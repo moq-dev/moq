@@ -126,8 +126,12 @@ impl Nvdec {
 			.map_err(|e| codec_err(format!("CUDA bind: {e:?}")))?;
 		// The decoder itself waits for the first sequence header, so ask now
 		// whether the GPU decodes the codec at all, at the one format this backend
-		// outputs and the size the description pins.
-		check_caps(api, cuda_codec, stream.size.map(|size| (size.width, size.height)))?;
+		// outputs and the size the description's SPS pins.
+		let coded = match stream.size {
+			Some(size) => Coded::AtLeast(size.width, size.height),
+			None => Coded::Unknown,
+		};
+		check_caps(api, cuda_codec, coded)?;
 
 		let mut state = Box::new(State {
 			api,
@@ -264,7 +268,11 @@ impl State {
 				format.bit_depth_luma_minus8 + 8
 			)));
 		}
-		check_caps(self.api, format.codec, Some((format.coded_width, format.coded_height)))?;
+		check_caps(
+			self.api,
+			format.codec,
+			Coded::Exact(format.coded_width, format.coded_height),
+		)?;
 
 		// Output size: the requested resize, or the display area (the coded size
 		// minus cropping). Rounded down to even for NV12.
@@ -406,12 +414,23 @@ impl State {
 	}
 }
 
+/// What [`check_caps`] knows of the coded size.
+enum Coded {
+	/// Nothing yet: no size pinned before the first sequence header.
+	Unknown,
+	/// At least this size: the catalog's, which may be cropped below the
+	/// macroblock-aligned coded size, so only a maximum it exceeds is certain.
+	AtLeast(u32, u32),
+	/// A sequence header's macroblock-aligned coded size.
+	Exact(u32, u32),
+}
+
 /// Ask the GPU whether it decodes `codec` as 8-bit 4:2:0 into NV12, the one
-/// format this backend handles, at `coded` size when known.
+/// format this backend handles, at the `coded` size as far as it is known.
 ///
 /// A no is [`Error::UnsupportedCodec`]: the device answered, and no retry here
 /// changes its answer. The CUDA context must be current.
-fn check_caps(api: &cuvid::Api, codec: cudaVideoCodec, coded: Option<(u32, u32)>) -> Result<(), Error> {
+fn check_caps(api: &cuvid::Api, codec: cudaVideoCodec, coded: Coded) -> Result<(), Error> {
 	let mut caps = CUVIDDECODECAPS {
 		eCodecType: codec,
 		eChromaFormat: cudaVideoChromaFormat::cudaVideoChromaFormat_420,
@@ -431,20 +450,23 @@ fn check_caps(api: &cuvid::Api, codec: cudaVideoCodec, coded: Option<(u32, u32)>
 			"this GPU cannot output {codec:?} as NV12"
 		)));
 	}
-	if let Some((width, height)) = coded {
-		// The same count NVIDIA's own samples hold against `nMaxMBCount`.
-		let macroblocks = u64::from(width >> 4) * u64::from(height >> 4);
-		if width > caps.nMaxWidth
-			|| height > caps.nMaxHeight
-			|| width < u32::from(caps.nMinWidth)
-			|| height < u32::from(caps.nMinHeight)
-			|| macroblocks > u64::from(caps.nMaxMBCount)
-		{
-			return Err(Error::UnsupportedCodec(format!(
-				"{width}x{height} is outside this GPU's {codec:?} decode range ({}x{} to {}x{}, {} macroblocks)",
-				caps.nMinWidth, caps.nMinHeight, caps.nMaxWidth, caps.nMaxHeight, caps.nMaxMBCount
-			)));
-		}
+	let (width, height, exact) = match coded {
+		Coded::Unknown => return Ok(()),
+		Coded::AtLeast(width, height) => (width, height, false),
+		Coded::Exact(width, height) => (width, height, true),
+	};
+	// cuviddec.h's limit: CodedWidth*CodedHeight/256 <= nMaxMBCount. A cropped
+	// size only undercounts, so a refusal on it still holds.
+	let macroblocks = u64::from(width) * u64::from(height) / 256;
+	let too_large = width > caps.nMaxWidth || height > caps.nMaxHeight || macroblocks > u64::from(caps.nMaxMBCount);
+	// The coded size can exceed a cropped one, so only an exact size is
+	// certainly below the minimum.
+	let too_small = exact && (width < u32::from(caps.nMinWidth) || height < u32::from(caps.nMinHeight));
+	if too_large || too_small {
+		return Err(Error::UnsupportedCodec(format!(
+			"{width}x{height} is outside this GPU's {codec:?} decode range ({}x{} to {}x{}, {} macroblocks)",
+			caps.nMinWidth, caps.nMinHeight, caps.nMaxWidth, caps.nMaxHeight, caps.nMaxMBCount
+		)));
 	}
 	Ok(())
 }

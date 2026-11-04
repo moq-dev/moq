@@ -105,8 +105,13 @@ enum Conversion {
 	/// avc1 / hvc1, and every CMAF H.264 / H.265 track: length-prefixed NALs.
 	/// Replace the length prefixes with start codes and prepend `keyframe_prefix`
 	/// (the description's parameter sets, empty when they are all in band) ahead
-	/// of every keyframe.
-	LengthPrefixed { length_size: usize, keyframe_prefix: Bytes },
+	/// of every keyframe. `pins_size` is whether the description carries an
+	/// SPS, which fixes the picture size for the whole track.
+	LengthPrefixed {
+		length_size: usize,
+		keyframe_prefix: Bytes,
+		pins_size: bool,
+	},
 }
 
 impl Conversion {
@@ -118,6 +123,7 @@ impl Conversion {
 			Self::LengthPrefixed {
 				length_size,
 				keyframe_prefix,
+				..
 			} => {
 				let prefix = keyframe.then(|| keyframe_prefix.as_ref());
 				Ok(annexb::from_length_prefixed(payload, *length_size, prefix).map_err(moq_mux::Error::from)?)
@@ -185,6 +191,7 @@ impl Decoder {
 						Conversion::LengthPrefixed {
 							length_size: params.length_size,
 							keyframe_prefix,
+							pins_size: !params.sps.is_empty(),
 						}
 					}
 					(true, None) if cmaf => {
@@ -213,6 +220,7 @@ impl Decoder {
 					Conversion::LengthPrefixed {
 						length_size: params.length_size,
 						keyframe_prefix,
+						pins_size: !params.sps.is_empty(),
 					}
 				};
 				(Codec::H265, conversion)
@@ -369,11 +377,16 @@ fn declared(catalog: &VideoConfig) -> Option<Color> {
 /// What the catalog says about the stream before its first picture, for the
 /// backends to ask their devices with.
 fn stream(catalog: &VideoConfig, codec: Codec, conversion: &Conversion) -> backend::Stream {
-	let parameter_sets = match conversion {
-		Conversion::LengthPrefixed { keyframe_prefix, .. } if !keyframe_prefix.is_empty() => {
-			Some(keyframe_prefix.clone())
-		}
-		_ => None,
+	let (parameter_sets, pins_size) = match conversion {
+		Conversion::LengthPrefixed {
+			keyframe_prefix,
+			pins_size,
+			..
+		} => (
+			(!keyframe_prefix.is_empty()).then(|| keyframe_prefix.clone()),
+			*pins_size,
+		),
+		Conversion::Passthrough => (None, false),
 	};
 	backend::Stream {
 		codec,
@@ -382,11 +395,12 @@ fn stream(catalog: &VideoConfig, codec: Codec, conversion: &Conversion) -> backe
 			_ => None,
 		},
 		// The catalog's coded size is a ceiling the picture resizes below in
-		// band, so it is the picture's size only when the description's
-		// parameter sets pin it.
-		size: parameter_sets
-			.as_ref()
-			.and(catalog.coded_width.zip(catalog.coded_height))
+		// band, so it is the picture's size only when the description's SPS
+		// pins it.
+		size: catalog
+			.coded_width
+			.zip(catalog.coded_height)
+			.filter(|_| pins_size)
 			.map(|(width, height)| Size::new(width, height)),
 		parameter_sets,
 	}
@@ -873,8 +887,8 @@ mod tests {
 	}
 
 	/// The catalog's coded size reaches the backends only when the description's
-	/// parameter sets pin it. Otherwise it is a ceiling the picture resizes below
-	/// in band, so a device must not refuse the stream by it.
+	/// SPS pins it. Otherwise it is a ceiling the picture resizes below in band,
+	/// so a device must not refuse the stream by it.
 	#[test]
 	fn only_a_pinned_size_reaches_the_backends() {
 		let mut catalog = probe_catalog();
@@ -884,9 +898,20 @@ mod tests {
 		let in_band = super::stream(&catalog, Codec::H264, &super::Conversion::Passthrough);
 		assert_eq!(in_band.size, None);
 
+		// A description with only a PPS leaves the SPS, and so the size, in band.
+		let unpinned = super::Conversion::LengthPrefixed {
+			length_size: 4,
+			keyframe_prefix: bytes::Bytes::from_static(b"\0\0\0\x01pps"),
+			pins_size: false,
+		};
+		let pps_only = super::stream(&catalog, Codec::H264, &unpinned);
+		assert_eq!(pps_only.size, None);
+		assert!(pps_only.parameter_sets.is_some());
+
 		let pinned = super::Conversion::LengthPrefixed {
 			length_size: 4,
 			keyframe_prefix: bytes::Bytes::from_static(b"\0\0\0\x01sps"),
+			pins_size: true,
 		};
 		let described = super::stream(&catalog, Codec::H264, &pinned);
 		assert_eq!(described.size, Some(crate::Size::new(8192, 8192)));
