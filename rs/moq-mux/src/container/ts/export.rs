@@ -1295,7 +1295,7 @@ struct SiTrack {
 	/// capped by that publisher's max age. A snapshot table needs only its newest group,
 	/// which never goes stale. A clock table (TDT/TOT) needs every revision to stay on
 	/// the subscription until media reaches its stamped slot ([`Self::advance`]), so the
-	/// TS importer's SI tracks declare the media max age ([`super::si::track_info`]).
+	/// TS importer's SI tracks declare their catalog's media max age ([`super::si::track_info`]).
 	max_age: Duration,
 }
 
