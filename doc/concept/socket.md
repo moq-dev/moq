@@ -1,156 +1,150 @@
 ---
 title: Sockets
-description: Dial and accept point-to-point connections over moq-lite, with tracks as streams
+description: Dial and accept point-to-point sessions over MoQ, each a reliable, ordered pipe of messages
 ---
 
 # Sockets
 
-A socket connects one dialer to one listener through relays, the way a TCP
-connection does, provided every hop runs moq-lite 07, which is opt-in (see
-[Versions](#versions)). A listener at a path accepts the sockets that dialers open to
-it, and inside a socket either side opens and accepts tracks the way QUIC opens
-and accepts streams. Use it for per-client state that only the two ends need,
-such as a viewer's commands and the replies to them, while whatever every
-client needs stays in an ordinary broadcast.
+A socket connects two endpoints through relays, the way a TCP connection
+connects two hosts. Each endpoint announces one hidden broadcast, dials other
+endpoints, and accepts their dials. Each connection is a session: a reliable,
+ordered, duplex pipe of messages that only the two ends can read. Use it for
+per-client state that only the two ends need, such as a viewer's commands and
+the replies to them, while whatever every client needs stays in an ordinary
+broadcast.
 
-A socket is a convention over moq-lite's announcements, broadcasts, and track
-listings, not a wire extension, so relays carry it unchanged. This page is the
-convention, enough to implement it in any language.
+A socket is a convention over announcements, broadcasts, and track
+subscriptions, not a wire extension. It uses no instances and no track
+listings, so it works over every moq-lite version and moq-transport, and relays
+carry it unchanged. This page is the convention, enough to implement it in any
+language.
 [`moq_net::socket`](https://docs.rs/moq-net/latest/moq_net/socket/) implements
 it in Rust.
 
-## Paths
+## Endpoints
 
-A listener at `L` keeps `L` itself for what it shares with everyone. Each
-socket is two broadcasts beneath it:
+An endpoint with id `<id>` announces one broadcast, once:
 
-| Path | Published by | Holds |
-| --- | --- | --- |
-| `L/.dial/<id>` | The dialer | The dialer's tracks |
-| `L/.accept/<id>` | The listener | The listener's tracks |
+```text
+<prefix>/.tcp/<id>
+```
 
-The id is one path segment that the dialer chooses, such as a random id or an
-endpoint ID. Run one listener per path: two would both answer a dial, and the
-dialer would follow only one of them. Both segments start with `.`, so sockets are
-[hidden](/concept/moq-lite#hidden-broadcasts) from anyone listing `L`. The
-listener discovers dialers with a one-segment watch of `L/.dial/*`, which a
-relay serves without scanning everything beneath `L`.
+The id is one path segment: a well-known name for a server, such as a game, or
+a random id for a client. The prefix is shared by every endpoint that talks to
+each other. The `.tcp` segment starts with `.`, so endpoints are
+[hidden](/concept/moq-lite#hidden-broadcasts) from anyone listing the prefix,
+and it names the mode: one reliable, ordered pipe per session, as TCP gives.
+
+Connections are never announced. An endpoint's broadcast holds only session
+tracks, served on request, and its announcement is the only thing a relay
+routes.
+
+## Sessions
+
+A session between a dialer `A` and an acceptor `B` is named by a session id
+`S` that `A` picks: random and unguessable, at least 128 bits, such as 32 hex
+digits. Both halves of the session are tracks with the same name,
+`<dialer>/<session>`, one in each endpoint's broadcast:
+
+| Track | In broadcast | Written by | Read by |
+| --- | --- | --- | --- |
+| `A/S` | `<prefix>/.tcp/A` | `A` | `B` |
+| `A/S` | `<prefix>/.tcp/B` | `B` | `A` |
+
+The dialer's id leads the name in both broadcasts, so an endpoint tells a dial
+from an answer by the name alone: a request under another endpoint's id is that
+endpoint dialing, and a request under its own id answers one of its own dials.
+
+### Dial
+
+1. `A` picks `S` and holds its own half, `A/S` in its broadcast, unanswered.
+2. `A` subscribes to `<prefix>/.tcp/B` for the track `A/S`, waiting for `B`'s
+   endpoint to be announced if it is not yet.
+3. `B` receives that subscription as a request for a track it does not have:
+   an incoming dial, claiming to be from `A`, with session `S`.
+
+### Accept
+
+1. `B` subscribes to `<prefix>/.tcp/A` for the track `A/S`, and holds `A`'s
+   subscription unanswered.
+2. `A` answers that subscription only if it dialed `S` and is still waiting,
+   and resets any other. That makes the exchange a return-routability check:
+   a dial forged in `A`'s name, by anyone who can subscribe to `B`, reaches an
+   `A` that never dialed it, so `A` resets `B`'s subscription and `B` resets the
+   forger's.
+3. Once `A` answers, `B` answers `A`'s subscription, and the session is open
+   for both. `B` writes nothing before `A` answers.
+
+### Reject
+
+`B` resets `A`'s subscription, with not found, as for a session that does not
+exist. An endpoint that is not accepting dials resets them the same way. A dial
+that gives up resets `B`'s subscription in turn.
+
+## Messages
+
+Each side writes its own half and reads the peer's. A message is one group, so a
+slow message never holds up the next, and messages are ordered by group
+sequence. A reader reads reliably and in order by default: oldest group first,
+with no delay budget, so it never skips a message. An application may opt into a
+lossy budget for a session whose messages go stale, such as positions, by
+setting a delay budget on its subscription.
+
+Finishing a half closes the session that way, like a FIN. Resetting it is an
+error. An endpoint closing, or its broadcast ending, resets every session it
+holds.
+
+There is no multiplexing within a session: another channel is another session.
+Several sessions between the same two endpoints are independent, and a
+restarted endpoint starts new sessions. A channel that every client reads, such
+as a game's status, stays an ordinary broadcast.
+
+## Hidden names
+
+The session id is the secret that keeps a session to its two ends: the token
+grants below let any endpoint subscribe to any other, so whoever learns a
+session's track name can read it, or answer it before its peer. A session
+track therefore never appears where a third party can read it:
+
+- It is never announced.
+- It is never listed: an endpoint serves its session tracks only on request,
+  so a moq-lite 07 track listing (`TRACKS`) of an endpoint's broadcast names
+  none of them, even to a reader allowed everything.
+- Logs and metrics that a third party can read must not carry it.
 
 ## Authorization
 
 Sockets need nothing beyond ordinary
 [token grants](/bin/relay/auth#path-matching). With the token's root at the
-listener's path `L`, each grant is a prefix:
+socket prefix, each grant is a prefix:
 
 ```jsonc
-// The listener: reads every dial and answers every id.
-{ "root": "L", "subscribe": [".dial/**"], "publish": [".accept/**"] }
-
-// The dialer with id <id>: its own dial and its own answer.
-{ "root": "L", "publish": [".dial/<id>"], "subscribe": [".accept/<id>"] }
+// The endpoint <id>: publishes its own endpoint, reads every endpoint.
+{ "root": "<prefix>", "publish": [".tcp/<id>"], "subscribe": [".tcp/**"] }
 ```
 
-The dialer's grant names its id, which is what stops one dialer from dialing as
-another, and so replacing its socket, or reading another's answer. A pattern
-matches `.`-prefixed segments like any other, so `**` would cover sockets too;
-hiding narrows only discovery. Keep reads of `.dial` and `.accept` to the two
-ends: a bi open counts any read of its track as the accept (see
-[Streams](#streams)), so a third party that may read them, such as an archiver
-granted `**` or anyone on an origin without auth, can resolve an open before
-the peer accepts it. No mid-path wildcard is needed, because the root carries
-`L`. It's the same shape as a request/response pair, such as
-`request/<id>` and `response/<id>`.
+The publish grant pins the id, so no endpoint can announce as another. The
+subscribe grant lets it reach any endpoint, which is what dialing and accepting
+need; the session id keeps it out of other endpoints' sessions. A narrower
+subscribe grant, such as a client allowed only `.tcp/<server>`, also works: it
+can then dial only that server and accept only its dials.
 
-`moq auth sign` writes these as, for example:
+`moq auth sign` writes this as, for example:
 
 ```bash
-moq auth sign --key key.jwk --root L --subscribe '.dial/**' --publish '.accept/**' > listener.jwt
-moq auth sign --key key.jwk --root L --publish ".dial/$ID" --subscribe ".accept/$ID" > dialer.jwt
+moq auth sign --key key.jwk --root "$PREFIX" --publish ".tcp/$ID" --subscribe '.tcp/**' > endpoint.jwt
 ```
 
-Each client then connects to the relay at `L` with its token, and its socket's
-path is the session root.
+Each client then connects to the relay at the prefix with its token, and its
+endpoint's prefix is the session root.
 
-## Instances
+Signing and encryption are not part of the convention: an endpoint id is a
+name the token pins, not a key, and relays are trusted with session names. A
+planned mesh layer makes ids public keys.
 
-Each dial is one socket, named by its
-[instance](/concept/moq-lite#publisher-instances):
+## Later
 
-1. The dialer announces `L/.dial/<id>` under a fresh random instance and
-   follows `L/.accept/<id>` pinned to that instance.
-2. When the application accepts, the listener requests `L/.dial/<id>` pinned
-   to the instance it saw announced, then announces `L/.accept/<id>` under the
-   same instance at epoch 0.
-3. The dialer's follow resolves on that answer, and the socket is open.
-
-An answer to another dial of the same id carries another instance, so a
-dialer never takes it. Dialing again with the same id, as a restarted dialer
-does, announces a new instance: the listener ends the socket it replaces and
-answers the new one on its next accept.
-
-A dial waits for as long as it takes, so give up by dropping it. Nothing reads
-a dialer before the application accepts it: dialers wait in the listener's
-announcements without limit, and its broadcast is requested only on accept.
-
-## Streams
-
-A stream is a track. Like a QUIC stream it has no name of its own: it is
-named by who opened it, which way it carries data, and its number.
-
-```text
-.<opener>/<kind>/<number>
-```
-
-`<opener>` is `dial` or `accept`, and `<kind>` is `uni` or `bi`. `<number>`
-counts the opener's streams in decimal from 0 with no leading zeros, uni and bi
-alike, and is never reused within a socket, so each open is a new track.
-
-- **Uni.** The opener publishes the track in its own broadcast. The peer
-  accepts it and subscribes.
-- **Bi.** The opener publishes the track in its own broadcast. The peer accepts
-  it by publishing the same name in its broadcast, with the opener's track
-  info, and subscribes to the opener's track until the opener drops it or the
-  peer closes the socket. That subscription is the accept: the opener's stream
-  resolves once its track is read. A listing can't carry it, because it drops an add its reader never
-  reached, so an answer dropped at once might never be seen. As with any
-  stream, the answer reaches the opener only while the peer holds it, finished
-  or not.
-
-The opener prefix and the number together work like a QUIC stream ID. The
-prefix keeps the two sides' streams apart, the way the ID's low bit does, so
-the dialer's first bi stream and the listener's are two streams. The number
-keeps one side's opens apart, so a track name always means one stream: a
-handle the peer kept to an earlier stream never reads a later one. A track's
-info, priority included, is the opener's to choose.
-
-The peer learns of new streams from the broadcast's track listing (the Tracks
-stream, `TRACKS_ADD`). A listing reports every track the broadcast holds, so
-accept skips any name outside the scheme.
-
-A channel both sides know in advance, such as a viewer's `command` track or the
-listener's acks back to it, isn't a stream. It's an ordinary track with a fixed
-name in the socket's broadcast: the writer creates it in its own half, and the
-reader subscribes to it by name in the peer's half, with no accept. Streams are
-for what an application opens at run time, such as one per request or per
-byte-stream connection, with any framing of its own.
-
-A stream can be accepted only while its opener lists it, which holds until the
-opener drops the track, finished or not. One dropped before the peer accepts it
-is never handed out, so a backlog of unaccepted streams costs the peer no more
-than the tracks the opener keeps.
-
-## Ending
-
-A socket ends when either side's broadcast ends, which includes either side
-closing it or a session on the way dropping, or when a newer dial of its id
-replaces it. Each side then drops its socket, which retracts its broadcast and
-ends the socket for the peer. A side that closed opens and accepts nothing
-more, and its pending bi opens fail, even when the peer answers them later.
-
-## Versions
-
-Sockets need moq-lite 07 (`moq-lite-07-wip`, opt-in) on every hop: older
-moq-lite versions and moq-transport carry neither instances nor track
-listings. Over an older hop, accepting a stream fails with `Unsupported`, and
-a dial never resolves, because the answer no longer carries the dial's
-instance.
+A multiplexed mode, with many streams per session like QUIC, would be its own
+endpoint, `<prefix>/.quic/<id>`, beside `.tcp`, and could name its streams
+beneath the session, such as a control stream under `<dialer>/<session>/`. A
+`.tcp` session name holds no `/` after the session id, so it leaves that room.

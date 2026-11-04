@@ -2,22 +2,23 @@
 
 ## Goal
 
-A Rust application opens a duplex byte stream on a
-[socket](/doc/concept/socket.md) and gets an `AsyncRead + AsyncWrite` that
-carries TCP semantics over one bi track: ordered,
-lossless, FIN as half-close, reset with a code. A socket's listener accepts the streams
-its dialers open. `moq` gains TCP forwarding on both ends so an
+A Rust application opens a duplex byte stream as a
+[socket](/doc/concept/socket.md) session and gets an `AsyncRead + AsyncWrite`
+that carries TCP semantics over the session's two tracks: ordered, lossless,
+FIN as half-close, reset with a code. A socket endpoint accepts the streams
+other endpoints dial. `moq` gains TCP forwarding on both ends so an
 unmodified client and server talk through a relay.
 
 ## Plan
 
-See the [epic](/quest/m2/stream/README.md) for the mapping: a socket per
-forwarded service, a bi track per connection with one group each way, a frame
-per TCP read, no fill handler.
+See the [epic](/quest/m2/stream/README.md) for the mapping: a socket endpoint
+per forwarded service, a session per connection with one group each way, a
+frame per TCP read, no fill handler.
 
 - Build on `moq_net::socket`: the path layout and connection naming are the
-  socket's (`open_bi` and `accept_bi`), so this quest adds only the
-  `AsyncRead`/`AsyncWrite` adapter and the TCP mapping. Place the adapter
+  socket's (`Endpoint::dial` and `accept`, each yielding a `Stream`), so this
+  quest adds only the `AsyncRead`/`AsyncWrite` adapter over a `Stream` and the
+  TCP mapping. Place the adapter
   beside the socket module unless it pulls in a dependency moq-net avoids;
   report the choice.
 - Each stream carries a subscription priority the caller sets; nothing is

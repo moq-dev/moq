@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `socket`: `Listener`, `dial`, and `Socket`, point-to-point connections over an origin whose streams are unnamed tracks, opened and accepted like QUIC's; see `doc/concept/socket.md`.
+- `socket`: `Endpoint`, which announces a hidden `<prefix>/.tcp/<id>` broadcast, dials other endpoints, and accepts their dials, each session a `Stream` of two unlisted tracks carrying one message per group; see `doc/concept/socket.md`.
 - `transport::SETUP_RECEIVE_WINDOW`, the connection credit a server offers before it admits a session: enough for the SETUP and one in-band AUTH.
 
 ## [0.3.10](https://github.com/moq-dev/moq/compare/moq-net-v0.3.9...moq-net-v0.3.10) - 2026-10-05

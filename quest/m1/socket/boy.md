@@ -2,29 +2,33 @@
 
 ## Goal
 
-The moq-boy emulator accepts viewers through a `Listener` at its game path,
-and each viewer dials it, so neither `rs/moq-boy` nor `js/moq-boy` watches
-announcements or requests broadcasts by hand. Each viewer's latency comes back
-on its own socket instead of the shared `status` map, and crowd play, pausing
-when nobody watches, and the 60 s idle stop behave as before.
+The moq-boy emulator accepts viewers on a socket endpoint named for its game,
+and each viewer dials it from its own endpoint, so neither `rs/moq-boy` nor
+`js/moq-boy` watches announcements or requests broadcasts by hand. Each
+viewer's commands and latency travel on its own session instead of a viewer
+broadcast and the shared `status` map, and crowd play, pausing when nobody
+watches, and the 60 s idle stop behave as before.
 
 ## Plan
 
-See the [epic](/quest/m1/socket/README.md) for the layout and the reply split.
+See the [epic](/quest/m1/socket/README.md) for the convention.
 
-- Viewers dial `boy/game/<name>` with their random id. Their `command` track
-  moves from `{viewerPrefix}/{name}/{viewerId}` to the socket, as a fixed
-  track named `command` on the viewer's `.dial` broadcast (`Socket::local`),
-  which the emulator reads by name from `Socket::remote`. It isn't a socket
-  stream: streams are unnamed and for what opens at run time. Drop the
+- The emulator runs an endpoint named for its game, and each viewer an
+  endpoint with its random id that dials it. Settle and record the prefix
+  (such as `boy`, so endpoints sit at `boy/.tcp/<id>`).
+- The viewer's `command` track at `{viewerPrefix}/{name}/{viewerId}` becomes
+  the viewer's messages on its session, one command per group. Drop the
   separate viewer-prefix configuration in `rs/moq-boy/src/main.rs`.
-- Per-viewer latency moves from `status`'s `latency` map to a fixed track on
-  that viewer's `.accept` broadcast. Game state stays in `status`.
-- Requests become pinned to the viewer's epoch (boy requests unpinned today),
-  so a reload is a new socket.
-- The demo relay's anonymous publish grant (`demo/relay/prod.toml`, and the
-  `moq auth serve` line it documents) covers `demo/boy/game/*/.dial/*`
-  instead of boy's use of `demo/viewer/**`. Whichever of this and
+- Per-viewer latency moves from `status`'s `latency` map to the emulator's
+  messages on that viewer's session. Game state stays in the ordinary
+  `status` broadcast.
+- A reload is a new session; the emulator counts a viewer as gone when its
+  session ends.
+- The demo relay's anonymous grants (`demo/relay/prod.toml`, and the
+  `moq auth serve` line it documents) let an anonymous viewer publish its own
+  endpoint and subscribe to the game endpoints, instead of boy's use of
+  `demo/viewer/**`. Anonymous viewers share one grant, so record how a viewer's
+  endpoint id is kept from being claimed by another. Whichever of this and
   [CARLA on sockets](/quest/m1/socket/carla.md) lands second removes
   `demo/viewer/**`.
 - Update `doc/bin/demo.md` and the boy README or CHANGELOG where they describe

@@ -460,6 +460,15 @@ impl Producer {
 		}))
 	}
 
+	/// [`Self::reserve_track`] for a track no listing ever names, so only a reader who
+	/// already knows the name finds it, as a socket session's track.
+	pub(super) fn reserve_unlisted_track(&self, name: impl Into<Arc<str>>) -> Result<track::Request, Error> {
+		let mut state = self.state.lock();
+		let request = track::Request::new(self.info.clone(), name.into()).with_stats(self.stats.clone());
+		state.insert_track(request.weak())?;
+		Ok(request)
+	}
+
 	/// Create a track with a unique name using the given suffix.
 	///
 	/// Uses [`Self::unique_name`]; minted names are never reused, even after closure.

@@ -15,17 +15,20 @@ Decided 2026-10-25 (maintainer): iroh-shaped, not drop-in compatible; tickets,
 `EndpointAddr`, and `Router` are out unless porting proves they are needed.
 
 - A service is the iroh ALPN analog: a name under `mesh/<id>/`.
-- Decided 2026-11-01 (maintainer, socket planning interview): an `Endpoint`
-  wraps [sockets](/doc/concept/socket.md). A service is a `Listener` at
-  `mesh/<id>/<service>`, `connect` dials it with the caller's own endpoint ID,
-  and `accept` reads the remote endpoint ID from the `.dial/<id>` segment,
-  which the grant pins. Extend `moq auth`'s mesh grant with publish on
-  `mesh/*/*/.dial/<id>`, and update `doc/bin/relay/auth.md`.
+- Decided 2026-11-01 (maintainer, socket planning interview), and updated
+  2026-11-03 when sockets became endpoints: an `Endpoint` wraps a
+  [socket](/doc/concept/socket.md) endpoint. Settle the layout here: such as
+  one socket endpoint per service at `mesh/<service>/.tcp/<id>`, or one per
+  node with the service named in the session. `connect` dials with the
+  caller's own endpoint ID, and `accept` reads the remote ID from the dial,
+  which the socket's answer check proves and the grant pins (publish
+  `.tcp/<id>` only). Update `moq auth`'s mesh grant and
+  `doc/bin/relay/auth.md` to match.
 - Streams are [byte streams](/quest/m2/stream/rust.md) at the protection
   level the service declares: identity reads `moq-net` directly, and
   authentication, the mesh default, reads through `moq_crypto::sign` against the
-  `PublicKey` parsed from the path it subscribes to: the listener's
-  `mesh/<id>/` for a dialer, and the `.dial/<id>` segment for a listener.
+  `PublicKey` parsed from the peer's endpoint id, which names the endpoint
+  broadcast it subscribes to.
 - The secret key comes from `moq_crypto::sign::SecretKey::load_or_generate`.
 - A mesh daemon (Kixel's, outside this repository, decided 2026-11-02) is
   built on this API, so a process either embeds an `Endpoint` or talks to a

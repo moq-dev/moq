@@ -1,788 +1,586 @@
-//! Point-to-point sockets over an origin: a [`Listener`] accepts the [`Socket`]s that
-//! [`dial`]ers open to its path.
+//! Point-to-point sockets over an origin, the way TCP connects two hosts.
 //!
-//! A socket is a convention over announcements and broadcasts, with no wire of its own.
-//! A listener at `L` keeps `L` for whatever it shares with everyone. A dialer publishes
-//! its half at `L/.dial/<id>`, and the listener answers with its half at `L/.accept/<id>`
-//! once the application accepts. The answer carries the dial's [`Instance`], so a
-//! dialer that dials again with the same id gets a new socket rather than an old answer.
+//! An [`Endpoint`] announces one hidden broadcast, `<prefix>/.tcp/<id>`, and from it
+//! [`dial`](Endpoint::dial)s other endpoints and [`accept`](Endpoint::accept)s their
+//! dials. Each connection is a session: one [`Stream`], a reliable, ordered pipe made of
+//! two tracks, one in each endpoint's broadcast. Connections are never announced.
 //!
-//! Inside a socket either side opens and accepts streams the way QUIC does, and like
-//! QUIC's they carry no name: a stream is told apart by who opened it and its number. A
-//! uni stream is one track in the opener's broadcast, and a bi stream is the same track
-//! name in both. Each open takes the next number of its opener, so a track never carries
-//! two streams. The peer learns of new streams from the broadcast's track listing, which
-//! needs moq-lite-07 on every hop. Channels both sides know in advance are ordinary
-//! fixed-name tracks on [`Socket::local`] and [`Socket::remote`]. See
-//! `doc/concept/socket.md` for the convention.
+//! A dialer `A` picks a random session id `S` and subscribes to `<prefix>/.tcp/<B>` for
+//! the track `A/S`. Endpoint `B` surfaces that request as an [`Incoming`] dial from `A`.
+//! To accept it, `B` subscribes to `<prefix>/.tcp/<A>` for the same track name, and `A`
+//! answers only a session it dialed, so the exchange checks that `A` really asked: a
+//! dial forged in `A`'s name is reset. Each side then writes its own half and reads the
+//! peer's. Session tracks are served only on request, so no track listing names them.
+//!
+//! See `doc/concept/socket.md` for the convention other languages follow.
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Weak};
+use std::collections::VecDeque;
+use std::sync::Arc;
 use std::task::{Poll, ready};
 
-use hashlink::{LinkedHashMap, LinkedHashSet};
+use crate::{Error, Path};
 
-use crate::{Error, Instance, Path, Pattern, Patterns};
-
-use super::broadcast::{self, TracksEvent};
+use super::WeakEntry;
 use super::origin::{self, Route};
-use super::{announce, track};
+use super::track::{self, Delay, Order, Subscription};
 
-/// The segment beneath a listener's path that dialers publish under.
-const DIAL: &str = ".dial";
-/// The segment beneath a listener's path that the listener answers under.
-const ACCEPT: &str = ".accept";
+/// The segment an endpoint's broadcast sits under: one reliable, ordered pipe per
+/// session, as TCP gives. A multiplexed mode would take a segment of its own.
+const TCP: &str = ".tcp";
 
-/// Which end of a socket a side is.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Role {
-	Dialer,
-	Listener,
-}
-
-impl Role {
-	/// The tag naming the streams this role opens.
-	fn tag(self) -> &'static str {
-		match self {
-			Self::Dialer => "dial",
-			Self::Listener => "accept",
-		}
-	}
-}
-
-/// Whether a stream carries data one way or both.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Kind {
-	Uni,
-	Bi,
-}
-
-impl Kind {
-	fn tag(self) -> &'static str {
-		match self {
-			Self::Uni => "uni",
-			Self::Bi => "bi",
-		}
-	}
-}
-
-/// The track name of the opener's `number`th stream, a `kind` one:
-/// `.<opener>/<kind>/<number>`.
-fn track_name(opener: Role, kind: Kind, number: u64) -> String {
-	format!(".{}/{}/{number}", opener.tag(), kind.tag())
-}
-
-/// Split a track name into its opener and kind, or `None` for a track outside the
-/// scheme, such as one the application names itself.
-fn parse(track: &str) -> Option<(Role, Kind)> {
-	let (opener, rest) = track.strip_prefix('.')?.split_once('/')?;
-	let (kind, number) = rest.split_once('/')?;
-	// Decimal, as the opener writes it, so one stream has one name.
-	if number.parse::<u64>().ok()?.to_string() != number {
-		return None;
-	}
-	let opener = match opener {
-		"dial" => Role::Dialer,
-		"accept" => Role::Listener,
-		_ => return None,
-	};
-	let kind = match kind {
-		"uni" => Kind::Uni,
-		"bi" => Kind::Bi,
-		_ => return None,
-	};
-	Some((opener, kind))
-}
-
-/// `L/<side>/<id>`, refusing an id that is not exactly one path segment.
-fn side(path: &Path, side: &'static str, id: &str) -> Result<Path, Error> {
-	let segment = Path::new(id)?;
-	if segment.parts().count() != 1 {
+/// Refuse an id that is not one plain path segment: empty, or holding a `/` or a `\`.
+fn check_id(id: &str) -> Result<(), Error> {
+	if id.is_empty() || id.contains(['/', '\\']) {
 		return Err(crate::InvalidPattern::InvalidSegment(id.to_string()).into());
 	}
-	Ok(path.join(&Path::from_static(side))?.join(&segment)?)
+	Ok(())
 }
 
-/// Why a [`Socket`] ended.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-#[non_exhaustive]
-pub enum Closed {
-	/// The peer's broadcast ended: it closed the socket, or a session on the way dropped.
-	#[error("the peer ended the socket")]
-	Remote,
-	/// This side's broadcast ended, through [`Socket::close`] or otherwise.
-	#[error("the socket was closed locally")]
-	Local,
-	/// The dialer dialed again with the same id, which replaces this socket.
-	#[error("a newer dial replaced the socket")]
-	Replaced,
+/// `<prefix>/.tcp/<id>`, the broadcast of the endpoint `id`.
+fn endpoint_path(prefix: &Path, id: &str) -> Result<Path, Error> {
+	check_id(id)?;
+	Ok(prefix.join(&Path::from_static(TCP))?.join(&Path::new(id)?)?)
 }
 
-/// A bi stream: this side's track and the peer's, under one track name.
-pub struct Bi {
-	/// This side's track.
+/// A fresh session id: 128 random bits as hex, so nobody can guess a session's tracks.
+fn session_id() -> Arc<str> {
+	use rand::RngExt;
+	format!("{:032x}", rand::rng().random::<u128>()).into()
+}
+
+/// The track name of a session: `<dialer>/<session>`, the same in both endpoints.
+fn track_name(dialer: &str, session: &str) -> String {
+	format!("{dialer}/{session}")
+}
+
+/// Split a session's track name into its dialer and session, or `None` for a name
+/// outside the scheme.
+fn parse(name: &str) -> Option<(&str, &str)> {
+	let (dialer, session) = name.split_once('/')?;
+	check_id(dialer).ok()?;
+	check_id(session).ok()?;
+	Some((dialer, session))
+}
+
+/// What a session's reader asks for: every message, oldest first, however late it is.
+fn reliable() -> Subscription {
+	Subscription::default()
+		.with_order(Order::Ascending)
+		.with_delay(Delay::default().with_max(None))
+}
+
+/// One session: this side's half and the peer's.
+///
+/// Each message is one group, so a slow message never holds up the next one, and messages
+/// are ordered by group sequence. [`Self::consumer`] starts reliable and in order (oldest
+/// first, with no delay budget); update its subscription to make it lossy.
+///
+/// Finishing [`Self::producer`] closes the session for the peer, and aborting it is an
+/// error. The endpoint closing aborts it too.
+pub struct Stream {
+	/// This side's half: the session's track in this endpoint's broadcast.
 	pub producer: track::Producer,
-	/// The peer's track.
-	pub consumer: track::Consumer,
+	/// The peer's half: the session's track in the peer's broadcast.
+	pub consumer: track::Subscriber,
+	peer: Arc<str>,
+	session: Arc<str>,
 }
 
-/// What the peer's track listing has reported and nobody has taken yet.
-#[derive(Default)]
-struct Listing {
-	/// The peer's listing, opened by the first accept or bi open.
-	tracks: Option<broadcast::Tracks>,
-	/// Uni streams the peer opened, not yet accepted, in order, by track name. A stream
-	/// leaves once the peer stops listing it, as the listing drops an add its reader
-	/// never reached, so these hold no more than the peer lists.
-	uni: LinkedHashSet<Arc<str>>,
-	/// Bi streams the peer opened, with the opener's track info, not yet accepted.
-	bi: LinkedHashMap<Arc<str>, track::Info>,
-	/// This side reading the opener's half of each bi stream it accepted, by track name,
-	/// until the opener's half leaves the listing or this side closes. The opener learns
-	/// of the accept from this demand, not from the answer's listing: a listing drops a
-	/// track that comes and goes before its reader reaches it, so an answer dropped at once
-	/// would never be seen, and the application may not read the opener's half before it
-	/// hears back. `None` while an accept is answering the stream, so a removal drained
-	/// meanwhile, by any poller, also drops the read the accept is about to register.
-	reading: HashMap<Arc<str>, Option<kio::Pending<track::Subscribing>>>,
-	/// How the listing ended: `Ok` once the peer's broadcast ended, or why it failed.
-	end: Option<Result<(), Error>>,
+impl Stream {
+	/// The peer endpoint's id.
+	pub fn peer(&self) -> &str {
+		&self.peer
+	}
+
+	/// The session's id, which the dialer chose.
+	pub fn session(&self) -> &str {
+		&self.session
+	}
 }
 
-impl Listing {
-	/// Sort every event on hand into the queues, registering `waiter` for the next.
-	///
-	/// Every poller drains the one listing, so each sorts what it reads for the others:
-	/// they all park on the listing, which wakes each of them on a change.
-	fn drain(&mut self, waiter: &kio::Waiter, role: Role, remote: &broadcast::Consumer) {
-		if self.end.is_some() {
-			return;
+/// What the endpoint's pollers share.
+struct State {
+	/// The dials peers send, from the first accept on; `None` until then, so the endpoint
+	/// answers a request for a session it does not hold with [`Error::NotFound`] at once.
+	requests: Option<super::broadcast::Requests>,
+	/// Dials from peers, not yet taken by an accept, in order.
+	incoming: VecDeque<track::Request>,
+	/// This side's half of every session handed out, aborted when the endpoint closes.
+	streams: Vec<track::TrackWeak>,
+	/// Why the endpoint stopped, once it did.
+	end: Option<Error>,
+}
+
+impl State {
+	/// Keep `producer`'s track, so the endpoint closing ends it.
+	fn hold(&mut self, producer: &track::Producer) {
+		self.streams.retain(|stream| !stream.is_closed());
+		self.streams.push(producer.weak());
+	}
+}
+
+struct Shared {
+	id: Arc<str>,
+	prefix: Path,
+	/// Where the peers' endpoints are requested.
+	origin: origin::Consumer,
+	/// This endpoint's broadcast.
+	publication: origin::Publication,
+	state: kio::Lock<State>,
+}
+
+impl Shared {
+	/// Queue every dial on hand, registering `waiter` for the next, and fail with the
+	/// endpoint's end once it stopped.
+	fn drain(&self, state: &mut State, waiter: &kio::Waiter) -> Result<(), Error> {
+		while state.end.is_none() {
+			let requests = state.requests.get_or_insert_with(|| self.publication.requests());
+			match requests.poll_requested_track(waiter) {
+				Poll::Pending => break,
+				Poll::Ready(Ok(request)) => self.sort(state, request),
+				Poll::Ready(Err(err)) => state.end = Some(err),
+			}
 		}
-		let tracks = match &mut self.tracks {
-			Some(tracks) => tracks,
-			None => match remote.tracks() {
-				Ok(tracks) => self.tracks.insert(tracks),
-				// The peer's broadcast already ended.
-				Err(Error::Unroutable) => {
-					self.end = Some(Ok(()));
-					return;
-				}
-				Err(err) => {
-					self.end = Some(Err(err));
-					return;
-				}
-			},
-		};
-		loop {
-			let event = match tracks.poll_next(waiter) {
-				Poll::Pending => return,
-				Poll::Ready(Ok(Some(event))) => event,
-				Poll::Ready(Ok(None)) => {
-					self.end = Some(Ok(()));
-					self.reading.clear();
-					return;
-				}
-				Poll::Ready(Err(err)) => {
-					self.end = Some(Err(err));
-					self.reading.clear();
-					return;
-				}
-			};
-			let (name, info) = match event {
-				TracksEvent::Added { name, info } => (name, Some(info)),
-				TracksEvent::Removed { name } | TracksEvent::Finished { name } => (name, None),
-				TracksEvent::Synced => continue,
-			};
-			// A track outside the scheme is the application's own.
-			let Some((opener, kind)) = parse(&name) else {
-				continue;
-			};
-			match (opener == role, kind, info) {
-				(false, Kind::Uni, Some(_)) => {
-					self.uni.replace(name);
-				}
-				(false, Kind::Uni, None) => {
-					self.uni.remove(&name);
-				}
-				(false, Kind::Bi, Some(info)) => {
-					self.bi.replace(name, info);
-				}
-				(false, Kind::Bi, None) => {
-					self.bi.remove(&name);
-					// The opener dropped its half, so it resolved or gave up.
-					self.reading.remove(&name);
-				}
-				// An open learns of its answer from the peer reading it, not the listing.
-				(true, Kind::Bi, _) => {}
-				// This side's uni streams live only in its own broadcast.
-				(true, Kind::Uni, _) => {}
+		match &state.end {
+			Some(err) => Err(err.clone()),
+			None => Ok(()),
+		}
+	}
+
+	/// Queue a peer's dial, or reset a request outside the scheme.
+	///
+	/// A dial of this endpoint's reserves its own track, so a request reaching the handler
+	/// under this endpoint's id names a session it never dialed, or one it gave up: such
+	/// as an accept of a dial forged in this endpoint's name, which this reset fails.
+	fn sort(&self, state: &mut State, request: track::Request) {
+		match parse(request.name()) {
+			Some((dialer, _)) if dialer != &*self.id => state.incoming.push_back(request),
+			_ => {
+				// Not the name: a session's name is its secret.
+				tracing::debug!("reset a request for no session");
+				request.reject(Error::NotFound);
 			}
 		}
 	}
 
-	/// The listing's end as what an accept returns: `None` once the peer is gone.
-	fn ended<T>(&self) -> Option<Result<Option<T>, Error>> {
-		match self.end.as_ref()? {
-			Ok(()) => Some(Ok(None)),
-			Err(err) => Some(Err(err.clone())),
+	/// Poll for the endpoint's end, registering `waiter` for it.
+	fn poll_end(&self, waiter: &kio::Waiter) -> Result<(), Error> {
+		if let Some(err) = &self.state.lock().end {
+			return Err(err.clone());
+		}
+		match self.publication.poll_closed(waiter) {
+			Poll::Ready(()) => Err(Error::Closed),
+			Poll::Pending => Ok(()),
 		}
 	}
-}
 
-/// What a socket shares with its pending bi opens and its listener.
-struct Inner {
-	role: Role,
-	id: Arc<str>,
-	/// This side's broadcast.
-	local: origin::Publication,
-	/// The peer's broadcast.
-	remote: broadcast::Consumer,
-	listing: kio::Lock<Listing>,
-	/// Why the listener ended the socket, set before it closes [`Self::local`].
-	closed: kio::Lock<Option<Closed>>,
-	/// The number of this side's next stream.
-	next: AtomicU64,
-}
+	fn close(&self) {
+		let mut state = self.state.lock();
+		state.end.get_or_insert(Error::Closed);
+		let requests = state.requests.take();
+		let incoming = std::mem::take(&mut state.incoming);
+		let streams = std::mem::take(&mut state.streams);
+		drop(state);
 
-impl Inner {
-	/// End the socket for `reason`, retracting this side's broadcast.
-	fn close(&self, reason: Closed) {
-		self.closed.lock().get_or_insert(reason);
-		self.retract();
-	}
-
-	/// Retract this side's broadcast and stop reading the opener's half of every bi stream
-	/// it accepted. Closed first, so an accept registering a read after the release sees
-	/// the close and drops it.
-	fn retract(&self) {
-		self.local.close();
-		// Dropped outside the lock.
-		let reading = std::mem::take(&mut self.listing.lock().reading);
-		drop(reading);
-	}
-
-	/// Whether this side's broadcast ended, registering `waiter` for when it does.
-	fn poll_local_closed(&self, waiter: &kio::Waiter) -> bool {
-		self.local.poll_closed(waiter).is_ready()
-	}
-
-	/// The track name of this side's next `kind` stream.
-	fn open(&self, kind: Kind) -> String {
-		track_name(self.role, kind, self.next.fetch_add(1, Ordering::Relaxed))
-	}
-
-	/// Create a track in this side's broadcast, refusing with [`Error::Closed`] once it
-	/// ended: a track in an ended broadcast reaches nobody. Checked after the create, so a
-	/// close racing it is either seen here or comes after the stream opened.
-	fn create_track(&self, name: String, info: impl Into<Option<track::Info>>) -> Result<track::Producer, Error> {
-		let producer = self.local.create_track(name, info)?;
-		if self.poll_local_closed(&kio::Waiter::noop()) {
-			return Err(Error::Closed);
+		self.publication.close();
+		for stream in streams {
+			stream.abort(Error::Cancel);
 		}
-		Ok(producer)
+		// Reset outside the lock.
+		drop((requests, incoming));
 	}
 }
 
-/// One end of a connection between a dialer and a listener.
+/// A socket endpoint: announces `<prefix>/.tcp/<id>`, dials other endpoints, and accepts
+/// their dials.
 ///
-/// Holds this side's broadcast and the peer's. Drop it once it ends: dropping retracts
-/// this side's broadcast, which ends the socket for the peer too.
-pub struct Socket {
-	inner: Arc<Inner>,
+/// It accepts dials from its first [`Self::accept`] on, like a TCP listener: before that, a
+/// dial to it is reset, and after it, dials queue until accepted. Dropping it, or
+/// [`Self::close`], retracts the broadcast, resets the dials waiting to be accepted, and
+/// aborts every session it handed out.
+pub struct Endpoint {
+	shared: Arc<Shared>,
 }
 
-impl Socket {
-	fn new(role: Role, id: Arc<str>, local: origin::Publication, remote: broadcast::Consumer) -> Self {
-		Self {
-			inner: Arc::new(Inner {
-				role,
-				id,
-				local,
-				remote,
-				listing: kio::Lock::new(Listing::default()),
-				closed: kio::Lock::new(None),
-				next: AtomicU64::new(0),
+impl Endpoint {
+	/// Announce the endpoint `id` under `prefix` on `origin`, which also reaches the peers.
+	///
+	/// `id` names the endpoint: a well-known name for a server, or a random one for a
+	/// client. It must be one path segment. Fails like
+	/// [`origin::Producer::create_broadcast`] when `origin` may not publish
+	/// `<prefix>/.tcp/<id>`.
+	pub fn new(
+		origin: &origin::Producer,
+		prefix: impl TryInto<Path, Error: Into<Error>>,
+		id: &str,
+	) -> Result<Self, Error> {
+		let prefix = crate::path::convert(prefix)?;
+		let publication = origin.create_broadcast(endpoint_path(&prefix, id)?)?;
+		publication.announce(Route::default())?;
+		Ok(Self {
+			shared: Arc::new(Shared {
+				id: id.into(),
+				prefix,
+				origin: origin.consume(),
+				publication,
+				state: kio::Lock::new(State {
+					requests: None,
+					incoming: VecDeque::new(),
+					streams: Vec::new(),
+					end: None,
+				}),
 			}),
-		}
+		})
 	}
 
-	/// The id the dialer chose.
+	/// This endpoint's id.
 	pub fn id(&self) -> &str {
-		&self.inner.id
+		&self.shared.id
 	}
 
-	/// This side's broadcast, for well-known channels: tracks with fixed names that both
-	/// sides agree on, beside the streams.
-	pub fn local(&self) -> &broadcast::Producer {
-		&self.inner.local
+	/// The prefix the endpoint's broadcast sits under, and where it finds its peers.
+	pub fn prefix(&self) -> &Path {
+		&self.shared.prefix
 	}
 
-	/// The peer's broadcast, for well-known channels: tracks with fixed names that both
-	/// sides agree on, beside the streams.
-	pub fn remote(&self) -> &broadcast::Consumer {
-		&self.inner.remote
-	}
-
-	/// Open a uni stream: a new track only this side writes, which the peer takes with
-	/// [`Self::accept_uni`].
+	/// Dial the endpoint `peer` in a new session, resolving once the peer accepts it.
 	///
-	/// `info` describes the track. Fails with [`Error::Closed`] once this side closed.
-	pub fn open_uni(&self, info: impl Into<Option<track::Info>>) -> Result<track::Producer, Error> {
-		self.inner.create_track(self.inner.open(Kind::Uni), info)
-	}
-
-	/// Open a bi stream, resolving once the peer accepts it with [`Self::accept_bi`].
-	///
-	/// `info` describes this side's track, and the peer's answer mirrors it. Fails with
-	/// [`Error::Closed`] once this side closed.
-	pub fn open_bi(&self, info: impl Into<Option<track::Info>>) -> Result<kio::Pending<OpenBi>, Error> {
-		let inner = &self.inner;
-		let track: Arc<str> = inner.open(Kind::Bi).into();
-		let producer = inner.create_track(track.to_string(), info)?;
-		Ok(kio::Pending::new(OpenBi {
-			inner: inner.clone(),
-			track,
-			demand: producer.demand(),
-			producer: Some(producer),
+	/// `info` describes this side's half. Waits for as long as the peer takes to accept:
+	/// drop the returned future to give up, which resets the session. That includes waiting
+	/// for the peer's endpoint to be announced. Fails with the peer's reset when it rejects
+	/// the dial, and with [`Error::Unsupported`] for a dial to this endpoint itself.
+	pub fn dial(&self, peer: &str, info: impl Into<Option<track::Info>>) -> Result<kio::Pending<Dialing>, Error> {
+		let shared = &self.shared;
+		let path = endpoint_path(&shared.prefix, peer)?;
+		if peer == &*shared.id {
+			return Err(Error::Unsupported);
+		}
+		if let Some(err) = &shared.state.lock().end {
+			return Err(err.clone());
+		}
+		let session = session_id();
+		// This side's half, waiting for the peer to ask for it, which only the peer can:
+		// nobody else knows the session.
+		let answer = shared
+			.publication
+			.reserve_unlisted_track(track_name(&shared.id, &session))?;
+		// Followed rather than requested, so a peer not announced yet is waited for.
+		let resolving = Resolving::Follow(shared.origin.follow(path, None)?);
+		Ok(kio::Pending::new(Dialing {
+			shared: shared.clone(),
+			peer: peer.into(),
+			session,
+			info: info.into(),
+			demand: answer.demand(),
+			answer: Some(Answer::Reserved(answer)),
+			step: Step::Resolving(resolving),
 		}))
 	}
 
-	/// Poll for the next uni stream the peer opened; `None` once the peer's broadcast ended,
-	/// and [`Error::Closed`] once this side closed.
+	/// Poll for the next dial from a peer; fails with [`Error::Closed`] once the endpoint
+	/// closed.
 	///
-	/// A stream is handed out only while the peer still lists it: one whose track the peer
-	/// dropped first, finished or not, is skipped.
-	pub fn poll_accept_uni(&self, waiter: &kio::Waiter) -> Poll<Result<Option<track::Consumer>, Error>> {
-		let inner = &self.inner;
-		loop {
-			if inner.poll_local_closed(waiter) {
-				return Poll::Ready(Err(Error::Closed));
-			}
-			let mut listing = inner.listing.lock();
-			listing.drain(waiter, inner.role, &inner.remote);
-			let Some(track) = listing.uni.pop_front() else {
-				return match listing.ended() {
-					Some(end) => Poll::Ready(end),
-					None => Poll::Pending,
-				};
-			};
-			drop(listing);
-			return match inner.remote.track(&track) {
-				Ok(consumer) => Poll::Ready(Ok(Some(consumer))),
-				// The peer's broadcast ended.
-				Err(Error::Unroutable) => Poll::Ready(Ok(None)),
-				// The peer dropped the track since the listing read it.
-				Err(Error::NotFound) => continue,
-				Err(err) => Poll::Ready(Err(err)),
-			};
-		}
-	}
-
-	/// Wait for the next uni stream the peer opened; see [`Self::poll_accept_uni`].
-	#[cfg(feature = "async")]
-	pub async fn accept_uni(&self) -> Result<Option<track::Consumer>, Error> {
-		kio::wait(|waiter| self.poll_accept_uni(waiter)).await
-	}
-
-	/// Poll for the next bi stream the peer opened, answering it with a track that mirrors
-	/// the opener's info; `None` once the peer's broadcast ended, and [`Error::Closed`]
-	/// once this side closed. Skips streams as [`Self::poll_accept_uni`] does.
-	///
-	/// The socket reads the opener's half until the opener drops it or this side closes,
-	/// which is how the opener learns of the accept. As with any stream, the answer reaches the opener only
-	/// while this side holds it: finishing it at once is fine, dropping it before the
-	/// opener reads it is not.
-	pub fn poll_accept_bi(&self, waiter: &kio::Waiter) -> Poll<Result<Option<Bi>, Error>> {
-		let inner = &self.inner;
-		loop {
-			if inner.poll_local_closed(waiter) {
-				return Poll::Ready(Err(Error::Closed));
-			}
-			let mut listing = inner.listing.lock();
-			listing.drain(waiter, inner.role, &inner.remote);
-			let Some((track, info)) = listing.bi.pop_front() else {
-				return match listing.ended() {
-					Some(end) => Poll::Ready(end),
-					None => Poll::Pending,
-				};
-			};
-			// Already answered: the peer listed it again, which it does only by opening a
-			// number twice.
-			if listing.reading.contains_key(&track) {
-				continue;
-			}
-			listing.reading.insert(track.clone(), None);
-			drop(listing);
-
-			let answered = self.answer_bi(&track, info);
-			let mut listing = inner.listing.lock();
-			let (bi, read) = match answered {
-				Ok(Some(answered)) => answered,
-				Ok(None) => {
-					listing.reading.remove(&track);
-					continue;
-				}
-				Err(err) => {
-					listing.reading.remove(&track);
-					return match err {
-						// The peer's broadcast ended.
-						Error::Unroutable => Poll::Ready(Ok(None)),
-						err => Poll::Ready(Err(err)),
-					};
-				}
-			};
-			// Under the lock, so a close or a removal of the stream either comes after this
-			// and drops the read, or came first and is seen here.
-			let closed = inner.poll_local_closed(&kio::Waiter::noop());
-			if !closed && let Some(slot) = listing.reading.get_mut(&track) {
-				// How the opener learns of the accept.
-				*slot = Some(read);
-				return Poll::Ready(Ok(Some(bi)));
-			}
-			// Dropped outside the lock.
-			let stale = listing.reading.remove(&track);
-			drop(listing);
-			drop((stale, read, bi));
-			if closed {
-				return Poll::Ready(Err(Error::Closed));
-			}
-			// The opener dropped its half while this answered it.
-		}
-	}
-
-	/// Answer the peer's bi stream `track` with a track mirroring the opener's `info`, and
-	/// start reading the opener's half. `None` for a stream to skip.
-	fn answer_bi(
-		&self,
-		track: &str,
-		info: track::Info,
-	) -> Result<Option<(Bi, kio::Pending<track::Subscribing>)>, Error> {
-		let inner = &self.inner;
-		let consumer = match inner.remote.track(track) {
-			Ok(consumer) => consumer,
-			// The peer dropped the track since the listing read it.
-			Err(Error::NotFound) => return Ok(None),
-			Err(err) => return Err(err),
+	/// Dials queue until taken, without limit, each holding the dialer's request open, so
+	/// keep accepting, and accept or reject each one.
+	pub fn poll_accept(&self, waiter: &kio::Waiter) -> Poll<Result<Incoming, Error>> {
+		let shared = &self.shared;
+		let mut state = shared.state.lock();
+		shared.drain(&mut state, waiter)?;
+		let Some(request) = state.incoming.pop_front() else {
+			return Poll::Pending;
 		};
-		// The opener's track info, minus how its copy reached this hop.
-		let info = track::Info {
-			properties: None,
-			unchecked: false,
-			..info
-		};
-		// Answered under the opener's track name.
-		let producer = match inner.create_track(track.to_string(), info) {
-			Ok(producer) => producer,
-			// This side still holds an answer under the name, which the peer listed again
-			// only by opening a number twice.
-			Err(Error::Duplicate) => return Ok(None),
-			Err(err) => return Err(err),
-		};
-		let read = consumer.subscribe(None);
-		Ok(Some((Bi { producer, consumer }, read)))
+		drop(state);
+		let (peer, session) = parse(request.name()).expect("sorted as a dial");
+		Poll::Ready(Ok(Incoming {
+			shared: shared.clone(),
+			peer: peer.into(),
+			session: session.into(),
+			request,
+		}))
 	}
 
-	/// Wait for the next bi stream the peer opened; see [`Self::poll_accept_bi`].
+	/// Wait for the next dial from a peer; see [`Self::poll_accept`].
 	#[cfg(feature = "async")]
-	pub async fn accept_bi(&self) -> Result<Option<Bi>, Error> {
-		kio::wait(|waiter| self.poll_accept_bi(waiter)).await
+	pub async fn accept(&self) -> Result<Incoming, Error> {
+		kio::wait(|waiter| self.poll_accept(waiter)).await
 	}
 
-	/// Poll for the socket to end, and why.
-	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Closed> {
-		let inner = &self.inner;
-		if let Some(reason) = *inner.closed.lock() {
-			return Poll::Ready(reason);
-		}
-		if inner.local.poll_closed(waiter).is_ready() {
-			// The listener may have ended it between the check above and the close.
-			return Poll::Ready(inner.closed.lock().unwrap_or(Closed::Local));
-		}
-		ready!(inner.remote.poll_closed(waiter));
-		Poll::Ready(Closed::Remote)
-	}
-
-	/// Wait for the socket to end, and why.
-	#[cfg(feature = "async")]
-	pub async fn closed(&self) -> Closed {
-		kio::wait(|waiter| self.poll_closed(waiter)).await
-	}
-
-	/// End the socket, retracting this side's broadcast.
+	/// Close the endpoint; see [`Endpoint`].
 	pub fn close(&self) {
-		self.inner.close(Closed::Local);
+		self.shared.close();
 	}
 }
 
-impl Drop for Socket {
+impl Drop for Endpoint {
 	fn drop(&mut self) {
-		// A pending bi open still holds the shared half, but not the socket.
-		self.inner.retract();
+		self.shared.close();
 	}
 }
 
-/// A bi stream being opened, from [`Socket::open_bi`]: resolves once the peer answers.
-pub struct OpenBi {
-	inner: Arc<Inner>,
-	/// The stream's track name, which the answer shares.
-	track: Arc<str>,
-	/// This side's track, handed over once the peer answers.
-	producer: Option<track::Producer>,
-	/// Whether anyone reads this side's track, which the peer does from its accept on.
-	demand: track::Demand,
+/// A dial from a peer, from [`Endpoint::accept`]: accept or reject it.
+///
+/// Dropping it rejects it.
+pub struct Incoming {
+	shared: Arc<Shared>,
+	peer: Arc<str>,
+	session: Arc<str>,
+	request: track::Request,
 }
 
-impl OpenBi {
-	/// Poll for the peer's answer, which it gives by reading this side's half. Any reader
-	/// counts, so only the peer should be able to read this side's broadcast; see the
-	/// authorization section of `doc/concept/socket.md`. Fails with
-	/// [`Error::Unroutable`] once the peer's broadcast ends without one, and with
-	/// [`Error::Closed`] once this side closed, even if the answer came.
-	pub fn poll_ok(&mut self, waiter: &kio::Waiter) -> Poll<Result<Bi, Error>> {
-		let inner = &self.inner;
-		// This side's track went with its broadcast, and a peer that keeps its own up
-		// without answering would otherwise hold this open forever.
-		if inner.poll_local_closed(waiter) {
-			return Poll::Ready(Err(Error::Closed));
-		}
-		// Polled until it parks, so a later change wakes this.
-		while let Poll::Ready(Ok(_)) = self.demand.poll_wanted_changed(waiter) {}
-		if self.demand.wanted().is_some() {
-			let consumer = inner.remote.track(&self.track)?;
-			let producer = self.producer.take().ok_or(Error::Closed)?;
-			return Poll::Ready(Ok(Bi { producer, consumer }));
-		}
-		let mut listing = inner.listing.lock();
-		listing.drain(waiter, inner.role, &inner.remote);
-		match &listing.end {
-			Some(Ok(())) => Poll::Ready(Err(Error::Unroutable)),
-			Some(Err(err)) => Poll::Ready(Err(err.clone())),
-			None => Poll::Pending,
+impl Incoming {
+	/// The id the dialer claims. [`Self::accept`] checks it: the dial connects only if that
+	/// endpoint really dialed this session.
+	pub fn peer(&self) -> &str {
+		&self.peer
+	}
+
+	/// The session's id, which the dialer chose.
+	pub fn session(&self) -> &str {
+		&self.session
+	}
+
+	/// Accept the dial, resolving once the dialer answers, which proves it dialed.
+	///
+	/// `info` describes this side's half. Nothing is written before the dialer answers.
+	pub fn accept(self, info: impl Into<Option<track::Info>>) -> kio::Pending<Accepting> {
+		let Self {
+			shared,
+			peer,
+			session,
+			request,
+		} = self;
+		// Requested, so a dial claiming an endpoint nobody announces fails at once: the
+		// dialer announced its endpoint before it dialed.
+		let resolving = endpoint_path(&shared.prefix, &peer)
+			.map(|path| Resolving::Request(shared.origin.request(path, None).into_inner()));
+		let step = match resolving {
+			Ok(resolving) => Step::Resolving(resolving),
+			Err(err) => Step::Failed(err),
+		};
+		kio::Pending::new(Accepting {
+			shared,
+			peer,
+			session,
+			info: info.into(),
+			request: Some(request),
+			step,
+		})
+	}
+
+	/// Reject the dial, resetting the dialer's request with [`Error::NotFound`], as for a
+	/// session that does not exist.
+	pub fn reject(self) {
+		self.request.reject(Error::NotFound);
+	}
+}
+
+/// Resolving the peer's endpoint broadcast.
+enum Resolving {
+	/// Failing once the endpoint is not announced.
+	Request(origin::Requesting),
+	/// Waiting for the endpoint to be announced.
+	Follow(origin::Following),
+}
+
+impl Resolving {
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<super::broadcast::Consumer, Error>> {
+		match self {
+			Self::Request(request) => request.poll_ok(waiter),
+			Self::Follow(follow) => follow.poll_available(waiter),
 		}
 	}
 }
 
-impl kio::Task for OpenBi {
-	type Output = Result<Bi, Error>;
+/// How far a dial or an accept got in reading the peer's half.
+enum Step {
+	/// Resolving the peer's endpoint broadcast.
+	Resolving(Resolving),
+	/// Subscribed to the peer's half, waiting for the peer to serve it.
+	Subscribing(track::Subscribing),
+	/// The peer serves its half.
+	Subscribed(track::Subscriber),
+	/// It failed before it started.
+	Failed(Error),
+	/// Handed out, or failed.
+	Done,
+}
 
-	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Self::Output> {
-		self.poll_ok(waiter)
+impl Step {
+	/// Advance until the peer serves its half, subscribing to `track` in its endpoint.
+	fn poll(&mut self, waiter: &kio::Waiter, track: &str) -> Poll<Result<(), Error>> {
+		loop {
+			match self {
+				Self::Resolving(resolving) => {
+					let broadcast = ready!(resolving.poll(waiter))?;
+					let subscribing = broadcast.track(track)?.subscribe(reliable()).into_inner();
+					*self = Self::Subscribing(subscribing);
+				}
+				Self::Subscribing(subscribing) => {
+					let subscriber = ready!(subscribing.poll_ok(waiter))?;
+					*self = Self::Subscribed(subscriber);
+				}
+				Self::Subscribed(_) => return Poll::Ready(Ok(())),
+				Self::Failed(err) => return Poll::Ready(Err(err.clone())),
+				Self::Done => return Poll::Ready(Err(Error::Closed)),
+			}
+		}
+	}
+
+	fn take_subscriber(&mut self) -> track::Subscriber {
+		match std::mem::replace(self, Self::Done) {
+			Self::Subscribed(subscriber) => subscriber,
+			_ => unreachable!("taken once subscribed"),
+		}
 	}
 }
 
-/// Dial the listener at `path` as `id`, from [`dial`]: resolves once the listener accepts.
+/// This side's half of a dial.
+enum Answer {
+	/// Reserved, until the peer asks for it.
+	Reserved(track::Request),
+	/// Served, once the peer asked.
+	Served(track::Producer),
+}
+
+/// A dial, from [`Endpoint::dial`]: resolves once the peer accepts.
+///
+/// Dropping it gives up, resetting the session.
 pub struct Dialing {
-	id: Arc<str>,
-	/// This side's broadcast, announced for the listener to find.
-	local: Option<origin::Publication>,
-	/// The listener's answer, pinned to this dial's instance.
-	answer: origin::Following,
+	shared: Arc<Shared>,
+	peer: Arc<str>,
+	session: Arc<str>,
+	info: Option<track::Info>,
+	/// Whether the peer asked for this side's half, which it does on accept.
+	demand: track::Demand,
+	answer: Option<Answer>,
+	step: Step,
 }
 
 impl Dialing {
-	/// Poll for the listener's answer. Waits for as long as it takes: drop this to give up.
-	pub fn poll_ok(&mut self, waiter: &kio::Waiter) -> Poll<Result<Socket, Error>> {
-		let remote = ready!(self.answer.poll_available(waiter))?;
-		let local = self.local.take().ok_or(Error::Closed)?;
-		Poll::Ready(Ok(Socket::new(Role::Dialer, self.id.clone(), local, remote)))
+	/// The session's id.
+	pub fn session(&self) -> &str {
+		&self.session
+	}
+
+	/// Poll for the peer to accept; see [`Endpoint::dial`].
+	pub fn poll_ok(&mut self, waiter: &kio::Waiter) -> Poll<Result<Stream, Error>> {
+		let result = self.poll_inner(waiter);
+		if let Poll::Ready(Err(_)) = &result {
+			// Resets the session for the peer.
+			self.answer = None;
+			self.step = Step::Done;
+		}
+		result
+	}
+
+	fn poll_inner(&mut self, waiter: &kio::Waiter) -> Poll<Result<Stream, Error>> {
+		let shared = &self.shared;
+		shared.poll_end(waiter)?;
+
+		// The peer asks for this side's half when it accepts: serve it, which proves to the
+		// peer that this endpoint dialed.
+		if let Some(Answer::Reserved(_)) = &self.answer {
+			// Polled until it parks, so the next change wakes this.
+			while let Poll::Ready(changed) = self.demand.poll_wanted_changed(waiter) {
+				// Ends once the reservation does: the endpoint closed.
+				changed?;
+			}
+			if self.demand.wanted().is_some()
+				&& let Some(Answer::Reserved(request)) = self.answer.take()
+			{
+				self.answer = Some(Answer::Served(request.accept(self.info.take())));
+			}
+		}
+
+		let track = track_name(&shared.id, &self.session);
+		ready!(self.step.poll(waiter, &track))?;
+		// The peer serves its half only after asking for this side's, so a conforming peer
+		// asked already; wait for its request regardless.
+		let Some(Answer::Served(_)) = &self.answer else {
+			return Poll::Pending;
+		};
+		let Some(Answer::Served(producer)) = self.answer.take() else {
+			unreachable!("checked above");
+		};
+
+		let mut state = shared.state.lock();
+		if let Some(err) = &state.end {
+			return Poll::Ready(Err(err.clone()));
+		}
+		state.hold(&producer);
+		drop(state);
+		Poll::Ready(Ok(Stream {
+			producer,
+			consumer: self.step.take_subscriber(),
+			peer: self.peer.clone(),
+			session: self.session.clone(),
+		}))
 	}
 }
 
 impl kio::Task for Dialing {
-	type Output = Result<Socket, Error>;
+	type Output = Result<Stream, Error>;
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Self::Output> {
 		self.poll_ok(waiter)
 	}
 }
 
-/// Dial the listener at `path` as `id`, resolving once it accepts.
-///
-/// Publishes this side's broadcast at `path/.dial/<id>` with a fresh [`Instance`], and
-/// waits for the listener's answer at `path/.accept/<id>` carrying that instance. There
-/// is no timeout: drop the returned future to give up, which retracts the dial.
-///
-/// `id` must be one path segment; an id with a `/` fails with [`Error::InvalidPath`].
-/// Fails like [`origin::Producer::create_broadcast`] when `origin` may not publish the
-/// dial, and like [`origin::Consumer::follow`] when it may not read the answer.
-pub fn dial(
-	origin: &origin::Producer,
-	path: impl TryInto<Path, Error: Into<Error>>,
-	id: &str,
-) -> Result<kio::Pending<Dialing>, Error> {
-	let path = crate::path::convert(path)?;
-	let instance = Instance::random();
-	let local = origin.create_broadcast(side(&path, DIAL, id)?)?;
-	let answer = origin.consume().follow(side(&path, ACCEPT, id)?, instance.clone())?;
-	local.announce(Route::default().with_instance(instance, 0))?;
-	Ok(kio::Pending::new(Dialing {
-		id: id.into(),
-		local: Some(local),
-		answer,
-	}))
+/// An accept, from [`Incoming::accept`]: resolves once the dialer answers.
+pub struct Accepting {
+	shared: Arc<Shared>,
+	peer: Arc<str>,
+	session: Arc<str>,
+	info: Option<track::Info>,
+	/// The dialer's request for this side's half, served once the dialer answers.
+	request: Option<track::Request>,
+	step: Step,
 }
 
-/// A socket the listener handed out, kept so a newer dial or the dialer leaving ends it.
-struct Live {
-	instance: Instance,
-	socket: Weak<Inner>,
-}
-
-/// A dial being accepted: its broadcast requested, pinned to its instance.
-struct Accepting {
-	id: Path,
-	instance: Instance,
-	request: origin::Requesting,
-}
-
-/// Accepts the sockets dialed to a path.
-///
-/// Dialers queue in the announcements until [`Self::accept`] takes them, without limit,
-/// and a dialer's broadcast is requested only then: a listener that stops accepting
-/// holds nothing for the dialers waiting on it. While it accepts, a dialer dialing again
-/// with the same id ends the socket it replaces with [`Closed::Replaced`].
-///
-/// Run one listener per path. Two would both answer a dial under its instance, and the
-/// dialer would follow only one of them, leaving the other's socket unread.
-pub struct Listener {
-	origin: origin::Producer,
-	path: Path,
-	/// The dialers' broadcasts, rooted at `path/.dial`.
-	dials: origin::Consumer,
-	announced: announce::Consumer,
-	live: HashMap<Path, Live>,
-	accepting: Option<Accepting>,
-}
-
-impl Listener {
-	/// Listen at `path` on `origin`, which publishes the answers and reads the dials.
+impl Accepting {
+	/// Poll for the dialer to answer; see [`Incoming::accept`].
 	///
-	/// Fails with [`Error::Unauthorized`] when `origin` may not read `path/.dial`.
-	pub fn new(origin: &origin::Producer, path: impl TryInto<Path, Error: Into<Error>>) -> Result<Self, Error> {
-		let path = crate::path::convert(path)?;
-		let ids = Patterns::from("*".parse::<Pattern>()?);
-		// An id is any one segment, a dotted one included.
-		let dials = origin
-			.consume()
-			.scope(path.join(&Path::from_static(DIAL))?, &ids)?
-			.with_hidden(true);
-		let announced = dials.announced();
-		Ok(Self {
-			origin: origin.clone(),
-			path,
-			dials,
-			announced,
-			live: HashMap::new(),
-			accepting: None,
-		})
-	}
-
-	/// The path this listener accepts dials at.
-	pub fn path(&self) -> &Path {
-		&self.path
-	}
-
-	/// Poll for the next dialer, requesting its broadcast and answering it.
-	///
-	/// Dialers are taken one at a time, in order. A session resolves a request for a
-	/// broadcast its peer announced itself, without asking the peer, so a remote dialer
-	/// cannot hold up the ones behind it; only an [`origin::Requests`] handler on this
-	/// origin that holds a dial's request can. A dialer that leaves before its broadcast
-	/// resolves is skipped. Fails with [`Error::Closed`] once the origin closes.
-	pub fn poll_accept(&mut self, waiter: &kio::Waiter) -> Poll<Result<Socket, Error>> {
-		loop {
-			if let Some(accepting) = &mut self.accepting {
-				let remote = ready!(accepting.request.poll_ok(waiter));
-				let accepting = self.accepting.take().expect("accepting");
-				match remote {
-					Ok(remote) => match self.answer(accepting, remote) {
-						Ok(Some(socket)) => return Poll::Ready(Ok(socket)),
-						Ok(None) => {}
-						Err(err) => return Poll::Ready(Err(err)),
-					},
-					Err(err) => tracing::debug!(id = %accepting.id, %err, "dialer left before it was accepted"),
-				}
-				continue;
+	/// Fails with the dialer's reset when it never dialed this session, such as a dial
+	/// forged in its name, and resets the dialer's request with the same error.
+	pub fn poll_ok(&mut self, waiter: &kio::Waiter) -> Poll<Result<Stream, Error>> {
+		let result = self.poll_inner(waiter);
+		if let Poll::Ready(Err(err)) = &result {
+			self.step = Step::Done;
+			if let Some(request) = self.request.take() {
+				request.reject(err.clone());
 			}
-
-			let Some(event) = ready!(self.announced.poll_next(waiter)) else {
-				return Poll::Ready(Err(Error::Closed));
-			};
-			let (announce, takeover) = match event {
-				announce::Event::Start(announce) | announce::Event::Restart(announce) => (announce, false),
-				announce::Event::Takeover { announce, .. } => (announce, true),
-				// The same instance, delivered in place.
-				announce::Event::Update(_) => continue,
-				announce::Event::End(announce) => {
-					// The dialer's routes are gone, and so is its broadcast; retract the
-					// answer too, so a return of the same instance never meets it.
-					if let Some(live) = self.live.remove(&announce.prefix)
-						&& let Some(socket) = live.socket.upgrade()
-					{
-						socket.close(Closed::Remote);
-					}
-					continue;
-				}
-			};
-			let Some(instance) = announce.route.instance else {
-				continue;
-			};
-			if let Some(live) = self.live.get_mut(&announce.prefix) {
-				match live.socket.upgrade() {
-					Some(_) if live.instance == instance => continue,
-					// A takeover continues the stream the live socket already reads.
-					Some(_) if takeover => {
-						live.instance = instance;
-						continue;
-					}
-					Some(socket) => socket.close(Closed::Replaced),
-					None => {}
-				}
-				self.live.remove(&announce.prefix);
-			}
-			let request = self.dials.request(&announce.prefix, instance.clone()).into_inner();
-			self.accepting = Some(Accepting {
-				id: announce.prefix,
-				instance,
-				request,
-			});
 		}
+		result
 	}
 
-	/// Wait for the next dialer; see [`Self::poll_accept`].
-	#[cfg(feature = "async")]
-	pub async fn accept(&mut self) -> Result<Socket, Error> {
-		kio::wait(|waiter| self.poll_accept(waiter)).await
-	}
+	fn poll_inner(&mut self, waiter: &kio::Waiter) -> Poll<Result<Stream, Error>> {
+		let shared = &self.shared;
+		shared.poll_end(waiter)?;
+		let track = track_name(&self.peer, &self.session);
+		ready!(self.step.poll(waiter, &track))?;
 
-	/// Publish the answer to a resolved dial, or `None` when this dialer's answer can't be
-	/// published, such as an id this origin may not answer.
-	fn answer(&mut self, accepting: Accepting, remote: broadcast::Consumer) -> Result<Option<Socket>, Error> {
-		let Accepting { id, instance, .. } = accepting;
-		let local = side(&self.path, ACCEPT, id.as_str())
-			.and_then(|path| self.origin.create_broadcast(path))
-			.and_then(|local| {
-				local.announce(Route::default().with_instance(instance.clone(), 0))?;
-				Ok(local)
-			});
-		let local = match local {
-			Ok(local) => local,
-			Err(Error::Closed) => return Err(Error::Closed),
-			Err(err) => {
-				tracing::warn!(%id, %err, "cannot answer the dialer");
-				return Ok(None);
-			}
-		};
-		let socket = Socket::new(Role::Listener, id.as_str().into(), local, remote);
-		self.live.insert(
-			id,
-			Live {
-				instance,
-				socket: Arc::downgrade(&socket.inner),
-			},
-		);
-		Ok(Some(socket))
+		let mut state = shared.state.lock();
+		if let Some(err) = &state.end {
+			return Poll::Ready(Err(err.clone()));
+		}
+		let request = self.request.take().ok_or(Error::Closed)?;
+		let producer = request.accept(self.info.take());
+		state.hold(&producer);
+		drop(state);
+		Poll::Ready(Ok(Stream {
+			producer,
+			consumer: self.step.take_subscriber(),
+			peer: self.peer.clone(),
+			session: self.session.clone(),
+		}))
+	}
+}
+
+impl kio::Task for Accepting {
+	type Output = Result<Stream, Error>;
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Self::Output> {
+		self.poll_ok(waiter)
 	}
 }
 
@@ -792,41 +590,31 @@ mod tests {
 
 	#[test]
 	fn track_names_round_trip() {
-		for opener in [Role::Dialer, Role::Listener] {
-			for kind in [Kind::Uni, Kind::Bi] {
-				let name = track_name(opener, kind, 7);
-				assert_eq!(parse(&name), Some((opener, kind)));
-			}
-		}
-		assert_eq!(track_name(Role::Dialer, Kind::Bi, 0), ".dial/bi/0");
-		assert_eq!(track_name(Role::Listener, Kind::Uni, 12), ".accept/uni/12");
+		let name = track_name("alice", "0123abcd");
+		assert_eq!(name, "alice/0123abcd");
+		assert_eq!(parse(&name), Some(("alice", "0123abcd")));
 	}
 
 	#[test]
 	fn foreign_track_names_are_skipped() {
-		for name in [
-			"command",
-			".dial",
-			".dial/uni",
-			".dial/uni/",
-			".dial/other/0",
-			".other/uni/0",
-			"dial/uni/0",
-			".dial/uni/x",
-			".dial/uni/0/x",
-			".dial/uni/07",
-			".dial/uni/-1",
-			".dial/uni/+1",
-		] {
+		for name in ["command", "alice/", "/s", "alice/s/0", "a\\b/s", "alice/s\\"] {
 			assert_eq!(parse(name), None, "{name}");
 		}
 	}
 
 	#[test]
-	fn an_id_is_one_segment() {
-		let path = Path::from_static("room");
-		assert_eq!(side(&path, DIAL, "alice").unwrap().as_str(), "room/.dial/alice");
-		assert!(side(&path, DIAL, "a/b").is_err());
-		assert!(side(&path, DIAL, "").is_err());
+	fn an_endpoint_path_holds_one_segment() {
+		let prefix = Path::from_static("room");
+		assert_eq!(endpoint_path(&prefix, "alice").unwrap().as_str(), "room/.tcp/alice");
+		assert!(endpoint_path(&prefix, "a/b").is_err());
+		assert!(endpoint_path(&prefix, "").is_err());
+		assert!(endpoint_path(&prefix, "a\\b").is_err());
+	}
+
+	#[test]
+	fn session_ids_are_128_bits() {
+		let (a, b) = (session_id(), session_id());
+		assert_eq!(a.len(), 32);
+		assert_ne!(a, b);
 	}
 }
