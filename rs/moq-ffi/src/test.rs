@@ -9414,7 +9414,7 @@ async fn ready_paces_a_writer_behind_a_slow_reader() {
 	// Let the writer run as far as it can while the reader stalls.
 	for _ in 0..50 {
 		ffi_caught_up().await;
-		tokio::time::sleep(Duration::from_millis(2)).await;
+		kio::clock::sleep(Duration::from_millis(2)).await;
 	}
 	let ahead = written.load(std::sync::atomic::Ordering::SeqCst);
 	assert!(!writer.is_finished(), "the writer never waited");
