@@ -198,6 +198,8 @@ where
 	/// Generation of the last returned frame, updated only at the output boundary.
 	emitted_epoch: u64,
 	pcr_discontinuity: bool,
+	/// Furthest presentation time reached by a signalled delivery gap, shared across tracks.
+	gap_until: Option<Timestamp>,
 	/// Lays the muxed packets onto the PCR grid.
 	schedule: Schedule,
 	/// Read each track from the oldest group the delay still reaches, rather than the live
@@ -320,6 +322,8 @@ struct Track {
 	base: (u64, u64, u64),
 	/// Delivery skips before the last frame muxed, so read-ahead cannot flag earlier output.
 	gap: u64,
+	/// Furthest presentation time muxed, so overlapping track losses share one break.
+	last_timestamp: Option<Timestamp>,
 	finished: bool,
 	pid: u16,
 	/// The PMT lists it: from its first frame out until its last has gone and the catalog has
@@ -398,6 +402,7 @@ impl Track {
 			restart: 0,
 			base: (0, 0, 0),
 			gap: 0,
+			last_timestamp: None,
 			finished: false,
 			pid: 0,
 			listed: false,
@@ -1460,6 +1465,7 @@ where
 			epoch: 0,
 			emitted_epoch: 0,
 			pcr_discontinuity: false,
+			gap_until: None,
 			schedule: Schedule::new(Duration::ZERO),
 			slot_timer: None,
 			replay: false,
@@ -2872,6 +2878,7 @@ where
 		}
 		self.program.video_start = None;
 		self.program.pcr_discontinuity = true;
+		self.program.gap_until = None;
 		self.program.tables.clear();
 		if let Some(psi) = &mut self.program.psi {
 			psi.sending.clear();
@@ -2879,6 +2886,7 @@ where
 			psi.led = psi.out.as_ref().map(|laid| laid.pmt.clone());
 		}
 		for track in self.program.tracks.values_mut() {
+			track.last_timestamp = None;
 			track.pack = None;
 			track.parked.clear();
 		}
@@ -3367,6 +3375,21 @@ where
 		let track = self.program.tracks.get_mut(name).context("missing track")?;
 		let skipped = gap > track.gap;
 		track.gap = gap;
+		let after = track.last_timestamp.unwrap_or(frame.timestamp);
+		track.last_timestamp = Some(after.max(frame.timestamp));
+		let skipped = skipped && {
+			// Audio and video can resume the same outage in different release slots. One
+			// flag covers their overlapping missing intervals, including a later read
+			// on another track that extends the interval already signalled. Presentation
+			// time shares the content's timeline across their different decode reserves.
+			let separate = self.program.gap_until.is_none_or(|until| after >= until);
+			self.program.gap_until = Some(
+				self.program
+					.gap_until
+					.map_or(frame.timestamp, |until| until.max(frame.timestamp)),
+			);
+			separate
+		};
 		let kind = &track.kind;
 		let is_video = matches!(kind, Kind::Video(_));
 		// Refresh PSI at keyframes, MPEG-1/2 video's carried whole among them, or after the

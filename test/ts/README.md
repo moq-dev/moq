@@ -728,11 +728,13 @@ paths run beside it, and `just rs ts-recovery` runs two minutes of the same faul
 nightly, failing if the latency drifts and keeping a failing arm's export and
 ledgers under `$HARNESS_RUNS/ts-recovery/`.
 
-Semantic loss also has paused-clock wire checks in `export_test.rs`:
+Semantic loss also has paused-clock wire checks in `export_test.rs` and
+`recovery_test.rs`:
 
 | Case | Contract | Test |
 |---|---|---|
 | Skipped groups, short or longer than PCR backfill | Only the next PCR flags the skip; PAT/PMT versions stay unchanged; importer Health reports no unflagged PCR jump | `a_skipped_group_flags_the_clock` |
+| Shared A/V outage, including different decode reserves | One program-level PCR flag for the overlapping losses | `a_short_outage_across_both_tracks_flags_once` |
 | Same-instance route handoff after a gap | The same PCR-only flag, with no program change | `a_follower_continues_through_a_same_instance_handoff_after_a_gap` |
 
 These run in `just rs test -p moq-mux --lib` and the selected Rust CI gate.

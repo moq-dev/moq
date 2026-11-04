@@ -645,7 +645,7 @@ impl Bottleneck {
 struct Arm {
 	profile: Profile,
 	schedule: Schedule,
-	/// Expected PCR flags from declared boundaries and delivery skips, coalesced within a slot.
+	/// Expected PCR flags from declared boundaries and overlapping delivery skips.
 	breaks: usize,
 	/// A bottleneck after the faults.
 	path: Option<Bottleneck>,
@@ -1418,7 +1418,7 @@ async fn recover(arm: Arm) -> Run {
 	assert_eq!(
 		count_discontinuity(&run.frames),
 		arm.breaks,
-		"one PCR flag per declared boundary or delivery skip, coalesced within a slot"
+		"one PCR flag per declared boundary or overlapping delivery gap"
 	);
 
 	let reference = Reference::new(profile, run.ledger(true));
@@ -1530,7 +1530,26 @@ async fn a_stall_drops_what_it_made_late() {
 /// deadline is dropped rather than sent late.
 #[tokio::test(start_paused = true)]
 async fn a_path_stall_drops_what_it_made_late() {
-	recover(arm(Profile::Closed, |slot| hold(true, slot)).breaks(2)).await;
+	recover(arm(Profile::Closed, |slot| hold(true, slot)).breaks(1)).await;
+}
+
+/// Audio and reordered video lose the same last-frame interval before a keyframe. Their
+/// decode reserves differ, but the missing media shares one PCR flag.
+#[tokio::test(start_paused = true)]
+async fn a_short_outage_across_both_tracks_flags_once() {
+	let run = recover(
+		arm(Profile::Closed, |slot| {
+			let missing = if slot.video {
+				slot.group == 5 && slot.frame == 11
+			} else {
+				(SPLICE - FRAME..SPLICE).contains(&slot.nominal)
+			};
+			if missing { Delivery::Omitted } else { clean(slot) }
+		})
+		.breaks(1),
+	)
+	.await;
+	assert_eq!(run.stats.release.gaps, 2, "both tracks skipped media");
 }
 
 /// Hold what is `held` and due in [1.92 s, 4.4 s) until the end, delivering the rest cleanly.
@@ -1791,7 +1810,7 @@ async fn a_declared_discontinuity_survives_loss_either_side() {
 }
 
 /// The path loses the marker that declares the break, and every frame on either side arrives:
-/// the export flags the delivery skip and the recovered clock jump.
+/// the export marks the overlapping delivery skips and recovered clock jump once.
 #[tokio::test(start_paused = true)]
 async fn a_lost_discontinuity_marker_still_breaks_the_clock() {
 	let run = recover(
@@ -1799,7 +1818,7 @@ async fn a_lost_discontinuity_marker_still_breaks_the_clock() {
 			true => Delivery::Omitted,
 			false => clean(slot),
 		})
-		.breaks(2),
+		.breaks(1),
 	)
 	.await;
 	assert_eq!(run.stats.release.dropped, 0);
@@ -1816,7 +1835,7 @@ async fn a_congested_path_sheds_what_it_made_late() {
 			queue: 2 * DELAY,
 			congested: |at| (Duration::from_millis(1500)..Duration::from_millis(3500)).contains(&at),
 		}),
-		..arm(Profile::Closed, clean).breaks(2)
+		..arm(Profile::Closed, clean).breaks(1)
 	})
 	.await;
 	let video = run.ledger(true);
@@ -1903,7 +1922,8 @@ async fn long_faults_hold_their_latency() {
 			// Two seconds of every twenty.
 			congested: |at| (17..19).contains(&(at.as_secs() % 20)) && at < Duration::from_secs(100),
 		}),
-		..arm(Profile::Long, faults).breaks(31)
+		// Five cycles, each with four scheduled losses and one shared congestion interval.
+		..arm(Profile::Long, faults).breaks(5 * 5)
 	})
 	.await;
 	assert!(run.stats.release.gaps >= 20, "every fault skipped: {:?}", run.stats);
