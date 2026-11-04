@@ -207,6 +207,7 @@ The `js/replay` nightly series and the browser smoke's `replay.json` protect it.
 ## Required
 
 - [Task capacity after bursts](/quest/m2/performance-survey/task-capacity.md) - memory a task set keeps after peak occupancy subsides
+- [QUIC send-group capacity](/quest/m2/performance-survey/send-groups.md) - memory the scheduler's send-group slab keeps after subscription churn
 - [Cache metadata](/quest/m2/performance-survey/cache-metadata.md) - bookkeeping capacity after cached groups expire
 - [HLS request fan-out](/quest/m2/performance-survey/hls-serving.md) - repeated fetch, remux and playlist construction per viewer
 - [Announcement snapshots](/quest/m2/performance-survey/announced-snapshots.md) - HTTP polling cost versus result size and unrelated routes

@@ -646,10 +646,7 @@ impl MoqTokens {
 	/// [`MoqError::Unsupported`] when the session cannot carry an in-band token, and the
 	/// connection's end, such as a refused dial, is its close reason.
 	pub async fn answered(&self) -> Result<(), MoqError> {
-		{
-			let tokens = self.inner.clone();
-			crate::ffi::detached(async move { tokens.answered().await.map_err(MoqError::from) }).await
-		}
+		crate::ffi::run(self.inner.answered()).await
 	}
 }
 
@@ -810,13 +807,13 @@ impl Shutdown {
 	async fn finished(&self) -> Result<(), MoqError> {
 		// Publish a background panic before reading the channel it dropped.
 		self.task.finished().await?;
-		self.result
-			.wait(|result| match &**result {
-				Some(result) => std::task::Poll::Ready(result.clone()),
-				None => std::task::Poll::Pending,
-			})
-			.await
-			.map_err(|_| MoqError::Cancelled)?
+		// The drain is a root child, so its wake must not run the host's continuation there.
+		crate::ffi::host(self.result.wait(|result| match &**result {
+			Some(result) => std::task::Poll::Ready(result.clone()),
+			None => std::task::Poll::Pending,
+		}))
+		.await
+		.map_err(|_| MoqError::Cancelled)?
 	}
 }
 

@@ -37,7 +37,7 @@ const INVALID_RANGE = 0x11;
 const INVALID_JOINING_REQUEST_ID = 0x32;
 
 /** A publisher serving the `room` broadcast, with its `video` track and the client's uni streams. */
-function serve(version: IetfVersion, grant?: Signal<Grant | undefined>) {
+function serve(version: IetfVersion, grant?: Signal<Grant | undefined>, priority?: number) {
 	const pair = createMockTransportPair(ALPNS[version]);
 	const origin = new OriginProducer();
 	const pub = new Publisher({
@@ -49,7 +49,7 @@ function serve(version: IetfVersion, grant?: Signal<Grant | undefined>) {
 	});
 	const publication = origin.createBroadcast(Path.from("room"));
 	publication.announce();
-	const track = publication.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = publication.broadcast.createTrack("video", { timescale: Timescale.MILLI, priority });
 	const uni = pair.client.incomingUnidirectionalStreams.getReader() as ReadableStreamDefaultReader<
 		ReadableStream<Uint8Array>
 	>;
@@ -327,6 +327,37 @@ test("a FETCH spanning groups is refused before FETCH_OK", async () => {
 	}
 });
 
+/** The Publisher Priority each object on a fetch stream states, absent where it inherits. */
+async function priorities(raw: Uint8Array, version: IetfVersion): Promise<(number | undefined)[]> {
+	const reader = new Reader(undefined, raw, version);
+	expect(await reader.u53()).toBe(FetchHeader.type);
+	await FetchHeader.decode(reader, version);
+	const out: (number | undefined)[] = [];
+	while (!(await reader.done())) {
+		const flags = await reader.u53();
+		if (flags & 0x08) await reader.u53();
+		if (flags & 0x04) await reader.u53();
+		out.push(flags & 0x10 ? await reader.u8() : undefined);
+		if (flags & 0x20) await reader.read(await reader.u53());
+		await reader.read(await reader.u53());
+	}
+	return out;
+}
+
+// A fetch stream's first object states the track's Publisher Priority, as a subgroup header
+// does, and the rest inherit it. Model priority 72 is wire 55, lower first.
+test("a FETCH states the track's priority on its first object", async () => {
+	for (const version of VERSIONS) {
+		using fx = serve(version, undefined, 72);
+		publishPairs(fx.track, 2);
+		const type = range(version, at(1, 0), at(1, 0));
+		const answer = served(await fetch(fx, new Fetch({ requestId: FETCH_ID, type })));
+		expect(answer.objects).toEqual(pairs([1]));
+		expect(answer.ok.properties.priority).toBe(55);
+		expect(await priorities(answer.raw, version)).toEqual([55, undefined]);
+	}
+});
+
 // Only a finished track's final object ends it, wherever the range starts or ends.
 test("a FETCH through the final object reports the end of track", async () => {
 	for (const version of VERSIONS) {
@@ -561,7 +592,8 @@ test("draft-18: a joining FETCH serves the head its subscription starts after", 
 	await reader.u53();
 	await FetchHeader.decode(reader, D18);
 	expect(await reader.u53()).toBe(0x3c);
-	expect([await reader.u53(), await reader.u53(), await reader.u8()]).toEqual([5, 0, 0]);
+	// The priority is the track's, as FETCH_OK and every subgroup header state it.
+	expect([await reader.u53(), await reader.u53(), await reader.u8()]).toEqual([5, 0, 127]);
 	await reader.read(await reader.u53());
 	await reader.read(await reader.u53());
 	expect(await reader.u53()).toBe(0x20);

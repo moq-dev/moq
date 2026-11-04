@@ -57,15 +57,15 @@ to the working group.
 
 Open, for this quest's interview:
 
-- The carrier: a message on the SUBSCRIBE's request stream (drafts 18 and 22
-  give each request its own stream), or a status on a group stream.
+- The carrier: a message on the SUBSCRIBE's request stream (drafts 18, 20,
+  and 22 give each request its own stream), or a status on a group stream.
 - Whether the drop names its budget, as lite-07's SUBSCRIBE_DROP `Max Age`
   does in [Drop set](/quest/m1/drop-set.md), so a stale drop doesn't settle
   a wider reader.
 - How a publisher answering a range walks the drop set's runs in group
   order, and where FETCH_OK's End Location falls.
 
-Test across Rust and JS on drafts 18 and 22, with and without the extension.
+Test across Rust and JS on drafts 18, 20, and 22, with and without the extension. Draft 20 added 2026-11-03 (maintainer, /quest-plan of the follow-ups from [moq-dev/moq#7704](https://github.com/moq-dev/moq/pull/7704)), since draft 20 joined the covered drafts in [interop coverage](/quest/m1/interop-coverage/README.md).
 A range over a copy whose holes are all proven is answered with `0x8C` runs.
 A range with an unknown hole is still refused. Regression: an upstream
 reports G stale for a narrow subscriber while still holding G; a wider

@@ -954,8 +954,31 @@ where
 
 	/// Finish the track, flushing any buffered frames and closing any open group.
 	pub fn finish(&mut self) -> crate::Result<()> {
+		self.end_with(None)
+	}
+
+	/// [`finish`](Self::finish) the track with `err`, for a source that failed after
+	/// producing media worth keeping.
+	///
+	/// Unlike [`abort`](Self::abort), every group written stays readable and keeps being
+	/// served; a reader reaching the end gets `err` instead of the end of stream. Over IETF
+	/// moq-transport, a remote subscriber is told only of a generic internal error.
+	pub fn fail(&mut self, err: moq_net::Error) -> crate::Result<()> {
+		self.end_with(Some(err))
+	}
+
+	fn end_with(&mut self, err: Option<moq_net::Error>) -> crate::Result<()> {
 		self.cut(None)?;
-		self.inner.finish()?;
+		match err {
+			None => self.inner.finish()?,
+			Some(err) => {
+				let next = self
+					.inner
+					.largest()
+					.map_or(0, |largest| largest.group.saturating_add(1));
+				self.inner.finish_at(moq_net::track::Position::group(next), Some(err))?;
+			}
+		}
 		self.publish_estimate()?;
 		// A finished track may be kept around, but its media stops holding the other tracks back.
 		self.estimator.discontinuity();

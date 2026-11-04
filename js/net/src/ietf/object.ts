@@ -425,11 +425,22 @@ export class FetchFrame {
 	streamed?: number;
 	/** The presentation timestamp carried in object properties, when present. */
 	timestamp?: Timestamp;
+	/**
+	 * The track's Publisher Priority on the wire, which the stream's first object states for
+	 * every object after it, as a subgroup header does.
+	 */
+	priority: number;
 
-	constructor({ payload, streamed, timestamp }: { payload?: Uint8Array; streamed?: number; timestamp?: Timestamp }) {
+	constructor({
+		payload,
+		streamed,
+		timestamp,
+		priority,
+	}: { payload?: Uint8Array; streamed?: number; timestamp?: Timestamp; priority: number }) {
 		this.payload = payload ?? new Uint8Array(0);
 		this.streamed = streamed;
 		this.timestamp = timestamp;
+		this.priority = priority;
 	}
 
 	/**
@@ -462,7 +473,7 @@ export class FetchFrame {
 				),
 				encodeVarint(position.object, version),
 			);
-			if (position.first) header.push(Uint8Array.of(0));
+			if (position.first) header.push(Uint8Array.of(this.priority));
 		} else {
 			// Same group and priority; the Object ID is the prior one plus one.
 			header.push(encodeVarint(stamped ? FETCH_PROPERTIES : 0, version));

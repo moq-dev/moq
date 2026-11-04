@@ -740,20 +740,29 @@ async fn a_track_sent_later_than_the_delay_loses_nothing() {
 
 /// A changeover between two encoders whose clocks started hours apart steps the whole timeline
 /// forward with no marker, mid-group, as in the field. The export re-acquires its clock as at
-/// startup, rather than read the step as drift and end, and renders on without a drop. (A step
-/// back further than the group before its own never reaches it: the reader refuses it.)
+/// startup, rather than read the step as drift and end, and renders on without a drop. So it
+/// does for a step back of more than the delay that lands within the group before its own, on
+/// video that declares its `reorder`, which proves the step is no reordering, rather than clamp
+/// the video onto the old timeline and drop it as late until the timeline catches up, or fail on
+/// a frame reordered deeper than declared. Video that declares none is left as it is. (A step
+/// back further than that never reaches it: the reader refuses it.)
 #[tokio::test(start_paused = true)]
 async fn an_unmarked_step_keeps_the_export_rendering() {
-	for step in [16_844_500_000, 2_000_000] {
+	let forward = [16_844_500_000, 2_000_000].map(|step| [(step, false), (step, true)]);
+	let cases = forward.into_iter().flatten().chain([(-560_000, true)]);
+	for (step, declared) in cases {
 		for lag in [0, LAGS[0], LAGS[1]] {
 			let mut live = Live::new(1.0, lag).await;
+			if declared {
+				live.reorder();
+			}
 			let mut leg = live.join(Duration::ZERO).await;
 			live.run(8 * GOP + GOP / 2, &mut [&mut leg], |_| false);
 			live.offset += step;
 			let stepped = kio::clock::now();
 			live.run(live.tick + 8 * GOP, &mut [&mut leg], |_| false);
 
-			let case = format!("{} s step, lag {lag}", step as f64 / 1e6);
+			let case = format!("{} s step, declared {declared}, lag {lag}", step as f64 / 1e6);
 			assert_eq!(leg.export.dropped(), 0, "{case}");
 			let video = leg
 				.units()
