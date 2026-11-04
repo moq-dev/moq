@@ -328,8 +328,8 @@ The relay and generator keep these affinities for every revision. Instructions
 mode runs alone.
 
 Each base builds into its own target under `target/bench/revisions/<sha>`,
-from a detached worktree in `.tmp/` that the run removes when it exits, so a
-later run reuses that build. The revisions build side by side on every allowed
+from a detached worktree at `.tmp/bench-revisions/<sha>` that later runs keep
+using, so a later run reuses that build without a compiler cache. The revisions build side by side on every allowed
 CPU, since fat LTO links on one thread, `BENCH_BUILD_JOBS` (default 4) at a
 time: each link takes gigabytes, so lower it on a host with little memory.
 Every round measures each base and the

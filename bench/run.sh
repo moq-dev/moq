@@ -973,15 +973,19 @@ run_queued_builds() {
     done
 }
 
-# Check out one revision for this run, in the checkout's ignored scratch space,
-# where it loads only its own Cargo configuration. Its target persists, keyed by
-# revision; the compiler cache keys on remapped paths, so a fresh checkout reuses it.
+# Check out one revision in the checkout's ignored scratch space, where it loads
+# only its own Cargo configuration. Both the checkout and its target persist,
+# keyed by revision: a fresh checkout's new mtimes would rebuild every workspace
+# crate on a host without a compiler cache.
 revision_checkout() {
-    local sha=$1 label=$2 worktree
-    mkdir -p "$ROOT/.tmp"
-    worktree=$(mktemp -d "$ROOT/.tmp/moq-bench-base.XXXXXX")
-    WORKTREES+=("$worktree")
-    git worktree add --detach "$worktree" "$sha" >/dev/null
+    local sha=$1 label=$2 worktree=$ROOT/.tmp/bench-revisions/$1
+    if [[ ! -f $worktree/.git || $(git -C "$worktree" rev-parse HEAD 2>/dev/null) != "$sha" ]] ||
+        [[ -n $(git -C "$worktree" status --porcelain 2>/dev/null) ]]; then
+        git worktree remove --force "$worktree" >/dev/null 2>&1 || rm -rf "$worktree"
+        git worktree prune
+        mkdir -p "$ROOT/.tmp/bench-revisions"
+        git worktree add --detach "$worktree" "$sha" >/dev/null
+    fi
     mkdir -p "$RUN/base-context/$label"
     (cd "$worktree" && python3 "$ROOT/bench/metadata.py" "$RUN/base-context/$label" "$sha" --profile)
     REVISION_CHECKOUT=$worktree
