@@ -1624,7 +1624,7 @@ A SUBSCRIBE_STARTED message resolves where a Range that a [SUBSCRIBE_UPDATE](#su
 
 ~~~
 SUBSCRIBE_STARTED Message {
-  Type (i) = 0x3
+  Type (i) = 0x4
   Message Length (i)
   Range ID (i)
   Range Start (i)
@@ -1632,7 +1632,7 @@ SUBSCRIBE_STARTED Message {
 ~~~
 
 **Type**:
-Set to 0x3 to indicate a SUBSCRIBE_STARTED message.
+Set to 0x4 to indicate a SUBSCRIBE_STARTED message.
 
 **Range ID**:
 The Range it resolves.
@@ -1988,7 +1988,7 @@ The `Message Length` describes the payload size on the wire.
 - A SUBSCRIBE_UPDATE that lowers a `Start` covers the groups below the old start that the publisher still holds, not only those that arrive later. A group already sent is not sent again.
 - Replaced SUBSCRIBE_OK `Group` with a `Range Start` per Range: the Group where that Range's delivery starts, including at a Relative or Time Anchor, from which its Groups are owed.
 - Each Range takes an implicit Range ID, and SUBSCRIBE_UPDATE edits the live Ranges instead of restating them: `Remove Count` Range IDs to retire, then the Ranges to add. The live Ranges must stay non-empty and fit in one SUBSCRIBE. A Range resolves its Anchors once, however many updates leave it live.
-- SUBSCRIBE_OK's Range Starts answer the SUBSCRIBE's Ranges, and added SUBSCRIBE_STARTED (type 0x3) resolving where each Range an update adds starts.
+- SUBSCRIBE_OK's Range Starts answer the SUBSCRIBE's Ranges, and added SUBSCRIBE_STARTED (type 0x4) resolving where each Range an update adds starts.
 - Added `Largest Group` and `Largest Frame` to SUBSCRIBE_OK: the publisher's largest position when it answers, which a subscriber takes as where the live feed is. A publisher MUST answer at once when the requested start is past it.
 - Renamed SUBSCRIBE_END to SUBSCRIBE_FINISH, matching TRACKS_FINISH: it ends the Track, not the subscription.
 - Added `Error Code` to SUBSCRIBE_FINISH: a track can end with an error while keeping the groups below its end.

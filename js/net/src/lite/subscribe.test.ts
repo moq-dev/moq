@@ -512,11 +512,11 @@ test("lite-07 updates edit only the changed ranges", async () => {
 	expect(() => refused([0n], [])).toThrow(ProtocolViolation);
 });
 
-test("SUBSCRIBE_STARTED is type 3 on lite-07 and unknown before it", async () => {
+test("SUBSCRIBE_STARTED is type 4 on lite-07 and unknown before it", async () => {
 	for (const start of [undefined, 0n, 7n]) {
 		const started = new SubscribeStarted(4n, start);
 		expect(await encode(Version.DRAFT_07, { started })).toEqual(
-			new Uint8Array([3, 2, 4, start === undefined ? 0 : Number(start) + 1]),
+			new Uint8Array([4, 2, 4, start === undefined ? 0 : Number(start) + 1]),
 		);
 		const got = await responseRoundtrip(Version.DRAFT_07, { started });
 		if (!("started" in got)) throw new Error("expected SUBSCRIBE_STARTED");
@@ -525,7 +525,7 @@ test("SUBSCRIBE_STARTED is type 3 on lite-07 and unknown before it", async () =>
 	await expect(encode(Version.DRAFT_06, { started: new SubscribeStarted(0n) })).rejects.toThrow();
 	await expect(
 		decodeSubscribeResponse(
-			new Reader(undefined, new Uint8Array([3, 2, 0, 0]), Version.DRAFT_06),
+			new Reader(undefined, new Uint8Array([4, 2, 0, 0]), Version.DRAFT_06),
 			Version.DRAFT_06,
 		),
 	).rejects.toThrow(ProtocolViolation);

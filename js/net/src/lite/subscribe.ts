@@ -1189,7 +1189,7 @@ export class SubscribeDrop {
  * - Draft-05+: `0x0` SUBSCRIBE_START (SUBSCRIBE_OK on lite-07), `0x1` SUBSCRIBE_FINISH
  *   (SUBSCRIBE_END before lite-07), `0x2` SUBSCRIBE_DROP (SUBSCRIBE_OK was removed;
  *   acceptance is implicit).
- * - Lite-07+: also `0x3` SUBSCRIBE_STARTED.
+ * - Lite-07+: also `0x4` SUBSCRIBE_STARTED.
  */
 export type SubscribeResponse =
 	| { ok: SubscribeOk }
@@ -1232,7 +1232,7 @@ export async function encodeSubscribeResponse(w: Writer, resp: SubscribeResponse
 				await w.u53(0x2);
 				await resp.drop.encode(w);
 			} else if ("started" in resp && hasRanges(version)) {
-				await w.u53(0x3);
+				await w.u53(0x4);
 				await resp.started.encode(w);
 			} else {
 				throw new Error("subscribe response not supported for this version");
@@ -1267,7 +1267,7 @@ export async function decodeSubscribeResponse(r: Reader, version: Version): Prom
 					return { finish: await SubscribeFinish.decode(r, version) };
 				case 0x2:
 					return { drop: await SubscribeDrop.decode(r) };
-				case 0x3:
+				case 0x4:
 					if (!hasRanges(version)) throw new ProtocolViolation(`unknown subscribe response type: ${typ}`);
 					return { started: await SubscribeStarted.decode(r) };
 				default:

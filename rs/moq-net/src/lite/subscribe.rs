@@ -1080,7 +1080,7 @@ impl<'a> Message<'a> for SubscribeDrop {
 /// - Lite05+: `0x0` SUBSCRIBE_START (SUBSCRIBE_OK on lite-07), `0x1` SUBSCRIBE_FINISH
 ///   (SUBSCRIBE_END before lite-07), `0x2` SUBSCRIBE_DROP
 ///   (SUBSCRIBE_OK was removed; acceptance is implicit).
-/// - Lite07+: also `0x3` SUBSCRIBE_STARTED.
+/// - Lite07+: also `0x4` SUBSCRIBE_STARTED.
 #[derive(Clone, Debug)]
 pub enum SubscribeResponse {
 	Ok(SubscribeOk),
@@ -1118,7 +1118,7 @@ impl Encode<Version> for SubscribeResponse {
 				Self::Start(start) => encode_typed(w, 0, start, version)?,
 				Self::Finish(end) => encode_typed(w, 1, end, version)?,
 				Self::Drop(drop) => encode_typed(w, 2, drop, version)?,
-				Self::Started(started) => encode_typed(w, 3, started, version)?,
+				Self::Started(started) => encode_typed(w, 4, started, version)?,
 				Self::Ok(_) => return Err(EncodeError::Version),
 			},
 		}
@@ -1145,7 +1145,7 @@ impl<'a> Decode<'a, Version> for SubscribeResponse {
 					0 => Ok(Self::Start(SubscribeStart::decode(buf, version)?)),
 					1 => Ok(Self::Finish(SubscribeFinish::decode(buf, version)?)),
 					2 => Ok(Self::Drop(SubscribeDrop::decode(buf, version)?)),
-					3 if version.has_ranges() => Ok(Self::Started(SubscribeStarted::decode(buf, version)?)),
+					4 if version.has_ranges() => Ok(Self::Started(SubscribeStarted::decode(buf, version)?)),
 					_ => Err(DecodeError::InvalidMessage(typ)),
 				}
 			}
@@ -1635,15 +1635,15 @@ mod test {
 		assert!(refused, "the live ranges are held to one SUBSCRIBE");
 	}
 
-	/// SUBSCRIBE_STARTED is type 3 on lite-07 and unknown before it.
+	/// SUBSCRIBE_STARTED is type 4 on lite-07 and unknown before it.
 	#[test]
-	fn subscribe_started_is_type_3_on_lite07() {
+	fn subscribe_started_is_type_4_on_lite07() {
 		for start in [None, Some(0), Some(7)] {
 			let started = SubscribeStarted { id: 4, start };
 			let buf = SubscribeResponse::Started(started.clone())
 				.encode_bytes(Version::Lite07)
 				.unwrap();
-			assert_eq!(buf[0], 3);
+			assert_eq!(buf[0], 4);
 			let got = crate::coding::decode_buf(&mut buf.as_ref(), Version::Lite07, |r, v| {
 				SubscribeResponse::decode(r, v)
 			})
@@ -1654,9 +1654,9 @@ mod test {
 		assert!(started.encode_bytes(Version::Lite06).is_err());
 		let mut buf = Vec::new();
 		let mut w = Encoder::new(&mut buf, Version::Lite06.into());
-		w.varint(3).unwrap();
+		w.varint(4).unwrap();
 		SubscribeStarted { id: 0, start: None }
-			.encode_msg(&mut w, Version::Lite07)
+			.encode(&mut w, Version::Lite07)
 			.unwrap();
 		assert!(
 			crate::coding::decode_buf(&mut buf.as_slice(), Version::Lite06, |r, v| SubscribeResponse::decode(r, v))

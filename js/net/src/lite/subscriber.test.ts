@@ -2692,7 +2692,7 @@ test("an unknown subscribe response type closes the session", async () => {
 		await answerTrackInfo(streams[0], Version.DRAFT_07);
 		await (await opened(1)).reading;
 		// An unassigned response type is a session protocol violation.
-		streams[1].inbound.enqueue(new Uint8Array([4, 0]));
+		streams[1].inbound.enqueue(new Uint8Array([5, 0]));
 		expect(await track.closed).toBeInstanceOf(ProtocolViolation);
 		await drainReactions();
 		expect(closes.map((info) => info?.closeCode)).toEqual([SessionCode.ProtocolViolation]);
