@@ -128,6 +128,7 @@ class Drive:
         self._instance: str | None = None
         self._sequence: int | None = None
         self._state = DriveState.stopped()
+        self._takeover_pedals: tuple[float, float] | None = None
         self._estopped = False
         self._estop_by: str | None = None
 
@@ -175,12 +176,17 @@ class Drive:
             self._instance = command.instance
             self._sequence = command.sequence
             state = (command.state or DriveState.stopped()).sanitized()
+            pedals = (state.throttle, state.brake)
+            if claiming:
+                self._takeover_pedals = pedals
+            if self._takeover_pedals == pedals:
+                # Heartbeats can repeat the autopilot's demand indefinitely.
+                # Only a pedal change releases the takeover brake.
+                state = replace(state, throttle=0.0, brake=1.0)
+            else:
+                self._takeover_pedals = None
             if state.gear is not self._state.gear and not self._can_shift(state):
                 state = replace(state, gear=self._state.gear)
-            if claiming:
-                # A client may still carry the autopilot's pedal demand. Every
-                # new lease starts braking until its driver supplies input.
-                state = replace(state, throttle=0.0, brake=1.0)
             self._state = state
 
         elif command.kind == "estop":
@@ -232,3 +238,4 @@ class Drive:
         self._instance = None
         self._sequence = None
         self._state = DriveState.stopped()
+        self._takeover_pedals = None

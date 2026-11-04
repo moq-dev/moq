@@ -1,5 +1,7 @@
 """The control safety gate's contract."""
 
+from dataclasses import replace
+
 import pytest
 
 from moq_carla_sim.drive import Command, Drive, DriveState, Gear
@@ -29,8 +31,8 @@ def test_first_driver_keeps_control() -> None:
     assert state.driver == "first"
     assert state.state.throttle == 0.0
     assert state.state.brake == 1.0
-    assert state.apply(drive("first", 2, 0.5))
-    assert state.state.throttle == 0.5
+    assert state.apply(drive("first", 2, 0.6))
+    assert state.state.throttle == 0.6
 
 
 def test_the_lease_belongs_to_one_run_of_a_driver() -> None:
@@ -183,6 +185,15 @@ def test_every_new_lease_resets_pedals_without_changing_steering_or_gear(gear: G
     assert state.apply(command)
     assert state.state == DriveState(steering=0.3, throttle=0.0, brake=1.0, gear=gear)
 
+    # Heartbeats and steering-only input must not restore inherited throttle.
+    assert state.apply(command)
+    assert state.state == DriveState(steering=0.3, throttle=0.0, brake=1.0, gear=gear)
+    assert state.apply(replace(command, state=DriveState(steering=-0.4, throttle=1.0, brake=0.0, gear=gear)))
+    assert state.state == DriveState(steering=-0.4, throttle=0.0, brake=1.0, gear=gear)
+
+    pedal_input = DriveState(steering=-0.4, throttle=0.5, brake=0.0, gear=gear)
+    assert state.apply(replace(command, state=pedal_input))
+    assert state.state == pedal_input
     assert state.apply(command)
     assert state.state == command.state
 
@@ -192,11 +203,10 @@ def test_every_new_lease_resets_pedals_without_changing_steering_or_gear(gear: G
     assert state.state == DriveState(steering=0.3, throttle=0.0, brake=1.0, gear=gear)
 
 
-def test_takeover_brake_does_not_bypass_the_shift_interlock() -> None:
+def test_takeover_brake_allows_a_forward_claim_without_autonomous_feedback() -> None:
     state = Drive()
-    assert state.synchronize(DriveState(gear=Gear.FORWARD))
     assert state.apply(
-        Command(kind="drive", driver_id="driver", state=DriveState(throttle=1.0, brake=0.0, gear=Gear.REVERSE))
+        Command(kind="drive", driver_id="driver", state=DriveState(throttle=0.85, brake=0.0, gear=Gear.FORWARD))
     )
     assert state.state == DriveState(gear=Gear.FORWARD)
 
@@ -210,7 +220,7 @@ def test_gear_change_requires_brake_and_released_throttle() -> None:
             kind="drive",
             driver_id="driver",
             sequence=1,
-            state=DriveState(throttle=0.0, brake=0.0, gear=Gear.NEUTRAL),
+            state=DriveState.stopped(),
         )
     )
 
