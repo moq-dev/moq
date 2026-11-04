@@ -30,14 +30,6 @@ Rules every child keeps:
 This README's own work, after the children: run `just check --all` several
 times on a loaded machine, as the first round did.
 
-Investigate and re-enable `draft-22: a wider fill is refused in ascending
-order` in `js/net/src/ietf/publisher.test.ts`. It fails on unchanged main
-(30 failures in 200 runs) and again during JS socket validation. The
-ascending case is disabled with its assertions intact; the descending case
-still runs. Reproduce the fixture's wall-clock and stream-order race with
-controlled time, fix the cause, then restore the ascending case without a
-retry or a larger timeout.
-
 The redundant failover drift moved to m0 on 2026-10-20 (maintainer) and is
 fixed by [moq-dev/moq#6113](https://github.com/moq-dev/moq/pull/6113).
 
