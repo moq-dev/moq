@@ -16,7 +16,9 @@ See the [epic](/quest/m1/socket/README.md) for the convention.
 - The worker (`publish.py`) runs a Python endpoint per truck; `paths.ts` and
   `truck.ts` dial it from an endpoint with the per-lease driver id. A new lease
   is a new session, which matches today's lease binding.
-- The `control` track becomes the driver's messages on its session. The
+- The `control` track becomes the driver's messages on a `track` session, one
+  control per group, so a late control never blocks a newer one; the driver
+  may read the truck's replies with a finite delay budget. The
   driver's ack, sequence, and round-trip echo move from the shared `status` to
   the truck's messages on that session. `driver` and `estop_by` stay in the
   ordinary `status` broadcast, because every viewer shows them.

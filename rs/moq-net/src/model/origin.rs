@@ -2087,6 +2087,12 @@ pub struct Producer {
 }
 
 impl Producer {
+	/// A handle that queues work on this origin's [`Driver`] without keeping the origin
+	/// alive: work queued once the driver is gone is dropped.
+	pub(super) fn tasks(&self) -> crate::util::TasksWeak {
+		self.tasks.downgrade()
+	}
+
 	/// Build a producer from a [`Config`] (identity + cache pool) with no scoped
 	/// prefix and no pre-existing broadcasts, paired with the [`Driver`] that runs
 	/// the origin's lifecycle work.

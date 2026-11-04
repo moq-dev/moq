@@ -15,10 +15,10 @@ See the [epic](/quest/m2/stream/README.md) for the mapping: a socket endpoint
 per forwarded service, a session per connection with one group each way, a
 frame per TCP read, no fill handler.
 
-- Build on `moq_net::socket`: the path layout and connection naming are the
-  socket's (`Endpoint::dial` and `accept`, each yielding a `Stream`), so this
-  quest adds only the `AsyncRead`/`AsyncWrite` adapter over a `Stream` and the
-  TCP mapping. Place the adapter
+- Build on `moq_net::socket`: the path layout, connection naming, FIN and RST
+  are the socket's (`Endpoint::dial_tcp` and `accept_tcp`, each yielding a
+  `TcpStream` of one group each way), so this quest adds only the
+  `AsyncRead`/`AsyncWrite` adapter over a `TcpStream` and the TCP mapping. Place the adapter
   beside the socket module unless it pulls in a dependency moq-net avoids;
   report the choice.
 - Each stream carries a subscription priority the caller sets; nothing is

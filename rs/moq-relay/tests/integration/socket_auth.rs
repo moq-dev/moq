@@ -2,14 +2,14 @@
 //! auth server, granting only the prefixes `doc/concept/socket.md` lists.
 //!
 //! Every token is rooted at the socket prefix `room`. An endpoint's token publishes its own
-//! endpoint, `.tcp/<id>`, and subscribes to every endpoint, `.tcp/**`, so the session
-//! track names are what keep third parties out: a forged dial never connects, and no
+//! endpoint, `.socket/<id>`, and subscribes to every endpoint, `.socket/**`, so the
+//! session track names are what keep third parties out: a forged dial never connects, and no
 //! listing gives a session's name away.
 
 use std::time::Duration;
 
 use moq_net::broadcast::TracksEvent;
-use moq_net::socket::{Endpoint, Stream};
+use moq_net::socket::{Endpoint, TcpStream, TrackStream};
 
 use crate::memory;
 
@@ -93,7 +93,7 @@ impl Fixture {
 	/// its own endpoint, subscribe to every endpoint.
 	async fn endpoint(&self, id: &str, version: &str) -> (Endpoint, moq_net::origin::Producer, moq_net::Session) {
 		let (origin, session) = self
-			.client(&self.token(&format!(".tcp/{id}"), ".tcp/**"), version)
+			.client(&self.token(&format!(".socket/{id}"), ".socket/**"), version)
 			.await;
 		// The session is rooted at the prefix, so the endpoint's prefix is the root.
 		let endpoint = Endpoint::new(&origin, "", id).expect("endpoint");
@@ -101,11 +101,26 @@ impl Fixture {
 	}
 }
 
-/// Dial `acceptor` from `dialer` while `acceptor` accepts, returning both ends.
-async fn connect(dialer: &Endpoint, acceptor: &Endpoint) -> (Stream, Stream) {
-	let dial = dialer.dial(acceptor.id(), None).expect("dial");
+/// Dial `acceptor` from `dialer` in a `tcp` session while `acceptor` accepts, returning
+/// both ends.
+async fn connect_tcp(dialer: &Endpoint, acceptor: &Endpoint) -> (TcpStream, TcpStream) {
+	let dial = dialer.dial_tcp(acceptor.id()).expect("dial");
 	let accept = async {
-		let incoming = acceptor.accept().await?;
+		let incoming = acceptor.accept_tcp().await?;
+		assert_eq!(incoming.peer(), dialer.id());
+		incoming.accept().await
+	};
+	let (dialed, accepted) = kio::clock::timeout(TIMEOUT, async { futures::join!(dial, accept) })
+		.await
+		.expect("connect timeout");
+	(dialed.expect("dial"), accepted.expect("accept"))
+}
+
+/// Dial `acceptor` from `dialer` in a `track` session; see [`connect_tcp`].
+async fn connect_track(dialer: &Endpoint, acceptor: &Endpoint) -> (TrackStream, TrackStream) {
+	let dial = dialer.dial_track(acceptor.id(), None).expect("dial");
+	let accept = async {
+		let incoming = acceptor.accept_track().await?;
 		assert_eq!(incoming.peer(), dialer.id());
 		incoming.accept(None).await
 	};
@@ -115,14 +130,25 @@ async fn connect(dialer: &Endpoint, acceptor: &Endpoint) -> (Stream, Stream) {
 	(dialed.expect("dial"), accepted.expect("accept"))
 }
 
-/// Write `payload` as one message: one group of `track`.
+/// Read the next write from a `tcp` session.
+async fn read(reader: &mut moq_net::group::Consumer) -> Vec<u8> {
+	kio::clock::timeout(TIMEOUT, reader.read_frame())
+		.await
+		.expect("read timeout")
+		.expect("frame")
+		.expect("a frame")
+		.payload
+		.to_vec()
+}
+
+/// Write `payload` as one message of a `track` session: one group.
 fn send(track: &moq_net::track::Producer, payload: &'static [u8]) {
 	let mut group = track.append_group().expect("group");
 	group.write_frame(None, payload).expect("frame");
 	group.finish().expect("finish");
 }
 
-/// Read the next message.
+/// Read the next message of a `track` session.
 async fn recv(reader: &mut moq_net::track::Ordered) -> Vec<u8> {
 	kio::clock::timeout(TIMEOUT, async {
 		let mut group = reader.next_group().await.expect("group").expect("a group");
@@ -133,19 +159,29 @@ async fn recv(reader: &mut moq_net::track::Ordered) -> Vec<u8> {
 	.expect("read timeout")
 }
 
-/// The prefix grants admit a dial and its accept, and the session carries data both ways,
-/// over moq-lite-07 and across a moq-transport hop.
+/// The prefix grants admit a dial and its accept in either protocol, and the session
+/// carries data, over moq-lite-07 and across a moq-transport hop.
 #[tokio::test]
 async fn prefix_grants_admit_a_session() {
 	for (dialer, acceptor) in [(LITE, LITE), (LITE, IETF), (IETF, LITE)] {
 		let fixture = Fixture::new().await;
 		let (alice, _alice_origin, _alice_session) = fixture.endpoint("alice", dialer).await;
 		let (bob, _bob_origin, _bob_session) = fixture.endpoint("bob", acceptor).await;
-		let (mut dialed, mut accepted) = connect(&alice, &bob).await;
+		let (mut dialed, mut accepted) = connect_tcp(&alice, &bob).await;
+		dialed.producer.write_frame(None, &b"ping"[..]).expect("write");
+		assert_eq!(read(&mut accepted.consumer).await, b"ping", "{dialer} to {acceptor}");
+		accepted.producer.write_frame(None, &b"pong"[..]).expect("write");
+		assert_eq!(read(&mut dialed.consumer).await, b"pong", "{dialer} to {acceptor}");
+		dialed.producer.finish().expect("finish");
+		accepted.producer.finish().expect("finish");
+
+		let (dialed, accepted) = connect_track(&alice, &bob).await;
 		send(&dialed.producer, b"ping");
-		assert_eq!(recv(&mut accepted.consumer).await, b"ping", "{dialer} to {acceptor}");
-		send(&accepted.producer, b"pong");
-		assert_eq!(recv(&mut dialed.consumer).await, b"pong", "{dialer} to {acceptor}");
+		assert_eq!(
+			recv(&mut accepted.consumer.ordered()).await,
+			b"ping",
+			"{dialer} to {acceptor}"
+		);
 	}
 }
 
@@ -160,23 +196,23 @@ async fn a_forged_dial_never_connects() {
 	let (_mallory, mallory_origin, _mallory_session) = fixture.endpoint("mallory", LITE).await;
 	// Alice keeps accepting, as a server would, which is how she resets the forged accept.
 	let alice_accepts = async {
-		let _ = alice.accept().await;
+		let _ = alice.accept_tcp().await;
 		panic!("alice heard of a dial");
 	};
 
 	let forge = async {
 		let broadcast = mallory_origin
 			.consume()
-			.request(".tcp/bob", None)
+			.request(".socket/bob", None)
 			.await
 			.expect("bob's endpoint");
 		let forged = broadcast
-			.track("alice/0123456789abcdef0123456789abcdef")
+			.track("tcp/alice/0123456789abcdef0123456789abcdef")
 			.expect("track")
 			.subscribe(None);
-		let incoming = bob.accept().await.expect("accept");
+		let incoming = bob.accept_tcp().await.expect("accept");
 		assert_eq!(incoming.peer(), "alice");
-		let (accepted, forged) = futures::join!(incoming.accept(None), forged);
+		let (accepted, forged) = futures::join!(incoming.accept(), forged);
 		assert!(accepted.is_err(), "bob connected to a forged dial");
 		assert!(forged.is_err(), "mallory read bob's half");
 	};
@@ -197,13 +233,16 @@ async fn a_reader_of_everything_lists_no_session() {
 	let fixture = Fixture::new().await;
 	let (alice, _alice_origin, _alice_session) = fixture.endpoint("alice", LITE).await;
 	let (bob, _bob_origin, _bob_session) = fixture.endpoint("bob", LITE).await;
-	let (dialed, mut accepted) = connect(&alice, &bob).await;
-	send(&dialed.producer, b"secret");
-	assert_eq!(recv(&mut accepted.consumer).await, b"secret");
+	let (mut dialed, mut accepted) = connect_tcp(&alice, &bob).await;
+	dialed.producer.write_frame(None, &b"secret"[..]).expect("write");
+	assert_eq!(read(&mut accepted.consumer).await, b"secret");
+	let (track_dialed, track_accepted) = connect_track(&alice, &bob).await;
+	send(&track_dialed.producer, b"secret");
+	assert_eq!(recv(&mut track_accepted.consumer.ordered()).await, b"secret");
 
-	let (eve_origin, _eve_session) = fixture.client(&fixture.token(".tcp/eve", "**"), LITE).await;
+	let (eve_origin, _eve_session) = fixture.client(&fixture.token(".socket/eve", "**"), LITE).await;
 	for id in ["alice", "bob"] {
-		let broadcast = kio::clock::timeout(TIMEOUT, eve_origin.consume().request(format!(".tcp/{id}"), None))
+		let broadcast = kio::clock::timeout(TIMEOUT, eve_origin.consume().request(format!(".socket/{id}"), None))
 			.await
 			.expect("request timeout")
 			.expect("the endpoint");

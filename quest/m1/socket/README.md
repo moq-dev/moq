@@ -4,8 +4,8 @@
 
 `moq-net` gains a generic dial/accept primitive. An `Endpoint` announces one
 hidden broadcast, dials other endpoints, and accepts their dials, and each
-connection is a session: one reliable, ordered pipe of messages between the
-two ends. moq-boy, CARLA, [byte streams](/quest/m2/stream/README.md), and the
+connection is a session between the two ends: a reliable, ordered byte pipe
+each way (`tcp`), or a track of messages each way (`track`). moq-boy, CARLA, [byte streams](/quest/m2/stream/README.md), and the
 mesh [Endpoint](/quest/m2/mesh/endpoint.md) all build on it instead of each
 hand-rolling the announce, watch, and request loop. Rust, JS, and Python
 (through moq-ffi) expose the same surface and interoperate.
@@ -21,45 +21,103 @@ lease and 1 s watchdog); signing and encryption, which the m2
 [`doc/concept/socket.md`](/doc/concept/socket.md) is the convention JS and
 Python follow, and `rs/moq-net/src/model/socket.rs` implements it.
 
-Decided 2026-11-03 (maintainer, /quest-grill in /quest-complete), on
-[moq-dev/moq#7677](https://github.com/moq-dev/moq/pull/7677), replacing the
-listener layout and QUIC-style streams below:
+Decided 2026-11-04 (maintainer, /quest-complete), on
+[moq-dev/moq#7677](https://github.com/moq-dev/moq/pull/7677), settling its
+Waiting items and replacing the `.tcp/<id>` layout and the one-message-per-group
+pipe below:
 
-- Endpoint sockets, one pipe per session. Each endpoint announces one hidden
-  broadcast, `<prefix>/.tcp/<id>`, once, and connections are never announced.
-  `<id>` is a well-known name for a server (a game) or a random id for a
-  client. Why: the old flow had the listener answer `L/.accept/<id>` under the
-  dialer's instance, which broke instance uniqueness (lite-07 treats routes
-  sharing an instance as replicas), let two listeners accept one dial,
-  announced every connection publicly, and needed lite-07 instances and track
-  listings on every hop.
-- The segment is `.tcp`, not `.socket`, so the path names the protocol: one
-  reliable, ordered pipe per session. A multiplexed mode would be its own
-  `.quic/<id>` endpoint later. The Rust and JS module stays `socket`
-  (`socket::Endpoint`, `socket::Stream`), since `.tcp` and a later `.quic` are
-  modes of one socket API.
-- Dial: `A` picks a random, unguessable session id `S` (128 bits) and
-  subscribes to `.tcp/<B>`; `B` surfaces the requested track as an incoming
-  dial claiming to be from `A`. Accept: `B` subscribes to `.tcp/<A>`, and `A`
-  answers only a session it dialed and resets any other, a return-routability
-  check that fails a dial forged in `A`'s name. `B` sends nothing until `A`
-  answers. Reject: `B` resets `A`'s subscription.
-- The pipe is one track each way. One message per group, so messages don't
-  block each other, ordered by group sequence; reliable and in order by
-  default (no delay budget, ascending), and the app may opt into a lossy
-  budget. Finishing a track closes the pipe, resetting it is an error, and the
-  endpoint's broadcast ending disconnects.
-- No multiplexing: another channel is another session, a pair of endpoints
-  holds several, and a restart is a new session. No control track and no
-  numbered streams now.
+- Keep `<dialer>/<S>` session naming. A dial and an answer can't be confused,
+  the claimed dialer is named for the return-routability check, and `S`
+  (random per dial) makes every session unique, so one endpoint can dial and
+  accept any number of sessions. Not chosen: reader-named halves.
+- One announcement per endpoint, used only for routing:
+  `<prefix>/.socket/<id>`. The session track name carries the protocol, the
+  dialer and the session: `<protocol>/<dialer>/<S>`. A dial is SUBSCRIBE
+  `<prefix>/.socket/<peer>`, track `tcp/<self>/<S>`; the answer is the same
+  name in the dialer's broadcast. A requested track whose protocol the
+  endpoint doesn't speak, or isn't accepting, is reset as unsupported. Grants:
+  publish `.socket/<self>`, subscribe `.socket/**`. The module stays `socket`.
+- Two protocols ship now over the same handshake, each with its own dial and
+  accept, and an incoming dial lands in its protocol's queue:
+  - `tcp/<dialer>/<S>`: a session half is a single group, not a track of
+    messages. A group is one QUIC stream on every hop, so it's reliable,
+    strictly ordered and flow controlled, like a TCP direction. Frames are
+    writes, finishing the group is FIN, and resetting it is RST. There are no
+    track-level settings (budget, max-delay, order), since the newest group is
+    never stale. A second group on a session track is a protocol error that
+    resets the session. Rust: `Endpoint::dial_tcp` / `accept_tcp`, yielding
+    `socket::TcpStream { producer: group::Producer, consumer: group::Consumer }`
+    plus `peer()` and `session()`. Not chosen: `track::Ordered` with one message
+    per group.
+  - `track/<dialer>/<S>`: the same dial, accept, reject and return-routability
+    check, but the app gets the whole session tracks, with groups as messages
+    and its own priority, budget and order, and no single-group rule. The
+    reader starts reliable and ascending (no delay budget) until the app
+    updates it. Rust: `Endpoint::dial_track` / `accept_track`, yielding
+    `socket::TrackStream { producer: track::Producer, consumer: track::Subscriber }`.
+- Long-lived `tcp` sessions rely on unbounded groups (since
+  [moq-dev/moq#7411](https://github.com/moq-dev/moq/pull/7411) a group has no
+  size cap, and each copy keeps a ~32 MiB tail). With one reader per copy,
+  [fastest-reader pacing](/quest/m1/unbounded-groups/fastest-reader.md) acts
+  as TCP backpressure: a writer awaiting `group::Producer::ready` runs at most
+  16 MiB past its reader on each hop, and a reader that falls off the tail
+  fails with `Evicted` rather than skipping data. Where pacing doesn't reach
+  yet, that `Evicted` is the failure mode, never silent loss: browsers and JS
+  read unpaced ([JS fastest-reader pacing](/quest/m2/js-fastest-reader.md)),
+  and a session past its paused-credit cap (about two paused group streams at
+  the client defaults) reads and sheds instead of pausing. That remaining
+  pacing work stays in the [unbounded groups](/quest/m1/unbounded-groups/README.md)
+  epic, which this depends on for lossless `tcp` in those cases.
+
+Implementation choices in
+[moq-dev/moq#7677](https://github.com/moq-dev/moq/pull/7677):
+
+- A `tcp` session runs a small task on the endpoint origin's driver. It copies
+  the peer's group into the group the app reads, a frame at a time and paced by
+  that reader, so it can end that group itself: on a second group from the
+  peer, on the endpoint closing, or when the peer resets. It also finishes or
+  aborts this side's track the way the app ended its group, and resets the
+  session when the app drops its reader early.
+- `TrackStream::consumer` is the handshake's own `track::Subscriber`, not a bare
+  `track::Consumer`: it is already subscribed reliably and in order, so no
+  message falls between the accept and the app's first read, and the app
+  overrides it with `update` or reads in sequence through `ordered()`.
+- An endpoint takes dials in a protocol from its first accept in it, like a TCP
+  listener. Until its first accept in any protocol it has no request handler,
+  so a dial to it is reset with not found at once. A dial reserves its own
+  half, which the peer's answer finds without a handler, so a dial-only
+  endpoint never needs polling. A dial waits for the peer's endpoint to be
+  announced (drop it to give up); an accept fails at once when the claimed
+  dialer's endpoint is not announced.
+- Accepted dials queue without limit while the app accepts, each holding the
+  dialer's subscription open.
 - Session track names are the secret, so they never appear in a lite-07 track
-  listing or anywhere else a third party reads. moq-net already lists only
-  tracks a producer creates or a handler's `Lister` answers, never one served
-  on request, so an endpoint serves its session tracks only on request. The
+  listing or anywhere else a third party reads. moq-net lists only tracks a
+  producer creates or a handler's `Lister` answers, never one served on
+  request, so an endpoint serves its session tracks only on request, and the
   dialer's own half is reserved unlisted
   (`broadcast::Producer::reserve_unlisted_track`, crate-private).
-- Grants are prefix only, rooted at the prefix: publish `.tcp/<self>`,
-  subscribe `.tcp/**`, or narrower subscribes. A relay test signs real
+
+Decided 2026-11-03 (maintainer, /quest-grill in /quest-complete), still
+standing where the 2026-11-04 decisions above don't replace it:
+
+- Endpoint sockets, one session per connection. Each endpoint announces one
+  hidden broadcast once, and connections are never announced. `<id>` is a
+  well-known name for a server (a game) or a random id for a client. Why: the
+  old flow had the listener answer `L/.accept/<id>` under the dialer's
+  instance, which broke instance uniqueness (lite-07 treats routes sharing an
+  instance as replicas), let two listeners accept one dial, announced every
+  connection publicly, and needed lite-07 instances and track listings on
+  every hop.
+- Dial: `A` picks a random, unguessable session id `S` (128 bits) and
+  subscribes to `B`'s endpoint; `B` surfaces the requested track as an
+  incoming dial claiming to be from `A`. Accept: `B` subscribes to `A`'s
+  endpoint, and `A` answers only a session it dialed and resets any other, a
+  return-routability check that fails a dial forged in `A`'s name. `B` sends
+  nothing until `A` answers. Reject: `B` resets `A`'s subscription.
+- No multiplexing: another channel is another session, a pair of endpoints
+  holds several, and a restart is a new session.
+- Grants are prefix only, rooted at the prefix. A relay test signs real
   `moq-auth` tokens.
 - It works over every moq-lite version and moq-transport, since the handshake
   uses no instances or listings; lite-07 instances only affect relay route
@@ -67,35 +125,11 @@ listener layout and QUIC-style streams below:
 - Fixed channels become sessions or messages on one: boy's `command` and
   per-viewer latency, CARLA's `control`, ack, and e-stop. Shared state such as
   boy's `status` stays an ordinary broadcast.
-- `socket::Stream` is a plain struct with public `producer` (this side's half)
+- The stream types are plain structs with public `producer` (this side's half)
   and `consumer` (the peer's half) fields, plus read-only `peer()` and
-  `session()`, and no read, write, or message methods of its own: apps use the
-  track API directly (groups as messages, priority, budget), so JS, Python, and
-  the bindings mirror a minimal surface.
-
-Settled by the Rust implementation of that decision, for the maintainer to
-confirm (see the PR's Waiting section):
-
-- Both halves are named `<dialer>/<session>`, not each after its reader. With
-  reader-named halves, an endpoint that both dials and accepts cannot tell a
-  peer's dial from a peer's answer, so it could not reset an answer to a
-  session it never dialed: a forged dial surfaced at the claimed dialer as a
-  dial from the victim and deadlocked both accepts. With the dialer's id
-  leading both names, a request under an endpoint's own id is always an answer.
-- `Stream::consumer` is a `track::Ordered`, already subscribed reliably and
-  in order, not a bare `track::Consumer`, whose default subscription is lossy
-  and newest first. The handshake's subscription becomes the stream's, so no
-  message falls between the accept and the app's first read; `update` makes it
-  lossy.
-- An endpoint takes dials from its first `accept` on, like a TCP listener; until
-  then it has no request handler, so a dial to it is reset at once. A dial
-  reserves its own half, which the peer's answer finds without a handler, so a
-  dial-only endpoint never needs polling. A dial waits for the peer's endpoint
-  to be announced (drop it to give up); an accept fails at once when the
-  claimed dialer's endpoint is not announced.
-- Accepted dials queue without limit while the app accepts, each holding the
-  dialer's subscription open. Announce backpressure is no longer a socket
-  concern, since connections are never announced.
+  `session()`, and no read, write, or message methods of their own: apps use
+  the group and track APIs directly, so JS, Python, and the bindings mirror a
+  minimal surface.
 
 Decided 2026-11-02 (maintainer, Kixel planning): the whole epic moves from
 m2 to m1, so the next cut publishes sockets in `@moq/net` and moq.pro's
@@ -115,10 +149,10 @@ replacement arc), still standing:
   `doc/concept/socket.md`, not in the moq-lite draft: it is an application
   convention over moq-lite.
 
-Later, not built now: a multiplexed `.quic/<id>` mode with many streams per
-session, which could name a control stream and numbered streams beneath the
-session (`<dialer>/<session>/...`); and signed or encrypted sessions with ids
-as public keys, in the m2 [mesh](/quest/m2/mesh/README.md).
+Later, not built now: a multiplexed `quic` protocol, `quic/<dialer>/<S>` on
+the same endpoint with no new announcement, which brings back several groups
+or streams per session; and signed or encrypted sessions with ids as public
+keys, in the m2 [mesh](/quest/m2/mesh/README.md).
 
 This epic owns removing the hand-rolled loops: after the ports, no
 announce-watch-request pairing remains in `rs/moq-boy`, `js/moq-boy`, or

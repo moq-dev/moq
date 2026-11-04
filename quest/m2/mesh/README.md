@@ -53,8 +53,9 @@ Decided 2026-10-25 with the maintainer (planning interview), still in force:
 - The token is the binding: enrollment proves the device key, then the
   coordinator issues a grant to publish `mesh/<id>/**` and subscribe
   `mesh/**`, plus publish on its own [socket](/quest/m1/socket/README.md)
-  endpoint, `.tcp/<id>`, so it can dial and accept under its own id (amended
-  2026-11-01, and 2026-11-03 when sockets became endpoints). Relays need no new check. Membership is the coordinator's
+  endpoint, `.socket/<id>`, so it can dial and accept under its own id
+  (amended 2026-11-01, 2026-11-03 when sockets became endpoints, and
+  2026-11-04 when the segment became `.socket`). Relays need no new check. Membership is the coordinator's
   token only; a Tailnet-Lock analog was declined.
 - Protection is per broadcast, with levels that nest: identity (the token
   only), authentication (per-frame Ed25519 signatures, the default), and

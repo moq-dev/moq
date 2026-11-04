@@ -39,16 +39,17 @@ Decided 2026-10-25 with the maintainer (mesh planning interview):
   identity, signing, and service names belong to the
   [mesh](/quest/m2/mesh/README.md), which builds on this.
 
-Amended 2026-11-01 with the maintainer (socket planning interview), and
-2026-11-03 when sockets became endpoints: connection setup is the
-[socket](/quest/m1/socket/README.md) epic's `Endpoint`, `dial`, and `accept`,
-which settle the layout (`<prefix>/.tcp/<id>`, a `<dialer>/<session>` track
-each way). Each TCP connection is one session, so it gets its own priority,
+Amended 2026-11-01 with the maintainer (socket planning interview),
+2026-11-03 when sockets became endpoints, and 2026-11-04 when the socket's
+`tcp` protocol became one group each way: connection setup is the
+[socket](/quest/m1/socket/README.md) epic's `Endpoint`, `dial_tcp`, and
+`accept_tcp`, which settle the layout (`<prefix>/.socket/<id>`, a
+`tcp/<dialer>/<session>` track each way). Each TCP connection is one `tcp`
+session, whose halves are a single group each way for the connection's life:
+frames are writes, finishing is FIN, resetting is RST, and the writer awaits
+`group::Producer::ready` for backpressure. Each session gets its own priority,
 pacing, and eviction, and a long-lived connection never sits in an old group
-that newer ones crowd out of a track's window. A session carries messages one
-group each; a byte stream instead holds one group each way for the
-connection's life, which the stream quests settle against the socket's
-reliable reader.
+that newer ones crowd out of a track's window.
 
 This epic owns the end-to-end proof: an unmodified TCP client and server (SSH
 and an HTTP bulk transfer) talk through a two-relay chain with loss injected on

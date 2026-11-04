@@ -16,13 +16,14 @@ Decided 2026-10-25 (maintainer): iroh-shaped, not drop-in compatible; tickets,
 
 - A service is the iroh ALPN analog: a name under `mesh/<id>/`.
 - Decided 2026-11-01 (maintainer, socket planning interview), and updated
-  2026-11-03 when sockets became endpoints: an `Endpoint` wraps a
-  [socket](/doc/concept/socket.md) endpoint. Settle the layout here: such as
-  one socket endpoint per service at `mesh/<service>/.tcp/<id>`, or one per
+  2026-11-03 when sockets became endpoints and 2026-11-04 when the segment
+  became `.socket` with the protocol in the session name: an `Endpoint` wraps
+  a [socket](/doc/concept/socket.md) endpoint. Settle the layout here: such as
+  one socket endpoint per service at `mesh/<service>/.socket/<id>`, or one per
   node with the service named in the session. `connect` dials with the
   caller's own endpoint ID, and `accept` reads the remote ID from the dial,
   which the socket's answer check proves and the grant pins (publish
-  `.tcp/<id>` only). Update `moq auth`'s mesh grant and
+  `.socket/<id>` only). Update `moq auth`'s mesh grant and
   `doc/bin/relay/auth.md` to match.
 - Streams are [byte streams](/quest/m2/stream/rust.md) at the protection
   level the service declares: identity reads `moq-net` directly, and

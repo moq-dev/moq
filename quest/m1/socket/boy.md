@@ -15,9 +15,11 @@ See the [epic](/quest/m1/socket/README.md) for the convention.
 
 - The emulator runs an endpoint named for its game, and each viewer an
   endpoint with its random id that dials it. Settle and record the prefix
-  (such as `boy`, so endpoints sit at `boy/.tcp/<id>`).
+  (such as `boy`, so endpoints sit at `boy/.socket/<id>`).
 - The viewer's `command` track at `{viewerPrefix}/{name}/{viewerId}` becomes
-  the viewer's messages on its session, one command per group. Drop the
+  the viewer's messages on a `track` session, one command per group: commands
+  are independent messages, and a stale one shouldn't hold up the next, which
+  a `tcp` session's single group would. Drop the
   separate viewer-prefix configuration in `rs/moq-boy/src/main.rs`.
 - Per-viewer latency moves from `status`'s `latency` map to the emulator's
   messages on that viewer's session. Game state stays in the ordinary
