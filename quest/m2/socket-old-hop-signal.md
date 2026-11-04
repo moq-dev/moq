@@ -47,12 +47,17 @@ Recommended design, to settle in this quest:
   sends a marker for that exact path on the wire: the endpoint exists behind
   an older hop. `D`'s endpoint fails the dial with `Unsupported`, and only
   for that path. With no answer, nothing is marked, and the dial waits as
-  for an absent peer. The marker is withdrawn when that session ends.
+  for an absent peer. The marker tracks that announcement: it goes when the
+  older session unannounces the endpoint or ends, whichever comes first.
+- **An announced route wins.** While any route announces the endpoint (for
+  example, a current session overlapping an older one during a reconnect),
+  the dial uses it and ignores the marker.
 - **Across a cluster.** Relay-to-relay links ask for everything, not for a
   dialer's narrow interest, so the relay holding the older session may never
-  see the dial. Settle how the interest or the probe reaches it (for example,
-  the holding relay probes on a dial's SUBSCRIBE to the path, which it does
-  receive), and how markers cross cluster links.
+  see the dial, and a dial sends no SUBSCRIBE until the endpoint is
+  announced. Settle how the dialer's narrow interest reaches the holding
+  relay (for example, cluster links forwarding narrow interest under
+  `.socket`), and how markers cross cluster links.
 - **Where the marker rides.** Its own announce-stream message, or a flag on
   the [route layer](/quest/m1/cluster-routing/routes/README.md)'s messages if
   that layer has landed. Choose whichever leaves the draft simpler.
@@ -78,7 +83,9 @@ Tests, in the relay harness (`rs/moq-net/tests/integration/socket.rs`): a
 lite-07 dial to a peer behind a lite-06 hop fails `Unsupported`, including
 across a cluster hop. A dial to an absent peer still waits, including one
 whose path lies under another lite-06 session's publish grant. A viewer-only
-lite-06 session is never asked. A peer opted into hidden routes over lite-06
+lite-06 session is never asked. A marker goes when the older session
+unannounces the endpoint, and a current route announcing the same endpoint
+wins over it. A peer opted into hidden routes over lite-06
 (`an_older_hop_opted_into_hidden_connects`) still connects.
 
 Public API: none expected; dials return the existing `Error::Unsupported`.
