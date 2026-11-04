@@ -159,10 +159,10 @@ class Drive:
         return Accepted(state=self._state, estopped=self._estopped)
 
     def synchronize(self, state: DriveState) -> bool:
-        """Adopt live vehicle feedback before an unclaimed manual handoff."""
+        """Adopt live steering and gear before an unclaimed manual handoff."""
         if self._driver is not None or self._estopped:
             return False
-        self._state = state.sanitized()
+        self._state = DriveState(steering=state.sanitized().steering, gear=state.gear)
         return True
 
     def apply(self, command: Command) -> bool:
@@ -175,12 +175,12 @@ class Drive:
             self._instance = command.instance
             self._sequence = command.sequence
             state = (command.state or DriveState.stopped()).sanitized()
-            if (
-                state.gear is not self._state.gear
-                and not self._can_shift(state)
-                and not (claiming and self._can_initialize_takeover(self._state, state))
-            ):
+            if state.gear is not self._state.gear and not self._can_shift(state):
                 state = replace(state, gear=self._state.gear)
+            if claiming:
+                # A client may still carry the autopilot's pedal demand. Every
+                # new lease starts braking until its driver supplies input.
+                state = replace(state, throttle=0.0, brake=1.0)
             self._state = state
 
         elif command.kind == "estop":
@@ -226,17 +226,6 @@ class Drive:
     def _can_shift(state: DriveState) -> bool:
         """Require some brake and a released throttle for a gear change."""
         return state.brake > 0.0 and state.throttle <= SHIFT_MAX_THROTTLE
-
-    @staticmethod
-    def _can_initialize_takeover(current: DriveState, requested: DriveState) -> bool:
-        """Let a new CARLA lease synchronize into forward without touching either pedal."""
-        return (
-            current.gear is Gear.NEUTRAL
-            and requested.gear is Gear.FORWARD
-            and requested.steering == 0.0
-            and requested.throttle == 0.0
-            and requested.brake == 0.0
-        )
 
     def _clear_driver(self) -> None:
         self._driver = None

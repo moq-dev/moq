@@ -113,6 +113,10 @@ The worker's gate (`sim/moq_carla_sim/drive.py`) owns every truck's controls:
   the lease.
 - **Gear changes are interlocked**: the gate keeps the current gear unless the
   command releases throttle and applies some brake.
+- **Takeover starts braking**: the player keeps measured steering and gear,
+  but sets zero throttle and full brake until the driver changes the pedals.
+  The worker enforces these pedals on every new driving lease, including for
+  older clients. A resting-state claim still leaves Traffic Manager in control.
 - **An unclaimed truck goes back to autonomy**, not to full brake. It first
   coasts onto the nearest lane running its way (`handback.py`), because
   Traffic Manager steers a truck it takes back toward the nearest waypoint

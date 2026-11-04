@@ -147,7 +147,6 @@ per-frame CPU growth since #5926.
 - [Drop set](/quest/m1/drop-set.md) - each cursor judges missing groups against its own budget, so a narrow reader drops promptly and a widening re-offers groups already reported dropped on lite-07
 - [Datagram tracks](/quest/m1/datagram-tracks/README.md) - a track is datagrams or streams; datagram tracks have their own request and sequence, no ranges, no cache, and map to object ID 0 on moq-transport
 - [A step back smaller than the delay keeps the TS export](/quest/m1/ts-small-step-back.md) - audio restarts instead of regressing; video stays within its declared depth
-- [Taking control of a CARLA truck starts from neutral pedals](/quest/m1/carla-takeover-neutral.md) - a viewer's takeover releases the autopilot's throttle instead of driving off the road on it
 - [A wedged CARLA truck nobody drives respawns after the stuck timeout](/quest/m1/carla-stuck-handback.md) - find what kept the 300 s stuck respawn off for a truck wedged after a handback, and fix it
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [Sockets](/quest/m1/socket/README.md) - a generic dial/accept `Socket` in moq-net, Rust, JS, and Python, with tracks as streams; moq-boy and CARLA move onto it
