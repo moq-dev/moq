@@ -154,7 +154,6 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [Read-only pull-request CI](/quest/m0/ci/read-only-secrets.md) - write secrets and publisher identities reach only protected branches and tags, never a pushed branch
 - [Land main through GitHub's merge queue](/quest/m0/ci/land.md) - one PR at a time on the self-hosted runner; the host's Codex fixer fixes and re-enqueues every dropped PR
 - [A cache error is a miss](/quest/m0/ci/nix-cache-5xx.md) - a transient `nix.moq.dev` 5xx no longer fails `just ci`
-- [Cheap checks skip the queue](/quest/m0/ci/gate-quick.md) - condition: quest ships `quest gate --quick`; then cheap modules wait at most a minute
 - [Gate each diff in under five minutes](/quest/m0/ci/five-minutes.md) - `just check`, test phases included, finishes within a worker's 5-minute prompt cache, admission wait included
 - [Measure the parallel frontend](/quest/m0/ci/nightly-levers.md) - a pinned nightly's parallel frontend, adopted only if the numbers beat its risks; Cranelift is ruled out
 - [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - confirm the hosted Nightly jobs reuse the previous Nightly, then measure restore time and expiry
@@ -162,10 +161,8 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [Unify dependency features](/quest/m0/ci/hakari.md) - align the FFI builds' features and record the hosted platform jobs' hits once the workspace-hack lands
 - [Drop main from the publish Environment](/quest/m0/ci/publish-release-only.md) - the maintainer narrows `publish` to `release` and release tags once no job naming it runs as `main`
 - [Binary release publishers run on their tag](/quest/m0/ci/release-tag-publishers.md) - brew, Go and Swift releases stop running through `workflow_run` on main
-- [The queue host keeps the queue's disk](/quest/m0/ci/queue-host-disk.md) - agent sessions can't starve the queue runner of disk, and a crashed runner restarts
 - [The bench comparison builds moq-gst's catalog bench on its base](/quest/m0/ci/bench-base-build.md) - A paired bench comparison that selects `rust/gst/moq-gst/catalog` against `origin/main` builds the base side and reports a comparison, instead of marking it unavailable with "base build failed"
 - [The workspace-hack refuses trybuild edges and spares non-media builds](/quest/m0/ci/hakari-followups.md) - `hakari.py` refuses trybuild dev-dependency edges, and non-media Linux test builds stop needing libpipewire and libclang
-- [The flake lane skips hosts that can't map user namespaces](/quest/m0/ci/userns-uid-map.md) - `check flake` skips instead of failing where `/proc/self/uid_map` is unwritable
 - [moq-audio's default-feature test build is clippy-clean and gated](/quest/m0/ci/default-feature-test-lint.md) - the dead `retains`/`fail` under default-feature `--tests` clippy is fixed, and the gate catches it next time
 - [A release merge opens no stale release PR](/quest/m0/ci/release-pr-after-release.md) - `just rs release` publishes before it proposes, so a merged release isn't re-proposed
 - [Dependabot leaves the workspace-hack to hakari](/quest/m0/ci/dependabot-workspace-hack.md) - cargo group PRs stop hand-editing `rs/workspace-hack/Cargo.toml`

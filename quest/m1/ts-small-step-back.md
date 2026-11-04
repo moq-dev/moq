@@ -17,13 +17,10 @@ regresses within one clock period, and declared-reorder video fails with
   declared depth for video.
 - #7221's `Track::steps_back` (`rs/moq-mux/src/container/ts/export.rs`) is
   where it goes.
-- Check the narrow case #7221 also raised: a slow, deep B-frame stream that
-  declares no reorder depth must not be mistaken for a step.
+- Video that declares no `reorder` stays untouched, so a slow, deep B-frame
+  stream is never mistaken for a step (decided 2026-11-03, maintainer, in
+  #7221).
 - Extend `an_unmarked_step_keeps_the_export_rendering`.
-
-## Required
-
-- [A small step back keeps the TS export's video](/quest/m1/ts-reliability/step-back.md) - adds `Track::steps_back`, which this extends, in [moq-dev/moq#7221](https://github.com/moq-dev/moq/pull/7221)
 
 ## Related
 
