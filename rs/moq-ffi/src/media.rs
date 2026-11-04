@@ -260,7 +260,7 @@ pub struct MoqMediaFrame {
 /// takes a [`MoqFrame`] and assigns the sequence number for you.
 #[derive(uniffi::Record)]
 pub struct MoqDatagram {
-	/// Per-track sequence number, shared with groups.
+	/// The datagram's sequence number, counted apart from the track's groups.
 	#[uniffi(default = 0)]
 	pub sequence: u64,
 	/// Presentation timestamp, or null on an untimed track, on both publish and receive.
@@ -845,7 +845,7 @@ impl MoqMediaCatalogProducer {
 	/// Set an application catalog section from JSON, refusing reserved section names.
 	///
 	/// `json` is any JSON document. Errors with [`MoqError::Json`] if it doesn't parse, or with
-	/// the reserved-section error if `name` is a HANG root (`video`, `audio`, `text`, `archive`, `clock`, `json`, `binary`, or
+	/// the reserved-section error if `name` is a HANG root (`video`, `audio`, `media`, `text`, `archive`, `clock`, `json`, `binary`, or
 	/// retired `timeline`) or an MSF root (`version`, `generatedAt`, `isComplete`, `tracks`, or
 	/// `initDataList`).
 	pub fn set_section(&self, name: String, json: String) -> Result<(), MoqError> {
@@ -1191,8 +1191,8 @@ impl MoqMediaTrackProducer {
 	///
 	/// Audio has no boundary of its own (every packet is independently decodable), so this is the
 	/// only thing that gives it groups: call it after every frame for one group (one QUIC stream)
-	/// the relay forwards without waiting, or at a segment cadence to align with video for
-	/// HLS/DASH. Video groups at its own keyframes and needs this only to override that.
+	/// the relay forwards without waiting, or less often to batch frames into fewer groups. Video
+	/// groups at its own keyframes and needs this only to override that.
 	pub fn cut(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();

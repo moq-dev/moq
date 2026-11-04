@@ -13,7 +13,7 @@ import {
 	Signal,
 } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
-import { hlsHint, wanted, watched } from "../internal";
+import { watched } from "../internal";
 import { Estimator, type Order } from "../order";
 import { Slot } from "../publication";
 import type { RenditionStats } from "../rendition";
@@ -134,8 +134,8 @@ export type EncoderOutput = {
 	// PCM rather than in the graph, so this is pre-gain. Undefined for a source that isn't a track.
 	root: Signal<AudioNode | undefined>;
 	// True while encoding capture: enabled with a captured format and a track, which also takes a
-	// subscriber to it or its HLS records unless the broadcast's `onDemand` is false. Retained audio
-	// encoded for a subscriber while disabled does not count.
+	// subscriber unless the broadcast's `onDemand` is false. Retained audio encoded for a subscriber
+	// while disabled does not count.
 	active: Signal<boolean>;
 	// Cumulative output totals (frames, bytes) measured while serving, and the target bitrate.
 	stats: Signal<Stats>;
@@ -153,8 +153,7 @@ type Pipeline = {
  * A single audio rendition encoder.
  *
  * Registers itself on the {@link Broadcast} under {@link name} (via `broadcast.audio(name)`), pumps PCM
- * off the source via a {@link Capture}, and retains raw PCM while enabled. A subscriber, to the track or its HLS records,
- * triggers encoding of that history followed by
+ * off the source via a {@link Capture}, and retains raw PCM while enabled. A subscriber triggers encoding of that history followed by
  * live audio; leaving resumes buffering without ending the epoch. The broadcast's `onDemand: false`
  * keeps encoding continuously instead. Rename by constructing a new encoder; the name is not a signal.
  */
@@ -229,6 +228,9 @@ export class Encoder {
 
 	// The last valid group duration, which #runConfig validates.
 	#groupDuration = Micro(20_000);
+	// How far apart groups start under the resolved config, which the broadcast may declare as the
+	// catalog's join interval (see groupSpacing).
+	#joinInterval = new Signal<Milli | undefined>(undefined);
 
 	// How many resolution runs threw for their current inputs (e.g. invalid codec settings), so no
 	// config is coming until one reruns.
@@ -415,9 +417,9 @@ export class Encoder {
 
 		const rendition = broadcast.audio(this.name);
 		effect.cleanup(() => rendition.close());
-		// Audio groups are far shorter than a segment, so any hint declares the grid's own duration up front.
-		rendition.hlsHint.set(hlsHint(this.groupDuration.peek()));
-		effect.subscribe(this.groupDuration, (duration) => rendition.hlsHint.set(hlsHint(duration)));
+		// How far apart groups start, which the broadcast declares as the catalog's join interval when
+		// nothing longer, such as a video GOP, sits beside it.
+		effect.proxy(rendition.joinInterval, this.#joinInterval);
 		effect.proxy(this.#slot, rendition.slot);
 		effect.cleanup(() => this.#slot.set(undefined));
 
@@ -449,11 +451,7 @@ export class Encoder {
 
 			const live = {
 				track,
-				producer: new Container.Legacy.Producer(
-					track,
-					new Container.Legacy.Format("audio"),
-					rendition.hls(track),
-				),
+				producer: new Container.Legacy.Producer(track, new Container.Legacy.Format("audio")),
 			};
 			this.#live = live;
 			effect.cleanup(() => {
@@ -472,7 +470,7 @@ export class Encoder {
 			const fatal = effect.get(this.#out.error);
 
 			const onDemand = effect.get(broadcast.in.onDemand) ?? true;
-			const demanded = !!track && wanted(effect, track, rendition.hls(track));
+			const demanded = !!track && effect.get(track.demand().wanted) !== undefined;
 			// Not gated on `enabled`: a disabled rendition takes no capture, but still encodes what it retained.
 			this.#encoding = !!format && !!track && !fatal && (!onDemand || demanded);
 			effect.set(this.#out.active, enabled && this.#encoding, false);
@@ -532,6 +530,8 @@ export class Encoder {
 		}
 
 		const resolved = resolve(captured, effect.get(this.codec));
+		// Set before the config is listed, so the catalog's first listing declares it.
+		this.#joinInterval.set(groupSpacing(groupDuration, resolved));
 		const source = capture ? effect.get(capture.in.source) : undefined;
 		const kind = source ? sourceKind(source) : "auto";
 		const encoderConfig = toEncoderConfig(resolved, kind, this.#opusOptions(effect));
@@ -981,6 +981,18 @@ export function resolve(captured: Format, selected: Codec): Resolved {
 		},
 		frameDuration: Micro.fromMilli(frameDuration),
 	};
+}
+
+/**
+ * How far apart audio groups start: a frame opens one once it is at least `groupDuration` past the
+ * open group's start, so groups are a whole number of frames apart, and at least one, since a zero
+ * duration opens a group per frame.
+ * @internal
+ */
+export function groupSpacing(groupDuration: Milli, resolved: Resolved): Milli {
+	const frame = resolved.frameDuration ?? (AAC_FRAME_SAMPLES * 1_000_000) / resolved.catalog.sampleRate;
+	const frames = Math.max(1, Math.ceil(Micro.fromMilli(groupDuration) / frame));
+	return Milli.fromMicro(Micro(frames * frame));
 }
 
 // The resolved config with the encoder settings and the probed decoder description, if the codec emitted one.

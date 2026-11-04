@@ -13,9 +13,9 @@ mod container;
 mod contribution;
 mod echo;
 mod hex;
-mod hls;
 mod json;
 mod m2ts;
+mod media;
 mod millis;
 mod mode;
 mod priority;
@@ -32,9 +32,9 @@ pub use consumer::*;
 pub use container::*;
 pub use contribution::*;
 pub use echo::*;
-pub use hls::*;
 pub use json::*;
 pub use m2ts::*;
+pub use media::*;
 pub use mode::*;
 pub use priority::*;
 pub use reference::*;
@@ -87,6 +87,20 @@ where
 	use serde::Deserialize;
 	let object = serde_json::Map::deserialize(deserializer)?;
 	serde_json::from_value(serde_json::Value::Object(object)).map_err(serde::de::Error::custom)
+}
+
+/// Decode the root `media` section, falling back to an empty one when the value is not an object.
+///
+/// `media` is a generic enough key that an application could have carried its own before it was
+/// reserved, so a non-object is someone else's, for the same reason as [`deserialize_section`]. An
+/// object is ours and must decode.
+pub(crate) fn deserialize_media<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Media, D::Error> {
+	use serde::Deserialize;
+	let value = serde_json::Value::deserialize(deserializer)?;
+	if !value.is_object() {
+		return Ok(Media::default());
+	}
+	serde_json::from_value(value).map_err(serde::de::Error::custom)
 }
 
 /// A media rendition config, checked as it decodes.

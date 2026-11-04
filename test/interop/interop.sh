@@ -511,8 +511,6 @@ plan_pass() {
         record "not run" case=tail publisher=rust subscriber="$runtime"
         record "not run" case=tail publisher="$runtime" subscriber=rust
         if [[ "$VERSION" == moq-transport-* ]]; then
-            record "not run" case=datagram publisher=rust subscriber="$runtime"
-            record "not run" case=datagram publisher="$runtime" subscriber=rust
             record "not run" case="wire track status" publisher=rust subscriber="$runtime"
             record "not run" case=goaway publisher=rust subscriber="$runtime"
             [[ "$runtime" != js-native-bun ]] || record "not run" case=goaway publisher="$runtime" subscriber=rust
@@ -527,7 +525,7 @@ plan_pass() {
             record "not run" case=compress publisher="$runtime" subscriber=rust version="$version"
         done
         record "not run" case="compressed catalog" publisher=rust subscriber="$runtime"
-        record "not run" case="hls records" publisher="$runtime" subscriber=rust
+        record "not run" case="hls grid" publisher="$runtime" subscriber=rust
     done
     needs js-native-node || return 0
     for version in "${DROP_VERSIONS[@]}"; do
@@ -1927,10 +1925,7 @@ run_tail_pair() {
         mode="join"
         want='tail join clean end=4 groups=[0-3](,[0-3])*'
     fi
-    if [[ "$kind" == datagram ]]; then
-        mode=datagram
-        want='datagram clean groups=0,1,2,3 bytes=3600'
-    elif [[ "$kind" == "track status" ]]; then
+    if [[ "$kind" == "track status" ]]; then
         mode=status
         want="track status answered"
     elif [[ "$kind" == compress ]]; then
@@ -1951,26 +1946,8 @@ run_tail_pair() {
     # Each side's token grants this broadcast alone, like a media round's.
     harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_tail_publisher "$fifo" "$pub" publish "$broadcast" "$(token_url --publish "$(publish_grant "$broadcast")")" "$version" "$mode"
     pid="$HARNESS_PID"
-    if [[ "$mode" == datagram ]]; then
-        # Subscription metadata, on the clients' serialized task runtimes, confirms the alias is bound. An acknowledgement
-        # per datagram avoids testing a best-effort receive buffer's burst capacity.
-        mkfifo "$LOGS/datagram-ack"
-        exec 8<>"$LOGS/datagram-ack"
-        harness_spawn "$name-sub" "$LOGS/$name-sub.log" run_tail_subscriber "$LOGS/datagram-ack" "$sub" subscribe "$broadcast" "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" "$version" "$mode"
-        subscriber_pid="$HARNESS_PID"
-        local ack sequence
-        if read -r -t "$TIMEOUT" ack <&8 && [[ "$ack" == "datagram ready" ]]; then
-            for sequence in 0 1 2 3; do
-                printf 'datagram %s\n' "$sequence" >&9
-                read -r -t "$TIMEOUT" ack <&8 && [[ "$ack" == "datagram $sequence" ]] || break
-            done
-        fi
-        exec 8>&-
-        rm "$LOGS/datagram-ack"
-    else
-        harness_spawn "$name-sub" "$LOGS/$name-sub.log" run_tail_client "$sub" subscribe "$broadcast" "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" "$version" "$mode"
-        subscriber_pid="$HARNESS_PID"
-    fi
+    harness_spawn "$name-sub" "$LOGS/$name-sub.log" run_tail_client "$sub" subscribe "$broadcast" "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" "$version" "$mode"
+    subscriber_pid="$HARNESS_PID"
     harness_wait "$subscriber_pid" || true
     # Like run_native, a verified data result survives the NAPI addon's exit crash.
     if read=$(grep -xE "$want" "$LOGS/$name-sub.log") && { [[ "$mode" != status ]] || grep -qx "track status answered" "$LOGS/$name-sub.log"; }; then
@@ -2391,15 +2368,15 @@ run_hls_publisher() {
     esac
 }
 
-# A native JS publisher's HLS records and declared durations match Rust's for the same frames:
-# moq-mux and @moq/hang each publish one schedule through the relay, and the Rust reader's
-# readout of the two broadcasts must be identical.
-run_hls_records() {
+# A native JS publisher's declared join interval and groups match Rust's for the same frames, so
+# an HLS edge numbers its segments alike: moq-mux and @moq/hang each publish one schedule through
+# the relay, and the Rust reader's readout of the two broadcasts must be identical.
+run_hls_grid() {
     local runtime="$1" started=$SECONDS publisher pid why="" want got
     local name="hls-$1" fifo="$LOGS/hls-ack" broadcast="hls-$1-$$-$RANDOM"
-    local cell=(case="hls records" publisher="$runtime" subscriber=rust log="$LOGS/$name-$runtime-read.log")
+    local cell=(case="hls grid" publisher="$runtime" subscriber=rust log="$LOGS/$name-$runtime-read.log")
     if is_broken "$runtime"; then
-        echo "  FAIL  hls records $runtime -> rust (client unavailable)"
+        echo "  FAIL  hls grid $runtime -> rust (client unavailable)"
         record fail "${cell[@]}" detail="client unavailable"
         overall=1
         return
@@ -2410,7 +2387,7 @@ run_hls_records() {
         harness_spawn "$name-$publisher-pub" "$LOGS/$name-$publisher-pub.log" run_hls_publisher "$fifo" "$publisher" "$(token_url --publish "$broadcast-$publisher/**")" "$broadcast-$publisher"
         pid="$HARNESS_PID"
         harness_spawn "$name-$publisher-read" "$LOGS/$name-$publisher-read.log" timeout -k 3 "$TIMEOUT" "$EXAMPLES/interop-hls" read "$(token_url --subscribe "$broadcast-$publisher/**")" "$broadcast-$publisher"
-        harness_wait "$HARNESS_PID" || why="${why:-$publisher records unreadable}"
+        harness_wait "$HARNESS_PID" || why="${why:-$publisher groups unreadable}"
         printf 'clean end\n' >&9
         harness_wait "$pid" || true
         grep -qx 'hls acknowledged' "$LOGS/$name-$publisher-pub.log" || why="${why:-$publisher publisher did not acknowledge}"
@@ -2418,15 +2395,15 @@ run_hls_records() {
     want=$(grep '^hls ' "$LOGS/$name-rust-read.log" || true)
     got=$(grep '^hls ' "$LOGS/$name-$runtime-read.log" || true)
     if [[ -z "$why" && -z "$want" ]]; then
-        why="rust published no records"
+        why="rust published no groups"
     elif [[ -z "$why" && "$want" != "$got" ]]; then
-        why="records differ from rust"
+        why="groups differ from rust"
     fi
     if [[ -z "$why" ]]; then
-        echo "  PASS  hls records $runtime -> rust (match moq-mux)"
+        echo "  PASS  hls grid $runtime -> rust (match moq-mux)"
         record pass "${cell[@]}" seconds=$((SECONDS - started))
     else
-        echo "  FAIL  hls records $runtime -> rust ($why)"
+        echo "  FAIL  hls grid $runtime -> rust ($why)"
         record fail "${cell[@]}" seconds=$((SECONDS - started)) detail="$why"
         overall=1
         diff <(echo "$want") <(echo "$got") || true
@@ -2462,8 +2439,6 @@ run_tails() {
             run_tail_pair rust "$runtime"
             run_tail_pair "$runtime" rust
             if [[ "$VERSION" == moq-transport-* ]]; then
-                run_tail_pair rust "$runtime" datagram
-                run_tail_pair "$runtime" rust datagram
                 run_control_case "$runtime" status
                 run_control_case "$runtime" goaway
                 [[ "$runtime" != js-native-bun ]] || run_control_case "$runtime" reverse-goaway
@@ -2480,7 +2455,7 @@ run_tails() {
             run_tail_pair "$runtime" rust compress "$version"
         done
         run_catalog_fanout "$runtime"
-        run_hls_records "$runtime"
+        run_hls_grid "$runtime"
     done
     if needs js-native-node; then
         for version in "${DROP_VERSIONS[@]}"; do

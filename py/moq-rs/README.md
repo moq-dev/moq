@@ -184,7 +184,7 @@ client = moq.Client(
   - `.abort(error_code)` terminates the track or group with an application error.
   - `.append_datagram(payload, timestamp=None) -> sequence` (`TrackProducer`) sends a best-effort datagram. Payloads are capped at 1200 bytes and there is no stream fallback.
   - `.insert_datagram(sequence, payload, timestamp=None)` (`TrackProducer`) sends one at the caller's own sequence.
-  - `.largest() -> Position | None` (`TrackProducer`) reports the newest group or datagram written, at its newest frame.
+  - `.largest() -> Position | None` (`TrackProducer`) reports the newest group written, at its newest frame. Datagrams are numbered apart from groups and never move it.
 
 ### Media
 
@@ -274,7 +274,7 @@ Every handle whose cleanup is `cancel()` is an async context manager, so exiting
 - **`Timestamp`**. `.value: int` units at `.scale: int` units per second, exact at any scale such as 90 kHz. `Timestamp.from_timedelta(duration)` is exact at microsecond scale; `.to_timedelta()` rounds down to a whole microsecond. A write with a scale of 0 or past `2**62 - 1`, or a value past `2**61 - 1`, raises `Error.TimeOverflow`.
 - **`Frame`**. `.payload: bytes`, `.timestamp: Timestamp | None`. The unit of every write and every raw read; `None` means untimed when publishing or reading.
 - **`media.MediaFrame`**. `.payload: bytes`, `.timestamp: Timestamp`, `.keyframe: bool`. The frame variant of a media read. `keyframe` marks a group start or video keyframe; for audio it is true only at a group start.
-- **`Datagram`**. `.sequence: int`, `.timestamp: Timestamp | None`, `.payload: bytes`. Delivered only on datagram-capable transports with lite-05 or newer moq-lite, or moq-transport.
+- **`Datagram`**. `.sequence: int`, `.timestamp: Timestamp | None`, `.payload: bytes`. Delivered only on datagram-capable transports with lite-05 or newer moq-lite.
 - **`media.Audio`**. `.codec`, `.sample_rate`, `.channel_count`, `.bitrate`, `.enabled`, `.description`.
 - **`media.Video`**. `.codec`, `.coded: Dimensions`, `.display_aspect`, `.bitrate`, `.enabled`, `.framerate`, `.description`. A false `.enabled` means no frames are coming, so don't select the rendition.
 - **`Subscription`**. Subscriber delivery preferences: priority, staleness, and optional group range.
