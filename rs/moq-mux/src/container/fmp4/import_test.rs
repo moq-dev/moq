@@ -1663,7 +1663,13 @@ async fn test_msf_catalog_roundtrip() {
 async fn sequences(consumer: &moq_net::broadcast::Consumer, track: &str) -> Vec<u64> {
 	let replay = moq_net::track::Subscription::default()
 		.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(3600)));
-	let mut track = consumer.track(track).unwrap().subscribe(replay).await.unwrap().ordered();
+	let mut track = consumer
+		.track(track)
+		.unwrap()
+		.subscribe(replay)
+		.await
+		.unwrap()
+		.ordered();
 	let mut sequences = Vec::new();
 	while let Some(group) = track.next_group().await.unwrap() {
 		sequences.push(group.sequence);
@@ -2110,7 +2116,11 @@ async fn segmented_source_writes_one_group_per_segment_in(passthrough: bool) {
 	fmp4.finish().unwrap();
 	catalog.finish().unwrap();
 
-	assert_eq!(sequences(&consumer, &video_name).await, [0, 1, 2], "one video group per segment");
+	assert_eq!(
+		sequences(&consumer, &video_name).await,
+		[0, 1, 2],
+		"one video group per segment"
+	);
 	assert_eq!(
 		sequences(&consumer, &audio_name).await,
 		[0, 1, 2],
@@ -2688,7 +2698,10 @@ async fn join_after(earlier: Earlier, start_us: u64) {
 	fmp4.finish().unwrap();
 
 	let snapshot = catalog.snapshot();
-	assert_eq!(snapshot.media.clock, fixed, "{earlier:?}: the import never moves the clock");
+	assert_eq!(
+		snapshot.media.clock, fixed,
+		"{earlier:?}: the import never moves the clock"
+	);
 	let published = crate::container::test_util::published(&consumer, &snapshot).await;
 	let video = &published[snapshot.video.renditions.keys().next().unwrap()];
 	// The offset rounds down to the track's own units.

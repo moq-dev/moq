@@ -605,7 +605,11 @@ async fn an_import_shifts_onto_a_clock_already_in_use() {
 		.unwrap();
 	let after = clock.now().as_micros() as u64;
 
-	assert_eq!(catalog.snapshot().media.clock, fixed, "the import never moves the clock");
+	assert_eq!(
+		catalog.snapshot().media.clock,
+		fixed,
+		"the import never moves the clock"
+	);
 	let first = shifted.objects[0].micros;
 	assert!(
 		(before..=after).contains(&first),

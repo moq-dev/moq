@@ -106,7 +106,7 @@ impl Grid {
 	pub fn segment(&self, pts: Timestamp, end: Option<Timestamp>) -> Option<u64> {
 		let pts = pts.as_nanos();
 		let slot = pts / self.interval;
-		if pts % self.interval == 0 {
+		if pts.is_multiple_of(self.interval) {
 			return Some(slot as u64);
 		}
 		let line = (slot + 1) * self.interval;
@@ -169,7 +169,9 @@ impl Grid {
 		let mut out = Vec::new();
 		if let Some(pending) = self.pending.take() {
 			// The last group spans to its last frame: without one, it reaches no further line.
-			let segment = self.segment(pending.pts, Some(reach.unwrap_or(pending.pts))).expect("bounded");
+			let segment = self
+				.segment(pending.pts, Some(reach.unwrap_or(pending.pts)))
+				.expect("bounded");
 			self.place(pending, segment, &mut out);
 		}
 		if let Some(open) = self.open.take() {
@@ -283,7 +285,7 @@ mod test {
 	/// Each case: interval, group starts, content end, and the segments listed.
 	#[test]
 	fn segmentation() {
-		#[allow(clippy::type_complexity)]
+		#[allow(clippy::type_complexity, reason = "a table of plain tuples reads best inline")]
 		let cases: &[(&str, u64, &[u64], u64, &[Listed])] = &[
 			(
 				"regular GOPs on the grid",
@@ -297,7 +299,12 @@ mod test {
 				2000,
 				&[500, 1900, 3800, 5700],
 				7600,
-				&[(0, 0..1, 500, 1900), (1, 1..2, 1900, 3800), (2, 2..3, 3800, 5700), (3, 3..4, 5700, 7600)],
+				&[
+					(0, 0..1, 500, 1900),
+					(1, 1..2, 1900, 3800),
+					(2, 2..3, 3800, 5700),
+					(3, 3..4, 5700, 7600),
+				],
 			),
 			(
 				"short groups pack into their slot",
@@ -311,7 +318,12 @@ mod test {
 				2000,
 				&[0, 1000, 2600, 3200, 6000],
 				8000,
-				&[(0, 0..1, 0, 1000), (1, 1..3, 1000, 3200), (2, 3..4, 3200, 6000), (3, 4..5, 6000, 8000)],
+				&[
+					(0, 0..1, 0, 1000),
+					(1, 1..3, 1000, 3200),
+					(2, 3..4, 3200, 6000),
+					(3, 4..5, 6000, 8000),
+				],
 			),
 			(
 				"an overrun lists its first line and the slots it covers as gaps",
@@ -330,14 +342,24 @@ mod test {
 				2000,
 				&[0, 6000],
 				8000,
-				&[(0, 0..1, 0, 2000), (1, 0..0, 2000, 4000), (2, 0..0, 4000, 6000), (3, 1..2, 6000, 8000)],
+				&[
+					(0, 0..1, 0, 2000),
+					(1, 0..0, 2000, 4000),
+					(2, 0..0, 4000, 6000),
+					(3, 1..2, 6000, 8000),
+				],
 			),
 			(
 				"a pause ending between lines",
 				2000,
 				&[0, 500, 7300],
 				8000,
-				&[(0, 0..1, 0, 500), (1, 1..2, 500, 4000), (2, 0..0, 4000, 7300), (3, 2..3, 7300, 8000)],
+				&[
+					(0, 0..1, 0, 500),
+					(1, 1..2, 500, 4000),
+					(2, 0..0, 4000, 7300),
+					(3, 2..3, 7300, 8000),
+				],
 			),
 			(
 				"a pause ending past the next line",
@@ -375,10 +397,17 @@ mod test {
 	fn a_segment_completes_once_a_later_one_starts() {
 		let mut grid = Grid::new(Duration::from_secs(2), 256);
 		assert!(grid.group(0, ms(0)).is_empty());
-		assert!(grid.group(1, ms(1000)).is_empty(), "its successor may still reach the next line");
+		assert!(
+			grid.group(1, ms(1000)).is_empty(),
+			"its successor may still reach the next line"
+		);
 		assert_eq!(listed(grid.group(2, ms(2000))), [(0, 0..2, 0, 2000)]);
 		assert!(grid.group(3, ms(3500)).is_empty());
-		assert_eq!(listed(grid.group(4, ms(4500))), [(1, 2..3, 2000, 3500)], "3.5s reaches 4s");
+		assert_eq!(
+			listed(grid.group(4, ms(4500))),
+			[(1, 2..3, 2000, 3500)],
+			"3.5s reaches 4s"
+		);
 	}
 
 	/// A long pause lists only the newest gaps, the ones a playlist window can still hold.
@@ -399,7 +428,9 @@ mod test {
 		let mut grid = Grid::new(Duration::from_secs(2), 256);
 		grid.group(0, ms(10_000));
 		assert_eq!(grid.group(1, ms(0)), [Slot::Reset]);
-		assert_eq!(listed(grid.finish(Some(ms(2000)), Some(ms(2000)))), [(0, 1..2, 0, 2000)]);
+		assert_eq!(
+			listed(grid.finish(Some(ms(2000)), Some(ms(2000)))),
+			[(0, 1..2, 0, 2000)]
+		);
 	}
 }
-

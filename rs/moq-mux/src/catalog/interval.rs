@@ -42,7 +42,10 @@ impl State {
 		if self.declared.is_some() || !self.measured || self.members.is_empty() {
 			return None;
 		}
-		let interval = self.members.values().try_fold(Duration::ZERO, |max, interval| Some(max.max((*interval)?)))?;
+		let interval = self
+			.members
+			.values()
+			.try_fold(Duration::ZERO, |max, interval| Some(max.max((*interval)?)))?;
 		self.declared = Some(interval);
 		Some(interval)
 	}
@@ -187,9 +190,16 @@ mod test {
 		let intervals = Intervals::default();
 		let mut audio = intervals.join(Some(secs(0.1)), declare());
 		let video = intervals.join(Some(secs(3.0)), declare());
-		assert!(declared.lock().unwrap().is_empty(), "the tracks have written nothing yet");
+		assert!(
+			declared.lock().unwrap().is_empty(),
+			"the tracks have written nothing yet"
+		);
 		audio.report(Some(secs(0.02)));
-		assert_eq!(*declared.lock().unwrap(), [secs(3.0)], "the largest hint, not the first");
+		assert_eq!(
+			*declared.lock().unwrap(),
+			[secs(3.0)],
+			"the largest hint, not the first"
+		);
 		drop(video);
 		assert_eq!(intervals.declared(), Some(secs(3.0)), "fixed once declared");
 	}

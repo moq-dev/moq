@@ -219,7 +219,6 @@ impl Media {
 			Self::Audio(track) => track.abort(err),
 		}
 	}
-
 }
 
 /// How the importer consumes an element.

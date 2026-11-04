@@ -466,7 +466,6 @@ impl<E: CatalogExt> Config<E> {
 		self.bandwidth = bandwidth;
 		self
 	}
-
 }
 
 impl<E: CatalogExt> Producer<E> {
@@ -2127,7 +2126,10 @@ mod test {
 			};
 			let timestamp = frame.timestamp.expect("captured frame is timed");
 			assert_eq!(catalog.clock().wall_clock(timestamp).unwrap(), wall);
-			assert_eq!(catalog.snapshot().media.clock.unwrap().wall_clock(timestamp).unwrap(), wall);
+			assert_eq!(
+				catalog.snapshot().media.clock.unwrap().wall_clock(timestamp).unwrap(),
+				wall
+			);
 		}
 	}
 

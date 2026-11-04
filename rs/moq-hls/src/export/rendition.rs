@@ -546,7 +546,9 @@ impl Rendition {
 
 	/// Start following this rendition's media track onto the grid.
 	pub(crate) fn watch(self: &Arc<Self>) {
-		let watcher = self.fanout.spawn(watch_media(Arc::downgrade(self), self.retiring.subscribe()));
+		let watcher = self
+			.fanout
+			.spawn(watch_media(Arc::downgrade(self), self.retiring.subscribe()));
 		*self.watcher.lock().expect("watcher lock poisoned") = Some(watcher);
 	}
 
@@ -1619,7 +1621,11 @@ async fn watch_media(rendition: Weak<Rendition>, mut retiring: tokio::sync::watc
 				rendition.push(row(&rendition, slot, broken));
 				broken = false;
 			}
-			if claim.retired && grid.open_groups().is_some_and(|groups| theirs(&(groups.start..groups.start + 1))) {
+			if claim.retired
+				&& grid
+					.open_groups()
+					.is_some_and(|groups| theirs(&(groups.start..groups.start + 1)))
+			{
 				return Ok(());
 			}
 			if let Some(sequence) = sequence {
@@ -1693,7 +1699,9 @@ async fn content_end(
 	let mut marker = None;
 	while let Ok(Some(frame)) = group.read_frame().await {
 		// The container says what a frame holds: a marker's payload is empty only once decoded.
-		let decoded = container.and_then(|container| container.decode(frame).ok()).unwrap_or_default();
+		let decoded = container
+			.and_then(|container| container.decode(frame).ok())
+			.unwrap_or_default();
 		for frame in decoded {
 			match frame.payload.is_empty() {
 				true => marker = Some(frame.timestamp),
@@ -1906,8 +1914,9 @@ mod tests {
 		let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		config.broadcast = Some(moq_net::path::Relative::new("./secret").unwrap());
 		let renditions = renditions::Producer::spawned(Duration::from_secs(30));
-		let rendition =
-			Arc::new(Rendition::video("video".into(), &config, &source, interval(), None, renditions.fanout()).unwrap());
+		let rendition = Arc::new(
+			Rendition::video("video".into(), &config, &source, interval(), None, renditions.fanout()).unwrap(),
+		);
 		let request = dynamic.requested_broadcast().await.unwrap();
 		let row = segments::Row {
 			index: 0,
@@ -2079,8 +2088,9 @@ mod tests {
 		let source = moq_mux::Source::new(origin.consume(), broadcast.consume());
 		let config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		let renditions = renditions::Producer::spawned(Duration::from_secs(30));
-		let rendition =
-			Arc::new(Rendition::video("video".into(), &config, &source, interval(), None, renditions.fanout()).unwrap());
+		let rendition = Arc::new(
+			Rendition::video("video".into(), &config, &source, interval(), None, renditions.fanout()).unwrap(),
+		);
 		// On its own task, so only a registered wake polls it again.
 		let refused = tokio::spawn({
 			let rendition = rendition.clone();

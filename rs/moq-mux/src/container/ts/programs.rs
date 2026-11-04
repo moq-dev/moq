@@ -2075,7 +2075,8 @@ mod test {
 			assert!(fills.contains(&frame.payload[4]), "{path} carries only its own program");
 			let skew = Duration::from_secs(2);
 			let wall = catalog
-				.media.clock
+				.media
+				.clock
 				.expect("the catalog advertises a clock")
 				.wall_clock(frame.timestamp)
 				.unwrap();

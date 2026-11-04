@@ -584,7 +584,11 @@ async fn the_same_instance_within_the_follow_continues() {
 		pace.tick().await;
 		import.decode(chunk).unwrap();
 	}
-	assert_eq!(catalog.snapshot().media.clock, clock, "the capture keeps its catalog clock");
+	assert_eq!(
+		catalog.snapshot().media.clock,
+		clock,
+		"the capture keeps its catalog clock"
+	);
 	import.finish().unwrap();
 	catalog.finish().unwrap();
 	export.output_past(mark).await;

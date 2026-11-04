@@ -788,7 +788,13 @@ mod tests {
 				let capture_task = tokio::task::spawn_local(capture.run());
 				let encode_task = tokio::spawn(driver.run());
 
-				let remote = origin.consume().follow("live", None).unwrap().available().await.unwrap();
+				let remote = origin
+					.consume()
+					.follow("live", None)
+					.unwrap()
+					.available()
+					.await
+					.unwrap();
 				let source = moq_mux::Source::new(origin.consume(), remote);
 				let (broadcaster, export) =
 					moq_hls::export::Broadcaster::new(source, moq_hls::export::Config::default()).unwrap();
@@ -796,12 +802,13 @@ mod tests {
 
 				// The capture runs on, writing video only while the export wants it.
 				let listed = |kind, name| {
-					broadcaster
-						.rendition(kind, name)
-						.is_some_and(|rendition| rendition.media_playlist(None).is_ok_and(|playlist| playlist.is_some()))
+					broadcaster.rendition(kind, name).is_some_and(|rendition| {
+						rendition.media_playlist(None).is_ok_and(|playlist| playlist.is_some())
+					})
 				};
 				let mut frame = 0u64;
-				while !(listed(moq_hls::export::Kind::Video, "video") && listed(moq_hls::export::Kind::Audio, "audio")) {
+				while !(listed(moq_hls::export::Kind::Video, "video") && listed(moq_hls::export::Kind::Audio, "audio"))
+				{
 					assert!(frame < 1_000, "the viewer never got both renditions listed");
 					samples.try_push(Ok(Samples::plain(vec![0.25; 1920], false))).unwrap();
 					if frame.is_multiple_of(5) && wanted.wanted().is_some() {
@@ -820,10 +827,13 @@ mod tests {
 							})
 							.unwrap();
 					}
-					tokio::time::sleep(Duration::from_millis(20)).await;
+					kio::clock::sleep(Duration::from_millis(20)).await;
 					frame += 1;
 				}
-				assert!(catalog.snapshot().media.join.is_some(), "the capture declared its interval");
+				assert!(
+					catalog.snapshot().media.join.is_some(),
+					"the capture declared its interval"
+				);
 
 				drop(broadcaster);
 				encode_task.abort();

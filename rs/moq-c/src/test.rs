@@ -8040,7 +8040,11 @@ fn group_duration_hint_declares_the_join_interval() {
 	let payload = [0u8; 100];
 	for i in 0..60u64 {
 		if i == 50 {
-			assert_eq!(published_catalog(broadcast).media.join, None, "no window has closed yet");
+			assert_eq!(
+				published_catalog(broadcast).media.join,
+				None,
+				"no window has closed yet"
+			);
 		}
 		assert_eq!(
 			unsafe { moq_publish_media_frame(hinted, payload.as_ptr(), payload.len(), micros(i * 20_000)) },

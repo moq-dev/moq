@@ -684,11 +684,12 @@ impl Seen {
 					));
 				}
 				starts.entry(*number).or_default().push(probe.start);
-				reconfigured |= index > 0 && segments[..index]
-					.iter()
-					.rev()
-					.find(|(_, previous)| !previous.gap)
-					.is_some_and(|(_, previous)| previous.init != segment.init);
+				reconfigured |= index > 0
+					&& segments[..index]
+						.iter()
+						.rev()
+						.find(|(_, previous)| !previous.gap)
+						.is_some_and(|(_, previous)| previous.init != segment.init);
 				timeline = Some(probe.start + segment.duration);
 
 				let recording = recorded.segments.get(name).and_then(|segments| segments.get(number));

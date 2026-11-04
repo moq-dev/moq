@@ -576,11 +576,19 @@ impl Producer {
 	fn wait(&self, source: &moq_mux::Source, catalog: &Catalog, waiting: &mut BTreeMap<Key, Owner>) {
 		use hang::catalog::Reference;
 		let video = catalog.video.renditions.iter().map(|(name, config)| {
-			let reference = (config.broadcast.clone(), config.instance.clone(), config.track(name).to_string());
+			let reference = (
+				config.broadcast.clone(),
+				config.instance.clone(),
+				config.track(name).to_string(),
+			);
 			((Kind::Video, name.clone()), reference)
 		});
 		let audio = catalog.audio.renditions.iter().map(|(name, config)| {
-			let reference = (config.broadcast.clone(), config.instance.clone(), config.track(name).to_string());
+			let reference = (
+				config.broadcast.clone(),
+				config.instance.clone(),
+				config.track(name).to_string(),
+			);
 			((Kind::Audio, name.clone()), reference)
 		});
 		let listed: BTreeMap<Key, _> = video.chain(audio).collect();

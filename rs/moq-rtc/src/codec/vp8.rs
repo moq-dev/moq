@@ -61,5 +61,4 @@ mod tests {
 		assert_eq!(config.coded_width, Some(320));
 		assert_eq!(config.coded_height, Some(240));
 	}
-
 }

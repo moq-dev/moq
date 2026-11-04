@@ -80,7 +80,7 @@ pub struct Config {
 	/// however short they are. Keep it within the relay's group-cache retention, since segments
 	/// are fetched from there on request. It also caps segment `Cache-Control: max-age`.
 	///
-	/// Durable records get the same window: a live playlist stays bounded however much its store
+	/// A durable archive gets the same window: a live playlist stays bounded however much its store
 	/// retains.
 	pub window: Duration,
 }
@@ -127,8 +127,8 @@ impl Drop for Guard {
 	fn drop(&mut self) {
 		// Release the map: a surviving `renditions::Consumer` would otherwise pin every
 		// `Rendition` forever. A recording cursor's own `Arc<Rendition>` keeps that rendition's
-		// records flowing, so its final segments are not truncated. Each rendition stops
-		// following its records once no recording cursor holds it.
+		// media flowing, so its final segments are not truncated. Each rendition stops
+		// following its media once no recording cursor holds it.
 		self.renditions.clear();
 	}
 }
@@ -230,7 +230,8 @@ impl Broadcaster {
 	/// A cursor over rendition add/remove events, for a consumer that mirrors or records the
 	/// whole broadcast. It replays the current renditions, then yields changes, and returns
 	/// `Ok(None)` only once the source finishes cleanly. A rendition is added once the catalog
-	/// advertises its HLS records, which an unhinted publisher declares after its first segment.
+	/// declares its join interval, which an unhinted publisher measures over its first second or
+	/// group.
 	pub fn renditions(&self) -> renditions::Consumer {
 		self.renditions.subscribe()
 	}
@@ -317,11 +318,11 @@ impl Broadcaster {
 		(video, audio)
 	}
 
-	/// Render the DASH manifest (MPD) from the current renditions' records, or `None` while nothing is listable yet (every `SegmentTimeline`
+	/// Render the DASH manifest (MPD) from the current renditions' segments, or `None` while nothing is listable yet (every `SegmentTimeline`
 	/// would be empty, which players reject).
 	///
 	/// Live broadcasts render a `dynamic` presentation anchored at the catalog's declared
-	/// wall clock (or, absent one, at an anchor estimated from the first record's arrival); a
+	/// wall clock (or, absent one, at an anchor estimated from the first segment's arrival); a
 	/// finished broadcast renders `static`. `query` propagates to every child URL exactly as
 	/// in [`master_playlist`](Self::master_playlist).
 	///
@@ -332,7 +333,7 @@ impl Broadcaster {
 	/// on one.
 	///
 	/// Fails with [`CatalogFailed`](crate::Error::CatalogFailed) once the catalog failed, rather
-	/// than turning a truncated presentation `static`. A rendition whose own records failed is
+	/// than turning a truncated presentation `static`. A rendition whose own media track failed is
 	/// left out instead, and its [`Rendition`] listings fail.
 	pub fn manifest(&self, query: Option<&str>) -> crate::Result<Option<String>> {
 		if let Some(err) = self.renditions.failure() {
@@ -390,7 +391,7 @@ impl Broadcaster {
 		let finished = !pending && representations().all(|rep| rep.ended);
 		if !finished {
 			// A dynamic presentation needs pts 0 anchored to the wall clock. The fallback is
-			// set whenever a record has been pushed, which listing a segment implies.
+			// set whenever a segment has been listed.
 			availability_start = availability_start.or_else(|| self.renditions.anchor());
 			if availability_start.is_none() {
 				return Ok(None);
@@ -461,7 +462,7 @@ impl Broadcaster {
 }
 
 async fn watch_catalog(source: moq_mux::Source, renditions: renditions::Producer) {
-	// The source's catalog broadcast, so the catalog, the record subscriptions, and the closed
+	// The source's catalog broadcast, so the catalog, the media subscriptions, and the closed
 	// check below all refer to the one broadcast it was built from.
 	let broadcast = &source.broadcast();
 	let mut delay = CATALOG_RETRY_MIN;
@@ -909,7 +910,7 @@ mod tests {
 		);
 	}
 
-	// The other half: a change that alters how the rendition decodes, or which records it
+	// The other half: a change that alters how the rendition decodes, or which track it
 	// lists, still rebuilds it, so the cached init segment can never describe media it no
 	// longer matches.
 	#[tokio::test]
@@ -973,8 +974,8 @@ mod tests {
 	}
 
 	// The whole fetch-on-demand path in process: a broadcast publishes media through the
-	// catalog (which records its HLS segments), the Broadcaster renders playlists from the
-	// records alone, and a segment request fetches and transmuxes exactly its groups.
+	// catalog (which declares its join interval), the Broadcaster renders playlists from the
+	// groups' timestamps, and a segment request fetches and transmuxes exactly its groups.
 	#[tokio::test]
 	async fn master_lists_only_playable_renditions() {
 		let origin = produce_origin();
@@ -1635,7 +1636,7 @@ mod tests {
 		config.coded_width = Some(640);
 		config.coded_height = Some(480);
 		media.set(config).unwrap();
-		// The replacement lists only records after the reconfigure.
+		// The replacement lists only segments after the reconfigure.
 		for micros in [6_000_000, 8_000_000, 10_000_000] {
 			media.write(vp8_frame(micros, true)).unwrap();
 		}
@@ -1673,7 +1674,7 @@ mod tests {
 
 	// Background work ends with its owners, not with the publisher: once a reconfigure replaced
 	// the rendition, dropping the broadcaster and both renditions finishes the driver while the
-	// records stay open.
+	// media tracks stay open.
 	#[tokio::test(start_paused = true)]
 	async fn the_driver_finishes_with_its_owners() {
 		let origin = produce_origin();
@@ -1898,7 +1899,7 @@ mod tests {
 		drop((media, catalog, broadcast));
 	}
 
-	// A fetched segment's last sample runs to where the next segment starts, as its record says,
+	// A fetched segment's last sample runs to where the next group starts, as its row says,
 	// rather than to a guess from the framerate.
 	#[tokio::test]
 	async fn a_segment_ends_where_its_record_says() {
@@ -1959,7 +1960,7 @@ mod tests {
 		drop((media, catalog, broadcast));
 	}
 
-	// The DASH half of the fetch-on-demand path: the manifest renders from the same record
+	// The DASH half of the fetch-on-demand path: the manifest renders from the same segment
 	// windows as the HLS playlists (dynamic while live, matching S entries across renditions),
 	// and $Time$ addressing resolves a segment's pts to the same bytes its number does.
 	#[tokio::test]
@@ -2227,7 +2228,7 @@ mod tests {
 
 	async fn live_fmp4_segments(version: Option<&str>, late: bool) {
 		use moq_mux::container::fmp4::mp4_atom::{self, DecodeMaybe, Encode};
-		// Reuse the A/V descriptors; opaque samples exercise record discovery and FETCH,
+		// Reuse the A/V descriptors; opaque samples exercise segment discovery and FETCH,
 		// without involving a codec decoder.
 		let mut fixture =
 			std::io::Cursor::new(include_bytes!("../../../moq-mux/src/container/fmp4/test_data/bbb.mp4").as_slice());
@@ -2381,7 +2382,10 @@ mod tests {
 		};
 		// The trailing segment runs to the duration marker the finish wrote after its one frame.
 		assert!(manifest.contains("<S t=\"0\" d=\"2000\"/>"), "{manifest}");
-		assert!(manifest.contains("<S t=\"2000\""), "the bounded tail is listed: {manifest}");
+		assert!(
+			manifest.contains("<S t=\"2000\""),
+			"the bounded tail is listed: {manifest}"
+		);
 		assert!(!manifest.contains("presentationTimeOffset"));
 		assert!(!manifest.contains("availabilityStartTime"));
 
@@ -2538,7 +2542,7 @@ mod tests {
 	}
 
 	/// A one-video-rendition catalog snapshot reconciled by hand, which is what `watch_catalog`
-	/// does with each snapshot: the rendition follows its records on its own.
+	/// does with each snapshot: the rendition follows its media on its own.
 	fn export(
 		upstream: &moq_mux::Source,
 		config: &hang::catalog::VideoConfig,
@@ -2764,7 +2768,7 @@ mod tests {
 		let (_renditions, rendition) = export(&fresh, &video_config());
 		kio::clock::timeout(Duration::from_secs(5), rendition.playable())
 			.await
-			.expect("the new publisher's records arrive");
+			.expect("the new publisher's media arrives");
 		let served = rendition
 			.listed_segment(0)
 			.await
@@ -3165,7 +3169,7 @@ mod tests {
 		drop((catalog, media, broadcast));
 	}
 
-	// The record path: the renditions cursor yields the video rendition, its segment cursor
+	// The recording path: the renditions cursor yields the video rendition, its segment cursor
 	// yields each finalized segment with its media, and losing the publisher fails both cursors
 	// instead of completing a truncated recording.
 	#[tokio::test]
@@ -3213,7 +3217,7 @@ mod tests {
 		assert_eq!(second.segment, 1);
 		assert_eq!(second.discontinuity, 0, "consecutive segments are continuous");
 
-		// Tear down the publisher. The records end abruptly, so the cursor fails rather than end
+		// Tear down the publisher. The media ends abruptly, so the cursor fails rather than end
 		// as if the recording were complete.
 		drop((catalog, media));
 		broadcast.close();
@@ -3286,13 +3290,13 @@ mod tests {
 
 	/// Renditions over hand-published media groups, reconciled the way `watch_catalog` does, on a
 	/// two-second join interval.
-	struct Records {
+	struct Groups {
 		broadcast: moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::hang::Catalog,
 		renditions: renditions::Producer,
 	}
 
-	impl Records {
+	impl Groups {
 		/// `video0` and `video1` renditions.
 		fn new() -> Self {
 			Self::with(&["video0", "video1"], &[])
@@ -3433,7 +3437,7 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn a_segment_cursor_rejects_an_unfinished_window() {
-		let test = Records::new();
+		let test = Groups::new();
 		let rendition = test.rendition("video0");
 		let mut cursor = rendition.segments();
 		rendition.close();
@@ -3443,7 +3447,7 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn a_failed_catalog_fails_unfinished_segment_windows() {
-		let test = Records::new();
+		let test = Groups::new();
 		let rendition = test.rendition("video0");
 		let mut segments = rendition.segments();
 		test.renditions
@@ -3464,7 +3468,7 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn a_slow_cursor_refuses_evicted_rows_before_its_first_read() {
-		let test = Records::with(&["video0"], &[]);
+		let test = Groups::with(&["video0"], &[]);
 		let rendition = test.rendition("video0");
 		let mut slow = rendition.segments();
 		let mut video0 = test.publish("video0");
@@ -3480,7 +3484,7 @@ mod tests {
 	// complete: its listings answer the error, while the other renditions go on.
 	#[tokio::test(start_paused = true)]
 	async fn a_media_error_fails_only_its_playlist() {
-		let test = Records::new();
+		let test = Groups::new();
 		let mut video0 = test.publish("video0");
 		let mut video1 = test.publish("video1");
 		for sequence in 0..4 {
@@ -3561,7 +3565,7 @@ mod tests {
 	// than timing out as not found or, without a router's timeout, waiting forever.
 	#[tokio::test(start_paused = true)]
 	async fn a_pending_playlist_answers_a_media_failure() {
-		let test = Records::new();
+		let test = Groups::new();
 		let video1 = test.publish("video1");
 		let rendition = test.rendition("video1");
 		let pending = tokio::spawn(async move { rendition.playlist(None).await });
@@ -3578,7 +3582,7 @@ mod tests {
 	// and media never read is not listed as an empty finished recording.
 	#[tokio::test(start_paused = true)]
 	async fn a_pending_media_subscription_ends_with_the_broadcast() {
-		let test = Records::new();
+		let test = Groups::new();
 		// A handler keeps the unpublished tracks' requests waiting rather than refused.
 		let _handler = test.broadcast.requests();
 		kio::clock::sleep(Duration::from_secs(60)).await;
@@ -3594,7 +3598,7 @@ mod tests {
 	// can tell it from rows it missed.
 	#[tokio::test(start_paused = true)]
 	async fn a_recording_refuses_missing_media_but_reports_gaps() {
-		let test = Records::new();
+		let test = Groups::new();
 		let mut video0 = test.publish("video0");
 		let mut video1 = test.publish("video1");
 		// Group 2 never lands, so segment 1, from groups 1 to 3, can't be served whole.
@@ -3644,7 +3648,7 @@ mod tests {
 	// joining at 5.5s starts at segment 3, the line its first group reaches, as the video does.
 	#[tokio::test(start_paused = true)]
 	async fn an_unaligned_ladder_shares_the_grid() {
-		let test = Records::with(&["video0"], &["audio0"]);
+		let test = Groups::with(&["video0"], &["audio0"]);
 		let mut video0 = test.publish("video0");
 		let mut audio0 = test.publish("audio0");
 		for sequence in 0..5 {
@@ -3710,7 +3714,7 @@ mod tests {
 	// discontinuity, since the timestamps never broke.
 	#[tokio::test(start_paused = true)]
 	async fn a_pause_is_listed_as_gaps() {
-		let test = Records::with(&["video0"], &[]);
+		let test = Groups::with(&["video0"], &[]);
 		let mut video0 = test.publish("video0");
 		video0.gop(0);
 		video0.gop(1);
@@ -3732,7 +3736,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn catalog_changes_report_removal_and_drain_old_cursors() {
 		for reconfigure in [false, true] {
-			let mut test = Records::with(&["video0"], &[]);
+			let mut test = Groups::with(&["video0"], &[]);
 			let mut records = test.publish("video0");
 			records.gop(0);
 			records.gop(1);
@@ -3782,7 +3786,7 @@ mod tests {
 	// own URLs, until the window slides past them (RFC 8216 6.2.2), then releases the predecessor.
 	#[tokio::test(start_paused = true)]
 	async fn a_reconfigure_keeps_serving_its_predecessors_segments() {
-		let mut test = Records::with(&["video0"], &[]);
+		let mut test = Groups::with(&["video0"], &[]);
 		let mut records = test.publish("video0");
 		for sequence in 0..3 {
 			records.gop(sequence);
@@ -3837,7 +3841,7 @@ mod tests {
 	// one, its playlist is the predecessor's segments under the predecessor's init.
 	#[tokio::test(start_paused = true)]
 	async fn an_inherited_playlist_needs_no_init_of_its_own() {
-		let mut test = Records::with(&["video0"], &[]);
+		let mut test = Groups::with(&["video0"], &[]);
 		let mut records = test.publish("video0");
 		for sequence in 0..3 {
 			records.gop(sequence);
@@ -3893,7 +3897,7 @@ mod tests {
 	// replacement's own first segment, even while the HLS playlist serves the predecessor's.
 	#[tokio::test(start_paused = true)]
 	async fn dash_readiness_waits_for_the_replacements_own_segment() {
-		let mut test = Records::with(&["video0"], &[]);
+		let mut test = Groups::with(&["video0"], &[]);
 		let mut records = test.publish("video0");
 		for sequence in 0..3 {
 			records.gop(sequence);
@@ -3929,7 +3933,7 @@ mod tests {
 	}
 
 	/// Reconfigure `video0` to `width`.
-	fn resize(test: &mut Records, width: u32) {
+	fn resize(test: &mut Groups, width: u32) {
 		test.catalog.video.renditions.get_mut("video0").unwrap().coded_width = Some(width);
 		test.sync();
 	}
@@ -3937,7 +3941,7 @@ mod tests {
 	// A predecessor still waiting on its first segment keeps it, whenever the playlist renders.
 	#[tokio::test(start_paused = true)]
 	async fn a_predecessors_pending_first_segment_is_kept() {
-		let mut test = Records::with(&["video0"], &[]);
+		let mut test = Groups::with(&["video0"], &[]);
 		let mut records = test.publish("video0");
 		records.gop(0);
 		kio::clock::sleep(Duration::from_millis(100)).await;
@@ -3951,7 +3955,7 @@ mod tests {
 	// Reconfigures that list nothing keep only the instance that does, however many there are.
 	#[tokio::test(start_paused = true)]
 	async fn reconfigures_listing_nothing_hold_nothing() {
-		let mut test = Records::with(&["video0"], &[]);
+		let mut test = Groups::with(&["video0"], &[]);
 		let mut records = test.publish("video0");
 		records.gop(0);
 		records.gop(1);
@@ -3968,7 +3972,7 @@ mod tests {
 	// back, and each segment URL still reaches the instance that lists it.
 	#[tokio::test(start_paused = true)]
 	async fn a_returning_config_serves_both_instances_segments() {
-		let mut test = Records::with(&["video0"], &[]);
+		let mut test = Groups::with(&["video0"], &[]);
 		let mut records = test.publish("video0");
 		for sequence in 0..3 {
 			records.gop(sequence);
@@ -4002,7 +4006,7 @@ mod tests {
 	// where its predecessor stopped, behind a discontinuity.
 	#[tokio::test(start_paused = true)]
 	async fn a_replacement_on_another_track_continues_the_numbering() {
-		let mut test = Records::with(&["video0"], &[]);
+		let mut test = Groups::with(&["video0"], &[]);
 		let mut records = test.publish("video0");
 		for sequence in 0..4 {
 			records.gop(sequence);
@@ -4028,7 +4032,7 @@ mod tests {
 	// group can be, is listed anyway, and counted for the warning.
 	#[tokio::test(start_paused = true)]
 	async fn the_target_duration_is_twice_the_interval() {
-		let test = Records::with(&["video0"], &[]);
+		let test = Groups::with(&["video0"], &[]);
 		let mut records = test.publish("video0");
 		records.gop(0);
 		// 25 frames 200ms apart: the last starts at 6.8s, so the content runs to 7s.
@@ -4038,15 +4042,19 @@ mod tests {
 		let durations: Vec<_> = snapshot.segments.iter().map(|s| s.duration.as_millis()).collect();
 		assert_eq!(durations, [2_000, 5_000]);
 		assert_eq!(snapshot.target_duration, 4);
-		assert_eq!(test.rendition("video0").overruns(), 1, "only the 5s segment rounds past it");
+		assert_eq!(
+			test.rendition("video0").overruns(),
+			1,
+			"only the 5s segment rounds past it"
+		);
 	}
 
 	// Each playlist URI keeps the EXT-X-TARGETDURATION it first got: a rendition rebuilt on another
 	// interval keeps its predecessor's, and one that returns derives its own, floored by the first.
 	#[tokio::test(start_paused = true)]
 	async fn each_playlist_keeps_its_target_duration() {
-		let mut test = Records::new();
-		let target = |test: &Records, name: &str| test.rendition(name).target_duration();
+		let mut test = Groups::new();
+		let target = |test: &Groups, name: &str| test.rendition(name).target_duration();
 		assert_eq!((target(&test, "video0"), target(&test, "video1")), (4, 4));
 
 		// The interval is fixed for a broadcast instance; should it change anyway, every rendition
@@ -4070,7 +4078,7 @@ mod tests {
 	// Two edges over one media track agree on the media sequence.
 	#[tokio::test(start_paused = true)]
 	async fn edges_agree_on_the_media_sequence() {
-		let early = Records::with(&["video0"], &[]);
+		let early = Groups::with(&["video0"], &[]);
 		let mut video0 = early.publish("video0");
 		for sequence in 0..21 {
 			video0.gop(sequence);
