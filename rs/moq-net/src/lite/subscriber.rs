@@ -10515,7 +10515,12 @@ impl ServeLoop {
 						Sub::Active(active) => Some(active.tail.clone()),
 						Sub::None => None,
 					};
-					if self.range_fills.poll(serve, &self.serving, accounted.as_ref(), waiter) {
+					// A stream still arriving on a recovery is kept only for someone reading it.
+					let read = crate::util::poll_unwanted(&mut self.demand, waiter).is_pending();
+					if self
+						.range_fills
+						.poll(serve, &self.serving, accounted.as_ref(), read, waiter)
+					{
 						if let Err(err) = self.begin(serve, self.serving.subscription()) {
 							return Poll::Ready(ServeEnd::GiveBack(err));
 						}

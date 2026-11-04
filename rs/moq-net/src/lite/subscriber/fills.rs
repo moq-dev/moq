@@ -161,12 +161,14 @@ impl RangeFills {
 
 	/// Settle each held fill against what the subscription refused, open a [`Recovery`] for
 	/// each run it will not deliver, and recompute what to ask. `accounted` is the tail of
-	/// the subscription the fills ride, if one is open. Returns whether the ask changed.
+	/// the subscription the fills ride, if one is open, and `read` whether anyone still reads
+	/// the track. Returns whether the ask changed.
 	pub fn poll(
 		&mut self,
 		serve: &TrackServe,
 		serving: &track::Producer,
 		accounted: Option<&kio::Producer<Tail>>,
+		read: bool,
 		waiter: &kio::Waiter,
 	) -> bool {
 		// The groups the subscription already accounted for, which it never sends again, are
@@ -256,11 +258,11 @@ impl RangeFills {
 			}
 		});
 
-		// A recovery no held fill owes any group of is cancelled once none of its streams is
-		// still being read, and a group is recovered once for the fills owing it now: a later
-		// request for it may recover it again.
+		// A recovery no held fill owes any group of is cancelled, once none of its streams is
+		// still being read or nobody reads the track, and a group is recovered once for the
+		// fills owing it now: a later request for it may recover it again.
 		self.recoveries
-			.retain(|recovery| owed.overlaps(&recovery.groups) || recovery.reading());
+			.retain(|recovery| owed.overlaps(&recovery.groups) || (read && recovery.reading()));
 		let still: RangeSet<u64> = self.recoveries.iter().map(|recovery| recovery.groups.clone()).collect();
 		self.recovering = still;
 		let recovered: Vec<_> = self.recovered.iter().cloned().collect();
