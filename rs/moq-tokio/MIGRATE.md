@@ -4,6 +4,15 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### QUIC waits have caller-owned poll forms ([#7707](https://github.com/moq-dev/moq/pull/7707))
+
+The QUIC driver connection's stream opens, accepts, datagram receive and close waits,
+the endpoint's accept, and both send handles' close waits now expose `poll_*` methods
+taking `&self, &kio::Waiter`. Existing async methods keep their behavior and wrap the
+polls. `send::Finished` also implements `Future`, with the same result as `stopped()`:
+`None` for acknowledged data and FIN or a local reset, `Some(code)` for a peer stop,
+and an error if the connection ends first.
+
 ### The iroh backend is removed ([#7345](https://github.com/moq-dev/moq/pull/7345))
 
 The `iroh` feature and module are gone, with `settings::Iroh`, `Client::with_iroh` and `with_iroh_addrs`, `server::Config::iroh`, `Server::iroh_endpoint` and `Listener::iroh_endpoint`, `Transport::Iroh`, `Error::Iroh` and `Error::IrohDisabled`, `secret::load_or_create`, and `quic::Resolved::gso_disabled`.
