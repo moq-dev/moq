@@ -15,6 +15,29 @@ DEVICE_FEATURES = "moq-video/capture moq-audio/capture moq-audio/playback moq-cl
 LINUX = os.uname().sysname == "Linux"
 
 
+def target_features():
+    """Every bench and example `required-features`, as `crate/feature`, for the workspace."""
+    metadata = json.loads(
+        subprocess.run(
+            ["cargo", "metadata", "--locked", "--format-version", "1", "--no-deps"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    )
+    return sorted(
+        {
+            f"{package['name']}/{feature}"
+            for package in metadata["packages"]
+            if not package["name"].endswith("-fuzz")
+            for target in package["targets"]
+            if {"bench", "example"} & set(target["kind"])
+            for feature in target.get("required-features", [])
+        }
+    )
+
+
 def dispatch_scope():
     """The rs module's impact pattern, as sh/dispatch.sh registers it."""
     return re.search(r"^module rs '([^']*)'", (ROOT / "sh/dispatch.sh").read_text(), re.M).group(1)
@@ -50,11 +73,12 @@ class SelectTest(unittest.TestCase):
             return calls.read_text().splitlines() if calls.exists() else []
 
     def test_nextest_launcher_selects_workspace(self):
+        features = [*DEVICE_FEATURES.split(), "moq-tokio/webrtc", *(["moq-relay/io-uring"] if LINUX else [])]
+        features += [feature for feature in target_features() if feature not in features]
         for github_actions in (False, True):
             for action in ("check", "check-test", "lint", "test"):
                 with self.subTest(action=action, github_actions=github_actions):
-                    suffix = f" --features {DEVICE_FEATURES} moq-tokio/webrtc" if action == "test" else ""
-                    suffix += " moq-relay/io-uring" if LINUX and action == "test" else ""
+                    suffix = f" --benches --examples --features {' '.join(features)}" if action == "test" else ""
                     suffix += " --timings" if github_actions and action == "test" else ""
                     self.assertIn(
                         f"rs {action} --workspace {FUZZ_EXCLUDES}{suffix}",
@@ -117,7 +141,8 @@ class SelectTest(unittest.TestCase):
             with self.subTest(path=path):
                 calls = self.selected(path, action="test")
                 self.assertEqual(len(calls), 1, calls)
-                self.assertTrue(calls[0].endswith(f" --features {features}"), calls)
+                # The targets' required features follow the device ones.
+                self.assertIn(f" --features {features}", calls[0])
         # moq-tokio's WebRTC module is off by default too.
         calls = self.selected("rs/moq-tokio/src/webrtc.rs", action="test")
         self.assertEqual(len(calls), 1, calls)
@@ -195,6 +220,20 @@ class SelectTest(unittest.TestCase):
         calls = self.selected(bench, "rs/moq-stats/src/lib.rs", action="test")
         self.assertTrue(any("/rs/moq-relay#" in call for call in calls), calls)
 
+    def test_a_bench_alone_enables_its_required_features(self):
+        # Alone in the selection, no dependent turns these on, and cargo would
+        # skip the targets without a word.
+        for bench, feature in (
+            ("rs/moq-stats/benches/producer_tick.rs", "moq-stats/bench"),
+            ("rs/moq-net/benches/codec.rs", "moq-net/fuzz"),
+            ("rs/moq-relay/benches/session.rs", "moq-relay/test-support"),
+            ("rs/moq-quic/benches/wire.rs", "moq-quic/fuzz"),
+        ):
+            with self.subTest(bench=bench):
+                (call,) = [call for call in self.selected(bench, action="test") if call.startswith("rs test ")]
+                self.assertIn(" --benches --examples ", call)
+                self.assertIn(feature, call.split(" --features ", 1)[1].split())
+
 
 class MetadataTest(unittest.TestCase):
     def setUp(self):
@@ -263,7 +302,10 @@ class MetadataTest(unittest.TestCase):
         self.assertEqual(result.stderr, "")
         self.assertEqual(
             self.calls.read_text().splitlines(),
-            ["rs test --package path+file:///rs/dependent#1.0.0 --package path+file:///rs/seed#1.0.0 --no-tests=pass"],
+            [
+                "rs test --package path+file:///rs/dependent#1.0.0 --package path+file:///rs/seed#1.0.0"
+                " --no-tests=pass --benches --examples"
+            ],
         )
 
     def test_malformed_metadata_stops_before_running_tests(self):

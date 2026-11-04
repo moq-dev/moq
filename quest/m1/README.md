@@ -147,6 +147,8 @@ per-frame CPU growth since #5926.
 - [Drop set](/quest/m1/drop-set.md) - each cursor judges missing groups against its own budget, so a narrow reader drops promptly and a widening re-offers groups already reported dropped on lite-07
 - [Datagram tracks](/quest/m1/datagram-tracks/README.md) - a track is datagrams or streams; datagram tracks have their own request and sequence, no ranges, no cache, and map to object ID 0 on moq-transport
 - [A step back smaller than the delay keeps the TS export](/quest/m1/ts-small-step-back.md) - audio restarts instead of regressing; video stays within its declared depth
+- [Taking control of a CARLA truck starts from neutral pedals](/quest/m1/carla-takeover-neutral.md) - a viewer's takeover releases the autopilot's throttle instead of driving off the road on it
+- [A wedged CARLA truck nobody drives respawns after the stuck timeout](/quest/m1/carla-stuck-handback.md) - find what kept the 300 s stuck respawn off for a truck wedged after a handback, and fix it
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [Sockets](/quest/m1/socket/README.md) - a generic dial/accept `Socket` in moq-net, Rust, JS, and Python, with tracks as streams; moq-boy and CARLA move onto it
 - [A smaller, safer API than release](/quest/m1/api-audit/README.md) - every surface added since release has a consumer or is gone, overlapping operations are collapsed, names mirror across Rust, JS, and the bindings, and every break says how to migrate
@@ -175,7 +177,6 @@ per-frame CPU growth since #5926.
 - [Ordered reads can skip owed holes, and snapshot latest() does](/quest/m1/ordered-owed-holes.md) - moq-net's `Ordered` gains a read that skips past an owed hole to the newest buffered group, while keeping the reader's bounds
 - [A Rust relay never replays from group 0 to a lite-03/04 subscriber](/quest/m1/relay-inflight-replay.md) - A Rust relay or publisher serving a lite-03 or lite-04 SUBSCRIBE from a track copy that is still resolving starts at the newest group once the copy resolves
 - [The resume model ends #7739's clean-end seed](/quest/m1/resume-seed-17893651.md) - replay seed 17893651 after #7705's wake fix, and fix it if a long-budget reader still never gets the end
-- [Stats name the route instance's epoch with a type](/quest/m1/stats-epoch-type.md) - `GroupFrame::epoch` gets a dedicated type and tests stop mislabelling the instance
 - [Every moq-mux consumer gets the catalog warmup from one entry point](/quest/m1/mux-warmup.md) - one moq-mux call widens the subscription and configures the consumer, adopted by moq-audio, moq-c, moq-ffi's raw consumer, and moqsrc
 - [Codex shells never load another checkout's dev environment](/quest/m1/codex-env-snapshot.md) - the Codex dev-shell snapshot is skipped when stale or inside `nix develop`
 
