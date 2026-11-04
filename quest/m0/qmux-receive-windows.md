@@ -10,8 +10,7 @@ throughput comparison before and after recorded in the PR.
 ## Plan
 
 Planned 2026-11-04 (maintainer, m0) from
-[qmux stream limits](/quest/m0/qmux-stream-limits.md)
-([moq-dev/moq#7893](https://github.com/moq-dev/moq/pull/7893)): `@moq/net`
+[qmux stream limits](https://github.com/moq-dev/moq/pull/7893): `@moq/net`
 still uses `@moq/qmux`'s defaults (`receiveWindow` 1 MiB per connection, 256
 KiB per stream, in `js/qmux/src/session.ts`), while `moq-tokio` uses
 `DEFAULT_RECEIVE_WINDOW` 4 MiB (`rs/moq-tokio/src/quic.rs`, sized for about
