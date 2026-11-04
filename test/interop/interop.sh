@@ -533,6 +533,9 @@ plan_pass() {
         done
         record "not run" case="compressed catalog" publisher=rust subscriber="$runtime"
         record "not run" case="hls grid" publisher="$runtime" subscriber=rust
+        for transport in websocket webtransport; do
+            record "not run" case="track replacement $transport" publisher="$runtime" subscriber="$runtime" version=moq-lite-07-wip
+        done
     done
     needs js-native-node || return 0
     for version in "${DROP_VERSIONS[@]}"; do
@@ -2307,7 +2310,10 @@ run_replacement_case() {
     harness_spawn "$name" "$LOGS/$name.log" timeout -k 3 "$TIMEOUT" \
         "${command[@]}" "$CLIENTS/js-native/replace.ts" \
         "$(token_url --publish "$prefix/**")" "$(token_url --subscribe "$prefix/**")" "$prefix" "$transport"
-    if harness_wait "$HARNESS_PID"; then
+    # Judged by its printed marker, as run_native is: the addon can crash during Bun's exit
+    # teardown after every assertion has passed.
+    harness_wait "$HARNESS_PID" || true
+    if grep -qx 'replacement automatic=64 immediate=2 resumed=2 missing-group-fetch=2' "$LOGS/$name.log"; then
         echo "  PASS  track replacement $runtime ($transport)"
         record pass "${cell[@]}" seconds=$((SECONDS - started))
     else

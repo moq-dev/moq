@@ -70,8 +70,8 @@ try {
 	write(0n);
 	ordered = subscribe(0, 0n);
 	check(await ordered.readFrame(), 0n);
-	// Leave the old-group miss to the relay's automatic FETCH path, as a failed live
-	// source does. With the old decoder that closes the publisher, the next read is unroutable.
+	// Leave the old-group miss to the relay, as a failed live source does. This loop checks
+	// only that each reader reaches the replacement; the explicit FETCHes below assert the codec.
 	for (let sequence = 1n; sequence <= 64n; sequence++) {
 		const continued = ordered.readFrame();
 		track.abort(new Moq.Error.Stream(Moq.StreamCode.Internal, { message: "source failed" }));
