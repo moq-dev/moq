@@ -221,6 +221,8 @@ impl RangeFills {
 		}
 
 		let mut ask = FillAsk::default();
+		// Every run a held fill still owes, recovered or not.
+		let mut owed = RangeSet::new();
 		let refused = &self.refused;
 		let recovering = &self.recovering;
 		self.held.retain_mut(|fill| {
@@ -244,6 +246,7 @@ impl RangeFills {
 					refuse_fill(fill, groups, err.clone());
 					continue;
 				}
+				owed.insert(run.clone());
 				// A run being recovered waits on its own subscription.
 				for gap in recovering.gaps(&run) {
 					ask.groups.insert(gap);
@@ -252,6 +255,21 @@ impl RangeFills {
 				return true;
 			}
 		});
+
+		// A recovery no held fill owes any group of is cancelled once none of its streams is
+		// still being read, and a group is recovered once for the fills owing it now: a later
+		// request for it may recover it again.
+		self.recoveries
+			.retain(|recovery| owed.overlaps(&recovery.groups) || recovery.reading());
+		let still: RangeSet<u64> = self.recoveries.iter().map(|recovery| recovery.groups.clone()).collect();
+		self.recovering = still;
+		let recovered: Vec<_> = self.recovered.iter().cloned().collect();
+		self.recovered = RangeSet::new();
+		for run in recovered {
+			for kept in owed.overlapping(&run) {
+				self.recovered.insert(kept.start.max(run.start)..kept.end.min(run.end));
+			}
+		}
 
 		// A run stays asked whole while a fill still owes any of it, so the subscription
 		// changes once as a run is asked and once as it is done, and the streams of its
@@ -266,8 +284,9 @@ impl RangeFills {
 				groups.insert(run.clone());
 				continue;
 			}
+			// Only the groups the cache holds, so a wide run costs what it holds.
 			for gap in self.draining.gaps(run) {
-				for sequence in gap {
+				for sequence in edge.cached_groups(gap) {
 					if let Some(mut group) = edge.peek_group(sequence)
 						&& group.poll_finished(waiter).is_pending()
 					{
@@ -355,6 +374,14 @@ impl Recovery {
 		}
 	}
 
+	/// Whether a stream of the subscription is still being read, which cancelling would cut.
+	fn reading(&self) -> bool {
+		match &self.state {
+			RecoveryState::Active(active) => active.tail.read().is_reading(),
+			_ => false,
+		}
+	}
+
 	/// End the subscription, refusing what is left of the groups with `err`, as nothing more
 	/// will arrive on it.
 	fn end(&mut self, err: StreamError) {
@@ -362,11 +389,8 @@ impl Recovery {
 		let mut owed = RangeSet::new();
 		owed.insert(self.groups.clone());
 		if let RecoveryState::Active(active) = &state {
-			let tail = active.tail.read();
-			for sequence in self.groups.clone() {
-				if tail.covers(sequence..sequence + 1) {
-					owed.remove(sequence..sequence + 1);
-				}
+			for arrived in active.tail.read().accounted(self.groups.clone()) {
+				owed.remove(arrived);
 			}
 		}
 		for (refused, _) in self.refused.iter() {

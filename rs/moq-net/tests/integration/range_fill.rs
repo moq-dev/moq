@@ -117,7 +117,7 @@ async fn receive(reader: &mut moq_net::track::Subscriber, count: usize) -> BTree
 /// SUBSCRIBE of its own, not a FETCH per group.
 #[kio::test]
 async fn evicted_history_is_recovered_once_on_its_own_subscription() {
-	kio::clock::timeout(TIMEOUT + cache::DEFAULT_EXPIRY * 3, async {
+	kio::clock::timeout(TIMEOUT + cache::DEFAULT_EXPIRY * 6, async {
 		let fixture = Fixture::new(6).await;
 		let mut first = fixture.subscribe([Range::oldest()]).await;
 		assert_eq!(receive(&mut first, 6).await, (0..6).collect());
@@ -141,6 +141,17 @@ async fn evicted_history_is_recovered_once_on_its_own_subscription() {
 		group.finish().unwrap();
 		assert_eq!(receive(&mut first, 1).await, [6].into());
 		assert_eq!(fixture.opened(SUBSCRIBE), subscribes + 1, "recovered once");
+
+		// Expired again, the history is recovered again for a later reader.
+		drop(second);
+		kio::clock::sleep(cache::DEFAULT_EXPIRY * 2 + Duration::from_secs(2)).await;
+		let mut third = fixture.subscribe([Range::groups(1..4)]).await;
+		assert_eq!(receive(&mut third, 3).await, (1..4).collect());
+		assert_eq!(
+			fixture.opened(SUBSCRIBE),
+			subscribes + 2,
+			"recovered for the later reader"
+		);
 	})
 	.await
 	.expect("timed out");
