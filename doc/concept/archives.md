@@ -106,8 +106,8 @@ resolve against the served track's cache, not the archive's stored keys, so they
 cannot reliably seek old stored content. There is no automatic switch from a
 live broadcast to its archive at the original path.
 
-The archived catalog is an ordinary track. [HLS](/bin/hls) can serve a recording
-whose renditions include their `hls` record tracks, just as it serves a live
-broadcast; a rendition without those records gets no playlist. The catalog's
-per-rendition [`hls`](/concept/hang#catalog) field describes HLS segmentation,
-not archive discovery. Protected broadcasts are outside this archive workflow.
+The archived catalog is an ordinary track. [HLS](/bin/hls) serves a recording
+from its media tracks, numbered on the catalog's `media.join.interval`, just as
+it serves a live broadcast; a recording whose catalog declares no interval gets
+no playlists. The [join interval](/concept/hang#catalog) describes HLS
+segmentation, not archive discovery. Protected broadcasts are outside this archive workflow.

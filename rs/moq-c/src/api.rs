@@ -212,7 +212,7 @@ impl moq_audio_hint {
 		Ok(())
 	}
 
-	/// The supplied group duration, for the track's HLS records.
+	/// The supplied group duration, for the broadcast's join interval.
 	fn group_duration(&self) -> Result<Option<std::time::Duration>, Error> {
 		group_duration(self.has_group_duration, self.group_duration_us)
 	}
@@ -330,7 +330,7 @@ impl moq_video_hint {
 		Ok(out)
 	}
 
-	/// The supplied group duration, for the track's HLS records.
+	/// The supplied group duration, for the broadcast's join interval.
 	fn group_duration(&self) -> Result<Option<std::time::Duration>, Error> {
 		group_duration(self.has_group_duration, self.group_duration_us)
 	}
@@ -2565,8 +2565,8 @@ pub extern "C" fn moq_publish_catalog_finish(broadcast: u32) -> i32 {
 pub unsafe extern "C" fn moq_publish_audio(broadcast: u32, config: *const moq_audio_init) -> i32 {
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
-		let (audio, hls) = unsafe { parse_audio_init(config)? };
-		State::lock().publish.audio(broadcast, audio, hls)
+		let (audio, interval) = unsafe { parse_audio_init(config)? };
+		State::lock().publish.audio(broadcast, audio, interval)
 	})
 }
 
@@ -2600,8 +2600,8 @@ unsafe fn parse_audio_init(
 pub unsafe extern "C" fn moq_publish_video(broadcast: u32, config: *const moq_video_init) -> i32 {
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
-		let (video, hls) = unsafe { parse_video_init(config)? };
-		State::lock().publish.video(broadcast, video, hls)
+		let (video, interval) = unsafe { parse_video_init(config)? };
+		State::lock().publish.video(broadcast, video, interval)
 	})
 }
 
@@ -2649,7 +2649,7 @@ pub unsafe extern "C" fn moq_publish_container(broadcast: u32, config: *const mo
 /// For a codec track this ends the open group; the next frame written starts a new one. Audio has
 /// no boundary of its own (every packet is independently decodable), so this is the only thing
 /// that gives it groups: call it after every frame for one group (one QUIC stream) the relay
-/// forwards without waiting, or at a segment cadence to align with video for HLS/DASH. Video
+/// forwards without waiting, or less often to batch frames into fewer groups. Video
 /// groups at its own keyframes and needs this only to override that.
 ///
 /// A container has its own [moq_publish_container_cut], since it rolls a group on every track it
@@ -3407,8 +3407,8 @@ pub unsafe extern "C" fn moq_track_request_accept(request: u32, info: *const moq
 pub unsafe extern "C" fn moq_track_request_audio(request: u32, config: *const moq_audio_init) -> i32 {
 	ffi::enter(move || {
 		let request = ffi::parse_id(request)?;
-		let (audio, hls) = unsafe { parse_audio_init(config)? };
-		State::lock().publish.track_request_audio(request, audio, hls)
+		let (audio, interval) = unsafe { parse_audio_init(config)? };
+		State::lock().publish.track_request_audio(request, audio, interval)
 	})
 }
 
@@ -3423,8 +3423,8 @@ pub unsafe extern "C" fn moq_track_request_audio(request: u32, config: *const mo
 pub unsafe extern "C" fn moq_track_request_video(request: u32, config: *const moq_video_init) -> i32 {
 	ffi::enter(move || {
 		let request = ffi::parse_id(request)?;
-		let (video, hls) = unsafe { parse_video_init(config)? };
-		State::lock().publish.track_request_video(request, video, hls)
+		let (video, interval) = unsafe { parse_video_init(config)? };
+		State::lock().publish.track_request_video(request, video, interval)
 	})
 }
 

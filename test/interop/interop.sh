@@ -525,7 +525,7 @@ plan_pass() {
             record "not run" case=compress publisher="$runtime" subscriber=rust version="$version"
         done
         record "not run" case="compressed catalog" publisher=rust subscriber="$runtime"
-        record "not run" case="hls records" publisher="$runtime" subscriber=rust
+        record "not run" case="hls grid" publisher="$runtime" subscriber=rust
     done
     needs js-native-node || return 0
     for version in "${DROP_VERSIONS[@]}"; do
@@ -2368,15 +2368,15 @@ run_hls_publisher() {
     esac
 }
 
-# A native JS publisher's HLS records and declared durations match Rust's for the same frames:
-# moq-mux and @moq/hang each publish one schedule through the relay, and the Rust reader's
-# readout of the two broadcasts must be identical.
-run_hls_records() {
+# A native JS publisher's declared join interval and groups match Rust's for the same frames, so
+# an HLS edge numbers its segments alike: moq-mux and @moq/hang each publish one schedule through
+# the relay, and the Rust reader's readout of the two broadcasts must be identical.
+run_hls_grid() {
     local runtime="$1" started=$SECONDS publisher pid why="" want got
     local name="hls-$1" fifo="$LOGS/hls-ack" broadcast="hls-$1-$$-$RANDOM"
-    local cell=(case="hls records" publisher="$runtime" subscriber=rust log="$LOGS/$name-$runtime-read.log")
+    local cell=(case="hls grid" publisher="$runtime" subscriber=rust log="$LOGS/$name-$runtime-read.log")
     if is_broken "$runtime"; then
-        echo "  FAIL  hls records $runtime -> rust (client unavailable)"
+        echo "  FAIL  hls grid $runtime -> rust (client unavailable)"
         record fail "${cell[@]}" detail="client unavailable"
         overall=1
         return
@@ -2387,7 +2387,7 @@ run_hls_records() {
         harness_spawn "$name-$publisher-pub" "$LOGS/$name-$publisher-pub.log" run_hls_publisher "$fifo" "$publisher" "$(token_url --publish "$broadcast-$publisher/**")" "$broadcast-$publisher"
         pid="$HARNESS_PID"
         harness_spawn "$name-$publisher-read" "$LOGS/$name-$publisher-read.log" timeout -k 3 "$TIMEOUT" "$EXAMPLES/interop-hls" read "$(token_url --subscribe "$broadcast-$publisher/**")" "$broadcast-$publisher"
-        harness_wait "$HARNESS_PID" || why="${why:-$publisher records unreadable}"
+        harness_wait "$HARNESS_PID" || why="${why:-$publisher groups unreadable}"
         printf 'clean end\n' >&9
         harness_wait "$pid" || true
         grep -qx 'hls acknowledged' "$LOGS/$name-$publisher-pub.log" || why="${why:-$publisher publisher did not acknowledge}"
@@ -2395,15 +2395,15 @@ run_hls_records() {
     want=$(grep '^hls ' "$LOGS/$name-rust-read.log" || true)
     got=$(grep '^hls ' "$LOGS/$name-$runtime-read.log" || true)
     if [[ -z "$why" && -z "$want" ]]; then
-        why="rust published no records"
+        why="rust published no groups"
     elif [[ -z "$why" && "$want" != "$got" ]]; then
-        why="records differ from rust"
+        why="groups differ from rust"
     fi
     if [[ -z "$why" ]]; then
-        echo "  PASS  hls records $runtime -> rust (match moq-mux)"
+        echo "  PASS  hls grid $runtime -> rust (match moq-mux)"
         record pass "${cell[@]}" seconds=$((SECONDS - started))
     else
-        echo "  FAIL  hls records $runtime -> rust ($why)"
+        echo "  FAIL  hls grid $runtime -> rust ($why)"
         record fail "${cell[@]}" seconds=$((SECONDS - started)) detail="$why"
         overall=1
         diff <(echo "$want") <(echo "$got") || true
@@ -2455,7 +2455,7 @@ run_tails() {
             run_tail_pair "$runtime" rust compress "$version"
         done
         run_catalog_fanout "$runtime"
-        run_hls_records "$runtime"
+        run_hls_grid "$runtime"
     done
     if needs js-native-node; then
         for version in "${DROP_VERSIONS[@]}"; do

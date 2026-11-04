@@ -88,9 +88,6 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	// open group belongs to an older one rolls, so every track segments identically.
 	segment: u64,
 
-	// The current segment's boundary was declared by the source (rather than inferred from a
-	// keyframe), so each track cuts its HLS segments where it opens its group for the segment.
-	declared: bool,
 	dropped_metadata: u64,
 
 	// A seek or discontinuity waiting for the fragment still publishing.
@@ -164,10 +161,9 @@ struct Passthrough<E: crate::catalog::hang::CatalogExt> {
 	/// The latest group's start, which the next group may not start below.
 	start: Option<Timestamp>,
 
-	// Reports this track's groups into its HLS records, unless disabled. Passthrough writes groups by
-	// hand (no `container::Producer`), so the recorder is fed directly rather than through
-	// `with_recorder`.
-	recorder: Option<crate::hls::Recorder>,
+	// This track's place in the broadcast's join interval. Passthrough writes groups by hand (no
+	// `container::Producer`), so it reports what its estimator measured itself.
+	member: Option<crate::catalog::interval::Member>,
 
 	// Sequence to use for the next group, set by `Import::seek`.
 	pending_sequence: Option<u64>,
@@ -189,6 +185,9 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 	fn publish_estimate(&mut self) -> crate::Result<()> {
 		let reading = self.estimator.reading();
 		self.claim.update(&self.track.demand(), reading.estimate.bitrate);
+		if let Some(member) = self.member.as_mut() {
+			member.report(reading.interval);
+		}
 		self.rendition.estimate(reading)
 	}
 
@@ -206,10 +205,13 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 	fn finish(&mut self) -> crate::Result<()> {
 		self.close()?;
 		self.track.finish()?;
+		// A track that ended before measuring declares what it saw, and no longer holds the join
+		// interval back.
+		if let Some(mut member) = self.member.take() {
+			member.finish(self.estimator.partial_interval());
+		}
 		// The importer may be kept around, but its media stops holding the other tracks back.
 		self.estimator.discontinuity();
-		// Dropping the recorder stops the open HLS segment, so the track is advertised.
-		self.recorder = None;
 		Ok(())
 	}
 
@@ -282,7 +284,6 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			failed: None,
 			pending_cut: false,
 			segment: 0,
-			declared: false,
 			dropped_metadata: 0,
 			deferred: Deferred::default(),
 		}
@@ -608,12 +609,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			self.catalog.track_info(kind.priority()).with_timescale(timescale),
 		)?;
 
-		// Enroll every track for HLS records: passthrough writes groups by hand (no
-		// `container::Producer`), so the recorder is fed directly at each fragment.
-		let mut recorder = self.catalog.enroll(track.name(), None)?;
-		if let Some(recorder) = recorder.as_mut() {
-			recorder.lend(&track);
-		}
+		// Join the broadcast's join interval, measured: an fMP4 declares no GOP.
+		let member = Some(self.catalog.join(None));
 
 		// Whatever the descriptor declared (a bitrate) is authoritative; the rest is filled by
 		// `estimate` as fragments arrive.
@@ -638,7 +635,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			track,
 			group: None,
 			start: None,
-			recorder,
+			member,
 			pending_sequence: None,
 			estimator: self.catalog.estimator(),
 			claim: crate::catalog::Claim::new(self.catalog.bandwidth()),
@@ -1094,9 +1091,6 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		let has_video = self.tracks.values().any(|t| t.kind == Kind::Video);
 		if self.starts_segment(&moof, has_video, len.unwrap_or(usize::MAX)) {
 			self.segment += 1;
-			// A boundary the source declared is also an HLS segment boundary; one merely inferred
-			// from a keyframe is not, since the default pacing already sees that group open.
-			self.declared = self.pending_cut;
 			self.pending_cut = false;
 		}
 		let mut resolver = sample::Resolver::new(self.moof_span, len.unwrap_or(usize::MAX));
@@ -1144,7 +1138,6 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			let placement = Placement {
 				offset,
 				new_segment: track.segment != Some(self.segment),
-				declared: track.segment != Some(self.segment) && self.declared,
 			};
 			let prefix = match track.output {
 				Output::Passthrough(_) => Some(fragment(traf, &moof, &run, &track.defaults)?),
@@ -1213,7 +1206,6 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					if pending.writer.is_none() {
 						if *sample_index == 0 {
 							pending.placement.new_segment = track.segment != Some(self.segment);
-							pending.placement.declared = pending.placement.new_segment && self.declared;
 						}
 						let (writer, opened) = match &mut track.output {
 							Output::Passthrough(output) => {
@@ -1354,8 +1346,6 @@ struct Placement {
 	offset: crate::catalog::Offset,
 	/// The fragment is this track's first in the current segment.
 	new_segment: bool,
-	/// That segment was declared by the source, so it is an HLS segment boundary too.
-	declared: bool,
 }
 
 impl Placement {
@@ -1604,13 +1594,6 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		};
 
 		if start_group {
-			// A group reopened mid-segment (after a `seek`) is no segment boundary.
-			if placement.declared
-				&& let Some(recorder) = self.recorder.as_mut()
-			{
-				recorder.cut(timestamp);
-			}
-
 			// Close the previous group for the bitrate estimator (used only when the
 			// descriptor didn't declare a bitrate).
 			self.estimator.cut(Some(timestamp));
@@ -1632,7 +1615,6 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 
 	fn complete(&mut self, writer: moq_net::frame::Producer, pending: &PendingTrack, kind: Kind) -> Result<()> {
 		let group = writer.finish()?;
-		let sequence = group.sequence;
 		let run = &pending.run;
 		let timestamp = pending.placement.offset.apply(run.earliest)?;
 		let end = pending.placement.offset.apply(run.end)?;
@@ -1642,20 +1624,13 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			Kind::Video => run.samples.iter().filter(|sample| sample.sync).count() as u64,
 			Kind::Audio => 0,
 		};
-		// Only once published, so a rejected fragment is never listed.
-		if let Some(recorder) = self.recorder.as_mut() {
-			recorder.frame(sequence, timestamp);
-		}
-
 		self.group = Some(group);
 
 		self.estimator.write(timestamp, pending.size);
 		let bytes = run.samples.iter().map(|sample| sample.range.len()).sum();
 		self.sent.add(run.samples.len() as u64, bytes, keyframes);
-		if let Some(recorder) = self.recorder.as_mut() {
-			recorder.end(end);
-		}
 		self.estimator.burst(end.checked_sub(timestamp)?.into());
+		self.estimator.reach(end);
 		self.publish_estimate()?;
 		Ok(())
 	}
@@ -1681,9 +1656,6 @@ fn open_sample<E: crate::catalog::hang::CatalogExt>(
 			Kind::Video => sample.sync,
 			Kind::Audio => (index == 0 && placement.new_segment) || producer.needs_keyframe(),
 		};
-		if keyframe && placement.declared && !pending.opened {
-			producer.boundary(placement.offset.apply(run.earliest)?);
-		}
 		if sample.pts > sample.dts {
 			producer.reorder(Timestamp::new(sample.pts - sample.dts, timescale)?);
 		}
@@ -1861,14 +1833,11 @@ impl<E: crate::catalog::hang::CatalogExt> Drop for Import<E> {
 			}
 		}
 		for mut track in std::mem::take(&mut self.tracks).into_values() {
-			let (name, ended) = media!(&mut track.output,
-				producer => (producer.name().to_string(), producer.end()),
-				passthrough => (passthrough.track.name().to_string(), passthrough.end()));
+			let ended = media!(&mut track.output, producer => producer.end(), passthrough => passthrough.end());
 			drop(track);
 			if let Err(err) = ended {
 				tracing::warn!(%err, "failed to end a dropped fMP4 track");
 			}
-			self.catalog.retire_dropped(&name);
 		}
 	}
 }
