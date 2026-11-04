@@ -439,6 +439,19 @@ async fn lite05_and_lite06_answer_a_datagram_request_beside_a_silent_stream_hand
 	}
 }
 
+/// A relay serving an old subscriber asks its upstream session for a name's datagram track
+/// once the stream track is not found there, as one asks a lite-07 upstream.
+#[kio::test]
+async fn an_old_subscriber_reaches_a_datagram_track_through_a_lite07_relay() {
+	let chain = Chain::new(&["moq-lite-07-wip", "moq-lite-06"]).await;
+	let mut producer = chain.publication.create_datagrams(TRACK, timed()).unwrap();
+	let mut consumer = chain.consume(&producer, 2).await;
+	producer.append(millis(4), &b"relayed"[..]).unwrap();
+	let datagram = recv(&mut consumer).await.unwrap().expect("a datagram");
+	assert_eq!(&datagram.payload[..], b"relayed");
+	assert_eq!(datagram.timestamp, Some(millis(4)));
+}
+
 /// An old hop answers a datagram lookup for every stream track it carries, so a relay serving
 /// an old subscriber keeps a stream track's name a stream track, though that relayed answer
 /// may arrive before the stream track's.

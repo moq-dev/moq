@@ -2562,8 +2562,8 @@ impl Request for SubscribeServe {
 struct Legacy {
 	broadcast: crate::broadcast::Consumer,
 	name: String,
-	/// The name's datagram track, asked for beside the stream track: `None` until asked, and
-	/// `Some(None)` once refused or not asked, as of a relayed broadcast.
+	/// The name's datagram track, asked for beside the stream track: `None` until asked, as
+	/// a relayed broadcast's stays, and `Some(None)` once refused.
 	datagrams: Option<Option<datagram::Consumer>>,
 }
 
@@ -2586,12 +2586,13 @@ impl Legacy {
 		let Some(this) = legacy else {
 			return Poll::Pending;
 		};
-		let asked = this.datagrams.get_or_insert_with(|| {
-			this.broadcast
-				.has_local_datagrams()
-				.then(|| this.broadcast.datagrams(&this.name).ok())
-				.flatten()
-		});
+		// A relayed broadcast is left unasked, for the stream track's not-found to ask.
+		if this.datagrams.is_none() && !this.broadcast.has_local_datagrams() {
+			return Poll::Pending;
+		}
+		let asked = this
+			.datagrams
+			.get_or_insert_with(|| this.broadcast.datagrams(&this.name).ok());
 		let Some(consumer) = asked else {
 			return Poll::Pending;
 		};
