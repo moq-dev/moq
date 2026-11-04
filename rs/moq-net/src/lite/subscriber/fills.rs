@@ -107,7 +107,7 @@ pub(super) struct RangeFills {
 	/// Asked groups no fill owes any more, already searched for streams still being read.
 	draining: RangeSet<u64>,
 	/// Groups the subscription said it will not deliver, and why.
-	refused: RangeMap<u64, StreamError>,
+	refused: RangeMap<u64, Refusal>,
 	/// Groups below where a fill's range starts, by the asked run that range carries, which
 	/// stand only while that range is live.
 	skipped: RangeMap<u64, Range<u64>>,
@@ -147,14 +147,14 @@ impl RangeFills {
 				for fresh in self.recovered.gaps(&groups).collect::<Vec<_>>() {
 					self.recover.insert(fresh);
 				}
-				// Recovered once already: this drop stands.
+				// Recovered once already: this drop stands for the fills owing it now.
 				for again in self.recovered.overlapping(&groups).cloned().collect::<Vec<_>>() {
 					let again = again.start.max(groups.start)..again.end.min(groups.end);
-					self.refused.insert(again, err.clone());
+					self.refused.insert(again, Refusal::dropped(err.clone()));
 				}
 				continue;
 			}
-			self.refused.insert(groups, err.clone());
+			self.refused.insert(groups, Refusal::dropped(err.clone()));
 		}
 	}
 
@@ -179,12 +179,13 @@ impl RangeFills {
 	}
 
 	/// Why the subscription will not deliver the run of groups from `first`, if it said so.
-	fn refusal(&self, first: u64) -> Option<(Range<u64>, StreamError)> {
-		if let Some((groups, err)) = self.refused.get_key_value(&first) {
-			return Some((groups.clone(), err.clone()));
+	fn refusal(&self, first: u64) -> Option<(Range<u64>, Refusal)> {
+		if let Some((groups, refusal)) = self.refused.get_key_value(&first) {
+			return Some((groups.clone(), refusal.clone()));
 		}
+		// The subscriber's own range starting past them says nothing of the source.
 		let (groups, _) = self.skipped.get_key_value(&first)?;
-		Some((groups.clone(), StreamError::NotFound))
+		Some((groups.clone(), Refusal::passing(StreamError::NotFound)))
 	}
 
 	/// Settle each held fill against what the subscription refused, open a [`Recovery`] for
@@ -216,7 +217,8 @@ impl RangeFills {
 						for again in self.recovered.overlapping(&gap).cloned().collect::<Vec<_>>() {
 							let again = again.start.max(gap.start)..again.end.min(gap.end);
 							if self.refusal(again.start).is_none() {
-								self.refused.insert(again, StreamError::NotFound);
+								// Recovered once for these fills; a later request may recover it again.
+								self.refused.insert(again, Refusal::passing(StreamError::NotFound));
 							}
 						}
 						for fresh in self.recovered.gaps(&gap).collect::<Vec<_>>() {
@@ -254,8 +256,8 @@ impl RangeFills {
 		}
 		for (groups, refused) in done {
 			self.recovering.remove(groups);
-			for (groups, err) in refused.iter() {
-				self.refused.insert(groups.clone(), err.clone());
+			for (groups, refusal) in refused.iter() {
+				self.refused.insert(groups.clone(), refusal.clone());
 			}
 		}
 
@@ -280,9 +282,9 @@ impl RangeFills {
 					Order::Ascending => run.start,
 					Order::Descending => run.end - 1,
 				};
-				if let Some((groups, err)) = this.refusal(first) {
+				if let Some((groups, refusal)) = this.refusal(first) {
 					let groups = run.start.max(groups.start)..run.end.min(groups.end);
-					refuse_fill(fill, groups, err);
+					refusal.answer(fill, groups);
 					continue;
 				}
 				owed.insert(run.clone());
@@ -371,13 +373,39 @@ impl RangeFills {
 	}
 }
 
-/// Answer `groups` of `fill` as the subscription that asked for them will not deliver them,
-/// with why: a miss names them dropped, as a FETCH's miss does.
-fn refuse_fill(fill: &track::Fill, groups: Range<u64>, err: StreamError) {
-	match err {
-		StreamError::NotFound => fill.drop_groups(groups),
-		StreamError::Old => fill.reject_groups(groups, Error::Old),
-		err => fill.refuse_groups(groups, Error::Stream(err)),
+/// Why the subscription that asked for groups will not deliver them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Refusal {
+	err: StreamError,
+	/// Whether the source no longer has them, which the track records so no reader asks
+	/// again: only a genuine miss, which its publisher named. Anything else answers only the
+	/// fills owing them now, since another request may still get them: a stale drop judges
+	/// a budget, and a range starting past them is the subscriber's own choice.
+	lost: bool,
+}
+
+impl Refusal {
+	/// The publisher gave the groups up with `err` (a SUBSCRIBE_DROP, or an end before them):
+	/// lost only when it never had them.
+	fn dropped(err: StreamError) -> Self {
+		let lost = err == StreamError::NotFound;
+		Self { err, lost }
+	}
+
+	/// Not delivered on this subscription, which says nothing of the source.
+	fn passing(err: StreamError) -> Self {
+		Self { err, lost: false }
+	}
+
+	/// Answer `groups` of `fill`: a lost group is named dropped, as a FETCH's miss is, and
+	/// anything else is refused for now, recorded nowhere.
+	fn answer(&self, fill: &track::Fill, groups: Range<u64>) {
+		match &self.err {
+			StreamError::NotFound if self.lost => fill.drop_groups(groups),
+			StreamError::NotFound => fill.refuse_groups(groups, Error::NotFound),
+			StreamError::Old => fill.refuse_groups(groups, Error::Old),
+			err => fill.refuse_groups(groups, Error::Stream(err.clone())),
+		}
 	}
 }
 
@@ -390,7 +418,7 @@ struct Recovery {
 	groups: Range<u64>,
 	state: RecoveryState,
 	/// The groups this subscription said it will not deliver, and why.
-	refused: RangeMap<u64, StreamError>,
+	refused: RangeMap<u64, Refusal>,
 	/// Whether SUBSCRIBE_START arrived.
 	started: bool,
 	/// Whether SUBSCRIBE_FINISH arrived.
@@ -458,7 +486,7 @@ impl Recovery {
 			owed.remove(refused.clone());
 		}
 		for gap in owed.iter() {
-			self.refused.insert(gap.clone(), err.clone());
+			self.refused.insert(gap.clone(), Refusal::passing(err.clone()));
 		}
 		self.serve.subscriber.remove_subscribe(self.id);
 		match state {
@@ -470,7 +498,7 @@ impl Recovery {
 
 	/// Ready once the recovery is over, with the groups it refused, or with the protocol
 	/// violation its publisher committed, which the subscription's would be too.
-	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<RangeMap<u64, StreamError>, Error>> {
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<RangeMap<u64, Refusal>, Error>> {
 		loop {
 			match &mut self.state {
 				RecoveryState::Establish(est) => match ready!(est.poll(waiter)) {
@@ -511,13 +539,13 @@ impl Recovery {
 					let version = self.serve.subscriber.version;
 					let groups = self.groups.clone();
 					// What the publisher gives up of the groups, accounted for in the tail.
-					let mut given_up = |given: Range<u64>, err: StreamError| {
+					let mut given_up = |given: Range<u64>, refusal: Refusal| {
 						if let Ok(mut tail) = active.tail.write() {
 							tail.account(given.clone(), now);
 						}
 						let given = given.start.max(groups.start)..given.end.min(groups.end);
 						if !given.is_empty() {
-							self.refused.insert(given, err);
+							self.refused.insert(given, refusal);
 						}
 					};
 					match res {
@@ -528,16 +556,22 @@ impl Recovery {
 							let from = start.starts[0].unwrap_or(groups.end);
 							given_up(
 								groups.start..from.clamp(groups.start, groups.end),
-								StreamError::NotFound,
+								Refusal::passing(StreamError::NotFound),
 							);
 						}
 						Ok(Some(lite::SubscribeResponse::Drop(dropped))) => {
-							given_up(dropped.start..dropped.end.saturating_add(1), dropped.error(version));
+							given_up(
+								dropped.start..dropped.end.saturating_add(1),
+								Refusal::dropped(dropped.error(version)),
+							);
 						}
 						// Nothing at or past the track's end will be produced.
 						Ok(Some(lite::SubscribeResponse::Finish(finish))) if !self.ended => {
 							self.ended = true;
-							given_up(finish.group.max(groups.start)..groups.end, StreamError::NotFound);
+							given_up(
+								finish.group.max(groups.start)..groups.end,
+								Refusal::dropped(StreamError::NotFound),
+							);
 						}
 						Ok(Some(lite::SubscribeResponse::Ok(_))) => {}
 						// A second START or FINISH, or a STARTED for a range no update added.
@@ -600,12 +634,104 @@ mod tests {
 		fills.recover = Default::default();
 		fills.refuse(2..5, StreamError::Old);
 		assert_eq!(fills.recover.iter().cloned().collect::<Vec<_>>(), [2..3]);
-		assert_eq!(fills.refused.get(&3), Some(&StreamError::Old));
+		assert_eq!(fills.refused.get(&3), Some(&Refusal::dropped(StreamError::Old)));
+		assert!(!fills.refused.get(&3).unwrap().lost, "a stale drop is never a loss");
 
 		fills.refuse(7..9, StreamError::NotFound);
 		assert_eq!(fills.refused.get(&7), None, "no fill asked for it");
 		fills.refuse(5..6, StreamError::NotFound);
-		assert_eq!(fills.refused.get(&5), Some(&StreamError::NotFound));
+		assert_eq!(fills.refused.get(&5), Some(&Refusal::dropped(StreamError::NotFound)));
+		assert!(fills.refused.get(&5).unwrap().lost, "the publisher never had it");
+	}
+
+	/// A track whose cache evicted groups 1..4, with a reader of them whose fill is the next
+	/// request.
+	fn missed() -> (track::Producer, track::Requests, track::Ordered, track::Fill) {
+		let producer = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"test",
+			track::Info::default()
+				.with_timescale(crate::Timescale::MILLI)
+				.with_max_age(None),
+		);
+		let requests = producer.requests();
+		for sequence in 0..6 {
+			let mut group = producer.create_group(group::Info { sequence }).unwrap();
+			group
+				.write_frame(crate::Timestamp::from_millis(sequence * 1000).unwrap(), b"x".as_slice())
+				.unwrap();
+			group.finish().unwrap();
+		}
+		for sequence in 1..4 {
+			producer.evict(sequence);
+		}
+		let (reader, fill) = ask(&producer, &requests);
+		(producer, requests, reader, fill)
+	}
+
+	/// A reader of groups 1..4, and the fill it asks for.
+	fn ask(producer: &track::Producer, requests: &track::Requests) -> (track::Ordered, track::Fill) {
+		let waiter = kio::Waiter::noop();
+		let mut reader = producer
+			.subscribe(
+				Subscription::default()
+					.with_delay(Delay::default().with_max(None))
+					.with_range(1..4),
+			)
+			.ordered();
+		assert!(reader.poll_next_group(&waiter).is_pending(), "groups 1..4 are owed");
+		let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
+			panic!("groups 1..4 are a miss");
+		};
+		(reader, fill)
+	}
+
+	/// A range starting past what a fill asked is the subscriber's own choice: the fill's
+	/// readers stop waiting, but nothing is recorded, so once a lowered start reaches the
+	/// groups a later reader asks again and gets them. A genuine miss stays dropped.
+	#[test]
+	fn a_skipped_start_is_never_a_loss() {
+		let waiter = kio::Waiter::noop();
+		let (producer, requests, mut reader, fill) = missed();
+		Refusal::passing(StreamError::NotFound).answer(&fill, 1..4);
+		assert!(
+			reader.poll_next_group(&waiter).is_ready(),
+			"the reader stops waiting for the skipped groups"
+		);
+		drop((reader, fill));
+
+		// The lowered start asks for them again, and they arrive.
+		let (mut reader, fill) = ask(&producer, &requests);
+		for sequence in 1..4 {
+			let mut group = fill.accept(sequence, None).unwrap();
+			group
+				.write_frame(crate::Timestamp::from_millis(sequence * 1000).unwrap(), b"x".as_slice())
+				.unwrap();
+			group.finish().unwrap();
+		}
+		for sequence in 1..4 {
+			let Poll::Ready(Ok(Some(group))) = reader.poll_next_group(&waiter) else {
+				panic!("group {sequence} was delivered");
+			};
+			assert_eq!(group.sequence, sequence);
+		}
+
+		// The publisher naming them not found is a loss: nobody asks again.
+		let (producer, requests, reader, fill) = missed();
+		Refusal::dropped(StreamError::NotFound).answer(&fill, 1..4);
+		drop((reader, fill));
+		let mut reader = producer
+			.subscribe(
+				Subscription::default()
+					.with_delay(Delay::default().with_max(None))
+					.with_range(1..4),
+			)
+			.ordered();
+		let _ = reader.poll_next_group(&waiter);
+		assert!(
+			requests.poll_requested_fill(&waiter).is_pending(),
+			"a lost group is not asked again"
+		);
 	}
 
 	/// A range starting past what it asked refuses those groups only while that range is live:
@@ -617,20 +743,20 @@ mod tests {
 		fills.ask.groups.insert(8..10);
 		fills.skip(2..6, 2..4);
 		fills.skip(8..10, 8..9);
-		assert_eq!(fills.refusal(3), Some((2..4, StreamError::NotFound)));
+		assert_eq!(fills.refusal(3), Some((2..4, Refusal::passing(StreamError::NotFound))));
 
 		// Asking 2..6 whole keeps its range; asking 8..12 retires the range for 8..10.
 		let mut asked = RangeSet::new();
 		asked.insert(2..6);
 		asked.insert(8..12);
 		fills.retire_skipped(&asked);
-		assert_eq!(fills.refusal(3), Some((2..4, StreamError::NotFound)));
+		assert_eq!(fills.refusal(3), Some((2..4, Refusal::passing(StreamError::NotFound))));
 		assert_eq!(fills.refusal(8), None, "the new range says where it starts");
 
 		// A drop stands whatever is asked.
 		fills.refuse(4..5, StreamError::NotFound);
 		fills.retire_skipped(&RangeSet::new());
 		assert_eq!(fills.refusal(3), None);
-		assert_eq!(fills.refusal(4), Some((4..5, StreamError::NotFound)));
+		assert_eq!(fills.refusal(4), Some((4..5, Refusal::dropped(StreamError::NotFound))));
 	}
 }

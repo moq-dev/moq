@@ -3706,6 +3706,12 @@ impl Producer {
 		self.state.read().start_sequence
 	}
 
+	/// Evict group `sequence` from the cache, as expiry does.
+	#[cfg(test)]
+	pub(crate) fn evict(&self, sequence: u64) {
+		self.modify().unwrap().evict_group(sequence, Error::Evicted);
+	}
+
 	/// The exclusive end, once [`Self::finish`] or [`Self::finish_at`] declared one.
 	///
 	/// `None` while the track is still open ended. Both methods reject a second end, so
