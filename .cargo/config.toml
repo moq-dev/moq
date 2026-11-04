@@ -11,6 +11,6 @@ moq = "run --bin moq --"
 # name carries no feature hash, so a build with other features replaces
 # `libmoq_ffi.so` under everyone reading it; such a build takes a target
 # directory of its own (py, `sh/size/collect.sh`, `build.sh --no-default-features`)
-# or a `--target` triple no default build uses (dart's `testing` build).
+# or dart's `target/dart` directory for its `testing` build.
 # Aliases resolve from the working directory, so run it inside the checkout.
 build-ffi = "build --locked --package moq-ffi --features openh264"

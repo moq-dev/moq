@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 class BuildTest(unittest.TestCase):
     def test_generator_profiles(self):
         # Only the dev build carries the test hooks, which would skew a benchmark.
-        for profile, release, features in (("debug", False, ["--features", "testing"]), ("release", True, [])):
+        for profile, release in (("debug", False), ("release", True)):
             with self.subTest(profile=profile), tempfile.TemporaryDirectory() as directory:
                 scratch = Path(directory)
                 calls = scratch / "calls"
@@ -42,7 +42,11 @@ class BuildTest(unittest.TestCase):
                 args = calls.read_text().split()
                 self.assertEqual(args[0], "build-ffi")
                 self.assertEqual("--release" in args, release)
-                self.assertEqual(args[1 : args.index("--target")], [*features, *(["--release"] if release else [])])
+                self.assertNotIn("--target", args)
+                self.assertEqual(
+                    args[1:],
+                    ["--release"] if release else ["--features", "testing", "--target-dir", str(ROOT / "target/dart")],
+                )
 
     def test_failed_benchmark_restores_manifest(self):
         with tempfile.TemporaryDirectory() as directory:

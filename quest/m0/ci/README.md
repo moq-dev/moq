@@ -167,7 +167,7 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [Measure the parallel frontend](/quest/m0/ci/nightly-levers.md) - a pinned nightly's parallel frontend, adopted only if the numbers beat its risks; Cranelift is ruled out
 - [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - confirm the hosted Nightly jobs reuse the previous Nightly, then measure restore time and expiry
 - [Verify the Nix cache](/quest/m0/ci/nix-cache-verify.md) - confirm releases use `nix.moq.dev`, check its bucket sizes, and retire Cachix
-- [Unify dependency features](/quest/m0/ci/hakari.md) - align the FFI builds' features and record the hosted platform jobs' hits once the workspace-hack lands
+- [Record hosted cargo-hakari evidence](/quest/m0/ci/hakari.md) - compare scheduled macOS and Windows cache hits and CPU before and after the workspace-hack
 - [Drop main from the publish Environment](/quest/m0/ci/publish-release-only.md) - the maintainer narrows `publish` to `release` and release tags once no job naming it runs as `main`
 - [Binary release publishers run on their tag](/quest/m0/ci/release-tag-publishers.md) - brew, Go and Swift releases stop running through `workflow_run` on main
 - [The bench comparison builds moq-gst's catalog bench on its base](/quest/m0/ci/bench-base-build.md) - A paired bench comparison that selects `rust/gst/moq-gst/catalog` against `origin/main` builds the base side and reports a comparison, instead of marking it unavailable with "base build failed"

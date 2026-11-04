@@ -28,7 +28,7 @@ cat >>dart/moq/pubspec.yaml <<YAML
 hooks:
   user_defines:
     moq_ffi:
-      library: ../../target/$host/release/$library
+      library: ../../target/release/$library
 YAML
 
 export MOQ_BENCH_DIR="${MOQ_BENCH_DIR:-$PWD/target/bench/ffi}"

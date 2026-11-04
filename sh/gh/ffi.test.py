@@ -178,6 +178,80 @@ print((root / "jobs").read_text())
             self.assertEqual(self.run_helper("completed", "go"), "ready=true\n")
         self.assertFalse((self.root / "queried").exists())
 
+    def test_native_and_cross_builds_stage_the_selected_artifacts(self):
+        # A native request must share host units, even when --target was
+        # explicitly passed to the packager. A cross request must keep its
+        # triple and linker. Minimal builds must never overwrite the default.
+        for host, target, minimal in [
+            ("x86_64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", False),
+            ("aarch64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", False),
+            ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", False),
+            ("x86_64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", True),
+        ]:
+            with self.subTest(host=host, target=target, minimal=minimal):
+                payload = f"{host}:{target}:{minimal}".encode()
+                self.env["BUILD_ID"] = payload.decode()
+                default_library = self.root / "target/release/libmoq_ffi.so"
+                if minimal:
+                    default_bytes = default_library.read_bytes()
+                # Packaging the native host also generates bindings. Only the
+                # library lookup matters here; no generator needs to execute.
+                self.tool("rustc", f'print("host: {host}")\n')
+                self.tool("rustup", "pass\n")
+                self.tool(
+                    "cargo",
+                    """import json, os, pathlib, sys
+root = pathlib.Path(os.environ["TEST_ROOT"])
+args = sys.argv[1:]
+if args[0] == "metadata":
+    print(json.dumps({"target_directory": str(root / "target")}, separators=(",", ":")))
+elif args[0] == "build-ffi":
+    target = args[args.index("--target") + 1] if "--target" in args else None
+    (root / "build").write_text(json.dumps({
+        "target": target, "args": args,
+        "linker": os.environ.get("CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER"),
+    }))
+    directory = pathlib.Path(args[args.index("--target-dir") + 1])
+    if target: directory /= target
+    directory /= "release"
+    directory.mkdir(parents=True, exist_ok=True)
+    for name in ["libmoq_ffi.so", "libmoq_ffi.a"]:
+        (directory / name).write_bytes(os.environ["BUILD_ID"].encode())
+elif args[0] == "run":
+    assert pathlib.Path(args[args.index("--library") + 1]).read_bytes() == os.environ["BUILD_ID"].encode()
+else: raise AssertionError(args)
+""",
+                )
+                for generator in ["uniffi-bindgen-go", "uniffi_bindgen_dart", "uniffi-bindgen-cpp"]:
+                    self.tool(generator, "pass\n")
+                args = [
+                    "bash",
+                    str(ROOT / "rs/moq-ffi/build.sh"),
+                    "--target",
+                    target,
+                    "--version",
+                    "1.2.3",
+                    "--output",
+                    str(self.root / "dist"),
+                ]
+                if minimal:
+                    args.append("--no-default-features")
+                result = subprocess.run(args, env=self.env, cwd=self.root, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                built = json.loads((self.root / "build").read_text())
+                self.assertEqual(built["target"], target if target != host else None)
+                self.assertEqual(built["linker"], "aarch64-linux-gnu-gcc" if target != host else None)
+                self.assertEqual("--no-default-features" in built["args"], minimal)
+                self.assertEqual(
+                    built["args"][built["args"].index("--target-dir") + 1],
+                    str(self.root / "target" / "minimal" if minimal else self.root / "target"),
+                )
+                staged = self.root / f"dist/moq-ffi-1.2.3-{target}/lib"
+                self.assertEqual((staged / "libmoq_ffi.a").read_bytes(), payload)
+                self.assertEqual((staged / "libmoq_ffi.so").read_bytes(), payload)
+                if minimal:
+                    self.assertEqual(default_library.read_bytes(), default_bytes)
+
     def test_bindings_from_existing_library_never_build_moq_ffi(self):
         library = self.root / "libmoq_ffi.so"
         library.write_bytes(b"metadata")
@@ -186,7 +260,7 @@ print((root / "jobs").read_text())
             """import json, os, pathlib, sys
 root = pathlib.Path(os.environ["TEST_ROOT"])
 with (root / "calls").open("a") as log: log.write(json.dumps(sys.argv[1:]) + "\\n")
-if sys.argv[1] == "metadata": print(json.dumps({"target_directory": str(root / "target")}))
+if sys.argv[1] == "metadata": print(json.dumps({"target_directory": str(root / "target")}, separators=(",", ":")))
 elif sys.argv[1] == "run":
     assert sys.argv[sys.argv.index("--library") + 1] == str(root / "libmoq_ffi.so")
     pathlib.Path(sys.argv[sys.argv.index("--out-dir") + 1]).mkdir(parents=True)
