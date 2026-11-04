@@ -4,6 +4,23 @@ How to adopt new APIs and update for breaking changes, newest first.
 
 ## Unreleased
 
+### The async API is opt-in
+
+Enable the `async` Cargo feature to keep awaiting moq-mux:
+`moq-mux = { version = "...", features = ["async"] }`. This also applies with `default-features = false`.
+The feature is off by default, and every `poll_*` method stays available without it.
+It covers the `next`, `read`, `latest`, `refresh`, `ready`, `wait`, and `broadcast` methods beside each poll:
+the catalog consumers and `catalog::Stream::next`, the container `Consumer` and `GroupConsumer`,
+every exporter (`next`, and fMP4's `next_chunk`), `ts::Follower`, `ts::Release`, `follow::Instances`,
+`json::Consumer`, `json::Snapshot`, `rate::Follower`, `timeline::Resume`, `Binding`, and `Linger`.
+It also covers the async functions with no poll of their own: `catalog::Consumer::new`,
+`Source::{catalog, resolve, subscribe_track}`, `ts::Release::new`, `fmp4::Muxer::read`, and the JSON
+catalog entry's `subscribe`.
+
+`timeline::Resume::ready` borrows the resume instead of consuming it, and the hang catalog consumer's
+`next` no longer requires `Catalog<E>: Unpin`.
+moq-mux no longer enables `moq-json/async`: enable it yourself to await moq-json's readers directly.
+
 ### `catalog::Config::with_max_age(None)` is unlimited ([#7729](https://github.com/moq-dev/moq/pull/7729))
 
 `Config::with_max_age` no longer treats `None` as "keep hang's default": an unset `Config` mints media tracks with `hang::container::MAX_AGE` (30 s), as before, `None` sets no publisher limit, and a value is that value.

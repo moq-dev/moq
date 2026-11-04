@@ -191,6 +191,7 @@ impl Source {
 	/// The stream rejects a catalog carrying a `broadcast` reference that walks above the root
 	/// (see [`Error::EscapingBroadcast`](crate::Error::EscapingBroadcast)), so every snapshot a
 	/// consumer sees is one whose references all name a broadcast it may reach.
+	#[cfg(feature = "async")]
 	pub async fn catalog<E: crate::catalog::hang::CatalogExt>(
 		&self,
 		format: crate::catalog::CatalogFormat,
@@ -310,6 +311,7 @@ impl Source {
 	/// A reference that escapes above the origin root is
 	/// [`Error::EscapingBroadcast`](crate::Error::EscapingBroadcast): the rendition names
 	/// no broadcast, so there is nothing to resolve.
+	#[cfg(feature = "async")]
 	pub async fn resolve(
 		&self,
 		rel: Option<&moq_net::path::Relative>,
@@ -354,6 +356,7 @@ impl Source {
 	/// This is the async counterpart to the poll-driven container exporters: consumers
 	/// that wrap a raw [`moq_net::track::Subscriber`] themselves (e.g. the WebRTC egress)
 	/// use it to honor cross-broadcast renditions without reimplementing the path math.
+	#[cfg(feature = "async")]
 	pub async fn subscribe_track(
 		&self,
 		rel: Option<&moq_net::path::Relative>,
@@ -461,9 +464,10 @@ impl Binding {
 		self.sibling
 	}
 
-	/// Poll for the bound broadcast without blocking.
+	/// The bound broadcast, once the origin answers.
 	///
-	/// Concurrent polls and cancelled waits retain the same request and result.
+	/// Concurrent reads and cancelled waits retain the same request and result.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_broadcast(&self, waiter: &kio::Waiter) -> Poll<crate::Result<moq_net::broadcast::Consumer>> {
 		let broadcast = match &self.bound {
 			Bound::Ready(broadcast) => broadcast.clone(),
@@ -486,13 +490,6 @@ impl Binding {
 			}
 		};
 		Poll::Ready(check_instance(self.instance.as_ref(), &broadcast).map(|()| broadcast))
-	}
-
-	/// The bound broadcast, awaiting the origin's answer when it hasn't arrived yet.
-	///
-	/// Concurrent reads and cancelled waits retain the same request and result.
-	pub async fn broadcast(&self) -> crate::Result<moq_net::broadcast::Consumer> {
-		kio::wait(|waiter| self.poll_broadcast(waiter)).await
 	}
 }
 

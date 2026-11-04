@@ -463,8 +463,8 @@ impl Follower {
 		}
 	}
 
-	/// Poll for the next target the sender should produce at, or the error that
-	/// closed the grant.
+	/// The next target the sender should produce at, or the error that closed the grant.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Target, moq_net::Error>> {
 		loop {
 			let estimate = if std::mem::take(&mut self.refeed) {
@@ -484,12 +484,7 @@ impl Follower {
 		}
 	}
 
-	/// The next target the sender should produce at, or the error that closed the grant.
-	pub async fn next(&mut self) -> Result<Target, moq_net::Error> {
-		kio::wait(|waiter| self.poll_next(waiter)).await
-	}
-
-	/// Take back the target [`next`](Self::next) last returned, because the sender
+	/// Take back the target [`poll_next`](Self::poll_next) last returned, because the sender
 	/// failed to apply it.
 	///
 	/// The previous target is restored and asked for again no sooner than one ramp

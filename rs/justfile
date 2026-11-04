@@ -271,6 +271,12 @@ coroutines:
     bash sh/rs/coroutines.sh moq-net --allow until --allow run_front --allow serve_front -- --no-default-features
     bash sh/rs/coroutines.sh moq-json -- --no-default-features
     RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-json --no-deps --no-default-features
+    bash sh/rs/coroutines.sh hang -- --no-default-features
+    RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p hang --no-deps --no-default-features
+    bash sh/rs/coroutines.sh moq-mux -- --no-default-features
+    RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-mux --no-deps --no-default-features
+    bash sh/rs/coroutines.sh moq-hls -- --no-default-features
+    RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-hls --no-deps --no-default-features
 
 # Prove moq-crypto's key-only build, which moq-auth depends on, leaves out the transport and aws-lc-rs, then lint and test it alone; a workspace build unifies the default features back in.
 crypto-key:
