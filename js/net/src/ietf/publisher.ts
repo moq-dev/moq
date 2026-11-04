@@ -2545,7 +2545,7 @@ export class Publisher {
 		if (!group) return unavailable;
 		// The saved Largest Object proves this prefix's headers exist. Do not read their
 		// payloads ahead: eviction after FETCH_OK fails the stream, as for a live subgroup.
-		if (hooks.groupFate(group)() || hooks.groupIndex(group) !== 0 || group.frameCount < toNumber(end.object)) {
+		if (hooks.groupFate(group)() || hooks.groupIndex(group) !== 0 || group.frameCount < frameBound(end.object)) {
 			group.close();
 			return unavailable;
 		}
@@ -2554,7 +2554,7 @@ export class Publisher {
 			owned: false,
 			range: { start: { group: end.group, object: 0n }, end },
 			group,
-			slice: { skip: 0, until: toNumber(end.object) },
+			slice: { skip: 0, until: frameBound(end.object) },
 			// Where the subscription starts, never the end of the track.
 			ok: new FetchOk({ endOfTrack: false, endLocation: end, properties: join.properties }),
 			timescale: join.timescale,
