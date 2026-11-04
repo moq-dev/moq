@@ -35,6 +35,16 @@ const presses = result.presses
 					(frame) => frame.at >= press.at && frame.at < (result.presses[(i + 1) * 2]?.at ?? Infinity),
 				)
 			: undefined;
+		// One-way delivery is the slowest frame the start waited on, measured from its first sample's
+		// capture: it covers packetization, transport, queueing and retransmission. What remains of the
+		// start is the player's own added latency; projected device output is reported apart from it.
+		const head = input[0]?.timestamp;
+		const waited = input.flatMap((frame) => {
+			const arrival = arrivals.get(frame.timestamp);
+			if (!audible || head === undefined || !arrival || arrival[0] > audible.received) return [];
+			return [arrival[0] - press.at - (frame.timestamp - head) / 1000];
+		});
+		const delivery = waited.length ? Math.max(...waited) : null;
 		return {
 			press: i + 1,
 			gap: result.presses[i * 2 - 1] ? press.at - result.presses[i * 2 - 1].at : null,
@@ -47,12 +57,28 @@ const presses = result.presses
 			firstReceived: input[0] ? arrivals.has(input[0].timestamp) : false,
 			arrival: first ? first[0] - press.at : null,
 			audible: audible ? audible.at - press.at : null,
+			delivery,
+			playout: audible && delivery !== null ? audible.received - press.at - delivery : null,
+			output: audible ? audible.at - audible.received : null,
 		};
 	});
 const activeDuration = presses.reduce((total, press) => total + press.duration, 0);
 const offered = result.sent.reduce((total, frame) => total + (frame.bytes ?? 0) * 8, 0) / (activeDuration / 1000);
+const spread = (values: (number | null)[]) => {
+	const sorted = values.flatMap((value) => (value === null ? [] : [value])).toSorted((a, b) => a - b);
+	if (!sorted.length) return null;
+	const middle = sorted.length / 2;
+	const median = sorted.length % 2 ? sorted[Math.floor(middle)] : (sorted[middle - 1] + sorted[middle]) / 2;
+	return { min: sorted[0], median, max: sorted[sorted.length - 1] };
+};
 const summary = {
 	offered,
+	// The goal: at most 300 ms of playout added on top of one-way delivery.
+	latency: {
+		delivery: spread(presses.map((press) => press.delivery)),
+		playout: spread(presses.map((press) => press.playout)),
+		output: spread(presses.map((press) => press.output)),
+	},
 	presses,
 	captures: result.captures,
 	probes: result.probes,
