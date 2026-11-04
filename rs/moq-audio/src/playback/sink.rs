@@ -232,17 +232,21 @@ impl Sink {
 
 	/// Set the playout target, converging by stretching received PCM.
 	///
-	/// Must be non-zero, at most [`Input::LATENCY_MAX`], and fit in the ring
-	/// allocated when the sink opened (the opening latency plus three seconds,
-	/// less a 30 ms processing window). Does not resize or reset the device.
+	/// Must be non-zero, at most [`Input::LATENCY_MAX`], and fit in the current
+	/// ring. Each device open or rebuild allocates the then-current target plus
+	/// three seconds, less a 30 ms processing window reserved as headroom.
+	/// Does not resize or reset the device.
 	pub fn set_latency(&mut self, latency: Duration) -> Result<(), Error> {
+		let mut input = self.input.clone();
+		input.latency = latency;
+		input.validate()?;
 		let mut channel = self.channel.lock().unwrap();
-		if latency.is_zero() || latency > Input::LATENCY_MAX || !channel.prod.set_latency(latency) {
+		if !channel.prod.set_latency(latency) {
 			return Err(Error::Unsupported(
-				"playback latency does not fit the sink's ring".into(),
+				"playback latency exceeds the current ring capacity".into(),
 			));
 		}
-		self.input.latency = latency;
+		self.input = input;
 		Ok(())
 	}
 

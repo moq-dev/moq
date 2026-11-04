@@ -74,8 +74,10 @@ pub(crate) enum Read {
 struct Shared {
 	pushed: AtomicBool,
 	read: AtomicBool,
-	/// Frames staged on the reading side, still owed to the device.
-	pending: AtomicUsize,
+	/// Effective input frames played or discarded, including stretch's length
+	/// correction. One publication avoids sampling the ring and staging buffer
+	/// on opposite sides of a window transfer.
+	consumed: AtomicUsize,
 	target: AtomicUsize,
 	finished: AtomicBool,
 	stretch: AtomicBool,
@@ -119,6 +121,7 @@ pub(crate) fn channel(channels: usize, input_rate: u32, output_rate: u32, config
 		rate: output_rate,
 		convert,
 		latency: config.latency,
+		written: latency,
 		pad: config.pad.then(|| latency * channels / 4),
 		shared: shared.clone(),
 	};
@@ -128,9 +131,8 @@ pub(crate) fn channel(channels: usize, input_rate: u32, output_rate: u32, config
 		stretch: None,
 		refill: false,
 		prime: latency,
-		trim: config
-			.trim
-			.then(|| latency * channels + (capacity - latency) * channels * 3 / 4),
+		consumed: 0,
+		trim: config.trim,
 		shared,
 	};
 	(producer, consumer)
@@ -147,6 +149,9 @@ pub(crate) struct Producer {
 	convert: Option<Box<Convert>>,
 	/// The requested duration, preserved across device rate changes.
 	latency: Duration,
+	/// Output-rate frames admitted, including the initial cushion. Together
+	/// with consumed this is a wrapping position, not a pair of queue snapshots.
+	written: usize,
 	/// Pad back up to the latency at or below this many samples.
 	pad: Option<usize>,
 	shared: Arc<Shared>,
@@ -166,10 +171,16 @@ impl Producer {
 		let frames = input.len() / self.channels;
 		let input = &input[..frames * self.channels];
 		let accepted = match &mut self.convert {
-			Some(convert) => convert.push(&mut self.ring, input),
+			Some(convert) => {
+				let before = convert.emitted;
+				let accepted = convert.push(&mut self.ring, input);
+				self.written = self.written.wrapping_add((convert.emitted - before) as usize);
+				accepted
+			}
 			None => {
 				let accepted = frames.min(self.ring.vacant_len() / self.channels);
 				self.ring.push_slice(&input[..accepted * self.channels]);
+				self.written = self.written.wrapping_add(accepted);
 				accepted
 			}
 		};
@@ -182,6 +193,7 @@ impl Producer {
 			let target = self.shared.target.load(Ordering::Relaxed) * self.channels;
 			if queued <= pad && queued < target {
 				let samples = self.ring.push_iter(std::iter::repeat_n(0.0, target - queued));
+				self.written = self.written.wrapping_add(samples / self.channels);
 				return Push::Padded {
 					frames: samples / self.channels,
 				};
@@ -198,7 +210,12 @@ impl Producer {
 	/// so the end of a stream otherwise sits inside it until more input arrives.
 	pub(crate) fn flush(&mut self) -> bool {
 		let flushed = match &mut self.convert {
-			Some(convert) if self.shared.read.load(Ordering::Relaxed) => convert.flush(&mut self.ring),
+			Some(convert) if self.shared.read.load(Ordering::Relaxed) => {
+				let before = convert.emitted;
+				let flushed = convert.flush(&mut self.ring);
+				self.written = self.written.wrapping_add((convert.emitted - before) as usize);
+				flushed
+			}
 			_ => true,
 		};
 		self.shared.finished.store(true, Ordering::Relaxed);
@@ -233,8 +250,7 @@ impl Producer {
 	/// How much audio is queued ahead of the reader.
 	pub(crate) fn buffered(&self) -> Duration {
 		Duration::from_secs_f64(
-			(self.ring.occupied_len() / self.channels + self.shared.pending.load(Ordering::Relaxed)) as f64
-				/ self.rate as f64,
+			self.written.wrapping_sub(self.shared.consumed.load(Ordering::Relaxed)) as f64 / self.rate as f64,
 		)
 	}
 }
@@ -367,8 +383,9 @@ pub(crate) struct Consumer {
 	refill: bool,
 	/// The startup cushion is silence, not received audio to stretch.
 	prime: usize,
-	/// Trim back down to the latency at or above this many samples.
-	trim: Option<usize>,
+	consumed: usize,
+	/// Trim only after filling three quarters of the current target's headroom.
+	trim: bool,
 	shared: Arc<Shared>,
 }
 
@@ -391,7 +408,10 @@ impl Consumer {
 		let read = if self.stretch.is_some() {
 			self.read_stretched(&mut output[..whole])
 		} else {
-			self.ring.pop_slice(&mut output[..whole])
+			let samples = self.ring.pop_slice(&mut output[..whole]);
+			self.consumed = self.consumed.wrapping_add(samples / self.channels);
+			self.shared.consumed.store(self.consumed, Ordering::Relaxed);
+			samples
 		};
 		output[read..].fill(0.0);
 		if read < whole {
@@ -401,12 +421,13 @@ impl Consumer {
 			};
 		}
 
-		if let Some(trim) = self.trim {
-			let queued = self.ring.occupied_len()
-				+ self.stretch.as_ref().map_or(0, |stretch| stretch.available()) * self.channels;
-			let latency = self.shared.target.load(Ordering::Relaxed) * self.channels;
-			if queued >= trim.max(latency) && queued > latency {
-				let frames = (queued - latency) / self.channels;
+		if self.trim {
+			let queued = self.available();
+			let latency = self.shared.target.load(Ordering::Relaxed);
+			let capacity = self.ring.capacity().get() / self.channels;
+			let trim = latency + (capacity - latency) * 3 / 4;
+			if queued >= trim && queued > latency {
+				let frames = queued - latency;
 				self.discard(frames);
 				return Read::Trimmed { frames };
 			}
@@ -439,10 +460,17 @@ impl Consumer {
 				let read = self.ring.pop_slice(&mut stretch.input[..frames * channels]);
 				debug_assert_eq!(read, frames * channels);
 				stretch.process(frames, buffered, self.shared.target.load(Ordering::Relaxed), enabled);
+				// The writer still counts the input while it is being analysed.
+				// Publish only the resulting duration change, then the rendered
+				// frames. Moving PCM into staging never makes it disappear.
+				self.consumed = self.consumed.wrapping_add(frames).wrapping_sub(stretch.available());
+				self.shared.consumed.store(self.consumed, Ordering::Relaxed);
 			}
-			done += stretch.read(&mut output[done..]) * channels;
+			let frames = stretch.read(&mut output[done..]);
+			done += frames * channels;
+			self.consumed = self.consumed.wrapping_add(frames);
+			self.shared.consumed.store(self.consumed, Ordering::Relaxed);
 		}
-		self.shared.pending.store(stretch.available(), Ordering::Relaxed);
 		done
 	}
 
@@ -465,10 +493,8 @@ impl Consumer {
 		let staged = self.stretch.as_mut().map_or(0, |stretch| stretch.discard(frames));
 		let skipped = self.ring.skip((frames - staged) * self.channels) / self.channels;
 		self.prime = self.prime.saturating_sub(skipped);
-		self.shared.pending.store(
-			self.stretch.as_ref().map_or(0, |stretch| stretch.available()),
-			Ordering::Relaxed,
-		);
+		self.consumed = self.consumed.wrapping_add(staged + skipped);
+		self.shared.consumed.store(self.consumed, Ordering::Relaxed);
 	}
 }
 
@@ -780,5 +806,36 @@ mod tests {
 			cons.read(&mut out);
 		}
 		assert_eq!(cons.read(&mut out), Read::Underflow { frames: 0 });
+	}
+
+	#[test]
+	fn a_target_near_capacity_still_has_emergency_headroom() {
+		let (mut prod, mut cons) = channel(
+			2,
+			48_000,
+			48_000,
+			Config {
+				latency: Duration::from_millis(50),
+				capacity: Duration::from_millis(3050),
+				pad: false,
+				trim: true,
+			},
+		);
+		cons.stretch(48_000);
+		cons.start();
+		assert!(prod.set_latency(Duration::from_secs(3)));
+		assert_eq!(prod.push(&vec![0.25; 48_000 * 2950 / 1000 * 2]), Push::Ok);
+		let mut out = [0.0; 480 * 2];
+		assert_eq!(cons.read(&mut out), Read::Ok);
+		assert_eq!(prod.push(&[0.25; 1440 * 2]), Push::Ok);
+		assert_eq!(
+			cons.read(&mut out),
+			Read::Ok,
+			"ordinary target overshoot must stretch, not trim"
+		);
+		assert_eq!(
+			prod.buffered(),
+			Duration::from_secs_f64(cons.available() as f64 / 48_000.0)
+		);
 	}
 }

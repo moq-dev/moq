@@ -60,6 +60,27 @@ impl AudioTimeline {
 	}
 }
 
+/// Keep the silence before a frame unless the distance is an emergency.
+/// `buffered` excludes this frame, so normal packet cadence never skips it.
+pub(super) fn fit(buffered: u64, target: u64, slack: u64, silence: u64, frame: u64) -> Fit {
+	let ahead = buffered + silence;
+	let skip = if ahead >= 4 * (target + slack) {
+		(ahead - target).min(silence + frame)
+	} else {
+		0
+	};
+	Fit {
+		silence: silence.saturating_sub(skip),
+		skip: skip.saturating_sub(silence),
+	}
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Fit {
+	pub silence: u64,
+	pub skip: u64,
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -106,5 +127,25 @@ mod tests {
 		let next = timeline.push(Duration::from_millis(1_020), 960, 48_000, 4_800);
 		assert!(!next.reset_sink);
 		assert_eq!(next.silence, 0);
+	}
+
+	#[test]
+	fn emergency_skip_consumes_hole_silence_before_frame_audio() {
+		assert_eq!(fit(23_039, 4_800, 960, 0, 960), Fit { silence: 0, skip: 0 });
+		assert_eq!(fit(23_040, 4_800, 960, 0, 960), Fit { silence: 0, skip: 960 });
+		assert_eq!(
+			fit(6_000, 4_800, 960, 18_000, 2_400),
+			Fit {
+				silence: 0,
+				skip: 1_200
+			}
+		);
+		assert_eq!(
+			fit(1_000, 4_800, 960, 23_040, 960),
+			Fit {
+				silence: 3_800,
+				skip: 0
+			}
+		);
 	}
 }

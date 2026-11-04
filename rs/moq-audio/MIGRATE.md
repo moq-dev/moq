@@ -7,8 +7,8 @@ How to update your code for each breaking change, newest first.
 ### Playback follows a changing latency with received-audio stretch
 
 `Sink::set_latency(duration)?` updates the device callback's playout target
-without replacing the sink. The duration must fit the ring allocated at open
-(the opening latency plus three seconds, less a 30 ms processing window) and
+without replacing the sink. The duration must fit the current ring (the target
+at the last device open or rebuild plus three seconds, less a 30 ms window) and
 remain within `Input::LATENCY_MAX`. Existing callers need no change: sinks
 stretch toward `Input::latency` by default. `buffered()` includes output staged
 by the stretcher, and `finish()` drains it. Missing input still plays silence;
