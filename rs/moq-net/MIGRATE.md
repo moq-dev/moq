@@ -4,6 +4,15 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Socket readers start at the beginning
+
+New socket sessions subscribe from group 0, frame 0, so an acceptor's first burst
+is preserved when its subscription answer arrives after its writes. Existing
+callers need no migration; the wire convention and public API are unchanged.
+IETF subscribers and publishers also honor explicit starts on every supported
+draft, keeping a prefix written before the answer arrived. Use a live range when
+only the current group is wanted.
+
 ### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
 
 `track::Info::default()` sets `max_age` to `Some(Duration::ZERO)` instead of `None`: a superseded group is stale as soon as its successor arrives, so readers get only the live edge; the newest group never goes stale.

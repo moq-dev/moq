@@ -100,7 +100,7 @@ track nobody serves. A dial that gives up resets `B`'s subscription in turn.
 ## Protocols
 
 Each side writes its own half and reads the peer's. A reader subscribes
-reliably and in order: oldest group first, with no delay budget, so it waits
+reliably and in order: from group 0, frame 0, oldest first, with no delay budget, so it waits
 for a late group rather than skipping it. The protocol decides what a half
 holds.
 

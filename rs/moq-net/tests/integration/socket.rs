@@ -849,3 +849,59 @@ async fn an_endpoint_not_accepting_resets_dials() {
 		.expect("dial timeout");
 	assert!(dialed.is_err(), "a dial to an endpoint not accepting connected");
 }
+
+/// An acceptor can finish its initial burst before the dialer gets the answer.
+#[kio::test]
+async fn the_first_burst_survives_a_late_subscribe_answer() {
+	for version in [LITE, IETF, "moq-transport-20", "moq-transport-22"] {
+		let mut fixture = Fixture::new();
+		let alice = fixture.endpoint(version, "alice").await;
+		let bob = fixture.endpoint(version, "bob").await;
+		let dial = alice.dial_track("bob", None).unwrap();
+		let accept = async {
+			let stream = bob.accept_track().await.unwrap().accept(None).await.unwrap();
+			for payload in [b"one", b"two", b"six"] {
+				send(&stream.producer, payload);
+			}
+			stream.producer.finish().unwrap();
+			stream
+		};
+		let (dialed, accepted) = futures::join!(dial, accept);
+		let dialed = dialed.unwrap();
+		dialed.producer.finish().unwrap();
+		let mut reader = dialed.consumer.ordered();
+		for payload in [b"one", b"two", b"six"] {
+			assert_eq!(recv(&mut reader).await.unwrap().unwrap(), payload, "{version}");
+		}
+		assert_eq!(recv(&mut reader).await.unwrap(), None);
+		assert_eq!(recv(&mut accepted.consumer.ordered()).await.unwrap(), None);
+	}
+}
+
+/// TCP must also recover every frame when FIN overtakes the subscription answer.
+#[kio::test]
+async fn the_first_tcp_writes_survive_a_late_subscribe_answer() {
+	for version in [LITE, IETF, "moq-transport-20", "moq-transport-22"] {
+		let mut fixture = Fixture::new();
+		let alice = fixture.endpoint(version, "alice").await;
+		let bob = fixture.endpoint(version, "bob").await;
+		let dial = alice.dial_tcp("bob").unwrap();
+		let accept = async {
+			let mut stream = bob.accept_tcp().await.unwrap().accept().await.unwrap();
+			for payload in [b"first".as_slice(), b"", b"last"] {
+				stream.producer.write_frame(None, payload).unwrap();
+			}
+			stream.producer.finish().unwrap();
+			stream
+		};
+		let (dialed, accepted) = futures::join!(dial, accept);
+		let mut dialed = dialed.unwrap();
+		let mut accepted = accepted;
+		for payload in [b"first".as_slice(), b"", b"last"] {
+			assert_eq!(read(&mut dialed.consumer).await.unwrap().unwrap(), payload, "{version}");
+		}
+		assert_eq!(read(&mut dialed.consumer).await.unwrap(), None);
+		dialed.producer.finish().unwrap();
+		assert_eq!(read(&mut accepted.consumer).await.unwrap(), None);
+	}
+}

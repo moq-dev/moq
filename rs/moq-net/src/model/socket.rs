@@ -102,6 +102,8 @@ fn messages() -> track::Info {
 /// What a session's reader asks for: every group, oldest first, however late it is.
 fn reliable() -> Subscription {
 	Subscription::default()
+		// A fresh session starts at group 0 even if its answer arrives after its first writes.
+		.with_range(0..)
 		.with_order(Order::Ascending)
 		.with_delay(Delay::default().with_max(None))
 }

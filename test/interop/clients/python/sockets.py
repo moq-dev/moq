@@ -42,9 +42,8 @@ async def exchange(stream: socket.TcpStream | socket.TrackStream) -> None:
                 group.write_frame(payload)
             group.finish()
         stream.producer.finish()
-        assert [(group.sequence, [frame.payload async for frame in group]) async for group in stream.consumer] == [
-            (sequence, PAYLOADS) for sequence in range(3)
-        ]
+        received = [(group.sequence, [frame.payload async for frame in group]) async for group in stream.consumer]
+        assert received == [(sequence, PAYLOADS) for sequence in range(3)], received
 
 
 async def main(args: argparse.Namespace) -> None:

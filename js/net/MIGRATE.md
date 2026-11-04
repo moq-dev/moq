@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Absolute IETF subscriptions keep their prefix
+
+Explicit group ranges now keep their requested start when the subscription answer
+arrives after its first data. IETF publishers honor absolute and unfiltered starts
+on all supported drafts instead of silently joining at the live edge. Use a live
+range when only the current group is wanted. There is no API or wire-format change.
+
 ### Authored tracks default to a zero `maxAge` ([#7729](https://github.com/moq-dev/moq/pull/7729))
 
 A track created with `Broadcast.Producer.createTrack`, `Track.Request.accept`, or `Track.Producer.accept` takes a `Track.InfoInit`, whose omitted or `undefined` `maxAge` is now zero instead of no publisher limit: a superseded group is stale as soon as its successor arrives, so readers get only the live edge. The newest group never goes stale, so a track that writes one snapshot stays readable to a late joiner.

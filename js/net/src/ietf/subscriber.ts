@@ -1535,6 +1535,7 @@ export class Subscriber {
 		// promise hands it back to be torn down.
 		if (state.cancelled) throw new Error("subscribe cancelled before it was sent");
 
+		const bounds = wireSpan(request.subscription.ranges ?? [{}]);
 		const msg = new Subscribe({
 			requestId,
 			trackNamespace: broadcast,
@@ -1544,10 +1545,9 @@ export class Subscriber {
 			maxAge: this.#maxAge ? maxDelayOf(request.subscription) : undefined,
 			// Fixed for the subscription's life: no REQUEST_UPDATE parameter carries it.
 			groupOrder: request.subscription.order,
-			// Joins at the current group, from its first object: the subscription delivers the
-			// objects after Largest, and the group's head before it comes on a fetch stream
+			// A known start is absolute; a live join recovers its head through a fetch stream
 			// (see {@link Join}). Fixed for the subscription's life.
-			...joinFilter(version),
+			...joinFilter(version, bounds.start, bounds.end),
 		});
 		if (msg.fill) {
 			// The fill names this request and can overtake SUBSCRIBE_OK, so it waits on it here.
@@ -1604,10 +1604,11 @@ export class Subscriber {
 		if (!known) state.requests = producer.requests();
 		const tail = new Tail();
 		const subscription: Subscription = { track: producer, tail, timescale: ok.properties.timescale, fetchIds: [] };
-		// The subscription starts after Largest, so the joining FETCH or the fill brings its
+		const live = msg.filter.kind === "nextObject";
+		// A live subscription starts after Largest, so the joining FETCH or the fill brings its
 		// group's head. With no Largest the track is empty and every group whole. A draft-22 fill
 		// is one of the subscription's own streams, so the Stream Count already waits for it.
-		if (ok.largest) {
+		if (live && ok.largest) {
 			subscription.join = new Join(ok.largest.groupId, tail, { counted: msg.fill !== undefined });
 			const join = subscription.join;
 			this.#joins.set(producer, join);
@@ -1623,12 +1624,10 @@ export class Subscriber {
 			// no object, so a Next Object join served onward still starts at the group's first.
 			hooks.reportedGroup(producer, ok.largest.groupId);
 		}
-		// The live join starts at the publisher's edge, whatever floor the demand asked for.
-		// With no Largest it skips nothing, so every group is owed: a lower one's stream may
-		// still arrive after a higher one's.
+		// Absolute subscriptions keep their prefix even when the answer follows its first data.
 		hooks.startTrack(producer, {
-			start: ok.largest ? ok.largest.groupId : 0n,
-			requested: wireSpan(request.subscription.ranges ?? [{}]).start,
+			start: live ? (ok.largest?.groupId ?? 0n) : (bounds.start ?? 0n),
+			requested: bounds.start,
 		});
 		staged?.commit();
 		state.fill?.(subscription);

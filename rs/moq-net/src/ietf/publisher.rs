@@ -2125,7 +2125,7 @@ impl Publisher {
 		// bound the subscription before subscribing so the ratio never judges it. From the
 		// start of its group, so a relay's copy holds the group's head for its other readers,
 		// as a live join would; the resolved range trims below.
-		let fixed = subscribe_range(msg.filter, LiveEdge::default(), self.version);
+		let fixed = subscribe_range(msg, LiveEdge::default());
 		if let Some(start) = fixed.start {
 			ServeRange {
 				start: Some(Location { object: 0, ..start }),
@@ -2163,7 +2163,7 @@ impl Publisher {
 		// current-group join (Next Object plus a StartGroup=1 fill) cover the group with no gap
 		// and no overlap.
 		let edge = live_edge(track);
-		let mut range = subscribe_range(msg.filter, edge, self.version);
+		let mut range = subscribe_range(msg, edge);
 		let fill = msg
 			.fill
 			.filter(|_| msg.forward && Filter::is_draft20(self.version))
@@ -18324,28 +18324,22 @@ struct GroupSlice {
 	until: Option<u64>,
 }
 
-/// Resolve a SUBSCRIBE's Location Filter into the range to serve.
-///
-/// Next Object is honored on every draft so a joining FETCH owns the cached prefix.
-/// Other draft-18 filters retain their existing serving behavior.
-fn subscribe_range(filter: Filter, edge: LiveEdge, version: Version) -> ServeRange {
-	if !Filter::is_draft20(version) && filter != Filter::NextObject {
-		if !matches!(filter, Filter::NextObject | Filter::Unfiltered) {
-			tracing::warn!(?filter, "filter not supported before draft-22, ignoring");
-		}
+/// A fill supplies a live join's head; an unfiltered live half must not resend it.
+fn subscribe_range(msg: &ietf::Subscribe<'_>, edge: LiveEdge) -> ServeRange {
+	if msg.filter == Filter::Unfiltered && msg.fill.is_some() {
 		return ServeRange::default();
 	}
-
-	filter_range(filter, edge)
+	filter_range(msg.filter, edge)
 }
 
 /// The Locations a single Location Filter selects, resolved against the live edge.
 fn filter_range(filter: Filter, edge: LiveEdge) -> ServeRange {
 	match filter {
-		// No restriction. moq-lite starts at the beginning of the latest group, which is
-		// the join point it is built around; a subscription passes objects as they are
-		// published, so an absent filter is not a request to replay history.
-		Filter::Unfiltered => ServeRange::default(),
+		// The unrestricted range is the absolute start {0, 0} on the wire.
+		Filter::Unfiltered => ServeRange {
+			start: Some(Location::default()),
+			end: None,
+		},
 		// `{Largest.Group, Largest.Object + 1}`. Everything below it, including the
 		// already-published head of the current group, is outside the requested range,
 		// so the join is mid-group by construction. The draft pairs this with a fill
@@ -18519,28 +18513,32 @@ mod range_tests {
 		assert_eq!(group.sequence, 9);
 	}
 
-	/// Earlier drafts never had their absolute filters served, so honoring one now would
-	/// change what an existing peer receives.
+	/// An absolute start and end retain their bounds on every draft.
 	#[test]
-	fn older_drafts_are_ignored() {
+	fn absolute_filters_keep_their_bounds() {
 		let msg = subscribe(Filter::Absolute {
 			start: Location { group: 4, object: 0 },
 			end: Some(EndLocation { group: 9, object: None }),
 		});
 		assert_eq!(
-			subscribe_range(msg.filter, EDGE, Version::Draft18),
-			ServeRange::default()
+			filter_range(msg.filter, EDGE),
+			ServeRange {
+				start: Some(Location { group: 4, object: 0 }),
+				end: Some(EndLocation { group: 9, object: None })
+			}
 		);
 	}
 
-	/// An absent filter is "no restriction on what is forwarded", not a request for
-	/// history, so it joins at the live edge.
+	/// An unfiltered subscription starts at the beginning, including cached groups.
 	#[test]
-	fn an_unfiltered_subscription_stays_live() {
+	fn an_unfiltered_subscription_starts_at_zero() {
 		let msg = subscribe(Filter::Unfiltered);
 		assert_eq!(
-			subscribe_range(msg.filter, EDGE, Version::Draft22),
-			ServeRange::default()
+			filter_range(msg.filter, EDGE),
+			ServeRange {
+				start: Some(Location::default()),
+				end: None
+			}
 		);
 	}
 
@@ -18550,7 +18548,7 @@ mod range_tests {
 	fn next_object_starts_past_the_largest_object() {
 		let msg = subscribe(Filter::NextObject);
 		assert_eq!(
-			subscribe_range(msg.filter, EDGE, Version::Draft22),
+			filter_range(msg.filter, EDGE),
 			ServeRange {
 				start: Some(Location { group: 100, object: 5 }),
 				end: None,
@@ -18569,7 +18567,7 @@ mod range_tests {
 		};
 		let msg = subscribe(Filter::NextObject);
 		assert_eq!(
-			subscribe_range(msg.filter, edge, Version::Draft22),
+			filter_range(msg.filter, edge),
 			ServeRange {
 				start: Some(Location { group: 101, object: 0 }),
 				end: None,
@@ -18584,7 +18582,7 @@ mod range_tests {
 		for (groups, expected) in [(0, 101), (1, 100), (2, 99), (5, 96)] {
 			let msg = subscribe(Filter::Relative(groups));
 			assert_eq!(
-				subscribe_range(msg.filter, EDGE, Version::Draft22),
+				filter_range(msg.filter, EDGE),
 				ServeRange {
 					start: Some(Location {
 						group: expected,
@@ -18608,7 +18606,7 @@ mod range_tests {
 		};
 		let msg = subscribe(Filter::Relative(1));
 		assert_eq!(
-			subscribe_range(msg.filter, edge, Version::Draft22),
+			filter_range(msg.filter, edge),
 			ServeRange {
 				start: Some(Location { group: 0, object: 0 }),
 				end: None,
@@ -18621,7 +18619,7 @@ mod range_tests {
 	fn relative_saturates_at_the_start() {
 		let msg = subscribe(Filter::Relative(500));
 		assert_eq!(
-			subscribe_range(msg.filter, EDGE, Version::Draft22),
+			filter_range(msg.filter, EDGE),
 			ServeRange {
 				start: Some(Location { group: 0, object: 0 }),
 				end: None,
@@ -18633,10 +18631,7 @@ mod range_tests {
 	#[test]
 	fn relative_without_an_edge_stays_live() {
 		let msg = subscribe(Filter::Relative(3));
-		assert_eq!(
-			subscribe_range(msg.filter, LiveEdge::default(), Version::Draft22),
-			ServeRange::default()
-		);
+		assert_eq!(subscribe_range(&msg, LiveEdge::default()), ServeRange::default());
 	}
 
 	/// A group created but not yet written has no objects, so the largest sits in an
@@ -18774,7 +18769,7 @@ mod range_tests {
 			}),
 		});
 		assert_eq!(
-			subscribe_range(msg.filter, EDGE, Version::Draft22),
+			filter_range(msg.filter, EDGE),
 			ServeRange {
 				start: Some(Location { group: 4, object: 3 }),
 				end: Some(EndLocation {

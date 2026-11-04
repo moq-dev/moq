@@ -45,16 +45,32 @@ function decodeGroupOrder(value: number): Order {
 }
 
 /**
- * How this implementation joins a live track: at the current group, from its first object,
- * as the Rust subscriber does.
+ * Join at a known absolute start, or at the current group's first object as Rust does.
  *
- * The subscription itself starts at the next object (draft 18's Largest Object), and the
+ * A live subscription starts at the next object (draft 18's Largest Object), and the
  * group's head comes on a fetch stream. Draft 22 asks for it with a fill one group back from
  * the next, its current-group join (section 3.5); earlier drafts have no fill, so the
  * subscriber sends a Relative Joining FETCH once SUBSCRIBE_OK names Largest. Spelling the
  * filter keeps a peer from reading an absent one its own way.
  */
-export function joinFilter(version: IetfVersion): { filter: Filter.Filter; fill?: Filter.Fill } {
+export function joinFilter(
+	version: IetfVersion,
+	start?: bigint,
+	end?: bigint,
+): { filter: Filter.Filter; fill?: Filter.Fill } {
+	if (start !== undefined) {
+		return {
+			filter:
+				start === 0n && end === undefined
+					? { kind: "unfiltered" }
+					: {
+							kind: "absolute",
+							startGroup: start,
+							startObject: 0n,
+							endGroup: end === undefined ? undefined : end - 1n,
+						},
+		};
+	}
 	const filter: Filter.Filter = { kind: "nextObject" };
 	if (!Filter.isDraft20(version)) return { filter };
 	return { filter, fill: { filter: { kind: "relative", groups: 1n }, rangeFilters: false } };

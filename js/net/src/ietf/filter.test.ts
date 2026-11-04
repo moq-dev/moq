@@ -24,6 +24,17 @@ test("a live join is Next Object, its head left to a joining FETCH or a StartGro
 	expect(draft22.fill).toEqual({ filter: { kind: "relative", groups: 1n }, rangeFilters: false });
 });
 
+test.each([OLD, FIELDS, NEW])("an absolute session start includes its first objects on %s", (version) => {
+	const join = joinFilter(version, 0n);
+	expect(join.fill).toBeUndefined();
+	expect([...Filter.encode(join.filter, version)]).toEqual(
+		version === OLD ? [0x03, 0x00, 0x00] : version === FIELDS ? [] : [0x00],
+	);
+	const bounded = joinFilter(version, 4n, 10n);
+	expect(bounded.fill).toBeUndefined();
+	expect(bounded.filter).toEqual({ kind: "absolute", startGroup: 4n, startObject: 0n, endGroup: 9n });
+});
+
 function roundTrip(filter: Filter.Filter, version: typeof OLD | typeof FIELDS | typeof NEW): Filter.Filter {
 	return Filter.decode(Filter.encode(filter, version), version);
 }

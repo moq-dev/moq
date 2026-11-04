@@ -3028,8 +3028,8 @@ impl Subscriber {
 		};
 		let start = subscription.as_ref().and_then(|s| s.start());
 		let join = subscribe_join(start, subscription.as_ref().and_then(|s| s.end()), self.version);
-		// A live join delivers nothing below the group SUBSCRIBE_OK names as Largest. Every
-		// draft-18 join is one, since its joining FETCH carries that group alone.
+		// A live join delivers nothing below the group SUBSCRIBE_OK names as Largest.
+		// An absolute start keeps its requested prefix even if the answer arrives late.
 		let live = start.is_none() || join.fetch;
 
 		// A listed track's paused subscription is already this track's upstream copy, so
@@ -12385,17 +12385,13 @@ struct Join {
 /// to honor. It splits the group across two streams, the fill carrying the head and the
 /// subscription the tail, which `claim_fill` stitches back into one group producer.
 ///
-/// Earlier drafts have no fill parameter. Every subscription is a live join: Largest
-/// Object, followed by a joining FETCH relative at offset 0 for that group's head. An
-/// earlier start's groups are left to the copy's fills, one FETCH per run of them, and a
-/// later start skips the head locally. A bounded end has no joining-FETCH spelling
-/// either, so the join stays open and readers stop at their own end: refusing it would
-/// abort a resumed copy for every reader it serves.
+/// Earlier drafts have no fill parameter, so a live join uses Largest Object followed
+/// by a joining FETCH relative at offset 0 for that group's head.
 ///
-/// A start group we already know is absolute on draft-22 and needs no fill: the
-/// subscription's own range covers it, which is what our publisher serves from its cache.
+/// A known start group is absolute on every draft and needs no fill: the subscription's
+/// own range covers it, including a first burst that overtook its answer.
 fn subscribe_join(start: Option<u64>, end: Option<u64>, version: Version) -> Join {
-	if !Filter::is_draft20(version) {
+	if !Filter::is_draft20(version) && start.is_none() {
 		return Join {
 			filter: Filter::NextObject,
 			fill: None,
@@ -12518,25 +12514,25 @@ mod filter_tests {
 	/// The whole track has a spelling of its own: an absent filter is unrestricted.
 	#[test]
 	fn the_whole_track_is_unfiltered() {
-		assert_eq!(
-			subscribe_join(Some(0), None, Version::Draft22),
-			Join {
-				filter: Filter::Unfiltered,
-				fill: None,
-				fetch: false,
-			}
-		);
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+			assert_eq!(
+				subscribe_join(Some(0), None, version),
+				Join {
+					filter: Filter::Unfiltered,
+					fill: None,
+					fetch: false,
+				}
+			);
+		}
 	}
 
 	const JOINING_DRAFTS: [Version; 1] = [Version::Draft18];
 
-	/// Every draft-18 join is Largest Object plus a joining FETCH, whatever its start or
-	/// end, so the current group's head arrives on the fetch stream and the live tail on the
-	/// subscription.
+	/// A draft-18 live join gets its current group's head through a joining FETCH.
 	#[test]
-	fn older_drafts_always_join_live() {
+	fn older_drafts_join_live_without_an_absolute_start() {
 		for version in JOINING_DRAFTS {
-			for (start, end) in [(None, None), (Some(7), None), (Some(7), Some(10))] {
+			for (start, end) in [(None, None), (None, Some(10))] {
 				assert_eq!(
 					subscribe_join(start, end, version),
 					Join {
