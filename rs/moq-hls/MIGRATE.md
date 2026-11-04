@@ -8,7 +8,8 @@ How to update your code for each breaking change, newest first.
 
 `Server` follows the root catalog's contributions and lists their renditions from their
 catalogs, on the root catalog's join interval and clock. Contribution media starts
-only when requested and stops after active responses and three idle target durations.
+only when requested and stops once responses finish and it idles for the longer of three
+target durations and the playlist window plus one target duration.
 Their URLs include both instances:
 `@{instance}/contribution/{id}/{kind}/{rendition}/@{contribution-instance}/...`.
 `Route::contribution` identifies that contribution; `Resource::instance` still names the

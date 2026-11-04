@@ -433,8 +433,14 @@ impl Drop for Demand {
 		}
 		// RFC 8216 6.3.4 permits a reload after one target duration (half when unchanged).
 		// Three target durations allow that reload and two more intervals of request latency.
-		// Start the window at completion, so an encode or slow fetch never expires mid-request.
-		let duration = Duration::from_secs(rendition.target_duration()).saturating_mul(3);
+		// Release also forgets the listed rows, so never before a live window would have evicted
+		// every row the last response listed: the playlist window plus one target duration, since
+		// eviction happens only as a later segment is listed. Start at completion, so an encode or
+		// slow fetch never expires mid-request.
+		let target = Duration::from_secs(rendition.target_duration());
+		let duration = target
+			.saturating_mul(3)
+			.max(rendition.fanout.window().saturating_add(target));
 		let weak = Arc::downgrade(&rendition);
 		watcher.idle = Some(rendition.fanout.spawn(async move {
 			kio::clock::sleep(duration).await;

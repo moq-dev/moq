@@ -172,7 +172,7 @@ async fn an_idle_predecessor_does_not_strand_a_requested_reconfigure() {
 		.await
 		.unwrap();
 	assert_eq!(held.status(), StatusCode::OK);
-	tokio::time::advance(Duration::from_secs(13)).await;
+	tokio::time::advance(Duration::from_secs(21)).await;
 	let mut demand = next.demand();
 	kio::clock::timeout(Duration::from_secs(1), async {
 		while demand.wanted_changed().await.unwrap().is_none() {}
@@ -229,6 +229,30 @@ async fn a_failed_parent_catalog_stops_its_contributions() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn idle_release_waits_out_the_playlist_window() {
+	let origin = moq_tokio::origin::spawn();
+	let root = Instance::random();
+	let child = Instance::random();
+	let parent = publish(&origin, "room/live", &root, &parent_catalog());
+	frames(&parent.video, 0);
+	let contribution = publish(&origin, "room/ladder", &child, &catalog());
+	frames(&contribution.video, 0);
+	let server = Server::new(origin.consume(), Default::default()).unwrap();
+	master(&server, "contribution/", true).await;
+	let uri = format!("/room/live/@{root}/contribution/rung%2Fa/video/same/@{child}/media.m3u8");
+	assert_eq!(request(&server, &uri).await.0, StatusCode::OK);
+	let settle = || kio::clock::sleep(Duration::from_millis(10));
+	settle().await;
+	// Three target durations (12 s) would forget rows the 16 s window still lists.
+	tokio::time::advance(Duration::from_secs(13)).await;
+	settle().await;
+	assert!(contribution.video.demand().wanted().is_some());
+	tokio::time::advance(Duration::from_secs(8)).await;
+	settle().await;
+	assert_eq!(contribution.video.demand().wanted(), None);
+}
+
+#[tokio::test(start_paused = true)]
 async fn idle_release_keeps_an_ended_playlists_inherited_segments() {
 	let origin = moq_tokio::origin::spawn();
 	let root = Instance::random();
@@ -282,7 +306,7 @@ async fn idle_release_keeps_an_ended_playlists_inherited_segments() {
 	// Past the idle window, the ended playlist still lists its predecessor's segments.
 	// Let the idle task start its timer, and run once it fires, before a request renews demand.
 	kio::clock::sleep(Duration::from_millis(10)).await;
-	tokio::time::advance(Duration::from_secs(13)).await;
+	tokio::time::advance(Duration::from_secs(21)).await;
 	kio::clock::sleep(Duration::from_millis(10)).await;
 	let (status, after) = request(&server, &uri).await;
 	assert_eq!(status, StatusCode::OK);
@@ -317,8 +341,9 @@ async fn listing_is_catalog_only_and_requests_own_the_lazy_media_lifetime() {
 	let mut demand = contribution.video.demand();
 	while demand.wanted_changed().await.unwrap().is_none() {}
 	assert_eq!(contribution.audio.demand().wanted(), None);
-	// TARGETDURATION = 4, so this first encode is slower than the entire 12 s idle window.
-	tokio::time::advance(Duration::from_secs(13)).await;
+	// The idle window is 20 s (the 16 s playlist window plus TARGETDURATION 4), and this first
+	// encode is slower than all of it.
+	tokio::time::advance(Duration::from_secs(21)).await;
 	assert!(futures::poll!(pending.as_mut()).is_pending());
 	assert!(contribution.video.demand().wanted().is_some());
 	frames(&contribution.video, 0);
@@ -333,17 +358,17 @@ async fn listing_is_catalog_only_and_requests_own_the_lazy_media_lifetime() {
 		.await
 		.unwrap();
 	assert_eq!(held.status(), StatusCode::OK);
-	tokio::time::advance(Duration::from_secs(13)).await;
+	tokio::time::advance(Duration::from_secs(21)).await;
 	assert!(
 		contribution.video.demand().wanted().is_some(),
 		"a slow body still holds demand"
 	);
 	drop(held);
 	// The reload window starts at completion, and another request renews it.
-	tokio::time::advance(Duration::from_secs(11)).await;
+	tokio::time::advance(Duration::from_secs(19)).await;
 	assert!(contribution.video.demand().wanted().is_some());
 	assert_eq!(request(&server, &uri).await.0, StatusCode::OK);
-	tokio::time::advance(Duration::from_secs(11)).await;
+	tokio::time::advance(Duration::from_secs(19)).await;
 	assert!(contribution.video.demand().wanted().is_some());
 	tokio::time::advance(Duration::from_secs(2)).await;
 	while demand.wanted_changed().await.unwrap().is_some() {}

@@ -252,7 +252,8 @@ impl Producer {
 			}
 		}) {
 			Poll::Ready(Ok(rendition)) => Poll::Ready(rendition),
-			Poll::Ready(Err(_)) => Poll::Ready(self.get(kind, name)),
+			// Read through the closed state's guard: `get` would lock it again.
+			Poll::Ready(Err(state)) => Poll::Ready(state.renditions.get(&(kind, name.to_string())).cloned()),
 			Poll::Pending => Poll::Pending,
 		}
 	}
@@ -839,6 +840,20 @@ fn next_event(current: &BTreeMap<Key, Arc<Rendition>>, seen: &BTreeMap<Key, Arc<
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// A set whose catalog closed before its first snapshot answers a lookup instead of
+	/// locking its state a second time.
+	#[cfg(feature = "server")]
+	#[test]
+	fn a_set_closed_before_its_catalog_answers_a_lookup() {
+		let (spawner, _driver) = Spawner::new();
+		let renditions = Producer::lazy(Duration::from_secs(16), spawner);
+		renditions.close();
+		assert!(matches!(
+			renditions.poll_get(&kio::Waiter::noop(), Kind::Video, "v"),
+			Poll::Ready(None)
+		));
+	}
 
 	#[tokio::test]
 	async fn cursors_end_only_with_a_finished_catalog() {
