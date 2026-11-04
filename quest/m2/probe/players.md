@@ -16,8 +16,11 @@ Decided with the maintainer on 2026-10-17 (see the
 already reads the catalog, which keeps moq-net catalog-agnostic, and only an
 enabled rendition is one it could switch to. Targets are on by default.
 
-- The handle comes from the [viewer targets](/quest/m2/probe/viewer-target.md) quest; this
-  quest only decides its `max`.
+- The handle is a `Bandwidth.Viewer` from `connection.viewers` in `@moq/net`
+  (`Session::viewers` or `moq_tokio::Connection::viewers` in Rust, and
+  `MoqSession::viewers` through moq-ffi and every binding, decided with the
+  maintainer on 2026-10-31), landed in
+  [moq-dev/moq#7090](https://github.com/moq-dev/moq/pull/7090); this quest only decides its `max`.
 - Settle what a rendition without a catalog bitrate contributes.
 - A probe that reaches the target must make the rendition selectable.
   Selection discounts the estimate (0.8x in `js/watch/src/video/source.ts`)
@@ -28,7 +31,3 @@ enabled rendition is one it could switch to. Targets are on by default.
 Tests with mocked catalogs: the target tracks the highest enabled rendition
 through enable and disable flips, ignores disabled ones, drops when unwatched,
 and yields to an application override.
-
-## Required
-
-- [Viewer targets](/quest/m2/probe/viewer-target.md) - the per-broadcast viewer handle
