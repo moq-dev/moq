@@ -242,10 +242,6 @@ impl Producer {
 		self.state.read().renditions.get(&(kind, name.to_string())).cloned()
 	}
 
-	pub fn media(&self) -> Option<hang::catalog::Media> {
-		self.state.read().media
-	}
-
 	#[cfg(feature = "server")]
 	pub fn poll_get(&self, waiter: &kio::Waiter, kind: Kind, name: &str) -> Poll<Option<Arc<Rendition>>> {
 		match self.state.poll_ref(waiter, |state| {

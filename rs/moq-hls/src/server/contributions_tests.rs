@@ -418,30 +418,18 @@ async fn late_instances_replace_unpinned_entries_and_do_not_replace_pins() {
 
 #[tokio::test(start_paused = true)]
 #[tracing_test::traced_test]
-async fn denied_and_incompatible_contributions_are_not_advertised() {
+async fn contributions_take_the_roots_grid_and_denied_ones_are_not_advertised() {
 	let origin = moq_tokio::origin::spawn();
 	let root = Instance::random();
 	let parent = publish(&origin, "room/live", &root, &parent_catalog());
 	frames(&parent.video, 0);
 	frames(&parent.audio, 0);
 	let child = Instance::random();
+	// The contribution declares its own interval, which HLS ignores for the root's.
 	let mut value = catalog();
 	value.media.join = Join::new(Duration::from_secs(1));
-	let mut contribution = publish(&origin, "room/ladder", &child, &value);
+	let contribution = publish(&origin, "room/ladder", &child, &value);
 	let server = Server::new(origin.consume(), Default::default()).unwrap();
-	master(&server, "contribution/", false).await;
-	value.media.join = None;
-	contribution
-		.catalog
-		.update(moq_net::Timed::from(&value).at(Timestamp::ZERO))
-		.unwrap();
-	master(&server, "contribution/", false).await;
-	assert_eq!(contribution.video.demand().wanted(), None);
-	value.media.join = Join::new(Duration::from_secs(2));
-	contribution
-		.catalog
-		.update(moq_net::Timed::from(&value).at(Timestamp::ZERO))
-		.unwrap();
 	master(&server, "contribution/", true).await;
 	let patterns = ["room/live".parse::<moq_net::Pattern>().unwrap()].into_iter().collect();
 	let denied = Server::new(origin.consume().scope("", &patterns).unwrap(), Default::default()).unwrap();
@@ -458,4 +446,52 @@ async fn denied_and_incompatible_contributions_are_not_advertised() {
 		);
 	}
 	assert_eq!(contribution.video.demand().wanted(), None);
+	let uri = format!("/room/live/@{root}/contribution/rung%2Fa/video/same/@{child}/media.m3u8");
+	let mut pending = Box::pin(request(&server, &uri));
+	assert!(futures::poll!(pending.as_mut()).is_pending());
+	let mut demand = contribution.video.demand();
+	kio::clock::timeout(Duration::from_secs(10), async {
+		while demand.wanted_changed().await.unwrap().is_none() {}
+	})
+	.await
+	.expect("the request never demanded the contribution's media");
+	frames(&contribution.video, 0);
+	let (status, playlist) = kio::clock::timeout(Duration::from_secs(10), pending)
+		.await
+		.expect("the contribution never listed a segment");
+	assert_eq!(status, StatusCode::OK, "{playlist}");
+	// Twice the root's 2 s interval; its own 1 s interval would give 2.
+	assert!(playlist.contains("#EXT-X-TARGETDURATION:4"), "{playlist}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_refused_contribution_is_listed_once_announced() {
+	let origin = moq_tokio::origin::spawn();
+	let root = Instance::random();
+	let parent = publish(&origin, "room/live", &root, &parent_catalog());
+	frames(&parent.video, 0);
+	frames(&parent.audio, 0);
+	// An on-demand route that drops its prepared answer refuses the first resolution.
+	let claim = origin.requests("room/ladder").unwrap();
+	let server = Server::new(origin.consume(), Default::default()).unwrap();
+	let refuse = async {
+		let request = kio::clock::timeout(Duration::from_secs(5), claim.requested_broadcast())
+			.await
+			.expect("never asked")
+			.unwrap();
+		drop(request.prepare().unwrap());
+	};
+	let own = format!("@{root}/video/same");
+	let (listed, ()) = futures::join!(master(&server, &own, true), refuse);
+	assert!(!listed.contains("contribution/"), "{listed}");
+	// The refusing route is not asked again on a timer.
+	assert!(
+		kio::clock::timeout(Duration::from_secs(30), claim.requested_broadcast())
+			.await
+			.is_err()
+	);
+	drop(claim);
+	let child = Instance::random();
+	let _contribution = publish(&origin, "room/ladder", &child, &catalog());
+	master(&server, &format!("contribution/rung%2Fa/video/same/@{child}"), true).await;
 }

@@ -170,7 +170,11 @@ impl Broadcaster {
 		let renditions = renditions::Producer::new(config.window, spawner);
 		// The watcher owns its own producer clone; dropping the `Broadcaster` ends it so the
 		// standing catalog subscription stops when nobody's serving from this broadcaster.
-		let watcher = driver.lead(watch_catalog(source, renditions.clone(), contributions.clone()));
+		let watcher = driver.lead(watch_catalog(
+			source,
+			renditions.clone(),
+			Role::Root(contributions.clone()),
+		));
 		let broadcaster = Self {
 			broadcast,
 			instance: Arc::from(instance.as_str()),
@@ -514,11 +518,16 @@ impl Broadcaster {
 	}
 }
 
-async fn watch_catalog(
-	source: moq_mux::Source,
-	renditions: renditions::Producer,
-	contributions: Option<contributions::Producer>,
-) {
+/// What a catalog watcher reconciles besides its own rendition set.
+enum Role {
+	/// A root broadcast, following its catalog's contributions when an HTTP server serves it.
+	Root(Option<contributions::Producer>),
+	/// A contribution included in a root broadcast. Its renditions take the root catalog's
+	/// `media`, so they share the root's timeline and grid whatever the contribution declares.
+	Contribution(kio::Consumer<hang::catalog::Media>),
+}
+
+async fn watch_catalog(source: moq_mux::Source, renditions: renditions::Producer, role: Role) {
 	// The source's catalog broadcast, so the catalog, the media subscriptions, and the closed
 	// check below all refer to the one broadcast it was built from.
 	let broadcast = &source.broadcast();
@@ -541,25 +550,46 @@ async fn watch_catalog(
 		}
 	};
 
+	// A contribution's latest catalog, re-synced when the root's media changes.
+	let mut latest: Option<catalog::hang::Catalog> = None;
 	let result = loop {
-		match kio::wait(|waiter| consumer.poll_next(waiter)).await {
-			Ok(Some(catalog)) => {
-				if let Some(contributions) = &contributions {
-					contributions.sync(&source, &catalog);
-				}
-				renditions.sync(&source, &catalog);
+		let next = kio::wait(|waiter| {
+			if let std::task::Poll::Ready(next) = consumer.poll_next(waiter) {
+				return std::task::Poll::Ready(Some(next));
 			}
-			Ok(None) => break Ok(()),
-			Err(err) => {
+			if let (Role::Contribution(root), Some(catalog)) = (&role, &latest)
+				&& let std::task::Poll::Ready(Ok(())) = root.poll(waiter, |media| match **media != catalog.media {
+					true => std::task::Poll::Ready(()),
+					false => std::task::Poll::Pending,
+				}) {
+				return std::task::Poll::Ready(None);
+			}
+			std::task::Poll::Pending
+		})
+		.await;
+		let mut catalog = match next {
+			Some(Ok(Some(catalog))) => catalog,
+			Some(Ok(None)) => break Ok(()),
+			Some(Err(err)) => {
 				tracing::warn!(%err, "broadcast catalog stream ended with error");
 				break Err(err.into());
 			}
+			None => latest.take().expect("a root media change follows a catalog"),
+		};
+		match &role {
+			Role::Root(Some(contributions)) => contributions.sync(&source, &catalog),
+			Role::Root(None) => {}
+			Role::Contribution(root) => catalog.media = *root.read(),
+		}
+		renditions.sync(&source, &catalog);
+		if let Role::Contribution(_) = role {
+			latest = Some(catalog);
 		}
 	};
 	renditions.finish(result);
-	// The parent catalog lists the contributions: once it ends or fails, stop following and
+	// The root catalog lists the contributions: once it ends or fails, stop following and
 	// advertising them too.
-	if let Some(contributions) = &contributions {
+	if let Role::Root(Some(contributions)) = &role {
 		contributions.clear();
 	}
 }

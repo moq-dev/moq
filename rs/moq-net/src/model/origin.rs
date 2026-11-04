@@ -6840,7 +6840,7 @@ impl Consumer {
 	///
 	/// The first [`available`](Following::poll_available) resolves the instance serving the
 	/// path once one is announced, retrying route churn but returning a selected handler's
-	/// refusal. Each later call waits for another instance to take over (an
+	/// refusal; the call after a refusal waits for the path's next announcement change. Each later call waits for another instance to take over (an
 	/// [`AnnounceEvent::Restart`]), or for the path to be served again after an
 	/// [`AnnounceEvent::End`], even by the same instance. Drop what was read from the
 	/// previous broadcast then: its tracks end with an error once its routes go.

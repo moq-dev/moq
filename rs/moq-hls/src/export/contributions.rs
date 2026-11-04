@@ -25,11 +25,13 @@ struct Context {
 	origin: moq_net::origin::Consumer,
 	window: Duration,
 	spawner: driver::Spawner,
+	/// The root catalog's `media`. A contribution is included in the root broadcast, so its
+	/// renditions share the root's timeline and segment on the root's grid.
+	root: kio::Producer<Media>,
 }
 
 #[derive(Default)]
 struct State {
-	media: Media,
 	entries: BTreeMap<String, Entry>,
 }
 
@@ -67,13 +69,19 @@ impl Producer {
 				origin,
 				window,
 				spawner,
+				root: kio::Producer::default(),
 			},
 		}
 	}
 
 	pub fn sync(&self, source: &moq_mux::Source, catalog: &Catalog) {
 		let Ok(mut state) = self.state.write() else { return };
-		state.media = catalog.media;
+		// Republished estimates leave the root media as is, so only a change wakes the children.
+		if *self.context.root.read() != catalog.media
+			&& let Ok(mut root) = self.context.root.write()
+		{
+			*root = catalog.media;
+		}
 		state
 			.entries
 			.retain(|id, entry| catalog.contributions.get(id) == Some(&entry.reference));
@@ -113,6 +121,7 @@ impl Producer {
 			state.entries.clear();
 			state.close();
 		}
+		let _ = self.context.root.close();
 	}
 
 	pub fn poll_advertised(&self, waiter: &kio::Waiter) -> Poll<()> {
@@ -121,10 +130,7 @@ impl Producer {
 				for entry in state.entries.values() {
 					let ready = entry.current.poll_ref(waiter, |current| {
 						if let Current::Online(instance) = &**current {
-							let listed = instance.renditions.poll_advertised(waiter);
-							if listed.is_ready() && compatible(state.media, instance.renditions.media()) {
-								return Poll::Ready(());
-							}
+							return instance.renditions.poll_advertised(waiter);
 						}
 						Poll::Pending
 					});
@@ -148,9 +154,6 @@ impl Producer {
 		for (id, entry) in &state.entries {
 			let current = entry.current.read();
 			let Current::Online(instance) = &*current else { continue };
-			if !compatible(state.media, instance.renditions.media()) {
-				continue;
-			}
 			for rendition in instance.renditions.snapshot() {
 				if !rendition.is_enabled() || rendition.poll_refused(&kio::Waiter::noop()).is_ready() {
 					continue;
@@ -207,34 +210,13 @@ impl Producer {
 				Current::Online(instance) if instance.id != at.instance => return Poll::Ready(Ok(None)),
 				Current::Online(instance) => instance,
 			};
-			let rendition = ready!(instance.renditions.poll_get(waiter, kind, name));
-			Poll::Ready(Ok(
-				rendition.filter(|_| compatible(state.media, instance.renditions.media()))
-			))
+			Poll::Ready(Ok(ready!(instance.renditions.poll_get(waiter, kind, name))))
 		}) {
 			Poll::Ready(Ok(result)) => Poll::Ready(result),
 			Poll::Ready(Err(_)) => Poll::Ready(Ok(None)),
 			Poll::Pending => Poll::Pending,
 		}
 	}
-}
-
-fn compatible(parent: Media, contribution: Option<Media>) -> bool {
-	contribution.is_some_and(|media| {
-		parent.interval().is_some()
-			&& parent.interval() == media.interval()
-			&& match (parent.clock, media.clock) {
-				(None, None) => true,
-				(Some(parent), Some(media)) => same_instant(parent.wall, media.wall),
-				_ => false,
-			}
-	})
-}
-
-/// Whether two wall timestamps name the same instant, whatever scale each is encoded in.
-/// `Timestamp` equality is structural, so `1000/1000` and `1000000/1000000` differ.
-fn same_instant(a: moq_net::Timestamp, b: moq_net::Timestamp) -> bool {
-	a.value() as u128 * b.scale().as_u64() as u128 == b.value() as u128 * a.scale().as_u64() as u128
 }
 
 async fn follow_instances(mut instances: follow::Instances, current: kio::Producer<Current>, context: Context) {
@@ -250,9 +232,11 @@ async fn follow_instances(mut instances: follow::Instances, current: kio::Produc
 					.to_string();
 				let source = moq_mux::Source::new(context.origin.clone(), broadcast);
 				let renditions = renditions::Producer::lazy(context.window, context.spawner.clone());
-				let owner = context
-					.spawner
-					.spawn(super::watch_catalog(source, renditions.clone(), None));
+				let owner = context.spawner.spawn(super::watch_catalog(
+					source,
+					renditions.clone(),
+					super::Role::Contribution(context.root.consume()),
+				));
 				Current::Online(Arc::new(Instance {
 					id,
 					renditions,
@@ -260,42 +244,36 @@ async fn follow_instances(mut instances: follow::Instances, current: kio::Produc
 				}))
 			}
 			Ok(follow::Event::End) => Current::Offline,
-			Err(err) => Current::Failed(err.into()),
-		};
-		let failed = match &next {
-			Current::Failed(err) => {
-				tracing::debug!(%err, "stopped following contribution");
-				true
+			// An authorization refusal is final: the contribution stays out and its URLs answer 403.
+			Err(err @ moq_mux::Error::Moq(moq_net::Error::Unauthorized)) => {
+				tracing::debug!(%err, "contribution refused");
+				let Ok(mut state) = current.write() else { return };
+				*state = Current::Failed(err.into());
+				return;
 			}
-			_ => false,
+			Err(moq_mux::Error::Moq(moq_net::Error::Closed)) => {
+				let Ok(mut state) = current.write() else { return };
+				*state = Current::Offline;
+				return;
+			}
+			// Not routed yet, or refused otherwise: wait for the path's next announcement, which
+			// the follower hands out, however long it takes. Until then nothing is listed.
+			Err(err) => {
+				tracing::debug!(%err, "contribution not routed; waiting for its next announcement");
+				match &*current.read() {
+					Current::Pending => Current::Offline,
+					_ => continue,
+				}
+			}
 		};
 		let Ok(mut state) = current.write() else { return };
 		*state = next;
-		if failed {
-			return;
-		}
 	}
 }
 
 #[cfg(all(test, feature = "server"))]
 mod tests {
 	use super::*;
-
-	#[test]
-	fn clocks_compare_as_instants_across_scales() {
-		let mut parent = Media::default();
-		parent.join = hang::catalog::Join::new(Duration::from_secs(2));
-		let mut child = parent;
-		assert!(compatible(parent, Some(child)));
-		parent.clock = Some(hang::catalog::Clock::new(moq_net::Timestamp::from_scale(1_000, 1_000).unwrap()).unwrap());
-		assert!(!compatible(parent, Some(child)), "only one side declares a clock");
-		child.clock =
-			Some(hang::catalog::Clock::new(moq_net::Timestamp::from_scale(1_000_000, 1_000_000).unwrap()).unwrap());
-		assert!(compatible(parent, Some(child)), "the same instant in another scale");
-		child.clock =
-			Some(hang::catalog::Clock::new(moq_net::Timestamp::from_scale(1_000_001, 1_000_000).unwrap()).unwrap());
-		assert!(!compatible(parent, Some(child)));
-	}
 
 	#[tokio::test(start_paused = true)]
 	async fn a_sync_after_clear_adds_nothing() {

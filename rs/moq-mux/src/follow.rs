@@ -65,7 +65,7 @@ impl Instances {
 	///
 	/// Each announcement that brings an instance hands it out, so the same one returns after an
 	/// end. Fails once the origin closes, and with any resolution failure, such as a handler
-	/// refusing the path.
+	/// refusing the path; the call after a refusal waits for the path's next announcement.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Event>> {
 		loop {
 			let next = match &mut self.feed {
