@@ -45,6 +45,7 @@ default:
 # from plain `bun test` so unit tests do not launch a browser.
 harness:
     ./lib/harness.test.sh
+    python3 lib/pulse.test.py
     ./interop/relay-log.test.sh
     python3 interop/staging.test.py
     python3 ../rs/moq-gst/smoke.test.py
