@@ -2149,6 +2149,7 @@ fn opus_caps(config: &hang::catalog::AudioConfig, rate: i32, channels: i32) -> R
 mod tests {
 	use super::{Timeline, ended};
 	use moq_net::Timestamp;
+	use std::time::Duration;
 
 	/// A reader cancelled as its track ends records the end only when no media is left to read,
 	/// passing over the markers a publisher closes with.
@@ -2367,11 +2368,25 @@ mod tests {
 		for (caps, expected) in [
 			(
 				&bare,
-				&[(960, 20_000), (960, 40_000), (960, 60_000), (960, 80_000), (0, 80_000), (0, 100_000)][..],
+				&[
+					(960, 20_000),
+					(960, 40_000),
+					(960, 60_000),
+					(960, 80_000),
+					(0, 80_000),
+					(0, 100_000),
+				][..],
 			),
 			(
 				&headed,
-				&[(960, 13_500), (960, 33_500), (960, 53_500), (960, 73_500), (312, 80_000), (0, 93_500)][..],
+				&[
+					(960, 13_500),
+					(960, 33_500),
+					(960, 53_500),
+					(960, 73_500),
+					(312, 80_000),
+					(0, 93_500),
+				][..],
 			),
 		] {
 			let mut clip = super::OpusClip::new(caps, warmup).unwrap();
@@ -4236,22 +4251,23 @@ mod session_tests {
 		);
 
 		// Change only the warmup, then list an audio rendition in the same catalog. Its pad shows
-		// the run took the warmup too, since a catalog snapshot carries both.
+		// the run took the warmup too, since a catalog snapshot carries both, and the cam follower
+		// takes a plan before any instance event.
 		let audio = room
 			.broadcast
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
-		let mut audio =
-			moq_mux::container::Producer::new(audio, moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio));
+		let mut audio = moq_mux::container::Producer::new(
+			audio,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
+		);
 		{
 			let mut guard = room.catalog.modify().unwrap();
 			guard.video.renditions.get_mut("video").unwrap().warmup = Some(Duration::from_millis(600));
 			guard.audio.renditions = BTreeMap::from([("audio".to_string(), audio_rendition())]);
 		}
 		audio.write(room.frame(9)).unwrap();
-		recorder.wait("the audio rendition never reached a pad", |seen| {
-			reached(seen, 9).into_iter().next()
-		});
+		await_pad(&element, "audio_");
 		assert_eq!(recorder.written(&mut first, 2), pad);
 
 		let mut follow = watch(&origin, "cam");

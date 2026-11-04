@@ -1561,9 +1561,7 @@ mod read_tests {
 		let delay = Duration::from_millis(200);
 		for video in [false, true] {
 			let broadcast = moq_net::broadcast::Info::new().produce();
-			let mut track = broadcast
-				.create_track("media", hang::container::track_info(0))
-				.unwrap();
+			let track = broadcast.create_track("media", hang::container::track_info(0)).unwrap();
 			let mut catalog = moq_mux::catalog::hang::Catalog::default();
 			let mut audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
 			audio.warmup = Some(warmup);
@@ -1607,7 +1605,7 @@ mod read_tests {
 			assert_eq!(subscription.delay.min, Some(delay), "video={video}");
 			assert_eq!(subscription.delay.max, Some(delay + warmup), "video={video}");
 
-			let mut write = |sequence: u64, micros| {
+			let write = |sequence: u64, micros| {
 				let mut group = track.create_group(sequence.into()).unwrap();
 				moq_mux::catalog::hang::Container::Legacy(kind)
 					.write(
