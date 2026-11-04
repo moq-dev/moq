@@ -2239,8 +2239,8 @@ impl Producer {
 	/// Rank the link this handle (and any handle derived from it) is given to:
 	/// higher wins, and every handle starts at the neutral [`Preference::default`].
 	///
-	/// Applies to what [`Self::requests`] advertises, which is how a session lands its
-	/// peer's routes, not to a broadcast published here. Only an instance's newest epoch is
+	/// Applies to the routes a session lands from its peer through this handle, not to
+	/// a route created here. Only an instance's newest epoch is
 	/// eligible, but among eligible routes preference decides before cost, so links to different
 	/// operators rank by this instead of comparing their metrics. Hand each CDN's
 	/// session its own rank to use the primary while it has a route and fail over to

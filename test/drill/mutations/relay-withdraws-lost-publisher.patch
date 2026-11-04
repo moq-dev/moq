@@ -9,7 +9,7 @@
 diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.rs
 --- a/rs/moq-net/src/lite/subscriber.rs
 +++ b/rs/moq-net/src/lite/subscriber.rs
-@@ -6602,7 +6602,7 @@
+@@ -7730,7 +7730,7 @@ impl Announced {
  		let in_place = predecessor == Some(&path);
  		// An error means the prefix is outside our origin's scope, so don't serve it.
  		let predecessor = predecessor.and_then(|previous| match self.routes.get(previous)? {
@@ -17,8 +17,8 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
 +			Held::Attached(attached) => Some(&*attached.dynamic),
  			_ => None,
  		});
- 		match subscriber.origin.requests_route(&path, route.clone(), predecessor) {
-@@ -6680,7 +6680,7 @@
+ 		match subscriber.origin.forward(&path, route.clone(), predecessor) {
+@@ -7819,7 +7819,7 @@ impl Announced {
  		};
  		self.held.pop();
  		if let Held::Attached(entry) = held {
@@ -27,17 +27,17 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
  		}
  	}
  
-@@ -6781,7 +6781,8 @@
+@@ -7921,7 +7921,8 @@ struct AnnouncedRoute {
  	/// without recomputing the chain.
- 	route: crate::origin::Route,
+ 	route: crate::origin::RouteInfo,
  	/// Dropping it retracts the route and rejects its queued requests.
--	dynamic: crate::origin::Requests,
+-	dynamic: crate::origin::Route,
 +	// MUTATION: never dropped, so a route outlives the session that announced it.
-+	dynamic: std::mem::ManuallyDrop<crate::origin::Requests>,
++	dynamic: std::mem::ManuallyDrop<crate::origin::Route>,
  	/// Closes as the route goes, which closes every source it minted.
  	live: kio::Producer<()>,
  	/// Whether the GOAWAY drain already re-priced this route.
-@@ -6801,7 +6802,7 @@
+@@ -7941,7 +7942,7 @@ impl AnnouncedRoute {
  	) -> Self {
  		Self {
  			route,
