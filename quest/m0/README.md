@@ -36,5 +36,4 @@ edge, which embeds moq-relay; it moved there on 2026-09-28.
 - [A waiter's record limit changes no behavior](/quest/m0/kio-waiter-records.md) - two moq-net tests stop failing when kio's waiters remember 16 lists, and the limit becomes a tuning knob worth 3.9% per delivered group
 - [Backport the relay and auth hardening to release](/quest/m0/backport-release-hardening.md) - `release`'s relay refuses dot-segment paths, serves its HTTP routes with main's response hardening, and withdraws advertisements a peer starves of send credit; its auth client refuses redirects
 - [HLS lists contributions](/quest/m0/hls-contributions.md) - an HLS master lists each catalog contribution's renditions, and a contribution's media is subscribed only while players fetch it
-- [@moq/net passes qmux stream limits through](/quest/m0/qmux-stream-limits.md) - Node and WebSocket JS clients stop failing near 100 live tracks
 - [@moq/net's WebSocket receive windows match Rust](/quest/m0/qmux-receive-windows.md) - WebSocket JS throughput stops being capped below Rust's

@@ -1,5 +1,5 @@
 import { Elapsed, Milli, Nano, sleep, timeout } from "@moq/clock";
-import Session, { type Version as QmuxVersion } from "@moq/qmux";
+import Session, { type SessionOptions as QmuxOptions, type Version as QmuxVersion } from "@moq/qmux";
 import { type Getter, race } from "@moq/signals";
 import type * as Auth from "../auth.ts";
 import { vacant } from "../auth_session.ts";
@@ -35,6 +35,11 @@ const WEBTRANSPORT_HEDGE = DEFAULT_WEBSOCKET_DELAY_MS;
 // WebSocket 20 s to open.
 const WEBSOCKET_REDIAL = Milli(10_000);
 
+// MoQ holds a stream open per subscription and per live group, far past qmux's default of
+// 100 each way, where the peer's opens are refused or wait on credit forever. Matches
+// `moq-tokio`'s `quic.max_streams`, the limit of Rust's sessions and the relay.
+const DEFAULT_MAX_STREAMS = 10_000;
+
 // RESET_STREAM and CONNECTION_CLOSE are separate transport notifications. Give the latter
 // time to surface its authoritative code without letting a reset-only peer stall SETUP forever.
 const SETUP_CLOSE_GRACE = Nano.fromMilli(Milli(100));
@@ -53,6 +58,14 @@ export interface WebSocketProps {
 	 * until WebTransport wins a race there again.
 	 */
 	delay?: Milli;
+
+	/**
+	 * How many streams the server may hold open at once, applied to bidirectional and
+	 * unidirectional streams alike (default: 10,000), like `moq-tokio`'s `quic.max_streams`.
+	 * MoQ holds a stream per subscription and per live group, so a low limit stalls or refuses them.
+	 * Must be a positive integer.
+	 */
+	maxStreams?: number;
 }
 
 /**
@@ -154,7 +167,7 @@ export function checkVersions(versions: readonly string[]): string[] {
 	return [...versions];
 }
 
-/** Validate and snapshot an ordered version list before acquiring a connection. @internal */
+/** Validate the transport options and snapshot an ordered version list before acquiring a connection. @internal */
 export function normalizeVersions(props?: {
 	versions?: readonly string[];
 	webtransport?: WebTransportProps;
@@ -164,6 +177,9 @@ export function normalizeVersions(props?: {
 		throw new TypeError("webtransport.protocols was removed; set versions instead");
 	if (props?.websocket && "protocols" in props.websocket)
 		throw new TypeError("websocket.protocols was removed; set versions instead");
+	const maxStreams = props?.websocket?.maxStreams;
+	if (maxStreams !== undefined && !(Number.isSafeInteger(maxStreams) && maxStreams > 0))
+		throw new RangeError(`websocket.maxStreams must be a positive integer: ${maxStreams}`);
 	return props?.versions === undefined ? undefined : checkVersions(props.versions);
 }
 
@@ -416,9 +432,17 @@ async function connectInner(
 	const server = websocketKey(websocketUrl);
 	const headstart =
 		!webtransport || websocketWon.has(server) ? 0 : (props.websocket?.delay ?? DEFAULT_WEBSOCKET_DELAY_MS);
+	const maxStreams = BigInt(props.websocket?.maxStreams ?? DEFAULT_MAX_STREAMS);
 	const websocket =
 		props.websocket?.enabled !== false
-			? connectWebSocket(websocketUrl, headstart, cancel, offered.alpns)
+			? connectWebSocket(websocketUrl, headstart, cancel, {
+					// The default (`requireProtocol: false`) also advertises the bare `qmux-02`,
+					// `qmux-01`, and `qmux-00`, so we still interop with relays that only know a
+					// wire-format version.
+					protocols: offered.alpns,
+					versions: Object.fromEntries(offered.alpns.map((alpn) => [alpn, QMUX[alpn] ?? null])),
+					config: { maxStreamsBidi: maxStreams, maxStreamsUni: maxStreams },
+				})
 			: undefined;
 
 	if (!websocket && !webtransport) {
@@ -814,7 +838,7 @@ async function connectWebSocket(
 	url: URL,
 	delay: number,
 	cancel: Promise<void>,
-	alpns: string[],
+	options: QmuxOptions,
 ): Promise<Session | undefined> {
 	const timer = sleep(Nano.fromMilli(Milli(delay)));
 
@@ -822,13 +846,7 @@ async function connectWebSocket(
 	if (!active) return undefined;
 
 	for (let wait = WEBSOCKET_REDIAL; ; wait = Milli(wait * 2)) {
-		// The default (`requireProtocol: false`) also advertises the bare `qmux-02`,
-		// `qmux-01`, and `qmux-00`, so we still interop with relays that only know a
-		// wire-format version.
-		const quic = new Session(url, {
-			protocols: alpns,
-			versions: Object.fromEntries(alpns.map((alpn) => [alpn, QMUX[alpn] ?? null])),
-		});
+		const quic = new Session(url, options);
 
 		// Wait for the WebSocket to connect, for the cancel promise to resolve, or for the
 		// redial. `ready` rejects on a refused/failed connection, so a throw here is the

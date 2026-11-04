@@ -20,7 +20,3 @@ below Rust's. Measure a WebSocket JS reader's throughput through a relay at a
 few RTTs, then match Rust's defaults and expose them on the same
 `ConnectProps.websocket` settings as `maxStreams`, with the same validation.
 Keep `@moq/qmux`'s own defaults unchanged, as #7893 did for stream limits.
-
-## Required
-
-- [@moq/net passes qmux stream limits through](/quest/m0/qmux-stream-limits.md) - the `websocket` settings this extends
