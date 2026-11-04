@@ -6057,9 +6057,22 @@ async fn datagrams_cross_a_default_connection() {
 	assert_eq!(session.state().version.as_deref(), Some("moq-lite-06"));
 }
 
+/// An on-demand datagram-only track reaches a reader on the default lite-06 path while a
+/// stream handler leaves the name unanswered: the datagram handler's answer serves it.
+#[tokio::test]
+async fn requested_datagrams_cross_a_default_connection() {
+	requested_datagrams_cross(vec![], "moq-lite-06").await;
+}
+
 #[tokio::test]
 async fn requested_datagrams_cross_lite07() {
-	let (broadcast, remote, session, _server) = datagram_connection("sensor", vec!["moq-lite-07-wip".into()]).await;
+	requested_datagrams_cross(vec!["moq-lite-07-wip".into()], "moq-lite-07-wip").await;
+}
+
+/// Reads a datagram track a datagram handler accepts over `versions`, which negotiate
+/// `negotiated`, while the broadcast's stream handler stays alive and never answers.
+async fn requested_datagrams_cross(versions: Vec<String>, negotiated: &str) {
+	let (broadcast, remote, session, _server) = datagram_connection("sensor", versions).await;
 	let requests = broadcast.requests().unwrap();
 	let datagrams = requests.datagrams().unwrap();
 	let consumer = remote.datagrams("events".into()).unwrap();
@@ -6076,7 +6089,7 @@ async fn requested_datagrams_cross_lite07() {
 		.unwrap()
 		.unwrap();
 	assert_eq!(datagram.payload, b"only");
-	assert_eq!(session.state().version.as_deref(), Some("moq-lite-07-wip"));
+	assert_eq!(session.state().version.as_deref(), Some(negotiated));
 }
 
 /// A replacement session from the same publisher re-announces every route while the old one
