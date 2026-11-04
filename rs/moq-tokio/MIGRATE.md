@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### The dial-side client certificate reloads from disk
+
+`tls::Connect`'s `cert` and `key` files are watched like its roots: a rewritten pair is presented on the next handshake, and the last valid pair is kept while the files are missing, malformed, or mismatched.
+Session resumption is disabled for a config with a client certificate from disk, so a new certificate takes effect on every subsequent handshake.
+`tls::Error::ClientAuth` is removed: a key that doesn't match its certificate is `tls::Error::KeyMismatch`, as on the listen side.
+
 ### QUIC method names and polls match the transport layer
 
 On `quic::driver::connection::Connection` and `quic::web::Session`, rename `read_datagram()` to `recv_datagram()`.

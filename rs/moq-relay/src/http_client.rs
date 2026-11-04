@@ -51,6 +51,11 @@ pub(crate) fn server_tls(
 	// The mesh verifier, hostname override and pins do not apply to HTTP servers.
 	// Share the identity resolver so certificate reloads reach both clients.
 	client.client_auth_cert_resolver = tls.client_auth_cert_resolver.clone();
+	// A resumed session would keep authenticating as the certificate it began
+	// with, so a reloaded one must handshake in full, as on the dialer.
+	if client.client_auth_cert_resolver.has_certs() {
+		client.resumption = rustls::client::Resumption::disabled();
+	}
 	Ok(client)
 }
 

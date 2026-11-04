@@ -328,7 +328,7 @@ Settings for outbound dials (cluster peers, auth API).
 [connect]
 timeout = "30s"                      # Dial plus handshake. "0" waits forever.
 tls.root = ["ca.pem"]                # Trust these CAs (replaces system roots unless system_roots = true).
-tls.cert = "relay.pem"               # Present a client certificate (mTLS to peers and the auth API).
+tls.cert = "relay.pem"               # Present a client certificate (mTLS to peers and the auth API). Reloaded on change.
 tls.key = "relay.key"
 goaway.redirect = "same-host"        # How far to trust a draining peer's redirect URI.
 goaway.handover = "10s"              # Cap on how long the drained upstream keeps serving.
