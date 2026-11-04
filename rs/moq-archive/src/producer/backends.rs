@@ -19,8 +19,7 @@ use super::*;
 const VIDEO: &str = "video/1080p";
 const CHAT: &str = "chat.json";
 
-/// Real time, so the S3 client's own timers behave: a flush short enough to store the untimed
-/// group while the test waits, and long enough that no put outlasts it.
+/// The archive clock stays fixed while the real backends perform I/O.
 fn config() -> Config {
 	Config::default()
 		.with_duration(Duration::from_secs(2))
@@ -62,12 +61,27 @@ fn path<S: ObjectStore>(store: &Store<S>, track: &str, name: &str) -> Path {
 	.unwrap()
 }
 
-/// Wait until every one of `paths` is stored.
+/// Finish only once the recorder owns each track, so TRACKS cannot miss it.
+async fn finish(tracks: &mut [track::Producer]) {
+	for track in tracks {
+		while track.subscription_changed().await.unwrap().is_none() {}
+		track.finish().unwrap();
+	}
+}
+
+/// Wait until every one of `paths` is stored, without moving the archive clock.
+#[expect(clippy::disallowed_methods, reason = "the real backends progress on tokio time")]
 async fn stored<S: ObjectStore>(store: &Store<S>, paths: &[Path]) {
-	kio::clock::timeout(Duration::from_secs(10), async {
+	tokio::time::timeout(Duration::from_secs(10), async {
 		for path in paths {
-			while store.inner().head(path).await.is_err() {
-				kio::clock::sleep(Duration::from_millis(10)).await;
+			loop {
+				match store.inner().head(path).await {
+					Ok(_) => break,
+					Err(object_store::Error::NotFound { .. }) => {
+						tokio::time::sleep(Duration::from_millis(10)).await;
+					}
+					Err(err) => panic!("{path}: {err}"),
+				}
 			}
 		}
 	})
@@ -75,11 +89,13 @@ async fn stored<S: ObjectStore>(store: &Store<S>, paths: &[Path]) {
 	.expect("the producer stores the objects");
 }
 
-/// Record in two runs: the first is stopped once it stored a split timed track and the head of
-/// an untimed group, and the second resumes both, continuing that group in a new object.
+/// Finish the first input tracks to flush all their groups, but keep the broadcast open and
+/// cancel before end markers. The second run resumes both, continuing the untimed group.
+#[expect(clippy::disallowed_methods, reason = "the real backends progress on tokio time")]
 async fn record<S: ObjectStore + Clone>(store: &Store<S>) {
-	let (first, _tracks) = source(4, &[(0, &["c0"])]);
+	let (first, mut tracks) = source(4, &[(0, &["c0"])]);
 	let run = tokio::spawn(Producer::new(store.clone(), first.consume(), config()).run());
+	finish(&mut tracks).await;
 	stored(
 		store,
 		&[
@@ -97,19 +113,31 @@ async fn record<S: ObjectStore + Clone>(store: &Store<S>) {
 		],
 	)
 	.await;
+	let first_objects = objects(store).await;
+	assert_eq!(
+		decode(
+			&first_objects,
+			"video%2F1080p/0000000000000000002-0000000000000000000-0000000000000002000",
+			true,
+		),
+		[
+			(2, vec!["v2.0".into(), "v2.1".into()]),
+			(3, vec!["v3.0".into(), "v3.1".into()]),
+		],
+		"the first run stores both groups before it is cancelled",
+	);
+	assert!(!first_objects.contains_key(".end"));
+	assert!(!first_objects.contains_key("video%2F1080p/end"));
+	assert!(!first_objects.contains_key("chat%2Ejson/end"));
+
 	run.abort();
 	assert!(run.await.unwrap_err().is_cancelled());
 
-	let (second, tracks) = source(6, &[(0, &["c0", "c1"]), (1, &["c2"])]);
+	let (second, mut tracks) = source(6, &[(0, &["c0", "c1"]), (1, &["c2"])]);
 	let run = tokio::spawn(Producer::new(store.clone(), second.consume(), config()).run());
-	for track in &tracks {
-		while track.subscription().is_none() {
-			kio::clock::sleep(Duration::from_millis(1)).await;
-		}
-		track.finish().unwrap();
-	}
+	finish(&mut tracks).await;
 	second.close();
-	kio::clock::timeout(Duration::from_secs(10), run)
+	tokio::time::timeout(Duration::from_secs(10), run)
 		.await
 		.expect("the producer ends with its broadcast")
 		.unwrap()
@@ -143,6 +171,8 @@ fn decode(objects: &BTreeMap<String, Bytes>, key: &str, timed: bool) -> Vec<(u64
 
 #[tokio::test]
 async fn recordings_are_byte_identical_on_every_backend() {
+	// Only archive time is held still: socket I/O and the S3 client's timers stay real.
+	let _clock = kio::clock::Manual::new().install(&tokio::runtime::Handle::current());
 	let memory = Store::new(InMemory::new(), "rec");
 	record(&memory).await;
 	let expected = objects(&memory).await;
