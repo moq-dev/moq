@@ -5,7 +5,8 @@
  * moq-transport subscription starts at the largest group rather than at the range asked for, so
  * it must read a contiguous run of groups through the last one. `compress` publishes a compressed
  * track with several frames, one empty, in each group. `cached` publishes every group before
- * announcing, for a FETCH of a past group. `late` writes the head of group 0 before announcing and
+ * announcing, for a FETCH of a past group. `history` writes only the last group live and serves the
+ * ones below it, never cached, from an in-memory responder on `track.requests()`. `late` writes the head of group 0 before announcing and
  * the rest only once the harness relays that the subscriber read it, so a join that skips the head
  * stalls rather than racing the publisher.
  *
@@ -32,27 +33,29 @@ const join = mode === "join" || mode === "status";
 const datagram = mode === "datagram";
 const status = mode === "status";
 const cached = mode === "cached";
+const history = mode === "history";
 const late = mode === "late";
 if (
 	!url ||
 	!path ||
 	!["publish", "subscribe"].includes(role) ||
-	![undefined, "drop", "join", "compress", "datagram", "status", "cached", "late"].includes(mode)
+	![undefined, "drop", "join", "compress", "datagram", "status", "cached", "history", "late"].includes(mode)
 ) {
 	throw new Error(
-		"usage: tail.ts publish|subscribe URL BROADCAST [VERSION [drop|join|compress|datagram|status|cached|late]]",
+		"usage: tail.ts publish|subscribe URL BROADCAST [VERSION [drop|join|compress|datagram|status|cached|history|late]]",
 	);
 }
 
 /**
  * The frames of each group. A compressed track spans several frames, one empty, per window.
- * `cached` and `late` give every frame its own bytes, so a FETCH or join that drops, repeats, or
+ * `cached`, `history`, and `late` give every frame its own bytes, so a FETCH or join that drops, repeats, or
  * reorders one fails.
  */
 function frames(sequence: number): Uint8Array[] {
 	if (compress)
 		return [new Uint8Array(BYTES / 2).fill(sequence), new Uint8Array(0), new Uint8Array(BYTES / 2).fill(sequence)];
-	if (cached || late) return [0, 1, 2].map((index) => new Uint8Array(BYTES / 4).fill(sequence * 16 + index));
+	if (cached || history || late)
+		return [0, 1, 2].map((index) => new Uint8Array(BYTES / 4).fill(sequence * 16 + index));
 	return [new Uint8Array(BYTES).fill(sequence)];
 }
 
@@ -69,6 +72,29 @@ function write(track: Moq.Track.Producer) {
 		group.finish();
 	}
 	track.finish();
+}
+
+/**
+ * Write only the last group, and serve the groups below it from an in-memory responder: this
+ * producer never cached them, as one resumed past its storage would not have.
+ */
+function serveHistory(track: Moq.Track.Producer) {
+	track.finishAt({ group: BigInt(GROUPS), frame: 0 });
+	const live = track.createGroup(BigInt(GROUPS - 1));
+	for (const payload of frames(GROUPS - 1)) live.writeFrame({ payload });
+	live.finish();
+	const requests = track.requests();
+	void (async () => {
+		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
+			for (let sequence = fill.wanted(); sequence !== undefined; sequence = fill.wanted()) {
+				const group = fill.accept(sequence);
+				for (const payload of frames(Number(sequence))) group.writeFrame({ payload });
+				group.finish();
+				console.error(`history served ${sequence}`);
+			}
+			fill.close();
+		}
+	})();
 }
 
 /** Read one whole group, checking every frame's bytes, and report when the `late` head is in. */
@@ -97,6 +123,7 @@ try {
 		// would leave stale.
 		const track = broadcast.createTrack("tail", { compress, maxAge: null, ...(status ? { priority: 2 } : {}) });
 		if (cached) write(track);
+		if (history) serveHistory(track);
 		let head: Moq.Group.Producer | undefined;
 		if (late) {
 			head = track.appendGroup();
@@ -116,7 +143,7 @@ try {
 			}
 			track.finish();
 			track.close();
-		} else if (!status && !cached) {
+		} else if (!status && !cached && !history) {
 			const demand = track.demand();
 			while (demand.wanted.peek() === undefined) await demand.wanted.changed();
 			if (datagram) {
