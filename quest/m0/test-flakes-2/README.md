@@ -94,4 +94,3 @@ Public API: none. Wire: none.
 
 - [IETF22 fallback](/quest/m0/test-flakes-2/ietf22-fallback.md) - an IETF22 browser viewer follows a fallback within the media lane's bound, keeping its session and its audio
 - [Browser buffering and Firefox audio-tone tests pass under load](/quest/m0/test-flakes-2/browser-media-flakes.md) - the two `harness.browser.ts` buffering tests and the Firefox player's audio-tone checks pass reliably in Interop and Nightly, each fixed at its cause under the epic's rules
-- [@moq/net's uni-stream flood test survives reruns](/quest/m0/test-flakes-2/js-stream-flood.md) - "a flood of uni streams yields" passes under `--rerun-each` and load
