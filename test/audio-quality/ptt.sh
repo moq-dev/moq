@@ -11,6 +11,8 @@ cd "$ROOT"
 # shellcheck source-path=SCRIPTDIR source=../lib/harness.sh
 source test/lib/harness.sh
 harness_begin push-to-talk "just test push-to-talk$(harness_argv "$@")"
+# The run directory is this measurement's evidence, so keep it even when it passes.
+export HARNESS_KEEP="${HARNESS_KEEP:-1}"
 
 [[ $# -eq 0 ]] || {
     echo 'usage: just test push-to-talk' >&2
@@ -40,4 +42,4 @@ if [[ $driver_status -ne 0 ]]; then
     cat "$HARNESS_RUN/driver.log" >&2
     exit "$driver_status"
 fi
-bun test/audio-quality/clients/js/ptt-analyze.ts "$HARNESS_RUN" >"$HARNESS_RUN/summary.log"
+bun test/audio-quality/clients/js/ptt-analyze.ts "$HARNESS_RUN" | tee "$HARNESS_RUN/summary.log"

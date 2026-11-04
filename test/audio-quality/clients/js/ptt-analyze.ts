@@ -122,7 +122,10 @@ const summary = {
 	unsent: result.encoded.filter((frame) => !sent.has(frame.timestamp)).length,
 };
 await Bun.write(join(directory, "summary.json"), JSON.stringify(summary, null, 2));
-console.log(JSON.stringify(summary, null, 2));
+// The report: the latency and its parts, and the completeness the run gates on. Per-press detail
+// stays in summary.json.
+const { latency, path, delay, unencoded, unsent } = summary;
+console.log(JSON.stringify({ latency, path, delay, unencoded, unsent }, null, 2));
 
 const failures: string[] = [];
 if (presses.some((press, i) => (i === 0 || i >= 8) && press.audible === null)) {

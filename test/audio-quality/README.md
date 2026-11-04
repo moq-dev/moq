@@ -165,7 +165,9 @@ the onset, which filled the playout delay), `render` (that PCM to the render ons
 hand-off and the context's render callback), and `device`, as the stages below name them. `latency`
 and `path` give each one's min, median and max.
 
-Nightly runs it and keeps the raw evidence alongside the audio quality rows.
+The command prints `latency`, `path`, and the completeness counts, and keeps its run directory
+even when it passes (set `HARNESS_KEEP=0` to drop it). Nightly runs it and keeps the raw evidence
+alongside the audio quality rows.
 
 ## Traces
 
