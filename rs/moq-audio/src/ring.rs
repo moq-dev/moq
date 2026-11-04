@@ -824,14 +824,34 @@ mod tests {
 		cons.stretch(48_000);
 		cons.start();
 		assert!(prod.set_latency(Duration::from_secs(3)));
-		assert_eq!(prod.push(&vec![0.25; 48_000 * 2950 / 1000 * 2]), Push::Ok);
+		// A 200 Hz tone, so the seam has a pitch period to remove.
+		let mut pcm = vec![0.0; 146_600 * 2];
+		for (i, frame) in pcm.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+			frame.fill((i as f32 * std::f32::consts::TAU * 200.0 / 48_000.0).sin() * 0.25);
+		}
+		let (first, second) = pcm.split_at(143_000 * 2);
+		// Play out the 50 ms prime and the 60 ms startup cooldown below the
+		// trim watermark, ending on a window boundary.
+		assert_eq!(prod.push(first), Push::Ok);
 		let mut out = [0.0; 480 * 2];
-		assert_eq!(cons.read(&mut out), Read::Ok);
-		assert_eq!(prod.push(&[0.25; 1440 * 2]), Push::Ok);
+		for _ in 0..8 {
+			assert_eq!(cons.read(&mut out), Read::Ok);
+		}
+		// Above NetEq's high limit (target + 20 ms) but under the trim
+		// watermark (three quarters of the 50 ms headroom).
+		assert_eq!(prod.push(second), Push::Ok);
+		let target = 144_000;
+		let queued = cons.available();
+		assert!((target + 960..target + 1800).contains(&queued), "{queued}");
 		assert_eq!(
 			cons.read(&mut out),
 			Read::Ok,
 			"ordinary target overshoot must stretch, not trim"
+		);
+		let removed = queued - cons.available() - 480;
+		assert!(
+			(120..=720).contains(&removed),
+			"accelerate removes one pitch period, removed {removed}"
 		);
 		assert_eq!(
 			prod.buffered(),

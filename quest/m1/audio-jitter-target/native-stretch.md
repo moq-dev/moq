@@ -50,9 +50,9 @@ Remaining verification:
   its documented native hiccup, rounded to two significant figures. A
   developer run is not that calibration.
 - Run `just rs bench-playback` on a quiet host with no other agents. It
-  now sweeps both sink count and callback size with and without stretch
-  and is included in nightly CI. A loaded-host smoke run is not a timing
-  acceptance claim.
+  now sweeps both sink count and callback size with and without stretch,
+  and the nightly `rust-test` benchmark job (`sh/gh/nightly.sh`) already
+  runs it. A loaded-host smoke run is not a timing acceptance claim.
 - Listen to real speech with 2 ms/s drift and the measured expansions on
   a real output device (below). Deterministic PCM and allocation checks do
   not establish perceptual acceptance.
