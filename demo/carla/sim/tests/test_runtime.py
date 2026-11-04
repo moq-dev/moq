@@ -8,6 +8,7 @@ from moq_carla_sim import runtime
 from moq_carla_sim.drive import Command, Drive, DriveState, Gear, TimestampEntry
 from moq_carla_sim.publish import Pose
 from moq_carla_sim.runtime import MAX_STAGE_MS, StuckDetector, latency_breakdown
+from moq_carla_sim.world import Truck
 
 
 class FakeClock:
@@ -235,6 +236,8 @@ def telemetry_session(pose, *, autonomous: bool = True) -> runtime.TruckSession:
         release=lambda: None,
     )
     session._drive = Drive()
+    session._deadline = None
+    session._media_pipeline = {}
     session._stuck = StuckDetector()
     return session
 
@@ -265,7 +268,7 @@ def test_telemetry_timer_keeps_releasing_a_driverless_truck(monkeypatch: pytest.
             await session._publish_telemetry()
         assert releases == 5
 
-        # A held or e-stopped truck is not driverless, and stays off autonomy.
+        # A held truck, or one whose e-stop is latched, is not handed back.
         for hold in (holding, estopped_by_bystander):
             ticks = releases = 0
             session = telemetry_session(pose=lambda: Pose(x=0.0, y=0.0, yaw=0.0, speed=0.0), autonomous=False)
@@ -327,9 +330,131 @@ def test_autonomous_truck_wedged_for_the_timeout_is_respawned(monkeypatch: pytes
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("reset_before_handback", [False, True], ids=["latched", "reset"])
+@pytest.mark.parametrize("handback", ["driver_left", "watchdog_expired"])
+def test_a_wedged_truck_handed_back_respawns_whether_or_not_its_estop_was_reset(
+    monkeypatch: pytest.MonkeyPatch, reset_before_handback: bool, handback: str
+) -> None:
+    """The public-demo incident: a viewer drives, e-stops, and leaves.
+
+    Nobody may come back to reset the latch, so a latched truck must not sit
+    wedged forever: the stuck watchdog respawns it and clears the latch.
+    """
+
+    async def scenario() -> None:
+        clock = 0.0
+        respawns: list[float] = []
+        controls: list[SimpleNamespace] = []
+        published: list[tuple[bool, str | None, bool]] = []
+        wedged = Pose(x=5.0, y=5.0, yaw=90.0, speed=0.0)
+        vehicle = SimpleNamespace(
+            get_transform=lambda: SimpleNamespace(),
+            get_control=lambda: controls[-1],
+            get_velocity=lambda: SimpleNamespace(x=0.0, y=0.0, z=0.0),
+            set_autopilot=lambda *_args: None,
+            apply_control=controls.append,
+        )
+        truck = Truck(
+            "truck1", vehicle, [], SimpleNamespace(listen=lambda _callback: None), 8000, road_map=SimpleNamespace()
+        )
+        truck.telemetry = lambda: SimpleNamespace(pose=wedged, measured=DriveState(gear=Gear.FORWARD))
+
+        def respawn() -> None:
+            respawns.append(clock)
+            truck.engage_autonomy()
+
+        truck.respawn = respawn
+        session = telemetry_session(pose=lambda: wedged)
+        session._truck = truck
+
+        def publish(_telemetry=None) -> None:
+            published.append((session._drive.estopped, session._drive.estop_by, truck.autonomous))
+
+        session._publish = publish
+
+        loop = asyncio.get_running_loop()
+        monkeypatch.setattr(loop, "time", lambda: clock)
+
+        async def command(command: Command) -> None:
+            commands = iter([command])
+
+            async def next_command() -> Command:
+                next_ = next(commands, None)
+                if next_ is None:
+                    raise asyncio.CancelledError
+                return next_
+
+            with monkeypatch.context() as patch:
+                patch.setattr(session, "_next_command", next_command)
+                with pytest.raises(asyncio.CancelledError):
+                    await session._loop()
+
+        # Claim with the brake applied, then supply a pedal input. This also
+        # exercises a genuine manual takeover with the takeover pedal hold.
+        await command(Command(kind="drive", driver_id="holder", sequence=1, state=DriveState(gear=Gear.FORWARD)))
+        await command(
+            Command(
+                kind="drive",
+                driver_id="holder",
+                sequence=2,
+                state=DriveState(throttle=0.5, brake=0.0, gear=Gear.FORWARD),
+            )
+        )
+        assert not truck.autonomous
+        assert controls[-1].throttle == 0.5
+        await command(Command(kind="estop", driver_id="holder", sequence=3))
+        assert controls[-1].brake == 1.0 and controls[-1].hand_brake
+        if reset_before_handback:
+            await command(Command(kind="reset_estop", driver_id="holder", sequence=4))
+        if handback == "watchdog_expired":
+            assert session._deadline is not None
+            clock = session._deadline
+            expired = await session._next_command()
+            assert expired.kind == "watchdog_expired"
+            await command(expired)
+        else:
+            await command(Command(kind="driver_left", driver_id="holder"))
+        assert session._drive.driver is None
+        assert session._drive.estopped is not reset_before_handback
+        assert truck.autonomous is reset_before_handback
+        assert session._clock.running
+        handed_back = clock
+
+        async def sleep(delay: float) -> None:
+            nonlocal clock
+            clock += delay
+            if clock - handed_back > 480.0:
+                raise asyncio.CancelledError
+
+        monkeypatch.setattr(runtime.asyncio, "sleep", sleep)
+        with pytest.raises(asyncio.CancelledError):
+            await session._publish_telemetry()
+
+        assert len(respawns) == 1
+        assert runtime.STUCK_TIMEOUT <= respawns[0] - handed_back < runtime.STUCK_TIMEOUT + 1.0
+        # The respawn cleared the latch and its attribution, and the status
+        # says so, so the player stops showing the truck as e-stopped.
+        assert session._drive.driver is None
+        assert not session._drive.estopped and session._drive.estop_by is None
+        assert truck.autonomous
+        assert published[-1] == (False, None, True)
+        # Until then the latch stood, attributed to the driver who set it.
+        if not reset_before_handback:
+            assert (True, "holder", False) in published
+
+    asyncio.run(scenario())
+
+
 def holding(drive: Drive) -> None:
     """A driver parked with the brake on."""
     assert drive.apply(Command(kind="drive", driver_id="holder", sequence=1, state=DriveState(brake=1.0)))
+
+
+def estopped_holding(drive: Drive) -> None:
+    """A driver who e-stopped and still holds the lease."""
+    holding(drive)
+    assert drive.apply(Command(kind="estop", driver_id="holder", sequence=2))
+    assert drive.driver == "holder" and drive.estopped
 
 
 def estopped_by_bystander(drive: Drive) -> None:
@@ -338,8 +463,8 @@ def estopped_by_bystander(drive: Drive) -> None:
     assert drive.driver is None and drive.estopped
 
 
-@pytest.mark.parametrize("hold", [holding, estopped_by_bystander])
-def test_stuck_watchdog_leaves_a_held_or_estopped_truck_alone(monkeypatch: pytest.MonkeyPatch, hold) -> None:
+@pytest.mark.parametrize("hold", [holding, estopped_holding])
+def test_stuck_watchdog_leaves_a_held_truck_alone(monkeypatch: pytest.MonkeyPatch, hold) -> None:
     async def scenario() -> None:
         clock = 0.0
         respawns: list[float] = []
@@ -364,6 +489,46 @@ def test_stuck_watchdog_leaves_a_held_or_estopped_truck_alone(monkeypatch: pytes
             await session._publish_telemetry()
 
         assert respawns == []
+
+    asyncio.run(scenario())
+
+
+def test_a_wedged_truck_latched_by_a_bystander_respawns_and_clears_the_latch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A latch nobody holds a lease over is still cleared by the respawn."""
+
+    async def scenario() -> None:
+        clock = 0.0
+        respawns: list[float] = []
+
+        async def sleep(delay: float) -> None:
+            nonlocal clock
+            clock += delay
+            if clock > runtime.STUCK_TIMEOUT + 1.0:
+                raise asyncio.CancelledError
+
+        monkeypatch.setattr(runtime.asyncio, "sleep", sleep)
+        loop = asyncio.get_running_loop()
+        monkeypatch.setattr(loop, "time", lambda: clock)
+
+        session = telemetry_session(pose=lambda: Pose(x=5.0, y=5.0, yaw=0.0, speed=0.0), autonomous=False)
+
+        def respawn() -> None:
+            respawns.append(clock)
+            session._truck.autonomous = True
+
+        session._truck.respawn = respawn
+        session._publish = lambda _telemetry: None
+        estopped_by_bystander(session._drive)
+
+        with pytest.raises(asyncio.CancelledError):
+            await session._publish_telemetry()
+
+        assert len(respawns) == 1
+        assert runtime.STUCK_TIMEOUT <= respawns[0] < runtime.STUCK_TIMEOUT + 1.0
+        assert not session._drive.estopped and session._drive.estop_by is None
+        assert session._clock.held == set()
 
     asyncio.run(scenario())
 
@@ -418,7 +583,8 @@ def test_a_driver_keeps_the_world_stepping_with_nobody_watching() -> None:
     asyncio.run(scenario())
 
 
-def test_a_parked_world_is_not_a_stuck_truck(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("latched", [False, True], ids=["autonomous", "latched"])
+def test_a_parked_world_is_not_a_stuck_truck(monkeypatch: pytest.MonkeyPatch, latched: bool) -> None:
     """Nothing is meant to be moving, so respawning on it would fire forever."""
 
     async def scenario() -> None:
@@ -435,15 +601,18 @@ def test_a_parked_world_is_not_a_stuck_truck(monkeypatch: pytest.MonkeyPatch) ->
         loop = asyncio.get_running_loop()
         monkeypatch.setattr(loop, "time", lambda: clock)
 
-        session = telemetry_session(pose=lambda: Pose(x=5.0, y=5.0, yaw=0.0, speed=0.0))
+        session = telemetry_session(pose=lambda: Pose(x=5.0, y=5.0, yaw=0.0, speed=0.0), autonomous=not latched)
         session._clock = FakeClock(running=False)
         session._truck.respawn = lambda: respawns.append(clock)
         session._publish = lambda _telemetry: None
+        if latched:
+            estopped_by_bystander(session._drive)
 
         with pytest.raises(asyncio.CancelledError):
             await session._publish_telemetry()
 
         assert respawns == []
+        assert session._drive.estopped is latched
 
     asyncio.run(scenario())
 
