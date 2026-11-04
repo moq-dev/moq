@@ -257,6 +257,10 @@ video:
 max-age:
     bash ../sh/local.sh cargo nextest run --locked -p moq-tokio --test integration -E 'test(/^max_age::/)' --run-ignored all
 
+# A JavaScript relay between Rust peers FETCHes upstream what its copy misses, below its start and once evicted.
+relay-fill:
+    bash ../sh/local.sh cargo nextest run --locked -p moq-tokio --test integration -E 'test(/^relay_fill::/)' --run-ignored all
+
 # A JavaScript sender exhausts each native receiver's connection credit, which recovers.
 receive-credit:
     bash ../sh/local.sh cargo nextest run --locked -p moq-tokio --test integration -E 'test(/^receive_credit::javascript_/)' --run-ignored only
