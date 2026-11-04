@@ -24,17 +24,32 @@ ended at 8.92 s), and no WebCodecs output maps a chunk back to its input
 the timeline; Safari wasn't measured. `usedtx` was removed in
 [moq-dev/moq#4919](https://github.com/moq-dev/moq/pull/4919).
 
+Measured 2026-11-04 (repro attached to
+[w3c/webcodecs#986](https://github.com/w3c/webcodecs/issues/986)): with
+`usedtx: true`, Chrome 156 (Linux and macOS) ends 14 s of input at 8.92 s, and it
+also ignores a jump in input timestamps. Firefox 157 keeps the timeline under
+DTX but ignores input jumps. Safari 26.6.2 follows input jumps but never
+applies `usedtx`. The spec requires the input's timestamp (WebCodecs §5.6) and
+says nothing about DTX; the spec issue asks for both, and the maintainer
+submits the Chromium bug.
+
 Decided 2026-11-04 (maintainer): measure before choosing. The routes:
 
-1. **Gate before the encoder.** The publisher decides silence itself (energy
-   threshold or VAD) and neither encodes nor sends silent frames, so it keeps
-   stamping from the input timestamps it already controls. Works with any
-   encoder.
+1. **Gate before the encoder, stamp from our own inputs ✅ as the workaround.**
+   The publisher decides silence itself (energy threshold or VAD) and neither
+   encodes nor sends silent frames. Inputs are already cut to one codec frame
+   each (`js/publish/src/audio/encoder.ts`, "Align those inputs to codec
+   frames"), and without DTX every browser emits one chunk per input in order,
+   so each chunk is stamped from a queue of the input timestamps fed, not from
+   `chunk.timestamp`. That sidesteps both Chromium bugs with no encoder
+   restart (today's code restarts the encoder on any input gap to re-base,
+   which also works but costs a re-prime per utterance). Works in every
+   browser.
 2. **WASM libopus.** Ship an Opus encoder with real DTX and exact timestamps.
    Overlaps the m2 [Opus backend](/quest/m2/audio-opus-backend.md) quest.
-3. **Native WebCodecs DTX** in the browsers that keep the timeline, if the
-   WebCodecs DTX repro (see the epic) shows any do, with route 1 or 2 as the
-   fallback elsewhere.
+3. **Native WebCodecs DTX** where it keeps the timeline: only Firefox today,
+   so at best a later optimization once Chromium is fixed, with route 1 or 2
+   as the fallback.
 
 Measure each on Chromium, Firefox and Safari (kixtop): timeline drift over a
 tone/silence/noise pattern, bytes sent during silence, onset latency of the
