@@ -4114,13 +4114,20 @@ mod tests {
 		let tags: Vec<_> = snapshot.segments.iter().map(|s| s.tag.as_str()).collect();
 		assert_eq!(tags, [old.tag(), old.tag(), new.tag()]);
 		let durations: Vec<_> = snapshot.segments.iter().map(|s| s.duration.as_millis()).collect();
-		assert_eq!(durations, [2_000, 1_000, 2_000], "the predecessor's part ends at group 6");
+		assert_eq!(
+			durations,
+			[2_000, 1_000, 2_000],
+			"the predecessor's part ends at group 6"
+		);
 		let id = segments::Id {
 			generation: None,
 			tag: old.tag().to_string(),
 			at: segments::At::Sequence(1),
 		};
-		assert!(new.segment(&id).await.unwrap().is_some(), "the predecessor's part serves");
+		assert!(
+			new.segment(&id).await.unwrap().is_some(),
+			"the predecessor's part serves"
+		);
 	}
 
 	// A segment spanning more groups than one request fetches is listed as a gap, never as a
@@ -4130,7 +4137,11 @@ mod tests {
 		let test = Groups::with(&["video0"], &[]);
 		let mut media = test.publish("video0");
 		let cap = test.rendition("video0").max_groups();
-		assert_eq!(cap, INTERVAL.as_millis() as u64, "one group per millisecond of the interval");
+		assert_eq!(
+			cap,
+			INTERVAL.as_millis() as u64,
+			"one group per millisecond of the interval"
+		);
 		for sequence in 0..=cap {
 			media.at(sequence, 0);
 		}

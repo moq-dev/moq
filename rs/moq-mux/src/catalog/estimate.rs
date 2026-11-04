@@ -209,15 +209,25 @@ impl Estimator {
 		self.jitter.max = self.jitter.max.max(duration);
 	}
 
-	/// The longest group seen so far, closed window or not, else the whole span written to the
-	/// furthest content end stated: what a track that ends before its first window closes
-	/// declares as its join interval.
+	/// The longest group seen so far, closed window or not, the open one included up to the
+	/// furthest content end stated, else the whole span written to that end: what a track that ends
+	/// before its first window closes declares as its join interval.
 	pub(crate) fn partial_interval(&self) -> Option<Duration> {
 		let window = &self.window;
-		window
-			.interval
-			.max(window.group)
-			.or_else(|| elapsed(window.start?, window.high?.max(window.reach.unwrap_or_default())))
+		let end = window.high.map(|high| high.max(window.reach.unwrap_or_default()));
+		match window.interval.max(window.group) {
+			// Measured from the last cut, as every closed group is.
+			Some(closed) => Some(
+				closed.max(
+					window
+						.cut
+						.zip(end)
+						.and_then(|(cut, end)| elapsed(cut, end))
+						.unwrap_or_default(),
+				),
+			),
+			None => elapsed(window.start?, end?),
+		}
 	}
 
 	/// Note that written content reaches `end`, as a fragment or a frame with a duration says.
@@ -804,6 +814,20 @@ mod tests {
 		video.cut(None);
 		// The second group holds the frames at 300 and 600ms, so with 300ms frames it runs to 900ms.
 		assert_eq!(video.partial_interval(), Some(ms(600)));
+
+		// A final group still open when the track ends counts too, to the end its content states.
+		let mut video = Estimator::new();
+		for ms in [0, 300] {
+			video.write(micros(ms * 1_000), 1);
+			video.cut(None);
+		}
+		video.write(micros(600_000), 1);
+		video.reach(micros(3_000_000));
+		assert_eq!(
+			video.partial_interval(),
+			Some(ms(2700)),
+			"the open group outlasts the closed one"
+		);
 	}
 
 	/// A longer group in a later window raises the interval; a discontinuity keeps it.

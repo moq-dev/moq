@@ -436,7 +436,9 @@ impl Rendition {
 	/// work by the media it serves, while a publisher grouping far finer than its interval can't
 	/// turn one request into an endless fetch loop.
 	pub(crate) fn max_groups(&self) -> u64 {
-		u64::try_from(self.interval.as_millis()).unwrap_or(u64::MAX).max(MAX_SEGMENT_GROUPS)
+		u64::try_from(self.interval.as_millis())
+			.unwrap_or(u64::MAX)
+			.max(MAX_SEGMENT_GROUPS)
 	}
 
 	/// The advertised bitrate in bits per second, for the master playlist `BANDWIDTH` attribute
@@ -1408,7 +1410,10 @@ impl Rendition {
 		// segment shorter than its advertised duration. The live window lists such a segment as a
 		// gap instead, so only a row from elsewhere reaches this.
 		if groups.end.saturating_sub(groups.start) > self.max_groups() {
-			tracing::warn!(?groups, "segment spans more groups than one request fetches; refusing to truncate");
+			tracing::warn!(
+				?groups,
+				"segment spans more groups than one request fetches; refusing to truncate"
+			);
 			return Ok(None);
 		}
 
@@ -1516,7 +1521,9 @@ async fn watch_media(rendition: Weak<Rendition>, mut retiring: tokio::sync::watc
 				(claim.next, claim.boundary)
 			};
 			// Another track, or the same name in another broadcast, numbers its groups afresh.
-			let continues = rendition.upgrade().is_some_and(|rendition| rendition.continues(&previous));
+			let continues = rendition
+				.upgrade()
+				.is_some_and(|rendition| rendition.continues(&previous));
 			after = boundary.filter(|_| continues);
 			if let Some(rendition) = rendition.upgrade() {
 				let mut claim = rendition.claim.lock().expect("claim lock poisoned");
@@ -1825,7 +1832,11 @@ fn row(rendition: &Rendition, slot: grid::Slot, broken: bool) -> segments::Row {
 	let (segment, groups, pts, end, content, stop) = match slot {
 		// Listed as a gap rather than as a segment every request for would refuse.
 		grid::Slot::Media {
-			segment, groups, pts, end, ..
+			segment,
+			groups,
+			pts,
+			end,
+			..
 		} if groups.end.saturating_sub(groups.start) > rendition.max_groups() => {
 			tracing::warn!(
 				rendition = rendition.name,

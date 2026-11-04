@@ -509,7 +509,10 @@ impl Consumer {
 	/// call with its authorization error.
 	///
 	/// FETCHes and transmuxes the next segment's groups. A stop, or a record its successor can't
-	/// bound, is yielded without media, so every segment number is accounted for. Missing window rows or unavailable media fail the recording instead of
+	/// bound, is yielded without media, so every segment number is accounted for, except across a
+	/// pause longer than the playlist window: only its newest
+	/// `MAX_SEGMENTS` gaps are listed, since older ones would slide out of every window before
+	/// the next segment, so the numbers before them are skipped. Missing window rows or unavailable media fail the recording instead of
 	/// silently omitting segments. Fetch/transmux errors leave the cursor in place so the caller
 	/// can retry. A bound instance's retained media drains after End or Restart; a replacement's
 	/// media is never read under the old rows.

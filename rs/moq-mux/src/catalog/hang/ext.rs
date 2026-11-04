@@ -272,4 +272,3 @@ mod test {
 		assert_eq!(catalog.ext.iter().count(), 1);
 	}
 }
-

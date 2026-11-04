@@ -108,11 +108,13 @@ mod test {
 		assert_eq!(Join::new(Duration::ZERO), None);
 		// Anything above zero rounds up to a whole millisecond on the wire, which reads back.
 		let join = Join::new(Duration::from_nanos(1)).unwrap();
-		let media: Media = serde_json::from_str(&serde_json::to_string(&Media {
-			join: Some(join),
-			..Default::default()
-		})
-		.unwrap())
+		let media: Media = serde_json::from_str(
+			&serde_json::to_string(&Media {
+				join: Some(join),
+				..Default::default()
+			})
+			.unwrap(),
+		)
 		.unwrap();
 		assert_eq!(media.interval(), Some(Duration::from_millis(1)));
 	}
