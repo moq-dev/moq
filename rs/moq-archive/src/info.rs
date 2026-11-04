@@ -155,6 +155,13 @@ mod tests {
 	}
 
 	#[test]
+	fn a_version_3_info_reads_its_signed_priority() {
+		let info = Info::decode(br#"{"version":3,"priority":-1,"timescale":1000}"#).unwrap();
+		assert_eq!((info.version, info.priority, info.timescale), (3, -1, Some(1000)));
+		assert!(matches!(info.encode(), Err(Error::Version(3))));
+	}
+
+	#[test]
 	fn unknown_version_is_refused() {
 		for version in [1, VERSION + 1] {
 			let json = format!(r#"{{"version":{version},"priority":0,"timescale":1000}}"#);

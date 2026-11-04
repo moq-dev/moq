@@ -7,6 +7,7 @@ How to update your code for each breaking change, newest first.
 ### Recording format version 4 drops the datagram form ([#7752](https://github.com/moq-dev/moq/pull/7752))
 
 An archive records stream tracks only, and its entries carry no `Form`. Versions 2 and 3 still read, but an entry of the datagram form refuses its object with `Error::Form`.
+A version 4 producer refuses to resume a prefix holding a version 2 or 3 track, failing with `Error::Version` before it writes anything: start a new recording prefix, and read the older one with a reader.
 
 ### Recording format version 3 replaces version 1
 

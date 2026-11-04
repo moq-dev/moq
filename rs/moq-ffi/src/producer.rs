@@ -632,20 +632,21 @@ impl MoqTrackRequest {
 		let _guard = crate::ffi::enter();
 		let info = raw_track_info(info)?;
 		let request = self.take()?;
-		let datagram_info = datagram_info(&info);
-		let track = request.accept(Some(info));
 		// Without a handle keeping it open, the broadcast has ended.
 		let Some(broadcast) = self.children.broadcast() else {
-			let _ = track.abort(moq_net::Error::Unroutable);
+			request.reject(moq_net::Error::Unroutable);
 			return Err(MoqError::Closed);
 		};
-		let datagrams = match broadcast.create_datagrams(track.name(), datagram_info) {
+		// The datagram track first: accepting wakes the track's subscribers, and one that asks
+		// for its datagrams, or a lite-05/06 subscription that carries them, must find it.
+		let datagrams = match broadcast.create_datagrams(request.name(), datagram_info(&info)) {
 			Ok(datagrams) => datagrams,
 			Err(err) => {
-				let _ = track.abort(err.clone());
+				request.reject(err.clone());
 				return Err(err.into());
 			}
 		};
+		let track = request.accept(Some(info));
 		MoqTrackProducer::child(Raw::new(track, datagrams), &self.children)
 	}
 

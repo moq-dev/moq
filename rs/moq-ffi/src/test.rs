@@ -2044,6 +2044,29 @@ async fn requested_track_carries_datagrams() {
 	assert_eq!((datagram.sequence, datagram.payload), (sequence, b"beep".to_vec()));
 }
 
+/// A track that finished before its first datagram read has none to come: its datagram
+/// track finished with it and is no longer found, which reads as the end, not an error.
+#[tokio::test]
+async fn a_finished_track_reads_no_datagrams() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("events".into(), Some(timed_info())).unwrap();
+	let consumer = broadcast
+		.consume()
+		.unwrap()
+		.subscribe_track("events".into(), None)
+		.await
+		.unwrap();
+	track.finish().unwrap();
+	let read = kio::clock::timeout(TIMEOUT, consumer.recv_datagram())
+		.await
+		.expect("timed out waiting for the end");
+	assert!(
+		matches!(read, Ok(None)),
+		"{:?}",
+		read.map(|datagram| datagram.map(|d| d.sequence))
+	);
+}
+
 #[tokio::test]
 async fn track_request_demand_ends_on_rejection() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
@@ -6293,10 +6316,17 @@ async fn roundtrip(media: &MoqMediaTrackProducer, track: &MoqMediaTrackConsumer,
 	}
 }
 
-/// A raw track's datagrams reach a remote reader over a default connection, which negotiates
-/// lite-06: its subscription to the track carries the track's datagrams too.
-#[tokio::test]
-async fn raw_track_datagrams_cross_a_default_connection() {
+/// A server publishing `path` and a client following it over default versions, which
+/// negotiate lite-06: the server's broadcast, the client's view of it, the client's session,
+/// and what keeps the server side alive.
+async fn default_connection(
+	path: &str,
+) -> (
+	Arc<MoqBroadcastProducer>,
+	Arc<MoqBroadcastConsumer>,
+	Arc<MoqSession>,
+	impl Sized,
+) {
 	let server_origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let server = MoqServer::new(MoqServerConfig {
 		bind: Some("127.0.0.1:0".into()),
@@ -6314,9 +6344,7 @@ async fn raw_track_datagrams_cross_a_default_connection() {
 		let request = accepting.accept().await.unwrap().expect("a session");
 		request.accept(None, None).await.expect("handshake failed")
 	});
-
-	let broadcast = create_announced(&server_origin, "sensor");
-	let track = broadcast.publish_track("events".into(), Some(timed_info())).unwrap();
+	let broadcast = create_announced(&server_origin, path);
 
 	let viewer = MoqOriginProducer::new(MoqOriginConfig::default());
 	let client = MoqClient::new(MoqClientConfig {
@@ -6330,17 +6358,18 @@ async fn raw_track_datagrams_cross_a_default_connection() {
 		.await
 		.expect("connect timed out")
 		.expect("connect failed");
-	let _server_session = kio::clock::timeout(TIMEOUT, accept).await.unwrap().unwrap();
-
-	let followed = viewer.consume().follow("sensor".into(), None).unwrap();
+	let server_session = kio::clock::timeout(TIMEOUT, accept).await.unwrap().unwrap();
+	let followed = viewer.consume().follow(path.into(), None).unwrap();
 	let remote = kio::clock::timeout(TIMEOUT, followed.available())
 		.await
 		.expect("timed out waiting for the broadcast")
 		.unwrap();
-	let consumer = remote.subscribe_track("events".into(), None).await.unwrap();
+	(broadcast, remote, session, (server, server_origin, server_session))
+}
 
-	// The reader joins the datagrams on its first read, which lands a moment later, and a
-	// datagram sent before then is gone: resend until one arrives.
+/// Read one datagram from `consumer`, resending `track`'s until one arrives: the reader joins
+/// the datagrams on its first read, which lands a moment later, and one sent before is gone.
+async fn resend_until_read(track: &MoqTrackProducer, consumer: &Arc<MoqTrackConsumer>) -> MoqDatagram {
 	let read = {
 		let consumer = consumer.clone();
 		spawn_parked(async move { consumer.recv_datagram().await }).await
@@ -6356,15 +6385,43 @@ async fn raw_track_datagrams_cross_a_default_connection() {
 			kio::clock::sleep(Duration::from_millis(10)).await;
 		}
 	};
-	let datagram = tokio::select! {
+	tokio::select! {
 		read = kio::clock::timeout(TIMEOUT, read) => read.expect("timed out waiting for a datagram"),
 		_ = send => unreachable!(),
 	}
 	.expect("datagram read panicked")
 	.unwrap()
-	.expect("expected a datagram");
+	.expect("expected a datagram")
+}
+
+/// A raw track's datagrams reach a remote reader over a default connection, which negotiates
+/// lite-06: its subscription to the track carries the track's datagrams too.
+#[tokio::test]
+async fn raw_track_datagrams_cross_a_default_connection() {
+	let (broadcast, remote, session, _server) = default_connection("sensor").await;
+	let track = broadcast.publish_track("events".into(), Some(timed_info())).unwrap();
+	let consumer = remote.subscribe_track("events".into(), None).await.unwrap();
+	let datagram = resend_until_read(&track, &consumer).await;
 	assert_eq!(datagram.payload, b"reading");
 	assert_eq!(datagram.timestamp.map(micros), Some(5_000));
+	assert_eq!(session.state().version.as_deref(), Some("moq-lite-06"));
+}
+
+/// So do a requested track's: its datagram track exists before the accept answers the
+/// subscription that carries them.
+#[tokio::test]
+async fn requested_track_datagrams_cross_a_default_connection() {
+	let (broadcast, remote, session, _server) = default_connection("sensor").await;
+	let dynamic = broadcast.requests().unwrap();
+	let subscribe = tokio::spawn(async move { remote.subscribe_track("events".into(), None).await });
+	let request = kio::clock::timeout(TIMEOUT, dynamic.requested_track())
+		.await
+		.expect("timed out waiting for the request")
+		.unwrap();
+	let track = request.accept(Some(timed_info())).unwrap();
+	let consumer = kio::clock::timeout(TIMEOUT, subscribe).await.unwrap().unwrap().unwrap();
+	let datagram = resend_until_read(&track, &consumer).await;
+	assert_eq!(datagram.payload, b"reading");
 	assert_eq!(session.state().version.as_deref(), Some("moq-lite-06"));
 }
 

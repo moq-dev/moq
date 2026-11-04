@@ -110,8 +110,8 @@ const DATAGRAM_PAYLOADS: usize = 16;
 
 const TRACK: &str = "video";
 
-/// The datagram track's name: lite-05/06 carry a name's stream track or its datagram track,
-/// not both, so it takes a name of its own.
+/// The datagram track's name. Lite-05/06 carry a name's stream and datagram tracks on one
+/// subscription, so a name of its own keeps the stream rounds from carrying datagrams.
 const DATAGRAMS: &str = "audio";
 
 /// Lite 06 is what the dash session and cluster peers negotiate today.
@@ -1058,7 +1058,20 @@ impl<B: Backend> Room<B> {
 		for (index, viewer) in self.viewers.iter_mut().enumerate() {
 			for (consumer, broadcast) in viewer.datagrams.iter_mut().zip(self.shape.watching(index)) {
 				let last = self.next[broadcast] - 1;
-				while consumer.recv().await.unwrap().expect("track ended").sequence != last {}
+				// Bounded as above: a last datagram that never arrives fails the run.
+				let mut attempts = 0;
+				loop {
+					match consumer.poll_recv(&waiter) {
+						std::task::Poll::Ready(Ok(Some(datagram))) if datagram.sequence == last => break,
+						std::task::Poll::Ready(Ok(Some(_))) => continue,
+						std::task::Poll::Ready(end) => panic!("the datagram track ended: {end:?}"),
+						std::task::Poll::Pending => {
+							attempts += 1;
+							assert!(attempts < 1024, "the last datagram never reached a viewer");
+							tokio::task::yield_now().await;
+						}
+					}
+				}
 			}
 		}
 	}

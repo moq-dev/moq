@@ -671,6 +671,33 @@ async fn a_track_added_mid_recording_is_recorded() {
 	assert!(complete(&store).await);
 }
 
+/// An archive records stream tracks only: a datagram track of the same name leaves no trace.
+#[tokio::test(start_paused = true)]
+async fn a_datagram_track_is_not_recorded() {
+	let store = store();
+	let broadcast = broadcast::Info::new().produce();
+	let video = broadcast.create_track("video", timed()).unwrap();
+	let mut datagrams = broadcast
+		.create_datagrams(
+			"video",
+			moq_net::datagram::Info::default().with_timescale(Timescale::MILLI),
+		)
+		.unwrap();
+	let task = spawn(&store, &broadcast, config());
+	subscribed(&video).await;
+	datagrams.append(ms(0), "datagram").unwrap();
+	group(&video, 0, &[(0, "a")]);
+	settle().await;
+	datagrams.finish();
+	video.finish().unwrap();
+	broadcast.close();
+	finished(task).await;
+
+	// The stream track's lone frame, and nothing of the datagram's.
+	let video = objects(&store, "video", true).await;
+	assert_eq!(contents(&video), [vec![(0, vec!["0/a".to_string()])]]);
+}
+
 #[tokio::test(start_paused = true)]
 async fn markers_wait_for_the_listing_to_end() {
 	let store = store();

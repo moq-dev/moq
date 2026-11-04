@@ -2011,6 +2011,11 @@ impl Request for TrackInfoServe {
 					timescale: info.timescale,
 					compress: false,
 				})?;
+				// As a stream track's answer does, though only lite-05/06 get here, which
+				// never negotiate the extension.
+				if ietf {
+					writer.buffer(&lite::ietf::TrackProperties(Default::default()))?;
+				}
 				return Poll::Ready(Ok(ControlFlow::Break(())));
 			}
 		};
@@ -6551,6 +6556,19 @@ mod serve_group_test {
 		assert_eq!(
 			log.datagram_ranks(),
 			[4, 9].map(|sequence| (Some(0), crate::priority::in_group(sequence, 0, Order::Descending)))
+		);
+
+		// Without send groups, the rank goes alone.
+		let session = SinkSession::new(Log::default()).with_datagrams(1200);
+		let log = session.log.clone();
+		datagram_send(Version::Lite07, session).send(crate::Datagram {
+			sequence: 4,
+			timestamp: Some(Timestamp::ZERO),
+			payload: bytes::Bytes::from_static(b"d"),
+		});
+		assert_eq!(
+			log.datagram_ranks(),
+			[(None, crate::priority::in_group(4, 0, Order::Descending))]
 		);
 	}
 

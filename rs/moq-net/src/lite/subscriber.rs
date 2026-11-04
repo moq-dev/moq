@@ -2367,6 +2367,8 @@ impl kio::Task for SourceServe {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		let _ = self.tracks.poll(waiter);
 		let _ = self.datagrams.poll(waiter);
+		// A batch of queued requests must not hold the thread from the session's other tasks.
+		let mut budget = kio::coop::Budget::new(32);
 
 		loop {
 			if self.closed.poll_closed(waiter).is_ready() {
@@ -2389,6 +2391,7 @@ impl kio::Task for SourceServe {
 					request,
 				);
 				self.datagrams.push(serve);
+				ready!(budget.poll_yield(waiter));
 				continue;
 			}
 			match self.dynamic.poll_requested_track(waiter) {
@@ -2405,6 +2408,7 @@ impl kio::Task for SourceServe {
 					// One machine per track serves its lone subscription and any number
 					// of fetches concurrently.
 					self.tracks.push(TrackServeRun::new(serve, request));
+					ready!(budget.poll_yield(waiter));
 				}
 				// The source was finished (unannounced) or aborted.
 				Poll::Ready(Err(err)) => {

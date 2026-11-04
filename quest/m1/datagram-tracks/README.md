@@ -68,10 +68,10 @@ Decided 2026-11-01 (maintainer, in `/quest-plan`):
   - A lite-05/06 SUBSCRIBE for a name carries its stream track's groups and
     its datagram track's datagrams, as one moq-transport subscription does. A
     name with only a datagram track is served from it alone.
-  - A subscriber keeps the kind it asked for. A datagram request is a
-    subscription to the name's stream track, sharing the one upstream
-    SUBSCRIBE with any stream reader, so a relay between old peers carries
-    datagrams without a second subscription.
+  - A subscriber keeps the kind it asked for. One upstream SUBSCRIBE serves
+    readers of both kinds: the stream track's subscription feeds the name's
+    datagram track, so a relay between old peers carries datagrams without a
+    second subscription.
   - No dedup: a name using both kinds can deliver a datagram to an old
     subscriber that also holds a group of the same sequence.
   - Reason: lite-05/06 are the default connections, and moq-ffi/moq-c publish

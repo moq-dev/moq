@@ -13,8 +13,13 @@
 //!
 //! Delivery is best-effort per hop: a session drops (with a debug log) any datagram whose
 //! encoded body exceeds the transport's datagram size, and sessions that can't carry
-//! datagrams at all (moq-lite before 05, or stream-only transports like WebSocket) never
-//! deliver them.
+//! datagrams at all (moq-lite before 05, moq-transport for now, or stream-only transports
+//! like WebSocket) never deliver them.
+//!
+//! Moq-lite 07 asks for a datagram track on a request of its own. Moq-lite 05 and 06 carry a
+//! name's groups and datagrams on one subscription, as moq-transport does: a session serves
+//! an old subscription with both of the name's tracks, and a subscriber keeps only the kind
+//! it asked for, sharing one subscription with any reader of the other kind.
 
 use std::{
 	collections::VecDeque,
@@ -39,6 +44,11 @@ pub(crate) const MAX_PAYLOAD: usize = u16::MAX as usize;
 /// A consumer more than this far behind skips to the oldest one still held, so a stalled
 /// reader costs the track at most this many payloads.
 const MAX_BUFFERED: usize = 64;
+
+/// How many payload bytes a track holds for consumers that have not read them yet, beyond
+/// which it drops the oldest, though never the newest. Datagrams that fit a path are well
+/// under this; it bounds a local writer of large payloads.
+const MAX_BUFFERED_BYTES: usize = 64 * 1024;
 
 /// The default subscriber priority of a [`Consumer`].
 const DEFAULT_PRIORITY: i8 = 0;
@@ -108,10 +118,13 @@ struct State {
 	// `None` while a request waits for a handler to accept it.
 	info: Option<Info>,
 	buffer: VecDeque<Datagram>,
+	// The payload bytes `buffer` holds.
+	bytes: usize,
 	// The absolute index of `buffer[0]`, so consumers keep a cursor past what was dropped.
 	offset: u64,
-	// The sequence `append` assigns next: one past the highest written.
-	next: u64,
+	// The sequence `append` assigns next: one past the highest written, or `None` once
+	// `u64::MAX` was written and no sequence follows it.
+	next: Option<u64>,
 	// Set once the track ends: `Ok` for a finish.
 	end: Option<Result<()>>,
 	// Live producer-side handles: producers and an unanswered request.
@@ -130,11 +143,16 @@ impl State {
 	}
 
 	fn push(&mut self, datagram: Datagram) {
-		if self.buffer.len() == MAX_BUFFERED {
-			self.buffer.pop_front();
+		self.bytes += datagram.payload.len();
+		while self.buffer.len() >= MAX_BUFFERED || (!self.buffer.is_empty() && self.bytes > MAX_BUFFERED_BYTES) {
+			let dropped = self.buffer.pop_front().expect("not empty");
+			self.bytes -= dropped.payload.len();
 			self.offset += 1;
 		}
-		self.next = self.next.max(datagram.sequence.saturating_add(1));
+		self.next = match (self.next, datagram.sequence.checked_add(1)) {
+			(Some(next), Some(after)) => Some(next.max(after)),
+			_ => None,
+		};
 		self.buffer.push_back(datagram);
 	}
 
@@ -147,6 +165,7 @@ impl State {
 		if end.is_err() {
 			self.offset += self.buffer.len() as u64;
 			self.buffer.clear();
+			self.bytes = 0;
 		}
 		self.end = Some(end);
 	}
@@ -202,6 +221,7 @@ impl Producer {
 	pub(super) fn new(name: Arc<str>, info: Option<Info>) -> Self {
 		let state = State {
 			info,
+			next: Some(0),
 			producers: 1,
 			..Default::default()
 		};
@@ -242,7 +262,7 @@ impl Producer {
 	/// MTU: a hop drops a datagram that does not fit.
 	pub fn append<B: crate::IntoBytes>(&mut self, timestamp: impl Into<Option<Timestamp>>, payload: B) -> Result<u64> {
 		let mut state = self.state.lock();
-		let sequence = state.next;
+		let sequence = state.next.ok_or(crate::coding::BoundsExceeded)?;
 		self.push(
 			&mut state,
 			Datagram {
@@ -616,6 +636,20 @@ mod tests {
 		assert!(recv(&mut consumer).is_pending());
 	}
 
+	/// Past `u64::MAX` no sequence remains, so `append` refuses instead of repeating it.
+	#[test]
+	fn append_refuses_once_the_sequence_is_spent() {
+		let mut producer = Info::default().produce("dg");
+		producer
+			.insert(Datagram {
+				sequence: u64::MAX,
+				timestamp: None,
+				payload: Bytes::from_static(b"last"),
+			})
+			.unwrap();
+		assert!(matches!(producer.append(None, "x"), Err(Error::BoundsExceeded(_))));
+	}
+
 	#[test]
 	fn a_consumer_starts_live() {
 		let mut producer = Info::default().produce("dg");
@@ -634,6 +668,25 @@ mod tests {
 			producer.append(None, "x").unwrap();
 		}
 		assert_eq!(sequence(&mut consumer), 5);
+	}
+
+	#[test]
+	fn a_slow_consumer_holds_a_bounded_number_of_bytes() {
+		let mut producer = Info::default().produce("dg");
+		let mut consumer = producer.consume();
+		let payload = Bytes::from(vec![0; MAX_BUFFERED_BYTES / 4]);
+		for _ in 0..8 {
+			producer.append(None, payload.clone()).unwrap();
+		}
+		// Four fit, so the oldest four went.
+		assert_eq!(sequence(&mut consumer), 4);
+		// The newest is always held, even alone over the budget.
+		let mut producer = Info::default().produce("dg");
+		let mut consumer = producer.consume();
+		for _ in 0..2 {
+			producer.append(None, vec![0; MAX_PAYLOAD]).unwrap();
+		}
+		assert_eq!(sequence(&mut consumer), 1);
 	}
 
 	#[test]

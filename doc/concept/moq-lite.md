@@ -450,12 +450,9 @@ waits behind higher-priority traffic instead of jumping the queue. Nothing
 caches a datagram, and `FETCH` never returns one, so use a stream track for
 anything a late joiner needs.
 
-On moq-lite 07 a datagram track has its own request. Moq-lite 05 and 06 carry
-a name's groups and datagrams on one subscription, as moq-transport does: a
-Rust peer serves an old subscription with both of the name's tracks, and
-subscribes to the name and keeps only the kind it asked for. Moq-lite before 05, moq-transport, and transports without datagrams
-(WebSocket, TCP) carry no datagram tracks from Rust yet. The JavaScript library
-still sends datagrams within a stream track.
+Datagram tracks need a transport with datagrams, so not WebSocket or TCP. The
+draft's [Datagrams](/draft/moq-lite#datagrams) section specifies them, and each
+library's API docs say which versions carry them.
 
 ## What moq-lite leaves out
 

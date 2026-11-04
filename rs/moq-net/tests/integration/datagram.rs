@@ -372,7 +372,7 @@ async fn lite06_shared_datagrams_end_with_their_subscription() {
 
 	track.abort(Error::App(7)).unwrap();
 	let end = recv(&mut consumer).await;
-	assert!(end.is_err(), "{end:?}");
+	assert!(matches!(end, Err(Error::Stream(StreamError::App(7)))), "{end:?}");
 }
 
 /// A lite-05/06 subscriber reads a name as a stream track, as one predating datagram tracks
