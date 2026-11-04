@@ -35,7 +35,12 @@ impl Resolver {
 	pub fn spawn(commands: mpsc::Sender<Command>, lookup: impl Lookup) -> Self {
 		let (batches, rx) = mpsc::channel(1);
 		use tracing::Instrument;
-		let task = crate::runtime::spawn(run(rx, commands, lookup).instrument(tracing::Span::current()));
+		let task = crate::runtime::spawn(
+			async move {
+				crate::panic::isolate(run(rx, commands, lookup)).await;
+			}
+			.instrument(tracing::Span::current()),
+		);
 		Self {
 			batches,
 			_task: AbortOnDrop::new(task),
@@ -181,7 +186,7 @@ mod tests {
 			let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
 			let _in_flight = InFlight(self.in_flight.clone());
 			self.most_in_flight.fetch_max(now, Ordering::SeqCst);
-			moq_clock::sleep(DELAY).await;
+			kio::clock::sleep(DELAY).await;
 			let index: u8 = host
 				.trim_start_matches("host")
 				.trim_end_matches(".local")
@@ -223,7 +228,7 @@ mod tests {
 		let (tx, mut commands) = mpsc::channel(1);
 		let resolver = Resolver::spawn(tx, fake.clone());
 
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		resolver.add((0..10).map(|i| line(i, i)).collect()).await.unwrap();
 		for i in 0..10 {
 			let candidate = next(&mut commands).await.unwrap();
@@ -244,7 +249,7 @@ mod tests {
 		resolver.add(vec![line(1, 1)]).await.unwrap();
 
 		// The third waits for the first to finish, rather than queueing.
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		resolver.add(vec![line(2, 2)]).await.unwrap();
 		assert_eq!(start.elapsed(), DELAY);
 		assert_eq!(fake.most_in_flight.load(Ordering::SeqCst), 1);
@@ -282,7 +287,7 @@ mod tests {
 
 		// The query in flight is cancelled before it answers, the rest of the batch
 		// is skipped, and signaling sees the peer is closed.
-		moq_clock::sleep(DELAY / 2).await;
+		kio::clock::sleep(DELAY / 2).await;
 		assert_eq!(fake.in_flight.load(Ordering::SeqCst), 0);
 		assert!(matches!(resolver.add(vec![line(2, 2)]).await, Err(Error::Closed)));
 		assert_eq!(fake.queries(), ["host0.local"]);

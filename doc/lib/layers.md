@@ -42,6 +42,12 @@ Sessions, origins, broadcasts, tracks, and groups: `Client`, `Server`,
 | C++ | `moq::` | `moq::BroadcastProducer` |
 | C | `moq_session_*`, `moq_origin_*`, `moq_publish_track_*`, `moq_consume_track_*` | `moq_publish_track` |
 
+On-demand broadcast requests in every binding can answer with held content
+without announcing an exact route. The answer uses the prefix route's
+continuous sequence space at that path. Use a fresh publication for a job
+that may restart independently; see [work on demand](/concept/identity#work-on-demand)
+and the [Go](/lib/go/) and [C](/lib/c/) binding references.
+
 ## media
 
 The catalog, encoded-media imports, and container-decoded reads, merging
@@ -65,8 +71,7 @@ and `GroupConsumer`.
 JSON tracks as a latest value with merge-patch deltas, an append log, or a
 sliding window of records: `SnapshotProducer`, `SnapshotConsumer`,
 `StreamProducer`, `StreamConsumer`, `WindowProducer`, and `WindowConsumer`.
-The catalog has no window mode, so a window track is not advertised there, and
-the C API has no window yet.
+The catalog has no window mode, so a window track is not advertised there.
 
 | Language | Module | Example |
 | --- | --- | --- |

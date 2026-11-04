@@ -36,17 +36,18 @@ let session = try await client.connect(to: "https://relay.example.com")
 let announced = try session.consume.announced(prefix: "demos/", filter: "*/camera")
 for try await event in announced {
     // `.update` reprices a route and `.end` retracts it. A `.restart` is a new
-    // publisher run at the same path: request it again.
+    // publisher run at the same path: request it again. A `.takeover` continues what an
+    // earlier route served, like a `.start`.
     let announcement: Announce
     switch event {
-    case .start(let started), .restart(let started): announcement = started
+    case .start(let started), .restart(let started), .takeover(let started, _): announcement = started
     default: continue
     }
     // Prefix stays origin-relative; captures reports what * matched.
     print("got broadcast \(announcement.prefix)")
-    print("captures \(announcement.captures ?? [])")
+    print("captures \(announcement.captures)")
 
-    let broadcast = try await session.consume.requestBroadcast(path: announcement.prefix)
+    let broadcast = try await session.consume.request(path: announcement.prefix)
     let catalog = try await Media.CatalogConsumer.subscribe(broadcast: broadcast)
     for try await update in catalog {
         print("catalog: \(update)")
@@ -77,10 +78,11 @@ Every consumer conforms to `AsyncSequence`, so `for try await x in consumer` wor
 
 Incoming server `Request` values expose the query-free `path` before acceptance. It is consistent across transports and is empty for the root or missing path. The encoded `query` may contain credentials.
 
-Raw tracks also expose best-effort datagrams: `TrackProducer.appendDatagram(_:timestampUs:)`
-returns the assigned sequence number, `TrackConsumer.recvDatagram()` receives one datagram,
+Raw tracks also expose best-effort datagrams: `TrackProducer.appendDatagram(_:timestamp:)`
+returns the assigned sequence number (`insertDatagram(_:sequence:timestamp:)` takes the
+caller's own), `TrackConsumer.recvDatagram()` receives one datagram,
 and `TrackConsumer.datagrams` streams them in arrival order. Payloads are capped at 1200 bytes.
-Datagrams require a datagram-capable transport and lite-05 or newer moq-lite, or moq-transport;
+Datagrams require a datagram-capable transport and lite-05 or newer moq-lite; moq-transport,
 pre-lite-05, WebSocket, and TCP paths do not deliver them, and there is no stream fallback.
 
 JSON tracks live under the `Json` namespace, mirroring the `moq-json` crate, and carry your own
@@ -91,7 +93,9 @@ JSON tracks live under the `Json` namespace, mirroring the `moq-json` crate, and
 (lossless append-log, every record preserved in order), or `Json.WindowProducer`/`Json.WindowConsumer`
 (a sliding window of records a reader can join at any point, not advertised in the catalog). Values encode/decode at the boundary with
 `JSONEncoder`/`JSONDecoder`; the consumer is an `AsyncSequence` of the decoded type. Publish the
-track with `TrackInfo(compress: true)`; consumers read it the same either way.
+track with `TrackInfo(compress: true)`; consumers read it the same either way. Every JSON write
+(snapshot update, stream append, window push or pop) takes a timestamp on the broadcast clock (`Media.CatalogProducer.now()`), so the
+track needs a timescale.
 
 ## Local development
 

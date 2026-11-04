@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
-import * as z from "@zod/mini";
+import * as z from "zod/mini";
 import { u53 } from "./integers.ts";
-import type { ReferenceEpoch, RelativeBroadcast } from "./path.ts";
+import type { ReferenceInstance, RelativeBroadcast } from "./path.ts";
 import { checkRenditions, DuplicateRendition, encode, RootSchema, UnsupportedVersion, VERSION } from "./root.ts";
 import { track } from "./track.ts";
 
@@ -31,7 +31,7 @@ test("rendition broadcast reference is parsed and normalized", () => {
 		video: {
 			renditions: {
 				video: {
-					broadcast: "././source/",
+					broadcast: "././source",
 					codec: "avc1.64001f",
 					container: { kind: "legacy" },
 				},
@@ -39,25 +39,32 @@ test("rendition broadcast reference is parsed and normalized", () => {
 		},
 	};
 	const parsed = RootSchema.parse(catalog);
-	if (!parsed.video || !("renditions" in parsed.video)) throw new Error("missing video section");
-	// Normalized like Rust path::Relative: redundant `.` and empty segments are dropped.
+	if (!parsed.video) throw new Error("missing video section");
+	// Normalized like Rust path::Relative: redundant `.` segments are dropped.
 	expect(parsed.video.renditions.video?.broadcast).toBe("source" as RelativeBroadcast);
+
+	// Spelled like a path, so an empty segment or a lone backslash refuses the catalog.
+	for (const broadcast of ["./source/", "/source", "a//b", "a\\b"]) {
+		const video = { broadcast, codec: "avc1.64001f", container: { kind: "legacy" } };
+		expect(RootSchema.safeParse({ video: { renditions: { video } } }).success).toBe(false);
+	}
 });
 
-// Mirrors Rust's `reference_epochs_roundtrip_in_every_section`.
-test("every reference-bearing section carries an optional epoch", () => {
-	const EPOCH = "01890a5d-ac96-774b-bcce-b302099a8057" as ReferenceEpoch;
-	const catalog = (epoch: string) => ({
+// Mirrors Rust's `reference_instances_roundtrip_in_every_section`.
+test("every reference-bearing section carries an optional instance", () => {
+	const INSTANCE = "01890a5d-ac96-774b-bcce-b302099a8057" as ReferenceInstance;
+	const catalog = (instance: string) => ({
+		contributions: { c: { broadcast: "./a", instance } },
 		video: {
 			renditions: {
-				v: { broadcast: "./a", epoch, codec: "avc1.64001f", container: { kind: "legacy" } },
+				v: { broadcast: "./a", instance, codec: "avc1.64001f", container: { kind: "legacy" } },
 			},
 		},
 		audio: {
 			renditions: {
 				a: {
 					broadcast: "./a",
-					epoch,
+					instance,
 					codec: "opus",
 					sampleRate: 48000,
 					numberOfChannels: 2,
@@ -65,24 +72,49 @@ test("every reference-bearing section carries an optional epoch", () => {
 				},
 			},
 		},
-		text: { renditions: { t: { broadcast: "./a", epoch, format: "vtt" } } },
-		json: { tracks: { j: { broadcast: "./a", epoch, mode: "snapshot" } } },
-		binary: { tracks: { b: { broadcast: "./a", epoch, mode: "snapshot" } } },
+		text: { renditions: { t: { broadcast: "./a", instance, format: "vtt" } } },
+		json: { tracks: { j: { broadcast: "./a", instance, mode: "snapshot" } } },
+		binary: { tracks: { b: { broadcast: "./a", instance, mode: "snapshot" } } },
 	});
 
-	const parsed = RootSchema.parse(catalog(EPOCH));
-	if (!parsed.video || !("renditions" in parsed.video)) throw new Error("missing video section");
-	if (!parsed.audio || !("renditions" in parsed.audio)) throw new Error("missing audio section");
-	expect(parsed.video.renditions.v?.epoch).toBe(EPOCH);
-	expect(parsed.audio.renditions.a?.epoch).toBe(EPOCH);
-	expect(parsed.text?.renditions.t?.epoch).toBe(EPOCH);
-	expect(parsed.json?.tracks.j?.epoch).toBe(EPOCH);
-	expect(parsed.binary?.tracks.b?.epoch).toBe(EPOCH);
+	const parsed = RootSchema.parse(catalog(INSTANCE));
+	if (!parsed.video) throw new Error("missing video section");
+	if (!parsed.audio) throw new Error("missing audio section");
+	expect(parsed.video.renditions.v?.instance).toBe(INSTANCE);
+	expect(parsed.audio.renditions.a?.instance).toBe(INSTANCE);
+	expect(parsed.text?.renditions.t?.instance).toBe(INSTANCE);
+	expect(parsed.json?.tracks.j?.instance).toBe(INSTANCE);
+	expect(parsed.binary?.tracks.b?.instance).toBe(INSTANCE);
+	expect(parsed.contributions?.c?.instance).toBe(INSTANCE);
 
-	// A malformed or noncanonical epoch refuses the catalog, as in Rust.
-	for (const bad of ["not-a-uuid", EPOCH.toUpperCase(), "01890a5d-ac96-474b-bcce-b302099a8057"]) {
-		expect(RootSchema.safeParse(catalog(bad)).success).toBe(false);
+	// An empty instance refuses the catalog, as in Rust.
+	expect(RootSchema.safeParse(catalog("")).success).toBe(false);
+});
+
+// Mirrors Rust's `contributions_roundtrip_and_refuse_malformed_entries`.
+test("a contribution parses beside a same-ID rendition and a malformed one is refused", () => {
+	const video = { alice: { codec: "avc1.64001f", container: { kind: "legacy" } } };
+	const parsed = RootSchema.parse({
+		contributions: { alice: { broadcast: "./alice.hang" } },
+		video: { renditions: video },
+	});
+	expect(parsed.contributions?.alice).toEqual({ broadcast: "alice.hang" as RelativeBroadcast });
+	// Contribution IDs are their own namespace, so one may share a rendition's ID.
+	expect(() => checkRenditions(parsed)).not.toThrow();
+	expect(encode(parsed).version).toBeUndefined();
+
+	for (const contributions of [
+		[],
+		{ alice: null },
+		{ alice: {} },
+		{ alice: { broadcast: 42 } },
+		{ alice: { broadcast: "./alice.hang", instance: "" } },
+	]) {
+		expect(RootSchema.safeParse({ contributions }).success).toBe(false);
 	}
+	// The issue names a contribution, not a rendition.
+	const refused = RootSchema.safeParse({ contributions: { alice: {} } });
+	expect(refused.error?.message).toContain("malformed contribution alice");
 });
 
 test("rendition parent broadcast reference stays distinct from empty", () => {
@@ -98,7 +130,7 @@ test("rendition parent broadcast reference stays distinct from empty", () => {
 		},
 	};
 	const parsed = RootSchema.parse(catalog);
-	if (!parsed.video || !("renditions" in parsed.video)) throw new Error("missing video section");
+	if (!parsed.video) throw new Error("missing video section");
 	expect(parsed.video.renditions.video?.broadcast).toBe("." as RelativeBroadcast);
 });
 
@@ -111,7 +143,7 @@ test("rendition without broadcast reference stays undefined", () => {
 		},
 	};
 	const parsed = RootSchema.parse(catalog);
-	if (!parsed.video || !("renditions" in parsed.video)) throw new Error("missing video section");
+	if (!parsed.video) throw new Error("missing video section");
 	expect(parsed.video.renditions.video?.broadcast).toBeUndefined();
 });
 
@@ -164,35 +196,80 @@ test("delay parses beside jitter and zero is absent", () => {
 	expect(parsed.text?.renditions.captions?.delay).toBe(u53(120));
 });
 
-test("clock round-trips at the root", () => {
-	const parsed = RootSchema.parse({
-		clock: { wall: 1_751_846_400_000_000, timescale: 1_000_000 },
-	});
-	expect(parsed.clock).toMatchObject({ wall: 1_751_846_400_000_000, timescale: 1_000_000 });
+test("media round-trips at the root", () => {
+	const media = { clock: { wall: 1_751_846_400_000_000, timescale: 1_000_000 }, join: { interval: 2000 } };
+	const parsed = RootSchema.parse({ media });
+	expect(parsed.media?.clock).toMatchObject(media.clock);
+	expect(Number(parsed.media?.join?.interval)).toBe(2000);
+	expect(JSON.parse(JSON.stringify(encode(parsed)))).toEqual({ media });
 });
 
-test("clock stays off the wire when absent", () => {
-	expect(JSON.stringify(RootSchema.parse({}))).not.toContain('"clock"');
+test("media stays off the wire when it holds nothing", () => {
+	expect(JSON.stringify(RootSchema.parse({}))).not.toContain('"media"');
+	expect(encode(RootSchema.parse({ media: {} }))).toEqual({});
+	// A join without a clock still holds something.
+	expect(encode(RootSchema.parse({ media: { join: { interval: 1000 } } })).media?.join?.interval).toBe(u53(1000));
 });
 
-test("a rendition's hls field round-trips", () => {
-	const hls = { track: "video.hls", duration: 2000 };
-	const parsed = RootSchema.parse({
-		video: { renditions: { video: { codec: "avc1.64001f", container: { kind: "legacy" }, hls } } },
-	});
-	if (!parsed.video || !("renditions" in parsed.video)) throw new Error("missing video section");
-	expect(parsed.video.renditions.video?.hls).toEqual({ track: hls.track, duration: u53(hls.duration) });
-	expect(JSON.stringify(parsed)).toContain('"hls":{"track":"video.hls","duration":2000}');
-});
-
-test("a malformed hls field leaves the rendition playable", () => {
-	const config = { codec: "avc1.64001f", container: { kind: "legacy" } };
-	for (const hls of [{ track: "video.hls" }, { duration: 2000 }, { track: 42, duration: 2000 }, "video.hls", null]) {
-		const parsed = RootSchema.parse({ video: { renditions: { video: { ...config, hls } } } });
-		if (!parsed.video || !("renditions" in parsed.video)) throw new Error("missing video section");
-		expect(parsed.video.renditions.video?.hls).toBeUndefined();
-		expect(parsed.video.renditions.video?.codec).toBe(config.codec);
+test("a malformed clock fails the catalog", () => {
+	for (const clock of [{ wall: -1 }, { wall: 0, timescale: 0 }, "now", null]) {
+		expect(RootSchema.safeParse({ media: { clock } }).success).toBe(false);
 	}
+});
+
+test("a media value that isn't an object is someone else's", () => {
+	const video = { renditions: { video: { codec: "avc1.64001f", container: { kind: "legacy" } } } };
+	for (const media of ["clock", 7, null, [], [{ join: { interval: 2000 } }]]) {
+		const parsed = RootSchema.parse({ video, media });
+		expect(parsed.media).toBeUndefined();
+		expect(parsed.video?.renditions.video).toBeDefined();
+	}
+});
+
+test("a malformed join leaves the media playable", () => {
+	const video = { renditions: { video: { codec: "avc1.64001f", container: { kind: "legacy" } } } };
+	const clock = { wall: 1000, timescale: 1_000_000 };
+	for (const join of [
+		{},
+		{ interval: 0 },
+		{ interval: 1.5 },
+		{ interval: -2000 },
+		{ interval: "2000" },
+		2000,
+		null,
+	]) {
+		const parsed = RootSchema.parse({ video, media: { clock, join } });
+		expect(parsed.media?.join).toBeUndefined();
+		expect(parsed.media?.clock).toMatchObject(clock);
+		expect(parsed.video?.renditions.video?.codec).toBe("avc1.64001f");
+	}
+});
+
+// The root `clock` moved to `media.clock` and the per-rendition `hls` field is gone: a catalog from
+// an older publisher still parses, with its media intact and both left unread.
+test("an old root clock and rendition hls are ignored", () => {
+	const config = { codec: "avc1.64001f", container: { kind: "legacy" } };
+	const parsed = RootSchema.parse({
+		video: { renditions: { video: { ...config, hls: { track: "video.hls", duration: 2000 } } } },
+		audio: {
+			renditions: {
+				audio: {
+					codec: "opus",
+					container: { kind: "legacy" },
+					sampleRate: 48000,
+					numberOfChannels: 2,
+					hls: { track: "audio.hls", duration: 2000 },
+				},
+			},
+		},
+		clock: { wall: 1000, timescale: 1_000_000 },
+	});
+	expect(parsed.media).toBeUndefined();
+	expect(parsed.video?.renditions.video).toEqual(
+		RootSchema.parse({ video: { renditions: { video: config } } }).video?.renditions.video,
+	);
+	expect(parsed.video?.renditions.video).not.toHaveProperty("hls");
+	expect(parsed.audio?.renditions.audio).not.toHaveProperty("hls");
 });
 
 // The root `archive` section is gone: a catalog from an older publisher still parses, with its

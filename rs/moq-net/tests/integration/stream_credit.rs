@@ -14,14 +14,16 @@ fn origin(hop: u64) -> origin::Producer {
 	origin
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn one_stream_credit_serves_every_backlogged_group() {
 	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {
 		let version: Version = version.parse().unwrap();
 		let publisher = origin(1);
 		let viewer = origin(2);
 		let broadcast = publisher.create_broadcast("live").unwrap();
-		let info = track::Info::default().with_timescale(moq_net::Timescale::MILLI);
+		let info = track::Info::default()
+			.with_timescale(moq_net::Timescale::MILLI)
+			.with_max_age(None);
 		let tracks: Vec<_> = (0..2)
 			.map(|i| broadcast.create_track(format!("{i}"), info.clone()).unwrap())
 			.collect();
@@ -41,7 +43,8 @@ async fn one_stream_credit_serves_every_backlogged_group() {
 			.available()
 			.await
 			.unwrap();
-		let prefs = track::Subscription::default().with_max_delay(Duration::from_secs(30));
+		let prefs =
+			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(30)));
 		let mut subscribers = Vec::new();
 		for i in 0..tracks.len() {
 			let track = remote.track(&format!("{i}")).unwrap();
@@ -59,7 +62,7 @@ async fn one_stream_credit_serves_every_backlogged_group() {
 			// The transport, not the publisher, picks which parked open gets the next grant.
 			let mut received = Vec::new();
 			while received.len() < 4 {
-				let group = moq_clock::timeout(Duration::from_secs(5), subscriber.recv_group())
+				let group = kio::clock::timeout(Duration::from_secs(5), subscriber.recv_group())
 					.await
 					.unwrap_or_else(|_| panic!("{version}: only {received:?} arrived"))
 					.unwrap()

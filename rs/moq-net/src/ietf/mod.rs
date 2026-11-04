@@ -21,7 +21,6 @@ pub mod cluster;
 #[cfg(feature = "async")]
 mod control;
 mod datagram;
-pub(crate) mod epoch;
 pub(crate) mod error;
 mod fetch;
 mod filter;
@@ -80,8 +79,14 @@ pub use subscribe_namespace::*;
 pub use subscribe_tracks::*;
 #[cfg(feature = "async")]
 use subscriber::*;
+// The fuzz harness drives a subgroup stream's ingest directly.
 pub use track::*;
 pub use version::Version;
+#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
+pub(crate) use {
+	request_stream::{Framed, NamespaceUpdate, Next, Update},
+	subscriber::GroupIngest,
+};
 
 #[cfg(test)]
 mod tests {
@@ -98,7 +103,6 @@ mod tests {
 			("HIDDEN", hidden::HIDDEN, 0x40B5C),
 			("AUTH", auth::AUTH, 0x40B70),
 			("ACTIVE_COUNT", active_count::ACTIVE_COUNT, 0x40B64),
-			("EPOCH", epoch::EPOCH, 0x40B68),
 		] {
 			assert_eq!(key, spec, "{name}");
 		}
@@ -112,7 +116,6 @@ mod tests {
 			("ROUTE_COST", cluster::ROUTE_COST, 0x40B58),
 			("HIDDEN", hidden::HIDDEN_PARAM, 0x40B5E),
 			("ACTIVE_COUNT", active_count::ACTIVE_COUNT_PARAM, 0x40B66),
-			("EPOCH", epoch::EPOCH_PARAM, 0x40B69),
 		] {
 			assert_eq!(key, spec, "{name}");
 		}

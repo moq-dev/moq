@@ -35,8 +35,8 @@ export const MAX_PLAINTEXT_BYTES = 2 ** 36;
 export const MAX_GROUPED_PAYLOAD = 32 * 1024 * 1024;
 export const MAX_GROUPED_PLAINTEXT = MAX_GROUPED_PAYLOAD - TAG_LEN;
 export const MAX_DATAGRAM_BODY = 1200;
-// Three QUIC varints at their widest: the publisher cannot see the Subscribe ID each hop encodes.
-export const MAX_DATAGRAM_HEADER = 24;
+// Lite-07's Type and three leading-ones varints at their widest: the publisher cannot see the Subscribe ID each hop encodes.
+export const MAX_DATAGRAM_HEADER = 28;
 export const MAX_DATAGRAM_PAYLOAD = MAX_DATAGRAM_BODY - MAX_DATAGRAM_HEADER;
 export const MAX_DATAGRAM_PLAINTEXT = MAX_DATAGRAM_PAYLOAD - TAG_LEN;
 

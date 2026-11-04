@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Breaking:** the bus routes sources into several mixes. `Bus::new` returns
+  the bus and the one `Driver` that advances it on the caller's clock; each mix
+  has its own meter and independent readers whose blocks carry their clock
+  position, and a mix-minus drops one source. A strip carries a per-source sync
+  delay. See `MIGRATE.md`.
+- **Breaking:** open one `capture::Producer` and pass its independent consumers
+  to the bus and encoder. Samples, timestamps, source gaps, and terminal failures
+  are shared; slow readers lose only their own expired buffers. See `MIGRATE.md`.
+- Retained (on-demand) audio stays on the track after `encode::Control::stop` and
+  after a source failure: a subscriber still encodes it on demand, and it
+  expires on the track's `max_age`. After a failure, the driver returns the
+  error once that history is served or expired, and the track ends with the
+  error while keeping what it published.
+
 ## [0.1.10](https://github.com/moq-dev/moq/compare/moq-audio-v0.1.9...moq-audio-v0.1.10) - 2026-10-05
 
 ### Other

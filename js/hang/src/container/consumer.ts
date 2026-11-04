@@ -10,16 +10,22 @@ export interface ConsumerProps {
 	/** The container format used to decode each MoQ frame. */
 	format: Format;
 	/**
-	 * How stale a group may get before it is skipped, in milliseconds (default: 0).
+	 * How far behind the live edge to play (default: zero for both bounds). See `Moq.Track.Delay`.
 	 *
-	 * Measured as the span from the oldest buffered frame to the newest, so it bounds how long a
-	 * late group is waited for. A missing sequence also expires this much monotonic time after
-	 * the first group past it arrived, even when the next group is a marker on a paused track.
-	 * The local half of the subscription's
-	 * `maxDelay`; both measure the same budget, one on the wire and one as frames are read.
+	 * The start is the group covering the live edge less `min`, plus any {@link ConsumerProps.warmup}, waiting
+	 * for it when the newest group arrives first; an unstated (`null`) `min` reads as zero. A `min`
+	 * past `max` starts at `max`, since the publisher serves nothing older. `max` is measured as
+	 * the span from the oldest buffered frame to the newest, so it bounds how long a late group is
+	 * waited for. A missing sequence also expires this much monotonic time after the first group
+	 * past it arrived, even when the next group is a marker on a paused track. It is the local
+	 * half of the subscription's `delay.max`; both measure the same budget, one on the wire and one
+	 * as frames are read. It bounds a join's lateness too: a backlog that landed before the first
+	 * read starts at the first group whose first frame is within it, plus any warmup, of the
+	 * newest content, though the start keeps the group covering the live edge less `min` and the
+	 * warmup.
 	 */
 	// Read-only: a Getter (e.g. another component's output) is accepted directly.
-	maxDelay?: GetterInit<Milli>;
+	delay?: GetterInit<Moq.Track.Delay>;
 	/**
 	 * Cap the bytes of decoded frames held ahead of the reader, counting the whole wire payload they
 	 * share and each frame's and group's own overhead (default: {@link DEFAULT_MAX_BUFFER}). Mirrors
@@ -33,6 +39,25 @@ export interface ConsumerProps {
 	 */
 	maxBuffer?: number;
 	/**
+	 * How much further than the min delay the start reaches, in milliseconds (default: 0), so a
+	 * decoder that needs that much media before its output is clean starts early enough, such as an
+	 * Opus decoder or the max-delay decoder of an intra-refresh rendition. Pass the catalog
+	 * rendition's `warmup`. Mirrors Rust's `Consumer::with_warmup`.
+	 *
+	 * Put the max delay plus the warmup on the subscription, since the publisher skips what falls
+	 * outside that budget. The start is no later than the group covering the live edge less
+	 * `delay.min` and the warmup: one that starts at or before that point. Both default to zero,
+	 * which the newest group covers, so the start waits for nothing. Otherwise groups can arrive
+	 * newest first, so when none that arrived covers that point the start waits for an earlier one,
+	 * until one covers it, group 0 arrived, the track finishes, the max buffer fills, or the newest
+	 * group's arrival is that whole reach ago. The wall clock bounds a quiet or paused track, which
+	 * never ages out in media time. Delivery then starts at the lowest group that arrived. Until the
+	 * reader is the warmup past both its first frame and that point, the age skip keeps a group that
+	 * covers the reach and tolerates the warmup, so the media leading up to the start is not dropped
+	 * as stale. After that, the max delay alone governs it.
+	 */
+	warmup?: Milli;
+	/**
 	 * The consumer this one replaces on the same path, such as the previous rendition.
 	 *
 	 * Its arrival estimate carries over instead of restarting from the cold-start prior, so a
@@ -44,7 +69,7 @@ export interface ConsumerProps {
 /** One item of a {@link Consumer.next} read, in delivery order. Mirrors Rust's `container::Read`. */
 export type Read =
 	/** A media frame from `group`. Only group equality means anything: numbers may skip. */
-	| { kind: "frame"; group: number; frame: ReceivedFrame }
+	| { kind: "frame"; group: bigint; frame: ReceivedFrame }
 	/**
 	 * Media after an item already read will never reach this reader: a group was skipped, evicted,
 	 * truncated, or never arrived. A decoder resumes without the references or state that media
@@ -60,7 +85,7 @@ export type Read =
 	 * Frames that follow from the same `group` are the stopped encoder's final packets (an audio
 	 * codec's drain), whose output at or past `end` is padding. The next group starts fresh.
 	 */
-	| { kind: "end"; group: number; end: Micro };
+	| { kind: "end"; group: bigint; end: Micro };
 
 /** The default {@link ConsumerProps.maxBuffer}: one group at the transport's size cap. Mirrors Rust's. */
 export const DEFAULT_MAX_BUFFER = 32 * 1024 * 1024;
@@ -88,6 +113,12 @@ interface Group {
 	index: number; // Media frames decoded so far: the first is a keyframe by protocol invariant
 	charged: number; // What this group holds against the max buffer
 	released?: boolean; // Dropped from #groups, with what it held refunded
+}
+
+// The earliest and latest known frame timestamps of the buffered groups from each index on.
+interface Spans {
+	min: (number | undefined)[];
+	max: (number | undefined)[];
 }
 
 // Two adjacent groups are treated as timeline-contiguous when the next group's first PTS is within
@@ -119,22 +150,38 @@ function ptsContiguous(end: Micro | undefined, nextStart: Micro | undefined): bo
 function continues(prev: Group, next: Group | undefined): next is Group {
 	if (next === undefined) return false;
 	return (
-		next.consumer.sequence === prev.consumer.sequence + 1 || ptsContiguous(prev.end, next.frames.at(0)?.timestamp)
+		next.consumer.sequence === prev.consumer.sequence + 1n || ptsContiguous(prev.end, next.frames.at(0)?.timestamp)
 	);
 }
 
-/** Reads frames from a MoQ track in order, buffering groups and skipping ones that fall `maxDelay` behind. */
+// The max delay in microseconds, infinite when unlimited.
+function maxMicros(delay: Moq.Track.Delay): number {
+	return delay.max === null ? Number.POSITIVE_INFINITY : Micro.fromMilli(delay.max ?? Milli.zero);
+}
+
+/** Reads frames from a MoQ track in order, buffering groups and skipping ones that fall the max delay behind. */
 export class Consumer {
 	#track: Moq.Track.Subscriber;
 	#format: Format;
-	#maxDelay: Getter<Milli>;
+	#delay: Getter<Moq.Track.Delay>;
 	#maxBuffer: number;
+	// How much further than the min delay the start reaches, and the age skip tolerates while warming.
+	#warmup: Milli;
+	// The start may still wait for a group covering the reach, until that wait ends for good.
+	#starting = true;
+	// When the newest group had landed as the first one arrived, once the start waits.
+	#anchor?: Instant;
+	// The point the start reached back to, the live edge less the reach, once its wait ended.
+	#target?: number;
+	// Where the warming ends: the warmup past the first frame read, or past the start's target when
+	// that is later. Undefined before the first frame.
+	#warmed?: Micro;
 	// What the buffered groups hold, against the max buffer.
 	#used = 0;
 	// Group watchers and the track loop parked on a full max buffer.
 	#room: (() => void)[] = [];
 	#groups: Group[] = [];
-	#active?: number; // the active group sequence number
+	#active?: bigint; // the active group sequence number
 	// When the missing sequence at the cursor became late, while one is.
 	#hole?: Instant;
 	// Presentation end (max PTS + duration) of the group we most recently advanced past, so next()'s
@@ -143,7 +190,7 @@ export class Consumer {
 	#presentedEnd?: Micro;
 	// Group of the last media frame next() returned, so an endpoint after it reads as that frame's
 	// duration rather than a declared stop.
-	#mediaGroup?: number;
+	#mediaGroup?: bigint;
 	// Media went missing since the last item read, so the next one is preceded by a gap.
 	#lost = false;
 	// The furthest presentation point read so far: max(timestamp + duration), endpoints included.
@@ -153,7 +200,7 @@ export class Consumer {
 	#next?: Read;
 	// The first media timestamp of the latest delivered group, and its predecessor's start.
 	// Endpoints and later frames can overlap the next group without moving this floor.
-	#start?: { group: number; timestamp: Micro };
+	#start?: { group: bigint; timestamp: Micro };
 	#floor?: Micro;
 	// The error that ended the reader, the first in delivery order: a decode failure or a rewind.
 	#error?: Error;
@@ -182,8 +229,9 @@ export class Consumer {
 	constructor(track: Moq.Track.Subscriber, props: ConsumerProps) {
 		this.#track = track;
 		this.#format = props.format;
-		this.#maxDelay = getter(props.maxDelay ?? Milli.zero);
+		this.#delay = getter(props.delay ?? {});
 		this.#maxBuffer = props.maxBuffer ?? DEFAULT_MAX_BUFFER;
+		this.#warmup = props.warmup ?? Milli.zero;
 		this.#jitter = props.predecessor ? props.predecessor.#jitter.fork() : new Jitter();
 		this.#spread = new Signal(this.#jitter.measured);
 		this.spread = this.#spread;
@@ -436,30 +484,57 @@ export class Consumer {
 
 		let skipped = 0;
 		const start = this.#groups[0]?.consumer.sequence;
+		// The span left after each further skip, computed once the first skip shows more may follow.
+		let spans: Spans | undefined;
 
 		// Keep skipping the oldest group while the buffered span exceeds the max delay.
 		// This also handles gaps in group sequence numbers: if #active points to a missing
 		// group, the span proves the missing content is too old to wait for.
 		while (this.#groups.length >= 2) {
-			const threshold = Micro.fromMilli(this.#maxDelay.peek());
+			const threshold = this.#ageBudget();
 			const first = this.#groups[0];
 
 			// Check the difference between the earliest and latest known frames.
 			let min: number | undefined;
 			let max: number | undefined;
 
-			for (const group of this.#groups) {
-				if (group.latest === undefined) continue;
+			if (skipped === 0) {
+				for (const group of this.#groups) {
+					if (group.latest === undefined) continue;
 
-				const frame = group.frames.at(0)?.timestamp ?? group.latest;
-				if (min === undefined || frame < min) min = frame;
-				if (max === undefined || group.latest > max) max = group.latest;
+					const frame = group.frames.at(0)?.timestamp ?? group.latest;
+					if (min === undefined || frame < min) min = frame;
+					if (max === undefined || group.latest > max) max = group.latest;
+				}
+			} else {
+				// A skip removes only the oldest group, so one pass over what the first skip left gives
+				// the span after every later one, and a bulk skip stays linear in the buffered groups.
+				spans ??= this.#spans();
+				min = spans.min[skipped - 1];
+				max = spans.max[skipped - 1];
 			}
 
 			if (min === undefined || max === undefined) break;
 
 			const age = max - min;
 			if (age <= threshold) break;
+			// Until the reader warms, a group may cover the start's reach though it began before it.
+			if (this.#warming()) {
+				const nextStart = this.#groups[1].start;
+				if (nextStart === undefined) break;
+				if (this.#edge === undefined) {
+					// Before the first item, a backlog that landed whole starts within the budget, so only
+					// the group covering the live edge less the reach is kept: one whose successor starts
+					// past that point. Rust's start skip, in `Consumer::poll_event_once`, measures the same.
+					// `max` is the live edge of the groups left, so this stays O(1) per skip.
+					const target = this.#startTarget(this.#reach(this.#delay.peek()), max);
+					if (target !== undefined && nextStart > target) break;
+				} else if (max - nextStart < threshold) {
+					// Once reading began, it is stale only once its successor starts a whole budget behind
+					// the newest content.
+					break;
+				}
+			}
 
 			this.#groups.shift();
 			this.#active = this.#groups[0]?.consumer.sequence;
@@ -474,7 +549,7 @@ export class Consumer {
 			// or still-open group may have lost its tail.
 			const ended = this.#ended(first);
 			const truncated = ended instanceof Error;
-			const adjacent = next?.consumer.sequence === first.consumer.sequence + 1;
+			const adjacent = next?.consumer.sequence === first.consumer.sequence + 1n;
 			const continued = (ended === null && adjacent) || ptsContiguous(first.end ?? this.#presentedEnd, nextStart);
 			if (marker || discarded || truncated || !continued) this.#lost = true;
 			skipped++;
@@ -482,12 +557,38 @@ export class Consumer {
 		}
 
 		if (skipped) {
+			// What the start would wait for is older than the reach, so it is past. The reader still
+			// warms until the start's target, as it would had the wait ended on its own.
+			if (this.#starting) {
+				this.#starting = false;
+				this.#target = this.#startTarget(this.#reach(this.#delay.peek()));
+			}
 			console.warn(
 				`skipping slow groups: track=${this.#track.name} ${start} -> ${this.#active} count=${skipped}`,
 			);
 			this.#updateBuffered();
 		}
 		return skipped > 0;
+	}
+
+	// The earliest and latest known frames of the buffered groups from each index on: the span left
+	// once that many of the oldest groups are skipped, undefined where none of them has a frame.
+	#spans(): Spans {
+		const count = this.#groups.length;
+		const spans: Spans = { min: new Array(count), max: new Array(count) };
+		let min: number | undefined;
+		let max: number | undefined;
+		for (let i = count - 1; i >= 0; i--) {
+			const group = this.#groups[i];
+			if (group.latest !== undefined) {
+				const frame = group.frames.at(0)?.timestamp ?? group.latest;
+				if (min === undefined || frame < min) min = frame;
+				if (max === undefined || group.latest > max) max = group.latest;
+			}
+			spans.min[i] = min;
+			spans.max[i] = max;
+		}
+		return spans;
 	}
 
 	// Skip the stalled active group once it has presented up to where the next group
@@ -668,6 +769,9 @@ export class Consumer {
 				}
 			}
 
+			// The start may wait for a group covering the reach, the min delay plus the warmup.
+			const starting = this.#reachStart(ended !== undefined);
+
 			// If #active points below all buffered groups -- e.g. a finished group's `+ 1`
 			// fallback fired because no later group was buffered yet, and the real (large-gap,
 			// non-sequential) next group has since arrived -- promote #active to the first real
@@ -684,21 +788,21 @@ export class Consumer {
 			// behind a hole can end a paused track without more arrivals. It is late since a group
 			// past it arrived, not since the cursor got here: once the edge stops moving, a backlog
 			// with every other group missing would otherwise drain one budget per hole.
-			if (this.#active !== undefined && this.#groups.length > 0) {
+			if (starting === undefined && this.#active !== undefined && this.#groups.length > 0) {
 				const head = this.#groups[0];
 				if (head.consumer.sequence > this.#active) {
 					this.#hole = head.late;
 					const startup = this.#start === undefined;
 					const contiguous = ptsContiguous(this.#presentedEnd, head.frames.at(0)?.timestamp);
 					const empty = head.empty && head.consumer.done;
-					const maxDelay = Micro.fromMilli(this.#maxDelay.peek());
+					const maxDelay = maxMicros(this.#delay.peek());
 					const skipHole =
 						head.frames.length > 0 &&
 						(maxDelay === 0 ||
 							(this.#presentedEnd !== undefined &&
 								head.latest !== undefined &&
 								head.latest - this.#presentedEnd > maxDelay));
-					const elapsed = Instant.durationSince(now(), this.#hole) >= Nano.fromMicro(maxDelay);
+					const elapsed = Instant.durationSince(now(), this.#hole) >= maxDelay * 1000;
 					// The groups past the hole already fill the max buffer, so it can hold none of what would arrive into it.
 					const full = this.#full();
 					if (startup || empty || contiguous || skipHole || elapsed || full || ended !== undefined) {
@@ -717,7 +821,12 @@ export class Consumer {
 			}
 
 			const head = this.#groups.at(0);
-			if (head && this.#active !== undefined && head.consumer.sequence <= this.#active) {
+			if (
+				starting === undefined &&
+				head &&
+				this.#active !== undefined &&
+				head.consumer.sequence <= this.#active
+			) {
 				const seq = head.consumer.sequence;
 				const frame = head.frames.shift();
 				if (frame) {
@@ -734,6 +843,10 @@ export class Consumer {
 					}
 					this.#mediaGroup = seq;
 
+					// A group covering the target began before it, so the reader warms until the target too.
+					this.#warmed ??= Micro(
+						Math.max(frame.timestamp, this.#target ?? frame.timestamp) + Micro.fromMilli(this.#warmup),
+					);
 					if (this.#start === undefined || seq > this.#start.group) {
 						this.#floor = this.#start?.timestamp;
 						this.#start = { group: seq, timestamp: frame.timestamp };
@@ -770,7 +883,7 @@ export class Consumer {
 						// +1 there (the promotion guard above fixes it up once a continuous group arrives).
 						this.#recordPresented(head);
 						const next = this.#groups.at(0);
-						this.#active = continues(head, next) ? next.consumer.sequence : seq + 1;
+						this.#active = continues(head, next) ? next.consumer.sequence : seq + 1n;
 					}
 					head.consumer.close();
 					this.#release(head);
@@ -801,13 +914,16 @@ export class Consumer {
 			const abort = this.#signals.abort;
 			if (abort.aborted) return undefined;
 			let timer: Effect | undefined;
-			if (this.#hole !== undefined) {
+			const since = starting ?? this.#hole;
+			if (since !== undefined) {
 				timer = new Effect();
-				const since = this.#hole;
 				timer.run((effect) => {
-					const budget = Nano.fromMilli(effect.get(this.#maxDelay));
+					const delay = effect.get(this.#delay);
+					// The start waits out its reach, and a hole the max delay, which an unlimited one never does.
+					const budget = starting === undefined ? maxMicros(delay) : this.#reach(delay);
+					if (!Number.isFinite(budget)) return;
 					const elapsed = Instant.durationSince(now(), since);
-					effect.timer(() => this.#notify?.(), Nano(Math.max(0, budget - elapsed)));
+					effect.timer(() => this.#notify?.(), Nano(Math.max(0, budget * 1000 - elapsed)));
 				});
 			}
 
@@ -824,6 +940,74 @@ export class Consumer {
 			this.#notify = undefined;
 			if (aborted) return undefined;
 		}
+	}
+
+	// How far behind the live edge the start reaches, in microseconds: the min delay plus the warmup.
+	// The publisher serves nothing older than the max delay, so a min delay past it reaches no further.
+	#reach(delay: Moq.Track.Delay): number {
+		return Math.min(Micro.fromMilli(delay.min ?? Milli.zero), maxMicros(delay)) + Micro.fromMilli(this.#warmup);
+	}
+
+	// While the start still waits for a group covering the live edge less the min delay and the
+	// warmup, when the newest group had landed as the first one arrived: the wait ends a reach after
+	// it. Undefined once the start is free to go, for good.
+	#reachStart(ended: boolean): Instant | undefined {
+		if (!this.#starting) return undefined;
+		// Nothing has a wire frame yet, so nothing can start either.
+		if (!this.#groups.some((group) => !group.empty)) return undefined;
+
+		const reach = this.#reach(this.#delay.peek());
+		// The newest group covers a zero reach.
+		if (reach === 0) {
+			this.#starting = false;
+			return undefined;
+		}
+		this.#anchor ??= this.#groups[this.#groups.length - 1].consumer.arrived;
+		const target = this.#startTarget(reach);
+		const covered =
+			target !== undefined && this.#groups.some((group) => group.start !== undefined && group.start <= target);
+		// Nothing earlier can arrive or be held.
+		const lowest = this.#groups[0].consumer.sequence === 0n;
+		// Wall time: the newest group landed a whole reach ago.
+		const elapsed = Instant.durationSince(now(), this.#anchor) >= reach * 1000;
+		if (ended || this.#full() || target === undefined || covered || lowest || elapsed) {
+			this.#starting = false;
+			this.#target = target;
+			return undefined;
+		}
+		return this.#anchor;
+	}
+
+	// The point the start reaches back to: the live edge (the newest content) less `reach`. Undefined
+	// for a zero reach, which the newest group covers, and before any timed content, since untimed
+	// content such as a marker has no edge to reach back from.
+	// A caller that already knows the live edge passes it, sparing a scan of every group.
+	#startTarget(reach: number, known?: number): number | undefined {
+		if (reach === 0) return undefined;
+		const edge = known ?? this.#liveEdge();
+		// Media starts at zero, so a reach past it is covered there.
+		return edge === undefined ? undefined : Math.max(0, edge - reach);
+	}
+
+	// The newest known frame timestamp across the buffered groups.
+	#liveEdge(): number | undefined {
+		let edge: number | undefined;
+		for (const group of this.#groups) {
+			if (group.latest !== undefined && (edge === undefined || group.latest > edge)) edge = group.latest;
+		}
+		return edge;
+	}
+
+	// How stale the buffered span may get before the age skip drops its oldest group, in microseconds:
+	// the max delay, plus the warmup while the reader warms.
+	#ageBudget(): number {
+		const maxDelay = maxMicros(this.#delay.peek());
+		return this.#warming() ? maxDelay + Micro.fromMilli(this.#warmup) : maxDelay;
+	}
+
+	// The reader has not yet read past the start's target and the warmup past its first frame.
+	#warming(): boolean {
+		return this.#warmed === undefined || (this.#edge ?? 0) < this.#warmed;
 	}
 
 	// Return `read`, or a gap ahead of it when media went missing after an earlier item.
@@ -858,7 +1042,7 @@ export class Consumer {
 			const end = Milli.fromMicro(group.latest);
 
 			const last = ranges.at(-1);
-			const contiguous = prev?.consumer.done && prev.consumer.sequence + 1 === group.consumer.sequence;
+			const contiguous = prev?.consumer.done && prev.consumer.sequence + 1n === group.consumer.sequence;
 			if (last && (last.end >= start || contiguous)) {
 				last.end = Milli(Math.max(last.end, end));
 			} else {

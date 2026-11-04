@@ -1,4 +1,4 @@
-# [S] VA-API renderer tests
+# [M] VA-API renderer tests
 
 ## Goal
 
@@ -8,7 +8,11 @@ The four ignored VA-API renderer import tests in
 `decoded_frames_reach_the_gpu_without_a_download`, and
 `recycled_decoder_surfaces_draw_the_latest_picture`) and
 `packed_dmabuf_renders_through_vulkan` run in `just rs gpu` on AMD and Intel
-hosts and fail there instead of skipping.
+hosts and fail there instead of skipping. So do the VA-API decode tests that
+return early without a device today (`vaapi_h264_round_trip` and
+`native_frames_still_answer_into_i420` in
+`rs/moq-video/src/decode/backend/vaapi.rs`) and moq-transcode's
+`vaapi_decoder_available` tests, which hosted CI reports as passed.
 
 ## Plan
 
@@ -30,6 +34,11 @@ which covers only NVIDIA.
   if the recipe cannot provide one, leave it to
   [Video hardware validation](/quest/m3/video-hardware.md) and say so in its
   reason.
+- Added 2026-10-27 (maintainer) from the coverage audit: convert the
+  early-return VA-API decode and transcode tests to
+  `#[ignore = "requires ..."]`, as [GPU CI](/quest/m2/gpu-ci.md) does for
+  NVIDIA's `hw_available`, so hosted CI reports them ignored and this
+  recipe's filter selects them.
 - No hosted runner has these GPUs, so this stays a local recipe until a
   GPU runner exists ([GPU CI](/quest/m2/gpu-ci.md) owns that decision).
 

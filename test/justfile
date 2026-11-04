@@ -17,6 +17,7 @@ set working-directory := '.'
 qmux_examples := absolute_path(env("CARGO_TARGET_DIR", source_directory() / ".." / "target")) / "debug" / "examples"
 
 harness_browser_tests := '''
+    ./capture-idle.browser.ts
     ./capture-channel-count.browser.ts
     ./encoded-preview.browser.ts
     ./harness.browser.ts
@@ -31,8 +32,8 @@ harness_browser_tests := '''
 '''
 
 harness_compat_tests := '''
-    test/interop/compat/claims.test.ts
-    test/interop/compat/resolve.test.ts
+    ./test/interop/compat/claims.test.ts
+    ./test/interop/compat/resolve.test.ts
 '''
 
 # List the cross-language suites.
@@ -45,6 +46,7 @@ default:
 harness:
     ./lib/harness.test.sh
     ./interop/relay-log.test.sh
+    python3 interop/staging.test.py
     python3 ../rs/moq-gst/smoke.test.py
     python3 interop/report.test.py
     python3 interop/tone.test.py
@@ -64,13 +66,14 @@ harness:
 [positional-arguments]
 interop *args:
     cd .. && bun install --frozen-lockfile
-    just rs test -p moq-net --lib \
+    just rs test -p moq-net -p moq-crypto --lib \
         auth_unsupported_interop \
         ietf_compression_fallback_interop \
         ietf_datagram_interop \
         ietf_track_status_interop \
         ietf_range_updates_interop \
         padding_interop \
+        sign_interop \
         tracks_interop \
         varint_interop \
         --run-ignored all
@@ -92,8 +95,9 @@ wire-compat *args:
     ./interop/compat.sh "$@"
 
 # Pinned Moxygen sections 1-7, subgroup zero, through one relay under the conformance profile.
-ietf-conformance:
-    ./ietf-conformance/run.sh
+[positional-arguments]
+ietf-conformance *args:
+    ./ietf-conformance/run.sh "$@"
 
 # Installs each client from its public registry, inside test/smoke's own Nix
 # shell rather than this repo's toolchain. The first argument picks a smoke
@@ -118,10 +122,13 @@ interop-negative *args:
 
 # Browser-to-browser media QA against a deterministic fixture: presented frame progress, audible
 # tone, audio/video skew, and the publication lifecycle (cold start, pause, rejoin, detach,
-# republish, late join). Ends with negative controls that inject a frozen picture, silence, a
-# shifted tone, and a leaked session; each must fail the assertion it names. --timeout 30 gives
+# republish, late join), audio format changes, rendition switches, mute and volume at the
+# speakers, AAC, and the same pattern from a native (ffmpeg + Rust CLI) publisher. Ends with
+# negative controls that inject a frozen picture, silence, a shifted tone, a leaked session, and
+# delayed native audio; each must fail the assertion it names. --timeout 30 gives
 
-# headless Chromium cold-start headroom. --media-engines selects player engines; the fixture stays Chromium.
+# headless Chromium cold-start headroom. --media-engines selects player engines, --media-publisher the
+# fixture's (chromium or firefox).
 [positional-arguments]
 media *args:
     ./interop/interop.sh --media --timeout 30 "$@"
@@ -156,9 +163,15 @@ native-play:
 audio-quality *args:
     ./audio-quality/run.sh "$@"
 
+# Measure 22 push-to-talk presses at 300 ms on an ideal local path.
+push-to-talk:
+    ./audio-quality/ptt.sh
+
 # Records the arrival traces under audio-quality/traces/ that the replay rows grade: the
 # public relay's bbb.hang, a local relay's AAC tone, and a browser microphone through the
-# public relay. Needs the network. Narrow it with `--lanes relay-bbb --duration 35`.
+# public relay. Needs the network. Narrow it with `--lanes relay-bbb --duration 35`; record a
+# real microphone with `--lanes relay-mic --mic-broadcast <name>`, published by hand to the
+# public relay's anon path.
 
 # Re-record the audio quality arrival traces.
 [positional-arguments]
@@ -234,22 +247,13 @@ ts-controls:
 drain *args:
     ./drain/run.sh {{ args }}
 
-# Runs the @moq/wasm bindings in headless Chromium against a real relay, one per
-# protocol flavour. The crate is `#![cfg(target_arch = "wasm32")]`, so nothing in
-# `just check` or `just rs wasm` gets past compiling it. See wasm/README.md.
-
-# Browser coverage for the @moq/wasm bindings.
-[positional-arguments]
-wasm *args:
-    ./wasm/run.sh "$@"
-
 # The @moq/video renderer in headless Chromium: WebGPU, a lost device, and the Canvas2D fallback.
 video:
     cd .. && bun install --frozen-lockfile
     # A desktop display makes software Vulkan request unsupported window surfaces.
     cd video && bash ../../sh/local.sh env -u DISPLAY -u WAYLAND_DISPLAY bun test ./renderer.browser.ts
 
-# Optional publisher retention across Rust/JS sessions through a Rust relay.
+# Optional publisher max age across Rust/JS sessions through a Rust relay.
 max-age:
     bash ../sh/local.sh cargo nextest run --locked -p moq-tokio --test integration -E 'test(/^max_age::/)' --run-ignored all
 
@@ -260,11 +264,15 @@ receive-credit:
 
 # Cross-language subscription termination over in-memory transports.
 bare-fin:
-    just rs test -p moq-net --lib bare_fin_interop --run-ignored all
+    just rs test -p moq-net --lib bare_fin_interop owed_tail_death_interop --run-ignored all
 
 # Explore JSON snapshot codec sequences with a fresh replayable seed.
 json-properties:
     bash ../sh/local.sh bash json-properties.sh
+
+# Check resume against its model of one logical track from a fresh replayable seed.
+resume-model:
+    bash ../sh/local.sh bash resume-model.sh
 
 # The TypeScript qmux peer as client and server against the in-tree Rust qmux
 # interop examples, per draft. The manifest path names the in-tree crate, which
@@ -274,15 +282,9 @@ json-properties:
 qmux:
     cargo build --locked --quiet --manifest-path ../rs/qmux/Cargo.toml --example interop-server --example interop-client
     cd .. && bun install --frozen-lockfile
-    cd .. && QMUX_INTEROP_BIN={{ quote(qmux_examples) }} bun test test/qmux/interop.test.ts
+    cd .. && QMUX_INTEROP_BIN={{ quote(qmux_examples) }} bun test ./test/qmux/interop.test.ts
 
 # Complete MoQ SETUP and transfer a frame over a real browser data-channel pair.
 p2p:
     cd .. && bun install --frozen-lockfile
     cd p2p && bash ../../sh/local.sh bun test ./transport.browser.ts
-
-# Retain complete backend assets, parity, and raw alternating browser samples.
-[positional-arguments]
-wasm-baseline *args:
-    HARNESS_RUNS="${HARNESS_RUNS:-../target/test/wasm-backend}" ./wasm/run.sh "$@"
-    HARNESS_RUNS="${HARNESS_RUNS:-../target/test/wasm-backend}" ./wasm/run.sh --baseline "$@"

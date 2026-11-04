@@ -13,6 +13,12 @@ type BroadcastConsumer struct {
 	inner *ffi.MoqBroadcastConsumer
 }
 
+// Closed blocks until the broadcast ends: its publisher closed it, or every producer
+// left. Cancelling ctx stops waiting.
+func (b *BroadcastConsumer) Closed(ctx context.Context) error {
+	return b.inner.Closed(ctx)
+}
+
 // SubscribeTrack subscribes to a track, receiving arbitrary byte payloads.
 // subscription tunes delivery priority, group range, and staleness; pass nil for defaults.
 func (b *BroadcastConsumer) SubscribeTrack(
@@ -54,9 +60,9 @@ func (b *BroadcastConsumer) FetchGroup(
 // Resolve returns the broadcast serving a catalog rendition, built with
 // media.VideoRendition or media.AudioRendition. The rendition's Broadcast reference, nil or
 // empty, names this broadcast; anything else names a sibling relative to it (e.g. "./source").
-// Its Epoch is the publisher instance the reference names: a broadcast proven to serve another
-// instance errors instead of resolving, and a route without an epoch cannot prove one, so there
-// it is best effort. Call it on a rendition that carries a reference before SubscribeTrack or
+// Its Instance is the stream the reference names: a broadcast proven to serve another one
+// errors instead of resolving, while a route over a wire that carries no instance cannot prove
+// one, so there it is best effort. Call it on a rendition that carries a reference before SubscribeTrack or
 // FetchGroup, which take a track name rather than a rendition: the rendition's Track, or its ID
 // when nil. The rendition-based media.NewTrackConsumer, media.FetchGroup, audio.Subscribe, and
 // video.Subscribe resolve it themselves.
@@ -86,8 +92,7 @@ func (g *GroupConsumer) Sequence() uint64 {
 
 // ReadFrame returns the next raw frame, or (nil, nil) when the group ends.
 func (g *GroupConsumer) ReadFrame(ctx context.Context) (*Frame, error) {
-	frame, err := bridge.Call(ctx, g.inner.Cancel, g.inner.ReadFrame)
-	return frameFromFFI(frame), err
+	return bridge.Call(ctx, g.inner.Cancel, g.inner.ReadFrame)
 }
 
 // All ranges over raw frames until the group ends or the loop breaks.
@@ -141,15 +146,13 @@ func (t *TrackConsumer) group(ctx context.Context, next func(context.Context) (*
 // Cancelling the context cancels this consumer, not just this call: see
 // package docs.
 func (t *TrackConsumer) ReadFrame(ctx context.Context) (*Frame, error) {
-	frame, err := bridge.Call(ctx, t.inner.Cancel, t.inner.ReadFrame)
-	return frameFromFFI(frame), err
+	return bridge.Call(ctx, t.inner.Cancel, t.inner.ReadFrame)
 }
 
 // RecvDatagram returns the next best-effort datagram in arrival order, or
 // (nil, nil) when the track ends.
 func (t *TrackConsumer) RecvDatagram(ctx context.Context) (*Datagram, error) {
-	datagram, err := bridge.Call(ctx, t.inner.Cancel, t.inner.RecvDatagram)
-	return datagramFromFFI(datagram), err
+	return bridge.Call(ctx, t.inner.Cancel, t.inner.RecvDatagram)
 }
 
 // Info returns the publisher-side track properties learned during subscription.
@@ -195,9 +198,9 @@ type VideoDecodedFrame struct {
 	inner *ffi.MoqVideoDecodedFrame
 }
 
-// TimestampUs is the presentation timestamp in microseconds.
-func (f *VideoDecodedFrame) TimestampUs() uint64 {
-	return f.inner.TimestampUs()
+// Timestamp is the presentation timestamp.
+func (f *VideoDecodedFrame) Timestamp() Timestamp {
+	return f.inner.Timestamp()
 }
 
 // Width is the decoded width in pixels.

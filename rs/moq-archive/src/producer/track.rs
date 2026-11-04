@@ -7,14 +7,14 @@ use std::task::Poll;
 use std::time::Duration;
 
 use bytes::Bytes;
-use moq_clock::Instant;
-use moq_net::track::{Anchor, Order, Position, Range, Subscription};
+use kio::clock::Instant;
+use moq_net::track::{Anchor, Delay, Order, Position, Range, Subscription};
 use moq_net::{StreamError, Timescale, group};
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutPayload};
 
 use super::Shared;
-use super::ordered::{Item, Ordered};
+use super::ordered::Ordered;
 use super::resume::Stored;
 use crate::layout::{self, End, Entry, Frame, Object};
 use crate::{Error, Info, Result};
@@ -71,7 +71,7 @@ struct Building {
 
 enum Event {
 	Frame(u64, moq_net::Result<Option<moq_net::frame::Frame>>),
-	Next(Option<(u64, Item)>),
+	Next(Option<Box<group::Consumer>>),
 	Timer,
 }
 
@@ -104,7 +104,7 @@ impl<S: ObjectStore> Track<S> {
 		track.newest = objects.pop();
 		if track.shared.config.dvr.is_some() {
 			// Their age is unknown, so their window starts now.
-			let now = moq_clock::now();
+			let now = kio::clock::now();
 			track.superseded = objects.into_iter().map(|path| (now, path)).collect();
 		}
 		Ok(track)
@@ -114,7 +114,7 @@ impl<S: ObjectStore> Track<S> {
 	/// to the newest, or `None` once the listing ended.
 	async fn idle(&mut self, queue: &kio::Queue<moq_net::track::Info>) -> Result<Option<moq_net::track::Info>> {
 		loop {
-			let mut timer = self.prune_at().map(|at| Box::pin(moq_clock::sleep_until(at)));
+			let mut timer = self.prune_at().map(|at| Box::pin(kio::clock::sleep_until(at)));
 			let popped = kio::wait(|waiter| {
 				if let Poll::Ready(popped) = queue.poll_pop(waiter) {
 					return Poll::Ready(Some(popped));
@@ -156,7 +156,7 @@ impl<S: ObjectStore> Track<S> {
 		Ok(())
 	}
 
-	/// Record one subscription until both its groups and its datagrams end, returning how.
+	/// Record one subscription until its groups end, returning how.
 	async fn run(&mut self, info: &moq_net::track::Info) -> Result<End> {
 		let shared = self.shared.clone();
 		let config = &shared.config;
@@ -171,7 +171,7 @@ impl<S: ObjectStore> Track<S> {
 		// backlog a smaller budget skipped is not sent again. The wait for a gap is narrowed below.
 		let subscription = Subscription::default()
 			.with_order(Order::Ascending)
-			.with_max_delay(config.max_delay)
+			.with_delay(Delay::default().with_max(config.max_delay))
 			.with_ranges([range]);
 
 		let subscribed = match self.shared.broadcast.track(&self.name) {
@@ -195,7 +195,7 @@ impl<S: ObjectStore> Track<S> {
 		// The group being stored, frame by frame.
 		let mut current: Option<Box<group::Consumer>> = None;
 		loop {
-			self.flush_due(moq_clock::now())?;
+			self.flush_due(kio::clock::now())?;
 			self.write().await?;
 			self.prune().await?;
 
@@ -203,7 +203,7 @@ impl<S: ObjectStore> Track<S> {
 				.into_iter()
 				.flatten()
 				.min()
-				.map(|at| Box::pin(moq_clock::sleep_until(at)));
+				.map(|at| Box::pin(kio::clock::sleep_until(at)));
 			let event = kio::wait(|waiter| {
 				match current.as_mut() {
 					Some(current) => {
@@ -224,18 +224,11 @@ impl<S: ObjectStore> Track<S> {
 			})
 			.await;
 
-			let now = moq_clock::now();
+			let now = kio::clock::now();
 			match event {
 				Event::Frame(index, read) => self.frame(&mut current, index, read, now)?,
-				Event::Next(Some((sequence, Item::Datagram(datagram)))) => {
-					let frame = Frame {
-						timestamp: self.stamp(datagram.timestamp)?,
-						payload: datagram.payload,
-					};
-					self.push(sequence, 0, frame, true, now)?;
-					self.next = Some(Position::group(sequence + 1));
-				}
-				Event::Next(Some((sequence, Item::Group(group)))) => {
+				Event::Next(Some(group)) => {
+					let sequence = group.sequence;
 					// A resumed group continues after its stored frames. The clamp also starts a
 					// group whose head is held elsewhere at its first frame, rather than lagging
 					// behind it.
@@ -280,7 +273,7 @@ impl<S: ObjectStore> Track<S> {
 					timestamp: self.stamp(frame.timestamp)?,
 					payload: frame.payload,
 				};
-				self.push(sequence, index, frame, false, now)?;
+				self.push(sequence, index, frame, now)?;
 				self.next = Some(Position {
 					group: sequence,
 					frame: index + 1,
@@ -308,11 +301,11 @@ impl<S: ObjectStore> Track<S> {
 		}
 	}
 
-	/// Append one frame of `sequence`, or a datagram, cutting the object before it when due.
-	fn push(&mut self, sequence: u64, index: u64, frame: Frame, datagram: bool, now: Instant) -> Result<()> {
+	/// Append one frame of `sequence`, cutting the object before it when due.
+	fn push(&mut self, sequence: u64, index: u64, frame: Frame, now: Instant) -> Result<()> {
 		let config = &self.shared.config;
 		if let Some(building) = &self.object {
-			let last = building.object.entries.last().map(Entry::sequence);
+			let last = building.object.entries.last().map(|entry| entry.sequence);
 			let boundary = last != Some(sequence);
 			// Only an object's first entry carries a frame start, so a group starting past frame 0
 			// opens its own object.
@@ -352,16 +345,13 @@ impl<S: ObjectStore> Track<S> {
 		});
 		let pts = frame.timestamp.unwrap_or(0);
 		match building.object.entries.last_mut() {
-			Some(Entry::Group { sequence: last, frames }) if *last == sequence && !datagram => frames.push(frame),
+			Some(last) if last.sequence == sequence => last.frames.push(frame),
 			_ => {
 				building.run_pts = pts;
 				building.run_at = now;
-				building.object.entries.push(match datagram {
-					true => Entry::Datagram { sequence, frame },
-					false => Entry::Group {
-						sequence,
-						frames: vec![frame],
-					},
+				building.object.entries.push(Entry {
+					sequence,
+					frames: vec![frame],
 				});
 			}
 		}
@@ -391,7 +381,7 @@ impl<S: ObjectStore> Track<S> {
 		if let Some(superseded) = self.newest.replace(path.clone())
 			&& self.shared.config.dvr.is_some()
 		{
-			self.superseded.push_back((moq_clock::now(), superseded));
+			self.superseded.push_back((kio::clock::now(), superseded));
 		}
 		self.puts.push((path, bytes));
 		Ok(())
@@ -425,7 +415,7 @@ impl<S: ObjectStore> Track<S> {
 
 	/// Delete the superseded objects whose window and grace have passed.
 	async fn prune(&mut self) -> Result<()> {
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		while self.prune_at().is_some_and(|at| at <= now) {
 			let (_, path) = self.superseded.pop_front().expect("a superseded object is due");
 			match self.shared.store.inner().delete(&path).await {
@@ -463,7 +453,7 @@ fn error(err: &moq_net::Error) -> End {
 }
 
 /// Poll an optional timer, pending forever without one.
-fn ready_at(timer: &mut Option<Pin<Box<moq_clock::Sleep>>>, waiter: &kio::Waiter) -> Poll<()> {
+fn ready_at(timer: &mut Option<Pin<Box<kio::clock::Sleep>>>, waiter: &kio::Waiter) -> Poll<()> {
 	match timer.as_mut() {
 		Some(timer) => waiter.poll_future(timer.as_mut()),
 		None => Poll::Pending,

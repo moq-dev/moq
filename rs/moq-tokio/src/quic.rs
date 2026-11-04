@@ -20,14 +20,13 @@ mod backend;
 pub use backend::Error;
 #[cfg(feature = "quic")]
 pub(crate) use backend::{Client, Closer, Options, Server, accept};
+#[cfg(feature = "quic")]
+pub mod demux;
 #[cfg(feature = "driver")]
 pub mod driver;
 
-/// WebTransport over [`driver`], formerly the `web-transport-moq` crate.
-///
-/// Public only so the workspace's tests can dial a bare session; not a stable API.
+/// WebTransport over the moq-quic [`driver`], usable without a MoQ session.
 #[cfg(feature = "quic")]
-#[doc(hidden)]
 pub mod web;
 
 /// The routable server ID a QUIC-LB load balancer encodes into connection IDs.
@@ -35,7 +34,7 @@ pub mod web;
 /// Parsed from, and serialized as, a hex string. Its length must match the load
 /// balancer's configured server-ID length.
 #[serde_with::serde_as]
-#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ServerId(#[serde_as(as = "serde_with::hex::Hex")] pub(crate) Vec<u8>);
 
 impl ServerId {
@@ -67,6 +66,35 @@ pub(crate) struct LoadBalancer {
 	pub id: ServerId,
 	/// Number of random nonce bytes appended to each connection ID.
 	pub nonce: usize,
+	/// Forwarding to the other servers behind this one's address.
+	pub forward: Option<Forward>,
+}
+
+/// Resolved QUIC-LB forwarding, every setting present.
+#[cfg(feature = "quic")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Forward {
+	/// The forward socket's address.
+	pub bind: std::net::SocketAddr,
+	/// The shared key file.
+	pub key: PathBuf,
+	/// The peer map file.
+	pub peers: PathBuf,
+}
+
+/// A congestion controller of the application's own, built fresh for each connection.
+///
+/// Implement [`crate::congestion::Factory`] and install it with [`Config::controller`].
+#[cfg(feature = "driver")]
+#[derive(Clone)]
+pub struct Controller(pub std::sync::Arc<dyn moq_congestion::Factory + Send + Sync>);
+
+#[cfg(feature = "driver")]
+impl std::fmt::Debug for Controller {
+	/// Opaque: a factory carries no description of its own.
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.write_str("Controller(..)")
+	}
 }
 
 /// The congestion control family for a QUIC connection.
@@ -104,37 +132,33 @@ pub const DEFAULT_MAX_STREAMS: u64 = 10_000;
 /// Default connection-wide receive window, used when [`Config::receive_window`] is unset.
 ///
 /// Bounds how much unread data and incomplete messages one peer can make us buffer across
-/// all of its streams, which the backends otherwise leave unlimited. On iroh, which returns
-/// credit as it reads, it bounds only the unread data. It has to be at least
-/// moq-net's `transport::MIN_RECEIVE_WINDOW`, the 64 MiB announcement
-/// cap plus framing, so 64 MiB would be refused; 128 MiB also holds two maximum-size frames
-/// at once, and lets a relay-to-relay session sustain several Gbps at intercontinental RTTs.
-pub const DEFAULT_RECEIVE_WINDOW: u64 = 128 << 20;
+/// all of its streams, which the backends otherwise leave unlimited. It has to be at least moq-net's
+/// `transport::MIN_RECEIVE_WINDOW`, one 1 MiB segment. 4 MiB sustains about 270 Mbps at a
+/// 100 ms RTT, room for any one viewer or publisher, and lets a session pause two group
+/// streams for slow readers (half the window, a stream window each).
+pub const DEFAULT_RECEIVE_WINDOW: u64 = 4 << 20;
 #[cfg(feature = "_transport")]
 const _: () = assert!(DEFAULT_RECEIVE_WINDOW >= moq_net::transport::MIN_RECEIVE_WINDOW);
 
 /// Default per-stream receive window, used when [`Config::stream_receive_window`] is unset.
 ///
 /// Stream credit returns as bytes are read, whether or not their message is complete,
-/// so this only paces one stream: enough for a single group stream to reach a few
-/// hundred Mbps at a 100 ms RTT.
-pub const DEFAULT_STREAM_RECEIVE_WINDOW: u64 = 4 << 20;
+/// so this only paces one stream: enough for a single group stream to reach about
+/// 67 Mbps at a 100 ms RTT. It is also what a stream paused for a slow reader holds.
+pub const DEFAULT_STREAM_RECEIVE_WINDOW: u64 = 1 << 20;
 
 /// Default cap on unacknowledged outgoing data, used when [`Config::send_window`] is unset.
-pub const DEFAULT_SEND_WINDOW: u64 = 16 << 20;
+///
+/// Matches [`DEFAULT_RECEIVE_WINDOW`], the most a peer with the defaults takes in flight, so
+/// a slow peer's connection buffers no more than it could receive.
+pub const DEFAULT_SEND_WINDOW: u64 = 4 << 20;
 
 /// Default idle timeout before an inactive connection is dropped.
 ///
 /// A peer that dies or drops off the network sends no close, so this is how long
 /// its routes and subscriptions stay stuck. Short enough to fail over in seconds;
-/// [`DEFAULT_KEEP_ALIVE`] keeps a live but quiet peer from reaching it.
+/// the keep-alive, derived from it, keeps a live but quiet peer from reaching it.
 pub(crate) const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Default keep-alive ping interval.
-///
-/// Under a third of [`DEFAULT_IDLE_TIMEOUT`], so a lost ping is followed by
-/// another (plus QUIC's probe retransmits) before the peer's timer runs out.
-pub(crate) const DEFAULT_KEEP_ALIVE: Duration = Duration::from_secs(3);
 
 /// The `--quic-*` transport section, applied to dialed and accepted connections alike.
 #[derive(Clone, Debug, Default, usage_rs::Args, serde::Serialize, serde::Deserialize)]
@@ -157,8 +181,7 @@ pub struct Config {
 	/// Enable UDP generic segmentation offload (GSO).
 	///
 	/// GSO batches sends into one syscall for throughput, but some NICs and
-	/// middleboxes mangle segmented packets. Defaults to on. The iroh backend
-	/// cannot turn it off and rejects an explicit `false`.
+	/// middleboxes mangle segmented packets. Defaults to on.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[usage(
 		name = "quic-gso",
@@ -184,13 +207,15 @@ pub struct Config {
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub idle_timeout: Option<crate::cli::Duration>,
 
-	/// Keep-alive ping interval. Defaults to 3s; set `0s` to disable.
+	/// Keep-alive ping interval; `0s` uses the default. Defaults to under a third of
+	/// the idle timeout both ends settle on (3s against the 10s default), so changing
+	/// the idle timeout needs no matching change here.
 	///
-	/// The iroh backend applies this to its connection keep-alive. It also keeps
-	/// a 5s per-path heartbeat that its builder will not raise or clear, so any
-	/// interval above 5s still sends those path pings. Explicit `0s` is refused
-	/// by Iroh because its builder cannot disable either heartbeat.
-	/// `None` uses the default; zero disables this duration.
+	/// Set it for a NAT binding that lives shorter than the idle timeout. A value no
+	/// shorter than the negotiated idle timeout could never keep the connection up,
+	/// so it is capped at the derived interval.
+	///
+	/// `None` and zero both use the default.
 	#[usage(
 		name = "quic-keep-alive",
 		long = "quic-keep-alive",
@@ -224,12 +249,21 @@ pub struct Config {
 	)]
 	pub congestion_control: Option<CongestionControl>,
 
+	/// A congestion controller of your own for every connection, in place of
+	/// [`congestion_control`](Self::congestion_control)'s families.
+	///
+	/// Code-only, since a controller has no text form: no flag or setting reaches it.
+	/// The QUIC backend runs it, and the io_uring runtime refuses it.
+	#[cfg(feature = "driver")]
+	#[serde(skip)]
+	#[usage(skip)]
+	pub controller: Option<Controller>,
+
 	/// Connection-wide receive window, in bytes: how much data the peer may have
 	/// in flight or in incomplete messages across every stream at once. Defaults to
-	/// 128 MiB, and must fit the largest message a session assembles, just over 64 MiB.
+	/// 4 MiB, and must fit the largest unit a session assembles, one 1 MiB segment.
 	///
-	/// When incomplete messages fill it, the least urgent stream is cancelled. iroh
-	/// returns credit as it reads, so there it bounds only unread data.
+	/// When incomplete messages fill it, the least urgent stream is cancelled.
 	///
 	/// Raise it when a fat, long path is idling below the link rate: the window
 	/// has to cover the bandwidth-delay product or the peer stalls waiting for
@@ -243,7 +277,7 @@ pub struct Config {
 	)]
 	pub receive_window: Option<u64>,
 
-	/// Per-stream receive window, in bytes. Defaults to 4 MiB.
+	/// Per-stream receive window, in bytes. Defaults to 1 MiB.
 	///
 	/// Stream credit returns as bytes are read, whether or not their message is
 	/// complete, so a smaller window only adds round trips to a large frame. The
@@ -258,7 +292,7 @@ pub struct Config {
 	pub stream_receive_window: Option<u64>,
 
 	/// Cap on unacknowledged outgoing data, in bytes, regardless of what the peer
-	/// allows. Defaults to 16 MiB.
+	/// allows. Defaults to 4 MiB.
 	///
 	/// This bounds the transport send buffer.
 	#[serde(skip_serializing_if = "Option::is_none")]
@@ -283,8 +317,7 @@ pub struct Config {
 	/// Danger: append TLS session secrets to this private file, for debugging.
 	///
 	/// Anyone holding this file can decrypt captured traffic. The native QUIC backend
-	/// opens it at initialization; Iroh refuses this setting because its API only supports
-	/// process-wide environment-based logging.
+	/// opens it at initialization.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[usage(
 		name = "quic-keylog",
@@ -594,11 +627,9 @@ impl Config {
 	/// first when the config came from a parser: a released spelling would show up
 	/// here as the default rather than the value that was written.
 	pub fn resolve(&self) -> Resolved {
-		// A zero keep-alive means "disabled"; anything else (including unset) keeps
-		// the connection warm, defaulting to 3s.
 		let idle_timeout = self.idle_timeout.map(Into::into).unwrap_or(DEFAULT_IDLE_TIMEOUT);
-		let keep_alive = self.keep_alive.map(Into::into).unwrap_or(DEFAULT_KEEP_ALIVE);
-		let keep_alive = (!keep_alive.is_zero()).then_some(keep_alive);
+		// Unset stays unset: the backend derives it from the negotiated idle timeout.
+		let keep_alive = self.keep_alive.map(Into::into);
 
 		Resolved {
 			max_streams: self.max_streams.unwrap_or(DEFAULT_MAX_STREAMS),
@@ -607,6 +638,8 @@ impl Config {
 			keep_alive,
 			mtu_discovery: self.mtu_discovery.unwrap_or(false),
 			congestion_control: self.congestion_control,
+			#[cfg(feature = "driver")]
+			controller: self.controller.clone(),
 			receive_window: self.receive_window.unwrap_or(DEFAULT_RECEIVE_WINDOW),
 			stream_receive_window: self.stream_receive_window.unwrap_or(DEFAULT_STREAM_RECEIVE_WINDOW),
 			send_window: self.send_window.unwrap_or(DEFAULT_SEND_WINDOW),
@@ -641,16 +674,23 @@ pub struct Resolved {
 	pub gso: Option<bool>,
 	/// Idle timeout.
 	pub idle_timeout: Duration,
-	/// Keep-alive interval, or `None` when disabled.
+	/// Keep-alive interval, `None` or zero to derive it from the negotiated idle timeout.
+	///
+	/// Unset by default, since the interval depends on the peer's idle timeout;
+	/// [`keep_alive_interval`](Self::keep_alive_interval) is what it comes to
+	/// against a peer that does not shorten ours.
 	pub keep_alive: Option<Duration>,
 	/// Whether to run path MTU discovery.
 	pub mtu_discovery: bool,
 	/// Congestion control override, or `None` for the default.
 	pub congestion_control: Option<CongestionControl>,
+	/// The application's own congestion controller, in place of the family.
+	#[cfg(feature = "driver")]
+	pub controller: Option<Controller>,
 	/// Connection-wide receive window in bytes, defaulting to [`DEFAULT_RECEIVE_WINDOW`].
 	///
 	/// The windows are resolved here rather than by each backend, whose own defaults
-	/// differ (moq-quic's and iroh's connection window is unlimited), so every runtime
+	/// differ (moq-quic's connection window is unlimited), so every runtime
 	/// honors the same `[quic]` section.
 	pub receive_window: u64,
 	/// Per-stream receive window in bytes, defaulting to [`DEFAULT_STREAM_RECEIVE_WINDOW`].
@@ -669,10 +709,7 @@ impl Resolved {
 	/// Delay-based unless the operator says otherwise: BBR keeps queues short and the
 	/// send rate steady enough for a live encoder to track, which is what this stack
 	/// carries.
-	#[cfg_attr(
-		not(any(feature = "quic", feature = "iroh")),
-		allow(dead_code, reason = "only the QUIC backends use it")
-	)]
+	#[cfg_attr(not(feature = "quic"), allow(dead_code, reason = "only the QUIC backend uses it"))]
 	pub(crate) fn congestion(&self) -> CongestionControl {
 		self.congestion_control.unwrap_or(CongestionControl::Delay)
 	}
@@ -686,13 +723,29 @@ impl Resolved {
 		self.qlog.as_deref()
 	}
 
-	/// Whether the config asks to turn GSO off, which not every backend can honor.
+	/// Whether an application's own congestion controller is installed.
 	///
-	/// Only the iroh backend consults this, to reject a GSO-off request it can't
-	/// satisfy; the other backends toggle GSO directly.
-	#[cfg_attr(not(feature = "iroh"), allow(dead_code, reason = "only the `iroh` feature uses it"))]
-	pub(crate) fn gso_disabled(&self) -> bool {
-		self.gso == Some(false)
+	/// Compiled in every feature set, unlike the `controller` field, so a runtime
+	/// that cannot run one, such as the relay's io_uring workers, can refuse it
+	/// whichever features unify onto this crate.
+	#[cfg(feature = "driver")]
+	pub fn has_controller(&self) -> bool {
+		self.controller.is_some()
+	}
+
+	/// Whether an application's own congestion controller is installed: never,
+	/// since a build without the `driver` feature has no way to install one.
+	#[cfg(not(feature = "driver"))]
+	pub fn has_controller(&self) -> bool {
+		false
+	}
+
+	/// The keep-alive interval against a peer whose idle timeout is no shorter than
+	/// ours, using moq-quic's 30s default (a 9s interval) when neither peer sets one.
+	#[cfg(feature = "_transport")]
+	pub fn keep_alive_interval(&self) -> Duration {
+		let idle_timeout = (!self.idle_timeout.is_zero()).then_some(self.idle_timeout);
+		moq_quic::transport::keep_alive_interval(self.keep_alive, idle_timeout)
 	}
 
 	/// The flow-control limits as moq-quic spells them.
@@ -749,40 +802,31 @@ mod tests {
 		let quic = Config::default().resolve();
 		assert_eq!(quic.max_streams, DEFAULT_MAX_STREAMS);
 		assert_eq!(quic.idle_timeout, DEFAULT_IDLE_TIMEOUT);
-		assert_eq!(quic.keep_alive, Some(DEFAULT_KEEP_ALIVE));
+		assert_eq!(quic.keep_alive, None);
 		assert!(!quic.mtu_discovery);
 		assert_eq!(quic.gso, None);
-		assert!(!quic.gso_disabled());
 		assert!(quic.keylog.is_none());
 	}
 
+	#[cfg(feature = "_transport")]
 	#[test]
-	fn zero_keep_alive_disables_it() {
-		let disabled = Config {
-			keep_alive: Some((Duration::ZERO).into()),
-			..Default::default()
+	fn keep_alive_interval_derives_from_the_idle_timeout() {
+		let interval = |idle: u64, keep_alive: Option<Duration>| {
+			Config {
+				idle_timeout: Some((Duration::from_secs(idle)).into()),
+				keep_alive: keep_alive.map(Into::into),
+				..Default::default()
+			}
+			.resolve()
+			.keep_alive_interval()
 		};
-		assert_eq!(disabled.resolve().keep_alive, None);
-
-		let explicit = Config {
-			keep_alive: Some((Duration::from_secs(2)).into()),
-			..Default::default()
-		};
-		assert_eq!(explicit.resolve().keep_alive, Some(Duration::from_secs(2)));
-	}
-
-	#[test]
-	fn gso_disabled_only_on_explicit_false() {
-		let off = Config {
-			gso: Some(false),
-			..Default::default()
-		};
-		assert!(off.resolve().gso_disabled());
-		let on = Config {
-			gso: Some(true),
-			..Default::default()
-		};
-		assert!(!on.resolve().gso_disabled());
+		assert_eq!(Resolved::default().keep_alive_interval(), Duration::from_secs(3));
+		assert_eq!(interval(30, None), Duration::from_secs(9));
+		assert_eq!(interval(0, None), Duration::from_secs(9));
+		assert_eq!(interval(10, Some(Duration::ZERO)), Duration::from_secs(3));
+		assert_eq!(interval(10, Some(Duration::from_secs(5))), Duration::from_secs(5));
+		assert_eq!(interval(10, Some(Duration::from_secs(20))), Duration::from_secs(3));
+		assert_eq!(interval(0, Some(Duration::from_secs(20))), Duration::from_secs(20));
 	}
 
 	#[test]
@@ -1082,6 +1126,6 @@ mod duration_tests {
 		keep_alive,
 		"--quic-keep-alive",
 		|c: &Config| c.resolve().keep_alive,
-		|d: Duration| (!d.is_zero()).then_some(d)
+		Some
 	);
 }

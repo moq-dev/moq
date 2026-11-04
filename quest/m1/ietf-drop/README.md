@@ -1,67 +1,46 @@
-# [XS] moq-transport 18 and 22 only
+# [XS] Register moq-dev draft 20 in the interop runner
 
 ## Goal
 
-`moq-net` and `@moq/net` speak moq-transport drafts 18 and 22 and no
-others. Drafts 14 to 17 and 19 to 21 are deleted from the wire code, tests,
-fuzzing, interop lanes, and docs, and our `moq-dev-rs` and `moq-dev-js`
-entries in the interop runner registry declare only 18 and 22.
-
-Out of scope: moq-lite versions. moq-lite-01/02 still negotiate over
-`moql` with the CLIENT_SETUP/SERVER_SETUP codec, which stays.
+The `moq-dev-rs` and `moq-dev-js` entries in
+`englishm/moq-interop-runner` declare moq-transport drafts 18, 20, and 22.
+Their notes and the two README table rows agree with that registry.
 
 ## Plan
 
-Decided with the maintainer on 2026-10-24. moq-transport support matters
-only for interop with third-party implementations; our own clients and
-servers always prefer moq-lite. A draft stays only when the peers it buys
-are worth its code (cost-weighted, not "any live peer").
+Protocol removal already landed in
+[moq-dev/moq#6753](https://github.com/moq-dev/moq/pull/6753) and
+[moq-dev/moq#6754](https://github.com/moq-dev/moq/pull/6754); draft 20 returned in
+[moq-dev/moq#7190](https://github.com/moq-dev/moq/pull/7190).
+[englishm/moq-interop-runner#178](https://github.com/englishm/moq-interop-runner/pull/178)
+registered only drafts 18 and 22 before draft 20 returned.
 
-Peers per draft, from `englishm/moq-interop-runner` `implementations.json`
-on 2026-10-24:
+Decided with the maintainer on 2026-10-24: retain 18 and 22 rather than
+16, 18, and 22. Removing 14-16's control-stream adapter and request limit
+was worth losing Cloudflare `moq-rs` main and using Moxygen's experimental
+draft-18 support. On 2026-10-28, the maintainer restored draft 20 because
+it adds only the field-count LOCATION_FILTER codec and SUBSCRIBE_TRACKS
+parameters to the path shared with 22. Drafts 19 and 21 stay dropped.
 
-- 18: 15 third-party peers, the most deployed draft.
-- 22: 8 peers (aiomoqt, imquic, moq-go, moqtail, Nokia, moxygen, red5, moqxr).
-- 14: aiomoqt, Cloudflare's draft-14 relay, xquic. Cloudflare and xquic also
-  run draft-18 builds.
-- 16: moxygen (its recommended draft; its 18 is experimental), Cloudflare
-  `moq-rs` main (16 only), and others that also speak 18.
-- 15: none. 17: imquic and quic-zig, both also on 18. 19 and 21: imquic
-  only. 20: aiomoqt and imquic, both also on 22.
+The maintainer approved posting the registry correction there on 2026-10-24.
+[englishm/moq-interop-runner#183](https://github.com/englishm/moq-interop-runner/pull/183)
+adds draft 20 to both entries, distinguishes the registered interop set from
+the wider capability of published releases in both notes, and replaces the
+README's stale drafts 14-17 with 18, 20, and 22. Its registration and image
+publication checks passed locally, and its final local review had no findings.
+No live interop suite was run for the metadata-only correction.
 
-So dropping 15, 17, and 19 to 21 loses no peer. Dropping 14 and 16 loses
-Cloudflare `moq-rs` main and moves moxygen onto its experimental draft-18;
-the maintainer accepted that for the savings (the cheaper alternative,
-keeping 16, 18, and 22, was declined).
+Verified again on 2026-11-03: the published Rust client image contains draft-20
+ALPN/config names; its lockfile resolves `moq-tokio` 0.19.28 and `moq-net`
+0.3.15, whose published crate offers `moqt-20`. The published JS client image
+contains `@moq/net` 0.4.7 and advertises `Ietf.ALPN.DRAFT_20`. The relay adapter
+wraps `docker.io/moqdev/moq-relay:latest`, now the same digest as `0.17.11`,
+whose binary and tagged source include draft 20. No release or pin bump is
+needed, and no protocol code changes belong in this task.
 
-Why 14 to 16 cost the most, measured on `main` at `28bd16452d`:
+After the external PR merges, delete this quest and its links. No further
+protocol implementation or release work remains here.
 
-- `ietf/adapter.rs` (2,701 lines) and `js/net/src/ietf/adapter.ts`
-  (1,211) exist only to multiplex 14-16 requests on one control stream.
-  74 commits touched them since 2026-08-01, 44 in October.
-- At least 11 fixes since August were 14-16 only, such as
-  [moq-dev/moq#2664](https://github.com/moq-dev/moq/pull/2664),
-  [moq-dev/moq#3481](https://github.com/moq-dev/moq/pull/3481),
-  [moq-dev/moq#4961](https://github.com/moq-dev/moq/pull/4961),
-  [moq-dev/moq#5798](https://github.com/moq-dev/moq/pull/5798),
-  [moq-dev/moq#6051](https://github.com/moq-dev/moq/pull/6051), and
-  [moq-dev/moq#6133](https://github.com/moq-dev/moq/pull/6133).
-- Cross-cutting IETF features also land a second path through the adapter,
-  for example GOAWAY
-  ([moq-dev/moq#5998](https://github.com/moq-dev/moq/pull/5998)) and watched
-  prefixes ([moq-dev/moq#6530](https://github.com/moq-dev/moq/pull/6530)).
+## Waiting
 
-m1, ranked beside the API audit, because the drop deletes public API
-(`session::Limits::requests` and the relay's request limit) and belongs with
-the other breaks before the cut. Drafts 14 to 17
-([moq-dev/moq#6753](https://github.com/moq-dev/moq/pull/6753)) and 19 to 21
-([moq-dev/moq#6754](https://github.com/moq-dev/moq/pull/6754)) are gone.
-
-This README's remaining work: open a PR on
-`englishm/moq-interop-runner` narrowing the `moq-dev-rs` and `moq-dev-js`
-entries in `implementations.json` to drafts 18 and 22. The maintainer
-approved posting there on 2026-10-24.
-
-## Related
-
-- [Interop coverage](/quest/m1/interop-coverage/README.md) - new cross-implementation cases target drafts 18 and 22 only
+- englishm/moq-interop-runner: review and merge [englishm/moq-interop-runner#183](https://github.com/englishm/moq-interop-runner/pull/183); verify both registry entries and README rows list drafts 18, 20, and 22 before deleting this quest

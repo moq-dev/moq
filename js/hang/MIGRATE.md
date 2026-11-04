@@ -4,16 +4,38 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Container.trackInfo` takes `maxAge: null` ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+`TrackInfoOptions.maxAge` accepts `null` for no publisher limit, and `trackInfo` returns a `@moq/net` `Track.InfoInit`. An omitted `maxAge` is still 30 seconds for media, now exported as `Container.MAX_AGE`.
+Following `@moq/net`, report tracks now advertise a zero max age instead of no limit: a reader gets their newest group, which restates the whole state.
+
+### The root `clock` is `media.clock`, and the catalog declares a join interval ([#7652](https://github.com/moq-dev/moq/pull/7652))
+
+The catalog root gains an optional `media` section holding what applies to every audio and video track: `clock`, moved from the root, and `join`, whose `interval` is the longest GOP in whole milliseconds.
+The `RootSchema` `clock` field is gone, and a root `clock` from an older publisher is ignored.
+Read `catalog.media?.clock` instead of `catalog.clock`, and write `catalog.media = { clock }` instead of `catalog.clock = clock`.
+A publisher that wants its broadcast exported as HLS or DASH declares `media.join.interval`, promising every audio and video track starts a group at least that often, and keeps it fixed for the broadcast. `Catalog.MediaSchema` and `Catalog.JoinSchema` validate the section; a malformed `join` reads as absent.
+
+### Group sequences are `bigint` ([#7681](https://github.com/moq-dev/moq/pull/7681))
+
+Following `@moq/net`, a `Container.Consumer` read's `group` is a `bigint`.
+Compare group sequences as bigints, such as `read.group === 3n`.
+
+### `Container.Consumer` takes a `delay` ([#7311](https://github.com/moq-dev/moq/pull/7311), [#7597](https://github.com/moq-dev/moq/pull/7597))
+
+`ConsumerProps.maxDelay` is `delay: GetterInit<Moq.Track.Delay>`, where `@moq/net`'s `Track.Delay` is `{ min?: Milli | null; max?: Milli | null }` and an omitted field is zero. The consumer reads a `null` `min` as zero.
+Replace `maxDelay: d` with `delay: { max: d }`, or derive it from a signal. `max: null` is no limit.
+`min` is the playout delay: the consumer starts at the group covering the live edge less `min` plus any `warmup`, waiting for it when the newest group arrives first. Before the first read, a backlog that already landed starts at the first group whose first frame is within `max`, plus the warmup, of the newest content, keeping the group covering the live edge less `min` and the warmup.
+
 ### The catalog rendition cap is removed
 
 `Catalog.MAX_RENDITIONS` and `Catalog.TooManyRenditions` are gone: `checkRenditions`, `encode`, and `watch` accept any number of renditions.
 Delete `instanceof TooManyRenditions` checks. An application that wants a limit counts the `renditions` of each section itself.
 
-### HLS records replace the root archive
+### The root archive is gone
 
-`Catalog.ArchiveSchema`, `Catalog.ARCHIVE_VERSION`, the root `archive` field, and the `Timeline` module are gone.
-A video or audio rendition carries an optional `hls: { track, duration }` field instead; read its records with `Hls.Consumer.subscribe(broadcast, rendition.hls)`.
-Each `Hls.Entry` is `{ sequence, group, pts, duration? }`, with `pts` and `duration` in microseconds; a zero `duration` marks where content stopped.
+`Catalog.ArchiveSchema`, `Catalog.ARCHIVE_VERSION`, the root `archive` field, and the `Timeline` module are gone, with no record track replacing them.
+An HLS or DASH export reads the media tracks directly, numbering segments on the catalog's `media.join.interval` grid.
 `Catalog.MOQ_EPOCH_UNIX_MILLIS` is unchanged.
 
 ### Container reads are a tagged union

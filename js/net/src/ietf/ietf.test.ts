@@ -103,7 +103,7 @@ async function encodeFetchFrameVersioned(
 }
 
 test("DEFAULT_PUBLISHER_PRIORITY has exact SUBSCRIBE_OK bytes per draft", async () => {
-	for (const version of [Version.DRAFT_18, Version.DRAFT_22] as const) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22] as const) {
 		const baseline = await encodeVersioned(new Subscribe.SubscribeOk({ trackAlias: 42n }), version);
 		const encoded = await encodeVersioned(
 			new Subscribe.SubscribeOk({ trackAlias: 42n, properties: { priority: 37 } }),
@@ -116,7 +116,7 @@ test("DEFAULT_PUBLISHER_PRIORITY has exact SUBSCRIBE_OK bytes per draft", async 
 });
 
 test("DEFAULT_PUBLISHER_PRIORITY has exact PUBLISH bytes per draft", async () => {
-	for (const version of [Version.DRAFT_18, Version.DRAFT_22] as const) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22] as const) {
 		const fields = {
 			requestId: 1n,
 			trackNamespace: Path.from("ns"),
@@ -151,7 +151,7 @@ test("Message Parameters: Location preserves bigint precision", async () => {
 
 	expect(params.largest).toEqual(largest);
 
-	for (const version of [Version.DRAFT_18, Version.DRAFT_22]) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 		const encoded = await encodeVersioned(params, version);
 		const decoded = await decodeVersioned(encoded, Parameters.decode, version);
 		expect(decoded.largest).toEqual(largest);
@@ -165,7 +165,7 @@ test("Message Parameters: Location preserves full uint64 values", async () => {
 
 	expect(params.largest).toEqual(largest);
 
-	for (const version of [Version.DRAFT_18, Version.DRAFT_22]) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 		const encoded = await encodeVersioned(params, version);
 		const decoded = await decodeVersioned(encoded, Parameters.decode, version);
 		expect(decoded.largest).toEqual(largest);
@@ -173,7 +173,7 @@ test("Message Parameters: Location preserves full uint64 values", async () => {
 });
 
 test("PublishDone: preserves unknown statuses across supported versions", async () => {
-	const versions = [Version.DRAFT_18, Version.DRAFT_22] as const;
+	const versions = [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22] as const;
 
 	for (const version of versions) {
 		const msg = new PublishDone({
@@ -610,7 +610,7 @@ test("RequestOk v18: round trip", async () => {
 // A REQUEST_UPDATE_OK or TRACK_STATUS_OK must carry LARGEST_OBJECT once the track has
 // objects, so a REQUEST_OK with one decodes.
 test("RequestOk: accepts LARGEST_OBJECT", async () => {
-	const versions = [Version.DRAFT_18, Version.DRAFT_22] as const;
+	const versions = [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22] as const;
 	for (const version of versions) {
 		const body = [0x01, 0x09, 0x05, 0x03];
 		const bytes = new Uint8Array([0x00, body.length, ...body]);
@@ -686,7 +686,7 @@ test("group flags round-trip firstObject", async () => {
 	const makeGroup = (firstObject: boolean) =>
 		new Group({
 			trackAlias: 7n,
-			groupId: 3,
+			groupId: 3n,
 			subGroupId: 0,
 			publisherPriority: 0,
 			flags: {
@@ -699,7 +699,7 @@ test("group flags round-trip firstObject", async () => {
 			},
 		});
 
-	for (const version of [Version.DRAFT_18, Version.DRAFT_22]) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 		for (const firstObject of [true, false]) {
 			const encoded = await encodeVersioned(makeGroup(firstObject), version);
 			const decoded = await decodeVersioned(encoded, Group.decode, version);
@@ -803,7 +803,7 @@ test("Frame reads only the current LOC Timestamp ID on every draft", async () =>
 		hasPriority: true,
 		firstObject: true,
 	};
-	for (const version of [Version.DRAFT_18, Version.DRAFT_22] as const) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22] as const) {
 		for (const id of [0x06, 0x10]) {
 			const reader = new Reader(undefined, new Uint8Array([0, 2, id, 42, 1, 0xaa]), version);
 			const frame = await reader.decode((c) => Frame.decode(c, flags, Timescale.MILLI));
@@ -814,17 +814,18 @@ test("Frame reads only the current LOC Timestamp ID on every draft", async () =>
 
 // A fetch stream's first object is the only one carrying absolute ids, so a wrong flag byte
 // there silently renumbers every object after it. This codec is the sole serialization path
-// for a served fill.
+// for a served fill. Its priority is the track's, as a subgroup header's is: model priority
+// 72 is wire 55, lower first.
 test("FetchFrame: the first object carries its absolute ids and the rest inherit them", async () => {
 	const timestamp = new Timestamp(96_000, Timescale.MILLI);
-	const frame = new FetchFrame({ payload: new Uint8Array([0xaa, 0xbb]), timestamp });
+	const frame = new FetchFrame({ payload: new Uint8Array([0xaa, 0xbb]), timestamp, priority: 55 });
 
-	const first = await encodeFetchFrameVersioned(frame, { group: 7, object: 3, first: true }, Version.DRAFT_22);
+	const first = await encodeFetchFrameVersioned(frame, { group: 7n, object: 3, first: true }, Version.DRAFT_22);
 	expect(Array.from(first)).toEqual([
 		0x3c, // GROUP_ID | OBJECT_ID | PRIORITY | PROPERTIES
 		7, // group id
 		3, // object id
-		0, // publisher priority
+		55, // publisher priority
 		0x04, // properties length
 		0x10, // TIMESTAMP
 		0xc1,
@@ -837,7 +838,7 @@ test("FetchFrame: the first object carries its absolute ids and the rest inherit
 
 	// Same group and priority, and the object id is the prior one plus one, so only the
 	// properties and the payload go on the wire.
-	const next = await encodeFetchFrameVersioned(frame, { group: 7, object: 4, first: false }, Version.DRAFT_22);
+	const next = await encodeFetchFrameVersioned(frame, { group: 7n, object: 4, first: false }, Version.DRAFT_22);
 	expect(Array.from(next)).toEqual([
 		0x20, // PROPERTIES
 		0x04,
@@ -855,7 +856,7 @@ test("FetchFrame: the first object carries its absolute ids and the rest inherit
 // every implementation reads it (moq-wg/moq-transport#1861). Read as a delta, its group
 // could never name the group it follows.
 test("FetchEndOfRange: absolute ids and nothing after them", async () => {
-	for (const version of [Version.DRAFT_18, Version.DRAFT_22] as const) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22] as const) {
 		const reason = version === Version.DRAFT_18 ? EndOfRange.Unknown : EndOfRange.TimedOut;
 		const { stream, written } = createTestWritableStream();
 		const writer = new Writer(stream, version);
@@ -879,10 +880,10 @@ test("FetchEndOfRange: absolute ids and nothing after them", async () => {
 // The first object after an End of Range has no prior object's priority to inherit, but its
 // group is still a delta from the marker's.
 test("FetchFrame: the first object after an End of Range", async () => {
-	const frame = new FetchFrame({ payload: new Uint8Array([0x01]) });
+	const frame = new FetchFrame({ payload: new Uint8Array([0x01]), priority: 0 });
 	const encoded = await encodeFetchFrameVersioned(
 		frame,
-		{ group: 9, object: 0, first: true, previousGroup: 7 },
+		{ group: 9n, object: 0, first: true, previousGroup: 7n },
 		Version.DRAFT_22,
 	);
 	// GROUP_ID | OBJECT_ID | PRIORITY, group 7 + 1 + 1, object 0, priority 0, then the payload.
@@ -892,8 +893,12 @@ test("FetchFrame: the first object after an End of Range", async () => {
 // A fetch object has no status field, unlike a subgroup object: a zero payload length is
 // simply an empty object, and writing a status after it would desync the stream.
 test("FetchFrame: an empty payload is a zero length, with no status byte", async () => {
-	const frame = new FetchFrame({ payload: new Uint8Array(), timestamp: new Timestamp(0, Timescale.MILLI) });
-	const encoded = await encodeFetchFrameVersioned(frame, { group: 1, object: 0, first: true }, Version.DRAFT_22);
+	const frame = new FetchFrame({
+		payload: new Uint8Array(),
+		timestamp: new Timestamp(0, Timescale.MILLI),
+		priority: 0,
+	});
+	const encoded = await encodeFetchFrameVersioned(frame, { group: 1n, object: 0, first: true }, Version.DRAFT_22);
 
 	expect(Array.from(encoded)).toEqual([
 		0x3c,
@@ -911,8 +916,8 @@ test("FetchFrame: an empty payload is a zero length, with no status byte", async
 // omitted rather than carrying a value in units the peer was never told. This is what a
 // subscriber that sent INCLUDE_PROPERTIES=0 gets.
 test("FetchFrame: an unstamped object omits the properties field", async () => {
-	const frame = new FetchFrame({ payload: new Uint8Array([0x01]) });
-	const encoded = await encodeFetchFrameVersioned(frame, { group: 0, object: 0, first: false }, Version.DRAFT_22);
+	const frame = new FetchFrame({ payload: new Uint8Array([0x01]), priority: 0 });
+	const encoded = await encodeFetchFrameVersioned(frame, { group: 0n, object: 0, first: false }, Version.DRAFT_22);
 
 	// Flags 0 (subgroup zero, no fields present), then the payload.
 	expect(Array.from(encoded)).toEqual([0x00, 0x01, 0x01]);
@@ -920,8 +925,8 @@ test("FetchFrame: an unstamped object omits the properties field", async () => {
 
 // The first object still carries its absolute ids and priority; only the properties go.
 test("FetchFrame: an unstamped first object keeps its ids", async () => {
-	const frame = new FetchFrame({ payload: new Uint8Array([0x01]) });
-	const encoded = await encodeFetchFrameVersioned(frame, { group: 4, object: 2, first: true }, Version.DRAFT_22);
+	const frame = new FetchFrame({ payload: new Uint8Array([0x01]), priority: 0 });
+	const encoded = await encodeFetchFrameVersioned(frame, { group: 4n, object: 2, first: true }, Version.DRAFT_22);
 
 	expect(Array.from(encoded)).toEqual([
 		0x1c, // GROUP_ID | OBJECT_ID | PRIORITY, without PROPERTIES
@@ -963,7 +968,7 @@ test("Subscribe draft-22: decodes every legal parameter", async () => {
 
 // An omitted SUBSCRIBER_PRIORITY means 128, not the unset 127, so a relay forwards it unchanged.
 test("Subscribe: an omitted SUBSCRIBER_PRIORITY is 128", async () => {
-	for (const version of [Version.DRAFT_18, Version.DRAFT_22]) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 		const msg = await decodeVersioned(framed([...TRACK_HEAD, 0x00]), Subscribe.Subscribe.decode, version);
 		expect(msg.subscriberPriority).toBe(128);
 	}
@@ -1060,7 +1065,7 @@ test("TRACK_PROPERTY_FILTER is rejected on SUBSCRIBE and FETCH", async () => {
 	await expect(decodeVersioned(body, Fetch.decode, Version.DRAFT_22)).rejects.toThrow();
 });
 
-for (const version of [Version.DRAFT_18, Version.DRAFT_22]) {
+for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 	for (const kind of [0x20n, 0x21n, 0x9dn, 0x11cn]) {
 		test(`SETUP ${version}: repeated unknown option ${kind}`, async () => {
 			const { stream, written } = createTestWritableStream();
@@ -1081,7 +1086,7 @@ for (const version of [Version.DRAFT_18, Version.DRAFT_22]) {
 	}
 }
 
-for (const version of [Version.DRAFT_18, Version.DRAFT_22]) {
+for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 	test(`SETUP ${version}: known options cannot repeat`, async () => {
 		for (const bytes of [new Uint8Array([4, 1, 0, 2]), new Uint8Array([7, 1, 97, 0, 1, 98])]) {
 			await expect(SetupOptions.decode(new Reader(undefined, bytes, version))).rejects.toThrow(/duplicate/);

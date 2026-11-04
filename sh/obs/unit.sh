@@ -35,9 +35,9 @@ ffmpeg=$(pkg-config --cflags libavcodec libavutil libswscale)
 # The output and source tests run against the real moq-ffi, over a server in
 # the same process. The bindings compile here, with the tests' flags.
 moq_prefix=$("$here/moq.sh")
-export PKG_CONFIG_PATH="$moq_prefix/lib/pkgconfig"
-moq_sources=$(pkg-config --variable=sources moq-cpp)
-moq_libs=$(pkg-config --libs moq-cpp)
+moq_pc="$moq_prefix/lib/pkgconfig/moq-cpp.pc"
+moq_sources=$(pkg-config --variable=sources "$moq_pc")
+moq_libs=$(pkg-config --libs "$moq_pc")
 
 flags=(-std=c++17 -g -O0 -pthread -Werror)
 if [ "$mode" = "tsan" ]; then
@@ -64,7 +64,7 @@ for name in moq-audio-encoder moq-output moq-settings moq-source obs-moq; do
         -o "$out/$name-test" "${sources[@]}" "$out/moq.o" $moq_libs
     TSAN_OPTIONS="halt_on_error=1 suppressions=$PWD/test/tsan.supp" "$out/$name-test"
 done
-for name in moq-quality-defaults moq-dock-stop moq-error moq-encoder-latency moq-dial moq-spark moq-rate; do
+for name in moq-quality-defaults moq-dock-stop moq-error moq-encoder-latency moq-dial moq-spark; do
     "$cxx" "${flags[@]}" "${includes[@]}" \
         -o "$out/$name-test" "test/$name-test.cpp"
     TSAN_OPTIONS="halt_on_error=1 suppressions=$PWD/test/tsan.supp" "$out/$name-test"

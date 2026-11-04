@@ -210,11 +210,6 @@ pub enum StreamError {
 	#[error("not found")]
 	NotFound,
 
-	/// A FETCH reached a datagram, which is never cached. Sent on moq-lite-07
-	/// and later; an earlier version sends [`NotFound`](Self::NotFound) instead.
-	#[error("not fetchable")]
-	NotFetchable,
-
 	/// The broadcast is neither announced nor served, so there is no route to it.
 	#[error("unroutable")]
 	Unroutable,
@@ -223,8 +218,9 @@ pub enum StreamError {
 	#[error("old")]
 	Old,
 
-	/// The group was dropped under memory pressure. Unlike [`Old`](Self::Old) it was still
-	/// current, so it can be re-fetched.
+	/// The group, or the frames a reader still needed from its front, was dropped under
+	/// memory pressure. Unlike [`Old`](Self::Old) it was still current, so it can be
+	/// re-fetched.
 	#[error("evicted")]
 	Evicted,
 
@@ -236,7 +232,7 @@ pub enum StreamError {
 	#[error("frame too large")]
 	FrameTooLarge,
 
-	/// A group grew past its cache budget and was aborted.
+	/// A group could not make room for a write, even by shedding its front, and was aborted.
 	#[error("group too large")]
 	GroupTooLarge,
 
@@ -282,7 +278,6 @@ impl StreamError {
 			Self::WrongSize => 0x37,
 			Self::FrameTooLarge => 0x38,
 			Self::TimestampMismatch => 0x39,
-			Self::NotFetchable => 0x3a,
 			Self::Unauthorized => 0x3b,
 			Self::App(app) => *app as u32 + 64,
 			Self::Unknown(code) => *code,
@@ -315,7 +310,6 @@ impl StreamError {
 			0x37 => Self::WrongSize,
 			0x38 => Self::FrameTooLarge,
 			0x39 => Self::TimestampMismatch,
-			0x3a => Self::NotFetchable,
 			0x3b => Self::Unauthorized,
 			code @ 64.. => match u16::try_from(code - 64) {
 				Ok(app) => Self::App(app),
@@ -381,6 +375,10 @@ pub enum Error {
 	#[error("path contains an empty segment")]
 	EmptySegment,
 
+	/// A path was spelled with a `\` before anything but `\` or `/`.
+	#[error(r"path contains a `\` that escapes neither `\` nor `/`")]
+	InvalidEscape,
+
 	/// A duplicate ID was used
 	// The broadcast/track is a duplicate
 	#[error("duplicate")]
@@ -412,10 +410,6 @@ pub enum Error {
 	/// The requested broadcast or track does not exist at the peer.
 	#[error("not found")]
 	NotFound,
-
-	/// A FETCH reached a datagram, which is never cached.
-	#[error("not fetchable")]
-	NotFetchable,
 
 	/// A joining FETCH named a request that is not an active subscription.
 	#[error("invalid joining request ID")]
@@ -479,9 +473,8 @@ pub enum Error {
 
 	/// The reader asked for a frame the group never held: below
 	/// [`crate::group::Producer::start_at`]. Named from the consumer's side; distinct
-	/// from [`Self::GroupTooLarge`], which aborts the whole group when a write exceeds
-	/// the cache budget, and from [`Self::Evicted`], which drops a whole group under the
-	/// pool's memory pressure.
+	/// from [`Self::Evicted`], for frames the group held but shed from its front or
+	/// dropped whole under memory pressure.
 	#[error("lagged")]
 	Lagged,
 
@@ -489,9 +482,10 @@ pub enum Error {
 	#[error("frame too large")]
 	FrameTooLarge,
 
-	/// A write would grow the group past its cache budget (byte size or frame count).
-	/// The write is refused and the group is aborted, so every reader sees the same
-	/// failure rather than a prefix some of them missed.
+	/// A write could not make room in the group even by shedding its front: what is left,
+	/// such as the frame in flight, already fills the live tail
+	/// ([`MAX_CACHE_BYTES`](crate::group::MAX_CACHE_BYTES)). The write is refused and the
+	/// group is aborted.
 	#[error("group too large")]
 	GroupTooLarge,
 
@@ -503,8 +497,9 @@ pub enum Error {
 
 	/// The group was evicted under memory pressure: by its own track to pay eviction debt
 	/// (see [`cache::Pool`](crate::cache::Pool)), or by the transport when incomplete
-	/// messages spent its receive window. Unlike [`Self::Old`], the group was still within
-	/// the publisher's window; it can be re-fetched.
+	/// messages spent its receive window. Also a read of a frame the group shed from its
+	/// front, past its live tail or under that debt. Unlike [`Self::Old`], the group was
+	/// still fresh under the publisher's max age; it can be re-fetched.
 	#[error("evicted")]
 	Evicted,
 
@@ -657,7 +652,8 @@ impl From<&Error> for SessionError {
 			| Error::BoundsExceeded(_)
 			| Error::InvalidPath(_)
 			| Error::NavigationSegment
-			| Error::EmptySegment => Self::ProtocolViolation,
+			| Error::EmptySegment
+			| Error::InvalidEscape => Self::ProtocolViolation,
 			Error::App(app) => Self::App(*app),
 			// A code we did not recognize, so we cannot say which space it came from.
 			// Forwarding it into this one risks landing on a value that IS registered here
@@ -671,7 +667,6 @@ impl From<&Error> for SessionError {
 			| Error::Evicted
 			| Error::Lagged
 			| Error::NotFound
-			| Error::NotFetchable
 			| Error::InvalidRange
 			| Error::InvalidJoiningRequestId
 			| Error::Unroutable
@@ -706,7 +701,6 @@ impl From<&Error> for StreamError {
 			Error::Evicted => Self::Evicted,
 			Error::Lagged => Self::TooFarBehind,
 			Error::NotFound => Self::NotFound,
-			Error::NotFetchable => Self::NotFetchable,
 			Error::Unroutable => Self::Unroutable,
 			Error::WrongSize => Self::WrongSize,
 			Error::FrameTooLarge => Self::FrameTooLarge,
@@ -723,6 +717,7 @@ impl From<&Error> for StreamError {
 			| Error::InvalidPath(_)
 			| Error::NavigationSegment
 			| Error::EmptySegment
+			| Error::InvalidEscape
 			| Error::MalformedTrack => Self::MalformedTrack,
 			Error::App(app) => Self::App(*app),
 			// See the SessionError impl: an unregistered code carries no registry, so
@@ -848,7 +843,6 @@ mod tests {
 			(StreamError::WrongSize, 0x37),
 			(StreamError::FrameTooLarge, 0x38),
 			(StreamError::TimestampMismatch, 0x39),
-			(StreamError::NotFetchable, 0x3a),
 			(StreamError::Unauthorized, 0x3b),
 			(StreamError::App(7), 0x40 + 7),
 		] {
@@ -885,12 +879,9 @@ mod tests {
 		let relayed = StreamError::from(&Error::from(StreamError::from_code(0x3)));
 		assert_eq!(relayed.to_code(), 0x3);
 
-		// A datagram reached by a FETCH keeps its own code rather than reading as a plain miss.
-		assert_eq!(StreamError::from(&Error::NotFetchable), StreamError::NotFetchable);
-
 		// Registered stream codes survive the hop unchanged.
 		for code in [
-			0x0, 0x1, 0x2, 0x4, 0x5, 0x12, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b,
+			0x0, 0x1, 0x2, 0x4, 0x5, 0x12, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3b,
 		] {
 			let relayed = StreamError::from(&Error::from(StreamError::from_code(code)));
 			assert_eq!(relayed.to_code(), code, "stream {code:#x} changed across a relay");

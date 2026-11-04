@@ -29,14 +29,14 @@ The route layer of [Cluster routing](/quest/m1/cluster-routing/README.md)
 lite-07, decided 2026-10-05. That removes lite-07's `Hop Base`/`Hop Keep`
 announce compression along with the hop list, and moq.pro's lite-07 rollout
 has to plan for a lite-07 without hop lists. Only
-[Routes and announces](/quest/m1/cluster-routing/routes.md) gates the cut,
+[Routes and announces](/quest/m1/cluster-routing/routes/README.md) gates the cut,
 not the later federation/P2P integrations. Decided 2026-10-13: routes now
 owns the tier/partition correctness tests, so they run before the cut. Peer
 grants and metadata-only subscriptions do not gate it: neither is clustering
 stability. Both are additive and, per the freeze policy, target whichever lite
 wip is current when they land. Decided 2026-10-25: no routing identity proof
-gates the cut; the key and its proof belong to Peer grants, and lite-07
-routing identities stay declared and unverified. Decided 2026-10-26
+gates the cut, and lite-07 routing identities stay declared and unverified
+(2026-11-02: peer grants are dropped and no key proof is planned). Decided 2026-10-26
 (maintainer): receivers do not stamp per-session identities either, since
 that splits one origin into several identities across a relay mesh.
 
@@ -72,13 +72,18 @@ replaced SUBSCRIBE_ALL) landed in [#6158](https://github.com/moq-dev/moq/pull/61
 and [#6167](https://github.com/moq-dev/moq/pull/6167), and the padding stream
 type for the m2 browser [padding probes](/quest/m2/probe/padding.md) landed in
 [#6233](https://github.com/moq-dev/moq/pull/6233).
+Decided 2026-10-30 (maintainer, on
+[moq-dev/moq#7390](https://github.com/moq-dev/moq/pull/7390)): those probes
+pad with datagrams rather than streams, and padding datagrams are supported
+only on lite-07. Lite-07 now defines the padding datagram type and both receivers
+discard it.
 The `Time(pts)` range end rides in the subscribe-ranges children already Required.
 
 Decided 2026-10-27 (maintainer): of [Subscribe ranges](/quest/m1/subscribe-ranges/README.md),
 only the children that change the lite-07 wire gate the cut:
 [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md),
-[JS ranges](/quest/m1/subscribe-ranges/js.md), and
-[Remove FETCH from lite-07](/quest/m1/subscribe-ranges/lite07-fetch.md). The
+JS ranges ([moq-dev/moq#7696](https://github.com/moq-dev/moq/pull/7696)), and
+[Lite-07 FETCH is single-group only](/quest/m1/subscribe-ranges/lite07-fetch.md). The
 fill path, fetch as a range, and the start bookkeeping change no wire.
 
 Decided 2026-10-25 (maintainer): addressing groups by timestamp gates the
@@ -101,14 +106,14 @@ timestamp bound in [#6168](https://github.com/moq-dev/moq/pull/6168).
 
 ## Required
 
-- [Routes and announces](/quest/m1/cluster-routing/routes.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the hop list gone
+- [Routes and announces](/quest/m1/cluster-routing/routes/README.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the hop list gone
 - [Drop set](/quest/m1/drop-set.md) - lite-07's SUBSCRIBE_DROP carries `Max Age`, so a widening re-offers groups reported dropped
-- [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - a relay fills a lite-07 upstream through the subscription, and moq-transport carries the anchors it can
-- [JS ranges](/quest/m1/subscribe-ranges/js.md) - JS speaks lite-07 ranges
-- [Remove FETCH from lite-07](/quest/m1/subscribe-ranges/lite07-fetch.md) - lite FETCH is gone from lite-07, in Rust and JS
+- [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - a relay fills a lite-07 upstream through the subscription
+- [Lite-07 FETCH is single-group only](/quest/m1/subscribe-ranges/lite07-fetch.md) - lite-07 FETCH reads one group or a slice of one, and SUBSCRIBE ranges of whole groups
 - [Lite-07 by start](/quest/m1/time-addressing/lite07.md) - lite-07 carries group starts, previous-start links, GROUP_END, and time bounds instead of sequence numbers
 - [@moq/net by start](/quest/m1/time-addressing/js.md) - JS speaks the same lite-07 wire
-- [Announcement takeover](/quest/m1/announce-takeover.md) - ANNOUNCE_TAKEOVER preserves a proven instance under a new independent route
+- [A job's exact route continues its claim's readers](/quest/m1/announce-takeover.md) - the job's route inherits the claim's instance, with no new wire message
+- [Datagram tracks](/quest/m1/datagram-tracks/README.md) - lite-07 subscribes to datagram tracks through their own request, and datagrams carry their own sequence
 
 ## Related
 

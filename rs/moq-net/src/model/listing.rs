@@ -562,10 +562,10 @@ impl Consumer {
 /// A handler's answer to the broadcast's listings, from [`Requests::lister`](super::Requests::lister).
 ///
 /// A broadcast has at most one. While it exists, readers wait for it to
-/// [`sync`](Self::synced) before reporting [`TracksEvent::Synced`]. Answer while [`poll_used`](Self::poll_used): list what the
+/// [`sync`](Self::synced) before reporting [`TracksEvent::Synced`]. Answer while [`poll_wanted`](Self::poll_wanted): list what the
 /// publisher behind the handler holds and keep it current, then [`clear`](Self::clear)
-/// once [`poll_unused`](Self::poll_unused). Dropping it clears what it listed.
-pub(crate) struct Lister {
+/// once [`poll_unwanted`](Self::poll_unwanted). Dropping it clears what it listed.
+pub struct Lister {
 	state: kio::Shared<BroadcastState>,
 }
 
@@ -584,9 +584,9 @@ impl Lister {
 		Ok(Self { state })
 	}
 
-	fn poll_readers(&self, waiter: &kio::Waiter, used: bool) -> Poll<Result<(), Error>> {
+	fn poll_readers(&self, waiter: &kio::Waiter, wanted: bool) -> Poll<Result<(), Error>> {
 		let state = ready!(self.state.poll(waiter, |state| {
-			match state.closing || state.listing.readers.is_empty() != used {
+			match state.closing || state.listing.readers.is_empty() != wanted {
 				true => Poll::Ready(()),
 				false => Poll::Pending,
 			}
@@ -598,12 +598,12 @@ impl Lister {
 	}
 
 	/// Ready once anyone lists the broadcast; [`Error::Closed`] once it ended.
-	pub fn poll_used(&self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+	pub fn poll_wanted(&self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		self.poll_readers(waiter, true)
 	}
 
 	/// Ready once nobody lists the broadcast; [`Error::Closed`] once it ended.
-	pub fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+	pub fn poll_unwanted(&self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		self.poll_readers(waiter, false)
 	}
 
@@ -731,6 +731,18 @@ mod tests {
 		let broadcast = Info::new().produce();
 		let mut tracks = broadcast.consume().tracks().unwrap();
 		assert_eq!(drain(&mut tracks), ["synced"]);
+		let _a = broadcast.create_track("a", None).unwrap();
+		assert_eq!(drain(&mut tracks), ["+a"]);
+	}
+
+	/// TRACK_INFO can't say a track is datagrams, so a listing never carries one.
+	#[test]
+	fn a_datagram_track_is_never_listed() {
+		let broadcast = Info::new().produce();
+		let _early = broadcast.create_datagrams("early", Default::default()).unwrap();
+		let mut tracks = broadcast.consume().tracks().unwrap();
+		assert_eq!(drain(&mut tracks), ["synced"]);
+		let _late = broadcast.create_datagrams("late", Default::default()).unwrap();
 		let _a = broadcast.create_track("a", None).unwrap();
 		assert_eq!(drain(&mut tracks), ["+a"]);
 	}
@@ -985,10 +997,10 @@ mod tests {
 		let _own = broadcast.create_track("own", None).unwrap();
 		let lister = broadcast.requests().lister().unwrap();
 		let waiter = kio::Waiter::noop();
-		assert!(lister.poll_used(&waiter).is_pending());
+		assert!(lister.poll_wanted(&waiter).is_pending());
 
 		let mut tracks = broadcast.consume().tracks().unwrap();
-		assert!(matches!(lister.poll_used(&waiter), Poll::Ready(Ok(()))));
+		assert!(matches!(lister.poll_wanted(&waiter), Poll::Ready(Ok(()))));
 		assert_eq!(drain(&mut tracks), ["+own"], "not synced until the lister says so");
 		lister.add("up", track::Info::default()).unwrap();
 		assert!(matches!(
@@ -1002,9 +1014,9 @@ mod tests {
 		assert!(matches!(lister.remove("up"), Err(Error::NotFound)));
 		assert_eq!(drain(&mut tracks), ["-up"]);
 
-		assert!(lister.poll_unused(&waiter).is_pending());
+		assert!(lister.poll_unwanted(&waiter).is_pending());
 		drop(tracks);
-		assert!(matches!(lister.poll_unused(&waiter), Poll::Ready(Ok(()))));
+		assert!(matches!(lister.poll_unwanted(&waiter), Poll::Ready(Ok(()))));
 	}
 
 	#[test]
@@ -1032,18 +1044,18 @@ mod tests {
 		lister.abort(Error::NotFound);
 		assert_eq!(drain(&mut tracks), [format!("error: {}", Error::NotFound)]);
 		assert!(
-			matches!(lister.poll_unused(&waiter), Poll::Ready(Ok(()))),
+			matches!(lister.poll_unwanted(&waiter), Poll::Ready(Ok(()))),
 			"a failed reader is not demand"
 		);
 
 		let mut again = broadcast.consume().tracks().unwrap();
-		assert!(matches!(lister.poll_used(&waiter), Poll::Ready(Ok(()))));
+		assert!(matches!(lister.poll_wanted(&waiter), Poll::Ready(Ok(()))));
 		assert_eq!(drain(&mut again), NONE, "a fresh answer");
 		lister.synced();
 		assert_eq!(drain(&mut again), ["synced"]);
 		drop(tracks);
 		assert!(
-			lister.poll_unused(&waiter).is_pending(),
+			lister.poll_unwanted(&waiter).is_pending(),
 			"a failed reader releases nothing"
 		);
 	}
@@ -1135,10 +1147,10 @@ mod tests {
 		assert_eq!(drain(&mut tracks), ["+up", "synced"]);
 		lister.end();
 		assert_eq!(drain(&mut tracks), ["end"]);
-		assert!(matches!(lister.poll_unused(&waiter), Poll::Ready(Ok(()))));
+		assert!(matches!(lister.poll_unwanted(&waiter), Poll::Ready(Ok(()))));
 
 		let mut again = broadcast.consume().tracks().unwrap();
-		assert!(matches!(lister.poll_used(&waiter), Poll::Ready(Ok(()))));
+		assert!(matches!(lister.poll_wanted(&waiter), Poll::Ready(Ok(()))));
 		assert_eq!(drain(&mut again), NONE, "the finished answer was withdrawn");
 	}
 
@@ -1163,7 +1175,7 @@ mod tests {
 		let lister = broadcast.requests().lister().unwrap();
 		broadcast.close();
 		assert!(matches!(
-			lister.poll_used(&kio::Waiter::noop()),
+			lister.poll_wanted(&kio::Waiter::noop()),
 			Poll::Ready(Err(Error::Closed))
 		));
 		assert!(matches!(lister.add("a", track::Info::default()), Err(Error::Closed)));

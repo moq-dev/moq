@@ -1,7 +1,7 @@
 //! Low-level protocol logic for the QUIC protocol
 //!
 //! moq-quic has no networking code: the caller supplies transport timestamps, and address
-//! validation reads the ambient `moq-clock` wall time. Most applications use the Tokio driver
+//! validation reads the ambient `kio::clock` wall time. Most applications use the Tokio driver
 //! in `moq_tokio::quic::driver` instead.
 //!
 //! Use `moq_tokio::quic::driver` for Tokio, or drive this state machine from another runtime.
@@ -13,9 +13,16 @@
 
 #![warn(missing_docs)]
 #![cfg_attr(test, allow(dead_code, reason = "test builds compile helpers only some tests call"))]
+#![cfg_attr(
+	not(any(feature = "aws-lc-rs", feature = "ring")),
+	allow(
+		dead_code,
+		unused_imports,
+		reason = "without a crypto provider only the mux connection is reachable"
+	)
+)]
 
 use std::{
-	fmt,
 	net::{IpAddr, SocketAddr},
 	ops,
 };
@@ -30,9 +37,13 @@ mod entropy;
 #[doc(hidden)]
 pub mod fuzz;
 mod range_set;
+// Not part of the public API: the network path the crate's tests and simulated drivers share.
+#[cfg(any(test, feature = "sim"))]
+#[doc(hidden)]
+pub mod sim;
 #[cfg(all(test, any(feature = "aws-lc-rs", feature = "ring")))]
 mod tests;
-pub mod transport_parameters;
+mod transport_parameters;
 mod varint;
 
 pub use varint::{VarInt, VarIntBoundsExceeded};
@@ -41,22 +52,21 @@ mod bloom_token_log;
 use bloom_token_log::BloomTokenLog;
 
 pub mod connection;
-pub use crate::connection::{
-	Chunk, Chunks, ClosedStream, CreditStats, Datagrams, Event, FinishError, FrameStats, LeaseError, Leased, PathStats,
-	ReadError, ReadableError, RecvStream, SendDatagramError, SendGroup, SendGroups, SendOptions, SendStream,
-	ShouldTransmit, StreamEvent, Streams, UdpStats, WriteError, Written,
-};
+pub use crate::connection::{CreditStats, Datagrams, Event, FrameStats, PathStats, Streams, UdpStats, recv, send};
+
+pub mod stream;
 #[cfg(feature = "mux")]
 #[doc(hidden)]
 pub use connection::mux;
+pub(crate) use stream::{Dir, Id as StreamId};
 
-#[cfg(any(feature = "ring", feature = "aws-lc-rs"))]
+// The configs take and report rustls types, so callers name the same version.
 pub use rustls;
 
 mod config;
 mod limits;
 pub use config::{ConfigError, client, server, transport};
-pub use limits::{Limits, LimitsError};
+pub use limits::{Limits, LimitsError, Rate};
 
 pub mod crypto;
 
@@ -89,7 +99,7 @@ use token_memory_cache::TokenMemoryCache;
 
 // Deal with time
 // MoQ's clock, so a caller-driven clock (a test's or the simulator's) reaches the state machine.
-pub(crate) use moq_clock::{Instant, Wall};
+pub(crate) use kio::clock::{Instant, Wall};
 pub(crate) use std::time::Duration;
 pub(crate) const UNIX_EPOCH: Wall = Wall::UNIX_EPOCH;
 
@@ -152,95 +162,6 @@ impl ops::Not for Side {
 	}
 }
 
-/// Whether a stream communicates data in both directions or only from the initiator
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub enum Dir {
-	/// Data flows in both directions
-	Bi = 0,
-	/// Data flows only from the stream's initiator
-	Uni = 1,
-}
-
-impl Dir {
-	fn iter() -> impl Iterator<Item = Self> {
-		[Self::Bi, Self::Uni].iter().cloned()
-	}
-}
-
-impl fmt::Display for Dir {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		use Dir::*;
-		f.pad(match *self {
-			Bi => "bidirectional",
-			Uni => "unidirectional",
-		})
-	}
-}
-
-/// Identifier for a stream within a particular connection
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct StreamId(u64);
-
-impl fmt::Display for StreamId {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		let initiator = match self.initiator() {
-			Side::Client => "client",
-			Side::Server => "server",
-		};
-		let dir = match self.dir() {
-			Dir::Uni => "uni",
-			Dir::Bi => "bi",
-		};
-		write!(f, "{} {}directional stream {}", initiator, dir, self.index())
-	}
-}
-
-impl StreamId {
-	/// Create a new StreamId
-	pub fn new(initiator: Side, dir: Dir, index: u64) -> Self {
-		Self((index << 2) | ((dir as u64) << 1) | initiator as u64)
-	}
-	/// Which side of a connection initiated the stream
-	pub fn initiator(self) -> Side {
-		if self.0 & 0x1 == 0 { Side::Client } else { Side::Server }
-	}
-	/// Which directions data flows in
-	pub fn dir(self) -> Dir {
-		if self.0 & 0x2 == 0 { Dir::Bi } else { Dir::Uni }
-	}
-	/// Distinguishes streams of the same initiator and directionality
-	pub fn index(self) -> u64 {
-		self.0 >> 2
-	}
-}
-
-impl From<StreamId> for VarInt {
-	fn from(x: StreamId) -> Self {
-		unsafe { Self::from_u64_unchecked(x.0) }
-	}
-}
-
-impl From<VarInt> for StreamId {
-	fn from(v: VarInt) -> Self {
-		Self(v.0)
-	}
-}
-
-impl From<StreamId> for u64 {
-	fn from(x: StreamId) -> Self {
-		x.0
-	}
-}
-
-impl coding::Codec for StreamId {
-	fn decode<B: bytes::Buf>(buf: &mut B) -> coding::Result<Self> {
-		VarInt::decode(buf).map(|x| Self(x.into_inner()))
-	}
-	fn encode<B: bytes::BufMut>(&self, buf: &mut B) {
-		VarInt::from_u64(self.0).unwrap().encode(buf);
-	}
-}
-
 /// An outgoing packet
 #[derive(Debug)]
 #[must_use]
@@ -270,6 +191,9 @@ const MIN_INITIAL_SIZE: u16 = 1200;
 /// <https://www.rfc-editor.org/rfc/rfc9000.html#name-datagram-size>
 const INITIAL_MTU: u16 = 1200;
 const MAX_UDP_PAYLOAD: u16 = 65527;
+/// Bytes one IPv4 UDP send can carry, however many GSO segments split it: 65,535 minus the IP and
+/// UDP headers. Linux refuses a larger train with `EMSGSIZE`.
+const MAX_TRANSMIT_SIZE: usize = 65_507;
 const TIMER_GRANULARITY: Duration = Duration::from_millis(1);
 /// Maximum number of streams that can be uniquely identified by a stream ID
 const MAX_STREAM_COUNT: u64 = 1 << 60;

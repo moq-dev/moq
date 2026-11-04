@@ -1,9 +1,9 @@
 import { Instant, Milli, Nano, now, sleep } from "@moq/clock";
-import { Effect, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
+import { Derived, Effect, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import type * as Announce from "../announced.ts";
 import { Handle as AuthHandle } from "../auth.ts";
 import { ended } from "../auth_session.ts";
-import { Allocator } from "../bandwidth.ts";
+import { Allocator, reserved, Viewers } from "../bandwidth.ts";
 import { error, reason, SessionCode, SessionError } from "../error.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -19,7 +19,7 @@ import {
 import type { Established } from "./established.ts";
 import { DISCOVERY_REMOVED } from "./forward.ts";
 import { DEFAULT_HANDOVER, type Drain, dialed, type GoawayProps, handover, pinnedTransport, target } from "./goaway.ts";
-import type { Probe } from "./stats.ts";
+import { estimates, type Probe } from "./stats.ts";
 import { heldOf } from "./tokens.ts";
 
 function sameTokens(a: readonly string[], b: readonly string[]): boolean {
@@ -83,7 +83,7 @@ export type ReloadDelay = {
  */
 export type ReloadProps = Omit<
 	ConnectProps,
-	"url" | "signal" | "transport" | "implementation" | "extensions" | "tokens"
+	"url" | "signal" | "transport" | "implementation" | "extensions" | "tokens" | "viewers"
 > & {
 	/** See {@link ConnectProps.tokens}; pass a `Signal` to replace them before they expire. */
 	tokens?: readonly string[] | Signal<readonly string[]>;
@@ -93,6 +93,9 @@ export type ReloadProps = Omit<
 
 	/** A one-shot transport cannot be reused by the reconnect loop. */
 	transport?: never;
+
+	/** A reload owns its {@link Reload.viewers}, fed by its own sessions' estimates. */
+	viewers?: never;
 
 	/** Whether to reload the connection when it disconnects (default: true). */
 	enabled?: boolean | Signal<boolean>;
@@ -162,7 +165,7 @@ function pacing(delay: ReloadDelay) {
 	};
 }
 
-/** How often the send-rate estimate is sampled from the live transport. */
+/** How often the send-rate estimate is sampled from the live transport while a reservation reads it. */
 const BANDWIDTH_POLL = Nano.fromMilli(Milli(100));
 
 /** Current state of a reconnecting connection. */
@@ -219,9 +222,22 @@ export class Reload {
 	 *
 	 * The same instance across reconnects, so reservations survive a drop. The
 	 * estimate is `undefined` while disconnected, which tells a sender to hold
-	 * its rate rather than encode at zero.
+	 * its rate rather than encode at zero. It is sampled from the transport only
+	 * while a reservation reads it, so the first reservation after none waits one
+	 * snapshot for its slice. It stays `undefined` on a transport that cannot
+	 * report one: the WebSocket fallback, WebRTC, or WebTransport without
+	 * `getStats()`.
 	 */
 	readonly allocator: Allocator;
+
+	/**
+	 * Divides this connection's receive estimate among the broadcasts watched over it.
+	 *
+	 * The same instance across reconnects, so viewers survive a drop, and every session
+	 * the loop dials sends their ceilings summed as its PROBE target. A live viewer
+	 * requests PROBE; viewers report `undefined` while disconnected.
+	 */
+	readonly viewers: Viewers;
 
 	/**
 	 * The auth handle every session of the loop is built on, spanning reconnects.
@@ -408,12 +424,22 @@ export class Reload {
 		this.allocator = new Allocator(this.#estimate);
 		this.#signals.cleanup(() => this.allocator.close());
 
+		// Lazy: the registry observes the estimate only while a viewer is live, and only
+		// that observation requests PROBE from the current session.
+		this.viewers = new Viewers(new Derived([this.probe], (probe) => probe?.estimatedRecvRate));
+		this.#signals.cleanup(() => this.viewers.close());
+
 		// The transport has no event for the send-rate estimate, so sample on our
 		// own schedule and skip a tick while the previous snapshot is outstanding.
+		// Only while a reservation reads it: a receive-only or lingering connection
+		// would otherwise snapshot the transport ten times a second for nobody. The
+		// estimate clears with the last reservation, so the next one never reads a
+		// stale figure. A transport that can never report one is not sampled at all.
 		this.#signals.run((effect) => {
 			effect.set(this.#estimate, undefined);
+			if (!effect.get(reserved(this.allocator))) return;
 			const connection = effect.get(this.established);
-			if (!connection) return;
+			if (!connection || !estimates(connection)) return;
 
 			let pending = false;
 			const sample = async () => {
@@ -542,6 +568,7 @@ export class Reload {
 							publish: this.publish,
 							consume: this.consume,
 							auth: this.auth,
+							viewers: this.viewers,
 							signal,
 						});
 					} finally {
@@ -564,7 +591,7 @@ export class Reload {
 					// A cancelled effect resolves undefined, so the sentinel tells the session
 					// closing (null for clean, an Error otherwise) apart from this run being
 					// torn down. Anything else is the peer's GOAWAY.
-					const ended = await effect.race(connection.closed, wireOf(connection).goaway);
+					const ended = await effect.race(connection.closed, connection.draining);
 					if (ended === undefined) return;
 					if (ended === null || ended instanceof Error) {
 						console.warn(`connection closed, reconnecting: ${ended ? reason(ended) : "no error"}`);

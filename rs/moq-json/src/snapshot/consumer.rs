@@ -67,6 +67,8 @@ impl<T: DeserializeOwned> Consumer<T> {
 	}
 
 	/// Skip to the newest buffered state and its timestamp, or wait for a new one.
+	///
+	/// See [`Self::poll_latest`] for how a nonzero `max_delay` delays it.
 	pub async fn latest(&mut self) -> Result<Option<moq_net::Timed<T>>>
 	where
 		T: Unpin,
@@ -78,6 +80,11 @@ impl<T: DeserializeOwned> Consumer<T> {
 	///
 	/// Frames inside the newest group are still decoded in order. What this skips is gone;
 	/// a subsequent `next` resumes after it. An untimed frame keeps `at: None`.
+	///
+	/// It reads groups in order, so on a received track with a nonzero `max_delay` it first
+	/// waits for a lower group the subscription still owes, up to that budget, and with no
+	/// limit until the gap resolves, even when a newer group is buffered. A reader that only
+	/// wants the newest state keeps the default zero budget.
 	pub fn poll_latest(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<moq_net::Timed<T>>>> {
 		self.poll_read(waiter, true)
 	}
@@ -85,8 +92,8 @@ impl<T: DeserializeOwned> Consumer<T> {
 	fn poll_read(&mut self, waiter: &kio::Waiter, skip: bool) -> Poll<Result<Option<moq_net::Timed<T>>>> {
 		if skip {
 			// Jump to the newest group the reader already has; a newer one supersedes the rest.
-			// Taking groups, not the track's largest position, ignores datagrams (which share
-			// the sequence space) and stays inside any cap the caller set on the reader.
+			// Taking groups, not the track's largest position, stays inside any cap the caller
+			// set on the reader.
 			while let Poll::Ready(Some(group)) = self.track.poll_next_group(waiter)? {
 				self.group = Some(group);
 				self.frames_read = 0;
@@ -171,16 +178,18 @@ mod timestamps {
 	fn exact_timestamps_survive_reads() {
 		for compress in [false, true] {
 			let scale = moq_net::Timescale::new(90_000).unwrap();
+			// Every state is read, superseded groups included, so they must stay fresh.
 			let info = moq_net::track::Info::default()
 				.with_timescale(scale)
-				.with_compress(compress);
+				.with_compress(compress)
+				.with_max_age(None);
 			let track = moq_net::broadcast::Info::new()
 				.produce()
 				.create_track("data", info)
 				.unwrap();
 			let mut subscriber = track.subscribe(None);
 			let mut subscription = subscriber.subscription();
-			subscription.max_delay = None;
+			subscription.delay.max = None;
 			subscriber.update(subscription).unwrap();
 			let mut producer = crate::snapshot::Producer::new(track, crate::snapshot::Config::default());
 			let mut consumer = Consumer::<serde_json::Value>::new(subscriber, Default::default());
@@ -291,28 +300,5 @@ mod timestamps {
 		};
 		assert_eq!(value.value["n"], 4, "latest crossed the cap");
 		assert!(consumer.poll_next(&waiter).is_pending());
-	}
-
-	#[test]
-	fn latest_ignores_datagrams() {
-		let track = moq_net::broadcast::Info::new()
-			.produce()
-			.create_track("data", moq_net::track::Info::default())
-			.unwrap();
-		let mut raw = track.clone();
-		let subscriber = track.subscribe(None);
-		let mut producer = crate::snapshot::Producer::new(track, crate::snapshot::Config::default());
-		let mut consumer = Consumer::<serde_json::Value>::new(subscriber, Default::default());
-		let waiter = kio::Waiter::noop();
-		for n in 0..2 {
-			producer.update(&serde_json::json!({ "n": n })).unwrap();
-			producer.cut().unwrap();
-		}
-		// A datagram shares the sequence space, so it outnumbers every group.
-		raw.append_datagram(None, &b"noise"[..]).unwrap();
-		let Poll::Ready(Ok(Some(value))) = consumer.poll_latest(&waiter) else {
-			panic!("a datagram hid the latest state")
-		};
-		assert_eq!(value.value["n"], 1);
 	}
 }

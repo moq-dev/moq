@@ -73,7 +73,7 @@ refused means an error or a counted drop.
 | DVB SI on 0x0010, 0x0011, 0x0012, 0x0014 | Preserved: snapshot track per PID and `table_id` | landed |
 | Program identity, program and ES descriptors | Preserved: descriptors follow each PMT revision; an identity change refuses | landed |
 | PMT add, remove, retype; PID reuse | Normalized without a new epoch: a changed or reused PID ends its track and continues under a fresh name, and the export rebuilds the PMT at the next `version_number` | landed |
-| PAT changes: moved PMT PID, programs added or removed | Normalized: followed; a removed program retires, and returns as a new epoch. Today a running export keeps the PMT on its first PID | [PAT changes](/quest/m1/ts-reliability/pat-lifecycle.md) |
+| PAT changes: moved PMT PID, programs added or removed | Normalized: followed; a removed program retires, and returns as a new epoch, and a running export moves the PMT behind a PAT at the next `version_number` | landed |
 | Programs without video | Preserved when the PMT names a PCR PID; refused without one | landed |
 | PCR | Normalized: rebased, carried on the first video PID, else audio, else a dedicated PCR-only PID | landed |
 | Mux rate, null stuffing | Normalized: re-padded to `muxRate` while the source is CBR | landed |
@@ -93,17 +93,22 @@ measurement (decided 2026-10-28). Re-planned the same day: decode order covers M
 absorbs the release audit's export-reorder quest, and the shared parser lands
 before the open stream-routes and PAT drafts, which rebase onto it.
 
+Decided 2026-11-03 (maintainer, #7221): the TS export counts an unmarked step
+back as a restart only where a reorder bound proves the frame falls outside
+valid reordering: audio, which never reorders, and video that steps back past
+its catalog `reorder` depth, in both cases by more than the export's delay.
+Video that declares no `reorder` is left untouched: no detection, no rewrite,
+no error.
+
 PMT fragmentation (#5220), initial mux-rate measurement (#5287), and
 decoder-time admission (#5306) have landed, as have PSI runs (#5606) and
 catalog linger (#5305).
 
 ## Required
 
-- [A timebase step restarts the TS import](/quest/m1/ts-reliability/step-restart.md) - an unflagged step or a rewind republishes under a new epoch instead of ending the import and every subscriber's export
-- [A restart keeps its catalog](/quest/m1/ts-reliability/restart-catalog.md) - a restarted import publishes its catalog with its first media
-- [PAT changes](/quest/m1/ts-reliability/pat-lifecycle.md) - a running export follows a moved PMT PID
-- [A small step back keeps the TS export's video](/quest/m1/ts-reliability/step-back.md) - the export re-acquires on a sub-group step back from any source instead of dropping its video
-- [Decide whether a stitched export demotes its old leg](/quest/m1/ts-reliability/stitch-catch-up.md) - measure on the bufferbloat fixture whether demoting the old leg while the replacement acquires shrinks the switch's output hole, and land it if so
+- [A skipped group flags the next PCR](/quest/m1/ts-reliability/skip-flag.md) - a within-instance skip reaches the wire as a flagged PCR discontinuity
+- [A republish announces as soon as its tracks are known](/quest/m1/ts-reliability/republish-announce.md) - a stitched export keeps the new instance's first group on a short-GOP feed
+- [A TS export never loses a queued clock revision](/quest/m1/ts-reliability/clock-revision-burst.md) - a burst of TDT/TOT revisions all reach their stamped slots, or the drop is shown to be the two-exporter fixture's
 
 ## Related
 

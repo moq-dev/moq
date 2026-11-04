@@ -17,11 +17,11 @@ deleted.
 
 ## Plan
 
-Decided 2026-10-28 (maintainer, in kixelated/quest's
-[trust audit](https://github.com/kixelated/quest/pull/264)): enrolled
+Decided 2026-10-28 (maintainer, in moq-dev/quest's
+[trust audit](https://github.com/moq-dev/quest/pull/264)): enrolled
 repositories keep pull-request CI read-only rather than kix shielding CI
 behind forks. moq-dev/moq is a kix pilot repository, so it should pass
-kix's [read-only CI check](https://github.com/kixelated/quest/blob/main/quest/m0/kix/ci-read-only.md)
+kix's [read-only CI check](https://github.com/moq-dev/quest/blob/main/quest/m0/kix/ci-read-only.md)
 before contributors are invited.
 
 Done in [moq-dev/moq#7166](https://github.com/moq-dev/moq/pull/7166): the
@@ -35,6 +35,13 @@ JSR's repository OIDC trust while the token is unset. The repository's
 `MBX_R2_*` pair is read-only: a branch's write to `mbx-moq-dev` is refused
 with AccessDenied.
 
+Verified 2026-11-03 during the [landing recheck](/quest/m0/ci/land.md):
+complete paginated secret metadata lists neither `APP_CLIENT_ID` nor
+`APP_PRIVATE_KEY` at organization or repository scope. The `bot` and
+`publish` Environments each list both names. The App-copy removal is done;
+other write-capable repository secrets below still remain. No secret values
+were read, and the throwaway-branch verification has not run.
+
 What remains, in order. Deleting a repository-level secret earlier breaks a
 publish, since jobs that do not name `publish` still read it:
 
@@ -45,14 +52,14 @@ publish, since jobs that do not name `publish` still read it:
    `CARGO_REGISTRY_TOKEN`, `CLOUDFLARE_API_TOKEN`, `DOCKER_USERNAME`,
    `DOCKER_PASSWORD`, `MAVEN_CENTRAL_USERNAME`, `MAVEN_CENTRAL_PASSWORD`,
    `SIGNING_KEY`, `SIGNING_PASSWORD`, `WINGET_TOKEN`, `R2_ACCESS_KEY_ID`,
-   `R2_SECRET_ACCESS_KEY`, `R2_ACCOUNT_ID`, `CACHIX_AUTH_TOKEN`,
-   `APP_PRIVATE_KEY` (the value jobs use today, the repository's, which
-   shadows the organization's) and `DISCORD_WEBHOOK`.
+   `R2_SECRET_ACCESS_KEY` and `R2_ACCOUNT_ID`.
+   `DISCORD_WEBHOOK` is already in the `alert` Environment, and
+   `CACHIX_AUTH_TOKEN` moves nowhere: `main` no longer uses Cachix
+   ([publish off main](/quest/m0/ci/publish-release-only.md)).
 3. Then deletes those repository secrets, the unused ones
    (`GCP_SERVICE_ACCOUNT_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`,
-   `META_MODEL_API_KEY`, `APP_ID`), and this repository's access to the
-   organization's `APP_PRIVATE_KEY` and `DISCORD_WEBHOOK`. `APP_CLIENT_ID`
-   and `APP_ID` are identifiers and can stay. `MBX_R2_*` stays.
+   `META_MODEL_API_KEY`), and this repository's access to the
+   organization's `DISCORD_WEBHOOK`. `MBX_R2_*` stays.
 4. The maintainer names the Environment in each trusted publisher: npm's
    (`npm`, for every `@moq/*` package), PyPI's (`pypi`, for `moq-rs` and
    `moq-ffi`) and pub.dev's (`pub.dev`, for `moq` and `moq_ffi`). Until then a
@@ -69,4 +76,4 @@ publish, since jobs that do not name `publish` still read it:
 
 ## Related
 
-- [Land main through quest land](/quest/m0/ci/land.md) - its gate credential also belongs in a protected environment
+- [Land main through GitHub's merge queue](/quest/m0/ci/land.md) - its gate credential also belongs in a protected environment

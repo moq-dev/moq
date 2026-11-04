@@ -51,7 +51,7 @@ fn old_peers_keep_hidden_paths() {
 async fn old_peer_keeps_hidden_paths(version: moq_net::Version) {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-	tokio::time::timeout(TEST_TIMEOUT, async {
+	kio::clock::timeout(TEST_TIMEOUT, async {
 		let (port, mut server) = listen_tcp(version).await;
 		let peer_origin = moq_tokio::origin::spawn();
 		let mut discovered = peer_origin.consume().with_hidden(true).announced();
@@ -65,9 +65,8 @@ async fn old_peer_keeps_hidden_paths(version: moq_net::Version) {
 		client_config.tls.insecure = Some(true);
 		let mut cluster_config = cluster::Config::default();
 		cluster_config.connect = vec![Peer::new(format!("tcp://127.0.0.1:{port}/"))];
-		let cluster = cluster::Cluster::new(cluster::Options::new(cluster_config))
-			.expect("cluster init")
-			.with_connect(client_config, Default::default());
+		let cluster =
+			crate::spawn_cluster(cluster::Options::new(cluster_config)).with_connect(client_config, Default::default());
 		let node = cluster.origin.create_broadcast(".hidden/test").expect("create hidden");
 		node.announce(Default::default()).expect("announce hidden");
 		let cluster_run = tokio::spawn(cluster.clone().start().await.expect("cluster start").run());

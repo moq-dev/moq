@@ -17,9 +17,9 @@ const LEGACY_UNLIMITED: u64 = (1u64 << 53) - 1;
 #[derive(Clone, Debug)]
 pub struct Track<'a> {
 	pub broadcast: Path,
-	/// The publisher instance the subscriber expects; see [`crate::origin::Route::epoch`].
+	/// The instance the subscriber expects; see [`crate::origin::Route::instance`].
 	/// Lite07+ only.
-	pub epoch: Option<crate::Epoch>,
+	pub instance: Option<crate::Instance>,
 	pub track: Cow<'a, str>,
 }
 
@@ -28,7 +28,7 @@ impl Track<'_> {
 	pub fn into_owned(self) -> Track<'static> {
 		Track {
 			broadcast: self.broadcast,
-			epoch: self.epoch,
+			instance: self.instance,
 			track: Cow::Owned(self.track.into_owned()),
 		}
 	}
@@ -42,12 +42,12 @@ impl<'a> Message<'a> for Track<'a> {
 		}
 
 		let broadcast = Path::decode(r, version)?;
-		let epoch = super::epoch::decode_epoch(r, version)?;
+		let instance = super::instance::decode_pin(r, version)?;
 		let track = Cow::Borrowed(r.str()?);
 
 		Ok(Self {
 			broadcast,
-			epoch,
+			instance,
 			track,
 		})
 	}
@@ -58,7 +58,7 @@ impl<'a> Message<'a> for Track<'a> {
 		}
 
 		self.broadcast.encode(w, version)?;
-		super::epoch::encode_epoch(w, version, self.epoch.as_ref())?;
+		super::instance::encode_pin(w, version, self.instance.as_ref())?;
 		w.string(&self.track)?;
 		Ok(())
 	}
@@ -90,13 +90,12 @@ pub struct TrackInfo {
 
 impl TrackInfo {
 	/// The TRACK_INFO a publisher serves for `info` on `version`.
-	pub(crate) fn serve(info: &crate::track::Info, version: Version, ietf: bool) -> Self {
+	pub(crate) fn serve(info: &crate::track::Info, version: Version) -> Self {
 		Self {
 			refresh: info.refresh,
 			priority: info.priority,
 			max_age: info.max_age,
-			// Only an extension peer knows the original publisher may stamp arrival times.
-			timescale: info.lite_timescale(ietf),
+			timescale: info.timescale,
 			// An older peer is served the frames inflated.
 			compress: info.compress && version.has_compression(),
 		}
@@ -133,8 +132,8 @@ pub(crate) struct Framing {
 }
 
 impl Framing {
-	/// How `version` frames a track accepted as `info`. Lite05/06 stamp every frame, so a
-	/// track received untimed there still has timestamps to read past.
+	/// How `version` frames a track accepted as `info`. Lite05/06 stamp every frame, an
+	/// untimed track's with its send time in milliseconds.
 	pub fn new(info: &crate::track::Info, version: Version) -> Self {
 		Self {
 			timescale: version.wire_timescale(info.timescale),
@@ -327,20 +326,30 @@ mod test {
 		assert_eq!(got.timescale, Some(Timescale::MICRO));
 	}
 
+	/// A TRACK_INFO without a max age is a track with no publisher limit, never the zero an
+	/// authored track defaults to.
+	#[test]
+	fn a_received_track_without_a_max_age_has_no_limit() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			let sent = TrackInfo {
+				max_age: None,
+				..info_sample()
+			};
+			let info = crate::track::Info::from(info_roundtrip(version, &sent));
+			assert_eq!(info.max_age, None, "{version}");
+		}
+	}
+
 	#[test]
 	fn track_info_defaults_match_cross_language_wire_bytes() {
-		// The default track is untimed, which lite-05 declares as milliseconds.
-		let info = TrackInfo::serve(&crate::track::Info::default(), Version::Lite05, false);
+		// The default authored track is untimed, which lite-05 declares as milliseconds, and
+		// advertises the default zero max age.
+		let info = TrackInfo::serve(&crate::track::Info::default(), Version::Lite05);
 		let mut buf = Vec::new();
 		info.encode(&mut Encoder::new(&mut buf, Version::Lite05.into()), Version::Lite05)
 			.unwrap();
 
-		assert_eq!(
-			buf,
-			[
-				0x0c, 0x80, 0x00, 0xc0, 0x1f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x43, 0xe8
-			]
-		);
+		assert_eq!(buf, [0x05, 0x80, 0x00, 0x00, 0x43, 0xe8]);
 	}
 
 	#[test]
@@ -493,7 +502,7 @@ mod test {
 	#[test]
 	fn track_request_roundtrips_on_lite05() {
 		let msg = Track {
-			epoch: None,
+			instance: None,
 			broadcast: Path::from_static("room"),
 			track: Cow::Borrowed("video"),
 		};
@@ -509,7 +518,7 @@ mod test {
 	#[test]
 	fn track_request_errors_before_lite05() {
 		let msg = Track {
-			epoch: None,
+			instance: None,
 			broadcast: Path::from_static("room"),
 			track: Cow::Borrowed("video"),
 		};

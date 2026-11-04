@@ -10,7 +10,7 @@ delay where BBR3 builds a standing queue, accepting lower throughput against
 competing loss-based flows. This is for teleoperation uplinks (drones, robots)
 over cellular and radio links, where a standing queue is control latency.
 
-Browsers, iroh/noq peers, and every other egress keep their controller.
+Browsers and every other egress keep their controller.
 Without the extension, `Realtime` falls back to BBR3.
 
 ## Plan
@@ -26,13 +26,31 @@ spike assumed no consumer; teleoperation uplinks are one):
   ACKs are unchanged.
 - Win on queuing delay, not fairness: a queue near empty at the bottleneck,
   accepting a smaller share against loss-based cross traffic.
-- [The receive-ts spike](/quest/m2/quic-realtime/receive-ts.md) gates the
-  candidates. A negative verdict on the forward-delay signal switches the
-  candidates to RTT gradients rather than abandoning the epic.
+- The receive-ts spike ([moq-dev/moq#7334](https://github.com/moq-dev/moq/pull/7334))
+  landed draft-ietf-quic-receive-ts-03 in `moq-quic`: a session that sets
+  `transport::Config::receive_timestamps` hands each controller the peer's
+  receive time as `moq_congestion::Acked::received`. Its verdict was positive.
+  A trendline over forward delay caught a capacity drop sooner than one over
+  RTT, with fewer false alarms, whenever the ACK path added variance. Over
+  `cellular-bursty` it was noisier than RTT, because per-packet delay sees the
+  scheduler's grants. So the candidates group arrivals into bursts before
+  fitting a trend, as GoogCC does. Reproduce it with `just rs quic-sim`.
 - Bake-off: all three candidates in parallel, each a controller
-  in `moq-congestion`. The spike's moq-shaper uplink
-  presets decide it; the report states the shaper's timing jitter as the
-  noise floor of the delay signal.
+  in `moq-congestion`. The moq-shaper presets `cellular-step`,
+  `cellular-bursty` and `cellular-deep` decide it. The report states the
+  shaper's timing jitter, measured over `near-zero`, as the noise floor of the
+  delay signal. The BBR3 delay bound (`bbr3::Config::delay_bound`) brought
+  the harness: moq-quic's `tests::realtime` replays the three presets on the
+  sim, and the shared comparison adds the other candidates to it as
+  `Candidate`s (`just rs quic-sim` prints the table).
+- BBR3 delay bound decisions, ✅ 2026-11-01 (maintainer, on
+  [moq-dev/moq#7544](https://github.com/moq-dev/moq/pull/7544)): the brake
+  is a separate `bw_delay` bound beside `max_bw` and `bw_shortterm`, which
+  REFILL doesn't reset and which Startup and ProbeBW_UP raise. Its GoogCC-style
+  trend detector stays inside `moq-congestion`'s `bbr3/`, so dropping the
+  candidate deletes it, rather than sharing the GCC candidate's trendline.
+  The candidate reported on the sim replicas only; real sockets are the
+  shared comparison's job.
 - Native probing is required (decided 2026-10-25, maintainer). Every
   candidate implements `moq_congestion::Controller::probes` and reports
   `probe_inflight`, so moq-quic's native probing
@@ -49,20 +67,85 @@ spike assumed no consumer; teleoperation uplinks are one):
   upgrading `Delay`, so current users see no behavior change.
 - Docs: inline only. The congestion-control lines in `doc/bin/cli.md` and
   `doc/lib/*` gain the new variant; no new page.
+- SCReAMv2 landed as `moq_congestion::Scream`
+  ([moq-dev/moq#7547](https://github.com/moq-dev/moq/pull/7547)). moq-quic's
+  `tests::scream` measures it on the sim beside BBR3, and moq-tokio's
+  `scream` integration tests over the real presets. Its estimate is a window
+  over the RTT rather than a delivery rate: under application-limited media,
+  each keyframe's burst raises it past the path's capacity, which matters
+  for re-enabling a rung. Its frame p95 on the sim rose under #7606's
+  corrected pacer, from 853 to 1327 ms on `cellular-step` and from 300 to
+  1361 ms on `cellular-deep`: its keyframes (5x a delta frame) no longer
+  overshoot its pacing of 1.5x the target rate, and the draft's media-queue
+  terms that would answer that sender backlog were left out.
+
+The shared pacer's low-rate correction and BBR3's one-datagram minimum send
+quantum are implemented together in [moq-dev/moq#7606](https://github.com/moq-dev/moq/pull/7606).
+GCC ([moq-dev/moq#7546](https://github.com/moq-dev/moq/pull/7546)) landed first,
+so #7606 reran its in-tree row, `rises_to_target_under_gcc` (1 Mbit/s start, a
+3 Mbit/s path opening to 12 Mbit/s), on all 8 seeds. The correction left it
+unchanged: 1 late frame probing and baseline, the same p99, and the target
+reached 5 s (1x) and 9 s (2x) after the path opened on every seed. The bake-off
+must use the corrected pacer: earlier candidate rows below 2 Mbit/s, including
+GCC's out-of-tree `tests::realtime` rows in #7546, can include up to 2x pacing
+overshoot.
 
 Remaining work once the candidates finish (this README's own job):
 
 - Run the shared comparison on the uplink presets: queuing delay p50/p95/p99,
   throughput, reaction time to a capacity step down, and share against one
   competing CUBIC flow. Pick the winner on queuing delay.
+  It runs every candidate once over real moq-shaper sockets, measuring the
+  `near-zero` noise floor too, so a candidate's own report may stay on the
+  sim replicas (✅ 2026-11-01, maintainer, on
+  [moq-dev/moq#7544](https://github.com/moq-dev/moq/pull/7544)).
+- Run every candidate under both sender models in one harness: a bulk
+  upload, and an encoder that follows `bandwidth_estimate` (the model moq-cli
+  and moq-ffi use, and the one GoogCC is built for). Decided 2026-11-01
+  (maintainer, follow-up planning after the 2026-11-01 /quest-afk run): the
+  candidates' own runs each used one model, so their rows don't compare.
+  [moq-dev/moq#7544](https://github.com/moq-dev/moq/pull/7544)'s
+  `tests::realtime` uploaded in bulk, which
+  [moq-dev/moq#7546](https://github.com/moq-dev/moq/pull/7546) found
+  understates GoogCC (low utilization from its 350 ms window allowance and
+  additive increase), while
+  [moq-dev/moq#7547](https://github.com/moq-dev/moq/pull/7547)'s
+  `tests::scream` drove an adaptive encoder (30 fps, 2 s GOP, 5x keyframes).
+- Before trusting a candidate's estimate to re-enable a stopped rung, weigh
+  how far it overshoots the path under app-limited bursty media. SCReAMv2's
+  estimate is its reference window over the RTT, not a delivery rate, so each
+  keyframe burst grew it past the path: 241 kB/s on a 125 kB/s path in #7547,
+  which let a rung with keyframes recover without a probe. The
+  [native rung disable](/quest/m1/simulcast-rung-disable.md) could re-enable
+  a rung the path can't carry on such an estimate, so the comparison reports
+  each candidate's estimate against the path's capacity under the encoder
+  model.
 - Ship the winner as `Realtime` in moq-tokio and moq-uring, mapped through
   `MoqCongestionControl` in moq-ffi and every binding in the cross-package
   sync table, and a `congestion-control` property on `moqsink` forwarded
-  into its QUIC config (moq-gst has no CLI or TOML loader). iroh maps
-  `Realtime` to BBR3 (noq has no extension).
+  into its QUIC config (moq-gst has no CLI or TOML loader).
 - Delete the losing candidates' code.
+- Decide who asks for receive timestamps. The spike added
+  `transport::Config::receive_timestamps`, off by default, and the maintainer
+  kept it on 2026-10-30. The winner decides whether its `Factory`
+  turns them on instead, so only `Realtime` sessions pay the ACK bytes.
 - Wire the winner's moq-shaper run into the nightly so a regression in
   queuing delay shows up.
+- SCReAMv2's frame latency under main's corrected pacer: recover it, through
+  the draft's media-queue terms (section 4.4) or headroom for keyframe
+  pacing ([moq-dev/moq#7547](https://github.com/moq-dev/moq/pull/7547)'s
+  rerun on [moq-dev/moq#7606](https://github.com/moq-dev/moq/pull/7606)).
+- Only if BBR3's delay bound wins the bake-off: cut ProbeBW_UP's short
+  transient queues, and explain why utilization after a drop fell to 80%
+  on `cellular-step` and `cellular-deep` where BBR3 gets 98%
+  ([moq-dev/moq#7544](https://github.com/moq-dev/moq/pull/7544)).
+
+Decided 2026-11-03 (maintainer, follow-up planning after the 2026-11-03 /quest-afk and /quest-complete runs): both items above join this README's remaining work. Options
+shown:
+
+- m0
+- m1
+- ✅ m2, in this epic
 
 The winner's target rate already reaches moq-cli and moq-ffi encoders
 through `bandwidth_estimate` → `estimated_send_rate` → `set_bitrate`.
@@ -73,15 +156,12 @@ owns that feedback.
 
 ## Required
 
-- [Receive-ts spike](/quest/m2/quic-realtime/receive-ts.md) - the extension in `moq-quic` and a verdict on its forward-delay signal
-- [GCC candidate](/quest/m2/quic-realtime/gcc.md) - libwebrtc's GoogCC vendored into `moq-congestion` and refreshed to current WebRTC
-- [BBR3 delay bound](/quest/m2/quic-realtime/bbr-delay-bound.md) - BBR3 with inflight capped when the forward delay gradient shows queue growth
-- [SCReAMv2 candidate](/quest/m2/quic-realtime/scream.md) - the RFC 8298bis delay path ported to `moq-congestion`
+- [io_uring runs an application's controller](/quest/m2/quic-realtime/uring-controller.md) - moq-uring takes a controller factory, so the winner installs the same way on both runtimes
 - [moqsink encoder feedback](/quest/m2/quic-realtime/moqsink-feedback.md) - GStreamer publishers retune their encoder to the target rate
 
 ## Related
 
-- [Per-stream deadlines](/quest/m2/quic-deadline.md) - also consumes the forward-delay estimate
+- [Per-stream and per-datagram deadlines](/quest/m2/quic-deadline.md) - also consumes the forward-delay estimate
 - [BBR media study](/quest/m2/quic-bbr-study.md) - BBR3 behavior under media, the baseline here
 - [Measure ECN on the backbone](/quest/m2/quic-ecn-measure.md) - decides whether SCReAMv2's L4S path is worth porting
 - [QUIC on the sim](/quest/m2/quic-sim.md) - deterministic successor to the moq-shaper harness once it lands

@@ -24,10 +24,10 @@ pub enum SettingsError {
 	ConnectionError(#[from] crate::quic::driver::connection::Error),
 
 	#[error("read error")]
-	ReadError(#[from] crate::quic::driver::ReadError),
+	ReadError(#[from] crate::quic::driver::recv::Error),
 
 	#[error("write error")]
-	WriteError(#[from] crate::quic::driver::WriteError),
+	WriteError(#[from] crate::quic::driver::send::Error),
 }
 
 pub struct Settings {
@@ -35,10 +35,10 @@ pub struct Settings {
 		dead_code,
 		reason = "a reference to the send/recv stream, so we don't close it until dropped"
 	)]
-	send: crate::quic::driver::SendStream,
+	send: crate::quic::driver::send::Stream,
 
 	#[allow(dead_code, reason = "held so the stream stays open until dropped")]
-	recv: crate::quic::driver::RecvStream,
+	recv: crate::quic::driver::recv::Stream,
 
 	/// The peer's other unidirectional streams that arrived before its control stream, their
 	/// headers read or still reading, for the session to take over. Behind a lock only so the
@@ -70,16 +70,13 @@ impl Settings {
 	/// one kept holds the peer's stream credit, which bounds how many it can open first.
 	async fn accept(
 		conn: &crate::quic::driver::connection::Connection,
-	) -> Result<(crate::quic::driver::RecvStream, Vec<Pin<Box<PendingUni>>>), SettingsError> {
-		let mut accept = std::pin::pin!(futures::stream::unfold(conn.clone(), |conn| async {
-			Some((conn.accept_uni().await, conn))
-		}));
+	) -> Result<(crate::quic::driver::recv::Stream, Vec<Pin<Box<PendingUni>>>), SettingsError> {
 		let mut pending = FuturesUnordered::<Pin<Box<PendingUni>>>::new();
 		let mut early = Vec::<Pin<Box<PendingUni>>>::new();
 
 		let mut recv = loop {
 			tokio::select! {
-				Some(recv) = accept.next() => pending.push(Box::pin(read_uni_header(recv?))),
+				recv = kio::wait(|waiter| conn.poll_accept_uni(waiter)) => pending.push(Box::pin(read_uni_header(recv?))),
 				Some(header) = pending.next() => match header {
 					Ok((StreamUni::CONTROL, _, recv)) => break recv,
 					Ok(header) => early.push(Box::pin(std::future::ready(Ok(header)))),
@@ -103,7 +100,7 @@ impl Settings {
 	}
 	async fn open(
 		conn: &crate::quic::driver::connection::Connection,
-	) -> Result<crate::quic::driver::SendStream, SettingsError> {
+	) -> Result<crate::quic::driver::send::Stream, SettingsError> {
 		let mut settings = web_transport_proto::Settings::default();
 		settings.enable_webtransport(1);
 

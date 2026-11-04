@@ -1627,23 +1627,9 @@ impl Serve {
 
 	/// Build a TLS policy with these ALPNs and the shared identity and client verifier.
 	pub fn config(&self, alpn: Vec<Vec<u8>>) -> Result<Arc<rustls::ServerConfig>> {
-		self.build(alpn, true)
-	}
-
-	#[cfg(feature = "_transport")]
-	pub(crate) fn client_auth(&self) -> bool {
-		self.0.verifier.is_some()
-	}
-
-	#[cfg(feature = "tcp")]
-	pub(crate) fn anonymous(&self, alpn: Vec<Vec<u8>>) -> Result<Arc<rustls::ServerConfig>> {
-		self.build(alpn, false)
-	}
-
-	fn build(&self, alpn: Vec<Vec<u8>>, client_auth: bool) -> Result<Arc<rustls::ServerConfig>> {
 		let builder =
 			rustls::ServerConfig::builder_with_provider(crypto::provider()).with_safe_default_protocol_versions()?;
-		let verifier = client_auth.then_some(self.0.verifier.as_ref()).flatten();
+		let verifier = self.0.verifier.as_ref();
 		let mut config = match verifier {
 			Some(verifier) => builder
 				.with_client_cert_verifier(verifier.clone())
@@ -1657,29 +1643,24 @@ impl Serve {
 		}
 		Ok(Arc::new(config))
 	}
+
+	#[cfg(feature = "_transport")]
+	pub(crate) fn client_auth(&self) -> bool {
+		self.0.verifier.is_some()
+	}
 }
 
 /// A peer's validated client-certificate chain from the mTLS handshake.
 ///
 /// Returned by [`crate::server::Request::peer_identity`] when the peer presented a
 /// certificate that chained to a configured [`Listen::root`]. Owns the chain
-/// (leaf first) so callers can inspect it, e.g. [`expiry`](Self::expiry),
-/// without re-parsing the type-erased QUIC identity.
+/// (leaf first) so callers can inspect it, e.g. [`expiry`](Self::expiry).
 #[derive(Debug, Clone)]
 pub struct PeerIdentity {
 	chain: Vec<CertificateDer<'static>>,
 }
 
 impl PeerIdentity {
-	/// Wrap the type-erased identity from the QUIC connection.
-	/// Returns `None` if the peer presented no certificate or the identity is
-	/// not a certificate chain.
-	#[cfg(feature = "quic")]
-	pub(crate) fn from_any(identity: Option<Box<dyn std::any::Any>>) -> Option<Self> {
-		let chain = identity?.downcast::<Vec<CertificateDer<'static>>>().ok()?;
-		Some(Self { chain: *chain })
-	}
-
 	/// Wrap a certificate chain a QUIC backend already validated, leaf first.
 	///
 	/// For a listener living outside this crate (the io_uring workers, say)
@@ -1741,13 +1722,13 @@ impl PeerIdentity {
 	}
 
 	/// The leaf certificate's `notAfter`, if it parses, saturated to the wall range.
-	pub fn expiry(&self) -> Option<moq_clock::Wall> {
+	pub fn expiry(&self) -> Option<kio::clock::Wall> {
 		let leaf = self.chain.first()?;
 		let (_, cert) = x509_parser::parse_x509_certificate(leaf).ok()?;
 		// Before 1970 reads as the epoch and past 2554 as the last wall time: no
 		// representable now compares differently against the saturated value.
 		let secs = u64::try_from(cert.validity().not_after.timestamp()).unwrap_or(0);
-		Some(moq_clock::Wall::UNIX_EPOCH.saturating_add(std::time::Duration::from_secs(secs)))
+		Some(kio::clock::Wall::UNIX_EPOCH.saturating_add(std::time::Duration::from_secs(secs)))
 	}
 }
 
@@ -2297,7 +2278,6 @@ mod tests {
 		params.self_signed(&key).unwrap().into()
 	}
 
-	#[cfg(feature = "quic")]
 	#[test]
 	fn peer_identity_expiry_reads_not_after() {
 		// notAfter at a whole second so the round-trip is exact.
@@ -2308,12 +2288,9 @@ mod tests {
 		params.not_after = not_after;
 		let cert: CertificateDer<'static> = params.self_signed(&key).unwrap().into();
 
-		// The QUIC backend hands back the chain as a boxed Vec<CertificateDer>.
-		let identity: Box<dyn std::any::Any> = Box::new(vec![cert]);
-		let parsed = PeerIdentity::from_any(Some(identity)).expect("chain parsed");
-		let expiry = parsed.expiry().expect("expiry parsed");
+		let expiry = PeerIdentity::from_chain(vec![cert]).expiry().expect("expiry parsed");
 		assert_eq!(
-			expiry.saturating_duration_since(moq_clock::Wall::UNIX_EPOCH).as_secs(),
+			expiry.saturating_duration_since(kio::clock::Wall::UNIX_EPOCH).as_secs(),
 			2_000_000_000
 		);
 	}
@@ -2321,10 +2298,10 @@ mod tests {
 	#[cfg(feature = "quic")]
 	#[test]
 	fn peer_expiry_saturates_to_the_wall_range() {
-		let last = moq_clock::Wall::UNIX_EPOCH.saturating_add(std::time::Duration::MAX);
+		let last = kio::clock::Wall::UNIX_EPOCH.saturating_add(std::time::Duration::MAX);
 		// rcgen's default notAfter is in 4096.
 		for (seconds, expected) in [
-			(-1, moq_clock::Wall::UNIX_EPOCH),
+			(-1, kio::clock::Wall::UNIX_EPOCH),
 			(18_446_744_074, last),
 			(67_090_118_400, last),
 		] {
@@ -2335,15 +2312,6 @@ mod tests {
 			let peer = PeerIdentity { chain: vec![cert] };
 			assert_eq!(peer.expiry(), Some(expected));
 		}
-	}
-
-	#[cfg(feature = "quic")]
-	#[test]
-	fn peer_identity_none_without_chain() {
-		assert!(PeerIdentity::from_any(None).is_none());
-		// A wrong downcast type (not a cert chain) yields None rather than panicking.
-		let bogus: Box<dyn std::any::Any> = Box::new(42u32);
-		assert!(PeerIdentity::from_any(Some(bogus)).is_none());
 	}
 
 	#[test]
@@ -2700,7 +2668,7 @@ mod tests {
 		);
 	}
 
-	/// An ACME-style resolver retains CA verification of presented client certificates.
+	/// An external resolver retains CA verification of presented client certificates.
 	#[cfg(all(feature = "watch", feature = "quic"))]
 	#[tokio::test]
 	async fn external_resolver_retains_client_roots() {

@@ -30,7 +30,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 
 use bytes::Bytes;
 use moq_net::Timestamp;
@@ -39,6 +39,22 @@ use super::catalog;
 use super::mux_rate::{MAX_INTERVAL, PCR_WRAP};
 use super::passthrough::PCR_HZ;
 use super::psi::{self, CRC};
+
+/// Track properties for an SI table track, given `max_age`: the max age its catalog mints
+/// media with ([`Config::with_max_age`](crate::catalog::Config::with_max_age)), `None` for
+/// no publisher limit.
+///
+/// Declares that media max age rather than moq-net's zero default: the TS export reads a
+/// clock table (TDT/TOT) in order under its delay, and holds each revision until media
+/// reaches its stamped slot, leaving the next revisions on the subscription meanwhile. At
+/// zero, a revision superseded before the export reads it would be stale at once and
+/// skipped. SI describes the media it travels with, so it stays fresh as long as that
+/// media does.
+pub(crate) fn track_info(max_age: Option<Duration>) -> moq_net::track::Info {
+	moq_net::track::Info::default()
+		.with_timescale(moq_net::Timescale::MILLI)
+		.with_max_age(max_age)
+}
 
 const SDT_PID: u16 = 0x0011;
 const SDT_ACTUAL: u8 = 0x42;
@@ -401,6 +417,7 @@ impl Entry {
 	fn cut(
 		&mut self,
 		broadcast: &moq_net::broadcast::Producer,
+		max_age: Option<Duration>,
 		(pid, table_id): (u16, u8),
 		pts: Timestamp,
 		now: Instant,
@@ -421,7 +438,7 @@ impl Entry {
 			// Deterministic, greppable name; fall back to a unique suffix on the
 			// (pathological) collision with an existing track.
 			None => {
-				let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
+				let info = track_info(max_age);
 				self.track.insert(
 					match broadcast.create_track(format!("{pid:#06x}-{table_id:#04x}.si"), info.clone()) {
 						Ok(track) => track,
@@ -628,7 +645,9 @@ impl<E: catalog::Catalog> Capture<E> {
 	/// the host clock ([`DEBOUNCE`]), and a first snapshot is never delayed. `force`
 	/// overrides the debounce, for end of stream.
 	pub fn flush(&mut self, pts: Timestamp, force: bool) -> anyhow::Result<()> {
-		let now = moq_clock::now();
+		let now = kio::clock::now();
+		// The max age this catalog mints media with, which its SI shares.
+		let max_age = self.catalog.track_info(hang::catalog::PRIORITY.catalog).max_age;
 		for (key, entry) in self.entries.iter_mut() {
 			entry.expire(self.now);
 			if !entry.dirty {
@@ -640,7 +659,7 @@ impl<E: catalog::Catalog> Capture<E> {
 			{
 				continue;
 			}
-			entry.cut(&self.broadcast, *key, pts, now)?;
+			entry.cut(&self.broadcast, max_age, *key, pts, now)?;
 		}
 
 		if self.entries.values().any(|e| e.advertised != e.populated) {
@@ -774,7 +793,38 @@ mod tests {
 	use super::*;
 	use crate::container::ts::fixture::{Flags, Mux};
 
-	#[moq_clock::test]
+	/// The TS export reads a clock table in order under its delay and holds each revision
+	/// until media reaches its stamped slot, so a revision superseded before the export reads
+	/// it has to stay on the subscription for that budget. The SI track's max age caps the
+	/// budget: at moq-net's zero default the superseded revision would be skipped at once.
+	#[test]
+	fn a_superseded_si_revision_stays_readable_within_the_export_budget() {
+		for (info, expected) in [
+			(track_info(Some(hang::container::MAX_AGE)), vec![0, 1]),
+			(track_info(Some(Duration::ZERO)), vec![1]),
+		] {
+			let broadcast = moq_net::broadcast::Info::new().produce();
+			let mut track = broadcast.create_track("0x0014-0x70.si", info).unwrap();
+			for revision in 0..2u64 {
+				track
+					.write_frame(Timestamp::from_millis(revision * 100).unwrap(), vec![revision as u8])
+					.unwrap();
+			}
+			// As the export subscribes: in order, with the CLI's default 500 ms delay.
+			let delay = moq_net::track::Delay::default().with_max(Duration::from_millis(500));
+			let mut reader = track
+				.subscribe(moq_net::track::Subscription::default().with_delay(delay))
+				.ordered();
+			let waiter = kio::Waiter::noop();
+			let mut read = Vec::new();
+			while let std::task::Poll::Ready(Ok(Some(group))) = reader.poll_next_group(&waiter) {
+				read.push(group.sequence);
+			}
+			assert_eq!(read, expected);
+		}
+	}
+
+	#[kio::test]
 	async fn program_clock_places_and_retires_si_without_media_pts() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = crate::catalog::Producer::new(
@@ -859,7 +909,7 @@ mod tests {
 		}
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn incomplete_generations_expire_on_their_table_intervals() {
 		let (mut capture, _) = capture();
 		let mut input = Input::new(&mut capture);
@@ -897,7 +947,7 @@ mod tests {
 		);
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn pending_renewal_replaces_its_deadline_without_renewing_other_versions() {
 		let (mut capture, _) = capture();
 		let mut input = Input::new(&mut capture);
@@ -921,7 +971,7 @@ mod tests {
 		assert!(capture.entries[&(0x11, 0x42)].pending.is_empty());
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn retirement_publishes_reduced_and_empty_snapshots_without_host_debounce() {
 		let (mut capture, catalog) = capture();
 		let mut input = Input::new(&mut capture);
@@ -967,13 +1017,13 @@ mod tests {
 		assert_eq!(catalog.snapshot().ext.mpegts.si[&0x10][&0x40].track, name);
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn host_time_and_new_si_at_one_input_position_do_not_age_si() {
 		let (mut capture, _) = capture();
 		let input = Input::new(&mut capture);
 		input.section(&mut capture, 0x12, section(0x4e, 0, 0, 0));
 		capture.flush(Timestamp::ZERO, false).unwrap();
-		moq_clock::sleep(Duration::from_secs(60)).await;
+		kio::clock::sleep(Duration::from_secs(60)).await;
 		for id in 1..1024 {
 			input.section(&mut capture, 0x12, section(0x4e, id, 0, 1));
 		}
@@ -1032,7 +1082,7 @@ mod tests {
 		assert_eq!(at(&clock, count), Some(4_000));
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn fresh_si_ages_out_while_the_pcr_stalls() {
 		for silent in [false, true] {
 			let (mut capture, _) = capture();
@@ -1058,7 +1108,36 @@ mod tests {
 		}
 	}
 
-	#[moq_clock::test]
+	/// An SI track takes the max age its catalog mints media with: the default, a configured
+	/// window, or an explicit no limit.
+	#[kio::test]
+	async fn si_tracks_share_the_catalogs_media_max_age() {
+		for (config, expected) in [
+			(crate::catalog::Config::default(), Some(hang::container::MAX_AGE)),
+			(
+				crate::catalog::Config::default().with_max_age(Duration::from_secs(120)),
+				Some(Duration::from_secs(120)),
+			),
+			(crate::catalog::Config::default().with_max_age(None), None),
+		] {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let consumer = broadcast.consume();
+			let catalog = crate::catalog::Producer::new(
+				&mut broadcast,
+				config.with_catalog(crate::catalog::hang::Catalog::<catalog::Ext>::default()),
+			)
+			.unwrap();
+			let mut capture = Capture::new(broadcast, catalog);
+			let input = Input::new(&mut capture);
+			input.section(&mut capture, 0x14, Bytes::from(vec![0x70, 0x70, 5, 0, 0, 0, 0, 0]));
+			capture.flush(Timestamp::ZERO, true).unwrap();
+			let track = capture.entries[&(0x14, 0x70)].track.as_ref().expect("the TDT track");
+			assert_eq!(track.info().max_age, expected);
+			drop(consumer);
+		}
+	}
+
+	#[kio::test]
 	async fn short_form_repetitions_replace_their_deadline_and_latest_value() {
 		let (mut capture, _) = capture();
 		let mut input = Input::new(&mut capture);

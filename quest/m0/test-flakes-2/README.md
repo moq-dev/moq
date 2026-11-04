@@ -21,8 +21,8 @@ Rules every child keeps:
   slow, fix that.
 - A paused clock auto-advances while the runtime idles, so it can fire a
   timer before a real socket delivers. Where real sockets fight the paused
-  clock, drive the timers with a `moq_clock::Manual` clock or the sim (every
-  crate's timers run on `moq-clock`), or move the test off real sockets.
+  clock, drive the timers with a `kio::clock::Manual` clock or the sim (every
+  crate's timers run on `kio::clock`), or move the test off real sockets.
 - A mocked clock still flakes when the code jitters its timers with `rand`
   (one cancel race was a retry sweep jittered past a fixed settle
   budget). Wait out the jitter's whole window, not a count of small steps.
@@ -48,9 +48,54 @@ The `rust-swapped -> js` and `rust -> js` browser audio timeouts were a lite-06
 catalog group dropped mid-read ending the player's catalog, fixed by
 [moq-dev/moq#6820](https://github.com/moq-dev/moq/pull/6820).
 
+moq-rtc's session-end test was never load-bound: on the paused clock, dimpl's
+randomly jittered DTLS handshake give-up raced ICE's establishment deadline,
+fixed by [moq-dev/moq#7379](https://github.com/moq-dev/moq/pull/7379).
+
+moq-relay's auth-trust test was never load-bound either: its fixture left each
+lease's background `end` POST unserved, so a reused port let one steal the next
+trial's accept. Fixed by [moq-dev/moq#7550](https://github.com/moq-dev/moq/pull/7550).
+
+The Kotlin flow-cancel test's `unroutable` was not load-bound: its snapshot
+writer became unreachable, so JVM cleanup aborted the track mid-read. The JS
+IETF blind-handle test's one identified cause was the session-closing reset
+fixed by [moq-dev/moq#6988](https://github.com/moq-dev/moq/pull/6988). A single
+event-loop stall at each of its 124 host tasks passes all 124 at 1.5 seconds;
+at 4.5 seconds 3 runs and at 11 seconds 114 runs hit bun's own 5-second test
+timeout. No run fails on a protocol deadline, so no clock change applies. Both handled in [moq-dev/moq#7622](https://github.com/moq-dev/moq/pull/7622).
+
+The JS announce harness assumed one host turn drained all request writes. It
+now waits until the subscriber reads the response, with forced write-budget
+yields covering lite-03 and lite-04, fixed by [moq-dev/moq#7663](https://github.com/moq-dev/moq/pull/7663).
+
+The JS close-drain fixture advanced after the setup group's first payload, so a
+zero-delay subscription could expire its sender while the write budget yielded.
+It now reads that group through FIN before starting the next one, fixed by
+[moq-dev/moq#7658](https://github.com/moq-dev/moq/pull/7658). The lite-04 case
+of the same test failed once more in the batch for
+[moq-dev/moq#7431](https://github.com/moq-dev/moq/pull/7431)
+([run 41573678257](https://github.com/moq-dev/moq/actions/runs/41573678257),
+2026-11-03 03:45Z) with `Session: remote error: 0`, the cancellation that PR
+explains. That batch predates #7658's merge at 15:56Z, and no queue run since
+has failed it, so it needs no child of its own (noted 2026-11-03,
+`/quest-plan`).
+
+Added 2026-11-03 (maintainer, `/quest-plan`): five more merge-queue failures
+from 2026-11-03 and early 2026-11-04 UTC, one child each.
+
 Public API: none. Wire: none.
 
 ## Required
 
-- [FFI publisher audio gaps](/quest/m0/test-flakes-2/ffi-audio-gap.md) - interop tone checks stop finding gaps from FFI publishers
 - [IETF22 fallback](/quest/m0/test-flakes-2/ietf22-fallback.md) - an IETF22 browser viewer follows a fallback within the media lane's bound, keeping its session and its audio
+- [Browser buffering and Firefox audio-tone tests pass under load](/quest/m0/test-flakes-2/browser-media-flakes.md) - the two `harness.browser.ts` buffering tests and the Firefox player's audio-tone checks pass reliably in Interop and Nightly, each fixed at its cause under the epic's rules
+- [moq-transcode's live multi-rung test survives load](/quest/m0/test-flakes-2/transcode-multi-rung.md) - `live_multi_rung` stops failing queue batches with a cancelled rung group
+- [moq-relay's embedded io_uring stop test survives load](/quest/m0/test-flakes-2/relay-embed-stop.md) - `uring_custom_route_and_quic` stops seeing HTTP accepted after its owner stopped
+- [The JS worklet library-build test survives load](/quest/m0/test-flakes-2/js-worklet-build.md) - the lazy-blob worklet build test stops timing out at bun's 5 seconds
+- [moq-archive's cross-backend recording test survives load](/quest/m0/test-flakes-2/archive-backends-identical.md) - `recordings_are_byte_identical_on_every_backend` stops splitting S3's video objects differently
+- [moq-ffi's panicked-origin supervision test survives load](/quest/m0/test-flakes-2/ffi-origin-panic.md) - a read the origin driver's panic ends always reports `MoqError::Task`
+- [The scheduled macOS WebSocket version test completes reliably](/quest/m0/test-flakes-2/macos-websocket.md) - fix the scheduled timeout while preserving newest-version negotiation assertions
+- [@moq/net's lite subscribe tests wait for the whole request](/quest/m0/test-flakes-2/js-subscribe-fixture.md) - the three lite subscribe-with-track cases pass under forced yields
+- [Concurrent PulseAudio harness runs don't share a D-Bus name](/quest/m0/test-flakes-2/pulse-dbus.md) - parallel media runs no longer collide on `org.PulseAudio1`
+- [@moq/net's uni-stream flood test survives reruns](/quest/m0/test-flakes-2/js-stream-flood.md) - "a flood of uni streams yields" passes under `--rerun-each` and load
+- [The JS receive-credit qmux test never completes an oversized frame](/quest/m0/test-flakes-2/receive-credit-qmux.md) - `javascript_partial_frame_gives_way_qmux` stops completing a frame larger than the window on moq-transport-18

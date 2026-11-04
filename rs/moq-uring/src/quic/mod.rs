@@ -5,9 +5,8 @@
 //! shuttles packets between the socket and the connection (GSO trains out,
 //! GRO coalesces in), arms the worker's userspace timers from the
 //! connection's timeout, and wakes stream waiters. The returned
-//! [`Connection`] implements [`web_transport_trait::poll`], so
-//! wrapping it with `crate::transport::Session::new` and
-//! [`moq_net::transport::Address::Setup`], then `crate::transport::Local`, lets
+//! [`web::Session`] implements [`moq_net::transport::poll`], so wrapping
+//! [`web::Session::raw`] in [`crate::transport::Local`] lets
 //! `moq_net::Client::connect` / `Server::accept` run real MoQ sessions on the
 //! worker; everything is `Rc`-shared and `!Send` by design.
 //!
@@ -31,10 +30,13 @@ pub mod web;
 
 mod driver;
 
-pub use driver::{Connection, Lease, RecvStream, SendGroup, SendOptions, SendStream};
+pub use driver::{Connection, recv, send};
 pub use endpoint::Endpoint;
-/// The flow-control limits a live connection can change; see [`Connection::set_limits`].
-pub use moq_quic::{Limits, LimitsError};
+/// The flow-control limits and bitrate caps a live connection can change; see
+/// [`Connection::set_limits`].
+pub use moq_quic::{Limits, LimitsError, Rate};
+/// Stream identity, and the varint every QUIC code is.
+pub use moq_quic::{VarInt, stream};
 
 /// A TLS certificate chain and the private key that signs for it, as PEM.
 /// One value, so neither half can be configured alone.
@@ -124,7 +126,7 @@ pub enum Congestion {
 /// Why a connection could not be set up or has ended.
 ///
 /// One error type for the whole module: it is also what every
-/// [`web_transport_trait::poll`] operation on a [`Connection`] reports, which
+/// [`moq_net::transport::poll`] session operation reports, which
 /// is how the close reason reaches `moq_net::Error::from_transport`.
 #[derive(Clone, Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -155,7 +157,7 @@ pub enum Error {
 	#[error("stream stopped: {0}")]
 	Stop(u64),
 	/// The connection window was stuck and this stream was discarded to free
-	/// it. See [`RecvStream::poll_lease`]. The peer hears of it once the
+	/// it. See [`recv::Stream::poll_lease`]. The peer hears of it once the
 	/// stream is stopped, so call `stop` with your own code: dropping the
 	/// stream sends code 0.
 	#[error("stream evicted")]
@@ -206,18 +208,48 @@ pub enum Error {
 	Config(#[from] moq_quic::ConfigError),
 }
 
-impl web_transport_trait::Error for Error {
+impl moq_net::transport::Error for Error {
+	fn close_kind(&self) -> moq_net::transport::CloseKind {
+		match self {
+			Self::TimedOut => moq_net::transport::CloseKind::IdleTimeout,
+			Self::Closed => moq_net::transport::CloseKind::Closed,
+			Self::Evicted => moq_net::transport::CloseKind::Evicted,
+			_ => moq_net::transport::CloseKind::Transport,
+		}
+	}
 	fn session_error(&self) -> Option<(u32, String)> {
 		match self {
-			Self::App { code, reason } => Some((u32::try_from(*code).unwrap_or(u32::MAX), reason.clone())),
+			Self::App { code, reason } => u32::try_from(*code).ok().map(|code| (code, reason.clone())),
 			_ => None,
 		}
 	}
 
 	fn stream_error(&self) -> Option<u32> {
 		match self {
-			Self::Reset(code) | Self::Stop(code) => Some(u32::try_from(*code).unwrap_or(u32::MAX)),
+			Self::Reset(code) | Self::Stop(code) => u32::try_from(*code).ok(),
 			_ => None,
 		}
+	}
+}
+
+#[cfg(test)]
+mod outcome_tests {
+	use super::*;
+	use moq_net::transport::{CloseKind, Error as _};
+	#[test]
+	fn transport_kinds_and_out_of_registry_codes_stay_typed() {
+		assert_eq!(Error::TimedOut.close_kind(), CloseKind::IdleTimeout);
+		assert_eq!(Error::Closed.close_kind(), CloseKind::Closed);
+		assert_eq!(web::recv::Error::Evicted.close_kind(), CloseKind::Evicted);
+		assert_eq!(
+			web::send::Error::SessionError(Error::TimedOut).close_kind(),
+			CloseKind::IdleTimeout
+		);
+		let outside = Error::App {
+			code: u64::MAX,
+			reason: "unknown registry".into(),
+		};
+		assert_eq!(outside.session_error(), None);
+		assert_eq!(Error::Reset(u64::MAX).stream_error(), None);
 	}
 }

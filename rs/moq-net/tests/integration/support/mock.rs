@@ -3,7 +3,7 @@
 //! [`MockSession`] wraps one end of a [`memory`] pair, so stream payloads cross
 //! zero-copy and flow-controlled exactly as between two in-process peers. The knobs
 //! bend delivery the ways a real network may: link latency, streams held back or
-//! reordered, a first write split from the rest, lost datagrams, and FINs that are
+//! reordered, a first write split from the rest, no datagram support, and FINs that are
 //! never sent or never acknowledged.
 //!
 //! The transport hands streams to the acceptor in the order they were opened, so each
@@ -204,7 +204,7 @@ impl MockSendStream {
 			&& size > 0
 		{
 			if let Some(types) = self.first_byte.take() {
-				types.lock().unwrap().push(first.expect("non-empty write"));
+				types.lock().push(first.expect("non-empty write"));
 			}
 			self.line.arrivals.lock().unwrap().push_back(self.conn.arrival());
 		}
@@ -361,8 +361,8 @@ impl MockChunks {
 			if self.landing != Some(arrival) {
 				self.landing = Some(arrival);
 				let waker = waiter.waker().clone();
-				drop(moq_clock::sim::spawn(async move {
-					moq_clock::sleep_until(arrival).await;
+				drop(kio::clock::sim::spawn(async move {
+					kio::clock::sleep_until(arrival).await;
 					waker.wake();
 				}));
 			}
@@ -386,8 +386,8 @@ impl MockChunks {
 			poll::RecvStream::stop(&mut inner, code);
 			return;
 		}
-		drop(moq_clock::sim::spawn(async move {
-			moq_clock::sleep(latency).await;
+		drop(kio::clock::sim::spawn(async move {
+			kio::clock::sleep(latency).await;
 			poll::RecvStream::stop(&mut inner, code);
 		}));
 	}
@@ -413,6 +413,14 @@ impl poll::Chunks for MockChunks {
 	fn stop(&mut self, code: u32) {
 		self.stop_after_latency(code);
 	}
+
+	// Unlike data, a reset skips the link's latency: no test times one.
+	fn poll_reset(&mut self, waiter: &kio::Waiter) -> Poll<Self::Error> {
+		match &mut self.inner {
+			Some(inner) => poll::RecvStream::poll_reset(inner, waiter),
+			None => Poll::Ready(memory::Error::Closed),
+		}
+	}
 }
 
 impl Drop for MockChunks {
@@ -427,7 +435,7 @@ impl Drop for MockChunks {
 type Resets = Arc<Mutex<Vec<u32>>>;
 
 /// The first byte of each bidi stream one side has opened.
-type StreamTypes = Arc<Mutex<Vec<u8>>>;
+type StreamTypes = Arc<kio::Shared<Vec<u8>>>;
 
 /// One side's knobs.
 struct Side {
@@ -438,8 +446,8 @@ struct Side {
 	inc: Arc<Link>,
 	/// Whether the peer has withheld uni stream credit, parking every open.
 	withheld: AtomicBool,
-	/// Whether the datagrams this side sends are lost.
-	lossy: AtomicBool,
+	/// Whether this side reports no datagram support, as a stream-only transport does.
+	no_datagrams: AtomicBool,
 	/// Whether this side drops the FIN of the bidi streams it opens.
 	withhold_bidi_fins: Arc<AtomicBool>,
 	/// The first byte of each bidi stream this side opened.
@@ -454,6 +462,12 @@ struct Side {
 	panic_on_stats: AtomicBool,
 	/// The wire counters [`poll::Session::wire`] exposes, which a test updates as a transport would.
 	wire: moq_net::transport::Wire,
+	/// Whether [`poll::Session::probe`] reports a sender; see [`MockSession::set_probe`].
+	probing: AtomicBool,
+	/// The sender's target, which the session sets.
+	probe: moq_net::transport::Probe,
+	/// What [`poll::Session::receive_window`] reports instead of the memory transport's, if set.
+	receive_window: Mutex<Option<Option<moq_net::transport::ReceiveWindow>>>,
 }
 
 /// The connection statistics a [`MockSession`] reports. Unavailable by default.
@@ -601,7 +615,7 @@ impl poll::Session for MockSession {
 		payload: Bytes,
 		options: poll::SendOptions<'_, poll::Ungrouped>,
 	) -> Result<(), Self::Error> {
-		if self.side.lossy.load(Ordering::Relaxed) {
+		if self.side.no_datagrams.load(Ordering::Relaxed) {
 			return Ok(());
 		}
 		self.inner.send_datagram(payload, options)
@@ -612,6 +626,9 @@ impl poll::Session for MockSession {
 	}
 
 	fn max_datagram_size(&self) -> usize {
+		if self.side.no_datagrams.load(Ordering::Relaxed) {
+			return 0;
+		}
 		self.inner.max_datagram_size()
 	}
 
@@ -642,6 +659,20 @@ impl poll::Session for MockSession {
 
 	fn wire(&self) -> Option<moq_net::transport::Wire> {
 		Some(self.side.wire.clone())
+	}
+
+	fn probe(&self) -> Option<moq_net::transport::Probe> {
+		self.side
+			.probing
+			.load(Ordering::Relaxed)
+			.then(|| self.side.probe.clone())
+	}
+
+	fn receive_window(&self) -> Option<moq_net::transport::ReceiveWindow> {
+		match *self.side.receive_window.lock().unwrap() {
+			Some(window) => window,
+			None => self.inner.receive_window(),
+		}
 	}
 }
 
@@ -674,6 +705,21 @@ impl MockSession {
 	/// Report `stats` from now on.
 	pub fn set_stats(&self, stats: MockStats) {
 		*self.side.stats.lock().unwrap() = stats;
+	}
+
+	/// Report a sender from now on, which a session reads once as it starts.
+	pub fn set_probe(&self, probing: bool) {
+		self.side.probing.store(probing, Ordering::Relaxed);
+	}
+
+	/// The target the session hands this side's sender, or zero without one.
+	pub fn probe_target(&self) -> moq_net::bandwidth::Rate {
+		self.side.probe.target()
+	}
+
+	/// Report `window` as the receive windows in force, as a transport whose limits changed.
+	pub fn set_receive_window(&self, window: Option<moq_net::transport::ReceiveWindow>) {
+		*self.side.receive_window.lock().unwrap() = Some(window);
 	}
 
 	/// How many times the stats were read.
@@ -777,6 +823,34 @@ impl MockSession {
 		}
 	}
 
+	/// Deliver only the oldest held bidi stream, and keep holding the rest.
+	pub fn release_oldest_bidi(&self) {
+		let link = &self.side.out;
+		link.settle();
+		let mut held = link.held_bi.lock().unwrap();
+		let held = held.as_mut().expect("not holding");
+		if !held.is_empty() {
+			let _ = link.ready_bi.try_push(held.remove(0));
+		}
+	}
+
+	/// Deliver the held bidi streams newest first, and stop holding.
+	pub fn release_bidis_reversed(&self) {
+		let link = &self.side.out;
+		link.settle();
+		for stream in link
+			.held_bi
+			.lock()
+			.unwrap()
+			.take()
+			.unwrap_or_default()
+			.into_iter()
+			.rev()
+		{
+			let _ = link.ready_bi.try_push(stream);
+		}
+	}
+
 	/// Park every uni stream this side opens from now on, like a peer that has granted
 	/// no more stream credit.
 	pub fn withhold_unis(&self) {
@@ -808,9 +882,9 @@ impl MockSession {
 			*gate.lock() = true;
 		}
 	}
-	/// Lose every datagram this side sends from now on.
-	pub fn lose_datagrams(&self) {
-		self.side.lossy.store(true, Ordering::Relaxed);
+	/// Report no datagram support from now on, as qmux or WebSocket does.
+	pub fn disable_datagrams(&self) {
+		self.side.no_datagrams.store(true, Ordering::Relaxed);
 	}
 
 	/// Delay stream data and STOP_SENDING sent from now on by `latency` in each direction,
@@ -832,7 +906,21 @@ impl MockSession {
 	/// The first byte, the stream type, of every bidi stream this side has written to,
 	/// in the order each was first written.
 	pub fn bidi_types(&self) -> Vec<u8> {
-		self.side.bidi_types.lock().unwrap().clone()
+		self.side.bidi_types.read().clone()
+	}
+
+	/// Wait for `count` streams of `kind` to reach the wire.
+	pub async fn bidi_count(&self, kind: u8, count: usize) {
+		kio::wait(|waiter| {
+			self.side.bidi_types.poll(waiter, |types| {
+				if types.iter().filter(|&&byte| byte == kind).count() >= count {
+					Poll::Ready(())
+				} else {
+					Poll::Pending
+				}
+			})
+		})
+		.await;
 	}
 
 	/// Every code this side has reset a stream with, in order.
@@ -864,14 +952,17 @@ pub fn create_mock_session_pair(config: memory::Config) -> (MockSession, MockSes
 			out: out.clone(),
 			inc: inc.clone(),
 			withheld: Default::default(),
-			lossy: Default::default(),
+			no_datagrams: Default::default(),
 			withhold_bidi_fins: Default::default(),
 			bidi_types: Default::default(),
 			resets: Default::default(),
 			stats: Default::default(),
 			stats_reads: Default::default(),
 			panic_on_stats: Default::default(),
+			receive_window: Default::default(),
 			wire: Default::default(),
+			probing: Default::default(),
+			probe: Default::default(),
 		}),
 	};
 

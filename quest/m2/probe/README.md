@@ -30,7 +30,7 @@ publisher-local padding handle:
   target and the peer's PROBE target. PROBE `Increase` is the wire signal;
   retransmission or padding is the mechanism. The
   send target (`bandwidth::Allocator`'s reservations) owns the local half and
-  [viewer targets](/quest/m2/probe/viewer-target.md) the peer's.
+  viewer targets (`bandwidth::Viewers`, [moq-dev/moq#7090](https://github.com/moq-dev/moq/pull/7090)) the peer's.
 - **Viewers are in scope.** The viewer up-switch joined the epic, since a
   viewer's target is the same session target sent the other way.
 - **moq-net stays catalog-agnostic, and each hop is independent.** A relay
@@ -55,8 +55,8 @@ Decided with the maintainer on 2026-10-20:
   the next breaking release. Their rung disable needs the target and native
   probing, not padding.
 - Padding is browser-only (WebTransport in `js/net`). moq-quic with BBR3 is
-  the only native backend with a probing hook; other native backends (iroh
-  on noq, moq-quic under CUBIC) have no sender, keep `Report`, and never
+  the only native backend with a probing hook; moq-quic under CUBIC
+  has no sender, keep `Report`, and never
   disable a rung. lite-07 reserves its stream
   type before the cut (Padding Stream 0x2), and
   the sender stays here.
@@ -64,10 +64,23 @@ Decided with the maintainer on 2026-10-20:
   probes with padding.
 - The target then split: m1 keeps the send target
   native rung recovery needs, and viewer handles, viewer grants, the peer's
-  PROBE target, and `Increase` came back here as
-  [viewer targets](/quest/m2/probe/viewer-target.md), beside their consumers.
+  PROBE target, and `Increase` came back here as viewer targets, beside their
+  consumers, and landed in [moq-dev/moq#7090](https://github.com/moq-dev/moq/pull/7090).
   The `js/net` send target moved to [padding](/quest/m2/probe/padding.md), its
   only sender.
+
+Decided with the maintainer on 2026-11-03, in review of
+[moq-dev/moq#7090](https://github.com/moq-dev/moq/pull/7090):
+
+- **A local override covers local reservations only.** ✅ Keep the larger of
+  the two targets: `Allocator::set_target(Some(0))` stops probing for this
+  side's reservations, and the peer's PROBE target still sets how high to
+  probe. Rejected: a local zero that also disables peer-driven probing.
+- **Unencodable viewer targets are refused at the public API.** ✅ Viewer
+  ceilings and overrides that would sum above 2^53 - 1 bps fail
+  (`Error::BoundsExceeded` in Rust, `MoqError::OutOfRange` through moq-ffi, a
+  `RangeError` in JS) and change nothing. Rejected: saturating the advertised
+  target, which silently changes what an oversized target means.
 
 This README's own work, once the children land:
 
@@ -83,15 +96,16 @@ This README's own work, once the children land:
 
 ## Required
 
-- [Native rung disable](/quest/m1/simulcast-rung-disable.md) - OBS stops sending the top renditions its grant cannot fund, as the Rust/FFI publishers do, and a shaped uplink through moq-ffi proves the resume
+- [Native rung disable proof](/quest/m1/simulcast-rung-disable.md) - a shaped uplink through moq-ffi proves the top rendition stops and resumes over real BBR3 probing
+- [Browser send estimate](/quest/m2/probe/browser-send-estimate.md) - shipping Chrome and Safari publishers adapt to the relay's PROBE estimate, since they have no `getStats()`
+- [One page-wide getStats sampling ticker](/quest/m2/probe/stats-ticker.md) - a page's connections share one sampling ticker
 - [Padding probes](/quest/m2/probe/padding.md) - a browser probes with a lowest-priority padding stream on an ALR schedule
 - [JS rung disable](/quest/m2/probe/rung-disable-js.md) - `@moq/publish` applies the native rung rule, recovering through padding
-- [Viewer targets](/quest/m2/probe/viewer-target.md) - a session sends its viewer handles as its PROBE target, probes to the peer's, splits the receive estimate into viewer grants, and advertises `Increase` where a sender exists
 - [Players set viewer targets](/quest/m2/probe/players.md) - players hold a viewer handle per watched broadcast at its highest enabled rendition's bitrate
 - [Viewer up-switch](/quest/m2/probe/viewer-upswitch.md) - a viewer capped by its small rendition finds headroom through PROBE and moves up
+- [Viewer targets are tested end to end and documented in Python](/quest/m2/probe/viewer-followups.md) - three gaps moq-dev/moq#7090 left are closed
 
 ## Related
 
-- [A finished PROBE stops reporting](/quest/m2/probe-end-stale.md) - the receive estimate this epic raises reads unknown once its stream ends
 - [BBR media study](/quest/m2/quic-bbr-study.md) - preserving an estimate and discovering spare capacity are separate problems
 - [Realtime uplink congestion control](/quest/m2/quic-realtime/README.md) - a delay-based alternative to BBR3 on native uplinks; it must implement native probing to ship (decided 2026-10-25)

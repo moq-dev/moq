@@ -1,11 +1,11 @@
 import { Milli, Nano } from "@moq/clock";
-import { Effect, type Getter, Once, Signal } from "@moq/signals";
+import { Effect, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import type * as announce from "../announced.ts";
 import type * as Auth from "../auth.ts";
 import { AuthSession } from "../auth_session.ts";
 import type { Established } from "../connection/established.ts";
 import type { Drain } from "../connection/goaway.ts";
-import { type Probe, type Stats, transportStats } from "../connection/stats.ts";
+import { detect, type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
 import { closeError, error, fromClose, ProtocolViolation, StreamCode, sessionCause } from "../error.ts";
 import { type Hop, randomHop } from "../hop.ts";
@@ -71,12 +71,14 @@ export interface ConnectionProps {
 	token?: Uint8Array;
 	/** The implementation our SETUP advertises (lite-05+). Defaults to {@link IMPLEMENTATION}; empty sends nothing. */
 	implementation?: string;
+	/** The PROBE target to send a peer that advertised `Increase`, in bits per second; zero sends none. */
+	probeTarget?: Getter<number>;
 }
 
 /**
  * Represents a connection to a MoQ server.
  *
- * @public
+ * @internal
  */
 export class Connection implements Established {
 	#closing?: Promise<void>;
@@ -136,6 +138,8 @@ export class Connection implements Established {
 	#token?: Uint8Array;
 	// What our SETUP advertises; see {@link ConnectionProps.implementation}.
 	#implementation: string;
+	// See {@link ConnectionProps.probeTarget}.
+	#probeTarget?: Getter<number>;
 	#peerImplementation = Promise.withResolvers<string | undefined>();
 
 	/** The implementation the peer advertised; see {@link Established.peerImplementation}. */
@@ -172,6 +176,7 @@ export class Connection implements Established {
 		client = true,
 		token,
 		implementation = IMPLEMENTATION,
+		probeTarget,
 	}: ConnectionProps) {
 		this.url = url;
 		// Older versions carry the credential in the URL instead.
@@ -186,6 +191,7 @@ export class Connection implements Established {
 		this.version = versionName(version);
 		this.#version = version;
 		this.transport = transportOf(quic);
+		detect(this, quic);
 
 		this.probe = this.#probe;
 
@@ -228,11 +234,11 @@ export class Connection implements Established {
 		);
 		this.#client = client;
 		this.#implementation = implementation;
+		this.#probeTarget = probeTarget;
 		// Only the lite-05+ Setup Stream carries it.
 		if (!hasSetupStream(version)) this.#peerImplementation.resolve(undefined);
 		registerWire(this, {
 			consume: (path) => this.#subscriber.consume(path),
-			goaway: this.#goaway,
 			exclusive: false,
 			auth: this.#auth,
 		});
@@ -249,7 +255,7 @@ export class Connection implements Established {
 	 * Withdraw announcements and finish the requests this session serves, waiting up to one
 	 * second for delivery before closing.
 	 *
-	 * A served subscription first delivers its remaining group streams, and on lite-07 also
+	 * A served subscription first delivers its remaining group streams, and from lite-05 also
 	 * waits for the subscriber's FIN, which says it read the tail. A live track never ends on
 	 * its own, so it holds the close until the deadline.
 	 */
@@ -266,8 +272,7 @@ export class Connection implements Established {
 	abort(): void {
 		this.#auth.close();
 		this.#publisher.close();
-		this.#subscriber.close();
-
+		// Received tracks end in #run once what already arrived drains, as on the peer's close.
 		this.#closeTransport();
 	}
 
@@ -280,22 +285,23 @@ export class Connection implements Established {
 		}
 	}
 
-	// Set the received tracks' terminal cause before abort's deliberate local teardown.
+	// End the received tracks with the session's end, then tear down the rest.
 	#fail(err: Error): void {
 		this.#subscriber.close(err);
 		this.abort();
 	}
 
 	async #run(): Promise<void> {
-		const tasks: Promise<void>[] = [this.#runSession(), this.#runBidis(), this.#runUnis()];
+		const unis = this.#runUnis();
+		const tasks: Promise<void>[] = [this.#runSession(), this.#runBidis(), unis];
 
 		if (hasSetupStream(this.#version)) {
 			tasks.push(this.#sendSetup());
 		}
 
 		const probes = new Effect((effect) => {
-			if (!effect.get(this.#probe.used)) return;
-			effect.spawn(() => this.#subscriber.runProbe(effect.abort));
+			if (!effect.get(this.#probe.wanted)) return;
+			effect.spawn(() => this.#subscriber.runProbe(effect.abort, this.#probeTarget));
 		});
 
 		// Fail loud on a publication our grant never covers, once the peer has answered the
@@ -329,9 +335,11 @@ export class Connection implements Established {
 			this.#closeTransport();
 			// The peer's close can overtake the group streams and SUBSCRIBE FIN it sent first.
 			// Read what already arrived, so a track its publisher ended finishes rather than aborts.
+			// Accepting yields to the host, so take the streams still queued before draining.
+			await unis.catch(() => {});
 			await Promise.all([...this.#unis, this.#subscriber.drain()]);
-			// The session died under every track it was receiving, so they end with its
-			// error. A deliberate close() already ended them cleanly, which makes this a no-op.
+			// The session ended under every track it was receiving, so they end with its
+			// error: a clean close from either side reads as a cancelled session.
 			this.#fail(err);
 		}
 	}
@@ -511,6 +519,11 @@ export class Connection implements Established {
 	/** Snapshot the transport's counters; see {@link Established.stats}. */
 	async stats(): Promise<Stats> {
 		return transportStats(this.#quic);
+	}
+
+	/** Settles with the peer's GOAWAY; see {@link Established.draining}. */
+	get draining(): GetPromise<Drain> {
+		return this.#goaway;
 	}
 
 	/** Resolves when the session closes, decoding the peer's close code; see {@link Established.closed}. */

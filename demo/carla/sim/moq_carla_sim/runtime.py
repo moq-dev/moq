@@ -98,7 +98,6 @@ class TruckSession:
         location: str | None,
         map_name: str | None,
         clock: Clock,
-        route: moq.AnnounceRoute,
     ) -> None:
         self._truck = truck
         self._video = video
@@ -117,9 +116,9 @@ class TruckSession:
         # A broadcast starts unadvertised; the player discovers trucks by
         # announcement, so advertise once the status and video tracks exist.
         # The stream's are there already: opening it advertised them. The
-        # route carries the run's epoch, so viewers see a restarted worker as
-        # a restart rather than a stalled broadcast.
-        publication.announce(route)
+        # broadcast mints a fresh instance, so viewers see a restarted worker
+        # as a restart rather than a stalled broadcast.
+        publication.announce()
 
     def stop_video(self) -> None:
         """End the video tracks cleanly and stop the bridge encoding them."""
@@ -178,12 +177,6 @@ class TruckSession:
                 self._hold_clock()
                 self._publish()
                 continue
-            if command.kind == "drive" and self._drive.driver is None and self._truck.autonomous:
-                # The browser seeds its first command from the latest status, but
-                # the gate still holds its no-driver resting state. Synchronize the
-                # gear from fresher local feedback so the shift interlock does not
-                # turn a moving takeover into a neutral coast.
-                self._drive.synchronize(self._truck.telemetry().measured)
             accepted = self._drive.apply(command)
             changed = accepted
             self._hold_clock()

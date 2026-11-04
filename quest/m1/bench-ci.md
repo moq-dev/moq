@@ -7,10 +7,12 @@ The paired Rust Criterion comparison each Nightly runs (see
 regressions: its threshold, confirmation budget, and round count come from A/A
 runs on the hosted ARM runners, and a deliberately slowed bench fails the job.
 
-## Plan
+## Waiting
 
-Waits on maintainer-dispatched Nightly runs on `main` after the paired mode
-lands; agents never dispatch Nightly.
+- Maintainer: dispatch the Nightly runs on `main` below (A/A and slowed
+  bench); agents never dispatch Nightly. Check each run's `paired.json`.
+
+## Plan
 
 - A/A: dispatch Nightly on `main` with `bench-base` set to the run's own
   commit, at least twice. Read each paired group's `paired.json` (the
@@ -28,6 +30,14 @@ lands; agents never dispatch Nightly.
 - Check the paired legs' durations against their hour; the base build relies
   on the mbx cache for the previous night's artifacts, and a cold one roughly
   doubles each leg's build time.
+- Each revision in a paired comparison needs its own `CARGO_TARGET_DIR`.
+  `bench/run.sh` already splits them (`target/bench/current` and
+  `target/bench/base`); the stale artifacts while attributing
+  [moq-dev/moq#7141](https://github.com/moq-dev/moq/pull/7141), such as a bench
+  linked against the other tree's library, came from an ad-hoc A/B of two
+  source trees sharing one. Say so in `bench/README.md`'s paired section, so an
+  A/B outside `run.sh` uses its base mode or a target per tree (decided
+  2026-10-28).
 
 - Decide whether `bench/run.sh` pins glibc's malloc thresholds for every
   Criterion target, as [moq-dev/moq#6727](https://github.com/moq-dev/moq/pull/6727)
@@ -81,6 +91,10 @@ poll on both builds. A paired round reruns the same two binaries, so a code or
 heap layout shift between them reads as a stable regression that rounds cannot
 filter. `codec_messages/*/lite` (+31%, +68%) moved only because a new bench group
 in the same binary changed what LTO inlines.
+[moq-dev/moq#7253](https://github.com/moq-dev/moq/pull/7253) found a third:
+`server_admission/workers=4/0` (+10%) runs machine code identical apart from
+addresses on both builds of the 2026-10-27 pair. The other four 2026-10-27 cases
+were real, and were fixed or accepted there.
 
 ## Related
 

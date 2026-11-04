@@ -172,25 +172,6 @@ pub enum Error {
 		composition_time_ms: i32,
 	},
 
-	/// An HLS record did not land at its window's next index: pushed out of order, or read where
-	/// its `sequence` differs from its window index.
-	#[error("HLS record {actual} where {expected} was next")]
-	HlsSequence {
-		/// The window's next index.
-		expected: u64,
-		/// The record's sequence.
-		actual: u64,
-	},
-
-	/// An HLS frame report named a group before the previous report's.
-	#[error("HLS report for group {group} after group {last}")]
-	HlsGroup {
-		/// The rejected report's group.
-		group: u64,
-		/// The previous report's group.
-		last: u64,
-	},
-
 	/// Error from a muxer/demuxer that reports via `anyhow` (currently the MPEG-TS demuxer).
 	/// Boxed in an `Arc` so the enum stays `Clone` (`anyhow::Error` is not).
 	#[error("{0}")]
@@ -221,18 +202,18 @@ pub enum Error {
 	#[error("broadcast reference escapes the root: {0}")]
 	EscapingBroadcast(String),
 
-	/// A reference's `epoch` names another publisher instance than the one serving its broadcast.
+	/// A reference's `instance` names another stream than the one serving its broadcast.
 	///
 	/// The served instance is the one the source resolved first for that path, so a later
 	/// reference cannot move it; the reference fails instead of reading other content.
-	#[error("broadcast {path} serves epoch {actual}, not the referenced {expected}")]
-	EpochMismatch {
+	#[error("broadcast {path} serves instance {actual}, not the referenced {expected}")]
+	InstanceMismatch {
 		/// The broadcast's path, relative to the origin root.
 		path: String,
-		/// The epoch the reference names.
-		expected: moq_net::Epoch,
-		/// The epoch the resolved broadcast serves.
-		actual: moq_net::Epoch,
+		/// The instance the reference names.
+		expected: moq_net::Instance,
+		/// The instance the resolved broadcast serves.
+		actual: moq_net::Instance,
 	},
 
 	/// A rendition tried to lower jitter already advertised to subscribers.
@@ -318,7 +299,7 @@ pub enum Error {
 impl Error {
 	/// The error for a rendition whose container this build does not recognize.
 	pub(crate) fn unsupported_container(container: &hang::catalog::UnknownContainer) -> Self {
-		Self::UnsupportedContainer(container.kind().unwrap_or("<missing>").to_string())
+		Self::UnsupportedContainer(container.kind().to_string())
 	}
 
 	/// The reason a track this error aborts gives its subscribers. Only a transport error has a

@@ -36,10 +36,11 @@ struct Imported {
 impl Imported {
 	/// Every object's packets, concatenated in order.
 	fn bytes(&self) -> Vec<u8> {
-		self.objects
-			.iter()
-			.flat_map(|object| object.payload.iter().copied())
-			.collect()
+		let mut bytes = Vec::new();
+		for object in &self.objects {
+			bytes.extend_from_slice(&object.payload);
+		}
+		bytes
 	}
 
 	fn section(&self) -> &hang::catalog::M2ts {
@@ -87,11 +88,14 @@ async fn import_onto(
 
 	let mut track = consumer
 		.track(&name)?
-		.subscribe(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_DELAY))
+		.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY)),
+		)
 		.await?;
 	let mut objects = Vec::new();
 	let mut markers = Vec::new();
-	while let Some(mut group) = tokio::time::timeout(Duration::from_secs(1), track.recv_group()).await?? {
+	while let Some(mut group) = kio::clock::timeout(Duration::from_secs(1), track.recv_group()).await?? {
 		while let Some(frame) = group.read_frame().await? {
 			if frame.payload.is_empty() {
 				markers.push(group.sequence);
@@ -593,7 +597,7 @@ async fn an_import_shifts_onto_a_clock_already_in_use() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 	let clock = catalog.clock();
-	let fixed = catalog.snapshot().clock;
+	let fixed = catalog.snapshot().media.clock;
 	tokio::time::advance(Duration::from_secs(5)).await;
 	let before = clock.now().as_micros() as u64;
 	let shifted = import_onto(broadcast, catalog.clone(), &data, data.len(), None)
@@ -601,7 +605,11 @@ async fn an_import_shifts_onto_a_clock_already_in_use() {
 		.unwrap();
 	let after = clock.now().as_micros() as u64;
 
-	assert_eq!(catalog.snapshot().clock, fixed, "the import never moves the clock");
+	assert_eq!(
+		catalog.snapshot().media.clock,
+		fixed,
+		"the import never moves the clock"
+	);
 	let first = shifted.objects[0].micros;
 	assert!(
 		(before..=after).contains(&first),

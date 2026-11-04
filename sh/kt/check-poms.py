@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Refuse unpublished development dependencies in generated wrapper POMs."""
 
-from pathlib import Path
 import sys
 import xml.etree.ElementTree as ET
+from pathlib import Path
 
 namespace = {"m": "http://maven.apache.org/POM/4.0.0"}
 for argument in sys.argv[1:]:

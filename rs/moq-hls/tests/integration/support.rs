@@ -47,7 +47,7 @@ impl Pair {
 		let (client, server) = tokio::join!(
 			async {
 				let (session, driver) = client
-					.connect(moq_clock::now(), client_transport)
+					.connect(kio::clock::now(), client_transport)
 					.await
 					.expect("client session");
 				tokio::spawn(moq_net::time::run(driver));
@@ -55,7 +55,7 @@ impl Pair {
 			},
 			async {
 				let (session, driver) = server
-					.accept(moq_clock::now(), server_transport)
+					.accept(kio::clock::now(), server_transport)
 					.await
 					.expect("server session");
 				tokio::spawn(moq_net::time::run(driver));
@@ -72,7 +72,7 @@ impl Pair {
 
 	/// An HLS server exporting everything the subscriber receives.
 	pub fn server(&self) -> Server {
-		Server::new(self.subscriber.consume(), Default::default())
+		Server::new(self.subscriber.consume(), Default::default()).unwrap()
 	}
 
 	/// Drop the publisher's session, as a publisher that lost its connection would.
@@ -87,14 +87,14 @@ fn origin(config: moq_net::origin::Config) -> moq_net::origin::Producer {
 	origin
 }
 
-/// One publisher run of a broadcast: a catalog and a single VP8 rendition whose HLS records the
-/// catalog advertises.
+/// One publisher run of a broadcast: a catalog declaring its join interval and a single VP8
+/// rendition.
 pub struct Publisher {
 	/// The broadcast, which announces its path while it lives.
 	pub broadcast: moq_net::origin::Publication,
 	/// The catalog.
 	pub catalog: moq_mux::catalog::Producer,
-	/// The media track, recording its HLS records as it is written.
+	/// The media track.
 	pub media: moq_mux::container::Producer<moq_mux::catalog::hang::Container, hang::catalog::VideoConfig>,
 }
 
@@ -123,7 +123,7 @@ impl Publisher {
 	}
 
 	/// Write one-second frames for each second in `start..end`, a keyframe on every even second.
-	/// Segments are cut every four seconds, so writing up to 13 completes segments 0 to 2 and
+	/// Segments are cut on a four-second grid, so writing up to 13 completes segments 0 to 2 and
 	/// leaves the GOP at 12s open.
 	pub fn write(&mut self, start: u64, end: u64, payload: u8) {
 		for second in start..end {
@@ -138,16 +138,20 @@ impl Publisher {
 	}
 }
 
-/// A catalog config publishing HLS records, hinted so they are advertised before any media and a
-/// recorder can start first.
+/// A catalog config declaring a four-second join interval up front, so renditions are listed before
+/// any media and a recorder can start first. The two-second GOPs pack two to a segment.
 pub fn catalog_config() -> moq_mux::catalog::Config {
-	let hls = moq_mux::hls::Config::default().with_duration_hint(Duration::from_secs(2));
-	moq_mux::catalog::Config::default().with_hls(hls)
+	let mut catalog = moq_mux::catalog::hang::Catalog::default();
+	catalog.media.join = hang::catalog::Join::new(Duration::from_secs(4));
+	moq_mux::catalog::Config::default().with_catalog(catalog)
 }
 
-/// A millisecond track: the frames written here carry timestamps.
+/// A millisecond track: the frames written here carry timestamps. It sets no publisher max
+/// age, so the segments a playlist lists stay fetchable once superseded.
 pub fn timed() -> moq_net::track::Info {
-	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	moq_net::track::Info::default()
+		.with_timescale(moq_net::Timescale::MILLI)
+		.with_max_age(None)
 }
 
 /// A 320x240 VP8 rendition, whose init its catalog config alone describes.
@@ -179,13 +183,13 @@ pub fn frame(second: u64, payload: u8) -> moq_mux::container::Frame {
 
 /// The rendition `server` exports for `path` once its catalog lists it.
 pub async fn rendition(server: &Server, path: &str) -> std::sync::Arc<Rendition> {
-	let broadcaster = moq_clock::timeout(TIMEOUT, server.broadcaster(path))
+	let broadcaster = kio::clock::timeout(TIMEOUT, server.broadcaster(path))
 		.await
 		.expect("resolve timed out")
 		.expect("announced");
 	let mut renditions = broadcaster.renditions();
 	loop {
-		match moq_clock::timeout(TIMEOUT, renditions.next()).await {
+		match kio::clock::timeout(TIMEOUT, renditions.next()).await {
 			Ok(Ok(Some(moq_hls::export::renditions::Event::Added(rendition)))) if rendition.name == TRACK => {
 				return rendition;
 			}
@@ -199,7 +203,7 @@ pub async fn rendition(server: &Server, path: &str) -> std::sync::Arc<Rendition>
 pub async fn drain(cursor: &mut segments::Consumer) -> (Vec<u64>, moq_hls::Result<()>) {
 	let mut read = Vec::new();
 	loop {
-		match moq_clock::timeout(TIMEOUT, cursor.next())
+		match kio::clock::timeout(TIMEOUT, cursor.next())
 			.await
 			.expect("the cursor stalled")
 		{
@@ -224,7 +228,7 @@ pub async fn get(app: &axum::Router, uri: &str) -> Response<Bytes> {
 
 /// Poll `uri` until it answers 200 with a body containing `needle`, returning the body.
 pub async fn listed(app: &axum::Router, uri: &str, needle: &str) -> String {
-	let deadline = moq_clock::now() + TIMEOUT;
+	let deadline = kio::clock::now() + TIMEOUT;
 	loop {
 		let response = get(app, uri).await;
 		let body = String::from_utf8_lossy(response.body()).into_owned();
@@ -232,11 +236,11 @@ pub async fn listed(app: &axum::Router, uri: &str, needle: &str) -> String {
 			return body;
 		}
 		assert!(
-			moq_clock::now() < deadline,
+			kio::clock::now() < deadline,
 			"{uri} never listed {needle}: {} {body}",
 			response.status()
 		);
-		moq_clock::sleep(Duration::from_millis(50)).await;
+		kio::clock::sleep(Duration::from_millis(50)).await;
 	}
 }
 

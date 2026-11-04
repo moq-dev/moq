@@ -32,7 +32,7 @@ async fn disconnect(at: At) {
 	let media = media_uri(&app, "live").await;
 	let playlist = listed(&app, &media, ".2.m4s").await;
 	assert_eq!(numbers(&playlist), [0, 1, 2], "{playlist}");
-	let first = moq_clock::timeout(TIMEOUT, cursor.next())
+	let first = kio::clock::timeout(TIMEOUT, cursor.next())
 		.await
 		.expect("the first segment")
 		.expect("records")
@@ -60,14 +60,14 @@ async fn disconnect(at: At) {
 		matches!(
 			err,
 			moq_hls::Error::CatalogFailed { .. }
-				| moq_hls::Error::RecordsFailed { .. }
+				| moq_hls::Error::MediaFailed { .. }
 				| moq_hls::Error::SegmentUnavailable { .. }
 		),
 		"{at:?}: a disconnect ended the recording with {err:?}"
 	);
 	// The failure is final: every later call answers it again.
 	for _ in 0..2 {
-		let again = moq_clock::timeout(TIMEOUT, cursor.next())
+		let again = kio::clock::timeout(TIMEOUT, cursor.next())
 			.await
 			.expect("the cursor stalled");
 		let Err(again) = again else {
@@ -83,7 +83,7 @@ async fn disconnect(at: At) {
 	assert!(
 		matches!(
 			refused,
-			moq_hls::Error::CatalogFailed { .. } | moq_hls::Error::RecordsFailed { .. }
+			moq_hls::Error::CatalogFailed { .. } | moq_hls::Error::MediaFailed { .. }
 		),
 		"{at:?}: {refused:?}"
 	);

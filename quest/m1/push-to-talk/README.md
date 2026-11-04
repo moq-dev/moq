@@ -1,4 +1,4 @@
-# Push-to-talk loses no speech
+# [M] Push-to-talk loses no speech
 
 ## Goal
 
@@ -29,27 +29,63 @@ Decided 2026-10-28 (maintainer):
   rendition.
 - **The publisher keeps its probe result across a disable**, and the
   element's `muted` and `invisible` leave capture open.
-- **Encoding no longer waits for demand**
-  ([always-on encoding](/quest/m1/eager-encode/README.md)). A listener who
-  subscribes after the unmute still gets the start within its `maxDelay`. This
+- **Encoding no longer waits for demand**, in every first-party publisher
+  (finished by [moq-dev/moq#7554](https://github.com/moq-dev/moq/pull/7554)).
+  A listener who
+  subscribes after the unmute still gets the start within its `delay.max`. This
   replaces a publisher head buffer, which was considered and dropped as the
   same idea special-cased.
 
-The epic's own work: once the children land, measure push-to-talk (22
-presses, 300 ms delay) behind bufferbloat: a rate limit below the media
-bitrate, behind a deep but finite queue whose overflow drops packets. That
-gates acceptance. A held listener's unmute pays no catalog round trip and no
-resubscribe, so unmute → audible is the path's one-way delay plus the 300 ms.
-Every frame of the utterance is encoded and sent; any frames dropped come
-only from queue overflow. Rerun the reporter's setup (100 ms RTT, 2% random
-loss) only as a reproduction of the original numbers, not as acceptance.
-Record both in the PR.
+The epic's own work: the acceptance proof `just test push-to-talk` (22
+presses, 60 ms Opus, 300 ms delay). A held listener's unmute pays no catalog
+round trip and no resubscribe, and every frame of each utterance is encoded,
+sent, received, and decoded from its first frame.
 
-## Required
+Decided with the maintainer on
+[moq-dev/moq#7760](https://github.com/moq-dev/moq/pull/7760):
 
-- [JS consumers hold a disabled rendition](/quest/m1/push-to-talk/hold-js.md) - watch keeps a disabled audio or video rendition subscribed, and the hang spec says "should not select"
-- [moqsrc holds a disabled rendition](/quest/m1/push-to-talk/hold-rs.md) - moqsrc keeps its reader running under the selection rule moq play and moq-mux already apply
-- [`muted` and `invisible` keep capture open](/quest/m1/push-to-talk/mute.md) - the element disables only the encoder, so unmute skips getUserMedia and AudioContext setup
+- ✅ **Ideal conditions only** (2026-11-04): "don't use random packet loss
+  either, assume ideal conditions." Both elements reach a local relay
+  directly, on separate sessions so the media crosses it, with no shaping,
+  loss, or queueing. The bufferbloat and 2% loss profiles were removed.
+- ✅ **Latency: at most 300 ms of playout on top of one-way delivery**
+  (2026-11-03): "We can't ever expect 300ms latency if it takes more than
+  300ms to deliver a packet." No clocked live start or other startup
+  machinery. Five ideal runs on 2026-11-04 held it on all 75 separated presses
+  (median 261 ms, max 294 ms). The breakdown and its knobs are in
+  [Push-to-talk latency](/quest/m1/push-to-talk-latency.md).
+- ✅ **No encoder recovery on re-enable** (2026-11-03). Asked first why a
+  fatal encoder error is expected at all: it is not. No push-to-talk run
+  reported one, and no issue reports a publisher encoder failure; the latch
+  came from a review finding
+  ([moq-dev/moq#5441](https://github.com/moq-dev/moq/pull/5441)). WebCodecs
+  fails an encoder only for a config the platform rejects, an internal codec
+  error, or reclamation, which Chromium applies only to inactive, backgrounded
+  hardware codecs; Opus is software. A failure stays latched until a device,
+  settings or `source` change.
+
+The publisher's tail drop is fixed:
+[moq-dev/moq#7725](https://github.com/moq-dev/moq/pull/7725) flushes the codec
+before a disable's discontinuity. A frame submitted under 1 ms before release
+used to be lost in 3 of 7 runs; it was lost in none of 12 since.
+
+What remains is a lost head at the listener. In one of 110 presses over the
+2026-11-04 relay runs (run 3, press 20, after a 60 s mute), the
+head's group 918 and the next frame's group 919, written at +72 and +73 ms,
+reached the listener reordered: 919 at +187 ms and 918 at +192 ms, about 115
+ms in transit against the usual 3 ms. The listener decoded 919 at +191.7 ms.
+Group 918 arrived 0.4 ms later and never reached the decoder, so the utterance
+played from its second frame, 60 ms late. The JS ordered read still delivers a
+group below its cursor as a late backfill
+(`js/hang/src/container/consumer.ts`), so the head was most likely dropped as
+late between the read and the decoder (`js/watch/src/audio/decoder.ts`); pin
+that down first. After a declared end, the next group is known to be the end's
+group plus one. Holding for it within the delay budget would keep the head
+without adding startup latency, but weigh that against the no-window decision
+in [Container reads drop backfill](/quest/m1/read-backfill.md).
+
+The runner fails on a head that is received but never decoded, so the proof
+catches this. A complete set of runs finishes this epic.
 
 ## Closes
 
@@ -57,4 +93,4 @@ Record both in the PR.
 
 ## Related
 
-- [Always-on encoding](/quest/m1/eager-encode/README.md) - encoders run while enabled, so a late subscriber can fetch the start
+- [Container reads drop backfill](/quest/m1/read-backfill.md) - changes how the ordered read treats a group below its cursor, where this head was lost

@@ -73,10 +73,14 @@ Contended channels at 16 workers, by share of mutex wait (`moq_net::model`):
 | `subscription::Subscription` | 0% | 0.6% | `GroupExpiry::is_expired` |
 
 Origin and broadcast state never appear. The `GroupExpiry::is_expired` read
-is its own fix, [Group expiry](/quest/m2/perf/kio-channel-contention/group-expiry.md).
+no longer locks the track (or the subscription) while nothing landed above the
+group it judges, the common verdict at the live edge
+([moq-dev/moq#7327](https://github.com/moq-dev/moq/pull/7327)). Its
+`just bench-profile lock` before and after was refused twice on a loaded host
+(perf dropped events), so this README's end-to-end rerun is its measurement.
 Every hot site is a read or re-poll
 of a per-track channel that all of a track's subscribers share, which is the
-[version counter](/quest/m2/perf/kio-channel-contention/version.md)'s target.
+version counter's target (below).
 `GroupState` is not contended here because both shapes send one-frame
 groups; `group_contended` in `rs/moq-net/benches/group.rs` measures a
 multi-frame group instead.
@@ -104,8 +108,7 @@ Decided (maintainer, 2026-10-14):
   mutex.
 - Breaking kio's API is allowed (e.g. a read becomes a snapshot or a cursor
   rather than a lock guard); moq-net updates in the same PR.
-- Candidates kept: a version counter with split waiter lists
-  ([Version counter](/quest/m2/perf/kio-channel-contention/version.md)) and
+- Candidates kept: a version counter with split waiter lists (landed below) and
   an append-only log primitive with front eviction
   (Append-only log (`kio::log`)), which
   much of moq-net could adopt
@@ -136,11 +139,9 @@ Decided (maintainer, 2026-10-14, per-thread follow-up):
   the thread-per-core workers (`--runtime-workers`, the default once
   [Shard by default](/quest/m2/perf/shard-default.md) lands) and link workers over an
   in-memory transport (`moq_net::transport::memory`),
-  never real QUIC. The
-  [replica spike](/quest/m2/perf/kio-channel-contention/spike-replica.md)
-  replicates the data plane and shares announcements; the
-  [cluster spike](/quest/m2/perf/kio-channel-contention/spike-cluster.md)
-  shares nothing. A measured win reopens sharding through `/quest-plan`; a
+  never real QUIC. The replica spike replicates the data plane and shares
+  announcements; the cluster spike shares nothing (both results below). A
+  measured win reopens sharding through `/quest-plan`; a
   no-win restores the rule.
 - Spikes are draft PRs that never merge; their numbers and recommendation
   land here. The in-memory transport merges for real.
@@ -204,10 +205,12 @@ median): deque 30, runs 30, log 46, ring 42. Draining it: 14, 15, 12, 19.
   growing stops every reader or needs epochs. Its per-slot locks cost 40%
   more for a burst on one thread and lose to the log across cores. It wins
   one-frame groups only because its reader holds no channel handle.
-- Not run: `just bench-profile lock` on a multi-frame shape
+- Not run on this host: `just bench-profile lock` on a multi-frame shape
   (`bench/workloads/video-heavy.toml` is one), which needs
-  `kernel.perf_event_paranoid=-1` and this host has 4. So a relay's share of
-  `GroupState` wait with multi-frame groups is still unmeasured.
+  `kernel.perf_event_paranoid=-1` and this host has 4. The replica spike
+  below captured video-heavy's total lock wait but doesn't split it by
+  channel, so a relay's share of `GroupState` wait with multi-frame groups
+  is still unmeasured.
 
 Decided (maintainer, 2026-10-24): Front eviction lands on the lock-free
 append-only log (`kio::log`) itself, a tail run from
@@ -218,16 +221,254 @@ eviction, scoped to `GroupState`'s frames with the above as its expected
 win, and no longer waits on the spikes: they change how much it wins, not
 the storage Front eviction needs. `TrackState` arrival order moved to
 [Log adoption](/quest/m2/perf/kio-channel-contention/log-adoption.md), which
-still waits on them.
+waited on them until both reported (below).
 A 2026-10-22 staging CDN chat profile (default tokio runtime, `f57c0aad`,
 DWARF stacks, 36% incomplete) put waiter registration at 1.97% self-time, the
 fourth-largest site, on a 501-connection chat shape. It agrees with this
 epic's targets but carries no lock-wait split.
 
+Version counter (landed 2026-11-01,
+[moq-dev/moq#7532](https://github.com/moq-dev/moq/pull/7532)). Every channel's
+value sits under its own mutex beside an `AtomicU64` version (bumped per publish,
+low bit closed), with the waiter lists under a second lock. `kio::Watch<T>` owns a
+`Consumer` and the version its one predicate was last pending at, so a re-poll at
+that version parks without the value lock or the predicate (✅ maintainer
+2026-11-01, over a caller-held cursor: it can't cross channels by mistake). A
+noop waiter parks nowhere. moq-net watches `Subscriber::poll_finished` and
+`Recover::wants`. `poll_recv_group` and `poll_recv_datagram` stay on
+`Consumer::poll`: their predicates read the wall clock (a received copy's tail
+grace, through `is_complete`), and their read paths lock the track in
+`Cursor::sync` and `probe` anyway.
+
+The cost on paths that don't opt in, in instructions on one pinned core (one
+codegen unit, 64 consumers, main `59e12a5bb9` to the PR): unchanged re-poll 84
+to 72, notify cycle per consumer 297 to 361, a write nobody is parked on 74 to
+87, `is_closed` 21 to 7, `poll_closed` while parked 58 to 81, `read` 24 to 24.
+An unchanged re-poll through a `Watch` is 25. The contended bench, ns per
+consumer at 4,096 consumers and 1, 4, and 16 threads: unchanged re-poll 7.8,
+63, and 70; through a `Watch` 0.84, 0.20, and 0.04; notify cycle 45, 274, and
+430. Accepting that cost was the default taken for the PR's second decision
+(the maintainer did not answer it separately): an unparked write skipping the
+waiter lock (a SeqCst "maybe parked" flag, at a fence per park) waits for a
+profile that names it.
+
+`just bench-profile lock fanout "1 4 16" tokio-workers` against main, three
+rounds on a host at load 9 to 12, mutex wait in ms (wait/CPU). The first round
+predates the noop waiter fix, whose waiter lock then held 30% of the wait at 4
+workers:
+
+| round | 4 workers, main | 4 workers, PR | 16 workers, main | 16 workers, PR |
+| --- | --- | --- | --- | --- |
+| 1 | 68 (22%) | 59 (23%) | 506 (151%) | 542 (182%) |
+| 2 | 130 (56%) | 33 (13%) | 546 (172%) | 407 (165%) |
+| 3 | 148 (59%) | 101 (47%) | 624 (164%) | 388 (126%) |
+
+At 16 workers `Subscriber::poll_finished` held 37 to 49% of main's wait and
+2.6% of the PR's. The wait moved to `Cursor::sync`'s read of `TrackState`
+(10 to 14% of main's, 52% of the PR's), with `probe` (11%) and
+`GroupExpiry::is_expired` (8%) next: reads, which a `Watch` doesn't reach.
+
+`just bench-profile lock chat` against main (`88e6990626`), two rounds on a
+host at load 6 to 15, 20,000 frames/s throughout:
+
+| round | 4 workers, main | 4 workers, PR | worker CPU, main to PR |
+| --- | --- | --- | --- |
+| 1 | 5,641 ms (70%) | 341 ms (5.2%) | 1.57 to 1.30 cores |
+| 2 | 4,779 ms (59%) | 967 ms (13%) | 1.69 to 1.42 cores |
+
+1 worker measured 0 on both. At 4 workers `Cursor::poll` for
+`Subscriber::poll_finished` held 48% of main's wait and none of the PR's;
+`Cursor::sync` (38% of the PR's) and `probe` (15%) lead it. So the higher
+notify and unparked-write costs above don't show end to end: worker CPU fell
+at the same throughput. Main at 16 workers was refused twice (perf dropped
+events); the PR alone measured 4,747 ms (61%) at 16 workers at load 17 to 19,
+led by `Cursor::sync` (32%) and `probe` (17%), with no `poll_finished` wait.
+
+Replica spike (2026-11-01,
+[moq-dev/moq#7533](https://github.com/moq-dev/moq/pull/7533)): the code is
+`Cluster::spike_replica` in `rs/moq-relay/src/cluster.rs` at
+[`0636821`](https://github.com/moq-dev/moq/blob/0636821358e42363ba9b2a4f05e07f0f85ccb1a8/rs/moq-relay/src/cluster.rs),
+switched on by `SPIKE_REPLICA=1`, and did not merge. Each tokio worker
+builds a second origin and links the shared one into it with one moq-lite-07
+session over `moq_net::transport::memory` (default 1 MiB stream buffer),
+both halves on that worker. Publishers still publish into the shared origin;
+the worker's subscribers read its replica. It departs from the plan twice:
+
+- Announcements cross the hop too, so each replica keeps its own announce
+  table. These shapes announce 1 to 256 broadcasts, so it doesn't show.
+- Every subscription takes the hop, even on the publisher's own worker. So
+  the 1-worker rows are the hop's whole cost, and the 4-worker rows overstate
+  it by up to a quarter.
+
+Method: `just bench-profile lock`, tokio workers over QUIC, with `perf stat`
+counting the relay's instructions over the unprofiled run's 5 s steady
+window. The relay was pinned to the 16 E-cores and the generator to the 8
+P-cores. The harness pins everything to the P-cores by default, so these
+numbers don't compare with the baseline above. Load average 5 to 21. Each
+cell is the median of 3 runs (chat at 16 workers: 9 base, 5 replica;
+video-heavy: 2). Mutex wait is the median of the runs whose lock capture
+the harness accepted, which is fewer where noted below. Instructions are
+user and kernel per delivered frame, in thousands; CPU and RSS come from the host sampler; latency is the
+generator's p50 in whole milliseconds. Each cell reads base → replica:
+
+| shape | workers | CPU cores | user instr | kernel instr | mutex wait (share) | RSS MiB | p50 ms |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| fanout | 1 | 0.06 → 0.05 | 167 → 170 | 20 → 21 | 0 → 0 | 36 → 36 | 3 → 4 |
+| fanout | 4 | 0.15 → 0.06 | 170 → 177 | 52 → 30 | 39 ms (12%) → 9 ms (3.1%) | 37 → 38 | 3 → 3 |
+| fanout | 16 | 0.45 → 0.16 | 182 → 211 | 344 → 123 | 807 ms (52%) → 256 ms (40%) | 43 → 47 | 3 → 2 |
+| chat | 1 | 1.00 → 1.00 | 185 → 184 | 18 → 18 | 0 → 0 | 576 → 577 | 966 → 1,273 |
+| chat | 4 | 1.91 → 1.80 | 168 → 171 | 40 → 20 | 50 ms (0.5%) → 18 ms (0.2%) | 499 → 507 | 31 → 68 |
+| chat | 16 | 9.5 → 2.2 | 180 → 170 | 427 → 28 | not captured → 793 ms (7.9%) | 500 → 518 | 34 → 18 |
+| video-heavy | 1 | 0.97 → 1.00 | 112 → 125 | 25 → 16 | 0 → 0 | 320 → 357 | 2.5 → 227 |
+| video-heavy | 4 | 1.22 → 1.87 | 116 → 207 | 32 → 31 | 27 ms (0.4%) → 16 ms (0.2%) | 324 → 381 | 1 → 1 |
+| video-heavy | 16 | 1.84 → 2.59 | 123 → 213 | 51 → 50 | 137 ms (1.5%) → 208 ms (1.6%) | 330 → 424 | 0 → 0 |
+
+`bench/workloads/video-heavy.toml` is the low-fan-out shape: 256
+connections each publish one 60 fps track of 60-frame groups and subscribe
+to two others. Chat at 1 worker saturates the worker either way (about
+15,000 of 20,000 messages/s delivered), so its latency is queueing.
+Video-heavy at 1 worker saturates only with the replica: 28,400 instead of
+31,400 frames/s. The harness refused all nine lock captures of base chat at
+16 workers, at least seven of them for a lost perf record (2, 8, and 32 MiB
+buffers), so its wait is missing. Its 400,000
+kernel instructions per frame are the contention: futex waits and wakes
+around one track with 2,000 readers. Base video-heavy at 16 workers is one
+capture; the other was refused for nonalternating switch records.
+
+- High fan-out wins at 16 workers. Chat drops from 9.5 to 2.2 cores, kernel
+  instructions per frame from 427k to 28k, and p50 from 34 to 18 ms.
+  Fanout drops from 0.45 to 0.16 cores while user instructions rise 16%,
+  the hop's own session work. At 4 workers the gain is small.
+- What stays contended with replicas is mostly the shared track, whose
+  readers are now the hops, one per worker. In chat at 16 workers (four
+  captures), `TrackState` is 86% of the wait: `Subscriber::poll_drop` 28%,
+  `Subscriber::poll_finished` via `resume::Reader::learn_end` 26%,
+  `GroupExpiry::is_expired` 10%, and the rest 21%. Another 13% is the
+  per-track cache mutex in `cache::Track::watch_wall`, also under
+  `GroupExpiry::is_expired`. The version counter targets the `TrackState`
+  reads, and only the ones that find nothing changed: a read of new data
+  still locks, and the cache mutex isn't a channel, so it stays.
+- Low fan-out loses. Video-heavy pays the hop on nearly every subscription.
+  At 4 and 16 workers that is 73 to 78% more user instructions per frame,
+  41 to 53% more CPU, and 18 to 28% more memory, with no lock-wait gain at
+  16 workers. At 1 worker the hop saturates the worker instead: 12% more
+  user instructions and 12% more memory, CPU pinned at one core, fewer
+  frames delivered, and p50 from 2.5 to 227 ms.
+- Memory: fanout and chat grow 0 to 11%. Replicated one-frame groups are
+  small, and multi-frame groups cost the most.
+
+Recommendation: a conditional win. Replicas pay off only on high-fan-out
+tracks. Applied to every track, they cost low fan-out about 1.8 times the
+user instructions per frame at 4 and 16 workers. If sharding reopens,
+replicate per track on demand: never on the publisher's own worker, and only above a per-worker fan-out
+threshold, serving the rest from the shared origin. Rerun this comparison
+with the version counter (landed above), since it attacks the same 16-worker chat `TrackState` waits without
+the hop. Weigh it against the cluster spike (below) before `/quest-plan`.
+
+Cluster spike (2026-11-01,
+[moq-dev/moq#7534](https://github.com/moq-dev/moq/pull/7534), prototype at
+[`ddd8b042`](https://github.com/moq-dev/moq/commit/ddd8b042ab82c7a4d53957e31fe35942957b7dfb),
+not merged): each tokio worker builds its own `Cluster` (origin, cache pool,
+origin driver) on its thread, and the workers link in a full mesh of
+moq-lite-06 memory sessions that publish and subscribe like a dialed
+cluster peer, so announcements, routes, and groups all cross workers
+through moq-lite. Measured with `just bench-profile lock`, both arms on the
+same build in the same session, plus `perf stat` instruction counts
+(user and kernel, both core types) over the same 5 s steady window. The host
+stayed loaded (load average 15 to 25), so instructions per delivered frame
+rank the arms and wall-clock numbers only corroborate. Workers pinned
+(`runtime.pin`) unless noted; two pinned passes (three for pinned chat
+`base`), one unpinned.
+
+Thousand instructions per delivered frame, `base` (today's shared origin) to
+`cluster`:
+
+| shape | 1 worker | 4 workers | 16 workers | 16 workers, unpinned |
+| --- | --- | --- | --- | --- |
+| chat | 189 to 175 | 219 to 185 (-15%) | 236 to 190 (-20%) | 309 to 191 (-38%) |
+| fanout | 188 to 188 | 204 to 200 (-2%) | 255 to 244 (-4%) | 221 to 244 (+10%) |
+
+Unpinned at 4 workers: chat 229 to 185, fanout 206 to 202. Cells are
+medians of the passes; one worker runs the same code in both arms (one
+cluster, no links), and chat saturates it, so that column is noise.
+
+- Lock wait goes to zero: every pinned and unpinned `cluster` run measured
+  0 to 2 ms against `base`'s 22 to 710 ms (chat, 4 workers), 2,096 to
+  3,159 ms (chat, 16), 106 to 172 ms (fanout, 4), and 669 to 774 ms
+  (fanout, 16). `base` chat's unpinned lock capture failed three times
+  (perf saw nonalternating switch records), so that cell has no wait number.
+- Relay CPU, chat, pinned: 1.5 to 1.7 cores at 4 workers fell to 1.1, and
+  1.8 to 2.4 at 16 fell to 1.2 to 1.3 (unpinned 16: 2.6 to 1.3). Unpinned 4
+  workers measured 1.7 in both arms, so CPU time only corroborates the
+  instruction counts. Fanout stays under 0.08 cores either way.
+- The saving is kernel instructions (futex) and off-CPU wait. User
+  instructions stay flat for chat, but rise 19% for fanout at 16 workers
+  (173 to 205 thousand per frame): a one-frame group costs about 140
+  thousand user instructions per hop, and fanout's 64 subscribers give each
+  of the 15 hops only four readers to amortize it over. Chat's 2,000
+  subscribers amortize it to nothing.
+- Resident memory at 16 workers rose 14 MiB for fanout (43 to 57 MiB) and
+  20 MiB for chat (507 to 527 MiB): 16 origins and cache pools, 120 links.
+- Glass-to-glass p50 stayed within the generator's millisecond resolution.
+  In process (`spike_announce`, below), a one-frame group read on another
+  worker arrives 75 to 175 us (p50) and 0.26 to 1.6 ms (p99) after its
+  write, against 14 to 44 us for a reader on the writing worker.
+
+The control plane is where it loses. `spike_announce` meshes W origin
+threads the same way (on cores 8 to 23, away from the relay runs) and
+announces 1,000 broadcasts spread over the workers; heap is a counting
+allocator's live bytes once every worker has every broadcast:
+
+| workers | heap per broadcast | allocations per broadcast | announce delay p50 / p99 | 1,000 broadcasts converge |
+| --- | --- | --- | --- | --- |
+| 1 | 4.9 KB | 64 | - | 5 to 18 ms |
+| 2 | 10.9 KB | 140 | 12 to 18 / 32 to 250 us | 8 to 14 ms |
+| 4 | 45 KB | 690 to 730 | 20 to 22 / 63 to 230 us | 31 to 40 ms |
+| 8 | 202 to 203 KB | 3,260 to 3,270 | 70 to 80 / 240 to 380 us | 107 to 166 ms |
+| 16 | 881 to 889 KB | 14,600 to 16,500 | 290 to 380 / 1,170 to 1,330 us | 0.5 to 0.9 s |
+
+The heap repeats across runs and grows with W squared: per worker it is
+5.4, 11.3, 25.3, and 55.4 KB per broadcast at 2, 4, 8, and 16 workers, about
+3.7 KB more per peer. That fits each worker keeping a route per peer, since
+a full mesh re-announces every route to every peer (not checked route by
+route). At 16 workers a relay with 10,000 broadcasts would hold about 9 GB of
+announce state that a shared origin holds in 49 MB.
+[Cluster route memory](/quest/m2/perf/cluster-route-memory.md) breaks that
+per-route state down and shrinks it, profiles the hop's group cost, and
+fixes the `bench-profile lock` failures both spikes hit.
+
+Findings: the data-plane half is a win wherever a track fans out to many
+subscribers per worker (chat), and a wash or a loss where it does not
+(fanout). Sharing nothing through today's full mesh then costs W-squared
+announce state and propagation, which grows past any data-plane saving at
+relay broadcast counts.
+
+Decided (maintainer, 2026-11-01, cluster spike):
+
+- ✅ A conditional win. Relay-per-thread is planned through `/quest-plan`,
+  on the condition that the worker mesh never re-announces peer routes to
+  peers. Each worker then learns a broadcast once, from the worker that
+  ingested it, which cuts announce state to about one route per worker
+  instead of one per peer.
+- That changes cluster routing semantics: today a relay re-announces every
+  route it learned to every other peer, and hop chains prevent loops. How
+  routes from outside the relay (other relays' peer links) reach every
+  worker without re-announce is for the planning to settle.
+  [Routes and announces](/quest/m1/cluster-routing/routes/README.md) plans a
+  per-connection `proxy` preference (decided 2026-10-14, relays default on)
+  that decides whether a connection is sent routes learned from other
+  connections; a worker link with it off is this condition.
+- The cost is unmeasured. The spike measured only the full mesh; nobody has
+  measured announce state, propagation, or the data plane with
+  no-re-announce.
+- The replica spike (above) has since reported its own conditional win. It
+  keeps one shared announce table and replicates only the data plane, so it
+  chases the same data-plane win, which these numbers bound, at a different
+  control-plane cost. Weighing the two is for the planning to settle.
+- Rejected: calling relay-per-thread a no-win and leaving sharding to the
+  replica spike alone, and restoring the no-sharding rule now.
+
 ## Required
 
-- [Group expiry](/quest/m2/perf/kio-channel-contention/group-expiry.md) - a group poll decides expiry without locking the track state, the largest single wait site
-- [Version counter](/quest/m2/perf/kio-channel-contention/version.md) - an opted-in re-poll skips the mutex when nothing changed, and parking no longer contends with readers
-- [Replica spike](/quest/m2/perf/kio-channel-contention/spike-replica.md) - measures per-worker data-plane replicas linked over the in-memory transport, announcements shared
-- [Cluster spike](/quest/m2/perf/kio-channel-contention/spike-cluster.md) - measures a relay per thread clustered over the in-memory transport, nothing shared
+- [Plan relay-per-thread on a worker mesh that never re-announces](/quest/m2/perf/kio-channel-contention/relay-per-thread.md) - measure no-re-announce, weigh it against per-track replicas, and decide whether log adoption waits on it
 - [Log adoption](/quest/m2/perf/kio-channel-contention/log-adoption.md) - the rest of moq-net's log-shaped state moves onto the log where it measures as a win

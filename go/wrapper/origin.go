@@ -133,13 +133,19 @@ func (r *BroadcastRequest) Path() (string, error) {
 	return r.inner.Path()
 }
 
-// Prepare starts an answer under a new epoch, hidden until published.
-func (r *BroadcastRequest) Prepare(epoch string) (*BroadcastPrepared, error) {
-	inner, err := r.inner.Prepare(epoch)
+// Prepare starts answering as a new stream under a fresh instance, hidden until published.
+func (r *BroadcastRequest) Prepare() (*BroadcastPrepared, error) {
+	inner, err := r.inner.Prepare()
 	if err != nil {
 		return nil, err
 	}
 	return &BroadcastPrepared{inner: inner}, nil
+}
+
+// Serve answers with held content under the prefix route's continuous sequence space,
+// without announcing an exact route. The broadcast remains the caller's to release.
+func (r *BroadcastRequest) Serve(broadcast *BroadcastConsumer) error {
+	return r.inner.Serve(broadcast.inner)
 }
 
 // Reject fails the request with an application error code.
@@ -200,24 +206,26 @@ func (o *OriginConsumer) Announced(options AnnounceOptions) (*AnnounceConsumer, 
 	return &AnnounceConsumer{inner: inner}, nil
 }
 
-// AnnouncedBroadcast follows an exact path, resolving each publisher instance
-// that serves it.
-func (o *OriginConsumer) AnnouncedBroadcast(path string) (*AnnouncedBroadcast, error) {
-	inner, err := o.inner.AnnouncedBroadcast(path)
+// Follow follows an exact path, resolving each stream that serves it. A non-nil
+// instance follows only that stream: another one taking over is never handed out,
+// and the stream is handed out again if it returns after an end.
+func (o *OriginConsumer) Follow(path string, instance *string) (*Following, error) {
+	inner, err := o.inner.Follow(path, instance)
 	if err != nil {
 		return nil, err
 	}
-	return &AnnouncedBroadcast{inner: inner}, nil
+	return &Following{inner: inner}, nil
 }
 
-// RequestBroadcast resolves a broadcast at path as soon as it can be served,
-// through the best announced route covering it: an announced broadcast on this
-// origin, a route a session announced (served on demand by that session), or a
-// dynamic handler on the origin; errors if nothing can serve it, including a
-// broadcast created but not announced. Unlike AnnouncedBroadcast, it
-// does not wait for a future announcement. Blocks until resolved.
-func (o *OriginConsumer) RequestBroadcast(ctx context.Context, path string) (*BroadcastConsumer, error) {
-	inner, err := o.inner.RequestBroadcast(ctx, path)
+// Request resolves one publisher instance of the broadcast at path as soon as
+// it can be served, through the best announced route covering it: an announced
+// broadcast on this origin, a route a session announced (served on demand by
+// that session), or a dynamic handler on the origin; errors if nothing can
+// serve it, including a broadcast created but not announced. Unlike Follow, it
+// does not wait for a future announcement. A non-nil instance refuses any
+// other stream. Blocks until resolved.
+func (o *OriginConsumer) Request(ctx context.Context, path string, instance *string) (*BroadcastConsumer, error) {
+	inner, err := o.inner.Request(ctx, path, instance)
 	if err != nil {
 		return nil, err
 	}
@@ -248,9 +256,9 @@ func (a *AnnounceConsumer) Cancel() {
 	a.inner.Cancel()
 }
 
-// AnnouncedBroadcast follows a specific broadcast across its publisher instances.
-type AnnouncedBroadcast struct {
-	inner *ffi.MoqAnnouncedBroadcast
+// Following follows a specific broadcast across its publisher instances.
+type Following struct {
+	inner *ffi.MoqFollowing
 }
 
 // Available blocks until the next publisher instance serves the broadcast and
@@ -259,7 +267,7 @@ type AnnouncedBroadcast struct {
 // publisher, or a replacement session) or for the broadcast to return after it went
 // offline. Drop what was read from the previous instance then: its tracks end when
 // its session does.
-func (a *AnnouncedBroadcast) Available(ctx context.Context) (*BroadcastConsumer, error) {
+func (a *Following) Available(ctx context.Context) (*BroadcastConsumer, error) {
 	inner, err := bridge.CallHandle(ctx, a.inner.Cancel, a.inner.Available)
 	if err != nil {
 		return nil, err
@@ -268,6 +276,6 @@ func (a *AnnouncedBroadcast) Available(ctx context.Context) (*BroadcastConsumer,
 }
 
 // Cancel stops awaiting the broadcast.
-func (a *AnnouncedBroadcast) Cancel() {
+func (a *Following) Cancel() {
 	a.inner.Cancel()
 }

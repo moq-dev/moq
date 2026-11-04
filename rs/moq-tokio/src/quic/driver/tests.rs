@@ -22,19 +22,14 @@ use std::{
 use crate::quic::driver::runtime::{AsyncUdpSocket, wrap_udp_socket};
 use crate::quic::driver::{Duration, Instant};
 use bytes::{Buf, Bytes};
-use moq_quic::{
-	ConnectionId, RandomConnectionIdGenerator, Version,
-	crypto::rustls::{QuicClientConfig, QuicServerConfig},
-	crypto::{Keys, ServerConfig as ProtoServerConfig, Session},
-	transport_parameters::TransportParameters,
-};
+use kio::clock::{sleep, timeout};
+use moq_quic::RandomConnectionIdGenerator;
 use moq_sock::udp::RecvMeta;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use rustls::{
 	RootCertStore,
 	pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
 };
-use tokio::time::{sleep, timeout};
 use tokio::{
 	join,
 	runtime::{Builder, Runtime},
@@ -44,10 +39,10 @@ use tracing::{error_span, info};
 use tracing_subscriber::EnvFilter;
 
 use super::{
-	ReadError, ReadToEndError, RecvStream, SendStream, VarInt, client,
+	VarInt, client,
 	connection::Connection,
 	endpoint::{self, Endpoint},
-	server, transport,
+	recv, send, server, transport,
 };
 
 #[test]
@@ -125,6 +120,32 @@ async fn close_endpoint() {
 	}
 }
 
+/// A driver panic wakes the handshake it was driving instead of leaving it pending forever.
+///
+/// The waiter panics on the poisoned state, for its owner to isolate (as `Server` does per handshake).
+#[tokio::test]
+async fn driver_panic_fails_connecting() {
+	let _guard = subscribe();
+
+	// Avoid NoRootAnchors error
+	let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+	let mut roots = RootCertStore::empty();
+	roots.add(cert.cert.into()).unwrap();
+
+	let endpoint = client_endpoint(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).unwrap();
+	endpoint.set_default_client_config(client::Config::with_root_certificates(Arc::new(roots)).unwrap());
+
+	// Nothing answers here, and the dead driver can't time the handshake out.
+	let connecting = endpoint
+		.dial(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234), "localhost")
+		.unwrap();
+	connecting.poison();
+
+	// The waiter wakes into the poisoned state and panics there, and dropping it doesn't abort.
+	let woken = timeout(Duration::from_secs(5), crate::panic::isolate(connecting)).await;
+	assert!(matches!(woken, Ok(None)), "the handshake waiter hung");
+}
+
 #[test]
 fn local_addr() {
 	let socket = UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).unwrap();
@@ -159,7 +180,7 @@ fn read_after_close() {
 			.expect("connection");
 		let mut s = new_conn.open_uni(Default::default()).await.unwrap();
 		s.write_all(MSG).await.unwrap();
-		s.finish().unwrap();
+		let s = s.finish();
 		// Wait for the stream to be closed, one way or another.
 		_ = s.stopped().await;
 	});
@@ -173,53 +194,6 @@ fn read_after_close() {
 		let mut stream = new_conn.accept_uni().await.expect("incoming streams");
 		let msg = stream.read_to_end(usize::MAX).await.expect("read_to_end");
 		assert_eq!(msg, MSG);
-	});
-}
-
-#[test]
-fn export_keying_material() {
-	let _guard = subscribe();
-	let runtime = rt_basic();
-	let endpoint = {
-		let _guard = runtime.enter();
-		endpoint()
-	};
-
-	runtime.block_on(async move {
-		let outgoing_conn_fut = tokio::spawn({
-			let endpoint = endpoint.clone();
-			async move {
-				endpoint
-					.dial(endpoint.local_addr(), "localhost")
-					.unwrap()
-					.await
-					.expect("connect")
-			}
-		});
-		let incoming_conn_fut = tokio::spawn({
-			let endpoint = endpoint.clone();
-			async move {
-				endpoint
-					.accept()
-					.await
-					.expect("endpoint")
-					.accept()
-					.expect("accept")
-					.await
-					.expect("connection")
-			}
-		});
-		let outgoing_conn = outgoing_conn_fut.await.unwrap();
-		let incoming_conn = incoming_conn_fut.await.unwrap();
-		let mut i_buf = [0u8; 64];
-		incoming_conn
-			.export_keying_material(&mut i_buf, b"asdf", b"qwer")
-			.unwrap();
-		let mut o_buf = [0u8; 64];
-		outgoing_conn
-			.export_keying_material(&mut o_buf, b"asdf", b"qwer")
-			.unwrap();
-		assert_eq!(&i_buf[..], &o_buf[..]);
 	});
 }
 
@@ -268,7 +242,7 @@ fn endpoint() -> Endpoint {
 	EndpointFactory::new().endpoint()
 }
 
-/// A dial-only endpoint on `addr`, dual-stack when the platform allows it for an IPv6 `addr`
+/// A dial-only endpoint on `addr`, dual-stack when the platform allows it for an IPv6 wildcard
 fn client_endpoint(addr: SocketAddr) -> Result<Endpoint, endpoint::Error> {
 	Endpoint::new(endpoint::Config::default(), bind(addr)?)
 }
@@ -279,12 +253,7 @@ fn server_endpoint(config: server::Config, addr: SocketAddr) -> Result<Endpoint,
 }
 
 fn bind(addr: SocketAddr) -> io::Result<UdpSocket> {
-	let socket = socket2::Socket::new(socket2::Domain::for_address(addr), socket2::Type::DGRAM, None)?;
-	if addr.is_ipv6() {
-		let _ = socket.set_only_v6(false);
-	}
-	socket.bind(&addr.into())?;
-	Ok(socket.into())
+	moq_sock::bind::udp(moq_sock::bind::Udp::new(addr))
 }
 
 fn endpoint_with_config(transport_config: transport::Config) -> Endpoint {
@@ -309,11 +278,16 @@ impl EndpointFactory {
 		self.endpoint_with_config(transport::Config::default())
 	}
 
-	fn endpoint_with_config(&self, transport_config: transport::Config) -> Endpoint {
+	fn server_config(&self, transport_config: transport::Config) -> server::Config {
 		let key = PrivateKeyDer::Pkcs8(self.cert.signing_key.serialize_der().into());
 		let mut server_config =
 			crate::quic::driver::server::Config::with_single_cert(vec![self.cert.cert.der().clone()], key).unwrap();
-		server_config.transport = transport_config.clone();
+		server_config.transport = transport_config;
+		server_config
+	}
+
+	fn endpoint_with_config(&self, transport_config: transport::Config) -> Endpoint {
+		let server_config = self.server_config(transport_config.clone());
 
 		let mut roots = RootCertStore::empty();
 		roots.add(self.cert.cert.der().clone()).unwrap();
@@ -330,13 +304,13 @@ impl EndpointFactory {
 	}
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct HandshakeBlocker {
 	state: Mutex<HandshakeBlockerState>,
 	changed: Condvar,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct HandshakeBlockerState {
 	started: bool,
 	released: bool,
@@ -376,23 +350,17 @@ impl Drop for HandshakeReleaseGuard {
 	}
 }
 
-struct BlockingServerConfig {
-	inner: Arc<dyn ProtoServerConfig>,
+/// Blocks the server's handshake on the ClientHello, which `Incoming::accept` processes
+#[derive(Debug)]
+struct BlockingResolver {
+	key: Arc<rustls::sign::CertifiedKey>,
 	blocker: Arc<HandshakeBlocker>,
 }
 
-impl ProtoServerConfig for BlockingServerConfig {
-	fn initial_keys(&self, version: Version, dst_cid: ConnectionId) -> Keys {
-		self.inner.initial_keys(version, dst_cid)
-	}
-
-	fn retry_tag(&self, version: Version, orig_dst_cid: ConnectionId, packet: &[u8]) -> [u8; 16] {
-		self.inner.retry_tag(version, orig_dst_cid, packet)
-	}
-
-	fn start_session(self: Arc<Self>, version: Version, params: &TransportParameters) -> Box<dyn Session> {
+impl rustls::server::ResolvesServerCert for BlockingResolver {
+	fn resolve(&self, _hello: rustls::server::ClientHello<'_>) -> Option<Arc<rustls::sign::CertifiedKey>> {
 		self.blocker.block();
-		self.inner.clone().start_session(version, params)
+		Some(self.key.clone())
 	}
 }
 
@@ -465,25 +433,24 @@ fn blocking_server_pair(
 ) -> (Endpoint, Endpoint, Arc<HandshakeBlocker>) {
 	let factory = EndpointFactory::new();
 	let key = PrivateKeyDer::Pkcs8(factory.cert.signing_key.serialize_der().into());
-	let mut server_crypto = rustls::ServerConfig::builder_with_provider(default_provider().into())
+	let provider = Arc::new(default_provider());
+	let key = rustls::sign::CertifiedKey::from_der(vec![factory.cert.cert.der().clone()], key, &provider).unwrap();
+	let blocker = Arc::new(HandshakeBlocker::default());
+	let mut server_crypto = rustls::ServerConfig::builder_with_provider(provider)
 		.with_protocol_versions(&[&rustls::version::TLS13])
 		.unwrap()
 		.with_no_client_auth()
-		.with_single_cert(vec![factory.cert.cert.der().clone()], key)
-		.unwrap();
+		.with_cert_resolver(Arc::new(BlockingResolver {
+			key: Arc::new(key),
+			blocker: blocker.clone(),
+		}));
 	server_crypto.alpn_protocols = vec![server_alpn.to_vec()];
-	let mut server_config =
-		crate::quic::driver::server::Config::new(Arc::new(QuicServerConfig::try_from(server_crypto).unwrap()));
+	let mut server_config = crate::quic::driver::server::Config::new(Arc::new(server_crypto));
 	// Loopback answers in microseconds. The default 333 ms initial RTT would hold every
 	// connection closed before its handshake in draining for three seconds.
 	let mut transport = transport::Config::default();
 	transport.initial_rtt = Duration::from_millis(10);
 	server_config.transport = transport.clone();
-	let blocker = Arc::new(HandshakeBlocker::default());
-	server_config.crypto = Arc::new(BlockingServerConfig {
-		inner: server_config.crypto.clone(),
-		blocker: blocker.clone(),
-	});
 
 	let server = Endpoint::new(
 		factory.endpoint_config.clone().with_server(server_config),
@@ -507,7 +474,7 @@ fn blocking_server_pair(
 		.with_root_certificates(roots)
 		.with_no_client_auth();
 	client_crypto.alpn_protocols = vec![client_alpn.to_vec()];
-	let mut client_config = client::Config::new(Arc::new(QuicClientConfig::try_from(client_crypto).unwrap()));
+	let mut client_config = client::Config::new(Arc::new(client_crypto));
 	client_config.transport = transport;
 	client.set_default_client_config(client_config);
 
@@ -688,6 +655,34 @@ fn echo_v6() {
 	});
 }
 
+/// Windows rejects the IPv4 options the driver sets on a dual-stack socket, so an endpoint on a
+/// specific IPv6 address must be bound v6-only.
+#[tokio::test]
+#[cfg_attr(
+	any(target_os = "solaris", target_os = "illumos"),
+	ignore = "Fails on Solaris and Illumos"
+)]
+async fn specific_v6_addr() {
+	let _guard = subscribe();
+	let addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0);
+
+	let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+	let key = PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
+	let cert = CertificateDer::from(cert.cert);
+	let server_config = server::Config::with_single_cert(vec![cert.clone()], key.into()).unwrap();
+	let server = server_endpoint(server_config, addr).unwrap();
+
+	let mut roots = RootCertStore::empty();
+	roots.add(cert).unwrap();
+	let client = client_endpoint(addr).unwrap();
+	client.set_default_client_config(client::Config::with_root_certificates(Arc::new(roots)).unwrap());
+
+	tokio::join!(
+		async { server.accept().await.unwrap().accept().unwrap().await.unwrap() },
+		async { client.dial(server.local_addr(), "localhost").unwrap().await.unwrap() },
+	);
+}
+
 #[test]
 #[cfg_attr(target_os = "solaris", ignore = "Sometimes hangs in poll() on Solaris")]
 fn echo_v4() {
@@ -803,7 +798,7 @@ fn run_echo(args: EchoArgs) {
 			let _guard = error_span!("client").entered();
 			client_endpoint(args.client_addr).unwrap()
 		};
-		let mut client_config = client::Config::new(Arc::new(QuicClientConfig::try_from(client_crypto).unwrap()));
+		let mut client_config = client::Config::new(Arc::new(client_crypto));
 		client_config.transport = transport_config;
 		client.set_default_client_config(client_config);
 
@@ -851,8 +846,8 @@ fn run_echo(args: EchoArgs) {
 					let msg = gen_data(args.stream_size, SEED);
 
 					let send_task = async {
-						send.write_all(&msg).await.expect("write");
-						send.finish().unwrap();
+						send.write_all(&msg[..]).await.expect("write");
+						send.finish();
 					};
 					let recv_task = async { recv.read_to_end(usize::MAX).await.expect("read") };
 
@@ -879,12 +874,12 @@ struct EchoArgs {
 	stream_receive_window: Option<u64>,
 }
 
-async fn echo((mut send, mut recv): (SendStream, RecvStream)) {
+async fn echo((mut send, mut recv): (send::Stream, recv::Stream)) {
 	while let Some(chunk) = recv.read_chunk(32 << 10).await.expect("read chunk") {
-		send.write_chunk(chunk.bytes).await.expect("write chunk");
+		send.write_all(chunk).await.expect("write chunk");
 	}
 
-	let _ = send.finish();
+	drop(send.finish());
 }
 
 fn gen_data(size: usize, seed: u64) -> Vec<u8> {
@@ -985,8 +980,8 @@ async fn rebind_recv() {
 		connected_send.notify_one();
 		write_recv.notified().await;
 		let mut stream = connection.open_uni(Default::default()).await.unwrap();
-		stream.write_all(MSG).await.unwrap();
-		stream.finish().unwrap();
+		stream.write_all(MSG.as_slice()).await.unwrap();
+		let stream = stream.finish();
 		// Wait for the stream to be closed, one way or another.
 		_ = stream.stopped().await;
 	});
@@ -1309,8 +1304,8 @@ async fn remote_address_follows_migration() {
 
 		// send data from the new socket to trigger migration on the server
 		let mut stream = client_conn.open_uni(Default::default()).await.unwrap();
-		stream.write_all(b"hello").await.unwrap();
-		stream.finish().unwrap();
+		stream.write_all(&b"hello"[..]).await.unwrap();
+		stream.finish();
 	};
 
 	trigger_migration.notified().await;
@@ -1321,6 +1316,135 @@ async fn remote_address_follows_migration() {
 
 	server_task.await.unwrap();
 	client_conn.close(0u32.into(), "done");
+}
+
+/// Three servers sit behind one front address. A connection whose handshake reached the first
+/// keeps working while the front sends its packets to the second, then the third: each forwards
+/// them to the first, which replies to the client directly.
+#[tokio::test]
+async fn forwarded_packets_reach_their_owner() {
+	use crate::quic::driver::forward::{Forward, Map, Peers, ServerIdGenerator};
+
+	let _guard = subscribe();
+	let localhost = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+	let factory = EndpointFactory::new();
+	let key = [7; 32];
+
+	let sockets: Vec<UdpSocket> = (0..3).map(|_| UdpSocket::bind(localhost).unwrap()).collect();
+	let peers = Peers::default();
+	let mut map = Map::default();
+	for (id, socket) in (1u8..).zip(&sockets) {
+		map.insert(&[id], socket.local_addr().unwrap());
+	}
+	peers.set(map);
+	let servers: Vec<Endpoint> = (1u8..)
+		.zip(sockets)
+		.map(|(id, socket)| {
+			let mut config = factory.endpoint_config.clone();
+			config.cid_generator = Some(Arc::new(move || Box::new(ServerIdGenerator::new(&[id], 4))));
+			let forward = Forward::new(socket, &[id], peers.clone(), &key, config.max_udp_payload_size).unwrap();
+			Endpoint::forwarding(
+				config.with_server(factory.server_config(transport::Config::default())),
+				UdpSocket::bind(localhost).unwrap(),
+				forward,
+			)
+			.unwrap()
+		})
+		.collect();
+
+	// The front end: the client's packets go to whichever server it names, from one address, and
+	// a reply from any server goes back to the client.
+	let front = tokio::net::UdpSocket::bind(localhost).await.unwrap();
+	let front_addr = front.local_addr().unwrap();
+	let back = tokio::net::UdpSocket::bind(localhost).await.unwrap();
+	let back_addr = back.local_addr().unwrap();
+	let target = Arc::new(Mutex::new(servers[0].local_addr()));
+	let front_task = tokio::spawn({
+		let target = target.clone();
+		async move {
+			let (mut up, mut down) = ([0; 1500], [0; 1500]);
+			let mut client = None;
+			loop {
+				tokio::select! {
+					received = front.recv_from(&mut up) => {
+						let (len, from) = received.unwrap();
+						client = Some(from);
+						let to = *target.lock().unwrap();
+						back.send_to(&up[..len], to).await.unwrap();
+					}
+					received = back.recv_from(&mut down) => {
+						let (len, _) = received.unwrap();
+						front.send_to(&down[..len], client.unwrap()).await.unwrap();
+					}
+				}
+			}
+		}
+	});
+
+	let owner = servers[0].clone();
+	let server_task = tokio::spawn(async move {
+		let conn = owner.accept().await.unwrap().accept().unwrap().await.unwrap();
+		loop {
+			let Ok(stream) = conn.accept_bi().await else { break };
+			// The client's packets keep arriving from the address its handshake took, whichever
+			// server they reached first.
+			assert_eq!(conn.remote_address(), back_addr);
+			echo(stream).await;
+		}
+	});
+
+	let client = factory.endpoint();
+	let conn = client.dial(front_addr, "localhost").unwrap().await.unwrap();
+	for (round, server) in [0, 1, 2, 0].into_iter().enumerate() {
+		*target.lock().unwrap() = servers[server].local_addr();
+		let message = format!("round {round} through server {server}");
+		let (mut send, mut recv) = conn.open_bi(Default::default()).await.unwrap();
+		send.write_all(message.as_bytes()).await.unwrap();
+		drop(send.finish());
+		let echoed = timeout(Duration::from_secs(10), recv.read_to_end(1024))
+			.await
+			.expect("the owner answered")
+			.unwrap();
+		assert_eq!(echoed, message.as_bytes());
+	}
+	assert_eq!(servers[1].open_connections(), 0);
+	assert_eq!(servers[2].open_connections(), 0);
+
+	conn.close(0u32.into(), "done");
+	server_task.await.unwrap();
+	front_task.abort();
+}
+
+/// Closing a forwarding endpoint frees its forward port with its main one, even while a handle
+/// keeps the endpoint alive, so a listener restarted on the same configuration can bind both.
+#[tokio::test]
+async fn close_releases_the_forward_socket() {
+	use crate::quic::driver::forward::{Forward, Peers};
+
+	let _guard = subscribe();
+	let localhost = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+	let factory = EndpointFactory::new();
+	let forward_socket = UdpSocket::bind(localhost).unwrap();
+	let forward_addr = forward_socket.local_addr().unwrap();
+	let config = factory.endpoint_config.clone();
+	let forward = Forward::new(
+		forward_socket,
+		&[1],
+		Peers::default(),
+		&[7; 32],
+		config.max_udp_payload_size,
+	)
+	.unwrap();
+	let endpoint = Endpoint::forwarding(
+		config.with_server(factory.server_config(transport::Config::default())),
+		UdpSocket::bind(localhost).unwrap(),
+		forward,
+	)
+	.unwrap();
+
+	endpoint.close(0u32.into(), "done").await;
+	UdpSocket::bind(forward_addr).expect("the forward port is free once close returns");
+	drop(endpoint);
 }
 
 /// A send group from another connection panics where it is passed in, without poisoning the
@@ -1341,7 +1465,7 @@ async fn foreign_send_group_panics_cleanly() {
 	let (conn, server_conn) = connect().await;
 	let (other, _other_server) = connect().await;
 	let group = other.send_group(0);
-	let options = super::SendOptions {
+	let options = super::send::Options {
 		group: Some(&group),
 		priority: 0,
 	};
@@ -1359,8 +1483,8 @@ async fn foreign_send_group_panics_cleanly() {
 	assert!(set.is_err(), "set_group accepted a foreign group");
 
 	// The connection still works, and its handles drop without panicking.
-	send.write_all(b"after").await.unwrap();
-	send.finish().unwrap();
+	send.write_all(&b"after"[..]).await.unwrap();
+	send.finish();
 	let mut recv = server_conn.accept_uni().await.unwrap();
 	assert_eq!(recv.read_to_end(usize::MAX).await.unwrap(), b"after");
 }
@@ -1420,9 +1544,9 @@ async fn two_datagram_readers() {
 			x
 		},
 		async {
-			server.send_datagram(b"one"[..].into(), Default::default()).unwrap();
+			server.send_datagram(&b"one"[..], Default::default()).unwrap();
 			done.notified().await;
-			server.send_datagram(b"two"[..].into(), Default::default()).unwrap();
+			server.send_datagram(&b"two"[..], Default::default()).unwrap();
 		}
 	);
 	assert!(*a == *b"one" || *b == *b"one");
@@ -1492,7 +1616,7 @@ async fn stream_stopped() {
 		let stopped2 = stream.stopped();
 		let stopped3 = stream.stopped();
 
-		stream.write_all(b"hi").await.unwrap();
+		stream.write_all(&b"hi"[..]).await.unwrap();
 		// spawn one of the futures into a task
 		let stopped1 = tokio::task::spawn(stopped1);
 		// verify that both futures resolved
@@ -1511,7 +1635,7 @@ async fn stream_stopped() {
 		let mut stream = conn.accept_uni().await.unwrap();
 		let mut buf = [0u8; 2];
 		stream.read_exact(&mut buf).await.unwrap();
-		stream.stop(42u32.into()).unwrap();
+		stream.stop(42u32.into());
 		conn
 	}
 	.instrument(error_span!("server"));
@@ -1529,7 +1653,7 @@ async fn stream_stopped_2() {
 		endpoint.accept().await.unwrap().accept().unwrap().await
 	})
 	.unwrap();
-	let mut send_stream = conn.open_uni(Default::default()).await.unwrap();
+	let send_stream = conn.open_uni(Default::default()).await.unwrap();
 	let stopped = timeout(Duration::from_millis(100), send_stream.stopped()).instrument(error_span!("stopped"));
 	tokio::pin!(stopped);
 	// poll the future once so that the waker is registered.
@@ -1539,7 +1663,7 @@ async fn stream_stopped_2() {
 		_x = std::future::ready(()) => {}
 	}
 	// finish and drop the send stream, since dropping it unfinished would reset it
-	send_stream.finish().unwrap();
+	let send_stream = send_stream.finish();
 	drop(send_stream);
 	// make sure the stopped future still resolves
 	let res = stopped.await;
@@ -1558,13 +1682,13 @@ async fn dropped_send_stream_resets() {
 	})
 	.unwrap();
 	let mut send_stream = conn.open_uni(Default::default()).await.unwrap();
-	send_stream.write_all(b"truncated").await.unwrap();
+	send_stream.write_all(&b"truncated"[..]).await.unwrap();
 	drop(send_stream);
 
 	let mut recv_stream = server_conn.accept_uni().await.unwrap();
 	let res = recv_stream.read_to_end(usize::MAX).await;
 	assert!(
-		matches!(res, Err(ReadToEndError::Read(ReadError::Reset(code))) if code == VarInt::from_u32(0)),
+		matches!(res, Err(recv::Error::Reset(code)) if code == VarInt::from_u32(0)),
 		"{res:?}"
 	);
 }
@@ -1580,8 +1704,8 @@ async fn finished_send_stream_survives_drop() {
 	})
 	.unwrap();
 	let mut send_stream = conn.open_uni(Default::default()).await.unwrap();
-	send_stream.write_all(b"complete").await.unwrap();
-	send_stream.finish().unwrap();
+	send_stream.write_all(&b"complete"[..]).await.unwrap();
+	let send_stream = send_stream.finish();
 	drop(send_stream);
 
 	let mut recv_stream = server_conn.accept_uni().await.unwrap();
@@ -1615,13 +1739,14 @@ async fn stream_stop_before_reset_wins() {
 	let endpoint = endpoint();
 	let (conn, server) = connect_self(&endpoint).await;
 	let mut send = conn.open_uni(Default::default()).await.unwrap();
-	send.write_all(b"hello").await.unwrap();
-	let mut recv = server.accept_uni().await.unwrap();
-	recv.stop(5u32.into()).unwrap();
+	send.write_all(&b"hello"[..]).await.unwrap();
+	let recv = server.accept_uni().await.unwrap();
+	recv.stop(5u32.into());
 	stop_sending_received(&conn).await;
 
-	send.reset(7u32.into()).unwrap();
-	let stopped = timeout(Duration::from_secs(10), send.stopped()).await;
+	let stopped = send.stopped();
+	send.reset(7u32.into());
+	let stopped = timeout(Duration::from_secs(10), stopped).await;
 	assert_eq!(stopped, Ok(Ok(Some(5u32.into()))));
 }
 
@@ -1632,14 +1757,15 @@ async fn stream_stop_after_reset_is_ignored() {
 	let endpoint = endpoint();
 	let (conn, server) = connect_self(&endpoint).await;
 	let mut send = conn.open_uni(Default::default()).await.unwrap();
-	send.write_all(b"hello").await.unwrap();
-	let mut recv = server.accept_uni().await.unwrap();
+	send.write_all(&b"hello"[..]).await.unwrap();
+	let recv = server.accept_uni().await.unwrap();
 	// Neither side runs in between, so the peer stops a stream it hasn't seen reset yet.
-	send.reset(7u32.into()).unwrap();
-	recv.stop(5u32.into()).unwrap();
+	let stopped = send.stopped();
+	send.reset(7u32.into());
+	recv.stop(5u32.into());
 	stop_sending_received(&conn).await;
 
-	let stopped = timeout(Duration::from_secs(10), send.stopped()).await;
+	let stopped = timeout(Duration::from_secs(10), stopped).await;
 	assert_eq!(stopped, Ok(Ok(None)));
 }
 
@@ -1650,16 +1776,15 @@ async fn stream_stop_survives_freed_reset() {
 	let endpoint = endpoint();
 	let (conn, server) = connect_self(&endpoint).await;
 	let mut send = conn.open_uni(Default::default()).await.unwrap();
-	send.write_all(b"hello").await.unwrap();
+	send.write_all(&b"hello"[..]).await.unwrap();
 	let stopped = send.stopped();
-	let mut recv = server.accept_uni().await.unwrap();
-	recv.stop(5u32.into()).unwrap();
+	let recv = server.accept_uni().await.unwrap();
+	recv.stop(5u32.into());
 	stop_sending_received(&conn).await;
 
-	send.reset(7u32.into()).unwrap();
-	let id = send.id();
+	send.reset(7u32.into());
 	timeout(Duration::from_secs(10), async {
-		while !conn.send_stream_freed(id) {
+		while conn.send_streams() > 0 {
 			tokio::task::yield_now().await;
 		}
 	})
@@ -1676,9 +1801,10 @@ async fn stream_reset_resolves_stopped() {
 	let endpoint = endpoint();
 	let (conn, _server) = connect_self(&endpoint).await;
 	let mut send = conn.open_uni(Default::default()).await.unwrap();
-	send.write_all(b"hello").await.unwrap();
-	send.reset(7u32.into()).unwrap();
-	let stopped = timeout(Duration::from_secs(10), send.stopped()).await;
+	send.write_all(&b"hello"[..]).await.unwrap();
+	let stopped = send.stopped();
+	send.reset(7u32.into());
+	let stopped = timeout(Duration::from_secs(10), stopped).await;
 	assert_eq!(stopped, Ok(Ok(None)));
 }
 
@@ -1688,9 +1814,12 @@ async fn stream_reset_at_resolves_stopped() {
 	let endpoint = endpoint();
 	let (conn, _server) = connect_self(&endpoint).await;
 	let mut send = conn.open_uni(Default::default()).await.unwrap();
-	send.write_all(b"hello").await.unwrap();
-	send.reset_at(2, 7u32.into()).unwrap();
-	let stopped = timeout(Duration::from_secs(10), send.stopped()).await;
+	send.write_all(&b"he"[..]).await.unwrap();
+	let offset = send.offset();
+	send.write_all(&b"llo"[..]).await.unwrap();
+	let stopped = send.stopped();
+	send.reset_at(offset, 7u32.into());
+	let stopped = timeout(Duration::from_secs(10), stopped).await;
 	assert_eq!(stopped, Ok(Ok(None)));
 }
 
@@ -1701,12 +1830,12 @@ async fn stream_stopped_pending_across_reset() {
 	let endpoint = endpoint();
 	let (conn, _server) = connect_self(&endpoint).await;
 	let mut send = conn.open_uni(Default::default()).await.unwrap();
-	send.write_all(b"hello").await.unwrap();
+	send.write_all(&b"hello"[..]).await.unwrap();
 	let unpolled = send.stopped();
 	let polled = tokio::spawn(send.stopped());
 	tokio::task::yield_now().await;
 	assert!(!polled.is_finished());
-	send.reset(7u32.into()).unwrap();
+	send.reset(7u32.into());
 	let polled = timeout(Duration::from_secs(10), polled).await;
 	assert_eq!(polled.expect("polled never resolved").unwrap(), Ok(None));
 	let unpolled = timeout(Duration::from_secs(10), unpolled).await;
@@ -1720,37 +1849,39 @@ async fn dropped_stream_resolves_stopped() {
 	let endpoint = endpoint();
 	let (conn, _server) = connect_self(&endpoint).await;
 	let mut send = conn.open_uni(Default::default()).await.unwrap();
-	send.write_all(b"truncated").await.unwrap();
+	send.write_all(&b"truncated"[..]).await.unwrap();
+	let id = send.id();
 	let stopped = send.stopped();
 	drop(send);
+	assert!(!conn.send_released(id), "the stopped future keeps the stream's end");
 	let stopped = timeout(Duration::from_secs(10), stopped).await;
 	assert_eq!(stopped, Ok(Ok(None)));
-	assert_eq!(conn.stopped_waiters(), 0);
+	assert!(conn.send_released(id), "the last stopped future releases the stream");
 }
 
-/// A reset releases the stream's `stopped` waiters, even one dropped while pending
+/// A `stopped` future dropped while pending leaves the stream to release itself
 #[tokio::test]
 async fn stream_reset_releases_stopped() {
 	let _guard = subscribe();
 	let endpoint = endpoint();
 	let (conn, _server) = connect_self(&endpoint).await;
 	let mut send = conn.open_uni(Default::default()).await.unwrap();
-	send.write_all(b"hello").await.unwrap();
+	send.write_all(&b"hello"[..]).await.unwrap();
+	let id = send.id();
 	{
 		let mut stopped = pin!(send.stopped());
 		let poll = std::future::poll_fn(|cx| Poll::Ready(stopped.as_mut().poll(cx))).await;
 		assert!(poll.is_pending());
 	}
-	assert_eq!(conn.stopped_waiters(), 1);
-	send.reset(7u32.into()).unwrap();
-	assert_eq!(conn.stopped_waiters(), 0);
-	// Answered at once, without registering a waiter for a stream that will never report
-	drop(send.stopped());
-	assert_eq!(conn.stopped_waiters(), 0);
+	assert!(!conn.send_released(id));
+	send.reset(7u32.into());
+	assert!(conn.send_released(id));
 }
 
+/// A blocked read wakes when the connection closes, and one dropped with its stream leaves no
+/// waiter behind
 #[tokio::test]
-async fn stream_drop_removes_blocked_reader() {
+async fn dropped_read_leaves_no_waiter() {
 	let _guard = subscribe();
 
 	for drop_stream in [false, true] {
@@ -1769,23 +1900,20 @@ async fn stream_drop_removes_blocked_reader() {
 
 			let (waker, wake_counter) = new_count_waker();
 			let mut cx = Context::from_waker(&waker);
-			// do a blocking read which will add the stream in conn.blocked_readers
-			{
-				let mut buf = [0u8; 64];
-				let read_fut = stream.read(&mut buf);
-				tokio::pin!(read_fut);
-				assert!(matches!(read_fut.as_mut().poll(&mut cx), Poll::Pending));
-			}
+			// A blocking read registers its waiter with moq-quic.
+			let mut buf = [0u8; 64];
+			let mut buf = &mut buf[..];
+			let mut read_fut = Box::pin(stream.read(&mut buf));
+			assert!(matches!(read_fut.as_mut().poll(&mut cx), Poll::Pending));
 
 			if !drop_stream {
 				assert_eq!(wake_counter.wakes(), 0);
-				// We have a blocked reader, closing the connection should wake it. We use this as
-				// a proxy to assert that the stream is in conn.blocked_readers.
+				// Closing the connection wakes the blocked reader.
 				conn.close(0u32.into(), "done");
 				assert_eq!(wake_counter.wakes(), 1);
 			} else {
-				// dropping the stream should remove it from conn.blocked_readers, so we don't
-				// expect any wakeups
+				// The dropped read took its waiter with it, so nothing is left to wake.
+				drop(read_fut);
 				drop(stream);
 				assert_eq!(wake_counter.wakes(), 0, "no wakeups should have occurred");
 				conn.close(0u32.into(), "done");
@@ -1796,7 +1924,7 @@ async fn stream_drop_removes_blocked_reader() {
 		let conn = client.dial(server_address, "localhost").unwrap().await.unwrap();
 		let mut stream = conn.open_uni(Default::default()).await.unwrap();
 		// need to send some data to actually start the stream
-		stream.write_all(b"hello").await.unwrap();
+		stream.write_all(&b"hello"[..]).await.unwrap();
 
 		server_task.await.unwrap();
 	}
@@ -1830,12 +1958,12 @@ async fn recv_stream_cancel_stop_drop() {
 				assert!(fut.poll(&mut cx).is_pending());
 			}
 			recv_dropped.set(()).unwrap();
-			recv.stop(0u32.into()).unwrap();
+			recv.stop(0u32.into());
 		},
 		async {
 			let conn = client.dial(server_addr, "localhost").unwrap().await.unwrap();
 			let mut send = conn.open_uni(Default::default()).await.unwrap();
-			_ = send.write_all(b"hello").await;
+			_ = send.write_all(&b"hello"[..]).await;
 			// Don't drop (finish) the send stream until the read has been
 			// cancelled by the server, ensuring that read_to_end can't complete
 			// immediately.
@@ -1919,8 +2047,8 @@ async fn leases_spend_the_connection_window() {
 	.unwrap();
 	let mut send = client.open_uni(Default::default()).await.unwrap();
 	let writer = tokio::spawn(async move {
-		send.write_all(&[7; WINDOW + 500]).await.unwrap();
-		send.finish().unwrap();
+		send.write_all(&[7; WINDOW + 500][..]).await.unwrap();
+		send.finish();
 	});
 
 	let mut recv = server.accept_uni().await.unwrap();
@@ -1968,10 +2096,11 @@ async fn stuck_window_evicts_the_lower_priority() {
 		let id = send.id();
 		let writer = tokio::spawn(async move {
 			// Keep the low stream open: an acknowledged FIN wins over a later STOP_SENDING.
-			if send.write_all(&[7; WINDOW]).await.is_ok() && id != low_id {
-				send.finish().unwrap();
+			if send.write_all(&[7; WINDOW][..]).await.is_ok() && id != low_id {
+				send.finish().stopped().await.unwrap()
+			} else {
+				send.stopped().await.unwrap()
 			}
-			send.stopped().await.unwrap()
 		});
 		(id, writer)
 	});
@@ -1992,7 +2121,9 @@ async fn stuck_window_evicts_the_lower_priority() {
 			len
 		})),
 	);
-	assert_eq!(leased, (Err(ReadError::Evicted), Ok(WINDOW)));
+	assert_eq!(leased, (Err(recv::Error::Evicted), Ok(WINDOW)));
+	// A reader waiting for a reset instead of reading learns of it too.
+	assert_eq!(low.received_reset().await, Err(recv::Error::Evicted));
 
 	// The peer hears of the eviction once the stream is stopped. Drain the survivor to FIN
 	// instead of dropping unread data, which would stop that stream too.
@@ -2008,14 +2139,14 @@ async fn stuck_window_evicts_the_lower_priority() {
 }
 
 /// Wait until `recv` leases at least `want` bytes, returning how many it leased.
-async fn leased(recv: &mut RecvStream, want: usize) -> usize {
+async fn leased(recv: &mut recv::Stream, want: usize) -> usize {
 	poll_fn(|cx| recv.poll_lease(cx, want).map_ok(|lease| lease.remaining()))
 		.await
 		.unwrap()
 }
 
 /// Consume the first `n` leased bytes of `recv`.
-async fn consume(recv: &mut RecvStream, n: usize) {
+async fn consume(recv: &mut recv::Stream, n: usize) {
 	poll_fn(|cx| {
 		recv.poll_lease(cx, n).map_ok(|mut lease| {
 			lease.advance(n);
@@ -2024,6 +2155,55 @@ async fn consume(recv: &mut RecvStream, n: usize) {
 	})
 	.await
 	.unwrap()
+}
+
+/// A lease owns its bytes and holds no lock, so the connection keeps moving its other streams
+/// while one is held, and the lease may cross an await in a spawned task.
+#[tokio::test]
+async fn held_lease_does_not_stall_the_connection() {
+	fn assert_send<T: Send>() {}
+	assert_send::<recv::Lease<'static>>();
+
+	let _guard = subscribe();
+	let endpoint = endpoint();
+	let (client, server) = connect_self(&endpoint).await;
+	let mut held = client.open_uni(Default::default()).await.unwrap();
+	held.write_all(&b"held"[..]).await.unwrap();
+	let mut recv = server.accept_uni().await.unwrap();
+	let lease = recv.lease(4).await.unwrap();
+
+	let mut other = client.open_uni(Default::default()).await.unwrap();
+	other.write_all(&b"other"[..]).await.unwrap();
+	other.finish();
+	let mut other = server.accept_uni().await.unwrap();
+	let read = timeout(Duration::from_secs(10), other.read_to_end(64)).await;
+	assert_eq!(read.unwrap().unwrap(), b"other");
+
+	assert_eq!(lease.chunk(), b"held");
+	lease.release();
+}
+
+/// Once `received_reset` reports a reset, moq-quic has freed the stream, so later reads and
+/// leases fail with the same reset instead of finding no stream.
+#[tokio::test]
+async fn reads_after_a_received_reset_fail_with_it() {
+	let _guard = subscribe();
+	let endpoint = endpoint();
+	let (client, server) = connect_self(&endpoint).await;
+	let mut send = client.open_uni(Default::default()).await.unwrap();
+	send.write_all(&b"x"[..]).await.unwrap();
+	let mut recv = server.accept_uni().await.unwrap();
+	send.reset(VarInt::from_u32(7));
+
+	let reset = timeout(Duration::from_secs(10), recv.received_reset()).await.unwrap();
+	assert_eq!(reset.unwrap(), Some(VarInt::from_u32(7)));
+	let lease = recv.lease(1).await.err();
+	assert!(matches!(lease, Some(recv::Error::Reset(code)) if code == VarInt::from_u32(7)));
+	let read = recv.read(&mut Vec::new()).await;
+	assert!(
+		matches!(read, Err(recv::Error::Reset(code)) if code == VarInt::from_u32(7)),
+		"{read:?}"
+	);
 }
 
 /// A tiny datagram, and a tiny stream frame taken from a lease, each reach the application in
@@ -2041,7 +2221,7 @@ async fn tiny_frames_do_not_pin_receive_batches() {
 	assert!(owns_exactly(server.read_datagram().await.unwrap()));
 
 	let mut send = client.open_uni(Default::default()).await.unwrap();
-	send.write_all(b"y").await.unwrap();
+	send.write_all(&b"y"[..]).await.unwrap();
 	let mut recv = server.accept_uni().await.unwrap();
 	let taken = poll_fn(|cx| {
 		recv.poll_lease(cx, 1).map_ok(|mut lease| {
@@ -2187,8 +2367,8 @@ async fn unreachable_sends_are_loss_once_established() {
 
 	outage.active.store(true, Ordering::SeqCst);
 	let mut send = client_conn.open_uni(Default::default()).await.unwrap();
-	send.write_all(b"hello").await.unwrap();
-	send.finish().unwrap();
+	send.write_all(&b"hello"[..]).await.unwrap();
+	send.finish();
 	outage.dropped.notified().await;
 	outage.active.store(false, Ordering::SeqCst);
 
@@ -2297,9 +2477,186 @@ async fn close_during_handshake_does_not_wait_for_silent_peer() {
 	// Let the driver send the Initial.
 	tokio::task::yield_now().await;
 
-	let start = tokio::time::Instant::now();
+	let start = kio::clock::now();
 	client.close(0u32.into(), "closing").await;
 	let elapsed = start.elapsed();
 	assert!(connect.await.is_err());
 	assert_eq!(elapsed, Duration::ZERO, "waited {elapsed:?}");
+}
+
+/// A socket whose output can be held independently of QUIC's flow control.
+#[cfg(feature = "sim")]
+#[derive(Debug)]
+struct ControlledSocket {
+	inner: super::sim::Socket,
+	output: Arc<Mutex<ControlledOutput>>,
+}
+
+#[cfg(feature = "sim")]
+#[derive(Debug, Default)]
+struct ControlledOutput {
+	blocked: bool,
+	attempts: usize,
+	writable: Option<Waker>,
+	parked: kio::WaiterList,
+}
+
+#[cfg(feature = "sim")]
+impl AsyncUdpSocket for ControlledSocket {
+	fn poll_recv(
+		&self,
+		cx: &mut Context<'_>,
+		bufs: &mut [IoSliceMut<'_>],
+		meta: &mut [RecvMeta],
+	) -> Poll<io::Result<usize>> {
+		// Once output stalls, suppress further ingress too, so the peer's retransmits cannot
+		// accidentally drive the close timer for us.
+		if self.output.lock().unwrap().writable.is_some() {
+			return Poll::Pending;
+		}
+		self.inner.poll_recv(cx, bufs, meta)
+	}
+
+	fn try_send(&self, transmit: &moq_sock::udp::Transmit<'_>) -> io::Result<()> {
+		if self.output.lock().unwrap().blocked {
+			return Err(io::ErrorKind::WouldBlock.into());
+		}
+		self.inner.try_send(transmit)
+	}
+
+	fn poll_writable(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+		let mut output = self.output.lock().unwrap();
+		if !output.blocked {
+			return Poll::Ready(Ok(()));
+		}
+		output.attempts += 1;
+		output.writable = Some(cx.waker().clone());
+		output.parked.wake();
+		Poll::Pending
+	}
+
+	fn local_addr(&self) -> io::Result<SocketAddr> {
+		self.inner.local_addr()
+	}
+}
+
+/// Output resumes on release, and closing never depends on that release.
+#[cfg(feature = "sim")]
+#[test]
+fn a_close_behind_a_blocked_socket_is_bounded() {
+	for release in [false, true] {
+		kio::clock::sim::run(async {
+			let network = super::sim::Network::new(1);
+			let client_addr = SocketAddr::from(([10, 0, 0, 1], 4433));
+			let server_addr = SocketAddr::from(([10, 0, 0, 2], 443));
+			let factory = EndpointFactory::new();
+			let mut transport = transport::Config::default();
+			transport.idle_timeout = None;
+			let mut roots = RootCertStore::empty();
+			roots.add(factory.cert.cert.der().clone()).unwrap();
+			let mut config = client::Config::with_root_certificates(Arc::new(roots)).unwrap();
+			config.transport = transport.clone();
+			let output = Arc::new(Mutex::new(ControlledOutput::default()));
+			let socket: Box<dyn AsyncUdpSocket> = Box::new(ControlledSocket {
+				inner: network.bind(server_addr),
+				output: output.clone(),
+			});
+			let client = Endpoint::new(endpoint::Config::default(), network.bind(client_addr)).unwrap();
+			let server = Endpoint::new(
+				endpoint::Config::default().with_server(factory.server_config(transport)),
+				socket,
+			)
+			.unwrap();
+			let (conn, peer) = tokio::try_join!(client.connect(&config, server_addr, "localhost").unwrap(), async {
+				server.accept().await.unwrap().accept().unwrap().await
+			})
+			.unwrap();
+
+			// Settle the server's handshake flight and FIN before holding an ACK-only packet.
+			let warmup = peer.open_uni(Default::default()).await.unwrap().finish();
+			assert_eq!(warmup.await, Ok(None));
+			// Retire handshake keys on the simulated clock before blocking its next send.
+			sleep(Duration::from_secs(1)).await;
+
+			output.lock().unwrap().blocked = true;
+			let mut stream = conn.open_uni(Default::default()).await.unwrap();
+			stream.write_all(&b"held"[..]).await.unwrap();
+			let finished = stream.finish();
+			kio::wait(|waiter| {
+				let mut output = output.lock().unwrap();
+				if output.writable.is_some() {
+					return Poll::Ready(());
+				}
+				waiter.register(&mut output.parked);
+				Poll::Pending
+			})
+			.await;
+
+			// Consume any transmit registration left from before the socket blocked. The driver
+			// must park again without polling transmission, which would consume a packet.
+			let attempts = output.lock().unwrap().attempts;
+			peer.send_datagram(Bytes::from_static(b"queued"), Default::default())
+				.unwrap();
+			kio::wait(|waiter| {
+				let mut output = output.lock().unwrap();
+				if output.attempts > attempts {
+					return Poll::Ready(());
+				}
+				waiter.register(&mut output.parked);
+				Poll::Pending
+			})
+			.await;
+
+			if release {
+				let waker = {
+					let mut output = output.lock().unwrap();
+					output.blocked = false;
+					output.writable.take().unwrap()
+				};
+				waker.wake();
+				let mut received = peer.accept_uni().await.unwrap();
+				assert_eq!(received.read_to_end(4).await.unwrap(), b"held");
+				assert_eq!(finished.await, Ok(None));
+			}
+
+			peer.close(0u32.into(), "closed while blocked");
+			// With zero path latency, three PTOs take about 78 ms. Closing must use that
+			// deadline rather than the unrelated timer left from the handshake.
+			timeout(Duration::from_secs(1), async {
+				server.wait_all_draining().await;
+				server.wait_idle().await;
+			})
+			.await
+			.expect("socket backpressure held the closing period open");
+			if !release {
+				assert!(output.lock().unwrap().blocked);
+			}
+		});
+	}
+}
+
+/// A finished handle keeps the terminal outcome when driven as a future or a caller-owned poll.
+#[tokio::test]
+async fn finished_waits_keep_the_terminal_outcome() {
+	for stopped in [false, true] {
+		let endpoint = endpoint();
+		let (conn, peer) = connect_self(&endpoint).await;
+		let mut stream = conn.open_uni(Default::default()).await.unwrap();
+		stream.write_all(&b"data"[..]).await.unwrap();
+		let received = peer.accept_uni().await.unwrap();
+		let finished = stream.finish();
+		if stopped {
+			received.stop(42u32.into());
+		} else {
+			peer.close(5u32.into(), "connection lost before FIN was acknowledged");
+		}
+		let polled = kio::wait(|waiter| finished.poll_closed(waiter)).await;
+		let awaited = finished.await;
+		assert_eq!(polled, awaited);
+		if stopped {
+			assert_eq!(awaited, Ok(Some(42u32.into())));
+		} else {
+			assert!(matches!(awaited, Err(send::Error::Connection(_))));
+		}
+	}
 }

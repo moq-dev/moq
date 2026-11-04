@@ -12,7 +12,7 @@ export const Version = {
 	/// Also adds frame-precise subscribe/fetch bounds and a GROUP frame offset.
 	DRAFT_06: 0xff0dad06,
 	/// Work-in-progress lite-07, only negotiated when explicitly offered.
-	/// Adds the ANNOUNCE_REQUEST hidden opt-in, the publisher epoch, and the Auth Stream.
+	/// Adds the ANNOUNCE_REQUEST hidden opt-in, the stream instance, and the Auth Stream.
 	DRAFT_07: 0xff0dad07,
 } as const;
 
@@ -137,7 +137,7 @@ export function hasTracks(version: Version): boolean {
 	}
 }
 
-/** Whether either endpoint may open a Padding Stream (0x2). Added in lite-07. */
+/** Whether datagrams have a type and either endpoint may send padding streams or datagrams. */
 export function hasPadding(version: Version): boolean {
 	switch (version) {
 		case Version.DRAFT_01:
@@ -274,6 +274,23 @@ export function hasOrder(version: Version): boolean {
 	}
 }
 
+/** Whether SUBSCRIBE and SUBSCRIBE_UPDATE carry the optional `Subscriber Min Age`. Added in
+ * lite-07; an earlier subscription decodes it as not stated. */
+export function hasMinDelay(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-07+ behavior.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
 /** Whether SUBSCRIBE and SUBSCRIBE_UPDATE carry a list of ranges. Added in lite-07; an
  * earlier subscription carries one span in its group and frame bounds. */
 export function hasRanges(version: Version): boolean {
@@ -292,7 +309,7 @@ export function hasRanges(version: Version): boolean {
 }
 
 /** Whether FETCH carries the subscriber's optional max delay. Added in lite-07; an earlier
- * fetch is bounded by the publisher's retention alone. */
+ * fetch is bounded by the publisher's max age alone. */
 export function hasFetchMaxDelay(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-07+ behavior.
 	switch (version) {
@@ -369,22 +386,22 @@ export function hasHidden(version: Version): boolean {
 
 /**
  * Whether a served SUBSCRIBE completes only once the subscriber FINs or resets its half of the
- * Subscribe Stream. Added in lite-07, where a subscriber FINs once its tail accounting settles,
- * since a transport ACK does not say the application read the tail.
+ * Subscribe Stream. A subscriber FINs once its tail accounting settles, since a transport ACK
+ * does not say the application read the tail. SUBSCRIBE_END says which groups are owed, so that
+ * is prompt from lite-05; before it, only the subscriber's grace settles the tail.
  */
 export function waitsForSubscriberFin(version: Version): boolean {
-	// Explicitly list older versions so future versions keep the lite-07+ behavior.
-	switch (version) {
-		case Version.DRAFT_01:
-		case Version.DRAFT_02:
-		case Version.DRAFT_03:
-		case Version.DRAFT_04:
-		case Version.DRAFT_05:
-		case Version.DRAFT_06:
-			return false;
-		default:
-			return true;
-	}
+	return hasTrackStream(version);
+}
+
+/**
+ * Whether the Subscribe Stream stays open past SUBSCRIBE_FINISH (SUBSCRIBE_END before lite-07)
+ * and past a covered bounded subscription, so a SUBSCRIBE_UPDATE can still reach the track's
+ * history. The subscriber FINs once it wants nothing more, and the publisher FINs in reply.
+ * Added in lite-07; before it the publisher FINs once the track ends.
+ */
+export function keepsSubscribeOpen(version: Version): boolean {
+	return hasRanges(version);
 }
 
 /** Whether the announce stream has ANNOUNCE_RESTART: another publisher instance replacing an
@@ -405,9 +422,16 @@ export function hasAnnounceRestart(version: Version): boolean {
 	}
 }
 
-/** Whether ANNOUNCE_START, TRACK, SUBSCRIBE, and FETCH carry the publisher epoch. Added in lite-07.
- * Older versions carry nothing, so a received route has no epoch and is never resumed elsewhere. */
-export function hasEpoch(version: Version): boolean {
+/** Whether the announce stream has ANNOUNCE_TAKEOVER: a new advertisement continuing what a
+ * live one served beneath its path. Added in lite-07. Older versions send an ANNOUNCE_START. */
+export function hasAnnounceTakeover(version: Version): boolean {
+	return hasAnnounceRestart(version);
+}
+
+/** Whether announcements carry their instance and epoch, and TRACK, TRACKS, SUBSCRIBE, and FETCH
+ * the instance they pin. Added in lite-07. Older versions carry nothing, so the receiving session
+ * mints an instance for each announcement. */
+export function hasInstance(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-07+ behavior.
 	switch (version) {
 		case Version.DRAFT_01:
@@ -475,8 +499,8 @@ export function hasRefresh(version: Version): boolean {
 }
 
 /** Whether received frame timestamps are the publisher's media time. Lite-05/06 stamp an untimed
- * track's payloads with their send time, which a receiver cannot tell from it, so it drops every
- * timestamp received on them and the track arrives untimed. */
+ * track's payloads with their send time, which a receiver cannot tell from it, so it passes them
+ * through as the track's time without checking them for a rewind. */
 export function hasMediaTime(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-07+ behavior.
 	switch (version) {
@@ -552,6 +576,25 @@ export function hasLargest(version: Version): boolean {
  * application-specific code there.
  */
 export function hasDropCode(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-07+ behavior.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
+/**
+ * Whether SUBSCRIBE_END carries the error the track ended with, so an errored end keeps its
+ * history across a hop. Added in lite-07; earlier versions can only reset.
+ */
+export function hasEndError(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-07+ behavior.
 	switch (version) {
 		case Version.DRAFT_01:

@@ -13,8 +13,8 @@ use super::args::Args;
 use super::media::Media;
 use super::metrics::Metrics;
 use super::output::Output;
-use super::timeline::Presentation;
 use super::window::Event;
+use moq_mux::timeline::Producer as Presentation;
 
 /// The speaker and the run loop's events, plus `--metrics`' observer feed.
 #[derive(Clone)]
@@ -51,10 +51,10 @@ pub(crate) async fn run(
 	mut network: tokio::task::JoinSet<anyhow::Result<()>>,
 ) -> anyhow::Result<()> {
 	let (events, mut received) = mpsc::unbounded_channel();
-	let presentation = Arc::new(Mutex::new(Presentation::new(args.video_delay())));
+	let presentation = Presentation::new(args.video_delay());
 	let (mut metrics, observe) = match &args.metrics {
 		Some(path) => {
-			let (metrics, observe) = Metrics::create(path, presentation.clone())?;
+			let (metrics, observe) = Metrics::create(path, presentation.consume())?;
 			(Some(metrics), Some(observe))
 		}
 		None => (None, None),
@@ -133,7 +133,7 @@ mod tests {
 			metrics: None,
 			delay: super::super::args::Delay::Auto,
 			select: crate::subscribe::SelectArgs {
-				no_video: true,
+				video: Some(crate::subscribe::Mode::Off),
 				..Default::default()
 			},
 		};
@@ -156,7 +156,7 @@ mod tests {
 			metrics: Some(path.clone()),
 			delay: super::super::args::Delay::Auto,
 			select: crate::subscribe::SelectArgs {
-				no_video: true,
+				video: Some(crate::subscribe::Mode::Off),
 				..Default::default()
 			},
 		};
@@ -182,7 +182,7 @@ mod tests {
 			metrics: None,
 			delay: super::super::args::Delay::Auto,
 			select: crate::subscribe::SelectArgs {
-				no_video: true,
+				video: Some(crate::subscribe::Mode::Off),
 				..Default::default()
 			},
 		};

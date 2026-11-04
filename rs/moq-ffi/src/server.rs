@@ -147,8 +147,11 @@ async fn serve(
 			request = listener.accept() => request,
 		};
 		match request {
-			Some(request) => slot.send(request),
-			None => break,
+			Ok(request) => slot.send(request),
+			Err(err) => {
+				tracing::error!(%err, "server stopped accepting");
+				break;
+			}
 		}
 	}
 	// `Listener::close` releases the sockets before it returns; a drop only schedules that.
@@ -345,8 +348,6 @@ struct RequestState {
 pub enum MoqTransport {
 	/// Raw QUIC, negotiating a MoQ ALPN directly.
 	Quic,
-	/// An Iroh QUIC connection.
-	Iroh,
 	/// A WebSocket connection using qmux framing.
 	WebSocket,
 	/// A plaintext TCP connection using qmux framing.
@@ -363,7 +364,6 @@ impl TryFrom<moq_tokio::Transport> for MoqTransport {
 	fn try_from(value: moq_tokio::Transport) -> Result<Self, Self::Error> {
 		Ok(match value {
 			moq_tokio::Transport::Quic => Self::Quic,
-			moq_tokio::Transport::Iroh => Self::Iroh,
 			moq_tokio::Transport::WebSocket => Self::WebSocket,
 			moq_tokio::Transport::Tcp => Self::Tcp,
 			moq_tokio::Transport::Unix => Self::Unix,
@@ -381,7 +381,6 @@ mod transport_tests {
 	#[test]
 	fn converts_supported_transports() {
 		assert_eq!(MoqTransport::try_from(Transport::Quic).unwrap(), MoqTransport::Quic);
-		assert_eq!(MoqTransport::try_from(Transport::Iroh).unwrap(), MoqTransport::Iroh);
 		assert_eq!(
 			MoqTransport::try_from(Transport::WebSocket).unwrap(),
 			MoqTransport::WebSocket

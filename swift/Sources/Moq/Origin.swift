@@ -54,9 +54,14 @@ public final class BroadcastRequest: Sendable {
         get throws { try ffi.path() }
     }
 
-    /// Start an answer under a new epoch, hidden until published.
-    public func prepare(epoch: String) throws -> BroadcastPrepared {
-        BroadcastPrepared(try ffi.prepare(epoch: epoch))
+    /// Start answering as a new stream under a fresh instance, hidden until published.
+    public func prepare() throws -> BroadcastPrepared {
+        BroadcastPrepared(try ffi.prepare())
+    }
+
+    /// Serve held content under the prefix route's continuous sequence space, without an exact route.
+    public func serve(broadcast: BroadcastConsumer) throws {
+        try ffi.serve(broadcast: broadcast.ffi)
     }
 
     /// Reject the request with an application error code.
@@ -152,18 +157,19 @@ public final class OriginConsumer: Sendable {
         AnnounceConsumer(try ffi.announced(config: MoqAnnounceConfig(prefix: prefix, filter: filter, hidden: hidden)))
     }
 
-    /// Follow an exact path, resolving each publisher instance that serves it.
-    public func announcedBroadcast(path: String) throws -> AnnouncedBroadcast {
-        AnnouncedBroadcast(try ffi.announcedBroadcast(path: path))
+    /// Follow an exact path, resolving each stream that serves it.
+    /// Pass an `instance` to follow only that stream.
+    public func follow(path: String, instance: String? = nil) throws -> Following {
+        Following(try ffi.follow(path: path, instance: instance))
     }
 
-    /// Request a broadcast by path, resolving as soon as it can be served through the
-    /// best announced route covering it: an announced broadcast on this origin, a route
-    /// a session announced (served on demand by that session), or a dynamic handler on
-    /// the origin, or an error if nothing can serve it. Unlike `announcedBroadcast`,
-    /// this does not wait for a future announcement.
-    public func requestBroadcast(path: String) async throws -> BroadcastConsumer {
-        BroadcastConsumer(try await ffi.requestBroadcast(path: path))
+    /// Request a broadcast by path, resolving one stream as soon as it can be
+    /// served through the best announced route covering it: an announced broadcast on this
+    /// origin, a route a session announced (served on demand by that session), or a dynamic
+    /// handler on the origin, or an error if nothing can serve it. Unlike `follow`, this
+    /// does not wait for a future announcement. Pass an `instance` to refuse any other stream.
+    public func request(path: String, instance: String? = nil) async throws -> BroadcastConsumer {
+        BroadcastConsumer(try await ffi.request(path: path, instance: instance))
     }
 }
 
@@ -199,11 +205,11 @@ public final class AnnounceConsumer: AsyncSequence, Sendable {
     }
 }
 
-/// A pending wait for a specific broadcast path.
-public final class AnnouncedBroadcast: Sendable {
-    let ffi: MoqAnnouncedBroadcast
+/// Follows a specific broadcast path across the publisher instances that serve it.
+public final class Following: Sendable {
+    let ffi: MoqFollowing
 
-    init(_ ffi: MoqAnnouncedBroadcast) {
+    init(_ ffi: MoqFollowing) {
         self.ffi = ffi
     }
 

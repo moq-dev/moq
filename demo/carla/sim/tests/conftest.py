@@ -1,7 +1,6 @@
 """Lightweight stand-ins for runtime-only modules used during unit collection."""
 
 import sys
-import uuid
 from types import ModuleType, SimpleNamespace
 
 import pytest
@@ -44,18 +43,19 @@ class SnapshotProducer:
     def demand(self) -> object:
         return self.track.demand()
 
-    def update(self, value: object) -> None:
+    def update(self, value: object, timestamp: object) -> None:
         self.values.append(value)
 
 
 class SnapshotConsumer:
-    """Yields whatever the wrapped fake track yields, already parsed."""
+    """Wraps parsed fake values in timed records, like the runtime consumer."""
 
     def __init__(self, track: object) -> None:
         self._track = track
 
-    def __aiter__(self):
-        return aiter(self._track)
+    async def __aiter__(self):
+        async for value in self._track:
+            yield SimpleNamespace(value=value, at=None)
 
 
 moq = ModuleType("moq")
@@ -64,8 +64,7 @@ moq.AnnounceEventStart = AnnounceEventStart
 moq.AnnounceEventUpdate = AnnounceEventUpdate
 moq.AnnounceEventEnd = AnnounceEventEnd
 moq.AnnounceEventRestart = AnnounceEventRestart
-moq.AnnounceRoute = lambda **kwargs: SimpleNamespace(**kwargs)
-moq.mint_epoch = lambda: str(uuid.uuid4())
+moq.Timestamp = lambda value, scale: SimpleNamespace(value=value, scale=scale)
 moq.TrackInfo = lambda **kwargs: SimpleNamespace(**kwargs)
 
 moq_json = ModuleType("moq.json")
@@ -74,6 +73,19 @@ moq_json.SnapshotConsumer = SnapshotConsumer
 moq.json = moq_json
 
 moq_media = ModuleType("moq.media")
+
+
+class CatalogProducer:
+    """A broadcast clock fixed at zero, like the runtime's shared epoch."""
+
+    def __init__(self, broadcast: object) -> None:
+        pass
+
+    def now(self) -> SimpleNamespace:
+        return SimpleNamespace(value=0, scale=1_000)
+
+
+moq_media.CatalogProducer = CatalogProducer
 moq_media.VideoFormat = SimpleNamespace(AVC3="avc3")
 moq_media.VideoInit = lambda **kwargs: SimpleNamespace(**kwargs)
 moq_media.VideoHint = lambda **kwargs: SimpleNamespace(**kwargs)

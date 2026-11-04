@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 import importlib.util
+import json
+import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
+
 spec = importlib.util.spec_from_file_location("report", Path(__file__).with_name("report.py"))
 report = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(report)
@@ -23,6 +28,21 @@ class Trends(unittest.TestCase):
         failures = report.compare(row("2026-10-10", 111), [row("2026-09-10"), row("2026-10-09", 109)])
         self.assertEqual(len(failures), 1)
         self.assertIn("30 days", failures[0])
+
+    def test_large_step_fails_monthly_until_it_becomes_the_anchor(self):
+        history = [row("2026-09-10"), row("2026-10-09")]
+        for date, previous, monthly in [
+            ("2026-10-10", True, True),
+            ("2026-10-11", False, True),
+            ("2026-11-08", False, True),
+            ("2026-11-09", False, False),
+        ]:
+            current = row(date, 112)
+            failures = report.compare(current, history)
+            with self.subTest(date=date):
+                self.assertEqual(any("previous:" in failure for failure in failures), previous)
+                self.assertEqual(any("30 days:" in failure for failure in failures), monthly)
+            history = report.retain(current, history)
 
     def test_refuses_missing_and_invalid_artifacts(self):
         for invalid in [0, -1, None, True, float("nan")]:
@@ -78,6 +98,51 @@ class Trends(unittest.TestCase):
     def test_validates_first_report_date(self):
         with self.assertRaises(ValueError):
             report.compare(row("invalid"), [])
+
+    def test_refuses_invalid_revision_metadata(self):
+        for revision in [None, 123, "main", "a" * 39, "a" * 40 + ")"]:
+            current = row("2026-10-10") | {"revision": revision}
+            with self.subTest(revision=revision), self.assertRaisesRegex(ValueError, "commit SHA"):
+                report.compare(current, [])
+
+    def test_failed_growth_advances_daily_history_but_keeps_monthly_anchor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            history = root / "previous.json"
+            history.write_text(json.dumps([row("2026-09-10"), row("2026-10-09")]))
+
+            def run(current):
+                (root / "sizes.json").write_text(json.dumps(current))
+                result = subprocess.run(
+                    [sys.executable, str(Path(report.__file__)), str(root), "--history", str(history)],
+                    capture_output=True,
+                    text=True,
+                )
+                retained = json.loads((root / "history.json").read_text())
+                history.write_text(json.dumps(retained))
+                return result, retained
+
+            previous = row("2026-10-10", 106) | {"revision": "a" * 40}
+            failed, retained = run(previous)
+            self.assertEqual(failed.returncode, 1, failed.stderr)
+            self.assertEqual(retained[-1], previous)
+
+            # A stable next report compares against the failed point, not the last success.
+            current = row("2026-10-11", 106) | {"revision": "b" * 40}
+            passed, _ = run(current)
+            self.assertEqual(passed.returncode, 0, passed.stderr)
+            self.assertIn(report.source(current), passed.stdout)
+
+            # The thirty-day guard still catches drift despite the advanced daily baseline.
+            monthly, _ = run(row("2026-10-12", 111))
+            self.assertEqual(monthly.returncode, 1, monthly.stderr)
+            self.assertIn("30 days: 2026-09-10", monthly.stdout)
+            self.assertNotIn("(previous:", monthly.stdout)
+
+    def test_failure_names_the_measured_baseline_revision(self):
+        baseline = row("2026-10-09") | {"revision": "a" * 40}
+        failures = report.compare(row("2026-10-10", 106), [baseline])
+        self.assertIn(report.source(baseline), failures[0])
 
 
 unittest.main()

@@ -4,8 +4,8 @@
 //! The receiver runs on the raw driver so its connection window can be far smaller than
 //! the stack allows, which keeps the payloads small. Without recovery the high-priority
 //! frame never arrives: the window is spent on a low-priority frame that can never
-//! complete. The Rust arm dials a stock server. The JavaScript arm serves WebTransport
-//! to a Bun publisher; it needs Bun and runs in the interop workflow.
+//! complete. The Rust arm dials a stock server. The JavaScript arms serve WebTransport, and
+//! qmux over WebSocket, to a Bun publisher; they need Bun and run in the interop workflow.
 //!
 //! Some runs go through a bufferbloated path instead of loopback, so a sender held back by
 //! a slow link and a deep queue is shown not to look like a stuck window.
@@ -15,7 +15,10 @@
 use std::{process::Stdio, sync::Arc, time::Duration};
 
 use bytes::Bytes;
-use moq_tokio::moq_net::{self, Timestamp, frame, track::Subscription};
+use moq_tokio::moq_net::{
+	self, Timestamp, frame,
+	track::{Delay, Subscription},
+};
 use moq_tokio::quic::{driver, web};
 use tokio::io::AsyncWriteExt;
 
@@ -106,34 +109,17 @@ async fn setup_through(
 		),
 		None => None,
 	};
-	let dial = shaper.as_ref().map_or(server_addr, |shaper| shaper.addr());
+	let addr = shaper.as_ref().map_or(server_addr, |shaper| shaper.addr());
 	tokio::spawn(async move {
 		let request = server.accept().await.expect("accept");
 		let session = request.with_publisher(&publisher).ok().await.expect("session");
 		let _ = session.closed().await;
 	});
 
-	let mut tls = rustls::ClientConfig::builder()
-		.dangerous()
-		.with_custom_certificate_verifier(Arc::new(AnyCert))
-		.with_no_client_auth();
-	tls.alpn_protocols = vec![version.alpn().as_bytes().to_vec()];
-	let quic = driver::crypto::rustls::QuicClientConfig::try_from(tls).expect("quic config");
-	let mut client = driver::client::Config::new(Arc::new(quic));
-	client.transport = transport;
-
-	let endpoint =
-		driver::endpoint::Endpoint::new(Default::default(), std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
-			.expect("endpoint");
-	let conn = endpoint
-		.connect(&client, dial, "localhost")
-		.expect("connect")
-		.await
-		.expect("handshake");
+	let (endpoint, conn) = dial(version, addr, transport).await;
 
 	let subscriber = moq_tokio::origin::spawn();
-	let session =
-		moq_tokio::transport::Session::new(web::Session::raw(conn.clone()), moq_net::transport::Address::Setup);
+	let session = web::Session::raw(conn.clone());
 	let (client, driver) = moq_net::Client::new()
 		.with_versions(version.into())
 		.with_subscriber(subscriber.clone())
@@ -152,23 +138,48 @@ async fn setup_through(
 	}
 }
 
+/// Dial native QUIC with the selected version and transport settings.
+pub(crate) async fn dial(
+	version: moq_net::Version,
+	addr: std::net::SocketAddr,
+	transport: driver::transport::Config,
+) -> (driver::endpoint::Endpoint, driver::connection::Connection) {
+	let mut tls = rustls::ClientConfig::builder()
+		.dangerous()
+		.with_custom_certificate_verifier(Arc::new(AnyCert))
+		.with_no_client_auth();
+	tls.alpn_protocols = vec![version.alpn().as_bytes().to_vec()];
+	let mut client = driver::client::Config::new(Arc::new(tls));
+	client.transport = transport;
+
+	let endpoint =
+		driver::endpoint::Endpoint::new(Default::default(), std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+			.expect("endpoint");
+	let conn = endpoint
+		.connect(&client, addr, "localhost")
+		.expect("connect")
+		.await
+		.expect("handshake");
+
+	(endpoint, conn)
+}
+
 /// The shaper's seed: `MOQ_SHAPER_SEED` to replay a run, or a fresh one, printed.
-fn rand_seed() -> u64 {
+pub(crate) fn rand_seed() -> u64 {
 	let seed = match std::env::var("MOQ_SHAPER_SEED") {
 		Ok(seed) => seed.parse().expect("MOQ_SHAPER_SEED is not a u64"),
-		Err(_) => std::time::SystemTime::now()
-			.duration_since(std::time::UNIX_EPOCH)
-			.unwrap()
+		Err(_) => kio::clock::wall()
+			.saturating_duration_since(kio::clock::Wall::UNIX_EPOCH)
 			.as_nanos() as u64,
 	};
-	println!("MOQ_SHAPER_SEED={seed}");
+	eprintln!("MOQ_SHAPER_SEED={seed}");
 	seed
 }
 
 /// Broadcast `room`, once the peer announces it into `origin`.
 async fn room(origin: &moq_net::origin::Producer) -> moq_net::broadcast::Consumer {
 	let consumer = origin.consume();
-	tokio::time::timeout(TIMEOUT, consumer.follow("room", None).unwrap().available())
+	kio::clock::timeout(TIMEOUT, consumer.follow("room", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves")
@@ -176,7 +187,7 @@ async fn room(origin: &moq_net::origin::Producer) -> moq_net::broadcast::Consume
 
 /// Subscribe to track `name` of `remote` at `priority`.
 async fn subscribe(remote: &moq_net::broadcast::Consumer, name: &str, priority: i8) -> moq_net::track::Subscriber {
-	tokio::time::timeout(
+	kio::clock::timeout(
 		TIMEOUT,
 		remote
 			.track(name)
@@ -204,7 +215,7 @@ impl Setup {
 
 /// The next group, which must arrive in time.
 async fn next_group(sub: &mut moq_net::track::Subscriber) -> moq_net::group::Consumer {
-	tokio::time::timeout(TIMEOUT, sub.recv_group())
+	kio::clock::timeout(TIMEOUT, sub.recv_group())
 		.await
 		.expect("group timed out")
 		.expect("group")
@@ -214,7 +225,7 @@ async fn next_group(sub: &mut moq_net::track::Subscriber) -> moq_net::group::Con
 /// The next frame's payload, which must arrive in time.
 async fn next_frame(sub: &mut moq_net::track::Subscriber) -> Bytes {
 	let mut group = next_group(sub).await;
-	tokio::time::timeout(TIMEOUT, group.read_frame())
+	kio::clock::timeout(TIMEOUT, group.read_frame())
 		.await
 		.expect("frame timed out")
 		.expect("frame")
@@ -225,7 +236,7 @@ async fn next_frame(sub: &mut moq_net::track::Subscriber) -> Bytes {
 /// The next group's first frame, still arriving.
 async fn partial_frame(sub: &mut moq_net::track::Subscriber) -> moq_net::frame::Consumer {
 	let mut group = next_group(sub).await;
-	tokio::time::timeout(TIMEOUT, group.next_frame())
+	kio::clock::timeout(TIMEOUT, group.next_frame())
 		.await
 		.expect("frame header timed out")
 		.expect("frame")
@@ -236,7 +247,7 @@ async fn partial_frame(sub: &mut moq_net::track::Subscriber) -> moq_net::frame::
 async fn read_partial(frame: &mut moq_net::frame::Consumer, bytes: usize) {
 	let mut seen = 0;
 	while seen < bytes {
-		let chunk = tokio::time::timeout(TIMEOUT, frame.read_chunk())
+		let chunk = kio::clock::timeout(TIMEOUT, frame.read_chunk())
 			.await
 			.expect("partial payload timed out")
 			.expect("chunk")
@@ -280,10 +291,7 @@ async fn the_less_urgent_partial_frame_gives_way(version: &str, profile: Option<
 	group.finish().unwrap();
 	assert_eq!(next_frame(&mut low_sub).await, &b"after"[..], "{version}");
 	assert_eq!(setup.conn.stats().credit.evicted, 1, "{version}");
-	let session = moq_tokio::transport::Session::new(
-		web::Session::raw(setup.conn.clone()),
-		moq_net::transport::Address::Setup,
-	);
+	let session = web::Session::raw(setup.conn.clone());
 	assert_eq!(
 		moq_net::transport::Metrics::streams_evicted(&moq_net::transport::poll::Session::metrics(&session)),
 		Some(1),
@@ -375,7 +383,7 @@ async fn lite_frame_past_the_window_gives_way() {
 
 	let mut partial = partial_frame(&mut low_sub).await;
 	loop {
-		match tokio::time::timeout(TIMEOUT, partial.read_chunk())
+		match kio::clock::timeout(TIMEOUT, partial.read_chunk())
 			.await
 			.expect("the partial frame neither failed nor grew")
 		{
@@ -419,8 +427,7 @@ async fn reversed(version: &str) -> Reversed {
 		.with_single_cert(vec![cert.der().clone()], key.into())
 		.expect("tls");
 	tls.alpn_protocols = vec![alpn.clone()];
-	let quic = driver::crypto::rustls::QuicServerConfig::try_from(tls).expect("quic config");
-	let mut config = driver::server::Config::new(Arc::new(quic));
+	let mut config = driver::server::Config::new(Arc::new(tls));
 	config.transport = transport(WINDOW as u64);
 	let server = driver::endpoint::Endpoint::new(
 		driver::endpoint::Config::default().with_server(config),
@@ -434,13 +441,12 @@ async fn reversed(version: &str) -> Reversed {
 		.with_custom_certificate_verifier(Arc::new(AnyCert))
 		.with_no_client_auth();
 	tls.alpn_protocols = vec![alpn];
-	let quic = driver::crypto::rustls::QuicClientConfig::try_from(tls).expect("quic config");
 	let client = driver::endpoint::Endpoint::new(Default::default(), std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
 		.expect("client endpoint");
 	let (conn, accepted) = tokio::join!(
 		async {
 			client
-				.connect(&driver::client::Config::new(Arc::new(quic)), addr, "localhost")
+				.connect(&driver::client::Config::new(Arc::new(tls)), addr, "localhost")
 				.expect("connect")
 				.await
 				.expect("handshake")
@@ -461,9 +467,7 @@ async fn reversed(version: &str) -> Reversed {
 	let broadcast = publisher.create_broadcast("room").expect("broadcast");
 	broadcast.announce(Default::default()).expect("announce");
 	let subscriber = moq_tokio::origin::spawn();
-	let session = |conn: driver::connection::Connection| {
-		moq_tokio::transport::Session::new(web::Session::raw(conn), moq_net::transport::Address::Setup)
-	};
+	let session = |conn: driver::connection::Connection| web::Session::raw(conn);
 	// A moq-lite client's driver sends its half of the handshake, so it runs meanwhile.
 	let client_session = tokio::spawn({
 		let session = session(conn.clone());
@@ -522,14 +526,14 @@ impl Reversed {
 				.expect("open");
 				// The credit an eviction frees can reach the writer before the stop does, letting
 				// the whole write queue, so only the stop itself proves the stream was stopped.
-				let _ = send.write_all(&bytes).await;
+				let _ = send.write_all(&bytes[..]).await;
 				if let Ok(Some(_)) = send.stopped().await {
 					let _ = tx.send(());
 				}
 			});
 		}
 		for _ in 0..stopped {
-			tokio::time::timeout(TIMEOUT, rx.recv())
+			kio::clock::timeout(TIMEOUT, rx.recv())
 				.await
 				.expect("stop timed out")
 				.expect("a writer");
@@ -561,6 +565,114 @@ async fn unidentified_headers_give_way() {
 	group.write_frame(Timestamp::ZERO, vec![3u8; 4096]).unwrap();
 	group.finish().unwrap();
 	assert_eq!(next_frame(&mut sub).await.len(), 4096);
+}
+
+/// A moq-lite-07 varint below 2^28: leading one bits count the extra bytes.
+fn varint(bytes: &mut Vec<u8>, value: u64) {
+	let [_, b, c, d] = u32::try_from(value).unwrap().to_be_bytes();
+	match value {
+		0..0x80 => bytes.push(d),
+		0x80..0x4000 => bytes.extend_from_slice(&[0x80 | c, d]),
+		0x4000..0x20_0000 => bytes.extend_from_slice(&[0xc0 | b, c, d]),
+		0x20_0000..0x1000_0000 => bytes.extend_from_slice(&(0xe000_0000 | value as u32).to_be_bytes()),
+		_ => panic!("{value} needs a longer varint"),
+	}
+}
+
+/// A moq-lite-07 GROUP stream for subscription `subscribe`, carrying one frame of `size`
+/// bytes timed at zero.
+fn group_stream(subscribe: u64, sequence: u64, size: usize) -> Vec<u8> {
+	let mut header = Vec::new();
+	varint(&mut header, subscribe);
+	varint(&mut header, sequence);
+	// The first frame.
+	varint(&mut header, 0);
+
+	// GROUP, then its size-prefixed header.
+	let mut bytes = vec![0x00];
+	varint(&mut bytes, header.len() as u64);
+	bytes.extend_from_slice(&header);
+	// The zigzag timestamp delta, then the frame's size and payload.
+	varint(&mut bytes, 0);
+	varint(&mut bytes, size as u64);
+	bytes.resize(bytes.len() + size, 5);
+	bytes
+}
+
+/// GROUP streams that beat their subscription's TRACK_INFO wait unread at the lowest
+/// receive priority. When they fill the window, they give way before a more urgent track's
+/// partial frame, the TRACK_INFO still arrives, and the groups that are left are then read.
+#[tokio::test]
+async fn groups_waiting_for_track_info_give_way_first() {
+	let setup = reversed("moq-lite-07-wip").await;
+
+	// Subscription 0: an urgent track's frame, half sent and holding its credit.
+	let (urgent, mut urgent_sub) = setup.subscribe("urgent", 100).await;
+	let mut frame = urgent
+		.append_group()
+		.unwrap()
+		.create_frame(frame::Info {
+			size: (WINDOW / 2) as u64,
+			timestamp: Some(Timestamp::ZERO),
+		})
+		.unwrap();
+	frame.write(vec![1u8; WINDOW / 4]).unwrap();
+	let mut partial = partial_frame(&mut urgent_sub).await;
+	read_partial(&mut partial, WINDOW / 4).await;
+
+	// Subscription 1, sent alongside a TRACK whose TRACK_INFO the publisher holds back.
+	let mut requests = setup.broadcast.requests();
+	let every = Subscription::default()
+		.with_order(moq_net::track::Order::Ascending)
+		.with_range(0..)
+		.with_delay(Delay::default().with_max(Duration::from_secs(60)));
+	let waiting = tokio::spawn({
+		let remote = setup.remote.clone();
+		async move { remote.track("parked").unwrap().subscribe(every).await }
+	});
+	let request = kio::clock::timeout(TIMEOUT, requests.requested_track())
+		.await
+		.expect("TRACK timed out")
+		.expect("TRACK");
+
+	// Its groups, which together with the urgent frame overflow the window: one gives way.
+	let groups = (0..4).map(|sequence| group_stream(1, sequence, WINDOW / 5)).collect();
+	setup.raw(false, groups, 1).await;
+
+	// The urgent frame was kept, and completes as more of the waiting groups give way.
+	frame.write(vec![1u8; WINDOW / 4]).unwrap();
+	read_partial(&mut partial, WINDOW / 4).await;
+	assert!(
+		kio::clock::timeout(TIMEOUT, partial.read_chunk())
+			.await
+			.expect("the urgent frame never ended")
+			.expect("the urgent frame failed")
+			.is_none(),
+		"the urgent frame overran its size"
+	);
+
+	// The TRACK_INFO arrives, and the groups still waiting are read.
+	let _track = request.accept(timed());
+	let mut parked = kio::clock::timeout(TIMEOUT, waiting)
+		.await
+		.expect("subscribe timed out")
+		.expect("subscribe task")
+		.expect("subscribe");
+	loop {
+		let mut group = next_group(&mut parked).await;
+		match kio::clock::timeout(TIMEOUT, group.read_frame())
+			.await
+			.expect("a waiting group never delivered")
+		{
+			Ok(Some(frame)) => {
+				assert_eq!(frame.payload.len(), WINDOW / 5);
+				break;
+			}
+			// Stopped to make room for the urgent frame.
+			Err(moq_net::Error::Evicted) => continue,
+			other => panic!("group {} ended with {other:?}", group.sequence),
+		}
+	}
 }
 
 /// Control requests that never complete fill the window: one is stopped with its stream,
@@ -624,6 +736,51 @@ async fn ietf_largest_unit_completes_under_pressure() {
 	the_largest_unit_completes_under_pressure("moq-transport-18").await;
 }
 
+/// Drive the Bun sender through its commands against a subscriber of `origin` whose
+/// connection window is `window`: a low-priority frame twice the window gives way to a
+/// high-priority one, and the low track then keeps delivering. Waits for the sender to exit.
+async fn javascript_exhausts(
+	version: moq_net::Version,
+	window: usize,
+	origin: &moq_net::origin::Producer,
+	mut child: tokio::process::Child,
+) {
+	let mut commands = child.stdin.take().unwrap();
+	let remote = room(origin).await;
+	let mut low = subscribe(&remote, "low", 1).await;
+	let mut high = subscribe(&remote, "high", 100).await;
+
+	// Wait until three quarters of the window holds a frame that can never complete.
+	commands.write_all(&b"low\n"[..]).await.unwrap();
+	let mut partial = partial_frame(&mut low).await;
+	read_partial(&mut partial, window * 3 / 4).await;
+
+	// Half the window, which only fits once the low frame lets go.
+	commands.write_all(&b"high\n"[..]).await.unwrap();
+	assert_eq!(next_frame(&mut high).await, vec![2u8; window / 2], "{version}");
+	loop {
+		let chunk = kio::clock::timeout(TIMEOUT, partial.read_chunk())
+			.await
+			.expect("stop timed out");
+		match chunk {
+			Ok(Some(_)) => {}
+			Ok(None) => panic!("{version}: a frame larger than the window completed"),
+			Err(_) => break,
+		}
+	}
+
+	// The session survives, and the low track keeps delivering what fits.
+	commands.write_all(&b"after\n"[..]).await.unwrap();
+	assert_eq!(next_frame(&mut low).await, &b"after"[..], "{version}");
+
+	drop(commands);
+	let status = kio::clock::timeout(TIMEOUT, child.wait())
+		.await
+		.expect("sender exit timed out")
+		.expect("sender");
+	assert!(status.success(), "{version}: JS sender failed");
+}
+
 /// A Bun publisher (`test/receive-credit/sender.ts`) dials a WebTransport server whose
 /// connection window is [`WINDOW`] and sends a low-priority frame twice that size. The
 /// receiver stops it, a high-priority frame completes, and a later low group arrives.
@@ -643,8 +800,7 @@ async fn javascript_partial_frame_gives_way(version: &str) {
 		.with_single_cert(vec![cert.der().clone()], key.into())
 		.expect("tls");
 	tls.alpn_protocols = vec![web::ALPN.as_bytes().to_vec()];
-	let quic = driver::crypto::rustls::QuicServerConfig::try_from(tls).expect("quic config");
-	let mut config = driver::server::Config::new(Arc::new(quic));
+	let mut config = driver::server::Config::new(Arc::new(tls));
 	config.transport = transport(WINDOW as u64);
 	let endpoint = driver::endpoint::Endpoint::new(
 		driver::endpoint::Config::default().with_server(config),
@@ -652,10 +808,9 @@ async fn javascript_partial_frame_gives_way(version: &str) {
 	)
 	.expect("endpoint");
 	let port = endpoint.local_addr().port();
-	let mut server = web::Server::new(endpoint);
 
 	let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test/receive-credit/sender.ts");
-	let mut child = tokio::process::Command::new("bun")
+	let child = tokio::process::Command::new("bun")
 		.arg(script)
 		.arg(format!("https://127.0.0.1:{port}/"))
 		.arg(version.to_string())
@@ -667,12 +822,15 @@ async fn javascript_partial_frame_gives_way(version: &str) {
 		.kill_on_drop(true)
 		.spawn()
 		.expect("spawn bun");
-	let mut commands = child.stdin.take().unwrap();
 
-	let request = tokio::time::timeout(TIMEOUT, server.accept())
-		.await
-		.expect("connect timeout")
-		.expect("request");
+	let request = kio::clock::timeout(TIMEOUT, async {
+		let incoming = endpoint.accept().await.expect("incoming connection");
+		let connection = incoming.accept().expect("accept QUIC").await.expect("QUIC handshake");
+		web::Request::accept(connection).await
+	})
+	.await
+	.expect("connect timeout")
+	.expect("request");
 	let session = request
 		.respond(web::proto::ConnectResponse::OK.with_protocol(version.alpn()))
 		.await
@@ -681,47 +839,70 @@ async fn javascript_partial_frame_gives_way(version: &str) {
 	let (session, driver) = moq_net::Server::new()
 		.with_versions(version.into())
 		.with_subscriber(origin.clone())
-		.accept(
-			moq_net::time::Instant::now(),
-			moq_tokio::transport::Session::new(session, moq_net::transport::Address::Uri),
-		)
+		.accept(moq_net::time::Instant::now(), session)
 		.await
 		.expect("server handshake");
 	tokio::spawn(moq_net::time::run(driver));
-	let remote = room(&origin).await;
-	let mut low = subscribe(&remote, "low", 1).await;
-	let mut high = subscribe(&remote, "high", 100).await;
-
-	// Wait until three quarters of the window holds a frame that can never complete.
-	commands.write_all(b"low\n").await.unwrap();
-	let mut partial = partial_frame(&mut low).await;
-	read_partial(&mut partial, WINDOW * 3 / 4).await;
-
-	// Half the window, which only fits once the low frame lets go.
-	commands.write_all(b"high\n").await.unwrap();
-	assert_eq!(next_frame(&mut high).await, vec![2u8; WINDOW / 2], "{version}");
-	loop {
-		let chunk = tokio::time::timeout(TIMEOUT, partial.read_chunk())
-			.await
-			.expect("stop timed out");
-		match chunk {
-			Ok(Some(_)) => {}
-			Ok(None) => panic!("{version}: a frame larger than the window completed"),
-			Err(_) => break,
-		}
-	}
-
-	// The session survives, and the low track keeps delivering what fits.
-	commands.write_all(b"after\n").await.unwrap();
-	assert_eq!(next_frame(&mut low).await, &b"after"[..], "{version}");
-
-	drop(commands);
-	let status = tokio::time::timeout(TIMEOUT, child.wait())
-		.await
-		.expect("sender exit timed out")
-		.expect("sender");
-	assert!(status.success(), "{version}: JS sender failed");
+	javascript_exhausts(version, WINDOW, &origin, child).await;
 	drop(session);
+}
+
+/// The same exhaustion as [`javascript_partial_frame_gives_way`], over qmux on a WebSocket,
+/// whose sessions lease receive credit like native QUIC. The window is moq-net's floor, the
+/// smallest a qmux session takes.
+async fn javascript_partial_frame_gives_way_websocket(version: &str) {
+	const WINDOW: usize = moq_net::transport::MIN_RECEIVE_WINDOW as usize;
+	let version: moq_net::Version = version.parse().expect("version");
+
+	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+	let port = listener.local_addr().expect("addr").port();
+	let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test/receive-credit/sender.ts");
+	let child = tokio::process::Command::new("bun")
+		.arg(script)
+		.arg(format!("http://127.0.0.1:{port}/"))
+		.arg(version.to_string())
+		.arg("websocket")
+		.arg(WINDOW.to_string())
+		.stdin(Stdio::piped())
+		.stdout(Stdio::null())
+		.stderr(Stdio::inherit())
+		.kill_on_drop(true)
+		.spawn()
+		.expect("spawn bun");
+
+	let (socket, _) = kio::clock::timeout(TIMEOUT, listener.accept())
+		.await
+		.expect("connect timeout")
+		.expect("accept");
+	socket.set_nodelay(true).expect("nodelay");
+	let mut session_config = qmux::Config::default();
+	session_config.limits.receive_window = std::num::NonZeroU64::new(WINDOW as u64);
+	let (session, driver) = qmux::ws::Server::new()
+		.with_protocol(version.alpn(), &[])
+		.require_protocol()
+		.with_session_config(session_config)
+		.accept(socket)
+		.await
+		.expect("websocket handshake");
+	tokio::spawn(driver);
+	let origin = moq_tokio::origin::spawn();
+	let (session, driver) = moq_net::Server::new()
+		.with_versions(version.into())
+		.with_subscriber(origin.clone())
+		.accept(moq_net::time::Instant::now(), session)
+		.await
+		.expect("server handshake");
+	tokio::spawn(moq_net::time::run(driver));
+	javascript_exhausts(version, WINDOW, &origin, child).await;
+	drop(session);
+}
+
+#[tokio::test]
+#[ignore = "requires Bun; run by just test receive-credit in the interop workflow"]
+async fn javascript_partial_frame_gives_way_qmux() {
+	for version in ["moq-lite-06", "moq-transport-18"] {
+		javascript_partial_frame_gives_way_websocket(version).await;
+	}
 }
 
 #[tokio::test]
@@ -733,7 +914,7 @@ async fn javascript_partial_frame_gives_way_tokio() {
 }
 
 /// moq-tokio's default connection receive window.
-const STOCK_WINDOW: u64 = 128 << 20;
+const STOCK_WINDOW: u64 = moq_tokio::quic::DEFAULT_RECEIVE_WINDOW;
 /// Bytes each loopback benchmark run delivers.
 const BENCH_BYTES: usize = 256 << 20;
 /// The benchmark's bottleneck, and the bytes a run delivers through it.
@@ -785,8 +966,8 @@ async fn measure(cell: Cell, profile: Option<moq_shaper::Profile>, bytes: usize)
 		let name = index.to_string();
 		let track = setup.broadcast.create_track(name.as_str(), timed()).unwrap();
 		// Groups in flight fall behind the live edge, so a zero budget would skip them.
-		let subscription = Subscription::default().with_max_delay(TIMEOUT);
-		let sub = tokio::time::timeout(TIMEOUT, setup.remote.track(&name).unwrap().subscribe(subscription))
+		let subscription = Subscription::default().with_delay(Delay::default().with_max(TIMEOUT));
+		let sub = kio::clock::timeout(TIMEOUT, setup.remote.track(&name).unwrap().subscribe(subscription))
 			.await
 			.expect("subscribe timeout")
 			.expect("subscribe");
@@ -795,7 +976,7 @@ async fn measure(cell: Cell, profile: Option<moq_shaper::Profile>, bytes: usize)
 
 	let rounds = (bytes / cell.frame / cell.streams).max(1);
 	let payload = Bytes::from(vec![7u8; cell.frame]);
-	let start = std::time::Instant::now();
+	let start = kio::clock::now();
 	let tasks: Vec<_> = tracks
 		.into_iter()
 		.map(|(track, mut sub)| {
@@ -809,7 +990,7 @@ async fn measure(cell: Cell, profile: Option<moq_shaper::Profile>, bytes: usize)
 						for _ in 0..rounds {
 							inflight.acquire().await.unwrap().forget();
 							let mut group = track.append_group().unwrap();
-							sent.lock().unwrap().insert(group.sequence, std::time::Instant::now());
+							sent.lock().unwrap().insert(group.sequence, kio::clock::now());
 							group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
 							group.finish().unwrap();
 						}
@@ -819,7 +1000,7 @@ async fn measure(cell: Cell, profile: Option<moq_shaper::Profile>, bytes: usize)
 				let mut latency = Vec::with_capacity(rounds);
 				for _ in 0..rounds {
 					let mut group = next_group(&mut sub).await;
-					let frame = tokio::time::timeout(TIMEOUT, group.read_frame())
+					let frame = kio::clock::timeout(TIMEOUT, group.read_frame())
 						.await
 						.expect("frame timed out")
 						.expect("frame")
@@ -901,7 +1082,7 @@ async fn benchmark_receive_windows() {
 		("loopback", None, BENCH_BYTES),
 		("bufferbloat", Some(bufferbloat(BENCH_BLOAT.0)), BENCH_BLOAT.1),
 	];
-	println!("path,axis,streams,frame,window_mib,stream_window,peak_mib,mib_per_s,p50_ms,p99_ms,overflowed");
+	println!("path,axis,streams,frame,window_mib,stream_window,peak_bytes,mib_per_s,p50_ms,p99_ms,overflowed_packets");
 	for (cell, (path, profile, bytes)) in cells.flat_map(|cell| paths.clone().map(|path| (cell, path))) {
 		let mut runs = Vec::with_capacity(RUNS);
 		for _ in 0..RUNS {
@@ -922,13 +1103,12 @@ async fn benchmark_receive_windows() {
 		let throughput = median(runs.iter().map(|run| run.throughput).collect());
 		let overflowed = median(runs.iter().map(|run| run.overflowed as f64).collect());
 		println!(
-			"{path},{},{},{},{},{},{:.1},{:.0},{:.2},{:.2},{overflowed}",
+			"{path},{},{},{},{},{},{peak:.0},{:.0},{:.2},{:.2},{overflowed}",
 			cell.axis,
 			cell.streams,
 			cell.frame,
 			cell.window >> 20,
 			if cell.follow { "follow" } else { "finite" },
-			peak / (1 << 20) as f64,
 			throughput / (1 << 20) as f64,
 			percentile(50),
 			percentile(99),
@@ -938,7 +1118,7 @@ async fn benchmark_receive_windows() {
 
 /// Accepts any server certificate: the test dials its own self-signed server.
 #[derive(Debug)]
-struct AnyCert;
+pub(crate) struct AnyCert;
 
 impl rustls::client::danger::ServerCertVerifier for AnyCert {
 	fn verify_server_cert(

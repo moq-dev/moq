@@ -11,7 +11,7 @@
 use std::{
 	sync::{
 		Arc, Mutex,
-		atomic::{AtomicUsize, Ordering},
+		atomic::{AtomicBool, AtomicUsize, Ordering},
 	},
 	task::Poll,
 };
@@ -72,12 +72,14 @@ pub struct Log {
 	closed_at: Arc<Mutex<Option<(usize, usize)>>>,
 	bi_opens: Arc<AtomicUsize>,
 	pub request_attempts: Arc<AtomicUsize>,
-	priorities: Arc<Mutex<Vec<u8>>>,
+	priorities: Arc<Mutex<Vec<i64>>>,
 	/// Hands each send group its id.
 	group_ids: Arc<AtomicUsize>,
 	groups: Arc<Mutex<Vec<(usize, i64)>>>,
 	joins: Arc<Mutex<Vec<(usize, usize)>>>,
 	orders: Arc<Mutex<Vec<(usize, i64)>>>,
+	/// Set by [`Self::fail_writes`].
+	writes_fail: Arc<AtomicBool>,
 }
 
 /// One thing a send stream did, as recorded in [`Log::trail`].
@@ -106,6 +108,12 @@ impl Log {
 				code: closed.expect("closed"),
 				stream: None,
 			})
+	}
+
+	/// Fail every later write on every send stream, as a peer that stopped reading
+	/// them (STOP_SENDING) would.
+	pub fn fail_writes(&self) {
+		self.writes_fail.store(true, Ordering::Relaxed);
 	}
 
 	/// What every send stream did, in call order, tagged with the stream's id (its
@@ -137,7 +145,7 @@ impl Log {
 	/// Every value handed to the transport's `set_priority`, in call order. These are
 	/// trait-contract send orders (higher = transmitted first), recorded so tests can
 	/// verify priority conversions at their protocol boundaries.
-	pub fn priorities(&self) -> Vec<u8> {
+	pub fn priorities(&self) -> Vec<i64> {
 		self.priorities.lock().unwrap().clone()
 	}
 
@@ -302,6 +310,12 @@ impl poll::SendStream for SinkSend {
 	type Group = SinkGroup;
 
 	fn poll_write(&mut self, waiter: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
+		if self.log.writes_fail.load(Ordering::Relaxed) {
+			return Poll::Ready(Err(SinkError {
+				stream: Some(0),
+				..Default::default()
+			}));
+		}
 		if self.prefix == 0
 			&& let Some(gate) = &self.gate
 		{
@@ -342,7 +356,10 @@ impl poll::SendStream for SinkSend {
 			self.log.orders.lock().unwrap().push((self.id, order));
 			return;
 		}
-		let order = u8::try_from(order).expect("moq-net sends u8 send orders outside a group");
+		assert!(
+			(0..=crate::coding::TRACK_INFO_SEND_ORDER).contains(&order),
+			"moq-net sends u8 send orders outside a group, and TRACK_INFO just above them"
+		);
 		self.log.priorities.lock().unwrap().push(order);
 	}
 
@@ -613,6 +630,8 @@ pub struct SinkSession {
 	stats: Arc<Mutex<SinkStats>>,
 	/// Set by [`Self::with_probe`].
 	probe: Option<crate::transport::Probe>,
+	/// Set by [`Self::with_receive_window`].
+	receive_window: Option<crate::transport::ReceiveWindow>,
 }
 
 impl SinkSession {
@@ -639,6 +658,12 @@ impl SinkSession {
 	/// Accept datagrams up to `max_size` bytes, recording them in the log.
 	pub fn with_datagrams(mut self, max_size: usize) -> Self {
 		self.datagram_size = max_size;
+		self
+	}
+
+	/// Report `window` as the receive windows in force.
+	pub fn with_receive_window(mut self, window: crate::transport::ReceiveWindow) -> Self {
+		self.receive_window = Some(window);
 		self
 	}
 
@@ -827,6 +852,10 @@ impl poll::Session for SinkSession {
 	fn probe(&self) -> Option<crate::transport::Probe> {
 		self.probe.clone()
 	}
+
+	fn receive_window(&self) -> Option<crate::transport::ReceiveWindow> {
+		self.receive_window
+	}
 }
 
 /// Connection statistics a test can dictate. Every metric defaults to unknown,
@@ -870,6 +899,7 @@ pub type ScriptedRecv = poll::Buffered<Script>;
 
 /// The plain reads of a [`ScriptedRecv`].
 pub struct Script {
+	wake: Option<kio::Shared<()>>,
 	script: Arc<Mutex<Vec<u8>>>,
 	/// How the peer's send side ends once the script runs out; `None` parks.
 	close: Arc<Mutex<Option<Close>>>,
@@ -890,6 +920,9 @@ impl poll::Chunks for Script {
 	type Error = SinkError;
 
 	fn poll_read_chunk(&mut self, waiter: &kio::Waiter, max: usize) -> Poll<Result<Option<bytes::Bytes>, Self::Error>> {
+		if let Some(wake) = &self.wake {
+			let _ = wake.poll(waiter, |_| Poll::Pending);
+		}
 		let chunk: bytes::Bytes = {
 			let mut script = self.script.lock().unwrap();
 			// A real transport hands over what each packet carried, so a body that is all
@@ -926,6 +959,8 @@ impl poll::Chunks for Script {
 #[derive(Clone)]
 pub struct ScriptedSession {
 	pub log: Log,
+	/// Optional notifications for tests that drive per-stream readiness queues.
+	wake: Option<kio::Shared<()>>,
 	stats: SinkStats,
 	/// Shared with every stream, like `script`. See [`Self::close`].
 	close: Arc<Mutex<Option<Close>>>,
@@ -936,6 +971,8 @@ pub struct ScriptedSession {
 	/// Set by [`Self::gated_open`]: parks `poll_open_bi` until the gate opens, standing in
 	/// for a transport header blocked on send capacity.
 	open_gate: Option<kio::Consumer<bool>>,
+	/// Set by [`Self::with_open_uni_gate`].
+	uni_open_gate: Option<kio::Consumer<bool>>,
 	credit: kio::Producer<bool>,
 	/// Scripts the peer pushes at us on unidirectional streams, popped by `accept_uni`
 	/// in order. See [`Self::with_incoming_unis`].
@@ -945,9 +982,10 @@ pub struct ScriptedSession {
 	unacked_fin: bool,
 	/// Set by [`Self::with_unacked_uni_fins`]; shared, so every clone counts down one budget.
 	unacked_unis: Arc<AtomicUsize>,
-	datagram_size: usize,
 	/// Set by [`Self::with_groups`].
 	groups: bool,
+	/// Set by [`Self::with_send_window`].
+	send_window: Option<usize>,
 }
 
 impl ScriptedSession {
@@ -965,32 +1003,42 @@ impl ScriptedSession {
 		self
 	}
 
-	pub fn with_datagrams(mut self, max_size: usize) -> Self {
-		self.datagram_size = max_size;
-		self
-	}
-
 	pub fn new(script: Vec<u8>) -> Self {
 		Self {
 			log: Log::default(),
+			wake: None,
 			stats: SinkStats::default(),
 			close: Default::default(),
 			script: Arc::new(Mutex::new(script)),
 			queue: None,
 			open_gate: None,
+			uni_open_gate: None,
 			credit: kio::Producer::new(true),
 			incoming_unis: Arc::new(Mutex::new(std::collections::VecDeque::new())),
 			incoming_bidis: Arc::new(Mutex::new(std::collections::VecDeque::new())),
 			unacked_fin: false,
 			unacked_unis: Default::default(),
-			datagram_size: 0,
 			groups: false,
+			send_window: None,
 		}
+	}
+
+	/// Let each opened bidi stream send only its first `bytes`, then park its writes for good,
+	/// like a peer that never grants more send credit.
+	pub fn with_send_window(mut self, bytes: usize) -> Self {
+		self.send_window = Some(bytes);
+		self
 	}
 
 	/// Open send groups, as native QUIC does, recording them in the log.
 	pub fn with_groups(mut self) -> Self {
 		self.groups = true;
+		self
+	}
+
+	/// Hold unidirectional stream opens until `gate` grants stream credit.
+	pub fn with_open_uni_gate(mut self, gate: kio::Consumer<bool>) -> Self {
+		self.uni_open_gate = Some(gate);
 		self
 	}
 
@@ -1061,16 +1109,33 @@ impl ScriptedSession {
 		session
 	}
 
-	/// Append to the shared script: the peer sending more on a stream it already opened.
-	/// Nothing is woken, so the test re-polls the reader itself.
-	pub fn push(&self, bytes: &[u8]) {
-		self.script.lock().unwrap().extend_from_slice(bytes);
+	/// Wake readers when the script changes or the peer ends its send side.
+	pub fn with_read_wakes(mut self) -> Self {
+		self.wake = Some(kio::Shared::new(()));
+		self
 	}
 
-	/// Close the peer's send side once the script runs out. Nothing is woken, so the
-	/// test re-polls the reader itself.
+	/// Append to the shared script: the peer sending more on a stream it already opened.
+	/// Wakes readers only with [`Self::with_read_wakes`]; otherwise re-poll them manually.
+	pub fn push(&self, bytes: &[u8]) {
+		self.script.lock().unwrap().extend_from_slice(bytes);
+		if let Some(wake) = &self.wake {
+			*wake.lock() = ();
+		}
+	}
+
+	/// Close the peer's send side once the script runs out.
+	/// Wakes readers only with [`Self::with_read_wakes`]; otherwise re-poll them manually.
 	pub fn close(&self, close: Close) {
 		*self.close.lock().unwrap() = Some(close);
+		if let Some(wake) = &self.wake {
+			*wake.lock() = ();
+		}
+	}
+
+	/// Undo [`Self::close`], so streams opened from here park once their script runs out.
+	pub fn reopen(&self) {
+		*self.close.lock().unwrap() = None;
 	}
 
 	/// Answer each stream from `scripts`, but only once the gate opens: a peer that
@@ -1093,6 +1158,7 @@ impl poll::Session for ScriptedSession {
 			return self.log.poll_closed(waiter).map(Err);
 		};
 		Poll::Ready(Ok(poll::Buffered::new(Script {
+			wake: self.wake.clone(),
 			script: Arc::new(Mutex::new(script)),
 			close: self.close.clone(),
 			log: self.log.clone(),
@@ -1106,6 +1172,7 @@ impl poll::Session for ScriptedSession {
 		Poll::Ready(Ok((
 			SinkSend::new(self.log.clone()),
 			poll::Buffered::new(Script {
+				wake: self.wake.clone(),
 				script: Arc::new(Mutex::new(script)),
 				close: self.close.clone(),
 				log: self.log.clone(),
@@ -1141,11 +1208,20 @@ impl poll::Session for ScriptedSession {
 			Some(queue) => Arc::new(Mutex::new(queue.lock().unwrap().pop_front().unwrap_or_default())),
 			None => self.script.clone(),
 		};
-		let mut send = SinkSend::new(self.log.clone()).opened(options);
+		let mut send = match self.send_window {
+			// The gate's producer is gone, so the writes past the prefix park forever.
+			Some(window) => SinkSend {
+				prefix: window,
+				..SinkSend::gated(self.log.clone(), kio::Producer::new(false).consume())
+			},
+			None => SinkSend::new(self.log.clone()),
+		}
+		.opened(options);
 		send.unacked_fin = self.unacked_fin;
 		Poll::Ready(Ok((
 			send,
 			poll::Buffered::new(Script {
+				wake: self.wake.clone(),
 				script,
 				close: self.close.clone(),
 				log: self.log.clone(),
@@ -1170,9 +1246,15 @@ impl poll::Session for ScriptedSession {
 
 	fn poll_open_uni(
 		&self,
-		_waiter: &kio::Waiter,
+		waiter: &kio::Waiter,
 		options: poll::SendOptions<'_, SinkGroup>,
 	) -> Poll<Result<Self::SendStream, Self::Error>> {
+		if let Some(gate) = &self.uni_open_gate {
+			match gate.poll(waiter, |open| (**open).then_some(()).map_or(Poll::Pending, Poll::Ready)) {
+				Poll::Ready(Ok(())) => {}
+				Poll::Ready(Err(_)) | Poll::Pending => return Poll::Pending,
+			}
+		}
 		let mut send = SinkSend::new(self.log.clone());
 		send.unacked_fin = self
 			.unacked_unis
@@ -1199,7 +1281,7 @@ impl poll::Session for ScriptedSession {
 	}
 
 	fn max_datagram_size(&self) -> usize {
-		self.datagram_size
+		0
 	}
 
 	fn address(&self) -> crate::transport::Address {

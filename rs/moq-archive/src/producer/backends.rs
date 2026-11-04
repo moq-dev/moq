@@ -29,10 +29,16 @@ fn config() -> Config {
 }
 
 /// A source with `groups` one-second video groups, and the chat's groups as `(sequence, frames)`.
+/// Both are published before the recorder reads them, so neither sets a publisher max age.
 fn source(groups: u64, chat: &[(u64, &[&str])]) -> (broadcast::Producer, [track::Producer; 2]) {
 	let source = broadcast::Info::new().produce();
 	let video = source
-		.create_track(VIDEO, track::Info::default().with_timescale(Timescale::MILLI))
+		.create_track(
+			VIDEO,
+			track::Info::default()
+				.with_timescale(Timescale::MILLI)
+				.with_max_age(None),
+		)
 		.unwrap();
 	for sequence in 0..groups {
 		let mut group = video.create_group(group::Info { sequence }).unwrap();
@@ -42,7 +48,9 @@ fn source(groups: u64, chat: &[(u64, &[&str])]) -> (broadcast::Producer, [track:
 		}
 		group.finish().unwrap();
 	}
-	let text = source.create_track(CHAT, track::Info::default()).unwrap();
+	let text = source
+		.create_track(CHAT, track::Info::default().with_max_age(None))
+		.unwrap();
 	for (sequence, frames) in chat {
 		let mut group = text.create_group(group::Info { sequence: *sequence }).unwrap();
 		for frame in *frames {
@@ -64,10 +72,10 @@ fn path<S: ObjectStore>(store: &Store<S>, track: &str, name: &str) -> Path {
 
 /// Wait until every one of `paths` is stored.
 async fn stored<S: ObjectStore>(store: &Store<S>, paths: &[Path]) {
-	moq_clock::timeout(Duration::from_secs(10), async {
+	kio::clock::timeout(Duration::from_secs(10), async {
 		for path in paths {
 			while store.inner().head(path).await.is_err() {
-				moq_clock::sleep(Duration::from_millis(10)).await;
+				kio::clock::sleep(Duration::from_millis(10)).await;
 			}
 		}
 	})
@@ -104,12 +112,12 @@ async fn record<S: ObjectStore + Clone>(store: &Store<S>) {
 	let run = tokio::spawn(Producer::new(store.clone(), second.consume(), config()).run());
 	for track in &tracks {
 		while track.subscription().is_none() {
-			moq_clock::sleep(Duration::from_millis(1)).await;
+			kio::clock::sleep(Duration::from_millis(1)).await;
 		}
 		track.finish().unwrap();
 	}
 	second.close();
-	moq_clock::timeout(Duration::from_secs(10), run)
+	kio::clock::timeout(Duration::from_secs(10), run)
 		.await
 		.expect("the producer ends with its broadcast")
 		.unwrap()
@@ -133,15 +141,10 @@ fn decode(objects: &BTreeMap<String, Bytes>, key: &str, timed: bool) -> Vec<(u64
 	object
 		.entries
 		.iter()
-		.map(|entry| match entry {
-			crate::layout::Entry::Group { sequence, frames } => (
-				*sequence,
-				frames
-					.iter()
-					.map(|frame| String::from_utf8(frame.payload.to_vec()).unwrap())
-					.collect(),
-			),
-			crate::layout::Entry::Datagram { .. } => panic!("no datagrams were sent"),
+		.map(|entry| {
+			let frames = entry.frames.iter();
+			let frames = frames.map(|frame| String::from_utf8(frame.payload.to_vec()).unwrap());
+			(entry.sequence, frames.collect())
 		})
 		.collect()
 }

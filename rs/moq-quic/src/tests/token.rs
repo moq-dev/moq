@@ -37,7 +37,7 @@ fn oversized_cached_initial_token() {
 			.unwrap();
 		let mut buf = Vec::new();
 		assert_eq!(
-			conn.poll_transmit(now, 1, &mut buf).is_some(),
+			conn.transmit(now, 1, &mut buf).is_some(),
 			fits,
 			"token {token_len}, MTU {mtu}"
 		);
@@ -46,11 +46,11 @@ fn oversized_cached_initial_token() {
 			assert!(conn.stats().frame_tx.crypto > 0);
 		} else {
 			assert_matches!(
-				conn.poll(),
-				Some(Event::ConnectionLost { reason: ConnectionError::TransportError(err) })
+				conn.error(),
+				Some(ConnectionError::TransportError(err))
 				if err.code == TransportErrorCode::PROTOCOL_VIOLATION
 			);
-			assert!(conn.poll_transmit(now, 1, &mut buf).is_none());
+			assert!(conn.transmit(now, 1, &mut buf).is_none());
 			assert!(buf.is_empty());
 		}
 	}
@@ -81,8 +81,8 @@ fn oversized_retry_token() {
 			)
 			.unwrap();
 		let mut buf = Vec::new();
-		let _ = conn.poll_transmit(now, 1, &mut buf).unwrap();
-		let ProtectedHeader::Initial(initial) =
+		let _ = conn.transmit(now, 1, &mut buf).unwrap();
+		let Some(ProtectedHeader::Initial(initial)) =
 			ProtectedHeader::decode(&mut Cursor::new(&buf), &FixedLengthConnectionIdParser::new(0), false).unwrap()
 		else {
 			panic!("expected an Initial packet")
@@ -107,6 +107,7 @@ fn oversized_retry_token() {
 				local_ip: None,
 				ecn: None,
 				data: BytesMut::from(&retry[..]),
+				arrival: None,
 			},
 			&mut buf,
 		) else {
@@ -116,24 +117,21 @@ fn oversized_retry_token() {
 		let now = now + Duration::from_secs(1);
 		let crypto_before = conn.stats().frame_tx.crypto;
 		buf.clear();
-		assert_eq!(conn.poll_transmit(now, 1, &mut buf).is_some(), fits);
+		assert_eq!(conn.transmit(now, 1, &mut buf).is_some(), fits);
 		if fits {
 			assert!(conn.stats().frame_tx.crypto > crypto_before);
 			assert!(buf.len() <= 1200);
 		} else {
 			assert_matches!(
-				conn.poll(),
-				Some(Event::ConnectionLost { reason: ConnectionError::TransportError(err) })
+				conn.error(),
+				Some(ConnectionError::TransportError(err))
 				if err.code == TransportErrorCode::PROTOCOL_VIOLATION
 			);
-			assert!(conn.poll_transmit(now, 1, &mut buf).is_none());
+			assert!(conn.transmit(now, 1, &mut buf).is_none());
 			assert!(buf.is_empty());
 		}
 	}
 }
-
-#[cfg(all(target_family = "wasm", target_os = "unknown"))]
-use wasm_bindgen_test::wasm_bindgen_test as test;
 
 #[test]
 fn stateless_retry() {
@@ -153,7 +151,7 @@ fn stateless_retry() {
 	assert_eq!(pair.server.known_cids(), 0);
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn retry_token_expired() {
 	let _guard = subscribe();
 
@@ -172,12 +170,12 @@ async fn retry_token_expired() {
 	pair.drive_client();
 
 	// to expire retry token
-	moq_clock::sleep(retry_token_lifetime + Duration::from_millis(1)).await;
+	kio::clock::sleep(retry_token_lifetime + Duration::from_millis(1)).await;
 
 	pair.drive();
 	assert_matches!(
-		pair.client_conn_mut(client_ch).poll(),
-		Some(Event::ConnectionLost { reason: ConnectionError::ConnectionClosed(err) })
+		pair.client_conn_mut(client_ch).error(),
+		Some(ConnectionError::ConnectionClosed(err))
 		if err.error_code == TransportErrorCode::INVALID_TOKEN
 	);
 
@@ -376,7 +374,7 @@ fn use_same_token_twice() {
 	assert_eq!(pair.server.known_cids(), 0);
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn use_token_expired() {
 	let _guard = subscribe();
 	let lifetime = Duration::from_secs(10000);
@@ -413,7 +411,7 @@ async fn use_token_expired() {
 	assert_eq!(pair.server.known_connections(), 0);
 	assert_eq!(pair.server.known_cids(), 0);
 
-	moq_clock::sleep(lifetime + Duration::from_secs(1)).await;
+	kio::clock::sleep(lifetime + Duration::from_secs(1)).await;
 
 	pair.server.handle_incoming = Box::new(|incoming| {
 		assert!(!incoming.remote_address_validated());

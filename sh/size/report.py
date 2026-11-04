@@ -1,17 +1,32 @@
 #!/usr/bin/env python3
 """Compare byte counts with the previous report and a thirty-day anchor."""
+
 import argparse
 import datetime as dt
 import json
+import re
 from pathlib import Path
+
+
+def source(row):
+    """Name the measured revision, keeping older reports without revision metadata readable."""
+    revision = row.get("revision")
+    if revision is None:
+        return row["date"]
+    return f"{row['date']} [{revision[:10]}](https://github.com/moq-dev/moq/commit/{revision})"
 
 
 def compare(current, history):
     """Return regressions; a new artifact starts its series, but a missing one is refused."""
+
     def validate(row):
         if row.get("version") != 1 or not row.get("bytes"):
             raise ValueError("expected a nonempty version 1 size report")
         date = dt.date.fromisoformat(row["date"])
+        if "revision" in row and (
+            not isinstance(row["revision"], str) or not re.fullmatch(r"[0-9a-f]{40}", row["revision"])
+        ):
+            raise ValueError("expected a full Git commit SHA for revision")
         for name, size in row["bytes"].items():
             if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
                 raise ValueError(f"invalid byte count for {name}: {size}")
@@ -23,8 +38,9 @@ def compare(current, history):
             raise ValueError("history contains a future report")
     # A rename shows up as a missing key, so it is refused along with a removal.
     if missing := sorted(tracked(history) - current["bytes"].keys()):
-        raise ValueError(f"artifacts missing or renamed: {', '.join(missing)}; "
-                         "review and explicitly start a new history")
+        raise ValueError(
+            f"artifacts missing or renamed: {', '.join(missing)}; review and explicitly start a new history"
+        )
     prior = sorted(history, key=lambda row: row["date"])
     if not prior:
         return []
@@ -32,9 +48,12 @@ def compare(current, history):
     comparisons = [("previous", prior[-1], 0.05)]
     if anchors:
         comparisons.append(("30 days", anchors[-1], 0.10))
-    return [f"{name}: {size} > {row['bytes'][name]} bytes + {limit:.0%} ({label})"
-            for label, row, limit in comparisons for name, size in current["bytes"].items()
-            if name in row["bytes"] and size > row["bytes"][name] * (1 + limit)]
+    return [
+        f"{name}: {size} > {row['bytes'][name]} bytes + {limit:.0%} ({label}: {source(row)})"
+        for label, row, limit in comparisons
+        for name, size in current["bytes"].items()
+        if name in row["bytes"] and size > row["bytes"][name] * (1 + limit)
+    ]
 
 
 def tracked(history):
@@ -46,8 +65,9 @@ def retain(current, history):
     """Keep the thirty-day anchor compare() would pick, every newer report, and the current one."""
     cutoff = dt.date.fromisoformat(current["date"]) - dt.timedelta(days=30)
     # A stable sort keeps the last of several same-date reports, matching compare().
-    anchors = sorted((row for row in history if dt.date.fromisoformat(row["date"]) <= cutoff),
-                     key=lambda row: row["date"])
+    anchors = sorted(
+        (row for row in history if dt.date.fromisoformat(row["date"]) <= cutoff), key=lambda row: row["date"]
+    )
     return anchors[-1:] + [row for row in history if dt.date.fromisoformat(row["date"]) > cutoff] + [current]
 
 
@@ -60,7 +80,7 @@ def main():
     history = json.loads(args.history.read_text()) if args.history else []
     failures = compare(current, history)
     (args.directory / "history.json").write_text(json.dumps(retain(current, history), indent=2) + "\n")
-    summary = "| Artifact | Bytes |\n|---|---:|\n"
+    summary = f"Measured {source(current)}.\n\n| Artifact | Bytes |\n|---|---:|\n"
     summary += "".join(f"| {name} | {size:,} |\n" for name, size in sorted(current["bytes"].items()))
     if failures:
         summary += "\n" + "\n".join(failures) + "\n"

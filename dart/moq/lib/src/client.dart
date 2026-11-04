@@ -118,7 +118,7 @@ final class QuicConfig {
   /// How long an idle QUIC connection survives before it is dropped.
   final Duration? idleTimeout;
 
-  /// QUIC keep-alive ping interval; zero disables it.
+  /// QUIC keep-alive ping interval; zero uses the default.
   final Duration? keepAlive;
 
   /// UDP generic segmentation offload; null leaves the choice to the backend.
@@ -230,13 +230,15 @@ final class Moq {
   }) => session.consume().announced(config: options._ffi);
 
   /// Follow the broadcast at exactly [path]: each `available()` resolves the
-  /// next publisher instance serving it, such as a restarted publisher.
-  AnnouncedBroadcast announcedBroadcast(String path) =>
-      session.consume().announcedBroadcast(path: path);
+  /// next instance serving it, such as a restarted publisher. Pass an
+  /// [instance] to follow only that stream.
+  Following follow(String path, {String? instance}) =>
+      session.consume().follow(path: path, instance: instance);
 
-  /// Resolve an existing broadcast at [path].
-  Future<BroadcastConsumer> requestBroadcast(String path) =>
-      session.consume().requestBroadcast(path: path);
+  /// Resolve one publisher instance of the broadcast at [path]. Pass an
+  /// [instance] to refuse any other stream.
+  Future<BroadcastConsumer> request(String path, {String? instance}) =>
+      session.consume().request(path: path, instance: instance);
 
   /// The session's bandwidth allocator.
   ///
@@ -244,6 +246,16 @@ final class Moq {
   /// a share for an app-owned encoder; dropping the [Reservation] hands
   /// the room back.
   Allocator allocator() => session.allocator();
+
+  /// The session's viewers, dividing the connection's receive estimate among
+  /// the broadcasts watched over it.
+  ///
+  /// Every call returns a handle to the same registry, and the session sends
+  /// what its viewers' ceilings add up to as its PROBE target. [Viewers.watch]
+  /// a broadcast with the ceiling of the largest rendition the player would
+  /// switch to, read its slice with [Viewer.rate], and dispose the [Viewer]
+  /// once the broadcast stops being watched.
+  Viewers viewers() => session.viewers();
 
   /// Follow the grant the peer gave this session.
   ///
@@ -264,9 +276,8 @@ final class Moq {
 
   /// Drain within one second, then stop the client.
   ///
-  /// Explicit `moq-lite-07-wip` waits for the peer to receive finished tails; older
-  /// Lite versions, including the default lite-06, wait only for transport ACKs.
-  /// IETF also waits for transport ACKs.
+  /// `moq-lite-05` and newer wait for the peer to receive finished tails; older
+  /// Lite versions and IETF wait only for transport ACKs.
   Future<void> close() async {
     try {
       session.shutdown();

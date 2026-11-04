@@ -1,20 +1,23 @@
-import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
-import { Micro, Milli } from "@moq/clock";
+import { afterEach, beforeEach, expect, test } from "bun:test";
+import { type Installed, Manual, Micro, Milli, Nano } from "@moq/clock";
 import { Time, Track } from "@moq/net";
 import { Consumer } from "./consumer";
 import { encodeFrame, Format, Producer } from "./legacy";
 
-let clock: ReturnType<typeof spyOn>;
+// Frozen at 200ms: nothing in these tests waits on time.
+let installed: Installed;
 beforeEach(() => {
-	clock = spyOn(performance, "now").mockReturnValue(200);
+	const clock = new Manual();
+	clock.jump(Nano.fromMilli(Milli(200)));
+	installed = clock.install();
 });
-afterEach(() => clock.mockRestore());
+afterEach(() => installed.close());
 
 function setup() {
 	const track = new Track.Producer("rewind");
-	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
+	const consumer = new Consumer(track.subscribe({ delay: { max: Milli(30_000) } }), {
 		format: new Format("video"),
-		maxDelay: Milli(30_000),
+		delay: { max: Milli(30_000) },
 	});
 	return { track, consumer };
 }
@@ -67,10 +70,10 @@ for (const start of [16_000, 0]) {
 		try {
 			producer.encode(new Uint8Array([1]), Micro(0), true);
 			producer.encode(new Uint8Array([1]), Micro(33_000), false);
-			expect((await frame(consumer))?.group).toBe(0);
+			expect((await frame(consumer))?.group).toBe(0n);
 			await frame(consumer);
 			producer.encode(new Uint8Array([1]), Micro(start), true);
-			expect((await frame(consumer))?.group).toBe(1);
+			expect((await frame(consumer))?.group).toBe(1n);
 		} finally {
 			consumer.close();
 			producer.close();

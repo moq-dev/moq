@@ -84,6 +84,10 @@ pub enum Error {
 	/// An ambisonic audio rendition's channel count is not a square of at least 4.
 	#[error("ambisonic audio needs a square channel count of at least 4, not {0}")]
 	InvalidAmbisonicChannels(u32),
+
+	/// A catalog field that counts something is zero, such as a picture dimension or sample rate.
+	#[error("catalog {0} must not be zero")]
+	Zero(&'static str),
 }
 
 /// A Result type alias for hang operations.

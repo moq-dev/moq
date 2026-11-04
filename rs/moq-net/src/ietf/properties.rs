@@ -52,7 +52,7 @@ const IMMUTABLE: u64 = 0x0b;
 /// The Track Properties block carried at the end of SUBSCRIBE_OK, PUBLISH, and FETCH_OK.
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct Properties {
-	/// The publisher's cache window; omission leaves retention unconstrained.
+	/// The publisher's max age; omission sets no publisher limit.
 	pub max_cache_duration: Option<Duration>,
 
 	/// The track's Timescale, which declares the units of every object Timestamp on it.
@@ -490,7 +490,7 @@ mod tests {
 
 	#[test]
 	fn publisher_priority_is_bounded_to_a_byte() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let mut buf = Vec::new();
 			Encoder::new(&mut buf, version.into()).varint(0x0eu64).unwrap();
 			Encoder::new(&mut buf, version.into()).varint(256u64).unwrap();
