@@ -103,9 +103,10 @@ The manifest-only filter loses hakari's refreshed lockfile: the returned
 fixes that, and both hakari's diff and locked Cargo metadata pass. The fixture
 runs nightly without credentials; fast workflow-boundary tests run in CI.
 
-Two changes to the settled Plan are proposed, not yet approved: collect
+Changes to the settled Plan are proposed, not yet approved: collect
 `Cargo.lock` alongside the generated manifest, and retain a Cargo-only
-Dependabot suppression entry. GitHub documents that `ignore` applies to
+Dependabot suppression entry, and permit commit-status reporting by the App.
+GitHub documents that `ignore` applies to
 security updates too; removing the Cargo entry alone leaves automatic security
 updates enabled. Renovate reads Cargo alerts with the App's additional
 Dependabot-alerts read permission. Other Dependabot ecosystems are unchanged.
@@ -126,6 +127,10 @@ Dependabot-alerts read permission. Other Dependabot ecosystems are unchanged.
   or keep the original removal and accept competing Dependabot security PRs
   that can hand-edit the hack. Other ecosystems keep Dependabot in either case;
   the suppression is needed for a complete Cargo security-update handoff.
+- Maintainer: approve the App's commit-status write permission (recommended),
+  needed for Renovate's release-age and artifact reports, or disable those
+  optional Renovate reports while retaining the queue checks and internal
+  release-age filtering. No App permissions have been granted by the agent.
 - GitHub Actions: after the reviewed workflow is installed on `main` and setup
   is complete, an approved Renovate run must publish a Cargo group PR passing
   hakari generation and locked metadata without a manual commit. Verify its

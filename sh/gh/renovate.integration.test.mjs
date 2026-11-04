@@ -116,3 +116,83 @@ test("grouped Cargo updates retain hakari's manifest and lockfile without buildi
 	);
 	assert.equal(denied.artifactErrors.length, 1);
 });
+
+test("GitHub security alerts cannot override the Cargo version caps", async () => {
+	const { default: api } = await import("../../.tmp/renovate-cli/node_modules/renovate/dist/modules/platform/api.js");
+	const { setPlatformApi } = await import(
+		"../../.tmp/renovate-cli/node_modules/renovate/dist/modules/platform/index.js"
+	);
+	const { detectVulnerabilityAlerts } = await import(
+		"../../.tmp/renovate-cli/node_modules/renovate/dist/workers/repository/init/vulnerability.js"
+	);
+	const { applyPackageRules } = await import(
+		"../../.tmp/renovate-cli/node_modules/renovate/dist/util/package-rules/index.js"
+	);
+	const { filterVersions } = await import(
+		"../../.tmp/renovate-cli/node_modules/renovate/dist/workers/repository/process/lookup/filter.js"
+	);
+	const { applyVulnerabilityFixFilter } = await import(
+		"../../.tmp/renovate-cli/node_modules/renovate/dist/workers/repository/process/lookup/vulnerability.js"
+	);
+	const { get } = await import("../../.tmp/renovate-cli/node_modules/renovate/dist/modules/versioning/index.js");
+	const cases = [
+		{ name: "uniffi", current: "0.32.0", inCap: "0.32.1", outsideCap: "0.33.1", cap: "<0.33" },
+		{ name: "syn", current: "2.0.0", inCap: "2.0.1", outsideCap: "3.0.1", cap: "<3" },
+	];
+	const localApi = api.get("local");
+	try {
+		for (const entry of cases) {
+			for (const patched of [entry.inCap, entry.outsideCap]) {
+				api.set("local", {
+					...localApi,
+					getVulnerabilityAlerts: async () => [
+						{
+							security_vulnerability: {
+								package: { ecosystem: "rust", name: entry.name },
+								first_patched_version: { identifier: patched },
+								severity: "high",
+							},
+							security_advisory: {
+								identifiers: [],
+								summary: "Fixture advisory",
+								severity: "high",
+								description: "Fixture only",
+							},
+						},
+					],
+				});
+				setPlatformApi("local");
+				const alertConfig = await detectVulnerabilityAlerts(config);
+				const dep = await applyPackageRules({
+					...alertConfig,
+					manager: "cargo",
+					datasource: "crate",
+					depName: entry.name,
+					packageName: entry.name,
+					currentVersion: entry.current,
+					currentValue: entry.current,
+					lockedVersion: entry.current,
+					versioning: "cargo",
+				});
+				assert.equal(dep.isVulnerabilityAlert, true);
+				assert.equal(dep.allowedVersions, entry.cap);
+				const versioning = get("cargo");
+				const allowed = filterVersions(
+					dep,
+					entry.current,
+					entry.outsideCap,
+					[{ version: entry.inCap }, { version: entry.outsideCap }],
+					versioning,
+				);
+				const fixes = applyVulnerabilityFixFilter(dep, {}, versioning, allowed).releases;
+				assert.deepEqual(
+					fixes.map(({ version }) => version),
+					patched === entry.inCap ? [entry.inCap] : [],
+				);
+			}
+		}
+	} finally {
+		api.set("local", localApi);
+		setPlatformApi("local");
+	}
+});

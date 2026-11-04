@@ -40,6 +40,8 @@ jobs:
           permission-contents: write
           permission-pull-requests: write
           permission-vulnerability-alerts: read
+          # Renovate reports release-age and artifact status on its branch.
+          permission-statuses: write
       - name: Update Cargo and regenerate the workspace-hack
         env:
           RENOVATE_TOKEN: ${{ steps.token.outputs.token }}

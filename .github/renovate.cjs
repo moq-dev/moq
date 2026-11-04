@@ -13,6 +13,8 @@ module.exports = {
 	allowPlugins: false,
 	allowShellExecutorForPostUpgradeCommands: false,
 	enabledManagers: ["cargo"],
+	// Match the root workspace, not standalone smoke and benchmark workspaces.
+	includePaths: ["Cargo.toml", "rs/**", "demo/carla/bridge/**"],
 	// The clone retains this manifest for Cargo resolution; only extraction skips it.
 	ignorePaths: ["rs/workspace-hack/**"],
 	minimumReleaseAge: "7 days",
@@ -51,6 +53,7 @@ module.exports = {
 		},
 	],
 	// Security fixes bypass the release-age hold, as Dependabot's did.
+	osvVulnerabilityAlerts: false,
 	vulnerabilityAlerts: {
 		enabled: true,
 		minimumReleaseAge: "0 days",

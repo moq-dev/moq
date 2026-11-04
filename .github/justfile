@@ -151,7 +151,9 @@ pages-clean:
 
 # Install the pinned updater before minting its write token.
 renovate-install:
-    npm install --prefix .tmp/renovate-cli --no-save --package-lock=false "renovate@$(cat .github/renovate-version)"
+    mkdir -p .tmp/renovate-cli
+    cp .github/renovate/package.json .github/renovate/package-lock.json .tmp/renovate-cli/
+    npm ci --prefix .tmp/renovate-cli --ignore-scripts
 
 # Run the trusted main configuration with the dedicated App's installation token.
 renovate:

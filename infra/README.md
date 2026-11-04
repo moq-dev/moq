@@ -96,7 +96,9 @@ A maintainer completes this setup after reviewing the workflow:
 
 1. Create a dedicated GitHub App and install it on **moq-dev/moq only**.
    Grant repository **Contents: read/write**, **Pull requests: read/write**,
-   and **Dependabot alerts: read**. Metadata read is implicit. It needs no
+   and **Dependabot alerts: read** plus **Commit statuses: read/write**.
+   The latter reports release age and artifact failures; it cannot enqueue
+   a merge. Metadata read is implicit. It needs no
    workflow, administration, issues, or merge-queue permission. Renovate's
    automerge is disabled; the existing landing workflow uses moq-bot's
    separate token to request a landing pinned to the update PR's head.
@@ -124,7 +126,8 @@ building repository code or executing its build scripts. The two exact paths
 collected from the hook are `rs/workspace-hack/Cargo.toml` and `Cargo.lock`;
 manifest and lockfile updates from Cargo itself are also retained. Excluding
 the generated manifest from Renovate extraction leaves it on disk for Cargo
-resolution. Ordinary updates share one Cargo PR and wait seven days after
+resolution. Only the root Cargo workspace is extracted; standalone smoke and benchmark
+workspaces keep their existing policy. Ordinary updates share one Cargo PR and wait seven days after
 release. Security fixes bypass that hold, retain the version caps, and run the
 same hook. Pull-request builds receive no Renovate write token.
 
