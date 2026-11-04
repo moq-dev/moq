@@ -217,6 +217,8 @@ class SelectTest(unittest.TestCase):
                 calls = self.selected(bench, action=action)
                 self.assertTrue(any("#moq-stats@" in call or "/rs/moq-stats#" in call for call in calls), calls)
                 self.assertFalse(any("moq-relay" in call or "moq-cli" in call for call in calls), calls)
+        calls = self.selected(bench, "rs/moq-stats/src/lib.rs", action="test")
+        self.assertTrue(any("/rs/moq-relay#" in call for call in calls), calls)
 
     def test_a_bench_alone_enables_its_required_features(self):
         # Alone in the selection, no dependent turns these on, and cargo would
@@ -231,8 +233,6 @@ class SelectTest(unittest.TestCase):
                 (call,) = [call for call in self.selected(bench, action="test") if call.startswith("rs test ")]
                 self.assertIn(" --benches --examples ", call)
                 self.assertIn(feature, call.split(" --features ", 1)[1].split())
-        calls = self.selected(bench, "rs/moq-stats/src/lib.rs", action="test")
-        self.assertTrue(any("/rs/moq-relay#" in call for call in calls), calls)
 
 
 class MetadataTest(unittest.TestCase):
