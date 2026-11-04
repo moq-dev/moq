@@ -867,14 +867,17 @@ export class Encoder {
 							if (!this.#live) continue;
 							const cut = breakPending;
 							breakPending = false;
-							if (this.#encoding && !flushing && backlog.empty && !cut && !gap(data)) {
+							const live = this.#encoding && !flushing && backlog.empty;
+							// Started here rather than from the backlog, which may not keep the frame: a
+							// zero max age retains nothing.
+							if (live && (cut || gap(data))) cutAfterFlush();
+							if (live && !flushing) {
 								submit(data);
 								continue;
 							}
 							// It waits for a subscriber, or behind the flush before a break.
 							const end = frames[i + 1]?.timestamp ?? framer.next;
-							backlog.push(data, end, clock(), cut);
-							if (this.#encoding) pipeline.drain();
+							backlog.push(data, end, clock(), cut && !live);
 						}
 						deadline.set(backlog.deadline);
 					},

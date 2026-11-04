@@ -1541,6 +1541,56 @@ test("a capture gap inside replayed audio keeps every frame on both sides of it"
 	}
 });
 
+// A zero max age retains nothing, not even the frame waiting behind a gap's flush, so the gap must not
+// depend on the backlog to be noticed, or every frame after it would wait forever.
+test("a capture gap without retention resumes the audio after it", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	const clock = new Manual();
+	const installed = clock.install();
+	const broadcast = new Broadcast({
+		origin: new Moq.Origin.Producer(),
+		name: Moq.Path.from("unretained.hang"),
+		maxAge: Milli(0),
+	});
+	const feed = new Feed();
+	const configuring = configured();
+	const encoder = new Encoder("audio", { broadcast, capture: fakeCapture(feed) as never });
+	const encode = spyOn(Container.Legacy.Producer.prototype, "encode");
+	const discontinuity = spyOn(Container.Legacy.Producer.prototype, "discontinuity");
+	let subscriber: Moq.Track.Subscriber | undefined;
+	try {
+		await configuring;
+		await settle();
+		const push = async (start: number, count: number) => {
+			for (let index = 0; index < count; index++) {
+				await feed.push({ timestamp: Micro(start + index * 20_000), channels: [new Float32Array(960)] });
+				await feed.drain();
+				await clock.advance(Nano.fromMilli(Milli(20)));
+			}
+		};
+		const net = broadcast.net.peek();
+		if (!net) throw new Error("expected network broadcast");
+		subscriber = net.track("audio").subscribe();
+		await settle();
+
+		await push(0, 4); // two written, two held
+		// The first frame after the gap waits behind the flush, where nothing is retained.
+		await push(200_000, 4);
+
+		expect(encode.mock.calls.map(([, timestamp]) => timestamp)).toEqual(
+			[0, 20_000, 40_000, 60_000, 220_000].map((t) => Micro(t)),
+		);
+		expect(discontinuity.mock.calls.map(([end]) => end)).toEqual([Micro(80_000)]);
+	} finally {
+		encode.mockRestore();
+		discontinuity.mockRestore();
+		subscriber?.close();
+		encoder.close();
+		broadcast.close();
+		installed.close();
+	}
+});
+
 // Two disables before anyone listens leave two breaks in the backlog: each flushes the audio before it.
 test("every disable retained before demand gets its own break", async () => {
 	using _webcodecs = installFakeWebCodecs();
