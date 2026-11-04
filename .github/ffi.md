@@ -97,9 +97,13 @@ stripped for `moq-ffi`. The toolchain action installed stable Rust 1.99.0,
 but the repository's `rust-toolchain.toml` selects Rust 1.98.1 (`48a229cea`)
 for the actual Cargo builds on both paths. C++ invokes
 `cargo build --locked --package moq-ffi --release` through
-CMake; the shared candidate adds `--target <triple>` through
+CMake; in this sampled revision, the shared candidate adds `--target <triple>` through
 `rs/moq-ffi/build.sh`. C++ is always a native host build. Only the shared ARM
 Linux candidate crosses from an x86 Linux host.
+
+Current native packaging omits `--target`, matching the C++ invocation. The
+table and debug-path differences below describe the older sampled invocation;
+only cross-builds still pass an explicit target.
 
 | Target | C++ host | Shared candidate host | Native archive comparison |
 | --- | --- | --- | --- |

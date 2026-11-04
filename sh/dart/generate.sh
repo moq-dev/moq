@@ -18,7 +18,7 @@ command -v dart >/dev/null 2>&1 || {
     exit 1
 }
 
-# Build with the environment dart/moq_ffi/hook/build.dart gets, so the hook's
+# Debug builds use the environment dart/moq_ffi/hook/build.dart gets, so the hook's
 # own Cargo run during `dart test` finds this build fresh. Dart filters a hook's
 # environment, and build scripts such as aws-lc-sys's rerun when a variable they
 # track (CC, PKG_CONFIG, ...) changes, rebuilding everything above them. This
@@ -40,14 +40,14 @@ profile=${MOQ_FFI_PROFILE:-debug}
 # Keep the test hooks out of the shared cdylib without changing Cargo's host
 # compilation mode. Release benchmarks use the shared default build.
 case "$profile" in
-    debug) profile_args=(--features testing --target-dir "$WORKSPACE_DIR/target/dart") ;;
-    release) profile_args=(--release) ;;
+    debug) build=(env -i "${hook_env[@]}" cargo build-ffi --features testing --target-dir "$WORKSPACE_DIR/target/dart") ;;
+    release) build=(cargo build-ffi --release) ;;
     *)
         echo "error: unsupported MOQ_FFI_PROFILE: $profile" >&2
         exit 1
         ;;
 esac
-(cd "$WORKSPACE_DIR" && env -i "${hook_env[@]}" cargo build-ffi ${profile_args[@]+"${profile_args[@]}"})
+(cd "$WORKSPACE_DIR" && "${build[@]}")
 
 target_dir="$WORKSPACE_DIR/target"
 if [[ "$profile" == debug ]]; then

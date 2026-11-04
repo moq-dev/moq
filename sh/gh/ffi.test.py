@@ -193,7 +193,9 @@ print((root / "jobs").read_text())
                 self.env["BUILD_ID"] = payload.decode()
                 default_library = self.root / "target/release/libmoq_ffi.so"
                 if minimal:
-                    default_bytes = default_library.read_bytes()
+                    default_library.parent.mkdir(parents=True, exist_ok=True)
+                    default_bytes = b"default library sentinel"
+                    default_library.write_bytes(default_bytes)
                 # Packaging the native host also generates bindings. Only the
                 # library lookup matters here; no generator needs to execute.
                 self.tool("rustc", f'print("host: {host}")\n')

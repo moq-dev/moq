@@ -17,8 +17,10 @@ class BuildTest(unittest.TestCase):
             with self.subTest(profile=profile), tempfile.TemporaryDirectory() as directory:
                 scratch = Path(directory)
                 calls = scratch / "calls"
+                compiler_env = scratch / "compiler-env"
                 for name, source in {
-                    "cargo": f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{calls}"\n',
+                    "cargo": f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{calls}"\n'
+                    f'printf "%s" "${{CC:-unset}}" > "{compiler_env}"\n',
                     "rustc": '#!/bin/sh\necho "host: x86_64-unknown-linux-gnu"\n',
                     "dart": "#!/bin/sh\nexit 0\n",
                     "uniffi_bindgen_dart": '#!/bin/sh\nwhile [ "$1" != --out-dir ]; do shift; done\n'
@@ -29,7 +31,11 @@ class BuildTest(unittest.TestCase):
                     tool.write_text(source)
                     tool.chmod(0o755)
                 env = dict(
-                    os.environ, PATH=f"{scratch}:{os.environ['PATH']}", MOQ_FFI_PROFILE=profile, BASH_ENV=os.devnull
+                    os.environ,
+                    PATH=f"{scratch}:{os.environ['PATH']}",
+                    MOQ_FFI_PROFILE=profile,
+                    BASH_ENV=os.devnull,
+                    CC="fixture-compiler",
                 )
                 result = subprocess.run(
                     ["bash", "sh/dart/generate.sh", str(scratch / "generated")],
@@ -39,6 +45,7 @@ class BuildTest(unittest.TestCase):
                     capture_output=True,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(compiler_env.read_text(), "fixture-compiler" if release else "unset")
                 args = calls.read_text().split()
                 self.assertEqual(args[0], "build-ffi")
                 self.assertEqual("--release" in args, release)
