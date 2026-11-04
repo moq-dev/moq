@@ -6,10 +6,10 @@ import * as Path from "../path.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
 import { type Subscription, Producer as TrackProducer } from "../track.ts";
 import { Fetch, FetchOk } from "./fetch.ts";
-import { EndOfRange, FetchEndOfRange, FetchFrame } from "./object.ts";
+import { EndOfRange, FetchEndOfRange, FetchFrame, Group } from "./object.ts";
 import { RequestError } from "./request.ts";
 import { NativeSession } from "./session.ts";
-import { Subscribe } from "./subscribe.ts";
+import { Subscribe, SubscribeOk } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
 import { TrackStatusOk, TrackStatusRequest } from "./track.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
@@ -316,6 +316,81 @@ for (const version of VERSIONS) {
 		const cached = await fx.broadcast.track("video").fetchGroup(1n);
 		expect(await payloads(cached)).toEqual(["1a", "", "1c"]);
 		cached.close();
+	});
+
+	test(`${version}: narrowing a widened read back to history ends its live SUBSCRIBE`, async () => {
+		const fx = fixture(version);
+		const history = fx.broadcast.track("video").subscribe(ranges(1n, 3n));
+		fx.readers.push(history);
+		const ordered = history.ordered();
+		const first = ordered.nextGroup();
+		await fx.status();
+		const fetching = await fx.fetch();
+		await fx.answer(fetching.stream, 2n);
+		const live = fx.broadcast
+			.track("video")
+			.subscribe({ ranges: [{ start: { absolute: 6n } }], delay: { max: null } });
+		const widening = await fx.next();
+		expect(await widening.reader.u53()).toBe(Subscribe.id);
+		await Subscribe.decode(widening.reader, version);
+		await widening.writer.u53(SubscribeOk.id);
+		await new SubscribeOk({ trackAlias: 7n }).encode(widening.writer, version);
+		live.close();
+		// The serve loop must stop and close the request rather than spin on its settled history wake.
+		expect(await widening.reader.done()).toBe(true);
+		await fx.data(fetching.request.requestId, [1n, 2n]);
+		const group = await first;
+		if (!group) throw new Error("missing history group");
+		expect(await payloads(group)).toEqual(["1a", "", "1c"]);
+		group.close();
+		const second = await ordered.nextGroup();
+		if (!second) throw new Error("missing history group");
+		expect(await payloads(second)).toEqual(["2a", "", "2c"]);
+		second.close();
+		expect(await ordered.nextGroup()).toBeUndefined();
+	});
+
+	test(`${version}: a relative end on an empty track subscribes for the first group`, async () => {
+		const fx = fixture(version);
+		const reader = fx.broadcast.track("video").subscribe({
+			ranges: [{ start: { absolute: 0n }, end: { relative: 0 } }],
+			delay: { max: null },
+			order: "ascending",
+		});
+		fx.readers.push(reader);
+		const ordered = reader.ordered();
+		const first = ordered.nextGroup();
+		await fx.status(null);
+		const live = await fx.next();
+		expect(await live.reader.u53()).toBe(Subscribe.id);
+		await Subscribe.decode(live.reader, version);
+		await live.writer.u53(SubscribeOk.id);
+		await new SubscribeOk({ trackAlias: 7n }).encode(live.writer, version);
+		const payload = new TextEncoder().encode("0a");
+		const header = new Group({
+			trackAlias: 7n,
+			groupId: 0n,
+			subGroupId: 0,
+			publisherPriority: 0,
+			flags: {
+				hasExtensions: false,
+				hasSubgroup: false,
+				hasSubgroupObject: false,
+				hasEnd: true,
+				hasPriority: true,
+				firstObject: true,
+			},
+		});
+		await fx.subscriber.handleGroup(
+			header,
+			new Reader(undefined, new Uint8Array([0, payload.byteLength, ...payload]), version),
+		);
+		const group = await first;
+		expect(group?.sequence).toBe(0n);
+		if (!group) throw new Error("missing first group");
+		expect(await payloads(group)).toEqual(["0a"]);
+		group.close();
+		expect(await ordered.nextGroup()).toBeUndefined();
 	});
 
 	test(`${version}: a nonexistent trailing object range preserves the group's payloads`, async () => {

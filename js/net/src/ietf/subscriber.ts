@@ -887,8 +887,11 @@ export class Subscriber {
 			const localEnded = Symbol("local");
 			const revokedEnded = Symbol("revoked");
 			const idle = Symbol("idle");
+			// History readers may still want the track once its live part is no longer read, so
+			// this wake stops serving without the demand re-check `idle` takes.
+			const historyEnded = Symbol("history");
 			const historical = known
-				? this.#historyOnly(producer, known.edge).then(() => idle)
+				? this.#historyOnly(producer, known.edge).then(() => historyEnded)
 				: new Promise<never>(() => {});
 
 			// Losing the grant ends the subscription, leaving the session alone.
@@ -986,8 +989,11 @@ export class Subscriber {
 	#needsLive(producer: track.Producer, edge: bigint): boolean {
 		if (hooks.trackFinished(producer) || !hooks.subscribing(producer).peek()) return false;
 		const ranges = producer.subscription.peek()?.ranges ?? [];
-		const span = wireSpan(ranges);
-		return !bounded(ranges) || (span.end !== undefined && span.end > edge);
+		if (!bounded(ranges)) return true;
+		const end = wireSpan(ranges).end;
+		// A relative end resolves against Largest, or against the first group when none exists yet,
+		// which only the live feed delivers.
+		return end === undefined ? edge === 0n : end > edge;
 	}
 
 	async #historyOnly(producer: track.Producer, edge: bigint): Promise<void> {
