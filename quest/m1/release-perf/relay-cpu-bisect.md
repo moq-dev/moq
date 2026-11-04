@@ -36,7 +36,7 @@ Decided 2026-11-03 (maintainer, on [moq-dev/moq#7605](https://github.com/moq-dev
    - Accept all of them now.
    - Keep investigating all of them.
 2. The waiter's list records:
-   - ✅ A follow-up at m0, as a correctness bug: [a waiter's record limit changes no behavior](/quest/m0/kio-waiter-records.md).
+   - ✅ A correctness follow-up at m0, completed in [moq-dev/moq#7789](https://github.com/moq-dev/moq/pull/7789): the metadata/abort and test teardown races are fixed, and waiters remember 16 lists.
    - Leave the limit at 8.
 3. `group::Consumer` moves:
    - ✅ A follow-up in this epic: [a read moves a small group consumer](/quest/m1/release-perf/group-consumer-size.md).
@@ -54,7 +54,6 @@ Public API: none expected. Wire: none.
 
 ## Related
 
-- [A waiter's record limit changes no behavior](/quest/m0/kio-waiter-records.md) - found here; the session's waiter registration cost waits on it
 - [A read moves a small group consumer](/quest/m1/release-perf/group-consumer-size.md) - found here; the session's largest remaining self cost
 
 - [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - the nightly series that should have caught this growth
