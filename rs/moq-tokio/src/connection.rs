@@ -590,6 +590,7 @@ struct State {
 	/// Advanced by `Shared::connected` with the same write that publishes `status`,
 	/// so a reader can't see `Connected` without its count.
 	connects: u64,
+	last_connected: Option<kio::clock::Instant>,
 	/// Cumulative connects and disconnects, bumped by the reconnect loop itself so a session that
 	/// connects and drops before a consumer polls still counts.
 	presence: moq_net::stats::Presence,
@@ -650,6 +651,7 @@ impl Shared {
 			state.revision += 1;
 			state.status = Some(Status::Connected);
 			state.connects += 1;
+			state.last_connected = Some(kio::clock::now());
 			state.presence.sessions_started += 1;
 			state.failure = None;
 			state.version = Some(session.version());
@@ -775,6 +777,10 @@ pub struct Observation {
 	pub phase: Phase,
 	/// How many sessions have connected, including replacements.
 	pub connects: u64,
+	/// When a session last connected, retained while offline.
+	pub last_connected: Option<kio::clock::Instant>,
+	/// The live session's transport, or none while offline.
+	pub transport: Option<crate::Transport>,
 	/// The latest failed attempt or terminal failure, cleared by a successful connect.
 	pub failure: Option<Error>,
 	/// The live session's negotiated version, or none while offline.
@@ -811,6 +817,8 @@ impl State {
 				}
 			},
 			connects: self.connects,
+			last_connected: self.last_connected,
+			transport: self.transport,
 			failure: self.error.clone().or_else(|| self.failure.clone()),
 			version: self.version,
 		}
