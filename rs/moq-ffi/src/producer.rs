@@ -319,7 +319,7 @@ impl MoqBroadcastProducer {
 	/// Create a standalone broadcast, not attached to any origin.
 	///
 	/// Use it for local pub/sub via [`consume`](Self::consume). To publish at a path, use
-	/// [`MoqOriginProducer::create_broadcast`](crate::origin::MoqOriginProducer::create_broadcast) instead.
+	/// [`MoqOriginProducer::route`](crate::origin::MoqOriginProducer::route) instead.
 	#[uniffi::constructor]
 	pub fn new() -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::enter();

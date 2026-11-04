@@ -108,7 +108,7 @@ pub async fn run(ctx: Connection) {
 		config.name()
 	};
 
-	let mut broadcasts = Vec::new();
+	let mut routes = Vec::new();
 	let mut publishing = Vec::new();
 	let mut own = HashSet::new();
 	let mut tasks = JoinSet::new();
@@ -126,14 +126,14 @@ pub async fn run(ctx: Connection) {
 	};
 
 	for (relative, path) in paths {
-		let broadcast = match publish.create_broadcast(&path) {
-			Ok(broadcast) => broadcast,
+		let route = match publish.route(&path, moq_net::origin::RouteOptions::hidden()) {
+			Ok(route) => route,
 			Err(err) => {
 				tracing::error!(connection, %err, "failed to create broadcast");
 				continue;
 			}
 		};
-		let track = match broadcast.create_track(
+		let track = match route.broadcast().create_track(
 			TRACK,
 			moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 		) {
@@ -143,14 +143,14 @@ pub async fn run(ctx: Connection) {
 				continue;
 			}
 		};
-		if let Err(err) = broadcast.announce(Default::default()) {
+		if let Err(err) = route.announce() {
 			tracing::error!(connection, %err, "failed to announce broadcast");
 			continue;
 		}
 		own.insert(relative);
-		// Hold the broadcast producer for the connection's lifetime so it stays
-		// published and advertised.
-		broadcasts.push(broadcast);
+		// Hold the route for the connection's lifetime so it stays published and
+		// advertised.
+		routes.push(route);
 
 		let published = Published::new(stats.clone());
 		publishing.push(Arc::downgrade(&published));
@@ -989,22 +989,26 @@ mod tests {
 		let origin = moq_tokio::origin::spawn();
 
 		// The relay-internal broadcast: announced, but with no bench data track.
-		let _internal = origin.create_broadcast(".stats/node/host").unwrap();
-		_internal.announce(Default::default()).unwrap();
+		let _internal = origin
+			.route(".stats/node/host", moq_net::origin::RouteOptions::default())
+			.unwrap();
 
 		// Our own broadcast: in the namespace, but excluded via the `own` set
 		// (paths relative to the namespace, matching the scoped announce consumer).
-		let _previous = origin.create_broadcast("bench/previous/0/0").unwrap();
-		_previous.announce(Default::default()).unwrap();
+		let _previous = origin
+			.route("bench/previous/0/0", moq_net::origin::RouteOptions::default())
+			.unwrap();
 
-		let _own = origin.create_broadcast("bench/current/9/9").unwrap();
-		_own.announce(Default::default()).unwrap();
+		let _own = origin
+			.route("bench/current/9/9", moq_net::origin::RouteOptions::default())
+			.unwrap();
 		let own = HashSet::from(["9/9".to_string()]);
 
 		// One legitimate peer under the bench namespace with a single finished group.
-		let peer = origin.create_broadcast("bench/current/0/0").unwrap();
-		peer.announce(Default::default()).unwrap();
-		let track = peer.create_track(TRACK, timed()).unwrap();
+		let peer = origin
+			.route("bench/current/0/0", moq_net::origin::RouteOptions::default())
+			.unwrap();
+		let track = peer.broadcast().create_track(TRACK, timed()).unwrap();
 		let mut group = track.append_group().unwrap();
 		group
 			.write_frame(moq_net::Timestamp::now(), Bytes::from_static(b"{}"))
@@ -1034,9 +1038,10 @@ mod tests {
 			stats.clone(),
 		));
 
-		let broadcast = origin.create_broadcast("bench/run/chat").unwrap();
-		broadcast.announce(Default::default()).unwrap();
-		let track = broadcast.create_track(TRACK, timed()).unwrap();
+		let broadcast = origin
+			.route("bench/run/chat", moq_net::origin::RouteOptions::default())
+			.unwrap();
+		let track = broadcast.broadcast().create_track(TRACK, timed()).unwrap();
 		tokio::task::yield_now().await;
 		let mut group = track.append_group().unwrap();
 		let header = serde_json::json!({
@@ -1053,7 +1058,7 @@ mod tests {
 
 		task.await.unwrap().unwrap();
 		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 1);
-		broadcast.close();
+		broadcast.broadcast().close();
 	}
 
 	/// The relay fails a group it gave up on (`Error::Lagged` once a subscriber

@@ -241,11 +241,11 @@ async def run(args: argparse.Namespace) -> None:
             async with moq.connect(args.url) as client:
                 try:
                     for truck in world.trucks:
-                        publication = client.create_broadcast(broadcast_path(truck.name, args.camera))
+                        route = client.route(broadcast_path(truck.name, args.camera), hidden=True)
                         video = await bridge.open(
-                            bridge_stream(truck.name, args.camera), renditions(camera), publication.broadcast
+                            bridge_stream(truck.name, args.camera), renditions(camera), route.broadcast
                         )
-                        session = TruckSession(truck, publication, video, args.location, map_name, world.clock)
+                        session = TruckSession(truck, route, video, args.location, map_name, world.clock)
                         sessions.append(session)
                         log.info(
                             "publishing %s, consuming %s/*",

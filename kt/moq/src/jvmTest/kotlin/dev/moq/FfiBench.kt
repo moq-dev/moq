@@ -83,8 +83,8 @@ class FfiBench {
         kotlinx.coroutines.coroutineScope {
             // Close every handle inside the case, so native teardown never lands in a later one.
             val origin = OriginProducer(OriginConfig(cacheCapacityBytes = CACHE_BYTES))
-            val publication = origin.createBroadcast("bench")
-            val broadcast = publication.broadcast()
+            val route = origin.route("bench", RouteOptions(hidden = true))
+            val broadcast = route.broadcast()
             val tracks =
                 (0 until case.publishers).map {
                     broadcast.publishTrack("$it", TrackInfo(timescale = 1_000_000uL))
@@ -142,7 +142,7 @@ class FfiBench {
             val mb = (n - WARMUP) * case.delivered / 1e6
             results += Result("throughput/${case.name}", "MB/s", mb / (wallNs / 1e9))
             results += Result("cpu/${case.name}", "ms/MB", cpuUsedNs / 1e6 / mb)
-            (consumers + tracks + listOf(broadcast, publication, origin)).forEach { it.close() }
+            (consumers + tracks + listOf(broadcast, route, origin)).forEach { it.close() }
         }
 
     private inline fun call(name: String, results: MutableList<Result>, fn: () -> Unit) {

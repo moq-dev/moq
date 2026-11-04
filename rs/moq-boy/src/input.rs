@@ -186,15 +186,16 @@ mod tests {
 	}
 
 	/// Publish a viewer with a live command track.
-	fn viewer(origin: &moq_net::origin::Producer) -> (moq_net::origin::Publication, moq_net::track::Producer) {
-		let broadcast = origin.create_broadcast("alice").unwrap();
+	fn viewer(origin: &moq_net::origin::Producer) -> (moq_net::origin::Route, moq_net::track::Producer) {
+		let broadcast = origin.route("alice", moq_net::origin::RouteOptions::hidden()).unwrap();
 		let track = broadcast
+			.broadcast()
 			.create_track(
 				"command",
 				moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 			)
 			.unwrap();
-		broadcast.announce(moq_net::origin::Route::default()).unwrap();
+		broadcast.announce().unwrap();
 		(broadcast, track)
 	}
 
@@ -249,7 +250,7 @@ mod tests {
 		send(&old_track, r#"{"type":"reset"}"#);
 		assert!(matches!(rx.recv().await, Some(Command::Reset)));
 
-		old.unannounce();
+		old.withdraw();
 		assert!(matches!(rx.recv().await, Some(Command::ViewerLeft { .. })));
 		let (_new, new_track) = viewer(&origin);
 		kio::clock::sleep(Duration::from_secs(1)).await;

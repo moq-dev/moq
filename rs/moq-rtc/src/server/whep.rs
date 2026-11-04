@@ -292,10 +292,9 @@ mod tests {
 	async fn a_broadcast_resolves_through_a_lazy_client_session() {
 		let pub_origin = moq_tokio::origin::spawn();
 
-		let source = pub_origin.create_broadcast("cam").expect("create broadcast");
-		source
-			.announce(moq_net::origin::Route::default())
-			.expect("announce broadcast");
+		let source = pub_origin
+			.route("cam", moq_net::origin::RouteOptions::default())
+			.expect("create broadcast");
 		let catalog =
 			moq_mux::catalog::Producer::new(&mut source.broadcast().clone(), moq_mux::catalog::Config::default())
 				.expect("create catalog");
@@ -323,10 +322,9 @@ mod tests {
 	#[tokio::test]
 	async fn offers_ride_the_routers_scope_watch() {
 		let pub_origin = moq_tokio::origin::spawn();
-		let other = pub_origin.create_broadcast("other").expect("create broadcast");
-		other
-			.announce(moq_net::origin::Route::default())
-			.expect("announce broadcast");
+		let other = pub_origin
+			.route("other", moq_net::origin::RouteOptions::default())
+			.expect("create broadcast");
 		let (sub_origin, _connection, accept) = lazy_client(pub_origin).await;
 
 		let _router = super::router(crate::server::Server::new(Default::default()), sub_origin.consume());

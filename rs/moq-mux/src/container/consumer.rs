@@ -3047,17 +3047,15 @@ mod tests {
 		// One publisher instance behind every route, so each may resume the others.
 		let instance = moq_net::Instance::random();
 		let origin = crate::source::produce_origin();
-		let hops = moq_net::Hops::try_from(vec![moq_net::Hop::new(10).unwrap()]).unwrap();
 		let route = |cost: u64| {
-			moq_net::origin::Route::default()
+			moq_net::origin::RouteOptions::hidden()
 				.with_instance(instance.clone(), 0)
-				.with_hops(hops.clone())
 				.with_cost(cost)
 		};
-		let first = origin.create_broadcast("live").unwrap();
+		let first = origin.route("live", route(5)).unwrap();
 		let info = hang::container::track_info(hang::catalog::PRIORITY.video);
-		let first_track = first.create_track("video", info.clone()).unwrap();
-		first.announce(route(5)).unwrap();
+		let first_track = first.broadcast().create_track("video", info.clone()).unwrap();
+		first.announce().unwrap();
 		let broadcast = origin.consume().request("live", None).await.unwrap();
 		let track = broadcast
 			.track("video")
@@ -3089,9 +3087,9 @@ mod tests {
 		// full budget past it.
 		let mut sources = Vec::new();
 		for sequence in 1..=4 {
-			let source = origin.create_broadcast("live").unwrap();
-			let mut track = source.create_track("video", info.clone()).unwrap();
-			source.announce(route(5 - sequence)).unwrap();
+			let source = origin.route("live", route(5 - sequence)).unwrap();
+			let mut track = source.broadcast().create_track("video", info.clone()).unwrap();
+			source.announce().unwrap();
 			let mut demand = track.demand();
 			while demand.wanted_changed().await.unwrap().is_none() {}
 			if sequence == 1 {

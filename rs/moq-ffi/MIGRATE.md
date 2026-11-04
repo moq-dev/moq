@@ -5,6 +5,22 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Publishing goes through one `MoqRoute` handle
+
+`MoqOriginProducer::create_broadcast(path)` is `route(path, MoqRouteOptions)`, and `requests(prefix)` is `route_prefix(prefix, MoqRouteOptions)`. Both return a `MoqRoute`, which replaces `MoqPublication`, `MoqOriginRequests`, and `MoqBroadcastPrepared`:
+
+- `MoqPublication::broadcast()` is `MoqRoute::broadcast()`, which errors with `Internal` on a prefix route.
+- `MoqPublication::announce(MoqAnnounceRoute)` is `announce()`, and re-pricing is `set_cost(cost)`. `unannounce()` is `withdraw()`.
+- `MoqOriginRequests::requested_broadcast()` is `requested()`, which returns `None` once the origin closes instead of `Closed`. A call after `cancel()` fails with `Cancelled`.
+- `MoqBroadcastRequest::prepare()` then `MoqBroadcastPrepared::publish()` is `MoqBroadcastRequest::route(options)`: create it hidden to fill it first, then `announce()`.
+- `MoqRoute::instance()` is the stream's instance, minted at creation and kept across `withdraw` and `announce`.
+
+`MoqAnnounceRoute` is `MoqRouteOptions { hidden, cost, instance, epoch }`, given once at creation. A route is visible at once unless `hidden`; pass `hidden: true` and call `announce()` after filling the catalog to keep the old create-then-announce order. A stable `instance` is fixed for the route's lifetime: announcing a different one is a new route.
+
+Hold the `MoqRoute` for as long as the broadcast should stay announced. Dropping or cancelling it retracts the route, while `MoqBroadcastProducer::close()` still ends both; a broadcast handle alone no longer keeps it announced.
+
+`MoqRoute`, the record carried by `MoqAnnounce.route`, is renamed `MoqRouteInfo`; its fields are unchanged.
+
 ### `MoqVideoInit.lower` takes either producer kind ([#7699](https://github.com/moq-dev/moq/pull/7699))
 
 `MoqVideoInit.lower` is `Option<MoqMediaProducer>` instead of `Option<MoqMediaTrackProducer>`. Wrap a frame producer as `MoqMediaProducer::Track { producer }`; a `MoqMediaTrackStreamProducer` goes in as `MoqMediaProducer::Stream { producer }`.

@@ -366,10 +366,10 @@ def test_stuck_watchdog_leaves_a_held_or_estopped_truck_alone(monkeypatch: pytes
 
 
 def test_session_announces_after_populating_tracks() -> None:
-    """The player lists trucks from announcements, and a broadcast starts
-    unadvertised, so a session that never announces is invisible."""
+    """The player lists trucks from announcements, and the route starts hidden,
+    so a session that never announces is invisible."""
     calls: list[object] = []
-    publication = SimpleNamespace(
+    route = SimpleNamespace(
         broadcast=SimpleNamespace(
             publish_track=lambda name, info=None: calls.append(name) or SimpleNamespace(demand=SimpleNamespace)
         ),
@@ -377,7 +377,7 @@ def test_session_announces_after_populating_tracks() -> None:
     )
 
     # The video tracks were advertised when the bridge stream opened.
-    runtime.TruckSession(SimpleNamespace(name="truck1"), publication, SimpleNamespace(), None, None, FakeClock())
+    runtime.TruckSession(SimpleNamespace(name="truck1"), route, SimpleNamespace(), None, None, FakeClock())
 
     assert calls == ["status", "announce"]
 

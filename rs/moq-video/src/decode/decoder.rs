@@ -614,11 +614,12 @@ mod tests {
 
 		let (origin, driver) = moq_net::origin::Producer::new(Default::default());
 		tokio::spawn(moq_net::time::run(driver));
-		let source = origin.publish("test", Default::default()).unwrap();
+		let source = origin.route("test", Default::default()).unwrap();
 		let mut source_catalog =
 			moq_mux::catalog::Producer::new(&mut source.broadcast().clone(), moq_mux::catalog::Config::default())
 				.unwrap();
 		let track = source
+			.broadcast()
 			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::H265 {

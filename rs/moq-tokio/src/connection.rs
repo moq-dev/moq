@@ -3355,9 +3355,8 @@ mod tests {
 
 		// Two relays of one fleet, serving the same live broadcast.
 		let origin = crate::origin::spawn();
-		let broadcast = origin.create_broadcast("cam").unwrap();
-		broadcast.announce(Default::default()).unwrap();
-		let track = broadcast.create_track("video", timed()).unwrap();
+		let broadcast = origin.route("cam", moq_net::origin::RouteOptions::default()).unwrap();
+		let track = broadcast.broadcast().create_track("video", timed()).unwrap();
 		let (addr_a, mut accepted_a, _task_a) = serve(origin.clone()).await;
 		let (addr_b, mut accepted_b, _task_b) = serve(origin.clone()).await;
 
@@ -3463,8 +3462,7 @@ mod tests {
 		session.drain().send(moq_net::goaway::Goaway::new()).unwrap();
 
 		// A broadcast announced after the GOAWAY still arrives: the drained session serves.
-		let late = origin.create_broadcast("late").unwrap();
-		late.announce(Default::default()).unwrap();
+		let _late = origin.route("late", moq_net::origin::RouteOptions::default()).unwrap();
 		kio::clock::timeout(WAIT, subscriber.consume().follow("late", None).unwrap().available())
 			.await
 			.expect("the drained session stopped serving")
@@ -3620,8 +3618,7 @@ mod tests {
 	async fn a_publication_waits_for_a_configured_token() {
 		let shared = shared();
 		let publish = crate::origin::spawn();
-		let broadcast = publish.create_broadcast("room").unwrap();
-		broadcast.announce(moq_net::origin::Route::default()).unwrap();
+		let _route = publish.route("room", moq_net::origin::RouteOptions::default()).unwrap();
 		let server_origin = crate::origin::spawn();
 
 		let config = crate::connect::Config {

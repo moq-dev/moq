@@ -56,9 +56,13 @@ fn lite_session_over_the_worker() {
 
 	// Content ready before anyone connects: one broadcast, one track, one
 	// finished group.
-	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("create broadcast");
-	let track = broadcast.create_track("data", timed()).expect("create track");
+	let broadcast = pub_origin
+		.route("test", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+	let track = broadcast
+		.broadcast()
+		.create_track("data", timed())
+		.expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, PAYLOAD)
@@ -194,9 +198,13 @@ fn two_lite_sessions_share_the_server_socket() {
 		});
 	});
 
-	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("create broadcast");
-	let track = broadcast.create_track("data", timed()).expect("create track");
+	let broadcast = pub_origin
+		.route("test", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+	let track = broadcast
+		.broadcast()
+		.create_track("data", timed())
+		.expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, PAYLOAD)

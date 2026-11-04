@@ -125,8 +125,8 @@ import (
 	moqmedia "moq.dev/moq/media"
 )
 
-publication, _ := client.CreateBroadcast("room")
-broadcast := publication.Broadcast()
+route, _ := client.Route("room", moq.RouteOptions{Hidden: true})
+broadcast, _ := route.Broadcast()
 // Every JSON write is stamped, so the track is timed. JSON is small and repetitive, so
 // compress it on the wire.
 scale := uint64(1_000)
@@ -135,7 +135,7 @@ status, _ := moqjson.NewSnapshotProducer(broadcast, track, moqjson.SnapshotOptio
 catalog, _ := moqmedia.NewCatalogProducer(broadcast)
 now, _ := catalog.Now()
 _ = status.Update(map[string]any{"viewers": 42}, now)
-_ = publication.Announce(moq.AnnounceRoute{})
+_ = route.Announce()
 ```
 
 Snapshot and window producers take `SnapshotOptions` or `WindowOptions`; the stream producer and

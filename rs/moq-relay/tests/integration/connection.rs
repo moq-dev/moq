@@ -19,10 +19,12 @@ async fn largest_quic_sequence_reaches_the_subscriber() {
 		let auth = memory::public(&["**"], &[], &[]);
 		let cluster = memory::cluster();
 		let publisher = moq_tokio::origin::spawn();
-		let broadcast = publisher.create_broadcast("ladder").unwrap();
+		let broadcast = publisher
+			.route("ladder", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MICRO);
-		let track = broadcast.create_track("data", info).unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let track = broadcast.broadcast().create_track("data", info).unwrap();
+		broadcast.announce().unwrap();
 		let _publisher = connect(
 			moq_net::Client::new().with_publisher(publisher.consume()),
 			version,
@@ -74,14 +76,15 @@ fn publish(
 	name: &str,
 ) -> (
 	moq_net::origin::Producer,
-	moq_net::origin::Publication,
+	moq_net::origin::Route,
 	moq_net::track::Producer,
 ) {
 	let origin = moq_tokio::origin::spawn();
-	let broadcast = origin.create_broadcast(name).expect("create broadcast");
-	broadcast.announce(Default::default()).expect("announce");
+	let broadcast = origin
+		.route(name, moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
 	let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
-	let track = broadcast.create_track("video", info).expect("create track");
+	let track = broadcast.broadcast().create_track("video", info).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, name.as_bytes())

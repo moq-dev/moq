@@ -74,9 +74,11 @@ async fn transfer(
 	subscriber: moq_auth::Grant,
 ) -> Duration {
 	let origin = moq_tokio::origin::spawn();
-	let broadcast = origin.create_broadcast("test").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("announce");
+	let broadcast = origin
+		.route("test", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
 	let track = broadcast
+		.broadcast()
 		.create_track(
 			"video",
 			moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),

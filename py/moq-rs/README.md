@@ -59,8 +59,9 @@ import moq
 
 async def main():
     async with moq.Client("https://cdn.moq.dev/anon") as client:
-        publication = client.create_broadcast("my-stream")
-        broadcast = publication.broadcast
+        # Hidden until announced; hold the route, since dropping it retracts the broadcast.
+        route = client.route("my-stream", hidden=True)
+        broadcast = route.broadcast
 
         # Publish an Opus audio track (init bytes from your encoder)
         audio = moq.media.TrackProducer.audio(
@@ -74,8 +75,8 @@ async def main():
         audio.write_frame(payload, timestamp=moq.Timestamp(20, 1_000))
         audio.cut()
 
-        # Each broadcast mints a fresh instance, so viewers see a restart as a new stream.
-        publication.announce()
+        # Each route mints a fresh instance, so viewers see a restart as a new stream.
+        route.announce()
 
         # Clean up
         audio.finish()
@@ -94,9 +95,9 @@ import moq
 
 async def main():
     async with moq.Server("127.0.0.1:4443", tls_generate=["localhost"]) as server:
-        publication = server.create_broadcast("hello")
-        track = publication.broadcast.publish_track("events")
-        publication.announce()
+        route = server.route("hello", hidden=True)
+        track = route.broadcast.publish_track("events")
+        route.announce()
         print(f"listening on https://{server.local_addr}")
 
         sessions = []
@@ -150,7 +151,7 @@ client = moq.Client(
   - `keylog`. Write TLS session secrets to the file `SSLKEYLOGFILE` names, for decrypting a capture; without `SSLKEYLOGFILE` entering the server fails.
   - `.local_addr`. The bound address (useful when binding to port `0`).
   - `.cert_fingerprints()`. SHA-256 fingerprints of the configured TLS certificates, for `serverCertificateHashes` browser cert pinning.
-  - `.create_broadcast(path) → Publication`. Create an unannounced broadcast, invisible to everyone; fill `.broadcast`, then `announce()` makes it discoverable and reachable; `.broadcast.close()` ends it.
+  - `.route(path, *, hidden=False, cost=0, instance=None, epoch=0) → Route`. Create a route owning a broadcast to fill at `.broadcast`. Create it `hidden` to fill it before `announce()` makes it discoverable and reachable; dropping or cancelling the route retracts it, and `.broadcast.close()` ends both.
 - **`Request`**. An incoming session, yielded by `async for request in server`.
   - `.url`, `.path`, `.query`, `.transport`. The query-free path is uniform across transports; the root or missing path is `""`. The encoded query may contain credentials.
   - `await .accept(*, publish=None, consume=None) → Session`. Origins are captured when accept starts; None inherits the server default and a supplied origin replaces it. Pass fresh origins for isolation, or the same origin on both sides to share it. A second response raises `AlreadyResponded`; calls after cancel raise `Cancelled`. Complete the handshake (hold the result to keep the connection alive).
@@ -249,20 +250,19 @@ same either way. Opaque bytes go on a plain `TrackProducer`.
 - **`GroupConsumer`**. Async iterator of raw `Frame`s.
   - `.read_frame() -> Frame | None` returns a raw frame with optional capture time.
 
-Every handle whose cleanup is `cancel()` is an async context manager, so exiting `async with` releases it: the consumers (`media.CatalogConsumer`, `media.TrackConsumer`, `media.GroupConsumer`, `TrackConsumer`, `audio.Consumer`, `video.Consumer`, `GroupConsumer`, `json.SnapshotConsumer`, `json.StreamConsumer`, `json.WindowConsumer`, `AnnounceConsumer`, `Following`) and the dynamic sources (`OriginRequests`, `BroadcastRequests`, `TrackRequests`).
+Every handle whose cleanup is `cancel()` is an async context manager, so exiting `async with` releases it: the consumers (`media.CatalogConsumer`, `media.TrackConsumer`, `media.GroupConsumer`, `TrackConsumer`, `audio.Consumer`, `video.Consumer`, `GroupConsumer`, `json.SnapshotConsumer`, `json.StreamConsumer`, `json.WindowConsumer`, `AnnounceConsumer`, `Following`) and the dynamic sources (`Route`, `BroadcastRequests`, `TrackRequests`).
 
 ### Origin (advanced)
 
 - **`OriginProducer(*, cache_capacity_bytes=None)`**. Manage broadcast announcements. Set `cache_capacity_bytes` to bound cached groups under this origin.
   - `.consume() → OriginConsumer`
-  - `.requests(prefix) → OriginRequests`
-  - `.create_broadcast(path) → Publication`
-- **`Publication`**. A broadcast published on an origin. Dropping it keeps the route; closing the broadcast ends it.
-  - `.broadcast → BroadcastProducer`. The broadcast to fill.
-  - `.announce(route=None)`, `.unannounce()`. Advertise or retract its exact path; both raise `Closed` once the broadcast closed.
-- **`OriginRequests`**. Async source of broadcasts requested by consumers.
-  - `await .requested_broadcast() → BroadcastRequest`. Call `.serve(consumer)` to answer with held content under the prefix route's continuous sequence space, `.prepare()` then fill its `.broadcast` and `.publish() → Publication` for an independently restarting job under a fresh instance, or `.reject(code)` to fail the requester.
-  - Async iterator yielding `BroadcastRequest`
+  - `.route(path, *, hidden=False, cost=0, instance=None, epoch=0) → Route`. An exact route owning a new broadcast, visible at once unless `hidden`, under a fresh instance unless `instance` names one.
+  - `.route_prefix(prefix, *, hidden=False, cost=0, instance=None, epoch=0) → Route`. A prefix route that yields the requests beneath it.
+- **`Route`**. A route on an origin. Hold it: dropping or cancelling it retracts it, and so does closing its broadcast.
+  - `.broadcast → BroadcastProducer`. The broadcast an exact route owns; raises `Internal` on a prefix route.
+  - `.instance`. The stream it serves, kept across `withdraw()` and `announce()`.
+  - `.announce()`, `.withdraw()`, `.set_cost(cost)`. Show, hide, or re-price it in place; `announce` and `set_cost` raise `Closed` once the broadcast closed.
+  - `await .requested() → BroadcastRequest | None`, or async iteration over a prefix route. Call `.serve(consumer)` to answer with held content under the prefix route's continuous sequence space, `.route(hidden=..., ...)` for the path's own route under a fresh instance, as an independently restarting job, or `.reject(code)` to fail the requester.
 - **`OriginConsumer`**. Discover broadcasts.
   - `.announced(prefix, filter=None) → AnnounceConsumer` (async iterator of `AnnounceEvent`: `AnnounceEventStart`, `AnnounceEventUpdate`, `AnnounceEventEnd`, `AnnounceEventRestart`, or `AnnounceEventTakeover`, each carrying an `Announce` whose `.route.instance` names the stream; on a restart, request the path again; a takeover continues what the route at `.predecessor` served); `filter` is a pattern relative to the literal prefix, while each `Announce.prefix` stays origin-relative and `.captures` is a required list of wildcard matches, empty without wildcards
   - `.follow(path, instance=None) → Following` (awaitable, waits until something serves the path, then each stream that takes over; an `instance` follows only that stream)

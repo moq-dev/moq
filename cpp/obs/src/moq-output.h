@@ -59,6 +59,9 @@ public:
 	// Prefer this over obs_output_get_connect_time_ms, which stays 0 for sub-ms connects.
 	bool IsLiveSession();
 
+	// The route's instance for this Start(), kept through session reconnects; empty when stopped.
+	std::string GetInstance();
+
 	// Most recent connect/reconnect failure for this Start(), or empty when none.
 	// Thread-safe; the dock polls this while connecting, while reconnecting, and on stop.
 	void CopyLastFailure(int *code, std::string *reason);
@@ -184,6 +187,7 @@ private:
 	bool connected = false;
 	bool live = false;
 	std::string url;
+	std::string instance;
 	int last_failure_code = 0;
 	std::string last_failure_reason;
 	std::string token_refusal;
@@ -195,6 +199,8 @@ private:
 	// Never held across an OBS call that can wait on an encoder thread.
 	std::mutex media_mutex;
 	std::shared_ptr<moq::OriginProducer> origin;
+	// Keeps the broadcast announced; the broadcast closing retracts it.
+	std::shared_ptr<moq::Route> route;
 	std::shared_ptr<moq::BroadcastProducer> broadcast;
 	std::map<obs_encoder_t *, Track> video_tracks;
 	std::map<obs_encoder_t *, Track> audio_tracks;

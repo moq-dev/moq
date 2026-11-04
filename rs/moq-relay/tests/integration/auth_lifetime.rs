@@ -271,9 +271,13 @@ fn room_url(scheme: &str, port: u16) -> url::Url {
 /// round-trips. Returns both sessions so the caller can watch them close.
 async fn connect_and_round_trip(url: &url::Url) -> (moq_tokio::Connection, moq_tokio::Connection) {
 	let pub_origin = moq_tokio::origin::spawn();
-	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("create broadcast");
-	let track = broadcast.create_track("video", timed()).expect("create track");
+	let broadcast = pub_origin
+		.route("test", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+	let track = broadcast
+		.broadcast()
+		.create_track("video", timed())
+		.expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
@@ -644,9 +648,13 @@ async fn a_moved_tier_retags_the_live_session() {
 
 	// A publisher whose track stays open across the move, and a subscriber to it.
 	let pub_origin = moq_tokio::origin::spawn();
-	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("announce broadcast");
-	let track = broadcast.create_track("video", timed()).expect("create track");
+	let broadcast = pub_origin
+		.route("test", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+	let track = broadcast
+		.broadcast()
+		.create_track("video", timed())
+		.expect("create track");
 	let pub_session = kio::clock::timeout(
 		TIMEOUT,
 		client()
@@ -786,9 +794,14 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 		let pub_origin = moq_tokio::origin::spawn();
 		let mut tracks = Vec::new();
 		for path in ["alice/audio", "alice/video"] {
-			let broadcast = pub_origin.create_broadcast(path).expect("create broadcast");
-			let track = broadcast.create_track("media", timed()).expect("create track");
-			broadcast.announce(Default::default()).expect("announce broadcast");
+			let broadcast = pub_origin
+				.route(path, moq_net::origin::RouteOptions::hidden())
+				.expect("create broadcast");
+			let track = broadcast
+				.broadcast()
+				.create_track("media", timed())
+				.expect("create track");
+			broadcast.announce().expect("announce broadcast");
 			tracks.push((broadcast, track));
 		}
 		let pub_session = kio::clock::timeout(
@@ -981,9 +994,13 @@ async fn http_routes_hold_a_lease() {
 
 	// A publisher whose group stays open, so a fetch of it keeps streaming.
 	let pub_origin = moq_tokio::origin::spawn();
-	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("announce");
-	let track = broadcast.create_track("video", timed()).expect("create track");
+	let broadcast = pub_origin
+		.route("test", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+	let track = broadcast
+		.broadcast()
+		.create_track("video", timed())
+		.expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
@@ -1326,8 +1343,9 @@ async fn mtls_route_source(mtls_peer: bool) -> moq_net::origin::Source {
 	config.tls.cert = Some(client_cert);
 	config.tls.key = Some(client_key);
 	let peer = moq_tokio::origin::spawn();
-	let _forwarded = peer.create_broadcast("forwarded").expect("create");
-	_forwarded.announce(Default::default()).expect("announce");
+	let _forwarded = peer
+		.route("forwarded", moq_net::origin::RouteOptions::default())
+		.expect("create");
 	let url: url::Url = format!("moql://127.0.0.1:{}/", addr.port()).parse().unwrap();
 	let _session = kio::clock::timeout(
 		TIMEOUT,
@@ -1755,12 +1773,12 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 			config.init(Default::default()).unwrap().with_reconnect(false)
 		};
 		let origin = moq_tokio::origin::spawn();
-		let a = origin.create_broadcast("a/cam").unwrap();
-		let a_track = a.create_track("video", timed()).unwrap();
-		a.announce(Default::default()).unwrap();
-		let b = origin.create_broadcast("b/cam").unwrap();
-		let b_track = b.create_track("video", timed()).unwrap();
-		b.announce(Default::default()).unwrap();
+		let a = origin.route("a/cam", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let a_track = a.broadcast().create_track("video", timed()).unwrap();
+		a.announce().unwrap();
+		let b = origin.route("b/cam", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let b_track = b.broadcast().create_track("video", timed()).unwrap();
+		b.announce().unwrap();
 		let publisher = kio::clock::timeout(
 			TIMEOUT,
 			client()
@@ -1874,10 +1892,16 @@ async fn request_token_lease_ends_before_the_connection_and_reopens_later() {
 		.unwrap();
 	let (token, _) = publisher.auth().add("shared").await.unwrap();
 	let first = origin
-		.publish("first", moq_net::origin::Route::default().with_auth(token.clone()))
+		.route(
+			"first",
+			moq_net::origin::RouteOptions::default().with_auth(token.clone()),
+		)
 		.unwrap();
 	let second = origin
-		.publish("second", moq_net::origin::Route::default().with_auth(token.clone()))
+		.route(
+			"second",
+			moq_net::origin::RouteOptions::default().with_auth(token.clone()),
+		)
 		.unwrap();
 	for path in ["first", "second"] {
 		kio::clock::timeout(TIMEOUT, read.follow(path, None).unwrap().available())
@@ -1919,7 +1943,7 @@ async fn request_token_lease_ends_before_the_connection_and_reopens_later() {
 	assert_eq!(ended[0].auth, attached[0].auth);
 	assert!(ended[0].auth.is_some());
 	let _later = origin
-		.publish("later", moq_net::origin::Route::default().with_auth(token))
+		.route("later", moq_net::origin::RouteOptions::default().with_auth(token))
 		.unwrap();
 	kio::clock::timeout(TIMEOUT, read.follow("later", None).unwrap().available())
 		.await
@@ -1961,14 +1985,12 @@ async fn relay_request_limits_distinguish_clients_and_peers() {
 				.established()
 				.await
 				.unwrap();
-			let first = origin.create_broadcast("one").unwrap();
-			first.announce(Default::default()).unwrap();
+			let _first = origin.route("one", moq_net::origin::RouteOptions::default()).unwrap();
 			kio::clock::timeout(TIMEOUT, next_update(&mut observed))
 				.await
 				.unwrap()
 				.unwrap();
-			let second = origin.create_broadcast("two").unwrap();
-			second.announce(Default::default()).unwrap();
+			let _second = origin.route("two", moq_net::origin::RouteOptions::default()).unwrap();
 			if peer {
 				let (route, active) = kio::clock::timeout(TIMEOUT, next_update(&mut observed))
 					.await

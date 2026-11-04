@@ -326,9 +326,9 @@ class BroadcastRequests(_Stream[TrackRequest]):
 class BroadcastProducer:
     """Wraps MoqBroadcastProducer with a cleaner interface.
 
-    It fills tracks; announcing belongs to the :class:`moq.Publication` that
-    :meth:`moq.OriginProducer.create_broadcast` returns, the way to publish at a
-    path. Constructing one directly creates a standalone broadcast for local pub/sub.
+    It fills tracks; announcing belongs to the :class:`moq.Route` that
+    :meth:`moq.OriginProducer.route` returns, the way to publish at a path.
+    Constructing one directly creates a standalone broadcast for local pub/sub.
     """
 
     def __init__(self) -> None:

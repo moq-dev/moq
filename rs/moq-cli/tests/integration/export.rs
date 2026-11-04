@@ -520,18 +520,16 @@ async fn a_restarted_publisher_is_a_program_switch_with_stitch() {
 #[ignore = "real-time process test: just rs cli-export"]
 async fn the_same_instance_within_the_follow_continues() {
 	let relay = relay().await;
-	let instance = moq_net::Instance::random();
 	let lite07 = ["--connect-version", LITE_07];
 	let origin = moq_tokio::origin::spawn();
-	let broadcast = origin.create_broadcast("demo").unwrap();
+	let broadcast = origin.route("demo", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let instance = broadcast.instance();
 	let config = moq_mux::catalog::Config::default()
 		.with_max_age(Some(Duration::from_secs(1)))
 		.with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default());
 	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config).unwrap();
 	let mut import = ts::Import::new(broadcast.broadcast().clone(), catalog.reserve());
-	broadcast
-		.announce(moq_net::origin::Route::default().with_instance(instance.clone(), 0))
-		.unwrap();
+	broadcast.announce().unwrap();
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
 	config.version = vec![LITE_07.parse().unwrap()];
@@ -1064,10 +1062,7 @@ async fn next_instance(announced: &mut moq_net::announce::Consumer) -> moq_net::
 				moq_net::announce::Event::Start(announce)
 				| moq_net::announce::Event::Restart(announce)
 				| moq_net::announce::Event::Takeover { announce, .. } => {
-					return announce
-						.route
-						.instance
-						.expect("a lite-07 importer announces its instance");
+					return announce.route.instance().clone();
 				}
 				_ => continue,
 			}

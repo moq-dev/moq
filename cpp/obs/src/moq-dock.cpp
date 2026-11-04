@@ -1124,6 +1124,11 @@ void MoQDock::StartStream()
 		return;
 	}
 
+	if (auto *moq = static_cast<MoQOutput *>(obs_obj_get_data(output))) {
+		const auto instance = moq->GetInstance();
+		if (!instance.empty())
+			publishSummary += QStringLiteral("\nInstance ") + QString::fromStdString(instance);
+	}
 	pollTimer->start();
 
 	SetRunning(true);

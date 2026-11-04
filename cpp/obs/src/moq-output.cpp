@@ -166,19 +166,20 @@ bool MoQOutput::Start()
 		return false;
 	}
 
-	// Create the broadcast on an origin of our own, then announce it so subscribers
-	// can discover it. Stop() finishes it, so each Start creates a fresh one, under a
-	// fresh instance the broadcast mints and keeps across reconnects. Only the
-	// broadcast is kept: the route outlives the publication until the broadcast closes.
+	// Route the broadcast on an origin of our own, visible at once so subscribers can
+	// discover it. Stop() closes it, so each Start creates a fresh route, under a fresh
+	// instance it mints and keeps across reconnects. The route is held until Reset():
+	// releasing it would retract the broadcast.
 	LOG_INFO("Publishing broadcast: %s", path.c_str());
 	auto next_origin = moq::OriginProducer::init(moq::OriginConfig{});
-	auto publication = next_origin->create_broadcast(path);
-	if (!publication) {
-		LOG_ERROR("Failed to create broadcast: %s", publication.error().to_string().c_str());
+	auto next_route = next_origin->route(path, {});
+	if (!next_route) {
+		LOG_ERROR("Failed to create broadcast: %s", next_route.error().to_string().c_str());
 		return false;
 	}
-	if (auto announced = (*publication)->announce({}); !announced) {
-		LOG_ERROR("Failed to announce broadcast: %s", announced.error().to_string().c_str());
+	auto next_broadcast = (*next_route)->broadcast();
+	if (!next_broadcast) {
+		LOG_ERROR("Failed to create broadcast: %s", next_broadcast.error().to_string().c_str());
 		return false;
 	}
 
@@ -228,11 +229,13 @@ bool MoQOutput::Start()
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		url = server;
+		instance = (*next_route)->instance();
 	}
 	{
 		std::lock_guard<std::mutex> lock(media_mutex);
 		origin = next_origin;
-		broadcast = (*publication)->broadcast();
+		route = *next_route;
+		broadcast = *next_broadcast;
 	}
 
 	// NOTE: You could publish the same broadcasts to multiple sessions if you want (redundant ingest).
@@ -369,6 +372,7 @@ void MoQOutput::Reset()
 		connected = false;
 		live = false;
 		url.clear();
+		instance.clear();
 		last_failure_code = MoQError::None;
 		last_failure_reason.clear();
 		token_refusal.clear();
@@ -403,6 +407,7 @@ void MoQOutput::Reset()
 	if (broadcast)
 		broadcast->close();
 	broadcast.reset();
+	route.reset();
 	origin.reset();
 
 	// The session owns the drain after this request, even if the output dies now.
@@ -423,6 +428,12 @@ void MoQOutput::Reset()
 
 	for (auto &[encoder, bitrate] : restore)
 		SetBitrate(encoder, bitrate);
+}
+
+std::string MoQOutput::GetInstance()
+{
+	std::lock_guard<std::mutex> lock(mutex);
+	return instance;
 }
 
 bool MoQOutput::TryGetConnectionStats(ConnectionStats *out)

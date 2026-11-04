@@ -149,9 +149,13 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
 	let upstream_origin = moq_tokio::origin::spawn();
-	let broadcast = upstream_origin.create_broadcast("cam").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("announce");
-	let track = broadcast.create_track("video", timed()).expect("create track");
+	let broadcast = upstream_origin
+		.route("cam", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+	let track = broadcast
+		.broadcast()
+		.create_track("video", timed())
+		.expect("create track");
 
 	let (port_a, mut accepted_a, _handle_a) = spawn_upstream(upstream_origin.clone()).await;
 	let (port_b, mut accepted_b, _handle_b) = spawn_upstream(upstream_origin.clone()).await;
@@ -217,7 +221,7 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 			| moq_net::announce::Event::Update(update)
 			| moq_net::announce::Event::Restart(update)
 			| moq_net::announce::Event::Takeover { announce: update, .. } = event
-				&& update.route.cost != moq_net::origin::Cost::DRAIN
+				&& update.route.cost() != moq_net::origin::Cost::DRAIN
 			{
 				break;
 			}
@@ -288,9 +292,13 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 	kio::clock::timeout(TEST_TIMEOUT, async {
 		// ── the shared "live" broadcast both siblings can serve ─────────
 		let upstream_origin = moq_tokio::origin::spawn();
-		let broadcast = upstream_origin.create_broadcast("cam").expect("create broadcast");
-		broadcast.announce(Default::default()).expect("create broadcast");
-		let track = broadcast.create_track("video", timed()).expect("create track");
+		let broadcast = upstream_origin
+			.route("cam", moq_net::origin::RouteOptions::default())
+			.expect("create broadcast");
+		let track = broadcast
+			.broadcast()
+			.create_track("video", timed())
+			.expect("create track");
 
 		let (port_a, mut accepted_a, _handle_a) = spawn_upstream(upstream_origin.clone()).await;
 		let (port_b, mut accepted_b, _handle_b) = spawn_upstream(upstream_origin.clone()).await;
@@ -480,11 +488,13 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 
 	// ── TOP: origin server serving the same broadcast to both mids ──────
 	let top_origin = moq_tokio::origin::spawn();
-	let broadcast = top_origin.create_broadcast("diamond").expect("create broadcast");
-	broadcast
-		.announce(moq_net::origin::Route::default())
+	let broadcast = top_origin
+		.route("diamond", moq_net::origin::RouteOptions::default())
 		.expect("create broadcast");
-	let track = broadcast.create_track("video", timed()).expect("create track");
+	let track = broadcast
+		.broadcast()
+		.create_track("video", timed())
+		.expect("create track");
 
 	let (top_port, mut top_accepted, _top_handle) = spawn_upstream(top_origin.clone()).await;
 	let top_url = format!("tcp://127.0.0.1:{top_port}/");

@@ -90,8 +90,8 @@ fn origin(config: moq_net::origin::Config) -> moq_net::origin::Producer {
 /// One publisher run of a broadcast: a catalog and a single VP8 rendition whose HLS records the
 /// catalog advertises.
 pub struct Publisher {
-	/// The broadcast, which announces its path while it lives.
-	pub broadcast: moq_net::origin::Publication,
+	/// The route, which announces its path while it lives.
+	pub route: moq_net::origin::Route,
 	/// The catalog.
 	pub catalog: moq_mux::catalog::Producer,
 	/// The media track, recording its HLS records as it is written.
@@ -99,14 +99,13 @@ pub struct Publisher {
 }
 
 impl Publisher {
-	/// Announce `path` on `origin` under `route` and publish its catalog.
-	pub fn new(origin: &moq_net::origin::Producer, path: &str, route: moq_net::origin::Route) -> Self {
-		let broadcast = origin.create_broadcast(path).expect("publish");
-		broadcast.announce(route).expect("announce");
+	/// Announce `path` on `origin` with `options` and publish its catalog.
+	pub fn new(origin: &moq_net::origin::Producer, path: &str, options: moq_net::origin::RouteOptions) -> Self {
+		let route = origin.route(path, options).expect("publish");
 		let catalog =
-			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), catalog_config()).expect("catalog");
+			moq_mux::catalog::Producer::new(&mut route.broadcast().clone(), catalog_config()).expect("catalog");
 		let reserved = catalog.reserve();
-		let track = broadcast.create_track(TRACK, timed()).expect("track");
+		let track = route.broadcast().create_track(TRACK, timed()).expect("track");
 		let media = reserved
 			.video(
 				track,
@@ -115,11 +114,7 @@ impl Publisher {
 			)
 			.expect("rendition");
 		drop(reserved);
-		Self {
-			broadcast,
-			catalog,
-			media,
-		}
+		Self { route, catalog, media }
 	}
 
 	/// Write one-second frames for each second in `start..end`, a keyframe on every even second.

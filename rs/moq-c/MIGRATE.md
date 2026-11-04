@@ -4,6 +4,22 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Publishing goes through one route handle
+
+A route handle replaces the publication, the prepared answer, and the request handler:
+
+- `moq_origin_create_broadcast(origin, path, len, &broadcast)` is `moq_origin_route(origin, path, len, options)`, which returns a route; `moq_route_broadcast(route)` gives the broadcast handle to fill.
+- `moq_publication_announce(publication, route)` is `moq_route_announce(route)`, and re-pricing is `moq_route_set_cost(route, cost)`. `moq_publication_unannounce` is `moq_route_withdraw`, and `moq_publication_free` is `moq_route_free`.
+- `moq_origin_requests(origin, prefix, len, on_request, user_data)` is `moq_origin_route_prefix(origin, prefix, len, options, on_request, user_data)`, and `moq_origin_requests_cancel` is `moq_route_free`.
+- `moq_broadcast_request_prepare(request, &broadcast)` then `moq_broadcast_prepared_publish` is `moq_broadcast_request_route(request, options)`: create it hidden to fill it first, then `moq_route_announce`. `moq_broadcast_prepared_free` is `moq_route_free`.
+- `moq_route_instance(route, &dst)` reads the stream's instance, minted at creation and kept across withdraw and announce.
+
+`moq_announce_route` is `moq_route_options`, given once at creation, and gains a trailing `hidden`. A zeroed or NULL `moq_route_options` is visible at once, so set `hidden` and call `moq_route_announce` after filling the catalog to keep the old create-then-announce order. A stable `instance` is fixed for the route's lifetime: announcing another one is a new route.
+
+Hold the route for as long as the broadcast should stay announced. `moq_route_free` now retracts it, while `moq_publish_close` still ends both; the broadcast handle alone no longer keeps it announced.
+
+`moq_route`, the struct carried by `moq_announce_event.route`, is renamed `moq_route_info`; its fields are unchanged. Recompile against the regenerated `moq.h`.
+
 ### JSON writes refuse a NULL timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
 
 `moq_publish_json_snapshot_update`, `moq_publish_json_stream_append`, `moq_publish_json_window_push`, and `moq_publish_json_window_pop` fail with `MOQ_ERROR_INVALID_POINTER` and publish nothing on a NULL `timestamp`, instead of stamping the broadcast clock's current time.

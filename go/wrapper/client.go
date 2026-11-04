@@ -300,11 +300,11 @@ func Dial(ctx context.Context, url string, config ClientConfig) (*Client, error)
 	return c, nil
 }
 
-// CreateBroadcast creates an unannounced broadcast at path, invisible to everyone until announced. Announce it after populating tracks.
+// Route creates a route at exactly path on the publish origin, owning a new broadcast to fill.
 //
-// See [OriginProducer.CreateBroadcast].
-func (c *Client) CreateBroadcast(path string) (*Publication, error) {
-	return c.publisher.CreateBroadcast(path)
+// See [OriginProducer.Route].
+func (c *Client) Route(path string, options RouteOptions) (*Route, error) {
+	return c.publisher.Route(path, options)
 }
 
 // Announced streams routes announced by the remote under a pattern scope.

@@ -682,7 +682,7 @@ impl<S: Stream> Publish<S> {
 			.map_err(|e| anyhow::anyhow!("rtmp accept publish: {e:?}"))?;
 		self.work.extend(results);
 
-		tracing::info!(peer = %self.peer, %path, instance = %publisher.instance, "rtmp publish accepted");
+		tracing::info!(peer = %self.peer, %path, instance = %publisher.route.instance(), "rtmp publish accepted");
 
 		let result = pump(
 			&mut self.stream,
@@ -1501,7 +1501,7 @@ async fn run_handshake<S: Stream>(stream: &mut S, peer: SocketAddr) -> anyhow::R
 }
 
 /// An active publish: the moq-mux FLV importer, which owns the origin-created
-/// [`BroadcastProducer`](moq_net::origin::Publication) it publishes into.
+/// [`Route`](moq_net::origin::Route) it publishes into.
 /// [`Self::close`] or dropping it closes the broadcast and unannounces the path;
 /// [`Self::finish`] hands back the finished broadcast to linger on.
 struct Publisher {
@@ -1509,25 +1509,19 @@ struct Publisher {
 	// Finished at a clean end, so the finished broadcast keeps serving the catalog.
 	catalog: moq_mux::catalog::Producer,
 	metadata: crate::metadata::Dropped,
-	// Controls publication so an end can retract before the importer's fill clone drops.
-	broadcast: moq_net::origin::Publication,
-	// This connection's publisher instance, so an encoder reconnecting under the
-	// same key replaces this broadcast at once instead of resuming into it.
-	instance: moq_net::Instance,
+	// Announces the path under this connection's fresh instance, so an encoder reconnecting
+	// under the same key replaces this broadcast at once instead of resuming into it.
+	// Closing its broadcast retracts it before the importer's fill clone drops.
+	route: moq_net::origin::Route,
 }
 
 impl Publisher {
 	/// Open a broadcast at `path` under a fresh instance and prime the importer with
 	/// the FLV file header, so subsequent tags decode against an initialized demuxer.
 	fn new(origin: &origin::Producer, path: &str, config: moq_mux::catalog::Config) -> anyhow::Result<Self> {
-		let instance = moq_net::Instance::random();
-		let broadcast = origin.publish(
-			path,
-			moq_net::origin::Route::default().with_instance(instance.clone(), 0),
-		)?;
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config)?;
-		let handle = broadcast.clone();
-		let mut importer = FlvImport::new(broadcast.broadcast().clone(), catalog.reserve());
+		let route = origin.route(path, moq_net::origin::RouteOptions::default())?;
+		let catalog = moq_mux::catalog::Producer::new(&mut route.broadcast().clone(), config)?;
+		let mut importer = FlvImport::new(route.broadcast().clone(), catalog.reserve());
 
 		// Feed the FLV file header once up front; media tags follow per message.
 		importer.decode(&flv::file_header())?;
@@ -1536,8 +1530,7 @@ impl Publisher {
 			importer,
 			catalog,
 			metadata: crate::metadata::Dropped::new(path),
-			broadcast: handle,
-			instance,
+			route,
 		})
 	}
 
@@ -1551,7 +1544,7 @@ impl Publisher {
 	fn finish(mut self, linger: Duration) -> anyhow::Result<moq_mux::Linger<Self>> {
 		self.importer.finish()?;
 		self.catalog.finish()?;
-		Ok(moq_mux::Linger::new([self.broadcast.broadcast().clone()], self, linger))
+		Ok(moq_mux::Linger::new([self.route.broadcast().clone()], self, linger))
 	}
 
 	/// Flush any buffered media, finish the catalog, close out the broadcast's open groups, and end
@@ -1559,7 +1552,7 @@ impl Publisher {
 	fn close(mut self) -> anyhow::Result<()> {
 		self.importer.finish()?;
 		self.catalog.finish()?;
-		self.broadcast.close();
+		self.route.broadcast().close();
 		Ok(())
 	}
 
@@ -1571,7 +1564,7 @@ impl Publisher {
 	fn abort(self, err: moq_net::Error) {
 		self.catalog.abort(err.clone());
 		self.importer.abort(err);
-		self.broadcast.close();
+		self.route.broadcast().close();
 	}
 }
 
@@ -2237,8 +2230,9 @@ mod tests {
 
 		// Publish the broadcast at `live/cam0` by feeding synthetic FLV to the importer.
 		let origin = moq_tokio::origin::spawn();
-		let broadcast = origin.create_broadcast("live/cam0").unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = origin
+			.route("live/cam0", moq_net::origin::RouteOptions::default())
+			.unwrap();
 		let catalog =
 			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), moq_mux::catalog::Config::default())
 				.unwrap();
@@ -2285,30 +2279,32 @@ mod tests {
 	}
 
 	/// Publish an AVC broadcast at `live/cam0` under `instance`, starting with a keyframe carrying
-	/// `idr`, and return its importer for more tags.
+	/// `idr`, and return its route and its importer for more tags.
 	fn publish_avc(
 		origin: &origin::Producer,
 		instance: moq_net::Instance,
 		idr: &[u8],
-	) -> (FlvImport, moq_mux::catalog::Producer) {
+	) -> (moq_net::origin::Route, FlvImport, moq_mux::catalog::Producer) {
 		let mut vseq = vec![0x17, 0x00, 0x00, 0x00, 0x00];
 		vseq.extend_from_slice(&[0x01, 0x42, 0xc0, 0x1f, 0xff, 0xe1, 0x00, 0x04, 0x67, 0x42, 0xc0, 0x1f]);
 		vseq.extend_from_slice(&[0x01, 0x00, 0x04, 0x68, 0xce, 0x3c, 0x80]);
 		let mut vframe = vec![0x17, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, idr.len() as u8];
 		vframe.extend_from_slice(idr);
 
-		let broadcast = origin.create_broadcast("live/cam0").unwrap();
-		broadcast
-			.announce(origin::Route::default().with_instance(instance, 0))
+		let route = origin
+			.route(
+				"live/cam0",
+				moq_net::origin::RouteOptions::default().with_instance(instance, 0),
+			)
 			.unwrap();
 		let catalog =
-			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), moq_mux::catalog::Config::default())
+			moq_mux::catalog::Producer::new(&mut route.broadcast().clone(), moq_mux::catalog::Config::default())
 				.unwrap();
-		let mut importer = FlvImport::new(broadcast.broadcast().clone(), catalog.reserve());
+		let mut importer = FlvImport::new(route.broadcast().clone(), catalog.reserve());
 		importer.decode(&flv::file_header()).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vseq)).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vframe)).unwrap();
-		(importer, catalog)
+		(route, importer, catalog)
 	}
 
 	/// A play stays on the instance it resolved: a publisher taking over the path never reaches
@@ -2319,7 +2315,8 @@ mod tests {
 		const OLD_DELTA: &[u8] = &[0x41, 0x9a, 0x02, 0x03];
 		let origin = moq_tokio::origin::spawn();
 		let consumer = origin.consume();
-		let (mut old, old_catalog) = publish_avc(&origin, moq_net::Instance::random(), &[0x65, 0x88, 0x84, 0x21, 0x00]);
+		let (old_route, mut old, old_catalog) =
+			publish_avc(&origin, moq_net::Instance::random(), &[0x65, 0x88, 0x84, 0x21, 0x00]);
 
 		let mut server = Server::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
 		let addr = server.local_addr().unwrap();
@@ -2344,7 +2341,7 @@ mod tests {
 
 		let instance = moq_net::Instance::random();
 		let mut instances = moq_mux::follow::Instances::new(&consumer, "live/cam0", Some(&instance)).unwrap();
-		let (_new, _new_catalog) = publish_avc(&origin, instance, &[0x65, 0x99, 0x99, 0x99, 0x99]);
+		let (_new_route, _new, _new_catalog) = publish_avc(&origin, instance, &[0x65, 0x99, 0x99, 0x99, 0x99]);
 		kio::clock::timeout(Duration::from_secs(5), instances.next())
 			.await
 			.expect("the new publisher takes over")
@@ -2359,6 +2356,7 @@ mod tests {
 
 		old.abort(moq_net::Error::Transport("connection lost".into()));
 		drop(old_catalog);
+		drop(old_route);
 		let played = kio::clock::timeout(Duration::from_secs(5), played)
 			.await
 			.expect("the play outlived its route")
@@ -2372,8 +2370,9 @@ mod tests {
 		const VP9_KEYFRAME_320X240: &[u8] = &[0x82, 0x49, 0x83, 0x42, 0x20, 0x13, 0xf0, 0x0e, 0xf0, 0x00];
 
 		let origin = moq_tokio::origin::spawn();
-		let broadcast = origin.create_broadcast("live/cam0").unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = origin
+			.route("live/cam0", moq_net::origin::RouteOptions::default())
+			.unwrap();
 		let catalog =
 			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), moq_mux::catalog::Config::default())
 				.unwrap();
@@ -2653,8 +2652,9 @@ mod tests {
 		let frames = multitrack_body(CODED_FRAMES, &[(0, nalu(0x88)), (1, nalu(0x99))]);
 
 		let origin = moq_tokio::origin::spawn();
-		let broadcast = origin.create_broadcast("live/cam0").unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = origin
+			.route("live/cam0", moq_net::origin::RouteOptions::default())
+			.unwrap();
 		let catalog =
 			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), moq_mux::catalog::Config::default())
 				.unwrap();

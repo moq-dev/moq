@@ -28,17 +28,17 @@ An endpoint's `SecretKey` signs; its `PublicKey` is the endpoint ID, displayed a
 characters (a DNS label). `SecretKey::load_or_generate(path)` keeps one key for the life of a host,
 as 52 z-base-32 characters in a `0600` file it never replaces implicitly.
 
-`broadcast::Producer` wraps the `moq-net` broadcast, mints a fresh instance, and signs each frame
-over the application path, instance, track, group, frame index, and timestamp (at the track's
-timescale). Announce the broadcast with that instance on its route:
+`broadcast::Producer` wraps the `moq-net` broadcast and signs each frame over the application
+path, instance, track, group, frame index, and timestamp (at the track's timescale). It signs under
+the instance of the route that serves the broadcast, which the route mints fresh:
 
 ```rust
 let key = SecretKey::load_or_generate("/var/lib/moq/endpoint.key")?;
 let path = moq_net::Path::new(&format!("mesh/{}/agent", key.public()))?;
-let publication = origin.create_broadcast(&path)?;
-let signed = broadcast::Producer::new(publication.broadcast().clone(), key, path);
+let route = origin.route(&path, RouteOptions::hidden())?;
+let signed = broadcast::Producer::new(route.broadcast().clone(), key, path, route.instance());
 let messages = signed.create_track("messages", None)?;
-publication.announce(Route::default().with_instance(signed.instance().clone(), 0))?;
+route.announce()?;
 ```
 
 A subscriber wraps the broadcast an origin resolved in a `broadcast::Consumer` with the key it
@@ -80,10 +80,12 @@ learns only its length rounded up to 16 bytes. A track served on demand is reser
 ```rust
 let credential = Credential::new(credential::Config { context, kid, secret })?;
 let generation = credential.produce();
-let publication = origin.create_broadcast(&credential.path("meeting.hang")?)?;
-let protected = broadcast::Producer::new(publication.broadcast().clone(), generation.clone());
+// The route serves the generation's epoch as its instance, so subscribers find the key.
+let options = RouteOptions::hidden().with_instance(generation.epoch().instance(), 0);
+let route = origin.route(&credential.path("meeting.hang")?, options)?;
+let protected = broadcast::Producer::new(route.broadcast().clone(), generation.clone());
 let video = protected.create_track("video", None)?;
-publication.announce(Route::default().with_instance(generation.epoch().instance(), 0))?;
+route.announce()?;
 ```
 
 A subscriber follows `credential.path(semantic)` with `origin.follow(path, None)`. It takes

@@ -109,7 +109,7 @@ pub(crate) struct Moving {
 	/// `other`'s track `a`.
 	pub(crate) other: crate::container::Producer<crate::catalog::hang::Container>,
 	origin: moq_net::origin::Producer,
-	_broadcasts: [moq_net::origin::Publication; 2],
+	_broadcasts: [moq_net::origin::Route; 2],
 }
 
 impl Moving {
@@ -119,8 +119,8 @@ impl Moving {
 
 	pub(crate) fn new() -> Self {
 		let origin = crate::source::produce_origin();
-		let live = origin.publish("live", Default::default()).unwrap();
-		let other = origin.publish("other", Default::default()).unwrap();
+		let live = origin.route("live", Default::default()).unwrap();
+		let other = origin.route("other", Default::default()).unwrap();
 		let catalog =
 			crate::catalog::Producer::new(&mut live.broadcast().clone(), crate::catalog::Config::default()).unwrap();
 		let track = |broadcast: &mut moq_net::broadcast::Producer, name: &str| {

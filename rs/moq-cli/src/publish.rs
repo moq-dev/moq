@@ -343,11 +343,12 @@ enum Source {
 pub struct Publish {
 	source: Source,
 	// Keeps the fill surface until finish. `None` for `import ts --program all`,
-	// whose programs each own their fill and publication control.
+	// whose programs each own their fill and route.
 	broadcast: Option<moq_net::broadcast::Producer>,
-	publication: Option<moq_net::origin::Publication>,
-	// A stdin import's route, announced once its catalog lists the tracks; see [`Self::announce`].
+	// The route announcing `broadcast`, held while it is up. Created hidden.
 	route: Option<moq_net::origin::Route>,
+	// Whether a stdin import announces once its catalog lists the tracks; see [`Self::announce`].
+	announce: bool,
 	// The `--report` track, written beside the decode loop; see [`Self::with_report`].
 	report: Option<crate::report::Stats>,
 	// How long a stdin import keeps its broadcast up after EOF; see [`Self::with_linger`].
@@ -362,19 +363,14 @@ pub struct Publish {
 /// relay queries a broadcast's tracks the moment it is announced, so a standby
 /// announced any sooner can receive requests for tracks it cannot serve yet.
 struct Pending {
-	broadcast: moq_net::origin::Publication,
-	catalog: moq_net::track::Consumer,
 	route: moq_net::origin::Route,
+	catalog: moq_net::track::Consumer,
 }
 
 impl Pending {
-	fn new(broadcast: moq_net::origin::Publication, route: moq_net::origin::Route) -> anyhow::Result<Self> {
-		let catalog = broadcast.consume().track(hang::Catalog::DEFAULT_NAME)?;
-		Ok(Self {
-			broadcast,
-			catalog,
-			route,
-		})
+	fn new(route: moq_net::origin::Route) -> anyhow::Result<Self> {
+		let catalog = route.broadcast().consume().track(hang::Catalog::DEFAULT_NAME)?;
+		Ok(Self { route, catalog })
 	}
 
 	/// Announce the broadcast if its catalog has gone out, returning whether it has.
@@ -385,9 +381,7 @@ impl Pending {
 		) {
 			return Ok(false);
 		}
-		self.broadcast
-			.announce(self.route.clone())
-			.context("failed to announce broadcast")?;
+		self.route.announce().context("failed to announce broadcast")?;
 		Ok(true)
 	}
 }
@@ -413,8 +407,8 @@ impl Publish {
 					catalog: PublishCatalog::Ts(catalog),
 				},
 				broadcast: Some(broadcast),
-				publication: None,
 				route: None,
+				announce: false,
 				report: None,
 				linger: moq_mux::Linger::DEFAULT,
 				republish: None,
@@ -463,8 +457,8 @@ impl Publish {
 				catalog: PublishCatalog::Media(catalog),
 			},
 			broadcast: Some(broadcast),
-			publication: None,
 			route: None,
+			announce: false,
 			report: None,
 			linger: moq_mux::Linger::DEFAULT,
 			republish: None,
@@ -472,7 +466,7 @@ impl Publish {
 	}
 
 	/// Build a publisher decoding `format` from stdin into a new broadcast at `name` on
-	/// `origin`, retaining its announcement control alongside the decoder's fill handle.
+	/// `origin` under `instance`, retaining its route alongside the decoder's fill handle.
 	///
 	/// A TS import whose source's clock steps onto another timeline ([`ts::Restart`]), such as
 	/// a changeover between two encoders whose clocks were never locked, finishes the broadcast
@@ -480,10 +474,13 @@ impl Publish {
 	pub(super) fn stdin(
 		origin: &moq_net::origin::Producer,
 		name: &str,
+		instance: moq_net::Instance,
 		format: &PublishFormat,
 		config: moq_mux::catalog::Config,
 	) -> anyhow::Result<Self> {
-		let publication = origin.create_broadcast(name).context("failed to create broadcast")?;
+		let route = origin
+			.route(name, moq_net::origin::RouteOptions::hidden().with_instance(instance, 0))
+			.context("failed to create broadcast")?;
 		let republish = match *format {
 			PublishFormat::Ts { program } => Some(Republish {
 				origin: origin.clone(),
@@ -495,8 +492,8 @@ impl Publish {
 			}),
 			_ => None,
 		};
-		let mut result = Self::new(publication.broadcast().clone(), format, config)?;
-		result.publication = Some(publication);
+		let mut result = Self::new(route.broadcast().clone(), format, config)?;
+		result.route = Some(route);
 		result.republish = republish;
 		Ok(result)
 	}
@@ -518,8 +515,8 @@ impl Publish {
 				catalog: PublishCatalog::TsPrograms,
 			},
 			broadcast: None,
-			publication: None,
 			route: None,
+			announce: false,
 			report: None,
 			linger: moq_mux::Linger::DEFAULT,
 			republish: None,
@@ -537,12 +534,12 @@ impl Publish {
 	/// left after audio's reservation rather than the whole uplink.
 	#[cfg(feature = "capture")]
 	pub fn capture(
-		publication: moq_net::origin::Publication,
+		route: moq_net::origin::Route,
 		args: &CaptureArgs,
 		bandwidth: moq_net::bandwidth::Allocator,
 		max_age: Option<std::time::Duration>,
 	) -> anyhow::Result<Self> {
-		let mut broadcast = publication.broadcast().clone();
+		let mut broadcast = route.broadcast().clone();
 		let config = moq_mux::catalog::Config::default().with_max_age(max_age);
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
 
@@ -563,8 +560,8 @@ impl Publish {
 				audio,
 			},
 			broadcast: Some(broadcast),
-			publication: Some(publication),
-			route: None,
+			route: Some(route),
+			announce: false,
 			report: None,
 			linger: moq_mux::Linger::DEFAULT,
 			republish: None,
@@ -626,17 +623,16 @@ impl Publish {
 		self
 	}
 
-	/// Advertise the broadcast's path under `instance`.
+	/// Advertise the broadcast's path.
 	///
 	/// A capture announces now. A stdin import announces from [`run`](Self::run), once the input
 	/// has declared its tracks: see [`Pending`].
-	pub fn announce(&mut self, instance: moq_net::Instance) -> anyhow::Result<()> {
-		let route = moq_net::origin::Route::default().with_instance(instance, 0);
-		match (&self.source, &self.publication) {
+	pub fn announce(&mut self) -> anyhow::Result<()> {
+		match (&self.source, &self.route) {
 			(_, None) => {}
-			(Source::Stream { .. }, Some(_)) => self.route = Some(route),
+			(Source::Stream { .. }, Some(_)) => self.announce = true,
 			#[cfg(feature = "capture")]
-			(Source::Capture { .. }, Some(broadcast)) => broadcast.announce(route).context("failed to announce broadcast")?,
+			(Source::Capture { .. }, Some(route)) => route.announce().context("failed to announce broadcast")?,
 		}
 		Ok(())
 	}
@@ -645,12 +641,12 @@ impl Publish {
 	pub async fn run(self) -> anyhow::Result<()> {
 		match self.source {
 			Source::Stream { decoder, catalog } => {
-				let pending = match (&self.publication, self.route) {
-					(Some(broadcast), Some(route)) => Some(Pending::new(broadcast.clone(), route)?),
+				let pending = match (&self.route, self.announce) {
+					(Some(route), true) => Some(Pending::new(route.clone())?),
 					_ => None,
 				};
 				let publication = Publication {
-					control: self.publication,
+					control: self.route,
 					broadcast: self.broadcast,
 					pending,
 					report: self.report,
@@ -734,8 +730,8 @@ impl Publish {
 /// What a stdin import does around its media: announce, report, and retain the end.
 #[derive(Default)]
 struct Publication {
-	/// The announcement control, held while the broadcast is up so its path stays announced.
-	control: Option<moq_net::origin::Publication>,
+	/// The route, held while the broadcast is up so its path stays announced.
+	control: Option<moq_net::origin::Route>,
 	/// The broadcast to keep up after EOF, or `None` when the decoder owns its broadcasts.
 	broadcast: Option<moq_net::broadcast::Producer>,
 	/// The announcement held until the catalog first goes out.
@@ -770,7 +766,7 @@ impl Republish {
 	fn instance(&self, mux_rate: Option<u64>) -> anyhow::Result<Instance> {
 		let control = self
 			.origin
-			.create_broadcast(&self.name)
+			.route(&self.name, moq_net::origin::RouteOptions::hidden())
 			.context("failed to create broadcast")?;
 		let mut broadcast = control.broadcast().clone();
 		let (import, mut catalog) = ts_import(&mut broadcast, self.config.clone(), self.program, mux_rate)?;
@@ -782,12 +778,8 @@ impl Republish {
 		if let Some(echo) = &self.echo {
 			catalog.mutate(|catalog| catalog.echo = Some(echo.clone()))?;
 		}
-		let instance = moq_net::Instance::random();
-		tracing::info!(%instance, "publisher instance");
-		let pending = Pending::new(
-			control.clone(),
-			moq_net::origin::Route::default().with_instance(instance, 0),
-		)?;
+		tracing::info!(instance = %control.instance(), "publisher instance");
+		let pending = Pending::new(control.clone())?;
 		Ok(Instance {
 			decoder: PublishDecoder::Ts(Box::new(import)),
 			catalog: PublishCatalog::Ts(catalog),
@@ -804,7 +796,7 @@ impl Republish {
 struct Instance {
 	decoder: PublishDecoder,
 	catalog: PublishCatalog,
-	control: Option<moq_net::origin::Publication>,
+	control: Option<moq_net::origin::Route>,
 	broadcast: Option<moq_net::broadcast::Producer>,
 	pending: Option<Pending>,
 	report: Option<crate::report::Stats>,
@@ -1368,8 +1360,7 @@ pub(crate) mod tests {
 	async fn manufacture_input() -> Vec<u8> {
 		// Create the broadcast on a throwaway origin so the exporter can resolve it by path.
 		let origin = moq_tokio::origin::spawn();
-		let broadcast = origin.create_broadcast("cli").unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = origin.route("cli", moq_net::origin::RouteOptions::default()).unwrap();
 		settle().await;
 		let config = moq_mux::catalog::Config::default().with_catalog(Catalog::<tscat::Ext>::default());
 		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config).unwrap();
@@ -1379,6 +1370,7 @@ pub(crate) mod tests {
 
 		// Section-framed verbatim stream (SCTE-35, stream_type 0x86).
 		let section = broadcast
+			.broadcast()
 			.unique_track(".scte35", hang::container::track_info(hang::catalog::PRIORITY.text))
 			.unwrap();
 		let mut section_track = tscat::Track::new(SECTION_PID);
@@ -1407,6 +1399,7 @@ pub(crate) mod tests {
 
 		// Whole-PES stream (undecoded private data, stream_type 0x06).
 		let pes = broadcast
+			.broadcast()
 			.unique_track(".data", hang::container::track_info(hang::catalog::PRIORITY.text))
 			.unwrap();
 		let mut pes_track = tscat::Track::new(PES_PID);
@@ -1481,14 +1474,15 @@ pub(crate) mod tests {
 		// streams land in the broadcast instead of being dropped by the media-only path.
 		// The broadcast is created on a throwaway origin so the exporter can resolve it by path.
 		let origin = moq_tokio::origin::spawn();
-		let mut publish =
-			Publish::stdin(&origin, "cli", &PublishFormat::Ts { program: None }, Default::default()).unwrap();
-		publish
-			.publication
-			.as_ref()
-			.unwrap()
-			.announce(Default::default())
-			.unwrap();
+		let mut publish = Publish::stdin(
+			&origin,
+			"cli",
+			moq_net::Instance::random(),
+			&PublishFormat::Ts { program: None },
+			Default::default(),
+		)
+		.unwrap();
+		publish.route.as_ref().unwrap().announce().unwrap();
 		settle().await;
 		#[cfg_attr(
 			not(feature = "capture"),
@@ -1685,16 +1679,12 @@ pub(crate) mod tests {
 			let mut publish = Publish::stdin(
 				&origin,
 				"pt.hang",
+				moq_net::Instance::random(),
 				&PublishFormat::TsPassthrough { pcr_pid: None },
 				Default::default(),
 			)
 			.unwrap();
-			publish
-				.publication
-				.as_ref()
-				.unwrap()
-				.announce(Default::default())
-				.unwrap();
+			publish.route.as_ref().unwrap().announce().unwrap();
 			#[cfg_attr(
 				not(feature = "capture"),
 				expect(
@@ -2141,8 +2131,15 @@ pub(crate) mod tests {
 			let origin = moq_tokio::origin::spawn();
 			let consumer = origin.consume();
 			let mut announced = consumer.announced();
-			let publish = Publish::stdin(&origin, "demo", &format, Default::default()).unwrap();
-			let broadcast = publish.publication.clone().unwrap();
+			let publish = Publish::stdin(
+				&origin,
+				"demo",
+				moq_net::Instance::random(),
+				&format,
+				Default::default(),
+			)
+			.unwrap();
+			let broadcast = publish.route.clone().unwrap();
 			#[cfg_attr(
 				not(feature = "capture"),
 				expect(
@@ -2153,8 +2150,7 @@ pub(crate) mod tests {
 			let Source::Stream { decoder, catalog } = publish.source else {
 				panic!("expected a stream source");
 			};
-			let route = moq_net::origin::Route::default();
-			let pending = Pending::new(broadcast, route).unwrap();
+			let pending = Pending::new(broadcast).unwrap();
 			let (mut stdin, input_end) = tokio::io::duplex(input.len());
 			let publication = Publication {
 				pending: Some(pending),
@@ -2254,9 +2250,11 @@ pub(crate) mod tests {
 
 		let origin = moq_tokio::origin::spawn();
 		let mut announced = origin.consume().announced();
-		let mut publish = Publish::stdin(
+		let first = moq_net::Instance::random();
+		let publish = Publish::stdin(
 			&origin,
 			"demo",
+			first.clone(),
 			&PublishFormat::Ts { program: None },
 			Default::default(),
 		)
@@ -2265,8 +2263,6 @@ pub(crate) mod tests {
 			moq_net::path::Relative::new("viewer").unwrap(),
 		))
 		.unwrap();
-		let first = moq_net::Instance::random();
-		publish.announce(first.clone()).unwrap();
 		#[cfg_attr(
 			not(feature = "capture"),
 			expect(
@@ -2277,9 +2273,9 @@ pub(crate) mod tests {
 		let Source::Stream { decoder, catalog } = publish.source else {
 			panic!("expected a stream source");
 		};
-		let control = publish.publication.unwrap();
+		let control = publish.route.unwrap();
 		let publication = Publication {
-			pending: Some(Pending::new(control.clone(), publish.route.unwrap()).unwrap()),
+			pending: Some(Pending::new(control.clone()).unwrap()),
 			control: Some(control),
 			broadcast: publish.broadcast,
 			republish: publish.republish,
@@ -2297,7 +2293,7 @@ pub(crate) mod tests {
 					loop {
 						use moq_net::announce::Event;
 						if let Event::Start(announce) | Event::Restart(announce) = announced.next().await.unwrap() {
-							break announce.route.instance.unwrap();
+							break announce.route.instance().clone();
 						}
 					}
 				} => instance,
@@ -2354,8 +2350,15 @@ pub(crate) mod tests {
 		] {
 			let origin = moq_tokio::origin::spawn();
 			let mut announced = origin.consume().announced();
-			let publish = Publish::stdin(&origin, "demo", &format, Default::default()).unwrap();
-			let broadcast = publish.publication.clone().unwrap();
+			let publish = Publish::stdin(
+				&origin,
+				"demo",
+				moq_net::Instance::random(),
+				&format,
+				Default::default(),
+			)
+			.unwrap();
+			let broadcast = publish.route.clone().unwrap();
 			#[cfg_attr(
 				not(feature = "capture"),
 				expect(
@@ -2366,7 +2369,7 @@ pub(crate) mod tests {
 			let Source::Stream { decoder, catalog } = publish.source else {
 				panic!("expected a stream source");
 			};
-			let pending = Pending::new(broadcast, Default::default()).unwrap();
+			let pending = Pending::new(broadcast).unwrap();
 			let publication = Publication {
 				pending: Some(pending),
 				..Default::default()

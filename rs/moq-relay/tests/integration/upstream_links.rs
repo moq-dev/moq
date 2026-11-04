@@ -144,7 +144,7 @@ async fn node(id: u64, connect: Vec<Peer>) -> Node {
 /// A broadcast writing a group every 50ms on `origin`, so a subscriber attaching
 /// at any point receives one. Dropping it ends the broadcast.
 struct Publisher {
-	_broadcast: moq_net::origin::Publication,
+	_route: moq_net::origin::Route,
 	writer: tokio::task::AbortHandle,
 }
 
@@ -155,8 +155,8 @@ impl Drop for Publisher {
 }
 
 fn publish(origin: &origin::Producer, path: &str) -> Publisher {
-	let broadcast = origin.publish(path, Default::default()).expect("publish");
-	let track = broadcast.create_track("video", timed()).expect("create track");
+	let route = origin.route(path, Default::default()).expect("publish");
+	let track = route.broadcast().create_track("video", timed()).expect("create track");
 	let writer = tokio::spawn(async move {
 		loop {
 			let Ok(mut group) = track.append_group() else { break };
@@ -167,10 +167,7 @@ fn publish(origin: &origin::Producer, path: &str) -> Publisher {
 		}
 	})
 	.abort_handle();
-	Publisher {
-		_broadcast: broadcast,
-		writer,
-	}
+	Publisher { _route: route, writer }
 }
 
 /// Subscribe to `path` through `origin`'s routes and read one frame.
@@ -213,7 +210,7 @@ fn routes(origin: &origin::Producer) -> BTreeMap<String, Vec<u64>> {
 		let announce::Event::Start(announce) = event else {
 			panic!("an initial set is only starts: got {event:?}");
 		};
-		let hops = announce.route.hops.iter().map(|hop| hop.id()).collect();
+		let hops = announce.route.hops().iter().map(|hop| hop.id()).collect();
 		routes.insert(announce.prefix.as_str().to_string(), hops);
 	}
 	routes

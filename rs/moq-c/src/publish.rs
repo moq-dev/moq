@@ -316,17 +316,6 @@ pub struct Publish {
 
 	/// Group requests delivered to a handler, freed on accept, abort, or free.
 	group_request: NonZeroSlab<GroupRequest>,
-
-	/// Announcement handles for origin broadcasts, freed by the caller.
-	publications: NonZeroSlab<Publication>,
-}
-
-/// A broadcast's announcement capability, beside the fill handle it was published with.
-struct Publication {
-	driver: crate::ffi::Background,
-	/// The fill handle, which leaves the registry once the broadcast closes.
-	broadcast: Id,
-	inner: moq_net::origin::Publication,
 }
 
 impl Publish {
@@ -364,77 +353,14 @@ impl Publish {
 		Ok(id)
 	}
 
-	/// Store an origin broadcast's fill handle and its publication, returning both handles.
-	pub fn create_publication(
-		&mut self,
-		(publication, driver): (moq_net::origin::Publication, crate::ffi::Background),
-	) -> Result<(Id, Id), Error> {
-		let broadcast = self.create((publication.broadcast().clone(), driver.clone()))?;
-		let id = self.publications.insert(Publication {
-			driver,
-			broadcast,
-			inner: publication,
-		});
-		match id {
-			Ok(id) => Ok((id, broadcast)),
-			Err(err) => {
-				self.broadcasts.remove(broadcast);
-				Err(err)
-			}
-		}
+	/// Whether `id` names a broadcast fill handle that has not been closed.
+	pub fn contains(&self, id: Id) -> bool {
+		self.broadcasts.get(id).is_some()
 	}
 
-	/// Publish a prepared answer filled through `id`, returning its publication handle.
-	pub fn admit(
-		&mut self,
-		id: Id,
-		prepared: moq_net::origin::Prepared,
-		driver: crate::ffi::Background,
-	) -> Result<Id, Error> {
-		if let Some(broadcast) = self.broadcasts.get(id) {
-			broadcast.driver.check()?;
-			if !broadcast.producer.is_clone(prepared.broadcast()) {
-				return Err(Error::BroadcastNotFound);
-			}
-		}
-		// A closed fill left this registry, and native admission refuses it.
-		let publication = prepared.publish()?;
-		self.publications.insert(Publication {
-			driver,
-			broadcast: id,
-			inner: publication,
-		})
-	}
-
-	/// The publication, refused with `Closed` once its broadcast closed.
-	fn publication(&self, id: Id) -> Result<&Publication, Error> {
-		let publication = self.publications.get(id).ok_or(Error::NotFound)?;
-		publication.driver.check()?;
-		if self.broadcasts.get(publication.broadcast).is_none() {
-			return Err(Error::Moq(moq_net::Error::Closed));
-		}
-		Ok(publication)
-	}
-
-	/// Advertise the broadcast's exact path as a route. Announcing again re-prices
-	/// in place. Until announced, the broadcast is invisible and unroutable.
-	pub fn announce(&mut self, publication: Id, route: moq_net::origin::Route) -> Result<(), Error> {
-		let publication = self.publication(publication)?;
-		let result = publication.inner.announce(route);
-		publication.driver.check()?;
-		Ok(result?)
-	}
-
-	/// Retract the broadcast's exact-path advertisement, if any.
-	pub fn unannounce(&mut self, publication: Id) -> Result<(), Error> {
-		self.publication(publication)?.inner.unannounce();
-		Ok(())
-	}
-
-	/// Release a publication handle; the broadcast and its route stay as they are.
-	pub fn publication_free(&mut self, publication: Id) -> Result<(), Error> {
-		self.publications.remove(publication).ok_or(Error::NotFound)?;
-		Ok(())
+	/// Drop a fill handle that never reached the caller.
+	pub fn discard(&mut self, id: Id) {
+		self.broadcasts.remove(id);
 	}
 
 	/// The broadcast's track producer.
@@ -1634,53 +1560,14 @@ mod children_tests {
 mod supervision_tests {
 	use super::*;
 
-	#[tokio::test(start_paused = true)]
-	async fn admission_must_match_the_broadcast_it_filled() {
-		let origin = moq_tokio::origin::spawn();
-		let claim = origin.requests("room").unwrap();
-		let pending = origin.consume().request("room/first", None);
-		let prepared = claim.requested_broadcast().await.unwrap().prepare().unwrap();
-		let mut publish = Publish::default();
-		let first = publish
-			.create((prepared.broadcast().clone(), Default::default()))
-			.unwrap();
-		let alias = {
-			let original = publish.broadcast(first).unwrap();
-			Broadcast {
-				driver: original.driver.clone(),
-				producer: original.producer.clone(),
-				catalog: original.catalog.clone(),
-				video: Default::default(),
-				audio: Default::default(),
-				children: Default::default(),
-				ended: false,
-			}
-		};
-		let clone = publish.broadcasts.insert(alias).unwrap();
-		assert_ne!(first, clone);
-		let publication = publish.admit(clone, prepared, Default::default()).unwrap();
-		pending.await.unwrap();
-		publish.unannounce(publication).unwrap();
-
-		let pending = origin.consume().request("room/second", None);
-		let prepared = claim.requested_broadcast().await.unwrap().prepare().unwrap();
-		publish
-			.create((prepared.broadcast().clone(), Default::default()))
-			.unwrap();
-		assert!(matches!(
-			publish.admit(first, prepared, Default::default()),
-			Err(Error::BroadcastNotFound)
-		));
-		assert!(pending.await.is_err());
-	}
-
 	#[tokio::test]
 	async fn a_container_importer_keeps_the_origin_failure_after_other_owners_are_released() {
 		let (origin, completion, trigger) = crate::ffi::panicking_origin();
 		let mut publish = Publish::default();
-		let (_publication, broadcast) = publish
-			.create_publication((origin.create_broadcast("retained").unwrap(), completion.clone()))
+		let route = origin
+			.route("retained", moq_net::origin::RouteOptions::hidden())
 			.unwrap();
+		let broadcast = publish.create((route.broadcast().clone(), completion.clone())).unwrap();
 		let container = publish
 			.container(
 				broadcast,
@@ -1702,9 +1589,12 @@ mod supervision_tests {
 	async fn a_finish_after_a_driver_panic_reports_it_until_the_close() {
 		let (origin, completion, trigger) = crate::ffi::panicking_origin();
 		let mut state = State::new();
-		let (_publication, broadcast) = state
+		let route = origin
+			.route("retained", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let broadcast = state
 			.publish
-			.create_publication((origin.create_broadcast("retained").unwrap(), completion.clone()))
+			.create((route.broadcast().clone(), completion.clone()))
 			.unwrap();
 		let producer = &state.publish.broadcast(broadcast).unwrap().producer;
 		// A dynamic handle outlives the consumed broadcast, so only an explicit close ends it.

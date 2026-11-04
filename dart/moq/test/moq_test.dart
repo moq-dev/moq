@@ -224,12 +224,15 @@ void main() {
     final announcement = client.announced().updates().firstWhere(
       (event) => event is AnnounceEventStart,
     );
-    final publication = relay.createBroadcast(path: 'live');
-    final track = publication.broadcast().publishTrack(
+    final route = relay.route(
+      path: 'live',
+      options: RouteOptions(hidden: true),
+    );
+    final track = route.broadcast().publishTrack(
       name: 'events',
       info: TrackInfo(timescale: 1000000),
     );
-    publication.announce(route: AnnounceRoute());
+    route.announce();
     final announced =
         (await announcement.timeout(timeout) as AnnounceEventStart).announce;
     expect(announced.prefix, 'live');
@@ -313,10 +316,10 @@ void main() {
     final announcement = client.announced().updates().firstWhere(
       (event) => event is AnnounceEventStart,
     );
-    final publication = server.createBroadcast('live');
-    final broadcast = publication.broadcast();
+    final route = server.route('live', options: RouteOptions(hidden: true));
+    final broadcast = route.broadcast();
     final track = broadcast.publishTrack(name: 'events', info: null);
-    publication.announce(route: AnnounceRoute());
+    route.announce();
     final announced =
         (await announcement.timeout(timeout) as AnnounceEventStart).announce;
     expect(announced.prefix, 'live');
@@ -326,6 +329,7 @@ void main() {
     track.finish();
     broadcast.close();
     broadcast.close(); // a second close is a no-op
+    route.dispose();
     server.close();
   });
 
@@ -469,8 +473,11 @@ void main() {
 
   test('a broadcast is reachable only while announced', () async {
     final origin = MoqOriginProducer(config: MoqOriginConfig());
-    final publication = origin.createBroadcast(path: 'live');
-    final broadcast = publication.broadcast();
+    final route = origin.route(
+      path: 'live',
+      options: RouteOptions(hidden: true),
+    );
+    final broadcast = route.broadcast();
     broadcast.publishTrack(name: 'events', info: null);
     final consumer = origin.consume();
     await expectLater(
@@ -478,13 +485,14 @@ void main() {
       throwsA(anything),
     );
 
-    publication.announce(route: AnnounceRoute());
+    route.announce();
     final announced = consumer.announced(config: MoqAnnounceConfig());
     final first = await nextRoute(announced);
     expect(first, isA<AnnounceEventStart>());
     expect((first as AnnounceEventStart).announce.prefix, 'live');
+    expect(first.announce.route.instance, route.instance());
 
-    publication.unannounce();
+    route.withdraw();
     final retracted = await nextRoute(announced);
     expect(retracted, isA<AnnounceEventEnd>());
     expect((retracted as AnnounceEventEnd).announce.prefix, 'live');
@@ -493,83 +501,125 @@ void main() {
       throwsA(anything),
     );
 
-    publication.announce(route: AnnounceRoute());
-    expect(await nextRoute(announced), isA<AnnounceEventStart>());
+    // Announcing again continues the same stream.
+    route.announce();
+    final again = await nextRoute(announced) as AnnounceEventStart;
+    expect(again.announce.route.instance, route.instance());
     await consumer.request(path: 'live').timeout(timeout);
 
-    // Disposing the publication keeps the route; closing the broadcast ends it.
-    publication.dispose();
+    // Disposing the broadcast handle keeps the route; cancelling the route retracts it,
+    // and its broadcast lives on.
+    broadcast.dispose();
     await consumer.request(path: 'live').timeout(timeout);
-    broadcast.close();
+    final kept = route.broadcast();
+    route.cancel();
     expect(await nextRoute(announced), isA<AnnounceEventEnd>());
+    expect(() => route.announce(), throwsA(isA<CancelledMoqException>()));
+    kept.publishTrack(name: 'after', info: null);
+    kept.close();
+    route.dispose();
     announced.cancel();
     announced.dispose();
   });
 
-  test('a stale publication leaves its replacement alone', () async {
-    final origin = MoqOriginProducer(config: MoqOriginConfig());
-    final stale = origin.createBroadcast(path: 'live');
-    stale.announce(route: AnnounceRoute());
-    stale.broadcast().close();
-
-    final replacement = origin.createBroadcast(path: 'live');
-    replacement.announce(route: AnnounceRoute());
-    expect(
-      () => stale.announce(route: AnnounceRoute()),
-      throwsA(isA<ClosedMoqException>()),
-    );
-    expect(() => stale.unannounce(), throwsA(isA<ClosedMoqException>()));
-    await origin.consume().request(path: 'live').timeout(timeout);
-    replacement.broadcast().close();
-  });
-
-  test('a new instance restarts announce consumers', () async {
+  test('closing the broadcast retracts its route', () async {
     final origin = MoqOriginProducer(config: MoqOriginConfig());
     final announced = origin.consume().announced(config: MoqAnnounceConfig());
-    final publication = origin.createBroadcast(path: 'instance');
-
-    publication.announce(route: AnnounceRoute());
-    final start = await nextRoute(announced) as AnnounceEventStart;
-    expect(start.announce.route.instance, isNotEmpty);
-
-    publication.announce(route: AnnounceRoute(instance: 'camera', epoch: 1));
-    final restart = await nextRoute(announced) as AnnounceEventRestart;
-    expect(restart.announce.route.instance, 'camera');
-
-    expect(
-      () => publication.announce(route: AnnounceRoute(instance: '')),
-      throwsA(isA<InvalidInstanceMoqException>()),
-    );
+    final route = origin.route(path: 'live', options: RouteOptions());
+    expect(await nextRoute(announced), isA<AnnounceEventStart>());
+    route.broadcast().close();
+    expect(await nextRoute(announced), isA<AnnounceEventEnd>());
+    expect(() => route.announce(), throwsA(isA<ClosedMoqException>()));
+    route.dispose();
     announced.cancel();
     announced.dispose();
   });
+
+  test('a closed route leaves its replacement alone', () async {
+    final origin = MoqOriginProducer(config: MoqOriginConfig());
+    final stale = origin.route(path: 'live', options: RouteOptions());
+    stale.broadcast().close();
+
+    final replacement = origin.route(path: 'live', options: RouteOptions());
+    expect(() => stale.announce(), throwsA(isA<ClosedMoqException>()));
+    expect(() => stale.setCost(cost: 1), throwsA(isA<ClosedMoqException>()));
+    stale.withdraw();
+    await origin.consume().request(path: 'live').timeout(timeout);
+    replacement.broadcast().close();
+    stale.dispose();
+    replacement.dispose();
+  });
+
+  test(
+    'a new route under another instance restarts announce consumers',
+    () async {
+      final origin = MoqOriginProducer(config: MoqOriginConfig());
+      final announced = origin.consume().announced(config: MoqAnnounceConfig());
+      final first = origin.route(path: 'instance', options: RouteOptions());
+
+      final start = await nextRoute(announced) as AnnounceEventStart;
+      expect(start.announce.route.instance, first.instance());
+
+      final second = origin.route(
+        path: 'instance',
+        options: RouteOptions(instance: 'camera', epoch: 1),
+      );
+      expect(second.instance(), 'camera');
+      final restart = await nextRoute(announced) as AnnounceEventRestart;
+      expect(restart.announce.route.instance, 'camera');
+
+      expect(
+        () => origin.route(
+          path: 'refused',
+          options: RouteOptions(instance: ''),
+        ),
+        throwsA(isA<InvalidInstanceMoqException>()),
+      );
+      first.cancel();
+      second.cancel();
+      first.dispose();
+      second.dispose();
+      announced.cancel();
+      announced.dispose();
+    },
+  );
 
   test('announced pattern reports captures', () async {
     final origin = MoqOriginProducer(config: MoqOriginConfig());
     final announced = origin.consume().announced(
       config: MoqAnnounceConfig(prefix: 'room', filter: '*/chat'),
     );
-    final publication = origin.createBroadcast(path: 'room/alice/chat');
-    publication.announce(route: AnnounceRoute());
+    final route = origin.route(
+      path: 'room/alice/chat',
+      options: RouteOptions(),
+    );
 
     final update = await nextRoute(announced) as AnnounceEventStart;
     expect(update.announce.prefix, 'room/alice/chat');
     expect(update.announce.captures, ['alice']);
+    route.dispose();
   });
 
   test('dynamic serves a request under a prefix', () async {
     final origin = MoqOriginProducer(config: MoqOriginConfig());
-    final dynamic = origin.requests(prefix: 'live');
+    final dynamic = origin.routePrefix(prefix: 'live', options: RouteOptions());
     final pending = origin.consume().request(path: 'live/cam');
-    final request = await dynamic.requestedBroadcast().timeout(timeout);
+    final request = (await dynamic.requested().timeout(timeout))!;
     expect(request.path(), 'live/cam');
-    final prepared = request.prepare();
-    final served = prepared.publish();
+    // A hidden job route answers nobody until it announces.
+    final served = request.route(options: RouteOptions(hidden: true));
+    expect(served.instance(), isNot(dynamic.instance()));
+    served.announce();
     await pending.timeout(timeout);
-    // The publication controls the prepared fill: closing that ends its announcement.
-    prepared.broadcast().close();
-    expect(() => served.unannounce(), throwsA(isA<ClosedMoqException>()));
+    // Closing the job's broadcast ends its route.
+    served.broadcast().close();
+    expect(() => served.announce(), throwsA(isA<ClosedMoqException>()));
+    expect(() => dynamic.broadcast(), throwsA(isA<InternalMoqException>()));
     dynamic.cancel();
+    await expectLater(
+      dynamic.requested(),
+      throwsA(isA<CancelledMoqException>()),
+    );
     dynamic.dispose();
     served.dispose();
   });

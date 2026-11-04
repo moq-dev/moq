@@ -243,13 +243,11 @@ int main(void) {
     if (origin <= 0) fail("error: moq_origin_create failed: %d\n", origin);
 
     const char *path = "c-decoder-output-test";
-    uint32_t broadcast = 0;
-    int32_t publication = moq_origin_create_broadcast((uint32_t)origin, path, strlen(path), &broadcast);
-    if (publication <= 0) fail("error: moq_origin_create_broadcast failed: %d\n", publication);
-    if (moq_publication_announce((uint32_t)publication, NULL) < 0)
-        fail("error: moq_publication_announce failed (%s)\n", moq_error());
-    if (moq_publication_free((uint32_t)publication) < 0)
-        fail("error: moq_publication_free failed (%s)\n", moq_error());
+    int32_t route = moq_origin_route((uint32_t)origin, path, strlen(path), NULL);
+    if (route <= 0) fail("error: moq_origin_route failed: %d\n", route);
+    int32_t created = moq_route_broadcast((uint32_t)route);
+    if (created <= 0) fail("error: moq_route_broadcast failed: %d\n", created);
+    uint32_t broadcast = (uint32_t)created;
 
     moq_video_encoder_input input = {MOQ_VIDEO_PIXEL_FORMAT_RGBA, WIDTH, HEIGHT, {30000, 1001}};
     moq_video_encoder_output output = {MOQ_VIDEO_CODEC_H264, 0, 0, MOQ_VIDEO_ENCODER_KIND_SOFTWARE, NULL, 0};
@@ -300,6 +298,8 @@ int main(void) {
         fail("error: moq_consume_close failed (%s)\n", moq_error());
     if (moq_encode_video_finish((uint32_t)producer) < 0)
         fail("error: moq_encode_video_finish failed (%s)\n", moq_error());
+    if (moq_route_free((uint32_t)route) < 0)
+        fail("error: moq_route_free failed (%s)\n", moq_error());
     if (moq_publish_close((uint32_t)broadcast) < 0)
         fail("error: moq_publish_close failed (%s)\n", moq_error());
     if (moq_origin_close((uint32_t)origin) < 0)

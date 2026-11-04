@@ -65,16 +65,17 @@ async fn read(subscription: &mut track::Subscriber) -> String {
 
 struct Published {
 	catalog: moq_mux::catalog::Producer,
-	_catalog_broadcast: origin::Publication,
-	sibling: origin::Publication,
+	_catalog_broadcast: origin::Route,
+	sibling: origin::Route,
 	media: track::Producer,
 }
 
 fn publish(origin: &origin::Producer, instance: &Instance, tag: &str) -> Published {
-	let route = origin::Route::default().with_instance(instance.clone(), 0);
-	let broadcast = origin.publish("live/catalog.hang", route.clone()).unwrap();
-	let sibling = origin.publish("live/media", route).unwrap();
+	let options = || origin::RouteOptions::default().with_instance(instance.clone(), 0);
+	let broadcast = origin.route("live/catalog.hang", options()).unwrap();
+	let sibling = origin.route("live/media", options()).unwrap();
 	let media = sibling
+		.broadcast()
 		.create_track(
 			"audio",
 			track::Info::default().with_timescale(moq_net::Timescale::MILLI),
@@ -179,6 +180,7 @@ async fn replacement(version: &str) {
 	write(&second.media, "B:2");
 	let _late = second
 		.sibling
+		.broadcast()
 		.create_track("late", track::Info::default().with_priority(17))
 		.unwrap();
 	let catalog_restart = changed(&mut catalog_follow).await;

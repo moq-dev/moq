@@ -51,13 +51,9 @@ public typealias VideoCodec = MoqFFI.MoqVideoCodec
 public typealias VideoEncoderKind = MoqFFI.MoqVideoEncoderKind
 /// A best-effort raw-track datagram as received: sequence, timestamp, and payload.
 public typealias Datagram = MoqFFI.MoqDatagram
-/// How a broadcast advertises its exact path: its static production `cost`,
-/// lower wins, an optional stable `instance` (`nil` keeps the one the broadcast
-/// minted), and the `epoch`, which only matters with a stable instance.
-public typealias AnnounceRoute = MoqFFI.MoqAnnounceRoute
-/// An observed path-prefix route: the `instance` of the stream it serves, relay
-/// hop ids (oldest first), and its static production and link cost, lower wins.
-public typealias Route = MoqFFI.MoqRoute
+/// The read-only facts on a received route: the `instance` of the stream it serves,
+/// relay hop ids (oldest first), and its static production and link cost, lower wins.
+public typealias RouteInfo = MoqFFI.MoqRouteInfo
 /// A route over a prefix: the origin-relative `prefix`, what each filter
 /// wildcard matched (`captures`, a required list, empty without wildcards), and the `route` serving it.
 /// Resolve a path with `OriginConsumer.request`.

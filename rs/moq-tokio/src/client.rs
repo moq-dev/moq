@@ -1091,11 +1091,11 @@ mod tests {
 	#[tokio::test]
 	async fn broadcast_race_quic_wins() {
 		let pub_origin = crate::origin::spawn();
-		let broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
-		broadcast
-			.announce(Default::default())
+		let broadcast = pub_origin
+			.route("test", moq_net::origin::RouteOptions::default())
 			.expect("failed to create broadcast");
 		let track = broadcast
+			.broadcast()
 			.create_track("video", timed())
 			.expect("failed to create track");
 		let mut group = track.append_group().expect("failed to append group");

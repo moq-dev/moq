@@ -811,8 +811,10 @@ mod tests {
 		// the output must be minted through an origin: a standalone producer has no path, and
 		// `..` from it would escape, failing the catalog read below.
 		let origin = moq_tokio::origin::spawn();
-		let output = origin.create_broadcast("room/transcode").unwrap();
-		let consumer = output.consume();
+		let output = origin
+			.route("room/transcode", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let consumer = output.broadcast().consume();
 		let transcoder = tokio::spawn(run(source.broadcast.consume(), output.broadcast().clone(), config));
 
 		// The derivative catalog appears before anything is encoded, with the

@@ -150,7 +150,7 @@ fn subscribe_all() -> moq_net::track::Subscription {
 /// A signed broadcast published at `path` on its own origin, announced under its instance.
 struct Published {
 	origin: moq_net::origin::Producer,
-	_publication: moq_net::origin::Publication,
+	route: moq_net::origin::Route,
 	signed: broadcast::Producer,
 	path: moq_net::Path,
 }
@@ -159,14 +159,11 @@ fn publish(key: &SecretKey, path: &str) -> Published {
 	let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
 	tokio::spawn(moq_net::time::run(driver));
 	let path = moq_net::Path::new(path).unwrap();
-	let publication = origin.create_broadcast(&path).unwrap();
-	let signed = broadcast::Producer::new(publication.broadcast().clone(), key.clone(), path.clone());
-	publication
-		.announce(moq_net::origin::Route::default().with_instance(signed.instance().clone(), 0))
-		.unwrap();
+	let route = origin.route(&path, moq_net::origin::RouteOptions::default()).unwrap();
+	let signed = broadcast::Producer::new(route.broadcast().clone(), key.clone(), path.clone(), route.instance());
 	Published {
 		origin,
-		_publication: publication,
+		route,
 		signed,
 		path,
 	}
@@ -182,7 +179,7 @@ impl Published {
 
 	/// A signed track over a net track the test can also write forged frames to.
 	fn track(&self, key: &SecretKey, name: &str) -> (track::Producer, moq_net::track::Producer) {
-		let net = self._publication.broadcast().create_track(name, None).unwrap();
+		let net = self.route.broadcast().create_track(name, None).unwrap();
 		let scope = Scope::new(&self.path, self.signed.instance(), name);
 		(
 			track::Producer::new(net.clone(), key.clone(), scope, Arc::default()),
@@ -370,7 +367,8 @@ async fn frame_from_an_earlier_instance_is_refused() {
 fn group_sequence_is_never_signed_twice() {
 	let key = SecretKey::generate();
 	let net = moq_net::broadcast::Info::new().produce();
-	let signed = broadcast::Producer::new(net, key, moq_net::Path::new("mesh/node/ssh").unwrap());
+	let path = moq_net::Path::new("mesh/node/ssh").unwrap();
+	let signed = broadcast::Producer::new(net, key, path, moq_net::Instance::random());
 	let track = signed.create_track("stream", None).unwrap();
 	let mut group = track.append_group().unwrap();
 	group.write_frame(None, b"first").unwrap();

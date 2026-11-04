@@ -885,7 +885,7 @@ mod tests {
 		use crate::container::test_util::raw_frame;
 
 		let origin = crate::source::produce_origin();
-		let _catalog = origin.publish("a/pub", Default::default()).unwrap();
+		let _catalog = origin.route("a/pub", Default::default()).unwrap();
 		tokio::task::yield_now().await;
 		let source = crate::source::resolved(&origin, "a/pub").await;
 		let config = audio(Some("./source"));
@@ -902,13 +902,14 @@ mod tests {
 		let info = || hang::container::track_info(hang::catalog::PRIORITY.audio);
 
 		assert_eq!(read().await, None, "nothing announces the sibling yet");
-		let old = origin.publish("a/source", Default::default()).unwrap();
-		let mut track = crate::container::Producer::new(old.create_track("audio", info()).unwrap(), wire());
+		let old = origin.route("a/source", Default::default()).unwrap();
+		let mut track = crate::container::Producer::new(old.broadcast().create_track("audio", info()).unwrap(), wire());
 		track.write(raw_frame(0, b"old", true)).unwrap();
 		assert_eq!(read().await, Some(Some(0)), "the late announcement starts it");
 
-		let new = origin.publish("a/source", Default::default()).unwrap();
-		let mut replacement = crate::container::Producer::new(new.create_track("audio", info()).unwrap(), wire());
+		let new = origin.route("a/source", Default::default()).unwrap();
+		let mut replacement =
+			crate::container::Producer::new(new.broadcast().create_track("audio", info()).unwrap(), wire());
 		replacement.write(raw_frame(1_000_000, b"new", true)).unwrap();
 		track.write(raw_frame(24_000, b"old", true)).unwrap();
 		assert_eq!(read().await, Some(Some(24_000)), "the replacement is never read");
@@ -938,7 +939,7 @@ mod tests {
 
 		for failure in ["malformed", "violation", "dropped"] {
 			let origin = crate::source::produce_origin();
-			let _catalog = origin.publish("a/pub", Default::default()).unwrap();
+			let _catalog = origin.route("a/pub", Default::default()).unwrap();
 			tokio::task::yield_now().await;
 			let source = crate::source::resolved(&origin, "a/pub").await;
 			let config = audio(Some("./source"));
@@ -946,8 +947,9 @@ mod tests {
 				.unwrap()
 				.unwrap();
 
-			let sibling = origin.publish("a/source", Default::default()).unwrap();
+			let sibling = origin.route("a/source", Default::default()).unwrap();
 			let track = sibling
+				.broadcast()
 				.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
 				.unwrap();
 			// Subscribe before anything is written, so the failure and the instance's end arrive
@@ -998,13 +1000,14 @@ mod tests {
 
 		let remote = crate::source::produce_origin();
 		let origin = crate::source::produce_origin();
-		let _catalog = origin.publish("a/pub", Default::default()).unwrap();
+		let _catalog = origin.route("a/pub", Default::default()).unwrap();
 		tokio::task::yield_now().await;
 		let source = crate::source::resolved(&origin, "a/pub").await;
 		let _link = Link::new(&remote, &origin).await;
-		let sibling = remote.publish("a/source", Default::default()).unwrap();
+		let sibling = remote.route("a/source", Default::default()).unwrap();
 		let mut track = crate::container::Producer::new(
 			sibling
+				.broadcast()
 				.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
 				.unwrap(),
 			HangContainer::Legacy(crate::container::Kind::Audio),
@@ -1095,11 +1098,14 @@ mod tests {
 		let (publisher, subscriber) = (origin(1), origin(2));
 		let _link = Link::new(&publisher, &subscriber).await;
 
-		let broadcast = publisher.create_broadcast("room").unwrap();
+		let broadcast = publisher
+			.route("room", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let track = broadcast
+			.broadcast()
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		broadcast.announce().unwrap();
 		let consumer = subscriber.consume();
 		let remote = consumer.follow("room", None).unwrap().available().await.unwrap();
 		let source = crate::Source::new(consumer, remote);
@@ -1172,11 +1178,14 @@ mod tests {
 				false => (Link::held(&publisher, &subscriber, 2).await, None),
 			};
 
-			let broadcast = publisher.create_broadcast("room").unwrap();
+			let broadcast = publisher
+				.route("room", moq_net::origin::RouteOptions::hidden())
+				.unwrap();
 			let track = broadcast
+				.broadcast()
 				.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
 				.unwrap();
-			broadcast.announce(Default::default()).unwrap();
+			broadcast.announce().unwrap();
 			let consumer = subscriber.consume();
 			let remote = consumer.follow("room", None).unwrap().available().await.unwrap();
 			let source = crate::Source::new(consumer, remote);

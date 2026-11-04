@@ -78,11 +78,11 @@ int main(void) {
     int32_t origin = moq_origin_create();
     CHECK(origin > 0);
     const char *path = "timestamps";
-    uint32_t broadcast = 0;
-    int32_t publication = moq_origin_create_broadcast((uint32_t)origin, path, strlen(path), &broadcast);
-    CHECK(publication > 0);
-    CHECK(moq_publication_announce((uint32_t)publication, NULL) == 0);
-    CHECK(moq_publication_free((uint32_t)publication) == 0);
+    int32_t route = moq_origin_route((uint32_t)origin, path, strlen(path), NULL);
+    CHECK(route > 0);
+    int32_t created = moq_route_broadcast((uint32_t)route);
+    CHECK(created > 0);
+    uint32_t broadcast = (uint32_t)created;
     moq_track_info info = {0};
     info.timescale = 90000;
     info.timescale_present = true;
@@ -153,6 +153,7 @@ int main(void) {
     CHECK(moq_consume_close((uint32_t)c.broadcast) == 0);
     CHECK(moq_publish_json_stream_finish((uint32_t)json) == 0);
     CHECK(moq_publish_track_finish((uint32_t)track) == 0);
+    CHECK(moq_route_free((uint32_t)route) == 0);
     CHECK(moq_publish_close((uint32_t)broadcast) == 0);
     CHECK(moq_origin_close((uint32_t)origin) == 0);
     WAIT_FOR(&c, c.request_done);

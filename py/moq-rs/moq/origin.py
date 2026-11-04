@@ -7,20 +7,18 @@ from moq_ffi import (
     MoqAnnounceConfig,
     MoqAnnounceConsumer,
     MoqAnnounceEvent,
-    MoqBroadcastPrepared,
     MoqBroadcastRequest,
     MoqFollowing,
     MoqOriginConfig,
     MoqOriginConsumer,
     MoqOriginProducer,
-    MoqOriginRequests,
-    MoqPublication,
+    MoqRoute,
+    MoqRouteOptions,
 )
 
 from ._stream import _Stream
 from .publish import BroadcastProducer
 from .subscribe import BroadcastConsumer
-from .types import AnnounceRoute
 
 Announce = MoqAnnounce
 """A route over a prefix: the origin-relative ``prefix``, what each filter wildcard
@@ -109,8 +107,12 @@ class Following:
         self._inner.cancel()
 
 
+def _options(*, hidden: bool, cost: int, instance: str | None, epoch: int) -> MoqRouteOptions:
+    return MoqRouteOptions(hidden=hidden, cost=cost, instance=instance, epoch=epoch)
+
+
 class BroadcastRequest:
-    """A requested broadcast that has not been accepted yet."""
+    """A requested broadcast that has not been answered yet."""
 
     def __init__(self, inner: MoqBroadcastRequest) -> None:
         self._inner = inner
@@ -120,9 +122,16 @@ class BroadcastRequest:
         """The requested broadcast path."""
         return self._inner.path()
 
-    def prepare(self) -> BroadcastPrepared:
-        """Start answering as a new stream under a fresh instance, hidden until published."""
-        return BroadcastPrepared(self._inner.prepare())
+    def route(self, *, hidden: bool = False, cost: int = 0, instance: str | None = None, epoch: int = 0) -> Route:
+        """Answer with the path's own exact :class:`Route`, owning a new broadcast.
+
+        The route serves a fresh instance unless ``instance`` names one, so a job that
+        restarts is a new stream. Created visible, it announces now and answers the waiting
+        requesters; created ``hidden``, they wait until :meth:`Route.announce`, so the job can
+        fill its catalog first, and cancelling the route before then refuses them. Ending the
+        route withdraws only this path.
+        """
+        return Route(self._inner.route(_options(hidden=hidden, cost=cost, instance=instance, epoch=epoch)))
 
     def serve(self, broadcast: BroadcastConsumer) -> None:
         """Serve held content under the prefix route's continuous sequence space, without an exact route."""
@@ -133,72 +142,75 @@ class BroadcastRequest:
         self._inner.reject(error_code)
 
 
-class BroadcastPrepared:
-    """A claim answer being filled before its exact route is announced."""
+class Route(_Stream[BroadcastRequest]):
+    """A route on an origin: an exact route owning one broadcast, or a prefix route
+    yielding the requests beneath it.
 
-    def __init__(self, inner: MoqBroadcastPrepared) -> None:
+    Hold it for as long as the route should stay advertised: dropping or cancelling it
+    retracts it, as does closing an exact route's broadcast. A broadcast handle alone does
+    not keep it announced. Iterate a prefix route with ``async for`` for its
+    :class:`BroadcastRequest` values; usable as an async context manager that cancels the
+    route on exit.
+    """
+
+    def __init__(self, inner: MoqRoute) -> None:
         self._inner = inner
-        self._broadcast = BroadcastProducer._from_inner(inner.broadcast())
+        self._broadcast: BroadcastProducer | None = None
 
     @property
     def broadcast(self) -> BroadcastProducer:
-        """The unannounced broadcast to fill before publishing; only `publish` announces it."""
+        """The broadcast this exact route owns, to fill with tracks.
+
+        Raises ``moq.Error.Internal`` on a prefix route, which owns none: answer its requests instead.
+        """
+        if self._broadcast is None:
+            self._broadcast = BroadcastProducer._from_inner(self._inner.broadcast())
         return self._broadcast
-
-    def publish(self) -> Publication:
-        """Announce the filled broadcast and resolve waiting requesters."""
-        return Publication(self._inner.publish(), self._broadcast)
-
-
-class Publication:
-    """A broadcast published on an origin: the broadcast to fill and its announcement.
-
-    Dropping it does not retract the route; :meth:`BroadcastProducer.close` does.
-    """
-
-    def __init__(self, inner: MoqPublication, broadcast: BroadcastProducer) -> None:
-        self._inner = inner
-        self._broadcast = broadcast
 
     @property
-    def broadcast(self) -> BroadcastProducer:
-        """The broadcast to fill, without announcement control."""
-        return self._broadcast
+    def instance(self) -> str:
+        """The stream this route serves, minted at creation unless one was named, and kept
+        across :meth:`withdraw` and :meth:`announce`."""
+        return self._inner.instance()
 
-    def announce(self, route: AnnounceRoute | None = None) -> None:
-        """Advertise the broadcast's exact path as a route, or re-price it in place.
+    def announce(self) -> None:
+        """Make the route visible, or keep it so.
 
-        Until announced, the broadcast is invisible and unroutable for local
-        consumers and peers alike. Raises ``moq.Error.Closed`` once the broadcast closed.
+        A route from :meth:`BroadcastRequest.route` also answers the requesters waiting on
+        its path. Raises ``moq.Error.Closed`` once its broadcast closed.
         """
-        self._inner.announce(route if route is not None else AnnounceRoute())
+        self._inner.announce()
 
-    def unannounce(self) -> None:
-        """Retract the advertisement, if any, keeping the filled tracks alive.
+    def withdraw(self) -> None:
+        """Hide the route from everyone, keeping its broadcast and instance.
 
-        Announcing again brings it back. Raises ``moq.Error.Closed`` once the broadcast closed.
+        :meth:`announce` brings the same stream back; tracks already in flight carry on.
         """
-        self._inner.unannounce()
+        self._inner.withdraw()
 
+    def set_cost(self, cost: int) -> None:
+        """Re-price the route in place: lower wins among routes covering the same prefix.
 
-class OriginRequests(_Stream[BroadcastRequest]):
-    """A served route: advertises a prefix and yields requests beneath it.
+        A hidden route keeps the price for when it next announces. Raises
+        ``moq.Error.Closed`` once its broadcast closed.
+        """
+        self._inner.set_cost(cost)
 
-    Usable as an async context manager that cancels the route on exit.
-    """
+    async def _next(self) -> BroadcastRequest | None:
+        return await self.requested()
 
-    def __init__(self, inner: MoqOriginRequests) -> None:
-        self._inner = inner
+    async def requested(self) -> BroadcastRequest | None:
+        """Await the next broadcast a consumer requests beneath this prefix route.
 
-    async def _next(self) -> BroadcastRequest:
-        return await self.requested_broadcast()
-
-    async def requested_broadcast(self) -> BroadcastRequest:
-        """Await the next broadcast a consumer requested but that isn't published yet."""
-        return BroadcastRequest(await self._inner.requested_broadcast())
+        Serve, route, or reject it; the requester stays pending until then. Returns
+        ``None`` once the origin closes, and at once on an exact route.
+        """
+        request = await self._inner.requested()
+        return None if request is None else BroadcastRequest(request)
 
     def cancel(self) -> None:
-        """Stop serving and retract the route."""
+        """Retract the route and release it now. An exact route's broadcast lives on until
+        :meth:`BroadcastProducer.close`."""
         self._inner.cancel()
 
 
@@ -244,12 +256,11 @@ class OriginConsumer:
 
 
 class OriginProducer:
-    """The publishing side of an origin: announce broadcasts for consumers to discover.
+    """The publishing side of an origin: route broadcasts for consumers to discover.
 
-    Call :meth:`create_broadcast` to publish at a path, :meth:`consume` for a
-    matching :class:`OriginConsumer`, or :meth:`requests` to advertise a prefix
-    and serve on-demand requests. Create, :meth:`requests` if tracks are served
-    on demand, populate, then :meth:`Publication.announce`.
+    Call :meth:`route` to publish a broadcast at a path, :meth:`route_prefix` to
+    serve on-demand requests beneath a prefix, or :meth:`consume` for a matching
+    :class:`OriginConsumer`.
     """
 
     def __init__(self, *, cache_capacity_bytes: int | None = None) -> None:
@@ -266,25 +277,29 @@ class OriginProducer:
         """Create a consumer that discovers the broadcasts this origin publishes."""
         return OriginConsumer(self._inner.consume())
 
-    def requests(self, prefix: str) -> OriginRequests:
-        """Advertise ``prefix`` and serve the requests beneath it.
+    def route(
+        self, path: str, *, hidden: bool = False, cost: int = 0, instance: str | None = None, epoch: int = 0
+    ) -> Route:
+        """Create a :class:`Route` at exactly ``path``, owning a new broadcast to fill.
+
+        Visible at once unless ``hidden``: a hidden route is invisible and unroutable, for
+        this origin's consumers and peers alike, until :meth:`Route.announce`, so create it
+        hidden to fill the catalog first. ``cost`` prices it: lower wins. The route serves a
+        fresh instance unless ``instance`` names a stable one, whose runs raise ``epoch``.
+        Hold the route: dropping or cancelling it retracts it, and
+        :meth:`BroadcastProducer.close` ends both.
+        """
+        return Route(self._inner.route(path, _options(hidden=hidden, cost=cost, instance=instance, epoch=epoch)))
+
+    def route_prefix(
+        self, prefix: str, *, hidden: bool = False, cost: int = 0, instance: str | None = None, epoch: int = 0
+    ) -> Route:
+        """Create a :class:`Route` over ``prefix`` that yields the requests beneath it.
 
         A route claims ``prefix`` and every path beneath it (``""`` claims every
         path). A service that only serves some of them rejects the rest as they
-        are requested. Hold the returned handle while the route should stay
-        advertised.
+        are requested. Hold the route while it should stay advertised.
         """
-        return OriginRequests(self._inner.requests(prefix))
-
-    def create_broadcast(self, path: str) -> Publication:
-        """Create a broadcast at ``path``, returning its :class:`Publication`.
-
-        Fill :attr:`Publication.broadcast`. The broadcast is invisible and
-        unroutable, for this origin's consumers and peers alike, until
-        :meth:`Publication.announce`. Announce it after populating tracks. Create,
-        :meth:`requests` if tracks are served on demand, populate, then announce.
-        :meth:`BroadcastProducer.close` ends it for good; dropping its last
-        handle, the publication included, does the same.
-        """
-        inner = self._inner.create_broadcast(path)
-        return Publication(inner, BroadcastProducer._from_inner(inner.broadcast()))
+        return Route(
+            self._inner.route_prefix(prefix, _options(hidden=hidden, cost=cost, instance=instance, epoch=epoch))
+        )

@@ -33,12 +33,13 @@ impl Drop for Fixture {
 async fn prepare(tracks: usize, frames: usize, live: bool) -> (moq_mux::Source, moq_mux::catalog::Consumer, Fixture) {
 	let (origin, driver) = moq_net::origin::Producer::new(Default::default());
 	let driver = tokio::spawn(moq_net::time::run(driver));
-	let broadcast = origin.create_broadcast("bench").unwrap();
+	let broadcast = origin.route("bench", moq_net::origin::RouteOptions::hidden()).unwrap();
 	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 	let stream = moq_mux::catalog::Consumer::from(catalog.consume().unwrap());
 	let mut publishers = Vec::new();
 	for index in 0..tracks {
 		let track = broadcast
+			.broadcast()
 			.create_track(
 				format!("audio{index}"),
 				catalog.track_info(hang::catalog::PRIORITY.audio),
@@ -66,7 +67,7 @@ async fn prepare(tracks: usize, frames: usize, live: bool) -> (moq_mux::Source, 
 	if !live {
 		catalog.finish().unwrap();
 	}
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 	let resolved = origin.consume().request("bench", None).await.unwrap();
 	let source = moq_mux::Source::new(origin.consume(), resolved);
 	let fixture = Fixture {
@@ -234,10 +235,11 @@ async fn prepare_video(
 ) -> (moq_mux::Source, moq_mux::catalog::Consumer, Fixture) {
 	let (origin, driver) = moq_net::origin::Producer::new(Default::default());
 	let driver = tokio::spawn(moq_net::time::run(driver));
-	let broadcast = origin.create_broadcast("bench").unwrap();
+	let broadcast = origin.route("bench", moq_net::origin::RouteOptions::hidden()).unwrap();
 	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 	let stream = moq_mux::catalog::Consumer::from(catalog.consume().unwrap());
 	let track = broadcast
+		.broadcast()
 		.create_track("video", catalog.track_info(hang::catalog::PRIORITY.video))
 		.unwrap();
 	let mut config = hang::catalog::VideoConfig::new(hang::catalog::H264 {
@@ -277,7 +279,7 @@ async fn prepare_video(
 	}
 	video.finish().unwrap();
 	catalog.finish().unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 	let resolved = origin.consume().request("bench", None).await.unwrap();
 	let source = moq_mux::Source::new(origin.consume(), resolved);
 	(

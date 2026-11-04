@@ -61,9 +61,9 @@ try await session.closed()
 To publish through the auto-created origin:
 
 ```swift
-let publication = try session.publish.createBroadcast(path: "my-stream")
-// ... configure tracks on publication.broadcast ...
-try publication.announce() // unannounced broadcasts are invisible
+let route = try session.publish.route(path: "my-stream", hidden: true)
+// ... configure tracks on route.broadcast ...
+try route.announce() // hidden routes are invisible; hold the route while it should stay announced
 ```
 
 Cancelling the surrounding Swift `Task` propagates through to the underlying `cancel()` calls on each consumer. `session.shutdown()` requests a drain immediately; `try await session.closed()` waits for it and throws on delivery failure. `cancel(code: 0)` remains immediate.

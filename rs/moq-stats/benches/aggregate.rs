@@ -17,7 +17,7 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use moq_net::{Instance, origin};
+use moq_net::origin;
 use moq_stats::{Group, Traffic, aggregate, group_track};
 
 /// Broadcast paths each node reports.
@@ -39,20 +39,18 @@ struct Body {
 /// A hand-published node stats broadcast with one group track carrying
 /// default-tier egress.
 struct Node {
-	source: moq_net::origin::Publication,
-	instance: Instance,
+	source: moq_net::origin::Route,
 	group: moq_json::snapshot::Producer<Body>,
 	frame: Body,
 }
 
 impl Node {
 	fn new(origin: &origin::Producer, name: &str) -> Self {
-		let source = origin.create_broadcast(format!(".stats/node/{name}").as_str()).unwrap();
-		let instance = Instance::random();
-		source
-			.announce(origin::Route::default().with_instance(instance.clone(), 0))
+		let source = origin
+			.route(format!(".stats/node/{name}").as_str(), origin::RouteOptions::default())
 			.unwrap();
 		let track = source
+			.broadcast()
 			.create_track(
 				group_track(moq_net::Path::from_static("acme")),
 				moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
@@ -71,7 +69,6 @@ impl Node {
 		};
 		Self {
 			source,
-			instance,
 			group: moq_json::snapshot::Producer::new(track, config),
 			frame,
 		}
@@ -136,16 +133,14 @@ async fn measure(live: usize, departed: usize, grace: Duration, state: State) ->
 	}
 	if matches!(state, State::Resumed) {
 		for node in &mut nodes {
-			node.source.unannounce();
+			node.source.withdraw();
 			loop {
 				let frame = traffic.next().await.unwrap().unwrap();
 				if first(&frame).unwrap().active_subscriptions() == live as u64 - 1 {
 					break;
 				}
 			}
-			node.source
-				.announce(origin::Route::default().with_instance(node.instance.clone(), 0))
-				.unwrap();
+			node.source.announce().unwrap();
 			node.publish(1);
 			total += 1;
 			read_until(&mut traffic, total).await;

@@ -143,12 +143,17 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 	}
 	defer client.Close()
 
-	// Hold the producer for the lifetime of the publish loop; Close unpublishes.
-	publication, err := client.CreateBroadcast(broadcast)
+	// Hold the route for the lifetime of the publish loop, hidden until the
+	// catalog is filled; Close on its broadcast unpublishes.
+	route, err := client.Route(broadcast, moq.RouteOptions{Hidden: true})
 	if err != nil {
 		return err
 	}
-	producer := publication.Broadcast()
+	defer route.Cancel()
+	producer, err := route.Broadcast()
+	if err != nil {
+		return err
+	}
 	defer producer.Close()
 
 	catalog, err := moqmedia.NewCatalogProducer(producer)
@@ -175,7 +180,7 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 	if err != nil {
 		return err
 	}
-	if err := publication.Announce(moq.AnnounceRoute{}); err != nil {
+	if err := route.Announce(); err != nil {
 		return err
 	}
 	fmt.Printf("publishing %q (Annex-B H.264 from stdin + a %v Hz tone) to %s\n", broadcast, tones, url)
@@ -236,11 +241,15 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 	if err := producer.Close(); err != nil {
 		return err
 	}
-	healthPublication, err := client.CreateBroadcast(broadcast + ".health")
+	healthRoute, err := client.Route(broadcast+".health", moq.RouteOptions{Hidden: true})
 	if err != nil {
 		return err
 	}
-	health := healthPublication.Broadcast()
+	defer healthRoute.Cancel()
+	health, err := healthRoute.Broadcast()
+	if err != nil {
+		return err
+	}
 	defer health.Close()
 	live, err := health.PublishTrack("live", nil)
 	if err != nil {
@@ -252,7 +261,7 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 	if err := live.Finish(); err != nil {
 		return err
 	}
-	if err := healthPublication.Announce(moq.AnnounceRoute{}); err != nil {
+	if err := healthRoute.Announce(); err != nil {
 		return err
 	}
 	ack, err := os.Open(finishAck)

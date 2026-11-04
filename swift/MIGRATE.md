@@ -4,6 +4,22 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Publishing goes through one `Route`
+
+`OriginProducer.createBroadcast(path:)` is `route(path:hidden:cost:instance:epoch:)`, and `requests(prefix:)` is `routePrefix(prefix:hidden:cost:instance:epoch:)`. Both return a `Route`, which replaces `Publication`, `OriginRequests`, and `BroadcastPrepared`:
+
+- `Publication.broadcast` is `Route.broadcast`, which now throws on a prefix route.
+- `Publication.announce(route: AnnounceRoute(...))` is `announce()`, and re-pricing is `setCost(_:)`. `unannounce()` is `withdraw()`.
+- `OriginRequests.requestedBroadcast()` is `Route.requested()`, which returns `nil` once the origin closes. A prefix `Route` is the `AsyncSequence` of requests, and cancelling the iterating task still cancels the route.
+- `BroadcastRequest.prepare()` then `BroadcastPrepared.publish()` is `BroadcastRequest.route(hidden:cost:instance:epoch:)`: create it hidden to fill it first, then `announce()`.
+- `Route.instance` is the stream's instance, minted at creation and kept across `withdraw` and `announce`.
+
+`AnnounceRoute` is gone: pass its `cost`, `instance`, and `epoch`, plus `hidden`, as labeled arguments when creating the route. A route is visible at once unless `hidden: true`; set it and call `announce()` after filling the catalog to keep the old create-then-announce order. A stable `instance` is fixed for the route's lifetime: announcing another one is a new route.
+
+Hold the `Route` for as long as the broadcast should stay announced: releasing or cancelling it retracts it, while `BroadcastProducer.close()` still ends both. A `BroadcastProducer` alone no longer keeps it announced.
+
+`Route`, the received facts in `Announce.route`, is renamed `RouteInfo`; its fields are unchanged.
+
 ### `lower` is a `Media.Producer` ([#7699](https://github.com/moq-dev/moq/pull/7699))
 
 `Media.TrackProducer.video` and `Media.TrackStreamProducer.video` take `lower: Media.Producer?` instead of `TrackProducer?`. Pass `lower: .track(producer)`, or `.stream(producer)` for a byte-stream rendition.

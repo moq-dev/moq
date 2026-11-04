@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Publishing goes through one `moq::Route` handle
+
+`OriginProducer::create_broadcast(path)` is `route(path, options)`, and `requests(prefix)` is `route_prefix(prefix, options)`; `{}` options are the default. Each returns a `std::shared_ptr<moq::Route>`, which replaces `moq::Publication`, `moq::OriginRequests`, and `moq::BroadcastPrepared`:
+
+- `Publication::broadcast()` is `Route::broadcast()`, which returns an error on a prefix route.
+- `Publication::announce(route)` is `announce()`, and re-pricing is `set_cost(cost)`; `unannounce()` is `withdraw()`.
+- `OriginRequests::requested_broadcast()` is `requested()`, which resolves to `nullptr` once the origin closes.
+- `BroadcastRequest::prepare()` then `BroadcastPrepared::publish()` is `BroadcastRequest::route(options)`: create it hidden to fill it first, then `announce()`.
+- `instance()` is the stream's instance, kept across `withdraw()` and `announce()`.
+
+`moq::AnnounceRoute` is `moq::RouteOptions{hidden, cost, instance, epoch}`, given at creation. A route is visible at once unless `hidden`; set it and call `announce()` after filling the catalog to keep the old order. Hold the route while the broadcast should stay announced: `cancel()` or releasing its last handle retracts it, and closing its broadcast ends both. `moq::Route`, the record on `moq::Announce::route`, is `moq::RouteInfo`.
+
 ### `moq::VideoInit::lower` takes either producer kind ([#7699](https://github.com/moq-dev/moq/pull/7699))
 
 `lower` is `std::optional<moq::MediaProducer>` instead of a `std::shared_ptr<moq::MediaTrackProducer>`. Assign `moq::MediaProducer(moq::MediaProducer::kTrack{producer})`, or `kStream` for a `moq::MediaTrackStreamProducer`.

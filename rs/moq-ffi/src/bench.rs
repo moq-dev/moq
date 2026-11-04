@@ -244,7 +244,16 @@ async fn rust_ffi() {
 		let origin = MoqOriginProducer::new(MoqOriginConfig {
 			cache_capacity_bytes: Some(CACHE_BYTES),
 		});
-		let broadcast = origin.create_broadcast("bench".into()).unwrap().broadcast();
+		let route = origin
+			.route(
+				"bench".into(),
+				crate::origin::MoqRouteOptions {
+					hidden: true,
+					..Default::default()
+				},
+			)
+			.unwrap();
+		let broadcast = route.broadcast().unwrap();
 		let timed = MoqTrackInfo {
 			priority: 0,
 			max_age: None,
@@ -288,7 +297,8 @@ async fn rust_net() {
 		config.pool = moq_net::cache::Pool::new(cache);
 		let (origin, driver) = moq_net::origin::Producer::new(config);
 		let driver = tokio::spawn(moq_net::time::run(driver));
-		let broadcast = origin.create_broadcast("bench").unwrap();
+		let route = origin.route("bench", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let broadcast = route.broadcast();
 		let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MICRO);
 		let tracks: Vec<_> = (0..case.publishers)
 			.map(|p| broadcast.create_track(p.to_string(), Some(info.clone())).unwrap())

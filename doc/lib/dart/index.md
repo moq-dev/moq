@@ -82,7 +82,8 @@ print(await catalog.next());
 // Publish raw pixels; the binding encodes them. rgba and pts come from your capture source.
 import 'package:moq/video.dart' as video;
 
-final camera = moq.createBroadcast('live/camera');
+// Hidden until announced, so the catalog is filled before anyone finds it.
+final camera = moq.route('live/camera', options: RouteOptions(hidden: true));
 final encoder = video.Producer(
   catalog: media.CatalogProducer(broadcast: camera.broadcast()),
   options: video.ProducerOptions(
@@ -100,7 +101,7 @@ final encoder = video.Producer(
   ),
 );
 encoder.write(frame: video.Frame(timestamp: pts, data: rgba));
-camera.announce(route: AnnounceRoute());
+camera.announce();
 encoder.finish();
 ```
 
@@ -127,15 +128,15 @@ if (read is video.ReadFrame) {
 
 ```dart
 // Publish already-encoded frames. bytes comes from your encoder or application source.
-final publication = moq.createBroadcast('live/camera');
-final mine = publication.broadcast();
+final route = moq.route('live/camera'); // visible at once, under a fresh instance
+print(route.instance());
+final mine = route.broadcast();
 final track = mine.publishTrack(name: 'video', info: null);
 final group = track.appendGroup();
 group.writeFrame(frame: Frame(payload: bytes, timestamp: null));
 group.finish();
-publication.announce(route: AnnounceRoute()); // the broadcast mints its own instance
 track.finish();
-mine.close();
+mine.close(); // ends the route too
 
 await moq.close();
 ```
@@ -148,13 +149,14 @@ The rest of the [shared feature list](/lib/#what-every-binding-can-do) maps
 one to one; the API reference has the names, and [Layers](/lib/layers)
 shows which module holds each.
 
-- **Names.** Types drop the `Moq` prefix (`Session`, `BroadcastProducer`) as aliases, so the generated names still work. `Container`, `Route`, and the exceptions keep it, since Flutter owns those names.
+- **Names.** Types drop the `Moq` prefix (`Session`, `BroadcastProducer`, `RouteOptions`) as aliases, so the generated names still work. `MoqContainer`, `MoqRoute`, and the exceptions keep it, since Flutter owns those names.
+- **Routes.** `route(path)` publishes a broadcast and `routePrefix(prefix)` answers requests beneath a prefix, each returning a `MoqRoute`. Hold it: cancelling or disposing it retracts the route, while a broadcast handle alone does not keep it announced. It keeps its instance across `withdraw()` and `announce()`, so a new run is a new route.
 - **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `cut()`: after every frame, or at a segment cadence to align with video.
 - **Timeline breaks.** On a seek or pause, call `discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
 - **Media reads.** `media.TrackConsumer`, `audio.Consumer`, and `video.Consumer` return a `Read` in order: a `ReadFrame`, a `ReadGap` where media was lost, or a `ReadEnd` where the publisher stopped its encoder. A gap breaks continuity. An encoder end is not stream EOF: following frames before its endpoint are the old encoder's drain; the first at or past it starts fresh. A decoder reads everything the track still holds unless a live player sets `start: media.DecodeStart.latest` in its decoder output, which joins at the newest group and skips the cached backlog.
 - **Decoded frames hold decoder buffers.** `dispose()` each frame from a `video.Consumer` promptly rather than waiting for the garbage collector, or the decoder stalls. `resize` is best effort, so read each frame's `width()` and `height()`.
 - **Closing.** `await moq.close()` drains for up to one second and reports its result. `session.shutdown()` requests the drain synchronously; `await session.closed()` waits for its result. `session.cancel(code: 0)` closes at once. Finish or abort live tracks first. Awaiting cancellation of an announcement, grant, or request subscription releases its pending native read. Announcements and grants also release their consumer; server listeners leave their shared server usable. moq-lite-05 and newer wait for the peer to receive finished tails; older Lite versions and IETF wait only for transport ACKs.
-- **Ending cleanly.** When the input ends, finish every track, then call `finish()` on its `CatalogProducer` to finish the catalog, which ends the content. The broadcast stays announced and keeps serving the finished tracks, so a subscriber still catching up can drain them, until `broadcast.close()` takes it offline; disposing its `Publication` does not. How long to keep it up is yours to decide. A track still open at the close, or released without a finish, ends with `Unroutable` (`Internal` over moq-transport, which has no such code). Readers follow a publisher's runs by announcement, not by that error: see [identity and recovery](/concept/identity).
+- **Ending cleanly.** When the input ends, finish every track, then call `finish()` on its `CatalogProducer` to finish the catalog, which ends the content. The broadcast stays announced and keeps serving the finished tracks, so a subscriber still catching up can drain them, until `broadcast.close()` or disposing its `MoqRoute` takes it offline. How long to keep it up is yours to decide. A track still open at the close, or released without a finish, ends with `Unroutable` (`Internal` over moq-transport, which has no such code). Readers follow a publisher's runs by announcement, not by that error: see [identity and recovery](/concept/identity).
 - **Stats.** `session.stats()` reports `rtt`, `estimatedSendRateBps`, and the byte and packet counters (`bytesSent`, `bytesReceived`, `bytesLost`, `packetsSent`, `packetsReceived`, `packetsLost`). A field is `null` when the transport does not report it, which is not the same as zero. `version` names the negotiated protocol. Connect returns a connecting session; read its coherent `state()` snapshot and wait with that snapshot's revision to observe first-dial failures and reconnects. Each watcher keeps its own revision. Hold the owned `BandwidthConsumer` returned by `session.recvBandwidth()` to receive bandwidth estimates. `rate()` reads the current estimate in bits per second and `rateChanged()` waits for a new one. Release the consumer or call `cancel()` when finished; releasing the last consumer stops PROBE; the session and stats snapshots do not request it. Client consumers survive reconnects and report no estimate while disconnected.
 - **Authorization.** On `moq-lite-07-wip` (opt in with `ConnectOptions(versions: ...)`) and on moq-transport draft-18+ with the [MoQ Auth extension](/draft/moq-auth), listen to `moq.grants().updates()` for the `Grant` the relay sent back and each change, `null` until it answers and while a client session reconnects.
 - **Tokens.** Pass `ConnectOptions(tokens: [...])` instead of putting the credential in the URL. The first is the connection credential, sent in SETUP and, while an offered version can't carry it there (lite before 07), as the URL's `?jwt=`; each other token widens the grant over AUTH. `moq.tokens().set_(tokens: [...])` replaces them before they expire: the next dial presents them, a live AUTH session at once, and after an authorization refusal the session redials only if they changed. `await tokens().answered()` returns once the relay accepts them and throws its refusal with the relay's code. A `?jwt=` already in the URL stays the connection credential, which is how to reach a relay older than this release.

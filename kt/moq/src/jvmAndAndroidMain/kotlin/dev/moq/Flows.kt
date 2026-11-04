@@ -47,9 +47,11 @@ fun BroadcastRequests.requestedTracks(): Flow<TrackRequest> =
 /** Stream of the fills readers of one track need. */
 fun TrackRequests.requestedFills(): Flow<Fill> = pull({ cancel() }) { requestedFill() }
 
-/** Stream of broadcasts requested by consumers. */
-fun OriginRequests.requestedBroadcasts(): Flow<BroadcastRequest> =
-    pull({ cancel() }) { requestedBroadcast() }
+/**
+ * Stream of broadcasts requested beneath a prefix route, ending once the origin closes. Ending the
+ * collection leaves the route advertised; close or cancel the route to retract it.
+ */
+fun Route.requestedBroadcasts(): Flow<BroadcastRequest> = pull { requested() }
 
 /** Stream of timestamped raw frames within a group. */
 fun GroupConsumer.frames(): Flow<Frame> = pull({ cancel() }) { readFrame() }

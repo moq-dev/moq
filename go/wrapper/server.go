@@ -215,14 +215,14 @@ func (s *Server) CertFingerprints() ([]string, error) {
 	return s.inner.CertFingerprints()
 }
 
-// CreateBroadcast creates an unannounced broadcast at path, invisible to everyone until announced. Announce it after populating tracks.
+// Route creates a route at exactly path on the publish origin, owning a new broadcast to fill.
 //
-// See [OriginProducer.CreateBroadcast].
-func (s *Server) CreateBroadcast(path string) (*Publication, error) {
+// See [OriginProducer.Route].
+func (s *Server) Route(path string, options RouteOptions) (*Route, error) {
 	if s.publishOrigin == nil {
 		return nil, ErrNoPublishOrigin
 	}
-	return s.publishOrigin.CreateBroadcast(path)
+	return s.publishOrigin.Route(path, options)
 }
 
 // Accept returns the next incoming request, or (nil, nil) when the server stops.

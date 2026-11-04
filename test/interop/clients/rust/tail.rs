@@ -106,14 +106,14 @@ async fn main() -> anyhow::Result<()> {
 
 	match args[1].as_str() {
 		"publish" => {
-			let broadcast = origin.create_broadcast(&args[3])?;
-			let mut track = broadcast.create_track(
+			let route = origin.route(&args[3], moq_net::origin::RouteOptions::hidden())?;
+			let mut track = route.broadcast().create_track(
 				"tail",
 				moq_net::track::Info::default()
 					.with_timescale((!datagram).then_some(moq_net::Timescale::MILLI))
 					.with_compress(compress),
 			)?;
-			broadcast.announce(Default::default())?;
+			route.announce()?;
 			if cached {
 				write(&mut track, mode)?;
 			}
@@ -174,7 +174,7 @@ async fn main() -> anyhow::Result<()> {
 			if datagram {
 				track.finish()?;
 			}
-			broadcast.close();
+			route.broadcast().close();
 			session.close().await?;
 			eprintln!("tail acknowledged");
 		}

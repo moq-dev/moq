@@ -30,6 +30,22 @@ func newOrigin(t *testing.T) *moq.OriginProducer {
 	return origin
 }
 
+// newRoute creates an exact route on origin with its broadcast, kept reachable
+// until the test ends: the collector reclaiming it would retract the route.
+func newRoute(t *testing.T, origin *moq.OriginProducer, path string, options moq.RouteOptions) (*moq.Route, *moq.BroadcastProducer) {
+	t.Helper()
+	route, err := origin.Route(path, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { runtime.KeepAlive(route) })
+	broadcast, err := route.Broadcast()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return route, broadcast
+}
+
 // opusHead builds a valid OpusHead init buffer (RFC 7845): 48 kHz, 2 channels.
 func opusHead() []byte {
 	buf := []byte("OpusHead")
@@ -46,11 +62,14 @@ func TestDynamicBroadcastRequest(t *testing.T) {
 	defer cancel()
 
 	origin := newOrigin(t)
-	dynamic, err := origin.Requests("")
+	dynamic, err := origin.RoutePrefix("", moq.RouteOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer dynamic.Cancel()
+	if _, err := dynamic.Broadcast(); err == nil {
+		t.Fatal("a prefix route owns no broadcast")
+	}
 
 	type result struct {
 		broadcast *moq.BroadcastConsumer
@@ -62,7 +81,7 @@ func TestDynamicBroadcastRequest(t *testing.T) {
 		requested <- result{broadcast: broadcast, err: err}
 	}()
 
-	request, err := dynamic.RequestedBroadcast(ctx)
+	request, err := dynamic.Requested(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,16 +93,24 @@ func TestDynamicBroadcastRequest(t *testing.T) {
 		t.Fatalf("path = %q, want %q", path, "dynamic/broadcast")
 	}
 
-	prepared, err := request.Prepare()
+	served, err := request.Route(moq.RouteOptions{Hidden: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	track, err := prepared.Broadcast().PublishTrack("status", timedInfo())
+	defer runtime.KeepAlive(served)
+	if served.Instance() == dynamic.Instance() {
+		t.Fatal("a job's route serves a fresh instance")
+	}
+	broadcast, err := served.Broadcast()
 	if err != nil {
 		t.Fatal(err)
 	}
-	served, err := prepared.Publish()
+	track, err := broadcast.PublishTrack("status", timedInfo())
 	if err != nil {
+		t.Fatal(err)
+	}
+	// Only announcing answers the requester.
+	if err := served.Announce(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -118,12 +145,19 @@ func TestDynamicBroadcastRequest(t *testing.T) {
 	if err := track.Finish(); err != nil {
 		t.Fatal(err)
 	}
-	if err := served.Broadcast().Close(); err != nil {
+	if err := broadcast.Close(); err != nil {
 		t.Fatal(err)
 	}
-	// The publication fills the prepared broadcast, so closing one closes the other.
-	if _, err := prepared.Broadcast().PublishTrack("late", nil); !errors.Is(err, moq.ErrClosed) {
+	// The route hands out one broadcast, so closing it ends the route too.
+	again, err := served.Broadcast()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := again.PublishTrack("late", nil); !errors.Is(err, moq.ErrClosed) {
 		t.Fatalf("PublishTrack after close = %v, want ErrClosed", err)
+	}
+	if err := served.Announce(); !errors.Is(err, moq.ErrClosed) {
+		t.Fatalf("Announce after close = %v, want ErrClosed", err)
 	}
 }
 
@@ -251,11 +285,7 @@ func TestAudioConsumerDelay(t *testing.T) {
 	defer cancel()
 
 	origin := newOrigin(t)
-	publication, err := origin.CreateBroadcast("audio-delay")
-	if err != nil {
-		t.Fatal(err)
-	}
-	broadcast := publication.Broadcast()
+	route, broadcast := newRoute(t, origin, "audio-delay", moq.RouteOptions{Hidden: true})
 	track := "mic"
 	catalogProducer, err := moqmedia.NewCatalogProducer(broadcast)
 	if err != nil {
@@ -270,7 +300,7 @@ func TestAudioConsumerDelay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := publication.Announce(moq.AnnounceRoute{}); err != nil {
+	if err := route.Announce(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -417,11 +447,7 @@ func testDecodeVideoFrame(t *testing.T, surface bool) {
 	defer cancel()
 
 	origin := newOrigin(t)
-	publication, err := origin.CreateBroadcast("video-decode-frame")
-	if err != nil {
-		t.Fatal(err)
-	}
-	broadcast := publication.Broadcast()
+	route, broadcast := newRoute(t, origin, "video-decode-frame", moq.RouteOptions{Hidden: true})
 	track := "camera"
 	catalogProducer, err := moqmedia.NewCatalogProducer(broadcast)
 	if err != nil {
@@ -436,7 +462,7 @@ func testDecodeVideoFrame(t *testing.T, surface bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := publication.Announce(moq.AnnounceRoute{}); err != nil {
+	if err := route.Announce(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -705,16 +731,12 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 	defer cancel()
 
 	origin := newOrigin(t)
-	publication, err := origin.CreateBroadcast("live")
-	if err != nil {
-		t.Fatal(err)
-	}
-	broadcast := publication.Broadcast()
+	route, broadcast := newRoute(t, origin, "live", moq.RouteOptions{Hidden: true})
 	media, err := moqmedia.NewAudioTrackProducer(broadcast, moqmedia.Named{}, moqmedia.AudioInit{Format: moqmedia.AudioFormatOpus, Data: opusHead()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := publication.Announce(moq.AnnounceRoute{}); err != nil {
+	if err := route.Announce(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1246,7 +1268,7 @@ func TestConsumerCancelConcurrent(t *testing.T) {
 // that one request rather than the consumer it was made on.
 func TestRequestCancelKeepsTheOrigin(t *testing.T) {
 	origin := newOrigin(t)
-	dynamic, err := origin.Requests("")
+	dynamic, err := origin.RoutePrefix("", moq.RouteOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1265,7 +1287,7 @@ func TestRequestCancelKeepsTheOrigin(t *testing.T) {
 
 	// Take the request but never answer it, so the cancel lands on a call that is
 	// genuinely parked rather than one that has not started.
-	pending, err := dynamic.RequestedBroadcast(waitCtx)
+	pending, err := dynamic.Requested(waitCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1289,19 +1311,15 @@ func TestRequestCancelKeepsTheOrigin(t *testing.T) {
 		resolved <- err
 	}()
 
-	next, err := dynamic.RequestedBroadcast(waitCtx)
+	next, err := dynamic.Requested(waitCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	prepared, err := next.Prepare()
+	served, err := next.Route(moq.RouteOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	served, err := prepared.Publish()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer served.Broadcast().Close()
+	defer runtime.KeepAlive(served)
 	select {
 	case err := <-resolved:
 		if err != nil {
@@ -1507,11 +1525,7 @@ func TestBroadcastIsReachableOnlyWhileAnnounced(t *testing.T) {
 	defer cancel()
 
 	origin := newOrigin(t)
-	publication, err := origin.CreateBroadcast("live")
-	if err != nil {
-		t.Fatal(err)
-	}
-	broadcast := publication.Broadcast()
+	route, broadcast := newRoute(t, origin, "live", moq.RouteOptions{Hidden: true})
 	if _, err := broadcast.PublishTrack("events", nil); err != nil {
 		t.Fatal(err)
 	}
@@ -1520,7 +1534,10 @@ func TestBroadcastIsReachableOnlyWhileAnnounced(t *testing.T) {
 		t.Fatal("an unannounced broadcast must be unroutable")
 	}
 
-	if err := publication.Announce(moq.AnnounceRoute{Cost: 3}); err != nil {
+	if err := route.SetCost(3); err != nil {
+		t.Fatal(err)
+	}
+	if err := route.Announce(); err != nil {
 		t.Fatal(err)
 	}
 	announced, err := consumer.Announced(moq.AnnounceOptions{})
@@ -1533,21 +1550,23 @@ func TestBroadcastIsReachableOnlyWhileAnnounced(t *testing.T) {
 		t.Fatalf("announce: ann=%+v", ann)
 	}
 
-	if err := publication.Unannounce(); err != nil {
+	if err := route.Withdraw(); err != nil {
 		t.Fatal(err)
 	}
 	event := nextRoute(t, ctx, announced)
 	if retracted, ok := event.(moq.AnnounceEventEnd); !ok || retracted.Announce.Prefix != "live" {
-		t.Fatalf("unannounce: event=%+v", event)
+		t.Fatalf("withdraw: event=%+v", event)
 	}
 	if _, err := consumer.Request(ctx, "live", nil); err == nil {
 		t.Fatal("an unannounced broadcast must be unroutable")
 	}
 
-	if err := publication.Announce(moq.AnnounceRoute{}); err != nil {
+	if err := route.Announce(); err != nil {
 		t.Fatal(err)
 	}
-	nextAnnounced(t, ctx, announced)
+	if ann := nextAnnounced(t, ctx, announced); ann.Route.Instance != route.Instance() {
+		t.Fatalf("reannounce: ann=%+v, want instance %s", ann, route.Instance())
+	}
 	if _, err := consumer.Request(ctx, "live", nil); err != nil {
 		t.Fatal(err)
 	}
@@ -1556,37 +1575,28 @@ func TestBroadcastIsReachableOnlyWhileAnnounced(t *testing.T) {
 	}
 }
 
-// A publication outliving its closed broadcast cannot announce or withdraw the
-// broadcast that replaced it at the same path.
-func TestStalePublicationLeavesItsReplacementAlone(t *testing.T) {
+// A route outliving its closed broadcast cannot announce, re-price, or withdraw
+// the route that replaced it at the same path.
+func TestStaleRouteLeavesItsReplacementAlone(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 
 	origin := newOrigin(t)
-	stale, err := origin.CreateBroadcast("live")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := stale.Announce(moq.AnnounceRoute{}); err != nil {
-		t.Fatal(err)
-	}
-	if err := stale.Broadcast().Close(); err != nil {
+	stale, broadcast := newRoute(t, origin, "live", moq.RouteOptions{})
+	if err := broadcast.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	replacement, err := origin.CreateBroadcast("live")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer replacement.Broadcast().Close()
-	if err := replacement.Announce(moq.AnnounceRoute{}); err != nil {
-		t.Fatal(err)
-	}
-	if err := stale.Announce(moq.AnnounceRoute{}); !errors.Is(err, moq.ErrClosed) {
+	_, replacement := newRoute(t, origin, "live", moq.RouteOptions{})
+	defer replacement.Close()
+	if err := stale.Announce(); !errors.Is(err, moq.ErrClosed) {
 		t.Fatalf("stale Announce = %v, want ErrClosed", err)
 	}
-	if err := stale.Unannounce(); !errors.Is(err, moq.ErrClosed) {
-		t.Fatalf("stale Unannounce = %v, want ErrClosed", err)
+	if err := stale.SetCost(1); !errors.Is(err, moq.ErrClosed) {
+		t.Fatalf("stale SetCost = %v, want ErrClosed", err)
+	}
+	if err := stale.Withdraw(); err != nil {
+		t.Fatalf("stale Withdraw = %v, want a no-op", err)
 	}
 	if _, err := origin.Consume().Request(ctx, "live", nil); err != nil {
 		t.Fatalf("Request = %v, want the replacement", err)
@@ -1605,20 +1615,8 @@ func TestAnnouncedPatternCaptures(t *testing.T) {
 	}
 	defer announced.Cancel()
 
-	audio, err := origin.CreateBroadcast("room/alice/audio")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := audio.Announce(moq.AnnounceRoute{}); err != nil {
-		t.Fatal(err)
-	}
-	chat, err := origin.CreateBroadcast("room/alice/chat")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := chat.Announce(moq.AnnounceRoute{}); err != nil {
-		t.Fatal(err)
-	}
+	newRoute(t, origin, "room/alice/audio", moq.RouteOptions{})
+	newRoute(t, origin, "room/alice/chat", moq.RouteOptions{})
 
 	update := nextAnnounced(t, ctx, announced)
 	if update.Prefix != "room/alice/chat" {
@@ -1643,13 +1641,7 @@ func TestAnnouncedExactFilterCapturesEmpty(t *testing.T) {
 	}
 	defer announced.Cancel()
 
-	chat, err := origin.CreateBroadcast("room/alice/chat")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := chat.Announce(moq.AnnounceRoute{}); err != nil {
-		t.Fatal(err)
-	}
+	newRoute(t, origin, "room/alice/chat", moq.RouteOptions{})
 
 	update := nextAnnounced(t, ctx, announced)
 	if update.Prefix != "room/alice/chat" {
@@ -1660,8 +1652,8 @@ func TestAnnouncedExactFilterCapturesEmpty(t *testing.T) {
 	}
 }
 
-// A broadcast mints its own instance and keeps it across re-announcing; another
-// instance is another stream and restarts announce consumers.
+// A route mints its own instance and keeps it across re-pricing; another route
+// is another stream and restarts announce consumers.
 func TestAnnouncedInstanceRestarts(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
@@ -1673,19 +1665,13 @@ func TestAnnouncedInstanceRestarts(t *testing.T) {
 	}
 	defer announced.Cancel()
 
-	publication, err := origin.CreateBroadcast("instance")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := publication.Announce(moq.AnnounceRoute{}); err != nil {
-		t.Fatal(err)
-	}
+	route, _ := newRoute(t, origin, "instance", moq.RouteOptions{})
 	minted := nextAnnounced(t, ctx, announced).Route.Instance
-	if minted == "" {
-		t.Fatal("start instance is empty, want a minted one")
+	if minted == "" || minted != route.Instance() {
+		t.Fatalf("start instance = %q, want the minted %q", minted, route.Instance())
 	}
 
-	if err := publication.Announce(moq.AnnounceRoute{Cost: 1}); err != nil {
+	if err := route.SetCost(1); err != nil {
 		t.Fatal(err)
 	}
 	update, ok := nextRoute(t, ctx, announced).(moq.AnnounceEventUpdate)
@@ -1694,17 +1680,15 @@ func TestAnnouncedInstanceRestarts(t *testing.T) {
 	}
 
 	stable := "cam"
-	if err := publication.Announce(moq.AnnounceRoute{Instance: &stable, Epoch: 1}); err != nil {
-		t.Fatal(err)
-	}
+	newRoute(t, origin, "instance", moq.RouteOptions{Instance: &stable, Epoch: 1})
 	restart, ok := nextRoute(t, ctx, announced).(moq.AnnounceEventRestart)
 	if !ok || restart.Announce.Route.Instance != stable {
 		t.Fatalf("restart = %+v, want instance %s", restart, stable)
 	}
 
 	empty := ""
-	if err := publication.Announce(moq.AnnounceRoute{Instance: &empty}); !errors.Is(err, moq.ErrInvalidInstance) {
-		t.Fatalf("Announce(empty instance) = %v, want ErrInvalidInstance", err)
+	if _, err := origin.Route("refused", moq.RouteOptions{Instance: &empty}); !errors.Is(err, moq.ErrInvalidInstance) {
+		t.Fatalf("Route(empty instance) = %v, want ErrInvalidInstance", err)
 	}
 }
 
@@ -1739,7 +1723,7 @@ func TestDynamicServesARequestUnderAPrefix(t *testing.T) {
 	defer cancel()
 
 	origin := newOrigin(t)
-	dynamic, err := origin.Requests("live")
+	dynamic, err := origin.RoutePrefix("live", moq.RouteOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1752,7 +1736,7 @@ func TestDynamicServesARequestUnderAPrefix(t *testing.T) {
 		done <- err
 	}()
 
-	request, err := dynamic.RequestedBroadcast(ctx)
+	request, err := dynamic.Requested(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1760,26 +1744,22 @@ func TestDynamicServesARequestUnderAPrefix(t *testing.T) {
 	if err != nil || path != "live/cam" {
 		t.Fatalf("path = %q err=%v", path, err)
 	}
-	prepared, err := request.Prepare()
+	served, err := request.Route(moq.RouteOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	served, err := prepared.Publish()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer served.Broadcast().Close()
+	defer runtime.KeepAlive(served)
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestClosingAPreparedAnswerRefusesTheRequest(t *testing.T) {
+func TestCancellingAHiddenAnswerRefusesTheRequest(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 
 	origin := newOrigin(t)
-	dynamic, err := origin.Requests("live")
+	dynamic, err := origin.RoutePrefix("live", moq.RouteOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1792,15 +1772,15 @@ func TestClosingAPreparedAnswerRefusesTheRequest(t *testing.T) {
 		done <- err
 	}()
 
-	request, err := dynamic.RequestedBroadcast(ctx)
+	request, err := dynamic.Requested(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	prepared, err := request.Prepare()
+	hidden, err := request.Route(moq.RouteOptions{Hidden: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	prepared.Close()
+	hidden.Cancel()
 
 	select {
 	case err := <-done:

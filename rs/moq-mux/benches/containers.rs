@@ -56,11 +56,12 @@ async fn prepare(video: Video, payload: &Bytes) -> (moq_mux::Source, impl Stream
 	} = video;
 	let (origin, driver) = moq_net::origin::Producer::new(Default::default());
 	let driver = tokio::spawn(moq_net::time::run(driver));
-	let broadcast = origin.create_broadcast("bench").unwrap();
+	let broadcast = origin.route("bench", moq_net::origin::RouteOptions::hidden()).unwrap();
 	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 	let mut publishers = Vec::new();
 	for index in 0..tracks {
 		let track = broadcast
+			.broadcast()
 			.create_track(
 				format!("video{index}"),
 				catalog.track_info(hang::catalog::PRIORITY.video),
@@ -84,7 +85,7 @@ async fn prepare(video: Video, payload: &Bytes) -> (moq_mux::Source, impl Stream
 		publishers.push(publisher);
 	}
 	catalog.finish().unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 	let resolved = origin.consume().request("bench", None).await.unwrap();
 	let source = moq_mux::Source::new(origin.consume(), resolved);
 	let stream = source.catalog::<()>(CatalogFormat::Hang).await.unwrap();

@@ -109,26 +109,31 @@ impl Forwarder {
 }
 
 /// A relay with a plaintext TCP listener and an open auth policy, publishing `name`.
-async fn relay(name: &str) -> (Relay, SocketAddr, moq_net::origin::Publication) {
+async fn relay(name: &str) -> (Relay, SocketAddr, moq_net::origin::Route) {
 	let mut config = moq_relay::Config::default();
 	config.listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.auth.public = vec![moq_auth::Pattern::all()];
 	config.drain_timeout = Some(DRAIN.into());
 	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let addr = relay.tcp_addr().expect("tcp listener");
-	let broadcast = relay.cluster().origin.create_broadcast(name).expect("create broadcast");
-	broadcast.announce(Default::default()).expect("announce");
+	let broadcast = relay
+		.cluster()
+		.origin
+		.route(name, moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
 	(relay, addr, broadcast)
 }
 
 /// A peer relay publishing `name` and dialing B through `forwarder`.
-async fn peer(name: &str, forwarder: &Forwarder) -> (cluster::Cluster, moq_net::origin::Publication) {
+async fn peer(name: &str, forwarder: &Forwarder) -> (cluster::Cluster, moq_net::origin::Route) {
 	let mut config = cluster::Config::default();
 	config.connect = vec![Peer::new(format!("tcp://127.0.0.1:{}/", forwarder.port))];
 	let cluster =
 		crate::spawn_cluster(cluster::Options::new(config)).with_connect(Default::default(), Default::default());
-	let broadcast = cluster.origin.create_broadcast(name).expect("create broadcast");
-	broadcast.announce(Default::default()).expect("announce");
+	let broadcast = cluster
+		.origin
+		.route(name, moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
 	let started = cluster.clone().start().await.expect("cluster start");
 	tokio::spawn(started.run());
 	(cluster, broadcast)

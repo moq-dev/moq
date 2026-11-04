@@ -57,8 +57,10 @@ async fn segments_match_their_manifests() {
 	let ts = encode(dir.path()).await;
 
 	let pair = Pair::connect().await;
-	let publication = pair.publisher.create_broadcast("live").expect("publish");
-	publication.announce(Default::default()).expect("announce");
+	let publication = pair
+		.publisher
+		.route("live", moq_net::origin::RouteOptions::default())
+		.expect("publish");
 	let mut broadcast = publication.broadcast().clone();
 	let hls = moq_mux::hls::Config::default()
 		.with_duration(DURATION)

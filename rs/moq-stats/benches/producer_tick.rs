@@ -95,7 +95,7 @@ struct Relay {
 	driver: Driver,
 	_origin: origin::Producer,
 	_origin_driver: origin::Driver,
-	_publishers: Vec<origin::Publication>,
+	_publishers: Vec<origin::Route>,
 	_cursors: Vec<announce::Consumer>,
 	_sessions: Vec<stats::Session>,
 	_held: Vec<moq_net::track::Subscriber>,
@@ -121,7 +121,7 @@ impl Relay {
 			.iter()
 			.map(|path| {
 				origin
-					.publish(path.as_str(), origin::Route::default())
+					.route(path.as_str(), moq_net::origin::RouteOptions::default())
 					.expect("publish path")
 			})
 			.collect();

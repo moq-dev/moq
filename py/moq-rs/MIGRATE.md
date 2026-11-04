@@ -4,6 +4,20 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Publishing goes through one `Route` handle
+
+`OriginProducer.create_broadcast(path)` (and `Client.create_broadcast` / `Server.create_broadcast`) is `route(path, *, hidden=False, cost=0, instance=None, epoch=0)`, and `OriginProducer.requests(prefix)` is `route_prefix(prefix, ...)`. Both return a `moq.Route`, which replaces `Publication`, `OriginRequests`, and `BroadcastPrepared`:
+
+- `Publication.broadcast` is `Route.broadcast`, which raises `Error.Internal` on a prefix route.
+- `Publication.announce(AnnounceRoute(...))` is `Route.announce()`; pass the cost and instance to `route()` instead, and re-price with `set_cost(cost)`. `unannounce()` is `withdraw()`.
+- `OriginRequests.requested_broadcast()` is `Route.requested()`, which returns `None` once the origin closes; `async for` still iterates the requests.
+- `BroadcastRequest.prepare()` then `.publish()` is `BroadcastRequest.route(hidden=True)`, then fill `.broadcast` and call `announce()`.
+- `Route.instance` is the stream's instance, minted at creation and kept across `withdraw()` and `announce()`.
+
+A route is visible at once unless `hidden=True`, so pass it and call `announce()` after filling the catalog to keep the old create-then-announce order. Hold the `Route` while the broadcast should stay announced: dropping or cancelling it retracts it, while `broadcast.close()` still ends both.
+
+`AnnounceRoute` is gone, and `moq.Route` now names the handle: the read-only facts on `Announce.route` are `moq.RouteInfo`.
+
 ### `VideoInit.lower` takes either producer kind ([#7699](https://github.com/moq-dev/moq/pull/7699))
 
 The `lower=` argument of `TrackProducer.video` and `TrackStreamProducer.video` accepts either producer and needs no change. Code that sets the raw `VideoInit.lower` field wraps the handle as `MoqMediaProducer.TRACK(producer=...)` or `MoqMediaProducer.STREAM(producer=...)`.

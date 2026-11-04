@@ -10,8 +10,8 @@
 //!
 //! [draft-lcurley-moq-sign]: https://datatracker.ietf.org/doc/draft-lcurley-moq-sign/
 //!
-//! A publisher wraps its `moq-net` broadcast in a [`broadcast::Producer`], which mints a fresh
-//! instance to announce on the broadcast's route. A subscriber wraps the broadcast an origin
+//! A publisher wraps its `moq-net` broadcast in a [`broadcast::Producer`], which signs under the
+//! instance of the route that serves it. A subscriber wraps the broadcast an origin
 //! resolved in a [`broadcast::Consumer`], which takes the instance from that route. Both sides name
 //! the broadcast by the same application path, independent of where a relay mounts it.
 //!

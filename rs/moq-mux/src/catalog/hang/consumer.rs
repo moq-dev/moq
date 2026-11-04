@@ -113,8 +113,11 @@ mod test {
 	/// resolves against.
 	fn publish_catalog(published: Catalog<()>) -> Result<Option<Catalog>> {
 		let origin = crate::source::produce_origin();
-		let broadcast = origin.create_broadcast("a/pub").expect("broadcast should create");
+		let broadcast = origin
+			.route("a/pub", moq_net::origin::RouteOptions::hidden())
+			.expect("broadcast should create");
 		let track = broadcast
+			.broadcast()
 			.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
 			.expect("catalog track should create");
 		let mut consumer = Consumer::new(track.subscribe(None));
@@ -146,27 +149,29 @@ mod test {
 	/// takes when it answers an origin request.
 	async fn publish_catalog_served(published: Catalog<()>) -> Result<Option<Catalog>> {
 		let origin = crate::source::produce_origin();
-		let dynamic = origin.requests("").unwrap();
+		let dynamic = origin
+			.route_prefix("", moq_net::origin::RouteOptions::default())
+			.unwrap();
 		let requesting = origin.consume().request("a/pub", None);
 		// The handler hands its route back: dropping it would retract the route and end
 		// the broadcast it just served.
 		let handler = tokio::spawn(async move {
-			let prepared = dynamic
-				.requested_broadcast()
+			let route = dynamic
+				.requested()
 				.await
 				.expect("handler should be asked for the path")
-				.prepare()
-				.expect("the answer should prepare");
-			let track = prepared
+				.route(moq_net::origin::RouteOptions::hidden())
+				.expect("the answer should route");
+			let track = route
 				.broadcast()
 				.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
 				.expect("catalog track should create");
-			let broadcast = prepared.publish().expect("the answer should publish");
-			(dynamic, broadcast, track)
+			route.announce().expect("the answer should announce");
+			(dynamic, route, track)
 		});
 
 		let resolved = requesting.await;
-		let (_dynamic, _broadcast, track) = handler.await.expect("handler task");
+		let (_dynamic, _route, track) = handler.await.expect("handler task");
 		let subscriber = resolved
 			.expect("the handler served it")
 			.track(hang::Catalog::DEFAULT_NAME)

@@ -16,7 +16,7 @@ struct Feedback {
 async fn export_echo_reports_where_the_import_solicits() {
 	let (expected, _) = written(CLIP);
 	let origin = moq_tokio::origin::spawn();
-	let publication = origin.create_broadcast("demo").unwrap();
+	let publication = origin.route("demo", moq_net::origin::RouteOptions::hidden()).unwrap();
 	let mut broadcast = publication.broadcast().clone();
 	let mut catalog_value = moq_mux::catalog::hang::Catalog::<ts::Ext>::default();
 	catalog_value.echo = Some(hang::catalog::Echo::new(
@@ -28,7 +28,7 @@ async fn export_echo_reports_where_the_import_solicits() {
 	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
 	let mut import = ts::Import::new(broadcast, catalog.reserve());
 	import.decode(&CLIP[..HALF]).unwrap();
-	publication.announce(Default::default()).unwrap();
+	publication.announce().unwrap();
 	let consumer = origin.consume();
 	let resolved = consumer.follow("demo", None).unwrap().available().await.unwrap();
 

@@ -437,8 +437,9 @@ async fn a_reconnecting_client_rides_out_a_restart_inner() {
 	let url: url::Url = format!("tcp://{addr}/").parse().expect("parse url");
 
 	let origin = moq_tokio::origin::spawn();
-	let broadcast = origin.create_broadcast("cam").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("announce");
+	let _broadcast = origin
+		.route("cam", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
 	let mut publisher = moq_tokio::connect::Config::default();
 	// Redials paced well inside the drain, under a window that ends long before it.
 	publisher.backoff.initial = Some((DRAIN_TIMEOUT / 15).into());

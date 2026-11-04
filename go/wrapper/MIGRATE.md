@@ -4,6 +4,22 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Publishing goes through one `Route`
+
+`OriginProducer.CreateBroadcast(path)`, `Client.CreateBroadcast`, and `Server.CreateBroadcast` are `Route(path, moq.RouteOptions{})`, and `OriginProducer.Requests(prefix)` is `RoutePrefix(prefix, moq.RouteOptions{})`. Both return a `*Route`, which replaces `*Publication`, `*OriginRequests`, and `*BroadcastPrepared`:
+
+- `Publication.Broadcast()` is `Route.Broadcast()`, which now also returns an error, on a prefix route.
+- `Publication.Announce(moq.AnnounceRoute{...})` is `Announce()`, and re-pricing is `SetCost(cost)`. `Unannounce()` is `Withdraw()`.
+- `OriginRequests.RequestedBroadcast(ctx)` is `Route.Requested(ctx)`, which returns `(nil, nil)` once the origin closes; `All(ctx)` and `Cancel()` keep their names. Cancelling ctx no longer retracts the route, only the wait.
+- `BroadcastRequest.Prepare()` then `BroadcastPrepared.Publish()` is `BroadcastRequest.Route(options)`: create it hidden to fill it first, then `Announce()`. `BroadcastPrepared.Close()` is `Route.Cancel()`.
+- `Route.Instance()` is the stream's instance, minted at creation and kept across `Withdraw` and `Announce`.
+
+`moq.AnnounceRoute` is `moq.RouteOptions{Hidden, Cost, Instance, Epoch}`, given once at creation. A route is visible at once unless `Hidden`; set it and call `Announce()` after filling the catalog to keep the old create-then-announce order. A stable `Instance` is fixed for the route's lifetime: announcing another one is a new route.
+
+Keep the `*Route` reachable for as long as the broadcast should stay announced: the collector reclaiming it, or `Cancel()`, retracts it, while `BroadcastProducer.Close()` still ends both. A `*BroadcastProducer` alone no longer keeps it announced.
+
+`moq.Route`, the received facts in `Announce.Route`, is renamed `moq.RouteInfo`; its fields are unchanged.
+
 ### `media.VideoInit.Lower` is a `media.Producer` ([#7699](https://github.com/moq-dev/moq/pull/7699))
 
 `Lower` is the `media.Producer` interface instead of `*media.TrackProducer`, so a `*media.TrackStreamProducer` fits too. Assigning a `*media.TrackProducer`, nil included, compiles unchanged; code that reads `Lower` back type-asserts it.

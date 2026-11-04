@@ -71,7 +71,9 @@ final class FfiBench: XCTestCase {
     private func throughput(_ c: Case, _ budget: Double) async throws -> [Result] {
         let origin = OriginProducer(cacheCapacityBytes: 64 << 20)
         defer { withExtendedLifetime(origin) {} }
-        let broadcast = try origin.createBroadcast(path: "bench").broadcast
+        let route = try origin.route(path: "bench", hidden: true)
+        defer { withExtendedLifetime(route) {} }
+        let broadcast = try route.broadcast
         let tracks = try (0..<c.publishers).map {
             try broadcast.publishTrack(name: "\($0)", info: TrackInfo(timescale: 1_000_000))
         }

@@ -109,9 +109,9 @@ async def publish(
     async with _client(url, version) as client:
         if grant:
             await _print_grant(client, timeout)
-        # Hold the producer for the lifetime of the publish loop.
-        publication = client.create_broadcast(broadcast)
-        producer = publication.broadcast
+        # Hold the route for the lifetime of the publish loop: dropping it retracts the broadcast.
+        route = client.route(broadcast, hidden=True)
+        producer = route.broadcast
         catalog = moq.media.CatalogProducer(producer)
         media = moq.media.TrackStreamProducer.video(
             producer, moq.media.VideoInit(format=moq.media.VideoFormat.AVC3, data=b"")
@@ -125,7 +125,7 @@ async def publish(
             ),
             track=AUDIO_TRACK,
         )
-        publication.announce()
+        route.announce()
         print(f"publishing {broadcast!r} (Annex-B H.264 from stdin + a {tones} Hz tone) to {url}")
 
         tone = asyncio.create_task(_publish_tone(audio, tones))
@@ -155,7 +155,7 @@ async def publish(
             print(f"finish ready linger_us={LINGER // timedelta(microseconds=1)}", flush=True)
             await asyncio.sleep(LINGER.total_seconds())
             producer.close()
-            health = client.create_broadcast(f"{broadcast}.health")
+            health = client.route(f"{broadcast}.health", hidden=True)
             live = health.broadcast.publish_track("live")
             live.write_frame(b"session-alive")
             live.finish()

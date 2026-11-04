@@ -16,9 +16,11 @@ fn sessions_without_a_runtime() {
 	assert!(tokio::runtime::Handle::try_current().is_err());
 
 	let publisher = moq_tokio::origin::spawn();
-	let broadcast = publisher.create_broadcast("test").expect("failed to create broadcast");
-	broadcast.announce(Default::default()).expect("failed to announce");
+	let broadcast = publisher
+		.route("test", moq_net::origin::RouteOptions::default())
+		.expect("failed to create broadcast");
 	let track = broadcast
+		.broadcast()
 		.create_track(
 			"video",
 			moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),

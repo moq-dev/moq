@@ -14,7 +14,7 @@ fn produce(key: &SecretKey) -> (moq_crypto::sign::track::Producer, moq_net::broa
 	let info = moq_net::track::Info::default().with_max_age(Duration::ZERO);
 	let inner = moq_net::broadcast::Info::new().produce();
 	let path = moq_net::Path::new("bench").unwrap();
-	let track = broadcast::Producer::new(inner.clone(), key.clone(), path)
+	let track = broadcast::Producer::new(inner.clone(), key.clone(), path, moq_net::Instance::random())
 		.create_track("stream", info)
 		.unwrap();
 	(track, inner)
@@ -26,24 +26,22 @@ async fn roundtrip(
 ) -> (
 	moq_crypto::sign::track::Producer,
 	moq_crypto::sign::track::Consumer,
-	moq_net::origin::Publication,
+	moq_net::origin::Route,
 ) {
 	let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
 	tokio::spawn(moq_net::time::run(driver));
 	let path = moq_net::Path::new("bench").unwrap();
-	let publication = origin.create_broadcast(&path).unwrap();
-	let signed = broadcast::Producer::new(publication.broadcast().clone(), key.clone(), path.clone());
+	let route = origin.route(&path, moq_net::origin::RouteOptions::hidden()).unwrap();
+	let signed = broadcast::Producer::new(route.broadcast().clone(), key.clone(), path.clone(), route.instance());
 	let info = moq_net::track::Info::default().with_max_age(Duration::ZERO);
 	let track = signed.create_track("stream", info).unwrap();
-	publication
-		.announce(moq_net::origin::Route::default().with_instance(signed.instance().clone(), 0))
-		.unwrap();
+	route.announce().unwrap();
 	let inner = origin.consume().request(&path, None).await.unwrap();
 	let consumer = broadcast::Consumer::new(inner, key.public(), path).unwrap();
 	let subscription = moq_net::track::Subscription::default()
 		.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(60)));
 	let consumer = consumer.subscribe("stream", subscription).unwrap().await.unwrap();
-	(track, consumer, publication)
+	(track, consumer, route)
 }
 
 fn bench_sign(c: &mut Criterion) {

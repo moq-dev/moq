@@ -4,6 +4,22 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Publishing goes through one `Route`
+
+`OriginProducer.createBroadcast(path)`, `Moq.createBroadcast`, and `Server.createBroadcast` are `route(path, RouteOptions())`, and `OriginProducer.requests(prefix)` is `routePrefix(prefix, RouteOptions())`. Both return a `Route`, which replaces `Publication`, `OriginRequests`, and `BroadcastPrepared`:
+
+- `Publication.broadcast()` is `Route.broadcast()`, which throws `MoqException.Internal` on a prefix route.
+- `Publication.announce(AnnounceRoute(...))` is `announce()`, and re-pricing is `setCost(cost)`. `unannounce()` is `withdraw()`.
+- `OriginRequests.requestedBroadcast()` is `Route.requested()`, which returns null once the origin closes; `requestedBroadcasts()` is now an extension on `Route`, and ending its collection no longer retracts the route.
+- `BroadcastRequest.prepare()` then `BroadcastPrepared.publish()` is `BroadcastRequest.route(options)`: create it hidden to fill it first, then `announce()`.
+- `Route.instance()` is the stream's instance, minted at creation and kept across `withdraw` and `announce`.
+
+`AnnounceRoute` is `RouteOptions(hidden, cost, instance, epoch)`, given once at creation. A route is visible at once unless `hidden = true`; set it and call `announce()` after filling the catalog to keep the old create-then-announce order. A stable `instance` is fixed for the route's lifetime: announcing another one is a new route.
+
+Hold the `Route` for as long as the broadcast should stay announced: closing or cancelling it retracts it, while `BroadcastProducer.end()` still ends both. A `BroadcastProducer` alone no longer keeps it announced.
+
+`Route`, the received facts in `Announce.route`, is renamed `RouteInfo`; its fields are unchanged.
+
 ### `VideoInit.lower` takes either producer kind ([#7699](https://github.com/moq-dev/moq/pull/7699))
 
 `VideoInit.lower` is a `dev.moq.media.Producer` (`uniffi.moq.MoqMediaProducer`) instead of a `TrackProducer`. Pass `MoqMediaProducer.Track(producer)`, or `MoqMediaProducer.Stream(producer)` for a byte-stream rendition.

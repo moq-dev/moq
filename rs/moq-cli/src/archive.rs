@@ -88,9 +88,7 @@ pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: Exp
 				if !announce.prefix.has_prefix(&prefix) {
 					continue;
 				}
-				let Some(instance) = announce.route.instance else {
-					continue;
-				};
+				let instance = announce.route.instance().clone();
 				let instance: Instance = (announce.prefix, instance);
 				if !running.start(&instance) {
 					continue;
@@ -250,13 +248,17 @@ pub async fn import(
 	if let Some(refresh) = args.refresh {
 		config = config.with_refresh(refresh.into());
 	}
-	let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
-	let consumer = moq_archive::Consumer::open(store, broadcast.broadcast().clone(), config)
+	// Hidden until the recording opens, then held while the replay runs.
+	let route = origin
+		.route(
+			&name,
+			moq_net::origin::RouteOptions::hidden().with_instance(instance, 0),
+		)
+		.context("failed to create broadcast")?;
+	let consumer = moq_archive::Consumer::open(store, route.broadcast().clone(), config)
 		.await
 		.with_context(|| format!("no readable recording at {}", args.store))?;
-	broadcast
-		.announce(moq_net::origin::Route::default().with_instance(instance, 0))
-		.context("failed to announce broadcast")?;
+	route.announce().context("failed to announce broadcast")?;
 
 	tracing::info!(%name, store = %args.store, "replaying");
 	notify_ready();
@@ -354,16 +356,13 @@ mod tests {
 		let mut instances = Vec::new();
 		let mut broadcasts = Vec::new();
 		for path in ["live/a", "live/b", "other"] {
-			let broadcast = origin.create_broadcast(path).unwrap();
-			let track = broadcast.create_track("video", info.clone()).unwrap();
+			let broadcast = origin.route(path, moq_net::origin::RouteOptions::hidden()).unwrap();
+			let track = broadcast.broadcast().create_track("video", info.clone()).unwrap();
 			let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
 			group.write_frame(Timestamp::from_millis(0).unwrap(), path).unwrap();
 			group.finish().unwrap();
-			let instance = moq_net::Instance::random();
-			broadcast
-				.announce(moq_net::origin::Route::default().with_instance(instance.clone(), 0))
-				.unwrap();
-			instances.push(instance);
+			broadcast.announce().unwrap();
+			instances.push(broadcast.instance());
 			broadcasts.push((broadcast, track));
 		}
 
@@ -374,7 +373,7 @@ mod tests {
 				.expect("the export subscribes")
 				.unwrap();
 			track.finish().unwrap();
-			broadcast.close();
+			broadcast.broadcast().close();
 		}
 		let complete = [
 			format!("live/a/@{}/.end", instances[0]),
@@ -446,7 +445,7 @@ mod tests {
 			loop {
 				if let Some(moq_net::announce::Event::Start(announce)) = announced.next().await {
 					assert_eq!(announce.prefix.as_str(), "replay");
-					assert_eq!(announce.route.instance, Some(instance.clone()));
+					assert_eq!(announce.route.instance(), &instance);
 					break;
 				}
 			}
@@ -479,16 +478,18 @@ mod tests {
 	async fn a_resolved_broadcast_is_recorded_once() {
 		let origin = moq_tokio::origin::spawn();
 		let path = moq_net::Path::from_static("live/a");
-		let newest = origin.create_broadcast(&path).unwrap();
-		let older = origin.create_broadcast(&path).unwrap();
+		let newest = origin.route(&path, moq_net::origin::RouteOptions::hidden()).unwrap();
+		let older = origin.route(&path, moq_net::origin::RouteOptions::hidden()).unwrap();
 
 		let claims = Claims::default();
-		let claim = claims.claim(&path, &newest.consume()).expect("first claim");
-		assert!(claims.claim(&path, &newest.consume()).is_none());
-		let beside = claims.claim(&path, &older.consume()).expect("another instance");
+		let claim = claims.claim(&path, &newest.broadcast().consume()).expect("first claim");
+		assert!(claims.claim(&path, &newest.broadcast().consume()).is_none());
+		let beside = claims
+			.claim(&path, &older.broadcast().consume())
+			.expect("another instance");
 
 		drop(claim);
-		assert!(claims.claim(&path, &newest.consume()).is_some());
+		assert!(claims.claim(&path, &newest.broadcast().consume()).is_some());
 		drop(beside);
 		assert!(claims.0.lock().unwrap().is_empty());
 	}

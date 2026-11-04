@@ -148,43 +148,46 @@ mod tests {
 			.expect("publish source packet");
 	}
 
-	/// Publish an Opus instance of `source` under `instance`, keeping its catalog so the test can
-	/// kill the instance.
-	fn publish_opus(
-		origin: &moq_net::origin::Producer,
-		instance: moq_net::Instance,
-	) -> (Box<dyn Bridge>, moq_mux::catalog::Producer) {
-		let broadcast = origin.create_broadcast("source").expect("create source broadcast");
-		broadcast
-			.announce(moq_net::origin::Route::default().with_instance(instance, 0))
-			.expect("announce source broadcast");
+	/// An Opus instance of `source`: its route, its bridge, and its catalog, kept so the test
+	/// can kill the instance.
+	type Opus = (moq_net::origin::Route, Box<dyn Bridge>, moq_mux::catalog::Producer);
+
+	/// Publish an Opus instance of `source` under `instance`.
+	fn publish_opus(origin: &moq_net::origin::Producer, instance: moq_net::Instance) -> Opus {
+		let route = origin
+			.route(
+				"source",
+				moq_net::origin::RouteOptions::default().with_instance(instance, 0),
+			)
+			.expect("publish source broadcast");
 		let catalog =
-			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), moq_mux::catalog::Config::default())
+			moq_mux::catalog::Producer::new(&mut route.broadcast().clone(), moq_mux::catalog::Config::default())
 				.expect("create source catalog");
-		let bridge = crate::codec::opus::Bridge::new(broadcast.broadcast().clone(), catalog.clone(), 48_000, 2)
+		let bridge = crate::codec::opus::Bridge::new(route.broadcast().clone(), catalog.clone(), 48_000, 2)
 			.expect("create Opus bridge");
-		(Box::new(bridge), catalog)
+		(route, Box::new(bridge), catalog)
 	}
 
 	/// Publish a replacement instance of `source`, returning once the origin serves it.
-	async fn take_over(origin: &moq_net::origin::Producer) -> (Box<dyn Bridge>, moq_mux::catalog::Producer) {
+	async fn take_over(origin: &moq_net::origin::Producer) -> Opus {
 		let instance = moq_net::Instance::random();
 		let mut instances = moq_mux::follow::Instances::new(&origin.consume(), "source", Some(&instance)).unwrap();
-		let (mut new, catalog) = publish_opus(origin, instance);
+		let (route, mut new, catalog) = publish_opus(origin, instance);
 		push(&mut *new, 20_000, NEW_PACKET);
 		let started = kio::clock::timeout(TIMEOUT, instances.next())
 			.await
 			.expect("the replacement never took over")
 			.unwrap();
 		assert!(matches!(started, moq_mux::follow::Event::Start(_)));
-		(new, catalog)
+		(route, new, catalog)
 	}
 
 	/// Kill an instance the way a dropped publisher session does.
-	fn kill(bridge: Box<dyn Bridge>, catalog: moq_mux::catalog::Producer) {
+	fn kill((route, bridge, catalog): Opus) {
 		let err = moq_net::Error::Transport("connection lost".into());
 		bridge.abort(err.clone());
 		catalog.abort(err);
+		drop(route);
 	}
 
 	/// A WHEP viewer stays on the instance its session resolved: a publisher taking over the
@@ -193,7 +196,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_whep_viewer_stays_on_its_instance_until_the_route_dies() {
 		let origin = moq_tokio::origin::spawn();
-		let (mut old, old_catalog) = publish_opus(&origin, moq_net::Instance::random());
+		let (old_route, mut old, old_catalog) = publish_opus(&origin, moq_net::Instance::random());
 		push(&mut *old, 20_000, OPUS_PACKET);
 
 		let server = Server::new(server::Config::default());
@@ -219,9 +222,9 @@ mod tests {
 
 		let output_origin = moq_tokio::origin::spawn();
 		let output = output_origin
-			.create_broadcast("output")
+			.route("output", moq_net::origin::RouteOptions::hidden())
 			.expect("create output broadcast");
-		let output_consumer = output.consume();
+		let output_consumer = output.broadcast().consume();
 		let client = Client::new(client::Config::default());
 		let url = format!("http://{address}/whep/source").parse().expect("WHEP URL");
 		let fill = output.broadcast().clone();
@@ -241,7 +244,7 @@ mod tests {
 			"the viewer left its instance"
 		);
 
-		kill(old, old_catalog);
+		kill((old_route, old, old_catalog));
 		let ended = kio::clock::timeout(TIMEOUT, session)
 			.await
 			.expect("the session outlived its route")
@@ -256,7 +259,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_whip_push_stays_on_its_instance_until_the_route_dies() {
 		let origin = moq_tokio::origin::spawn();
-		let (mut old, old_catalog) = publish_opus(&origin, moq_net::Instance::random());
+		let (old_route, mut old, old_catalog) = publish_opus(&origin, moq_net::Instance::random());
 		push(&mut *old, 20_000, OPUS_PACKET);
 
 		let server = Server::new(server::Config::default());
@@ -301,7 +304,7 @@ mod tests {
 			"the push left its instance"
 		);
 
-		kill(old, old_catalog);
+		kill((old_route, old, old_catalog));
 		let pushed = kio::clock::timeout(TIMEOUT, pushed)
 			.await
 			.expect("the push outlived its route")
@@ -371,8 +374,9 @@ mod tests {
 		}
 
 		let origin = moq_tokio::origin::spawn();
-		let broadcast = origin.create_broadcast("source").unwrap();
-		broadcast.announce(moq_net::origin::Route::default()).unwrap();
+		let broadcast = origin
+			.route("source", moq_net::origin::RouteOptions::default())
+			.unwrap();
 		let catalog =
 			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), moq_mux::catalog::Config::default())
 				.unwrap();
@@ -407,7 +411,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_whip_publisher_past_its_cap_plus_burst_is_closed() {
 		let origin = moq_tokio::origin::spawn();
-		let (mut opus, _catalog) = publish_opus(&origin, moq_net::Instance::random());
+		let (_route, mut opus, _catalog) = publish_opus(&origin, moq_net::Instance::random());
 		// 8 kbps with a tenth of a second of burst allows 100 bytes up front.
 		let cap = crate::rate::Cap::new(moq_net::bandwidth::Rate::from_kbps(8)).with_burst(Duration::from_millis(100));
 		let (address, http, mut sessions) = serve_capped_whip(crate::rate::Limit::new(cap)).await;
@@ -434,11 +438,8 @@ mod tests {
 		let source_consumer = source_origin.consume();
 		let mut announcements = source_consumer.announced();
 		let source = source_origin
-			.create_broadcast("source")
+			.route("source", moq_net::origin::RouteOptions::default())
 			.expect("create source broadcast");
-		source
-			.announce(moq_net::origin::Route::default())
-			.expect("announce source broadcast");
 		let catalog =
 			moq_mux::catalog::Producer::new(&mut source.broadcast().clone(), moq_mux::catalog::Config::default())
 				.expect("create source catalog");
@@ -533,9 +534,9 @@ mod tests {
 
 		let output_origin = moq_tokio::origin::spawn();
 		let output = output_origin
-			.create_broadcast("output")
+			.route("output", moq_net::origin::RouteOptions::hidden())
 			.expect("create output broadcast");
-		let output_consumer = output.consume();
+		let output_consumer = output.broadcast().consume();
 		let whep = format!("http://user:pass@{address}/whep/ingested?jwt=secret")
 			.parse()
 			.expect("WHEP URL");

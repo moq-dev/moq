@@ -725,11 +725,6 @@ impl<T> Polled<T> {
 		self.state.lock().as_ref().map(f)
 	}
 
-	/// Whether [Self::cancel] or [Self::take] has run.
-	pub fn is_cancelled(&self) -> bool {
-		self.state.lock().is_none()
-	}
-
 	/// Move the state to a new owner, ending this handle as [Self::cancel] would.
 	///
 	/// `check` sees the state first, and an error there leaves this handle untouched.
@@ -1460,7 +1455,7 @@ mod tests {
 		polled.cancel();
 		// Dropped before cancel returns, though the parked call still holds a borrow.
 		assert!(matches!(dropped.try_recv(), Ok(())));
-		assert!(polled.is_cancelled());
+		assert!(polled.peek(|_| ()).is_none());
 		assert!(matches!(soon(parked).await, Err(MoqError::Cancelled)));
 		assert!(matches!(
 			polled.wait(|_, _| Poll::Ready(Ok(()))).await,

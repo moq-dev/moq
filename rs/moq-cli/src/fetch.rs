@@ -183,7 +183,7 @@ mod tests {
 	struct Fixture {
 		origin: moq_net::origin::Producer,
 		_keep: (
-			moq_net::origin::Publication,
+			moq_net::origin::Route,
 			Vec<moq_net::track::Producer>,
 			moq_net::group::Producer,
 		),
@@ -192,10 +192,11 @@ mod tests {
 	impl Fixture {
 		async fn new() -> Self {
 			let origin = moq_tokio::origin::spawn();
-			let broadcast = origin.create_broadcast("demo").expect("broadcast");
-			broadcast.announce(Default::default()).expect("announce");
+			let broadcast = origin
+				.route("demo", moq_net::origin::RouteOptions::default())
+				.expect("broadcast");
 
-			let data = broadcast.create_track("data", timed()).expect("data track");
+			let data = broadcast.broadcast().create_track("data", timed()).expect("data track");
 			for sequence in 0..3 {
 				let mut group = data.append_group().expect("group");
 				for frame in frames(sequence) {
@@ -203,8 +204,11 @@ mod tests {
 				}
 				group.finish().expect("finish");
 			}
-			let empty = broadcast.create_track("empty", timed()).expect("empty track");
-			let live = broadcast.create_track("live", timed()).expect("live track");
+			let empty = broadcast
+				.broadcast()
+				.create_track("empty", timed())
+				.expect("empty track");
+			let live = broadcast.broadcast().create_track("live", timed()).expect("live track");
 			let mut open = live.append_group().expect("open group");
 			open.write_frame(moq_net::Timestamp::ZERO, b"first".as_ref())
 				.expect("frame");
@@ -241,7 +245,7 @@ mod tests {
 		/// Kept so the published broadcast, its tracks, and the open group stay live.
 		_publisher: (moq_tokio::Connection, Fixture),
 		/// Kept so the relay's hidden broadcast and its track stay live.
-		_hidden: (moq_net::origin::Publication, moq_net::track::Producer),
+		_hidden: (moq_net::origin::Route, moq_net::track::Producer),
 	}
 
 	impl NetworkFixture {
@@ -255,10 +259,9 @@ mod tests {
 				.relay
 				.cluster()
 				.origin
-				.create_broadcast(".hidden")
+				.route(".hidden", moq_net::origin::RouteOptions::default())
 				.expect("hidden broadcast");
-			hidden.announce(Default::default()).expect("announce hidden");
-			let secret = hidden.create_track("data", timed()).expect("hidden track");
+			let secret = hidden.broadcast().create_track("data", timed()).expect("hidden track");
 			let mut group = secret.append_group().expect("group");
 			group
 				.write_frame(moq_net::Timestamp::ZERO, b"secret".as_ref())

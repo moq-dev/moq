@@ -3,7 +3,7 @@ use tokio::sync::oneshot;
 
 use crate::ffi::OnStatus;
 use crate::task::Task;
-use crate::{Error, Id, NonZeroSlab, State, moq_announce_event, moq_announce_kind, moq_route, moq_string};
+use crate::{Error, Id, NonZeroSlab, State, moq_announce_event, moq_announce_kind, moq_route_info, moq_string};
 
 /// Global state managing all active resources.
 ///
@@ -25,14 +25,15 @@ pub struct Origin {
 	/// Pending consume-until-announced tasks. Close signals shutdown; the task delivers a final callback, then removes itself.
 	consume_task: NonZeroSlab<Task>,
 
-	/// Served routes from [Self::dynamic], retracted when the handle is closed.
-	dynamic: NonZeroSlab<DynamicEntry>,
+	/// Routes created on an origin, retracted when freed.
+	routes: NonZeroSlab<RouteEntry>,
 
-	/// Broadcast requests delivered to a dynamic handler, freed after accept/reject.
+	/// Request deliveries of prefix routes. Freeing the route signals shutdown; the task
+	/// delivers a final callback, then removes itself.
+	route_requests: NonZeroSlab<Task>,
+
+	/// Broadcast requests delivered to a prefix route's callback, freed after serve/route/reject.
 	broadcast_request: NonZeroSlab<(moq_net::origin::Request, crate::ffi::Background)>,
-
-	/// Claim answers being filled before their exact route is announced.
-	prepared: NonZeroSlab<(moq_net::origin::Prepared, crate::ffi::Background, Id)>,
 }
 
 #[derive(Clone)]
@@ -121,21 +122,39 @@ impl AnnouncedRecord {
 			_captures: captures,
 			capture_views,
 			kind,
-			hops: update.route.hops.iter().map(|hop| hop.id()).collect(),
-			cost: update.route.cost.value(),
-			instance: update
-				.route
-				.instance
-				.map(|instance| instance.to_string())
-				.unwrap_or_default(),
+			hops: update.route.hops().iter().map(|hop| hop.id()).collect(),
+			cost: update.route.cost().value(),
+			instance: update.route.instance().to_string(),
 			predecessor,
 		}
 	}
 }
 
-struct DynamicEntry {
-	task: Task,
-	inner: Option<moq_net::origin::Requests>,
+impl State {
+	/// Store an exact route and the fill handle of the broadcast it owns, returning the route.
+	pub fn exact_route(
+		&mut self,
+		(route, driver): (moq_net::origin::Route, crate::ffi::Background),
+	) -> Result<Id, Error> {
+		let broadcast = self.publish.create((route.broadcast().clone(), driver.clone()))?;
+		self.origin.route_insert(route, driver, broadcast).inspect_err(|_| {
+			self.publish.discard(broadcast);
+		})
+	}
+}
+
+struct RouteEntry {
+	inner: moq_net::origin::Route,
+	driver: crate::ffi::Background,
+	/// Minted at creation and kept for the route's lifetime, borrowed by [Origin::route_instance].
+	instance: String,
+	/// An exact route's broadcast fill handle, or a prefix route's request delivery task.
+	kind: RouteKind,
+}
+
+enum RouteKind {
+	Exact { broadcast: Id },
+	Prefix { requests: Id },
 }
 
 impl Origin {
@@ -208,7 +227,7 @@ impl Origin {
 			captures: announced.capture_views.as_ptr(),
 			captures_len: announced.capture_views.len(),
 			kind: announced.kind,
-			route: moq_route {
+			route: moq_route_info {
 				hops: announced.hops.as_ptr(),
 				hops_len: announced.hops.len(),
 				cost: announced.cost,
@@ -358,49 +377,83 @@ impl Origin {
 		self.consume_task.close(task, Error::NotFound)
 	}
 
-	/// Create an unannounced broadcast at `path` on an origin.
+	/// Create an exact route at `path`, returning the route and the broadcast it owns.
 	///
 	/// Errors with [`Error::Moq`] if the path is outside the origin's scope.
-	pub fn create_broadcast<P: TryInto<moq_net::Path, Error: Into<moq_net::Error>>>(
+	pub fn route(
 		&self,
 		origin: Id,
-		path: P,
-	) -> Result<(moq_net::origin::Publication, crate::ffi::Background), Error> {
+		path: &str,
+		options: moq_net::origin::RouteOptions,
+	) -> Result<(moq_net::origin::Route, crate::ffi::Background), Error> {
 		let origin = self.get(origin)?;
-		let result = origin.producer.create_broadcast(path);
+		let result = origin.producer.route(path, options);
 		origin.driver.check()?;
 		Ok((result?, origin.driver.clone()))
 	}
 
-	/// Advertise `prefix` and serve requests beneath it, delivering each as a
-	/// broadcast-request handle via `on_request`.
-	pub fn dynamic(&mut self, origin: Id, prefix: &str, on_request: OnStatus) -> Result<Id, Error> {
-		let origin = self.active.get(origin).ok_or(Error::OriginNotFound)?;
-		origin.driver.check()?;
-		let driver = origin.driver.clone();
-		let result = origin.producer.requests(prefix);
-		origin.driver.check()?;
-		let inner = result?;
-		let (task, close) = Task::new(on_request);
-		let id = self.dynamic.insert(DynamicEntry {
-			task,
-			inner: Some(inner),
-		})?;
+	/// Store an exact route whose broadcast fill handle is `broadcast`.
+	pub fn route_insert(
+		&mut self,
+		route: moq_net::origin::Route,
+		driver: crate::ffi::Background,
+		broadcast: Id,
+	) -> Result<Id, Error> {
+		self.routes.insert(RouteEntry {
+			instance: route.instance().to_string(),
+			inner: route,
+			driver,
+			kind: RouteKind::Exact { broadcast },
+		})
+	}
 
-		let request_driver = driver.clone();
+	/// Create a prefix route, delivering each request beneath it as a broadcast-request handle
+	/// via `on_request`.
+	pub fn route_prefix(
+		&mut self,
+		origin: Id,
+		prefix: &str,
+		options: moq_net::origin::RouteOptions,
+		on_request: OnStatus,
+	) -> Result<Id, Error> {
+		let origin = self.get(origin)?;
+		let driver = origin.driver.clone();
+		let result = origin.producer.route_prefix(prefix, options);
+		driver.check()?;
+		let route = result?;
+		let instance = route.instance().to_string();
+
+		// The route first, so the delivery task finds it once it runs; it cannot lock the
+		// state before this call returns.
+		let (task, close) = Task::new(on_request);
+		let requests = self.route_requests.insert(task)?;
+		let id = match self.routes.insert(RouteEntry {
+			inner: route,
+			driver: driver.clone(),
+			instance,
+			kind: RouteKind::Prefix { requests },
+		}) {
+			Ok(id) => id,
+			Err(err) => {
+				self.route_requests.remove(requests);
+				return Err(err);
+			}
+		};
+
 		tokio::spawn(async move {
-			let res = crate::ffi::run(driver.watch(Self::run_dynamic(id, close, request_driver))).await;
-			let entry = State::lock().origin.dynamic.remove(id);
+			let res = crate::ffi::run(driver.watch(Self::run_requests(id, on_request, close, driver.clone()))).await;
+			let entry = State::lock().origin.route_requests.remove(requests);
 			if let Some(entry) = entry {
-				entry.task.callback.call(res);
+				entry.callback.call(res);
 			}
 		});
 
 		Ok(id)
 	}
 
-	async fn run_dynamic(
-		id: Id,
+	async fn run_requests(
+		route: Id,
+		callback: OnStatus,
 		mut close: oneshot::Receiver<()>,
 		driver: crate::ffi::Background,
 	) -> Result<(), Error> {
@@ -408,37 +461,72 @@ impl Origin {
 			let request = tokio::select! {
 				biased;
 				_ = &mut close => return Ok(()),
-				res = kio::wait(|waiter| {
+				request = kio::wait(|waiter| {
 					let state = State::lock();
-					match state.origin.dynamic.get(id).and_then(|entry| entry.inner.as_ref()) {
-						Some(dynamic) => dynamic.poll_requested_broadcast(waiter),
-						None => std::task::Poll::Ready(Err(moq_net::Error::Closed)),
+					match state.origin.routes.get(route) {
+						Some(entry) => entry.inner.poll_requested(waiter),
+						None => std::task::Poll::Ready(None),
 					}
-				}) => match res {
-					Ok(request) => request,
-					Err(moq_net::Error::Closed) => return Ok(()),
-					Err(err) => return Err(err.into()),
+				}) => match request {
+					Some(request) => request,
+					// Retracted, or the origin closed.
+					None => return Ok(()),
 				},
 			};
 
+			// Hold the lock only to buffer the request; release it before the callback.
 			let request_id = State::lock()
 				.origin
 				.broadcast_request
 				.insert((request, driver.clone()))?;
-			let callback = State::lock().origin.dynamic.get(id).map(|entry| entry.task.callback);
-			let Some(callback) = callback else {
-				return Ok(());
-			};
 			callback.call(request_id);
 		}
 	}
 
-	pub fn dynamic_close(&mut self, dynamic: Id) -> Result<(), Error> {
-		let entry = self.dynamic.get_mut(dynamic).ok_or(Error::NotFound)?;
-		let inner = entry.inner.take().ok_or(Error::NotFound)?;
-		entry.task.close(Error::NotFound)?;
-		drop(inner);
+	fn route_entry(&self, route: Id) -> Result<&RouteEntry, Error> {
+		let entry = self.routes.get(route).ok_or(Error::NotFound)?;
+		entry.driver.check()?;
+		Ok(entry)
+	}
+
+	/// Run `f` against the route, then check its origin is still healthy.
+	pub fn route_with<R>(
+		&self,
+		route: Id,
+		f: impl FnOnce(&moq_net::origin::Route) -> Result<R, moq_net::Error>,
+	) -> Result<R, Error> {
+		let entry = self.route_entry(route)?;
+		let result = f(&entry.inner);
+		entry.driver.check()?;
+		Ok(result?)
+	}
+
+	/// An exact route's broadcast fill handle, or [`Error::BroadcastNotFound`] on a prefix route.
+	pub fn route_broadcast(&self, route: Id) -> Result<Id, Error> {
+		match self.route_entry(route)?.kind {
+			RouteKind::Exact { broadcast } => Ok(broadcast),
+			RouteKind::Prefix { .. } => Err(Error::BroadcastNotFound),
+		}
+	}
+
+	pub fn route_instance(&self, route: Id, dst: &mut moq_string) -> Result<(), Error> {
+		let entry = self.route_entry(route)?;
+		*dst = moq_string {
+			data: entry.instance.as_ptr().cast::<c_char>(),
+			len: entry.instance.len(),
+		};
 		Ok(())
+	}
+
+	/// Release a route handle and stop a prefix route's request delivery, returning the route
+	/// for the caller to retract by dropping it.
+	pub fn route_take(&mut self, route: Id) -> Result<moq_net::origin::Route, Error> {
+		let entry = self.routes.remove(route).ok_or(Error::NotFound)?;
+		if let RouteKind::Prefix { requests } = entry.kind {
+			// Already gone once the origin closed and the task delivered its terminal callback.
+			let _ = self.route_requests.close(requests, Error::NotFound);
+		}
+		Ok(entry.inner)
 	}
 
 	pub fn broadcast_request_path(&self, request: Id, dst: &mut crate::moq_string) -> Result<(), Error> {
@@ -458,22 +546,6 @@ impl Origin {
 		self.broadcast_request.remove(request).ok_or(Error::NotFound)
 	}
 
-	pub fn prepared_insert(
-		&mut self,
-		prepared: moq_net::origin::Prepared,
-		driver: crate::ffi::Background,
-		broadcast: Id,
-	) -> Result<Id, Error> {
-		self.prepared.insert((prepared, driver, broadcast))
-	}
-
-	pub fn prepared_take(
-		&mut self,
-		prepared: Id,
-	) -> Result<(moq_net::origin::Prepared, crate::ffi::Background, Id), Error> {
-		self.prepared.remove(prepared).ok_or(Error::NotFound)
-	}
-
 	pub fn close(&mut self, origin: Id) -> Result<(), Error> {
 		self.active.remove(origin).ok_or(Error::OriginNotFound)?;
 		Ok(())
@@ -483,36 +555,35 @@ impl Origin {
 #[cfg(test)]
 mod supervision_tests {
 	use super::*;
+	use moq_net::origin::RouteOptions;
 
 	#[tokio::test]
-	async fn a_broadcast_keeps_the_origin_failure_after_its_origin_handle_is_released() {
+	async fn a_route_keeps_the_origin_failure_after_its_origin_handle_is_released() {
 		let (producer, completion, trigger) = crate::ffi::panicking_origin();
-		let mut origins = Origin::default();
-		let origin = origins
+		let mut state = State::new();
+		let origin = state
+			.origin
 			.active
 			.insert(Producer {
 				producer,
 				driver: completion.clone(),
 			})
 			.unwrap();
-		let mut publish = crate::publish::Publish::default();
-		let (publication, _broadcast) = publish
-			.create_publication(origins.create_broadcast(origin, "retained").unwrap())
-			.unwrap();
-		origins.close(origin).unwrap();
+		let retained = state.origin.route(origin, "retained", RouteOptions::hidden()).unwrap();
+		let route = state.exact_route(retained).unwrap();
+		state.origin.close(origin).unwrap();
 		*trigger
 			.write()
 			.unwrap_or_else(|_| unreachable!("test keeps its panic trigger open")) = true;
 		assert!(matches!(completion.finished().await, Err(Error::Panic)));
 		drop(completion);
 		assert!(matches!(
-			publish.announce(publication, Default::default()),
+			state.origin.route_with(route, |route| route.announce()),
 			Err(Error::Panic)
 		));
-		let healthy = origins.create().unwrap();
-		let (publication, _broadcast) = publish
-			.create_publication(origins.create_broadcast(healthy, "healthy").unwrap())
-			.unwrap();
-		publish.announce(publication, Default::default()).unwrap();
+		let healthy = state.origin.create().unwrap();
+		let healthy = state.origin.route(healthy, "healthy", RouteOptions::hidden()).unwrap();
+		let route = state.exact_route(healthy).unwrap();
+		state.origin.route_with(route, |route| route.announce()).unwrap();
 	}
 }

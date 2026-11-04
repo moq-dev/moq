@@ -910,10 +910,12 @@ mod tests {
 
 		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
 		tokio::spawn(moq_net::time::run(driver));
-		let broadcast = origin.create_broadcast("marker").unwrap();
-		broadcast.announce(moq_net::origin::Route::default()).unwrap();
+		let route = origin
+			.route("marker", moq_net::origin::RouteOptions::default())
+			.unwrap();
+		let broadcast = route.broadcast();
 		let mut catalog = moq_mux::catalog::Producer::new(
-			&mut broadcast.broadcast().clone(),
+			&mut broadcast.clone(),
 			moq_mux::catalog::Config::default().with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default()),
 		)
 		.unwrap();
@@ -1014,22 +1016,22 @@ mod tests {
 	/// One publisher instance of `live`: an announced broadcast under its own instance with one
 	/// Legacy AAC track, for the egress tests.
 	struct Instance {
-		_broadcast: moq_net::origin::Publication,
+		_route: moq_net::origin::Route,
 		catalog: moq_mux::catalog::Producer<moq_mux::container::ts::Ext>,
 		audio: moq_mux::container::Producer<moq_mux::catalog::hang::Container>,
 	}
 
 	impl Instance {
 		fn publish(origin: &moq_net::origin::Producer, track: &str) -> Self {
-			let route = moq_net::origin::Route::default();
-			let broadcast = origin.publish("live", route).unwrap();
+			let route = origin.route("live", moq_net::origin::RouteOptions::default()).unwrap();
 			let mut catalog = moq_mux::catalog::Producer::new(
-				&mut broadcast.broadcast().clone(),
+				&mut route.broadcast().clone(),
 				moq_mux::catalog::Config::default()
 					.with_catalog(moq_mux::catalog::hang::Catalog::<moq_mux::container::ts::Ext>::default()),
 			)
 			.unwrap();
-			let audio = broadcast
+			let audio = route
+				.broadcast()
 				.create_track(track, hang::container::track_info(hang::catalog::PRIORITY.audio))
 				.unwrap();
 			let mut config = hang::catalog::AudioConfig::new(hang::catalog::AAC { profile: 2 }, 48_000, 2);
@@ -1046,7 +1048,7 @@ mod tests {
 				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
 			);
 			Self {
-				_broadcast: broadcast,
+				_route: route,
 				catalog,
 				audio,
 			}

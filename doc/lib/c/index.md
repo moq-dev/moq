@@ -68,25 +68,29 @@ if (session < 0)
 
 ```c
 const char *path = "my-stream.hang";
-uint32_t broadcast;
-int publication = moq_origin_create_broadcast(origin, path, strlen(path), &broadcast);
-if (publication < 0)
+moq_route_options options;
+memset(&options, 0, sizeof(options)); // zeroed means visible, cost 0, a fresh instance
+options.hidden = true;                // fill the catalog before anyone finds it
+int route = moq_origin_route(origin, path, strlen(path), &options);
+if (route < 0)
     return fail(moq_error());
-// Fill tracks on broadcast here; announce on the publication.
-
-moq_announce_route route;
-memset(&route, 0, sizeof(route));     // zeroed means cost 0 and the minted instance
-if (moq_publication_announce((uint32_t)publication, &route) < 0)
+int broadcast = moq_route_broadcast((uint32_t)route);
+// Fill tracks on broadcast here, then make the route visible.
+if (moq_route_announce((uint32_t)route) < 0)
     return fail(moq_error());
 ```
 
-A route carries only a cost and the stream's instance; relays add the hops. Each
-publication mints a fresh instance and keeps it across re-announcing, so a restarted
-publisher is a new stream viewers restart onto (`MOQ_ANNOUNCE_KIND_RESTART`) instead of a
+The route keeps the broadcast announced: `moq_route_free()` retracts it, and
+`moq_publish_close()` ends both. A route carries only a cost and the stream's instance;
+relays add the hops. Each route mints a fresh instance (`moq_route_instance()`) and keeps it
+across `moq_route_withdraw()` and `moq_route_announce()`, so a restarted publisher, being a
+new route, is a new stream viewers restart onto (`MOQ_ANNOUNCE_KIND_RESTART`) instead of a
 stalled broadcast. Set `instance` only for a publisher that continues its group sequences
 across restarts, and raise `epoch` on each: readers stitch every route of one instance
 together, so restarting the sequences under an old instance splices unrelated groups into
-their tracks.
+their tracks. To serve paths on demand, `moq_origin_route_prefix()` delivers each request to
+answer with `moq_broadcast_request_serve()`, `moq_broadcast_request_route()`, or
+`moq_broadcast_request_reject()`.
 
 Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Publication track names stay separate from codec settings. For simulcast, give each rendition the next one down as the `lower` handle in its `moq_video_encode_options`: it stops encoding, advertised as disabled, while its bandwidth grant cannot fund it, and resumes once the grant recovers. A rung only disables while the session probes for bandwidth, which on native transports takes moq-quic with BBR3.
 
@@ -108,7 +112,7 @@ inside. The header is the reference: each function carries a doc comment.
 - **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `moq_publish_media_cut`: after every frame, or at a segment cadence to align with video. Pass that cadence as `moq_audio_init.hint.group_duration_us`.
 - **Catalog hints.** Give the catalog what the encoder knows instead of having it estimated: `moq_video_init.hint` (coded size, bitrate, frame rate, group duration) and `moq_audio_init.hint` (bitrate, group duration). A supplied bitrate is never re-estimated. `group_duration_us` is the longest span between two group starts: the GOP, or your cut cadence. Leave a field's `has_*` flag false to have it measured. A bitrate or `group_duration_us` flag set with a 0 value returns `MOQ_ERROR_INVALID_CONFIG`.
 - **Discovery.** Announcement captures are always a list of wildcard matches, empty when the filter has no wildcards.
-- **Ending cleanly.** When the input ends, finish every track, then call `moq_publish_catalog_finish()` to finish the catalog, which ends the content. The broadcast stays announced and keeps serving the finished tracks, so a subscriber still catching up can drain them, until `moq_publish_close()` takes it offline. How long to keep it up is yours to decide. A track still open at the close ends with `UNROUTABLE` (an internal error over moq-transport, which has no such code), and its handle is released. Readers follow a publisher's runs by announcement, not by that error: see [identity and recovery](/concept/identity).
+- **Ending cleanly.** When the input ends, finish every track, then call `moq_publish_catalog_finish()` to finish the catalog, which ends the content. The broadcast stays announced and keeps serving the finished tracks, so a subscriber still catching up can drain them, until `moq_publish_close()` or `moq_route_free()` takes it offline. How long to keep it up is yours to decide. A track still open at the close ends with `UNROUTABLE` (an internal error over moq-transport, which has no such code), and its handle is released. Readers follow a publisher's runs by announcement, not by that error: see [identity and recovery](/concept/identity).
 - **Timeline breaks.** On a seek or pause, call `moq_publish_media_discontinuity`, then keep timestamps moving forward and resume video on a keyframe.
 - **Timestamps.** A `moq_timestamp` is exact: `value` units at `scale` units per second, so a 90 kHz tick survives a read and republish. Frames, datagrams, and JSON values point `timestamp` at theirs, NULL on an untimed track and valid as long as the payload. Tracks moq-c creates are timed, so their raw writes need one. Stamp media frames and JSON writes from `moq_publish_catalog_now()`, the broadcast clock every track in the broadcast shares; media on a timeline of its own advertises the gap to the JSON tracks as catalog `delay`. JSON writes are converted to their track's milliseconds. A NULL timestamp on any JSON write (snapshot update, stream append, window push or pop) fails with `MOQ_ERROR_INVALID_POINTER` and publishes nothing. A zero scale or an out-of-range value fails with `MOQ_ERROR_TIMESTAMP_OVERFLOW`.
 - **JSON values.** `moq_consume_json_value` fills `moq_json_value` with the document and its frame's timestamp. A snapshot consumer's callback fires for each state in order, but a group superseded before it is read is skipped.

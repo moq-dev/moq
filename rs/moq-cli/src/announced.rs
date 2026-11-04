@@ -187,7 +187,7 @@ mod tests {
 		/// Stops the relay, which ends every session on it.
 		shutdown: moq_relay::shutdown::Trigger,
 		/// The published broadcasts by path; dropping one retracts it.
-		broadcasts: Vec<(&'static str, moq_net::origin::Publication)>,
+		broadcasts: Vec<(&'static str, moq_net::origin::Route)>,
 		_publisher: moq_tokio::Connection,
 	}
 
@@ -212,8 +212,9 @@ mod tests {
 			let broadcasts = ["demo/a", "demo/b", "other/c"]
 				.into_iter()
 				.map(|path| {
-					let broadcast = origin.create_broadcast(path).expect("broadcast");
-					broadcast.announce(Default::default()).expect("announce");
+					let broadcast = origin
+						.route(path, moq_net::origin::RouteOptions::default())
+						.expect("broadcast");
 					(path, broadcast)
 				})
 				.collect::<Vec<_>>();

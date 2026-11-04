@@ -256,15 +256,11 @@ async fn run(config: &Config) -> Result<()> {
 	let publish_origin = moq_tokio::origin::spawn();
 	let (broadcast_path, viewer_path) = config.paths(&name)?;
 
-	// Create the broadcast on the publish origin and announce its path.
-	let broadcast = publish_origin
-		.create_broadcast(&broadcast_path)
-		.context("failed to create broadcast")?;
-	let instance = moq_net::Instance::random();
-	broadcast
-		.announce(moq_net::origin::Route::default().with_instance(instance.clone(), 0))
+	// Announce the game session's route on the publish origin; it owns the broadcast.
+	let route = publish_origin
+		.route(&broadcast_path, moq_net::origin::RouteOptions::default())
 		.context("failed to announce broadcast")?;
-	tracing::info!(broadcast = %broadcast_path, %instance, "announced");
+	tracing::info!(broadcast = %broadcast_path, instance = %route.instance(), "announced");
 
 	// Consume origin: viewer broadcasts under the viewer prefix.
 	// JS publishes viewer feedback at "{viewer_prefix}/{name}/{viewerId}"
@@ -282,16 +278,15 @@ async fn run(config: &Config) -> Result<()> {
 		.connect(url);
 
 	// Set up catalog and encoders.
-	let catalog =
-		moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), moq_mux::catalog::Config::default())?;
-	let video_encoder = video::VideoEncoder::spawn(broadcast.broadcast().clone(), catalog.clone()).await;
+	let catalog = moq_mux::catalog::Producer::new(&mut route.broadcast().clone(), moq_mux::catalog::Config::default())?;
+	let video_encoder = video::VideoEncoder::spawn(route.broadcast().clone(), catalog.clone()).await;
 
-	let audio_encoder = audio::AudioEncoder::new(broadcast.broadcast().clone(), catalog.clone(), 44100)?;
+	let audio_encoder = audio::AudioEncoder::new(route.broadcast().clone(), catalog.clone(), 44100)?;
 
 	let video_track = video_encoder.demand.clone();
 	let audio_track = audio_encoder.demand();
 
-	let status_publisher = status::StatusPublisher::new(&mut broadcast.broadcast().clone())?;
+	let status_publisher = status::StatusPublisher::new(&mut route.broadcast().clone())?;
 
 	let session = Arc::new(Session {
 		video_encoder,
@@ -332,7 +327,7 @@ async fn run(config: &Config) -> Result<()> {
 	};
 
 	// Close the broadcast now, even if the emulator thread still holds a clone.
-	broadcast.close();
+	route.broadcast().close();
 	result
 }
 

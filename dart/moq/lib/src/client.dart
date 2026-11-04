@@ -213,13 +213,14 @@ final class Moq {
     }
   }
 
-  /// Create an unannounced broadcast at [path], invisible to everyone until announced.
+  /// Create a route at exactly [path], owning a new broadcast to fill.
   ///
-  /// Populate its `broadcast`, calling `requests` first if tracks are served
-  /// on demand, then advertise it with `announce`. Disposing the publication
-  /// keeps the route; closing the broadcast ends it.
-  Publication createBroadcast(String path) =>
-      session.publish().createBroadcast(path: path);
+  /// Visible at once unless [options] is hidden: create it hidden to populate
+  /// its `broadcast()` first (calling `requests` if tracks are served on
+  /// demand), then `announce()` it. Hold the route: cancelling or disposing it
+  /// retracts it, and closing the broadcast ends both.
+  MoqRoute route(String path, {RouteOptions? options}) =>
+      session.publish().route(path: path, options: options ?? RouteOptions());
 
   /// Discover routes matching [options]; prefixes stay relative to the origin.
   ///

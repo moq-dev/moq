@@ -67,8 +67,7 @@ async fn takeover(version: &str, case: Case) {
 	}
 
 	// The new instance numbers its groups and segments from zero again.
-	let route = moq_net::origin::Route::default();
-	let mut new = Publisher::new(&pair.publisher, "live", route);
+	let mut new = Publisher::new(&pair.publisher, "live", Default::default());
 	let deadline = kio::clock::now() + TIMEOUT;
 	let current = loop {
 		let current = server.broadcaster("live").await.expect("announced");

@@ -12,15 +12,28 @@ pub struct IngestSink {
 	broadcast: moq_net::broadcast::Producer,
 	catalog: moq_mux::catalog::Producer,
 	bridges: session::Bridges,
+	/// The route announcing the broadcast, when the sink owns it: held for the session's
+	/// life, linger included, and retracted when the session drops it.
+	_route: Option<moq_net::origin::Route>,
 }
 
 impl IngestSink {
+	/// Fill `broadcast`, whose announcement the caller owns.
 	pub fn new(mut broadcast: moq_net::broadcast::Producer, config: moq_mux::catalog::Config) -> Result<Self> {
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
 		Ok(Self {
 			broadcast,
 			catalog,
 			bridges: session::Bridges::new(),
+			_route: None,
+		})
+	}
+
+	/// Fill `route`'s broadcast, keeping the route for the session's life.
+	pub fn routed(route: moq_net::origin::Route, config: moq_mux::catalog::Config) -> Result<Self> {
+		Ok(Self {
+			_route: Some(route.clone()),
+			..Self::new(route.broadcast().clone(), config)?
 		})
 	}
 }

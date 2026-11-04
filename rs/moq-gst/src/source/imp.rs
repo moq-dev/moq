@@ -2661,21 +2661,27 @@ mod session_tests {
 		let _pad_ids = pad_ids();
 		let element = element();
 		let origin = origin();
-		let catalog_broadcast = origin.create_broadcast("room/catalog").unwrap();
-		let mut local = catalog_broadcast.requests();
-		let left = origin.create_broadcast("room/left").unwrap();
-		let mut remote = left.requests();
-		let right = origin.create_broadcast("room/right").unwrap();
-		let mut replacement = right.requests();
+		let catalog_broadcast = origin
+			.route("room/catalog", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let mut local = catalog_broadcast.broadcast().requests();
+		let left = origin
+			.route("room/left", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let mut remote = left.broadcast().requests();
+		let right = origin
+			.route("room/right", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let mut replacement = right.broadcast().requests();
 		let mut catalog =
 			moq_mux::catalog::Producer::new(&mut catalog_broadcast.broadcast().clone(), Default::default()).unwrap();
 		let mut config = video_rendition();
 		config.broadcast = Some(moq_net::path::Relative::new("./left").unwrap());
 		config.track = Some("encoded".into());
 		catalog.modify().unwrap().video.renditions.insert("view".into(), config);
-		catalog_broadcast.announce(Default::default()).unwrap();
-		left.announce(Default::default()).unwrap();
-		right.announce(Default::default()).unwrap();
+		catalog_broadcast.announce().unwrap();
+		left.announce().unwrap();
+		right.announce().unwrap();
 		let (stopping, shutdown) = watch::channel(false);
 		let consumer = origin.consume();
 		let weak = element.downgrade();
@@ -3500,7 +3506,7 @@ mod session_tests {
 
 	/// A broadcast with one video rendition, and what feeds it.
 	struct Publisher {
-		publication: Option<moq_net::origin::Publication>,
+		route: Option<moq_net::origin::Route>,
 		broadcast: moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer,
 		video: moq_mux::container::Producer<moq_mux::catalog::hang::Container>,
@@ -3508,21 +3514,32 @@ mod session_tests {
 	}
 
 	impl Publisher {
-		/// Publish at `room` on `origin` under `route`.
-		fn new(origin: &moq_net::origin::Producer, route: moq_net::origin::Route, config: VideoConfig) -> Self {
-			let publication = origin.create_broadcast("room").unwrap();
-			let mut publisher = Self::build(publication.broadcast().clone(), config);
-			publication.announce(route).unwrap();
-			publisher.publication = Some(publication);
-			publisher
+		/// Publish at `room` on `origin` under `instance`, or a fresh one.
+		fn new(origin: &moq_net::origin::Producer, instance: Option<moq_net::Instance>, config: VideoConfig) -> Self {
+			Self::routed(origin, "room", instance, config)
 		}
 
-		/// The `cam` broadcast a rendition of `room` references as `./cam`, under `route`.
-		fn sibling(origin: &moq_net::origin::Producer, route: moq_net::origin::Route) -> Self {
-			let publication = origin.create_broadcast("cam").unwrap();
-			let mut publisher = Self::build(publication.broadcast().clone(), video_rendition());
-			publication.announce(route).unwrap();
-			publisher.publication = Some(publication);
+		/// The `cam` broadcast a rendition of `room` references as `./cam`, under `instance`, or
+		/// a fresh one.
+		fn sibling(origin: &moq_net::origin::Producer, instance: Option<moq_net::Instance>) -> Self {
+			Self::routed(origin, "cam", instance, video_rendition())
+		}
+
+		/// Announce `path` once its catalog is built.
+		fn routed(
+			origin: &moq_net::origin::Producer,
+			path: &str,
+			instance: Option<moq_net::Instance>,
+			config: VideoConfig,
+		) -> Self {
+			let options = match instance {
+				Some(instance) => moq_net::origin::RouteOptions::hidden().with_instance(instance, 0),
+				None => moq_net::origin::RouteOptions::hidden(),
+			};
+			let route = origin.route(path, options).unwrap();
+			let mut publisher = Self::build(route.broadcast().clone(), config);
+			route.announce().unwrap();
+			publisher.route = Some(route);
 			publisher
 		}
 
@@ -3541,7 +3558,7 @@ mod session_tests {
 				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
 			);
 			Self {
-				publication: None,
+				route: None,
 				broadcast,
 				catalog,
 				video,
@@ -3920,17 +3937,17 @@ mod session_tests {
 
 	/// A publisher restarted while the old one stays up switches at once, on the same pad, and
 	/// nothing more from the old broadcast gets through.
-	fn restart(route: impl Fn() -> moq_net::origin::Route) {
+	fn restart() {
 		let _pad_ids = pad_ids();
 		let element = element();
 		let recorder = Recorder::attach(&element);
 		let origin = origin();
 
-		let mut old = Publisher::new(&origin, route(), video_rendition());
+		let mut old = Publisher::new(&origin, None, video_rendition());
 		let session = follow(&element, &origin);
 		let pad = recorder.written(&mut old, 1);
 
-		let mut new = Publisher::new(&origin, route(), video_rendition());
+		let mut new = Publisher::new(&origin, None, video_rendition());
 		assert_eq!(recorder.written(&mut new, 2), pad, "the restart moved to another pad");
 
 		// The old broadcast still writes, but nothing reads it any more.
@@ -3952,7 +3969,7 @@ mod session_tests {
 
 	#[test]
 	fn a_restart_switches_on_the_same_pad() {
-		restart(moq_net::origin::Route::default);
+		restart();
 	}
 
 	/// The route serving the path can be a prefix covering it, here the root, and a restart of
@@ -3964,13 +3981,16 @@ mod session_tests {
 		let recorder = Recorder::attach(&element);
 		let origin = origin();
 
-		let claim = origin.requests("").unwrap();
+		let claim = origin
+			.route_prefix("", moq_net::origin::RouteOptions::default())
+			.unwrap();
 		let (answers, answered) = std::sync::mpsc::channel();
 		let handler = super::RUNTIME.spawn(async move {
-			while let Ok(request) = claim.requested_broadcast().await {
-				let prepared = request.prepare().unwrap();
-				let answer = Publisher::build(prepared.broadcast().clone(), video_rendition());
-				prepared.publish().unwrap();
+			while let Some(request) = claim.requested().await {
+				let route = request.route(moq_net::origin::RouteOptions::hidden()).unwrap();
+				let mut answer = Publisher::build(route.broadcast().clone(), video_rendition());
+				route.announce().unwrap();
+				answer.route = Some(route);
 				answers.send(answer).unwrap();
 			}
 		});
@@ -3997,10 +4017,12 @@ mod session_tests {
 		let element = element();
 		let recorder = Recorder::attach(&element);
 		let origin = origin();
-		let pool = origin.requests("").unwrap();
+		let pool = origin
+			.route_prefix("", moq_net::origin::RouteOptions::default())
+			.unwrap();
 		let session = follow(&element, &origin);
 		let pending = super::RUNTIME.block_on(async {
-			kio::clock::timeout(Duration::from_secs(10), pool.requested_broadcast())
+			kio::clock::timeout(Duration::from_secs(10), pool.requested())
 				.await
 				.unwrap()
 				.unwrap()
@@ -4122,15 +4144,14 @@ mod session_tests {
 		let session = follow(&element, &origin);
 		let mut follow = watch(&origin, "cam");
 
-		let route = moq_net::origin::Route::default();
-		let mut first = Publisher::sibling(&origin, route.clone());
+		let mut first = Publisher::sibling(&origin, None);
 		let pad = recorder.written(&mut first, 1);
 		first.video.finish().unwrap();
 		await_finished(&first);
 		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
-		first.publication.as_ref().unwrap().unannounce();
+		first.route.as_ref().unwrap().withdraw();
 		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::End(_)));
-		first.publication.as_ref().unwrap().announce(route).unwrap();
+		first.route.as_ref().unwrap().announce().unwrap();
 		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
 
 		let mut second = Publisher::sibling(&origin, Default::default());
@@ -4418,12 +4439,12 @@ mod session_tests {
 		let mut room = referencing(&origin, Some(old.clone()));
 		let session = follow(&element, &origin);
 
-		let mut first = Publisher::sibling(&origin, moq_net::origin::Route::default().with_instance(old, 0));
+		let mut first = Publisher::sibling(&origin, Some(old));
 		let pad = recorder.written(&mut first, 1);
 		first.video.finish().unwrap();
 		await_finished(&first);
 
-		let mut second = Publisher::sibling(&origin, moq_net::origin::Route::default().with_instance(new.clone(), 0));
+		let mut second = Publisher::sibling(&origin, Some(new.clone()));
 		room.catalog
 			.modify()
 			.unwrap()
@@ -4468,7 +4489,7 @@ mod session_tests {
 
 		// Each rendition plays the first instance on a pad of its own. Written once, so a second
 		// copy on either pad can only be a replay.
-		let mut first = Publisher::sibling(&origin, moq_net::origin::Route::default().with_instance(pinned, 0));
+		let mut first = Publisher::sibling(&origin, Some(pinned));
 		first.write(1);
 		let played = recorder.wait("1 never reached both renditions", |seen| {
 			let pads = reached(seen, 1);
@@ -4479,7 +4500,7 @@ mod session_tests {
 
 		// Another instance wins the path, which only the unpinned rendition plays, then leaves it
 		// to the pinned one.
-		let mut second = Publisher::sibling(&origin, moq_net::origin::Route::default().with_instance(other, 0));
+		let mut second = Publisher::sibling(&origin, Some(other));
 		let unpinned = recorder.written(&mut second, 2);
 		let pad = played.into_iter().find(|pad| *pad != unpinned).unwrap();
 		let mut follow = watch(&origin, "cam");
@@ -4494,10 +4515,7 @@ mod session_tests {
 			)
 		});
 
-		let mut third = Publisher::sibling(
-			&origin,
-			moq_net::origin::Route::default().with_instance(next.clone(), 0),
-		);
+		let mut third = Publisher::sibling(&origin, Some(next.clone()));
 		room.catalog
 			.modify()
 			.unwrap()
@@ -4605,17 +4623,17 @@ mod session_tests {
 
 	/// A sibling replaced while the old one stays up restarts a reference that names no instance, on
 	/// the same pad, and nothing more from the old instance gets through.
-	fn sibling_restart(route: impl Fn() -> moq_net::origin::Route) {
+	fn sibling_restart() {
 		let _pad_ids = pad_ids();
 		let element = element();
 		let recorder = Recorder::attach(&element);
 		let origin = origin();
 		let _room = referencing(&origin, None);
-		let mut old = Publisher::sibling(&origin, route());
+		let mut old = Publisher::sibling(&origin, None);
 		let session = follow(&element, &origin);
 		let pad = recorder.written(&mut old, 1);
 
-		let mut new = Publisher::sibling(&origin, route());
+		let mut new = Publisher::sibling(&origin, None);
 		assert_eq!(recorder.written(&mut new, 2), pad, "the restart moved to another pad");
 		old.write(1);
 		recorder.written(&mut new, 3);
@@ -4635,7 +4653,7 @@ mod session_tests {
 
 	#[test]
 	fn a_sibling_restart_switches_on_the_same_pad() {
-		sibling_restart(moq_net::origin::Route::default);
+		sibling_restart();
 	}
 
 	/// A reference naming its sibling's instance never reads the instance replacing it: the pad
@@ -4648,7 +4666,7 @@ mod session_tests {
 		let origin = origin();
 		let named = moq_net::Instance::random();
 		let _room = referencing(&origin, Some(named.clone()));
-		let mut old = Publisher::sibling(&origin, moq_net::origin::Route::default().with_instance(named, 0));
+		let mut old = Publisher::sibling(&origin, Some(named));
 		let session = follow(&element, &origin);
 		await_demand(&old, true);
 		let pad = recorder.written(&mut old, 1);
@@ -4758,19 +4776,12 @@ mod session_tests {
 		let element = element();
 		let recorder = Recorder::attach(&element);
 		let origin = origin();
-		let route = moq_net::origin::Route::default();
-
-		let mut publisher = Publisher::new(&origin, route.clone(), video_rendition());
+		let mut publisher = Publisher::new(&origin, None, video_rendition());
 		let mut announced = announced(&origin);
 		let session = follow(&element, &origin);
 		recorder.written(&mut publisher, 1);
 
-		publisher
-			.publication
-			.as_ref()
-			.unwrap()
-			.announce(route.with_cost(5))
-			.unwrap();
+		publisher.route.as_ref().unwrap().set_cost(5).unwrap();
 		await_event(&mut announced, |event| {
 			matches!(event, moq_net::announce::Event::Update(_))
 		});
@@ -4915,7 +4926,7 @@ mod session_tests {
 		let session = follow(&element, &origin);
 		let pad = recorder.written(&mut old, 1);
 
-		old.publication.as_ref().unwrap().unannounce();
+		old.route.as_ref().unwrap().withdraw();
 		await_event(&mut announced, |event| {
 			matches!(event, moq_net::announce::Event::End(_))
 		});
@@ -4947,8 +4958,7 @@ mod session_tests {
 		let pad = recorder.written(&mut current, 1);
 		for round in 0..4u8 {
 			let tag = 2 + round * 3;
-			let route = moq_net::origin::Route::default();
-			let mut next = Publisher::new(&origin, route.clone(), video_rendition());
+			let mut next = Publisher::new(&origin, None, video_rendition());
 			assert_eq!(
 				recorder.written(&mut next, tag),
 				pad,
@@ -4967,12 +4977,12 @@ mod session_tests {
 			);
 
 			let mut announced = announced(&origin);
-			let publication = next.publication.as_ref().unwrap();
-			publication.unannounce();
+			let route = next.route.as_ref().unwrap();
+			route.withdraw();
 			await_event(&mut announced, |event| {
 				matches!(event, moq_net::announce::Event::End(_))
 			});
-			publication.announce(route).unwrap();
+			route.announce().unwrap();
 			assert_eq!(
 				recorder.written(&mut next, tag + 2),
 				pad,
@@ -4990,8 +5000,7 @@ mod session_tests {
 	fn a_refused_catalog_fails_the_session() {
 		let element = element();
 		let origin = origin();
-		let broadcast = origin.create_broadcast("room").unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let _route = origin.route("room", moq_net::origin::RouteOptions::default()).unwrap();
 
 		let (_shutdown, session) = follow(&element, &origin);
 		let err = super::RUNTIME

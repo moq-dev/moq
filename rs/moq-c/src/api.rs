@@ -915,42 +915,45 @@ pub struct moq_section {
 	pub json_len: usize,
 }
 
-/// How a publication advertises its exact path: a static cost and, optionally, a stable
-/// instance.
+/// How a route advertises itself: its visibility at creation, a static cost and, optionally,
+/// a stable instance.
 ///
-/// Pass one to [moq_publication_announce]. The hop chain is the origin's to build,
-/// so a local publisher cannot claim relay hops it never took. Zeroed (cost 0, NULL
-/// instance) is the default route. `instance` is borrowed for the duration of the call.
+/// Pass one to [moq_origin_route], [moq_origin_route_prefix], or [moq_broadcast_request_route].
+/// The hop chain is the origin's to build, so a local publisher cannot claim relay hops it
+/// never took. Zeroed (or NULL) is the default: visible at once, cost 0, under a fresh
+/// instance. `instance` is borrowed for the duration of the call.
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct moq_announce_route {
+pub struct moq_route_options {
 	/// Preference among routes covering the same prefix: lower wins. A publisher
 	/// sets its production cost here: zero for content it is already producing,
 	/// larger for content it would have to start producing on demand.
 	pub cost: u64,
-	/// A stable instance for the stream, NOT NULL terminated, or NULL (or empty) to keep the
-	/// one the publication minted.
+	/// A stable instance for the stream, NOT NULL terminated, or NULL (or empty) to mint a
+	/// fresh one when the route is created.
 	///
-	/// Every publication mints a fresh instance, kept across re-announcing, so a restarted
-	/// publisher is a new stream viewers restart onto. Set one only for a publisher that
-	/// continues its group sequences across restarts and raises `epoch` on each: readers
-	/// stitch every route of one instance together, so restarting the sequences under an
-	/// old instance splices unrelated groups into their tracks. Changing it is a
-	/// `MOQ_ANNOUNCE_KIND_RESTART`.
+	/// A route keeps its instance for its lifetime, across [moq_route_withdraw] and
+	/// [moq_route_announce], so a new route is a new stream viewers restart onto. Set one only
+	/// for a publisher that continues its group sequences across restarts and raises `epoch`
+	/// on each: readers stitch every route of one instance together, so restarting the
+	/// sequences under an old instance splices unrelated groups into their tracks.
 	pub instance: *const c_char,
 	/// The length in bytes of `instance`.
 	pub instance_len: usize,
 	/// Which run of a stable `instance` this is: only its highest epoch is eligible, cheaper
 	/// or not. Ignored without one.
 	pub epoch: u64,
+	/// Create the route hidden: it exists for nobody until [moq_route_announce]. For a
+	/// publisher that fills its catalog first.
+	pub hidden: bool,
 }
 
-/// An observed route: hops, a static cost, and the stream's instance.
+/// The read-only facts on a received route: hops, a static cost, and the stream's instance.
 ///
 /// Carried by [moq_announce_event]. Its pointers borrow the announcement's storage.
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct moq_route {
+pub struct moq_route_info {
 	/// Hop ids of the relay hops the route traversed, oldest first. 0 is the
 	/// anonymous mark, which ranks the route below every fully identified one.
 	/// A route announced on this origin has none.
@@ -963,18 +966,24 @@ pub struct moq_route {
 	pub instance: moq_string,
 }
 
-/// Parse a [moq_announce_route], treating NULL as the default.
+/// Parse [moq_route_options], treating NULL as the default.
+///
+/// The instance parses as at every API that takes one: NULL or empty names none.
 ///
 /// # Safety
-/// `route` may be NULL, or must point at a readable [moq_announce_route] whose `instance`
+/// `options` may be NULL, or must point at a readable [moq_route_options] whose `instance`
 /// pointer is valid for `instance_len` bytes.
-unsafe fn parse_announce_route(route: *const moq_announce_route) -> Result<moq_net::origin::Route, Error> {
-	let Some(route) = (unsafe { route.as_ref() }) else {
-		return Ok(moq_net::origin::Route::default());
+unsafe fn parse_route_options(options: *const moq_route_options) -> Result<moq_net::origin::RouteOptions, Error> {
+	let Some(options) = (unsafe { options.as_ref() }) else {
+		return Ok(moq_net::origin::RouteOptions::default());
 	};
-	let mut out = moq_net::origin::Route::default().with_cost(moq_net::origin::Cost::new(route.cost));
-	if let Some(instance) = unsafe { parse_instance(route.instance, route.instance_len)? } {
-		out = out.with_instance(instance, route.epoch);
+	let mut out = match options.hidden {
+		true => moq_net::origin::RouteOptions::hidden(),
+		false => moq_net::origin::RouteOptions::default(),
+	}
+	.with_cost(options.cost);
+	if let Some(instance) = unsafe { parse_instance(options.instance, options.instance_len)? } {
+		out = out.with_instance(instance, options.epoch);
 	}
 	Ok(out)
 }
@@ -1040,7 +1049,7 @@ pub struct moq_announce_event {
 
 	/// The route serving the prefix. On `MOQ_ANNOUNCE_KIND_END` it carries the last
 	/// advertised route.
-	pub route: moq_route,
+	pub route: moq_route_info,
 	/// For [moq_announce_kind::MOQ_ANNOUNCE_KIND_TAKEOVER], the prefix of the route continued,
 	/// relative to the origin, NOT NULL terminated. Empty for every other kind.
 	pub predecessor: *const c_char,
@@ -2004,89 +2013,178 @@ pub extern "C" fn moq_origin_create() -> i32 {
 	ffi::enter(move || State::lock().origin.create())
 }
 
-/// Create a broadcast at `path` on an origin, for publishing media tracks.
+/// Create a route at exactly `path` on an origin, owning a new broadcast to fill.
 ///
-/// Writes the broadcast handle to fill with the `moq_publish_*` functions to
-/// `broadcast`, and returns a positive publication handle that announces it, or a
-/// negative code on failure. The broadcast is invisible and unroutable, on this
-/// origin and its peers alike, until [moq_publication_announce]. Fill it, then
-/// announce it. [moq_publish_close] ends it for good;
-/// [moq_publication_free] releases the publication handle without retracting.
+/// Returns a positive route handle, or a negative code on failure. [moq_route_broadcast]
+/// gives the broadcast handle to fill with the `moq_publish_*` functions. The route is
+/// visible at once unless `options` sets `hidden`: a hidden route is invisible and
+/// unroutable, on this origin and its peers alike, until [moq_route_announce], so create
+/// it hidden to fill the catalog first. NULL `options` is the default.
+///
+/// Hold the route while the broadcast should stay announced: [moq_route_free] retracts it,
+/// and [moq_publish_close] ends both.
 ///
 /// # Safety
 /// - The caller must ensure that path is a valid pointer to path_len bytes of data.
-/// - `broadcast` must point at writable storage for one handle.
+/// - `options` may be NULL, or must point at a readable [moq_route_options].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_origin_create_broadcast(
+pub unsafe extern "C" fn moq_origin_route(
 	origin: u32,
 	path: *const c_char,
 	path_len: usize,
-	broadcast: *mut u32,
+	options: *const moq_route_options,
 ) -> i32 {
 	ffi::enter(move || {
 		let origin = ffi::parse_id(origin)?;
 		let path = unsafe { ffi::parse_str(path, path_len)? };
-		let broadcast_out = unsafe { broadcast.as_mut() }.ok_or(Error::InvalidPointer)?;
-
+		let options = unsafe { parse_route_options(options)? };
 		let mut state = State::lock();
-		let publication = state.origin.create_broadcast(origin, path)?;
-		let (publication, broadcast) = state.publish.create_publication(publication)?;
-		*broadcast_out = broadcast.into();
-		Ok(publication)
+		let route = state.origin.route(origin, path, options)?;
+		state.exact_route(route)
 	})
 }
 
-/// Advertise `prefix` and serve the requests beneath it.
+/// Create a route over `prefix` that serves the requests beneath it.
 ///
 /// A route claims `prefix` and every path beneath it (the empty prefix claims
 /// every path). A service that only serves some of them advertises the
-/// covering prefix and rejects the rest as they are requested. `on_request` is
-/// required: a NULL callback is refused before the route is advertised. It is
-/// invoked with a positive request handle for each
-/// pending broadcast, then exactly once more with a terminal code: `0` (stopped
-/// cleanly, including after [moq_origin_requests_cancel]) or a negative error.
+/// covering prefix and rejects the rest as they are requested. NULL `options` is the
+/// default.
+///
+/// `on_request` is required: a NULL callback is refused before the route is advertised.
+/// It is invoked with a positive request handle for each pending broadcast (answer it with
+/// [moq_broadcast_request_serve], [moq_broadcast_request_route], or
+/// [moq_broadcast_request_reject]), then exactly once more with a terminal code: `0`
+/// (stopped cleanly, after [moq_route_free] or the origin closing) or a negative error.
 /// After the terminal (`<= 0`) callback, `user_data` is never touched again.
 ///
-/// Returns a non-zero handle on success, or a negative code on failure.
+/// Returns a positive route handle on success, or a negative code on failure.
 ///
 /// # Safety
 /// - The caller must ensure that prefix is a valid pointer to prefix_len bytes of data.
+/// - `options` may be NULL, or must point at a readable [moq_route_options].
 /// - `on_request` must be non-NULL; a missing callback is refused before the route is advertised.
 /// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_request` callback.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_origin_requests(
+pub unsafe extern "C" fn moq_origin_route_prefix(
 	origin: u32,
 	prefix: *const c_char,
 	prefix_len: usize,
+	options: *const moq_route_options,
 	on_request: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let origin = ffi::parse_id(origin)?;
 		let prefix = unsafe { ffi::parse_str(prefix, prefix_len)? };
+		let options = unsafe { parse_route_options(options)? };
 		let on_request = unsafe { ffi::OnStatus::new(user_data, on_request)? };
-		State::lock().origin.dynamic(origin, prefix, on_request)
+		State::lock().origin.route_prefix(origin, prefix, options, on_request)
 	})
 }
 
-/// Stop serving and retract the route.
+/// The broadcast an exact route owns, to fill with the `moq_publish_*` functions.
 ///
-/// Returns immediately: zero on success, or a negative code if already closed.
-/// The [moq_origin_requests] `on_request` callback still fires once more with a
-/// terminal `0` (or a negative error), and that final callback is where
-/// `user_data` should be released.
+/// Returns the same positive broadcast handle on every call, or a negative code: a prefix
+/// route owns none (`MOQ_ERROR_BROADCAST_NOT_FOUND`), and neither does a route whose
+/// broadcast [moq_publish_close] ended.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_origin_requests_cancel(dynamic: u32) -> i32 {
+pub extern "C" fn moq_route_broadcast(route: u32) -> i32 {
 	ffi::enter(move || {
-		let dynamic = ffi::parse_id(dynamic)?;
-		State::lock().origin.dynamic_close(dynamic)
+		let route = ffi::parse_id(route)?;
+		let state = State::lock();
+		let broadcast = state.origin.route_broadcast(route)?;
+		match state.publish.contains(broadcast) {
+			true => Ok(broadcast),
+			false => Err(Error::BroadcastNotFound),
+		}
 	})
 }
 
-/// The path of a broadcast request delivered to a [moq_origin_requests] callback.
+/// The stream a route serves, minted at creation unless its options named one.
+///
+/// Kept across [moq_route_withdraw] and [moq_route_announce]. The destination borrows the
+/// route's storage until [moq_route_free].
+///
+/// Returns zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - `dst` must point at a writable [moq_string].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_route_instance(route: u32, dst: *mut moq_string) -> i32 {
+	ffi::enter(move || {
+		let route = ffi::parse_id(route)?;
+		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
+		State::lock().origin.route_instance(route, dst)
+	})
+}
+
+/// Make a route visible, or keep it so.
+///
+/// A route from [moq_broadcast_request_route] also answers the requesters waiting on its
+/// path. Fails once its broadcast closed, and when a request's route can never announce
+/// because the request was released or its prefix route retracted meanwhile.
+///
+/// Returns zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_route_announce(route: u32) -> i32 {
+	ffi::enter(move || {
+		let route = ffi::parse_id(route)?;
+		State::lock().origin.route_with(route, |route| route.announce())
+	})
+}
+
+/// Hide a route from everyone, keeping its broadcast and instance.
+///
+/// Local consumers and peers alike stop discovering and requesting it; tracks already in
+/// flight carry on, and [moq_route_announce] brings the same stream back.
+/// Returns zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_route_withdraw(route: u32) -> i32 {
+	ffi::enter(move || {
+		let route = ffi::parse_id(route)?;
+		State::lock().origin.route_with(route, |route| {
+			route.withdraw();
+			Ok(())
+		})
+	})
+}
+
+/// Re-price a route in place: lower wins among routes covering the same prefix.
+///
+/// A hidden route keeps the price for when it next announces. Fails once its broadcast
+/// closed. Returns zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_route_set_cost(route: u32, cost: u64) -> i32 {
+	ffi::enter(move || {
+		let route = ffi::parse_id(route)?;
+		State::lock().origin.route_with(route, |route| route.set_cost(cost))
+	})
+}
+
+/// Release a route handle, retracting the route.
+///
+/// An exact route's broadcast handle stays the caller's until [moq_publish_close]. A prefix
+/// route stops serving: requests not yet delivered are rejected, and its `on_request`
+/// callback fires once more with a terminal `0`, which is where `user_data` should be
+/// released.
+///
+/// Returns zero on success, or a negative code if the handle is unknown.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_route_free(route: u32) -> i32 {
+	ffi::enter(move || {
+		let route = ffi::parse_id(route)?;
+		// Dropped outside the lock: retracting refuses a job's waiting requesters.
+		let route = State::lock().origin.route_take(route)?;
+		drop(route);
+		Ok(())
+	})
+}
+
+/// The path of a broadcast request delivered to a [moq_origin_route_prefix] callback.
 ///
 /// The destination borrows the request's storage: copy it out before
-/// [moq_broadcast_request_serve], [moq_broadcast_request_prepare],
+/// [moq_broadcast_request_serve], [moq_broadcast_request_route],
 /// [moq_broadcast_request_reject], or [moq_broadcast_request_free].
 ///
 /// Returns a zero on success, or a negative code on failure.
@@ -2105,7 +2203,7 @@ pub unsafe extern "C" fn moq_broadcast_request_path(request: u32, dst: *mut moq_
 /// Serve a held consumer under the prefix route's instance without announcing an exact route.
 ///
 /// Every answer at this path must continue the same sequences and bytes. Start a new
-/// prefix route for different content, or prepare and publish a job with its own instance.
+/// prefix route for different content, or route a job with its own instance.
 /// Consumes the request handle; the consumer remains owned by the caller.
 /// Returns zero on success, or a negative error.
 #[unsafe(no_mangle)]
@@ -2123,55 +2221,28 @@ pub extern "C" fn moq_broadcast_request_serve(request: u32, broadcast: u32) -> i
 	})
 }
 
-/// Start a broadcast request answer as a new stream under a fresh instance, hidden until
-/// published.
+/// Answer a broadcast request with the path's own exact route, owning a new broadcast.
 ///
-/// Consumes the request handle, writes the new broadcast handle to `broadcast`
-/// (which cannot announce itself; only [moq_broadcast_prepared_publish] does),
-/// and returns a positive prepared-answer handle or a negative error.
+/// Consumes the request handle and returns a positive route handle, or a negative error.
+/// The route serves a fresh instance unless `options` names one, so a job that restarts is
+/// a new stream. Created visible, it announces now and answers the waiting requesters;
+/// created hidden, they wait until [moq_route_announce], so the job can fill its catalog
+/// first, and freeing the route before then refuses them. Ending the route withdraws only
+/// this path. Unreadable `options` fail without consuming the request.
 ///
 /// # Safety
-/// - `broadcast` must point at writable storage for one handle.
+/// - `options` may be NULL, or must point at a readable [moq_route_options].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_broadcast_request_prepare(request: u32, broadcast: *mut u32) -> i32 {
+pub unsafe extern "C" fn moq_broadcast_request_route(request: u32, options: *const moq_route_options) -> i32 {
 	ffi::enter(move || {
 		let request = ffi::parse_id(request)?;
-		let broadcast_out = unsafe { broadcast.as_mut() }.ok_or(Error::InvalidPointer)?;
+		let options = unsafe { parse_route_options(options)? };
 		let mut state = State::lock();
 		let (pending, driver) = state.origin.broadcast_request_take(request)?;
-		let prepared = pending.prepare()?;
-		let broadcast = state.publish.create((prepared.broadcast().clone(), driver.clone()))?;
-		let id = state.origin.prepared_insert(prepared, driver, broadcast)?;
-		*broadcast_out = broadcast.into();
-		Ok(id)
-	})
-}
-
-/// Publish a prepared claim answer and resolve every waiting requester.
-///
-/// Consumes the prepared handle and returns a positive publication handle, or a
-/// negative code on failure. The broadcast handle returned by
-/// [moq_broadcast_request_prepare] remains owned by the caller.
-#[unsafe(no_mangle)]
-pub extern "C" fn moq_broadcast_prepared_publish(prepared: u32) -> i32 {
-	ffi::enter(move || {
-		let prepared = ffi::parse_id(prepared)?;
-		let mut state = State::lock();
-		let (prepared, driver, broadcast) = state.origin.prepared_take(prepared)?;
 		driver.check()?;
-		let result = state.publish.admit(broadcast, prepared, driver.clone());
+		let result = pending.route(options);
 		driver.check()?;
-		result
-	})
-}
-
-/// Free a prepared claim answer without publishing it.
-#[unsafe(no_mangle)]
-pub extern "C" fn moq_broadcast_prepared_free(prepared: u32) -> i32 {
-	ffi::enter(move || {
-		let prepared = ffi::parse_id(prepared)?;
-		State::lock().origin.prepared_take(prepared)?;
-		Ok(())
+		state.exact_route((result?, driver))
 	})
 }
 
@@ -2191,7 +2262,7 @@ pub extern "C" fn moq_broadcast_request_reject(request: u32, error_code: u16) ->
 	})
 }
 
-/// Free a broadcast request without accepting or rejecting it.
+/// Free a broadcast request without answering it.
 ///
 /// Dropping the request rejects it. Returns a zero on success, or a negative
 /// code if the handle is unknown.
@@ -2368,8 +2439,8 @@ pub extern "C" fn moq_origin_follow_cancel(task: u32) -> i32 {
 ///
 /// Owns discovery of the path and retries route churn while resolving one publisher instance.
 /// It fails as unroutable once discovery has synced without a covering route, including a
-/// broadcast created but not announced. No separate announcement stream is needed.
-/// Serve on-demand paths with [moq_origin_requests].
+/// hidden route not announced yet. No separate announcement stream is needed.
+/// Serve on-demand paths with [moq_origin_route_prefix].
 ///
 /// `instance` is the only stream to accept, or NULL (or empty) for any. A request pinned to an
 /// instance that does not serve the path is unroutable.
@@ -2435,8 +2506,7 @@ unsafe fn parse_instance(instance: *const c_char, instance_len: usize) -> Result
 
 /// Close an origin and clean up its resources.
 ///
-/// The origin keeps running while a broadcast published on it or a
-/// [moq_origin_requests] handler lives; close or cancel those to end it.
+/// The origin keeps running while a route created on it lives; free those to end it.
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
@@ -2444,51 +2514,6 @@ pub extern "C" fn moq_origin_close(origin: u32) -> i32 {
 	ffi::enter(move || {
 		let origin = ffi::parse_id(origin)?;
 		State::lock().origin.close(origin)
-	})
-}
-
-/// Advertise a publication's exact path as a route.
-///
-/// Announcing again re-prices the route in place, or restarts it under another instance. A
-/// NULL `route` uses the default: cost 0, under the instance the publication minted. Until
-/// announced, the broadcast is invisible and unroutable for local consumers and peers alike.
-/// Fails once the broadcast closed.
-///
-/// Returns a zero on success, or a negative code on failure.
-///
-/// # Safety
-/// - `route` may be NULL, or must point at a readable [moq_announce_route].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_publication_announce(publication: u32, route: *const moq_announce_route) -> i32 {
-	ffi::enter(move || {
-		let publication = ffi::parse_id(publication)?;
-		let route = unsafe { parse_announce_route(route)? };
-		State::lock().publish.announce(publication, route)
-	})
-}
-
-/// Retract a publication's exact-path advertisement, if any.
-///
-/// Local consumers and peers alike stop discovering and requesting it; tracks already in
-/// flight carry on, and announcing again brings it back. Fails once the broadcast closed.
-/// Returns a zero on success, or a negative code on failure.
-#[unsafe(no_mangle)]
-pub extern "C" fn moq_publication_unannounce(publication: u32) -> i32 {
-	ffi::enter(move || {
-		let publication = ffi::parse_id(publication)?;
-		State::lock().publish.unannounce(publication)
-	})
-}
-
-/// Release a publication handle.
-///
-/// The broadcast and its route stay as they are; [moq_publish_close] ends them.
-/// Returns a zero on success, or a negative code on failure.
-#[unsafe(no_mangle)]
-pub extern "C" fn moq_publication_free(publication: u32) -> i32 {
-	ffi::enter(move || {
-		let publication = ffi::parse_id(publication)?;
-		State::lock().publish.publication_free(publication)
 	})
 }
 
@@ -2889,7 +2914,7 @@ pub unsafe extern "C" fn moq_publish_video_properties(broadcast: u32, properties
 ///
 /// This is the producer counterpart to [moq_consume_video_config]: instead of
 /// reading a rendition out of a catalog, it writes one into the catalog of a
-/// broadcast created with [moq_origin_create_broadcast]. The rendition is keyed by
+/// broadcast from [moq_route_broadcast]. The rendition is keyed by
 /// `config.name`; calling this again with the same name replaces the rendition
 /// you declared, so a config can be refined in place. It fails when a
 /// [moq_publish_video] track owns the name, since that track publishes and
@@ -3026,7 +3051,7 @@ pub unsafe extern "C" fn moq_publish_audio_remove(broadcast: u32, name: *const c
 ///
 /// This is the producer counterpart to [moq_consume_catalog_section] /
 /// [moq_consume_catalog_section_at]: it writes an arbitrary top-level JSON key into the
-/// catalog of a broadcast created with [moq_origin_create_broadcast], beyond the
+/// catalog of a broadcast from [moq_route_broadcast], beyond the
 /// `video`/`audio` keys owned by the media pipeline. Calling it again with the
 /// same name replaces the section. The updated catalog is published to
 /// subscribers automatically.

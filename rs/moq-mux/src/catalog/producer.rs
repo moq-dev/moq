@@ -1565,7 +1565,11 @@ mod test {
 			let (origin, driver) = moq_net::origin::Producer::new(Default::default());
 			let driver = tokio::spawn(moq_net::time::run(driver));
 			let mut broadcast = match path {
-				Some(path) => origin.create_broadcast(path).unwrap().broadcast().clone(),
+				Some(path) => origin
+					.route(path, moq_net::origin::RouteOptions::hidden())
+					.unwrap()
+					.broadcast()
+					.clone(),
 				None => moq_net::broadcast::Info::new().produce(),
 			};
 			let mut producer = Producer::new(&mut broadcast, Config::default()).unwrap();
@@ -2307,8 +2311,12 @@ mod test {
 		let wall = kio::clock::Wall::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS + 60_000);
 		let clock = crate::Clock::at(captured, wall).unwrap();
 		let (origin, _driver) = moq_net::origin::Producer::new(Default::default());
-		let front = origin.create_broadcast("robot/front.hang").unwrap();
-		let rear = origin.create_broadcast("robot/rear.hang").unwrap();
+		let front = origin
+			.route("robot/front.hang", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let rear = origin
+			.route("robot/rear.hang", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let catalogs = [
 			Producer::new(
 				&mut front.broadcast().clone(),
@@ -2326,6 +2334,7 @@ mod test {
 			assert_eq!(catalog.snapshot().clock, clock.wall());
 			let timestamp = catalog.clock().capture(captured).unwrap();
 			let track = broadcast
+				.broadcast()
 				.create_track("video", catalog.track_info(hang::catalog::PRIORITY.video))
 				.unwrap();
 			let mut video = catalog

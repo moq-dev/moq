@@ -41,11 +41,11 @@ async fn finish(order: Order) {
 			// The served playlist ends while the broadcast is still announced.
 			let playlist = listed(&app, &media, "#EXT-X-ENDLIST").await;
 			assert_eq!(numbers(&playlist), [0, 1, 2, 3, 4], "{playlist}");
-			publisher.broadcast.close();
+			publisher.route.broadcast().close();
 		}
 		Order::EndBeforeEof => {
 			publisher.media.finish().expect("finish media");
-			publisher.broadcast.close();
+			publisher.route.broadcast().close();
 			// The server stops serving the instance once `End` reaches it.
 			let deadline = kio::clock::now() + TIMEOUT;
 			while get(&app, &media).await.status() != StatusCode::NOT_FOUND {

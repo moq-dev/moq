@@ -98,7 +98,10 @@ Reader read(Case c, std::shared_ptr<moq::TrackConsumer> consumer, const std::vec
 void throughput(Case c, double budget, std::vector<Result> &results)
 {
 	auto origin = moq::OriginProducer::init({uint64_t(64 << 20)});
-	auto broadcast = ok(origin->create_broadcast("bench"))->broadcast();
+	moq::RouteOptions hidden;
+	hidden.hidden = true;
+	auto route = ok(origin->route("bench", hidden));
+	auto broadcast = ok(route->broadcast());
 	std::vector<std::shared_ptr<moq::TrackProducer>> tracks;
 	std::vector<std::shared_ptr<moq::TrackConsumer>> consumers;
 	moq::TrackInfo info;

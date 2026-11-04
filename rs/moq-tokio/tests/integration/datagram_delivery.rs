@@ -212,9 +212,11 @@ async fn measure(version: &str, cell: Cell) {
 	let version: moq_net::Version = version.parse().expect("version");
 
 	let publisher = moq_tokio::origin::spawn();
-	let broadcast = publisher.create_broadcast("room").expect("broadcast");
-	let mut track = broadcast.create_track("audio", timed()).unwrap();
-	broadcast.announce(Default::default()).expect("announce");
+	let broadcast = publisher
+		.route("room", moq_net::origin::RouteOptions::hidden())
+		.expect("broadcast");
+	let mut track = broadcast.broadcast().create_track("audio", timed()).unwrap();
+	broadcast.announce().expect("announce");
 
 	let mut config = moq_tokio::listen::Config::default();
 	config.bind = Some("127.0.0.1:0".parse().unwrap());

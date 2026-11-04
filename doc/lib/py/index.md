@@ -71,8 +71,9 @@ import asyncio, moq
 async def main():
     # opus_init_bytes, payload, pts, and rgba come from your encoder or capture source.
     async with moq.Client("https://cdn.moq.dev/anon") as client:
-        publication = client.create_broadcast("my-stream.hang")
-        broadcast = publication.broadcast
+        # Hidden until announced, so viewers find a filled catalog. Hold the route: dropping it retracts it.
+        route = client.route("my-stream.hang", hidden=True)
+        broadcast = route.broadcast
 
         # Already-encoded frames: the catalog is filled from the bitstream
         audio = moq.media.TrackProducer.audio(broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=opus_init_bytes))
@@ -99,7 +100,7 @@ async def main():
         status = moq.json.SnapshotProducer(broadcast, status_track)
         status.update({"state": "live", "viewers": 42}, catalog_producer.now())
 
-        publication.announce()  # each broadcast mints a fresh instance
+        route.announce()  # each route mints a fresh instance, route.instance
         audio.finish()
         video.finish()
         events.finish()

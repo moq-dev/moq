@@ -148,9 +148,13 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 
 	// ── publisher ───────────────────────────────────────────────────
 	let pub_origin = moq_tokio::origin::spawn();
-	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("create broadcast");
-	let track = broadcast.create_track("video", timed()).expect("create track");
+	let broadcast = pub_origin
+		.route("test", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+	let track = broadcast
+		.broadcast()
+		.create_track("video", timed())
+		.expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
@@ -287,9 +291,10 @@ async fn hidden_broadcasts_need_a_lite07_opt_in() {
 	let url: url::Url = format!("ws://127.0.0.1:{port}/hidden").parse().expect("parse url");
 
 	let pub_origin = moq_tokio::origin::spawn();
-	let hidden = pub_origin.create_broadcast(".x/y").expect("create hidden");
-	hidden.announce(Default::default()).expect("announce hidden");
-	let track = hidden.create_track("video", timed()).expect("create track");
+	let hidden = pub_origin
+		.route(".x/y", moq_net::origin::RouteOptions::default())
+		.expect("create hidden");
+	let track = hidden.broadcast().create_track("video", timed()).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hidden".as_ref())
@@ -319,8 +324,9 @@ async fn hidden_broadcasts_need_a_lite07_opt_in() {
 
 	// Announced after the hidden one, so any client that could see both lists the
 	// hidden one first (the relay drains its table in path order).
-	let visible = pub_origin.create_broadcast("visible").expect("create visible");
-	visible.announce(Default::default()).expect("announce visible");
+	let visible = pub_origin
+		.route("visible", moq_net::origin::RouteOptions::default())
+		.expect("create visible");
 	assert_eq!(announced_until(&mut opted, "visible").await, ["visible"]);
 
 	// A lite-07 client that did not opt in, and a lite-06 client that cannot even
@@ -485,9 +491,13 @@ async fn relay_websocket_root_path_upgrades() {
 
 	// ── publisher ───────────────────────────────────────────────────
 	let pub_origin = moq_tokio::origin::spawn();
-	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("create broadcast");
-	let track = broadcast.create_track("video", timed()).expect("create track");
+	let broadcast = pub_origin
+		.route("test", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+	let track = broadcast
+		.broadcast()
+		.create_track("video", timed())
+		.expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
@@ -618,9 +628,13 @@ async fn internal_tcp_round_trip() {
 
 	// ── publisher ───────────────────────────────────────────────────
 	let pub_origin = moq_tokio::origin::spawn();
-	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("create broadcast");
-	let track = broadcast.create_track("video", timed()).expect("create track");
+	let broadcast = pub_origin
+		.route("test", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+	let track = broadcast
+		.broadcast()
+		.create_track("video", timed())
+		.expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
@@ -721,9 +735,13 @@ async fn internal_unix_round_trip() {
 
 	// ── publisher ───────────────────────────────────────────────────
 	let pub_origin = moq_tokio::origin::spawn();
-	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("create broadcast");
-	let track = broadcast.create_track("video", timed()).expect("create track");
+	let broadcast = pub_origin
+		.route("test", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+	let track = broadcast
+		.broadcast()
+		.create_track("video", timed())
+		.expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
@@ -805,9 +823,10 @@ fn path_versions() -> Vec<moq_net::Version> {
 /// to that root).
 async fn path_round_trip(version: moq_net::Version, pub_url: url::Url, sub_url: url::Url, broadcast: &str) -> String {
 	let pub_origin = moq_tokio::origin::spawn();
-	let bc = pub_origin.create_broadcast(broadcast).expect("create broadcast");
-	bc.announce(Default::default()).expect("create broadcast");
-	let track = bc.create_track("video", timed()).expect("create track");
+	let bc = pub_origin
+		.route(broadcast, moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+	let track = bc.broadcast().create_track("video", timed()).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())

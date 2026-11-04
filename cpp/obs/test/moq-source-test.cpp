@@ -585,8 +585,10 @@ public:
 		  uint64_t start_us = 1'000'000)
 		: timestamp_us(start_us)
 	{
-		auto publication = TestOk(relay.origin->create_broadcast(path), "create_broadcast");
-		broadcast = publication->broadcast();
+		moq::RouteOptions hidden;
+		hidden.hidden = true;
+		route = TestOk(relay.origin->route(path, hidden), "route");
+		broadcast = TestOk(route->broadcast(), "route broadcast");
 		if (video) {
 			moq::VideoInit init{};
 			init.format = moq::VideoFormat::kAvc3;
@@ -603,7 +605,7 @@ public:
 				TestOk(moq::MediaTrackProducer::audio(broadcast, moq::MediaTarget::kNamed{}, init),
 				       "audio producer");
 		}
-		TestOk(publication->announce(moq::AnnounceRoute{}), "announce");
+		TestOk(route->announce(), "announce");
 	}
 
 	~Publisher() { (void)broadcast->close(); }
@@ -632,6 +634,8 @@ public:
 			timeout);
 	}
 
+	// Keeps the broadcast announced for the publisher's lifetime.
+	std::shared_ptr<moq::Route> route;
 	std::shared_ptr<moq::BroadcastProducer> broadcast;
 	std::shared_ptr<moq::MediaTrackProducer> video;
 	std::shared_ptr<moq::MediaTrackProducer> audio;
@@ -1607,9 +1611,13 @@ int main()
 		auto snapshot = TestOk(catalogs->next().get(), "catalog snapshot");
 		CHECK(snapshot.has_value());
 		auto config = snapshot->video.begin()->second;
-		std::shared_ptr<moq::Publication> hidden;
+		std::shared_ptr<moq::Route> hidden;
 		if (sibling) {
-			hidden = TestOk(relay.origin->create_broadcast("obs/hidden"), "unannounced sibling");
+			// A different stream than the one the rendition pins, hidden until announced.
+			moq::RouteOptions options;
+			options.hidden = true;
+			options.instance = "obs-test-other";
+			hidden = TestOk(relay.origin->route("obs/hidden", options), "unannounced sibling");
 			config.broadcast = "./hidden";
 			config.instance = "obs-test-pinned";
 		}
@@ -1632,9 +1640,7 @@ int main()
 			const int frames = g_output_frames;
 			CHECK(publisher.WriteUntil([&] { return g_output_frames >= frames + 3; }));
 			// A different stream is a real resolution failure.
-			moq::AnnounceRoute route;
-			route.instance = "obs-test-other";
-			TestOk(hidden->announce(route), "announce mismatched sibling");
+			TestOk(hidden->announce(), "announce mismatched sibling");
 		}
 		CHECK(WaitFor([] {
 			std::lock_guard<std::mutex> lock(g_candidate_mutex);

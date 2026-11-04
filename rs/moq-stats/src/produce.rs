@@ -577,7 +577,8 @@ impl<V: Serialize> Output<V> {
 
 /// The node's stats broadcast and its change-detection state.
 struct NodePublisher {
-	broadcast: origin::Publication,
+	/// The node's route, which owns its broadcast.
+	route: origin::Route,
 	/// Holds the broadcast's request queue open, so a subscriber asking for a
 	/// presence or prefix track parks until the next drain serves it instead
 	/// of being rejected `NotFound` on the spot.
@@ -955,9 +956,8 @@ impl NodePublisher {
 			.ok()?;
 		// A fresh instance per announcement: a restart is a new broadcast, so no relay
 		// resumes it from groups cached under the old one.
-		let route = origin::Route::default();
-		let broadcast = match task.origin.publish(&advertised, route) {
-			Ok(broadcast) => broadcast,
+		let route = match task.origin.route(&advertised, origin::RouteOptions::default()) {
+			Ok(route) => route,
 			Err(err) => {
 				tracing::warn!(advertised = %advertised, ?err, "stats: origin rejected stats broadcast");
 				return None;
@@ -966,7 +966,7 @@ impl NodePublisher {
 		tracing::debug!(advertised = %advertised, "stats: publishing broadcast");
 
 		let name = totals_track();
-		let totals = match Output::create(&broadcast, &name) {
+		let totals = match Output::create(route.broadcast(), &name) {
 			Ok(output) => TotalsTrack {
 				output,
 				sums: Cumulative::new(),
@@ -979,7 +979,7 @@ impl NodePublisher {
 
 		let mut groups = HashMap::new();
 		if task.depth == 0 {
-			match GroupTrack::create(&broadcast, &Path::empty()) {
+			match GroupTrack::create(route.broadcast(), &Path::empty()) {
 				Ok(track) => {
 					groups.insert(String::new(), track);
 				}
@@ -990,10 +990,10 @@ impl NodePublisher {
 			}
 		}
 
-		let dynamic = broadcast.requests();
+		let dynamic = route.broadcast().requests();
 
 		Some(Self {
-			broadcast,
+			route,
 			dynamic,
 			local: HashMap::new(),
 			totals,
@@ -1007,7 +1007,7 @@ impl NodePublisher {
 	/// and add them to the totals and every held presence and prefix track.
 	fn collect(&mut self, report: &Report, tick: u64, depth: usize) {
 		let Self {
-			broadcast,
+			route,
 			local,
 			totals,
 			presence,
@@ -1063,13 +1063,13 @@ impl NodePublisher {
 			let publisher = slots.publisher.observe(entry.publisher);
 			let subscriber = slots.subscriber.observe(entry.subscriber);
 			let key = group_key(&entry.path, depth);
-			if let Some(track) = Self::group(broadcast, groups, &key) {
+			if let Some(track) = Self::group(route.broadcast(), groups, &key) {
 				track.add_traffic(entry, publisher, subscriber);
 			}
 		}
 		for entry in &report.sessions {
 			let key = group_key(&entry.label, depth);
-			if let Some(track) = Self::group(broadcast, groups, &key) {
+			if let Some(track) = Self::group(route.broadcast(), groups, &key) {
 				track.add_sessions(&entry.label, &entry.tier, entry.presence, entry.closed);
 			}
 		}
@@ -1192,7 +1192,7 @@ impl NodePublisher {
 			return;
 		}
 		let name = presence_track(&label);
-		let output = match Output::adopt(&self.broadcast, &name, request) {
+		let output = match Output::adopt(self.route.broadcast(), &name, request) {
 			Ok(output) => output,
 			Err(err) => {
 				tracing::warn!(?err, name, "stats: failed to adopt presence track");
@@ -1226,7 +1226,7 @@ impl NodePublisher {
 			return;
 		}
 		let name = prefix_track(&path);
-		let output = match Output::adopt(&self.broadcast, &name, request) {
+		let output = match Output::adopt(self.route.broadcast(), &name, request) {
 			Ok(output) => output,
 			Err(err) => {
 				tracing::warn!(?err, name, "stats: failed to adopt prefix track");
@@ -1265,7 +1265,7 @@ impl Drop for NodePublisher {
 		for (_, track) in self.groups.drain() {
 			track.finish();
 		}
-		self.broadcast.close();
+		self.route.broadcast().close();
 	}
 }
 
@@ -1655,7 +1655,7 @@ mod tests {
 	#[allow(dead_code, reason = "held for their drop, never read")]
 	struct Feed {
 		announced: announce::Consumer,
-		source: origin::Publication,
+		source: origin::Route,
 		consumer: broadcast::Consumer,
 		sub: Option<track::Subscriber>,
 	}
@@ -1680,9 +1680,10 @@ mod tests {
 		let egress = origin.consume().with_stats(ctx);
 
 		let mut announced = egress.announced();
-		let source = origin.create_broadcast(path).expect("create_broadcast");
-		source.announce(origin::Route::default()).expect("announce");
-		let producer = source.create_track("video", timed()).expect("create_track");
+		let source = origin
+			.route(path, moq_net::origin::RouteOptions::default())
+			.expect("route");
+		let producer = source.broadcast().create_track("video", timed()).expect("create_track");
 
 		let (_, active) = next_update(&mut announced).await.expect("announce");
 		assert!(active);
@@ -2146,9 +2147,9 @@ mod tests {
 					.tier(Tier::default())
 					.session(moq_net::Path::from_static("publisher")),
 			)
-			.publish("foo/bar", origin::Route::default())
+			.route("foo/bar", moq_net::origin::RouteOptions::default())
 			.expect("publish");
-		let mut video = source.create_track("video", timed()).expect("create_track");
+		let mut video = source.broadcast().create_track("video", timed()).expect("create_track");
 		let egress = data.consume().with_stats(
 			registry
 				.tier(Tier::default())
@@ -2225,12 +2226,12 @@ mod tests {
 	}
 
 	/// The announce events buffered so far in delivery order, as
-	/// `(path, active, instance)`. Every stats route carries an instance.
+	/// `(path, active, instance)`.
 	fn take_instances(events: &mut announce::Consumer) -> Vec<(String, bool, Instance)> {
 		use futures::FutureExt;
 		let mut out = Vec::new();
 		while let Some(Some((update, active))) = next_update(events).now_or_never() {
-			let instance = update.route.instance.expect("a stats route carries an instance");
+			let instance = update.route.instance().clone();
 			out.push((update.prefix.as_str().to_string(), active, instance));
 		}
 		out
@@ -2597,9 +2598,9 @@ mod tests {
 					.tier(Tier::default())
 					.session(moq_net::Path::from_static("publisher")),
 			)
-			.publish("acme/live", origin::Route::default())
+			.route("acme/live", moq_net::origin::RouteOptions::default())
 			.expect("publish");
-		let video = source.create_track("video", timed()).expect("create_track");
+		let video = source.broadcast().create_track("video", timed()).expect("create_track");
 		let egress = data.consume().with_stats(
 			registry
 				.tier(Tier::default())
@@ -3150,7 +3151,7 @@ mod tests {
 			interval: Duration::from_secs(1),
 		})
 		.unwrap();
-		let stats = crate::Consumer::new(drain.node.broadcast.consume(), Default::default());
+		let stats = crate::Consumer::new(drain.node.route.broadcast().consume(), Default::default());
 
 		let _acme = registry
 			.tier(Tier::default())

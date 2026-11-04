@@ -137,12 +137,15 @@ void main() {
       await pending.cancel();
       await error;
       final next = cursor.next();
-      final publication = origin.createBroadcast(path: 'still-listening');
+      final route = origin.route(
+        path: 'still-listening',
+        options: MoqRouteOptions(),
+      );
       try {
-        publication.announce(route: MoqAnnounceRoute());
         expect(await next, isA<StartMoqAnnounceEvent>());
       } finally {
-        publication.broadcast().close();
+        route.broadcast().close();
+        route.dispose();
       }
     } finally {
       cursor.cancel();

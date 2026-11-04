@@ -280,9 +280,11 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_warm_copy_starts_at_the_newest_window() {
 		let publisher = origin(1);
-		let broadcast = publisher.create_broadcast("room").unwrap();
-		let track = broadcast.create_track(TRACK, info()).unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = publisher
+			.route("room", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let track = broadcast.broadcast().create_track(TRACK, info()).unwrap();
+		broadcast.announce().unwrap();
 		let mut demand = track.demand();
 		let mut chat = moq_json::window::Producer::<String>::new(
 			track,

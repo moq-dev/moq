@@ -127,13 +127,14 @@ impl Clock {
 struct Program {
 	/// The PAT's program number.
 	number: u16,
-	/// Owns announcement control while the importer holds a fill clone.
-	broadcast: moq_net::origin::Publication,
+	/// The program's route, created hidden: dropping it retracts the broadcast the importer
+	/// fills.
+	route: moq_net::origin::Route,
 	import: Import<Ext>,
 	catalog: catalog::Producer<Ext>,
-	/// The route and catalog track until the catalog first names a servable track: announced any
-	/// sooner, a relay would ask for tracks it cannot serve yet.
-	pending: Option<(moq_net::origin::Route, moq_net::track::Consumer)>,
+	/// The catalog track until the catalog first names a servable track: announced any sooner,
+	/// a relay would ask for tracks it cannot serve yet.
+	pending: Option<moq_net::track::Consumer>,
 	/// The PIDs this program is listed under in [`Programs::readers`], sorted.
 	claims: Vec<u16>,
 	/// The ways it reads each PID, sorted, but for the PAT and the SI PIDs every program reads.
@@ -145,7 +146,7 @@ struct Program {
 impl Program {
 	/// Announce the broadcast once its catalog has gone out.
 	fn announce_if_listed(&mut self) -> anyhow::Result<bool> {
-		let Some((route, listed)) = &mut self.pending else {
+		let Some(listed) = &mut self.pending else {
 			return Ok(true);
 		};
 		if !matches!(
@@ -154,8 +155,8 @@ impl Program {
 		) {
 			return Ok(false);
 		}
-		self.broadcast
-			.announce(route.clone())
+		self.route
+			.announce()
 			.with_context(|| format!("failed to announce program {}", self.number))?;
 		self.pending = None;
 		Ok(true)
@@ -635,7 +636,7 @@ impl Programs {
 			}
 		}
 		for (program, _) in gone.values() {
-			program.broadcast.close();
+			program.route.broadcast().close();
 		}
 		Ok(())
 	}
@@ -725,9 +726,11 @@ impl Programs {
 	fn start(&mut self, number: u16, pmt_pid: u16, sections: SectionReassembler) -> anyhow::Result<()> {
 		let pat = self.pat.as_ref().expect("a program waits on its PAT");
 		let name = program_broadcast(self.name.as_str(), number);
-		let broadcast = self
+		// Each program is its own publisher instance for this run, minted by its route, so a
+		// restart replaces it rather than resuming into it.
+		let route = self
 			.origin
-			.create_broadcast(&name)
+			.route(&name, moq_net::origin::RouteOptions::hidden())
 			.with_context(|| format!("failed to create broadcast {name}"))?;
 		// TS carries undecoded elementary streams verbatim, so each catalog carries the
 		// `mpegts` extension, and owns its broadcast's catalog tracks.
@@ -735,22 +738,19 @@ impl Programs {
 			.config
 			.clone()
 			.with_catalog(catalog::hang::Catalog::<Ext>::default());
-		let catalog = catalog::Producer::new(&mut broadcast.broadcast().clone(), config)?;
+		let catalog = catalog::Producer::new(&mut route.broadcast().clone(), config)?;
 		let pmt_pid = Pid::new(pmt_pid).expect("a packet's PID fits 13 bits");
-		let mut import = Import::new(broadcast.broadcast().clone(), catalog.reserve())
+		let mut import = Import::new(route.broadcast().clone(), catalog.reserve())
 			.with_program(number)
 			.with_pmt(pmt_pid, sections);
 		import.handle_pat(pat)?;
-		// Each program is its own publisher instance for this run, so a restart
-		// replaces it rather than resuming into it.
-		let route = moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0);
-		let listed = broadcast.consume().track(hang::Catalog::DEFAULT_NAME)?;
+		let listed = route.broadcast().consume().track(hang::Catalog::DEFAULT_NAME)?;
 		self.programs.push(Program {
 			number,
-			broadcast,
+			route,
 			import,
 			catalog,
-			pending: Some((route, listed)),
+			pending: Some(listed),
 			claims: Vec::new(),
 			reads: Vec::new(),
 			touched: false,
@@ -892,7 +892,7 @@ impl Programs {
 		Ok(self
 			.programs
 			.iter()
-			.map(|program| program.broadcast.broadcast().clone())
+			.map(|program| program.route.broadcast().clone())
 			.collect())
 	}
 
@@ -936,14 +936,7 @@ mod test {
 		programs
 			.programs
 			.iter()
-			.map(|program| {
-				let route = program.broadcast.route();
-				let route = route.as_ref().or(program.pending.as_ref().map(|(route, _)| route));
-				(
-					program.number,
-					route.and_then(|route| route.instance.clone()).expect("an instance"),
-				)
-			})
+			.map(|program| (program.number, program.route.instance()))
 			.collect()
 	}
 
@@ -1001,7 +994,7 @@ mod test {
 		let both = instances(&programs);
 		assert_eq!(both[0], one[0], "program 1 carries on");
 		assert_eq!(both[1].0, 2, "the added program publishes");
-		let two = programs.programs[1].broadcast.consume();
+		let two = programs.programs[1].route.broadcast().consume();
 		let mut catalog = hang::catalog::Catalog::<()>::subscribe(&two).await.unwrap();
 
 		steps.step(&mut programs, &[(1, 0x100)]);
@@ -2020,16 +2013,16 @@ mod test {
 		);
 		programs.decode(&two_section_pat()).unwrap();
 		programs.finish().unwrap();
+		assert!(
+			programs.programs.iter().all(|program| program.route.is_announced()),
+			"every program announces"
+		);
 		let instances: Vec<_> = programs
 			.programs
 			.iter()
-			.map(|program| program.broadcast.route().and_then(|route| route.instance))
+			.map(|program| program.route.instance())
 			.collect();
 		assert_eq!(instances.len(), 2);
-		assert!(
-			instances.iter().all(Option::is_some),
-			"every program names its instance"
-		);
 		assert_ne!(instances[0], instances[1]);
 	}
 
@@ -2051,10 +2044,7 @@ mod test {
 				.unwrap();
 		}
 		assert!(
-			programs
-				.programs
-				.iter()
-				.all(|program| program.broadcast.route().is_none()),
+			programs.programs.iter().all(|program| !program.route.is_announced()),
 			"announced on the PSI alone"
 		);
 		for packet in packets {
@@ -2062,10 +2052,7 @@ mod test {
 		}
 		programs.finish().unwrap();
 		assert!(
-			programs
-				.programs
-				.iter()
-				.all(|program| program.broadcast.route().is_some()),
+			programs.programs.iter().all(|program| program.route.is_announced()),
 			"every program is announced once it has declared its tracks"
 		);
 	}
@@ -2104,10 +2091,7 @@ mod test {
 		};
 		assert!(err.to_string().contains("declared a track"), "{err:#}");
 		assert!(
-			programs
-				.programs
-				.iter()
-				.all(|program| program.broadcast.route().is_none()),
+			programs.programs.iter().all(|program| !program.route.is_announced()),
 			"no empty program is announced"
 		);
 	}

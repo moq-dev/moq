@@ -13,7 +13,7 @@ import (
 // consume sink for a full-duplex peer.
 //
 // There is no Close: the origin ends once the collector reaches every owner
-// (each producer, published broadcast, and [OriginRequests]), and its consumers
+// (each producer and [Route]), and its consumers
 // then fail with [ErrClosed]. Keep an owner reachable for as long as the origin
 // should live.
 type OriginProducer struct {
@@ -35,95 +35,122 @@ func (o *OriginProducer) Consume() *OriginConsumer {
 	return &OriginConsumer{inner: o.inner.Consume()}
 }
 
-// Requests advertises prefix and serves the requests beneath it.
+// Route creates a route at exactly path, owning a new broadcast to fill.
+//
+// The route is visible at once unless options.Hidden: a hidden route is
+// invisible and unroutable, for this origin's consumers and peers alike, until
+// [Route.Announce], so create it hidden to fill the catalog first. It serves a
+// fresh instance, kept across [Route.Withdraw] and [Route.Announce], unless
+// options names one. Keep the route reachable: [Route.Cancel], or the collector
+// reclaiming it, retracts it, and [BroadcastProducer.Close] ends both.
+func (o *OriginProducer) Route(path string, options RouteOptions) (*Route, error) {
+	inner, err := o.inner.Route(path, options)
+	if err != nil {
+		return nil, err
+	}
+	return newRoute(inner), nil
+}
+
+// RoutePrefix creates a route over prefix that serves the requests beneath it.
 //
 // A route claims prefix and every path beneath it ("" claims every path). A
 // service that only serves some of them rejects the rest as they are requested.
-// Create, Requests if tracks are served on demand, populate, then
-// [Publication.Announce].
-func (o *OriginProducer) Requests(prefix string) (*OriginRequests, error) {
-	inner, err := o.inner.Requests(prefix)
+// Answer each [Route.Requested] request, and keep the route reachable while it
+// should stay advertised.
+func (o *OriginProducer) RoutePrefix(prefix string, options RouteOptions) (*Route, error) {
+	inner, err := o.inner.RoutePrefix(prefix, options)
 	if err != nil {
 		return nil, err
 	}
-	return &OriginRequests{inner: inner}, nil
+	return newRoute(inner), nil
 }
 
-// CreateBroadcast creates a broadcast at the given path, returning its publication.
+// Route is a route on an origin: an exact route owning one broadcast, or a
+// prefix route yielding the requests beneath it.
 //
-// The broadcast is invisible and unroutable, for this origin's consumers and
-// peers alike, until [Publication.Announce]. Announce it after populating
-// tracks. [BroadcastProducer.Close] ends it for good; dropping the last handle,
-// the publication included, does the same.
-func (o *OriginProducer) CreateBroadcast(path string) (*Publication, error) {
-	inner, err := o.inner.CreateBroadcast(path)
-	if err != nil {
-		return nil, err
-	}
-	return newPublication(inner), nil
-}
-
-// Publication is a broadcast published on an origin: the broadcast to fill and
-// its announcement.
-//
-// The collector reclaiming it does not retract the route; [BroadcastProducer.Close] does.
-type Publication struct {
-	inner     *ffi.MoqPublication
+// [Route.Cancel], or the collector reclaiming it, retracts the route, as does
+// closing an exact route's broadcast; a [BroadcastProducer] alone does not keep
+// it announced.
+type Route struct {
+	inner     *ffi.MoqRoute
 	broadcast *BroadcastProducer
 }
 
-func newPublication(inner *ffi.MoqPublication) *Publication {
-	return &Publication{inner: inner, broadcast: &BroadcastProducer{inner: inner.Broadcast()}}
+func newRoute(inner *ffi.MoqRoute) *Route {
+	route := &Route{inner: inner}
+	// A prefix route owns no broadcast.
+	if broadcast, err := inner.Broadcast(); err == nil {
+		route.broadcast = &BroadcastProducer{inner: broadcast}
+	}
+	return route
 }
 
-// Broadcast returns the broadcast to fill, the same one on every call.
-func (p *Publication) Broadcast() *BroadcastProducer {
-	return p.broadcast
-}
-
-// Announce advertises the broadcast's exact path as a route.
-//
-// Announcing again re-prices the route in place. Until announced, the
-// broadcast is invisible and unroutable for local consumers and peers alike.
-// Errors with ErrClosed once the broadcast is closed.
-func (p *Publication) Announce(route AnnounceRoute) error {
-	return p.inner.Announce(route)
-}
-
-// Unannounce retracts the broadcast's exact-path advertisement, if any, from
-// local consumers and peers alike. Tracks already in flight carry on, and
-// Announce brings it back. Errors with ErrClosed once the broadcast is closed.
-func (p *Publication) Unannounce() error {
-	return p.inner.Unannounce()
-}
-
-// OriginRequests streams requests for paths with no existing exact-path broadcast.
-type OriginRequests struct {
-	inner *ffi.MoqOriginRequests
-}
-
-// RequestedBroadcast blocks until a consumer requests a path with no existing
-// exact-path broadcast.
-func (d *OriginRequests) RequestedBroadcast(ctx context.Context) (*BroadcastRequest, error) {
-	inner, err := bridge.CallHandle(ctx, d.inner.Cancel, d.inner.RequestedBroadcast)
-	if err != nil {
+// Broadcast returns the broadcast an exact route owns, the same one on every
+// call, or an error on a prefix route, which owns none.
+func (r *Route) Broadcast() (*BroadcastProducer, error) {
+	if r.broadcast == nil {
+		_, err := r.inner.Broadcast()
 		return nil, err
 	}
-	return &BroadcastRequest{inner: inner}, nil
+	return r.broadcast, nil
 }
 
-// All ranges over requested broadcasts until the stream errors or the loop
-// breaks.
-func (d *OriginRequests) All(ctx context.Context) iter.Seq2[*BroadcastRequest, error] {
-	return bridge.Seq(ctx, d.RequestedBroadcast)
+// Instance returns the stream this route serves, minted at creation unless
+// [RouteOptions] named one.
+func (r *Route) Instance() string {
+	return r.inner.Instance()
 }
 
-// Cancel stops serving requested broadcasts and retracts the route.
-func (d *OriginRequests) Cancel() {
-	d.inner.Cancel()
+// Announce makes the route visible, or keeps it so. A route from
+// [BroadcastRequest.Route] also answers the requesters waiting on its path.
+// Errors with ErrClosed once its broadcast is closed.
+func (r *Route) Announce() error {
+	return r.inner.Announce()
 }
 
-// BroadcastRequest is a requested broadcast that has not been accepted yet.
+// Withdraw hides the route from local consumers and peers alike, keeping its
+// broadcast and instance. Tracks already in flight carry on, and Announce
+// brings the same stream back.
+func (r *Route) Withdraw() error {
+	return r.inner.Withdraw()
+}
+
+// SetCost re-prices the route in place: lower wins among routes covering the
+// same prefix. A hidden route keeps the price for when it next announces.
+func (r *Route) SetCost(cost uint64) error {
+	return r.inner.SetCost(cost)
+}
+
+// Requested blocks until a consumer requests a path beneath this prefix route,
+// returning (nil, nil) once the origin closes, and at once on an exact route.
+//
+// Cancelling ctx abandons only this wait: the route stays advertised.
+func (r *Route) Requested(ctx context.Context) (*BroadcastRequest, error) {
+	inner, err := bridge.CallRelease(ctx, nil, r.inner.Requested, func(request **ffi.MoqBroadcastRequest) {
+		if request != nil {
+			(*request).Destroy()
+		}
+	})
+	if err != nil || inner == nil {
+		return nil, err
+	}
+	return &BroadcastRequest{inner: *inner}, nil
+}
+
+// All ranges over requested broadcasts until the route ends, a call errors, or
+// the loop breaks.
+func (r *Route) All(ctx context.Context) iter.Seq2[*BroadcastRequest, error] {
+	return bridge.Seq(ctx, r.Requested)
+}
+
+// Cancel retracts the route now, rather than when the collector reclaims it.
+// Pending requests are rejected and later calls fail with ErrCancelled. An exact
+// route's broadcast lives on until [BroadcastProducer.Close].
+func (r *Route) Cancel() {
+	r.inner.Cancel()
+}
+
+// BroadcastRequest is a requested broadcast that has not been answered yet.
 type BroadcastRequest struct {
 	inner *ffi.MoqBroadcastRequest
 }
@@ -133,13 +160,17 @@ func (r *BroadcastRequest) Path() (string, error) {
 	return r.inner.Path()
 }
 
-// Prepare starts answering as a new stream under a fresh instance, hidden until published.
-func (r *BroadcastRequest) Prepare() (*BroadcastPrepared, error) {
-	inner, err := r.inner.Prepare()
+// Route answers with the path's own exact route, owning a new broadcast.
+//
+// It serves a fresh instance unless options names one. Created visible, it
+// announces now and answers the waiting requesters; created hidden, they wait
+// until [Route.Announce], so the job can fill its catalog first.
+func (r *BroadcastRequest) Route(options RouteOptions) (*Route, error) {
+	inner, err := r.inner.Route(options)
 	if err != nil {
 		return nil, err
 	}
-	return &BroadcastPrepared{inner: inner}, nil
+	return newRoute(inner), nil
 }
 
 // Serve answers with held content under the prefix route's continuous sequence space,
@@ -151,31 +182,6 @@ func (r *BroadcastRequest) Serve(broadcast *BroadcastConsumer) error {
 // Reject fails the request with an application error code.
 func (r *BroadcastRequest) Reject(errorCode uint16) error {
 	return r.inner.Reject(errorCode)
-}
-
-// BroadcastPrepared is a claim answer being filled before announcement.
-type BroadcastPrepared struct {
-	inner *ffi.MoqBroadcastPrepared
-}
-
-// Broadcast returns the unannounced broadcast to fill before publishing; only Publish announces it.
-func (p *BroadcastPrepared) Broadcast() *BroadcastProducer {
-	return &BroadcastProducer{inner: p.inner.Broadcast()}
-}
-
-// Publish announces the answer and resolves every waiting requester, returning
-// its publication.
-func (p *BroadcastPrepared) Publish() (*Publication, error) {
-	inner, err := p.inner.Publish()
-	if err != nil {
-		return nil, err
-	}
-	return newPublication(inner), nil
-}
-
-// Close abandons the answer if it was not published, refusing every waiting requester.
-func (p *BroadcastPrepared) Close() {
-	p.inner.Destroy()
 }
 
 // OriginConsumer discovers and requests broadcasts published to an origin.

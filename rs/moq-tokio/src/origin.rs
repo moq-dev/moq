@@ -57,14 +57,15 @@ mod tests {
 		let origin = spawn();
 		let mut announced = origin.consume().announced();
 
-		let broadcast = origin.create_broadcast("cam").expect("create broadcast");
-		broadcast.announce(Default::default()).expect("create broadcast");
+		let broadcast = origin
+			.route("cam", moq_net::origin::RouteOptions::default())
+			.expect("create broadcast");
 
 		let (update, active) = next_update(&mut announced).await.expect("announce");
 		assert_eq!(update.prefix.as_str(), "cam");
 		assert!(active);
 
-		broadcast.close();
+		broadcast.broadcast().close();
 		let (_, active) = next_update(&mut announced).await.expect("retraction");
 		assert!(!active);
 	}

@@ -20,9 +20,9 @@ import moq
 
 async def run(bind: str, broadcast_name: str, track_name: str, host: str) -> None:
     async with moq.Server(bind, tls_generate=[host]) as server:
-        publication = server.create_broadcast(broadcast_name)
-        track = publication.broadcast.publish_track(track_name, moq.TrackInfo(timescale=1_000_000))
-        publication.announce()
+        route = server.route(broadcast_name, hidden=True)
+        track = route.broadcast.publish_track(track_name, moq.TrackInfo(timescale=1_000_000))
+        route.announce()
         print(f"serving {broadcast_name!r} track={track_name!r} on https://{server.local_addr}")
         for fp in server.cert_fingerprints():
             print(f"  cert fingerprint sha256: {fp}")

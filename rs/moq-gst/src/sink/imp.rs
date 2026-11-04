@@ -68,7 +68,7 @@ impl TryFrom<Settings> for ResolvedSettings {
 /// Live state for one READY to PAUSED run.
 struct State {
 	session: Session,
-	broadcast: moq_net::origin::Publication,
+	route: moq_net::origin::Route,
 	catalog: Option<moq_mux::catalog::Producer>,
 	wall: std::sync::Arc<super::wall::Wall>,
 	/// Follows the published catalog, so a pad reports demand once its track is listed.
@@ -573,7 +573,7 @@ impl MoqSink {
 			gst::error!(CAT, obj = self.obj(), "invalid settings: {err:#}");
 			gst::StateChangeError
 		})?;
-		let (session, registration, broadcast, catalog) =
+		let (session, registration, route, catalog) =
 			Session::start(settings, self.obj().downgrade()).map_err(|err| {
 				gst::error!(CAT, obj = self.obj(), "failed to start session: {err:?}");
 				gst::StateChangeError
@@ -594,7 +594,7 @@ impl MoqSink {
 			let mut control = self.control.lock().unwrap();
 			control.live = Some(State {
 				session,
-				broadcast,
+				route,
 				catalog: Some(catalog),
 				wall,
 				watch,
@@ -686,7 +686,7 @@ impl MoqSink {
 		if let Some(lingering) = state.lingering.take() {
 			lingering.abort();
 		}
-		state.broadcast.close();
+		state.route.broadcast().close();
 		drop(closed);
 		state.session.stop();
 		self.notify_updates(updates);
@@ -1083,8 +1083,7 @@ impl MoqSink {
 			None if completion.finish() => {
 				// The closed renditions and the catalog hold the finished tracks, so they go only
 				// once the broadcast closes.
-				let finished =
-					moq_mux::Linger::new([state.broadcast.broadcast().clone()], (closed, catalog), state.linger);
+				let finished = moq_mux::Linger::new([state.route.broadcast().clone()], (closed, catalog), state.linger);
 				self.linger_locked(control, finished)
 			}
 			None => Posted::Nothing,
@@ -1297,7 +1296,7 @@ fn observe_caps(
 	if let Some(track) = requested.as_deref() {
 		options = options.with_track(track);
 	}
-	let outcome = lifecycle.media.observe_caps(&state.broadcast, catalog, options);
+	let outcome = lifecycle.media.observe_caps(state.route.broadcast(), catalog, options);
 	lifecycle.completion = Some(state.session.completion());
 	match outcome {
 		CapsOutcome::Active(track) => {
@@ -1373,7 +1372,8 @@ mod tests {
 				.live
 				.as_ref()
 				.unwrap()
-				.broadcast
+				.route
+				.broadcast()
 				.consume();
 			futures::executor::block_on(moq_mux::catalog::Consumer::new(
 				&broadcast,
@@ -1517,7 +1517,7 @@ mod tests {
 				let control = run.0.imp().control.lock().unwrap();
 				let state = control.live.as_ref().unwrap();
 				(
-					state.broadcast.consume(),
+					state.route.broadcast().consume(),
 					state.catalog.as_ref().unwrap().snapshot().clock.unwrap(),
 				)
 			};
@@ -1753,7 +1753,8 @@ mod tests {
 			.live
 			.as_ref()
 			.unwrap()
-			.broadcast
+			.route
+			.broadcast()
 			.consume();
 		let _first_reader = broadcast.track("first").unwrap().subscribe(None);
 		let _second_reader = broadcast.track("second").unwrap().subscribe(None);
@@ -1825,7 +1826,8 @@ mod tests {
 			.live
 			.as_ref()
 			.unwrap()
-			.broadcast
+			.route
+			.broadcast()
 			.consume();
 		let _reader = broadcast.track("camera").unwrap().subscribe(None);
 		assert!(
@@ -1872,7 +1874,8 @@ mod tests {
 			.live
 			.as_ref()
 			.unwrap()
-			.broadcast
+			.route
+			.broadcast()
 			.consume();
 		let _reader = broadcast.track("levels").unwrap().subscribe(None);
 		let wanted = await_demand(&levels, |state| {
@@ -1919,7 +1922,8 @@ mod tests {
 			.live
 			.as_ref()
 			.unwrap()
-			.broadcast
+			.route
+			.broadcast()
 			.consume();
 		let _old_reader = broadcast.track("camera").unwrap().subscribe(None);
 		frame(&video, VP8_KEYFRAME);
@@ -1970,7 +1974,8 @@ mod tests {
 			.live
 			.as_ref()
 			.unwrap()
-			.broadcast
+			.route
+			.broadcast()
 			.consume();
 		let _first_reader = broadcast.track("first").unwrap().subscribe(None);
 		let _second_reader = broadcast.track("second").unwrap().subscribe(None);
@@ -2035,7 +2040,8 @@ mod tests {
 				.live
 				.as_ref()
 				.unwrap()
-				.broadcast
+				.route
+				.broadcast()
 				.consume();
 			let mut track = broadcast
 				.track("video/1")
@@ -2441,7 +2447,7 @@ mod tests {
 		let (broadcast, session) = {
 			let control = sink.imp().control.lock().unwrap();
 			let state = control.live.as_ref().expect("live session");
-			(state.broadcast.broadcast().clone(), state.session.completion())
+			(state.route.broadcast().clone(), state.session.completion())
 		};
 		let consumer = broadcast.consume();
 		let track = broadcast.create_track("video", None).unwrap();

@@ -11,14 +11,16 @@ async fn main() -> anyhow::Result<()> {
 	);
 	let version: moq_net::Version = args[2].parse().map_err(anyhow::Error::msg)?;
 	let origin = moq_tokio::origin::spawn();
-	let broadcast = origin.create_broadcast("control")?;
-	let track = broadcast.create_track("video", moq_net::track::Info::default().with_priority(2))?;
+	let route = origin.route("control", moq_net::origin::RouteOptions::hidden())?;
+	let track = route
+		.broadcast()
+		.create_track("video", moq_net::track::Info::default().with_priority(2))?;
 	let mut group = track.create_group(moq_net::group::Info { sequence: 4 })?;
 	for byte in [1, 2] {
 		group.write_frame(None, vec![byte])?;
 	}
 	group.finish()?;
-	broadcast.announce(Default::default())?;
+	route.announce()?;
 
 	let socket = moq_tokio::websocket::Listener::bind("127.0.0.1:0".parse()?).await?;
 	let url = format!("http://{}/", socket.local_addr()?);

@@ -262,29 +262,32 @@ pub(crate) struct Session {
 }
 
 impl Session {
-	/// Create the broadcast/catalog producers and spawn the connect task. Returns the producers for the
-	/// element to write into; the session task owns only the origin, the connection, and the status.
+	/// Create the route and catalog producer and spawn the connect task. Returns them for the element
+	/// to hold and write into; the session task owns only the origin, the connection, and the status.
 	pub fn start(
 		settings: ResolvedSettings,
 		element: glib::WeakRef<Element>,
 	) -> Result<(
 		Self,
 		SessionRegistration,
-		moq_net::origin::Publication,
+		moq_net::origin::Route,
 		moq_mux::catalog::Producer,
 	)> {
 		// Producer setup may touch tokio time (group eviction), so run it inside the runtime context.
 		let _rt = RUNTIME.enter();
 
 		let origin = moq_tokio::origin::spawn();
-		// Each run is a new stream under a fresh instance, which the publication mints: a restarted
+		// Each run is a new stream under a fresh instance, which the route mints: a restarted
 		// pipeline never resumes viewers into the old run's group sequence. Reconnects keep it.
-		let broadcast = origin.publish(&settings.broadcast, moq_net::origin::Route::default())?;
-		if let Some(instance) = broadcast.route().and_then(|route| route.instance) {
-			gst::info!(CAT, "publishing {} under instance {instance}", settings.broadcast);
-		}
+		let route = origin.route(&settings.broadcast, moq_net::origin::RouteOptions::default())?;
+		gst::info!(
+			CAT,
+			"publishing {} under instance {}",
+			settings.broadcast,
+			route.instance()
+		);
 		let catalog =
-			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), moq_mux::catalog::Config::default())?;
+			moq_mux::catalog::Producer::new(&mut route.broadcast().clone(), moq_mux::catalog::Config::default())?;
 
 		let status = Arc::new(Status::default());
 		let completion = CompletionState::new();
@@ -332,7 +335,7 @@ impl Session {
 				completion,
 			},
 			SessionRegistration { gate },
-			broadcast,
+			route,
 			catalog,
 		))
 	}
@@ -550,7 +553,7 @@ mod tests {
 		assert_eq!(structure.get::<u64>("ended"), Ok(2));
 	}
 
-	fn started_with_broadcast() -> (Session, moq_net::origin::Publication) {
+	fn started_with_broadcast() -> (Session, moq_net::origin::Route) {
 		gst::init().unwrap();
 		let settings = ResolvedSettings {
 			url: "https://127.0.0.1:1".parse().unwrap(),
@@ -558,9 +561,9 @@ mod tests {
 			connect: crate::connection::Settings::default().resolve().unwrap().0,
 			quic: Default::default(),
 		};
-		let (session, registration, broadcast, _) = Session::start(settings, glib::WeakRef::new()).unwrap();
+		let (session, registration, route, _) = Session::start(settings, glib::WeakRef::new()).unwrap();
 		registration.mark_registered();
-		(session, broadcast)
+		(session, route)
 	}
 
 	fn started() -> (Session, moq_tokio::Connection) {
@@ -569,8 +572,9 @@ mod tests {
 		(session, connection)
 	}
 
-	fn announced_instance(broadcast: &moq_net::origin::Publication) -> moq_net::Instance {
-		broadcast.route().expect("announced").instance.expect("an instance")
+	fn announced_instance(route: &moq_net::origin::Route) -> moq_net::Instance {
+		assert!(route.is_announced());
+		route.instance()
 	}
 
 	// Under one instance, a restart whose old route lingers would resume viewers into the old run's groups.

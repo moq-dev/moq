@@ -159,16 +159,16 @@ impl Room {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use moq_net::{Path, origin::Route};
+	use moq_net::Path;
 
 	fn origin() -> origin::Producer {
 		moq_tokio::origin::spawn()
 	}
 
-	fn publish(origin: &origin::Producer, path: &str) -> origin::Publication {
-		let broadcast = origin.create_broadcast(path).expect(path);
-		broadcast.announce(Route::default()).expect("announce");
-		broadcast
+	fn publish(origin: &origin::Producer, path: &str) -> origin::Route {
+		origin
+			.route(path, moq_net::origin::RouteOptions::default())
+			.expect(path)
 	}
 
 	#[tokio::test]

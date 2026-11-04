@@ -159,7 +159,7 @@ fn client(version: Option<moq_net::Version>) -> moq_tokio::Client {
 }
 
 struct Publisher {
-	_broadcast: moq_net::origin::Publication,
+	_broadcast: moq_net::origin::Route,
 	_session: moq_tokio::Connection,
 	streamer: tokio::task::AbortHandle,
 }
@@ -167,8 +167,7 @@ struct Publisher {
 impl Drop for Publisher {
 	fn drop(&mut self) {
 		// The streaming task owns the track producer; stop it with the
-		// publisher so the broadcast actually ends (a live track producer
-		// would keep it announced).
+		// publisher so the track ends with the route.
 		self.streamer.abort();
 	}
 }
@@ -176,9 +175,13 @@ impl Drop for Publisher {
 async fn publish_version(port: u16, version: &str) -> Publisher {
 	let url: Url = format!("tcp://127.0.0.1:{port}").parse().expect("parse url");
 	let origin = moq_tokio::origin::spawn();
-	let broadcast = origin.create_broadcast(PATH).expect("create broadcast");
-	broadcast.announce(Default::default()).expect("create broadcast");
-	let track = broadcast.create_track("video", timed()).expect("create track");
+	let broadcast = origin
+		.route(PATH, moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+	let track = broadcast
+		.broadcast()
+		.create_track("video", timed())
+		.expect("create track");
 
 	// Stream like a real publisher: a fresh group every 100ms, so a subscriber
 	// that attaches at any point receives one (and the test doesn't depend on

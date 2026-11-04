@@ -35,15 +35,15 @@ func TestOriginEndsWithItsProducer(t *testing.T) {
 	}
 }
 
-// An OriginRequests owns its origin: once the collector finalizes the last
+// A prefix Route owns its origin: once the collector finalizes the last
 // OriginProducer, the route still serves and a consumer made earlier still
 // resolves through it.
-func TestRequestsKeepTheOrigin(t *testing.T) {
+func TestRouteKeepsTheOrigin(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	origin := NewOriginProducer()
-	dynamic, err := origin.Requests("")
+	dynamic, err := origin.RoutePrefix("", RouteOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,19 +62,15 @@ func TestRequestsKeepTheOrigin(t *testing.T) {
 		requested <- result{broadcast: broadcast, err: err}
 	}()
 
-	request, err := dynamic.RequestedBroadcast(ctx)
-	if err != nil {
-		t.Fatalf("RequestedBroadcast err = %v, want a request", err)
+	request, err := dynamic.Requested(ctx)
+	if err != nil || request == nil {
+		t.Fatalf("Requested = (%v, %v), want a request", request, err)
 	}
-	prepared, err := request.Prepare()
-	if err != nil {
-		t.Fatal(err)
-	}
-	served, err := prepared.Publish()
+	served, err := request.Route(RouteOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = served.Broadcast().Close() }()
+	defer func() { _ = served.broadcast.Close() }()
 
 	var res result
 	select {
@@ -87,34 +83,37 @@ func TestRequestsKeepTheOrigin(t *testing.T) {
 	}
 }
 
-// Releasing a publication, which is what its finalizer does, keeps the route:
-// only closing the broadcast retracts it.
-func TestReleasingAPublicationKeepsItsRoute(t *testing.T) {
+// Releasing a route, which is what its finalizer does, retracts it: the
+// broadcast alone keeps nothing announced, though it lives on until closed.
+func TestReleasingARouteRetractsIt(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	origin := NewOriginProducer()
 	consumer := origin.Consume()
-	publication, err := origin.CreateBroadcast("live")
+	route, err := origin.Route("live", RouteOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := publication.Announce(AnnounceRoute{}); err != nil {
+	broadcast, err := route.Broadcast()
+	if err != nil {
 		t.Fatal(err)
 	}
-	broadcast := publication.Broadcast()
-	if broadcast != publication.Broadcast() {
+	if again, _ := route.Broadcast(); again != broadcast {
 		t.Fatal("Broadcast must return the same producer on every call")
 	}
-	publication.inner.Destroy()
-
 	if _, err := consumer.Request(ctx, "live", nil); err != nil {
-		t.Fatalf("Request = %v, want the released publication's broadcast", err)
+		t.Fatalf("Request = %v, want the route's broadcast", err)
+	}
+	route.inner.Destroy()
+
+	if _, err := consumer.Request(ctx, "live", nil); err == nil {
+		t.Fatal("a released route must be unroutable")
+	}
+	if _, err := broadcast.PublishTrack("data", nil); err != nil {
+		t.Fatalf("PublishTrack = %v, want the broadcast still open", err)
 	}
 	if err := broadcast.Close(); err != nil {
 		t.Fatal(err)
-	}
-	if _, err := consumer.Request(ctx, "live", nil); err == nil {
-		t.Fatal("a closed broadcast must be unroutable")
 	}
 }

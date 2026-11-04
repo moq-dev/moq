@@ -34,12 +34,12 @@ final server = await Server.listen(
     tlsGenerate: ['localhost'],
   ),
 );
-final publication = server.createBroadcast('live');
-publication.announce(route: AnnounceRoute()); // unannounced broadcasts are invisible
+final route = server.route('live'); // hold it: disposing the route retracts it
 await for (final request in server.requests()) {
   final session = await request.accept();
   print(session.state().connects);
 }
+route.dispose(); // retracts the route
 ```
 
 The package uses `Future` for asynchronous operations and `Stream` for
