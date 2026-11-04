@@ -732,6 +732,14 @@ impl Drop for MoqTrackProducer {
 }
 
 impl MoqTrackProducer {
+	/// Wrap a socket's track without a broadcast family or datagram side channel.
+	pub(crate) fn from_socket(track: moq_net::track::Producer) -> Self {
+		Self {
+			inner: std::sync::Mutex::new(Some(Raw { track, datagrams: None })),
+			keep: std::sync::Mutex::new(None),
+		}
+	}
+
 	/// Wrap `raw` as a child of the broadcast `children` belongs to.
 	fn child(raw: Raw, children: &Children) -> Result<Arc<Self>, MoqError> {
 		children.adopt(Arc::new(Self {
@@ -961,6 +969,27 @@ impl MoqTrackProducer {
 pub struct MoqGroupProducer {
 	sequence: u64,
 	inner: std::sync::Mutex<Option<moq_net::group::Producer>>,
+}
+
+impl Drop for MoqGroupProducer {
+	fn drop(&mut self) {
+		let _guard = crate::ffi::enter();
+		if let Some(group) = self.inner.get_mut().unwrap().take()
+			&& group.poll_closed(&kio::Waiter::noop()).is_pending()
+		{
+			let _ = group.abort(moq_net::Error::Unroutable);
+		}
+	}
+}
+
+impl MoqGroupProducer {
+	/// Wrap the single write half of a socket.
+	pub(crate) fn from_inner(group: moq_net::group::Producer) -> Self {
+		Self {
+			sequence: group.sequence,
+			inner: std::sync::Mutex::new(Some(group)),
+		}
+	}
 }
 
 #[uniffi::export]

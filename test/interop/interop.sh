@@ -498,6 +498,11 @@ plan_pass() {
         done
     fi
     [[ "$FINISH_ONLY" -eq 0 ]] || return 0
+    if needs python; then
+        case "$VERSION" in
+            auto | moq-transport-*) record "not run" case="Python Rust sockets" publisher=python subscriber=rust ;;
+        esac
+    fi
     for pub in rust js-native-node js-native-bun; do
         [[ "$pub" == rust ]] || needs "$pub" || continue
         for sub in rust js-native-node js-native-bun; do
@@ -623,7 +628,7 @@ build_relay_cli() {
         INTEROP_SUB_MOQ="$HARNESS_RUN/bin/moq-sub"
     fi
     if [[ "$build_examples" -eq 1 && "$MEDIA" -eq 0 ]]; then
-        local example args=() examples=(interop-tail interop-catalog interop-audio interop-hls interop-control interop-goaway interop-goaway-client interop-finish)
+        local example args=() examples=(interop-socket interop-tail interop-catalog interop-audio interop-hls interop-control interop-goaway interop-goaway-client interop-finish)
         for example in "${examples[@]}"; do args+=(--example "$example"); done
         (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-cli "${args[@]}")
         for example in "${examples[@]}"; do
@@ -2430,6 +2435,27 @@ run_hls_grid() {
 }
 
 # This checkout's CLI FETCH and finite track tails in this pass, then the lite drop lanes.
+# Both roles and protocols share this lane; Python acknowledges Rust's drain before teardown.
+run_sockets() {
+    needs python || return 0
+    local version="$VERSION" log="$LOGS/sockets.log" prefix="sockets-$$-$RANDOM"
+    case "$version" in
+        auto) version=moq-lite-07-wip ;;
+        moq-transport-*) ;;
+        *) return 0 ;;
+    esac
+    if is_broken python || ! timeout -k 3 "$TIMEOUT" "$PY" "$CLIENTS/python/sockets.py" \
+        "$(token_url --publish "$prefix/**" --subscribe "$prefix/**")" "$prefix" "$version" \
+        "$EXAMPLES/interop-socket" >"$log" 2>&1; then
+        echo "  FAIL  Python/Rust sockets ($version): $log"
+        record fail case="Python Rust sockets" publisher=python subscriber=rust log="$log"
+        overall=1
+        return
+    fi
+    echo "  PASS  Python/Rust sockets ($version), both roles and protocols"
+    record pass case="Python Rust sockets" publisher=python subscriber=rust log="$log"
+}
+
 run_tails() {
     local runtime version
     echo "=== CLI FETCH close ==="
@@ -2519,7 +2545,10 @@ else
         [[ "$TAIL_ONLY" -eq 1 || "$FINISH_ONLY" -eq 1 ]] || run_matrix
         if [[ "$IN_TREE" -eq 1 ]]; then
             [[ "$TAIL_ONLY" -eq 1 ]] || run_finishes
-            [[ "$FINISH_ONLY" -eq 1 ]] || run_tails
+            if [[ "$FINISH_ONLY" -eq 0 ]]; then
+                run_tails
+                run_sockets
+            fi
         fi
     done
 fi

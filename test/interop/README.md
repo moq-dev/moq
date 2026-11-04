@@ -47,6 +47,13 @@ Rust CLI swap its channels' tones, and every subscriber must refuse every rendit
 as the wrong tone, not fail some other way. `interop.sh` is the one place the tones
 and each publisher's codecs are chosen.
 
+When Python is selected, the in-tree run also connects Python and Rust socket
+endpoints through the relay in both dial directions and both `tcp` and `track`
+protocols. Each direction checks exact frames, empty writes, ordered groups,
+and clean FIN. A stdin drain acknowledgement keeps Rust alive until Python has
+read its entire half. The normal pass pins lite-07 for this lane; the IETF pass
+uses each selected moq-transport draft. Older lite hops are outside this lane.
+
 The normal run also checks a finite raw track through the relay. Its publisher
 announces end 4 before writing four 256 KiB groups; the reader verifies every byte,
 exactly groups 0 through 3, and a clean end at 4. Rust-to-Rust always runs. Selecting

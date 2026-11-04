@@ -189,7 +189,6 @@ announce-watch-request pairing remains in `rs/moq-boy`, `js/moq-boy`, or
 
 - [JS sockets](/quest/m1/socket/js.md) - the same surface in `@moq/net`, interoperating with Rust
 - [A socket dial over an older hop fails instead of waiting](/quest/m1/socket/old-hop-dial.md) - a dial through a pre-lite-07 hop fails `Unsupported`
-- [Python sockets](/quest/m1/socket/py.md) - moq-ffi and `py/moq-rs` bindings, interoperating with Rust
 - [moq-boy on sockets](/quest/m1/socket/boy.md) - viewers dial the emulator's endpoint and send commands and receive latency on their session
 - [CARLA on sockets](/quest/m1/socket/carla.md) - drivers dial the truck's endpoint and send control and receive acks on their session
 

@@ -42,5 +42,4 @@ See the [epic](/quest/m1/socket/README.md) for the convention.
 
 ## Required
 
-- [Python sockets](/quest/m1/socket/py.md) - the truck's endpoint
 - [JS sockets](/quest/m1/socket/js.md) - the driver's dial

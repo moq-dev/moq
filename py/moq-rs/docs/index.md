@@ -242,3 +242,22 @@ Rust side ([`moq-ffi`](https://crates.io/crates/moq-ffi)).
 
 self
 ```
+
+## Sockets
+
+`moq.socket` connects endpoints through relays, using the same origin for both
+publishing and consuming. See the [socket convention](https://doc.moq.dev/concept/socket).
+
+```{eval-rst}
+.. currentmodule:: moq.socket
+
+.. autosummary::
+   :toctree: api
+   :nosignatures:
+
+   Endpoint
+   IncomingTcp
+   IncomingTrack
+   TcpStream
+   TrackStream
+```

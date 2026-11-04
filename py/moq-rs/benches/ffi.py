@@ -107,8 +107,61 @@ def call(name: str, fn: Callable[[], object], results: list[dict]) -> None:
     results.append({"name": f"call/{name}", "unit": "ns", "value": (time.perf_counter() - start) * 1e9 / calls})
 
 
+async def sockets(results: list[dict]) -> None:
+    """Sweep listening endpoints and simultaneous sessions per endpoint separately."""
+    for protocol in ("tcp", "track"):
+        for endpoints in (1, 4, 16):
+            for sessions in (1, 4, 16):
+                origin = moq.OriginProducer()
+                client = moq.socket.Endpoint(origin, "bench", "client")
+                servers = [moq.socket.Endpoint(origin, "bench", f"server-{i}") for i in range(endpoints)]
+
+                async def drain(stream: moq.socket.TcpStream | moq.socket.TrackStream) -> None:
+                    if isinstance(stream, moq.socket.TcpStream):
+                        assert [frame.payload async for frame in stream.consumer] == [b"echo"]
+                    else:
+                        assert [[frame.payload async for frame in group] async for group in stream.consumer] == [
+                            [b"echo"]
+                        ]
+                    stream.producer.finish()
+
+                async def accept(server: moq.socket.Endpoint) -> None:
+                    readers = []
+                    for _ in range(sessions):
+                        incoming = await (server.accept_tcp() if protocol == "tcp" else server.accept_track())
+                        readers.append(asyncio.create_task(drain(await incoming.accept())))
+                    await asyncio.gather(*readers)
+
+                async def dial(server: moq.socket.Endpoint) -> None:
+                    stream = await (client.dial_tcp(server.id) if protocol == "tcp" else client.dial_track(server.id))
+                    stream.producer.write_frame(b"echo")
+                    stream.producer.finish()
+                    assert [item async for item in stream.consumer] == []
+
+                # Start accepts before dialing; all setup and messages remain in the measurement.
+                start = time.perf_counter()
+                accepts = [asyncio.create_task(accept(server)) for server in servers]
+                # Scheduling barrier: each accept has reached its first suspension before dials run.
+                polled = asyncio.get_running_loop().create_future()
+                asyncio.get_running_loop().call_soon(polled.set_result, None)
+                await polled
+                await asyncio.gather(*(dial(server) for server in servers for _ in range(sessions)), *accepts)
+                elapsed = time.perf_counter() - start
+                results.append(
+                    {
+                        "name": f"socket/{protocol}/endpoints={endpoints}/sessions={sessions}",
+                        "unit": "sessions/s",
+                        "value": endpoints * sessions / elapsed,
+                    }
+                )
+                client.close()
+                for server in servers:
+                    server.close()
+
+
 async def main() -> None:
     results: list[dict] = []
+    await sockets(results)
     for case in CASES:
         await throughput(case, results)
 

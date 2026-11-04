@@ -9,6 +9,7 @@ from . import audio as audio
 
 # Layer namespaces stay out of __all__; json would shadow the stdlib module.
 from . import json as json
+from . import socket as socket
 from . import video as video
 from .client import Client, CongestionControl, connect, qlog_supported, versions
 from .errors import is_auth, is_shutdown, protocol_error

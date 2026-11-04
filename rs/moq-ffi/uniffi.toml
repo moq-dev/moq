@@ -3,3 +3,4 @@
 # generated forced end is `end()` so it doesn't collide with it.
 [bindings.kotlin.rename]
 "MoqBroadcastProducer.close" = "end"
+"MoqSocketEndpoint.close" = "end"

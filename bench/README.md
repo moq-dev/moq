@@ -922,3 +922,13 @@ the module lanes `just check` runs at once, sweep `--jobs 1 3` over
 `bash sh/dispatch.sh check BASE`, which is then admitted once as a whole.
 Admission remains outside the suite's timeout clocks. Use separate checkouts to
 avoid measuring Cargo's artifact lock instead of competing work.
+
+
+### Python socket sessions
+
+The Python binding runner also sweeps both TCP and track sockets over 1, 4,
+and 16 accepting endpoints and 1, 4, and 16 concurrent sessions per endpoint.
+Each session sends a checked payload and finishes both halves. The
+`socket/<protocol>/endpoints=N/sessions=M` entries report complete sessions per
+second, including handshake, FFI calls, reads, and teardown. Run with
+`just py bench`; Nightly's binding lane runs the same sweep.

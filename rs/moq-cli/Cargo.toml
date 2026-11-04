@@ -210,5 +210,9 @@ path = "../../test/interop/clients/rust/hls.rs"
 name = "interop-audio"
 path = "../../test/interop/clients/rust/audio.rs"
 
+[[example]]
+name = "interop-socket"
+path = "../../test/interop/clients/rust/socket.rs"
+
 [lints]
 workspace = true

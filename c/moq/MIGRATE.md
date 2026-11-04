@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Socket sessions
+
+the generated socket endpoint, incoming dial, and stream handles now expose TCP group halves and reliably subscribed track halves beside origin. Regenerate bindings and rebuild the matching native library together. Existing callers need no migration. Socket endpoints require lite-07 or moq-transport on every hop; there is no wire change.
+
 ### Viewer targets are bounded ([#7090](https://github.com/moq-dev/moq/pull/7090))
 
 Viewer ceilings and PROBE target overrides are refused with the new `MOQ_ERROR_OUT_OF_RANGE` once they would sum above 2^53 - 1 bps, the most a PROBE target carries; nothing changes on a refusal. `moq_viewers_watch`, `moq_viewers_set_target`, and `moq_viewer_update` return it. Handle the new variant wherever you match the error exhaustively. Regenerate bindings and rebuild the matching native library together.
