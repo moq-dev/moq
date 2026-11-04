@@ -15721,26 +15721,40 @@ mod joining_fetch_tests {
 		}
 	}
 
-	/// A start below, at, or past the Largest group joins that group alone: a group below it
-	/// is left to the copy's fills.
+	/// A known start stays absolute even below or past Largest, so it needs no live head fetch.
 	#[kio::test]
-	async fn a_join_from_any_start_fetches_only_the_largest_group() {
+	async fn an_absolute_start_never_becomes_a_largest_group_join() {
 		let largest = Some(ietf::Location { group: 9, object: 0 });
 		for version in JOINING_DRAFTS {
-			for start in [7, 9, 11] {
+			for start in [0, 7, 9, 11] {
 				let run = JoinRun::start(version, Some(start), subscribe_ok(version, largest), fetch_ok(version)).await;
 
 				let messages = decode_messages(&run.session.log, version);
-				let fetch = messages.iter().find(|(id, _)| *id == ietf::Fetch::ID).expect("FETCH");
-				let body = &fetch.1;
-				let msg = crate::coding::decode_from(&mut &body[..], version, ietf::Fetch::decode_msg).unwrap();
+				let subscribe = messages
+					.iter()
+					.find(|(id, _)| *id == ietf::Subscribe::ID)
+					.expect("SUBSCRIBE");
+				let body = &subscribe.1;
+				let msg = crate::coding::decode_from(&mut &body[..], version, ietf::Subscribe::decode_msg).unwrap();
 				assert_eq!(
-					msg.fetch_type,
-					FetchType::RelativeJoining {
-						subscriber_request_id: RequestId(1),
-						group_offset: 0,
+					msg.filter,
+					if start == 0 {
+						Filter::Unfiltered
+					} else {
+						Filter::Absolute {
+							start: ietf::Location {
+								group: start,
+								object: 0,
+							},
+							end: None,
+						}
 					},
 					"{version} from {start}"
+				);
+				assert!(msg.fill.is_none(), "{version} from {start}");
+				assert!(
+					!messages.iter().any(|(id, _)| *id == ietf::Fetch::ID),
+					"{version} from {start}: an absolute stream includes its head"
 				);
 			}
 		}
