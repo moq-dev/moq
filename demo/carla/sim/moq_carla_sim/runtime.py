@@ -169,12 +169,7 @@ class TruckSession:
                 # drive contract. Only the lease holder may move the truck.
                 if not self._drive.holds(command) or self._drive.estopped:
                     continue
-                self._truck.respawn()
-                self._drive = Drive()
-                self._deadline = None
-                self._media_pipeline.clear()
-                self._stuck.reset()
-                self._hold_clock()
+                self._respawn()
                 self._publish()
                 continue
             if command.kind == "drive" and self._drive.driver is None and self._truck.autonomous:
@@ -250,9 +245,11 @@ class TruckSession:
 
         The stuck watchdog rides on the same tick. It only ever fires for a
         truck nobody holds: a stationary truck under a driver is the driver's
-        business, and an e-stopped one is latched on purpose. So does the
-        handback: a released truck steers itself onto a lane before Traffic
-        Manager takes it, and nothing else runs often enough to drive it.
+        business. A driverless truck whose e-stop is still latched is not, since
+        nobody may come back to reset it: it respawns like an autonomous one,
+        and the respawn clears the latch. So does the handback: a released
+        truck steers itself onto a lane before Traffic Manager takes it, and
+        nothing else runs often enough to drive it.
         """
         while True:
             await asyncio.sleep(TELEMETRY_INTERVAL)
@@ -261,8 +258,9 @@ class TruckSession:
                 self._truck.release()
             if (
                 self._drive.driver is not None
-                or self._drive.estopped
-                or not self._truck.autonomous
+                # Mid-handback: the truck is still coasting onto a lane, and
+                # engages autonomy within a tick once it slows to walking pace.
+                or not (self._drive.estopped or self._truck.autonomous)
                 or not self._clock.running
             ):
                 # A parked world is not a stuck truck: nothing is meant to be
@@ -270,10 +268,28 @@ class TruckSession:
                 # for as long as nobody watches.
                 self._stuck.reset()
             elif self._stuck.update(telemetry.pose, asyncio.get_running_loop().time()):
-                log.warning("%s: no movement in %.0f s while autonomous, respawning", self._truck.name, STUCK_TIMEOUT)
-                self._truck.respawn()
-                self._stuck.reset()
+                log.warning(
+                    "%s: no movement in %.0f s with nobody driving%s, respawning",
+                    self._truck.name,
+                    STUCK_TIMEOUT,
+                    f", clearing the e-stop latched by {self._drive.estop_by}" if self._drive.estopped else "",
+                )
+                self._respawn()
+                telemetry = self._truck.telemetry()
             self._publish(telemetry)
+
+    def _respawn(self) -> None:
+        """Return the truck to a spawn point under a fresh gate.
+
+        The fresh gate drops the lease and clears any e-stop latch and its
+        attribution, so the truck comes back autonomous rather than braked.
+        """
+        self._truck.respawn()
+        self._drive = Drive()
+        self._deadline = None
+        self._media_pipeline.clear()
+        self._stuck.reset()
+        self._hold_clock()
 
     async def _next_command(self) -> Command:
         """The next driver command, or a synthesized watchdog expiry."""

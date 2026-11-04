@@ -110,15 +110,17 @@ The worker's gate (`sim/moq_carla_sim/drive.py`) owns every truck's controls:
   path is a new claimant rather than a continuation.
 - **E-stop latches** until an explicit reset, from any viewer: the player
   latches and resets it through a short-lived safety broadcast without taking
-  the lease.
+  the lease. A latched truck nobody drives is also cleared when it respawns
+  as wedged, below.
 - **Gear changes are interlocked**: the gate keeps the current gear unless the
   command releases throttle and applies some brake.
 - **An unclaimed truck goes back to autonomy**, not to full brake. It first
   coasts onto the nearest lane running its way (`handback.py`), because
   Traffic Manager steers a truck it takes back toward the nearest waypoint
   whatever its heading.
-- **A wedged truck respawns**: an autonomous truck that has not moved 2 m in
-  5 minutes returns to a free spawn point.
+- **A wedged truck respawns**: a truck nobody drives, autonomous or with its
+  e-stop latched, that has not moved 2 m in 5 minutes of a running world
+  returns to a free spawn point under autonomy, its e-stop cleared.
 
 The lease is cooperative. Anyone who can publish under `viewer/carla/` can
 announce a driver path, so it stops two honest drivers fighting over a truck,
