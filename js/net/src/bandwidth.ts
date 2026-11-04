@@ -503,6 +503,7 @@ export class Viewers {
 
 	#divider: Divider;
 	#override = new Signal<number | undefined>(undefined);
+	#closed = false;
 
 	/**
 	 * The PROBE target: the live viewers' ceilings summed, or the {@link setTarget} override.
@@ -540,14 +541,20 @@ export class Viewers {
 	 * @throws {RangeError} keeping the previous override, for a target above {@link Viewers.MAX_TARGET}.
 	 */
 	setTarget(target: number | undefined): void {
+		if (this.#closed) return;
 		if (target !== undefined && ceiling(target) > Viewers.MAX_TARGET) {
 			throw new RangeError(`PROBE target ${target} is above the limit of ${Viewers.MAX_TARGET}`);
 		}
 		this.#override.set(target);
 	}
 
-	/** Stop dividing. Existing viewers report `undefined` and release their claims. */
+	/**
+	 * Stop dividing. Existing viewers report `undefined` and release their claims, and the
+	 * target drops to zero for good, override included.
+	 */
 	close(): void {
+		this.#closed = true;
+		this.#override.set(undefined);
 		this.#divider.close();
 	}
 }

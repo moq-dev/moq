@@ -246,8 +246,11 @@ impl Session {
 	/// advertised `Increase` probes the connection up to it. Holding a viewer requests
 	/// PROBE. Clones share one registry: a
 	/// [`Client::with_viewers`](crate::Client::with_viewers) registry's when the session
-	/// was dialed with one, so viewers outlive a reconnect. Viewers report `None` when
-	/// the version has no PROBE.
+	/// was dialed with one, so their claims outlive a reconnect, like
+	/// [`allocator`](Self::allocator)'s. Viewers taken here read this session's
+	/// estimate, and report `None` once it ends or when the version has no PROBE; take
+	/// them from the reconnecting handle (`moq_tokio::Connection::viewers`) to read
+	/// each new session's.
 	pub fn viewers(&self) -> bandwidth::Viewers {
 		self.viewers.with_estimate(self.recv_bandwidth.clone())
 	}

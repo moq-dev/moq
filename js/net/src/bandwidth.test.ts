@@ -449,7 +449,12 @@ test("the viewers' target sums their ceilings until overridden", () => {
 
 test("a closed viewers registry claims nothing", () => {
 	const viewers = new Viewers(new Signal<number | undefined>(1_000_000));
+	// Closing retracts an override too, and a later one is ignored.
+	viewers.setTarget(1_000_000);
 	viewers.close();
+	expect(viewers.target.peek()).toBe(0);
+	viewers.setTarget(1_000_000);
+	expect(viewers.target.peek()).toBe(0);
 
 	const viewer = viewers.watch(2_000_000);
 	expect(viewers.target.peek()).toBe(0);
