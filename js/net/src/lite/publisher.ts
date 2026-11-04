@@ -994,7 +994,12 @@ export class Publisher {
 			// newest the answer held, or the first group when it held none: cached history below
 			// it is skipped, and anything written since, even for this demand, is delivered.
 			const resolved = cursorFloor(this.version, msg.startGroup, hooks.requestedSequence(track));
-			if (latest === undefined && resolved !== floor) {
+			if (
+				this.version !== Version.DRAFT_01 &&
+				this.version !== Version.DRAFT_02 &&
+				latest === undefined &&
+				resolved !== floor
+			) {
 				floor = resolved;
 				track.withRange({ start: { included: floor } });
 			}

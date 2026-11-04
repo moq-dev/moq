@@ -2369,7 +2369,7 @@ impl Request for SubscribeServe {
 					subscribing, legacy, ..
 				} => {
 					let ietf = ready!(shared.peer_setup.poll_ietf(waiter));
-					let track = match subscribing.poll_ok(waiter) {
+					let track = match subscribing.poll_wire(waiter) {
 						Poll::Ready(track) => track,
 						Poll::Pending => {
 							let consumer = ready!(Legacy::poll_datagrams(legacy, waiter));

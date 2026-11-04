@@ -323,6 +323,19 @@ impl Consumer {
 		self.state.read().copy.clone()
 	}
 
+	/// Wait for a copy to supply a join snapshot, or for the route to end.
+	pub(super) fn poll_join(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.state
+			.poll(waiter, |route| {
+				if route.copy.is_some() || route.parked.is_some() || route.phase.terminal() {
+					Poll::Ready(())
+				} else {
+					Poll::Pending
+				}
+			})
+			.map(|_| ())
+	}
+
 	/// The newest sequence as of the front's request for the serving copy, as it was spliced.
 	pub(super) fn resolved(&self) -> Option<u64> {
 		self.state.read().resolved
@@ -2525,6 +2538,29 @@ mod test {
 		track::Request::new(Arc::new(broadcast::Info::default()), "video")
 			.routes(routes.consume())
 			.accept(crate::track::Info::timed())
+	}
+
+	#[test]
+	fn a_wire_join_waits_for_a_copy_despite_retained_metadata() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let pending = logical.consume().subscribe(None);
+		let noop = kio::Waiter::noop();
+		assert!(pending.poll_wire(&noop).is_pending());
+		let copy = copy();
+		copy.create_group(group::Info { sequence: 7 })
+			.unwrap()
+			.finish()
+			.unwrap();
+		routes.serve(copy.consume());
+		copy.create_group(group::Info { sequence: 8 })
+			.unwrap()
+			.finish()
+			.unwrap();
+		let Poll::Ready(Ok(sub)) = pending.poll_wire(&noop) else {
+			panic!("the copy supplies the snapshot");
+		};
+		assert_eq!(sub.requested_sequence(), Some(7));
 	}
 
 	fn subscribe(logical: &track::Producer, max_delay: Duration) -> track::Subscriber {

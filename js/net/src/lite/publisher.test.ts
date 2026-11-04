@@ -1455,6 +1455,22 @@ test.each([Version.DRAFT_03, Version.DRAFT_04, Version.DRAFT_05])(
 	},
 );
 
+// Lite-01/02 retain the arrival-only floor even when the answer contains history.
+test.each([Version.DRAFT_01, Version.DRAFT_02])(
+	"lite %s: a pending join retains its arrival-only floor",
+	async (version) => {
+		const sub = await servedSubscription({ version, pending: true });
+		try {
+			await sub.accept([0n, 3n, 7n]);
+			expect(await sub.servedHeader()).toBe(0n);
+			expect(await sub.servedHeader()).toBe(3n);
+			expect(await sub.servedHeader()).toBe(7n);
+		} finally {
+			await sub.close();
+		}
+	},
+);
+
 // On an empty track the re-pin has no latest group to name, so the first group the
 // track produces is served, even below the dropped floor.
 test("lite draft-05: an update dropping the floor on an empty track serves the next group", async () => {

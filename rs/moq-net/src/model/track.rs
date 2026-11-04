@@ -2135,13 +2135,13 @@ impl TrackState {
 			return None;
 		}
 		// Read outside the track's lock: the copy has a lock of its own.
-		Some(match routes {
+		match routes {
 			Some(routes) => routes
 				.serving()
 				.or_else(|| routes.parked())
-				.and_then(|copy| copy.latest_sequence()),
-			None => max,
-		})
+				.map(|copy| copy.latest_sequence()),
+			None => Some(max),
+		}
 	}
 
 	/// The newest sequence a request made while the track was still resolving finds in its
@@ -5412,6 +5412,16 @@ impl Subscribing {
 			requested: self.subscription.requested(),
 			stats: self.stats.clone(),
 		}
+	}
+
+	/// Wait for a front's copy before pinning a wire join from retained metadata.
+	pub(crate) fn poll_wire(&self, waiter: &kio::Waiter) -> Poll<Result<Subscriber>> {
+		if self.subscription.requested().is_none()
+			&& let Some(routes) = self.state.read().routes.clone()
+		{
+			ready!(routes.poll_join(waiter));
+		}
+		self.poll_ok(waiter)
 	}
 
 	/// Poll until the peer confirms the subscription, yielding the [`Subscriber`].
@@ -9445,6 +9455,27 @@ mod test {
 	fn track_producer(name: impl Into<Arc<str>>, info: impl Into<Option<Info>>) -> Producer {
 		let info = info.into().unwrap_or_else(|| Info::default().with_max_age(None));
 		Producer::new(Arc::new(broadcast::Info::default()), name, info)
+	}
+
+	#[test]
+	fn a_provisional_install_is_the_first_visible_answer() {
+		let request = Request::new(Arc::new(broadcast::Info::default()), "test");
+		let consumer = request.consume();
+		let pending = consumer.subscribe(None);
+		{
+			let mut state = request.state.write().unwrap();
+			state
+				.insert_group_request(3, group::Bounds { start: 0, end: Some(1) }, None)
+				.unwrap();
+			assert!(state.poll_info().is_ready());
+		}
+		let Poll::Ready(Ok(sub)) = pending.poll_ok(&kio::Waiter::noop()) else {
+			panic!("provisional metadata already resolves subscribers");
+		};
+		assert_eq!(sub.requested_sequence(), None);
+		// A later publisher acceptance must not move the first visible answer's boundary.
+		let producer = request.accept(Info::default().with_max_age(None));
+		assert_eq!(TrackState::request_answered(&producer.state.consume()), None);
 	}
 
 	#[test]
