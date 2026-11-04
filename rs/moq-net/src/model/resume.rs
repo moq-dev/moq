@@ -450,7 +450,12 @@ impl Consumer {
 /// copy may fix it. Anything else would repeat on every copy. Mirrors `routeFailed` in
 /// `js/net/src/resume.ts`.
 pub(super) fn route_failed(err: &Error) -> bool {
-	matches!(err, Error::Unroutable | Error::Stream(StreamError::Unroutable)) || retryable(err)
+	unroutable(err) || retryable(err)
+}
+
+/// Whether `err` is a source losing its route to the content: only another route continues it.
+fn unroutable(err: &Error) -> bool {
+	matches!(err, Error::Unroutable | Error::Stream(StreamError::Unroutable))
 }
 
 /// Whether the same source may deliver a fresh copy. An unroutable source needs a new
@@ -2078,6 +2083,14 @@ impl Recover {
 			{
 				return Poll::Ready(Err(err.clone()));
 			}
+			// An unroutable copy waits for another route: asking its own again could only replace
+			// the withdrawal's cause with a refusal. None comes once the front is done.
+			let withdrawn = failed.filter(|err| generation == self.generation && unroutable(err));
+			if let Some(err) = withdrawn
+				&& terminal
+			{
+				return Poll::Ready(Err(err.clone()));
+			}
 			let Some(serving) = serving else {
 				// Nothing serves: a failed copy waits for a route, unless none will come.
 				return match (failed, terminal) {
@@ -2089,7 +2102,7 @@ impl Recover {
 			if generation == self.generation && failed.is_none() {
 				return Poll::Pending;
 			}
-			let res = self.poll_serving(generation, &serving, index, failed, waiter);
+			let res = self.poll_serving(generation, &serving, index, failed, withdrawn.is_none(), waiter);
 			// The serving route failed too, and no front is left to replace it.
 			if let (Poll::Pending, Some(err)) = (&res, failed)
 				&& terminal && copy_failed(&serving)
@@ -2129,13 +2142,15 @@ impl Recover {
 		})
 	}
 
-	/// [`Self::poll`] once a newer route serves, through its copy `serving`.
+	/// [`Self::poll`] once a newer route serves, through its copy `serving`, fetching the rest
+	/// from it only if it may `ask`.
 	fn poll_serving(
 		&mut self,
 		generation: u64,
 		serving: &track::Consumer,
 		index: u64,
 		failed: Option<&Error>,
+		ask: bool,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Replacement>> {
 		// A newer copy's subscription delivered it: continue from there. The copy that
@@ -2175,7 +2190,7 @@ impl Recover {
 		{
 			verdict = Some(err);
 		}
-		match self.poll_fetch(generation, serving, index, failed, verdict.is_none(), waiter) {
+		match self.poll_fetch(generation, serving, index, failed, ask && verdict.is_none(), waiter) {
 			Poll::Ready(Ok(replacement)) => Poll::Ready(Ok(replacement)),
 			res => verdict.map_or(res, |err| Poll::Ready(Err(err))),
 		}
@@ -3385,6 +3400,63 @@ mod test {
 
 		assert_eq!(read(&mut reading), Some(b"b".to_vec()));
 		assert_eq!(read(&mut reading), None);
+	}
+
+	/// A copy whose route became unroutable waits for another route rather than asking its own
+	/// again, which could only replace the withdrawal's cause with a refusal. It keeps that
+	/// cause once no route will come.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_unroutable_group_waits_for_another_route() {
+		for (fetched, concluded) in [(false, false), (true, false), (false, true), (true, true)] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			let dynamic = a.requests();
+			routes.serve(a.consume());
+			let mut sub = subscribe(&logical, Duration::from_secs(10));
+
+			let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
+			open.write_frame(ts(0), b"a".as_ref()).unwrap();
+			let mut reading = if fetched {
+				logical.consume().fetch_group(0, None).now_or_never().unwrap().unwrap()
+			} else {
+				recv(&mut sub)
+			};
+			assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+			open.abort(Error::Unroutable).unwrap();
+			assert!(reading.read_frame().now_or_never().is_none(), "fetched={fetched}");
+
+			// The route still serves the track but no longer holds the group: it would refuse.
+			if let Some(request) = dynamic.requested_fill_group().now_or_never() {
+				request.unwrap().reject(Error::NotFound);
+			}
+			let res = reading.read_frame().now_or_never();
+			assert!(res.is_none(), "fetched={fetched}: {res:?}");
+
+			if concluded {
+				drop(routes);
+				let res = reading.read_frame().now_or_never();
+				assert!(
+					matches!(
+						res,
+						Some(Err(Error::Unroutable | Error::Stream(StreamError::Unroutable)))
+					),
+					"fetched={fetched}: {res:?}"
+				);
+				continue;
+			}
+
+			// Another route holds it: the group continues there.
+			let b = copy();
+			let mut whole = b.create_group(group::Info { sequence: 0 }).unwrap();
+			whole.write_frame(ts(0), b"a".as_ref()).unwrap();
+			whole.write_frame(ts(1), b"b".as_ref()).unwrap();
+			whole.finish().unwrap();
+			routes.serve(b.consume());
+			assert_eq!(read(&mut reading), Some(b"b".to_vec()), "fetched={fetched}");
+			assert_eq!(read(&mut reading), None, "fetched={fetched}");
+		}
 	}
 
 	/// A drop judges the serving route's subscription, not whether the group exists, so a

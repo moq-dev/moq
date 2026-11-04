@@ -107,6 +107,13 @@ export function routeFailed(err: Error): boolean {
 	return err instanceof SessionError || sessionClosed(err);
 }
 
+// A source losing its route to the content: only another route continues it, since asking the
+// same one again could only replace the withdrawal's cause with a refusal. Mirrors the Rust
+// `unroutable`.
+function unroutable(err: Error): boolean {
+	return err instanceof StreamError && err.code === StreamCode.Unroutable;
+}
+
 // A copy's delivery failure says nothing about its content. A terminal track verdict does.
 // Mirrors the Rust `copy_failed`.
 function copyFailed(copy: Copy): boolean {
@@ -1501,6 +1508,8 @@ class Recover implements GroupRecover {
 				// A verdict would repeat from the route that gave it.
 				if (generation === current.generation && !this.#undelivered(failed, current)) throw failed;
 			}
+			// An unroutable copy waits for another route rather than asking its own again.
+			const withdrawn = failed !== undefined && generation === current.generation && unroutable(failed);
 			if (!serving) {
 				// Nothing serves: a failed copy waits for a route, unless none will come.
 				if (failed && route.concluded) throw failed;
@@ -1529,7 +1538,7 @@ class Recover implements GroupRecover {
 				// holds it, so it ends as the failed copy left it.
 				const fetchGroup = serving.source.wire.fetchGroup;
 				if (!fetchGroup && failed) throw verdict ?? failed;
-				if (fetchGroup && !verdict && fetch?.generation !== generation) {
+				if (fetchGroup && !verdict && !withdrawn && fetch?.generation !== generation) {
 					fetch = startFetch(fetchGroup, route.name, this.sequence, generation, signal);
 					started(fetch);
 				}
@@ -1959,10 +1968,12 @@ export class Front {
 				return this.#source !== undefined && this.#source !== current;
 			},
 			replace: async (_index, failed, signal) => {
-				// A fetch that failed delivering may ask its own route again; a stalled one, or one
-				// a verdict ended, only moves to another.
-				const avoid = failed && undelivered(failed) ? undefined : current;
-				const next = await this.#fetch(name, sequence, { ...options, signal }, avoid);
+				// A fetch that failed delivering may ask its own route again; a stalled one, one a
+				// verdict ended, or one whose route withdrew only moves to another. A withdrawal
+				// keeps its cause once none will come.
+				const withdrawn = failed && unroutable(failed) ? failed : undefined;
+				const avoid = failed && undelivered(failed) && !withdrawn ? undefined : current;
+				const next = await this.#fetch(name, sequence, { ...options, signal }, avoid, withdrawn);
 				// The fetch's hold on its route passes to the group on adoption, or goes with the discard.
 				return {
 					group: next.group,
@@ -1987,16 +1998,18 @@ export class Front {
 
 	// Fetch a group from whichever route serves the track, asking the next one when a route
 	// fails, and never `avoid`. The source comes back retained for as long as the group is read.
+	// Once no route will come, it ends with `ended`, or as not found.
 	async #fetch(
 		name: string,
 		sequence: bigint,
 		options: track.FetchGroupOptions | undefined,
 		avoid?: Source,
+		ended?: Error,
 	): Promise<{ group: GroupConsumer; source: Source }> {
 		for (;;) {
 			const source = this.#source;
 			if (!source || source === avoid) {
-				if (this.#concluded) throw new NotFound(`group ${sequence}`);
+				if (this.#concluded) throw ended ?? new NotFound(`group ${sequence}`);
 				await this.#next(options?.signal);
 				continue;
 			}

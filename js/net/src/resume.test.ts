@@ -3232,6 +3232,54 @@ function counted(
 	return { route: Counted.of(source.consume()), asked };
 }
 
+for (const fetched of [false, true]) {
+	test.each(["another route", "conclusion"] as const)(
+		`an unroutable ${fetched ? "fetched" : "read"} group waits for %s`,
+		async (end) => {
+			// Mirrors `an_unroutable_group_waits_for_another_route` in rs/moq-net/src/model/resume.rs.
+			const front = new Front();
+			const a = new BroadcastProducer();
+			const b = new BroadcastProducer();
+			const stalled = copy(a).write(0n, 1, false);
+			// Once the group is read, the route still serves the track but no longer holds the group.
+			let refusing = false;
+			const { route, asked } = counted(a, (sequence) =>
+				refusing ? Promise.reject(new NotFound(`group ${sequence}`)) : undefined,
+			);
+			const sub = front.consumer.track("seq").subscribe();
+			front.serve(route);
+			const group = fetched ? await front.consumer.track("seq").fetchGroup(0n) : sub.tryRecvGroup();
+			if (!group) throw new Error("expected group 0");
+			expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+			asked.length = 0;
+			refusing = true;
+
+			// Its copy loses the route: asking that route again could only answer a refusal.
+			stalled.abort(new StreamError(StreamCode.Unroutable));
+			const read = group.readFrame();
+			expect(await isPending(read)).toBe(true);
+			expect(asked).toEqual([]);
+
+			if (end === "conclusion") {
+				// No route will come: the group ends with the withdrawal, not a refusal.
+				front.conclude();
+				await expect(read).rejects.toMatchObject({ code: StreamCode.Unroutable });
+			} else {
+				// Another route holds it: the group continues there.
+				copy(b).write(0n, 2);
+				front.serve(b.consume());
+				expect(dec.decode((await read)?.payload)).toBe("0.1");
+				expect(await group.readFrame()).toBeUndefined();
+			}
+
+			sub.close();
+			front.consumer.close();
+			a.close();
+			b.close();
+		},
+	);
+}
+
 test("a fetch its route already answered continues the group past that route's abort", async () => {
 	// Mirrors `an_answered_fetch_outlives_the_serving_routes_abort` in rs/moq-net/src/model/resume.rs.
 	const front = new Front();
