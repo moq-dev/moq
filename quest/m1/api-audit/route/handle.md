@@ -64,11 +64,25 @@ JS and the bindings identical.
 - **Prefix routes.** A prefix route yields requests, and each one is
   answered by `serve(consumer)`,
   by `route(options)`, or by `reject`. `route(options)` creates the path's
-  exact `Route`, which inherits the prefix route's instance by default so
-  that the reader continues (see [announce takeover](/quest/m1/announce-takeover.md)).
-  A prefix route takes cost and auth as an exact one does, so claims can
-  be priced. Today `Requests::route()` is always the default and
-  `update_route` is crate-private.
+  exact `Route`. A prefix route takes cost and auth as an exact one does,
+  so claims can be priced. Today `Requests::route()` is always the default
+  and `update_route` is crate-private.
+- **A job's instance.** ✅ Decided 2026-11-03 (maintainer, on
+  [moq-dev/moq#7770](https://github.com/moq-dev/moq/pull/7770)):
+  `request.route(options)` mints a fresh instance by default, as
+  `Request::prepare` does today, so a job that ends and restarts beneath
+  the same prefix gets a new instance for its restarted sequences. An
+  explicit stable instance in the options is only for a caller that
+  continues its sequences. Ending a job's route withdraws only that path:
+  the prefix route stays open and keeps answering later requests, each
+  with its own job lifetime, and the origin keeps no history of ended
+  paths. The existing predecessor handling stays until
+  [announce takeover](/quest/m1/announce-takeover.md) replaces it, and
+  that quest owns continuing the claim's readers on the job's route.
+  Rejected: inheriting the prefix route's instance by default and making
+  the prefix terminal once a materialized job ends, which would change
+  long-lived services; and inheriting it with automatic restarts, which
+  needs ended-path history or a retirement design this quest does not own.
 - **Visibility, not unannounced broadcasts.** Callers that fill the catalog
   first (`moq-cli` hls, rtsp and publish; moq-mux
   `ts/programs.rs`) or announce after SDP (`moq-rtc/server/whip.rs`) create
