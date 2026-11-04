@@ -538,7 +538,8 @@ struct Opening {
 }
 
 impl Session {
-	/// Poll for a unidirectional stream after its session header.
+	/// The next unidirectional stream, after its session header.
+	#[kio::wrapper]
 	pub fn poll_accept_uni(&self, waiter: &kio::Waiter) -> Poll<Result<RecvStream, Error>> {
 		let Some(web) = &self.web else {
 			return self
@@ -570,7 +571,8 @@ impl Session {
 		})
 	}
 
-	/// Poll for a bidirectional stream after its session header.
+	/// The next bidirectional stream, after its session header.
+	#[kio::wrapper]
 	pub fn poll_accept_bi(&self, waiter: &kio::Waiter) -> Poll<Result<(SendStream, RecvStream), Error>> {
 		let Some(web) = &self.web else {
 			return self.conn.poll_accept_bi(waiter).map_ok(|(send, recv)| {
@@ -607,7 +609,8 @@ impl Session {
 		})
 	}
 
-	/// Poll to open a unidirectional stream scheduled by `options`.
+	/// Open a unidirectional stream scheduled by `options`.
+	#[kio::wrapper]
 	pub fn poll_open_uni(
 		&self,
 		waiter: &kio::Waiter,
@@ -636,7 +639,8 @@ impl Session {
 		})
 	}
 
-	/// Poll to open a bidirectional stream scheduled by `options`.
+	/// Open a bidirectional stream scheduled by `options`.
+	#[kio::wrapper]
 	pub fn poll_open_bi(
 		&self,
 		waiter: &kio::Waiter,
@@ -697,10 +701,11 @@ impl Session {
 		})
 	}
 
-	/// Poll for the next datagram after its session header.
+	/// The next datagram, with its session header removed.
 	///
 	/// A datagram that does not name this session, such as another session's on the same
 	/// connection, is dropped: datagrams are unreliable, so a stray one must not end the session.
+	#[kio::wrapper]
 	pub fn poll_recv_datagram(&self, waiter: &kio::Waiter) -> Poll<Result<Bytes, Error>> {
 		loop {
 			let datagram = ready!(self.conn.poll_recv_datagram(waiter)).map_err(|e| self.map_err(e))?;
@@ -743,7 +748,8 @@ impl Session {
 	pub fn close(&self, code: u32, reason: &str) {
 		close(&self.conn, self.web.as_ref(), code, reason);
 	}
-	/// Poll until the session's connection has closed.
+	/// Why the session's connection closed, once it has.
+	#[kio::wrapper]
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
 		let err = ready!(self.conn.poll_closed(waiter));
 		Poll::Ready(
@@ -760,30 +766,6 @@ impl Session {
 	/// The QUIC connection carrying this session.
 	pub fn connection(&self) -> &Connection {
 		&self.conn
-	}
-	/// Accept the next unidirectional stream after its session header.
-	pub async fn accept_uni(&self) -> Result<RecvStream, Error> {
-		kio::wait(|w| self.poll_accept_uni(w)).await
-	}
-	/// Accept the next bidirectional stream after its session header.
-	pub async fn accept_bi(&self) -> Result<(SendStream, RecvStream), Error> {
-		kio::wait(|w| self.poll_accept_bi(w)).await
-	}
-	/// Open a unidirectional stream scheduled by `options`.
-	pub async fn open_uni(&self, options: driver_send::Options<'_>) -> Result<SendStream, Error> {
-		kio::wait(|w| self.poll_open_uni(w, options)).await
-	}
-	/// Open a bidirectional stream scheduled by `options`.
-	pub async fn open_bi(&self, options: driver_send::Options<'_>) -> Result<(SendStream, RecvStream), Error> {
-		kio::wait(|w| self.poll_open_bi(w, options)).await
-	}
-	/// Receive a datagram with its session header removed.
-	pub async fn recv_datagram(&self) -> Result<Bytes, Error> {
-		kio::wait(|w| self.poll_recv_datagram(w)).await
-	}
-	/// Wait until the session's connection has closed.
-	pub async fn closed(&self) -> Error {
-		kio::wait(|w| self.poll_closed(w)).await
 	}
 }
 
