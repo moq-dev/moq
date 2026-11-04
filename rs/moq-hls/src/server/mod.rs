@@ -61,6 +61,8 @@
 //! # }
 //! ```
 
+#[cfg(test)]
+mod contributions_tests;
 mod routes;
 
 use std::collections::HashMap;
@@ -281,7 +283,7 @@ impl Inner {
 	/// broadcaster.
 	fn serve(&self, broadcast: moq_net::broadcast::Consumer) -> Broadcaster {
 		let source = moq_mux::Source::new(self.origin.consume(), broadcast);
-		let (broadcaster, driver) = Broadcaster::start(source, self.config.clone());
+		let (broadcaster, driver) = Broadcaster::start(source, self.config.clone(), Some(self.origin.clone()));
 		tokio::spawn(driver.run());
 		broadcaster
 	}

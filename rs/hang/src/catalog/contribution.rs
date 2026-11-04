@@ -3,8 +3,9 @@ use serde::{Deserialize, Serialize};
 /// A whole broadcast whose own catalog describes its renditions, listed without opening it.
 ///
 /// Listing one subscribes to nothing: a consumer opens the contribution's catalog only when it
-/// selects one of its renditions. Its rendition IDs belong to that broadcast, never the listing
-/// catalog.
+/// selects it, including an HLS master listing its renditions. An on-demand publisher answers
+/// the catalog without starting media. Its rendition IDs belong to that broadcast, never the
+/// listing catalog.
 ///
 /// Marked `#[non_exhaustive]` so optional fields can be added later. External callers build one
 /// with [`Contribution::new`].

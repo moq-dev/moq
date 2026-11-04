@@ -121,6 +121,7 @@ pub(crate) struct Producer {
 #[derive(Default)]
 struct State {
 	renditions: BTreeMap<Key, Arc<Rendition>>,
+	media: Option<hang::catalog::Media>,
 	/// The catalog's confirmed end, distinct from dropping its watcher.
 	finished: Option<crate::Result<()>>,
 	// Cache catalog quality order without counting it as a holder.
@@ -159,6 +160,7 @@ async fn hold(binding: moq_mux::Binding, track: String) {
 /// channel open (so `renditions()` cursors would never terminate).
 #[derive(Clone)]
 pub(crate) struct Fanout {
+	pub(super) lazy: bool,
 	feed: kio::Producer<Feed>,
 	/// Starts each rendition's background work on the broadcaster's driver.
 	spawner: Spawner,
@@ -169,6 +171,7 @@ impl Producer {
 		Self {
 			state: kio::Producer::new(State::default()),
 			fanout: Fanout {
+				lazy: false,
 				feed: kio::Producer::new(Feed {
 					targets: Vec::new(),
 					discontinuities: Discontinuities::default(),
@@ -182,6 +185,12 @@ impl Producer {
 				spawner,
 			},
 		}
+	}
+
+	pub fn lazy(window: Duration, spawner: Spawner) -> Self {
+		let mut producer = Self::new(window, spawner);
+		producer.fanout.lazy = true;
+		producer
 	}
 
 	/// A producer whose renditions run on a driver spawned on the ambient runtime.
@@ -231,6 +240,25 @@ impl Producer {
 	/// Look up a rendition by kind and name (serve path).
 	pub fn get(&self, kind: Kind, name: &str) -> Option<Arc<Rendition>> {
 		self.state.read().renditions.get(&(kind, name.to_string())).cloned()
+	}
+
+	pub fn media(&self) -> Option<hang::catalog::Media> {
+		self.state.read().media
+	}
+
+	#[cfg(feature = "server")]
+	pub fn poll_get(&self, waiter: &kio::Waiter, kind: Kind, name: &str) -> Poll<Option<Arc<Rendition>>> {
+		match self.state.poll_ref(waiter, |state| {
+			if state.media.is_some() {
+				Poll::Ready(state.renditions.get(&(kind, name.to_string())).cloned())
+			} else {
+				Poll::Pending
+			}
+		}) {
+			Poll::Ready(Ok(rendition)) => Poll::Ready(rendition),
+			Poll::Ready(Err(_)) => Poll::Ready(self.get(kind, name)),
+			Poll::Pending => Poll::Pending,
+		}
 	}
 
 	/// Snapshot video by name and audio in catalog quality order (for the master playlist).
@@ -436,14 +464,25 @@ impl Producer {
 		not(feature = "server"),
 		allow(dead_code, reason = "only the `server` feature uses it")
 	)]
-	pub(crate) async fn advertised(&self) {
+	pub(crate) fn poll_advertised(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.state
+			.poll_ref(waiter, |current| {
+				if current.renditions.values().any(|rendition| {
+					rendition.is_enabled() && (self.fanout.lazy || rendition.poll_advertised(waiter).is_ready())
+				}) {
+					Poll::Ready(())
+				} else {
+					Poll::Pending
+				}
+			})
+			.map(|_| ())
+	}
+
+	#[cfg(feature = "server")]
+	pub(crate) async fn catalogued(&self) {
 		let _ = kio::wait(|waiter| {
 			self.state.poll_ref(waiter, |current| {
-				if current
-					.renditions
-					.values()
-					.any(|rendition| rendition.is_enabled() && rendition.poll_advertised(waiter).is_ready())
-				{
+				if current.media.is_some() {
 					Poll::Ready(())
 				} else {
 					Poll::Pending
@@ -530,7 +569,7 @@ impl Producer {
 				if let Some(err) = &feed.failed {
 					rendition.fail(err.clone());
 					rendition.close();
-				} else {
+				} else if !self.fanout.lazy {
 					rendition.watch();
 				}
 				feed.targets.push(Arc::downgrade(&rendition));
@@ -618,6 +657,7 @@ impl Producer {
 		let Ok(mut current) = self.state.write() else {
 			return;
 		};
+		current.media = Some(catalog.media);
 
 		// Renditions the catalog dropped or reconfigured. Retire each as it goes so any cursor
 		// over it drains and ends, instead of parking on a window that never finishes -- the
@@ -653,7 +693,8 @@ impl Producer {
 		let current = &mut *current;
 		match interval {
 			Some(_) => current.waiting.clear(),
-			None => self.wait(source, catalog, &mut current.waiting),
+			None if !self.fanout.lazy => self.wait(source, catalog, &mut current.waiting),
+			None => current.waiting.clear(),
 		}
 
 		let mut added = Vec::new();

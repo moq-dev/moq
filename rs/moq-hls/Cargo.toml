@@ -14,7 +14,7 @@ categories = ["multimedia", "network-programming", "web-programming"]
 
 [features]
 default = ["server"]
-server = ["dep:axum"]
+server = ["dep:axum", "dep:http-body"]
 
 [dependencies]
 # Only needed by the HTTP export server (gated by `server`).
@@ -22,6 +22,7 @@ axum = { workspace = true, optional = true }
 bytes = { workspace = true }
 hang = { workspace = true }
 humantime = { workspace = true }
+http-body = { version = "1", optional = true }
 kio = { workspace = true, features = ["runtime"] }
 m3u8-rs = "6"
 moq-mux = { workspace = true }
@@ -41,6 +42,7 @@ url = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }
+criterion = { package = "bench-harness", path = "../bench-harness" }
 futures = { workspace = true }
 moq-archive = { path = "../moq-archive" }
 moq-json = { path = "../moq-json" }
@@ -51,6 +53,11 @@ tokio = { workspace = true, features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
 tracing-test = { workspace = true }
 workspace-hack = { path = "../workspace-hack" }
+
+[[bench]]
+name = "contributions"
+harness = false
+required-features = ["server"]
 
 [lints]
 workspace = true

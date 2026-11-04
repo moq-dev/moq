@@ -1,6 +1,8 @@
 //! axum handlers for the HLS endpoints.
 
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use axum::Router;
@@ -49,19 +51,19 @@ impl Server {
 				instance,
 				kind,
 				rendition,
-			} => media(self, At::new(broadcast, instance, *kind, rendition), query).await,
+			} => media(self, At::new(route, instance, *kind, rendition), query).await,
 			Resource::Init {
 				instance,
 				kind,
 				rendition,
 				hash,
-			} => init(self, At::new(broadcast, instance, *kind, rendition), hash).await,
+			} => init(self, At::new(route, instance, *kind, rendition), hash).await,
 			Resource::Segment {
 				instance,
 				kind,
 				rendition,
 				segment: id,
-			} => segment(self, At::new(broadcast, instance, *kind, rendition), id).await,
+			} => segment(self, At::new(route, instance, *kind, rendition), id).await,
 		}
 	}
 }
@@ -103,9 +105,20 @@ async fn manifest(server: &Server, broadcast: &str, query: Option<&str>) -> Resp
 }
 
 async fn media(server: &Server, at: At<'_>, query: Option<&str>) -> Response {
-	let Some(rendition) = rendition_for(server, at).await else {
-		return not_found();
+	let rendition = match rendition_for(server, at).await {
+		Ok(Some(rendition)) => rendition,
+		Ok(None) => return not_found(),
+		Err(err) => return server_error(err),
 	};
+	let demand = rendition.demand();
+	if rendition.is_lazy() {
+		let response = match rendition.playlist(query).await {
+			Ok(Some(playlist)) => m3u8(playlist),
+			Ok(None) => not_found(),
+			Err(err) => server_error(err),
+		};
+		return demanded(response, demand);
+	}
 	match kio::clock::timeout(READY_TIMEOUT, rendition.playlist(query)).await {
 		Ok(Ok(Some(playlist))) => m3u8(playlist),
 		Ok(Ok(None)) | Err(_) => not_found(),
@@ -114,32 +127,76 @@ async fn media(server: &Server, at: At<'_>, query: Option<&str>) -> Response {
 }
 
 async fn init(server: &Server, at: At<'_>, hash: &str) -> Response {
-	let Some(rendition) = rendition_for(server, at).await else {
-		return not_found();
+	let rendition = match rendition_for(server, at).await {
+		Ok(Some(rendition)) => rendition,
+		Ok(None) => return not_found(),
+		Err(err) => return server_error(err),
 	};
-	media_result(rendition.init(hash).await, server)
+	let demand = rendition.demand();
+	let response = media_result(rendition.init(hash).await, server);
+	if rendition.is_lazy() {
+		demanded(response, demand)
+	} else {
+		response
+	}
 }
 
 async fn segment(server: &Server, at: At<'_>, id: &segments::Id) -> Response {
-	let Some(rendition) = rendition_for(server, at).await else {
-		return not_found();
+	let rendition = match rendition_for(server, at).await {
+		Ok(Some(rendition)) => rendition,
+		Ok(None) => return not_found(),
+		Err(err) => return server_error(err),
 	};
-	media_result(rendition.segment(id).await, server)
+	let demand = rendition.demand();
+	let response = media_result(rendition.segment(id).await, server);
+	if rendition.is_lazy() {
+		demanded(response, demand)
+	} else {
+		response
+	}
+}
+
+/// Retain demand through the HTTP body's lifetime, including backpressure from a slow player.
+fn demanded(response: Response, demand: crate::export::Demand) -> Response {
+	let (parts, body) = response.into_parts();
+	Response::from_parts(parts, axum::body::Body::new(Demanded { body, _demand: demand }))
+}
+
+struct Demanded {
+	body: axum::body::Body,
+	_demand: crate::export::Demand,
+}
+
+impl http_body::Body for Demanded {
+	type Data = Bytes;
+	type Error = axum::Error;
+	fn poll_frame(
+		mut self: Pin<&mut Self>,
+		cx: &mut Context<'_>,
+	) -> Poll<Option<Result<http_body::Frame<Bytes>, axum::Error>>> {
+		Pin::new(&mut self.body).poll_frame(cx)
+	}
+	fn is_end_stream(&self) -> bool {
+		self.body.is_end_stream()
+	}
+	fn size_hint(&self) -> http_body::SizeHint {
+		self.body.size_hint()
+	}
 }
 
 /// A rendition of one publisher instance, as an instance-scoped URL names it.
 #[derive(Clone, Copy)]
 struct At<'a> {
-	broadcast: &'a str,
+	route: &'a Route,
 	instance: &'a str,
 	kind: Kind,
 	rendition: &'a str,
 }
 
 impl<'a> At<'a> {
-	fn new(broadcast: &'a str, instance: &'a str, kind: Kind, rendition: &'a str) -> Self {
+	fn new(route: &'a Route, instance: &'a str, kind: Kind, rendition: &'a str) -> Self {
 		Self {
-			broadcast,
+			route,
 			instance,
 			kind,
 			rendition,
@@ -148,10 +205,15 @@ impl<'a> At<'a> {
 }
 
 /// Resolve a rendition, waiting for the catalog to populate.
-async fn rendition_for(server: &Server, at: At<'_>) -> Option<Arc<Rendition>> {
-	let broadcaster = server.instance(at.broadcast, at.instance).await?;
+async fn rendition_for(server: &Server, at: At<'_>) -> crate::Result<Option<Arc<Rendition>>> {
+	let Some(broadcaster) = server.instance(&at.route.broadcast, at.instance).await else {
+		return Ok(None);
+	};
+	if let Some(contribution) = &at.route.contribution {
+		return broadcaster.contribution(contribution, at.kind, at.rendition).await;
+	}
 	let _ = kio::clock::timeout(READY_TIMEOUT, broadcaster.ready()).await;
-	broadcaster.rendition(at.kind, at.rendition)
+	Ok(broadcaster.rendition(at.kind, at.rendition))
 }
 
 fn m3u8(body: String) -> Response {

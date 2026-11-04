@@ -4,6 +4,18 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### HTTP HLS lists contributions without starting their media
+
+`Server` follows the root catalog's contributions and lists their renditions from their
+catalogs when the join interval and clock match the broadcast's. Contribution media starts
+only when requested and stops after active responses and three idle target durations.
+Their URLs include both instances:
+`@{instance}/contribution/{id}/{kind}/{rendition}/@{contribution-instance}/...`.
+`Route::contribution` identifies that contribution; `Resource::instance` still names the
+parent broadcast's instance. Embedders using `Server::respond` need no routing change.
+DASH, `Broadcaster::new`, and the recorder cursor continue serving the broadcast's own
+renditions only.
+
 ### `Broadcaster::new` returns a cloneable handle and its `Driver`
 
 `Broadcaster::new(source, config)` returns `(Broadcaster, Driver)` instead of `Arc<Broadcaster>`.

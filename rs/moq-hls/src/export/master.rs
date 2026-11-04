@@ -46,6 +46,27 @@ pub(crate) fn rendition_uri(instance: &str, kind: Kind, name: &str, query: Optio
 	uri
 }
 
+pub(crate) fn contribution_uri(
+	parent: &str,
+	id: &str,
+	instance: &str,
+	rendition: &super::Rendition,
+	query: Option<&str>,
+) -> String {
+	let mut uri = format!(
+		"@{}/contribution/{}/{}/{}/@{}/media.m3u8",
+		utf8_percent_encode(parent, PATH_SEGMENT),
+		utf8_percent_encode(id, PATH_SEGMENT),
+		rendition.kind.as_str(),
+		utf8_percent_encode(&rendition.name, PATH_SEGMENT),
+		utf8_percent_encode(instance, PATH_SEGMENT)
+	);
+	if let Some(query) = query {
+		let _ = write!(uri, "?{query}");
+	}
+	uri
+}
+
 fn quoted_string(value: &str) -> String {
 	let mut quoted = String::with_capacity(value.len());
 	for character in value.chars() {
@@ -163,9 +184,13 @@ pub fn render(video: &[VideoVariant], audio: &[AudioVariant]) -> String {
 
 	let audio_groups = group_audio(audio);
 	for group in &audio_groups {
+		let mut names = std::collections::BTreeSet::new();
 		for (index, variant) in group.variants.iter().enumerate() {
 			let default = if index == 0 { "YES" } else { "NO" };
-			let name = quoted_string(&variant.name);
+			let mut name = quoted_string(&variant.name);
+			while !names.insert(name.clone()) {
+				name.push('~');
+			}
 			let _ = writeln!(
 				out,
 				"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"{}\",NAME=\"{}\",DEFAULT={default},AUTOSELECT=YES,URI=\"{}\"",
@@ -315,6 +340,7 @@ mod tests {
 				Route::parse(url.path()).unwrap(),
 				Route {
 					broadcast: "live".into(),
+					contribution: None,
 					resource: Resource::Media {
 						instance: instance.into(),
 						kind: Kind::Video,
@@ -336,6 +362,26 @@ mod tests {
 		assert!(out.contains("URI=\"a%22%0A#EXT-X-INJECT\""));
 		assert!(!out.contains("\nINJECT"));
 		assert!(!out.contains("\n#EXT-X-INJECT"));
+	}
+
+	#[test]
+	fn audio_names_stay_unique_after_quoting_and_catalog_qualification() {
+		let out = render(
+			&[],
+			&[
+				audio("guest/main", 128_000, "opus"),
+				audio("guest/main", 128_000, "opus"),
+				audio("a\"", 128_000, "opus"),
+				audio("a%22", 128_000, "opus"),
+			],
+		);
+		let names: Vec<_> = out
+			.lines()
+			.filter(|line| line.starts_with("#EXT-X-MEDIA:"))
+			.map(|line| line.split("NAME=\"").nth(1).unwrap().split('"').next().unwrap())
+			.collect();
+		assert_eq!(names.len(), 4);
+		assert_eq!(names.iter().collect::<std::collections::BTreeSet<_>>().len(), 4);
 	}
 
 	#[test]

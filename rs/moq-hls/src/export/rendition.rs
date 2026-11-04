@@ -120,6 +120,7 @@ enum Config {
 /// The broadcast serving this rendition's media. A sibling that ends ends the rendition: it is
 /// never rebound onto whatever serves the path next.
 struct Media {
+	lazy: bool,
 	handle: Mutex<Handle>,
 	track: String,
 	/// The rendition reads another broadcast than the catalog's.
@@ -128,7 +129,8 @@ struct Media {
 
 struct Handle {
 	binding: Arc<moq_mux::Binding>,
-	/// The query holding the track instance alive without subscribing to its media.
+	/// The query pinning the track instance. Even an info query creates publisher demand,
+	/// so a lazy rendition holds it only while serving media.
 	track: Option<moq_net::track::Resolving>,
 	/// The bound sibling ended, so only its retained rows drain.
 	ended: bool,
@@ -147,17 +149,23 @@ impl Handle {
 }
 
 impl Media {
-	fn bind(source: &moq_mux::Source, reference: &impl hang::catalog::Reference, track: &str) -> moq_mux::Result<Self> {
+	fn bind(
+		source: &moq_mux::Source,
+		reference: &impl hang::catalog::Reference,
+		track: &str,
+		lazy: bool,
+	) -> moq_mux::Result<Self> {
 		let rel = reference.broadcast();
 		let mut handle = Handle {
 			binding: Arc::new(source.bind(rel, reference.instance())?),
 			track: None,
 			ended: false,
 		};
-		if let Poll::Ready(Ok(broadcast)) = handle.binding.poll_broadcast(&kio::Waiter::noop()) {
+		if !lazy && let Poll::Ready(Ok(broadcast)) = handle.binding.poll_broadcast(&kio::Waiter::noop()) {
 			handle.capture(&broadcast, track);
 		}
 		Ok(Self {
+			lazy,
 			handle: Mutex::new(handle),
 			track: track.to_string(),
 			// `bind` already rejected an escaping reference, so both sides name a path.
@@ -180,7 +188,9 @@ impl Media {
 	fn poll_sync(&self, waiter: &kio::Waiter, window: &segments::Producer) -> Arc<moq_mux::Binding> {
 		let mut handle = self.handle.lock().expect("media lock poisoned");
 		if let Poll::Ready(Ok(broadcast)) = handle.binding.poll_broadcast(waiter) {
-			handle.capture(&broadcast, &self.track);
+			if !self.lazy {
+				handle.capture(&broadcast, &self.track);
+			}
 			if self.sibling && !handle.ended && broadcast.poll_closed(waiter).is_ready() {
 				// End and Restart both drain only the pinned instance. Looking its path up again
 				// could serve a replacement under the old track's rows.
@@ -374,7 +384,7 @@ pub struct Rendition {
 	/// What every rendition of the broadcast shares: discontinuity counts and the run.
 	fanout: renditions::Fanout,
 	/// Follows the media track's groups into [`live`](Self::live); ends when the rendition drops.
-	watcher: Mutex<Option<Owner>>,
+	watcher: Mutex<Watcher>,
 	/// Set once the catalog drops or replaces the rendition (see [`retire`](Self::retire)).
 	retiring: tokio::sync::watch::Sender<bool>,
 	/// Which segments this instance lists.
@@ -397,6 +407,55 @@ pub struct Rendition {
 	building: Arc<tokio::sync::Mutex<()>>,
 	/// The background init build; ends when the rendition drops.
 	build: Mutex<Option<Owner>>,
+}
+
+#[derive(Default)]
+struct Watcher {
+	media: Option<Owner>,
+	idle: Option<Owner>,
+	#[cfg(feature = "server")]
+	requests: usize,
+	stopped: bool,
+}
+
+/// Keeps lazy media demanded for the whole response, including its first encode.
+#[cfg(feature = "server")]
+pub(crate) struct Demand(Option<Arc<Rendition>>);
+
+#[cfg(feature = "server")]
+impl Drop for Demand {
+	fn drop(&mut self) {
+		let Some(rendition) = self.0.take() else { return };
+		let mut watcher = rendition.watcher.lock().expect("watcher lock poisoned");
+		watcher.requests -= 1;
+		if watcher.requests != 0 || watcher.stopped {
+			return;
+		}
+		// RFC 8216 6.3.4 permits a reload after one target duration (half when unchanged).
+		// Three target durations allow that reload and two more intervals of request latency.
+		// Start the window at completion, so an encode or slow fetch never expires mid-request.
+		let duration = Duration::from_secs(rendition.target_duration()).saturating_mul(3);
+		let weak = Arc::downgrade(&rendition);
+		watcher.idle = Some(rendition.fanout.spawn(async move {
+			kio::clock::sleep(duration).await;
+			if let Some(rendition) = weak.upgrade() {
+				let mut claim = rendition.claim.lock().expect("claim lock poisoned");
+				let mut watcher = rendition.watcher.lock().expect("watcher lock poisoned");
+				if watcher.requests == 0 {
+					watcher.media.take();
+					rendition.media.handle.lock().expect("media lock poisoned").track.take();
+					// A resumed watcher never rewrites already-addressed segments or lists a
+					// partial segment it had open when the last player left.
+					claim.start = claim.next;
+					claim.pending = false;
+					if !claim.retired {
+						rendition.live.clear();
+						rendition.previous.lock().expect("previous lock poisoned").take();
+					}
+				}
+			}
+		}));
+	}
 }
 
 impl Rendition {
@@ -507,7 +566,7 @@ impl Rendition {
 	) -> moq_mux::Result<Self> {
 		let track = config.track(&name);
 		let container = Arc::new(moq_mux::catalog::hang::Container::try_from(config)?);
-		let media = Media::bind(source, config, track)?;
+		let media = Media::bind(source, config, track, fanout.lazy)?;
 		Ok(Self {
 			tag: tag(track, interval, &normalize_video(config)),
 			container,
@@ -527,7 +586,7 @@ impl Rendition {
 			clock,
 			live: Arc::new(segments::Producer::new(0)),
 			fanout,
-			watcher: Mutex::new(None),
+			watcher: Mutex::default(),
 			retiring: tokio::sync::watch::Sender::new(false),
 			claim: Mutex::default(),
 			previous: Mutex::new(None),
@@ -550,7 +609,7 @@ impl Rendition {
 	) -> moq_mux::Result<Self> {
 		let track = config.track(&name);
 		let container = Arc::new(moq_mux::catalog::hang::Container::try_from(config)?);
-		let media = Media::bind(source, config, track)?;
+		let media = Media::bind(source, config, track, fanout.lazy)?;
 		Ok(Self {
 			tag: tag(track, interval, &normalize_audio(config)),
 			container,
@@ -570,7 +629,7 @@ impl Rendition {
 			clock,
 			live: Arc::new(segments::Producer::new(0)),
 			fanout,
-			watcher: Mutex::new(None),
+			watcher: Mutex::default(),
 			retiring: tokio::sync::watch::Sender::new(false),
 			claim: Mutex::default(),
 			previous: Mutex::new(None),
@@ -586,7 +645,29 @@ impl Rendition {
 		let watcher = self
 			.fanout
 			.spawn(watch_media(Arc::downgrade(self), self.retiring.subscribe()));
-		*self.watcher.lock().expect("watcher lock poisoned") = Some(watcher);
+		self.watcher.lock().expect("watcher lock poisoned").media = Some(watcher);
+	}
+
+	#[cfg(feature = "server")]
+	pub(crate) fn is_lazy(&self) -> bool {
+		self.media.lazy
+	}
+
+	#[cfg(feature = "server")]
+	pub(crate) fn demand(self: &Arc<Self>) -> Demand {
+		let mut watcher = self.watcher.lock().expect("watcher lock poisoned");
+		if !self.media.lazy {
+			return Demand(None);
+		}
+		watcher.idle.take();
+		watcher.requests += 1;
+		if watcher.media.is_none() && !watcher.stopped {
+			watcher.media = Some(
+				self.fanout
+					.spawn(watch_media(Arc::downgrade(self), self.retiring.subscribe())),
+			);
+		}
+		Demand(Some(self.clone()))
 	}
 
 	/// Take over from a retired predecessor (see [`retire`](Self::retire)): keep its target
@@ -830,8 +911,10 @@ impl Rendition {
 	/// End the window at the segments listed now, because another publisher run replaced this
 	/// one, and stop following its media: what the replaced run lists later is never listed.
 	pub(crate) fn cut(&self) {
-		let watcher = self.watcher.lock().expect("watcher lock poisoned").take();
-		drop(watcher);
+		let mut watcher = self.watcher.lock().expect("watcher lock poisoned");
+		watcher.stopped = true;
+		watcher.idle.take();
+		watcher.media.take();
 		self.live.cut();
 	}
 
