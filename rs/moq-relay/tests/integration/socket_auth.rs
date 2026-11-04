@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use moq_net::broadcast::TracksEvent;
 use moq_net::socket::{Endpoint, TcpStream, TrackStream};
-
-use crate::memory;
+use moq_net::transport::memory;
+use moq_relay::{Accepted, Connection};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -57,7 +57,7 @@ impl Fixture {
 			.expect("auth init");
 		Self {
 			key,
-			cluster: memory::cluster(),
+			cluster: crate::spawn_cluster(Default::default()),
 			auth,
 			_keys: keys,
 			_server: server,
@@ -83,10 +83,39 @@ impl Fixture {
 			.with_subscriber(origin.clone())
 			.with_url(url);
 		let version = version.parse().expect("version");
-		let session = memory::connect(client, version, &self.cluster, &self.auth)
-			.await
-			.expect("connect");
+		let session = self.connect(client, version).await.expect("connect");
 		(origin, session)
+	}
+
+	/// Dial the relay over a fresh in-memory link, as `client` speaking `version`.
+	///
+	/// On Tokio rather than kio's simulator, which `crate::memory` uses, since the
+	/// reference auth server is a real HTTP server.
+	async fn connect(
+		&self,
+		client: moq_net::Client,
+		version: moq_net::Version,
+	) -> Result<moq_net::Session, moq_net::Error> {
+		let mut config = memory::Config::default();
+		config.protocol = Some(version.alpn().to_string());
+		let (client_link, relay_link) = memory::pair(config);
+
+		let (cluster, auth) = (self.cluster.clone(), self.auth.clone());
+		tokio::spawn(async move {
+			let server = moq_net::Server::new().with_versions(version.into());
+			let Ok(handshake) = server.accept_request(moq_net::time::Instant::now(), relay_link).await else {
+				return;
+			};
+			let request = Accepted::new(handshake, moq_auth::Transport::Quic);
+			Connection::new(request, cluster, auth).run().await;
+		});
+
+		let (session, driver) = client
+			.with_versions(version.into())
+			.connect(moq_net::time::Instant::now(), client_link)
+			.await?;
+		tokio::spawn(moq_net::time::run(driver));
+		Ok(session)
 	}
 
 	/// The endpoint `id`'s client, holding the grants `doc/concept/socket.md` lists: publish
