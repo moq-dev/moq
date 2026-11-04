@@ -488,7 +488,7 @@ pub struct Traffic {
 	/// payload as stored or sent.
 	pub inflated: u64,
 	/// Content skipped because it fell behind a subscriber's
-	/// [`max_delay`](crate::track::Subscription::max_delay) budget. Disjoint from the top-level payload
+	/// [`Delay::max`](crate::track::Delay::max) budget. Disjoint from the top-level payload
 	/// counters: skipped content is never handed over. A steady rate here means
 	/// subscribers are consistently behind the live edge.
 	pub stale: Content,

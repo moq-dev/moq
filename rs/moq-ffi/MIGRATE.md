@@ -5,6 +5,26 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Media setup refusals are typed
+
+Audio and video subscribe setup now reports `UnsupportedConfig` when the decoder refuses a codec, layout, or description. Handle this variant to try another rendition instead of inspecting an audio/video error message or `Unsupported`. Decoder faults, such as a backend that fails to open, and later peer and decode failures keep their existing errors. Regenerate bindings and rebuild the matching native library together.
+
+### JSON writes take a broadcast-clock timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
+
+`MoqJsonSnapshotProducer::update`, `MoqJsonStreamProducer::append`, and `MoqJsonWindowProducer::push` and `pop` take a required `MoqTimestamp` instead of an optional one that defaulted to null. Stamp it on the broadcast clock, read with `MoqMediaCatalogProducer::now`, so the data shares the media's epoch.
+Their constructors refuse a track created without a `timescale`: set one in `MoqTrackInfo`.
+
+### Subscriptions take a `MoqDelay` ([#7697](https://github.com/moq-dev/moq/pull/7697))
+
+`MoqSubscription.max_delay` is `delay: MoqDelay`, the record the decoder outputs take: set `delay.max` to the old `max_delay`.
+`MoqDelay.min` is `Option<Duration>`: null leaves the target latency unstated, which a decoder plays as zero, while `moq_subscription_defaults()` states zero. Wrap a decoder's `min: d` as `Some(d)`.
+Kotlin and Swift name both fields, and the Python, Go, and Dart wrappers default an omitted one to zero. A bare generated C or C++ record leaves both unset, so start from `moq_subscription_defaults()` there.
+
+### `MoqTransport::Iroh` is removed ([#7345](https://github.com/moq-dev/moq/pull/7345))
+
+moq-tokio no longer accepts iroh sessions, so `MoqTransport` loses its `Iroh` variant and the later variants renumber; Go loses `TransportIroh`.
+Drop the match arm, and regenerate the bindings and rebuild the matching native library together.
+
 ### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
 
 `MoqAnnounce.captures` is `Vec<String>` instead of `Option<Vec<String>>`. Remove optional checks and pass an empty list when constructing an announcement for a filter without wildcards. Regenerate bindings and rebuild the matching native library together.
@@ -24,7 +44,7 @@ The `MoqFlate*` producers and `MoqFlateConfig` are deleted: publish opaque bytes
 
 ### Paths with an empty segment are refused ([#6648](https://github.com/moq-dev/moq/pull/6648))
 
-Every method taking a path, such as `MoqOriginProducer::create_broadcast` and `MoqOriginConsumer::request_broadcast`, returns an error for a path with a leading, trailing, or doubled `/` instead of collapsing it. Pass the canonical path, such as `room/cam`.
+Every method taking a path, such as `MoqOriginProducer::create_broadcast` and `MoqOriginConsumer::request`, returns an error for a path with a leading, trailing, or doubled `/` instead of collapsing it. Pass the canonical path, such as `room/cam`.
 
 ### Request handlers are `requests()` ([#6752](https://github.com/moq-dev/moq/pull/6752))
 
@@ -53,9 +73,6 @@ It defaults to empty in every generated binding; a Rust struct literal adds `tok
 Every duration is a UniFFI `Duration` instead of an integer microsecond field, and drops its `_us` suffix: each language receives its own duration type (`timedelta`, `TimeInterval`, `java.time.Duration`, `time.Duration`, Dart `Duration`, C++ `std::chrono` nanoseconds).
 The renamed fields are `MoqClientConfig.{timeout, race, resolution_delay}`, `MoqQuicConfig.{idle_timeout, keep_alive}`, `MoqWebSocketConfig.delay`, `MoqBackoff.{initial, max, timeout}`, `MoqConnectionStats.rtt`, `MoqGrant.expires`, `MoqTrackInfo.max_age`, `MoqSubscription.max_delay`, `MoqFetchGroupOptions.max_delay`, `MoqAudio.jitter`, `MoqAudioDecoderOutput.{max_delay, delay}`, and `MoqVideoDecoderOutput.max_delay`; the methods are `MoqFill::max_delay()` and `MoqAudioConsumer::delay()`.
 `MoqAudioEncoderOutput.frame_duration_us: u32` is `frame_duration: Option<Duration>`: pass null where you passed 0 for the codec's own frame.
-`MoqSubscription.max_delay` has no default, since UniFFI can't default a duration to 0: Kotlin and Swift must name it, `0` for moq-net's default or null for no subscriber limit.
-Dart, Go, and C can still omit it (Dart's optional parameter, Go's nil `*time.Duration`, a zeroed C struct), which means no subscriber limit; name it there too.
-Start from `moq_subscription_defaults()` where you relied on that default; a null subscription argument still means it.
 `MoqTrackConsumer::info()` no longer fails.
 A duration handed out saturates at `i64::MAX` nanoseconds (about 292 years), so C, C++, and Go hold every value.
 
@@ -80,9 +97,10 @@ settings. Regenerate bindings and rebuild the native library together.
 
 ### `announce` takes a `MoqAnnounceRoute`
 
-`MoqBroadcastProducer::announce` takes `MoqAnnounceRoute { cost, epoch }` instead of a `MoqRoute`: the origin builds the hop chain, so a publisher no longer passes `hops` or `anonymous`.
+`MoqBroadcastProducer::announce` takes `MoqAnnounceRoute { cost, instance, epoch }` instead of a `MoqRoute`: the origin builds the hop chain, so a publisher no longer passes `hops` or `anonymous`.
 `MoqRoute` is only what `MoqAnnounceConsumer` reports, so its fields lose their defaults, and `MoqError::InvalidRoute` is gone.
-To re-announce an observed route, copy its `cost` and `epoch`.
+Leave `instance` null to keep the one the broadcast minted; name a stable one only for a publisher that continues its group sequences across restarts, raising `epoch` on each.
+To re-announce an observed route, copy its `cost`, and its `instance` only when forwarding that same stream.
 
 ### A broadcast reference waits for its sibling's announcement (#6254)
 
@@ -118,11 +136,16 @@ Snapshot groups roll on joiner demand, which the producer answers on its own: pu
 `MoqTrackInfo.priority` defaulted to 127 and now defaults to 0.
 To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 
+### `request` and `follow` name the two resolutions ([#7193](https://github.com/moq-dev/moq/pull/7193), [#7489](https://github.com/moq-dev/moq/pull/7489))
+
+Rename `MoqOriginConsumer::request_broadcast(path)` to `request(path, instance)`, `announced_broadcast(path)` to `follow(path, instance)`, and `MoqAnnouncedBroadcast` to `MoqFollowing`.
+`instance` defaults to null in every generated binding, accepting whichever publisher instance serves the path; pass one to refuse every other.
+`request` resolves one publisher instance: it retries as the routes covering the path change, and fails with `MoqError::Unroutable` only once discovery has synced with no covering route. `follow` hands out each instance that serves the path in turn.
+
 ### A client asks only about what it watches (#6165)
 
-On moq-lite, a client session asks its relay for announcements only under paths something watches, through `announced` or `announced_broadcast`, instead of under its whole scope at connect.
-`MoqOriginConsumer::request_broadcast` watches nothing, so on a client it fails with `MoqError::Unroutable` for a path nothing watches, even when the relay announces it.
-Resolve the path with `announced_broadcast`, or hold `announced` over its prefix while requesting.
+On moq-lite, a client session asks its relay for announcements only under paths something watches, through `announced`, `request`, or `follow`, instead of under its whole scope at connect.
+`MoqOriginConsumer::request` owns the discovery of its path, so it finds a broadcast the relay serves with nothing else watching first; no announcement stream is needed beside it.
 moq-transport and moq-lite-03/04 sessions are unchanged.
 
 ### `MoqContainerFormat::Fmp4` unwraps to Legacy (#6250)
@@ -130,11 +153,11 @@ moq-transport and moq-lite-03/04 sessions are unchanged.
 A container import with `MoqContainerFormat::Fmp4` now publishes one Legacy frame per sample instead of one CMAF frame per fragment.
 Pass the new `MoqContainerFormat::Cmaf` to keep publishing CMAF.
 
-### Catalog references carry their epoch
+### Catalog references carry their instance
 
-`MoqVideo` and `MoqAudio` gain `epoch`, the publisher instance their `broadcast` reference names. It defaults to null in every generated binding; a Rust struct literal adds `epoch: None`.
-`MoqBroadcastConsumer::resolve` takes the catalog `MoqRendition` instead of its `reference`, and reads the reference and its `epoch` from it.
-Resolving, and the rendition-based consumers, fail a rendition whose broadcast is proven to serve another epoch with `Mux`.
+`MoqVideo` and `MoqAudio` gain `instance`, the publisher instance their `broadcast` reference names. It defaults to null in every generated binding; a Rust struct literal adds `instance: None`.
+`MoqBroadcastConsumer::resolve` takes the catalog `MoqRendition` instead of its `reference`, and reads the reference and its `instance` from it.
+Resolving, and the rendition-based consumers, fail a rendition whose broadcast is proven to serve another instance with `Mux`.
 
 ### Timestamps stop at 2^61 - 1 microseconds (#6168)
 
@@ -150,8 +173,8 @@ Publish a replacement under a new name, and expect a finished track's demand wat
 ### A claim answers by publishing (#5678)
 
 `MoqOriginProducer::dynamic(prefix)` takes no `MoqRoute`, and `MoqOriginDynamic::update` is gone.
-`MoqBroadcastRequest::accept` is replaced by `prepare(epoch)`, which returns a `MoqBroadcastPrepared`: fill its `broadcast()`, then `publish()` announces it at the exact path under that epoch and returns its producer.
-Mint a fresh epoch per output run with `moq_mint_epoch()`. Dropping a prepared answer unpublished refuses the request.
+`MoqBroadcastRequest::accept` is replaced by `prepare()`, which returns a `MoqBroadcastPrepared`: fill its `broadcast()`, then `publish()` announces it at the exact path under a fresh instance of its own and returns its producer.
+Dropping a prepared answer unpublished refuses the request.
 
 ### `MoqTrackInfo` gains `compress` (#5928)
 
@@ -211,7 +234,7 @@ let rate = bandwidth.as_ref().and_then(|b| b.rate());
 
 ### `available()` waits for the next publisher instance (#5700)
 
-`MoqAnnouncedBroadcast::available` returns the broadcast serving the path on its first call, as before.
+`MoqFollowing::available` returns the broadcast serving the path on its first call, as before.
 Each later call waits for the next instance to take over the path, instead of returning whatever serves it now.
 
 ### A timed track refuses a group that rewinds (#5803)

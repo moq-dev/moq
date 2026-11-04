@@ -12,12 +12,12 @@ OBS Studio install.
 - **Subscribe**: add a "MoQ Source", enter the relay URL and broadcast path, and the stream appears in the scene.
 - **Dock**: a **MoQ** dock with Go Live, encoding that uses the OBS Output settings or custom settings for this stream only, and live stats (protocol, RTT, bandwidth, loss), and the reason while a stream connects or reconnects.
 
-Each Start Streaming publishes a fresh epoch, shown in the dock's Stats tab.
-The client's automatic reconnects keep the same epoch. A stop/start, or an OBS
-auto-reconnect after the client gives up, republishes the broadcast under a new
-epoch, which peers using an epoch-capable protocol see as a new publisher run.
+Each Start Streaming publishes under a fresh instance. The client's automatic
+reconnects keep the same instance. A
+stop/start, or an OBS auto-reconnect after the client gives up, republishes
+the broadcast under a new instance, which viewers see as a new stream.
 
-MoQ Source plays the best enabled audio and video rendition it can decode and place. It follows catalog changes while keeping the current audio and video playing until a replacement produces decoded output. A failed replacement leaves the current rendition playing. Disabling every rendition of a media kind keeps the one already playing; removing the media kind from the catalog clears it. It also follows a restarted or replaced publisher, including a sibling broadcast the catalog points at, playing the new one from its first keyframe.
+MoQ Source plays the best enabled audio and video rendition it can decode and place. It follows catalog changes while keeping the current audio and video playing until a replacement produces decoded output. A decoder setup refusal tries the next ranked rendition, including when a supported codec name carries a description the decoder cannot use. A later peer or decode failure leaves the current rendition playing. Disabling every rendition of a media kind keeps the one already playing; removing the media kind from the catalog clears it. It also follows a restarted or replaced publisher, including a sibling broadcast the catalog points at, playing the new one from its first keyframe.
 
 The source plays Opus, AAC-LC (mono or stereo), and PCM audio. A channel count names its speakers by the WAVE convention: 1, 2, 3 (2.1), 6 (5.1), and 8 (7.1) play on the matching OBS layout, while quad and 5.0 are upmixed to 5.1 and 6.1 to 7.1, which OBS lacks. Other counts are refused.
 
@@ -67,6 +67,14 @@ Saving Settings > Stream afterwards replaces the MoQ service. The dock's Go
 Live publishes one rendition. OBS's Enhanced Broadcasting (multitrack video)
 always streams through its RTMP output, so it cannot drive MoQ.
 
+A rendition above a lower-bitrate one stops sending while its share of the
+estimate cannot fund it, advertised as disabled so viewers switch down. Only an encoder
+that follows the estimate, as above, stops; one that cannot retune while live,
+or uses CQP or CRF, keeps sending. A stopped encoder keeps encoding, since OBS
+cannot pause one encoder of a live output, and resumes at that encoder's next
+keyframe once the estimate recovers. This needs the session to probe for
+bandwidth, which takes moq-quic with BBR3.
+
 ## Source quality and moq-transcode
 
 Without simulcast layers, OBS publishes **one** rendition. When a
@@ -102,6 +110,13 @@ macOS and Windows source builds use `just obs setup && just obs build` with
 Xcode or Visual Studio 2022, plus Rust and
 [`uniffi-bindgen-cpp`](/lib/cpp/) to build the C++ package in-tree; see
 [`cpp/obs/`](https://github.com/moq-dev/moq/tree/main/cpp/obs).
+
+To capture qlog traces, configure a source build with `-DMOQ_FFI_QLOG=ON`, for
+example `cmake --preset ubuntu-x86_64 -DMOQ_FFI_QLOG=ON` before `just obs build`.
+It builds moq-ffi with its `qlog` feature, which adds a qlog directory to the
+advanced settings. It is off by default, and the prebuilt archives leave it
+out, so configuration fails if the C++ package would come from a release
+archive or `MOQ_FFI_DIR`.
 
 ## Advanced settings
 

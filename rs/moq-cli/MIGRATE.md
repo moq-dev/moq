@@ -4,6 +4,11 @@ How to update your invocation and config for each breaking change, newest first.
 
 ## Unreleased
 
+### The iroh transport is removed ([#7345](https://github.com/moq-dev/moq/pull/7345))
+
+The `iroh` Cargo feature and the `--iroh-*` flags are gone, and a `MOQ_IROH_*` variable stops startup like any other unknown `MOQ_*` variable.
+Connect over QUIC or WebTransport instead.
+
 ### `--broadcast` refuses empty segments ([#6648](https://github.com/moq-dev/moq/pull/6648))
 
 A broadcast name or prefix with a leading, trailing, or doubled `/` is an error instead of being collapsed: pass `--broadcast room/cam`, not `/room/cam/`.
@@ -23,10 +28,6 @@ A reconnect at the same path no longer ends the wait. `import rtsp`, `import arc
 
 Enable `nvidia` instead; the old names were aliases for it.
 
-### Iroh is opt-in
-
-The default source-build features no longer include `iroh`. Add `--features iroh` when building a binary that must use Iroh endpoints.
-
 ### `import fmp4` and `import hls` unwrap to Legacy (#6250)
 
 Both now publish one `legacy` frame per sample instead of one `cmaf` frame per fragment.
@@ -34,10 +35,10 @@ Add `--passthrough` to keep publishing CMAF.
 
 ### `export archive` records a prefix (#6160)
 
-`moq export archive <url>` records every broadcast announced at or under `--broadcast`, each instance under `<url>/<broadcast>/@<epoch>`, until the connection ends, instead of one broadcast at `<url>`.
+`moq export archive <url>` records every broadcast announced at or under `--broadcast`, each instance under `<url>/<broadcast>/@<instance>`, until the connection ends, instead of one broadcast at `<url>`.
 Point `<url>` at the root you want recordings under, and drop `--catalog-format`, which it now refuses.
 Untimed tracks record, and `--retention` works on them.
-`import archive` replays one recorded broadcast in the new layout, `<url>/<broadcast>/@<epoch>`, and no longer reads recordings made by older `moq` versions.
+`import archive` replays one recorded broadcast in the new layout, `<url>/<broadcast>/@<instance>`, and no longer reads recordings made by older `moq` versions.
 
 ### `--cluster-lan-secret` is a file path only (#5910)
 
@@ -52,7 +53,7 @@ If your auth server can take longer than the handshake timeout allows, raise `--
 ### `--epoch` is removed (#5967)
 
 Remove `--epoch` and `MOQ_EPOCH`: either stops startup as an unknown flag or environment variable.
-Every `moq` run mints its own epoch, so two importers fed one stream publish two instances, and the newest wins new requests.
+Every `moq` run mints its own instance, so two importers fed one stream publish two instances. `moq` has no flag to name a stable one.
 To fail over between them, follow restarts: `export ts --stitch` switches programs, and players follow the announced restart.
 Other consumers, such as `export ts --passthrough`, end with the instance they read.
 
@@ -111,7 +112,7 @@ Pass `--delay 100ms` to keep the old fixed delay.
 
 ### `--hop` is removed (#4969)
 
-Remove `--hop` and `MOQ_HOP`: each independent publisher now mints its own epoch.
+Remove `--hop` and `MOQ_HOP`: each independent publisher now mints its own instance.
 Redundant importers switch as a restart; use `export ts --stitch` to follow them.
 A node that pinned its cluster id with `--hop` passes `--cluster-id` instead.
 
@@ -156,7 +157,7 @@ A renamed flag or environment variable is refused with its replacement named.
 | --- | --- |
 | `moq publish`, `moq subscribe` | `moq import`, `moq export` |
 | `moq token`, the `moq-token` binary | `moq auth` |
-| `--origin` | Removed; publishers mint their own epoch |
+| `--origin` | Removed; publishers mint their own instance |
 | `--name` | `--broadcast` |
 | `--latency-max` | `--max-age` |
 | `--server-bind` | `--listen` |

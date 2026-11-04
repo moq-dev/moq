@@ -56,7 +56,7 @@
 //!
 //! ## Driving and time
 //! Session and origin drivers never spawn tasks or read the clock.
-//! Explicitly minting an [`Epoch`] uses the wall clock and secure randomness. `Client::connect` and
+//! Minting an [`Instance`] uses secure randomness. `Client::connect` and
 //! `Server::accept` take an initial [`time::Instant`] and return
 //! `(Session, Driver)`. Poll the `Driver` with the current instant and a
 //! [`kio::Waiter`], then wake on external activity or at the deadline it
@@ -97,7 +97,6 @@ mod coding;
 mod discovery;
 #[cfg(feature = "async")]
 mod driver;
-mod epoch;
 mod error;
 #[cfg(feature = "async")]
 pub mod goaway;
@@ -112,6 +111,7 @@ mod test_tracing;
 #[doc(hidden)]
 pub mod fuzz;
 mod ietf;
+mod instance;
 mod ledger;
 mod lite;
 mod model;
@@ -120,6 +120,7 @@ pub mod path;
 mod priority;
 #[cfg(feature = "async")]
 mod recv;
+mod route;
 #[cfg(feature = "async")]
 pub mod setup;
 #[cfg(not(feature = "async"))]
@@ -145,8 +146,8 @@ pub use client::*;
 pub use coding::{BoundsExceeded, DecodeError, EncodeError, varint};
 #[cfg(feature = "async")]
 pub use driver::Driver;
-pub use epoch::{Epoch, InvalidEpoch};
 pub use error::*;
+pub use instance::{Instance, InvalidInstance};
 pub use model::*;
 pub use path::{InvalidPattern, Path, Pattern, Patterns};
 #[cfg(feature = "async")]

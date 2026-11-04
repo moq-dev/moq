@@ -4,12 +4,24 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### A `Delay` sets where a consumer starts ([#7311](https://github.com/moq-dev/moq/pull/7311))
+### JSON writes take a broadcast-clock timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
+
+`json::Snapshot::update` and `json::Stream::append` take `(&value, timestamp)`, a required `moq_net::Timestamp` on the broadcast clock, instead of `impl Into<Timed<&T>>`. Every track in a broadcast shares that clock's epoch, so nothing stamps a write for you.
+Replace `update(&value)` and `update(Timed::from(&value).at(at))` with `update(&value, at)`, taking `at` from `catalog.clock().now()` or `catalog.clock().capture(instant)?`.
+`catalog::Producer::json_snapshot` and `json_stream` refuse a track without a timescale with `Error::Moq(moq_net::Error::TimestampMismatch)`: create it with `moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)`.
+
+### fMP4 decode errors are terminal
+
+After `container::fmp4::Import::decode` fails, later decodes, cuts, seeks and discontinuities return that error without reading input or changing tracks, including through `import::Container`.
+Replace the importer to resume instead of feeding it another box or segment. `finish()` still ends the tracks with the accepted media and does not reset the error.
+HLS replaces a refused importer immediately; transient fetch failures still keep their retry budget.
+
+### A `Delay` sets where a consumer starts ([#7311](https://github.com/moq-dev/moq/pull/7311), [#7597](https://github.com/moq-dev/moq/pull/7597))
 
 `container::Consumer::set_max_delay(Duration)` is `set_delay(Delay)`, and `with_delay(Delay)` is its builder.
-`container::Delay { min, max }` defaults to zero for both: `max` (`None` for no limit) is the max delay that `set_max_delay` took, and the subscription still carries it.
-`min` is the playout delay. An unfloored consumer starts at the group covering the live edge less `min` plus any `with_warmup`, waiting for it when the newest group arrives first. Before the first read, a backlog that already landed starts at the first group whose first frame is within the max delay, plus the warmup, of the newest content, keeping the group covering the live edge less `min` and the warmup.
-Replace `consumer.set_max_delay(d)` with `consumer.set_delay(Delay { max: Some(d), ..Delay::default() })`, and set `min` to your playout delay. Call `with_warmup` before `with_delay`.
+`moq_net::track::Delay { min, max }` defaults to zero for both: `max` (`None` for no limit) is the max delay that `set_max_delay` took. `set_delay` puts the whole delay on the subscription, and `Consumer::new` inherits it from there.
+`min` is the playout delay, and a consumer reads an unstated (`None`) one as zero. An unfloored consumer starts at the group covering the live edge less `min` plus any `with_warmup`, waiting for it when the newest group arrives first. Before the first read, a backlog that already landed starts at the first group whose first frame is within the max delay, plus the warmup, of the newest content, keeping the group covering the live edge less `min` and the warmup.
+Replace `consumer.set_max_delay(d)` with `consumer.set_delay(Delay::default().with_max(d))`, and set `min` to your playout delay. Call `with_warmup` before `with_delay`.
 
 ### Compression moves to the track
 
@@ -114,11 +126,11 @@ Call `.with_passthrough(true)` to keep publishing CMAF.
 Read the frame yourself and hand it over: `while let Some(frame) = group.read_frame().await? { for media in container.decode(frame)? { .. } }`.
 An implementation drops its `group.poll_read_frame` call and its `None` end-of-group case, and decodes the frame it is given.
 
-### `Source` resolution takes the reference's epoch (#5699)
+### `Source` resolution takes the reference's instance (#5699)
 
-`Source::bind(rel)`, `resolve(rel)`, and `subscribe_track(rel, name)` take the catalog entry's optional epoch after `rel`.
-Pass `config.epoch.as_ref()` (or `Reference::epoch`), or `None` to accept the first instance resolved as before.
-A broadcast proven to serve another epoch fails with the new `Error::EpochMismatch`; over a route without an epoch the check is best effort.
+`Source::bind(rel)`, `resolve(rel)`, and `subscribe_track(rel, name)` take the catalog entry's optional instance after `rel`.
+Pass `config.instance.as_ref()` (or `Reference::instance`), or `None` to accept the first instance resolved as before.
+A broadcast proven to serve another instance fails with the new `Error::InstanceMismatch`; against an instance a session minted the check is best effort.
 
 ### `ts::stats::Export`'s release counters move into `release` (#5849)
 
@@ -187,7 +199,7 @@ Its `Hang`, `Msf`, and `Closed` variants and `catalog::msf::Consumer::track` are
 Every later request for a path, siblings included, stays on the broadcast first held there and fails once it ends, so build a new `Source` to follow a new instance.
 
 ```rust
-let broadcast = origin.request_broadcast(path, None).await?;
+let broadcast = origin.request(path, None).await?;
 let source = Source::new(origin, broadcast);
 ```
 

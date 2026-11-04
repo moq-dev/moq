@@ -103,7 +103,10 @@ empty busy turns, so enters/turn alone does not grade efficiency.
 tasks a turn runs; a ratio near the default budget of 4 shows heavy use of
 the pass budget but does not prove that work spilled into the next turn. The
 histograms include empty enters. A dead worker shows stuck zeros rather than
-disappearing.
+disappearing. The `*_pool_bytes` gauges are the UDP buffer space each worker
+has allocated; pools grow under load and keep their high-water size. Most of
+it is reserved rather than resident: RSS grows by the buffer pages datagrams
+have touched.
 
 ### GET /sessions
 

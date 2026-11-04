@@ -4,14 +4,31 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Media setup refusals are typed
+
+Audio and video subscribe setup now reports `UnsupportedConfigMoqException` when the decoder refuses a codec, layout, or description. Handle this variant to try another rendition instead of inspecting an audio/video error message or `Unsupported`. Decoder faults, such as a backend that fails to open, and later peer and decode failures keep their existing errors. Regenerate bindings and rebuild the matching native library together.
+
+### JSON writes take a broadcast-clock timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
+
+`json.SnapshotProducer.update`, `json.StreamProducer.append`, and `json.WindowProducer.push` / `pop` take a `required MoqTimestamp timestamp` on the broadcast clock instead of an optional one. Read it with `MoqMediaCatalogProducer(broadcast: broadcast).now()`. Their track needs a timescale, such as `MoqTrackInfo(timescale: 1000)`; one without is refused.
+
+### Subscriptions take a `Delay` ([#7697](https://github.com/moq-dev/moq/pull/7697))
+
+`Subscription.maxDelay` is `delay`, a `Delay`, and a bare `Subscription()` is moq-net's defaults again: pass `delay: Delay(max: maxDelay)`, and `Delay(max: null)` for no subscriber limit.
+`media.Delay` moves to `package:moq/moq.dart`. `Delay` and `Subscription` are extension types over the generated records, so they pass wherever those are taken; `Delay` defaults `min` and `max` to zero, and an explicit null `min` leaves the target latency unstated.
+
+### `Transport.iroh` is removed ([#7345](https://github.com/moq-dev/moq/pull/7345))
+
+Native sessions no longer arrive over iroh, so `Transport` loses its `iroh` value. Drop the case, and regenerate bindings and rebuild with the matching native library.
+
 ### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
 
 `Announce.captures` is `List<String>` instead of `List<String>?`. Remove null checks and pass `captures: []` when constructing an announcement for a filter without wildcards. Regenerate bindings and rebuild with the matching native library.
 
 ### Decoder outputs take a `Delay` ([#7311](https://github.com/moq-dev/moq/pull/7311))
 
-`audio.DecoderOutput` replaces `maxDelay` and the playout `delay: Duration?` with `delay: media.Delay?` and `estimate: bool = true`.
-`video.DecoderOutput.maxDelay` is `delay: media.Delay?`.
+`audio.DecoderOutput` replaces `maxDelay` and the playout `delay: Duration?` with `delay: Delay?` and `estimate: bool = true`.
+`video.DecoderOutput.maxDelay` is `delay: Delay?`.
 `Delay(min: ..., max: ...)`: `max` (null for no limit) is the old `maxDelay`, and `min` is the playout delay, where a cold join starts.
 A fixed audio playout delay `d` is `delay: Delay(min: d, max: ...)` with `estimate: false`.
 
@@ -42,7 +59,6 @@ Their handles `OriginDynamic`, `BroadcastDynamic`, and `TrackDynamic` are `Origi
 
 The records carry durations as `Duration` fields instead of `*Us` microsecond integers, so the duration extension getters are gone: read `backoff.initial`, `stats.rtt`, `grant.expires`, `info.maxAge`, `fill.maxDelay()`, and `consumer.delay()` directly.
 `audio.EncoderOutput.frameDuration` is nullable: pass null where you passed `frameDurationUs: 0` for the codec's own frame.
-`Subscription.maxDelay` defaults to null, so a `Subscription()` that omits it gets no staleness limit instead of moq-net's 0: start from `defaultSubscription()`, or pass `maxDelay: Duration.zero`, for the old default.
 A negative `Duration` throws `ArgumentError` wherever it crosses into the native library.
 
 ### Connection state
@@ -62,8 +78,8 @@ the matching generated bindings and native library.
 
 ### `announce` takes an `AnnounceRoute`
 
-`BroadcastProducer.announce(route:)` takes `AnnounceRoute(cost:, epoch:)` instead of a `MoqRoute`: the origin builds the hop chain, so `hops` is no longer an input.
-`MoqRoute` is only what announcements report. To re-announce an observed route, copy its `cost` and `epoch`.
+`BroadcastProducer.announce(route:)` takes `AnnounceRoute(cost:, instance:, epoch:)` instead of a `MoqRoute`: the origin builds the hop chain, so `hops` is no longer an input.
+`MoqRoute` is only what announcements report. To re-announce an observed route, copy its `cost`, and its `instance` only when forwarding that same stream; leave `instance` unset to keep the one the broadcast minted.
 
 ### Cancelling a stream cancels its pending read
 
@@ -105,11 +121,16 @@ Publish the track with a `refresh` ratio so a joiner gets the value restated in 
 `TrackInfo.priority` defaulted to 127 and now defaults to 0.
 To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 
+### `request` and `follow` name the two resolutions ([#7193](https://github.com/moq-dev/moq/pull/7193), [#7489](https://github.com/moq-dev/moq/pull/7489))
+
+Rename `requestBroadcast` to `request`, `announcedBroadcast` to `follow`, and `AnnouncedBroadcast` to `Following`.
+On `Moq` both take a positional path and a named `instance:`; on `OriginConsumer` they take `path:` and `instance:`. Pass an instance to refuse every other publisher instance.
+`request` resolves one publisher instance: it retries as the routes covering the path change, and fails with an unroutable error only once discovery has synced with no covering route. `follow` hands out each instance that serves the path in turn.
+
 ### A client asks only about what it watches (#6165)
 
-On moq-lite, a client session asks its relay for announcements only under paths something watches, through `announced()` or `announcedBroadcast()`, instead of under its whole scope at connect.
-`requestBroadcast()` watches nothing, so on a client it fails with an unroutable error for a path nothing watches, even when the relay announces it.
-Resolve the path with `announcedBroadcast()`, or hold `announced()` over its prefix while requesting.
+On moq-lite, a client session asks its relay for announcements only under paths something watches, through `announced()`, `request()`, or `follow()`, instead of under its whole scope at connect.
+`request()` owns the discovery of its path, so it finds a broadcast the relay serves with nothing else watching first; no announcement stream is needed beside it.
 moq-transport and moq-lite-03/04 sessions are unchanged.
 
 ### `ContainerFormat.fmp4` unwraps to Legacy (#6250)
@@ -117,11 +138,11 @@ moq-transport and moq-lite-03/04 sessions are unchanged.
 A container import with `ContainerFormat.fmp4` now publishes one Legacy frame per sample instead of one CMAF frame per fragment.
 Pass the new `ContainerFormat.cmaf` to keep publishing CMAF.
 
-### Catalog references carry their epoch
+### Catalog references carry their instance
 
-`Video` and `Audio` renditions gain `epoch`, the publisher instance their `broadcast` reference names.
-`BroadcastConsumer.resolve(reference:)` becomes `resolve(rendition:)`, taking the catalog `Rendition` and reading its `broadcast` and `epoch` from it.
-Resolving, and the rendition-based consumers, throw for a rendition whose broadcast is proven to serve another epoch.
+`Video` and `Audio` renditions gain `instance`, the publisher instance their `broadcast` reference names.
+`BroadcastConsumer.resolve(reference:)` becomes `resolve(rendition:)`, taking the catalog `Rendition` and reading its `broadcast` and `instance` from it.
+Resolving, and the rendition-based consumers, throw for a rendition whose broadcast is proven to serve another instance.
 
 ### Timestamps stop at 2^61 - 1 microseconds (#6168)
 
@@ -137,7 +158,8 @@ Publish a replacement under a new name, and expect a finished track's demand wat
 ### A claim answers by publishing (#5678)
 
 `origin.dynamic_(prefix:)` takes no route, and `update` is gone.
-Replace `request.accept(broadcast:)` with `request.prepare(epoch: mintEpoch())`, which returns a `BroadcastPrepared`: fill its `broadcast()`, then `publish()` announces it at the exact path under that epoch and returns its producer.
+Replace `request.accept(broadcast:)` with `request.prepare()`, which returns a `BroadcastPrepared`: fill its `broadcast()`, then `publish()` announces it at the exact path under a fresh instance of its own and returns its producer.
+To answer with a broadcast you already hold, `request.serve(broadcast: producer.consume())` serves it under the prefix route without announcing an exact route.
 
 ### Anchors can name a time (#6074)
 
@@ -189,7 +211,7 @@ The connection stats no longer carry a receive estimate.
 Hold the consumer `Session.recvBandwidth` returns to request PROBE, read it with `rate()` or wait with `rateChanged()`, and `cancel()` it to stop.
 Replace `stats().estimatedRecvRateBps` with `recvBandwidth()?.rate()`.
 
-### `AnnouncedBroadcast.available()` waits for the next publisher instance (#5700)
+### `Following.available()` waits for the next publisher instance (#5700)
 
 The first call returns the broadcast serving the path, as before.
 Each later call waits for the next instance to take over the path, instead of returning whatever serves it now.

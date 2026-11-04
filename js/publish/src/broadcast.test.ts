@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { Manual, Micro, Milli, Nano } from "@moq/clock";
+import { Stats } from "@moq/hang";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Json from "@moq/json";
@@ -250,7 +251,7 @@ test("serves no catalog until announced, so the first snapshot is the one at ann
 	if (!net) throw new Error("expected a network producer once connected");
 
 	const group = await net.track(Broadcast.CATALOG_TRACK).subscribe().ordered().nextGroup();
-	expect(group?.sequence).toBe(0);
+	expect(group?.sequence).toBe(0n);
 	const catalog = (await group?.readJson()) as Catalog.Root;
 	expect(Object.keys(catalog.video?.renditions ?? {})).toEqual(["video"]);
 	expect(Object.keys(catalog.audio?.renditions ?? {})).toEqual(["audio"]);
@@ -259,7 +260,7 @@ test("serves no catalog until announced, so the first snapshot is the one at ann
 });
 
 // Regression: a re-announce re-created the catalog track, restarting its group sequence under the
-// same epoch, so a resumed viewer mistook the new catalog for the old one. Turning the announce off
+// same instance, so a resumed viewer mistook the new catalog for the old one. Turning the announce off
 // unannounces at once and keeps the broadcast for the next announce.
 test("a re-announce continues the catalog's group sequence", async () => {
 	const announce = new Signal(true);
@@ -276,7 +277,7 @@ test("a re-announce continues the catalog's group sequence", async () => {
 	if (!net) throw new Error("expected a network producer once connected");
 	const announced = broadcast.in.origin.peek()?.follow(broadcast.in.name.peek());
 	const first = net.track(Broadcast.CATALOG_TRACK).subscribe().ordered();
-	expect((await first.nextGroup())?.sequence).toBe(0);
+	expect((await first.nextGroup())?.sequence).toBe(0n);
 
 	announce.set(false);
 	await settle();
@@ -324,7 +325,7 @@ test("a rendition keeps its track across rendition changes", async () => {
 	const again = broadcast.video("video");
 	await settle();
 	expect(again.track.peek()).toBe(track);
-	expect(track.appendGroup().sequence).toBe(1);
+	expect(track.appendGroup().sequence).toBe(1n);
 
 	// The name keeps its kind.
 	again.close();
@@ -392,7 +393,7 @@ test("replacing a closed rendition track keeps the broadcast and publishes a fre
 	const replacement = again.track.peek();
 	expect(replacement).toBeDefined();
 	expect(replacement).not.toBe(track);
-	expect(replacement?.appendGroup().sequence).toBe(0);
+	expect(replacement?.appendGroup().sequence).toBe(0n);
 
 	first.close();
 	second.close();
@@ -479,7 +480,7 @@ test("registering a sibling after an encoder failure keeps the network broadcast
 });
 
 // A name always means the same content, so a served rendition whose decoder identity changes moves to
-// a fresh track name under the same catalog ID and epoch, ending the old track on its old identity.
+// a fresh track name under the same catalog ID and instance, ending the old track on its old instance.
 // Fields a decoder needn't reinitialize for update the served track in place.
 test("a served decoder identity change moves the rendition to a fresh track name", async () => {
 	const broadcast = new Broadcast({ origin: new Origin.Producer(), name: Path.from("identity.hang") });
@@ -497,7 +498,7 @@ test("a served decoder identity change moves the rendition to a fresh track name
 	const net = broadcast.net.peek();
 	if (!net) throw new Error("expected a network producer once connected");
 	const announced = broadcast.in.origin.peek()?.follow(broadcast.in.name.peek());
-	const epoch = announced?.active.peek()?.epoch;
+	const instance = announced?.active.peek()?.instance;
 	const catalog = new Json.Snapshot.Consumer<Catalog.Root>({
 		track: net.track(Broadcast.CATALOG_TRACK).subscribe(),
 	});
@@ -533,13 +534,13 @@ test("a served decoder identity change moves the rendition to a fresh track name
 		// The replacement is handed over at once, with or without a subscriber.
 		expect(video.track.peek()?.name).toBe("video/1");
 		expect(broadcast.net.peek()).toBe(net);
-		expect(announced?.active.peek()?.epoch).toBe(epoch);
+		expect(announced?.active.peek()?.instance).toBe(instance);
 
 		const second = net.track("video/1").subscribe();
 		await settle();
 		const replacement = video.track.peek();
 		expect(replacement?.name).toBe("video/1");
-		expect(replacement?.appendGroup().sequence).toBe(0);
+		expect(replacement?.appendGroup().sequence).toBe(0n);
 
 		// So is a display aspect change, which moves it again rather than redefining the second name.
 		video.config.set({
@@ -758,9 +759,115 @@ test("identity changes before the first announce take a fresh track name", async
 	// The replacement starts empty, so no group from the old codec reads under the new config.
 	const replacement = video.track.peek();
 	expect(replacement?.name).toBe("video/1");
-	expect(replacement?.appendGroup().sequence).toBe(0);
+	expect(replacement?.appendGroup().sequence).toBe(0n);
 
 	broadcast.close();
+});
+
+test("stats names a track in the catalog and reports each listed rendition while subscribed", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const stats = new Signal(false);
+	const probe = new Signal({ rtt: Milli(12.7) });
+	const broadcast = new Broadcast({
+		enabled: true,
+		origin: new Origin.Producer(),
+		name: Path.from("test.hang"),
+		stats,
+		probe,
+	});
+	try {
+		const video = broadcast.video("video");
+		video.config.set(videoConfig);
+		video.stats.set({ frames: 3, bytes: 300, keyframes: 1, skipped: 2, bitrate: 1_000_000 });
+		// A rendition without a config is not in the catalog, so it is not reported either.
+		broadcast.audio("audio").stats.set({ frames: 1 });
+		await settle();
+		expect((await readCatalog(broadcast))?.stats).toBeUndefined();
+
+		stats.set(true);
+		await settle();
+		expect((await readCatalog(broadcast))?.stats).toEqual({ track: Broadcast.STATS_TRACK });
+
+		const net = broadcast.net.peek();
+		if (!net) throw new Error("expected a network producer once connected");
+		const subscriber = net.track(Broadcast.STATS_TRACK).subscribe();
+		const consumer = new Json.Snapshot.Consumer<Stats.Snapshot>({
+			track: subscriber,
+			schema: Stats.SnapshotSchema,
+		});
+		await settle();
+		await clock.advance(Nano.fromMilli(Milli(1000)));
+		// Sub-millisecond durations are floored on the wire.
+		expect((await consumer.latest())?.value as unknown).toEqual({
+			transport: { rtt: 12 },
+			renditions: { video: { frames: 3, bytes: 300, keyframes: 1, skipped: 2, bitrate: 1_000_000 } },
+		});
+		subscriber.close();
+
+		stats.set(false);
+		await settle();
+		expect((await readCatalog(broadcast))?.stats).toBeUndefined();
+	} finally {
+		broadcast.close();
+		installed.close();
+	}
+});
+
+test("an unsubscribed stats track writes nothing", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const broadcast = new Broadcast({
+		enabled: true,
+		origin: new Origin.Producer(),
+		name: Path.from("test.hang"),
+		stats: true,
+	});
+	try {
+		const video = broadcast.video("video");
+		video.config.set(videoConfig);
+		video.stats.set({ frames: 1 });
+		await settle();
+		await clock.advance(Nano.fromMilli(Milli(3000)));
+
+		const net = broadcast.net.peek();
+		if (!net) throw new Error("expected a network producer once connected");
+		const subscriber = net.track(Broadcast.STATS_TRACK).subscribe();
+		await settle();
+		await clock.advance(Nano.fromMilli(Milli(1000)));
+		// Nothing was written while nobody subscribed, so the first report opens the first group.
+		expect((await subscriber.recvGroup())?.sequence).toBe(0n);
+		subscriber.close();
+	} finally {
+		broadcast.close();
+		installed.close();
+	}
+});
+
+test("echo solicits feedback in the catalog unless it walks above the root", async () => {
+	const echo = new Signal<Path.Relative | undefined>(Path.normalizeRelative("viewers"));
+	const name = new Signal(Path.from("room/live.hang"));
+	const broadcast = new Broadcast({ enabled: true, name, echo });
+	try {
+		await settle();
+		expect((await readCatalog(broadcast))?.echo as unknown).toEqual({ path: "viewers" });
+
+		// From `room/live.hang`, `../../viewers` walks above the root, which every viewer refuses.
+		echo.set(Path.normalizeRelative("../../viewers"));
+		await settle();
+		expect((await readCatalog(broadcast))?.echo).toBeUndefined();
+
+		// A deeper name brings the same path back within the root.
+		name.set(Path.from("org/room/live.hang"));
+		await settle();
+		expect((await readCatalog(broadcast))?.echo as unknown).toEqual({ path: "../../viewers" });
+
+		echo.set(undefined);
+		await settle();
+		expect((await readCatalog(broadcast))?.echo).toBeUndefined();
+	} finally {
+		broadcast.close();
+	}
 });
 
 test("each video and audio track publishes HLS records and advertises them once declared", async () => {
@@ -954,7 +1061,7 @@ test("a new network broadcast starts every track name over", async () => {
 	await settle();
 	expect((await readCatalog(broadcast))?.video?.renditions.video?.track).toBeUndefined();
 	expect(video.track.peek()?.name).toBe("video");
-	expect(video.track.peek()?.appendGroup().sequence).toBe(0);
+	expect(video.track.peek()?.appendGroup().sequence).toBe(0n);
 	expect(() => broadcast.video("video/1").close()).not.toThrow();
 
 	broadcast.close();

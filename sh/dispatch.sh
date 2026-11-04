@@ -100,14 +100,15 @@ module() {
 
 # maturin bundles rs/moq-ffi into the moq-ffi wheel, and the other bindings
 # generate from it, built by the `cargo build-ffi` alias in .cargo/config.toml.
-# Each binding's check also compiles its doc samples. kt, swift, go, cpp, and
+# Each binding's check also compiles its doc samples. Python, Kotlin, and Swift
+# render through the rs/uniffi-bindgen generator fork. kt, swift, go, cpp, and
 # obs_compile each build moq-ffi's cdylib with the same features and profile
 # before reading target/debug/libmoq_ffi.so. Cargo runs one build at a time per
 # target directory and leaves a fresh output untouched, so the first of those
 # lanes builds it while the rest wait in Cargo, and none rewrites it while
 # another reads it. py builds its test features into a target directory of its
 # own, and carla runs its tools outside py's venv.
-module py '^(py/|sh/py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/|doc/lib/py/|doc/lib/samples\.sh$)' \
+module py '^(py/|sh/py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/|rs/uniffi-bindgen/|doc/lib/py/|doc/lib/samples\.sh$)' \
     tools='uv' compiles=check
 # sh/rs/select.sh widens to the whole workspace for inputs every crate shares.
 # moq-cli builds the Rust interop clients as examples from outside its
@@ -128,16 +129,19 @@ module cpp '^(\.cargo/config\.toml$|cpp/moq/|cpp/justfile$|sh/cpp/|sh/clang-form
 # the libobs headers it compiles against.
 module obs_compile '^(\.cargo/config\.toml$|cpp/obs/|cpp/moq/|sh/obs/|rs/moq-ffi/|rs/moq-c/native-libs/|flake\.nix$)' \
     tools='cargo cmake pkg-config uniffi-bindgen-cpp' compiles=check lane=cpp
-# The JS tests also read Rust's shared JSON vectors; sh/js/workspace.py
-# fails a check that reads a cross-tree input this pattern misses.
-# demo/pub is a Worker outside the Bun workspace, listed so Biome lints it.
-# Root Nix inputs own the browser version every npm Playwright pin matches.
 # The bun lane exists because `bun install` relinks the root workspace's
 # packages even when nothing changed, so a concurrent install or import of
-# them fails.
-module js '^(js/|bench/browser/|doc/|drafts/|demo/(boy|pub|web|carla/web)/|test/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$|flake\.(nix|lock)$)' \
+# them fails. Biome checks the whole repository. It registers before js so
+# that fix runs it first, since Biome can fix sources that the package build
+# rejects, such as a type-only export.
+module biome '' \
+    tools='bun' lane=bun fix
+# The JS tests also read Rust's shared JSON vectors; sh/js/workspace.py
+# fails a check that reads a cross-tree input this pattern misses.
+# Root Nix inputs own the browser version every npm Playwright pin matches.
+module js '^(js/|bench/browser/|doc/|drafts/|demo/(boy|web|carla/web)/|test/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$|flake\.(nix|lock)$)' \
     tools='bun python3' lane=bun fix
-module kt '^(\.cargo/config\.toml$|kt/|sh/kt/|rs/moq-ffi/|doc/lib/kt/|doc/lib/samples\.sh$)' \
+module kt '^(\.cargo/config\.toml$|kt/|sh/kt/|rs/moq-ffi/|rs/uniffi-bindgen/|doc/lib/kt/|doc/lib/samples\.sh$)' \
     tools='cargo gradle java ktfmt' compiles=check fix
 # Rust source is compiled below. Nix reads Cargo metadata, packaging inputs,
 # and its own modules and test helpers; those still gate the full flake.
@@ -152,7 +156,7 @@ module carla '^demo/carla/(sim/|justfile$)' \
 # swift needs no tools: it skips off macOS by design, and platform.yml is its
 # real gate. Its formatter is absent where nixpkgs cannot build it (see
 # flake.nix).
-module swift '^(\.cargo/config\.toml$|swift/|sh/swift/|rs/moq-ffi/|doc/lib/swift/|doc/lib/samples\.sh$)' \
+module swift '^(\.cargo/config\.toml$|swift/|sh/swift/|rs/moq-ffi/|rs/uniffi-bindgen/|doc/lib/swift/|doc/lib/samples\.sh$)' \
     fix
 module go '^(\.cargo/config\.toml$|go/|sh/go/|rs/moq-ffi/|doc/lib/go/|doc/lib/samples\.sh$)' \
     tools='cargo go uniffi-bindgen-go' compiles=check fix
@@ -161,7 +165,7 @@ module drafts '^(drafts/|sh/drafts/|doc/\.vitepress/drafts\.ts$)' \
 module markdown '' \
     tools='bun' lane=bun fix
 module gh '' \
-    tools='actionlint zizmor bun python3 cargo clippy-driver dpkg-deb nfpm rpm' lane=bun
+    tools='actionlint zizmor bun python3 cargo release-plz clippy-driver dpkg-deb nfpm rpm' lane=bun
 # The drill mutations patch Rust source, so a Rust change can move the code
 # they target. Only nightly runs the drills; this catches a stale patch.
 module drill '^(rs/|test/drill/)'
@@ -188,6 +192,7 @@ module python '(\.pyi?|(^|/)pyproject\.toml)$' \
 module shell '' \
     tools='shellcheck shfmt' fix
 module large_files ''
+module text ''
 module toml '' \
     tools='taplo' fix
 module nix '' \
@@ -365,11 +370,13 @@ step() {
             }
             ;;
         check:ts_paths) python3 sh/gh/ts-paths.py ;;
+        check:biome) just biome ;;
         check:markdown)
             bun install --frozen-lockfile
             sh/markdown.sh check
             ;;
         check:large_files) sh/large-files.sh "$large_base" ;;
+        check:text) sh/text.sh ;;
         check:python)
             files '*.py' '*.pyi' | xargs -0 ruff check --force-exclude
             files '*.py' '*.pyi' | xargs -0 ruff format --check --force-exclude
@@ -382,7 +389,8 @@ step() {
         test:py) just py test ;;
         test:gh) just gh test ;;
         fix:rs) just rs fix-changed "$rs_list" ;;
-        fix:js) just js fix "$js_list" ;;
+        fix:js) just js fix-changed "$js_list" ;;
+        fix:biome) just biome-fix ;;
         fix:markdown)
             bun install
             sh/markdown.sh fix

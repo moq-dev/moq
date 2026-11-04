@@ -23,6 +23,7 @@ runner-vm:
 
 # Lint GitHub Actions workflows, their security, their alert coverage, that every step runs a recipe, and that every opt-in test has a caller.
 check:
+    python3 sh/version.py
     actionlint
     zizmor --offline --quiet .github
     sh/gh/alert.sh check-coverage
@@ -33,6 +34,7 @@ check:
 
 # Tests of repository tooling; every `just check` and `just ci` runs them.
 test:
+    python3 sh/version.test.py
     python3 sh/local.test.py
     python3 test/smoke/runner.test.py
     python3 sh/coverage.test.py
@@ -42,9 +44,11 @@ test:
     python3 bench/compare.test.py
     python3 bench/summary.test.py
     python3 bench/profile.test.py
+    python3 bench/fanout.test.py
     python3 sh/gh/gst-formula.test.py
     python3 sh/changed.test.py
     python3 sh/large-files.test.py
+    python3 sh/text.test.py
     python3 sh/dispatch-query.test.py
     python3 sh/dispatch-query.test.py --bench
     python3 sh/gh/test-inventory.test.py
@@ -53,7 +57,7 @@ test:
     python3 sh/gh/install-formula.test.py
     sh/gh/release.test.sh
     python3 sh/gh/ffi.test.py
-    bun test sh/gh/ffi.test.ts sh/gh/cpp.test.ts
+    bun test sh/gh/ffi.test.ts sh/gh/cpp.test.ts sh/gh/publish.test.ts
     python3 sh/rs/package-rename.test.py
     python3 sh/dart/build.test.py
     python3 sh/rs/select.test.py

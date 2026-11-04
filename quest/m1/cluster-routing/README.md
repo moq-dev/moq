@@ -39,9 +39,9 @@ Decided with the maintainer, 2026-10-13:
   refresh from the origin; instant failover is not required. Measure failure
   detection, additional routing recovery, and total interruption separately.
 - An origin declares its own routing identity, fresh per process or tab
-  restart and shared across its live sessions. It is unverified: recognizing
-  a routing identity needs key proof, which
-  [Peer grants](/quest/m2/p2p/peer-grant.md) owns. Receiver-stamped
+  restart and shared across its live sessions. It is unverified. Decided 2026-11-02 (maintainer, /quest-unblock): no
+  key proof is planned; if a use case needs a provable identity, moq-lite-07's
+  route identity becomes a public key, independent of P2P. Receiver-stamped
   per-session identities were dropped 2026-10-26 (maintainer): in a mesh,
   two relays stamping their sessions from one origin forward its routes as
   two identities a third relay cannot recognize as one. Keep administrative
@@ -51,8 +51,8 @@ Decided with the maintainer, 2026-10-13:
   qualified when its publish grant is scoped, and stays bare when it is
   unscoped, so a forger only damages routes inside its own scope. (Decided
   2026-10-14; own identities included 2026-10-26, since they are no longer
-  proven.) How a scoped peer's identities are keyed is open in
-  [Routes and announces](/quest/m1/cluster-routing/routes.md): the
+  proven.) How a scoped peer's identities are keyed waits on the maintainer in
+  [Route session integration](/quest/m1/cluster-routing/routes/session.md): the
   issuer-qualified subject key was dropped 2026-11-02 (maintainer).
 - Matching explicit epochs authorize resume. Epochless changes retain
   Restart and fresh resolution; neither node identity nor a healthy
@@ -86,7 +86,7 @@ Decided with the maintainer, 2026-10-13:
 
 The handoff proof showed a complete neighbor snapshot does not prove its
 claims are current; receivers merge origin-versioned views by floor instead.
-The routing contract is recorded in [Routes and announces](/quest/m1/cluster-routing/routes.md)
+The routing contract is recorded in [Routes and announces](/quest/m1/cluster-routing/routes/README.md)
 with deterministic counterexamples: path-only subscriptions that reselect
 origins at every hop loop and deadlock, so forwarded requests name their
 identity; feasibility makes transit priorities depend on arrival order;
@@ -109,7 +109,7 @@ The 300 ms update hold alone is no longer the baseline. Keep regression
 coverage for announcement churn, idle work, active continuity, and retained
 state separately; fewer control bytes does not prove cheaper runtime work.
 
-The earlier simulator estimates remain in [Routes and announces](/quest/m1/cluster-routing/routes.md).
+The earlier simulator estimates remain in [Routes and announces](/quest/m1/cluster-routing/routes/README.md).
 They do not prove the handoff correct; its fixtures do. Preserve public synthetic
 fixtures and controlled-time regressions, including residual stale revival,
 not only results from deployment tooling. Do not claim per-origin aggregation
@@ -126,7 +126,7 @@ setup after the capabilities land.
 
 ## Required
 
-- [Routes and announces](/quest/m1/cluster-routing/routes.md) - implement the proven route layer with Rust/JS parity and tiered-cluster acceptance
+- [Routes and announces](/quest/m1/cluster-routing/routes/README.md) - implement the proven route layer with Rust/JS parity and tiered-cluster acceptance
 - [Outbound federation](/quest/m1/cluster-routing/federation.md) - an outbound-only local relay exchanges authorized broadcasts with the CDN and survives partition/healing
 
 ## Related

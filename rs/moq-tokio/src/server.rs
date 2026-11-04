@@ -8,25 +8,17 @@ use std::net;
 #[cfg(any(test, all(feature = "uds", unix)))]
 use std::path::PathBuf;
 
-#[cfg(feature = "iroh")]
-use crate::iroh;
 use crate::{Error, Transport};
 use moq_net::Session;
 use url::Url;
 
 // Only the transports that finish their handshake in a spawned future need `.boxed()`;
 // the stream listeners hand back an already-built `Request`.
-#[cfg(any(feature = "quic", feature = "iroh", feature = "websocket"))]
+#[cfg(any(feature = "quic", feature = "websocket"))]
 use futures::FutureExt;
 // The pending handshakes of the transports `Server` accepts itself; WebRTC
 // signaling is the caller's, so a WebRTC-only build has none.
-#[cfg(any(
-	feature = "quic",
-	feature = "iroh",
-	feature = "websocket",
-	feature = "tcp",
-	all(feature = "uds", unix)
-))]
+#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", all(feature = "uds", unix)))]
 use futures::{
 	future::BoxFuture,
 	stream::{FuturesUnordered, StreamExt},
@@ -177,14 +169,6 @@ pub struct Config {
 	#[cfg(feature = "websocket")]
 	pub websocket: Option<crate::websocket::Listener>,
 
-	/// An Iroh endpoint to accept sessions from.
-	///
-	/// The server owns the endpoint's listener: it replaces the endpoint's ALPN set with its
-	/// configured versions, accepts every incoming connection, and closes it on shutdown.
-	/// Don't give one endpoint to two servers; dialing through clones of it is fine.
-	#[cfg(feature = "iroh")]
-	pub iroh: Option<iroh::Endpoint>,
-
 	/// The origin published to every accepted session.
 	pub publisher: Option<moq_net::origin::Consumer>,
 
@@ -221,8 +205,6 @@ impl Config {
 			quic: self.quic.clone(),
 			#[cfg(feature = "websocket")]
 			websocket: None,
-			#[cfg(feature = "iroh")]
-			iroh: None,
 			publisher: self.publisher.clone(),
 			subscriber: self.subscriber.clone(),
 			stats: self.stats.clone(),
@@ -243,13 +225,7 @@ pub struct Server {
 	versions: moq_net::Versions,
 	/// From [`crate::listen::Config::resolved_timeout`].
 	timeout: Option<std::time::Duration>,
-	#[cfg(any(
-		feature = "quic",
-		feature = "iroh",
-		feature = "websocket",
-		feature = "tcp",
-		all(feature = "uds", unix)
-	))]
+	#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", all(feature = "uds", unix)))]
 	/// Pending handshakes, each isolated: one panicking (`None`) must not end the listener.
 	/// Each is boxed before `isolate` wraps it, so a debug build never holds a
 	/// handshake's large state twice on the accept loop's stack.
@@ -259,8 +235,6 @@ pub struct Server {
 	/// The `tls://` config another listener can serve, when a listen identity is loaded.
 	#[cfg(all(feature = "tcp", feature = "_certs"))]
 	tls_stream: Option<std::sync::Arc<rustls::ServerConfig>>,
-	#[cfg(feature = "iroh")]
-	iroh: Option<iroh::Endpoint>,
 	#[cfg(feature = "quic")]
 	quic: Option<crate::quic::Server>,
 	#[cfg(feature = "websocket")]
@@ -286,8 +260,6 @@ impl Server {
 			tls,
 			#[cfg(feature = "websocket")]
 			websocket,
-			#[cfg(feature = "iroh")]
-			iroh,
 			publisher,
 			subscriber,
 			stats,
@@ -314,6 +286,9 @@ impl Server {
 		// is (the default). A stream-only server (`--listen-unix-bind` with no
 		// `--listen`) doesn't also open UDP/443.
 		quic.validate()?;
+		// Every qmux session this server accepts starts at the same `[quic]` windows.
+		#[cfg(any(feature = "websocket", feature = "tcp", all(feature = "uds", unix)))]
+		let resolved = quic.resolve();
 
 		let build_quic = parts.quic() && (config.bind.is_some() || !config.has_stream_listener());
 		// A stream-only server would silently ignore what only QUIC reads. A caller
@@ -425,6 +400,7 @@ impl Server {
 			stream_binds,
 			stream_versions(&versions),
 			timeout,
+			resolved.clone(),
 			#[cfg(all(feature = "uds", unix))]
 			unix_allow,
 		);
@@ -434,13 +410,6 @@ impl Server {
 			.map(|tls| TcpTls::new(&config, &versions, tls))
 			.transpose()?
 			.map(|tls| tls.config);
-
-		// The endpoint was bound before this server's versions were known, so it
-		// accepts nothing until they name its ALPNs.
-		#[cfg(feature = "iroh")]
-		if let Some(endpoint) = iroh.as_ref() {
-			iroh::listen(endpoint, &versions)?;
-		}
 
 		let mut moq = moq_net::Server::new()
 			.with_versions(versions.clone())
@@ -458,13 +427,7 @@ impl Server {
 
 		Ok(Server {
 			activity,
-			#[cfg(any(
-				feature = "quic",
-				feature = "iroh",
-				feature = "websocket",
-				feature = "tcp",
-				all(feature = "uds", unix)
-			))]
+			#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", all(feature = "uds", unix)))]
 			accept: Default::default(),
 			moq,
 			versions,
@@ -473,12 +436,10 @@ impl Server {
 			streams,
 			#[cfg(all(feature = "tcp", feature = "_certs"))]
 			tls_stream,
-			#[cfg(feature = "iroh")]
-			iroh,
 			#[cfg(feature = "quic")]
 			quic,
 			#[cfg(feature = "websocket")]
-			websocket,
+			websocket: websocket.map(|websocket| websocket.with_quic(&resolved)),
 		})
 	}
 
@@ -549,7 +510,8 @@ impl Server {
 	pub fn tls_acceptor(&self) -> Option<crate::tcp::TlsAcceptor> {
 		let config = self.tls_stream.clone()?;
 		let server = self.moq.clone().with_versions(self.streams.versions.clone());
-		Some(crate::tcp::TlsAcceptor::new(config, server, self.timeout))
+		let session = crate::qmux_config(&self.streams.quic);
+		Some(crate::tcp::TlsAcceptor::new(config, session, server, self.timeout))
 	}
 
 	/// A live handle to the certificates this server is serving.
@@ -569,13 +531,7 @@ impl Server {
 		crate::tls::Certificates::empty()
 	}
 
-	#[cfg(not(any(
-		feature = "quic",
-		feature = "iroh",
-		feature = "websocket",
-		feature = "tcp",
-		all(feature = "uds", unix)
-	)))]
+	#[cfg(not(any(feature = "quic", feature = "websocket", feature = "tcp", all(feature = "uds", unix))))]
 	/// Fails, since no compiled transport is one this server listens on (WebRTC
 	/// sessions arrive through [`Listener::accept_webrtc`]).
 	async fn accept_next(&mut self) -> crate::Result<Request> {
@@ -665,13 +621,7 @@ impl Server {
 
 	/// The body of [`Listener::accept`]. Stream accept loops start here if
 	/// [`Server::bind`] left them stopped; [`Server::listen`] already started them.
-	#[cfg(any(
-		feature = "quic",
-		feature = "iroh",
-		feature = "websocket",
-		feature = "tcp",
-		all(feature = "uds", unix)
-	))]
+	#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", all(feature = "uds", unix)))]
 	async fn accept_next(&mut self) -> crate::Result<Request> {
 		// A `bind` (rather than `listen`) leaves the stream loops stopped so an
 		// embedder can read the port before it is willing to take sessions.
@@ -702,17 +652,6 @@ impl Server {
 			};
 			#[cfg(not(feature = "quic"))]
 			let quic_accept = async { None::<()> };
-
-			#[cfg(feature = "iroh")]
-			let iroh_accept = async {
-				#[cfg(feature = "iroh")]
-				if let Some(endpoint) = self.iroh.as_mut() {
-					return Some(endpoint.accept().await);
-				}
-				None
-			};
-			#[cfg(not(feature = "iroh"))]
-			let iroh_accept = async { None::<()> };
 
 			#[cfg(feature = "websocket")]
 			let ws_ref = self.websocket.as_ref();
@@ -790,45 +729,7 @@ impl Server {
 							let (request, deadline) = accept_request(&setup.server, session, deadline).await?;
 							// Only WebTransport carries a request URL; raw QUIC puts the path in the SETUP.
 							let transport = match url { Some(_) => Transport::WebTransport, None => Transport::Quic };
-							Ok(Request { transport, url, identity, authority, link, handshake: Box::new(request), quic, window, quic_limits: Default::default(), deadline, active })
-						}.boxed()).boxed());
-					}
-				}
-				Some(_conn) = iroh_accept => {
-					#[cfg(feature = "iroh")]
-					{
-						// Only a closed endpoint stops yielding; like QUIC, its loss ends the listener.
-						let Some(_conn) = _conn else {
-							self.shutdown().await;
-							return Err(Error::Accept(Transport::Iroh));
-						};
-						let alpns = versions.alpns();
-						let deadline = setup.deadline();
-						let Some(active) = setup.activity.enter() else {
-							_conn.refuse();
-							continue;
-						};
-						self.accept.push(crate::panic::isolate(async move {
-							let Accepted { session, url, identity, authority, link } = within(deadline, super::iroh::accept(_conn, alpns)).await?;
-							let address = match url { Some(_) => moq_net::transport::Address::Uri, None => moq_net::transport::Address::Setup };
-							let session = crate::iroh::Session::new(session, address);
-							let (request, deadline) = accept_request(&setup.server, session, deadline).await?;
-							Ok(Request {
-								transport: Transport::Iroh,
-								url,
-								identity,
-								authority,
-								link,
-								handshake: Box::new(request),
-								#[cfg(feature = "quic")]
-								quic: None,
-								#[cfg(feature = "quic")]
-								window: None,
-								#[cfg(feature = "quic")]
-								quic_limits: Default::default(),
-								deadline,
-								active,
-							})
+							Ok(Request { transport, url, identity, authority, link, handshake: Box::new(request), quic, window, quic_limits: Default::default(), #[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))] qmux: None, deadline, active })
 						}.boxed()).boxed());
 					}
 				}
@@ -870,12 +771,6 @@ impl Server {
 		}
 	}
 
-	/// The Iroh endpoint from [`Config::iroh`], if one was set.
-	#[cfg(feature = "iroh")]
-	pub fn iroh_endpoint(&self) -> Option<&iroh::Endpoint> {
-		self.iroh.as_ref()
-	}
-
 	/// The address the QUIC listener bound to, useful when the config asked for
 	/// port 0.
 	///
@@ -910,10 +805,6 @@ impl Server {
 		#[cfg(feature = "quic")]
 		if let Some(quic) = self.quic.take() {
 			quic.shutdown().await;
-		}
-		#[cfg(feature = "iroh")]
-		if let Some(iroh) = self.iroh.take() {
-			iroh.close().await;
 		}
 		#[cfg(feature = "websocket")]
 		{
@@ -989,6 +880,7 @@ impl Listener {
 			};
 			let (session, protocol) = within(deadline, handshake).await?;
 
+			let qmux = session.clone();
 			let (request, deadline) = accept_request(&server.moq, session, deadline).await?;
 			Ok(Request {
 				transport: Transport::WebRtc,
@@ -1004,8 +896,10 @@ impl Listener {
 				quic: None,
 				#[cfg(feature = "quic")]
 				window: None,
-				#[cfg(feature = "quic")]
+				#[cfg(feature = "_transport")]
 				quic_limits: Default::default(),
+				#[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
+				qmux: Some(qmux),
 				deadline,
 				active,
 			})
@@ -1057,12 +951,6 @@ impl Listener {
 	pub fn accept_health(&self) -> Vec<crate::accept::Health> {
 		self.server.accept_health()
 	}
-
-	/// The Iroh endpoint from [`Config::iroh`], if one was set.
-	#[cfg(feature = "iroh")]
-	pub fn iroh_endpoint(&self) -> Option<&iroh::Endpoint> {
-		self.server.iroh_endpoint()
-	}
 }
 
 impl Drop for Listener {
@@ -1078,13 +966,7 @@ async fn serve_session(request: Request) -> crate::Result<()> {
 }
 
 /// The MoQ server an accepted connection handshakes against, and how long it has.
-#[cfg(any(
-	feature = "quic",
-	feature = "iroh",
-	feature = "websocket",
-	feature = "tcp",
-	all(feature = "uds", unix)
-))]
+#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", all(feature = "uds", unix)))]
 #[derive(Clone)]
 struct Setup {
 	activity: moq_net::server::Activity,
@@ -1092,13 +974,7 @@ struct Setup {
 	timeout: Option<std::time::Duration>,
 }
 
-#[cfg(any(
-	feature = "quic",
-	feature = "iroh",
-	feature = "websocket",
-	feature = "tcp",
-	all(feature = "uds", unix)
-))]
+#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", all(feature = "uds", unix)))]
 impl Setup {
 	/// When a connection accepted now must finish its handshake, or `None` to wait
 	/// forever, including past the clock's range.
@@ -1109,7 +985,6 @@ impl Setup {
 
 #[cfg(any(
 	feature = "quic",
-	feature = "iroh",
 	feature = "websocket",
 	feature = "tcp",
 	all(feature = "uds", unix),
@@ -1134,12 +1009,24 @@ where
 	Ok((request, deadline))
 }
 
+/// The limits [`Request::ok`] gives an accepted qmux session on `transport`. A WebRTC data
+/// channel keeps its own receive window, which sizes its read queue, so a wider one would let
+/// a peer honoring flow control overrun the queue and close the channel.
+#[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
+fn qmux_limits(transport: Transport, mut limits: moq_quic::Limits) -> moq_quic::Limits {
+	if transport == Transport::WebRtc {
+		limits.receive_window = None;
+	}
+	limits
+}
+
 #[cfg(feature = "websocket")]
 pub(crate) async fn accept_websocket(
 	session: qmux::Session,
 	options: crate::websocket::Options,
 	deadline: Option<kio::clock::Instant>,
 ) -> crate::Result<Request> {
+	let qmux = session.clone();
 	let (request, deadline) = accept_request(&options.server, session, deadline).await?;
 	let authority = options.url.host_str().filter(|h| !h.is_empty()).map(str::to_owned);
 	Ok(Request {
@@ -1153,8 +1040,10 @@ pub(crate) async fn accept_websocket(
 		quic: None,
 		#[cfg(feature = "quic")]
 		window: None,
-		#[cfg(feature = "quic")]
+		#[cfg(feature = "_transport")]
 		quic_limits: Default::default(),
+		#[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
+		qmux: Some(qmux),
 		deadline,
 		active: options.active,
 	})
@@ -1171,7 +1060,6 @@ struct Deadline {
 impl Deadline {
 	#[cfg(any(
 		feature = "quic",
-		feature = "iroh",
 		feature = "websocket",
 		feature = "tcp",
 		all(feature = "uds", unix),
@@ -1217,7 +1105,6 @@ impl Deadline {
 /// handshake is dropped, which closes its connection.
 #[cfg(any(
 	feature = "quic",
-	feature = "iroh",
 	feature = "websocket",
 	feature = "tcp",
 	all(feature = "uds", unix),
@@ -1341,6 +1228,8 @@ struct StreamListeners {
 	health: Vec<crate::accept::Health>,
 	versions: moq_net::Versions,
 	timeout: Option<std::time::Duration>,
+	/// The `[quic]` section each accepted session starts with.
+	quic: crate::quic::Resolved,
 	#[cfg(all(feature = "uds", unix))]
 	unix_allow: Option<crate::unix::Allow>,
 	/// Bound sockets whose accept loops have not started. Empty once [`Self::serve`]
@@ -1359,6 +1248,7 @@ impl StreamListeners {
 		binds: Vec<StreamBind>,
 		versions: moq_net::Versions,
 		timeout: Option<std::time::Duration>,
+		quic: crate::quic::Resolved,
 		#[cfg(all(feature = "uds", unix))] unix_allow: Option<crate::unix::Allow>,
 	) -> Self {
 		let health = binds
@@ -1372,6 +1262,7 @@ impl StreamListeners {
 			health,
 			versions,
 			timeout,
+			quic,
 			#[cfg(all(feature = "uds", unix))]
 			unix_allow,
 			pending: Vec::new(),
@@ -1404,6 +1295,7 @@ impl StreamListeners {
 					let mut listener = crate::tcp::Listener::bind(addr)
 						.await?
 						.with_protocols(alpns)
+						.with_quic(&self.quic)
 						.with_accept_health(health);
 					let encrypted = tls.is_some();
 					if let Some(tls) = tls {
@@ -1420,6 +1312,7 @@ impl StreamListeners {
 					let listener = crate::unix::Listener::bind(&path)
 						.await?
 						.with_protocols(alpns)
+						.with_quic(&self.quic)
 						.with_accept_health(health);
 					// Loose socket perms let workers run as a different user. The parent
 					// directory or uid/gid/pid allowlist is the access gate.
@@ -1674,6 +1567,7 @@ pub(crate) async fn accept_stream(
 		deadline,
 		active,
 	} = incoming;
+	let qmux = session.clone();
 	let (request, deadline) = accept_request(server, session, deadline).await?;
 	Ok(Request {
 		transport,
@@ -1686,8 +1580,10 @@ pub(crate) async fn accept_stream(
 		quic: None,
 		#[cfg(feature = "quic")]
 		window: None,
-		#[cfg(feature = "quic")]
+		#[cfg(feature = "_transport")]
 		quic_limits: Default::default(),
+		#[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
+		qmux: Some(qmux),
 		deadline,
 		active,
 	})
@@ -1696,7 +1592,7 @@ pub(crate) async fn accept_stream(
 /// The transport-level facts a backend captures while accepting a connection, before the
 /// MoQ SETUP. Grouped so the shared accept loop builds a [`Request`] from named fields
 /// rather than a wide tuple.
-#[cfg(any(feature = "quic", feature = "iroh"))]
+#[cfg(feature = "quic")]
 pub(crate) struct Accepted<S> {
 	pub session: S,
 	pub url: Option<Url>,
@@ -1706,8 +1602,8 @@ pub(crate) struct Accepted<S> {
 }
 
 /// What the transport knows about an accepted session's link, reported to whoever
-/// authorizes it. Every field is optional: a unix socket has no addresses, a qmux
-/// stream negotiates no ALPN, and iroh dials by node id.
+/// authorizes it. Every field is optional: a unix socket has no addresses, and a qmux
+/// stream negotiates no ALPN.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Link {
@@ -1737,7 +1633,7 @@ pub struct Request {
 	url: Option<Url>,
 	/// The authority the client dialed, when it offered one: the TLS SNI on raw QUIC and
 	/// `tls://`, the CONNECT authority on WebTransport. `None` on the plaintext stream
-	/// bindings and on iroh.
+	/// bindings.
 	authority: Option<String>,
 	/// The peer's validated mTLS identity, captured at the transport handshake (before
 	/// the MoQ SETUP), when the backend supports it.
@@ -1752,9 +1648,13 @@ pub struct Request {
 	/// The receive window [`Request::ok`] opens unless [`Request::with_quic_limits`] names one.
 	#[cfg(feature = "quic")]
 	window: Option<std::num::NonZeroU64>,
-	/// What [`Request::ok`] applies to the QUIC connection before answering SETUP.
-	#[cfg(feature = "quic")]
+	/// What [`Request::ok`] applies to the QUIC connection or qmux session before answering SETUP.
+	#[cfg(feature = "_transport")]
 	quic_limits: moq_quic::Limits,
+	/// The session under a WebSocket, `tcp://`, `tls://`, `unix://`, or WebRTC request, which
+	/// [`Request::ok`] widens to [`Request::with_quic_limits`].
+	#[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
+	qmux: Option<qmux::Session>,
 	/// What remains of the handshake deadline, which also bounds [`Request::ok`].
 	deadline: Option<Deadline>,
 }
@@ -1800,19 +1700,21 @@ impl Request {
 	}
 
 	/// The QUIC connection under this request, to change its limits once the session runs.
-	/// `None` on a transport moq-quic does not drive (qmux streams, iroh).
+	/// `None` on a transport moq-quic does not drive (qmux streams).
 	#[cfg(feature = "quic")]
 	pub fn quic(&self) -> Option<&crate::quic::driver::connection::Connection> {
 		self.quic.as_ref()
 	}
 
 	/// Set the QUIC limits [`Self::ok`] applies before answering SETUP, replacing any set
-	/// before. Ignored on a transport moq-quic does not drive.
+	/// before.
 	///
-	/// Until then the connection holds only [`moq_net::transport::SETUP_RECEIVE_WINDOW`];
+	/// Until then a QUIC connection holds only [`moq_net::transport::SETUP_RECEIVE_WINDOW`];
 	/// `ok` opens `receive_window`, or `[quic] receive_window` when it is unset, after the
-	/// other limits, so a `receive_rate` set here paces the opened window.
-	#[cfg(feature = "quic")]
+	/// other limits, so a `receive_rate` set here paces the opened window. A qmux session
+	/// starts at the `[quic]` defaults and takes the windows and stream count set here; it
+	/// never paces, so `ok` refuses a rate cap on one.
+	#[cfg(feature = "_transport")]
 	pub fn with_quic_limits(mut self, limits: moq_quic::Limits) -> Result<Self, moq_quic::LimitsError> {
 		limits.validate()?;
 		self.quic_limits = limits;
@@ -1830,6 +1732,13 @@ impl Request {
 		crate::runtime::scope(Deadline::bound(self.deadline.as_ref(), async { Ok(work.await) })).await
 	}
 
+	/// The receive window of the qmux session under this request.
+	#[cfg(all(test, any(feature = "websocket", feature = "tcp")))]
+	pub(crate) fn qmux_window(&self) -> moq_net::transport::ReceiveWindow {
+		let qmux = self.qmux.as_ref().expect("a qmux session");
+		moq_net::transport::poll::Session::receive_window(qmux).expect("qmux reports its window")
+	}
+
 	/// Accept the session, driving it until it closes.
 	///
 	/// A driver panic is reported through [`Session::closed`].
@@ -1845,6 +1754,13 @@ impl Request {
 			limits.receive_window = limits.receive_window.or(self.window);
 			quic.set_limits(limits)
 				.expect("validated by with_quic_limits and the config");
+		}
+		#[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
+		if let Some(qmux) = &self.qmux
+			&& let Err(err) = qmux.set_limits(qmux_limits(self.transport, self.quic_limits))
+		{
+			self.handshake.close(moq_net::SessionError::Internal.into());
+			return Err(crate::Error::QmuxLimits(crate::error::message(err)));
 		}
 		let Request {
 			handshake,
@@ -1887,7 +1803,7 @@ impl Request {
 	}
 
 	/// The host authority the client dialed, or `None` when the client offered none or the
-	/// transport carries no host (iroh, plaintext stream bindings). On raw QUIC and
+	/// transport carries no host (plaintext stream bindings). On raw QUIC and
 	/// `tls://` it is the TLS SNI.
 	///
 	/// Reported as offered: rustls sends no SNI for an IP-literal dial (RFC 6066),
@@ -2016,6 +1932,7 @@ mod tests {
 			Vec::new(),
 			Default::default(),
 			None,
+			Default::default(),
 			#[cfg(all(feature = "uds", unix))]
 			None,
 		);
@@ -2049,6 +1966,47 @@ mod tests {
 		config.listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
 		config.tls = Some(tls);
 		assert!(matches!(Server::new(config), Err(Error::NoBackend(_))));
+	}
+
+	/// The windows `[quic]` configures, smaller than its defaults.
+	#[cfg(feature = "tcp")]
+	fn small_quic() -> crate::quic::Config {
+		crate::quic::Config {
+			receive_window: Some(moq_net::transport::MIN_RECEIVE_WINDOW * 2),
+			stream_receive_window: Some(256 * 1024),
+			..Default::default()
+		}
+	}
+
+	/// A `tcp://` session starts at the server's `[quic]` windows rather than the defaults,
+	/// before anything admits it.
+	#[cfg(feature = "tcp")]
+	#[tokio::test]
+	async fn an_accepted_qmux_session_starts_at_the_configured_windows() {
+		const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+		let mut listen = crate::listen::Config::default();
+		listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+		let mut listener = listen
+			.init(small_quic())
+			.expect("server init")
+			.listen()
+			.await
+			.expect("listen");
+		let addr = listener.tcp_local_addr().expect("tcp listener bound");
+
+		let client = crate::connect::Config::default()
+			.init(Default::default())
+			.expect("client init");
+		let url: Url = format!("tcp://{addr}/").parse().unwrap();
+		let _connection = client.connect(url);
+		let request = kio::clock::timeout(TIMEOUT, listener.accept())
+			.await
+			.expect("accept timeout")
+			.expect("accept");
+
+		let window = request.qmux_window();
+		assert_eq!(window.connection, moq_net::transport::MIN_RECEIVE_WINDOW * 2);
+		assert_eq!(window.stream, 256 * 1024);
 	}
 
 	/// A millisecond track: the frames written here carry timestamps.
@@ -2683,8 +2641,10 @@ mod tests {
 			quic: None,
 			#[cfg(feature = "quic")]
 			window: None,
-			#[cfg(feature = "quic")]
+			#[cfg(feature = "_transport")]
 			quic_limits: Default::default(),
+			#[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
+			qmux: None,
 			deadline,
 		}
 		.with_stats(

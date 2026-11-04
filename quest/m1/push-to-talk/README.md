@@ -32,7 +32,7 @@ Decided 2026-10-28 (maintainer):
 - **Encoding no longer waits for demand**, in every first-party publisher
   (finished by [moq-dev/moq#7554](https://github.com/moq-dev/moq/pull/7554)).
   A listener who
-  subscribes after the unmute still gets the start within its `maxDelay`. This
+  subscribes after the unmute still gets the start within its `delay.max`. This
   replaces a publisher head buffer, which was considered and dropped as the
   same idea special-cased.
 

@@ -34,7 +34,7 @@ ships, not the default.
   crosses runtimes (WebRTC media and SRT, received on the ring's one port
   and handed to their tokio stacks), what a
   ring relay still serves from the shared tokio runtime (TCP, WebSocket,
-  Unix, HTTP, iroh, outbound cluster dials), and what it refuses loudly
+  Unix, HTTP, outbound cluster dials), and what it refuses loudly
   (`listen.lb_id` QUIC-LB server ids). That refusal is a recorded exception
   to parity, not a prerequisite, until a consumer asks.
 
@@ -42,5 +42,4 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [Ring drain GOAWAY](/quest/m2/uring-ring-drain.md) - closes are delivered on the ring for moq-transport too
 - [One port on the io_uring workers](/quest/m2/uring-demux.md) - a one-port config is served on the ring too

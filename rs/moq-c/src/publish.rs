@@ -97,8 +97,8 @@ enum Family {
 
 /// The track-publishing handles of one broadcast.
 ///
-/// Closing the broadcast ends every child still open with `Unroutable`, the way a reader sees a
-/// publisher leave, and frees its handle. A finished track stops being served once its last
+/// Closing the broadcast ends every child still open with `Unroutable` (`Internal` to a
+/// moq-transport reader), and frees its handle. A finished track stops being served once its last
 /// producer drops, and a `*_finish` call frees its handle, so the broadcast keeps the finished
 /// producer here instead: a subscriber arriving after the end still finds the track until
 /// [`State::publish_close`].
@@ -252,11 +252,9 @@ impl<T> std::ops::DerefMut for Kept<T> {
 	}
 }
 
-// C data methods stamp a write the caller left unstamped on one fixed broadcast clock,
-// without retaining another catalog handle after a failed stream retires its listing.
+/// A data producer, kept beside its broadcast's children.
 struct Data<T> {
 	producer: T,
-	clock: moq_mux::Clock,
 	children: Children,
 }
 
@@ -494,6 +492,13 @@ impl Publish {
 		})();
 		broadcast.driver.check()?;
 		result
+	}
+
+	/// Read the broadcast clock, the epoch every track in the broadcast is stamped in.
+	///
+	/// Reading it fixes the clock, as [`moq_mux::catalog::Producer::clock`] does.
+	pub fn catalog_now(&mut self, broadcast: Id) -> Result<moq_net::Timestamp, Error> {
+		Ok(self.catalog(broadcast)?.clock().now())
 	}
 
 	/// End the broadcast's content by finishing its catalog, with its entries still listed, so
@@ -1212,7 +1217,6 @@ impl Publish {
 		let producer = publish(&broadcast.catalog, track)?;
 		Ok(Data {
 			producer,
-			clock: broadcast.catalog.clock(),
 			children: broadcast.children.clone(),
 		})
 	}
@@ -1288,16 +1292,16 @@ impl Publish {
 		Ok(id)
 	}
 
-	/// Publish a new value to a JSON snapshot track. A no-op if unchanged.
+	/// Publish a new value to a JSON snapshot track at `timestamp` on the broadcast clock. A no-op
+	/// if unchanged.
 	pub fn json_snapshot_update(
 		&mut self,
 		json: Id,
 		value: serde_json::Value,
-		timestamp: Option<moq_net::Timestamp>,
+		timestamp: moq_net::Timestamp,
 	) -> Result<(), Error> {
 		let json = &mut self.json_snapshot.get_mut(json).ok_or(Error::TrackNotFound)?.data;
-		let at = timestamp.unwrap_or_else(|| json.clock.now());
-		json.producer.update(moq_net::Timed::from(&value).at(at))?;
+		json.producer.update(&value, timestamp)?;
 		Ok(())
 	}
 
@@ -1322,16 +1326,15 @@ impl Publish {
 		children.insert(&mut self.json_stream, producer, Child::JsonStream)
 	}
 
-	/// Append one record to a JSON stream track.
+	/// Append one record to a JSON stream track at `timestamp` on the broadcast clock.
 	pub fn json_stream_append(
 		&mut self,
 		stream: Id,
 		value: serde_json::Value,
-		timestamp: Option<moq_net::Timestamp>,
+		timestamp: moq_net::Timestamp,
 	) -> Result<(), Error> {
 		let producer = self.json_stream.get_mut(stream).ok_or(Error::TrackNotFound)?;
-		let at = timestamp.unwrap_or_else(|| producer.clock.now());
-		producer.producer.append(moq_net::Timed::from(&value).at(at))?;
+		producer.producer.append(&value, timestamp)?;
 		Ok(())
 	}
 
@@ -1368,21 +1371,23 @@ impl Publish {
 		)
 	}
 
-	/// Append one record to the back of a JSON window.
-	pub fn json_window_push(&mut self, window: Id, value: serde_json::Value) -> Result<(), Error> {
+	/// Append one record to the back of a JSON window at `timestamp` on the broadcast clock.
+	pub fn json_window_push(
+		&mut self,
+		window: Id,
+		value: serde_json::Value,
+		timestamp: moq_net::Timestamp,
+	) -> Result<(), Error> {
 		let window = &mut self.json_window.get_mut(window).ok_or(Error::TrackNotFound)?.data;
-		window
-			.producer
-			.push(moq_net::Timed::from(&value).at(window.clock.now()))?;
+		window.producer.push(moq_net::Timed::from(&value).at(timestamp))?;
 		Ok(())
 	}
 
-	/// Drop `count` records from the front of a JSON window, clamped to what it holds.
-	pub fn json_window_pop(&mut self, window: Id, count: u64) -> Result<(), Error> {
+	/// Drop `count` records from the front of a JSON window, clamped to what it holds, at
+	/// `timestamp` on the broadcast clock.
+	pub fn json_window_pop(&mut self, window: Id, count: u64, timestamp: moq_net::Timestamp) -> Result<(), Error> {
 		let window = &mut self.json_window.get_mut(window).ok_or(Error::TrackNotFound)?.data;
-		window
-			.producer
-			.pop(moq_net::Timed::from(count).at(window.clock.now()))?;
+		window.producer.pop(moq_net::Timed::from(count).at(timestamp))?;
 		Ok(())
 	}
 
@@ -1574,11 +1579,15 @@ mod children_tests {
 		}
 		let json = serde_json::Value::Null;
 		assert!(matches!(
-			state.publish.json_snapshot_update(json_snapshot, json.clone(), None),
+			state
+				.publish
+				.json_snapshot_update(json_snapshot, json.clone(), moq_net::Timestamp::ZERO),
 			Err(Error::TrackNotFound)
 		));
 		assert!(matches!(
-			state.publish.json_stream_append(json_stream, json, None),
+			state
+				.publish
+				.json_stream_append(json_stream, json, moq_net::Timestamp::ZERO),
 			Err(Error::TrackNotFound)
 		));
 	}
@@ -1630,12 +1639,7 @@ mod supervision_tests {
 		let origin = moq_tokio::origin::spawn();
 		let claim = origin.requests("room").unwrap();
 		let pending = origin.consume().request("room/first", None);
-		let prepared = claim
-			.requested_broadcast()
-			.await
-			.unwrap()
-			.prepare(moq_net::Epoch::mint())
-			.unwrap();
+		let prepared = claim.requested_broadcast().await.unwrap().prepare().unwrap();
 		let mut publish = Publish::default();
 		let first = publish
 			.create((prepared.broadcast().clone(), Default::default()))
@@ -1659,12 +1663,7 @@ mod supervision_tests {
 		publish.unannounce(publication).unwrap();
 
 		let pending = origin.consume().request("room/second", None);
-		let prepared = claim
-			.requested_broadcast()
-			.await
-			.unwrap()
-			.prepare(moq_net::Epoch::mint())
-			.unwrap();
+		let prepared = claim.requested_broadcast().await.unwrap().prepare().unwrap();
 		publish
 			.create((prepared.broadcast().clone(), Default::default()))
 			.unwrap();

@@ -1008,9 +1008,11 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 	let mut config = relay_config();
 	config.quic = relay_quic();
 	config.connect = dial();
-	// Retry forever: a give-up after a slow impaired handshake would look exactly
-	// like the never-redialed regression, and a stall still fails the drill.
-	config.connect.backoff.timeout = Some((Duration::ZERO).into());
+	// Each cluster session dials from its own socket and gives up after this
+	// budget, then the cluster redials from a fresh port. Keep it long: cutting a
+	// slow impaired handshake short mid-flap adds a redial wait the drill's budget
+	// does not cover. A stall still fails the drill.
+	config.connect.backoff.timeout = Some((Duration::from_secs(10)).into());
 	if link == PeerLink::Transport {
 		config.connect.version = vec!["moq-transport-22".parse().expect("parse version")];
 	}
@@ -1451,7 +1453,10 @@ async fn subscriber_max_age_skips_bufferbloat(version: &str) {
 	let mut groups = remote
 		.track(TRACK)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_millis(100)))
+		.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(100))),
+		)
 		.await
 		.unwrap();
 	let mut warmup = groups.recv_group().await.unwrap().unwrap();
@@ -1463,7 +1468,7 @@ async fn subscriber_max_age_skips_bufferbloat(version: &str) {
 		loop {
 			if track
 				.subscription()
-				.is_some_and(|subscription| subscription.max_delay == Some(Duration::from_millis(100)))
+				.is_some_and(|subscription| subscription.delay.max == Some(Duration::from_millis(100)))
 			{
 				break;
 			}

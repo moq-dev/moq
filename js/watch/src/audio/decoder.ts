@@ -1,10 +1,11 @@
-import { Micro, Milli, type Second } from "@moq/clock";
+import { Micro, Milli, type Second, type Wall } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Util from "@moq/hang/util";
 import type * as Moq from "@moq/net";
 import {
 	type Computed,
+	Derived,
 	Effect,
 	type Getter,
 	getter,
@@ -16,6 +17,7 @@ import {
 import { Producer as ArrivalProducer, type Arrivals, gap } from "../arrivals";
 import { hostedAssets } from "../assets";
 import { base64ToBytes } from "../base64";
+import { arrivedAt, type Counter, type Key, type Received, Tally } from "../feedback";
 import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
 import { supportCacheKey } from "../support-probe";
 import type { Sync } from "../sync";
@@ -95,7 +97,23 @@ export interface Stats {
 	bytesReceived: number;
 	/** How many times playback ran dry mid-stream; a rising count means the delay is too low. */
 	underruns: number;
+	/** Frames that arrived after their playout time. */
+	late: number;
+	/** Renditions that failed to decode. */
+	errors: number;
+	/** Times playback stalled waiting for audio once it had played. */
+	stalls: number;
+	/** Total time spent in finished stalls. */
+	stalled: Milli;
+	/** The newest received media timestamp and the wall time it arrived. */
+	arrival?: { timestamp: Milli; wall: Wall };
 }
+
+// The running totals before anything is counted.
+const EMPTY: Stats = { bytesReceived: 0, underruns: 0, late: 0, errors: 0, stalls: 0, stalled: Milli.zero };
+
+// What a decode attempt reads, and where its counts go.
+type Attempt = { config: DecoderConfig; failure: Signal<Error | undefined>; path: Moq.Path.Valid; key: Key };
 
 /**
  * Downloads audio from a track and emits it to an AudioContext.
@@ -151,7 +169,7 @@ export class Decoder {
 	#subscribeMaxDelay = new Signal<Milli>(Milli.zero);
 	// The container consumer's delay: the playout delay to start at and the shared budget. Its warmup
 	// reaches the start further back, to the media the decoder primes on.
-	#delay = new Signal<Container.Delay>({});
+	#delay = new Signal<Moq.Track.Delay>({});
 
 	// The codec's frame duration: the catalog constant, refined by each frame's own duration.
 	#frame = new Signal<Milli | undefined>(undefined);
@@ -167,6 +185,13 @@ export class Decoder {
 
 	#signals = new Effect();
 	#failed?: Failure;
+
+	// What each rendition delivered, for the feedback a viewer reports.
+	#tally = new Tally();
+	// The rendition decoding into the ring, which an underrun or a stall is counted against.
+	#playing?: Key;
+	// Whether audio played since the decoder was enabled, so the wait for the first is no stall.
+	#played = false;
 
 	// The catalog fields that require a replacement subscription or decoder.
 	readonly #identity: Computed<PlaybackIdentity | undefined>;
@@ -224,6 +249,56 @@ export class Decoder {
 		this.#signals.run(this.#runEnabled.bind(this));
 		this.#signals.run(this.#runLatency.bind(this));
 		this.#signals.run(this.#runDecoder.bind(this));
+		this.#signals.run(this.#runStalls.bind(this));
+	}
+
+	/**
+	 * What this decoder received and played of each rendition in the catalog of the broadcast at
+	 * `path`, keyed by rendition ID, for the feedback a viewer reports.
+	 * @internal
+	 */
+	feedback(path: Moq.Path.Valid): Record<string, Received> {
+		return this.#tally.report(path);
+	}
+
+	// Count into a rendition's feedback and the decoder's running totals.
+	#count(key: Key | undefined, counts: Partial<Record<Counter, number>>, totals?: (stats: Stats) => Partial<Stats>) {
+		if (key) this.#tally.count(key, counts);
+		if (totals) this.#out.stats.update((current) => ({ ...(current ?? EMPTY), ...totals(current ?? EMPTY) }));
+	}
+
+	// Count a received frame and whether it arrived too late for playout.
+	#receive(key: Key, frame: Container.ReceivedFrame, timestamp: Milli, late: boolean): void {
+		const bytes = frame.payload.byteLength;
+		const arrived = arrivedAt(frame.arrival);
+		this.#tally.arrive(key, timestamp, arrived);
+		this.#count(key, { frames: 1, bytes, late: late ? 1 : 0 }, (stats) => ({
+			bytesReceived: stats.bytesReceived + bytes,
+			late: stats.late + (late ? 1 : 0),
+			arrival: { timestamp, wall: arrived },
+		}));
+	}
+
+	// Count each stall once audio has played, and how long it lasted. A disabled decoder waits for
+	// audio again: resuming is a startup, not a stall.
+	#runStalls(effect: Effect): void {
+		if (!effect.get(this.in.enabled)) {
+			this.#played = false;
+			return;
+		}
+		if (!effect.get(this.#out.stalled)) {
+			this.#played = true;
+			return;
+		}
+		const key = this.#playing;
+		if (!this.#played || !key) return;
+
+		const end = this.#tally.stall(key);
+		this.#count(undefined, {}, (stats) => ({ stalls: stats.stalls + 1 }));
+		effect.cleanup(() => {
+			const duration = end();
+			this.#count(undefined, {}, (stats) => ({ stalled: Milli(stats.stalled + duration) }));
+		});
 	}
 
 	// A group the relay expires is never observed, so a subscription cut to the target would cap the
@@ -330,10 +405,7 @@ export class Decoder {
 				const added = underruns - counted;
 				counted = underruns;
 				if (added <= 0) return;
-				this.#out.stats.update((stats) => ({
-					bytesReceived: stats?.bytesReceived ?? 0,
-					underruns: (stats?.underruns ?? 0) + added,
-				}));
+				this.#count(this.#playing, { underruns: added }, (stats) => ({ underruns: stats.underruns + added }));
 			});
 
 			effect.set(this.#out.root, worklet);
@@ -389,7 +461,7 @@ export class Decoder {
 		// tell whether a failure's source is still selected.
 		const active =
 			broadcast && track && identity && (running || this.#failed)
-				? broadcast.relativeBroadcast(effect, identity.broadcast, identity.epoch)
+				? broadcast.relativeBroadcast(effect, identity.broadcast, identity.instance)
 				: undefined;
 		const key = identity && JSON.stringify(identity);
 
@@ -420,10 +492,13 @@ export class Decoder {
 		}
 		// Closing this effect releases both its container reader and track subscription.
 		const failure = new Signal<Error | undefined>(undefined);
+		const rendition: Key = { path: broadcast.in.name.peek(), id: track };
+		this.#playing = rendition;
 		let attempt: Effect | undefined;
 		effect.run((inner) => {
 			const error = inner.get(failure);
 			if (!error) return;
+			this.#count(rendition, { errors: 1 }, (stats) => ({ errors: stats.errors + 1 }));
 			this.#failed = {
 				broadcast: broadcast.out.active.peek()?.closed,
 				media: active.closed,
@@ -459,7 +534,7 @@ export class Decoder {
 				broadcast: active,
 				track: Catalog.track(track, identity),
 				priority: Catalog.PRIORITY.audio,
-				maxDelay: this.#subscribeMaxDelay,
+				delay: new Derived([this.sync.out.delay, this.#subscribeMaxDelay], (min, max) => ({ min, max })),
 			});
 			if (!sub) {
 				this.#retire();
@@ -468,7 +543,7 @@ export class Decoder {
 
 			// A config the probe accepted can still fail to parse (a malformed init segment or Opus
 			// header). Report it like a decode failure, which also retires the outgoing estimate.
-			const props = { config, failure, path: active.path };
+			const props: Attempt = { config, failure, path: active.path, key: rendition };
 			spawnFatal(run, failure, async () => {
 				if (config.container.kind === "cmaf") await this.#runCmafDecoder(run, sub, props);
 				else this.#runLegacyDecoder(run, sub, props);
@@ -476,11 +551,7 @@ export class Decoder {
 		});
 	}
 
-	#runLegacyDecoder(
-		effect: Effect,
-		sub: Moq.Track.Subscriber,
-		{ config, failure, path }: { config: DecoderConfig; failure: Signal<Error | undefined>; path: Moq.Path.Valid },
-	): void {
+	#runLegacyDecoder(effect: Effect, sub: Moq.Track.Subscriber, { config, failure, path, key }: Attempt): void {
 		const preSkip =
 			config.codec === "opus" && config.description ? Util.Opus.preSkip(Util.Hex.toBytes(config.description)) : 0;
 		this.#terminal.clear(preSkip, Micro.fromMilli(Milli(config.warmup ?? 0)));
@@ -495,7 +566,10 @@ export class Decoder {
 			if (!loaded) return; // cancelled
 
 			const decoder = new AudioDecoder({
-				output: (data) => this.#emit(data),
+				output: (data) => {
+					this.#count(key, { decoded: 1 });
+					this.#emit(data);
+				},
 				error: (error) => failure.set(error),
 			});
 			effect.cleanup(() => {
@@ -546,10 +620,7 @@ export class Decoder {
 				const duration = packetDuration(config.codec, frame);
 				if (duration !== undefined) this.#frame.set(duration);
 
-				this.#out.stats.update((stats) => ({
-					bytesReceived: (stats?.bytesReceived ?? 0) + frame.payload.byteLength,
-					underruns: stats?.underruns ?? 0,
-				}));
+				this.#receive(key, frame, timestamp, late);
 
 				if (!(await play(order.push(next)))) return;
 			}
@@ -559,7 +630,7 @@ export class Decoder {
 	async #runCmafDecoder(
 		effect: Effect,
 		sub: Moq.Track.Subscriber,
-		{ config, failure, path }: { config: DecoderConfig; failure: Signal<Error | undefined>; path: Moq.Path.Valid },
+		{ config, failure, path, key }: Attempt,
 	): Promise<void> {
 		if (config.container.kind !== "cmaf") return; // just to help typescript
 
@@ -588,7 +659,10 @@ export class Decoder {
 			if (!loaded) return; // cancelled
 
 			const decoder = new AudioDecoder({
-				output: (data) => this.#emit(data),
+				output: (data) => {
+					this.#count(key, { decoded: 1 });
+					this.#emit(data);
+				},
 				error: (error) => failure.set(error),
 			});
 			effect.cleanup(() => {
@@ -632,10 +706,7 @@ export class Decoder {
 				const duration = packetDuration(config.codec, frame);
 				if (duration !== undefined) this.#frame.set(duration);
 
-				this.#out.stats.update((stats) => ({
-					bytesReceived: (stats?.bytesReceived ?? 0) + frame.payload.byteLength,
-					underruns: stats?.underruns ?? 0,
-				}));
+				this.#receive(key, frame, timestamp, late);
 
 				if (!(await play(order.push(next)))) return;
 			}

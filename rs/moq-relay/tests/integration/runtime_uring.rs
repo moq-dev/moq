@@ -89,9 +89,15 @@ fn uring_config(cert: &std::path::Path, key: &std::path::Path) -> Config {
 }
 
 fn client() -> moq_tokio::Client {
+	offering(Vec::new())
+}
+
+/// A one-shot client offering only `version` (every version when empty).
+fn offering(version: Vec<moq_net::Version>) -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
 	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
+	config.version = version;
 	config
 		.init(Default::default())
 		.expect("client init")
@@ -213,17 +219,7 @@ async fn uring_workers_serve_every_configured_version() {
 
 	let pinned = |version: &str| {
 		let version: moq_net::Version = version.parse().expect("known version");
-		let mut config = moq_tokio::connect::Config::default();
-		config.tls.insecure = Some(true);
-		config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
-		config.version = vec![version];
-		(
-			version,
-			config
-				.init(Default::default())
-				.expect("client init")
-				.with_reconnect(false),
-		)
+		(version, offering(vec![version]))
 	};
 
 	let dir = tempfile::tempdir().expect("tempdir");
@@ -364,9 +360,9 @@ async fn uring_workers_report_link_facts() {
 /// are each sent a GOAWAY and leave, and `run` then returns with the worker
 /// threads joined and the port free.
 ///
-/// What an arrival is told is left of the window only reaches the wire on
-/// moq-transport, which this test does not dial; `shutdown_signal.rs`
-/// reads it through the shared runtime, whose supervision this path shares.
+/// Run once offering every version, and once pinned to moq-transport, whose
+/// GOAWAY carries the deadline on the wire: the established session is told
+/// the whole window, and the arrival only what is left of it.
 #[tokio::test]
 async fn uring_workers_drain_on_the_trigger() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -374,6 +370,13 @@ async fn uring_workers_drain_on_the_trigger() {
 		return;
 	}
 
+	drain_on_the_trigger(None).await;
+	drain_on_the_trigger(Some("moq-transport-18".parse().expect("known version"))).await;
+}
+
+/// One relay drained under [`uring_workers_drain_on_the_trigger`], its two
+/// sessions offering only `version`, or every version when `None`.
+async fn drain_on_the_trigger(version: Option<moq_net::Version>) {
 	const DRAIN: Duration = Duration::from_secs(2);
 
 	let dir = tempfile::tempdir().expect("tempdir");
@@ -390,10 +393,13 @@ async fn uring_workers_drain_on_the_trigger() {
 	let running = tokio::spawn(relay.run());
 	ready.wait().await.expect("relay ready");
 
-	// One-shot (see `client`), so a session leaves on its GOAWAY rather than
+	// One-shot (see `offering`), so a session leaves on its GOAWAY rather than
 	// migrating, and closing cleanly shows it was one.
-	let client = client();
+	let client = offering(version.into_iter().collect());
 	let url: url::Url = format!("moql://127.0.0.1:{port}/drain").parse().expect("parse url");
+	let label = version.map_or("every version", |version| version.as_str());
+	// Only moq-transport puts the deadline on the wire.
+	let ietf = matches!(version, Some(moq_net::Version::Ietf(_)));
 
 	let connecting = tokio::spawn(connect(client.clone(), url.clone()));
 	let first = admissions.next().await.expect("first admission");
@@ -401,24 +407,46 @@ async fn uring_workers_drain_on_the_trigger() {
 	let (_first_lease, first_consumer) = moq_auth::lease::Producer::new(moq_auth::Grant::new(all(), all()));
 	first.grant(first_consumer);
 	let established = connecting.await.expect("client task");
+	if version.is_some() {
+		assert_eq!(established.version(), version, "{label}: negotiated version");
+	}
 
 	// Hold the next real connection at authentication. Its admission keeps the
 	// drain open even after the first session leaves, without an unrelated peer.
 	let arriving = tokio::spawn(connect(client, url));
 	let pending = admissions.next().await.expect("pending admission");
+	// The relay fixes its deadline inside `start`, so these bracket it: what is
+	// left of each bounds what the relay tells the arrival from below and above.
+	let earliest = kio::clock::now() + DRAIN;
 	trigger.start();
+	let deadline = kio::clock::now() + DRAIN;
 	let draining = established.draining().expect("connected");
 	let goaway = kio::clock::timeout(TIMEOUT, moq_net::kio::wait(|waiter| draining.poll(waiter)))
 		.await
-		.expect("no GOAWAY after the trigger")
+		.unwrap_or_else(|_| panic!("{label}: no GOAWAY after the trigger"))
 		.expect("session closed without a GOAWAY");
-	assert_eq!(goaway.uri(), "", "expected a reconnect-to-me GOAWAY");
+	assert_eq!(goaway.uri(), "", "{label}: expected a reconnect-to-me GOAWAY");
+	if ietf {
+		let timeout = goaway.timeout().expect("the GOAWAY carries its deadline");
+		assert!(
+			timeout > DRAIN / 2 && timeout <= DRAIN,
+			"{label}: an established session gets the whole window, got {timeout:?}"
+		);
+	}
 	kio::clock::timeout(TIMEOUT, established.closed())
 		.await
-		.expect("the drained session never closed")
+		.unwrap_or_else(|_| panic!("{label}: the drained session never closed"))
 		.expect("a one-shot session leaves cleanly on GOAWAY");
 
+	if ietf {
+		// Admit the arrival halfway into the window, so what is left of it is
+		// distinguishable from a fresh one. Measured from the deadline, not from
+		// the first session leaving, so a slow close cannot push the admission
+		// past the deadline (where the relay rejects it).
+		kio::clock::sleep_until(deadline - DRAIN / 2).await;
+	}
 	let (_arrival_lease, arrival_consumer) = moq_auth::lease::Producer::new(moq_auth::Grant::new(all(), all()));
+	let granted = kio::clock::now();
 	pending.grant(arrival_consumer);
 	let arrival = arriving.await.expect("arrival task");
 	let draining = arrival.draining().expect("connected");
@@ -427,19 +455,36 @@ async fn uring_workers_drain_on_the_trigger() {
 		moq_net::kio::wait(|waiter| draining.poll(waiter)),
 	)
 	.await
-	.expect("an arrival mid-drain was not sent a GOAWAY")
+	.unwrap_or_else(|_| panic!("{label}: an arrival mid-drain was not sent a GOAWAY"))
 	.expect("arrival closed without a GOAWAY");
-	assert_eq!(goaway.uri(), "", "expected a reconnect-to-me GOAWAY");
+	assert_eq!(goaway.uri(), "", "{label}: expected a reconnect-to-me GOAWAY");
+	if ietf {
+		// Only what is left of the window, not a fresh one that would outlive the
+		// relay. The wire rounds up to whole milliseconds.
+		let left = deadline.saturating_duration_since(granted) + Duration::from_millis(1);
+		let timeout = goaway.timeout().expect("the GOAWAY carries its deadline");
+		assert!(
+			timeout <= left,
+			"{label}: an arrival mid-drain got {timeout:?}, past the {left:?} left of the window"
+		);
+		// Nor less: the relay read its clock no later than now, and the wire
+		// rounds up, so the remaining window is a floor.
+		let least = earliest.saturating_duration_since(kio::clock::now());
+		assert!(
+			timeout >= least,
+			"{label}: an arrival mid-drain got {timeout:?}, short of the {least:?} left of the window"
+		);
+	}
 	kio::clock::timeout(TIMEOUT, arrival.closed())
 		.await
-		.expect("the arrival never closed")
+		.unwrap_or_else(|_| panic!("{label}: the arrival never closed"))
 		.expect("a one-shot session leaves cleanly on GOAWAY");
 
 	// `run` joins the worker threads before returning, so returning at all is
 	// the clean join; the rebind proves every worker let go of the port.
 	kio::clock::timeout(TIMEOUT, running)
 		.await
-		.expect("run did not return after the drain window")
+		.unwrap_or_else(|_| panic!("{label}: run did not return after the drain window"))
 		.expect("run panicked")
 		.expect("run returned an error after the drain");
 	std::net::UdpSocket::bind(("127.0.0.1", port)).expect("a worker still holds the QUIC port");
@@ -905,10 +950,9 @@ async fn uring_forwards_the_setup_token() {
 		} else {
 			b"moqt-18".to_vec()
 		}];
-		let crypto = driver::crypto::rustls::QuicClientConfig::try_from(tls).unwrap();
 		let conn = client
 			.connect(
-				&driver::client::Config::new(std::sync::Arc::new(crypto)),
+				&driver::client::Config::new(std::sync::Arc::new(tls)),
 				addr,
 				"localhost",
 			)
@@ -1107,10 +1151,9 @@ fn uring_workers_bound_stalled_handshakes() {
 		let crypto = |alpn: &[u8]| {
 			let mut tls = tls.clone();
 			tls.alpn_protocols = vec![alpn.to_vec()];
-			let crypto = driver::crypto::rustls::QuicClientConfig::try_from(tls).expect("QUIC crypto");
 			let mut transport = driver::transport::Config::default();
 			transport.congestion = std::sync::Arc::new(moq_congestion::Unlimited);
-			let mut config = driver::client::Config::new(std::sync::Arc::new(crypto));
+			let mut config = driver::client::Config::new(std::sync::Arc::new(tls));
 			config.transport = transport;
 			config
 		};

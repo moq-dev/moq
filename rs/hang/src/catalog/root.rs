@@ -435,10 +435,18 @@ mod test {
 		video: Vec<String>,
 		#[serde(default)]
 		audio: Vec<String>,
+		#[serde(default)]
+		text: Vec<String>,
+		#[serde(default)]
+		json: Vec<String>,
+		#[serde(default)]
+		binary: Vec<String>,
+		#[serde(default)]
+		contributions: Vec<String>,
 	}
 
 	/// The corpus `js/hang` also loads: both languages accept the same catalogs and keep the same
-	/// renditions, so a divergence fails CI on whichever side drifts.
+	/// rendition, data track, and contribution IDs, so a divergence fails CI on whichever side drifts.
 	#[test]
 	fn shared_parity_fixtures() {
 		let cases: Vec<ParityCase> = serde_json::from_str(include_str!("../../fixtures/catalog-parity.json")).unwrap();
@@ -455,8 +463,23 @@ mod test {
 				(Ok(catalog), false) => {
 					let video: Vec<_> = catalog.video.renditions.keys().cloned().collect();
 					let audio: Vec<_> = catalog.audio.renditions.keys().cloned().collect();
-					if (&video, &audio) != (&case.video, &case.audio) {
-						failures.push(format!("{}: kept video {video:?} audio {audio:?}", case.name));
+					let text: Vec<_> = catalog.text.renditions.keys().cloned().collect();
+					let json: Vec<_> = catalog.json.tracks.keys().cloned().collect();
+					let binary: Vec<_> = catalog.binary.tracks.keys().cloned().collect();
+					let contributions: Vec<_> = catalog.contributions.keys().cloned().collect();
+					if (&video, &audio, &text, &json, &binary, &contributions)
+						!= (
+							&case.video,
+							&case.audio,
+							&case.text,
+							&case.json,
+							&case.binary,
+							&case.contributions,
+						) {
+						failures.push(format!(
+							"{}: kept video {video:?} audio {audio:?} text {text:?} json {json:?} binary {binary:?} contributions {contributions:?}",
+							case.name
+						));
 					}
 				}
 			}
@@ -536,30 +559,30 @@ mod test {
 			r#"{"contributions":{"alice":null}}"#,
 			r#"{"contributions":{"alice":{}}}"#,
 			r#"{"contributions":{"alice":{"broadcast":42}}}"#,
-			r#"{"contributions":{"alice":{"broadcast":"./alice.hang","epoch":"not-an-epoch"}}}"#,
+			r#"{"contributions":{"alice":{"broadcast":"./alice.hang","instance":""}}}"#,
 		] {
 			assert!(Catalog::<()>::from_str(bad).is_err(), "{bad} must be refused");
 		}
 	}
 
-	/// Every reference-bearing section carries an optional epoch beside its `broadcast`.
+	/// Every reference-bearing section carries an optional instance beside its `broadcast`.
 	#[test]
-	fn reference_epochs_roundtrip_in_every_section() {
+	fn reference_instances_roundtrip_in_every_section() {
 		use crate::catalog::Reference;
 
-		const EPOCH: &str = "01890a5d-ac96-774b-bcce-b302099a8057";
+		const INSTANCE: &str = "01890a5d-ac96-774b-bcce-b302099a8057";
 		let encoded = format!(
 			r#"{{
-				"contributions": {{"c": {{"broadcast": "./a", "epoch": "{EPOCH}"}}}},
-				"video": {{"renditions": {{"v": {{"broadcast": "./a", "epoch": "{EPOCH}", "codec": "avc1.64001f", "container": {{"kind": "legacy"}}}}}}}},
-				"audio": {{"renditions": {{"a": {{"broadcast": "./a", "epoch": "{EPOCH}", "codec": "opus", "sampleRate": 48000, "numberOfChannels": 2, "container": {{"kind": "legacy"}}}}}}}},
-				"text": {{"renditions": {{"t": {{"broadcast": "./a", "epoch": "{EPOCH}", "format": "vtt"}}}}}},
-				"json": {{"tracks": {{"j": {{"broadcast": "./a", "epoch": "{EPOCH}", "mode": "snapshot"}}}}}},
-				"binary": {{"tracks": {{"b": {{"broadcast": "./a", "epoch": "{EPOCH}", "mode": "snapshot"}}}}}}
+				"contributions": {{"c": {{"broadcast": "./a", "instance": "{INSTANCE}"}}}},
+				"video": {{"renditions": {{"v": {{"broadcast": "./a", "instance": "{INSTANCE}", "codec": "avc1.64001f", "container": {{"kind": "legacy"}}}}}}}},
+				"audio": {{"renditions": {{"a": {{"broadcast": "./a", "instance": "{INSTANCE}", "codec": "opus", "sampleRate": 48000, "numberOfChannels": 2, "container": {{"kind": "legacy"}}}}}}}},
+				"text": {{"renditions": {{"t": {{"broadcast": "./a", "instance": "{INSTANCE}", "format": "vtt"}}}}}},
+				"json": {{"tracks": {{"j": {{"broadcast": "./a", "instance": "{INSTANCE}", "mode": "snapshot"}}}}}},
+				"binary": {{"tracks": {{"b": {{"broadcast": "./a", "instance": "{INSTANCE}", "mode": "snapshot"}}}}}}
 			}}"#
 		);
 		let catalog = Catalog::<()>::from_str(&encoded).unwrap();
-		let epoch: moq_net::Epoch = EPOCH.parse().unwrap();
+		let instance: moq_net::Instance = INSTANCE.parse().unwrap();
 		let references: [&dyn Reference; 5] = [
 			&catalog.video.renditions["v"],
 			&catalog.audio.renditions["a"],
@@ -568,21 +591,18 @@ mod test {
 			&catalog.binary.tracks["b"],
 		];
 		for reference in references {
-			assert_eq!(reference.epoch(), Some(&epoch));
+			assert_eq!(reference.instance(), Some(&instance));
 		}
-		assert_eq!(catalog.contributions["c"].epoch.as_ref(), Some(&epoch));
+		assert_eq!(catalog.contributions["c"].instance.as_ref(), Some(&instance));
 		assert_eq!(Catalog::<()>::from_str(&catalog.to_json().unwrap()).unwrap(), catalog);
 
-		// Omitted stays omitted, and a malformed or noncanonical epoch refuses the catalog.
-		assert!(!Catalog::<()>::default().to_json().unwrap().contains("poch"));
-		for bad in [
-			"not-a-uuid",
-			"01890A5D-AC96-774B-BCCE-B302099A8057",
-			"01890a5d-ac96-474b-bcce-b302099a8057",
-		] {
-			let encoded = encoded.replace(EPOCH, bad);
-			assert!(Catalog::<()>::from_str(&encoded).is_err(), "{bad} must be refused");
-		}
+		// Omitted stays omitted, and an empty instance refuses the catalog.
+		assert!(!Catalog::<()>::default().to_json().unwrap().contains("instance"));
+		let encoded = encoded.replace(INSTANCE, "");
+		assert!(
+			Catalog::<()>::from_str(&encoded).is_err(),
+			"an empty instance must be refused"
+		);
 	}
 
 	#[test]
@@ -742,7 +762,7 @@ mod test {
 			VideoConfig {
 				broadcast: None,
 				track: None,
-				epoch: None,
+				instance: None,
 				label: None,
 				codec: H264 {
 					profile: 0x64,
@@ -780,7 +800,7 @@ mod test {
 			AudioConfig {
 				broadcast: None,
 				track: None,
-				epoch: None,
+				instance: None,
 				label: None,
 				codec: Opus,
 				sample_rate: 48_000,

@@ -94,6 +94,22 @@ impl CanonicalStorage {
 	}
 }
 
+/// A lite-07 subscription's frame bounds over many ranges, for the range-count bench.
+pub struct FrameBounds(crate::lite::FramesBench);
+
+impl FrameBounds {
+	/// `ranges` ranges, each starting and ending partway through its own group.
+	pub fn new(ranges: u64) -> Self {
+		Self(crate::lite::FramesBench::new(ranges))
+	}
+
+	/// The first and last frame served of `group`, as a served group or datagram looks
+	/// them up.
+	pub fn serve(&self, group: u64) -> (u64, Option<u64>) {
+		self.0.serve(group)
+	}
+}
+
 /// Every target, keyed by the name of its `fuzz_targets/<name>.rs` shim.
 pub const TARGETS: &[(&str, Target)] = &[
 	("lite", lite_wire),
@@ -291,7 +307,7 @@ pub fn lite_wire(data: &[u8]) -> bool {
 		6 => roundtrip::<lite::Subscribe<'_>, _>(rest, &mut Vec::new(), version),
 		7 => roundtrip::<lite::SubscribeOk, _>(rest, &mut Vec::new(), version),
 		8 => roundtrip::<lite::SubscribeStart, _>(rest, &mut Vec::new(), version),
-		9 => roundtrip::<lite::SubscribeEnd, _>(rest, &mut Vec::new(), version),
+		9 => roundtrip::<lite::SubscribeFinish, _>(rest, &mut Vec::new(), version),
 		10 => roundtrip::<lite::SubscribeUpdate, _>(rest, &mut Vec::new(), version),
 		11 => roundtrip::<lite::SubscribeDrop, _>(rest, &mut Vec::new(), version),
 		12 => roundtrip::<lite::SubscribeResponse, _>(rest, &mut Vec::new(), version),
@@ -356,8 +372,10 @@ impl AnnounceWriter {
 		let msg = match announced {
 			Announced::Start(suffix, hops) => {
 				let (_, suffix, hops) = self.encoder.start(suffix.clone(), hops.clone());
+				// A fixed instance, so the bytes stay pinned and match what `js/net` writes.
 				lite::AnnounceBroadcast::Active {
-					epoch: None,
+					instance: self.version.has_instance().then(|| "a".parse().unwrap()),
+					epoch: 0,
 					suffix,
 					hops,
 					cost: Default::default(),
@@ -412,11 +430,6 @@ pub fn takeover_route(
 /// Replace a peer claim's route in place, as a session does on a route update.
 pub fn update_route(dynamic: &crate::origin::Requests, route: crate::origin::Route) -> Result<(), crate::Error> {
 	dynamic.update_route(route)
-}
-
-/// Answer a peer claim's request with the broadcast its session already holds.
-pub fn accept(request: crate::origin::Request, broadcast: impl crate::Consume<broadcast::Consumer>) {
-	request.accept(broadcast)
 }
 
 /// A session's snapshot of its peer's initial announcements, for the synced bench.
@@ -627,12 +640,13 @@ impl LiteSample {
 			.unwrap(),
 			Self::Subscribe => lite::Subscribe {
 				order: crate::track::Order::Descending,
-				epoch: None,
+				instance: None,
 				id: 3,
 				broadcast: Path::from_static("room/alice"),
 				track: "video".into(),
 				priority: 2,
 				max_delay: std::time::Duration::from_secs(10),
+				min_delay: None,
 				ranges: vec![lite::Range::OLDEST],
 			}
 			.encode(w, version)
@@ -832,12 +846,13 @@ impl Default for Messages {
 		Self {
 			lite_subscribe: lite::Subscribe {
 				order: crate::track::Order::Descending,
-				epoch: None,
+				instance: None,
 				id: 7,
 				broadcast: Path::from_static("room/alice"),
 				track: "video".into(),
 				priority: 3,
 				max_delay: Duration::from_millis(500),
+				min_delay: None,
 				ranges: vec![lite::Range {
 					start: Some(lite::Anchor::Absolute(crate::track::Position::group(1_000))),
 					end: None,
@@ -848,6 +863,7 @@ impl Default for Messages {
 				order: crate::track::Order::Descending,
 				priority: 4,
 				max_delay: Duration::from_millis(500),
+				min_delay: None,
 				ranges: vec![lite::Range {
 					start: Some(lite::Anchor::Absolute(crate::track::Position::group(1_000))),
 					end: Some(lite::Anchor::Absolute(crate::track::Position::group(2_001))),
@@ -1011,10 +1027,11 @@ pub fn encode_subscribe(broadcast: &Path, track: &str, ietf: bool, out: &mut Vec
 		false => lite::Subscribe {
 			id: 0,
 			broadcast: broadcast.clone(),
-			epoch: None,
+			instance: None,
 			track: track.into(),
 			priority: 0,
 			max_delay: std::time::Duration::ZERO,
+			min_delay: None,
 			ranges: vec![lite::Range::OLDEST],
 			order: track::Order::Descending,
 		}
@@ -1369,6 +1386,7 @@ pub fn seeds() -> Vec<Seed> {
 		];
 		let Some(encoded) = fetch_types.into_iter().find_map(|fetch_type| {
 			let fetch = ietf::Fetch {
+				authorization_token: None,
 				request_id: ietf::RequestId(0),
 				subscriber_priority: 128,
 				group_order: ietf::GroupOrder::Ascending,
@@ -1508,11 +1526,12 @@ pub fn seeds() -> Vec<Seed> {
 
 	// Length prefixes at and one past each cap, ahead of a body far too short for them, so
 	// the fuzzer starts beside every rejection path instead of searching for its bound: a
-	// moq-lite message's size (0xffff for most, 64 MiB for ANNOUNCE_INIT) and a
+	// moq-lite message's size (0xffff for most, a segment for ANNOUNCE_INIT) and a
 	// moq-transport control message's two-byte length.
 	for (index, version) in LITE_VERSIONS.iter().enumerate() {
 		for kind in 0..LITE_KINDS {
-			for size in limits(&[0xffff, 64 << 20]) {
+			let announce_init = <crate::lite::AnnounceInit as crate::lite::Message>::MAX_SIZE as u64;
+			for size in limits(&[0xffff, announce_init]) {
 				let mut data = vec![index as u8, kind];
 				Encoder::new(&mut data, (*version).into()).varint(size).unwrap();
 				data.extend_from_slice(&[0; 4]);

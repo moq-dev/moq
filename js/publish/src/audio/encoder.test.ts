@@ -293,6 +293,7 @@ async function setup(order = new Order(), codec?: Codec, groupDuration?: Milli) 
 	const rendition = {
 		slot: new Signal(undefined),
 		config: new Signal(undefined),
+		stats: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
 		hls: () => undefined,
 		hlsHint: new Signal(undefined),
@@ -663,7 +664,7 @@ test("the catalog bitrate only rises", async () => {
 });
 
 // Another rendition on the same broadcast that already wrote media ahead of this one's frames leaves
-// this one trailing it, which the catalog advertises as `delay`.
+// this one trailing it, which the catalog advertises as `delay` once a second of it has been measured.
 test("a rendition written behind another advertises delay", async () => {
 	using _webcodecs = installFakeWebCodecs();
 	const clock = manualAt(200);
@@ -675,20 +676,26 @@ test("a rendition written behind another advertises delay", async () => {
 
 		expect(encoder.out.catalog.peek()?.delay).toBeUndefined();
 
-		// A sibling that already wrote media up to now.
-		new Estimator().write(Nano.toMicro(Nano(now())), order);
-
-		// Captured 100ms ago, with a clock origin that keeps timestamps nonnegative.
+		// A sibling that stays 100ms ahead of the frames written, with a clock origin that keeps
+		// timestamps nonnegative. The encoder holds two frames, so each push writes the frame captured
+		// two before it.
+		const sibling = new Estimator();
 		const start = Nano.toMicro(Nano(now())) - 100_000;
-		for (let index = 0; index < 4; index++) {
+		const push = async (index: number) => {
+			sibling.write(start + 100_000 + (index - 2) * 20_000, order, true);
 			await feed.push({ timestamp: Micro(start + index * 20_000), channels: [new Float32Array(960)] });
-		}
+		};
+		for (let index = 0; index < 4; index++) await push(index);
 		await feed.drain();
 
 		expect(env.written).toEqual([
 			[100_000, 1],
 			[120_000, 1],
 		]);
+		expect(encoder.out.catalog.peek()?.delay).toBeUndefined();
+
+		for (let index = 4; index < 60; index++) await push(index);
+		await feed.drain();
 		expect(encoder.out.catalog.peek()).toMatchObject({ delay: 100 });
 	} finally {
 		clock.close();
@@ -803,14 +810,14 @@ test("audio failure stays local through demand changes and capture format re-arm
 		}
 		await feed.drain();
 	};
-	let announced: Moq.Origin.Requesting | undefined;
+	let announced: Moq.Origin.Following | undefined;
 	try {
 		await configuring;
 		await settle();
 		const net = broadcast.net.peek();
 		if (!net) throw new Error("expected network broadcast");
 		announced = broadcast.in.origin.peek()?.follow(broadcast.in.name.peek());
-		const epoch = announced?.active.peek()?.epoch;
+		const epoch = announced?.active.peek()?.instance;
 		const sibling = broadcast.video("video");
 		sibling.config.set({ codec: "avc1.640028", container: { kind: "legacy" } });
 		await settle();
@@ -819,9 +826,9 @@ test("audio failure stays local through demand changes and capture format re-arm
 		await settle();
 		const siblingTrack = sibling.track.peek();
 		if (!siblingTrack) throw new Error("expected demanded sibling track");
-		expect(siblingTrack.appendGroup().sequence).toBe(0);
+		expect(siblingTrack.appendGroup().sequence).toBe(0n);
 		await push(0, 1);
-		expect((await subscriber.largest())?.group).toBe(0);
+		expect((await subscriber.largest())?.group).toBe(0n);
 		catalogSubscriber = net.track(Broadcast.CATALOG_TRACK).subscribe();
 		const catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track: catalogSubscriber });
 		expect((await catalog.latest())?.value.audio?.renditions.audio?.enabled).not.toBe(false);
@@ -848,8 +855,8 @@ test("audio failure stays local through demand changes and capture format re-arm
 		expect(encoder.out.catalog.peek()?.enabled).toBe(false);
 		expect(LaggingAudioEncoder.instances).toHaveLength(instances);
 		expect(broadcast.net.peek()).toBe(net);
-		expect(announced?.active.peek()?.epoch).toBe(epoch);
-		expect(siblingTrack.appendGroup().sequence).toBe(1);
+		expect(announced?.active.peek()?.instance).toBe(epoch);
+		expect(siblingTrack.appendGroup().sequence).toBe(1n);
 
 		const reconfiguring = configured();
 		capture.out.format.set({ sampleRate: 48_000, channelCount: 2 });
@@ -864,12 +871,12 @@ test("audio failure stays local through demand changes and capture format re-arm
 		recovered = net.track(config.track).subscribe();
 		await settle();
 		await push(3, 2);
-		expect((await recovered.largest())?.group).toBe(0);
+		expect((await recovered.largest())?.group).toBe(0n);
 		expect(encoder.out.active.peek()).toBe(true);
 		expect(recovered.closed.peek()).toBeUndefined();
 		expect(broadcast.net.peek()).toBe(net);
-		expect(announced?.active.peek()?.epoch).toBe(epoch);
-		expect(siblingTrack.appendGroup().sequence).toBe(2);
+		expect(announced?.active.peek()?.instance).toBe(epoch);
+		expect(siblingTrack.appendGroup().sequence).toBe(2n);
 	} finally {
 		subscriber?.close();
 		siblingSubscriber?.close();
@@ -998,7 +1005,7 @@ test.each([undefined, false, true])(
 
 			await push(4);
 			expect(encoder.out.stats.peek().frames).toBe(onDemand === false ? 2 : 0);
-			late = net.track("audio").subscribe({ maxDelay: Milli(10_000) });
+			late = net.track("audio").subscribe({ delay: { max: Milli(10_000) } });
 			await settle();
 			expect(encoder.out.active.peek()).toBe(true);
 			await push(3);
@@ -1009,7 +1016,7 @@ test.each([undefined, false, true])(
 			if (!frame) throw new Error("expected a frame");
 			const [timestamp] = Moq.Varint.decode(frame.payload);
 			// Buffered audio is encoded ahead of the live input on the capture clock.
-			expect(group.sequence).toBe(0);
+			expect(group.sequence).toBe(0n);
 			expect(timestamp).toBe(0);
 
 			// Losing demand preserves the epoch and resumes raw retention.
@@ -1116,7 +1123,7 @@ test("default audio replays the last second after three seconds without a subscr
 		expect(encoder.out.active.peek()).toBe(false);
 		const net = broadcast.net.peek();
 		if (!net) throw new Error("expected network broadcast");
-		late = net.track("audio").subscribe({ maxDelay: Milli(1000) });
+		late = net.track("audio").subscribe({ delay: { max: Milli(1000) } });
 		await settle();
 		expect(encoder.out.stats.peek().frames).toBe(50 - LaggingAudioEncoder.LAG);
 		for (let index = 150; index < 153; index++) {
@@ -1164,10 +1171,10 @@ test("replayed raw audio raises no catalog delay", async () => {
 			await clock.advance(Nano.fromMilli(Milli(20)));
 		}
 		// Video already wrote up to the live edge.
-		new Estimator().write(150 * 20_000, broadcast.order);
+		new Estimator().write(150 * 20_000, broadcast.order, true);
 		const net = broadcast.net.peek();
 		if (!net) throw new Error("expected network broadcast");
-		late = net.track("audio").subscribe({ maxDelay: Milli(1000) });
+		late = net.track("audio").subscribe({ delay: { max: Milli(1000) } });
 		await settle();
 		for (let index = 150; index < 153; index++) {
 			await feed.push({ timestamp: Micro(index * 20_000), channels: [new Float32Array(960)] });

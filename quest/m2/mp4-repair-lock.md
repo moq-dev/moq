@@ -6,7 +6,7 @@
 
 ## Plan
 
-Found by [moq-dev/moq#7560](https://github.com/moq-dev/moq/pull/7560), which adds `moq repair mp4`: it can't tell a running `export mp4` still writes the file, and repairing one corrupts it. This waits on #7560 landing; `moq repair mp4` and `moq_mux::container::mp4::repair` don't exist on `main` until then.
+Found by [moq-dev/moq#7560](https://github.com/moq-dev/moq/pull/7560), which adds `moq repair mp4`: it can't tell a running `export mp4` still writes the file, and repairing one corrupts it. #7560 merged 2026-11-02.
 
 Decided 2026-11-01 (maintainer, follow-up planning after the 2026-11-01 /quest-afk run): m2. An advisory lock taken by the recorder and checked by repair, as #7560 suggested.
 

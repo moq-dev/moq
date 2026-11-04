@@ -208,15 +208,11 @@ impl Invocation {
 
 	/// Refuse every MoQ-side flag but the dial and those in `allow`, on a verb that
 	/// only reads from a relay: a listener, cluster, or auth policy it would never
-	/// serve is not silently ignored. The dial is `--connect*` and the `--quic-*` and
-	/// `--iroh-*` settings it dials with. Answered from the command line, like
+	/// serve is not silently ignored. The dial is `--connect*` and the `--quic-*`
+	/// settings it dials with. Answered from the command line, like
 	/// [`Self::reject`].
 	pub fn dial_only(&self, command: &str, allow: &[&str]) -> anyhow::Result<()> {
 		let dials = |flag: &&&usage_rs::Flag<'_>| {
-			#[cfg(feature = "iroh")]
-			if owns::<moq_tokio::iroh::Config>(flag) {
-				return true;
-			}
 			owns::<moq_tokio::connect::Config>(flag)
 				|| owns::<moq_tokio::quic::Config>(flag)
 				|| allow
@@ -520,11 +516,6 @@ pub struct MoqSide {
 	#[usage(flatten)]
 	pub server: moq_tokio::listen::Config,
 
-	/// Iroh transport config (`--iroh-*`), used by both the client and server.
-	#[cfg(feature = "iroh")]
-	#[usage(flatten)]
-	pub iroh: moq_tokio::iroh::Config,
-
 	/// Clustering config (`--cluster-*`, including LAN). The same flags as
 	/// `moq-relay`, so a CLI process and a relay on the same network mesh
 	/// through one implementation.
@@ -556,10 +547,10 @@ impl MoqSide {
 		found
 	}
 
-	/// The cluster this process publishes and subscribes on. Built once; the
-	/// origin is its origin, whose Hop ID is random per run unless `--cluster-id`
-	/// names the node.
-	pub fn cluster(&self) -> anyhow::Result<moq_relay::cluster::Cluster> {
+	/// The cluster this process publishes and subscribes on, with the driver that
+	/// must run for as long as it serves. Built once; the origin is its origin, whose
+	/// Hop ID is random per run unless `--cluster-id` names the node.
+	pub fn cluster(&self) -> anyhow::Result<(moq_relay::cluster::Cluster, moq_relay::cluster::Driver)> {
 		moq_relay::cluster::Cluster::new(moq_relay::cluster::Options::new(self.cluster.clone()))
 	}
 
@@ -2084,14 +2075,14 @@ mod tests {
 	}
 
 	#[test]
-	fn independent_importers_cannot_select_a_shared_epoch() {
-		let epoch = hang::moq_net::Epoch::mint().to_string();
+	fn independent_importers_cannot_select_a_shared_instance() {
+		let instance = hang::moq_net::Instance::random().to_string();
 		let refused = Invocation::try_parse_from([
 			"moq",
 			"--connect",
 			"http://relay/anon",
-			"--epoch",
-			&epoch,
+			"--instance",
+			&instance,
 			"import",
 			"ts",
 		]);
@@ -2762,8 +2753,6 @@ mod tests {
 			&["--connect-tls-insecure"],
 			&["--connect-backoff-initial", "2s"],
 			&["--quic-idle-timeout", "10s"],
-			#[cfg(feature = "iroh")]
-			&["--iroh-enabled"],
 			&["--broadcast", "room"],
 		];
 

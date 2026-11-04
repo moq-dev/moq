@@ -182,6 +182,15 @@ impl Version {
 		)
 	}
 
+	/// Whether SUBSCRIBE and SUBSCRIBE_UPDATE carry the subscriber's optional
+	/// `Subscriber Min Age`. Added in lite-07; an earlier subscription decodes it as not stated.
+	pub(crate) fn has_min_delay(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
 	/// Whether FETCH carries the subscriber's optional max delay. Added in lite-07; an
 	/// earlier fetch is bounded by the publisher's retention alone.
 	pub(crate) fn has_fetch_max_delay(self) -> bool {
@@ -226,10 +235,18 @@ impl Version {
 	}
 
 	/// Whether subscription completion waits for the subscriber's FIN, which it sends once
-	/// its tail accounting settles. SUBSCRIBE_END says which groups are owed, so that is
+	/// its tail accounting settles. SUBSCRIBE_FINISH says which groups are owed, so that is
 	/// prompt from lite-05; before it, only the subscriber's grace settles the tail.
 	pub(crate) fn waits_for_subscriber_fin(self) -> bool {
 		self.has_track_stream()
+	}
+
+	/// Whether the Subscribe Stream stays open past SUBSCRIBE_FINISH and past a covered
+	/// bounded subscription, so a SUBSCRIBE_UPDATE can still reach the track's history.
+	/// The subscriber FINs once it wants nothing more, and the publisher FINs in reply.
+	/// Added in lite-07; before it the publisher FINs once the track ends.
+	pub(crate) fn keeps_subscribe_open(self) -> bool {
+		self.has_ranges()
 	}
 
 	/// Whether ANNOUNCE_REQUEST carries the hidden opt-in. Added in lite-07; older
@@ -280,7 +297,7 @@ impl Version {
 		)
 	}
 
-	/// Whether SUBSCRIBE_END carries the error the track ended with, so an errored end
+	/// Whether SUBSCRIBE_FINISH carries the error the track ended with, so an errored end
 	/// keeps its history across a hop. Added in lite-07; earlier versions can only reset.
 	pub(crate) fn has_end_error(self) -> bool {
 		!matches!(
@@ -289,11 +306,10 @@ impl Version {
 		)
 	}
 
-	/// Whether announcements and track requests carry the publisher epoch, the
-	/// identity that says two routes serve the same bytes. Added in lite-07.
-	/// Older versions carry nothing, so a received route has no epoch and is
-	/// never resumed through another route.
-	pub fn has_epoch(self) -> bool {
+	/// Whether announcements carry their instance and epoch, and track requests the
+	/// instance they pin. Added in lite-07. Older versions carry nothing, so the
+	/// receiving session mints an instance for each announcement.
+	pub fn has_instance(self) -> bool {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
