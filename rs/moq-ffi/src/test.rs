@@ -1434,7 +1434,7 @@ async fn catalog_now_fixes_the_clock_for_later_media() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let catalog = MoqMediaCatalogProducer::new(broadcast.clone()).unwrap();
 	let clock = broadcast
-		.with_state(|state| Ok(state.catalog.snapshot().clock))
+		.with_state(|state| Ok(state.catalog.snapshot().media.clock))
 		.unwrap();
 	// Withhold publication so only the explicit clock read can fix it before the first frame.
 	let reserved = broadcast.with_state(|state| Ok(state.catalog.reserve())).unwrap();
@@ -1454,7 +1454,7 @@ async fn catalog_now_fixes_the_clock_for_later_media() {
 		.unwrap();
 	assert_eq!(
 		broadcast
-			.with_state(|state| Ok(state.catalog.snapshot().clock))
+			.with_state(|state| Ok(state.catalog.snapshot().media.clock))
 			.unwrap(),
 		clock
 	);
