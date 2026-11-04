@@ -431,6 +431,19 @@ impl Shared {
 				wakes.push(waiting.take());
 			}
 		}
+		// Dials whose dialer gave up leave both queues on every poll, which each new dial
+		// triggers, so a queue holds no more than the dials still open, even in a protocol
+		// the application stopped accepting.
+		for protocol in [Protocol::Tcp, Protocol::Track] {
+			let queue = state.queue(protocol);
+			if queue.dials.iter().any(|request| !request.demand().is_wanted()) {
+				let (open, abandoned): (VecDeque<_>, VecDeque<_>) = std::mem::take(&mut queue.dials)
+					.into_iter()
+					.partition(|request| request.demand().is_wanted());
+				queue.dials = open;
+				resets.extend(abandoned.into_iter().map(|request| (request, Error::Cancel)));
+			}
+		}
 		for request in taken {
 			// `None` for a name naming no dial to this endpoint: outside the scheme, this
 			// endpoint's own, or for another acceptor.
@@ -660,9 +673,8 @@ impl Endpoint {
 	/// Poll for the next `tcp` dial from a peer; fails with [`Error::Closed`] once the
 	/// endpoint closed.
 	///
-	/// The first call starts accepting `tcp` dials. They queue until taken, without limit,
-	/// each holding the dialer's request open, so keep accepting, and accept or reject
-	/// each one.
+	/// The first call starts accepting `tcp` dials. They queue until taken, or until their
+	/// dialer gives up, so keep accepting, and accept or reject each one.
 	pub fn poll_accept_tcp(&self, waiter: &kio::Waiter) -> Poll<Result<Incoming<TcpStream>, Error>> {
 		self.poll_accept(waiter)
 	}
@@ -1292,6 +1304,40 @@ mod tests {
 			panic!("deadlocked re-entering the endpoint");
 		}
 		thread.join().unwrap();
+	}
+
+	/// A dial queued in a protocol the application stopped accepting leaves the queue once
+	/// its dialer gives up, so dialing and giving up again never piles up requests.
+	#[test]
+	fn abandoned_dials_leave_the_queue() {
+		let (origin, _driver) = origin::Producer::new(origin::Config::new(crate::Hop::new(1).unwrap()));
+		let endpoint = Endpoint::new(&origin, "room", "bob").unwrap();
+		let noop = kio::Waiter::noop();
+		// Accepting both protocols, then only `tcp`.
+		assert!(endpoint.poll_accept_track(&noop).is_pending());
+		assert!(endpoint.poll_accept_tcp(&noop).is_pending());
+
+		let broadcast = endpoint.shared.publication.broadcast().consume();
+		let queued = || endpoint.shared.state.lock().track.dials.len();
+		let dial = |session: u32| {
+			let dial = broadcast
+				.track(&format!("track/alice/bob/{session:032x}"))
+				.unwrap()
+				.subscribe(None)
+				.into_inner();
+			assert!(dial.poll_ok(&noop).is_pending());
+			dial
+		};
+		for session in 0..3 {
+			let dial = dial(session);
+			assert!(endpoint.poll_accept_tcp(&noop).is_pending());
+			assert_eq!(queued(), 1, "dial {session}");
+			drop(dial);
+		}
+		let _open = dial(3);
+		let _also = dial(4);
+		assert!(endpoint.poll_accept_tcp(&noop).is_pending());
+		assert_eq!(queued(), 2);
 	}
 
 	#[test]

@@ -110,8 +110,10 @@ Implementation choices in
   endpoint never needs polling. A dial waits for the peer's endpoint to be
   announced (drop it to give up), and an accept waits for the claimed
   dialer's endpoint until the dialer drops its subscription.
-- Accepted dials queue without limit while the app accepts, each holding the
-  dialer's subscription open.
+- Accepted dials queue while the app accepts, each holding the dialer's
+  subscription open. A queued dial whose dialer gave up leaves its queue on the
+  endpoint's next poll, which each new dial triggers, so a queue holds only
+  open dials, even in a protocol the app stopped accepting.
 - Session track names are the secret, so they never appear in a lite-07 track
   listing or anywhere else a third party reads. moq-net lists only tracks a
   producer creates or a handler's `Lister` answers, never one served on
