@@ -17,22 +17,31 @@ Precedence is CLI, then env, then file, then defaults.
 ```toml
 [listen]
 bind = "[::]:443"                    # QUIC (UDP), as --listen. Omit for a stream-only relay.
-version = ["moq-lite-05"]            # Restrict accepted versions. Omit for all.
+version = ["moq-lite-05"]            # Restrict accepted versions. Omit for all but moq-lite-07-wip.
 timeout = "10s"                      # Handshake deadline. "0" waits forever.
 implementation = "edge/1"            # SETUP name for the relay. Omit for moq-relay/<v> moq-net-rs/<v>, "" to send none.
 
 [listen.reset]
 secret = "/etc/moq/reset.key"        # File holding 64 hex chars. Omit for a random key.
 
+[listen.lb]                          # QUIC-LB: name this relay in its connection IDs.
+id = "01"                            # Server ID, hex. The same length on every relay.
+nonce = 8                            # Random bytes after it. Default.
+
+[listen.lb.forward]                  # Forward packets that land on the wrong relay to their owner.
+bind = "10.0.0.1:4443"               # This relay's forward socket, a specific IP its peers list.
+key = "/etc/moq/forward.key"         # File holding 64 hex chars, the same on every relay.
+peers = "/etc/moq/peers.toml"        # Server ID to forward socket. Reloaded on change.
+
 [listen.tls]
 cert = "cert.pem"                    # Certificate chain and key. Reloaded on change.
 key = "key.pem"
 generate = ["localhost"]             # Or: a self-signed cert for development.
-root = ["peer-ca.pem"]               # Optional: CAs for client certs (mTLS), reported to the auth server. Needs QUIC.
+root = ["peer-ca.pem"]               # Optional: CAs for client certs (mTLS), reported to the auth server. Needs QUIC or tcp.tls.
 
 [listen.tcp]                         # Plaintext qmux over TCP for trusted local workers.
 bind = "127.0.0.1:4444"
-# tls = true                         # Or: qmux over TLS (tls://) with the listen certificate, no client certs.
+# tls = true                         # Or: qmux over TLS (tls://) with the listen certificate and client-cert policy.
 
 [listen.unix]                        # Plaintext qmux over a Unix socket, gated by peer credentials.
 bind = "/run/moq/internal.sock"
@@ -40,9 +49,8 @@ allow.uid = [1001]
 
 [listen.extensions]                  # moq-transport SETUP extensions to offer, each on by default.
                                      # The relay always offers ietf, for moq-lite-07 relay links.
-auth = false                         # Decline MoQ Auth (draft 17+).
+auth = false                         # Decline MoQ Auth.
 solicit = false                      # Decline MoQ Solicit, so peers may announce unasked.
-epoch = false                        # Decline MoQ Epoch, so routes over moq-transport carry no epoch (draft 17+).
 ```
 
 `timeout` bounds the whole handshake, transport through MoQ SETUP and auth
@@ -54,6 +62,13 @@ admission is bounded by the same value from the request's arrival.
 alike. A client that advertises its own name (moq-lite-05+ or any moq-transport draft)
 reaches the [auth server](/bin/relay/auth#the-contract) with it as `implementation`,
 which is where to count client versions; older clients arrive without one.
+
+`bind` is the relay's one UDP port. Beside QUIC it carries WebRTC media for an
+[embedder](/bin/relay/#embed) that takes it; otherwise that traffic is dropped,
+as are STUN Binding queries ([`[stun]`](#stun) has its own port) and anything
+else. `/metrics` counts the drops in `moq_relay_demux_dropped_total` by `reason`:
+`unclaimed` (WebRTC with no embedder), `overflow`, `stun`, and `unknown`. Not
+with `runtime.io_uring`, which serves QUIC alone.
 
 `reset.secret` lets a relay restarted on the same address reset its
 predecessor's QUIC connections, so clients reconnect at once instead of
@@ -68,9 +83,32 @@ A setting no configured listener reads stops startup rather than being ignored.
 A stream-only relay refuses `preferred_v4`, `preferred_v6`, `lb.id`, and
 `reset.secret`, which only QUIC reads, and a `[listen.tls]` `cert`, `key`, or `generate` unless
 `tcp.tls` serves it.
+The io\_uring runtime refuses `preferred_v4`, `preferred_v6`, and `lb.id`;
+use the tokio runtime when the listener needs these settings.
 `[listen.lb] nonce` needs an `id` in the same table; unset nonce uses 8.
 The `--listen-quic-lb-id` and `--listen-quic-lb-nonce` flags update that table.
 `unix.allow` needs `unix.bind`.
+
+`[listen.lb.forward]` keeps a connection alive when its packets land on another relay behind
+the same anycast address or VIP, after a route change or a rebalance. That relay reads the
+server ID in the connection ID and forwards the packet to the owner's forward socket, which
+handles it as if the client had sent it there and keeps replying from the shared address.
+Handshakes are not forwarded, so the front end must keep each new flow on one relay until it
+completes.
+
+The peers file maps each relay's server ID to its forward `bind`, and may list this relay too,
+so one file serves the whole cluster:
+
+```toml
+"01" = "10.0.0.1:4443"
+"02" = "10.0.0.2:4443"
+```
+
+A packet for an unlisted server ID is dropped. A forward is accepted only from a listed address
+and under the shared `key` (`openssl rand -hex 32 > forward.key`). A changed file replaces the
+map; an invalid one is logged and the last valid map kept, or stops startup. Forwarding needs
+`lb.id` and all three settings, which the `--listen-quic-lb-forward-bind`, `-key`, and `-peers`
+flags update.
 
 ## \[quic]
 
@@ -81,12 +119,12 @@ Transport tuning, applied to accepted and dialed connections alike.
 congestion_control = "delay"         # "delay" (BBR, the default), "loss" (CUBIC), or "none".
 max_streams = 10000                  # Concurrent streams per connection, bidi and uni; 0 is refused. Default.
 idle_timeout = "10s"                 # Drop a connection after this long with nothing on it. Default.
-keep_alive = "3s"                    # Ping interval; "0s" disables it. iroh refuses zero and keeps a separate 5s path heartbeat. Default.
-gso = true                           # UDP segmentation offload. iroh cannot turn it off.
+# keep_alive = "3s"                  # Ping interval; unset or "0s" derives it from the idle timeout.
+gso = true                           # UDP segmentation offload. Default.
 mtu_discovery = false                # Path MTU discovery. Default.
-receive_window = 134217728           # Whole-connection window, in bytes. Default (128 MiB).
-stream_receive_window = 4194304      # Per-stream window, in bytes. Default (4 MiB).
-send_window = 16777216               # Unacknowledged outgoing data, in bytes. Default (16 MiB).
+receive_window = 4194304             # Whole-connection window, in bytes. Default (4 MiB).
+stream_receive_window = 1048576      # Per-stream window, in bytes. Default (1 MiB).
+send_window = 4194304                # Unacknowledged outgoing data, in bytes. Default (4 MiB).
 qlog = "/var/log/moq/qlog"           # Existing directory. Needs the `qlog` build feature.
 # keylog = "/private/keys.log"       # Explicit secret log path; unset is off.
 ```
@@ -98,24 +136,35 @@ Set `keylog` only while debugging, since the file decrypts every captured sessio
 Tokio and io\_uring open the configured path at initialization. New Unix files are
 mode 0600; an existing file readable by group or others is refused without changing
 its permissions. `SSLKEYLOGFILE` does not configure native relay logging.
-Iroh currently refuses an explicit keylog path when enabled.
 
 `idle_timeout` is how long a peer that vanished without a close keeps its
 sessions, and so its [cluster routes](/bin/relay/cluster#failure-detection).
 QUIC uses the smaller of the two endpoints' values, so this also bounds the
-other end. Keep `keep_alive` under a third of it.
+other end.
 
-Raise the receive windows when a fat, long path idles below the link rate. The
-128 MiB `receive_window` default carries several Gbps at a 100 ms RTT and bounds
-how much unread data and incomplete messages one peer can make the relay
-buffer. It has to fit the largest message, just over 64 MiB, so a smaller
-value, here or in `[limits.peer.quic]`, is refused at startup. When incomplete
-messages fill the window, the relay cancels the least urgent stream: the
-lowest subscription priority, then the group its subscription would deliver
-last. Over iroh the window bounds only
-unread data, and over WebSocket or TCP nothing bounds incomplete messages.
-`stream_receive_window` only paces one stream: its credit returns as bytes are
-read, whether or not their message is complete.
+Leave `keep_alive` unset or set it to `"0s"` to derive it from the idle timeout both ends settle
+on: 3/10 of it, so 3s against the 10s default, and shorter against a peer that
+advertises a shorter `max_idle_timeout`. Changing `idle_timeout` then needs no
+matching change here. If neither end sets an idle timeout, pings still run every
+9s. Set it only for a NAT binding that expires sooner than
+the idle timeout. A value no shorter than the negotiated idle timeout could
+never keep the connection up, so it is capped at the derived interval.
+
+Raise the receive windows when a fat, long path idles below the link rate: a
+connection carries at most its window per round trip. The 4 MiB
+`receive_window` default carries about 270 Mbps at a 100 ms RTT, plenty for one
+viewer or publisher, and bounds how much unread data and incomplete messages
+one peer can make the relay buffer. It has to fit the largest unit a session
+assembles, one 1 MiB segment, so a smaller value, here or in
+`[limits.peer.quic]`, is refused at startup. When incomplete messages fill the
+window, the relay cancels the least urgent stream: the lowest subscription
+priority, then the group its subscription would deliver last. A group still
+waiting for its track's TRACK\_INFO goes first, so that control message always
+gets through. WebSocket and TCP sessions cancel the same way; the relay accepts
+them at these windows too and widens peers to `[limits.peer.quic]`, and links
+it dials take these settings. `stream_receive_window` only paces one stream:
+its credit returns as bytes are read, whether or not their message is complete,
+so the 1 MiB default caps one group stream at about 67 Mbps at a 100 ms RTT.
 
 ## \[limits.client] and \[limits.peer]
 
@@ -127,33 +176,28 @@ certificate, route hop, or cluster-looking URL alone does not select peer limits
 ```toml
 [limits.client]
 announces = 1000                     # Simultaneous broadcasts or namespaces.
-requests = 10000                     # Other simultaneous moq-transport requests.
 
 [limits.peer]
 announces = 100000
-requests = 20000
 
 [limits.peer.quic]
 max_streams = 100000                 # Concurrent QUIC streams per direction.
-receive_window = 671088640           # Connection-wide receive window (640 MiB).
-send_window = 671088640              # Unacknowledged outgoing data (640 MiB).
+receive_window = 16777216            # Connection-wide receive window (16 MiB).
+send_window = 16777216               # Unacknowledged outgoing data (16 MiB).
 ```
 
 `[limits.peer.quic]` takes only `max_streams`, `receive_window`, and `send_window`;
 any other `[quic]` key is refused. They replace the `[quic]` values for a
-peer's QUIC connection once its grant is known, before the SETUP reply. Links
-the relay dials get them from the handshake on. A link carrying a whole cluster is then
-not throttled by `[quic]` limits sized for one viewer, for example
-`--limits-peer-quic-max-streams=200000`. Peers over WebSocket, TCP, or iroh keep
-their transport's own limits.
+peer's connection once its grant is known, before the SETUP reply, over QUIC,
+WebSocket, or TCP alike. Links the relay dials get them from the handshake on.
+A link carrying a whole cluster is then not throttled by `[quic]` limits sized
+for one viewer, for example `--limits-peer-quic-max-streams=200000`. The 16 MiB windows carry about 450 Mbps at a 250 ms
+RTT and about 1 Gbps at 100 ms; raise both for a busier link.
 
-These are the defaults. Each subscription and FETCH holds a stream on moq-lite
-and on moq-transport draft 17 and later, as does each PUBLISH a peer's track
-listing gets, so `[quic]` or `[limits.peer.quic]` `max_streams` bounds them
-there, and a peer past it waits rather than fails.
-On drafts 14 to 16, `announces` and `requests` together size the request
-window instead, which every request counts against, so very small values can
-prevent other requests from progressing. Size peer limits
+These are the defaults. Each subscription and FETCH holds a stream, as does each
+PUBLISH a peer's track listing gets, so `[quic]` or `[limits.peer.quic]`
+`max_streams` bounds them, and a peer past it waits rather than fails. The
+removed `requests` limit is refused at startup. Size peer limits
 for the combined traffic they carry, and use session peak counters to check
 announcement and subscription headroom. Exceeding `announces` closes the session
 with `TOO_MANY_REQUESTS`; reconnecting with the same load will exceed it again.
@@ -196,8 +240,8 @@ start rather than being ignored. If io\_uring workers fail to start naming
 listen = "[::]:4443"                 # HTTP: fingerprint, announced, fetch, health.
 
 [web.https]
-listen = "[::]:443"                  # HTTPS plus the WebSocket fallback.
-cert = "cert.pem"                    # cert, key, and root need listen. Omit cert and key with [acme].
+listen = "[::]:443"                  # HTTPS, the WebSocket fallback, and tls:// with the listen certificate.
+cert = "cert.pem"                    # cert, key, and root need listen.
 key = "key.pem"
 
 [internal]
@@ -210,38 +254,6 @@ and HTTP/2 peers that acknowledge keep-alive PINGs. Active response bodies
 keep the connection open; a WebSocket upgrade hands its lifetime to MoQ.
 
 See [HTTP endpoints](/bin/relay/http).
-
-## \[acme]
-
-The relay provisions and renews a publicly trusted certificate itself, for QUIC
-and HTTPS alike (Unix only, where the key can be kept owner-only). This needs
-the default `acme` Cargo feature; builds without it refuse configured issuance:
-
-```toml
-[acme]
-domains = ["relay.example.com"]      # Enables ACME. No wildcards.
-contact = ["mailto:ops@example.com"] # Optional account contact.
-cache = "/var/lib/moq-relay/acme"      # Required: account key and certificate, kept owner-only.
-# directory = "https://acme-staging-v02.api.letsencrypt.org/directory"  # Default: Let's Encrypt production.
-# timeout = "5m"                     # How long the first issuance may take before startup fails.
-```
-
-Validation is TLS-ALPN-01 only: the directory connects to TCP port 443 of each
-domain, so `web.https.listen` is required and must be reachable there, directly
-or forwarded. `[acme]` cannot be combined with `listen.tls.cert`, `key`, or
-`generate`, or with `web.https.cert` and `key`.
-
-With no usable certificate in `cache` (missing, expired, missing a domain, or
-from another directory), startup answers only the challenge until one is
-issued; QUIC, the other routes, and readiness wait for it, and startup fails
-with the ACME error once `timeout` runs out. It also fails after 3 failed
-validations within an hour, counting earlier starts and renewals recorded in
-`cache`, so a restart loop stops short of Let's Encrypt's limit of 5 per
-hostname per hour. Renewal runs in the background well before expiry and
-reaches every listener on its next handshake. A failed renewal keeps the
-current certificate serving and retries, pausing once the same budget is spent
-until the oldest failure is an hour old; a restart in the meantime still serves
-the cached certificate.
 
 ## \[stun]
 
@@ -321,15 +333,15 @@ tls.key = "relay.key"
 goaway.redirect = "same-host"        # How far to trust a draining peer's redirect URI.
 goaway.handover = "10s"              # Cap on how long the drained upstream keeps serving.
 extensions.auth = false              # Decline MoQ Auth on outbound moq-transport sessions.
-extensions.solicit = false           # Decline MoQ Solicit.
-extensions.epoch = false             # Decline MoQ Epoch. All default to on, as in [listen.extensions].
+extensions.solicit = false           # Decline MoQ Solicit. All default to on, as in [listen.extensions].
 ```
 
 A draining upstream may name a replacement URI. `same-host` follows it only
 onto the host already dialed, so a peer can move us between ports and schemes;
 `follow` also lets it choose the host, which trusts it not to point us into
 the local network; `ignore` keeps the current address. `handover` caps how long
-the old connection keeps serving after a GOAWAY.
+the old connection keeps serving after a GOAWAY; it closes sooner, once the
+replacement is up and it carries no subscription or fetch.
 
 ## \[cache]
 
@@ -337,50 +349,55 @@ the old connection keeps serving after a GOAWAY.
 [cache]
 capacity = "8GiB"                    # Target bytes of cached groups and buffered datagrams. "75%" of memory also works.
 headroom = "2GiB"                    # Or: keep this much system memory free and grow into the rest.
-duration = "30s"                     # Cap how long a non-latest group is kept, whatever the publisher asked.
+duration = "30s"                     # Reclaim groups idle this long, and cap every track's max age at it.
 ```
 
 `capacity` is a byte target, repaid as active publishers write. `duration`
 (30s by default) bounds memory by age, and sweeps on a timer, so a publisher
-that stalls but stays connected still has its idle groups reclaimed. The latest
-group of every track is always kept, even past `capacity`.
+that stalls but stays connected still has its idle groups reclaimed. Set
+explicitly, it also caps how long a superseded group stays fresh, whatever max
+age the publisher declared; unset, each track keeps its own max age. The latest
+group of every track, and any group still being read, is kept past `capacity` but
+sheds its oldest frames instead. Whatever the capacity, a group holds at most its
+newest 32 MB. A reader of a track's newest group that reaches a shed frame asks
+for a new group on tracks that opt into refresh. Any other reader of a shed
+frame sees `Evicted`.
+
+While a group has readers, the relay receives at most 16 MB of it past the
+fastest one, then stops reading its stream until that reader catches up, so
+flow control slows the upstream hop and the publisher. A slower reader is never
+waited on: one that trails the fastest by more than the rest of the 32 MB
+reaches a shed frame. A group nobody reads keeps arriving and shedding.
+A stopped stream keeps its receive credit, so the relay stops reading at most as
+many streams per connection as fit in half of its receive window, a stream
+window each; past that, groups keep arriving and shedding as if unpaced. At the
+defaults that is two streams per client session and eight per peer link.
 
 ## \[stats]
 
 ```toml
 [stats]
 enabled = true
-prefix = ".stats"                    # Broadcasts appear under <prefix>/node/<node>.
+prefix = ".stats"                    # The broadcast appears at <prefix>/node/<node>.
 interval = "1s"                      # Time between snapshots. Default.
 node = "sjc/1"                       # Disambiguates relays sharing a cluster.
-depth = 1                            # Also bucket by the first N path segments (per tenant).
-linger = "5m"                        # Keep an empty group's broadcast announced this long. Default.
+depth = 1                            # One group track per first N path segments (per tenant).
+linger = "5m"                        # Keep an empty group's track listed this long. Default.
 ```
 
 Each node publishes its traffic and session counters as MoQ tracks, split by a
 **tier** label from the auth server's grant (`--cluster-tier` for links this
 relay dials and LAN peers it admits), which is what makes billing per customer or per region possible.
-Each run, and each group returning after its linger, announces under a fresh
-[epoch](/concept/moq-lite#publisher-epochs), so a restart is a new broadcast at
-the same path. Each group's totals count everything since its epoch began, so
-billing reads those; per-path traffic and per-label sessions and HTTP requests are for
+Each run announces under a fresh [instance](/concept/moq-lite#publisher-instances),
+so a restart is a new broadcast at the same path. Each group is a
+[track](/concept/stats#group-tracks) of that broadcast, and one returning after
+its linger restarts its counters under a new run id without an announce. The
+node's totals count everything since its run began, so billing reads those;
+a group's per-path traffic and per-label sessions and HTTP requests are for
 dashboards. Session counters report how close sessions come to the
 per-session limits, past which one is closed with `TOO_MANY_REQUESTS`.
 [Stats](/concept/stats) describes the paths, tracks, and encodings; read them
 with the [`moq-stats`](https://docs.rs/moq-stats) crate.
-
-## \[iroh]
-
-Iroh requires building the relay from source with `cargo build --release -p moq-relay --features iroh`. Published binaries, Docker images, and the Nix package leave it out.
-
-```toml
-[iroh]
-enabled = true
-secret = "./iroh-secret.key"         # Persist the key so the endpoint id survives restarts.
-# disable_relay = true               # Direct addresses only. Right on a LAN, wrong on the internet.
-```
-
-See [Transport](/concept/transport#iroh-peer-to-peer-experimental).
 
 ## Shutdown
 

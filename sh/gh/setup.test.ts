@@ -1,3 +1,4 @@
+// biome-ignore-all lint/suspicious/noTemplateCurlyInString: GitHub Actions expressions are literal strings.
 // Runner timing and action execution stay in CI. These tests check the setup gates.
 import { expect, test } from "bun:test";
 
@@ -16,7 +17,7 @@ const workflow = Bun.YAML.parse(await Bun.file(".github/workflows/check.yml").te
 };
 
 for (const name of ["check"]) {
-	test(`${name} queries before setup and keeps its required check name`, () => {
+	test(`${name} queries before setup and keeps its check name`, () => {
 		const job = workflow.jobs[name];
 		expect(job.name).toBe("Check");
 		const scopeIndex = job.steps.findIndex((step) => step.id === "scope");
@@ -47,12 +48,8 @@ for (const name of ["check"]) {
 		}
 	});
 
-	test(`${name} uses the configured runner only for merge groups`, () => {
-		const expression = workflow.jobs[name]["runs-on"].replace(/^\$\{\{\s*|\s*\}\}$/g, "");
-		const runner = new Function("github", "vars", `return (${expression});`);
-		expect(runner({ event_name: "merge_group" }, { MOQ_QUEUE_RUNNER: "moq-queue" })).toBe("moq-queue");
-		expect(runner({ event_name: "merge_group" }, {})).toBe("ubuntu-24.04-arm");
-		expect(runner({ event_name: "pull_request" }, { MOQ_QUEUE_RUNNER: "moq-queue" })).toBe("ubuntu-24.04-arm");
+	test(`${name} keeps release checks on a hosted runner`, () => {
+		expect(workflow.jobs[name]["runs-on"]).toBe("ubuntu-24.04-arm");
 	});
 }
 
@@ -64,10 +61,26 @@ test("self-hosted queue jobs use local caches without R2 credentials", async () 
 		.replaceAll("inputs.secret-access-key", 'inputs["secret-access-key"]')
 		.replace(/^\$\{\{\s*|\s*\}\}$/g, "");
 	const backend = new Function("runner", "inputs", `return (${expression});`);
-	const guard = new Function("runner", "github", `return (${action.runs.steps[0].if});`);
-	for (const event_name of ["merge_group", "pull_request", "pull_request_target", "push", "workflow_dispatch"]) {
-		expect(guard({ environment: "self-hosted" }, { event_name })).toBe(event_name !== "merge_group");
-		expect(guard({ environment: "github-hosted" }, { event_name })).toBe(false);
+	// GitHub's expression `startsWith`, so the guard evaluates as written.
+	const startsWith = (value: string, prefix: string) => value.startsWith(prefix);
+	const guard = new Function("runner", "github", "startsWith", `return (${action.runs.steps[0].if});`);
+	const queue = "refs/heads/gh-readonly-queue/main/pr-1-0123456789abcdef0123456789abcdef01234567";
+	const refs = [
+		"refs/heads/main",
+		"refs/heads/feature",
+		"refs/pull/1/merge",
+		queue,
+		"refs/heads/gh-readonly-queue/release/pr-1-0",
+	];
+	for (const name of ["Queue", "Land", "Check", "Untrusted"]) {
+		for (const event of ["merge_group", "pull_request", "push"]) {
+			for (const ref of refs) {
+				const github = { workflow: name, event_name: event, ref };
+				const trusted = name === "Queue" && event === "merge_group" && ref === queue;
+				expect(guard({ environment: "self-hosted" }, github, startsWith)).toBe(!trusted);
+				expect(guard({ environment: "github-hosted" }, github, startsWith)).toBe(false);
+			}
+		}
 	}
 	for (const credentials of [
 		{ "access-key-id": "key", "secret-access-key": "secret" },
@@ -93,4 +106,29 @@ test("one job runs one CI dispatch with one checkout and cache restore", () => {
 	expect(steps.filter((step) => step.uses === "./.github/actions/nix")).toHaveLength(1);
 	expect(steps.filter((step) => step.uses === "./.github/actions/rust-cache")).toHaveLength(1);
 	expect(steps.filter((step) => step.run?.includes("nix develop"))).toHaveLength(1);
+});
+
+test("nightly fuzzing restores and saves minimized target-specific corpora", async () => {
+	const nightly = Bun.YAML.parse(await Bun.file(".github/workflows/nightly.yml").text());
+	const steps = nightly.jobs.fuzz.steps;
+	const restore = steps.findIndex((step: Step) => step.uses?.startsWith("actions/cache/restore@"));
+	const run = steps.findIndex((step: Step) => step.name === "Fuzz");
+	const minimize = steps.findIndex((step: Step) => step.name === "Minimize corpus");
+	const save = steps.findIndex((step: Step) => step.uses?.startsWith("actions/cache/save@"));
+	expect(restore).toBeGreaterThan(0);
+	expect(run).toBeGreaterThan(restore);
+	expect(minimize).toBeGreaterThan(run);
+	expect(save).toBeGreaterThan(minimize);
+	const cached = steps[restore].with;
+	expect(cached.path).toBe("rs/*/fuzz/corpus/${{ matrix.target }}");
+	expect(cached.key).toContain("${{ matrix.target }}");
+	expect(cached.key).toContain("${{ github.run_id }}-${{ github.run_attempt }}");
+	expect(cached.key).toStartWith(cached["restore-keys"].trim());
+	expect(steps[save].with.path).toBe(cached.path);
+	expect(steps[save].with.key).toBe(cached.key);
+	// Default success guards preserve the last healthy corpus after a crash or failed minimization.
+	expect(steps[minimize].if).toBeUndefined();
+	expect(steps[save].if).toBeUndefined();
+	expect(steps[minimize].run).toBe("nix develop --command just rs fuzz --minimize ${{ matrix.target }}");
+	expect(steps.find((step: Step) => step.name === "Preserve failure inputs").if).toBe("${{ failure() }}");
 });

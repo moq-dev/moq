@@ -47,6 +47,44 @@ pub(crate) struct Ledger {
 	// Index both: one due gap must not make every arrival scan all the younger ones.
 	ages: BTreeSet<(Instant, u64)>,
 	grace: Duration,
+	changes: Changes,
+}
+
+/// Revisions of the current runs, indexed in both orders. Coalescing or removing a run
+/// removes its revision too, so an idle reader never retains a history of mutations.
+#[derive(Debug, Default)]
+pub(crate) struct Changes {
+	runs: BTreeMap<u64, (u64, u64)>,
+	changed: BTreeMap<u64, u64>,
+	revision: u64,
+}
+
+impl Changes {
+	pub fn revision(&self) -> u64 {
+		self.revision
+	}
+
+	pub fn remove(&mut self, start: u64) {
+		if let Some((_, revision)) = self.runs.remove(&start) {
+			self.changed.remove(&revision);
+		}
+	}
+
+	pub fn insert(&mut self, run: Range<u64>) {
+		self.remove(run.start);
+		self.revision = self.revision.checked_add(1).expect("run revisions exhausted");
+		self.runs.insert(run.start, (run.end, self.revision));
+		self.changed.insert(self.revision, run.start);
+	}
+
+	pub fn since(&self, revision: u64) -> impl Iterator<Item = Range<u64>> + '_ {
+		self.changed
+			.range((std::ops::Bound::Excluded(revision), std::ops::Bound::Unbounded))
+			.map(|(_, start)| {
+				let (end, _) = self.runs.get(start).expect("a changed run stays indexed");
+				*start..*end
+			})
+	}
 }
 
 impl Default for Ledger {
@@ -62,6 +100,7 @@ impl Ledger {
 			runs: BTreeMap::new(),
 			ages: BTreeSet::new(),
 			grace,
+			changes: Changes::default(),
 		}
 	}
 
@@ -71,6 +110,7 @@ impl Ledger {
 	}
 
 	fn remove(&mut self, start: u64) -> Run {
+		self.changes.remove(start);
 		let run = self.runs.remove(&start).expect("an indexed run");
 		self.ages.remove(&(run.since, start));
 		run
@@ -112,6 +152,20 @@ impl Ledger {
 				self.runs.insert(first, Run { end, since });
 			}
 		}
+		self.changes.insert(first..end);
+	}
+
+	/// Account a live arrival, refreshing a cached incarnation even if its sequence was
+	/// accounted before. Its gap ages stay unchanged, but readers must revisit a refusal.
+	pub fn arrive(&mut self, sequence: u64, now: Instant) {
+		let revision = self.changes.revision();
+		self.account(sequence..sequence.saturating_add(1), now);
+		if self.changes.revision() == revision
+			&& let Some((&start, run)) = self.runs.range(..=sequence).next_back()
+			&& sequence < run.end
+		{
+			self.changes.insert(start..run.end);
+		}
 	}
 
 	/// Fold every gap older than the grace into the runs around it.
@@ -126,12 +180,9 @@ impl Ledger {
 				break;
 			}
 			let run = self.remove(start);
-			self.runs
-				.range_mut(..start)
-				.next_back()
-				.expect("not the first run")
-				.1
-				.end = run.end;
+			let (&lower, previous) = self.runs.range_mut(..start).next_back().expect("not the first run");
+			previous.end = run.end;
+			self.changes.insert(lower..run.end);
 		}
 	}
 
@@ -143,11 +194,6 @@ impl Ledger {
 	/// The lowest sequence accounted for.
 	pub fn first(&self) -> Option<u64> {
 		self.runs.first_key_value().map(|(start, _)| *start)
-	}
-
-	/// One past the highest sequence accounted for.
-	pub fn end(&self) -> Option<u64> {
-		self.runs.last_key_value().map(|(_, run)| run.end)
 	}
 
 	/// The exclusive end of the accounted run holding `sequence`, `None` while it is not.
@@ -172,6 +218,10 @@ impl Ledger {
 			.range(lower..)
 			.take_while(move |(start, _)| **start < groups.end)
 			.map(move |(&start, run)| start.max(groups.start)..run.end.min(groups.end))
+	}
+
+	pub fn changes(&self) -> &Changes {
+		&self.changes
 	}
 
 	/// Whether every group in `groups` is accounted for.
@@ -199,6 +249,7 @@ impl Ledger {
 				self.ages.remove(&(run.since, start));
 				run.since = now;
 				self.ages.insert((now, start));
+				self.changes.insert(start..run.end);
 			}
 			below = run.end;
 		}
@@ -253,6 +304,27 @@ impl Ledger {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn changes_keep_only_current_runs_across_coalescing_and_expiry() {
+		let now = Instant::ZERO;
+		let mut ledger = Ledger::new(GRACE);
+		ledger.account(0..1, now);
+		ledger.account(4..5, now);
+		ledger.account(8..9, now);
+		let revision = ledger.changes().revision();
+		ledger.account(2..3, now);
+		assert_eq!(ledger.changes().since(revision).collect::<Vec<_>>(), vec![2..3]);
+		let revision = ledger.changes().revision();
+		ledger.account(1..4, now);
+		assert_eq!(ledger.changes().since(revision).collect::<Vec<_>>(), vec![0..5]);
+		ledger.expire(now + GRACE);
+		assert_eq!(ledger.changes().since(0).collect::<Vec<_>>(), vec![0..9]);
+		assert_eq!(ledger.changes.changed.len(), ledger.runs.len());
+		let revision = ledger.changes().revision();
+		ledger.account(2..7, now + GRACE);
+		assert_eq!(ledger.changes().revision(), revision, "already accounted is unchanged");
+	}
 
 	/// Account `groups` and fold what aged out, as each arrival does.
 	fn arrive(ledger: &mut Ledger, groups: Range<u64>, now: Instant) {

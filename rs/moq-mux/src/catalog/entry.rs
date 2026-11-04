@@ -10,11 +10,10 @@ use std::ops::Deref;
 /// name the track once.
 ///
 /// Create one from a catalog section's map entry with [`Entry::new`]. It derefs to the config, so
-/// the config's fields are reachable directly (`entry.mode`, `entry.compression`).
+/// the config's fields are reachable directly (`entry.mode`, `entry.schema`).
 ///
-/// The entry is what a consumer is built from: see
-/// [`json::Consumer`](crate::json::Consumer) and [`binary::Consumer`](crate::binary::Consumer),
-/// each of which adds a `subscribe` to the entry types it can read.
+/// The entry is what a consumer is built from: see [`json::Consumer`](crate::json::Consumer),
+/// which adds a `subscribe` to the entry types it can read.
 #[derive(Clone, Copy, Debug)]
 pub struct Entry<'a, C> {
 	name: &'a str,

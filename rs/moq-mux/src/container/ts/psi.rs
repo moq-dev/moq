@@ -5,7 +5,8 @@
 //! used only when its CRC-32/MPEG-2 matches: a corrupt one is dropped whole, and the last
 //! good table stays in force until a repetition replaces it.
 
-use std::collections::BTreeMap;
+use std::collections::hash_map::Entry;
+use std::collections::{BTreeMap, HashMap};
 
 use anyhow::Context;
 use mpeg2ts::ts::Pid;
@@ -221,16 +222,25 @@ impl Pmt {
 
 		let mut rest = &body[4 + info_len..];
 		let mut streams = Vec::new();
+		// A PID the loop lists again takes the later entry, in the earlier one's place.
+		let mut index = HashMap::new();
 		while !rest.is_empty() {
 			if rest.len() < 5 {
 				return None;
 			}
 			let len = length([rest[3], rest[4]]);
-			streams.push(Es {
+			let es = Es {
 				stream_type: rest[0],
 				pid: pid([rest[1], rest[2]]),
 				descriptors: descriptors(rest.get(5..5 + len)?)?,
-			});
+			};
+			match index.entry(es.pid) {
+				Entry::Occupied(entry) => streams[*entry.get()] = es,
+				Entry::Vacant(entry) => {
+					entry.insert(streams.len());
+					streams.push(es);
+				}
+			}
 			rest = &rest[5 + len..];
 		}
 		Some(Self {
@@ -576,6 +586,21 @@ mod test {
 		assert_eq!(pmt.streams[0].stream_type, 0x2d);
 		assert_eq!(pmt.streams[1].pid, Pid::new(0x100).unwrap());
 		assert_eq!(pmt.streams[1].descriptors[0].tag, 0x0a);
+	}
+
+	/// A PID listed again takes the later entry, in the place of the first.
+	#[test]
+	fn pmt_repeated_pid_keeps_the_last_entry() {
+		let body = [
+			0xe1, 0x00, 0xf0, 0x00, // PCR PID 0x100, no program_info
+			0x1b, 0xe1, 0x00, 0xf0, 0x00, // H.264 on 0x100
+			0x0f, 0xe1, 0x01, 0xf0, 0x00, // AAC on 0x101
+			0x06, 0xe1, 0x00, 0xf0, 0x03, 0x0a, 0x01, 0x00, // private data on 0x100, with a descriptor
+		];
+		let pmt = Pmt::parse(&section(0x02, 1, 0, 0, 0, &body)).unwrap();
+		let streams: Vec<_> = pmt.streams.iter().map(|es| (es.stream_type, es.pid.as_u16())).collect();
+		assert_eq!(streams, [(0x06, 0x100), (0x0f, 0x101)]);
+		assert_eq!(pmt.streams[0].descriptors[0].tag, 0x0a);
 	}
 
 	#[test]

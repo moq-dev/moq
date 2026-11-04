@@ -1,12 +1,12 @@
 use bytes::{Buf, Bytes};
 use moq_net::transport::{self as moq, poll};
 use send_wrapper::SendWrapper;
-use std::task::{Context, Poll};
+use std::task::Poll;
 
 /// A worker's transport, usable where moq-net wants a `Send` one.
 ///
 /// moq-net boxes every transport with a native `Send` bound, which a worker's
-/// `!Send` [`Session`](super::Session) cannot meet, so wrap the session in this
+/// `!Send` session cannot meet, so wrap the session in this
 /// before `Server::accept_request` or `Client::connect`. The session, its
 /// streams, and its send groups never leave the worker that polls them, so
 /// this checks the thread on every use and panics anywhere else instead of
@@ -34,58 +34,58 @@ impl<S: poll::Session> poll::Session for Local<S> {
 	type RecvStream = Local<S::RecvStream>;
 	type Error = S::Error;
 
-	fn poll_accept_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, Self::Error>> {
-		self.0.poll_accept_uni(cx).map_ok(Local::new)
+	fn poll_accept_uni(&self, waiter: &kio::Waiter) -> Poll<Result<Self::RecvStream, Self::Error>> {
+		self.0.poll_accept_uni(waiter).map_ok(Local::new)
 	}
 
-	fn poll_accept_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
+	fn poll_accept_bi(&self, waiter: &kio::Waiter) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
 		self.0
-			.poll_accept_bi(cx)
+			.poll_accept_bi(waiter)
 			.map_ok(|(send, recv)| (Local::new(send), Local::new(recv)))
 	}
 
 	fn poll_open_uni(
-		&mut self,
-		cx: &mut Context<'_>,
+		&self,
+		waiter: &kio::Waiter,
 		options: poll::SendOptions<'_, Local<<S::SendStream as poll::SendStream>::Group>>,
 	) -> Poll<Result<Self::SendStream, Self::Error>> {
-		self.0.poll_open_uni(cx, unwrap(options)).map_ok(Local::new)
+		self.0.poll_open_uni(waiter, unwrap(options)).map_ok(Local::new)
 	}
 
 	fn poll_open_bi(
-		&mut self,
-		cx: &mut Context<'_>,
+		&self,
+		waiter: &kio::Waiter,
 		options: poll::SendOptions<'_, Local<<S::SendStream as poll::SendStream>::Group>>,
 	) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
 		self.0
-			.poll_open_bi(cx, unwrap(options))
+			.poll_open_bi(waiter, unwrap(options))
 			.map_ok(|(send, recv)| (Local::new(send), Local::new(recv)))
 	}
 
 	fn poll_open_request(
-		&mut self,
-		cx: &mut Context<'_>,
+		&self,
+		waiter: &kio::Waiter,
 		options: poll::SendOptions<'_, Local<<S::SendStream as poll::SendStream>::Group>>,
 	) -> Poll<Result<Option<poll::BiStreams<Self>>, Self::Error>> {
 		self.0
-			.poll_open_request(cx, unwrap(options))
+			.poll_open_request(waiter, unwrap(options))
 			.map_ok(|streams| streams.map(|(send, recv)| (Local::new(send), Local::new(recv))))
 	}
 
-	fn send_group(&mut self, priority: i64) -> Option<Local<<S::SendStream as poll::SendStream>::Group>> {
+	fn send_group(&self, priority: i64) -> Option<Local<<S::SendStream as poll::SendStream>::Group>> {
 		self.0.send_group(priority).map(Local::new)
 	}
 
 	fn send_datagram(
-		&mut self,
+		&self,
 		payload: Bytes,
 		options: poll::SendOptions<'_, Local<<S::SendStream as poll::SendStream>::Group>>,
 	) -> Result<(), Self::Error> {
 		self.0.send_datagram(payload, unwrap(options))
 	}
 
-	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
-		self.0.poll_recv_datagram(cx)
+	fn poll_recv_datagram(&self, waiter: &kio::Waiter) -> Poll<Result<Bytes, Self::Error>> {
+		self.0.poll_recv_datagram(waiter)
 	}
 
 	fn max_datagram_size(&self) -> usize {
@@ -96,20 +96,20 @@ impl<S: poll::Session> poll::Session for Local<S> {
 		self.0.protocol()
 	}
 
-	fn binding(&self) -> moq::Binding {
-		self.0.binding()
+	fn address(&self) -> moq::Address {
+		self.0.address()
 	}
 
-	fn close(&mut self, code: u32, reason: &str) {
+	fn close(&self, code: u32, reason: &str) {
 		self.0.close(code, reason)
 	}
 
-	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Self::Error> {
-		self.0.poll_closed(cx)
+	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Self::Error> {
+		self.0.poll_closed(waiter)
 	}
 
-	fn stats(&self) -> impl moq::Stats {
-		self.0.stats()
+	fn metrics(&self) -> impl moq::Metrics {
+		self.0.metrics()
 	}
 
 	fn wire(&self) -> Option<moq::Wire> {
@@ -119,18 +119,22 @@ impl<S: poll::Session> poll::Session for Local<S> {
 	fn probe(&self) -> Option<moq::Probe> {
 		self.0.probe()
 	}
+
+	fn receive_window(&self) -> Option<moq::ReceiveWindow> {
+		self.0.receive_window()
+	}
 }
 
 impl<T: poll::SendStream> poll::SendStream for Local<T> {
 	type Error = T::Error;
 	type Group = Local<T::Group>;
 
-	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
-		self.0.poll_write(cx, buf)
+	fn poll_write(&mut self, waiter: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
+		self.0.poll_write(waiter, buf)
 	}
 
-	fn poll_write_buf<B: Buf>(&mut self, cx: &mut Context<'_>, buf: &mut B) -> Poll<Result<usize, Self::Error>> {
-		self.0.poll_write_buf(cx, buf)
+	fn poll_write_buf<B: Buf>(&mut self, waiter: &kio::Waiter, buf: &mut B) -> Poll<Result<usize, Self::Error>> {
+		self.0.poll_write_buf(waiter, buf)
 	}
 
 	fn set_priority(&mut self, priority: i64) {
@@ -149,8 +153,8 @@ impl<T: poll::SendStream> poll::SendStream for Local<T> {
 		self.0.reset(code)
 	}
 
-	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-		self.0.poll_closed(cx)
+	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Self::Error>> {
+		self.0.poll_closed(waiter)
 	}
 }
 
@@ -161,8 +165,8 @@ impl<T: poll::RecvStream> poll::RecvStream for Local<T> {
 	where
 		Self: 'a;
 
-	fn poll_lease(&mut self, cx: &mut Context<'_>, want: usize) -> Poll<Result<Self::Lease<'_>, Self::Error>> {
-		self.0.poll_lease(cx, want)
+	fn poll_lease(&mut self, waiter: &kio::Waiter, want: usize) -> Poll<Result<Self::Lease<'_>, Self::Error>> {
+		self.0.poll_lease(waiter, want)
 	}
 
 	fn set_priority(&mut self, priority: i64) {
@@ -173,8 +177,12 @@ impl<T: poll::RecvStream> poll::RecvStream for Local<T> {
 		self.0.stop(code)
 	}
 
-	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
-		self.0.poll_read_chunk(cx, max)
+	fn poll_reset(&mut self, waiter: &kio::Waiter) -> Poll<Self::Error> {
+		self.0.poll_reset(waiter)
+	}
+
+	fn poll_read_chunk(&mut self, waiter: &kio::Waiter, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
+		self.0.poll_read_chunk(waiter, max)
 	}
 }
 
@@ -194,7 +202,7 @@ mod tests {
 	#[test]
 	fn meets_the_boxed_driver_bounds() {
 		fn boxable<S: poll::Boxable>() {}
-		boxable::<Local<super::super::Session<crate::quic::web::Session>>>();
+		boxable::<Local<crate::quic::web::Session>>();
 	}
 
 	/// Touching it off its thread fails loud rather than racing the worker.

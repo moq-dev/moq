@@ -198,7 +198,8 @@ export type TranscodeInput = {
 /** Constructor options for {@link Transcode}. */
 export type TranscodeProps = Inputs<TranscodeInput>;
 
-type TranscodeOutput = {
+/** Signals the transcoder derives. */
+export type TranscodeOutput = {
 	// The decoded output frame. Owned here, closed on each update and on close().
 	frame: Signal<VideoFrame | undefined>;
 };
@@ -218,6 +219,13 @@ export class Transcode {
 	readonly out = readonlys(this.#out);
 
 	#signals = new Effect();
+	#active?: {
+		effect: Effect;
+		encoder: VideoEncoder;
+		codec: string;
+		width: number;
+		height: number;
+	};
 
 	constructor(props?: TranscodeProps) {
 		this.in = {
@@ -226,14 +234,58 @@ export class Transcode {
 			settings: getter(props?.settings),
 		};
 		this.#signals.run(this.#run.bind(this));
+		this.#signals.cleanup(() => {
+			this.#active?.effect.close();
+			this.#active = undefined;
+		});
 	}
 
 	#run(effect: Effect): void {
 		const config = effect.get(this.in.config);
-		if (!config) return;
+		const active = this.#active;
+		if (!config) {
+			active?.effect.close();
+			this.#active = undefined;
+			return;
+		}
 
+		if (
+			active &&
+			active.encoder.state !== "closed" &&
+			active.codec === config.codec &&
+			active.width === config.width &&
+			active.height === config.height
+		) {
+			try {
+				active.encoder.configure(config);
+			} catch (error) {
+				console.warn("preview: encode configuration error", error);
+				active.effect.close();
+			}
+			return;
+		}
+
+		active?.effect.close();
+		this.#active = undefined;
+		// Config notifications may reconfigure a healthy encoder; only codec/size changes or a
+		// previous failure replace the codec pair and its frame ownership scope.
+		const run = new Effect();
+		try {
+			const encoder = this.#start(run, config);
+			this.#active = { effect: run, encoder, codec: config.codec, width: config.width, height: config.height };
+		} catch (error) {
+			console.warn("preview: codec setup error", error);
+			run.close();
+		}
+	}
+
+	#start(effect: Effect, config: VideoEncoderConfig): VideoEncoder {
 		const decoder = new VideoDecoder({
 			output: (frame: VideoFrame) => {
+				if (effect.abort.aborted) {
+					frame.close();
+					return;
+				}
 				this.#out.frame.update((prev) => {
 					prev?.close();
 					return frame;
@@ -250,7 +302,13 @@ export class Transcode {
 
 		const encoder = new VideoEncoder({
 			output: (chunk: EncodedVideoChunk) => {
-				if (decoder.state === "configured") decoder.decode(chunk);
+				if (effect.abort.aborted || decoder.state !== "configured") return;
+				try {
+					decoder.decode(chunk);
+				} catch (error) {
+					console.warn("preview: decode error", error);
+					effect.close();
+				}
 			},
 			error: (err: Error) => {
 				console.warn("preview: encode error", err);
@@ -261,6 +319,12 @@ export class Transcode {
 			if (encoder.state !== "closed") encoder.close();
 		});
 
+		effect.cleanup(() => {
+			this.#out.frame.update((prev) => {
+				prev?.close();
+				return undefined;
+			});
+		});
 		encoder.configure(config);
 
 		// The encoder emits Annex B (inline SPS/PPS on keyframes), so the decoder needs no description.
@@ -300,6 +364,10 @@ export class Transcode {
 						if (keyFrame) lastKeyframe = timestamp;
 
 						encoder.encode(frame, { keyFrame });
+					} catch (error) {
+						console.warn("preview: encode error", error);
+						effect.close();
+						break;
 					} finally {
 						frame.close();
 					}
@@ -307,12 +375,7 @@ export class Transcode {
 			});
 		});
 
-		effect.cleanup(() => {
-			this.#out.frame.update((prev) => {
-				prev?.close();
-				return undefined;
-			});
-		});
+		return encoder;
 	}
 
 	/** Stop transcoding and close the last output frame. */

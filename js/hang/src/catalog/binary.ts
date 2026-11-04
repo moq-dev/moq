@@ -1,8 +1,8 @@
 import * as z from "zod/mini";
-import { CompressionSchema } from "./compression";
 import { u53Schema } from "./integers";
 import { ModeSchema } from "./mode";
-import { EpochSchema, RelativeBroadcastSchema } from "./path";
+import { InstanceSchema, RelativeBroadcastSchema } from "./path";
+import { renditions } from "./section";
 
 /**
  * Schema for a single binary track: application data published as opaque payloads.
@@ -12,27 +12,24 @@ import { EpochSchema, RelativeBroadcastSchema } from "./path";
  * consumer can read them.
  *
  * A *loose* object: fields this build doesn't recognize pass through untouched, so an entry using
- * a future mode or compression round-trips rather than losing the fields that describe it.
+ * a future mode round-trips rather than losing the fields that describe it.
  */
 export const BinaryConfigSchema = z.looseObject({
 	// Optional reference to another broadcast that publishes this track, expressed
 	// relative to the broadcast that served this catalog (e.g. "./source").
 	// If unset, the track lives in the same broadcast as the catalog.
 	broadcast: z.optional(RelativeBroadcastSchema),
-	// The publisher instance the reference names, when known. Absent accepts whichever instance
-	// resolves first. An epoch-aware route proving another instance fails the entry; an epochless
-	// route cannot prove one, so there it is best effort. Without `broadcast`, it names the
-	// catalog's own instance.
-	epoch: z.optional(EpochSchema),
+	// The instance of the stream the reference names, when known. Absent accepts whichever stream
+	// resolves first. A route of another instance fails the entry; a route over a wire that
+	// carries no instance has one its session minted, which proves nothing, so there it is best
+	// effort. Without `broadcast`, it names the catalog's own stream.
+	instance: z.optional(InstanceSchema),
 	// The track's name in its broadcast, when it differs from this entry's ID (its key in the
 	// catalog). Absent means the ID is the track name. Resolve it with `track`.
 	track: z.optional(z.string()),
 
 	// Whether the track is a latest-value blob or an append log. Always stated.
 	mode: ModeSchema,
-
-	// The compression applied to each frame, or absent when they are written through untouched.
-	compression: z.optional(CompressionSchema),
 
 	// An optional media type for each payload (e.g. "image/jpeg"). Purely descriptive:
 	// a consumer that doesn't recognize it can still read the track.
@@ -68,7 +65,7 @@ export const BinaryConfigSchema = z.looseObject({
  * key is the track name to subscribe to.
  */
 export const BinarySchema = z.object({
-	tracks: z.record(z.string(), BinaryConfigSchema),
+	tracks: renditions(BinaryConfigSchema),
 });
 
 /** The catalog binary section: data tracks keyed by track name. */

@@ -9,9 +9,8 @@ sends a short probe cluster at about twice the estimate, capped at the target,
 about every five seconds, with a follow-up probe when one validates. When the
 path has room the estimate rises; when it doesn't, padding stays within its
 overhead and media frame-delay budgets. Such sessions on lite-07 or IETF
-draft-18 and later then have a sender, so
-[viewer targets](/quest/m2/probe/viewer-target.md) can advertise PROBE
-`Increase` for them.
+draft-18 and later then have a sender, so they advertise PROBE `Increase` and
+probe to the larger of their send target and the peer's PROBE target.
 
 ## Plan
 
@@ -19,11 +18,11 @@ Decided with the maintainer on 2026-10-17 (see the
 [epic](/quest/m2/probe/README.md)):
 
 - **Padding is the browser's sender.** Native sessions retransmit in-flight
-  data instead ([native probing](/quest/m1/probe-native.md)). Padding is
+  data instead (native probing, [moq-dev/moq#6635](https://github.com/moq-dev/moq/pull/6635)). Padding is
   ordinary stream data that any controller counts and paces, and it
   implements the sender hook in `js/net`, mirroring Rust's
   `transport::Probe`. Decided 2026-10-20: browser-only. A native session without
-  native probing (iroh on noq, or moq-quic under CUBIC) has no sender, so
+  native probing (moq-quic under CUBIC) has no sender, so
   [native rung disable](/quest/m1/simulcast-rung-disable.md) never stops a
   rung there.
 - **The browser's send target.** The `js/net` mirror of the Rust send
@@ -33,6 +32,14 @@ Decided with the maintainer on 2026-10-17 (see the
   (`js/net/src/connection/reload.ts`). Moved here in review of
   [#6102](https://github.com/moq-dev/moq/pull/6102), so m1 ships no browser
   target without a sender.
+- **The peer's target.** Viewer targets landed first ([moq-dev/moq#7090](https://github.com/moq-dev/moq/pull/7090)), so
+  `js/net` still advertises `Report` and its publisher's `runProbe` reads and
+  drops a peer's PROBE target. With padding, keep the latest target from each
+  PROBE stream (zero once the stream ends), pad to the larger of it and the send
+  target, and advertise `Increase` from `probeLevel` only where padding runs,
+  mirroring Rust's `ProbeLevel::detect` and the session's `Probing` in
+  `rs/moq-net/src/session.rs`. The two directions never mix: a viewer's own
+  target goes to its peer, never into what it pads.
 - **WebRTC's schedule.** Model it on GoogCC's `ProbeController` ALR probing.
   Rejected: [#5863](https://github.com/moq-dev/moq/pull/5863)'s exponential
   backoff to 60 s, which leaves a rendition waiting up to a minute after the
@@ -42,8 +49,7 @@ Decided with the maintainer on 2026-10-17 (see the
   (Padding Stream 0x2), matching moq-transport's
   PADDING. Pad only on lite-07 and, on moq-transport, from draft-18 on. On
   lite-05 and lite-06 the peer resets every padding stream, so the estimate
-  can never rise, and drafts 14 to 17 close the session on an unknown stream
-  type (`UniType::classify`). Those sessions have no sender: refuse to pad
+  can never rise. Those sessions have no sender: refuse to pad
   and keep `Report`. Update `drafts/draft-lcurley-moq-probe.md` if the sender changes
   what it says, and run `just drafts check`.
 - A browser sender can't see whether it is app-limited; settle how to judge
@@ -64,6 +70,9 @@ Tests, on `@moq/clock`'s `Manual`:
 - The padding writer over a fake WebTransport: padding goes out at the lowest
   priority on lite-07 and IETF draft-18, while lite-05, lite-06, and drafts
   14 to 17 pad nothing and negotiate `Report`.
+- A peer's PROBE target raises what padding probes to, a session that also
+  watches never pads for its own viewers, and the target lapses when the
+  PROBE stream ends.
 - In Chrome through a shaped link: with padding the estimate rises past the
   media, without it it stays frozen. On a path held below the target, report
   media frame delay and deadline misses against budgets set before tuning:
@@ -72,3 +81,7 @@ Tests, on `@moq/clock`'s `Manual`:
   Assert that repeated clusters on a path with no room stay within the
   overhead budget.
   Wire it into CI at least nightly, sharing the epic's shaped-uplink setup.
+
+## Required
+
+- [Browser send estimate](/quest/m2/probe/browser-send-estimate.md) - shipping Chrome and Safari have no estimate for a probe cluster to pace against or raise until the PROBE estimate feeds the allocator

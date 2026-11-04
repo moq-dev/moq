@@ -1,8 +1,6 @@
 #![cfg(feature = "async")]
 
-//! A group finished with no frames reaches the subscriber as an empty group. On drafts 14
-//! to 17 its stream is a bare header with no FIRST_OBJECT bit, which must not read as a
-//! group missing its head.
+//! A group finished with no frames reaches the subscriber as an empty group.
 
 use crate::support;
 
@@ -18,13 +16,7 @@ fn timed() -> moq_net::track::Info {
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-const VERSIONS: &[&str] = &[
-	"moq-lite-06",
-	"moq-transport-14",
-	"moq-transport-16",
-	"moq-transport-17",
-	"moq-transport-22",
-];
+const VERSIONS: &[&str] = &["moq-lite-06", "moq-transport-18", "moq-transport-22"];
 
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
@@ -32,7 +24,7 @@ fn produce_origin(hop: u64) -> origin::Producer {
 	producer
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn an_empty_group_arrives_empty() {
 	for version in VERSIONS {
 		let publisher = produce_origin(1);
@@ -44,25 +36,24 @@ async fn an_empty_group_arrives_empty() {
 		broadcast.announce(Default::default()).unwrap();
 
 		let consumer = subscriber.consume();
-		consumer.routed("room").await.unwrap();
-		let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast("room", None))
+		let remote = kio::clock::timeout(TIMEOUT, consumer.follow("room", None).unwrap().available())
 			.await
 			.expect("resolve timeout")
 			.expect("broadcast resolves");
-		let mut sub = moq_clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(None))
+		let mut sub = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(None))
 			.await
 			.expect("subscribe timeout")
 			.expect("subscribe");
 		subscribed(&track).await;
 
 		track.append_group().unwrap().finish().unwrap();
-		let mut empty = moq_clock::timeout(TIMEOUT, sub.recv_group())
+		let mut empty = kio::clock::timeout(TIMEOUT, sub.recv_group())
 			.await
 			.unwrap_or_else(|_| panic!("{version}: the empty group was dropped"))
 			.unwrap()
 			.expect("a group");
 		assert_eq!(empty.sequence, 0, "{version}");
-		let frame = moq_clock::timeout(TIMEOUT, empty.read_frame())
+		let frame = kio::clock::timeout(TIMEOUT, empty.read_frame())
 			.await
 			.expect("frame timeout")
 			.unwrap();
@@ -71,7 +62,7 @@ async fn an_empty_group_arrives_empty() {
 		let mut group = track.append_group().unwrap();
 		group.write_frame(Timestamp::ZERO, &b"ok"[..]).unwrap();
 		group.finish().unwrap();
-		let mut next = moq_clock::timeout(TIMEOUT, sub.recv_group())
+		let mut next = kio::clock::timeout(TIMEOUT, sub.recv_group())
 			.await
 			.expect("group timeout")
 			.unwrap()

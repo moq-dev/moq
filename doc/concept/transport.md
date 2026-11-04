@@ -1,6 +1,6 @@
 ---
 title: Transport
-description: QUIC, WebTransport, the WebSocket fallback, raw QUIC, stream listeners, WebRTC data channels, and iroh
+description: QUIC, WebTransport, the WebSocket fallback, raw QUIC, stream listeners, and WebRTC data channels
 ---
 
 # Transport
@@ -33,7 +33,10 @@ support it. The TypeScript client is pickier than the browsers: it uses
 WebTransport on Firefox only from 153 (earlier releases allow too few incoming
 streams) and keeps Safari on the WebSocket fallback, since WebKit bugs stall
 long sessions even though Safari 26.4 ships the API. Native
-clients can use WebTransport too, but usually skip it.
+clients can use WebTransport too, but usually skip it. Both Rust runtime
+crates expose `quic::web` as a WebTransport library usable without MoQ;
+see [moq-tokio](https://docs.rs/moq-tokio/latest/moq_tokio/quic/web/) and
+[moq-uring](https://docs.rs/moq-uring/latest/moq_uring/quic/web/).
 
 ## WebSocket fallback
 
@@ -45,11 +48,20 @@ only help once bytes leave the TCP queue. The fallback is automatic in every
 client; the relay serves it on its `[web.http]` or `[web.https]` listener. A session that lands on
 WebSocket stays there until it ends; the next connect races again.
 
+QUIC gets a head start in the race: 500 ms in `@moq/net` and 200 ms in
+`moq-tokio`. Once WebSocket wins against a server, identified by the host and
+port the fallback dials, later connects to that server race both transports at
+once. The path and query, including a rotating `?jwt=` token, don't matter. A
+QUIC win against that server restores the head start, so a client returns to
+QUIC once UDP gets through again.
+
 ## Raw QUIC (native)
 
 Native clients dial the relay directly with the MoQ ALPN, skipping the HTTP/3
-handshake. The URL path and `?jwt=` token travel in the MoQ `SETUP` message
+handshake. The URL path and any `?jwt=` token travel in the MoQ `SETUP` message
 instead of a `CONNECT` request, so the server sees the same thing either way.
+On every transport, a SETUP token (moq-lite-07-wip and moq-transport) can carry
+the credential in place of the query.
 `moq-tokio` dials WebTransport for `https://` URLs; use `moql://` or `moqt://`
 for raw QUIC. A browser cannot dial raw QUIC, so `@moq/net` reaches a `moqt://`
 or `moql://` URL over WebTransport at the same host, port, and path.
@@ -80,34 +92,8 @@ servers it is given, and mDNS resolution of a browser's `.local` candidates.
 The application still carries the offer, answer, and candidates; the offering
 peer connects as the MoQ client and the answering peer accepts.
 
-## iroh (peer-to-peer, experimental)
-
-[iroh](https://www.iroh.computer/) swaps "dial a hostname" for "dial a public
-key". Two native MoQ endpoints on the same network can exchange media with no
-relay, no DNS, and no certificate authority: the endpoint's key is its address
-and its TLS identity. Build `moq` from source with
-`cargo build -p moq-cli --release --features iroh,play,openh264` for native playback;
-published binaries, Docker images, and the Nix package leave iroh out.
-
-```bash
-moq --iroh-enabled --iroh-disable-relay \
-    --connect "iroh://<endpoint-id>/anon" --broadcast cam.hang play
-```
-
-Keep it on the local network. Across the internet iroh falls back to an n0
-relay that forwards opaque packets, which is a TURN-shaped hop that cannot
-cache or fan out; a [MoQ relay](/bin/relay/) is the right tool there.
-`--iroh-disable-relay` pins traffic to direct addresses but also removes hole
-punching. Discovery still publishes the endpoint's addresses to n0's DNS
-whichever way it is configured. Browsers can't use iroh at all: WebTransport
-gives a page a connection, not an endpoint.
-
-Build the relay from source with `cargo build -p moq-relay --release --features iroh`,
-then opt in with `[iroh] enabled = true` and a persisted `secret` so the
-endpoint id survives restarts. See the [config reference](/bin/relay/config#iroh).
-
 ## Custom Rust transports
 
 `moq-net` runs over its own poll traits, so a custom transport implements
-those directly. `moq-tokio`, `moq-wasm`, and `moq-uring` are the built-in
+those directly. `moq-tokio` and `moq-uring` are the built-in
 adapters. See the [moq-net API](/lib/rs/moq-net).

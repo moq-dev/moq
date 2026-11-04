@@ -367,7 +367,8 @@ impl Verbatim {
 /// Each frame is one complete PES packet, start code through payload, with its PTS, DTS
 /// and every other header field already on the catalog clock. Its timestamp is the
 /// packet's placement: the program clock at its first byte, which export sends it at.
-/// A member beside [`Verbatim`] rather than a [`Framing`], so a consumer that predates it
+/// Each frame is a group of its own, except MPEG-1/2 video's, grouped from one sequence header
+/// to the next. A member beside [`Verbatim`] rather than a [`Framing`], so a consumer that predates it
 /// ignores the track instead of refusing the catalog.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]

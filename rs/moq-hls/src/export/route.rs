@@ -27,7 +27,7 @@ pub enum Resource {
 	/// `@{instance}/{kind}/{rendition}/media.m3u8`: a rendition's HLS media playlist.
 	#[non_exhaustive]
 	Media {
-		/// The publisher instance the URL names, without its `@`.
+		/// The publisher instance, percent-decoded and without its `@`.
 		instance: String,
 		/// The rendition's kind.
 		kind: Kind,
@@ -38,7 +38,7 @@ pub enum Resource {
 	/// answered by [`Rendition::init`](super::Rendition::init).
 	#[non_exhaustive]
 	Init {
-		/// The publisher instance the URL names, without its `@`.
+		/// The publisher instance, percent-decoded and without its `@`.
 		instance: String,
 		/// The rendition's kind.
 		kind: Kind,
@@ -51,7 +51,7 @@ pub enum Resource {
 	/// [`Rendition::segment`](super::Rendition::segment).
 	#[non_exhaustive]
 	Segment {
-		/// The publisher instance the URL names, without its `@`.
+		/// The publisher instance, percent-decoded and without its `@`.
 		instance: String,
 		/// The rendition's kind.
 		kind: Kind,
@@ -68,8 +68,9 @@ impl Route {
 	///
 	/// The broadcast occupies every segment before the resource suffix, which for every
 	/// resource but the master and manifest starts with the `@{instance}` segment. Each segment is
-	/// percent-decoded, and one that decodes to a `/` is refused, so an encoded separator
-	/// cannot smuggle a different broadcast past a policy check on [`broadcast`](Self::broadcast).
+	/// percent-decoded. An instance or rendition can contain an encoded `/`, but a broadcast
+	/// segment cannot, so an encoded separator cannot smuggle a different broadcast past a
+	/// policy check on [`broadcast`](Self::broadcast).
 	pub fn parse(path: &str) -> Option<Self> {
 		let parts = path
 			.strip_prefix('/')?
@@ -199,7 +200,7 @@ mod tests {
 			rendition: "main".to_string(),
 			segment: Id {
 				generation: generation.map(str::to_string),
-				reference: "ab12cd34".to_string(),
+				tag: "ab12cd34".to_string(),
 				at,
 			},
 		};
@@ -243,7 +244,7 @@ mod tests {
 		assert!(Route::parse("/project/live/@run/video/main/seg/ab12cd34.tx.m4s").is_none());
 		assert!(
 			Route::parse("/project/live/@run/video/main/seg/42.m4s").is_none(),
-			"a segment URL names its reference"
+			"a segment URL names its record track"
 		);
 		assert!(Route::parse("/project/live/@run/video/main/seg/1.ts").is_none());
 	}

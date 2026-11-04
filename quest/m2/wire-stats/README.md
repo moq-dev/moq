@@ -16,8 +16,9 @@ excluded:
   ACKs, and retransmits.
 - **WebSocket:** the TCP stream's bytes, which include TLS, WebSocket, and
   qmux framing and retransmits.
-- **Gateways an embedder terminates:** SRT and WebRTC through moq-srt's and
-  moq-rtc's sources. An embedder terminating RTMP on its own socket
+- **Gateways an embedder terminates:** SRT through moq-srt's source. moq-rtc
+  exposes none since #6454 removed its unused one; it returns only with an
+  adapter a consumer registers. An embedder terminating RTMP on its own socket
   registers that socket's `TCP_INFO` counts; moq-rtmp's own `Server` and
   client expose no source until a consumer needs one.
 - **TCP receive:** bytes TCP delivered, so a peer's duplicate retransmits
@@ -45,7 +46,8 @@ A provider bills the wire, so a relay operator needs per-root wire bytes to
 see cost per tenant.
 
 The shared core landed in #5773 (`778263c50`): `Presence` carries both
-counters, `moq_net::stats::Handle::wire` registers embedder sources, and
+counters, `stats::Handle::session(label)` then `stats::Session::wire`
+registers embedder sources (`Handle::wire` was removed in #6470), and
 the stats producer samples and preserves their final values. Native tokio
 and io_uring QUIC sources and their relay integration tests are already on
 `main`. Reuse that registry and accounting; do not create another one.
@@ -66,9 +68,8 @@ receive-side limitations.
 - **Sampled on the stats tick.** Rejected: a once-only count at session end,
   which loses a crashed session and lags a long one.
 - **One source registry for sessions and embedders.** An embedder registers
-  a gateway connection's wire source against a (tier, root) on its stats
-  handle, the same path the relay's own sessions use, like the existing
-  `stats::Handle::refuse` API.
+  a gateway connection's wire source on a `stats::Session` from its stats
+  handle's `session(label)`, the same path the relay's own sessions use.
 
 ## Required
 

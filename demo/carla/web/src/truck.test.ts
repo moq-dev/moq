@@ -61,8 +61,8 @@ describe("Truck status", () => {
 
 	function statusOrigin() {
 		const origin = new Moq.Broadcast.Producer();
-		const track = origin.createTrack("status");
-		const producer = new Json.Snapshot.Producer<TruckStatus>({ track, compression: "deflate" });
+		const track = origin.createTrack("status", { compress: true });
+		const producer = new Json.Snapshot.Producer<TruckStatus>({ track });
 		return { origin, producer };
 	}
 
@@ -256,7 +256,7 @@ describe("Truck.setDrive", () => {
 		}
 	});
 
-	test("preserves measured controls while claiming control", async () => {
+	test("claims with measured steering and gear but zero throttle and full brake", async () => {
 		const connection = new Moq.Connection({ enabled: false });
 		const driving = new Moq.Signals.Signal<string | undefined>(undefined);
 		const focused = new Moq.Signals.Signal<string | undefined>("truck1/front");
@@ -279,7 +279,7 @@ describe("Truck.setDrive", () => {
 			driving.set(t.id);
 			await Promise.resolve();
 			expect(t.active.peek()).toBe(true);
-			expect(t.drive.peek()).toEqual(measured);
+			expect(t.drive.peek()).toEqual({ ...measured, throttle: 0, brake: 1 });
 		} finally {
 			t.close();
 			connection.close();
@@ -329,11 +329,9 @@ describe("Truck safety controls", () => {
 		});
 		const front = new Json.Snapshot.Consumer<Record<string, unknown>>({
 			track: safety.broadcast.track("control").subscribe(),
-			compression: "deflate",
 		});
 		const rear = new Json.Snapshot.Consumer<Record<string, unknown>>({
 			track: safety.broadcast.track("control").subscribe(),
-			compression: "deflate",
 		});
 
 		try {

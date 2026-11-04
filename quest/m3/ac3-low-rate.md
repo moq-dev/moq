@@ -10,7 +10,7 @@ variants, through TS and FLV import and TS export, instead of refusing them.
 Decided 2026-10-22 (maintainer, from the release audit): support them rather
 than only documenting the refusal. It is cheap and removes an inconsistency
 noted in [moq-dev/moq#5758](https://github.com/moq-dev/moq/pull/5758):
-`ac3_core` in `rs/moq-mux/src/ts/export.rs` counts bsid up to 10 as an AC-3
+`ac3_core` in `rs/moq-mux/src/container/ts/export.rs` counts bsid up to 10 as an AC-3
 core, then hands it to `ac3::parse_header`, which refuses anything above 8.
 
 In `rs/moq-mux/src/codec/ac3.rs`, keep the frame-size tables and shift the

@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { type Installed, Manual, Milli, Nano } from "@moq/clock";
+import { type Installed, Instant, Manual, Milli, Nano, now, sleep, yieldNow } from "@moq/clock";
 import { SessionError, StreamError } from "./error.ts";
 import * as Frame from "./frame.ts";
 import { DEFAULT_MAX_RECORD_SIZE, type TransportParams } from "./frame.ts";
+import * as QMux from "./index.ts";
 import Session, { type Config } from "./session.ts";
 import * as Stream from "./stream.ts";
 import { VarInt } from "./varint.ts";
@@ -31,6 +32,7 @@ class FakePeer {
 	#writeBlocked: Promise<void> | undefined;
 	#writeError: Error | undefined;
 	#unblockWrites: (() => void) | undefined;
+	#pongResolve?: () => void;
 
 	/** Raw chunks the Session has written. */
 	sent: Uint8Array[] = [];
@@ -39,7 +41,7 @@ class FakePeer {
 	sentAtClose: number | undefined;
 
 	/** `options` mirrors the native `WebSocketStream` constructor, which
-	 *  `openWebSocketStream` calls with `{protocols, signal}` — hence `protocol`
+	 *  `openWebSocketStream` calls with `{protocols, signal}` - hence `protocol`
 	 *  (the *negotiated* value, which only `Session.accept` tests set) rather than
 	 *  a positional argument that call would fill in. */
 	constructor(url: string, options?: { protocol?: string }) {
@@ -56,6 +58,10 @@ class FakePeer {
 				await this.#writeBlocked;
 				if (this.#writeError) throw this.#writeError;
 				this.sent.push(chunk);
+				if (this.#pongResolve && Frame.decodeRecord(chunk).some((frame) => frame.type === "ping_response")) {
+					this.#pongResolve();
+					this.#pongResolve = undefined;
+				}
 			},
 		});
 		this.opened = Promise.resolve({ readable, writable, protocol, extensions: "" });
@@ -73,7 +79,7 @@ class FakePeer {
 		this.sentAtClose ??= this.sent.length;
 		this.#closedResolve(info);
 	}
-	/** The socket errored out, rather than closing — `WebSocketStream.closed` rejects. */
+	/** The socket errored out, rather than closing - `WebSocketStream.closed` rejects. */
 	error(err = new Error("socket error")) {
 		this.#closedReject(err);
 	}
@@ -94,6 +100,14 @@ class FakePeer {
 	}
 
 	// --- test controls ---
+	/** Wait until the session has handled all preceding inbound frames. */
+	barrier(): Promise<void> {
+		const pong = Promise.withResolvers<void>();
+		this.#pongResolve = pong.resolve;
+		this.send({ type: "ping_request", sequence: 0n });
+		return pong.promise;
+	}
+
 	/** Inject a frame as if sent by the peer. */
 	send(frame: Frame.Any) {
 		this.#recv.enqueue(Frame.encode(frame, "qmux-01"));
@@ -102,7 +116,7 @@ class FakePeer {
 	sendText(text: string) {
 		this.#recv.enqueue(text);
 	}
-	/** Inject a raw binary record — bytes the encoder wouldn't normally emit
+	/** Inject a raw binary record - bytes the encoder wouldn't normally emit
 	 * (e.g. the no-length 0x30 datagram form). */
 	sendRaw(bytes: Uint8Array) {
 		this.#recv.enqueue(bytes);
@@ -126,7 +140,7 @@ class FakePeer {
 
 /** A plain `WebSocket` as a server host hands it over: already open, with the
  *  subprotocol picked during the upgrade. `Session.accept` has to wrap this
- *  itself — there's no `WebSocketStream` in sight. */
+ *  itself - there's no `WebSocketStream` in sight. */
 class FakeServerSocket implements WebSocketLike {
 	binaryType = "blob";
 	bufferedAmount = 0;
@@ -157,10 +171,10 @@ class FakeServerSocket implements WebSocketLike {
 
 /** Poll an observable condition with a bounded timeout (no fixed-yield sleeps). */
 async function waitFor(check: () => boolean, timeoutMs = 1000): Promise<void> {
-	const start = Date.now();
+	const deadline = Instant.add(now(), Nano.fromMilli(Milli(timeoutMs)));
 	while (!check()) {
-		if (Date.now() - start > timeoutMs) throw new Error("timed out waiting for condition");
-		await new Promise((resolve) => setTimeout(resolve, 0));
+		if (now() > deadline) throw new Error("timed out waiting for condition");
+		await yieldNow();
 	}
 }
 
@@ -168,7 +182,7 @@ async function waitFor(check: () => boolean, timeoutMs = 1000): Promise<void> {
  * settle (an unhandled rejection surfaces at the end of the current turn). */
 async function settle(turns = 5): Promise<void> {
 	for (let i = 0; i < turns; i++) {
-		await new Promise((resolve) => setTimeout(resolve, 0));
+		await yieldNow();
 	}
 }
 
@@ -543,7 +557,7 @@ describe("Session integration (scripted peer)", () => {
 		const next = reader.read();
 		const resurrected = await Promise.race([
 			next.then(() => true),
-			new Promise<false>((resolve) => setTimeout(() => resolve(false), 50)),
+			sleep(Nano.fromMilli(Milli(50))).then(() => false as const),
 		]);
 		expect(resurrected).toBe(false);
 		session.close();
@@ -1034,7 +1048,7 @@ describe("Session integration (scripted peer)", () => {
 		await settle();
 
 		peer.send({ type: "stop_sending", id: Stream.Id.create(0n, Stream.Dir.Bi, false), code: VarInt.from(5) });
-		const err = await Promise.race([write, new Promise((resolve) => setTimeout(() => resolve("pending"), 500))]);
+		const err = await Promise.race([write, sleep(Nano.fromMilli(Milli(500))).then(() => "pending" as const)]);
 		expect(err).toBeInstanceOf(StreamError);
 		session.close();
 	});
@@ -1151,7 +1165,7 @@ describe("Session integration (scripted peer)", () => {
 
 	// The WebTransport contract: `closed` fulfills only on a graceful end, and rejects
 	// with a WebTransportError (source "session") on an abnormal one. Without that
-	// split a consumer cannot tell a dropped session from a clean shutdown — the close
+	// split a consumer cannot tell a dropped session from a clean shutdown - the close
 	// code can't carry it, since codes are application-defined.
 	describe("closed settles graceful vs abnormal", () => {
 		test("a peer APPLICATION_CLOSE resolves closed with its code and reason", async () => {
@@ -1169,7 +1183,7 @@ describe("Session integration (scripted peer)", () => {
 			await session.ready;
 
 			// 1002 is a transport-error code, but an APPLICATION_CLOSE is graceful by
-			// definition — the *subtype*, not the code, decides. Codes are
+			// definition - the *subtype*, not the code, decides. Codes are
 			// application-defined, so the app still gets its code and reason.
 			peer.send({ type: "application_close", code: VarInt.from(1002), reason: "bye" });
 			expect(await session.closed).toEqual({ closeCode: 1002, reason: "bye" });
@@ -1180,7 +1194,7 @@ describe("Session integration (scripted peer)", () => {
 			await session.ready;
 
 			// The peer detected a protocol violation / transport error and sent a
-			// CONNECTION_CLOSE (0x1c) — abnormal, so `closed` rejects rather than
+			// CONNECTION_CLOSE (0x1c) - abnormal, so `closed` rejects rather than
 			// fulfilling. Mirrors the frame we emit from #abort.
 			peer.send({
 				type: "connection_close",
@@ -1412,6 +1426,154 @@ describe("Session integration (scripted peer)", () => {
 		expect(sentClose(peer)?.type).toBe("connection_close");
 	});
 
+	test("datagrams: lowering the live high-water mark retains backlog and sheds later overflow", async () => {
+		const { session, peer } = connect();
+		await session.ready;
+		const datagrams = session.datagrams;
+		datagrams.incomingHighWaterMark = 3;
+		for (const value of [1, 2]) peer.send({ type: "datagram", data: new Uint8Array([value]) });
+		await peer.barrier();
+
+		datagrams.incomingHighWaterMark = 1;
+		peer.send({ type: "datagram", data: new Uint8Array([3]) });
+		await peer.barrier();
+		const reader = datagrams.readable.getReader();
+		expect((await reader.read()).value).toEqual(new Uint8Array([1]));
+		peer.send({ type: "datagram", data: new Uint8Array([4]) });
+		await peer.barrier();
+		expect((await reader.read()).value).toEqual(new Uint8Array([2]));
+		peer.send({ type: "datagram", data: new Uint8Array([5]) });
+		await peer.barrier();
+		session.close();
+		expect((await reader.read()).value).toEqual(new Uint8Array([5]));
+		expect((await reader.read()).done).toBe(true);
+	});
+
+	test("datagrams: raising the live high-water mark admits more queued packets", async () => {
+		const { session, peer } = connect();
+		await session.ready;
+		session.datagrams.incomingHighWaterMark = 1;
+		for (const value of [1, 2]) peer.send({ type: "datagram", data: new Uint8Array([value]) });
+		await peer.barrier();
+		session.datagrams.incomingHighWaterMark = 3;
+		for (const value of [3, 4, 5]) peer.send({ type: "datagram", data: new Uint8Array([value]) });
+		await peer.barrier();
+		session.close();
+		const received: number[] = [];
+		for await (const data of session.datagrams.readable) received.push(data[0]);
+		expect(received).toEqual([1, 3, 4]);
+	});
+
+	test("datagrams: the live limit validates input without changing the previous policy", async () => {
+		const { session } = connect();
+		await session.ready;
+		const datagrams = session.datagrams;
+		for (const value of [0, -0, 0.5, 1.5, Infinity]) {
+			datagrams.incomingHighWaterMark = value;
+			expect(datagrams.incomingHighWaterMark).toBe(Math.max(1, value));
+		}
+		datagrams.incomingHighWaterMark = 2;
+		for (const value of [NaN, -1, -Infinity]) {
+			expect(() => {
+				datagrams.incomingHighWaterMark = value;
+			}).toThrow(RangeError);
+			expect(datagrams.incomingHighWaterMark).toBe(2);
+		}
+		for (const value of [undefined, null, "2", {}, 2n]) {
+			expect(() => {
+				Reflect.set(datagrams, "incomingHighWaterMark", value);
+			}).toThrow(TypeError);
+			expect(datagrams.incomingHighWaterMark).toBe(2);
+		}
+		session.close();
+	});
+
+	test("datagrams: unsupported policies accept only their defaults", async () => {
+		const { session } = connect();
+		await session.ready;
+		const datagrams = session.datagrams;
+		for (const [field, defaultValue] of [
+			["incomingMaxAge", null],
+			["outgoingMaxAge", null],
+			["outgoingHighWaterMark", 1024],
+		] as const) {
+			expect(Reflect.set(datagrams, field, defaultValue)).toBe(true);
+			for (const value of [0, 1, -1, NaN, Infinity, undefined, "1024"]) {
+				try {
+					Reflect.set(datagrams, field, value);
+					throw new Error("unsupported datagram policy was accepted");
+				} catch (err) {
+					expect(err).toBeInstanceOf(DOMException);
+					expect((err as DOMException).name).toBe("NotSupportedError");
+				}
+				expect(datagrams[field]).toBe(defaultValue);
+			}
+		}
+		session.close();
+	});
+
+	test("datagrams: pending reads bypass the queue and draining frees capacity", async () => {
+		const { session, peer } = connect();
+		await session.ready;
+		session.datagrams.incomingHighWaterMark = 1;
+		const reader = session.datagrams.readable.getReader();
+		const pending = reader.read();
+		for (const value of [1, 2, 3]) peer.send({ type: "datagram", data: new Uint8Array([value]) });
+		await peer.barrier();
+		expect((await pending).value).toEqual(new Uint8Array([1]));
+		expect((await reader.read()).value).toEqual(new Uint8Array([2]));
+		peer.send({ type: "datagram", data: new Uint8Array([4]) });
+		await peer.barrier();
+		expect((await reader.read()).value).toEqual(new Uint8Array([4]));
+		session.close();
+		expect((await reader.read()).done).toBe(true);
+	});
+
+	for (const queued of [false, true]) {
+		test(`datagrams: cancellation clears ${queued ? "queued packets" : "a pending read"} and ignores later arrivals`, async () => {
+			const { session, peer } = connect();
+			await session.ready;
+			session.datagrams.incomingHighWaterMark = 1;
+			if (queued) {
+				peer.send({ type: "datagram", data: new Uint8Array([1]) });
+				await peer.barrier();
+			}
+			const reader = session.datagrams.readable.getReader();
+			const pending = queued ? undefined : reader.read();
+			await reader.cancel();
+			if (pending) expect((await pending).done).toBe(true);
+			session.datagrams.incomingHighWaterMark = 2;
+			peer.send({ type: "datagram", data: new Uint8Array([2]) });
+			await peer.barrier();
+			expect((await reader.read()).done).toBe(true);
+			session.close();
+			await session.closed;
+		});
+	}
+
+	test("datagrams: session failure discards queued packets and rejects reads", async () => {
+		const { session, peer } = connect();
+		await session.ready;
+		session.datagrams.incomingHighWaterMark = 1;
+		peer.send({ type: "datagram", data: new Uint8Array([1]) });
+		await peer.barrier();
+		peer.error();
+		await expectSessionFailure(session);
+		await expect(session.datagrams.readable.getReader().read()).rejects.toThrow("socket error");
+	});
+
+	test("datagrams: the runtime view has no constructor or transport mutators for applications", async () => {
+		const { session } = connect();
+		await session.ready;
+		const datagrams = session.datagrams;
+		expect("Datagrams" in QMux).toBe(false);
+		for (const key of ["push", "close", "setMaxDatagramSize"]) expect(key in datagrams).toBe(false);
+		expect(() => Reflect.construct(datagrams.constructor, [() => {}])).toThrow(TypeError);
+		expect(Reflect.set(datagrams, "maxDatagramSize", 100)).toBe(false);
+		expect(Reflect.set(session, "datagrams", {})).toBe(false);
+		session.close();
+	});
+
 	test("datagrams: an app write produces a DATAGRAM frame on the wire", async () => {
 		const { session, peer } = connect();
 		await session.ready;
@@ -1450,7 +1612,7 @@ describe("Session integration (scripted peer)", () => {
 
 	test("datagrams: a DATAGRAM whose frame exactly fits our advertised size is delivered", async () => {
 		// ourParams.maxDatagramFrameSize = 10; an 8-byte payload encodes to a
-		// 1 (type) + 1 (length varint) + 8 = 10-byte frame — exactly the limit.
+		// 1 (type) + 1 (length varint) + 8 = 10-byte frame - exactly the limit.
 		const { session, peer } = connect({ maxDatagramFrameSize: 10n });
 		await session.ready;
 		peer.send({ type: "transport_parameters", params: peerParams() });
@@ -1463,7 +1625,7 @@ describe("Session integration (scripted peer)", () => {
 
 	test("datagrams: a DATAGRAM whose frame overflows our advertised size is fatal", async () => {
 		// ourParams.maxDatagramFrameSize = 10. A 10-byte payload encodes to a
-		// 1 + 1 + 10 = 12-byte frame > 10 — a peer exceeding the size we negotiated
+		// 1 + 1 + 10 = 12-byte frame > 10 - a peer exceeding the size we negotiated
 		// is a PROTOCOL_VIOLATION (RFC 9221), so the session must close, not drop.
 		const { session, peer } = connect({ maxDatagramFrameSize: 10n });
 		await session.ready;
@@ -1488,8 +1650,8 @@ describe("Session integration (scripted peer)", () => {
 
 	test("datagrams: a no-length (0x30) DATAGRAM is sized without a length varint", async () => {
 		// ourParams.maxDatagramFrameSize = 10. A 0x30 datagram carries no length
-		// varint, so a 9-byte payload is a 1 + 9 = 10-byte frame — exactly the
-		// limit — even though the length-prefixed reconstruction (1 + 1 + 9 = 11)
+		// varint, so a 9-byte payload is a 1 + 9 = 10-byte frame - exactly the
+		// limit - even though the length-prefixed reconstruction (1 + 1 + 9 = 11)
 		// would wrongly drop it. Hand-build the record: a 0x30 type byte + payload.
 		const { session, peer } = connect({ maxDatagramFrameSize: 10n });
 		await session.ready;
@@ -1741,7 +1903,7 @@ describe("Session integration (scripted peer)", () => {
 			session.close({ closeCode: 42, reason: "bye" });
 
 			// Peer-initiated streams still in flight when the session closed: one uni,
-			// one bidi — both would hit the now-closed incoming-stream controllers.
+			// one bidi - both would hit the now-closed incoming-stream controllers.
 			// The third targets a stream id that could only exist pre-close (#recvStreams
 			// was cleared by close), so it also takes the new-stream branch.
 			peer.send({
@@ -1775,7 +1937,7 @@ describe("Session integration (scripted peer)", () => {
 
 			// A client-initiated uni stream is send-only from our (client) perspective;
 			// the peer writing to it is a protocol violation. Now that #handleStreamFrame
-			// is synchronous, the throw propagates to #onData and closes with 1002 —
+			// is synchronous, the throw propagates to #onData and closes with 1002 -
 			// previously it leaked as a rejection while the session limped on.
 			peer.send({
 				type: "stream",
@@ -1805,7 +1967,7 @@ describe("Session integration (scripted peer)", () => {
 			});
 
 			// Ping barrier: once the pong is seen the STREAM frame above has been fully
-			// processed. The session must still be alive — an app-local cancel is not a
+			// processed. The session must still be alive - an app-local cancel is not a
 			// peer protocol violation.
 			peer.send({ type: "ping_request", sequence: 1n });
 			await waitFor(() => peer.has("ping_response"), 5000);
@@ -1856,7 +2018,7 @@ describe("Session integration (scripted peer)", () => {
 
 			await session.incomingUnidirectionalStreams.cancel();
 
-			// Five distinct refused uni streams carrying 500B total — well past the 300B
+			// Five distinct refused uni streams carrying 500B total - well past the 300B
 			// window. With correct accounting the window keeps pace (MAX_DATA is emitted)
 			// and the session stays healthy; the buggy refuse path froze `consumed` and
 			// closed with a spurious flow-control error by the 4th stream.
@@ -2095,7 +2257,7 @@ describe("Session.accept (server role)", () => {
 		await session.ready;
 		peer.send({ type: "transport_parameters", params: peerParams() });
 
-		// Client-initiated (isServer: false) — the mirror of what a client session
+		// Client-initiated (isServer: false) - the mirror of what a client session
 		// accepts, and what a client session would reject as a violation.
 		peer.send({
 			type: "stream",
@@ -2133,7 +2295,7 @@ describe("Session.accept (server role)", () => {
 
 	test("ArrayBuffer chunks decode on a transport we were handed directly", async () => {
 		// `openWebSocketStream` normalizes the native API's ArrayBuffer chunks, but
-		// accept() gets the transport as-is — and Chromium's WebSocketStream yields
+		// accept() gets the transport as-is - and Chromium's WebSocketStream yields
 		// ArrayBuffer. Without normalization in the read loop this throws
 		// "Expected ArrayBuffer for the first argument" out of the varint decoder
 		// and the session never opens a stream.
@@ -2218,8 +2380,8 @@ describe("STREAM frame size", () => {
 	test("a record-sized STREAM frame is delivered", async () => {
 		// A 5-byte STREAM header plus 16377 payload bytes is a record of exactly the
 		// max_record_size we advertised: refusing it refuses the very size the
-		// handshake invited. A peer chunking at any other header budget — an older
-		// release, a third-party stack — lands somewhere in this range too.
+		// handshake invited. A peer chunking at any other header budget - an older
+		// release, a third-party stack - lands somewhere in this range too.
 		const { session, peer } = connect();
 		await session.ready;
 		peer.send({ type: "transport_parameters", params: peerParams() });
@@ -2236,7 +2398,7 @@ describe("STREAM frame size", () => {
 
 	test("qmux-00 delivers a frame of exactly max_frame_size", async () => {
 		// draft-00 §5.2 bounds the whole frame, header included, so a 16384-byte
-		// frame is legal — and the parameter may only ever be raised.
+		// frame is legal - and the parameter may only ever be raised.
 		const { session, peer } = accept({ protocol: "qmux-00" });
 		await session.ready;
 
@@ -2270,7 +2432,7 @@ describe("STREAM frame size", () => {
 
 	test("a record over max_record_size closes the session", async () => {
 		// The record is the limit a peer can actually derive from the handshake, so
-		// it is the one worth enforcing — and a record too large to parse is a
+		// it is the one worth enforcing - and a record too large to parse is a
 		// connection-level violation.
 		const { session, peer } = connect();
 		await session.ready;
@@ -2299,7 +2461,7 @@ describe("STREAM frame size", () => {
 	});
 
 	test("a peer advertising the largest max_record_size can still be written to", async () => {
-		// max_record_size is a varint, so 2^62-1 is legal — and is not a value
+		// max_record_size is a varint, so 2^62-1 is legal - and is not a value
 		// `number` holds exactly, so the budget has to stay a bigint.
 		const { session, peer } = connect();
 		await session.ready;

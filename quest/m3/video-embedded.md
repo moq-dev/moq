@@ -12,14 +12,14 @@ records what breaks.
 Decided 2026-10-08: verify first. The Pi 4 and 5 ship Mesa's v3dv Vulkan
 driver, so the premise that embedded devices have no usable Vulkan driver is
 doubtful. Run the renderer's DMA-BUF Vulkan import against V4L2 M2M decoder
-output, and the I420 CPU fallback, and record the device, OS image, Mesa
+output, and the I420 CPU path, and record the device, OS image, Mesa
 version, and which path presented.
 
 If the Vulkan import cannot take the decoder's buffers (a missing extension
 or modifier) on a device a consumer needs, plan EGL/GLES import as its own
-quest: same shape as the Vulkan path (alias the buffer, keep the per-path
-fallback and three-strike disable, fall back to I420 when import fails), and
-the usual dlopen-and-degrade rule, so a build without the device present
+quest: same shape as the Vulkan path (alias the buffer, refuse what it cannot
+import rather than download it, and teach `Output::Render` which buffers it
+takes), and the usual dlopen-and-degrade rule, so a build without the device present
 degrades rather than fails to start.
 
 Two items from the same wave are deliberately not here. X11 MIT-SHM capture is

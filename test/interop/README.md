@@ -35,13 +35,12 @@ Go, and C++, `moq-c` for C, `decodebin` on each `audio_N` pad for GStreamer, and
 publisher's channel count, contiguous timestamps, and each channel's tone carrying
 most of its energy by a Goertzel filter. A garbled decode (wrong channel order or
 sample rate), silence, a timestamp gap, or a rendition left undecoded fails the cell.
-Each publisher's tone starts at timestamp zero, so `--phase` also holds every Opus
+Each publisher's tone starts at timestamp zero, so `--phase` also holds every
 rendition's tone to its timestamps within a sample, which fails a decoder that keeps
-or drops the wrong pre-skip. It skips the browser publisher, which stamps its file
-from its own page clock, and the native-JS subscriber, which leaves the pre-skip to the
-player as WebCodecs does and stamps milliseconds. AAC is skipped until the fMP4
-importer applies the edit list holding ffmpeg's priming
-([quest](/quest/m1/fmp4-edit-lists.md)). The browser plays each rendition in a page
+or drops the wrong Opus pre-skip or AAC priming. It skips the browser publisher, which stamps its file
+from its own page clock, the native-JS subscriber, which leaves the pre-skip to the
+player as WebCodecs does and stamps milliseconds, and GStreamer's AAC, whose `faad`
+decoder reads the priming a frame early. The browser plays each rendition in a page
 of its own, the player pinned to it by `controls.audio.target`, and runs the same
 filter on each channel of the player's audio graph. A negative control then has the
 Rust CLI swap its channels' tones, and every subscriber must refuse every rendition
@@ -52,7 +51,31 @@ The normal run also checks a finite raw track through the relay. Its publisher
 announces end 4 before writing four 256 KiB groups; the reader verifies every byte,
 exactly groups 0 through 3, and a clean end at 4. Rust-to-Rust always runs. Selecting
 native JS adds both Rust-to-JS and JS-to-Rust under that runtime, so `--all` covers
-Node and Bun. The current CLI also FETCHes group 0, verifies every byte, and closes under the relay idle-out check. `--tail` runs this FETCH round and the five finite-tail lanes. The wire-compat lanes, which swap in released relays and clients, skip them.
+Node and Bun. The FETCH round crosses Rust and each selected native JS runtime as both
+publisher and subscriber. Each reader fetches group 1 of a finished track, requires exactly
+its three objects, each with its own bytes, and closes under the relay idle-out check. Each native JS runtime also serves
+that FETCH to all three subscribers from history (`CLI FETCH history`): its publisher writes only group 3 live and answers
+groups 0 through 2, which it never cached, from an in-memory responder on `track.requests()`.
+This runs on moq-lite and every supported IETF draft.
+
+A late-join lane runs Rust-to-Rust and Rust/Node/Bun in both directions. The publisher
+writes the first two objects of group 0 before any subscriber exists and leaves the group
+open. The subscriber joins at the latest group, as a player does, and reports once it has
+read those two objects; only then does the harness release the rest of the group and
+group 1. A join that skips the head cannot pass by racing the publisher. On
+moq-transport the subscription starts after Largest Object, so the relay does not replay
+the group on it: a subscriber, Rust or JS, and the relay toward its publisher, recover the
+head with a joining FETCH before draft 22 and a fill from it.
+
+`--tail` runs the FETCH round, the late joins, and the five finite-tail lanes. The
+wire-compat lanes, which swap in released relays and clients, skip them.
+
+On lite-07, Node and Bun also replace tracks in a claimed broadcast through the
+relay over WebSocket and WebTransport. Pre-connected readers subscribe immediately
+after each replacement while an existing reader resumes. The case also repeats the
+automatic failed-source lifecycle 64 times. A missing-group FETCH
+crosses both hops with the unlimited subscriber budget, checking its optional
+millisecond encoding at the safe-integer boundary.
 
 The finite clients keep their session alive until the harness acknowledges the
 reader's complete clean end over stdin, so a lane tests delivery rather than
@@ -184,9 +207,9 @@ delivers them as minted: a publisher is granted its exact broadcast, a subscribe
 `--versions` runs the matrix and the tails once per version, against the same
 relay. `auto`, the default, is everything above. Any other version pins every
 client in its pass to offer that version alone, and `ietf` expands to the even
-drafts `moq-transport-14` through `moq-transport-22`. A pinned pass keeps the
-media cells, the relay close check, the CLI FETCH of group 0, and the finite
-tails. The grant, refusal, close-code, and drop cases are moq-lite's and run in
+drafts `moq-transport-18` through `moq-transport-22`. A pinned pass keeps the
+media cells, the relay close check, the CLI FETCH round, the late joins, and the
+finite tails. The grant, refusal, close-code, and drop cases are moq-lite's and run in
 `auto` alone.
 
 The relay logs the version each connection negotiated, so every round in a
@@ -197,35 +220,20 @@ one cell. The tails check their own connections, so a fallback fails the lane.
 
 The in-tree control lanes also run with `--tail`:
 
-- Four untimed 900-byte datagrams cross the relay in both directions between Rust
-  and each native JS runtime. The subscriber acknowledges resolved metadata before
-  sending begins, then acknowledges each packet, so this checks framing and bytes
-  rather than best-effort burst capacity. The publisher stays open until the read is
-  acknowledged, keeping a reliable track end from overtaking the datagrams.
 - A JS wire requester gets the Rust publisher's exact largest location through
-  TRACK\_STATUS on every draft. From draft 18, Rust also queries the JS publisher's
+  TRACK\_STATUS on every draft. Rust also queries the JS publisher's
   non-default priority before subscribing, when the answer can describe a track.
-- On drafts 14 and 16, a JS publisher advertises one usable track slot beyond namespace discovery, holds the first
-  Rust subscription open through a data round trip while a second is queued, and
-  grants credit when the first is cancelled. Sending the second without waiting
-  violates the peer adapter's live-request limit. A JS subscriber runs the same
-  held-first/queued-second exchange over QMux against a controlled JS peer, whose
-  grant and replenishment codecs are also exercised by the Rust subscriber.
 - On drafts 18, 20, and 22, a Rust GOAWAY names a second WebSocket endpoint serving
-  the same publisher epoch. The JS reconnect loop retains its reader across the
+  the same publisher instance. The JS reconnect loop retains its reader across the
   move. A separate read through the replacement proves it serves data before the
   original transport is cut; only the replacement can deliver the final group.
   The reverse JS-server-to-Rust-client case uses a marker broadcast excluded from
   the old endpoint's scope, then cuts that endpoint before publishing the final
   group. Both directions use the original publisher stream.
-- Drafts 14 and 16 carry no epoch, so nothing proves the replacement is the same
-  publisher. The same GOAWAY lanes there check that the held reader ends with the
-  original transport instead, and that requesting the path again subscribes
-  through the new URI and reads the final group.
 
 The standalone control endpoints use OS-assigned ports and production QMux,
-SETUP codecs, and request adapters. They verify their negotiated version directly.
-The datagram and query lanes through moq-relay use its usual version-log check.
+SETUP codecs, and request sessions. They verify their negotiated version directly.
+The query lanes through moq-relay use their usual version-log check.
 
 Some cases change shape on moq-transport:
 
@@ -233,7 +241,7 @@ Some cases change shape on moq-transport:
   so a tail reader started before the publisher's groups may begin past group 0.
   The tails take any contiguous run of groups through group 3, each verified
   byte for byte, and still require the clean end at 4.
-- The AUTH extension (draft-17 on) carries prefixes alone, and a relay refuses a
+- The AUTH extension carries prefixes alone, and a relay refuses a
   grant narrower than a subtree, closing the session as Unauthorized. Pinned
   passes mint `name/**` for both roles instead of the exact and `**/name`
   patterns above.
@@ -257,14 +265,14 @@ just test interop --all
 # Pick your own axes:
 just test interop --publishers rust,python --subscribers rust,c,js-native-bun
 
-# CLI FETCH close and finite track tails only: Rust-to-Rust and Rust/Node/Bun in both directions.
+# CLI FETCH close, late joins, and finite track tails only: Rust-to-Rust and Rust/Node/Bun in both directions.
 just test interop --tail
 
 # The full matrix once per even moq-transport draft (see moq-transport below).
 just test interop --all --versions ietf
 
 # Or pick the versions, `auto` being the default moq-lite run.
-just test interop --versions auto,moq-transport-14,moq-transport-22
+just test interop --versions auto,moq-transport-18,moq-transport-22
 
 # Subscription termination: Rust/JS response bytes over in-memory transports.
 just test bare-fin
@@ -361,21 +369,36 @@ The matrix asks "did bytes arrive and did a pixel light up". That passes on a
 frozen picture, on silence, and on audio a second out of step, so
 `just test media` measures the media itself, browser to browser.
 Use `just test media --media-engines chromium,firefox,webkit` to run each pinned
-Playwright player against a Chromium publisher. Chromium comes from the root devShell;
+Playwright player against a Chromium publisher, and `--media-publisher firefox` to
+publish from Firefox instead. Chromium comes from the root devShell;
 the dedicated Firefox CI job provides its other engines. The harness runs the same
-lifecycle cases, content tolerances, and five negative controls per engine. A missing runtime or required API fails that engine by name.
-Firefox and WebKit players explicitly use WebSocket; Chromium keeps normal
+lifecycle cases, content tolerances, and six negative controls per engine. A missing runtime or required API fails that engine by name.
+Firefox and WebKit pages explicitly use WebSocket; Chromium keeps normal
 transport selection. This does not measure Firefox's QUIC path.
 
 The capability report names the engine version and separately lists missing
-publisher and player APIs. Firefox 157 in Playwright 1.64 exposes WebTransport and
-WebCodecs but lacks `MediaStreamTrackProcessor`, so it can play this fixture but
-cannot publish it. Capabilities are measured on every run rather than assumed
-from an engine name. Playwright WebKit is not Safari; Safari device/transport
+publisher and player APIs. Capabilities are measured on every run rather than assumed
+from an engine name. A publisher needs one of the capture paths `@moq/publish` tries,
+in order: a window `MediaStreamTrackProcessor` (Chromium), one in a worker the track
+is transferred to (Safari), or a `<video>` element sampled per presented frame.
+Firefox 157 in Playwright 1.64 has neither `MediaStreamTrackProcessor` nor a
+transferable `MediaStreamTrack`, so a Firefox publisher takes the `<video>`
+fallback. The fixture must log that fallback exactly when the probe predicts it,
+or the run fails `capture path`. No Playwright engine on Linux takes the worker
+path. Playwright WebKit is not Safari; Safari device/transport
 bugs and real Firefox transport negotiation still require manual evidence.
 
+A Firefox publisher does not pass yet, so no CI job runs one. Under load its runs
+fail audio/video sync by about one 200 ms tone step (audio ahead of the picture),
+and late joins land 1.8 s behind live against the 1.5 s bound. Chromium forced onto
+the same `<video>` fallback stays in sync, so the cause is Firefox's. The capture
+case also fails, since Firefox has no fake camera configured.
+
 Firefox only resumes Web Audio on an output device, so each Linux run gets a
-private null sink from `test/lib/pulse.py`. Chromium plays to its fake output instead,
+private null sink from `test/lib/pulse.py`. That sink renders in 50 ms blocks, so a fresh
+player's context starts in tens of milliseconds, as on a real device; the null sink's
+default 2 s block held a late joiner's audio, and with it live playback, for up to 2 s.
+Chromium plays to its fake output instead,
 with or without a host sound server.
 
 Nightly runs the Firefox player only. Playwright's Linux WebKit 27.2 fails two
@@ -425,6 +448,32 @@ Each run covers, against a real local relay:
   advancing and in sync through the change. A VP8 resize doubles the presented
   dimensions on the same track. The pixels carry a source generation, so old
   pictures cannot reappear after the new generation starts presenting.
+- **audio format changes** - the fixture moves its capture from 48 kHz to 24 kHz,
+  then from mono to stereo. Each change re-mints the audio rendition's track; the
+  player must follow onto it and stay there, with the window across the change
+  held to the cold start's tone and sync agreement. The longest stretch without
+  the tone is reported, not gated: today's player rebuffers for 200-300 ms across
+  a re-minted track.
+- **audio rendition switch** - the fixture adds a second Opus rendition of the
+  same tone, and the player is pinned to it and back by name. The same grading
+  and reported gap as a format change.
+- **mute and volume** - the probe's tone analyser hangs off the player's graph
+  root, upstream of its private volume gain, so `src/instrument.ts` also taps
+  everything connected to `AudioContext.destination`. At volume 1 and 0.25 the
+  speakers must carry that fraction of the root's level, within 10% (both
+  analysers read one context in one tick, so they differ by at most a render
+  quantum); muted, they must be silent while the picture keeps playing.
+- **AAC publish and codec change** - the fixture publishing AAC from its first
+  frame, and switching its rendition from Opus to AAC. Chromium encodes AAC only
+  through a platform encoder, which Linux builds lack, so this run reports a skip
+  naming the missing encoder wherever the capability probe finds none.
+- **native publisher** - the Rust CLI imports ffmpeg's rendering of the same
+  pattern (`src/native.ts`: `drawbox` filters for the counter strip, an
+  `aevalsrc` step table for the tone), so the player grades a native importer's
+  timestamps for sync. One run sends an Opus and an AAC rendition and switches
+  between them; another sends AAC alone, so AAC playback is graded on every host.
+  `src/native.test.ts` renders the filters and requires the fixture's own
+  decoder to read back every frame number and tone step.
 - **resources return to baseline** - the page wraps `WebTransport`, `WebSocket`,
   `AudioContext`, and `Worker` to count live instances, so a detach that leaks a
   session is visible rather than merely invisible.
@@ -447,7 +496,7 @@ pass makes no claim about those omitted checks.
 `just test media --media-cases replacement` keeps publisher A open while B takes
 the same path, then closes B and follows A again. Lite-07, lite-06, and IETF draft
 22 viewers must present each run's marked pixels and synchronized audio, with
-no A pictures spliced into B. Epoch-aware viewers also check the broadcast
+no A pictures spliced into B. Instance-aware viewers also check the broadcast
 identities. Both publishers use lite-07. Each switch must present within a bound
 derived from its parts, counted from B's readiness (connected, with catalogs) or
 B's withdrawal: the relay's 300 ms announcement hold, five loopback round trips
@@ -455,8 +504,8 @@ at QUIC's 1 ms timer granularity, the 500 ms GOP, one frame to decode, the 50 ms
 playback delay, and one page sample plus one driver poll. Publisher preparation
 is not part of it.
 
-The CLI integration suite's `epochs` cases exercise the real QUIC relay with
-lite-07, lite-06, and IETF drafts 14 and 22. Held catalog snapshots and media
+The CLI integration suite's `instances` cases exercise the real QUIC relay with
+lite-07, lite-06, and IETF draft 22. Held catalog snapshots and media
 subscriptions keep A while fresh catalog handles resolve B with fresh sibling
 pins. Later metadata and FETCH work cannot join B through A's retired handle;
 withdrawing B reveals the still-live A to fresh readers. Announcement followers
@@ -471,6 +520,7 @@ assertion that has to catch it, and passes only by failing there:
 | tone muted at the source | `audio tone` |
 | picture frozen after the first frame | `video progress` |
 | tone table shifted 800ms ahead of the picture | `audio/video sync` |
+| the native publisher's audio delayed 800ms (`-itsoffset`) | `audio/video sync` |
 | the detached player's session never torn down | `resource baseline` |
 | the latecomer's player delayed 3s behind live | `late join reaches live` |
 
@@ -478,13 +528,13 @@ The leaked-session control waits for an extra `AudioContext` rather than an extr
 session: every player on one relay URL shares a transport, so a session count
 cannot move.
 
-Not covered yet: other browser engines (the capability probe is the groundwork)
-and any claim about physical playback.
+Not covered yet: publishing from engines other than Chromium in CI, the worker
+capture path, and any claim about physical playback.
 
 The relay's port is reserved for the run rather than fixed, so two checkouts can
 run the interop test at once; `INTEROP_PORT` pins one instead. A failing run keeps its
 directory, including a Playwright trace of the failing page, and CI uploads it;
-`MOQ_TEST_KEEP=1` keeps a passing run's too. See [the harness
+`HARNESS_KEEP=1` keeps a passing run's too. See [the harness
 contract](../README.md).
 
 ## Layout
@@ -499,6 +549,8 @@ varint.ts               the JS side of the varint check, driven by moq-net's tes
 clients/
   rust/audio.rs           the Rust subscriber's audio decode via rs/moq-audio (`interop-audio`)
   rust/tail.rs            the finite raw-track client (`interop-tail`)
+  rust/catalog.rs         the compressed-catalog publisher (`interop-catalog`)
+  rust/hls.rs             the HLS grid publisher and reader (`interop-hls`)
   python/interop.py       publish/subscribe via py/moq-rs (import moq)
   go/main.go              publish/subscribe via go/wrapper (import moq-go/moq)
   cpp/main.cpp            publish/subscribe via cpp/moq (find_package(moq-cpp))
@@ -510,10 +562,13 @@ clients/
     src/contract.ts       what the page and its drivers agree on, free of browser imports
     src/fixture.ts        the deterministic publisher (frame counter + stepped tone)
     src/pattern.ts        how that fixture encodes itself into the picture and the audio
+    src/native.ts         the same pattern as ffmpeg filters, for the native publisher
     src/probe.ts          subscriber-side measurement, taken at the sinks
-    src/instrument.ts     live counts of the platform resources the page holds
+    src/instrument.ts     live counts of the platform resources the page holds, and the speaker tap
     src/close.ts          the refused session, read off `WebTransport.closed`
   js-native/subscribe.ts  subscribe via @moq/net + @moq/hang + the WebTransport polyfill
+  js-native/catalog.ts    the compressed-catalog reader, pinned to one version
+  js-native/hls.ts        the HLS grid publisher via @moq/hang
   c/subscribe.c           subscribe via rs/moq-c
 ```
 
@@ -521,7 +576,7 @@ clients/
 
 `.github/workflows/interop.yml` runs the full matrix nightly (and on demand, and on
 release PRs that touch `test/interop/`), then again with `--versions ietf`. A
-release PR's moq-transport step runs only drafts 14 and 22 between Rust and native
+release PR's moq-transport step runs only drafts 18 and 22 between Rust and native
 JS. A red cell means a real interop break in the current tree.
 
 The scheduled run on `main` publishes its report to <https://git.moq.dev/interop/>;
@@ -530,7 +585,7 @@ table of publisher by subscriber for each suite, case, transport, and version, p
 workflow step's outcome. A red cell links to its run and to the failure artifact, and
 its tooltip names the log inside that artifact.
 
-The report reads records, never logs. With `MOQ_TEST_RESULTS` set, `interop.sh` and
+The report reads records, never logs. With `HARNESS_RESULTS` set, `interop.sh` and
 `compat.sh` append one JSON line per case through `harness_result` (`test/lib/harness.sh`):
 suite, case, publisher, subscriber, transport, version, outcome, seconds, detail, and
 log. A run first records every case it will reach as `not run`, before building
@@ -539,7 +594,7 @@ rather than missing ones. Transport and version are `auto` where each client neg
 its own; a pinned pass, the drop lanes, and wire-compat record their version. `report.py` renders the page:
 
 ```bash
-MOQ_TEST_RESULTS=/tmp/results.jsonl just test interop
+HARNESS_RESULTS=/tmp/results.jsonl just test interop
 just test interop-report /tmp/results.jsonl /tmp/interop-report
 ```
 
@@ -548,8 +603,9 @@ just test interop-report /tmp/results.jsonl /tmp/interop-report
 `just test bare-fin` exchanges encoded subscription responses between Rust and
 JS, then feeds them into each implementation's subscriber over an in-memory
 transport. It checks bare FIN before and after SUBSCRIBE\_START on lite-05/06/07,
-and FIN without PUBLISH\_DONE on IETF draft-19. Clean-end controls use the same
-path. This tests response interoperability, not network delivery or relay behavior.
+and FIN without PUBLISH\_DONE on IETF draft-18. Clean-end controls use the same
+path. On lite-05/06/07 it also ends a track owing group 0 and kills the session
+before that group arrives, which each subscriber must end with the session's error. This tests response interoperability, not network delivery or relay behavior.
 The interop workflow runs it alongside the real-transport matrix.
 
 ## Varints
@@ -579,15 +635,28 @@ range is per version: JS writes lite-07's 64-bit values, which Rust reads back,
 and JS refuses them on lite-06.
 
 `ietf_datagram_interop` does the same for moq-transport's `OBJECT_DATAGRAM` on
-drafts 14 through 22: `ietf-datagram.ts` decodes Rust's datagrams and their
+each supported draft: `ietf-datagram.ts` decodes Rust's datagrams and their
 Timestamps and re-encodes them byte for byte, and Rust decodes the datagram the
 JS publisher sends.
 
 `ietf_track_status_interop` sends Rust's `TRACK_STATUS` to the JS publisher on
-drafts 14 through 22 through `track-status.ts`, and Rust decodes each
+each supported draft through `track-status.ts`, and Rust decodes each
 `TRACK_STATUS_OK` and the refusal for a missing broadcast the way its
 subscriber reads them.
 
 The finite-tail matrix also publishes compressed tracks from Rust and native JS through
 the relay, in both directions on lite-07 and lite-06. It checks multiple frames in each
 DEFLATE window, empty frames, the plain fallback and the received track's codec flag.
+
+The compressed-catalog lane then fans one Rust hang catalog out to three native JS
+readers at once, each pinned to lite-07, lite-06, or moq-transport-22 and reading it as
+`@moq/watch` does. Only the lite-07 reader sees the flag; the other two share the relay's
+inflated copy, so `moq_relay_inflated_bytes_total` must grow by exactly the catalog's
+inflated size. The harness enables the relay's `[stats]` and `[internal]` listener for it.
+
+The HLS grid lane has the Rust publisher (moq-mux) and each native JS runtime
+(`@moq/hang`) publish one fixed frame schedule, with GOPs on and off the 2 s grid, a
+discontinuity, and a finish, and the Rust reader prints each broadcast's declared
+`media.join.interval` and every rendition's groups with their first pts, the input an HLS
+edge numbers segments from. The two readouts must be identical, so a browser-published
+broadcast exports as HLS like a native one.

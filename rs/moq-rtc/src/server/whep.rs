@@ -97,7 +97,13 @@ async fn accept_offer(
 		return Err(Error::InvalidSdp("expected Content-Type: application/sdp".into()));
 	}
 	let offer = std::str::from_utf8(&body).map_err(|err| Error::InvalidSdp(err.to_string()))?;
-	accept(server, subscriber, path, offer).await
+	accept(
+		server,
+		subscriber,
+		moq_net::Path::new(path).map_err(moq_net::Error::from)?,
+		offer,
+	)
+	.await
 }
 
 #[cfg(feature = "server")]
@@ -132,12 +138,12 @@ async fn delete(State(state): State<RouterState>, Path(path): Path<String>) -> S
 pub async fn accept(
 	server: &Server,
 	subscriber: &moq_net::origin::Consumer,
-	broadcast: impl moq_net::AsPath,
+	broadcast: impl Into<moq_net::Path>,
 	offer: &str,
 ) -> Result<Response> {
 	let offer = sdp::parse_offer(offer)?;
 
-	let source = resolve(subscriber, broadcast.as_path()).await?;
+	let source = resolve(subscriber, broadcast.into()).await?;
 	let codecs = source.catalog_codecs();
 	if codecs.is_empty() {
 		return Err(Error::NoRenditions);
@@ -151,7 +157,7 @@ pub async fn accept(
 	let (creds, inbound, registration) = mux.register();
 	let mut rtc = session::rtc_config_with_codecs(&codecs)
 		.set_local_ice_credentials(creds)
-		.build(moq_clock::now().into_std());
+		.build(kio::clock::now().into_std());
 	for addr in mux.candidates() {
 		let cand = Candidate::host(*addr, "udp").map_err(Error::rtc)?;
 		rtc.add_local_candidate(cand);
@@ -191,20 +197,21 @@ fn is_sdp(headers: &HeaderMap) -> bool {
 
 /// Resolve `path` on the subscribe origin and wait for its first catalog.
 ///
-/// `routed_broadcast` watches the path while it resolves, which is what makes a lazily
-/// discovering client session ask its peer about it; a plain request would be unroutable
-/// there. The `Source` resolves any sibling broadcast a rendition's catalog `broadcast` field
+/// Following the path watches it while it resolves, which is what makes a lazily
+/// discovering client session ask its peer about it, and waits out a publisher that has not
+/// announced yet. The `Source` resolves any sibling broadcast a rendition's catalog `broadcast` field
 /// references (e.g. `./source`) through the same origin.
 ///
 /// Both waits share one bound, or an unannounced broadcast, or an announced-but-catalog-less
 /// one, would park the handler forever. No route by the deadline is
 /// [`moq_net::Error::Unroutable`], so the WHEP client sees a 404 and retries (typical).
-async fn resolve(subscriber: &moq_net::origin::Consumer, path: moq_net::Path<'_>) -> Result<EgressSource> {
-	let deadline = moq_clock::now() + CATALOG_TIMEOUT;
-	let broadcast = moq_clock::timeout_at(deadline, subscriber.routed_broadcast(path))
+async fn resolve(subscriber: &moq_net::origin::Consumer, path: moq_net::Path) -> Result<EgressSource> {
+	let deadline = kio::clock::now() + CATALOG_TIMEOUT;
+	let mut following = subscriber.follow(path, None)?;
+	let broadcast = kio::clock::timeout_at(deadline, following.available())
 		.await
 		.map_err(|_| Error::Moq(moq_net::Error::Unroutable))??;
-	moq_clock::timeout_at(
+	kio::clock::timeout_at(
 		deadline,
 		EgressSource::new(moq_mux::Source::new(subscriber.clone(), broadcast)),
 	)
@@ -215,7 +222,9 @@ async fn resolve(subscriber: &moq_net::origin::Consumer, path: moq_net::Path<'_>
 #[cfg(feature = "server")]
 fn status_for(err: &Error) -> StatusCode {
 	match err {
-		Error::InvalidSdp(_) => StatusCode::BAD_REQUEST,
+		Error::InvalidSdp(_) | Error::Moq(moq_net::Error::EmptySegment | moq_net::Error::InvalidEscape) => {
+			StatusCode::BAD_REQUEST
+		}
 		Error::UnsupportedCodec(_) => StatusCode::UNSUPPORTED_MEDIA_TYPE,
 		Error::SessionNotFound => StatusCode::NOT_FOUND,
 		Error::Moq(moq_net::Error::Unauthorized) => StatusCode::UNAUTHORIZED,
@@ -270,7 +279,7 @@ mod tests {
 			.with_subscriber(sub_origin.clone())
 			.with_reconnect(false);
 		let url: url::Url = format!("tcp://{addr}/").parse().expect("url");
-		let connection = moq_clock::timeout(TIMEOUT, client.connect(url).established())
+		let connection = kio::clock::timeout(TIMEOUT, client.connect(url).established())
 			.await
 			.expect("connect timed out")
 			.expect("connect");
@@ -283,13 +292,15 @@ mod tests {
 	async fn a_broadcast_resolves_through_a_lazy_client_session() {
 		let pub_origin = moq_tokio::origin::spawn();
 
-		let mut source = pub_origin.create_broadcast("cam").expect("create broadcast");
+		let source = pub_origin.create_broadcast("cam").expect("create broadcast");
 		source
 			.announce(moq_net::origin::Route::default())
 			.expect("announce broadcast");
 		let catalog =
-			moq_mux::catalog::Producer::new(&mut source, moq_mux::catalog::Config::default()).expect("create catalog");
-		let mut opus = crate::codec::opus::Bridge::new(source, catalog, 48_000, 2).expect("create Opus bridge");
+			moq_mux::catalog::Producer::new(&mut source.broadcast().clone(), moq_mux::catalog::Config::default())
+				.expect("create catalog");
+		let mut opus = crate::codec::opus::Bridge::new(source.broadcast().clone(), catalog, 48_000, 2)
+			.expect("create Opus bridge");
 		opus.push(Frame {
 			timestamp_us: 20_000,
 			payload: Bytes::from_static(&[0xfc, 0xff, 0xfe]),
@@ -298,7 +309,7 @@ mod tests {
 
 		let (sub_origin, _connection, accept) = lazy_client(pub_origin).await;
 
-		let resolved = super::resolve(&sub_origin.consume(), moq_net::Path::new("cam"))
+		let resolved = super::resolve(&sub_origin.consume(), moq_net::Path::from_static("cam"))
 			.await
 			.expect("the broadcast resolves");
 		assert!(!resolved.catalog_codecs().is_empty());
@@ -319,15 +330,18 @@ mod tests {
 		let (sub_origin, _connection, accept) = lazy_client(pub_origin).await;
 
 		let _router = super::router(crate::server::Server::new(Default::default()), sub_origin.consume());
-		let missing = sub_origin.consume().follow("missing").expect("follow");
-		moq_clock::timeout(TIMEOUT, missing.synced())
+		let missing = kio::clock::timeout(TIMEOUT, sub_origin.consume().request("missing", None))
 			.await
 			.expect("sync timed out");
+		assert!(
+			matches!(missing, Err(moq_net::Error::Unroutable)),
+			"the missing path resolved"
+		);
 
 		// Nothing watches `other` on its own, yet the synced lookup already discovered it.
 		sub_origin
 			.consume()
-			.request_broadcast("other", None)
+			.request("other", None)
 			.await
 			.expect("discovered through the scope watch");
 

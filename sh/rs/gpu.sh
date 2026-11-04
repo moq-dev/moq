@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Hardware tests are opt-in; a detected GPU must have its driver and pass its tests.
 set -euo pipefail
+
+if [[ "${GITHUB_ACTIONS:-}" != true && "${LOCAL_SUPERVISED:-}" != 1 ]]; then
+    exec bash "$(dirname "$0")/../local.sh" bash "$0" "$@"
+fi
 cd "$(git rev-parse --show-toplevel)"
 
 declare -A vendors=()
@@ -43,7 +47,21 @@ for vendor in "${!vendors[@]}"; do
             esac
             LD_LIBRARY_PATH="$loader/lib" VK_DRIVER_FILES="${icd[0]}" MOQ_GPU_VENDOR="$vendor" \
                 just rs test -p moq-video --run-ignored only -E 'test(vulkan_gpu_device)'
-            echo "GPU $vendor: Vulkan driver verified; encoder hardware tests arrive with its backend"
+            # A real driver exports memory where Mesa's software one cannot, so an
+            # encoder that cannot read the export is passed over after it opens.
+            LD_LIBRARY_PATH="$loader/lib" VK_DRIVER_FILES="${icd[0]}" \
+                just rs test -p moq-video --features render,openh264 --lib --run-ignored only \
+                -E 'test(=render::export::vulkan::tests::vulkan_export_round_trips) | test(/^render::export::tests::(choosing_passes_over|a_named_encoder)_/)'
+            if [[ "$vendor" == 0x8086 ]]; then
+                va=$(nix build --inputs-from . --no-link --print-out-paths nixpkgs#libva.out)
+                media=$(nix build --inputs-from . --no-link --print-out-paths nixpkgs#intel-media-driver)
+                LD_LIBRARY_PATH="$va/lib" LIBVA_DRIVERS_PATH="$media/lib/dri" LIBVA_DRIVER_NAME=iHD \
+                    just rs test -p moq-video --no-default-features --features vaapi --lib --run-ignored only \
+                    -E 'test(=encode::backend::vaapi::hardware_tests::vaapi_1080p_ladder_stays_on_the_gpu)'
+            else
+                echo 'AMD VA-API encode and VPP are not covered by this hardware selection'
+            fi
+            echo "GPU $vendor: Vulkan driver verified"
             ;;
     esac
 done

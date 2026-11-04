@@ -1,17 +1,17 @@
 import * as Json from "@moq/json";
 import type * as Moq from "@moq/net";
-import { Path } from "@moq/net";
-import * as z from "@zod/mini";
-import { ArchiveSchema } from "./archive";
+import { Path, Track } from "@moq/net";
+import * as z from "zod/mini";
 import { AudioSchema } from "./audio";
 import { BinarySchema } from "./binary";
-import { ClockSchema } from "./clock";
+import { ContributionSchema } from "./contribution";
 import { EchoSchema } from "./echo";
 import { TRACK } from "./format";
 import { JsonSchema } from "./json";
+import { MediaSchema } from "./media";
 import type { RelativeBroadcast } from "./path";
 import { PRIORITY } from "./priority";
-import { named, section } from "./section";
+import { named, object, renditions, section } from "./section";
 import { StatsSchema } from "./stats";
 import { TextSchema } from "./text";
 import { track } from "./track";
@@ -46,11 +46,12 @@ const VersionSchema = z.number().check(
 /**
  * The root catalog: the base sections every hang broadcast carries.
  *
- * The media sections are `video`, `audio`, and `text`, alongside the broadcast's `archive`
- * (the segment index and any durable recording) and its `clock` (the one wall-clock mapping);
- * `json` and `binary` list application data tracks that aren't media. A section is omitted
- * when it holds no tracks. `stats` names the publisher's media snapshot track, and `echo`
- * solicits viewer feedback under a relative broadcast prefix.
+ * The media sections are `video`, `audio`, and `text`, alongside `media`, which holds what applies
+ * to every audio and video track: the broadcast's `clock` (the one wall-clock mapping) and its
+ * `join` interval. `json` and `binary` list application data tracks that aren't media. A section is omitted
+ * when it holds no tracks. `stats` names the publisher's media snapshot track, `echo`
+ * solicits viewer feedback under a relative broadcast prefix, and `contributions` lists whole
+ * broadcasts without opening them.
  *
  * This is a *loose* object: unknown root sections pass through validation untouched, so an
  * application can add its own sections (e.g. `scte35`) without modifying hang. A base consumer
@@ -66,11 +67,11 @@ export const RootSchema = z.looseObject({
 	version: z.optional(VersionSchema),
 	video: z.optional(VideoSchema),
 	audio: z.optional(AudioSchema),
-	// An incompatible archive disables seeking/recording, not the rest of the catalog.
-	archive: z.catch(z.optional(ArchiveSchema), undefined),
-	// The broadcast's one continuous clock, if the publisher exposes one. Independent of
-	// `archive`: a live-only publisher exposes its mapping without creating a segment index.
-	clock: z.optional(ClockSchema),
+	// What applies to every audio and video track, omitted when it holds nothing. `media` is a
+	// generic key an application may already carry, so a value that isn't an object decodes as
+	// absent; an object with a malformed clock fails the catalog, the same as Rust. See `MediaSchema`
+	// for its lenient `join`.
+	media: object(MediaSchema),
 	// Decoded leniently like `text` below: a value without a string `track` or `path` is someone
 	// else's and decodes as absent. See `named`.
 	stats: named(StatsSchema, "track"),
@@ -83,9 +84,11 @@ export const RootSchema = z.looseObject({
 	text: section(TextSchema, "renditions"),
 	json: section(JsonSchema, "tracks"),
 	binary: section(BinarySchema, "tracks"),
+	// A new key, so a malformed entry fails the catalog, the same as Rust.
+	contributions: z.optional(renditions(ContributionSchema, "contribution")),
 });
 
-/** The root catalog object: the media and archive sections, the data track sections, plus any app extensions. */
+/** The root catalog object: the media sections, `media`, the data track sections, plus any app extensions. */
 export type Root = z.infer<typeof RootSchema>;
 
 /**
@@ -110,21 +113,6 @@ function minVersion(root: Root): number | undefined {
 	return renamed || warmup ? 4 : undefined;
 }
 
-/** Maximum number of video, audio, and text renditions accepted in one catalog update. */
-export const MAX_RENDITIONS = 64;
-
-/** A catalog update announced more media renditions than a reader will retain. */
-export class TooManyRenditions extends Error {
-	/** How many renditions the catalog lists. */
-	readonly count: number;
-
-	constructor(count: number) {
-		super(`catalog has ${count} renditions, over the limit of ${MAX_RENDITIONS}`);
-		this.name = "TooManyRenditions";
-		this.count = count;
-	}
-}
-
 /** A catalog update used one rendition ID for both a video and an audio rendition. */
 export class DuplicateRendition extends Error {
 	/** The rendition ID used for both video and audio. */
@@ -137,13 +125,8 @@ export class DuplicateRendition extends Error {
 	}
 }
 
-/** Refuse an update with too many media renditions, or with an ID naming both a video and an audio rendition. */
+/** Refuse an update with an ID naming both a video and an audio rendition. */
 export function checkRenditions(root: Root): Root {
-	const count =
-		Object.keys(root.video?.renditions ?? {}).length +
-		Object.keys(root.audio?.renditions ?? {}).length +
-		Object.keys(root.text?.renditions ?? {}).length;
-	if (count > MAX_RENDITIONS) throw new TooManyRenditions(count);
 	const audio = root.audio?.renditions ?? {};
 	const duplicate = Object.keys(root.video?.renditions ?? {}).find((id) => Object.hasOwn(audio, id));
 	if (duplicate !== undefined) throw new DuplicateRendition(duplicate);
@@ -152,14 +135,16 @@ export function checkRenditions(root: Root): Root {
 
 /**
  * The catalog as a publisher writes it: refused as every reader refuses it, with the root
- * `version` computed rather than carried, so an edit can't claim less than the catalog uses.
+ * `version` computed rather than carried, so an edit can't claim less than the catalog uses, and an
+ * empty `media` left off the wire.
  *
- * Throws {@link TooManyRenditions} or {@link DuplicateRendition}. Mirrors Rust's catalog serializer.
+ * Throws {@link DuplicateRendition}. Mirrors Rust's catalog serializer.
  */
 export function encode(root: Root): Root {
 	checkRenditions(root);
 	const value = { ...root };
 	delete value.version;
+	if (value.media && value.media.clock === undefined && value.media.join === undefined) delete value.media;
 	const version = minVersion(root);
 	if (version !== undefined) value.version = version;
 	return value;
@@ -187,6 +172,7 @@ export function checkResolvable(root: Root, base: Moq.Path.Valid): Root {
 		root.text?.renditions,
 		root.json?.tracks,
 		root.binary?.tracks,
+		root.contributions,
 	];
 	for (const section of sections) {
 		for (const { broadcast } of Object.values(section ?? {})) {
@@ -200,12 +186,12 @@ export function checkResolvable(root: Root, base: Moq.Path.Valid): Root {
 /**
  * Subscribe to a broadcast's catalog and iterate validated root updates.
  *
- * Throws {@link UnsupportedVersion}, {@link TooManyRenditions}, or {@link EscapingBroadcast} on an
+ * Throws {@link UnsupportedVersion}, {@link DuplicateRendition}, or {@link EscapingBroadcast} on an
  * update that fails validation. `broadcast` references are checked against the handle's `path` and
  * yielded unresolved.
  */
 export async function* watch(broadcast: Moq.Broadcast.Consumer): AsyncIterable<Root> {
-	const track = broadcast.track(TRACK).subscribe({ priority: PRIORITY.catalog });
+	const track = broadcast.track(TRACK).subscribe({ ...Track.Subscription.default(), priority: PRIORITY.catalog });
 	try {
 		const consumer = new Json.Snapshot.Consumer<Root>({ track, schema: RootSchema });
 		for (;;) {

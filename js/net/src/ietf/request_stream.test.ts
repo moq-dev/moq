@@ -1,17 +1,12 @@
-import { expect, test } from "bun:test";
-import { ProtocolViolation, SessionCode } from "../error.ts";
+import { expect, mock, spyOn, test } from "bun:test";
+import { Manual, Milli, Nano } from "@moq/clock";
+import { NoStreamCredit, ProtocolViolation, SessionCode, StreamCode, StreamError } from "../error.ts";
 import { Reader, Stream } from "../stream.ts";
+import { Deadline, REQUEST_TIMEOUT_MS } from "../util/deadline.ts";
 import * as Varint from "../varint.ts";
-import type { Session } from "./adapter.ts";
-import { type RequestKind, toRequestCode } from "./error.ts";
-import { FetchError } from "./fetch.ts";
-import { PublishError } from "./publish.ts";
-import { PublishNamespaceError } from "./publish_namespace.ts";
 import { RequestError } from "./request.ts";
-import { namespaceUpdate, nextMessage, RequestStream, refuse, refuseUpdate } from "./request_stream.ts";
-import { SubscribeError } from "./subscribe.ts";
-import { SubscribeNamespaceError } from "./subscribe_namespace.ts";
-import { TRACK_STATUS_ERROR_14 } from "./track.ts";
+import { namespaceUpdate, nextMessage, RequestStream, refuse } from "./request_stream.ts";
+import type { Session } from "./session.ts";
 import { type IetfVersion, Version, versionName } from "./version.ts";
 
 /**
@@ -46,7 +41,7 @@ const GOAWAY = [0x10, 0, 2, 0, 0];
 
 test("an oversized or truncated request stream message type is a protocol violation", async () => {
 	// Both drafts use leading-ones varints.
-	for (const version of [Version.DRAFT_18, Version.DRAFT_21]) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 		const oversized = Varint.encodeLeadingOnes(2n ** 53n);
 		// A two-byte varint prefix with its second byte missing.
 		const truncated = Uint8Array.of(0x80);
@@ -59,7 +54,7 @@ test("an oversized or truncated request stream message type is a protocol violat
 });
 
 test("namespace update framing refuses duplicate prefix parameters", async () => {
-	for (const version of [Version.DRAFT_18, Version.DRAFT_21]) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 		const body = [2, 2, 0x34, 1, 1, 97, 0, 1, 1, 98];
 		const reader = new Reader(undefined, Uint8Array.from([0, body.length, ...body]), version);
 		await expect(namespaceUpdate({ type: 2, reader }, version)).rejects.toBeInstanceOf(ProtocolViolation);
@@ -67,7 +62,7 @@ test("namespace update framing refuses duplicate prefix parameters", async () =>
 });
 
 test("a repeated namespace update token is a request refusal", async () => {
-	for (const version of [Version.DRAFT_18, Version.DRAFT_21]) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 		const body = [2, 2, 3, 3, 3, 0, 170, 0, 3, 3, 0, 170];
 		const reader = new Reader(undefined, Uint8Array.from([0, body.length, ...body]), version);
 		expect(await namespaceUpdate({ type: 2, reader }, version)).toEqual({
@@ -77,7 +72,7 @@ test("a repeated namespace update token is a request refusal", async () => {
 	}
 });
 
-for (const version of [Version.DRAFT_18, Version.DRAFT_21]) {
+for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 	test(`${versionName(version)} a request nobody reads yet still refuses a second GOAWAY`, async () => {
 		const { request, closes } = requested(version, Uint8Array.of(...GOAWAY, ...GOAWAY));
 		await request.ended;
@@ -98,7 +93,7 @@ for (const version of [Version.DRAFT_18, Version.DRAFT_21]) {
 		expect(framed?.type).toBe(7);
 		expect(await framed?.reader.u16()).toBe(0);
 		expect(await request.next()).toBeUndefined();
-		// FIN cancels a draft-18 request; a draft-21 one lasts until reset.
+		// FIN cancels a draft-18 request; a draft-22 one lasts until reset.
 		const ended = await Promise.race([request.ended.then(() => true), Bun.sleep(10).then(() => false)]);
 		expect(ended).toBe(version === Version.DRAFT_18);
 		expect(closes).toEqual([]);
@@ -116,7 +111,7 @@ for (const version of [Version.DRAFT_18, Version.DRAFT_21]) {
 	});
 }
 
-for (const version of [Version.DRAFT_18, Version.DRAFT_19, Version.DRAFT_21, Version.DRAFT_22]) {
+for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 	test(`${versionName(version)} keeps GOAWAY state across request response phases`, async () => {
 		// GOAWAY, an empty REQUEST_OK, and another GOAWAY on the same stream.
 		const reader = new Reader(undefined, Uint8Array.of(0x10, 0, 2, 0, 0, 7, 0, 0, 0x10, 0, 2, 0, 0), version);
@@ -159,51 +154,102 @@ function recording(version: IetfVersion) {
 	return { stream, wire: () => new Reader(undefined, Uint8Array.from(written), version) };
 }
 
-const refusal = { requestId: 7n, condition: "not_supported", reasonPhrase: "no" } as const;
+const refusal = { condition: "not_supported", reasonPhrase: "no" } as const;
 
-test("draft 14 refuses each request kind with its own error message and REQUEST_ERROR's body", async () => {
-	const ids: Record<RequestKind, number> = {
-		subscribe: SubscribeError.id,
-		fetch: FetchError.id,
-		publish: PublishError.id,
-		publish_namespace: PublishNamespaceError.id,
-		subscribe_namespace: SubscribeNamespaceError.id,
-		track_status: TRACK_STATUS_ERROR_14,
-	};
-	for (const [kind, id] of Object.entries(ids) as [RequestKind, number][]) {
-		const { stream, wire } = recording(Version.DRAFT_14);
-		await refuse(stream, Version.DRAFT_14, kind, refusal);
-		const r = wire();
-		expect(await r.u53()).toBe(id);
-		const err = await RequestError.decode(r, Version.DRAFT_14);
-		expect(err.requestId).toBe(7n);
-		expect(err.errorCode).toBe(toRequestCode("not_supported", kind, Version.DRAFT_14));
-		expect(await r.done()).toBe(true);
-	}
-});
-
-test("a refusal names its Request ID on drafts 15 and 16 only", async () => {
-	for (const version of [Version.DRAFT_15, Version.DRAFT_16, Version.DRAFT_17, Version.DRAFT_21]) {
+test("a refusal carries its reason", async () => {
+	for (const version of [Version.DRAFT_22]) {
 		const { stream, wire } = recording(version);
 		await refuse(stream, version, "fetch", refusal);
 		const r = wire();
 		expect(await r.u53()).toBe(RequestError.id);
 		const err = await RequestError.decode(r, version);
-		expect(err.requestId).toBe(version <= Version.DRAFT_16 ? 7n : undefined);
 		expect(err.reasonPhrase).toBe("no");
 	}
 });
 
-test("draft 14 answers no update", async () => {
-	for (const version of [Version.DRAFT_14, Version.DRAFT_15]) {
-		const { stream, wire } = recording(version);
-		await refuseUpdate(stream.writer, version, "subscribe", refusal);
-		const r = wire();
-		if (version === Version.DRAFT_14) {
-			expect(await r.done()).toBe(true);
-			continue;
-		}
-		expect(await r.u53()).toBe(RequestError.id);
-		expect((await RequestError.decode(r, version)).requestId).toBe(7n);
+test("a request's deadline ends it through the request, so later ends do nothing", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		const stream = new Stream({
+			readable: new ReadableStream<Uint8Array>(),
+			writable: new WritableStream<Uint8Array>(),
+			version: Version.DRAFT_18,
+		});
+		const aborts = spyOn(stream, "abort");
+		const session = { version: Version.DRAFT_18, client: true, openBi: () => stream } as unknown as Session;
+		const deadline = new Deadline();
+		const request = await RequestStream.open(session, deadline);
+		const answer = deadline.wait(new Promise<never>(() => {})).catch((e: unknown) => e);
+		await clock.advance(Nano.fromMilli(Milli(REQUEST_TIMEOUT_MS)));
+		const err = await answer;
+		expect(err).toBeInstanceOf(StreamError);
+		expect((err as StreamError).code).toBe(StreamCode.ControlTimeout);
+		await request.ended;
+
+		// The caller's own cleanup after the deadline.
+		request.abort(new Error("abandoned"));
+		request.close();
+		expect(aborts).toHaveBeenCalledTimes(1);
+		expect(aborts.mock.calls[0]?.[0]).toBe(err as StreamError);
+	} finally {
+		installed.close();
+	}
+});
+
+test("a request opening after its deadline is aborted through its owner once and never sends", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const owners: RequestStream[] = [];
+	const abort = RequestStream.prototype.abort;
+	const ownerAborts = spyOn(RequestStream.prototype, "abort").mockImplementation(function (
+		this: RequestStream,
+		err: unknown,
+	) {
+		owners.push(this);
+		abort.call(this, err);
+	});
+	try {
+		const write = mock((_chunk: Uint8Array) => {});
+		const stream = new Stream({
+			readable: new ReadableStream<Uint8Array>(),
+			writable: new WritableStream<Uint8Array>({ write }),
+			version: Version.DRAFT_18,
+		});
+		const aborts = spyOn(stream, "abort");
+		const opening = Promise.withResolvers<Stream>();
+		const session = {
+			version: Version.DRAFT_18,
+			client: true,
+			openBi: () => opening.promise,
+		} as unknown as Session;
+		const deadline = new Deadline();
+		const send = mock((request: RequestStream) => request.writer.u8(1));
+		const sending = RequestStream.open(session, deadline).then(send);
+		const answer = deadline.wait(sending).catch((e: unknown) => e);
+		await clock.advance(Nano.fromMilli(Milli(REQUEST_TIMEOUT_MS)));
+		const err = await answer;
+		expect(err).toBeInstanceOf(NoStreamCredit);
+		expect(ownerAborts).not.toHaveBeenCalled();
+		expect(aborts).not.toHaveBeenCalled();
+
+		opening.resolve(stream);
+		await expect(sending).rejects.toBe(err);
+		expect(ownerAborts).toHaveBeenCalledTimes(1);
+		expect(ownerAborts.mock.calls[0]?.[0]).toBe(err);
+		const [request] = owners;
+		expect(request).toBeInstanceOf(RequestStream);
+		await request.ended;
+
+		// The caller's cleanup cannot reset the late stream a second time.
+		request.abort(new Error("abandoned"));
+		request.close();
+		expect(aborts).toHaveBeenCalledTimes(1);
+		expect(aborts.mock.calls[0]?.[0]).toBe(err as NoStreamCredit);
+		expect(send).not.toHaveBeenCalled();
+		expect(write).not.toHaveBeenCalled();
+	} finally {
+		ownerAborts.mockRestore();
+		installed.close();
 	}
 });

@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ "${GITHUB_ACTIONS:-}" != true && "${LOCAL_SUPERVISED:-}" != 1 ]]; then
+    exec bash "$(dirname "$0")/../local.sh" bash "$0" "$@"
+fi
+
 all=0
 if [[ $# == 1 && $1 == --all ]]; then
     all=1
@@ -9,9 +13,12 @@ elif [[ $# != 0 ]]; then
     exit 2
 fi
 
+targets=(--tests)
+if ((all)); then targets=(--all-targets); fi
+
 check() {
     echo "media features: cargo check $*"
-    cargo check --locked --all-targets "$@"
+    cargo check --locked "${targets[@]}" "$@"
 }
 
 # Resolved for Linux, the platform every asserted dependency targets: moq-nvenc
@@ -37,10 +44,9 @@ forbid_crate() {
     fi
 }
 
-# Minimal shapes and the off-default VPX backend always compile and test. The
-# other positive paths already compile in default, capture, and play checks;
-# isolate them when their feature owner changes, and exhaustively in Nightly.
-# Dependency absence contracts stay on every affected PR, including transitive edits.
+# Minimal shapes and the off-default VPX backend always compile and test, and
+# the dependency absence contracts always run. --all, which `just rs features`
+# passes, also compiles each positive path in isolation.
 check -p moq-video --no-default-features
 minimal=$(tree -p moq-video --no-default-features)
 for crate in openh264 openh264-sys2 wgpu cpal; do

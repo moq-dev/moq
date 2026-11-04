@@ -2,15 +2,17 @@
 # Keep benchmark builds together while unrelated Nightly workloads run independently.
 set -euo pipefail
 
-usage='usage: just gh nightly rust-test|rust-bench|rust-shared|rust-extra|rust-uring|js'
+usage='usage: just gh nightly rust-test|rust-bench|rust-shared|rust-relay|rust-extra|rust-uring|js|bindings'
 if [[ $# != 1 ]]; then
     echo "$usage" >&2
     exit 2
 fi
-# The measured groups write a report for the benchmark site; rust-test only runs.
+# The measured groups write a report for the benchmark site; bindings only run, since
+# rust2 measures them (see bench/README.md).
 case "$1" in
-    rust-test) report= ;;
-    rust-bench | rust-shared | rust-extra | rust-uring) report=rust ;;
+    bindings) report= ;;
+    rust-bench | rust-shared | rust-relay | rust-extra | rust-uring) report=rust ;;
+    rust-test) report=rust-test ;;
     js) report=js ;;
     *)
         echo "$usage" >&2
@@ -18,37 +20,38 @@ case "$1" in
         ;;
 esac
 
-# MOQ_BENCH_BASE pairs every Rust bench target with its build at that revision, run on the
+# BENCH_BASE pairs every Rust bench target with its build at that revision, run on the
 # same machine; `previous-nightly` is the commit of the latest other scheduled Nightly on main.
-if [[ -n ${MOQ_BENCH_BASE:-} ]]; then
+if [[ -n ${BENCH_BASE:-} ]]; then
     if [[ $report != rust ]]; then
-        echo "nightly: MOQ_BENCH_BASE applies only to the Rust bench groups" >&2
+        echo "nightly: BENCH_BASE applies only to the Rust bench groups" >&2
         exit 2
     fi
-    if [[ $MOQ_BENCH_BASE == previous-nightly ]]; then
-        MOQ_BENCH_BASE=$(gh run list --workflow nightly.yml --branch main --event schedule --limit 2 \
+    if [[ $BENCH_BASE == previous-nightly ]]; then
+        BENCH_BASE=$(gh run list --workflow nightly.yml --branch main --event schedule --limit 2 \
             --json databaseId,headSha --jq "map(select(.databaseId != ${GITHUB_RUN_ID:-0}))[0].headSha // empty")
-        if [[ -z $MOQ_BENCH_BASE ]]; then
+        if [[ -z $BENCH_BASE ]]; then
             echo "nightly: no previous scheduled Nightly on main" >&2
             exit 1
         fi
     fi
     # A shallow CI checkout has only its own commit. Fetching a branch name only updates
     # FETCH_HEAD, so the base is exported as the commit it resolved to.
-    if ! base=$(git rev-parse --verify --quiet "$MOQ_BENCH_BASE^{commit}"); then
-        git fetch --no-tags --depth=1 origin "$MOQ_BENCH_BASE"
+    if ! base=$(git rev-parse --verify --quiet "$BENCH_BASE^{commit}"); then
+        git fetch --no-tags --depth=1 origin "$BENCH_BASE"
         base=$(git rev-parse --verify 'FETCH_HEAD^{commit}')
     fi
-    export MOQ_BENCH_BASE=$base
+    export BENCH_BASE=$base
 fi
 
 if [[ -n $report ]]; then
     root=$(git rev-parse --show-toplevel)
-    out=${MOQ_BENCH_RESULTS:-$root/target/bench/nightly/$1}
+    out=${BENCH_RESULTS:-$root/target/bench/nightly/$1}
     mkdir -p "$out"
-    export MOQ_BENCH_RUNS="$out/criterion-runs.txt"
-    : >"$MOQ_BENCH_RUNS"
-    rm -f "$out/report.json" "$out/paired.json"
+    export BENCH_RUNS="$out/criterion-runs.txt"
+    : >"$BENCH_RUNS"
+    rm -rf "$out/report.json" "$out/paired.json" "$out/raw"
+    mkdir -p "$out/raw"
 fi
 
 failed=()
@@ -60,37 +63,54 @@ run() {
 criterion() {
     local label=$1
     shift
-    run env MOQ_BENCH_LABEL="$label" MOQ_BENCH_ARTIFACTS="$out/runs" just gh criterion "$@"
+    run env BENCH_LABEL="$label" BENCH_ARTIFACTS="$out/runs" just gh criterion "$@"
 }
 
 javascript() {
     local label=$1
     shift
-    mkdir -p "$out/raw"
     echo "nightly: $*"
     if ! "$@" | tee "$out/raw/$label.csv"; then failed+=("$*"); fi
 }
 
+# The bench nextest profile stores each test's printed tables in its JUnit report,
+# which every run overwrites; keep each run's copy.
+nextest() {
+    local junit=${CARGO_TARGET_DIR:-$root/target}/nextest/bench/junit.xml
+    rm -f "$junit"
+    run "$@"
+    if [[ -s $junit ]]; then
+        mv "$junit" "$out/raw/nextest-$((++nextest_runs)).xml"
+    else
+        failed+=("no JUnit report from: $*")
+    fi
+}
+nextest_runs=0
+
 case "$1" in
-    # Ignored benchmark tests under nextest: the release builds first, then the test-profile ones.
+    # Ignored benchmark tests under nextest, all in release builds and one at a time, so
+    # none measures beside another. Each prints CSV tables whose unit-suffixed columns
+    # the report records (see bench/README.md).
     rust-test)
-        run just rs bench-latency
-        run just rs test -p moq-bench --release --run-ignored only \
+        export NEXTEST_PROFILE=bench NEXTEST_TEST_THREADS=1
+        nextest just rs bench-latency
+        nextest just rs test -p moq-bench --release --run-ignored only \
             -E 'test(benchmark_readiness_establishment)' --success-output immediate
-        run just rs bench-playback
-        run just rs test --release -p moq-congestion -E 'test(benchmark_ack_cleanup)' \
+        nextest just rs bench-playback
+        nextest just rs test --release -p moq-congestion -E 'test(benchmark_per_packet)' \
             --run-ignored only --success-output immediate
-        run just rs bench-feed-fetch
-        run just rs test -p moq-quic --release -E 'test(benchmark_receive_credit)' --run-ignored only --success-output immediate
-        run just rs test -p moq-tokio --release -E 'test(benchmark_receive_windows)' --run-ignored only --success-output immediate
-        run just rs test -p moq-relay -E 'test(benchmark_stun_sources)' --run-ignored only --success-output immediate
-        run just rs test -p moq-archive -p moq-mux -p moq-hls --no-fail-fast \
-            -E 'test(benchmark_timeline_fetch_fanout) | test(benchmark_damage_pid_fanout) | test(benchmark_pes_staging) | test(benchmark_reference_handoff_fanout)' \
+        nextest just rs bench-feed-fetch
+        nextest just rs test -p moq-quic --release -E 'test(benchmark_receive_credit)' --run-ignored only --success-output immediate
+        nextest just rs test -p moq-tokio --release -E 'test(benchmark_receive_windows)' --run-ignored only --success-output immediate
+        nextest just rs test -p moq-uring --release -E 'test(benchmark_socket_queues)' --run-ignored only --success-output immediate
+        nextest just rs test -p moq-tokio --release -E 'test(benchmark_datagram_delivery)' --run-ignored only --success-output immediate
+        # One build for the crates whose benchmarks need no features of their own.
+        nextest just rs test --release --no-fail-fast -p moq-relay -p moq-c -p moq-mux -p moq-cli \
+            -E 'test(benchmark_stun_sources) | test(benchmark_handles) | test(benchmark_damage_pid_fanout) | test(benchmark_pes_staging) | test(benchmark_stream_import)' \
             --run-ignored only --success-output immediate
         # Codecs are irrelevant to timebase reservation, so skip building them.
-        run just rs test -p moq-ffi --no-default-features -E 'test(benchmark_timebase_reservation_fanout)' \
+        nextest just rs test -p moq-ffi --release --no-default-features -E 'test(benchmark_timebase_reservation_fanout)' \
             --run-ignored only --success-output immediate
-        run just rs test -p moq-cli -E 'test(benchmark_stream_import)' --run-ignored only --success-output immediate
         ;;
     # Measured Cargo bench targets, all in the bench profile. A paired run builds and
     # measures each group twice, so the groups split across jobs to fit an hour each.
@@ -114,27 +134,37 @@ case "$1" in
             --bench chunk_interleaving --bench worker_turns \
             --bench streams --bench receive --bench endpoint --bench wire
         ;;
+    rust-relay)
+        criterion relay -p moq-relay --features test-support --bench session
+        ;;
     # Keep added coverage out of the rust-bench and rust-shared legs.
     rust-extra)
-        # The allocation/window/play-buffer tables keep their stdout in the run;
+        # The allocation/window/play-buffer/batch/receive-bursts tables keep their stdout in the run;
         # only Criterion estimates enter the trend report.
-        criterion extra --no-fail-fast -p moq-e2ee -p moq-json -p moq-archive -p moq-cli -p moq-mux \
-            --bench protect --bench codec --bench table --bench allocations --bench window \
-            --bench producer --bench play_buffer --bench jitter --bench decode_clock --bench ts_programs
+        criterion extra --no-fail-fast -p moq-crypto -p moq-json -p moq-archive -p moq-cli -p moq-mux -p moq-audio \
+            -p moq-quic -p moq-sock -p moq-tokio -p moq-transcode --features moq-quic/fuzz \
+            --bench protect --bench sign --bench codec --bench table --bench allocations --bench window \
+            --bench producer --bench play_buffer --bench jitter --bench timeline --bench decode_clock --bench ts_programs --bench ts_video \
+            --bench bus --bench batches --bench parameter_sets --bench sent_packets --bench demux --bench receive_bursts --bench ladder --bench fanout
+        criterion audio-capture -p moq-audio --features capture --bench capture
+        # moq-auth's published release is its own dev-dependency, so `-p moq-auth` is ambiguous.
+        # The concurrent cases' latency percentiles stay in the run's stdout.
+        criterion auth --manifest-path rs/moq-auth/Cargo.toml --bench verify --bench jwt
         ;;
     rust-uring)
         # One run per target makes an unsupported/skipped ring fail report
         # validation instead of hiding behind the Tokio target's measurements.
-        for target in udp_tokio udp_uring echo_quic session_lite unreachable_dials timers; do
+        for target in udp_tokio udp_uring echo_quic session_lite unreachable_dials timers web_headers; do
             criterion "uring-$target" -p moq-uring --bench "$target"
         done
         ;;
     js)
-        for benchmark in broadcasts request-ids requests forward reader frames drift varint lite-varint track resume priority subscribe-drop subscribe-tracks refresh observed compression; do
+        for benchmark in broadcasts requests fills fetch forward reader frames drift ledger bandwidth replay varint lite-varint track resume priority subscribe-drop refresh observed compression; do
             javascript "$benchmark" just js bench "$benchmark"
         done
         javascript catalog just js catalog-bench
         javascript qmux-record just js qmux-record-bench
+        javascript qmux-datagrams just js qmux-datagrams-bench
         javascript cmaf just js cmaf-bench
         javascript arrivals just js arrivals-bench
         javascript p2p just js p2p-bench
@@ -144,9 +174,29 @@ case "$1" in
         javascript json-codec just js json-codec-bench
         javascript json-parse just js json-parse-bench
         javascript slow-group just js slow-group-bench
+        javascript buffered just js buffered-bench
         javascript jitter just js jitter-bench
         javascript audio-warmup just js audio-warmup-bench
+        javascript audio-support just js audio-support-bench
+        javascript pattern just js pattern-bench
         javascript clock just js clock-bench
+        ;;
+    # The binding benchmark's runners at a token budget, so they keep working at this
+    # commit; rust2's `just bench-ffi` measures them at its pinned moq revision. Swift
+    # runs on macOS in the Platform workflow.
+    bindings)
+        export MOQ_BENCH_SECONDS=0.05
+        MOQ_BENCH_DIR=${BENCH_RESULTS:-$(git rev-parse --show-toplevel)/target/bench/nightly/bindings}
+        export MOQ_BENCH_DIR
+        rm -rf "$MOQ_BENCH_DIR"
+        run just rs test -p moq-ffi --cargo-profile release -E 'test(bench::benchmark_ffi) | test(bench::benchmark_background)' --run-ignored only
+        run just go bench -benchtime="${MOQ_BENCH_SECONDS}s"
+        for runner in py kt cpp dart; do
+            run just "$runner" bench
+        done
+        for result in rust-ffi rust-net rust-background go python kotlin cpp dart; do
+            if [[ ! -s $MOQ_BENCH_DIR/$result.json ]]; then failed+=("no $MOQ_BENCH_DIR/$result.json"); fi
+        done
         ;;
 esac
 

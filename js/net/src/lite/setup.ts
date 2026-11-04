@@ -9,11 +9,11 @@ import { type Hop, HopSchema, wireHop } from "../hop.ts";
 import { encodeVarint, Reader, type Writer } from "../stream.ts";
 import { decodeUtf8 } from "../util/utf8.ts";
 import * as Message from "./message.ts";
-import { hasSetupStream, type Version } from "./version.ts";
+import { hasAuth, hasImplementation, hasSetupStream, type Version } from "./version.ts";
 
 const clientParameters = new WeakSet<Setup>();
 
-/** Whether the peer's SETUP carried Path or Role; raw presence matters even when an unknown Role decodes as Both. */
+/** Whether the peer's SETUP carried Path, Role, or Token; raw presence matters even when an unknown Role decodes as Both. */
 export function hasClientParameters(setup: Setup): boolean {
 	return clientParameters.has(setup);
 }
@@ -28,9 +28,8 @@ const PARAM_ROLE = 0x3n;
 const PARAM_HOP = 0x5n;
 /** Setup Parameter id for the endpoint's implementation name and version. */
 const PARAM_IMPLEMENTATION = 0x6n;
-
-/** Cap on the number of parameters in a bag, matching the Rust decoder. */
-const MAX_PARAMS = 64;
+/** Setup Parameter id for the client's connection credential (client-only, lite-07+). */
+const PARAM_TOKEN = 0x7n;
 
 /** SETUP only carries negotiation parameters, so it gets a far smaller cap than other messages. */
 const MAX_SETUP_SIZE = 0xffff;
@@ -140,10 +139,6 @@ class Parameters {
 	}
 
 	async encode(w: Writer) {
-		if (this.#entries.size > MAX_PARAMS) {
-			throw new Error("too many parameters");
-		}
-
 		await w.u53(this.#entries.size);
 		for (const [id, value] of this.#entries) {
 			await w.u62(id);
@@ -156,10 +151,6 @@ class Parameters {
 		const params = new Parameters();
 
 		const count = await r.u53();
-		if (count > MAX_PARAMS) {
-			throw new Error("too many parameters");
-		}
-
 		for (let i = 0; i < count; i++) {
 			const id = await r.u62();
 			if (params.#entries.has(id)) {
@@ -184,6 +175,8 @@ export interface SetupProps {
 	role?: Role;
 	/** See {@link Setup.hop}. Omitted by default. */
 	hop?: Hop;
+	/** See {@link Setup.token}. Omitted by default. */
+	token?: Uint8Array;
 	/** See {@link Setup.implementation}. Omitted by default. */
 	implementation?: string;
 }
@@ -224,16 +217,23 @@ export class Setup {
 	hop?: Hop;
 
 	/**
+	 * The connection credential (lite-07+), which the empty-token Auth Stream names. Sent
+	 * only by the client. Never empty: an empty value is no credential.
+	 */
+	token?: Uint8Array;
+
+	/**
 	 * This endpoint's implementation and version, such as `moq-net-js/0.4.2`. Opaque and
 	 * peer-controlled, so only for logs and rollout counts. `undefined` or empty sends nothing.
 	 */
 	implementation?: string;
 
-	constructor({ probe, path, role, hop, implementation }: SetupProps = {}) {
+	constructor({ probe, path, role, hop, token, implementation }: SetupProps = {}) {
 		this.probe = probe ?? ProbeLevel.None;
 		this.path = path;
 		this.role = role ?? Role.Both;
 		this.hop = hop;
+		this.token = token;
 		this.implementation = implementation;
 	}
 
@@ -262,6 +262,11 @@ export class Setup {
 		if (this.implementation) {
 			params.setBytes(PARAM_IMPLEMENTATION, new TextEncoder().encode(this.implementation));
 		}
+		if (this.token !== undefined) {
+			if (!hasAuth(version)) throw new Error("setup token not supported for this version");
+			if (this.token.byteLength === 0) throw new Error("setup token cannot be empty");
+			params.setBytes(PARAM_TOKEN, this.token);
+		}
 		await params.encode(w);
 	}
 
@@ -283,11 +288,15 @@ export class Setup {
 		const hopRaw = await params.getVarint(PARAM_HOP, version);
 		const hop = hopRaw === undefined || hopRaw === 0n ? undefined : HopSchema.parse(hopRaw);
 
-		const implementationBytes = params.getBytes(PARAM_IMPLEMENTATION);
+		// An older version does not know the token parameter, so it ignores it like any other.
+		const token = hasAuth(version) ? params.getBytes(PARAM_TOKEN) : undefined;
+		if (token?.byteLength === 0) throw new Error("setup token cannot be empty");
+
+		const implementationBytes = hasImplementation(version) ? params.getBytes(PARAM_IMPLEMENTATION) : undefined;
 		const implementation = implementationBytes === undefined ? undefined : decodeUtf8(implementationBytes);
 
-		const setup = new Setup({ probe, path, role, hop, implementation });
-		if (pathBytes !== undefined || roleCode !== undefined) clientParameters.add(setup);
+		const setup = new Setup({ probe, path, role, hop, token, implementation });
+		if (pathBytes !== undefined || roleCode !== undefined || token !== undefined) clientParameters.add(setup);
 		return setup;
 	}
 

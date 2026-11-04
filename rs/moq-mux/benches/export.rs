@@ -1,4 +1,11 @@
-//! Container export cost swept over independently varied tracks and queued frames.
+//! Container export cost swept over independently varied tracks and queued frames, and the
+//! cost of a live export's poll that nothing new woke.
+#![expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "`iter_custom` timings measure the host clock on purpose"
+)]
+use std::task::Poll;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -14,21 +21,20 @@ struct Fixture {
 	_published: Box<dyn std::any::Any>,
 	_origin: moq_net::origin::Producer,
 	driver: tokio::task::JoinHandle<moq_net::Error>,
-	requests: tokio::task::JoinHandle<()>,
 }
 
 impl Drop for Fixture {
 	fn drop(&mut self) {
 		self.driver.abort();
-		self.requests.abort();
 	}
 }
 
-/// A finished broadcast of `tracks` audio tracks with `frames` queued frames each.
-async fn prepare(tracks: usize, frames: usize) -> (moq_mux::Source, moq_mux::catalog::Consumer, Fixture) {
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let consumer = broadcast.consume();
-	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+/// A broadcast of `tracks` audio tracks with `frames` queued frames each, finished unless `live`.
+async fn prepare(tracks: usize, frames: usize, live: bool) -> (moq_mux::Source, moq_mux::catalog::Consumer, Fixture) {
+	let (origin, driver) = moq_net::origin::Producer::new(Default::default());
+	let driver = tokio::spawn(moq_net::time::run(driver));
+	let broadcast = origin.create_broadcast("bench").unwrap();
+	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 	let stream = moq_mux::catalog::Consumer::from(catalog.consume().unwrap());
 	let mut publishers = Vec::new();
 	for index in 0..tracks {
@@ -53,24 +59,20 @@ async fn prepare(tracks: usize, frames: usize) -> (moq_mux::Source, moq_mux::cat
 				})
 				.unwrap();
 		}
-		track.finish().unwrap();
-	}
-	catalog.finish().unwrap();
-	let (origin, driver) = moq_net::origin::Producer::new(Default::default());
-	let driver = tokio::spawn(moq_net::time::run(driver));
-	let dynamic = origin.dynamic_route("", Default::default()).unwrap();
-	let requests = tokio::spawn(async move {
-		while let Ok(request) = dynamic.requested_broadcast().await {
-			request.accept(consumer.clone());
+		if !live {
+			track.finish().unwrap();
 		}
-	});
-	let resolved = origin.consume().request_broadcast("bench", None).await.unwrap();
+	}
+	if !live {
+		catalog.finish().unwrap();
+	}
+	broadcast.announce(Default::default()).unwrap();
+	let resolved = origin.consume().request("bench", None).await.unwrap();
 	let source = moq_mux::Source::new(origin.consume(), resolved);
 	let fixture = Fixture {
 		_published: Box::new((broadcast, catalog, publishers)),
 		_origin: origin,
 		driver,
-		requests,
 	};
 	(source, stream, fixture)
 }
@@ -80,6 +82,17 @@ enum Export {
 	Flv(Box<moq_mux::container::flv::Export<moq_mux::catalog::Consumer>>),
 	Mkv(Box<moq_mux::container::mkv::Export<moq_mux::catalog::Consumer>>),
 	Ts(Box<moq_mux::container::ts::Export<moq_mux::catalog::Consumer>>),
+}
+
+impl Export {
+	/// Poll for the next chunk, ready with whether one came out rather than the export ending.
+	fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<bool> {
+		match self {
+			Export::Flv(export) => export.poll_next(waiter).map(|res| res.unwrap().is_some()),
+			Export::Mkv(export) => export.poll_next(waiter).map(|res| res.unwrap().is_some()),
+			Export::Ts(export) => export.poll_next(waiter).map(|res| res.unwrap().is_some()),
+		}
+	}
 }
 
 fn open(format: &str, source: moq_mux::Source, stream: moq_mux::catalog::Consumer) -> Export {
@@ -141,7 +154,7 @@ fn bench_export(c: &mut Criterion) {
 					// Publishing and opening are setup; only draining the export is measured.
 					b.iter_batched(
 						|| {
-							let (source, stream, fixture) = runtime.block_on(prepare(tracks, frames));
+							let (source, stream, fixture) = runtime.block_on(prepare(tracks, frames, false));
 							(open(format, source, stream), fixture)
 						},
 						|(opened, fixture)| {
@@ -162,7 +175,50 @@ fn bench_export(c: &mut Criterion) {
 	group.finish();
 }
 
-criterion_group!(benches, bench_export, video_reorder);
+/// A live export polled again from the same task with nothing new: the poll a task pays for
+/// whenever something else wakes it. Swept over tracks, a slope is work repeated per track.
+fn export_idle(c: &mut Criterion) {
+	let runtime = tokio::runtime::Builder::new_current_thread()
+		.enable_all()
+		.build()
+		.unwrap();
+	let mut group = c.benchmark_group("container-export-idle");
+	group.sample_size(10);
+	group.measurement_time(Duration::from_secs(1));
+	for format in ["flv", "mkv", "ts"] {
+		for tracks in [1, 4, 16] {
+			group.throughput(Throughput::Elements(tracks as u64));
+			group.bench_function(BenchmarkId::new(format, tracks), |b| {
+				let (mut opened, _fixture) = runtime.block_on(async {
+					let (source, stream, fixture) = prepare(tracks, 4, true).await;
+					let mut opened = open(format, source, stream);
+					// Take what the export lets go now, giving the origin's tasks a turn between polls.
+					while let Ok(chunk) =
+						kio::clock::timeout(Duration::from_millis(10), kio::wait(|waiter| opened.poll_next(waiter)))
+							.await
+					{
+						assert!(chunk, "a live export ended");
+					}
+					(opened, fixture)
+				});
+				let mut park = kio::Park::default();
+				b.iter_custom(|iterations| {
+					runtime.block_on(std::future::poll_fn(|cx| {
+						let start = std::time::Instant::now();
+						for _ in 0..iterations {
+							// Each poll holds its waiter as `kio::wait` does.
+							assert!(std::hint::black_box(opened.poll_next(park.hold(cx))).is_pending());
+						}
+						Poll::Ready(start.elapsed())
+					}))
+				});
+			});
+		}
+	}
+	group.finish();
+}
+
+criterion_group!(benches, bench_export, video_reorder, export_idle);
 criterion_main!(benches);
 
 /// A progressive AVC SPS declaring a reorder depth of two (25 fps), as the catalog does.
@@ -176,9 +232,10 @@ async fn prepare_video(
 	size: usize,
 	pattern: &str,
 ) -> (moq_mux::Source, moq_mux::catalog::Consumer, Fixture) {
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let consumer = broadcast.consume();
-	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let (origin, driver) = moq_net::origin::Producer::new(Default::default());
+	let driver = tokio::spawn(moq_net::time::run(driver));
+	let broadcast = origin.create_broadcast("bench").unwrap();
+	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 	let stream = moq_mux::catalog::Consumer::from(catalog.consume().unwrap());
 	let track = broadcast
 		.create_track("video", catalog.track_info(hang::catalog::PRIORITY.video))
@@ -201,7 +258,15 @@ async fn prepare_video(
 	let mut video = catalog.video(track, Container::Legacy(Kind::Video), config).unwrap();
 	for index in 0..count {
 		let pts = match pattern {
-			"pyramid" => ((index / 9 * 9 + [0, 4, 2, 1, 3, 8, 6, 5, 7][index % 9]) * 3_600) as u64,
+			"pyramid" | "step-back" => {
+				let pts = ((index / 9 * 9 + [0, 4, 2, 1, 3, 8, 6, 5, 7][index % 9]) * 3_600) as u64;
+				if pattern == "step-back" && index >= count / 2 {
+					// Keep the 300 ms rewind in the one group every subscription reads.
+					pts - 300 * 90
+				} else {
+					pts
+				}
+			}
 			"flat" => 90_000,
 			"backward" => 90_000 - index as u64,
 			_ => unreachable!(),
@@ -220,15 +285,8 @@ async fn prepare_video(
 	}
 	video.finish().unwrap();
 	catalog.finish().unwrap();
-	let (origin, driver) = moq_net::origin::Producer::new(Default::default());
-	let driver = tokio::spawn(moq_net::time::run(driver));
-	let dynamic = origin.dynamic_route("", Default::default()).unwrap();
-	let requests = tokio::spawn(async move {
-		while let Ok(request) = dynamic.requested_broadcast().await {
-			request.accept(consumer.clone());
-		}
-	});
-	let resolved = origin.consume().request_broadcast("bench", None).await.unwrap();
+	broadcast.announce(Default::default()).unwrap();
+	let resolved = origin.consume().request("bench", None).await.unwrap();
 	let source = moq_mux::Source::new(origin.consume(), resolved);
 	(
 		source,
@@ -237,7 +295,6 @@ async fn prepare_video(
 			_published: Box::new((broadcast, catalog, video)),
 			_origin: origin,
 			driver,
-			requests,
 		},
 	)
 }
@@ -251,14 +308,36 @@ fn video_reorder(c: &mut Criterion) {
 	group.sample_size(10);
 	group.warm_up_time(Duration::from_millis(50));
 	group.measurement_time(Duration::from_millis(200));
-	for pattern in ["pyramid", "flat", "backward"] {
+	for (format, pattern) in [
+		("mkv", "pyramid"),
+		("mkv", "flat"),
+		("mkv", "backward"),
+		("ts", "pyramid"),
+		("ts", "step-back"),
+	] {
+		let name = if format == "ts" {
+			format!("ts/{pattern}")
+		} else {
+			pattern.into()
+		};
 		for count in [64, 256, 1024] {
 			for size in [256, 16_384] {
-				group.bench_function(BenchmarkId::new(pattern, format!("{count}x{size}")), |b| {
+				group.bench_function(BenchmarkId::new(&name, format!("{count}x{size}")), |b| {
 					b.iter_batched(
 						|| runtime.block_on(prepare_video(count, size, pattern)),
 						|(source, stream, fixture)| {
 							let refused = runtime.block_on(async {
+								if format == "ts" {
+									let mut opened = moq_mux::container::ts::Export::new(source, stream);
+									let mut chunks = 0;
+									while let Some(frame) = opened.next().await.unwrap() {
+										std::hint::black_box(frame);
+										chunks += 1;
+									}
+									assert!(chunks > 0);
+									assert_eq!(opened.discontinuity(), u64::from(pattern == "step-back"));
+									return false;
+								}
 								let mut export = moq_mux::container::mkv::Export::new(source, stream)
 									.with_fragment_duration(Duration::ZERO);
 								loop {
@@ -271,7 +350,7 @@ fn video_reorder(c: &mut Criterion) {
 									}
 								}
 							});
-							assert_eq!(refused, pattern != "pyramid");
+							assert_eq!(refused, format == "mkv" && pattern != "pyramid");
 							fixture
 						},
 						BatchSize::PerIteration,

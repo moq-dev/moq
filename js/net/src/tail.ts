@@ -43,10 +43,10 @@ export class Tail {
 	 * Record a group stream whose header arrived. Returns the call that marks it read to
 	 * its end, which is idempotent.
 	 */
-	open(sequence: number): () => void {
+	open(sequence: bigint): () => void {
 		this.#streams += 1;
 		this.#active += 1;
-		this.#account(sequence, sequence + 1);
+		this.#account(sequence, sequence + 1n);
 
 		let closed = false;
 		return () => {
@@ -57,18 +57,55 @@ export class Tail {
 		};
 	}
 
+	/**
+	 * Hold the end open for something being read that is not one of the counted streams,
+	 * such as a joining FETCH's head, or let go of a counted stream while it waits on one.
+	 * Returns the call that lets go, which is idempotent.
+	 */
+	hold(): () => void {
+		this.#active += 1;
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			this.#active -= 1;
+			this.#bump();
+		};
+	}
+
+	/**
+	 * Stop holding the end open for a counted stream while it waits on something that holds
+	 * it instead. Returns the call that holds it again, which must come before the stream's
+	 * own close.
+	 */
+	suspend(): () => void {
+		this.#active -= 1;
+		this.#bump();
+		let resumed = false;
+		return () => {
+			if (resumed) return;
+			resumed = true;
+			this.#active += 1;
+		};
+	}
+
+	/** Re-check what {@link settle} waits on, after something outside the ledger changed. */
+	touch(): void {
+		this.#bump();
+	}
+
 	/** Record sequences `[start, end)` as accounted for without a stream: dropped, or a datagram. */
-	account(start: number, end: number): void {
+	account(start: bigint, end: bigint): void {
 		this.#account(start, end);
 	}
 
 	/** Restart the age of every gap reaching into `[start, end)`, which the demand newly asks for. */
-	demand(start: number, end: number): void {
+	demand(start: bigint, end: bigint): void {
 		this.#ledger.demand(start, end, now());
 	}
 
 	/** Whether every sequence in `[start, end)` is accounted for. */
-	covers(start: number, end: number): boolean {
+	covers(start: bigint, end: bigint): boolean {
 		return this.#ledger.covers(start, end);
 	}
 
@@ -103,7 +140,7 @@ export class Tail {
 		}
 	}
 
-	#account(start: number, end: number): void {
+	#account(start: bigint, end: bigint): void {
 		if (start >= end) return;
 		const at = now();
 		this.#ledger.account(start, end, at);

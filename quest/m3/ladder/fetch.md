@@ -12,7 +12,7 @@ Two independent leaks of controller state, both cheap to close once the
 controller owns it.
 
 The FETCH path opens a new encoder per requested group at
-`Rung::bitrate`: `spawn_fetch` and `fetch`
+`Rung::bitrate`: `fetches` and `fetch`
 (`rs/moq-transcode/src/rung.rs`) call `encode`, which sets
 `config.bitrate = Some(self.info.bitrate)`, so a constrained ladder
 still burns full-rate encodes on demand. Make it read the controller's
@@ -21,8 +21,8 @@ manually fetchable, and cache hits are untouched.
 
 Catalog mutations publish full snapshots
 (`rs/moq-mux/src/catalog/producer.rs`). The
-[compression migration](/quest/m1/compress/migrate.md) removes the HANGZ
-sibling before this quest; coalesce every rung state change from one
+[compression migration](https://github.com/moq-dev/moq/pull/7046) removed the HANGZ
+sibling; coalesce every rung state change from one
 controller iteration into a single publication of each supported catalog, and make a
 later source catalog snapshot compose with current generated-rung state
 rather than overwrite it.
@@ -35,3 +35,7 @@ intact.
 
 - [Controller](/quest/m3/ladder/controller.md) - there is no shared applied
   target to read until the controller owns one
+
+## Related
+
+- [On-demand pops](/quest/m2/video-quality/on-demand.md) - grades and fixes cold-start pops in the same fetch encoder this quest retargets

@@ -18,9 +18,18 @@ Meteor Lake nor the Arrow Lake test host exposes `EncSliceLP`, so no machine
 on hand reaches that fallback. A render node other than the first is checked
 by [VA-API external images](/quest/m2/vaapi-vulkan-import.md).
 
-- **Windows Media Foundation capture**: on-demand open and close, so the
-  camera LED is off when nobody is watching, and NV12 delivery from MJPEG and
-  YUY2 cameras.
+- **Windows Media Foundation capture**: the camera opens while capture is
+  enabled and closes when it is disabled, so the LED is off whenever capture
+  is; with the `on_demand` opt-in it also opens and closes as the first viewer
+  arrives and the last leaves. NV12 delivery from MJPEG and YUY2 cameras.
+- **A GPU export on a hardware encoder**: run the ignored
+  `render::export::dx12::tests::exports_an_nv12_texture` (the Platform runner
+  has only WARP, which has no Direct3D11 video device) and
+  `render::export::dx12::tests::media_foundation_encodes_the_export_in_place`
+  on a Windows GPU with a Media Foundation H.264 encoder. The
+  [studio](https://github.com/moq-dev/studio), the export's main consumer,
+  confirms its Output panel reports no readback on that machine and a Mac in
+  its own repository.
 - **A live camera run per platform**: capture needs device permission that a
   headless or agent process cannot grant itself.
 - **OBS follows its grant on a shaped uplink**: stream from a real OBS build
@@ -61,7 +70,7 @@ A separate-plane producer belongs to
 Pi produces nothing, write it down and stop. `doc/lib/rs/moq-video.md` says
 both paths are reachable; correct that sentence if one cannot capture.
 
-### Windows and Apple GPU probes
+### Windows GPU probes
 
 Ignored moq-video tests that only a GPU on that platform can run, and that no
 runner hosts (found by the m0 coverage audit):
@@ -76,8 +85,6 @@ runner hosts (found by the m0 coverage audit):
   capture tests belong to [Windows.Graphics.Capture](/quest/m2/capture-wgc.md).
 - Media Foundation encode: `mediafoundation_cpu_rgba` and
   `mediafoundation_camera_texture`.
-- Metal import on an Apple Silicon Mac: `the_metal_import_matches_the_cpu_path`
-  and `imports_survive_decoder_pool_recycling`.
 
 ### Fixes
 

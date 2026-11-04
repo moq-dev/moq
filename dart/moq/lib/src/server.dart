@@ -2,11 +2,12 @@ import 'package:moq_ffi/moq_ffi.dart';
 
 import 'aliases.dart';
 import 'stream.dart';
+import 'version.dart';
 
 /// Everything [Server.listen] can be told.
 ///
 /// A value the native side cannot use fails [Server.listen] with
-/// `MoqException.Config`.
+/// `ConfigMoqException`.
 final class ListenOptions {
   /// Local socket address to listen on, e.g. `127.0.0.1:4443` or `[::]:443`.
   final String bind;
@@ -95,6 +96,7 @@ final class Server {
           maxStreams: options.maxStreams,
           keylog: options.keylog,
         ),
+        implementation: implementation,
         publish: publishOrigin,
         consume: options.consume ?? shared,
       ),
@@ -111,10 +113,10 @@ final class Server {
 
   /// Create a broadcast at [path], served to incoming sessions.
   ///
-  /// Advertise it with `announce` after populating tracks. Throws when [listen]
-  /// was given a [ListenOptions.consume] origin but no
+  /// Advertise it with `announce` after populating its `broadcast`. Throws
+  /// when [listen] was given a [ListenOptions.consume] origin but no
   /// [ListenOptions.publish] one, since there is then nothing to serve from.
-  BroadcastProducer createBroadcast(String path) {
+  Publication createBroadcast(String path) {
     final origin = _publishOrigin;
     if (origin == null) throw StateError('no publish origin configured');
     return origin.createBroadcast(path: path);

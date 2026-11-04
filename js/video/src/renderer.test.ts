@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { yieldNow } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import { type Backend, Renderer } from "./renderer";
 
 // Let the probe's promise chain and the effects it wakes run to completion.
 async function settle(): Promise<void> {
-	for (let i = 0; i < 5; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+	for (let i = 0; i < 5; i++) await yieldNow();
 }
 
 type Kind = "2d" | "webgpu";

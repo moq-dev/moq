@@ -89,22 +89,26 @@ else
     note FAIL "smoke.sh no longer go-gets moq.dev/moq @latest"
     fail=1
 fi
-# Both relays and the local integrity client deliberately follow their
-# repositories' default branches. A rev/tag/branch would silently turn this
-# into a stale snapshot rather than a Git-head smoke test.
+# Both relays and the local integrity client deliberately follow a branch head:
+# moq-dev/moq's default branch, and cloudflare/moq-rs's draft-18 branch, since its
+# default speaks only moq-transport-16. A rev or tag would silently turn this into
+# a stale snapshot rather than a Git-head smoke test.
 # shellcheck disable=SC2016  # the greps match literal variable references
 builds_head() {
     # builds_head <script> <repo variable>: the script builds that repo through
-    # its build_git, whose shallow clone takes the default branch (no --branch).
-    grep -qF "build_git \"\$$2\"" "$1" &&
-        grep -qF 'git clone --quiet --depth 1 "$repo" "$dir"' "$1"
+    # its build_git with no branch argument, whose shallow clone then takes the
+    # default branch.
+    grep -qE "build_git \"\\\$$2\" [^ ]+ [^ ]+( >|$)" "$1" &&
+        grep -qE 'git clone --quiet --depth 1 (\$\{branch:\+--branch "\$branch"\} )?"\$repo" "\$dir"' "$1"
 }
-if grep -q 'git = "https://github.com/cloudflare/moq-rs"' clients/cloudflare/Cargo.toml &&
-    ! grep -qE '(^|[,{[:space:]])(rev|tag|branch)[[:space:]]*=' clients/cloudflare/Cargo.toml &&
-    builds_head cloudflare.sh CLOUDFLARE_MOQ_REPO; then
-    note ok "cloudflare/moq-rs -> unpinned Git default branch"
+# shellcheck disable=SC2016  # the greps match literal variable references
+if grep -q 'git = "https://github.com/cloudflare/moq-rs", branch = "draft-18-dev"' clients/cloudflare/Cargo.toml &&
+    ! grep -qE '(^|[,{[:space:]])(rev|tag)[[:space:]]*=' clients/cloudflare/Cargo.toml &&
+    grep -qF 'build_git "$CLOUDFLARE_MOQ_REPO" moq-relay-ietf "$TMP/cloudflare-moq" "$CLOUDFLARE_MOQ_BRANCH"' cloudflare.sh &&
+    grep -qF 'CLOUDFLARE_MOQ_BRANCH="draft-18-dev"' cloudflare.sh; then
+    note ok "cloudflare/moq-rs -> unpinned draft-18-dev head"
 else
-    note FAIL "cloudflare/moq-rs is no longer resolved from the unpinned Git default branch"
+    note FAIL "cloudflare/moq-rs is no longer resolved from the unpinned draft-18-dev head"
     fail=1
 fi
 if builds_head cloudflare.sh MOQ_REPO; then
@@ -146,14 +150,16 @@ else
     fail=1
 fi
 # C: smoke.sh resolves the newest libmoq-v* release, never a fixed version.
-if grep -q "grep '\^libmoq-v' | head -1" smoke.sh; then
+# shellcheck disable=SC2016  # match the literal helper invocation
+if grep -qF '"$SMOKE_DIR/release.sh" libmoq-v' smoke.sh; then
     note ok "libmoq -> latest release"
 else
     note FAIL "smoke.sh no longer resolves the latest libmoq-v* release"
     fail=1
 fi
 # GStreamer: smoke.sh resolves the newest moq-gst-v* release, never a fixed version.
-if grep -q "grep '\^moq-gst-v' | head -1" smoke.sh; then
+# shellcheck disable=SC2016  # match the literal helper invocation
+if grep -qF '"$SMOKE_DIR/release.sh" moq-gst-v' smoke.sh; then
     note ok "moq-gst -> latest release"
 else
     note FAIL "smoke.sh no longer resolves the latest moq-gst-v* release"

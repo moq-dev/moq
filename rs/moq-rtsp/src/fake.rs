@@ -21,7 +21,7 @@ pub const H264_PPS: &[u8] = &[0x68, 0xcb, 0x83, 0xcb, 0x20];
 /// An IDR slice; its contents are never decoded.
 pub const H264_IDR: &[u8] = &[0x65, 0x88, 0x84, 0x21, 0xa0];
 /// A recovery-point SEI: the non-IDR I-picture after it is an open-GOP keyframe.
-pub const H264_RECOVERY: &[u8] = &[0x06, 0x06, 0x02, 0x00, 0x40, 0x80];
+pub const H264_RECOVERY: &[u8] = &[0x06, 0x06, 0x01, 0x84, 0x80];
 /// A non-IDR slice.
 pub const H264_SLICE: &[u8] = &[0x41, 0x9a, 0x02, 0x04, 0x80];
 
@@ -152,6 +152,9 @@ impl Server {
 	/// `rtptime`.
 	pub async fn accept(&self, rtptime: u32) -> Session {
 		let (socket, _) = self.listener.accept().await.expect("accept");
+		// Each write reaches the client before it returns, rather than waiting on an ACK, so a
+		// test can order its writes against the clock.
+		socket.set_nodelay(true).expect("nodelay");
 		let (read, write) = socket.into_split();
 		let mut read = BufReader::new(read);
 		let write = Arc::new(Mutex::new(write));

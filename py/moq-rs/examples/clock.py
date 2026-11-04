@@ -10,27 +10,27 @@ frame per second.
 
 import argparse
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import moq
 
 
 async def publish(url: str, broadcast_name: str, track_name: str, insecure: bool) -> None:
     async with moq.Client(url, tls=moq.ClientTls(insecure=insecure)) as client:
-        broadcast = client.create_broadcast(broadcast_name)
-        track = broadcast.publish_track(track_name, moq.TrackInfo(timescale=1_000_000))
-        broadcast.announce()
+        publication = client.create_broadcast(broadcast_name)
+        track = publication.broadcast.publish_track(track_name, moq.TrackInfo(timescale=1_000_000))
+        publication.announce()
         print(f"publishing {broadcast_name!r} track={track_name!r} at {url}")
 
         while True:
             now = datetime.now(timezone.utc).replace(microsecond=0)
-            timestamp = timedelta(seconds=int(now.timestamp()))
+            timestamp = moq.Timestamp(int(now.timestamp()), 1)
             group = track.append_group()
             group.write_frame(now.strftime("%Y-%m-%d %H:%M:").encode(), timestamp)
 
             current_minute = now.minute
             while now.minute == current_minute:
-                timestamp = timedelta(seconds=int(now.timestamp()))
+                timestamp = moq.Timestamp(int(now.timestamp()), 1)
                 group.write_frame(now.strftime("%S").encode(), timestamp)
                 await asyncio.sleep(1 - datetime.now(timezone.utc).microsecond / 1_000_000)
                 now = datetime.now(timezone.utc).replace(microsecond=0)
@@ -41,7 +41,7 @@ async def publish(url: str, broadcast_name: str, track_name: str, insecure: bool
 async def subscribe(url: str, broadcast_name: str, track_name: str, insecure: bool) -> None:
     async with moq.Client(url, tls=moq.ClientTls(insecure=insecure)) as client:
         print(f"waiting for {broadcast_name!r} at {url}")
-        broadcast = await client.announced_broadcast(broadcast_name)
+        broadcast = await client.follow(broadcast_name)
 
         print(f"subscribed to {broadcast_name!r} track={track_name!r}")
         track = await broadcast.subscribe_track(track_name)

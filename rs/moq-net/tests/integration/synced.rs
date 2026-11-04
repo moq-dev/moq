@@ -24,13 +24,15 @@ fn produce_origin(hop: u64) -> origin::Producer {
 /// Read events until the consumer syncs, returning the prefixes then announced.
 async fn read_until_synced(announced: &mut announce::Consumer) -> BTreeSet<String> {
 	let mut seen = BTreeSet::new();
-	while !announced.is_synced() {
-		let event = moq_clock::timeout(SETTLE, announced.next())
+	while !announced.poll_synced(&moq_net::kio::Waiter::noop()).is_ready() {
+		let event = kio::clock::timeout(SETTLE, announced.next())
 			.await
 			.expect("synced in time")
 			.expect("the cursor stays open");
 		match event {
-			announce::Event::Start(announce) | announce::Event::Restart(announce) => {
+			announce::Event::Start(announce)
+			| announce::Event::Restart(announce)
+			| announce::Event::Takeover { announce, .. } => {
 				seen.insert(announce.prefix.to_string());
 			}
 			announce::Event::End(announce) => {
@@ -66,18 +68,13 @@ fn both() -> BTreeSet<String> {
 }
 
 /// Every version that marks the boundary syncs with the whole initial set.
-#[moq_clock::test]
+#[kio::test]
 async fn an_exact_boundary_catches_up_with_the_initial_set() {
 	for version in [
 		"moq-lite-05",
 		"moq-lite-06",
 		"moq-lite-07-wip",
-		"moq-transport-16",
-		"moq-transport-17",
 		"moq-transport-18",
-		"moq-transport-19",
-		"moq-transport-20",
-		"moq-transport-21",
 		"moq-transport-22",
 	] {
 		assert_eq!(synced(version).await, both(), "{version}");
@@ -85,16 +82,16 @@ async fn an_exact_boundary_catches_up_with_the_initial_set() {
 }
 
 /// Versions without a boundary still sync, so nothing waiting on it hangs.
-#[moq_clock::test]
+#[kio::test]
 async fn a_best_effort_boundary_still_catches_up() {
-	for version in ["moq-lite-03", "moq-lite-04", "moq-transport-14", "moq-transport-15"] {
+	for version in ["moq-lite-03", "moq-lite-04"] {
 		synced(version).await;
 	}
 }
 
 /// A second session into the same origin, as a reconnect makes, syncs too: the
 /// consumer waits on every current session.
-#[moq_clock::test]
+#[kio::test]
 async fn a_second_session_catches_up() {
 	let publisher = produce_origin(1);
 	let a = publisher.create_broadcast("a").unwrap();
@@ -116,13 +113,13 @@ async fn a_second_session_catches_up() {
 
 	let second = connect().await;
 	drop(first);
-	moq_clock::sleep(SETTLE).await;
+	kio::clock::sleep(SETTLE).await;
 	read_until_synced(&mut announced).await;
 	drop(second);
 }
 
 /// A cold relay's empty set is complete before an upstream joins it.
-#[moq_clock::test]
+#[kio::test]
 async fn a_cold_relay_syncs_then_forwards_upstream_routes_as_live() {
 	let relay = produce_origin(2);
 	let subscriber = produce_origin(3);
@@ -144,5 +141,5 @@ async fn a_cold_relay_syncs_then_forwards_upstream_routes_as_live() {
 	let _upstream = connect_mock(options).await;
 	let event = announced.next().await.unwrap();
 	assert!(matches!(event, announce::Event::Start(route) if route.prefix.as_str() == "room/cam"));
-	assert!(announced.is_synced());
+	assert!(announced.poll_synced(&moq_net::kio::Waiter::noop()).is_ready());
 }

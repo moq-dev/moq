@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
-import * as Epoch from "../epoch.ts";
 import { ProtocolViolation } from "../error.ts";
 import { Cost, HopSchema, UNKNOWN_HOP } from "../hop.ts";
+import * as Instance from "../instance.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import {
@@ -76,10 +76,10 @@ test("AnnounceBroadcast round-trips on draft-06", async () => {
 
 test("AnnounceBroadcast carries a restart only on draft-07", async () => {
 	const hops = [HopSchema.parse(7n)];
-	const epoch = Epoch.mint();
+	const instance = Instance.random();
 	for (const msg of [
-		{ status: "restart" as const, id: 3n, epoch, hops, cost: 12n },
-		{ status: "restart" as const, id: 3n, epoch: undefined, hops, cost: 12n },
+		{ status: "restart" as const, id: 3n, instance, epoch: 0n, hops, cost: 12n },
+		{ status: "restart" as const, id: 3n, instance, epoch: 7n, hops, cost: 12n },
 	]) {
 		expect(await roundTrip(msg, Version.DRAFT_07)).toEqual(msg);
 	}
@@ -98,6 +98,35 @@ test("AnnounceBroadcast carries a restart only on draft-07", async () => {
 	}, Version.DRAFT_06);
 	const reader = new Reader(undefined, encoded, Version.DRAFT_06);
 	expect(await decodeAnnounceBroadcast(reader, Version.DRAFT_06)).toEqual({ status: "skipped" });
+});
+
+test("AnnounceBroadcast carries a takeover only on draft-07", async () => {
+	const hops = [HopSchema.parse(7n)];
+	const msg = {
+		status: "takeover" as const,
+		predecessor: 2n,
+		suffix: Path.from("p"),
+		pathBase: { distance: 1n, keep: 1 },
+		instance: Instance.random(),
+		epoch: 3n,
+		hops,
+		hopBase: undefined,
+		cost: 12n,
+	};
+	expect(await roundTrip(msg, Version.DRAFT_07)).toEqual(msg);
+
+	// Older versions send a start instead.
+	await expect(
+		bytes(
+			(w) =>
+				encodeAnnounceBroadcast(
+					w,
+					{ status: "takeover", predecessor: 0n, suffix: Path.from("p"), hops: [] },
+					Version.DRAFT_06,
+				),
+			Version.DRAFT_06,
+		),
+	).rejects.toThrow();
 });
 
 test("AnnounceBroadcast skips an unknown type on draft-06", async () => {
@@ -171,14 +200,14 @@ async function requestRoundTrip(msg: AnnounceRequest, version: Version): Promise
 // Draft04/05 carry the subscriber's Hop ID so the publisher can skip reflected
 // announces before they hit the wire.
 test("AnnounceRequest carries excludeHop on draft-05", async () => {
-	const got = await requestRoundTrip(new AnnounceRequest(Path.from("room/"), HopSchema.parse(42n)), Version.DRAFT_05);
+	const got = await requestRoundTrip(new AnnounceRequest(Path.from("room"), HopSchema.parse(42n)), Version.DRAFT_05);
 	expect(got.excludeHop).toBe(HopSchema.parse(42n));
 });
 
 // Draft06 dropped the field: the receiver's reflected-announce check catches the same
 // loops, so a value set locally is simply not sent and decodes as zero.
 test("AnnounceRequest drops excludeHop on draft-06", async () => {
-	const msg = new AnnounceRequest(Path.from("room/"), HopSchema.parse(42n));
+	const msg = new AnnounceRequest(Path.from("room"), HopSchema.parse(42n));
 	const got = await requestRoundTrip(msg, Version.DRAFT_06);
 	expect(got.excludeHop).toBe(UNKNOWN_HOP);
 
@@ -190,7 +219,7 @@ test("AnnounceRequest drops excludeHop on draft-06", async () => {
 // Draft07 carries the hidden opt-in; every earlier version decodes as not opted in.
 test("AnnounceRequest carries hidden from draft-07", async () => {
 	for (const hidden of [false, true]) {
-		const msg = new AnnounceRequest(Path.from("room/"), UNKNOWN_HOP, hidden);
+		const msg = new AnnounceRequest(Path.from("room"), UNKNOWN_HOP, hidden);
 		expect((await requestRoundTrip(msg, Version.DRAFT_07)).hidden).toBe(hidden);
 		expect((await requestRoundTrip(msg, Version.DRAFT_06)).hidden).toBe(false);
 	}
@@ -230,7 +259,8 @@ test("a 64-bit hop is unknown on draft-06 and whole on draft-07", async () => {
 		[Version.DRAFT_06, UNKNOWN_HOP],
 		[Version.DRAFT_07, wide],
 	] as const) {
-		const got = await roundTrip({ status: "active", suffix: Path.from("room"), hops: [wide] }, version);
+		const instance = Instance.parse("a");
+		const got = await roundTrip({ status: "active", suffix: Path.from("room"), instance, hops: [wide] }, version);
 		expect(got).toMatchObject({ hops: [want] });
 
 		const msg = new AnnounceOk(wide, 0);
@@ -318,6 +348,8 @@ async function resolveStream(data: Uint8Array) {
 
 const hop = (id: bigint) => HopSchema.parse(id);
 const relay = hop(0x2222n);
+const a = Instance.parse("a");
+const b = Instance.parse("b");
 const GOLDEN_RESOLVED = [
 	{ start: { suffix: Path.from("room/a/cam"), hops: [hop(0x1111n), relay] } },
 	{ start: { suffix: Path.from("room/a/mic"), hops: [hop(0x3333n), relay] } },
@@ -329,7 +361,7 @@ const GOLDEN_RESOLVED = [
 // Pinned from the Rust encoder (`lite::compress::tests::golden_stream_is_pinned`), so the
 // JS decoder is checked against real compressed output.
 const GOLDEN =
-	"001600000a726f6f6d2f612f63616d0000029111a2220000000d0102036d6963000101b33301000208000101c044440100010101000c02010162000201c055550100";
+	"001800000a726f6f6d2f612f63616d01610000029111a2220000000f0102036d69630161000101b33301000208000101c044440100010101000e020101620161000201c055550100";
 
 test("AnnounceHistory resolves the Rust encoder's compressed stream", async () => {
 	expect(await resolveStream(unhex(GOLDEN))).toEqual(GOLDEN_RESOLVED);
@@ -337,7 +369,7 @@ test("AnnounceHistory resolves the Rust encoder's compressed stream", async () =
 
 // JS always encodes literally; Rust decodes these bytes too (`js_literal_stream_decodes`).
 const JS_LITERAL =
-	"001600000a726f6f6d2f612f63616d0000029111a2220000001600000a726f6f6d2f612f6d6963000002b333a2220000020a000002c04444a22200000101010013000006726f6f6d2f62000002c05555a2220000";
+	"001800000a726f6f6d2f612f63616d01610000029111a2220000001800000a726f6f6d2f612f6d69630161000002b333a2220000020a000002c04444a22200000101010015000006726f6f6d2f620161000002c05555a2220000";
 
 test("the literal draft-07 stream matches what Rust decodes", async () => {
 	const wire = await bytes(async (w) => {
@@ -345,19 +377,19 @@ test("the literal draft-07 stream matches what Rust decodes", async () => {
 		const cost = 0n;
 		await encodeAnnounceBroadcast(
 			w,
-			{ status: "active", suffix: Path.from("room/a/cam"), hops: [hop(0x1111n), relay], cost },
+			{ status: "active", suffix: Path.from("room/a/cam"), instance: a, hops: [hop(0x1111n), relay], cost },
 			v,
 		);
 		await encodeAnnounceBroadcast(
 			w,
-			{ status: "active", suffix: Path.from("room/a/mic"), hops: [hop(0x3333n), relay], cost },
+			{ status: "active", suffix: Path.from("room/a/mic"), instance: a, hops: [hop(0x3333n), relay], cost },
 			v,
 		);
 		await encodeAnnounceBroadcast(w, { status: "update", id: 0n, hops: [hop(0x4444n), relay], cost }, v);
 		await encodeAnnounceBroadcast(w, { status: "endedId", id: 1n }, v);
 		await encodeAnnounceBroadcast(
 			w,
-			{ status: "active", suffix: Path.from("room/b"), hops: [hop(0x5555n), relay], cost },
+			{ status: "active", suffix: Path.from("room/b"), instance: a, hops: [hop(0x5555n), relay], cost },
 			v,
 		);
 	}, Version.DRAFT_07);
@@ -388,6 +420,28 @@ test("AnnounceHistory rejects a keep longer than the base", () => {
 		ProtocolViolation,
 	);
 	expect(() => history.update({ id: 0n, hops: [], hopBase: { distance: 1n, keep: 2 } })).toThrow(ProtocolViolation);
+});
+
+test("AnnounceHistory keeps segments split at an escaped slash", () => {
+	const history = new AnnounceHistory();
+	history.start({ suffix: Path.from("a\\/b"), hops: [] });
+	// The kept `a\` is half an escape, which the rest completes or nothing does.
+	const { suffix } = history.start({ suffix: Path.from("c"), hops: [], pathBase: { distance: 1n, keep: 1 } });
+	expect(suffix).toBe(Path.from("a\\/c"));
+	expect(() => history.start({ suffix: Path.empty(), hops: [], pathBase: { distance: 1n, keep: 1 } })).toThrow(
+		ProtocolViolation,
+	);
+});
+
+test("AnnounceHistory rejects a resolved path past the byte limit", () => {
+	const history = new AnnounceHistory();
+	history.start({ suffix: Path.from("x".repeat(Path.MAX_BYTES - 2)), hops: [] });
+	// `head/y` is exactly the limit, and one byte more is refused.
+	const { suffix } = history.start({ suffix: Path.from("y"), hops: [], pathBase: { distance: 1n, keep: 1 } });
+	expect(suffix.length).toBe(Path.MAX_BYTES);
+	expect(() => history.start({ suffix: Path.from("yz"), hops: [], pathBase: { distance: 1n, keep: 1 } })).toThrow(
+		ProtocolViolation,
+	);
 });
 
 test("AnnounceHistory rejects a resolved chain that repeats a hop", () => {
@@ -426,16 +480,20 @@ test("route costs saturate at 2^62-1 on every version", async () => {
 	const ceiling = 2n ** 62n - 1n;
 	const huge = 2n ** 64n - 1n;
 	for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
-		const got = await roundTrip({ status: "active", suffix: Path.from("x"), hops: [], cost: huge }, version);
+		const instance = Instance.parse("a");
+		const got = await roundTrip(
+			{ status: "active", suffix: Path.from("x"), instance, hops: [], cost: huge },
+			version,
+		);
 		expect(got).toMatchObject({ cost: ceiling });
 	}
 
-	// ANNOUNCE_START: path base, path keep, empty suffix, no epoch, hop base, no hops, hop
-	// keep, then a cost of 2^64-1, which only lite-07's varints can carry.
+	// ANNOUNCE_START: path base, path keep, empty suffix, instance "a", epoch 0, hop base, no
+	// hops, hop keep, then a cost of 2^64-1, which only lite-07's varints can carry.
 	const wire = await bytes(async (w) => {
 		await w.u53(0);
-		await w.u53(16);
-		for (const b of [0, 0, 0, 0, 0, 0, 0]) await w.u8(b);
+		await w.u53(18);
+		for (const byte of [0, 0, 0, 1, 0x61, 0, 0, 0, 0]) await w.u8(byte);
 		await w.u62(huge);
 	}, Version.DRAFT_07);
 	const got = await decodeAnnounceBroadcast(new Reader(undefined, wire, Version.DRAFT_07), Version.DRAFT_07);
@@ -445,11 +503,16 @@ test("route costs saturate at 2^62-1 on every version", async () => {
 test("wip start and update carry one static cost", async () => {
 	const v = Version.DRAFT_07;
 	const start = await bytes(
-		(w) => encodeAnnounceBroadcast(w, { status: "active", suffix: Path.empty(), hops: [], cost: Cost.zero }, v),
+		(w) =>
+			encodeAnnounceBroadcast(
+				w,
+				{ status: "active", suffix: Path.empty(), instance: b, hops: [], cost: Cost.zero },
+				v,
+			),
 		v,
 	);
-	// Path base, path keep, empty suffix, no epoch, hop base, no hops, hop keep, cost.
-	expect([...start]).toEqual([0, 8, 0, 0, 0, 0, 0, 0, 0, 0]);
+	// Path base, path keep, empty suffix, instance "b", epoch 0, hop base, no hops, hop keep, cost.
+	expect([...start]).toEqual([0, 10, 0, 0, 0, 1, 0x62, 0, 0, 0, 0, 0]);
 	const update = await bytes(
 		(w) => encodeAnnounceBroadcast(w, { status: "update", id: 0n, hops: [], cost: Cost.zero }, v),
 		v,

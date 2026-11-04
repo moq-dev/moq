@@ -16,6 +16,7 @@ mod support;
 #[cfg(all(target_os = "linux", feature = "quic"))]
 #[expect(
 	clippy::disallowed_methods,
+	clippy::disallowed_types,
 	reason = "benchmarks measure themselves on the host clock"
 )]
 mod linux {
@@ -37,7 +38,9 @@ mod linux {
 
 	/// A millisecond track: the frames written here carry timestamps.
 	fn timed() -> moq_net::track::Info {
-		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+		moq_net::track::Info::default()
+			.with_max_age(None)
+			.with_timescale(moq_net::Timescale::MILLI)
 	}
 
 	struct Ablation {
@@ -131,7 +134,7 @@ mod linux {
 			let client_sock = handle
 				.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), ablation.config.clone())
 				.expect("client socket");
-			let mut dial = quic::client::Config::new(server_addr, "localhost");
+			let mut dial = quic::client::Config::default();
 			dial.alpn = vec![ALPN.to_string()];
 			dial.verify = false;
 
@@ -144,10 +147,7 @@ mod linux {
 					.with_publisher(&pub_origin)
 					.accept(
 						moq_net::time::Instant::now(),
-						moq_uring::transport::Local::new(moq_uring::transport::Session::new(
-							quic::web::Session::raw(conn),
-							moq_net::transport::Binding::InBand,
-						)),
+						moq_uring::transport::Local::new(quic::web::Session::raw(conn)),
 					)
 					.await
 					.expect("accept");
@@ -158,15 +158,14 @@ mod linux {
 			// Establish and subscribe once; iterations measure steady state.
 			let (_session, mut sub) = worker
 				.block_on(async {
-					let conn = quic::client::connect(client_sock, &dial).await.expect("quic connect");
+					let conn = quic::client::connect(client_sock, &dial, server_addr, "localhost")
+						.await
+						.expect("quic connect");
 					let (session, driver) = moq_net::Client::new()
 						.with_subscriber(sub_origin.clone())
 						.connect(
 							moq_net::time::Instant::now(),
-							moq_uring::transport::Local::new(moq_uring::transport::Session::new(
-								quic::web::Session::raw(conn),
-								moq_net::transport::Binding::InBand,
-							)),
+							moq_uring::transport::Local::new(quic::web::Session::raw(conn)),
 						)
 						.await
 						.expect("connect");
@@ -176,9 +175,10 @@ mod linux {
 					});
 					let bc = {
 						let consumer = sub_origin.consume();
-						consumer.routed("bench").await.expect("broadcast announced");
 						consumer
-							.request_broadcast("bench", None)
+							.follow("bench", None)
+							.unwrap()
+							.available()
 							.await
 							.expect("broadcast resolves")
 					};

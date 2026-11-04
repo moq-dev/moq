@@ -8,9 +8,9 @@ interface SampleSpan {
 
 /** The parts of a container read the terminal tracks. */
 type Update =
-	| { readonly kind: "frame"; readonly group: number; readonly frame: { readonly timestamp: Micro } }
+	| { readonly kind: "frame"; readonly group: bigint; readonly frame: { readonly timestamp: Micro } }
 	| { readonly kind: "gap" }
-	| { readonly kind: "end"; readonly group: number; readonly end: Micro };
+	| { readonly kind: "end"; readonly group: bigint; readonly end: Micro };
 
 /** The portion of decoded audio that belongs to the source timeline. */
 export interface DecodedSpan {
@@ -24,11 +24,11 @@ export interface DecodedSpan {
 
 /** Track codec epochs and map decoded output onto the source timeline. */
 export class Terminal {
-	// Whether a frame arrived since the last reset, so there is an epoch to end.
+	// Whether media has started on this timeline.
 	#started = false;
 	#end?: Micro;
 	// The group that carried `#end`. It bounds only the terminal packets that follow it there.
-	#endGroup?: number;
+	#endGroup?: bigint;
 	#epoch?: Micro;
 	#preSkip = 0;
 	#preSkipRemaining?: number;
@@ -57,7 +57,9 @@ export class Terminal {
 	update(read: Update): boolean {
 		if (read.kind === "gap") {
 			this.#prime = true;
-			return this.#restart();
+			this.#before = undefined;
+			this.#resetEpoch();
+			return this.#started;
 		}
 		if (read.kind === "end") {
 			this.#end = read.end;
@@ -66,7 +68,8 @@ export class Terminal {
 		}
 		// A later group after a declared end comes from a fresh encoder; the end's own group carries
 		// the stopped encoder's final packets.
-		const reset = this.#end !== undefined && read.group !== this.#endGroup && this.#restart();
+		const reset = this.#endGroup !== undefined && read.group > this.#endGroup;
+		if (reset) this.#restart();
 		this.#started = true;
 		this.#epoch ??= read.frame.timestamp;
 		if (this.#prime) {
@@ -76,15 +79,13 @@ export class Terminal {
 		return reset;
 	}
 
-	// Start a new epoch, reporting whether one was running.
-	#restart(): boolean {
-		const started = this.#started;
+	// Start a fresh timeline after its declared end.
+	#restart(): void {
 		this.#started = false;
 		this.#end = undefined;
 		this.#endGroup = undefined;
 		this.#before = undefined;
 		this.#resetEpoch();
-		return started;
 	}
 
 	/** Remove codec pre-skip and terminal padding from one decoded sample. */

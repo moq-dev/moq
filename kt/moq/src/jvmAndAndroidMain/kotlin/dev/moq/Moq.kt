@@ -3,15 +3,15 @@ package dev.moq
 /**
  * A MoQ session with publish/subscribe conveniences.
  *
- * Build one with [Moq.connect]. The underlying [session] always exposes a
- * publisher and a subscriber (wired from the origins in its [ClientConfig], or
- * auto-created), so you can [createBroadcast] and collect [announced] updates
- * without touching the raw [Client] handle.
+ * Build one with [Moq.connect]. The underlying [session] always exposes a publisher and a
+ * subscriber (wired from the origins in its [ClientConfig], or auto-created), so you can
+ * [createBroadcast] and collect [announced] updates without touching the raw [Client] handle.
  *
- * Call [shutdown], then await [Session.closed] to drain finished tracks before disconnecting. [AutoCloseable]
- * disposal through `use { ... }` or [close] cancels immediately.
+ * Call [shutdown], then await [Session.closed] to drain finished tracks before disconnecting.
+ * [AutoCloseable] disposal through `use { ... }` or [close] cancels immediately.
  */
-class Moq internal constructor(
+class Moq
+internal constructor(
     /** The connecting or connected session. Use it for [Session.closed]/[Session.shutdown]. */
     val session: Session,
     private val client: Client,
@@ -19,61 +19,82 @@ class Moq internal constructor(
     /**
      * Create an unannounced broadcast at [path], invisible to everyone until announced.
      *
-     * Advertise it with `announce` after populating tracks. `end()` ends it for good; `close()`
-     * (or `use`) releases the handle, which ends it once no `dynamic()` handle remains.
+     * Fill `broadcast()`, then advertise it with `announce`. The broadcast's `end()` ends it for
+     * good, as does releasing its last handle: the publication, each `broadcast()`, and
+     * `requests()`.
      */
-    fun createBroadcast(path: String): BroadcastProducer = session.publish().createBroadcast(path)
+    fun createBroadcast(path: String): Publication = session.publish().createBroadcast(path)
 
     /**
-     * Discover routes matching [config]; prefixes stay relative to the origin.
-     * Collect `announced(config).updates()` for a [Flow] of [AnnounceEvent] that
-     * cancels the handle when collection ends.
+     * Discover routes matching [config]; prefixes stay relative to the origin. Collect
+     * `announced(config).updates()` for a [Flow] of [AnnounceEvent] that cancels the handle when
+     * collection ends.
      */
     fun announced(config: AnnounceConfig = AnnounceConfig()): AnnounceConsumer =
         session.consume().announced(config)
 
     /**
-     * Follow exactly [path], resolving each publisher instance that serves it.
+     * Follow exactly [path], resolving each stream that serves it.
      *
-     * Unlike [requestBroadcast] this waits indefinitely for a future
-     * announcement, and each later `available()` waits for the next instance,
-     * such as a restarted publisher. Cancel the returned handle to stop waiting.
+     * Unlike [request] this waits indefinitely for a future announcement, and each later
+     * `available()` waits for the next stream, such as a restarted publisher. Pass an [instance] to
+     * follow only that stream. Cancel the returned handle to stop waiting.
      */
-    fun announcedBroadcast(path: String): AnnouncedBroadcast = session.consume().announcedBroadcast(path)
+    fun follow(path: String, instance: String? = null): Following =
+        session.consume().follow(path, instance)
 
     /**
-     * Resolve the broadcast at [path] as soon as it can be served: a local
-     * broadcast at the exact path, the best announced route covering it, or a
-     * dynamic fallback on the origin.
+     * Resolve one stream of the broadcast at [path] as soon as it can be served: a local broadcast
+     * at the exact path, the best announced route covering it, or a dynamic fallback on the origin.
      *
-     * Unlike [announcedBroadcast] this does not wait for a future announcement;
-     * it throws when neither can serve the path.
+     * Unlike [follow] this does not wait for a future announcement; it throws when neither can
+     * serve the path. Pass an [instance] to refuse any other stream.
      */
-    suspend fun requestBroadcast(path: String): BroadcastConsumer = session.consume().requestBroadcast(path)
+    suspend fun request(path: String, instance: String? = null): BroadcastConsumer =
+        session.consume().request(path, instance)
 
     /**
      * The session's bandwidth allocator.
      *
-     * Every call returns a handle to the same registry. [Bandwidth.reserve] a
-     * share for an app-owned encoder, or pass the handle to an audio or video
-     * producer.
+     * Every call returns a handle to the same registry. [Allocator.reserve] a share for an
+     * app-owned encoder, or pass the handle to an audio or video producer.
      */
-    fun bandwidth(): Bandwidth = session.bandwidth()
+    fun allocator(): Allocator = session.allocator()
 
     /**
-     * The session's authorization: the grant its peer gave it, and more tokens to present.
+     * The session's viewers, dividing the connection's receive estimate among the broadcasts
+     * watched over it.
      *
-     * Collect [Auth.grants] to follow the grant, and [Auth.add] a fresh token before the
-     * current one expires; each added token is presented again on every reconnect.
+     * Every call returns a handle to the same registry, and the session sends what its viewers'
+     * ceilings add up to as its PROBE target. [Viewers.watch] a broadcast with the ceiling of the
+     * largest rendition the player would switch to, read its slice with [Viewer.rate], and
+     * [Viewer.close] it once the broadcast stops being watched.
      */
-    fun auth(): Auth = session.auth()
+    fun viewers(): Viewers = session.viewers()
 
     /**
-     * Request a draining close now; await `session.closed()` for its result, then [close]
-     * to release the client.
-     * Explicit `moq-lite-07-wip` waits for the peer to receive finished tails; older
-     * Lite versions, including the default lite-06, wait only for transport ACKs.
-     * IETF also waits for transport ACKs.
+     * Follow the grant the peer gave this session.
+     *
+     * Collect `grants().updates()` for the current grant and each change. Every call returns an
+     * independent consumer.
+     */
+    fun grants(): GrantConsumer = session.grants()
+
+    /**
+     * The credentials every dial presents ([ClientConfig.tokens]), to replace while running.
+     *
+     * [Tokens.set] replaces them, such as before the current ones expire: the next dial presents
+     * them, and a live session with in-band AUTH presents them at once, withdrawing each replaced
+     * token once its replacements are answered, even when one is refused. After an authorization
+     * refusal the session redials only if they changed. An empty token throws
+     * `MoqException.Config`. Suspend on [Tokens.answered] for the relay's verdict.
+     */
+    fun tokens(): Tokens = checkNotNull(session.tokens()) { "a client session presents tokens" }
+
+    /**
+     * Request a draining close now; await `session.closed()` for its result, then [close] to
+     * release the client. `moq-lite-05` and newer wait for the peer to receive finished tails;
+     * older Lite versions and IETF wait only for transport ACKs.
      */
     fun shutdown() {
         session.shutdown()
@@ -89,17 +110,16 @@ class Moq internal constructor(
         /**
          * Connect to a relay at [url] and return a connecting [Moq] connection.
          *
-         * [config] carries the TLS trust, bind address, protocol versions, QUIC and
-         * WebSocket tuning, reconnect pacing, and origins; every field has a default.
-         * A value the native side cannot use throws `MoqException.Config`.
+         * [config] carries the TLS trust, bind address, protocol versions, QUIC and WebSocket
+         * tuning, reconnect pacing, and origins; every field has a default. A value the native side
+         * cannot use throws `MoqException.Config`.
          *
-         * With neither [ClientConfig.publish] nor [ClientConfig.consume] set, both sides
-         * share one origin, so a broadcast announced on this connection is discoverable
-         * via its own [announced] (loopback). Wiring either side opts out and isolates the
-         * two directions.
+         * With neither [ClientConfig.publish] nor [ClientConfig.consume] set, both sides share one
+         * origin, so a broadcast announced on this connection is discoverable via its own
+         * [announced] (loopback). Wiring either side opts out and isolates the two directions.
          */
         suspend fun connect(url: String, config: ClientConfig = ClientConfig()): Moq {
-            val client = Client(config)
+            val client = Client(config.copy(implementation = implementation(config.implementation)))
             try {
                 return Moq(client.connect(url), client)
             } catch (e: Throwable) {

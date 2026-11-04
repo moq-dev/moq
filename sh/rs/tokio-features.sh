@@ -5,6 +5,10 @@
 # through unification.
 set -euo pipefail
 
+if [[ "${GITHUB_ACTIONS:-}" != true && "${LOCAL_SUPERVISED:-}" != 1 ]]; then
+    exec bash "$(dirname "$0")/../local.sh" bash "$0" "$@"
+fi
+
 all=0
 if [[ $# == 1 && $1 == --all ]]; then
     all=1
@@ -21,15 +25,16 @@ cargo clippy --locked -p moq-tokio --all-features -- -D warnings
 # The QUIC driver is public API for applications without a MoQ session, so its
 # build must not reach moq-net, the MoQ backend's dependencies, or another QUIC stack.
 driver=(--no-default-features --features "driver,aws-lc-rs")
-cargo clippy --locked -p moq-tokio --all-targets "${driver[@]}" -- -D warnings
+targets=(--tests)
+if ((all)); then targets=(--all-targets); fi
+cargo clippy --locked -p moq-tokio "${targets[@]}" "${driver[@]}" -- -D warnings
 graph=$(cargo tree --locked -p moq-tokio -e normal --prefix none "${driver[@]}")
 if leaked=$(grep -E '^(moq-net|reqwest|notify|quinn[a-z-]*|noq[a-z-]*|web-transport[a-z-]*) ' <<<"$graph"); then
     echo "rs: moq-tokio's driver build must not depend on:" >&2
     sort -u <<<"$leaked" >&2
     exit 1
 fi
-# Only a feature-owner edit needs every isolated permutation on a PR. Shared
-# dependencies still compile at both extremes; Nightly runs every permutation.
+# Every isolated permutation, which `just rs features` asks for.
 if ((all)); then
     cargo clippy --locked -p moq-tokio --no-default-features --features quic,aws-lc-rs -- -D warnings
     cargo clippy --locked -p moq-tokio --no-default-features --features quic,ring -- -D warnings

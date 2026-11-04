@@ -1,0 +1,20 @@
+# find_package(moq-c): the C API for moq-ffi as the moq::c target. Every moq package exports
+# into the one moq:: namespace, and the package names keep installs apart.
+
+@PACKAGE_INIT@
+
+if(NOT TARGET moq::c)
+    find_package(Threads REQUIRED)
+
+    # The compiled C API, then the prebuilt Rust staticlib and what an external linker must add
+    # for the two: the system libraries and the C++ runtime, baked in for the platform and
+    # compiler this package was built with.
+    add_library(moq::c STATIC IMPORTED)
+    set_target_properties(moq::c PROPERTIES
+        IMPORTED_LOCATION "@PACKAGE_CMAKE_INSTALL_LIBDIR@/@MOQ_C_LIB_NAME@"
+        INTERFACE_INCLUDE_DIRECTORIES "@PACKAGE_CMAKE_INSTALL_INCLUDEDIR@"
+        INTERFACE_LINK_LIBRARIES "@PACKAGE_CMAKE_INSTALL_LIBDIR@/@MOQ_FFI_LIB_NAME@;@MOQ_NATIVE_LIBS@;@MOQ_CXX_RUNTIME@;Threads::Threads"
+    )
+endif()
+
+check_required_components(moq-c)

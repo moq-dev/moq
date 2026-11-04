@@ -30,7 +30,7 @@ public = "**"
 #
 #   .stats/node/local/host
 #
-# carrying totals.json, publisher.json, subscriber.json, and sessions.json tracks. See
+# carrying totals.json and group.json tracks. See
 # doc/bin/relay/config.md for the field semantics.
 [stats]
 enabled = true
@@ -39,6 +39,3 @@ enabled = true
 # It can be multi-segment (e.g. `sjc/1`, `sjc/2`) to nest multiple hosts under
 # a shared region key. Single-node setups can leave it unset.
 node = "local/host"
-
-# Iroh is available in source builds with `--features iroh`.
-# See doc/bin/relay/config.md to enable its listener.

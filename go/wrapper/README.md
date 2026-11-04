@@ -56,6 +56,8 @@ for event, err := range announced.All(ctx) {
 		fmt.Println("got broadcast", event.Announce.Prefix)
 	case moq.AnnounceEventRestart: // a new publisher run at the same path
 		fmt.Println("restarted broadcast", event.Announce.Prefix)
+	case moq.AnnounceEventTakeover: // continues what an earlier route served
+		fmt.Println("took over broadcast", event.Announce.Prefix)
 	}
 }
 ```
@@ -71,12 +73,21 @@ pinning a generated self-signed certificate.
 `Client.Session().Stats()` returns a connection stats snapshot. Fields are nil
 when the transport backend does not report that metric yet.
 
-An encoder you manage can claim a share of `Client.Session().Bandwidth()` with
+An encoder you manage can claim a share of `Client.Session().Allocator()` with
 `Reserve(demand, maxBps)`, using the track's `Demand()`. Keep one reservation and change its ceiling
 with `Update(maxBps)`. Call `Update(0)` before abandoning or replacing it to
 return its share and automatic probe ceiling immediately, even while the track
 stays subscribed. A later update can resume the same claim. While the track
 stays open, dropping the Go reference alone leaves release to garbage collection.
+
+A player divides the receive estimate among the broadcasts it watches with
+`Client.Session().Viewers()`. `Watch(maxBps)` claims up to what the largest
+rendition it would switch to needs; the viewer's `Rate()` is its slice, nil
+while there is no estimate, and `Update(maxBps)` changes the ceiling. The
+session sends the viewers' summed ceilings as its PROBE target, which
+`SetTarget` overrides. Ceilings or a target summing above 2^53 - 1 fail with
+`moq.ErrOutOfRange`. Holding a viewer requests PROBE, so `Close()` it once
+the broadcast stops being watched.
 
 Incoming server requests expose the query-free `Path()` before `Accept()`. It
 is consistent across transports and returns an empty string for the root or
@@ -97,9 +108,9 @@ catalog snapshots, live media, and one fetched media group. The last two take a 
 (`VideoRendition` or `AudioRendition`: a catalog ID and its config) and follow its broadcast
 and track themselves. `NewGroupConsumer`
 decodes a raw group, such as one from `moq.TrackConsumer.RecvGroup` for arrival-order reads.
-Frames and `Flush` use `time.Duration`; `Demand()` owns track names and subscriber waits.
+Frames carry exact `moq.Timestamp` records; `Demand()` owns track names and subscriber waits.
 
-`BroadcastProducer.Dynamic()` accepts subscriber-requested tracks. Call
+`BroadcastProducer.Requests()` accepts subscriber-requested tracks. Call
 `TrackRequest.Accept()` for raw tracks, or pass the request as `media.Requested`
 so the media importer selects the timescale.
 
@@ -112,22 +123,32 @@ carry every record in order. `NewWindowProducer` / `NewWindowConsumer` carry a s
 of records a reader can join at any point; the catalog has no window mode, so the producer
 takes only the track. Producers accept any `encoding/json` value; consumers return
 `json.RawMessage` so callers choose their own decoded type.
-`Update` / `Append` / `Push` / `Pop` take a final `*time.Duration` on the broadcast clock; nil publishes untimed.
+`Update` / `Append` / `Push` / `Pop` take a final `moq.Timestamp` on the broadcast clock, so their track needs a timescale.
 Raw tracks with a nil timescale are untimed; timed tracks require matching timestamps.
-`media.CatalogProducer.Now()` samples and fixes the catalog clock for explicit local-event stamps.
-`moq.dev/moq/flate` provides the matching snapshot and stream producers for opaque bytes.
+`media.CatalogProducer.Now()` samples and fixes the broadcast clock, the epoch every track in the broadcast shares; stamp media and JSON from it.
+Opaque bytes go on a plain `TrackProducer`.
 
 ```go
-import moqjson "moq.dev/moq/json"
+import (
+	moqjson "moq.dev/moq/json"
+	moqmedia "moq.dev/moq/media"
+)
 
-broadcast, _ := client.CreateBroadcast("room")
-track, _ := broadcast.PublishTrack("status", nil)
-status, _ := moqjson.NewSnapshotProducer(broadcast, track, moqjson.SnapshotOptions{Compression: true})
-_ = status.Update(map[string]any{"viewers": 42}, nil)
+publication, _ := client.CreateBroadcast("room")
+broadcast := publication.Broadcast()
+// Every JSON write is stamped, so the track is timed. JSON is small and repetitive, so
+// compress it on the wire.
+scale := uint64(1_000)
+track, _ := broadcast.PublishTrack("status", &moq.TrackInfo{Timescale: &scale, Compress: true})
+status, _ := moqjson.NewSnapshotProducer(broadcast, track, moqjson.SnapshotOptions{})
+catalog, _ := moqmedia.NewCatalogProducer(broadcast)
+now, _ := catalog.Now()
+_ = status.Update(map[string]any{"viewers": 42}, now)
+_ = publication.Announce(moq.AnnounceRoute{})
 ```
 
-Producers take `SnapshotOptions` or `StreamOptions`; both consumers take
-`ConsumerOptions`, where only `Compression` has to match the producer.
+Snapshot and window producers take `SnapshotOptions` or `WindowOptions`; the stream producer and
+every consumer take only the track, and a consumer reads a compressed track like a plain one.
 
 ## Errors
 
@@ -140,17 +161,18 @@ the session closed, i.e. not a real failure) and `moq.IsAuthError(err)` (HTTP
 
 Every call that can block takes a `context.Context` and aborts cleanly when it is
 cancelled, leaving nothing running in the background. A one-shot call (a subscribe,
-a fetch, `RequestBroadcast`, `Resolve`, `WantedChanged`, `Used`/`Unused`, `Server.Accept`) aborts on
+a fetch, `Request`, `Resolve`, `WantedChanged`, `Server.Accept`) aborts on
 its own and leaves the object usable; a stream read cancels the stream it reads.
 See the package doc for details.
 
 ## Raw datagrams
 
 Raw tracks support best-effort datagrams alongside groups: `TrackProducer.AppendDatagram`
-sends one `Frame` and returns its sequence number, while `TrackConsumer.RecvDatagram`
+sends one `Frame` and returns its sequence number (`InsertDatagram` takes the caller's
+own sequence instead), while `TrackConsumer.RecvDatagram`
 and `TrackConsumer.Datagrams` receive them in arrival order. Payloads are capped at
 1200 bytes. Datagram delivery requires a datagram-capable transport and lite-05 or
-newer moq-lite, or moq-transport; pre-lite-05, WebSocket, and TCP paths do not
+newer moq-lite; moq-transport, pre-lite-05, WebSocket, and TCP paths do not
 deliver them, and there is no stream fallback.
 
 ## Versioning

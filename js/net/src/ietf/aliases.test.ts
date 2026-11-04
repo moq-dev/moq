@@ -39,7 +39,7 @@ test("a track name containing a slash does not collide with a longer namespace",
 	expect(() => aliases.set(7n, {}, { broadcast: "a/b", name: "c" })).toThrow(DuplicateTrackAlias);
 });
 
-// Draft-19 section 5.1 lets a publisher give several subscriptions to one track the same
+// Draft-22 section 3.1.3 lets a publisher give several subscriptions to one track the same
 // alias. We cannot demux that, but it is a legal choice: failing the session over it would
 // drop every other broadcast on the connection.
 test("sharing an alias across subscriptions to one track is not fatal", () => {
@@ -47,14 +47,6 @@ test("sharing an alias across subscriptions to one track is not fatal", () => {
 	aliases.set(7n, {}, { broadcast: "cam", name: "video" });
 
 	expect(() => aliases.set(7n, {}, { broadcast: "cam", name: "video" })).toThrow(SharedTrackAlias);
-});
-
-// Another publisher instance is other content under the same name (MoQ Epoch).
-test("one alias for two epochs of a track is a collision", () => {
-	const aliases = new TrackAliases<object>();
-	aliases.set(7n, {}, { broadcast: "cam", name: "video", epoch: "a" });
-
-	expect(() => aliases.set(7n, {}, { broadcast: "cam", name: "video", epoch: "b" })).toThrow(DuplicateTrackAlias);
 });
 
 // Metadata keyed by an alias (the track's timescale) must only be torn down by whoever
@@ -79,7 +71,7 @@ test("does not let stale cleanup retire a reused alias", async () => {
 });
 
 // A cancelled subscription leaves its alias behind, so the groups the publisher is still
-// sending are discarded at once instead of waiting out the timeout (draft-19 section 11.1).
+// sending are discarded at once instead of waiting out the timeout (draft-22 section 3.1.3).
 test("a retired alias rejects late groups immediately", async () => {
 	const aliases = new TrackAliases<object>();
 	const track = {};

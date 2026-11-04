@@ -8,6 +8,6 @@ runs:
 
     - name: Build packaging tools from flake
       shell: bash
-      run: |
+      run: | # zizmor: ignore[github-env] the path is a Nix store build of the checkout this job already runs.
         out=$(nix build --no-link --print-out-paths .#packaging)
         echo "$out/bin" >> "$GITHUB_PATH"

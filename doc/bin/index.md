@@ -16,6 +16,7 @@ Once connected, [Inspect a relay](/bin/inspect) shows what it is receiving.
 | --- | --- |
 | [moq-relay](/bin/relay/) | Route, cache, and fan out broadcasts. Authenticate with JWTs, cluster across regions, publish stats. |
 | [moq-cli](/bin/cli) | Move media in and out of MoQ: pipe FFmpeg in, play natively, capture a camera or screen, transcode, mint tokens. |
+| [moq-studio](/bin/studio) | Compose cameras, screens, images, and other broadcasts into scenes on the GPU and go live. |
 
 ## Gateways
 

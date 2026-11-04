@@ -3,7 +3,6 @@ import { race } from "@moq/signals";
 import { fromTransport, StreamCode, toStreamCode, toTransport } from "./error.ts";
 import { sharedStreamCode } from "./ietf/error.ts";
 import type { IetfVersion } from "./ietf/version.ts";
-import { Version } from "./ietf/version.ts";
 import { Version as Lite, type Version as LiteVersion } from "./lite/version.ts";
 import { decodeError } from "./util/decode_error.ts";
 import { TimeoutError, withTimeout } from "./util/timeout.ts";
@@ -26,6 +25,12 @@ import { Budget } from "./util/yield.ts";
 // Sharing the slice across writers bounds concurrent groups and subscriber fanout too.
 const writeBudget = new Budget();
 
+/** Stream credit alone lets a peer keep thousands of streams ready, each accepted in a
+ * microtask, so accept loops share a slice that lets the host's other tasks run.
+ * @internal
+ */
+export const acceptBudget = new Budget();
+
 // Decode raw transport errors before mapping so they cannot bypass the negotiated
 // registry. Ordinary errors already send 0 and retain their local identity.
 function withCode(reason: unknown, stream: StreamVersion): unknown {
@@ -39,9 +44,8 @@ function withCode(reason: unknown, stream: StreamVersion): unknown {
 // withCode, which reads a number as a non-stream error and sends Internal.
 function stopReason(reason: unknown, stream: StreamVersion): unknown {
 	if (typeof reason !== "number") return withCode(reason, stream);
-	const version = asIetf(stream);
 	const code =
-		version === undefined || sharedStreamCode(reason, version) ? (reason as StreamCode) : StreamCode.Internal;
+		asIetf(stream) === undefined || sharedStreamCode(reason) ? (reason as StreamCode) : StreamCode.Internal;
 	return toTransport(code, "cancel");
 }
 
@@ -107,9 +111,6 @@ export function asIetf(version: StreamVersion): IetfVersion | undefined {
  */
 export function isLeadingOnes(version: StreamVersion): boolean {
 	switch (version) {
-		case Version.DRAFT_14:
-		case Version.DRAFT_15:
-		case Version.DRAFT_16:
 		case Lite.DRAFT_01:
 		case Lite.DRAFT_02:
 		case Lite.DRAFT_03:
@@ -230,6 +231,8 @@ export class Stream {
 
 	static async accept(quic: WebTransport, version: StreamVersion): Promise<Stream | undefined> {
 		for (;;) {
+			const pause = acceptBudget.poll();
+			if (pause !== undefined) await pause;
 			const reader =
 				quic.incomingBidirectionalStreams.getReader() as ReadableStreamDefaultReader<WebTransportBidirectionalStream>;
 			const next = await reader.read();
@@ -444,6 +447,26 @@ export class Reader {
 	async read(size: number): Promise<Uint8Array> {
 		if (size === 0) return new Uint8Array();
 		return this.decode((c) => c.read(size));
+	}
+
+	/**
+	 * Read between 1 and `max` bytes as they arrive, without joining them into one buffer, so
+	 * a payload of any size streams through. Throws {@link UnexpectedEnd} at a clean end.
+	 */
+	async readChunk(max: number): Promise<Uint8Array> {
+		if (this.#buffer.byteLength === 0 && this.#chunked === 0 && !(await this.#fill())) throw new UnexpectedEnd();
+		// What a decode ran short of is measured from bytes this consumes.
+		this.#short = undefined;
+		if (this.#buffer.byteLength > 0) return this.#slice(Math.min(max, this.#buffer.byteLength));
+		const chunk = this.#chunks[0];
+		if (chunk.byteLength <= max) {
+			this.#chunks.shift();
+			this.#chunked -= chunk.byteLength;
+			return chunk;
+		}
+		this.#chunks[0] = chunk.subarray(max);
+		this.#chunked -= max;
+		return chunk.subarray(0, max);
 	}
 
 	async readAll(): Promise<Uint8Array> {
@@ -685,10 +708,7 @@ export class Cursor {
 		let size: number;
 		if (this.#leadingOnes) {
 			size = peekLeadingOnes(b[o]);
-			// 1111110x is a 7-byte form. Draft-17 rejects it; draft-18+ allows it per #1595.
-			if (size === 7 && this.version === Version.DRAFT_17) {
-				throw new Error("invalid leading-ones varint: 1111110x prefix is reserved on draft-17");
-			}
+			// 1111110x is a 7-byte form, which draft-18+ allows per #1595.
 			this.#ensure(size);
 			this.#offset += size;
 			return readLeadingOnes(b, o, size);
@@ -919,6 +939,8 @@ export class Readers {
 	}
 
 	async next(): Promise<Reader | undefined> {
+		const pause = acceptBudget.poll();
+		if (pause !== undefined) await pause;
 		const next = await this.#reader.read();
 		if (next.done) return;
 		return new Reader(next.value, undefined, this.#version);

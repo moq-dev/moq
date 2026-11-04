@@ -10,6 +10,7 @@ import { Nano, Second } from "@moq/clock";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import * as Watch from "@moq/watch";
+import { z } from "zod/mini";
 import type { GameStatus } from "./schemas.ts";
 import { GameStatusSchema } from "./schemas.ts";
 
@@ -130,7 +131,7 @@ export class Game {
 		// Video pipeline.
 		this.broadcast = new Watch.Broadcast({
 			origin: config.origin,
-			name: Moq.Path.from(`${gamePrefix}/${sessionId}`),
+			name: Moq.Path.from(gamePrefix, sessionId),
 			enabled: true,
 		});
 		this.#signals.cleanup(() => this.broadcast.close());
@@ -268,7 +269,7 @@ export class Game {
 		const active = effect.get(this.broadcast.out.active);
 		if (!active) return;
 
-		const statusTrack = active.track("status").subscribe({ priority: 10 });
+		const statusTrack = active.track("status").subscribe({ ...Moq.Track.Subscription.default(), priority: 10 });
 		effect.cleanup(() => statusTrack.close());
 
 		// Reconstruct each status from snapshots and deltas, validated against the schema.
@@ -282,7 +283,10 @@ export class Game {
 				try {
 					status = (await consumer.latest())?.value;
 				} catch (err) {
-					console.warn("Invalid status JSON:", err);
+					// The value was decoded and only failed the schema, so the next frame still applies.
+					// Anything else, such as a track closed with an error, throws on every call: end the loop.
+					if (!(err instanceof z.core.$ZodError)) throw err;
+					console.warn("Invalid status:", err);
 					continue;
 				}
 				if (!status) break;
@@ -317,10 +321,11 @@ export class Game {
 		const viewerId = Math.random().toString(36).slice(2, 8);
 		this.viewerId.set(viewerId);
 
-		const viewerBroadcast = origin.createBroadcast(
-			Moq.Path.from(`${this.#viewerPrefix}/${this.sessionId}/${viewerId}`),
+		const viewerBroadcastPublication = origin.createBroadcast(
+			Moq.Path.from(this.#viewerPrefix, this.sessionId, viewerId),
 		);
-		viewerBroadcast.announce({ epoch: Moq.Epoch.mint() });
+		const viewerBroadcast = viewerBroadcastPublication.broadcast;
+		viewerBroadcastPublication.announce();
 		effect.cleanup(() => {
 			viewerBroadcast.close();
 			this.viewerId.set(undefined);

@@ -1,12 +1,12 @@
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
-import { Milli } from "@moq/clock";
+import { Milli, yieldNow } from "@moq/clock";
 import { type Getter, Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { Producer as BroadcastProducer, type Tracks } from "../broadcast.ts";
 import { accept, connect } from "../connection/index.ts";
-import * as Epoch from "../epoch.ts";
 import { fromTransport, NotFound, SessionCode, StreamCode, StreamError } from "../error.ts";
 import { randomHop } from "../hop.ts";
+import * as Instance from "../instance.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -28,7 +28,7 @@ afterEach(() => mock.restore());
 
 /** Lets queued microtasks, signal notifications, and mock stream deliveries run. */
 function settle(): Promise<void> {
-	return new Promise((resolve) => setTimeout(resolve, 0));
+	return yieldNow();
 }
 
 async function bytes(f: (w: Writer) => Promise<void>): Promise<Uint8Array> {
@@ -91,11 +91,11 @@ test("events and the request round-trip", async () => {
 	expect(await decodeTracksEventMaybe(reader, version)).toEqual({ kind: "synced" });
 	expect(await decodeTracksEventMaybe(reader, version)).toBeUndefined();
 
-	const epoch = Epoch.parse("01900000-0000-7000-8000-000000000001");
-	const request = await bytes((w) => new TracksMessage(Path.from("room/alice"), epoch).encode(w, version));
+	const instance = Instance.parse("01900000-0000-7000-8000-000000000001");
+	const request = await bytes((w) => new TracksMessage(Path.from("room/alice"), instance).encode(w, version));
 	const got = await TracksMessage.decode(new Reader(undefined, request, version), version);
 	expect(got.broadcast).toBe(Path.from("room/alice"));
-	expect(got.epoch).toBe(epoch);
+	expect(got.instance).toBe(instance);
 });
 
 test("older versions have no tracks stream", async () => {
@@ -225,17 +225,15 @@ test("a listing past the announces cap is reset, and the session stays", async (
 	const cap = 3;
 	const { subscriber, listed, closing } = handPlayed({ limits: { announces: cap } });
 	const tracks = subscriber.consume(Path.from("room")).tracks();
+	expect(await next(tracks)).toBe("synced");
 	const peer = await listed();
-	for (let i = 0; i <= cap; i++) await peer.send({ kind: "added", name: `t${i}`, info });
-	let added = 0;
-	let end: string;
-	for (;;) {
-		end = await next(tracks);
-		if (end.startsWith("+")) added++;
-		else if (end !== "synced") break;
+	// Read in step: the reset withdraws whatever adds are still unread.
+	for (let i = 0; i < cap; i++) {
+		await peer.send({ kind: "added", name: `t${i}`, info });
+		expect(await next(tracks)).toBe(`+t${i}`);
 	}
-	expect(added).toBe(cap);
-	expect(end).toMatch(/^error: /);
+	await peer.send({ kind: "added", name: `t${cap}`, info });
+	expect(await next(tracks)).toMatch(/^error: /);
 	await settle();
 	expect(closing).not.toHaveBeenCalled();
 	// The reset released every slot: another listing lists the whole cap again.
@@ -266,9 +264,9 @@ test("a flood of a peer's listing churn yields to the host's tasks", async () =>
 	// The receiver is mid-flood: a task queued now runs before it reaches the end.
 	let last = false;
 	let ranFirst: boolean | undefined;
-	setTimeout(() => {
+	void yieldNow().then(() => {
 		ranFirst = !last;
-	}, 0);
+	});
 	let event: string;
 	do event = await next(tracks);
 	while (event !== "+last");
@@ -352,8 +350,9 @@ function publisher(origin: OriginProducer) {
 
 test("data after a TRACKS request closes the session", async () => {
 	const origin = new OriginProducer();
-	const broadcast = origin.createBroadcast(Path.from("room"));
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(Path.from("room"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	broadcast.createTrack("a");
 	const { list, closing } = publisher(origin);
 	const listing = await list("room");
@@ -367,8 +366,9 @@ test("data after a TRACKS request closes the session", async () => {
 
 test("a publisher lists its broadcast's own tracks, never one served on request", async () => {
 	const origin = new OriginProducer();
-	const broadcast = origin.createBroadcast(Path.from("room"));
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(Path.from("room"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	broadcast.createTrack("a", { priority: 5 });
 	// Served on request: answered when asked, never listed.
 	void wireOf(broadcast)
@@ -389,8 +389,9 @@ test("a publisher lists its broadcast's own tracks, never one served on request"
 
 test("a newer listing of a broadcast on one session replaces the older", async () => {
 	const origin = new OriginProducer();
-	const broadcast = origin.createBroadcast(Path.from("room"));
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(Path.from("room"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	broadcast.createTrack("a");
 	const { list } = publisher(origin);
 	const older = await list("room");
@@ -407,12 +408,12 @@ test("a newer listing of a broadcast on one session replaces the older", async (
 
 test("a path served through a covering prefix route is NOT_FOUND", async () => {
 	const origin = new OriginProducer();
-	const dynamic = origin.dynamicRoute(Path.from("room"));
+	const dynamic = origin.requestsRoute(Path.from("room"));
 	void (async () => {
 		for await (const request of dynamic.requested()) {
 			const served = new BroadcastProducer();
 			served.createTrack("video");
-			request.accept(served);
+			request.serve(served);
 		}
 	})();
 	const { list } = publisher(origin);
@@ -424,12 +425,12 @@ test("a path served through a covering prefix route is NOT_FOUND", async () => {
 test("a local read through a covering prefix route is NOT_FOUND, and through its exact route lists", async () => {
 	const origin = new OriginProducer();
 	for (const prefix of ["room", "room/bob"]) {
-		const dynamic = origin.dynamicRoute(Path.from(prefix));
+		const dynamic = origin.requestsRoute(Path.from(prefix));
 		void (async () => {
 			for await (const request of dynamic.requested()) {
 				const served = new BroadcastProducer();
 				served.createTrack("video");
-				request.accept(served);
+				request.serve(served);
 			}
 		})();
 	}
@@ -460,8 +461,9 @@ test("a listing over a session carries each track's info, end to end", async () 
 		connect({ url, transport: pair.client }),
 		accept({ transport: pair.server, url, publish: origin.consume() }),
 	]);
-	const broadcast = origin.createBroadcast(Path.from("room"));
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(Path.from("room"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	broadcast.createTrack("a", {
 		timescale: Timescale.MILLI,
 		maxAge: Milli(3000),
@@ -487,7 +489,7 @@ test("a listing over a session carries each track's info, end to end", async () 
 	server.abort();
 });
 
-test("an epoch-pinned front lists its serving route's tracks", async () => {
+test("an instance-pinned front lists its serving route's tracks", async () => {
 	const pair = createMockTransportPair(ALPN_07_WIP);
 	const serverOrigin = new OriginProducer();
 	const clientOrigin = new OriginProducer();
@@ -495,9 +497,10 @@ test("an epoch-pinned front lists its serving route's tracks", async () => {
 		connect({ url, transport: pair.client, consume: clientOrigin }),
 		accept({ transport: pair.server, url, publish: serverOrigin.consume() }),
 	]);
-	const broadcast = serverOrigin.createBroadcast(Path.from("room"));
+	const broadcastPublication = serverOrigin.createBroadcast(Path.from("room"));
+	const broadcast = broadcastPublication.broadcast;
 	broadcast.createTrack("a");
-	broadcast.announce({ epoch: Epoch.parse("01900000-0000-7000-8000-000000000001") });
+	broadcastPublication.announce({ instance: Instance.parse("01900000-0000-7000-8000-000000000001") });
 
 	const reader = clientOrigin.consume();
 	const announced = reader.announced();
@@ -520,25 +523,23 @@ test("an epoch-pinned front lists its serving route's tracks", async () => {
 	server.abort();
 });
 
-test("an epoch-pinned front served through a covering prefix route is NOT_FOUND", async () => {
+test("a front pinned to a named instance served through a covering prefix route is NOT_FOUND", async () => {
 	const origin = new OriginProducer();
-	const dynamic = origin.dynamicRoute(Path.from("room"), {
-		epoch: Epoch.parse("01900000-0000-7000-8000-000000000001"),
-	});
+	const dynamic = origin.requestsRoute(Path.from("room"), { instance: Instance.parse("named") });
 	void (async () => {
 		for await (const request of dynamic.requested()) {
 			const served = new BroadcastProducer();
 			served.createTrack("video");
-			request.accept(served);
+			request.serve(served);
 		}
 	})();
 	const request = origin.consume().request(Path.from("room/alice"));
 	await settle();
 	const front = request.active.peek();
 	if (!front) throw new Error("expected the covering route to serve");
-	expect(await next(front.tracks())).toBe(`error: ${StreamCode.NotFound}`);
+	expect(() => front.tracks()).toThrow(NotFound);
 	// A later reader asks again, and is refused again.
-	expect(await next(front.tracks())).toBe(`error: ${StreamCode.NotFound}`);
+	expect(() => front.tracks()).toThrow(NotFound);
 	request.close();
 	origin.close();
 });
@@ -550,8 +551,9 @@ test("lite-06 cannot list over a session", async () => {
 		connect({ url, transport: pair.client }),
 		accept({ transport: pair.server, url, publish: origin.consume() }),
 	]);
-	const broadcast = origin.createBroadcast(Path.from("room"));
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(Path.from("room"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	const tracks = wireOf(client).consume(Path.from("room")).tracks();
 	expect(await next(tracks)).toMatch(/requires moq-lite-07/);
 	broadcast.close();

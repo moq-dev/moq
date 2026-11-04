@@ -1,50 +1,55 @@
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::task::{Context, Poll, Waker, ready};
 
 use crate::error::MoqError;
 
-/// A worker runtime driving I/O, timers, and background work beside host-polled calls.
+/// Saturate a duration handed to a binding at `i64::MAX` nanoseconds, about 292 years.
 ///
-/// wasm32 has neither threads nor a tokio driver. uniffi's `RustFuture` is polled by the
-/// JS event loop instead.
-#[cfg(not(target_arch = "wasm32"))]
+/// C and C++ carry a duration as `int64_t` nanoseconds and abort past that, and Go's
+/// `time.Duration` wraps negative, so a peer's oversized value must not reach them.
+pub(crate) fn duration(duration: std::time::Duration) -> std::time::Duration {
+	duration.min(std::time::Duration::from_nanos(i64::MAX as u64))
+}
+
+/// A worker runtime driving I/O, timers, and background work beside host-polled calls.
 static RUNTIME: std::sync::OnceLock<Runtime> = std::sync::OnceLock::new();
 
 /// The worker runtime and the owner thread that joins it on shutdown.
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct Runtime {
 	handle: tokio::runtime::Handle,
+	/// Work submitted by local handles, closed and drained with the root.
+	pending: kio::Shared<Option<Vec<Child>>>,
 	/// The clock a test drives, when the runtime started with one.
 	#[cfg(feature = "testing")]
-	clock: Option<moq_clock::Installed>,
+	clock: Option<kio::clock::Installed>,
 	/// Taken by [`shutdown`], so the thread is stopped and joined once.
 	thread: std::sync::Mutex<Option<Thread>>,
-	/// Set by [`shutdown`] to wake the [`Task::run`] calls parked in place, so they observe
-	/// [`Polls::stopped`] and resolve `Cancelled`.
-	stopped: tokio::sync::watch::Sender<bool>,
-	/// The [`Task::run`] polls in flight on host threads, which [`shutdown`] waits out.
-	polls: std::sync::Mutex<Polls>,
-	/// Notified when the last in-flight poll finishes.
+	/// Closed by [`shutdown`] to wake the calls parked in place, so their next poll finds
+	/// [`STOPPED`] and resolves `Cancelled`.
+	stopped: kio::Producer<()>,
+	/// The polls in flight on host threads, which [`shutdown`] waits out, plus [`STOPPED`]
+	/// once it has begun.
+	polls: AtomicUsize,
+	/// Taken to sleep on and notify [`Self::idle`], so the last poll cannot wake shutdown
+	/// between its check and its wait.
+	idling: std::sync::Mutex<()>,
+	/// Notified when the last in-flight poll finishes after [`STOPPED`] is set.
 	idle: std::sync::Condvar,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-#[derive(Default)]
-struct Polls {
-	active: usize,
-	/// Set by [`shutdown`]: no poll may start once the drivers are about to stop, because a
-	/// tokio timer polled after its driver is gone panics rather than erroring.
-	stopped: bool,
-}
+/// Set in [`Runtime::polls`] by [`shutdown`]: no poll may start once the drivers are about to
+/// stop, because a tokio timer polled after its driver is gone panics rather than erroring.
+const STOPPED: usize = 1 << (usize::BITS - 1);
 
-#[cfg(not(target_arch = "wasm32"))]
 struct Thread {
 	/// Resolves the `block_on` the thread parks in.
 	stop: tokio::sync::oneshot::Sender<()>,
 	join: std::thread::JoinHandle<()>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl std::ops::Deref for Runtime {
 	type Target = tokio::runtime::Handle;
 
@@ -54,15 +59,14 @@ impl std::ops::Deref for Runtime {
 }
 
 /// The runtime, started on first use.
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn runtime() -> &'static Runtime {
 	RUNTIME.get_or_init(|| Runtime::new(false))
 }
 
-/// Start the runtime on a [`moq_clock::Manual`] clock that only a test moves.
+/// Start the runtime on a [`kio::clock::Manual`] clock that only a test moves.
 ///
 /// False when the runtime already started, since its timers are armed on the host clock.
-#[cfg(all(feature = "testing", not(target_arch = "wasm32")))]
+#[cfg(feature = "testing")]
 pub(crate) fn start_test_clock() -> bool {
 	let mut started = false;
 	RUNTIME.get_or_init(|| {
@@ -73,12 +77,11 @@ pub(crate) fn start_test_clock() -> bool {
 }
 
 /// The clock [`start_test_clock`] installed, if it did.
-#[cfg(all(feature = "testing", not(target_arch = "wasm32")))]
-pub(crate) fn test_clock() -> Option<&'static moq_clock::Installed> {
+#[cfg(feature = "testing")]
+pub(crate) fn test_clock() -> Option<&'static kio::clock::Installed> {
 	RUNTIME.get()?.clock.as_ref()
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl Runtime {
 	fn new(
 		#[cfg_attr(
@@ -95,15 +98,35 @@ impl Runtime {
 		let handle = runtime.handle().clone();
 		// Before any task runs, so every read and timer lands on it.
 		#[cfg(feature = "testing")]
-		let clock = test_clock.then(|| moq_clock::Manual::new().install(&handle));
+		let clock = test_clock.then(|| kio::clock::Manual::new().install(&handle));
 		let (stop, stopped) = tokio::sync::oneshot::channel();
+		let pending = kio::Shared::new(Some(Vec::new()));
+		let mut root = Root {
+			pending: pending.clone(),
+			children: kio::Tasks::new(),
+		};
+		// The only FFI background task: each operation is a child polled by this owner.
+		let driver = runtime.spawn(async move {
+			if moq_tokio::panic::isolate(kio::wait(move |waiter| root.poll(waiter)))
+				.await
+				.is_none()
+			{
+				// Individual children contain their failures. Losing the owner itself would
+				// leave every handle looking healthy while no background work progresses.
+				std::process::abort();
+			}
+		});
 
 		let join = std::thread::Builder::new()
 			.name("moq-ffi".into())
 			.spawn(move || {
 				// `Err` when the sender is dropped, which the shutdown never does; either way the
 				// runtime is torn down here, joining the threads that ran its tasks.
-				let _ = runtime.block_on(stopped);
+				runtime.block_on(async move {
+					let _ = stopped.await;
+					driver.abort();
+					let _ = driver.await;
+				});
 				// Join every worker and blocking task before the host can unload callbacks.
 				drop(runtime);
 			})
@@ -111,11 +134,13 @@ impl Runtime {
 
 		Runtime {
 			handle,
+			pending,
 			#[cfg(feature = "testing")]
 			clock,
 			thread: std::sync::Mutex::new(Some(Thread { stop, join })),
-			stopped: tokio::sync::watch::Sender::new(false),
-			polls: Default::default(),
+			stopped: kio::Producer::new(()),
+			polls: AtomicUsize::new(0),
+			idling: Default::default(),
 			idle: Default::default(),
 		}
 	}
@@ -124,13 +149,11 @@ impl Runtime {
 /// Stop the runtime workers and wait for them to finish; a no-op when it never started.
 ///
 /// See [`crate::moq_ffi_shutdown`] for what this is for.
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn shutdown() {
 	let Some(runtime) = RUNTIME.get() else { return };
 	runtime.shutdown();
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl Runtime {
 	fn shutdown(&self) {
 		let runtime = self;
@@ -139,16 +162,16 @@ impl Runtime {
 			return;
 		};
 		// Before the thread stops, so no call awaited in place polls the runtime after it is gone.
-		let mut polls = runtime.polls.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-		polls.stopped = true;
+		let idling = runtime.idling.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+		runtime.polls.fetch_or(STOPPED, Ordering::SeqCst);
 		drop(
 			runtime
 				.idle
-				.wait_while(polls, |polls| polls.active > 0)
+				.wait_while(idling, |_| runtime.polls.load(Ordering::SeqCst) != STOPPED)
 				.unwrap_or_else(std::sync::PoisonError::into_inner),
 		);
 		// Outside the lock: a waker may poll inline, which takes it.
-		runtime.stopped.send_replace(true);
+		let _ = runtime.stopped.close();
 		let _ = thread.stop.send(());
 		thread.join.join().expect("runtime owner panicked");
 		// Retain the owner lock until the join completes, including concurrent shutdown calls.
@@ -157,136 +180,304 @@ impl Runtime {
 }
 
 /// Resolves once [`shutdown`] has run.
-#[cfg(not(target_arch = "wasm32"))]
 async fn stopped() {
-	let mut stopped = runtime().stopped.subscribe();
-	// `Err` only when the sender is dropped, which a static never is.
-	let _ = stopped.wait_for(|&stopped| stopped).await;
+	kio::wait(|waiter| runtime().stopped.poll_closed(waiter)).await
 }
 
-/// wasm32's runtime is the JS event loop, which never stops under us.
-#[cfg(target_arch = "wasm32")]
-async fn stopped() {
-	std::future::pending().await
-}
-
-/// Marks a [`Task::run`] poll in flight, so [`shutdown`] waits for it to finish.
-#[cfg(not(target_arch = "wasm32"))]
+/// Marks a poll in flight on a host thread, so [`shutdown`] waits for it to finish.
 struct Polling;
 
-#[cfg(not(target_arch = "wasm32"))]
 impl Polling {
 	/// `None` once [`shutdown`] has begun.
 	fn start() -> Option<Self> {
-		let mut polls = runtime()
-			.polls
-			.lock()
-			.unwrap_or_else(std::sync::PoisonError::into_inner);
-		if polls.stopped {
-			return None;
-		}
-		polls.active += 1;
-		Some(Self)
+		let previous = runtime().polls.fetch_add(1, Ordering::SeqCst);
+		let polling = Self;
+		// Dropped rather than forgotten, so a shutdown already waiting sees the count fall back.
+		(previous & STOPPED == 0).then_some(polling)
 	}
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl Drop for Polling {
 	fn drop(&mut self) {
 		let runtime = runtime();
-		let mut polls = runtime.polls.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-		polls.active -= 1;
-		if polls.active == 0 {
+		if runtime.polls.fetch_sub(1, Ordering::SeqCst) == STOPPED + 1 {
+			// The last poll a waiting shutdown counts. Under the lock, so the wake cannot land
+			// between its check and its wait.
+			let _idling = runtime.idling.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 			runtime.idle.notify_all();
 		}
 	}
 }
 
-/// wasm32's runtime is the JS event loop, which never stops under us.
-#[cfg(target_arch = "wasm32")]
-struct Polling;
-
-#[cfg(target_arch = "wasm32")]
-impl Polling {
-	fn start() -> Option<Self> {
-		Some(Self)
-	}
-}
-
 /// Enter the runtime context, so a handle built outside [`Task::run`] can still spawn.
-///
-/// A no-op on wasm32, where the JS event loop is the only runtime.
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn enter() -> tokio::runtime::EnterGuard<'static> {
 	runtime().enter()
 }
 
-/// Stands in for tokio's `EnterGuard` on wasm32, so callers bind a guard either way.
-#[cfg(target_arch = "wasm32")]
-pub(crate) struct EnterGuard;
+type ChildFuture = Pin<Box<dyn Future<Output = moq_tokio::Result<()>> + Send>>;
 
-#[cfg(target_arch = "wasm32")]
-pub(crate) fn enter() -> EnterGuard {
-	EnterGuard
+/// One background operation, with panic isolation shared by every kind of child.
+struct Child {
+	future: Option<ChildFuture>,
+	result: kio::Producer<Option<moq_tokio::Result<()>>>,
+}
+
+impl Child {
+	/// Teardown may call user code too. One child's destructor must not stop its siblings.
+	fn release(&mut self) -> moq_tokio::Result<()> {
+		let future = self.future.take();
+		std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(future))).map_err(|payload| {
+			tracing::error!(
+				panic = moq_tokio::panic::message(payload.as_ref()),
+				"owned task teardown panicked"
+			);
+			moq_tokio::Error::Panic
+		})
+	}
+
+	fn complete(&self, completed: moq_tokio::Result<()>) {
+		*self
+			.result
+			.write()
+			.unwrap_or_else(|_| unreachable!("only the child closes its completion")) = Some(completed);
+	}
+}
+
+impl kio::Task for Child {
+	type Output = ();
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		let completed = {
+			// Isolate polling without consuming the stored future; release it separately
+			// so a destructor panic cannot escape the child.
+			let mut isolated = std::pin::pin!(moq_tokio::panic::isolate(
+				self.future.as_mut().expect("polled before completion").as_mut()
+			));
+			ready!(waiter.poll_future(isolated.as_mut())).unwrap_or(Err(moq_tokio::Error::Panic))
+		};
+		// The remaining captures may wake readers when dropped. Publish the failure before
+		// releasing them; drivers also protect captures from the async state's unwind.
+		if matches!(&completed, Err(moq_tokio::Error::Panic)) {
+			self.complete(completed.clone());
+		}
+		let released = self.release();
+		self.complete(released.and(completed));
+		Poll::Ready(())
+	}
+}
+
+impl Drop for Child {
+	fn drop(&mut self) {
+		if let Err(err) = self.release() {
+			self.complete(Err(err));
+		}
+	}
+}
+
+/// Owns every background child, including operations whose host discarded its completion.
+struct Root {
+	pending: kio::Shared<Option<Vec<Child>>>,
+	children: kio::Tasks<Child>,
+}
+
+impl Root {
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		let _root = InRoot::enter();
+		waiter.batch(|| {
+			if let Poll::Ready(mut pending) = self.pending.poll(waiter, |pending| {
+				if pending.as_ref().is_some_and(|pending| !pending.is_empty()) {
+					Poll::Ready(())
+				} else {
+					Poll::Pending
+				}
+			}) {
+				let incoming = std::mem::take(pending.as_mut().expect("open until root drops"));
+				drop(pending);
+				for child in incoming {
+					self.children.push(child);
+				}
+				// Re-arm the inbox next turn, including work submitted by a child's poll.
+				waiter.waker().wake_by_ref();
+			}
+			let _ = self.children.poll(waiter);
+			// An empty set is idle, not finished: later local handles can submit more work.
+			Poll::Pending
+		})
+	}
+}
+
+impl Drop for Root {
+	fn drop(&mut self) {
+		// Refuse submissions atomically with taking the last batch, then drop outside the
+		// lock: cleanup can itself submit work. Each Child contains its teardown panic.
+		let _root = InRoot::enter();
+		let pending = self.pending.lock().take();
+		drop(pending);
+		// Here rather than after this returns, so their teardown wakes still see the root.
+		drop(std::mem::take(&mut self.children));
+	}
+}
+
+thread_local! {
+	/// Set while this thread polls or releases the root's children.
+	static ROOT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Marks this thread as inside the root until dropped.
+struct InRoot(bool);
+
+impl InRoot {
+	fn enter() -> Self {
+		Self(ROOT.replace(true))
+	}
+}
+
+impl Drop for InRoot {
+	fn drop(&mut self) {
+		ROOT.set(self.0);
+	}
+}
+
+/// A host call's waker, which keeps the host's continuation out of the root.
+///
+/// UniFFI resumes the foreign continuation on the waking thread, and a binding may run it there
+/// to its next suspension, host code included (Kotlin's `Dispatchers.Unconfined` does). Woken
+/// inside the root's poll, that would hold every background child until the host returns, so
+/// the wake moves to the runtime's blocking pool instead: a thread per continuation in flight,
+/// owning no state and polling nothing but the host's waker. Woken anywhere else, it wakes the
+/// host directly, as before.
+struct Dispatch {
+	host: Waker,
+	/// A dispatched wake not delivered yet, so repeated wakes before it lands send one.
+	queued: AtomicBool,
+}
+
+impl std::task::Wake for Dispatch {
+	fn wake(self: Arc<Self>) {
+		self.wake_by_ref();
+	}
+
+	fn wake_by_ref(self: &Arc<Self>) {
+		if !ROOT.get() {
+			self.host.wake_by_ref();
+			return;
+		}
+		if self.queued.swap(true, Ordering::AcqRel) {
+			return;
+		}
+		let deferred = Deferred(self.clone());
+		match tokio::runtime::Handle::try_current() {
+			// A runtime already shutting down drops the closure unrun, which still delivers it.
+			Ok(handle) => drop(handle.spawn_blocking(move || drop(deferred))),
+			Err(_) => drop(deferred),
+		}
+	}
+}
+
+/// Delivers a dispatched wake when dropped, whether the blocking pool ran it or refused it.
+struct Deferred(Arc<Dispatch>);
+
+impl Drop for Deferred {
+	fn drop(&mut self) {
+		// Before waking, so a wake raised while the host polls dispatches again.
+		self.0.queued.store(false, Ordering::Release);
+		self.0.host.wake_by_ref();
+	}
+}
+
+/// Poll a host call with a [`Dispatch`] waker, so the root cannot run its continuation.
+///
+/// Every primitive a binding call parks in goes through this: [`run`], [`Polled::wait`], and
+/// [`Background::finished`] and [`Background::watch`]. Nesting is harmless: every wake chain
+/// ends at the outermost host waker, and any one dispatch moves it off the root.
+pub(crate) async fn host<F: Future>(future: F) -> F::Output {
+	let mut future = std::pin::pin!(future);
+	// Reused while the host keeps its waker, which UniFFI's call future does.
+	let mut dispatch: Option<(Arc<Dispatch>, Waker)> = None;
+	std::future::poll_fn(|cx| {
+		// Polled by the root itself, the waker is the root's own, not a host's.
+		if ROOT.get() {
+			return future.as_mut().poll(cx);
+		}
+		if !dispatch
+			.as_ref()
+			.is_some_and(|(current, _)| current.host.will_wake(cx.waker()))
+		{
+			let current = Arc::new(Dispatch {
+				host: cx.waker().clone(),
+				queued: AtomicBool::new(false),
+			});
+			dispatch = Some((current.clone(), Waker::from(current)));
+		}
+		let (_, waker) = dispatch.as_ref().expect("set above");
+		future.as_mut().poll(&mut Context::from_waker(waker))
+	})
+	.await
+}
+
+impl Runtime {
+	fn background(&self, future: impl Future<Output = moq_tokio::Result<()>> + Send + 'static) -> Background {
+		let result = kio::Producer::new(None);
+		self.submit(Child {
+			future: Some(Box::pin(future)),
+			result,
+		})
+	}
+
+	fn submit(&self, child: Child) -> Background {
+		let receiver = child.result.consume();
+		let mut pending = self.pending.lock();
+		if let Some(pending) = pending.as_mut() {
+			pending.push(child);
+		} else {
+			// Shutdown joined the root. A late handle must release its work immediately.
+			drop(pending);
+			drop(child);
+		}
+		Background { result: Some(receiver) }
+	}
 }
 
 /// Completion of an owned operation, retained by the object's host calls.
 #[derive(Clone, Default)]
 pub(crate) struct Background {
-	#[cfg(not(target_arch = "wasm32"))]
 	result: Option<kio::Consumer<Option<moq_tokio::Result<()>>>>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl Background {
 	pub fn new(future: impl Future<Output = moq_tokio::Result<()>> + Send + 'static) -> Self {
-		let result = kio::Producer::new(None);
-		let receiver = result.consume();
-		runtime().spawn(async move {
-			let completed = moq_tokio::panic::isolate(future)
-				.await
-				.unwrap_or(Err(moq_tokio::Error::Panic));
-			*result
-				.write()
-				.unwrap_or_else(|_| unreachable!("only the task closes its completion")) = Some(completed);
-		});
-		Self { result: Some(receiver) }
+		runtime().background(future)
 	}
 
 	pub fn driver(mut driver: impl moq_net::time::Driver + Send + 'static) -> Self {
 		let result = kio::Producer::new(None);
-		let receiver = result.consume();
-		runtime().spawn(async move {
-			// Keep channel teardown outside the unwind and after panic publication.
-			let completed = moq_tokio::panic::isolate(async {
-				match moq_net::time::run(Borrowed(&mut driver)).await {
-					moq_net::Error::Closed => Ok(()),
-					error => Err(error.into()),
+		let failed = result.clone();
+		runtime().submit(Child {
+			result,
+			future: Some(Box::pin(async move {
+				// Keep the driver outside the unwinding future: its teardown wakes the host.
+				let completed = moq_tokio::panic::isolate(async {
+					match moq_net::time::run(Borrowed(&mut driver)).await {
+						moq_net::Error::Closed => Ok(()),
+						error => Err(error.into()),
+					}
+				})
+				.await
+				.unwrap_or(Err(moq_tokio::Error::Panic));
+				if matches!(&completed, Err(moq_tokio::Error::Panic)) {
+					*failed
+						.write()
+						.unwrap_or_else(|_| unreachable!("only the child closes its completion")) = Some(completed.clone());
 				}
-			})
-			.await
-			.unwrap_or(Err(moq_tokio::Error::Panic));
-			if matches!(&completed, Err(moq_tokio::Error::Panic)) {
-				*result
-					.write()
-					.unwrap_or_else(|_| unreachable!("only the task closes its completion")) = Some(completed.clone());
-			}
-			let completed = moq_tokio::panic::isolate(async move {
 				drop(driver);
 				completed
-			})
-			.await
-			.unwrap_or(Err(moq_tokio::Error::Panic));
-			*result
-				.write()
-				.unwrap_or_else(|_| unreachable!("only the task closes its completion")) = Some(completed);
-		});
-		Self { result: Some(receiver) }
+			})),
+		})
 	}
 
 	pub async fn finished(&self) -> Result<(), MoqError> {
 		let Some(result) = &self.result else { return Ok(()) };
-		let completed = kio::wait(|waiter| {
+		let completed = host(kio::wait(|waiter| {
 			match std::task::ready!(result.poll(waiter, |state| {
 				match &**state {
 					Some(completed) => std::task::Poll::Ready(completed.clone()),
@@ -296,7 +487,7 @@ impl Background {
 				Ok(completed) => std::task::Poll::Ready(completed),
 				Err(_) => std::task::Poll::Ready(Err(moq_net::Error::Cancel.into())),
 			}
-		})
+		}))
 		.await;
 		completed.map_err(crate::session::map_closed_error)
 	}
@@ -304,7 +495,6 @@ impl Background {
 
 impl Background {
 	pub fn check(&self) -> Result<(), MoqError> {
-		#[cfg(not(target_arch = "wasm32"))]
 		if let Some(result) = &self.result {
 			return result
 				.read()
@@ -315,27 +505,44 @@ impl Background {
 		Ok(())
 	}
 
+	/// Ready with the owner's failure once it fails; pending while it runs or after it ended
+	/// cleanly, the same split [`Self::watch`] makes.
+	pub fn poll_failed(&self, waiter: &kio::Waiter) -> Poll<MoqError> {
+		let Some(result) = &self.result else {
+			return Poll::Pending;
+		};
+		let completed = ready!(result.poll(waiter, |state| match &**state {
+			Some(completed) => Poll::Ready(completed.clone()),
+			None => Poll::Pending,
+		}));
+		match completed {
+			Ok(Ok(())) => Poll::Pending,
+			Ok(Err(err)) => Poll::Ready(crate::session::map_closed_error(err)),
+			Err(_) => Poll::Ready(crate::session::map_closed_error(moq_net::Error::Cancel.into())),
+		}
+	}
+
 	pub async fn watch<T>(&self, future: impl Future<Output = Result<T, MoqError>>) -> Result<T, MoqError> {
 		self.check()?;
-		#[cfg(not(target_arch = "wasm32"))]
-		let result = if self.result.is_some() {
-			tokio::pin!(future);
-			tokio::select! {
-				biased;
-				result = self.finished() => { result?; future.await }
-				result = &mut future => result,
+		let result = host(async {
+			if self.result.is_some() {
+				tokio::pin!(future);
+				tokio::select! {
+					biased;
+					result = self.finished() => { result?; future.await }
+					result = &mut future => result,
+				}
+			} else {
+				future.await
 			}
-		} else {
-			future.await
-		};
-		#[cfg(target_arch = "wasm32")]
-		let result = future.await;
+		})
+		.await;
 		self.check()?;
 		result
 	}
 }
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(test)]
 pub(crate) fn panicking_origin() -> (moq_net::origin::Producer, Background, kio::Producer<bool>) {
 	struct Driver {
 		inner: moq_net::origin::Driver,
@@ -363,10 +570,8 @@ pub(crate) fn panicking_origin() -> (moq_net::origin::Producer, Background, kio:
 	(origin, driver, failed)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 struct Borrowed<'a, D>(&'a mut D);
 
-#[cfg(not(target_arch = "wasm32"))]
 impl<D: moq_net::time::Driver> moq_net::time::Driver for Borrowed<'_, D> {
 	fn poll(
 		&mut self,
@@ -377,8 +582,7 @@ impl<D: moq_net::time::Driver> moq_net::time::Driver for Borrowed<'_, D> {
 	}
 }
 
-/// Spawn an owned background future on the native runtime.
-#[cfg(not(target_arch = "wasm32"))]
+/// Submit an owned background future to the runtime's root driver.
 pub(crate) fn spawn<F: Future<Output = ()> + Send + 'static>(future: F) -> Background {
 	Background::new(async move {
 		future.await;
@@ -386,57 +590,206 @@ pub(crate) fn spawn<F: Future<Output = ()> + Send + 'static>(future: F) -> Backg
 	})
 }
 
-/// Spawn onto the JS event loop, whose current toolchain aborts on panic.
-#[cfg(target_arch = "wasm32")]
-pub(crate) fn spawn<F: Future<Output = ()> + 'static>(future: F) -> Background {
-	web_async::spawn(future);
-	Background::default()
-}
-
-/// Aborts a spawned task when the future awaiting it is dropped.
+/// Poll a binding call in place, inside the runtime context and shutdown accounting.
 ///
-/// Aborting one that already finished is a no-op, so this is inert on the happy path.
-/// Native only: wasm32 has no runtime to spawn onto, so its callers await in place.
-#[cfg(not(target_arch = "wasm32"))]
-struct AbortOnDrop(tokio::task::AbortHandle);
+/// A foreign cancel stops polling immediately. Freeing the call drops its future; nothing
+/// keeps running independently to consume an event in the meantime.
+pub(crate) fn run<F, T, E>(future: F) -> impl Future<Output = Result<T, MoqError>>
+where
+	F: Future<Output = Result<T, E>>,
+	E: Into<MoqError>,
+{
+	let mut call = Box::pin(moq_tokio::panic::isolate(async move {
+		tokio::select! {
+			biased;
+			_ = stopped() => Err(MoqError::Cancelled),
+			result = future => result.map_err(Into::into),
+		}
+	}));
+	host(std::future::poll_fn(move |cx| {
+		let Some(_polling) = Polling::start() else {
+			return Poll::Ready(Err(MoqError::Cancelled));
+		};
+		let _runtime = enter();
+		call.as_mut().poll(cx).map(|completed| {
+			completed.unwrap_or_else(|| Err(crate::session::map_closed_error(moq_tokio::Error::Panic)))
+		})
+	}))
+}
 
-#[cfg(not(target_arch = "wasm32"))]
-impl Drop for AbortOnDrop {
+/// A handle's state for async calls that only poll it, which UniFFI's `RustFuture` polls directly.
+///
+/// The state sits behind a [`kio::Bridge`], locked across one poll, never across a wait.
+/// Concurrent calls on one handle all park, and each poll takes the next item atomically, so
+/// between them they take every item once, though not in call order. Unlike [`Task`], nothing
+/// queues: a call the foreign side cancelled but has not freed yet stops polling and holds
+/// nothing the next call needs.
+///
+/// The bridge is what lets calls park together: each call polls the state with a waiter on the
+/// bridge's one waker, which wakes every parked call, since a handle may keep one waker per wait
+/// (moq-net's track cursor does) and would otherwise wake only its latest caller. It also holds a wake the
+/// state sends while locked until the lock is released, since UniFFI runs the foreign
+/// continuation on the waking thread and a binding may poll the woken call right there.
+///
+/// Each poll runs inside [`shutdown`]'s in-flight accounting and the runtime context, so a poll
+/// that missed the shutdown finishes before the drivers stop, and a tokio timer in the state
+/// stays pollable. [`Self::cancel`] closes a channel every poll checks, then drops the state.
+/// A call that awaits tokio channels, codecs, or I/O uses [`Task`] instead.
+pub(crate) struct Polled<T> {
+	/// `None` once cancelled or taken.
+	state: kio::Bridge<Option<T>>,
+	/// Closed by [`Self::cancel`] and [`Self::take`], waking every parked call.
+	cancel: kio::Producer<()>,
+	driver: Background,
+	/// Calls polled at least once and not yet dropped, for [`Self::busy`].
+	calls: AtomicUsize,
+	/// A panic dropping the state, which every later call reports.
+	cleanup: std::sync::OnceLock<MoqError>,
+}
+
+impl<T> Polled<T> {
+	pub fn new(inner: T) -> Self {
+		Self {
+			state: kio::Bridge::new(Some(inner)),
+			cancel: kio::Producer::new(()),
+			driver: Background::default(),
+			calls: AtomicUsize::new(0),
+			cleanup: Default::default(),
+		}
+	}
+
+	/// End every call with the owner's failure, as [`Task::supervised`] does.
+	pub fn supervised(mut self, driver: Background) -> Self {
+		self.driver = driver;
+		self
+	}
+
+	fn check(&self) -> Result<(), MoqError> {
+		self.driver.check()?;
+		match self.cleanup.get() {
+			Some(err) => Err(err.clone()),
+			None => Ok(()),
+		}
+	}
+
+	/// Poll `poll` against the state until it is ready.
+	///
+	/// Resolves [`MoqError::Cancelled`] once [`Self::cancel`] or [`shutdown`] has run, and the
+	/// owner's error once it fails. `poll` must leave the state consistent at every return,
+	/// since another call may poll it before this one polls again.
+	pub async fn wait<R>(
+		&self,
+		mut poll: impl FnMut(&mut T, &kio::Waiter) -> Poll<Result<R, MoqError>>,
+	) -> Result<R, MoqError> {
+		self.calls.fetch_add(1, Ordering::Relaxed);
+		let _call = Call(&self.calls);
+		// The waiter this call polls the state with, on the bridge's waker.
+		let mut park = kio::Park::default();
+		let result = host(kio::wait(|waiter| self.poll(waiter, &mut park, &mut poll))).await;
+		// A driver can fail after the poll's check, then close the state this read sees.
+		self.check()?;
+		result
+	}
+
+	fn poll<R>(
+		&self,
+		waiter: &kio::Waiter,
+		park: &mut kio::Park,
+		poll: &mut impl FnMut(&mut T, &kio::Waiter) -> Poll<Result<R, MoqError>>,
+	) -> Poll<Result<R, MoqError>> {
+		let Some(_polling) = Polling::start() else {
+			return Poll::Ready(Err(MoqError::Cancelled));
+		};
+		let _runtime = enter();
+		// Only registers: the signal closes after every in-flight poll, this one included, ends.
+		let _ = runtime().stopped.poll_closed(waiter);
+		if let Poll::Ready(err) = self.driver.poll_failed(waiter) {
+			return Poll::Ready(Err(err));
+		}
+		if let Some(err) = self.cleanup.get() {
+			return Poll::Ready(Err(err.clone()));
+		}
+		if self.cancel.poll_closed(waiter).is_ready() {
+			return Poll::Ready(Err(MoqError::Cancelled));
+		}
+		self.state.poll(waiter, |state, cx| match state.as_mut() {
+			Some(state) => poll(state, park.hold(cx)),
+			None => Poll::Ready(Err(MoqError::Cancelled)),
+		})
+	}
+
+	/// Whether a call is in flight: polled at least once and not yet dropped.
+	pub fn busy(&self) -> bool {
+		self.calls.load(Ordering::Relaxed) > 0
+	}
+
+	/// Read the state synchronously, or `None` once it is gone.
+	pub fn peek<R>(&self, f: impl FnOnce(&T) -> R) -> Option<R> {
+		self.state.lock().as_ref().map(f)
+	}
+
+	/// Modify the state synchronously, between polls, or `None` once it is gone.
+	pub fn peek_mut<R>(&self, f: impl FnOnce(&mut T) -> R) -> Option<R> {
+		self.state.lock().as_mut().map(f)
+	}
+
+	/// Whether [Self::cancel] or [Self::take] has run.
+	pub fn is_cancelled(&self) -> bool {
+		self.state.lock().is_none()
+	}
+
+	/// Move the state to a new owner, ending this handle as [Self::cancel] would.
+	///
+	/// `check` sees the state first, and an error there leaves this handle untouched.
+	/// [`MoqError::Cancelled`] once the state is gone.
+	pub fn take(&self, check: impl FnOnce(&T) -> Result<(), MoqError>) -> Result<T, MoqError> {
+		self.check()?;
+		let mut state = self.state.lock();
+		check(state.as_ref().ok_or(MoqError::Cancelled)?)?;
+		let inner = state.take().ok_or(MoqError::Cancelled)?;
+		drop(state);
+		let _ = self.cancel.close();
+		Ok(inner)
+	}
+
+	/// Cancel all current and future calls and drop the state before returning.
+	///
+	/// Calls resolve [MoqError::Cancelled]; later calls report a panic dropping the state.
+	/// Terminal: there is no way back from here, and the state is gone rather than idle.
+	pub fn cancel(&self) {
+		let _ = self.cancel.close();
+		let state = self.state.lock().take();
+		self.release(state);
+	}
+
+	/// Drop `state` inside the runtime, so the reactor unregisters whatever it held, and keep
+	/// a panic for later calls rather than unwinding into the caller's.
+	fn release(&self, state: Option<T>) {
+		let Some(state) = state else { return };
+		let polling = Polling::start();
+		let _runtime = polling.as_ref().map(|_| enter());
+		if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(state))).is_err() {
+			let _ = self
+				.cleanup
+				.set(crate::session::map_closed_error(moq_tokio::Error::Panic));
+		}
+	}
+}
+
+impl<T> Drop for Polled<T> {
 	fn drop(&mut self) {
-		self.0.abort();
+		let state = self.state.get_mut().take();
+		self.release(state);
 	}
 }
 
-/// Run a future to completion off the caller's thread, mapping its error into [`MoqError`].
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) async fn detached<F, T, E>(future: F) -> Result<T, MoqError>
-where
-	F: Future<Output = Result<T, E>> + Send + 'static,
-	T: Send + 'static,
-	E: Into<MoqError> + Send + 'static,
-{
-	let task = runtime().spawn(async move {
-		moq_tokio::panic::isolate(async move { future.await.map_err(Into::into) })
-			.await
-			.unwrap_or_else(|| Err(crate::session::map_closed_error(moq_tokio::Error::Panic)))
-	});
-	let _abort = AbortOnDrop(task.abort_handle());
-	match task.await {
-		Ok(result) => result,
-		Err(e) if e.is_cancelled() => Err(MoqError::Cancelled),
-		Err(e) => Err(e.into()),
-	}
-}
+/// Counts one [`Polled::wait`] call until it is dropped.
+struct Call<'a>(&'a AtomicUsize);
 
-/// Await a future in place: wasm32 has no other thread to hand it to.
-#[cfg(target_arch = "wasm32")]
-pub(crate) async fn detached<F, T, E>(future: F) -> Result<T, MoqError>
-where
-	F: Future<Output = Result<T, E>> + 'static,
-	T: 'static,
-	E: Into<MoqError> + 'static,
-{
-	future.await.map_err(Into::into)
+impl Drop for Call<'_> {
+	fn drop(&mut self) {
+		self.0.fetch_sub(1, Ordering::Relaxed);
+	}
 }
 
 /// Serializes access to `T` across the FFI boundary, and releases it on cancel.
@@ -444,7 +797,7 @@ where
 /// The state is dropped rather than parked once [Self::cancel] runs, so a handle the foreign
 /// side has cancelled but not yet released stops holding whatever it wrapped: a subscription,
 /// a codec session.
-pub(crate) struct Task<T: kio::MaybeSend + 'static> {
+pub(crate) struct Task<T: Send + 'static> {
 	/// `None` once cancelled, which is what makes running against a released state
 	/// unrepresentable rather than merely documented.
 	state: Arc<tokio::sync::Mutex<Option<T>>>,
@@ -456,7 +809,7 @@ pub(crate) struct Task<T: kio::MaybeSend + 'static> {
 /// Exclusive access to a [Task]'s state, held for as long as the guard lives.
 pub(crate) type Guard<T> = tokio::sync::OwnedMappedMutexGuard<Option<T>, T>;
 
-impl<T: kio::MaybeSend + 'static> Task<T> {
+impl<T: Send + 'static> Task<T> {
 	pub fn new(inner: T) -> Self {
 		Self {
 			state: Arc::new(tokio::sync::Mutex::new(Some(inner))),
@@ -472,8 +825,7 @@ impl<T: kio::MaybeSend + 'static> Task<T> {
 	}
 
 	/// Try to lock the state synchronously. Returns `None` if a task is running or it was cancelled.
-	// Only the native server and its requests read state synchronously.
-	#[cfg(not(target_arch = "wasm32"))]
+	// Only the server and its requests read state synchronously.
 	pub fn lock(&self) -> Option<Guard<T>> {
 		let guard = self.state.clone().try_lock_owned().ok()?;
 
@@ -490,7 +842,6 @@ impl<T: kio::MaybeSend + 'static> Task<T> {
 
 	/// Whether [Self::cancel] has run, which [Self::lock] folds into the same `None` as a busy
 	/// state. The state may still be a moment away from being dropped.
-	#[cfg(not(target_arch = "wasm32"))]
 	pub fn is_cancelled(&self) -> bool {
 		*self.cancel.borrow()
 	}
@@ -501,7 +852,6 @@ impl<T: kio::MaybeSend + 'static> Task<T> {
 	/// Configuration must apply or fail, so this splits them: [`MoqError::Busy`]
 	/// while a [`Self::run`] owns the state, [`MoqError::Cancelled`] after
 	/// [`Self::cancel`].
-	#[cfg(not(target_arch = "wasm32"))]
 	pub fn configure(&self) -> Result<Guard<T>, MoqError> {
 		self.driver.check()?;
 		if let Some(cleanup) = self.cleanup.lock().unwrap().as_ref() {
@@ -532,26 +882,10 @@ impl<T: kio::MaybeSend + 'static> Task<T> {
 		if let Some(cleanup) = self.cleanup.lock().unwrap().as_ref() {
 			cleanup.check()?;
 		}
-		let result = {
-			let drive = self
-				.driver
-				.watch(Self::drive(self.cancel.subscribe(), self.state.clone(), f));
-			let mut run = std::pin::pin!(async {
-				tokio::select! {
-					biased;
-					_ = stopped() => Err(MoqError::Cancelled),
-					result = drive => result,
-				}
-			});
-			std::future::poll_fn(|cx| {
-				let Some(_polling) = Polling::start() else {
-					return std::task::Poll::Ready(Err(MoqError::Cancelled));
-				};
-				let _runtime = enter();
-				run.as_mut().poll(cx)
-			})
-			.await
-		};
+		let result = run(self
+			.driver
+			.watch(Self::drive(self.cancel.subscribe(), self.state.clone(), f)))
+		.await;
 		// A foreign future may stop polling while holding the state, so cancellation cannot
 		// wait for cleanup. Its next call still reports a completed cleanup panic.
 		self.driver.check()?;
@@ -587,31 +921,6 @@ impl<T: kio::MaybeSend + 'static> Task<T> {
 		}
 	}
 
-	/// Move the state to a new owner, ending this handle as [Self::cancel] would.
-	///
-	/// `check` sees the state first, and an error there leaves this handle untouched.
-	/// [`MoqError::Busy`] while a [Self::run] owns the state, [`MoqError::Cancelled`] after
-	/// [Self::cancel].
-	pub fn take(&self, check: impl FnOnce(&T) -> Result<(), MoqError>) -> Result<T, MoqError> {
-		self.driver.check()?;
-		if let Some(cleanup) = self.cleanup.lock().unwrap().as_ref() {
-			cleanup.check()?;
-		}
-		if *self.cancel.borrow() {
-			return Err(MoqError::Cancelled);
-		}
-		let mut state = self.state.clone().try_lock_owned().map_err(|_| MoqError::Busy)?;
-		// Re-read under the lock, as `lock` does: a cancel we don't see here has not taken the state.
-		if *self.cancel.borrow() {
-			return Err(MoqError::Cancelled);
-		}
-		check(state.as_ref().ok_or(MoqError::Cancelled)?)?;
-		let inner = state.take().ok_or(MoqError::Cancelled)?;
-		// The state is already gone, so this only fails later runs; nothing is left to drop.
-		self.cancel.send_replace(true);
-		Ok(inner)
-	}
-
 	/// Cancel all current and future [Self::run] calls and drop the state.
 	///
 	/// Calls return [MoqError::Cancelled]; later calls report a completed cleanup panic.
@@ -637,14 +946,87 @@ impl<T: kio::MaybeSend + 'static> Task<T> {
 	}
 }
 
-impl<T: kio::MaybeSend + 'static> Drop for Task<T> {
+impl<T: Send + 'static> Drop for Task<T> {
 	fn drop(&mut self) {
 		self.cancel();
 	}
 }
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(test)]
 mod tests {
+
+	/// Teardown includes pending submissions and children that never reached their first
+	/// poll. One panicking destructor must not prevent the rest from being released.
+	#[tokio::test]
+	async fn root_shutdown_releases_every_child_and_refuses_late_work() {
+		struct Tracked {
+			dropped: Arc<AtomicUsize>,
+			panics: bool,
+		}
+		impl Drop for Tracked {
+			fn drop(&mut self) {
+				self.dropped.fetch_add(1, Ordering::SeqCst);
+				assert!(!self.panics, "injected child teardown panic");
+			}
+		}
+		let dropped = Arc::new(AtomicUsize::new(0));
+		let mut root = Root {
+			pending: kio::Shared::new(Some(Vec::new())),
+			children: kio::Tasks::new(),
+		};
+		let mut completions = Vec::new();
+		for panics in [true, false, false] {
+			let state = Tracked {
+				dropped: dropped.clone(),
+				panics,
+			};
+			let result = kio::Producer::new(None);
+			completions.push(Background {
+				result: Some(result.consume()),
+			});
+			root.pending.lock().as_mut().unwrap().push(Child {
+				future: Some(Box::pin(async move {
+					let _state = state;
+					std::future::pending().await
+				})),
+				result,
+			});
+		}
+		assert!(root.poll(&kio::Waiter::noop()).is_pending());
+		// A submission not yet enrolled in the child set must be released too.
+		let state = Tracked {
+			dropped: dropped.clone(),
+			panics: false,
+		};
+		root.pending.lock().as_mut().unwrap().push(Child {
+			future: Some(Box::pin(async move {
+				drop(state);
+				Ok(())
+			})),
+			result: kio::Producer::new(None),
+		});
+		let pending = root.pending.clone();
+		drop(root);
+		assert_eq!(dropped.load(Ordering::SeqCst), 4);
+		assert!(pending.read().is_none());
+		assert!(matches!(completions[0].finished().await, Err(MoqError::Task { .. })));
+		for completion in &completions[1..] {
+			assert!(matches!(completion.finished().await, Err(MoqError::Cancelled)));
+		}
+
+		let runtime = Runtime::new(false);
+		runtime.shutdown();
+		let state = Tracked {
+			dropped: dropped.clone(),
+			panics: false,
+		};
+		let late = runtime.background(async move {
+			drop(state);
+			Ok(())
+		});
+		assert_eq!(dropped.load(Ordering::SeqCst), 5);
+		assert!(matches!(late.finished().await, Err(MoqError::Cancelled)));
+	}
 
 	#[tokio::test]
 	async fn a_driver_teardown_panic_reaches_its_owner() {
@@ -697,10 +1079,11 @@ mod tests {
 		let (release, released) = std::sync::mpsc::channel();
 		let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
 		let callback = finished.clone();
-		runtime.spawn(async move {
+		runtime.background(async move {
 			entered.send(()).unwrap();
 			released.recv().unwrap();
 			callback.store(true, std::sync::atomic::Ordering::SeqCst);
+			Ok(())
 		});
 		entering.recv().unwrap();
 
@@ -714,13 +1097,11 @@ mod tests {
 
 		// Wait until the first caller has flagged the stop, so it holds the owner lock and is
 		// joining the workers while the callback is still held.
-		let mut stopped = runtime.stopped.subscribe();
 		let first = std::thread::spawn(shutdown(runtime.clone(), finished.clone()));
 		tokio::runtime::Builder::new_current_thread()
 			.build()
 			.unwrap()
-			.block_on(stopped.wait_for(|&stopped| stopped))
-			.unwrap();
+			.block_on(kio::wait(|waiter| runtime.stopped.poll_closed(waiter)));
 
 		let (started, starting) = std::sync::mpsc::channel();
 		let second = std::thread::spawn({
@@ -741,6 +1122,114 @@ mod tests {
 		runtime.shutdown();
 	}
 
+	/// A host continuation that blocks once woken from a root child, as one resumed inline by
+	/// Kotlin's `Dispatchers.Unconfined` can, holds neither the root nor its other children.
+	#[test]
+	fn a_blocking_host_continuation_does_not_hold_the_root() {
+		/// The host side of a call: woken, it reports entering and blocks until released.
+		struct Continuation {
+			entered: std::sync::Mutex<Option<std::sync::mpsc::Sender<std::thread::ThreadId>>>,
+			release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+		}
+		impl std::task::Wake for Continuation {
+			fn wake(self: Arc<Self>) {
+				self.wake_by_ref();
+			}
+			fn wake_by_ref(self: &Arc<Self>) {
+				if let Some(entered) = self.entered.lock().unwrap().take() {
+					entered.send(std::thread::current().id()).unwrap();
+					let _ = self.release.lock().unwrap().recv();
+				}
+			}
+		}
+
+		let runtime = Runtime::new(false);
+		let ready = kio::Producer::new(false);
+		let consumer = ready.consume();
+		let mut call = Box::pin(host(kio::wait(|waiter| {
+			consumer.poll(waiter, |ready| if **ready { Poll::Ready(()) } else { Poll::Pending })
+		})));
+		let (entered, entering) = std::sync::mpsc::channel();
+		let (release, released) = std::sync::mpsc::channel();
+		let waker = Waker::from(Arc::new(Continuation {
+			entered: std::sync::Mutex::new(Some(entered)),
+			release: std::sync::Mutex::new(released),
+		}));
+		assert!(call.as_mut().poll(&mut Context::from_waker(&waker)).is_pending());
+
+		// A root child wakes the parked call; its continuation enters and stays.
+		let (root, rooted) = std::sync::mpsc::channel();
+		runtime.background(async move {
+			root.send(std::thread::current().id()).unwrap();
+			*ready.write().ok().unwrap() = true;
+			std::future::pending().await
+		});
+		let root = rooted
+			.recv_timeout(Duration::from_secs(5))
+			.expect("the root polls its child");
+		let continuation = entering
+			.recv_timeout(Duration::from_secs(5))
+			.expect("the continuation is woken");
+		assert_ne!(continuation, root, "the continuation ran inside the root");
+
+		// Another child still runs to completion while the continuation blocks.
+		let sibling = runtime.background(async { Ok(()) });
+		tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.build()
+			.unwrap()
+			.block_on(soon(sibling.finished()))
+			.unwrap();
+
+		release.send(()).unwrap();
+		runtime.shutdown();
+	}
+
+	/// Children released by the root's teardown wake host calls off the root too.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn root_teardown_wakes_host_calls_off_the_root() {
+		struct Record(std::sync::Mutex<std::sync::mpsc::Sender<std::thread::ThreadId>>);
+		impl std::task::Wake for Record {
+			fn wake(self: Arc<Self>) {
+				self.wake_by_ref();
+			}
+			fn wake_by_ref(self: &Arc<Self>) {
+				let _ = self.0.lock().unwrap().send(std::thread::current().id());
+			}
+		}
+
+		let mut root = Root {
+			pending: kio::Shared::new(Some(Vec::new())),
+			children: kio::Tasks::new(),
+		};
+		let held = kio::Producer::new(());
+		let consumer = held.consume();
+		root.pending.lock().as_mut().unwrap().push(Child {
+			future: Some(Box::pin(async move {
+				let _held = held;
+				std::future::pending().await
+			})),
+			result: kio::Producer::new(None),
+		});
+		// Enroll the child, so the teardown below releases it from the child set.
+		assert!(root.poll(&kio::Waiter::noop()).is_pending());
+
+		let mut call = Box::pin(host(kio::wait(|waiter| consumer.poll(waiter, |_| Poll::<()>::Pending))));
+		let (woke, woken) = std::sync::mpsc::channel();
+		let waker = Waker::from(Arc::new(Record(std::sync::Mutex::new(woke))));
+		assert!(call.as_mut().poll(&mut Context::from_waker(&waker)).is_pending());
+
+		drop(root);
+		let woken = woken
+			.recv_timeout(Duration::from_secs(5))
+			.expect("teardown wakes the call");
+		assert_ne!(
+			woken,
+			std::thread::current().id(),
+			"the continuation ran inside the root"
+		);
+	}
+
 	/// A state that reports its own drop, which is what a terminal cancel has to trigger.
 	struct Tracked(Option<tokio::sync::oneshot::Sender<()>>);
 
@@ -757,9 +1246,7 @@ mod tests {
 
 	/// Fail the test instead of hanging when a wakeup goes missing.
 	async fn soon<F: Future>(f: F) -> F::Output {
-		tokio::time::timeout(Duration::from_secs(5), f)
-			.await
-			.expect("timed out")
+		kio::clock::timeout(Duration::from_secs(5), f).await.expect("timed out")
 	}
 
 	#[tokio::test]
@@ -893,49 +1380,215 @@ mod tests {
 		assert!(matches!(err, MoqError::Cancelled));
 	}
 
-	#[tokio::test]
-	async fn take_is_busy_while_a_run_holds_the_lock() {
-		let task = Task::new(7);
-		let (started, running) = tokio::sync::oneshot::channel();
-		let run = task.run(move |state| async move {
-			let _state = state;
-			started.send(()).expect("test should still be waiting");
-			std::future::pending::<Result<(), MoqError>>().await
-		});
-		tokio::pin!(run);
+	/// A cursor over items `0..` behind a [`Polled`], read the way a moq-net consumer is.
+	struct Cursor {
+		/// How many items exist, closed once no more will.
+		produced: kio::Consumer<u32>,
+		/// The next item to take.
+		next: u32,
+	}
 
-		soon(async {
-			tokio::select! {
-				_ = &mut run => panic!("a pending run should not resolve"),
-				started = running => started.expect("the run should start"),
-			}
-		})
-		.await;
-		assert!(matches!(task.take(|_| Ok(())), Err(MoqError::Busy)));
+	fn queue() -> (kio::Producer<u32>, Polled<Cursor>) {
+		let producer = kio::Producer::new(0);
+		let polled = Polled::new(Cursor {
+			produced: producer.consume(),
+			next: 0,
+		});
+		(producer, polled)
+	}
+
+	/// Take the next item, or `None` once every item is taken and no more will come.
+	async fn pop(polled: &Polled<Cursor>) -> Result<Option<u32>, MoqError> {
+		polled
+			.wait(|cursor, waiter| {
+				let next = cursor.next;
+				let available = cursor.produced.poll(waiter, |produced| match **produced > next {
+					true => Poll::Ready(()),
+					false => Poll::Pending,
+				});
+				Poll::Ready(Ok(match ready!(available) {
+					Ok(()) => {
+						cursor.next += 1;
+						Some(next)
+					}
+					Err(_closed) => None,
+				}))
+			})
+			.await
+	}
+
+	/// Poll `future` once with a no-op waker.
+	fn poll_once<F: Future>(future: std::pin::Pin<&mut F>) -> Poll<F::Output> {
+		future.poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
 	}
 
 	#[tokio::test]
-	async fn take_moves_the_state_unless_refused() {
-		let task = Task::new(7);
+	async fn polled_failure_during_a_read_overrides_the_origins_end() {
+		for panicked in [false, true] {
+			let (origin, driver) = moq_net::origin::Producer::new(Default::default());
+			let completed = kio::Producer::new(None);
+			let announced = Polled::new(origin.consume().announced()).supervised(Background {
+				result: Some(completed.consume()),
+			});
+			let mut driver = Some(driver);
+			let result = announced
+				.wait(|announced, waiter| {
+					// The driver completes after supervision was checked, but before the
+					// read sees its teardown. This interleaving must not hide a failure.
+					*completed.write().ok().unwrap() =
+						Some(if panicked { Err(moq_tokio::Error::Panic) } else { Ok(()) });
+					drop(driver.take());
+					Poll::Ready(Ok(ready!(announced.poll_next(waiter))))
+				})
+				.await;
+			if panicked {
+				assert!(matches!(result, Err(MoqError::Task { .. })), "{result:?}");
+			} else {
+				assert!(matches!(result, Ok(None)), "{result:?}");
+			}
+		}
+	}
+
+	#[tokio::test]
+	async fn polled_take_moves_the_state_unless_refused() {
+		let polled = Polled::new(7);
 		assert!(matches!(
-			task.take(|_| Err(MoqError::AlreadyCommitted)),
+			polled.take(|_| Err(MoqError::AlreadyCommitted)),
 			Err(MoqError::AlreadyCommitted)
 		));
 		assert_eq!(
-			task.take(|state| {
-				assert_eq!(*state, 7);
-				Ok(())
-			})
-			.unwrap(),
+			polled
+				.take(|state| {
+					assert_eq!(*state, 7);
+					Ok(())
+				})
+				.unwrap(),
 			7
 		);
 
-		let err = task
-			.run(|_| async { Ok(()) })
+		let err = polled
+			.wait(|_, _| Poll::Ready(Ok(())))
 			.await
-			.expect_err("taken state cannot run");
+			.expect_err("taken state cannot be polled");
 		assert!(matches!(err, MoqError::Cancelled));
-		assert!(matches!(task.take(|_| Ok(())), Err(MoqError::Cancelled)));
+		assert!(matches!(polled.take(|_| Ok(())), Err(MoqError::Cancelled)));
+	}
+
+	#[tokio::test]
+	async fn polled_is_busy_until_a_parked_call_is_dropped() {
+		let (_producer, polled) = queue();
+		assert!(!polled.busy());
+		let mut parked = Box::pin(pop(&polled));
+		assert!(poll_once(parked.as_mut()).is_pending());
+		assert!(polled.busy(), "a parked call is in flight");
+		drop(parked);
+		assert!(!polled.busy());
+	}
+
+	#[tokio::test]
+	async fn polled_cancel_drops_the_state_and_ends_a_parked_call() {
+		let (tx, mut dropped) = tokio::sync::oneshot::channel();
+		let polled = Polled::new(Tracked(Some(tx)));
+		let mut parked = Box::pin(polled.wait(|_, _| Poll::<Result<(), MoqError>>::Pending));
+		assert!(poll_once(parked.as_mut()).is_pending());
+
+		polled.cancel();
+		// Dropped before cancel returns, though the parked call still holds a borrow.
+		assert!(matches!(dropped.try_recv(), Ok(())));
+		assert!(polled.is_cancelled());
+		assert!(matches!(soon(parked).await, Err(MoqError::Cancelled)));
+		assert!(matches!(
+			polled.wait(|_, _| Poll::Ready(Ok(()))).await,
+			Err(MoqError::Cancelled)
+		));
+	}
+
+	#[tokio::test]
+	async fn polled_cleanup_panic_reaches_later_calls() {
+		struct Panics;
+		impl Drop for Panics {
+			fn drop(&mut self) {
+				panic!("injected cleanup panic");
+			}
+		}
+		let polled = Polled::new(Panics);
+		polled.cancel();
+		let result = polled.wait(|_, _| Poll::Ready(Ok(()))).await;
+		assert!(matches!(result, Err(MoqError::Task { .. })), "{result:?}");
+	}
+
+	/// Two calls parked on one handle both wake, and between them take every item once.
+	#[tokio::test]
+	async fn polled_concurrent_calls_take_every_item_once() {
+		let (producer, polled) = queue();
+		let polled = Arc::new(polled);
+		let reader = |polled: Arc<Polled<_>>| {
+			tokio::spawn(async move {
+				let mut items = Vec::new();
+				while let Some(item) = pop(&polled).await.unwrap() {
+					items.push(item);
+				}
+				items
+			})
+		};
+		let first = reader(polled.clone());
+		let second = reader(polled.clone());
+		// Let both park before anything arrives.
+		tokio::task::yield_now().await;
+		for _ in 0..100 {
+			*producer.write().ok().unwrap() += 1;
+			tokio::task::yield_now().await;
+		}
+		assert!(producer.close().is_ok());
+
+		let first = soon(first).await.unwrap();
+		let second = soon(second).await.unwrap();
+		let mut all: Vec<u32> = first.iter().chain(&second).copied().collect();
+		all.sort_unstable();
+		assert_eq!(all, (0..100).collect::<Vec<_>>());
+	}
+
+	/// A state that keeps one waker, as moq-net's track cursor does, still wakes every call
+	/// parked on it, not only the one that polled last.
+	#[tokio::test]
+	async fn polled_one_waker_state_wakes_every_parked_call() {
+		#[derive(Default)]
+		struct OneWaker {
+			ready: bool,
+			waker: Option<std::task::Waker>,
+		}
+		let shared = Arc::new(std::sync::Mutex::new(OneWaker::default()));
+		let polled = Arc::new(Polled::new(shared.clone()));
+		let call = |polled: Arc<Polled<Arc<std::sync::Mutex<OneWaker>>>>| {
+			tokio::spawn(async move {
+				polled
+					.wait(|state, waiter| {
+						let mut state = state.lock().unwrap();
+						if state.ready {
+							return Poll::Ready(Ok(()));
+						}
+						// Replaces the last caller's waker.
+						state.waker = Some(waiter.waker().clone());
+						Poll::Pending
+					})
+					.await
+			})
+		};
+		let first = call(polled.clone());
+		let second = call(polled.clone());
+		for _ in 0..4 {
+			tokio::task::yield_now().await;
+		}
+		assert!(!first.is_finished() && !second.is_finished());
+
+		let waker = {
+			let mut state = shared.lock().unwrap();
+			state.ready = true;
+			state.waker.take().expect("a call parked")
+		};
+		waker.wake();
+		soon(first).await.unwrap().unwrap();
+		soon(second).await.unwrap().unwrap();
 	}
 
 	#[test]

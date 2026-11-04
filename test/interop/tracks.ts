@@ -23,8 +23,9 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 if (input.mode === "answer") {
 	const origin = new OriginProducer();
-	const broadcast = origin.createBroadcast(Path.from("room"));
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(Path.from("room"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	broadcast.createTrack("a", { timescale: Timescale.MILLI, maxAge: Milli(3000), priority: 9, refresh: 4 });
 	broadcast.createTrack("b");
 

@@ -58,11 +58,16 @@ Recommendations for the implementation:
   catalog schema (`js/msf/src/catalog.ts`) accepts a negative `delay` and
   folds it into absent; refuse it on decode instead.
 
+Decided 2026-10-27 (maintainer): this waits only on
+[capped budgets](/quest/m1/audio-jitter-target/capped-budgets.md), not the
+whole [audio jitter target](/quest/m1/audio-jitter-target/README.md) epic,
+whose remaining manual browser proof does not gate reshaping the clock.
+
 ## Required
 
-- [Audio jitter target](/quest/m1/audio-jitter-target/README.md) - the estimator this sits on, and the per-track targets this shape carries
+- [Capped budgets](/quest/m1/audio-jitter-target/capped-budgets.md) - the estimator's browser budgets, re-measured, before this reshapes the clock around them
 
 ## Related
 
-- [Time stretch](/quest/m2/watch-audio-time-stretch.md) - stretching needs a clock to converge toward
+- [Watch](/quest/m1/audio-jitter-target/watch.md) - time-stretches the audio ring toward the clock this produces
 - [Watch worker](/quest/m2/watch-worker.md) - moves `Sync` into a worker afterwards; keep the handles free of main-thread assumptions

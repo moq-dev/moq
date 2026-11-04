@@ -10,9 +10,9 @@ this quest and every `Required` entry that links it.
 
 ## Plan
 
-As of 2026-10-20 `main` carries `assets()` (#4518) but `release` does not, so
-the newest releases (`@moq/watch` 0.6.3, `@moq/publish` 0.5.3) still lack it;
-`@moq/watch` 0.6.3's `exports` has no `./assets/*`. moq.pro's dashboard
+As of 2026-10-25 `main` carries `assets()` (#4518) but `release` does not, so
+the newest releases (`@moq/watch` 0.6.6, `@moq/publish` 0.5.3) still lack it;
+`@moq/watch` 0.6.6's `exports` has no `./assets/*`. moq.pro's dashboard
 adoption of the hosted files lives in moq.pro's package adoption, not here. Check with
 `npm view @moq/watch version` and `npm view @moq/publish version` for a newer
 version, then confirm its `exports` lists `./assets/*`.

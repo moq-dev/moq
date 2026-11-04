@@ -4,26 +4,54 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### The catalog track advertises a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+`Catalog::default_track_info` takes moq-net's new zero default, so the catalog track advertises the live edge only where it advertised no limit. A late joiner still reads the newest snapshot, which never goes stale.
+`container::track_info` still declares `container::MAX_AGE` (30 s) on media tracks.
+
+### Compression moves to the track
+
+`catalog::Compression`, the `compression` field on `JsonConfig` and `BinaryConfig`, `Catalog::COMPRESSED_NAME`, and `catalog::Consumer::compressed` are gone.
+A compressed track is one name with `compress: true` on its `moq_net::track::Info`, and moq-net hands every reader plain frames, so read `catalog.json` with `Consumer::new` whether or not it is compressed.
+`Catalog::default_track_info()` sets `compress`, so a publisher using it compresses `catalog.json`; stop publishing `catalog.json.z`.
+An old catalog's `"compression"` key on a data track lands in the entry's `extra`, and its frames are still app-level DEFLATE nothing here inflates.
+
+### `moq_net::Path` has no lifetime
+
+`catalog` reference fields, `Echo::path`, and `health::Observer` use the lifetime-free `moq_net::path::Relative` and `moq_net::Path`: replace `RelativeOwned` with `Relative` and `PathOwned` with `Path`. `Echo::new` takes `impl Into<Relative>`: pass `Relative::new(s)?` rather than a string. See moq-net's migration for the rest.
+
+### The catalog rendition cap is removed
+
+`catalog::MAX_RENDITIONS` and `Error::TooManyRenditions` are gone: a catalog with any number of renditions is accepted.
+Delete matches on `TooManyRenditions`. An application that wants a limit counts `video.renditions`, `audio.renditions`, and `text.renditions` itself.
+
+### The `media` section replaces the root archive and clock
+
+`catalog::Archive`, `catalog::Timeline`, `Catalog::archive`, and the `timeline` module are gone.
+A catalog with an old root `archive` still parses, with the entry ignored.
+
+`Catalog::clock` moves to `Catalog::media.clock`, serialized as `media.clock` rather than a root `clock`.
+`catalog::MOQ_EPOCH_UNIX_MILLIS` moves to the `clock` module, re-exported at the same path.
+
+`catalog::Media` also carries `join: Option<catalog::Join>`, whose `interval` promises that every audio and video track starts a group at least that often.
+Set it with `catalog.media.join = Join::new(gop)`, which is `None` for a zero `gop`.
+An HLS or DASH export numbers its segments on that grid, so a broadcast without it is not HLS-renderable.
+A root `clock` written by an older publisher is ignored.
+
 ### `Catalog` parses through `FromStr` (#6471)
 
 The inherent `Catalog::from_str` is replaced by `impl FromStr for Catalog`, with the same `Error`.
 Call `json.parse::<Catalog>()`, or bring `std::str::FromStr` into scope to keep calling `Catalog::from_str`.
-
-### Timeline records describe one track
-
-`timeline::Range` is replaced by `Position { group, frame }`. A `Record` has `start` and exclusive `end` positions for its own track instead of a `tracks` map of inclusive group ranges.
-`Record::segment` is `sequence`, and `Record::new` takes the start and end positions. `pts` and `duration` are optional for untimed records.
-`timeline::DEFAULT_NAME` is replaced by `SUFFIX`; construct a per-track name with `timeline::default_name(track)`.
 
 ### Priorities are signed (#6142)
 
 `catalog::Priorities` fields and `container::track_info`'s priority are `i8`, higher first, with 0 unset.
 `PRIORITY` keeps its values (100, 90, 80, 60), which now sit above the unset default instead of below it, so their moq-lite bytes move from 100..60 to 228..188.
 
-### `catalog::Reference` names its epoch (#5699)
+### `catalog::Reference` names its instance (#5699)
 
-Every rendition and data track config gains an optional `epoch` beside `broadcast`, and `Archive` gains `replay_epoch` beside `replay`.
-`Reference` has a new required `epoch()`: an implementor outside this crate returns the entry's epoch, or `None` when it names none.
+Every rendition and data track config gains an optional `instance` beside `broadcast`.
+`Reference` has a new required `instance()`: an implementor outside this crate returns the entry's instance, or `None` when it names none.
 
 ### A lost catalog track is `Error::Moq` (#6114)
 
@@ -43,18 +71,6 @@ It can be absent until the first measurement, change when the source's rate does
 
 `version` is reserved at the catalog root: decoding refuses a catalog newer than this crate reads with `Error::UnsupportedVersion`, and serializing fails if the extension `E` has its own `version` member.
 Rename that member, such as to `app_version`.
-
-### Archive timelines declare a per-track duration (#5715)
-
-`Archive::track` becomes `Archive::timelines`, keyed by each media track name. Each value is `Timeline { track, duration }`, naming that media track's timeline and nominal duration, `None` when untimed.
-Replace `Archive::new(track)` with `Archive::new()` and insert each `Timeline::new(track, duration)`; `duration_max` is removed.
-The archive version is 3 rather than 1. Older catalog shapes are not read as this archive, so update publishers and consumers together.
-
-### Timeline records are optionally timed (#5720)
-
-`timeline::Record::pts` and `duration` are `Option<u64>`, absent on an untimed track.
-Build an untimed record with `Record::untimed(sequence, start, end)`.
-Handle `None` where you read `record.pts` or `record.duration`.
 
 ### One `enabled` flag replaces `stalled` (#4915)
 

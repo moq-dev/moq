@@ -12,11 +12,13 @@ const [address, protocol, mode] = process.argv.slice(2);
 if (!address || !protocol || !["publish", "subscribe"].includes(mode))
 	throw new Error("expected URL ALPN publish|subscribe");
 const origin = new Producer();
-const ages = [undefined, Milli(0), Milli(30_000)];
+// `null` is an explicit unlimited: an omitted max age is the zero authored default.
+const ages = [null, Milli(0), Milli(30_000)];
 if (mode === "publish") {
-	const broadcast = origin.createBroadcast(Path.from("age"));
+	const broadcastPublication = origin.createBroadcast(Path.from("age"));
+	const broadcast = broadcastPublication.broadcast;
 	for (const [i, maxAge] of ages.entries()) broadcast.createTrack(String(i), { maxAge });
-	broadcast.announce();
+	broadcastPublication.announce();
 }
 const url = new URL(address);
 const transport = new Session(url, {
@@ -46,7 +48,8 @@ try {
 		assert(broadcast);
 		for (const [i, age] of ages.entries()) {
 			const track = broadcast.track(String(i)).subscribe();
-			assert.equal((await track.info()).maxAge, age, `${protocol} track ${i}`);
+			// A track received without a max age has no publisher limit: absent, not null.
+			assert.equal((await track.info()).maxAge, age ?? undefined, `${protocol} track ${i}`);
 			track.close();
 		}
 		request.close();

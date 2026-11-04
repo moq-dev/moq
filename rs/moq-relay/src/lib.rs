@@ -12,7 +12,6 @@
 
 #![warn(missing_docs)]
 
-pub mod acme;
 pub mod auth;
 pub mod cache;
 /// Joining other relays into a cluster that shares one origin.
@@ -55,8 +54,11 @@ pub const DEFAULT_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from
 
 /// Resolve an optional stats tier label. An absent or empty label selects the
 /// default unprefixed tier.
-fn configured_tier(label: Option<String>) -> moq_net::stats::Tier {
-	label.map(moq_net::stats::Tier::new).unwrap_or_default()
+fn configured_tier(label: Option<String>) -> Result<moq_net::stats::Tier, moq_net::path::Error> {
+	match label {
+		Some(label) => Ok(moq_net::stats::Tier::new(moq_net::Path::new(&label)?)),
+		None => Ok(Default::default()),
+	}
 }
 
 pub use config::*;

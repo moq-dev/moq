@@ -27,6 +27,7 @@ with each AU in its own PES, a PCR packet between AUs and nulls elsewhere.
 
     synthetic           as built                                      must pass
     two AUs, one PES    an AU without its own timestamp               refused
+    AVC/HEVC timed pairs two AUs per PES with proportional POC timing must pass
     adaptation burst    four payload-less packets after an AU         TB overflow (they cost TB)
     duplicate packet    one AU's first packet sent twice (2.4.3.3)    must pass (TB only, not MB)
     teletext burst      eight teletext packets back to back           TB overflow (EN 300 472's 480 B,
@@ -415,24 +416,66 @@ def encoded(audio: bool):
     """A builder for an 8 s level-default AVC reference, optionally with stereo AAC."""
 
     def build(path: str) -> str:
-        command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                   "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=25"]
+        command = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x240:rate=25",
+        ]
         if audio:
             command += ["-f", "lavfi", "-i", "sine=frequency=1000:sample_rate=48000"]
         command += ["-map", "0:v"] + (["-map", "1:a"] if audio else [])
-        command += ["-t", "8", "-c:v", "libx264", "-threads", "2",
-                    "-preset", "ultrafast", "-tune", "zerolatency",
-                    "-profile:v", "baseline", "-level:v", "2.0", "-b:v", "1M",
-                    "-x264-params", "keyint=25:min-keyint=25:scenecut=0:aud=1:repeat-headers=1:nal-hrd=none"]
+        command += [
+            "-t",
+            "8",
+            "-c:v",
+            "libx264",
+            "-threads",
+            "2",
+            "-preset",
+            "ultrafast",
+            "-tune",
+            "zerolatency",
+            "-profile:v",
+            "baseline",
+            "-level:v",
+            "2.0",
+            "-b:v",
+            "1M",
+            "-x264-params",
+            "keyint=25:min-keyint=25:scenecut=0:aud=1:repeat-headers=1:nal-hrd=none",
+        ]
         if audio:
             command += ["-c:a", "aac", "-b:a", "128k", "-ac", "2"]
         # The 0.1 s lead avoids underflow without filling AAC's 3584-byte B;
         # the 2 Mb/s mux rate also keeps audio packet bursts within its TB drain.
-        command += ["-f", "mpegts", "-muxrate", "2000000", "-pcr_period", "20",
-                    "-pes_payload_size", "0", "-muxdelay", "0.1", "-muxpreload", "0.1", path]
+        command += [
+            "-f",
+            "mpegts",
+            "-muxrate",
+            "2000000",
+            "-pcr_period",
+            "20",
+            "-pes_payload_size",
+            "0",
+            "-muxdelay",
+            "0.1",
+            "-muxpreload",
+            "0.1",
+            path,
+        ]
         subprocess.run(command, check=True)
-        probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_name",
-                                "-of", "json", path], capture_output=True, text=True, check=True)
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "stream=codec_name", "-of", "json", path],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
         codecs = [stream["codec_name"] for stream in json.loads(probe.stdout)["streams"]]
         if codecs != (["h264", "aac"] if audio else ["h264"]):
             raise RuntimeError(f"generated reference has unexpected codecs: {codecs}")
@@ -487,6 +530,109 @@ def audio(frames: int, decode_s: float, enhanced: bool = False):
     return build
 
 
+def timed_video_pairs(kind: str, hrd: bool = True, reordered: bool = False):
+    """Two pictures per PES, with a declared proportional POC clock.
+
+    Removing alternate PES headers preserves every ES byte at its original
+    packet/byte arrival position: the removed header becomes adaptation stuffing.
+    """
+
+    def build(path: str) -> str:
+        source = path + ".source.ts"
+        command = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=32x32:rate=25",
+            "-t",
+            "2",
+            "-an",
+            "-c:v",
+            "libx264" if kind == "avc" else "libx265",
+            "-preset",
+            "ultrafast",
+            "-tune",
+            "zerolatency",
+            "-threads",
+            "1",
+            "-b:v",
+            "100k",
+            "-maxrate",
+            "1M",
+            "-bufsize",
+            "1M",
+        ]
+        if kind == "avc":
+            command += [
+                "-profile:v",
+                "high" if reordered else "baseline",
+                "-level:v",
+                "2.0",
+                "-x264-params",
+                "keyint=50:min-keyint=50:scenecut=0:aud=1:force-cfr=1"
+                + (":bframes=3:b-adapt=0" if reordered else ":bframes=0")
+                + (":nal-hrd=vbr" if hrd else ""),
+                "-bsf:v",
+                "h264_metadata=fixed_frame_rate_flag=1",
+            ]
+        else:
+            command += [
+                "-x265-params",
+                "keyint=50:min-keyint=50:scenecut=0:aud=1:level-idc=2:pools=none:frame-threads=1:log-level=error"
+                + (":bframes=3:b-adapt=0:rc-lookahead=4" if reordered else ":bframes=0")
+                + (":hrd=1" if hrd else ""),
+                "-bsf:v",
+                "hevc_metadata=tick_rate=25:num_ticks_poc_diff_one=1",
+            ]
+        command += [
+            "-f",
+            "mpegts",
+            "-muxrate",
+            "500000",
+            "-pcr_period",
+            "20",
+            "-muxdelay",
+            "0.1",
+            "-muxpreload",
+            "0.1",
+            source,
+        ]
+        subprocess.run(command, check=True)
+        with open(source, "rb") as handle:
+            data = handle.read()
+        out = bytearray()
+        pictures = 0
+        for at in range(0, len(data), 188):
+            pkt = data[at : at + 188]
+            pid = (pkt[1] & 31) * 256 + pkt[2]
+            start = 4 + (1 + pkt[4] if pkt[3] & 0x20 else 0)
+            if kind == "avc" and pid == 0x1000 and pkt[1] & 0x40:
+                descriptor = bytes.fromhex("2a027edf")
+                body = bytes.fromhex("e100f000 1be100f004") + descriptor
+                pmt = section(2, 1, body)
+                pkt = packet(pid, pkt[3] & 15, b"\0" + pmt, pusi=True)
+            elif pid == 0x100 and pkt[1] & 0x40 and pkt[3] & 0x10:
+                if pictures % 2:
+                    body = pkt[start + 9 + pkt[start + 8] :]
+                    original_af = pkt[5:start] if pkt[3] & 0x20 else b"\0"
+                    field = 183 - len(body)
+                    af = original_af.ljust(field, b"\xff")
+                    pkt = bytes([pkt[0], pkt[1] & ~0x40, pkt[2], 0x30 | (pkt[3] & 15), field]) + af + body
+                pictures += 1
+            out.extend(pkt)
+        assert pictures == 50
+        with open(path, "wb") as handle:
+            handle.write(out)
+        return path
+
+    return build
+
+
 # A packet's byte j leaves an empty TB (j + 1) x 4 us after the packet starts arriving.
 BYTE_S = 8 / compliance.AUDIO_RX
 # Frame 0 ends at PES byte 14 + 576 = 590, byte 41 of the fourth packet: decode it 0.3 ms
@@ -512,6 +658,12 @@ CASES = [
     ("AAC reference", encoded(True), "pass"),
     ("synthetic", built("synthetic"), "pass"),
     ("two AUs, one PES", built("two AUs, one PES"), "several access units"),
+    ("AVC timed pairs", timed_video_pairs("avc"), "pass"),
+    ("HEVC timed pairs", timed_video_pairs("hevc"), "pass"),
+    ("AVC reordered pairs", timed_video_pairs("avc", reordered=True), "pass"),
+    ("HEVC reordered pairs", timed_video_pairs("hevc", reordered=True), "pass"),
+    ("AVC no removal time", timed_video_pairs("avc", False), "HRD picture timing"),
+    ("HEVC no removal time", timed_video_pairs("hevc", False), "HRD picture timing"),
     ("adaptation burst", built("adaptation burst"), {"TB overflow"}),
     ("duplicate packet", built("duplicate packet"), "pass"),
     ("teletext burst", built("teletext burst"), {"TB overflow"}),
@@ -542,6 +694,7 @@ CASES = [
     ("DVB E-AC-3 unsplit PES", audio(16, 0.1, enhanced=True), {"B overflow"}),
 ]
 
+
 def grade(path: str) -> dict[str, compliance.Check]:
     """compliance.py's verdicts on one file, by check name."""
     return {check.name: check for check in compliance.analyze(path)}
@@ -553,8 +706,14 @@ def main(tmp: str) -> int:
     for n, (name, build, expected) in enumerate(CASES):
         checks = grade(build(os.path.join(tmp, f"{n}.ts")))
         with open(os.path.join(tmp, f"{n}.json"), "w") as report:
-            json.dump({key: {"status": value.status.value, "detail": value.detail, "metrics": value.metrics}
-                       for key, value in checks.items()}, report, indent=2)
+            json.dump(
+                {
+                    key: {"status": value.status.value, "detail": value.detail, "metrics": value.metrics}
+                    for key, value in checks.items()
+                },
+                report,
+                indent=2,
+            )
         check = checks["tstd"]
         streams = check.metrics.get("streams", {})
         seen = {v for s in streams.values() for v in s["violations"]}

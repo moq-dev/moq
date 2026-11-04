@@ -15,11 +15,11 @@ concurrency:
 jobs:
   uring:
     name: io_uring
-    # This image provides a 6.12+ kernel; MOQ_STRICT fails the tests if that changes.
+    # This image provides a 6.12+ kernel; CI_STRICT fails the tests if that changes.
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
     env:
-      MOQ_STRICT: 1
+      CI_STRICT: 1
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

@@ -8,45 +8,31 @@ use serde::de::DeserializeOwned;
 use super::Config;
 use crate::Result;
 
-/// Decodes JSON records from frame payloads, sharing one DEFLATE window across the log.
+/// Decodes JSON records from frame payloads.
 ///
 /// The track-free core of [`Consumer`](super::Consumer), and the mirror of
-/// [`Encoder`](super::Encoder). Payloads must be fed in the order they were encoded, since each one
-/// builds on the window the earlier ones left behind. Call [`reset`](Self::reset) at a group
-/// boundary, matching the encoder.
+/// [`Encoder`](super::Encoder).
 pub struct Decoder<T> {
-	/// The DEFLATE decoder (one window for the whole log), `Some` while decompressing.
-	flate: Option<moq_flate::Decoder>,
-	compression: bool,
 	/// Reused key buffers for refusing a record that repeats a key.
 	check: RefCell<crate::strict::Scratch>,
 	_marker: PhantomData<fn() -> T>,
 }
 
 impl<T> Decoder<T> {
-	/// Create a decoder with a cold window.
-	pub fn new(config: Config) -> Self {
+	/// Create a decoder.
+	pub fn new(_config: Config) -> Self {
 		Self {
-			flate: config.compression.is_deflate().then(moq_flate::Decoder::new),
-			compression: config.compression.is_deflate(),
 			check: RefCell::default(),
 			_marker: PhantomData,
 		}
-	}
-
-	/// Start a cold DEFLATE window, for a caller that has just moved to a new group.
-	pub fn reset(&mut self) {
-		self.flate = self.compression.then(moq_flate::Decoder::new);
 	}
 }
 
 impl<T: DeserializeOwned> Decoder<T> {
 	/// Decode the next frame payload back into a record.
 	pub fn decode(&mut self, payload: &[u8]) -> Result<T> {
-		let inflated = self.flate.as_mut().map(|flate| flate.frame(payload)).transpose()?;
-		let plain = inflated.as_deref().unwrap_or(payload);
-		crate::strict::check(plain, &self.check)?;
-		Ok(serde_json::from_slice(plain)?)
+		crate::strict::check(payload, &self.check)?;
+		Ok(serde_json::from_slice(payload)?)
 	}
 }
 
@@ -54,66 +40,24 @@ impl<T: DeserializeOwned> Decoder<T> {
 mod test {
 	use super::super::{Config, Encoder};
 	use super::*;
-	use crate::Compression;
 	use serde_json::{Value, json};
 
-	fn cfg(compression: bool) -> Config {
-		Config {
-			compression: if compression {
-				Compression::Deflate
-			} else {
-				Compression::None
-			},
-		}
-	}
-
-	/// Round-trip a sequence of records through an encoder and decoder.
-	fn roundtrip(compression: bool, values: &[Value]) -> Vec<Value> {
-		let mut encoder = Encoder::<Value>::new(cfg(compression));
-		let mut decoder = Decoder::<Value>::new(cfg(compression));
-
-		values
-			.iter()
-			.map(|value| {
-				let record = encoder.encode(value).unwrap();
-				let decoded = decoder.decode(record.payload()).unwrap();
-				record.commit();
-				decoded
-			})
-			.collect()
-	}
-
 	#[test]
-	fn compressed_roundtrip_in_order() {
-		let values: Vec<Value> = (0..20).map(|n| json!({ "group": n, "pts": n * 2_000 })).collect();
-		assert_eq!(roundtrip(true, &values), values);
-	}
-
-	/// A caller that rolls a group has to restart both windows, or the new group's frames decode
-	/// against context the decoder on the other side never received.
-	#[test]
-	fn reset_starts_a_cold_window_on_both_sides() {
-		let mut encoder = Encoder::<Value>::new(cfg(true));
-		let mut decoder = Decoder::<Value>::new(cfg(true));
-
-		for n in 0..4 {
-			let record = encoder.encode(&json!({ "n": n })).unwrap();
-			assert_eq!(decoder.decode(record.payload()).unwrap(), json!({ "n": n }));
+	fn roundtrip_in_order() {
+		let mut encoder = Encoder::<Value>::new(Config::default());
+		let mut decoder = Decoder::<Value>::new(Config::default());
+		for n in 0..20 {
+			let value = json!({ "group": n, "pts": n * 2_000 });
+			let record = encoder.encode(&value).unwrap();
+			assert_eq!(decoder.decode(record.payload()).unwrap(), value);
 			record.commit();
 		}
-
-		encoder.reset();
-		decoder.reset();
-
-		let record = encoder.encode(&json!({ "n": 99 })).unwrap();
-		assert_eq!(decoder.decode(record.payload()).unwrap(), json!({ "n": 99 }));
-		record.commit();
 	}
 
 	#[test]
 	fn duplicate_keys_are_refused() {
 		let vectors = crate::strict::test::vectors();
-		let mut decoder = Decoder::<Value>::new(cfg(false));
+		let mut decoder = Decoder::<Value>::new(Config::default());
 		for payload in &vectors.refused {
 			let err = decoder.decode(payload.as_bytes()).unwrap_err();
 			assert!(matches!(err, crate::Error::DuplicateKey), "{payload}: {err}");
@@ -122,52 +66,15 @@ mod test {
 			decoder.decode(payload.as_bytes()).unwrap();
 		}
 	}
-}
 
-#[cfg(test)]
-mod desync_test {
-	use super::super::{Config, Encoder};
-	use super::*;
-	use crate::Compression;
-	use serde_json::{Value, json};
-
-	fn deflate() -> Config {
-		Config {
-			compression: Compression::Deflate,
-		}
-	}
-
-	/// A compressed record that never reached the wire leaves the window ahead of the consumer, and a
-	/// log has no keyframe to resynchronize on. Continuing would emit frames nothing can decode, so
-	/// the encoder refuses until the caller rolls a new group and resets.
+	/// A record carries no shared state, so a dropped one leaves a gap in the log rather than an
+	/// undecodable stream, and the encoder keeps going.
 	#[test]
-	fn an_uncommitted_compressed_record_stops_the_encoder() {
-		let mut encoder = Encoder::<Value>::new(deflate());
-		encoder.encode(&json!({ "n": 0 })).unwrap().commit();
-
-		// This one fails to write, so the caller never commits it.
-		drop(encoder.encode(&json!({ "n": 1 })).unwrap());
-
-		assert!(matches!(encoder.encode(&json!({ "n": 2 })), Err(crate::Error::Desync)));
-
-		// Rolling a new group gives the consumer a cold window too, so the reset clears it.
-		encoder.reset();
-		let record = encoder.encode(&json!({ "n": 2 })).unwrap();
-		let mut decoder = Decoder::<Value>::new(deflate());
-		assert_eq!(decoder.decode(record.payload()).unwrap(), json!({ "n": 2 }));
-		record.commit();
-	}
-
-	/// Without compression a record carries no shared state, so a dropped one leaves a gap in the log
-	/// rather than an undecodable stream, and the encoder keeps going.
-	#[test]
-	fn an_uncommitted_plaintext_record_does_not_stop_the_encoder() {
+	fn an_uncommitted_record_does_not_stop_the_encoder() {
 		let mut encoder = Encoder::<Value>::new(Config::default());
 		drop(encoder.encode(&json!({ "n": 0 })).unwrap());
 
-		let record = encoder
-			.encode(&json!({ "n": 1 }))
-			.expect("plaintext records are independent");
+		let record = encoder.encode(&json!({ "n": 1 })).expect("records are independent");
 		let mut decoder = Decoder::<Value>::new(Config::default());
 		assert_eq!(decoder.decode(record.payload()).unwrap(), json!({ "n": 1 }));
 		record.commit();

@@ -12,7 +12,6 @@ mod version;
 #[cfg(feature = "async")]
 mod writer;
 
-#[cfg(feature = "async")]
 pub use codes::*;
 pub use decode::*;
 pub use encode::*;
@@ -38,6 +37,19 @@ pub(crate) fn decode_buf<B: bytes::Buf, V: Into<Form> + Copy, T>(
 	let value = decode(&mut r, version)?;
 	let used = chunk.len() - r.remaining();
 	buf.advance(used);
+	Ok(value)
+}
+
+/// [`decode_buf`] from a slice, so the value may borrow from it.
+#[cfg(test)]
+pub(crate) fn decode_from<'a, V: Into<Form> + Copy, T>(
+	buf: &mut &'a [u8],
+	version: V,
+	decode: impl FnOnce(&mut Decoder<'a>, V) -> Result<T, DecodeError>,
+) -> Result<T, DecodeError> {
+	let mut r = Decoder::new(buf, version.into());
+	let value = decode(&mut r, version)?;
+	*buf = &buf[buf.len() - r.remaining()..];
 	Ok(value)
 }
 

@@ -1,59 +1,43 @@
-import { error, ProtocolViolation, StreamError } from "../error.ts";
+import { error, ProtocolViolation, StreamCode, StreamError } from "../error.ts";
 import type * as Path from "../path.ts";
 import { Reader, type Stream, type Writer } from "../stream.ts";
-import type { Session } from "./adapter.ts";
+import { type Deadline, requestOptions } from "../util/deadline.ts";
 import { type RequestCondition, type RequestKind, toRequestCode } from "./error.ts";
-import { FetchError } from "./fetch.ts";
 import { GoAway } from "./goaway.ts";
 import * as Message from "./message.ts";
 import { Parameters } from "./parameters.ts";
-import { PublishError } from "./publish.ts";
-import { PublishNamespaceError } from "./publish_namespace.ts";
 import { RequestError } from "./request.ts";
-import { SubscribeError } from "./subscribe.ts";
-import { SubscribeNamespaceError } from "./subscribe_namespace.ts";
+import type { Session } from "./session.ts";
 import { MalformedAuthToken } from "./token.ts";
-import { TRACK_STATUS_ERROR_14 } from "./track.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
-/** Whether the draft treats the requester finishing its messages as cancellation. */
+/**
+ * Whether the requester finishing its messages withdraws a request on `version`.
+ *
+ * Draft 18 asks for a reset or STOP_SENDING (section 3.3.2) and names a FIN as a cancel only for
+ * SUBSCRIBE_NAMESPACE and SUBSCRIBE_TRACKS (section 6.1), but our own draft-18 requesters cancel
+ * by FIN, so we read one that way. TRACK_STATUS passes `false` instead: nothing can follow it, so
+ * a requester may FIN right after it (moxygen does).
+ */
 function finCancels(version: IetfVersion): boolean {
-	return (
-		version === Version.DRAFT_14 ||
-		version === Version.DRAFT_15 ||
-		version === Version.DRAFT_16 ||
-		version === Version.DRAFT_17 ||
-		version === Version.DRAFT_18
-	);
+	return version === Version.DRAFT_18;
 }
 
 /**
- * Why a request is refused, and which one: only drafts 14-16 name the Request ID.
+ * Why a request is refused.
  * @internal
  */
 export interface Refusal {
-	requestId?: bigint;
 	condition: RequestCondition;
 	reasonPhrase: string;
 }
 
-// Each draft-14 error message has the REQUEST_ERROR body that draft-15 folded them into.
-const ERROR_14: Record<RequestKind, number> = {
-	subscribe: SubscribeError.id,
-	fetch: FetchError.id,
-	publish: PublishError.id,
-	publish_namespace: PublishNamespaceError.id,
-	subscribe_namespace: SubscribeNamespaceError.id,
-	track_status: TRACK_STATUS_ERROR_14,
-};
-
 async function writeRefusal(w: Writer, version: IetfVersion, kind: RequestKind, refusal: Refusal): Promise<void> {
 	const err = new RequestError({
-		requestId: version <= Version.DRAFT_16 ? refusal.requestId : undefined,
 		errorCode: toRequestCode(refusal.condition, kind, version),
 		reasonPhrase: refusal.reasonPhrase,
 	});
-	await Message.write(w, version === Version.DRAFT_14 ? ERROR_14[kind] : RequestError.id, err, version);
+	await Message.write(w, RequestError.id, err, version);
 }
 
 /**
@@ -66,19 +50,16 @@ export async function refuse(stream: Stream, version: IetfVersion, kind: Request
 }
 
 /**
- * Refuse a REQUEST_UPDATE, leaving its request standing. Draft 14 answers no update.
+ * Refuse a REQUEST_UPDATE, leaving its request standing.
  * @internal
  */
-export async function refuseUpdate(
-	w: Writer,
-	version: IetfVersion,
-	kind: RequestKind,
-	refusal: Refusal,
-): Promise<void> {
-	if (version !== Version.DRAFT_14) await writeRefusal(w, version, kind, refusal);
-}
+export const refuseUpdate = writeRefusal;
 
-/** Refuse an unrecognized reserved namespace before it reaches the application. */
+/**
+ * Refuse an unrecognized reserved namespace before it reaches the application.
+ *
+ * @internal
+ */
 export async function refuseReserved(request: RequestStream): Promise<void> {
 	await request.refuse("subscribe", {
 		condition: "does_not_exist",
@@ -98,7 +79,7 @@ const goaways = new WeakMap<Reader, GoAways>();
 
 /**
  * Read the type of a request stream's next message, or undefined once the peer finishes.
- * From draft 18 on, the peer may send one GOAWAY on a request stream, consumed here; a second,
+ * The peer may send one GOAWAY on a request stream, consumed here; a second,
  * or a client's naming a new session, is a protocol violation.
  * @internal
  */
@@ -112,7 +93,7 @@ export async function nextMessage(reader: Reader, version: IetfVersion, client: 
 		for (;;) {
 			if (await reader.done()) return undefined;
 			const type = await reader.u53();
-			if (type !== GoAway.id || version < Version.DRAFT_18) return type;
+			if (type !== GoAway.id) return type;
 			if (goaway.seen) throw new ProtocolViolation("second GOAWAY on a request stream");
 			goaway.seen = true;
 			// Draft-18's Request ID belongs on the control stream only.
@@ -138,18 +119,8 @@ export async function namespaceUpdate(
 	try {
 		return await Message.decode(framed.reader, async (body) => {
 			const requestId = await body.u62();
-			// Drafts 14-16 define no namespace update. The update's own Request ID is all its
-			// refusal names; the target is what the adapter routed it by.
-			if (version <= Version.DRAFT_16) {
-				await body.readAll();
-				return { requestId, refused: "not_supported" };
-			}
 			const params = await Parameters.decode(body, version, "namespace-update");
-			return {
-				requestId,
-				prefix: params.namespacePrefix,
-				refused: undefined,
-			};
+			return { requestId, prefix: params.namespacePrefix };
 		});
 	} catch (err) {
 		if (err instanceof MalformedAuthToken && err.requestId !== undefined)
@@ -183,6 +154,8 @@ export class RequestStream {
 	readonly #stream: Stream;
 	readonly #session: Session;
 	readonly #quic?: WebTransport;
+	// Whether the peer's FIN withdraws the request, rather than only ending its input.
+	readonly #finCancels: boolean;
 	// The next message, read ahead of whoever takes it. Unset until someone first waits.
 	#ahead?: Promise<Framed | undefined>;
 	#taking = false;
@@ -191,15 +164,27 @@ export class RequestStream {
 	readonly #ended: Promise<void>;
 	#end!: () => void;
 
-	/** Own `stream` for a request on `session`, closing `quic` over the peer's violations. */
-	constructor(stream: Stream, session: Session, quic?: WebTransport) {
+	/**
+	 * Own `stream` for a request on `session`, closing `quic` over the peer's violations. The
+	 * peer's FIN withdraws the request where `finCancels`, by default as the draft has it.
+	 */
+	constructor(stream: Stream, session: Session, quic?: WebTransport, options: { finCancels?: boolean } = {}) {
 		this.#stream = stream;
 		this.writer = stream.writer;
 		this.#session = session;
 		this.#quic = quic;
+		this.#finCancels = options.finCancels ?? finCancels(session.version);
 		this.#ended = new Promise((resolve) => {
 			this.#end = resolve;
 		});
+	}
+
+	/**
+	 * Open a request's stream under `deadline`, whose failure then resets the request through
+	 * {@link abort} like any other end, so the request ends once whatever ends it.
+	 */
+	static open(session: Session, deadline: Deadline, quic?: WebTransport): Promise<RequestStream> {
+		return deadline.open(session.openBi(requestOptions), (stream) => new RequestStream(stream, session, quic));
 	}
 
 	/**
@@ -228,6 +213,16 @@ export class RequestStream {
 	async refuse(kind: RequestKind, refusal: Refusal): Promise<void> {
 		await writeRefusal(this.writer, this.#session.version, kind, refusal);
 		this.close();
+	}
+
+	/**
+	 * Cancel the request but keep reading, so {@link next} reports when the peer ends its
+	 * half: FIN where that cancels, a CANCELLED reset otherwise.
+	 */
+	cancel(): void {
+		if (this.#closed) return;
+		if (this.#finCancels) this.writer.close();
+		else this.writer.reset(new StreamError(StreamCode.Cancel, { message: "cancel" }));
 	}
 
 	/** End the request cleanly: FIN, and stop reading. Only the first close counts. */
@@ -274,22 +269,19 @@ export class RequestStream {
 	// Start reading on the first wait.
 	#read(): Promise<Framed | undefined> {
 		if (this.#ahead === undefined) {
-			const version = this.#session.version;
 			this.#ahead = this.#readAhead();
 			// The read ahead stops at an untaken message, so watch for the peer's end apart from it.
 			this.#stream.reader.closed.then(
 				() => {
-					if (finCancels(version)) this.#end();
+					if (this.#finCancels) this.#end();
 				},
 				() => this.#end(),
 			);
-			// Drafts 14-16 adapt the request onto the control stream, whose virtual writer
-			// finishes while the request lives.
-			if (version > Version.DRAFT_16)
-				this.writer.closed.then(
-					() => this.#end(),
-					() => this.#end(),
-				);
+			// Our own side finishing or resetting ends the request too.
+			this.writer.closed.then(
+				() => this.#end(),
+				() => this.#end(),
+			);
 		}
 		return this.#ahead;
 	}
@@ -299,7 +291,7 @@ export class RequestStream {
 		const read = this.#readFramed();
 		read.then(
 			(framed) => {
-				if (framed === undefined && finCancels(this.#session.version)) this.#end();
+				if (framed === undefined && this.#finCancels) this.#end();
 			},
 			(err: unknown) => {
 				if (err instanceof ProtocolViolation) this.abort(err);

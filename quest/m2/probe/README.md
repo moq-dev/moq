@@ -13,13 +13,14 @@ by default; an application can override or disable them.
 ## Plan
 
 The estimators stop learning once a connection is app-limited. moq-quic's
-BBR3 only raises `max_bw` from an app-limited sample above its current value,
-and only ages its window on a cycle that isn't app-limited (`update_max_bw`
-and `adapt_long_term_model` in `rs/moq-congestion/src/bbr3/mod.rs`).
-Chromium's QUICHE gates its BBR2 filter the same way, and its Cubic estimate
-stops growing while the sender isn't cwnd-limited. So after a rendition
-stops, the estimate freezes at the value that stopped it, and today nothing
-makes it rise: moq-net advertises PROBE `Report` only.
+BBR3 only raises `max_bw` from an app-limited sample above its current value;
+while app-limited it ages its window every 3 s, so the estimate falls to what
+the flow still delivers but never rises past it (`update_max_bw` in
+`rs/moq-congestion/src/bbr3/mod.rs`). Chromium's QUICHE gates its BBR2 filter
+the same way without the aging, and its Cubic estimate stops growing while the
+sender isn't cwnd-limited. So after a rendition stops, the estimate settles at
+or below the value that stopped it, and today nothing makes it rise: moq-net
+advertises PROBE `Report` only.
 
 Decided with the maintainer on 2026-10-17 (quest-plan on
 [#5863](https://github.com/moq-dev/moq/pull/5863)), replacing that PR's
@@ -29,7 +30,7 @@ publisher-local padding handle:
   target and the peer's PROBE target. PROBE `Increase` is the wire signal;
   retransmission or padding is the mechanism. The
   send target (`bandwidth::Allocator`'s reservations) owns the local half and
-  [viewer targets](/quest/m2/probe/viewer-target.md) the peer's.
+  viewer targets (`bandwidth::Viewers`, [moq-dev/moq#7090](https://github.com/moq-dev/moq/pull/7090)) the peer's.
 - **Viewers are in scope.** The viewer up-switch joined the epic, since a
   viewer's target is the same session target sent the other way.
 - **moq-net stays catalog-agnostic, and each hop is independent.** A relay
@@ -41,21 +42,21 @@ publisher-local padding handle:
   players set targets by default, so probing works without an application
   knowing about it.
 - **Native retransmits, the browser pads.** Where moq-quic sends, it
-  retransmits in-flight data during BBR3's ProbeBW_UP phase
-  ([native](/quest/m1/probe-native.md)). A browser over WebTransport can't
+  resends in-flight data during BBR3's Startup and one ProbeBW_UP per probe
+  wait ([moq-dev/moq#6635](https://github.com/moq-dev/moq/pull/6635)). A browser over WebTransport can't
   reach its controller, so a lowest-priority padding stream on an ALR probe
   schedule does ([padding](/quest/m2/probe/padding.md)).
 
 Decided with the maintainer on 2026-10-20:
 
-- The send target, [native](/quest/m1/probe-native.md),
+- The send target, native probing,
   and the native publishers' [rung disable](/quest/m1/simulcast-rung-disable.md)
   moved to m1, so Rust, FFI, and OBS publishers recover a stopped rendition in
   the next breaking release. Their rung disable needs the target and native
   probing, not padding.
 - Padding is browser-only (WebTransport in `js/net`). moq-quic with BBR3 is
-  the only native backend with a probing hook; other native backends (iroh
-  on noq, moq-quic under CUBIC) have no sender, keep `Report`, and never
+  the only native backend with a probing hook; moq-quic under CUBIC
+  has no sender, keep `Report`, and never
   disable a rung. lite-07 reserves its stream
   type before the cut (Padding Stream 0x2), and
   the sender stays here.
@@ -63,10 +64,23 @@ Decided with the maintainer on 2026-10-20:
   probes with padding.
 - The target then split: m1 keeps the send target
   native rung recovery needs, and viewer handles, viewer grants, the peer's
-  PROBE target, and `Increase` came back here as
-  [viewer targets](/quest/m2/probe/viewer-target.md), beside their consumers.
+  PROBE target, and `Increase` came back here as viewer targets, beside their
+  consumers, and landed in [moq-dev/moq#7090](https://github.com/moq-dev/moq/pull/7090).
   The `js/net` send target moved to [padding](/quest/m2/probe/padding.md), its
   only sender.
+
+Decided with the maintainer on 2026-11-03, in review of
+[moq-dev/moq#7090](https://github.com/moq-dev/moq/pull/7090):
+
+- **A local override covers local reservations only.** ✅ Keep the larger of
+  the two targets: `Allocator::set_target(Some(0))` stops probing for this
+  side's reservations, and the peer's PROBE target still sets how high to
+  probe. Rejected: a local zero that also disables peer-driven probing.
+- **Unencodable viewer targets are refused at the public API.** ✅ Viewer
+  ceilings and overrides that would sum above 2^53 - 1 bps fail
+  (`Error::BoundsExceeded` in Rust, `MoqError::OutOfRange` through moq-ffi, a
+  `RangeError` in JS) and change nothing. Rejected: saturating the advertised
+  target, which silently changes what an oversized target means.
 
 This README's own work, once the children land:
 
@@ -82,16 +96,16 @@ This README's own work, once the children land:
 
 ## Required
 
-- [Native probing](/quest/m1/probe-native.md) - moq-quic retransmits in-flight data during BBR3's ProbeBW_UP so an app-limited sender still validates headroom up to the target
-- [Native rung disable](/quest/m1/simulcast-rung-disable.md) - Rust/FFI and OBS publishers stop encoding the top renditions their grant cannot fund, advertise `enabled: false`, and re-enable with hysteresis
+- [Native rung disable proof](/quest/m1/simulcast-rung-disable.md) - a shaped uplink through moq-ffi proves the top rendition stops and resumes over real BBR3 probing
+- [Browser send estimate](/quest/m2/probe/browser-send-estimate.md) - shipping Chrome and Safari publishers adapt to the relay's PROBE estimate, since they have no `getStats()`
+- [One page-wide getStats sampling ticker](/quest/m2/probe/stats-ticker.md) - a page's connections share one sampling ticker
 - [Padding probes](/quest/m2/probe/padding.md) - a browser probes with a lowest-priority padding stream on an ALR schedule
 - [JS rung disable](/quest/m2/probe/rung-disable-js.md) - `@moq/publish` applies the native rung rule, recovering through padding
-- [Viewer targets](/quest/m2/probe/viewer-target.md) - a session sends its viewer handles as its PROBE target, probes to the peer's, splits the receive estimate into viewer grants, and advertises `Increase` where a sender exists
 - [Players set viewer targets](/quest/m2/probe/players.md) - players hold a viewer handle per watched broadcast at its highest enabled rendition's bitrate
 - [Viewer up-switch](/quest/m2/probe/viewer-upswitch.md) - a viewer capped by its small rendition finds headroom through PROBE and moves up
+- [Viewer targets are tested end to end and documented in Python](/quest/m2/probe/viewer-followups.md) - three gaps moq-dev/moq#7090 left are closed
 
 ## Related
 
-- [A finished PROBE stops reporting](/quest/m2/probe-end-stale.md) - the receive estimate this epic raises reads unknown once its stream ends
 - [BBR media study](/quest/m2/quic-bbr-study.md) - preserving an estimate and discovering spare capacity are separate problems
-- [Realtime uplink congestion control](/quest/m2/quic-realtime/README.md) - a delay-based alternative to BBR3 on native uplinks, with no ProbeBW_UP phase to ride
+- [Realtime uplink congestion control](/quest/m2/quic-realtime/README.md) - a delay-based alternative to BBR3 on native uplinks; it must implement native probing to ship (decided 2026-10-25)

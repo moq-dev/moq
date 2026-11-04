@@ -11,7 +11,7 @@
 /// The PCR clock, in Hz.
 const PCR_HZ: u64 = 27_000_000;
 /// Bits per transport packet.
-const PACKET_BITS: u64 = 188 * 8;
+pub(super) const PACKET_BITS: u64 = 188 * 8;
 /// The 33-bit base times 300 plus the 9-bit extension: the PCR wraps here.
 pub(super) const PCR_WRAP: u64 = (1 << 33) * 300;
 /// How much PCR time one window spans before it is judged.
@@ -64,7 +64,7 @@ fn rate(packets: u64, ticks: u64) -> u64 {
 }
 
 /// Tracks the multiplex rate and the value currently recorded for it.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct Meter {
 	/// The last PCR seen, in 27 MHz ticks.
 	last: Option<u64>,
@@ -81,6 +81,15 @@ pub(super) struct Meter {
 }
 
 impl Meter {
+	/// A meter whose catalog already records `published`, measured on this multiplex before,
+	/// which the next windows confirm, replace, or clear.
+	pub fn measured(published: Option<u64>) -> Self {
+		Self {
+			published,
+			..Default::default()
+		}
+	}
+
 	/// The rate recorded in the catalog.
 	pub fn published(&self) -> Option<u64> {
 		self.published

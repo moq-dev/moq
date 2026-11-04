@@ -9,19 +9,21 @@ from moq_ffi import (
     MoqAudioConsumer,
     MoqAudioDecoderOutput,
     MoqAudioEncoder,
-    MoqAudioEncoderFinish,
+    MoqAudioEncoderFinished,
     MoqAudioEncoderOutput,
     MoqAudioFrame,
     MoqAudioPacket,
     MoqAudioProducer,
     MoqAudioProducerOptions,
+    MoqAudioRead,
 )
 
-from ._records import _from_us, _opt_us, _to_us
+from ._read import End, Gap, _end, _gap
+from ._records import Delay, Timestamp
 from ._stream import _Stream
-from .media import Audio, AudioInit, CatalogProducer
+from .media import Audio, AudioInit, CatalogProducer, DecodeStart
 from .publish import TrackDemand
-from .session import Bandwidth, Reservation
+from .session import Allocator, Reservation
 from .subscribe import BroadcastConsumer
 from .types import AudioCodec as Codec
 from .types import AudioEncoderInput as EncoderInput
@@ -30,7 +32,7 @@ from .types import AudioSampleFormat as SampleFormat
 Packet = MoqAudioPacket
 """One encoded payload from an :class:`Encoder`."""
 
-EncoderFinish = MoqAudioEncoderFinish
+EncoderFinish = MoqAudioEncoderFinished
 """The packets :meth:`Encoder.finish` drains and the padded samples to discard."""
 
 
@@ -38,30 +40,34 @@ EncoderFinish = MoqAudioEncoderFinish
 class Frame:
     """Interleaved PCM with its presentation timestamp."""
 
-    timestamp: timedelta
+    timestamp: Timestamp
     data: bytes
 
     def _ffi(self) -> MoqAudioFrame:
-        return MoqAudioFrame(timestamp_us=_to_us(self.timestamp, "timestamp"), data=self.data)
+        return MoqAudioFrame(timestamp=self.timestamp._ffi(), data=self.data)
 
     @staticmethod
     def _from_ffi(value: MoqAudioFrame) -> Frame:
-        return Frame(timestamp=_from_us(value.timestamp_us), data=value.data)
+        return Frame(timestamp=Timestamp._from_ffi(value.timestamp), data=value.data)
+
+
+Read = Frame | Gap | End
+"""One item a :class:`Consumer` reads, in delivery order: decoded PCM, or a break in it."""
 
 
 @dataclass(frozen=True)
 class EncoderOutput:
     """Codec-side settings.
 
-    A zero ``frame_duration`` takes the codec's own frame: 20 ms for Opus, 1024
-    samples for AAC. 10 ms Opus packets halve the packetization delay.
+    ``frame_duration`` of ``None`` takes the codec's own frame: 20 ms for Opus,
+    1024 samples for AAC. 10 ms Opus packets halve the packetization delay.
     """
 
     codec: Codec
     sample_rate: int | None = None
     channels: int | None = None
     bitrate: int | None = None
-    frame_duration: timedelta = timedelta(0)
+    frame_duration: timedelta | None = None
 
     def _ffi(self) -> MoqAudioEncoderOutput:
         return MoqAudioEncoderOutput(
@@ -69,7 +75,7 @@ class EncoderOutput:
             sample_rate=self.sample_rate,
             channels=self.channels,
             bitrate=self.bitrate,
-            frame_duration_us=_to_us(self.frame_duration, "frame_duration"),
+            frame_duration=self.frame_duration,
         )
 
 
@@ -77,24 +83,30 @@ class EncoderOutput:
 class DecoderOutput:
     """The PCM layout a :class:`Consumer` delivers, how stale a group may get, and its playout delay.
 
-    ``delay`` fixes the jitter buffer to hold ahead of the playhead; ``None``
-    estimates it from arrival timing. ``max_delay`` only bounds how stale a
-    group may get before it is skipped, and adds no buffering.
+    ``delay.min`` is the jitter buffer to hold ahead of the playhead, and where a
+    cold join starts; with ``estimate`` (the default) it floors the delay measured
+    from arrival timing instead. ``delay.max`` only bounds how stale a group may
+    get before it is skipped, and adds no buffering. Both default to zero.
+    ``start`` picks where to begin on a track that already holds groups, ``None``
+    for the oldest: a live player passes ``DecodeStart.LATEST`` so a reopened
+    decoder skips the cached backlog.
     """
 
     format: SampleFormat
     sample_rate: int | None = None
     channels: int | None = None
-    max_delay: timedelta | None = None
-    delay: timedelta | None = None
+    delay: Delay = Delay()
+    estimate: bool = True
+    start: DecodeStart | None = None
 
     def _ffi(self) -> MoqAudioDecoderOutput:
         return MoqAudioDecoderOutput(
             format=self.format,
             sample_rate=self.sample_rate,
             channels=self.channels,
-            max_delay_us=_opt_us(self.max_delay, "max_delay"),
-            delay_us=_opt_us(self.delay, "delay"),
+            delay=self.delay._ffi(),
+            estimate=self.estimate,
+            start=self.start,
         )
 
 
@@ -112,7 +124,7 @@ class Producer:
         output: EncoderOutput,
         *,
         track: str | None = None,
-        bandwidth: Bandwidth | None = None,
+        bandwidth: Allocator | None = None,
     ) -> None:
         """Open an audio track on the catalog's broadcast and register its rendition."""
         self._inner = MoqAudioProducer(
@@ -147,11 +159,13 @@ class Producer:
         self._inner.finish()
 
 
-class Consumer(_Stream[Frame]):
-    """Async iterator of decoded PCM frames. Construct with :meth:`subscribe`.
+class Consumer(_Stream[Read]):
+    """Async iterator of decoded PCM :class:`Frame` reads, and the :class:`Gap` and
+    :class:`End` breaks between them. Construct with :meth:`subscribe`.
 
     The layout is fixed by the :class:`DecoderOutput` passed at subscribe time;
-    each frame's ``data`` is raw bytes in that format.
+    each frame's ``data`` is raw bytes in that format. Restart playback after a
+    gap or an end, since what follows does not continue what came before.
     """
 
     @classmethod
@@ -164,9 +178,17 @@ class Consumer(_Stream[Frame]):
     def __init__(self, inner: MoqAudioConsumer) -> None:
         self._inner = inner
 
-    async def _next(self) -> Frame | None:
+    async def _next(self) -> Read | None:
         value = await self._inner.next()
-        return None if value is None else Frame._from_ffi(value)
+        if value is None:
+            return None
+        if isinstance(value, MoqAudioRead.FRAME):
+            return Frame._from_ffi(value.frame)
+        if isinstance(value, MoqAudioRead.GAP):
+            return _gap(value.timestamp, value.duration)
+        if isinstance(value, MoqAudioRead.END):
+            return _end(value.end)
+        raise TypeError(f"unknown audio read: {value!r}")
 
     @property
     def delay(self) -> timedelta:
@@ -175,7 +197,7 @@ class Consumer(_Stream[Frame]):
         The estimate measures when each frame is read, so read the next frame as
         soon as the previous one is handled rather than pacing reads to the speaker.
         """
-        return _from_us(self._inner.delay_us())
+        return self._inner.delay()
 
     def cancel(self) -> None:
         """Cancel the subscription and stop delivering audio frames."""
@@ -217,9 +239,12 @@ __all__ = [
     "EncoderInput",
     "EncoderFinish",
     "EncoderOutput",
+    "End",
     "Frame",
+    "Gap",
     "Codec",
     "Packet",
     "Producer",
+    "Read",
     "SampleFormat",
 ]

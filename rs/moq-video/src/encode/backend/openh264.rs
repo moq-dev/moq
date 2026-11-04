@@ -240,7 +240,7 @@ mod tests {
 	fn config() -> Config {
 		Config {
 			kind: Kind::Software,
-			..Config::new(320, 240, crate::Rate::new(30, 1).unwrap())
+			..Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap())
 		}
 	}
 
@@ -343,7 +343,7 @@ mod tests {
 		] {
 			let config = Config {
 				kind: Kind::Software,
-				..Config::new(size.width, size.height, crate::Rate::new(30, 1).unwrap())
+				..Config::new(size.width, size.height, crate::FrameRate::new(30, 1).unwrap())
 			};
 			let mut enc = Openh264::new(&config).unwrap();
 
@@ -368,7 +368,7 @@ mod tests {
 	/// the flag agrees with the bitstream.
 	#[test]
 	fn keyframes_are_flagged_on_the_cadence_and_on_a_cut() {
-		let framerate = crate::Rate::new(30, 1).unwrap();
+		let framerate = crate::FrameRate::new(30, 1).unwrap();
 		let config = Config {
 			gop: Gop::keyframe_every(std::time::Duration::from_secs(1), framerate),
 			..config()

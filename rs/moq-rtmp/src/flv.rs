@@ -74,6 +74,28 @@ pub fn tag(tag_type: u8, timestamp: u32, body: &[u8]) -> Bytes {
 	buf.freeze()
 }
 
+/// Import one whole tag, ending a restarted timeline while allowing isolated tag faults.
+pub fn import(
+	importer: &mut moq_mux::container::flv::Import,
+	tag_type: u8,
+	timestamp: u32,
+	body: &[u8],
+) -> anyhow::Result<()> {
+	anyhow::ensure!(
+		body.len() <= 0xFF_FFFF,
+		"RTMP message body exceeds FLV's 24-bit tag size"
+	);
+	match importer.decode(&tag(tag_type, timestamp, body)) {
+		Ok(()) => Ok(()),
+		Err(err @ moq_mux::Error::TimestampRewind(_)) => Err(err.into()),
+		Err(err) => {
+			// A whole tag is consumed atomically; a bad frame cannot desynchronize the next tag.
+			tracing::warn!(%err, "dropping RTMP frame that failed to demux");
+			Ok(())
+		}
+	}
+}
+
 /// One FLV media tag pulled out of an [`Export`](moq_mux::container::flv::Export)
 /// byte stream by [`TagReader`], ready to send as an RTMP message body.
 pub struct Tag {

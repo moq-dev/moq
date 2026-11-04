@@ -15,7 +15,6 @@
 #include <string>
 #include <vector>
 #include "logger.h"
-#include "moq-rate.h"
 #include "moq-worker.h"
 
 class MoQOutput {
@@ -60,26 +59,24 @@ public:
 	// Prefer this over obs_output_get_connect_time_ms, which stays 0 for sub-ms connects.
 	bool IsLiveSession();
 
-	// Publisher epoch of this Start(), retained through session reconnects; empty when stopped.
-	std::string GetEpoch();
-
 	// Most recent connect/reconnect failure for this Start(), or empty when none.
 	// Thread-safe; the dock polls this while connecting, while reconnecting, and on stop.
 	void CopyLastFailure(int *code, std::string *reason);
 
 	// The bitrate the video encoders follow the bandwidth grant at, summed over
-	// every encoder that follows, beside the configured rate that caps it.
-	// False when no video encoder follows the grant.
+	// every encoder that follows, beside the configured rate that caps it. A rung
+	// disabled for lack of bandwidth counts as zero. False when no video encoder
+	// follows the grant.
 	struct VideoRate {
 		uint64_t target_bps = 0;
 		uint64_t configured_bps = 0;
 	};
 	bool TryGetVideoRate(VideoRate *out);
 
-	// Present a fresh publish token on the connected session without reconnecting,
-	// replacing the one presented here before once the relay accepts it. False when
-	// there is no session yet. The outcome is logged, and a refusal is kept for
-	// TokenRefusal(); a session without in-band AUTH refuses it.
+	// Replace the session's tokens with a fresh publish token, presented without
+	// reconnecting and on every reconnect; the one it replaces is withdrawn once the
+	// relay answers. False when there is no session yet. The answer is logged, and a
+	// refusal is kept for TokenRefusal(); a session without in-band AUTH refuses it.
 	bool PresentToken(const std::string &token);
 	// Why the relay refused the token PresentToken() last presented, or empty.
 	std::string TokenRefusal();
@@ -104,10 +101,7 @@ private:
 		bool connected = false;
 		// False while the session is between reconnects.
 		bool live = false;
-		// The latest token PresentToken() got accepted, presented on every reconnect
-		// until it is replaced or the attempt is dropped, and the call presenting the
-		// next one.
-		std::shared_ptr<moq::AuthToken> token;
+		// The wait for the relay's answer to the token PresentToken() set last.
 		std::optional<moq::Continuation> presenting;
 	};
 
@@ -132,10 +126,20 @@ private:
 		uint64_t bitrate_bps = 0;
 		// Claimed on the first frame after the session connects.
 		std::shared_ptr<moq::Reservation> reservation;
-		// Video only, when the encoder can retune: the grant it follows, and a
+		// Video only, when the encoder can retune: the grant it follows, which
+		// disables it while the grant cannot fund it above a lower rendition, and a
 		// weak ref so Reset() can hand the configured bitrate back.
-		std::optional<MoQRate> rate;
+		std::shared_ptr<moq::RateControl> rate;
 		OBSWeakEncoder encoder;
+		// The bitrate the encoder was last told, which Reset() restores when it moved.
+		uint64_t applied_bps = 0;
+		// Whether the last target enabled this rendition.
+		bool enabled = true;
+		// False from a disable until the keyframe that resumes it, dropping packets.
+		bool sending = true;
+		// Whether a frame was written. Until one is, the importer still holds the
+		// init's parameter sets, which a discontinuity would discard.
+		bool started = false;
 	};
 
 	void VideoInit(obs_encoder_t *encoder);
@@ -144,6 +148,9 @@ private:
 	void AudioData(struct encoder_packet *packet);
 	// NOTE: Caller must hold media_mutex.
 	void Reserve(Track &track);
+	// Apply a rate target to `encoder`'s track: retune it, or stop sending it.
+	// NOTE: Caller must hold media_mutex.
+	void Retarget(obs_encoder_t *encoder, Track &track, const moq::RateTarget &target);
 
 	obs_output_t *output;
 
@@ -177,7 +184,6 @@ private:
 	bool connected = false;
 	bool live = false;
 	std::string url;
-	std::string epoch;
 	int last_failure_code = 0;
 	std::string last_failure_reason;
 	std::string token_refusal;
@@ -194,7 +200,7 @@ private:
 	std::map<obs_encoder_t *, Track> audio_tracks;
 	// The session's allocator once it connects. It survives reconnects: grants
 	// read empty while disconnected and resume on the next connection.
-	std::shared_ptr<moq::Bandwidth> bandwidth;
+	std::shared_ptr<moq::Allocator> allocator;
 
 	// `closed()` of retired sessions still draining, which the destructor waits
 	// out. Guarded by signal_mutex.

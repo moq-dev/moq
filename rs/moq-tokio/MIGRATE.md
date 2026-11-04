@@ -4,6 +4,115 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### QUIC method names and polls match the transport layer
+
+On `quic::driver::connection::Connection` and `quic::web::Session`, rename `read_datagram()` to `recv_datagram()`.
+On both layers' `send::Stream` and `send::Finished`, rename `stopped()` to `closed()`; results and acknowledgement semantics are unchanged.
+The driver's close future still owns its stream observation and may outlive the handle.
+
+Both layers' `recv::Stream::poll_lease`, and `quic::web::recv::Stream::poll_reset`, take `&kio::Waiter` instead of `&mut Context`.
+Use `kio::wait(|waiter| stream.poll_lease(waiter, want).map_ok(...))` for a lease operation, or retain a `kio::Park` in a `Future` implementation and pass `park.hold(cx)`.
+Dropping the caller's waiter cancels its registrations while the stream stays alive.
+
+### Native WebTransport implements moq-net's poll traits ([#7771](https://github.com/moq-dev/moq/pull/7771))
+
+`quic::web` is supported as a WebTransport library without running MoQ.
+Pass its `Session` directly to moq-net.
+Remove the generic `transport::Session::new(session, address)` wrapper; a WebTransport session reports `Address::Uri` and `Session::raw(connection)` reports `Address::Setup`.
+The generic send/receive adapters, their error wrapper, and the sealed `Grouped`/`GroupedSend` traits are removed, along with every `web_transport_trait` implementation and dependency.
+Custom transports implement `moq_net::transport::poll` directly.
+
+Use `quic::web::send::Stream` and `recv::Stream` instead of `SendStream` and `RecvStream`.
+Their errors are `send::Error` and `recv::Error`.
+`finish(self)` returns a `send::Finished`, which can be awaited for acknowledgements or a peer stop; `reset(self, code)` and `stop(self, code)` consume their stream.
+Code using moq-net's poll traits keeps their mutable terminal methods.
+Session polls take `&self` and a caller-owned `&kio::Waiter`; opens also take the driver's `send::Options`, preserving full `i64` priorities and real send groups.
+
+`Session` no longer dereferences to its QUIC connection. Use `session.connection()` for QUIC-specific operations; `session.send_datagram` always applies WebTransport framing.
+`Session::stats` returns the driver's statistics snapshot. Use moq-net's `Session::metrics` for transport metrics.
+
+`Request` dereferences to `proto::ConnectRequest`; read its `url` and `protocols` fields there.
+`Request::connection()` names the underlying QUIC connection.
+`Request::respond` takes `impl Into<proto::ConnectResponse>` and requires status OK; `reject` takes an `http::StatusCode` and requires a 4xx or 5xx status.
+The Tokio `web::Server` helper and `Request::connect()` accessor are removed; accept from the driver endpoint, then call `Request::accept(connection)`.
+`send::Stream`, `send::Finished`, and `recv::Stream` expose their stream ID as `id()`.
+
+A receive stream's `closed()` observes an empty FIN without a read. When there is payload, read it before waiting for close. `poll_reset` still watches only failures, so it remains pending after a clean end.
+Invalid stream error codes fail as `InvalidReset` or `InvalidStopped`, rather than looking like a clean end.
+
+### `connection::Observation` reports the transport and last connect ([#7776](https://github.com/moq-dev/moq/pull/7776))
+
+`Observation` adds `transport`, the live session's transport or none while offline, and `last_connected`, when a session last connected, kept while offline.
+Code that builds an `Observation` with a struct literal, such as a test double, sets both.
+
+### QUIC waits have caller-owned poll forms ([#7707](https://github.com/moq-dev/moq/pull/7707))
+
+The QUIC driver connection's stream opens, accepts, datagram receive and close waits,
+the endpoint's accept, and both send handles' close waits now expose `poll_*` methods
+taking `&self, &kio::Waiter`. Existing async methods keep their behavior and wrap the
+polls. `send::Finished` also implements `Future`, with the same result as `stopped()`:
+`None` for acknowledged data and FIN or a local reset, `Some(code)` for a peer stop,
+and an error if the connection ends first.
+
+### The iroh backend is removed ([#7345](https://github.com/moq-dev/moq/pull/7345))
+
+The `iroh` feature and module are gone, with `settings::Iroh`, `Client::with_iroh` and `with_iroh_addrs`, `server::Config::iroh`, `Server::iroh_endpoint` and `Listener::iroh_endpoint`, `Transport::Iroh`, `Error::Iroh` and `Error::IrohDisabled`, `secret::load_or_create`, and `quic::Resolved::gso_disabled`.
+Connect over QUIC or WebTransport instead; an `iroh://` URL no longer dials.
+
+### QUIC handshake data needs no downcast ([#7028](https://github.com/moq-dev/moq/pull/7028))
+
+`quic::driver::Connecting::handshake_data` returns `crypto::HandshakeData` and `Connection::handshake_data` returns `Option<crypto::HandshakeData>`, so drop the `downcast`.
+`Connection::peer_identity` returns `Option<Vec<CertificateDer<'static>>>`.
+Pass a rustls config straight to `quic::driver::client::Config::new` or `server::Config::new` instead of wrapping it in `crypto::rustls::QuicClientConfig::try_from` or `QuicServerConfig::try_from`.
+`quic::Error::NoInitialCipherSuite` is removed.
+
+### Smaller default windows, which qmux shares ([#7624](https://github.com/moq-dev/moq/pull/7624))
+
+`quic::DEFAULT_RECEIVE_WINDOW` is 4 MiB, `DEFAULT_STREAM_RECEIVE_WINDOW` 1 MiB, and `DEFAULT_SEND_WINDOW` 4 MiB, down from 128 MiB, 4 MiB, and 16 MiB. `Error::ReceiveWindowTooSmall` now refuses only a `receive_window` below 1 MiB.
+Set `[quic]` windows explicitly to keep the old behavior, such as for a path whose bandwidth-delay product exceeds them.
+Every qmux session (WebSocket, `tcp://`, `tls://`, `unix://`, WebRTC) starts at the `[quic]` windows and stream count, which a client's or server's `[quic]` overrides, and leases receive credit, so a stream can now fail as evicted.
+A `Server` applies its `[quic]` to every qmux listener and to `tls_acceptor`. `websocket::accept` reads it from the new `websocket::Options::quic`, which defaults to the `[quic]` defaults, so set it to your config's `quic.resolve()`; `tcp::Listener::with_quic` and `websocket::Listener::with_quic` set it on a listener built outside a `Server`.
+`server::Request::with_quic_limits` also widens a qmux session at `ok()`, except a WebRTC session's receive window, which sizes its read queue; one refusing them, such as a rate cap, which qmux cannot pace, fails `ok()` with the new `Error::QmuxLimits`.
+`quic::driver::recv::Stream::received_reset`, and so `quic::web::RecvStream::poll_reset`, fail with `Evicted` for a stream evicted to free a stuck window.
+`quic::web::RecvStream::received_reset` now fails with a `ReadError`, `ReadError::SessionError` for what was its `SessionError` or `ReadError::Evicted`, rather than panicking on an eviction.
+
+### `listen::LoadBalancer` has a `forward` field ([#7539](https://github.com/moq-dev/moq/pull/7539))
+
+`listen::LoadBalancer` gained `forward: listen::Forward`, the `[listen.lb.forward]` settings that forward QUIC packets to the server their connection ID names.
+The struct is not `#[non_exhaustive]`, so add `..Default::default()` to a `LoadBalancer { id, nonce }` literal, which leaves forwarding off.
+An exhaustive destructure, such as a QUIC runtime mapping the resolved listener settings, must name `forward`: honor it, or ignore it with `forward: _` only where `lb.id` is already refused.
+
+### `tls://` listeners verify client certificates ([#7358](https://github.com/moq-dev/moq/pull/7358))
+
+A `listen.tcp.tls` listener serves the listen policy's client-certificate verifier, so `--listen-tls-root` and pinned `tls.peers` apply to it as they do to QUIC, and a stream-only server with that listener accepts them instead of returning `Error::MtlsUnsupported`.
+Its `Request::peer_identity`, `server_name`, and `authority` report the client chain and SNI, which were always `None`.
+Under pinned peers, a `tls://` client must present a pinned certificate, as on QUIC.
+
+### `Connection::allocator` ([#6751](https://github.com/moq-dev/moq/pull/6751))
+
+`Connection::bandwidth()` is `Connection::allocator()`, mirroring `moq_net::Session::allocator()`.
+
+### QUIC connections wait for the handshake
+
+Await `quic::driver::Connecting` instead of calling `into_0rtt()`.
+`Connection::authenticated()` and `RecvStream::is_0rtt()` are gone because every connection handle already completed its handshake.
+Remove `ZeroRttRejected` match arms from `ReadError`, `WriteError`, `ResetError`, and `StoppedError`.
+TLS session tickets still enable resumed 1-RTT connections; application data always waits for the handshake.
+
+### QUIC driver APIs follow their consumers
+
+`quic::driver::RecvStream::read_chunk(max)` reads ordered bytes and has no ordering flag or `Chunk::offset`.
+Replace `read_chunks` with successive `read_chunk` calls. `ReadError::IllegalOrderedRead` is gone.
+Use `Connection::set_limits` with `quic::Limits` instead of `set_max_concurrent_uni_streams`, `set_max_concurrent_bi_streams`, `set_send_window`, and `set_receive_window`.
+`Limits::max_streams` sets both directions, so code that called only `set_max_concurrent_uni_streams(n)` now raises the bidirectional limit too.
+Each field is a `NonZeroU64`, and `None` leaves that limit unchanged, so a live connection cannot set a stream limit or window to 0; set a per-direction or zero stream limit at construction with `TransportConfig::max_concurrent_uni_streams` and `max_concurrent_bidi_streams`.
+The accept, open, and datagram methods return opaque futures; await them without naming the removed `Accept`, `AcceptUni`, `AcceptBi`, `OpenUni`, `OpenBi`, `ReadDatagram`, or `IncomingFuture` types.
+Unused connection accessors (`side`, `local_ip`, `min_rtt`, `force_key_update`, `export_keying_material`, `watch_remote_address` with its `RemoteAddressWatcher`, and `handshake_confirmed`), `Connecting::local_ip`, `Endpoint::stats`, `EndpointStats`, `Endpoint::open_connections`, `set_server_config`, `rebind_abstract`, and unused `Incoming` operations (`accept_with`, `retry` with its `RetryError`, `ignore`, `may_retry`, `refuse`, `local_ip`, `remote_address`, `remote_address_validated`, and `orig_dst_cid`) are no longer public.
+Read peer addresses through `Connection::remote_address` or `Connecting::remote_address`; configure the endpoint at construction and use `Endpoint::rebind` for a new UDP socket.
+To rotate TLS certificates without `set_server_config`, give the `ServerConfig`'s rustls config a `ResolvesServerCert` that returns the current certificate, as `tls::Serve` does.
+The `poll_read_buf` helper is private; use `AsyncRead` or `poll_read`.
+`quic::driver` no longer re-exports `Side`, `TimeSource`, `StdSystemTime`, `BloomTokenLog`, `TokenMemoryCache`, `TokenLog`, `TokenStore`, `NoneTokenLog`, `NoneTokenStore`, or `TokenReuseError`; name `moq_quic::Side` directly, and use the default token policy.
+
 ### The connection receive window is 128 MiB, and has a floor (#5878)
 
 `quic::DEFAULT_RECEIVE_WINDOW` is 128 MiB instead of 64 MiB, since incomplete messages now hold connection credit until complete.
@@ -18,7 +127,7 @@ A WebSocket client must offer a QMux subprotocol: `websocket::accept` refuses an
 
 ### MoQ sessions need the `net` feature (#6132)
 
-moq-net is optional, behind the default `net` feature that every transport feature (`quic`, `websocket`, `tcp`, `uds`, `iroh`, `webrtc`) turns on.
+moq-net is optional, behind the default `net` feature that every transport feature (`quic`, `websocket`, `tcp`, `uds`, `webrtc`) turns on.
 A build with `default-features = false` and no transport feature loses `client`, `connect`, `connection`, `listen`, `origin`, `transport`, their root re-exports (`Client`, `Connection`, `ConnectError`, `Transport`, ...), `Error::MoqNet`, `Error::Connect`, `Error::connect_error`, `Error::is_auth`, and the `moq_net` re-export.
 Enable `net`, or a transport feature, to keep them.
 
@@ -47,7 +156,7 @@ Rename a `usage = { package = "usage-rs" }` alias to `usage-rs`, or add `#[usage
 ### Key logging is opt-in (#5907)
 
 `SSLKEYLOGFILE` alone no longer writes TLS session secrets.
-Set `quic::Config::keylog` (`--quic-keylog`, `MOQ_QUIC_KEYLOG`, `[quic] keylog`) as well; it now covers the iroh backend too.
+Set `quic::Config::keylog` (`--quic-keylog`, `MOQ_QUIC_KEYLOG`, `[quic] keylog`) as well.
 Setting it without `SSLKEYLOGFILE` fails with `Error::KeylogUnset`.
 
 ### QUIC limits are `moq_quic::Limits`, set through `Request::quic` (#5871)
@@ -113,13 +222,13 @@ Set `load_balancer`, or `lb_id` alone (nonce 8), or `lb_id` with `lb_nonce`.
 
 ### Settings no listener reads stop startup (#5006)
 
-A stream-only listener (TCP or Unix, no QUIC bind) refuses the QUIC-only `preferred_v4` / `preferred_v6`, `lb_id`, pinned `tls.peers`, and a TLS cert, key, or `generate` unless `tcp.tls` serves it.
+A stream-only listener (TCP or Unix, no QUIC bind) refuses the QUIC-only `preferred_v4` / `preferred_v6` and `lb_id`, and a TLS cert, key, or `generate` unless `tcp.tls` serves it.
 `unix.allow_*` needs `unix.bind`.
 Each used to be ignored: drop it, or add the listener it configures.
 
-### A client CA needs a QUIC listener
+### A client CA needs a QUIC or `tls://` listener
 
-A stream-only listener with `listen.tls.root` returns `Error::MtlsUnsupported` instead of silently verifying nothing.
+A stream-only listener with `listen.tls.root` or pinned `tls.peers` returns `Error::MtlsUnsupported` unless `tcp.tls` verifies them, instead of silently verifying nothing.
 
 ### `Transport` names WebTransport
 
@@ -127,9 +236,9 @@ A stream-only listener with `listen.tls.root` returns `Error::MtlsUnsupported` i
 A WebTransport session reports `Transport::WebTransport` (`"webtransport"` in logs); `Quic` now means raw QUIC only, so match both where you meant either.
 `Connection::transport()` reports the live transport.
 
-### Custom sessions declare their request binding
+### Custom sessions declare their request address
 
-`transport::Session::new` takes the session's `moq_net::transport::Binding`: `Uri` when the transport handshake carries the request URI, `InBand` when SETUP does.
+`transport::Session::new` takes the session's `moq_net::transport::Address`: `Uri` when the transport handshake carries the request URI, `Setup` when SETUP does.
 `Client` and `Server` are unchanged.
 
 ### `Redirect::resolve` is removed (#4854)

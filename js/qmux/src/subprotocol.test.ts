@@ -42,7 +42,7 @@ describe("resolveSubprotocols", () => {
 	});
 
 	test("already-prefixed pairs pass through without a versions entry", () => {
-		expect(resolveSubprotocols(["qmux-00.moq-transport-17"], {}, true)).toEqual(["qmux-00.moq-transport-17"]);
+		expect(resolveSubprotocols(["qmux-00.moq-transport-18"], {}, true)).toEqual(["qmux-00.moq-transport-18"]);
 	});
 
 	test("unsupported mapped versions are refused before negotiating", () => {

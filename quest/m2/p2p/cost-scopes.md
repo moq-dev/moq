@@ -24,7 +24,11 @@ Decided 2026-10-13, replacing the unconditional direct-first policy:
   the CDN through a peer whose uplink died, off for conference offload.
   Browser tabs never relay, whatever the backend (decided 2026-10-22,
   maintainer). A neighboring watcher is not a source of its received
-  media. The authenticated origin identity maps announcements to roster peers.
+  media. A publisher's routing identity is declared and unverified (peers are
+  trusted, decided 2026-11-02 (maintainer, /quest-unblock)); switching between
+  its CDN and direct copies resumes only across a matching explicit epoch.
+  Which roster peer serves an announcement is the application's selection in
+  [Signaling and policy](/quest/m2/p2p/signal.md).
 - Matching explicit epochs permit shared logical-track resume. Different or
   missing epochs require Restart and fresh resolution. Keep CDN control and
   discovery while releasing its unused media demand after P2P handover.
@@ -43,7 +47,7 @@ in Peers and native configuration. Wire: none beyond shared routing and existing
 
 ## Required
 
-- [Routes and announces](/quest/m1/cluster-routing/routes.md) - common identity and route ordering
+- [Routes and announces](/quest/m1/cluster-routing/routes/README.md) - route identities and route ordering
 - [Signaling and policy](/quest/m2/p2p/signal.md) - explicit application peer selection
 - [moq-cli joins](/quest/m2/p2p/cli.md) - matching native controls
 

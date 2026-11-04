@@ -1,4 +1,4 @@
-//! Follow a real JS QMux server's redirect: retain the reader with an epoch, else re-subscribe.
+//! Follow a real JS QMux server's redirect, on a wire without instances, through its replacement announcement.
 use std::process::Stdio;
 
 use anyhow::{Context, ensure};
@@ -40,23 +40,11 @@ async fn main() -> anyhow::Result<()> {
 		connection.version() == Some(version.parse().map_err(anyhow::Error::msg)?),
 		"wrong negotiated version"
 	);
-	// Drafts 14 and 16 carry no epoch, so nothing proves the replacement serves the same
-	// publisher: the held reader ends with the old route and the application requests again.
-	let legacy = ["moq-transport-14", "moq-transport-16"].contains(&version.as_str());
-	let broadcast = consumer.routed_broadcast("handover").await?;
+	let mut following = consumer.follow("handover", None)?;
+	let broadcast = following.available().await?;
 	let mut track = broadcast.track("video")?.subscribe(None).await?;
 	let input = child.stdin.as_mut().context("stdin")?;
 	for sequence in 0..2 {
-		if sequence == 1 && legacy {
-			ensure!(
-				!matches!(track.recv_group().await, Ok(Some(_))),
-				"an epochless route spliced the held reader"
-			);
-			// The server wrote this group just after cutting the original, so only the
-			// replacement, already its largest, can serve it.
-			let broadcast = consumer.routed_broadcast("handover").await?;
-			track = broadcast.track("video")?.subscribe(None).await?;
-		}
 		let mut group = track.recv_group().await?.context("reader ended during GOAWAY")?;
 		ensure!(group.sequence == sequence, "wrong group after migration");
 		ensure!(
@@ -68,13 +56,16 @@ async fn main() -> anyhow::Result<()> {
 			input.write_all(b"first group\n").await?;
 			// The first endpoint's publisher scope excludes this broadcast, so its bytes
 			// prove that the replacement session is serving beyond its SETUP handshake.
-			let ready = consumer.routed_broadcast("replacement").await?;
+			let ready = consumer.follow("replacement", None)?.available().await?;
 			let mut marker = ready.track("ready")?.subscribe(None).await?;
 			let mut marker = marker.recv_group().await?.context("replacement marker")?;
 			ensure!(
 				marker.read_frame().await?.context("marker frame")?.payload.as_ref() == [42],
 				"wrong marker"
 			);
+			let restarted = following.available().await?;
+			ensure!(!restarted.is_clone(&broadcast), "redirect did not restart the instance");
+			track = restarted.track("video")?.subscribe(None).await?.with_range(1..);
 			input.write_all(b"replacement ready\n").await?;
 		}
 	}
@@ -82,6 +73,6 @@ async fn main() -> anyhow::Result<()> {
 	ensure!(child.wait().await?.success(), "JS server failed");
 	let _ = connection.close().await;
 	client.close().await;
-	eprintln!("reverse goaway resumed {version}");
+	eprintln!("reverse goaway restarted {version}");
 	Ok(())
 }

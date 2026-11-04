@@ -552,7 +552,7 @@ mod tests {
 				let config = Config {
 					codec,
 					preset,
-					..Config::new(320, 240, crate::Rate::new(30, 1).unwrap())
+					..Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap())
 				};
 				// Determine which controls this host accepts independently of the production fallback.
 				let candidates: &[Preset] = match preset {

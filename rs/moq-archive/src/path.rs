@@ -1,7 +1,7 @@
 use object_store::path::{Path, PathPart};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
 
-use crate::{Error, ID_MAX, ID_WIDTH, Result};
+use crate::{Error, ID_MAX, Result};
 
 /// Bytes that are not `A-Z a-z 0-9 _ -` and must be percent-encoded in a track name.
 const TRACK: &AsciiSet = &NON_ALPHANUMERIC.remove(b'_').remove(b'-');
@@ -26,129 +26,9 @@ pub(crate) fn decode_track(encoded: &str) -> Result<String> {
 	Ok(decoded.into_owned())
 }
 
-/// Write a segment ID as 19 zero-padded decimal digits.
-pub(crate) fn format_id(id: u64) -> Result<String> {
-	check_id(id)?;
-	Ok(format!("{id:0width$}", width = ID_WIDTH))
-}
-
-/// Parse a 19-digit decimal ID field, refusing values outside the recording range.
-pub(crate) fn parse_id(field: &str) -> Result<u64> {
-	if field.len() != ID_WIDTH || !field.bytes().all(|b| b.is_ascii_digit()) {
-		return Err(Error::Path(field.to_string()));
-	}
-	let id: u64 = field.parse().map_err(|_| Error::Path(field.to_string()))?;
-	check_id(id)
-}
-
 /// Refuse an ID outside 0 through 2^53 - 1.
 pub(crate) fn check_id(id: u64) -> Result<u64> {
 	if id > ID_MAX { Err(Error::Id(id)) } else { Ok(id) }
-}
-
-/// A recording object key under an application prefix.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum Key {
-	/// `<encoded-track>/.info`
-	Info {
-		/// The unencoded track name.
-		track: String,
-	},
-	/// `<encoded-track>/segments/<segment>`: record `segment` of a track's timeline, or for a
-	/// timeline track, the window groups closed while committing that record.
-	Segments {
-		/// The unencoded track name.
-		track: String,
-		/// The record's sequence.
-		segment: u64,
-	},
-}
-
-impl Key {
-	/// A track's `.info` object.
-	pub fn info(track: impl Into<String>) -> Result<Self> {
-		let track = track.into();
-		encode_track(&track)?;
-		Ok(Self::Info { track })
-	}
-
-	/// The object at `segments/<segment>`.
-	pub fn segments(track: impl Into<String>, segment: u64) -> Result<Self> {
-		let track = track.into();
-		encode_track(&track)?;
-		check_id(segment)?;
-		Ok(Self::Segments { track, segment })
-	}
-
-	/// The unencoded track name this key belongs to.
-	pub fn track(&self) -> &str {
-		match self {
-			Self::Info { track } | Self::Segments { track, .. } => track,
-		}
-	}
-
-	/// Encode this key under `prefix`.
-	pub(crate) fn path(&self, prefix: &Path) -> Result<Path> {
-		let path = push(prefix, &encode_track(self.track())?)?;
-		match self {
-			Self::Info { .. } => push(&path, ".info"),
-			Self::Segments { segment, .. } => {
-				let path = push(&path, "segments")?;
-				push(&path, &format_id(*segment)?)
-			}
-		}
-	}
-
-	/// Parse a store location relative to `prefix`.
-	pub(crate) fn parse(prefix: &Path, location: &Path) -> Result<Self> {
-		if prefix.as_ref().is_empty() {
-			return parse_parts(location.parts(), location);
-		}
-		let parts = location
-			.prefix_match(prefix)
-			.ok_or_else(|| Error::Path(location.to_string()))?;
-		parse_parts(parts, location)
-	}
-}
-
-fn parse_parts<'a>(mut parts: impl Iterator<Item = PathPart<'a>>, location: &Path) -> Result<Key> {
-	let encoded = parts.next().ok_or_else(|| Error::Path(location.to_string()))?;
-	let track = decode_track(encoded.as_ref())?;
-	let kind = parts.next().ok_or_else(|| Error::Path(location.to_string()))?;
-	match kind.as_ref() {
-		".info" => {
-			if parts.next().is_some() {
-				return Err(Error::Path(location.to_string()));
-			}
-			Ok(Key::Info { track })
-		}
-		"segments" => {
-			let name = parts.next().ok_or_else(|| Error::Path(location.to_string()))?;
-			if parts.next().is_some() {
-				return Err(Error::Path(location.to_string()));
-			}
-			Ok(Key::Segments {
-				track,
-				segment: parse_id(name.as_ref())?,
-			})
-		}
-		_ => Err(Error::Path(location.to_string())),
-	}
-}
-
-pub(crate) fn track_prefix(track: &str) -> Result<Path> {
-	push(&Path::ROOT, &encode_track(track)?)
-}
-
-pub(crate) fn segments_prefix(prefix: &Path, track: &str) -> Result<Path> {
-	let path = append(prefix, &track_prefix(track)?);
-	push(&path, "segments")
-}
-
-fn append(base: &Path, relative: &Path) -> Path {
-	let mut path = base.clone();
-	path.extend(relative.parts());
-	path
 }
 
 pub(crate) fn push(base: &Path, segment: &str) -> Result<Path> {
@@ -195,93 +75,5 @@ mod tests {
 		assert!(matches!(decode_track("%41"), Err(Error::Track)));
 		assert!(matches!(decode_track("a/b"), Err(Error::Track)));
 		assert!(matches!(decode_track(".info"), Err(Error::Track)));
-	}
-
-	#[test]
-	fn id_fields_are_19_digits() {
-		assert_eq!(format_id(0).unwrap(), "0000000000000000000");
-		assert_eq!(format_id(ID_MAX).unwrap(), "0009007199254740991");
-		assert_eq!(parse_id("0000000000000000000").unwrap(), 0);
-		assert_eq!(parse_id("0009007199254740991").unwrap(), ID_MAX);
-	}
-
-	#[test]
-	fn ids_outside_the_json_range_are_rejected() {
-		assert!(matches!(format_id(ID_MAX + 1), Err(Error::Id(_))));
-		assert!(matches!(check_id(u64::MAX), Err(Error::Id(_))));
-		assert!(matches!(
-			parse_id("0009007199254740992"),
-			Err(Error::Id(n)) if n == ID_MAX + 1
-		));
-		// The largest QUIC varint still fits the 19-digit field.
-		let varint = (1u64 << 62) - 1;
-		assert!(matches!(format_id(varint), Err(Error::Id(n)) if n == varint));
-		assert!(matches!(parse_id("4611686018427387903"), Err(Error::Id(n)) if n == varint));
-		assert!(matches!(parse_id("5"), Err(Error::Path(_))));
-		assert!(matches!(parse_id("000000000000000000X"), Err(Error::Path(_))));
-	}
-
-	#[test]
-	fn keys_roundtrip_under_a_prefix() {
-		let prefix = Path::from("rec/1");
-		for key in [
-			Key::info("catalog.json").unwrap(),
-			Key::segments("video", 5).unwrap(),
-			Key::segments("timeline.z", 0).unwrap(),
-			Key::segments("timeline.z", ID_MAX).unwrap(),
-		] {
-			let path = key.path(&prefix).unwrap();
-			assert_eq!(Key::parse(&prefix, &path).unwrap(), key);
-		}
-	}
-
-	#[test]
-	fn encoded_track_is_not_double_encoded() {
-		let path = Key::info("catalog.json").unwrap().path(&Path::from("rec")).unwrap();
-		assert_eq!(path.as_ref(), "rec/catalog%2Ejson/.info");
-	}
-
-	#[test]
-	fn direct_construction_is_validated_when_serialized() {
-		let prefix = Path::from("rec");
-		let empty = Key::Info { track: String::new() };
-		assert!(matches!(empty.path(&prefix), Err(Error::Track)));
-		let segment = Key::Segments {
-			track: "t".to_string(),
-			segment: ID_MAX + 1,
-		};
-		assert!(matches!(segment.path(&prefix), Err(Error::Id(_))));
-
-		// Everything that does serialize parses back to the same key.
-		for key in [
-			Key::Info {
-				track: "a/b".to_string(),
-			},
-			Key::Segments {
-				track: ".x".to_string(),
-				segment: ID_MAX,
-			},
-			Key::Segments {
-				track: "é".to_string(),
-				segment: 0,
-			},
-		] {
-			let path = key.path(&prefix).unwrap();
-			assert_eq!(Key::parse(&prefix, &path).unwrap(), key);
-		}
-	}
-
-	#[test]
-	fn keys_parse_under_an_empty_prefix() {
-		let key = Key::segments("catalog.json", 2).unwrap();
-		let path = key.path(&Path::ROOT).unwrap();
-		assert_eq!(path.as_ref(), "catalog%2Ejson/segments/0000000000000000002");
-		assert_eq!(Key::parse(&Path::ROOT, &path).unwrap(), key);
-	}
-
-	#[test]
-	fn a_retired_directory_is_not_a_key() {
-		let path = Path::from("video/groups/0000000000000000001.0000000000000000001");
-		assert!(matches!(Key::parse(&Path::ROOT, &path), Err(Error::Path(_))));
 	}
 }

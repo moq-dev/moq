@@ -57,6 +57,11 @@ if [[ "$PACKAGE" == moq_ffi ]]; then
     sed -i.bak "s/^## 0\.0\.0-dev$/## $VERSION/" "$destination/CHANGELOG.md"
     rm -f "$destination/CHANGELOG.md.bak"
 else
+    # Sessions advertise the wrapper's version in SETUP; the source tree says `dev`.
+    sed -i.bak "s/^const packageVersion = .*/const packageVersion = '$VERSION';/" \
+        "$destination/lib/src/version.dart"
+    rm -f "$destination/lib/src/version.dart.bak"
+
     # The override points moq_ffi at ../moq_ffi, which only exists in this
     # checkout. Dropping it also invalidates the committed lock, which resolved
     # moq_ffi by path, so remove that too rather than ship a lie: the published

@@ -40,8 +40,8 @@ public final class TrackConsumer: AsyncSequence, Sendable {
     }
 
     /// The publisher-side properties learned during subscription.
-    public func info() throws -> TrackInfo {
-        try ffi.info()
+    public func info() -> TrackInfo {
+        ffi.info()
     }
 
     /// Change this subscriber's delivery preferences. Throws on a time anchor the track
@@ -162,8 +162,8 @@ public final class TrackProducer: Sendable {
     }
 
     /// Serve fetches for groups that are not currently cached.
-    public func dynamic() throws -> TrackDynamic {
-        TrackDynamic(try ffi.dynamic())
+    public func requests() throws -> TrackRequests {
+        TrackRequests(try ffi.requests())
     }
 
     /// Append a new group, returning a producer for its frames.
@@ -176,17 +176,28 @@ public final class TrackProducer: Sendable {
         GroupProducer(try ffi.createGroup(sequence: sequence))
     }
 
-    /// Write a single-frame group with a timestamp in microseconds.
-    public func writeFrame(_ payload: Data, timestampUs: UInt64? = nil) throws {
-        try ffi.writeFrame(frame: Frame(payload: payload, timestampUs: timestampUs))
+    /// Write a single-frame group with a presentation timestamp, or untimed when nil.
+    public func writeFrame(_ payload: Data, timestamp: Timestamp? = nil) throws {
+        try ffi.writeFrame(frame: Frame(payload: payload, timestamp: timestamp))
     }
 
     /// Send a best-effort datagram and return its sequence number.
     ///
-    /// `timestampUs` is the presentation timestamp in microseconds. Payloads are
+    /// `timestamp` is the presentation timestamp, or untimed when nil. Payloads are
     /// capped at 1200 bytes. There is no stream fallback.
-    public func appendDatagram(_ payload: Data, timestampUs: UInt64? = nil) throws -> UInt64 {
-        try ffi.appendDatagram(frame: Frame(payload: payload, timestampUs: timestampUs))
+    public func appendDatagram(_ payload: Data, timestamp: Timestamp? = nil) throws -> UInt64 {
+        try ffi.appendDatagram(frame: Frame(payload: payload, timestamp: timestamp))
+    }
+
+    /// Send a best-effort datagram at an explicit sequence number, for a caller that
+    /// allocates its own. `appendDatagram` continues after the largest one.
+    public func insertDatagram(_ payload: Data, sequence: UInt64, timestamp: Timestamp? = nil) throws {
+        try ffi.insertDatagram(sequence: sequence, frame: Frame(payload: payload, timestamp: timestamp))
+    }
+
+    /// The newest group written, at its newest frame, or `nil` before any. Datagrams never move it.
+    public func largest() throws -> Position? {
+        try ffi.largest()
     }
 
     /// Abort the track with an application error code, failing active consumers.
@@ -224,9 +235,9 @@ public final class GroupProducer: Sendable {
         GroupConsumer(try ffi.consume())
     }
 
-    /// Write a frame with a timestamp in microseconds.
-    public func writeFrame(_ payload: Data, timestampUs: UInt64? = nil) throws {
-        try ffi.writeFrame(frame: Frame(payload: payload, timestampUs: timestampUs))
+    /// Write a frame with a presentation timestamp, or untimed when nil.
+    public func writeFrame(_ payload: Data, timestamp: Timestamp? = nil) throws {
+        try ffi.writeFrame(frame: Frame(payload: payload, timestamp: timestamp))
     }
 
     /// Mark the group complete. No more frames can be written.

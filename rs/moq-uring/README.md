@@ -2,7 +2,7 @@
 
 Experimental Linux io\_uring support for the native MoQ stack: a
 thread-per-core `Worker` that owns a `SINGLE_ISSUER | DEFER_TASKRUN |
-COOP_TASKRUN | TASKRUN_FLAG` ring, a userspace timer queue on moq-clock, a
+COOP_TASKRUN | TASKRUN_FLAG` ring, a userspace timer queue on `kio::clock`, a
 local (`!Send`) task set, and the UDP sockets bound through it.
 
 - **Receive**: one persistent multishot `recvmsg` per socket, fed from a
@@ -15,10 +15,16 @@ local (`!Send`) task set, and the UDP sockets bound through it.
 - **Send**: `sendmsg` with an explicit `UDP_SEGMENT` control message per call,
   staged in a fixed pool of buffers owned by id and released on completion
   (the shape a later `SENDMSG_ZC` needs).
-- **Timers**: a `moq_clock::Deadlines` queue the worker advances once per
+- **Timers**: a `kio::clock::Deadlines` queue the worker advances once per
   turn, from its one clock read; the earliest deadline rides `io_uring_enter`
   as an absolute timeout. Zero timeout SQEs. The queue is the worker's ambient
   clock, and `Handle::run` drives MoQ with it and a single timer.
+- **Turns**: each turn reaps and dispatches completions first, then polls the
+  root future and runs passes over the woken tasks until a pass wakes nothing
+  or `Config::passes` have run, then parks or submits. So a received
+  datagram's routing, its connection's processing, and the reply that stages
+  are carried by the one enter that follows. A connection stages a bounded
+  number of GSO trains per turn, then yields its backlog to the next turn.
 - **Parking**: a futex word per worker. Remote wakes are an atomic store, plus
   one `futex(2)` wake only while the worker is actually parked (a `FUTEX_WAIT`
   SQE armed on the word).
@@ -29,12 +35,11 @@ local (`!Send`) task set, and the UDP sockets bound through it.
   the application protocol.
 - **WebTransport**: browsers negotiate `h3` and `quic::web::Request` runs the
   HTTP/3 CONNECT handshake (SETTINGS, subprotocol selection, capsule close)
-  over the same adapter via `web-transport-proto`. `quic::web::Session` is
-  a raw or web transport (`Session::raw`). Wrap it with
-  `transport::Session::new(session, binding)`, using `moq_net::transport::Binding::Uri`
-  for WebTransport or `InBand` for raw QUIC. moq-net boxes the transport with a
-  native `Send` bound, so wrap the session once more in `transport::Local`, which
-  checks the thread on every use, before `connect`/`accept`. They return the
+  over the same driver via `web-transport-proto`. `quic::web::Session` is
+  a raw or web transport (`Session::raw`) implementing moq-net's poll traits directly.
+  moq-net boxes the transport with a native `Send` bound, so wrap the session in
+  `transport::Local::new(session)`, which checks the thread on every use, before
+  `connect`/`accept`. They return the
   session and its driver; poll the driver or await it inside a `Handle::spawn`
   task to run it on the worker. Web mode maps stream and close codes through the
   HTTP/3 error space.
@@ -48,8 +53,8 @@ local (`!Send`) task set, and the UDP sockets bound through it.
   thread through `metrics::Metrics::snapshot`. Buffer-pool health (`ENOBUFS`,
   provided-buffer exhaustion, TX-pool stalls), batch effectiveness (datagrams
   per receive and per send), ring traffic (submissions, completions,
-  `io_uring_enter` calls), and scheduling (turns, parks, remote futex wakes,
-  timer churn). A turn that parks carries its staged SQEs in that enter;
+  `io_uring_enter` calls), and scheduling (turns, task passes, parks, remote
+  futex wakes, timer churn). A turn that parks carries its staged SQEs in that enter;
   notified turns enter only for staged SQEs, deferred completion work, or CQ
   overflow. `sq_full_enters` counts queue-pressure enters. `sqes` and `cqes`
   are fixed histograms of submissions accepted and completions made visible
@@ -106,7 +111,7 @@ steered two-worker reuseport group serving one port across threads, and
 datagram echo through the H3 framing,
 close codes through the capsule, and a full moq-lite session over
 WebTransport. All of them skip (loudly) below the kernel floor. CI runs them
-on `ubuntu-24.04-arm`, whose kernel clears it, with `MOQ_STRICT=1` refusing a
+on `ubuntu-24.04-arm`, whose kernel clears it, with `CI_STRICT=1` refusing a
 skip: in the `uring.yml` release gate and the nightly `rs uring` job.
 
 ## Benchmarks
@@ -115,13 +120,30 @@ skip: in the `uring.yml` release gate and the nightly `rs uring` job.
 first spike (recv batching x GRO x GSO, epoll vs io\_uring); see git history
 for their methodology. `echo_quic` is the ablation matrix over the real
 worker: the same QUIC echo with receive batching, GRO, and GSO toggled one
-at a time. `worker_turns` sweeps socket counts and datagrams per burst
-independently to measure drive-loop batching without QUIC. Its smoke cases
-run in the Rust nightly benchmark group.
+at a time. `worker_turns` sweeps sockets against datagrams per burst for UDP,
+and connections against reply bytes and task passes for QUIC request/reply.
+The QUIC client and server run as worker tasks; the root only waits for a
+measurement to finish. Counter deltas stay in the run's log beside the timing
+series in the nightly `rust-shared` group.
 
 ```bash
 just rs bench-udp --sample-size 20 --measurement-time 2 --warm-up-time 1
 just rs bench-echo
+```
+
+`benchmark_socket_queues` (an ignored integration test, run nightly) attributes
+UDP loss between a sender and a steered worker group, on this ring and on
+moq-sock's `recvmmsg` under Tokio. It sweeps the kernel queue, the receive pool
+depth, workers, flows and GSO one at a time across worker stalls, CPU
+contention, sustained overload, and a rate-limited path with a deep finite
+queue (moq-shaper). Each row accounts for every datagram: delivered, dropped
+at a socket (`sk_drops` via `SO_MEMINFO`), dropped on the path, or
+unattributed, beside `rx_enobufs`, peak queued bytes, delay and receive CPU.
+`rx_enobufs` is pool starvation, which leaves datagrams queued in the socket:
+with a 16-buffer pool it fired hundreds of times and dropped nothing.
+
+```bash
+just rs test -p moq-uring --release -E 'test(benchmark_socket_queues)' --run-ignored only --success-output immediate
 ```
 
 ## Parallel test runs

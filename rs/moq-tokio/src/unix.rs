@@ -188,7 +188,7 @@ impl Allow {
 	/// Whether `cred` satisfies every populated field (AND across fields, OR
 	/// within a field). A required pid is unsatisfiable when the platform
 	/// reports none.
-	pub(crate) fn permits(&self, cred: &PeerCred) -> bool {
+	fn permits(&self, cred: &PeerCred) -> bool {
 		let uid_ok = self.uid.is_empty() || self.uid.contains(&cred.uid);
 		let gid_ok = self.gid.is_empty() || self.gid.contains(&cred.gid);
 		let pid_ok = self.pid.is_empty() || cred.pid.is_some_and(|pid| self.pid.contains(&pid));
@@ -228,7 +228,7 @@ type Result<T> = std::result::Result<T, Error>;
 /// `pid` is `None` on platforms that don't report it (e.g. some macOS versions);
 /// `uid`/`gid` are always available.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PeerCred {
+pub(crate) struct PeerCred {
 	/// The peer process's effective user ID.
 	pub uid: u32,
 	/// The peer process's effective group ID.
@@ -242,14 +242,15 @@ pub struct PeerCred {
 ///
 /// The path is taken from the URL path, so use a triple slash for an absolute
 /// path: `unix:///run/moq/internal.sock`.
-pub(crate) async fn connect(url: Url, protocols: &[&str]) -> Result<qmux::Session> {
+pub(crate) async fn connect(url: Url, protocols: &[&str], session: &qmux::Config) -> Result<qmux::Session> {
 	let path = socket_path(&url).ok_or(Error::MissingPath)?;
 	tracing::debug!(peer = %crate::connect::Endpoint(&url), "connecting via Unix socket");
-	let mut config = crate::qmux_config();
+	let mut config = session.clone();
 	config.version = WIRE_VERSION;
 	config.protocol = qmux::Protocol::Negotiate(protocols.iter().map(|p| (*p).to_owned()).collect());
 	qmux::uds::connect(path, config)
 		.await
+		.map(crate::spawn_qmux)
 		.map_err(|err| Error::Connect(crate::error::message(err)))
 }
 
@@ -264,14 +265,15 @@ fn socket_path(url: &Url) -> Option<PathBuf> {
 
 /// Listens for incoming qmux connections on a Unix domain socket.
 ///
-/// Each accepted connection yields the session plus the peer's [`PeerCred`], so
-/// the caller can enforce a uid/gid/pid allowlist. The socket file is removed on
-/// drop.
-pub struct Listener {
+/// Credentials are checked against the server's allowlist before the qmux handshake.
+/// The socket file is removed on drop.
+pub(crate) struct Listener {
 	listener: tokio::net::UnixListener,
 	path: PathBuf,
 	protocols: Vec<String>,
 	health: crate::accept::Health,
+	/// The settings each accepted qmux session starts with.
+	session: qmux::Config,
 }
 
 impl Listener {
@@ -280,7 +282,7 @@ impl Listener {
 	///
 	/// Refuses to unlink the path if it exists and is not a socket, to avoid
 	/// clobbering an unrelated file.
-	pub async fn bind(path: impl AsRef<Path>) -> Result<Self> {
+	pub(crate) async fn bind(path: impl AsRef<Path>) -> Result<Self> {
 		let path = path.as_ref().to_path_buf();
 
 		// A leftover socket from a crashed run would make bind() fail with
@@ -299,28 +301,30 @@ impl Listener {
 			path,
 			protocols: Vec::new(),
 			health: crate::accept::Health::new("unix"),
+			session: crate::qmux_default(),
 		})
-	}
-
-	/// A live handle to this listener's accept-loop health, for an embedder that
-	/// publishes it (see [`crate::accept`]).
-	pub fn accept_health(&self) -> crate::accept::Health {
-		self.health.clone()
 	}
 
 	/// Report into `health` instead of the one this listener made for itself.
 	///
 	/// For an owner that has to hand the handle out *before* the listener exists:
-	/// [`crate::Server`] binds these lazily (they need a runtime), but an embedder
+	/// [`crate::Server`] binds these lazily (they bind asynchronously), but an embedder
 	/// registering them with a metrics endpoint does so at startup.
-	pub fn with_accept_health(mut self, health: crate::accept::Health) -> Self {
+	pub(crate) fn with_accept_health(mut self, health: crate::accept::Health) -> Self {
 		self.health = health;
+		self
+	}
+
+	/// Open each accepted session with `quic`'s windows and stream count, the `[quic]`
+	/// section, rather than its defaults.
+	pub(crate) fn with_quic(mut self, quic: &crate::quic::Resolved) -> Self {
+		self.session = crate::qmux_config(quic);
 		self
 	}
 
 	/// Advertise these application protocols (moq ALPNs) for in-band negotiation,
 	/// in preference order. The first server entry the client also offers wins.
-	pub fn with_protocols<I, S>(mut self, protocols: I) -> Self
+	pub(crate) fn with_protocols<I, S>(mut self, protocols: I) -> Self
 	where
 		I: IntoIterator<Item = S>,
 		S: Into<String>,
@@ -330,32 +334,19 @@ impl Listener {
 	}
 
 	/// Set the socket file's permission bits (e.g. `0o660`).
-	pub fn set_mode(&self, mode: u32) -> Result<()> {
+	pub(crate) fn set_mode(&self, mode: u32) -> Result<()> {
 		fs::set_permissions(&self.path, fs::Permissions::from_mode(mode))?;
 		Ok(())
 	}
 
-	/// The bound socket path.
-	pub fn path(&self) -> &Path {
-		&self.path
-	}
-
-	/// Accept the next connection, returning the session and the peer's credentials.
-	///
-	/// A failed `accept(2)` is handled here rather than yielded: it is classified,
-	/// counted, logged, and paced by [`accept_health`](Self::accept_health), then
-	/// retried, because the caller has no better answer than to ask again. A
-	/// per-connection failure is still yielded as `Some(Err(..))`.
-	///
-	/// As in [`crate::tcp`], the `Option` has no `None` case left to report.
-	pub async fn accept(&self) -> Option<Result<(qmux::Session, PeerCred)>> {
-		Some(self.accept_pending().await.await)
-	}
-
 	/// Accept a socket and return its independently driven qmux handshake.
-	pub(crate) async fn accept_pending(&self) -> impl Future<Output = Result<(qmux::Session, PeerCred)>> + use<> {
+	pub(crate) async fn accept_pending(
+		&self,
+		allow: Option<&Allow>,
+	) -> impl Future<Output = Result<(qmux::Session, PeerCred)>> + use<> {
 		let stream = self.accept_socket().await;
-		let mut config = crate::qmux_config();
+		let allow = allow.cloned();
+		let mut config = self.session.clone();
 		config.version = WIRE_VERSION;
 		config.protocol = qmux::Protocol::Negotiate(self.protocols.clone());
 		async move {
@@ -365,8 +356,23 @@ impl Listener {
 				gid: cred.gid(),
 				pid: cred.pid(),
 			};
+			// Qmux negotiates in-band, so enforce credentials before it can read or
+			// write any bytes, rather than after it returns a session.
+			if let Some(allow) = &allow
+				&& !allow.permits(&cred)
+			{
+				return Err(io::Error::new(
+					io::ErrorKind::PermissionDenied,
+					format!(
+						"unix peer outside allow list: uid={}, gid={}, pid={:?}",
+						cred.uid, cred.gid, cred.pid
+					),
+				)
+				.into());
+			}
 			let session = qmux::uds::accept(stream, config)
 				.await
+				.map(crate::spawn_qmux)
 				.map_err(|err| Error::Accept(crate::error::message(err)))?;
 			Ok((session, cred))
 		}
@@ -382,7 +388,7 @@ impl Listener {
 				}
 				Err(err) => {
 					if let Some(delay) = self.health.failed(&err) {
-						moq_clock::sleep(delay).await;
+						kio::clock::sleep(delay).await;
 					}
 				}
 			}

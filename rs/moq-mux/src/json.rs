@@ -20,11 +20,13 @@
 //! #     broadcast: &mut moq_net::broadcast::Producer,
 //! #     catalog: &moq_mux::catalog::Producer,
 //! # ) -> moq_mux::Result<()> {
-//! let info = moq_net::track::Info::default();
+//! // A timed track, since every write is stamped. JSON is small and repetitive, so compress it.
+//! let info = moq_net::track::Info::default()
+//!     .with_timescale(moq_net::Timescale::MILLI)
+//!     .with_compress(true);
 //! let track = broadcast.create_track("chat", info)?;
-//! let config = moq_mux::json::Config::default().with_compression(true);
-//! let mut chat = catalog.json_stream::<Message>(track, config)?;
-//! chat.append(&Message { text: "hello".to_string() })?;
+//! let mut chat = catalog.json_stream::<Message>(track, moq_mux::json::Config::default())?;
+//! chat.append(&Message { text: "hello".to_string() }, catalog.clock().now())?;
 //! # Ok(())
 //! # }
 //! ```
@@ -32,22 +34,22 @@
 //! The catalog entry is written when the producer is created and removed when it drops, so a track
 //! is never advertised without a publisher behind it.
 //!
-//! A bare value stays untimed; only a timed track accepts an explicit capture time.
-//!
-//! A value timed on the broadcast [`Clock`](crate::Clock) is written at that timestamp as given,
-//! and the entry advertises how late values reach the transport as its `jitter` and `delay`, the
-//! way a media rendition does. A capture [`Instant`](moq_clock::Instant) converts with
-//! [`Clock::capture`](crate::Clock::capture) on the catalog's clock:
+//! Every write takes a timestamp on the broadcast [`Clock`](crate::Clock), the epoch every track
+//! in the broadcast shares, so the track must have a timescale. A value is written at that
+//! timestamp as given, and the entry advertises how late values reach the transport as its
+//! `jitter` and `delay`, the way a media rendition does. A capture
+//! [`Instant`](kio::clock::Instant) converts with [`Clock::capture`](crate::Clock::capture) on the
+//! catalog's clock:
 //!
 //! ```no_run
 //! # fn example(
 //! #     catalog: &moq_mux::catalog::Producer,
 //! #     gps: &mut moq_mux::json::Stream<serde_json::Value>,
 //! #     fix: serde_json::Value,
-//! #     received: moq_clock::Instant,
+//! #     received: kio::clock::Instant,
 //! # ) -> moq_mux::Result<()> {
 //! let at = catalog.clock().capture(received)?;
-//! gps.append(moq_net::Timed::from(&fix).at(at))?;
+//! gps.append(&fix, at)?;
 //! # Ok(())
 //! # }
 //! ```
@@ -80,7 +82,7 @@ use moq_net::Timed;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use hang::catalog::{Compression, JsonConfig, Mode, Reference};
+use hang::catalog::{JsonConfig, Mode, Reference};
 
 use crate::catalog::hang::CatalogExt;
 use crate::catalog::{IntoRendition, Listing, RenditionConfig};
@@ -90,50 +92,41 @@ use crate::catalog::{IntoRendition, Listing, RenditionConfig};
 /// Start from [`default`](Default::default) and chain the setters. The mode is not in here: it is
 /// fixed by which producer you create. To list the track in an application's own catalog section
 /// instead of `json`, pass that section's entry (see [`IntoRendition`]).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct Config {
-	/// DEFLATE-compress the track's frames, advertised as
-	/// [`Compression::Deflate`].
-	///
-	/// The catalog flag is what a consumer reads, so the track name needs no `.z` suffix.
-	pub compression: bool,
-
 	/// An optional identifier for the shape of each value, typically a JSON Schema URL.
 	pub schema: Option<String>,
-
-	/// Whether the snapshot encoder emits merge-patch deltas (see
-	/// [`moq_json::snapshot::Config::deltas`]). Only a [`Snapshot`] reads it: a stream has no
-	/// deltas. Defaults to `true`.
-	///
-	/// Not part of the catalog entry: deltas are a property of the frames, which every consumer
-	/// decodes the same way, so a reader needs nothing from the entry to follow them.
-	pub deltas: bool,
-}
-
-impl Default for Config {
-	fn default() -> Self {
-		Self {
-			compression: false,
-			schema: None,
-			deltas: true,
-		}
-	}
 }
 
 impl Config {
-	/// Set [`compression`](Self::compression) (a builder, since the struct is `#[non_exhaustive]`).
-	pub fn with_compression(mut self, compression: bool) -> Self {
-		self.compression = compression;
-		self
-	}
-
 	/// Set [`schema`](Self::schema) (a builder, since the struct is `#[non_exhaustive]`).
 	pub fn with_schema(mut self, schema: impl Into<String>) -> Self {
 		self.schema = Some(schema.into());
 		self
 	}
+}
 
+/// How a [`Snapshot`] encodes its frames, beyond what its catalog entry declares.
+///
+/// Start from [`default`](Default::default) and chain the setters. None of this is written into
+/// the catalog entry: every consumer decodes the frames the same way, so a reader needs nothing
+/// from the entry to follow them.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct Options {
+	/// Whether changes ride as merge-patch deltas (see [`moq_json::snapshot::Config::deltas`]).
+	/// Defaults to `true`.
+	pub deltas: bool,
+}
+
+impl Default for Options {
+	fn default() -> Self {
+		Self { deltas: true }
+	}
+}
+
+impl Options {
 	/// Set [`deltas`](Self::deltas) (a builder, since the struct is `#[non_exhaustive]`).
 	pub fn with_deltas(mut self, deltas: bool) -> Self {
 		self.deltas = deltas;
@@ -147,33 +140,26 @@ impl<E: CatalogExt> IntoRendition<E, JsonConfig> for Config {
 	fn into_rendition(self) -> JsonConfig {
 		// The producer overwrites the mode with the one it publishes in.
 		let mut entry = JsonConfig::new(Mode::Snapshot);
-		entry.compression = self.compression.then_some(Compression::Deflate);
 		entry.schema = self.schema;
 		entry
 	}
 }
 
-/// Fix `config`'s mode and return whether its frames are compressed.
+/// Fix `config`'s mode.
 ///
-/// Errors on a compression this build can't write, rather than advertising one the frames don't use,
-/// and on a `broadcast` reference, which would point consumers away from the track this publishes.
-fn prepare(config: &mut impl AsMut<JsonConfig>, mode: Mode) -> crate::Result<bool> {
+/// Errors on a `broadcast` reference, which would point consumers away from the track this
+/// publishes, and with [`moq_net::Error::TimestampMismatch`] on a track without a timescale, which
+/// would refuse every timestamped write.
+fn prepare(track: &moq_net::track::Producer, config: &mut impl AsMut<JsonConfig>, mode: Mode) -> crate::Result<()> {
+	if track.info().timescale.is_none() {
+		return Err(moq_net::Error::TimestampMismatch.into());
+	}
 	let json = config.as_mut();
 	if json.broadcast.is_some() {
 		return Err(crate::Error::ForeignBroadcast);
 	}
 	json.mode = mode;
-	crate::compression(json.compression.as_ref())
-}
-
-/// Whether the snapshot encoder emits deltas: the [`Config`] builder's choice, if `config` is one.
-///
-/// [`IntoRendition`] only returns the catalog entry, and this switch is not a catalog field.
-/// Downcast keeps it on the existing builder instead of a new trait method.
-fn deltas_of<C: std::any::Any>(config: &C) -> bool {
-	(config as &dyn std::any::Any)
-		.downcast_ref::<Config>()
-		.is_none_or(|config| config.deltas)
+	Ok(())
 }
 
 /// Publishes a latest-value JSON track, advertised in the catalog for as long as this handle lives.
@@ -186,22 +172,14 @@ pub struct Snapshot<T> {
 }
 
 impl<T: Serialize> Snapshot<T> {
-	pub(crate) fn new<C, E: CatalogExt>(
+	pub(crate) fn new<E: CatalogExt, C: RenditionConfig<E> + AsMut<JsonConfig>>(
 		track: moq_net::track::Producer,
-		rendition: crate::catalog::Rendition<E, C::Config>,
-		config: C,
-	) -> crate::Result<Self>
-	where
-		C: IntoRendition<E, JsonConfig> + std::any::Any,
-	{
-		// Read before `into_rendition` consumes the builder. Only [`Config`] carries the switch;
-		// a custom section entry has none, and the encoder default applies.
-		let deltas = deltas_of(&config);
-		let mut config = config.into_rendition();
-		let mut json = moq_json::snapshot::Config::default().with_deltas(deltas);
-		if prepare(&mut config, Mode::Snapshot)? {
-			json.compression = moq_json::Compression::Deflate;
-		}
+		rendition: crate::catalog::Rendition<E, C>,
+		mut config: C,
+		options: Options,
+	) -> crate::Result<Self> {
+		prepare(&track, &mut config, Mode::Snapshot)?;
+		let json = moq_json::snapshot::Config::default().with_deltas(options.deltas);
 		let inner = moq_json::snapshot::Producer::new(track, json);
 		let listing = Listing::new(rendition, config)?;
 		Ok(Self { inner, listing })
@@ -235,19 +213,13 @@ impl<T: Serialize> Snapshot<T> {
 		self.inner.poll_refresh(waiter).map_err(Into::into)
 	}
 
-	/// Publish a new value, superseding the previous one.
+	/// Publish a new value at `timestamp` on the broadcast clock, superseding the previous one.
 	///
-	/// A value timed on the broadcast clock is written at that timestamp and measures the entry's
-	/// `jitter` and `delay`; one ahead of now measures as zero delay. An unchanged
-	/// value writes nothing and measures nothing.
-	pub fn update<'a>(&mut self, value: impl Into<Timed<&'a T>>) -> crate::Result<()>
-	where
-		T: 'a,
-	{
-		let value = value.into();
-		let captured = value.at;
-		match self.inner.update(value)? {
-			Some(size) => self.listing.record(size, captured),
+	/// The value is written at that timestamp and measures the entry's `jitter` and `delay`; one
+	/// ahead of now measures as zero delay. An unchanged value writes nothing and measures nothing.
+	pub fn update(&mut self, value: &T, timestamp: moq_net::Timestamp) -> crate::Result<()> {
+		match self.inner.update(Timed::from(value).at(timestamp))? {
+			Some(size) => self.listing.record(size, Some(timestamp)),
 			None => Ok(()),
 		}
 	}
@@ -259,6 +231,12 @@ impl<T: Serialize> Snapshot<T> {
 	/// dropping the handle without finishing retires the entry too.
 	pub fn finish(mut self) -> crate::Result<()> {
 		Ok(self.inner.finish()?)
+	}
+
+	/// Abort the track with `err`, which consumers see in place of a clean end, and retire its
+	/// catalog entry.
+	pub fn abort(self, err: moq_net::Error) -> crate::Result<()> {
+		Ok(self.inner.abort(err)?)
 	}
 }
 
@@ -282,11 +260,8 @@ impl<T: Serialize> Stream<T> {
 		rendition: crate::catalog::Rendition<E, C>,
 		mut config: C,
 	) -> crate::Result<Self> {
-		let mut json = moq_json::stream::Config::default();
-		if prepare(&mut config, Mode::Stream)? {
-			json.compression = moq_json::Compression::Deflate;
-		}
-		let inner = moq_json::stream::Producer::new(track, json);
+		prepare(&track, &mut config, Mode::Stream)?;
+		let inner = moq_json::stream::Producer::new(track, moq_json::stream::Config::default());
 		let listing = Listing::new(rendition, config)?;
 		Ok(Self {
 			inner,
@@ -313,23 +288,23 @@ impl<T: Serialize> Stream<T> {
 		self.inner.demand()
 	}
 
-	/// Append one record to the log.
+	/// Append one record to the log at `timestamp` on the broadcast clock.
 	///
 	/// A record that cannot be written ends the track (see [`moq_json::stream::Producer::append`])
 	/// and retires the catalog entry with it. A record refused with
-	/// [`moq_net::Error::GroupTooLarge`] or [`moq_net::Error::TimestampMismatch`] leaves both intact,
-	/// since nothing was written. A catalog error publishing the measured bitrate is returned after the record was written, so the track
+	/// [`moq_net::Error::FrameTooLarge`], [`moq_net::Error::GroupTooLarge`], or
+	/// [`moq_net::Error::TimestampMismatch`] leaves both intact, since nothing was written. A catalog
+	/// error publishing the measured bitrate is returned after the record was written, so the track
 	/// stays open and a retry would duplicate it.
-	pub fn append<'a>(&mut self, value: impl Into<Timed<&'a T>>) -> crate::Result<()>
-	where
-		T: 'a,
-	{
-		let value = value.into();
-		let captured = value.at;
-		let size = match self.inner.append(value) {
+	pub fn append(&mut self, value: &T, timestamp: moq_net::Timestamp) -> crate::Result<()> {
+		let size = match self.inner.append(Timed::from(value).at(timestamp)) {
 			Ok(size) => size,
 			// Refused before anything was written, so the log and its entry carry on.
-			Err(err @ moq_json::Error::Net(moq_net::Error::GroupTooLarge | moq_net::Error::TimestampMismatch)) => {
+			Err(
+				err @ moq_json::Error::Net(
+					moq_net::Error::FrameTooLarge | moq_net::Error::GroupTooLarge | moq_net::Error::TimestampMismatch,
+				),
+			) => {
 				return Err(err.into());
 			}
 			Err(err) => {
@@ -343,7 +318,7 @@ impl<T: Serialize> Stream<T> {
 		};
 
 		match &mut self.listing {
-			Some(listing) => listing.record(size, captured),
+			Some(listing) => listing.record(size, Some(timestamp)),
 			None => Ok(()),
 		}
 	}
@@ -355,6 +330,12 @@ impl<T: Serialize> Stream<T> {
 	/// dropping the handle without finishing retires the entry too.
 	pub fn finish(mut self) -> crate::Result<()> {
 		Ok(self.inner.finish()?)
+	}
+
+	/// Abort the track with `err`, which consumers see in place of a clean end, and retire its
+	/// catalog entry.
+	pub fn abort(self, err: moq_net::Error) -> crate::Result<()> {
+		Ok(self.inner.abort(err)?)
 	}
 }
 
@@ -382,26 +363,12 @@ impl<T: DeserializeOwned> Consumer<T> {
 	/// [`Entry::subscribe`](crate::catalog::Entry::subscribe), which resolves the track (including a
 	/// cross-broadcast [`broadcast`](JsonConfig::broadcast) reference) from the catalog for you.
 	///
-	/// Errors if the entry declares a mode or compression this build doesn't implement, which is a
-	/// track a consumer must skip rather than guess at.
+	/// Errors if the entry declares a mode this build doesn't implement, which is a track a consumer
+	/// must skip rather than guess at.
 	pub fn from_track(track: moq_net::track::Subscriber, config: &JsonConfig) -> crate::Result<Self> {
-		let compression = crate::compression(config.compression.as_ref())?;
-
 		let inner = match &config.mode {
-			Mode::Snapshot => {
-				let mut json = moq_json::snapshot::consumer::Config::default();
-				if compression {
-					json.compression = moq_json::Compression::Deflate;
-				}
-				Inner::Snapshot(moq_json::snapshot::Consumer::new(track, json))
-			}
-			Mode::Stream => {
-				let mut json = moq_json::stream::Config::default();
-				if compression {
-					json.compression = moq_json::Compression::Deflate;
-				}
-				Inner::Stream(moq_json::stream::Consumer::new(track, json))
-			}
+			Mode::Snapshot => Inner::Snapshot(moq_json::snapshot::Consumer::new(track, Default::default())),
+			Mode::Stream => Inner::Stream(moq_json::stream::Consumer::new(track, Default::default())),
 			other => return Err(crate::Error::UnsupportedMode(other.to_string())),
 		};
 
@@ -414,7 +381,8 @@ impl<T: DeserializeOwned> Consumer<T> {
 	/// The mode the publisher chose.
 	///
 	/// [`Mode::Snapshot`] is lossy: groups may be skipped once superseded beyond the subscription
-	/// drift budget. [`Mode::Stream`] preserves every record. Check this when the application can only
+	/// drift budget. [`Mode::Stream`] preserves every record a reader keeps up with; one that falls
+	/// behind a group's retained tail sees `Evicted`. Check this when the application can only
 	/// work with one of them.
 	pub fn mode(&self) -> &Mode {
 		&self.mode
@@ -458,12 +426,12 @@ impl crate::catalog::Entry<'_, JsonConfig> {
 	/// Resolves the track through `source`, so an entry whose [`broadcast`](JsonConfig::broadcast)
 	/// field names a sibling broadcast is followed rather than silently read from the catalog's own.
 	///
-	/// Errors if the entry declares a mode or compression this build doesn't implement.
+	/// Errors if the entry declares a mode this build doesn't implement.
 	pub async fn subscribe<T: DeserializeOwned>(&self, source: &crate::Source) -> crate::Result<Consumer<T>> {
 		let track = source
 			.subscribe_track(
 				self.config().broadcast.as_ref(),
-				self.config().epoch.as_ref(),
+				self.config().instance.as_ref(),
 				self.config().track(self.name()),
 			)
 			.await?;
@@ -492,11 +460,7 @@ mod test {
 
 	/// Create the moq-net track a data producer publishes on, as a caller does for a media track.
 	fn track(broadcast: &mut moq_net::broadcast::Producer, name: &str) -> moq_net::track::Producer {
-		broadcast.create_track(name, moq_net::track::Info::default()).unwrap()
-	}
-
-	fn timed_track(broadcast: &mut moq_net::broadcast::Producer, name: &str) -> moq_net::track::Producer {
-		broadcast.create_track(name, timed()).unwrap()
+		broadcast.create_track(name, timed().with_compress(true)).unwrap()
 	}
 
 	fn entry(catalog: &crate::catalog::Producer, name: &str) -> JsonConfig {
@@ -529,19 +493,19 @@ mod test {
 	fn a_stream_track_roundtrips() {
 		let (mut broadcast, catalog) = catalog();
 		let mut chat = catalog
-			.json_stream::<Value>(track(&mut broadcast, "chat"), Config::default().with_compression(true))
+			.json_stream::<Value>(track(&mut broadcast, "chat"), Config::default())
 			.unwrap();
 
 		let track = chat.consume();
 		let expected: Vec<Value> = (0..3).map(|n| json!({ "n": n })).collect();
 		for value in &expected {
-			chat.append(value).unwrap();
+			chat.append(value, catalog.clock().now()).unwrap();
 		}
 		// `finish` retires the entry, so read both off the live track first.
 		let entry = entry(&catalog, "chat");
 		chat.finish().unwrap();
 
-		// The catalog is the only thing the reader is told; mode and compression come from it.
+		// The catalog is the only thing the reader is told; the mode comes from it.
 		let consumer = Consumer::from_track(track, &entry).unwrap();
 		assert_eq!(consumer.mode(), &Mode::Stream);
 		assert_eq!(drain(consumer), expected);
@@ -551,12 +515,12 @@ mod test {
 	fn a_snapshot_track_roundtrips() {
 		let (mut broadcast, catalog) = catalog();
 		let mut status = catalog
-			.json_snapshot::<Value>(track(&mut broadcast, "status"), Config::default())
+			.json_snapshot::<Value>(track(&mut broadcast, "status"), Config::default(), Options::default())
 			.unwrap();
 
 		let track = status.consume();
-		status.update(&json!({ "live": false })).unwrap();
-		status.update(&json!({ "live": true })).unwrap();
+		status.update(&json!({ "live": false }), catalog.clock().now()).unwrap();
+		status.update(&json!({ "live": true }), catalog.clock().now()).unwrap();
 		let entry = entry(&catalog, "status");
 		status.finish().unwrap();
 
@@ -572,27 +536,24 @@ mod test {
 	fn an_importer_joins_the_data_tracks_clock() {
 		let (mut broadcast, catalog) = catalog();
 		let mut status = catalog
-			.json_snapshot::<Value>(timed_track(&mut broadcast, "status"), Config::default())
+			.json_snapshot::<Value>(track(&mut broadcast, "status"), Config::default(), Options::default())
 			.unwrap();
 		let mut chat = catalog
-			.json_stream::<Value>(timed_track(&mut broadcast, "chat"), Config::default())
+			.json_stream::<Value>(track(&mut broadcast, "chat"), Config::default())
 			.unwrap();
 		let mut subscribers = [status.consume(), chat.consume()];
 
-		let published = catalog.snapshot().clock;
+		let published = catalog.snapshot().media.clock;
 		let before = catalog.clock().now();
 		// The stream starts an hour in, far from the ten seconds a fresh clock reads.
 		let first = catalog
 			.timebase()
 			.shift(moq_net::Timestamp::from_micros(3_600_000_000).unwrap())
 			.unwrap();
-		assert_eq!(catalog.snapshot().clock, published, "the clock never moves");
+		assert_eq!(catalog.snapshot().media.clock, published, "the clock never moves");
 		assert!(before <= first, "the importer lands at now: {before:?} {first:?}");
-		status
-			.update(Timed::from(&json!({ "live": true })).at(catalog.clock().now()))
-			.unwrap();
-		chat.append(Timed::from(&json!({ "n": 1 })).at(catalog.clock().now()))
-			.unwrap();
+		status.update(&json!({ "live": true }), catalog.clock().now()).unwrap();
+		chat.append(&json!({ "n": 1 }), catalog.clock().now()).unwrap();
 		let after = catalog.clock().now();
 
 		let waiter = kio::Waiter::noop();
@@ -612,29 +573,33 @@ mod test {
 		}
 	}
 
-	/// `deltas` is an encoder setting on [`Config`], not a catalog field. Without deltas
-	/// each value is its own group; with them the next value joins that group.
+	/// `deltas` reaches the encoder whatever the catalog entry, including one that is not a
+	/// [`Config`]. Without deltas each value is its own group; with them the next value joins
+	/// that group.
 	#[test]
-	fn a_config_deltas_switch_reaches_the_encoder() {
+	fn the_deltas_option_reaches_the_encoder() {
 		let (mut broadcast, catalog) = catalog();
 		let mut full = catalog
-			.json_snapshot::<Value>(track(&mut broadcast, "full"), Config::default().with_deltas(false))
+			.json_snapshot::<Value>(
+				track(&mut broadcast, "full"),
+				JsonConfig::new(Mode::Snapshot),
+				Options::default().with_deltas(false),
+			)
 			.unwrap();
 		let mut delta = catalog
-			.json_snapshot::<Value>(track(&mut broadcast, "delta"), Config::default())
+			.json_snapshot::<Value>(track(&mut broadcast, "delta"), Config::default(), Options::default())
 			.unwrap();
 
 		let mut full_track = full.consume();
 		let mut delta_track = delta.consume();
 		for value in [json!({ "n": 1 }), json!({ "n": 2 })] {
-			full.update(&value).unwrap();
-			delta.update(&value).unwrap();
+			full.update(&value, catalog.clock().now()).unwrap();
+			delta.update(&value, catalog.clock().now()).unwrap();
 		}
 		full.finish().unwrap();
 		delta.finish().unwrap();
 
-		// The default subscription budget keeps only the latest group, aging untimed groups by
-		// wall clock. Without deltas the second value rolled a new group, so that group holds one
+		// The default subscription budget keeps only the latest group. Without deltas the second value rolled a new group, so that group holds one
 		// frame. With deltas the second value joins the same group.
 		assert_eq!(ready_groups(&mut full_track), vec![1]);
 		assert_eq!(ready_groups(&mut delta_track), vec![2]);
@@ -658,17 +623,13 @@ mod test {
 		let _chat = catalog
 			.json_stream::<Value>(
 				track(&mut broadcast, "chat"),
-				Config::default()
-					.with_compression(true)
-					.with_schema("https://example.com/chat.schema.json"),
+				Config::default().with_schema("https://example.com/chat.schema.json"),
 			)
 			.unwrap();
 
 		let entry = entry(&catalog, "chat");
 		assert_eq!(entry.mode, Mode::Stream);
-		assert_eq!(entry.compression, Some(Compression::Deflate));
 		assert_eq!(entry.schema.as_deref(), Some("https://example.com/chat.schema.json"));
-		// The flag is authoritative, so the track name carries no `.z` suffix.
 		assert_eq!(_chat.name(), "chat");
 	}
 
@@ -709,7 +670,7 @@ mod test {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 
 		let mut existing = JsonConfig::new(Mode::Snapshot);
-		existing.broadcast = Some(moq_net::path::RelativeOwned::new("source"));
+		existing.broadcast = Some(moq_net::path::Relative::new("source").unwrap());
 
 		let mut seed = crate::catalog::hang::Catalog::<()>::default();
 		seed.json.tracks.insert("chat".to_string(), existing.clone());
@@ -734,7 +695,7 @@ mod test {
 		let mut supplied = JsonConfig::new(Mode::Stream);
 		supplied.bitrate = Some(4_200);
 		let mut status = catalog
-			.json_snapshot::<Value>(track(&mut broadcast, "status"), supplied)
+			.json_snapshot::<Value>(track(&mut broadcast, "status"), supplied, Options::default())
 			.unwrap();
 
 		// 40ms records of 500 bytes: 100 kbps, over more than the bitrate window.
@@ -750,30 +711,37 @@ mod test {
 	}
 
 	/// An unchanged snapshot value writes no frame, so its capture time must not measure a write
-	/// that never happened.
-	#[test]
-	fn an_unchanged_snapshot_measures_nothing() {
+	/// that never happened. Delay is measured over a second of writes, so each half runs longer.
+	#[tokio::test(start_paused = true)]
+	async fn an_unchanged_snapshot_measures_nothing() {
 		let (mut broadcast, catalog) = catalog();
 		let mut gps = catalog
-			.json_stream::<Value>(timed_track(&mut broadcast, "gps"), Config::default())
+			.json_stream::<Value>(track(&mut broadcast, "gps"), Config::default())
 			.unwrap();
 		let mut status = catalog
-			.json_snapshot::<Value>(timed_track(&mut broadcast, "status"), Config::default())
+			.json_snapshot::<Value>(track(&mut broadcast, "status"), Config::default(), Options::default())
 			.unwrap();
-		let now = catalog.clock().now();
+		let second = moq_net::Timestamp::from_micros(1_000_000).unwrap();
 		let value = serde_json::json!({ "armed": true });
-		status.update(Timed::from(&value).at(now)).unwrap();
-		gps.append(Timed::from(&serde_json::json!({ "lat": 0 })).at(now))
-			.unwrap();
-		let stale = now
-			.checked_sub(moq_net::Timestamp::from_micros(1_000_000).unwrap())
-			.unwrap();
-		status.update(Timed::from(&value).at(stale)).unwrap();
+		status.update(&value, catalog.clock().now()).unwrap();
+
+		// The same value again, captured a second behind gps: nothing is written.
+		for _ in 0..60 {
+			tokio::time::advance(std::time::Duration::from_millis(40)).await;
+			let now = catalog.clock().now();
+			gps.append(&serde_json::json!({ "lat": 0 }), now).unwrap();
+			status.update(&value, now.checked_sub(second).unwrap()).unwrap();
+		}
 		assert_eq!(entry(&catalog, "status").delay, None);
 
-		// The same stale capture on a changed value is written behind gps.
-		let changed = serde_json::json!({ "armed": false });
-		status.update(Timed::from(&changed).at(stale)).unwrap();
+		// The same stale captures on changing values are written behind gps.
+		for i in 0..60 {
+			tokio::time::advance(std::time::Duration::from_millis(40)).await;
+			let now = catalog.clock().now();
+			gps.append(&serde_json::json!({ "lat": 0 }), now).unwrap();
+			let changed = serde_json::json!({ "armed": i % 2 == 0 });
+			status.update(&changed, now.checked_sub(second).unwrap()).unwrap();
+		}
 		let delay = entry(&catalog, "status").delay.expect("a capture behind gps is delay");
 		assert!(delay >= std::time::Duration::from_secs(1), "{delay:?}");
 	}
@@ -787,7 +755,7 @@ mod test {
 			.json_stream::<Value>(track(&mut broadcast, "chat"), Config::default())
 			.unwrap();
 		let _status = catalog
-			.json_snapshot::<Value>(track(&mut broadcast, "status"), Config::default())
+			.json_snapshot::<Value>(track(&mut broadcast, "status"), Config::default(), Options::default())
 			.unwrap();
 
 		let snapshot = catalog.snapshot();
@@ -819,7 +787,7 @@ mod test {
 		let mut chat = catalog
 			.json_stream::<Value>(track(&mut broadcast, "chat"), Config::default())
 			.unwrap();
-		chat.append(&json!({ "text": "hello" })).unwrap();
+		chat.append(&json!({ "text": "hello" }), catalog.clock().now()).unwrap();
 
 		let snapshot = catalog.snapshot();
 		let entry = crate::catalog::Entry::new("chat", snapshot.json.tracks.get("chat").expect("missing entry"));
@@ -860,11 +828,11 @@ mod test {
 			.unwrap();
 		let mut track = chat.consume();
 
-		assert!(chat.append(&Record(true)).is_err());
+		assert!(chat.append(&Record(true), catalog.clock().now()).is_err());
 		assert!(!catalog.snapshot().json.tracks.contains_key("chat"));
 
 		assert!(
-			chat.append(&Record(false)).is_err(),
+			chat.append(&Record(false), catalog.clock().now()).is_err(),
 			"a record after the failure would land on a track the retired entry no longer advertises"
 		);
 
@@ -872,7 +840,7 @@ mod test {
 		assert!(matches!(track.poll_recv_group(&waiter), Poll::Ready(Err(_))));
 	}
 
-	/// A record past the group budget is refused before anything is written, so the log stays
+	/// A record past the frame budget is refused before anything is written, so the log stays
 	/// advertised and the next record still lands.
 	#[test]
 	fn an_oversized_record_keeps_the_track_and_the_entry() {
@@ -884,12 +852,12 @@ mod test {
 
 		let oversized = Value::String("x".repeat(moq_net::group::MAX_CACHE_BYTES as usize));
 		assert!(matches!(
-			chat.append(&oversized),
-			Err(crate::Error::Json(moq_json::Error::Net(moq_net::Error::GroupTooLarge)))
+			chat.append(&oversized, catalog.clock().now()),
+			Err(crate::Error::Json(moq_json::Error::Net(moq_net::Error::FrameTooLarge)))
 		));
 		assert!(catalog.snapshot().json.tracks.contains_key("chat"));
 
-		chat.append(&json!({ "n": 1 })).unwrap();
+		chat.append(&json!({ "n": 1 }), catalog.clock().now()).unwrap();
 		let entry = entry(&catalog, "chat");
 		chat.finish().unwrap();
 		assert_eq!(
@@ -898,26 +866,39 @@ mod test {
 		);
 	}
 
+	/// Every write is stamped, so a track without a timescale, which refuses a timestamp, is refused
+	/// up front instead of on every write, and nothing is advertised for it.
+	#[test]
+	fn an_untimed_track_is_refused() {
+		let (mut broadcast, catalog) = catalog();
+		let untimed = |broadcast: &mut moq_net::broadcast::Producer, name: &str| {
+			broadcast.create_track(name, moq_net::track::Info::default()).unwrap()
+		};
+
+		assert!(matches!(
+			catalog.json_stream::<Value>(untimed(&mut broadcast, "chat"), Config::default()),
+			Err(crate::Error::Moq(moq_net::Error::TimestampMismatch))
+		));
+		assert!(matches!(
+			catalog.json_snapshot::<Value>(untimed(&mut broadcast, "status"), Config::default(), Options::default()),
+			Err(crate::Error::Moq(moq_net::Error::TimestampMismatch))
+		));
+		assert!(catalog.snapshot().json.tracks.is_empty());
+	}
+
 	/// A consumer that can't tell a log from a latest-value document would silently drop records,
 	/// so an unreadable entry is an error rather than a guess.
 	#[test]
-	fn an_unrecognized_mode_or_compression_is_refused() {
+	fn an_unrecognized_mode_is_refused() {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
 			.create_track("chat", timed())
 			.unwrap();
 
-		let mut config = JsonConfig::new(Mode::Unknown("windowed".to_string()));
+		let config = JsonConfig::new(Mode::Unknown("windowed".to_string()));
 		assert!(matches!(
 			Consumer::<Value>::from_track(track.subscribe(None), &config),
 			Err(crate::Error::UnsupportedMode(_))
-		));
-
-		config.mode = Mode::Stream;
-		config.compression = Some(Compression::Unknown("zstd".to_string()));
-		assert!(matches!(
-			Consumer::<Value>::from_track(track.subscribe(None), &config),
-			Err(crate::Error::UnsupportedCompression(_))
 		));
 	}
 }

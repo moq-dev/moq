@@ -27,12 +27,14 @@ let
 in
 stdenv.mkDerivation {
   pname = "moxygen-conformance";
-  version = "unstable-2026-10-23";
+  version = "unstable-2026-10-30";
   src = sources.moxygen;
   cmakeDir = "../standalone";
-  # The relay conformance profile: the client accepts track-level priority and
-  # an END_OF_TRACK directly after the last object. Every other check stays.
-  patches = [ ./moxygen-profile.patch ];
+  patches = [
+    # The relay conformance profile: the client accepts track-level priority and
+    # an END_OF_TRACK directly after the last object. Every other check stays.
+    ./moxygen-profile.patch
+  ];
   nativeBuildInputs = [
     cmake
     ninja
@@ -62,6 +64,11 @@ stdenv.mkDerivation {
         cp -R ${source} .vendor-${name}
         chmod -R u+w .vendor-${name}
         patchShebangs .vendor-${name}
+        # The upstream export lost Meta's revision files. Restore CMake's
+        # metadata from the same pins as the vendored sources.
+        mkdir -p build/deps/github_hashes/${pins.${name}.owner}
+        printf 'Subproject commit %s\n' '${pins.${name}.rev}' \
+          > build/deps/github_hashes/${pins.${name}.owner}/${name}-rev.txt
       '') (builtins.removeAttrs sources [ "moxygen" ])
     )
     + ''

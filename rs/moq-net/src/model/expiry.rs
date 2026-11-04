@@ -4,7 +4,7 @@
 //! frame write advances, and the wall clock, which the cache pool's driver advances.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering, fence};
 use std::time::Duration;
 
 use super::Timestamp;
@@ -38,6 +38,18 @@ pub(super) struct Wakes {
 	/// frame below every one skips the lock. Ordered by the starts index's lock, which a
 	/// read takes after registering and a first frame before checking this.
 	starts_from: AtomicU64,
+	/// Whether either landing index has entries. Insertion checks this after raising
+	/// `newest`, and a landing read sets it before reading `newest`, each across a SeqCst
+	/// fence: whichever goes second sees the other, so a read registering without the
+	/// track lock is either woken or sees the group. Held reads register under the track
+	/// read lock, which orders them against insertion too. First-frame reveal holds only
+	/// a track read lock and must always take the parked lock instead.
+	landing_waiters: AtomicBool,
+	/// The highest sequence a servable group ever landed at, or 0, so a read with nothing
+	/// above it skips the track lock. Nothing landing and group 0 landing put no group
+	/// above any read, so 0 serves both. Never lowered: a group that later fails or leaves
+	/// only sends the read the slow way.
+	newest: AtomicU64,
 	parked: kio::Lock<Parked>,
 }
 
@@ -92,6 +104,8 @@ impl Default for Wakes {
 		Self {
 			earliest: AtomicU64::new(u64::MAX),
 			starts_from: AtomicU64::new(u64::MAX),
+			landing_waiters: AtomicBool::new(false),
+			newest: AtomicU64::new(0),
 			parked: kio::Lock::default(),
 		}
 	}
@@ -182,14 +196,29 @@ impl Wakes {
 		next
 	}
 
-	/// Park `waiter` until a group lands above `sequence`.
-	pub(super) fn watch_landing(&self, sequence: u64, waiter: &kio::Waiter) {
-		self.parked
-			.lock()
-			.landings
-			.entry(sequence)
-			.or_default()
-			.register(waiter);
+	/// A servable group was inserted at `sequence`: returns whether a landing read may be
+	/// parked for it to wake.
+	pub(super) fn land(&self, sequence: u64) -> bool {
+		self.newest.fetch_max(sequence, Ordering::Relaxed);
+		// Pairs with the fence in `watch_landing`.
+		fence(Ordering::SeqCst);
+		self.landing_waiters.load(Ordering::Relaxed)
+	}
+
+	/// Park `waiter` until a group lands above `sequence`, returning whether one already
+	/// has. Needs no track lock: a group landing after it either wakes `waiter` or is seen.
+	///
+	/// `false` means no servable group ever landed above `sequence`, so it has no successor
+	/// and neither of the budget's clocks can convict it yet.
+	pub(super) fn watch_landing(&self, sequence: u64, waiter: &kio::Waiter) -> bool {
+		{
+			let mut parked = self.parked.lock();
+			parked.landings.entry(sequence).or_default().register(waiter);
+			self.landing_waiters.store(true, Ordering::Relaxed);
+		}
+		// Pairs with the fence in `land`.
+		fence(Ordering::SeqCst);
+		self.newest.load(Ordering::Relaxed) > sequence
 	}
 
 	/// Park `waiter`, holding group `sequence` from another copy, until it or a group
@@ -205,6 +234,7 @@ impl Wakes {
 			parked.held_sweep = sweep_at(parked.held.len());
 		}
 		parked.held.entry(sequence).or_default().register(waiter);
+		self.landing_waiters.store(true, Ordering::Relaxed);
 	}
 
 	/// Park until this exact group is cached, or a declared boundary excludes it.
@@ -284,6 +314,10 @@ impl Wakes {
 				woken.extend(parked.held.remove(&at));
 			}
 			parked.held_sweep = lower(parked.held_sweep, parked.held.len());
+			self.landing_waiters.store(
+				!parked.landings.is_empty() || !parked.held.is_empty(),
+				Ordering::Relaxed,
+			);
 		}
 		woken.iter_mut().for_each(kio::WaiterList::wake);
 	}
@@ -294,6 +328,7 @@ impl Wakes {
 			let mut parked = self.parked.lock();
 			self.earliest.store(u64::MAX, Ordering::Relaxed);
 			self.starts_from.store(u64::MAX, Ordering::Relaxed);
+			self.landing_waiters.store(false, Ordering::Relaxed);
 			std::mem::take(&mut *parked)
 		};
 		let lists = parked.deadlines.into_values().chain(parked.landings.into_values());
@@ -326,6 +361,38 @@ impl Wakes {
 mod test {
 	use super::*;
 
+	/// A reader's waiter that stays registered while it lives: `kio::Waiter::noop` registers nothing.
+	fn parked() -> kio::Waiter {
+		kio::Waiter::new(std::task::Waker::noop().clone())
+	}
+
+	#[test]
+	fn landing_hint_keeps_both_indices_armed() {
+		let wakes = Wakes::default();
+		let waiter = parked();
+		assert!(!wakes.landing_waiters.load(Ordering::Relaxed));
+		wakes.watch_landing(0, &waiter);
+		wakes.watch_held(10, &waiter);
+		wakes.landed(None, 1, 0);
+		assert!(
+			wakes.landing_waiters.load(Ordering::Relaxed),
+			"the held group still waits"
+		);
+		wakes.landed(Some(1), 10, 1);
+		assert!(!wakes.landing_waiters.load(Ordering::Relaxed));
+		wakes.watch_held(11, &waiter);
+		assert!(wakes.land(13));
+		assert!(wakes.watch_landing(12, &waiter), "a group landed above it");
+		assert!(!wakes.watch_landing(13, &waiter), "nothing landed above it");
+		assert!(wakes.land(u64::MAX));
+		assert!(
+			wakes.watch_landing(u64::MAX - 1, &waiter),
+			"the last sequence is above it"
+		);
+		wakes.wake_all();
+		assert!(!wakes.landing_waiters.load(Ordering::Relaxed));
+	}
+
 	/// Each route switch parks the groups then in flight; once their readers drop, the
 	/// next switch's park must not find them still indexed.
 	#[test]
@@ -335,7 +402,7 @@ mod test {
 		for sequence in 0..100 {
 			// The last switch's reader gave its group up.
 			drop(reader.take());
-			let waiter = kio::Waiter::noop();
+			let waiter = parked();
 			wakes.watch_held(sequence, &waiter);
 			reader = Some(waiter);
 		}
@@ -354,7 +421,7 @@ mod test {
 		let mut next = 0u64;
 		let mut park = |count: usize| {
 			for _ in 0..count {
-				let waiter = kio::Waiter::noop();
+				let waiter = parked();
 				wakes.watch_deadline(Timestamp::from_micros(next).unwrap(), Duration::ZERO, &waiter);
 				next += 1;
 			}
@@ -384,7 +451,7 @@ mod test {
 				media_sweeps += usize::from(parked.deadlines.len() >= parked.deadlines_sweep);
 				wall_sweeps += usize::from(parked.wall.len() >= parked.wall_sweep);
 			}
-			let waiter = kio::Waiter::noop();
+			let waiter = parked();
 			let budget = Duration::from_secs(1) + Duration::from_micros(i);
 			wakes.watch_deadline(Timestamp::from_secs(10).unwrap(), budget, &waiter);
 			wakes.watch_wall(now + budget, &waiter);
@@ -403,7 +470,7 @@ mod test {
 		let wakes = Wakes::default();
 		let now = crate::time::Instant::ZERO;
 		for i in 0..1_000u64 {
-			let waiter = kio::Waiter::noop();
+			let waiter = parked();
 			let budget = Duration::from_secs(1) + Duration::from_micros(i);
 			wakes.watch_deadline(Timestamp::from_secs(10).unwrap(), budget, &waiter);
 			wakes.watch_wall(now + budget, &waiter);

@@ -41,9 +41,12 @@ Every `--report` interval, `moq-bench` logs throughput (`send_mbps`/`recv_mbps`
 and `send_fps`/`recv_fps`) plus delivery accounting for the subscribe side:
 
 - `recv_groups`: cumulative groups read end to end across all subscriptions.
-- `lost_groups`: cumulative groups that were skipped or that the relay gave up
-  on part-way. It never decreases: a group that lands after being counted
-  lost stays lost.
+- `history_groups`: the part of `recv_groups` older than its subscription's
+  first group, such as cached history a relay fills in after the subscribe.
+  These are never counted as lost.
+- `lost_groups`: cumulative groups that were skipped at or after a
+  subscription's first group, or that the relay gave up on part-way. It never
+  decreases: a group that lands after being counted lost stays lost.
 - `loss`: `lost_groups` as a percentage.
 - `latency_p50_ms` / `latency_p90_ms` / `latency_p99_ms` / `latency_max_ms`:
   cumulative one-way delivery latency from each group's keyframe timestamp.
@@ -60,7 +63,10 @@ subscription's sequence span. A span wider than the count received means groups
 in between were skipped, so loss reflects dropped groups rather than QUIC packet
 loss (which the transport already repairs). The newest group is the live frontier
 and is excluded from the count: groups just behind it may still be in flight, so a
-gap is only blamed once a higher group confirms it was truly skipped. A group the
+gap is only blamed once a higher group confirms it was truly skipped. The span
+starts at the first group a subscription receives: an older group that arrives
+later is history, counted in `history_groups` rather than widening the span, so
+a join that over-fetches history never reads as loss. A group the
 relay fails part-way (it gives up on a subscriber that fell behind) ends that
 group alone and lands in the same accounting; the subscription stays for the next
 one, so the offered load holds at the configured count. Subscribers use
@@ -187,7 +193,8 @@ rates, the same convention as `moq-stats` frames. Resource `active` and
 `groups_lost` is the logged `lost_groups`, so its increase over a window is the
 groups lost inside it. `groups_expected - groups_present` is the gaps still
 outstanding, which a late arrival closes; it is not monotonic, so do not diff
-it to count loss.
+it to count loss. `groups_history` is the logged `history_groups`: late history
+included in `groups_recv` but outside `groups_expected`.
 
 Latency is measured from wall-clock milliseconds embedded by the publisher.
 Run each publisher and its subscribers on the same host so a latency sample closes
@@ -237,6 +244,23 @@ process's share of the machine is computable. `--threads` adds a per-thread
 breakdown including the core each thread last ran on, which is how to verify
 pinning once the relay grows a thread-per-core mode.
 
+The `udp_*` fields come from the kernel's own socket accounting (a `sock_diag`
+dump, what `ss -uam` reads) for the process's UDP sockets: how many it holds
+(`udp_sockets`), the smallest receive and send buffer the kernel granted
+(`udp_rcvbuf_min`, `udp_sndbuf_min`, in kernel units, which on Linux are twice
+the honored `SO_RCVBUF` request), the bytes queued for receive right now
+(`udp_rx_queue_bytes`), and `udp_drops`, the datagrams dropped at those sockets
+because a receive queue was full. `udp_drops` is cumulative across every socket
+the sampler saw, closed ones included. One drop is one queued skb, so a
+coalesced GRO train counts once however many datagrams it carried. A drop here
+is local: the process was too slow to read. Loss on the path never reaches the
+socket and needs the transport's own counters. `udp_rcvbuf_errors`,
+`udp_sndbuf_errors` and `udp_in_errors` are the namespace's `/proc/net/snmp`
+counters, IPv4 and IPv6 summed, and count every socket in the namespace. The
+dump sees the sampler's network namespace, so run it in the target's. The
+fields are absent when the host refuses the dump, or for another user's process,
+whose `/proc/<pid>/fd` the sampler may not list; the other fields still sample.
+
 ## Measuring CPU cost
 
 Run the load from one machine and the sampler on the relay's host, then join
@@ -268,4 +292,5 @@ to the results.
 
 `just rs bench-latency` measures latency recording with 1, 4 and 16 concurrent
 writers and 0, 10 and 100 snapshots per run. It checks final sample conservation
-and prints throughput for each case. The nightly workflow runs the same matrix.
+and prints the cost per sample for each case. The nightly workflow runs the same
+matrix and records it on the benchmark table.

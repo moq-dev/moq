@@ -7,7 +7,8 @@ microbenchmarks stay beside their crates under `rs/*/benches`, while the
 `run.sh` owns builds, comparison rounds, and reporting. `relay.sh` owns the
 temporary relay lifecycle and load execution shared by each comparison mode.
 A temporary relay is ready only once its PID owns both the TCP listener and UDP
-socket on its assigned port. `lsof`, included in the Nix shell, verifies
+socket on its assigned port, plus the stream listener a `wss`, `tcp`, or `tls`
+case dials. `lsof`, included in the Nix shell, verifies
 ownership. A collision uses the existing startup attempts; exhausted attempts
 fail with the relay log before any load starts.
 
@@ -23,9 +24,26 @@ Measure small-group session cost over independent publisher and viewer counts,
 for SUBSCRIBE and FETCH:
 
 ```bash
-nix develop --command cargo bench --locked -p moq-net --bench session -- session_delivery_group_cost
-nix develop --command env SESSION_CPU=1 cargo bench --locked -p moq-net --bench session -- session_delivery_group_cost_cpu
+nix develop --command cargo bench --locked -p moq-net --features fuzz --bench session -- session_delivery_group_cost
+nix develop --command env SESSION_CPU=1 cargo bench --locked -p moq-net --features fuzz --bench session -- session_delivery_group_cost_cpu
 ```
+
+Run the same session scenarios through relay admission, auth, cluster routing,
+and stats over the in-memory transport:
+
+```bash
+nix develop --command cargo bench --locked -p moq-relay --features test-support --bench session -- relay_session_dash_
+nix develop --command cargo bench --locked -p moq-relay --features test-support --bench session -- relay_session_delivery_group_cost
+```
+
+The relay and model targets share shapes and complete-payload assertions. The
+`relay_` prefix distinguishes results; the model-only idle case needs its server
+session handle and is not registered by the relay target. Relay fixtures enable
+stats and admit all benchmark paths using embedded auth. The dash viewer gets a
+peer grant to discover hidden stats routes on protocols without hidden opt-in. The announcement limit
+uses the existing peer limit so the large broadcast sweeps exercise routing
+rather than ordinary-client admission caps. These settings are benchmark-only.
+The relay target has its own Nightly leg.
 
 The CPU mode requires Unix and measures the benchmark's current thread, including
 its protocol drivers and the flow-control fixture but excluding scheduler
@@ -36,6 +54,60 @@ SUBSCRIBE use uni data streams. No sleep supplies backpressure. Every case
 checks complete payload delivery. Compare paired runs with identical settings
 and disclose host load; CPU timing still depends on hardware contention.
 
+Measure datagram delivery the same way, over publishers and viewers, payload
+size, and cadence (datagrams per track between reads):
+
+```bash
+nix develop --command cargo bench --locked -p moq-net --features fuzz --bench session -- session_delivery_datagram
+nix develop --command env SESSION_ALLOCS=1 cargo bench --locked -p moq-net --features fuzz --bench session -- session_delivery
+```
+
+Throughput counts delivered datagrams. Every one must arrive with its sequence
+and payload; the memory transport loses none at these cadences, so a drop fails
+instead of looking cheaper. `SESSION_ALLOCS=1` prints the group consumer size,
+allocations, allocated bytes and, where Linux perf counters are readable, user instructions per
+delivered datagram or viewer-group. The counts exclude the cache tick. Bytes sum
+requested allocation and reallocation sizes, including growth in place; they
+measure neither live memory nor bytes copied. A multiplexed instruction counter
+fails the run instead of reporting an undercount. Every task runs on the bench's
+one thread. Pin it to one CPU to compare repeated instruction counts. The relay target runs the same shapes as
+`relay_session_delivery_datagram`.
+
+Real QUIC adds congestion control and the sender's datagram queue. This sends
+datagrams below and above a bufferbloated bottleneck to a loopback viewer and a
+throttled one:
+
+```bash
+nix develop --command just rs test -p moq-tokio --release -E 'test(benchmark_datagram_delivery)' --run-ignored only --success-output immediate
+```
+
+It reports offered and lost datagrams, bottleneck queue drops, QUIC DATAGRAM frames
+that delivered no datagram, reordered arrivals and append-to-receive latency per viewer, and fails if the loopback
+viewer loses any. It runs nightly.
+
+Native transport allocation cost is measured through moq-net's real poll interface,
+including QUIC opens, writes, receive leases and FINs, on long-lived loopback connections:
+
+```bash
+nix develop --command cargo bench --locked -p moq-tokio --bench fanout -- native_transport
+nix develop --command env NATIVE_ALLOCS=1 cargo bench --locked -p moq-tokio --bench fanout -- native_transport
+```
+
+The allocation mode warms each shape, then counts allocations and requested allocation/reallocation
+bytes over 64 batches, per delivered stream. Setup and destruction are outside the counters;
+all QUIC tasks run on the benchmark's current-thread runtime. Payload size and streams per batch
+vary independently. Every delivered payload is compared byte for byte. The ordinary timing
+series runs nightly with `fanout`.
+
+The io\_uring `web_headers` target varies stalled partial headers independently of ready uni/bi
+streams. It then completes every fragmented header and checks its payload and FIN, so a busy
+peer cannot hide a parser or stream-credit failure behind fast ready streams. It runs in the
+nightly io\_uring leg:
+
+```bash
+nix develop --command cargo bench --locked -p moq-uring --bench web_headers
+```
+
 Measure 50 fps audio at per-packet, 100 and 200 ms grouping, plus 400 fps
 (2.5 ms packets) at per-packet and the 20 ms default. Frames are 200 bytes:
 
@@ -45,7 +117,8 @@ nix develop --command just bench-audio
 
 This sweeps room connections (16, 32) and subscriptions per connection (2, 8)
 independently, plus one publisher serving 64 and 200 subscribers. It uses the
-normal relay sampler and runs nightly. Each shape reports delivered frames,
+normal relay sampler. Run it locally when changing grouping or relay load;
+its measurements are not a nightly series. Each shape reports delivered frames,
 p99 latency, relay CPU and RSS; the group-size suffix is the number of frames
 after the keyframe (0, 4, 9), so each group carries 1, 5 or 10 frames. These
 synthetic payloads measure group overhead; they do not measure codec loss
@@ -56,6 +129,48 @@ Compare the current tree with another revision:
 ```bash
 nix develop --command just bench origin/main
 ```
+
+The relay workloads run `video` over QUIC, then `chat` (per-message cost) and
+`fanout` (per-byte cost) over each transport in turn: QUIC (`https://`), and qmux
+over `ws://`, `wss://`, `tcp://`, and `tls://`. The second argument narrows the
+transports, for example to compare only WebSocket against a base:
+
+```bash
+nix develop --command just bench origin/main ws
+```
+
+Every relay serves QUIC and plain WebSocket on its port; `wss://`, `tcp://`, and
+`tls://` get their own listener on the port two above it. A base revision must
+accept the listener a case needs, so pass the transports it has: a relay without
+`listen.tcp.tls` refuses the `tls` cases. Until a release includes
+`listen.tcp.tls`, compare against it without them:
+
+```bash
+nix develop --command just bench origin/release "quic ws wss tcp"
+```
+
+Beside relay CPU in cores, each case
+reports CPU microseconds per delivered frame and cores per delivered Gbps; base
+comparisons pair those too.
+
+The qmux micro-bench isolates the transport from the relay. It connects
+client/server pairs over loopback TCP, each echoing one message at a time on one
+stream so messages are never coalesced, swept over transport, session count, and
+message size. A message up to about 16 KB, qmux's default maximum record size,
+crosses as one record; a larger one is split. It reports process CPU per message
+and per Gbps, so it also runs under `perf`; build it with the profiling profile
+and frame pointers to attribute that CPU:
+
+```bash
+nix develop --command cargo run --release -p qmux@0.7.0 --example bench
+nix develop --command cargo run --release -p qmux@0.7.0 --example bench -- --transport ws,wss --sessions 1,256 --size 300
+RUSTFLAGS="-C force-frame-pointers=yes" nix develop --command cargo build --profile profiling -p qmux@0.7.0 --example bench
+perf record -F 999 --call-graph fp -- target/profiling/examples/bench --transport ws --sessions 16 --size 1024
+```
+
+Both ends share one current-thread runtime, so its CPU covers sending and
+receiving alike. It is a local profiling tool rather than a nightly series: the
+`moq-net` session bench owns qmux's series.
 
 Compare one multi-threaded Tokio runtime with the same number of independent
 Tokio/epoll and io\_uring workers:
@@ -68,6 +183,16 @@ nix develop --command just bench-runtime 5 16
 Runtime comparison requires Linux because io\_uring and relay process metrics
 come from Linux interfaces. The default worker count is the number of logical
 CPUs the run may use.
+
+`moq-uring`'s `worker_turns` target also measures QUIC request/reply on one
+worker, sweeping 1 or 16 connections against 64 B or 256 KiB replies with
+1 or 4 task passes. It prints rounds and counter deltas for turns, passes,
+enters and received datagrams, so counts per round can be compared alongside
+timing. The existing nightly `rust-shared` group runs these cases.
+
+```bash
+nix develop --command cargo bench --locked -p moq-uring --bench worker_turns -- worker_request_reply
+```
 
 Measure `moq-uring`'s actual `Local` thread guard separately from I/O:
 
@@ -92,7 +217,13 @@ Zero shards is the shared runtime with one Tokio thread per usable CPU; any
 other count is that many unpinned Tokio workers. The table reports CPU per
 connection, so a steering, dispatch, or per-shard cost that grows with either
 axis reads as a slope. Linux only, since nothing else steers a reuseport
-group. It runs nightly.
+group. Run the sweep locally when changing relay sharding; its measurements
+are not a nightly series. `sock-drops` and `gen-drops` are the datagrams the
+kernel dropped over the measured window at the relay's and the generator's
+own UDP sockets because a receive queue was full, from the sampler's
+`udp_drops` (see `rs/moq-bench/README.md`). Every relay summary carries them
+with the granted receive buffer and the peak queued bytes. A nonzero
+`sock-drops` is local starvation; loss with zero drops happened elsewhere.
 
 Profile the relay under a workload, in one or more capture modes: `lock`
 (worker std mutex waits by stack), `cpu` (CPU stacks of every relay thread),
@@ -101,14 +232,28 @@ or `heap` (jemalloc retained heap and allocation churn):
 ```bash
 nix develop --command just bench-profile lock
 nix develop --command just bench-profile "cpu heap" fanout-heavy "4 16"
+nix develop --command just bench-profile "cpu heap" audio "4 16" io-uring-workers
+nix develop --command just bench-profile cpu chat 4 io-uring-workers origin/main
+nix develop --command just bench-profile cpu chat 4 tokio-workers "" ws
 ```
 
-This builds the relay with `[profile.profiling]` and frame pointers, then runs
-the workload on Tokio workers at each count twice per mode: an unprofiled
-control, then a profiled run, so the throughput and CPU difference shows the
-profiler's overhead. Each mode captures only the relay process, never the load
+This is an on-demand diagnostic, with captures kept in the local run directory.
+It builds the relay with `[profile.profiling]` and frame pointers, then runs
+the workload over the selected transport (`quic` by default, or `ws`, `wss`,
+`tcp`, or `tls`) on the selected runtime (`tokio-workers` by default, or
+`io-uring-workers`) at each count twice per mode: an unprofiled control, then a
+profiled run, so the throughput and CPU difference shows the profiler's overhead. Each mode captures only the relay process, never the load
 generator, during the profiled run's 5 s steady window, the same window as the
-summary's throughput. Linux only.
+summary's throughput. Linux only. Both runtimes use the runtime comparison's
+feature build; io\_uring uses its kernel support check too. Readiness verifies the
+selected backend and exact worker count from the relay's actual thread names,
+retained as `runtime.json`, before the generator starts.
+
+The optional final argument selects a base revision. The current harness builds
+it in a temporary worktree and drives both revisions with the current generator,
+sampler, workload and capture settings. This also works when the base's own
+profiling harness has no runtime selector. Results live under `relay/base/` and
+`relay/current/`, with one unprofiled control per revision, worker count and mode.
 
 ### Lock wait
 
@@ -155,6 +300,123 @@ refused rather than reported.
 ```bash
 sudo sysctl -w kernel.perf_event_paranoid=-1
 ```
+
+The maintainer's 24-core `desktop` workstation is the profiling host: it
+keeps `kernel.perf_event_paranoid=-1`. Profile there only while it is quiet,
+with no other agents running and load near zero, since other work on the
+host shows up as lock waits and CPU the relay did not cause.
+
+### Instructions
+
+Count instructions and cycles (user and kernel) per delivered frame, with
+fixed-period instruction stacks for source attribution:
+
+```bash
+BENCH_RELAY_CPUS=4-7 BENCH_GENERATOR_CPUS=0-3 BENCH_RUNTIME_ROUNDS=5 \
+  BENCH_INSTRUCTION_PERIOD=10000019 \
+  nix develop --command just bench-profile instructions chat 4 io-uring-workers cdff3c8f95
+BENCH_RELAY_CPUS=4-7 BENCH_GENERATOR_CPUS=0-3 \
+  nix develop --command just bench-profile instructions video 4 tokio-workers cdff3c8f95
+# A bisect step: every listed base and the current tree, rotated in each round.
+BENCH_RELAY_CPUS=4-7 BENCH_GENERATOR_CPUS=0-3 BENCH_GENERATOR=21d6da9fc1 \
+  nix develop --command just bench-profile instructions chat 4 io-uring-workers "fe722cec9f 2d73eea67d e84ffb3de3"
+```
+
+Choose disjoint allowed CPU sets, with at least one relay CPU per worker.
+Hybrid CPUs require performance cores, and count their `cpu_core` events.
+The relay and generator keep these affinities for every revision. Instructions
+mode runs alone.
+
+Each base builds into its own target under `target/bench/revisions/<sha>`,
+from a detached worktree in `.tmp/` that the run removes when it exits, so a
+later run reuses that build. The revisions build side by side on every allowed
+CPU, since fat LTO links on one thread, `BENCH_BUILD_JOBS` (default 4) at a
+time: each link takes gigabytes, so lower it on a host with little memory.
+Every round measures each base and the
+current tree back to back, rotating which goes first, for
+`BENCH_RUNTIME_ROUNDS` rounds (default 3). The revisions are each other's
+control, so there is no unprofiled run per revision. One generator drives them
+all: the current tree's, unless `BENCH_GENERATOR` names a revision. Hold it
+fixed across a bisect's runs, so client changes (flow control, subscription
+options) can't move what an old relay spends per frame.
+
+The run ends with each revision's median and range at each worker count in
+`instructions-summary.json`, including the groups the generator confirmed lost
+between the reports bracketing each counter window and the host's highest
+one-minute load during it. Admission only waits for room when the run starts,
+so judge cells by the load they actually ran under.
+
+After seven seconds of warmup, acknowledged perf enable/disable commands bound
+five seconds of relay counters. `instructions/instructions.json` records both
+acknowledgement brackets, their uncertainty, and the delivered frames linearly
+interpolated between the generator's surrounding 500 ms reports at those same
+boundaries. This is a sampled delivery estimate, not exact frame accounting.
+Missing, uncounted, or multiplexed counters and unbracketed delivery fail the run.
+Lost or throttled instruction samples also fail. Inspect the host's sample-rate
+limit and buffers before choosing a larger fixed period for the whole comparison;
+some sample-rate limits throttle on every interrupt, regardless of the period.
+On the profiling host, a 1,000 Hz limit throttled every sample even at a period
+of 10,000,019. Temporarily raising `kernel.perf_event_max_sample_rate` to 100,000
+allowed complete captures. Save and restore the original setting around the
+whole gated run; the driver records the observed limit and changes no sysctls.
+The host sampler lasts nineteen seconds, so delivery reports bracket both edges
+of the counter window and cover the sampling window after it. The normal
+`summary.json` still describes its own final throughput window; use
+`instructions.json` for instruction comparisons.
+
+`BENCH_INSTRUCTION_PERIOD` defaults to 1,000,003 retired instructions per
+sample. The fixed-period recording covers the five seconds after the counter
+window, not the window itself, so sampling interrupts, which run as the relay's
+kernel instructions, stay out of the counts. `instructions.folded` weights each
+stack by that period; scale stacks to a frame by their share of samples.
+`perf.data`, raw `stat.json`, `perf.log`, thread names, CPU sets, and delivery
+reports remain with the evidence. Both counters and samples cover only the
+relay.
+
+Compare equivalent delivery and loss. Instructions reduce frequency noise, but
+not batching: a relay contending with other host work handles more frames per
+wakeup, so each frame costs fewer instructions. On the profiling host, cells
+measured under a one-minute load above about 9 read 5-20% low, so compare
+cells from quiet stretches within one run. Pinning does not remove interference
+from other host work.
+
+### Fan-out
+
+Relay instruction counts move with host load (see Instructions above), which
+hides steps of a few percent. `just bench-fanout` counts the chat fan-out
+without a relay process or sockets, so the counts are the code's alone:
+
+```bash
+nix develop --command just bench-fanout "cdff3c8f95 21d6da9fc1"
+nix develop --command just bench-fanout "" "model" "1 512"
+```
+
+Two scenarios run every subscriber count on one thread:
+
+- `model`: one finished group a cycle through the track model, which every
+  subscriber takes before parking again, as moq-net's `track_fanout_group`
+  bench does. It builds against every revision since
+  [cdff3c8f95](https://github.com/moq-dev/moq/commit/cdff3c8f952b1d6bd2fd40c3f64eb0fd53b97e95).
+- `session`: one publisher session into a relay origin and one viewer session
+  out of it per subscriber, over `transport::memory`, on one current-thread
+  runtime. It counts the publisher, relay, and viewer sessions together, but no
+  QUIC: in-tree qmux, receive leases, and crypto only show in relay counts. A
+  revision whose session API predates this harness reports it unsupported.
+
+Each `bench/fanout/<scenario>` crate builds against each base's and the current
+tree's own crates and lock, `BENCH_BUILD_JOBS` at a time, into
+`target/bench/fanout/`, or
+`BENCH_FANOUT_TARGET` where a build cache might evict that during a long sweep. Each
+count pins the harness to one CPU (`BENCH_FANOUT_CPU`, by default the last
+allowed one) and takes its user instructions from `perf stat` for a run of
+zero cycles and one of many; the difference over the groups delivered is
+`fanout-summary.json`. Each process draws its own hash seeds, which move a
+count by up to about 0.5%, so each is the median of three. `BENCH_FANOUT_CALLGRIND=1`, with `valgrind` on `PATH`, also keeps
+callgrind outputs of both runs under `fanout/<revision>/<scenario>/callgrind/`;
+`python3 bench/fanout.py functions ZERO FULL UNITS` ranks functions by
+instructions per group, and `python3 bench/fanout.py compare BASE CURRENT
+SUBSCRIBERS` ranks what moved between two revisions' `callgrind/` directories. `BENCH_FANOUT_VERSION` picks the session's protocol
+version (default `moq-lite-06`).
 
 ### Heap
 
@@ -207,10 +469,10 @@ to the performance cores wherever the kernel lists them
 already allowed, so an outer `taskset` or cpuset still narrows it. The run prints the pinned cores beside its result and records
 them as `affinity` in the metadata. A CPU with one core type runs unpinned.
 
-BASE comparisons run paired rounds (default three, `MOQ_BENCH_RUNTIME_ROUNDS`),
+BASE comparisons run paired rounds (default three, `BENCH_RUNTIME_ROUNDS`),
 alternating base/current order. Startup remains outside the final five-second
-throughput window. `MOQ_BENCH_ARTIFACTS` chooses the evidence parent (default
-the current worktree's `.scratch/bench`), which must be outside the repository,
+throughput window. `BENCH_ARTIFACTS` chooses the evidence parent (default
+the current worktree's `.tmp/bench`), which must be outside the repository,
 or git-ignored and outside `bench/`; each invocation retains a new run directory even on failure.
 It contains raw load/host JSONL, process diagnostics, Criterion statistics,
 execution order, source revision and tracked dirty patch, tool/build/machine
@@ -219,7 +481,8 @@ source files. The retained path is printed at the end, including on failure.
 Choose an evidence parent outside disposable worktrees when the report must survive
 worktree removal. Criterion case discovery uses isolated short measurements and
 their full JSON IDs, since `--list` truncates display names; discovery samples
-are retained separately and never used in the comparison.
+are retained separately and never used in the comparison. A target that writes
+no Criterion samples, such as one that prints its own table, is listed as skipped.
 
 Each comparison reports the median of the paired percentage deltas, their median
 absolute deviation and range, and flags fewer than three observations or a sign
@@ -238,43 +501,26 @@ hide a relay improvement behind generator saturation. CPU efficiency remains
 withheld until offered load and delivery/loss are comparable. Zero-baseline
 metrics retain absolute deltas when their percentage ratio is undefined.
 
-Measure what each binding adds over Rust:
+Each wrapper carries a runner of the binding benchmark, which measures what the
+binding adds over Rust: `just go bench`, `just py bench`, `just kt bench`,
+`just cpp bench`, `just dart bench`, and `just swift bench` (macOS), beside the
+Rust baselines in `rs/moq-ffi/src/bench.rs`. Every runner runs the same
+in-process rounds with no network: each publisher writes one group from the
+driving thread while every subscriber reads it on its own task, and a round
+waits for every subscriber. It sweeps frame sizes from 100 B to 1 MiB at one
+publisher and subscriber, then 1/4 publishers by 1/4 subscribers at 1 KiB, and
+times two sync calls (`sequence`, `info`). Each case reports delivered MB/s and
+process CPU (user + system, every thread) per MB into
+`$MOQ_BENCH_DIR/<runner>.json`. `MOQ_BENCH_SECONDS` sets each case's time
+budget (default 1); every received frame is checked byte for byte.
 
-```bash
-nix develop --command just bench-ffi
-```
-
-Every runner (Rust, Go, Python, Kotlin, C++, Dart, Swift) runs the same in-process rounds with no
-network: each publisher writes one group from the driving thread while every
-subscriber reads it on its own task, and a round waits for every subscriber. It
-sweeps frame sizes from 100 B to 1 MiB at one publisher and subscriber, then
-1/4 publishers by 1/4 subscribers at 1 KiB, and times two sync calls
-(`sequence`, `info`). Each case reports delivered MB/s and process CPU (user +
-system, every thread) per MB. `MOQ_BENCH_SECONDS` sets each case's time budget
-(default 1); every received frame is checked byte for byte.
-
-Each runner writes `target/bench/ffi/<runner>.json`; `bench/ffi.py` combines
-them into a table and `report.json`. Ratios are against `rust-ffi`, moq-ffi's
-API called from Rust without crossing the FFI, so a wrapper's ratio is what its
-boundary and wrapper cost. `rust-net` runs the same rounds on moq-net, so its
-ratio is what moq-ffi's handles and runtime cost. Ratios hold only within one
-machine. The nightly runs it, prints the table in the job summary, and keeps the
-results as the `bench-ffi` artifact. Each language also has its own recipe
-(`just go bench`, `just py bench`, `just kt bench`, `just cpp bench`,
-`just dart bench`, `just swift bench`). C++ uses C++20 reader coroutines;
-Swift uses structured tasks; Dart uses futures on its event loop.
-The payload checks and scheduling costs are included in each measurement.
-
-Linux runs every wrapper except Swift. The nightly macOS platform job, or a
-manual Platform run with `benchmarks` set, runs `just bench-ffi swift`,
-measuring fresh Rust baselines on that same machine, and uploads
-`bench-ffi-swift` separately. Never compare its absolute values
-against the Linux job's baselines. A local run can select runners explicitly,
-for example `just bench-ffi cpp dart`. Each invocation clears its output
-directory and refuses a runner that produces no report. Dart's native asset
-hook builds its usual minimal-feature release library; C++ and Swift use
-their default-feature release libraries. No codec work is timed here.
-C++ and Dart process CPU measurement supports Linux and macOS.
+The binding benchmark itself lives in
+[rust2](https://github.com/moq-dev/rust2/blob/main/bench/ffi/README.md), with
+the UniFFI fork whose changes it measures: its `just bench-ffi` runs these
+runners nightly at a pinned moq revision, against the fork, and reports each
+wrapper's ratio to Rust. So that they keep working here, moq's Nightly runs every
+runner at a token budget without measuring it: `just gh nightly bindings` on
+Linux, and `just swift bench` in the macOS Platform job.
 
 ## Browser
 
@@ -293,7 +539,7 @@ extra copy of every received stream chunk injected into `@moq/net`, the control
 that shows the suite can see a copy-heavy change), and `base` when a revision is
 given. Each variant resolves `@moq/*` from its own checkout. Variants alternate
 within each round, with the starting variant rotated, after one warmup round
-(`--rounds`, `--warmup`, `--scenarios transport,cmaf,media`).
+(`--rounds`, `--warmup`, `--scenarios transport,cmaf,media,racing,stats`).
 
 - `transport`: a publisher page writes 160 B through 1 MiB frames, a consumer page
   subscribes and reads them all. Connection setup and fixture generation stay
@@ -309,6 +555,36 @@ within each round, with the starting variant rotated, after one warmup round
   window's edges, so decoded-but-unpainted can be off by a frame or two; decoder
   queue depth (mean, and maximum within the window) comes from a thin
   `VideoDecoder` wrapper present in every pass.
+- `racing`: one page dials `Connection.connect` repeatedly, closing each session
+  before the next, to measure what the WebSocket fallback's win history keeps and
+  what it saves. Each URL's reconnects dial in order. From a 16 URL x 4 reconnect
+  x 256 character base, dialed one at a time, the sweep varies one axis at a
+  time: 1 and 128 URLs, 1 and 16 reconnects, 64 and 2048 characters, and a query
+  rotated on every reconnect, as a refreshed token would be. The 128 URL shape
+  dials 8 URLs at once to finish; the browser opens one WebSocket to an address
+  at a time, so only its retention compares. Modes refuse WebTransport so
+  WebSocket wins (`websocket`, and `alternate` with its own fallback URL), leave
+  it open (`webtransport`, and `disabled` without a fallback), or refuse only each
+  URL's first dial and then race twice more with it open (`sticky`). The refusal
+  throws from the page's `WebTransport` constructor, as a blocked network fails,
+  so the WebSocket head start still runs. Each sample reports dial latency per
+  reconnect and the WebSocket win fraction. After the pool's linger and a forced
+  collection, a heap snapshot counts the flat strings still holding the run's URL
+  marker, with their V8 object bytes and characters. A forced arm's winner is
+  checked; an open race's is only reported.
+- `stats`: one page holds `Moq.Connection` handles open while they do nothing
+  else, to measure local send-rate sampling. Distinct reconnect loops (1, 4, 16)
+  cross reservations held on each (0, 1, 4); receive-only playback of a 30 fps
+  track, pooled connections inside the linger window after their last handle
+  closed, four identical pooled handles (one connection, the control) and qmux
+  complete the sweep. After a settle, a 2 s window (1.2 s for linger) reports
+  `getStats` calls and `setTimeout` calls per second, main-thread and process
+  CPU, and how many reservations hold a send-rate slice. `stats resume` releases
+  and re-takes a reservation ten times, 500 ms apart, timing its first slice.
+  Shipping Chromium has no `WebTransport.getStats()`, so this scenario runs in a
+  second browser with `--enable-blink-features=WebTransportStats`; its `absent`
+  shapes delete the method again, as shipping Chromium and Safari present it. The
+  `copy` control does not run here: nothing receives stream chunks in bulk.
 
 Costs are split by where they run. Main-thread CPU is CDP `TaskDuration` in
 thread ticks; process CPU is each page's renderer (every thread, including
@@ -318,8 +594,10 @@ keep instrumentation out of timed samples: a traced pass retains a gzipped Chrom
 trace per workload and reports GC pauses and reclaimed JS heap; a counted pass
 wraps typed-array constructors, `set` and `slice` to report JS-visible bytes
 copied and allocated per payload byte during delivery, with connection setup
-subtracted; a probed pass reads each presented
-frame's painted id back to report frame delay percentiles. Native copies inside
+subtracted (for `stats`, V8's sampling heap profiler reports every byte the
+window allocated, collected or not); a probed pass reads each presented
+frame's painted id back to report frame delay percentiles. The `stats` call
+counters are one increment per call and run in every pass. Native copies inside
 WebTransport and WebCodecs are unavailable, and the report says so.
 
 Chromium runs headless with `--disable-gpu`, so decode and rendering are
@@ -343,36 +621,142 @@ check sampled bytes, the counted pass checks every byte, and frame counts and an
 order-independent digest must match, so skipped work cannot read as a speedup.
 CMAF output is decoded and checked byte for byte in a separate call after each
 phase's CPU and trace snapshots.
-Crashes, wrong bytes, missing frames, a window that presents nothing, or an
-unavailable CPU clock fail the run; timing never does. The nightly runs
-`--smoke` and keeps its run directory as the `bench-browser` artifact.
+Crashes, wrong bytes, missing frames, a window that presents nothing, a racing
+dial that fails or a forced racing arm won by the other transport, a stats
+window whose reservations hold more or fewer send-rate slices than the transport
+can give (every one over WebTransport with `getStats()`, none over qmux or
+without it), a resume cycle that never gets its slice, or an unavailable CPU
+clock fail the run; timing never does. The nightly runs
+`--smoke`, whose racing sweep runs every mode and a rotated query at 4 URLs x 2
+reconnects x 64 characters, and keeps its run directory as the `bench-browser`
+artifact. `consoles.jsonl` beside `report.json` retains page console messages and
+uncaught errors, including failed setup and samples. Each entry identifies its
+page, role, variant, workload, round and pass; `time` is Unix milliseconds.
+Console levels do not change the benchmark's existing failure checks.
 
-The in-memory frame and retained-history paths also run directly in Chromium:
+The in-memory frame, retained-history, gap ledger, bandwidth allocation, cached-group
+replay, resume-history, buffered-group, and peer grant paths also run directly in Chromium:
 
 ```bash
-nix develop --command bun bench/browser/micro.ts --bench frames --out .scratch/frames.json base=/path/to/release current=. aa=.
-nix develop --command bun bench/browser/micro.ts --bench drift --out .scratch/drift.json before=/path/to/main current=. aa=.
+nix develop --command bun bench/browser/micro.ts --bench frames --out .tmp/frames.json base=/path/to/release current=. aa=.
+nix develop --command bun bench/browser/micro.ts --bench drift --out .tmp/drift.json before=/path/to/main current=. aa=.
+nix develop --command bun bench/browser/micro.ts --bench ledger --out .tmp/ledger.json before=/path/to/main current=. aa=.
+nix develop --command bun bench/browser/micro.ts --bench bandwidth --out .tmp/bandwidth.json before=/path/to/main current=. aa=.
+nix develop --command bun bench/browser/micro.ts --bench replay --out .tmp/replay.json before=/path/to/main current=. aa=.
+nix develop --command bun bench/browser/micro.ts --bench resume-history --out .tmp/resume-history.json before=/path/to/main current=. aa=.
+nix develop --command bun bench/browser/micro.ts --bench buffered --out .tmp/buffered.json before=/path/to/main current=. aa=.
+nix develop --command bun bench/browser/micro.ts --bench pattern --out .tmp/pattern.json before=/path/to/main current=. aa=.
 ```
 
-Each variant uses its own workspace source and a persistent page, with one full
+Each variant uses its own workspace source and a persistent, cross-origin isolated
+page, so `performance.now()` resolves 5 µs rather than 100 µs, with one full
 warmup before three alternating measured rounds. `aa` must bundle identically to
-`current`. The JSON preserves every CSV sample and the browser version. `frames`
+`current`. The JSON preserves every CSV sample and the browser version. Replay
+and resume-history also record each variant's main-thread GC count, pause and
+reclaimed heap and the rows from one traced run after the timed rounds. `frames`
 runs the checkout's existing `js/net/bench/frames.ts`; `drift` uses the same fixture
 against every checkout, sweeping retained groups, publishers, and readers. Replay
 and group setup stay outside drift timing; each parked read checks its live
-payload. The browser smoke lane preserves one measured round of both fixtures, and drift
-also runs in the nightly JS benchmark leg. Timing is
+payload. `ledger` uses one fixture against every checkout's internal ledger, sweeping
+ascending, descending, shuffled, and rolling-expiration arrivals over the retained
+gap count. It includes each arrival's expiration and coverage checks. `bandwidth`
+uses one fixture against every checkout's allocator, sweeping connections,
+reservations, priority tiers, idle reservations and observers. It times an estimate
+change, a demand change and a ceiling change until the allocator republishes, and a
+peek of every reservation, checking every grant against a reference division. Its
+Rust counterpart is `cargo bench -p moq-net --features fuzz --bench bandwidth`, whose
+`BANDWIDTH_COUNTS=<iterations>` mode prints allocations and wakes per operation.
+`pattern` runs `js/pattern/bench/algebra.ts` against every checkout's `@moq/pattern`:
+the same peer grant shapes as the Rust `pattern-algebra` sweep below, reduced and
+compared against a previous grant, up to a whole `AUTH_OK`.
+The drift sweep includes untimed controls and timed groups with decode-order
+B-frames, independently varying publisher and reader counts and retained history.
+Its `time_mode` column is 0 for untimed, 1 for millisecond timestamps, and 2
+for mixed millisecond/microsecond timestamps, which exercise exact cross-scale
+comparison.
+
+`buffered` drives every checkout's `@moq/hang` container consumer with one fixture,
+sweeping buffered groups against frames per group, then publishers against players.
+`steady` reads each frame as it lands (its `ns_per_op` is the frame delay);
+`lookahead` and `sparse` decode every group before draining them, in order or
+shuffled with a missing sequence between groups; `burst` times only the arrival
+that skips every buffered group once the max delay drops to zero, per skipped group.
+Each case checks its exact buffered ranges, timestamp order and payloads, and that
+skipped groups are closed; `gaps` and `warnings` must match between variants.
+
+`replay` sweeps retained groups (64, 512, 2048) against subscribers (1, 8) for
+monotonic, reverse, and shuffled arrivals. `join` rows time each subscriber
+joining the cache and replaying every retained group; `append` rows time each of
+64 arrivals fanned into every subscriber's unread backlog, landing inside the
+backlog for reverse and shuffled orders. `max_us` is the slowest single operation,
+the longest the event loop was held. An untimed pass first prints each shape's
+`Array.prototype.sort` calls, elements and comparator visits, ahead of the timing
+header so the nightly report keeps only timings as series. Every subscriber then
+drains, requiring each sequence once, ascending, with its payload. Each shape then
+closes its readers and track and advances its own manual clock past cache expiry,
+outside timing, so completed shapes cannot accumulate through prune timers.
+
+`resume-history` moves long-lived logical fronts across lite sessions over the
+in-memory transport, make-before-break as a session draining after GOAWAY does.
+It sweeps fronts, names read per route, and route count, with `stable` names
+(the same ones on every route) against `churn` (new names first answered by each
+route), each read by info lookup, fetch, or subscription and then closed. Once a
+manual clock ages out every cache, asynchronous major collections from Chromium's
+exposed `gc` run without stack heap pointers, so dead stack slots cannot pin a route
+even under tracing. Weak references count the retired routes' sessions, transports,
+broadcast handles, and delivered payload buffers still reachable. These counts are exact,
+so any nonzero one in a timed or traced pass fails the run once every sample is
+written, leaving a retaining `before` revision's counts in the JSON. A concluded control must release everything,
+or the fixture fails. `size_bytes` is the JS heap the fronts and their serving
+route hold, from Chromium's precise memory info; `serve_us` and
+`read_us` include no setup. Bun's collector scans its
+stack conservatively, so the fixture refuses to run there.
+
+The browser smoke lane preserves one measured round of all eight fixtures, and drift,
+ledger, bandwidth, replay, buffered and pattern also run in the nightly JS benchmark leg. Timing is
 observational, with the A/A spread showing the host's noise floor.
 
 ## Pattern and container coverage
 
 Rust Criterion coverage includes `moq-pattern`'s
-`matching` (pattern count and path depth, last match and miss) and `moq-mux`'s
+`matching` (pattern count and path depth, last match and miss; and, in
+`pattern-algebra`, whole-union operations, including the worst known peer grant
+shapes swept over encoded size up to a whole `AUTH_OK`) and `moq-mux`'s
 `containers` (CMAF and Annex-B import/export). Container cases vary frame count
 and payload size; CMAF also varies track count. Separate frame and byte rates
 use the same fixtures, with byte rates counting the encoded stream size.
 Fixture generation, publisher setup and destruction stay outside timing.
 The shared Rust benchmark nightly invocation measures both targets in quick mode.
+
+## Auth verification
+
+`moq-auth`'s `verify` target measures what `moq auth serve` spends on one JWT:
+
+```bash
+nix develop --command cargo bench --locked --manifest-path rs/moq-auth/Cargo.toml --bench verify
+```
+
+`decide` runs `Policy::decide` end to end for every supported algorithm against a
+key file, a key directory and a one-key set, rereading and importing the key as the
+server does per request. `stage` times each part alone: the async file read beside a
+blocking one, key and set parsing, header decoding, `kid` lookup, import, and
+verification with a fresh (`verify_cold`) or already used (`verify_warm`) key. `set`
+sweeps the set size (1, 16, 256) against a first, last or missing `kid`; `refuse`
+covers expired, forged, unknown-`kid`, `kid`-less and malformed tokens. `clients`
+runs 1, 16 or 64 concurrent requests on a four-worker runtime against one key, a
+16-key directory or a 16-key set, plus a refusal burst and a key replaced and
+removed by atomic rename during the requests; each prints its per-request
+p50/p95/p99 after the run. `sessions` times a `connect` and `end` while the
+server's session limits count 0, 1024 or 16384 other live sessions. `http` is one
+HS256 or ES256 `connect` as a relay sends it, a `POST /` over loopback TCP, which
+puts the verification in scale.
+
+Validity checks read a manual clock, so every run decides alike. Set
+`VERIFY_FIXTURE` to a directory to reuse its keys and tokens across runs, and
+`VERIFY_CASE` with `VERIFY_ITERATIONS=n` to skip Criterion and run one case exactly
+`n` times, printing its allocations per iteration. Under `perf stat`, the
+instruction difference between `n` and 0 iterations, divided by `n`, is that case's
+deterministic cost on a loaded host. It runs nightly in the `rust-extra` group.
 
 ## Nightly trends
 
@@ -403,47 +787,54 @@ that artifact first or wait for the next Nightly.
 
 The table includes these measurements:
 
-- Binding delivery in MB/s, process CPU in ms/MB, sync calls in ns, and each
-  wrapper's ratio to `rust-ffi`. Ratios above 1 mean more cost than Rust on the
-  same host, including for throughput, where the ratio is Rust/wrapper.
 - Rust Criterion mean ns per iteration; the history also keeps the confidence interval.
   The `net-cpu` source and the moq-quic targets time thread CPU; the others
   time elapsed time. The Rust bench target jobs measure them with a short warmup
   and Criterion's quick mode. Per-group benchmark settings can override the default warmup. Quick estimates
   trade precision for nightly runtime; the paired comparison below assesses a change.
-- JS benchmark CSV time columns (`ns`, `us`, `ms`, and their per-operation
-  variants) and `size_bytes` columns, retaining every other column as a workload
-  dimension in each series name.
+- The CSV tables the JS benchmarks and the Rust benchmark tests print. A header
+  line names the columns; the time columns (`ns`, `us`, `ms`, and their
+  per-operation variants such as `ns_per_frame` or `plain_ns_per_read`),
+  `size_bytes` and `peak_bytes`, `mib_per_s`, and `*_packets` columns are
+  measurements, and every other column is a workload dimension in each series
+  name, so print outcomes only in measured columns. The Rust benchmark tests
+  (`just gh nightly rust-test`) run in release builds, one at a time, under
+  nextest's `bench` profile, which keeps each test's output in a JUnit report;
+  their series are named by package and test path, such as
+  `rust-test/moq-congestion/gcc/bench/benchmark_per_packet`.
+- Shipping sizes, in bytes: the release artifacts, minimal FFI build, and JS
+  bundles the [size report](../sh/size/README.md) measures, recorded even on a
+  night its growth check fails. Release build times stay out.
 
 Hosted runners vary across nights, so a trend flag prompts a look at the paired
-comparison rather than proving a regression. Binding ratios compare languages within one run.
+comparison rather than proving a regression.
 Malformed, empty, nonfinite, or duplicate measurements fail validation. The
-nightly artifacts retain the reports, raw JS output, and each Criterion run's
-metadata and estimates for 45 days. Relay load, audio quality, and the Rust
-benchmark tests job's nextest output do not enter the table.
+nightly artifacts retain the reports, raw JS output, nextest JUnit reports, and
+each Criterion run's metadata and estimates for 45 days. Relay load, audio
+quality, and the binding runners (measured in rust2, above) do not enter the
+table.
 
 Render the table from the published history:
 
 ```bash
 git fetch origin gh-pages
-git worktree add .scratch/pages origin/gh-pages
-nix develop --command just gh benchmark-report index .scratch/pages
+git worktree add .tmp/pages origin/gh-pages
+nix develop --command just gh benchmark-report index .tmp/pages
 ```
 
-Then open `.scratch/pages/bench/index.html`. Without `--commit`, the newest
+Then open `.tmp/pages/bench/index.html`. Without `--commit`, the newest
 recorded commit counts as tonight's. Reproduce the measurements locally:
 
 ```bash
-nix develop --command just bench-ffi
 nix develop --command just gh nightly rust-bench
 nix develop --command just gh nightly js
 ```
 
-The latter two write `target/bench/nightly/{rust-bench,js}/report.json`. For a focused
+These write `target/bench/nightly/{rust-bench,js}/report.json`. For a focused
 measured Rust run using the same evidence lifecycle:
 
 ```bash
-nix develop --command env MOQ_BENCH_LABEL=pattern MOQ_BENCH_RUNS=/tmp/criterion-runs.txt just gh criterion -p moq-pattern --bench matching
+nix develop --command env BENCH_LABEL=pattern BENCH_RUNS=/tmp/criterion-runs.txt just gh criterion -p moq-pattern --bench matching
 nix develop --command just gh benchmark-report rust /tmp /tmp/rust-report.json
 ```
 
@@ -484,10 +875,50 @@ Reproduce a paired group locally against any revision; `previous-nightly`
 resolves the last scheduled Nightly's commit through `gh`:
 
 ```bash
-nix develop --command env MOQ_BENCH_BASE=previous-nightly just gh nightly rust-bench
+nix develop --command env BENCH_BASE=previous-nightly just gh nightly rust-bench
 nix develop --command just gh benchmark-report gate target/bench/nightly/rust-bench
 ```
 
 Each run's evidence directory keeps both builds' estimates (`criterion` and
 `criterion-base`), the confirmation rounds under `confirm/`, and the run's
 `paired.json`.
+
+### CodSpeed
+
+The CodSpeed workflow adds instruction counts for every `main` commit that
+touches Rust, at <https://codspeed.io/moq-dev/moq>. Its CPU simulation runs
+each bench under Valgrind on a hosted runner, so a change of a few percent
+shows without the paired comparison's rounds. It does not see syscalls, I/O,
+contention, or caches, and skips `iter_custom` benches, so `just rs codspeed`
+builds only single-threaded targets without I/O, and Nightly keeps measuring
+every bench. Workspace benches import `criterion`, which `rs/bench-harness`
+resolves to Criterion, or to CodSpeed's instrumented Criterion under
+`cargo codspeed`. Nothing gates on it.
+
+```bash
+nix develop --command just rs codspeed
+nix develop --command cargo codspeed run
+```
+
+Run locally, the benches only check that each case runs; there is no
+measurement outside CodSpeed's runner.
+
+## Local check capacity
+
+Prepare the same warm dependencies and artifacts in each isolated checkout, then
+compare solo and concurrent suites with their actual worker counts:
+
+```bash
+just bench-local --checkout "$PWD" --checkout /path/to/another/checkout \
+  --workers 1 4 8 24 --samples 3 --cache warm -- \
+  cargo nextest run --locked -p moq-net --lib
+```
+
+Each JSON record retains host load, configured workers and lanes, admission
+delay, work wall time, total wall time, and child CPU time. Logs stay under each
+checkout's `.tmp/local-bench/`. To compare Bun workspace fanout, repeat with
+the same `bun run --filter=... test` command, then add `--sequential`. To compare
+the module lanes `just check` runs at once, sweep `--jobs 1 3` over
+`bash sh/dispatch.sh check BASE`, which is then admitted once as a whole.
+Admission remains outside the suite's timeout clocks. Use separate checkouts to
+avoid measuring Cargo's artifact lock instead of competing work.

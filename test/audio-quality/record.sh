@@ -4,11 +4,17 @@
 # Three lanes, each --duration seconds from the first arrival:
 #   relay-bbb   the public relay's Big Buck Bunny, the AAC flush-span shape #3477 measured
 #   local-aac   an AAC tone through a local relay, the shallow control
-#   relay-mic   a browser publishing Chromium's fake capture device through the public relay
+#   relay-mic   a browser publishing Chromium's fake capture device through the public relay, or
+#               with --mic-broadcast NAME, a broadcast someone publishes by hand from a real
+#               browser and microphone to the public relay's anon path
 #
 # Not part of a run: re-record by hand when the path or the publishers change, and re-measure the
 # replay budgets after.
 set -euo pipefail
+
+if [[ "${GITHUB_ACTIONS:-}" != true && "${LOCAL_SUPERVISED:-}" != 1 ]]; then
+    exec bash "$(dirname "$0")/../../sh/local.sh" bash "$0" "$@"
+fi
 
 AQ_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 WORKSPACE=$(cd "$AQ_DIR/../.." && pwd)
@@ -22,6 +28,7 @@ RERUN="just test audio-quality-record$(harness_argv "$@")"
 ALL_LANES=(relay-bbb local-aac relay-mic)
 LANES=("${ALL_LANES[@]}")
 DURATION=35
+MIC_BROADCAST=""
 PUBLIC="https://cdn.moq.dev"
 
 while [[ $# -gt 0 ]]; do
@@ -32,6 +39,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --duration)
             DURATION="${2:?--duration requires a value}"
+            shift 2
+            ;;
+        --mic-broadcast)
+            MIC_BROADCAST="${2:?--mic-broadcast requires a value}"
             shift 2
             ;;
         *)
@@ -97,10 +108,19 @@ for lane in "${LANES[@]}"; do
                 --description "The shallow control: the audio quality harness's AAC publisher with nothing but loopback between it and the viewer."
             ;;
         relay-mic)
-            broadcast="aq-mic-$RANDOM$RANDOM.hang"
-            record "$lane" --mic --url "$PUBLIC/anon" --broadcast "$broadcast" \
-                --source "$PUBLIC/anon, <moq-publish> in headless Chromium capturing its fake audio device, recorded $DATE" \
-                --description "A browser publisher through the public relay: getUserMedia, the capture worklet, and WebCodecs Opus, with the relay's round trip in between."
+            description="A browser publisher through the public relay: getUserMedia, the capture worklet, and WebCodecs Opus, with the relay's round trip in between."
+            if [[ -n "$MIC_BROADCAST" ]]; then
+                # Published by hand, so the capture is a real microphone on a real path.
+                echo "recording $PUBLIC/anon $MIC_BROADCAST; it must already be publishing audio"
+                record "$lane" --url "$PUBLIC/anon" --broadcast "$MIC_BROADCAST" \
+                    --source "$PUBLIC/anon $MIC_BROADCAST, <moq-publish> in a browser capturing a real microphone, published by hand, recorded $DATE" \
+                    --description "$description"
+            else
+                broadcast="aq-mic-$RANDOM$RANDOM.hang"
+                record "$lane" --mic --url "$PUBLIC/anon" --broadcast "$broadcast" \
+                    --source "$PUBLIC/anon, <moq-publish> in headless Chromium capturing its fake audio device, recorded $DATE" \
+                    --description "$description"
+            fi
             ;;
     esac
 done

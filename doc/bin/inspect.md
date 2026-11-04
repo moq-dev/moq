@@ -69,15 +69,15 @@ Dial the `.stats` path, which the token must cover:
 
 ```bash
 moq --connect http://localhost:4443/.stats announced
-moq --connect http://localhost:4443/.stats --broadcast node/local/host fetch publisher.json | jq
-curl http://localhost:4443/fetch/.stats/node/local/host/publisher.json | jq
+moq --connect http://localhost:4443/.stats --broadcast node/local/host fetch totals.json | jq
+curl http://localhost:4443/fetch/.stats/node/local/host/totals.json | jq
 ```
 
 The node name (`local/host` here) is `stats.node`. Each fetch returns the
-newest snapshot of cumulative counters. `totals.json` sums each tier's traffic
-and sessions, `publisher.json` is egress per broadcast path,
-`subscriber.json` is ingress, and `sessions.json` counts sessions per stats
-label. A subscriber may also ask for `<path>/prefix.json`, one broadcast
-prefix rolled up with each child, produced only while held. Fetch twice and divide by the interval for a
-rate. The `.json.z` twins carry compressed patches, which these tools print as
-raw bytes. [Stats](/concept/stats) describes every field.
+newest group of cumulative counters: a full snapshot followed by merge-patch
+deltas, one per line. `totals.json` sums each tier's traffic and sessions.
+`group.json` (`<group>/group.json` at `stats.depth` 1 or more) carries a
+group's traffic per broadcast path and sessions per stats label.
+A subscriber may also ask for `<path>/prefix.json`, one broadcast prefix rolled
+up with each child, produced only while held. Fetch twice and divide by the
+interval for a rate. [Stats](/concept/stats) describes every field.

@@ -13,16 +13,17 @@
 //!
 //! The track is closed with [Error] when all writers or readers are dropped.
 
-use crate::sync::Mutex;
-use crate::{Error, Result, SessionError, StreamError, Timescale, Timestamp, coding};
+use crate::{Error, Result, StreamError, Timescale, Timestamp, coding};
 use crate::{broadcast, cache, group, stats};
+use std::sync::Mutex;
 
-use super::Datagram;
 use super::delivered::Delivered;
+use super::idle;
+use super::skipped::Skipped;
 use crate::ledger::{self, Ledger};
 
-pub use super::subscription::{Anchor, Order, Position, Range, Subscription};
-use super::subscription::{Containing, Held, Holdings, Resolved, Window, later};
+use super::subscription::{Accounted, Containing, Held, Holdings, Layered, Resolved, Runs, Seen, Window, later};
+pub use super::subscription::{Anchor, Delay, Order, Position, Range, Subscription};
 use rangemap::{RangeInclusiveSet, RangeMap, RangeSet};
 
 mod demand;
@@ -43,7 +44,8 @@ use std::{
 	sync::Arc,
 	sync::OnceLock,
 	sync::PoisonError,
-	sync::atomic::{AtomicBool, AtomicU64, Ordering},
+	sync::Weak,
+	sync::atomic::{AtomicBool, Ordering},
 	task::{Poll, ready},
 	time::Duration,
 };
@@ -51,13 +53,6 @@ use std::{
 // The unset priority, the midpoint of the signed range. It goes out as byte 128 on moq-lite
 // and 127 on IETF, which flips priority (lower first): one urgency on both.
 const DEFAULT_PRIORITY: i8 = 0;
-
-/// Maximum number of datagrams retained in the per-track send buffer.
-///
-/// Datagrams are a best-effort send buffer, not a replay cache (unlike groups): only the last
-/// 64 datagrams are kept, so a stalled consumer cannot retain an unbounded backlog. The buffer
-/// bills its bytes to the track's [`cache::Pool`], which drops the oldest under pressure.
-pub(super) const MAX_DATAGRAMS: usize = 64;
 
 /// Slack before the eviction order is rebuilt, so a track holding just a few groups
 /// doesn't rebuild on every write.
@@ -107,33 +102,37 @@ pub struct Info {
 	/// Units per second for per-frame timestamps on this track, or `None` for an untimed
 	/// track.
 	///
-	/// A track is all timed or all untimed: every frame and datagram on a timed track
+	/// A track is all timed or all untimed: every frame on a timed track
 	/// carries a timestamp, none on an untimed one does, and a write that doesn't match
 	/// is refused with [`Error::TimestampMismatch`]. Defaults to `None` (untimed). On
 	/// Lite05+ it is reported in TRACK_INFO and the publisher zigzag-delta encodes
-	/// per-frame timestamps at this scale on the wire; on moq-transport draft 17 and
-	/// later it is the TIMESCALE Track Property. A track received without one
-	/// (pre-Lite05 moq-lite, moq-transport drafts 14-16, or moq-transport without
-	/// TIMESCALE) is untimed.
+	/// per-frame timestamps at this scale on the wire; on moq-transport it is the
+	/// TIMESCALE Track Property. A track received without one (pre-Lite05 moq-lite, or
+	/// moq-transport without TIMESCALE) is untimed.
 	pub timescale: Option<Timescale>,
 	/// How long a superseded group stays fresh. The newest group is never stale.
 	///
 	/// A group is stale once either clock reaches the budget: the wall-clock time since
 	/// its successor arrived at this hop, or how far its successor's first timestamp
-	/// trails the live edge (see [`Subscription::max_delay`]). An untimed track is judged
+	/// trails the live edge (see [`Delay::max`]). An untimed track is judged
 	/// by the wall clock alone, and a peer whose timestamps stop advancing cannot pin a
 	/// superseded group.
 	///
-	/// A retention bound rather than a delivery one, the inverse of an HTTP
-	/// `Cache-Control: max-age`. [`Subscription::max_delay`] is clamped to this, since a
-	/// group can't be waited for longer than it's kept around. Reported in TRACK_INFO so
-	/// relays re-serve with the same window. `None` (the default) sets no limit;
-	/// the origin cache ceiling and pool still apply. `Some(Duration::ZERO)` keeps the live edge.
-	/// Stale groups are skipped by readers; reclaiming their bytes is the cache pool's
-	/// [`expiry`](crate::cache::Pool::expiry) window.
+	/// A freshness bound on what may still be served, the inverse of an HTTP
+	/// `Cache-Control: max-age`. [`Delay::max`] is clamped to this, since a
+	/// group can't be waited for once it is stale. Reported in TRACK_INFO so
+	/// relays re-serve with the same bound.
+	///
+	/// An authored track defaults to `Some(Duration::ZERO)`: a superseded group is stale at once,
+	/// so only the live edge is served, and a publisher that wants a reader to reach history sets a
+	/// longer age, or `None`, explicitly. `None` sets no publisher limit: requested with
+	/// `with_max_age(None)`, and kept by a track received without one (an older moq-lite, or
+	/// moq-transport without MAX_CACHE_DURATION). A hop's cache still bounds what it keeps with
+	/// its own pool and ceiling. Stale groups are skipped by readers; reclaiming their bytes is
+	/// the cache pool's [`expiry`](crate::cache::Pool::expiry) window.
 	///
 	/// This is the `Publisher Max Age` on the wire, the publisher-side half of the
-	/// budget [`Subscription::max_delay`] sets for a subscriber.
+	/// budget [`Delay::max`] sets for a subscriber.
 	///
 	/// Encoded as milliseconds in a QUIC varint, so a duration of `2^62` milliseconds
 	/// or more cannot be put on lite-07 or IETF wires. Lite05/06 map values at or above
@@ -150,7 +149,7 @@ pub struct Info {
 	///
 	/// Writers and readers see plain frames either way: the producer compresses each
 	/// frame as it is written and the cache stores the compressed form. A moq-lite-07 peer or a
-	/// moq-transport draft-17+ peer negotiating the Flate extension receives the compressed
+	/// moq-transport peer negotiating the Flate extension receives the compressed
 	/// bytes and the flag. Other sessions receive one shared inflated copy per group,
 	/// unless a sealed compression declaration makes that fallback unsupported.
 	/// Worth it for small, repetitive payloads like JSON; wasted on media.
@@ -175,17 +174,49 @@ pub struct Info {
 	/// Shared, since every group holds a copy of the info.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) properties: Option<Arc<crate::model::object::TrackProperties>>,
+	/// Whether this copy's groups skip the rewind check: set on a lite-05/06 copy, whose
+	/// untimed origin stamps send times, so an older group fetched later looks like a rewind.
+	/// A track with moq-transport provenance ([`Self::ietf`]) skips it too.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) unchecked: bool,
 }
 
+// `unchecked` says how this copy arrived, not what it holds, so copies of one track over
+// different versions still match.
+impl PartialEq for Info {
+	fn eq(&self, other: &Self) -> bool {
+		let Self {
+			timescale,
+			max_age,
+			priority,
+			compress,
+			refresh,
+			properties,
+			unchecked: _,
+		} = self;
+		*timescale == other.timescale
+			&& *max_age == other.max_age
+			&& *priority == other.priority
+			&& *compress == other.compress
+			&& *refresh == other.refresh
+			&& *properties == other.properties
+	}
+}
+
+impl Eq for Info {}
+
+/// An authored track's defaults: untimed, a zero [`max_age`](Info::max_age) (the live edge only),
+/// priority 0, uncompressed, never asking for a refresh.
 impl Default for Info {
 	fn default() -> Self {
 		Self {
 			timescale: None,
-			max_age: None,
+			max_age: Some(Duration::ZERO),
 			priority: DEFAULT_PRIORITY,
 			compress: false,
 			refresh: None,
 			properties: None,
+			unchecked: false,
 		}
 	}
 }
@@ -201,7 +232,8 @@ impl Info {
 		self
 	}
 
-	/// Set how old a non-latest group may get before eviction, returning `self` for chaining.
+	/// Set how long a superseded group stays fresh, or `None` for no publisher limit,
+	/// returning `self` for chaining. See [`max_age`](Self::max_age).
 	pub fn with_max_age(mut self, max_age: impl Into<Option<Duration>>) -> Self {
 		self.max_age = max_age.into();
 		self
@@ -225,11 +257,21 @@ impl Info {
 		self
 	}
 
-	/// The timescale served on a moq-lite hop, preserving moq-transport timestamps only
-	/// when the hop negotiated the `ietf` extension.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn lite_timescale(&self, ietf: bool) -> Option<Timescale> {
-		self.timescale.filter(|_| self.ietf().is_none() || ietf)
+	/// `timestamp` at this track's [`timescale`](Self::timescale).
+	///
+	/// A track is all timed or all untimed, so a frame must match it: a timed frame on an
+	/// untimed track, or an untimed one on a timed track, is [`Error::TimestampMismatch`],
+	/// as is a timestamp the track's scale can't hold. A writer that changes state before
+	/// its frame reaches the track, such as signing or encrypting it, rescales first so a
+	/// refused timestamp changes nothing.
+	pub fn rescale(&self, timestamp: Option<Timestamp>) -> Result<Option<Timestamp>> {
+		match (timestamp, self.timescale) {
+			(Some(timestamp), Some(timescale)) => Ok(Some(
+				timestamp.convert(timescale).map_err(|_| Error::TimestampMismatch)?,
+			)),
+			(None, None) => Ok(None),
+			_ => Err(Error::TimestampMismatch),
+		}
 	}
 
 	/// The original moq-transport publisher's draft, whose timestamps may rewind, or
@@ -241,52 +283,10 @@ impl Info {
 
 #[cfg(test)]
 impl Info {
-	/// A millisecond track, for tests that write timestamps.
+	/// A millisecond track with no publisher max age, for tests that write timestamps: a test
+	/// of staleness sets its max age explicitly.
 	pub(crate) fn timed() -> Self {
-		Self::default().with_timescale(Timescale::MILLI)
-	}
-}
-
-/// The sequence namespace a track name keeps within its broadcast, shared by every
-/// producer that serves the name, so a replacement continues the same timeline: it can't
-/// append a sequence an earlier one wrote, nor start a group before an earlier one's.
-#[derive(Clone, Default)]
-pub(super) struct Sequence(Arc<SequenceState>);
-
-#[derive(Default)]
-struct SequenceState {
-	// One past the highest sequence written.
-	next: AtomicU64,
-	// The highest-sequence checked start written, which bounds a replacement's groups the
-	// way the eviction watermark bounds a track's own.
-	bound: Mutex<Option<(u64, Timestamp)>>,
-}
-
-impl Sequence {
-	/// One past the highest sequence any producer of the name wrote.
-	fn next(&self) -> u64 {
-		self.0.next.load(Ordering::Relaxed)
-	}
-
-	fn advance(&self, sequence: u64) {
-		self.0.next.fetch_max(sequence.saturating_add(1), Ordering::Relaxed);
-	}
-
-	fn bound(&self) -> Option<(u64, Timestamp)> {
-		*self.0.bound.lock().unwrap_or_else(PoisonError::into_inner)
-	}
-
-	/// Keep group `sequence`'s checked `start` if it is the highest-sequence one yet.
-	fn share_bound(&self, sequence: u64, start: Timestamp) {
-		let mut bound = self.0.bound.lock().unwrap_or_else(PoisonError::into_inner);
-		if bound.is_none_or(|(highest, _)| sequence > highest) {
-			*bound = Some((sequence, start));
-		}
-	}
-
-	/// Whether nothing holds it and nothing was written, so forgetting it changes nothing.
-	pub(super) fn is_unused(&self) -> bool {
-		Arc::strong_count(&self.0) == 1 && self.next() == 0
+		Self::default().with_timescale(Timescale::MILLI).with_max_age(None)
 	}
 }
 
@@ -300,9 +300,8 @@ enum Feed {
 		/// from: the newest group when it went live, or else the first it produced since.
 		/// Kept after the group is evicted.
 		first: Option<u64>,
-		/// The group the route answered with, which its datagrams can show before any
-		/// group reaches it: relative starts count back from it until a newer group
-		/// arrives.
+		/// The group the route answered with, which can be ahead of any group cached:
+		/// relative starts count back from it until a newer group arrives.
 		edge: Option<u64>,
 	},
 	/// The upstream subscription ended with the copy still held, so how stale the cache
@@ -334,20 +333,30 @@ impl Feed {
 	}
 }
 
+/// How far a track got toward a live [`Producer`]; each step replaces the last.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Publication {
+	/// Nobody answered the request yet.
+	#[default]
+	Pending,
+	/// A dynamic handler took the request. Its answer is the handler's call, so ending
+	/// the broadcast leaves it pending rather than rejecting it.
+	Claimed,
+	/// Minted by `Request::stage` and not committed yet: the producer writes, but waiting
+	/// subscribers resolve only at `Staged::commit`, with everything written by then.
+	Staged,
+	/// A live Producer was minted and committed.
+	Published,
+}
+
 #[derive(Default)]
 pub(crate) struct TrackState {
 	// The publisher's properties, once known; always Some for Subscriber/Producer.
 	// Copied by value into each group it creates.
 	info: Option<Info>,
-	// Whether a live Producer was minted. A reverse fetch may install `info`
-	// before acceptance, so the two states are deliberately separate.
-	published: bool,
-	// Minted by `Request::stage` and not committed yet: the producer writes, but waiting
-	// subscribers resolve only at `Staged::commit`, with everything written by then.
-	staged: bool,
-	// Whether a dynamic handler took the request. Its answer is the handler's call,
-	// so ending the broadcast leaves it pending rather than rejecting it.
-	claimed: bool,
+	// How far the track got toward a live Producer. A reverse fetch may install `info`
+	// before acceptance, so the two are deliberately separate.
+	publication: Publication,
 
 	// The broadcast this track belongs to. Supplies the cache pool its groups charge
 	// into and the local `cache_duration` ceiling.
@@ -357,6 +366,9 @@ pub(crate) struct TrackState {
 	// creates (see `cache::Track`). Holds the gross-write counter `charge_debt` drains,
 	// and the weak link a frame write follows back here to settle its own debt.
 	cache: Arc<cache::Track>,
+	// The upstream publisher's Largest Object, retained even on a fetch-only copy, with the
+	// track's largest position once it was reported: anything received past that outdates it.
+	object_edge: Option<((u64, u64), Position)>,
 
 	// Cached groups by sequence: the single source of truth for what is cached. The
 	// two orderings below hold bare sequences and validate against this map, so a
@@ -364,6 +376,15 @@ pub(crate) struct TrackState {
 	// Ordered so an in-range subscriber can seek to its cursor instead of scanning
 	// every cached group for each delivery.
 	lookup: BTreeMap<u64, Slot>,
+	// The sequences in `lookup` the live feed holds ([`Slot::visible`]): the searches for
+	// live content walk these, so fetched backfill between them costs nothing.
+	visible: BTreeSet<u64>,
+	contents: group::Contents,
+	// Copies that left `lookup`, or never entered it, while a fetch or reader may still
+	// hold them, so a teardown ends those still being written. Pruned once it doubles
+	// past `detached_kept`, the count its last prune left.
+	detached: Vec<group::Detached>,
+	detached_kept: usize,
 
 	// Publisher-produced groups in arrival order as (sequence, stamp), walked by
 	// subscriptions; an entry only resolves while its stamp matches the slot's.
@@ -387,30 +408,17 @@ pub(crate) struct TrackState {
 	// what each track writes and never touches another track's cache.
 	debt: u64,
 
-	// Datagrams in arrival order, bounded by `MAX_DATAGRAMS` and billed to the pool, which
-	// drops the oldest under pressure. Shares the group sequence namespace but is otherwise
-	// independent.
-	datagrams: VecDeque<super::datagram::Buffered>,
-
-	// Number of datagrams dropped off the front (over capacity), mapping a subscriber's absolute
-	// cursor to an index into `datagrams` (mirrors `offset` for groups).
-	datagram_offset: usize,
-
 	// We've popped the front of `arrival` this many times, mapping a subscriber's
 	// absolute cursor to an index.
 	offset: usize,
 
-	// The highest sequence number successfully appended to the track. Shared with
-	// datagrams, so it can run ahead of any cached group.
+	// The highest sequence number successfully appended to the track, which can run ahead
+	// of any cached group.
 	max_sequence: Option<u64>,
 
 	// The newest group the publisher produced, which fetched backfill never moves: where
 	// relative starts count back from (see `latest_live`).
 	newest_produced: Option<u64>,
-
-	// The name's sequence namespace within the broadcast, which can run past this track's
-	// `max_sequence` when an earlier producer of the name wrote further.
-	sequence: Sequence,
 
 	// The checked starts cached groups hold, by sequence (see [`group::Origin::Bound`]), so a
 	// first frame finds its neighbors without walking groups not yet stamped. Filled through
@@ -430,9 +438,8 @@ pub(crate) struct TrackState {
 
 	// The sequence of the newest cached group: the live edge, protected from
 	// eviction by never entering the eviction order until the track is `closed`.
-	// Tracked separately from `max_sequence` because datagrams advance that shared
-	// counter, and the live edge must still demote correctly when the next group
-	// lands past one.
+	// Tracked separately from `max_sequence`, which a reserved sequence can push past
+	// any cached group.
 	latest_group: Option<u64>,
 
 	// Incarnation counter for `Slot::stamp`.
@@ -441,9 +448,11 @@ pub(crate) struct TrackState {
 	// The exclusive end: no frame at or past it exists. Retained independently of the
 	// cache, so an evicted last group does not lose where the track ended.
 	end: Option<Position>,
+	// The error the track ended with at `end`, if it did not end cleanly: a reader reaching
+	// the end gets it instead of the end of stream, while everything below stays readable.
+	end_error: Option<Error>,
 
-	// Nothing more can arrive: the last producer dropped after a declared boundary,
-	// or the receiving session closed locally without declaring an end.
+	// Nothing more can arrive: the last producer dropped after a declared boundary.
 	sealed: bool,
 
 	// Set once a received copy's end is declared, ahead of group streams below it that QUIC
@@ -452,7 +461,7 @@ pub(crate) struct TrackState {
 	// end at the boundary with groups still to arrive.
 	tail: Option<crate::time::Instant>,
 
-	// The sequences the live feed delivered, as a group or a datagram: what a pending tail
+	// The sequences the live feed delivered: what a pending tail
 	// is judged by. Fetched copies never count, and eviction never touches it. A gap folds
 	// away a subscription's grace after a later arrival opened it, as the session's tail
 	// does, so this holds only the gaps still worth waiting for.
@@ -474,6 +483,10 @@ pub(crate) struct TrackState {
 	// [`Subscriber::poll_start`]) wait on it; everything else treats the floor as usual.
 	start_pending: bool,
 
+	// Whether the publisher resolved `start_sequence` (a lite-06+ SUBSCRIBE_START), which
+	// may sit above history a reader can still fill. Cleared by any other declaration.
+	start_resolved: bool,
+
 	// A copy received from a remote publisher, whose declared end waits for groups still
 	// in flight below it (see `tail`), and whose readers' relative and time anchors are
 	// refused unless `anchored` (see `Holdings::drops_anchors`).
@@ -481,6 +494,13 @@ pub(crate) struct TrackState {
 	// Whether a received copy's wire tells it what relative and time anchors resolve
 	// against, so they resolve here as at the publisher.
 	anchored: bool,
+	// This copy can translate only time anchors its cache has already settled. A relative one
+	// waits for the live edge its wire reports, as on an `anchored` copy.
+	cached_anchors: bool,
+	// Whether readers ask no fills below `start_sequence`: its publisher resolved it from the
+	// budget, but neither this copy's timestamps nor a fill can judge an older group against
+	// a reader's budget. A widened budget reaches lower groups through the feed's re-offer.
+	fills_from_start: bool,
 	// Sequences the upstream publisher gave up, with the error each was given up with: an
 	// incoming SUBSCRIBE_DROP or a producer cut. Kept apart from the cache so reclaiming a
 	// slot cannot erase a disposition a relay must forward, and as ranges so a wide DROP
@@ -488,14 +508,33 @@ pub(crate) struct TrackState {
 	drops: RangeMap<u64, StreamError>,
 	// Bumped on every insert into `drops`, so a cursor rescans it only after a change.
 	drops_revision: u64,
+	drops_changes: ledger::Changes,
+	// How many copies the cache took in that the live feed didn't deliver: fetched backfill,
+	// and fetched heads joining a live group, which may give it a start. Neither is in the
+	// arrival ledger, so a time end parked on a gap looks again.
+	fetched: u64,
+	// Every reader's eviction inbox. Its own lock, so a reader registers through the read
+	// guard it judges under.
+	inboxes: Mutex<miss::Inboxes>,
+	// Bumped whenever an eviction lands in an inbox, so a reader with nothing new skips
+	// its own lock.
+	evictions: u64,
+	// Bumped as each group is cached, stamped on its slot: a reader judged a slot cached
+	// only if it was cached by the count the reader last judged at.
+	cached: u64,
 
 	// Whether the cache reflects the live feed: readers get nothing from it while it does
 	// not, since how stale it is cannot be told; fetches still do. A track is live from
 	// creation, and only a session's copy goes idle: when its upstream subscription ends
 	// with the copy still held, until the route's answer shows in the cache.
 	feed: Feed,
-	// Readers start at this group: the route's live feed starts past a gap after
-	// everything cached, so nothing bounds how old the cache below it is.
+	// No subscription feeds this copy: its session holds none upstream for it, so nothing
+	// reaches it but what fills answer. Set and cleared only by the session, from its own
+	// state, never judged from the cache. A bounded read's holes are then misses up to its
+	// end at once, with nothing to wait for (see [`Self::nothing_arrives`]).
+	unfed: bool,
+	// The route's live feed starts past a gap after everything cached, so the cache
+	// below this group is unjudgeable for readers with a finite delay budget.
 	live_floor: Option<u64>,
 
 	// Where production stopped, snapshotted when the open groups are released (an
@@ -506,17 +545,23 @@ pub(crate) struct TrackState {
 	// The error that caused the track to be aborted, if any.
 	abort: Option<Error>,
 
-	// Whether the declared end still stands after an abort: every group below it was
-	// produced and finished before the abort landed. See [`Self::is_complete`].
-	settled: bool,
+	// Whether the declared end settled before a write that could reopen it or an abort, or
+	// `closed()` reported it: every group below it was produced and finished then, so the
+	// clean end stands for good. Atomic so reporting it latches through a read guard. See
+	// [`Self::latch_settled`].
+	settled: AtomicBool,
 
 	// Active subscriptions, in their own [`kio::Lock`] so a read-only `Consumer`
 	// registers under that lock instead of writing back into the track state.
 	// Kept here (rather than threaded through every handle) so any holder reaches it.
 	subscriptions: kio::Lock<Subscriptions>,
 
+	// Demand wakes a write owes, fired once the state guard is released (see
+	// [`Self::deferred`]). A woken waker may read this track, so none fires under its lock.
+	deferred: Vec<kio::WaiterList>,
+
 	// The fills readers queued for groups they miss (see [`Fill`]), same reasoning: a miss
-	// queues here and a `Dynamic` drains.
+	// queues here and a `Requests` drains.
 	fills: kio::Shared<FillState>,
 
 	// A front's logical track: read straight from its routes' copies rather than this
@@ -565,6 +610,9 @@ struct Slot {
 	// the replacement and deliver it twice or at the wrong position.
 	stamp: u32,
 
+	// [`TrackState::cached`] once this incarnation was cached.
+	cached: u64,
+
 	// Whether this incarnation came from the live publisher and can replace older
 	// subscription content. Fetch-only backfill stays cached but never anchors drift.
 	visible: bool,
@@ -574,8 +622,8 @@ struct Slot {
 	arrived: crate::time::Instant,
 
 	// A fetched copy of a live `group` that the feed started past the frames a fetch
-	// asked for. It runs to the end of the group too, so it is served in the live
-	// group's place while it lasts; `group` stays the slot, still written by the feed,
+	// asked for. One that runs to the end of the group is served in the live group's
+	// place while it lasts; `group` stays the slot, still written by the feed,
 	// so an abandoned fetch leaves the group servable rather than gone. Boxed: rare.
 	head: Option<Box<group::Handle>>,
 
@@ -598,16 +646,22 @@ impl Slot {
 		self.is_live() && self.group.is_started()
 	}
 
+	/// Whether a group-only reader may treat this slot as reaching the original end.
+	fn serves_end(&self) -> bool {
+		let group = self.serving();
+		!group.is_aborted() && !group.back_cut()
+	}
+
 	/// Whether the arrival walk hands this slot out: the live feed's, and still serving, a
 	/// fetched head counting for an aborted live group.
 	fn is_walked(&self) -> bool {
-		self.visible && !self.is_aborted()
+		self.visible && self.serves_end()
 	}
 
 	/// Why the publisher gave up this live-feed group readers were shown, once nothing
-	/// serves it: a reader is handed the group to see that error, never a missing group.
+	/// serves its end: a reader is handed the group to see that error, never a missing group.
 	fn cut(&self) -> Option<&Error> {
-		match self.visible && self.is_aborted() && !self.retired.load(Ordering::Relaxed) {
+		match self.visible && !self.serves_end() && !self.retired.load(Ordering::Relaxed) {
 			true => self.group.cut_error(),
 			false => None,
 		}
@@ -621,9 +675,18 @@ impl Slot {
 	/// The copy to hand readers: the fetched head while it lasts, else the live group.
 	fn serving(&self) -> &group::Handle {
 		match &self.head {
-			Some(head) if !head.is_aborted() => head,
+			Some(head) if !head.is_aborted() && !head.back_cut() => head,
 			_ => &self.group,
 		}
+	}
+
+	/// Whether the copy serving this slot finished, even one a transport bound cut short, so
+	/// nothing it promised a reader is still in flight. A fetched head serving the group to
+	/// its end is judged in place of the live copy beside it, which may still be written or
+	/// may have been cut or evicted. Once no head serves, an aborted live copy holds the end
+	/// open: a session that died mid-group delivered less than the end promised.
+	fn is_settled(&self) -> bool {
+		self.serving().is_settled()
 	}
 
 	/// Every copy this slot holds, the live group first.
@@ -633,7 +696,7 @@ impl Slot {
 
 	/// Whether every copy is gone, so the slot has nothing left to serve.
 	fn is_aborted(&self) -> bool {
-		self.serving().is_aborted()
+		self.copies().all(group::Handle::is_aborted)
 	}
 
 	/// The mean access over copies still held, weighed the way each one samples the
@@ -651,7 +714,15 @@ impl Slot {
 
 	/// The bytes every copy holds, all freed together.
 	fn cache_size(&self) -> u64 {
-		self.copies().map(group::Handle::cache_size).sum()
+		let mut size = self.group.cache_size();
+		if let Some(head) = &self.head {
+			size += if head.same_content(&self.group) {
+				head.delivery_size()
+			} else {
+				head.cache_size()
+			};
+		}
+		size
 	}
 
 	/// Whether every copy still held sat idle past the scan's expiry window. Asks
@@ -662,13 +733,10 @@ impl Slot {
 				.cache_accessed_tick(scan.gc.then_some(scan.now))
 				.is_some_and(|tick| scan.now.saturating_sub(tick) > scan.max_ticks)
 		};
-		// No copy of a cut serves, so it ages as the live group it was: a reader behind
-		// still gets it for as long as it would have got that group.
-		if self.cut().is_some() {
-			return idle(&self.group);
-		}
+		// No copy of a cut serves its end, so it ages as the live group it was: a reader
+		// behind still gets it for as long as it would have got that group.
+		let mut expired = self.cut().is_none() || idle(&self.group);
 		// Not `all`, which stops at the first live copy and leaves the rest undated.
-		let mut expired = true;
 		for group in self.copies().filter(|group| !group.is_aborted()) {
 			expired &= idle(group);
 		}
@@ -691,16 +759,23 @@ impl Slot {
 
 	/// Where the group starts in presentation time, from a live copy holding frame 0. A
 	/// copy joined mid-group stamps a later frame, which proves nothing about the start.
-	fn start(&self) -> Option<Timestamp> {
+	///
+	/// Only for time anchors. `unverified` counts a start accepted below the eviction
+	/// watermark too, which a track whose history a local handler serves trusts (see
+	/// [`Holdings::looks_up`]): no remote publisher wrote it.
+	fn start(&self, unverified: bool) -> Option<Timestamp> {
 		self.copies()
 			.filter(|group| group.live_first_frame() == Some(0))
-			.find_map(group::Handle::timestamp)
+			.find_map(|group| match unverified {
+				true => group.first_timestamp(),
+				false => group.timestamp(),
+			})
 	}
 
-	/// Whether the group has no start yet but may still get one: a copy holding frame 0
-	/// has not presented it.
-	fn may_start(&self) -> bool {
-		self.start().is_none() && self.copies().any(group::Handle::may_start)
+	/// Whether the group has no [`Self::start`] yet but may still get one: a copy holding
+	/// frame 0 has not presented it.
+	fn may_start(&self, unverified: bool) -> bool {
+		self.start(unverified).is_none() && self.copies().any(group::Handle::may_start)
 	}
 
 	/// The checked start of whichever copy began at frame 0.
@@ -719,14 +794,14 @@ impl Slot {
 /// Heap the track keeps per cached group, excluding the group itself
 /// ([`group::CACHE_OVERHEAD`]).
 ///
-/// One [`Slot`] under its sequence in `lookup`, its start in `starts` once frame 0
-/// arrives, plus a hint in each of `arrival` and `evict`. Doubled because the
-/// containers run half empty in the worst case: a
+/// One [`Slot`] under its sequence in `lookup`, its sequence in `visible`, its start in
+/// `starts` once frame 0 arrives, plus a hint in each of `arrival` and `evict`. Doubled
+/// because the containers run half empty in the worst case: a
 /// `BTreeMap` node sits between half and fully packed, and a `VecDeque` holds up to
 /// twice the entries in it. Half of [`cache::ENTRY_OVERHEAD`]; see it for why this is
 /// derived rather than measured.
 pub(super) const CACHE_OVERHEAD: u64 =
-	2 * (size_of::<u64>() + size_of::<Slot>() + size_of::<(u64, Timestamp)>() + 2 * size_of::<(u64, u32)>()) as u64;
+	2 * (2 * size_of::<u64>() + size_of::<Slot>() + size_of::<(u64, Timestamp)>() + 2 * size_of::<(u64, u32)>()) as u64;
 
 /// Where the groups this hop holds start, for resolving time anchors: ordered lookups in
 /// the starts index and the cache, so no query walks more than the run it answers.
@@ -737,6 +812,11 @@ impl Holdings for TrackState {
 
 	fn drops_anchors(&self) -> bool {
 		self.received && !self.anchored
+	}
+
+	fn looks_up(&self) -> bool {
+		// A received copy's handler is its session, which fetches by group alone.
+		!self.received && self.fills.read().has_handlers()
 	}
 
 	fn containing(&self, pts: Timestamp) -> Containing {
@@ -772,32 +852,115 @@ impl Holdings for TrackState {
 
 	fn next_held(&self, from: u64) -> Option<(u64, Held)> {
 		let (&sequence, slot) = self.lookup.range(from..).next()?;
-		let held = match slot.start() {
+		let held = match slot.start(self.looks_up()) {
 			Some(at) => Held::Started(at),
-			None if slot.may_start() => Held::Pending,
+			None if slot.may_start(self.looks_up()) => Held::Pending,
 			None => Held::Never,
 		};
 		Some((sequence, held))
 	}
 
 	fn gone(&self, sequence: u64) -> Option<u64> {
+		let dropped = self.drops.get_key_value(&sequence).map(|(dropped, _)| dropped.end);
+		// The history a handler serves may still hold what the live feed never delivered, or
+		// delivered and the cache evicted, starting anywhere: only a drop, or a reader's own
+		// refused fills (see `ReaderHoldings`), says it is gone.
+		if self.looks_up() {
+			return dropped;
+		}
 		// Without a declared start, the first arrival stands in for it, as the tail's does.
 		let floor = self.start_sequence.or(self.arrivals.first()).unwrap_or(0);
 		if sequence < floor {
 			return Some(floor);
 		}
-		self.drops
-			.get_key_value(&sequence)
-			.map(|(dropped, _)| dropped.end)
-			.or_else(|| self.arrivals.run_end(sequence))
+		dropped.or_else(|| self.arrivals.run_end(sequence))
 	}
 
 	fn complete(&self) -> bool {
 		self.sealed || self.abort.is_some()
 	}
+
+	fn changes(&self, seen: &mut Seen) -> Option<Vec<ops::Range<u64>>> {
+		let global = [
+			self.start_sequence.map_or(0, |start| start.saturating_add(1)),
+			u64::from(self.complete()),
+			self.fetched,
+			// A handler appearing or leaving changes which starts count and what is gone.
+			u64::from(self.looks_up()),
+		];
+		let (ledger, drops) = (self.arrivals.changes(), &self.drops_changes);
+		let changed = (seen.global == Some(global))
+			.then(|| ledger.since(seen.runs[0]).chain(drops.since(seen.runs[1])).collect());
+		*seen = Seen {
+			runs: [ledger.revision(), drops.revision()],
+			global: Some(global),
+		};
+		changed
+	}
+}
+
+/// Where a cursor's groups start, for resolving its time anchors: its track's, with the
+/// runs its own fills refused or it gave up counted gone, so a time end walking history a
+/// handler serves passes what that history lacks.
+struct ReaderHoldings<'a> {
+	state: &'a TrackState,
+	misses: Option<&'a miss::Misses>,
+	/// What the reader's own fills gave up since its window last took it in (see
+	/// [`miss::Misses::take_gone`]): changes a parked time end wakes on beside the track's.
+	newly_gone: RangeSet<u64>,
+}
+
+impl Holdings for ReaderHoldings<'_> {
+	fn timed(&self) -> bool {
+		self.state.timed()
+	}
+
+	fn drops_anchors(&self) -> bool {
+		self.state.drops_anchors()
+	}
+
+	fn looks_up(&self) -> bool {
+		self.state.looks_up()
+	}
+
+	fn containing(&self, pts: Timestamp) -> Containing {
+		self.state.containing(pts)
+	}
+
+	fn next_start(&self, from: u64) -> Option<(u64, Timestamp)> {
+		self.state.next_start(from)
+	}
+
+	fn next_held(&self, from: u64) -> Option<(u64, Held)> {
+		self.state.next_held(from)
+	}
+
+	fn gone(&self, sequence: u64) -> Option<u64> {
+		self.state.gone(sequence).or_else(|| self.misses?.gone(sequence))
+	}
+
+	fn complete(&self) -> bool {
+		self.state.complete()
+	}
+
+	fn changes(&self, seen: &mut Seen) -> Option<Vec<ops::Range<u64>>> {
+		let mut changed = self.state.changes(seen)?;
+		changed.extend(self.newly_gone.iter().cloned());
+		Some(changed)
+	}
 }
 
 impl TrackState {
+	/// The upstream publisher's Largest Object, unless a frame or group received since its
+	/// report outdates it, even one the cache has since evicted.
+	fn object_edge(&self) -> Option<(u64, u64)> {
+		let (edge, mark) = self.object_edge?;
+		self.cache
+			.largest()
+			.is_none_or(|largest| largest <= mark)
+			.then_some(edge)
+	}
+
 	/// A consumer joined at the live edge: ask for a group past every sequence written when
 	/// the newest group's bytes after its first frame exceed [`Info::refresh`] times that
 	/// frame.
@@ -822,6 +985,22 @@ impl TrackState {
 		{
 			return;
 		}
+		Self::refresh(state);
+	}
+
+	/// A reader of group `sequence` reached a frame its copy shed: ask for a new group as
+	/// a join over [`Info::refresh`] does, if it is the newest and the track opts in. An
+	/// older group's reader moves on to the groups after it instead.
+	pub(super) fn shed_read(state: kio::Ref<'_, TrackState>, sequence: u64) {
+		let opted = state.info.as_ref().is_some_and(|info| info.refresh.is_some());
+		if opted && state.latest_group == Some(sequence) {
+			Self::refresh(state);
+		}
+	}
+
+	/// Ask for a group past every sequence written, releasing the read guard before
+	/// locking the demand.
+	fn refresh(state: kio::Ref<'_, TrackState>) {
 		let subscriptions = state.subscriptions.clone();
 		drop(state);
 		let mut wakes = subscriptions.lock().refresh();
@@ -834,9 +1013,13 @@ impl TrackState {
 	/// so the watermark caps it instead.
 	///
 	/// Usually one group lookup each way; only unstarted or partial neighbors are skipped.
-	/// `None` on a track with moq-transport provenance, whose timestamps may rewind.
+	/// `None` on an [unchecked](Info::unchecked) track, whose timestamps may rewind.
 	pub(super) fn neighbors(&self, sequence: u64) -> Option<Neighbors> {
-		if self.info.as_ref().is_some_and(|info| info.ietf().is_some()) {
+		if self
+			.info
+			.as_ref()
+			.is_some_and(|info| info.unchecked || info.ietf().is_some())
+		{
 			return None;
 		}
 		let bounds = self.bounds.lock().unwrap_or_else(PoisonError::into_inner);
@@ -875,9 +1058,11 @@ impl TrackState {
 	}
 
 	/// Index where cached group `sequence` starts, read back through its slot so only the
-	/// cached copy holding frame 0 counts, and wake the reads a time end parks on it.
+	/// cached copy holding frame 0 counts, and wake the reads a time end parks on it. On a
+	/// track whose history a handler serves, a start accepted unverified counts: the fills
+	/// below the eviction watermark that a time range walks are all unverified.
 	fn index_start(&self, sequence: u64) {
-		let Some(start) = self.lookup.get(&sequence).and_then(Slot::start) else {
+		let Some(start) = self.lookup.get(&sequence).and_then(|slot| slot.start(self.looks_up())) else {
 			return;
 		};
 		self.starts
@@ -887,8 +1072,8 @@ impl TrackState {
 		self.cache.wakes().started(sequence);
 	}
 
-	/// Record group `sequence`'s just-checked `start` as a bound for its neighbors and the
-	/// name's later producers. A group stamped after it left the cache bounds nothing.
+	/// Record group `sequence`'s just-checked `start` as a bound for its neighbors. A group
+	/// stamped after it left the cache bounds nothing.
 	fn share_bound(&self, sequence: u64, start: Timestamp) {
 		if self.lookup.get(&sequence).and_then(Slot::bound) != Some(start) {
 			return;
@@ -897,7 +1082,6 @@ impl TrackState {
 			.lock()
 			.unwrap_or_else(PoisonError::into_inner)
 			.insert(sequence, start);
-		self.sequence.share_bound(sequence, start);
 	}
 
 	/// Take group `sequence` out of the cache, raising the eviction watermark to its start.
@@ -911,13 +1095,66 @@ impl TrackState {
 		Some(slot)
 	}
 
+	/// [`Self::uncache`] a servable group to free the cache and abort it with `err`, recording
+	/// it for the readers that judged it cached to judge again.
+	fn evict_group(&mut self, sequence: u64, err: Error) {
+		let slot = self.uncache(sequence).expect("a cached group");
+		slot.abort(err);
+		let landed = self
+			.inboxes
+			.get_mut()
+			.unwrap_or_else(PoisonError::into_inner)
+			.evicted(sequence, slot.cached);
+		if landed {
+			self.evictions += 1;
+		}
+	}
+
+	/// [`Self::uncache`] a group that another copy displaces rather than one that ends, so a
+	/// teardown still ends the copies its readers hold.
+	fn displace(&mut self, sequence: u64) {
+		if let Some(slot) = self.uncache(sequence) {
+			for group in slot.copies() {
+				self.detach(group);
+			}
+		}
+	}
+
+	/// Keep `group` for a teardown to end, though the cache does not hold it.
+	fn detach(&mut self, group: &group::Handle) {
+		self.detached.push(group.detach());
+		if self.detached.len() > 2 * self.detached_kept {
+			self.detached.retain(|copy| copy.writing().is_some());
+			self.detached_kept = self.detached.len();
+		}
+	}
+
 	/// Record sequences the upstream publisher gave up, with `err`.
 	fn drop_groups(&mut self, groups: ops::Range<u64>, err: StreamError) {
 		if groups.is_empty() {
 			return;
 		}
 		self.cache.wakes().arrived(groups.clone());
-		self.drops.insert(groups, err);
+		self.change_drops(groups, Some(err));
+	}
+
+	/// Keep the change index aligned with the range map, including the neighbours an
+	/// insertion coalesces and the two pieces a removal can leave.
+	fn change_drops(&mut self, groups: ops::Range<u64>, err: Option<StreamError>) {
+		let mut affected = groups.start.saturating_sub(1)..groups.end.saturating_add(1);
+		let old: Vec<_> = self.drops.overlapping(&affected).map(|(run, _)| run.clone()).collect();
+		for run in old {
+			self.drops_changes.remove(run.start);
+			affected.start = affected.start.min(run.start);
+			affected.end = affected.end.max(run.end);
+		}
+		match err {
+			Some(err) => self.drops.insert(groups, err),
+			None => self.drops.remove(groups),
+		}
+		for (run, _) in self.drops.overlapping(&affected) {
+			self.drops_changes.insert(run.clone());
+		}
 		self.drops_revision += 1;
 	}
 
@@ -941,13 +1178,36 @@ impl TrackState {
 		self.drops.get(&sequence).cloned().map(Error::Stream)
 	}
 
-	fn accept(&mut self, info: Info) {
-		self.published = true;
+	/// Whether a Producer was minted, committed or not.
+	fn minted(&self) -> bool {
+		matches!(self.publication, Publication::Staged | Publication::Published)
+	}
+
+	/// A dynamic handler took the request.
+	fn claim(&mut self) {
+		self.publication = Publication::Claimed;
+	}
+
+	/// Mint the Producer, holding waiting subscribers until [`Self::commit`].
+	fn stage(&mut self, info: Info) {
+		self.publication = Publication::Staged;
+		self.install(info);
+	}
+
+	/// Resolve waiting subscribers with what the minted Producer wrote.
+	fn commit(&mut self) {
+		debug_assert_eq!(self.publication, Publication::Staged, "only a staged track commits");
+		self.publication = Publication::Published;
+	}
+
+	/// Mint the Producer and resolve waiting subscribers at once.
+	fn publish(&mut self, info: Info) {
+		self.publication = Publication::Published;
 		self.install(info);
 	}
 
 	fn poll_info(&self) -> Poll<Result<Info>> {
-		if let Some(info) = self.info.as_ref().filter(|_| !self.staged) {
+		if let Some(info) = self.info.as_ref().filter(|_| self.publication != Publication::Staged) {
 			Poll::Ready(Ok(info.clone()))
 		} else if let Some(err) = &self.abort {
 			// Aborted before anyone served it, so the info can never arrive: fail the
@@ -1000,21 +1260,26 @@ impl TrackState {
 		};
 	}
 
-	/// Find the next live group at or after `index` in arrival order.
+	/// Find the next live group at or after `index` in arrival order, for a reader reading
+	/// `window`.
 	///
 	/// Returns the group and its absolute index so the consumer can advance past it.
 	/// The cached producer rather than a consumer: `consume` reads the clock and can
 	/// take the group's own lock, which the caller does once the track guard is gone.
-	fn poll_recv_group(&self, index: usize, min_sequence: u64) -> Poll<Result<Option<(group::Handle, usize)>>> {
+	fn poll_recv_group(
+		&self,
+		index: usize,
+		min_sequence: u64,
+		window: &Window,
+	) -> Poll<Result<Option<(group::Handle, usize)>>> {
 		let start = index.saturating_sub(self.offset);
-		let readable = self.readable();
-		let min_sequence = min_sequence.max(self.live_floor.unwrap_or(0));
+		let readable = self.serves_bounded(window);
 		for (i, (sequence, stamp)) in self.arrival.iter().enumerate().skip(start).filter(|_| readable) {
 			// A cut group is handed out too, so its reader sees why it ended.
 			if *sequence >= min_sequence
 				&& let Some(slot) = self.lookup.get(sequence)
 				&& slot.stamp == *stamp
-				&& (!slot.is_aborted() || slot.cut().is_some())
+				&& slot.is_read()
 			{
 				return Poll::Ready(Ok(Some((slot.serving().clone(), self.offset + i))));
 			}
@@ -1027,65 +1292,6 @@ impl TrackState {
 			Poll::Ready(Err(err.clone()))
 		} else {
 			Poll::Pending
-		}
-	}
-
-	/// Find the next datagram at or after the subscriber's absolute `index`.
-	///
-	/// Returns the datagram and its absolute index so the consumer can advance past it. A
-	/// consumer whose `index` has fallen behind `datagram_offset` (older datagrams dropped)
-	/// resumes at the oldest still-buffered datagram, skipping the lost ones.
-	fn poll_recv_datagram(&self, index: usize) -> Poll<Result<Option<(super::datagram::Stored, usize)>>> {
-		let start = index.saturating_sub(self.datagram_offset);
-		// An ended track's expiry releases its oldest in place, which a reader skips like a drop.
-		for (i, datagram) in self
-			.datagrams
-			.iter()
-			.enumerate()
-			.skip(start)
-			.filter(|_| self.readable())
-		{
-			if let Some(stored) = datagram.stored() {
-				return Poll::Ready(Ok(Some((stored, self.datagram_offset + i))));
-			}
-		}
-
-		// Nothing buffered at the cursor: the track ending terminates the datagram stream too.
-		if self.is_complete() {
-			Poll::Ready(Ok(None))
-		} else if let Some(err) = &self.abort {
-			Poll::Ready(Err(err.clone()))
-		} else {
-			Poll::Pending
-		}
-	}
-
-	/// Whether `sequence` was sent as a datagram still in the send buffer.
-	fn holds_datagram(&self, sequence: u64) -> bool {
-		self.datagrams.iter().any(|datagram| datagram.sequence == sequence)
-	}
-
-	/// Push a datagram, dropping the oldest when the send buffer is full.
-	///
-	/// Billed before the debt is settled, so its bytes accrue debt, but pushed after, so the
-	/// newcomer is never a victim of its own write.
-	fn push_datagram(&mut self, datagram: super::datagram::Stored) {
-		let datagram = super::datagram::Buffered::new(datagram, &self.cache);
-		self.charge_debt();
-		if self.datagrams.len() == MAX_DATAGRAMS {
-			self.drop_datagram();
-		}
-		let sequence = datagram.sequence;
-		self.datagrams.push_back(datagram);
-		let now = self.cache.pool().now_wall();
-		self.record_arrival(sequence, now);
-		self.shown(sequence);
-	}
-
-	/// Drop the oldest buffered datagram, releasing its bill.
-	fn drop_datagram(&mut self) {
-		if self.datagrams.pop_front().is_some() {
-			self.datagram_offset += 1;
 		}
 	}
 
@@ -1111,14 +1317,16 @@ impl TrackState {
 		// Once nothing more is in range: an abort before the end settled cut the track
 		// off. One after it is a clean end (see `is_complete`), as is reaching the end.
 		let end = || match &self.abort {
-			Some(err) if !self.settled => Err(err.clone()),
+			Some(err) if !self.settled.load(Ordering::Relaxed) => Err(err.clone()),
 			_ => Ok(None),
 		};
 
 		// If the exclusive end is already at or below where we'd resume, no
 		// group can ever satisfy this call until the cap rises or the ranges widen.
 		// Pending (not None) so the consumer is parked rather than told the stream
-		// is over. An empty range (`end == 0`) parks even at the first sequence.
+		// is over, unless the track declared its end: a finished track ends a reader
+		// with nothing left in range, as the arrival path does. An empty range
+		// (`end == 0`) parks even at the first sequence.
 		let cap = match (end_sequence, window.end()) {
 			(Some(cap), Some(end)) => Some(cap.min(end)),
 			(cap, end) => cap.or(end),
@@ -1126,22 +1334,22 @@ impl TrackState {
 		if let Some(cap) = cap
 			&& cap <= next_sequence
 		{
-			if closed {
+			if closed || self.final_sequence().is_some() {
 				return Poll::Ready(end());
 			}
 			return Poll::Pending;
 		}
 
 		let best = window
-			.runs(next_sequence.max(self.live_floor.unwrap_or(0)))
-			.filter(|_| self.readable())
+			.runs(next_sequence)
+			.filter(|_| self.serves_bounded(window))
 			.find_map(|run| {
 				// A cut group is handed out too, so its reader sees why it ended.
 				self.lookup
 					.range(run)
 					.map(|(_, slot)| slot)
 					.take_while(|slot| super::subscription::before_end(slot.group.sequence, end_sequence))
-					.find(|slot| !slot.is_aborted() || slot.cut().is_some())
+					.find(|slot| slot.serves_end() || slot.cut().is_some())
 					.map(Slot::serving)
 			});
 
@@ -1157,10 +1365,11 @@ impl TrackState {
 		// `final_sequence` is one past the last possible sequence. If our
 		// floor is already at/past it, nothing else can land in range.
 		// A closed track produces nothing more either, so a gap below its
-		// boundary is the end, not a wait. Cached in-range groups were
-		// returned above, so an aborted track drains what finished first.
+		// boundary is the end, not a wait, as is one in a complete track, which
+		// ends the arrival path too. Cached in-range groups were returned above,
+		// so an aborted track drains what finished first.
 		// This is the cursor the ordered reader uses.
-		if closed || self.final_sequence().is_some_and(|fin| next_sequence >= fin) {
+		if closed || self.is_complete() || self.final_sequence().is_some_and(|fin| next_sequence >= fin) {
 			return Poll::Ready(end());
 		}
 		Poll::Pending
@@ -1173,22 +1382,36 @@ impl TrackState {
 	/// it to someone who asked for the whole group would silently hand back a tail. It
 	/// is a miss instead, so the fetch goes upstream for the frames that are missing.
 	fn covering_group(&self, sequence: u64, frame_start: u64) -> Option<&group::Handle> {
-		self.lookup.get(&sequence)?.copies().find(|group| {
-			group
-				.live_first_frame()
-				.is_some_and(|first| first as u64 <= frame_start)
-		})
+		self.covering_range(
+			sequence,
+			group::Bounds {
+				start: frame_start,
+				end: None,
+			},
+		)
 	}
 
-	/// The local retention bound, or `None` when unknown or unlimited.
-	/// Bounds the aggregate subscription without changing the publisher's metadata.
+	fn covering_range(&self, sequence: u64, frames: group::Bounds) -> Option<&group::Handle> {
+		self.lookup.get(&sequence)?.copies().find(|group| group.covers(frames))
+	}
+
+	/// The local freshness bound, or `None` when unknown or unlimited: the publisher's max
+	/// age under the local ceiling, how long a reader may wait for a late group, without
+	/// changing the publisher's metadata.
 	fn max_age_bound(&self) -> Option<Duration> {
 		let published = self.info.as_ref()?.max_age;
-		let ceiling = self.broadcast.cache_duration;
 		match published {
-			Some(age) => Some(age.min(ceiling)),
-			None => (ceiling != Duration::MAX).then_some(ceiling),
+			Some(age) => Some(age.min(self.broadcast.cache_duration)),
+			None => self.demand_bound(),
 		}
+	}
+
+	/// The bound on the aggregate subscription: the local cache ceiling alone, or `None`
+	/// when unlimited. It needs no info, so a track asks upstream for the same demand
+	/// before and after its info lands, and the publisher enforces its own max age.
+	fn demand_bound(&self) -> Option<Duration> {
+		let ceiling = self.broadcast.cache_duration;
+		(ceiling != Duration::MAX).then_some(ceiling)
 	}
 
 	/// The live edge a subscription served `servable` measures drift against: the
@@ -1234,10 +1457,23 @@ impl TrackState {
 		}
 	}
 
-	/// The first cached group at or above `from` that `servable` covers for which `f`
+	/// The live feed's cached groups within `range`, by sequence: never fetched backfill.
+	fn live(&self, range: impl ops::RangeBounds<u64> + Clone) -> impl DoubleEndedIterator<Item = (&u64, &Slot)> {
+		// Without backfill every cached group is the feed's, so the cache is walked as is.
+		let all = self.visible.len() == self.lookup.len();
+		let cached = all.then(|| self.lookup.range(range.clone()));
+		let indexed = (!all).then(|| {
+			self.visible
+				.range(range)
+				.map(|sequence| (sequence, self.lookup.get(sequence).expect("an indexed live slot")))
+		});
+		cached.into_iter().flatten().chain(indexed.into_iter().flatten())
+	}
+
+	/// The first live-feed group at or above `from` that `servable` covers for which `f`
 	/// answers, lowest first or, with `rev`, highest first: one lookup for a single run.
-	/// Several runs leapfrog the cache, so a run holding nothing (a reader's misses) costs
-	/// one lookup rather than a walk over every run past it.
+	/// Several runs leapfrog the live groups, so a run holding none (a reader's misses, or
+	/// fetched backfill) costs one lookup rather than a walk over every run past it.
 	fn find_servable<'a, R>(
 		&'a self,
 		servable: &Servable,
@@ -1245,7 +1481,7 @@ impl TrackState {
 		rev: bool,
 		mut f: impl FnMut(&'a Slot) -> Option<R>,
 	) -> Option<R> {
-		let mut scan = |range: std::collections::btree_map::Range<'a, u64, Slot>| match rev {
+		let mut scan = |range: &mut dyn DoubleEndedIterator<Item = (&'a u64, &'a Slot)>| match rev {
 			true => range.rev().find_map(|(_, slot)| f(slot)),
 			false => range.map(|(_, slot)| slot).find_map(&mut f),
 		};
@@ -1257,43 +1493,75 @@ impl TrackState {
 					return None;
 				}
 				let end = end.map_or(Bound::Unbounded, Bound::Excluded);
-				scan(self.lookup.range((Bound::Included(from), end)))
+				scan(&mut self.live((Bound::Included(from), end)))
 			}
-			Servable::Runs(runs) => {
-				// What is left to search, shrinking from the end the search starts at.
-				let (mut lo, mut hi) = (from, u64::MAX);
-				while lo <= hi {
-					let mut left = runs.overlapping(lo..=hi);
-					let run = match rev {
-						true => left.next_back(),
-						false => left.next(),
-					}?;
-					let (start, end) = ((*run.start()).max(lo), (*run.end()).min(hi));
-					// The cache from the run on, toward the far end: one lookup either finds
-					// the run's groups or the next cached group past a run holding none.
-					let leap = match rev {
-						true => leap(self.lookup.range(lo..=end).rev(), start..=end, &mut f),
-						false => leap(self.lookup.range(start..=hi), start..=end, &mut f),
-					};
-					match leap {
-						Leap::Found(found) => return Some(found),
-						Leap::Empty => return None,
-						Leap::Past(sequence) if rev => hi = sequence,
-						Leap::Past(sequence) => lo = sequence,
-						Leap::Exhausted if rev => hi = start.checked_sub(1)?,
-						Leap::Exhausted => lo = end.checked_add(1)?,
-					}
+			Servable::Runs(several) => {
+				let hi = match several.cap {
+					Some(cap) => cap.checked_sub(1)?,
+					None => u64::MAX,
+				};
+				if from > hi {
+					return None;
 				}
-				None
+				let groups = &several.groups;
+				// The fixed runs through the reader's index of the live groups among them, then
+				// the walks' few runs layered over them, short of what the index found.
+				let fixed = several.live.find(self, groups.fixed(), from, hi, rev, &mut f);
+				// Nothing lies past a find at the far end, so only the find answers.
+				let short = match (&fixed, rev) {
+					(None, _) => Some((from, hi)),
+					(Some((found, _)), true) => found.checked_add(1).map(|lo| (lo, hi)),
+					(Some((found, _)), false) => found.checked_sub(1).map(|hi| (from, hi)),
+				};
+				let layered = short
+					.filter(|(lo, hi)| lo <= hi)
+					.and_then(|(lo, hi)| self.leapfrog(groups.layer(), lo, hi, rev, &mut f));
+				layered.or(fixed.map(|(_, found)| found))
 			}
 		}
+	}
+
+	/// [`Self::find_servable`] over `runs` within `lo..=hi`: several runs leapfrog the live
+	/// groups, so a run holding none costs one lookup rather than a walk over every run past
+	/// it.
+	fn leapfrog<'a, R>(
+		&'a self,
+		runs: &Runs,
+		mut lo: u64,
+		mut hi: u64,
+		rev: bool,
+		f: &mut impl FnMut(&'a Slot) -> Option<R>,
+	) -> Option<R> {
+		// What is left to search, shrinking from the end the search starts at.
+		while lo <= hi {
+			let run = match rev {
+				true => runs.last(lo, hi),
+				false => runs.first(lo, hi),
+			}?;
+			let (start, end) = ((*run.start()).max(lo), (*run.end()).min(hi));
+			// The cache from the run on, toward the far end: one lookup either finds the run's
+			// groups or the next cached group past a run holding none.
+			let leap = match rev {
+				true => leap(self.live(lo..=end).rev(), start..=end, f),
+				false => leap(self.live(start..=hi), start..=end, f),
+			};
+			match leap {
+				Leap::Found(found) => return Some(found),
+				Leap::Empty => return None,
+				Leap::Past(sequence) if rev => hi = sequence,
+				Leap::Past(sequence) => lo = sequence,
+				Leap::Exhausted if rev => hi = start.checked_sub(1)?,
+				Leap::Exhausted => lo = end.checked_add(1)?,
+			}
+		}
+		None
 	}
 
 	/// Whether `sequence` still holds the servable incarnation `stamp`.
 	fn holds(&self, sequence: u64, stamp: u32) -> bool {
 		self.lookup
 			.get(&sequence)
-			.is_some_and(|slot| slot.stamp == stamp && !slot.is_aborted())
+			.is_some_and(|slot| slot.stamp == stamp && slot.serves_end())
 	}
 
 	/// The furthest presentation time the group at `sequence` could still reach: where
@@ -1337,7 +1605,7 @@ impl TrackState {
 	) -> Option<&'a Slot> {
 		loop {
 			match select(self) {
-				Some(slot) if slot.group.poll_closed(waiter).is_ready() && slot.group.is_aborted() => continue,
+				Some(slot) if slot.group.poll_aborted(waiter).is_ready() => continue,
 				slot => return slot,
 			}
 		}
@@ -1419,12 +1687,22 @@ impl TrackState {
 	/// The edge must sit strictly above the candidate. The live edge is never late
 	/// against itself, and a group received from past its first frame carries a later
 	/// frame's timestamp on a low sequence without being an edge at all.
+	///
+	/// A group below [`Self::cache_floor`] is stale whether or not the cache still holds
+	/// it: an eviction between selecting it and this verdict must not hand it out.
 	fn is_stale(&self, sequence: u64, edge: &Edge, budget: Duration) -> bool {
-		self.lookup.contains_key(&sequence) && self.drifted(sequence, edge, budget)
+		sequence < self.cache_floor(budget)
+			|| (self.lookup.contains_key(&sequence) && self.drifted(sequence, edge, budget))
 	}
 
-	/// [`Self::is_stale`] for group `sequence`, whether this track holds it or not: its
-	/// successor here starts a full `budget` behind the edge, or arrived a full `budget` ago.
+	/// A finite subscription cannot admit a cache whose reach its resumed feed cannot
+	/// bound. Unlimited history still owes it, and one-shot fetches judge their own budget.
+	fn cache_floor(&self, budget: Duration) -> u64 {
+		self.live_floor.filter(|_| budget != Duration::MAX).unwrap_or(0)
+	}
+
+	/// Whether group `sequence`, cached or not, has a successor a full `budget` behind
+	/// the edge, or one that arrived a full `budget` ago.
 	fn drifted(&self, sequence: u64, edge: &Edge, budget: Duration) -> bool {
 		if self.superseded(sequence, &edge.servable, budget) {
 			return true;
@@ -1495,8 +1773,7 @@ impl TrackState {
 			// edge again, so each pass resolves a lower one.
 			if let Some(live) = edge.presentation
 				&& let Some(slot) = self.lookup.get(&live.sequence)
-				&& slot.group.poll_closed(waiter).is_ready()
-				&& slot.group.is_aborted()
+				&& slot.group.poll_aborted(waiter).is_ready()
 			{
 				continue;
 			}
@@ -1506,12 +1783,12 @@ impl TrackState {
 
 	/// Resolve a one-shot fetch from the track side: the cached group, or an [`Error`]
 	/// once it can never be served. A missing group is a failure ([`Error::NotFound`]), not an
-	/// end-of-stream. The handler side (a refusal, or no [`Dynamic`] at all) lives
+	/// end-of-stream. The handler side (a refusal, or no [`Requests`] at all) lives
 	/// in the track's fills; [`Fetching`] polls both.
-	fn poll_fetch_cached(&self, sequence: u64, frame_start: u64) -> Poll<Result<group::Consumer>> {
+	fn poll_fetch_cached(&self, sequence: u64, frames: group::Bounds) -> Poll<Result<group::Consumer>> {
 		// A group aborted between the lookup and the consume (an abandoned fetch cut
 		// short) is a miss, not a hit that fails on its first read.
-		if let Some(group) = self.covering_group(sequence, frame_start)
+		if let Some(group) = self.covering_range(sequence, frames)
 			&& let Some(consumer) = group.try_consume()
 		{
 			// A cache hit refreshes the group: it resets both its age (expiry keys
@@ -1536,8 +1813,8 @@ impl TrackState {
 	/// Expire groups idle past the pool's wall-clock LRU window, never the latest.
 	///
 	/// The window is the pool's [`expiry`](cache::Pool::expiry), not the track's
-	/// [`max_age`](Info::max_age): retention is a media-timestamp promise, while this
-	/// is the cache's own guard against unread content pinning RAM, shared by every
+	/// [`max_age`](Info::max_age): max age only bounds how long a superseded group stays
+	/// fresh and frees nothing, while this is the cache's own guard against unread content pinning RAM, shared by every
 	/// track in the pool.
 	///
 	/// One bounded, rotating scan over the eviction order, which holds every cached
@@ -1609,11 +1886,9 @@ impl TrackState {
 			}
 		}
 
-		self.datagrams.front().is_some_and(|datagram| datagram.expired())
-			|| self
-				.arrival
-				.front()
-				.is_some_and(|(sequence, stamp)| !self.is_current(*sequence, *stamp))
+		self.arrival
+			.front()
+			.is_some_and(|(sequence, stamp)| !self.is_current(*sequence, *stamp))
 			|| self
 				.evict
 				.front()
@@ -1621,10 +1896,9 @@ impl TrackState {
 			|| self.evict.len() > 2 * self.lookup.len() + EVICT_SLACK
 	}
 
-	/// Expire an ended track's idle groups and datagrams, whose closed channel refuses the
-	/// write [`Self::evict_expired_scan`] takes: abort the groups in place, releasing their
-	/// frames, retire expired cuts, and release the datagrams, leaving entries that every
-	/// read path skips.
+	/// Expire an ended track's idle groups, whose closed channel refuses the write
+	/// [`Self::evict_expired_scan`] takes: abort the groups in place, releasing their
+	/// frames, and retire expired cuts, leaving entries that every read path skips.
 	pub(super) fn expire_closed(&self, scan: ExpiryScan) {
 		for (sequence, stamp) in &self.evict {
 			let Some(slot) = self.lookup.get(sequence) else {
@@ -1637,12 +1911,6 @@ impl TrackState {
 				slot.retired.store(true, Ordering::Relaxed);
 			} else {
 				slot.abort(Error::Old);
-			}
-		}
-		// Released oldest first, so the expired ones stay a prefix that readers skip.
-		for datagram in &self.datagrams {
-			if !datagram.release_expired() {
-				break;
 			}
 		}
 	}
@@ -1686,13 +1954,8 @@ impl TrackState {
 				// Take the group out of the cache and abort it, so any consumer
 				// still reading surfaces `Error::Old` instead of blocking forever
 				// on a frame that will never arrive.
-				self.uncache(sequence).unwrap().abort(Error::Old);
+				self.evict_group(sequence, Error::Old);
 			}
-		}
-
-		// A datagram is never the live edge a late joiner needs, so even the newest goes.
-		while self.datagrams.front().is_some_and(|datagram| datagram.expired()) {
-			self.drop_datagram();
 		}
 
 		// Trim dead leading arrival entries to advance the subscriber offset. An
@@ -1752,8 +2015,8 @@ impl TrackState {
 	/// End the track abruptly with `err`: drop the open groups nobody will finish, keep the
 	/// finished ones for readers still draining, and stop protecting the live edge.
 	///
-	/// Returns every unfinished copy, to abort once the track lock is released, so a reader
-	/// that already pulled one ends with `err` too and its writer fails.
+	/// Returns every unfinished copy, cached or not, to abort once the track lock is released,
+	/// so a reader that already pulled one ends with `err` too and its writer fails.
 	fn tear_down(&mut self, err: Error) -> OpenGroups {
 		// Snapshot the frame boundary before the open group it may sit in goes away: an
 		// abrupt end is exactly when a replacement route asks where to resume.
@@ -1762,10 +2025,14 @@ impl TrackState {
 			.lookup
 			.values()
 			.flat_map(Slot::copies)
-			.filter(|group| !group.is_finished())
+			.filter(|group| !group.is_settled())
 			.cloned()
+			.chain(self.detached.drain(..).filter_map(|copy| copy.writing()))
 			.collect();
 		let dropped = StreamError::from(&err);
+		// A slot survives only on a copy holding the whole group. A finished bounded copy
+		// serves no group reader, so it leaves the cache like an open one; a reader already
+		// holding it keeps it, since its writer settled and it is not aborted above.
 		let open: Vec<_> = self
 			.lookup
 			.iter()
@@ -1778,6 +2045,7 @@ impl TrackState {
 		self.lookup
 			.retain(|_, slot| slot.copies().any(group::Handle::is_finished));
 		let lookup = &self.lookup;
+		self.visible.retain(|sequence| lookup.contains_key(sequence));
 		self.bounds
 			.get_mut()
 			.unwrap_or_else(PoisonError::into_inner)
@@ -1793,6 +2061,7 @@ impl TrackState {
 	/// Take `sequence` out of the cache, along with its checked start.
 	fn remove_slot(&mut self, sequence: u64) -> Option<Slot> {
 		let slot = self.lookup.remove(&sequence)?;
+		self.visible.remove(&sequence);
 		self.bounds
 			.get_mut()
 			.unwrap_or_else(PoisonError::into_inner)
@@ -1806,7 +2075,7 @@ impl TrackState {
 
 	/// Record that the live feed delivered `sequence`, then fold the gaps that aged out.
 	fn record_arrival(&mut self, sequence: u64, now: crate::time::Instant) {
-		self.arrivals.account(sequence..sequence.saturating_add(1), now);
+		self.arrivals.arrive(sequence, now);
 		// A feed still delivering keeps the gap above its last arrival open.
 		if self.tail.is_some() {
 			self.tail = Some(now);
@@ -1828,8 +2097,7 @@ impl TrackState {
 	/// How long a missing live group is waited for, from the max delay the track's
 	/// subscribers ask for.
 	fn arrival_grace(&self) -> Duration {
-		let max_delay = snapshot_subscription(&self.subscriptions, self.max_age_bound())
-			.map_or(Duration::ZERO, |subscription| subscription.budget());
+		let max_delay = clamp_max_delay(self.subscriptions.lock().max_delay(), self.max_age_bound());
 		ledger::grace(max_delay)
 	}
 
@@ -1857,33 +2125,33 @@ impl TrackState {
 		state
 	}
 
-	/// Record a written sequence, here and in the name's shared namespace. It raises the
-	/// largest too, so a later group below it never changes it, even one below a reached end.
+	/// Record a written sequence. It raises the largest too, so a later group below it never
+	/// changes it, even one below a reached end.
 	///
 	/// `answers` when it is a group subscribers receive, which answers a pending refresh.
+	///
+	/// The demand wakes it owes wait in [`Self::deferred`] for the caller to fire once its guard
+	/// is released.
 	fn advance(&mut self, sequence: u64, answers: bool) {
 		self.max_sequence = Some(self.max_sequence.map_or(sequence, |max| max.max(sequence)));
-		let next = self.sequence.next();
-		self.sequence.advance(sequence);
 		self.cache.advance_largest(Position::group(sequence));
-		let mut wakes = self.subscriptions.lock().wrote(sequence, next, answers);
-		wakes.wake();
+		let wakes = self.subscriptions.lock().wrote(sequence, answers);
+		if !wakes.is_empty() {
+			self.deferred.push(wakes);
+		}
+	}
+
+	/// Take the wakes [`Self::advance`] deferred, to fire once the state guard is released.
+	pub(super) fn deferred(&mut self) -> Deferred {
+		Deferred(std::mem::take(&mut self.deferred))
 	}
 
 	/// The sequence the next append takes: one past this track's own writes.
-	///
-	/// The application owns where a replacement of the name starts, so an append that
-	/// would reuse a sequence an earlier producer wrote is [`Error::Duplicate`] instead of
-	/// renumbering.
 	fn next_sequence(&self) -> Result<u64> {
-		let next = match self.max_sequence {
+		Ok(match self.max_sequence {
 			Some(max) => max.checked_add(1).ok_or(coding::BoundsExceeded)?,
 			None => 0,
-		};
-		if next < self.sequence.next() {
-			return Err(Error::Duplicate);
-		}
-		Ok(next)
+		})
 	}
 
 	/// Reject a sequence that is still cached; a dead (aborted or evicted)
@@ -1895,13 +2163,21 @@ impl TrackState {
 	/// A group that starts above `frame_start` is also replaceable: it cannot answer a
 	/// request from there, so the wider producer takes the slot. Readers already
 	/// draining the old one keep their own handle.
+	///
+	/// A fetched backfill never holds the sequence against the feed: subscribers read only
+	/// the feed's groups, so its copy takes the slot, and the fetch's readers keep theirs.
 	fn claim_sequence(&mut self, sequence: u64, frame_start: u64) -> Result<()> {
-		// Either copy that can still answer from `frame_start` takes the sequence.
-		if self.covering_group(sequence, frame_start).is_some() {
+		if self.holding_group(sequence, frame_start).is_some() {
 			return Err(Error::Duplicate);
 		}
-		self.uncache(sequence);
+		self.displace(sequence);
 		Ok(())
+	}
+
+	/// The copy of the feed's `sequence` that still answers from `frame_start`, if any.
+	fn holding_group(&self, sequence: u64, frame_start: u64) -> Option<&group::Handle> {
+		self.lookup.get(&sequence).filter(|slot| slot.visible)?;
+		self.covering_group(sequence, frame_start)
 	}
 
 	/// Insert a freshly-created group into the cache.
@@ -1912,13 +2188,17 @@ impl TrackState {
 	/// groups reach subscribers, fetched backfill is served by sequence only. A group
 	/// counts as content only once [`Self::reveal`] reports its first frame or finish.
 	fn insert_group(&mut self, group: &group::Handle, visible: bool) {
+		self.latch_settled();
 		let sequence = group.sequence;
+		if visible {
+			self.contents.remove(sequence);
+		}
+		group.register_content(&self.contents);
 		self.next_stamp = self.next_stamp.wrapping_add(1);
 		let stamp = self.next_stamp;
 
-		// The live edge is tracked separately from `max_sequence`, which datagrams
-		// share and can push past any cached group: demotion must still fire when
-		// the next group lands beyond a datagram-advanced counter.
+		// The live edge is tracked separately from `max_sequence`, which can run past
+		// any cached group: demotion must still fire when the next group lands beyond it.
 		if self.latest_group.is_none_or(|latest| sequence >= latest) {
 			// Demote the previous latest: it joins the eviction order (and the
 			// pool's access average) like any other cached group.
@@ -1943,29 +2223,37 @@ impl TrackState {
 		}
 
 		self.advance(sequence, visible);
+		if !visible {
+			self.fetched += 1;
+		}
 		// A publisher may re-create a group it cut; the sequence is no longer given up.
 		if visible
 			&& self.drops.contains_key(&sequence)
 			&& let Some(end) = sequence.checked_add(1)
 		{
-			self.drops.remove(sequence..end);
-			self.drops_revision += 1;
+			self.change_drops(sequence..end, None);
 		}
 		let now = self.cache.pool().now_wall();
 		if visible {
 			self.record_arrival(sequence, now);
 		}
+		self.cached += 1;
 		let replaced = self.lookup.insert(
 			sequence,
 			Slot {
 				group: group.clone(),
 				stamp,
+				cached: self.cached,
 				visible,
 				arrived: now,
 				head: None,
 				retired: AtomicBool::new(false),
 			},
 		);
+		match visible {
+			true => self.visible.insert(sequence),
+			false => self.visible.remove(&sequence),
+		};
 		if replaced.is_some() {
 			self.bounds
 				.get_mut()
@@ -1979,7 +2267,11 @@ impl TrackState {
 			// Readers and group demand reach it at once. Its arrival starts the wall clock of
 			// the reads it succeeds, but it counts as content only once it starts.
 			self.arrival.push_back((sequence, stamp));
-			self.wake_landed(sequence);
+			// Publishes the landing to reads judging expiry without the track lock, then
+			// checks for one parked. Reveal only holds a read lock and cannot use the shortcut.
+			if self.cache.wakes().land(sequence) {
+				self.wake_landed(sequence);
+			}
 		}
 	}
 
@@ -2002,8 +2294,7 @@ impl TrackState {
 	/// Wake the reads a group landing at `sequence` succeeds.
 	fn wake_landed(&self, sequence: u64) {
 		let below = self
-			.lookup
-			.range(..sequence)
+			.live(..sequence)
 			.rev()
 			.find(|(_, slot)| slot.is_shown())
 			.map(|(below, _)| *below);
@@ -2057,8 +2348,7 @@ impl TrackState {
 				// Cap each payment at twice what was written so one write never dumps
 				// a deep backlog at once; the remainder carries to the next write.
 				let cap = written.saturating_mul(2);
-				let paid = self.pay_debt(&pool, cap);
-				self.pay_datagrams(cap.saturating_sub(paid));
+				self.pay_debt(&pool, cap);
 			}
 			// Under capacity there is nothing to work off, and stale debt would
 			// cause a spurious eviction burst at the next pressure spike.
@@ -2098,6 +2388,7 @@ impl TrackState {
 		let average = pool.average().unwrap_or(0);
 		let mut paid = 0u64;
 		let mut scanned = 0usize;
+		let mut fresh = Vec::new();
 		for _ in 0..self.evict.len() {
 			if self.debt == 0 || paid >= cap || scanned >= EVICT_SCAN {
 				break;
@@ -2127,9 +2418,11 @@ impl TrackState {
 			scanned += 1;
 			// Protected: accessed more recently than the average (a fresh insert,
 			// an active reader, or a FETCH hit, which also covers a backfill still
-			// being filled). Rotate to the back.
+			// being filled). Rotate to the back, but shed its front below if the debt
+			// outlives the scan.
 			if slot.cache_accessed() > average {
 				self.evict.push_back((sequence, stamp));
+				fresh.push(sequence);
 				continue;
 			}
 			// The full footprint including overhead, so even empty groups repay
@@ -2137,35 +2430,37 @@ impl TrackState {
 			let size = slot.cache_size();
 			if size > self.debt {
 				self.evict.push_front((sequence, stamp));
-				break;
+				return paid;
 			}
 
 			self.debt -= size;
 			paid = paid.saturating_add(size);
-			self.uncache(sequence).unwrap().abort(Error::Evicted);
+			self.evict_group(sequence, Error::Evicted);
+		}
+		// No cold group left to pay with: shed the front of the groups that could not go
+		// whole, the ones being read and then the live edge, so neither grows without bound.
+		fresh.extend(self.latest_group.filter(|latest| self.protects(*latest)));
+		for sequence in fresh {
+			if self.debt == 0 || paid >= cap {
+				break;
+			}
+			let Some(slot) = self.lookup.get(&sequence) else {
+				continue;
+			};
+			for group in slot.copies() {
+				let freed = group.shed(self.debt, cap - paid.min(cap));
+				self.debt -= freed.min(self.debt);
+				paid = paid.saturating_add(freed);
+			}
 		}
 		paid
-	}
-
-	/// Drop this track's oldest buffered datagrams toward the debt its groups left, freeing
-	/// at most `cap` bytes. Like a group, one larger than the remaining debt stays.
-	fn pay_datagrams(&mut self, cap: u64) {
-		let mut paid = 0u64;
-		while let Some(datagram) = self.datagrams.front()
-			&& paid < cap
-			&& datagram.bytes() <= self.debt
-		{
-			self.debt -= datagram.bytes();
-			paid = paid.saturating_add(datagram.bytes());
-			self.drop_datagram();
-		}
 	}
 
 	/// Group `sequence` once cached, `None` once the feed starts past it or ends before it,
 	/// and pending while it still may land.
 	fn landing(&self, sequence: u64) -> Poll<Option<group::Consumer>> {
 		if let Some(slot) = self.lookup.get(&sequence)
-			&& !slot.is_aborted()
+			&& slot.serves_end()
 		{
 			return Poll::Ready(Some(slot.serving().consume()));
 		}
@@ -2208,26 +2503,66 @@ impl TrackState {
 	/// [`Self::poll_arrival`] applies: not accounted for, not dropped, within the feed, and
 	/// in a gap a later arrival opened less than `grace` ago, or that nothing later opened.
 	/// Below the first arrival only when the feed was asked to start lower, as `floor` says.
-	/// With `delivered`, only a group it lacks counts.
-	fn may_land(&self, groups: ops::Range<u64>, floor: bool, grace: Duration, delivered: Option<&Delivered>) -> bool {
+	/// With `delivered`, only a group it lacks counts. Parks `waiter` until the gap folds.
+	fn may_land(
+		&self,
+		groups: ops::Range<u64>,
+		floor: bool,
+		grace: Duration,
+		delivered: Option<&Delivered>,
+		waiter: &kio::Waiter,
+	) -> bool {
+		self.find_landable(groups, floor, grace, |open, folds| {
+			if delivered.is_some_and(|delivered| delivered.covers(open)) {
+				return None;
+			}
+			if let Some(at) = folds {
+				self.cache.watch_wall(at, waiter);
+			}
+			Some(())
+		})
+		.is_some()
+	}
+
+	/// The first `f` answers of the runs of `groups` that may still land from the live
+	/// feed, lowest first, by the rule [`Self::may_land`] applies.
+	fn find_landable<R>(
+		&self,
+		groups: ops::Range<u64>,
+		floor: bool,
+		grace: Duration,
+		mut f: impl FnMut(ops::Range<u64>, Option<crate::time::Instant>) -> Option<R>,
+	) -> Option<R> {
 		let start = match floor {
 			true => groups.start,
-			false => match self.arrivals.first() {
-				Some(first) => groups.start.max(first),
-				None => return false,
-			},
+			false => groups.start.max(self.arrivals.first()?),
 		};
 		let start = start.max(self.start_sequence.unwrap_or(0));
 		let end = groups.end.min(self.final_sequence().unwrap_or(u64::MAX));
 		let now = self.cache.pool().now_wall();
-		self.arrivals.gaps(start..end).any(|(gap, opened)| {
-			opened
-				.and_then(|opened| opened.checked_add(grace))
-				.is_none_or(|folds| now < folds)
-				&& self
-					.drops
-					.gaps(&gap)
-					.any(|open| delivered.is_none_or(|delivered| !delivered.covers(open)))
+		for (gap, opened) in self.arrivals.gaps(start..end) {
+			let folds = opened.and_then(|opened| opened.checked_add(grace));
+			if folds.is_some_and(|folds| now >= folds) {
+				continue;
+			}
+			if let Some(found) = self.drops.gaps(&gap).find_map(|open| f(open, folds)) {
+				return Some(found);
+			}
+		}
+		None
+	}
+
+	/// The lowest group in `groups` and `window` a sequence-order reader still waits for:
+	/// one only a subscription owes, so a received copy's live feed may still land it. Not a
+	/// group accounted for by its arrivals (since evicted or aborted), dropped,
+	/// outside the feed, or in a gap its grace stopped waiting for. A local track owes none.
+	fn owed(&self, groups: ops::Range<u64>, window: &Window) -> Option<u64> {
+		if !self.received || self.closed || !self.readable() {
+			return None;
+		}
+		let asked = self.start_sequence.is_some();
+		self.find_landable(groups, asked, self.arrival_grace(), |open, _| {
+			window.clip(open).map(|run| run.start)
 		})
 	}
 
@@ -2240,8 +2575,10 @@ impl TrackState {
 	/// or above it, and a pending tail above the last arrival, is waited for a fresh grace:
 	/// the feed may only now be sending it.
 	fn set_start(&mut self, start_sequence: Option<u64>, pending: bool) {
+		self.latch_settled();
 		self.start_sequence = start_sequence;
 		self.start_pending = pending;
+		self.start_resolved = false;
 		if let Some(start) = start_sequence {
 			self.cache.wakes().arrived(..start);
 			let now = self.cache.pool().now_wall();
@@ -2255,7 +2592,7 @@ impl TrackState {
 	/// Record the exclusive end, rejecting a second end, one that would orphan
 	/// already-produced groups, or one inside a group that already holds a frame past it.
 	/// A mid-group end caps that group, so no later write can land past it either.
-	fn set_end(&mut self, end: Position) -> Result<()> {
+	fn set_end(&mut self, end: Position, error: Option<Error>) -> Result<()> {
 		if self.end.is_some() {
 			return Err(Error::Closed);
 		}
@@ -2279,8 +2616,26 @@ impl TrackState {
 			}
 		}
 		self.end = Some(end);
+		self.end_error = error;
+		self.cache.declare_end();
 		self.cache.wakes().arrived(fin..);
 		Ok(())
+	}
+
+	/// What a reader past the end gets: the end of stream, or the error the track ended with.
+	fn ended<T>(&self) -> Result<Option<T>> {
+		match &self.end_error {
+			Some(err) => Err(err.clone()),
+			None => Ok(None),
+		}
+	}
+
+	/// The final sequence and the error the track ended with, once a reader can reach it.
+	fn end_error(&self) -> Option<(u64, Error)> {
+		if !self.is_complete() {
+			return None;
+		}
+		Some((self.final_sequence()?, self.end_error.clone()?))
 	}
 
 	/// The first group the end excludes whole: one past the last group that may exist.
@@ -2306,13 +2661,26 @@ impl TrackState {
 	/// An abort before the end settled wins over it: a group below the boundary was
 	/// still open, so the track was cut off rather than ended.
 	fn is_complete(&self) -> bool {
-		// `sealed` also ends a locally closed receive track without a declared end.
-		// An abort still wins unless that end had already settled: a group below it was still open.
+		// `sealed` is a declared end the last producer dropped short of. An abort still wins
+		// unless that end had already settled: a group below it was still open.
 		let reached = self.sealed
 			|| self
 				.final_sequence()
 				.is_some_and(|fin| self.reaches(fin) && !self.awaits_tail(fin));
-		reached && (self.abort.is_none() || self.settled)
+		reached && (self.abort.is_none() || self.settled.load(Ordering::Relaxed))
+	}
+
+	/// Whether nothing more reaches the cache but what fills answer: the track was aborted,
+	/// reached its end, or its session holds no subscription that feeds it.
+	pub(super) fn nothing_arrives(&self) -> bool {
+		self.abort.is_some() || self.is_complete() || self.unfed
+	}
+
+	/// Whether a bounded window reads from the cache: whenever readers may, and on a copy no
+	/// subscription feeds, whose groups in the window are the groups themselves however old
+	/// its live edge is. An open window still waits for the feed.
+	fn serves_bounded(&self, window: &Window) -> bool {
+		self.readable() || self.unfed && window.end().is_some()
 	}
 
 	/// Whether the live edge reached `fin`, or a received copy's tail decides it instead:
@@ -2330,11 +2698,8 @@ impl TrackState {
 	}
 
 	/// One past the highest sequence produced: where the live edge stands against the end.
-	/// A replacement starts at its name's, since what earlier producers wrote never arrives here.
 	fn edge(&self) -> u64 {
-		self.max_sequence
-			.map_or(0, |max| max.saturating_add(1))
-			.max(self.sequence.next())
+		self.max_sequence.map_or(0, |max| max.saturating_add(1))
 	}
 
 	/// Whether a group below `fin` the wire subscription still owes has yet to arrive.
@@ -2348,19 +2713,21 @@ impl TrackState {
 	/// still worth waiting for; see [`Self::tail_deadline`].
 	fn owes(&self, fin: u64) -> bool {
 		self.tail_deadline(fin)
-			.is_some_and(|at| self.cache.pool().now_wall() < at)
+			.is_some_and(|at| at.is_none_or(|at| self.cache.pool().now_wall() < at))
 	}
 
 	/// When a received copy's declared end stops waiting for its tail: the latest instant a
-	/// sequence below `fin` it still misses is given up. `None` when nothing is missing.
+	/// sequence below `fin` it still misses is given up, or `Some(None)` when one is never given
+	/// up, as under an unbounded max delay, whose grace runs past the clock's range. `None`
+	/// when nothing is missing.
 	///
-	/// A missing sequence is one no live group or datagram delivered and the publisher did
+	/// A missing sequence is one no live group delivered and the publisher did
 	/// not drop. A gap below an arrival is given up a grace after that arrival opened it, as
 	/// the session's tail does. The gap above the last arrival is given up a grace after
 	/// the end or a start was declared, or a group last arrived, so a feed still delivering toward an
-	/// end declared ahead of it is not cut off. Judged by the arrivals, not the cache, so an evicted group or a
-	/// datagram counts as delivered, and the check costs the same however much is cached.
-	fn tail_deadline(&self, fin: u64) -> Option<crate::time::Instant> {
+	/// end declared ahead of it is not cut off. Judged by the arrivals, not the cache, so an evicted group
+	/// counts as delivered, and the check costs the same however much is cached.
+	fn tail_deadline(&self, fin: u64) -> Option<Option<crate::time::Instant>> {
 		let active = self.tail?;
 		let grace = self.arrival_grace();
 		// Fetched backfill never reaches a reader in arrival order, so only the live feed's
@@ -2374,26 +2741,22 @@ impl TrackState {
 					.arrivals
 					.gaps(0..fin)
 					.any(|(gap, _)| self.drops.gaps(&gap).next().is_some());
-				return missing.then(|| active.checked_add(grace)).flatten();
+				return missing.then(|| active.checked_add(grace));
 			}
 			None => self.arrivals.first().unwrap_or(0),
 		};
-		let owed = floor.min(fin)..fin;
-		let top = self.arrivals.end().unwrap_or(0)..fin;
+		// Nothing opened the gap above the last arrival, so its grace runs from `active`.
 		self.arrivals
-			.folds(grace)
-			.chain(active.checked_add(grace).map(|at| (top, at)))
-			.filter(|(gap, _)| {
-				let gap = gap.start.max(owed.start)..gap.end.min(owed.end);
-				!gap.is_empty() && self.drops.gaps(&gap).next().is_some()
-			})
-			.map(|(_, at)| at)
-			.max()
+			.gaps(floor.min(fin)..fin)
+			.filter(|(gap, _)| self.drops.gaps(gap).next().is_some())
+			.map(|(_, opened)| opened.unwrap_or(active).checked_add(grace))
+			// A gap that is never given up holds the end for good.
+			.reduce(|a, b| a.zip(b).map(|(a, b)| a.max(b)))
 	}
 
 	/// Wake `waiter` when a received copy's declared end stops waiting for its tail.
 	fn watch_tail(&self, waiter: &kio::Waiter) {
-		if let Some(at) = self.final_sequence().and_then(|fin| self.tail_deadline(fin))
+		if let Some(Some(at)) = self.final_sequence().and_then(|fin| self.tail_deadline(fin))
 			&& self.cache.pool().now_wall() < at
 		{
 			self.cache.watch_wall(at, waiter);
@@ -2401,19 +2764,24 @@ impl TrackState {
 	}
 
 	/// Whether the declared end is reached, the pending tail owes nothing below it, and
-	/// every cached group below it finished, so nothing the end promised is still in flight.
-	///
-	/// Decided as an abort lands, which ends any wait for the tail: a group the tail still
-	/// owed was cut off by the abort, so readers get the error rather than a clean end.
+	/// every cached slot below it settled ([`Slot::is_settled`]), so nothing the end
+	/// promised is still in flight.
 	fn is_settled(&self) -> bool {
 		let Some(fin) = self.final_sequence() else {
 			return false;
 		};
 		let reached = self.sealed || self.reaches(fin);
-		reached
-			&& (self.abort.is_none() || self.settled)
-			&& !self.owes(fin)
-			&& self.lookup.range(..fin).all(|(_, slot)| slot.group.is_finished())
+		reached && !self.owes(fin) && self.lookup.range(..fin).all(|(_, slot)| slot.is_settled())
+	}
+
+	/// Record that the end settled before a write that could reopen it: an abort, a late
+	/// group below the end, or a fresh grace for the tail. The clean outcome `closed()` saw
+	/// then stands, and a later abort ends readers cleanly. A late group or a wider
+	/// subscription is still served; it just cannot turn the outcome into an error.
+	fn latch_settled(&mut self) {
+		if self.abort.is_none() && self.is_settled() {
+			self.settled.store(true, Ordering::Relaxed);
+		}
 	}
 
 	/// Where a replacement route should pick this track up: one past the last frame
@@ -2445,8 +2813,7 @@ impl TrackState {
 	}
 
 	/// The upstream subscription ended with the copy still held: what it cached may go
-	/// stale, so readers get nothing from it until the route answers again. Buffered
-	/// datagrams go too, since a reader returning later must not be handed them.
+	/// stale, so readers get nothing from it until the route answers again.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn set_idle(&mut self) {
 		let newest = self
@@ -2456,8 +2823,6 @@ impl TrackState {
 			.find(|(_, slot)| slot.is_shown())
 			.map(|(sequence, _)| *sequence);
 		self.feed = Feed::Idle { newest };
-		self.datagram_offset += self.datagrams.len();
-		self.datagrams.clear();
 		// An open group stops because this copy dropped its feed, not because the publisher
 		// gave it up: its stream resets as a cut would, so it leaves the cache first, and the
 		// next feed sends it again.
@@ -2468,7 +2833,7 @@ impl TrackState {
 			.map(|(&sequence, _)| sequence)
 			.collect();
 		for sequence in open {
-			self.uncache(sequence);
+			self.displace(sequence);
 		}
 	}
 
@@ -2476,12 +2841,28 @@ impl TrackState {
 	/// is current up to there. `start` is the first group the feed serves, when the answer
 	/// names it; otherwise the largest stands in. A feed that starts past a gap after
 	/// everything cached leaves the cache unjudgeable, since nothing bounds how far an old
-	/// group reached, so readers skip it; whatever the feed delivers stays.
+	/// group reached, so readers with a finite delay budget skip it; an unlimited read
+	/// still serves it. Whatever the feed delivers stays.
 	///
 	/// Readers wait until the cache shows that position: before then its newest group would
 	/// read as the live edge, though the route already holds a newer one.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn set_live(&mut self, largest: Option<Position>, start: Option<u64>) {
+		self.answered(largest, start, true);
+	}
+
+	/// [`Self::set_live`] for a feed that serves no group from `largest`'s on, such as a
+	/// bounded subscription of history: the cache can never show that group, so the answer
+	/// alone makes it current, and relative starts count back from that group.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	fn set_live_ahead(&mut self, largest: Position, start: Option<u64>) {
+		self.answered(Some(largest), start, false);
+	}
+
+	/// The route answered with `largest`. With `reaches`, its feed reaches that group, so
+	/// readers wait until the cache shows it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	fn answered(&mut self, largest: Option<Position>, start: Option<u64>, reaches: bool) {
 		let Feed::Idle { newest } = self.feed else {
 			return;
 		};
@@ -2504,7 +2885,7 @@ impl TrackState {
 			_ => self.live_floor,
 		};
 		match largest.map(|largest| largest.group) {
-			Some(from) if !self.shows(from) => self.feed = Feed::Answered { from },
+			Some(from) if reaches && !self.shows(from) => self.feed = Feed::Answered { from },
 			edge => self.go_live(edge),
 		}
 	}
@@ -2513,17 +2894,12 @@ impl TrackState {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn shows(&self, sequence: u64) -> bool {
 		self.lookup.range(sequence..).any(|(_, slot)| slot.is_shown())
-			|| self.datagrams.iter().any(|datagram| datagram.sequence >= sequence)
 	}
 
 	/// The newest live group the cache holds, and the number of frames it has so far.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn newest(&self) -> Option<(u64, u64)> {
-		let (sequence, slot) = self
-			.lookup
-			.iter()
-			.rev()
-			.find(|(_, slot)| slot.visible && slot.group.is_started())?;
+		let (sequence, slot) = self.live(..).rev().find(|(_, slot)| slot.group.is_started())?;
 		Some((*sequence, slot.group.frame_count() as u64))
 	}
 
@@ -2542,8 +2918,6 @@ impl TrackState {
 			Poll::Ready(Ok(end))
 		} else if let Some(err) = &self.abort {
 			Poll::Ready(Err(err.clone()))
-		} else if self.sealed {
-			Poll::Ready(Err(Error::Closed))
 		} else {
 			Poll::Pending
 		}
@@ -2553,12 +2927,62 @@ impl TrackState {
 		producer.write().map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
 	}
 
-	/// Observe a shared track's terminal cause without extending its publisher lifetime.
+	/// Observe a shared track's abort, or every producer leaving, without extending its
+	/// publisher lifetime. A finish alone does not end it: lower groups may still arrive.
 	// Sessions retain shared state while a FETCH owns its group writer.
-	pub(crate) fn poll_closed(producer: &kio::Producer<Self>, waiter: &kio::Waiter) -> Poll<Error> {
+	pub(crate) fn poll_aborted(producer: &kio::Producer<Self>, waiter: &kio::Waiter) -> Poll<Error> {
 		producer
 			.poll_closed(waiter)
 			.map(|()| producer.read().abort.clone().unwrap_or(Error::Dropped))
+	}
+
+	/// The track's outcome once final: `Ok` once its declared end is reached with every
+	/// cached group below it finished, which a later abort keeps, or the abort error. An
+	/// end declared with an error reports that error instead of `Ok`.
+	///
+	/// A clean outcome latches once reported: a received copy's tail grace is judged when
+	/// polled, and a later subscription asking for a longer one must not reopen it.
+	fn poll_outcome(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
+		if self.settled.load(Ordering::Relaxed) {
+			return Poll::Ready(self.ended().map(|_: Option<()>| ()));
+		}
+		if self.is_complete() {
+			// An abort after the end settled keeps the clean end; until then a group below it
+			// may still abort, which would cut the track off, so wait for each slot to settle
+			// ([`Slot::is_settled`]). One whose last serving copy aborts leaves the outcome to
+			// the track's own abort or drop.
+			if self.abort.is_none()
+				&& let Some(fin) = self.final_sequence()
+			{
+				for (_, slot) in self.lookup.range(..fin).filter(|(_, slot)| !slot.is_settled()) {
+					// Watch every copy, since a serving head that aborts hands the slot back to
+					// the live group, then judge again so a copy closing meanwhile is seen.
+					for group in slot.copies() {
+						let _ = group.poll_closed(waiter);
+					}
+					if !slot.is_settled() {
+						return Poll::Pending;
+					}
+				}
+			}
+			self.settled.store(true, Ordering::Relaxed);
+			Poll::Ready(self.ended().map(|_: Option<()>| ()))
+		} else if let Some(err) = &self.abort {
+			Poll::Ready(Err(err.clone()))
+		} else {
+			self.watch_tail(waiter);
+			Poll::Pending
+		}
+	}
+
+	/// [`Self::poll_outcome`] read through a handle: the channel closing short of an
+	/// outcome (every producer gone without an end or abort) reads as [`Error::Dropped`].
+	fn settle(poll: Poll<std::result::Result<Result<()>, kio::Ref<'_, Self>>>) -> Poll<Result<()>> {
+		Poll::Ready(match ready!(poll) {
+			Ok(outcome) => outcome,
+			Err(closed) if closed.is_complete() => closed.ended().map(|_: Option<()>| ()),
+			Err(closed) => Err(closed.abort.clone().unwrap_or(Error::Dropped)),
+		})
 	}
 
 	/// Abort shared track state without extending its publisher lifetime.
@@ -2566,6 +2990,20 @@ impl TrackState {
 	pub(crate) fn abort(producer: &kio::Producer<Self>, err: Error) -> Result<()> {
 		commit_abort(Self::modify(producer)?, err).abort();
 		Ok(())
+	}
+
+	fn content_for_copy(&self, sequence: u64) -> Result<Option<Arc<group::Content>>> {
+		if let Some(content) = self.contents.get(sequence) {
+			return Ok(Some(content));
+		}
+		if let Some(slot) = self.lookup.get(&sequence) {
+			for copy in slot.copies() {
+				if let Some(content) = copy.activate_content()? {
+					return Ok(Some(content));
+				}
+			}
+		}
+		Ok(None)
 	}
 
 	/// Insert a group a [`Fill`] answered, setting the track's [`Info`]
@@ -2576,7 +3014,7 @@ impl TrackState {
 	pub(super) fn insert_group_request(
 		&mut self,
 		sequence: u64,
-		frame_start: u64,
+		frames: group::Bounds,
 		info: Option<Info>,
 	) -> Result<group::Producer> {
 		if let Some(err) = &self.abort {
@@ -2590,29 +3028,42 @@ impl TrackState {
 
 		// Adopt the supplied info only if the track hasn't been accepted yet. Groups
 		// created here charge the same account as any other, so backfill written
-		// before the track is accepted settles its debt like the rest.
+		// before the track is accepted settles its debt like the rest. Without one, the
+		// provisional info claims no publisher max age, not an authored track's zero: the
+		// publisher's real bound is unknown until its metadata arrives.
 		if self.info.is_none() {
-			self.install(info.unwrap_or_default());
+			self.install(info.unwrap_or_else(|| Info::default().with_max_age(None)));
 		}
 		let info = self.info.clone().unwrap();
 
-		// A live group the feed started past `frame_start` keeps its slot: subscribers
-		// walk it in arrival order and the feed keeps writing it. The fetch fills its
-		// head instead. Anything else that can't answer from `frame_start` (evicted,
-		// aborted, or narrower backfill) is replaced; a group that can is a duplicate.
-		if self.lookup.get(&sequence).is_some_and(Slot::is_live) {
-			if self.covering_group(sequence, frame_start).is_some() {
-				return Err(Error::Duplicate);
-			}
-		} else {
-			self.claim_sequence(sequence, frame_start)?;
+		if self.covering_range(sequence, frames).is_some() {
+			return Err(Error::Duplicate);
+		}
+		let content = self.content_for_copy(sequence)?;
+
+		// A copy cut short at the back never displaces a fetched one that reaches the end,
+		// which whole-group readers still take. The fill hands it to its own fetch instead.
+		let kept = frames.end.is_some()
+			&& self.lookup.get(&sequence).is_some_and(|slot| match slot.is_live() {
+				true => slot
+					.head
+					.as_deref()
+					.is_some_and(|head| !head.is_aborted() && !head.back_cut()),
+				false => slot.serves_end(),
+			});
+		if !kept && !self.lookup.get(&sequence).is_some_and(Slot::is_live) {
+			self.displace(sequence);
 		}
 
 		let mut group = group::Producer::new(group::Info { sequence }, info, self.cache.clone());
+		if let Some(content) = content {
+			group.handle().share_content(content);
+		}
+		group.handle().register_content(&self.contents);
 		// Start where the request did before the group is visible: a fetch looking it up
 		// in between would otherwise see it begin at 0 and get a reader that later skips
 		// the head it asked for.
-		group.start_at(frame_start)?;
+		group.bound(frames)?;
 		self.cap(&group.handle())?;
 		// A backfill exists because someone is fetching it right now: stamp that
 		// access so the eviction walk can't kill it before the fetch resolves.
@@ -2622,12 +3073,17 @@ impl TrackState {
 		self.charge_debt();
 		let protected = self.protects(sequence);
 		match self.lookup.get_mut(&sequence).filter(|slot| slot.is_live()) {
+			_ if kept => self.detach(&group.handle()),
 			Some(slot) => {
 				// Joins the slot's standing: demoted already unless it is the live edge.
 				if !protected {
 					group.handle().cache_demote();
 				}
-				slot.head = Some(Box::new(group.handle()));
+				if let Some(head) = slot.head.replace(Box::new(group.handle())) {
+					self.detach(&head);
+				}
+				// A head holding frame 0 gives a group received past it a start.
+				self.fetched += 1;
 			}
 			// Invisible to arrival-order subscribers: fetched on demand, not produced
 			// live by the publisher.
@@ -2638,6 +3094,18 @@ impl TrackState {
 	}
 }
 
+/// Demand wakes taken out of the track state, fired once its guard is gone.
+#[must_use = "fire the wakes once the guard is released"]
+pub(super) struct Deferred(Vec<kio::WaiterList>);
+
+impl Deferred {
+	pub(super) fn wake(self) {
+		for mut wakes in self.0 {
+			wakes.wake();
+		}
+	}
+}
+
 /// Record `err` and close the track, the shared tail of every abort, returning the open
 /// groups to abort once the guard is gone.
 fn commit_abort(mut state: kio::Mut<'_, TrackState>, err: Error) -> OpenGroups {
@@ -2645,7 +3113,7 @@ fn commit_abort(mut state: kio::Mut<'_, TrackState>, err: Error) -> OpenGroups {
 	// past the grace was lost before the abort rather than cut off by it.
 	let now = state.cache.pool().now_wall();
 	state.fold_arrivals(now);
-	state.settled = state.is_settled();
+	state.latch_settled();
 	state.abort = Some(err.clone());
 	// Keep what finished for consumers still draining: they get it, then the abort (or
 	// the clean end, when the end settled). Clearing here would abort finished groups a
@@ -2744,7 +3212,7 @@ pub struct Producer {
 	broadcast: Arc<broadcast::Info>,
 	state: kio::Producer<TrackState>,
 	prev_subscription: Option<Subscription>,
-	// Shared with every clone and every `Dynamic`: its `Drop` is the teardown.
+	// Shared with every clone and every `Requests`: its `Drop` is the teardown.
 	alive: Arc<Alive>,
 	// Ingress stats scope, inherited from a tagged [`broadcast::Producer`]. Bumped as
 	// one subscription on tag and closed when the last producer clone drops. Empty
@@ -2775,7 +3243,7 @@ impl Producer {
 		let name = name.into();
 		let info = info.into().unwrap_or_default();
 		let state = TrackState::spawn(broadcast.clone());
-		state.write().ok().expect("a new track is open").accept(info.clone());
+		state.write().ok().expect("a new track is open").publish(info.clone());
 		let alive = Alive::new(name.clone(), state.clone());
 		alive.publish(None);
 		Self {
@@ -2795,13 +3263,6 @@ impl Producer {
 	pub(super) fn with_stats(mut self, scope: stats::Scope) -> Self {
 		self.alive.publish(Some(&scope));
 		self.stats = scope;
-		self
-	}
-
-	/// Continue the name's sequence namespace within its broadcast. Set by the broadcast
-	/// before the track is handed out.
-	pub(super) fn with_sequence(self, sequence: Sequence) -> Self {
-		set_sequence(&self.state, sequence);
 		self
 	}
 
@@ -2832,27 +3293,51 @@ impl Producer {
 	/// live edge, or the successor that ages the group before it) only once its first frame
 	/// opens or it finishes.
 	pub fn create_group(&self, group: group::Info) -> Result<group::Producer> {
+		self.create_group_inner(group, None)
+	}
+
+	/// A received copy starts at its wire offset before any reader can see it.
+	#[cfg(feature = "async")]
+	pub(crate) fn create_group_at(&self, group: group::Info, start: u64) -> Result<group::Producer> {
+		self.create_group_inner(group, Some(start))
+	}
+
+	fn create_group_inner(&self, info: group::Info, received: Option<u64>) -> Result<group::Producer> {
 		let mut state = self.modify()?;
-		// A sealed track takes no group, not even one below its end.
-		if state.sealed || state.final_sequence().is_some_and(|fin| group.sequence >= fin) {
+		if state.sealed || state.final_sequence().is_some_and(|fin| info.sequence >= fin) {
 			return Err(Error::Closed);
 		}
+		let start = received.unwrap_or(0);
+		let content = if received.is_some() {
+			if state.holding_group(info.sequence, start).is_some() {
+				return Err(Error::Duplicate);
+			}
+			state.content_for_copy(info.sequence)?
+		} else {
+			None
+		};
 		let track = state.info.clone().unwrap();
-
-		// An evicted sequence can be re-created; a live one is a duplicate.
-		state.claim_sequence(group.sequence, 0)?;
-
-		let group = group::Producer::new(group, track, state.cache.clone()).with_meter(self.stats.meter());
+		state.claim_sequence(info.sequence, start)?;
+		let mut group = group::Producer::new(info, track, state.cache.clone()).with_meter(self.stats.meter());
+		if start != 0 {
+			group.bound(group::Bounds { start, end: None })?;
+		}
+		if let Some(content) = content {
+			group.handle().share_content(content);
+		}
 		state.cap(&group.handle())?;
 		state.commit_group(&group.handle());
-
+		let deferred = state.deferred();
+		drop(state);
+		deferred.wake();
 		Ok(group)
 	}
 
 	/// Create a new group with the next sequence number: one past this producer's own writes.
 	///
-	/// [`Error::Duplicate`] if an earlier producer of the name in this broadcast already wrote
-	/// that sequence. A replacement picks where it starts with [`Self::create_group`].
+	/// The broadcast remembers nothing of an earlier producer of the name, so a replacement
+	/// starts at 0. Since a name always means the same content, a replacement continues past
+	/// its predecessor's groups with [`Self::create_group`].
 	pub fn append_group(&self) -> Result<group::Producer> {
 		let mut state = self.modify()?;
 		let sequence = state.next_sequence()?;
@@ -2868,142 +3353,11 @@ impl Producer {
 			group::Producer::new(group::Info { sequence }, track, state.cache.clone()).with_meter(self.stats.meter());
 		state.cap(&group.handle())?;
 		state.commit_group(&group.handle());
+		let deferred = state.deferred();
+		drop(state);
+		deferred.wake();
 
 		Ok(group)
-	}
-
-	/// Append a datagram with the next sequence number, returning the assigned sequence.
-	///
-	/// A datagram is delivered best-effort over a single QUIC datagram, parallel to the
-	/// track's groups but drawing from the same sequence namespace (so interleaving with
-	/// [`Self::append_group`] never reuses a number). There is no group fallback: each
-	/// session drops (with a debug log) any datagram whose encoded body exceeds the
-	/// transport's datagram size, and sessions that can't carry datagrams at all (moq-lite
-	/// before 05, or stream-only transports like WebSocket) never deliver them. Keep payloads well under the 1200-byte minimum path MTU.
-	/// A datagram is never cached or served by a fetch, so use a group for anything a late
-	/// joiner needs. An origin publisher uses this; a relay preserving upstream numbering
-	/// uses [`Self::insert_datagram`]. Like [`Self::append_group`], it is [`Error::Duplicate`]
-	/// if an earlier producer of the name already wrote that sequence.
-	///
-	/// Pass `None` on an untimed track; a datagram that doesn't match its track is
-	/// [`Error::TimestampMismatch`].
-	pub fn append_datagram<B: crate::IntoBytes>(
-		&mut self,
-		timestamp: impl Into<Option<Timestamp>>,
-		payload: B,
-	) -> Result<u64> {
-		let payload = payload.into_bytes();
-		if payload.len() > super::datagram::MAX_DATAGRAM_PAYLOAD {
-			return Err(Error::FrameTooLarge);
-		}
-		// Resolved before the state guard borrows `self`.
-		let meter = self.stats.meter();
-		let mut state = self.modify()?;
-		// Normalize into the track's timescale, like frames (see `group::Producer::create_frame`).
-		let timescale = state.info.as_ref().unwrap().timescale;
-		let timestamp = group::on_track(timestamp.into(), timescale)?;
-		let sequence = state.next_sequence()?;
-		if let Some(fin) = state.final_sequence()
-			&& sequence >= fin
-		{
-			return Err(Error::Closed);
-		}
-		state.advance(sequence, false);
-		state.cache.finish_largest(sequence);
-		// A datagram is its own group, so it compresses alone.
-		let deflated = state
-			.info
-			.as_ref()
-			.unwrap()
-			.compress
-			.then(|| super::flate::Encoder::new().frame(&payload));
-		let datagram = super::datagram::Stored {
-			datagram: Datagram {
-				sequence,
-				timestamp,
-				payload,
-			},
-			wire: None,
-			deflated,
-		};
-		meter.datagram(datagram.stored_len());
-		state.push_datagram(datagram);
-		let cache = state.cache.clone();
-		drop(state);
-		cache.settle(None);
-		Ok(sequence)
-	}
-
-	/// Insert a datagram with an explicit sequence number.
-	///
-	/// Preserves the supplied sequence (bumping the shared `max_sequence` if needed), so a
-	/// relay can forward a datagram without renumbering it. Most origin publishers want
-	/// [`Self::append_datagram`] instead.
-	pub fn insert_datagram<B: crate::IntoBytes>(
-		&mut self,
-		sequence: u64,
-		timestamp: impl Into<Option<Timestamp>>,
-		payload: B,
-	) -> Result<()> {
-		self.insert_wire_datagram(
-			Datagram {
-				sequence,
-				timestamp: timestamp.into(),
-				payload: payload.into_bytes(),
-			}
-			.into(),
-		)
-	}
-
-	pub(crate) fn insert_wire_datagram(&mut self, mut datagram: super::datagram::Stored) -> Result<()> {
-		if datagram.payload.len() > super::datagram::MAX_DATAGRAM_PAYLOAD {
-			return Err(Error::FrameTooLarge);
-		}
-		let meter = self.stats.meter();
-		let mut state = self.modify()?;
-		let info = state.info.as_ref().unwrap();
-		let timescale = info.timescale;
-		let status = datagram.wire.as_ref().and_then(|wire| wire.status);
-		// A datagram is its own group, so it compresses alone. A status has no payload.
-		if info.compress && datagram.deflated.is_none() && status.is_none() {
-			datagram.deflated = Some(super::flate::Encoder::new().frame(&datagram.payload));
-		}
-		if status.is_none_or(|status| status == 0) {
-			datagram.datagram.timestamp = group::on_track(datagram.timestamp, timescale)?;
-		}
-		if state.final_sequence().is_some_and(|fin| datagram.sequence >= fin) {
-			return Err(Error::Closed);
-		}
-		state.advance(datagram.sequence, false);
-		state.cache.finish_largest(datagram.sequence);
-		meter.datagram(datagram.stored_len());
-		state.push_datagram(datagram);
-		let cache = state.cache.clone();
-		drop(state);
-		cache.settle(None);
-		Ok(())
-	}
-
-	/// Insert a received datagram of a compressed track, whose payload is its own DEFLATE
-	/// stream that must inflate to exactly `size` bytes. Kept as it arrived, beside the
-	/// inflated payload.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn insert_deflated_datagram(&mut self, mut datagram: super::datagram::Stored, size: u64) -> Result<()> {
-		if !self.info.compress {
-			return Err(Error::ProtocolViolation);
-		}
-		// Refused before inflating, like an oversized plain payload.
-		let size = usize::try_from(size)
-			.ok()
-			.filter(|size| *size <= super::datagram::MAX_DATAGRAM_PAYLOAD)
-			.ok_or(Error::FrameTooLarge)?;
-		let payload = super::flate::Decoder::new().frame(&datagram.payload, size)?;
-		let inflated = payload.len() as u64;
-		datagram.deflated = Some(std::mem::replace(&mut datagram.datagram.payload, payload));
-		self.insert_wire_datagram(datagram)?;
-		// Only once stored, so a refused datagram counts toward nothing.
-		self.stats.meter().inflated(inflated);
-		Ok(())
 	}
 
 	/// Create a group with a single frame, at the given presentation timestamp.
@@ -3020,8 +3374,7 @@ impl Producer {
 			return Err(Error::FrameTooLarge);
 		}
 		// Checked before the group exists, so a refused frame leaves no empty group behind.
-		let timescale = self.modify()?.info.as_ref().unwrap().timescale;
-		let timestamp = group::on_track(timestamp.into(), timescale)?;
+		let timestamp = self.modify()?.info.as_ref().unwrap().rescale(timestamp.into())?;
 		let mut group = self.append_group()?;
 		if let Err(err) = group.write_frame(timestamp, frame) {
 			// A rewind is only known once the group exists; end it rather than leave it open.
@@ -3032,26 +3385,9 @@ impl Producer {
 		Ok(())
 	}
 
-	/// End the track without declaring where it ends, as a closed session does.
-	///
-	/// Consumers drain the groups that finished and then end cleanly. The open groups are
-	/// aborted with [`StreamError::Session`], so a consumer that already pulled one ends
-	/// with it and their writers fail. A reader following the track's routes resumes from
-	/// another one where this copy stopped. Use [`Self::finish`] or [`Self::finish_at`]
-	/// when the end is known.
-	pub fn close(self) -> Result<()> {
-		let mut state = self.modify()?;
-		state.sealed = true;
-		let open = state.tear_down(Error::Stream(StreamError::Session(SessionError::Cancel)));
-		state.close();
-		open.abort();
-		Ok(())
-	}
-
 	/// Mark the track as finished after the last appended group.
 	///
-	/// Ends the track at the head of the group after the largest one written to its name,
-	/// including by an earlier producer this one replaces.
+	/// Ends the track at the head of the group after the current max_sequence.
 	/// No new groups at or above it can be appended.
 	/// NOTE: Old groups with lower sequence numbers can still arrive.
 	pub fn finish(&self) -> Result<()> {
@@ -3060,10 +3396,7 @@ impl Producer {
 			Some(max) => max.checked_add(1).ok_or(coding::BoundsExceeded)?,
 			None => 0,
 		};
-		// A replacement continues its name's timeline: ending below an earlier producer's
-		// groups would contradict the ones subscribers already received.
-		let final_sequence = final_sequence.max(state.sequence.next());
-		state.set_end(Position::group(final_sequence))
+		state.set_end(Position::group(final_sequence), None)
 	}
 
 	/// Declare the track's exclusive end, possibly ahead of the live edge.
@@ -3083,32 +3416,33 @@ impl Producer {
 	///
 	/// Repeating the declared end is a no-op, and a mid-group end may refine the group
 	/// boundary it falls just before (a peer may name only the boundary first). Any other
-	/// second end is [`Error::ProtocolViolation`], and so is one before or inside a group an
-	/// earlier producer of the name wrote, which a replacement continues.
+	/// second end is [`Error::ProtocolViolation`].
 	///
-	/// On a [received](Self::received) copy, groups below the end may still be in flight:
+	/// On a copy a session received, groups below the end may still be in flight:
 	/// readers wait for a missing one until a grace passes, the subscription's max delay
 	/// or one second without one, before ending at the boundary.
-	pub fn finish_at(&mut self, end: Position) -> Result<()> {
+	///
+	/// With an `error`, the track ended that way rather than cleanly, yet keeps its history,
+	/// unlike [`Self::abort`]: readers and fills still get every group below the end, and a
+	/// reader reaching the end gets the error instead of the end of stream. A repeated or
+	/// refined end must carry the same error code.
+	pub fn finish_at(&mut self, end: Position, error: Option<Error>) -> Result<()> {
 		let mut state = self.modify()?;
-		// A replacement continues its name's timeline, so it can't end before or inside a group
-		// an earlier producer wrote; only its own last group can be cut mid-way. A received
-		// copy answers to its publisher's end, which the session judges.
-		let own_last = end.frame != 0 && state.max_sequence == Some(end.group);
-		if !state.received && end.group < state.sequence.next() && !own_last {
+		let code = |err: &Option<Error>| err.as_ref().map(|err| StreamError::from(err).to_code());
+		if state.end.is_some() && code(&state.end_error) != code(&error) {
 			return Err(Error::ProtocolViolation);
 		}
 		match state.end {
 			Some(declared) if declared == end => return Ok(()),
 			Some(declared) if declared.frame == 0 && end.frame != 0 && end.final_sequence() == Some(declared.group) => {
 				state.end = None;
-				if let Err(err) = state.set_end(end) {
+				if let Err(err) = state.set_end(end, error) {
 					state.end = Some(declared);
 					return Err(err);
 				}
 			}
 			Some(_) => return Err(Error::ProtocolViolation),
-			None => state.set_end(end)?,
+			None => state.set_end(end, error)?,
 		}
 		if state.received && state.tail.is_none() {
 			state.tail = Some(state.cache.pool().now_wall());
@@ -3127,9 +3461,20 @@ impl Producer {
 	/// still promised. Pass `None` to clear it, for demand at the live edge:
 	/// its floor is unknown until the feed declares one.
 	///
-	/// Resolves a start left pending by [`Request::request_start`].
+	/// Resolves a start a subscriber session left pending.
 	pub fn start_at(&mut self, sequence: impl Into<Option<u64>>) -> Result<()> {
 		self.modify()?.set_start(sequence.into(), false);
+		Ok(())
+	}
+
+	/// [`Self::start_at`] a start the publisher resolved from its subscriber's budget. An
+	/// update can cross the response, so that budget is unknown: every older group stays
+	/// fillable, and a fill that finds none ends empty.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn start_resolved(&mut self, sequence: u64) -> Result<()> {
+		let mut state = self.modify()?;
+		state.set_start(Some(sequence), false);
+		state.start_resolved = true;
 		Ok(())
 	}
 
@@ -3139,7 +3484,8 @@ impl Producer {
 	/// Its readers' relative and time anchors, other than [`Range::live`](crate::track::Range::live)
 	/// and [`Range::oldest`](crate::track::Range::oldest), fail with [`Error::Unsupported`]
 	/// unless its session's wire lets it resolve them, since it holds only part of the track.
-	pub fn received(&self) {
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn received(&self) {
 		if let Ok(mut state) = self.modify() {
 			state.received = true;
 		}
@@ -3147,10 +3493,29 @@ impl Producer {
 
 	/// Let this received copy's readers resolve relative and time anchors, for a wire that
 	/// reports the live edge and media time and asks for every group the budget allows.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn anchored(&self) {
 		if let Ok(mut state) = self.modify() {
 			state.anchored = true;
+		}
+	}
+
+	/// Let readers use only time anchors this cache can already translate to group bounds. A
+	/// relative anchor counts back from the live edge the wire reports, once it does.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn anchored_cached(&self) {
+		if let Ok(mut state) = self.modify() {
+			state.anchored = true;
+			state.cached_anchors = true;
+		}
+	}
+
+	/// Have this received copy's readers ask no fills below the start its publisher resolved
+	/// from the budget, for a wire whose fills and timestamps cannot bound them by it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn fills_from_start(&self) {
+		if let Ok(mut state) = self.modify() {
+			state.fills_from_start = true;
 		}
 	}
 
@@ -3203,6 +3568,104 @@ impl Producer {
 		}
 	}
 
+	/// [`Self::set_live`] for a feed that serves no group from `largest`'s on, such as a
+	/// bounded subscription of history: readers resume at once, counting relative starts
+	/// back from `largest`'s group. A no-op unless idle.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn set_live_ahead(&mut self, largest: Position, start: Option<u64>) {
+		if let Ok(mut state) = self.modify() {
+			state.set_live_ahead(largest, start);
+		}
+	}
+
+	/// Whether a subscription feeds this copy: its session holds one upstream for it, or
+	/// none, so nothing reaches it but what fills answer. Only the session knows, from its
+	/// own state; the cache never tells. While unfed, a bounded read's holes are misses up
+	/// to its end at once, and it reads the cache whether or not the copy is idle.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn set_unfed(&self, unfed: bool) {
+		// Unchanged wakes nobody: every write wakes the readers.
+		if self.state.read().unfed == unfed {
+			return;
+		}
+		if let Ok(mut state) = self.modify() {
+			state.unfed = unfed;
+		}
+	}
+
+	/// The group of the newest Largest Object the upstream publisher's answers reported,
+	/// kept however far the cache has moved past it: every group below it is history there.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn reported_group(&self) -> Option<u64> {
+		self.state.read().object_edge.map(|((group, _), _)| group)
+	}
+
+	/// The live feed's route answered that it reaches `group`: a relative start counts back
+	/// from it, rather than from whichever group lands first. A no-op unless live.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn report_edge(&self, group: u64) {
+		if let Ok(mut state) = self.modify()
+			&& let Feed::Live { first, edge } = &mut state.feed
+		{
+			*edge = (*edge).max(Some(group));
+			first.get_or_insert(group);
+		}
+	}
+
+	/// Record the upstream Object ID separately from the frame ordinal readers count.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn report_object(&self, group: u64, object: u64) {
+		if let Ok(mut state) = self.modify() {
+			// A frame received past the report outdates it on arrival. A frame's ordinal never
+			// exceeds its Object ID, so one past the reported object proves the report stale.
+			if state
+				.cache
+				.largest()
+				.is_some_and(|largest| largest > Position { group, frame: object })
+			{
+				return;
+			}
+			let edge = state.object_edge().max(Some((group, object)));
+			state.cache.advance_largest(Position::group(group));
+			let mark = state.cache.largest().unwrap_or(Position::group(group));
+			state.object_edge = edge.map(|edge| (edge, mark));
+		}
+	}
+
+	/// Resolve cached time anchors before sending a wire that can name only groups.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn resolve_subscription(&self, subscription: &Subscription) -> Result<Subscription> {
+		if !subscription.ranges.iter().any(|range| !range.is_wire()) {
+			return Ok(subscription.clone());
+		}
+		let state = self.state.read();
+		let window = Window::new(&subscription.ranges, state.latest_live(), &*state)?;
+		if !window.is_settled() {
+			return Err(Error::Unsupported);
+		}
+		let resolved = window.resolved();
+		let mut subscription = subscription.clone();
+		for (range, resolved) in subscription.ranges.iter_mut().zip(resolved) {
+			if match range.start {
+				super::subscription::Anchor::Time(_) => true,
+				super::subscription::Anchor::Relative(back) => back != 0 && back != u64::MAX,
+				_ => false,
+			} {
+				range.start = super::subscription::Anchor::Absolute(resolved.ok_or(Error::Unsupported)?.start);
+			}
+			if matches!(
+				range.end,
+				Some(super::subscription::Anchor::Time(_) | super::subscription::Anchor::Relative(_))
+			) {
+				range.end = resolved
+					.ok_or(Error::Unsupported)?
+					.end
+					.map(super::subscription::Anchor::Absolute);
+			}
+		}
+		Ok(subscription)
+	}
+
 	/// The source reported its largest frame, which [`Self::largest`] follows before the
 	/// frame itself arrives. A hint about the edge: it never makes the frame readable.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
@@ -3247,7 +3710,7 @@ impl Producer {
 	///
 	/// `None` while the track is still open ended. Both methods reject a second end, so
 	/// callers that may have already declared one check here first.
-	pub fn end(&self) -> Option<Position> {
+	pub fn finished(&self) -> Option<Position> {
 		self.state.read().end
 	}
 
@@ -3262,7 +3725,7 @@ impl Producer {
 	///
 	/// If the declared end had settled (the final sequence from
 	/// [`finish_at`](Self::finish_at) was reached and every group below it finished),
-	/// consumers get a clean end instead of the error, as after [`finish`](Self::finish).
+	/// consumers get that end instead of the error, as after [`finish`](Self::finish).
 	///
 	/// [`finish`](Self::finish) is deliberately not terminal: it declares the final
 	/// sequence, and lower-numbered groups may still be written afterwards.
@@ -3273,16 +3736,16 @@ impl Producer {
 		Ok(())
 	}
 
-	/// Abort an unused track, returning the producer unchanged if consumers remain.
+	/// Abort an unwanted track, returning the producer unchanged if consumers remain.
 	///
-	/// Consumer creation and the unused check share a lock, so demand returning
+	/// Consumer creation and the unwanted check share a lock, so demand returning
 	/// after [`Demand::wanted`] went to `None` prevents the abort. `Ok(())` means
 	/// the track is closed, including when it was already closed; existing handles
 	/// may still observe its final state. `Err(producer)` leaves the track unchanged
-	/// so the caller can continue serving and wait for the next unused wake.
+	/// so the caller can continue serving and wait for the next unwanted wake.
 	///
-	/// The abort is the same as [`Self::abort`]: a group consumer that outlived the track's
-	/// consumers ends with `err`, and the group's writer fails.
+	/// The abort is the same as [`Self::abort`]. A reader still in a group it was handed
+	/// counts as a consumer until it reads the group's end.
 	#[cfg_attr(
 		target_pointer_width = "64",
 		expect(
@@ -3290,16 +3753,16 @@ impl Producer {
 			reason = "return the owned producer without allocating on an idle check"
 		)
 	)]
-	pub fn abort_unused(self, err: Error) -> std::result::Result<(), Self> {
-		let used = match self.state.write_unused() {
-			kio::Unused::Idle(guard) => {
+	pub fn abort_unwanted(self, err: Error) -> std::result::Result<(), Self> {
+		let wanted = match self.state.write_unwanted() {
+			kio::Unwanted::Idle(guard) => {
 				commit_abort(guard, err).abort();
 				false
 			}
-			kio::Unused::Closed => false,
-			kio::Unused::Used => true,
+			kio::Unwanted::Closed => false,
+			kio::Unwanted::Wanted => true,
 		};
-		if used {
+		if wanted {
 			return Err(self);
 		}
 		// After the track's own lock is released; a later track of the name, listed in
@@ -3308,15 +3771,26 @@ impl Producer {
 		Ok(())
 	}
 
-	/// Block until the track is closed or aborted, returning the cause.
+	/// Block until the track's outcome is final: `Ok` once its declared end is reached (its
+	/// error, if declared with one), or the abort error, or [`Error::Dropped`] once every
+	/// producer left without either.
 	#[cfg(feature = "async")]
-	pub async fn closed(&self) -> Error {
+	pub async fn closed(&self) -> Result<()> {
 		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
 
-	/// Poll until the track is closed or aborted; ready with the cause.
-	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
-		TrackState::poll_closed(&self.state, waiter)
+	/// Poll until the track's outcome is final: `Ok` once its declared end is reached (its
+	/// error, if declared with one), or the abort error, or [`Error::Dropped`] once every
+	/// producer left without either.
+	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
+		TrackState::settle(self.state.poll_ref(waiter, |state| state.poll_outcome(waiter)))
+	}
+
+	/// Poll until the track is aborted, or every producer left; ready with the cause.
+	// Sessions stop serving on an abort, but keep taking lower groups past a finish.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn poll_aborted(&self, waiter: &kio::Waiter) -> Poll<Error> {
+		TrackState::poll_aborted(&self.state, waiter)
 	}
 
 	/// Return true if the track has been closed.
@@ -3329,13 +3803,13 @@ impl Producer {
 		self.state.read().max_sequence
 	}
 
-	/// The track's largest location: its newest group or datagram at the newest frame (0 while empty), `None` before any.
+	/// The track's largest location: its newest group at the newest frame (0 while empty), `None` before any.
 	pub fn largest(&self) -> Option<Position> {
 		self.state.read().cache.largest()
 	}
 
 	/// Ready once the track holds content past `sequence`, or is closed: a later group whose
-	/// first frame opened or that finished, or a later datagram. A frameless group header
+	/// first frame opened or that finished. A frameless group header
 	/// does not count, since nothing says the copy reached it yet.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn poll_past(&self, sequence: u64, waiter: &kio::Waiter) -> Poll<()> {
@@ -3399,7 +3873,7 @@ impl Producer {
 	/// SUBSCRIBE_OK round trip). Pass `None` for [`Subscription::default`].
 	///
 	/// Reads only the groups the subscription's ranges cover.
-	/// [`Subscription::max_delay`] is what asks for data: delivery skips everything in range
+	/// [`Delay::max`] is what asks for data: delivery skips everything in range
 	/// that the budget convicts, so the default budget of zero delivers only the latest
 	/// group and a larger one reaches back over what it can still use.
 	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> Subscriber {
@@ -3425,6 +3899,7 @@ impl Producer {
 			stats: stats::Scope::default(),
 			_stats_sub: stats::Subscription::default(),
 			largest: Reported::default(),
+			parks: false,
 		}
 	}
 
@@ -3442,12 +3917,13 @@ impl Producer {
 	/// when there are no live subscribers. Unlike [`Self::subscription`], this
 	/// doesn't wait for a change or advance the change cursor.
 	///
-	/// The aggregate's [`Subscription::max_delay`] is clamped to this track's
-	/// [`Info::max_age`]: no subscriber can wait for a late group longer than the
-	/// publisher keeps it.
+	/// The aggregate's [`Delay::max`] is the subscribers' own, capped only by
+	/// the local cache ceiling ([`broadcast::Info::cache_duration`]). The publisher
+	/// enforces its own [`Info::max_age`], which each reader's lateness budget also
+	/// applies, so the demand asked upstream is the same before and after the info lands.
 	pub fn subscription(&self) -> Option<Subscription> {
 		let state = self.state.read();
-		let (subs, bound) = (state.subscriptions.clone(), state.max_age_bound());
+		let (subs, bound) = (state.subscriptions.clone(), state.demand_bound());
 		drop(state);
 		snapshot_subscription(&subs, bound)
 	}
@@ -3465,17 +3941,32 @@ impl Producer {
 
 		// Read the bound before locking `subs`, so the aggregation never nests the two locks.
 		let state = self.state.read();
-		let (subs, bound) = (state.subscriptions.clone(), state.max_age_bound());
+		let (subs, bound) = (state.subscriptions.clone(), state.demand_bound());
 		drop(state);
 
 		poll_combined_changed(&subs, bound, &mut self.prev_subscription, waiter).map(Ok)
 	}
 
-	/// Create a [`Dynamic`] handle that serves on-demand fetches of uncached
+	/// Count `seen` as the aggregate already acted on, so
+	/// [`Self::poll_subscription_changed`] reports only a change from it: the demand a
+	/// subscriber session asked upstream for before accepting the track.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn seen_subscription(&mut self, seen: Subscription) {
+		self.prev_subscription = Some(seen);
+	}
+
+	/// How long a subscriber session's tail waits for a late group: `budget`, bounded by how
+	/// long the publisher keeps one. The aggregate asked upstream is not bounded by it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn tail_grace(&self, budget: Duration) -> Duration {
+		ledger::grace(clamp_max_delay(budget, self.state.read().max_age_bound()))
+	}
+
+	/// Create a [`Requests`] handle that serves on-demand fetches of uncached
 	/// (old) groups. Most producers never need this; a relay creates one to fetch
 	/// past groups from upstream.
-	pub fn dynamic(&self) -> Dynamic {
-		Dynamic::new(self.name.clone(), self.state.clone(), self.alive.clone())
+	pub fn requests(&self) -> Requests {
+		Requests::new(self.name.clone(), self.state.clone(), self.alive.clone())
 	}
 
 	fn modify(&self) -> Result<kio::Mut<'_, TrackState>> {
@@ -3484,15 +3975,15 @@ impl Producer {
 }
 
 /// Serves the groups a track's readers miss, the group-level analogue of
-/// [`broadcast::Dynamic`].
+/// [`broadcast::Requests`].
 ///
 /// Most tracks never serve old content, so this capability lives on a dedicated
 /// handle rather than [`Producer`]: a relay creates one (via
-/// [`Producer::dynamic`] or [`Request::dynamic`]) to pull past groups
+/// [`Producer::requests`] or [`Request::requests`]) to pull past groups
 /// from upstream. While at least one is alive a reader's miss queues a [`Fill`] for it
 /// to serve; with none, the miss is named dropped, and a cache-miss
 /// [`Consumer::fetch_group`] on an accepted track fails fast with [`Error::NotFound`].
-pub struct Dynamic {
+pub struct Requests {
 	name: Arc<str>,
 	// Kept to insert served groups into the cache and observe track abort.
 	state: kio::Producer<TrackState>,
@@ -3503,7 +3994,7 @@ pub struct Dynamic {
 	alive: Arc<Alive>,
 }
 
-impl Dynamic {
+impl Requests {
 	fn new(name: Arc<str>, state: kio::Producer<TrackState>, alive: Arc<Alive>) -> Self {
 		let fills = state.read().fills.clone();
 		fills.lock().add_handler();
@@ -3556,9 +4047,9 @@ impl Dynamic {
 	}
 }
 
-impl Clone for Dynamic {
+impl Clone for Requests {
 	fn clone(&self) -> Self {
-		// Count each live handle (mirrors `broadcast::Dynamic`).
+		// Count each live handle (mirrors `broadcast::Requests`).
 		self.fills.lock().add_handler();
 		Self {
 			name: self.name.clone(),
@@ -3569,9 +4060,9 @@ impl Clone for Dynamic {
 	}
 }
 
-impl Drop for Dynamic {
+impl Drop for Requests {
 	fn drop(&mut self) {
-		// Unlike `broadcast::Dynamic`, dropping the last handle doesn't abort the track:
+		// Unlike `broadcast::Requests`, dropping the last handle doesn't abort the track:
 		// a live `Producer` may still be serving the subscription. It just stops serving
 		// fills: a queued one no handler will ever take closes, so its readers stop
 		// waiting on it, while one already taken stays with its `Fill`.
@@ -3579,27 +4070,7 @@ impl Drop for Dynamic {
 	}
 }
 
-fn set_sequence(state: &kio::Producer<TrackState>, sequence: Sequence) {
-	let Ok(mut state) = state.write() else {
-		return;
-	};
-	debug_assert!(
-		state.max_sequence.is_none(),
-		"a track joins its namespace before writing"
-	);
-	// What earlier producers of the name wrote is gone from this track's cache, so their
-	// highest checked start is its eviction watermark.
-	state.evicted = sequence.bound();
-	// A replacement's consumers want the group past what earlier producers wrote.
-	let next = sequence.next();
-	state.sequence = sequence;
-	let subscriptions = state.subscriptions.clone();
-	drop(state);
-	let mut wakes = subscriptions.lock().want(next);
-	wakes.wake();
-}
-
-/// Ends the track when the last [`Producer`] or [`Dynamic`] drops.
+/// Ends the track when the last [`Producer`] or [`Requests`] drops.
 ///
 /// A refcount rather than a "am I the last one?" check inside `Drop`: that answer is a
 /// snapshot, and acting on it is exactly what invalidates it. The track state's own
@@ -3612,7 +4083,7 @@ struct Alive {
 	state: kio::Producer<TrackState>,
 
 	// Set when a `Producer` is first minted, so a `Request` nobody accepted (its
-	// `Dynamic` holds this guard too) isn't reported as an abandoned publisher.
+	// `Requests` holds this guard too) isn't reported as an abandoned publisher.
 	published: AtomicBool,
 
 	// Ingress subscription for this track, opened by the tagged producer that claimed
@@ -3725,15 +4196,18 @@ fn snapshot_subscription(subs: &kio::Lock<Subscriptions>, bound: Option<Duration
 	clamp_combined(subs.lock().combined(), bound)
 }
 
-/// Clamp a drift budget to the publisher's retention window: nobody can wait for a late
-/// group longer than the publisher keeps it around.
+/// Clamp a drift budget to a max age: nobody can wait for a late group longer than it
+/// stays fresh.
 ///
 /// The single clamp point. Subscribers hold their preferences verbatim, so what they asked
 /// for stays readable, and it is applied here on both sides of the aggregate: to the
-/// combined request the publisher sees ([`clamp_combined`]) and to one subscriber's own
-/// budget when it decides a group is stale ([`TrackState::is_stale`]). Those agree because
-/// `min` distributes over the `max` that combines them. `bound` is `None` on a track whose
-/// info isn't known yet (an unaccepted [`Request`]), which imposes no window.
+/// combined request the publisher sees ([`clamp_combined`]), with the local cache ceiling
+/// ([`TrackState::demand_bound`]), and to one subscriber's own budget when it decides a
+/// group is stale ([`TrackState::is_stale`]), with the publisher's window too
+/// ([`TrackState::max_age_bound`]). The publisher applies its own window to the request,
+/// and `min` distributes over the `max` that combines the subscribers, so a group is stale
+/// under the request exactly when it is stale for one of them. `bound` is `None` when
+/// nothing imposes a window.
 fn clamp_max_delay(mut max_delay: Duration, bound: Option<Duration>) -> Duration {
 	if let Some(bound) = bound {
 		max_delay = max_delay.min(bound);
@@ -3741,11 +4215,11 @@ fn clamp_max_delay(mut max_delay: Duration, bound: Option<Duration>) -> Duration
 	max_delay
 }
 
-/// Clamp the aggregate's max delay budget to the publisher's window; see [`clamp_max_delay`].
+/// Clamp the aggregate's max delay budget to `bound`; see [`clamp_max_delay`].
 fn clamp_combined(combined: Option<Subscription>, bound: Option<Duration>) -> Option<Subscription> {
 	let mut combined = combined?;
 	if bound.is_some() {
-		combined.max_delay = Some(clamp_max_delay(combined.budget(), bound));
+		combined.delay.max = Some(clamp_max_delay(combined.budget(), bound));
 	}
 	Some(combined)
 }
@@ -3761,7 +4235,7 @@ impl TrackWeak {
 	/// Join the cached track's demand, or `None` once it has closed.
 	///
 	/// The count moves under the same lock the close takes, which is the other half
-	/// of [`Producer::abort_unused`]: a request either joins in time to decline the
+	/// of [`Producer::abort_unwanted`]: a request either joins in time to decline the
 	/// teardown, or gets nothing and re-requests the track. It is never handed a track
 	/// that is already on its way out.
 	pub(super) fn try_consume(
@@ -3800,7 +4274,7 @@ impl TrackWeak {
 		let Ok(mut state) = producer.write() else {
 			return false;
 		};
-		if state.published || state.claimed || state.abort.is_some() {
+		if state.publication != Publication::Pending || state.abort.is_some() {
 			return false;
 		}
 		state.abort = Some(err);
@@ -3808,16 +4282,41 @@ impl TrackWeak {
 		true
 	}
 
+	/// Abort the track with `err`, as [`Producer::abort`] does, unless it already closed.
+	///
+	/// For an owner that hands a track's [`Producer`] out and must end it on its own
+	/// shutdown without keeping it alive. Leaves the listing alone: such a track is one
+	/// served on request, which is never listed.
+	pub(super) fn abort(&self, err: Error) {
+		let Some(producer) = self.state.produce() else {
+			return;
+		};
+		let Ok(state) = producer.write() else {
+			return;
+		};
+		commit_abort(state, err).abort();
+	}
+
+	/// Whether its producer declared the track's end, which is how its listing ends too.
+	pub(super) fn is_finished(&self) -> bool {
+		self.state.read().end.is_some()
+	}
+
 	/// Whether anyone is consuming the track right now. A closed track doesn't
 	/// count even if consumers linger to drain its cache: no new work is owed.
-	pub(super) fn is_used(&self) -> bool {
-		!self.state.is_closed() && self.state.is_used()
+	pub(super) fn is_wanted(&self) -> bool {
+		!self.state.is_closed() && self.state.wanted()
+	}
+
+	/// A [`Demand`] on the cached track, for a broadcast to watch.
+	pub(super) fn demand(&self) -> Demand {
+		Demand::new(self.name.clone(), self.state.clone())
 	}
 
 	/// The readers' aggregate demand and contribution count, or `None` without one.
 	pub(super) fn subscription(&self) -> Option<(Subscription, usize)> {
 		let state = self.state.read();
-		let (subs, bound) = (state.subscriptions.clone(), state.max_age_bound());
+		let (subs, bound) = (state.subscriptions.clone(), state.demand_bound());
 		drop(state);
 		let subs = subs.lock();
 		Some((clamp_combined(subs.combined(), bound)?, subs.len()))
@@ -3826,32 +4325,32 @@ impl TrackWeak {
 	/// End the track with `err` unless a reader holds it, atomically with lookups: a
 	/// lookup either gets a consumer in time to keep it, or finds it closed and asks
 	/// afresh. True once the track is gone.
-	pub(super) fn abort_unused(&self, err: Error) -> bool {
+	pub(super) fn abort_unwanted(&self, err: Error) -> bool {
 		let Some(producer) = self.state.produce() else {
 			return true;
 		};
-		match producer.write_unused() {
-			kio::Unused::Idle(guard) => {
+		match producer.write_unwanted() {
+			kio::Unwanted::Idle(guard) => {
 				commit_abort(guard, err).abort();
 				true
 			}
-			kio::Unused::Closed => true,
-			kio::Unused::Used => false,
+			kio::Unwanted::Closed => true,
+			kio::Unwanted::Wanted => false,
 		}
 	}
 
 	/// `Ready(Ok)` while anyone reads the open track, `Ready(Err)` once it closed, and
 	/// otherwise park `waiter` for the next reader. Only `Pending` registers: act on the
-	/// answer, not a later [`Self::is_used`], or a reader leaving in between is never seen.
-	pub(super) fn poll_used(&self, waiter: &kio::Waiter) -> Poll<std::result::Result<(), kio::Closed>> {
-		self.state.poll_used(waiter)
+	/// answer, not a later [`Self::is_wanted`], or a reader leaving in between is never seen.
+	pub(super) fn poll_wanted(&self, waiter: &kio::Waiter) -> Poll<std::result::Result<(), kio::Closed>> {
+		self.state.poll_wanted_changed(waiter, false).map_ok(drop)
 	}
 
 	/// `Ready(Ok)` while nobody reads the track, `Ready(Err)` once it closed, and
 	/// otherwise park `waiter` for the last reader leaving. Only `Pending` registers,
-	/// as with [`Self::poll_used`].
-	pub(super) fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<std::result::Result<(), kio::Closed>> {
-		self.state.poll_unused(waiter)
+	/// as with [`Self::poll_wanted`].
+	pub(super) fn poll_unwanted(&self, waiter: &kio::Waiter) -> Poll<std::result::Result<(), kio::Closed>> {
+		self.state.poll_wanted_changed(waiter, true).map_ok(drop)
 	}
 }
 
@@ -3867,10 +4366,12 @@ impl super::WeakEntry for TrackWeak {
 
 /// A cloneable, watch-only handle to a track's subscriber demand.
 ///
-/// Obtained from [`Producer::demand`], [`Request::demand`], or [`Dynamic::demand`].
+/// Obtained from [`Producer::demand`], [`Request::demand`], or [`Requests::demand`].
 /// A publisher uses it to learn which group anyone subscribed, querying, or fetching
 /// wants (on-demand capture / encoding) without being able to publish frames or close the
-/// track. A bare [`Consumer`] is not demand. It's a weak handle, so it neither keeps
+/// track. A bare [`Consumer`] is not demand. A group a subscription or fetch handed out
+/// keeps its track wanted until a reader reads its end, and a wanted track makes its
+/// broadcast wanted ([`broadcast::Demand`]). It's a weak handle, so it neither keeps
 /// the track alive nor pins its cached groups; once the owning [`Producer`]
 /// goes away, [`poll_wanted_changed`](Self::poll_wanted_changed) reports the track's
 /// closure. Each clone watches on its own, so its first
@@ -3907,15 +4408,13 @@ impl Demand {
 	///
 	/// A publisher opens a group whenever `n` passes its largest. The first consumer of a
 	/// track with no group asks for `Some(0)`, and a join judged by [`Info::refresh`]
-	/// asks for the next free sequence until a group lands there, so a datagram taking it
-	/// moves the ask past. `n` never goes back, so once a group reaches it nothing is
+	/// asks for the next free sequence until a group lands there. `n` never goes back, so once a group reaches it nothing is
 	/// pending until another join asks.
 	pub fn wanted(&self) -> Option<u64> {
-		if !self.is_used() {
+		if !self.is_wanted() {
 			return None;
 		}
-		let (subscriptions, namespace) = self.subscriptions();
-		let wanted = subscriptions.lock().wanted(&namespace);
+		let wanted = self.subscriptions().lock().wanted();
 		Some(wanted)
 	}
 
@@ -3930,22 +4429,20 @@ impl Demand {
 		kio::wait(|waiter| self.poll_wanted_changed(waiter)).await
 	}
 
-	/// The demand aggregate, and the name's sequence namespace a pending refresh reads.
-	fn subscriptions(&self) -> (kio::Lock<Subscriptions>, Sequence) {
-		let state = self.state.read();
-		(state.subscriptions.clone(), state.sequence.clone())
+	/// The demand aggregate.
+	fn subscriptions(&self) -> kio::Lock<Subscriptions> {
+		self.state.read().subscriptions.clone()
 	}
 
 	/// Poll for [`wanted`](Self::wanted) to differ from what this handle last returned.
 	pub fn poll_wanted_changed(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<u64>>> {
-		let used = match self.poll_state(waiter) {
+		let active = match self.poll_state(waiter) {
 			DemandState::Closed => return Poll::Ready(Err(self.abort_reason())),
 			DemandState::Active => true,
 			DemandState::Idle => false,
 		};
-		let (subscriptions, namespace) = self.subscriptions();
-		let wanted = subscriptions.lock().poll_wanted(&namespace, waiter);
-		let next = used.then_some(wanted);
+		let wanted = self.subscriptions().lock().poll_wanted(waiter);
+		let next = active.then_some(wanted);
 		if self.prev == Some(next) {
 			return Poll::Pending;
 		}
@@ -3953,11 +4450,17 @@ impl Demand {
 		Poll::Ready(Ok(next))
 	}
 
-	/// Block until the track is closed or aborted, returning the cause.
+	/// Block until the track's outcome is final; see [`Producer::closed`].
 	#[cfg(feature = "async")]
-	pub async fn closed(&self) -> Error {
-		self.state.closed().await;
-		self.abort_reason()
+	pub async fn closed(&self) -> Result<()> {
+		kio::wait(|waiter| {
+			TrackState::settle(
+				self.state
+					.consume_weak()
+					.poll(waiter, |state| state.poll_outcome(waiter)),
+			)
+		})
+		.await
 	}
 
 	/// The publisher's tie-break priority, as set in [`Info::priority`].
@@ -3971,8 +4474,8 @@ impl Demand {
 	}
 
 	/// Whether the track is open and anyone consumes it right now, without waiting.
-	pub(super) fn is_used(&self) -> bool {
-		!self.state.is_closed() && self.state.is_used()
+	pub(super) fn is_wanted(&self) -> bool {
+		!self.state.is_closed() && self.state.wanted()
 	}
 
 	/// Whether the track is gone, without waiting.
@@ -3987,17 +4490,17 @@ impl Demand {
 	/// to track which edge it's waiting for.
 	pub(super) fn poll_state(&self, waiter: &kio::Waiter) -> DemandState {
 		loop {
-			match self.state.poll_used(waiter) {
+			match self.state.poll_wanted_changed(waiter, false) {
 				Poll::Ready(Err(_)) => return DemandState::Closed,
-				// Not used, and armed for it becoming used.
+				// Not wanted, and armed for it becoming wanted.
 				Poll::Pending => return DemandState::Idle,
-				// Used, so arm for the reverse.
-				Poll::Ready(Ok(())) => match self.state.poll_unused(waiter) {
+				// Wanted, so arm for the reverse.
+				Poll::Ready(Ok(_)) => match self.state.poll_wanted_changed(waiter, true) {
 					Poll::Ready(Err(_)) => return DemandState::Closed,
 					Poll::Pending => return DemandState::Active,
 					// Went idle between the two reads, so neither poll armed anything.
 					// Start over rather than returning a state with no waker behind it.
-					Poll::Ready(Ok(())) => continue,
+					Poll::Ready(Ok(_)) => continue,
 				},
 			}
 		}
@@ -4145,8 +4648,8 @@ impl ArrivalRead<'_> {
 /// A lazy handle to a single track within a broadcast.
 ///
 /// Obtained from [`broadcast::Consumer::track`]. Holding it sends nothing and is not
-/// [`Demand`]: the track is requested, and counts as demanded, only while a
-/// [`query`](Self::query), [`subscribe`](Self::subscribe) (a live, ongoing stream of
+/// [`Demand`]: the track is requested, and counts as demanded, only while an
+/// [`info`](Self::info), [`subscribe`](Self::subscribe) (a live, ongoing stream of
 /// groups), or [`fetch_group`](Self::fetch_group) (one group) made from it is held. The
 /// same handle can be used any number of times, and clones are cheap.
 #[derive(Clone)]
@@ -4188,6 +4691,12 @@ impl Consumer {
 	/// An already declared end, without resolving a pending subscription or registering a wake.
 	pub(super) fn declared_end(&self) -> Option<Position> {
 		self.with_state(|state| state?.read().end)
+	}
+
+	/// The error the declared end carries, reached or not.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(super) fn declared_error(&self) -> Option<Error> {
+		self.with_state(|state| state?.read().end_error.clone())
 	}
 
 	fn new(name: Arc<str>, state: kio::ConsumerWeak<TrackState>) -> Self {
@@ -4274,7 +4783,7 @@ impl Consumer {
 	/// [`Error::Dropped`]) if it is already closed.
 	///
 	/// Reads only the groups the subscription's ranges cover.
-	/// [`Subscription::max_delay`] is what asks for data: delivery skips everything in range
+	/// [`Delay::max`] is what asks for data: delivery skips everything in range
 	/// that the budget convicts, so the default budget of zero delivers only the latest
 	/// group and a larger one reaches back over what it can still use.
 	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> kio::Pending<Subscribing> {
@@ -4307,6 +4816,29 @@ impl Consumer {
 		}
 	}
 
+	/// Refuse a new range before it changes the demand shared by this route's readers.
+	///
+	/// Only an unresolved time anchor is refused, so callers skip ranges without one
+	/// before building a consumer or locking the track's state.
+	fn refuse_subscription(&self, subscription: &Subscription) -> Result<()> {
+		if let Some(serving) = self.serving() {
+			return serving.refuse_subscription(subscription);
+		}
+		self.with_state(|state| match state {
+			Some(state) => refuse_cached_anchors(&state.read(), subscription),
+			None => Ok(()),
+		})
+	}
+
+	/// The upstream publisher's Largest Object, independently of which groups are cached.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn reported_object(&self) -> Option<(u64, u64)> {
+		if let Some(serving) = self.serving() {
+			return serving.reported_object();
+		}
+		self.with_state(|state| state?.read().object_edge())
+	}
+
 	/// The newest group, when it is already cached: resolved synchronously, without
 	/// counting as a fetch or a delivery. The IETF publisher snapshots its frame count to
 	/// resolve Largest Object; a group that is not immediately available reads as no edge.
@@ -4333,16 +4865,15 @@ impl Consumer {
 				.lookup
 				.range(..sequence)
 				.rev()
-				.map(|(_, slot)| slot.serving())
-				.find(|group| !group.is_aborted())
-				.map(|group| group.consume())
+				.find(|(_, slot)| slot.serves_end())
+				.map(|(_, slot)| slot.serving().consume())
 		})
 	}
 
 	/// A cached group by sequence, under the same terms as [`Self::peek_latest`]. Unlike a
 	/// fetch, a peek does not refresh the group's cache standing, so it never keeps a
-	/// group alive over one a subscriber actually read; an aborted (evicted) group is a
-	/// miss.
+	/// group alive over one a subscriber actually read; an aborted (evicted) group, or a
+	/// copy cut short at the back, is a miss.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn peek_group(&self, sequence: u64) -> Option<group::Consumer> {
 		if let Some(serving) = self.serving() {
@@ -4350,11 +4881,8 @@ impl Consumer {
 		}
 		self.with_state(|state| {
 			let state = state?.read();
-			let group = state.lookup.get(&sequence)?.serving();
-			if group.is_aborted() {
-				return None;
-			}
-			Some(group.consume())
+			let slot = state.lookup.get(&sequence).filter(|slot| slot.serves_end())?;
+			Some(slot.serving().consume())
 		})
 	}
 
@@ -4424,7 +4952,7 @@ impl Consumer {
 		}
 	}
 
-	/// Poll for group `sequence` falling a full `budget`, clamped to this track's retention,
+	/// Poll for group `sequence` falling a full `budget`, clamped to this track's max age,
 	/// behind its live edge, as a reader would judge it, whether the track holds it or not;
 	/// see `TrackState::drifted`. Parks in this track's expiry index, so only a change that
 	/// can make the group stale, or land it here, wakes it. Pending for good once the track closes.
@@ -4444,19 +4972,22 @@ impl Consumer {
 	}
 
 	/// Whether a group in `groups` may still land here; see `TrackState::may_land`. Never
-	/// once no producer is left to write one.
+	/// once no producer is left to write one. Parks `waiter` until its gap folds.
 	pub(super) fn may_land(
 		&self,
 		groups: ops::Range<u64>,
 		floor: bool,
 		grace: Duration,
 		delivered: Option<&Delivered>,
+		waiter: &kio::Waiter,
 	) -> bool {
 		if let Some(serving) = self.serving() {
-			return serving.may_land(groups, floor, grace, delivered);
+			return serving.may_land(groups, floor, grace, delivered, waiter);
 		}
 		self.with_state(|state| {
-			state.is_some_and(|state| !state.is_closed() && state.read().may_land(groups, floor, grace, delivered))
+			state.is_some_and(|state| {
+				!state.is_closed() && state.read().may_land(groups, floor, grace, delivered, waiter)
+			})
 		})
 	}
 
@@ -4545,7 +5076,7 @@ impl Consumer {
 		self.with_state(|state| {
 			state.is_some_and(|state| {
 				let state = state.read();
-				state.routes.is_none() && state.published && !state.closed && state.feed.is_live()
+				state.routes.is_none() && state.minted() && !state.closed && state.feed.is_live()
 			})
 		})
 	}
@@ -4553,18 +5084,49 @@ impl Consumer {
 	/// Fetching a single past group, without holding a live subscription.
 	///
 	/// Returns a [`kio::Pending`] that resolves to the [`group::Consumer`]:
-	/// immediately if the group is cached, otherwise once a [`Dynamic`] serves
+	/// immediately if the group is cached, otherwise once a [`Requests`] serves
 	/// the request (a wire FETCH for a relay). `options` accepts `None`, a [`group::Fetch`],
 	/// or `group::Fetch::default()`.
 	///
 	/// The returned future resolves to [`Error::NotFound`] when the group can never be served
-	/// (past the final sequence, or no [`Dynamic`] on the track), [`Error::NotFetchable`]
-	/// instead when this track sent the sequence as a datagram still buffered, the handler's
+	/// (past the final sequence, or no [`Requests`] on the track), the handler's
 	/// rejection (a relay's upstream miss is [`StreamError::NotFound`](StreamError::NotFound)),
 	/// or the track's abort error if it's already closed. A miss queues a one-group [`Fill`],
 	/// which concurrent fetches of the same sequence join.
 	pub fn fetch_group(&self, sequence: u64, options: impl Into<Option<group::Fetch>>) -> kio::Pending<Fetching> {
-		let options = options.into().unwrap_or_default();
+		self.fetching(
+			sequence,
+			FetchOptions {
+				options: options.into().unwrap_or_default(),
+				end: None,
+			},
+		)
+	}
+
+	/// Fill a wire request, widening a cold or compressed group to a reusable prefix.
+	pub(crate) fn fetch_range(&self, sequence: u64, mut request: FetchOptions) -> kio::Pending<Fetching> {
+		let state = self.resolve(None).0;
+		{
+			let state = state.read();
+			if state.lookup.get(&sequence).is_none_or(Slot::is_aborted)
+				|| state.info.as_ref().is_none_or(|info| info.compress)
+			{
+				request.options.frame_start = 0;
+			}
+			// A compressed stream needs the entire dictionary; an unknown track is conservative
+			// until TRACK_INFO has told the relay which representation it will receive.
+			if state.info.as_ref().is_none_or(|info| info.compress) {
+				request.end = None;
+			}
+		}
+		self.fetching(sequence, request)
+	}
+
+	fn fetching(&self, sequence: u64, request: FetchOptions) -> kio::Pending<Fetching> {
+		let FetchOptions {
+			options,
+			end: frame_end,
+		} = request;
 
 		// One fetch per calling context, counted here (coalesced upstream work is
 		// still one request served). Independent of `subscriptions` and the viewer
@@ -4580,8 +5142,10 @@ impl Consumer {
 				fills,
 				sequence,
 				frame_start: options.frame_start,
+				frame_end,
 				priority: options.priority,
 				max_delay: options.max_delay,
+				judges_drift: true,
 				result: None,
 				hit: Some(Box::new(group)),
 				stats: self.stats.clone(),
@@ -4591,7 +5155,6 @@ impl Consumer {
 
 		let state = self.resolve(None).0;
 		let resume = state.read().routes.clone();
-		let mut result = None;
 
 		// A front's logical track caches nothing: the serving route answers.
 		if let Some(resume) = resume {
@@ -4600,48 +5163,52 @@ impl Consumer {
 				fills: state.read().fills.clone(),
 				sequence,
 				frame_start: options.frame_start,
+				frame_end,
 				priority: options.priority,
 				max_delay: options.max_delay,
+				judges_drift: true,
 				result: None,
 				hit: None,
 				stats: self.stats.clone(),
-				resume: Some(Box::new(resume.fetch_group(sequence, options, state.clone()))),
+				resume: Some(Box::new(resume.fetch_group(
+					sequence,
+					FetchOptions {
+						options,
+						end: frame_end,
+					},
+					state.clone(),
+				))),
 			});
 		}
 
-		// Queue a request only when the group isn't already resolvable from the track
-		// (cached, aborted, or past-final all resolve through `Fetching::poll` without
-		// a queue entry).
-		let (fills, cached) = {
-			let state = state.read();
-			(
-				state.fills.clone(),
-				state.poll_fetch_cached(sequence, options.frame_start),
-			)
-		};
-		let unresolved = cached.is_pending();
-		// Hold a hit until the caller polls: the held consumer keeps the group wanted,
-		// so an abandoned fetch filling it can't abort it in between.
-		let hit = match cached {
-			Poll::Ready(Ok(group)) => Some(Box::new(group)),
-			_ => None,
-		};
-
-		if unresolved {
-			result = queue(&fills, sequence, &options);
-		}
-
-		kio::Pending::new(Fetching {
+		kio::Pending::new(Fetching::cached_or_queued(
 			state,
-			fills,
 			sequence,
-			frame_start: options.frame_start,
-			priority: options.priority,
-			max_delay: options.max_delay,
-			result,
-			hit,
-			stats: self.stats.clone(),
-			resume: None,
+			FetchOptions {
+				options,
+				end: frame_end,
+			},
+			self.stats.clone(),
+		))
+	}
+
+	/// The sequences of `span` the cache holds, lowest first.
+	#[cfg(feature = "async")]
+	pub(crate) fn cached_groups(&self, span: ops::Range<u64>) -> Vec<u64> {
+		if let Some(serving) = self.serving() {
+			return serving.cached_groups(span);
+		}
+		self.with_state(|state| {
+			let Some(state) = state else {
+				return Vec::new();
+			};
+			let state = state.read();
+			state
+				.lookup
+				.range(span)
+				.filter(|(_, slot)| slot.serves_end())
+				.map(|(sequence, _)| *sequence)
+				.collect()
 		})
 	}
 
@@ -4651,8 +5218,8 @@ impl Consumer {
 	/// for the producer to [`Request::accept`] the track (a wire TRACK_INFO round-trip
 	/// for a relay), and errors with the track's abort error if it closes first.
 	/// [`Subscriber::info`] is the already-resolved counterpart.
-	pub fn query(&self) -> kio::Pending<Querying> {
-		kio::Pending::new(Querying {
+	pub fn info(&self) -> kio::Pending<Resolving> {
+		kio::Pending::new(Resolving {
 			name: self.name.clone(),
 			broadcast: self.broadcast.clone(),
 			state: self.resolve(None).0,
@@ -4699,7 +5266,7 @@ impl Consumer {
 		})
 	}
 
-	/// The track's largest location, its newest group or datagram at the newest frame (0 while empty): the current one, then each newer one, and `None` once the track ends.
+	/// The track's largest location, its newest group at the newest frame (0 while empty): the current one, then each newer one, and `None` once the track ends.
 	#[cfg(feature = "async")]
 	pub async fn largest(&mut self) -> Option<Position> {
 		kio::wait(|waiter| self.poll_largest(waiter)).await
@@ -4739,15 +5306,14 @@ impl Consumer {
 	/// Poll for the track reaching a terminal state: `Ok(())` once it is complete
 	/// (the final group was produced), `Err` once it closed or aborted before
 	/// completing. This tells a track that truly ended from one whose serving route
-	/// died mid-stream. A session closed locally, on purpose, is [`Error::Closed`].
+	/// died mid-stream.
 	pub(super) fn poll_complete(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
 		self.with_state(|state| {
 			let Some(state) = state else {
 				return Poll::Ready(Err(Error::Dropped));
 			};
 			match ready!(state.poll(waiter, |state| {
-				// A local close without a declared end is a dead route, not finished content.
-				if state.end.is_some() && state.is_complete() {
+				if state.is_complete() {
 					Poll::Ready(())
 				} else {
 					state.watch_tail(waiter);
@@ -4757,11 +5323,7 @@ impl Consumer {
 				Ok(_) => Poll::Ready(Ok(())),
 				// Closed before completing. Read through the returned guard: it holds
 				// the lock, so re-locking the channel here would deadlock.
-				Err(closed) => Poll::Ready(Err(match (&closed.abort, closed.sealed) {
-					(Some(err), _) => err.clone(),
-					(None, true) => Error::Closed,
-					(None, false) => Error::Dropped,
-				})),
+				Err(closed) => Poll::Ready(Err(closed.abort.clone().unwrap_or(Error::Dropped))),
 			}
 		})
 	}
@@ -4778,9 +5340,9 @@ pub struct Subscribing {
 }
 
 impl Subscribing {
-	/// Query the same track with this subscription already registered.
-	pub(super) fn query(&self) -> Querying {
-		Querying {
+	/// Resolve the same track's info with this subscription already registered.
+	pub(super) fn info(&self) -> Resolving {
+		Resolving {
 			name: self.name.clone(),
 			broadcast: self.broadcast.clone(),
 			state: self.state.clone(),
@@ -4795,6 +5357,9 @@ impl Subscribing {
 		let info = ready!(self.state.poll(waiter, |state| state.poll_info()))
 			.map_err(|e| e.abort.clone().unwrap_or(Error::Dropped))??;
 		refuse_untimed(&info, &self.subscription.read())?;
+		if self.subscription.read().has_time() {
+			Consumer::new(self.name.clone(), self.state.weak()).refuse_subscription(&self.subscription.read())?;
+		}
 
 		let resume = self.state.read().routes.clone();
 		let inner = match resume {
@@ -4813,6 +5378,7 @@ impl Subscribing {
 			stats: self.stats.clone(),
 			_stats_sub: self.stats.subscribe(),
 			largest: Reported::default(),
+			parks: false,
 		}))
 	}
 
@@ -4821,6 +5387,9 @@ impl Subscribing {
 	/// Returns [`Error::Closed`] if the track already ended; the update is
 	/// meaningless at that point and can usually be ignored.
 	pub fn update(&mut self, subscription: Subscription) -> Result<()> {
+		if subscription.has_time() && subscription.ranges != self.subscription.read().ranges {
+			Consumer::new(self.name.clone(), self.state.weak()).refuse_subscription(&subscription)?;
+		}
 		self.subscription.update(subscription)
 	}
 }
@@ -4833,19 +5402,19 @@ impl kio::Task for Subscribing {
 	}
 }
 
-/// The pollable state of a [`Consumer::query`]; awaited via the
+/// The pollable state of a [`Consumer::info`]; awaited via the
 /// [`kio::Pending`] wrapper.
 ///
 /// Counts as the track's [`Demand`] while held, answered or not.
-pub struct Querying {
+pub struct Resolving {
 	name: Arc<str>,
 	broadcast: Arc<broadcast::Info>,
 	state: kio::Consumer<TrackState>,
 	stats: stats::Scope,
 }
 
-impl Querying {
-	/// A handle on the track instance this query asked, whatever its broadcast serves later.
+impl Resolving {
+	/// A handle on the track instance this resolves, whatever its broadcast serves later.
 	pub fn track(&self) -> Consumer {
 		Consumer {
 			name: self.name.clone(),
@@ -4865,7 +5434,7 @@ impl Querying {
 	}
 }
 
-impl kio::Task for Querying {
+impl kio::Task for Resolving {
 	type Output = Result<Info>;
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Self::Output> {
@@ -4875,7 +5444,8 @@ impl kio::Task for Querying {
 
 /// Join the fill covering `sequence`, or queue a one-group fill; `None` when no handler
 /// exists to take one, or for the last sequence, which a fill's exclusive end can't name.
-fn queue(fills: &kio::Shared<FillState>, sequence: u64, options: &group::Fetch) -> Option<Box<fill::Join>> {
+fn queue(fills: &kio::Shared<FillState>, sequence: u64, request: &FetchOptions) -> Option<Box<fill::Join>> {
+	let options = &request.options;
 	let end = sequence.checked_add(1)?;
 	let ask = fill::Ask {
 		start: Position {
@@ -4883,15 +5453,26 @@ fn queue(fills: &kio::Shared<FillState>, sequence: u64, options: &group::Fetch) 
 			frame: options.frame_start,
 		},
 		end,
-		priority: options.priority,
-		max_delay: options.max_delay,
-		// One group either way; newest first is the default order.
-		order: Order::default(),
+		frame_end: request.end,
+		asking: fill::Asking {
+			priority: options.priority,
+			max_delay: options.max_delay,
+			// One group either way, so it never turns a wider fill it joins newest first.
+			order: Order::Ascending,
+		},
+		time: None,
 	};
 	// The handler gate is atomic with a handler dropping (no fill stranded on a queue
 	// nobody drains); with no handler, `Fetching::poll` fails fast.
 	let (joins, _) = fills.lock().join(fills, &ask);
 	joins.into_iter().next().map(Box::new)
+}
+
+/// One transport request, whose end may cut the stored copy short.
+#[derive(Clone)]
+pub(crate) struct FetchOptions {
+	pub options: group::Fetch,
+	pub end: Option<u64>,
 }
 
 /// The pollable state of a [`Consumer::fetch_group`].
@@ -4906,10 +5487,14 @@ pub struct Fetching {
 	// This caller's own start, so a cached group that begins above it is a miss
 	// rather than a short answer.
 	frame_start: u64,
+	frame_end: Option<u64>,
 	// This caller's priority, for a fetch that moves to a front's routes.
 	priority: i8,
 	// This caller's own age cap. None means only the publisher's max age.
 	max_delay: Option<Duration>,
+	// Whether this fetch refuses a group a newer cached one superseded, judged across the
+	// whole cache. A cursor's head fill leaves it to the cursor, which judges its window.
+	judges_drift: bool,
 	// The fill this fetch joined; `None` on a cache hit, or when no handler existed to
 	// queue on. Boxed: a miss already allocates, and the handle stays small.
 	result: Option<Box<fill::Join>>,
@@ -4923,12 +5508,65 @@ pub struct Fetching {
 	resume: Option<Box<super::resume::Fetching>>,
 }
 
+impl Fetching {
+	/// A fetch of `sequence` from the track's own cache, queueing a fill for it only when
+	/// the cache can't resolve it (cached, aborted, or past-final all resolve through
+	/// [`Self::poll`] without one).
+	fn cached_or_queued(
+		state: kio::Consumer<TrackState>,
+		sequence: u64,
+		request: FetchOptions,
+		stats: stats::Scope,
+	) -> Self {
+		let frames = group::Bounds {
+			start: request.options.frame_start,
+			end: request.end,
+		};
+		let (fills, cached) = {
+			let state = state.read();
+			(state.fills.clone(), state.poll_fetch_cached(sequence, frames))
+		};
+		let result = match cached.is_pending() {
+			true => queue(&fills, sequence, &request),
+			false => None,
+		};
+		// Hold a hit until the caller polls: the held consumer keeps the group wanted,
+		// so an abandoned fetch filling it can't abort it in between.
+		let hit = match cached {
+			Poll::Ready(Ok(group)) => Some(Box::new(group)),
+			_ => None,
+		};
+		Self {
+			state,
+			fills,
+			sequence,
+			frame_start: request.options.frame_start,
+			frame_end: request.end,
+			priority: request.options.priority,
+			max_delay: request.options.max_delay,
+			judges_drift: true,
+			result,
+			hit,
+			stats,
+			resume: None,
+		}
+	}
+
+	/// Leave staleness to the caller, a cursor filling a head: it judges the group against
+	/// its own window when it hands it out, where a newer group outside that window
+	/// supersedes nothing.
+	fn unjudged(mut self) -> Self {
+		self.judges_drift = false;
+		self
+	}
+}
+
 impl kio::Task for Fetching {
 	type Output = Result<group::Consumer>;
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Self::Output> {
-		// Made before a front accepted its logical track, which caches nothing: the
-		// serving route answers instead.
+		// Made before a front took its logical track, which caches nothing: the serving
+		// route answers instead.
 		if self.resume.is_none()
 			&& let Some(routes) = self.state.read().routes.clone()
 		{
@@ -4937,7 +5575,14 @@ impl kio::Task for Fetching {
 				max_delay: self.max_delay,
 				frame_start: self.frame_start,
 			};
-			self.resume = Some(Box::new(routes.fetch_group(self.sequence, options, self.state.clone())));
+			self.resume = Some(Box::new(routes.fetch_group(
+				self.sequence,
+				FetchOptions {
+					options,
+					end: self.frame_end,
+				},
+				self.state.clone(),
+			)));
 		}
 		if let Some(resume) = &mut self.resume {
 			let group = ready!(kio::Task::poll(&mut **resume, waiter))?;
@@ -4950,19 +5595,22 @@ impl kio::Task for Fetching {
 			self.frame_start,
 			self.result.as_ref(),
 		);
-		{
+		let cache = {
 			let state = state.read();
 			let budget = clamp_max_delay(self.max_delay.unwrap_or(Duration::MAX), state.max_age_bound());
-			state.cache.wakes().watch_landing(sequence, waiter);
-			if state.poll_drifted(sequence, &Servable::ALL, budget, None, waiter) {
+			let _ = state.cache.wakes().watch_landing(sequence, waiter);
+			if self.judges_drift && state.poll_drifted(sequence, &Servable::ALL, budget, None, waiter) {
 				return Poll::Ready(Err(Error::Old));
 			}
-		}
+			state.cache.clone()
+		};
 
 		// Hand back a consumer sitting where the caller asked rather than at the group's
 		// own start. Coverage was checked first, so this can only skip frames they excluded.
 		let expiry: Arc<dyn group::Expiry> = Arc::new(FetchExpiry {
 			state: state.weak(),
+			cache,
+			reading: Reading::new(state.clone()),
 			sequence,
 			max_delay: self.max_delay,
 			superseded: Superseded::default(),
@@ -4970,6 +5618,7 @@ impl kio::Task for Fetching {
 		let resolve = |group: group::Consumer| {
 			group
 				.with_range(frame_start..)
+				.with_end(self.frame_end)
 				.with_meter(self.stats.meter())
 				.with_expiry(expiry.clone())
 		};
@@ -4979,12 +5628,16 @@ impl kio::Task for Fetching {
 
 		// Track side: the cached group, the abort error, or past-final. The outer
 		// error is the channel closing without any of those.
-		let cached =
-			|waiter: &kio::Waiter| match state.poll(waiter, |state| state.poll_fetch_cached(sequence, frame_start)) {
-				Poll::Ready(Ok(res)) => Poll::Ready(res.map(resolve)),
-				Poll::Ready(Err(closed)) => Poll::Ready(Err(closed.abort.clone().unwrap_or(Error::Dropped))),
-				Poll::Pending => Poll::Pending,
-			};
+		let frames = group::Bounds {
+			start: frame_start,
+			end: self.frame_end,
+		};
+		let cached = |waiter: &kio::Waiter| match state.poll(waiter, |state| state.poll_fetch_cached(sequence, frames))
+		{
+			Poll::Ready(Ok(res)) => Poll::Ready(res.map(resolve)),
+			Poll::Ready(Err(closed)) => Poll::Ready(Err(closed.abort.clone().unwrap_or(Error::Dropped))),
+			Poll::Pending => Poll::Pending,
+		};
 		if let Poll::Ready(res) = cached(waiter) {
 			return Poll::Ready(res);
 		}
@@ -4998,36 +5651,38 @@ impl kio::Task for Fetching {
 			}
 			// Never queued: no handler existed when the fetch was made. Fail fast while
 			// that's still true; a handler that appeared since may yet fill the cache.
-			// A sequence this track sent as a datagram says so, rather than a plain miss.
 			return match fills.poll(waiter, |fills| match fills.has_handlers() {
 				false => Poll::Ready(()),
 				true => Poll::Pending,
 			}) {
-				Poll::Ready(_guard) => Poll::Ready(Err(match state.read().holds_datagram(sequence) {
-					true => Error::NotFetchable,
-					false => Error::NotFound,
-				})),
+				Poll::Ready(_guard) => Poll::Ready(Err(Error::NotFound)),
 				Poll::Pending => Poll::Pending,
 			};
 		};
 
 		// An answered fill fails a joined fetch the cache cannot cover. The channel
 		// closing without an answer means its handlers went away.
-		let (err, asked) = match result
+		let (err, asked, partial) = match result
 			.outcome()
 			.poll(waiter, |outcome| match outcome.refused(sequence) {
-				Some(err) => Poll::Ready((err.clone(), outcome.asked())),
-				None if outcome.is_accepted(sequence) => Poll::Ready((Error::NotFound, None)),
+				Some((err, asked)) => Poll::Ready((err.clone(), asked, None)),
+				None if outcome.is_accepted(sequence) => {
+					Poll::Ready((Error::NotFound, None, outcome.partial(sequence, frames)))
+				}
 				None => Poll::Pending,
 			}) {
 			Poll::Ready(Ok(res)) => res,
-			Poll::Ready(Err(_closed)) => (Error::NotFound, None),
+			Poll::Ready(Err(_closed)) => (Error::NotFound, None, None),
 			Poll::Pending => return Poll::Pending,
 		};
 		// An accept caches the group before it answers the channel, which may land
 		// between the track check above and this one: look again before failing.
 		if let Poll::Ready(res) = cached(waiter) {
 			return Poll::Ready(res);
+		}
+		// A later copy displaced the one accepted for this fetch from the cache.
+		if let Some(group) = partial.as_ref().and_then(group::Handle::try_consume) {
+			return Poll::Ready(Ok(resolve(group)));
 		}
 		// Joined after a tighter budget went on the wire, which judged the group too old
 		// for that budget, not ours: ask again with ours. Terminates, since the new
@@ -5043,7 +5698,14 @@ impl kio::Task for Fetching {
 				max_delay: self.max_delay,
 				frame_start: self.frame_start,
 			};
-			self.result = queue(&self.fills, self.sequence, &options);
+			self.result = queue(
+				&self.fills,
+				self.sequence,
+				&FetchOptions {
+					options,
+					end: self.frame_end,
+				},
+			);
 			return self.poll(waiter);
 		}
 		Poll::Ready(Err(err))
@@ -5069,7 +5731,7 @@ impl kio::Task for Fetching {
 ///   publisher's demand.
 ///
 /// A group outside either is held rather than skipped past, so widening either one later
-/// makes it available again. Within both, [`Subscription::max_delay`] decides what is
+/// makes it available again. Within both, [`Delay::max`] decides what is
 /// still worth delivering, measured against the track's live edge.
 pub struct Subscriber {
 	name: Arc<str>,
@@ -5087,6 +5749,9 @@ pub struct Subscriber {
 	// while held, closing them on drop. Empty (no-op) for an untagged track.
 	_stats_sub: stats::Subscription,
 	largest: Reported,
+	/// Whether a read past a bounded window's end parks rather than ending: a wire
+	/// publisher's, whose peer would read the end of its stream as the track's.
+	parks: bool,
 }
 
 /// What a [`Subscriber`]'s `largest` stream last reported.
@@ -5115,6 +5780,10 @@ pub(super) struct Unread<'a> {
 }
 
 /// How a [`Subscriber`] reads: its track's own cache, or a front's routes.
+#[allow(
+	clippy::large_enum_variant,
+	reason = "the plain cursor is the hot path, so it stays inline and the front's reader is boxed; an allow, since the size gap varies by build"
+)]
 enum Inner {
 	Plain(Cursor),
 	/// A front's logical track, read straight from its routes' copies; see
@@ -5126,23 +5795,54 @@ enum Inner {
 	),
 }
 
+/// A group a [`Subscriber`] reserved without handing it out; see
+/// [`Subscriber::poll_peek_group`]. It holds the group and the step that moves past it,
+/// so taking it never asks the cursor again: a route or bound that moved meanwhile cannot
+/// lose it.
+#[allow(
+	clippy::large_enum_variant,
+	reason = "a plain read, the hot path, passes its group on the stack instead of allocating"
+)]
+pub(super) enum Reserved {
+	Plain(Peeked),
+	Resume(Box<super::resume::Candidate>),
+}
+
+impl Reserved {
+	pub(super) fn sequence(&self) -> u64 {
+		match self {
+			Self::Plain(peeked) => peeked.group.sequence,
+			Self::Resume(candidate) => candidate.sequence(),
+		}
+	}
+
+	/// Whether it was found in sequence order rather than arrival order.
+	pub(super) fn ordered(&self) -> bool {
+		match self {
+			Self::Plain(peeked) => peeked.arrival.is_none(),
+			Self::Resume(candidate) => candidate.ordered(),
+		}
+	}
+}
+
 /// One poll's view of how far this subscription may drift: the clamped budget and the
 /// live edge to measure a candidate group against. Resolved once, then applied to every
 /// group that poll considers.
 #[derive(Clone)]
 struct Drift {
 	budget: Duration,
+	/// The budget is the track's max age bound, which no widening passes: its verdicts are final.
+	bounded: bool,
 	edge: Edge,
 }
 
 /// Keeps one handed-out group tied to the subscription whose cursor selected it.
 struct GroupExpiry {
-	/// Weak so a handed-out group never joins the track's consumer count, which is what
-	/// [`crate::broadcast::Demand`] reads to decide the track still has readers. A group
-	/// outlives the cursor that produced it (a relay serves one for the life of its
-	/// stream), and pinning demand on that would hold an upstream subscription open past
-	/// the last real subscriber.
 	state: kio::ConsumerWeak<TrackState>,
+	/// The track's cache account, whose wakes judge a group with nothing above it without
+	/// locking `state`.
+	cache: Arc<cache::Track>,
+	reading: Reading,
 	subscription: kio::Consumer<Subscription>,
 	/// What the cursor can be served; see [`Cursor::published`].
 	servable: kio::Consumer<Published>,
@@ -5150,12 +5850,37 @@ struct GroupExpiry {
 	superseded: Superseded,
 }
 
-/// Keeps one fetched group tied to this caller's age budget without adding live demand.
+/// Keeps one fetched group tied to this caller's age budget.
 struct FetchExpiry {
 	state: kio::ConsumerWeak<TrackState>,
+	/// See [`GroupExpiry::cache`].
+	cache: Arc<cache::Track>,
+	reading: Reading,
 	sequence: u64,
 	max_delay: Option<Duration>,
 	superseded: Superseded,
+}
+
+/// The track demand a handed-out group holds for its readers, and the frames they take,
+/// until one of them reads the group's end: from then on the track owes it nothing.
+struct Reading(Mutex<Option<kio::Consumer<TrackState>>>);
+
+impl Reading {
+	fn new(track: kio::Consumer<TrackState>) -> Self {
+		Self(Mutex::new(Some(track)))
+	}
+
+	/// The same hold on the copy a reader moved to, unless the group already ended.
+	fn moved(&self, track: &kio::ConsumerWeak<TrackState>) -> Self {
+		let held = self.0.lock().unwrap_or_else(PoisonError::into_inner).is_some();
+		Self(Mutex::new(held.then(|| track.consume())))
+	}
+
+	fn release(&self) {
+		let track = self.0.lock().unwrap_or_else(PoisonError::into_inner).take();
+		// Dropped outside the lock: the last reader leaving wakes the track's watchers.
+		drop(track);
+	}
 }
 
 /// The successor a handed-out group was last judged by, so the group stays judgeable once
@@ -5175,15 +5900,32 @@ impl group::Expiry for FetchExpiry {
 	fn for_track(&self, track: &Consumer) -> Arc<dyn group::Expiry> {
 		// A replacement copy is always one track instance; the fallback is never read.
 		let state = track.with_state(|state| state.cloned());
+		let (state, cache) = match state {
+			Some(state) => {
+				let cache = state.read().cache.clone();
+				(state, cache)
+			}
+			None => (self.state.clone(), self.cache.clone()),
+		};
 		Arc::new(Self {
-			state: state.unwrap_or_else(|| self.state.clone()),
+			reading: self.reading.moved(&state),
+			state,
+			cache,
 			sequence: self.sequence,
 			max_delay: self.max_delay,
 			superseded: Superseded::default(),
 		})
 	}
 
+	fn ended(&self) {
+		self.reading.release();
+	}
+
 	fn is_expired(&self, max_delay: Option<Duration>, waiter: &kio::Waiter) -> bool {
+		// Parked first, so a group landing above while this judges wakes it.
+		if !self.cache.wakes().watch_landing(self.sequence, waiter) {
+			return false;
+		}
 		let state = self.state.read();
 		let budget = match (self.max_delay, max_delay) {
 			(Some(fetch), Some(route)) => fetch.min(route),
@@ -5192,7 +5934,6 @@ impl group::Expiry for FetchExpiry {
 			(None, None) => Duration::MAX,
 		};
 		let budget = clamp_max_delay(budget, state.max_age_bound());
-		state.cache.wakes().watch_landing(self.sequence, waiter);
 		state.poll_drifted(self.sequence, &Servable::ALL, budget, Some(&self.superseded), waiter)
 	}
 }
@@ -5201,8 +5942,17 @@ impl group::Expiry for GroupExpiry {
 	fn for_track(&self, track: &Consumer) -> Arc<dyn group::Expiry> {
 		// A replacement copy is always one track instance; the fallback is never read.
 		let state = track.with_state(|state| state.cloned());
+		let (state, cache) = match state {
+			Some(state) => {
+				let cache = state.read().cache.clone();
+				(state, cache)
+			}
+			None => (self.state.clone(), self.cache.clone()),
+		};
 		Arc::new(Self {
-			state: state.unwrap_or_else(|| self.state.clone()),
+			reading: self.reading.moved(&state),
+			state,
+			cache,
 			subscription: self.subscription.clone(),
 			servable: self.servable.clone(),
 			sequence: self.sequence,
@@ -5210,7 +5960,19 @@ impl group::Expiry for GroupExpiry {
 		})
 	}
 
+	fn ended(&self) {
+		self.reading.release();
+	}
+
+	/// A group nothing ever landed above has no successor, so neither clock can convict it:
+	/// that verdict, the common one at the live edge, takes neither the track's lock nor the
+	/// subscription's. Nothing it skips parking on can move it until a group lands above,
+	/// which wakes the read.
 	fn is_expired(&self, max_delay: Option<Duration>, waiter: &kio::Waiter) -> bool {
+		// Parked first, so a group landing above while this judges wakes it.
+		if !self.cache.wakes().watch_landing(self.sequence, waiter) {
+			return false;
+		}
 		let max_delay = max_delay.unwrap_or_else(|| {
 			let mut max_delay = Duration::default();
 			let _ = self.subscription.poll(waiter, |subscription| {
@@ -5228,7 +5990,6 @@ impl group::Expiry for GroupExpiry {
 
 		let state = self.state.read();
 		let budget = clamp_max_delay(max_delay, state.max_age_bound());
-		state.cache.wakes().watch_landing(self.sequence, waiter);
 		state.poll_drifted(self.sequence, &servable, budget, Some(&self.superseded), waiter)
 	}
 }
@@ -5244,12 +6005,84 @@ struct Edge {
 	servable: Servable,
 }
 
-/// The groups `window` covers from `from`, below the exclusive `cap`.
-fn admitted(window: &Window, from: u64, cap: Option<u64>) -> RangeInclusiveSet<u64> {
-	below(window.runs(from), cap)
+/// What a cursor's arrival walk reads: its window from the floor, below the cap. Holds the
+/// window's groups as they are layered, so taking it again after a time end moves costs
+/// the walks' runs, not every run of the window.
+#[derive(Clone, Default)]
+struct Admitted {
+	/// The window's groups, `None` while a relative anchor waits and every group is in it.
+	groups: Option<Layered>,
+	floor: u64,
+	cap: Option<u64>,
+}
+
+impl Admitted {
+	fn new(window: &Window, floor: u64, cap: Option<u64>) -> Self {
+		Self {
+			groups: window.groups().cloned(),
+			floor,
+			cap,
+		}
+	}
+
+	/// The last group admitted, `None` for none.
+	fn last(&self) -> Option<u64> {
+		match self.cap {
+			Some(cap) => cap.checked_sub(1).filter(|last| *last >= self.floor),
+			None => Some(u64::MAX),
+		}
+	}
+
+	/// The admitted runs reaching into `run`, clipped to it, lowest first.
+	fn overlapping(&self, run: ops::RangeInclusive<u64>) -> Vec<ops::RangeInclusive<u64>> {
+		let Some(last) = self.last() else {
+			return Vec::new();
+		};
+		let (lo, hi) = ((*run.start()).max(self.floor), (*run.end()).min(last));
+		if lo > hi {
+			return Vec::new();
+		}
+		match &self.groups {
+			None => std::iter::once(lo..=hi).collect(),
+			Some(groups) => groups
+				.runs(lo)
+				.take_while(|run| *run.start() <= hi)
+				.map(|run| *run.start()..=(*run.end()).min(hi))
+				.collect(),
+		}
+	}
+
+	/// Every admitted run, lowest first.
+	fn runs(&self) -> Vec<ops::RangeInclusive<u64>> {
+		self.overlapping(0..=u64::MAX)
+	}
+
+	/// What this admits and `old` doesn't within `lo..=hi`, when the two differ only in the
+	/// window's walks: `None` otherwise.
+	fn gained(&self, old: &Self, lo: u64, hi: u64) -> Option<Vec<ops::RangeInclusive<u64>>> {
+		let (groups, old_groups) = (self.groups.as_ref()?, old.groups.as_ref()?);
+		if (self.floor, self.cap) != (old.floor, old.cap) || !groups.shares_fixed(old_groups) {
+			return None;
+		}
+		let Some(last) = self.last() else {
+			return Some(Vec::new());
+		};
+		groups.gained(old_groups, lo.max(self.floor), hi.min(last))
+	}
 }
 
 /// `runs`, lowest first, below the exclusive `cap`.
+/// What a reader asks its fills with: read only once it asks, since every probe that asks
+/// nothing would otherwise take the subscription's lock for it.
+fn asking(subscription: &Preferences) -> miss::Asking {
+	let subscription = subscription.read();
+	miss::Asking {
+		priority: subscription.priority,
+		max_delay: subscription.delay.max,
+		order: subscription.order,
+	}
+}
+
 fn below(runs: impl Iterator<Item = ops::RangeInclusive<u64>>, cap: Option<u64>) -> RangeInclusiveSet<u64> {
 	let mut below = RangeInclusiveSet::new();
 	let last = match cap {
@@ -5339,8 +6172,177 @@ enum Servable {
 	/// case, kept as cheap to copy and look up as a cap. Its start still bounds a group
 	/// handed out before the run moved above it, which is judged against the run.
 	Run { start: u64, end: Option<u64> },
-	/// Disjoint runs, lowest first.
-	Runs(Arc<RangeInclusiveSet<u64>>),
+	/// Several runs, as the window holds them.
+	Runs(Arc<Several>),
+}
+
+/// A servable window of several runs: the window's groups as it layers them, below the
+/// exclusive `cap`, with the reader's index of the live groups inside its fixed runs.
+///
+/// Built again whenever the window or cap moves, which a time end does on each group, so it
+/// shares the fixed runs and their index, and copies only the walks' runs.
+struct Several {
+	groups: Layered,
+	cap: Option<u64>,
+	live: Arc<Live>,
+}
+
+impl PartialEq for Several {
+	fn eq(&self, other: &Self) -> bool {
+		self.groups == other.groups && self.cap == other.cap
+	}
+}
+
+/// A reader's index of the live feed's cached groups inside its window's fixed runs, so a
+/// search costs the live groups it passes, never the runs between them: thousands of runs
+/// in the gaps of a sparsely numbered feed would otherwise each cost a lookup.
+///
+/// Taken in from the arrival order, which every live group enters once, on the reader's own
+/// search: each arrival costs it one lookup in the fixed runs. A slot that leaves or is
+/// replaced leaves its entry stale, dropped when a search meets it or once stale entries
+/// could outnumber the live groups.
+///
+/// One index per track searched: a group's expiry that moved to a replacement copy (see
+/// [`GroupExpiry::for_track`]) searches its reader's servable on that copy's track, whose
+/// arrival order and stamps are its own.
+#[derive(Default)]
+struct Live(Mutex<Vec<Indexed>>);
+
+struct Indexed {
+	/// The track indexed, by its cache account. Held weakly, so a track that went away
+	/// leaves an entry another track's can't be mistaken for.
+	track: Weak<cache::Track>,
+	/// How far into the arrival order this has taken in, as an absolute index.
+	taken: usize,
+	/// The stamp of each live group inside the fixed runs, by sequence, as it arrived.
+	groups: BTreeMap<u64, u32>,
+}
+
+/// How many index entries a search takes per lock: the search answers with the lock
+/// released, since the answer reads each group's own state.
+const LIVE_BATCH: usize = 16;
+
+impl Indexed {
+	/// Whether this indexes `state`'s track.
+	fn indexes(&self, state: &TrackState) -> bool {
+		std::ptr::eq(self.track.as_ptr(), Arc::as_ptr(&state.cache))
+	}
+
+	/// Take in what arrived since the last call.
+	fn catch_up(&mut self, state: &TrackState, fixed: &Runs) {
+		let skip = self.taken.saturating_sub(state.offset).min(state.arrival.len());
+		for (sequence, stamp) in state.arrival.range(skip..) {
+			if fixed.contains(*sequence) {
+				self.groups.insert(*sequence, *stamp);
+			}
+		}
+		self.taken = state.offset + state.arrival.len();
+		// A live entry is a visible slot, so past twice their count most entries are stale,
+		// and a prune costs each entry it drops one lookup.
+		if self.groups.len() > 2 * state.visible.len().max(LIVE_BATCH) {
+			self.groups
+				.retain(|sequence, stamp| current(state, *sequence, *stamp).is_some());
+		}
+	}
+}
+
+/// The live slot at `sequence`, if it is still the incarnation stamped `stamp`.
+fn current(state: &TrackState, sequence: u64, stamp: u32) -> Option<&Slot> {
+	state
+		.lookup
+		.get(&sequence)
+		.filter(|slot| slot.stamp == stamp && slot.visible)
+}
+
+impl Live {
+	/// The index of `state`'s track among `indexes`, made on its first search. Indexes of
+	/// tracks that went away are dropped then.
+	fn index<'a>(indexes: &'a mut Vec<Indexed>, state: &TrackState) -> &'a mut Indexed {
+		let position = match indexes.iter().position(|indexed| indexed.indexes(state)) {
+			Some(position) => position,
+			None => {
+				indexes.retain(|indexed| indexed.track.strong_count() > 0);
+				indexes.push(Indexed {
+					track: Arc::downgrade(&state.cache),
+					taken: 0,
+					groups: BTreeMap::new(),
+				});
+				indexes.len() - 1
+			}
+		};
+		&mut indexes[position]
+	}
+
+	/// The first live group inside `fixed`, within `lo..=hi`, for which `f` answers, lowest
+	/// first or, with `rev`, highest first, with its sequence.
+	fn find<'a, R>(
+		&self,
+		state: &'a TrackState,
+		fixed: &Runs,
+		mut lo: u64,
+		mut hi: u64,
+		rev: bool,
+		f: &mut impl FnMut(&'a Slot) -> Option<R>,
+	) -> Option<(u64, R)> {
+		let mut caught_up = false;
+		loop {
+			if lo > hi {
+				return None;
+			}
+			let mut batch = [(0, 0); LIVE_BATCH];
+			let taken = {
+				let mut indexes = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+				let indexed = Self::index(&mut indexes, state);
+				if !caught_up {
+					indexed.catch_up(state, fixed);
+					caught_up = true;
+				}
+				let entries = indexed
+					.groups
+					.range(lo..=hi)
+					.map(|(&sequence, &stamp)| (sequence, stamp));
+				let mut taken = 0;
+				let mut put = |entry| {
+					batch[taken] = entry;
+					taken += 1;
+				};
+				match rev {
+					true => entries.rev().take(LIVE_BATCH).for_each(&mut put),
+					false => entries.take(LIVE_BATCH).for_each(&mut put),
+				}
+				taken
+			};
+			let batch = &batch[..taken];
+			let mut stale = Vec::new();
+			let mut found = None;
+			for &(sequence, stamp) in batch {
+				match current(state, sequence, stamp) {
+					Some(slot) => {
+						if let Some(answer) = f(slot) {
+							found = Some((sequence, answer));
+							break;
+						}
+					}
+					None => stale.push(sequence),
+				}
+			}
+			if !stale.is_empty() {
+				let mut indexes = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+				let indexed = Self::index(&mut indexes, state);
+				for sequence in stale {
+					indexed.groups.remove(&sequence);
+				}
+			}
+			if found.is_some() || taken < LIVE_BATCH {
+				return found;
+			}
+			let &(last, _) = batch.last().expect("a full batch");
+			match rev {
+				true => hi = last.checked_sub(1)?,
+				false => lo = last.checked_add(1)?,
+			}
+		}
+	}
 }
 
 impl Servable {
@@ -5354,27 +6356,47 @@ impl Servable {
 	fn contains(&self, sequence: u64) -> bool {
 		match self {
 			Self::Run { start, end } => sequence >= *start && end.is_none_or(|end| sequence < end),
-			Self::Runs(runs) => runs.contains(&sequence),
+			Self::Runs(several) => several.cap.is_none_or(|cap| sequence < cap) && several.groups.contains(sequence),
 		}
 	}
 
-	/// The groups in `runs`, disjoint and lowest first. Only several runs allocate: every
+	/// The groups `window` reads. `previous`, what the same reader was served before, lends
+	/// its index of the live groups when the fixed runs are the same.
+	fn of(window: &Window, previous: &Self) -> Self {
+		match window.groups() {
+			None => Self::ALL,
+			Some(groups) => Self::layered(groups.clone(), None, previous),
+		}
+	}
+
+	/// The groups in `groups` below the exclusive `cap`. Only several runs allocate: every
 	/// subscriber resolves one, so the common single run stays off the heap.
-	fn new(runs: impl Iterator<Item = ops::RangeInclusive<u64>>) -> Self {
-		let mut runs = runs.peekable();
-		let Some(first) = runs.next() else {
+	fn layered(groups: Layered, cap: Option<u64>, previous: &Self) -> Self {
+		let last = match cap {
+			Some(cap) => match cap.checked_sub(1) {
+				Some(last) => last,
+				None => return Self::NONE,
+			},
+			None => u64::MAX,
+		};
+		let (first, more) = {
+			let mut runs = groups.runs(0).take_while(|run| *run.start() <= last);
+			(runs.next(), runs.next().is_some())
+		};
+		let Some(first) = first else {
 			return Self::NONE;
 		};
-		if runs.peek().is_none() {
+		if !more {
 			return Self::Run {
 				start: *first.start(),
-				end: first.end().checked_add(1),
+				end: (*first.end()).min(last).checked_add(1),
 			};
 		}
-		let mut set = RangeInclusiveSet::new();
-		set.insert(first);
-		set.extend(runs);
-		Self::Runs(Arc::new(set))
+		let live = match previous {
+			Self::Runs(several) if several.groups.shares_fixed(&groups) => several.live.clone(),
+			_ => Arc::default(),
+		};
+		Self::Runs(Arc::new(Several { groups, cap, live }))
 	}
 
 	/// These groups below the exclusive `cap`.
@@ -5393,15 +6415,9 @@ impl Servable {
 					false => Self::NONE,
 				}
 			}
-			Self::Runs(runs) => {
-				let Some(last) = cap.checked_sub(1) else {
-					return Self::NONE;
-				};
-				Self::new(
-					runs.iter()
-						.take_while(|run| *run.start() <= last)
-						.map(|run| *run.start()..=(*run.end()).min(last)),
-				)
+			Self::Runs(several) => {
+				let cap = several.cap.map_or(cap, |own| own.min(cap));
+				Self::layered(several.groups.clone(), Some(cap), self)
 			}
 		}
 	}
@@ -5431,12 +6447,13 @@ impl PresentationEdge {
 /// The read cursor behind a [`Subscriber`].
 struct Cursor {
 	state: kio::Consumer<TrackState>,
+	/// The track's cache account, handed to each group's [`GroupExpiry`] without locking
+	/// `state` per delivery.
+	cache: Arc<cache::Track>,
 
 	subscription: Preferences,
 	/// Arrival-order cursor used by `recv_group`.
 	index: usize,
-	/// Arrival-order cursor used by `recv_datagram`, independent of groups.
-	datagram_index: usize,
 	/// Minimum sequence to return from any `recv` method. Set by `set_range`.
 	min_sequence: u64,
 	/// This subscriber's own ranges, resolved. Boxed: every reader embeds a cursor.
@@ -5445,9 +6462,6 @@ struct Cursor {
 	/// `u64::MAX` and no group can follow.
 	/// Used only by that method to skip late arrivals; does not affect `recv_group`.
 	next_sequence: Option<u64>,
-	/// The exact candidate a route-copy selection inspected, including its arrival
-	/// position. Consuming it must not look up a different group after eviction.
-	peeked: Option<Box<Peeked>>,
 	/// Exclusive upper sequence bound for `next_group` and `recv_group`. `None` means no
 	/// cap. Set by `set_range`;
 	/// can be raised, lowered, or unset at any time. Groups at or past the cap stay in
@@ -5469,16 +6483,35 @@ struct Cursor {
 	/// Groups the seek path has convicted but whose sequences no caller has committed
 	/// past yet, keyed by sequence; see [`Self::commit_seek_stale`].
 	seek_pending: BTreeMap<u64, stats::Content>,
+	/// Cached groups the arrival path skipped as stale, which a wider budget owes again.
+	skipped: Skipped,
 	/// The drops a wire publisher forwards, once it first polls for one.
 	drops: Option<Box<DropCursor>>,
 	/// What this cursor misses and asks fills for, once it first reads.
 	misses: Option<Box<miss::Misses>>,
+	/// The heads a bounded window asked for, once it first finds a group missing one.
+	heads: Option<Box<Heads>>,
+	/// The group read that last parked, answered again without the walk until something
+	/// it parked on fires, once it first parks.
+	idle: Option<Box<idle::Idle<idle::Walk>>>,
+	/// [`Self::state`] for [`Self::poll_finished`], which a publisher re-polls on every
+	/// wake: one the track has not changed since skips the lock. Made on the first poll.
+	finished: Option<Box<kio::Watch<TrackState>>>,
 }
 
-struct Peeked {
+/// A time start a [`Cursor`]'s window looks up through a fill.
+struct Lookup {
+	pts: Timestamp,
+	/// The fill looking it up, `None` once its answer was taken in.
+	join: Option<fill::Join>,
+}
+
+/// A group a cursor found but has not moved past; see [`Cursor::take`].
+pub(super) struct Peeked {
 	group: group::Consumer,
-	taken: Taken,
-	ordered: bool,
+	/// How taking it moves the cursor: an arrival read past where it came from, or a
+	/// sequence read past its sequence.
+	arrival: Option<Taken>,
 }
 
 /// Where a recv-order candidate came from, which taking it advances past.
@@ -5490,6 +6523,18 @@ enum Taken {
 	Owed,
 	/// What a fill answered.
 	Filled,
+	/// A head a bounded window asked for.
+	Head,
+}
+
+/// The groups a bounded window read missing their head, which it hands out only once a
+/// fill answered from their first frame: a whole-group read never starts short.
+#[derive(Default)]
+struct Heads {
+	/// Asked, by sequence.
+	fetching: BTreeMap<u64, Fetching>,
+	/// Answered and not handed out yet.
+	filled: BTreeMap<u64, group::Consumer>,
 }
 
 /// The sequences a [`DropCursor`] reports from: a cursor's span, narrowed to its window.
@@ -5614,12 +6659,19 @@ struct Filter {
 	refused: Option<Error>,
 	/// What the arrival walk reads: the window from the floor, below the cap. The walk
 	/// passes a group outside it holding nothing, so widening it re-scans the cache.
-	admitted: RangeInclusiveSet<u64>,
+	admitted: Admitted,
 	/// The floor, [`Self::revision`], and cap [`Self::admitted`] was taken at.
 	admitted_at: Option<(u64, u64, Option<u64>)>,
-	/// The spans a widening newly admitted, scanned in the cache lowest first and handed
-	/// out ahead of the walk: each cached group in them is visited once.
+	/// The spans a widening newly covers, from the ranges, the floor, the cap, or the
+	/// budget, scanned in the cache in the subscription's order and handed out ahead of the
+	/// walk: each cached group in them is visited once.
 	owed: RangeInclusiveSet<u64>,
+	/// The time starts [`Self::window`] looks up from the track's history, each asked once.
+	lookups: Vec<Lookup>,
+	/// Groups skipped as stale, which account for a bounded window as handed out would,
+	/// until a wider budget owes them again. Kept under an open window too, which a reader
+	/// may narrow to a bounded one.
+	written_off: RangeSet<u64>,
 }
 
 impl Cursor {
@@ -5630,7 +6682,7 @@ impl Cursor {
 		if subscription.read().joins_live() {
 			TrackState::join(state.read());
 		}
-		let (filter, datagram_index) = {
+		let (filter, cache) = {
 			let preferences = subscription.read();
 			let ranges_revision = subscription.ranges_revision();
 			let state = state.read();
@@ -5638,56 +6690,45 @@ impl Cursor {
 				Ok(window) => (window, None),
 				Err(err) => (Window::new(&[], None, &*state).expect("nothing to refuse"), Some(err)),
 			};
-			// Arrival order need not be timestamp order. Only skip the initial stale prefix;
-			// subsequent delivery stays in arrival order, including late datagrams.
-			let newest = state.datagrams.iter().filter_map(|datagram| datagram.timestamp).max();
-			let start = newest.map_or(0, |newest| {
-				// Every datagram carries the track's scale: convert the cutoff into it once,
-				// rounded up, rather than each timestamp into a `Duration` (a 128-bit division).
-				let cutoff = Duration::from(newest).saturating_sub(preferences.budget());
-				let scale = newest.scale().as_u64() as u128;
-				let cutoff = (cutoff.as_nanos() * scale).div_ceil(1_000_000_000) as u64;
-				let cutoff = Timestamp::new(cutoff, newest.scale()).expect("at most the newest");
-				state
-					.datagrams
-					.iter()
-					.position(|datagram| datagram.timestamp.is_none_or(|timestamp| timestamp >= cutoff))
-					.expect("the newest datagram is within max delay")
-			});
 			let filter = Filter {
 				window,
 				resolved: ranges_revision,
 				revision: 0,
 				refused,
-				admitted: RangeInclusiveSet::new(),
+				admitted: Admitted::default(),
 				admitted_at: None,
 				owed: RangeInclusiveSet::new(),
+				lookups: Vec::new(),
+				written_off: RangeSet::new(),
 			};
-			(filter, state.datagram_offset + start)
+			(filter, state.cache.clone())
 		};
-		let published = Published::new(Servable::new(filter.window.runs(0)), filter.resolved, None);
+		let published = Published::new(Servable::of(&filter.window, &Servable::NONE), filter.resolved, None);
 		Self {
 			state,
+			cache,
 			subscription,
 			min_sequence: 0,
 			filter: Box::new(filter),
 			index: 0,
-			datagram_index,
 			next_sequence: Some(0),
-			peeked: None,
 			end_sequence: None,
 			// Uncapped, the servable groups are the window's.
 			servable: published.servable.clone(),
 			published: kio::Producer::new(published),
 			stale: stats::Content::default(),
 			seek_pending: BTreeMap::new(),
+			skipped: Skipped::default(),
 			drops: None,
 			misses: None,
+			heads: None,
+			idle: None,
+			finished: None,
 		}
 	}
 
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	fn poll_drop(&mut self, waiter: &kio::Waiter) -> Poll<(ops::Range<u64>, StreamError)> {
+	fn poll_drop(&mut self, taken: &Delivered, waiter: &kio::Waiter) -> Poll<(ops::Range<u64>, StreamError)> {
 		self.sync();
 		if self.drops.is_none() {
 			let mut drops = Box::new(DropCursor::new(&self.state.read()));
@@ -5701,10 +6742,14 @@ impl Cursor {
 		if self.filter.refused.is_none()
 			&& let Poll::Ready(Ok(drift)) = self.poll_drift(&self.servable, waiter)
 		{
-			self.probe(self.floor(), &drift, waiter);
+			// From where the reader reads next: an ordered one asks nothing below what it took.
+			let from = self.next_sequence.unwrap_or(u64::MAX).max(self.floor());
+			self.probe(from, &drift, taken, waiter);
 		}
+		// A cap at or below the floor leaves nothing to report, not a reversed span.
+		let floor = self.floor();
 		let within = Within {
-			span: self.floor()..self.end_sequence.unwrap_or(u64::MAX),
+			span: floor..self.end_sequence.unwrap_or(u64::MAX).max(floor),
 			window: &self.filter.window,
 			revision: self.filter.revision,
 		};
@@ -5729,7 +6774,9 @@ impl Cursor {
 	/// Resolve [`Self::servable`] again once the window or cap moved, and publish it to the
 	/// groups already handed out. Costs the ranges, never the cache.
 	fn update_servable(&mut self) {
-		let runs = Servable::new(self.filter.window.runs(0));
+		// A moved window or cap notifies nothing this cursor parked on.
+		idle::Idle::disarm(&mut self.idle);
+		let runs = Servable::of(&self.filter.window, &self.published.read().runs);
 		let (revision, cap) = (self.filter.resolved, self.end_sequence);
 		self.servable = runs.below(cap);
 		let next = |current: &Published| {
@@ -5762,14 +6809,32 @@ impl Cursor {
 			let revision = self.subscription.ranges_revision();
 			(revision != self.filter.resolved).then(|| (revision, preferences.ranges.clone()))
 		};
+		// Taken even when nothing walks, so it never piles up.
+		let newly_gone = self
+			.misses
+			.as_deref_mut()
+			.map(miss::Misses::take_gone)
+			.unwrap_or_default();
+		// A settled window has nothing to read from the track, whose lock every subscriber
+		// of it takes.
+		if replaced.is_none() && self.filter.window.is_settled() {
+			return false;
+		}
 		let state = self.state.read();
+		// Every walk reads the reader's own gone runs, so none parks on a gap they fill.
+		let holdings = ReaderHoldings {
+			state: &state,
+			misses: self.misses.as_deref(),
+			newly_gone,
+		};
 		let moved = match replaced {
 			Some((revision, ranges)) => {
 				self.filter.resolved = revision;
-				match Window::new(&ranges, state.latest_live(), &*state) {
+				match Window::new(&ranges, state.latest_live(), &holdings) {
 					Ok(window) => {
 						self.filter.window = window;
 						self.filter.refused = None;
+						self.filter.lookups.clear();
 					}
 					Err(err) => self.filter.refused = Some(err),
 				}
@@ -5779,8 +6844,8 @@ impl Cursor {
 			// The live feed had no group when the ranges resolved, so the newest one then was
 			// the first to arrive, or the newest once it went live, however many have arrived
 			// or left since.
-			None if self.filter.window.is_pending() => self.filter.window.settle(state.first_live(), &*state),
-			None => self.filter.window.settle(state.latest_live(), &*state),
+			None if self.filter.window.is_pending() => self.filter.window.settle(state.first_live(), &holdings),
+			None => self.filter.window.settle(state.latest_live(), &holdings),
 		};
 		drop(state);
 		if moved {
@@ -5818,30 +6883,74 @@ impl Cursor {
 		self.min_sequence.max(self.filter.window.floor().unwrap_or(0))
 	}
 
+	/// Whether a bounded window has nothing left to deliver: every group in its ranges was
+	/// handed out (in any of `taken`), dropped, skipped as stale, or given up as unfillable.
+	/// An open window, or one with a fill still out, always has more, and so does one its
+	/// cap keeps a group out of, since a reader may raise a cap again.
+	fn is_exhausted(&self, taken: &[&Delivered]) -> bool {
+		let Some(end) = self.filter.window.end() else {
+			return false;
+		};
+		if self.filter.window.is_pending() || self.awaits_fill() {
+			return false;
+		}
+		let given_up = self.misses.as_ref().map(|misses| misses.given_up());
+		let state = self.state.read();
+		let accounted = |gap: ops::Range<u64>| {
+			let mut left = RangeSet::new();
+			left.insert(gap.clone());
+			for run in self.filter.written_off.overlapping(&gap) {
+				left.remove(run.clone());
+			}
+			if let Some(given_up) = given_up {
+				for run in given_up.overlapping(&gap) {
+					left.remove(run.clone());
+				}
+			}
+			for (run, _) in state.drops.overlapping(&gap) {
+				left.remove(run.clone());
+			}
+			for sequence in self.seek_pending.range(gap).map(|(sequence, _)| *sequence) {
+				left.remove(sequence..sequence + 1);
+			}
+			left.is_empty()
+		};
+		self.filter
+			.window
+			.runs(self.filter.window.floor().unwrap_or(0))
+			.take_while(|run| *run.start() < end)
+			.all(|run| {
+				let run = *run.start()..run.end().checked_add(1).map_or(end, |next| next.min(end));
+				Delivered::gaps_in_all(taken, run).into_iter().all(&accounted)
+			})
+	}
+
 	/// Whether group `sequence`, at or above [`Self::floor`], is one this cursor reads now:
 	/// in its window and below its cap. One that isn't may be later.
 	fn admits(&self, sequence: u64) -> bool {
 		super::subscription::before_end(sequence, self.end_sequence) && self.filter.window.contains(sequence)
 	}
 
-	/// The window from `from`, below the exclusive `cap`.
-	fn admitted(&self, from: u64, cap: Option<u64>) -> RangeInclusiveSet<u64> {
-		admitted(&self.filter.window, from, cap)
-	}
-
-	/// [`Filter::owed`] as of now: what was owed and what the walk newly reads since
-	/// [`Filter::admitted`] was taken, both cut to `admitted`.
-	fn owed(&self, admitted: &RangeInclusiveSet<u64>) -> RangeInclusiveSet<u64> {
+	/// [`Filter::owed`] as of `admitted`: what was owed and what the walk newly reads since
+	/// [`Filter::admitted`] was taken, both cut to `admitted`. Costs every run of both.
+	fn owed(&self, admitted: &Admitted) -> RangeInclusiveSet<u64> {
 		// Nothing is owed before the walk first reads: it starts at the oldest arrival.
 		if self.filter.admitted_at.is_none() {
 			return RangeInclusiveSet::new();
 		}
 		let mut owed = RangeInclusiveSet::new();
-		for run in admitted.iter() {
-			for gap in self.filter.admitted.gaps(run) {
-				owed.insert(gap);
+		for run in admitted.runs() {
+			let mut from = Some(*run.start());
+			for held in self.filter.admitted.overlapping(run.clone()) {
+				if let Some(gap) = from.filter(|from| from < held.start()) {
+					owed.insert(gap..=*held.start() - 1);
+				}
+				from = held.end().checked_add(1);
 			}
-			for span in self.filter.owed.overlapping(run) {
+			if let Some(gap) = from.filter(|from| from <= run.end()) {
+				owed.insert(gap..=*run.end());
+			}
+			for span in self.filter.owed.overlapping(&run) {
 				owed.insert((*span.start()).max(*run.start())..=(*span.end()).min(*run.end()));
 			}
 		}
@@ -5850,56 +6959,165 @@ impl Cursor {
 
 	/// Take in a move of the floor, the ranges, or the cap: whatever it newly admits is
 	/// owed. Costs the ranges, never the cache, and only when one moved.
+	///
+	/// A time end whose cap moves on each group moves only the walks' runs layered over the
+	/// window's fixed ones, so that costs those runs: what they gain is owed only where the
+	/// cache holds a group now, the only place a scan finds one, and what they lose is cut
+	/// only from what is owed.
 	fn admit(&mut self) {
 		let at = (self.floor(), self.filter.revision, self.end_sequence);
 		if self.filter.admitted_at == Some(at) {
 			return;
 		}
 		// The arrival walk reads the window from the floor.
-		let admitted = self.admitted(self.floor(), self.end_sequence);
-		self.filter.owed = self.owed(&admitted);
+		let admitted = Admitted::new(&self.filter.window, self.floor(), self.end_sequence);
+		let moved = self.filter.admitted_at.and_then(|_| {
+			let cached = {
+				let state = self.state.read();
+				state
+					.lookup
+					.first_key_value()
+					.map(|(first, _)| *first)
+					.zip(state.lookup.last_key_value().map(|(last, _)| *last))
+			};
+			let gained = match cached {
+				Some((first, last)) => admitted.gained(&self.filter.admitted, first, last)?,
+				None => admitted.gained(&self.filter.admitted, 1, 0)?,
+			};
+			let owed = self
+				.filter
+				.owed
+				.first()
+				.map(|run| *run.start())
+				.zip(self.filter.owed.last().map(|run| *run.end()));
+			let lost = match owed {
+				Some((first, last)) => self.filter.admitted.gained(&admitted, first, last)?,
+				None => Vec::new(),
+			};
+			Some((gained, lost))
+		});
+		match moved {
+			Some((gained, lost)) => {
+				for run in lost {
+					self.filter.owed.remove(run);
+				}
+				for run in gained {
+					self.filter.owed.insert(run);
+				}
+			}
+			None => self.filter.owed = self.owed(&admitted),
+		}
 		self.filter.admitted = admitted;
 		self.filter.admitted_at = Some(at);
 	}
 
-	/// The lowest cached group still owed, consuming the spans scanned below it: only one
-	/// the walk could have read, never fetched backfill or a withheld group. The group
-	/// itself stays owed until [`Self::advance_arrival`] takes it, so a peek keeps it.
+	/// Move each group written off as stale that nothing can offer again, since its group
+	/// left the cache or was judged at the bound, into `taken`, which compacts what it
+	/// accounts for below its floor. Only a group a wider budget may still offer stays
+	/// written off, so the write-offs never outnumber the stale skips the cache holds.
+	fn retire_written_off(&mut self, taken: &mut Delivered) {
+		// Most cursors never write a group off, and this runs on every hand-out.
+		if self.filter.written_off.is_empty() {
+			return;
+		}
+		// By run, so a long stale run costs one lookup rather than one per group.
+		let settled: Vec<ops::Range<u64>> = self
+			.filter
+			.written_off
+			.iter()
+			.flat_map(|run| self.skipped.gaps(run.start..=run.end - 1))
+			.map(|gap| *gap.start()..gap.end() + 1)
+			.collect();
+		for run in settled {
+			self.filter.written_off.remove(run.clone());
+			taken.insert_run(run);
+		}
+	}
+
+	/// The next cached group still owed in the subscription's order, newest first unless
+	/// ascending, consuming the spans scanned on the way: only one the walk could have read,
+	/// never fetched backfill or a withheld group. The group itself stays owed until
+	/// [`Self::advance_arrival`] takes it, so a peek keeps it.
 	fn next_owed(&mut self) -> Option<group::Handle> {
 		if self.filter.owed.is_empty() {
 			return None;
 		}
+		let ascending = self.subscription.read().order == Order::Ascending;
 		let state = self.state.read();
 		// Nothing is read from the cache now, so leave what is owed until it is.
-		if !state.readable() {
+		if !state.serves_bounded(&self.filter.window) {
 			return None;
 		}
-		let low = state.live_floor.unwrap_or(0);
-		while let Some(run) = self.filter.owed.iter().next().cloned() {
-			let from = (*run.start()).max(low);
-			let found = (from <= *run.end())
-				.then(|| {
-					state
-						.lookup
-						.range(from..=*run.end())
-						.map(|(_, slot)| slot)
-						.find(|slot| slot.is_read())
-						.map(Slot::serving)
-				})
-				.flatten();
-			match found {
-				Some(group) => {
-					if let Some(below) = group.sequence.checked_sub(1)
-						&& *run.start() <= below
-					{
-						self.filter.owed.remove(*run.start()..=below);
-					}
-					return Some(group.clone());
+		loop {
+			let run = match ascending {
+				true => self.filter.owed.first(),
+				false => self.filter.owed.last(),
+			}
+			.cloned()?;
+			let mut slots = state.lookup.range(run.clone()).map(|(_, slot)| slot);
+			let found = match ascending {
+				true => slots.find(|slot| slot.is_read()),
+				false => slots.rev().find(|slot| slot.is_read()),
+			}
+			.map(Slot::serving);
+			let Some(group) = found else {
+				self.filter.owed.remove(run);
+				continue;
+			};
+			let scanned = match ascending {
+				true => group.sequence.checked_sub(1).map(|below| *run.start()..=below),
+				false => group.sequence.checked_add(1).map(|above| above..=*run.end()),
+			};
+			if let Some(scanned) = scanned.filter(|scanned| !scanned.is_empty()) {
+				self.filter.owed.remove(scanned);
+			}
+			return Some(group.clone());
+		}
+	}
+
+	/// Record `sequence` as skipped stale under `budget`, so a wider one owes it again.
+	fn skip(&mut self, sequence: u64, budget: Duration) {
+		self.skipped.insert(sequence, budget);
+		self.prune_skipped();
+	}
+
+	/// Forget the skipped runs no cached group is left in: nothing can offer them again.
+	fn prune_skipped(&mut self) {
+		// Most cursors never skip, and this runs on every hand-out.
+		if self.skipped.is_empty() {
+			return;
+		}
+		let state = self.state.read();
+		self.skipped.prune(state.lookup.len(), |run| {
+			!state.lookup.range(run.clone()).any(|(_, slot)| slot.is_read())
+		});
+	}
+
+	/// Owe again the groups this cursor skipped as stale under a budget narrower than
+	/// `budget`: only a widening reverses a stale verdict. Costs the skipped runs, never
+	/// the cache, and nothing when the budget did not widen.
+	fn reoffer(&mut self, budget: Duration) {
+		for run in self.skipped.widened(budget) {
+			self.filter
+				.written_off
+				.remove(*run.start()..run.end().saturating_add(1));
+			// Judged again, so a drop not reported yet is withdrawn; a reported one stands.
+			if let Some(drops) = &mut self.drops {
+				let span = *run.start()..run.end().saturating_add(1);
+				let old: Vec<_> = drops
+					.pending
+					.overlapping(span.clone())
+					.filter(|(_, err)| **err == StreamError::Old)
+					.map(|(range, _)| range.start.max(span.start)..range.end.min(span.end))
+					.collect();
+				for range in old {
+					drops.pending.remove(range);
 				}
-				None => self.filter.owed.remove(run),
+			}
+			for owed in self.filter.admitted.overlapping(run.clone()) {
+				self.filter.owed.insert(owed);
 			}
 		}
-		None
 	}
 
 	// A helper to automatically apply Dropped if the state is closed without an error.
@@ -5920,6 +7138,26 @@ impl Cursor {
 			// We try to clone abort just in case the function forgot to check for terminal state.
 			Err(state) => Err(state.abort.clone().unwrap_or(Error::Dropped)),
 		})
+	}
+
+	/// Poll for the track's declared end, or the error it was cut short with.
+	///
+	/// Through a [`kio::Watch`]: the end and the abort are plain fields of the track, so an
+	/// unchanged version proves the answer unchanged. [`Self::poll`]'s tail watch is no loss
+	/// here: a pending answer means no end, and the tail only waits once one is declared.
+	fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<Position>> {
+		let watch = self
+			.finished
+			.get_or_insert_with(|| Box::new(kio::Watch::new(self.state.clone())));
+		Poll::Ready(match ready!(watch.poll(waiter, |state| state.poll_finished())) {
+			Ok(res) => res,
+			Err(state) => Err(state.abort.clone().unwrap_or(Error::Dropped)),
+		})
+	}
+
+	/// Whether a group read in `walk` order would park again at once; see [`idle`].
+	fn parked(&self, walk: idle::Walk, waiter: &kio::Waiter) -> bool {
+		idle::Idle::parked(&self.idle, walk, waiter)
 	}
 
 	/// Take the groups skipped since the last call, for the owner to meter.
@@ -5944,10 +7182,43 @@ impl Cursor {
 			Poll::<()>::Pending
 		});
 		self.poll(waiter, |state| {
+			let bound = state.max_age_bound();
 			Poll::Ready(Ok(Drift {
-				budget: clamp_max_delay(max_delay, state.max_age_bound()),
+				budget: clamp_max_delay(max_delay, bound),
+				bounded: bound.is_some_and(|bound| max_delay >= bound),
 				edge: state.drift_edge(servable),
 			}))
+		})
+	}
+
+	/// Pending while a group in `groups` that the live feed still owes is within the drift
+	/// budget, so a read in sequence order waits for it; see `TrackState::owed`. A budget
+	/// with no deadline waits until the hole resolves: the group lands, or the track learns
+	/// it won't.
+	fn poll_owed(&self, groups: ops::Range<u64>, drift: &Drift, waiter: &kio::Waiter) -> Poll<Result<()>> {
+		if groups.is_empty() {
+			return Poll::Ready(Ok(()));
+		}
+		let window = &self.filter.window;
+		self.poll(waiter, |state| {
+			// An unjudgeable old gap cannot stand in for a fresh gap above the floor.
+			let floor = groups.start.max(state.cache_floor(drift.budget));
+			if floor >= groups.end {
+				return Poll::Ready(Ok(()));
+			}
+			let Some(owed) = state.owed(floor..groups.end, window) else {
+				return Poll::Ready(Ok(()));
+			};
+			if state.poll_drifted(owed, &drift.edge.servable, drift.budget, None, waiter) {
+				return Poll::Ready(Ok(()));
+			}
+			// The ledger may stop owing it before the budget gives up on it.
+			if let Some(folds) = state.arrivals.folds_at(owed, state.arrival_grace()) {
+				state.cache.watch_wall(folds, waiter);
+			}
+			// Parked on the track too: the group landing, its drop, or a group landing
+			// between it and the candidate, which can convict it sooner.
+			Poll::Pending
 		})
 	}
 
@@ -5960,13 +7231,17 @@ impl Cursor {
 	}
 
 	/// Forget the gaps in `delivered` below each group past this cursor's budget now,
-	/// whether this track holds it or not: one landing there would be written off.
+	/// whether this track holds it or not: one landing there would be written off. A group
+	/// skipped as stale is not forgotten, since a wider budget owes it again, and neither is
+	/// one a widening still owes, which a newest-first re-offer has yet to judge.
 	///
 	/// One edge for every group judged, so forgetting N gaps never resolves it N times.
 	fn forget_past_budget(&self, delivered: &mut Delivered) {
 		if delivered.above_gap().is_none() {
 			return;
 		}
+		let owed = self.filter.owed.first().map(|run| *run.start());
+		let skipped = self.skipped.lowest().into_iter().chain(owed).min();
 		let max_delay = self.subscription.read().budget();
 		let state = self.state.read();
 		let budget = clamp_max_delay(max_delay, state.max_age_bound());
@@ -5992,6 +7267,12 @@ impl Cursor {
 			let last = delivered
 				.last_before(shared)
 				.expect("the oldest run is below its successor");
+			if let Some(skipped) = skipped
+				&& skipped < last
+			{
+				delivered.forget_below(skipped);
+				break;
+			}
 			delivered.forget_below(last);
 		}
 	}
@@ -6004,6 +7285,8 @@ impl Cursor {
 		let sequence = group.sequence;
 		group.with_expiry(Arc::new(GroupExpiry {
 			state: self.state.weak(),
+			cache: self.cache.clone(),
+			reading: Reading::new(self.state.clone()),
 			subscription: self.subscription.consume(),
 			servable: self.published.consume(),
 			sequence,
@@ -6011,55 +7294,156 @@ impl Cursor {
 		}))
 	}
 
+	/// Look up each time start the window can't resolve from the cache, once, and take in
+	/// the answers, parking `waiter` on the lookups still out.
+	fn look_up(&mut self, waiter: &kio::Waiter) {
+		let lookups: Vec<(Timestamp, u64)> = self.filter.window.lookups().collect();
+		if lookups.is_empty() && self.filter.lookups.iter().all(|lookup| lookup.join.is_none()) {
+			return;
+		}
+		let asking = &asking(&self.subscription);
+		let fills = self.state.read().fills.clone();
+		for (pts, reach) in lookups {
+			if self.filter.lookups.iter().any(|lookup| lookup.pts == pts) {
+				continue;
+			}
+			let ask = fill::Ask {
+				start: Position::group(0),
+				end: reach,
+				frame_end: None,
+				asking: *asking,
+				time: Some(pts),
+			};
+			let (joins, _) = fills.lock().join(&fills, &ask);
+			self.filter.lookups.push(Lookup {
+				pts,
+				join: joins.into_iter().next(),
+			});
+		}
+		let mut moved = false;
+		for lookup in &mut self.filter.lookups {
+			// The window stops looking once replaced; with no join, nothing can answer.
+			if !self.filter.window.lookups().any(|(pts, _)| pts == lookup.pts) {
+				lookup.join = None;
+				continue;
+			}
+			let answer = match &lookup.join {
+				None => None,
+				Some(join) => match join.outcome().poll(waiter, |outcome| {
+					outcome.first_accepted().map_or(Poll::Pending, Poll::Ready)
+				}) {
+					Poll::Ready(Ok(group)) => Some(group),
+					// Ended unanswered: its handler couldn't tell.
+					Poll::Ready(Err(closed)) => closed.first_accepted(),
+					Poll::Pending => continue,
+				},
+			};
+			let state = self.state.read();
+			// The answer's first frame says whether it starts at or before the time.
+			if let Some(group) = answer
+				&& let Some(slot) = state.lookup.get(&group)
+				&& slot.may_start(state.looks_up())
+			{
+				let _ = slot.serving().poll_started(waiter);
+				continue;
+			}
+			lookup.join = None;
+			// What the reader's fills gave up since its last sync wakes its walks at the next.
+			let holdings = ReaderHoldings {
+				state: &state,
+				misses: self.misses.as_deref(),
+				newly_gone: RangeSet::new(),
+			};
+			moved |= self.filter.window.found(lookup.pts, answer, &holdings);
+		}
+		if moved {
+			self.filter.revision += 1;
+			self.update_servable();
+		}
+	}
+
 	/// Ask fills for what this cursor misses from `from`, and take in what they answered,
 	/// parking `waiter` on the fills still out. Whatever it gives up goes to the drop cursor.
-	fn probe(&mut self, from: u64, drift: &Drift, waiter: &kio::Waiter) {
+	/// `taken` is what its subscriber handed out, which an eviction never makes a miss.
+	///
+	/// A live reader that takes each group as it arrives never misses one, so most probes
+	/// find nothing to ask and hold no fill: those skip the fills, the subscription, and
+	/// the answers entirely, paying only for the judgement that the new groups arrived.
+	fn probe(&mut self, from: u64, drift: &Drift, taken: &Delivered, waiter: &kio::Waiter) {
+		self.look_up(waiter);
 		let (window, cap, revision) = (&self.filter.window, self.end_sequence, self.filter.revision);
-		let asking = {
-			let subscription = self.subscription.read();
-			miss::Asking {
-				priority: subscription.priority,
-				max_delay: subscription.max_delay,
-				order: subscription.order,
-			}
-		};
-		let fills = self.state.read().fills.clone();
 		let misses = self.misses.get_or_insert_with(Box::default);
 		let mut given_up = Vec::new();
-		if misses.lowest().is_some() {
-			misses.retain(from, &below(window.missable(from), cap));
-		}
-		let asks = {
+		misses.retain((from, revision, cap), window.missable_groups(), || {
+			below(window.missable(from), cap)
+		});
+		// One lock for the judgement and the fills it asks, since every subscriber of the
+		// track probes through it.
+		let (asks, fills) = {
 			let state = self.state.read();
-			misses.judge(
+			let asks = misses.judge(
 				&state,
 				(from, revision, cap),
-				|| below(window.missable(from), cap),
+				window.missable_groups(),
+				window.named(),
+				window.end(),
+				|span| {
+					let end = cap.map_or(*span.end(), |cap| (*span.end()).min(cap.saturating_sub(1)));
+					if cap == Some(0) || *span.start() > end {
+						return RangeInclusiveSet::new();
+					}
+					window
+						.missable(*span.start())
+						.take_while(|run| *run.start() <= end)
+						.map(|run| *run.start()..=(*run.end()).min(end))
+						.collect()
+				},
+				taken,
 				drift,
 				&mut given_up,
 				waiter,
-			)
+			);
+			// Only an ask needs the fills.
+			let fills = (!asks.is_empty()).then(|| state.fills.clone());
+			(asks, fills)
 		};
-		misses.ask(&self.state, &fills, &asks, &asking, &mut given_up);
-		loop {
-			let retry = misses.resolve(&self.state, asking.max_delay, &mut given_up, waiter);
-			if retry.is_empty() {
-				break;
+		// Nothing to ask, no fill to hear from, and no gap to time: no answer can arrive.
+		if fills.is_some() || !misses.is_idle() {
+			let asking = asking(&self.subscription);
+			match &fills {
+				Some(fills) => misses.ask(&self.state, fills, &asks, &asking, &mut given_up),
+				// What the reader asks with still reaches the fills it joined.
+				None => misses.update(&asking),
 			}
-			misses.ask(&self.state, &fills, &retry, &asking, &mut given_up);
+			loop {
+				let retry = misses.resolve(&self.state, asking.max_delay, &mut given_up, waiter);
+				if retry.is_empty() {
+					break;
+				}
+				let fills = self.state.read().fills.clone();
+				misses.ask(&self.state, &fills, &retry, &asking, &mut given_up);
+			}
 		}
-		misses.expire(&self.state.read(), drift, &mut given_up, waiter);
+		// Only what a fill still owes can expire.
+		if misses.is_waiting() {
+			misses.expire(&self.state.read(), drift, &mut given_up, waiter);
+		}
 		if let Some(drops) = &mut self.drops {
 			for run in given_up {
 				drops.give_up(run);
 			}
+		}
+		// A refusal taken in may move a time end walking history past it, widening what
+		// is missed: the read goes again to ask for it.
+		if !self.filter.window.is_settled() && self.sync() {
+			waiter.waker().wake_by_ref();
 		}
 	}
 
 	/// The next group a fill answered for this cursor in its order, cached and not handed
 	/// out yet.
 	fn next_filled(&mut self) -> Option<group::Handle> {
-		let misses = self.misses.as_mut()?;
+		let misses = self.misses.as_mut().filter(|misses| misses.has_filled())?;
 		let order = self.subscription.read().order;
 		let mut given_up = Vec::new();
 		let group = misses.next_filled(&self.state.read(), order, &mut given_up);
@@ -6074,17 +7458,25 @@ impl Cursor {
 	/// Whether a fill still owes this cursor a group, so the end of the feed is not its end.
 	fn awaits_fill(&self) -> bool {
 		self.misses.as_ref().is_some_and(|misses| misses.is_waiting())
+			|| self.filter.window.lookups().next().is_some()
+			|| self.heads.as_ref().is_some_and(|heads| !heads.fetching.is_empty())
 	}
 
-	fn poll_recv_group(&mut self, take: bool, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
-		if let Some(peeked) = self.peeked.take().filter(|peeked| take && !peeked.ordered) {
-			// The reserved group is still the one handed out, but bounded by the ranges in
-			// force now, which a `Control` may have replaced since the peek.
-			self.sync();
-			self.advance_arrival(peeked.group.sequence, peeked.taken);
-			peeked.group.cache_refresh();
-			return Poll::Ready(Ok(Some(self.deliver(peeked.group))));
-		}
+	/// Move past the group `peeked` found and hand it out: the exact group, even if its
+	/// producer evicted it since, so eviction cannot advance the reader past a gap.
+	fn take(&mut self, peeked: Peeked) -> group::Consumer {
+		let Peeked { group, arrival } = peeked;
+		let Some(taken) = arrival else {
+			return self.advance_sequence(group);
+		};
+		self.advance_arrival(group.sequence, taken);
+		self.skipped.remove(group.sequence);
+		// Taking is the cache access a peek is not.
+		group.cache_refresh();
+		self.deliver(group)
+	}
+
+	fn poll_peek_recv(&mut self, taken: &Delivered, waiter: &kio::Waiter) -> Poll<Result<Option<Peeked>>> {
 		self.sync();
 		if let Some(err) = &self.filter.refused {
 			return Poll::Ready(Err(err.clone()));
@@ -6093,44 +7485,40 @@ impl Cursor {
 
 		// One scan for the whole poll, so walking a backlog off stays linear in its size.
 		let drift = ready!(self.poll_drift(&self.servable, waiter))?;
-		self.probe(self.floor(), &drift, waiter);
-		self.poll_recv_with(take, drift, waiter)
+		self.reoffer(drift.budget);
+		self.probe(self.floor(), &drift, taken, waiter);
+		self.poll_recv_with(drift, waiter)
 	}
 
-	/// [`Self::poll_recv_group`] once synced, judging against `drift`. Without `take`, it
-	/// peeks: the candidate stays at its cursor position until a taking read.
-	fn poll_recv_with(
-		&mut self,
-		take: bool,
-		mut drift: Drift,
-		waiter: &kio::Waiter,
-	) -> Poll<Result<Option<group::Consumer>>> {
+	/// [`Self::poll_peek_recv`] once synced, judging against `drift`.
+	fn poll_recv_with(&mut self, mut drift: Drift, waiter: &kio::Waiter) -> Poll<Result<Option<Peeked>>> {
+		self.poll_heads(waiter);
+		self.expire_heads(&drift, waiter);
 		loop {
-			// Re-offer what a widening newly covers ahead of the arrival walk, lowest first:
-			// it is the oldest thing still owed. A group the walk has yet to reach comes
-			// again from it, and the subscriber's delivered set drops the repeat.
+			// Re-offer what a widening newly covers ahead of the arrival walk, in the
+			// subscription's order: it is the oldest thing still owed. A group the walk has
+			// yet to reach comes again from it, and the subscriber's delivered set drops the
+			// repeat.
 			let owed = match self.next_owed() {
-				Some(producer) => Some((producer, Taken::Owed)),
+				Some(producer) => Some((producer.consume(), Taken::Owed)),
 				// A fill answered what the walk never reaches: backfill is not in it.
-				None => self.next_filled().map(|producer| (producer, Taken::Filled)),
+				None => match self.next_filled() {
+					Some(producer) => Some((producer.consume(), Taken::Filled)),
+					None => self.next_head().map(|group| (group, Taken::Head)),
+				},
 			};
 			let (consumer, taken) = match owed {
-				Some((producer, taken)) => {
-					let consumer = producer.consume();
-					// A re-offer is a delivery: stamp it like a fresh hand-out. Peeking is
-					// not an access.
-					if take {
-						consumer.cache_refresh();
-					}
-					(consumer, taken)
-				}
+				Some((consumer, taken)) => (consumer, taken),
 				None => {
 					let floor = self.floor();
-					let polled = self.poll(waiter, |state| state.poll_recv_group(self.index, floor));
+					let polled = self.poll(waiter, |state| {
+						state.poll_recv_group(self.index, floor, &self.filter.window)
+					});
 					// A moved window moved the servable edge `drift` was judged against.
 					if polled.is_pending() && self.watch_time(waiter) {
 						self.admit();
 						drift = ready!(self.poll_drift(&self.servable, waiter))?;
+						self.expire_heads(&drift, waiter);
 						continue;
 					}
 					let Some((producer, found_index)) = ready!(polled)? else {
@@ -6141,11 +7529,6 @@ impl Cursor {
 						return Poll::Ready(Ok(None));
 					};
 					let consumer = producer.consume();
-					// Stamp with the track guard released, so delivery never nests the
-					// group's state lock under the track's. Peeking is not an access.
-					if take {
-						consumer.cache_refresh();
-					}
 
 					// The first group to arrive resolves a relative floor, which may land
 					// above it, and a later one may settle where a time end falls.
@@ -6175,31 +7558,41 @@ impl Cursor {
 
 			// Drop a group the drift budget has given up on and keep scanning, so one
 			// poll walks a whole backlog off rather than handing it out group by group.
-			let stale = ready!(self.poll_stale(&consumer, &drift, waiter))?;
-			// A peek discards what cannot be delivered, but keeps its candidate at the
-			// same cursor position until the reader chooses this copy.
-			if take || stale {
+			if ready!(self.poll_stale(&consumer, &drift, waiter))? {
 				self.advance_arrival(consumer.sequence, taken);
-			}
-			if stale {
-				self.stale.add(consumer.content());
-				if let Some(drops) = &mut self.drops
-					&& let Some(end) = consumer.sequence.checked_add(1)
-				{
-					drops.pending.insert(consumer.sequence..end, StreamError::Old);
-				}
+				self.write_off_stale(consumer.sequence, consumer.content(), &drift);
 				continue;
 			}
-			return Poll::Ready(Ok(Some(if take {
-				self.deliver(consumer)
-			} else {
-				self.peeked = Some(Box::new(Peeked {
-					group: consumer.clone(),
-					taken,
-					ordered: false,
-				}));
-				consumer
+			if self.lacks_head(&consumer) {
+				self.advance_arrival(consumer.sequence, taken);
+				self.ask_head(consumer.sequence, waiter);
+				continue;
+			}
+			return Poll::Ready(Ok(Some(Peeked {
+				group: consumer,
+				arrival: Some(taken),
 			})));
+		}
+	}
+
+	/// Write off group `sequence`, which the drift budget gave up on, as dropped `Old`:
+	/// skipped for a wider budget to offer again, unless the budget is at its bound.
+	fn write_off_stale(&mut self, sequence: u64, content: stats::Content, drift: &Drift) {
+		self.stale.add(content);
+		if let Some(drops) = &mut self.drops
+			&& let Some(end) = sequence.checked_add(1)
+		{
+			drops.pending.insert(sequence..end, StreamError::Old);
+		}
+		match drift.bounded {
+			// A re-offered group stale at the bound is final.
+			true => self.skipped.remove(sequence),
+			false => self.skip(sequence, drift.budget),
+		}
+		// Whatever the window is now: narrowed to a bounded one later, it accounts for this
+		// group by it, even once the group left the cache.
+		if let Some(end) = sequence.checked_add(1) {
+			self.filter.written_off.insert(sequence..end);
 		}
 	}
 
@@ -6214,39 +7607,144 @@ impl Cursor {
 					misses.take_filled(sequence);
 				}
 			}
+			Taken::Head => {
+				if let Some(heads) = &mut self.heads {
+					heads.filled.remove(&sequence);
+				}
+			}
 		}
 	}
 
-	/// The next datagram inside this subscriber's range, dropping the ones outside it.
-	///
-	/// The range is the one groups get: the floor, the cap, and the frames its group's
-	/// ranges cover, matched by Object ID.
-	/// Plain datagrams have Object ID 0. A datagram is judged when the cursor reaches
-	/// it, against the range in force then, and one outside it is gone for good: unlike a
-	/// group past the cap, nothing holds it for a later raise.
-	fn poll_recv_datagram(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<super::datagram::Stored>>> {
-		loop {
-			// Refuse before reading, so a refused subscription consumes no datagram.
-			self.sync();
-			if let Some(err) = &self.filter.refused {
-				return Poll::Ready(Err(err.clone()));
-			}
-			let Some((datagram, found_index)) =
-				ready!(self.poll(waiter, |state| state.poll_recv_datagram(self.datagram_index))?)
-			else {
-				return Poll::Ready(Ok(None));
-			};
-			self.datagram_index = found_index + 1;
-			self.sync();
+	/// Whether `group` is one this cursor hands out only from its first frame, which it
+	/// lacks: the window is bounded, so it reads whole groups as a fetch would.
+	fn lacks_head(&self, group: &group::Consumer) -> bool {
+		self.filter.window.end().is_some() && group.first_frame() > 0
+	}
 
-			let sequence = datagram.sequence;
-			// A datagram is a whole group, so its own timestamp places it against a time end.
-			let admits = super::subscription::before_end(sequence, self.end_sequence)
-				&& self.filter.window.admits_datagram(sequence, datagram.timestamp);
-			if sequence >= self.floor() && admits {
-				return Poll::Ready(Ok(Some(datagram)));
+	/// Ask a fill for the head of `sequence`, as a fetch from frame 0 would, taking in an
+	/// answer already at hand.
+	fn ask_head(&mut self, sequence: u64, waiter: &kio::Waiter) {
+		let asking = self.subscription.read().clone();
+		let request = FetchOptions {
+			options: group::Fetch {
+				priority: asking.priority,
+				max_delay: asking.delay.max,
+				frame_start: 0,
+			},
+			end: None,
+		};
+		// The cursor judges the answer against its window when it hands it out.
+		let mut fetching =
+			Fetching::cached_or_queued(self.state.clone(), sequence, request, stats::Scope::default()).unjudged();
+		let heads = self.heads.get_or_insert_default();
+		match kio::Task::poll(&mut fetching, waiter) {
+			Poll::Pending => {
+				heads.fetching.insert(sequence, fetching);
+			}
+			Poll::Ready(Ok(group)) => {
+				heads.filled.insert(sequence, group);
+			}
+			Poll::Ready(Err(_)) => self.give_up_heads(std::iter::once(sequence..sequence.saturating_add(1))),
+		}
+	}
+
+	/// Take in the heads answered, parking `waiter` on those still out, once per read. A
+	/// head the reader's bounds no longer admit is let go: a widening offers its group again.
+	fn poll_heads(&mut self, waiter: &kio::Waiter) {
+		let Some(mut heads) = self.heads.take() else { return };
+		let floor = self.floor();
+		let admitted = |sequence: &u64| *sequence >= floor && self.admits(*sequence);
+		heads.fetching.retain(|sequence, _| admitted(sequence));
+		heads.filled.retain(|sequence, _| admitted(sequence));
+		let mut given_up = Vec::new();
+		heads
+			.fetching
+			.retain(|sequence, fetching| match kio::Task::poll(fetching, waiter) {
+				Poll::Pending => true,
+				Poll::Ready(Ok(group)) => {
+					heads.filled.insert(*sequence, group);
+					false
+				}
+				Poll::Ready(Err(_)) => {
+					given_up.push(*sequence..sequence.saturating_add(1));
+					false
+				}
+			});
+		self.heads = Some(heads);
+		self.give_up_heads(given_up);
+	}
+
+	/// Write off the heads still asked whose group went stale within this cursor's window,
+	/// so a bounded read never waits on a fill for a group it would not hand out. The cursor
+	/// judges what it hands out, so a head fill does not ([`Fetching::unjudged`]).
+	fn expire_heads(&mut self, drift: &Drift, waiter: &kio::Waiter) {
+		let Some(heads) = &self.heads else { return };
+		if heads.fetching.is_empty() {
+			return;
+		}
+		let asked: Vec<u64> = heads.fetching.keys().copied().collect();
+		let servable = self.servable.clone();
+		let Poll::Ready(Ok(stale)) = self.poll(waiter, |state| {
+			let stale: Vec<(u64, stats::Content)> = asked
+				.iter()
+				.filter_map(|&sequence| {
+					// Parked first, so a group landing above while this judges wakes it.
+					let _ = state.cache.wakes().watch_landing(sequence, waiter);
+					// Judged whether or not the cache still holds the headless copy: an evicted
+					// one goes stale all the same, and counts as a group of unknown size.
+					(sequence < state.cache_floor(drift.budget)
+						|| state.poll_drifted(sequence, &servable, drift.budget, None, waiter))
+					.then(|| {
+						let content = match state.lookup.get(&sequence) {
+							Some(slot) => slot.group.consume().content(),
+							None => stats::Content {
+								groups: 1,
+								..Default::default()
+							},
+						};
+						(sequence, content)
+					})
+				})
+				.collect();
+			Poll::Ready(Ok(stale))
+		}) else {
+			return;
+		};
+		for (sequence, content) in stale {
+			if let Some(heads) = &mut self.heads {
+				heads.fetching.remove(&sequence);
+			}
+			self.write_off_stale(sequence, content, drift);
+		}
+	}
+
+	/// Give up the groups whose head no fill can serve, as a refused miss is.
+	fn give_up_heads(&mut self, given_up: impl IntoIterator<Item = ops::Range<u64>>) {
+		let mut given_up = given_up.into_iter().peekable();
+		if given_up.peek().is_none() {
+			return;
+		}
+		let misses = self.misses.get_or_insert_with(Box::default);
+		let mut runs = Vec::new();
+		for run in given_up {
+			misses.give_up(run, &mut runs);
+		}
+		if let Some(drops) = &mut self.drops {
+			for run in runs {
+				drops.give_up(run);
 			}
 		}
+	}
+
+	/// The next head answered and not handed out yet, in the subscription's order.
+	fn next_head(&self) -> Option<group::Consumer> {
+		let heads = self.heads.as_ref()?;
+		let mut filled = heads.filled.values();
+		match self.subscription.read().order {
+			Order::Ascending => filled.next(),
+			Order::Descending => filled.next_back(),
+		}
+		.cloned()
 	}
 
 	/// Pass groups another copy already handed out, without delivering or metering them.
@@ -6255,28 +7753,28 @@ impl Cursor {
 		if next == self.next_sequence {
 			return;
 		}
+		idle::Idle::disarm(&mut self.idle);
 		self.next_sequence = next;
-		if self
-			.peeked
-			.as_ref()
-			.is_some_and(|peeked| next.is_none_or(|next| peeked.group.sequence < next))
-		{
-			self.peeked = None;
-		}
 		// A group delivered on another copy is not a stale skip on this one.
 		if !self.seek_pending.is_empty() {
 			self.seek_pending = next.map_or_else(BTreeMap::new, |next| self.seek_pending.split_off(&next));
+		}
+		self.forget_heads_below(next);
+	}
+
+	/// Let go of the heads asked below `next`, which an ordered read never goes back for:
+	/// one still out would keep the read waiting on a fill it no longer polls.
+	fn forget_heads_below(&mut self, next: Option<u64>) {
+		if let Some(heads) = &mut self.heads {
+			let next = next.unwrap_or(u64::MAX);
+			heads.fetching = heads.fetching.split_off(&next);
+			heads.filled = heads.filled.split_off(&next);
 		}
 	}
 
 	/// The lowest servable group past the last one returned, walking off everything the
 	/// drift budget has convicted on the way.
-	fn poll_next_group(&mut self, take: bool, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
-		if let Some(peeked) = self.peeked.take().filter(|peeked| take && peeked.ordered) {
-			// Bounded by the ranges in force now, as on the arrival path.
-			self.sync();
-			return Poll::Ready(Ok(Some(self.advance_sequence(peeked.group))));
-		}
+	fn poll_peek_next(&mut self, taken: &Delivered, waiter: &kio::Waiter) -> Poll<Result<Option<Peeked>>> {
 		let Some(next) = self.next_sequence else {
 			return Poll::Ready(Ok(None));
 		};
@@ -6287,20 +7785,21 @@ impl Cursor {
 		let floor = next.max(self.floor());
 		// One scan for the whole poll, so walking a backlog off stays linear in its size.
 		let drift = ready!(self.poll_drift(&self.servable, waiter))?;
-		self.probe(floor, &drift, waiter);
-		self.poll_next_with(take, floor, drift, waiter)
+		self.probe(floor, &drift, taken, waiter);
+		self.poll_next_with(floor, drift, waiter)
 	}
 
-	/// [`Self::poll_next_group`] once synced, from `floor`, judging against `drift`.
-	/// Without `take`, it peeks: the candidate is reserved, not delivered.
+	/// [`Self::poll_peek_next`] once synced, from `floor`, judging against `drift`.
 	fn poll_next_with(
 		&mut self,
-		take: bool,
 		mut floor: u64,
 		mut drift: Drift,
 		waiter: &kio::Waiter,
-	) -> Poll<Result<Option<group::Consumer>>> {
+	) -> Poll<Result<Option<Peeked>>> {
 		let end = self.end_sequence;
+		self.poll_heads(waiter);
+		// Where the gap below the candidate starts: groups stepped over as stale are cached.
+		let mut from = floor;
 		let group = loop {
 			let window = &self.filter.window;
 			let polled = self.poll(waiter, |state| state.poll_next_in_range(floor, end, window));
@@ -6340,6 +7839,7 @@ impl Cursor {
 				if !self.filter.window.is_pending() {
 					drift = ready!(self.poll_drift(&self.servable, waiter))?;
 				}
+				from = from.max(self.floor());
 				if group.sequence < self.floor() || !self.filter.window.contains(group.sequence) {
 					floor = floor.max(self.floor()).max(group.sequence.saturating_add(1));
 					continue;
@@ -6358,22 +7858,47 @@ impl Cursor {
 				continue;
 			}
 
+			// In order means a group the live feed still owes below this one comes first,
+			// until the budget gives up on it. Its landing, its drop, or that verdict wakes us.
+			ready!(self.poll_owed(from..group.sequence, &drift, waiter))?;
+
+			// A group missing its head comes from the fill asked for it, in its turn.
+			let group = match self.lacks_head(&group) {
+				false => group,
+				true => {
+					let sequence = group.sequence;
+					if self.heads.as_ref().is_none_or(|heads| {
+						!heads.fetching.contains_key(&sequence) && !heads.filled.contains_key(&sequence)
+					}) && self
+						.misses
+						.as_ref()
+						.is_none_or(|misses| misses.gone(sequence).is_none())
+					{
+						self.ask_head(sequence, waiter);
+					}
+					match self.heads.as_ref().and_then(|heads| heads.filled.get(&sequence)) {
+						Some(head) => head.clone(),
+						// Given up: past it, as past any group no fill can serve.
+						None if self
+							.misses
+							.as_ref()
+							.is_some_and(|misses| misses.gone(sequence).is_some()) =>
+						{
+							floor = sequence.saturating_add(1);
+							continue;
+						}
+						None => return Poll::Pending,
+					}
+				}
+			};
+
 			// A conviction the budget walked back: the group is handed over after all,
 			// so it must never reach the stale count.
 			self.seek_pending.remove(&group.sequence);
 			break group;
 		};
 
-		Poll::Ready(Ok(Some(if take {
-			self.advance_sequence(group)
-		} else {
-			self.peeked = Some(Box::new(Peeked {
-				group: group.clone(),
-				taken: Taken::Owed,
-				ordered: true,
-			}));
-			group
-		})))
+		Poll::Ready(Ok(Some(Peeked { group, arrival: None })))
 	}
 
 	fn advance_sequence(&mut self, group: group::Consumer) -> group::Consumer {
@@ -6382,6 +7907,7 @@ impl Cursor {
 		if let Some(misses) = &mut self.misses {
 			misses.take_filled(group.sequence);
 		}
+		self.forget_heads_below(self.next_sequence);
 		// The delivery commits everything the seek stepped over to reach this group.
 		self.commit_seek_stale(self.next_sequence.unwrap_or(u64::MAX));
 		group.cache_refresh();
@@ -6393,7 +7919,7 @@ impl Cursor {
 	///
 	/// A conviction only becomes a real skip once a delivery commits past it. Until then
 	/// the entry waits in [`Self::seek_pending`], where a delivered group removes itself
-	/// (see [`Self::poll_next_group`]). `committed` must be the sequence watermark (one
+	/// (see [`Self::poll_next_with`]). `committed` must be the sequence watermark (one
 	/// past the last delivery), which only rises. The seek's floor is NOT that: it
 	/// includes the local floor, which can be lowered again, and a conviction it flushed could
 	/// then be delivered after all.
@@ -6413,10 +7939,13 @@ impl Cursor {
 #[derive(Clone)]
 pub struct Control {
 	subscription: Preferences,
+	track: Consumer,
 	/// A plain cursor's servable window, republished when the ranges are replaced, so a
 	/// group it handed out is judged against them before the cursor next reads. `None`
-	/// for a reader that follows a route, whose copies take them on its next read.
+	/// for a reader that follows a route, which [`Self::mirror`] serves instead.
 	republish: Option<Republish>,
+	/// A reader that follows a route, whose copies take the new preferences at once.
+	mirror: Option<super::resume::Mirror>,
 	// Whether the track is timed, so a time anchor on an untimed one is refused.
 	timed: bool,
 }
@@ -6448,7 +7977,7 @@ impl Republish {
 			return;
 		};
 		drop(state);
-		let runs = Servable::new(window.runs(0));
+		let runs = Servable::of(&window, &Servable::NONE);
 		if let Ok(mut current) = published.write()
 			&& current.revision < revision
 		{
@@ -6472,12 +8001,29 @@ impl Control {
 		if !self.timed && subscription.has_time() {
 			return Err(Error::TimestampMismatch);
 		}
+		if subscription.has_time() && subscription.ranges != self.subscription.read().ranges {
+			self.track.refuse_subscription(&subscription)?;
+		}
 		self.subscription.update(subscription)?;
 		if let Some(republish) = &self.republish {
 			republish.publish(&self.subscription);
 		}
+		if let Some(mirror) = &self.mirror {
+			mirror.sync();
+		}
 		Ok(())
 	}
+}
+
+/// A group-only wire refuses an unresolved time anchor before changing shared demand.
+fn refuse_cached_anchors(state: &TrackState, subscription: &Subscription) -> Result<()> {
+	if state.cached_anchors && subscription.has_time() {
+		let window = Window::new(&subscription.ranges, state.latest_live(), state)?;
+		if !window.is_settled() {
+			return Err(Error::Unsupported);
+		}
+	}
+	Ok(())
 }
 
 /// Refuse `subscription` when it asks an untimed track for a presentation time.
@@ -6491,7 +8037,7 @@ fn refuse_untimed(info: &Info, subscription: &Subscription) -> Result<()> {
 impl Subscriber {
 	/// The track's [`Info`], resolved when the subscription was established.
 	///
-	/// Free, unlike [`Consumer::query`]: subscribing already waited for the info
+	/// Free, unlike [`Consumer::info`]: subscribing already waited for the info
 	/// (SUBSCRIBE_OK on the wire), so a subscriber always has it.
 	pub fn info(&self) -> &Info {
 		&self.info
@@ -6525,21 +8071,35 @@ impl Subscriber {
 		}
 	}
 
+	/// Read this subscription's track cache without sharing its cursor.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn consume(&self) -> Consumer {
+		let state = match &self.inner {
+			Inner::Plain(cursor) => cursor.state.weak(),
+			Inner::Resume(_, state) => state.weak(),
+		};
+		Consumer::new(self.name.clone(), state)
+	}
+
 	/// Create a handle for updating this subscriber's delivery preferences.
 	pub fn control(&self) -> Control {
 		let timed = self.info.timescale.is_some();
 		match &self.inner {
 			Inner::Plain(cursor) => Control {
+				track: self.consume(),
 				subscription: cursor.subscription.clone(),
 				republish: Some(Republish {
 					state: cursor.state.weak(),
 					published: cursor.published.weak(),
 				}),
+				mirror: None,
 				timed,
 			},
 			Inner::Resume(resume, _) => Control {
+				track: self.consume(),
 				subscription: resume.subscription().clone(),
 				republish: None,
+				mirror: Some(resume.mirror()),
 				timed,
 			},
 		}
@@ -6556,9 +8116,10 @@ impl Subscriber {
 	/// a second route delivers too, is not handed out again. Once a group is past the
 	/// budget below, the subscriber stops expecting every group before it, so a gap that
 	/// old is never filled, which holds because a timed track refuses a group whose start
-	/// rewinds.
+	/// rewinds. The exception is a cached group it skipped as stale, which a wider budget
+	/// offers again.
 	///
-	/// Groups are semi-reliable, and the [`Subscription::max_delay`] budget is the other
+	/// Groups are semi-reliable, and the [`Delay::max`] budget is the other
 	/// thing (alongside eviction and a moving start) that decides which of them arrive:
 	/// one that has drifted further behind the live edge than the budget tolerates is
 	/// skipped rather than handed over, so a single poll walks off a whole backlog. The
@@ -6566,7 +8127,7 @@ impl Subscriber {
 	/// edge and writes the rest off; raise it to read history. [`Self::with_range`] and
 	/// [`Subscription::ranges`] are filters, not exemptions: backfill needs a budget that
 	/// covers it. [`Consumer::fetch_group`] is the way to ask for one old group outright.
-	/// Across same-epoch route copies, the lowest next buffered group is delivered
+	/// Across same-instance route copies, the lowest next buffered group is delivered
 	/// first; a lower group that arrives later is still delivered in arrival order.
 	/// The budget remains attached to a returned group: if it stalls while newer data
 	/// advances, its pending frame read ends with [`Error::Old`].
@@ -6574,15 +8135,25 @@ impl Subscriber {
 	/// Honors the group range set by [`Self::with_range`]: a group beyond the cap is
 	/// passed without blocking in-range groups that arrive behind it, and holds nothing
 	/// here. Raising the cap, or widening the ranges, offers the groups it newly covers
-	/// that the cache still holds, lowest sequence first. Once the track finishes, a
-	/// reader with nothing left in range ends.
+	/// that the cache still holds, newest first unless [`Order::Ascending`]. Widening the
+	/// budget offers the cached groups it skipped as stale and now covers the same way.
+	/// Once the track finishes, a reader with nothing left in range ends.
+	///
+	/// A reader whose [`Subscription::ranges`] all end ends too, once every group in them
+	/// was handed out, dropped, skipped as stale, or given up as unfillable, rather than
+	/// waiting for an update to widen them: a reader that wants more keeps a range open. A
+	/// [`Self::with_range`] cap never ends a read, since it may rise again, and a group it
+	/// keeps out stays owed. A track an origin serves from whichever of its routes is up ends
+	/// the same way, once no route it left may still deliver a group in range.
+	/// Later reads return `Ok(None)` immediately too. Widening the ranges with
+	/// [`Self::update`] resumes reading the newly covered groups without replaying any.
 	///
 	/// A group one of [`Subscription::ranges`] starts or ends inside reads only the frames
 	/// they cover there. One missing the frames asked for reads [`Error::Lagged`] rather
 	/// than starting short.
 	///
 	/// Returns `Poll::Ready(Ok(Some(group)))` when a group is available,
-	/// `Poll::Ready(Ok(None))` when the track is finished,
+	/// `Poll::Ready(Ok(None))` when the track is finished or the ranges are read,
 	/// `Poll::Ready(Err(e))` when the track has been aborted, or
 	/// `Poll::Pending` when no group is available yet.
 	pub fn poll_recv_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
@@ -6592,50 +8163,138 @@ impl Subscriber {
 	/// The next group in arrival order, or in sequence order for `ordered`, skipping any
 	/// already handed out.
 	fn poll_group(&mut self, ordered: bool, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
-		let meter = self.stats.meter();
-		let res = match &mut self.inner {
-			Inner::Plain(cursor) => loop {
-				let res = match ordered {
-					true => cursor.poll_next_group(true, waiter),
-					false => cursor.poll_recv_group(true, waiter),
-				};
-				match res {
-					Poll::Ready(Ok(Some(group))) if self.delivered.contains(group.sequence) => continue,
-					res => break res,
+		// Ahead of the meter: a read that parks again counts only what a peek skipped.
+		let walk = idle::Walk::new(ordered);
+		match &self.inner {
+			Inner::Plain(cursor) if cursor.parked(walk, waiter) => {
+				if cursor.stale != stats::Content::default() && self.stats.is_tagged() {
+					self.count_stale(&self.stats.meter());
 				}
-			},
-			Inner::Resume(resume, _) => resume.poll_group(ordered, &self.delivered, waiter),
+				return Poll::Pending;
+			}
+			// A resumed read takes its copies' skips only on a full read, which counts them.
+			Inner::Resume(resume, _) if resume.parked(walk, waiter) => return Poll::Pending,
+			_ => {}
+		}
+		match self.poll_peek_group(ordered, waiter) {
+			Poll::Ready(Ok(Some(reserved))) => Poll::Ready(self.take(reserved).map(Some)),
+			res => {
+				// What the peek skipped for age counts even when nothing is handed out.
+				self.count_stale(&self.stats.meter());
+				match res {
+					Poll::Ready(Ok(None)) => Poll::Ready(self.ended()),
+					res => res.map(|res| res.map(|_| None)),
+				}
+			}
+		}
+	}
+
+	/// Reserve the next group not yet handed out, without moving past it: [`Self::take`]
+	/// hands out that exact group, even if its producer evicted it meanwhile.
+	pub(super) fn poll_peek_group(&mut self, ordered: bool, waiter: &kio::Waiter) -> Poll<Result<Option<Reserved>>> {
+		match &mut self.inner {
+			Inner::Plain(cursor) => {
+				let walk = idle::Walk::new(ordered);
+				if cursor.parked(walk, waiter) {
+					return Poll::Pending;
+				}
+				let mut idle = idle::Idle::start(&mut cursor.idle, waiter);
+				let polled = loop {
+					let peeked = match ordered {
+						true => cursor.poll_peek_next(&self.delivered, idle.waiter()),
+						false => cursor.poll_peek_recv(&self.delivered, idle.waiter()),
+					};
+					let peeked = match peeked {
+						Poll::Pending => {
+							// A read that only skipped since its last hand-out settles its write-offs too.
+							cursor.retire_written_off(&mut self.delivered);
+							break match !self.parks && cursor.is_exhausted(&[&self.delivered]) {
+								true => Poll::Ready(Ok(None)),
+								false => Poll::Pending,
+							};
+						}
+						Poll::Ready(Err(err)) => break Poll::Ready(Err(err)),
+						Poll::Ready(Ok(None)) => break Poll::Ready(Ok(None)),
+						Poll::Ready(Ok(Some(peeked))) => peeked,
+					};
+					if !self.delivered.contains(peeked.group.sequence) {
+						break Poll::Ready(Ok(Some(Reserved::Plain(peeked))));
+					}
+					// A replay advances only this copy's cursor, as an ordinary read would.
+					cursor.take(peeked);
+				};
+				idle.finish(&mut cursor.idle, walk, polled.is_pending());
+				polled
+			}
+			Inner::Resume(resume, _) => resume
+				.poll_peek_group(ordered, self.parks, &self.delivered, waiter)
+				.map(|res| res.map(|candidate| candidate.map(|candidate| Reserved::Resume(Box::new(candidate))))),
+		}
+	}
+
+	/// Whether this route copy's bounded window has nothing left for the logical readers that
+	/// handed out `logical`: what this copy took itself, wrote off, or gave up counts too.
+	pub(super) fn exhausted_for(&mut self, logical: &[&Delivered], waiter: &kio::Waiter) -> bool {
+		let mut taken = Vec::with_capacity(logical.len() + 1);
+		taken.push(&self.delivered);
+		taken.extend_from_slice(logical);
+		match &mut self.inner {
+			Inner::Plain(cursor) => cursor.is_exhausted(&taken),
+			// A copy that is another front's logical track judges across its own copies.
+			Inner::Resume(resume, _) => resume.exhausted(&taken, waiter),
+		}
+	}
+
+	/// Hand out the group a [`Self::poll_peek_group`] on this subscriber reserved.
+	pub(super) fn take(&mut self, reserved: Reserved) -> Result<group::Consumer> {
+		let meter = self.stats.meter();
+		let ordered = reserved.ordered();
+		let res = match (&mut self.inner, reserved) {
+			(Inner::Plain(cursor), Reserved::Plain(peeked)) => Ok(cursor.take(peeked)),
+			(Inner::Resume(resume, _), Reserved::Resume(candidate)) => resume.take(*candidate),
+			_ => unreachable!("a reservation is taken from the subscriber that made it"),
 		};
-		if let Poll::Ready(Ok(Some(group))) = &res {
+		if let Ok(group) = &res {
 			self.hand_out(group.sequence, ordered);
 		}
 		self.count_stale(&meter);
-		res.map(|res| res.map(|group| group.map(|group| group.with_meter(meter))))
+		res.map(|group| group.with_meter(meter))
 	}
 
-	/// Reserve the next group without advancing past it, so the subsequent read
-	/// takes that exact group even if a producer evicts it meanwhile.
-	pub(super) fn poll_peek_group(&mut self, ordered: bool, waiter: &kio::Waiter) -> Poll<Result<Option<u64>>> {
-		match &mut self.inner {
-			Inner::Plain(cursor) => loop {
-				let group = ready!(match ordered {
-					true => cursor.poll_next_group(false, waiter),
-					false => cursor.poll_recv_group(false, waiter),
-				})?;
-				let Some(group) = group else {
-					return Poll::Ready(Ok(None));
-				};
-				if !self.delivered.contains(group.sequence) {
-					return Poll::Ready(Ok(Some(group.sequence)));
-				}
-				// A replay advances only this copy's cursor, as an ordinary read would.
-				ready!(match ordered {
-					true => cursor.poll_next_group(true, waiter),
-					false => cursor.poll_recv_group(true, waiter),
-				})?;
-			},
-			Inner::Resume(resume, _) => resume.poll_peek_group(ordered, &self.delivered, waiter),
+	/// The error the track's declared end carries, if it does not end cleanly.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn end_error(&self) -> Option<Error> {
+		match &self.inner {
+			Inner::Plain(cursor) => cursor.state.read().end_error.clone(),
+			Inner::Resume(resume, _) => resume.declared_error(),
 		}
+	}
+
+	/// Whether this reader ran out at an end declared with an error, rather than an abort.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn ended_with_error(&self) -> bool {
+		self.ended::<()>().is_err()
+	}
+
+	/// What a reader that ran out of groups gets: the end of stream, or the error the track
+	/// ended with once this reader's range reaches that end.
+	fn ended<T>(&self) -> Result<Option<T>> {
+		let end = match &self.inner {
+			Inner::Plain(cursor) => cursor.state.read().end_error(),
+			Inner::Resume(resume, _) => resume.end_error(),
+		};
+		match end {
+			Some((fin, err)) if self.reaches(fin) => Err(err),
+			_ => Ok(None),
+		}
+	}
+
+	/// Whether this reader's range reaches an end at the exclusive final sequence `fin`: a
+	/// range that stops short of it, past the cap or past every range as resolved, whatever
+	/// its anchors, never reaches the end.
+	pub(crate) fn reaches(&self, fin: u64) -> bool {
+		self.bounds().end.is_none_or(|cap| cap >= fin)
+			&& fin.checked_sub(1).is_none_or(|last| self.next_in_range(last).is_some())
 	}
 
 	/// Pass groups another route copy handed out, preserving the arrival cursor and bounds.
@@ -6643,13 +8302,17 @@ impl Subscriber {
 		match &mut self.inner {
 			Inner::Plain(cursor) => cursor.skip_ordered(floor),
 			Inner::Resume(resume, _) => {
+				// What it handed out moves, which nothing it parked on notifies.
+				let end = floor.unwrap_or(u64::MAX);
+				if !self.delivered.covers(0..end) || (floor.is_none() && !self.delivered.contains(u64::MAX)) {
+					resume.disarm();
+				}
 				// Its retention decisions also need the containing reader's past prefix.
 				// This records what is no longer owed, without handing a group out.
 				self.delivered.forget_below(floor.unwrap_or(u64::MAX));
 				if floor.is_none() {
 					self.delivered.insert(u64::MAX);
 				}
-				resume.skip_ordered(floor);
 			}
 		}
 	}
@@ -6660,10 +8323,16 @@ impl Subscriber {
 		if ordered {
 			self.delivered.forget_below(sequence);
 		}
+		if let Inner::Plain(cursor) = &mut self.inner {
+			cursor.prune_skipped();
+		}
 		self.delivered.insert(sequence);
 		let mut delivered = std::mem::take(&mut self.delivered);
 		self.forget_past_budget(&mut delivered);
 		self.delivered = delivered;
+		if let Inner::Plain(cursor) = &mut self.inner {
+			cursor.retire_written_off(&mut self.delivered);
+		}
 	}
 
 	/// Forget the gaps in `delivered` below each group past this subscriber's budget now:
@@ -6681,14 +8350,26 @@ impl Subscriber {
 		self.delivered.runs()
 	}
 
+	/// How many runs of groups written off as stale this subscriber remembers.
+	#[cfg(test)]
+	fn written_off_runs(&self) -> usize {
+		match &self.inner {
+			Inner::Plain(cursor) => cursor.filter.written_off.iter().count(),
+			Inner::Resume(..) => 0,
+		}
+	}
+
 	/// Whether an unread cached group needs this subscription, without moving its cursor.
 	pub(super) fn has_unread_group(&self, unread: &Unread<'_>) -> bool {
 		let cursor = match &self.inner {
 			Inner::Plain(cursor) => cursor,
 			Inner::Resume(resume, _) => return resume.has_unread_group(unread),
 		};
+		let budget = cursor.subscription.read().budget();
 		let state = cursor.state.read();
-		let floor = cursor.floor().max(state.live_floor.unwrap_or(0)).max(unread.start);
+		// A finite budget skips the cache below its floor at once, so it is not unread.
+		let budget = clamp_max_delay(budget, state.max_age_bound());
+		let floor = cursor.floor().max(state.cache_floor(budget)).max(unread.start);
 		let eligible = |sequence: u64| {
 			sequence >= floor
 				&& super::subscription::before_end(sequence, unread.end)
@@ -6697,7 +8378,7 @@ impl Subscriber {
 		};
 		// What a widening owes, the walk has yet to take in, or lifting the local cap would:
 		// a group past it is unread, not gone.
-		let owed = cursor.owed(&cursor.admitted(cursor.floor(), None));
+		let owed = cursor.owed(&Admitted::new(&cursor.filter.window, cursor.floor(), None));
 		let last = unread.end.map(|end| end.checked_sub(1));
 		let owed = || {
 			owed.iter().any(|run| {
@@ -6723,7 +8404,7 @@ impl Subscriber {
 						&& state
 							.lookup
 							.get(sequence)
-							.is_some_and(|slot| slot.stamp == *stamp && (!slot.is_aborted() || slot.cut().is_some()))
+							.is_some_and(|slot| slot.stamp == *stamp && slot.is_read())
 				}) || owed())
 	}
 
@@ -6733,82 +8414,11 @@ impl Subscriber {
 	/// be out of sequence due to network reordering or loss. Use [`Self::ordered`] if you
 	/// only want groups whose sequence number is higher than any previously returned.
 	/// See [`Self::poll_recv_group`] for how [`Self::with_range`] applies.
+	/// Once a bounded range returns `Ok(None)`, later reads return it immediately too;
+	/// widening the ranges with [`Self::update`] resumes reading the newly covered groups.
 	#[cfg(feature = "async")]
 	pub async fn recv_group(&mut self) -> Result<Option<group::Consumer>> {
 		kio::wait(|waiter| self.poll_recv_group(waiter)).await
-	}
-
-	/// Poll for the next datagram in arrival order, without blocking.
-	///
-	/// Datagrams are a separate best-effort channel from groups (see
-	/// [`Producer::append_datagram`]); they share only the sequence namespace, and
-	/// neither cursor moves the other. A new timed subscriber skips the buffered prefix older
-	/// than its max delay behind the highest timestamp; untimed subscribers keep the whole
-	/// buffer. Later arrival-order delivery is unchanged, and any outside its group range
-	/// are skipped. A consumer that falls too far behind silently loses the oldest datagrams.
-	///
-	/// Returns `Poll::Ready(Ok(Some(datagram)))` when one is available,
-	/// `Poll::Ready(Ok(None))` when the track is finished, `Poll::Ready(Err(e))` when the track
-	/// is aborted, or `Poll::Pending` when none is buffered yet.
-	pub fn poll_recv_datagram(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Datagram>>> {
-		loop {
-			let Some(datagram) = ready!(self.poll_recv_stored_datagram(waiter))? else {
-				return Poll::Ready(Ok(None));
-			};
-			// A moq-transport status is no datagram an application can read.
-			if datagram
-				.wire
-				.as_ref()
-				.is_some_and(|wire| wire.status.is_some_and(|status| status != 0))
-			{
-				continue;
-			}
-			self.meter_datagram(datagram.payload.len() as u64);
-			return Poll::Ready(Ok(Some(datagram.datagram)));
-		}
-	}
-
-	/// Count a datagram handed on as `bytes` of payload, the single-frame group it stands in
-	/// for. Unlike a group (metered lazily as its frames are read), a datagram goes whole.
-	pub(crate) fn meter_datagram(&self, bytes: u64) {
-		self.stats.meter().datagram(bytes);
-	}
-
-	/// The next datagram as the track stores it: its wire metadata, any status, and a
-	/// compressed track's DEFLATE slice. Unmetered: the caller meters the form it hands on
-	/// with [`Self::meter_datagram`].
-	pub(crate) fn poll_recv_stored_datagram(
-		&mut self,
-		waiter: &kio::Waiter,
-	) -> Poll<Result<Option<super::datagram::Stored>>> {
-		match &mut self.inner {
-			Inner::Plain(cursor) => cursor.poll_recv_datagram(waiter),
-			Inner::Resume(resume, _) => resume.poll_recv_datagram(&self.delivered, waiter),
-		}
-	}
-
-	/// [`Self::poll_recv_stored_datagram`], metered as its plain payload: for a session that
-	/// never carries compression.
-	pub(crate) fn poll_recv_wire_datagram(
-		&mut self,
-		waiter: &kio::Waiter,
-	) -> Poll<Result<Option<super::datagram::Stored>>> {
-		let res = self.poll_recv_stored_datagram(waiter);
-		if let Poll::Ready(Ok(Some(datagram))) = &res {
-			self.meter_datagram(datagram.payload.len() as u64);
-		}
-		res
-	}
-
-	/// Receive the next datagram in arrival order.
-	///
-	/// A best-effort channel parallel to [`Self::recv_group`]; the two share only the sequence
-	/// namespace. To receive both concurrently from one subscriber, poll
-	/// [`Self::poll_recv_group`] and [`Self::poll_recv_datagram`] together in a single `poll`
-	/// closure (sequential `&mut` borrows), rather than awaiting the two `recv` futures at once.
-	#[cfg(feature = "async")]
-	pub async fn recv_datagram(&mut self) -> Result<Option<Datagram>> {
-		kio::wait(|waiter| self.poll_recv_datagram(waiter)).await
 	}
 
 	/// The sequence cursor behind [`Ordered`], which owns the only public door to it.
@@ -6822,9 +8432,6 @@ impl Subscriber {
 	/// arrival-order [`Subscriber`] or a sequence-order [`Ordered`], never both at once.
 	/// The two advance independently, and interleaving them produces a group stream that
 	/// is neither, which is why the choice is a handle rather than a method.
-	///
-	/// Datagrams come along: they are a separate cursor either way, so the choice of group
-	/// order says nothing about them.
 	pub fn ordered(self) -> Ordered {
 		Ordered { inner: self }
 	}
@@ -6873,6 +8480,23 @@ impl Subscriber {
 		Some(start?.max(self.bounds().start))
 	}
 
+	/// Where each of this subscriber's ranges starts, by index, as resolved here and raised
+	/// to `from`, where delivery starts: `None` for one with no group there or still waiting
+	/// on the first group from the live feed.
+	///
+	/// A publisher tells its peer where a relative or time start landed, which the peer
+	/// can't work out from the groups it receives.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn starts(&mut self, from: u64) -> Vec<Option<u64>> {
+		match &mut self.inner {
+			Inner::Plain(cursor) => {
+				cursor.sync();
+				cursor.filter.window.starts(from)
+			}
+			Inner::Resume(resume, _) => resume.starts(from),
+		}
+	}
+
 	/// The lowest group at or above `from` this subscriber's ranges and
 	/// [`Self::with_range`] floor cover, `None` when none does: the groups between are
 	/// never read, so a reader waiting on each group in sequence need not wait for them.
@@ -6883,6 +8507,47 @@ impl Subscriber {
 		match &self.inner {
 			Inner::Plain(cursor) => cursor.filter.window.runs(from).next().map(|run| *run.start()),
 			Inner::Resume(resume, _) => resume.next_in_range(from),
+		}
+	}
+
+	/// The groups from `from` up to the exclusive `end` that this subscriber's ranges and
+	/// [`Self::with_range`] bounds name, lowest first: the groups it is owed, without the
+	/// ones between disjoint ranges.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn runs_in_range(&mut self, from: u64, end: u64) -> Vec<ops::Range<u64>> {
+		let bounds = self.bounds();
+		let from = from.max(bounds.start);
+		let end = bounds.end.map_or(end, |cap| cap.min(end));
+		let runs = match &mut self.inner {
+			Inner::Plain(cursor) => {
+				cursor.sync();
+				cursor.filter.window.runs(from).collect::<Vec<_>>()
+			}
+			Inner::Resume(resume, _) => resume.runs(from),
+		};
+		runs.into_iter()
+			.take_while(|run| *run.start() < end)
+			.map(|run| *run.start()..run.end().saturating_add(1).min(end))
+			.collect()
+	}
+
+	/// Whether `accounted` holds every group from `from` on that this subscriber's ranges
+	/// and [`Self::with_range`] bounds name, once every range has a resolved end: `false`
+	/// while one stays open, counts back from a group not seen yet, or ends at a time not
+	/// settled yet.
+	///
+	/// A publisher that accounts for each group it serves or drops learns from it that a
+	/// bounded subscription has nothing more to deliver.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn covered(&mut self, from: u64, accounted: &impl Accounted) -> bool {
+		let bounds = self.bounds();
+		let from = from.max(bounds.start);
+		match &mut self.inner {
+			Inner::Plain(cursor) => {
+				cursor.sync();
+				cursor.filter.window.covered_by(from, bounds.end, accounted)
+			}
+			Inner::Resume(resume, _) => resume.covered(from, bounds.end, accounted),
 		}
 	}
 
@@ -6931,8 +8596,8 @@ impl Subscriber {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn poll_drop(&mut self, waiter: &kio::Waiter) -> Poll<(ops::Range<u64>, StreamError)> {
 		match &mut self.inner {
-			Inner::Plain(cursor) => cursor.poll_drop(waiter),
-			Inner::Resume(resume, _) => resume.poll_drop(waiter),
+			Inner::Plain(cursor) => cursor.poll_drop(&self.delivered, waiter),
+			Inner::Resume(resume, _) => resume.poll_drop(&self.delivered, waiter),
 		}
 	}
 
@@ -6956,10 +8621,25 @@ impl Subscriber {
 		}
 	}
 
+	/// The track's declared exclusive end, as [`Self::poll_finished`] reports it, without
+	/// registering a wake. A track that never declared one answers without its lock.
+	pub(super) fn declared_end(&mut self) -> Option<Position> {
+		match &mut self.inner {
+			Inner::Plain(cursor) => match cursor.cache.end_declared() {
+				true => cursor.state.read().end,
+				false => None,
+			},
+			Inner::Resume(..) => match self.poll_finished(&kio::Waiter::noop()) {
+				Poll::Ready(Ok(end)) => Some(end),
+				_ => None,
+			},
+		}
+	}
+
 	/// Poll for the track's declared exclusive end, without blocking.
 	pub fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<Position>> {
 		match &mut self.inner {
-			Inner::Plain(cursor) => cursor.poll(waiter, |state| state.poll_finished()),
+			Inner::Plain(cursor) => cursor.poll_finished(waiter),
 			Inner::Resume(resume, _) => resume.poll_finished(waiter),
 		}
 	}
@@ -6983,30 +8663,40 @@ impl Subscriber {
 	/// empty range. Both bounds are assigned, in either direction: an omitted start is
 	/// group 0 and an omitted end removes the cap. Lowering the floor or raising the cap
 	/// offers the groups it newly covers that the cache still holds and this reader never
-	/// handed out, lowest first; a group is never handed out twice. Groups past the cap
+	/// handed out, in its [`Order`]; a group is never handed out twice. Groups past the cap
 	/// stay cached, and lowering the cap below the cursor waits until it rises again or
 	/// the track finishes. [`Self::poll_largest`] reports within these bounds.
 	///
 	/// A local filter, not a request: it tells the publisher nothing, so groups outside it
 	/// are still delivered and simply not returned. To change what is requested, set
 	/// [`Subscription::ranges`] via [`Self::update`]. See [Local cursor vs wire
-	/// preference](Self#local-cursor-vs-wire-preference).
+	/// preference](Self#local-cursor-vs-wire-preference). One exception: on a track served
+	/// across route changes, lowering the floor asks the serving route again for the groups
+	/// it newly covers within those ranges, since the route that delivered them may be gone.
 	pub fn with_range(mut self, groups: impl RangeBounds<u64>) -> Self {
 		self.set_range(groups);
 		self
 	}
 
 	/// [`Self::with_range`] on a reader held in place.
+	/// Park past the end of a bounded window rather than end the read there, as a wire
+	/// publisher does: its peer reads the end of a subscription's stream as the track's,
+	/// unless the wire ends a covered subscription itself.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn parked(mut self) -> Self {
+		self.parks = true;
+		self
+	}
+
 	pub(crate) fn set_range(&mut self, groups: impl RangeBounds<u64>) {
 		let (start, end) = super::subscription::sequence_bounds(groups);
 		match &mut self.inner {
 			Inner::Plain(cursor) => {
-				cursor.peeked = None;
 				cursor.min_sequence = start;
 				cursor.end_sequence = end;
 				cursor.update_servable();
 			}
-			Inner::Resume(resume, _) => resume.set_range(start, end),
+			Inner::Resume(resume, _) => resume.set_range(start, end, &self.delivered),
 		}
 		self.largest.bounds_moved();
 	}
@@ -7043,16 +8733,24 @@ impl Subscriber {
 			Inner::Plain(cursor) => &cursor.subscription,
 			Inner::Resume(resume, _) => resume.subscription(),
 		};
+		if subscription.has_time() && subscription.ranges != channel.read().ranges {
+			self.consume().refuse_subscription(&subscription)?;
+		}
 		channel.update(subscription)?;
-		if let Inner::Plain(cursor) = &mut self.inner {
-			cursor.sync();
+		match &mut self.inner {
+			Inner::Plain(cursor) => {
+				cursor.sync();
+			}
+			// The copies take the change now, not on the next read, so it reaches their
+			// sources even while nobody reads.
+			Inner::Resume(resume, _) => resume.mirror().sync(),
 		}
 		Ok(())
 	}
 
 	/// Poll for the track's largest location within [`Self::with_range`]: the current one, then each newer one, and `None` once the track ends.
 	///
-	/// The largest is the newest group or datagram at the newest frame (0 while empty), as
+	/// The largest is the newest group at the newest frame (0 while empty), as
 	/// the source reported it and its live feed delivered since, so nothing reports until
 	/// the track's feed is live. A largest past the cap or below the floor reports nothing:
 	/// the cache does not stand in for it, so a cap moved below the largest stays pending.
@@ -7148,7 +8846,7 @@ impl Subscriber {
 ///
 /// # Age and skipping
 ///
-/// [`Subscription::max_delay`] applies as this cursor reads, exactly as it does on the
+/// [`Delay::max`] applies as this cursor reads, exactly as it does on the
 /// arrival cursor: a group is skipped once its *reach*, where its immediate successor
 /// begins, is that far behind the newest frame on the track. Nothing weaker convicts it,
 /// because the reach is the only proof that *every* frame it could still hold is past the
@@ -7158,9 +8856,22 @@ impl Subscriber {
 /// reading a gap-free sequence needs.
 ///
 /// The same budget follows a group already handed out: once newer content pulls that far
-/// ahead, a read still waiting on it ends with [`Error::Old`] and the cursor moves on. A
-/// gap costs nothing either way, since the cursor seeks to the lowest cached group in
-/// range rather than waiting for the sequence it would have read next.
+/// ahead, a read still waiting on it ends with [`Error::Old`] and the cursor moves on.
+///
+/// # Gaps
+///
+/// A missing group is waited for only while the track still owes it: on a copy a
+/// subscription feeds, a group that may still land, reordered behind its successor, is
+/// read first, until the same budget gives up on it. Without a budget (`None`, which a
+/// history or VOD read uses) it waits until the hole resolves. A group the track knows will never land costs nothing:
+/// one the publisher dropped, one that arrived and was since evicted or aborted, or one
+/// below where the feed starts. A locally produced track owes
+/// nothing, so there the cursor seeks to the lowest cached group in range.
+///
+/// An unlimited or long budget only avoids blocking where the feed signals its gaps:
+/// moq-lite, whose publisher sends `SUBSCRIBE_DROP` for every group it won't deliver, or an
+/// ordered moq-transport FETCH. A moq-transport SUBSCRIBE signals no gaps, so there a group
+/// lost in transit can hold the ordered reader at its hole until the track ends.
 ///
 /// The budget is updatable mid-stream through [`Self::control`]. [`Duration::ZERO`] (the
 /// default) keeps only what nothing newer has superseded, so a consumer that stalls and
@@ -7190,11 +8901,14 @@ impl Ordered {
 	///
 	/// Honors the group range set by [`Self::with_range`]:
 	/// a group past the cap stays in the producer's cache and becomes eligible again if
-	/// the cap rises or is removed.
+	/// the cap rises or is removed. Ranges that all end end the read once they are
+	/// accounted for, as for [`Subscriber::poll_recv_group`].
+	/// Later reads return `Ok(None)` immediately too; widening the ranges with
+	/// [`Self::update`] resumes reading above the last sequence returned.
 	///
 	/// Returns `Poll::Ready(Ok(Some(group)))` when a group is available,
 	/// `Poll::Ready(Ok(None))` when the track is finished (including an abort after its
-	/// declared end settled, see [`Producer::abort`]),
+	/// declared end settled, see [`Producer::abort`]) or the ranges are read,
 	/// `Poll::Ready(Err(e))` when the track has been aborted short of its end, or
 	/// `Poll::Pending` when no group is available yet.
 	pub fn poll_next_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
@@ -7202,31 +8916,12 @@ impl Ordered {
 	}
 
 	/// Return the next group with a higher sequence number than any previously returned.
+	///
+	/// Once a bounded range returns `Ok(None)`, later reads return it immediately too;
+	/// widening the ranges with [`Self::update`] resumes reading above the last sequence returned.
 	#[cfg(feature = "async")]
 	pub async fn next_group(&mut self) -> Result<Option<group::Consumer>> {
 		kio::wait(|waiter| self.poll_next_group(waiter)).await
-	}
-
-	/// Poll for the next datagram in arrival order, without blocking.
-	///
-	/// Datagrams are a separate best-effort channel from groups (see
-	/// [`Producer::append_datagram`]); they share only the sequence namespace, and neither
-	/// cursor moves the other. Unordered by construction, so this behaves identically on
-	/// either handle; it is here so a track carrying both channels needs one subscription
-	/// rather than two.
-	pub fn poll_recv_datagram(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Datagram>>> {
-		self.inner.poll_recv_datagram(waiter)
-	}
-
-	/// Receive the next datagram in arrival order.
-	///
-	/// To read groups and datagrams concurrently from one handle, poll
-	/// [`Self::poll_next_group`] and [`Self::poll_recv_datagram`] together in a single
-	/// `poll` closure (sequential `&mut` borrows), rather than awaiting the two `recv`
-	/// futures at once.
-	#[cfg(feature = "async")]
-	pub async fn recv_datagram(&mut self) -> Result<Option<Datagram>> {
-		kio::wait(|waiter| self.poll_recv_datagram(waiter)).await
 	}
 
 	/// Limit subsequent reads to these group sequences, returning `self` for chaining.
@@ -7261,18 +8956,13 @@ impl Ordered {
 		self.inner.update(subscription)
 	}
 
-	/// Poll for the track's declared exclusive end, without blocking.
-	pub fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<Position>> {
-		self.inner.poll_finished(waiter)
-	}
-
 	/// Block until the track declares its end, returning the exclusive end position.
 	///
 	/// See [`Subscriber::finished`]: this reports the declared end, not that every group
 	/// has arrived.
 	#[cfg(feature = "async")]
 	pub async fn finished(&mut self) -> Result<Position> {
-		kio::wait(|waiter| self.poll_finished(waiter)).await
+		kio::wait(|waiter| self.inner.poll_finished(waiter)).await
 	}
 
 	/// Poll for the largest location within [`Self::with_range`]; see [`Subscriber::poll_largest`].
@@ -7298,20 +8988,20 @@ impl Ordered {
 /// request resolve only at [`Self::commit`], with everything written by then. Dropping it
 /// uncommitted rejects the request with [`Error::Dropped`].
 #[must_use = "a staged track is rejected unless committed"]
-pub struct Staged {
+pub(crate) struct Staged {
 	// Taken only by `commit`.
 	producer: Option<Producer>,
 	// The request's fetch claim, held until the track is published like an unanswered
 	// request's: a cache miss meanwhile waits rather than racing its own handler.
-	_dynamic: Dynamic,
+	_dynamic: Requests,
 }
 
 impl Staged {
 	/// Publish the track: every waiting subscriber resolves now, with what was written.
-	pub fn commit(mut self) -> Producer {
+	pub(crate) fn commit(mut self) -> Producer {
 		let producer = self.producer.take().expect("taken only by commit");
 		if let Ok(mut state) = producer.state.write() {
-			state.staged = false;
+			state.commit();
 		}
 		producer
 	}
@@ -7343,11 +9033,10 @@ impl Drop for Staged {
 
 /// A subscriber asked for a track this broadcast doesn't have yet.
 ///
-/// Yielded by [`poll_requested_track`](crate::broadcast::Dynamic::poll_requested_track),
+/// Yielded by [`poll_requested_track`](crate::broadcast::Requests::poll_requested_track),
 /// or created up front with [`broadcast::Producer::reserve_track`](crate::broadcast::Producer::reserve_track).
 /// Subscribers block until the request is
-/// resolved: call [`accept`](Self::accept) to serve it with a [`Producer`] (or
-/// [`stage`](Self::stage) to write content before they see it), or
+/// resolved: call [`accept`](Self::accept) to serve it with a [`Producer`], or
 /// [`reject`](Self::reject) to fail them. Dropping it without either rejects with
 /// [`Error::Dropped`].
 ///
@@ -7362,7 +9051,7 @@ pub struct Request {
 	// The previous subscription that was combined, used to detect changes.
 	prev_subscription: Option<Subscription>,
 
-	// Shared with the accepted [`Producer`] and every [`Dynamic`]: its `Drop` is the
+	// Shared with the accepted [`Producer`] and every [`Requests`]: its `Drop` is the
 	// teardown, and it stays inert until a producer is minted.
 	alive: Arc<Alive>,
 
@@ -7370,24 +9059,28 @@ pub struct Request {
 	// birth: a consumer's cache-miss `fetch_group` waits to be served instead of
 	// racing the producer (e.g. a relay) into creating its own handler. Released
 	// when the request is accepted or dropped; by then the relay holds its own.
-	_dynamic: Dynamic,
+	_dynamic: Requests,
 
 	// Ingress stats scope, threaded into the accepted [`Producer`]. Empty (no-op)
 	// unless this request was reserved on a tagged broadcast.
 	stats: stats::Scope,
 
-	// The floor the accepted track's start is pending at, until the source resolves it
-	// (see [`Self::request_start`]).
-	requested_start: Option<Option<u64>>,
+	// Where the accepted track's start is pending; see [`Self::request_start`].
+	requested_start: RequestedStart,
 
 	// Whether the accepted track starts idle; see [`Self::idle`].
 	idle: bool,
 
-	// Served from a front's routes; see [`Self::routes`].
-	routes: Option<super::resume::Consumer>,
-
 	// A track the producer reserved, listed by its broadcast once accepted.
 	list: Option<broadcast::ListOnAccept>,
+}
+
+/// Whether a [`Request`] asked for its accepted track's start to be pending.
+enum RequestedStart {
+	/// The track starts as [`Request::accept`] leaves it.
+	Unset,
+	/// Pending at this floor, `None` for the live edge, until the source resolves it.
+	Pending(Option<u64>),
 }
 
 impl Request {
@@ -7395,7 +9088,7 @@ impl Request {
 		let name = name.into();
 		let state = TrackState::spawn(broadcast.clone());
 		let alive = Alive::new(name.clone(), state.clone());
-		let dynamic = Dynamic::new(name.clone(), state.clone(), alive.clone());
+		let dynamic = Requests::new(name.clone(), state.clone(), alive.clone());
 		Self {
 			name,
 			broadcast,
@@ -7404,9 +9097,8 @@ impl Request {
 			alive,
 			_dynamic: dynamic,
 			stats: stats::Scope::default(),
-			requested_start: None,
+			requested_start: RequestedStart::Unset,
 			idle: false,
-			routes: None,
 			list: None,
 		}
 	}
@@ -7418,10 +9110,12 @@ impl Request {
 	}
 
 	/// Serve the track from a front's routes, read straight from their copies; see
-	/// [`super::resume`]. Applied atomically with [`Self::accept`], so no reader ever sees
-	/// the accepted track without it.
-	pub(super) fn routes(mut self, routes: super::resume::Consumer) -> Self {
-		self.routes = Some(routes);
+	/// [`super::resume`]. Applied at once, so a fetch made before [`Self::accept`] already
+	/// reaches the copy whose info is still in flight.
+	pub(super) fn routes(self, routes: super::resume::Consumer) -> Self {
+		if let Ok(mut state) = self.state.write() {
+			state.routes = Some(routes);
+		}
 		self
 	}
 
@@ -7433,8 +9127,9 @@ impl Request {
 	/// as they arrive, but a relay serving the track waits for the resolved start before
 	/// declaring its own. Applied atomically with [`Self::accept`], before any reader can
 	/// see the track.
-	pub fn request_start(mut self, floor: impl Into<Option<u64>>) -> Self {
-		self.requested_start = Some(floor.into());
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn request_start(mut self, floor: impl Into<Option<u64>>) -> Self {
+		self.requested_start = RequestedStart::Pending(floor.into());
 		self
 	}
 
@@ -7453,13 +9148,6 @@ impl Request {
 		self
 	}
 
-	/// Continue the name's sequence namespace within its broadcast. Set by the broadcast
-	/// before the request is visible to anyone.
-	pub(super) fn with_sequence(self, sequence: Sequence) -> Self {
-		set_sequence(&self.state, sequence);
-		self
-	}
-
 	/// The requested track name.
 	pub fn name(&self) -> &str {
 		&self.name
@@ -7470,11 +9158,11 @@ impl Request {
 		Consumer::new(self.name.clone(), self.state.weak().consume_weak())
 	}
 
-	/// Create a [`Dynamic`] handle that serves on-demand fetches of uncached
+	/// Create a [`Requests`] handle that serves on-demand fetches of uncached
 	/// groups, before [`Self::accept`] is even called. A relay creates one to fetch
 	/// past groups from upstream while (or instead of) serving a live subscription.
-	pub fn dynamic(&self) -> Dynamic {
-		Dynamic::new(self.name.clone(), self.state.clone(), self.alive.clone())
+	pub fn requests(&self) -> Requests {
+		Requests::new(self.name.clone(), self.state.clone(), self.alive.clone())
 	}
 
 	/// Watch subscriber demand without keeping the track alive.
@@ -7496,7 +9184,7 @@ impl Request {
 	/// Mark this request as taken by a dynamic handler, which alone decides its answer.
 	pub(super) fn claim(self) -> Self {
 		if let Ok(mut state) = self.state.write() {
-			state.claimed = true;
+			state.claim();
 		}
 		self
 	}
@@ -7505,14 +9193,14 @@ impl Request {
 	/// share one lock, so demand returning after `Demand::wanted` went to `None` wins the race, and the
 	/// close under that lock stops a later consumer attaching to a dead request.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn reject_unused(&self, err: Error) -> bool {
-		match self.state.write_unused() {
-			kio::Unused::Idle(guard) => {
+	pub(crate) fn reject_unwanted(&self, err: Error) -> bool {
+		match self.state.write_unwanted() {
+			kio::Unwanted::Idle(guard) => {
 				commit_abort(guard, err).abort();
 				true
 			}
-			kio::Unused::Closed => true,
-			kio::Unused::Used => false,
+			kio::Unwanted::Closed => true,
+			kio::Unwanted::Wanted => false,
 		}
 	}
 
@@ -7522,8 +9210,6 @@ impl Request {
 	/// (`None` for the defaults). If the track was already aborted, the returned
 	/// [`Producer`] is inert: writes fail with the abort error, as if it had been
 	/// aborted immediately after accepting.
-	///
-	/// The same as [`Self::stage`] followed by [`Staged::commit`].
 	pub fn accept(self, info: impl Into<Option<Info>>) -> Producer {
 		self.stage(info).commit()
 	}
@@ -7534,21 +9220,19 @@ impl Request {
 	/// For a relay that already holds groups of the track: write them, then
 	/// [`Staged::commit`]. Dropping the [`Staged`] uncommitted rejects the request with
 	/// [`Error::Dropped`].
-	pub fn stage(self, info: impl Into<Option<Info>>) -> Staged {
+	pub(crate) fn stage(self, info: impl Into<Option<Info>>) -> Staged {
 		let info = info.into().unwrap_or_default();
 		// A closed state means the track was aborted under us. Mirror `reject` and
 		// tolerate it: the Producer we hand back simply can't write.
 		let open = match self.state.write() {
 			Ok(mut state) => {
-				state.accept(info.clone());
-				state.staged = true;
-				if let Some(floor) = self.requested_start {
+				state.stage(info.clone());
+				if let RequestedStart::Pending(floor) = self.requested_start {
 					state.set_start(floor, true);
 				}
 				if self.idle {
 					state.set_idle();
 				}
-				state.routes = self.routes;
 				true
 			}
 			Err(_) => false,
@@ -7585,7 +9269,7 @@ impl Request {
 	/// or `None` if nobody is waiting. Useful for sizing the track before accepting.
 	pub fn subscription(&self) -> Option<Subscription> {
 		let state = self.state.read();
-		let (subs, bound) = (state.subscriptions.clone(), state.max_age_bound());
+		let (subs, bound) = (state.subscriptions.clone(), state.demand_bound());
 		drop(state);
 		snapshot_subscription(&subs, bound)
 	}
@@ -7600,7 +9284,7 @@ impl Request {
 	/// Poll for a changed subscription.
 	pub fn poll_subscription_changed(&mut self, waiter: &kio::Waiter) -> Poll<Option<Subscription>> {
 		let state = self.state.read();
-		let (subs, bound) = (state.subscriptions.clone(), state.max_age_bound());
+		let (subs, bound) = (state.subscriptions.clone(), state.demand_bound());
 		drop(state);
 
 		poll_combined_changed(&subs, bound, &mut self.prev_subscription, waiter)
@@ -7664,13 +9348,44 @@ impl Subscriber {
 mod test {
 	use super::*;
 	use crate::frame;
-	use crate::model::test_tracing::count_drop_warnings;
+	use crate::test_tracing::count_drop_warnings;
 	use std::time::Duration;
 
 	/// Mint a track for tests with a default parent broadcast, since tracks are
-	/// normally born from a [`broadcast::Producer`].
+	/// normally born from a [`broadcast::Producer`]. `None` is an untimed track with no
+	/// publisher max age.
 	fn track_producer(name: impl Into<Arc<str>>, info: impl Into<Option<Info>>) -> Producer {
+		let info = info.into().unwrap_or_else(|| Info::default().with_max_age(None));
 		Producer::new(Arc::new(broadcast::Info::default()), name, info)
+	}
+
+	#[test]
+	fn drop_changes_follow_split_coalesced_and_recreated_runs() {
+		let producer = track_producer("test", Info::default());
+		let indexed = || {
+			let state = producer.state.read();
+			let mut changed: Vec<_> = state.drops_changes.since(0).collect();
+			changed.sort_by_key(|run| run.start);
+			let current: Vec<_> = state.drops.iter().map(|(run, _)| run.clone()).collect();
+			assert_eq!(changed, current, "one change entry per current drop run");
+		};
+		producer.drop_groups(10..20, StreamError::Old);
+		producer.drop_groups(20..30, StreamError::Old);
+		indexed();
+		producer.drop_groups(15..25, StreamError::Cancel);
+		indexed();
+		producer
+			.create_group(group::Info { sequence: 17 })
+			.unwrap()
+			.finish()
+			.unwrap();
+		indexed();
+		producer.drop_groups(14..26, StreamError::Old);
+		indexed();
+		assert_eq!(
+			producer.state.read().drops_changes.since(0).collect::<Vec<_>>(),
+			vec![10..30]
+		);
 	}
 
 	/// Let `duration` pass on the cache pool `producer`'s groups charge into.
@@ -7680,9 +9395,9 @@ mod test {
 
 	#[test]
 	fn a_missing_group_uses_the_subscription_grace() {
-		let producer = track_producer("test", Info::default());
+		let producer = track_producer("test", None);
 		let budget = Duration::from_millis(50);
-		let _sub = producer.subscribe(Subscription::default().with_max_delay(budget));
+		let _sub = producer.subscribe(Subscription::default().with_delay(Delay::default().with_max(budget)));
 		let feed = producer.consume();
 		let waiter = kio::Waiter::noop();
 		producer
@@ -7714,7 +9429,7 @@ mod test {
 
 	/// A bounded replay window for tests whose subject requires every buffered group.
 	fn replay() -> Subscription {
-		Subscription::default().with_max_delay(Duration::from_secs(30))
+		Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(30)))
 	}
 
 	/// Helper: count live cached groups in state.
@@ -7732,32 +9447,9 @@ mod test {
 			.unwrap()
 	}
 
-	/// Helper: non-blocking datagram receive that must be ready with a datagram.
-	#[cfg(feature = "async")]
-	fn recv_datagram(dg: &mut Subscriber) -> Datagram {
-		dg.recv_datagram()
-			.now_or_never()
-			.expect("datagram would have blocked")
-			.expect("would have errored")
-			.expect("track was closed")
-	}
-
-	#[test]
-	fn append_datagram_shares_group_sequence() {
-		let mut producer = track_producer("test", Info::timed());
-		let ts = Timestamp::from_millis(10).unwrap();
-
-		// Interleave groups and datagrams: they draw from one monotonic counter.
-		assert_eq!(producer.append_group().unwrap().sequence, 0);
-		assert_eq!(producer.append_datagram(ts, &b"a"[..]).unwrap(), 1);
-		assert_eq!(producer.append_group().unwrap().sequence, 2);
-		assert_eq!(producer.append_datagram(ts, &b"b"[..]).unwrap(), 3);
-		assert_eq!(producer.latest_sequence(), Some(3));
-	}
-
 	/// An empty group raises the largest at its head, so its first frame names nothing newer.
 	#[cfg(feature = "async")]
-	#[moq_clock::test]
+	#[kio::test]
 	async fn largest_streams_groups_and_frames_and_coalesces() {
 		let producer = track_producer("test", Info::default());
 		let mut subscriber = producer.subscribe(replay());
@@ -7802,7 +9494,7 @@ mod test {
 			.unwrap()
 			.finish()
 			.unwrap();
-		producer.finish_at(Position::group(6)).unwrap();
+		producer.finish_at(Position::group(6), None).unwrap();
 
 		let mut reader = producer.consume();
 		assert_eq!(reader.poll_largest(&noop), Poll::Ready(Some(Position::group(5))));
@@ -7825,7 +9517,7 @@ mod test {
 		let mut first = producer.create_group(group::Info { sequence: 0 }).unwrap();
 		first.write_frame(None, &b"a"[..]).unwrap();
 		first.abort(Error::Cancel).unwrap();
-		producer.finish_at(Position::group(1)).unwrap();
+		producer.finish_at(Position::group(1), None).unwrap();
 
 		let mut reader = producer.consume();
 		assert_eq!(reader.poll_largest(&noop), Poll::Ready(Some(Position::group(0))));
@@ -7846,21 +9538,48 @@ mod test {
 		assert_eq!(reader.poll_largest(&noop), Poll::Ready(None));
 	}
 
-	/// A datagram raises the largest like a group, at its only object.
-	#[test]
-	fn a_datagram_raises_the_largest() {
-		let mut producer = track_producer("test", Info::default());
-		producer.append_group().unwrap().finish().unwrap();
-		let sequence = producer.append_datagram(None, &b"d"[..]).unwrap();
-		assert_eq!(sequence, 1);
-		assert_eq!(producer.largest(), Some(Position::group(1)));
+	/// A copy a transport bound cut short finishes only its own range, so the largest group
+	/// may still grow and the stream stays open past the end.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_finished_bounded_copy_keeps_the_largest_open() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let noop = kio::Waiter::noop();
+		let mut first = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		first.write_frame(Timestamp::ZERO, &b"a"[..]).unwrap();
+		first.abort(Error::Cancel).unwrap();
+		producer.finish_at(Position::group(1), None).unwrap();
+
+		let mut reader = producer.consume();
+		assert_eq!(reader.poll_largest(&noop), Poll::Ready(Some(Position::group(0))));
+		let fetch = reader.fetch_range(
+			0,
+			FetchOptions {
+				options: group::Fetch::default(),
+				end: Some(1),
+			},
+		);
+		let mut bounded = dynamic
+			.requested_fill_group()
+			.await
+			.unwrap()
+			.accept(Info::timed())
+			.unwrap();
+		bounded.write_frame(Timestamp::ZERO, &b"a"[..]).unwrap();
+		bounded.finish().unwrap();
+		fetch.await.unwrap();
+		assert!(
+			reader.poll_largest(&noop).is_pending(),
+			"the bounded copy does not hold the whole group"
+		);
 	}
 
 	/// A reader that starts at the largest group while it is still empty is at the live edge:
 	/// it gets that group, which ends with nothing, then the next one.
 	#[test]
 	fn a_live_edge_reader_starts_on_an_empty_largest_group() {
-		let producer = track_producer("test", Info::default());
+		let producer = track_producer("test", None);
 		let noop = kio::Waiter::noop();
 		let mut first = producer.append_group().unwrap();
 		first.write_frame(None, &b"a"[..]).unwrap();
@@ -7936,7 +9655,7 @@ mod test {
 	}
 
 	#[cfg(feature = "async")]
-	#[moq_clock::test]
+	#[kio::test]
 	async fn largest_starts_with_the_sources_report() {
 		let producer = track_producer("test", Info::default());
 		let mut subscriber = producer.subscribe(replay());
@@ -7977,6 +9696,34 @@ mod test {
 		}
 	}
 
+	/// A read that found nothing parks again at once until something it parked on fires,
+	/// but parks anew for another task, which the next group then wakes instead.
+	#[test]
+	fn an_idle_read_parks_for_the_task_polling_it() {
+		for ordered in [false, true] {
+			let producer = track_producer("test", Info::default());
+			let mut first = framed(&producer, 0, 1);
+			first.finish().unwrap();
+			let mut reader = producer.subscribe(replay());
+			let mut read = |waiter: &kio::Waiter| match ordered {
+				true => reader.poll_group(true, waiter),
+				false => reader.poll_group(false, waiter),
+			};
+			let (flag, waiter) = Flag::waiter();
+			assert!(matches!(read(&waiter), Poll::Ready(Ok(Some(_)))));
+			assert!(read(&waiter).is_pending());
+			assert!(read(&waiter).is_pending(), "nothing fired, so it parks again");
+			assert!(!flag.take());
+
+			let (other, moved) = Flag::waiter();
+			assert!(read(&moved).is_pending());
+			let mut next = framed(&producer, 1, 1);
+			next.finish().unwrap();
+			assert!(other.take(), "the next group wakes the task that polled last");
+			assert!(matches!(read(&moved), Poll::Ready(Ok(Some(_)))));
+		}
+	}
+
 	/// Write group `sequence` with `frames` frames, left open.
 	fn framed(producer: &Producer, sequence: u64, frames: usize) -> group::Producer {
 		let mut group = producer.create_group(group::Info { sequence }).unwrap();
@@ -8013,7 +9760,7 @@ mod test {
 	/// aggregate.
 	#[test]
 	fn a_range_reads_only_its_groups() {
-		let producer = track_producer("test", Info::default());
+		let producer = track_producer("test", None);
 		let _groups: Vec<_> = (3..8)
 			.map(|sequence| {
 				let mut group = framed(&producer, sequence, 8);
@@ -8223,7 +9970,7 @@ mod test {
 		let mut producer = track_producer("test", Info::default());
 		let noop = kio::Waiter::noop();
 		let _groups: Vec<_> = (0..3).map(|sequence| framed(&producer, sequence, 1)).collect();
-		producer.finish_at(Position::group(10)).unwrap();
+		producer.finish_at(Position::group(10), None).unwrap();
 		producer.set_idle();
 
 		let mut reader = producer.subscribe(replay());
@@ -8268,7 +10015,7 @@ mod test {
 
 	/// A relay copy holding groups 0 to 3 from an ended feed, idle until its route answers.
 	fn idle_copy() -> Producer {
-		let mut producer = track_producer("test", Info::default());
+		let mut producer = track_producer("test", None);
 		for sequence in 0..4 {
 			framed(&producer, sequence, 1).finish().unwrap();
 		}
@@ -8340,7 +10087,7 @@ mod test {
 	#[test]
 	fn an_idle_copy_with_a_future_end_waits_for_the_live_feed() {
 		let mut producer = idle_copy();
-		producer.finish_at(Position::group(10)).unwrap();
+		producer.finish_at(Position::group(10), None).unwrap();
 		let mut live = producer.subscribe(replay().with_ranges([Range::live()]));
 		let mut oldest = producer.subscribe(replay());
 		assert_eq!(ready_groups(&mut live), Vec::<u64>::new(), "the copy is idle");
@@ -8366,210 +10113,28 @@ mod test {
 		assert_eq!(ready_groups(&mut reader), vec![3]);
 	}
 
-	/// A datagram can show the route's answer before any group does, as it does when a
-	/// datagram is the first thing the resumed feed sends. A relative start counts back
-	/// from that answer, not from the older groups cached below it.
+	/// A live join's answer anchors a relative start where it says the feed is, both for the
+	/// copy's readers and for the bounds sent upstream, even once a newer group lands before
+	/// the one it named.
 	#[test]
-	#[cfg(feature = "async")]
-	fn a_relative_start_on_an_idle_copy_counts_from_a_datagram_edge() {
-		let mut producer = idle_copy();
-		let mut reader = producer.subscribe(replay().with_ranges([Range::live()]));
-		producer
-			.insert_datagram(4, None, bytes::Bytes::from_static(b"x"))
-			.unwrap();
-		producer.set_live(Some(Position::group(4)), None);
-		assert_eq!(
-			ready_groups(&mut reader),
-			Vec::<u64>::new(),
-			"no group reached the edge"
-		);
-		assert_eq!(reader.floor(), Some(4), "the answer anchors the start");
+	fn a_relative_start_counts_from_the_answered_edge() {
+		let producer = track_producer("test", Info::default());
+		let back = Range {
+			start: super::super::subscription::Anchor::Relative(2),
+			end: None,
+		};
+		let mut reader = producer.subscribe(replay().with_ranges([back]));
+		producer.report_edge(4);
+		let upstream = producer.resolve_subscription(&replay().with_ranges([back])).unwrap();
+		assert_eq!(upstream.start(), Some(2), "the answer resolves the upstream bounds");
 
 		framed(&producer, 5, 1).finish().unwrap();
 		assert_eq!(ready_groups(&mut reader), vec![5]);
-	}
-
-	/// An idle copy forgets the edge its previous feed answered with, which only a datagram
-	/// it dropped showed: when it ends without going live, a relative start counts back
-	/// from its newest cached group.
-	#[test]
-	#[cfg(feature = "async")]
-	fn an_idle_copy_that_ends_forgets_an_earlier_datagram_edge() {
-		let mut producer = idle_copy();
-		producer
-			.insert_datagram(4, None, bytes::Bytes::from_static(b"x"))
-			.unwrap();
-		producer.set_live(Some(Position::group(4)), None);
-		producer.set_idle();
-		let mut reader = producer.subscribe(replay().with_ranges([Range::live()]));
-		assert_eq!(ready_groups(&mut reader), Vec::<u64>::new(), "the copy is idle");
-		producer.finish().unwrap();
-		assert_eq!(ready_groups(&mut reader), vec![3]);
-	}
-
-	#[test]
-	#[cfg(feature = "async")]
-	fn append_datagram_roundtrip() {
-		let mut producer = track_producer("test", Info::timed());
-		let mut dg = producer.subscribe(None);
-
-		let ts = Timestamp::from_millis(42).unwrap();
-		let seq = producer.append_datagram(ts, &b"hello"[..]).unwrap();
-
-		let got = recv_datagram(&mut dg);
-		assert_eq!(got.sequence, seq);
-		assert_eq!(got.timestamp, Some(ts));
-		assert_eq!(&got.payload[..], b"hello");
-	}
-
-	#[test]
-	#[cfg(feature = "async")]
-	fn insert_datagram_preserves_sequence() {
-		let mut producer = track_producer("test", Info::timed());
-		let mut dg = producer.subscribe(None);
-
-		let ts = Timestamp::from_millis(5).unwrap();
-		// A relay forwarding an upstream datagram keeps its sequence number.
-		producer
-			.insert_datagram(100, ts, bytes::Bytes::from_static(b"x"))
-			.unwrap();
-
-		assert_eq!(recv_datagram(&mut dg).sequence, 100);
-		// max_sequence advanced, so the next appended group/datagram continues past it.
-		assert_eq!(producer.append_group().unwrap().sequence, 101);
-	}
-
-	#[test]
-	#[cfg(feature = "async")]
-	fn insert_datagram_leaves_a_gap() {
-		let mut producer = track_producer("test", Info::timed());
-		let mut dg = producer.subscribe(None);
-		let ts = Timestamp::from_millis(0).unwrap();
-
-		producer
-			.insert_datagram(10, ts, bytes::Bytes::from_static(b"gap"))
-			.unwrap();
-		assert_eq!(recv_datagram(&mut dg).sequence, 10);
-		assert_eq!(producer.append_datagram(ts, &b"next"[..]).unwrap(), 11);
-		assert_eq!(producer.append_group().unwrap().sequence, 12);
-	}
-
-	#[test]
-	#[cfg(feature = "async")]
-	fn insert_datagram_out_of_order_does_not_rewind() {
-		let mut producer = track_producer("test", Info::timed());
-		let mut dg = producer.subscribe(None);
-		let ts = Timestamp::from_millis(0).unwrap();
-
-		producer
-			.insert_datagram(10, ts, bytes::Bytes::from_static(b"high"))
-			.unwrap();
-		producer
-			.insert_datagram(5, ts, bytes::Bytes::from_static(b"low"))
-			.unwrap();
-
-		assert_eq!(recv_datagram(&mut dg).sequence, 10);
-		assert_eq!(recv_datagram(&mut dg).sequence, 5);
-		assert_eq!(producer.append_datagram(ts, &b"next"[..]).unwrap(), 11);
-	}
-
-	#[test]
-	#[cfg(feature = "async")]
-	fn insert_datagram_duplicate_is_best_effort() {
-		let mut producer = track_producer("test", Info::timed());
-		let mut dg = producer.subscribe(None);
-		let ts = Timestamp::from_millis(0).unwrap();
-
-		producer
-			.insert_datagram(3, ts, bytes::Bytes::from_static(b"first"))
-			.unwrap();
-		producer
-			.insert_datagram(3, ts, bytes::Bytes::from_static(b"again"))
-			.unwrap();
-
-		assert_eq!(&recv_datagram(&mut dg).payload[..], b"first");
-		assert_eq!(&recv_datagram(&mut dg).payload[..], b"again");
-		assert_eq!(producer.append_datagram(ts, &b"next"[..]).unwrap(), 4);
-	}
-
-	#[test]
-	#[cfg(feature = "async")]
-	fn insert_datagram_stale_does_not_rewind_after_append() {
-		let mut producer = track_producer("test", Info::timed());
-		let mut dg = producer.subscribe(None);
-		let ts = Timestamp::from_millis(0).unwrap();
-
-		assert_eq!(producer.append_datagram(ts, &b"0"[..]).unwrap(), 0);
-		assert_eq!(producer.append_datagram(ts, &b"1"[..]).unwrap(), 1);
-		producer
-			.insert_datagram(0, ts, bytes::Bytes::from_static(b"stale"))
-			.unwrap();
-
-		assert_eq!(recv_datagram(&mut dg).sequence, 0);
-		assert_eq!(recv_datagram(&mut dg).sequence, 1);
-		assert_eq!(recv_datagram(&mut dg).sequence, 0);
-		assert_eq!(producer.append_datagram(ts, &b"2"[..]).unwrap(), 2);
-		assert_eq!(producer.append_group().unwrap().sequence, 3);
-	}
-
-	#[test]
-	#[cfg(feature = "async")]
-	fn insert_datagram_cloned_producers_share_counter() {
-		let mut producer = track_producer("test", Info::timed());
-		let mut other = producer.clone();
-		let mut dg = producer.subscribe(None);
-		let ts = Timestamp::from_millis(0).unwrap();
-
-		producer
-			.insert_datagram(4, ts, bytes::Bytes::from_static(b"a"))
-			.unwrap();
-		assert_eq!(other.append_datagram(ts, &b"b"[..]).unwrap(), 5);
-		other.insert_datagram(8, ts, bytes::Bytes::from_static(b"c")).unwrap();
-		assert_eq!(producer.append_group().unwrap().sequence, 9);
-
-		assert_eq!(recv_datagram(&mut dg).sequence, 4);
-		assert_eq!(recv_datagram(&mut dg).sequence, 5);
-		assert_eq!(recv_datagram(&mut dg).sequence, 8);
-	}
-
-	#[test]
-	fn insert_datagram_after_finish_is_closed() {
-		let mut producer = track_producer("test", Info::timed());
-		let ts = Timestamp::from_millis(0).unwrap();
-		producer.finish().unwrap();
-		assert!(matches!(
-			producer.insert_datagram(0, ts, bytes::Bytes::from_static(b"x")),
-			Err(Error::Closed)
-		));
-		assert!(matches!(producer.append_datagram(ts, &b"x"[..]), Err(Error::Closed)));
-	}
-
-	#[test]
-	fn insert_datagram_after_abort_fails() {
-		let producer = track_producer("test", Info::timed());
-		let mut other = producer.clone();
-		let ts = Timestamp::from_millis(0).unwrap();
-		producer.abort(Error::Cancel).unwrap();
-		assert!(other.insert_datagram(0, ts, bytes::Bytes::from_static(b"x")).is_err());
-	}
-
-	#[test]
-	fn insert_datagram_respects_finish_at() {
-		let mut producer = track_producer("test", Info::timed());
-		let ts = Timestamp::from_millis(0).unwrap();
-		producer.finish_at(Position::group(10)).unwrap();
-		producer
-			.insert_datagram(5, ts, bytes::Bytes::from_static(b"ok"))
-			.unwrap();
-		assert!(matches!(
-			producer.insert_datagram(10, ts, bytes::Bytes::from_static(b"late")),
-			Err(Error::Closed)
-		));
-		assert_eq!(producer.append_group().unwrap().sequence, 6);
+		assert_eq!(reader.floor(), Some(2), "the answer anchors the start");
 	}
 
 	/// A cached observer must not keep an unfinished writer alive or serve its dead copy.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn dropped_group_writer_aborts_and_releases_its_cached_copy() {
 		let pool = cache::Pool::unbounded();
 		let producer = track_producer_pooled("test", pool.clone());
@@ -8592,7 +10157,7 @@ mod test {
 		assert_eq!(pool.used(), 0);
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn dropped_group_writer_is_absent_and_its_sequence_can_be_recreated() {
 		let producer = track_producer("test", Info::timed());
 		let mut group = producer.create_group(group::Info { sequence: 3 }).unwrap();
@@ -8624,7 +10189,7 @@ mod test {
 		));
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn dropped_group_writer_preserves_the_committed_resume_position() {
 		let producer = track_producer("test", Info::timed());
 		let consumer = producer.consume();
@@ -8645,375 +10210,17 @@ mod test {
 		assert_eq!(consumer.resume_position(), Some(Position { group: 3, frame: 1 }));
 	}
 
-	/// Datagram sequence advances do not move a route takeover past an open group.
-	#[test]
-	fn resume_position_uses_the_latest_group() {
-		let mut datagram_only = track_producer("datagram-only", Info::timed());
-		let datagram_only_consumer = datagram_only.consume();
-		datagram_only
-			.insert_datagram(8, Timestamp::ZERO, bytes::Bytes::from_static(b"x"))
-			.unwrap();
-		assert_eq!(
-			datagram_only_consumer.resume_position(),
-			None,
-			"a datagram creates no group position to resume"
-		);
-
-		let mut producer = track_producer("mixed", Info::timed());
-		let consumer = producer.consume();
-		let mut group = producer.create_group(group::Info { sequence: 3 }).unwrap();
-		group
-			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"head"))
-			.unwrap();
-		producer
-			.insert_datagram(8, Timestamp::ZERO, bytes::Bytes::from_static(b"x"))
-			.unwrap();
-
-		assert_eq!(
-			consumer.resume_position(),
-			Some(Position { group: 3, frame: 1 }),
-			"the replacement must continue the open group"
-		);
-		group.abort(Error::Cancel).unwrap();
-	}
-
-	/// Datagrams and groups are separate channels that share only a sequence namespace,
-	/// so consuming one must not move the other's cursor.
-	#[test]
-	#[cfg(feature = "async")]
-	fn recv_datagram_leaves_the_ordered_cursor_alone() {
-		let mut producer = track_producer("test", Info::timed());
-		let mut datagrams = producer.subscribe(replay());
-		let mut subscriber = producer.subscribe(replay()).ordered();
-		let ts = Timestamp::from_millis(5).unwrap();
-
-		producer
-			.insert_datagram(5, ts, bytes::Bytes::from_static(b"x"))
-			.unwrap();
-		assert_eq!(recv_datagram(&mut datagrams).sequence, 5);
-
-		producer
-			.create_group(group::Info { sequence: 3 })
-			.unwrap()
-			.finish()
-			.unwrap();
-		producer
-			.create_group(group::Info { sequence: 6 })
-			.unwrap()
-			.finish()
-			.unwrap();
-
-		let mut next = || {
-			subscriber
-				.next_group()
-				.now_or_never()
-				.expect("group would have blocked")
-				.expect("would have errored")
-				.expect("track was closed")
-				.sequence
-		};
-		assert_eq!(next(), 3, "the datagram at sequence 5 did not consume group 3");
-		assert_eq!(next(), 6);
-	}
-
-	#[test]
-	#[cfg(feature = "async")]
-	fn datagram_normalized_to_track_timescale() {
-		let info = Info::default().with_timescale(Timescale::MICRO);
-		let mut producer = track_producer("test", info);
-		let mut dg = producer.subscribe(None);
-
-		// Supplied at millis; stored/emitted at the track's micro timescale.
-		producer
-			.append_datagram(Timestamp::from_millis(2).unwrap(), &b"z"[..])
-			.unwrap();
-		let got = recv_datagram(&mut dg);
-		assert_eq!(got.timestamp.unwrap().scale(), Timescale::MICRO);
-		assert_eq!(got.timestamp.unwrap().value(), 2_000);
-	}
-
-	#[test]
-	fn datagram_rejects_oversized() {
-		let mut producer = track_producer("test", Info::timed());
-		let big = bytes::Bytes::from(vec![0u8; crate::model::datagram::MAX_DATAGRAM_PAYLOAD + 1]);
-		let ts = Timestamp::from_millis(0).unwrap();
-		assert!(matches!(
-			producer.append_datagram(ts, big.clone()),
-			Err(Error::FrameTooLarge)
-		));
-		assert!(matches!(
-			producer.insert_datagram(0, ts, big),
-			Err(Error::FrameTooLarge)
-		));
-	}
-
-	#[test]
-	#[cfg(feature = "async")]
-	fn datagram_fanout_to_subscribers() {
-		let mut producer = track_producer("test", Info::timed());
-		// Two independent subscribers, each with its own datagram cursor.
-		let mut a = producer.subscribe(None);
-		let mut b = producer.subscribe(None);
-		let ts = Timestamp::from_millis(1).unwrap();
-
-		producer.append_datagram(ts, &b"first"[..]).unwrap();
-		producer.append_datagram(ts, &b"second"[..]).unwrap();
-
-		// Both receive every datagram in order, independently.
-		assert_eq!(&recv_datagram(&mut a).payload[..], b"first");
-		assert_eq!(&recv_datagram(&mut a).payload[..], b"second");
-		assert_eq!(&recv_datagram(&mut b).payload[..], b"first");
-		assert_eq!(&recv_datagram(&mut b).payload[..], b"second");
-	}
-
-	#[test]
-	#[cfg(feature = "async")]
-	fn datagram_replay_starts_within_max_delay() {
-		let info = Info::default().with_timescale(Timescale::MICRO);
-		let mut producer = track_producer("sparse", info);
-		let timestamps = [0, 179_949, 179_950, 180_000, 179_975];
-		for millis in timestamps {
-			producer
-				.append_datagram(Timestamp::from_millis(millis).unwrap(), b"x".as_slice())
-				.unwrap();
-			elapse(&producer, Duration::from_secs(1));
-		}
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_millis(50)));
-		// The edge is captured at attachment, not when the subscriber first reads.
-		producer
-			.append_datagram(Timestamp::from_secs(600).unwrap(), b"newer".as_slice())
-			.unwrap();
-		for sequence in [2, 3, 4, 5] {
-			assert_eq!(recv_datagram(&mut subscriber).sequence, sequence);
-		}
-		assert!(subscriber.poll_recv_datagram(&kio::Waiter::noop()).is_pending());
-
-		// The initial bound does not filter arrivals after attachment, even when they are old.
-		producer
-			.append_datagram(Timestamp::from_millis(0).unwrap(), b"later".as_slice())
-			.unwrap();
-		assert_eq!(recv_datagram(&mut subscriber).sequence, 6);
-	}
-
-	#[test]
-	#[cfg(feature = "async")]
-	fn datagram_replay_cutoff_between_track_units() {
-		// A 90 kHz unit doesn't divide the nanosecond cutoff, which lands inside unit 89_995.
-		let info = Info::default().with_timescale(Timescale::new(90_000).unwrap());
-		let mut producer = track_producer("video", info);
-		for units in [89_995, 89_996, 90_000] {
-			producer
-				.append_datagram(Timestamp::from_scale(units, 90_000).unwrap(), b"x".as_slice())
-				.unwrap();
-		}
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_micros(50)));
-		for sequence in [1, 2] {
-			assert_eq!(recv_datagram(&mut subscriber).sequence, sequence);
-		}
-		assert!(subscriber.poll_recv_datagram(&kio::Waiter::noop()).is_pending());
-	}
-
-	#[test]
-	#[cfg(feature = "async")]
-	fn datagram_replay_starts_after_evicted_entries_with_zero_delay() {
-		let mut producer = track_producer("test", Info::timed());
-		for _ in 0..MAX_DATAGRAMS + 1 {
-			producer.append_datagram(Timestamp::ZERO, b"old".as_slice()).unwrap();
-		}
-		let sequence = producer
-			.append_datagram(Timestamp::from_secs(180).unwrap(), b"new".as_slice())
-			.unwrap();
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::ZERO));
-		assert_eq!(recv_datagram(&mut subscriber).sequence, sequence);
-		assert!(subscriber.poll_recv_datagram(&kio::Waiter::noop()).is_pending());
-	}
-
-	#[test]
-	#[cfg(feature = "async")]
-	fn untimed_datagram_replay_keeps_the_buffer() {
-		let mut producer = untimed_producer();
-		// Far past the delay, but within the pool's idle window.
-		for _ in 0..3 {
-			producer.append_datagram(None, b"x".as_slice()).unwrap();
-			elapse(&producer, Duration::from_secs(5));
-		}
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::ZERO));
-		for sequence in 0..3 {
-			assert_eq!(recv_datagram(&mut subscriber).sequence, sequence);
-		}
-		assert!(subscriber.poll_recv_datagram(&kio::Waiter::noop()).is_pending());
-	}
-
-	#[test]
-	#[cfg(feature = "async")]
-	fn datagram_buffer_drops_oldest_at_capacity() {
-		let mut producer = track_producer("test", Info::timed());
-		let mut slow = producer.subscribe(None);
-		let mut fast = producer.subscribe(None);
-		let count = MAX_DATAGRAMS * 3;
-		for sequence in 0..count {
-			producer.append_datagram(Timestamp::ZERO, b"x".as_slice()).unwrap();
-			assert_eq!(recv_datagram(&mut fast).sequence, sequence as u64);
-		}
-		assert_eq!(producer.state.read().datagrams.len(), MAX_DATAGRAMS);
-		for sequence in count - MAX_DATAGRAMS..count {
-			assert_eq!(recv_datagram(&mut slow).sequence, sequence as u64);
-		}
-		assert!(slow.poll_recv_datagram(&kio::Waiter::noop()).is_pending());
-	}
-
-	#[test]
-	#[cfg(feature = "async")]
-	fn datagram_recv_pends_until_written() {
-		let mut producer = track_producer("test", Info::timed());
-		let mut dg = producer.subscribe(None);
-
-		assert!(
-			dg.recv_datagram().now_or_never().is_none(),
-			"should block with no datagrams"
-		);
-
-		producer
-			.append_datagram(Timestamp::from_millis(0).unwrap(), &b"go"[..])
-			.unwrap();
-		assert_eq!(&recv_datagram(&mut dg).payload[..], b"go");
-	}
-
-	/// A fetch never serves a datagram group, and says so rather than reporting a plain
-	/// miss, whether or not a group followed it.
-	#[test]
-	fn a_datagram_group_is_not_fetchable() {
-		let mut producer = track_producer("test", Info::timed());
-		let consumer = producer.consume();
-		let _subscriber = producer.subscribe(None);
-		let sequence = producer.append_datagram(Timestamp::ZERO, &b"x"[..]).unwrap();
-		let fetch = |sequence| consumer.fetch_group(sequence, None).now_or_never();
-		assert!(
-			matches!(fetch(sequence), Some(Err(Error::NotFetchable))),
-			"the newest sequence"
-		);
-
-		let _open = producer.append_group().unwrap();
-		assert!(
-			matches!(fetch(sequence), Some(Err(Error::NotFetchable))),
-			"below a newer group"
-		);
-		// A sequence that was never a datagram is a plain miss.
-		assert!(
-			matches!(fetch(sequence + 2), Some(Err(Error::NotFound))),
-			"a missing group"
-		);
-	}
-
 	/// A fill's end is exclusive, so the last sequence can't be asked of a handler: its fetch
 	/// fails at once rather than parking until every handler goes.
 	#[test]
 	#[cfg(feature = "async")]
 	fn the_last_sequence_misses_with_a_handler() {
 		let producer = track_producer("test", None);
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 		let fetch = consumer.fetch_group(u64::MAX, None).now_or_never();
 		assert!(matches!(fetch, Some(Err(Error::NotFound))));
 		assert!(dynamic.requested_fill().now_or_never().is_none(), "nothing to fill");
-	}
-
-	/// The subscription's floor and cap bound datagrams as they bound groups. The datagrams
-	/// in range, sent between the dropped ones, show the reader is live, so the range is
-	/// what dropped the others.
-	#[test]
-	#[cfg(feature = "async")]
-	fn the_group_range_bounds_datagrams() {
-		let mut producer = track_producer("test", Info::timed());
-		let mut subscriber = producer.subscribe(Subscription::default().with_start(5));
-		subscriber.set_range(..7);
-		for sequence in [4, 5, 7, 6] {
-			producer
-				.insert_datagram(sequence, Timestamp::ZERO, bytes::Bytes::from_static(b"x"))
-				.unwrap();
-		}
-
-		assert_eq!(recv_datagram(&mut subscriber).sequence, 5);
-		assert_eq!(recv_datagram(&mut subscriber).sequence, 6);
-		assert!(subscriber.poll_recv_datagram(&kio::Waiter::noop()).is_pending());
-	}
-
-	/// A range update judges the datagrams still buffered when they are read, and one it
-	/// dropped stays dropped once the cap rises again: nothing holds it like a parked group.
-	#[test]
-	#[cfg(feature = "async")]
-	fn a_range_update_applies_to_buffered_datagrams() {
-		let mut producer = track_producer("test", Info::timed());
-		let mut subscriber = producer.subscribe(None);
-		for sequence in 1..=4 {
-			producer
-				.insert_datagram(sequence, Timestamp::ZERO, bytes::Bytes::from_static(b"x"))
-				.unwrap();
-		}
-
-		subscriber.set_range(2..4);
-		assert_eq!(recv_datagram(&mut subscriber).sequence, 2);
-		assert_eq!(recv_datagram(&mut subscriber).sequence, 3);
-		assert!(subscriber.poll_recv_datagram(&kio::Waiter::noop()).is_pending());
-
-		subscriber.set_range(..);
-		assert!(subscriber.poll_recv_datagram(&kio::Waiter::noop()).is_pending());
-		producer
-			.insert_datagram(5, Timestamp::ZERO, bytes::Bytes::from_static(b"x"))
-			.unwrap();
-		assert_eq!(recv_datagram(&mut subscriber).sequence, 5);
-	}
-
-	/// Exercises the full producer -> publisher-encode -> subscriber-decode -> producer seam
-	/// (everything but the QUIC datagram send/recv), catching any field-order mismatch between
-	/// the wire codec and the model.
-	#[test]
-	#[cfg(feature = "async")]
-	fn datagram_wire_roundtrip_between_tracks() {
-		use crate::coding::Encode;
-		use crate::lite;
-
-		let version = lite::Version::Lite05;
-
-		// Origin publishes a datagram; the publisher reads it and encodes the wire body.
-		let mut origin = track_producer("test", Info::timed());
-		let mut origin_dg = origin.subscribe(None);
-		let ts = Timestamp::from_millis(7).unwrap();
-		let seq = origin.append_datagram(ts, &b"payload"[..]).unwrap();
-
-		let d = recv_datagram(&mut origin_dg);
-		let body = lite::Datagram {
-			subscribe: 5,
-			sequence: d.sequence,
-			timestamp: Some(d.timestamp.unwrap().value()),
-			payload: d.payload.clone(),
-			inflated: None,
-			ietf: None,
-		}
-		.encode_bytes(version)
-		.unwrap();
-
-		// Subscriber decodes the body and writes it downstream, preserving the sequence.
-		let wire = lite::Datagram::decode(body, version, false, |_| lite::Framing {
-			timescale: Some(crate::Timescale::MICRO),
-			ietf: None,
-			compressed: false,
-		})
-		.unwrap();
-		let mut downstream = track_producer("test", Info::timed());
-		let mut downstream_dg = downstream.subscribe(None);
-		downstream
-			.insert_datagram(
-				wire.sequence,
-				Timestamp::new(wire.timestamp.unwrap(), Timescale::MILLI).unwrap(),
-				wire.payload,
-			)
-			.unwrap();
-
-		let got = recv_datagram(&mut downstream_dg);
-		assert_eq!(got.sequence, seq);
-		assert_eq!(got.timestamp, Some(ts));
-		assert_eq!(&got.payload[..], b"payload");
 	}
 
 	#[test]
@@ -9052,10 +10259,10 @@ mod test {
 		}
 	}
 
-	/// A group whose frames outlive `max_age` is aged out when the next group starts, but
+	/// A group whose frames outlive the pool's LRU window is aged out when the next group starts, but
 	/// a subscriber that already drained it must still see the clean end of group. Otherwise a
 	/// track with long groups (a per-minute rollup, say) fails its readers at every boundary.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn aging_out_a_finished_group_keeps_the_clean_end() {
 		let producer = track_producer("test", Info::timed());
@@ -9078,7 +10285,7 @@ mod test {
 	/// An actively-read group is not expired out from under its reader: every frame
 	/// read restarts the retention clock. A group nobody reads still ages out on
 	/// schedule, so reclamation stays intact.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn active_reader_survives_expiry() {
 		let producer = track_producer("test", Info::timed());
@@ -9116,7 +10323,7 @@ mod test {
 	/// alive: the batch is filled (and stamped) once per `Prefetch::CAP` frames,
 	/// which bounds frames, not elapsed time, so a slow `read_frame` reader has to
 	/// re-stamp on a time bound between refills.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn slow_prefetch_reader_survives_expiry() {
 		let producer = track_producer("test", Info::timed());
@@ -9145,7 +10352,7 @@ mod test {
 	/// Receiving a group is itself a cache access: a subscriber that takes
 	/// delivery just before the group would age out still gets to read it a full
 	/// window later.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn delivery_restarts_the_expiry_clock() {
 		let producer = track_producer("test", Info::timed());
@@ -9241,7 +10448,7 @@ mod test {
 
 	/// Re-offering a parked group (once the cap rises) is a delivery: it restarts
 	/// the expiry clock so the subscriber gets to read what it was just handed.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn parked_reoffer_restarts_the_expiry_clock() {
 		let producer = track_producer("test", Info::timed());
@@ -9508,34 +10715,6 @@ mod test {
 		assert!(expired, "a streamed chunk runs expiry");
 	}
 
-	#[test]
-	fn appended_datagram_expires_idle_groups() {
-		let mut producer = track_producer_expiring("test", Duration::from_secs(1));
-		producer.append_group().unwrap().finish().unwrap(); // seq 0
-		producer.append_group().unwrap().finish().unwrap(); // seq 1
-
-		elapse(&producer, Duration::from_secs(2));
-		producer.append_datagram(Timestamp::ZERO, b"x".as_slice()).unwrap();
-
-		let expired = !producer.state.read().lookup.contains_key(&0);
-		assert!(expired, "an appended datagram runs expiry");
-	}
-
-	#[test]
-	fn forwarded_datagram_expires_idle_groups() {
-		let mut producer = track_producer_expiring("test", Duration::from_secs(1));
-		producer.append_group().unwrap().finish().unwrap(); // seq 0
-		producer.append_group().unwrap().finish().unwrap(); // seq 1
-
-		elapse(&producer, Duration::from_secs(2));
-		producer
-			.insert_datagram(2, Timestamp::ZERO, bytes::Bytes::from_static(b"x"))
-			.unwrap();
-
-		let expired = !producer.state.read().lookup.contains_key(&0);
-		assert!(expired, "a forwarded datagram runs expiry");
-	}
-
 	/// A stalled track keeps its newest group and gives up the ones before it by the wall
 	/// clock: `max_age` measures how long ago each group's successor arrived as well as
 	/// media time, so a publisher that stops writing cannot pin its superseded groups.
@@ -9568,7 +10747,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn frozen_timestamps_still_age_out_by_wall_clock() {
 		let mut producer = track_producer("test", Info::timed());
-		let budget = Subscription::default().with_max_delay(Duration::from_secs(1));
+		let budget = Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(1)));
 		append_at(&mut producer, 0);
 		elapse(&producer, Duration::from_millis(500));
 		append_at(&mut producer, 0);
@@ -9595,17 +10774,18 @@ mod test {
 
 		// Group N reaches N + 1 seconds against the 4s edge: groups 0 and 1 are 3s and 2s
 		// behind, past 1.5s. Their successors arrived just now.
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_millis(1500)));
+		let mut subscriber = producer
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(1500))));
 		assert_eq!(drain(&mut subscriber), vec![2, 3, 4]);
 	}
 
 	/// A read parked on a superseded group is released by the wall clock alone: nothing is
 	/// written after its successor arrives, so no write could wake it. That holds whether a
 	/// driver collected the pool before the read parked or only after.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_parked_read_wakes_at_its_wall_deadline() {
-		for (info, primed) in [Info::default(), Info::timed()]
+		for (info, primed) in [Info::default().with_max_age(None), Info::timed()]
 			.into_iter()
 			.flat_map(|info| [(info.clone(), true), (info, false)])
 		{
@@ -9614,7 +10794,8 @@ mod test {
 			if primed {
 				elapse(&producer, Duration::ZERO);
 			}
-			let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(1)));
+			let mut subscriber = producer
+				.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(1))));
 			let mut held = producer.append_group().unwrap();
 			held.write_frame(at, bytes::Bytes::from_static(b"x")).unwrap();
 			let mut reading = subscriber.assert_group();
@@ -9651,14 +10832,15 @@ mod test {
 
 	/// A successor whose header landed but whose first frame never does still starts the
 	/// wall clock, so a relay ages the group before it as the origin does.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_frameless_successor_ages_its_predecessor() {
-		for info in [Info::default(), Info::timed()] {
+		for info in [Info::default().with_max_age(None), Info::timed()] {
 			let producer = track_producer("test", info.clone());
 			let at = info.timescale.map(|_| Timestamp::ZERO);
 			elapse(&producer, Duration::ZERO);
-			let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(1)));
+			let mut subscriber = producer
+				.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(1))));
 			let mut held = producer.append_group().unwrap();
 			held.write_frame(at, bytes::Bytes::from_static(b"x")).unwrap();
 			let mut reading = subscriber.assert_group();
@@ -9692,7 +10874,7 @@ mod test {
 	fn an_evicted_group_is_judged_by_its_evicted_successor() {
 		let mut producer = track_producer_expiring("test", cache::DEFAULT_EXPIRY);
 		let budget = cache::DEFAULT_EXPIRY * 2;
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(budget));
+		let mut subscriber = producer.subscribe(Subscription::default().with_delay(Delay::default().with_max(budget)));
 		let waiter = kio::Waiter::noop();
 		let expired = |held: &mut [group::Consumer; 2]| held.each_mut().map(|group| group.poll_expired(&waiter));
 
@@ -9709,8 +10891,8 @@ mod test {
 				.unwrap(),
 		];
 		for group in &mut held {
-			assert!(group.read_frame().now_or_never().unwrap().unwrap().is_some());
-			assert!(group.read_frame().now_or_never().unwrap().unwrap().is_none());
+			assert!(matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
+			assert!(matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(None))));
 		}
 		assert_eq!(expired(&mut held), [false; 2], "the newest group");
 
@@ -9751,7 +10933,7 @@ mod test {
 	fn a_reclaimed_failed_successor_hands_the_clock_on() {
 		let mut producer = track_producer_expiring("test", cache::DEFAULT_EXPIRY);
 		let budget = cache::DEFAULT_EXPIRY * 2;
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(budget));
+		let mut subscriber = producer.subscribe(Subscription::default().with_delay(Delay::default().with_max(budget)));
 		let waiter = kio::Waiter::noop();
 		let expired = |held: &mut [group::Consumer; 2]| held.each_mut().map(|group| group.poll_expired(&waiter));
 
@@ -9767,8 +10949,8 @@ mod test {
 				.unwrap(),
 		];
 		for group in &mut held {
-			assert!(group.read_frame().now_or_never().unwrap().unwrap().is_some());
-			assert!(group.read_frame().now_or_never().unwrap().unwrap().is_none());
+			assert!(matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
+			assert!(matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(None))));
 		}
 
 		let failed = producer.append_group().unwrap();
@@ -9799,13 +10981,13 @@ mod test {
 		let pool = cache::Pool::new(cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY));
 		let mut producer = track_producer_pooled("test", pool.clone());
 		let budget = cache::DEFAULT_EXPIRY * 2;
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(budget));
+		let mut subscriber = producer.subscribe(Subscription::default().with_delay(Delay::default().with_max(budget)));
 		let waiter = kio::Waiter::noop();
 
 		append_at(&mut producer, 0);
 		let mut held = subscriber.assert_group();
-		assert!(held.read_frame().now_or_never().unwrap().unwrap().is_some());
-		assert!(held.read_frame().now_or_never().unwrap().unwrap().is_none());
+		assert!(matches!(held.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
+		assert!(matches!(held.poll_read_frame(&waiter), Poll::Ready(Ok(None))));
 
 		pool.step(Duration::from_secs(1));
 		append_at(&mut producer, 0); // the successor
@@ -9838,7 +11020,7 @@ mod test {
 	fn a_run_of_empty_groups_ages_out_by_wall_clock() {
 		const RUN: u64 = 1000;
 		let mut producer = track_producer("test", Info::timed());
-		let budget = Subscription::default().with_max_delay(Duration::from_secs(1));
+		let budget = Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(1)));
 		let mut subscriber = producer.subscribe(budget.clone());
 		append_at(&mut producer, 0);
 		let mut open = Vec::new();
@@ -9872,32 +11054,33 @@ mod test {
 
 	#[test]
 	fn max_delay_clamped_to_cache() {
-		let producer = track_producer("test", Info::timed().with_max_age(Duration::from_secs(2)));
+		let producer = track_producer_capped("test", Info::timed(), Duration::from_secs(2));
 
 		// A max delay budget beyond the cache is capped in the aggregate; a group can't be
-		// waited for longer than the publisher keeps it. The subscriber's own preference
+		// waited for longer than the cache keeps it. The subscriber's own preference
 		// is stored verbatim, so what it asked for stays readable.
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(10)));
-		assert_eq!(subscriber.subscription().max_delay, Some(Duration::from_secs(10)));
-		assert_eq!(producer.subscription().unwrap().max_delay, Some(Duration::from_secs(2)));
+		let mut subscriber =
+			producer.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10))));
+		assert_eq!(subscriber.subscription().delay.max, Some(Duration::from_secs(10)));
+		assert_eq!(producer.subscription().unwrap().delay.max, Some(Duration::from_secs(2)));
 
 		// A budget within the cache is left alone, and ZERO (skip immediately) stays ZERO.
 		subscriber
-			.update(Subscription::default().with_max_delay(Duration::from_millis(500)))
+			.update(Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(500))))
 			.unwrap();
 		assert_eq!(
-			producer.subscription().unwrap().max_delay,
+			producer.subscription().unwrap().delay.max,
 			Some(Duration::from_millis(500))
 		);
 
 		subscriber
-			.update(Subscription::default().with_max_delay(Duration::ZERO))
+			.update(Subscription::default().with_delay(Delay::default().with_max(Duration::ZERO)))
 			.unwrap();
-		assert_eq!(producer.subscription().unwrap().max_delay, Some(Duration::ZERO));
+		assert_eq!(producer.subscription().unwrap().delay.max, Some(Duration::ZERO));
 	}
 
-	/// Mint a track under an origin whose retention ceiling is `cap`, so the
-	/// local delivery budget is capped without rewriting the publisher's window.
+	/// Mint a track under an origin whose max age ceiling is `cap`, so the
+	/// local delivery budget is capped without rewriting the publisher's max age.
 	fn track_producer_capped(name: impl Into<Arc<str>>, info: Info, cap: Duration) -> Producer {
 		Producer::new(
 			Arc::new(broadcast::Info {
@@ -9909,8 +11092,26 @@ mod test {
 		)
 	}
 
+	/// A fill that lands before the track's metadata installs provisional info with no
+	/// publisher max age: the real bound is unknown, and an authored track's zero would
+	/// refuse history an unlimited publisher still serves.
+	#[test]
+	fn a_fill_before_metadata_claims_no_max_age() {
+		let state = TrackState::spawn(Arc::new(broadcast::Info::default()));
+		let _group = state
+			.write()
+			.ok()
+			.unwrap()
+			.insert_group_request(0, group::Bounds::default(), None)
+			.unwrap();
+		let state = state.read();
+		assert_eq!(state.info.as_ref().unwrap().max_age, None);
+		assert_eq!(state.max_age_bound(), None);
+	}
+
 	#[test]
 	fn optional_age_keeps_publisher_metadata_and_local_policy_separate() {
+		assert_eq!(Info::default().max_age, Some(Duration::ZERO));
 		assert_eq!(Info::timed().max_age, None);
 		for age in [None, Some(Duration::ZERO), Some(Duration::from_secs(30))] {
 			let producer = track_producer_capped("optional", Info::timed().with_max_age(age), Duration::from_secs(1));
@@ -9964,31 +11165,67 @@ mod test {
 
 	#[test]
 	fn max_delay_clamped_via_every_update_path() {
-		let producer = track_producer("test", Info::timed().with_max_age(Duration::from_secs(2)));
-		let over = Subscription::default().with_max_delay(Duration::from_secs(10));
+		let producer = track_producer_capped("test", Info::timed(), Duration::from_secs(2));
+		let over = Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10)));
 
 		// The clamp lives in the aggregation, so it applies no matter which entry point
 		// wrote the raw preference. Previously only `Subscriber::update` clamped.
 		let mut subscriber = producer.subscribe(over.clone());
-		assert_eq!(producer.subscription().unwrap().max_delay, Some(Duration::from_secs(2)));
+		assert_eq!(producer.subscription().unwrap().delay.max, Some(Duration::from_secs(2)));
 
 		subscriber.control().update(over.clone()).unwrap();
-		assert_eq!(producer.subscription().unwrap().max_delay, Some(Duration::from_secs(2)));
+		assert_eq!(producer.subscription().unwrap().delay.max, Some(Duration::from_secs(2)));
 
 		subscriber.update(over).unwrap();
-		assert_eq!(producer.subscription().unwrap().max_delay, Some(Duration::from_secs(2)));
+		assert_eq!(producer.subscription().unwrap().delay.max, Some(Duration::from_secs(2)));
 	}
 
 	#[test]
 	fn max_delay_aggregate_clamps_across_subscribers() {
-		let producer = track_producer("test", Info::timed().with_max_age(Duration::from_secs(2)));
+		let producer = track_producer_capped("test", Info::timed(), Duration::from_secs(2));
 
 		// The aggregate takes the max, then clamps once. Equivalent to clamping each
 		// subscriber first, since `min` distributes over `max`.
-		let _a = producer.subscribe(Subscription::default().with_max_delay(Duration::from_millis(500)));
-		let _b = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(10)));
+		let _a = producer
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(500))));
+		let _b =
+			producer.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10))));
 
-		assert_eq!(producer.subscription().unwrap().max_delay, Some(Duration::from_secs(2)));
+		assert_eq!(producer.subscription().unwrap().delay.max, Some(Duration::from_secs(2)));
+	}
+
+	/// The publisher enforces its own max age, so the demand asked of it is the subscribers'
+	/// own, and a request asks for the same before and after its info lands.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn the_aggregate_is_not_clamped_to_the_publisher_max_age() {
+		let broadcast = broadcast::Info {
+			cache_duration: Duration::from_secs(30),
+			..Default::default()
+		}
+		.produce();
+		let mut dynamic = broadcast.requests();
+		let consumer = broadcast.consume();
+		let mut waiting = std::pin::pin!(
+			consumer
+				.track("test")
+				.unwrap()
+				.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(60))))
+		);
+		assert!(futures::poll!(waiting.as_mut()).is_pending());
+		let request = dynamic.requested_track().await.unwrap();
+		// Capped by the local ceiling alone.
+		let before = request.subscription().unwrap().delay.max;
+		assert_eq!(before, Some(Duration::from_secs(30)));
+
+		let producer = request.accept(Info::timed().with_max_age(Duration::from_secs(2)));
+		assert_eq!(producer.subscription().unwrap().delay.max, before);
+		assert_eq!(producer.state.read().max_age_bound(), Some(Duration::from_secs(2)));
+		// A session's tail still waits for a late group no longer than the publisher keeps it,
+		// even for a subscriber that defers to the max age alone.
+		assert_eq!(producer.tail_grace(Duration::from_secs(60)), Duration::from_secs(2));
+		assert_eq!(producer.tail_grace(Duration::MAX), Duration::from_secs(2));
+		waiting.await.unwrap();
 	}
 
 	#[test]
@@ -10073,8 +11310,265 @@ mod test {
 			.write_frame(Timestamp::from_millis(533).unwrap(), bytes::Bytes::from_static(b""))
 			.unwrap();
 
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_millis(400)));
+		let mut subscriber = producer
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(400))));
 		assert_eq!(drain(&mut subscriber), vec![2]);
+		// A one-shot fetch still serves that cache: an unknown reach is no proof
+		// that the requested group exceeded the fetch's budget.
+		let mut fetched = producer
+			.consume()
+			.fetch_group(0, group::Fetch::default().with_max_delay(Duration::from_millis(400)))
+			.now_or_never()
+			.expect("the cache answers")
+			.expect("cached fetch");
+		assert!(fetched.read_frame().now_or_never().unwrap().unwrap().is_some());
+	}
+
+	/// An old gap below a resumed cache's floor never hides a fresh group still owed
+	/// above it: an ordered finite-budget reader must wait for that fresh group.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_unjudgeable_gap_does_not_hide_a_fresh_ordered_gap() {
+		let mut producer = track_producer("test", None);
+		producer.received();
+		for sequence in [0, 4] {
+			framed(&producer, sequence, 1).finish().unwrap();
+		}
+		producer.set_idle();
+		let mut reader = producer.subscribe(
+			Subscription::default()
+				.with_delay(Delay::default().with_max(Duration::from_millis(400)))
+				.with_range(0..),
+		);
+		producer.set_live(Some(Position::group(8)), None);
+		for sequence in [6, 8] {
+			framed(&producer, sequence, 1).finish().unwrap();
+		}
+		assert_eq!(read_now(&mut reader, true), None, "group 5 is still owed");
+		framed(&producer, 5, 1).finish().unwrap();
+		assert_eq!(read_now(&mut reader, true), Some(Some(5)));
+		assert_eq!(read_now(&mut reader, true), Some(Some(6)));
+	}
+
+	/// Cache pressure can make one missing run span the old cache floor. A finite
+	/// reader gives up only the unjudgeable prefix, keeping the fresh suffix's fill.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_fill_crossing_the_cache_floor_keeps_its_fresh_suffix() {
+		let budget = Duration::from_millis(400);
+		for cached in [false, true] {
+			let mut producer = track_producer("test", Info::default());
+			let requests = producer.requests();
+			producer.received();
+			for sequence in 0..3 {
+				framed(&producer, sequence, 1).finish().unwrap();
+			}
+			producer.set_idle();
+			producer.start_at(6).unwrap();
+			producer.set_live(Some(Position::group(6)), None);
+			framed(&producer, 6, 1).finish().unwrap();
+			if !cached {
+				for sequence in 0..3 {
+					evict(&producer, sequence);
+				}
+			}
+			let mut reader = producer.subscribe(
+				Subscription::default()
+					.with_delay(Delay::default().with_max(budget))
+					.with_range(0..6),
+			);
+			let waiter = kio::Waiter::noop();
+			assert_eq!(read_now(&mut reader, false), None);
+			let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
+				panic!("cached: {cached}: missing history must be requested");
+			};
+			assert_eq!(
+				(fill.start().group, fill.end()),
+				(3, 6),
+				"only fresh history is fetched"
+			);
+			assert_eq!(read_now(&mut reader, false), None, "the fill is still owed");
+			assert_eq!(fill.wanted(), Some(5), "the fresh suffix stays wanted");
+			for sequence in 3..6 {
+				let mut group = fill.accept(sequence, None).unwrap();
+				group.write_frame(None, &b"x"[..]).unwrap();
+				group.finish().unwrap();
+			}
+			let mut got = Vec::new();
+			loop {
+				match read_now(&mut reader, false) {
+					Some(Some(sequence)) => got.push(sequence),
+					Some(None) => break,
+					None => panic!("cached: {cached}: the bounded read still owes history"),
+				}
+			}
+			got.sort_unstable();
+			assert_eq!(got, [3, 4, 5], "cached: {cached}");
+		}
+	}
+
+	/// A budget narrowed while a fill is outstanding raises the cache floor through the
+	/// fill's wanted run. Only the unjudgeable prefix is given up; the fresh suffix stays
+	/// wanted and is delivered once the fill answers.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_floor_raised_under_an_asked_fill_keeps_its_fresh_suffix() {
+		let mut producer = track_producer("test", Info::default().with_max_age(None));
+		let requests = producer.requests();
+		producer.received();
+		for sequence in 0..3 {
+			framed(&producer, sequence, 1).finish().unwrap();
+		}
+		producer.set_idle();
+		producer.start_at(6).unwrap();
+		producer.set_live(Some(Position::group(6)), None);
+		framed(&producer, 6, 1).finish().unwrap();
+		for sequence in 0..3 {
+			evict(&producer, sequence);
+		}
+		let unlimited = Subscription::default()
+			.with_delay(Delay::default().with_max(None))
+			.with_range(0..6);
+		let mut reader = producer.subscribe(unlimited.clone());
+		let waiter = kio::Waiter::noop();
+		assert_eq!(read_now(&mut reader, true), None);
+		let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
+			panic!("missing history must be requested");
+		};
+		assert_eq!(
+			(fill.start().group, fill.end()),
+			(0, 6),
+			"unlimited history is fetched whole"
+		);
+		assert!(reader.poll_drop(&waiter).is_pending());
+
+		reader
+			.update(unlimited.with_delay(Delay::default().with_max(Duration::from_millis(400))))
+			.unwrap();
+		assert_eq!(read_now(&mut reader, true), None, "the fresh suffix is still owed");
+		assert_eq!(
+			reader.poll_drop(&waiter),
+			Poll::Ready((0..3, StreamError::NotFound)),
+			"the unjudgeable prefix is given up"
+		);
+		assert!(fill.wanted().is_some(), "the fresh suffix stays wanted");
+		for sequence in 3..6 {
+			let mut group = fill.accept(sequence, None).unwrap();
+			group.write_frame(None, &b"x"[..]).unwrap();
+			group.finish().unwrap();
+		}
+		for sequence in 3..6 {
+			assert_eq!(read_now(&mut reader, true), Some(Some(sequence)));
+		}
+		assert_eq!(read_now(&mut reader, true), Some(None));
+	}
+
+	/// A finite budget skips the cache below the floor at once, so a copy handing over
+	/// waits on none of it; an unlimited read still owes it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn the_cache_below_the_floor_is_unread_only_to_unlimited_reads() {
+		let mut producer = track_producer("test", Info::default().with_max_age(None));
+		producer.received();
+		for sequence in 0..3 {
+			framed(&producer, sequence, 1).finish().unwrap();
+		}
+		producer.set_idle();
+		producer.set_live(Some(Position::group(6)), None);
+		framed(&producer, 6, 1).finish().unwrap();
+		let delivered = Delivered::default();
+		let unread = Unread {
+			start: 0,
+			end: Some(6),
+			delivered: &delivered,
+		};
+		for (max, owed) in [(Some(Duration::from_millis(400)), false), (None, true)] {
+			let reader = producer.subscribe(
+				Subscription::default()
+					.with_delay(Delay::default().with_max(max))
+					.with_range(0..),
+			);
+			assert_eq!(reader.has_unread_group(&unread), owed, "max delay {max:?}");
+		}
+	}
+
+	/// A finite reader selects a group below the floor, then judges it with the lock
+	/// released in between. An eviction in that window must not turn the skip into a delivery.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_evicted_group_below_the_floor_stays_stale() {
+		let mut producer = track_producer("test", Info::default());
+		producer.received();
+		framed(&producer, 0, 1).finish().unwrap();
+		producer.set_idle();
+		producer.set_live(Some(Position::group(6)), None);
+		framed(&producer, 6, 1).finish().unwrap();
+		evict(&producer, 0);
+		let state = producer.state.read();
+		let edge = state.drift_edge(&Servable::ALL);
+		assert!(state.is_stale(0, &edge, Duration::from_millis(400)));
+		assert!(
+			!state.is_stale(0, &edge, Duration::MAX),
+			"unlimited history still owes it"
+		);
+	}
+
+	/// An idle cache's old groups and the holes after them stay owed by unlimited reads.
+	/// A refused run reports every missing sequence and releases a bounded reader, while
+	/// an open reader keeps receiving the live feed. Both cursor orders use the same rule.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_resumed_history_read_accounts_for_cached_and_refused_groups() {
+		for ordered in [false, true] {
+			for bounded in [false, true] {
+				let mut producer = track_producer("test", Info::default().with_max_age(None));
+				let requests = producer.requests();
+				producer.received();
+				framed(&producer, 0, 1).finish().unwrap();
+				producer.set_idle();
+				let subscription = Subscription::default()
+					.with_delay(Delay::default().with_max(None))
+					.with_range((
+						Bound::Included(0),
+						if bounded { Bound::Excluded(3) } else { Bound::Unbounded },
+					));
+				let mut reader = producer.subscribe(subscription);
+				let waiter = kio::Waiter::noop();
+				assert!(reader.poll_drop(&waiter).is_pending());
+				assert_eq!(read_now(&mut reader, ordered), None, "the copy is idle");
+
+				producer.start_at(3).unwrap();
+				producer.set_live(Some(Position::group(3)), None);
+				framed(&producer, 3, 1).finish().unwrap();
+				assert_eq!(read_now(&mut reader, ordered), Some(Some(0)), "cached history");
+				// An arrival-order reader may take the live group before its history.
+				if !bounded && !ordered {
+					assert_eq!(read_now(&mut reader, ordered), Some(Some(3)));
+				}
+				assert_eq!(read_now(&mut reader, ordered), None, "the missing run is owed");
+				let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
+					panic!("the missing history was never requested");
+				};
+				assert_eq!((fill.start(), fill.end()), (Position::group(1), 3));
+				fill.refuse_groups(1..3, Error::Unsupported);
+				assert!(
+					reader.poll_drop(&waiter).is_pending(),
+					"a late live arrival may still answer"
+				);
+				elapse(&producer, ledger::GRACE);
+				assert_eq!(reader.poll_drop(&waiter), Poll::Ready((1..3, StreamError::NotFound)));
+				assert!(reader.poll_drop(&waiter).is_pending(), "each drop is reported once");
+				if bounded {
+					assert_eq!(read_now(&mut reader, ordered), Some(None), "nothing remains owed");
+				} else {
+					if ordered {
+						assert_eq!(read_now(&mut reader, ordered), Some(Some(3)));
+					}
+					framed(&producer, 4, 1).finish().unwrap();
+					assert_eq!(read_now(&mut reader, ordered), Some(Some(4)), "the feed survives");
+				}
+			}
+		}
 	}
 
 	/// The cancel that idles a copy resets the group in flight, which the publisher never
@@ -10146,7 +11640,8 @@ mod test {
 		for second in 0..5 {
 			append_at(&mut producer, second * 1000);
 		}
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(1)));
+		let mut subscriber =
+			producer.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(1))));
 		assert_eq!(
 			subscriber
 				.recv_group()
@@ -10175,7 +11670,8 @@ mod test {
 		edge.write_frame(Timestamp::from_millis(2000).unwrap(), bytes::Bytes::from_static(b"a"))
 			.unwrap();
 
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(2)));
+		let mut subscriber =
+			producer.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(2))));
 		assert_eq!(
 			subscriber
 				.recv_group()
@@ -10206,7 +11702,8 @@ mod test {
 		// edge (2s, 3s, 4s) and drops the two below it. Group 1 reaches exactly 2s behind
 		// the edge, and the reach bound is exclusive, so every frame it could hold is
 		// already past the budget.
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(2)));
+		let mut subscriber =
+			producer.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(2))));
 		assert_eq!(drain(&mut subscriber), vec![2, 3, 4]);
 	}
 
@@ -10252,7 +11749,7 @@ mod test {
 		// edge, so the same join is handed the head of what it can still use. One bound
 		// decides both what is sent and what is expired, so a subscriber is never sent
 		// history it would discard on arrival.
-		let budget = Subscription::default().with_max_delay(Duration::from_secs(2));
+		let budget = Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(2)));
 		let mut subscriber = producer.subscribe(budget);
 		assert_eq!(drain(&mut subscriber), vec![2, 3, 4]);
 	}
@@ -10275,14 +11772,14 @@ mod test {
 		// A budget reaching further back than the floor is cut off at it.
 		let floored = Subscription::default()
 			.with_start(3)
-			.with_max_delay(Duration::from_secs(10));
+			.with_delay(Delay::default().with_max(Duration::from_secs(10)));
 		let mut subscriber = producer.subscribe(floored);
 		assert_eq!(drain(&mut subscriber), vec![3, 4]);
 
 		// A floor below what the budget admits changes nothing.
 		let slack = Subscription::default()
 			.with_start(1)
-			.with_max_delay(Duration::from_secs(2));
+			.with_delay(Delay::default().with_max(Duration::from_secs(2)));
 		let mut subscriber = producer.subscribe(slack);
 		assert_eq!(drain(&mut subscriber), vec![2, 3, 4]);
 	}
@@ -10299,7 +11796,7 @@ mod test {
 		// cursor sits at the floor rather than sliding back to what is cached.
 		let resumed = Subscription::default()
 			.with_start(7)
-			.with_max_delay(Duration::from_secs(10));
+			.with_delay(Delay::default().with_max(Duration::from_secs(10)));
 		let mut subscriber = producer.subscribe(resumed);
 		assert_eq!(drain(&mut subscriber), Vec::<u64>::new());
 		append_at(&mut producer, 3000); // sequence 3: still below the floor
@@ -10322,7 +11819,8 @@ mod test {
 			group.finish().unwrap();
 		}
 
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(5)));
+		let mut subscriber =
+			producer.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(5))));
 		assert_eq!(drain(&mut subscriber), vec![5, 6, 7]);
 
 		// Arriving below everything already delivered is not what makes content stale:
@@ -10346,7 +11844,8 @@ mod test {
 			append_at(&mut producer, second * 1000);
 		}
 
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_millis(1500)));
+		let mut subscriber = producer
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(1500))));
 		assert_eq!(drain(&mut subscriber), vec![1, 2, 3]);
 	}
 
@@ -10364,7 +11863,7 @@ mod test {
 		assert_eq!(drain(&mut subscriber), vec![1]);
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_handed_out_group_expires_while_its_first_frame_is_stalled() {
 		let mut producer = track_producer("test", Info::timed());
@@ -10372,8 +11871,8 @@ mod test {
 		let _writer_1 = producer.append_group().unwrap();
 
 		let mut stalled = subscriber.recv_group().await.unwrap().expect("stalled group");
-		let pending = moq_clock::sim::spawn(async move { stalled.read_frame().await });
-		moq_clock::sim::yield_now().await;
+		let pending = kio::clock::sim::spawn(async move { stalled.read_frame().await });
+		kio::clock::sim::yield_now().await;
 		assert!(
 			!pending.is_finished(),
 			"the empty live edge still waits for its first frame"
@@ -10391,11 +11890,12 @@ mod test {
 	/// to be woken by it. The conviction needs a group beyond the held one's successor:
 	/// a group is bounded by where its successor begins, so the successor itself never
 	/// proves it stale.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_handed_out_group_wakes_when_a_newer_group_gets_its_first_timestamp() {
 		let mut producer = track_producer("test", Info::timed());
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_millis(500)));
+		let mut subscriber = producer
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(500))));
 		let mut old = producer.append_group().unwrap();
 		old.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"old"))
 			.unwrap();
@@ -10407,8 +11907,8 @@ mod test {
 		assert!(held.read_frame().await.unwrap().is_some());
 
 		let mut live = producer.append_group().unwrap();
-		let pending = moq_clock::sim::spawn(async move { held.read_frame().await });
-		moq_clock::sim::yield_now().await;
+		let pending = kio::clock::sim::spawn(async move { held.read_frame().await });
+		kio::clock::sim::yield_now().await;
 		assert!(!pending.is_finished(), "the newer group has no timestamp yet");
 
 		// 2s edge against group 0's 1s reach: a full second past the budget.
@@ -10417,7 +11917,7 @@ mod test {
 			bytes::Bytes::from_static(b"live"),
 		)
 		.unwrap();
-		moq_clock::sim::yield_now().await;
+		kio::clock::sim::yield_now().await;
 
 		assert!(pending.is_finished(), "the new presentation edge wakes the held reader");
 		// Drained but never finished, so the budget fails the group.
@@ -10443,7 +11943,8 @@ mod test {
 		const FRAME: u64 = 2500; // micros, one Opus frame per group
 		const PARKED: u64 = 64;
 		let producer = track_producer("test", Info::timed());
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_millis(200)));
+		let mut subscriber = producer
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(200))));
 		// Left open, so every read parks instead of ending.
 		let _open: Vec<_> = (0..PARKED)
 			.map(|i| {
@@ -10520,7 +12021,8 @@ mod test {
 	#[cfg(feature = "async")]
 	fn a_parked_read_wakes_only_once_the_edge_reaches_its_deadline() {
 		let mut producer = track_producer("test", Info::timed());
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(10)));
+		let mut subscriber =
+			producer.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10))));
 		let mut head = producer.append_group().unwrap();
 		head.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"head"))
 			.unwrap();
@@ -10572,13 +12074,94 @@ mod test {
 		);
 	}
 
+	/// A batch must notify expiry at its highest PTS even when its decode-order tail is lower.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_reordered_batch_wakes_the_group_pts_drift_deadline() {
+		let mut producer = track_producer("test", Info::timed());
+		let mut subscriber =
+			producer.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10))));
+		let mut head = producer.append_group().unwrap();
+		head.write_frame(Timestamp::from_millis(0).unwrap(), bytes::Bytes::new())
+			.unwrap();
+		append_at(&mut producer, 1000);
+		let mut edge = producer.append_group().unwrap();
+		edge.write_frame(Timestamp::from_millis(2000).unwrap(), bytes::Bytes::new())
+			.unwrap();
+		let mut held = subscriber.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		assert!(held.read_frame().now_or_never().unwrap().unwrap().is_some());
+		let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let waker = futures::task::waker(Arc::new(FlagWake(woken.clone())));
+		let mut cx = std::task::Context::from_waker(&waker);
+		let mut next = std::pin::pin!(held.read_frame());
+		assert!(next.as_mut().poll(&mut cx).is_pending());
+		let mut frames = crate::frame::Buffer::<2>::new();
+		for ms in [11_000, 10_000] {
+			frames
+				.push(crate::frame::Frame::new(
+					Timestamp::from_millis(ms).unwrap(),
+					bytes::Bytes::new(),
+				))
+				.unwrap();
+		}
+		edge.write_frames(&mut frames).unwrap();
+		assert!(
+			woken.load(Ordering::SeqCst),
+			"the batch's highest PTS reaches the deadline"
+		);
+		assert!(matches!(next.as_mut().poll(&mut cx), Poll::Ready(Err(Error::Old))));
+		head.finish().unwrap();
+		edge.finish().unwrap();
+	}
+
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_adopted_high_pts_wakes_the_group_drift_deadline() {
+		let mut producer = track_producer("test", Info::timed());
+		let mut subscriber =
+			producer.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10))));
+		let mut old = producer.append_group().unwrap();
+		old.write_frame(Timestamp::from_millis(0).unwrap(), bytes::Bytes::new())
+			.unwrap();
+		append_at(&mut producer, 1000);
+		let mut edge = producer.append_group().unwrap();
+		edge.start_at(2).unwrap();
+		edge.write_frame(Timestamp::from_millis(2000).unwrap(), bytes::Bytes::new())
+			.unwrap();
+		let mut held = subscriber.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		assert!(held.read_frame().now_or_never().unwrap().unwrap().is_some());
+		let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let waker = futures::task::waker(Arc::new(FlagWake(woken.clone())));
+		let mut cx = std::task::Context::from_waker(&waker);
+		let mut next = std::pin::pin!(held.read_frame());
+		assert!(next.as_mut().poll(&mut cx).is_pending());
+		let mut prefix = group::Info { sequence: 2 }.produce();
+		for ms in [1500, 11_000] {
+			prefix
+				.write_frame(Timestamp::from_millis(ms).unwrap(), bytes::Bytes::new())
+				.unwrap();
+		}
+		let head = prefix.consume().handoff().head().unwrap();
+		edge.handle().adopt_head(&head);
+		assert_eq!(edge.handle().latest(), Some(Timestamp::from_millis(11_000).unwrap()));
+		assert!(
+			woken.load(Ordering::SeqCst),
+			"the adopted prefix reaches the drift deadline"
+		);
+		assert!(matches!(next.as_mut().poll(&mut cx), Poll::Ready(Err(Error::Old))));
+		old.finish().unwrap();
+		edge.finish().unwrap();
+		prefix.finish().unwrap();
+	}
+
 	/// An aborted edge hands the edge to a group between it and the successor, and neither
 	/// the abort nor that group's frames touch the track, so the read must still wake.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_parked_read_watches_its_edge_abort() {
 		let mut producer = track_producer("test", crate::track::Info::timed());
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(5)));
+		let mut subscriber =
+			producer.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(5))));
 		let mut head = producer.append_group().unwrap();
 		head.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"head"))
 			.unwrap();
@@ -10628,7 +12211,8 @@ mod test {
 	#[cfg(feature = "async")]
 	fn a_parked_read_watches_the_replacement_for_an_aborted_successor() {
 		let mut producer = track_producer("test", Info::timed());
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_millis(500)));
+		let mut subscriber = producer
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(500))));
 		let mut head = producer.append_group().unwrap();
 		head.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"head"))
 			.unwrap();
@@ -10683,7 +12267,8 @@ mod test {
 	#[cfg(feature = "async")]
 	fn a_parked_read_watches_its_overtaken_edge_abort() {
 		let mut producer = track_producer("test", crate::track::Info::timed());
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(5)));
+		let mut subscriber =
+			producer.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(5))));
 		let mut head = producer.append_group().unwrap();
 		head.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"head"))
 			.unwrap();
@@ -10731,7 +12316,8 @@ mod test {
 	#[cfg(feature = "async")]
 	fn revealing_a_presented_group_wakes_a_read_it_expires() {
 		let mut producer = track_producer("test", Info::timed());
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_millis(500)));
+		let mut subscriber = producer
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(500))));
 		let mut head = producer.append_group().unwrap();
 		head.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"head"))
 			.unwrap();
@@ -10777,8 +12363,9 @@ mod test {
 	#[cfg(feature = "async")]
 	fn a_frameless_group_does_not_count_as_content() {
 		let mut producer = track_producer("test", crate::track::Info::timed());
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(60)));
-		producer.finish_at(Position::group(2)).unwrap();
+		let mut subscriber =
+			producer.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(60))));
+		producer.finish_at(Position::group(2), None).unwrap();
 		let mut received: Vec<_> = (0..2)
 			.map(|sequence| producer.create_group(group::Info { sequence }).unwrap())
 			.collect();
@@ -10830,13 +12417,14 @@ mod test {
 
 	/// A frameless group whose stream ends with no frame, cleanly or reset, ends its readers
 	/// with it, and the track's end follows.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_frameless_group_that_ends_empty_ends_its_readers() {
 		for abort in [false, true] {
 			let mut producer = track_producer("test", None);
-			let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(60)));
-			producer.finish_at(Position::group(1)).unwrap();
+			let mut subscriber = producer
+				.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(60))));
+			producer.finish_at(Position::group(1), None).unwrap();
 			let mut group = producer.create_group(group::Info { sequence: 0 }).unwrap();
 			let mut reading = subscriber.assert_group();
 			assert_eq!(reading.sequence, 0);
@@ -10848,7 +12436,7 @@ mod test {
 					true => group.abort(Error::Cancel).unwrap(),
 					false => group.finish().unwrap(),
 				}
-				moq_clock::timeout(Duration::from_secs(1), next)
+				kio::clock::timeout(Duration::from_secs(1), next)
 					.await
 					.expect("the end wakes the reader")
 			};
@@ -10869,7 +12457,7 @@ mod test {
 	/// and the next group's first frame are separate events and the wire does not order
 	/// them. A zero budget gives up there, and the group fails with [`Error::Old`] since
 	/// its producer never finished it, but only after the reader took every frame.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn real_time_reads_a_live_stream_without_truncating_it() {
 		let producer = track_producer("test", Info::timed());
@@ -10935,6 +12523,41 @@ mod test {
 		assert_eq!(read, vec![(0, 2), (1, 2), (2, 2), (3, 2)], "every frame of every group");
 	}
 
+	/// Decode-order B-frames cannot rewind the presentation edge and re-admit an old group.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_reordered_tail_keeps_the_group_pts_drift_verdict() {
+		for reordered in [false, true] {
+			let producer = track_producer("test", Info::timed());
+			let mut subscriber = producer
+				.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(80))));
+			for ms in [0, 100] {
+				let mut group = producer.append_group().unwrap();
+				group
+					.write_frame(Timestamp::from_millis(ms).unwrap(), bytes::Bytes::new())
+					.unwrap();
+				group.finish().unwrap();
+			}
+			let mut edge = producer.append_group().unwrap();
+			for ms in [150, 200] {
+				edge.write_frame(Timestamp::from_millis(ms).unwrap(), bytes::Bytes::new())
+					.unwrap();
+			}
+			if reordered {
+				edge.write_frame(Timestamp::from_millis(160).unwrap(), bytes::Bytes::new())
+					.unwrap();
+			}
+			edge.finish().unwrap();
+			// Group 0 can reach 100ms: 100ms behind the 200ms edge, past its 80ms budget.
+			// Group 1 can reach 150ms and stays within the same budget.
+			assert_eq!(
+				subscriber.recv_group().await.unwrap().unwrap().sequence,
+				1,
+				"reordered {reordered}"
+			);
+		}
+	}
+
 	/// A budget is spent from where the reader stands, not from where its group opened.
 	///
 	/// A 2s GOP with a 1s budget: the reader has drained to 1900ms when the next group
@@ -10944,11 +12567,12 @@ mod test {
 	///
 	/// Measuring from the group's first frame instead makes the drift 2000ms, so a
 	/// budget shorter than one GOP would drop the tail of every GOP.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_budget_is_measured_from_the_readers_position() {
 		let producer = track_producer("test", Info::timed());
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(1)));
+		let mut subscriber =
+			producer.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(1))));
 
 		let mut open = producer.append_group().unwrap();
 		open.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"key"))
@@ -10990,7 +12614,7 @@ mod test {
 
 	/// A drained group the budget gives up on fails with [`Error::Old`] on every probe,
 	/// including [`group::Consumer::finished`]: the producer never finished it.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn an_expired_group_stays_old_when_probed_again() {
 		let mut producer = track_producer("test", Info::timed());
@@ -11002,13 +12626,13 @@ mod test {
 		let mut group = subscriber.recv_group().await.unwrap().expect("group");
 		assert!(group.read_frame().await.unwrap().is_some());
 
-		let probes = moq_clock::sim::spawn(async move {
+		let probes = kio::clock::sim::spawn(async move {
 			let first = group.read_frame().await;
 			let second = group.read_frame().await;
 			let finished = group.finished().await;
 			(first, second, finished)
 		});
-		moq_clock::sim::yield_now().await;
+		kio::clock::sim::yield_now().await;
 
 		append_at(&mut producer, 1000);
 
@@ -11018,7 +12642,7 @@ mod test {
 		assert!(matches!(finished, Err(Error::Old)), "never finished: {finished:?}");
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_drained_group_finishes_cleanly_after_the_live_edge_advances() {
 		let mut producer = track_producer("test", Info::timed());
@@ -11033,7 +12657,7 @@ mod test {
 		assert!(group.read_frame().await.unwrap().is_none());
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_handed_out_partial_frame_expires_while_its_payload_is_stalled() {
 		let mut producer = track_producer("test", Info::timed());
@@ -11053,8 +12677,8 @@ mod test {
 			frame.read_chunk().await.unwrap(),
 			Some(bytes::Bytes::from_static(b"old"))
 		);
-		let pending = moq_clock::sim::spawn(async move { frame.read_chunk().await });
-		moq_clock::sim::yield_now().await;
+		let pending = kio::clock::sim::spawn(async move { frame.read_chunk().await });
+		kio::clock::sim::yield_now().await;
 		assert!(!pending.is_finished(), "the partial payload is still stalled");
 
 		elapse(&producer, Duration::from_secs(1));
@@ -11072,8 +12696,8 @@ mod test {
 	#[cfg(feature = "async")]
 	fn max_age_bounds_the_budget() {
 		// The publisher only keeps a group around for 500ms, so a subscriber asking to
-		// wait ten seconds for one still gives up at 500ms: the same clamp the aggregate
-		// applies, on the subscriber's own side of it.
+		// wait ten seconds for one still gives up at 500ms: the window the publisher
+		// applies to the aggregate, on the subscriber's own side of it.
 		let mut producer = track_producer("test", Info::timed().with_max_age(Duration::from_millis(500)));
 		append_at(&mut producer, 0);
 		append_at(&mut producer, 1000);
@@ -11081,8 +12705,50 @@ mod test {
 
 		// Group 0 reaches 1s, a full second behind the 2s edge, so the clamped 500ms
 		// budget drops it. An unclamped ten seconds would have kept it.
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(10)));
+		let mut subscriber =
+			producer.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10))));
 		assert_eq!(drain(&mut subscriber), vec![1, 2]);
+	}
+
+	/// An authored track's default zero max age serves only the live edge: a superseded group is
+	/// stale at once, even to a reader with no budget of its own, while the newest group, a
+	/// snapshot a late joiner bootstraps from, never goes stale. A longer history is the
+	/// publisher's explicit choice.
+	#[test]
+	#[cfg(feature = "async")]
+	fn the_default_max_age_serves_only_the_live_edge() {
+		let history = || Subscription::default().with_delay(Delay::default().with_max(None));
+
+		// Timed: a successor at the same instant already supersedes.
+		let mut timed = track_producer("timed", Info::default().with_timescale(Timescale::MILLI));
+		append_at(&mut timed, 0);
+		append_at(&mut timed, 0);
+		assert_eq!(drain(&mut timed.subscribe(history())), vec![1]);
+
+		// Untimed: the wall clock agrees, and an hour on the unchanged newest group still
+		// bootstraps a late joiner.
+		let mut untimed = track_producer("untimed", Info::default());
+		append_untimed(&mut untimed);
+		append_untimed(&mut untimed);
+		assert_eq!(drain(&mut untimed.subscribe(history())), vec![1]);
+		elapse(&untimed, Duration::from_secs(3600));
+		assert_eq!(drain(&mut untimed.subscribe(None)), vec![1]);
+		assert_eq!(drain(&mut untimed.subscribe(history())), vec![1]);
+
+		// An explicit age keeps superseded groups fresh that long; explicit `None` keeps them all.
+		let mut explicit = track_producer(
+			"explicit",
+			Info::default()
+				.with_timescale(Timescale::MILLI)
+				.with_max_age(Duration::from_secs(30)),
+		);
+		let mut unlimited = track_producer("unlimited", Info::timed());
+		for millis in [0, 1_000, 31_000] {
+			append_at(&mut explicit, millis);
+			append_at(&mut unlimited, millis);
+		}
+		assert_eq!(drain(&mut explicit.subscribe(history())), vec![1, 2]);
+		assert_eq!(drain(&mut unlimited.subscribe(history())), vec![0, 1, 2]);
 	}
 
 	#[test]
@@ -11102,7 +12768,7 @@ mod test {
 		let mut patient = producer.subscribe(
 			Subscription::default()
 				.with_start(0)
-				.with_max_delay(Duration::from_secs(10)),
+				.with_delay(Delay::default().with_max(Duration::from_secs(10))),
 		);
 		patient.set_range(0..);
 		assert_eq!(drain(&mut patient), vec![0, 1, 2, 3]);
@@ -11126,7 +12792,8 @@ mod test {
 		append_at(&mut producer, 2000);
 
 		// A budget far shorter than the group's own span still keeps it.
-		let mut sub = producer.subscribe(Subscription::default().with_max_delay(Duration::from_millis(500)));
+		let mut sub = producer
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(500))));
 		assert_eq!(drain(&mut sub), vec![0, 1]);
 	}
 
@@ -11151,7 +12818,8 @@ mod test {
 		append_at(&mut producer, 3000);
 		append_at(&mut producer, 4000);
 
-		let mut sub = producer.subscribe(Subscription::default().with_max_delay(Duration::from_millis(500)));
+		let mut sub = producer
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(500))));
 		assert_eq!(drain(&mut sub), vec![1, 2]);
 	}
 
@@ -11163,7 +12831,8 @@ mod test {
 	fn a_frameless_successor_leaves_the_next_started_group_as_the_bound() {
 		let mut producer = track_producer("test", Info::timed());
 		// Any budget, so only media time judges: the wall clock stands still here.
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_millis(500)));
+		let mut subscriber = producer
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(500))));
 
 		append_at(&mut producer, 0); // seq 0
 		let _writer_1 = producer.append_group().unwrap(); // seq 1 stalls before its first frame
@@ -11220,7 +12889,8 @@ mod test {
 
 		// Four seconds after group 4 arrived, groups 0 to 2 were superseded 4, 3, and 2
 		// seconds ago: past a 1.5s budget. Group 3 was superseded 1s ago.
-		let mut patient = producer.subscribe(Subscription::default().with_max_delay(Duration::from_millis(1500)));
+		let mut patient = producer
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(1500))));
 		assert_eq!(drain(&mut patient), vec![3, 4]);
 		// No budget takes the newest group alone, which is never stale.
 		let mut live = producer.subscribe(None);
@@ -11273,62 +12943,6 @@ mod test {
 			Err(Error::TimestampMismatch)
 		));
 		assert_eq!(producer.append_group().unwrap().sequence, 0);
-	}
-
-	/// A track is all timed or all untimed, so a datagram that doesn't match it is refused.
-	#[test]
-	fn a_mismatched_datagram_is_refused() {
-		let mut untimed = track_producer("untimed", Info::default().with_timescale(None));
-		assert!(matches!(
-			untimed.append_datagram(Timestamp::ZERO, &b"x"[..]),
-			Err(Error::TimestampMismatch)
-		));
-		untimed.append_datagram(None, &b"x"[..]).unwrap();
-
-		let mut timed = track_producer("timed", Info::timed());
-		assert!(matches!(
-			timed.append_datagram(None, &b"x"[..]),
-			Err(Error::TimestampMismatch)
-		));
-		assert!(matches!(
-			timed.insert_datagram(5, None, &b"x"[..]),
-			Err(Error::TimestampMismatch)
-		));
-	}
-
-	/// Datagrams are unordered by construction, so the sequence cursor carries them too:
-	/// a track using both channels needs one subscription, not two.
-	#[test]
-	#[cfg(feature = "async")]
-	fn ordered_carries_datagrams() {
-		let mut producer = track_producer("test", Info::timed());
-		let mut sub = producer.subscribe(None).ordered();
-
-		producer
-			.insert_datagram(5, Timestamp::from_millis(5).unwrap(), bytes::Bytes::from_static(b"x"))
-			.unwrap();
-		producer
-			.create_group(group::Info { sequence: 3 })
-			.unwrap()
-			.finish()
-			.unwrap();
-
-		let datagram = sub
-			.recv_datagram()
-			.now_or_never()
-			.expect("datagram would have blocked")
-			.expect("would have errored")
-			.expect("track was closed");
-		assert_eq!(datagram.sequence, 5);
-
-		// The datagram did not consume the group cursor.
-		let group = sub
-			.next_group()
-			.now_or_never()
-			.expect("group would have blocked")
-			.expect("would have errored")
-			.expect("track was closed");
-		assert_eq!(group.sequence, 3);
 	}
 
 	/// A subscriber read by either cursor, so one test covers both.
@@ -11405,7 +13019,7 @@ mod test {
 		// Group 0 reaches 1s, a full 2s behind the 3s edge, so it is gone. Group 1
 		// reaches 2s and could still present up to it: inside a 1.5s budget.
 		let mut subscriber = producer
-			.subscribe(Subscription::default().with_max_delay(Duration::from_millis(1500)))
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(1500))))
 			.ordered();
 		assert_eq!(drain_ordered(&mut subscriber), vec![1, 2, 3]);
 
@@ -11426,7 +13040,7 @@ mod test {
 
 		// Groups 0 and 1 reach at most 10s, a second behind the edge: convicted.
 		let mut subscriber = producer
-			.subscribe(Subscription::default().with_max_delay(Duration::from_millis(500)))
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(500))))
 			.ordered();
 		assert_eq!(drain_ordered(&mut subscriber), vec![2, 3]);
 	}
@@ -11489,7 +13103,7 @@ mod test {
 	#[test]
 	fn cold_fetch_expires_without_waiting_for_the_upstream_group() {
 		let mut producer = track_producer("test", Info::timed());
-		let _dynamic = producer.dynamic();
+		let _dynamic = producer.requests();
 		let mut successor = producer.create_group(group::Info { sequence: 1 }).unwrap();
 		successor
 			.write_frame(Timestamp::from_millis(1000).unwrap(), bytes::Bytes::from_static(b"x"))
@@ -11504,7 +13118,7 @@ mod test {
 		));
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn fetched_group_keeps_its_budget_while_reading() {
 		let mut producer = track_producer("test", Info::timed());
@@ -11517,8 +13131,8 @@ mod test {
 		let mut fetched = consumer.fetch_group(0, options).await.unwrap();
 		assert!(fetched.read_frame().await.unwrap().is_some());
 
-		let pending = moq_clock::sim::spawn(async move { fetched.read_frame().await });
-		moq_clock::sim::yield_now().await;
+		let pending = kio::clock::sim::spawn(async move { fetched.read_frame().await });
+		kio::clock::sim::yield_now().await;
 		elapse(&producer, Duration::from_secs(1));
 		append_at(&mut producer, 1000);
 		append_at(&mut producer, 2000);
@@ -11575,7 +13189,7 @@ mod test {
 	fn a_fetch_only_cache_is_not_live() {
 		let waiter = kio::Waiter::noop();
 		let request = Request::new(Arc::new(broadcast::Info::default()), "test");
-		let dynamic = request.dynamic();
+		let dynamic = request.requests();
 		let consumer = request.consume();
 		let mut pending = consumer.fetch_group(2, None);
 		let Poll::Ready(Ok(req)) = dynamic.poll_requested_fill_group(&waiter) else {
@@ -11609,11 +13223,11 @@ mod test {
 
 	/// A one-shot fetch populates the shared cache but never the live arrival cursor,
 	/// so it cannot make content available to a subscription look stale.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn fetched_group_is_not_a_live_drift_edge() {
 		let mut producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 		append_at(&mut producer, 0);
 
@@ -11651,6 +13265,7 @@ mod test {
 		let state = producer.state.read();
 		let drift = Drift {
 			budget: Duration::ZERO,
+			bounded: false,
 			edge: state.drift_edge(&Servable::ALL),
 		};
 		assert!(
@@ -11660,7 +13275,7 @@ mod test {
 		drop(state);
 
 		// The edge dies between resolving it and judging the candidate.
-		let slot = producer.modify().unwrap().lookup.remove(&edge).unwrap();
+		let slot = producer.modify().unwrap().remove_slot(edge).unwrap();
 		let _ = slot.group.abort(Error::Evicted);
 
 		let state = producer.state.read();
@@ -11743,11 +13358,11 @@ mod test {
 	/// A group handed out before the ranges moved above it is judged against the new run,
 	/// not a cached group below its start: here group 1 would put group 0 18s behind the
 	/// edge, past the budget, where the run's own group 10 puts it 9s behind.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_held_group_is_judged_against_the_moved_run() {
 		let at = |millis| Timestamp::from_millis(millis).unwrap();
-		let budget = Subscription::default().with_max_delay(Duration::from_secs(15));
+		let budget = Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(15)));
 		let producer = track_producer("test", Info::timed());
 		let mut subscriber = producer.subscribe(budget.clone());
 		let mut zero = producer.create_group(group::Info { sequence: 0 }).unwrap();
@@ -11762,8 +13377,8 @@ mod test {
 			group.finish().unwrap();
 		}
 
-		let pending = moq_clock::sim::spawn(async move { held.read_frame().await });
-		moq_clock::sim::yield_now().await;
+		let pending = kio::clock::sim::spawn(async move { held.read_frame().await });
+		kio::clock::sim::yield_now().await;
 		assert!(!pending.is_finished(), "group 0 is within the budget of its run");
 	}
 
@@ -11775,7 +13390,7 @@ mod test {
 		for ordered in [false, true] {
 			let mut producer = track_producer("test", Info::timed());
 			let subscription = Subscription::default()
-				.with_max_delay(Duration::ZERO)
+				.with_delay(Delay::default().with_max(Duration::ZERO))
 				.with_ranges([Range {
 					start: Anchor::Absolute(0),
 					end: Some(Anchor::Relative(0)),
@@ -11794,13 +13409,13 @@ mod test {
 			append_at(&mut producer, 0);
 			append_at(&mut producer, 1000);
 			let res = match ordered {
-				true => cursor.poll_next_with(true, 0, drift, &waiter),
-				false => cursor.poll_recv_with(true, drift, &waiter),
+				true => cursor.poll_next_with(0, drift, &waiter),
+				false => cursor.poll_recv_with(drift, &waiter),
 			};
-			let Poll::Ready(Ok(Some(group))) = res else {
+			let Poll::Ready(Ok(Some(peeked))) = res else {
 				panic!("group 0 is the newest group its range reads (ordered: {ordered})");
 			};
-			assert_eq!(group.sequence, 0);
+			assert_eq!(peeked.group.sequence, 0);
 		}
 	}
 
@@ -11844,6 +13459,152 @@ mod test {
 		}
 	}
 
+	/// A search over a layered servable window, through the reader's index of the live
+	/// groups and the layer's runs, finds what a scan of every live group would, in either
+	/// direction, as groups arrive, start, abort, leave the cache, or arrive again between
+	/// searches that keep the same index. Each window is searched on two tracks, as a
+	/// group's expiry that moved to a replacement copy searches its reader's.
+	#[test]
+	fn layered_searches_match_a_scan_of_every_live_group() {
+		// A small deterministic generator, so a failure replays.
+		let seed = std::cell::Cell::new(0x2545_f491_4f6c_dd1d_u64);
+		let next = |bound: u64| {
+			let mut x = seed.get();
+			x ^= x << 13;
+			x ^= x >> 7;
+			x ^= x << 17;
+			seed.set(x);
+			x % bound
+		};
+		const SEQUENCES: u64 = 40;
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		for round in 0..300 {
+			let producers = [
+				track_producer("test", Info::timed()),
+				track_producer("copy", Info::timed()),
+			];
+			let runs = |count: u64| -> Runs {
+				Runs::new((0..next(count + 1)).map(|_| {
+					let start = next(SEQUENCES);
+					start..=start + next(5)
+				}))
+			};
+			let fixed = Arc::new(runs(8));
+			let mut groups = [Vec::new(), Vec::new()];
+			let mut servable = Servable::NONE;
+			for step in 0..30 {
+				let sequence = next(SEQUENCES);
+				let track = next(2) as usize;
+				let (producer, groups) = (&producers[track], &mut groups[track]);
+				match next(6) {
+					0 | 1 => {
+						if let Ok(mut group) = producer.create_group(group::Info { sequence }) {
+							if next(3) > 0 {
+								group
+									.write_frame(at(sequence * 10), bytes::Bytes::from_static(b"x"))
+									.unwrap();
+							}
+							groups.push(group);
+						}
+					}
+					2 => {
+						if let Some(index) = groups.iter().position(|group| group.sequence == sequence) {
+							let _ = groups.swap_remove(index).abort(Error::Cancel);
+						}
+					}
+					3 => {
+						let _ = producer.modify().unwrap().uncache(sequence);
+					}
+					_ => {}
+				}
+				// Now and then the window's walks move, keeping the fixed runs and their index.
+				if step == 0 || next(4) == 0 {
+					let cap = (next(4) == 0).then(|| next(SEQUENCES + 2));
+					let layered = Layered::new(fixed.clone(), runs(2));
+					servable = Servable::layered(layered, cap, &servable);
+				}
+				for (track, producer) in producers.iter().enumerate() {
+					let state = producer.state.read();
+					let shown = |slot: &Slot| slot.is_shown().then_some(slot.group.sequence);
+					for from in [0, next(SEQUENCES), next(SEQUENCES)] {
+						for rev in [false, true] {
+							let scan = state.live(from..).filter(|(sequence, _)| servable.contains(**sequence));
+							let expected = match rev {
+								true => scan.map(|(_, slot)| slot).rev().find_map(shown),
+								false => scan.map(|(_, slot)| slot).find_map(shown),
+							};
+							let found = state.find_servable(&servable, from, rev, shown);
+							let shape = match &servable {
+								Servable::Run { start, end } => format!("run {start}..{end:?}"),
+								Servable::Runs(several) => format!(
+									"{:?} under {:?} below {:?}",
+									several.groups.fixed(),
+									several.groups.layer(),
+									several.cap
+								),
+							};
+							let cached: Vec<_> = state
+								.live(..)
+								.map(|(sequence, slot)| (*sequence, slot.is_shown()))
+								.collect();
+							assert_eq!(
+								found, expected,
+								"round {round} step {step} track {track} from {from}, rev {rev}: {shape}, cached {cached:?}"
+							);
+						}
+					}
+				}
+			}
+		}
+	}
+
+	/// Once churn leaves the index holding more entries than the cache, a cache that then
+	/// shrinks to its newest group still lets the index shrink, though every search answers
+	/// at the newest entry and never meets the stale ones.
+	#[test]
+	fn the_live_index_shrinks_with_the_cache() {
+		let producer = track_producer("test", Info::timed());
+		let groups: Vec<_> = (0..100)
+			.map(|sequence| producer.create_group(group::Info { sequence }).unwrap())
+			.collect();
+		let fixed = Arc::new(Runs::new([0..=999, 1001..=u64::MAX]));
+		let servable = Servable::layered(Layered::new(fixed, Runs::default()), None, &Servable::NONE);
+		let Servable::Runs(several) = &servable else {
+			panic!("several runs");
+		};
+		let entries = || -> usize {
+			let indexes = several.live.0.lock().unwrap();
+			indexes.iter().map(|indexed| indexed.groups.len()).sum()
+		};
+		let newest = |slot: &Slot| Some(slot.group.sequence);
+		assert_eq!(
+			producer.state.read().find_servable(&servable, 0, true, newest),
+			Some(99)
+		);
+		assert_eq!(entries(), 100);
+
+		// Most of the cache leaves, so a prune keeps only the groups still cached.
+		for sequence in 0..60 {
+			producer.modify().unwrap().uncache(sequence).unwrap();
+		}
+		assert_eq!(
+			producer.state.read().find_servable(&servable, 0, true, newest),
+			Some(99)
+		);
+		assert_eq!(entries(), 40);
+
+		// Then all but the newest leaves.
+		for sequence in 60..99 {
+			producer.modify().unwrap().uncache(sequence).unwrap();
+		}
+		assert_eq!(
+			producer.state.read().find_servable(&servable, 0, true, newest),
+			Some(99)
+		);
+		assert_eq!(entries(), 1, "the stale entries are pruned");
+		drop(groups);
+	}
+
 	/// Capping a servable window in place keeps exactly the groups the set of its runs
 	/// keeps below the cap, so the single run stays off the heap without moving a bound.
 	#[test]
@@ -11868,22 +13629,50 @@ mod test {
 			Some(13),
 			Some(u64::MAX),
 		];
+		let points = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, u64::MAX - 1, u64::MAX];
 		for bounds in windows {
 			let runs = || bounds.iter().map(|&(first, last)| first..=last);
-			let servable = Servable::new(runs());
-			if let [(first, last)] = bounds {
-				assert!(
-					servable
-						== Servable::Run {
-							start: *first,
-							end: last.checked_add(1)
-						},
-					"{bounds:?}"
-				);
-			}
-			for cap in caps {
-				let expected = Servable::new(below(runs(), cap).into_iter());
-				assert!(servable.below(cap) == expected, "{bounds:?} below {cap:?}");
+			// The runs fixed, and again split between fixed runs and a layer over them.
+			let layered = [
+				Layered::new(Arc::new(Runs::new(runs())), Runs::default()),
+				Layered::new(Arc::new(Runs::new(runs().skip(1))), Runs::new(runs().take(1))),
+			];
+			for groups in layered {
+				let servable = Servable::layered(groups, None, &Servable::NONE);
+				if let [(first, last)] = bounds {
+					assert!(
+						servable
+							== Servable::Run {
+								start: *first,
+								end: last.checked_add(1)
+							},
+						"{bounds:?}"
+					);
+				}
+				for cap in caps {
+					let expected = below(runs(), cap);
+					let capped = servable.below(cap);
+					for point in points {
+						assert_eq!(
+							capped.contains(point),
+							expected.contains(&point),
+							"{bounds:?} below {cap:?} at {point}"
+						);
+					}
+					// One run below the cap stays off the heap.
+					if let Some(run) = expected.iter().next()
+						&& expected.len() == 1
+					{
+						assert!(
+							capped
+								== Servable::Run {
+									start: *run.start(),
+									end: run.end().checked_add(1)
+								},
+							"{bounds:?} below {cap:?}"
+						);
+					}
+				}
 			}
 		}
 	}
@@ -11891,11 +13680,11 @@ mod test {
 	/// Ranges replaced through a [`Control`] republish what a held group is judged against
 	/// at once, before the cursor next reads: group 0 is judged against the run's own
 	/// group 10, not group 1, which the new ranges never read.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_control_update_moves_the_run_a_held_group_is_judged_against() {
 		let at = |millis| Timestamp::from_millis(millis).unwrap();
-		let budget = Subscription::default().with_max_delay(Duration::from_secs(15));
+		let budget = Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(15)));
 		let producer = track_producer("test", Info::timed());
 		let mut subscriber = producer.subscribe(budget.clone());
 		let mut zero = producer.create_group(group::Info { sequence: 0 }).unwrap();
@@ -11910,8 +13699,8 @@ mod test {
 			group.finish().unwrap();
 		}
 
-		let pending = moq_clock::sim::spawn(async move { held.read_frame().await });
-		moq_clock::sim::yield_now().await;
+		let pending = kio::clock::sim::spawn(async move { held.read_frame().await });
+		kio::clock::sim::yield_now().await;
 		assert!(!pending.is_finished(), "group 0 is within the budget of its run");
 		drop(subscriber);
 	}
@@ -12213,38 +14002,11 @@ mod test {
 		assert!(matches!(write, Err(Error::Cancel)), "{write:?}");
 	}
 
-	/// Closing a track aborts its open groups like [`Producer::abort`], with
-	/// [`StreamError::Session`].
+	/// A reader still in an open group keeps the track used after its subscription leaves,
+	/// so only its leaving lets an unused abort end the group's writer.
 	#[test]
 	#[cfg(feature = "async")]
-	fn close_ends_a_pulled_open_group() {
-		let producer = track_producer("test", Info::timed());
-		let mut consumer = producer.subscribe(None);
-		let mut writer = producer.append_group().unwrap();
-		writer
-			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"x"))
-			.unwrap();
-		let mut group = consumer.assert_group();
-		assert!(group.read_frame().now_or_never().unwrap().unwrap().is_some());
-
-		producer.close().unwrap();
-		let read = group.read_frame().now_or_never().expect("should not block");
-		assert!(
-			matches!(read, Err(Error::Stream(StreamError::Session(SessionError::Cancel)))),
-			"{read:?}"
-		);
-		let write = writer.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"y"));
-		assert!(
-			matches!(write, Err(Error::Stream(StreamError::Session(SessionError::Cancel)))),
-			"{write:?}"
-		);
-	}
-
-	/// Aborting an unused track aborts an open group whose reader outlived the track's
-	/// consumers.
-	#[test]
-	#[cfg(feature = "async")]
-	fn abort_unused_ends_a_pulled_open_group() {
+	fn abort_unwanted_waits_for_a_pulled_open_group() {
 		let producer = track_producer("test", Info::timed());
 		let mut consumer = producer.subscribe(None);
 		let mut writer = producer.append_group().unwrap();
@@ -12255,9 +14017,11 @@ mod test {
 		assert!(group.read_frame().now_or_never().unwrap().unwrap().is_some());
 		drop(consumer);
 
-		assert!(producer.abort_unused(Error::Cancel).is_ok());
-		let read = group.read_frame().now_or_never().expect("should not block");
-		assert!(matches!(read, Err(Error::Cancel)), "{read:?}");
+		let producer = producer
+			.abort_unwanted(Error::Cancel)
+			.expect_err("the group's reader keeps the track");
+		drop(group);
+		assert!(producer.abort_unwanted(Error::Cancel).is_ok());
 		let write = writer.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"y"));
 		assert!(matches!(write, Err(Error::Cancel)), "{write:?}");
 	}
@@ -12285,11 +14049,11 @@ mod test {
 
 	/// Aborting a track also aborts a fetched head still being written, so its reader ends
 	/// with the track's error rather than waiting on a fetch that can no longer land.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn abort_ends_an_open_fetched_head() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 		let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
 		live.start_at(1).unwrap();
@@ -12365,7 +14129,7 @@ mod test {
 	fn drop_short_of_the_boundary_ends_cleanly() {
 		let mut producer = track_producer("test", Info::timed());
 		producer.append_group().unwrap().finish().unwrap();
-		producer.finish_at(Position::group(3)).unwrap();
+		producer.finish_at(Position::group(3), None).unwrap();
 
 		let mut consumer = producer.subscribe(None);
 		assert_eq!(consumer.assert_group().sequence, 0);
@@ -12398,7 +14162,7 @@ mod test {
 			.unwrap()
 			.finish()
 			.unwrap();
-		producer.finish_at(Position::group(4)).unwrap();
+		producer.finish_at(Position::group(4), None).unwrap();
 
 		let mut ordered = producer.subscribe(replay()).ordered();
 		drop(producer);
@@ -12409,6 +14173,43 @@ mod test {
 		assert_eq!(second.sequence, 2);
 		let done = ordered.next_group().now_or_never().expect("end").unwrap();
 		assert!(done.is_none(), "missing groups below the boundary are not an error");
+	}
+
+	/// A finished track ends both readers with nothing left in range, whether the range
+	/// ends at the cursor or the rest was given up.
+	#[test]
+	fn readers_end_once_a_finished_track_leaves_nothing_in_range() {
+		for given_up in [false, true] {
+			let producer = track_producer("test", Info::timed());
+			let end = if given_up { 4 } else { 3 };
+			let mut arrival = producer.subscribe(replay().with_range(0..end));
+			let mut ordered = producer.subscribe(replay().with_range(0..end)).ordered();
+			if given_up {
+				producer.drop_groups(3..4, StreamError::DeliveryTimeout);
+			}
+			for sequence in [0, 1, 2, 4, 5] {
+				write_group(&producer, sequence);
+			}
+			producer.finish().unwrap();
+			for sequence in 0..3 {
+				let Poll::Ready(Ok(Some(group))) = ordered.poll_next_group(&kio::Waiter::noop()) else {
+					panic!("group {sequence}, given_up={given_up}")
+				};
+				assert_eq!(group.sequence, sequence);
+				let Poll::Ready(Ok(Some(group))) = arrival.poll_recv_group(&kio::Waiter::noop()) else {
+					panic!("arrival group {sequence}, given_up={given_up}")
+				};
+				assert_eq!(group.sequence, sequence);
+			}
+			assert!(
+				matches!(ordered.poll_next_group(&kio::Waiter::noop()), Poll::Ready(Ok(None))),
+				"given_up={given_up}"
+			);
+			assert!(
+				matches!(arrival.poll_recv_group(&kio::Waiter::noop()), Poll::Ready(Ok(None))),
+				"arrival, given_up={given_up}"
+			);
+		}
 	}
 
 	#[test]
@@ -12438,16 +14239,16 @@ mod test {
 
 		// The boundary is exclusive, so it must be strictly above the highest produced
 		// group. 5 or below would orphan groups that already exist.
-		assert!(producer.finish_at(Position::group(4)).is_err());
-		assert!(producer.finish_at(Position::group(5)).is_err());
-		assert!(producer.finish_at(Position::group(6)).is_ok());
+		assert!(producer.finish_at(Position::group(4), None).is_err());
+		assert!(producer.finish_at(Position::group(5), None).is_err());
+		assert!(producer.finish_at(Position::group(6), None).is_ok());
 
-		assert_eq!(producer.end(), Some(Position::group(6)));
+		assert_eq!(producer.finished(), Some(Position::group(6)));
 
 		// Repeating the end is a no-op, moving it is rejected, and no group at or above the
 		// boundary can be created.
-		assert!(producer.finish_at(Position::group(6)).is_ok());
-		assert!(producer.finish_at(Position::group(7)).is_err());
+		assert!(producer.finish_at(Position::group(6), None).is_ok());
+		assert!(producer.finish_at(Position::group(7), None).is_err());
 		assert!(producer.create_group(group::Info { sequence: 4 }).is_ok());
 		assert!(producer.create_group(group::Info { sequence: 6 }).is_err());
 	}
@@ -12457,7 +14258,7 @@ mod test {
 		let pool = cache::Pool::new(cache::Config::default().with_expiry(Duration::from_secs(1)));
 		let mut producer = track_producer_pooled("test", pool.clone());
 		let end = Position { group: 5, frame: 5 };
-		producer.finish_at(end).unwrap();
+		producer.finish_at(end, None).unwrap();
 		let mut group = producer.create_group(group::Info { sequence: 5 }).unwrap();
 		for _ in 0..5 {
 			group.write_frame(Timestamp::ZERO, b"x".as_slice()).unwrap();
@@ -12482,12 +14283,12 @@ mod test {
 	fn a_wire_end_repeats_or_refines_but_never_moves() {
 		let mut producer = track_producer("test", Info::timed());
 		// A FETCH_OK names only the boundary; END_OF_TRACK may then name the frame before it.
-		producer.finish_at(Position::group(6)).unwrap();
-		producer.finish_at(Position { group: 5, frame: 5 }).unwrap();
-		producer.finish_at(Position { group: 5, frame: 5 }).unwrap();
-		assert_eq!(producer.end(), Some(Position { group: 5, frame: 5 }));
+		producer.finish_at(Position::group(6), None).unwrap();
+		producer.finish_at(Position { group: 5, frame: 5 }, None).unwrap();
+		producer.finish_at(Position { group: 5, frame: 5 }, None).unwrap();
+		assert_eq!(producer.finished(), Some(Position { group: 5, frame: 5 }));
 		for moved in [Position { group: 5, frame: 4 }, Position::group(6), Position::group(5)] {
-			assert!(matches!(producer.finish_at(moved), Err(Error::ProtocolViolation)));
+			assert!(matches!(producer.finish_at(moved, None), Err(Error::ProtocolViolation)));
 		}
 	}
 
@@ -12501,11 +14302,11 @@ mod test {
 			group.write_frame(Timestamp::ZERO, b"x".as_slice()).unwrap();
 		}
 		assert!(matches!(
-			producer.finish_at(Position { group: 5, frame: 5 }),
+			producer.finish_at(Position { group: 5, frame: 5 }, None),
 			Err(Error::ProtocolViolation)
 		));
-		assert_eq!(producer.end(), None, "a refused end declares nothing");
-		producer.finish_at(Position { group: 5, frame: 6 }).unwrap();
+		assert_eq!(producer.finished(), None, "a refused end declares nothing");
+		producer.finish_at(Position { group: 5, frame: 6 }, None).unwrap();
 	}
 
 	/// A mid-group end caps its group, whether the group exists yet or not.
@@ -12515,12 +14316,12 @@ mod test {
 			let mut producer = track_producer("test", Info::timed());
 			let end = Position { group: 5, frame: 2 };
 			if early {
-				producer.finish_at(end).unwrap();
+				producer.finish_at(end, None).unwrap();
 			}
 			let mut group = producer.create_group(group::Info { sequence: 5 }).unwrap();
 			group.write_frame(Timestamp::ZERO, b"x".as_slice()).unwrap();
 			if !early {
-				producer.finish_at(end).unwrap();
+				producer.finish_at(end, None).unwrap();
 			}
 			group.write_frame(Timestamp::ZERO, b"x".as_slice()).unwrap();
 			assert!(matches!(
@@ -12550,13 +14351,13 @@ mod test {
 	#[test]
 	fn end_reports_the_declared_end() {
 		let mut producer = track_producer("test", Info::timed());
-		assert_eq!(producer.end(), None);
+		assert_eq!(producer.finished(), None);
 
 		let _open = producer.create_group(group::Info { sequence: 5 }).unwrap();
-		assert_eq!(producer.end(), None, "a group does not declare an end");
+		assert_eq!(producer.finished(), None, "a group does not declare an end");
 
-		producer.finish_at(Position::group(9)).unwrap();
-		assert_eq!(producer.end(), Some(Position::group(9)));
+		producer.finish_at(Position::group(9), None).unwrap();
+		assert_eq!(producer.finished(), Some(Position::group(9)));
 
 		// finish() would try to declare a second boundary, so callers check first.
 		assert!(producer.finish().is_err());
@@ -12567,7 +14368,7 @@ mod test {
 		let producer = track_producer("test", Info::timed());
 		let _open = producer.create_group(group::Info { sequence: 5 }).unwrap();
 		producer.finish().unwrap();
-		assert_eq!(producer.end(), Some(Position::group(6)));
+		assert_eq!(producer.finished(), Some(Position::group(6)));
 	}
 
 	#[test]
@@ -12581,7 +14382,7 @@ mod test {
 			.unwrap();
 
 		// Learn the track ends at group 6 (exclusive 7) while the live edge is still 5.
-		producer.finish_at(Position::group(7)).unwrap();
+		producer.finish_at(Position::group(7), None).unwrap();
 
 		let mut consumer = producer.subscribe(None);
 		assert_eq!(consumer.assert_group().sequence, 5);
@@ -12614,13 +14415,65 @@ mod test {
 		assert!(done.is_none(), "track completes once the boundary is reached");
 	}
 
-	#[moq_clock::test]
+	/// An end declared with an error keeps the history below it: every reader gets the groups
+	/// first, then the error, and a fetch still reads them. A range short of the end ends
+	/// cleanly, since it never reaches the error.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn an_errored_end_keeps_its_history() {
+		let mut producer = track_producer("test", Info::timed());
+		for sequence in 0..2 {
+			producer
+				.create_group(group::Info { sequence })
+				.unwrap()
+				.finish()
+				.unwrap();
+		}
+		producer.finish_at(Position::group(2), Some(Error::App(7))).unwrap();
+		// A repeat must carry the same error.
+		producer.finish_at(Position::group(2), Some(Error::App(7))).unwrap();
+		assert!(matches!(
+			producer.finish_at(Position::group(2), None),
+			Err(Error::ProtocolViolation)
+		));
+
+		let mut arrival = producer.subscribe(replay().with_range(0..));
+		let mut ordered = producer.subscribe(replay().with_range(0..)).ordered();
+		for sequence in 0..2 {
+			assert_eq!(arrival.assert_group().sequence, sequence);
+			assert_eq!(ordered.next_group().await.unwrap().unwrap().sequence, sequence);
+		}
+		assert!(matches!(arrival.recv_group().await, Err(Error::App(7))));
+		assert!(matches!(ordered.next_group().await, Err(Error::App(7))));
+		assert!(matches!(producer.closed().await, Err(Error::App(7))));
+
+		let mut capped = producer.subscribe(replay().with_range(0..)).with_range(..1);
+		assert_eq!(capped.assert_group().sequence, 0);
+		assert!(capped.recv_group().await.unwrap().is_none());
+		// So does a range whose relative end excludes the last group.
+		let mut relative = producer.subscribe(replay().with_ranges([Range {
+			start: Anchor::Absolute(0),
+			end: Some(Anchor::Relative(1)),
+		}]));
+		assert_eq!(relative.assert_group().sequence, 0);
+		assert!(relative.recv_group().await.unwrap().is_none());
+
+		// Unlike an abort, the history stays: a later reader and a fetch still get it.
+		producer.clone().abort(Error::Timeout).unwrap();
+		let mut late = producer.subscribe(replay().with_range(0..));
+		assert_eq!(late.assert_group().sequence, 0);
+		assert_eq!(late.assert_group().sequence, 1);
+		assert!(matches!(late.recv_group().await, Err(Error::App(7))));
+		producer.consume().fetch_group(1, None).await.unwrap();
+	}
+
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn readers_end_at_the_boundary_with_missing_lower_groups() {
 		let mut producer = track_producer("test", Info::timed());
 		let mut arrival = producer.subscribe(None);
 		let mut ordered = producer.subscribe(None).ordered();
-		producer.finish_at(Position::group(3)).unwrap();
+		producer.finish_at(Position::group(3), None).unwrap();
 		let _open = producer.create_group(group::Info { sequence: 2 }).unwrap();
 
 		// Missing lower groups do not hold either reader for the wire's grace.
@@ -12645,7 +14498,7 @@ mod test {
 	/// A received copy's end holds readers at a hole below it, since a lower group's stream
 	/// may arrive after a higher one, until the hole fills or its grace passes. The last
 	/// producer going ends them regardless.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_pending_tail_holds_readers_at_a_hole() {
 		let mut producer = track_producer("test", None);
@@ -12653,7 +14506,7 @@ mod test {
 		let mut arrival = producer.subscribe(replay());
 		// The wire declares where the feed starts.
 		producer.start_at(0).unwrap();
-		producer.finish_at(Position::group(3)).unwrap();
+		producer.finish_at(Position::group(3), None).unwrap();
 		let _high = producer.create_group(group::Info { sequence: 2 }).unwrap();
 		assert_eq!(arrival.assert_group().sequence, 2);
 		assert!(arrival.recv_group().now_or_never().is_none(), "held at the hole");
@@ -12671,7 +14524,7 @@ mod test {
 		producer.received();
 		let mut arrival = producer.subscribe(replay());
 		producer.start_at(0).unwrap();
-		producer.finish_at(Position::group(2)).unwrap();
+		producer.finish_at(Position::group(2), None).unwrap();
 		let _high = producer.create_group(group::Info { sequence: 1 }).unwrap();
 		assert_eq!(arrival.assert_group().sequence, 1);
 		assert!(arrival.recv_group().now_or_never().is_none());
@@ -12684,7 +14537,7 @@ mod test {
 		producer.received();
 		let mut arrival = producer.subscribe(replay());
 		producer.start_at(0).unwrap();
-		producer.finish_at(Position::group(2)).unwrap();
+		producer.finish_at(Position::group(2), None).unwrap();
 		let _high = producer.create_group(group::Info { sequence: 1 }).unwrap();
 		assert_eq!(arrival.assert_group().sequence, 1);
 		drop(producer);
@@ -12693,7 +14546,7 @@ mod test {
 
 	/// The grace alone ends a reader parked at a hole, with no write to wake it: below an
 	/// arrival it runs from that arrival, and above the last one from the declared end.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_parked_reader_wakes_when_the_tail_grace_passes() {
 		// The subscription's max delay is the grace.
@@ -12715,7 +14568,7 @@ mod test {
 				// The end comes later than the arrival, so its gap runs from the end.
 				elapse(&producer, grace / 2);
 			}
-			producer.finish_at(Position::group(end)).unwrap();
+			producer.finish_at(Position::group(end), None).unwrap();
 
 			let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
 			let waiter = kio::Waiter::new(futures::task::waker(Arc::new(FlagWake(woken.clone()))));
@@ -12744,6 +14597,41 @@ mod test {
 		}
 	}
 
+	/// An unbounded max delay never gives up on a hole, below an arrival or above the last
+	/// one, until it fills.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_unbounded_tail_holds_readers_at_a_hole() {
+		// Hole 0 sits below arrival 1; hole 1 sits above arrival 0.
+		for (arrived, missing) in [(1, 0), (0, 1)] {
+			let mut producer = track_producer("test", None);
+			producer.received();
+			let mut arrival = producer.subscribe(replay().with_delay(Delay::default().with_max(None)));
+			producer.start_at(0).unwrap();
+			producer.finish_at(Position::group(2), None).unwrap();
+			producer
+				.create_group(group::Info { sequence: arrived })
+				.unwrap()
+				.finish()
+				.unwrap();
+			assert_eq!(arrival.assert_group().sequence, arrived);
+
+			elapse(&producer, Duration::from_secs(3600));
+			assert!(
+				arrival.recv_group().now_or_never().is_none(),
+				"hole {missing}: given up on"
+			);
+
+			producer
+				.create_group(group::Info { sequence: missing })
+				.unwrap()
+				.finish()
+				.unwrap();
+			assert_eq!(arrival.assert_group().sequence, missing);
+			assert!(arrival.recv_group().now_or_never().unwrap().unwrap().is_none());
+		}
+	}
+
 	/// An end declared ahead of a feed still delivering does not cut it off: each arrival
 	/// restarts the grace for the groups above it. A feed that stalls past it ends readers.
 	#[test]
@@ -12754,7 +14642,7 @@ mod test {
 		let grace = replay().budget();
 		let mut arrival = producer.subscribe(replay());
 		producer.start_at(0).unwrap();
-		producer.finish_at(Position::group(5)).unwrap();
+		producer.finish_at(Position::group(5), None).unwrap();
 		for sequence in 0..3 {
 			elapse(&producer, grace / 2);
 			producer
@@ -12779,7 +14667,7 @@ mod test {
 		producer.received();
 		let grace = replay().budget();
 		let mut arrival = producer.subscribe(replay());
-		producer.finish_at(Position::group(2)).unwrap();
+		producer.finish_at(Position::group(2), None).unwrap();
 		elapse(&producer, grace - Duration::from_millis(1));
 		producer.start_at(0).unwrap();
 		elapse(&producer, Duration::from_millis(1));
@@ -12796,7 +14684,7 @@ mod test {
 		let mut producer = track_producer("test", None);
 		let mut arrival = producer.subscribe(replay());
 		producer.start_at(0).unwrap();
-		producer.finish_at(Position::group(2)).unwrap();
+		producer.finish_at(Position::group(2), None).unwrap();
 		producer
 			.create_group(group::Info { sequence: 1 })
 			.unwrap()
@@ -12814,7 +14702,7 @@ mod test {
 		producer.received();
 		let mut arrival = producer.subscribe(replay());
 		producer.start_at(0).unwrap();
-		producer.finish_at(Position::group(3)).unwrap();
+		producer.finish_at(Position::group(3), None).unwrap();
 		producer
 			.create_group(group::Info { sequence: 2 })
 			.unwrap()
@@ -12836,7 +14724,7 @@ mod test {
 		producer.received();
 		producer.request_start(None).unwrap();
 		let mut arrival = producer.subscribe(replay());
-		producer.finish_at(Position::group(0)).unwrap();
+		producer.finish_at(Position::group(0), None).unwrap();
 		assert!(arrival.recv_group().now_or_never().unwrap().unwrap().is_none());
 
 		// Nor does one whose groups below it all arrived or were dropped.
@@ -12851,7 +14739,7 @@ mod test {
 			.unwrap();
 		assert_eq!(arrival.assert_group().sequence, 0);
 		producer.drop_groups(1..2, StreamError::NotFound);
-		producer.finish_at(Position::group(2)).unwrap();
+		producer.finish_at(Position::group(2), None).unwrap();
 		assert!(arrival.recv_group().now_or_never().unwrap().unwrap().is_none());
 
 		// A hole is still owed until the grace passes.
@@ -12865,7 +14753,7 @@ mod test {
 			.finish()
 			.unwrap();
 		assert_eq!(arrival.assert_group().sequence, 1);
-		producer.finish_at(Position::group(2)).unwrap();
+		producer.finish_at(Position::group(2), None).unwrap();
 		assert!(arrival.recv_group().now_or_never().is_none(), "group 0 is owed");
 		elapse(&producer, replay().budget());
 		assert!(arrival.recv_group().now_or_never().unwrap().unwrap().is_none());
@@ -12873,16 +14761,16 @@ mod test {
 
 	/// A fetched copy of a group the live feed still owes never reaches an arrival-order
 	/// reader, so it does not fill the hole: the reader waits for the live group.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_fetched_group_does_not_fill_a_pending_tail() {
 		let mut producer = track_producer("test", None);
 		producer.received();
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 		let mut arrival = producer.subscribe(None);
 		producer.start_at(0).unwrap();
-		producer.finish_at(Position::group(2)).unwrap();
+		producer.finish_at(Position::group(2), None).unwrap();
 		let _high = producer.create_group(group::Info { sequence: 1 }).unwrap();
 		assert_eq!(arrival.assert_group().sequence, 1);
 
@@ -12897,14 +14785,14 @@ mod test {
 
 	/// An abort ends the wait for a pending tail. A group the tail still owed was cut off,
 	/// so readers get the abort rather than a clean end without it.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn an_abort_errors_a_pending_tail_short_of_a_group() {
 		let mut producer = track_producer("test", None);
 		producer.received();
 		let mut arrival = producer.subscribe(None);
 		producer.start_at(0).unwrap();
-		producer.finish_at(Position::group(2)).unwrap();
+		producer.finish_at(Position::group(2), None).unwrap();
 		let mut high = producer.create_group(group::Info { sequence: 1 }).unwrap();
 		high.finish().unwrap();
 		assert_eq!(arrival.assert_group().sequence, 1);
@@ -12919,14 +14807,14 @@ mod test {
 
 	/// A reader that got every group ends cleanly, even when the track aborts before the
 	/// reader polls past the last one.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn an_abort_after_a_full_tail_ends_cleanly() {
 		let mut producer = track_producer("test", None);
 		producer.received();
 		let mut arrival = producer.subscribe(replay());
 		producer.start_at(0).unwrap();
-		producer.finish_at(Position::group(2)).unwrap();
+		producer.finish_at(Position::group(2), None).unwrap();
 		for sequence in [1, 0] {
 			producer
 				.create_group(group::Info { sequence })
@@ -12942,7 +14830,7 @@ mod test {
 
 	/// A gap the grace already gave up on was lost before the abort, not cut off by it, so
 	/// readers end cleanly. Within the grace, the same abort errors them.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn an_abort_past_the_grace_ends_a_pending_tail_cleanly() {
 		for (waited, ended) in [(ledger::GRACE / 2, false), (ledger::GRACE, true)] {
@@ -12950,7 +14838,7 @@ mod test {
 			producer.received();
 			let mut arrival = producer.subscribe(None);
 			producer.start_at(0).unwrap();
-			producer.finish_at(Position::group(3)).unwrap();
+			producer.finish_at(Position::group(3), None).unwrap();
 			for sequence in [0, 2] {
 				producer
 					.create_group(group::Info { sequence })
@@ -12977,7 +14865,7 @@ mod test {
 		producer.received();
 		let mut arrival = producer.subscribe(replay());
 		producer.start_at(0).unwrap();
-		producer.finish_at(Position::group(3)).unwrap();
+		producer.finish_at(Position::group(3), None).unwrap();
 		for sequence in [0, 1] {
 			producer
 				.create_group(group::Info { sequence })
@@ -12997,29 +14885,10 @@ mod test {
 		assert!(arrival.recv_group().now_or_never().unwrap().unwrap().is_none());
 	}
 
-	/// A datagram is a live arrival too, so it fills its sequence in a pending tail.
-	#[test]
-	#[cfg(feature = "async")]
-	fn a_datagram_fills_a_pending_tail() {
-		let mut producer = track_producer("test", None);
-		producer.received();
-		let mut arrival = producer.subscribe(replay());
-		producer.start_at(0).unwrap();
-		producer.finish_at(Position::group(2)).unwrap();
-		producer.insert_datagram(0, None, b"x".as_slice()).unwrap();
-		producer
-			.create_group(group::Info { sequence: 1 })
-			.unwrap()
-			.finish()
-			.unwrap();
-		assert_eq!(arrival.assert_group().sequence, 1);
-		assert!(arrival.recv_group().now_or_never().unwrap().unwrap().is_none());
-	}
-
 	/// The wire's end can land after the highest group, with lower groups still owed. A
 	/// reader already past that group stays held at the hole: the end never shows without
 	/// its pending tail.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn an_end_after_the_highest_group_holds_the_reader() {
 		let mut producer = track_producer("test", None);
@@ -13030,13 +14899,16 @@ mod test {
 		assert_eq!(arrival.assert_group().sequence, 2);
 		assert!(arrival.recv_group().now_or_never().is_none());
 
-		producer.finish_at(Position::group(3)).unwrap();
+		producer.finish_at(Position::group(3), None).unwrap();
 		assert!(arrival.recv_group().now_or_never().is_none(), "held at the hole");
 		assert!(
-			matches!(producer.finish_at(Position::group(2)), Err(Error::ProtocolViolation)),
+			matches!(
+				producer.finish_at(Position::group(2), None),
+				Err(Error::ProtocolViolation)
+			),
 			"a second end is refused"
 		);
-		assert_eq!(producer.end(), Some(Position::group(3)), "the first end stands");
+		assert_eq!(producer.finished(), Some(Position::group(3)), "the first end stands");
 
 		let mut _low = Vec::new();
 		for sequence in [0, 1] {
@@ -13057,7 +14929,7 @@ mod test {
 		let mut head = producer.create_group(group::Info { sequence: 0 }).unwrap();
 		head.finish().unwrap();
 		let _tail = producer.create_group(group::Info { sequence: 1 }).unwrap();
-		producer.finish_at(Position::group(2)).unwrap();
+		producer.finish_at(Position::group(2), None).unwrap();
 		assert_eq!(consumer.assert_group().sequence, 0);
 
 		producer.abort(Error::Timeout).unwrap();
@@ -13065,55 +14937,10 @@ mod test {
 		assert!(matches!(res, Err(Error::Timeout)));
 	}
 
-	#[moq_clock::test]
-	#[cfg(feature = "async")]
-	async fn local_close_keeps_finished_groups_without_declaring_an_end() {
-		let producer = track_producer("local", Info::timed());
-		let mut consumer = producer.consume().subscribe(None).await.unwrap();
-		producer.append_group().unwrap().finish().unwrap();
-		producer.clone().close().unwrap();
-		assert!(producer.end().is_none());
-		assert!(matches!(consumer.finished().await, Err(Error::Closed)));
-		assert!(consumer.recv_group().await.unwrap().is_some());
-		assert!(consumer.recv_group().await.unwrap().is_none());
-	}
-
-	#[moq_clock::test]
-	#[cfg(feature = "async")]
-	async fn local_close_cannot_mask_an_abort_before_declared_end_settles() {
-		let mut producer = track_producer("local", Info::timed());
-		let mut consumer = producer.consume().subscribe(None).await.unwrap();
-		let _group = producer.append_group().unwrap();
-		producer.finish_at(Position::group(2)).unwrap();
-		producer.clone().abort(Error::Timeout).unwrap();
-		assert!(producer.close().is_err());
-		assert!(matches!(consumer.recv_group().await, Err(Error::Timeout)));
-	}
-
-	/// A close drops a group still open that no reader pulled: readers drain the finished
-	/// groups, then end without a declared end.
-	#[moq_clock::test]
-	#[cfg(feature = "async")]
-	async fn local_close_drops_an_unpulled_open_group() {
-		let producer = track_producer("local", Info::timed());
-		let mut consumer = producer.consume().subscribe(None).await.unwrap();
-		producer.append_group().unwrap().finish().unwrap();
-		let mut open = producer.append_group().unwrap();
-		open.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"x"))
-			.unwrap();
-		producer.clone().close().unwrap();
-		assert_eq!(
-			consumer.recv_group().await.unwrap().map(|group| group.sequence),
-			Some(0)
-		);
-		assert!(consumer.recv_group().await.unwrap().is_none());
-		assert!(matches!(consumer.finished().await, Err(Error::Closed)));
-	}
-
-	/// A local close is a dead route to the origin, not finished content, so a
+	/// A local session closing is a dead route to the origin, not finished content, so a
 	/// replacement route can take over where it left off.
 	#[test]
-	fn local_close_is_not_completion_and_keeps_the_resume_position() {
+	fn session_close_is_not_completion_and_keeps_the_resume_position() {
 		let producer = track_producer("local", Info::timed());
 		let consumer = producer.consume();
 		producer.append_group().unwrap().finish().unwrap();
@@ -13124,12 +14951,134 @@ mod test {
 		group
 			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"b"))
 			.unwrap();
-		producer.close().unwrap();
+		producer
+			.abort(Error::Stream(StreamError::Session(crate::SessionError::Cancel)))
+			.unwrap();
 		assert!(matches!(
 			consumer.poll_complete(&kio::Waiter::noop()),
 			Poll::Ready(Err(_))
 		));
 		assert_eq!(consumer.resume_position(), Some(Position { group: 1, frame: 2 }));
+	}
+
+	/// `closed` settles once the declared end is reached, not when it is declared, and an
+	/// abort after that keeps the clean outcome.
+	#[test]
+	#[cfg(feature = "async")]
+	fn closed_settles_on_a_reached_end() {
+		let waiter = kio::Waiter::noop();
+		let mut producer = track_producer("test", Info::timed());
+		let demand = producer.demand();
+		producer.append_group().unwrap().finish().unwrap();
+		producer.finish_at(Position::group(2), None).unwrap();
+		assert!(producer.poll_closed(&waiter).is_pending(), "group 1 is still to come");
+		assert!(demand.closed().now_or_never().is_none());
+
+		producer.append_group().unwrap().finish().unwrap();
+		assert!(matches!(producer.poll_closed(&waiter), Poll::Ready(Ok(()))));
+		assert!(matches!(demand.closed().now_or_never(), Some(Ok(()))));
+		assert!(
+			producer.poll_aborted(&waiter).is_pending(),
+			"lower groups may still arrive"
+		);
+
+		producer.clone().abort(Error::Cancel).unwrap();
+		assert!(matches!(producer.poll_closed(&waiter), Poll::Ready(Ok(()))));
+		assert!(matches!(demand.closed().now_or_never(), Some(Ok(()))));
+	}
+
+	/// A group still open below a reached end keeps the outcome pending: it finishing settles
+	/// the end and wakes the wait, while an abort before then cuts the track off.
+	#[test]
+	#[cfg(feature = "async")]
+	fn closed_waits_for_open_groups_below_the_end() {
+		use std::sync::atomic::{AtomicBool, Ordering};
+
+		let mut producer = track_producer("test", Info::timed());
+		let mut open = producer.append_group().unwrap();
+		producer.finish_at(Position::group(1), None).unwrap();
+		let woken = Arc::new(AtomicBool::new(false));
+		let waiter = kio::Waiter::new(futures::task::waker(Arc::new(FlagWake(woken.clone()))));
+		assert!(producer.poll_closed(&waiter).is_pending(), "group 0 may still abort");
+		open.finish().unwrap();
+		assert!(woken.load(Ordering::SeqCst), "the group finishing wakes the wait");
+		assert!(matches!(producer.poll_closed(&waiter), Poll::Ready(Ok(()))));
+
+		let mut cut = track_producer("cut", Info::timed());
+		let _open = cut.append_group().unwrap();
+		cut.finish_at(Position::group(1), None).unwrap();
+		assert!(cut.poll_closed(&kio::Waiter::noop()).is_pending());
+		cut.clone().abort(Error::Cancel).unwrap();
+		assert!(matches!(
+			cut.poll_closed(&kio::Waiter::noop()),
+			Poll::Ready(Err(Error::Cancel))
+		));
+	}
+
+	/// A received end whose tail grace passed is final once `closed()` reports it: a later
+	/// subscription with a longer grace, and an abort within it, leave the clean outcome.
+	#[test]
+	fn a_reported_end_survives_a_longer_grace() {
+		let waiter = kio::Waiter::noop();
+		let mut producer = track_producer("test", None);
+		producer.received();
+		let _short = producer.subscribe(None);
+		producer.start_at(0).unwrap();
+		producer.finish_at(Position::group(3), None).unwrap();
+		for sequence in [0, 2] {
+			producer
+				.create_group(group::Info { sequence })
+				.unwrap()
+				.finish()
+				.unwrap();
+		}
+		assert!(producer.poll_closed(&waiter).is_pending(), "held at the hole");
+		elapse(&producer, ledger::GRACE);
+		assert!(matches!(producer.poll_closed(&waiter), Poll::Ready(Ok(()))));
+
+		let _long =
+			producer.subscribe(Subscription::default().with_delay(Delay::default().with_max(ledger::GRACE * 10)));
+		assert!(matches!(producer.poll_closed(&waiter), Poll::Ready(Ok(()))));
+		producer.clone().abort(Error::Cancel).unwrap();
+		assert!(matches!(producer.poll_closed(&waiter), Poll::Ready(Ok(()))));
+	}
+
+	/// A settled end is final: a late group below it and a later abort leave the outcome
+	/// `closed()` already saw.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_settled_end_survives_a_late_group_and_an_abort() {
+		let waiter = kio::Waiter::noop();
+		let mut producer = track_producer("test", Info::timed());
+		let demand = producer.demand();
+		producer
+			.create_group(group::Info { sequence: 5 })
+			.unwrap()
+			.finish()
+			.unwrap();
+		producer.finish_at(Position::group(6), None).unwrap();
+		assert!(matches!(producer.poll_closed(&waiter), Poll::Ready(Ok(()))));
+
+		let _late = producer.create_group(group::Info { sequence: 4 }).unwrap();
+		assert!(matches!(producer.poll_closed(&waiter), Poll::Ready(Ok(()))));
+		producer.clone().abort(Error::Cancel).unwrap();
+		assert!(matches!(producer.poll_closed(&waiter), Poll::Ready(Ok(()))));
+		assert!(matches!(demand.closed().now_or_never(), Some(Ok(()))));
+	}
+
+	/// An abort short of the end, or the last producer leaving without one, is the outcome.
+	#[test]
+	#[cfg(feature = "async")]
+	fn closed_reports_an_unfinished_end() {
+		let waiter = kio::Waiter::noop();
+		let aborted = track_producer("aborted", Info::timed());
+		aborted.clone().abort(Error::Timeout).unwrap();
+		assert!(matches!(aborted.poll_closed(&waiter), Poll::Ready(Err(Error::Timeout))));
+
+		let dropped = track_producer("dropped", Info::timed());
+		let demand = dropped.demand();
+		drop(dropped);
+		assert!(matches!(demand.closed().now_or_never(), Some(Err(Error::Dropped))));
 	}
 
 	/// An abort short of the end keeps the groups that finished for a reader that has not
@@ -13264,7 +15213,7 @@ mod test {
 			let mut group = producer.create_group(group::Info { sequence }).unwrap();
 			group.finish().unwrap();
 		}
-		producer.finish_at(Position::group(2)).unwrap();
+		producer.finish_at(Position::group(2), None).unwrap();
 		assert_eq!(consumer.assert_group().sequence, 0);
 		assert_eq!(consumer.assert_group().sequence, 1);
 
@@ -13285,7 +15234,7 @@ mod test {
 			let mut group = producer.create_group(group::Info { sequence }).unwrap();
 			group.finish().unwrap();
 		}
-		producer.finish_at(Position::group(2)).unwrap();
+		producer.finish_at(Position::group(2), None).unwrap();
 		producer.abort(Error::Timeout).unwrap();
 
 		assert_eq!(drain_ordered(&mut consumer), [0, 1]);
@@ -13312,7 +15261,7 @@ mod test {
 				.finish()
 				.unwrap();
 		}
-		producer.finish_at(Position::group(2)).unwrap();
+		producer.finish_at(Position::group(2), None).unwrap();
 		producer.abort(Error::Timeout).unwrap();
 
 		consumer.set_range(..1);
@@ -13336,7 +15285,7 @@ mod test {
 				.finish()
 				.unwrap();
 		}
-		producer.finish_at(Position::group(3)).unwrap();
+		producer.finish_at(Position::group(3), None).unwrap();
 		producer.abort(Error::Timeout).unwrap();
 
 		consumer.set_range(..2);
@@ -13372,6 +15321,244 @@ mod test {
 			.expect("should not block")
 			.expect("would have errored");
 		assert!(done.is_none(), "track should finish without waiting for gaps");
+	}
+
+	/// A received copy, as a session's subscription feeds it, on a pinned wall clock.
+	#[cfg(feature = "async")]
+	fn received_producer(info: impl Into<Option<Info>>) -> Producer {
+		let producer = track_producer("test", info);
+		producer.received();
+		elapse(&producer, Duration::ZERO);
+		producer
+	}
+
+	/// Create and finish group `sequence`, with one frame at `millis` on a timed track.
+	#[cfg(feature = "async")]
+	fn put(producer: &Producer, sequence: u64, millis: Option<u64>) {
+		let mut group = producer.create_group(group::Info { sequence }).unwrap();
+		if let Some(millis) = millis {
+			group
+				.write_frame(Timestamp::from_millis(millis).unwrap(), &b"x"[..])
+				.unwrap();
+		}
+		group.finish().unwrap();
+	}
+
+	/// A received group reordered behind its successor is still delivered in order: the
+	/// subscription owes it, so the reader waits for it within its budget.
+	#[test]
+	#[cfg(feature = "async")]
+	fn next_group_waits_for_an_owed_group() {
+		let producer = received_producer(None);
+		let mut consumer = producer
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(1))))
+			.ordered();
+		put(&producer, 0, None);
+		put(&producer, 2, None);
+		assert_eq!(drain_ordered(&mut consumer), [0], "group 1 is still owed");
+		put(&producer, 1, None);
+		assert_eq!(drain_ordered(&mut consumer), [1, 2]);
+	}
+
+	/// A local track owes nothing: a gap costs nothing, as before.
+	#[test]
+	#[cfg(feature = "async")]
+	fn next_group_skips_a_local_gap() {
+		let producer = track_producer("test", None);
+		let mut consumer = producer
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(1))))
+			.ordered();
+		put(&producer, 0, None);
+		put(&producer, 2, None);
+		assert_eq!(drain_ordered(&mut consumer), [0, 2]);
+	}
+
+	/// An untimed track with groups 0 and 2..10 keeps delivering: the wall clock gives up
+	/// on group 1 a budget after its successor arrived, waking the parked reader exactly then,
+	/// and nothing after waits on it again.
+	#[test]
+	#[cfg(feature = "async")]
+	fn next_group_passes_an_owed_group_at_the_budget() {
+		let budget = Duration::from_millis(50);
+		let producer = received_producer(None);
+		let mut consumer = producer
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(budget)))
+			.ordered();
+		put(&producer, 0, None);
+		put(&producer, 2, None);
+		assert_eq!(drain_ordered(&mut consumer), [0]);
+
+		let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let waiter = kio::Waiter::new(futures::task::waker(Arc::new(FlagWake(woken.clone()))));
+		assert!(consumer.poll_next_group(&waiter).is_pending());
+		elapse(&producer, budget - Duration::from_millis(1));
+		assert!(!woken.load(Ordering::SeqCst), "woken before the budget");
+		assert!(consumer.poll_next_group(&waiter).is_pending());
+		elapse(&producer, Duration::from_millis(1));
+		assert!(woken.load(Ordering::SeqCst), "the budget never woke the reader");
+		assert_eq!(drain_ordered(&mut consumer), [2]);
+		for sequence in 3..10 {
+			put(&producer, sequence, None);
+			assert_eq!(drain_ordered(&mut consumer), [sequence]);
+		}
+	}
+
+	/// On a timed track, media time gives up on an owed group too: once the edge is a full
+	/// budget past where its successor starts, and not a frame before.
+	#[test]
+	#[cfg(feature = "async")]
+	fn next_group_passes_an_owed_group_past_the_media_deadline() {
+		let producer = received_producer(Info::timed());
+		let mut consumer = producer
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(2))))
+			.ordered();
+		put(&producer, 5, Some(5000));
+		assert_eq!(drain_ordered(&mut consumer), [5]);
+
+		let mut later = producer.create_group(group::Info { sequence: 7 }).unwrap();
+		later
+			.write_frame(Timestamp::from_millis(7000).unwrap(), &b"start"[..])
+			.unwrap();
+		let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let waiter = kio::Waiter::new(futures::task::waker(Arc::new(FlagWake(woken.clone()))));
+		assert!(consumer.poll_next_group(&waiter).is_pending(), "group 6 is still owed");
+		woken.store(false, Ordering::SeqCst);
+		later
+			.write_frame(Timestamp::from_millis(8999).unwrap(), &b"within"[..])
+			.unwrap();
+		assert!(consumer.poll_next_group(&waiter).is_pending());
+		woken.store(false, Ordering::SeqCst);
+		later
+			.write_frame(Timestamp::from_millis(9000).unwrap(), &b"deadline"[..])
+			.unwrap();
+		assert!(woken.load(Ordering::SeqCst), "the deadline never woke the reader");
+		assert_eq!(drain_ordered(&mut consumer), [7]);
+	}
+
+	/// A group landing between the owed one and the candidate wakes the reader: it can
+	/// convict the owed group sooner, and is then read without waiting.
+	#[test]
+	#[cfg(feature = "async")]
+	fn next_group_rejudges_an_owed_group_when_a_lower_successor_lands() {
+		let producer = received_producer(Info::timed());
+		let mut consumer = producer
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(1))))
+			.ordered();
+		put(&producer, 0, Some(0));
+		assert_eq!(drain_ordered(&mut consumer), [0]);
+		let mut edge = producer.create_group(group::Info { sequence: 4 }).unwrap();
+		edge.write_frame(Timestamp::from_millis(4000).unwrap(), &b"edge"[..])
+			.unwrap();
+
+		let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let waiter = kio::Waiter::new(futures::task::waker(Arc::new(FlagWake(woken.clone()))));
+		assert!(consumer.poll_next_group(&waiter).is_pending(), "group 1 is still owed");
+		// Group 1 reaches only to group 2's start, a full budget behind the edge.
+		put(&producer, 2, Some(2000));
+		assert!(woken.load(Ordering::SeqCst), "the lower successor went unjudged");
+		assert_eq!(drain_ordered(&mut consumer), [2], "group 3 is still owed");
+	}
+
+	/// The arrival ledger giving up on a gap wakes the reader, even when the owed group's
+	/// successor now is a later arrival whose own budget runs longer.
+	#[test]
+	#[cfg(feature = "async")]
+	fn next_group_passes_an_owed_group_when_its_gap_folds() {
+		let budget = Duration::from_millis(50);
+		let producer = received_producer(None);
+		let mut consumer = producer
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(budget)))
+			.ordered();
+		put(&producer, 0, None);
+		assert_eq!(drain_ordered(&mut consumer), [0]);
+		let opener = producer.create_group(group::Info { sequence: 2 }).unwrap();
+		elapse(&producer, Duration::from_millis(40));
+		put(&producer, 3, None);
+		opener.abort(Error::Cancel).unwrap();
+		producer.modify().unwrap().reclaim_aborted(2);
+
+		let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let waiter = kio::Waiter::new(futures::task::waker(Arc::new(FlagWake(woken.clone()))));
+		assert!(consumer.poll_next_group(&waiter).is_pending(), "group 1 is still owed");
+		elapse(&producer, Duration::from_millis(9));
+		assert!(!woken.load(Ordering::SeqCst), "woken before the gap folds");
+		elapse(&producer, Duration::from_millis(1));
+		assert!(woken.load(Ordering::SeqCst), "the fold never woke the reader");
+		assert_eq!(drain_ordered(&mut consumer), [3]);
+	}
+
+	/// What the track knows will never land is passed at once: a drop, an aborted group
+	/// whose slot was reclaimed, or a group from below where the feed starts.
+	#[test]
+	#[cfg(feature = "async")]
+	fn next_group_passes_what_is_not_owed() {
+		let subscription = Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(30)));
+		let producer = received_producer(None);
+		let mut consumer = producer.subscribe(subscription.clone()).ordered();
+		put(&producer, 0, None);
+		assert_eq!(drain_ordered(&mut consumer), [0]);
+
+		producer.drop_groups(1..4, StreamError::Old);
+		put(&producer, 4, None);
+		assert_eq!(drain_ordered(&mut consumer), [4], "groups 1 to 3 were dropped");
+
+		let aborted = producer.create_group(group::Info { sequence: 5 }).unwrap();
+		aborted.abort(Error::Cancel).unwrap();
+		producer.modify().unwrap().reclaim_aborted(5);
+		assert!(!producer.state.read().lookup.contains_key(&5), "the slot was reclaimed");
+		put(&producer, 6, None);
+		assert_eq!(drain_ordered(&mut consumer), [6], "group 5 was aborted and reclaimed");
+
+		// Below the first arrival, a feed with no declared start owes nothing.
+		let producer = received_producer(None);
+		let mut consumer = producer.subscribe(subscription.clone()).ordered();
+		put(&producer, 1, None);
+		assert_eq!(drain_ordered(&mut consumer), [1]);
+
+		// A declared start owes everything from it.
+		let mut producer = received_producer(None);
+		let mut consumer = producer.subscribe(subscription).ordered();
+		producer.start_at(0).unwrap();
+		put(&producer, 1, None);
+		assert!(
+			drain_ordered(&mut consumer).is_empty(),
+			"group 0 is owed from the start"
+		);
+		put(&producer, 0, None);
+		assert_eq!(drain_ordered(&mut consumer), [0, 1]);
+	}
+
+	/// The wait follows the reader's budget: a zero budget waits for nothing, a budget
+	/// narrowed mid-wait ends it, and an unbounded one waits until the hole resolves.
+	#[test]
+	#[cfg(feature = "async")]
+	fn next_group_waits_on_an_owed_group_within_the_budget() {
+		let producer = received_producer(None);
+		let mut consumer = producer.subscribe(Subscription::default()).ordered();
+		put(&producer, 0, None);
+		assert_eq!(drain_ordered(&mut consumer), [0]);
+		put(&producer, 2, None);
+		assert_eq!(drain_ordered(&mut consumer), [2], "a zero budget waits for nothing");
+
+		let producer = received_producer(None);
+		let mut consumer = producer.subscribe(replay()).ordered();
+		put(&producer, 0, None);
+		put(&producer, 2, None);
+		assert_eq!(drain_ordered(&mut consumer), [0]);
+		consumer.control().update(Subscription::default()).unwrap();
+		assert_eq!(drain_ordered(&mut consumer), [2], "the narrowed budget gave up");
+
+		let producer = received_producer(None);
+		let mut consumer = producer
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(None)))
+			.ordered();
+		put(&producer, 0, None);
+		put(&producer, 2, None);
+		assert_eq!(drain_ordered(&mut consumer), [0]);
+		elapse(&producer, Duration::from_secs(3600));
+		assert!(drain_ordered(&mut consumer).is_empty(), "no deadline, however long");
+		put(&producer, 1, None);
+		assert_eq!(drain_ordered(&mut consumer), [1, 2]);
 	}
 
 	#[test]
@@ -13463,6 +15650,13 @@ mod test {
 		assert_eq!(group.sequence, 5);
 	}
 
+	/// The sequence a peek reserves, without taking it.
+	fn peek(subscriber: &mut Subscriber, ordered: bool) -> Poll<Option<u64>> {
+		subscriber
+			.poll_peek_group(ordered, &kio::Waiter::noop())
+			.map(|res| res.unwrap().map(|reserved| reserved.sequence()))
+	}
+
 	#[test]
 	fn skipping_another_copys_groups_preserves_arrival_bounds_and_the_last_sequence() {
 		let producer = track_producer("test", Info::timed());
@@ -13474,22 +15668,12 @@ mod test {
 				.finish()
 				.unwrap();
 		}
-		let waiter = kio::Waiter::noop();
-		assert_eq!(
-			subscriber.poll_peek_group(true, &waiter).map(Result::unwrap),
-			Poll::Ready(Some(u64::MAX - 1))
-		);
+		assert_eq!(peek(&mut subscriber, true), Poll::Ready(Some(u64::MAX - 1)));
 		subscriber.skip_ordered(Some(u64::MAX));
-		assert_eq!(
-			subscriber.poll_peek_group(true, &waiter).map(Result::unwrap),
-			Poll::Ready(Some(u64::MAX))
-		);
+		assert_eq!(peek(&mut subscriber, true), Poll::Ready(Some(u64::MAX)));
 		subscriber.skip_ordered(None);
 		subscriber.skip_ordered(Some(0));
-		assert_eq!(
-			subscriber.poll_peek_group(true, &waiter).map(Result::unwrap),
-			Poll::Ready(None)
-		);
+		assert_eq!(peek(&mut subscriber, true), Poll::Ready(None));
 		assert_eq!(subscriber.delivered.runs(), 0, "skips are not deliveries");
 		assert_eq!(subscriber.take_stale().groups, 0, "duplicates are not stale skips");
 		let Inner::Plain(cursor) = &subscriber.inner else {
@@ -13498,10 +15682,7 @@ mod test {
 		assert_eq!(cursor.min_sequence, 0);
 		assert_eq!(cursor.end_sequence, None);
 		assert_eq!(cursor.index, 0);
-		assert_eq!(
-			subscriber.poll_peek_group(false, &waiter).map(Result::unwrap),
-			Poll::Ready(Some(u64::MAX - 1))
-		);
+		assert_eq!(peek(&mut subscriber, false), Poll::Ready(Some(u64::MAX - 1)));
 	}
 
 	#[test]
@@ -13511,26 +15692,23 @@ mod test {
 			append_at(&mut producer, second * 1000);
 		}
 		let mut subscriber = producer.subscribe(None);
-		let waiter = kio::Waiter::noop();
-		assert_eq!(
-			subscriber.poll_peek_group(true, &waiter).map(Result::unwrap),
-			Poll::Ready(Some(3))
-		);
-		subscriber.skip_ordered(Some(2));
-		let Poll::Ready(Ok(Some(group))) = subscriber.poll_next_group(&waiter) else {
-			panic!("the reserved group is still delivered");
+		let Poll::Ready(Ok(Some(reserved))) = subscriber.poll_peek_group(true, &kio::Waiter::noop()) else {
+			panic!("group 3 is servable");
 		};
-		assert_eq!(group.sequence, 3);
+		assert_eq!(reserved.sequence(), 3);
+		subscriber.skip_ordered(Some(2));
+		assert_eq!(subscriber.take(reserved).unwrap().sequence, 3);
 		assert_eq!(subscriber.take_stale().groups, 1, "only group 2 was skipped for age");
 		assert_eq!(subscriber.take_stale().groups, 0, "counted once");
 	}
 
+	/// A peek moves no cursor, so the bounds in force at the next read decide it.
 	#[test]
-	fn changed_bounds_invalidate_a_peeked_group() {
+	fn changed_bounds_after_a_peek_decide_the_next_read() {
 		for ordered in [false, true] {
 			for raise_floor in [false, true] {
 				let producer = track_producer("test", Info::timed());
-				let mut subscriber = producer.subscribe(replay());
+				let mut subscriber = producer.subscribe(replay().with_order(Order::Ascending));
 				for sequence in [1, 2] {
 					producer
 						.create_group(group::Info { sequence })
@@ -13539,10 +15717,7 @@ mod test {
 						.unwrap();
 				}
 				let waiter = kio::Waiter::noop();
-				assert_eq!(
-					subscriber.poll_peek_group(ordered, &waiter).map(Result::unwrap),
-					Poll::Ready(Some(1))
-				);
+				assert_eq!(peek(&mut subscriber, ordered), Poll::Ready(Some(1)));
 				if raise_floor {
 					subscriber.set_range(2..);
 					let Poll::Ready(Ok(Some(group))) = subscriber.poll_group(ordered, &waiter) else {
@@ -13574,17 +15749,13 @@ mod test {
 					.finish()
 					.unwrap();
 			}
-			let waiter = kio::Waiter::noop();
-			assert_eq!(
-				subscriber.poll_peek_group(ordered, &waiter).map(Result::unwrap),
-				Poll::Ready(Some(1))
-			);
-			evict(&producer, 1);
-			let Poll::Ready(Ok(Some(group))) = subscriber.poll_group(ordered, &waiter) else {
-				panic!("the exact reserved group must be returned");
+			let Poll::Ready(Ok(Some(reserved))) = subscriber.poll_peek_group(ordered, &kio::Waiter::noop()) else {
+				panic!("group 1 is servable");
 			};
+			evict(&producer, 1);
 			assert_eq!(
-				group.sequence, 1,
+				subscriber.take(reserved).unwrap().sequence,
+				1,
 				"ordered={ordered}: eviction must not substitute group 3"
 			);
 		}
@@ -13594,7 +15765,7 @@ mod test {
 	#[test]
 	fn peeking_keeps_a_re_offered_group_owed() {
 		let producer = track_producer("test", Info::timed());
-		let mut subscriber = producer.subscribe(replay());
+		let mut subscriber = producer.subscribe(replay().with_order(Order::Ascending));
 		subscriber.set_range(..0);
 		for sequence in [1, 2] {
 			producer
@@ -13607,10 +15778,7 @@ mod test {
 		assert!(subscriber.poll_group(false, &waiter).is_pending());
 		subscriber.set_range(..);
 		for _ in 0..2 {
-			assert_eq!(
-				subscriber.poll_peek_group(false, &waiter).map(Result::unwrap),
-				Poll::Ready(Some(1))
-			);
+			assert_eq!(peek(&mut subscriber, false), Poll::Ready(Some(1)));
 		}
 		let mut read = Vec::new();
 		while let Poll::Ready(Ok(Some(group))) = subscriber.poll_group(false, &waiter) {
@@ -13634,10 +15802,7 @@ mod test {
 			let waiter = kio::Waiter::noop();
 			let first = if ordered { 1 } else { 2 };
 			for _ in 0..2 {
-				assert_eq!(
-					subscriber.poll_peek_group(ordered, &waiter).map(Result::unwrap),
-					Poll::Ready(Some(first))
-				);
+				assert_eq!(peek(&mut subscriber, ordered), Poll::Ready(Some(first)));
 			}
 			let Poll::Ready(Ok(Some(group))) = subscriber.poll_group(ordered, &waiter) else {
 				panic!("the peeked group is still available");
@@ -13647,10 +15812,7 @@ mod test {
 			subscriber.set_range(..0);
 			assert!(subscriber.poll_peek_group(ordered, &waiter).is_pending());
 			subscriber.set_range(..);
-			assert_eq!(
-				subscriber.poll_peek_group(ordered, &waiter).map(Result::unwrap),
-				Poll::Ready(Some(second))
-			);
+			assert_eq!(peek(&mut subscriber, ordered), Poll::Ready(Some(second)));
 		}
 	}
 
@@ -13983,7 +16145,7 @@ mod test {
 		);
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn group_ranges_preserve_the_floor_when_the_cap_changes() {
 		let producer = track_producer("test", Info::timed());
@@ -14128,7 +16290,7 @@ mod test {
 	fn empty_local_cap_holds_while_another_subscriber_requests_everything() {
 		let producer = track_producer("test", Info::timed());
 		let mut everything = producer.subscribe(replay());
-		let mut empty = producer.subscribe(replay());
+		let mut empty = producer.subscribe(replay().with_order(Order::Ascending));
 		empty.set_range((Bound::Unbounded, Position::group(0).group_end()));
 
 		for s in 0..3 {
@@ -14237,6 +16399,25 @@ mod test {
 	}
 
 	#[test]
+	fn rescale_matches_the_track_timeline() {
+		let timed = Info::timed();
+		let ms = Timestamp::from_micros(2_400).unwrap();
+		let rescaled = timed.rescale(Some(ms)).unwrap().unwrap();
+		assert_eq!(rescaled, Timestamp::from_millis(2).unwrap());
+		// Halfway rounds down too, as `@moq/net`'s `Track.rescale` does.
+		let half = timed.rescale(Timestamp::from_micros(1_500).ok()).unwrap().unwrap();
+		assert_eq!(half, Timestamp::from_millis(1).unwrap());
+		assert!(matches!(timed.rescale(None), Err(Error::TimestampMismatch)));
+		// (2^61-1) seconds overflows conversion to the milli-scale track.
+		let huge = Timestamp::from_secs((1 << 61) - 1).unwrap();
+		assert!(matches!(timed.rescale(Some(huge)), Err(Error::TimestampMismatch)));
+
+		let untimed = Info::default();
+		assert_eq!(untimed.rescale(None).unwrap(), None);
+		assert!(matches!(untimed.rescale(Some(ms)), Err(Error::TimestampMismatch)));
+	}
+
+	#[test]
 	fn write_frame_rejects_an_oversized_frame_before_appending_its_group() {
 		let mut producer = track_producer("test", Info::timed());
 		let frame = bytes::Bytes::from(vec![0; group::MAX_CACHE_BYTES as usize + 1]);
@@ -14263,7 +16444,7 @@ mod test {
 		assert!(matches!(producer.append_group(), Err(Error::BoundsExceeded(_))));
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn fetch_cache_hit() {
 		let producer = track_producer("test", Info::timed());
@@ -14277,7 +16458,7 @@ mod test {
 
 		// A cached group resolves immediately and never queues a request. `peek_group`
 		// also returns it synchronously.
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 		assert!(consumer.peek_group(0).is_some());
 		let mut g = consumer.fetch_group(0, None).await.unwrap();
@@ -14288,11 +16469,11 @@ mod test {
 		assert!(dynamic.poll_requested_fill_group(&kio::Waiter::noop()).is_pending());
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn fetch_miss_signals_dynamic() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		// A cache miss isn't in `peek_group`, but a dynamic handler exists, so
@@ -14322,11 +16503,11 @@ mod test {
 		assert_eq!(&g.read_frame().await.unwrap().unwrap().payload[..], b"hi");
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn fetch_miss_rejects() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		let pending = consumer.fetch_group(5, None);
@@ -14342,11 +16523,11 @@ mod test {
 		assert!(fetch.read().is_empty());
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn fetch_miss_drop_rejects() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		let pending = consumer.fetch_group(5, None);
@@ -14362,11 +16543,11 @@ mod test {
 
 	/// A request stays wanted while any joined fetch waits, and once the last leaves it
 	/// is withdrawn: a later fetch starts a fresh request instead of joining it.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn fetch_request_unused_once_every_fetch_leaves() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		let first = consumer.fetch_group(5, None);
@@ -14378,9 +16559,9 @@ mod test {
 		let second = consumer.fetch_group(5, None);
 
 		drop(first);
-		assert!(req.poll_unused(&kio::Waiter::noop()).is_pending());
+		assert!(req.poll_unwanted(&kio::Waiter::noop()).is_pending());
 		drop(second);
-		assert!(req.poll_unused(&kio::Waiter::noop()).is_ready());
+		assert!(req.poll_unwanted(&kio::Waiter::noop()).is_ready());
 
 		let retry = consumer.fetch_group(5, None);
 		let fresh = dynamic
@@ -14389,18 +16570,18 @@ mod test {
 			.expect("the retry queues a fresh request")
 			.unwrap();
 		drop(req);
-		assert!(fresh.poll_unused(&kio::Waiter::noop()).is_pending());
+		assert!(fresh.poll_unwanted(&kio::Waiter::noop()).is_pending());
 		fresh.accept(Info::timed()).unwrap().finish().unwrap();
 		assert_eq!(retry.await.unwrap().sequence, 5);
 	}
 
 	/// A fetch abandoned before any handler took it is withdrawn from the queue too, so
 	/// no handler serves it.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn fetch_abandoned_while_queued_never_reaches_the_handler() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		drop(consumer.fetch_group(5, None));
@@ -14411,11 +16592,11 @@ mod test {
 
 	/// The withdrawal happens as the last caller leaves, not when the handler notices: a
 	/// fetch arriving before the handler drops the abandoned request is not failed with it.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn fetch_after_the_last_caller_left_is_not_dropped() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		let first = consumer.fetch_group(5, None);
@@ -14441,11 +16622,11 @@ mod test {
 
 	/// A handler that accepts after every caller left still caches the group, so a fetch
 	/// that queued a fresh request meanwhile resolves from it and that request is moot.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn fetch_accept_after_withdrawal_caches_the_group() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		let first = consumer.fetch_group(5, None);
@@ -14471,7 +16652,7 @@ mod test {
 
 		let mut fetched = retry.await.unwrap();
 		assert_eq!(&fetched.read_frame().await.unwrap().unwrap().payload[..], b"hi");
-		assert!(!fresh.is_used(), "the retry left the fresh request");
+		assert!(!fresh.is_wanted(), "the retry left the fresh request");
 		assert!(matches!(fresh.accept(Info::timed()), Err(Error::Duplicate)));
 	}
 
@@ -14486,11 +16667,11 @@ mod test {
 
 	/// A fetch that hits the cache holds the group until polled, so a handler that aborts
 	/// the group once nobody wants it (an abandoned upstream fetch) leaves it alone.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn fetch_hit_keeps_the_group_wanted() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		let first = consumer.fetch_group(5, None);
@@ -14506,19 +16687,394 @@ mod test {
 		drop(first.await.unwrap());
 
 		let hit = consumer.fetch_group(5, None);
-		assert!(!group.abort_unused(Error::Cancel), "the pending hit wants the group");
+		assert!(
+			!group.handle().abort_unwanted(Error::Cancel),
+			"the pending hit wants the group"
+		);
 		let mut fetched = hit.await.unwrap();
 		assert_eq!(&fetched.read_frame().await.unwrap().unwrap().payload[..], b"head");
+	}
+
+	/// A bounded FIN is local to its request, never proof that the original group ended.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn bounded_transport_copies_never_answer_whole_fetches() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let consumer = producer.consume();
+		let request = |start, end| FetchOptions {
+			options: group::Fetch {
+				frame_start: start,
+				..Default::default()
+			},
+			end,
+		};
+		let bounded = consumer.fetch_range(0, request(2, Some(4)));
+		let fill = dynamic.requested_fill_group().await.unwrap();
+		assert_eq!((fill.frame_start(), fill.frame_end()), (0, Some(4)));
+		let mut prefix = fill.accept(Info::timed()).unwrap();
+		for _ in 0..4 {
+			prefix.write_frame(Timestamp::ZERO, b"prefix".as_slice()).unwrap();
+		}
+		prefix.finish().unwrap();
+		let mut bounded = bounded.await.unwrap().with_range(2..).with_end(Some(4));
+		for expected in 2..4 {
+			assert_eq!(bounded.index(), expected);
+			assert!(bounded.read_frame().await.unwrap().is_some());
+		}
+		assert!(bounded.read_frame().await.unwrap().is_none());
+		assert!(
+			consumer.cached_groups(0..1).is_empty(),
+			"a bounded prefix is no whole cached group"
+		);
+		// A narrower bound reuses the same stored prefix.
+		assert!(
+			consumer
+				.fetch_range(0, request(1, Some(3)))
+				.now_or_never()
+				.unwrap()
+				.is_ok()
+		);
+		let mut whole = consumer.fetch_group(0, None);
+		assert!(kio::Task::poll(&mut *whole, &kio::Waiter::noop()).is_pending());
+		let fill = dynamic.requested_fill_group().await.unwrap();
+		assert_eq!((fill.frame_start(), fill.frame_end()), (0, None));
+		let mut complete = fill.accept(Info::timed()).unwrap();
+		for _ in 0..6 {
+			complete.write_frame(Timestamp::ZERO, b"prefix".as_slice()).unwrap();
+		}
+		complete.finish().unwrap();
+		let mut whole = whole.await.unwrap();
+		for _ in 0..6 {
+			assert!(whole.read_frame().await.unwrap().is_some());
+		}
+		assert!(whole.read_frame().await.unwrap().is_none());
+		assert_eq!(producer.state.read().lookup[&0].copies().count(), 1);
+	}
+
+	/// Tail starts replace one backfill slot rather than retaining a copy per peer range.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn bounded_tail_refills_coalesce_behind_a_live_copy() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let consumer = producer.consume();
+		let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		live.start_at(200).unwrap();
+		live.write_frame(Timestamp::ZERO, b"live".as_slice()).unwrap();
+		for start in (1..100).rev() {
+			let fetched = consumer.fetch_range(
+				0,
+				FetchOptions {
+					options: group::Fetch {
+						frame_start: start,
+						..Default::default()
+					},
+					end: Some(start + 1),
+				},
+			);
+			let fill = dynamic.requested_fill_group().await.unwrap();
+			assert_eq!((fill.frame_start(), fill.frame_end()), (start, Some(start + 1)));
+			let mut tail = fill.accept(Info::timed()).unwrap();
+			tail.write_frame(Timestamp::ZERO, b"tail".as_slice()).unwrap();
+			tail.finish().unwrap();
+			assert_eq!(fetched.await.unwrap().index(), start);
+			assert_eq!(producer.state.read().lookup[&0].copies().count(), 2);
+		}
+		let mut sub = producer.subscribe(None);
+		let group = sub.recv_group().await.unwrap().unwrap();
+		assert_eq!(
+			group.with_range(0..).index(),
+			200,
+			"a bounded head does not replace the live feed for whole-group readers"
+		);
+		live.abort(Error::Cancel).unwrap();
+		// The backfill remains cache-owned after the live copy failed.
+		assert!(!producer.state.read().lookup[&0].is_aborted());
+	}
+
+	/// A bounded fill that a later, disjoint one displaces from the cache still answers the
+	/// fetch that asked for it.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_displaced_bounded_fill_still_answers_its_fetch() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let consumer = producer.consume();
+		let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		live.start_at(200).unwrap();
+		live.write_frame(Timestamp::ZERO, b"live".as_slice()).unwrap();
+		let range = |start, end| FetchOptions {
+			options: group::Fetch {
+				frame_start: start,
+				..Default::default()
+			},
+			end: Some(end),
+		};
+		let fill = async |frames: std::ops::Range<u64>| {
+			let fill = dynamic.requested_fill_group().await.unwrap();
+			assert_eq!((fill.frame_start(), fill.frame_end()), (frames.start, Some(frames.end)));
+			let mut group = fill.accept(Info::timed()).unwrap();
+			for _ in frames {
+				group.write_frame(Timestamp::ZERO, b"tail".as_slice()).unwrap();
+			}
+			group.finish().unwrap();
+		};
+		let later = consumer.fetch_range(0, range(4, 10));
+		fill(4..10).await;
+		let earlier = consumer.fetch_range(0, range(0, 3));
+		fill(0..3).await;
+		assert_eq!(earlier.await.unwrap().index(), 0);
+		assert_eq!(later.await.unwrap().index(), 4);
+	}
+
+	/// A copy cut short at the back never displaces a fetched one that reaches the group's
+	/// end, so whole-group readers keep it, and it still answers its own fetch.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_bounded_fill_never_displaces_a_whole_tail() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let consumer = producer.consume();
+		let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		live.start_at(200).unwrap();
+		live.write_frame(Timestamp::ZERO, b"live".as_slice()).unwrap();
+		let fill = async |start: u64, end: Option<u64>| {
+			let fill = dynamic.requested_fill_group().await.unwrap();
+			assert_eq!((fill.frame_start(), fill.frame_end()), (start, end));
+			let mut group = fill.accept(Info::timed()).unwrap();
+			group.write_frame(Timestamp::ZERO, b"tail".as_slice()).unwrap();
+			group
+		};
+		let tail = consumer.fetch_group(
+			0,
+			group::Fetch {
+				frame_start: 5,
+				..Default::default()
+			},
+		);
+		let _tail = fill(5, None).await;
+		let head = consumer.fetch_range(
+			0,
+			FetchOptions {
+				options: group::Fetch::default(),
+				end: Some(1),
+			},
+		);
+		fill(0, Some(1)).await.finish().unwrap();
+		assert_eq!(head.await.unwrap().index(), 0);
+		assert_eq!(tail.await.unwrap().index(), 5);
+		let mut sub = producer.subscribe(None);
+		assert_eq!(sub.assert_group().with_range(0..).index(), 5);
+	}
+
+	/// A track abort ends every copy still being written, including one the cache never held
+	/// or has since displaced: its reader gets the abort and its writer fails.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_track_abort_ends_uncached_copies() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let consumer = producer.consume();
+		let range = |start, end| FetchOptions {
+			options: group::Fetch {
+				frame_start: start,
+				..Default::default()
+			},
+			end,
+		};
+		let fill = async |frames: FetchOptions| {
+			let fill = dynamic.requested_fill_group().await.unwrap();
+			assert_eq!(
+				(fill.frame_start(), fill.frame_end()),
+				(frames.options.frame_start, frames.end)
+			);
+			let mut group = fill.accept(Info::timed()).unwrap();
+			group.write_frame(Timestamp::ZERO, b"copy".as_slice()).unwrap();
+			group
+		};
+		let fetch = async |sequence, frames: FetchOptions| {
+			let pending = consumer.fetch_range(sequence, frames.clone());
+			let held = fill(frames).await;
+			(held, pending.await.unwrap())
+		};
+		let mut lives = Vec::new();
+		for sequence in 0..2 {
+			let mut live = producer.create_group(group::Info { sequence }).unwrap();
+			live.start_at(200).unwrap();
+			live.write_frame(Timestamp::ZERO, b"live".as_slice()).unwrap();
+			lives.push(live);
+		}
+		// A bounded copy beside a cached whole tail never enters the cache.
+		let _tail = fetch(0, range(5, None)).await;
+		let kept = fetch(0, range(0, Some(3))).await;
+		// A later copy displaces a live group's bounded head, and a fetched-only bounded copy.
+		let head = fetch(1, range(4, Some(10))).await;
+		let _wider = fetch(1, range(0, Some(3))).await;
+		let fetched = fetch(2, range(0, Some(3))).await;
+		let _wider = fetch(2, range(0, None)).await;
+		let mut detached = [kept, head, fetched];
+		for (_, fetched) in &mut detached {
+			fetched.read_frame().await.unwrap().unwrap();
+		}
+
+		producer.abort(Error::Cancel).unwrap();
+		for (mut held, mut fetched) in detached {
+			assert!(matches!(fetched.read_frame().now_or_never(), Some(Err(Error::Cancel))));
+			assert!(held.write_frame(Timestamp::ZERO, b"late".as_slice()).is_err());
+		}
+	}
+
+	/// A track abort keeps a finished bounded copy for the reader still draining it, as it
+	/// does a finished whole group.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_track_abort_keeps_a_finished_bounded_copy() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let consumer = producer.consume();
+		let fetch = consumer.fetch_range(
+			0,
+			FetchOptions {
+				options: group::Fetch::default(),
+				end: Some(2),
+			},
+		);
+		let mut group = dynamic
+			.requested_fill_group()
+			.await
+			.unwrap()
+			.accept(Info::timed())
+			.unwrap();
+		for _ in 0..2 {
+			group.write_frame(Timestamp::ZERO, b"copy".as_slice()).unwrap();
+		}
+		group.finish().unwrap();
+		let mut fetched = fetch.await.unwrap();
+
+		producer.abort(Error::Cancel).unwrap();
+		assert!(fetched.read_frame().await.unwrap().is_some());
+		assert!(fetched.read_frame().await.unwrap().is_some());
+		assert!(fetched.read_frame().await.unwrap().is_none());
+	}
+
+	/// A finished bounded copy below the declared end is nothing in flight, so an abort after
+	/// the end is reached still ends the track cleanly.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_finished_bounded_copy_lets_the_end_settle() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let consumer = producer.consume();
+		let fetch = consumer.fetch_range(
+			0,
+			FetchOptions {
+				options: group::Fetch::default(),
+				end: Some(1),
+			},
+		);
+		let fill = dynamic.requested_fill_group().await.unwrap();
+		assert_eq!(fill.frame_end(), Some(1));
+		let mut group = fill.accept(Info::timed()).unwrap();
+		group.write_frame(Timestamp::ZERO, b"copy".as_slice()).unwrap();
+		// The end is reached while the copy is still being written, so only the abort
+		// can find it settled.
+		producer
+			.create_group(group::Info { sequence: 1 })
+			.unwrap()
+			.finish()
+			.unwrap();
+		producer.finish_at(Position::group(2), None).unwrap();
+		group.finish().unwrap();
+		fetch.await.unwrap();
+
+		producer.abort(Error::Timeout).unwrap();
+		assert!(matches!(
+			consumer.poll_complete(&kio::Waiter::noop()),
+			Poll::Ready(Ok(()))
+		));
+	}
+
+	/// A copy cut short at the back never answers a whole-group reader. A live group the
+	/// publisher cut is still handed out as that cut, and one it cancelled stays a hole,
+	/// whatever bounded copy of it remains.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_back_cut_copy_never_answers_a_whole_group_reader() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let consumer = producer.consume();
+		let bounded = async |sequence: u64| {
+			let fetch = consumer.fetch_range(
+				sequence,
+				FetchOptions {
+					options: group::Fetch::default(),
+					end: Some(1),
+				},
+			);
+			let mut group = dynamic
+				.requested_fill_group()
+				.await
+				.unwrap()
+				.accept(Info::timed())
+				.unwrap();
+			group.write_frame(Timestamp::ZERO, b"head".as_slice()).unwrap();
+			group.finish().unwrap();
+			fetch.await.unwrap();
+		};
+		let mut arrival = producer.subscribe(replay());
+		let mut ordered = producer.subscribe(replay()).ordered();
+		for (sequence, err) in [(0, Error::App(5)), (1, Error::Cancel)] {
+			let mut live = producer.create_group(group::Info { sequence }).unwrap();
+			live.start_at(200).unwrap();
+			live.write_frame(Timestamp::ZERO, b"live".as_slice()).unwrap();
+			bounded(sequence).await;
+			live.abort(err).unwrap();
+		}
+		// Fetched only, so it reaches the ordered reader alone.
+		bounded(2).await;
+
+		let cut = arrival.assert_group();
+		assert_eq!(cut.sequence, 0);
+		assert!(matches!(cut.with_range(200..).read_frame().await, Err(Error::App(5))));
+		arrival.assert_no_group();
+		let cut = ordered.next_group().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(cut.sequence, 0);
+		assert!(matches!(cut.with_range(200..).read_frame().await, Err(Error::App(5))));
+		assert!(
+			ordered.next_group().now_or_never().is_none(),
+			"neither the cancelled group nor a copy ending short of its group is read"
+		);
+	}
+
+	/// Queued ranges widen before dispatch; a taken cap does not promise an unseen suffix.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn bounded_fetches_widen_before_dispatch_and_split_after() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let consumer = producer.consume();
+		let request = |end| FetchOptions {
+			options: group::Fetch::default(),
+			end: Some(end),
+		};
+		let _a = consumer.fetch_range(0, request(3));
+		let _b = consumer.fetch_range(0, request(5));
+		let first = dynamic.requested_fill_group().await.unwrap();
+		assert_eq!(first.frame_end(), Some(5));
+		let _c = consumer.fetch_range(0, request(8));
+		let second = dynamic.requested_fill_group().await.unwrap();
+		assert_eq!((first.frame_end(), second.frame_end()), (Some(5), Some(8)));
 	}
 
 	/// An accepted group starts where its request did before anyone can see it, so a
 	/// wider fetch arriving before the handler writes misses instead of being handed a
 	/// reader that would skip the head it asked for.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn accepted_group_starts_at_the_request() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		let _tail = consumer.fetch_group(
@@ -14547,11 +17103,11 @@ mod test {
 
 	/// Once a group nobody wanted is aborted, a later fetch misses rather than reading
 	/// the abort, and queues a fresh request.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn fetch_misses_an_abandoned_group() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		let first = consumer.fetch_group(5, None);
@@ -14562,7 +17118,7 @@ mod test {
 			.unwrap();
 		let group = req.accept(Info::timed()).unwrap();
 		drop(first.await.unwrap());
-		assert!(group.abort_unused(Error::Cancel));
+		assert!(group.handle().abort_unwanted(Error::Cancel));
 
 		let retry = consumer.fetch_group(5, None);
 		let req = dynamic
@@ -14574,11 +17130,11 @@ mod test {
 		assert!(retry.await.unwrap().read_frame().await.unwrap().is_none());
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn fetch_reject_does_not_poison_retry() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		let pending = consumer.fetch_group(5, None);
@@ -14609,11 +17165,11 @@ mod test {
 	/// A group cached from a frame-bounded subscription starts partway in. Serving it to
 	/// someone who asked for the whole group would silently hand back a tail, so it is a
 	/// miss and the fetch goes upstream instead.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn fetch_ignores_a_group_that_starts_too_late() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		// The live subscription resumed mid-group, so only the tail is cached.
@@ -14664,11 +17220,11 @@ mod test {
 	/// A fetch for the head of a live group the feed started partway into keeps that group
 	/// in arrival order: subscribers get the fetched copy while it lasts, and the live
 	/// group again once the fetch is gone.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn fetch_fills_the_head_of_a_live_group() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
@@ -14708,12 +17264,234 @@ mod test {
 		);
 	}
 
+	/// A bounded read of a live group the feed started partway into asks its head as a fill,
+	/// and reads the filled copy from its first frame rather than lagging.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_bounded_read_fills_the_head_of_a_live_group() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+
+		let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		live.start_at(1).unwrap();
+		live.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"delta"))
+			.unwrap();
+		live.finish().unwrap();
+
+		let mut sub = producer.subscribe(replay().with_range(0..1));
+		let reading = kio::clock::sim::spawn(async move {
+			let mut group = sub.recv_group().await.unwrap().expect("the group");
+			let mut frames = Vec::new();
+			while let Some(frame) = group.read_frame().await.unwrap() {
+				frames.push(frame.payload);
+			}
+			(frames, sub.recv_group().await.unwrap().is_none())
+		});
+		let request = kio::clock::timeout(std::time::Duration::from_secs(1), dynamic.requested_fill_group())
+			.await
+			.expect("the head is asked")
+			.unwrap();
+		assert_eq!(request.frame_start(), 0);
+		let mut head = request.accept(Info::timed()).unwrap();
+		for payload in [&b"snapshot"[..], b"delta"] {
+			head.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(payload))
+				.unwrap();
+		}
+		head.finish().unwrap();
+		let (frames, ended) = reading.await.unwrap();
+		assert_eq!(frames, [&b"snapshot"[..], b"delta"]);
+		assert!(ended, "the read ends with its range");
+	}
+
+	/// A head fill is judged against the reader's window, as the cursor judges a cached
+	/// group: a newer group outside the window leaves it fresh, even with no max delay.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_head_fill_is_judged_against_the_reader_window() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+
+		let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		live.start_at(1).unwrap();
+		live.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"delta"))
+			.unwrap();
+		live.finish().unwrap();
+		let mut newer = producer.create_group(group::Info { sequence: 1 }).unwrap();
+		newer
+			.write_frame(Timestamp::from_secs(1).unwrap(), bytes::Bytes::from_static(b"x"))
+			.unwrap();
+		newer.finish().unwrap();
+
+		let mut sub = producer.subscribe(Subscription::default().with_range(0..1));
+		let reading = kio::clock::sim::spawn(async move {
+			let group = sub.recv_group().await.unwrap().map(|group| group.sequence);
+			(group, sub.recv_group().await.unwrap().is_none())
+		});
+		let request = kio::clock::timeout(std::time::Duration::from_secs(1), dynamic.requested_fill_group())
+			.await
+			.expect("the head is asked")
+			.unwrap();
+		let mut head = request.accept(Info::timed()).unwrap();
+		for payload in [&b"snapshot"[..], b"delta"] {
+			head.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(payload))
+				.unwrap();
+		}
+		head.finish().unwrap();
+		assert_eq!(reading.await.unwrap(), (Some(0), true));
+	}
+
+	/// A head still asked when a newer group in the reader's window supersedes it is
+	/// written off, so the bounded read ends without waiting on the fill, whether or not the
+	/// cache still holds the headless copy.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_head_still_asked_goes_stale_within_the_window() {
+		for evict in [false, true] {
+			let producer = track_producer("test", Info::timed());
+			let dynamic = producer.requests();
+
+			let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
+			live.start_at(1).unwrap();
+			live.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"delta"))
+				.unwrap();
+			live.finish().unwrap();
+
+			let mut sub = producer.subscribe(Subscription::default().with_range(0..2));
+			assert!(sub.recv_group().now_or_never().is_none(), "the head is still asked");
+			let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
+			assert_eq!(request.sequence(), 0);
+
+			let mut newer = producer.create_group(group::Info { sequence: 1 }).unwrap();
+			newer
+				.write_frame(Timestamp::from_millis(1).unwrap(), bytes::Bytes::from_static(b"x"))
+				.unwrap();
+			newer.finish().unwrap();
+			if evict {
+				producer.modify().unwrap().evict_group(0, Error::Evicted);
+			}
+			let group = kio::clock::timeout(std::time::Duration::from_secs(1), sub.recv_group())
+				.await
+				.expect("group 1 timed out")
+				.unwrap()
+				.expect("group 1");
+			assert_eq!(group.sequence, 1, "evict={evict}");
+			let end = kio::clock::timeout(std::time::Duration::from_secs(1), sub.recv_group())
+				.await
+				.unwrap_or_else(|_| panic!("evict={evict}: the read never ended"))
+				.unwrap();
+			assert!(end.is_none(), "evict={evict}: the read ends with group 0 written off");
+			drop(request);
+		}
+	}
+
+	/// Answered heads go out in the subscription's order, as owed and filled groups do.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn answered_heads_go_out_in_the_subscription_order() {
+		for (order, expected) in [(Order::Ascending, [0, 1]), (Order::Descending, [1, 0])] {
+			let producer = track_producer("test", None);
+			let dynamic = producer.requests();
+			for sequence in 0..2 {
+				let mut live = producer.create_group(group::Info { sequence }).unwrap();
+				live.start_at(1).unwrap();
+				live.write_frame(None, bytes::Bytes::from_static(b"delta")).unwrap();
+				live.finish().unwrap();
+			}
+
+			let mut sub = producer.subscribe(replay().with_order(order).with_range(0..2));
+			assert!(
+				sub.recv_group().now_or_never().is_none(),
+				"{order:?}: the heads are asked"
+			);
+			let mut requests = Vec::new();
+			while let Some(request) = dynamic.requested_fill_group().now_or_never() {
+				requests.push(request.unwrap());
+			}
+			assert_eq!(requests.len(), 2, "{order:?}: both heads are asked");
+			for request in requests {
+				let mut head = request.accept(Info::default()).unwrap();
+				head.write_frame(None, bytes::Bytes::from_static(b"snapshot")).unwrap();
+				head.finish().unwrap();
+			}
+
+			let mut got = Vec::new();
+			for _ in 0..2 {
+				let group = sub.recv_group().now_or_never().unwrap().unwrap().expect("a head");
+				got.push(group.sequence);
+			}
+			assert_eq!(got, expected, "{order:?}");
+			assert!(
+				matches!(sub.recv_group().now_or_never(), Some(Ok(None))),
+				"{order:?}: the read ends"
+			);
+		}
+	}
+
+	/// A head answered after the reader's ranges moved off its group is not handed out.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_head_answered_outside_the_ranges_is_not_handed_out() {
+		let producer = track_producer("test", None);
+		let dynamic = producer.requests();
+
+		let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		live.start_at(1).unwrap();
+		live.write_frame(None, bytes::Bytes::from_static(b"delta")).unwrap();
+		live.finish().unwrap();
+		framed(&producer, 1, 1).finish().unwrap();
+
+		let mut sub = producer.subscribe(replay().with_range(0..2));
+		let group = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(group.sequence, 1);
+		let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
+		assert_eq!(request.sequence(), 0);
+
+		sub.update(replay().with_range(1..2)).unwrap();
+		let mut head = request.accept(Info::default()).unwrap();
+		head.write_frame(None, bytes::Bytes::from_static(b"snapshot")).unwrap();
+		head.finish().unwrap();
+		assert!(
+			matches!(sub.recv_group().now_or_never(), Some(Ok(None))),
+			"the narrowed read ends without group 0"
+		);
+	}
+
+	/// An ordered bounded read whose head no fill serves gives that group up and reads on,
+	/// rather than handing it out to lag.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_bounded_read_gives_up_a_group_whose_head_is_refused() {
+		let producer = track_producer("test", None);
+		let dynamic = producer.requests();
+
+		let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		live.start_at(1).unwrap();
+		live.write_frame(None, bytes::Bytes::from_static(b"delta")).unwrap();
+		live.finish().unwrap();
+		framed(&producer, 1, 1).finish().unwrap();
+
+		let mut sub = producer.subscribe(replay().with_range(0..2)).ordered();
+		let reading = kio::clock::sim::spawn(async move {
+			let mut read = Vec::new();
+			while let Some(group) = sub.next_group().await.unwrap() {
+				read.push(group.sequence);
+			}
+			read
+		});
+		let request = kio::clock::timeout(std::time::Duration::from_secs(1), dynamic.requested_fill_group())
+			.await
+			.expect("the head is asked")
+			.unwrap();
+		request.reject(Error::NotFound);
+		assert_eq!(reading.await.unwrap(), [1]);
+	}
+
 	/// A refused mid-group end caps none of its group's copies, even one that fit under it.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_refused_end_leaves_every_copy_uncapped() {
 		let mut producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		// The live copy holds frames 0 and 1, the fetched head frames 0 to 2.
@@ -14727,23 +17505,28 @@ mod test {
 			.unwrap()
 			.accept(Info::timed())
 			.unwrap();
-		for _ in 0..3 {
-			head.write_frame(Timestamp::ZERO, b"x".as_slice()).unwrap();
+		for index in 0..3 {
+			let payload = if index == 0 {
+				b"x".as_slice()
+			} else {
+				b"delta".as_slice()
+			};
+			head.write_frame(Timestamp::ZERO, payload).unwrap();
 		}
 		fetch.await.unwrap();
 
 		assert!(matches!(
-			producer.finish_at(Position { group: 0, frame: 2 }),
+			producer.finish_at(Position { group: 0, frame: 2 }, None),
 			Err(Error::ProtocolViolation)
 		));
-		assert_eq!(producer.end(), None);
+		assert_eq!(producer.finished(), None);
 		live.write_frame(Timestamp::ZERO, b"delta".as_slice()).unwrap();
 	}
 
 	/// A live group with a fetched head: group 0, fed from frame 1, plus a two-frame head.
 	#[cfg(feature = "async")]
 	async fn live_group_with_head(producer: &Producer) -> (group::Producer, group::Producer) {
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
@@ -14763,13 +17546,139 @@ mod test {
 		(live, head)
 	}
 
+	/// A live group with a fetched head of group 0 still writing, and the track's end
+	/// declared past it. The live copy ended as `live` says: aborted with it, else finished.
+	#[cfg(feature = "async")]
+	async fn live_group_under_a_writing_head(live: Option<Error>) -> (Producer, group::Producer) {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let consumer = producer.consume();
+
+		let mut group = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		group.start_at(1).unwrap();
+		group
+			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"delta"))
+			.unwrap();
+		let _fetch = consumer.fetch_group(0, None);
+		let mut head = dynamic
+			.requested_fill_group()
+			.await
+			.unwrap()
+			.accept(Info::timed())
+			.unwrap();
+		for payload in [&b"snapshot"[..], b"delta"] {
+			head.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(payload))
+				.unwrap();
+		}
+
+		match live {
+			Some(err) => group.abort(err).unwrap(),
+			None => group.finish().unwrap(),
+		}
+		producer.finish_at(Position::group(1), None).unwrap();
+		(producer, head)
+	}
+
+	/// The fetched head serving a group to its end settles the declared end once it finishes,
+	/// whether the live copy beside it was cut, evicted, or finished, and a later abort keeps
+	/// that clean end, whether `closed()` saw it first or only the abort did.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_fetched_head_settles_the_end_once_it_finishes() {
+		use std::sync::atomic::{AtomicBool, Ordering};
+
+		for live in [Some(Error::Cancel), Some(Error::Evicted), None] {
+			for polled in [false, true] {
+				let (producer, mut head) = live_group_under_a_writing_head(live.clone()).await;
+				let woken = Arc::new(AtomicBool::new(false));
+				let waiter = kio::Waiter::new(futures::task::waker(Arc::new(FlagWake(woken.clone()))));
+				if polled {
+					assert!(
+						producer.poll_closed(&waiter).is_pending(),
+						"{live:?}: the head still writes"
+					);
+				}
+				head.finish().unwrap();
+				if polled {
+					assert!(
+						woken.load(Ordering::SeqCst),
+						"{live:?}: the head finishing wakes the wait"
+					);
+					assert!(matches!(producer.poll_closed(&waiter), Poll::Ready(Ok(()))), "{live:?}");
+				}
+
+				producer.clone().abort(Error::Timeout).unwrap();
+				let noop = kio::Waiter::noop();
+				assert!(
+					matches!(producer.poll_closed(&noop), Poll::Ready(Ok(()))),
+					"{live:?} polled={polled}"
+				);
+				assert!(
+					matches!(producer.consume().poll_complete(&noop), Poll::Ready(Ok(()))),
+					"{live:?} polled={polled}"
+				);
+			}
+		}
+	}
+
+	/// A fetched head aborting hands its group back to the live copy: a finished one settles
+	/// the end, while a cut one leaves nothing that delivered the group, so an abort still
+	/// cuts the track off.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn an_aborted_head_hands_the_end_back_to_the_live_copy() {
+		use std::sync::atomic::{AtomicBool, Ordering};
+
+		for (live, settles) in [(None, true), (Some(Error::App(5)), false)] {
+			let (producer, head) = live_group_under_a_writing_head(live.clone()).await;
+			let woken = Arc::new(AtomicBool::new(false));
+			let waiter = kio::Waiter::new(futures::task::waker(Arc::new(FlagWake(woken.clone()))));
+			assert!(producer.poll_closed(&waiter).is_pending(), "{live:?}");
+
+			head.abort(Error::Cancel).unwrap();
+			assert!(
+				woken.load(Ordering::SeqCst),
+				"{live:?}: the head aborting wakes the wait"
+			);
+			assert_eq!(producer.poll_closed(&waiter).is_ready(), settles, "{live:?}");
+			producer.clone().abort(Error::Timeout).unwrap();
+			let outcome = producer.poll_closed(&kio::Waiter::noop());
+			match settles {
+				true => assert!(matches!(outcome, Poll::Ready(Ok(()))), "{live:?}: {outcome:?}"),
+				false => assert!(
+					matches!(outcome, Poll::Ready(Err(Error::Timeout))),
+					"{live:?}: {outcome:?}"
+				),
+			}
+		}
+	}
+
+	/// A finished fetched head serves its group to the end, so the declared end settles while
+	/// the live copy beside it is still written, and that copy aborting later keeps it clean.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_finished_head_settles_the_end_over_an_open_live_copy() {
+		let mut producer = track_producer("test", Info::timed());
+		let consumer = producer.consume();
+		let noop = kio::Waiter::noop();
+		let (live, _head) = live_group_with_head(&producer).await;
+
+		producer.finish_at(Position::group(1), None).unwrap();
+		assert!(matches!(producer.poll_closed(&noop), Poll::Ready(Ok(()))));
+
+		live.abort(Error::Cancel).unwrap();
+		producer.clone().abort(Error::Timeout).unwrap();
+		assert!(matches!(producer.poll_closed(&noop), Poll::Ready(Ok(()))));
+		assert!(matches!(consumer.poll_complete(&noop), Poll::Ready(Ok(()))));
+	}
+
 	/// A fetched head still writing holds the largest stream open after the live copy
 	/// aborted and the track ended, so a later head frame is reported rather than lost.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_fetched_head_holds_the_largest_open() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 		let mut reader = consumer.clone();
 		let noop = kio::Waiter::noop();
@@ -14806,7 +17715,7 @@ mod test {
 		assert_eq!(reader.poll_largest(&noop), Poll::Ready(None));
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_live_abort_does_not_remove_a_parked_fetched_head() {
 		let producer = track_producer("test", Info::timed());
@@ -14826,7 +17735,7 @@ mod test {
 
 	/// The live copy ending early (its subscription went away) leaves a fetched head
 	/// that still holds the whole group servable, instead of reclaiming the slot.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn aborted_live_group_keeps_its_fetched_head() {
 		let producer = track_producer("test", Info::timed());
@@ -14845,7 +17754,7 @@ mod test {
 
 	/// Reads land on the fetched head, so they keep the slot from expiring even though
 	/// the live copy beside it sits idle.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn reading_the_head_keeps_the_slot_from_expiring() {
 		let producer = track_producer("test", Info::timed());
@@ -14867,7 +17776,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn pressure_evicts_a_headed_slot(abort_live: bool) -> bool {
 		let (producer, _pool) = pooled_producer(10_000);
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
@@ -14900,7 +17809,7 @@ mod test {
 
 	/// A head left alone in its slot still joins the pool's access average when the
 	/// slot is demoted, so memory pressure can evict it.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_head_only_slot_yields_to_memory_pressure() {
 		assert!(pressure_evicts_a_headed_slot(true).await);
@@ -14908,57 +17817,46 @@ mod test {
 
 	/// A slot weighs its copies the way the pool's average samples them, so two copies
 	/// with different access stamps can't keep it above the average on their own.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_two_copy_slot_yields_to_memory_pressure() {
 		assert!(pressure_evicts_a_headed_slot(false).await);
 	}
 
-	/// Joining a queued fetch widens its range, and a caller that arrives once the range
-	/// is already on the wire fails cleanly rather than being handed the narrower group.
-	#[moq_clock::test]
+	/// Joining a queued fetch widens its range. A caller that arrives once the range is
+	/// already on the wire asks for its own frames rather than being handed the narrower group.
+	#[kio::test]
 	#[cfg(feature = "async")]
-	async fn fetch_widens_or_fails_cleanly() {
+	async fn fetch_widens_or_asks_afresh() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
+		let from = |frame_start| group::Fetch {
+			frame_start,
+			..Default::default()
+		};
 
-		let _narrow = consumer.fetch_group(
-			0,
-			group::Fetch {
-				frame_start: 5,
-				..Default::default()
-			},
-		);
-		let mut narrow = std::pin::pin!(_narrow);
+		let mut narrow = std::pin::pin!(consumer.fetch_group(0, from(5)));
 		assert!(futures::poll!(narrow.as_mut()).is_pending());
 
 		// Still queued: widening is honored, because nothing has read the range yet.
-		let _wider = consumer.fetch_group(
-			0,
-			group::Fetch {
-				frame_start: 2,
-				..Default::default()
-			},
-		);
-		let mut wider = std::pin::pin!(_wider);
+		let mut wider = std::pin::pin!(consumer.fetch_group(0, from(2)));
 		assert!(futures::poll!(wider.as_mut()).is_pending());
 
 		let request = dynamic.requested_fill_group().await.unwrap();
 		assert_eq!(request.frame_start(), 2, "widened while queued");
 
 		// Handed off now: the handler holds its own copy of the range, so a later wider
-		// caller cannot move what is already being served.
-		let _widest = consumer.fetch_group(
-			0,
-			group::Fetch {
-				frame_start: 0,
-				..Default::default()
-			},
-		);
-		let mut widest = std::pin::pin!(_widest);
+		// caller cannot move what is already being served. It asks for its own.
+		let mut widest = std::pin::pin!(consumer.fetch_group(0, from(0)));
 		assert!(futures::poll!(widest.as_mut()).is_pending());
 		assert_eq!(request.frame_start(), 2, "the in-flight range is already on the wire");
+		let whole = dynamic.requested_fill_group().await.unwrap();
+		assert_eq!(
+			(whole.sequence(), whole.frame_start()),
+			(0, 0),
+			"the earlier frames are asked"
+		);
 
 		// A handler may keep tracking the group's readers past the accept, as the lite
 		// subscriber does, which holds the result channel open.
@@ -14971,20 +17869,26 @@ mod test {
 			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"from2"))
 			.unwrap();
 
-		// The two callers it covers resolve; the one it doesn't fails cleanly rather
-		// than being handed a group that starts above what it asked for, even while
-		// the group is still being written.
+		// The two callers it covers resolve; the one it doesn't waits on its own fill
+		// rather than being handed a group that starts above what it asked for.
 		assert_eq!(narrow.await.unwrap().index(), 5);
 		assert_eq!(wider.await.unwrap().index(), 2);
-		assert!(matches!(widest.await, Err(Error::NotFound)));
+		assert!(futures::poll!(widest.as_mut()).is_pending());
+		group.finish().unwrap();
+
+		let mut group = whole.accept(None).unwrap();
+		group
+			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"from0"))
+			.unwrap();
+		assert_eq!(widest.await.unwrap().index(), 0);
 		group.finish().unwrap();
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn fetch_coalesces_concurrent() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		// Two fetches for the same uncached group produce ONE handler request,
@@ -15033,11 +17937,11 @@ mod test {
 
 	/// A looser caller that joined after a tighter budget went on the wire is not failed by
 	/// that budget's `Old`: it asks again with its own.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_late_looser_fetch_asks_again_after_old() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		let tight = consumer.fetch_group(5, group::Fetch::default().with_max_delay(Duration::from_secs(1)));
@@ -15060,11 +17964,11 @@ mod test {
 		assert_eq!(loose.await.unwrap().sequence, 5);
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn fetch_coalesced_reject_fails_all() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		let first = consumer.fetch_group(5, None);
@@ -15090,11 +17994,11 @@ mod test {
 		assert_eq!(req.sequence(), 5);
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn fetch_queued_fails_when_handlers_leave() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		// Queued but never popped: the last handler leaving fails it fast.
@@ -15108,10 +18012,10 @@ mod test {
 		assert!(fetch.read().is_empty());
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn fetch_miss_no_dynamic_not_found() {
-		// A track with no `Dynamic` can't serve old content, so a cache miss
+		// A track with no `Requests` can't serve old content, so a cache miss
 		// resolves to NotFound instead of blocking forever.
 		let producer = track_producer("test", Info::timed());
 		let _open = producer.append_group().unwrap(); // seq 0, but we miss on seq 5
@@ -15119,7 +18023,7 @@ mod test {
 		assert!(matches!(consumer.fetch_group(5, None).await, Err(Error::NotFound)));
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn fetch_past_final_not_found() {
 		let producer = track_producer("test", Info::timed());
@@ -15128,7 +18032,7 @@ mod test {
 
 		// A group at or past the final sequence can never exist, even with a handler,
 		// so it resolves to NotFound.
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 		assert!(matches!(consumer.fetch_group(5, None).await, Err(Error::NotFound)));
 
@@ -15228,7 +18132,7 @@ mod test {
 	}
 
 	/// The latest group is never in the eviction order, so it survives any budget.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn latest_group_never_evicted() {
 		// Far too small for even one group: the latest survives anyway.
@@ -15249,10 +18153,10 @@ mod test {
 	/// A FETCH cache hit refreshes the group's access time: anything accessed more
 	/// recently than the pool-wide average is protected, so the eviction walk skips
 	/// it and evicts a never-read group instead, even one that arrived later.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn fetch_refresh_survives_eviction() {
-		let (mut producer, _pool) = pooled_producer(10_000);
+		let (mut producer, _pool) = pooled_producer(11_000);
 		let consumer = producer.consume();
 
 		finished_group(&mut producer, 3_000); // seq 0
@@ -15279,7 +18183,7 @@ mod test {
 
 	/// A consumer holding an evicted group surfaces the eviction, not a hang or a
 	/// truncated clean end.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn eviction_aborts_readers() {
 		let (mut producer, _pool) = pooled_producer(10_000);
@@ -15293,6 +18197,27 @@ mod test {
 
 		let read = group0.read_frame().await;
 		assert!(matches!(read, Err(Error::Evicted)), "expected Evicted, got {read:?}");
+	}
+
+	/// Waiting for enough debt to evict an old group must not shed the live group's
+	/// frames instead: its reader has not had a chance to take them yet.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn carried_debt_keeps_the_live_group() {
+		let unit = 100 * cache::ENTRY_OVERHEAD;
+		let (mut producer, _) = pooled_producer(22 * unit);
+		finished_group(&mut producer, 20 * unit as usize);
+
+		let mut group = producer.append_group().unwrap();
+		let mut reader = group.consume();
+		for _ in 0..3 {
+			group.write_frame(Timestamp::ZERO, vec![0u8; unit as usize]).unwrap();
+		}
+		group.finish().unwrap();
+		for _ in 0..3 {
+			assert_eq!(reader.read_frame().await.unwrap().unwrap().payload.len(), unit as usize);
+		}
+		assert!(reader.read_frame().await.unwrap().is_none());
 	}
 
 	/// A write smaller than the next victim carries debt instead of evicting: a
@@ -15387,7 +18312,7 @@ mod test {
 	/// Accepting a track after pre-accept backfill must keep the same write
 	/// counter: the counter is owned by the track state, so replacing the info
 	/// can't strand the bytes already-created groups keep charging.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn accept_preserves_write_accounting() {
 		let config = cache::Config::default()
@@ -15399,7 +18324,7 @@ mod test {
 			..Default::default()
 		};
 		let request = Request::new(Arc::new(broadcast), "test");
-		let dynamic = request.dynamic();
+		let dynamic = request.requests();
 		let consumer = request.consume();
 
 		// Serve a backfill before the track is accepted, then grow it.
@@ -15506,12 +18431,12 @@ mod test {
 		assert!(!Arc::ptr_eq(&a, &b), "each track owns its account");
 	}
 
-	/// A `Dynamic` still serving fetches keeps the track alive, so the publisher
+	/// A `Requests` still serving fetches keeps the track alive, so the publisher
 	/// letting go isn't an abrupt teardown: the handler can still serve the cache.
 	#[test]
 	fn a_dynamic_defers_teardown() {
 		let (mut producer, pool) = pooled_producer(1 << 40);
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		finished_group(&mut producer, 100);
 
 		drop(producer);
@@ -15581,7 +18506,7 @@ mod test {
 	/// A backfill served before the track was accepted settles its own debt: the
 	/// account exists from the moment the state does, so acceptance replacing the
 	/// `Info` can't leave already-created groups writing for free.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn pre_accept_backfill_settles_late_writes() {
 		let config = cache::Config::default()
@@ -15593,7 +18518,7 @@ mod test {
 			..Default::default()
 		};
 		let request = Request::new(Arc::new(broadcast), "test");
-		let dynamic = request.dynamic();
+		let dynamic = request.requests();
 		let consumer = request.consume();
 
 		// Serve backfill seq 0 before the track is accepted.
@@ -15650,11 +18575,11 @@ mod test {
 
 	/// Continuously refreshed entries at the front of the eviction order must not
 	/// starve expiry of entries behind them: the scan cursor rotates.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn refreshed_front_does_not_starve_expiry() {
 		let (producer, _pool) = pooled_producer(1 << 40);
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		producer.create_group(10u64.into()).unwrap().finish().unwrap();
@@ -15711,171 +18636,6 @@ mod test {
 		subscriber.assert_no_group();
 	}
 
-	/// Datagrams share `max_sequence` but must not break group demotion: the live
-	/// edge is tracked per group, so interleaving datagrams can't strand groups
-	/// outside the eviction order and bypass the budget.
-	#[test]
-	fn datagrams_do_not_block_eviction() {
-		let (mut producer, pool) = pooled_producer(1_000);
-		for _ in 0..10 {
-			finished_group(&mut producer, 1_000);
-			producer.append_datagram(Timestamp::ZERO, &b"beat"[..]).unwrap();
-		}
-
-		let consumer = producer.consume();
-		assert!(consumer.peek_group(0).is_none(), "old groups still evict");
-		assert!(
-			pool.used() < 4 * 1_256,
-			"interleaved datagrams must not bypass the budget: {}",
-			pool.used()
-		);
-	}
-
-	/// A received compressed datagram inflates far past its wire size, so the send buffer
-	/// bills both forms to the pool, and pressure drops each track's oldest instead of
-	/// letting every track retain a full buffer of inflated payloads.
-	#[test]
-	#[cfg(feature = "async")]
-	fn received_compressed_datagrams_are_billed() {
-		let capacity = 1024;
-		let pool = cache::Pool::new(cache::Config::default().with_capacity(capacity));
-		let broadcast = Arc::new(broadcast::Info {
-			pool: pool.clone(),
-			..Default::default()
-		});
-		let plain = bytes::Bytes::from(vec![0u8; super::super::datagram::MAX_DATAGRAM_PAYLOAD]);
-		let deflated = super::super::flate::Encoder::new().frame(&plain);
-		assert!(
-			deflated.len() < 128,
-			"the payload compresses to {} bytes",
-			deflated.len()
-		);
-
-		let tracks = 16;
-		let mut held = Vec::new();
-		for track in 0..tracks {
-			let mut producer = Producer::new(
-				broadcast.clone(),
-				format!("track{track}").as_str(),
-				Info::timed().with_compress(true),
-			);
-			let subscriber = producer.subscribe(None);
-			for sequence in 0..MAX_DATAGRAMS as u64 {
-				let datagram = Datagram {
-					sequence,
-					timestamp: Some(Timestamp::ZERO),
-					payload: deflated.clone(),
-				};
-				producer
-					.insert_deflated_datagram(datagram.into(), plain.len() as u64)
-					.unwrap();
-			}
-			held.push((producer, subscriber));
-		}
-
-		let retained: u64 = held
-			.iter()
-			.flat_map(|(producer, _)| {
-				let state = producer.state.read();
-				state
-					.datagrams
-					.iter()
-					.map(|datagram| {
-						let stored = datagram.stored().unwrap();
-						(stored.payload.len() + stored.deflated.as_ref().unwrap().len()) as u64
-					})
-					.collect::<Vec<_>>()
-			})
-			.sum();
-		assert!(
-			pool.used() >= retained,
-			"{retained} retained bytes, {} billed",
-			pool.used()
-		);
-		// Each track keeps only its newest, which no write ever evicts on its own account.
-		let newest = (plain.len() + deflated.len()) as u64;
-		assert!(
-			retained <= tracks * newest,
-			"{retained} bytes retained across {tracks} tracks"
-		);
-
-		for (_, subscriber) in &mut held {
-			assert_eq!(
-				recv_datagram(subscriber).payload,
-				plain,
-				"the newest is still delivered"
-			);
-		}
-		drop(held);
-		assert_eq!(pool.used(), 0, "the buffers release their bill when the tracks go");
-	}
-
-	/// A datagram the full buffer pushes out releases its bill, so the pool holds exactly
-	/// what the buffer retains.
-	#[test]
-	fn a_full_datagram_buffer_bills_what_it_retains() {
-		let pool = cache::Pool::unbounded();
-		let mut producer = track_producer_pooled("test", pool.clone());
-		for _ in 0..MAX_DATAGRAMS * 2 {
-			producer.append_datagram(Timestamp::ZERO, vec![0u8; 1000]).unwrap();
-		}
-		let state = producer.state.read();
-		assert_eq!(state.datagrams.len(), MAX_DATAGRAMS);
-		let billed: u64 = state.datagrams.iter().map(|datagram| datagram.bytes()).sum();
-		assert_eq!(pool.used(), billed);
-	}
-
-	/// A track that stops sending datagrams cannot pin its buffer in the shared pool: the
-	/// sweep reclaims it once idle, the newest too, since no late joiner needs it.
-	#[test]
-	fn pool_sweep_expires_idle_datagrams() {
-		let pool = cache::Pool::new(cache::Config::default().with_expiry(Duration::from_secs(1)));
-		let mut producer = track_producer_pooled("test", pool.clone());
-		for _ in 0..3 {
-			producer.append_datagram(Timestamp::ZERO, b"x".as_slice()).unwrap();
-		}
-		assert!(pool.used() > 0);
-
-		elapse(&producer, Duration::from_secs(2));
-		pool.sweep();
-
-		assert!(
-			producer.state.read().datagrams.is_empty(),
-			"the sweep reclaimed idle datagrams"
-		);
-		assert_eq!(pool.used(), 0);
-	}
-
-	/// An ended track's closed state refuses the write that pops a datagram, so a stale
-	/// reader would pin its buffer: the sweep releases each idle one in place instead,
-	/// and the reader skips it like a dropped one.
-	#[test]
-	#[cfg(feature = "async")]
-	fn pool_sweep_expires_an_ended_tracks_datagrams() {
-		let pool = cache::Pool::new(cache::Config::default().with_expiry(Duration::from_secs(10)));
-		let mut producer = track_producer_pooled("test", pool.clone());
-		let mut stale = producer.subscribe(None);
-		producer.append_datagram(Timestamp::ZERO, b"old".as_slice()).unwrap();
-		pool.step(Duration::from_secs(6));
-		producer.append_datagram(Timestamp::ZERO, b"new".as_slice()).unwrap();
-		producer.finish().unwrap();
-		drop(producer);
-
-		// Only the oldest is idle for the whole window.
-		pool.step(Duration::from_secs(6));
-		pool.sweep();
-		assert!(pool.used() > 0, "the newest is still within the window");
-		assert_eq!(
-			recv_datagram(&mut stale).payload,
-			b"new".as_slice(),
-			"the reader skips the released one"
-		);
-
-		pool.step(Duration::from_secs(6));
-		pool.sweep();
-		assert_eq!(pool.used(), 0, "the sweep released every idle datagram");
-	}
-
 	/// An aborted group releases its access sample along with its bytes, from any
 	/// handle: ghost samples must not linger in the pool mean where they'd hold it
 	/// in the past and over-protect every live group.
@@ -15928,13 +18688,13 @@ mod test {
 		assert!(pool.used() <= 3_000, "growth is reclaimed: {}", pool.used());
 	}
 
-	/// A stale arrival entry whose sequence was later re-served by fetched backfill
-	/// must not leak the replacement into arrival-order subscriptions.
-	#[moq_clock::test]
+	/// A stale arrival entry whose sequence was later re-served by fetched backfill must
+	/// not put the replacement in the arrival walk, which a subscriber reads as backfill.
+	#[kio::test]
 	#[cfg(feature = "async")]
-	async fn refilled_sequence_stays_out_of_subscriptions() {
+	async fn a_refilled_sequence_stays_out_of_the_arrival_walk() {
 		let (producer, _pool) = pooled_producer(1 << 40);
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		producer.create_group(0u64.into()).unwrap().finish().unwrap();
@@ -15959,19 +18719,33 @@ mod test {
 
 		// The backfill serves by sequence, but never in arrival order.
 		assert!(consumer.peek_group(1).is_some());
+		let mut walked = Vec::new();
+		let mut index = 0;
+		let window = {
+			let state = producer.state.read();
+			Window::new(&replay().ranges, None, &*state).unwrap()
+		};
+		while let Poll::Ready(Ok(Some((group, next)))) = producer.state.read().poll_recv_group(index, 0, &window) {
+			walked.push(group.sequence);
+			index = next + 1;
+		}
+		assert_eq!(walked, [0, 2]);
+		// A reader takes it as the fill answer for the group the feed gave up, as it would
+		// have asked a fill for it, and the stale arrival entry adds nothing.
 		let mut subscriber = producer.subscribe(replay());
-		assert_eq!(subscriber.assert_group().sequence, 0);
-		assert_eq!(subscriber.assert_group().sequence, 2);
+		let mut read: Vec<_> = (0..3).map(|_| subscriber.assert_group().sequence).collect();
+		read.sort();
+		assert_eq!(read, [0, 1, 2]);
 		subscriber.assert_no_group();
 	}
 
 	/// An expired backfill can't hide behind a refreshed one: the eviction-order
 	/// expiry scans a bounded prefix instead of stopping at the first fresh entry.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn expired_backfill_behind_refreshed_reclaimed() {
 		let (producer, _pool) = pooled_producer(1 << 40);
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		producer.create_group(5u64.into()).unwrap().finish().unwrap();
@@ -16003,11 +18777,11 @@ mod test {
 
 	/// A FETCH hit within the same coarse clock tick still protects the group: the
 	/// refresh stamps one tick ahead, so it reads strictly newer than the mean.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn same_tick_fetch_protects() {
 		// No time advances at all: every timestamp lands in the same tick.
-		let (mut producer, _pool) = pooled_producer(10_000);
+		let (mut producer, _pool) = pooled_producer(11_000);
 		let consumer = producer.consume();
 
 		finished_group(&mut producer, 3_000); // seq 0
@@ -16026,11 +18800,11 @@ mod test {
 	/// A refetched group that reclaims max_sequence is the live edge again: it must
 	/// not re-enter the eviction order, or memory pressure could evict the newest
 	/// content.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn refetched_latest_stays_protected() {
 		let (producer, _pool) = pooled_producer(10_000);
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		let straggler = producer.append_group().unwrap(); // seq 0
@@ -16068,11 +18842,11 @@ mod test {
 
 	/// An evicted group is a cache miss, so a fetch re-fetches it and the accepted
 	/// replacement serves the sequence again (not `Error::Duplicate`).
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn eviction_allows_refetch() {
 		let (mut producer, _pool) = pooled_producer(10_000);
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 
 		finished_group(&mut producer, 10_000); // seq 0
 		finished_group(&mut producer, 10_000); // seq 1: demotes seq 0
@@ -16135,13 +18909,14 @@ mod test {
 			.unwrap();
 	}
 
-	/// Lowering the floor re-offers only what the arrival walk could have read: a fetched
-	/// group stays out of arrival order, while a live one is offered before its first frame.
-	#[moq_clock::test]
+	/// Lowering the floor re-offers what the arrival walk could have read, a live group
+	/// before its first frame, and owes a fetched one as cached backfill. Only the walked
+	/// groups count as unread for a copy handing over.
+	#[kio::test]
 	#[cfg(feature = "async")]
-	async fn a_lowered_floor_reoffers_live_groups_but_not_fetched_ones() {
+	async fn a_lowered_floor_reoffers_live_groups_and_owes_fetched_ones() {
 		let (producer, _pool) = pooled_producer(1 << 40);
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 		producer.create_group(5u64.into()).unwrap().finish().unwrap();
 		let mut subscriber = producer.subscribe(replay().with_range(5..));
@@ -16163,6 +18938,7 @@ mod test {
 
 		subscriber.update(replay().with_range(0..)).unwrap();
 		assert_eq!(subscriber.assert_group().sequence, 3, "offered before its first frame");
+		assert_eq!(subscriber.assert_group().sequence, 2, "cached backfill is owed");
 		subscriber.assert_no_group();
 
 		// A cursor floor lowered before the next read counts only walked groups as unread.
@@ -16179,13 +18955,14 @@ mod test {
 		assert!(!lowered.has_unread_group(&unread), "the fetched group 2 is not unread");
 	}
 
-	/// A fetched (backfill) group is served by sequence but never replayed to
-	/// arrival-order subscribers.
-	#[moq_clock::test]
+	/// A group another reader's fill cached is owed to a subscriber whose window holds it,
+	/// as its own fill's answer would be, though the arrival walk never reaches it: a warm
+	/// cache serves what a cold one fills.
+	#[kio::test]
 	#[cfg(feature = "async")]
-	async fn fetched_backfill_not_subscribed() {
+	async fn cached_backfill_is_owed_to_a_subscriber() {
 		let (producer, _pool) = pooled_producer(1 << 40);
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		// The publisher starts at seq 5; earlier groups exist only upstream.
@@ -16208,20 +18985,74 @@ mod test {
 		assert_eq!(&fetched.read_frame().await.unwrap().unwrap().payload[..], b"backfill");
 		assert!(consumer.peek_group(2).is_some(), "backfill is cached for later fetches");
 
-		// ...but an arrival-order subscriber only sees the live groups.
+		// ...and a subscriber reads it beside the live groups, asking no fill of its own.
 		let mut subscriber = producer.subscribe(replay());
-		assert_eq!(subscriber.assert_group().sequence, 5);
-		assert_eq!(subscriber.assert_group().sequence, 6);
+		let mut read: Vec<_> = (0..3).map(|_| subscriber.assert_group().sequence).collect();
+		read.sort_unstable();
+		assert_eq!(read, [2, 5, 6]);
 		subscriber.assert_no_group();
+
+		// A bounded read of it alone ends once it took it.
+		let mut bounded = producer.subscribe(replay().with_range(2..3));
+		assert_eq!(read_now(&mut bounded, false), Some(Some(2)));
+		assert_eq!(read_now(&mut bounded, false), Some(None));
+		assert!(
+			dynamic.requested_fill_group().now_or_never().is_none(),
+			"the cache answered both reads"
+		);
+	}
+
+	/// The feed's copy of a group a fetch cached first takes the slot, so a subscriber reads
+	/// it, while the fetch's reader keeps its own copy, abandoned or not.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn the_feed_takes_a_group_a_fetch_cached_first() {
+		let (producer, _pool) = pooled_producer(1 << 40);
+		let dynamic = producer.requests();
+		let consumer = producer.consume();
+		let mut subscriber = producer.subscribe(replay());
+
+		let pending = consumer.fetch_group(0, None);
+		let req = dynamic
+			.requested_fill_group()
+			.now_or_never()
+			.expect("should not block")
+			.unwrap();
+		let mut fetching = req.accept(Info::timed()).unwrap();
+		fetching
+			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"snapshot"))
+			.unwrap();
+		let mut fetched = pending.await.unwrap();
+		subscriber.assert_no_group();
+
+		let mut live = producer
+			.create_group_at(0u64.into(), 0)
+			.expect("the feed takes the slot");
+		live.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"snapshot"))
+			.unwrap();
+		let mut group = subscriber.assert_group();
+		assert_eq!(group.sequence, 0);
+		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"snapshot");
+		assert_eq!(&fetched.read_frame().await.unwrap().unwrap().payload[..], b"snapshot");
+
+		// The fetch giving up never cuts the group short for the subscriber.
+		drop(fetched);
+		fetching.abort(Error::Cancel).unwrap();
+		live.finish().unwrap();
+		assert!(group.read_frame().await.unwrap().is_none());
+		assert!(matches!(
+			producer.create_group_at(0u64.into(), 0),
+			Err(Error::Duplicate)
+		));
 	}
 
 	/// Fetched backfill isn't in arrival order, so it ages out through the eviction
 	/// order instead of lingering until the track closes.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn expired_backfill_reclaimed() {
 		let (producer, pool) = pooled_producer(1 << 40);
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		producer.create_group(5u64.into()).unwrap().finish().unwrap();
@@ -16299,35 +19130,78 @@ mod test {
 		}
 	}
 
-	/// A datagram past the newest group took the sequence after it, so a join over the
-	/// ratio wants the next free one rather than one already written.
+	/// A handed-out group keeps its track wanted once its subscription leaves, until a
+	/// reader reads its end: a finished group owes nothing more, even while still held.
 	#[test]
-	fn a_join_wants_past_a_later_datagram() {
-		let mut producer = track_producer("test", Info::default().with_refresh(1));
-		refresh_group(&producer, 4);
-		assert_eq!(producer.append_datagram(None, &b"dgram"[..]).unwrap(), 1);
-		let _subscriber = producer.subscribe(None);
-		assert_eq!(producer.demand().wanted(), Some(2));
+	fn a_group_read_keeps_its_track_wanted_until_its_end() {
+		let producer = track_producer("test", Info::timed());
+		let mut subscriber = producer.subscribe(None);
+		let mut writing = producer.append_group().unwrap();
+		writing.write_frame(Timestamp::ZERO, &b"key"[..]).unwrap();
+		let mut group = subscriber.assert_group();
+		let other = group.clone();
+		drop(subscriber);
+		assert_eq!(producer.demand().wanted(), Some(0), "the group is read");
+
+		writing.finish().unwrap();
+		assert_eq!(producer.demand().wanted(), Some(0), "not read to its end yet");
+		let waiter = kio::Waiter::noop();
+		assert!(matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
+		assert!(matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(None))));
+		assert_eq!(
+			producer.demand().wanted(),
+			None,
+			"a clone reading the end ends it for all"
+		);
+		drop(other);
 	}
 
-	/// A datagram taking the sequence a pending refresh asked for moves the ask past it, so
-	/// it still names a group the publisher has to open. The group landing answers it.
+	/// A reader stopping at its range cap has not reached the group's end: the group is
+	/// still open, so it keeps its track wanted for the others and for a raised cap.
 	#[test]
-	fn a_datagram_never_overtakes_a_pending_refresh() {
-		let mut producer = track_producer("test", Info::default().with_refresh(1));
-		let mut demand = producer.demand();
-		refresh_group(&producer, 4);
-		let _subscriber = producer.subscribe(None);
-		assert_eq!(wanted_changed(&mut demand), Some(Some(1)));
+	fn a_range_cap_is_not_the_groups_end() {
+		let producer = track_producer("test", Info::timed());
+		let mut subscriber = producer.subscribe(None);
+		let mut writing = producer.append_group().unwrap();
+		writing.write_frame(Timestamp::ZERO, &b"key"[..]).unwrap();
+		let group = subscriber.assert_group();
+		let mut capped = group.clone().with_range(..1);
+		drop(subscriber);
 
-		assert_eq!(producer.append_datagram(None, &b"dgram"[..]).unwrap(), 1);
-		assert_eq!(wanted_changed(&mut demand), Some(Some(2)), "the datagram took group 1");
+		let waiter = kio::Waiter::noop();
+		assert!(matches!(capped.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
+		assert!(matches!(capped.poll_read_frame(&waiter), Poll::Ready(Ok(None))));
+		assert!(matches!(capped.poll_finished(&waiter), Poll::Ready(Ok(1))));
+		assert_eq!(producer.demand().wanted(), Some(0), "the cap is not the group's end");
+		drop(group);
+		let producer = producer
+			.abort_unwanted(Error::Cancel)
+			.expect_err("the capped reader can raise its cap");
 
-		refresh_group(&producer, 0);
-		assert_eq!(wanted_changed(&mut demand), None, "group 2 answers it");
-		producer.append_datagram(None, &b"dgram"[..]).unwrap();
-		assert_eq!(wanted_changed(&mut demand), None, "nothing is pending");
-		assert_eq!(demand.wanted(), Some(2));
+		writing.write_frame(Timestamp::ZERO, &b"delta"[..]).unwrap();
+		let mut capped = capped.with_range(..);
+		assert!(matches!(capped.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
+		writing.finish().unwrap();
+		assert!(matches!(capped.poll_read_frame(&waiter), Poll::Ready(Ok(None))));
+		assert_eq!(producer.demand().wanted(), None, "read to the group's end");
+	}
+
+	/// A fetched group keeps its track wanted after the fetch resolved, while it is read.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_fetched_group_keeps_its_track_wanted() {
+		let producer = track_producer("test", Info::timed());
+		let mut writing = producer.append_group().unwrap();
+		writing.write_frame(Timestamp::ZERO, &b"key"[..]).unwrap();
+		let group = producer
+			.consume()
+			.fetch_group(0, None)
+			.now_or_never()
+			.expect("cached")
+			.unwrap();
+		assert_eq!(producer.demand().wanted(), Some(0));
+		drop(group);
+		assert_eq!(producer.demand().wanted(), None);
 	}
 
 	/// Joins while a request is pending ask for the same group, so the publisher hears it
@@ -16372,25 +19246,6 @@ mod test {
 		assert_eq!(producer.demand().wanted(), Some(0));
 	}
 
-	/// A replacement's consumers want the group past what earlier producers of the name
-	/// wrote, where its first group has to start.
-	#[test]
-	fn a_replacement_wants_past_its_predecessor() {
-		let broadcast = broadcast::Info::default().produce();
-		let first = broadcast.create_track("test", Info::default()).unwrap();
-		let _open = first.create_group(group::Info { sequence: 7 }).unwrap();
-		first.finish().unwrap();
-		drop(first);
-
-		let second = broadcast.create_track("test", Info::default()).unwrap();
-		let mut demand = second.demand();
-		assert_eq!(wanted_changed(&mut demand), Some(None));
-		let _subscriber = second.subscribe(None);
-		assert_eq!(wanted_changed(&mut demand), Some(Some(8)));
-		let _open = second.create_group(group::Info { sequence: 8 }).unwrap();
-		assert_eq!(wanted_changed(&mut demand), None);
-	}
-
 	/// The demand reports the track's closure as its abort reason.
 	#[test]
 	fn wanted_changed_errors_once_closed() {
@@ -16422,15 +19277,15 @@ mod test {
 	#[cfg(feature = "async")]
 	fn request_and_dynamic_share_weak_track_demand() {
 		let request = Request::new(Arc::new(broadcast::Info::default()), "demand");
-		let dynamic = request.dynamic();
+		let dynamic = request.requests();
 		let demand = request.demand();
 		let consumer = request.consume();
-		assert!(!demand.is_used(), "a bare handle is not demand");
-		let query = consumer.query();
-		assert!(demand.is_used());
-		assert!(dynamic.demand().is_used());
+		assert!(!demand.is_wanted(), "a bare handle is not demand");
+		let query = consumer.info();
+		assert!(demand.is_wanted());
+		assert!(dynamic.demand().is_wanted());
 		drop(query);
-		assert!(!demand.is_used());
+		assert!(!demand.is_wanted());
 		let producer = request.accept(Info::timed());
 		assert_eq!(producer.demand().name(), demand.name());
 		drop(producer);
@@ -16446,7 +19301,7 @@ mod test {
 	#[test]
 	fn fill_demand_counts_every_joined_caller() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 		let first = consumer.fetch_group(3, None);
 		let second = consumer.fetch_group(3, None);
@@ -16456,11 +19311,12 @@ mod test {
 		};
 		assert!(dynamic.poll_requested_fill(&waiter).is_pending(), "the second joined");
 		assert_eq!((fill.start(), fill.end()), (Position::group(3), 4));
-		assert!(fill.is_used());
+		assert_eq!(fill.wanted(), Some(3));
 		drop(first);
-		assert!(fill.poll_unused(&waiter).is_pending());
+		assert!(fill.poll_withdrawn(&waiter).is_pending());
 		drop(second);
-		assert!(fill.poll_unused(&waiter).is_ready());
+		assert!(fill.poll_withdrawn(&waiter).is_ready());
+		assert_eq!(fill.wanted(), None);
 		drop(fill);
 		assert!(
 			!producer.state.read().drops.contains_key(&3),
@@ -16472,7 +19328,7 @@ mod test {
 	#[test]
 	fn accepted_fill_resolves_its_fetch() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 		let mut fetch = consumer.fetch_group(3, None);
 		let waiter = kio::Waiter::noop();
@@ -16491,9 +19347,9 @@ mod test {
 
 	/// A feed declared to start at group 2, with groups 2 and 3 written, read from group 0.
 	#[cfg(feature = "async")]
-	fn started_late() -> (Producer, Dynamic, Subscriber) {
+	fn started_late() -> (Producer, Requests, Subscriber) {
 		let mut producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let subscriber = producer.subscribe(replay().with_range(0..));
 		producer.start_at(2).unwrap();
 		write_group(&producer, 2);
@@ -16501,7 +19357,6 @@ mod test {
 		(producer, dynamic, subscriber)
 	}
 
-	#[cfg(feature = "async")]
 	fn write_filled(group: Result<group::Producer>, millis: u64) {
 		let mut group = group.unwrap();
 		group
@@ -16554,6 +19409,90 @@ mod test {
 		);
 	}
 
+	/// A copy whose fills cannot carry a reader's budget asks none below the start its
+	/// publisher resolved from that budget, and names nothing there dropped: what a wider
+	/// budget reaches comes through the feed's re-offer, which a reader takes as it arrives.
+	#[test]
+	#[cfg(feature = "async")]
+	fn no_fill_below_a_start_resolved_from_the_budget() {
+		let write = |producer: &Producer, sequence| {
+			let mut group = producer.create_group(group::Info { sequence }).unwrap();
+			group.write_frame(None, &b"x"[..]).unwrap();
+			group.finish().unwrap();
+		};
+		let mut producer = track_producer("test", None);
+		producer.fills_from_start();
+		let dynamic = producer.requests();
+		let mut subscriber = producer.subscribe(replay().with_range(0..));
+		producer.request_start(None).unwrap();
+		producer.start_at(2).unwrap();
+		write(&producer, 2);
+		write(&producer, 3);
+		let waiter = kio::Waiter::noop();
+		assert_eq!(drain_groups(&mut subscriber), [2, 3]);
+		assert!(
+			dynamic.poll_requested_fill(&waiter).is_pending(),
+			"below the start is no miss"
+		);
+		assert!(drained_drops(&mut subscriber).is_empty());
+
+		// The re-offer of a widened budget.
+		write(&producer, 1);
+		assert_eq!(drain_groups(&mut subscriber), [1]);
+		assert!(dynamic.poll_requested_fill(&waiter).is_pending());
+	}
+
+	/// Below a start its publisher resolved, a reader asks for the history its budget
+	/// reaches: an update may have crossed the start, so the copy cannot tell which budget
+	/// skipped those groups, and a fill that finds none ends empty.
+	#[test]
+	#[cfg(feature = "async")]
+	fn below_a_resolved_start_a_reader_asks() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let mut reader = producer.subscribe(replay());
+		producer.start_resolved(2).unwrap();
+		write_group(&producer, 2);
+		write_group(&producer, 3);
+		let waiter = kio::Waiter::noop();
+		assert_eq!(drain_groups(&mut reader), [2, 3]);
+		assert!(
+			drained_drops(&mut reader).is_empty(),
+			"nothing below the start is given up unasked"
+		);
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the reader asks below the start");
+		};
+		assert_eq!((fill.start().group, fill.end()), (0, 2));
+	}
+
+	/// A reader arriving after another's fill cached the groups under the start reads them
+	/// from the cache: the arrival walk never reaches a backfill, and no fill is asked again.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_newcomer_reads_the_backfill_another_fill_cached() {
+		let (producer, dynamic, mut first) = started_late();
+		let waiter = kio::Waiter::noop();
+		while let Poll::Ready(Ok(Some(_))) = first.poll_recv_group(&waiter) {}
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("below the start is a miss");
+		};
+		while let Some(sequence) = fill.wanted() {
+			write_filled(fill.accept(sequence, None), sequence);
+		}
+		let mut newcomer = producer.subscribe(replay().with_range(0..));
+		let mut read = Vec::new();
+		while let Poll::Ready(Ok(Some(group))) = newcomer.poll_recv_group(&waiter) {
+			read.push(group.sequence);
+		}
+		read.sort();
+		assert_eq!(read, [0, 1, 2, 3]);
+		assert!(
+			dynamic.poll_requested_fill(&waiter).is_pending(),
+			"the cache answers it"
+		);
+	}
+
 	/// Groups a fill answered before the reader came back are handed out in the reader's
 	/// order, so a warm cache keeps a descending reader newest first.
 	#[test]
@@ -16561,7 +19500,7 @@ mod test {
 	fn filled_groups_are_read_in_the_readers_order() {
 		for order in [Order::Descending, Order::Ascending] {
 			let mut producer = track_producer("test", Info::timed());
-			let dynamic = producer.dynamic();
+			let dynamic = producer.requests();
 			let mut subscriber = producer.subscribe(replay().with_range(0..).with_order(order));
 			producer.start_at(2).unwrap();
 			write_group(&producer, 2);
@@ -16570,7 +19509,7 @@ mod test {
 			let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 				panic!("below the start is a miss");
 			};
-			while let Some(sequence) = fill.next() {
+			while let Some(sequence) = fill.wanted() {
 				write_filled(fill.accept(sequence, None), sequence);
 			}
 			let mut read = Vec::new();
@@ -16608,7 +19547,7 @@ mod test {
 		// Group 2 is as stale as the groups below it, superseded by group 3 as long ago.
 		assert_eq!(next(&mut subscriber), Some(3));
 		assert_eq!(drained_drops(&mut subscriber), [(0, 2)]);
-		assert!(!fill.is_used(), "nobody waits on the stale fill");
+		assert_eq!(fill.wanted(), None, "nobody waits on the stale fill");
 	}
 
 	/// Groups arriving out of order inside a stalled fill judge each stretch between them by
@@ -16618,7 +19557,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn a_late_fresh_group_keeps_its_stretch_of_a_stalled_fill() {
 		let mut producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let mut subscriber = producer.subscribe(replay().with_range(0..));
 		producer.start_at(10).unwrap();
 		write_group(&producer, 10);
@@ -16660,7 +19599,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn an_aborted_fetched_group_stays_wanted_by_its_replacement_fill() {
 		let mut producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		producer.start_at(10).unwrap();
 		write_group(&producer, 10);
 		let waiter = kio::Waiter::noop();
@@ -16691,7 +19630,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn a_refused_group_is_asked_again_by_a_later_reader() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		for sequence in 0..5 {
 			write_group(&producer, sequence);
 		}
@@ -16728,7 +19667,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn a_source_miss_is_asked_again_by_a_later_reader() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		for sequence in 0..5 {
 			write_group(&producer, sequence);
 		}
@@ -16759,7 +19698,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn a_backfill_cached_before_its_answer_stays_owed() {
 		let mut producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let ascending = |groups| replay().with_range(groups).with_order(Order::Ascending);
 		let mut subscriber = producer.subscribe(ascending(0..));
 		producer.start_at(10).unwrap();
@@ -16775,7 +19714,7 @@ mod test {
 			.write()
 			.ok()
 			.unwrap()
-			.insert_group_request(3, 0, None)
+			.insert_group_request(3, group::Bounds::default(), None)
 			.unwrap();
 		assert!(subscriber.poll_recv_group(&waiter).is_pending());
 		assert!(fill.is_wanted(3), "the answer has not reached the reader yet");
@@ -16787,7 +19726,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn an_ordered_reader_leaves_a_filled_group_it_takes() {
 		let mut producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let mut subscriber = producer.subscribe(replay().with_range(0..1));
 		producer.start_at(10).unwrap();
 		write_group(&producer, 10);
@@ -16805,7 +19744,74 @@ mod test {
 		};
 		assert_eq!(group.sequence, 0);
 		drop(group);
-		assert!(fill.poll_unused(&waiter).is_ready(), "nobody waits on the fill now");
+		assert!(fill.poll_withdrawn(&waiter).is_ready(), "nobody waits on the fill now");
+	}
+
+	/// A parked [`Fill::poll_wanted_changed`] wakes on every move of the group owed: a
+	/// reader narrowing past it, an answer, and the last reader leaving, which ends at `None`.
+	#[test]
+	fn fill_wanted_changed_follows_the_group_owed() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let ascending = |groups| replay().with_range(groups).with_order(Order::Ascending);
+		let mut subscriber = producer.subscribe(ascending(0..));
+		producer.start_at(10).unwrap();
+		write_group(&producer, 10);
+		let noop = kio::Waiter::noop();
+		while let Poll::Ready(Ok(Some(_))) = subscriber.poll_recv_group(&noop) {}
+		let Poll::Ready(Ok(mut fill)) = dynamic.poll_requested_fill(&noop) else {
+			panic!("below the start is a miss");
+		};
+		let (flag, waiter) = Flag::waiter();
+		assert_eq!(
+			fill.poll_wanted_changed(&waiter),
+			Poll::Ready(Some(0)),
+			"the first poll reports"
+		);
+		assert!(fill.poll_wanted_changed(&waiter).is_pending());
+
+		subscriber.update(ascending(8..)).unwrap();
+		assert!(subscriber.poll_recv_group(&noop).is_pending());
+		assert!(flag.take(), "narrowing woke the parked poll");
+		assert_eq!(fill.poll_wanted_changed(&waiter), Poll::Ready(Some(8)));
+		assert!(fill.poll_wanted_changed(&waiter).is_pending());
+
+		write_filled(fill.accept(8, None), 8);
+		assert!(flag.take(), "an answer woke the parked poll");
+		assert_eq!(fill.poll_wanted_changed(&waiter), Poll::Ready(Some(9)));
+		assert!(fill.poll_wanted_changed(&waiter).is_pending());
+
+		drop(subscriber);
+		assert!(flag.take(), "the last reader leaving woke the parked poll");
+		assert_eq!(fill.poll_wanted_changed(&waiter), Poll::Ready(None));
+		assert_eq!(fill.wanted(), None);
+	}
+
+	/// The owed group arriving through the live feed wakes a parked
+	/// [`Fill::poll_wanted_changed`]: the cache answers it, so the fill no longer owes it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn fill_wanted_changed_follows_a_live_arrival() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let ascending = |groups| replay().with_range(groups).with_order(Order::Ascending);
+		let mut subscriber = producer.subscribe(ascending(9..));
+		producer.start_at(10).unwrap();
+		write_group(&producer, 10);
+		let noop = kio::Waiter::noop();
+		while let Poll::Ready(Ok(Some(_))) = subscriber.poll_recv_group(&noop) {}
+		let Poll::Ready(Ok(mut fill)) = dynamic.poll_requested_fill(&noop) else {
+			panic!("below the start is a miss");
+		};
+		let (flag, waiter) = Flag::waiter();
+		assert_eq!(fill.poll_wanted_changed(&waiter), Poll::Ready(Some(9)));
+		assert!(fill.poll_wanted_changed(&waiter).is_pending());
+
+		write_group(&producer, 9);
+		assert!(flag.take(), "the owed group arriving live woke the parked poll");
+		assert_eq!(fill.poll_wanted_changed(&waiter), Poll::Ready(None));
+		assert_eq!(fill.wanted(), None);
+		drop(subscriber);
 	}
 
 	/// A reader narrowing its ranges leaves the part of its fill it no longer reads: the
@@ -16815,7 +19821,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn a_narrowed_reader_leaves_the_rest_of_its_fill() {
 		let mut producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let ascending = |groups| replay().with_range(groups).with_order(Order::Ascending);
 		let mut subscriber = producer.subscribe(ascending(0..));
 		producer.start_at(10).unwrap();
@@ -16825,7 +19831,7 @@ mod test {
 		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("below the start is a miss");
 		};
-		assert_eq!(fill.next(), Some(0));
+		assert_eq!(fill.wanted(), Some(0));
 		assert!(fill.is_wanted(0));
 		assert!(fill.poll_unwanted(0, &waiter).is_pending());
 
@@ -16835,9 +19841,9 @@ mod test {
 		assert!(!fill.is_wanted(0));
 		assert!(fill.is_wanted(8));
 		assert!(fill.poll_unwanted(8, &waiter).is_pending());
-		assert_eq!(fill.next(), Some(8), "nobody reads below 8 any more");
+		assert_eq!(fill.wanted(), Some(8), "nobody reads below 8 any more");
 		write_filled(fill.accept(8, None), 8);
-		assert_eq!(fill.next(), Some(9));
+		assert_eq!(fill.wanted(), Some(9));
 		// Over, so what the fill refuses is a drop rather than a group still to come.
 		producer.finish().unwrap();
 		fill.drop_groups(0..9);
@@ -16858,7 +19864,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn a_filled_group_is_wanted_until_taken() {
 		let mut producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let ascending = |groups| replay().with_range(groups).with_order(Order::Ascending);
 		let mut subscriber = producer.subscribe(ascending(0..));
 		producer.start_at(10).unwrap();
@@ -16891,7 +19897,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn an_accepted_groups_readers_leave_before_its_fill() {
 		let mut producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let ascending = |groups| replay().with_range(groups).with_order(Order::Ascending);
 		let mut subscriber = producer.subscribe(ascending(0..));
 		producer.start_at(10).unwrap();
@@ -16904,22 +19910,26 @@ mod test {
 		let group = fill.group(0);
 		let readers = group.readers();
 		let _writing = group.accept(None).unwrap();
-		assert!(readers.poll_unused(&waiter).is_pending());
+		assert!(readers.poll_unwanted(&waiter).is_pending());
 
 		subscriber.update(ascending(1..)).unwrap();
 		assert!(subscriber.poll_recv_group(&waiter).is_pending());
-		assert!(readers.poll_unused(&waiter).is_ready(), "nobody reads group 0 now");
-		assert!(fill.poll_unused(&waiter).is_pending(), "the fill still owes 1 and up");
+		assert!(readers.poll_unwanted(&waiter).is_ready(), "nobody reads group 0 now");
+		assert!(
+			fill.poll_withdrawn(&waiter).is_pending(),
+			"the fill still owes 1 and up"
+		);
 	}
 
-	/// A time start before every group held asks no fill below the oldest, since which of
-	/// those groups it reaches is unknown until they start; another range still asks for its
-	/// own misses.
+	/// A time start before every group held looks up its group through a fill that owes
+	/// none: a handler that can't resolve times drops it, and the start reaches back to the
+	/// oldest group held, asking no fill below it, since which of those groups it reaches is
+	/// unknown until they start. Another range still asks for its own misses.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_time_start_before_the_cache_asks_nothing_below_it() {
 		let mut producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let at = |millis| Timestamp::from_millis(millis).unwrap();
 		let since = Range {
 			start: Anchor::Time(at(5)),
@@ -16933,16 +19943,30 @@ mod test {
 		producer.start_at(10).unwrap();
 		write_group(&producer, 10);
 		let waiter = kio::Waiter::noop();
+		assert_eq!(
+			drain_groups(&mut subscriber),
+			Vec::<u64>::new(),
+			"the time start waits on its lookup"
+		);
+		let Poll::Ready(Ok(lookup)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the time start is looked up");
+		};
+		assert_eq!(
+			(lookup.time(), lookup.start().group, lookup.end()),
+			(Some(at(5)), 0, 10)
+		);
+		assert_eq!(lookup.wanted(), None, "a lookup owes no group");
+		drop(lookup);
 		let mut read = drain_groups(&mut subscriber);
 		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("the group range misses its groups");
 		};
 		assert_eq!(
-			(fill.start().group, fill.end()),
-			(0, 2),
+			(fill.time(), fill.start().group, fill.end()),
+			(None, 0, 2),
 			"nothing below 10 for the time start"
 		);
-		while let Some(sequence) = fill.next() {
+		while let Some(sequence) = fill.wanted() {
 			write_filled(fill.accept(sequence, None), sequence);
 		}
 		drop(fill);
@@ -16951,13 +19975,144 @@ mod test {
 		assert!(dynamic.poll_requested_fill(&waiter).is_pending());
 	}
 
+	/// A time start before every group held starts at the group its lookup answers, once that
+	/// group's first frame says where it starts, asking nothing below it; a time end walks the
+	/// history below the feed's start through fills, stopping just past the group containing it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_looked_up_time_range_reads_the_history() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		let mut subscriber = producer.subscribe(replay().with_ranges([Range {
+			start: Anchor::Time(at(5)),
+			end: Some(Anchor::Time(at(7))),
+		}]));
+		producer.start_at(10).unwrap();
+		write_group(&producer, 10);
+		let waiter = kio::Waiter::noop();
+		assert_eq!(
+			drain_groups(&mut subscriber),
+			Vec::<u64>::new(),
+			"nothing reads until it is found"
+		);
+		let Poll::Ready(Ok(lookup)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the time start is looked up");
+		};
+		assert_eq!(lookup.time(), Some(at(5)));
+		let found = lookup.accept(5, None);
+		drop(lookup);
+		assert_eq!(
+			drain_groups(&mut subscriber),
+			Vec::<u64>::new(),
+			"nothing reads until the group found starts"
+		);
+		write_filled(found, 5);
+		let mut read = drain_groups(&mut subscriber);
+		// One group at a time past the start, until one starts after the end.
+		while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) {
+			assert_eq!(fill.time(), None);
+			while let Some(sequence) = fill.wanted() {
+				assert!(sequence >= 5, "group {sequence} is below the looked-up start");
+				write_filled(fill.accept(sequence, None), sequence);
+			}
+			drop(fill);
+			read.extend(drain_groups(&mut subscriber));
+		}
+		assert_eq!(read, [5, 6, 7]);
+	}
+
+	/// A time end walking the history a handler serves takes no group the live feed
+	/// delivered and the cache evicted as gone: the history still holds it, and it may start
+	/// inside the end, so the end settles on what the history answers.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_time_end_walks_evicted_arrivals_through_the_history() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		for sequence in 0..10 {
+			write_group(&producer, sequence);
+		}
+		for sequence in [0, 1, 2, 3, 5, 6, 7, 8] {
+			evict(&producer, sequence);
+		}
+		let mut subscriber = producer.subscribe(replay().with_ranges([Range {
+			start: Anchor::Time(at(5)),
+			end: Some(Anchor::Time(at(6))),
+		}]));
+		let waiter = kio::Waiter::noop();
+		assert_eq!(drain_groups(&mut subscriber), Vec::<u64>::new());
+		let Poll::Ready(Ok(lookup)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the time start in the evicted gap is looked up");
+		};
+		assert_eq!(lookup.time(), Some(at(5)));
+		write_filled(lookup.accept(5, None), 5);
+		drop(lookup);
+		let mut read = drain_groups(&mut subscriber);
+		while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) {
+			while let Some(sequence) = fill.wanted() {
+				write_filled(fill.accept(sequence, None), sequence);
+			}
+			drop(fill);
+			read.extend(drain_groups(&mut subscriber));
+		}
+		assert_eq!(read, [5, 6], "groups 7 and 8 start past the end");
+	}
+
+	/// A time end parked on a gap the history may still fill moves on once the reader's own
+	/// fill refuses it: what its fills give up counts gone for its walks, which wake on it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_time_end_parked_on_a_gap_wakes_when_its_fill_refuses_it() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		for sequence in 0..7 {
+			write_group(&producer, sequence);
+		}
+		for sequence in [3, 4] {
+			evict(&producer, sequence);
+		}
+		let mut subscriber = producer.subscribe(replay().with_order(Order::Ascending).with_ranges([Range {
+			start: Anchor::Time(at(0)),
+			end: Some(Anchor::Time(at(4))),
+		}]));
+		// Polled as an executor would, again whenever the read wakes itself.
+		let (flag, waiter) = Flag::waiter();
+		let mut poll = || loop {
+			match subscriber.poll_group(true, &waiter) {
+				Poll::Ready(res) => return Some(res.expect("no error").map(|group| group.sequence)),
+				Poll::Pending if flag.take() => continue,
+				Poll::Pending => return None,
+			}
+		};
+		let (mut read, mut ended) = (Vec::new(), false);
+		loop {
+			while !ended && let Some(next) = poll() {
+				match next {
+					Some(sequence) => read.push(sequence),
+					None => ended = true,
+				}
+			}
+			let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&kio::Waiter::noop()) else {
+				break;
+			};
+			while let Some(sequence) = fill.wanted() {
+				fill.group(sequence).reject(Error::App(sequence as u16));
+			}
+		}
+		assert_eq!(read, [0, 1, 2]);
+		assert!(ended, "the end settles at group 5, past the refused 3 and 4");
+	}
+
 	/// A wide fill refused group by group, each with its own error, holds only the answers its
 	/// readers have yet to take, not one per refusal.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_wide_fill_forgets_refusals_its_readers_took() {
 		let mut producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let mut subscriber = producer.subscribe(replay().with_range(0..).with_order(Order::Ascending));
 		producer.start_at(100).unwrap();
 		write_group(&producer, 100);
@@ -16968,7 +20123,7 @@ mod test {
 		};
 		assert_eq!((fill.start().group, fill.end()), (0, 100));
 		for sequence in 0..50 {
-			assert_eq!(fill.next(), Some(sequence));
+			assert_eq!(fill.wanted(), Some(sequence));
 			fill.group(sequence).reject(Error::App(sequence as u16));
 			let _ = subscriber.poll_recv_group(&waiter);
 			assert!(fill.answers() <= 1, "group {sequence}: {} answers held", fill.answers());
@@ -16981,7 +20136,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn a_later_reader_asks_afresh_for_what_a_fill_stopped_owing() {
 		let mut producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let ascending = |groups| replay().with_range(groups).with_order(Order::Ascending);
 		let mut narrowed = producer.subscribe(ascending(0..));
 		producer.start_at(10).unwrap();
@@ -17000,7 +20155,7 @@ mod test {
 			panic!("what the first fill stopped owing is asked afresh");
 		};
 		assert_eq!((again.start().group, again.end()), (0, 8));
-		assert_eq!(fill.next(), Some(8), "the first fill still owes only 8 and up");
+		assert_eq!(fill.wanted(), Some(8), "the first fill still owes only 8 and up");
 		assert!(!fill.is_wanted(0), "a group stops being wanted for good");
 	}
 
@@ -17010,7 +20165,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn a_descending_reader_asks_its_newest_miss_first() {
 		let mut producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let mut subscriber =
 			producer.subscribe(replay().with_ranges([Range::groups(0..2), Range::groups(4..6), Range::groups(8..)]));
 		producer.start_at(8).unwrap();
@@ -17024,6 +20179,350 @@ mod test {
 		assert_eq!(asked, [(4, 6), (0, 2)]);
 	}
 
+	/// A group evicted after an arrival-order reader judged it cached, before it took it, is
+	/// asked of a fill like one evicted before: the reader still receives it, and a group it
+	/// took is never asked again.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_group_evicted_before_its_reader_took_it_is_refilled() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let mut subscriber = producer.subscribe(replay());
+		for sequence in 0..3 {
+			write_group(&producer, sequence);
+		}
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(Some(first))) = subscriber.poll_recv_group(&waiter) else {
+			panic!("group 0 is cached");
+		};
+		assert_eq!(first.sequence, 0);
+		evict(&producer, 0);
+		evict(&producer, 1);
+		assert_eq!(drain_groups(&mut subscriber), [2]);
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("group 1 is a miss now");
+		};
+		assert_eq!((fill.start().group, fill.end()), (1, 2), "group 0 was taken");
+		assert_eq!(fill.wanted(), Some(1));
+		write_filled(fill.accept(1, None), 1);
+		drop(fill);
+		assert_eq!(drain_groups(&mut subscriber), [1]);
+		assert!(dynamic.poll_requested_fill(&waiter).is_pending());
+		assert!(drained_drops(&mut subscriber).is_empty(), "nothing was given up");
+		let Inner::Plain(cursor) = &subscriber.inner else {
+			unreachable!("a plain subscription");
+		};
+		let misses = cursor.misses.as_ref().expect("the reader judged its misses");
+		assert!(misses.refilled().is_empty(), "a refill handed out is forgotten");
+	}
+
+	/// A live arrival judged on its own keeps the history a resumed copy's live floor sits
+	/// above: a cached group the reader hasn't taken yet, evicted after, is still refilled.
+	#[test]
+	#[cfg(feature = "async")]
+	fn history_below_a_resumed_live_floor_is_refilled_after_a_live_arrival() {
+		let mut producer = track_producer("test", None);
+		let dynamic = producer.requests();
+		producer.received();
+		for sequence in 0..5 {
+			framed(&producer, sequence, 1).finish().unwrap();
+		}
+		producer.set_idle();
+		// The feed resumes at 8, above the cached 0..=4: its live floor is 5.
+		producer.set_live(Some(Position::group(8)), None);
+		framed(&producer, 8, 1).finish().unwrap();
+		let mut reader = producer.subscribe(
+			Subscription::default()
+				.with_range(0..)
+				.with_order(Order::Ascending)
+				.with_delay(Delay::default().with_max(None)),
+		);
+		let waiter = kio::Waiter::noop();
+		let next = |reader: &mut Subscriber| match reader.poll_next_group(&waiter) {
+			Poll::Ready(Ok(Some(group))) => Some(group.sequence),
+			_ => None,
+		};
+		assert_eq!(next(&mut reader), Some(0));
+		// The gap the feed may still deliver arrives late, so nothing is deferred after.
+		for sequence in 5..8 {
+			framed(&producer, sequence, 1).finish().unwrap();
+		}
+		assert_eq!(next(&mut reader), Some(1));
+		// Only the newest group moves before this read: judged on its own.
+		framed(&producer, 9, 1).finish().unwrap();
+		assert_eq!(next(&mut reader), Some(2));
+		evict(&producer, 3);
+		let _ = next(&mut reader);
+		let mut asked = Vec::new();
+		while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) {
+			asked.push((fill.start().group, fill.end()));
+		}
+		assert!(
+			asked.iter().any(|&(start, end)| start <= 3 && 3 < end),
+			"group 3 was evicted before the reader took it: asked {asked:?}"
+		);
+	}
+
+	/// An eviction waits only for a reader that judged the evicted group cached: a reader
+	/// that judged once and stalled holds no more than what was cached then, however many
+	/// groups the feed caches and evicts after, late lower ones included. A reader that
+	/// took every group up to it holds none, since a group it took is never a miss again.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_eviction_waits_only_for_readers_that_judged_it_cached() {
+		let producer = track_producer("test", Info::timed());
+		let _dynamic = producer.requests();
+		write_group(&producer, 0);
+		write_group(&producer, 1);
+		write_group(&producer, 1 << 40);
+		let held = || producer.state.read().inboxes.lock().unwrap().held();
+		evict(&producer, 0);
+		assert!(held().is_empty(), "no reader judged group 0");
+
+		let mut stalled = producer.subscribe(replay());
+		let mut active = producer.subscribe(replay());
+		drain_groups(&mut stalled);
+		drain_groups(&mut active);
+		// Late groups below the stalled reader's newest, cached after it judged.
+		for sequence in (2..200).step_by(2) {
+			write_group(&producer, sequence);
+			drain_groups(&mut active);
+			evict(&producer, sequence);
+		}
+		// The active reader judged each one cached, so it holds the last until it judges again.
+		assert_eq!(held(), [vec![], vec![(198, 199)]], "the stalled reader judged none");
+		drain_groups(&mut active);
+		evict(&producer, 1);
+		assert_eq!(
+			held(),
+			[vec![(1, 2)], vec![]],
+			"the active reader judged after taking every group up to 2; the stalled one judged before it took group 1"
+		);
+		drain_groups(&mut active);
+		assert_eq!(
+			held(),
+			[vec![(1, 2)], vec![]],
+			"the active reader has nothing to take in"
+		);
+		drop(stalled);
+		assert_eq!(held(), [vec![]], "a dropped reader holds nothing");
+		write_group(&producer, 3);
+		evict(&producer, 3);
+		assert_eq!(
+			producer.state.read().inboxes.lock().unwrap().len(),
+			1,
+			"an eviction prunes a dropped reader's inbox"
+		);
+	}
+
+	/// An ordered reader forwarding drops asks nothing below what it took, though its drop
+	/// cursor reports from the window's floor.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_ordered_readers_drop_poll_asks_nothing_it_took() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let mut subscriber = producer.subscribe(replay().with_order(Order::Ascending));
+		for sequence in 0..3 {
+			write_group(&producer, sequence);
+		}
+		let waiter = kio::Waiter::noop();
+		for expected in 0..2 {
+			let Poll::Ready(Ok(Some(group))) = subscriber.poll_next_group(&waiter) else {
+				panic!("group {expected} is cached");
+			};
+			assert_eq!(group.sequence, expected);
+		}
+		evict(&producer, 0);
+		evict(&producer, 1);
+		assert!(drained_drops(&mut subscriber).is_empty());
+		assert!(dynamic.poll_requested_fill(&waiter).is_pending(), "both were taken");
+	}
+
+	/// An ordered reader waits on the refill of a group evicted at or above its next
+	/// sequence, and reads it in order.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_ordered_reader_refills_an_evicted_group_in_order() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let mut subscriber = producer.subscribe(replay().with_order(Order::Ascending));
+		for sequence in 0..4 {
+			write_group(&producer, sequence);
+		}
+		let waiter = kio::Waiter::noop();
+		let next = |subscriber: &mut Subscriber| match subscriber.poll_next_group(&kio::Waiter::noop()) {
+			Poll::Ready(Ok(Some(group))) => Some(group.sequence),
+			_ => None,
+		};
+		assert_eq!(next(&mut subscriber), Some(0));
+		evict(&producer, 1);
+		evict(&producer, 2);
+		assert_eq!(next(&mut subscriber), None, "group 1 comes before 3");
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("groups 1 and 2 are misses now");
+		};
+		assert_eq!((fill.start().group, fill.end()), (1, 3));
+		while let Some(sequence) = fill.wanted() {
+			write_filled(fill.accept(sequence, None), sequence);
+		}
+		drop(fill);
+		assert_eq!([next(&mut subscriber), next(&mut subscriber)], [Some(1), Some(2)]);
+		assert_eq!(next(&mut subscriber), Some(3));
+	}
+
+	/// An ordered reader gives up a refill evicted again while it waits on a lower one,
+	/// naming it dropped and releasing its fill, rather than reading past it unnamed.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_ordered_reader_gives_up_a_refill_evicted_while_it_waits_below() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let mut subscriber = producer.subscribe(replay().with_order(Order::Ascending));
+		for sequence in 0..4 {
+			write_group(&producer, sequence);
+		}
+		let waiter = kio::Waiter::noop();
+		let next = |subscriber: &mut Subscriber| match subscriber.poll_next_group(&kio::Waiter::noop()) {
+			Poll::Ready(Ok(Some(group))) => Some(group.sequence),
+			_ => None,
+		};
+		assert_eq!(next(&mut subscriber), Some(0));
+		evict(&producer, 1);
+		evict(&producer, 2);
+		assert_eq!(next(&mut subscriber), None, "group 1 comes before 3");
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("groups 1 and 2 are misses now");
+		};
+		write_filled(fill.accept(2, None), 2);
+		assert_eq!(next(&mut subscriber), None, "still waiting on group 1");
+		evict(&producer, 2);
+		assert_eq!(next(&mut subscriber), None, "still waiting on group 1");
+		assert_eq!(drained_drops(&mut subscriber), [(2, 3)]);
+		write_filled(fill.accept(1, None), 1);
+		drop(fill);
+		assert_eq!([next(&mut subscriber), next(&mut subscriber)], [Some(1), Some(3)]);
+		assert!(dynamic.poll_requested_fill(&waiter).is_pending(), "refilled once");
+	}
+
+	/// A refill evicted again before its reader took it is given up rather than asked a
+	/// second time, so refills that evict each other cannot loop.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_refill_evicted_again_is_given_up() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let mut subscriber = producer.subscribe(replay());
+		for sequence in 0..3 {
+			write_group(&producer, sequence);
+		}
+		let waiter = kio::Waiter::noop();
+		assert!(matches!(subscriber.poll_recv_group(&waiter), Poll::Ready(Ok(Some(_)))));
+		evict(&producer, 1);
+		assert_eq!(drain_groups(&mut subscriber), [2]);
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("group 1 is a miss now");
+		};
+		assert_eq!(fill.wanted(), Some(1));
+		write_filled(fill.accept(1, None), 1);
+		drop(fill);
+		evict(&producer, 1);
+		assert!(drain_groups(&mut subscriber).is_empty());
+		assert!(dynamic.poll_requested_fill(&waiter).is_pending(), "refilled once");
+		assert_eq!(drained_drops(&mut subscriber), [(1, 2)]);
+	}
+
+	/// A slow ascending reader on a pooled track holding `cached` groups, taking `pace` of
+	/// every four its feed writes, as behind a bufferbloated link. Returns what it read, how
+	/// many groups the fills wrote, and what it gave up.
+	#[cfg(feature = "async")]
+	fn read_slowly(cached: usize, pace: u64) -> (Vec<u64>, u64, Vec<(u64, u64)>) {
+		let size = 10_000;
+		let (producer, _pool) = pooled_producer((cached * size) as u64);
+		let dynamic = producer.requests();
+		let mut subscriber = producer.subscribe(replay().with_order(Order::Ascending));
+		let write = |group: Result<group::Producer>, sequence: u64| {
+			let mut group = group.unwrap();
+			group
+				.write_frame(Timestamp::from_millis(sequence).unwrap(), vec![0u8; size])
+				.unwrap();
+			group.finish().unwrap();
+		};
+		let waiter = kio::Waiter::noop();
+		let mut refilled = 0;
+		let mut serve = || {
+			while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) {
+				while let Some(sequence) = fill.wanted() {
+					write(fill.accept(sequence, None), sequence);
+					refilled += 1;
+				}
+			}
+		};
+		let (mut read, mut drops) = (Vec::new(), Vec::new());
+		// A wire publisher forwards what the reader gives up as it reads.
+		let mut take = |subscriber: &mut Subscriber| {
+			let taken = match subscriber.poll_next_group(&kio::Waiter::noop()) {
+				Poll::Ready(Ok(Some(group))) => {
+					read.push(group.sequence);
+					true
+				}
+				_ => false,
+			};
+			drops.extend(drained_drops(subscriber));
+			taken
+		};
+		for sequence in 0..GROUPS {
+			write(producer.create_group(group::Info { sequence }), sequence);
+			if sequence % 4 < pace {
+				take(&mut subscriber);
+			}
+			serve();
+		}
+		// The feed pauses and the reader drains what it can, refills included.
+		loop {
+			serve();
+			if !take(&mut subscriber) {
+				serve();
+				if !take(&mut subscriber) {
+					break;
+				}
+			}
+		}
+		(read, refilled, drops)
+	}
+
+	#[cfg(feature = "async")]
+	const GROUPS: u64 = 40;
+
+	/// A backlog a little past the cache: what the reader judged and lost to eviction is
+	/// refilled, so it receives every group once, in order, refilling no more than it reads.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_slow_reader_on_a_pooled_track_receives_every_group() {
+		let (read, refilled, drops) = read_slowly(8, 3);
+		assert_eq!(read, (0..GROUPS).collect::<Vec<_>>(), "every group once, in order");
+		assert!(drops.is_empty(), "nothing given up: {drops:?}");
+		assert!(refilled > 0, "the backlog outgrew the cache");
+		assert!(refilled <= GROUPS, "{refilled} refills for {GROUPS} groups read");
+	}
+
+	/// A backlog far past the cache, where refills evict the groups the reader reads next:
+	/// each group is refilled at most once, and one lost again is given up and named, never
+	/// handed out twice.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_slow_reader_past_the_cache_refills_each_group_once() {
+		let (read, refilled, drops) = read_slowly(4, 2);
+		let mut seen = read.clone();
+		seen.dedup();
+		assert_eq!(seen, read, "none twice");
+		assert!(read.is_sorted(), "in order");
+		assert!(refilled <= GROUPS, "{refilled} refills for {GROUPS} groups");
+		let lost: Vec<u64> = (0..GROUPS).filter(|sequence| !read.contains(sequence)).collect();
+		let named: Vec<u64> = drops.iter().flat_map(|&(start, end)| start..end).collect();
+		assert_eq!(lost, named, "every group lost is named dropped");
+	}
+
 	/// A reader forgets the misses it gave up once its window moves past them, as it forgets
 	/// what it judged, so a feed skipping every other group costs it only the gaps it can
 	/// still read.
@@ -17031,7 +20530,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn a_reader_forgets_misses_behind_its_window() {
 		let mut producer = track_producer("test", Info::timed());
-		let _dynamic = producer.dynamic();
+		let _dynamic = producer.requests();
 		let ascending = |groups| Subscription::default().with_range(groups).with_order(Order::Ascending);
 		let mut subscriber = producer.subscribe(ascending(0..));
 		producer.start_at(0).unwrap();
@@ -17062,7 +20561,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn a_descending_reader_asks_its_newest_fragment_first() {
 		let mut producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let mut middle = producer.subscribe(replay().with_range(5..6));
 		producer.start_at(8).unwrap();
 		write_group(&producer, 8);
@@ -17135,7 +20634,7 @@ mod test {
 		for sequence in [0, 1, 2, 4, 5] {
 			write_group(&producer, sequence);
 		}
-		producer.finish_at(Position::group(10)).unwrap();
+		producer.finish_at(Position::group(10), None).unwrap();
 		assert_eq!(drain_groups(&mut subscriber), [0, 1, 2, 4, 5]);
 		assert!(drained_drops(&mut subscriber).is_empty(), "group 3 may still arrive");
 		write_group(&producer, 3);
@@ -17169,7 +20668,7 @@ mod test {
 	fn a_wide_fill_its_handler_left_settles_by_run() {
 		const WIDE: u64 = 1 << 40;
 		let mut producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let mut subscriber = producer.subscribe(replay().with_range(0..));
 		producer.start_at(WIDE).unwrap();
 		write_group(&producer, WIDE);
@@ -17185,14 +20684,15 @@ mod test {
 	}
 
 	/// A handler refusing a wide fill one group at a time, as a FETCH-capable session does,
-	/// pays for each refusal rather than for every refusal before it.
+	/// advances after each refusal and coalesces the resolved run, forgetting consumed answers.
+	/// `track_fill_refusal` benchmarks the cost over refusals and readers.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_fill_refused_group_by_group_stays_linear() {
 		const WIDE: u64 = 1 << 40;
-		const REFUSED: u64 = 100_000;
+		const REFUSED: u64 = 32;
 		let mut producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let mut subscriber = producer.subscribe(replay().with_range(0..));
 		producer.start_at(WIDE).unwrap();
 		write_group(&producer, WIDE);
@@ -17201,12 +20701,18 @@ mod test {
 		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&kio::Waiter::noop()) else {
 			panic!("the miss below the start is asked");
 		};
-		for _ in 0..REFUSED {
-			let sequence = fill.next().unwrap();
+		for refused in 1..=REFUSED {
+			let sequence = fill.wanted().unwrap();
 			fill.drop_groups(sequence..sequence + 1);
 			assert!(subscriber.poll_recv_group(&kio::Waiter::noop()).is_pending());
+			assert_eq!(fill.wanted(), Some(WIDE - refused - 1));
+			assert_eq!(fill.answers(), 0, "the reader consumed the refusal");
+			assert_eq!(
+				fill.resolved_runs(),
+				vec![WIDE - refused..WIDE],
+				"adjacent refusals remain one resolved run"
+			);
 		}
-		assert_eq!(fill.next(), Some(WIDE - REFUSED - 1));
 	}
 
 	/// A descending reader joining a queued fill makes it newest first, as any descending
@@ -17214,7 +20720,7 @@ mod test {
 	#[test]
 	fn a_descending_reader_turns_a_queued_fill_newest_first() {
 		let mut producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let mut ascending = producer.subscribe(replay().with_range(0..).with_order(Order::Ascending));
 		let mut descending = producer.subscribe(replay().with_range(0..));
 		producer.start_at(4).unwrap();
@@ -17231,6 +20737,83 @@ mod test {
 			dynamic.poll_requested_fill(&kio::Waiter::noop()).is_pending(),
 			"both readers share the fill"
 		);
+	}
+
+	/// A run that passes over a group another request is bringing serves the groups around
+	/// it, across the runs that answered groups split the fill into, and leaves that group
+	/// to [`Fill::next_run`] once nothing else is owed.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_run_passes_over_a_skipped_group() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let mut descending = producer.subscribe(replay().with_range(0..));
+		producer.start_at(6).unwrap();
+		write_group(&producer, 6);
+		let _ = descending.poll_recv_group(&kio::Waiter::noop());
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&kio::Waiter::noop()) else {
+			panic!("the miss below the start is asked");
+		};
+		assert_eq!(fill.order(), Order::Descending);
+		assert_eq!(fill.next_run(), Some(0..6));
+		assert_eq!(fill.next_run_except(5), Some(0..5));
+		assert_eq!(fill.next_run_except(2), Some(3..6));
+
+		fill.drop_groups(3..4);
+		assert_eq!(fill.next_run(), Some(4..6));
+		assert_eq!(fill.next_run_except(5), Some(4..5));
+		assert_eq!(fill.next_run_except(4), Some(5..6));
+		fill.drop_groups(4..5);
+		assert_eq!(
+			fill.next_run_except(5),
+			Some(0..3),
+			"older runs are served while 5 waits"
+		);
+		fill.drop_groups(0..3);
+		assert_eq!(fill.next_run_except(5), None);
+		assert_eq!(fill.next_run(), Some(5..6));
+	}
+
+	/// A reader changing its priority, budget, or order moves the fill it waits on, queued
+	/// or taken, so the handler serves the rest under the new values, even ones lower than
+	/// it was asked with.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_reader_update_reaches_its_fill() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let mut subscriber = producer.subscribe(replay().with_range(0..).with_order(Order::Ascending));
+		producer.start_at(4).unwrap();
+		write_group(&producer, 4);
+		let waiter = kio::Waiter::noop();
+		assert_eq!(drain_groups(&mut subscriber), [4]);
+
+		subscriber.update(subscriber.subscription().with_priority(3)).unwrap();
+		assert!(subscriber.poll_recv_group(&waiter).is_pending());
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the miss below the start is asked");
+		};
+		assert_eq!((fill.start().group, fill.end()), (0, 4));
+		assert_eq!(
+			(fill.priority(), fill.order()),
+			(3, Order::Ascending),
+			"refreshed while queued"
+		);
+		assert_eq!(fill.wanted(), Some(0));
+		write_filled(fill.accept(0, None), 0);
+
+		let budget = Duration::from_secs(20);
+		let update = subscriber
+			.subscription()
+			.with_priority(-2)
+			.with_delay(Delay::default().with_max(budget))
+			.with_order(Order::Descending);
+		subscriber.update(update).unwrap();
+		assert_eq!(drain_groups(&mut subscriber), [0]);
+		assert_eq!(fill.priority(), -2);
+		assert_eq!(fill.max_delay(), Some(budget));
+		assert_eq!(fill.order(), Order::Descending);
+		assert_eq!(fill.wanted(), Some(3), "the rest is served newest first");
 	}
 
 	/// An ordered reader waits on a fill for its miss rather than skipping past it.
@@ -17268,13 +20851,13 @@ mod test {
 			panic!("the gap is a miss");
 		};
 		drop(subscriber);
-		assert!(!fill.is_used());
+		assert_eq!(fill.wanted(), None);
 		drop(fill);
 		assert!(drops(&producer).is_empty());
 	}
 
 	/// Fetch group 3 and drop it through the fill it queues, returning how the fetch ended.
-	fn drop_through_fill(producer: &Producer, dynamic: &Dynamic, drop_all: bool) -> Error {
+	fn drop_through_fill(producer: &Producer, dynamic: &Requests, drop_all: bool) -> Error {
 		let consumer = producer.consume();
 		let mut fetch = consumer.fetch_group(3, None);
 		let waiter = kio::Waiter::noop();
@@ -17304,35 +20887,35 @@ mod test {
 	/// A group the source no longer has fails its fetch, and is named dropped for good only
 	/// once the live feed gave up on it too: a fetch answered before a late group header
 	/// arrives says nothing about the feed.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn dropped_fill_group_fails_its_fetch() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		write_group(&producer, 5);
 		assert!(matches!(drop_through_fill(&producer, &dynamic, true), Error::NotFound));
 		assert!(drops(&producer).is_empty(), "the feed may still deliver 3");
 
-		moq_clock::sim::advance(Duration::from_secs(60)).await;
+		kio::clock::sim::advance(Duration::from_secs(60)).await;
 		assert!(matches!(drop_through_fill(&producer, &dynamic, true), Error::NotFound));
 		assert_eq!(drops(&producer), vec![3..4], "clipped to the fill");
 	}
 
 	/// Dropping a fill a reader still waits on names what it left as dropped.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn fill_dropped_unanswered_names_the_rest_dropped() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		write_group(&producer, 5);
-		moq_clock::sim::advance(Duration::from_secs(60)).await;
+		kio::clock::sim::advance(Duration::from_secs(60)).await;
 		assert!(matches!(drop_through_fill(&producer, &dynamic, false), Error::Dropped));
 		assert_eq!(drops(&producer), vec![3..4]);
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn fetch_aborts_with_track() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		let mut pending = consumer.fetch_group(3, None);
@@ -17382,10 +20965,13 @@ mod test {
 	fn a_gap_is_forgotten_once_a_group_above_it_is_past_the_budget() {
 		let budget = Duration::from_millis(10);
 		let readers = [
-			(Info::timed(), Subscription::default().with_max_delay(budget)),
+			(
+				Info::timed(),
+				Subscription::default().with_delay(Delay::default().with_max(budget)),
+			),
 			(
 				Info::timed().with_max_age(budget),
-				Subscription::default().with_max_delay(Duration::from_secs(3600)),
+				Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(3600))),
 			),
 		];
 		for (info, subscription) in readers {
@@ -17417,7 +21003,8 @@ mod test {
 	fn an_endless_track_with_gaps_stays_bounded() {
 		let producer = track_producer("test", Info::timed());
 		// Groups present 1ms apart, so the budget spans ten of them.
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_millis(10)));
+		let mut subscriber = producer
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(10))));
 		let mut most = 0;
 		for sequence in 0..3000u64 {
 			// Every third group never arrives.
@@ -17449,7 +21036,8 @@ mod test {
 	fn an_endless_untimed_track_with_gaps_stays_bounded() {
 		let producer = track_producer("test", None);
 		// Groups arrive 1ms apart, so the budget spans ten of them.
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_millis(10)));
+		let mut subscriber = producer
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(10))));
 		let mut most = 0;
 		for sequence in 0..3000u64 {
 			elapse(&producer, Duration::from_millis(1));
@@ -17474,7 +21062,8 @@ mod test {
 	#[test]
 	fn an_empty_successor_still_lets_the_gaps_go() {
 		let producer = track_producer("test", Info::timed());
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_millis(10)));
+		let mut subscriber = producer
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(10))));
 		let mut most = 0;
 		for sequence in 0..3000u64 {
 			elapse(&producer, Duration::from_millis(1));
@@ -17502,7 +21091,8 @@ mod test {
 	fn a_gap_below_a_frameless_run_lets_the_floor_advance() {
 		const RUN: u64 = 100;
 		let producer = track_producer("test", Info::timed());
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(1)));
+		let mut subscriber =
+			producer.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(1))));
 		write_group(&producer, 0);
 		// Group 1 never arrives.
 		let open: Vec<_> = (2..2 + RUN)
@@ -17527,7 +21117,8 @@ mod test {
 	#[test]
 	fn gaps_below_aborted_groups_are_forgotten_together() {
 		let producer = track_producer("test", Info::timed());
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(1)));
+		let mut subscriber =
+			producer.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(1))));
 		let mut handed = Vec::new();
 		for sequence in (0..20).step_by(2) {
 			let mut group = producer.create_group(group::Info { sequence }).unwrap();
@@ -17557,7 +21148,7 @@ mod test {
 	fn wall_time_batches_aborted_gaps_without_forgetting_a_fresh_successor() {
 		let budget = Duration::from_secs(1);
 		let producer = track_producer("test", None);
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(budget));
+		let mut subscriber = producer.subscribe(Subscription::default().with_delay(Delay::default().with_max(budget)));
 		let mut open = Vec::new();
 		for sequence in (0..=10).step_by(2) {
 			let mut group = producer.create_group(group::Info { sequence }).unwrap();
@@ -17642,42 +21233,13 @@ mod test {
 		assert_eq!(drain(&mut live), vec![0, 1]);
 	}
 
-	/// A live range starts at the newest group even when a datagram took a later sequence.
-	#[test]
-	#[cfg(feature = "async")]
-	fn a_live_range_ignores_a_datagram_past_the_newest_group() {
-		let mut producer = track_producer("test", Info::timed());
-		append_at(&mut producer, 0);
-		assert_eq!(
-			producer
-				.append_datagram(Timestamp::from_millis(1).unwrap(), &b"x"[..])
-				.unwrap(),
-			1
-		);
-		let mut live = producer.subscribe(replay().with_ranges([Range::live()]));
-		assert_eq!(drain(&mut live), vec![0]);
-	}
-
-	/// A live range on a track without groups delivers datagrams as they arrive, rather than
-	/// holding them for a group a datagram-only track never produces.
-	#[test]
-	#[cfg(feature = "async")]
-	fn a_live_range_on_a_track_without_groups_delivers_datagrams() {
-		let mut producer = track_producer("test", Info::timed());
-		let mut live = producer.subscribe(replay().with_ranges([Range::live()]));
-		producer
-			.append_datagram(Timestamp::from_millis(0).unwrap(), &b"x"[..])
-			.unwrap();
-		assert_eq!(recv_datagram(&mut live).sequence, 0);
-	}
-
 	/// Fetched backfill past the newest produced group moves no relative start, whether the
 	/// track had a produced group at subscribe or not.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_live_range_ignores_a_fetched_group_past_the_newest_group() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 		let mut early = producer.subscribe(replay().with_ranges([Range::live()]));
 		let _fetching = consumer.fetch_group(5, None);
@@ -17754,7 +21316,11 @@ mod test {
 			elapse(&producer, Duration::from_secs(1));
 		}
 		let budget = Duration::from_millis(1500);
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(budget).with_range(0..));
+		let mut subscriber = producer.subscribe(
+			Subscription::default()
+				.with_delay(Delay::default().with_max(budget))
+				.with_range(0..),
+		);
 		assert_eq!(drain(&mut subscriber), vec![3, 4]);
 	}
 
@@ -17773,12 +21339,7 @@ mod test {
 
 	/// Take group `sequence` out of the cache as eviction does.
 	fn evict(producer: &Producer, sequence: u64) {
-		producer
-			.modify()
-			.unwrap()
-			.uncache(sequence)
-			.unwrap()
-			.abort(Error::Evicted);
+		producer.modify().unwrap().evict_group(sequence, Error::Evicted);
 	}
 
 	/// A rewound first frame is refused and leaves the group as it was, so the publisher can
@@ -17977,7 +21538,11 @@ mod test {
 		assert_eq!(drain(&mut subscriber), vec![0, 1]);
 
 		subscriber.update(replay().with_range(0..)).unwrap();
-		assert_eq!(drain(&mut subscriber), vec![2, 3], "held back, now in range");
+		assert_eq!(
+			drain(&mut subscriber),
+			vec![3, 2],
+			"held back, now in range, newest first"
+		);
 
 		// The latest group is 3 now, so one back is 2, already read: only new groups follow.
 		let mut late = producer.subscribe(replay().with_range(..1));
@@ -17987,14 +21552,104 @@ mod test {
 			end: None,
 		}]))
 		.unwrap();
-		assert_eq!(drain(&mut late), vec![2, 3]);
+		assert_eq!(drain(&mut late), vec![3, 2]);
 		append_at(&mut producer, 4000);
 		assert_eq!(drain(&mut late), vec![4]);
 	}
 
+	/// A time end whose cap moves beside fixed ranges owes, of every cached group, exactly
+	/// what was owed and is still admitted, and what is newly admitted: what the walks' runs
+	/// gain is taken in by their runs alone, and must still owe each cached group it reaches.
+	#[test]
+	fn a_moving_time_cap_owes_what_it_newly_admits() {
+		let seed = std::cell::Cell::new(0x2545_f491_4f6c_dd1d_u64);
+		let next = |bound: u64| {
+			let mut x = seed.get();
+			x ^= x << 13;
+			x ^= x >> 7;
+			x ^= x << 17;
+			seed.set(x);
+			x % bound
+		};
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		const SEQUENCES: u64 = 40;
+		let mut owed = 0;
+		for round in 0..150 {
+			let producer = track_producer("test", Info::timed());
+			// One time end, and fixed ranges around and above where the feed starts.
+			let ranges = std::iter::once(Range {
+				start: Anchor::Time(at(next(100))),
+				end: Some(Anchor::Time(at(200 + next(400)))),
+			})
+			.chain((0..1 + next(6)).map(|_| {
+				let start = next(SEQUENCES);
+				Range::groups(start..start + 1 + next(3))
+			}));
+			let mut subscriber = producer.subscribe(Subscription::default().with_ranges(ranges));
+			let mut groups = Vec::new();
+			for step in 0..30 {
+				let sequence = next(SEQUENCES);
+				match next(4) {
+					0 | 1 => {
+						if let Ok(mut group) = producer.create_group(group::Info { sequence }) {
+							if next(2) == 0 {
+								group
+									.write_frame(at(sequence * 20), bytes::Bytes::from_static(b"x"))
+									.unwrap();
+							}
+							groups.push(group);
+						}
+					}
+					2 => {
+						if let Some(group) = groups.iter_mut().find(|group| group.sequence == sequence)
+							&& group.handle().timestamp().is_none()
+						{
+							let _ = group.write_frame(at(sequence * 20), bytes::Bytes::from_static(b"x"));
+						}
+					}
+					_ => {
+						// Read now and then, so the walk passes groups and owes them again.
+						let _ = subscriber.poll_recv_group(&kio::Waiter::noop());
+					}
+				}
+				let Inner::Plain(cursor) = &mut subscriber.inner else {
+					unreachable!("a local subscriber reads its own cursor");
+				};
+				cursor.sync();
+				let (before, was, primed) = (
+					cursor.filter.admitted.runs(),
+					cursor.filter.owed.clone(),
+					cursor.filter.admitted_at.is_some(),
+				);
+				cursor.admit();
+				let now = cursor.filter.admitted.runs();
+				let held =
+					|runs: &[ops::RangeInclusive<u64>], sequence: u64| runs.iter().any(|run| run.contains(&sequence));
+				let cached: Vec<u64> = cursor.state.read().lookup.keys().copied().collect();
+				for sequence in cached {
+					let expected =
+						primed && held(&now, sequence) && (was.contains(&sequence) || !held(&before, sequence));
+					assert_eq!(
+						cursor.filter.owed.contains(&sequence),
+						expected,
+						"round {round} step {step}: group {sequence}, admitted {before:?} then {now:?}, owed {was:?}"
+					);
+					owed += usize::from(expected);
+				}
+				for run in cursor.filter.owed.iter() {
+					assert!(
+						cursor.filter.admitted.overlapping(run.clone()) == vec![run.clone()],
+						"round {round} step {step}: owed {run:?} beyond {now:?}"
+					);
+				}
+			}
+		}
+		assert!(owed > 100, "only {owed} groups owed");
+	}
+
 	/// A narrow reader under an open aggregate passes the groups outside its range holding
 	/// nothing for them, however many arrive, and widening its ranges still serves the
-	/// ones the cache holds in the new span, lowest first and once each.
+	/// ones the cache holds in the new span, newest first and once each.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_narrow_reader_holds_nothing_for_excluded_groups() {
@@ -18013,17 +21668,17 @@ mod test {
 			unreachable!()
 		};
 		assert!(cursor.filter.owed.is_empty(), "nothing owed for excluded groups");
-		assert_eq!(cursor.filter.admitted.iter().count(), 1, "only the range is kept");
+		assert_eq!(cursor.filter.admitted.runs().len(), 1, "only the range is kept");
 
 		narrow
 			.update(replay().with_ranges([Range::groups(0..2), Range::groups(5..8)]))
 			.unwrap();
-		assert_eq!(drain(&mut narrow), vec![5, 6, 7]);
+		assert_eq!(drain(&mut narrow), vec![7, 6, 5]);
 		narrow.set_range(..9);
 		narrow.update(replay().with_range(0..)).unwrap();
-		assert_eq!(drain(&mut narrow), vec![2, 3, 4, 8]);
+		assert_eq!(drain(&mut narrow), vec![8, 4, 3, 2]);
 		narrow.set_range(..);
-		assert_eq!(drain(&mut narrow), (9..1000).collect::<Vec<_>>());
+		assert_eq!(drain(&mut narrow), (9..1000).rev().collect::<Vec<_>>());
 	}
 
 	/// Lowering the floor re-offers the cached groups the arrival walk passed below it,
@@ -18041,11 +21696,11 @@ mod test {
 		subscriber.update(replay().with_range(2..)).unwrap();
 		assert_eq!(
 			drain(&mut subscriber),
-			vec![2, 3, 4],
+			vec![4, 3, 2],
 			"passed below the floor, now in range"
 		);
 		subscriber.update(replay().with_range(0..)).unwrap();
-		assert_eq!(drain(&mut subscriber), vec![0, 1]);
+		assert_eq!(drain(&mut subscriber), vec![1, 0]);
 
 		// Raising and lowering it again re-offers only what is cached in between, and
 		// nothing already served goes out twice.
@@ -18058,7 +21713,7 @@ mod test {
 	}
 
 	/// Lowering a reader's local floor offers the cached groups below the old one that it
-	/// passed over, lowest first, and never a group twice.
+	/// passed over, in its order, and never a group twice.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_lowered_range_reoffers_the_unread_cached_groups() {
@@ -18070,31 +21725,13 @@ mod test {
 		assert_eq!(drain(&mut subscriber), vec![4, 5]);
 
 		let mut subscriber = subscriber.with_range(1..);
-		assert_eq!(drain(&mut subscriber), vec![1, 2, 3], "passed below the floor");
+		assert_eq!(drain(&mut subscriber), vec![3, 2, 1], "passed below the floor");
 		let mut subscriber = subscriber.with_range(..=1);
 		assert_eq!(drain(&mut subscriber), vec![0], "the floor and the cap both assign");
 		let mut subscriber = subscriber.with_range(..);
 		assert_eq!(drain(&mut subscriber), Vec::<u64>::new(), "nothing goes out twice");
 		append_at(&mut producer, 6000);
 		assert_eq!(drain(&mut subscriber), vec![6]);
-	}
-
-	/// Datagrams outside a subscriber's ranges are dropped like the groups.
-	#[test]
-	#[cfg(feature = "async")]
-	fn datagrams_outside_the_ranges_are_skipped() {
-		let mut producer = track_producer("test", Info::timed());
-		let mut subscriber = producer.subscribe(replay().with_ranges([Range::groups(1..2), Range::groups(3..)]));
-		for millis in 0..5 {
-			producer
-				.append_datagram(Timestamp::from_millis(millis).unwrap(), &b"x"[..])
-				.unwrap();
-		}
-		let mut sequences = Vec::new();
-		while let Some(Ok(Some(datagram))) = subscriber.recv_datagram().now_or_never() {
-			sequences.push(datagram.sequence);
-		}
-		assert_eq!(sequences, vec![1, 3, 4]);
 	}
 
 	/// Only the sequences a subscriber asked for are named dropped to it.
@@ -18113,6 +21750,25 @@ mod test {
 			dropped,
 			vec![(2..4, StreamError::NotFound), (6..8, StreamError::NotFound)]
 		);
+	}
+
+	/// A report describes a miss, not a delivery: a late group is still handed out once.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_reported_drop_still_allows_a_late_group() {
+		let producer = track_producer("test", Info::timed());
+		let mut subscriber = producer.subscribe(replay());
+		let waiter = kio::Waiter::noop();
+		producer.drop_groups(2..4, StreamError::NotFound);
+		assert_eq!(
+			subscriber.poll_drop(&waiter),
+			Poll::Ready((2..4, StreamError::NotFound))
+		);
+		assert!(subscriber.poll_drop(&waiter).is_pending());
+		write_group(&producer, 3);
+		assert_eq!(drain_groups(&mut subscriber), [3]);
+		assert!(subscriber.poll_drop(&waiter).is_pending());
+		assert!(drain_groups(&mut subscriber).is_empty());
 	}
 
 	/// A drop ends a group still arriving with the drop's error at once, for the reader
@@ -18155,11 +21811,11 @@ mod test {
 
 	/// A drop judges the subscription, not a fetch: a fetched head still arriving keeps
 	/// serving the group to its end after the drop ends the live copy.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_drop_spares_a_fetched_head_still_arriving() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
@@ -18374,6 +22030,49 @@ mod test {
 		assert_eq!(drain(&mut seek), vec![1, 2]);
 	}
 
+	/// A time start resolves once a group starts, not at the latest group: a copy can show
+	/// the route's answer (here an empty group) before the groups its publisher resolved the
+	/// time to start, and a producer can open groups before their first frames.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_time_start_waits_for_a_group_to_start() {
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		let since = [Range {
+			start: Anchor::Time(at(2500)),
+			end: None,
+		}];
+		for (copy, order) in [
+			(false, Order::Ascending),
+			(true, Order::Ascending),
+			(true, Order::Descending),
+		] {
+			let mut producer = track_producer("test", Info::timed());
+			if copy {
+				producer.set_idle();
+				producer.set_live(Some(Position::group(9)), Some(2));
+			}
+			let mut groups: Vec<_> = (2..9)
+				.map(|sequence| producer.create_group(group::Info { sequence }).unwrap())
+				.collect();
+			producer
+				.create_group(group::Info { sequence: 9 })
+				.unwrap()
+				.finish()
+				.unwrap();
+
+			let mut subscriber = producer.subscribe(replay().with_ranges(since).with_order(order));
+			assert_eq!(drain(&mut subscriber), Vec::<u64>::new(), "copy: {copy}, {order:?}");
+			for (group, sequence) in groups.iter_mut().zip(2..) {
+				group
+					.write_frame(at(sequence * 1000), bytes::Bytes::from_static(b"x"))
+					.unwrap();
+			}
+			let mut read = drain(&mut subscriber);
+			read.sort_unstable();
+			assert_eq!(read, (2..10).collect::<Vec<_>>(), "copy: {copy}, {order:?}");
+		}
+	}
+
 	/// A time end stays open across a group that has yet to start: it may start before the
 	/// end, so a later group starting after it settles nothing.
 	#[test]
@@ -18472,7 +22171,7 @@ mod test {
 
 	/// A read parked on a time end's cap wakes when the speculative group starts, and when
 	/// a later group starts inside the end while the speculative one stalls.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_read_parked_on_a_time_end_wakes_as_groups_start() {
 		let at = |millis| Timestamp::from_millis(millis).unwrap();
@@ -18480,23 +22179,23 @@ mod test {
 		let mut groups: Vec<_> = (0..4)
 			.map(|sequence| producer.create_group(group::Info { sequence }).unwrap())
 			.collect();
-		let mut subscriber = producer.subscribe(replay().with_ranges([Range {
+		let mut subscriber = producer.subscribe(replay().with_order(Order::Ascending).with_ranges([Range {
 			start: Anchor::Absolute(0),
 			end: Some(Anchor::Time(at(3500))),
 		}]));
 		assert_eq!(drain(&mut subscriber), vec![0]);
 
-		let parked = moq_clock::sim::spawn(async move {
+		let parked = kio::clock::sim::spawn(async move {
 			let one = subscriber.recv_group().await.unwrap().unwrap().sequence;
 			let two = subscriber.recv_group().await.unwrap().unwrap().sequence;
 			(one, two, subscriber)
 		});
-		moq_clock::sim::yield_now().await;
+		kio::clock::sim::yield_now().await;
 		assert!(!parked.is_finished(), "1 waits on 0 starting");
 		groups[0]
 			.write_frame(at(3000), bytes::Bytes::from_static(b"x"))
 			.unwrap();
-		moq_clock::sim::yield_now().await;
+		kio::clock::sim::yield_now().await;
 		assert!(!parked.is_finished(), "1 is read, and 2 waits on 1 starting");
 
 		// 1 stalls, so only 2 starting inside the end lifts the cap past it.
@@ -18518,53 +22217,11 @@ mod test {
 		);
 	}
 
-	/// A datagram is a whole group of one frame, so its own timestamp says whether it falls
-	/// inside a time end, without one ever settling from the groups.
-	#[test]
-	#[cfg(feature = "async")]
-	fn a_datagram_is_judged_against_a_time_end_by_its_timestamp() {
-		let at = |millis| Timestamp::from_millis(millis).unwrap();
-		let mut producer = track_producer("test", Info::timed());
-		let mut subscriber = producer.subscribe(replay().with_ranges([Range {
-			start: Anchor::Absolute(0),
-			end: Some(Anchor::Time(at(3500))),
-		}]));
-		for millis in [3000, 3400, 3600, 3700] {
-			producer.append_datagram(at(millis), &b"x"[..]).unwrap();
-		}
-		let mut read = Vec::new();
-		while let Some(Ok(Some(datagram))) = subscriber.recv_datagram().now_or_never() {
-			read.push(datagram.sequence);
-		}
-		assert_eq!(read, vec![0, 1]);
-	}
-
-	/// A track of only datagrams starts no group, so a time start is judged against each
-	/// datagram's own timestamp rather than letting every one through.
-	#[test]
-	#[cfg(feature = "async")]
-	fn a_datagram_is_judged_against_a_time_start_by_its_timestamp() {
-		let at = |millis| Timestamp::from_millis(millis).unwrap();
-		let mut producer = track_producer("test", Info::timed());
-		let mut subscriber = producer.subscribe(replay().with_ranges([Range {
-			start: Anchor::Time(at(3500)),
-			end: None,
-		}]));
-		for millis in [3000, 3400, 3500, 3700] {
-			producer.append_datagram(at(millis), &b"x"[..]).unwrap();
-		}
-		let mut read = Vec::new();
-		while let Some(Ok(Some(datagram))) = subscriber.recv_datagram().now_or_never() {
-			read.push(datagram.sequence);
-		}
-		assert_eq!(read, vec![2, 3]);
-	}
-
 	/// An untimed track refuses a time anchor wherever the ranges reach it.
 	#[test]
 	#[cfg(feature = "async")]
 	fn an_untimed_track_refuses_time_anchors() {
-		let mut producer = untimed_producer();
+		let producer = untimed_producer();
 		let timed = replay().with_ranges([Range {
 			start: Anchor::Time(Timestamp::from_millis(0).unwrap()),
 			end: None,
@@ -18592,21 +22249,1284 @@ mod test {
 			refused.recv_group().now_or_never(),
 			Some(Err(Error::TimestampMismatch))
 		));
-		producer.append_datagram(None, &b"x"[..]).unwrap();
-		assert!(matches!(
-			refused.recv_datagram().now_or_never(),
-			Some(Err(Error::TimestampMismatch))
-		));
 
 		// Ranges it can serve lift the refusal.
 		refused.update(replay()).unwrap();
 		let mut group = producer.append_group().unwrap();
 		group.finish().unwrap();
 		let read = refused.recv_group().now_or_never().expect("the group is cached");
+		assert_eq!(read.unwrap().map(|group| group.sequence), Some(0));
+	}
+
+	/// A widened budget re-offers the cached groups the cursor skipped as stale, newest
+	/// first by default, and never a group it already handed out.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_widened_budget_reoffers_what_it_skipped_as_stale() {
+		let mut producer = track_producer("test", Info::timed());
+		let narrow = Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(1500)));
+		let mut subscriber = producer.subscribe(narrow.clone());
+		append_at(&mut producer, 0);
+		assert_eq!(drain(&mut subscriber), vec![0]);
+		for millis in [1000, 2000, 3000, 6000] {
+			append_at(&mut producer, millis);
+		}
+		// Groups 1 and 2 reach 2s and 3s, at least 1.5s behind the 6s edge.
+		assert_eq!(drain(&mut subscriber), vec![3, 4]);
+
+		subscriber
+			.update(narrow.with_delay(Delay::default().with_max(Duration::from_secs(10))))
+			.unwrap();
 		assert_eq!(
-			read.unwrap().map(|group| group.sequence),
-			Some(1),
-			"the datagram took sequence 0"
+			drain(&mut subscriber),
+			vec![2, 1],
+			"newest first, never 0, 3, or 4 again"
 		);
+		assert_eq!(drain(&mut subscriber), Vec::<u64>::new());
+	}
+
+	/// An ascending subscription gets the re-offer lowest first.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_ascending_widening_reoffers_lowest_first() {
+		let mut producer = track_producer("test", Info::timed());
+		for millis in [0, 1000, 2000, 5000] {
+			append_at(&mut producer, millis);
+		}
+		let narrow = Subscription::default()
+			.with_delay(Delay::default().with_max(Duration::from_millis(1500)))
+			.with_order(Order::Ascending);
+		let mut subscriber = producer.subscribe(narrow.clone());
+		assert_eq!(drain(&mut subscriber), vec![2, 3]);
+		subscriber
+			.update(narrow.with_delay(Delay::default().with_max(Duration::from_secs(10))))
+			.unwrap();
+		assert_eq!(drain(&mut subscriber), vec![0, 1]);
+	}
+
+	/// A widening that covers only the newer of two skipped groups hands it out without
+	/// folding the older one into the delivered floor: a further widening still owes it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_partial_widening_keeps_the_older_skip_owed() {
+		let mut producer = track_producer("test", Info::timed());
+		let narrow = Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(1500)));
+		let mut subscriber = producer.subscribe(narrow.clone());
+		append_at(&mut producer, 0);
+		assert_eq!(drain(&mut subscriber), vec![0]);
+		for millis in [1000, 2000, 4000] {
+			append_at(&mut producer, millis);
+		}
+		assert_eq!(drain(&mut subscriber), vec![2, 3]);
+		for millis in [5000, 6000, 9000] {
+			append_at(&mut producer, millis);
+		}
+		assert_eq!(drain(&mut subscriber), vec![5, 6]);
+
+		// Group 4 reaches 6s, 3s behind the 9s edge; group 1 reaches 2s, 7s behind.
+		subscriber
+			.update(
+				narrow
+					.clone()
+					.with_delay(Delay::default().with_max(Duration::from_secs(4))),
+			)
+			.unwrap();
+		assert_eq!(drain(&mut subscriber), vec![4]);
+		subscriber
+			.update(narrow.with_delay(Delay::default().with_max(Duration::from_secs(10))))
+			.unwrap();
+		assert_eq!(drain(&mut subscriber), vec![1]);
+	}
+
+	/// Handing out the newest group a widened range owes never folds the older ones it still
+	/// owes into the delivered floor before they are judged: a later budget widening gets the
+	/// ones judged stale.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_newest_first_range_reoffer_keeps_the_older_owed_groups() {
+		let mut producer = track_producer("test", Info::timed());
+		for millis in [0, 1000, 2000, 3000, 6000] {
+			append_at(&mut producer, millis);
+		}
+		let narrow = Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(1500)));
+		let mut subscriber = producer.subscribe(narrow.clone());
+		subscriber.set_range(3..5);
+		assert_eq!(drain(&mut subscriber), vec![3, 4]);
+		for millis in [20_000, 40_000] {
+			append_at(&mut producer, millis);
+		}
+
+		subscriber.set_range(0..);
+		// Groups 0 through 2 reach 3s at most, far behind the 40s edge.
+		assert_eq!(drain(&mut subscriber), vec![6, 5]);
+		subscriber
+			.update(narrow.with_delay(Delay::default().with_max(Duration::from_secs(60))))
+			.unwrap();
+		assert_eq!(drain(&mut subscriber), vec![2, 1, 0]);
+	}
+
+	/// How many runs of skipped groups `subscriber` holds.
+	#[cfg(feature = "async")]
+	fn skipped_runs(subscriber: &Subscriber) -> usize {
+		let Inner::Plain(cursor) = &subscriber.inner else {
+			unreachable!()
+		};
+		cursor.skipped.runs()
+	}
+
+	/// The groups handed out around a skipped one aging past the budget does not fold it in
+	/// with them: a widening still owes it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_skipped_group_outlives_the_fold_of_its_neighbours() {
+		let mut producer = track_producer("test", Info::timed());
+		let narrow = Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(1500)));
+		let mut subscriber = producer.subscribe(narrow.clone());
+		append_at(&mut producer, 0);
+		assert_eq!(drain(&mut subscriber), vec![0]);
+		for millis in [1000, 2000, 3000, 6000] {
+			append_at(&mut producer, millis);
+		}
+		assert_eq!(drain(&mut subscriber), vec![3, 4]);
+		// Groups 3 and 4 are past the budget now, which would write off the gap below them.
+		for millis in [20_000, 40_000] {
+			append_at(&mut producer, millis);
+			assert_eq!(drain(&mut subscriber).len(), 1);
+		}
+		assert_eq!(
+			subscriber.delivered_runs(),
+			2,
+			"folded up to the skipped groups, no further"
+		);
+
+		subscriber
+			.update(narrow.with_delay(Delay::default().with_max(Duration::from_secs(60))))
+			.unwrap();
+		assert_eq!(drain(&mut subscriber), vec![2, 1]);
+	}
+
+	/// A group skipped at the track's max age bound is final: no widening passes the bound, so
+	/// the cursor keeps no record of it and its gap folds as the groups above it age out.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_skip_at_the_max_age_bound_folds_into_the_floor() {
+		let mut producer = track_producer("test", Info::timed().with_max_age(Duration::from_millis(500)));
+		for millis in [0, 1000, 2000] {
+			append_at(&mut producer, millis);
+		}
+		let mut subscriber =
+			producer.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10))));
+		assert_eq!(drain(&mut subscriber), vec![1, 2]);
+		assert_eq!(skipped_runs(&subscriber), 0);
+		append_at(&mut producer, 3000);
+		assert_eq!(drain(&mut subscriber), vec![3]);
+		assert_eq!(subscriber.delivered_runs(), 1, "the gap at group 0 folded");
+	}
+
+	/// A skipped group gone from the cache can never be offered again, so the cursor forgets
+	/// it and a widening finds nothing.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_evicted_skip_is_forgotten() {
+		let mut producer = track_producer("test", Info::timed());
+		let narrow = Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(1500)));
+		let mut subscriber = producer.subscribe(narrow.clone());
+		append_at(&mut producer, 0);
+		assert_eq!(drain(&mut subscriber), vec![0]);
+		for millis in [1000, 2000, 3000, 6000] {
+			append_at(&mut producer, millis);
+		}
+		assert_eq!(drain(&mut subscriber), vec![3, 4]);
+		assert_eq!(skipped_runs(&subscriber), 1);
+
+		evict(&producer, 1);
+		evict(&producer, 2);
+		append_at(&mut producer, 7000);
+		assert_eq!(drain(&mut subscriber), vec![5]);
+		assert_eq!(skipped_runs(&subscriber), 0);
+		subscriber
+			.update(narrow.with_delay(Delay::default().with_max(Duration::from_secs(60))))
+			.unwrap();
+		assert_eq!(drain(&mut subscriber), Vec::<u64>::new());
+	}
+	/// Distinct transport starts retain delivery outcomes, but share the same indexed
+	/// bytes even while every earlier delivery is held by an unread consumer.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn distinct_tail_readers_share_canonical_content() {
+		for size in [0, 1, 1024] {
+			for bounded in [false, true] {
+				let producer = track_producer("test", Info::timed());
+				let pool = producer.broadcast.pool.clone();
+				let dynamic = producer.requests();
+				let consumer = producer.consume();
+				let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
+				live.start_at(32).unwrap();
+				live.write_frame(Timestamp::ZERO, vec![32; size]).unwrap();
+				assert!(
+					live.handle().content().is_none(),
+					"a single copy keeps its fast representation"
+				);
+				let mut held = Vec::new();
+				let mut deliveries = vec![live.handle()];
+				let end = if bounded { 17 } else { 33 };
+				for start in (1..=8).rev() {
+					let pending = consumer.fetch_range(
+						0,
+						FetchOptions {
+							options: group::Fetch {
+								frame_start: start,
+								..Default::default()
+							},
+							end: bounded.then_some(end),
+						},
+					);
+					let fill = dynamic.requested_fill_group().await.unwrap();
+					let mut tail = fill.accept(Info::timed()).unwrap();
+					for frame in start..end {
+						tail.write_frame(Timestamp::ZERO, vec![frame as u8; size]).unwrap();
+					}
+					tail.finish().unwrap();
+					deliveries.push(tail.handle());
+					held.push(pending.await.unwrap());
+				}
+				let owner = deliveries[0].content().unwrap();
+				for delivery in &deliveries {
+					assert!(Arc::ptr_eq(&owner, &delivery.content().unwrap()));
+				}
+				let (rows, bytes, shared_charge) = owner.cost();
+				assert_eq!(rows, if bounded { 17 } else { 32 });
+				assert_eq!(bytes, rows * size);
+				let total = pool.used();
+				let delivery_charge: u64 = deliveries.iter().map(group::Handle::delivery_size).sum();
+				eprintln!(
+					"CANONICAL_TAIL_COST size={size} bounded={bounded} delivery_handles={} canonical_rows={rows} unique_payload={bytes} shared_charge={shared_charge} delivery_charge={delivery_charge} discovery_charge={} total={total}",
+					deliveries.len(),
+					total - shared_charge - delivery_charge
+				);
+				let mut pointers = BTreeMap::new();
+				for (copy, reader) in held.iter_mut().enumerate() {
+					for index in (8 - copy) as u64..end {
+						assert_eq!(reader.index(), index);
+						let frame = reader.read_frame().await.unwrap().unwrap();
+						assert_eq!(frame.payload.as_ref(), vec![index as u8; size]);
+						if size != 0
+							&& let Some(prior) = pointers.insert(index, frame.payload.as_ptr() as usize)
+						{
+							assert_eq!(
+								prior,
+								frame.payload.as_ptr() as usize,
+								"one physical payload for every matching frame"
+							);
+						}
+					}
+					if bounded {
+						assert!(reader.read_frame().await.unwrap().is_none());
+					}
+				}
+				drop((pointers, owner, deliveries));
+				assert_eq!(
+					pool.used(),
+					total,
+					"identity probes neither own nor conceal payload copies"
+				);
+				drop(held);
+				live.abort(Error::Cancel).unwrap();
+			}
+		}
+	}
+
+	/// Evicting a Slot does not hide a canonical owner from still-held older tails;
+	/// explicitly recreating the live group, however, starts a new incarnation.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn tail_owner_survives_slot_removal_but_not_live_recreation() {
+		let producer = track_producer("test", Info::timed());
+		let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		live.start_at(8).unwrap();
+		live.write_frame(Timestamp::ZERO, b"eight".as_slice()).unwrap();
+		let mut tails = Vec::new();
+		let mut held = Vec::new();
+		for start in [4, 2] {
+			let mut tail = producer
+				.state
+				.write()
+				.ok()
+				.unwrap()
+				.insert_group_request(
+					0,
+					group::Bounds {
+						start,
+						end: Some(start + 1),
+					},
+					None,
+				)
+				.unwrap();
+			tail.write_frame(Timestamp::ZERO, vec![start as u8; 4]).unwrap();
+			tail.finish().unwrap();
+			held.push(tail.consume().with_range(start..));
+			tails.push(tail);
+		}
+		let owner = tails[0].handle().content().unwrap();
+		producer
+			.state
+			.write()
+			.ok()
+			.unwrap()
+			.uncache(0)
+			.unwrap()
+			.abort(Error::Evicted);
+		assert!(
+			!tails[0].handle().is_aborted(),
+			"the replaced delivery is held outside the Slot"
+		);
+		let mut refill = producer
+			.state
+			.write()
+			.ok()
+			.unwrap()
+			.insert_group_request(0, group::Bounds { start: 0, end: Some(1) }, None)
+			.unwrap();
+		assert!(Arc::ptr_eq(&owner, &refill.handle().content().unwrap()));
+		refill.write_frame(Timestamp::ZERO, b"zero".as_slice()).unwrap();
+		refill.finish().unwrap();
+		refill.abort(Error::Cancel).unwrap();
+		let mut recreated = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		recreated.start_at(8).unwrap();
+		recreated.write_frame(Timestamp::ZERO, b"new eight".as_slice()).unwrap();
+		assert!(
+			recreated.handle().content().is_none(),
+			"an explicit new live incarnation starts independently"
+		);
+		let mut new = producer
+			.state
+			.write()
+			.ok()
+			.unwrap()
+			.insert_group_request(0, group::Bounds { start: 0, end: Some(1) }, None)
+			.unwrap();
+		new.write_frame(Timestamp::ZERO, b"new zero".as_slice()).unwrap();
+		assert!(!Arc::ptr_eq(&owner, &new.handle().content().unwrap()));
+		assert_eq!(held[0].read_frame().await.unwrap().unwrap().payload.as_ref(), &[4; 4]);
+	}
+
+	/// Activation preserves an already-streaming reader and producer, and every
+	/// delivery's progress, arrival and abort while sharing the origin's admission.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn canonical_activation_preserves_inflight_delivery_ownership() {
+		for abort_first in [false, true] {
+			let budget = frame::Budget::new(1024);
+			let broadcast = Arc::new(broadcast::Info {
+				frames: budget.clone(),
+				..Default::default()
+			});
+			let producer = Producer::new(broadcast, "test", Info::timed());
+			let mut first = producer.create_group(group::Info { sequence: 0 }).unwrap();
+			first.start_at(4).unwrap();
+			let mut first_read = first.consume().with_range(4..);
+			let mut first = first
+				.create_frame(frame::Info {
+					size: 1024,
+					timestamp: Some(Timestamp::ZERO),
+				})
+				.unwrap();
+			first.write(vec![4; 512]).unwrap();
+			let mut streaming = first_read.next_frame().await.unwrap().unwrap();
+			let early = streaming.read_chunk().await.unwrap().unwrap();
+			assert_eq!(early.as_ref(), &[4; 512]);
+			let mut second = producer
+				.state
+				.write()
+				.ok()
+				.unwrap()
+				.insert_group_request(0, group::Bounds { start: 3, end: Some(5) }, None)
+				.unwrap();
+			second.write_frame(Timestamp::ZERO, b"three".as_slice()).unwrap();
+			let mut second_read = second.consume().with_range(4..);
+			let mut second = second
+				.create_frame(frame::Info {
+					size: 1024,
+					timestamp: Some(Timestamp::ZERO),
+				})
+				.unwrap();
+			assert!(
+				budget.reserve(1).is_none(),
+				"overlap shares the first producer's reservation"
+			);
+			assert_eq!(first.remaining(), 512);
+			second.write(vec![4; 256]).unwrap();
+			assert_eq!(first.remaining(), 512, "another delivery credits no progress");
+			assert!(streaming.read_chunk().now_or_never().is_none());
+			kio::clock::sim::advance(Duration::from_millis(20)).await;
+			if abort_first {
+				first.abort(Error::Cancel).unwrap();
+				assert!(budget.reserve(1).is_none(), "the survivor still holds admission");
+				second.write(vec![4; 768]).unwrap();
+				let mut second = second.finish().unwrap();
+				second.finish().unwrap();
+				assert!(matches!(streaming.read_chunk().await, Err(Error::Cancel)));
+				let frame = second_read.read_frame().await.unwrap().unwrap();
+				assert_eq!(frame.payload.as_ref(), &[4; 1024]);
+				assert_eq!(
+					early.as_ptr(),
+					frame.payload.as_ptr(),
+					"the survivor reuses the published storage"
+				);
+			} else {
+				second.write(vec![4; 768]).unwrap();
+				let mut second = second.finish().unwrap();
+				second.finish().unwrap();
+				let later_copy = second_read.read_frame().await.unwrap().unwrap();
+				assert!(
+					budget.reserve(1).is_none(),
+					"the slower first delivery still owns admission"
+				);
+				assert_eq!(first.remaining(), 512);
+				assert!(streaming.read_chunk().now_or_never().is_none());
+				kio::clock::sim::advance(Duration::from_millis(10)).await;
+				first.write(vec![4; 512]).unwrap();
+				let mut first = first.finish().unwrap();
+				first.finish().unwrap();
+				let original_copy = first.consume().with_range(4..).read_frame().await.unwrap().unwrap();
+				assert_eq!(
+					original_copy.arrived().duration_since(later_copy.arrived()),
+					Duration::from_millis(10)
+				);
+				assert_eq!(original_copy.payload.as_ptr(), later_copy.payload.as_ptr());
+				assert_eq!(early.as_ptr(), later_copy.payload.as_ptr());
+				assert_eq!(streaming.read_chunk().await.unwrap().unwrap().as_ref(), &[4; 512]);
+			}
+			assert!(
+				budget.reserve(1024).is_some(),
+				"all completed producers return admission"
+			);
+		}
+	}
+	/// IETF Object IDs can occupy different delivery ordinals. Sharing bytes must
+	/// preserve their typed fields and each delivery's independent terminal record.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn canonical_content_keys_typed_objects_by_id_not_ordinal() {
+		fn wire(first: u64) -> group::Wire {
+			group::Wire {
+				sparse: true,
+				first_object: false,
+				first_id: first,
+				extensions: true,
+				has_end: true,
+				fetchable: true,
+				last: None,
+			}
+		}
+		fn write(group: group::Producer, id: u64, payload: &'static [u8]) -> group::Producer {
+			let mut frame = group
+				.create_object(frame::Header {
+					info: frame::Info {
+						size: payload.len() as u64,
+						timestamp: Some(Timestamp::ZERO),
+					},
+					fields: Some(Arc::new(super::super::object::Fields {
+						id,
+						properties: super::super::object::Properties {
+							sealed_time: Some(Timestamp::ZERO),
+							..Default::default()
+						},
+					})),
+					inflated: None,
+				})
+				.unwrap();
+			frame.write(payload).unwrap();
+			frame.finish().unwrap()
+		}
+		let producer = track_producer("test", Info::timed());
+		let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		live.start_at(2).unwrap();
+		live.set_wire(wire(100)).unwrap();
+		let live = write(live, 100, b"a");
+		let head = producer
+			.state
+			.write()
+			.ok()
+			.unwrap()
+			.insert_group_request(0, group::Bounds { start: 1, end: Some(3) }, None)
+			.unwrap();
+		head.set_wire(wire(90)).unwrap();
+		let head = write(head, 90, b"b");
+		let mut head = write(head, 100, b"a");
+		head.set_end_object(super::super::object::Fields {
+			id: 101,
+			properties: Default::default(),
+		})
+		.unwrap();
+		head.finish().unwrap();
+		let earlier = producer
+			.state
+			.write()
+			.ok()
+			.unwrap()
+			.insert_group_request(0, group::Bounds { start: 0, end: Some(2) }, None)
+			.unwrap();
+		earlier.set_wire(wire(90)).unwrap();
+		let earlier = write(earlier, 90, b"b");
+		let mut earlier = write(earlier, 95, b"c");
+		earlier.finish().unwrap();
+		assert!(head.consume().end_object().is_some_and(|fields| fields.id == 101));
+		assert!(
+			earlier.consume().end_object().is_none(),
+			"content sharing copies no terminal metadata"
+		);
+		let mut prior = head.consume().with_range(1..).compressed();
+		let mut later = earlier.consume().compressed();
+		let mut a = arrayvec::ArrayVec::<frame::Object, 4>::new();
+		let mut b = arrayvec::ArrayVec::<frame::Object, 4>::new();
+		assert!(matches!(
+			prior.poll_read_objects(&kio::Waiter::noop(), &mut a),
+			Poll::Ready(Ok(2))
+		));
+		assert!(matches!(
+			later.poll_read_objects(&kio::Waiter::noop(), &mut b),
+			Poll::Ready(Ok(2))
+		));
+		assert_eq!(
+			a.iter()
+				.map(|object| object.fields.as_ref().unwrap().id)
+				.collect::<Vec<_>>(),
+			[90, 100]
+		);
+		assert_eq!(
+			b.iter()
+				.map(|object| object.fields.as_ref().unwrap().id)
+				.collect::<Vec<_>>(),
+			[90, 95]
+		);
+		assert_eq!(
+			a[0].payload.chunk_at(0).as_ptr(),
+			b[0].payload.chunk_at(0).as_ptr(),
+			"one Object ID shares bytes across different ordinals"
+		);
+		assert_eq!(
+			b[1].payload.contiguous(0),
+			b"c".as_slice(),
+			"the same ordinal cannot alias a different Object ID"
+		);
+		assert!(
+			a.iter()
+				.chain(&b)
+				.all(|object| object.fields.as_ref().unwrap().properties.sealed_time == Some(Timestamp::ZERO))
+		);
+		assert_eq!(live.handle().content().unwrap().cost().0, 3);
+	}
+
+	/// Compressed transport refills keep the received slices, share one inflation,
+	/// and continue widening hostile tail requests rather than minting local encoders.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn canonical_compressed_ingress_preserves_raw_plain_and_widening() {
+		fn ingest(group: group::Producer, object: &frame::Object) -> group::Producer {
+			assert!(
+				object.inflated.is_some(),
+				"compressed ingress carries the stored representation"
+			);
+			let mut frame = group
+				.create_object(frame::Header {
+					info: frame::Info {
+						size: object.payload.len() as u64,
+						timestamp: object.timestamp,
+					},
+					fields: object.fields.clone(),
+					inflated: object.inflated,
+				})
+				.unwrap();
+			let mut at = 0;
+			while at < object.payload.len() {
+				let chunk = object.payload.chunk_at(at);
+				at += chunk.len();
+				frame.write(bytes::Bytes::copy_from_slice(&chunk)).unwrap();
+			}
+			frame.finish().unwrap()
+		}
+		let info = Info::timed().with_compress(true);
+		let reference = track_producer("reference", info.clone());
+		let mut source = reference.create_group(group::Info { sequence: 0 }).unwrap();
+		let expected: Vec<_> = (0..9)
+			.map(|index| bytes::Bytes::from(format!("shared dictionary frame {index}; ").repeat(64)))
+			.collect();
+		for payload in &expected {
+			source.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+		}
+		source.finish().unwrap();
+		let mut stored = arrayvec::ArrayVec::<frame::Object, 16>::new();
+		assert!(matches!(
+			source
+				.consume()
+				.compressed()
+				.poll_read_objects(&kio::Waiter::noop(), &mut stored),
+			Poll::Ready(Ok(9))
+		));
+		let producer = track_producer("test", info.clone());
+		let requests = producer.requests();
+		let consumer = producer.consume();
+		let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		live.start_at(8).unwrap();
+		let live = ingest(live, &stored[8]);
+		let mut raw_live = live.consume().with_range(8..).compressed();
+		let raw_live = raw_live.read_frame().await.unwrap().unwrap();
+		assert!(
+			matches!(live.consume().with_range(8..).read_frame().await, Err(Error::Lagged)),
+			"canonical storage does not grant a missing compression prefix"
+		);
+		let pending = consumer.fetch_range(
+			0,
+			FetchOptions {
+				options: group::Fetch {
+					frame_start: 2,
+					..Default::default()
+				},
+				end: Some(4),
+			},
+		);
+		let fill = requests.requested_fill_group().await.unwrap();
+		assert_eq!((fill.frame_start(), fill.frame_end()), (0, None));
+		let mut head = fill.accept(info).unwrap();
+		for object in &stored[..8] {
+			head = ingest(head, object);
+		}
+		let registry = stats::Registry::new(stats::Config::new());
+		let meter = registry.publisher_meter(crate::Path::new("demo").unwrap(), &stats::Tier::default());
+		let mut first = head.consume().with_meter(meter.clone());
+		assert_eq!(first.read_frame().await.unwrap().unwrap().payload, expected[0]);
+		kio::clock::sim::advance(Duration::from_millis(20)).await;
+		head = ingest(head, &stored[8]);
+		head.finish().unwrap();
+		pending.await.unwrap();
+		let mut raw_head = head.consume().with_range(8..).compressed();
+		let raw_head = raw_head.read_frame().await.unwrap().unwrap();
+		assert_eq!(
+			raw_live.payload.as_ptr(),
+			raw_head.payload.as_ptr(),
+			"stored compressed bytes are retained once"
+		);
+		assert_eq!(
+			raw_head.payload,
+			stored[8].payload.contiguous(0),
+			"the relay does not recompress"
+		);
+		assert_eq!(
+			raw_head.arrived().duration_since(raw_live.arrived()),
+			Duration::from_millis(20)
+		);
+		let mut second = head.consume().with_meter(meter);
+		for (index, payload) in expected.iter().enumerate() {
+			if index != 0 {
+				assert_eq!(first.read_frame().await.unwrap().unwrap().payload, *payload);
+			}
+			assert_eq!(second.read_frame().await.unwrap().unwrap().payload, *payload);
+		}
+		let inflated: u64 = registry
+			.snapshot()
+			.traffic()
+			.into_iter()
+			.map(|(_, _, traffic)| traffic.inflated)
+			.sum();
+		assert_eq!(
+			inflated,
+			expected.iter().map(|payload| payload.len() as u64).sum::<u64>()
+		);
+		for start in 1..9 {
+			consumer
+				.fetch_range(
+					0,
+					FetchOptions {
+						options: group::Fetch {
+							frame_start: start,
+							..Default::default()
+						},
+						end: Some(start + 1),
+					},
+				)
+				.await
+				.unwrap();
+		}
+		assert!(
+			requests.poll_requested_fill_group(&kio::Waiter::noop()).is_pending(),
+			"compressed tail starts coalesce through the established widening policy"
+		);
+		assert_eq!(head.handle().content().unwrap().cost().0, 9);
+	}
+
+	/// An evicted streaming reader still owns in-flight storage until it is dropped.
+	/// A refill must discover those same bytes without changing that reader's abort.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn canonical_owner_follows_an_evicted_streaming_frame_reader() {
+		let producer = track_producer("test", Info::timed());
+		let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		live.start_at(4).unwrap();
+		let observing = live.handle();
+		let mut reader = live.consume().with_range(4..);
+		let mut live = live
+			.create_frame(frame::Info {
+				size: 1024,
+				timestamp: Some(Timestamp::ZERO),
+			})
+			.unwrap();
+		live.write(vec![4; 512]).unwrap();
+		let mut streaming = reader.next_frame().await.unwrap().unwrap();
+		let first = streaming.read_chunk().await.unwrap().unwrap();
+		let original = first.as_ptr() as usize;
+		drop(first);
+		let mut head = producer
+			.state
+			.write()
+			.ok()
+			.unwrap()
+			.insert_group_request(0, group::Bounds { start: 3, end: Some(4) }, None)
+			.unwrap();
+		head.write_frame(Timestamp::ZERO, b"three".as_slice()).unwrap();
+		head.finish().unwrap();
+		let identity = Arc::downgrade(&observing.content().unwrap());
+		producer
+			.state
+			.write()
+			.ok()
+			.unwrap()
+			.uncache(0)
+			.unwrap()
+			.abort(Error::Evicted);
+		drop(live);
+		assert!(
+			identity.upgrade().is_some(),
+			"the streaming frame still owns canonical storage"
+		);
+		let refill = producer
+			.state
+			.write()
+			.ok()
+			.unwrap()
+			.insert_group_request(0, group::Bounds { start: 4, end: Some(5) }, None)
+			.unwrap();
+		assert!(Arc::ptr_eq(
+			&identity.upgrade().unwrap(),
+			&refill.handle().content().unwrap()
+		));
+		let mut refill = refill
+			.create_frame(frame::Info {
+				size: 1024,
+				timestamp: Some(Timestamp::ZERO),
+			})
+			.unwrap();
+		refill.write(vec![4; 1024]).unwrap();
+		let mut refill = refill.finish().unwrap();
+		refill.finish().unwrap();
+		let complete = refill.consume().with_range(4..).read_frame().await.unwrap().unwrap();
+		assert_eq!(
+			complete.payload.as_ptr() as usize,
+			original,
+			"refill reuses the reader-held content"
+		);
+		assert_eq!(complete.payload.as_ref(), &[4; 1024]);
+		assert!(matches!(streaming.read_chunk().await, Err(Error::Evicted)));
+	}
+
+	/// Existing limits apply to each delivery, not the union of disjoint valid ranges.
+	#[test]
+	fn canonical_content_preserves_individually_valid_disjoint_ranges() {
+		let producer = track_producer("test", Info::timed());
+		let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		const FRAMES: usize = 8192;
+		live.start_at(FRAMES as u64).unwrap();
+		for _ in 0..FRAMES {
+			live.write_frame(Timestamp::ZERO, bytes::Bytes::new()).unwrap();
+		}
+		let mut head = producer
+			.state
+			.write()
+			.ok()
+			.unwrap()
+			.insert_group_request(0, group::Bounds { start: 0, end: Some(1) }, None)
+			.unwrap();
+		head.write_frame(Timestamp::ZERO, bytes::Bytes::new()).unwrap();
+		head.finish().unwrap();
+		assert_eq!(live.handle().content().unwrap().cost().0, FRAMES + 1);
+		assert_eq!(live.frame_count(), 2 * FRAMES);
+		assert_eq!(head.frame_count(), 1);
+	}
+
+	/// Frame `index` of the groups below: 16 KiB naming its index.
+	fn numbered(index: u32) -> bytes::Bytes {
+		bytes::Bytes::from(index.to_le_bytes().repeat(4096))
+	}
+
+	/// One live group grows through a pool far smaller than it: pool debt sheds its front,
+	/// memory stays near the pool, a reader that keeps up reads every frame, and a late
+	/// reader is `Evicted`.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_live_group_sheds_its_front_under_pressure() {
+		const POOL: u64 = 4 * 1024 * 1024;
+		let pool = cache::Pool::new(cache::Config::default().with_capacity(POOL));
+		let producer = track_producer_pooled("test", pool.clone());
+		let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		let mut reader = live.consume();
+		let mut late = live.consume();
+		// 48 MiB, past the 32 MiB tail: pool debt sheds first.
+		for index in 0..3_000 {
+			live.write_frame(Timestamp::ZERO, numbered(index)).unwrap();
+			let frame = reader.read_frame().now_or_never().unwrap();
+			let frame = frame.unwrap_or_else(|err| panic!("frame {index}: {err}")).unwrap();
+			assert_eq!(frame.payload, numbered(index));
+			assert!(pool.used() < 2 * POOL, "frame {index}: {} bytes held", pool.used());
+		}
+		assert!(matches!(late.read_frame().now_or_never().unwrap(), Err(Error::Evicted)));
+		assert!(!live.is_aborted(), "shedding never ends the group");
+	}
+
+	/// A join onto a group whose first frame was shed asks for a new group on a track that
+	/// opts into refresh, rather than reading a group it could only see `Evicted` in.
+	#[test]
+	fn a_join_past_a_shed_first_frame_wants_a_new_group() {
+		let pool = cache::Pool::new(cache::Config::default().with_capacity(256 * 1024));
+		let producer = Producer::new(
+			Arc::new(broadcast::Info {
+				pool,
+				..Default::default()
+			}),
+			"test",
+			Info::default().with_refresh(1_000_000),
+		);
+		let mut live = producer.append_group().unwrap();
+		for index in 0..1_000 {
+			live.write_frame(None, numbered(index)).unwrap();
+		}
+		let _subscriber = producer.subscribe(None);
+		assert_eq!(producer.demand().wanted(), Some(1));
+	}
+
+	/// A reader that reaches a shed frame of the newest group asks for a new group on a
+	/// track that opts into refresh.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_reader_at_a_shed_frame_wants_a_new_group() {
+		let pool = cache::Pool::new(cache::Config::default().with_capacity(256 * 1024));
+		let producer = Producer::new(
+			Arc::new(broadcast::Info {
+				pool,
+				..Default::default()
+			}),
+			"test",
+			Info::default().with_refresh(1_000_000),
+		);
+		// Joined before the group grew, so the join asks for nothing.
+		let _subscriber = producer.subscribe(None);
+		let mut live = producer.append_group().unwrap();
+		let mut reader = live.consume();
+		for index in 0..1_000 {
+			live.write_frame(None, numbered(index)).unwrap();
+		}
+		assert_eq!(producer.demand().wanted(), Some(0), "nothing asked yet");
+		assert!(matches!(
+			reader.read_frame().now_or_never().unwrap(),
+			Err(Error::Evicted)
+		));
+		assert_eq!(producer.demand().wanted(), Some(1), "the reader asked");
+
+		let _joined = producer.subscribe(None);
+		assert_eq!(producer.demand().wanted(), Some(1), "a join asks for the same group");
+	}
+
+	/// What a read returns right now: `Some(Some(sequence))` for a group, `Some(None)` for
+	/// its end, `None` while it parks.
+	fn read_now(subscriber: &mut Subscriber, ordered: bool) -> Option<Option<u64>> {
+		match subscriber.poll_group(ordered, &kio::Waiter::noop()) {
+			Poll::Ready(res) => Some(res.expect("would have errored").map(|group| group.sequence)),
+			Poll::Pending => None,
+		}
+	}
+
+	/// Exhaustion stays observable through repeated reads and unchanged or narrower ranges;
+	/// widening reopens the cursor without replaying groups already handed out.
+	fn bounded_read_reopens(track: &Consumer, source: &mut Producer) {
+		for ordered in [false, true] {
+			for parks in [false, true] {
+				let subscription = replay()
+					.with_order(Order::Ascending)
+					.with_ranges([Range::groups(1..2), Range::groups(3..4)]);
+				let mut subscribing = track.subscribe(subscription.clone());
+				let Poll::Ready(Ok(mut reader)) = kio::Task::poll(&mut *subscribing, &kio::Waiter::noop()) else {
+					panic!("the track info is available");
+				};
+				if parks {
+					reader = reader.parked();
+				}
+				let end = if parks { None } else { Some(None) };
+				assert_eq!(read_now(&mut reader, ordered), Some(Some(1)));
+				assert_eq!(read_now(&mut reader, ordered), Some(Some(3)));
+				for _ in 0..3 {
+					assert_eq!(read_now(&mut reader, ordered), end, "ordered={ordered}, parks={parks}");
+				}
+				source.set_idle();
+				for _ in 0..2 {
+					assert_eq!(read_now(&mut reader, ordered), end, "the source is idle");
+				}
+				source.set_live(Some(Position::group(5)), None);
+				reader.update(subscription.clone()).unwrap();
+				assert_eq!(read_now(&mut reader, ordered), end);
+				reader.update(subscription.clone().with_range(3..4)).unwrap();
+				assert_eq!(read_now(&mut reader, ordered), end);
+
+				reader.update(subscription.clone().with_range(0..6)).unwrap();
+				let newly_covered = if ordered { &[4, 5][..] } else { &[0, 2, 4, 5][..] };
+				for sequence in newly_covered {
+					assert_eq!(read_now(&mut reader, ordered), Some(Some(*sequence)));
+				}
+				for _ in 0..3 {
+					assert_eq!(read_now(&mut reader, ordered), end);
+				}
+				reader.update(subscription.with_range(0..)).unwrap();
+				assert_eq!(
+					read_now(&mut reader, ordered),
+					None,
+					"the open range still owes new groups"
+				);
+			}
+		}
+	}
+
+	#[test]
+	fn a_bounded_read_stays_ended_until_widened() {
+		let mut producer = track_producer("test", Info::timed());
+		for sequence in 0..6 {
+			write_group(&producer, sequence);
+		}
+		bounded_read_reopens(&producer.consume(), &mut producer);
+	}
+
+	#[test]
+	fn a_routed_bounded_read_stays_ended_until_widened() {
+		let routes = super::super::resume::Producer::new();
+		let logical = Request::new(Arc::new(broadcast::Info::default()), "test")
+			.routes(routes.consume())
+			.accept(Info::timed());
+		let mut producer = track_producer("test", Info::timed());
+		for sequence in 0..6 {
+			write_group(&producer, sequence);
+		}
+		routes.serve(producer.consume());
+		bounded_read_reopens(&logical.consume(), &mut producer);
+	}
+
+	/// An open range, or a bounded one still owed a group, parks; a local cap alone bounds
+	/// nothing, since its reader may raise it again.
+	#[test]
+	fn a_read_with_more_to_come_parks() {
+		let producer = track_producer("test", Info::timed());
+		producer.create_group(0u64.into()).unwrap().finish().unwrap();
+
+		let mut open = producer.subscribe(replay().with_range(0..));
+		assert_eq!(read_now(&mut open, false), Some(Some(0)));
+		assert_eq!(read_now(&mut open, false), None);
+
+		let mut capped = producer.subscribe(replay().with_range(0..)).with_range(..1);
+		assert_eq!(read_now(&mut capped, false), Some(Some(0)));
+		assert_eq!(read_now(&mut capped, false), None);
+
+		let mut owed = producer.subscribe(replay().with_range(0..2));
+		assert_eq!(read_now(&mut owed, false), Some(Some(0)));
+		assert_eq!(read_now(&mut owed, false), None, "group 1 may still arrive");
+		producer.create_group(1u64.into()).unwrap().finish().unwrap();
+		assert_eq!(read_now(&mut owed, false), Some(Some(1)));
+		assert_eq!(read_now(&mut owed, false), Some(None));
+	}
+
+	/// A dropped group, or one skipped as stale, accounts for its place in a bounded window
+	/// as a group handed out does.
+	#[test]
+	fn a_bounded_read_ends_past_dropped_and_stale_groups() {
+		let producer = track_producer("test", Info::timed());
+		let mut dropped = producer.subscribe(replay().with_range(0..2));
+		producer.create_group(0u64.into()).unwrap().finish().unwrap();
+		assert_eq!(read_now(&mut dropped, false), Some(Some(0)));
+		assert_eq!(read_now(&mut dropped, false), None);
+		producer.drop_groups(1..2, StreamError::NotFound);
+		for _ in 0..3 {
+			assert_eq!(read_now(&mut dropped, false), Some(None));
+		}
+
+		let producer = track_producer("test", Info::timed());
+		// Group 1 runs on past where group 0 could still present.
+		for (sequence, frames) in [(0u64, &[0u64][..]), (1, &[1_000, 1_100])] {
+			let mut group = producer.create_group(sequence.into()).unwrap();
+			for at in frames {
+				group
+					.write_frame(Timestamp::from_millis(*at).unwrap(), bytes::Bytes::from_static(b"f"))
+					.unwrap();
+			}
+			group.finish().unwrap();
+		}
+		let mut stale = producer.subscribe(
+			Subscription::default()
+				.with_delay(crate::track::Delay::default().with_max(Duration::from_millis(10)))
+				.with_order(Order::Ascending)
+				.with_range(0..2),
+		);
+		assert_eq!(read_now(&mut stale, false), Some(Some(1)), "group 0 is stale");
+		for _ in 0..3 {
+			assert_eq!(read_now(&mut stale, false), Some(None));
+		}
+	}
+
+	/// A wire publisher's read parks past its window's end, since its peer would read the
+	/// end of the subscription as the track's.
+	#[test]
+	fn a_parked_bounded_read_waits_past_its_end() {
+		let producer = track_producer("test", Info::timed());
+		producer.create_group(0u64.into()).unwrap().finish().unwrap();
+		let mut reader = producer.subscribe(replay().with_range(0..1)).parked();
+		assert_eq!(read_now(&mut reader, false), Some(Some(0)));
+		assert_eq!(read_now(&mut reader, false), None);
+	}
+
+	/// A bounded read waits on the fill its miss asked, and ends once it took the answer.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_bounded_read_ends_after_its_fill() {
+		let (producer, _pool) = pooled_producer(1 << 40);
+		let dynamic = producer.requests();
+		producer.create_group(0u64.into()).unwrap().finish().unwrap();
+		producer.create_group(2u64.into()).unwrap().finish().unwrap();
+		producer.finish().unwrap();
+		let mut reader = producer.subscribe(replay().with_order(Order::Ascending).with_range(1..2));
+		assert_eq!(read_now(&mut reader, false), None, "the fill is out");
+		let fill = dynamic
+			.requested_fill_group()
+			.now_or_never()
+			.expect("the miss asks a fill")
+			.unwrap();
+		assert_eq!(fill.sequence(), 1);
+		let mut group = fill.accept(Info::timed()).unwrap();
+		group
+			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"filled"))
+			.unwrap();
+		group.finish().unwrap();
+		assert_eq!(read_now(&mut reader, false), Some(Some(1)));
+		assert_eq!(read_now(&mut reader, false), Some(None));
+	}
+
+	/// A hole the live feed may still deliver is waited for over the arrival grace before
+	/// it is asked as a miss. With no budget and no publisher max age nothing bounds that
+	/// grace, so the wait is [`ledger::GRACE`]: a bounded read of a hole below where a live
+	/// feed started, with no start declared, ends rather than parking for good.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_hole_below_an_undeclared_start_is_asked_after_a_bounded_grace() {
+		let (producer, _pool) = pooled_producer(1 << 40);
+		let dynamic = producer.requests();
+		producer.create_group(10u64.into()).unwrap().finish().unwrap();
+		let mut reader = producer.subscribe(
+			Subscription::default()
+				.with_delay(crate::track::Delay::default().with_max(None))
+				.with_range(5..6),
+		);
+		assert_eq!(read_now(&mut reader, false), None, "group 5 may still arrive");
+		assert!(dynamic.requested_fill_group().now_or_never().is_none());
+		elapse(&producer, ledger::GRACE);
+		assert_eq!(read_now(&mut reader, false), None, "the fill is out");
+		let fill = dynamic
+			.requested_fill_group()
+			.now_or_never()
+			.expect("the hole is asked once the grace passed")
+			.unwrap();
+		assert_eq!(fill.sequence(), 5);
+		fill.reject(Error::NotFound);
+		assert_eq!(read_now(&mut reader, false), Some(None), "the refusal is final");
+
+		// With no fill handler, the hole is given up once the grace passed.
+		let (producer, _pool) = pooled_producer(1 << 40);
+		producer.create_group(10u64.into()).unwrap().finish().unwrap();
+		let mut reader = producer.subscribe(
+			Subscription::default()
+				.with_delay(crate::track::Delay::default().with_max(None))
+				.with_range(5..6),
+		);
+		assert_eq!(read_now(&mut reader, false), None);
+		elapse(&producer, ledger::GRACE);
+		assert_eq!(read_now(&mut reader, false), Some(None));
+	}
+
+	/// A hole below a declared start is asked at once, and a refusal there is held while the
+	/// live feed may still deliver the group late. With nothing bounding the arrival grace the
+	/// hold lasts [`ledger::GRACE`], on a received copy as on a local track, so the read ends.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_refusal_below_the_start_is_held_for_a_bounded_grace() {
+		for received in [false, true] {
+			let (mut producer, _pool) = pooled_producer(1 << 40);
+			if received {
+				producer.received();
+			}
+			let dynamic = producer.requests();
+			producer.start_at(10).unwrap();
+			producer.create_group(10u64.into()).unwrap().finish().unwrap();
+			let mut reader = producer.subscribe(
+				Subscription::default()
+					.with_delay(crate::track::Delay::default().with_max(None))
+					.with_range(5..6),
+			);
+			assert_eq!(read_now(&mut reader, false), None, "received: {received}");
+			let fill = dynamic
+				.requested_fill_group()
+				.now_or_never()
+				.expect("a hole below the start is asked at once")
+				.unwrap();
+			assert_eq!(fill.sequence(), 5, "received: {received}");
+			fill.reject(Error::NotFound);
+			assert_eq!(
+				read_now(&mut reader, false),
+				None,
+				"received: {received}: may still arrive"
+			);
+			elapse(&producer, ledger::GRACE);
+			assert_eq!(read_now(&mut reader, false), Some(None), "received: {received}");
+		}
+	}
+
+	/// A copy its session holds no subscription for asks a bounded read's holes as misses
+	/// at once, though it is idle and its feed produced nothing, and the read ends once the
+	/// fill answered or refused each, since nothing else will deliver them.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn an_unfed_copy_asks_a_bounded_read_s_holes_at_once() {
+		let (mut producer, _pool) = pooled_producer(1 << 40);
+		let dynamic = producer.requests();
+		producer.set_idle();
+		let mut reader = producer.subscribe(replay().with_order(Order::Ascending).with_range(1..3));
+		assert_eq!(read_now(&mut reader, false), None);
+		assert!(
+			dynamic.requested_fill().now_or_never().is_none(),
+			"an idle copy a feed may still answer asks nothing"
+		);
+
+		producer.set_unfed(true);
+		assert_eq!(read_now(&mut reader, false), None, "the fill is out");
+		let fill = dynamic
+			.requested_fill()
+			.now_or_never()
+			.expect("the holes are asked at once")
+			.unwrap();
+		assert_eq!((fill.start(), fill.end()), (Position::group(1), 3));
+		let mut group = fill.accept(1, Info::timed()).unwrap();
+		group
+			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"filled"))
+			.unwrap();
+		group.finish().unwrap();
+		fill.refuse_groups(2..3, Error::Unsupported);
+		assert_eq!(read_now(&mut reader, false), Some(Some(1)));
+		assert_eq!(read_now(&mut reader, false), Some(None), "the refusal is final");
+	}
+
+	/// On a copy no subscription feeds, a bounded read takes what the cache holds in its
+	/// window, idle or not, while an open read still waits for a feed to answer.
+	#[test]
+	fn an_unfed_copy_serves_a_bounded_read_from_its_cache() {
+		let producer = idle_copy();
+		producer.set_unfed(true);
+		let mut bounded = producer.subscribe(replay().with_order(Order::Ascending).with_range(1..3));
+		assert_eq!(read_now(&mut bounded, false), Some(Some(1)));
+		assert_eq!(read_now(&mut bounded, false), Some(Some(2)));
+		assert_eq!(read_now(&mut bounded, false), Some(None));
+
+		let mut open = producer.subscribe(replay().with_range(1..));
+		assert_eq!(read_now(&mut open, false), None, "the cache is not the live edge");
+	}
+
+	/// A long bounded read that writes a group off as stale between each it hands out
+	/// remembers a write-off only while its group is cached, since only then can a wider
+	/// budget offer it again, and still ends.
+	#[test]
+	fn a_bounded_read_retires_its_write_offs_as_it_advances() {
+		// Small enough that each round evicts the groups before it.
+		let (producer, _pool) = pooled_producer(1);
+		let mut reader = producer.subscribe(
+			Subscription::default()
+				.with_delay(crate::track::Delay::default().with_max(Duration::from_millis(10)))
+				.with_order(Order::Ascending)
+				.with_range(0..16),
+		);
+		for round in 0..8u64 {
+			// Group 2k+1 runs on past where group 2k could still present, so 2k is stale.
+			let at = 2_000 * round;
+			for (sequence, frames) in [(2 * round, vec![at]), (2 * round + 1, vec![at + 1_000, at + 1_100])] {
+				let mut group = producer.create_group(sequence.into()).unwrap();
+				for at in frames {
+					group
+						.write_frame(Timestamp::from_millis(at).unwrap(), bytes::Bytes::from_static(b"f"))
+						.unwrap();
+				}
+				group.finish().unwrap();
+			}
+			assert_eq!(read_now(&mut reader, false), Some(Some(2 * round + 1)), "round {round}");
+			assert!(
+				reader.written_off_runs() <= 1,
+				"round {round}: {}",
+				reader.written_off_runs()
+			);
+		}
+		assert_eq!(read_now(&mut reader, false), Some(None));
+	}
+
+	/// A read that skipped a group as stale while its window was open, then narrows to a
+	/// bounded window holding that group, still ends, whether the group is cached or evicted.
+	#[test]
+	fn a_read_narrowed_past_a_stale_skip_ends() {
+		for evict in [false, true] {
+			let (producer, _pool) = pooled_producer(if evict { 1 } else { 1 << 40 });
+			let mut reader = producer.subscribe(
+				Subscription::default()
+					.with_delay(crate::track::Delay::default().with_max(Duration::from_millis(10)))
+					.with_order(Order::Ascending)
+					.with_range(0..),
+			);
+			for (sequence, frames) in [(0u64, &[0u64][..]), (1, &[1_000, 1_100])] {
+				let mut group = producer.create_group(sequence.into()).unwrap();
+				for at in frames {
+					group
+						.write_frame(Timestamp::from_millis(*at).unwrap(), bytes::Bytes::from_static(b"f"))
+						.unwrap();
+				}
+				group.finish().unwrap();
+			}
+			assert_eq!(read_now(&mut reader, false), Some(Some(1)), "evict: {evict}");
+			reader
+				.update(
+					Subscription::default()
+						.with_delay(crate::track::Delay::default().with_max(Duration::from_millis(10)))
+						.with_order(Order::Ascending)
+						.with_range(0..2),
+				)
+				.unwrap();
+			assert_eq!(read_now(&mut reader, false), Some(None), "evict: {evict}");
+		}
+	}
+
+	/// A hole below the start that no fill handler can take is held as refused while the feed
+	/// may still deliver it, and the hold ending wakes the parked reader.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn an_unfillable_hole_below_the_start_wakes_its_reader() {
+		let (mut producer, _pool) = pooled_producer(1 << 40);
+		producer.start_at(10).unwrap();
+		producer.create_group(10u64.into()).unwrap().finish().unwrap();
+		let mut reader = producer.subscribe(
+			Subscription::default()
+				.with_delay(crate::track::Delay::default().with_max(None))
+				.with_range(5..6),
+		);
+		let (flag, waiter) = Flag::waiter();
+		assert!(reader.poll_group(false, &waiter).is_pending());
+		flag.take();
+		elapse(&producer, ledger::GRACE);
+		assert!(flag.take(), "the hold's end woke the reader");
+		assert_eq!(read_now(&mut reader, false), Some(None));
 	}
 }

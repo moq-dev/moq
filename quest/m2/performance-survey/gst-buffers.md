@@ -8,8 +8,8 @@ proven with both fast and slow consumers.
 ## Plan
 
 [Sink::forward_buffer](/rs/moq-gst/src/sink/imp.rs) receives an owned
-GStreamer buffer but maps and copies its full encoded payload into Bytes
-(lines 714-737). Egress already wraps Bytes in a GStreamer buffer. The ingest
+GStreamer buffer but maps and copies its full encoded payload into Bytes.
+Egress already wraps Bytes in a GStreamer buffer. The ingest
 copy could be avoidable, but retaining a mapped upstream buffer can exhaust a
 finite producer pool or pin more memory than copying.
 

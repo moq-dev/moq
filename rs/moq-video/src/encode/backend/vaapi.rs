@@ -238,7 +238,7 @@ mod tests {
 	use crate::decode::backend as decode_backend;
 	use crate::decode::{Codec as DecodeCodec, Config as DecodeConfig, Kind as DecodeKind};
 	use crate::encode::{Encoder as CrateEncoder, Kind as EncodeKind};
-	use crate::{Output, Rate, Size};
+	use crate::{FrameRate, Output, Size};
 
 	const WIDTH: u32 = 320;
 	const HEIGHT: u32 = 240;
@@ -246,7 +246,7 @@ mod tests {
 	fn config() -> Config {
 		Config {
 			kind: EncodeKind::Named(NAME.into()),
-			..Config::new(WIDTH, HEIGHT, Rate::new(30, 1).unwrap())
+			..Config::new(WIDTH, HEIGHT, FrameRate::new(30, 1).unwrap())
 		}
 	}
 
@@ -389,7 +389,7 @@ mod tests {
 		// A software-encoded source stream, decoded by VA-API into DMA-BUFs.
 		let mut source = CrateEncoder::new(&Config {
 			kind: EncodeKind::Software,
-			..Config::new(WIDTH, HEIGHT, Rate::new(30, 1).unwrap())
+			..Config::new(WIDTH, HEIGHT, FrameRate::new(30, 1).unwrap())
 		})
 		.unwrap();
 		let mut hardware = decoder(NAME, Output::Native);
@@ -553,7 +553,7 @@ mod tests {
 			let config = Config {
 				kind: EncodeKind::Named(NAME.into()),
 				color: Some(color),
-				..Config::new(size.width, size.height, Rate::new(30, 1).unwrap())
+				..Config::new(size.width, size.height, FrameRate::new(30, 1).unwrap())
 			};
 			let Ok(mut backend) = Vaapi::new(&config) else {
 				eprintln!("skipping: no VA-API H.264 encoder");
@@ -564,6 +564,108 @@ mod tests {
 			let encoded = backend.encode(&frame, true).unwrap();
 			let annexb = &encoded.first().expect("a keyframe").payload;
 			assert_eq!(declared_color(annexb), Some(described), "{size} SPS color description");
+		}
+	}
+}
+
+#[cfg(test)]
+mod hardware_tests {
+	use super::*;
+	use crate::{FrameRate, Output, Size, decode, encode};
+	use moq_net::Timestamp;
+
+	/// Decode one 1080p source and scale/encode every picture at each ladder size.
+	/// Explicitly requested hardware must fail, never skip or accept CPU transfers.
+	/// The tests above check pixels with an independent software decoder; this
+	/// proof deliberately compiles without a software codec.
+	#[test]
+	#[ignore = "requires an Intel VA-API decode/VPP/encode device"]
+	fn vaapi_1080p_ladder_stays_on_the_gpu() {
+		const FRAMES: usize = 12;
+		let size = Size::new(1920, 1080);
+		let mut config = Config::new(size.width, size.height, FrameRate::new(30, 1).unwrap());
+		config.kind = encode::Kind::Hardware;
+		let mut source = encode::Encoder::new(&config).expect("hardware source encoder");
+		assert_eq!(source.name(), NAME, "run on a VA-API host without NVIDIA");
+		let video = hang::catalog::VideoConfig::new(hang::catalog::H264 {
+			inline: true,
+			profile: 0x4d,
+			constraints: 0,
+			level: 40,
+		});
+		let mut config = decode::Config::new();
+		config.kind = decode::Kind::Hardware;
+		config.output = Output::Native;
+		let mut decoder = decode::Decoder::new(&video, &config).expect("hardware source decoder");
+		assert_eq!(decoder.name(), crate::decode::backend::vaapi::NAME);
+
+		let pixels = I420::new(size, vec![128; size.pixels() as usize * 3 / 2]).unwrap();
+		let mut frames = Vec::new();
+		for index in 0..FRAMES {
+			let timestamp = Timestamp::from_micros(index as u64 * 33_333).unwrap();
+			let frame = Frame::new(Surface::I420(pixels.clone()), timestamp);
+			for packet in source.encode(&frame).expect("encode source") {
+				frames.extend(
+					decoder
+						.decode(&packet.payload, packet.timestamp, packet.keyframe)
+						.expect("decode source"),
+				);
+			}
+		}
+		for packet in source.finish().expect("finish source") {
+			frames.extend(
+				decoder
+					.decode(&packet.payload, packet.timestamp, packet.keyframe)
+					.expect("decode source tail"),
+			);
+		}
+		frames.extend(decoder.flush().expect("flush source decoder"));
+		assert_eq!(frames.len(), FRAMES);
+		assert!(
+			frames.iter().all(|frame| matches!(frame.surface, Surface::DmaBuf(_))),
+			"decode downloaded pixels"
+		);
+
+		for size in [Size::new(1280, 720), Size::new(852, 480), Size::new(640, 360)] {
+			let mut config = Config::new(size.width, size.height, FrameRate::new(30, 1).unwrap());
+			config.color = frames[0].surface.color();
+			let mut encoder = Vaapi::new(&config).expect("rung encoder");
+			let mut output = decode::Decoder::new(
+				&video,
+				&decode::Config {
+					kind: decode::Kind::Hardware,
+					output: Output::Native,
+					..decode::Config::new()
+				},
+			)
+			.expect("rung decoder");
+			assert_eq!(output.name(), crate::decode::backend::vaapi::NAME);
+			let mut decoded = Vec::new();
+			for (index, frame) in frames.iter().enumerate() {
+				let scaled = frame
+					.resize(size, &crate::resize::Config::default())
+					.expect("VPP resize");
+				assert!(
+					matches!(scaled.surface, Surface::DmaBuf(_)),
+					"{size}: resize downloaded pixels"
+				);
+				assert_eq!(scaled.size(), size);
+				for packet in encoder.encode(&scaled, index == 0).expect("encode rung") {
+					decoded.extend(
+						output
+							.decode(&packet.payload, packet.timestamp, packet.keyframe)
+							.expect("decode rung"),
+					);
+				}
+			}
+			decoded.extend(output.flush().expect("flush rung decoder"));
+			assert_eq!(encoder.gpu_frames, FRAMES as u64, "{size}: encoder used CPU transfers");
+			assert!(encoder.refused.is_empty());
+			assert_eq!(decoded.len(), FRAMES, "{size}: lost output pictures");
+			assert!(
+				decoded.iter().all(|frame| frame.size() == size),
+				"{size}: wrong output size"
+			);
 		}
 	}
 }

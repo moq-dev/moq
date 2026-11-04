@@ -25,11 +25,9 @@ export class Producer<T> {
 	/**
 	 * Append one record to the log.
 	 *
-	 * A record that might not fit in what is left of the group's budget throws `GroupTooLarge`
-	 * before anything is written, leaving the log intact. The budget covers the whole log, so once it
-	 * is spent every append throws; a publisher with more to say opens a new track.
+	 * A record beyond the whole-frame limit throws `FrameTooLarge` before it is written.
 	 *
-	 * Any other record that cannot be written ends the track: a log missing a record is not the
+	 * A record that cannot be written ends the track: a log missing a record is not the
 	 * lossless log this mode promises, so the failure is surfaced rather than papered over with a
 	 * second group. The track is aborted rather than closed cleanly, so a consumer sees the failure
 	 * instead of a log that merely looks complete.
@@ -45,34 +43,20 @@ export class Producer<T> {
 		try {
 			record = this.#encoder.encode(value);
 		} catch (err) {
-			// Refused before encoding, so nothing is missing from the log and nothing desynced.
-			if (err instanceof NetError.GroupTooLarge) throw err;
-
+			if (err instanceof NetError.FrameTooLarge) throw err;
 			// A record that can't be encoded is as lost as one the group rejects: the log is missing it
 			// either way. Nothing was published, so this only has to end the track.
 			this.#abort(err);
 			throw err;
 		}
 
-		// Split the two failures: what decides whether this is terminal is whether a group is live by
-		// the time the write fails, not whether one was already open when the append started. The
-		// first append opens group 0 and can then fail its write, which is just as terminal.
-		try {
-			this.#group ??= this.#track.appendGroup();
-		} catch (err) {
-			// Nothing was published, so a later append may still open a fresh group whose decoder
-			// starts cold. The record never landed, so the window still has to reset, or the desync
-			// latch answers the next append before the track does.
-			this.#encoder.reset();
-			throw err;
-		}
+		this.#group ??= this.#track.appendGroup();
 
 		try {
 			this.#group.writeFrame({ payload: record.payload, timestamp: at });
 		} catch (err) {
 			// The group is live, so the record is a hole in the log and a second group would hand
 			// consumers that gap dressed up as a complete log.
-			this.#encoder.reset();
 			this.#abort(err);
 			throw err;
 		}
@@ -87,19 +71,21 @@ export class Producer<T> {
 		// Close the group with the same error first. A consumer that already pulled it holds its own
 		// handle, which the track's close no longer reaches, so dropping ours would leave a reader
 		// sitting in the group with a generic error instead of the failure that ended the log.
-		this.#group?.close(abort);
+		this.#group?.abort(abort);
 		this.#group = undefined;
-		this.#track.close(abort);
+		this.#track.abort(abort);
 	}
 
 	/** Finish the track, closing the group. */
 	finish(): void {
-		this.#group?.close();
+		this.#group?.finish();
 		this.#group = undefined;
+		this.#track.finish();
 		this.#track.close();
 	}
 }
 
+/** Types for {@link Producer}. */
 export namespace Producer {
 	/** Stream producer options, including the destination track. */
 	export type Config<T> = CodecConfig<T> & { track: Moq.Track.Producer };

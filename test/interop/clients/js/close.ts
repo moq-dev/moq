@@ -1,7 +1,7 @@
 /**
  * Proves a relay's rejection reaches the page over WebTransport and WebSocket.
  * WebTransport.closed has to carry the relay's code; a WebSocket Connection has
- * to publish its Unauthorized session error and stop reconnecting.
+ * to publish its MalformedAuthToken session error and stop reconnecting.
  *
  * Chromium treats the server's HTTP/3 control stream ending as fatal, so a server that ends it
  * alongside the CLOSE_WEBTRANSPORT_SESSION capsule turns the close into a bare connection error.
@@ -31,8 +31,8 @@ if (!url || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
 	process.exit(2);
 }
 
-/** What the relay sends when its auth refuses a session: moq-net's Unauthorized and its message. */
-const EXPECTED = { closeCode: SessionCode.Unauthorized, reason: "unauthorized" };
+/** What the relay sends when its auth refuses a token that is not a JWT: moq-net's code and message. */
+const EXPECTED = { closeCode: SessionCode.MalformedAuthToken, reason: "malformed auth token" };
 
 async function readClose(page: Page): Promise<CloseState | undefined> {
 	const state = await page.evaluate(() => document.body.dataset.interopClose);

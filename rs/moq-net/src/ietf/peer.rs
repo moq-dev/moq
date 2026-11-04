@@ -30,11 +30,7 @@ pub(crate) struct Peer {
 	/// NAMESPACE messages before the subscription is synced, in both directions.
 	pub active_count: bool,
 
-	/// MoQ Epoch: whether both sides offered it, so advertisements and requests carry the
-	/// publisher's epoch in both directions.
-	pub epoch: bool,
-
-	/// Whether this draft-17+ peer offered DEFLATE-compressed tracks.
+	/// Whether this peer offered DEFLATE-compressed tracks.
 	pub flate: bool,
 }
 
@@ -47,10 +43,10 @@ pub(crate) struct Peer {
 #[derive(Clone, Default)]
 pub(crate) struct PeerSetup {
 	slot: kio::Shared<Option<Peer>>,
-	/// What we offered, which an extension negotiated by both sides needs as well.
-	declined_epoch: bool,
 	/// Where the peer's advertised implementation is published for the session handle.
 	implementation: crate::setup::PeerImplementation,
+	/// The session's auth link to tell once the peer's SETUP accepts the connection.
+	accept: Option<crate::auth::Link>,
 }
 
 impl PeerSetup {
@@ -62,13 +58,11 @@ impl PeerSetup {
 		setup
 	}
 
-	/// A slot for a session that offered `offered`.
-	pub fn new(offered: crate::setup::Extensions) -> Self {
-		Self {
-			slot: Default::default(),
-			declined_epoch: !offered.epoch,
-			implementation: Default::default(),
-		}
+	/// Tell `link` once the peer's SETUP arrives that it accepted the connection credential.
+	pub fn accepting(mut self, link: crate::auth::Link) -> Self {
+		link.await_setup();
+		self.accept = Some(link);
+		self
 	}
 
 	/// Publish the peer's advertised implementation to `slot` once its SETUP is read.
@@ -89,11 +83,15 @@ impl PeerSetup {
 	/// lifetime while subscription serving re-reads it, so letting a later SETUP
 	/// overwrite the identity would advertise under one exclusion and serve under
 	/// another, which is how a routing loop gets back in.
-	pub fn set(&self, mut peer: Peer) {
-		peer.epoch &= !self.declined_epoch;
+	pub fn set(&self, peer: Peer) {
 		let mut slot = self.slot.lock();
-		if slot.is_none() {
-			*slot = Some(peer);
+		if slot.is_some() {
+			return;
+		}
+		*slot = Some(peer);
+		drop(slot);
+		if let Some(link) = &self.accept {
+			link.accepted();
 		}
 	}
 
@@ -125,7 +123,7 @@ mod tests {
 	/// The announce loops read the peer's declaration once and hold it, while
 	/// subscription serving re-reads it. A second SETUP overwriting the identity would
 	/// split those two apart, so the first write is the one that counts.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn first_write_wins() {
 		let first = Peer {
 			cluster: cluster::Peer {
@@ -137,7 +135,6 @@ mod tests {
 			max_age: false,
 			auth: false,
 			active_count: false,
-			epoch: false,
 			flate: false,
 		};
 
@@ -153,30 +150,9 @@ mod tests {
 			max_age: false,
 			auth: true,
 			active_count: true,
-			epoch: true,
 			flate: true,
 		});
 
 		assert_eq!(slot.get().await, first);
-	}
-
-	/// MoQ Epoch needs both sides: a peer declaring it to a side that declined leaves it off.
-	#[moq_clock::test]
-	async fn epoch_needs_our_offer_too() {
-		let declared = Peer {
-			epoch: true,
-			..Default::default()
-		};
-
-		let offered = PeerSetup::new(crate::setup::Extensions::default());
-		offered.set(declared);
-		assert!(offered.get().await.epoch);
-
-		let declined = PeerSetup::new(crate::setup::Extensions {
-			epoch: false,
-			..Default::default()
-		});
-		declined.set(declared);
-		assert!(!declined.get().await.epoch);
 	}
 }

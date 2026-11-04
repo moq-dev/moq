@@ -9,6 +9,9 @@ typedef TrackProducer = MoqMediaTrackProducer;
 /// The write side of a media track fed a raw byte stream, with frame boundaries inferred.
 typedef TrackStreamProducer = MoqMediaTrackStreamProducer;
 
+/// A single-track producer of either kind, such as a video rendition's `lower`.
+typedef Producer = MoqMediaProducer;
+
 /// The write side of a container, which publishes each track it describes.
 typedef ContainerProducer = MoqMediaContainerProducer;
 
@@ -26,6 +29,18 @@ typedef Catalog = MoqCatalog;
 
 /// A media frame whose keyframe flag marks group starts or video keyframes; audio flags only group starts.
 typedef MediaFrame = MoqMediaFrame;
+
+/// One encoded frame, a gap, or an encoder end.
+typedef Read = MoqMediaRead;
+
+/// An encoded frame and its container metadata.
+typedef ReadFrame = FrameMoqMediaRead;
+
+/// Lost media; what follows does not continue it.
+typedef ReadGap = GapMoqMediaRead;
+
+/// Where a stopped encoder's media stops.
+typedef ReadEnd = EndMoqMediaRead;
 
 /// The catalog description of a video track, including whether it is enabled (a disabled one has no frames coming).
 typedef Video = MoqVideo;
@@ -63,6 +78,9 @@ typedef ContainerInit = MoqContainerInit;
 /// A width and height pair, in pixels.
 typedef Dimensions = MoqDimensions;
 
+/// Where an audio or video decoder starts on a track that already holds groups: `latest` for a live player.
+typedef DecodeStart = MoqDecodeStart;
+
 /// A weak catalog handle that closes with its broadcast.
 typedef CatalogProducer = MoqMediaCatalogProducer;
 
@@ -92,9 +110,3 @@ typedef GroupConfig = MoqMediaGroupConfig;
 
 /// The packaging advertised for a media track.
 typedef Container = MoqContainer;
-
-/// Duration view over a media frame's presentation time.
-extension MediaFrameDuration on MoqMediaFrame {
-  /// Presentation timestamp.
-  Duration get timestamp => Duration(microseconds: timestampUs);
-}

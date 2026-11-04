@@ -1,12 +1,13 @@
 import { expect, spyOn, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { Manual, Milli, Nano, sleep, yieldNow } from "@moq/clock";
+import Qmux from "@moq/qmux";
 import { accept } from "../connection/accept.ts";
 import { connect } from "../connection/connect.ts";
 import { SessionCode, SessionError } from "../error.ts";
 import { createMockTransportPair, type MockTransport, textFrame } from "../mock.ts";
 import { Producer } from "../origin.ts";
 import * as Path from "../path.ts";
-import { Stream, Writer } from "../stream.ts";
+import { acceptBudget, Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import { wireOf } from "../wire.ts";
 import { Connection, probeLevel } from "./connection.ts";
@@ -23,7 +24,18 @@ import {
 	SubscribeStart,
 } from "./subscribe.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
-import { ALPN_04, ALPN_05, ALPN_06, ALPN_07_WIP, Version } from "./version.ts";
+import {
+	ALPN,
+	ALPN_03,
+	ALPN_04,
+	ALPN_05,
+	ALPN_06,
+	ALPN_07_WIP,
+	hasTrackStream,
+	keepsSubscribeOpen,
+	Version,
+	versionName,
+} from "./version.ts";
 
 /** A transport whose `getStats` behaves as described, or is absent entirely. */
 function transport(getStats?: () => Promise<unknown>): WebTransport {
@@ -90,14 +102,14 @@ test("a lite GOAWAY keeps the session open, and a second one closes it", async (
 
 	try {
 		await sendGoaway(pair.server, "");
-		const drain = await wireOf(connection).goaway;
+		const drain = await connection.draining;
 		expect(drain.uri).toBe("");
 
-		await new Promise((resolve) => setTimeout(resolve, 20));
+		await sleep(Nano.fromMilli(Milli(20)));
 		expect(closed).toBe(false);
 
 		await sendGoaway(pair.server, "https://other.example/");
-		await new Promise((resolve) => setTimeout(resolve, 50));
+		await sleep(Nano.fromMilli(Milli(50)));
 		expect(closed).toBe(true);
 	} finally {
 		connection.abort();
@@ -203,6 +215,72 @@ function holdFins(transport: MockTransport, streams: "uni" | "incoming-bidi") {
 	};
 }
 
+// Buffer incoming unidirectional streams outside the transport, independently of when the
+// connection accepts them: its accept budget may yield until after the session closes. QMux
+// keeps a finished stream's unread bytes across a close, so the reads still owed land afterwards.
+function deliverWhole(transport: MockTransport) {
+	const incoming = transport.incomingUnidirectionalStreams;
+	Object.defineProperty(transport, "incomingUnidirectionalStreams", {
+		value: new ReadableStream<ReadableStream<Uint8Array>>({
+			async start(controller) {
+				for await (const stream of incoming) {
+					controller.enqueue(
+						new ReadableStream<Uint8Array>({
+							async start(whole) {
+								const chunks = await Array.fromAsync(stream);
+								for (const chunk of chunks) whole.enqueue(chunk);
+								whole.close();
+							},
+						}),
+					);
+				}
+				controller.close();
+			},
+		}),
+	});
+}
+
+// Deliver the bytes of every bidirectional stream `transport` opens at once, but each FIN only a task
+// after the session closed, so every reaction to the close runs before a SUBSCRIBE FIN sent first.
+function finAfterClose(transport: MockTransport) {
+	const create = transport.createBidirectionalStream.bind(transport);
+	transport.createBidirectionalStream = async (options) => {
+		const stream = await create(options);
+		const readable = stream.readable.pipeThrough(
+			new TransformStream<Uint8Array, Uint8Array>({
+				async flush() {
+					await transport.closed;
+					await yieldNow();
+				},
+			}),
+		);
+		return { readable, writable: stream.writable };
+	};
+}
+
+// A qmux session pair over an in-memory socket. Unlike the mock, its receive streams are
+// pull-driven, so a stream's FIN surfaces only to a read.
+function qmuxPair(): { client: WebTransport; server: WebTransport } {
+	const socket = (readable: ReadableStream<Uint8Array>, writable: WritableStream<Uint8Array>) => {
+		const closed = Promise.withResolvers<{ closeCode: number; reason: string }>();
+		return {
+			url: "",
+			opened: Promise.resolve({ readable, writable, extensions: "", protocol: "qmux-01" }),
+			closed: closed.promise,
+			close: () => closed.resolve({ closeCode: 1000, reason: "" }),
+		};
+	};
+	// Copied, since a sender may reuse its buffer once a write resolves.
+	const pipe = () =>
+		new TransformStream<Uint8Array, Uint8Array>({ transform: (chunk, c) => c.enqueue(chunk.slice()) });
+	const up = pipe();
+	const down = pipe();
+	const config = { idleTimeout: null };
+	const client = new Qmux(socket(down.readable, up.writable), { config });
+	const server = Qmux.accept(socket(up.readable, down.writable), { config });
+	return { client, server };
+}
+
 // Holds the one-second close deadline on a manual clock, so a test fires it by hand instead of waiting.
 function mockDeadline() {
 	const clock = new Manual();
@@ -214,23 +292,30 @@ function mockDeadline() {
 
 /** Runs every task queued so far, so a test can assert that something is still pending. */
 async function settle() {
-	for (let i = 0; i < 5; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+	for (let i = 0; i < 5; i++) await yieldNow();
 }
 
-for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
+for (const [alpn, version] of [
+	[ALPN, Version.DRAFT_01],
+	[ALPN, Version.DRAFT_02],
+	[ALPN_03, Version.DRAFT_03],
+	[ALPN_04, Version.DRAFT_04],
+	[ALPN_05, Version.DRAFT_05],
+	[ALPN_06, Version.DRAFT_06],
+	[ALPN_07_WIP, Version.DRAFT_07],
+] as const) {
 	// A publisher that finishes a track and closes must not cut the final group short.
-	test(`close delivers a finished track's final group over ${alpn}`, async () => {
+	test(`close delivers a finished track's final group over ${versionName(version)}`, async () => {
 		const pair = createMockTransportPair(alpn);
 		const fin = holdFins(pair.server, "uni");
 		const origin = new Producer();
-		const broadcast = origin.createBroadcast(Path.from("room"));
-		broadcast.announce();
+		const broadcastPublication = origin.createBroadcast(Path.from("room"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
 		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 		const url = new URL("https://localhost/test");
-		const [client, server] = await Promise.all([
-			connect({ url, transport: pair.client }),
-			accept({ url, transport: pair.server, publish: origin.consume() }),
-		]);
+		const client = new Connection({ url, quic: pair.client, version });
+		const server = new Connection({ url, quic: pair.server, version, publish: origin.consume(), client: false });
 		const remote = wireOf(client).consume(Path.from("room"));
 		const track = remote.track("video").subscribe().ordered();
 		let closed = false;
@@ -238,13 +323,21 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 			closed = true;
 		});
 		try {
-			producer.appendGroup().writeFrame(textFrame("first"));
-			expect(await (await track.nextGroup())?.readString()).toBe("first");
+			const first = producer.appendGroup();
+			first.writeFrame(textFrame("first"));
+			first.finish();
+			// A frame can arrive while its sender still yields on the write. Drain the setup group
+			// before a zero-delay subscription supersedes its still-unfinished sender.
+			const received = await track.nextGroup();
+			expect(await received?.readString()).toBe("first");
+			expect(await received?.readString()).toBeUndefined();
+			received?.close();
 
 			fin.enable();
 			const last = producer.appendGroup();
 			last.writeFrame(textFrame("last"));
-			last.close();
+			last.finish();
+			producer.finish();
 			producer.close();
 			const closing = server.close();
 
@@ -256,6 +349,7 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 			fin.release();
 			await closing;
 			expect(closed).toBe(true);
+			expect(await track.nextGroup()).toBeUndefined();
 		} finally {
 			fin.release();
 			track.close();
@@ -266,15 +360,158 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 			origin.close();
 		}
 	});
+
+	// The peer's close can overtake the final group or, where it is the track's only end, the
+	// SUBSCRIBE FIN it sent first; the closing session reads them.
+	for (const overtaken of hasTrackStream(version) ? ["group"] : ["group", "fin"]) {
+		test(`a peer close drains the overtaken ${overtaken} over ${versionName(version)}`, async () => {
+			// Exercise a close that overtakes acceptance, regardless of the host CPU budget.
+			const yielding = spyOn(acceptBudget, "poll").mockImplementation(() => yieldNow());
+			const pair = createMockTransportPair(alpn);
+			deliverWhole(pair.client);
+			if (overtaken === "fin") finAfterClose(pair.client);
+			const origin = new Producer();
+			const broadcastPublication = origin.createBroadcast(Path.from("room"));
+			const broadcast = broadcastPublication.broadcast;
+			broadcastPublication.announce();
+			const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+			const url = new URL("https://localhost/test");
+			const client = new Connection({ url, quic: pair.client, version });
+			const server = new Connection({
+				url,
+				quic: pair.server,
+				version,
+				publish: origin.consume(),
+				client: false,
+			});
+			const remote = wireOf(client).consume(Path.from("room"));
+			const track = remote.track("video").subscribe().ordered();
+			try {
+				const first = producer.appendGroup();
+				first.writeFrame(textFrame("first"));
+				first.finish();
+				expect(await (await track.nextGroup())?.readString()).toBe("first");
+
+				const frames = Array.from({ length: 32 }, (_, i) => `frame ${i}`);
+				const last = producer.appendGroup();
+				for (const frame of frames) last.writeFrame(textFrame(frame));
+				last.finish();
+				producer.finish();
+				producer.close();
+				await server.close();
+
+				const group = await track.nextGroup();
+				for (const frame of frames) expect(await group?.readString()).toBe(frame);
+				expect(await group?.readString()).toBeUndefined();
+				expect(await track.nextGroup()).toBeUndefined();
+			} finally {
+				yielding.mockRestore();
+				track.close();
+				remote.close();
+				client.abort();
+				server.abort();
+				broadcast.close();
+				origin.close();
+			}
+		});
+	}
+
+	// A local close reads what already arrived as the peer's close does: a track whose
+	// SUBSCRIBE FIN is in flight, its only end on legacy drafts, still finishes.
+	if (!hasTrackStream(version)) {
+		test(`a local close drains a FIN sent first over ${versionName(version)}`, async () => {
+			const pair = createMockTransportPair(alpn);
+			finAfterClose(pair.client);
+			const origin = new Producer();
+			const broadcastPublication = origin.createBroadcast(Path.from("room"));
+			const broadcast = broadcastPublication.broadcast;
+			broadcastPublication.announce();
+			const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+			const url = new URL("https://localhost/test");
+			const client = new Connection({ url, quic: pair.client, version });
+			const server = new Connection({
+				url,
+				quic: pair.server,
+				version,
+				publish: origin.consume(),
+				client: false,
+			});
+			const remote = wireOf(client).consume(Path.from("room"));
+			const track = remote.track("video").subscribe().ordered();
+			try {
+				const group = producer.appendGroup();
+				group.writeFrame(textFrame("only"));
+				group.finish();
+				expect(await (await track.nextGroup())?.readString()).toBe("only");
+
+				producer.finish();
+				producer.close();
+				await settle();
+				client.abort();
+
+				expect(await track.nextGroup()).toBeUndefined();
+				expect(await track.closed).toBeNull();
+			} finally {
+				track.close();
+				remote.close();
+				client.abort();
+				server.abort();
+				broadcast.close();
+				origin.close();
+			}
+		});
+	}
+
+	// The subscriber reads a legacy subscribe stream to its FIN, since QMux closes a stream only
+	// on a read; awaiting the FIN instead would hold the closing session's drain forever.
+	if (!hasTrackStream(version)) {
+		test(`a peer close finishes a FIN'd track over qmux ${versionName(version)}`, async () => {
+			const pair = qmuxPair();
+			const origin = new Producer();
+			const broadcastPublication = origin.createBroadcast(Path.from("room"));
+			const broadcast = broadcastPublication.broadcast;
+			broadcastPublication.announce();
+			const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+			const url = new URL("https://localhost/test");
+			const client = new Connection({ url, quic: pair.client, version });
+			const server = new Connection({
+				url,
+				quic: pair.server,
+				version,
+				publish: origin.consume(),
+				client: false,
+			});
+			const remote = wireOf(client).consume(Path.from("room"));
+			const track = remote.track("video").subscribe().ordered();
+			try {
+				const group = producer.appendGroup();
+				group.writeFrame(textFrame("only"));
+				group.finish();
+				expect(await (await track.nextGroup())?.readString()).toBe("only");
+
+				producer.finish();
+				producer.close();
+				await server.close();
+				expect(await track.nextGroup()).toBeUndefined();
+			} finally {
+				track.close();
+				remote.close();
+				client.abort();
+				server.abort();
+				broadcast.close();
+				origin.close();
+			}
+		});
+	}
 }
 
-/** A lite-07 publisher serving a finished track to a raw subscriber that has read up to the FIN. */
-async function servedRawSubscription() {
-	const version = Version.DRAFT_07;
-	const pair = createMockTransportPair(ALPN_07_WIP);
+/** A publisher serving a finished track to a raw subscriber that has read up to the FIN. */
+async function servedRawSubscription(alpn: string = ALPN_07_WIP, version: Version = Version.DRAFT_07) {
+	const pair = createMockTransportPair(alpn);
 	const origin = new Producer();
-	const broadcast = origin.createBroadcast(Path.from("room"));
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(Path.from("room"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const server = new Connection({
 		url: new URL("https://relay.example/"),
@@ -285,7 +522,7 @@ async function servedRawSubscription() {
 
 	const group = producer.appendGroup();
 	group.writeFrame(textFrame("last"));
-	group.close();
+	group.finish();
 
 	const subscriber = await Stream.open(pair.client, { version });
 	await subscriber.writer.u53(StreamId.Subscribe);
@@ -295,14 +532,17 @@ async function servedRawSubscription() {
 		track: "video",
 		priority: 0,
 		maxDelay: 10_000,
-		startGroup: 0,
+		startGroup: 0n,
 	}).encode(subscriber.writer, version);
 
 	// Finish the track only once it is served: a track closed before anyone subscribed is gone.
 	expect("start" in (await decodeSubscribeResponse(subscriber.reader, version))).toBe(true);
+	producer.finish();
 	producer.close();
-	// SUBSCRIBE_END, then the publisher's FIN.
-	await subscriber.reader.readAll();
+	// SUBSCRIBE_END, then before lite-07 the publisher's FIN; lite-07 keeps the stream open.
+	if (keepsSubscribeOpen(version)) {
+		while (!("end" in (await decodeSubscribeResponse(subscriber.reader, version)))) {}
+	} else await subscriber.reader.readAll();
 
 	let closed = false;
 	void pair.server.closed.then(() => {
@@ -320,42 +560,49 @@ async function servedRawSubscription() {
 	};
 }
 
-// The publisher's FIN says nothing about whether the subscriber read the tail; on lite-07 the
-// subscriber's FIN does, so close waits for it.
-test("a lite-07 subscriber withholding FIN holds close until the deadline", async () => {
-	const deadline = mockDeadline();
-	const served = await servedRawSubscription();
-	try {
-		const closing = served.server.close();
-		await settle();
-		expect(served.closed()).toBe(false);
+// The publisher's FIN says nothing about whether the subscriber read the tail, and a receiver
+// may drop unread bytes on close. From lite-05, whose SUBSCRIBE_END lets the subscriber settle
+// its tail at once, the subscriber's FIN says so, and close waits for it.
+for (const [alpn, version] of [
+	[ALPN_05, Version.DRAFT_05],
+	[ALPN_06, Version.DRAFT_06],
+	[ALPN_07_WIP, Version.DRAFT_07],
+] as const) {
+	test(`a ${versionName(version)} subscriber withholding FIN holds close until the deadline`, async () => {
+		const deadline = mockDeadline();
+		const served = await servedRawSubscription(alpn, version);
+		try {
+			const closing = served.server.close();
+			await settle();
+			expect(served.closed()).toBe(false);
 
-		const failure = closing.catch((error: unknown) => error);
-		await deadline.expire();
-		expect(await failure).toHaveProperty("message", "session close timed out");
-		expect(served.closed()).toBe(true);
-	} finally {
-		deadline.installed.close();
-		served.cleanup();
-	}
-});
+			const failure = closing.catch((error: unknown) => error);
+			await deadline.expire();
+			expect(await failure).toHaveProperty("message", "session close timed out");
+			expect(served.closed()).toBe(true);
+		} finally {
+			deadline.installed.close();
+			served.cleanup();
+		}
+	});
 
-test("a lite-07 subscriber FIN releases close", async () => {
-	const deadline = mockDeadline();
-	const served = await servedRawSubscription();
-	try {
-		const closing = served.server.close();
-		await settle();
-		expect(served.closed()).toBe(false);
+	test(`a ${versionName(version)} subscriber FIN releases close`, async () => {
+		const deadline = mockDeadline();
+		const served = await servedRawSubscription(alpn, version);
+		try {
+			const closing = served.server.close();
+			await settle();
+			expect(served.closed()).toBe(false);
 
-		served.subscriber.writer.close();
-		await closing;
-		expect(served.closed()).toBe(true);
-	} finally {
-		deadline.installed.close();
-		served.cleanup();
-	}
-});
+			served.subscriber.writer.close();
+			await closing;
+			expect(served.closed()).toBe(true);
+		} finally {
+			deadline.installed.close();
+			served.cleanup();
+		}
+	});
+}
 
 test("abort during the close drain ends the session at once", async () => {
 	const deadline = mockDeadline();
@@ -381,12 +628,13 @@ test("close waits for a served FETCH to be acknowledged", async () => {
 	const pair = createMockTransportPair(ALPN_05);
 	const fin = holdFins(pair.server, "incoming-bidi");
 	const origin = new Producer();
-	const broadcast = origin.createBroadcast(Path.from("room"));
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(Path.from("room"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const group = producer.appendGroup();
 	group.writeFrame(textFrame("last"));
-	group.close();
+	group.finish();
 	const server = new Connection({
 		url: new URL("https://relay.example/"),
 		quic: pair.server,
@@ -401,7 +649,7 @@ test("close waits for a served FETCH to be acknowledged", async () => {
 		fin.enable();
 		const fetch = await Stream.open(pair.client, { version });
 		await fetch.writer.u53(StreamId.Fetch);
-		await new Fetch({ broadcast: Path.from("room"), track: "video", priority: 0, group: 0 }).encode(
+		await new Fetch({ broadcast: Path.from("room"), track: "video", priority: 0, group: 0n }).encode(
 			fetch.writer,
 			version,
 		);
@@ -433,12 +681,13 @@ test("close waits for a request served while withdrawals are in flight", async (
 	const fin = holdFins(pair.server, "incoming-bidi");
 	const source = new Producer();
 	const destination = new Producer();
-	const broadcast = source.createBroadcast(Path.from("room"));
-	broadcast.announce();
+	const broadcastPublication = source.createBroadcast(Path.from("room"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const group = producer.appendGroup();
 	group.writeFrame(textFrame("last"));
-	group.close();
+	group.finish();
 	const url = new URL("https://localhost/test");
 	const [client, server] = await Promise.all([
 		connect({ url, transport: pair.client, consume: destination }),
@@ -464,11 +713,13 @@ test("close waits for a request served while withdrawals are in flight", async (
 			track: "video",
 			priority: 0,
 			maxDelay: 10_000,
-			startGroup: 0,
+			startGroup: 0n,
 		}).encode(subscriber.writer, version);
 		expect("start" in (await decodeSubscribeResponse(subscriber.reader, version))).toBe(true);
+		producer.finish();
 		producer.close();
-		await subscriber.reader.readAll();
+		// SUBSCRIBE_END; lite-07 keeps the stream open past it.
+		while (!("end" in (await decodeSubscribeResponse(subscriber.reader, version)))) {}
 
 		// The withdrawal completes, but the subscription still waits for the subscriber's FIN.
 		fin.release();
@@ -604,57 +855,81 @@ for (const [alpn, version] of [
 			await goaway.writer.u53(StreamId.Goaway);
 			await new Goaway("").encode(goaway.writer, version);
 			goaway.writer.close();
-			expect((await wireOf(connection).goaway).uri).toBe("");
+			expect((await connection.draining).uri).toBe("");
 		} finally {
 			connection.abort();
 		}
 	});
 }
 
-// A group stream that breaks the protocol ends the session, so a hostile peer cannot repeat
-// it on every stream.
+// A transport tail keeps its absolute frame numbers and the session open. A group past
+// the declared end still ends the session, so a hostile peer cannot repeat that violation.
 for (const violation of ["a partial group", "a group past the declared end"] as const) {
-	test(`${violation} closes the session with PROTOCOL_VIOLATION`, async () => {
-		const version = Version.DRAFT_07;
-		const pair = createMockTransportPair(ALPN_07_WIP);
-		const connection = new Connection({ url: new URL("https://relay.example/"), quic: pair.client, version });
-		try {
-			const track = wireOf(connection).consume(Path.from("room")).track("video").subscribe();
+	test(
+		violation === "a partial group"
+			? "a partial group keeps its indices and the session open"
+			: "a group past the declared end closes the session with PROTOCOL_VIOLATION",
+		async () => {
+			const version = Version.DRAFT_07;
+			const pair = createMockTransportPair(ALPN_07_WIP);
+			const connection = new Connection({ url: new URL("https://relay.example/"), quic: pair.client, version });
+			try {
+				const track = wireOf(connection).consume(Path.from("room")).track("video").subscribe();
 
-			// The publisher, played by hand: answer TRACK_INFO, start the subscription, and
-			// leave any other stream the session opens (such as PROBE) open.
-			let sub: Stream | undefined;
-			while (!sub) {
-				const stream = await Stream.accept(pair.server, version);
-				if (!stream) throw new Error("the subscriber never subscribed");
-				const id = await stream.reader.u53();
-				if (id === StreamId.Track) {
-					await TrackMessage.decode(stream.reader, version);
-					await new TrackInfo({ maxAge: 60_000, timescale: Timescale.MILLI }).encode(stream.writer, version);
-					stream.close();
-				} else if (id === StreamId.Subscribe) {
-					await Subscribe.decode(stream.reader, version);
-					sub = stream;
+				// The publisher, played by hand: answer TRACK_INFO, start the subscription, and
+				// leave any other stream the session opens (such as PROBE) open.
+				let sub: Stream | undefined;
+				while (!sub) {
+					const stream = await Stream.accept(pair.server, version);
+					if (!stream) throw new Error("the subscriber never subscribed");
+					const id = await stream.reader.u53();
+					if (id === StreamId.Track) {
+						await TrackMessage.decode(stream.reader, version);
+						await new TrackInfo({ maxAge: 60_000, timescale: Timescale.MILLI }).encode(
+							stream.writer,
+							version,
+						);
+						stream.close();
+					} else if (id === StreamId.Subscribe) {
+						await Subscribe.decode(stream.reader, version);
+						sub = stream;
+					}
 				}
-			}
-			await encodeSubscribeResponse(sub.writer, { start: new SubscribeStart(0) }, version);
+				await encodeSubscribeResponse(sub.writer, { start: new SubscribeStart([0n]) }, version);
 
-			let group: GroupMessage;
-			if (violation === "a partial group") {
-				// The subscriber never asked to start mid-group.
-				group = new GroupMessage({ subscribe: 0n, sequence: 0, frameStart: 5 });
-			} else {
-				await encodeSubscribeResponse(sub.writer, { end: new SubscribeEnd(2) }, version);
-				group = new GroupMessage({ subscribe: 0n, sequence: 2 });
-			}
-			const writer = await Writer.open(pair.server, { version });
-			await writer.u53(DataType.Group);
-			await group.encode(writer, version);
+				let group: GroupMessage;
+				if (violation === "a partial group") {
+					// A received tail uses its wire position even without a locally retained prefix.
+					group = new GroupMessage({ subscribe: 0n, sequence: 0n, frameStart: 5 });
+				} else {
+					await encodeSubscribeResponse(sub.writer, { end: new SubscribeEnd(2n) }, version);
+					group = new GroupMessage({ subscribe: 0n, sequence: 2n });
+				}
+				const writer = await Writer.open(pair.server, { version });
+				await writer.u53(DataType.Group);
+				await group.encode(writer, version);
 
-			expect((await pair.client.closed).closeCode).toBe(SessionCode.ProtocolViolation);
-			track.close();
-		} finally {
-			connection.abort();
-		}
-	});
+				if (violation === "a partial group") {
+					await writer.u62(2000n); // timestamp 1000, zigzag delta from 0
+					await writer.u53(1);
+					await writer.write(new Uint8Array([7]));
+					writer.close();
+					const received = await track.recvGroup();
+					expect((await received?.readFrameSequence())?.sequence).toBe(5);
+					expect(await received?.readFrameSequence()).toBeUndefined();
+					received?.close();
+					const goaway = await Stream.open(pair.server, { version });
+					await goaway.writer.u53(StreamId.Goaway);
+					await new Goaway("").encode(goaway.writer, version);
+					goaway.writer.close();
+					expect((await connection.draining).uri).toBe("");
+				} else {
+					expect((await pair.client.closed).closeCode).toBe(SessionCode.ProtocolViolation);
+				}
+				track.close();
+			} finally {
+				connection.abort();
+			}
+		},
+	);
 }

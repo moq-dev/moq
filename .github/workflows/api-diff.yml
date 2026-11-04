@@ -1,0 +1,54 @@
+name: API diff
+
+# Diffs every published API against its last release on PRs into `release`.
+# A backport fails on any break, since it must keep the published API. The cut
+# (a PR from `main`) only reports, for the migration audit: release-plz bumps
+# the versions after it lands, so its breaks are expected.
+permissions:
+  contents: read
+
+on:
+  workflow_call:
+
+concurrency:
+  group: api-diff-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  diff:
+    name: Public API
+    runs-on: ubuntu-24.04-arm
+    # cargo-semver-checks documents every published crate twice, baseline and current.
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/nix
+      - uses: ./.github/actions/rust-cache
+        with:
+          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
+      # The JS baseline is rendered from `release`'s source.
+      - name: Fetch release
+        run: git fetch --no-tags --depth=1 origin +refs/heads/release:refs/remotes/origin/release
+      - name: Diff against the last release
+        id: diff
+        run: |
+          mode=(--deny)
+          # Only this repository's own `main` is the cut; a fork's `main` is a backport.
+          [[ "$HEAD_REF" != main || "$HEAD_REPO" != "$GITHUB_REPOSITORY" ]] || mode=()
+          nix develop --command just api-diff "${mode[@]}"
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          # Lists and downloads the moq-c and moq-ffi release assets.
+          GH_TOKEN: ${{ github.token }}
+      - name: Keep the report
+        if: ${{ !cancelled() && steps.diff.outcome != 'skipped' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: api-diff
+          path: target/api-diff/
+          retention-days: 30
+          if-no-files-found: error

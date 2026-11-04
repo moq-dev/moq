@@ -7,6 +7,7 @@
 
 #![expect(
 	clippy::disallowed_methods,
+	clippy::disallowed_types,
 	reason = "custom timings measure the real time the work took, not the ambient clock"
 )]
 
@@ -32,7 +33,7 @@ fn join(c: &mut Criterion) {
 	for tracks in TRACKS {
 		for subscribers in SUBSCRIBERS {
 			let broadcast = broadcast::Info::default().produce();
-			let info = track::Info::default().with_refresh(1);
+			let info = track::Info::default().with_max_age(None).with_refresh(1);
 			let producers: Vec<_> = (0..tracks)
 				.map(|i| broadcast.create_track(format!("bench{i}"), info.clone()).unwrap())
 				.collect();

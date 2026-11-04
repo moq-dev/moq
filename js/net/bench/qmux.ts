@@ -1,6 +1,7 @@
 /** Compare eager and cold lazy fallback startup with real WebSocket negotiation. */
 import { basename } from "node:path";
 import { gzipSync } from "node:zlib";
+import { selectSubprotocol } from "@moq/qmux";
 import { type Browser, chromium } from "playwright";
 
 const build = await Bun.build({
@@ -20,7 +21,9 @@ const server = Bun.serve({
 	fetch(request, server) {
 		const path = new URL(request.url).pathname;
 		if (path === "/qmux") {
-			if (server.upgrade(request, { headers: { "Sec-WebSocket-Protocol": "webtransport" } })) return;
+			const protocol = selectSubprotocol(request.headers.get("Sec-WebSocket-Protocol"), {});
+			if (!protocol) return new Response("unsupported QMux protocol", { status: 400 });
+			if (server.upgrade(request, { headers: { "Sec-WebSocket-Protocol": protocol } })) return;
 			return new Response("upgrade required", { status: 400 });
 		}
 		const code = files.get(path.slice(1));

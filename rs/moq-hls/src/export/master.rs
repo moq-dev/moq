@@ -4,7 +4,8 @@
 //! recorder writing `<name>/media.m3u8`, say) reuses the grouping and attribute
 //! rules. [`Broadcaster::master_playlist`](super::Broadcaster::master_playlist)
 //! renders the live layout, relative to `/<broadcast>/master.m3u8`: each rendition under the
-//! publisher instance it lists (`@<instance>/<kind>/<rendition>/media.m3u8`).
+//! publisher instance it lists (`@<instance>/<kind>/<rendition>/media.m3u8`), with the instance
+//! and rendition name each percent-encoded as one segment.
 
 use std::collections::BTreeMap;
 use std::fmt::Write;
@@ -18,15 +19,24 @@ const AUDIO_GROUP: &str = "aud";
 
 /// RFC 3986 unreserved characters, which are safe in one URL path segment.
 ///
-/// The DASH manifest encodes rendition names with this same set, so a name stays one segment
-/// in both layouts.
+/// The HLS playlists and DASH manifest encode instances and rendition names with this set,
+/// so each stays one segment in both layouts.
 pub(crate) const PATH_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC.remove(b'-').remove(b'.').remove(b'_').remove(b'~');
+
+/// Whether a rendition name can be addressed as one URL path segment.
+///
+/// A client resolves a `.` or `..` segment away, percent-encoded or not, and the router refuses
+/// an empty one, so renditions with those names are never admitted.
+pub(crate) fn is_path_segment(name: &str) -> bool {
+	!matches!(name, "" | "." | "..")
+}
 
 /// The live layout's media-playlist URI for a rendition of the publisher `instance`, relative to
 /// the master, with an optional query (without the leading `?`) appended.
 pub(crate) fn rendition_uri(instance: &str, kind: Kind, name: &str, query: Option<&str>) -> String {
 	let mut uri = format!(
-		"@{instance}/{}/{}/media.m3u8",
+		"@{}/{}/{}/media.m3u8",
+		utf8_percent_encode(instance, PATH_SEGMENT),
 		kind.as_str(),
 		utf8_percent_encode(name, PATH_SEGMENT)
 	);
@@ -278,6 +288,41 @@ mod tests {
 			rendition_uri("run", Kind::Audio, "audio #1", None),
 			"@run/audio/audio%20%231/media.m3u8"
 		);
+	}
+
+	#[test]
+	fn instances_round_trip_through_playlist_urls() {
+		use crate::export::{Resource, Route};
+
+		for (instance, encoded) in [
+			("a/b?%23#", "a%2Fb%3F%2523%23"),
+			("音声\"\n&", "%E9%9F%B3%E5%A3%B0%22%0A%26"),
+			("~0123_-.abc", "~0123_-.abc"),
+		] {
+			let uri = rendition_uri(instance, Kind::Video, "hd", Some("jwt=abc"));
+			assert_eq!(uri, format!("@{encoded}/video/hd/media.m3u8?jwt=abc"));
+			let mut variant = video("hd", None, None);
+			variant.uri = uri;
+			let playlist = render(&[variant], &[]);
+			let uri = playlist.lines().find(|line| !line.starts_with('#')).unwrap();
+			let url = url::Url::parse("https://example.com/live/master.m3u8")
+				.unwrap()
+				.join(uri)
+				.unwrap();
+			assert_eq!(url.query(), Some("jwt=abc"));
+			assert_eq!(url.fragment(), None);
+			assert_eq!(
+				Route::parse(url.path()).unwrap(),
+				Route {
+					broadcast: "live".into(),
+					resource: Resource::Media {
+						instance: instance.into(),
+						kind: Kind::Video,
+						rendition: "hd".into(),
+					},
+				}
+			);
+		}
 	}
 
 	#[test]

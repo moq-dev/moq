@@ -18,8 +18,9 @@ pub enum Error {
 	#[error("session closed")]
 	SessionClosed,
 
-	/// ICE connectivity was not established before the establishment deadline.
-	#[error("ICE did not connect before the establishment deadline")]
+	/// ICE never connected before the establishment deadline, or before the DTLS
+	/// handshake gave up waiting for it.
+	#[error("ICE did not connect in time")]
 	IceTimeout,
 
 	/// A broadcast did not produce a catalog before the negotiation deadline.
@@ -61,6 +62,14 @@ pub enum Error {
 	/// Error from the WebRTC engine (SDP negotiation, DTLS, media state).
 	#[error("rtc error: {0}")]
 	Rtc(String),
+
+	/// A capped WHIP publisher sent media past its cap plus burst, ignoring the steering
+	/// toward it. `cap` is the sustained rate it exceeded.
+	#[error("media exceeded the {} bps cap plus burst", cap.as_bps())]
+	RateLimited {
+		/// The cap's sustained rate.
+		cap: moq_net::bandwidth::Rate,
+	},
 
 	/// An internal video bridge could not be initialized.
 	#[error("video bridge initialization failed")]

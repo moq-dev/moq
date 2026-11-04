@@ -3,10 +3,10 @@
 
 #include "moq-output.h"
 #include "moq-error.h"
+#include "moq-implementation.h"
 #include "moq-settings.h"
 #include "moq-url.h"
 #include "logger.h"
-#include "util/util_uint64.h"
 
 #include <algorithm>
 #include <cstring>
@@ -167,17 +167,17 @@ bool MoQOutput::Start()
 	}
 
 	// Create the broadcast on an origin of our own, then announce it so subscribers
-	// can discover it. Stop() finishes it, so each Start creates a fresh one.
+	// can discover it. Stop() finishes it, so each Start creates a fresh one, under a
+	// fresh instance the broadcast mints and keeps across reconnects. Only the
+	// broadcast is kept: the route outlives the publication until the broadcast closes.
 	LOG_INFO("Publishing broadcast: %s", path.c_str());
 	auto next_origin = moq::OriginProducer::init(moq::OriginConfig{});
-	auto next_broadcast = next_origin->create_broadcast(path);
-	if (!next_broadcast) {
-		LOG_ERROR("Failed to create broadcast: %s", next_broadcast.error().to_string().c_str());
+	auto publication = next_origin->create_broadcast(path);
+	if (!publication) {
+		LOG_ERROR("Failed to create broadcast: %s", publication.error().to_string().c_str());
 		return false;
 	}
-	moq::AnnounceRoute route;
-	route.epoch = moq::mint_epoch();
-	if (auto announced = (*next_broadcast)->announce(route); !announced) {
+	if (auto announced = (*publication)->announce({}); !announced) {
 		LOG_ERROR("Failed to announce broadcast: %s", announced.error().to_string().c_str());
 		return false;
 	}
@@ -186,6 +186,12 @@ bool MoQOutput::Start()
 	// switched off the client keeps the library defaults.
 	moq::ClientConfig config;
 	config.publish = next_origin;
+	config.implementation = MoQImplementation();
+	// Not on the URL: a URL's ?jwt= overrides the client's tokens, so every reconnect
+	// would dial it instead of the one PresentToken() set last.
+	if (const char *token = obs_service_get_connect_info(service, OBS_SERVICE_CONNECT_INFO_BEARER_TOKEN);
+	    token && *token)
+		config.tokens = {token};
 	OBSDataAutoRelease service_settings = obs_service_get_settings(service);
 	std::string invalid = MoQSettings::Configure(service_settings, config);
 	std::shared_ptr<moq::Client> client;
@@ -222,12 +228,11 @@ bool MoQOutput::Start()
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		url = server;
-		epoch = *route.epoch;
 	}
 	{
 		std::lock_guard<std::mutex> lock(media_mutex);
 		origin = next_origin;
-		broadcast = *next_broadcast;
+		broadcast = (*publication)->broadcast();
 	}
 
 	// NOTE: You could publish the same broadcasts to multiple sessions if you want (redundant ingest).
@@ -253,7 +258,7 @@ void MoQOutput::OnConnect(const std::shared_ptr<Attempt> &current, moq::expected
 	current->session = *result;
 	{
 		std::lock_guard<std::mutex> lock(media_mutex);
-		bandwidth = current->session->bandwidth();
+		allocator = current->session->allocator();
 	}
 	{
 		std::lock_guard<std::mutex> lock(mutex);
@@ -364,7 +369,6 @@ void MoQOutput::Reset()
 		connected = false;
 		live = false;
 		url.clear();
-		epoch.clear();
 		last_failure_code = MoQError::None;
 		last_failure_reason.clear();
 		token_refusal.clear();
@@ -380,9 +384,9 @@ void MoQOutput::Reset()
 	for (auto &[encoder, track] : video_tracks) {
 		if (track.producer)
 			track.producer->finish();
-		if (track.rate && track.rate->Target() != track.rate->Max()) {
+		if (track.rate && track.applied_bps != track.bitrate_bps) {
 			if (OBSEncoder strong = OBSGetStrongRef(track.encoder))
-				restore.emplace_back(std::move(strong), track.rate->Max());
+				restore.emplace_back(std::move(strong), track.bitrate_bps);
 		}
 	}
 	video_tracks.clear();
@@ -392,7 +396,7 @@ void MoQOutput::Reset()
 			track.producer->finish();
 	}
 	audio_tracks.clear();
-	bandwidth.reset();
+	allocator.reset();
 
 	// Close the broadcast so the origin retracts it immediately; Start()
 	// creates a fresh one on restart.
@@ -419,12 +423,6 @@ void MoQOutput::Reset()
 
 	for (auto &[encoder, bitrate] : restore)
 		SetBitrate(encoder, bitrate);
-}
-
-std::string MoQOutput::GetEpoch()
-{
-	std::lock_guard<std::mutex> lock(mutex);
-	return epoch;
 }
 
 bool MoQOutput::TryGetConnectionStats(ConnectionStats *out)
@@ -454,8 +452,8 @@ bool MoQOutput::TryGetConnectionStats(ConnectionStats *out)
 
 	ConnectionStats snapshot;
 	snapshot.reconnects = GetReconnectCount();
-	snapshot.rtt_valid = raw.rtt_us.has_value();
-	snapshot.rtt_ms = raw.rtt_us ? static_cast<double>(*raw.rtt_us) / 1000.0 : 0;
+	snapshot.rtt_valid = raw.rtt.has_value();
+	snapshot.rtt_ms = raw.rtt ? std::chrono::duration<double, std::milli>(*raw.rtt).count() : 0;
 	snapshot.estimated_send_rate_valid = raw.estimated_send_rate_bps.has_value();
 	snapshot.estimated_send_rate_bps =
 		raw.estimated_send_rate_bps ? static_cast<double>(*raw.estimated_send_rate_bps) : 0;
@@ -526,31 +524,36 @@ bool MoQOutput::PresentToken(const std::string &token)
 	std::lock_guard<std::recursive_mutex> signal_lock(signal_mutex);
 	if (!attempt || !attempt->session)
 		return false;
+	// Only a server-accepted session has no tokens.
+	std::shared_ptr<moq::Tokens> tokens = attempt->session->tokens();
+	if (!tokens)
+		return false;
+
+	auto refused = [this](const std::string &reason) {
+		LOG_WARNING("MoQ relay refused the new publish token: %s", reason.c_str());
+		std::lock_guard<std::mutex> lock(mutex);
+		token_refusal = reason;
+	};
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		token_refusal.clear();
 	}
+	if (auto set = tokens->set({token}); !set) {
+		attempt->presenting.reset();
+		refused(set.error().to_string());
+		return true;
+	}
 
-	// Replacing `presenting` cancels a presentation still in flight, which the
-	// newer token supersedes.
-	attempt->presenting = attempt->session->auth()->add(token).then(
-		worker.Executor(), Current<moq::expected<std::shared_ptr<moq::AuthToken>>>(
-					   attempt, [this](const std::shared_ptr<Attempt> &current, auto result) {
-						   if (!result) {
-							   const std::string reason = result.error().to_string();
-							   LOG_WARNING("MoQ relay refused the new publish token: %s",
-								       reason.c_str());
-							   std::lock_guard<std::mutex> lock(mutex);
-							   token_refusal = reason;
-							   return;
-						   }
-						   // The old token's grant leaves the union only after the new one joined.
-						   if (current->token)
-							   current->token->cancel();
-						   current->token = *result;
-						   LOG_INFO("MoQ relay accepted the new publish token: %s",
-							    MoQRedactUrl(current->url).c_str());
-					   }));
+	// Replacing `presenting` drops the wait on a token this one replaced.
+	attempt->presenting = tokens->answered().then(
+		worker.Executor(),
+		Current<moq::expected<void>>(attempt, [refused](const std::shared_ptr<Attempt> &current, auto result) {
+			if (!result) {
+				refused(result.error().to_string());
+				return;
+			}
+			LOG_INFO("MoQ relay accepted the new publish token: %s", MoQRedactUrl(current->url).c_str());
+		}));
 	return true;
 }
 
@@ -564,8 +567,8 @@ bool MoQOutput::TryGetVideoRate(VideoRate *out)
 			if (!track.rate || !track.reservation)
 				continue;
 			following = true;
-			rate.target_bps += track.rate->Target();
-			rate.configured_bps += track.rate->Max();
+			rate.target_bps += track.enabled ? track.applied_bps : 0;
+			rate.configured_bps += track.bitrate_bps;
 		}
 	}
 	if (following && out)
@@ -592,20 +595,20 @@ void MoQOutput::Data(struct encoder_packet *packet)
 }
 
 // The packet's timestamp on the broadcast clock, or nothing when it falls before zero.
-static std::optional<uint64_t> PacketTimestamp(const struct encoder_packet *packet)
+static std::optional<moq::Timestamp> PacketTimestamp(const struct encoder_packet *packet)
 {
-	// Add ~1 second offset to handle negative PTS from audio priming frames, and
-	// the same to video for A/V sync.
-	// TODO: This is slightly wrong when den is not evenly divisible by num, but close enough.
-	int64_t pts = packet->pts + packet->timebase_den / packet->timebase_num;
-	if (pts < 0)
+	// A tick is num/den seconds, so den units per second hold it exactly, 1001/30000 included.
+	// Offset by one second to cover the negative PTS of audio priming frames, and video by
+	// the same for A/V sync.
+	const int64_t value = packet->pts * packet->timebase_num + packet->timebase_den;
+	if (value < 0)
 		return std::nullopt;
-	return util_mul_div64(pts, 1000000ULL * packet->timebase_num, packet->timebase_den);
+	return moq::Timestamp{static_cast<uint64_t>(value), static_cast<uint64_t>(packet->timebase_den)};
 }
 
-static moq::Frame PacketFrame(const struct encoder_packet *packet, uint64_t timestamp_us)
+static moq::Frame PacketFrame(const struct encoder_packet *packet, const moq::Timestamp &timestamp)
 {
-	return moq::Frame{std::vector<uint8_t>(packet->data, packet->data + packet->size), timestamp_us};
+	return moq::Frame{std::vector<uint8_t>(packet->data, packet->data + packet->size), timestamp};
 }
 
 void MoQOutput::AudioData(struct encoder_packet *packet)
@@ -654,6 +657,9 @@ void MoQOutput::VideoData(struct encoder_packet *packet)
 
 	auto it = video_tracks.find(encoder);
 	if (it == video_tracks.end()) {
+		// A track opens on a keyframe; deltas before it have no group to join.
+		if (!packet->keyframe)
+			return;
 		VideoInit(encoder);
 		it = video_tracks.find(encoder);
 	}
@@ -665,9 +671,15 @@ void MoQOutput::VideoData(struct encoder_packet *packet)
 	// Read before the frame is written, so a retune lands on the encoder's next
 	// frame. obs_encoder_update only flags an active encoder for its own thread.
 	if (track.rate && track.reservation) {
-		if (auto next = track.rate->Update(track.reservation->grant(), MoQRate::Clock::now()))
-			SetBitrate(encoder, *next);
+		if (auto next = track.rate->update(track.reservation))
+			Retarget(encoder, track, *next);
 	}
+
+	// OBS can't stop one encoder of a running output, or force it to keyframe, so a
+	// disabled rung keeps encoding and its packets are dropped here. It resumes on
+	// the encoder's next natural keyframe once the grant funds it again.
+	if (!track.sending && (!track.enabled || !packet->keyframe))
+		return;
 
 	auto timestamp = PacketTimestamp(packet);
 	if (!timestamp) {
@@ -675,18 +687,62 @@ void MoQOutput::VideoData(struct encoder_packet *packet)
 		return;
 	}
 
+	// A resume that fails to write its keyframe stays disabled, so it retries on the
+	// next keyframe instead of advertising a rung whose deltas have no group to join.
+	bool resumed = false;
+	if (!track.sending) {
+		if (auto result = track.producer->set_enabled(true); !result) {
+			LOG_ERROR("Failed to enable video track: %s", result.error().to_string().c_str());
+			return;
+		}
+		track.sending = true;
+		resumed = true;
+	}
+
 	if (auto result = track.producer->write_frame(PacketFrame(packet, *timestamp)); !result) {
 		LOG_ERROR("Failed to write video frame: %s", result.error().to_string().c_str());
+		if (resumed) {
+			track.sending = false;
+			if (auto disable = track.producer->set_enabled(false); !disable)
+				LOG_ERROR("Failed to disable video track: %s", disable.error().to_string().c_str());
+		}
 		return;
 	}
+	track.started = true;
 
 	total_bytes_sent += packet->size;
 }
 
 // NOTE: Caller must hold media_mutex.
+void MoQOutput::Retarget(obs_encoder_t *encoder, Track &track, const moq::RateTarget &target)
+{
+	if (const auto *enabled = std::get_if<moq::RateTarget::kEnabled>(&target.get_variant())) {
+		SetBitrate(encoder, enabled->bitrate_bps);
+		track.applied_bps = enabled->bitrate_bps;
+		track.enabled = true;
+		return;
+	}
+
+	track.enabled = false;
+	if (!track.sending)
+		return;
+	track.sending = false;
+	// The lower renditions keep their share; viewers switch to one instead of
+	// waiting on frames that stopped coming. Before the first frame there is no
+	// timeline to break, and the marker would drop the init's parameter sets, which
+	// an encoder that sends them only as extra data never repeats.
+	if (track.started) {
+		if (auto result = track.producer->discontinuity(); !result)
+			LOG_ERROR("Failed to mark a disabled video track: %s", result.error().to_string().c_str());
+	}
+	if (auto result = track.producer->set_enabled(false); !result)
+		LOG_ERROR("Failed to disable video track: %s", result.error().to_string().c_str());
+}
+
+// NOTE: Caller must hold media_mutex.
 void MoQOutput::Reserve(Track &track)
 {
-	if (track.reservation || !bandwidth || track.bitrate_bps == 0)
+	if (track.reservation || !allocator || track.bitrate_bps == 0)
 		return;
 	auto demand = track.producer->demand();
 	if (!demand) {
@@ -694,7 +750,7 @@ void MoQOutput::Reserve(Track &track)
 		track.bitrate_bps = 0;
 		return;
 	}
-	track.reservation = bandwidth->reserve(*demand, track.bitrate_bps);
+	track.reservation = allocator->reserve(*demand, track.bitrate_bps);
 }
 
 // NOTE: Caller must hold media_mutex.
@@ -754,6 +810,51 @@ void MoQOutput::VideoInit(obs_encoder_t *encoder)
 	hint.optimize_for_latency = true;
 	config.hint = hint;
 
+	// Every video encoder on the output encodes the same program, so the encoder with
+	// the next lower bitrate is this rendition's fallback. That track is published
+	// first, so this one can sit one priority below it and the allocator funds it first.
+	obs_encoder_t *lower = nullptr;
+	int lower_kbps = 0;
+	for (uint32_t idx = 0; idx < MAX_OUTPUT_VIDEO_ENCODERS; idx++) {
+		obs_encoder_t *other = obs_output_get_video_encoder2(output, idx);
+		if (!other || other == encoder)
+			continue;
+		// An encoder already publishing may have been retuned, so read the bitrate it
+		// was configured with.
+		int kbps = 0;
+		if (auto known = video_tracks.find(other); known != video_tracks.end()) {
+			kbps = (int)(known->second.bitrate_bps / 1000);
+		} else {
+			OBSDataAutoRelease other_settings = obs_encoder_get_settings(other);
+			kbps = other_settings ? (int)obs_data_get_int(other_settings, "bitrate") : 0;
+		}
+		if (kbps > lower_kbps && kbps < video_bitrate_kbps) {
+			lower = other;
+			lower_kbps = kbps;
+		}
+	}
+	std::optional<uint64_t> lower_bps;
+	if (lower) {
+		if (video_tracks.find(lower) == video_tracks.end()) {
+			// The lower track keeps the headers it starts with, and some encoders only have
+			// them after their first frame. Wait for its first packet to start it instead;
+			// this rendition opens on its next keyframe after that.
+			uint8_t *lower_data = nullptr;
+			size_t lower_size = 0;
+			if (!obs_encoder_get_extra_data(lower, &lower_data, &lower_size) || lower_size == 0)
+				return;
+			VideoInit(lower);
+		}
+		// The lower rendition waits on one further down, so this one waits with it.
+		auto below = video_tracks.find(lower);
+		if (below == video_tracks.end())
+			return;
+		if (below->second.producer) {
+			config.lower = moq::MediaProducer(moq::MediaProducer::kTrack{below->second.producer});
+			lower_bps = (uint64_t)lower_kbps * 1000ULL;
+		}
+	}
+
 	auto track = moq::MediaTrackProducer::video(broadcast, moq::MediaTarget::kNamed{}, config);
 	if (!track) {
 		LOG_ERROR("Failed to initialize video track: %s", track.error().to_string().c_str());
@@ -769,7 +870,8 @@ void MoQOutput::VideoInit(obs_encoder_t *encoder)
 		// bitrate drives; a quality target (CQP, CRF) only reserves.
 		const bool dynamic = obs_encoder_get_caps(encoder) & OBS_ENCODER_CAP_DYN_BITRATE;
 		if (dynamic && BitrateDriven(rate_control)) {
-			entry.rate.emplace(entry.bitrate_bps);
+			entry.rate = moq::RateControl::init(moq::RatePolicy{entry.bitrate_bps, lower_bps});
+			entry.applied_bps = entry.bitrate_bps;
 			entry.encoder = OBSGetWeakRef(encoder);
 		} else {
 			LOG_INFO("Video bitrate stays at %d kbps: the encoder cannot follow the bandwidth grant (%s)",
@@ -778,7 +880,11 @@ void MoQOutput::VideoInit(obs_encoder_t *encoder)
 	}
 	video_tracks[encoder] = std::move(entry);
 
-	LOG_INFO("Video track initialized (%ux%u, %d kbps)", video_width, video_height, video_bitrate_kbps);
+	if (lower_bps)
+		LOG_INFO("Video track initialized (%ux%u, %d kbps, above a %d kbps rendition)", video_width,
+			 video_height, video_bitrate_kbps, lower_kbps);
+	else
+		LOG_INFO("Video track initialized (%ux%u, %d kbps)", video_width, video_height, video_bitrate_kbps);
 }
 
 // NOTE: Caller must hold media_mutex.
@@ -841,15 +947,10 @@ void MoQOutput::AudioInit(obs_encoder_t *encoder)
 
 void register_moq_output()
 {
-	const uint32_t base_flags = OBS_OUTPUT_ENCODED | OBS_OUTPUT_SERVICE | OBS_OUTPUT_MULTI_TRACK_VIDEO |
-				    OBS_OUTPUT_MULTI_TRACK_AUDIO;
-
-	const char *audio_codecs = "aac;opus";
-	const char *video_codecs = "h264;hevc;av1";
-
 	struct obs_output_info info = {};
 	info.id = "moq_output";
-	info.flags = OBS_OUTPUT_AV | base_flags;
+	info.flags = OBS_OUTPUT_AV | OBS_OUTPUT_ENCODED | OBS_OUTPUT_SERVICE | OBS_OUTPUT_MULTI_TRACK_VIDEO |
+		     OBS_OUTPUT_MULTI_TRACK_AUDIO;
 	info.get_name = [](void *) -> const char * {
 		return "MoQ Output";
 	};
@@ -874,20 +975,9 @@ void register_moq_output()
 	info.get_connect_time_ms = [](void *priv_data) -> int {
 		return static_cast<MoQOutput *>(priv_data)->GetConnectTime();
 	};
-	info.encoded_video_codecs = video_codecs;
-	info.encoded_audio_codecs = audio_codecs;
+	info.encoded_video_codecs = "h264;hevc;av1";
+	info.encoded_audio_codecs = "aac;opus";
 	info.protocols = "MoQ";
 
-	obs_register_output(&info);
-
-	info.id = "moq_output_video";
-	info.flags = OBS_OUTPUT_VIDEO | base_flags;
-	info.encoded_audio_codecs = nullptr;
-	obs_register_output(&info);
-
-	info.id = "moq_output_audio";
-	info.flags = OBS_OUTPUT_AUDIO | base_flags;
-	info.encoded_video_codecs = nullptr;
-	info.encoded_audio_codecs = audio_codecs;
 	obs_register_output(&info);
 }

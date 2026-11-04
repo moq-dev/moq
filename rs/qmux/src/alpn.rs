@@ -79,11 +79,11 @@ mod tests {
 		let out = build(
 			[
 				("moq-lite-04", &[Version::QMux01][..]),
-				("moq-transport-17", &[Version::QMux00][..]),
+				("moq-transport-18", &[Version::QMux00][..]),
 			],
 			true,
 		);
-		assert_eq!(out, vec!["qmux-01.moq-lite-04", "qmux-00.moq-transport-17"]);
+		assert_eq!(out, vec!["qmux-01.moq-lite-04", "qmux-00.moq-transport-18"]);
 	}
 
 	#[test]
@@ -126,8 +126,8 @@ mod tests {
 			(Version::QMux01, Some("moq-lite-04".to_string()))
 		);
 		assert_eq!(
-			parse(Some("qmux-00.moq-transport-17")).unwrap(),
-			(Version::QMux00, Some("moq-transport-17".to_string()))
+			parse(Some("qmux-00.moq-transport-18")).unwrap(),
+			(Version::QMux00, Some("moq-transport-18".to_string()))
 		);
 	}
 

@@ -8,9 +8,9 @@
 //! JavaScript arm serves WebTransport to a Bun publisher; it needs Bun and runs in the
 //! interop workflow.
 //!
-//! Unsupported local kernels skip loudly; MOQ_STRICT makes CI refuse them.
+//! Unsupported local kernels skip loudly; CI_STRICT makes CI refuse them.
 
-#![cfg(all(target_os = "linux", feature = "quic"))]
+#![cfg(feature = "quic")]
 
 use crate::support;
 
@@ -29,7 +29,7 @@ const WINDOW: usize = 256 * 1024;
 fn worker() -> Option<Worker> {
 	match Worker::new(Config::default()) {
 		Ok(worker) => Some(worker),
-		Err(Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
+		Err(Error::Unsupported(reason)) if std::env::var_os("CI_STRICT").is_none() => {
 			eprintln!("skipping io_uring receive credit test: {reason}");
 			None
 		}
@@ -107,10 +107,11 @@ fn partial_frame_gives_way() {
 			.expect("socket")
 	};
 	let server_sock = socket(&handle);
-	let mut dial = quic::client::Config::new(server_sock.local_addr().expect("server addr"), "localhost");
+	let server_addr = server_sock.local_addr().expect("server addr");
+	let mut dial = quic::client::Config::default();
 	dial.alpn = vec![ALPN.to_string()];
 	dial.verify = false;
-	dial.transport.receive_window = Some(WINDOW as u64);
+	dial.transport.limits.receive_window = std::num::NonZeroU64::new(WINDOW as u64);
 	let client_sock = socket(&handle);
 
 	let server_handle = handle.clone();
@@ -122,10 +123,7 @@ fn partial_frame_gives_way() {
 			.with_publisher(&pub_origin)
 			.accept(
 				moq_net::time::Instant::now(),
-				moq_uring::transport::Local::new(moq_uring::transport::Session::new(
-					quic::web::Session::raw(conn),
-					moq_net::transport::Binding::InBand,
-				)),
+				moq_uring::transport::Local::new(quic::web::Session::raw(conn)),
 			)
 			.await
 			.expect("accept");
@@ -136,15 +134,14 @@ fn partial_frame_gives_way() {
 	let sub = sub_origin.clone();
 	worker
 		.block_on(async move {
-			let conn = quic::client::connect(client_sock, &dial).await.expect("quic connect");
+			let conn = quic::client::connect(client_sock, &dial, server_addr, "localhost")
+				.await
+				.expect("quic connect");
 			let (session, driver) = moq_net::Client::new()
 				.with_subscriber(sub.clone())
 				.connect(
 					moq_net::time::Instant::now(),
-					moq_uring::transport::Local::new(moq_uring::transport::Session::new(
-						quic::web::Session::raw(conn),
-						moq_net::transport::Binding::InBand,
-					)),
+					moq_uring::transport::Local::new(quic::web::Session::raw(conn)),
 				)
 				.await
 				.expect("connect");
@@ -154,12 +151,13 @@ fn partial_frame_gives_way() {
 			});
 
 			let consumer = sub.consume();
-			within(&handle, "the route", consumer.routed("room"))
-				.await
-				.expect("routed");
-			let remote = within(&handle, "the broadcast", consumer.request_broadcast("room", None))
-				.await
-				.expect("broadcast resolves");
+			let remote = within(
+				&handle,
+				"the broadcast",
+				consumer.follow("room", None).unwrap().available(),
+			)
+			.await
+			.expect("broadcast resolves");
 			let subscribe = |name: &str, priority: i8| {
 				let track = remote.track(name).expect("track");
 				async move {
@@ -228,8 +226,9 @@ fn partial_frame_gives_way() {
 }
 
 /// A Bun publisher (`test/receive-credit/sender.ts`) dials a WebTransport endpoint whose
-/// connection window is [`WINDOW`] and sends a low-priority frame twice that size. The
-/// subscriber stops it, a high-priority frame completes, and a later low group arrives.
+/// connection window is [`WINDOW`] and holds an unsealed low-priority prefix in a frame
+/// declared twice that size. The subscriber evicts it, a high-priority frame completes, and a
+/// later low group arrives.
 /// The worker speaks moq-lite only.
 #[test]
 #[ignore = "requires Bun; run by just test receive-credit in the interop workflow"]
@@ -255,11 +254,11 @@ fn javascript_partial_frame_gives_way() {
 			.server(&["h3"], quic::server::ClientAuth::None)
 			.expect("tls"),
 	);
-	server.transport.receive_window = Some(WINDOW as u64);
+	server.transport.limits.receive_window = std::num::NonZeroU64::new(WINDOW as u64);
 	let sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("socket");
-	let endpoint = quic::Endpoint::new(sock, quic::endpoint::Config::default().with_server(server)).expect("endpoint");
+	let endpoint = quic::Endpoint::new(quic::endpoint::Config::default().with_server(server), sock).expect("endpoint");
 
 	let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test/receive-credit/sender.ts");
 	let mut child = std::process::Command::new("bun")
@@ -290,18 +289,12 @@ fn javascript_partial_frame_gives_way() {
 				.await
 				.expect("handshake");
 			let session = request
-				.respond(quic::web::Response::default().with_protocol(ALPN))
+				.respond(quic::web::proto::ConnectResponse::OK.with_protocol(ALPN))
 				.await
 				.expect("respond");
 			let (session, driver) = moq_net::Server::new()
 				.with_subscriber(sub.clone())
-				.accept(
-					moq_net::time::Instant::now(),
-					moq_uring::transport::Local::new(moq_uring::transport::Session::new(
-						session,
-						moq_net::transport::Binding::Uri,
-					)),
-				)
+				.accept(moq_net::time::Instant::now(), moq_uring::transport::Local::new(session))
 				.await
 				.expect("accept");
 			let task_handle = handle.clone();
@@ -310,12 +303,13 @@ fn javascript_partial_frame_gives_way() {
 			});
 
 			let consumer = sub.consume();
-			within(&handle, "the route", consumer.routed("room"))
-				.await
-				.expect("routed");
-			let remote = within(&handle, "the broadcast", consumer.request_broadcast("room", None))
-				.await
-				.expect("broadcast resolves");
+			let remote = within(
+				&handle,
+				"the broadcast",
+				consumer.follow("room", None).unwrap().available(),
+			)
+			.await
+			.expect("broadcast resolves");
 			let subscribe = |name: &str, priority: i8| {
 				let track = remote.track(name).expect("track");
 				async move {
@@ -328,7 +322,7 @@ fn javascript_partial_frame_gives_way() {
 			let mut low = within(&handle, "the low subscription", subscribe("low", 1)).await;
 			let mut high = within(&handle, "the high subscription", subscribe("high", 100)).await;
 
-			// Wait until three quarters of the window holds a frame that can never complete.
+			// The sender holds back the rest, so no segment can seal and return this credit.
 			commands.write_all(b"low\n").expect("command");
 			let mut partial = within(&handle, "the low group", low.recv_group())
 				.await
@@ -350,13 +344,10 @@ fn javascript_partial_frame_gives_way() {
 			// Half the window, which only fits once the low frame lets go.
 			commands.write_all(b"high\n").expect("command");
 			assert_eq!(next_frame(&handle, &mut high).await, vec![2u8; WINDOW / 2]);
-			loop {
-				match within(&handle, "the low stop", partial.read_chunk()).await {
-					Ok(Some(_)) => {}
-					Ok(None) => panic!("a frame larger than the window completed"),
-					Err(_) => break,
-				}
-			}
+			let err = within(&handle, "the low stop", partial.read_chunk())
+				.await
+				.expect_err("the partial frame must be evicted");
+			assert!(matches!(err, moq_net::Error::Evicted), "{err}");
 
 			// The session survives, and the low track keeps delivering what fits.
 			commands.write_all(b"after\n").expect("command");

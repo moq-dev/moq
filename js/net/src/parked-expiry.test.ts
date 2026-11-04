@@ -1,10 +1,9 @@
 import { expect, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano } from "@moq/clock";
 import { StreamCode } from "./error.ts";
-import { Producer as Group } from "./group.ts";
 import { randomHop } from "./hop.ts";
-import { NativeSession } from "./ietf/adapter.ts";
 import { Publisher as IetfPublisher } from "./ietf/publisher.ts";
+import { NativeSession } from "./ietf/session.ts";
 import { Subscribe as IetfSubscribe } from "./ietf/subscribe.ts";
 import { ALPN, Version as Ietf } from "./ietf/version.ts";
 import { Publisher as LitePublisher } from "./lite/publisher.ts";
@@ -19,7 +18,7 @@ import { Timescale, Timestamp } from "./time.ts";
 const protocols = [
 	{ kind: "lite", version: Lite.DRAFT_05, alpn: ALPN_05 },
 	{ kind: "lite", version: Lite.DRAFT_07, alpn: ALPN_07_WIP },
-	{ kind: "ietf", version: Ietf.DRAFT_19, alpn: ALPN.DRAFT_19 },
+	{ kind: "ietf", version: Ietf.DRAFT_18, alpn: ALPN.DRAFT_18 },
 	{ kind: "ietf", version: Ietf.DRAFT_22, alpn: ALPN.DRAFT_22 },
 ] as const;
 
@@ -31,17 +30,18 @@ for (const protocol of protocols) {
 			const installed = clock.install();
 			const pair = createMockTransportPair(protocol.alpn);
 			const origin = new Origin();
-			const broadcast = origin.createBroadcast(Path.from("parked"));
-			broadcast.announce();
-			const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
-			const write = (sequence: number) => {
-				const group = new Group(sequence);
+			const broadcastPublication = origin.createBroadcast(Path.from("parked"));
+			const broadcast = broadcastPublication.broadcast;
+			broadcastPublication.announce();
+			// No publisher limit, so the cache eviction rather than a stale verdict ends a long budget.
+			const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+			const write = (sequence: bigint) => {
+				const group = track.createGroup(sequence);
 				group.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(0) });
-				group.close();
-				track.writeGroup(group);
+				group.finish();
 			};
 
-			write(0);
+			write(0n);
 
 			const parked = Promise.withResolvers<void>();
 			const slot = Promise.withResolvers<void>();
@@ -111,7 +111,7 @@ for (const protocol of protocols) {
 			try {
 				await parked.promise;
 				expect(ended).toBe(false);
-				write(1);
+				write(1n);
 				if (mode === "expires") {
 					await clock.advance(Nano.fromMilli(Milli(budget - 1)));
 					expect(ended).toBe(false);
@@ -121,7 +121,7 @@ for (const protocol of protocols) {
 				if (protocol.kind === "lite") {
 					for (;;) {
 						const response = await decodeSubscribeResponse(client.reader, protocol.version);
-						if (!("drop" in response) || response.drop.start !== 0) continue;
+						if (!("drop" in response) || response.drop.start !== 0n) continue;
 						const cause = mode === "expires" ? StreamCode.Old : StreamCode.TooFarBehind;
 						expect(response.drop.error).toBe(protocol.version === Lite.DRAFT_07 ? cause : 0);
 						break;
@@ -154,20 +154,20 @@ for (const protocol of protocols) {
 		const installed = clock.install();
 		const pair = createMockTransportPair(protocol.alpn);
 		const origin = new Origin();
-		const broadcast = origin.createBroadcast(Path.from("parked"));
-		broadcast.announce();
+		const broadcastPublication = origin.createBroadcast(Path.from("parked"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
 		const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
-		const write = (sequence: number, frames: number) => {
-			const group = new Group(sequence);
+		const write = (sequence: bigint, frames: number) => {
+			const group = track.createGroup(sequence);
 			for (let frame = 0; frame < frames; frame++) {
 				group.writeFrame({ payload: new Uint8Array([frame]), timestamp: Timestamp.fromMillis(0) });
 			}
-			group.close();
-			track.writeGroup(group);
+			group.finish();
 		};
 
 		// Two frames, so the second is still unread while the stream's first write waits on credit.
-		write(0, 2);
+		write(0n, 2);
 
 		const blocked = Promise.withResolvers<void>();
 		const credit = Promise.withResolvers<void>();
@@ -224,7 +224,7 @@ for (const protocol of protocols) {
 		}
 		try {
 			await blocked.promise;
-			write(1, 1);
+			write(1n, 1);
 			await clock.advance(Nano.fromMilli(Milli(33_750)));
 			// The write already handed to the stream finishes, and the stream is reset after it.
 			credit.resolve();

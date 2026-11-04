@@ -28,7 +28,7 @@
 use std::time::{Duration, Instant};
 
 use moq_video::encode::{Codec, Config, Encoder, Kind, Preset};
-use moq_video::{Frame, I420, Rate, Size, Surface};
+use moq_video::{Frame, FrameRate, I420, Size, Surface};
 
 const PRESETS: [(Preset, &str); 3] = [
 	(Preset::LowLatency, "low-latency"),
@@ -73,7 +73,7 @@ fn main() -> anyhow::Result<()> {
 		.into_iter()
 		.filter(|(_, label)| only.is_none_or(|only| only == *label))
 	{
-		let mut config = Config::new(size.width, size.height, Rate::new(fps, 1)?);
+		let mut config = Config::new(size.width, size.height, FrameRate::new(fps, 1)?);
 		config.codec = codec;
 		config.kind = Kind::Named(backend.clone());
 		config.bitrate = Some(moq_net::bandwidth::Rate::from_bps(bitrate));

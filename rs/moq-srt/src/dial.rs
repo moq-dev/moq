@@ -43,14 +43,13 @@ pub struct Client {
 	/// for loss recovery. It doubles as [`publish`]'s egress skip threshold.
 	max_delay: Duration,
 
-	/// How long relays keep a non-latest group of an ingested media track fetchable, or
-	/// `None` for hang's own default.
+	/// How long a superseded group of an ingested media track stays fresh, or `None` for
+	/// no publisher limit. Defaults to [`MAX_AGE`](hang::container::MAX_AGE).
 	///
-	/// A retention budget, not a delivery one: it never makes a subscriber play further
+	/// A freshness bound, not a delivery one: it never makes a subscriber play further
 	/// behind live, it caps how far back a FETCH can still reach. The default suits a
 	/// segmented egress (HLS/DASH) reading the broadcast downstream, which may only
-	/// advertise segments that are still fetchable. Lower it when nothing reads history
-	/// and the memory matters. [`pull`] only; [`publish`] reads a broadcast someone else
+	/// advertise segments that are still fetchable. Lower it when nothing reads history. [`pull`] only; [`publish`] reads a broadcast someone else
 	/// declared.
 	max_age: Option<Duration>,
 
@@ -75,13 +74,13 @@ pub struct Client {
 
 impl Client {
 	/// Dial `addr` for `resource`, with the default SRT latency (500ms) and the
-	/// publisher's own media retention.
+	/// authored media max age.
 	pub fn new(addr: SocketAddr, resource: impl Into<String>) -> Self {
 		Self {
 			addr,
 			resource: resource.into(),
 			max_delay: DEFAULT_LATENCY,
-			max_age: None,
+			max_age: Some(hang::container::MAX_AGE),
 			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
 			program: None,
 			linger: moq_mux::Linger::DEFAULT,
@@ -151,8 +150,8 @@ impl Client {
 	}
 
 	/// Push a MoQ broadcast out to the remote as MPEG-TS until the broadcast ends.
-	pub async fn publish(&self, origin: &origin::Consumer, path: impl moq_net::AsPath) -> Result<()> {
-		let path = path.as_path();
+	pub async fn publish(&self, origin: &origin::Consumer, path: impl Into<moq_net::Path>) -> Result<()> {
+		let path: moq_net::Path = path.into();
 		let socket = self.call(Mode::Publish).await?;
 		let options = crate::ts::Options {
 			latency: self.max_delay,
@@ -166,8 +165,8 @@ impl Client {
 	///
 	/// The finished broadcast then stays up for the [linger](Self::with_linger), as
 	/// [`Publish::accept`](crate::Publish::accept) describes, and the future resolves after that.
-	pub async fn pull(&self, origin: &origin::Producer, path: impl moq_net::AsPath) -> Result<()> {
-		let path = path.as_path();
+	pub async fn pull(&self, origin: &origin::Producer, path: impl Into<moq_net::Path>) -> Result<()> {
+		let path: moq_net::Path = path.into();
 		let socket = self.call(Mode::Request).await?;
 		let ingest = crate::server::Ingest {
 			config: moq_mux::catalog::Config::default()
@@ -213,7 +212,6 @@ impl Mode {
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	/// Build an origin producer, spawning its driver on the ambient runtime.
 	fn produce_origin() -> moq_net::origin::Producer {
@@ -265,7 +263,7 @@ mod tests {
 				// Runs until the caller disconnects, then closes at once.
 				publish
 					.with_linger(Duration::ZERO)
-					.accept(&origin, "ingested/cam0")
+					.accept(&origin, moq_net::Path::from_static("ingested/cam0"))
 					.await
 					.ok();
 			}
@@ -275,14 +273,14 @@ mod tests {
 		// Caller: dial with m=publish, then drop (we only assert connect + routing).
 		let caller = tokio::spawn(async move { Client::new(addr, "cam0").call(Mode::Publish).await });
 
-		let socket = tokio::time::timeout(Duration::from_secs(10), caller)
+		let socket = kio::clock::timeout(Duration::from_secs(10), caller)
 			.await
 			.expect("caller timed out")
 			.expect("caller task")
 			.expect("SRT caller should connect");
 		drop(socket);
 
-		let (resource, is_publish) = tokio::time::timeout(Duration::from_secs(10), server_task)
+		let (resource, is_publish) = kio::clock::timeout(Duration::from_secs(10), server_task)
 			.await
 			.expect("server timed out")
 			.expect("server task");
@@ -306,21 +304,24 @@ mod tests {
 			let resource = request.resource().to_string();
 			let is_subscribe = matches!(request, Request::Subscribe(_));
 			if let Request::Subscribe(subscribe) = request {
-				subscribe.accept(&consumer, "live/cam0").await.ok();
+				subscribe
+					.accept(&consumer, moq_net::Path::from_static("live/cam0"))
+					.await
+					.ok();
 			}
 			(resource, is_subscribe)
 		});
 
 		let caller = tokio::spawn(async move { Client::new(addr, "cam0").call(Mode::Request).await });
 
-		let socket = tokio::time::timeout(Duration::from_secs(10), caller)
+		let socket = kio::clock::timeout(Duration::from_secs(10), caller)
 			.await
 			.expect("caller timed out")
 			.expect("caller task")
 			.expect("SRT caller should connect");
 		drop(socket);
 
-		let (resource, is_subscribe) = tokio::time::timeout(Duration::from_secs(10), server_task)
+		let (resource, is_subscribe) = kio::clock::timeout(Duration::from_secs(10), server_task)
 			.await
 			.expect("server timed out")
 			.expect("server task");

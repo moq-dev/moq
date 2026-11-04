@@ -275,33 +275,23 @@ impl Resampler {
 	}
 
 	/// Convert every whole chunk that is buffered, keeping the remainder.
+	///
+	/// Chunks are read in place and the remainder moves to the front once, so a
+	/// large batch costs linear rather than quadratic copying.
 	fn convert(&mut self) -> Result<Vec<f32>, BackendError> {
 		let chunk_samples = self.chunk_frames * self.channels;
 		let mut out = Vec::new();
-		while self.pending.len() >= chunk_samples {
-			for (frame_idx, frame) in self.pending[..chunk_samples].chunks_exact(self.channels).enumerate() {
-				for (ch, &sample) in frame.iter().enumerate() {
-					self.input_planar[ch][frame_idx] = sample;
-				}
+		let mut consumed = 0;
+		let mut result = Ok(());
+		while result.is_ok() && self.pending.len() - consumed >= chunk_samples {
+			result = self.convert_chunk(consumed, &mut out);
+			// A chunk the filter refused stays buffered.
+			if result.is_ok() {
+				consumed += chunk_samples;
 			}
-
-			let input = SequentialSliceOfVecs::new(&self.input_planar, self.channels, self.chunk_frames)
-				.expect("resampler input buffer dimensions");
-			let mut output =
-				SequentialSliceOfVecs::new_mut(&mut self.output_planar, self.channels, self.output_frames_max)
-					.expect("resampler output buffer dimensions");
-			let (_, produced) = self.resampler.process_into_buffer(&input, &mut output, None)?;
-
-			let prev_len = out.len();
-			out.resize(prev_len + produced * self.channels, 0.0);
-			for frame_idx in 0..produced {
-				for ch in 0..self.channels {
-					out[prev_len + frame_idx * self.channels + ch] = self.output_planar[ch][frame_idx];
-				}
-			}
-
-			self.pending.drain(..chunk_samples);
 		}
+		self.pending.drain(..consumed);
+		result?;
 
 		// Drop the filter's startup silence rather than passing it on as audio. What
 		// it costs is paid back by `flush`, which drains the same amount at the end,
@@ -313,6 +303,31 @@ impl Resampler {
 		}
 
 		Ok(out)
+	}
+
+	/// Convert the chunk starting at `start` in `pending`, appending its output to `out`.
+	fn convert_chunk(&mut self, start: usize, out: &mut Vec<f32>) -> Result<(), BackendError> {
+		let chunk = &self.pending[start..start + self.chunk_frames * self.channels];
+		for (frame_idx, frame) in chunk.chunks_exact(self.channels).enumerate() {
+			for (ch, &sample) in frame.iter().enumerate() {
+				self.input_planar[ch][frame_idx] = sample;
+			}
+		}
+
+		let input = SequentialSliceOfVecs::new(&self.input_planar, self.channels, self.chunk_frames)
+			.expect("resampler input buffer dimensions");
+		let mut output = SequentialSliceOfVecs::new_mut(&mut self.output_planar, self.channels, self.output_frames_max)
+			.expect("resampler output buffer dimensions");
+		let (_, produced) = self.resampler.process_into_buffer(&input, &mut output, None)?;
+
+		let prev_len = out.len();
+		out.resize(prev_len + produced * self.channels, 0.0);
+		for frame_idx in 0..produced {
+			for ch in 0..self.channels {
+				out[prev_len + frame_idx * self.channels + ch] = self.output_planar[ch][frame_idx];
+			}
+		}
+		Ok(())
 	}
 }
 
@@ -539,35 +554,39 @@ mod tests {
 	#[test]
 	#[ignore = "run with just rs bench-playback"]
 	fn benchmark_resampler() {
-		for (input_rate, output_rate) in [(44_100, 48_000), (48_000, 44_100)] {
+		println!("input_rate,output_rate,channels,chunk,packet,ns_per_input_frame");
+		for (input_rate, output_rate) in [(44_100, 48_000), (48_000, 44_100), (96_000, 48_000)] {
 			for channels in [1, 2, 6] {
-				for packet in [32, 960, 4096] {
-					let frames = input_rate as usize;
-					let input = vec![0.25; frames * channels as usize];
-					let mut resampler =
-						Resampler::new(input_rate, output_rate, channels, input_rate as usize / 50).unwrap();
-					let mut elapsed = std::time::Duration::ZERO;
-					for _ in 0..10 {
-						let start = moq_clock::now();
-						let mut count = 0;
-						for (index, samples) in input.chunks(packet * channels as usize).enumerate() {
-							let at = at((index * packet) as u64, input_rate as u64);
-							let held = if resampler.pending_frames() == 0 {
-								at
-							} else {
-								resampler.held_at().unwrap()
-							};
-							std::hint::black_box(resampler.output_at(held).unwrap());
-							count += std::hint::black_box(resampler.process(samples, at).unwrap()).len();
+				let mut chunks = vec![input_rate as usize / 50, (input_rate as usize / 50).clamp(1, 960)];
+				chunks.dedup();
+				for chunk in chunks {
+					for packet in [32, 960, 4096] {
+						let frames = input_rate as usize;
+						let input = vec![0.25; frames * channels as usize];
+						let mut resampler = Resampler::new(input_rate, output_rate, channels, chunk).unwrap();
+						let mut elapsed = std::time::Duration::ZERO;
+						for _ in 0..10 {
+							let start = kio::clock::now();
+							let mut count = 0;
+							for (index, samples) in input.chunks(packet * channels as usize).enumerate() {
+								let at = at((index * packet) as u64, input_rate as u64);
+								let held = if resampler.pending_frames() == 0 {
+									at
+								} else {
+									resampler.held_at().unwrap()
+								};
+								std::hint::black_box(resampler.output_at(held).unwrap());
+								count += std::hint::black_box(resampler.process(samples, at).unwrap()).len();
+							}
+							count += std::hint::black_box(resampler.drain().unwrap()).len();
+							elapsed += start.elapsed();
+							assert_eq!(count, output_rate as usize * channels as usize);
 						}
-						count += std::hint::black_box(resampler.drain().unwrap()).len();
-						elapsed += start.elapsed();
-						assert_eq!(count, output_rate as usize * channels as usize);
+						println!(
+							"{input_rate},{output_rate},{channels},{chunk},{packet},{:.1}",
+							elapsed.as_nanos() as f64 / (10 * frames) as f64
+						);
 					}
-					println!(
-						"{input_rate}->{output_rate} channels={channels} packet={packet}: {:.1} ns/input-frame",
-						elapsed.as_nanos() as f64 / (10 * frames) as f64
-					);
 				}
 			}
 		}

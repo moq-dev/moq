@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Exercise the Vulkan producer -> CUDA image contract, the GPU color conversion
-# and resize, and NVENC encoding of the result on Linux/NVIDIA hardware. The
-# driver directory is added explicitly because the Nix shell's dynamic loader
-# path does not include Ubuntu's host driver directory.
+# and resize, and NVENC encoding of the result (including wgpu's render export)
+# on Linux/NVIDIA hardware. The driver directory is added explicitly because
+# the Nix shell's dynamic loader path does not include Ubuntu's host driver
+# directory.
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
@@ -26,3 +27,5 @@ for library in libcuda.so.1 libnvidia-encode.so.1 libnvidia-ptxjitcompiler.so.1;
 done
 export LD_LIBRARY_PATH="$driver_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 just rs test -p moq-video --run-ignored only -E 'test(/^frame::(vulkan|cuda)::tests::vulkan_cuda_/)'
+# wgpu's exported image reaching NVENC through the same CUDA import.
+just rs test -p moq-video --features render --lib --run-ignored only -E 'test(/^render::export::vulkan::tests::/)'

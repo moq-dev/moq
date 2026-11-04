@@ -19,7 +19,8 @@ export type SourceInput = {
 	target: Getter<string | undefined>;
 };
 
-type SourceOutput = {
+/** Signals the source derives. */
+export type SourceOutput = {
 	// The catalog text section, or undefined when the broadcast publishes no captions.
 	catalog: Signal<Catalog.Text | undefined>;
 

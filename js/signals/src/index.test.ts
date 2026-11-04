@@ -1,5 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { type Installed, Manual, Milli, Nano, now, Second } from "@moq/clock";
+import { type Installed, Manual, Milli, Nano, now, Second, sleep, yieldNow } from "@moq/clock";
 import { Computed, type Dispose, Effect, type GetPromise, Once, race, Signal } from "./index.ts";
 
 const NO_SUBSCRIPTION_WARNING = "Effect did not subscribe to any signals; it will never rerun.";
@@ -1025,6 +1025,28 @@ describe("Computed", () => {
 		timesTen.close();
 	});
 
+	test("close clears the value and notifies downstream readers once", async () => {
+		const input = new Signal(1);
+		const value = new Computed((effect) => effect.get(input) * 2);
+		await settle();
+		const seen: (number | undefined)[] = [];
+		const unsubscribe = value.subscribe((next) => seen.push(next));
+		try {
+			input.set(3); // A queued recompute must not resurrect a closed value.
+			value.close();
+			expect(value.peek()).toBeUndefined();
+			await settle();
+			expect(seen).toEqual([undefined]);
+			value.close();
+			await settle();
+			expect(value.peek()).toBeUndefined();
+			expect(seen).toEqual([undefined]);
+		} finally {
+			unsubscribe();
+			value.close();
+		}
+	});
+
 	test("close stops recomputing", async () => {
 		const a = new Signal(1);
 		let computes = 0;
@@ -1170,8 +1192,8 @@ function thenable<T>(): PromiseLike<T> & { reactions: number; resolve: (value: T
 
 describe("race", () => {
 	test("settles with the first value to settle", async () => {
-		const slow = new Promise((resolve) => setTimeout(() => resolve("slow"), 20));
-		const fast = new Promise((resolve) => setTimeout(() => resolve("fast"), 1));
+		const slow = sleep(Nano.fromMilli(Milli(20))).then(() => "slow" as const);
+		const fast = sleep(Nano.fromMilli(Milli(1))).then(() => "fast" as const);
 		expect(await race([slow, fast])).toBe("fast");
 	});
 
@@ -1197,7 +1219,7 @@ describe("race", () => {
 			const later = new Promise<never>((_, reject) => (fail = reject));
 			expect(await race([once, later])).toBe("done");
 			fail(new Error("late"));
-			await new Promise((resolve) => setTimeout(resolve, 0));
+			await yieldNow();
 			expect(unhandled).toEqual([]);
 		} finally {
 			process.off("unhandledRejection", onUnhandled);

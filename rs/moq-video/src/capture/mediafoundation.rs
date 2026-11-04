@@ -89,7 +89,7 @@ struct Camera {
 	device: Option<ID3D11Device>,
 	width: u32,
 	height: u32,
-	framerate: Option<crate::Rate>,
+	framerate: Option<crate::FrameRate>,
 	device_name: String,
 	// Keep the DXGI manager alive for the reader's lifetime (the reader holds its
 	// own ref, but we own the pairing). Drops before `_com`.
@@ -182,7 +182,7 @@ impl Camera {
 		}
 		let framerate = unsafe { current.GetUINT64(&MF_MT_FRAME_RATE).ok() }.and_then(|packed| {
 			let (num, den) = unpack_2x32(packed);
-			crate::Rate::new(num, den).ok()
+			crate::FrameRate::new(num, den).ok()
 		});
 
 		let (device, manager) = match gpu {

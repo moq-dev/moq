@@ -16,11 +16,11 @@ import {
 	type WebSocketStreamLike,
 } from "./web-socket-stream.ts";
 
-/** The QMux wire-format versions a caller can advertise. */
+/** The QMux wire-format versions a caller can advertise. @reexport */
 export type Version = WireFormat;
 
 /** Options for a new outgoing stream. `@types/web` doesn't declare `waitUntilAvailable` yet. */
-type SendStreamOptions = WebTransportSendStreamOptions & {
+export type SendStreamOptions = WebTransportSendStreamOptions & {
 	/** Wait for the peer to grant stream credit (the default) instead of rejecting at once. */
 	waitUntilAvailable?: boolean;
 };
@@ -41,7 +41,7 @@ export interface Config {
 	maxRecordSize?: bigint;
 	/** Largest DATAGRAM *frame* (RFC 9221: type + length + payload) we advertise
 	 *  willingness to receive; null disables datagrams. This is a frame size, not a
-	 *  payload size — {@link Datagrams.maxDatagramSize} reports the usable payload
+	 *  payload size; `Session.datagrams.maxDatagramSize` reports the usable payload
 	 *  (this value less framing overhead). Keep it at or below `maxRecordSize`.
 	 *  Datagrams are a record-framed-draft feature (qmux-01+); this is ignored on
 	 *  qmux-00. Defaults to a full record. */
@@ -102,7 +102,8 @@ function configToTransportParams(config: Required<Config>): TransportParams {
 		maxDatagramFrameSize:
 			config.maxDatagramFrameSize === null
 				? 0n
-				: config.maxDatagramFrameSize < config.maxRecordSize
+				: // biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min/max throw on bigint.
+					config.maxDatagramFrameSize < config.maxRecordSize
 					? config.maxDatagramFrameSize
 					: config.maxRecordSize,
 		maxRecordSize: config.maxRecordSize,
@@ -111,79 +112,142 @@ function configToTransportParams(config: Required<Config>): TransportParams {
 	};
 }
 
-/** `WebTransportDatagramDuplexStream` (RFC 9221) backed by QMux DATAGRAM frames.
- *
- * Datagrams are unreliable: the inbound `readable` is a fixed-capacity queue that
- * drops when a slow reader lets it fill, and an outbound payload larger than
- * {@link maxDatagramSize} (or one sent before the peer advertised support) is
- * silently discarded, matching the W3C WebTransport semantics.
- */
-export class Datagrams implements WebTransportDatagramDuplexStream {
-	incomingHighWaterMark = 1024;
-	incomingMaxAge: number | null = null;
-	outgoingHighWaterMark = 1024;
-	outgoingMaxAge: number | null = null;
+// Only the session can construct or mutate the datagram transport.
+const datagramsKey = Symbol("Datagrams");
+let makeDatagrams: (send: (data: Uint8Array) => void) => Datagrams;
+let pushDatagram: (datagrams: Datagrams, data: Uint8Array) => void;
+let setMaxDatagramSize: (datagrams: Datagrams, size: number) => void;
+let closeDatagrams: (datagrams: Datagrams, err?: Error) => void;
 
+/** WebTransport datagrams with a live inbound queue limit and no expiry. */
+class Datagrams implements WebTransportDatagramDuplexStream {
+	/** The datagrams the peer sends. */
 	readonly readable: ReadableStream<Uint8Array>;
+	/** The datagrams to send to the peer. */
 	readonly writable: WritableStream<Uint8Array>;
 
+	#incomingHighWaterMark = 1024;
 	#incoming!: ReadableStreamDefaultController<Uint8Array>;
+	#pending: Uint8Array[] = [];
+	#pullResolve?: () => void;
+	#closed = false;
 	// Resolved from the peer's transport parameters once the handshake completes;
 	// 0 until then (and forever if the peer doesn't accept datagrams).
 	#maxDatagramSize = 0;
-	#send: (data: Uint8Array) => void;
 
-	/** @param send Enqueue a datagram payload onto the wire (best-effort). */
-	constructor(send: (data: Uint8Array) => void) {
-		this.#send = send;
-		// A bounded queue: `pull` is a no-op, so `desiredSize` reflects the
-		// backlog and #push drops once it's full rather than buffering unboundedly.
+	private constructor(key: typeof datagramsKey, send: (data: Uint8Array) => void) {
+		if (key !== datagramsKey) throw new TypeError("Datagrams can only be constructed by Session");
 		this.readable = new ReadableStream<Uint8Array>(
 			{
 				start: (controller) => {
 					this.#incoming = controller;
 				},
+				pull: () => {
+					const data = this.#pending.shift();
+					if (data) this.#incoming.enqueue(data);
+					if (this.#closed && this.#pending.length === 0) this.#incoming.close();
+					if (data || this.#closed) return;
+					return new Promise<void>((resolve) => {
+						this.#pullResolve = resolve;
+					});
+				},
+				cancel: () => {
+					this.#closed = true;
+					this.#pending = [];
+					this.#resolvePull();
+				},
 			},
-			{ highWaterMark: this.incomingHighWaterMark },
+			// Keep the backlog here so the live policy counts only unread packets.
+			{ highWaterMark: 0 },
 		);
 
 		this.writable = new WritableStream<Uint8Array>({
 			write: (chunk) => {
 				// Oversized or unsupported datagrams are discarded, not errored:
 				// the writable stays usable, matching unreliable-datagram semantics.
-				if (this.#maxDatagramSize > 0 && chunk.byteLength <= this.#maxDatagramSize) {
-					this.#send(chunk);
-				}
+				if (this.#maxDatagramSize > 0 && chunk.byteLength <= this.#maxDatagramSize) send(chunk);
 			},
 		});
 	}
 
+	static {
+		makeDatagrams = (send) => new Datagrams(datagramsKey, send);
+		pushDatagram = (datagrams, data) => datagrams.#push(data);
+		setMaxDatagramSize = (datagrams, size) => {
+			datagrams.#maxDatagramSize = size;
+		};
+		closeDatagrams = (datagrams, err) => datagrams.#close(err);
+	}
+
+	/** The largest payload a datagram can carry, or 0 before the peer allows any. */
 	get maxDatagramSize(): number {
 		return this.#maxDatagramSize;
 	}
 
-	/** Resolve the send-payload limit from the negotiated parameters. */
-	setMaxDatagramSize(size: number): void {
-		this.#maxDatagramSize = size;
+	/** The live inbound queue limit; lowering it preserves already queued datagrams. */
+	get incomingHighWaterMark(): number {
+		return this.#incomingHighWaterMark;
 	}
 
-	/** Deliver an inbound datagram to the reader, dropping it if the queue is full. */
-	push(data: Uint8Array): void {
-		// `desiredSize` is null once the readable is closed/errored (e.g. a datagram
-		// arriving in a WS message the read loop delivers just after the session
-		// closed); enqueue would throw, so drop silently — matching Rust's try_send.
-		if (this.#incoming.desiredSize === null || this.#incoming.desiredSize <= 0) {
-			return; // reader is behind or gone — shed load
+	set incomingHighWaterMark(value: number) {
+		if (typeof value !== "number") throw new TypeError("incomingHighWaterMark must be a number");
+		if (Number.isNaN(value) || value < 0) throw new RangeError("incomingHighWaterMark must be nonnegative");
+		this.#incomingHighWaterMark = Math.max(1, value);
+	}
+
+	/** Inbound expiry is unsupported. */
+	get incomingMaxAge(): number | null {
+		return null;
+	}
+
+	set incomingMaxAge(value: number | null) {
+		if (value !== null) throw new DOMException("Datagram expiry is unsupported", "NotSupportedError");
+	}
+
+	/** The outbound queue limit cannot be changed. */
+	get outgoingHighWaterMark(): number {
+		return 1024;
+	}
+
+	set outgoingHighWaterMark(value: number) {
+		if (value !== 1024) throw new DOMException("Outbound queue policy is unsupported", "NotSupportedError");
+	}
+
+	/** Outbound expiry is unsupported. */
+	get outgoingMaxAge(): number | null {
+		return null;
+	}
+
+	set outgoingMaxAge(value: number | null) {
+		if (value !== null) throw new DOMException("Datagram expiry is unsupported", "NotSupportedError");
+	}
+
+	#push(data: Uint8Array): void {
+		if (this.#closed) return;
+		if (this.#pullResolve) {
+			this.#incoming.enqueue(data);
+			this.#resolvePull();
+		} else if (this.#pending.length < this.#incomingHighWaterMark) {
+			this.#pending.push(data);
 		}
-		this.#incoming.enqueue(data);
 	}
 
-	/** Close the inbound readable when the session ends. */
-	close(err?: Error): void {
-		try {
-			if (err) this.#incoming.error(err);
-			else this.#incoming.close();
-		} catch {}
+	#resolvePull(): void {
+		const resolve = this.#pullResolve;
+		this.#pullResolve = undefined;
+		resolve?.();
+	}
+
+	#close(err?: Error): void {
+		if (this.#closed) return;
+		this.#closed = true;
+		if (err) {
+			this.#pending = [];
+			this.#incoming.error(err);
+		} else if (this.#pending.length === 0) {
+			this.#incoming.close();
+		}
+		this.#resolvePull();
 	}
 }
 
@@ -285,10 +349,10 @@ export interface SessionOptions extends WebTransportOptions {
 	 *
 	 * Each entry is either:
 	 *  - A bare ALPN (e.g. `"moq-lite-04"`). The polyfill resolves it via
-	 *    [[SessionOptions.versions]] and emits the prefixed wire form
+	 *    {@link SessionOptions.versions} and emits the prefixed wire form
 	 *    `{version}.{alpn}` (e.g. `"qmux-01.moq-lite-04"`).
 	 *  - An explicit pair already prefixed with a QMux version
-	 *    (e.g. `"qmux-00.moq-transport-17"`). Advertised as-is.
+	 *    (e.g. `"qmux-00.moq-transport-18"`). Advertised as-is.
 	 *
 	 * Bare entries that have no matching `versions` entry throw at
 	 * construction time.
@@ -334,8 +398,8 @@ export interface SessionOptions extends WebTransportOptions {
 /** Options for accepting a QMux Session on an already-negotiated socket.
  *
  * The handshake is done by the time [[Session.accept]] is called, so the
- * subprotocol options ([[SessionOptions.protocols]], `versions`,
- * `requireProtocol`) don't apply — see [[selectSubprotocol]], which consumes
+ * subprotocol options ({@link SessionOptions.protocols}, `versions`,
+ * `requireProtocol`) don't apply - see [[selectSubprotocol]], which consumes
  * them during the upgrade instead.
  */
 export interface AcceptOptions extends Pick<SessionOptions, "config" | "sendBufferSize"> {
@@ -344,7 +408,7 @@ export interface AcceptOptions extends Pick<SessionOptions, "config" | "sendBuff
 	 *
 	 *  [[Session.accept]] reads `socket.protocol` by default, which is where the
 	 *  wire-format version comes from. Set this when the socket reports an empty
-	 *  protocol despite one having been negotiated — otherwise the session refuses the socket. Pass the full wire value (e.g. `"qmux-02.moq-lite-04"`), not
+	 *  protocol despite one having been negotiated - otherwise the session refuses the socket. Pass the full wire value (e.g. `"qmux-02.moq-lite-04"`), not
 	 *  the bare app protocol. */
 	protocol?: string;
 }
@@ -448,7 +512,7 @@ export function resolveSubprotocols(
 /** Choose the `Sec-WebSocket-Protocol` value to accept from a client's offer.
  *
  * The server role performs the WebSocket handshake itself (`Deno.upgradeWebSocket`,
- * `ws`, `Bun.serve`, ...), so it — not this library — picks the subprotocol. This
+ * `ws`, `Bun.serve`, ...), so it - not this library - picks the subprotocol. This
  * is the server-side mirror of [[resolveSubprotocols]]: it expands the same
  * `protocols` + `versions` pair into the wire forms this session supports, in
  * preference order, and returns the first one the client offered. Pass the result
@@ -460,14 +524,14 @@ export function resolveSubprotocols(
  * caller should turn into a failed upgrade rather than accepting the socket:
  * completing the handshake with no supported subprotocol is refused.
  *
- * Preference is ours, not the client's — the first entry in `protocols` that the
+ * Preference is ours, not the client's - the first entry in `protocols` that the
  * client also offered wins, matching the Rust `qmux::ws::Server`.
  *
  * @example
  * ```ts
  * const protocol = selectSubprotocol(req.headers.get("sec-websocket-protocol"), {
- *   protocols: ["moq-transport-17"],
- *   versions: { "moq-transport-17": null },
+ *   protocols: ["moq-transport-18"],
+ *   versions: { "moq-transport-18": null },
  * });
  * if (!protocol) return new Response("no supported protocol", { status: 400 });
  * const { socket, response } = Deno.upgradeWebSocket(req, { protocol });
@@ -537,7 +601,7 @@ export default class Session implements WebTransport {
 	// [[AcceptOptions.protocol]]: stands in for `socket.protocol` when the host
 	// doesn't expose the negotiated subprotocol.
 	#protocolOverride?: string;
-	// [[SessionOptions.requireProtocol]] on a dial: the server must pick one of
+	// `SessionOptions.requireProtocol` on a dial: the server must pick one of
 	// our application protocols, not answer with none.
 	#requireProtocol = false;
 	#closed?: Error;
@@ -579,8 +643,12 @@ export default class Session implements WebTransport {
 	readonly incomingUnidirectionalStreams: ReadableStream<ReadableStream<Uint8Array>>;
 	#incomingUnidirectionalQueue: IncomingStreamQueue<ReadableStream<Uint8Array>>;
 
+	readonly #datagrams = makeDatagrams((data) => this.#sendDatagram(data));
+
 	/** Unreliable datagrams sent and received as QMux DATAGRAM frames. */
-	readonly datagrams = new Datagrams((data) => this.#sendDatagram(data));
+	get datagrams(): WebTransportDatagramDuplexStream {
+		return this.#datagrams;
+	}
 
 	// Flow control state
 	#config: Required<Config>;
@@ -608,7 +676,7 @@ export default class Session implements WebTransport {
 	#bidiStreamCredit = new Credit(0n);
 	#uniStreamCredit = new Credit(0n);
 
-	// Stream count tracking via Credit (for receiving — our limits)
+	// Stream count tracking via Credit (for receiving - our limits)
 	#recvBiCredit: Credit;
 	#recvUniCredit: Credit;
 
@@ -632,14 +700,14 @@ export default class Session implements WebTransport {
 	 * application-level ALPNs in `options.protocols` plus a `versions`
 	 * map saying which QMux wire-format version each bare ALPN rides on. The
 	 * wire form `{qmux-VV}.{alpn}` is built automatically; entries already in
-	 * pair form (e.g. `"qmux-00.moq-transport-17"`) pass through unchanged.
+	 * pair form (e.g. `"qmux-00.moq-transport-18"`) pass through unchanged.
 	 *
 	 * Once the handshake completes, the QMux wire-format version is derived
 	 * from the negotiated `Sec-WebSocket-Protocol`. `.protocol` exposes the
 	 * application protocol with the QMux prefix stripped.
 	 *
 	 * Pass an already-connected `WebSocket` (or `WebSocketStream`) instead of a
-	 * URL to run the client role over a socket you opened yourself — the
+	 * URL to run the client role over a socket you opened yourself - the
 	 * subprotocol was chosen when you created it, so `options.protocols` and
 	 * `options.versions` are ignored. See [[Session.accept]] for the server role.
 	 */
@@ -694,7 +762,7 @@ export default class Session implements WebTransport {
 
 		this.#attach(
 			dial
-				? // Open the transport via `WebSocketStream` — native when present (real
+				? // Open the transport via `WebSocketStream` - native when present (real
 					// backpressure), else the ponyfill over a plain `WebSocket`. One code
 					// path for both, so the path exercised in tests is the one Chromium
 					// runs natively.
@@ -715,7 +783,7 @@ export default class Session implements WebTransport {
 	 * advertised. Use [[selectSubprotocol]] to pick that value during the upgrade.
 	 *
 	 * The returned session is a `WebTransport`, identical to a client session
-	 * apart from the stream-id role — so it accepts peer-initiated streams and
+	 * apart from the stream-id role - so it accepts peer-initiated streams and
 	 * opens server-initiated ones.
 	 *
 	 * @example
@@ -771,13 +839,13 @@ export default class Session implements WebTransport {
 			(info) => {
 				// The socket went away without a CONNECTION_CLOSE. A peer close or a
 				// local close() would already have transitioned us (and #close is
-				// idempotent), so reaching here settled means the session dropped —
+				// idempotent), so reaching here settled means the session dropped -
 				// even if the WebSocket itself closed with a "clean" status code.
 				this.#closeReason ??= new Error(`Connection closed: ${info.closeCode ?? 0} ${info.reason ?? ""}`);
 				this.#abort(info.closeCode ?? 1006, info.reason ?? "");
 			},
 			(err: unknown) => {
-				// Keep the socket failure itself — it becomes the SessionError's cause, and
+				// Keep the socket failure itself - it becomes the SessionError's cause, and
 				// it's the only description of *why* the transport died.
 				this.#closeReason ??= err instanceof Error ? err : new Error("WebSocketStream closed");
 				this.#abort(1006, "WebSocketStream error");
@@ -799,7 +867,7 @@ export default class Session implements WebTransport {
 				}
 				// `openWebSocketStream` normalizes the native API's ArrayBuffer chunks,
 				// but a transport handed straight to the constructor or [[accept]]
-				// hasn't been through it — and Chromium's WebSocketStream yields
+				// hasn't been through it - and Chromium's WebSocketStream yields
 				// ArrayBuffer. Normalize here so every inbound path reaches the decoder
 				// as a Uint8Array.
 				this.#onData(value instanceof ArrayBuffer ? new Uint8Array(value) : value);
@@ -818,7 +886,7 @@ export default class Session implements WebTransport {
 		this.#protocol = parseProtocol(rawProtocol, version);
 
 		// Datagrams rely on the record layer for framing, so don't advertise the
-		// parameter — or accept datagrams — on any non-record wire format. The recv
+		// parameter - or accept datagrams - on any non-record wire format. The recv
 		// path gates on #ourParams.maxDatagramFrameSize. RESET_STREAM_AT is only
 		// permitted on draft-02, so advertise `reset_stream_at` there and nowhere
 		// else; the recv path gates on #ourParams.resetStreamAt.
@@ -878,7 +946,7 @@ export default class Session implements WebTransport {
 				}
 			} else {
 				// draft-00 §5.2: `max_frame_size` bounds the whole frame, header
-				// included, and may only be raised from its initial value — which we
+				// included, and may only be raised from its initial value - which we
 				// never do, so the initial value is what a peer may send. Each message
 				// is one frame here.
 				if (this.#version === "qmux-00" && data.byteLength > Frame.MAX_FRAME_SIZE) {
@@ -917,7 +985,7 @@ export default class Session implements WebTransport {
 		} else if (frame.type === "application_close" || frame.type === "connection_close") {
 			this.#closeReason ??= new Error(`Connection closed: ${frame.code.value} ${frame.reason}`);
 			if (frame.type === "application_close") {
-				// APPLICATION_CLOSE (0x1d): the peer closed the session deliberately —
+				// APPLICATION_CLOSE (0x1d): the peer closed the session deliberately -
 				// graceful, so `closed` fulfills with its code/reason.
 				this.#close(Number(frame.code.value), frame.reason);
 			} else {
@@ -941,7 +1009,7 @@ export default class Session implements WebTransport {
 		} else if (frame.type === "datagram") {
 			// `max_datagram_frame_size` is negotiated: we advertised the largest
 			// DATAGRAM frame we're willing to receive, so a peer that sends one we
-			// never accepted — or one larger than we advertised — has violated the
+			// never accepted - or one larger than we advertised - has violated the
 			// contract. Per RFC 9221 that's a fatal PROTOCOL_VIOLATION, not a
 			// droppable frame; throwing here closes the session via #onData (matching
 			// the Rust implementation's DatagramsUnsupported / FrameTooLarge).
@@ -959,7 +1027,7 @@ export default class Session implements WebTransport {
 			if (frameSize > this.#ourParams.maxDatagramFrameSize) {
 				throw new Error("received a DATAGRAM larger than our advertised max_datagram_frame_size");
 			}
-			this.datagrams.push(frame.data);
+			pushDatagram(this.#datagrams, frame.data);
 		} else if (frame.type === "ping_request") {
 			// Draft-02: request sequence numbers must strictly increase.
 			if (this.#version === "qmux-02") {
@@ -1009,12 +1077,13 @@ export default class Session implements WebTransport {
 			// A datagram must fit in one record, so the frame is capped by the
 			// smaller of the peer's datagram-frame limit and its record size.
 			const cap =
+				// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min/max throw on bigint.
 				params.maxRecordSize < params.maxDatagramFrameSize ? params.maxRecordSize : params.maxDatagramFrameSize;
 			// We encode the length-prefixed form (0x31): one type byte plus a length
 			// varint sized for `cap`. Subtracting it keeps the frame within the limit.
 			const overhead = BigInt(1 + VarInt.from(cap).size());
 			const payload = cap > overhead ? cap - overhead : 0n;
-			this.datagrams.setMaxDatagramSize(Number(payload));
+			setMaxDatagramSize(this.#datagrams, Number(payload));
 		}
 
 		// Credit streams created before params arrived. Only qmux-02 requires the
@@ -1048,6 +1117,7 @@ export default class Session implements WebTransport {
 		if (a === 0n && b === 0n) return 0n;
 		if (a === 0n) return b;
 		if (b === 0n) return a;
+		// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min/max throw on bigint.
 		return a < b ? a : b;
 	}
 
@@ -1056,7 +1126,7 @@ export default class Session implements WebTransport {
 		this.#idleTimer = undefined;
 		const timeoutMs = this.#effectiveIdleTimeoutMs();
 		if (timeoutMs === 0n) return;
-		// Poll at a fraction of the timeout — frequent enough to trigger pings on time
+		// Poll at a fraction of the timeout - frequent enough to trigger pings on time
 		// but not so frequent it burns CPU on otherwise-quiet sessions.
 		const timeout = Nano.fromMilli(Milli(Number(timeoutMs)));
 		const timer = interval(Nano.fromMilli(Milli(Math.max(50, Number(timeoutMs) / 6))));
@@ -1094,7 +1164,7 @@ export default class Session implements WebTransport {
 	 * while its socket still accepts our writes would never be reclaimed.
 	 *
 	 * Crediting the first send after each receive is what still lets a mostly
-	 * one-way sender stay open — its peer answers the keep-alive, and each answer
+	 * one-way sender stay open - its peer answers the keep-alive, and each answer
 	 * re-arms the credit.
 	 */
 	#idleActivityAt(): Instant {
@@ -1106,6 +1176,7 @@ export default class Session implements WebTransport {
 			this.#sendResetAt = this.#lastSendAt;
 			this.#sendCredit = false;
 		}
+		// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min/max throw on bigint.
 		return this.#recvSeen > this.#sendResetAt ? this.#recvSeen : this.#sendResetAt;
 	}
 
@@ -1132,7 +1203,7 @@ export default class Session implements WebTransport {
 			try {
 				this.#sendPriorityFrame({ type: "ping_request", sequence: BigInt(seq) });
 			} catch (e) {
-				// Best effort — if the send fails, the close path will fire shortly.
+				// Best effort - if the send fails, the close path will fire shortly.
 				// Log a breadcrumb so a never-fire encoder bug doesn't vanish silently.
 				console.warn("qmux: keep-alive ping failed", e);
 			}
@@ -1290,6 +1361,7 @@ export default class Session implements WebTransport {
 		// TODO(qmux-03): Once draft-03 is implemented, reject finalSize < received
 		// (and conflicting terminal final sizes) with FINAL_SIZE_ERROR instead of
 		// applying this draft-00/-01/-02 compatibility fallback.
+		// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min/max throw on bigint.
 		const finalSize = frame.finalSize > received ? frame.finalSize : received;
 		const gap = finalSize - received;
 
@@ -1439,7 +1511,7 @@ export default class Session implements WebTransport {
 				}
 			}
 		} else {
-			// Existing stream — validate recv flow control
+			// Existing stream - validate recv flow control
 			if (!this.#accountRecv(frame)) {
 				this.#sendClose("connection_close", 1002, "flow control error");
 				this.#abort(1002, "flow control error");
@@ -1464,7 +1536,7 @@ export default class Session implements WebTransport {
 	#handleResetStream(frame: Frame.ResetStream) {
 		// A RESET_STREAM_AT frame (reliableSize present, draft-02) is only legal if
 		// we advertised the `reset_stream_at` transport parameter. Receiving it
-		// otherwise — or on an earlier draft, which never advertises it — is a
+		// otherwise - or on an earlier draft, which never advertises it - is a
 		// PROTOCOL_VIOLATION. Plain RESET_STREAM is always allowed.
 		if (frame.reliableSize !== undefined && !this.#ourParams.resetStreamAt) {
 			throw new Error("RESET_STREAM_AT received without advertising reset_stream_at");
@@ -1588,9 +1660,10 @@ export default class Session implements WebTransport {
 	#maxStreamPayload(id: Stream.Id, offset: bigint): bigint {
 		const peerMax = Frame.maxStreamPayload(this.#version, this.#sendFrameBudget(), id, offset);
 		const compatibilityMax = BigInt(Frame.MAX_FRAME_PAYLOAD);
+		// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min/max throw on bigint.
 		const max = peerMax < compatibilityMax ? peerMax : compatibilityMax;
 		// Unreachable with a conforming peer: max_record_size is validated against
-		// the draft-01 minimum on arrival. Guard anyway — a zero budget would make
+		// the draft-01 minimum on arrival. Guard anyway - a zero budget would make
 		// the chunking loops below spin forever instead of failing.
 		if (max === 0n) throw new Error("peer frame limit leaves no room for stream data");
 		return max;
@@ -1628,6 +1701,7 @@ export default class Session implements WebTransport {
 			// Size from the peer's frame budget and this frame's actual header, then
 			// apply the compatibility ceiling for released receivers.
 			const payloadMax = this.#maxStreamPayload(id, flow.sendOffset);
+			// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min/max throw on bigint.
 			const chunkMax = Number(payloadMax < remaining ? payloadMax : remaining);
 
 			// Claim flow control credit (stream + connection)
@@ -1675,7 +1749,7 @@ export default class Session implements WebTransport {
 		await this.#enqueueStreamFrame(streamId, { type: "stream", id, offset, data: new Uint8Array(), fin: true });
 	}
 
-	/** Enqueue a DATAGRAM frame on the scheduler's bounded, lossy datagram lane —
+	/** Enqueue a DATAGRAM frame on the scheduler's bounded, lossy datagram lane -
 	 *  dropped under transport backpressure or once closed, rather than piling up
 	 *  on the (lossless, unbounded) control lane. Size/support checks happen in
 	 *  {@link Datagrams} before we get here. */
@@ -1873,7 +1947,7 @@ export default class Session implements WebTransport {
 
 	/** Shared teardown for both terminal transitions: tears down streams,
 	 *  credits, and the scheduler. The caller has already marked the session
-	 *  closed and settled `ready`/`closed` — the only thing that differs between
+	 *  closed and settled `ready`/`closed` - the only thing that differs between
 	 *  a clean shutdown and a dropped session is which way `closed` settled, and
 	 *  {@link #close} vs {@link #abort} own that choice. */
 	#teardown() {
@@ -1887,7 +1961,7 @@ export default class Session implements WebTransport {
 		// app-initiated close leaves `#closeReason` unset, so the datagram
 		// readable closes cleanly instead of erroring, matching the incoming
 		// stream controllers below.
-		this.datagrams.close(this.#closeReason);
+		closeDatagrams(this.#datagrams, this.#closeReason);
 		for (const c of this.#sendStreams.values()) {
 			try {
 				c.error(this.#closed);
@@ -1930,7 +2004,7 @@ export default class Session implements WebTransport {
 	}
 
 	/** Graceful terminal transition: `closed` **fulfills** with the close code
-	 *  and reason. Per the WebTransport contract this is the only clean outcome —
+	 *  and reason. Per the WebTransport contract this is the only clean outcome -
 	 *  reached by a local {@link close} (which first puts an APPLICATION_CLOSE on
 	 *  the wire) or by receiving a peer's APPLICATION_CLOSE (0x1d). A peer's
 	 *  CONNECTION_CLOSE (0x1c) routes to {@link #abort} instead. Idempotent. */
@@ -1947,7 +2021,7 @@ export default class Session implements WebTransport {
 	}
 
 	/** Abnormal terminal transition: `closed` **rejects** with a
-	 *  `WebTransportError`. Reached on everything that is not a clean shutdown —
+	 *  `WebTransportError`. Reached on everything that is not a clean shutdown -
 	 *  socket failure, read error, idle timeout, a protocol violation we detected
 	 *  locally, or a peer's CONNECTION_CLOSE (0x1c). Close codes cannot carry this
 	 *  distinction, since they are
@@ -2012,7 +2086,17 @@ export default class Session implements WebTransport {
 	}
 
 	/** Always `"default"`: the underlying TCP connection does its own congestion control. */
-	get congestionControl(): string {
+	get congestionControl(): WebTransportCongestionControl {
 		return "default";
+	}
+
+	/** Always `"reliable-only"`: datagrams ride the WebSocket, so nothing is unreliable. */
+	get reliability() {
+		return "reliable-only" as const;
+	}
+
+	/** Reports no counters: the WebSocket exposes none. `datagrams` is required by the W3C dictionary. */
+	async getStats() {
+		return { datagrams: {} };
 	}
 }

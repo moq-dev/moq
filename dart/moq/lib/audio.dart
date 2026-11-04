@@ -16,8 +16,20 @@ typedef Producer = MoqAudioProducer;
 /// Encodes PCM without publishing it.
 typedef Encoder = MoqAudioEncoder;
 
-/// Subscribes to a catalog audio rendition and yields decoded PCM; open one with `Consumer.subscribe`.
+/// Subscribes to a catalog audio rendition and yields each [Read]; open one with `Consumer.subscribe`.
 typedef Consumer = MoqAudioConsumer;
+
+/// One item a [Consumer] reads, in delivery order: [ReadFrame], [ReadGap], or [ReadEnd].
+typedef Read = MoqAudioRead;
+
+/// Decoded PCM.
+typedef ReadFrame = FrameMoqAudioRead;
+
+/// Media after what was already read was lost; what follows does not continue it.
+typedef ReadGap = GapMoqAudioRead;
+
+/// The publisher stopped its encoder; frames starting before `end` are its remaining media.
+typedef ReadEnd = EndMoqAudioRead;
 
 /// The PCM layout written to a [Producer].
 typedef EncoderInput = MoqAudioEncoderInput;
@@ -35,42 +47,13 @@ typedef Frame = MoqAudioFrame;
 typedef Packet = MoqAudioPacket;
 
 /// The packets an [Encoder] drains on finish and the padded samples to discard.
-typedef EncoderFinish = MoqAudioEncoderFinish;
+typedef EncoderFinish = MoqAudioEncoderFinished;
 
 /// The audio codec: `Codec.opus()` or `Codec.aac()`.
 typedef Codec = MoqAudioCodec;
 
 /// A raw PCM sample layout.
 typedef SampleFormat = MoqAudioSampleFormat;
-
-/// Duration view over a PCM frame's timestamp.
-extension AudioFrameDuration on MoqAudioFrame {
-  /// Presentation timestamp of the first sample.
-  Duration get timestamp => Duration(microseconds: timestampUs);
-}
-
-/// Duration view over an encoder's frame size.
-extension AudioEncoderOutputDuration on MoqAudioEncoderOutput {
-  /// Encoded frame duration; zero takes the codec's own.
-  Duration get frameDuration => Duration(microseconds: frameDurationUs);
-}
-
-/// Duration view over a decoder's latency bound.
-extension AudioDecoderOutputDuration on MoqAudioDecoderOutput {
-  /// Upper bound on buffering before a stalled group is skipped, or null for the default.
-  Duration? get maxDelay =>
-      maxDelayUs == null ? null : Duration(microseconds: maxDelayUs!);
-
-  /// Fixed playout delay to hold ahead of the playhead, or null to estimate it from arrival timing.
-  Duration? get delay =>
-      delayUs == null ? null : Duration(microseconds: delayUs!);
-}
-
-/// Duration view over a consumer's playout delay.
-extension AudioConsumerDuration on MoqAudioConsumer {
-  /// Playout delay to hold ahead of the playhead: the fixed one, or the estimate from every frame read so far.
-  Duration get delay => Duration(microseconds: delayUs());
-}
 
 /// Input, codec settings, and publication ownership for a producer.
 typedef ProducerOptions = MoqAudioProducerOptions;

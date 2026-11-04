@@ -87,10 +87,10 @@ mod tests {
 	use super::*;
 	use crate::session::MediaSink;
 
-	/// The retention the caller configured has to land on the media tracks the codec
+	/// The max age the caller configured has to land on the media tracks the codec
 	/// bridges mint, not just on the catalog producer it was set on.
 	#[tokio::test]
-	async fn tracks_inherit_the_configured_retention() {
+	async fn tracks_inherit_the_configured_max_age() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let mut sink = IngestSink::new(
 			broadcast.clone(),
@@ -106,7 +106,7 @@ mod tests {
 		)
 		.unwrap();
 
-		let info = broadcast.consume().track("0.avc3").unwrap().query().await.unwrap();
+		let info = broadcast.consume().track("0.avc3").unwrap().info().await.unwrap();
 		assert_eq!(info.max_age, Some(Duration::from_secs(3)));
 	}
 

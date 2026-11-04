@@ -51,28 +51,22 @@ impl StreamCodes for lite::Version {
 	}
 
 	fn encode_stream_code(&self, err: &StreamError) -> u32 {
-		match err {
-			StreamError::NotFetchable if !self.has_not_fetchable() => StreamError::NotFound.to_code(),
-			err => err.to_code(),
-		}
+		err.to_code()
 	}
 
 	fn decode_stream_code(&self, code: u32) -> StreamError {
-		match StreamError::from_code(code) {
-			StreamError::NotFetchable if !self.has_not_fetchable() => StreamError::Unknown(code),
-			err => err,
-		}
+		StreamError::from_code(code)
 	}
 }
 
-/// moq-transport's registry, which is per draft.
+/// moq-transport's registry.
 impl StreamCodes for ietf::Version {
 	fn encode_stream_code(&self, err: &StreamError) -> u32 {
-		ietf::error::to_stream_code(err, *self)
+		ietf::error::to_stream_code(err)
 	}
 
 	fn decode_stream_code(&self, code: u32) -> StreamError {
-		ietf::error::from_stream_code(code, *self)
+		ietf::error::from_stream_code(code)
 	}
 }
 
@@ -111,7 +105,7 @@ mod tests {
 	#[test]
 	fn the_version_picks_the_registry() {
 		let lite = crate::Version::Lite(lite::Version::Lite05);
-		let ietf = crate::Version::Ietf(ietf::Version::Draft20);
+		let ietf = crate::Version::Ietf(ietf::Version::Draft22);
 
 		assert_eq!(lite.encode_stream_code(&StreamError::Old), StreamError::Old.to_code());
 		assert_eq!(ietf.encode_stream_code(&StreamError::Old), ietf::error::INTERNAL_ERROR);
@@ -120,42 +114,8 @@ mod tests {
 		assert_eq!(lite.encode_stream_code(&StreamError::Cancel), ietf::error::CANCELLED);
 		assert_eq!(ietf.encode_stream_code(&StreamError::Cancel), ietf::error::CANCELLED);
 
-		// GOING_AWAY is moq-lite's 0x4 and draft-20's, but draft-17 gives 0x4 to
-		// UNKNOWN_OBJECT_STATUS, so it is not sent there and not read back there.
-		let draft17 = crate::Version::Ietf(ietf::Version::Draft17);
 		assert_eq!(lite.decode_stream_code(0x4), StreamError::GoingAway);
 		assert_eq!(ietf.decode_stream_code(0x4), StreamError::GoingAway);
-		assert_eq!(draft17.decode_stream_code(0x4), StreamError::Unknown(0x4));
-		assert_eq!(
-			draft17.encode_stream_code(&StreamError::GoingAway),
-			ietf::error::INTERNAL_ERROR
-		);
-	}
-
-	/// NOT_FETCHABLE is lite-07's: an earlier peer is told NOT_FOUND, the miss it would
-	/// have been told before, and is not credited with a code its version never assigned.
-	#[test]
-	fn not_fetchable_is_lite_07s() {
-		for version in [lite::Version::Lite05, lite::Version::Lite06] {
-			assert_eq!(
-				version.encode_stream_code(&StreamError::NotFetchable),
-				StreamError::NotFound.to_code(),
-				"{version}"
-			);
-			assert_eq!(
-				version.decode_stream_code(0x3a),
-				StreamError::Unknown(0x3a),
-				"{version}"
-			);
-		}
-
-		let version = lite::Version::Lite07;
-		assert_eq!(version.encode_stream_code(&StreamError::NotFetchable), 0x3a);
-		assert_eq!(version.decode_stream_code(0x3a), StreamError::NotFetchable);
-		assert_eq!(
-			version.decode_stream_code(StreamError::NotFound.to_code()),
-			StreamError::NotFound
-		);
 	}
 
 	/// A dropped [`Writer`](super::Writer) resets with a cancellation, and `Drop` cannot
@@ -178,7 +138,7 @@ mod tests {
 	/// connection closed. Native transport adapters supply that metadata themselves.
 	#[test]
 	fn a_virtual_stream_close_does_not_claim_the_connection_closed() {
-		let version = ietf::Version::Draft16;
+		let version = ietf::Version::Draft18;
 		assert!(matches!(version.transport_error(Error::Closed), Error::Transport(_)));
 		assert!(matches!(
 			version.transport_error(Error::IdleTimeout),
@@ -206,7 +166,7 @@ mod tests {
 			}
 		}
 
-		let version = ietf::Version::Draft20;
+		let version = ietf::Version::Draft22;
 
 		// 0x0 ends a session cleanly, but fails a stream.
 		assert!(matches!(

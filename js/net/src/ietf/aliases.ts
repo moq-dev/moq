@@ -22,21 +22,20 @@ type Resolver<T> = PromiseWithResolvers<T>["resolve"];
  *
  * Kept as two components rather than one joined string: a track name may contain the same
  * separator a broadcast path uses, so `a` + `b/c` and `a/b` + `c` would otherwise compare
- * equal and turn a genuine collision into apparent sharing. The publisher instance a
- * subscription names (MoQ Epoch) is part of it: another instance is other content.
+ * equal and turn a genuine collision into apparent sharing.
  * @internal
  */
-export type TrackIdentity = { broadcast: string; name: string; epoch?: string };
+export type TrackIdentity = { broadcast: string; name: string };
 
 function sameTrack(a: TrackIdentity, b: TrackIdentity): boolean {
-	return a.broadcast === b.broadcast && a.name === b.name && a.epoch === b.epoch;
+	return a.broadcast === b.broadcast && a.name === b.name;
 }
 
 /**
  * Thrown when a group arrives for a subscription we already cancelled.
  *
  * The publisher only stops once our cancellation reaches it, so objects keep arriving for
- * at least a round trip afterwards. Draft-19 section 11.1 asks us to keep enough state to
+ * at least a round trip afterwards. Draft-22 section 3.1.3 asks us to keep enough state to
  * discard them quickly "rather than treating them as belonging to an unknown Track Alias".
  *
  * This makes the window quiet, not safe. Once a publisher reassigns the alias the tombstone
@@ -54,7 +53,7 @@ export class RetiredTrackAlias extends Error {
 /**
  * Thrown when a publisher gives one alias to two subscriptions of the same track.
  *
- * Draft-19 section 5.1 permits this and expects the subscriber to demux by re-applying
+ * Draft-22 section 3.1.3 permits this and expects the subscriber to demux by re-applying
  * each subscription's filter. Ours are all LargestObject, so they are indistinguishable and
  * we cannot, which costs the one subscription. It is not a protocol error, so it must not
  * take the session down with it.
@@ -69,7 +68,7 @@ export class SharedTrackAlias extends Error {
 
 /**
  * Thrown when a publisher points one alias at two different tracks at once, which
- * draft-19 section 11.1 makes fatal to the session.
+ * draft-22 section 3.1.3 makes fatal to the session.
  * @internal
  */
 export class DuplicateTrackAlias extends Error {

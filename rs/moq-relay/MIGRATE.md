@@ -5,6 +5,90 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### Built-in ACME is removed ([#7803](https://github.com/moq-dev/moq/pull/7803))
+
+Remove the `acme` Cargo feature, `[acme]` table, `--acme-*` flags, and `MOQ_ACME_*` variables.
+In Rust, remove `Config::acme` and uses of `moq_relay::acme::Config`.
+The removed flags, TOML table, and environment variables are refused as unknown settings.
+Have an external certificate manager issue and renew the certificate, then set `listen.tls.cert` / `key` and, for HTTPS, `web.https.cert` / `key` to its PEM files; both listeners reload changes.
+For local development, `listen.tls.generate` still creates self-signed certificates.
+
+The NixOS module also removes `services.moq-relay.acme.*`: use `services.moq-relay.tls.certs` for externally managed certificates, or `tls.generate` for development.
+If you used `acme.httpsPort`, configure the HTTPS listener separately through the service's `MOQ_WEB_HTTPS_LISTEN`, `MOQ_WEB_HTTPS_CERT`, and `MOQ_WEB_HTTPS_KEY` environment variables, and grant `CAP_NET_BIND_SERVICE` if its port is below 1024.
+
+### `/nodes` lists peers that are down ([#7776](https://github.com/moq-dev/moq/pull/7776))
+
+The internal `/nodes` endpoint lists every configured outbound peer, not only those with a live session.
+A peer that is connecting, retrying, or has never connected has an empty `connections` array, so tooling that counts entries as live peers must count those with a nonempty `connections` instead.
+Each connection adds `transport`, and each peer adds `last_connected_seconds_ago`, null until its first successful connect.
+A LAN peer is named by its mDNS identity instead of the first address dialed, whose path carried its credential.
+
+### Stats are configured in `cluster::Options` ([#7673](https://github.com/moq-dev/moq/pull/7673))
+
+`Cluster::with_stats` is removed, and `stats::Config::build` is no longer public. Pass the stats config to `Cluster::new` instead, which builds the producer on the cluster's origin and runs its publisher in the returned `Driver`:
+
+```rust
+// Before
+let (cluster, driver) = Cluster::new(options)?;
+let (stats, publisher) = stats_config.build(cluster.origin.clone())?;
+let cluster = cluster.with_stats(stats, publisher);
+
+// After
+let (cluster, driver) = Cluster::new(options.with_stats(stats_config))?;
+```
+
+Read the registry from `cluster.stats`; `Relay::stats` still returns the producer. Publishing runs only while the driver is polled, which `Relay::run` does, and stops when the driver drops. Building stats needs no Tokio runtime, and an invalid stats config now fails `Cluster::new`.
+
+### The iroh transport is removed ([#7345](https://github.com/moq-dev/moq/pull/7345))
+
+The `iroh` feature, the `[iroh]` table, the `--iroh-*` flags, and `Cluster::with_iroh` are gone.
+An `[iroh]` table is refused as an unknown field, and a `MOQ_IROH_*` variable stops startup like any other unknown `MOQ_*` variable: remove them, and serve clients and cluster peers over QUIC or WebTransport.
+
+### Smaller default receive windows ([#7624](https://github.com/moq-dev/moq/pull/7624))
+
+`[quic]` defaults to a 4 MiB `receive_window`, a 1 MiB `stream_receive_window`, and a 4 MiB `send_window`, down from 128 MiB, 4 MiB, and 16 MiB, and the smallest `receive_window` accepted here or in `[limits.peer.quic]` is 1 MiB instead of about 64 MiB.
+`[limits.peer.quic]` defaults to a 16 MiB `receive_window` and `send_window`, down from 640 MiB. Set the old values to keep them: a link that must carry more than about 450 Mbps at a 250 ms RTT needs a larger window.
+WebSocket, `tcp://`, `tls://`, and `unix://` sessions take the `[quic]` windows and stream count instead of qmux's own 1 MiB and 256 KiB, cancel the least urgent stream when incomplete messages fill the window as QUIC does, and peers over them widen to `[limits.peer.quic]`.
+An embedder that builds `web::Web` itself passes the relay's `[quic]` with `Web::with_quic`; without it, WebSocket sessions start at the `[quic]` defaults until admitted.
+A lite-01/02 peer whose initial announcement set exceeds 1 MiB is refused; it needs lite-03 or later.
+
+### `Cluster::new` returns a driver to poll ([#7626](https://github.com/moq-dev/moq/pull/7626))
+
+`Cluster::new` no longer spawns the origin's lifecycle work or the cache governor; it returns `(Cluster, Driver)`, and nothing runs until the driver is polled.
+`Relay` polls it for you. An embedder building a `Cluster` itself keeps the driver for as long as the cluster serves, and polls it with `Driver::poll` or runs it with `Driver::run`, for example `tokio::spawn(driver.run())`:
+
+```rust
+let (cluster, driver) = moq_relay::cluster::Cluster::new(options)?;
+tokio::spawn(driver.run());
+```
+
+Dropping the driver tears the origin down. `Driver::run` returns the first panic among its tasks, such as `origin driver panicked: ...`, which `Started::run` used to report.
+
+### `tls://` links verify client certificates ([#7358](https://github.com/moq-dev/moq/pull/7358))
+
+The `listen.tcp.tls` listener applies `listen.tls.root` and pinned `tls.peers` as the QUIC listener does, so a stream-only relay with that listener no longer refuses them.
+A peer dialing `tls://` with a `connect.tls` certificate now presents it, and a certificate presented beside a JWT is refused as it is on QUIC: give such a peer `cluster.token` or a certificate, not both.
+With pinned `tls.peers`, a `tls://` peer must present a pinned certificate; a token alone is refused.
+The auth request's `server_name` reports the SNI on `tls://` too.
+
+### Paths with an empty segment are refused ([#6648](https://github.com/moq-dev/moq/pull/6648))
+
+A session dialed at a URL path with a trailing or doubled `/`, such as `/room/` or `/room//cam`, is refused as a bad request instead of collapsed; dial `/room`. An auth grant whose `root`, `mounts`, `tier`, or `label` has one is refused as forbidden, and `stats.prefix`, `stats.node`, and `--cluster-tier` with one refuse to start.
+
+### `moq_net::Path` has no lifetime
+
+`auth` token fields that were `PathOwned` are `moq_net::Path`. `auth::Token::new` and `auth::Lease::new` return `Result`, refusing a grant whose root, mount, tier, or label is longer than `moq_net::Path::MAX_BYTES`. See moq-net's migration for the rest.
+
+### Tiers are metric-safe names (#6778)
+
+`--cluster-tier` and the auth server's grant and refusal `tier` must be `/`-joined segments of ASCII letters, digits, `.`, `_`, and `-`.
+The relay refuses to start with any other `--cluster-tier`, and treats a grant naming one as an auth server error; rename such tiers, for example `gold tier` to `gold-tier`.
+
+### Unknown `MOQ_*` environment variables stop startup ([#6633](https://github.com/moq-dev/moq/pull/6633))
+
+A `MOQ_*` variable moq-relay does not read, such as a misspelling, a removed name, or one meant for another binary, now stops startup with the variable named instead of being ignored.
+Remove or rename what the error lists.
+
 ### Auth `server_name` is the SNI only (#6509)
 
 The auth request's `server_name` no longer falls back to the HTTP `Host` header, `:authority`, or the WebTransport CONNECT host: it is absent over plain `http://` and `ws://` and for an IP-literal dial, while HTTPS and `wss://` report the SNI.
@@ -86,7 +170,7 @@ Add `--quic-keylog` (`MOQ_QUIC_KEYLOG`, `[quic] keylog = true`) to capture them;
 ### Cluster dials build from a template (#5674)
 
 `Relay::client()` and `Cluster::with_client` are removed.
-Give the cluster `with_connect(connect, quic)`, plus `with_iroh(endpoint)` for `iroh://` peers, and build your own `moq_tokio::Client` for other outbound dials.
+Give the cluster `with_connect(connect, quic)`, and build your own `moq_tokio::Client` for other outbound dials.
 
 ### `max_streams = 0` is refused (#5871)
 
@@ -109,11 +193,6 @@ Set it to keep the old placement.
 pin = true
 ```
 
-### iroh is opt-in (#5223)
-
-The default build has no iroh listener and no `--iroh-*` flags or `[iroh]` table.
-Build with `--features iroh` to keep it.
-
 ### The `noq` cargo feature is `quic`
 
 Rename it wherever you enable it; the QUIC stack is MoQ's own `moq-quic`.
@@ -127,14 +206,15 @@ Set `load_balancer`, or `lb_id` alone (nonce 8), or `lb_id` with `lb_nonce`.
 
 ### Settings no listener reads stop startup (#5006)
 
-A stream-only relay (TCP or Unix, no `--listen`) refuses the QUIC-only `--listen-preferred-v4` / `-v6`, `--listen-quic-lb-id`, and pinned `tls.peers`.
-It also refuses `--listen-tls-cert`, `-key`, or `-generate` unless `--listen-tcp-tls` serves it, and `listen.tls.root`, since only QUIC verifies a client CA.
+A stream-only relay (TCP or Unix, no `--listen`) refuses the QUIC-only `--listen-preferred-v4` / `-v6` and `--listen-quic-lb-id`.
+It also refuses `--listen-tls-cert`, `-key`, or `-generate` unless `--listen-tcp-tls` serves it, and `listen.tls.root` or pinned `tls.peers` unless `--listen-tcp-tls` verifies them.
 `--listen-unix-allow-*` needs `--listen-unix-bind`, and `web.https.cert`, `key`, and `root` need `web.https.listen`.
 Each used to be ignored: drop it, or add the listener it configures.
 
 ### `--cluster-mesh` and `--cluster-linger` are unknown flags (#4818)
 
-They, TOML `mesh` and `linger`, and `MOQ_CLUSTER_MESH` / `MOQ_CLUSTER_LINGER` are no longer read.
+Remove the flags, TOML `mesh` and `linger`, and `MOQ_CLUSTER_MESH` / `MOQ_CLUSTER_LINGER`.
+The removed environment variables stop startup rather than being ignored.
 List every peer with `--cluster-connect` or `--cluster-connect-api`.
 In Rust, `cluster::Config` has no `mesh` or `linger` field.
 

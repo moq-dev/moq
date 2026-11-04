@@ -1,30 +1,33 @@
-# [M] Build queue entries concurrently
+# [S] The merge queue builds two entries at once if it measurably helps
 
 ## Goal
 
-The merge queue builds two or more entries at once on self-hosted capacity, so
-merged PRs per hour rise measurably over the 2026-10-23 baseline while every
-entry still runs the same gate.
+A measured trial decides whether moq's merge queue builds two entries at once
+(`maximumEntriesToBuild: 2`) or stays at one. Done when the PR records both
+settings' burst p90 enqueue-to-merge latency and median merges per
+never-empty hour over comparable windows, and the maintainer keeps the winner
+in the ruleset.
 
 ## Plan
 
-Decided with the maintainer on 2026-10-23: structural queue changes come before
-faster toolchains.
+Planned 2026-11-04 with the maintainer. The landing quest
+([last version](https://github.com/moq-dev/moq/blob/17a81d6c64/quest/m0/ci/land.md))
+ran the queue at build concurrency 1 and said to try 2 only with measured
+data. Its performance goal closed on that data (decided 2026-11-04 ✅): over
+2026-11-03 06:47Z to 2026-11-04 06:47Z, the eight hours the queue was never
+empty merged a median of 11.0 PRs against the queue baseline's 6.0.
 
-Measured 2026-10-23 over 32 merge-queue runs: `max_entries_to_build: 1` with one
-`moq-queue` runner makes the queue fully serial, about 7 merged PRs per hour,
-with a median entry of 135 s (p90 516 s) and 3 to 12 s of runner wait.
+Why try 2: with a median queue build of 4.4 min, one lane tops out near 13
+merges an hour, and busy hours already run close to that. Bursts of 22-26
+entries on 2026-11-03 pushed p90 enqueue-to-merge to about 58 min (median
+20.6 min), and waiting behind other entries was most of it.
 
-- Add queue runner capacity (another instance or container) and raise
-  `max_entries_to_build` to match. The host also runs the `moq-pro` runner
-  under the same `ci.slice` quota and a desktop; split CPU and memory so
-  concurrent entries do not slow each other past the gain.
-- Concurrent entries share the local mbx store; confirm that is safe, or give
-  each its own.
-- Measure merged PRs per hour and per-entry wall time before and after.
-
-Public API: none. Wire: none.
-
-## Related
-
-- [Share local check capacity](/quest/m0/ci/local-gate.md) - admission for the same host
+Method: occupancy comes from the PRs' `AddedToMergeQueue`,
+`RemovedFromMergeQueue` and `Merged` timeline events (reconstruct removed and
+unmerged entries too). Compare at least one busy day at each setting, and
+count queue failures per build, since building two means a failure in the
+first entry rebuilds the second. The ruleset change and revert are the
+maintainer's actions (ruleset 2420853); the quest names the setting and
+reports the numbers. The host runner must handle two builds at once without
+the shared mbx cache or `quest gate` admission erasing the gain, so record
+host load during the trial.

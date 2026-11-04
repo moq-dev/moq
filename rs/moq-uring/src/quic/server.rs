@@ -44,7 +44,7 @@ pub struct Config {
 	pub tls: std::sync::Arc<rustls::ServerConfig>,
 	/// The per-connection transport settings (timeouts, stream limits,
 	/// congestion control).
-	pub transport: super::Transport,
+	pub transport: super::transport::Config,
 }
 
 impl Config {
@@ -52,7 +52,7 @@ impl Config {
 	pub fn new(tls: std::sync::Arc<rustls::ServerConfig>) -> Self {
 		Self {
 			tls,
-			transport: super::Transport::default(),
+			transport: super::transport::Config::default(),
 		}
 	}
 }
@@ -65,6 +65,6 @@ impl Config {
 /// socket keep reaching the accepted connection, but nothing else is ever
 /// accepted. Keep the endpoint itself for a listener.
 pub async fn accept(socket: udp::Socket, config: &Config) -> Result<Connection, Error> {
-	let endpoint = super::Endpoint::new(socket, super::endpoint::Config::default().with_server(config.clone()))?;
+	let endpoint = super::Endpoint::new(super::endpoint::Config::default().with_server(config.clone()), socket)?;
 	endpoint.accept().await
 }

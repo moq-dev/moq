@@ -28,6 +28,7 @@ function summarize(support: Full): Level {
 
 /** The `<moq-watch-support>` element: a banner reporting what this browser can play. */
 export default class MoqWatchSupport extends Support {
+	/** Detect what this browser can play. */
 	protected async detect(): Promise<Report> {
 		const support = await isSupported();
 		return {

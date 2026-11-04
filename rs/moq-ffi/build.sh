@@ -79,6 +79,12 @@ if [[ -n "$LIBRARY" ]]; then
     fi
 fi
 
+# A cdylib's file name carries no feature hash, so the minimal library gets a
+# target directory of its own rather than replacing the default build's.
+if [[ "$NO_DEFAULT_FEATURES" == true ]]; then
+    TARGET_BASE_DIR="$TARGET_BASE_DIR/minimal"
+fi
+
 # Get version from Cargo.toml if not specified
 if [[ -z "$VERSION" ]]; then
     VERSION=$(grep '^version' "$SCRIPT_DIR/Cargo.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')
@@ -113,9 +119,10 @@ can_run_on_host() {
 # Build the library for a single target
 build_target() {
     local target="$1"
-    # Releases carry the OpenH264 software fallback, the only encoder on API-24
-    # Android and the Apple simulators; a no-op under --no-default-features.
-    local cargo_args=(build --locked --release --package moq-ffi --features openh264)
+    # The shared default build (.cargo/config.toml): releases carry the OpenH264
+    # software fallback, the only encoder on API-24 Android and the Apple
+    # simulators. It is a no-op under --no-default-features.
+    local cargo_args=(build-ffi --release --target-dir "$TARGET_BASE_DIR" --manifest-path "$WORKSPACE_DIR/Cargo.toml")
     if [[ "$NO_DEFAULT_FEATURES" == true ]]; then
         cargo_args+=(--no-default-features)
     fi
@@ -131,15 +138,14 @@ build_target() {
 
     if is_android "$target"; then
         # Android targets use cargo-ndk
-        cargo ndk --target "$target" --platform 24 -- \
-            "${cargo_args[@]}" --manifest-path "$WORKSPACE_DIR/Cargo.toml"
+        (cd "$WORKSPACE_DIR" && cargo ndk --target "$target" --platform 24 -- "${cargo_args[@]}")
     else
         # Set up cross-compilation for Linux ARM64
         if [[ "$target" == "aarch64-unknown-linux-gnu" ]]; then
             export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
         fi
 
-        cargo "${cargo_args[@]}" --target "$target" --manifest-path "$WORKSPACE_DIR/Cargo.toml"
+        (cd "$WORKSPACE_DIR" && cargo "${cargo_args[@]}" --target "$target")
     fi
 }
 
@@ -173,7 +179,7 @@ generate_bindings() {
 
     # Go uses a separate, third-party bindgen. Upstream has no uniffi 0.32
     # release yet, so install the compatible generator fork with:
-    # cargo install --locked uniffi-bindgen-go --git https://github.com/kixelated/uniffi-bindgen-go --rev v0.10.0-kixelated.1+v0.32.0
+    # cargo install --locked uniffi-bindgen-go --git https://github.com/kixelated/uniffi-bindgen-go --rev v0.10.0-kixelated.2+v0.32.0
     if command -v uniffi-bindgen-go >/dev/null 2>&1; then
         echo "  Generating go bindings..."
         uniffi-bindgen-go --library "$lib_path" --out-dir "$OUTPUT_DIR/bindings/go"

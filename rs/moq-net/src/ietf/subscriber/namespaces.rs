@@ -26,7 +26,7 @@ pub(super) enum Ended {
 
 /// A request from when discovery opens it until it is off the wire.
 struct Request {
-	prefix: PathOwned,
+	prefix: Path,
 	/// Dropped to end it; `None` once the session did.
 	live: Option<kio::Producer<()>>,
 	/// Closes once it is off the wire, so an overlapping one may go out.
@@ -59,7 +59,7 @@ impl Subscriber {
 		};
 		let mut requests: HashMap<u64, Request> = HashMap::new();
 		// The request discovery holds open for each prefix.
-		let mut open_at: HashMap<PathOwned, u64> = HashMap::new();
+		let mut open_at: HashMap<Path, u64> = HashMap::new();
 		let mut running = futures::stream::FuturesUnordered::new();
 		let mut next = 0u64;
 
@@ -147,7 +147,7 @@ impl Subscriber {
 	async fn namespace_request<O>(
 		mut self,
 		key: u64,
-		prefix: PathOwned,
+		prefix: Path,
 		snapshot: crate::model::Snapshot,
 		pending: Pending<O>,
 	) -> (u64, Result<Ended, Error>)

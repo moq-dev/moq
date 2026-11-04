@@ -6,23 +6,24 @@ from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from moq_ffi import (
-    MoqBroadcastDynamic,
     MoqBroadcastProducer,
+    MoqBroadcastRequests,
     MoqFill,
     MoqGroupProducer,
     MoqOrder,
     MoqTrackDemand,
-    MoqTrackDynamic,
     MoqTrackProducer,
     MoqTrackRequest,
+    MoqTrackRequests,
 )
 
-from ._records import _opt_from_us, _subscription, _track_info
+from ._records import _subscription, _track_info
 from ._stream import _Stream
 from .types import (
-    AnnounceRoute,
     Frame,
+    Position,
     Subscription,
+    Timestamp,
     TrackInfo,
 )
 
@@ -47,7 +48,7 @@ class GroupProducer:
 
         return GroupConsumer(self._inner.consume())
 
-    def write_frame(self, payload: bytes, timestamp: timedelta | None = None) -> None:
+    def write_frame(self, payload: bytes, timestamp: Timestamp | None = None) -> None:
         """Write a frame with its presentation timestamp."""
         self._inner.write_frame(Frame(payload, timestamp)._ffi())
 
@@ -105,9 +106,9 @@ class TrackProducer:
         """A watch-only handle to this track's name and whether it has subscribers."""
         return TrackDemand(self._inner.demand())
 
-    def dynamic(self) -> TrackDynamic:
+    def requests(self) -> TrackRequests:
         """Serve fetches for groups that are not currently cached."""
-        return TrackDynamic(self._inner.dynamic())
+        return TrackRequests(self._inner.requests())
 
     def append_group(self) -> GroupProducer:
         """Start a new group; write frames into it, then finish()."""
@@ -117,17 +118,29 @@ class TrackProducer:
         """Create a group with an explicit sequence number."""
         return GroupProducer(self._inner.create_group(sequence))
 
-    def write_frame(self, payload: bytes, timestamp: timedelta | None = None) -> None:
+    def write_frame(self, payload: bytes, timestamp: Timestamp | None = None) -> None:
         """Write a single-frame group with its presentation timestamp."""
         self._inner.write_frame(Frame(payload, timestamp)._ffi())
 
-    def append_datagram(self, payload: bytes, timestamp: timedelta | None = None) -> int:
+    def append_datagram(self, payload: bytes, timestamp: Timestamp | None = None) -> int:
         """Send a best-effort datagram and return its sequence number.
 
         Payloads are capped at 1200 bytes. Datagram delivery requires a datagram-capable
         transport and wire version; there is no stream fallback.
         """
         return self._inner.append_datagram(Frame(payload, timestamp)._ffi())
+
+    def insert_datagram(self, sequence: int, payload: bytes, timestamp: Timestamp | None = None) -> None:
+        """Send a best-effort datagram at an explicit sequence number.
+
+        For a caller that allocates its own sequences; :meth:`append_datagram`
+        continues after the largest one.
+        """
+        self._inner.insert_datagram(sequence, Frame(payload, timestamp)._ffi())
+
+    def largest(self) -> Position | None:
+        """The newest group written, at its newest frame; ``None`` before any. Datagrams never move it."""
+        return self._inner.largest()
 
     def consume(self, subscription: Subscription | None = None) -> TrackConsumer:
         """Create a consumer that reads directly from this producer's track.
@@ -181,9 +194,9 @@ class TrackRequest:
         """Watch this track's subscribers, including after accepting it."""
         return TrackDemand(self._inner.demand())
 
-    def dynamic(self) -> TrackDynamic:
+    def requests(self) -> TrackRequests:
         """Create a fetch handler before accepting this requested track."""
-        return TrackDynamic(self._inner.dynamic())
+        return TrackRequests(self._inner.requests())
 
     def abort(self, error_code: int) -> None:
         """Reject the request with an application error code."""
@@ -191,13 +204,13 @@ class TrackRequest:
 
 
 class Fill:
-    """A run of groups readers miss, for a :class:`TrackDynamic` to serve.
+    """A run of groups readers miss, for a :class:`TrackRequests` to serve.
 
     Call :meth:`accept` for each group you have and :meth:`drop_groups` for the rest;
-    :meth:`next` names what is still owed, in the fill's order. Dropping the fill names
+    :meth:`wanted` names what is still owed, in the fill's order. Dropping the fill names
     whatever is left as dropped while a reader still wants it; once nobody does, it is
-    withdrawn, so stop serving it when :meth:`unused` returns. Stop serving a single group
-    when :meth:`unwanted` returns for it, and move on to :meth:`next`.
+    withdrawn, so stop serving it once :meth:`wanted` is ``None``. Stop serving a single group
+    when :meth:`unwanted` returns for it, and move on to :meth:`wanted`.
     """
 
     def __init__(self, inner: MoqFill) -> None:
@@ -226,16 +239,23 @@ class Fill:
     @property
     def max_delay(self) -> timedelta | None:
         """The most tolerant age budget among its readers, ``None`` for the publisher's max age alone."""
-        return _opt_from_us(self._inner.max_delay_us())
+        return self._inner.max_delay()
 
     @property
     def order(self) -> MoqOrder:
         """Which end to fill first."""
         return self._inner.order()
 
-    def next(self) -> int | None:
-        """The next group still owed in the fill's order, ``None`` once every group is answered."""
-        return self._inner.next()
+    def wanted(self) -> int | None:
+        """The next group still owed in the fill's order.
+
+        ``None`` once every group is answered or no reader waits on the fill.
+        """
+        return self._inner.wanted()
+
+    async def wanted_changed(self) -> int | None:
+        """Wait for ``wanted`` to change and return it. The first call returns at once."""
+        return await self._inner.wanted_changed()
 
     def accept(self, sequence: int) -> GroupProducer:
         """Insert group ``sequence`` and return a producer for it.
@@ -247,14 +267,6 @@ class Fill:
     def drop_groups(self, start: int, end: int) -> None:
         """Name groups ``start`` up to the exclusive ``end`` as never to be delivered."""
         self._inner.drop_groups(start, end)
-
-    def is_used(self) -> bool:
-        """Whether a reader still waits on this fill."""
-        return self._inner.is_used()
-
-    async def unused(self) -> None:
-        """Wait until no reader waits on this fill."""
-        await self._inner.unused()
 
     def is_wanted(self, sequence: int) -> bool:
         """Whether a reader still waits for group ``sequence`` from this fill.
@@ -268,13 +280,13 @@ class Fill:
         await self._inner.unwanted(sequence)
 
 
-class TrackDynamic(_Stream[Fill]):
+class TrackRequests(_Stream[Fill]):
     """Async source of the fills readers of one track need: runs of groups the cache lacks.
 
     Usable as an async context manager that cancels on exit.
     """
 
-    def __init__(self, inner: MoqTrackDynamic) -> None:
+    def __init__(self, inner: MoqTrackRequests) -> None:
         self._inner = inner
 
     async def _next(self) -> Fill:
@@ -289,14 +301,14 @@ class TrackDynamic(_Stream[Fill]):
         self._inner.cancel()
 
 
-class BroadcastDynamic(_Stream[TrackRequest]):
+class BroadcastRequests(_Stream[TrackRequest]):
     """Async source of tracks requested by subscribers.
 
     Hold this object while subscriptions to unknown tracks should be accepted.
     Usable as an async context manager that cancels on exit.
     """
 
-    def __init__(self, inner: MoqBroadcastDynamic) -> None:
+    def __init__(self, inner: MoqBroadcastRequests) -> None:
         self._inner = inner
 
     async def _next(self) -> TrackRequest:
@@ -314,9 +326,9 @@ class BroadcastDynamic(_Stream[TrackRequest]):
 class BroadcastProducer:
     """Wraps MoqBroadcastProducer with a cleaner interface.
 
-    Constructing one directly creates a standalone broadcast for serving dynamic
-    requests (:meth:`moq.BroadcastRequest.accept`) or local pub/sub. To publish at
-    a path, use :meth:`moq.OriginProducer.create_broadcast` instead.
+    It fills tracks; announcing belongs to the :class:`moq.Publication` that
+    :meth:`moq.OriginProducer.create_broadcast` returns, the way to publish at a
+    path. Constructing one directly creates a standalone broadcast for local pub/sub.
     """
 
     def __init__(self) -> None:
@@ -329,21 +341,9 @@ class BroadcastProducer:
         self._inner = inner
         return self
 
-    def dynamic(self) -> BroadcastDynamic:
+    def requests(self) -> BroadcastRequests:
         """Accept subscriptions to tracks that are not published yet."""
-        return BroadcastDynamic(self._inner.dynamic())
-
-    def announce(self, route: AnnounceRoute | None = None) -> None:
-        """Advertise this broadcast's exact path as a route.
-
-        Announcing again re-prices the route in place. Until announced, the
-        broadcast is invisible and unroutable for local consumers and peers alike.
-        """
-        self._inner.announce(route if route is not None else AnnounceRoute())
-
-    def unannounce(self) -> None:
-        """Retract this broadcast's advertisement, if any, from local consumers and peers alike."""
-        self._inner.unannounce()
+        return BroadcastRequests(self._inner.requests())
 
     def publish_track(self, name: str, info: TrackInfo | None = None) -> TrackProducer:
         """Create a track. Send any bytes, no codec validation. ``info`` sets track
@@ -359,6 +359,8 @@ class BroadcastProducer:
     def close(self) -> None:
         """End the broadcast for good: retract it and serve no new tracks.
 
-        Tracks already subscribed carry on to their own end. Closing again is a no-op.
+        Tracks still open on it end with ``Unroutable`` (``Internal`` to a moq-transport reader),
+        and their later calls raise ``moq.Error.Closed``; finish a track first to end it cleanly.
+        Closing again is a no-op.
         """
         self._inner.close()

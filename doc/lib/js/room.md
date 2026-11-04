@@ -6,6 +6,7 @@ description: Headless multi-participant rooms over MoQ
 # @moq/room
 
 [![npm](https://img.shields.io/npm/v/@moq/room)](https://www.npmjs.com/package/@moq/room)
+[![API](https://img.shields.io/badge/API-reference-blue)](/lib/js/api/room)
 
 A room is a path prefix. There is no service and no storage: joining is minting
 a moq-auth token rooted at that prefix and dialing the relay. Participants are
@@ -34,6 +35,13 @@ local.cameraEnabled.set(true);
 
 const room = new Room({ connection, identity: Path.from("alice") });
 ```
+
+`Local` publishes through `Publish.Broadcast`, which
+[encodes while enabled](/lib/js/publish#encoding): while `cameraEnabled` is on,
+the camera's hd and sd renditions encode even when nobody in the room watches,
+so a member who arrives late can fetch the last few seconds. While
+`microphoneEnabled` is on, the microphone keeps raw audio and encodes it once
+someone listens. Turn either off to stop that capture.
 
 On a public prefix, skip the token and dial that path directly. The conferencing
 demo at [`demo/web`](https://github.com/moq-dev/moq/tree/main/demo/web) (`meet.html`)

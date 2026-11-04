@@ -39,9 +39,6 @@ pub struct Settings {
 	web: Web,
 
 	#[usage(flatten)]
-	acme: Acme,
-
-	#[usage(flatten)]
 	stats: Stats,
 
 	#[cfg(feature = "stun")]
@@ -56,10 +53,6 @@ pub struct Settings {
 
 	#[usage(env = "MOQ_DRAIN_TIMEOUT", cli("--drain-timeout"))]
 	drain_timeout: Option<String>,
-
-	#[cfg(feature = "iroh")]
-	#[usage(flatten)]
-	iroh: moq_tokio::settings::Iroh,
 }
 
 #[derive(usage_rs::Config)]
@@ -140,6 +133,9 @@ struct Auth {
 	#[usage(env = "MOQ_AUTH_URL", cli("--auth-url"))]
 	url: Option<String>,
 
+	#[usage(env = "MOQ_AUTH_ROOT", cli("--auth-root"))]
+	root: Option<Vec<String>>,
+
 	#[usage(env = "MOQ_AUTH_PUBLIC", cli("--auth-public"), parse = "list_by_comma")]
 	public: Option<Vec<String>>,
 
@@ -192,25 +188,6 @@ struct WebHttps {
 
 	#[usage(env = "MOQ_WEB_HTTPS_ROOT", cli("--web-https-root"), parse = "list_by_comma")]
 	root: Option<Vec<String>>,
-}
-
-#[derive(usage_rs::Config)]
-#[usage(prefix = "acme")]
-struct Acme {
-	#[usage(env = "MOQ_ACME_DOMAINS", cli("--acme-domains"), parse = "list_by_comma")]
-	domains: Option<Vec<String>>,
-
-	#[usage(env = "MOQ_ACME_CONTACT", cli("--acme-contact"), parse = "list_by_comma")]
-	contact: Option<Vec<String>>,
-
-	#[usage(env = "MOQ_ACME_CACHE", cli("--acme-cache"))]
-	cache: Option<String>,
-
-	#[usage(env = "MOQ_ACME_DIRECTORY", cli("--acme-directory"))]
-	directory: Option<String>,
-
-	#[usage(env = "MOQ_ACME_TIMEOUT", cli("--acme-timeout"))]
-	timeout: Option<String>,
 }
 
 #[derive(usage_rs::Config)]
@@ -268,8 +245,6 @@ struct Limits {
 struct Client {
 	#[usage(env = "MOQ_LIMITS_CLIENT_ANNOUNCES", cli("--limits-client-announces"))]
 	announces: Option<usize>,
-	#[usage(env = "MOQ_LIMITS_CLIENT_REQUESTS", cli("--limits-client-requests"))]
-	requests: Option<usize>,
 }
 
 #[derive(usage_rs::Config)]
@@ -277,8 +252,6 @@ struct Client {
 struct Peer {
 	#[usage(env = "MOQ_LIMITS_PEER_ANNOUNCES", cli("--limits-peer-announces"))]
 	announces: Option<usize>,
-	#[usage(env = "MOQ_LIMITS_PEER_REQUESTS", cli("--limits-peer-requests"))]
-	requests: Option<usize>,
 	#[usage(flatten)]
 	quic: PeerQuic,
 }

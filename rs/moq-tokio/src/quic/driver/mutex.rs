@@ -1,52 +1,30 @@
-use std::{
-    fmt::Debug,
-    ops::{Deref, DerefMut},
-};
+pub(crate) use std::sync::MutexGuard;
 
-mod non_tracking {
-    use super::*;
+/// A connection mutex that fails immediately if a holder poisoned it.
+#[derive(Debug)]
+pub(crate) struct Mutex<T>(std::sync::Mutex<T>);
 
-    /// A Mutex which optionally allows to track the time a lock was held and
-    /// emit warnings in case of excessive lock times
-    #[derive(Debug)]
-    pub(crate) struct Mutex<T> {
-        inner: std::sync::Mutex<T>,
-    }
+impl<T> Mutex<T> {
+	pub(crate) fn new(value: T) -> Self {
+		Self(std::sync::Mutex::new(value))
+	}
 
-    impl<T> Mutex<T> {
-        pub(crate) fn new(value: T) -> Self {
-            Self {
-                inner: std::sync::Mutex::new(value),
-            }
-        }
+	pub(crate) fn lock(&self) -> MutexGuard<'_, T> {
+		self.0.lock().unwrap()
+	}
 
-        /// Acquires the lock for a certain purpose
-        ///
-        /// The purpose will be recorded in the list of last lock owners
-        pub(crate) fn lock(&self, _purpose: &'static str) -> MutexGuard<'_, T> {
-            MutexGuard {
-                guard: self.inner.lock().unwrap(),
-            }
-        }
-    }
+	/// The lock for a drop's cleanup, or `None` once a holder panicked.
+	///
+	/// A drop can run while that panic's victims unwind, where a second panic aborts the process,
+	/// and a poisoned connection has no driver left to act on the cleanup anyway.
+	pub(crate) fn lock_for_drop(&self) -> Option<MutexGuard<'_, T>> {
+		self.0.lock().ok()
+	}
 
-    pub(crate) struct MutexGuard<'a, T> {
-        guard: std::sync::MutexGuard<'a, T>,
-    }
-
-    impl<T> Deref for MutexGuard<'_, T> {
-        type Target = T;
-
-        fn deref(&self) -> &Self::Target {
-            self.guard.deref()
-        }
-    }
-
-    impl<T> DerefMut for MutexGuard<'_, T> {
-        fn deref_mut(&mut self) -> &mut Self::Target {
-            self.guard.deref_mut()
-        }
-    }
+	/// The guard a panicked holder left behind, or `None` while the value is intact.
+	///
+	/// Only for waking waiters, so they reach the poisoned [`lock`](Self::lock) instead of hanging.
+	pub(crate) fn poisoned(&self) -> Option<MutexGuard<'_, T>> {
+		self.0.lock().err().map(std::sync::PoisonError::into_inner)
+	}
 }
-
-pub(crate) use non_tracking::{Mutex, MutexGuard};

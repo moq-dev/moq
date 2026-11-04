@@ -5,7 +5,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll, ready};
 
 use hang::catalog::VideoConfig;
-use moq_clock::Instant;
+use kio::clock::Instant;
 use moq_mux::container::Read as Encoded;
 
 use super::decoder::Config;
@@ -13,6 +13,7 @@ use super::select::{Lane, Next, Selector};
 use super::sink::Sink;
 use crate::Error;
 use crate::Frame;
+pub use moq_net::track::Delay;
 
 /// One item of a [`Consumer`] read, in delivery order: a decoded picture, or a break
 /// between them.
@@ -88,13 +89,15 @@ pub struct Options {
 	pub decoder: Config,
 	/// Where to start on a track that already holds groups.
 	pub start: Start,
-	/// How far playback may drift from the live edge before a stalled group is
-	/// skipped. Defaults to [`std::time::Duration::ZERO`](std::time::Duration::ZERO)
-	/// (skip aggressively); set it to your playout buffer for a softer skip.
-	/// Applied to the transport subscription and inherited by
+	/// How far behind the live edge playback runs. [`Delay::min`] is the
+	/// player's playout delay, where a cold join starts; [`Delay::max`] is how
+	/// far playback may drift before a stalled group is skipped. Both default to
+	/// zero: start at the newest group and skip aggressively. Set `min` to your
+	/// playout delay and `max` at or past it for a softer skip. The max is
+	/// applied to the transport subscription, and both reach
 	/// [`moq_mux::container::Consumer`]. A rendition with a catalog `warmup`
-	/// runs a second decoder at this plus the warmup (see [`Consumer`]).
-	pub max_delay: std::time::Duration,
+	/// runs a second decoder at both plus the warmup (see [`Consumer`]).
+	pub delay: Delay,
 }
 
 impl Options {
@@ -112,9 +115,9 @@ impl Options {
 /// `moq_audio::decode::Consumer`.
 ///
 /// A rendition with a catalog `warmup` (intra refresh, so no keyframes) runs
-/// two decoders. One skips at [`Options::max_delay`] and may show refresh
-/// stripes after a join or a skip. The other tolerates `warmup` more and joins
-/// a group earlier, so its pictures stay clean, and they replace the first
+/// two decoders. One skips at [`Options::delay`]'s max and may show refresh
+/// stripes after a join or a skip. The other starts and tolerates `warmup` more
+/// and joins a group earlier, so its pictures stay clean, and they replace the first
 /// decoder's once it catches up. Both subscriptions share one upstream request.
 pub struct Consumer {
 	/// The min-delay and max-delay decoders, indexed by [`Lane`].
@@ -168,16 +171,20 @@ impl Consumer {
 		options: Options,
 	) -> Result<Self, Error> {
 		let name = name.into();
-		let min = Reader::open(broadcast, catalog, &name, &options, options.max_delay, 0).await?;
+		let min = Reader::open(broadcast, catalog, &name, &options, options.delay, 0).await?;
 
 		let warmup = catalog.warmup.unwrap_or_default();
 		let max = if warmup.is_zero() {
 			None
 		} else {
-			// One more sweep of budget, joining a group earlier, so this decoder
-			// starts at a recovery point a whole sweep before the live edge.
-			let budget = options.max_delay.saturating_add(warmup);
-			Some(Reader::open(broadcast, catalog, &name, &options, budget, 1).await?)
+			// One more sweep both to start and to fall behind, joining a group earlier,
+			// so this decoder starts at a recovery point a whole sweep before the
+			// min-delay one.
+			let delay = Delay {
+				min: Some(options.delay.min.unwrap_or_default().saturating_add(warmup)),
+				max: options.delay.max.map(|max| max.saturating_add(warmup)),
+			};
+			Some(Reader::open(broadcast, catalog, &name, &options, delay, 1).await?)
 		};
 
 		// The catalog's rate when it has one, else whatever the pictures show.
@@ -218,7 +225,7 @@ impl Consumer {
 	fn poll_read(
 		&mut self,
 		cx: &mut Context<'_>,
-		sleep: &mut Option<Pin<Box<moq_clock::Sleep>>>,
+		sleep: &mut Option<Pin<Box<kio::clock::Sleep>>>,
 	) -> Poll<Result<Option<Read>, Error>> {
 		loop {
 			let deadline = match self.selector.next(Instant::now()) {
@@ -265,7 +272,7 @@ impl Consumer {
 			let Some(deadline) = deadline else {
 				return Poll::Pending;
 			};
-			let sleep = sleep.get_or_insert_with(|| Box::pin(moq_clock::sleep_until(deadline)));
+			let sleep = sleep.get_or_insert_with(|| Box::pin(kio::clock::sleep_until(deadline)));
 			sleep.as_mut().reset(deadline);
 			ready!(sleep.as_mut().poll(cx));
 		}
@@ -295,30 +302,37 @@ impl Consumer {
 }
 
 impl Reader {
-	/// Subscribe with `max_delay`, starting `lookback` groups before the live
-	/// edge when the caller asked for [`Start::Latest`].
+	/// Subscribe with `delay`, starting `lookback` groups before the live edge
+	/// when the caller asked for [`Start::Latest`].
 	async fn open(
 		broadcast: &moq_net::broadcast::Consumer,
 		catalog: &VideoConfig,
 		name: &str,
 		options: &Options,
-		max_delay: std::time::Duration,
+		delay: Delay,
 		lookback: u64,
 	) -> Result<Self, Error> {
-		let decoder = Sink::open(catalog, &options.decoder).await?;
+		let decoder = Sink::open(catalog, &options.decoder).await.map_err(|err| match err {
+			// Only a codec or description this build cannot decode is a refusal of the
+			// rendition. Backend and worker faults keep their own variants.
+			Error::UnsupportedCodec(reason) => Error::UnsupportedConfig(reason),
+			err => err,
+		})?;
 
 		let track = broadcast.track(hang::catalog::Reference::track(catalog, name))?;
 		let mut subscriber = track
 			.subscribe(
 				moq_net::track::Subscription::default()
 					.with_priority(hang::catalog::PRIORITY.video)
-					.with_max_delay(max_delay),
+					// The whole delay from the first request, as the container keeps it, so the
+					// publisher never sees a stated zero min before the container's update.
+					.with_delay(delay),
 			)
 			.await?;
 		// A decoder often opens on a track that is already cached: a replacement
 		// decoder subscribes while its predecessor still holds groups, and a
 		// rendition switched away from and back to stays warm on the origin for
-		// `TRACK_IDLE_LINGER` (cached groups, not an upstream subscription). A
+		// `moq_net::model::track::IDLE_LINGER` (cached groups, not an upstream subscription). A
 		// caller that asked for `Start::Latest` wants none of that backlog,
 		// because a cursor starting at sequence zero replays every cached group
 		// at decode speed before reaching live media, which on a thirty-second
@@ -343,7 +357,11 @@ impl Reader {
 		// wire: `moq import fmp4` publishes CMAF. Reading a moof+mdat fragment as a
 		// varint timestamp plus a payload decodes to garbage rather than failing.
 		let container = moq_mux::catalog::hang::Container::try_from(catalog)?;
-		let track = moq_mux::container::Consumer::new(track, container);
+		// On a cold network join the live edge's stream often lands first. The container starts
+		// at the group covering the live edge less the min delay, waiting for it, so the
+		// max-delay decoder, whose min delay includes the warmup, still gets the group its warmup
+		// needs. That decoder tolerates the warmup as lateness too, so it passes no further warmup.
+		let track = moq_mux::container::Consumer::new(track, container).with_delay(delay);
 
 		Ok(Self {
 			decoder,
@@ -432,11 +450,6 @@ mod tests {
 		not(feature = "openh264"),
 		allow(dead_code, unused_imports, reason = "only the `openh264` feature uses it")
 	)]
-	#![expect(
-		clippy::disallowed_methods,
-		clippy::disallowed_types,
-		reason = "tests read the host clock directly"
-	)]
 
 	use bytes::Bytes;
 	use moq_net::Timestamp;
@@ -468,12 +481,12 @@ mod tests {
 			moq_mux::catalog::Producer::new(&mut source_broadcast, moq_mux::catalog::Config::default()).unwrap();
 		let config = EncodeConfig {
 			kind: EncodeKind::Software,
-			..EncodeConfig::new(320, 240, crate::Rate::new(30, 1).unwrap())
+			..EncodeConfig::new(320, 240, crate::FrameRate::new(30, 1).unwrap())
 		};
 		let rendition = config.probe().await.unwrap();
 		let reserved = source_catalog
 			.reserve()
-			.with_timeline_hint(config.gop.duration(config.framerate));
+			.with_interval(config.gop.duration(config.framerate));
 		let mut producer = EncodeProducer::new(source_broadcast, reserved, rendition).unwrap();
 		let mut encoder = Encoder::new(&config).unwrap();
 		let rgba = vec![0x80u8; 320 * 240 * 4];
@@ -579,7 +592,10 @@ mod tests {
 				// Wide enough to keep every group fresh: the age budget on its own
 				// delivers only the live edge, which would pass this test without
 				// `Start::Latest` doing anything.
-				max_delay: std::time::Duration::from_secs(10),
+				delay: Delay {
+					max: Some(std::time::Duration::from_secs(10)),
+					..Delay::default()
+				},
 				..Options::new()
 			},
 		)
@@ -660,7 +676,10 @@ mod tests {
 				},
 				// A budget that keeps every group fresh, so the start policy is the
 				// only thing deciding what is read.
-				max_delay: std::time::Duration::from_secs(10),
+				delay: Delay {
+					max: Some(std::time::Duration::from_secs(10)),
+					..Delay::default()
+				},
 				..Options::new()
 			},
 		)
@@ -729,7 +748,10 @@ mod tests {
 			"video",
 			Options {
 				decoder: decoder.clone(),
-				max_delay,
+				delay: Delay {
+					max: Some(max_delay),
+					..Delay::default()
+				},
 				..Options::new()
 			},
 		))
@@ -737,7 +759,7 @@ mod tests {
 
 		let subscription = published.subscription().expect("the consumer subscribed");
 		assert_eq!(
-			subscription.max_delay,
+			subscription.delay.max,
 			Some(max_delay),
 			"the age budget did not reach the publisher"
 		);
@@ -777,7 +799,10 @@ mod tests {
 					kind: Kind::Named(probe::BUFFERED_NAME.into()),
 					..Config::new()
 				},
-				max_delay: std::time::Duration::from_secs(10),
+				delay: Delay {
+					max: Some(std::time::Duration::from_secs(10)),
+					..Delay::default()
+				},
 				..Options::new()
 			},
 		)
@@ -810,10 +835,7 @@ mod tests {
 			[1000, 1100, 2000, 1800, 1900],
 			"join trims, continuous delivery keeps every leading picture"
 		);
-		consumer
-			.reader(Lane::Min)
-			.track
-			.set_max_delay(std::time::Duration::ZERO);
+		consumer.reader(Lane::Min).track.set_delay(Delay::default());
 		write(12, &[3000]);
 		write(13, &[4000, 3800, 3900, 4100]);
 		track.finish().unwrap();
@@ -924,7 +946,10 @@ mod tests {
 					kind: Kind::Named(probe::BUFFERED_NAME.into()),
 					..Config::new()
 				},
-				max_delay: std::time::Duration::from_secs(10),
+				delay: Delay {
+					max: Some(std::time::Duration::from_secs(10)),
+					..Delay::default()
+				},
 				..Options::new()
 			},
 		)
@@ -993,15 +1018,15 @@ mod tests {
 		.unwrap();
 
 		let mut read = Box::pin(consumer.next_frame());
-		let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+		let deadline = kio::clock::Instant::now() + std::time::Duration::from_secs(1);
 		loop {
 			tokio::select! {
 				_result = &mut read => panic!("flush returned before cancellation"),
-				_ = tokio::time::sleep(std::time::Duration::from_millis(1)) => {
+				_ = kio::clock::sleep(std::time::Duration::from_millis(1)) => {
 					if probe::flush_entered() {
 						break;
 					}
-					if tokio::time::Instant::now() >= deadline {
+					if kio::clock::Instant::now() >= deadline {
 						probe::release_flush();
 						panic!("flush never reached the codec thread");
 					}
@@ -1025,7 +1050,7 @@ mod tests {
 		const FRAMES: u64 = 5;
 		let config = EncodeConfig {
 			kind: EncodeKind::Software,
-			..EncodeConfig::new(320, 240, crate::Rate::new(30, 1).unwrap())
+			..EncodeConfig::new(320, 240, crate::FrameRate::new(30, 1).unwrap())
 		};
 		let catalog = config.probe().await.expect("probe the software encoder");
 
@@ -1148,7 +1173,10 @@ mod tests {
 					..Config::new()
 				},
 				start,
-				max_delay,
+				delay: Delay {
+					max: Some(max_delay),
+					..Delay::default()
+				},
 			},
 		)
 		.await
@@ -1157,7 +1185,7 @@ mod tests {
 
 	/// Read one frame, as (seconds, the lane it was shown from).
 	async fn read(consumer: &mut Consumer) -> (u64, Lane) {
-		let frame = tokio::time::timeout(std::time::Duration::from_secs(10), consumer.next_frame())
+		let frame = kio::clock::timeout(std::time::Duration::from_secs(10), consumer.next_frame())
 			.await
 			.expect("a frame within ten seconds")
 			.unwrap()
@@ -1169,13 +1197,13 @@ mod tests {
 	/// Let the decoders run with nothing new to show until the max-delay one
 	/// has caught up, or fail after ten seconds of trying.
 	async fn catch_up(consumer: &mut Consumer) {
-		let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+		let deadline = kio::clock::Instant::now() + std::time::Duration::from_secs(10);
 		while consumer.selector.source() != Lane::Max {
 			assert!(
-				tokio::time::Instant::now() < deadline,
+				kio::clock::Instant::now() < deadline,
 				"the max-delay decoder never caught up"
 			);
-			if let Ok(frame) = tokio::time::timeout(std::time::Duration::from_millis(20), consumer.next_frame()).await {
+			if let Ok(frame) = kio::clock::timeout(std::time::Duration::from_millis(20), consumer.next_frame()).await {
 				panic!(
 					"nothing new was published, yet read returned {:?}",
 					frame.map(|f| f.map(|f| f.timestamp))
@@ -1201,7 +1229,7 @@ mod tests {
 		)
 		.await;
 		assert_eq!(
-			published.subscription().and_then(|sub| sub.max_delay),
+			published.subscription().and_then(|sub| sub.delay.max),
 			Some(WARMUP),
 			"the two subscriptions did not share one request at the larger budget"
 		);
@@ -1214,6 +1242,50 @@ mod tests {
 			write(&mut live, &[second]);
 			assert_eq!(read(&mut consumer).await, (second, Lane::Max));
 		}
+	}
+
+	/// On a cold network join the live edge's stream often lands first. The
+	/// max-delay decoder still starts at the group before it, and takes over.
+	#[tokio::test]
+	async fn a_cold_join_whose_live_edge_arrives_first_starts_a_group_earlier() {
+		let (broadcast, mut track) = live_track();
+		let mut live = group(&mut track, 1, &[4, 5]);
+
+		let mut consumer = dual(
+			&broadcast,
+			Start::Latest,
+			std::time::Duration::ZERO,
+			probe::IMMEDIATE_NAME,
+		)
+		.await;
+
+		// Only the live edge has landed: the max-delay decoder waits for the group below it.
+		// Mocked time, so the timeout and the warmup's deadline never race; no decode runs
+		// while it waits, and the probe's thread would let mocked time skip ahead if one did.
+		let max = consumer.reader(Lane::Max);
+		tokio::time::pause();
+		assert!(
+			kio::clock::timeout(std::time::Duration::from_millis(50), max.read())
+				.await
+				.is_err(),
+			"the max-delay decoder started at the live edge"
+		);
+		tokio::time::resume();
+		group(&mut track, 0, &[0, 1, 2, 3]).finish().unwrap();
+		let Ok(Some(Read::Frame(first))) = max.read().await else {
+			panic!("the max-delay decoder produced no picture");
+		};
+		assert_eq!(
+			first.timestamp,
+			Timestamp::from_micros(0).unwrap(),
+			"it starts a group earlier"
+		);
+
+		assert_eq!(read(&mut consumer).await, (4, Lane::Min), "the live edge shows first");
+		assert_eq!(read(&mut consumer).await.0, 5);
+		catch_up(&mut consumer).await;
+		write(&mut live, &[6]);
+		assert_eq!(read(&mut consumer).await, (6, Lane::Max));
 	}
 
 	/// A stall shorter than a sweep makes the min-delay decoder skip, while the
@@ -1249,7 +1321,7 @@ mod tests {
 		let mut live = group(&mut track, 2, &[8]);
 		shown.push(read(&mut consumer).await);
 		assert!(
-			tokio::time::timeout(std::time::Duration::from_millis(100), consumer.next_frame())
+			kio::clock::timeout(std::time::Duration::from_millis(100), consumer.next_frame())
 				.await
 				.is_err()
 		);
@@ -1325,8 +1397,9 @@ mod tests {
 		group(&mut track, 1, &[4, 5]).finish().unwrap();
 		track.finish().unwrap();
 
-		// A budget that keeps every cached group, so both decoders read them all.
-		let mut consumer = dual(&broadcast, Start::Oldest, WARMUP, probe::BUFFERED_NAME).await;
+		// A budget past the whole 5 s backlog, so the start keeps every cached group and both
+		// decoders read them all.
+		let mut consumer = dual(&broadcast, Start::Oldest, 2 * WARMUP, probe::BUFFERED_NAME).await;
 		let mut shown = Vec::new();
 		while let Some(frame) = consumer.next_frame().await.unwrap() {
 			shown.push(u64::try_from(frame.timestamp.as_micros()).unwrap() / SECOND);
@@ -1334,6 +1407,39 @@ mod tests {
 		assert_eq!(shown, [0, 1, 2, 3, 4, 5]);
 		assert!(consumer.next_frame().await.unwrap().is_none());
 		assert!(consumer.lanes.iter().all(|slot| matches!(slot, Slot::Closed)));
+	}
+
+	/// The first request already states the min delay: a latest start waits for the live edge
+	/// with its subscription open, before the container could update it.
+	#[tokio::test]
+	async fn the_first_subscription_states_the_min_delay() {
+		let (broadcast, mut track) = live_track();
+		let delay = Delay {
+			min: Some(std::time::Duration::from_millis(300)),
+			max: Some(std::time::Duration::from_millis(500)),
+		};
+		let consume = broadcast.consume();
+		let catalog = warmup_catalog(None);
+		let mut open = Box::pin(Consumer::new(
+			&consume,
+			&catalog,
+			"video",
+			Options {
+				decoder: Config {
+					kind: Kind::Named(probe::IMMEDIATE_NAME.into()),
+					..Config::new()
+				},
+				start: Start::Latest,
+				delay,
+			},
+		));
+		// The open waits for the live edge with its subscription open, so the first aggregate
+		// the publisher sees is the request itself.
+		let first = tokio::select! {
+			opened = &mut open => panic!("the open finished with no live edge (ok: {})", opened.is_ok()),
+			first = track.subscription_changed() => first.unwrap(),
+		};
+		assert_eq!(first.map(|sub| sub.delay), Some(delay));
 	}
 
 	/// A rendition without `warmup` opens one subscription and one decoder.
@@ -1351,14 +1457,17 @@ mod tests {
 						kind: Kind::Named(probe::IMMEDIATE_NAME.into()),
 						..Config::new()
 					},
-					max_delay,
+					delay: Delay {
+						max: Some(max_delay),
+						..Delay::default()
+					},
 					..Options::new()
 				},
 			)
 			.await
 			.unwrap();
 			assert!(matches!(consumer.lanes[Lane::Max as usize], Slot::Closed));
-			assert_eq!(track.subscription().and_then(|sub| sub.max_delay), Some(max_delay));
+			assert_eq!(track.subscription().and_then(|sub| sub.delay.max), Some(max_delay));
 		}
 	}
 
@@ -1418,7 +1527,7 @@ mod tests {
 		)
 		.await;
 		for _ in 0..3 {
-			match tokio::time::timeout(std::time::Duration::from_secs(10), consumer.next_frame()).await {
+			match kio::clock::timeout(std::time::Duration::from_secs(10), consumer.next_frame()).await {
 				Ok(Ok(Some(_))) => continue,
 				Ok(Err(err)) => {
 					assert!(err.to_string().contains("corrupt"), "unexpected error: {err}");

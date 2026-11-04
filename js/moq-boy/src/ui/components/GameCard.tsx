@@ -27,7 +27,7 @@ function GameCardInner() {
 		game.canvas.set(canvasRef);
 	});
 
-	// Keyboard input — preventDefault when expanded or hovered.
+	// Keyboard input - preventDefault when expanded or hovered.
 	const isActive = () => game.expanded.peek() === game.sessionId || game.hovered.peek();
 
 	const onKeyDown = (e: KeyboardEvent) => {

@@ -62,7 +62,8 @@ export type CaptureProps = Inputs<CaptureInput> & {
 	channelCount?: number | Signal<number | undefined>;
 };
 
-type CaptureOutput = {
+/** Signals the capture derives. */
+export type CaptureOutput = {
 	// The PCM to encode, replaced whenever the source changes. Subscribe for a stream of your own:
 	// several renditions share one capture, and each needs every frame rather than the newest.
 	frames: Signal<Fanout<AudioFrame> | undefined>;
@@ -159,7 +160,7 @@ export class Capture {
 	}
 
 	// Decoded samples need no graph and declare their own format, so this only converts them to the
-	// planar shape the framer wants. Note it never reads `enabled`: muting must not tear the stream
+	// planar shape the framer wants. Note it never reads `enabled`: disabling must not tear the stream
 	// down, because a one-shot stream can't be read again.
 	#runSamples(source: SampleSource, effect: Effect): void {
 		const { sampleRate, channelCount } = source;
@@ -172,7 +173,7 @@ export class Capture {
 	}
 
 	#runTrack(source: SourceConfig, effect: Effect): void {
-		// Releasing the capture device while muted is the whole point of gating on `enabled`.
+		// Releasing the capture device while disabled is the whole point of gating on `enabled`.
 		if (!effect.get(this.in.enabled)) return;
 
 		const settings = source.track.getSettings();

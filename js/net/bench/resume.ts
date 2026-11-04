@@ -41,17 +41,16 @@ function read(subscribers: Subscriber[]) {
 
 /** Microseconds per group per reader, reading through a front after `swaps` route swaps, or directly. */
 async function measure(readers: number, swaps: number | undefined, fork = false): Promise<number> {
-	let sequence = 0;
+	let sequence = 0n;
 	const sources: { broadcast: BroadcastProducer; write: () => void }[] = [];
 	const source = () => {
 		const broadcast = new BroadcastProducer();
 		const track = broadcast.createTrack("seq");
 		// Every route's copy holds the same groups under the same sequences.
 		const write = () => {
-			const group = new GroupProducer(sequence);
-			track.writeGroup(group);
+			const group = track.createGroup(sequence);
 			group.writeFrame({ payload });
-			group.close();
+			group.finish();
 		};
 		sources.push({ broadcast, write });
 		return broadcast;
@@ -151,7 +150,7 @@ async function measureFlaps(readers: number, flaps: number): Promise<number> {
 	});
 	front.serve(handles[0]);
 	const subscribers = Array.from({ length: readers }, () =>
-		front.consumer.track("seq").subscribe({ maxDelay: Milli(3_600_000) }),
+		front.consumer.track("seq").subscribe({ delay: { max: Milli(3_600_000) } }),
 	);
 	const held = subscribers.map((subscriber) => {
 		const group = subscriber.tryRecvGroup();
@@ -171,7 +170,7 @@ async function measureFlaps(readers: number, flaps: number): Promise<number> {
 	for (const group of held) group.close();
 	for (const subscriber of subscribers) subscriber.close();
 	front.consumer.close();
-	for (const group of groups) group.close();
+	for (const group of groups) group.finish();
 	for (const handle of handles) handle.close();
 	for (const source of sources) source.close();
 	await flush();
@@ -191,8 +190,8 @@ for (const readers of readerCounts) {
 // An adopted copy may repeat a large prefix before it reaches unread content. Time readiness
 // separately from constructing the copies, sweeping both the replay and independent readers.
 async function measureReplay(readers: number, replayed: number): Promise<number> {
-	const producer = new GroupProducer(0);
-	const replacement = new GroupProducer(0);
+	const producer = new GroupProducer(0n);
+	const replacement = new GroupProducer(0n);
 	for (let index = 0; index < replayed; index++) {
 		producer.writeFrame({ payload });
 		replacement.writeFrame({ payload });
@@ -215,7 +214,7 @@ async function measureReplay(readers: number, replayed: number): Promise<number>
 			}),
 		});
 	}
-	producer.close(new Error("route failed"));
+	producer.abort(new Error("route failed"));
 	const start = performance.now();
 	await Promise.all(consumers.map((consumer) => consumer.readable()));
 	const elapsed = performance.now() - start;
@@ -225,7 +224,7 @@ async function measureReplay(readers: number, replayed: number): Promise<number>
 		checksum += frame.payload.byteLength;
 		consumer.close();
 	}
-	replacement.close();
+	replacement.finish();
 	await flush();
 	return (elapsed * 1000) / readers;
 }
@@ -248,19 +247,21 @@ async function measureDatagrams(readers: number, retained: number): Promise<numb
 	const producer = broadcast.createTrack("seq");
 	front.serve(broadcast.consume());
 	const subscribers = Array.from({ length: readers }, () =>
-		front.consumer.track("seq").subscribe({ maxDelay: Milli(3_600_000) }),
+		front.consumer.track("seq").subscribe({ delay: { max: Milli(3_600_000) } }),
 	);
-	const deliver = (sequence: number) => {
+	const deliver = (sequence: bigint) => {
 		producer.insertDatagram(sequence, undefined, payload);
 		for (const subscriber of subscribers) {
 			const recv = hooks.tryRecvDatagram(subscriber);
 			if (recv.kind !== "datagram") throw new Error("datagram was not delivered");
-			checksum += recv.datagram.sequence;
+			checksum += Number(recv.datagram.sequence);
 		}
 	};
-	for (let sequence = 0; sequence < retained; sequence++) deliver(sequence);
+	const base = BigInt(retained);
+	for (let sequence = 0n; sequence < base; sequence++) deliver(sequence);
+	const end = base + BigInt(groups);
 	const start = performance.now();
-	for (let index = 0; index < groups; index++) deliver(retained + index);
+	for (let sequence = base; sequence < end; sequence++) deliver(sequence);
 	const elapsed = performance.now() - start;
 	for (const subscriber of subscribers) subscriber.close();
 	front.consumer.close();

@@ -161,14 +161,9 @@ pub enum Error {
 		websocket: Arc<Error>,
 	},
 
-	/// An `iroh://` URL was dialed but the client was built without an Iroh endpoint.
-	#[cfg(feature = "iroh")]
-	#[error("Iroh support is not enabled")]
-	IrohDisabled,
-
-	/// A client CA or pinned peers were configured on a stream-only server, which has no QUIC listener to verify them.
+	/// A client CA or pinned peers were configured on a server with no QUIC or `tls://` listener to verify them.
 	#[error(
-		"mTLS (--listen-tls-root or tls.peers) needs a QUIC listener (--listen); the TCP and Unix listeners never ask for a client certificate"
+		"mTLS (--listen-tls-root or tls.peers) needs a QUIC listener (--listen) or a TLS TCP listener (--listen-tcp-tls); the plaintext TCP and Unix listeners never ask for a client certificate"
 	)]
 	MtlsUnsupported,
 
@@ -230,6 +225,12 @@ pub enum Error {
 	#[error("panicked")]
 	Panic,
 
+	/// A listener's endpoint stopped, so [`Listener::accept`](crate::Listener::accept) can never
+	/// yield another session. The endpoint's own failure is logged where it happened.
+	#[cfg(feature = "_transport")]
+	#[error("the {0} listener stopped accepting")]
+	Accept(crate::Transport),
+
 	/// Loading certificates or building the TLS config failed.
 	#[error(transparent)]
 	Tls(Arc<crate::tls::Error>),
@@ -238,11 +239,6 @@ pub enum Error {
 	#[cfg(feature = "quic")]
 	#[error(transparent)]
 	Quic(Arc<crate::quic::Error>),
-
-	/// The Iroh backend failed.
-	#[cfg(feature = "iroh")]
-	#[error(transparent)]
-	Iroh(Arc<crate::iroh::Error>),
 
 	/// The WebSocket fallback transport failed.
 	#[cfg(feature = "websocket")]
@@ -263,6 +259,12 @@ pub enum Error {
 	#[cfg(feature = "webrtc")]
 	#[error(transparent)]
 	WebRtc(Arc<crate::webrtc::Error>),
+
+	/// A qmux session refused the limits [`crate::server::Request::with_quic_limits`] set,
+	/// such as a rate cap, which qmux cannot pace.
+	#[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
+	#[error("qmux refused the session limits: {0}")]
+	QmuxLimits(String),
 }
 
 impl Error {
@@ -276,6 +278,7 @@ impl Error {
 				moq_net::SessionError::from(err),
 				moq_net::SessionError::Unauthorized
 					| moq_net::SessionError::Expired
+					| moq_net::SessionError::MalformedAuthToken
 					| moq_net::SessionError::ProtocolViolation
 					| moq_net::SessionError::KeyValueFormatting
 					| moq_net::SessionError::InvalidRequestId
@@ -302,17 +305,6 @@ impl Error {
 			),
 			#[cfg(all(feature = "uds", unix))]
 			Self::Unix(err) => matches!(err.as_ref(), crate::unix::Error::MissingPath),
-			#[cfg(feature = "iroh")]
-			Self::IrohDisabled => true,
-			#[cfg(feature = "iroh")]
-			Self::Iroh(err) => matches!(
-				err.as_ref(),
-				crate::iroh::Error::MissingHost
-					| crate::iroh::Error::InvalidEndpointId(_)
-					| crate::iroh::Error::InvalidUrl
-					| crate::iroh::Error::Url(_)
-					| crate::iroh::Error::NoVersions
-			),
 			_ => self.is_auth(),
 		}
 	}
@@ -338,9 +330,14 @@ impl Error {
 	/// True if the server rejected us for auth reasons, so retrying won't help without new credentials.
 	#[cfg(feature = "net")]
 	pub fn is_auth(&self) -> bool {
-		// Expiry has no HTTP status, so it has no `ConnectError` to report.
-		matches!(self, Self::MoqNet(err) if moq_net::SessionError::from(err) == moq_net::SessionError::Expired)
-			|| self.connect_error().is_some_and(|err| err.is_auth())
+		// Neither code has an HTTP status, so neither has a `ConnectError` to report.
+		matches!(
+			self,
+			Self::MoqNet(err) if matches!(
+				moq_net::SessionError::from(err),
+				moq_net::SessionError::Expired | moq_net::SessionError::MalformedAuthToken
+			)
+		) || self.connect_error().is_some_and(|err| err.is_auth())
 	}
 
 	/// The HTTP status a server answered a connection attempt with, if it answered with one at all.
@@ -399,13 +396,6 @@ impl From<crate::quic::Error> for Error {
 		}
 
 		Self::Quic(Arc::new(err))
-	}
-}
-
-#[cfg(feature = "iroh")]
-impl From<crate::iroh::Error> for Error {
-	fn from(err: crate::iroh::Error) -> Self {
-		Self::Iroh(Arc::new(err))
 	}
 }
 
@@ -484,6 +474,14 @@ mod tests {
 		assert!(Error::MoqNet(moq_net::SessionError::Expired.into()).is_terminal());
 		assert!(Error::MoqNet(moq_net::Error::Expired).is_auth());
 		assert!(Error::MoqNet(moq_net::SessionError::Expired.into()).is_auth());
+	}
+
+	/// Redialing with a token the peer could not parse sends the same bytes again.
+	#[test]
+	fn malformed_credentials_are_terminal() {
+		let err = Error::MoqNet(moq_net::SessionError::MalformedAuthToken.into());
+		assert!(err.is_terminal());
+		assert!(err.is_auth());
 	}
 
 	/// Every raced address building the same malformed request is as terminal as one address doing so.

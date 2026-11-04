@@ -1,14 +1,14 @@
 //! Broadcast archives on any [`object_store::ObjectStore`].
 //!
 //! A [`Producer`] stores every track of one broadcast under a key prefix the host picks, and a
-//! [`Reader`] serves a recording back through a `moq_net` broadcast. Callers that need runtime
+//! [`Consumer`] serves that prefix back as an ordinary `moq_net` broadcast. Callers that need runtime
 //! dispatch supply `Arc<dyn ObjectStore>`; the archive API itself stays generic.
 //!
 //! # Layout
 //!
 //! A [`Producer`] writes, under its prefix:
 //!
-//! - `<track>/.info`: the track's properties as JSON, `{"version":3,"priority":0,"timescale":1000}`,
+//! - `<track>/.info`: the track's properties as JSON, `{"version":4,"priority":0,"timescale":1000}`,
 //!   written before its first object. `timescale` is absent on an untimed track. Properties never
 //!   change for a track name. The source's max age is not stored: it bounds the live cache, not
 //!   the archive.
@@ -32,8 +32,8 @@
 //!
 //! ```text
 //! Object {
-//!   Version (i) = 3,
-//!   Frame Start (i),      // the first group's first frame index; 0 when it starts with a datagram
+//!   Version (i) = 4,
+//!   Frame Start (i),      // the first group's first frame index
 //!   Entry Count (i),
 //!   Entry (..) ...,
 //!   Payload (..),         // every frame's bytes, in table order
@@ -41,9 +41,8 @@
 //!
 //! Entry {
 //!   Sequence (i),         // absolute for the first entry, then current - previous - 1
-//!   Form (i),             // 0 for a group, 1 for a datagram
-//!   [Frame Count (i)],    // a group only, at least 1
-//!   Frame (..) ...,       // a datagram has exactly one
+//!   Frame Count (i),      // at least 1
+//!   Frame (..) ...,
 //! }
 //!
 //! Frame {
@@ -52,13 +51,14 @@
 //! }
 //! ```
 //!
-//! A track's groups and datagrams share one sequence space, so each entry keeps its form, and a
-//! datagram replays as a datagram, never as a cached one-frame group.
+//! An archive records stream tracks only. A datagram track is live-only, so a broadcast's
+//! archive holds none of its datagram tracks.
 
 #![warn(missing_docs)]
 
 pub use object_store;
 
+pub mod consumer;
 mod error;
 /// The `.info` object holding a track's immutable properties.
 pub mod info;
@@ -67,29 +67,25 @@ mod layout;
 mod mock;
 mod path;
 pub mod producer;
-pub mod reader;
-/// The binary segment object holding a record's groups and frames.
-mod segment;
-/// Recording objects on an object store.
+/// The object store and key prefix an archive lives under.
 mod store;
 
+pub use consumer::Consumer;
 pub use error::{Error, Result};
 pub use info::Info;
-pub(crate) use path::Key;
 pub use producer::Producer;
-pub use reader::Reader;
-pub(crate) use segment::Object;
 pub use store::Store;
 
 /// Recording format version written into `.info` and the binary envelope.
-pub const VERSION: u64 = 3;
+pub const VERSION: u64 = 4;
 
-/// The oldest recording format version [`Reader`] accepts. Version 2 stored `.info`'s
-/// priority as its moq-lite byte and is otherwise identical.
+/// The oldest recording format version a [`Consumer`] accepts. Version 2 stored `.info`'s
+/// priority as its moq-lite byte, and versions 2 and 3 give each object entry a form, which
+/// a reader accepts only as a group.
 pub(crate) const VERSION_MIN: u64 = 2;
 
-/// Largest group, segment, or timestamp value the format allows (`2^53 - 1`).
+/// Largest sequence, frame index, or timestamp value the format allows (`2^53 - 1`).
 pub const ID_MAX: u64 = (1 << 53) - 1;
 
-/// Decimal width of segment ID filename fields.
+/// Decimal width of each object key field.
 pub(crate) const ID_WIDTH: usize = 19;

@@ -30,12 +30,11 @@ mod tests {
 	use super::*;
 	#[test]
 	fn negotiated_separately_and_bounded() {
-		for version in [Version::Draft14, Version::Draft16, Version::Draft22] {
-			let mut params = Parameters::default();
-			assert!(!from_setup(&params, version));
-			into_setup(&mut params, version);
-			assert!(from_setup(&params, version));
-		}
+		let version = Version::Draft22;
+		let mut params = Parameters::default();
+		assert!(!from_setup(&params, version));
+		into_setup(&mut params, version);
+		assert!(from_setup(&params, version));
 		assert_eq!(validate(None).unwrap(), None);
 		assert_eq!(validate(Some(0)).unwrap(), Some(0));
 		assert!(validate(Some(MAX_MILLIS + 1)).is_err());

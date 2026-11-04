@@ -56,5 +56,76 @@ fn bench(c: &mut Criterion) {
 	group.finish();
 }
 
-criterion_group!(benches, bench);
+fn amf0(c: &mut Criterion) {
+	let mut group = c.benchmark_group("rtmp_amf0");
+	for count in [1024usize, 65536, 1048576] {
+		for (name, value) in [("nulls", vec![5]), ("properties", vec![0, 1, b'a', 5])] {
+			let mut bytes = Vec::new();
+			if name == "properties" {
+				bytes.push(3);
+			}
+			for _ in 0..count {
+				bytes.extend_from_slice(&value);
+			}
+			if name == "properties" {
+				bytes.extend_from_slice(&[0, 0, 9]);
+			}
+			group.throughput(Throughput::Bytes(bytes.len() as u64));
+			group.bench_function(BenchmarkId::new(name, count), |b| {
+				b.iter(|| black_box(rml::amf0::Values::decode(black_box(&bytes)).unwrap()));
+			});
+		}
+	}
+	group.finish();
+}
+
+fn connect(c: &mut Criterion) {
+	use rml::amf0::Amf0Value;
+	use rml::chunk_io::ChunkSerializer;
+	use rml::messages::RtmpMessage;
+	use rml::sessions::{ServerSession, ServerSessionConfig};
+	use rml::time::RtmpTimestamp;
+	let mut group = c.benchmark_group("rtmp_connect_fourccs");
+	for count in [16usize, 256, 4096] {
+		for shape in ["array", "object", "info_map"] {
+			let names = (0..count).rev().map(|id| format!("{id:04x}"));
+			let value = match shape {
+				"array" => Amf0Value::StrictArray(names.map(Amf0Value::Utf8String).collect()),
+				"object" => Amf0Value::Object(names.map(|name| (name.clone(), Amf0Value::Utf8String(name))).collect()),
+				_ => Amf0Value::Object(names.map(|name| (name, Amf0Value::Number(1.0))).collect()),
+			};
+			let field = if shape == "info_map" {
+				"videoFourCcInfoMap"
+			} else {
+				"fourCcList"
+			};
+			let message = RtmpMessage::Amf0Command {
+				command_name: "connect".into(),
+				transaction_id: 1.0,
+				command_object: Amf0Value::Object(
+					[
+						("app".into(), Amf0Value::Utf8String("live".into())),
+						(field.into(), value),
+					]
+					.into_iter()
+					.collect(),
+				),
+				additional_arguments: Vec::new(),
+			};
+			let payload = message.into_message_payload(RtmpTimestamp::new(0), 0).unwrap();
+			let packet = ChunkSerializer::new().serialize(&payload, false, false).unwrap();
+			group.throughput(Throughput::Elements(count as u64));
+			group.bench_function(BenchmarkId::new(shape, count), |b| {
+				b.iter_batched(
+					|| ServerSession::new(ServerSessionConfig::new()).unwrap().0,
+					|mut session| black_box(session.handle_input(black_box(&packet.bytes)).unwrap()),
+					criterion::BatchSize::SmallInput,
+				);
+			});
+		}
+	}
+	group.finish();
+}
+
+criterion_group!(benches, bench, amf0, connect);
 criterion_main!(benches);

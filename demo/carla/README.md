@@ -8,7 +8,7 @@ follows the [moq-boy](../boy) pattern: the viewer publishes, the truck
 subscribes, and the truck echoes what it accepted on `status`.
 
 ```text
-├── web/      # the player: map, video, keyboard and steering-wheel input (@moq/demo-carla)
+├── web/      # the player: the <moq-carla> element, with map, video, keyboard and steering-wheel input (@moq/demo-carla)
 ├── sim/      # the worker: one Python process driving every truck in CARLA
 │   ├── moq_carla_sim/  # safety gate, CARLA world, MoQ publish and control
 │   └── systemd/        # rootless user units for an always-on workstation
@@ -106,19 +106,27 @@ The worker's gate (`sim/moq_carla_sim/drive.py`) owns every truck's controls:
 - **One driver at a time.** The first driver to send a command holds the
   lease until its broadcast ends or its 1 s watchdog expires; the player
   heartbeats every 250 ms. The lease is bound to the driver's path and the
-  epoch it announced with, so a driver that reconnects at the same path is a
-  new claimant rather than a continuation.
+  route instance it announced with, so a driver that reconnects at the same
+  path is a new claimant rather than a continuation.
 - **E-stop latches** until an explicit reset, from any viewer: the player
   latches and resets it through a short-lived safety broadcast without taking
-  the lease.
+  the lease. A latched truck nobody drives is also cleared when it respawns
+  as wedged, below.
 - **Gear changes are interlocked**: the gate keeps the current gear unless the
   command releases throttle and applies some brake.
+- **Takeover starts braking**: the player keeps measured steering and gear,
+  but sets zero throttle and full brake until the driver changes the pedals.
+  The worker holds these pedals on every new driving lease until the holder
+  changes a pedal, including for older clients sending unchanged heartbeats.
+  Reclaiming after a watchdog expiry is another takeover and requires pedal input.
+  A resting-state claim still leaves Traffic Manager in control.
 - **An unclaimed truck goes back to autonomy**, not to full brake. It first
   coasts onto the nearest lane running its way (`handback.py`), because
   Traffic Manager steers a truck it takes back toward the nearest waypoint
   whatever its heading.
-- **A wedged truck respawns**: an autonomous truck that has not moved 2 m in
-  5 minutes returns to a free spawn point.
+- **A wedged truck respawns**: a truck nobody drives, autonomous or with its
+  e-stop latched, that has not moved 2 m in 5 minutes of a running world
+  returns to a free spawn point under autonomy, its e-stop cleared.
 
 The lease is cooperative. Anyone who can publish under `viewer/carla/` can
 announce a driver path, so it stops two honest drivers fighting over a truck,
@@ -207,8 +215,10 @@ at login.
 
 ## The player
 
-`just carla deploy` builds the player against `https://cdn.moq.dev/demo` and
-deploys it to `carla.moq.dev`. With no simulator publishing, it says so.
+The player is a `<moq-carla>` custom element: importing
+`@moq/demo-carla/element` registers it, and its `url` attribute names the relay.
+`just carla web` serves it on a local dev page. With no simulator publishing,
+it says so.
 
 Hover a truck on the map to stream its 240p preview; click it for 720p. A drive
 key, a wheel movement, or **Take control** claims the lease, and **Esc**
@@ -223,7 +233,7 @@ A steering wheel works through the
 the keys it is absolute: rim angle is steering angle and pedal travel is
 throttle and brake. It takes over only once it moves with the throttle
 released, so a resting foot cannot claim control, and losing an armed wheel
-cuts the throttle and brakes. Click its name in the header to calibrate an
+cuts the throttle and brakes. Click its name on the map to calibrate an
 unfamiliar layout; the result is stored per device.
 
 ## Checks

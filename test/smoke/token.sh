@@ -28,15 +28,15 @@ JS_DIR="$SMOKE_DIR/clients/token/js"
 GENERATORS="rust"
 VERIFIERS="rust"
 # Cover both code paths in each impl: symmetric (HS256) and every asymmetric
-# family they support — EdDSA (OKP/Ed25519), ES256 (EC), RS256 (RSA) — so the
+# family they support - EdDSA (OKP/Ed25519), ES256 (EC), RS256 (RSA) - so the
 # default matrix (and `just token-full` / CI, which don't pass --algorithms)
 # can't silently stop exercising one. Override with --algorithms / TOKEN_ALGORITHMS.
 ALGORITHMS="${TOKEN_ALGORITHMS:-HS256,EdDSA,ES256,RS256}"
 
 # The Rust CLI under test, as a command prefix: the same `moq` binary smoke.sh
-# tests (MOQ_BIN, else PATH), since moq-token-cli was folded into `moq auth`
+# tests (CLI_BIN, else PATH), since moq-token-cli was folded into `moq auth`
 # (moq-dev/moq#3684). TOKEN_BIN overrides the whole prefix.
-TOKEN="${TOKEN_BIN:-${MOQ_BIN:-moq} auth}"
+TOKEN="${TOKEN_BIN:-${CLI_BIN:-moq} auth}"
 
 # The published Docker image for the `rust-docker` cell. Untagged = :latest, the
 # tag the release pipeline moves to the newest version; pulled fresh each run.

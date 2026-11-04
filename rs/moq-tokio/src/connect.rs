@@ -85,6 +85,15 @@ impl Addr {
 	pub fn addresses(&self) -> Option<&[net::SocketAddr]> {
 		self.resolved.as_deref()
 	}
+
+	/// The same peer and addresses, requested at `url`.
+	#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds"))]
+	pub(crate) fn with_url(&self, url: Url) -> Self {
+		Self {
+			url,
+			resolved: self.resolved.clone(),
+		}
+	}
 }
 
 impl From<Url> for Addr {
@@ -206,14 +215,8 @@ pub(crate) struct Legacy {
 			"moq-lite-05",
 			"moq-lite-06",
 			"moq-lite-07-wip",
-			"moq-transport-14",
-			"moq-transport-15",
-			"moq-transport-16",
-			"moq-transport-17",
 			"moq-transport-18",
-			"moq-transport-19",
 			"moq-transport-20",
-			"moq-transport-21",
 			"moq-transport-22"
 		),
 		hide = true
@@ -493,13 +496,29 @@ pub struct Config {
 	/// The URL to dial.
 	///
 	/// Supports WebTransport (`https`/`http`), WebSocket (`ws`/`wss`), raw QUIC
-	/// (`moqt`/`moql`), qmux over `tcp`/`unix`, and `iroh`. The URL path is the
+	/// (`moqt`/`moql`), and qmux over `tcp`/`unix`. The URL path is the
 	/// request/auth path (e.g. `/anon` for a public relay) and `?jwt=` supplies a
 	/// token. `http://` first fetches `/certificate.sha256` for the (insecure)
 	/// self-signed fingerprint; `https://` connects directly.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[usage(name = "connect", long = "connect", env = "MOQ_CONNECT", setting = "connect.url")]
 	pub url: Option<Url>,
+
+	/// Credentials to present on every dial, kept apart from the URL.
+	///
+	/// The first is the connection credential: it rides SETUP, and the URL query too
+	/// while an offered version can't carry it in SETUP (lite before 07). Each other
+	/// token rides its own AUTH stream, widening the session's grant. A URL that
+	/// already has a `?jwt=` keeps it as the connection credential, and then every
+	/// token rides AUTH. Replace a connection's through `Connection::tokens`.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	#[usage(
+		name = "connect-token",
+		long = "connect-token",
+		env = "MOQ_CONNECT_TOKEN",
+		setting = "connect.tokens"
+	)]
+	pub tokens: Vec<moq_net::auth::Token>,
 
 	/// The released `connect` key, kept so [`deprecated`](Self::deprecated) can name [`url`](Self::url).
 	#[serde(default, skip_serializing)]
@@ -581,7 +600,8 @@ pub struct Config {
 
 	/// Restrict the client to specific MoQ protocol version(s).
 	///
-	/// By default, the client offers all supported versions and lets the server choose.
+	/// By default, the client offers every supported version except the opt-in `moq-lite-07-wip`
+	/// and lets the server choose.
 	/// Use this to force a specific version, e.g. `--connect-version moq-lite-02`.
 	/// Can be specified multiple times to offer a subset of versions.
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -598,14 +618,8 @@ pub struct Config {
 			"moq-lite-05",
 			"moq-lite-06",
 			"moq-lite-07-wip",
-			"moq-transport-14",
-			"moq-transport-15",
-			"moq-transport-16",
-			"moq-transport-17",
 			"moq-transport-18",
-			"moq-transport-19",
 			"moq-transport-20",
-			"moq-transport-21",
 			"moq-transport-22"
 		)
 	)]
@@ -764,7 +778,7 @@ mod addr_tests {
 	#[test]
 	fn fixed_addresses_require_a_supported_nonempty_target() {
 		let peer: net::SocketAddr = "127.0.0.1:443".parse().unwrap();
-		for scheme in ["http", "ws", "tcp", "unix", "iroh"] {
+		for scheme in ["http", "ws", "tcp", "unix"] {
 			let url = format!("{scheme}://relay.example/path").parse().unwrap();
 			assert_eq!(Addr::pinned(url, [peer]), Err(Error::UnsupportedScheme(scheme.into())));
 		}

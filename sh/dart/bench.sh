@@ -3,8 +3,8 @@ set -euo pipefail
 
 workspace=$(git rev-parse --show-toplevel)
 cd "$workspace"
-mkdir -p .scratch
-scratch=$(mktemp -d .scratch/dart-bench.XXXXXX)
+mkdir -p .tmp
+scratch=$(mktemp -d .tmp/dart-bench.XXXXXX)
 cp dart/moq/pubspec.yaml "$scratch/pubspec.yaml"
 restore() {
     cd "$workspace"

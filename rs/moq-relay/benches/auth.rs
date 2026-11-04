@@ -16,7 +16,7 @@ fn grant(prefix: &str) -> Grant {
 
 struct Fixture {
 	_connections: Vec<moq_tokio::Connection>,
-	_tokens: Vec<moq_net::auth::Auth>,
+	_tokens: Vec<moq_net::auth::Credential>,
 	producers: Vec<lease::Producer>,
 	selected: usize,
 	watch: moq_net::auth::Watch,
@@ -58,10 +58,11 @@ impl Fixture {
 		config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
 		let mut server = config.init(Default::default()).unwrap().listen().await.unwrap();
 		let port = server.tcp_local_addr().unwrap().port();
-		let cluster = cluster::Cluster::new(Default::default()).unwrap();
+		let (cluster, driver) = cluster::Cluster::new(Default::default()).unwrap();
+		tokio::spawn(driver.run());
 		let listener = tokio::spawn(async move {
 			let mut serving = tokio::task::JoinSet::new();
-			while let Some(request) = server.accept().await {
+			while let Ok(request) = server.accept().await {
 				let connection = Connection::new(request, cluster.clone(), auth.clone());
 				serving.spawn(async move {
 					connection.run().await;
@@ -84,8 +85,9 @@ impl Fixture {
 			let added = futures::future::join_all((0..tokens).map(|index| auth.add(format!("token{index}")))).await;
 			let added: Vec<_> = added.into_iter().map(|added| added.unwrap().0).collect();
 			if session == 0 {
-				let mut observed = added.last().unwrap().grant();
-				observed.changed().await.unwrap();
+				// `add` resolves once the peer grants the token, so its grant is already current.
+				let observed = added.last().unwrap().grant();
+				assert!(observed.peek().is_some());
 				watch = Some(observed);
 			}
 			for _ in 0..tokens {
@@ -169,10 +171,11 @@ impl Queue {
 		config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
 		let mut server = config.init(Default::default()).unwrap().listen().await.unwrap();
 		let port = server.tcp_local_addr().unwrap().port();
-		let cluster = cluster::Cluster::new(Default::default()).unwrap();
+		let (cluster, driver) = cluster::Cluster::new(Default::default()).unwrap();
+		tokio::spawn(driver.run());
 		let listener = tokio::spawn(async move {
 			let mut serving = tokio::task::JoinSet::new();
-			while let Some(request) = server.accept().await {
+			while let Ok(request) = server.accept().await {
 				let connection = Connection::new(request, cluster.clone(), auth.clone());
 				serving.spawn(async move {
 					connection.run().await;

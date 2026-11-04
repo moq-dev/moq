@@ -8,8 +8,8 @@ use crate::{Error, Result, VERSION, VERSION_MIN};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "Stored")]
 pub struct Info {
-	/// Recording format version: [`VERSION`], or 2 for a recording read from before
-	/// priorities were signed, which only a reader accepts.
+	/// Recording format version: [`VERSION`], or 2 or 3 for an older recording, which only a
+	/// reader accepts.
 	pub version: u64,
 	/// The publisher's track priority, higher first.
 	pub priority: i8,
@@ -19,9 +19,7 @@ pub struct Info {
 	pub timescale: Option<u64>,
 }
 
-/// [`Info`] as stored, before its priority is read in its version's encoding. It also takes the
-/// `epoch` an older `Writer` recorded, so [`Reader`](crate::Reader) still replays those
-/// recordings; that goes when `Reader` does.
+/// [`Info`] as stored, before its priority is read in its version's encoding.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Stored {
@@ -29,8 +27,6 @@ struct Stored {
 	priority: i64,
 	#[serde(default)]
 	timescale: Option<u64>,
-	#[serde(default, rename = "epoch")]
-	_epoch: Option<serde::de::IgnoredAny>,
 }
 
 impl TryFrom<Stored> for Info {
@@ -102,7 +98,7 @@ mod tests {
 	fn roundtrip() {
 		let info = Info::new(0, Some(1_000_000)).unwrap();
 		let bytes = info.encode().unwrap();
-		assert_eq!(bytes.as_ref(), br#"{"version":3,"priority":0,"timescale":1000000}"#);
+		assert_eq!(bytes.as_ref(), br#"{"version":4,"priority":0,"timescale":1000000}"#);
 		assert_eq!(Info::decode(&bytes).unwrap(), info);
 	}
 
@@ -110,16 +106,16 @@ mod tests {
 	fn an_untimed_track_omits_its_timescale() {
 		let info = Info::new(3, None).unwrap();
 		let bytes = info.encode().unwrap();
-		assert_eq!(bytes.as_ref(), br#"{"version":3,"priority":3}"#);
+		assert_eq!(bytes.as_ref(), br#"{"version":4,"priority":3}"#);
 		assert_eq!(Info::decode(&bytes).unwrap(), info);
 	}
 
 	#[test]
 	fn whitespace_and_member_order_do_not_affect_equality() {
-		let info = Info::decode(br#"{"timescale":1000,"priority":7,"version":3}"#).unwrap();
+		let info = Info::decode(br#"{"timescale":1000,"priority":7,"version":4}"#).unwrap();
 		assert_eq!(
 			info,
-			Info::decode(br#"{ "version": 3, "priority": 7, "timescale": 1000 }"#).unwrap()
+			Info::decode(br#"{ "version": 4, "priority": 7, "timescale": 1000 }"#).unwrap()
 		);
 		assert_eq!(info.priority, 7);
 		assert_eq!(info.timescale, Some(1000));
@@ -129,12 +125,12 @@ mod tests {
 	fn priority_is_stored_signed() {
 		for priority in [i8::MIN, -1, 0, i8::MAX] {
 			let info = Info::new(priority, None).unwrap();
-			let json = format!(r#"{{"version":3,"priority":{priority}}}"#);
+			let json = format!(r#"{{"version":4,"priority":{priority}}}"#);
 			assert_eq!(info.encode().unwrap().as_ref(), json.as_bytes());
 			assert_eq!(Info::decode(json.as_bytes()).unwrap(), info);
 		}
 		for priority in [-129, 128] {
-			let json = format!(r#"{{"version":3,"priority":{priority}}}"#);
+			let json = format!(r#"{{"version":4,"priority":{priority}}}"#);
 			assert!(
 				matches!(Info::decode(json.as_bytes()), Err(Error::Json(_))),
 				"{priority}"
@@ -159,6 +155,13 @@ mod tests {
 	}
 
 	#[test]
+	fn a_version_3_info_reads_its_signed_priority() {
+		let info = Info::decode(br#"{"version":3,"priority":-1,"timescale":1000}"#).unwrap();
+		assert_eq!((info.version, info.priority, info.timescale), (3, -1, Some(1000)));
+		assert!(matches!(info.encode(), Err(Error::Version(3))));
+	}
+
+	#[test]
 	fn unknown_version_is_refused() {
 		for version in [1, VERSION + 1] {
 			let json = format!(r#"{{"version":{version},"priority":0,"timescale":1000}}"#);
@@ -175,19 +178,17 @@ mod tests {
 	}
 
 	#[test]
-	fn an_older_writers_epoch_is_ignored() {
-		let info = Info::decode(br#"{"version":2,"priority":128,"timescale":1000,"epoch":"x"}"#).unwrap();
-		assert_eq!((info.version, info.priority, info.timescale), (2, 0, Some(1000)));
-	}
-
-	#[test]
 	fn unknown_members_and_missing_fields_are_refused() {
 		assert!(matches!(
-			Info::decode(br#"{"version":3,"priority":0,"timescale":1,"extra":true}"#),
+			Info::decode(br#"{"version":2,"priority":128,"timescale":1000,"epoch":"x"}"#),
 			Err(Error::Json(_))
 		));
 		assert!(matches!(
-			Info::decode(br#"{"version":3,"timescale":1}"#),
+			Info::decode(br#"{"version":4,"priority":0,"timescale":1,"extra":true}"#),
+			Err(Error::Json(_))
+		));
+		assert!(matches!(
+			Info::decode(br#"{"version":4,"timescale":1}"#),
 			Err(Error::Json(_))
 		));
 	}

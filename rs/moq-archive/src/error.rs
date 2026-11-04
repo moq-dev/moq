@@ -14,7 +14,7 @@ pub enum Error {
 	#[error("unsupported version {0}")]
 	Version(u64),
 
-	/// A group ID, segment ID, or frame timestamp is outside 0 through 2^53 - 1.
+	/// A sequence, frame index, or timestamp is outside 0 through 2^53 - 1.
 	#[error("{0} exceeds the recording id range")]
 	Id(u64),
 
@@ -44,13 +44,14 @@ pub enum Error {
 	#[error("empty object")]
 	Empty,
 
+	/// A version 2 or 3 object entry is not a group: the datagram form, which an archive
+	/// does not replay, or an unknown one.
+	#[error("unsupported entry form {0}")]
+	Form(u64),
+
 	/// Group sequences are not strictly ascending.
 	#[error("group sequences are not strictly ascending")]
 	Sequence,
-
-	/// An object's table does not hold exactly the frames its record names.
-	#[error("object does not match its record")]
-	Span,
 
 	/// The binary table is truncated, overlapping, gapped, or out of range.
 	#[error("malformed table")]
@@ -68,10 +69,6 @@ pub enum Error {
 	#[error("invalid path: {0}")]
 	Path(String),
 
-	/// A backend returned a directory from the flat object listing API.
-	#[error("directory listing is unsupported: {0}")]
-	Directory(String),
-
 	/// A create collided with different object bytes.
 	#[error("conflicting object: {0}")]
 	Conflict(String),
@@ -80,7 +77,7 @@ pub enum Error {
 	#[error("json: {0}")]
 	Json(String),
 
-	/// Publishing the replayed archive failed.
+	/// Serving the archive on its broadcast failed.
 	#[error("moq: {0}")]
 	Moq(String),
 

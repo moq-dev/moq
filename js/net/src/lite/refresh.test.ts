@@ -13,12 +13,13 @@ test.each([ALPN_06, ALPN_07_WIP])("refresh joins reach a browser publisher on %s
 	const installed = clock.install();
 	const source = new Producer();
 	const b = new Producer();
-	const broadcast = source.createBroadcast(Path.from("room"));
-	broadcast.announce();
+	const broadcastPublication = source.createBroadcast(Path.from("room"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	const producer = broadcast.createTrack("data", { refresh: 1 });
 	const pair = createMockTransportPair(alpn);
 	const url = new URL("https://localhost/refresh");
-	const updates: number[] = [];
+	const updates: bigint[] = [];
 	const encode = SubscribeUpdate.prototype.encode;
 	const spy = spyOn(SubscribeUpdate.prototype, "encode").mockImplementation(function (
 		this: SubscribeUpdate,
@@ -54,26 +55,26 @@ test.each([ALPN_06, ALPN_07_WIP])("refresh joins reach a browser publisher on %s
 		expect((await received.readFrame())?.payload.length).toBe(3);
 		const joins = [remote.subscribe()];
 		await clock.advance(Nano(0));
-		expect(producer.demand().wanted.peek()).toBe(0);
+		expect(producer.demand().wanted.peek()).toBe(0n);
 		updates.length = 0;
 		group.writeFrame({ payload: new Uint8Array(1) });
 		expect((await received.readFrame())?.payload.length).toBe(1);
 		for (let i = 0; i < 8; i++) joins.push(remote.subscribe());
 		await clock.advance(Nano(0));
 		if (alpn === ALPN_07_WIP) {
-			while (producer.demand().wanted.peek() !== 1) await producer.demand().wanted.changed();
+			while (producer.demand().wanted.peek() !== 1n) await producer.demand().wanted.changed();
 		}
-		expect(producer.demand().wanted.peek()).toBe(alpn === ALPN_07_WIP ? 1 : 0);
+		expect(producer.demand().wanted.peek()).toBe(alpn === ALPN_07_WIP ? 1n : 0n);
 		// Concurrent local joins coalesce into one upstream update.
-		expect(updates).toEqual(alpn === ALPN_07_WIP ? [1] : []);
+		expect(updates).toEqual(alpn === ALPN_07_WIP ? [1n] : []);
 		// A parameter change restates the wanted group rather than clearing it.
 		joins.push(remote.subscribe({ priority: 9 }));
 		await clock.advance(Nano(0));
-		expect(updates).toEqual(alpn === ALPN_07_WIP ? [1, 1] : []);
+		expect(updates).toEqual(alpn === ALPN_07_WIP ? [1n, 1n] : []);
 		for (const join of joins) join.close();
 		received.close();
 		baseline.close();
-		group.close();
+		group.finish();
 	} finally {
 		spy.mockRestore();
 		for (const origin of [b, source]) origin.close();

@@ -6,9 +6,7 @@
 //! All of 127/8 is local, so IPv4 reaches `127.0.0.2`. IPv6 has only `::1`, so
 //! the IPv6 case is ignored by default and `just rs uring` runs it after its CI
 //! lanes add [`SECOND_V6`] to `lo`; without it the case skips loudly, and
-//! MOQ_STRICT makes CI refuse it.
-
-#![cfg(target_os = "linux")]
+//! CI_STRICT makes CI refuse it.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::os::fd::AsRawFd;
@@ -23,7 +21,7 @@ const SECOND_V6: Ipv6Addr = Ipv6Addr::new(0xfd6d, 0x6f71, 0, 0, 0, 0, 0, 2);
 const TIMEOUT: Duration = Duration::from_secs(5);
 
 fn strict() -> bool {
-	std::env::var_os("MOQ_STRICT").is_some()
+	std::env::var_os("CI_STRICT").is_some()
 }
 
 fn worker() -> Option<Worker> {
@@ -165,7 +163,7 @@ fn a_wildcard_endpoint_handshakes_on_a_secondary_address() {
 		.udp(UdpSocket::bind("0.0.0.0:0").expect("bind"), udp::Config::default())
 		.expect("socket");
 	let endpoint =
-		quic::Endpoint::new(socket, quic::endpoint::Config::default().with_server(server)).expect("endpoint");
+		quic::Endpoint::new(quic::endpoint::Config::default().with_server(server), socket).expect("endpoint");
 	let addr = SocketAddr::new(SECOND_V4.into(), endpoint.local_addr().port());
 	let (done_tx, done_rx) = tokio::sync::oneshot::channel();
 
@@ -177,14 +175,10 @@ fn a_wildcard_endpoint_handshakes_on_a_secondary_address() {
 			.build()
 			.expect("runtime");
 		runtime.block_on(async move {
-			let client = moq_tokio::quic::web::ClientBuilder::new()
-				.dangerous()
-				.with_no_certificate_verification()
-				.expect("client");
 			let request = moq_tokio::quic::web::proto::ConnectRequest::new(
 				url::Url::parse(&format!("https://{addr}/")).expect("url"),
 			);
-			moq_clock::timeout(TIMEOUT, client.connect(request))
+			kio::clock::timeout(TIMEOUT, crate::support::web_connect(request, Default::default()))
 				.await
 				.expect("handshake stalled")
 				.expect("connect");

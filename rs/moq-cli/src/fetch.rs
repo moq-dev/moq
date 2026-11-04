@@ -6,8 +6,8 @@ use std::time::Duration;
 use anyhow::Context;
 use base64::Engine;
 use hang::moq_net;
-use moq_clock::Instant;
-use moq_clock::timeout_at;
+use kio::clock::Instant;
+use kio::clock::timeout_at;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 use crate::args::MoqSide;
@@ -119,7 +119,8 @@ async fn fetch_from<C>(
 		// is still in flight right after connecting.
 		let broadcast = origin
 			.consume()
-			.routed_broadcast(path)
+			.follow(path, None)?
+			.available()
 			.await
 			.with_context(|| format!("broadcast `{}` not found", crate::display_name(path)))?;
 		let track = broadcast.track(&args.track)?;
@@ -165,9 +166,12 @@ mod tests {
 	use super::*;
 	use crate::args::{Command, Invocation};
 
-	/// A millisecond track: the frames written here carry timestamps.
+	/// A millisecond track: the frames written here carry timestamps. It sets no publisher max
+	/// age, so a fetch still reaches its superseded groups.
 	fn timed() -> moq_net::track::Info {
-		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+		moq_net::track::Info::default()
+			.with_timescale(moq_net::Timescale::MILLI)
+			.with_max_age(None)
 	}
 
 	/// The frames of each finished group on the `data` track.
@@ -182,7 +186,7 @@ mod tests {
 	struct Fixture {
 		origin: moq_net::origin::Producer,
 		_keep: (
-			moq_net::broadcast::Producer,
+			moq_net::origin::Publication,
 			Vec<moq_net::track::Producer>,
 			moq_net::group::Producer,
 		),
@@ -240,7 +244,7 @@ mod tests {
 		/// Kept so the published broadcast, its tracks, and the open group stay live.
 		_publisher: (moq_tokio::Connection, Fixture),
 		/// Kept so the relay's hidden broadcast and its track stay live.
-		_hidden: (moq_net::broadcast::Producer, moq_net::track::Producer),
+		_hidden: (moq_net::origin::Publication, moq_net::track::Producer),
 	}
 
 	impl NetworkFixture {
@@ -334,8 +338,6 @@ mod tests {
 	fn net() -> crate::Net {
 		crate::Net {
 			quic: Default::default(),
-			#[cfg(feature = "iroh")]
-			iroh: None,
 		}
 	}
 

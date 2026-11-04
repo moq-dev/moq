@@ -6,8 +6,6 @@
 //!
 //! - **Catalog**: A JSON track containing codec info and track metadata, updated live as tracks change.
 //! - **Tracks**: Audio or video, supporting one or more renditions.
-//! - **Timeline**: A JSON track indexing the broadcast's aligned segments (one or more groups each), so a
-//!   consumer can seek (or build indexes/playlists) without downloading media. Advertised by the catalog's `archive` entry.
 //!
 //! Each track specifies a container format:
 //! - **Legacy**: A timestamp followed by the codec payload.
@@ -26,14 +24,14 @@ pub mod stats;
 /// Solicited viewer feedback and echo broadcast names.
 pub mod echo;
 
+/// Client health graded from two consecutive media reports.
+pub mod health;
+
 /// The catalog is used to describe the available media tracks and codecs.
 pub mod catalog;
 
 /// The container is the contents of each media track.
 pub mod container;
-
-/// Per-track timelines index each track's spans.
-pub mod timeline;
 
 /// Export the moq-net version we use.
 pub use moq_net;

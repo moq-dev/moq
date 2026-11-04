@@ -27,12 +27,6 @@ const FIRST_OBJECT: u64 = 0x2;
 const EXTENSIONS: u64 = 0x4;
 const END_OF_GROUP: u64 = 0x8;
 
-// Datagram State bits, after RELAYED.
-const OBJECT_ID: u64 = 0x2;
-const PRIORITY: u64 = 0x4;
-const DATAGRAM_END: u64 = 0x8;
-const STATUS: u64 = 0x10;
-
 /// Immutable Properties, whose keys TRACK_PROPERTIES derives its sealed list from.
 const IMMUTABLE: u64 = 0x0b;
 
@@ -206,11 +200,11 @@ pub(crate) fn decode_properties(body: &[u8], framing: super::Framing, framed: bo
 }
 
 /// Decode the END_OF_GROUP record's body on a track `framing` describes. It is a status
-/// object, so a block needs a draft that lets one carry properties.
+/// object, so it may not carry properties.
 #[cfg(feature = "async")]
 pub(crate) fn decode_end(body: &[u8], framing: super::Framing) -> Result<Decoded, DecodeError> {
 	let decoded = decode_properties(body, framing, false)?;
-	if decoded.properties.block.is_some() && !framing.ietf.is_some_and(crate::ietf::object::status_has_properties) {
+	if decoded.properties.block.is_some() {
 		return Err(DecodeError::InvalidValue);
 	}
 	Ok(decoded)
@@ -316,8 +310,8 @@ impl Records {
 #[derive(Clone, Debug, Default)]
 pub struct TrackProperties(pub Option<Arc<crate::model::object::TrackProperties>>);
 
-impl Message for TrackProperties {
-	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::TrackInfo);
+impl<'a> Message<'a> for TrackProperties {
+	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::TrackInfo);
 	fn encode_msg(&self, w: &mut Encoder<'_>, _: Version) -> Result<(), EncodeError> {
 		// A track published over moq-lite is a lone 0.
 		let Some(properties) = &self.0 else {
@@ -328,7 +322,7 @@ impl Message for TrackProperties {
 		Ok(())
 	}
 
-	fn decode_msg(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, _: Version) -> Result<Self, DecodeError> {
 		let code = r.varint()?;
 		if code == 0 {
 			// A track published over moq-lite has no moq-transport properties.
@@ -340,10 +334,6 @@ impl Message for TrackProperties {
 		let Some(crate::Version::Ietf(version)) = crate::Version::from_code(code) else {
 			return Err(DecodeError::InvalidValue);
 		};
-		// Track Properties start at draft-16.
-		if matches!(version, crate::ietf::Version::Draft14 | crate::ietf::Version::Draft15) && !r.is_empty() {
-			return Err(DecodeError::InvalidValue);
-		}
 		let properties = crate::model::object::TrackProperties {
 			version,
 			values: decode_list(r, version)?,
@@ -370,73 +360,6 @@ impl Message for TrackProperties {
 		}
 		Ok(Self(Some(Arc::new(properties))))
 	}
-}
-
-/// Encode a datagram's relay state after its Group Sequence, or a plain one's as 0.
-pub(crate) fn encode_datagram(
-	w: &mut Encoder<'_>,
-	wire: Option<&crate::model::datagram::Wire>,
-) -> Result<(), EncodeError> {
-	let Some(wire) = wire else {
-		return w.varint(0);
-	};
-	let mut state = RELAYED;
-	for (set, bit) in [
-		(wire.object_id.is_some(), OBJECT_ID),
-		(wire.priority.is_some(), PRIORITY),
-		(wire.end_of_group, DATAGRAM_END),
-		(wire.status.is_some(), STATUS),
-	] {
-		if set {
-			state |= bit;
-		}
-	}
-	w.varint(state)?;
-	if let Some(id) = wire.object_id {
-		w.varint(id)?;
-	}
-	if let Some(priority) = wire.priority {
-		w.u8(priority);
-	}
-	if let Some(status) = wire.status {
-		w.varint(status)?;
-	}
-	w.bytes(encode_properties(&wire.properties))
-}
-
-/// Decode a datagram's relay state on a track `framing` describes.
-pub(crate) fn decode_datagram(
-	r: &mut Decoder<'_>,
-	framing: super::Framing,
-) -> Result<Option<crate::model::datagram::Wire>, DecodeError> {
-	let state = r.varint()?;
-	if state == 0 {
-		return Ok(None);
-	}
-	if state & RELAYED == 0 || state & !(RELAYED | OBJECT_ID | PRIORITY | DATAGRAM_END | STATUS) != 0 {
-		return Err(DecodeError::InvalidValue);
-	}
-	// A track published over moq-lite has no moq-transport state.
-	let version = framing.ietf.ok_or(DecodeError::InvalidValue)?;
-	let object_id = (state & OBJECT_ID != 0).then(|| r.varint()).transpose()?;
-	let priority = (state & PRIORITY != 0).then(|| r.u8()).transpose()?;
-	let status = (state & STATUS != 0).then(|| r.varint()).transpose()?;
-	// A status object has no frame to hold its time.
-	let framed = status.is_none_or(|status| status == 0);
-	let block = r.bytes()?;
-	let properties = decode_properties(block, framing, framed)?.properties;
-	let wire = crate::model::datagram::Wire {
-		object_id,
-		priority,
-		end_of_group: state & DATAGRAM_END != 0,
-		status,
-		properties,
-	};
-	// A relay holds and forwards it, so it must be one its publisher's draft could send.
-	if !wire.defined(version) {
-		return Err(DecodeError::InvalidValue);
-	}
-	Ok(Some(wire))
 }
 
 #[cfg(test)]
@@ -507,9 +430,9 @@ mod tests {
 
 	#[test]
 	fn properties_round_trip() {
-		// An immutable block in draft-16 holding a gap of 2 (0x3e) and a timestamp.
+		// An immutable block holding a gap of 2 (0x3e) and a timestamp.
 		let mut sealed = Vec::new();
-		let e = &mut Encoder::new(&mut sealed, Draft::Draft16.into());
+		let e = &mut Encoder::new(&mut sealed, Draft::Draft18.into());
 		for value in [0x10u64, 77, 0x3e - 0x10, 2] {
 			e.varint(value).unwrap();
 		}
@@ -525,16 +448,16 @@ mod tests {
 		];
 		let properties = Properties {
 			sealed_time: Some(crate::Timestamp::new(77, Timescale::MILLI).unwrap()),
-			block: crate::ietf::object::block(&values, Draft::Draft16).unwrap(),
+			block: crate::ietf::object::block(&values, Draft::Draft18).unwrap(),
 		};
 		let body = encode_properties(&properties);
-		let decoded = decode_properties(body, from(Draft::Draft16, Some(Timescale::MILLI)), true).unwrap();
+		let decoded = decode_properties(body, from(Draft::Draft18, Some(Timescale::MILLI)), true).unwrap();
 		assert_eq!(decoded.properties, properties);
 		assert_eq!(decoded.gap, Some(2));
 
 		// None at all is an empty body.
 		assert!(encode_properties(&Properties::default()).is_empty());
-		let empty = decode_properties(&[], from(Draft::Draft16, Some(Timescale::MILLI)), true).unwrap();
+		let empty = decode_properties(&[], from(Draft::Draft18, Some(Timescale::MILLI)), true).unwrap();
 		assert_eq!(empty.properties, Properties::default());
 
 		// An untimed track's Timestamp has no frame to hold it, so it stays in the block.
@@ -565,7 +488,7 @@ mod tests {
 	/// after a large first ID, crosses the hop byte for byte and is held at its wire size.
 	#[test]
 	fn a_full_block_crosses_at_its_wire_size() {
-		for version in [Draft::Draft16, Draft::Draft22] {
+		for version in [Draft::Draft22] {
 			let mut list = Vec::new();
 			let e = &mut Encoder::new(&mut list, version.into());
 			// A Timestamp, then IDs from 2^40 on, each repeated as a two-byte zero delta.
@@ -610,7 +533,7 @@ mod tests {
 	#[test]
 	fn track_properties_round_trip() {
 		let properties = crate::model::object::TrackProperties {
-			version: Draft::Draft19,
+			version: Draft::Draft18,
 			values: vec![
 				Property {
 					id: IMMUTABLE,
@@ -625,15 +548,13 @@ mod tests {
 		let decoded = round_trip(&TrackProperties(Some(Arc::new(properties.clone())))).unwrap();
 		assert_eq!(decoded.0.as_deref(), Some(&properties));
 
-		// Drafts 14 and 15 have no Track Properties, but their objects may have properties.
-		for version in [Draft::Draft14, Draft::Draft22] {
-			let bare = crate::model::object::TrackProperties {
-				version,
-				values: Vec::new(),
-			};
-			let decoded = round_trip(&TrackProperties(Some(Arc::new(bare.clone())))).unwrap();
-			assert_eq!(decoded.0.as_deref(), Some(&bare), "{version}");
-		}
+		// An empty list still names its draft.
+		let bare = crate::model::object::TrackProperties {
+			version: Draft::Draft22,
+			values: Vec::new(),
+		};
+		let decoded = round_trip(&TrackProperties(Some(Arc::new(bare.clone())))).unwrap();
+		assert_eq!(decoded.0.as_deref(), Some(&bare));
 
 		let none = crate::coding::Encode::encode_bytes(&TrackProperties(None), V).unwrap();
 		assert_eq!(&none[1..], [0], "a moq-lite track is a lone 0");
@@ -677,13 +598,6 @@ mod tests {
 			decode(&wire(&[opaque(0x40)], 0)).is_err(),
 			"properties on a moq-lite track"
 		);
-		for version in [Draft::Draft14, Draft::Draft15] {
-			assert!(decode(&wire(&[], code(version))).is_ok(), "{version}");
-			assert!(
-				decode(&wire(&[opaque(0x40)], code(version))).is_err(),
-				"{version} has no Track Properties"
-			);
-		}
 		for code in [1, 0xff000099, crate::Version::Lite(V).code()] {
 			assert!(decode(&wire(&[], code)).is_err(), "{code:#x} is no moq-transport draft");
 		}
@@ -730,7 +644,7 @@ mod tests {
 	/// message would no longer fit a lite one.
 	#[test]
 	fn track_properties_cross_at_their_wire_size() {
-		for version in [Draft::Draft16, Draft::Draft17, Draft::Draft22] {
+		for version in [Draft::Draft22] {
 			// As many repeats of an ID from 2^60 as moq-transport forwards, then one value
 			// that fills the rest of a lite message beside its Version.
 			let id = (1 << 60) + 1;
@@ -788,230 +702,25 @@ mod tests {
 		}
 	}
 
-	/// Dropping an understood property can widen the delta that spans it, so a list that
-	/// could not cross is refused where it arrives rather than where it would be sent.
-	#[test]
-	fn track_properties_that_cannot_cross_are_refused_at_ingress() {
-		let version = Draft::Draft16;
-		// The most a draft-16 answer holds beside a Request ID and an empty parameter count.
-		let size = super::super::message::MAX_MESSAGE_SIZE - 2;
-		// DYNAMIC_GROUPS, then the last ID whose delta from it fits four bytes.
-		let id = 0x30 + (1 << 30) - 1;
-		let mut list = Vec::new();
-		let e = &mut Encoder::new(&mut list, version.into());
-		for value in [0x30, 1, id - 0x30] {
-			e.varint(value).unwrap();
-		}
-		let fill = size - list.len() - 4;
-		let e = &mut Encoder::new(&mut list, version.into());
-		e.bytes(&vec![0; fill]).unwrap();
-		assert_eq!(list.len(), size);
-
-		// The delta from zero takes eight bytes once DYNAMIC_GROUPS leaves the list.
-		let ingress = crate::ietf::Properties::decode(&mut Decoder::new(&list, version.into()), version).unwrap();
-		assert!(ingress.dynamic_groups);
-		let forwarded = crate::model::object::TrackProperties {
-			version,
-			values: ingress.unknown,
-		};
-		assert!(!fits(&forwarded));
-		assert!(matches!(
-			forwarded.refused(&crate::track::Info::default()),
-			Some(crate::Error::Unsupported)
-		));
-	}
-
-	fn datagram(wire: &crate::model::datagram::Wire) -> Vec<u8> {
-		let mut buf = Vec::new();
-		encode_datagram(&mut Encoder::new(&mut buf, V.into()), Some(wire)).unwrap();
-		buf
-	}
-
-	/// A relay holds and forwards a datagram's Status, so one moq-transport does not define
-	/// would close the session it reached: it is refused where it arrives.
-	#[test]
-	fn datagram_statuses_are_ones_moq_transport_defines() {
-		for (status, ok) in [(0, true), (1, true), (2, false), (3, true), (4, true), (5, false)] {
-			// Draft 14 sends a status datagram's Object ID and priority.
-			let wire = crate::model::datagram::Wire {
-				object_id: Some(3),
-				priority: Some(9),
-				end_of_group: false,
-				status: Some(status),
-				properties: Properties::default(),
-			};
-			let decoded = decode_datagram(
-				&mut Decoder::new(&datagram(&wire), V.into()),
-				from(Draft::Draft14, None),
-			);
-			assert_eq!(decoded.is_ok(), ok, "{status}");
-		}
-	}
-
-	/// No moq-transport draft defines a status datagram that also ends the group, so one
-	/// is refused where it arrives, by the check moq-transport ingress applies.
-	#[test]
-	fn a_status_datagram_cannot_end_the_group() {
-		let wire = crate::model::datagram::Wire {
-			object_id: Some(3),
-			priority: Some(9),
-			end_of_group: true,
-			status: Some(3),
-			properties: Properties::default(),
-		};
-		assert!(
-			decode_datagram(
-				&mut Decoder::new(&datagram(&wire), V.into()),
-				from(Draft::Draft22, None)
-			)
-			.is_err()
-		);
-	}
-
-	#[test]
-	fn datagram_state_round_trips() {
-		for (end_of_group, status) in [(false, Some(3)), (true, None)] {
-			let wire = crate::model::datagram::Wire {
-				object_id: Some(3),
-				priority: Some(9),
-				end_of_group,
-				status,
-				properties: Properties::default(),
-			};
-			let decoded = decode_datagram(
-				&mut Decoder::new(&datagram(&wire), V.into()),
-				from(Draft::Draft22, None),
-			)
-			.unwrap();
-			assert_eq!(decoded, Some(wire));
-		}
-
-		let mut plain = Vec::new();
-		encode_datagram(&mut Encoder::new(&mut plain, V.into()), None).unwrap();
-		assert_eq!(plain, [0]);
-		// A plain datagram crosses whether or not its track came from moq-transport.
-		for framing in [from(Draft::Draft22, None), Default::default()] {
-			assert_eq!(
-				decode_datagram(&mut Decoder::new(&plain, V.into()), framing).unwrap(),
-				None
-			);
-		}
-	}
-
-	/// A track published over moq-lite has no moq-transport state, so a datagram on one
-	/// with any is refused.
-	#[test]
-	fn datagram_state_needs_a_moq_transport_track() {
-		let id = crate::model::datagram::Wire {
-			object_id: Some(3),
-			priority: None,
-			end_of_group: false,
-			status: None,
-			properties: Properties::default(),
-		};
-		let properties = crate::model::datagram::Wire {
-			object_id: None,
-			properties: Properties {
-				block: crate::ietf::object::block(
-					&[Property {
-						id: 0x20,
-						value: Value::Int(1),
-					}],
-					Draft::Draft22,
-				)
-				.unwrap(),
-				..Default::default()
-			},
-			..id.clone()
-		};
-		for wire in [id, properties] {
-			let buf = datagram(&wire);
-			assert!(decode_datagram(&mut Decoder::new(&buf, V.into()), from(Draft::Draft22, None)).is_ok());
-			assert!(
-				decode_datagram(&mut Decoder::new(&buf, V.into()), Default::default()).is_err(),
-				"{wire:?}"
-			);
-		}
-	}
-
-	/// A retained datagram holds its properties as the bytes they arrived as, not a decoded
-	/// list many times their size.
-	#[test]
-	fn datagram_properties_are_held_at_their_wire_size() {
-		const COUNT: usize = 500;
-		let mut block = vec![0x20, 1];
-		for _ in 1..COUNT {
-			block.extend([0, 1]);
-		}
-		let mut buf = Vec::new();
-		let w = &mut Encoder::new(&mut buf, V.into());
-		w.varint(RELAYED).unwrap();
-		w.bytes(&block).unwrap();
-		let wire = decode_datagram(&mut Decoder::new(&buf, V.into()), from(Draft::Draft18, None))
-			.unwrap()
-			.unwrap();
-		assert_eq!(wire.properties.heap(), block.len() as u64);
-		assert!(wire.properties.heap() < (COUNT * size_of::<Property>()) as u64 / 10);
-	}
-
-	/// Drafts 18 and 19 serialize a block alike, so only the track's draft says whether 0x06
-	/// is SUBGROUP_DELIVERY_TIMEOUT: a draft-18 one is dropped on its way to draft-19.
+	/// Drafts 18 and 22 serialize a block alike, so only the track's draft says whether 0x06
+	/// is SUBGROUP_DELIVERY_TIMEOUT: a draft-18 one is dropped on its way to draft-22.
 	#[test]
 	fn a_block_means_what_its_tracks_draft_says() {
-		for (version, kept) in [(Draft::Draft18, false), (Draft::Draft19, true)] {
+		for (version, kept) in [(Draft::Draft18, false), (Draft::Draft22, true)] {
 			let decoded = decode_properties(&[0x06, 42], from(version, None), true).unwrap();
 			let written =
-				crate::ietf::object::write(&decoded.properties, Some(version), None, Draft::Draft19, None).unwrap();
+				crate::ietf::object::write(&decoded.properties, Some(version), None, Draft::Draft22, None).unwrap();
 			assert_eq!(!written.is_empty(), kept, "{version}");
 		}
 	}
 
-	/// Only draft-14 lets a status object carry properties, so the END_OF_GROUP record has a
-	/// block only on a draft-14 track.
+	/// A status object carries no properties, so the END_OF_GROUP record has no block.
 	#[cfg(feature = "async")]
 	#[test]
-	fn an_end_record_block_needs_a_draft_that_carries_one() {
-		for version in [Draft::Draft14, Draft::Draft15, Draft::Draft16, Draft::Draft22] {
-			let framing = from(version, None);
-			assert_eq!(
-				decode_end(&[0x20, 1], framing).is_ok(),
-				version == Draft::Draft14,
-				"{version}"
-			);
-			assert!(decode_end(&[], framing).is_ok(), "{version}");
-		}
-	}
-
-	/// A datagram must be one its track's draft defines: from draft-17 on a non-zero Status
-	/// carries no properties, and only drafts 14 and 15 define DOES_NOT_EXIST.
-	#[test]
-	fn a_datagram_block_needs_a_draft_that_sends_its_shape() {
-		let drafts = [
-			Draft::Draft14,
-			Draft::Draft15,
-			Draft::Draft16,
-			Draft::Draft17,
-			Draft::Draft22,
-		];
-		for (status, carried) in [
-			(0, &drafts[..]),
-			(1, &drafts[..2]),
-			(3, &drafts[..3]),
-			(4, &drafts[..3]),
-		] {
-			for version in drafts {
-				// Object 3 at priority 9, which every draft can send beside a status.
-				let mut buf = Vec::new();
-				let w = &mut Encoder::new(&mut buf, V.into());
-				w.varint(RELAYED | OBJECT_ID | PRIORITY | STATUS).unwrap();
-				w.varint(3).unwrap();
-				w.u8(9);
-				w.varint(status).unwrap();
-				w.bytes(&[0x20, 1]).unwrap();
-				let decoded = decode_datagram(&mut Decoder::new(&buf, V.into()), from(version, None));
-				assert_eq!(decoded.is_ok(), carried.contains(&version), "{status}: {version}");
-			}
-		}
+	fn an_end_record_has_no_block() {
+		let framing = from(Draft::Draft22, None);
+		assert!(decode_end(&[0x20, 1], framing).is_err());
+		assert!(decode_end(&[], framing).is_ok());
 	}
 }
 
@@ -1045,19 +754,21 @@ pub(crate) async fn test_hop(
 		.with_publisher(upstream.consume());
 	let (client, server) = futures::join!(
 		async {
-			let (session, driver) = dial.connect(moq_clock::now(), client).await.unwrap();
-			drop(moq_clock::sim::spawn(crate::time::run(driver)));
+			let (session, driver) = dial.connect(kio::clock::now(), client).await.unwrap();
+			drop(kio::clock::sim::spawn(crate::time::run(driver)));
 			session
 		},
 		async {
-			let (session, driver) = serve.accept(moq_clock::now(), server).await.unwrap();
-			drop(moq_clock::sim::spawn(crate::time::run(driver)));
+			let (session, driver) = serve.accept(kio::clock::now(), server).await.unwrap();
+			drop(kio::clock::sim::spawn(crate::time::run(driver)));
 			session
 		},
 	);
 	downstream
 		.consume()
-		.routed(broadcast)
+		.routes(broadcast)
+		.unwrap()
+		.next()
 		.await
 		.expect("the hop announced the broadcast");
 	(downstream, [client, server])
@@ -1128,19 +839,19 @@ mod hop_tests {
 	}
 
 	async fn next(group: &mut group::Consumer) -> Option<frame::Object> {
-		moq_clock::timeout(TIMEOUT, kio::wait(|waiter| group.poll_read_object(waiter)))
+		kio::clock::timeout(TIMEOUT, kio::wait(|waiter| group.poll_read_object(waiter)))
 			.await
 			.expect("no frame")
 			.unwrap()
 	}
 
 	async fn subscribe(origin: &crate::origin::Producer) -> (track::Consumer, track::Subscriber) {
-		let broadcast = moq_clock::timeout(TIMEOUT, origin.consume().request_broadcast("room", None))
+		let broadcast = kio::clock::timeout(TIMEOUT, origin.consume().request("room", None))
 			.await
 			.expect("no broadcast")
 			.unwrap();
 		let track = broadcast.track("video").unwrap();
-		let subscriber = moq_clock::timeout(TIMEOUT, track.subscribe(None))
+		let subscriber = kio::clock::timeout(TIMEOUT, track.subscribe(None))
 			.await
 			.expect("no subscription")
 			.unwrap();
@@ -1148,7 +859,7 @@ mod hop_tests {
 	}
 
 	async fn recv(subscriber: &mut track::Subscriber) -> group::Consumer {
-		moq_clock::timeout(TIMEOUT, subscriber.recv_group())
+		kio::clock::timeout(TIMEOUT, subscriber.recv_group())
 			.await
 			.expect("no group")
 			.unwrap()
@@ -1159,7 +870,7 @@ mod hop_tests {
 	/// Object IDs, properties, and END_OF_GROUP position, and its track's properties.
 	/// A side that does not offer the extension gets the plain frames alone. The track info
 	/// moq-transport egress restates as Track Properties crosses either way.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn relayed_state_crosses_while_the_group_is_open() {
 		for offer in [[true, true], [true, false], [false, true]] {
 			let negotiated = offer == [true, true];
@@ -1201,8 +912,8 @@ mod hop_tests {
 
 			// The upstream group is still open.
 			let frame = next(&mut received).await.unwrap();
-			assert_eq!(&frame.payload[..], b"a");
-			assert_eq!(frame.timestamp, negotiated.then(|| ts(0)));
+			assert_eq!(&frame.payload.contiguous(0)[..], b"a");
+			assert_eq!(frame.timestamp, Some(ts(0)));
 			match negotiated {
 				true => {
 					assert_eq!(fields(&frame), Some((first.id, first.properties.clone())), "{offer:?}");
@@ -1236,17 +947,12 @@ mod hop_tests {
 			group.finish().unwrap();
 
 			let frame = next(&mut received).await.unwrap();
-			assert_eq!(&frame.payload[..], b"b");
+			assert_eq!(&frame.payload.contiguous(0)[..], b"b");
 			assert!(next(&mut received).await.is_none());
-			let info = moq_clock::timeout(TIMEOUT, copy.query()).await.unwrap().unwrap();
+			let info = kio::clock::timeout(TIMEOUT, copy.info()).await.unwrap().unwrap();
 			assert_eq!(
 				(info.max_age, info.timescale, info.priority, info.refresh),
-				(
-					Some(Duration::from_secs(7)),
-					negotiated.then_some(Timescale::MILLI),
-					9,
-					Some(0)
-				),
+				(Some(Duration::from_secs(7)), Some(Timescale::MILLI), 9, Some(0)),
 				"{offer:?}"
 			);
 			match negotiated {
@@ -1280,11 +986,11 @@ mod hop_tests {
 		let _track = broadcast.create_track("video", info).unwrap();
 
 		let (downstream, _sessions) = test_hop(&upstream, "room", [true, true]).await;
-		let broadcast = moq_clock::timeout(TIMEOUT, downstream.consume().request_broadcast("room", None))
+		let broadcast = kio::clock::timeout(TIMEOUT, downstream.consume().request("room", None))
 			.await
 			.expect("no broadcast")
 			.unwrap();
-		moq_clock::timeout(TIMEOUT, broadcast.track("video").unwrap().subscribe(None))
+		kio::clock::timeout(TIMEOUT, broadcast.track("video").unwrap().subscribe(None))
 			.await
 			.expect("no answer")
 			.map(drop)
@@ -1293,7 +999,7 @@ mod hop_tests {
 	/// A track with a Mandatory Track Property, mutable or sealed, is refused across the hop
 	/// as moq-transport ingress refuses it: one we do not understand is neither processed
 	/// nor forwarded.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn mandatory_track_properties_are_refused() {
 		let mut sealed = Vec::new();
 		let e = &mut Encoder::new(&mut sealed, crate::ietf::Version::Draft22.into());
@@ -1316,7 +1022,7 @@ mod hop_tests {
 
 	/// A sealed TIMESCALE that contradicts TRACK_INFO is refused across the hop: the relay
 	/// times frames by TRACK_INFO, while egress would forward the sealed one.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_sealed_property_must_match_track_info() {
 		for (timescale, ok) in [(1000, true), (900, false), (0, false)] {
 			let mut sealed = Vec::new();
@@ -1337,7 +1043,7 @@ mod hop_tests {
 
 	/// A sealed DYNAMIC_GROUPS must match the refresh TRACK_INFO carries across the hop,
 	/// which moq-transport egress restates as DYNAMIC_GROUPS.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_sealed_dynamic_groups_must_match_track_info() {
 		for (refresh, value, ok) in [
 			(Some(0), 1, true),
@@ -1368,7 +1074,7 @@ mod hop_tests {
 
 	/// A relay forwards only as many Track Properties as leave room for the ones it
 	/// restates from TRACK_INFO, so one more is refused across the hop.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn forwarded_track_properties_leave_room_for_track_info() {
 		let max = crate::ietf::properties::MAX_FORWARDED;
 		for (count, ok) in [(max, true), (max + 1, false)] {
@@ -1380,50 +1086,46 @@ mod hop_tests {
 		}
 	}
 
-	/// Groups and datagrams from a moq-lite publisher cross a negotiated hop as plain as
-	/// they left: no relay state appears on the way, nor a moq-transport draft.
-	#[moq_clock::test]
+	/// Groups from a moq-lite publisher cross a negotiated hop as plain as they left: no
+	/// relay state appears on the way, nor a moq-transport draft.
+	#[kio::test]
 	async fn plain_media_crosses_unchanged() {
 		let upstream = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
 		let broadcast = upstream.publish("room", crate::origin::Route::default()).unwrap();
-		let mut track = broadcast
+		let track = broadcast
 			.create_track("video", track::Info::timed().with_timescale(Timescale::MILLI))
 			.unwrap();
 		let (downstream, sessions) = test_hop(&upstream, "room", [true, true]).await;
 		let (copy, mut subscriber) = subscribe(&downstream).await;
-		let info = moq_clock::timeout(TIMEOUT, copy.query()).await.unwrap().unwrap();
+		let info = kio::clock::timeout(TIMEOUT, copy.info()).await.unwrap().unwrap();
 		assert!(info.properties.is_none());
 
 		let mut group = track.append_group().unwrap();
 		group.write_frame(ts(5), b"key".to_vec()).unwrap();
 		let mut received = recv(&mut subscriber).await;
 		let frame = next(&mut received).await.unwrap();
-		assert_eq!((frame.timestamp, &frame.payload[..]), (Some(ts(5)), &b"key"[..]));
+		assert_eq!(
+			(frame.timestamp, &frame.payload.contiguous(0)[..]),
+			(Some(ts(5)), &b"key"[..])
+		);
 		assert!(frame.fields.is_none() && received.wire().is_none());
 		group.write_frame(ts(6), b"delta".to_vec()).unwrap();
 		group.finish().unwrap();
 		let frame = next(&mut received).await.unwrap();
-		assert_eq!((frame.timestamp, &frame.payload[..]), (Some(ts(6)), &b"delta"[..]));
+		assert_eq!(
+			(frame.timestamp, &frame.payload.contiguous(0)[..]),
+			(Some(ts(6)), &b"delta"[..])
+		);
 		assert!(frame.fields.is_none());
 		assert!(next(&mut received).await.is_none());
 		assert!(received.end_object().is_none());
-
-		track.insert_datagram(7, ts(9), b"datagram".to_vec()).unwrap();
-		let datagram = moq_clock::timeout(TIMEOUT, kio::wait(|waiter| subscriber.poll_recv_wire_datagram(waiter)))
-			.await
-			.expect("no datagram")
-			.unwrap()
-			.unwrap();
-		assert_eq!((datagram.sequence, datagram.timestamp), (7, Some(ts(9))));
-		assert_eq!(&datagram.payload[..], b"datagram");
-		assert!(datagram.wire.is_none());
 		drop(sessions);
 	}
 
-	/// Provenance keeps IETF times unchecked after a hop, while a peer declining the
-	/// extension gets no timeline. SUBSCRIBE, FETCH, and datagrams must agree with TRACK_INFO,
-	/// while a listing stays untimed.
-	#[moq_clock::test]
+	/// Every hop carries IETF times, and provenance keeps them unchecked after a hop that
+	/// negotiated the extension. A peer declining it checks them like native moq-lite, as a
+	/// listing's copy does. SUBSCRIBE and FETCH must agree with TRACK_INFO.
+	#[kio::test]
 	async fn ietf_timestamps_keep_their_provenance_across_a_hop() {
 		for offer in [[true, true], [true, false], [false, true]] {
 			let negotiated = offer == [true, true];
@@ -1433,26 +1135,29 @@ mod hop_tests {
 				properties: draft22(Vec::new()),
 				..track::Info::timed()
 			};
-			let mut track = broadcast.create_track("video", info).unwrap();
+			let track = broadcast.create_track("video", info).unwrap();
 			let mut head = track.create_group(0u64.into()).unwrap();
 			head.write_frame(ts(100), b"frame".to_vec()).unwrap();
 			head.finish().unwrap();
 			let (downstream, sessions) = test_hop(&upstream, "room", offer).await;
-			let broadcast = downstream.consume().request_broadcast("room", None).await.unwrap();
-			// A listing cannot carry the provenance, so it lists the track untimed even when
-			// negotiated: a relay re-listing it would otherwise advertise it as native lite.
+			let broadcast = downstream.consume().request("room", None).await.unwrap();
+			// A listing carries no provenance, so it lists the track as native lite.
 			let mut tracks = broadcast.tracks().unwrap();
 			let listed = loop {
-				match moq_clock::timeout(TIMEOUT, tracks.next()).await.unwrap().unwrap() {
+				match kio::clock::timeout(TIMEOUT, tracks.next()).await.unwrap().unwrap() {
 					Some(crate::broadcast::TracksEvent::Added { name, info }) if &*name == "video" => break info,
 					Some(_) => continue,
 					None => panic!("listing ended before the track"),
 				}
 			};
-			assert_eq!((listed.timescale, listed.ietf()), (None, None), "{offer:?}");
+			assert_eq!(
+				(listed.timescale, listed.ietf()),
+				(Some(Timescale::MILLI), None),
+				"{offer:?}"
+			);
 			let copy = broadcast.track("video").unwrap();
-			let info = moq_clock::timeout(TIMEOUT, copy.query()).await.unwrap().unwrap();
-			assert_eq!(info.timescale, negotiated.then_some(Timescale::MILLI), "{offer:?}");
+			let info = kio::clock::timeout(TIMEOUT, copy.info()).await.unwrap().unwrap();
+			assert_eq!(info.timescale, Some(Timescale::MILLI), "{offer:?}");
 			assert_eq!(
 				info.ietf(),
 				negotiated.then_some(crate::ietf::Version::Draft22),
@@ -1460,50 +1165,44 @@ mod hop_tests {
 			);
 			// Before any subscription, this must fetch the head over the hop, rather
 			// than reading an already subscribed copy's cache.
-			let mut fetched = moq_clock::timeout(TIMEOUT, copy.fetch_group(0, None))
+			let mut fetched = kio::clock::timeout(TIMEOUT, copy.fetch_group(0, None))
 				.await
 				.unwrap()
 				.unwrap();
-			assert_eq!(next(&mut fetched).await.unwrap().timestamp, negotiated.then(|| ts(100)));
+			assert_eq!(next(&mut fetched).await.unwrap().timestamp, Some(ts(100)));
 			assert!(next(&mut fetched).await.is_none());
 			let mut subscriber =
-				moq_clock::timeout(TIMEOUT, copy.subscribe(track::Subscription::default().with_start(1)))
+				kio::clock::timeout(TIMEOUT, copy.subscribe(track::Subscription::default().with_start(1)))
 					.await
 					.unwrap()
 					.unwrap();
 			// A peer may have stamped arrival times. The second group's rewind must not
-			// acquire native moq-lite checks merely because it crossed a relay hop.
+			// acquire native moq-lite checks merely because it crossed a negotiated hop;
+			// without the extension, the copy is checked, so it advances instead.
+			let start = if negotiated { ts(50) } else { ts(150) };
 			let mut group = track.create_group(1u64.into()).unwrap();
-			group.write_frame(ts(50), b"frame".to_vec()).unwrap();
+			group.write_frame(start, b"frame".to_vec()).unwrap();
 			group.finish().unwrap();
 			let mut received = recv(&mut subscriber).await;
 			assert_eq!(received.sequence, 1);
 			let frame = next(&mut received).await.unwrap();
-			assert_eq!(frame.timestamp, negotiated.then(|| ts(50)), "{offer:?}");
-			assert_eq!(&frame.payload[..], b"frame");
+			assert_eq!(frame.timestamp, Some(start), "{offer:?}");
+			assert_eq!(&frame.payload.contiguous(0)[..], b"frame");
 			assert!(next(&mut received).await.is_none());
-			track.insert_datagram(2, ts(25), b"datagram".to_vec()).unwrap();
-			let datagram = moq_clock::timeout(TIMEOUT, kio::wait(|waiter| subscriber.poll_recv_wire_datagram(waiter)))
-				.await
-				.unwrap()
-				.unwrap()
-				.unwrap();
-			assert_eq!(datagram.timestamp, negotiated.then(|| ts(25)), "{offer:?}");
-			assert_eq!(&datagram.payload[..], b"datagram");
 			drop(sessions);
 		}
 	}
 
 	/// A compressed track crosses a negotiated hop as stored: each frame's Inflated Size
-	/// follows its Object Record, and a datagram's follows its Datagram State.
-	#[moq_clock::test]
+	/// follows its Object Record.
+	#[kio::test]
 	async fn compressed_media_crosses_a_negotiated_hop() {
 		let upstream = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
 		let broadcast = upstream.publish("room", crate::origin::Route::default()).unwrap();
 		let info = track::Info::timed()
 			.with_timescale(Timescale::MILLI)
 			.with_compress(true);
-		let mut track = broadcast.create_track("video", info).unwrap();
+		let track = broadcast.create_track("video", info).unwrap();
 		let (downstream, sessions) = test_hop(&upstream, "room", [true, true]).await;
 		let (_copy, mut subscriber) = subscribe(&downstream).await;
 		assert!(subscriber.info().compress);
@@ -1517,25 +1216,12 @@ mod hop_tests {
 		for (millis, n) in [(5, 1), (6, 2)] {
 			let frame = next(&mut received).await.unwrap();
 			assert_eq!(
-				(frame.timestamp, &frame.payload[..]),
+				(frame.timestamp, &frame.payload.contiguous(0)[..]),
 				(Some(ts(millis)), &payload(n)[..])
 			);
 			assert!(frame.fields.is_none());
 		}
 		assert!(next(&mut received).await.is_none());
-
-		track.insert_datagram(7, ts(9), payload(3)).unwrap();
-		let datagram = moq_clock::timeout(
-			TIMEOUT,
-			kio::wait(|waiter| subscriber.poll_recv_stored_datagram(waiter)),
-		)
-		.await
-		.expect("no datagram")
-		.unwrap()
-		.unwrap();
-		assert_eq!((datagram.sequence, datagram.timestamp), (7, Some(ts(9))));
-		assert_eq!(&datagram.payload[..], &payload(3)[..]);
-		assert!(datagram.deflated.is_some() && datagram.wire.is_none());
 		drop(sessions);
 	}
 }

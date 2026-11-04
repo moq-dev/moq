@@ -54,22 +54,46 @@ async fn spawn_relay(id: u64, connect: Vec<String>, cluster_version: Option<moq_
 
 /// Wait until the relay behind `internal` holds a session with each of the
 /// `dialed` peers it connects to.
-async fn wait_dialed(internal: u16, dialed: usize) {
+async fn wait_dialed(http: &reqwest::Client, internal: u16, dialed: usize) {
 	let url = format!("http://127.0.0.1:{internal}/nodes");
-	let deadline = tokio::time::Instant::now() + TIMEOUT;
+	let deadline = kio::clock::now() + TIMEOUT;
 	loop {
-		let body = reqwest::get(&url)
+		let body = http
+			.get(&url)
+			.send()
 			.await
 			.expect("fetch /nodes")
 			.text()
 			.await
 			.expect("read /nodes");
 		let nodes: serde_json::Value = serde_json::from_str(&body).expect("parse /nodes");
-		if nodes["nodes"].as_array().expect("a node list").len() == dialed {
+		if nodes["nodes"]
+			.as_array()
+			.expect("a node list")
+			.iter()
+			.filter(|node| !node["connections"].as_array().expect("connections").is_empty())
+			.count() == dialed
+		{
+			for node in nodes["nodes"].as_array().unwrap() {
+				let connections = node["connections"].as_array().unwrap();
+				if connections.is_empty() {
+					continue;
+				}
+				assert!(
+					node["last_connected_seconds_ago"].is_number(),
+					"live peer has no successful connect: {node}"
+				);
+				for connection in connections {
+					assert!(
+						connection["transport"].is_string(),
+						"live peer has no transport: {node}"
+					);
+				}
+			}
 			return;
 		}
-		assert!(tokio::time::Instant::now() < deadline, "the mesh never formed: {nodes}");
-		tokio::time::sleep(Duration::from_millis(10)).await;
+		assert!(kio::clock::now() < deadline, "the mesh never formed: {nodes}");
+		kio::clock::sleep(Duration::from_millis(10)).await;
 	}
 }
 
@@ -95,8 +119,10 @@ impl Mesh {
 		)
 		.await;
 		let d = spawn_relay(14, vec![format!("tcp://127.0.0.1:{}", c.port)], cluster_version).await;
+		// One client for every poll: building one loads the system trust roots.
+		let http = reqwest::Client::new();
 		for (node, dialed) in [(&b, 1), (&c, 2), (&d, 1)] {
-			wait_dialed(node.internal, dialed).await;
+			wait_dialed(&http, node.internal, dialed).await;
 		}
 		Self { nodes: [a, b, c, d] }
 	}
@@ -123,14 +149,17 @@ impl Drop for Mesh {
 fn client(version: Option<moq_net::Version>) -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
-	config.websocket.delay = Some((Duration::ZERO).into());
+	#[cfg(feature = "websocket")]
+	{
+		config.websocket.delay = Some((Duration::ZERO).into());
+	}
 	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
 	config.version.extend(version);
 	config.init(Default::default()).expect("client init")
 }
 
 struct Publisher {
-	_broadcast: moq_net::broadcast::Producer,
+	_broadcast: moq_net::origin::Publication,
 	_session: moq_tokio::Connection,
 	streamer: tokio::task::AbortHandle,
 }
@@ -164,13 +193,13 @@ async fn publish_version(port: u16, version: &str) -> Publisher {
 			if group.finish().is_err() {
 				break;
 			}
-			tokio::time::sleep(Duration::from_millis(100)).await;
+			kio::clock::sleep(Duration::from_millis(100)).await;
 		}
 	})
 	.abort_handle();
 
 	let version = version.parse().expect("parse version");
-	let session = tokio::time::timeout(
+	let session = kio::clock::timeout(
 		TIMEOUT,
 		client(Some(version)).with_publisher(&origin).connect(url).established(),
 	)
@@ -186,9 +215,9 @@ async fn publish_version(port: u16, version: &str) -> Publisher {
 }
 
 async fn publish_unknown(port: u16) -> Publisher {
-	// Draft-14 has no Cluster extension, so the accepting relay must represent
+	// Lite-03 declares no origin identity, so the accepting relay must represent
 	// this external publisher with the wire-defined UNKNOWN Hop ID.
-	publish_version(port, "moq-transport-14").await
+	publish_version(port, "moq-lite-03").await
 }
 
 /// Subscribe to [`PATH`] through the relay on `port` and read its first frame.
@@ -198,28 +227,27 @@ async fn read_first_frame(port: u16) -> Result<Vec<u8>, String> {
 	let url: Url = format!("tcp://127.0.0.1:{port}").parse().expect("parse url");
 	let origin = moq_tokio::origin::spawn();
 	let consumer = origin.consume();
-	let session = tokio::time::timeout(TIMEOUT, client(None).with_subscriber(origin).connect(url).established())
+	let session = kio::clock::timeout(TIMEOUT, client(None).with_subscriber(origin).connect(url).established())
 		.await
 		.map_err(|_| "subscriber connect timeout".to_string())?
 		.map_err(|err| format!("subscriber connect failed: {err}"))?;
 
 	// Wait for the announcement rather than asking the moment the session connects:
-	// `request_broadcast` answers on the spot, so it would race the announcement that
+	// `request` answers on the spot, so it would race the announcement that
 	// makes the path routable.
-	tokio::time::timeout(TIMEOUT, consumer.routed(PATH))
-		.await
-		.map_err(|_| "routed timed out".to_string())?
-		.ok_or_else(|| "origin closed before the broadcast was announced".to_string())?;
 	let broadcast = consumer
-		.request_broadcast(PATH, None)
+		.follow(PATH, None)
+		.unwrap()
+		.available()
 		.await
 		.map_err(|err| format!("broadcast unroutable: {err}"))?;
 
 	// This verifies route propagation rather than real-time backlog skipping. Give
 	// every hop enough tolerance for the next 100ms group to arrive while the
 	// selected group's frame is still crossing the redundant mesh.
-	let subscription = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1));
-	let mut track = tokio::time::timeout(
+	let subscription = moq_net::track::Subscription::default()
+		.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1)));
+	let mut track = kio::clock::timeout(
 		TIMEOUT,
 		broadcast.track("video").expect("track handle").subscribe(subscription),
 	)
@@ -227,13 +255,13 @@ async fn read_first_frame(port: u16) -> Result<Vec<u8>, String> {
 	.map_err(|_| "subscribe timed out".to_string())?
 	.map_err(|err| format!("subscribe failed: {err}"))?;
 
-	let mut group = tokio::time::timeout(TIMEOUT, track.recv_group())
+	let mut group = kio::clock::timeout(TIMEOUT, track.recv_group())
 		.await
 		.map_err(|_| "recv_group timed out".to_string())?
 		.map_err(|err| format!("recv_group failed: {err}"))?
 		.ok_or_else(|| "track closed before a group arrived".to_string())?;
 
-	let frame = tokio::time::timeout(TIMEOUT, group.read_frame())
+	let frame = kio::clock::timeout(TIMEOUT, group.read_frame())
 		.await
 		.map_err(|_| "read_frame timed out".to_string())?
 		.map_err(|err| format!("read_frame failed: {err}"))?
@@ -254,7 +282,7 @@ async fn watch_announces(
 	let url: Url = format!("tcp://127.0.0.1:{port}").parse().expect("parse url");
 	let origin = moq_tokio::origin::spawn();
 	let mut announced = origin.consume().announced();
-	let session = tokio::time::timeout(TIMEOUT, client(None).with_subscriber(origin).connect(url).established())
+	let session = kio::clock::timeout(TIMEOUT, client(None).with_subscriber(origin).connect(url).established())
 		.await
 		.expect("viewer connect timeout")
 		.expect("viewer connect failed");
@@ -286,7 +314,7 @@ async fn assert_unknown_publisher_stays_announced(cluster_version: Option<moq_ne
 	// The announce is only half the contract: the route it advertises must
 	// actually serve a frame at the far end of the mesh.
 	let frame = read_first_frame(mesh.d()).await;
-	tokio::time::sleep(SETTLE).await;
+	kio::clock::sleep(SETTLE).await;
 	let _ = stop.send(());
 	let updates = watcher.await.expect("viewer task");
 
@@ -305,7 +333,7 @@ async fn assert_unknown_publisher_stays_announced(cluster_version: Option<moq_ne
 
 /// Every ingest version that can carry a broadcast must survive the same
 /// redundant mesh. The pre-fix failure set was exactly the versions that
-/// declare no origin identity (lite <= 03, moq-transport <= 16): their
+/// declare no origin identity (lite <= 03): their
 /// broadcasts enter with an UNKNOWN first hop, and the reflected copy replaced
 /// the live source instead of parking. The identity-carrying versions held
 /// even before the fix, so this pins both halves of the boundary.
@@ -318,9 +346,7 @@ async fn every_ingest_version_crosses_a_redundant_mesh() {
 		"moq-lite-03",
 		"moq-lite-04",
 		"moq-lite-05",
-		"moq-transport-14",
-		"moq-transport-16",
-		"moq-transport-17",
+		"moq-transport-18",
 	] {
 		let mesh = Mesh::start(None).await;
 		let _publisher = publish_version(mesh.a(), version).await;
@@ -343,7 +369,7 @@ async fn unknown_publisher_republish_stays_routable() {
 	let url: Url = format!("tcp://127.0.0.1:{}", mesh.d()).parse().expect("parse url");
 	let origin = moq_tokio::origin::spawn();
 	let mut announced = origin.consume().announced();
-	let _session = tokio::time::timeout(TIMEOUT, client(None).with_subscriber(origin).connect(url).established())
+	let _session = kio::clock::timeout(TIMEOUT, client(None).with_subscriber(origin).connect(url).established())
 		.await
 		.expect("viewer connect timeout")
 		.expect("viewer connect failed");
@@ -361,7 +387,7 @@ async fn unknown_publisher_republish_stays_routable() {
 		// The session ends; the broadcast unannounces everywhere before the
 		// next round republishes the same path.
 		drop(publisher);
-		tokio::time::timeout(TIMEOUT, async {
+		kio::clock::timeout(TIMEOUT, async {
 			while let Some((update, active)) = next_update(&mut announced).await {
 				if !active && update.prefix.as_str() == PATH {
 					return;
@@ -381,7 +407,7 @@ async fn unknown_publisher_does_not_flap_across_a_lite_cluster_triangle() {
 
 #[tokio::test]
 async fn unknown_publisher_does_not_flap_across_an_ietf_cluster_triangle() {
-	let version = "moq-transport-19".parse().expect("parse version");
+	let version = "moq-transport-22".parse().expect("parse version");
 	assert_unknown_publisher_stays_announced(Some(version)).await;
 }
 
@@ -401,7 +427,8 @@ async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq
 	match announced.next().await? {
 		moq_net::announce::Event::Start(route)
 		| moq_net::announce::Event::Update(route)
-		| moq_net::announce::Event::Restart(route) => Some((route, true)),
+		| moq_net::announce::Event::Restart(route)
+		| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
 		moq_net::announce::Event::End(route) => Some((route, false)),
 	}
 }

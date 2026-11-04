@@ -1,4 +1,4 @@
-//! Complete fMP4/CMAF and Annex-B imports and exports, with setup outside timing.
+//! Complete container and Annex-B imports and exports, with setup outside timing.
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
@@ -34,13 +34,11 @@ struct Fixture {
 	_published: Box<dyn std::any::Any>,
 	_origin: moq_net::origin::Producer,
 	driver: tokio::task::JoinHandle<moq_net::Error>,
-	requests: tokio::task::JoinHandle<()>,
 }
 
 impl Drop for Fixture {
 	fn drop(&mut self) {
 		self.driver.abort();
-		self.requests.abort();
 	}
 }
 
@@ -56,9 +54,10 @@ async fn prepare(video: Video, payload: &Bytes) -> (moq_mux::Source, impl Stream
 		frames,
 		frames_per_group,
 	} = video;
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let consumer = broadcast.consume();
-	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let (origin, driver) = moq_net::origin::Producer::new(Default::default());
+	let driver = tokio::spawn(moq_net::time::run(driver));
+	let broadcast = origin.create_broadcast("bench").unwrap();
+	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 	let mut publishers = Vec::new();
 	for index in 0..tracks {
 		let track = broadcast
@@ -85,22 +84,14 @@ async fn prepare(video: Video, payload: &Bytes) -> (moq_mux::Source, impl Stream
 		publishers.push(publisher);
 	}
 	catalog.finish().unwrap();
-	let (origin, driver) = moq_net::origin::Producer::new(Default::default());
-	let driver = tokio::spawn(moq_net::time::run(driver));
-	let dynamic = origin.dynamic_route("", Default::default()).unwrap();
-	let requests = tokio::spawn(async move {
-		while let Ok(request) = dynamic.requested_broadcast().await {
-			request.accept(consumer.clone());
-		}
-	});
-	let resolved = origin.consume().request_broadcast("bench", None).await.unwrap();
+	broadcast.announce(Default::default()).unwrap();
+	let resolved = origin.consume().request("bench", None).await.unwrap();
 	let source = moq_mux::Source::new(origin.consume(), resolved);
 	let stream = source.catalog::<()>(CatalogFormat::Hang).await.unwrap();
 	let fixture = Fixture {
 		_published: Box::new((broadcast, catalog, publishers)),
 		_origin: origin,
 		driver,
-		requests,
 	};
 	(source, stream, fixture)
 }
@@ -141,10 +132,20 @@ fn cmaf_import(passthrough: bool) -> (moq_mux::catalog::Producer, moq_mux::conta
 }
 
 fn import_cmaf(
-	(catalog, mut import): (moq_mux::catalog::Producer, moq_mux::container::fmp4::Import),
+	import: (moq_mux::catalog::Producer, moq_mux::container::fmp4::Import),
 	data: &Bytes,
 ) -> (moq_mux::catalog::Producer, moq_mux::container::fmp4::Import) {
-	import.decode(data).unwrap();
+	import_cmaf_chunks(import, data, data.len())
+}
+
+fn import_cmaf_chunks(
+	(catalog, mut import): (moq_mux::catalog::Producer, moq_mux::container::fmp4::Import),
+	data: &Bytes,
+	chunk: usize,
+) -> (moq_mux::catalog::Producer, moq_mux::container::fmp4::Import) {
+	for chunk in data.chunks(chunk) {
+		import.decode(chunk).unwrap();
+	}
 	import.finish().unwrap();
 	(catalog, import)
 }
@@ -216,12 +217,13 @@ fn interleaved(init: &[u8], tracks: usize, runs: usize, fragments: usize, payloa
 					trun: (0..runs)
 						.map(|run| mp4_atom::Trun {
 							data_offset: Some(0),
-							entries: vec![mp4_atom::TrunEntry {
+							samples: vec![mp4_atom::TrunEntry {
 								duration: Some(trak.mdia.mdhd.timescale / 50),
 								size: Some(payload.len() as u32),
 								flags: Some(if run == 0 { 0 } else { 0x0001_0000 }),
 								cts: None,
-							}],
+							}]
+							.into(),
 						})
 						.collect(),
 					..Default::default()
@@ -268,30 +270,111 @@ fn interleaved_runs(c: &mut Criterion) {
 		));
 		let init = runtime.block_on(export("cmaf", source, stream, true));
 		drop(fixture);
-		for runs in [1, 16] {
-			let data = interleaved(&init, tracks, runs, frames, &payload);
-			for passthrough in [false, true] {
-				let (catalog, import) = import_cmaf(cmaf_import(passthrough), &data);
-				assert_eq!(catalog.snapshot().video.renditions.len(), tracks);
-				drop(import);
-			}
-			for (direction, passthrough) in [("import", true), ("unwrap", false)] {
-				let mut group = c.benchmark_group(format!("cmaf-interleaved-{direction}"));
-				group.throughput(Throughput::Bytes(data.len() as u64));
-				group.bench_function(
-					BenchmarkId::new(format!("{tracks}tracks"), format!("{runs}runs")),
-					|b| {
-						b.iter_batched(
-							|| cmaf_import(passthrough),
-							|import| import_cmaf(import, std::hint::black_box(&data)),
-							BatchSize::PerIteration,
+		for size in [1, payload.len()] {
+			let sample = payload.slice(..size);
+			for runs in [1, 16] {
+				let data = interleaved(&init, tracks, runs, frames, &sample);
+				for passthrough in [false, true] {
+					let (catalog, import) = import_cmaf(cmaf_import(passthrough), &data);
+					assert_eq!(catalog.snapshot().video.renditions.len(), tracks);
+					drop(import);
+				}
+				for (direction, passthrough) in [("import", true), ("unwrap", false)] {
+					let mut group = c.benchmark_group(format!("cmaf-interleaved-{direction}"));
+					group.throughput(Throughput::Bytes(data.len() as u64));
+					for chunk in [1, 1024, data.len()] {
+						group.bench_function(
+							BenchmarkId::new(
+								format!("{tracks}tracks"),
+								format!("{runs}runs-{size}bytes-{chunk}chunk"),
+							),
+							|b| {
+								b.iter_batched(
+									|| cmaf_import(passthrough),
+									|import| import_cmaf_chunks(import, std::hint::black_box(&data), chunk),
+									BatchSize::PerIteration,
+								);
+							},
 						);
-					},
-				);
-				group.finish();
+					}
+
+					group.finish();
+				}
 			}
 		}
 	}
+}
+
+/// Receive-side init and sample parsing, across metadata counts and media payload sizes.
+fn cmaf_receive(c: &mut Criterion) {
+	use moq_mux::container::Container;
+	use mp4_atom::{Decode, Encode};
+
+	let mut source = include_bytes!("../src/container/fmp4/test_data/bbb.mp4").as_slice();
+	mp4_atom::Ftyp::decode(&mut source).unwrap();
+	let mut moov = mp4_atom::Moov::decode(&mut source).unwrap();
+	let trak = moov
+		.trak
+		.iter()
+		.find(|trak| trak.mdia.hdlr.handler.as_ref() == b"soun")
+		.unwrap()
+		.clone();
+	let id = trak.tkhd.track_id;
+	moov.trak = vec![trak];
+	let mut init = Vec::new();
+	moov.encode(&mut init).unwrap();
+	let wire = moq_mux::container::fmp4::Wire::from_init(&init).unwrap();
+	let mut group = c.benchmark_group("cmaf-receive");
+	group.bench_function("init", |b| {
+		b.iter(|| moq_mux::container::fmp4::Wire::from_init(std::hint::black_box(&init)).unwrap())
+	});
+	for samples in [1, 32, 1024] {
+		for size in [1, 4096] {
+			let mut moof = mp4_atom::Moof {
+				mfhd: mp4_atom::Mfhd { sequence_number: 1 },
+				traf: vec![mp4_atom::Traf {
+					tfhd: mp4_atom::Tfhd {
+						track_id: id,
+						..Default::default()
+					},
+					tfdt: Some(mp4_atom::Tfdt {
+						base_media_decode_time: 0,
+					}),
+					trun: vec![mp4_atom::Trun {
+						data_offset: Some(0),
+						samples: vec![
+							mp4_atom::TrunEntry {
+								size: Some(size),
+								duration: Some(1024),
+								flags: Some(0),
+								cts: None
+							};
+							samples
+						]
+						.into(),
+					}],
+					..Default::default()
+				}],
+			};
+			let mut data = Vec::new();
+			moof.encode(&mut data).unwrap();
+			moof.traf[0].trun[0].data_offset = Some((data.len() + 8) as i32);
+			data.clear();
+			moof.encode(&mut data).unwrap();
+			mp4_atom::Mdat {
+				data: vec![1; size as usize * samples],
+			}
+			.encode(&mut data)
+			.unwrap();
+			let frame = moq_net::frame::Frame::new(None, Bytes::from(data));
+			assert_eq!(wire.decode(frame.clone()).unwrap().len(), samples);
+			group.throughput(Throughput::Elements(samples as u64));
+			group.bench_function(BenchmarkId::new(samples.to_string(), size), |b| {
+				b.iter(|| wire.decode(std::hint::black_box(frame.clone())).unwrap())
+			});
+		}
+	}
+	group.finish();
 }
 
 fn containers(c: &mut Criterion) {
@@ -651,9 +734,119 @@ fn ts_si_table_history(c: &mut Criterion) {
 	);
 }
 
+/// Live WebM framing across transport chunk sizes, including byte-at-a-time metadata.
+fn mkv_chunks(c: &mut Criterion) {
+	let runtime = tokio::runtime::Builder::new_current_thread()
+		.enable_all()
+		.build()
+		.unwrap();
+	let _enter = runtime.enter();
+	let data = include_bytes!("../src/container/mkv/test_data/opus.webm");
+	let mut group = c.benchmark_group("mkv-chunks");
+	group.throughput(Throughput::Bytes(data.len() as u64));
+	for chunk in [1, 7, 64, data.len()] {
+		group.bench_function(BenchmarkId::from_parameter(chunk), |b| {
+			b.iter_batched(
+				|| {
+					let mut broadcast = moq_net::broadcast::Info::new().produce();
+					let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+					let import = moq_mux::container::mkv::Import::new(broadcast, catalog.reserve());
+					(catalog, import)
+				},
+				|(catalog, mut import)| {
+					for bytes in std::hint::black_box(data).chunks(chunk) {
+						import.decode(bytes).unwrap();
+					}
+					import.finish().unwrap();
+					(catalog, import)
+				},
+				BatchSize::PerIteration,
+			);
+		});
+	}
+	group.finish();
+}
+
+/// A one-track VP9 WebM of `total` bytes of keyframe SimpleBlocks, each carrying `payload` bytes.
+fn mkv_payload_file(payload: usize, total: usize) -> Vec<u8> {
+	use webm_iterable::WebmWriter;
+	use webm_iterable::matroska_spec::{Master, MatroskaSpec, SimpleBlock};
+
+	let frame = vec![0x5a; payload];
+	let blocks: Vec<MatroskaSpec> = (0..total / payload)
+		.map(|index| SimpleBlock::new_uncheked(&frame, 1, (index % 1024) as i16, false, None, false, true).into())
+		.collect();
+	let mut data = Vec::new();
+	let mut writer = WebmWriter::new(&mut data);
+	writer
+		.write(&MatroskaSpec::Ebml(Master::Full(vec![MatroskaSpec::DocType(
+			"webm".into(),
+		)])))
+		.unwrap();
+	writer.write(&MatroskaSpec::Segment(Master::Start)).unwrap();
+	writer
+		.write(&MatroskaSpec::Tracks(Master::Full(vec![MatroskaSpec::TrackEntry(
+			Master::Full(vec![
+				MatroskaSpec::TrackNumber(1),
+				MatroskaSpec::TrackType(1),
+				MatroskaSpec::CodecID("V_VP9".into()),
+			]),
+		)])))
+		.unwrap();
+	// Relative block timestamps are 16-bit, so each cluster holds a bounded run of them.
+	for (cluster, blocks) in blocks.chunks(1024).enumerate() {
+		let mut children = vec![MatroskaSpec::Timestamp(cluster as u64 * 1024)];
+		children.extend_from_slice(blocks);
+		writer.write(&MatroskaSpec::Cluster(Master::Full(children))).unwrap();
+	}
+	writer.write(&MatroskaSpec::Segment(Master::End)).unwrap();
+	writer.flush().unwrap();
+	drop(writer);
+	data
+}
+
+/// MKV block payloads across payload and transport chunk sizes.
+fn mkv_payloads(c: &mut Criterion) {
+	let runtime = tokio::runtime::Builder::new_current_thread()
+		.enable_all()
+		.build()
+		.unwrap();
+	let _enter = runtime.enter();
+	let mut group = c.benchmark_group("mkv-payloads");
+	for payload in [1024, 64 * 1024, 1024 * 1024] {
+		let data = mkv_payload_file(payload, 4 * 1024 * 1024);
+		group.throughput(Throughput::Bytes(data.len() as u64));
+		for chunk in [1500, 64 * 1024, data.len()] {
+			let id = BenchmarkId::new(format!("payload-{payload}"), format!("chunk-{chunk}"));
+			group.bench_function(id, |b| {
+				b.iter_batched(
+					|| {
+						let mut broadcast = moq_net::broadcast::Info::new().produce();
+						let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+						let import = moq_mux::container::mkv::Import::new(broadcast, catalog.reserve());
+						(catalog, import)
+					},
+					|(catalog, mut import)| {
+						for bytes in std::hint::black_box(&data).chunks(chunk) {
+							import.decode(bytes).unwrap();
+						}
+						import.finish().unwrap();
+						(catalog, import)
+					},
+					BatchSize::PerIteration,
+				);
+			});
+		}
+	}
+	group.finish();
+}
+
 criterion_group!(
 	benches,
 	containers,
+	cmaf_receive,
+	mkv_chunks,
+	mkv_payloads,
 	interleaved_runs,
 	queued_groups,
 	ts_si_renewal,

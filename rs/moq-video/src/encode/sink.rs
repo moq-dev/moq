@@ -21,7 +21,7 @@
 use std::sync::Arc;
 
 use super::Encoded;
-use super::encoder::Config;
+use super::encoder::{Applied, Config};
 use crate::{Error, Frame};
 
 #[cfg(apple)]
@@ -73,6 +73,12 @@ impl Sink {
 	/// The encoder name in use, e.g. `"mediafoundation"`.
 	pub fn name(&self) -> &str {
 		self.0.name()
+	}
+
+	/// The latency and compression controls the backend applied, like the
+	/// encoder's own report.
+	pub(crate) fn applied(&self) -> Applied {
+		self.0.applied()
 	}
 
 	/// Cut a new group at the next frame, like
@@ -152,7 +158,7 @@ mod threaded {
 	use tokio::sync::{mpsc, oneshot};
 
 	use super::super::Encoded;
-	use super::super::encoder::{Config, Encoder};
+	use super::super::encoder::{Applied, Config, Encoder};
 	use crate::worker::{Ready, Worker};
 	use crate::{Error, Frame};
 
@@ -198,6 +204,7 @@ mod threaded {
 	/// What the encode thread reports once its encoder is open.
 	pub struct Opened {
 		name: String,
+		applied: Applied,
 	}
 
 	/// Build an encoder for `config` and serve requests until the channel closes.
@@ -210,6 +217,7 @@ mod threaded {
 		// If the awaiting `open` was cancelled, give up before encoding.
 		let opened = Opened {
 			name: encoder.name().to_owned(),
+			applied: encoder.applied(),
 		};
 		if !ready.ok(opened) {
 			return;
@@ -266,6 +274,10 @@ mod threaded {
 			&self.0.info().name
 		}
 
+		pub fn applied(&self) -> Applied {
+			self.0.info().applied.clone()
+		}
+
 		pub async fn cut(&mut self) -> Result<(), Error> {
 			self.0.request(|resp| Request::Cut { resp }).await
 		}
@@ -300,7 +312,7 @@ mod inline {
 	use std::sync::Arc;
 
 	use super::super::Encoded;
-	use super::super::encoder::{Config, Encoder};
+	use super::super::encoder::{Applied, Config, Encoder};
 	use crate::{Error, Frame};
 
 	/// An [`Encoder`] driven inline on the calling thread (see the module docs).
@@ -318,6 +330,10 @@ mod inline {
 
 		pub fn name(&self) -> &str {
 			self.0.name()
+		}
+
+		pub fn applied(&self) -> Applied {
+			self.0.applied()
 		}
 
 		/// Async only to match the threaded `Inner`; there's no thread to hand this
@@ -375,7 +391,7 @@ mod tests {
 	}
 
 	fn probe_config() -> Config {
-		let mut config = Config::new(320, 240, crate::Rate::new(30, 1).unwrap());
+		let mut config = Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap());
 		config.codec = Codec::H264;
 		config.kind = Kind::Named(probe::NAME.into());
 		config

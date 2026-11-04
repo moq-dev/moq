@@ -3,7 +3,7 @@
 //! Publishes raw AV1 (OBU-framed, inline sequence headers) on a single moq
 //! track and resolves the catalog rendition. The codec config comes from the
 //! sequence header the splitter packages into the first keyframe (scanned out of
-//! the frame here), or from an av1C record handed to
+//! the frame here), or from the one in an av1C record's `configOBUs` handed to
 //! [`initialize`](Import::initialize). A keyframe that can't be configured is an
 //! error; non-keyframes before the first config are written through to the
 //! producer, which reports [`MissingKeyframe`](crate::container::MissingKeyframe)
@@ -30,6 +30,9 @@ pub struct Import {
 	track: crate::container::Producer<crate::catalog::hang::Container, hang::catalog::VideoConfig>,
 	catalog: crate::codec::video::Catalog,
 	last_seq: Option<Bytes>,
+	/// A sequence header only a [`dropped`](Self::dropped) keyframe carried, which the next
+	/// keyframe written takes if it carries none, so a subscriber can still decode it.
+	owed_seq: bool,
 }
 
 impl Import {
@@ -52,6 +55,7 @@ impl Import {
 			track,
 			catalog,
 			last_seq: None,
+			owed_seq: false,
 		};
 		if let Some(config) = import.catalog.initial_config() {
 			import.apply_config(config)?;
@@ -62,7 +66,7 @@ impl Import {
 	/// Resolve the codec config from a sequence header / av1C and other metadata.
 	///
 	/// - **av1C** (leading `0x81` marker): the buffer is parsed as an
-	///   AV1CodecConfigurationRecord, which resolves the config.
+	///   AV1CodecConfigurationRecord, whose `configOBUs` sequence header resolves the config.
 	/// - **raw OBUs**: any sequence header resolves the config.
 	///
 	/// Optional, since the importer also self-initializes from the first keyframe.
@@ -90,34 +94,20 @@ impl Import {
 		Ok(())
 	}
 
+	/// Resolve the config from the sequence header in an av1C's `configOBUs`.
+	///
+	/// The record's own header fields omit the colour the codec string carries, so a config built
+	/// from them alone would differ from the stream's first sequence header and force a new track.
+	/// A record without one publishes nothing: the first keyframe must carry it to be decodable.
 	fn init_from_av1c(&mut self, data: &[u8]) -> crate::Result<()> {
-		let seq_profile = (data[1] >> 5) & 0x07;
-		let seq_level_idx = data[1] & 0x1F;
-		let tier = ((data[2] >> 7) & 0x01) == 1;
-		let high_bitdepth = ((data[2] >> 6) & 0x01) == 1;
-		let twelve_bit = ((data[2] >> 5) & 0x01) == 1;
-
-		// Resolution is unknown from av1C; it's filled when the first sequence header arrives.
-		let mut config = hang::catalog::VideoConfig::new(hang::catalog::AV1 {
-			profile: seq_profile,
-			level: seq_level_idx,
-			tier: if tier { 'H' } else { 'M' },
-			bitdepth: super::bitdepth(twelve_bit, high_bitdepth),
-			mono_chrome: ((data[2] >> 4) & 0x01) == 1,
-			chroma_subsampling_x: ((data[2] >> 3) & 0x01) == 1,
-			chroma_subsampling_y: ((data[2] >> 2) & 0x01) == 1,
-			chroma_sample_position: data[2] & 0x03,
-			color_primaries: 1,
-			transfer_characteristics: 1,
-			matrix_coefficients: 1,
-			full_range: false,
-		});
 		// configOBUs follow the four header bytes; samples need not repeat what they carry. A new
 		// record starts a new coded sequence, whose HDR metadata is what its configOBUs carry.
-		config.color = color(&data[4..]);
-		let hdr = find_hdr(&Bytes::copy_from_slice(&data[4..]));
+		let obus = &data[4..];
+		let hdr = find_hdr(&Bytes::copy_from_slice(obus));
 		self.catalog.hdr(&mut self.track, hdr, true)?;
-		self.apply_config(config)?;
+		if let Some(seq) = find_sequence_header(obus) {
+			self.configure_from_seq(&seq)?;
+		}
 		Ok(())
 	}
 
@@ -177,10 +167,7 @@ impl Import {
 		Ok(())
 	}
 
-	/// Apply a resolved config, updating the catalog rendition in place.
-	///
-	/// A changed config just re-mirrors the rendition; there are no fixed tracks
-	/// to reject a reconfiguration.
+	/// Apply a resolved config, minting a track when the decoder identity changes.
 	fn apply_config(&mut self, config: hang::catalog::VideoConfig) -> crate::Result<()> {
 		self.catalog.publish(&mut self.track, config)
 	}
@@ -233,6 +220,13 @@ impl Import {
 		self.track.discontinuity()
 	}
 
+	/// Advertise whether this rendition is being produced, as the catalog's
+	/// [`enabled`](hang::catalog::VideoConfig::enabled): a publisher that stops encoding it
+	/// disables it, so viewers select another rendition rather than wait for frames.
+	pub fn set_enabled(&mut self, enabled: bool) -> Result<()> {
+		self.catalog.set_enabled(&mut self.track, enabled)
+	}
+
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		self.track.seek(sequence)?;
@@ -242,24 +236,20 @@ impl Import {
 	/// Write split frames to the track, resolving the config from the first
 	/// keyframe's inline sequence header and refining the catalog jitter.
 	fn write_frames(&mut self, frames: impl IntoIterator<Item = Frame>) -> Result<()> {
-		for frame in frames {
-			if frame.keyframe {
-				let seq = find_sequence_header(&frame.payload);
-				// A new sequence header starts a coded sequence whose HDR metadata replaces the last
-				// one's. It goes first, so a keyframe that also configures publishes once.
-				// The first header after an av1C is the record's own sequence, which sync samples repeat.
-				let sequence = seq
-					.as_ref()
-					.is_some_and(|seq| self.last_seq.as_ref().is_some_and(|last| last != seq));
-				self.catalog.hdr(&mut self.track, find_hdr(&frame.payload), sequence)?;
-				if let Some(seq) = seq {
-					self.configure_from_seq(&seq)?;
-				}
-			}
+		for mut frame in frames {
+			self.configure(&frame)?;
 
 			// A keyframe we couldn't configure (no sequence header) is undecodable.
 			if frame.keyframe && !self.catalog.configured() {
 				return Err(Error::MissingSequenceHeader.into());
+			}
+
+			if frame.keyframe
+				&& std::mem::take(&mut self.owed_seq)
+				&& let Some(seq) = &self.last_seq
+				&& find_sequence_header(&frame.payload).is_none()
+			{
+				frame.payload = with_sequence_header(&frame.payload, seq)?;
 			}
 
 			// A pre-keyframe delta has no group to anchor it: the producer returns
@@ -269,11 +259,57 @@ impl Import {
 		Ok(())
 	}
 
+	/// Account for a frame its caller drops rather than writes: a keyframe still configures the
+	/// rendition, and its sequence header goes out with the next keyframe written.
+	pub(crate) fn dropped(&mut self, frame: &Frame) -> Result<()> {
+		self.configure(frame)?;
+		if frame.keyframe && find_sequence_header(&frame.payload).is_some() {
+			self.owed_seq = true;
+		}
+		Ok(())
+	}
+
+	/// Resolve the config and HDR metadata a keyframe carries inline, without publishing it.
+	fn configure(&mut self, frame: &Frame) -> Result<()> {
+		if !frame.keyframe {
+			return Ok(());
+		}
+		let seq = find_sequence_header(&frame.payload);
+		// A new sequence header starts a coded sequence whose HDR metadata replaces the last
+		// one's. It goes first, so a keyframe that also configures publishes once.
+		// The first header after an av1C is the record's own sequence, which sync samples repeat.
+		let sequence = seq
+			.as_ref()
+			.is_some_and(|seq| self.last_seq.as_ref().is_some_and(|last| last != seq));
+		self.catalog.hdr(&mut self.track, find_hdr(&frame.payload), sequence)?;
+		if let Some(seq) = seq {
+			self.configure_from_seq(&seq)?;
+		}
+		Ok(())
+	}
+
 	/// Publish split frames, resolving the config from the first keyframe's inline
 	/// sequence header and refining the catalog jitter.
 	pub fn decode(&mut self, frames: impl IntoIterator<Item = Frame>) -> Result<()> {
 		self.write_frames(frames)
 	}
+}
+
+/// `payload` with the sequence header `seq` after its leading temporal delimiter, where a temporal
+/// unit carries it.
+fn with_sequence_header(payload: &Bytes, seq: &Bytes) -> Result<Bytes> {
+	let mut buf = payload.clone();
+	let first = ObuIterator::new(&mut buf).next().transpose()?;
+	let delimiter = first.filter(|obu| {
+		let mut reader = &obu[..];
+		ObuHeader::parse(&mut reader).is_ok_and(|header| header.obu_type == ObuType::TemporalDelimiter)
+	});
+	let at = delimiter.map_or(0, |obu| obu.len());
+	let mut out = bytes::BytesMut::with_capacity(payload.len() + seq.len());
+	out.extend_from_slice(&payload[..at]);
+	out.extend_from_slice(seq);
+	out.extend_from_slice(&payload[at..]);
+	Ok(out.freeze())
 }
 
 fn is_sequence_header(obu: &[u8]) -> bool {
@@ -300,8 +336,8 @@ fn sequence_color(seq_header: &SequenceHeaderObu) -> Option<hang::catalog::Color
 	)
 }
 
-/// The colour a run of OBUs signals, such as av1C's `configOBUs`: the first parseable sequence
-/// header's, plus the static HDR metadata OBUs that the AV1 ISOBMFF binding places after it.
+/// The colour a run of OBUs signals, such as av1C's `configOBUs`: the last sequence header's, if
+/// it parses, plus the static HDR metadata OBUs that the AV1 ISOBMFF binding places after it.
 pub(crate) fn color(obus: &[u8]) -> Option<hang::catalog::Color> {
 	let mut color = find_sequence_header(obus)
 		.and_then(|seq| parse_sequence_header(&seq).ok().flatten())
@@ -310,7 +346,31 @@ pub(crate) fn color(obus: &[u8]) -> Option<hang::catalog::Color> {
 	color
 }
 
-/// Read encoded dimensions from the first parseable sequence header in a frame.
+/// Whether `obus`, an av1C's `configOBUs`, hold only what [`color`] reads: at most a sequence
+/// header, first, then at most one of each HDR metadata type.
+pub(crate) fn config_obus_supported(obus: &[u8]) -> bool {
+	let kind = |obu: &[u8]| {
+		let mut reader = obu;
+		match ObuHeader::parse(&mut reader).ok()?.obu_type {
+			ObuType::SequenceHeader => Some(0),
+			ObuType::Metadata => crate::codec::color::av1_hdr_type(reader),
+			_ => None,
+		}
+	};
+	let mut buf = Bytes::copy_from_slice(obus);
+	let mut iter = ObuIterator::new(&mut buf);
+	let mut seen = Vec::new();
+	for obu in iter.by_ref() {
+		match obu.ok().and_then(|obu| kind(&obu)) {
+			Some(kind) if !seen.contains(&kind) && (kind != 0 || seen.is_empty()) => seen.push(kind),
+			_ => return false,
+		}
+	}
+	// A truncated OBU is left behind.
+	matches!(iter.flush(), Ok(None))
+}
+
+/// Read encoded dimensions from the last sequence header in a frame.
 pub(crate) fn dimensions(payload: &[u8]) -> Result<Option<(u32, u32)>> {
 	let Some(sequence) = find_sequence_header(payload) else {
 		return Ok(None);
@@ -346,16 +406,24 @@ fn find_hdr(payload: &Bytes) -> crate::codec::color::Hdr {
 	hdr
 }
 
-/// Find the first sequence-header OBU in a payload, if any.
+/// Find the last sequence-header OBU in a payload, if any: the one a decoder applies.
+///
+/// A splitter that retained its init's header across a reset puts it ahead of the keyframe's own,
+/// so the first one can be stale.
 fn find_sequence_header(payload: &[u8]) -> Option<Bytes> {
 	let mut buf = Bytes::copy_from_slice(payload);
 	let mut obus = ObuIterator::new(&mut buf);
+	let mut last = None;
 	while let Some(Ok(obu)) = obus.next() {
 		if is_sequence_header(&obu) {
-			return Some(obu);
+			last = Some(obu);
 		}
 	}
-	obus.flush().ok().flatten().filter(|obu| is_sequence_header(obu))
+	obus.flush()
+		.ok()
+		.flatten()
+		.filter(|obu| is_sequence_header(obu))
+		.or(last)
 }
 
 #[cfg(test)]
@@ -391,8 +459,33 @@ mod tests {
 		assert_eq!(color.primaries, None);
 	}
 
+	#[test]
+	fn config_obus_hold_a_sequence_header_then_hdr_metadata() {
+		let sequence = av1_config_obus();
+		let hdr = hdr10_obus();
+		for (obus, supported) in [
+			(Vec::new(), true),
+			([sequence.as_slice(), &hdr].concat(), true),
+			(hdr.clone(), true),
+			// ITU-T T.35 metadata, which nothing reads.
+			(
+				[sequence.as_slice(), &metadata_obu(&[4, 0xb5, 0, 0x3c])].concat(),
+				false,
+			),
+			([hdr.as_slice(), &sequence].concat(), false),
+			([sequence.as_slice(), &sequence].concat(), false),
+			([hdr.as_slice(), &hdr].concat(), false),
+			// A temporal delimiter.
+			(vec![0x12, 0x00], false),
+			(sequence[..sequence.len() - 1].to_vec(), false),
+		] {
+			assert_eq!(config_obus_supported(&obus), supported, "{obus:02x?}");
+		}
+	}
+
 	/// A track initialized from an av1C publishes the colour its configOBUs carry, since the
-	/// samples need not repeat it.
+	/// samples need not repeat it, and the first sync sample repeating its sequence header keeps
+	/// the track.
 	#[tokio::test(start_paused = true)]
 	async fn av1c_initialize_publishes_config_obu_color() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -402,7 +495,8 @@ mod tests {
 			.unwrap();
 		let mut import = Import::new(track, catalog.reserve(), Default::default()).unwrap();
 
-		let mut av1c = vec![0x81, 0x08, 0x0c, 0x00];
+		let mut av1c = vec![0x81, 0x09, 0x4c, 0x00];
+		av1c.extend(av1_config_obus());
 		av1c.extend(hdr10_obus());
 		import.initialize(&av1c).unwrap();
 
@@ -420,6 +514,11 @@ mod tests {
 		let mut frames = split.decode(&sequence, pts).unwrap();
 		frames.extend(split.flush(pts).unwrap());
 		import.decode(frames).unwrap();
+		assert_eq!(
+			import.track.name(),
+			"video",
+			"the repeated sequence header keeps the track"
+		);
 		let color = catalog.snapshot().video.renditions["video"]
 			.color
 			.clone()
@@ -430,8 +529,30 @@ mod tests {
 		);
 	}
 
+	/// An av1C without a sequence header publishes nothing: its header fields omit the colour the
+	/// codec string carries, so the stream's first sequence header configures the track instead.
+	#[tokio::test(start_paused = true)]
+	async fn av1c_without_a_sequence_header_waits_for_the_stream() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let track = broadcast
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let mut import = Import::new(track, catalog.reserve(), Default::default()).unwrap();
+		import.initialize(&[0x81, 0x09, 0x4c, 0x00]).unwrap();
+		assert!(catalog.snapshot().video.renditions.is_empty());
+
+		let pts = moq_net::Timestamp::from_micros(0).unwrap();
+		let mut split = super::super::Split::new();
+		let mut frames = split.decode(&av1_sequence_header(), pts).unwrap();
+		frames.extend(split.flush(pts).unwrap());
+		import.decode(frames).unwrap();
+		assert_eq!(import.track.name(), "video");
+		assert_eq!(catalog.snapshot().video.renditions["video"].coded_width, Some(1920));
+	}
+
 	/// Seeding with raw OBUs whose sequence header is new starts a new coded sequence, dropping the
-	/// HDR metadata the last one carried.
+	/// HDR metadata an earlier av1C carried.
 	#[tokio::test(start_paused = true)]
 	async fn a_new_raw_sequence_drops_stale_hdr_metadata() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -443,15 +564,14 @@ mod tests {
 		let mut av1c = vec![0x81, 0x08, 0x0c, 0x00];
 		av1c.extend(hdr10_obus());
 		import.initialize(&av1c).unwrap();
-		let color = || catalog.snapshot().video.renditions["video"].color.clone().unwrap();
-		assert!(color().mastering.is_some());
 
 		import.initialize(&av1_sequence_header()).unwrap();
-		assert_eq!((color().mastering, color().content_light), (None, None));
+		let color = catalog.snapshot().video.renditions["video"].color.clone().unwrap();
+		assert_eq!((color.mastering, color.content_light), (None, None));
 	}
 
-	/// A temporal unit of a temporal delimiter, the sequence header from `av1.mp4`'s av1C, and a frame.
-	fn av1_sequence_header() -> Vec<u8> {
+	/// The configOBUs of `av1.mp4`'s av1C: its sequence header.
+	fn av1_config_obus() -> Vec<u8> {
 		let init = include_bytes!("../../container/fmp4/test_data/av1.mp4");
 		let mut cursor = std::io::Cursor::new(&init[..]);
 		let moov = loop {
@@ -463,8 +583,13 @@ mod tests {
 		let mp4_atom::Codec::Av01(av01) = &moov.trak[0].mdia.minf.stbl.stsd.codecs[0] else {
 			panic!("expected av01");
 		};
+		av01.av1c.config_obus.clone()
+	}
+
+	/// A temporal unit of a temporal delimiter, the sequence header from `av1.mp4`'s av1C, and a frame.
+	fn av1_sequence_header() -> Vec<u8> {
 		let mut tu = vec![0x12, 0x00];
-		tu.extend_from_slice(&av01.av1c.config_obus);
+		tu.extend(av1_config_obus());
 		tu.extend_from_slice(&[0x32, 0x01, 0x10]);
 		tu
 	}

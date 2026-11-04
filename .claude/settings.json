@@ -6,11 +6,47 @@
 				"hooks": [
 					{
 						"type": "command",
-						"command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/submodule.sh"
-					},
+						"command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/direnv.sh"
+					}
+				]
+			}
+		],
+		"WorktreeCreate": [
+			{
+				"hooks": [
 					{
 						"type": "command",
-						"command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/direnv.sh"
+						"command": "nix run \"${CLAUDE_PROJECT_DIR}#quest\" -- worktree hook"
+					}
+				]
+			}
+		],
+		"WorktreeRemove": [
+			{
+				"hooks": [
+					{
+						"type": "command",
+						"command": "nix run \"${CLAUDE_PROJECT_DIR}#quest\" -- worktree hook"
+					}
+				]
+			}
+		],
+		"SubagentStart": [
+			{
+				"hooks": [
+					{
+						"type": "command",
+						"command": "nix run \"${CLAUDE_PROJECT_DIR}#quest\" -- worktree hook"
+					}
+				]
+			}
+		],
+		"SubagentStop": [
+			{
+				"hooks": [
+					{
+						"type": "command",
+						"command": "nix run \"${CLAUDE_PROJECT_DIR}#quest\" -- worktree hook"
 					}
 				]
 			}

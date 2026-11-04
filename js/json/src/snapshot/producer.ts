@@ -1,5 +1,6 @@
 import type { Time, Timed } from "@moq/net";
 import * as Moq from "@moq/net";
+import { MAX_FRAME_BYTES } from "../limits.ts";
 
 import { type Config as CodecConfig, type Encoded, Encoder } from "./encoder.ts";
 
@@ -14,6 +15,9 @@ import { type Config as CodecConfig, type Encoded, Encoder } from "./encoder.ts"
  * `refresh` ratio times the snapshot, a join asks for a group past the largest, and the producer
  * restates the value there at the newest timestamp written. Set the ratio when creating the
  * track, or joins never ask.
+ *
+ * Set `compress` on that track's info too: JSON is small and repetitive, and moq-net compresses each
+ * delta against the snapshot earlier in its group.
  */
 export class Producer<T> {
 	#track: Moq.Track.Producer;
@@ -27,7 +31,7 @@ export class Producer<T> {
 	#deltas: boolean;
 
 	// The sequence of the newest group written, which a joiner's wanted group has to pass.
-	#largest?: number;
+	#largest?: bigint;
 	// The newest timestamp written, which a refresh restates the value at. An update may carry an
 	// older timestamp than its group's first frame, and a new group may not start before that one.
 	#at?: Time.Timestamp;
@@ -45,7 +49,7 @@ export class Producer<T> {
 	}
 
 	// Restate the value in a new group once a joiner wants one past the largest written.
-	#refresh(wanted: number | undefined): void {
+	#refresh(wanted: bigint | undefined): void {
 		if (wanted === undefined || this.#largest === undefined || wanted <= this.#largest) return;
 		const frame = this.#encoder.snapshot();
 		if (!frame) return;
@@ -80,7 +84,7 @@ export class Producer<T> {
 
 		const group = this.#group;
 		this.#group = undefined;
-		group.close();
+		group.finish();
 	}
 
 	/**
@@ -106,12 +110,12 @@ export class Producer<T> {
 		// replacement before the frame is written, so discovering the limit inside `writeFrame` would
 		// leave an empty newest group behind: a snapshot consumer jumps to the newest, so the last
 		// good value would vanish even though this update reported an error.
-		if (encoded.payload.byteLength > Moq.Group.MAX_GROUP_CACHE_BYTES) throw new Moq.Error.FrameTooLarge();
+		if (encoded.payload.byteLength > MAX_FRAME_BYTES) throw new Moq.Error.FrameTooLarge();
 
 		if (encoded.keyframe) {
 			// The previous group is complete; no more frames will be appended to it. Drop the handle
 			// before opening the next one, so a failure below doesn't leave a closed group behind.
-			this.#group?.close();
+			this.#group?.finish();
 			this.#group = undefined;
 
 			const group = this.#track.appendGroup();
@@ -122,7 +126,7 @@ export class Producer<T> {
 				// The group carries no frames, so close it rather than leaving it open on the track. A
 				// rejected frame doesn't close the track, and a consumer that already advanced into this
 				// group would otherwise block until some later update opened a newer one.
-				group.close();
+				group.finish();
 				throw err;
 			}
 
@@ -131,7 +135,7 @@ export class Producer<T> {
 				this.#group = group;
 			} else {
 				// Deltas disabled: one frame per group, identical to a plain JSON track.
-				group.close();
+				group.finish();
 				this.#group = undefined;
 			}
 			return;
@@ -186,17 +190,23 @@ export class Producer<T> {
 	#close(abort?: Error): void {
 		this.#unwatch?.();
 		this.#unwatch = undefined;
-		this.#group?.close(abort);
+		if (abort) this.#group?.abort(abort);
+		else this.#group?.finish();
 		this.#group = undefined;
 
 		// The open group goes with the track, so the encoder must not keep emitting deltas into it.
 		// Any further update fails on the closed track, but it has to fail as a track error rather
 		// than as a delta with nowhere to put it.
 		this.#encoder.reset();
-		this.#track.close(abort);
+		if (abort) this.#track.abort(abort);
+		else {
+			this.#track.finish();
+			this.#track.close();
+		}
 	}
 }
 
+/** Types for {@link Producer}. */
 export namespace Producer {
 	/** Snapshot producer options, including the destination track. */
 	export type Config<T> = CodecConfig<T> & { track: Moq.Track.Producer };

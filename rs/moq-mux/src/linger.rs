@@ -21,9 +21,9 @@ pub struct Linger<T> {
 	// Dropped after `Drop::drop` closes the broadcasts.
 	_owner: T,
 	// `None` when the duration overflows the clock, so only an interrupt ends it.
-	deadline: Option<moq_clock::Instant>,
+	deadline: Option<kio::clock::Instant>,
 	// Armed at the deadline, created on first poll.
-	timer: Option<moq_clock::Sleep>,
+	timer: Option<kio::clock::Sleep>,
 }
 
 impl Linger<()> {
@@ -45,7 +45,7 @@ impl<T> Linger<T> {
 		Self {
 			broadcasts: broadcasts.into_iter().collect(),
 			_owner: owner,
-			deadline: moq_clock::now().checked_add(duration),
+			deadline: kio::clock::now().checked_add(duration),
 			timer: None,
 		}
 	}
@@ -56,7 +56,7 @@ impl<T> Linger<T> {
 		let Some(deadline) = self.deadline else {
 			return Poll::Pending;
 		};
-		let timer = self.timer.get_or_insert_with(|| moq_clock::sleep_until(deadline));
+		let timer = self.timer.get_or_insert_with(|| kio::clock::sleep_until(deadline));
 		waiter.poll_future(Pin::new(timer))
 	}
 
@@ -81,23 +81,25 @@ mod tests {
 
 	const PATH: &str = "live";
 
-	/// A broadcast at [`PATH`] whose one track, `video`, has three finished groups.
+	/// A broadcast at [`PATH`] whose one track, `video`, has three finished groups. It declares
+	/// media's max age, so its superseded groups stay fetchable as long as the default linger.
 	fn finished(origin: &moq_net::origin::Producer) -> (moq_net::broadcast::Producer, moq_net::track::Producer) {
 		let broadcast = origin.publish(PATH, moq_net::origin::Route::default()).unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let info = moq_net::track::Info::default().with_max_age(hang::container::MAX_AGE);
+		let track = broadcast.create_track("video", info).unwrap();
 		for _ in 0..3 {
 			let mut group = track.append_group().unwrap();
 			group.write_frame(None, bytes::Bytes::from_static(b"frame")).unwrap();
 			group.finish().unwrap();
 		}
 		track.finish().unwrap();
-		(broadcast, track)
+		(broadcast.broadcast().clone(), track)
 	}
 
 	/// Whether the origin has stopped routing [`PATH`].
 	async fn unroutable(origin: &moq_net::origin::Producer) -> bool {
 		matches!(
-			origin.consume().request_broadcast(PATH, None).await,
+			origin.consume().request(PATH, None).await,
 			Err(moq_net::Error::Unroutable)
 		)
 	}
@@ -108,11 +110,11 @@ mod tests {
 	async fn a_late_subscriber_drains_the_tail_until_the_deadline() {
 		let origin = crate::source::produce_origin();
 		let (broadcast, track) = finished(&origin);
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let linger = tokio::spawn(Linger::new([broadcast], track, Duration::from_secs(30)).wait());
 
-		moq_clock::sleep(Duration::from_secs(29)).await;
-		let late = origin.consume().request_broadcast(PATH, None).await.unwrap();
+		kio::clock::sleep(Duration::from_secs(29)).await;
+		let late = origin.consume().request(PATH, None).await.unwrap();
 		let video = late.track("video").unwrap();
 		for sequence in 0..3 {
 			let mut group = video.fetch_group(sequence, None).await.unwrap();
@@ -127,7 +129,7 @@ mod tests {
 		);
 
 		linger.await.unwrap();
-		assert_eq!(moq_clock::now() - start, Duration::from_secs(30));
+		assert_eq!(kio::clock::now() - start, Duration::from_secs(30));
 		assert!(unroutable(&origin).await);
 	}
 
@@ -136,12 +138,12 @@ mod tests {
 	async fn the_deadline_is_fixed_at_the_end() {
 		let origin = crate::source::produce_origin();
 		let (broadcast, track) = finished(&origin);
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let linger = Linger::new([broadcast], track, Duration::from_secs(30));
 
-		moq_clock::sleep(Duration::from_secs(20)).await;
+		kio::clock::sleep(Duration::from_secs(20)).await;
 		linger.wait().await;
-		assert_eq!(moq_clock::now() - start, Duration::from_secs(30));
+		assert_eq!(kio::clock::now() - start, Duration::from_secs(30));
 	}
 
 	/// Dropping the handle, as an interrupt does, closes the broadcast at once.

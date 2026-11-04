@@ -1,1476 +1,1505 @@
-//! Per-track timelines: each track's index of spans, which HLS/DASH export and recordings use.
+//! One playout clock shared by a broadcast's audio and video.
 //!
-//! Every indexed track gets its own timeline track carrying one [`hang::timeline::Record`] per
-//! *span*: a run of the track's frames mapped to their content time. A consumer can answer "which
-//! groups cover time T on track X" and "where is the live edge" from a few bytes per span
-//! without subscribing to media, which is the primitive a playlist server (HLS/DASH), a seek bar,
-//! or a recorder index needs.
+//! Feed video arrivals and the audio device's buffered position to a [`Producer`].
+//! Give its [`Consumer`] to a presenter: [`Consumer::present`] selects the newest
+//! due picture without waiting, so a canvas can repeat its previous picture.
+//! Audio owns the anchor while it plays; without audio, video uses the delay
+//! passed to [`Producer::new`]. The audio jitter target comes from the caller,
+//! keeping this module independent of decoders and output devices.
 //!
-//! ## Cutting
-//!
-//! Tracks cut independently; nothing waits for another track.
-//!
-//! Every track follows one rule, parameterized by its [`Config`]:
-//!
-//! - A record ends at the first group boundary at least [`Config::duration_min`] (4s by default)
-//!   past its own start, so short groups (audio) pack into one record and long ones (video GOPs)
-//!   get one each. Only sparse data, such as a catalog that may not publish again for the rest of
-//!   the broadcast, uses a zero minimum: every group is then its own record, ended as soon as the
-//!   group finishes.
-//! - A group still open three declared durations past the record's start is split at the next
-//!   reported frame, so an append-only group that never closes is still indexed as it grows.
-//!   Before an unhinted track declares, the ceiling is ten seconds, or the minimum if longer.
-//! - A skipped group sequence always closes the record at its newest reported content time, so a
-//!   record's groups are contiguous and a pause is not absorbed into its duration.
-//! - [`Segmenter::cut`] adds an application boundary, such as a video keyframe cutting audio so a
-//!   derived segment needs fewer objects. The first cut takes over from minimum-duration pacing.
-//!
-//! An untimed track, whose frames carry no timestamps, has no duration to pace by: each group is
-//! its own record, ended when the group finishes or the next one starts, and its records carry no
-//! `pts` or `duration`. Nothing splits an untimed group, so one that never closes is indexed only
-//! when the segmenter flushes.
-//!
-//! ## Wiring
-//!
-//! [`catalog::Producer`](crate::catalog::Producer) owns the broadcast's [`Timelines`] and advertises
-//! them in the catalog's root [`hang::catalog::Archive`] entry. Its role-specific track
-//! constructors enroll each media track, and the catalog enrolls itself with a zero minimum.
-//!
-//! A [`Segmenter`] builds records from a track's frame reports without publishing them, and a
-//! [`Producer`] publishes records onto a timeline track. A [`Recorder`] pairs the two for live
-//! publishing; a recording writer drives them separately so it can store the media a record names
-//! before publishing it. On the read side, [`Consumer::subscribe`] reads one track's timeline from
-//! the catalog's [`Archive`] entry and yields decoded [`Event`]s. On the wire each timeline is a
-//! DEFLATE-compressed [`moq_json::window`], so a DVR can trim old records while an unbounded
-//! timeline simply never pops them.
+//! A [`Track`] maps encoder segments onto the clock across declared ends. Keep
+//! one active track per [`Kind`]; retire it before starting its successor. Bound
+//! replacement media with the caller's retention budget and [`Track::abandon`]
+//! transitions whose replacement is discarded.
 
-use std::collections::{BTreeMap, VecDeque};
-use std::sync::{Arc, Mutex};
-use std::task::Poll;
+use kio::clock::Instant;
 use std::time::Duration;
 
-use hang::catalog::{Archive, Timeline};
-use hang::timeline::{Position, Record, RecordExt};
+use moq_net::Timestamp;
+use std::{
+	pin::Pin,
+	sync::{Arc, Mutex},
+	task::Poll,
+};
 
-use moq_net::{Timescale, Timestamp};
-
-/// The default [`Config::duration_min`] (4 seconds). Only sparse data, such as a catalog, uses zero.
-pub const DEFAULT_DURATION_MIN: Duration = Duration::from_secs(4);
-
-/// The safety ceiling before an unhinted track declares its duration, unless the minimum is longer.
-const DEFAULT_DURATION_CEILING: Duration = Duration::from_secs(10);
-
-/// Records may overrun their target to reach a keyframe, but not indefinitely.
-const DURATION_CEILING_MULTIPLIER: u32 = 3;
-
-/// Recent records repeated when the window track rolls to a new group.
-const CHECKPOINT_RECORDS: usize = 256;
-
-/// How a track's records are cut.
-///
-/// Every track follows one rule: a record ends at the first group boundary at least
-/// [`duration_min`](Self::duration_min) past its start. A hint fixes the nominal target to its
-/// smallest multiple at or beyond that minimum.
-#[derive(Clone, Debug)]
-#[non_exhaustive]
-pub struct Config {
-	/// The shortest a record may be before a group boundary ends it.
-	///
-	/// A floor rather than a target on purpose: a floor is always satisfiable (wait for the next
-	/// group), so no group is split to honor it. Zero, for sparse data such as a catalog, makes
-	/// every group its own record, ended as soon as the group finishes.
-	pub duration_min: Duration,
-
-	/// The application's nominal group duration, when known.
-	pub duration_hint: Option<Duration>,
+struct Clock {
+	state: Mutex<State>,
+	changed: kio::Shared<()>,
 }
 
-impl Config {
-	/// Set [`duration_min`](Self::duration_min).
-	pub fn with_duration_min(mut self, duration: Duration) -> Self {
-		self.duration_min = duration;
-		self
-	}
-
-	/// Set [`duration_hint`](Self::duration_hint).
-	pub fn with_duration_hint(mut self, duration: impl Into<Option<Duration>>) -> Self {
-		self.duration_hint = duration.into();
-		self
-	}
-}
-
-impl Default for Config {
-	fn default() -> Self {
+impl Clock {
+	fn new(delay: Duration) -> Self {
 		Self {
-			duration_min: DEFAULT_DURATION_MIN,
-			duration_hint: None,
+			state: Mutex::new(State::new(delay)),
+			changed: Default::default(),
 		}
 	}
+
+	fn wake(&self) {
+		*self.changed.lock() = ();
+	}
 }
 
-/// The wire timescale for record `pts`/`duration`: the catalog section's default, milliseconds.
-const TIMESCALE: Timescale = Timescale::MILLI;
-
-/// A duration in wire units, rounded up so a bound never understates itself.
-fn units(duration: Duration) -> u64 {
-	u64::try_from((duration.as_micros() * TIMESCALE.as_u64() as u128).div_ceil(1_000_000)).unwrap_or(u64::MAX)
-}
-
-fn duration(units: u64) -> Duration {
-	Duration::from_micros(units.saturating_mul(1_000_000) / TIMESCALE.as_u64())
-}
-
-fn wire(pts: Timestamp) -> u64 {
-	pts.as_scale(TIMESCALE) as u64
-}
-
-/// The record being built.
-struct Open {
-	start: Position,
-	/// `None` on an untimed track.
-	pts: Option<Timestamp>,
-	keyframe: bool,
-}
-
-/// Builds one track's records from reports of the frames it published.
+/// The playout clock: one anchor the window and the speaker both present
+/// against.
 ///
-/// Reports arrive in position order: [`frame`](Self::frame) for each frame that may start a record
-/// (every frame, or at least the first of each group), [`finish_group`](Self::finish_group) once a
-/// group can gain no more frames, and [`end`](Self::end) wherever the content is known to stop.
-/// Closed records queue until [`Iterator::next`] takes them.
-pub struct Segmenter {
-	config: Config,
-	/// Fixed nominal duration; absent until an unhinted track's first record closes. Kept unrounded
-	/// so pacing hits a fractional-millisecond GOP's boundary; only the wire declaration rounds.
-	declared: Option<Duration>,
-	/// The number the next closed record gets.
-	sequence: u64,
-	open: Option<Open>,
-	/// The newest reported frame position.
-	last: Option<Position>,
-	/// Whether the group of `last` has finished.
-	finished: bool,
-	/// The newest reported content time in the open record.
-	frontier: Option<Timestamp>,
-	/// Application boundaries not yet reached, in order.
-	cuts: VecDeque<Timestamp>,
-	/// A cut arrived, so the application owns the group boundaries from here on.
-	manual: bool,
-	/// Whether the track's frames carry timestamps, fixed by its first report.
-	timed: Option<bool>,
-	ready: VecDeque<Record>,
-	closed: bool,
+/// Every arriving frame is folded into a single [`Pacer`](crate::Pacer), which
+/// maps media time onto the wall clock and holds each result back by the
+/// configured delay. That is what pulls playback toward live: a frame arriving
+/// earlier than the anchor predicted re-pins it, and the delay is measured from
+/// the edge it just set rather than from wherever the first frame happened to
+/// land.
+///
+/// While audio is playing it is the only half allowed to move the anchor. The
+/// speaker drains on its own clock and cannot skip forward with a re-anchor, so
+/// a video tune-in burst re-anchoring would leave the picture ahead of the
+/// sound. Video reads the anchor and follows it.
+struct State {
+	pacer: crate::Pacer,
+	/// How far behind the live edge playback runs.
+	delay: Duration,
+	/// Whether the speaker owns the anchor.
+	speaker: bool,
+	/// Set when the speaker restarts on a new timeline mid-track, so the next
+	/// audio frame pins the anchor outright instead of pacing against media it
+	/// will never play.
+	restart: bool,
+	/// Endpoints declared by each live role, on the shared playback timeline.
+	ends: [Option<Boundary>; 2],
+	/// When each retired role's tail finishes playing, frozen on the wall clock:
+	/// a later rendition re-pins the anchor, which would carry a media endpoint
+	/// onto an unrelated timeline. Kept apart from `ends` so a successor role
+	/// never clears its predecessor's tail.
+	tails: Vec<Instant>,
+	/// Encoder restarts whose replacements have not all started playing.
+	transitions: std::collections::VecDeque<Pending>,
+	/// The latest transition each role declared.
+	declared: [Transition; 2],
+	next: Transition,
+	reference: Option<Timestamp>,
+	/// The last speaker write: the media time it ends at, when that sounds, and
+	/// the playhead it may not fall back behind on the same timeline.
+	written: Option<(Duration, Instant, Option<Duration>)>,
+	/// The playout target the speaker holds, once audio is playing.
+	target: Option<Duration>,
 }
 
-impl Segmenter {
-	/// A segmenter numbering its records from zero.
-	pub fn new(config: Config) -> Self {
-		let declared = match config.duration_hint.filter(|hint| !hint.is_zero()) {
-			Some(hint) => {
-				let multiple = config.duration_min.as_nanos().div_ceil(hint.as_nanos()).max(1);
-				Some(hint.saturating_mul(u32::try_from(multiple).unwrap_or(u32::MAX)))
-			}
-			None if config.duration_min.is_zero() => Some(Duration::ZERO),
-			None => None,
+/// One encoder restart, shared by the roles whose ends declared it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Transition(u64);
+
+struct Pending {
+	id: Transition,
+	/// Roles whose declared end opened or joined this transition.
+	members: [bool; 2],
+	/// Members that applied its mapping.
+	resumed: [bool; 2],
+	/// Each member's first replacement media.
+	plans: [Option<Plan>; 2],
+	mapping: Option<Mapping>,
+}
+
+struct Boundary {
+	starts: Option<Instant>,
+	end: Duration,
+}
+
+#[derive(Clone, Copy)]
+struct Plan {
+	source: Duration,
+	delay: Duration,
+}
+
+impl State {
+	fn new(delay: Duration) -> Self {
+		Self {
+			pacer: crate::Pacer::default().with_delay(delay),
+			delay,
+			speaker: false,
+			restart: false,
+			ends: Default::default(),
+			tails: Vec::new(),
+			transitions: Default::default(),
+			declared: [Transition(0); 2],
+			next: Transition(1),
+			reference: None,
+			written: None,
+			target: None,
+		}
+	}
+
+	/// How many transitions are still pending.
+	#[cfg(test)]
+	fn pending(&self) -> usize {
+		self.transitions.len()
+	}
+
+	fn transition(&mut self, id: Transition) -> Option<&mut Pending> {
+		self.transitions.iter_mut().find(|pending| pending.id == id)
+	}
+
+	/// Forget transitions nobody resumes, or that every member resumed once
+	/// their replacement started and nothing can join them.
+	fn prune(&mut self, now: Instant) {
+		self.transitions.retain(|pending| {
+			let members = pending.members.iter().any(|member| *member);
+			let resumed = (0..2).all(|role| !pending.members[role] || pending.resumed[role]);
+			let started = pending.mapping.is_some_and(|mapping| mapping.started(now));
+			members && !(resumed && started)
+		});
+	}
+
+	/// The media position the shared clock will reach at `at`.
+	fn position(&self, at: Instant) -> Option<Duration> {
+		let reference = self.reference?;
+		let due = self.due(reference)?;
+		let reference = Duration::from(reference);
+		Some(if at >= due {
+			reference.saturating_add(at.duration_since(due))
+		} else {
+			reference.saturating_sub(due.duration_since(at))
+		})
+	}
+
+	/// Fold an arriving video frame into the anchor, unless the speaker owns it,
+	/// reporting whether that moved the schedule.
+	///
+	/// A move makes every queued frame due earlier, so the window has to recompute
+	/// the deadline it is already asleep on.
+	fn video(&mut self, timestamp: Timestamp, now: Instant) -> bool {
+		if self.speaker {
+			return false;
+		}
+
+		self.reference = Some(timestamp);
+		let before = self.pacer.due(timestamp);
+		before != Some(self.pacer.pace(timestamp, now))
+	}
+
+	/// Start a new video timeline without taking ownership from a speaker.
+	fn video_restarted(&mut self) {
+		if !self.speaker {
+			self.pacer = crate::Pacer::default().with_delay(self.delay);
+		}
+	}
+
+	/// Fold the speaker's position into the anchor, reporting whether that moved
+	/// the schedule.
+	///
+	/// `end` is the media time of the last sample written and `buffered` is how
+	/// much of the write is still queued, so `end` does not sound until
+	/// `buffered` from now. The anchor is pinned at the instant that leaves
+	/// exactly the delay before it does, which is where the live edge sits on a
+	/// clock trailing by that delay. Pinning the sample sounding *now* instead
+	/// would schedule video a whole delay behind the speaker.
+	///
+	/// A move makes every queued video frame due earlier, so the window has to
+	/// recompute the deadline it is already asleep on.
+	fn audio(&mut self, end: Duration, buffered: Duration, now: Instant) -> bool {
+		// Silence padded ahead of the frame to refill the speaker is not media: the
+		// playhead holds where it was until the padding has played, rather than
+		// projecting back over media already heard. A new timeline starts afresh.
+		let floor = (self.speaker && !self.restart).then(|| self.playhead(now)).flatten();
+		self.written = now.checked_add(buffered).map(|sounds| (end, sounds, floor));
+		let timestamp = media(end);
+		self.reference = Some(timestamp);
+		let edge = now
+			.checked_add(buffered)
+			.and_then(|at| at.checked_sub(self.delay))
+			.unwrap_or(now);
+
+		// Taking ownership re-pins outright rather than pacing. Whatever set the
+		// anchor before is either video, which the speaker cannot follow, or a
+		// track that has since ended, and a timestamp that maps into the past under
+		// that anchor would never re-anchor on its own: the sink would play now
+		// while the picture stayed on a timeline nothing is feeding.
+		let before = self.pacer.due(timestamp);
+		let after = if !self.speaker || std::mem::take(&mut self.restart) {
+			self.pacer.hurry(timestamp, edge)
+		} else {
+			self.pacer.pace(timestamp, edge)
 		};
-		Self {
-			config,
-			declared,
-			sequence: 0,
-			open: None,
-			last: None,
-			finished: false,
-			frontier: None,
-			cuts: VecDeque::new(),
-			manual: false,
-			timed: None,
-			ready: VecDeque::new(),
-			closed: false,
-		}
+		self.speaker = true;
+
+		before != Some(after)
 	}
 
-	/// The fixed nominal record duration, once known, in timeline units. An untimed track has no
-	/// duration to declare.
-	pub fn declared_duration(&self) -> Option<u64> {
-		self.declared.filter(|_| self.timed != Some(false)).map(units)
+	/// The speaker restarted on a new timeline, so the media either side of the
+	/// break is unrelated: re-pin the anchor on the next audio frame rather than
+	/// pacing across a jump the speaker never plays.
+	fn restarted(&mut self) {
+		self.restart = true;
 	}
 
-	fn target(&self) -> Duration {
-		self.declared
-			.filter(|value| !value.is_zero())
-			.unwrap_or(self.config.duration_min)
-	}
-
-	fn ceiling(&self) -> Duration {
-		self.declared
-			.filter(|value| !value.is_zero())
-			.and_then(|value| value.checked_mul(DURATION_CEILING_MULTIPLIER))
-			.unwrap_or(DEFAULT_DURATION_CEILING.max(self.config.duration_min))
-	}
-
-	/// Number the next record `sequence`, continuing a resumed timeline.
-	pub fn with_sequence(mut self, sequence: u64) -> Self {
-		self.sequence = sequence;
-		self
-	}
-
-	/// The number the next closed record gets.
-	pub fn sequence(&self) -> u64 {
-		self.sequence
-	}
-
-	/// Report the frame at `position`, presented at `pts`, or `None` on an untimed track.
+	/// The speaker went quiet, so nothing holds playback to its cadence any
+	/// more and video takes the anchor back.
 	///
-	/// Fails with [`TimelinePosition`](crate::Error::TimelinePosition) when `position` is at or
-	/// before the previous report: records never overlap, so that frame could never be indexed.
-	/// Fails with [`TimelineTiming`](crate::Error::TimelineTiming) when the track's first report
-	/// was timed and this one is not, or the reverse.
-	pub fn frame(
-		&mut self,
-		position: Position,
-		pts: impl Into<Option<Timestamp>>,
-		keyframe: bool,
-	) -> crate::Result<()> {
-		let pts = pts.into();
-		if self.closed {
-			return Ok(());
+	/// A replacement rendition takes ownership again on its first frame, and
+	/// re-pins there: it is a track boundary, so its timestamps are not
+	/// necessarily continuous with what just ended. That covers a pending
+	/// restart, which would otherwise re-pin the frame after it too.
+	fn stopped(&mut self) {
+		self.speaker = false;
+		self.restart = false;
+		self.written = None;
+		self.target = None;
+	}
+
+	/// Record the playout target the speaker is being held on.
+	fn hold(&mut self, target: Duration) {
+		self.target = Some(target);
+	}
+
+	/// The media time sounding at `now`, or `None` with no speaker.
+	///
+	/// Projected from the last write at the wall rate, held at its end (a speaker
+	/// with nothing left plays nothing further), and never behind where it stood
+	/// at that write (refill padding plays no media).
+	fn playhead(&self, now: Instant) -> Option<Duration> {
+		let (end, sounds, floor) = self.written?;
+		let projected = end.saturating_sub(sounds.saturating_duration_since(now));
+		Some(floor.map_or(projected, |floor| projected.max(floor)).min(end))
+	}
+
+	/// The playout target the speaker is held on, or `None` with no speaker.
+	fn target(&self) -> Option<Duration> {
+		self.target
+	}
+
+	/// When `timestamp` should be presented, or `None` before any frame has
+	/// anchored the clock. `None` means as soon as possible: there is nothing
+	/// left to wait for.
+	fn due(&self, timestamp: Timestamp) -> Option<Instant> {
+		self.pacer.due(timestamp)
+	}
+}
+
+/// Maps each encoder segment onto the shared playback clock.
+pub struct Track {
+	presentation: Arc<Clock>,
+	role: Kind,
+	mapping: std::sync::Mutex<Mapping>,
+}
+
+/// A segment's timestamp mapping, applied only after its first media can play.
+#[derive(Clone, Copy)]
+#[must_use]
+pub struct Mapping {
+	source: Duration,
+	target: Duration,
+	starts: Option<Instant>,
+}
+
+impl Mapping {
+	fn map(self, source: Timestamp) -> Result<Timestamp> {
+		let source = Duration::from(source);
+		let target = if source >= self.source {
+			self.target.checked_add(source - self.source).ok_or(Error::Overflow)?
+		} else {
+			self.target
+				.checked_sub(self.source - source)
+				.ok_or(Error::BeforeOrigin)?
+		};
+		Timestamp::from_micros(target.as_micros().try_into().map_err(|_| Error::Overflow)?).map_err(|_| Error::Overflow)
+	}
+
+	fn started(&self, now: Instant) -> bool {
+		self.starts.is_none_or(|starts| starts <= now)
+	}
+}
+
+impl Track {
+	fn new(presentation: Arc<Clock>, role: Kind) -> Self {
+		Self {
+			presentation,
+			role,
+			mapping: std::sync::Mutex::new(Mapping {
+				source: Duration::ZERO,
+				target: Duration::ZERO,
+				starts: None,
+			}),
 		}
-		if let Some(last) = self.last
-			&& position <= last
+	}
+
+	/// Stop while a tail still plays until `drained`, holding a declared end until
+	/// then. Dropping instead discards the tail with the end.
+	pub fn retire(self, drained: Option<Instant>) {
+		let now = kio::clock::now();
+		let mut presentation = self.presentation.state.lock().unwrap();
+		presentation.tails.retain(|tail| *tail > now);
+		if presentation.ends[self.role as usize].take().is_some()
+			&& let Some(drained) = drained
 		{
-			return Err(crate::Error::TimelinePosition { position, last });
+			presentation.tails.push(drained);
 		}
-		if *self.timed.get_or_insert(pts.is_some()) != pts.is_some() {
-			return Err(crate::Error::TimelineTiming(position));
-		}
-		if pts.is_none() {
-			// Cuts are content times, which an untimed track never reaches.
-			self.cuts.clear();
-		}
+	}
 
-		if let (Some(start), Some(last)) = (self.open.as_ref().map(|open| open.pts), self.last) {
-			match (start, pts) {
-				(Some(start), Some(pts)) => {
-					if let Some(end) = self.timed_end(start, pts, position, last) {
-						self.emit(end, Some(pts), true);
-					}
-				}
-				// An untimed record holds one group, ended where the next one starts.
-				_ if position.group != last.group => self.emit(Position::group(last.group + 1), None, true),
-				_ => {}
-			}
-		}
+	/// Map a source timestamp onto the shared broadcast timeline.
+	pub fn map(&self, source: Timestamp) -> Result<Timestamp> {
+		self.mapping.lock().unwrap().map(source)
+	}
 
-		if self.open.is_none() {
-			self.open = Some(Open {
-				start: position,
-				pts,
-				keyframe,
+	/// Declare that this role's encoder stopped, returning the transition its
+	/// replacement resumes.
+	///
+	/// A peer's transition this role has not joined yet is the same restart, as
+	/// long as its replacement has not started playing; otherwise this one opens
+	/// a transition of its own.
+	pub fn declare(&self) -> Transition {
+		let now = kio::clock::now();
+		let own = self.role as usize;
+		let mut presentation = self.presentation.state.lock().unwrap();
+		presentation.prune(now);
+		let after = presentation.declared[own];
+		let joined = presentation
+			.transitions
+			.iter_mut()
+			.filter(|transition| transition.id > after)
+			.find(|transition| {
+				transition.members[1 - own]
+					&& !transition.members[own]
+					&& transition.mapping.is_none_or(|mapping| !mapping.started(now))
+			})
+			.map(|transition| {
+				transition.members[own] = true;
+				transition.id
 			});
-			self.frontier = None;
-		}
-		self.last = Some(position);
-		self.finished = false;
-		if let Some(pts) = pts {
-			self.advance(pts);
-		}
+		let id = joined.unwrap_or_else(|| {
+			let id = presentation.next;
+			presentation.next = Transition(id.0 + 1);
+			let mut members = [false; 2];
+			members[own] = true;
+			presentation.transitions.push_back(Pending {
+				id,
+				members,
+				resumed: [false; 2],
+				plans: [None, None],
+				mapping: None,
+			});
+			id
+		});
+		presentation.declared[own] = id;
+		drop(presentation);
+		self.presentation.wake();
+		id
+	}
+
+	/// Mark where this role's current segment ends on the shared clock.
+	pub fn end(&self, source: Timestamp) -> Result<()> {
+		let mapping = *self.mapping.lock().unwrap();
+		self.presentation.state.lock().unwrap().ends[self.role as usize] = Some(Boundary {
+			starts: mapping.starts,
+			end: Duration::from(mapping.map(source)?),
+		});
+		self.presentation.wake();
 		Ok(())
 	}
 
-	/// Where pacing ends a timed record that started at `start`, if a frame at `position` and `pts`
-	/// ends it there. A gap instead closes the record itself and returns `None`.
-	fn timed_end(&mut self, start: Timestamp, pts: Timestamp, position: Position, last: Position) -> Option<Position> {
-		let elapsed = pts.as_micros().saturating_sub(start.as_micros());
-		if position.group == last.group {
-			return (elapsed >= self.ceiling().as_micros()).then_some(position);
+	/// Record the first replacement media for `transition`.
+	pub fn plan(&self, transition: Transition, source: Timestamp, delay: Option<Duration>) {
+		let mut presentation = self.presentation.state.lock().unwrap();
+		let delay = delay.unwrap_or(presentation.delay);
+		if let Some(pending) = presentation.transition(transition) {
+			pending.plans[self.role as usize] = Some(Plan {
+				source: Duration::from(source),
+				delay,
+			});
 		}
-		let contiguous = position.group == last.group + 1 && position.frame == 0;
-		if !contiguous {
-			// A skipped sequence or a group joined mid-way always closes, so a record's groups are
-			// contiguous and the reader never has to guess what lies between. The skipped time is
-			// not content, so the record ends at its newest report rather than at this frame.
-			self.emit(Position::group(last.group + 1), self.frontier, false);
-			return None;
-		}
-		if elapsed >= self.ceiling().as_micros() || self.boundary(start, pts, elapsed) {
-			return Some(Position::group(last.group + 1));
-		}
-		None
+		drop(presentation);
+		self.presentation.wake();
 	}
 
-	/// Whether a group starting at `pts` ends the record that started at `start`.
-	fn boundary(&mut self, start: Timestamp, pts: Timestamp, elapsed: u128) -> bool {
-		while self
-			.cuts
-			.front()
-			.is_some_and(|cut| cut.as_micros() <= start.as_micros())
-		{
-			self.cuts.pop_front();
-		}
-		if self.cuts.front().is_some_and(|cut| cut.as_micros() <= pts.as_micros()) {
-			while self.cuts.front().is_some_and(|cut| cut.as_micros() <= pts.as_micros()) {
-				self.cuts.pop_front();
-			}
-			return true;
-		}
-		!self.manual && elapsed >= self.target().as_micros()
+	/// Media was lost: nothing waits for the discarded tail.
+	pub fn gap(&self) {
+		self.presentation.state.lock().unwrap().ends[self.role as usize] = None;
+		self.presentation.wake();
 	}
 
-	/// Report that group `group` can gain no more frames.
-	///
-	/// With a zero [`Config::duration_min`], or on an untimed track, this closes the record, so the
-	/// newest group is indexed without waiting for the next one.
-	pub fn finish_group(&mut self, group: u64) {
-		if self.closed || self.last.is_none_or(|last| last.group != group) {
-			return;
+	/// This role will never resume `transition`, so a peer must not pair with its plan.
+	pub fn abandon(&self, transition: Transition) {
+		let own = self.role as usize;
+		let mut presentation = self.presentation.state.lock().unwrap();
+		if let Some(pending) = presentation.transition(transition) {
+			pending.members[own] = false;
+			pending.plans[own] = None;
 		}
-		self.finished = true;
-		let each = self.config.duration_min.is_zero() || self.timed == Some(false);
-		if each && self.open.is_some() {
-			self.emit(Position::group(group + 1), self.frontier, true);
-		}
+		presentation.prune(kio::clock::now());
+		drop(presentation);
+		self.presentation.wake();
 	}
 
-	/// Report that the content extends to `pts`, without a frame starting there.
-	///
-	/// A frame report says where content starts; the last record has no successor to bound it, so
-	/// its duration would otherwise stop at its last frame's start.
-	pub fn end(&mut self, pts: Timestamp) {
-		if !self.closed && self.open.is_some() {
-			self.advance(pts);
+	/// Commit the mapping once its replacement media starts playing.
+	pub fn apply(&self, transition: Transition, mapping: Mapping) {
+		*self.mapping.lock().unwrap() = mapping;
+		let mut presentation = self.presentation.state.lock().unwrap();
+		if let Some(pending) = presentation.transition(transition) {
+			pending.resumed[self.role as usize] = true;
 		}
+		presentation.prune(kio::clock::now());
+		drop(presentation);
+		self.presentation.wake();
 	}
 
-	fn advance(&mut self, pts: Timestamp) {
-		if self
-			.frontier
-			.is_none_or(|frontier| pts.as_micros() > frontier.as_micros())
-		{
-			self.frontier = Some(pts);
+	/// Prepare a mapping after the old media drains; dropping the wait leaves the track unchanged.
+	pub fn resume(&self, transition: Transition, source: Timestamp, delay: Option<Duration>) -> Resume<'_> {
+		Resume {
+			track: self,
+			transition,
+			source,
+			delay,
+			timer: None,
 		}
-	}
-
-	/// Declare a boundary at `pts`: the record closes at the first group starting at or after it.
-	///
-	/// The first cut takes over from [`Config::duration_min`] pacing for good, since pacing would
-	/// otherwise close a record just before the caller declares where it really ends. A cut at or
-	/// before an earlier one is ignored, so several producers declaring the same boundaries (the
-	/// renditions of one import) cost nothing. An untimed track ignores cuts.
-	pub fn cut(&mut self, pts: Timestamp) {
-		if self.closed || self.timed == Some(false) {
-			return;
-		}
-		self.manual = true;
-		if self.cuts.back().is_none_or(|back| pts.as_micros() > back.as_micros()) {
-			self.cuts.push_back(pts);
-		}
-	}
-
-	/// Close the open record now, at the end of the newest reported frame.
-	///
-	/// The record ends after the newest group when that group finished, otherwise after the newest
-	/// reported frame. Later reports start a new record.
-	pub fn flush(&mut self) {
-		let Some(last) = self.last else {
-			return;
-		};
-		if self.open.is_none() {
-			return;
-		}
-		let end = match self.finished {
-			true => Position::group(last.group + 1),
-			false => Position::new(last.group, last.frame + 1),
-		};
-		self.emit(end, self.frontier, false);
-	}
-
-	/// Flush, then ignore every later report.
-	pub fn close(&mut self) {
-		self.flush();
-		self.closed = true;
-	}
-
-	/// Close the open record at `end`, its content running to `pts`, which is `None` only when
-	/// the track is untimed. `paced` is false when a gap or flush closes the record early.
-	fn emit(&mut self, end: Position, pts: Option<Timestamp>, paced: bool) {
-		let Some(open) = self.open.take() else {
-			return;
-		};
-		let mut record = match open.pts {
-			Some(start) => {
-				let start = wire(start);
-				let pts = pts.expect("a timed record has a frontier");
-				// Frames farther apart than the maximum leave nothing to split at, so the record stops at
-				// the advertised bound and the rest of the gap is uncovered.
-				let duration = wire(pts).saturating_sub(start).min(units(self.ceiling()));
-				// The first record fixes an unhinted declaration. One closed early says nothing about
-				// the cadence, so the target falls back to the minimum.
-				self.declared.get_or_insert(match paced {
-					true => self::duration(duration),
-					false => self.config.duration_min,
-				});
-				Record::new(self.sequence, start, duration, open.start, end)
-			}
-			None => Record::untimed(self.sequence, open.start, end),
-		};
-		record.keyframe = open.keyframe;
-		self.sequence += 1;
-		self.ready.push_back(record);
 	}
 }
 
-/// Yields each closed record once; `None` means none is ready yet, not that none ever will be.
-impl Iterator for Segmenter {
-	type Item = Record;
-
-	fn next(&mut self) -> Option<Record> {
-		self.ready.pop_front()
+impl Drop for Track {
+	fn drop(&mut self) {
+		let own = self.role as usize;
+		{
+			let mut presentation = self.presentation.state.lock().unwrap();
+			presentation.ends[own] = None;
+			for pending in presentation
+				.transitions
+				.iter_mut()
+				.filter(|pending| !pending.resumed[own])
+			{
+				pending.members[own] = false;
+				pending.plans[own] = None;
+			}
+			presentation.declared[own] = Transition(0);
+			presentation.prune(kio::clock::now());
+		}
+		self.presentation.wake();
 	}
 }
 
-/// Publishes one track's records onto its timeline track.
+/// A duration from the start of the track as a wire timestamp.
+fn media(duration: Duration) -> Timestamp {
+	// A timestamp caps at 2^61 - 1, which is ~73,000 years of microseconds.
+	const MAX: u128 = (1 << 61) - 1;
+	Timestamp::from_micros(duration.as_micros().min(MAX) as u64).expect("clamped to the timestamp maximum")
+}
+
+/// A pending segment mapping, driven by the caller's executor or waiter.
+#[must_use = "drive the wait before applying its mapping"]
+pub struct Resume<'a> {
+	track: &'a Track,
+	transition: Transition,
+	source: Timestamp,
+	delay: Option<Duration>,
+	timer: Option<kio::clock::Sleep>,
+}
+
+impl Resume<'_> {
+	/// Resolve the replacement's mapping once all declared old media has drained.
+	pub fn poll_ready(&mut self, waiter: &kio::Waiter) -> Poll<Result<Mapping>> {
+		let _ = self.track.presentation.changed.poll(waiter, |_| Poll::Pending);
+		let now = kio::clock::now();
+		let mut presentation = self.track.presentation.state.lock().unwrap();
+		if let Some(mapping) = presentation
+			.transition(self.transition)
+			.and_then(|pending| pending.mapping)
+		{
+			return Poll::Ready(Ok(mapping));
+		}
+		let end = presentation
+			.ends
+			.iter()
+			.flatten()
+			.filter(|boundary| boundary.starts.is_none_or(|start| start <= now))
+			.filter_map(|boundary| presentation.due(media(boundary.end)))
+			.chain(presentation.tails.iter().copied())
+			.max();
+		if let Some(end) = end.filter(|end| *end > now) {
+			let timer = self.timer.get_or_insert_with(|| kio::clock::sleep_until(end));
+			if timer.deadline() != end {
+				timer.reset(end);
+			}
+			std::task::ready!(waiter.poll_future(Pin::new(timer)));
+		}
+
+		let peer = 1 - self.track.role as usize;
+		// A transition abandoned under this resume, by a gap the caller rechecks,
+		// maps alone like one the peer never joined.
+		let (mapping, paired) = presentation
+			.transition(self.transition)
+			.map_or((None, None), |pending| {
+				let both = pending.members[peer] && pending.plans.iter().all(Option::is_some);
+				(pending.mapping, pending.plans[Kind::Audio as usize].filter(|_| both))
+			});
+		// The peer already resumed this transition.
+		if let Some(mapping) = mapping {
+			return Poll::Ready(Ok(mapping));
+		}
+		// Both roles have replacement media. The speaker's first sample defines
+		// their common origin even when its adaptive delay differs from video's.
+		// Otherwise this role maps alone and a peer joining later follows it.
+		let (source, delay) = match paired {
+			Some(audio) => (audio.source, audio.delay),
+			None => (Duration::from(self.source), self.delay.unwrap_or(presentation.delay)),
+		};
+		let starts = now.checked_add(delay).ok_or(Error::DelayOverflow)?;
+		let mapping = Mapping {
+			source,
+			target: presentation.position(starts).unwrap_or(source),
+			starts: Some(starts),
+		};
+		if let Some(pending) = presentation.transition(self.transition) {
+			pending.mapping = Some(mapping);
+		}
+		Poll::Ready(Ok(mapping))
+	}
+
+	/// Wait for the old media to drain and return the replacement's mapping.
+	pub async fn ready(mut self) -> Result<Mapping> {
+		kio::wait(|waiter| self.poll_ready(waiter)).await
+	}
+}
+
+/// Whether a track feeds the picture or the speaker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+	/// A picture track.
+	Video,
+	/// A sound track.
+	Audio,
+}
+
+/// A timestamp or delay cannot be represented on the playout clock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+	/// Mapping the timestamp would overflow.
+	#[error("playback timeline overflow")]
+	Overflow,
+	/// A picture precedes the mapped segment's origin.
+	#[error("picture precedes the playback timeline")]
+	BeforeOrigin,
+	/// The requested delay exceeds the system clock.
+	#[error("playback delay exceeds the system clock")]
+	DelayOverflow,
+}
+
+/// A result from mapping media onto the playout clock.
+pub type Result<T> = std::result::Result<T, Error>;
+
+/// The speaker's last write and caller-selected jitter target.
+#[derive(Clone, Copy, Debug)]
+pub struct Audio {
+	/// Media time at the end of the last write.
+	pub end: Duration,
+	/// How long until the end of that write sounds.
+	pub buffered: Duration,
+	/// The jitter target used to fill the speaker's buffer.
+	pub target: Duration,
+}
+
+/// Updates one broadcast's playout clock, shared by audio and video tasks.
 ///
-/// Records must be pushed in sequence order, starting at the window's next index.
+/// Clones capture this broadcast's clock; resetting a handle never changes the
+/// clock its previous clones or track handles update.
+#[derive(Clone)]
 pub struct Producer {
-	sink: moq_json::window::Producer<Record>,
+	clock: Arc<Clock>,
+	current: Arc<Mutex<Arc<Clock>>>,
+}
+
+/// Reads the current playout schedule without moving its anchor.
+///
+/// Keeps the final schedule readable after update handles drop, and follows
+/// the replacement clock when a producer resets for another broadcast.
+#[derive(Clone)]
+pub struct Consumer {
+	current: Arc<Mutex<Arc<Clock>>>,
 }
 
 impl Producer {
-	/// The properties a timeline track is created with.
-	pub fn info() -> moq_net::track::Info {
-		moq_net::track::Info::default()
-			.with_timescale(moq_net::Timescale::MILLI)
-			.with_priority(hang::catalog::PRIORITY.catalog)
-			// A joiner asks for a fresh group once the ops outweigh eight headers.
-			.with_refresh(8)
-	}
-
-	/// Publish onto `track`, starting at record zero.
-	pub fn new(track: moq_net::track::Producer) -> Self {
+	/// Create a broadcast clock with this video-only delay.
+	pub fn new(delay: Duration) -> Self {
+		let clock = Arc::new(Clock::new(delay));
 		Self {
-			sink: moq_json::window::Producer::new(track, Self::config()),
+			clock: clock.clone(),
+			current: Arc::new(Mutex::new(clock)),
 		}
 	}
 
-	fn config() -> moq_json::window::ProducerConfig {
-		moq_json::window::ProducerConfig::default()
-			.with_compression(true)
-			.with_checkpoint_records(CHECKPOINT_RECORDS)
-	}
-
-	/// The window indices currently retained.
-	pub fn range(&self) -> std::ops::Range<u64> {
-		self.sink.range()
-	}
-
-	/// Append `record`, which must be the window's next sequence.
-	pub fn push(&mut self, record: &Record) -> crate::Result<()> {
-		let next = self.sink.range().end;
-		if record.sequence != next {
-			return Err(crate::Error::TimelineSequence {
-				expected: next,
-				actual: record.sequence,
-			});
-		}
-		self.refresh()?;
-		self.sink
-			.push(moq_net::Timed::from(record).at(moq_net::Timestamp::now()))
-			.map_err(json)
-	}
-
-	/// Remove up to `count` oldest records from the window.
-	pub fn pop(&mut self, count: u64) -> crate::Result<()> {
-		self.refresh()?;
-		self.sink
-			.pop(moq_net::Timed::from(count).at(moq_net::Timestamp::now()))
-			.map_err(json)
-	}
-
-	/// Finish the timeline track.
-	pub fn finish(&mut self) -> crate::Result<()> {
-		self.sink.finish().map_err(json)
-	}
-
-	/// Restate the window in a fresh group if a joiner wants one.
+	/// Replace this producer with a new broadcast clock and switch readers to it.
 	///
-	/// Checked on each edit rather than driven by a task, since nothing here owns a runtime. A
-	/// timeline gains a record every segment, so a joiner waits at most about one segment.
-	fn refresh(&mut self) -> crate::Result<()> {
-		match self.sink.poll_refresh(&kio::Waiter::noop()) {
-			std::task::Poll::Ready(Err(err)) => Err(json(err)),
-			_ => Ok(()),
-		}
-	}
-}
-
-/// Surface a transport failure as one, rather than wrapped in the JSON layer.
-fn json(err: moq_json::Error) -> crate::Error {
-	match err {
-		moq_json::Error::Net(err) => err.into(),
-		err => err.into(),
-	}
-}
-
-/// A live track's segmenter and the timeline it publishes to.
-struct Live {
-	segmenter: Segmenter,
-	/// Publishes an unhinted declaration with the first complete record.
-	on_declare: Option<OnDeclare>,
-	/// `None` once a publish failed: the timeline is an optional sidecar, so it stops instead.
-	output: Option<Producer>,
-	/// Whether a [`Recorder`] owns the segmenter, so a second enrollment can't share it.
-	recording: bool,
-}
-
-impl Live {
-	fn publish(&mut self) {
-		for record in self.segmenter.by_ref() {
-			let Some(output) = self.output.as_mut() else {
-				continue;
-			};
-			if let Err(err) = output.push(&record) {
-				tracing::warn!(%err, "timeline publish failed; dropping the timeline track");
-				let _ = output.finish();
-				self.output = None;
-			}
-		}
-		if let Some(duration) = self.segmenter.declared_duration()
-			&& let Some(on_declare) = self.on_declare.take()
-		{
-			on_declare(duration);
-		}
-	}
-
-	fn finish(&mut self) {
-		self.segmenter.close();
-		self.publish();
-		if let Some(output) = self.output.as_mut() {
-			let _ = output.finish();
-		}
-	}
-}
-
-type OnDeclare = Box<dyn FnOnce(u64) + Send>;
-
-struct Registry {
-	/// Each enrolled track's timeline, by track name. Kept after its recorder drops, so a finished
-	/// span stays discoverable and a re-enrolled track continues its numbering.
-	tracks: BTreeMap<String, (String, Arc<Mutex<Live>>)>,
-	finished: bool,
-}
-
-/// A broadcast's timelines, one per enrolled track.
-///
-/// Each enrollment creates the track's timeline track and returns the [`Recorder`] its producer
-/// reports through. `Clone` shares the set.
-#[derive(Clone)]
-pub struct Timelines {
-	broadcast: moq_net::broadcast::Producer,
-	registry: Arc<Mutex<Registry>>,
-}
-
-impl Timelines {
-	/// Timelines for tracks of `broadcast`.
-	pub fn new(broadcast: &moq_net::broadcast::Producer) -> Self {
-		let registry = Arc::new(Mutex::new(Registry {
-			tracks: BTreeMap::new(),
-			finished: false,
-		}));
+	/// Previous clones and track handles retain their old broadcast's clock.
+	#[must_use = "use the returned producer for the replacement broadcast"]
+	pub fn reset(self, delay: Duration) -> Self {
+		let clock = Arc::new(Clock::new(delay));
+		*self.current.lock().unwrap() = clock.clone();
 		Self {
-			broadcast: broadcast.clone(),
-			registry,
+			clock,
+			current: self.current,
 		}
 	}
 
-	/// Enroll the track `name`, its records cut by `config`.
-	///
-	/// Creates its timeline track, named by [`hang::timeline::default_name`], on first enrollment.
-	/// Enrolling a name again after its recorder dropped continues its timeline's numbering for a new
-	/// producer, cut by the new `config`. Errors when the name's recorder is still alive, the timeline
-	/// track name is taken, or the timelines finished.
-	pub fn track(&self, name: &str, config: Config) -> crate::Result<Recorder> {
-		let mut registry = self.registry.lock().unwrap();
-		if registry.finished {
-			return Err(moq_net::Error::Closed.into());
+	/// Return a reader that follows this handle's broadcast replacements.
+	pub fn consume(&self) -> Consumer {
+		Consumer {
+			current: self.current.clone(),
 		}
-		if let Some((_, existing)) = registry.tracks.get(name) {
-			// A re-enrolled track is a new producer whose group sequences may restart, so it gets a
-			// fresh segmenter continuing the record numbering.
-			let mut live = existing.lock().unwrap();
-			if live.recording {
-				return Err(moq_net::Error::Duplicate.into());
+	}
+
+	/// Return a track handle bound to this broadcast's clock.
+	pub fn track(&self, kind: Kind) -> Track {
+		Track::new(self.clock.clone(), kind)
+	}
+
+	/// Fold an arriving video frame into the anchor, unless the speaker owns it,
+	/// reporting whether that moved the schedule.
+	///
+	/// A move makes every queued frame due earlier, so the window has to recompute
+	/// the deadline it is already asleep on.
+	pub fn video(&self, timestamp: Timestamp, now: Instant) -> bool {
+		let clock = &self.clock;
+		let moved = clock.state.lock().unwrap().video(timestamp, now);
+		if moved {
+			clock.wake();
+		}
+		moved
+	}
+
+	/// Start a new video timeline without taking ownership from a speaker.
+	pub fn video_restarted(&self) {
+		let clock = &self.clock;
+		let moved = {
+			let mut state = clock.state.lock().unwrap();
+			if state.speaker {
+				false
+			} else {
+				state.video_restarted();
+				true
 			}
-			live.recording = true;
-			live.segmenter.flush();
-			live.publish();
-			let sequence = live.segmenter.sequence();
-			let declared = live.segmenter.declared;
-			live.segmenter = Segmenter::new(config).with_sequence(sequence);
-			if declared.is_some() {
-				live.segmenter.declared = declared;
-			}
-			drop(live);
-			return Ok(Recorder { live: existing.clone() });
-		}
-
-		let timeline = hang::timeline::default_name(name);
-		let track = self.broadcast.create_track(timeline.as_str(), Producer::info())?;
-		let live = Arc::new(Mutex::new(Live {
-			segmenter: Segmenter::new(config),
-			on_declare: None,
-			output: Some(Producer::new(track)),
-			recording: true,
-		}));
-		registry.tracks.insert(name.to_string(), (timeline, live.clone()));
-		Ok(Recorder { live })
-	}
-
-	/// The catalog's root `archive` entry advertising every timeline whose duration is known.
-	pub fn section(&self) -> Archive {
-		let registry = self.registry.lock().unwrap();
-		let mut section = Archive::new();
-		section.timescale = TIMESCALE.as_u64() as u32;
-		section.timelines = registry
-			.tracks
-			.iter()
-			.filter_map(|(name, (track, live))| {
-				live.lock()
-					.unwrap()
-					.segmenter
-					.declared_duration()
-					.map(|duration| (name.clone(), Timeline::new(track, duration)))
-			})
-			.collect();
-		section
-	}
-
-	/// Close every open record now, publishing any declaration it fixes.
-	pub(crate) fn flush(&self) {
-		let registry = self.registry.lock().unwrap();
-		for (_, live) in registry.tracks.values() {
-			let mut live = live.lock().unwrap();
-			live.segmenter.flush();
-			live.publish();
-		}
-	}
-
-	/// Flush every open record and finish every timeline track. Later enrollments fail.
-	pub fn finish(&self) {
-		let mut registry = self.registry.lock().unwrap();
-		registry.finished = true;
-		for (_, live) in registry.tracks.values() {
-			live.lock().unwrap().finish();
-		}
-	}
-}
-
-/// Reports one track's frames into its live timeline.
-///
-/// Move-only: it is the track's reporting handle, minted by [`Timelines::track`] and held by a
-/// rendition's [`container::Producer`](crate::container::Producer). Dropping it flushes the open
-/// record; the timeline track stays open until [`Timelines::finish`].
-pub struct Recorder {
-	live: Arc<Mutex<Live>>,
-}
-
-impl Recorder {
-	/// Run `callback` once when an unhinted track learns its fixed duration.
-	pub(crate) fn on_declare(&mut self, callback: impl FnOnce(u64) + Send + 'static) {
-		self.live.lock().unwrap().on_declare = Some(Box::new(callback));
-	}
-	fn report(&mut self, f: impl FnOnce(&mut Segmenter)) {
-		let mut live = self.live.lock().unwrap();
-		f(&mut live.segmenter);
-		live.publish();
-	}
-
-	/// Report the frame at `position`, presented at `pts`; see [`Segmenter::frame`].
-	///
-	/// A report the timeline cannot place ends the timeline track with an error rather than
-	/// publishing a timeline that silently omits frames. Media publishing is unaffected.
-	pub fn frame(&mut self, position: Position, pts: Timestamp, keyframe: bool) {
-		let mut live = self.live.lock().unwrap();
-		if let Err(err) = live.segmenter.frame(position, pts, keyframe) {
-			tracing::warn!(%err, "timeline report rejected; dropping the timeline track");
-			live.segmenter.close();
-			// Dropped without a finish, so subscribers see the timeline fail rather than end.
-			live.output = None;
-		}
-		live.publish();
-	}
-
-	/// Report that group `group` can gain no more frames; see [`Segmenter::finish_group`].
-	pub fn finish_group(&mut self, group: u64) {
-		self.report(|segmenter| segmenter.finish_group(group));
-	}
-
-	/// Report that the content extends to `pts`; see [`Segmenter::end`].
-	pub fn end(&mut self, pts: Timestamp) {
-		self.report(|segmenter| segmenter.end(pts));
-	}
-
-	/// Declare a boundary at `pts` on this track; see [`Segmenter::cut`].
-	pub fn cut(&mut self, pts: Timestamp) {
-		self.report(|segmenter| segmenter.cut(pts));
-	}
-
-	/// Close the open record now; see [`Segmenter::flush`].
-	pub(crate) fn flush(&mut self) {
-		self.report(|segmenter| segmenter.flush());
-	}
-}
-
-impl Drop for Recorder {
-	fn drop(&mut self) {
-		let mut live = self.live.lock().unwrap();
-		live.segmenter.flush();
-		live.publish();
-		live.recording = false;
-	}
-}
-
-/// One decoded timeline record, with real [`Timestamp`]s.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Entry<E: RecordExt = ()> {
-	/// The record's number, consecutive within its track's timeline.
-	pub sequence: u64,
-
-	/// The span's start.
-	pub pts: Timestamp,
-
-	/// The span's duration. The next entry starts at `pts + duration` unless content time itself
-	/// jumped (a discontinuity).
-	pub duration: Duration,
-
-	/// The first frame of the span, inclusive.
-	pub start: Position,
-
-	/// The end of the span, exclusive.
-	pub end: Position,
-
-	/// Whether the span's first frame is a keyframe.
-	pub keyframe: bool,
-
-	/// The record's application extension (nothing for the default `()`).
-	pub ext: E,
-}
-
-impl<E: RecordExt> Entry<E> {
-	/// Decode a record into an entry, converting its timing out of the wire timescale.
-	///
-	/// A pts the timescale can't represent is an error rather than a substituted value: silently
-	/// moving a timestamp would misdirect seeking and live-edge logic. An untimed record, or one
-	/// missing half its timing, fails with [`TimelineUntimed`](crate::Error::TimelineUntimed).
-	pub fn decode(record: Record<E>, timescale: Timescale) -> crate::Result<Entry<E>> {
-		let (Some(pts), Some(duration)) = (record.pts, record.duration) else {
-			return Err(crate::Error::TimelineUntimed(record.sequence));
 		};
-		let scale = timescale.as_u64() as u128;
-		let nanos = (duration as u128) * 1_000_000_000 / scale;
-		Ok(Self {
-			sequence: record.sequence,
-			pts: Timestamp::new(pts, timescale)?,
-			duration: Duration::from_nanos(nanos as u64),
-			start: record.start,
-			end: record.end,
-			keyframe: record.keyframe,
-			ext: record.ext,
-		})
+		if moved {
+			clock.wake();
+		}
 	}
 
-	/// The span's exclusive end time.
-	pub fn end_time(&self) -> Duration {
-		Duration::from(self.pts) + self.duration
-	}
-}
-
-/// One change to the visible timeline window.
-#[derive(Debug, Clone, PartialEq)]
-#[non_exhaustive]
-pub enum Event<E: RecordExt = ()> {
-	/// A record became visible at this window index, which equals its sequence.
-	Push {
-		/// Absolute window index assigned to the record.
-		index: u64,
-		/// The decoded record.
-		entry: Entry<E>,
-	},
-	/// These previously visible window indices were removed.
-	Pop(std::ops::Range<u64>),
-	/// These indices were removed before this consumer saw them.
-	Skip(std::ops::Range<u64>),
-}
-
-/// Reads one track's timeline, yielding decoded [`Event`]s in window order.
-///
-/// Generic over the record extension `E` (see [`RecordExt`]).
-pub struct Consumer<E: RecordExt = ()> {
-	inner: moq_json::window::Consumer<Record<E>>,
-	timescale: Timescale,
-}
-
-impl<E: RecordExt> Consumer<E> {
-	/// Subscribe to `track`'s timeline as advertised by the catalog's [`Archive`] entry.
+	/// Fold the speaker's position into the anchor, reporting whether that moved
+	/// the schedule.
 	///
-	/// The section supplies both the timeline name and the timescale, so a reader can't pair the
-	/// wrong scale with the track. Errors if the section indexes no such track or declares a
-	/// timescale that isn't representable.
-	pub async fn subscribe(
-		broadcast: &moq_net::broadcast::Consumer,
-		section: &Archive,
-		track: &str,
-	) -> crate::Result<Self> {
-		let timeline = section
-			.timelines
-			.get(track)
-			.ok_or_else(|| crate::Error::TimelineMissing(track.to_string()))?;
-		let timescale =
-			Timescale::new(section.timescale as u64).map_err(|_| crate::Error::InvalidTimescale(section.timescale))?;
-		let track = broadcast.track(&timeline.track)?.subscribe(None).await?;
-		let config = moq_json::window::ConsumerConfig::default().with_compression(true);
-		Ok(Self {
-			inner: moq_json::window::Consumer::new(track, config),
-			timescale,
-		})
-	}
-
-	fn decode_event(&self, event: moq_json::window::Event<Record<E>>) -> crate::Result<Event<E>> {
-		Ok(match event {
-			moq_json::window::Event::Push { index, value } => Event::Push {
-				index,
-				entry: Entry::decode(value, self.timescale)?,
-			},
-			moq_json::window::Event::Pop(range) => Event::Pop(range),
-			moq_json::window::Event::Skip(range) => Event::Skip(range),
-			_ => unreachable!("unknown timeline window event"),
-		})
-	}
-
-	/// Get the next window event, or `None` once the track ends.
-	pub async fn next(&mut self) -> crate::Result<Option<Event<E>>> {
-		match self.inner.next().await? {
-			Some(event) => Ok(Some(self.decode_event(event.value)?)),
-			None => Ok(None),
+	/// `audio.end` is the media time of the last sample written and `audio.buffered` is how
+	/// much of the write is still queued, so `end` does not sound until
+	/// `buffered` from now. The anchor is pinned at the instant that leaves
+	/// exactly the delay before it does, which is where the live edge sits on a
+	/// clock trailing by that delay. Pinning the sample sounding *now* instead
+	/// would schedule video a whole delay behind the speaker.
+	///
+	/// A move makes every queued video frame due earlier, so the window has to
+	/// recompute the deadline it is already asleep on.
+	pub fn audio(&self, audio: Audio, now: Instant) -> bool {
+		let clock = &self.clock;
+		let moved = {
+			let mut state = clock.state.lock().unwrap();
+			state.hold(audio.target);
+			state.audio(audio.end, audio.buffered, now)
+		};
+		if moved {
+			clock.wake();
 		}
+		moved
 	}
 
-	/// Poll for the next window event, without blocking.
-	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Event<E>>>> {
-		match self.inner.poll_next(waiter)? {
-			// Each record carries its own pts, so the frame timestamp adds nothing.
-			Poll::Ready(Some(event)) => Poll::Ready(self.decode_event(event.value).map(Some)),
-			Poll::Ready(None) => Poll::Ready(Ok(None)),
-			Poll::Pending => Poll::Pending,
-		}
+	/// The speaker restarted on a new timeline, so the media either side of the
+	/// break is unrelated: re-pin the anchor on the next audio frame rather than
+	/// pacing across a jump the speaker never plays.
+	pub fn audio_restarted(&self) {
+		self.clock.state.lock().unwrap().restarted()
+	}
+
+	/// The speaker went quiet, so nothing holds playback to its cadence any
+	/// more and video takes the anchor back.
+	///
+	/// A replacement rendition takes ownership again on its first frame, and
+	/// re-pins there: it is a track boundary, so its timestamps are not
+	/// necessarily continuous with what just ended. That covers a pending
+	/// restart, which would otherwise re-pin the frame after it too.
+	pub fn audio_stopped(&self) {
+		self.clock.state.lock().unwrap().stopped()
+	}
+
+	/// When `timestamp` should be presented, or `None` before any frame has
+	/// anchored the clock. `None` means as soon as possible: there is nothing
+	/// left to wait for.
+	pub fn due(&self, timestamp: Timestamp) -> Option<Instant> {
+		self.clock.state.lock().unwrap().due(timestamp)
+	}
+}
+
+impl Consumer {
+	/// The media time sounding now, held at the last audio write's end.
+	pub fn playhead(&self, now: Instant) -> Option<Duration> {
+		self.current.lock().unwrap().state.lock().unwrap().playhead(now)
+	}
+
+	/// The caller-supplied audio playout target, or `None` without audio.
+	pub fn target(&self) -> Option<Duration> {
+		self.current.lock().unwrap().state.lock().unwrap().target()
+	}
+
+	/// When this timestamp is due, or `None` before the first anchor.
+	pub fn due(&self, timestamp: Timestamp) -> Option<Instant> {
+		self.current.lock().unwrap().state.lock().unwrap().due(timestamp)
+	}
+
+	/// The newest due picture's index in presentation order, or `None` to repeat the previous one.
+	///
+	/// Pass queued timestamps in ascending order and discard entries through the
+	/// returned index after showing that picture. This stores no frames and leaves
+	/// their retention and backpressure to the caller. Query again after every
+	/// anchor update; a cached deadline can become stale.
+	pub fn present(&self, timestamps: impl IntoIterator<Item = Timestamp>, now: Instant) -> Option<usize> {
+		let clock = self.current.lock().unwrap();
+		let state = clock.state.lock().unwrap();
+		timestamps
+			.into_iter()
+			.take_while(|timestamp| state.due(*timestamp).is_none_or(|at| at <= now))
+			.count()
+			.checked_sub(1)
 	}
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
 	use super::*;
-
-	/// Sparse data: every group is its own record.
-	fn sparse() -> Config {
-		Config::default().with_duration_min(Duration::ZERO)
+	#[tokio::test]
+	async fn replacing_a_broadcast_isolates_its_old_update_handles() {
+		tokio::time::pause();
+		let clock = Producer::new(DELAY);
+		let reader = clock.consume();
+		let previous = clock.clone();
+		let old = clock.track(Kind::Audio);
+		old.declare();
+		let clock = clock.reset(DELAY);
+		let now = kio::clock::now();
+		clock.audio(
+			Audio {
+				end: Duration::ZERO,
+				buffered: DELAY,
+				target: DELAY,
+			},
+			now,
+		);
+		let audio = clock.track(Kind::Audio);
+		audio.declare();
+		audio.end(ms(1_000)).unwrap();
+		// A JoinSet abort can leave these updates and drops until after the new track started.
+		drop(old);
+		previous.audio(
+			Audio {
+				end: Duration::from_secs(10),
+				buffered: Duration::ZERO,
+				target: Duration::ZERO,
+			},
+			now,
+		);
+		assert_eq!(reader.due(ms(0)), Some(now + DELAY));
+		let video = clock.track(Kind::Video);
+		let transition = video.declare();
+		video.plan(transition, ms(0), None);
+		let resumed = kio::clock::timeout(
+			DELAY + Duration::from_millis(500),
+			video.resume(transition, ms(0), None).ready(),
+		)
+		.await;
+		assert!(resumed.is_err(), "old handle cleared the new audio tail");
 	}
 
-	/// Media whose encoder reports a 4s cadence, so its timeline declares before any record.
-	fn hinted() -> Config {
-		Config::default().with_duration_hint(Duration::from_secs(4))
-	}
-
-	fn ms(v: u64) -> Timestamp {
-		Timestamp::from_millis(v).unwrap()
-	}
-
-	fn at(group: u64) -> Position {
-		Position::group(group)
-	}
-
-	/// A record's `(pts, duration, start, end)` in wire units, for compact comparisons.
-	fn span(record: &Record) -> (u64, u64, Position, Position) {
-		(record.pts.unwrap(), record.duration.unwrap(), record.start, record.end)
-	}
-
-	fn drain(segmenter: &mut Segmenter) -> Vec<(u64, u64, Position, Position)> {
-		let mut out = Vec::new();
-		let mut sequence = None;
-		for record in segmenter.by_ref() {
-			if let Some(previous) = sequence {
-				assert_eq!(record.sequence, previous + 1, "records are numbered consecutively");
+	#[tokio::test]
+	async fn ordinary_arrivals_leave_a_parked_resume_asleep() {
+		use std::sync::{
+			Arc,
+			atomic::{AtomicUsize, Ordering},
+		};
+		use std::task::{Wake, Waker};
+		struct Wakes(AtomicUsize);
+		impl Wake for Wakes {
+			fn wake(self: Arc<Self>) {
+				self.0.fetch_add(1, Ordering::Relaxed);
 			}
-			sequence = Some(record.sequence);
-			out.push(span(&record));
 		}
-		out
-	}
-
-	/// One frame per group, one group every `step` ms.
-	fn groups(segmenter: &mut Segmenter, groups: std::ops::Range<u64>, step: u64) {
-		for group in groups {
-			segmenter.frame(at(group), ms(group * step), true).unwrap();
-			segmenter.finish_group(group);
-		}
-	}
-
-	#[test]
-	fn long_groups_get_a_record_each() {
-		let mut video = Segmenter::new(Config::default());
-		groups(&mut video, 0..3, 2_000);
-		video.end(ms(6_000));
-		video.close();
-
-		assert_eq!(
-			drain(&mut video),
-			vec![(0, 4_000, at(0), at(2)), (4_000, 2_000, at(2), at(3))]
+		tokio::time::pause();
+		let clock = Producer::new(DELAY);
+		let now = kio::clock::now();
+		clock.audio(
+			Audio {
+				end: Duration::ZERO,
+				buffered: DELAY,
+				target: DELAY,
+			},
+			now,
 		);
-	}
-
-	#[test]
-	fn short_groups_pack_up_to_the_minimum() {
-		let mut audio = Segmenter::new(Config::default().with_duration_min(Duration::from_millis(1_500)));
-		groups(&mut audio, 0..8, 500);
-		audio.close();
-
-		assert_eq!(
-			drain(&mut audio),
-			vec![
-				(0, 1_500, at(0), at(3)),
-				(1_500, 1_500, at(3), at(6)),
-				(3_000, 500, at(6), at(8)),
-			]
+		let audio = clock.track(Kind::Audio);
+		audio.end(ms(1_000)).unwrap();
+		let video = clock.track(Kind::Video);
+		let transition = video.declare();
+		video.plan(transition, ms(0), None);
+		let wakes = Arc::new(Wakes(AtomicUsize::new(0)));
+		let waiter = kio::Waiter::new(Waker::from(wakes.clone()));
+		let mut resume = video.resume(transition, ms(0), None);
+		assert!(resume.poll_ready(&waiter).is_pending());
+		clock.video(ms(20), now);
+		clock.audio(
+			Audio {
+				end: Duration::from_millis(20),
+				buffered: DELAY,
+				target: DELAY,
+			},
+			now + Duration::from_millis(20),
 		);
-	}
-
-	#[test]
-	fn a_hint_declares_its_smallest_multiple_at_or_past_the_minimum() {
-		let segmenter = Segmenter::new(Config::default().with_duration_hint(Duration::from_millis(1_500)));
-		assert_eq!(segmenter.declared_duration(), Some(4_500));
-	}
-
-	/// A 60-frame GOP at 29.97fps lasts 2002.002ms. Rounding the hint before multiplying would aim
-	/// at 4006ms, past the second GOP's end, and pace three GOPs per record instead of two.
-	#[test]
-	fn a_fractional_hint_paces_on_its_own_boundaries() {
-		let gop = Duration::from_nanos(2_002_002_002);
-		let mut video = Segmenter::new(Config::default().with_duration_hint(gop));
-		assert_eq!(video.declared_duration(), Some(4_005));
-		for group in 0..5 {
-			let pts = Timestamp::from_micros((gop * group as u32).as_micros() as u64).unwrap();
-			video.frame(at(group), pts, true).unwrap();
-			video.finish_group(group);
-		}
-
-		assert_eq!(
-			drain(&mut video),
-			vec![(0, 4_004, at(0), at(2)), (4_004, 4_004, at(2), at(4))]
+		assert_eq!(wakes.0.load(Ordering::Relaxed), 0);
+		clock.audio(
+			Audio {
+				end: Duration::from_millis(40),
+				buffered: DELAY,
+				target: DELAY,
+			},
+			now + Duration::from_millis(20),
 		);
-	}
-
-	#[test]
-	fn a_hint_remains_the_target_when_the_minimum_is_zero() {
-		let segmenter = Segmenter::new(
-			Config::default()
-				.with_duration_min(Duration::ZERO)
-				.with_duration_hint(Duration::from_secs(3)),
-		);
-		assert_eq!(segmenter.declared_duration(), Some(3_000));
-	}
-
-	#[test]
-	fn packet_groups_estimate_a_record_instead_of_one_packet() {
-		let mut audio = Segmenter::new(Config::default());
-		groups(&mut audio, 0..202, 20);
-		assert_eq!(audio.declared_duration(), Some(4_000));
-		assert_eq!(audio.next().unwrap().duration, Some(4_000));
-	}
-
-	#[test]
-	fn an_early_first_record_declares_the_minimum() {
-		// A flushed tail is not a cadence: one frame would otherwise declare zero, as if sparse.
-		let mut flushed = Segmenter::new(Config::default());
-		flushed.frame(at(0), ms(0), true).unwrap();
-		flushed.flush();
-		assert_eq!(flushed.next().unwrap().duration, Some(0));
-		assert_eq!(flushed.declared_duration(), Some(4_000));
-
-		// A skipped sequence ends the record early too.
-		let mut skipped = Segmenter::new(Config::default());
-		skipped.frame(at(0), ms(0), true).unwrap();
-		skipped.frame(at(2), ms(9_000), true).unwrap();
-		assert_eq!(skipped.next().unwrap().duration, Some(0));
-		assert_eq!(skipped.declared_duration(), Some(4_000));
-
-		// Later paced records keep the declaration.
-		skipped.frame(at(3), ms(15_000), true).unwrap();
-		assert_eq!(skipped.next().unwrap().duration, Some(6_000));
-		assert_eq!(skipped.declared_duration(), Some(4_000));
-	}
-
-	#[test]
-	fn the_first_estimate_survives_later_longer_records() {
-		let mut video = Segmenter::new(Config::default());
-		groups(&mut video, 0..3, 2_000);
-		assert_eq!(video.next().unwrap().duration, Some(4_000));
-		assert_eq!(video.declared_duration(), Some(4_000));
-
-		groups(&mut video, 3..5, 6_000);
-		assert_eq!(video.next().unwrap().duration, Some(12_000));
-		assert_eq!(video.declared_duration(), Some(4_000));
-	}
-
-	#[test]
-	fn a_long_group_splits_by_frame_at_the_safety_ceiling() {
-		let mut video = Segmenter::new(
-			Config::default()
-				.with_duration_min(Duration::from_secs(1))
-				.with_duration_hint(Duration::from_secs(1)),
-		);
-		for frame in 0..8 {
-			video
-				.frame(Position::new(0, frame), ms(frame * 1_000), frame == 0)
-				.unwrap();
-		}
-		video.close();
-
-		let records: Vec<Record> = std::iter::from_fn(|| video.next()).collect();
-		assert_eq!(
-			records.iter().map(span).collect::<Vec<_>>(),
-			vec![
-				(0, 3_000, Position::new(0, 0), Position::new(0, 3)),
-				(3_000, 3_000, Position::new(0, 3), Position::new(0, 6)),
-				(6_000, 1_000, Position::new(0, 6), Position::new(0, 8)),
-			]
-		);
-		assert!(records[0].keyframe);
 		assert!(
-			!records[1].keyframe,
-			"a split inside a group does not start on a keyframe"
+			wakes.0.load(Ordering::Relaxed) > 0,
+			"a moved anchor must wake the resume"
 		);
 	}
 
 	#[test]
-	fn a_sparse_track_records_each_group_when_it_finishes() {
-		let mut catalog = Segmenter::new(sparse());
-		catalog.frame(at(0), ms(0), true).unwrap();
-		assert!(catalog.next().is_none(), "the group may still grow");
-		catalog.finish_group(0);
-		assert_eq!(drain(&mut catalog), vec![(0, 0, at(0), at(1))]);
-
-		catalog.frame(at(1), ms(60_000), true).unwrap();
-		catalog.finish_group(1);
-		assert_eq!(drain(&mut catalog), vec![(60_000, 0, at(1), at(2))]);
-	}
-
-	#[test]
-	fn an_append_only_group_is_indexed_as_it_grows() {
-		// A never-closing log: one frame a second, split every three seconds.
-		let mut log = Segmenter::new(
-			Config::default()
-				.with_duration_min(Duration::from_secs(1))
-				.with_duration_hint(Duration::from_secs(1)),
-		);
-		for frame in 0..7 {
-			log.frame(Position::new(0, frame), ms(frame * 1_000), true).unwrap();
+	fn discarded_replacements_release_their_transition_state() {
+		let presentation = Arc::new(Clock::new(Duration::ZERO));
+		let video = Track::new(presentation.clone(), Kind::Video);
+		let audio = Track::new(presentation.clone(), Kind::Audio);
+		let first = audio.declare();
+		assert_eq!(first, video.declare());
+		// Audio can hold its declared end while video discards any number of replacements.
+		for _ in 0..100 {
+			let transition = video.declare();
+			video.plan(transition, Timestamp::ZERO, None);
+			video.abandon(transition);
+			assert_eq!(presentation.state.lock().unwrap().pending(), 1);
 		}
-		assert_eq!(
-			drain(&mut log),
-			vec![
-				(0, 3_000, Position::new(0, 0), Position::new(0, 3)),
-				(3_000, 3_000, Position::new(0, 3), Position::new(0, 6)),
-			]
+		video.abandon(first);
+		drop(audio);
+		assert_eq!(presentation.state.lock().unwrap().pending(), 0);
+	}
+
+	#[test]
+	fn presentation_selects_due_frames_on_the_current_audio_anchor() {
+		let clock = Producer::new(Duration::from_millis(40));
+		let video = clock.consume();
+		let now = Instant::now();
+		clock.video(ms(0), now);
+		let frames = [ms(0), ms(20), ms(40)];
+		assert_eq!(video.present(frames, now), None);
+		assert_eq!(video.present(frames, now + Duration::from_millis(60)), Some(1));
+		// The speaker takes over with 100ms queued; stale video deadlines no longer apply.
+		clock.audio(
+			Audio {
+				end: Duration::from_millis(40),
+				buffered: Duration::from_millis(100),
+				target: Duration::from_millis(100),
+			},
+			now,
 		);
-
-		// The tail ends after the newest frame, since the group never finished.
-		log.close();
-		assert_eq!(
-			drain(&mut log),
-			vec![(6_000, 0, Position::new(0, 6), Position::new(0, 7))]
-		);
+		assert_eq!(video.present(frames, now + Duration::from_millis(60)), Some(0));
+		assert_eq!(video.present(frames, now + Duration::from_millis(99)), Some(1));
+		assert_eq!(video.present(frames, now + Duration::from_millis(100)), Some(2));
+		// Neither a stall nor a future-only queue invents a new picture.
+		assert_eq!(video.present([], now + Duration::from_secs(1)), None);
+		assert_eq!(video.present([ms(80)], now + Duration::from_millis(100)), None);
+		clock.video(ms(1_000), now);
+		assert_eq!(video.due(ms(40)), Some(now + Duration::from_millis(100)));
 	}
 
+	const DELAY: Duration = Duration::from_millis(100);
+
+	fn ms(millis: u64) -> Timestamp {
+		Timestamp::from_millis(millis).unwrap()
+	}
+
+	/// The playhead runs at the wall rate from the last write and stops at its
+	/// end, which is what a speaker that ran dry is still sounding.
 	#[test]
-	fn a_skipped_sequence_closes_the_record() {
-		let mut audio = Segmenter::new(Config::default().with_duration_min(Duration::from_secs(1)));
-		audio.frame(at(0), ms(0), true).unwrap();
-		audio.frame(at(1), ms(300), true).unwrap();
-		audio.frame(at(5), ms(600), true).unwrap();
-		audio.frame(at(6), ms(1_700), true).unwrap();
-		audio.close();
+	fn the_playhead_projects_the_last_write_and_holds_at_its_end() {
+		let now = Instant::now();
+		let mut presentation = State::new(DELAY);
+		assert_eq!(presentation.playhead(now), None);
 
-		assert_eq!(
-			drain(&mut audio),
-			vec![
-				(0, 300, at(0), at(2)),
-				(600, 1_100, at(5), at(6)),
-				(1_700, 0, at(6), Position::new(6, 1))
-			]
-		);
+		presentation.audio(Duration::from_secs(10), Duration::from_millis(200), now);
+		presentation.hold(DELAY);
+		assert_eq!(presentation.playhead(now), Some(Duration::from_millis(9_800)));
+		let later = now + Duration::from_millis(150);
+		assert_eq!(presentation.playhead(later), Some(Duration::from_millis(9_950)));
+		let dry = now + Duration::from_secs(1);
+		assert_eq!(presentation.playhead(dry), Some(Duration::from_secs(10)));
+		assert_eq!(presentation.target(), Some(DELAY));
+
+		presentation.stopped();
+		assert_eq!((presentation.playhead(dry), presentation.target()), (None, None));
 	}
 
+	/// Silence padded ahead of a frame after the speaker ran dry plays no media,
+	/// so the playhead holds instead of replaying media already heard.
 	#[test]
-	fn a_skipped_run_ends_at_the_previous_frontier() {
-		// A track paused for 40 minutes, resuming past a skipped sequence.
-		let mut data = Segmenter::new(Config::default());
-		groups(&mut data, 0..2, 1_000);
-		data.end(ms(2_000));
-		data.frame(at(3), ms(2_400_000), true).unwrap();
-		data.close();
+	fn the_playhead_holds_through_refill_padding() {
+		let now = Instant::now();
+		let mut presentation = State::new(DELAY);
+		presentation.audio(Duration::from_secs(10), Duration::from_millis(200), now);
+		let dry = now + Duration::from_secs(1);
+		assert_eq!(presentation.playhead(dry), Some(Duration::from_secs(10)));
 
-		assert_eq!(
-			drain(&mut data),
-			vec![(0, 2_000, at(0), at(2)), (2_400_000, 0, at(3), Position::new(3, 1))],
-			"the pause is not absorbed into the record before it"
-		);
-	}
+		// 100 ms of padding, then a 20 ms frame continuing from 10 s.
+		presentation.audio(Duration::from_millis(10_020), Duration::from_millis(120), dry);
+		assert_eq!(presentation.playhead(dry), Some(Duration::from_secs(10)));
+		let padded = dry + Duration::from_millis(100);
+		assert_eq!(presentation.playhead(padded), Some(Duration::from_secs(10)));
+		let played = dry + Duration::from_millis(110);
+		assert_eq!(presentation.playhead(played), Some(Duration::from_millis(10_010)));
 
-	#[test]
-	fn an_unhinted_first_record_declares_the_default_ceiling_when_it_hits_it() {
-		let mut log = Segmenter::new(Config::default());
-		log.frame(Position::new(0, 0), ms(0), true).unwrap();
-		log.frame(Position::new(0, 1), ms(20_000), true).unwrap();
-
-		assert_eq!(
-			drain(&mut log),
-			vec![(0, 10_000, Position::new(0, 0), Position::new(0, 1))]
-		);
-		assert_eq!(log.declared_duration(), Some(10_000));
-	}
-
-	#[test]
-	fn an_unhinted_ceiling_never_undercuts_a_longer_minimum() {
-		let mut log = Segmenter::new(Config::default().with_duration_min(Duration::from_secs(12)));
-		log.frame(Position::new(0, 0), ms(0), true).unwrap();
-		log.frame(Position::new(0, 1), ms(11_000), true).unwrap();
-		log.frame(Position::new(0, 2), ms(20_000), true).unwrap();
-
-		assert_eq!(
-			drain(&mut log),
-			vec![(0, 12_000, Position::new(0, 0), Position::new(0, 2))]
-		);
-		assert_eq!(log.declared_duration(), Some(12_000));
-	}
-
-	#[test]
-	fn explicit_cuts_override_the_pacing() {
-		let mut video = Segmenter::new(Config::default());
-		// Keyframes every second, cut every three: the records follow the cuts, not the GOPs.
-		video.cut(ms(3_000));
-		video.cut(ms(3_000));
-		video.cut(ms(6_000));
-		groups(&mut video, 0..7, 1_000);
-
-		assert_eq!(
-			drain(&mut video),
-			vec![(0, 3_000, at(0), at(3)), (3_000, 3_000, at(3), at(6))]
-		);
-	}
-
-	#[test]
-	fn a_cut_on_the_first_group_does_not_poison_later_cuts() {
-		let mut video = Segmenter::new(Config::default());
-		video.cut(ms(0));
-		for group in 0..10u64 {
-			if group % 3 == 0 {
-				video.cut(ms(group * 1_000));
-			}
-			video.frame(at(group), ms(group * 1_000), true).unwrap();
-		}
-
-		assert_eq!(drain(&mut video)[0], (0, 3_000, at(0), at(3)));
-	}
-
-	#[test]
-	fn a_non_keyframe_start_is_flagged() {
-		let mut video = Segmenter::new(Config::default());
-		video.frame(at(0), ms(0), true).unwrap();
-		// A mid-stream join: the group doesn't open on an IDR.
-		video.frame(at(1), ms(4_000), false).unwrap();
-		video.frame(at(2), ms(8_000), true).unwrap();
-
-		let records: Vec<Record> = std::iter::from_fn(|| video.next()).collect();
-		assert!(records[0].keyframe);
-		assert!(!records[1].keyframe);
-	}
-
-	#[test]
-	fn a_report_that_does_not_advance_is_refused() {
-		let mut video = Segmenter::new(Config::default());
-		video.frame(at(3), ms(0), true).unwrap();
-		for position in [at(2), at(3)] {
-			assert!(matches!(
-				video.frame(position, ms(2_000), true),
-				Err(crate::Error::TimelinePosition { last, .. }) if last == at(3)
-			));
-		}
-		video.frame(at(4), ms(4_000), true).unwrap();
-		assert_eq!(drain(&mut video), vec![(0, 4_000, at(3), at(4))]);
-	}
-
-	#[test]
-	fn a_resumed_segmenter_continues_the_numbering() {
-		let mut video = Segmenter::new(Config::default()).with_sequence(7);
-		groups(&mut video, 10..13, 2_000);
-		assert_eq!(video.next().unwrap().sequence, 7);
-	}
-
-	#[test]
-	fn an_untimed_track_records_each_group_without_timing() {
-		// The minimum and hint measure time, which an untimed track has none of.
-		let mut data = Segmenter::new(Config::default().with_duration_hint(Duration::from_secs(1)));
-		data.frame(Position::new(0, 0), None, true).unwrap();
-		data.frame(Position::new(0, 1), None, false).unwrap();
-		assert!(data.next().is_none(), "nothing splits an untimed group");
-		data.finish_group(0);
-		// A group that starts before the previous one finished ends it, as does a skipped sequence.
-		data.frame(at(1), None, true).unwrap();
-		data.frame(at(3), None, true).unwrap();
-		data.frame(Position::new(3, 1), None, false).unwrap();
-		data.close();
-
-		let records: Vec<Record> = std::iter::from_fn(|| data.next()).collect();
-		assert_eq!(
-			records,
-			vec![
-				Record::untimed(0, at(0), at(1)),
-				Record::untimed(1, at(1), at(2)),
-				Record::untimed(2, at(3), Position::new(3, 2)),
-			]
-		);
-		assert_eq!(data.declared_duration(), None, "an untimed track declares no duration");
-	}
-
-	#[test]
-	fn a_sparse_untimed_track_declares_no_duration() {
-		let mut data = Segmenter::new(Config::default().with_duration_min(Duration::ZERO));
-		assert_eq!(data.declared_duration(), Some(0), "unknown timing defaults to sparse");
-		data.frame(at(0), None, true).unwrap();
-		data.finish_group(0);
-		assert_eq!(data.next(), Some(Record::untimed(0, at(0), at(1))));
-		assert_eq!(data.declared_duration(), None);
-	}
-
-	#[test]
-	fn an_untimed_track_keeps_no_cuts() {
-		let mut data = Segmenter::new(Config::default());
-		data.cut(ms(0));
-		data.frame(at(0), None, true).unwrap();
-		assert!(data.cuts.is_empty(), "a cut before the first report is dropped");
-		for i in 1..100 {
-			data.cut(ms(i * 1_000));
-		}
-		assert!(data.cuts.is_empty());
-	}
-
-	#[test]
-	fn a_track_is_all_timed_or_all_untimed() {
-		let mut timed = Segmenter::new(Config::default());
-		timed.frame(at(0), ms(0), true).unwrap();
-		assert!(matches!(
-			timed.frame(at(1), None, true),
-			Err(crate::Error::TimelineTiming(position)) if position == at(1)
-		));
-
-		let mut untimed = Segmenter::new(Config::default());
-		untimed.frame(at(0), None, true).unwrap();
-		assert!(matches!(
-			untimed.frame(at(1), ms(0), true),
-			Err(crate::Error::TimelineTiming(_))
-		));
-	}
-
-	#[test]
-	fn an_untimed_record_has_no_entry() {
-		let record = Record::<()>::untimed(3, at(0), at(1));
-		assert!(matches!(
-			Entry::decode(record, Timescale::MILLI),
-			Err(crate::Error::TimelineUntimed(3))
-		));
-		let mut half = Record::<()>::new(4, 0, 1_000, at(0), at(1));
-		half.duration = None;
-		assert!(matches!(
-			Entry::decode(half, Timescale::MILLI),
-			Err(crate::Error::TimelineUntimed(4))
-		));
-	}
-
-	/// Drain a finished timeline track.
-	async fn read(broadcast: &moq_net::broadcast::Producer, section: &Archive, track: &str) -> Vec<Entry> {
-		let mut consumer = Consumer::<()>::subscribe(&broadcast.consume(), section, track)
-			.await
-			.unwrap();
-		let waiter = kio::Waiter::noop();
-		let mut out = Vec::new();
-		while let Poll::Ready(Ok(Some(event))) = consumer.poll_next(&waiter) {
-			if let Event::Push { index, entry } = event {
-				assert_eq!(index, entry.sequence);
-				out.push(entry);
-			}
-		}
-		out
+		// A new timeline may start anywhere.
+		presentation.restarted();
+		presentation.audio(Duration::from_secs(2), Duration::from_millis(100), played);
+		assert_eq!(presentation.playhead(played), Some(Duration::from_millis(1_900)));
 	}
 
 	#[tokio::test]
-	async fn tracks_publish_independent_timelines() {
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let timelines = Timelines::new(&broadcast);
-		let mut video = timelines.track("video0", hinted()).unwrap();
-		let mut catalog = timelines.track("catalog.json", sparse()).unwrap();
-
-		catalog.frame(at(0), ms(0), true);
-		catalog.finish_group(0);
-		for group in 0..3 {
-			video.frame(at(group), ms(group * 2_000), true);
-			video.finish_group(group);
-		}
-		video.end(ms(6_000));
-		drop(video);
-		timelines.finish();
-
-		let section = timelines.section();
-		assert_eq!(section.timelines["video0"], Timeline::new("video0.timeline.z", 4_000));
-		assert_eq!(
-			section.timelines["catalog.json"],
-			Timeline::new("catalog.json.timeline.z", 0)
+	async fn one_ended_role_maps_to_the_continuous_peers_clock() {
+		tokio::time::pause();
+		let start = kio::clock::now();
+		let presentation = Arc::new(Clock::new(DELAY));
+		let audio = Track::new(presentation.clone(), Kind::Audio);
+		let video = Track::new(presentation.clone(), Kind::Video);
+		presentation.state.lock().unwrap().video(ms(10_000), start);
+		let transition = audio.declare();
+		audio.end(ms(10_020)).unwrap();
+		tokio::time::advance(DELAY + Duration::from_millis(20)).await;
+		let unchanged = presentation.state.lock().unwrap().due(ms(10_500));
+		audio.apply(
+			transition,
+			audio.resume(transition, ms(0), Some(DELAY)).ready().await.unwrap(),
 		);
-
-		let video = read(&broadcast, &section, "video0").await;
-		assert_eq!(video.len(), 2);
-		assert_eq!(video[1].end, at(3), "the terminal flush ends after the finished group");
-		let catalog = read(&broadcast, &section, "catalog.json").await;
-		assert_eq!(catalog.len(), 1, "the catalog does not wait for the video");
-	}
-
-	#[test]
-	fn an_empty_enrollment_does_not_mask_a_later_hint() {
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let timelines = Timelines::new(&broadcast);
-		drop(timelines.track("video", Config::default()).unwrap());
-		let _video = timelines
-			.track("video", Config::default().with_duration_hint(Duration::from_secs(6)))
-			.unwrap();
-		assert_eq!(timelines.section().timelines["video"].duration, Some(6_000));
-	}
-
-	#[test]
-	fn an_unhinted_timeline_waits_for_its_first_record() {
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let timelines = Timelines::new(&broadcast);
-		let mut video = timelines.track("video", Config::default()).unwrap();
-		assert!(!timelines.section().timelines.contains_key("video"));
-
-		video.frame(at(0), ms(0), true);
-		video.finish_group(0);
-		video.frame(at(1), ms(4_000), true);
-		assert_eq!(timelines.section().timelines["video"].duration, Some(4_000));
+		assert_eq!(audio.map(ms(0)).unwrap().as_millis(), 10_120);
+		assert_eq!(video.map(ms(10_500)).unwrap().as_millis(), 10_500);
+		assert_eq!(presentation.state.lock().unwrap().due(ms(10_500)), unchanged);
 	}
 
 	#[tokio::test]
-	async fn a_sparse_record_publishes_before_the_track_ends() {
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let timelines = Timelines::new(&broadcast);
-		let mut catalog = timelines.track("catalog.json", sparse()).unwrap();
-		catalog.frame(at(0), ms(0), true);
-		catalog.finish_group(0);
-
-		assert_eq!(read(&broadcast, &timelines.section(), "catalog.json").await.len(), 1);
-		drop(catalog);
-	}
-
-	#[tokio::test]
-	async fn a_rejected_report_fails_the_timeline() {
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let timelines = Timelines::new(&broadcast);
-		let mut video = timelines.track("video0", hinted()).unwrap();
-		let mut consumer = Consumer::<()>::subscribe(&broadcast.consume(), &timelines.section(), "video0")
-			.await
-			.unwrap();
-
-		video.frame(at(1), ms(0), true);
-		video.frame(at(0), ms(2_000), true);
-		loop {
-			match consumer.next().await {
-				Ok(Some(_)) => continue,
-				Ok(None) => panic!("the timeline ended cleanly despite omitting a frame"),
-				Err(_) => break,
-			}
-		}
-	}
-
-	#[tokio::test]
-	async fn re_enrolling_continues_the_timeline() {
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let timelines = Timelines::new(&broadcast);
-		let mut first = timelines.track("video0", Config::default()).unwrap();
-		first.frame(at(0), ms(0), true);
-		drop(first);
-		let mut second = timelines.track("video0", Config::default()).unwrap();
-		// The new producer restarts its group sequences.
-		second.frame(at(0), ms(2_000), true);
-		drop(second);
-		timelines.finish();
-
-		let entries = read(&broadcast, &timelines.section(), "video0").await;
+	async fn a_late_paired_replacement_keeps_its_media_offset() {
+		tokio::time::pause();
+		let now = kio::clock::now();
+		let presentation = Arc::new(Clock::new(DELAY));
+		presentation
+			.state
+			.lock()
+			.unwrap()
+			.audio(Duration::from_secs(10), DELAY, now);
+		let audio = Track::new(presentation.clone(), Kind::Audio);
+		let video = Track::new(presentation.clone(), Kind::Video);
+		let transition = audio.declare();
+		assert_eq!(video.declare(), transition, "one restart");
+		audio.end(ms(10_020)).unwrap();
+		video.end(ms(10_020)).unwrap();
+		audio.plan(transition, ms(0), Some(DELAY));
+		tokio::time::advance(DELAY + Duration::from_millis(20)).await;
+		audio.apply(
+			transition,
+			audio.resume(transition, ms(0), Some(DELAY)).ready().await.unwrap(),
+		);
+		// The video replacement lands after the resumed audio has started playing.
+		tokio::time::advance(DELAY * 2).await;
+		video.plan(transition, ms(40), None);
+		video.apply(
+			transition,
+			video.resume(transition, ms(40), None).ready().await.unwrap(),
+		);
 		assert_eq!(
-			entries.iter().map(|entry| entry.sequence).collect::<Vec<_>>(),
-			vec![0, 1]
+			video.map(ms(40)).unwrap().as_millis() - audio.map(ms(0)).unwrap().as_millis(),
+			40
 		);
 	}
 
-	/// Two live recorders would share one segmenter, each resetting or closing the other's
-	/// timeline, so a name is enrolled once at a time.
 	#[tokio::test]
-	async fn enrolling_an_active_track_is_refused() {
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let timelines = Timelines::new(&broadcast);
-		let mut first = timelines.track("video0", Config::default()).unwrap();
-		assert!(timelines.track("video0", Config::default()).is_err());
-
-		// The live recorder is untouched by the refusal.
-		first.frame(at(0), ms(0), true);
-		first.frame(at(1), ms(2_000), true);
-		drop(first);
-		assert!(timelines.track("video0", Config::default()).is_ok());
+	async fn a_late_replacement_pairs_with_its_own_transition() {
+		tokio::time::pause();
+		let now = kio::clock::now();
+		let presentation = Arc::new(Clock::new(DELAY));
+		presentation
+			.state
+			.lock()
+			.unwrap()
+			.audio(Duration::from_secs(10), DELAY, now);
+		let audio = Track::new(presentation.clone(), Kind::Audio);
+		let video = Track::new(presentation.clone(), Kind::Video);
+		let transition = audio.declare();
+		video.declare();
+		audio.end(ms(10_020)).unwrap();
+		video.end(ms(10_020)).unwrap();
+		video.plan(transition, ms(40), None);
+		tokio::time::advance(DELAY + Duration::from_millis(20)).await;
+		video.apply(
+			transition,
+			video.resume(transition, ms(40), None).ready().await.unwrap(),
+		);
+		// Video already queued its next replacement when audio's first one lands.
+		let next = video.declare();
+		assert_ne!(next, transition);
+		video.end(ms(60)).unwrap();
+		video.plan(next, ms(5_000), None);
+		audio.plan(transition, ms(0), Some(DELAY));
+		audio.apply(
+			transition,
+			audio.resume(transition, ms(0), Some(DELAY)).ready().await.unwrap(),
+		);
+		assert_eq!(
+			video.map(ms(40)).unwrap().as_millis() - audio.map(ms(0)).unwrap().as_millis(),
+			40
+		);
 	}
 
+	#[tokio::test]
+	async fn a_peer_two_restarts_ahead_pairs_with_the_first() {
+		tokio::time::pause();
+		let now = kio::clock::now();
+		let presentation = Arc::new(Clock::new(DELAY));
+		presentation
+			.state
+			.lock()
+			.unwrap()
+			.audio(Duration::from_secs(10), DELAY, now);
+		let audio = Track::new(presentation.clone(), Kind::Audio);
+		let video = Track::new(presentation.clone(), Kind::Video);
+		let transition = audio.declare();
+		video.declare();
+		audio.end(ms(10_020)).unwrap();
+		video.end(ms(10_020)).unwrap();
+		tokio::time::advance(DELAY + Duration::from_millis(20)).await;
+		video.plan(transition, ms(40), None);
+		let first = video.resume(transition, ms(40), None).ready().await.unwrap();
+		video.apply(transition, first);
+		// Video restarts again and resumes before audio's first replacement lands.
+		let next = video.declare();
+		video.plan(next, ms(5_000), None);
+		tokio::time::advance(Duration::from_millis(10)).await;
+		video.apply(next, video.resume(next, ms(5_000), None).ready().await.unwrap());
+		audio.plan(transition, ms(0), Some(DELAY));
+		audio.apply(
+			transition,
+			audio.resume(transition, ms(0), Some(DELAY)).ready().await.unwrap(),
+		);
+		assert_eq!(
+			first.map(ms(40)).unwrap().as_millis() - audio.map(ms(0)).unwrap().as_millis(),
+			40
+		);
+	}
+
+	#[tokio::test]
+	async fn an_abandoned_replacement_leaves_the_next_transition_alone() {
+		tokio::time::pause();
+		let now = kio::clock::now();
+		let presentation = Arc::new(Clock::new(DELAY));
+		presentation
+			.state
+			.lock()
+			.unwrap()
+			.audio(Duration::from_secs(10), DELAY, now);
+		let audio = Track::new(presentation.clone(), Kind::Audio);
+		let video = Track::new(presentation.clone(), Kind::Video);
+		let transition = audio.declare();
+		video.declare();
+		audio.end(ms(10_020)).unwrap();
+		video.end(ms(10_020)).unwrap();
+		// Video's first replacement is evicted before it plays, then it restarts again.
+		video.plan(transition, ms(40), None);
+		video.abandon(transition);
+		let next = video.declare();
+		video.plan(next, ms(5_000), None);
+		audio.plan(transition, ms(0), Some(DELAY));
+		tokio::time::advance(DELAY + Duration::from_millis(20)).await;
+		audio.apply(
+			transition,
+			audio.resume(transition, ms(0), Some(DELAY)).ready().await.unwrap(),
+		);
+		video.apply(next, video.resume(next, ms(5_000), None).ready().await.unwrap());
+		// The later replacement maps onto the running clock, not the audio restart's.
+		let resumed = kio::clock::now() + DELAY;
+		assert_eq!(
+			presentation.state.lock().unwrap().due(video.map(ms(5_000)).unwrap()),
+			Some(resumed)
+		);
+	}
+
+	#[tokio::test]
+	async fn an_abandoned_peer_plan_is_not_paired() {
+		tokio::time::pause();
+		let now = kio::clock::now();
+		let presentation = Arc::new(Clock::new(DELAY));
+		presentation
+			.state
+			.lock()
+			.unwrap()
+			.audio(Duration::from_secs(10), DELAY, now);
+		let audio = Track::new(presentation.clone(), Kind::Audio);
+		let video = Track::new(presentation.clone(), Kind::Video);
+		let transition = audio.declare();
+		video.declare();
+		audio.end(ms(10_020)).unwrap();
+		video.end(ms(10_020)).unwrap();
+		audio.plan(transition, ms(0), Some(Duration::from_millis(80)));
+		audio.abandon(transition);
+		video.plan(transition, ms(40), None);
+		tokio::time::advance(DELAY + Duration::from_millis(20)).await;
+		video.apply(
+			transition,
+			video.resume(transition, ms(40), None).ready().await.unwrap(),
+		);
+		let resumed = kio::clock::now() + DELAY;
+		assert_eq!(
+			presentation.state.lock().unwrap().due(video.map(ms(40)).unwrap()),
+			Some(resumed)
+		);
+	}
+
+	#[tokio::test]
+	async fn a_resumed_transition_ignores_the_peers_later_end() {
+		tokio::time::pause();
+		let now = kio::clock::now();
+		let presentation = Arc::new(Clock::new(DELAY));
+		presentation
+			.state
+			.lock()
+			.unwrap()
+			.audio(Duration::from_secs(10), DELAY, now);
+		let audio = Track::new(presentation.clone(), Kind::Audio);
+		let video = Track::new(presentation.clone(), Kind::Video);
+		let transition = audio.declare();
+		video.declare();
+		audio.end(ms(10_020)).unwrap();
+		video.end(ms(10_020)).unwrap();
+		video.plan(transition, ms(40), None);
+		tokio::time::advance(DELAY + Duration::from_millis(20)).await;
+		let mapping = video.resume(transition, ms(40), None).ready().await.unwrap();
+		video.apply(transition, mapping);
+		// The resumed video plays, then its encoder stops again far ahead.
+		tokio::time::advance(DELAY * 2).await;
+		video.declare();
+		video.end(ms(60_000)).unwrap();
+		audio.plan(transition, ms(0), Some(DELAY));
+		let resumed = kio::clock::timeout(
+			Duration::from_millis(1),
+			audio.resume(transition, ms(0), Some(DELAY)).ready(),
+		)
+		.await;
+		assert!(resumed.is_ok(), "audio waited for video's next end");
+	}
+
+	#[tokio::test]
+	async fn a_cancelled_role_releases_its_declared_end() {
+		tokio::time::pause();
+		let now = kio::clock::now();
+		let presentation = Arc::new(Clock::new(DELAY));
+		presentation
+			.state
+			.lock()
+			.unwrap()
+			.audio(Duration::from_secs(10), DELAY, now);
+		let audio = Track::new(presentation.clone(), Kind::Audio);
+		let video = Track::new(presentation.clone(), Kind::Video);
+		audio.declare();
+		audio.end(ms(10_200)).unwrap();
+		// Cancelled with its sink, so nothing plays the tail.
+		drop(audio);
+		let transition = video.declare();
+		video.end(ms(10_000)).unwrap();
+		video.plan(transition, ms(0), None);
+		let resume = kio::clock::timeout(
+			DELAY + Duration::from_millis(150),
+			video.resume(transition, ms(0), None).ready(),
+		)
+		.await;
+		assert!(resume.is_ok(), "video waited for discarded audio");
+	}
+
+	#[tokio::test]
+	async fn a_closed_role_still_holds_its_declared_end() {
+		tokio::time::pause();
+		let now = kio::clock::now();
+		let presentation = Arc::new(Clock::new(DELAY));
+		presentation
+			.state
+			.lock()
+			.unwrap()
+			.audio(Duration::from_secs(10), DELAY, now);
+		let audio = Track::new(presentation.clone(), Kind::Audio);
+		let video = Track::new(presentation.clone(), Kind::Video);
+		audio.declare();
+		audio.end(ms(10_200)).unwrap();
+		// The track closed, but its returned sink still plays the tail up to the end.
+		audio.retire(Some(now + Duration::from_millis(300)));
+		let transition = video.declare();
+		video.end(ms(10_000)).unwrap();
+		video.plan(transition, ms(0), None);
+		let resume = kio::clock::timeout(
+			DELAY + Duration::from_millis(150),
+			video.resume(transition, ms(0), None).ready(),
+		)
+		.await;
+		assert!(resume.is_err(), "video resumed before the audio tail played");
+	}
+
+	#[tokio::test]
+	async fn a_retired_end_ignores_a_later_re_pin() {
+		tokio::time::pause();
+		let now = kio::clock::now();
+		let presentation = Arc::new(Clock::new(DELAY));
+		presentation
+			.state
+			.lock()
+			.unwrap()
+			.audio(Duration::from_secs(10), DELAY, now);
+		let audio = Track::new(presentation.clone(), Kind::Audio);
+		let video = Track::new(presentation.clone(), Kind::Video);
+		audio.declare();
+		audio.end(ms(10_200)).unwrap();
+		audio.retire(Some(now + Duration::from_millis(300)));
+		// A replacement rendition starts over at zero and re-pins the anchor.
+		{
+			let mut presentation = presentation.state.lock().unwrap();
+			presentation.restarted();
+			presentation.audio(Duration::from_millis(50), DELAY, now);
+		}
+		let transition = video.declare();
+		video.plan(transition, ms(0), None);
+		let resume = kio::clock::timeout(
+			Duration::from_millis(400),
+			video.resume(transition, ms(0), None).ready(),
+		)
+		.await;
+		assert!(resume.is_ok(), "video waited past the drained tail");
+	}
+
+	#[tokio::test]
+	async fn a_cancelled_successor_keeps_a_retired_tail() {
+		tokio::time::pause();
+		let now = kio::clock::now();
+		let presentation = Arc::new(Clock::new(DELAY));
+		presentation
+			.state
+			.lock()
+			.unwrap()
+			.audio(Duration::from_secs(10), DELAY, now);
+		let audio = Track::new(presentation.clone(), Kind::Audio);
+		let video = Track::new(presentation.clone(), Kind::Video);
+		audio.declare();
+		audio.end(ms(10_200)).unwrap();
+		audio.retire(Some(now + Duration::from_millis(300)));
+		// The next rendition fails while the retired sink still plays.
+		let successor = Track::new(presentation.clone(), Kind::Audio);
+		successor.declare();
+		drop(successor);
+		let transition = video.declare();
+		video.plan(transition, ms(0), None);
+		let resume = kio::clock::timeout(
+			Duration::from_millis(250),
+			video.resume(transition, ms(0), None).ready(),
+		)
+		.await;
+		assert!(resume.is_err(), "video resumed over the retired audio tail");
+	}
+
+	#[tokio::test]
+	async fn paired_plans_keep_media_offsets_and_follow_the_speakers_delay() {
+		tokio::time::pause();
+		let now = kio::clock::now();
+		let presentation = Arc::new(Clock::new(DELAY));
+		presentation
+			.state
+			.lock()
+			.unwrap()
+			.audio(Duration::from_secs(10), DELAY, now);
+		let audio = Track::new(presentation.clone(), Kind::Audio);
+		let video = Track::new(presentation.clone(), Kind::Video);
+		let transition = audio.declare();
+		video.declare();
+		audio.end(ms(10_020)).unwrap();
+		video.end(ms(10_020)).unwrap();
+		audio.plan(transition, ms(0), Some(Duration::from_millis(80)));
+		video.plan(transition, ms(40), None);
+		tokio::time::advance(DELAY + Duration::from_millis(20)).await;
+		video.apply(
+			transition,
+			video.resume(transition, ms(40), None).ready().await.unwrap(),
+		);
+		audio.apply(
+			transition,
+			audio
+				.resume(transition, ms(0), Some(Duration::from_millis(80)))
+				.ready()
+				.await
+				.unwrap(),
+		);
+		assert_eq!(
+			video.map(ms(40)).unwrap().as_millis() - audio.map(ms(0)).unwrap().as_millis(),
+			40
+		);
+		assert_eq!(
+			presentation.state.lock().unwrap().due(audio.map(ms(0)).unwrap()),
+			Some(now + Duration::from_millis(200))
+		);
+	}
+
+	/// Earlier arrivals pull the anchor forward so playback converges on the live
+	/// edge without giving up the configured delay.
 	#[test]
-	fn a_taken_timeline_name_fails_enrollment() {
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let _squat = broadcast.create_track("video0.timeline.z", None).unwrap();
-		let timelines = Timelines::new(&broadcast);
-		assert!(timelines.track("video0", Config::default()).is_err());
-		assert!(timelines.section().timelines.is_empty());
+	fn a_late_first_frame_catches_up_to_live() {
+		let start = Instant::now();
+		let mut presentation = State::new(DELAY);
+
+		// Produced 500ms ago, though nothing here knows that yet. The window is
+		// asleep on the deadline the anchor last gave it, so every move is reported.
+		assert!(presentation.video(ms(0), start), "the first anchor");
+		assert_eq!(presentation.due(ms(0)), Some(start + DELAY));
+
+		// 40ms of media later, but only 20ms of wall clock: the anchor was 480ms
+		// behind live, so it moves onto this frame.
+		let now = start + Duration::from_millis(20);
+		assert!(presentation.video(ms(40), now), "an early frame left the anchor alone");
+		assert_eq!(presentation.due(ms(40)), Some(now + DELAY));
+
+		// A frame that merely arrives late keeps its media instant. The delay is
+		// the room it has to be late in.
+		let late = now + Duration::from_millis(70);
+		assert!(!presentation.video(ms(80), late), "a late arrival moved the anchor");
+		assert_eq!(presentation.due(ms(80)), Some(now + Duration::from_millis(140)));
 	}
 
+	/// The speaker cannot skip forward with a re-anchor, so while it is playing a
+	/// video burst must not move the anchor out from under it.
 	#[test]
-	fn enrollment_after_finish_is_refused() {
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let timelines = Timelines::new(&broadcast);
-		timelines.finish();
-		assert!(matches!(
-			timelines.track("video0", Config::default()),
-			Err(crate::Error::Moq(moq_net::Error::Closed))
-		));
+	fn the_speaker_owns_the_anchor_while_it_plays() {
+		let start = Instant::now();
+		let mut presentation = State::new(DELAY);
+
+		presentation.audio(Duration::from_secs(1), DELAY, start);
+		let anchored = presentation.due(ms(1_000));
+
+		// A tune-in burst: seconds of video arriving at once.
+		presentation.video(ms(1_040), start);
+		presentation.video(ms(4_000), start);
+		assert_eq!(
+			presentation.due(ms(1_000)),
+			anchored,
+			"video moved the speaker's anchor"
+		);
+
+		// Once audio stops, video anchors again.
+		presentation.stopped();
+		presentation.video(ms(4_040), start);
+		assert_eq!(presentation.due(ms(4_040)), Some(start + DELAY));
 	}
 
-	#[tokio::test]
-	async fn a_missing_timeline_is_an_error() {
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let section = Archive::new();
-		assert!(matches!(
-			Consumer::<()>::subscribe(&broadcast.consume(), &section, "video0").await,
-			Err(crate::Error::TimelineMissing(_))
-		));
+	/// The speaker reports the sample sounding now, which is a delay behind the
+	/// edge. Pinning that instant directly would schedule video a second delay
+	/// behind the sound.
+	#[test]
+	fn the_speaker_anchors_at_the_live_edge() {
+		let start = Instant::now();
+		let mut presentation = State::new(DELAY);
+
+		// The last sample written is a full delay from sounding, which is exactly
+		// where a settled sink sits: media time and the picture agree.
+		presentation.audio(Duration::from_secs(1), DELAY, start);
+		assert_eq!(presentation.due(ms(1_000)), Some(start + DELAY));
+
+		// Filling up, with only 40ms queued: that sample sounds in 40ms, so the
+		// picture that goes with it is due then too.
+		let now = start + Duration::from_millis(500);
+		presentation.audio(Duration::from_millis(1_500), Duration::from_millis(40), now);
+		assert_eq!(presentation.due(ms(1_500)), Some(now + Duration::from_millis(40)));
 	}
 
-	#[tokio::test]
-	async fn rejects_an_invalid_timescale() {
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let timelines = Timelines::new(&broadcast);
-		let _recorder = timelines.track("video0", hinted()).unwrap();
-		let mut section = timelines.section();
-		section.timescale = 0;
-		let err = Consumer::<()>::subscribe(&broadcast.consume(), &section, "video0").await;
-		assert!(matches!(err, Err(crate::Error::InvalidTimescale(0))));
+	/// Video usually anchors first, and audio's first frame can sit behind that
+	/// anchor. Pacing it would map it into the past, which never re-anchors, so
+	/// the sink would play now while the picture stayed on video's timeline.
+	#[test]
+	fn the_speaker_re_anchors_when_it_takes_over() {
+		let start = Instant::now();
+		let mut presentation = State::new(DELAY);
+		presentation.video(ms(4_000), start);
+
+		presentation.audio(Duration::from_secs(1), DELAY, start);
+		assert_eq!(presentation.due(ms(1_000)), Some(start + DELAY));
+
+		// A replacement rendition is a track boundary too: its timestamps need not
+		// continue the one that just ended.
+		presentation.stopped();
+		let now = start + Duration::from_millis(20);
+		presentation.audio(Duration::from_millis(200), DELAY, now);
+		assert_eq!(presentation.due(ms(200)), Some(now + DELAY));
+	}
+
+	/// A hole too large to play through drops the buffered audio and starts a new
+	/// sink, and a rewind restarts the timeline outright. Pacing across either
+	/// would schedule video against samples the speaker never plays.
+	#[test]
+	fn a_restarted_speaker_re_anchors() {
+		let start = Instant::now();
+		let mut presentation = State::new(DELAY);
+		presentation.audio(Duration::from_secs(10), DELAY, start);
+
+		// The publisher rewound: without the restart this pins media 9 seconds
+		// behind the anchor, leaving the picture 9 seconds in the past.
+		let now = start + Duration::from_millis(20);
+		presentation.restarted();
+		presentation.audio(Duration::from_secs(1), DELAY, now);
+		assert_eq!(presentation.due(ms(1_000)), Some(now + DELAY));
+	}
+
+	/// A retired rendition marks a restart for its replacement, which may never
+	/// come. The next track re-pins on its first frame for taking ownership, so a
+	/// restart left over would re-pin the frame after it onto that frame's jitter.
+	#[test]
+	fn a_stopped_speaker_drops_a_pending_restart() {
+		let start = Instant::now();
+		let mut presentation = State::new(DELAY);
+		presentation.audio(Duration::from_secs(10), DELAY, start);
+		presentation.restarted();
+		presentation.stopped();
+
+		presentation.audio(Duration::from_secs(1), DELAY, start);
+		// 20ms of media, 40ms of wall clock: a late frame paces and leaves the
+		// anchor where it was.
+		let now = start + Duration::from_millis(40);
+		presentation.audio(Duration::from_millis(1_020), DELAY, now);
+		assert_eq!(
+			presentation.due(ms(1_020)),
+			Some(start + Duration::from_millis(20) + DELAY)
+		);
+	}
+
+	/// The window sleeps on the deadline it last computed, so an anchor the
+	/// speaker moved has to say so or the queue presents late by that much.
+	#[test]
+	fn a_moved_anchor_is_reported() {
+		let start = Instant::now();
+		let mut presentation = State::new(DELAY);
+		assert!(
+			presentation.audio(Duration::from_secs(1), DELAY, start),
+			"the first anchor"
+		);
+
+		// On schedule: 40ms of media, 40ms of wall clock, same sink depth.
+		let now = start + Duration::from_millis(40);
+		assert!(
+			!presentation.audio(Duration::from_millis(1_040), DELAY, now),
+			"a frame on the anchor moved it"
+		);
+
+		// Arriving early re-anchors, and the window has to hear about it.
+		assert!(
+			presentation.audio(Duration::from_millis(1_100), DELAY, now),
+			"an early frame left the anchor alone"
+		);
 	}
 }

@@ -14,8 +14,8 @@ The targets are `packet`, `params`, `streamid`, `streams`, `frame`, and `connect
 Extra arguments pass through to libFuzzer, so `just rs fuzz connection -- -max_total_time=300`
 bounds a run.
 
-The Nightly workflow runs every target for five minutes and uploads failure inputs as
-workflow artifacts.
+The Nightly workflow runs every target for five minutes, resumes from the previous run's
+minimized corpus, and uploads failure inputs as workflow artifacts.
 
 ## How it fits together
 
@@ -30,8 +30,8 @@ module (`src/fuzz.rs`), and the files here are one-line shims. Two reasons:
 `just rs fuzz` regenerates `seeds/` from `moq_quic::fuzz::seeds()` before each run, so
 the corpus follows the code instead of rotting beside it. libFuzzer writes what it
 discovers to `corpus/<target>/`, which is kept across runs and gitignored along with
-`seeds/` and `artifacts/`. `cargo +nightly fuzz cmin --fuzz-dir rs/moq-quic/fuzz <target>`
-shrinks the corpus once it has grown.
+`seeds/` and `artifacts/`. `just rs fuzz --minimize <target>` shrinks
+the corpus once it has grown.
 
 Calling `cargo fuzz` directly skips `just rs fuzz`, which turns off the release
 profile's fat LTO (it drops the sanitizer-coverage globals, so the link fails) and

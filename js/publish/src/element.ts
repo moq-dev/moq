@@ -15,18 +15,21 @@ import * as Source from "./source";
 import { clearSourceState } from "./source-state";
 import * as Video from "./video";
 
+function invalidAttribute(name: string, value: unknown, expected: string): Error {
+	return new Error(`moq-publish: invalid ${name}="${value}", expected ${expected}`);
+}
+
 function parseUrl(value: string | null): URL | undefined {
-	if (!value) return undefined;
+	if (value === null) return undefined;
 	try {
 		return new URL(value);
 	} catch {
-		console.warn(`moq-publish: invalid url="${value}", expected an absolute URL`);
-		return undefined;
+		throw invalidAttribute("url", value, "an absolute URL");
 	}
 }
 
 // Parse the `versions` attribute: a comma-separated list, or the defaults when absent or empty.
-// The connection checks the names and reports an unsupported one on `connection.error`.
+// The setter refuses an unsupported or duplicate name.
 function parseVersions(value: string | null): string[] | undefined {
 	const versions = value
 		?.split(",")
@@ -35,8 +38,21 @@ function parseVersions(value: string | null): string[] | undefined {
 	return versions?.length ? versions : undefined;
 }
 
-const OBSERVED = ["url", "versions", "name", "muted", "invisible", "source", "preview", "backend", "announce"] as const;
-type Observed = (typeof OBSERVED)[number];
+/** The attributes the element observes. */
+const OBSERVED = [
+	"url",
+	"versions",
+	"name",
+	"muted",
+	"invisible",
+	"source",
+	"preview",
+	"backend",
+	"announce",
+	"stats",
+	"echo-path",
+	"capture",
+] as const;
 
 /** The built-in capture sources selectable via the `source` attribute. */
 export type SourceType = "camera" | "screen" | "file";
@@ -44,12 +60,22 @@ export type SourceType = "camera" | "screen" | "file";
 /**
  * When to announce the broadcast. Nobody can see or subscribe to it until it is announced.
  *
- * `always` announces immediately, `never` never announces, and `source` waits until media is
- * actually being captured. A camera source waits for every enabled track, so a refused microphone
+ * `always` announces immediately, and `source` waits until media is actually being captured. A camera source waits for every enabled track, so a refused microphone
  * cannot advertise a partial broadcast. `source` also waits until every captured track's config
  * resolves or fails, so a subscriber's first catalog lists every rendition. Defaults to `source`.
+ * To keep a broadcast out of discovery, give it a hidden name with a `.`-prefixed path segment
+ * instead; it is still subscribable by name.
  */
-export type AnnounceMode = "always" | "source" | "never";
+export type AnnounceMode = "always" | "source";
+
+/**
+ * What a muted or invisible track does with its capture.
+ *
+ * `hold` keeps the device open, so resuming is instant but the browser's capture indicator stays lit.
+ * `release` closes it, so the indicator goes dark and resuming reopens it. A screen share or file
+ * stops only once both tracks are off. Defaults to `hold`.
+ */
+export type CaptureMode = "hold" | "release";
 
 /**
  * Parse a boolean attribute: absent uses `defaultValue`, bare presence is true, and an explicit
@@ -61,46 +87,46 @@ function parseBoolean(value: string | null, defaultValue: boolean): boolean {
 	return normalized !== "false" && normalized !== "0";
 }
 
-// Invalid attribute values warn and fall back rather than throwing: attributeChangedCallback runs
-// from the browser, where a throw surfaces as an unhandled error and leaves the element
-// half-configured.
 function parseSource(value: string | null): SourceType | undefined {
 	if (value === null) return undefined;
 	if (value === "camera" || value === "screen" || value === "file") return value;
-	console.warn(`moq-publish: invalid source="${value}", expected "camera", "screen", or "file"`);
-	return undefined;
+	throw invalidAttribute("source", value, '"camera", "screen", or "file"');
 }
 
 function parseAnnounce(value: string | null): AnnounceMode {
 	if (value === null) return "source";
-	if (value === "source" || value === "always" || value === "never") return value;
-	console.warn(`moq-publish: invalid announce="${value}", expected "source", "always", or "never"`);
-	return "source";
+	if (value === "source" || value === "always") return value;
+	throw invalidAttribute("announce", value, '"source" or "always"');
+}
+
+function parseCapture(value: string | null): CaptureMode {
+	if (value === null) return "hold";
+	if (value === "hold" || value === "release") return value;
+	throw invalidAttribute("capture", value, '"hold" or "release"');
 }
 
 function parsePreview(value: string | null): Preview.Mode {
 	if (value === null) return "source";
 	if (value === "encoded" || value === "source" || value === "none") return value;
-	console.warn(`moq-publish: invalid preview="${value}", expected "encoded", "source", or "none"`);
-	return "source";
+	throw invalidAttribute("preview", value, '"encoded", "source", or "none"');
+}
+
+// Parse the `echo-path` attribute: a path relative to the broadcast, or undefined when absent.
+function parseEchoPath(value: string | null): Moq.Path.Relative | undefined {
+	return value === null ? undefined : Moq.Path.normalizeRelative(value);
 }
 
 function parseBackend(value: string | null): Preview.Backend {
-	const trimmed = value?.trim();
-	if (!trimmed) return "auto";
+	if (value === null) return "auto";
+	const trimmed = value.trim();
 	if (trimmed === "auto" || trimmed === "webgpu" || trimmed === "2d") return trimmed;
-	console.warn(`moq-publish: invalid backend="${value}", expected "auto", "webgpu", or "2d"`);
-	return "auto";
+	throw invalidAttribute("backend", value, '"auto", "webgpu", or "2d"');
 }
-
-// Close everything when this element is garbage collected.
-// This is primarily to avoid a console.warn that we didn't close() before GC.
-// There's no destructor for web components so this is the best we can do.
-const cleanup = new FinalizationRegistry<Effect>((signals) => signals.close());
 
 /** The `<moq-publish>` element: captures a source and publishes it as a broadcast. */
 export default class MoqPublish extends HTMLElement {
-	static observedAttributes = OBSERVED;
+	/** The attributes the browser reports changes to. */
+	static observedAttributes: typeof OBSERVED = OBSERVED;
 
 	/**
 	 * The mutable user controls. As the top of the tree, this element owns the writable Signals
@@ -115,8 +141,15 @@ export default class MoqPublish extends HTMLElement {
 		preview: new Signal<Preview.Mode>("source"),
 		// Which graphics API draws a <canvas> preview.
 		backend: new Signal<Preview.Backend>("auto"),
-		// When to advertise the broadcast: always, never, or only once a source is live.
-		announce: new Signal<AnnounceMode>("source"),
+		// When to advertise the broadcast: always, or only once a source is live. Undefined while the
+		// `announce` attribute is invalid, which never announces.
+		announce: new Signal<AnnounceMode | undefined>("source"),
+		// Whether to publish a stats track named in the catalog.
+		stats: new Signal(false),
+		// Where viewers may publish feedback, relative to the broadcast, or undefined to solicit none.
+		echoPath: new Signal<Moq.Path.Relative | undefined>(undefined),
+		// Whether a muted or invisible track keeps its capture open.
+		capture: new Signal<CaptureMode>("hold"),
 	};
 
 	/**
@@ -163,19 +196,30 @@ export default class MoqPublish extends HTMLElement {
 	// The preview element, either a <video> (raw source via srcObject) or a <canvas> (rendered frames).
 	#preview = new Signal<HTMLVideoElement | HTMLCanvasElement | undefined>(undefined);
 
-	// The inverse of the `muted` and `invisible` signals.
-	#videoEnabled: Signal<boolean>;
-	#audioEnabled: Signal<boolean>;
-	#eitherEnabled: Signal<boolean>;
+	// Whether to encode each track: connected and allowed by `muted` and `invisible`.
+	#videoEnabled = new Signal(false);
+	#audioEnabled = new Signal(false);
+
+	// Whether to capture each track: connected, and with `capture="release"` also allowed by `muted`
+	// and `invisible`. A screen share or file carries both tracks, so it captures while either does.
+	#videoCapture = new Signal(false);
+	#audioCapture = new Signal(false);
+	#eitherCapture = new Signal(false);
 
 	// Set when the element is connected to the DOM.
 	#enabled = new Signal(false);
+	#root = new Signal<Document | ShadowRoot | undefined>(undefined);
+	#invalid = new Signal<ReadonlySet<string>>(new Set());
+	// Whether clearing the last invalid attribute re-enables media: false when the page had
+	// already disabled the connection, so recovery does not override that.
+	#resume = false;
+	#reflecting = false;
 
 	// Whether to advertise the broadcast, driven by the `announce` mode.
 	#announcing = new Signal(false);
 
 	/**
-	 * Effects scoped to this element's lifetime, closed on disconnect.
+	 * Effects owned by this element; media resources are suspended while disconnected.
 	 *
 	 * Public because the element is the top of the tree: it's where an application hangs its own
 	 * reactivity. The components underneath keep theirs private, so `close()` is the only handle.
@@ -185,25 +229,25 @@ export default class MoqPublish extends HTMLElement {
 	constructor() {
 		super();
 
-		cleanup.register(this, this.signals);
-
 		this.connection = new Moq.Connection({
 			enabled: this.#enabled,
 		});
 		this.signals.cleanup(() => this.connection.close());
 
-		// The inverse of the `muted` and `invisible` signals.
-		// TODO make this.signals.computed to simplify the code.
-		this.#videoEnabled = new Signal(false);
-		this.#audioEnabled = new Signal(false);
-		this.#eitherEnabled = new Signal(false);
+		this.signals.run((effect) => {
+			const enabled = effect.get(this.#enabled);
+			this.#videoEnabled.set(enabled && !effect.get(this.controls.invisible));
+			this.#audioEnabled.set(enabled && !effect.get(this.controls.muted));
+		});
 
 		this.signals.run((effect) => {
-			const muted = effect.get(this.controls.muted);
-			const invisible = effect.get(this.controls.invisible);
-			this.#videoEnabled.set(!invisible);
-			this.#audioEnabled.set(!muted);
-			this.#eitherEnabled.set(!muted || !invisible);
+			const enabled = effect.get(this.#enabled);
+			const hold = effect.get(this.controls.capture) === "hold";
+			const video = enabled && (hold || !effect.get(this.controls.invisible));
+			const audio = enabled && (hold || !effect.get(this.controls.muted));
+			this.#videoCapture.set(video);
+			this.#audioCapture.set(audio);
+			this.#eitherCapture.set(video || audio);
 		});
 
 		this.#capture = new Video.Capture({ source: this.#videoSource, orientation: this.#orientation });
@@ -212,7 +256,7 @@ export default class MoqPublish extends HTMLElement {
 		// Reached as `audio.capture` rather than a field of its own, so audio and video read alike.
 		const audioCapture = new Audio.Capture({
 			source: this.#audioSource,
-			enabled: this.#audioEnabled,
+			enabled: this.#audioCapture,
 		});
 		this.signals.cleanup(() => audioCapture.close());
 
@@ -224,6 +268,9 @@ export default class MoqPublish extends HTMLElement {
 			display: this.#capture.out.display,
 			flip: this.#flip,
 			rotation: this.#capture.out.rotation,
+			stats: this.controls.stats,
+			probe: this.connection.probe,
+			echo: this.controls.echoPath,
 		});
 		this.signals.cleanup(() => this.broadcast.close());
 
@@ -231,7 +278,7 @@ export default class MoqPublish extends HTMLElement {
 			broadcast: this.broadcast,
 			capture: this.#capture,
 			enabled: this.#videoEnabled,
-			bandwidth: this.connection.bandwidth,
+			bandwidth: this.connection.allocator,
 		});
 		this.signals.cleanup(() => this.video.close());
 
@@ -239,13 +286,15 @@ export default class MoqPublish extends HTMLElement {
 			broadcast: this.broadcast,
 			enabled: this.#audioEnabled,
 			capture: audioCapture,
-			bandwidth: this.connection.bandwidth,
+			bandwidth: this.connection.allocator,
 		});
 		this.signals.cleanup(() => this.audio.close());
 
 		Announce.run(this.signals, this.#announcing, {
 			mode: this.controls.announce,
-			camera: this.signals.computed((effect) => effect.get(this.controls.source) === "camera"),
+			source: this.signals.computed((effect) =>
+				effect.get(this.#enabled) ? effect.get(this.controls.source) : undefined,
+			),
 			video: { enabled: this.#videoEnabled, source: this.#videoSource, settled: this.video.settled },
 			audio: { enabled: this.#audioEnabled, source: this.#audioSource, settled: this.audio.settled },
 		});
@@ -262,30 +311,65 @@ export default class MoqPublish extends HTMLElement {
 		this.signals.run((effect) => {
 			const preview = effect.get(this.#preview);
 			if (!preview) return;
-
 			// A <canvas> renders the decoded frames; a <video> shows the raw source via srcObject.
 			if (preview instanceof HTMLCanvasElement) {
-				const renderer = new Preview.Renderer({
-					canvas: preview,
-					frames: this.#capture.out.frames,
-					display: this.#capture.out.display,
-					flip: this.#flip,
-					rotation: this.#capture.out.rotation,
-					encoder: this.video,
-					mode: this.controls.preview,
-					enabled: this.#videoEnabled,
-					backend: this.controls.backend,
+				// Own only the empty-state rule, leaving the page's inline and stylesheet display intact.
+				const hidden = "moq-publish-preview-hidden";
+				effect.cleanup(() => {
+					preview.classList.remove(hidden);
 				});
-				effect.cleanup(() => renderer.close());
-
-				// A canvas that lost its GPU never hands out another context, so swap in a fresh copy.
-				// The observer above picks it up and this effect builds a renderer for it.
 				effect.run((inner) => {
-					if (inner.get(renderer.out.error)?.name === "InvalidStateError")
-						preview.replaceWith(preview.cloneNode());
+					const root = inner.get(this.#root);
+					if (!root) return;
+					// CSSOM styles need no inline-style permission. Reattach in the current root on reconnect.
+					const view = this.ownerDocument.defaultView as Window & typeof globalThis;
+					const sheet = new view.CSSStyleSheet();
+					sheet.replaceSync(`canvas.${hidden} { display: none !important; }`);
+					root.adoptedStyleSheets = [...root.adoptedStyleSheets, sheet];
+					inner.cleanup(() => {
+						root.adoptedStyleSheets = root.adoptedStyleSheets.filter((current) => current !== sheet);
+					});
+				});
+				effect.run((inner) => {
+					const source = inner.get(this.#videoEnabled) ? inner.get(this.#videoSource) : undefined;
+					const display = inner.get(this.#capture.out.display);
+					preview.classList.toggle(
+						hidden,
+						!source || !display || inner.get(this.controls.preview) === "none",
+					);
+				});
+
+				// Keep the renderer while hidden, but release it when the publisher disconnects.
+				effect.run((active) => {
+					if (!active.get(this.#enabled)) return;
+					const renderer = new Preview.Renderer({
+						canvas: preview,
+						frames: this.#capture.out.frames,
+						display: this.#capture.out.display,
+						flip: this.#flip,
+						rotation: this.#capture.out.rotation,
+						encoder: this.video,
+						mode: this.controls.preview,
+						enabled: this.#videoEnabled,
+						backend: this.controls.backend,
+					});
+					active.cleanup(() => renderer.close());
+
+					// A canvas that lost its GPU never hands out another context, so swap in a fresh copy.
+					// The observer above picks it up and this effect builds a renderer for it.
+					active.run((inner) => {
+						if (inner.get(renderer.out.error)?.name === "InvalidStateError")
+							preview.replaceWith(preview.cloneNode());
+					});
 				});
 				return;
 			}
+
+			preview.style.display = "none";
+			if (!effect.get(this.#enabled)) return;
+			effect.cleanup(() => {
+				preview.style.display = "none";
+			});
 
 			// preview="none" disables the preview entirely.
 			if (effect.get(this.controls.preview) === "none") {
@@ -293,7 +377,8 @@ export default class MoqPublish extends HTMLElement {
 				return;
 			}
 
-			const source = effect.get(this.#videoSource);
+			// A hidden camera may stay open, so blank the preview to match what viewers get.
+			const source = effect.get(this.#videoEnabled) ? effect.get(this.#videoSource) : undefined;
 			if (!source) {
 				preview.style.display = "none";
 				return;
@@ -323,41 +408,94 @@ export default class MoqPublish extends HTMLElement {
 			console.warn('moq-publish: preview="encoded" requires a <canvas> element; showing the raw source.');
 		});
 
+		// Reflect state without replaying its setters through attributeChangedCallback.
+		this.signals.run((effect) => this.#reflect(effect, "url", effect.get(this.connection.url)?.toString()));
+		this.signals.run((effect) =>
+			this.#reflect(effect, "versions", effect.get(this.connection.versions)?.join(",")),
+		);
+		this.signals.run((effect) => this.#reflect(effect, "name", effect.get(this.#name).toString()));
+		this.signals.run((effect) => this.#reflect(effect, "muted", effect.get(this.controls.muted) ? "" : undefined));
+		this.signals.run((effect) =>
+			this.#reflect(effect, "invisible", effect.get(this.controls.invisible) ? "" : undefined),
+		);
+		this.signals.run((effect) => {
+			const source = effect.get(this.controls.source);
+			this.#reflect(effect, "source", source instanceof File ? "file" : source);
+		});
+		this.signals.run((effect) => this.#reflect(effect, "preview", effect.get(this.controls.preview)));
+		this.signals.run((effect) => this.#reflect(effect, "backend", effect.get(this.controls.backend)));
+		this.signals.run((effect) => this.#reflect(effect, "announce", effect.get(this.controls.announce)));
+		this.signals.run((effect) => this.#reflect(effect, "stats", effect.get(this.controls.stats) ? "" : undefined));
+		this.signals.run((effect) => this.#reflect(effect, "echo-path", effect.get(this.controls.echoPath)));
+		this.signals.run((effect) => this.#reflect(effect, "capture", effect.get(this.controls.capture)));
 		this.signals.run(this.#runSource.bind(this));
 	}
 
+	/** Called by the browser when the element joins a document. */
 	connectedCallback() {
-		this.#enabled.set(true);
+		this.#root.set(this.getRootNode() as Document | ShadowRoot);
+		if (this.#invalid.peek().size) this.#resume = true;
+		else this.#enabled.set(true);
 	}
 
+	/** Called by the browser when the element leaves its document. */
 	disconnectedCallback() {
+		this.#root.set(undefined);
 		this.#enabled.set(false);
 	}
 
-	attributeChangedCallback(name: Observed, oldValue: string | null, newValue: string | null) {
-		if (oldValue === newValue) return;
+	/** Called by the browser when an observed attribute changes. */
+	attributeChangedCallback(name: (typeof OBSERVED)[number], oldValue: string | null, newValue: string | null) {
+		if (this.#reflecting || oldValue === newValue) return;
+		try {
+			if (name === "url") this.url = parseUrl(newValue);
+			else if (name === "versions") this.versions = parseVersions(newValue);
+			else if (name === "name") this.name = newValue ?? "";
+			else if (name === "source") this.source = parseSource(newValue);
+			else if (name === "announce") this.announce = parseAnnounce(newValue);
+			else if (name === "muted") this.muted = parseBoolean(newValue, false);
+			else if (name === "invisible") this.invisible = parseBoolean(newValue, false);
+			else if (name === "preview") this.preview = parsePreview(newValue);
+			else if (name === "backend") this.backend = parseBackend(newValue);
+			else if (name === "stats") this.stats = parseBoolean(newValue, false);
+			else if (name === "echo-path") this.echoPath = parseEchoPath(newValue);
+			else if (name === "capture") this.capture = parseCapture(newValue);
+			else {
+				const exhaustive: never = name;
+				throw new Error(`Invalid attribute: ${exhaustive}`);
+			}
+		} catch (error) {
+			if (this.#invalid.peek().size === 0) this.#resume = this.#enabled.peek();
+			if (name === "announce") this.controls.announce.set(undefined);
+			this.#invalid.update((previous) => new Set(previous).add(name));
+			this.#enabled.set(false);
+			throw error;
+		}
+	}
 
-		if (name === "url") {
-			this.connection.url.set(parseUrl(newValue));
-		} else if (name === "versions") {
-			this.connection.versions.set(parseVersions(newValue));
-		} else if (name === "name") {
-			this.#name.set(Moq.Path.from(newValue ?? ""));
-		} else if (name === "source") {
-			this.controls.source.set(parseSource(newValue));
-		} else if (name === "announce") {
-			this.controls.announce.set(parseAnnounce(newValue));
-		} else if (name === "muted") {
-			this.controls.muted.set(parseBoolean(newValue, false));
-		} else if (name === "invisible") {
-			this.controls.invisible.set(parseBoolean(newValue, false));
-		} else if (name === "preview") {
-			this.controls.preview.set(parsePreview(newValue));
-		} else if (name === "backend") {
-			this.controls.backend.set(parseBackend(newValue));
-		} else {
-			const exhaustive: never = name;
-			throw new Error(`Invalid attribute: ${exhaustive}`);
+	#accept(name: string) {
+		// Ordinary edits must preserve an explicitly disabled connection.
+		if (!this.#invalid.peek().has(name)) return;
+		this.#invalid.update((previous) => {
+			const next = new Set(previous);
+			next.delete(name);
+			return next;
+		});
+		if (this.#invalid.peek().size || !this.#resume) return;
+		this.#resume = false;
+		this.#enabled.set(this.#root.peek() !== undefined);
+	}
+
+	#reflect(effect: Effect, name: (typeof OBSERVED)[number], value: string | undefined) {
+		// Keep refused markup observable until corrected. An echo must never reconfigure a File
+		// source or another control whose serialized value omits some of its state.
+		if (effect.get(this.#invalid).size) return;
+		this.#reflecting = true;
+		try {
+			if (value === undefined) this.removeAttribute(name);
+			else if (this.getAttribute(name) !== value) this.setAttribute(name, value);
+		} finally {
+			this.#reflecting = false;
 		}
 	}
 
@@ -373,11 +511,14 @@ export default class MoqPublish extends HTMLElement {
 		});
 		effect.set(this.#orientation, 0, 0);
 
+		// Sources stay alive while disconnected so device and file selections survive a reconnect;
+		// the connection gate releases their capture and device discovery. `muted` and `invisible`
+		// release a device only with `capture="release"`.
 		if (!source) return;
 
 		if (source === "camera") {
-			const video = new Source.Camera({ enabled: this.#videoEnabled });
-			const audio = new Source.Microphone({ enabled: this.#audioEnabled });
+			const video = new Source.Camera({ enabled: this.#videoCapture, device: { enabled: this.#enabled } });
+			const audio = new Source.Microphone({ enabled: this.#audioCapture, device: { enabled: this.#enabled } });
 
 			effect.set(this.#sources.video, video);
 			effect.set(this.#sources.audio, audio);
@@ -397,7 +538,7 @@ export default class MoqPublish extends HTMLElement {
 
 		if (source === "screen") {
 			const screen = new Source.Screen({
-				enabled: this.#eitherEnabled,
+				enabled: this.#eitherCapture,
 			});
 
 			effect.run((nested) => {
@@ -420,7 +561,7 @@ export default class MoqPublish extends HTMLElement {
 			const fileSource = new Source.File({
 				// If a File is provided, use it directly.
 				file: source instanceof File ? source : undefined,
-				enabled: this.#eitherEnabled,
+				enabled: this.#eitherCapture,
 			});
 
 			// Otherwise prompt the user to pick one. The selection click is still the
@@ -454,7 +595,8 @@ export default class MoqPublish extends HTMLElement {
 	}
 
 	set url(value: string | URL | undefined) {
-		this.connection.url.set(value ? new URL(value) : undefined);
+		this.connection.url.set(parseUrl(value instanceof URL ? value.toString() : (value ?? null)));
+		this.#accept("url");
 	}
 
 	/** The protocol versions to offer, most preferred first; undefined offers the defaults. */
@@ -463,7 +605,8 @@ export default class MoqPublish extends HTMLElement {
 	}
 
 	set versions(value: readonly string[] | undefined) {
-		this.connection.versions.set(value);
+		this.connection.versions.set(value === undefined ? undefined : Moq.Connection.checkVersions(value));
+		this.#accept("versions");
 	}
 
 	/** The broadcast name, mirrored by the `name` attribute. */
@@ -473,6 +616,7 @@ export default class MoqPublish extends HTMLElement {
 
 	set name(value: string | Moq.Path.Valid) {
 		this.#name.set(Moq.Path.from(value));
+		this.#accept("name");
 	}
 
 	/** What to capture: a built-in source, a file, or nothing. Mirrored by the `source` attribute. */
@@ -481,25 +625,44 @@ export default class MoqPublish extends HTMLElement {
 	}
 
 	set source(value: SourceType | File | undefined) {
-		this.controls.source.set(value);
+		this.controls.source.set(value instanceof File ? value : parseSource(value ?? null));
+		this.#accept("source");
 	}
 
-	/** Whether audio is muted, mirrored by the `muted` attribute. */
+	/**
+	 * Whether audio is muted, mirrored by the `muted` attribute. Muting stops encoding; `capture`
+	 * decides whether the microphone stays open.
+	 */
 	get muted(): boolean {
 		return this.controls.muted.peek();
 	}
 
 	set muted(value: boolean) {
 		this.controls.muted.set(value);
+		this.#accept("muted");
 	}
 
-	/** Whether video is disabled, mirrored by the `invisible` attribute. */
+	/**
+	 * Whether video is hidden, mirrored by the `invisible` attribute. Hiding stops encoding and the
+	 * preview; `capture` decides whether the camera stays open.
+	 */
 	get invisible(): boolean {
 		return this.controls.invisible.peek();
 	}
 
 	set invisible(value: boolean) {
 		this.controls.invisible.set(value);
+		this.#accept("invisible");
+	}
+
+	/** What a muted or invisible track does with its capture, mirrored by the `capture` attribute. */
+	get capture(): CaptureMode {
+		return this.controls.capture.peek();
+	}
+
+	set capture(value: CaptureMode) {
+		this.controls.capture.set(parseCapture(value));
+		this.#accept("capture");
 	}
 
 	/** What a <canvas> preview renders, mirrored by the `preview` attribute. */
@@ -508,25 +671,56 @@ export default class MoqPublish extends HTMLElement {
 	}
 
 	set preview(value: Preview.Mode) {
-		this.controls.preview.set(value);
+		this.controls.preview.set(parsePreview(value));
+		this.#accept("preview");
 	}
 
-	/** Which graphics API draws a <canvas> preview. */
+	/** Which graphics API draws a <canvas> preview, mirrored by the `backend` attribute. */
 	get backend(): Preview.Backend {
 		return this.controls.backend.peek();
 	}
 
 	set backend(value: Preview.Backend) {
-		this.controls.backend.set(value);
+		this.controls.backend.set(parseBackend(value));
+		this.#accept("backend");
 	}
 
-	/** When to announce the broadcast, mirrored by the `announce` attribute. */
-	get announce(): AnnounceMode {
+	/** When to announce the broadcast, mirrored by the `announce` attribute; undefined while that attribute is invalid. */
+	get announce(): AnnounceMode | undefined {
 		return this.controls.announce.peek();
 	}
 
 	set announce(value: AnnounceMode) {
-		this.controls.announce.set(value);
+		this.controls.announce.set(parseAnnounce(value));
+		this.#accept("announce");
+	}
+
+	/**
+	 * Whether to publish a stats track, mirrored by the `stats` attribute. The catalog names it in its
+	 * `stats` section, and it reports what each rendition has sent plus the connection's PROBE
+	 * round-trip time, about once a second while someone subscribes.
+	 */
+	get stats(): boolean {
+		return this.controls.stats.peek();
+	}
+
+	set stats(value: boolean) {
+		this.controls.stats.set(value);
+		this.#accept("stats");
+	}
+
+	/**
+	 * Where viewers may publish feedback, relative to the broadcast as a rendition reference is (from
+	 * `room/live`, `viewers` is `room/viewers`), mirrored by the `echo-path` attribute. Sets the
+	 * catalog's `echo` section, so a `<moq-watch echo>` publishes its feedback there. Undefined solicits none.
+	 */
+	get echoPath(): Moq.Path.Relative | undefined {
+		return this.controls.echoPath.peek();
+	}
+
+	set echoPath(value: string | undefined) {
+		this.controls.echoPath.set(parseEchoPath(value ?? null));
+		this.#accept("echo-path");
 	}
 }
 

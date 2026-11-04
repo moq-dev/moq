@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { Instant, Manual, Milli, Nano, now, yieldNow } from "@moq/clock";
 import { Once } from "@moq/signals";
 import { accept } from "./connection/accept.ts";
 import { connect } from "./connection/connect.ts";
 import type { Drain } from "./connection/goaway.ts";
-import type { Session } from "./ietf/adapter.ts";
 import { GoAway } from "./ietf/goaway.ts";
+import type { Session } from "./ietf/session.ts";
 import { Subscriber } from "./ietf/subscriber.ts";
 import { ALPN, Version as IetfVersion } from "./ietf/version.ts";
 import { Goaway } from "./lite/goaway.ts";
@@ -25,19 +25,19 @@ const url = new URL("https://relay.example/room");
 const DRAIN = 2n ** 62n - 1n;
 
 async function settle() {
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await yieldNow();
 }
 
 async function waitUntil(pred: () => boolean): Promise<void> {
-	const deadline = Date.now() + 2000;
+	const deadline = Instant.add(now(), Nano.fromMilli(Milli(2000)));
 	for (;;) {
 		if (pred()) return;
-		if (Date.now() > deadline) throw new Error("timed out waiting for condition");
+		if (now() > deadline) throw new Error("timed out waiting for condition");
 		await settle();
 	}
 }
 
-/** Bytes of one GOAWAY, framed the way the draft-17 setup stream carries it. */
+/** Bytes of one GOAWAY, framed the way the setup stream carries it. */
 async function encodeIetfGoaway(): Promise<Uint8Array> {
 	const chunks: Uint8Array[] = [];
 	const writable = new WritableStream<Uint8Array>({
@@ -45,9 +45,9 @@ async function encodeIetfGoaway(): Promise<Uint8Array> {
 			chunks.push(Uint8Array.from(chunk));
 		},
 	});
-	const writer = new Writer(writable, IetfVersion.DRAFT_17);
+	const writer = new Writer(writable, IetfVersion.DRAFT_22);
 	await writer.u53(GoAway.id);
-	await new GoAway({ newSessionUri: "" }).encode(writer, IetfVersion.DRAFT_17);
+	await new GoAway({ newSessionUri: "" }).encode(writer, IetfVersion.DRAFT_22);
 	const size = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
 	const bytes = new Uint8Array(size);
 	let offset = 0;
@@ -96,19 +96,20 @@ async function sendLiteGoaway(server: WebTransport): Promise<void> {
 /**
  * After GOAWAY the old session keeps opening subscribe, fetch, and announce-interest streams
  * while it is the only route, at the drain cost. Once a replacement answers, it outranks the
- * old session and new requests open there instead. These wires carry no epoch, so the
+ * old session and new requests open there instead. These wires carry no instance, so the
  * replacement is another instance: the request already open stays on the draining session.
  */
 async function handover(kind: "lite" | "ietf"): Promise<void> {
-	const protocol = kind === "lite" ? ALPN_06 : ALPN.DRAFT_17;
+	const protocol = kind === "lite" ? ALPN_06 : ALPN.DRAFT_22;
 	const pair = createMockTransportPair(protocol);
 	const inject = kind === "ietf" ? captureFirstUni(pair.server) : undefined;
 	const goawayBytes = kind === "ietf" ? await encodeIetfGoaway() : undefined;
 
 	const consume = new OriginProducer();
 	const publish = new OriginProducer();
-	const broadcast = publish.createBroadcast(Path.from("room"));
-	broadcast.announce();
+	const broadcastPublication = publish.createBroadcast(Path.from("room"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 
 	const served: TrackProducer[] = [];
 	let armVideo = true;
@@ -116,7 +117,8 @@ async function handover(kind: "lite" | "ietf"): Promise<void> {
 		for (;;) {
 			const req = await wireOf(broadcast).requested();
 			if (!req) break;
-			const track = req.accept({ timescale: Timescale.MILLI });
+			// The draining session fetches the superseded group 0 below.
+			const track = req.accept({ timescale: Timescale.MILLI, maxAge: null });
 			if (req.name === "video" && armVideo) track.writeFrame(textFrame("one"));
 			if (req.name === "later") track.writeFrame(textFrame("from-draining"));
 			if (req.name === "audio") track.writeFrame(textFrame("from-replacement"));
@@ -161,7 +163,7 @@ async function handover(kind: "lite" | "ietf"): Promise<void> {
 
 		if (inject && goawayBytes) await inject.inject(goawayBytes);
 		else await sendLiteGoaway(pair.server);
-		await wireOf(client).goaway;
+		await client.draining;
 
 		const update = await announced.next();
 		expect(update?.kind).toBe("update");
@@ -179,9 +181,10 @@ async function handover(kind: "lite" | "ietf"): Promise<void> {
 		expect(await later.readString()).toBe("from-draining");
 
 		// A fresh consumer caches nothing, so the publisher's answer proves the FETCH reached the wire.
-		const fetched = wireOf(client).consume(Path.from("room")).track("video").fetchGroup(0);
-		if (kind === "lite") expect(await (await fetched).readString()).toBe("one");
-		else await expect(fetched).rejects.toThrow(/not supported/);
+		const fetched = wireOf(client).consume(Path.from("room")).track("video").fetchGroup(0n);
+		const group = await fetched;
+		expect(await group.readString()).toBe("one");
+		group.close();
 
 		// A new announce-interest opens too, and sees the route at the drain cost.
 		const interest = client.announced();
@@ -243,8 +246,8 @@ test("ietf: requests open on the draining session until the replacement wins", a
 	await handover("ietf");
 });
 
-test("announcing and subscribing after GOAWAY still open streams, on the adapter too", async () => {
-	for (const version of [IetfVersion.DRAFT_14, IetfVersion.DRAFT_16, IetfVersion.DRAFT_19]) {
+test("announcing and subscribing after GOAWAY still open streams", async () => {
+	for (const version of [IetfVersion.DRAFT_18, IetfVersion.DRAFT_22]) {
 		const goaway = new Once<Drain>();
 		goaway.set({ uri: "" });
 		let opened = false;
@@ -255,24 +258,19 @@ test("announcing and subscribing after GOAWAY still open streams, on the adapter
 				opened = true;
 				throw new Error("openBi");
 			},
-			openNativeBi() {
-				opened = true;
-				throw new Error("openNativeBi");
-			},
 			acceptBi() {
 				return Promise.resolve(undefined);
 			},
 			nextRequestId() {
 				return Promise.resolve(0n);
 			},
-			spendRequest() {
+			checkRequestId() {
 				throw new Error("unexpected incoming request");
 			},
 			close() {},
 		};
 
-		// A soliciting peer, so draft-14 still asks it for the empty namespace.
-		const subscriber = new Subscriber({ session, goaway, solicit: true });
+		const subscriber = new Subscriber({ session, goaway });
 		const track = subscriber.consume(Path.from("room")).track("video").subscribe();
 		await track.closed;
 		expect(opened).toBe(true);
@@ -281,7 +279,6 @@ test("announcing and subscribing after GOAWAY still open streams, on the adapter
 		const announced = subscriber.announced();
 		await waitUntil(() => opened);
 		announced.close();
-		subscriber.close();
 	}
 });
 
@@ -295,15 +292,16 @@ async function routeDeath(kind: "lite" | "ietf", after: boolean): Promise<void> 
 	const clock = new Manual();
 	const installed = clock.install();
 	using _clock = { [Symbol.dispose]: () => installed.close() };
-	const protocol = kind === "lite" ? ALPN_06 : ALPN.DRAFT_17;
+	const protocol = kind === "lite" ? ALPN_06 : ALPN.DRAFT_22;
 	const pair = createMockTransportPair(protocol);
 	const inject = kind === "ietf" ? captureFirstUni(pair.server) : undefined;
 	const goawayBytes = kind === "ietf" ? await encodeIetfGoaway() : undefined;
 
 	const consume = new OriginProducer();
 	const publish = new OriginProducer();
-	const broadcast = publish.createBroadcast(Path.from("room"));
-	broadcast.announce();
+	const broadcastPublication = publish.createBroadcast(Path.from("room"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 
 	const served: TrackProducer[] = [];
 	const serving = (async () => {
@@ -337,7 +335,7 @@ async function routeDeath(kind: "lite" | "ietf", after: boolean): Promise<void> 
 
 		if (inject && goawayBytes) await inject.inject(goawayBytes);
 		else await sendLiteGoaway(pair.server);
-		await wireOf(client).goaway;
+		await client.draining;
 
 		routes = consume.announced();
 		expect((await routes.next())?.kind).toBe("start");

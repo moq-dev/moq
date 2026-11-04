@@ -5,20 +5,26 @@ stream producers also advertise it in their broadcast's catalog (``json.tracks.<
 long as they live, while the catalog has no window mode. A consumer takes over a
 :class:`~moq.TrackConsumer` that has not read a group yet. Either track can come from a request
 as well as by name. Values are any JSON-serializable Python object.
+
+Compression is the track's: publish it with ``TrackInfo(compress=True)``, which JSON benefits from,
+and a consumer reads it with no option of its own.
+
+Every write (a snapshot update, a stream append, a window push or pop) takes a timestamp on the
+broadcast clock, the epoch every track in the broadcast shares: read it with
+:meth:`moq.media.CatalogProducer.now`. The track needs a timescale (``TrackInfo(timescale=1000)``);
+one without is refused.
 """
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import timedelta
 from typing import Any
 
 from moq_ffi import (
     MoqJsonSnapshotConfig,
     MoqJsonSnapshotConsumer,
     MoqJsonSnapshotProducer,
-    MoqJsonStreamConfig,
     MoqJsonStreamConsumer,
     MoqJsonStreamProducer,
     MoqJsonValue,
@@ -30,7 +36,7 @@ from moq_ffi import (
 )
 
 from . import publish, subscribe
-from ._records import _opt_from_us, _opt_us
+from ._records import Timestamp, _opt_from_ts
 from ._stream import _Stream
 from .publish import BroadcastProducer, TrackDemand
 
@@ -53,19 +59,17 @@ __all__ = [
 class Timed:
     """A parsed JSON value and the timestamp of the frame that carried it.
 
-    ``timestamp`` is on the broadcast clock, and ``None`` on an untimed track. It is
-    rounded down to a whole microsecond, so a tick on a track like 90 kHz may not
-    survive a read and republish exactly.
+    ``timestamp`` is on the broadcast clock, and ``None`` on an untimed track.
     """
 
     value: Any
-    timestamp: timedelta | None
+    timestamp: Timestamp | None
 
     @staticmethod
     def _from_ffi(value: MoqJsonValue | None) -> Timed | None:
         if value is None:
             return None
-        return Timed(value=json.loads(value.value), timestamp=_opt_from_us(value.timestamp_us))
+        return Timed(value=json.loads(value.value), timestamp=_opt_from_ts(value.timestamp))
 
 
 class SnapshotProducer:
@@ -75,8 +79,7 @@ class SnapshotProducer:
     snapshots and merge-patch deltas automatically. Set ``deltas=False`` to publish every update
     as a full snapshot in its own group. With deltas on, give the track a ``refresh`` ratio so a
     join after more than that many snapshots' worth of deltas asks for the value restated in a
-    fresh group. Set ``compression`` to DEFLATE-compress each group; the consumer
-    must pass the same flag. A name the catalog already carries is refused.
+    fresh group. A name the catalog already carries is refused.
     """
 
     def __init__(
@@ -85,18 +88,20 @@ class SnapshotProducer:
         track: publish.TrackProducer,
         *,
         deltas: bool = True,
-        compression: bool = False,
     ) -> None:
-        config = MoqJsonSnapshotConfig(deltas=deltas, compression=compression)
+        config = MoqJsonSnapshotConfig(deltas=deltas)
         self._inner = MoqJsonSnapshotProducer(broadcast._inner, track._inner, config)
 
     def demand(self) -> TrackDemand:
         """A watch-only handle to whether this track has subscribers."""
         return TrackDemand(self._inner.demand())
 
-    def update(self, value: Any, *, timestamp: timedelta | None = None) -> None:
-        """Publish a new value. A no-op if unchanged from the previous update."""
-        self._inner.update(json.dumps(value), _opt_us(timestamp, "timestamp"))
+    def update(self, value: Any, timestamp: Timestamp) -> None:
+        """Publish a new value at ``timestamp`` on the broadcast clock.
+
+        A no-op if unchanged from the previous update.
+        """
+        self._inner.update(json.dumps(value), timestamp._ffi())
 
     def finish(self) -> None:
         """Finish the track, closing any open group."""
@@ -106,24 +111,20 @@ class SnapshotProducer:
 class StreamProducer:
     """Publish an ordered log of JSON records (lossless).
 
-    Every :meth:`append` is preserved and delivered in order. Set ``compression`` to
-    DEFLATE-compress the group; the consumer must pass the same flag. A name the catalog already
-    carries is refused.
+    Every :meth:`append` is preserved and delivered in order. A name the catalog already carries is
+    refused.
     """
 
-    def __init__(
-        self, broadcast: BroadcastProducer, track: publish.TrackProducer, *, compression: bool = False
-    ) -> None:
-        config = MoqJsonStreamConfig(compression=compression)
-        self._inner = MoqJsonStreamProducer(broadcast._inner, track._inner, config)
+    def __init__(self, broadcast: BroadcastProducer, track: publish.TrackProducer) -> None:
+        self._inner = MoqJsonStreamProducer(broadcast._inner, track._inner)
 
     def demand(self) -> TrackDemand:
         """A watch-only handle to whether this track has subscribers."""
         return TrackDemand(self._inner.demand())
 
-    def append(self, value: Any, *, timestamp: timedelta | None = None) -> None:
-        """Append one record to the log."""
-        self._inner.append(json.dumps(value), _opt_us(timestamp, "timestamp"))
+    def append(self, value: Any, timestamp: Timestamp) -> None:
+        """Append one record to the log at ``timestamp`` on the broadcast clock."""
+        self._inner.append(json.dumps(value), timestamp._ffi())
 
     def finish(self) -> None:
         """Finish the track, closing the group."""
@@ -133,16 +134,13 @@ class StreamProducer:
 class SnapshotConsumer(_Stream[Timed]):
     """Async iterator over a JSON snapshot track, yielding each state in order (lossy).
 
-    Each item is a :class:`Timed`. Groups older than the subscription's ``max_delay`` are skipped,
+    Each item is a :class:`Timed`. Groups older than the subscription's ``delay.max`` are skipped,
     so a playhead reader sets that budget to its distance behind live; :meth:`latest` skips to the
-    newest state instead. Pass the same ``compression`` the producer used. Usable as an async
-    context manager that cancels on exit.
+    newest state instead. Usable as an async context manager that cancels on exit.
     """
 
-    def __init__(self, track: subscribe.TrackConsumer, *, compression: bool = False) -> None:
-        # deltas is producer-only, so leave it at its default here.
-        config = MoqJsonSnapshotConfig(compression=compression)
-        self._inner = MoqJsonSnapshotConsumer(track._inner, config)
+    def __init__(self, track: subscribe.TrackConsumer) -> None:
+        self._inner = MoqJsonSnapshotConsumer(track._inner)
 
     async def _next(self) -> Timed | None:
         return Timed._from_ffi(await self._inner.next())
@@ -162,13 +160,11 @@ class SnapshotConsumer(_Stream[Timed]):
 class StreamConsumer(_Stream[Timed]):
     """Async iterator over a JSON stream track, yielding every record in order (lossless).
 
-    Each item is a :class:`Timed`. Pass the same ``compression`` the producer used. Usable as an
-    async context manager that cancels on exit.
+    Each item is a :class:`Timed`. Usable as an async context manager that cancels on exit.
     """
 
-    def __init__(self, track: subscribe.TrackConsumer, *, compression: bool = False) -> None:
-        config = MoqJsonStreamConfig(compression=compression)
-        self._inner = MoqJsonStreamConsumer(track._inner, config)
+    def __init__(self, track: subscribe.TrackConsumer) -> None:
+        self._inner = MoqJsonStreamConsumer(track._inner)
 
     async def _next(self) -> Timed | None:
         return Timed._from_ffi(await self._inner.next())
@@ -186,7 +182,6 @@ class WindowProducer:
     by popping, or with ``checkpoint_records`` for a window that is never popped: a reader that
     keeps up still sees every record, while one joining later is told the older ones were skipped.
     Give the track a ``refresh`` ratio so a join past it gets the window restated in a fresh group.
-    Set ``compression`` to DEFLATE-compress each group; the consumer must pass the same flag.
 
     Not advertised in the broadcast's catalog, which has no window mode; a reader names the track.
     """
@@ -195,23 +190,22 @@ class WindowProducer:
         self,
         track: publish.TrackProducer,
         *,
-        compression: bool = False,
         checkpoint_records: int | None = None,
     ) -> None:
-        config = MoqJsonWindowConfig(compression=compression, checkpoint_records=checkpoint_records)
+        config = MoqJsonWindowConfig(checkpoint_records=checkpoint_records)
         self._inner = MoqJsonWindowProducer(track._inner, config)
 
     def demand(self) -> TrackDemand:
         """A watch-only handle to whether this track has subscribers."""
         return TrackDemand(self._inner.demand())
 
-    def push(self, value: Any, *, timestamp: timedelta | None = None) -> None:
-        """Append one record to the back of the window."""
-        self._inner.push(json.dumps(value), _opt_us(timestamp, "timestamp"))
+    def push(self, value: Any, timestamp: Timestamp) -> None:
+        """Append one record to the back of the window at ``timestamp`` on the broadcast clock."""
+        self._inner.push(json.dumps(value), timestamp._ffi())
 
-    def pop(self, count: int, *, timestamp: timedelta | None = None) -> None:
-        """Drop ``count`` records from the front of the window, clamped to what it holds."""
-        self._inner.pop(count, _opt_us(timestamp, "timestamp"))
+    def pop(self, count: int, timestamp: Timestamp) -> None:
+        """Drop ``count`` records from the front of the window at ``timestamp``, clamped to what it holds."""
+        self._inner.pop(count, timestamp._ffi())
 
     def cut(self) -> None:
         """Close the open group, so the next edit opens one restating the retained window.
@@ -269,7 +263,7 @@ def _window_event(timed: MoqJsonWindowTimed | None) -> Timed | None:
         value = WindowSkip(range(event.start, event.end))
     else:
         raise TypeError(f"unknown window event: {event!r}")
-    return Timed(value=value, timestamp=_opt_from_us(timed.timestamp_us))
+    return Timed(value=value, timestamp=_opt_from_ts(timed.timestamp))
 
 
 class WindowConsumer(_Stream[Timed]):
@@ -278,14 +272,12 @@ class WindowConsumer(_Stream[Timed]):
     Each item is a :class:`Timed` whose ``value`` is a :class:`WindowPush`, :class:`WindowPop`, or
     :class:`WindowSkip`. Group rolls never surface: a restated record this reader already has
     yields nothing. A record first learned of from a restatement (after a join, or while behind)
-    carries that frame's timestamp, not its original push time. Pass the same ``compression`` the
-    producer used. Usable as an async context manager that cancels on exit.
+    carries that frame's timestamp, not its original push time. Usable as an async context manager
+    that cancels on exit.
     """
 
-    def __init__(self, track: subscribe.TrackConsumer, *, compression: bool = False) -> None:
-        # checkpoint_records is producer-only, so leave it at its default here.
-        config = MoqJsonWindowConfig(compression=compression)
-        self._inner = MoqJsonWindowConsumer(track._inner, config)
+    def __init__(self, track: subscribe.TrackConsumer) -> None:
+        self._inner = MoqJsonWindowConsumer(track._inner)
 
     async def _next(self) -> Timed | None:
         return _window_event(await self._inner.next())

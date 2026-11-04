@@ -2,6 +2,7 @@ package moq_test
 
 import (
 	"context"
+	"errors"
 	"math"
 	"runtime"
 	"testing"
@@ -24,10 +25,10 @@ func TestReservationUpdateReleasesSubscribedTrack(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.Close()
-	// Dial returns while connecting; the grants need the live session's estimate.
+	// Dial returns while connecting; the rates need the live session's estimate.
 	waitConnects(t, ctx, client.Session(), 1)
 	// Grant assertions use a live QUIC estimate, but need no traffic or probing.
-	bandwidth := client.Session().Bandwidth()
+	bandwidth := client.Session().Allocator()
 	broadcast, err := moq.NewBroadcastProducer()
 	if err != nil {
 		t.Fatal(err)
@@ -53,14 +54,14 @@ func TestReservationUpdateReleasesSubscribedTrack(t *testing.T) {
 		}
 		return demand, bandwidth.Reserve(demand, ceiling)
 	}
-	grant := func(reservation *moq.Reservation, want uint64) {
+	rate := func(reservation *moq.Reservation, want uint64) {
 		t.Helper()
-		got := reservation.Grant()
+		got := reservation.Rate()
 		if got == nil {
-			t.Fatalf("grant unavailable, want %d", want)
+			t.Fatalf("rate unavailable, want %d", want)
 		}
 		if *got != want {
-			t.Fatalf("grant = %d, want %d", *got, want)
+			t.Fatalf("rate = %d, want %d", *got, want)
 		}
 	}
 
@@ -69,20 +70,85 @@ func TestReservationUpdateReleasesSubscribedTrack(t *testing.T) {
 	replacement := bandwidth.Reserve(demand, 1)
 	// Even a retained predecessor must relinquish the allocation explicitly.
 	// Priority makes this independent of the live estimate's exact value.
-	grant(sibling, 0)
+	rate(sibling, 0)
 	retired.Update(0)
-	grant(retired, 0)
-	grant(replacement, 1)
-	grant(sibling, 1)
+	rate(retired, 0)
+	rate(replacement, 1)
+	rate(sibling, 1)
 
 	// Zero is reversible and repeated release is harmless.
 	retired.Update(math.MaxUint64)
-	grant(sibling, 0)
+	rate(sibling, 0)
 	retired.Update(0)
 	retired.Update(0)
-	grant(sibling, 1)
+	rate(sibling, 1)
 	if demand.Wanted() == nil {
 		t.Fatal("release ended the track subscription")
 	}
 	runtime.KeepAlive(retired)
+}
+
+// Viewers are wired through the session: watch, update, override the target,
+// and release a viewer without disturbing the registry. The moq-ffi tests
+// cover how the estimate divides.
+func TestViewersWatchUpdateAndClose(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	relay := startRelay(t, ctx, "127.0.0.1:0")
+	defer relay.server.Close()
+	client, err := moq.Dial(ctx, "https://"+relay.addr, moq.ClientConfig{
+		TLS:  moq.ClientTLS{Insecure: true},
+		Once: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	waitConnects(t, ctx, client.Session(), 1)
+
+	viewers := client.Session().Viewers()
+	first, err := viewers.Watch(4_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := viewers.Watch(1_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Whether QUIC has a receive estimate yet varies, but a slice never exceeds its ceiling.
+	if rate := second.Rate(); rate != nil && *rate > 1_000_000 {
+		t.Fatalf("rate = %d, above its 1000000 ceiling", *rate)
+	}
+	if err := second.Update(500_000); err != nil {
+		t.Fatal(err)
+	}
+	if rate := second.Rate(); rate != nil && *rate > 500_000 {
+		t.Fatalf("rate = %d, above its 500000 ceiling", *rate)
+	}
+	zero := uint64(0)
+	if err := viewers.SetTarget(&zero); err != nil {
+		t.Fatal(err)
+	}
+	if err := viewers.SetTarget(nil); err != nil {
+		t.Fatal(err)
+	}
+	// Past what a PROBE target carries: refused.
+	if _, err := viewers.Watch(1 << 53); !errors.Is(err, moq.ErrOutOfRange) {
+		t.Fatalf("Watch(2^53) = %v, want ErrOutOfRange", err)
+	}
+
+	// Closing one viewer leaves the others and the registry usable.
+	second.Close()
+	if err := first.Update(2_000_000); err != nil {
+		t.Fatal(err)
+	}
+	if rate := first.Rate(); rate != nil && *rate > 2_000_000 {
+		t.Fatalf("rate = %d, above its 2000000 ceiling", *rate)
+	}
+	first.Close()
+	last, err := client.Session().Viewers().Watch(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last.Close()
 }

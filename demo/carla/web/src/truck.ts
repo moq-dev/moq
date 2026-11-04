@@ -45,8 +45,8 @@ export class SafetyCommandBroadcast {
 
 	constructor(command: Command, broadcast = new Moq.Broadcast.Producer()) {
 		this.broadcast = broadcast;
-		const track = this.broadcast.createTrack("control");
-		this.#producer = new Json.Snapshot.Producer<Record<string, unknown>>({ track, compression: "deflate" });
+		const track = this.broadcast.createTrack("control", { compress: true });
+		this.#producer = new Json.Snapshot.Producer<Record<string, unknown>>({ track });
 		this.#producer.update({
 			value: { ...command.cmd, sequence: command.sequence, timestamps: command.timestamps },
 		});
@@ -177,7 +177,7 @@ export class Truck {
 		this.#canvas.set(canvas);
 	}
 
-	/** Prepare a bumpless handoff from the latest vehicle feedback. */
+	/** Take over with measured steering and gear, zero throttle, and full brake. */
 	beginTakeover(): boolean {
 		const status = this.status.peek();
 		if (this.estopped.peek() || !status) return false;
@@ -371,7 +371,6 @@ export class Truck {
 		const consumer = new Json.Snapshot.Consumer({
 			track: statusTrack,
 			schema: TruckStatusSchema,
-			compression: "deflate",
 		});
 
 		effect.spawn(async () => {
@@ -416,7 +415,8 @@ export class Truck {
 		const driverId = crypto.randomUUID().replaceAll("-", "").slice(0, 12);
 		this.driverId.set(driverId);
 
-		const driverBroadcast = conn.createBroadcast(driverPath(this.name, driverId));
+		const driverBroadcastPublication = conn.createBroadcast(driverPath(this.name, driverId));
+		const driverBroadcast = driverBroadcastPublication.broadcast;
 		effect.cleanup(() => {
 			driverBroadcast.close();
 			this.driverId.set(undefined);
@@ -424,12 +424,13 @@ export class Truck {
 			this.#sentAt.clear();
 		});
 
-		const track = driverBroadcast.createTrack("control");
-		const producer = new Json.Snapshot.Producer<Record<string, unknown>>({ track, compression: "deflate" });
+		const track = driverBroadcast.createTrack("control", { compress: true });
+		const producer = new Json.Snapshot.Producer<Record<string, unknown>>({ track });
 		effect.cleanup(() => producer.finish());
 		effect.run(this.#runControlTrack.bind(this, track, producer));
-		// A fresh epoch per lease: the truck binds its single driver to this path and epoch.
-		driverBroadcast.announce({ epoch: Moq.Epoch.mint() });
+		// A fresh instance per lease, which each publication mints: the truck binds its single
+		// driver to this path and instance.
+		driverBroadcastPublication.announce();
 	}
 
 	#runSafetyControl(connection: Moq.Connection, effect: Moq.Signals.Effect) {
@@ -438,9 +439,10 @@ export class Truck {
 		if (!conn || !command) return;
 
 		const driverId = `safety-${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
-		const broadcast = conn.createBroadcast(driverPath(this.name, driverId));
+		const broadcastPublication = conn.createBroadcast(driverPath(this.name, driverId));
+		const broadcast = broadcastPublication.broadcast;
 		const safety = new SafetyCommandBroadcast(command, broadcast);
-		broadcast.announce({ epoch: Moq.Epoch.mint() });
+		broadcastPublication.announce();
 		effect.cleanup(() => safety.close());
 	}
 

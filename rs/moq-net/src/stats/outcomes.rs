@@ -146,6 +146,7 @@ impl Failure {
 	/// How a session that ended with `err` failed, or `None` for a clean end: anything the
 	/// peer is told is "no error", by either side, and a drain that reached its deadline,
 	/// which is the draining side ending it on purpose.
+	#[cfg(any(feature = "async", test))]
 	pub(crate) fn of(err: &crate::Error) -> Option<Self> {
 		use crate::{Error, SessionError};
 		match err {

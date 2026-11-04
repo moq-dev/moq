@@ -34,7 +34,7 @@ jobs:
         shell: bash -leo pipefail {0}
         env:
           # Somewhere upload-artifact can reach; the harness default is under $TMPDIR.
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
 
       # The harness keeps a failing run's directory: every row's samples and summary.
       - name: Keep the failing run

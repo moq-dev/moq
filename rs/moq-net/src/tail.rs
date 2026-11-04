@@ -25,8 +25,8 @@ pub(crate) struct Tail {
 	streams: u64,
 	// Streams whose header arrived and that are still being read.
 	active: u64,
-	// The publisher ended the subscription, so the track is over even if the session
-	// dies before the tail settles.
+	// The publisher's FIN ended the track, its only end before lite-05, so a session that
+	// dies before the tail settles declares that end before aborting.
 	ended: bool,
 }
 
@@ -47,12 +47,12 @@ impl Tail {
 		}
 	}
 
-	/// Record that the publisher ended the subscription.
+	/// Record that the publisher's FIN ended the track.
 	pub fn end(&mut self) {
 		self.ended = true;
 	}
 
-	/// Whether the publisher ended the subscription.
+	/// Whether the publisher's FIN ended the track.
 	pub fn is_ended(&self) -> bool {
 		self.ended
 	}
@@ -90,6 +90,11 @@ impl Tail {
 	#[cfg(test)]
 	pub fn folds_at(&self, group: u64) -> Option<Instant> {
 		self.ledger.folds_at(group, self.ledger.grace())
+	}
+
+	/// Whether a data stream whose header arrived is still being read.
+	pub fn is_reading(&self) -> bool {
+		self.active > 0
 	}
 
 	/// Data streams received, whether they finished or were reset.
@@ -175,10 +180,13 @@ impl Settle {
 
 	/// Ready once no stream is being read and either `complete` holds or the grace
 	/// expired, or once the subscription is gone.
+	///
+	/// `complete` runs whenever no stream is being read, the grace notwithstanding, so a
+	/// caller recording what it found sees a stream that finished after the grace.
 	pub fn poll(&mut self, waiter: &kio::Waiter, mut complete: impl FnMut(&Tail) -> bool) -> Poll<()> {
 		let expired = self.grace.poll(waiter).is_ready();
 		self.tail
-			.poll(waiter, |tail| match tail.active == 0 && (expired || complete(tail)) {
+			.poll(waiter, |tail| match tail.active == 0 && (complete(tail) || expired) {
 				true => Poll::Ready(()),
 				false => Poll::Pending,
 			})
@@ -192,7 +200,7 @@ mod tests {
 
 	/// The grace gives up on streams that never arrived, never on one still being read:
 	/// its group, or the END_OF_TRACK it carries, still belongs to the track.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn the_grace_waits_for_a_stream_being_read() {
 		let runtime = crate::time::sim();
 		let tail = kio::Producer::new(Tail::default());
@@ -200,7 +208,7 @@ mod tests {
 		let mut settle = Settle::new(&runtime, tail.consume());
 		let mut settled = std::pin::pin!(kio::wait(|waiter| settle.poll(waiter, |_| false)));
 
-		moq_clock::sleep(GRACE * 2).await;
+		kio::clock::sleep(GRACE * 2).await;
 		assert!(
 			futures::poll!(settled.as_mut()).is_pending(),
 			"a stream is still being read"
@@ -210,8 +218,29 @@ mod tests {
 		settled.await;
 	}
 
+	/// A stream that outlives the grace still reaches `complete` once it finishes.
+	#[kio::test]
+	async fn completion_is_judged_after_the_grace() {
+		let runtime = crate::time::sim();
+		let tail = kio::Producer::new(Tail::default());
+		let reading = Reading::open(&tail, Some(0), runtime.now());
+		let mut settle = Settle::new(&runtime, tail.consume());
+		kio::clock::sleep(GRACE * 2).await;
+
+		drop(reading);
+		let mut complete = false;
+		kio::wait(|waiter| {
+			settle.poll(waiter, |tail| {
+				complete = tail.streams() == 1;
+				complete
+			})
+		})
+		.await;
+		assert!(complete);
+	}
+
 	/// A stream parked on another one does not hold the end open.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_parked_stream_does_not_hold_the_end() {
 		let runtime = crate::time::sim();
 		let tail = kio::Producer::new(Tail::default());

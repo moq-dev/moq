@@ -17,7 +17,7 @@ const ESTIMATE_INTERVAL = Nano.fromMilli(Milli(1000));
  * application's own sections, e.g. `scte35`) each edit only their own keys, so their sections
  * compose instead of clobbering one another.
  *
- * The root `clock` is advertised from the first snapshot: every js/publish timestamp is the
+ * The `media.clock` is advertised from the first snapshot: every js/publish timestamp is the
  * installed clock's instant in microseconds, so PTS zero is the wall time of instant zero. The
  * mapping is fixed when the producer is created, so a later system-clock adjustment never retimes
  * the broadcast. A page whose wall clock reads before 2020 has not set it yet (a device booted
@@ -72,15 +72,10 @@ export class CatalogProducer {
 	/**
 	 * Serve a track: seed it with the current catalog, then forward updates.
 	 *
-	 * Pass `opts.compression` to DEFLATE-compress this subscriber's frames, so the same catalog can be
-	 * served both plaintext and compressed (e.g. `catalog.json` and `catalog.json.z`).
+	 * Create the track with `compress: true`: catalog JSON is small and repetitive.
 	 */
-	serve(track: Moq.Track.Producer, effect: Effect, opts?: { compression?: boolean }): void {
-		const output = new Json.Snapshot.Producer<Catalog.Root>({
-			track,
-			compression: opts?.compression ? "deflate" : "none",
-			deltas: false,
-		});
+	serve(track: Moq.Track.Producer, effect: Effect): void {
+		const output = new Json.Snapshot.Producer<Catalog.Root>({ track, deltas: false });
 		output.update({ value: this.#value, at: Time.Timestamp.now() });
 
 		this.#outputs.add(output);
@@ -141,5 +136,5 @@ function advertised(catalog: Catalog.Root, field: "jitter" | "delay"): [string, 
 function pageRoot(): Catalog.Root {
 	const at = Math.round((origin() - Catalog.MOQ_EPOCH_UNIX_MILLIS) * 1000);
 	if (at < 0) return {};
-	return { clock: { wall: Catalog.u53(at), timescale: 1_000_000 } };
+	return { media: { clock: { wall: Catalog.u53(at), timescale: 1_000_000 } } };
 }
