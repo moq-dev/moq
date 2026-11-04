@@ -16,7 +16,18 @@ import { isAnonymous, type Route } from "./hop.ts";
 import type * as Instance from "./instance.ts";
 import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
-import type { Delay, Demand, Groups, Info, Position, Producer, Request, Subscriber, Subscription } from "./track.ts";
+import type {
+	Delay,
+	Demand,
+	Groups,
+	Info,
+	InfoInit,
+	Position,
+	Producer,
+	Request,
+	Subscriber,
+	Subscription,
+} from "./track.ts";
 import { max, min } from "./util/sequence.ts";
 import * as Varint from "./varint.ts";
 import type { Window } from "./window.ts";
@@ -495,7 +506,7 @@ export const hooks: {
 	 * Take a request's producer without resolving its subscribers, so content written before
 	 * {@link StagedTrack.commit} is there when the first reader looks; assigned by `track.ts`.
 	 */
-	stageRequest: (request: Request, info: Partial<Info>) => StagedTrack;
+	stageRequest: (request: Request, info: InfoInit) => StagedTrack;
 	/** The newest frame a producer's cache holds, read without subscribing; assigned by `track.ts`. */
 	cachedLargest: (producer: Producer) => Position | undefined;
 	/** The publisher priority from a demanded track's committed {@link Info}; assigned by `track.ts`. */
@@ -615,6 +626,12 @@ export const hooks: {
 	groupChanged: (subscriber: Subscriber, fn: () => void) => Dispose;
 	/** Apply a FETCH reader budget without inheriting SUBSCRIBE's zero default. */
 	fetchBudget: (subscriber: Subscriber, maxDelay: Milli | undefined) => void;
+	/** Whether a reader beyond one-shot fetches subscribes to this copy. */
+	subscribing: (producer: Producer) => Getter<boolean>;
+	/** Leave a wire copy serving its cache and fills without a live feed. */
+	cacheTrack: (producer: Producer) => void;
+	/** Fail subscriptions reaching beyond `edge`, keeping history readers and one-shot fetches. */
+	refuseLive: (producer: Producer, edge: bigint, error: Error) => void;
 	/**
 	 * A fetch's group `sequence`, before it reads: `true` once it is cached or asked of a fill,
 	 * written yet or not, as the Rust `fetch_group` queues one; `false` with no handler to ask;
@@ -861,6 +878,15 @@ export const hooks: {
 	},
 	groupChanged: () => {
 		throw new Error("track.ts not loaded");
+	},
+	cacheTrack: () => {
+		throw new Error("track.ts not loaded");
+	},
+	refuseLive: () => {
+		throw new Error("track.ts not loaded");
+	},
+	subscribing: () => {
+		throw new Error("track module not loaded");
 	},
 	fetchBudget: () => {
 		throw new Error("track.ts not loaded");

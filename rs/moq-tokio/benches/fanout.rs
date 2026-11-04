@@ -150,5 +150,117 @@ fn bench_fanout(c: &mut Criterion) {
 	group.finish();
 }
 
-criterion_group!(benches, bench_fanout);
+#[cfg(feature = "quic")]
+mod native {
+	use super::*;
+	use bytes::Bytes;
+	use moq_net::transport::poll::{RecvStream as _, SendStream as _};
+	use std::alloc::{GlobalAlloc, Layout, System};
+	use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+	struct Counter;
+	static COUNTING: AtomicBool = AtomicBool::new(false);
+	static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+	static ALLOCATED: AtomicU64 = AtomicU64::new(0);
+	#[global_allocator]
+	static ALLOCATOR: Counter = Counter;
+
+	fn count(size: usize) {
+		if COUNTING.load(Ordering::Relaxed) {
+			ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+			ALLOCATED.fetch_add(size as u64, Ordering::Relaxed);
+		}
+	}
+	unsafe impl GlobalAlloc for Counter {
+		unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+			count(layout.size());
+			unsafe { System.alloc(layout) }
+		}
+		unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+			count(layout.size());
+			unsafe { System.alloc_zeroed(layout) }
+		}
+		unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+			count(size);
+			unsafe { System.realloc(ptr, layout, size) }
+		}
+		unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+			unsafe { System.dealloc(ptr, layout) }
+		}
+	}
+
+	fn transfer<S: moq_net::transport::poll::Session>(
+		pair: &Pair,
+		client: &S,
+		server: &S,
+		streams: usize,
+		message: &Bytes,
+	) {
+		pair.runtime.block_on(async {
+			let send = async {
+				for _ in 0..streams {
+					let mut send = client.open_uni(Default::default()).await.expect("open");
+					send.write_chunk(message.clone()).await.expect("write");
+					send.finish().expect("finish");
+				}
+			};
+			let recv = async {
+				for _ in 0..streams {
+					let mut recv = server.accept_uni().await.expect("accept");
+					let mut offset = 0;
+					while let Some(chunk) = recv.read_chunk(message.len()).await.expect("read") {
+						assert_eq!(chunk, message.slice(offset..offset + chunk.len()));
+						offset += chunk.len();
+					}
+					assert_eq!(offset, message.len());
+				}
+			};
+			tokio::join!(send, recv);
+		});
+	}
+
+	pub fn benchmark(c: &mut Criterion) {
+		let pair = Pair::new();
+		let client = moq_tokio::quic::web::Session::raw(pair.client.clone());
+		let server = moq_tokio::quic::web::Session::raw(pair.server.clone());
+		let allocations = std::env::var_os("NATIVE_ALLOCS").is_some();
+		let mut group = c.benchmark_group("native_transport");
+		for size in [64, 64 * 1024] {
+			let message = Bytes::from(vec![0x5a; size]);
+			for streams in [1, 16, 256] {
+				if allocations {
+					for _ in 0..16 {
+						transfer(&pair, &client, &server, streams, &message);
+					}
+					ALLOCATIONS.store(0, Ordering::Relaxed);
+					ALLOCATED.store(0, Ordering::Relaxed);
+					COUNTING.store(true, Ordering::Relaxed);
+					for _ in 0..64 {
+						transfer(&pair, &client, &server, streams, &message);
+					}
+					COUNTING.store(false, Ordering::Relaxed);
+					let count = (streams * 64) as f64;
+					println!(
+						"native_transport bytes={size} streams={streams} allocations_per_stream={} allocated_bytes_per_stream={}",
+						ALLOCATIONS.load(Ordering::Relaxed) as f64 / count,
+						ALLOCATED.load(Ordering::Relaxed) as f64 / count
+					);
+				} else {
+					group.throughput(Throughput::Elements(streams as u64));
+					group.bench_function(format!("bytes-{size}/streams-{streams}"), |b| {
+						b.iter(|| transfer(&pair, &client, &server, streams, &message));
+					});
+				}
+			}
+		}
+		group.finish();
+	}
+}
+
+#[cfg(not(feature = "quic"))]
+mod native {
+	pub fn benchmark(_: &mut criterion::Criterion) {}
+}
+
+criterion_group!(benches, bench_fanout, native::benchmark);
 criterion_main!(benches);

@@ -972,7 +972,10 @@ mod tests {
 		let source_fills = source.create_track("video", None).unwrap().requests();
 
 		let output = moq_net::broadcast::Info::default().produce();
-		let timed = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
+		// A rung's media max age, as `serve` accepts it, so its history is still fresh to fill.
+		let timed = moq_net::track::Info::default()
+			.with_timescale(moq_net::Timescale::MILLI)
+			.with_max_age(hang::container::MAX_AGE);
 		let mut track = output.create_track("video/120p", timed).unwrap();
 		let fills = track.requests();
 		let ascending = |groups| {

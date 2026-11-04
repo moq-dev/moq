@@ -202,7 +202,7 @@ impl Version {
 	}
 
 	/// Whether FETCH carries the subscriber's optional max delay. Added in lite-07; an
-	/// earlier fetch is bounded by the publisher's retention alone.
+	/// earlier fetch is bounded by the publisher's max age alone.
 	pub(crate) fn has_fetch_max_delay(self) -> bool {
 		!matches!(
 			self,

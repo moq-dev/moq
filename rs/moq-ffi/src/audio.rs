@@ -169,7 +169,7 @@ pub struct MoqAudioDecoderOutput {
 	/// jitter buffer to hold ahead of the playhead, reported by
 	/// [`MoqAudioConsumer::delay`], and where a cold join starts; with
 	/// [`estimate`](Self::estimate) it floors the measured delay instead. A `min`
-	/// beyond the track's retention is refused. `max` is the congestion-control
+	/// beyond the track's max age is refused. `max` is the congestion-control
 	/// knob of [`MoqSubscription::delay`](crate::consumer::MoqSubscription::delay):
 	/// a stalled group more than this far behind a newer one is skipped, with no
 	/// buffering added. `None` keeps the moq-mux default of zero for both.

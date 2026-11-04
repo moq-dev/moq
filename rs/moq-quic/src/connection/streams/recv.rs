@@ -455,7 +455,8 @@ impl<'a> Chunks<'a> {
 
 	/// The next contiguous chunk of at most `max_length` bytes, or `None` once the stream finished
 	///
-	/// Fails with [`Error::Blocked`] until more arrives, or [`Error::Reset`]. Call
+	/// Fails with [`Error::Blocked`] until more arrives, or [`Error::Reset`]. A finished stream
+	/// whose leased bytes are not all read stays blocked rather than finish without them. Call
 	/// [`Self::finalize()`] when done.
 	pub fn next(&mut self, max_length: usize) -> Result<Option<Chunk>, Error> {
 		let rs = match &mut self.state {
@@ -490,7 +491,9 @@ impl<'a> Chunks<'a> {
 				Err(Error::Reset(error_code))
 			}
 			RecvState::Recv { size } => {
-				if size == Some(rs.end) && rs.assembler.bytes_read() == rs.end {
+				// Leased bytes left the assembler unread, so the end is not reached until they
+				// are read: freeing the stream now would discard them.
+				if size == Some(rs.end) && rs.assembler.bytes_read() == rs.end && !rs.lease.has_unread() {
 					let state = mem::replace(&mut self.state, ChunksState::Finished);
 					// At this point if we have `rs` self.state must be `ChunksState::Readable`
 					let recv = match state {
