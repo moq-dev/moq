@@ -155,7 +155,7 @@ export class RangeFetch {
 				if (
 					object.subgroup === "datagram" ||
 					object.subgroup === "next" ||
-					(object.subgroup === "explicit" && object.subgroupId !== 0)
+					(object.subgroup === "explicit" && object.subgroupId !== 0n)
 				)
 					throw new Error("FETCH subgroups and datagrams are unsupported");
 				const sequence =
