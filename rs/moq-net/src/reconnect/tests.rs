@@ -329,11 +329,13 @@ async fn only_an_address_with_a_fallback_is_bounded() {
 		.await
 		.unwrap()
 		.expect_err("nothing answered");
-	assert_eq!(run.events, ["abandon", "abandon"]);
+	assert_eq!(run.events, ["abandon", "abandon", "retrying"]);
 	assert_eq!(run.dials, targets, "a walk under way finishes past the retry window");
 	assert_eq!(kio::clock::now() - started, ATTEMPT + config.timeout);
+	// The give-up names the last address's connect timeout as its cause.
+	let last = Failure::Timeout(config.timeout).to_string();
 	assert!(
-		matches!(&err, TestError::Policy(Failure::Timeout(timeout)) if *timeout == config.timeout),
+		matches!(&err, TestError::Policy(Failure::Exhausted { last: Some(cause), .. }) if *cause == last),
 		"{err}"
 	);
 }

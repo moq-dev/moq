@@ -482,6 +482,10 @@ impl Shared {
 
 	/// Mirror the policy's draining predecessor, for [`Connection::close`].
 	fn predecessor(&self, predecessor: Option<(&moq_net::Session, kio::clock::Instant)>) {
+		// A write wakes every watcher, so skip one that changes nothing.
+		if predecessor.is_none() && self.state.read().predecessor.is_none() {
+			return;
+		}
 		if let Ok(mut state) = self.state.write() {
 			state.predecessor = predecessor.map(|(session, deadline)| (session.clone(), deadline));
 		}
@@ -1310,6 +1314,7 @@ fn terminal(state: &State) -> Error {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use url::Url;
 
 	/// A millisecond track: the frames written here carry timestamps.
 	fn timed() -> moq_net::track::Info {
