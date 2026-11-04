@@ -442,7 +442,8 @@ impl Track {
 			self.release(name, jitter, true)?;
 			self.restart = pending.restart;
 			self.clock = DecodeClock::default();
-			self.declared = None;
+			// The step changes the timeline, not the group's declared reorder bound.
+			self.declared = self.declared.take().map(DeclaredClock::restart);
 			self.keyframe = None;
 			self.leading_floor = None;
 		}
@@ -5077,7 +5078,7 @@ mod tests {
 			if pending.restart != track.restart {
 				track.restart = pending.restart;
 				track.clock = DecodeClock::default();
-				track.declared = None;
+				track.declared = track.declared.take().map(super::DeclaredClock::restart);
 			}
 			if keyframe {
 				track.declared = reorder.map(super::DeclaredClock::new);
