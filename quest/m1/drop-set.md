@@ -107,16 +107,21 @@ decision above and the PR's `## Waiting` item on out-of-order creation:
 - ✅ **SKIP is final:** creating a group (or appending a group or datagram)
   at a skipped sequence is refused with `Error::Skipped` (JS `Skipped`).
   Re-creating a dropped or aborted sequence still works.
-- **A SKIP replaces a stale (OLD) drop, but not a final one** (decided in
-  `/quest-iterate` from review, 2026-11-04). OLD is the only verdict an
-  update reopens: a SKIP that left an earlier OLD in place let the next
-  update supersede it, so a relay waited on or refilled a sequence its
-  upstream had declared never produced. A final DROP already settles every
-  reader and no update reopens it, so the first final verdict stands. The
-  rule lives in the model, so `skip_groups` and `append_group`'s implicit
-  skip follow it too. A received SKIP or final DROP also takes its groups
+- ✅ **SKIP replaces every drop, final or stale** (maintainer, 2026-11-03,
+  `/quest-complete`, replacing the 2026-11-04 `/quest-iterate` rule that a
+  SKIP replaced only a stale OLD drop). "Never produced" is the most
+  authoritative fact about a sequence, so a received SKIP, `skip_groups`, or
+  `append_group`'s implicit skip overwrites an earlier DROP of any code (OLD,
+  aborted, evicted, NOT_FOUND), and a later DROP leaves a skip in place.
+  Readers that drop already ended stay ended, and nothing is re-delivered; the
+  run's reason becomes Skip, so every later reader, relay and downstream
+  report sees SKIP, and a relay forwards the SKIP even over a DROP it already
+  forwarded (`DropCursor::reported_skip`, `TrackRun::dropped`, and their JS
+  mirrors). A cached group is never overwritten: a received SKIP naming one
+  leaves the group, logs a protocol error, and keeps the session, since the
+  draft requires no more. A received SKIP or final DROP also takes its groups
   out of the subscriber's stale record, so the next update doesn't owe them
-  again.
+  again. Not chosen: SKIP replacing only a stale OLD drop.
 - ✅ **`append_group` is an implicit skip** (refinement, same session): it
   means "the next group", so the producer declares it won't go back, and it
   skips every sequence below it that never arrived and wasn't already given

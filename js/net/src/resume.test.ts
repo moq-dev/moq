@@ -1297,6 +1297,39 @@ test("a resumed reader reports a drop once and still serves a late group", async
 	a.close();
 });
 
+// A skip of a run the serving copy already dropped replaces the drop, so the resumed reader
+// reports it again, as a skip, and only once. Mirrors Rust.
+test("a resumed reader reports a skip over a reported drop", () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe({ delay: { max: Milli(60_000) } });
+	const recv = () => {
+		const next = hooks.tryRecvGroup(sub, true);
+		if (next.kind === "group") {
+			next.group.close();
+			return next.group.sequence;
+		}
+		if (next.kind === "drop") return [next.start, next.end, next.skip === true];
+		return next.kind;
+	};
+	ta.write(0n);
+	expect(recv()).toBe(0n);
+	hooks.dropTrackGroups(ta.producer, 1n, 3n, { error: new StreamError(StreamCode.NotFound) });
+	expect(recv()).toEqual([1n, 3n, false]);
+	expect(recv()).toBe("idle");
+	ta.producer.skipGroups(1n, 3n);
+	expect(recv()).toEqual([1n, 3n, true]);
+	expect(recv()).toBe("idle");
+	ta.write(3n);
+	expect(recv()).toBe(3n);
+
+	sub.close();
+	front.consumer.close();
+	a.close();
+});
+
 test("a separately polled drop does not deliver its run", () => {
 	const front = new Front();
 	const source = new BroadcastProducer();

@@ -798,7 +798,9 @@ class Reader implements ResumeSource {
 				if (open) {
 					// Report once without marking it delivered: a late fill may still land.
 					this.#drops = removeRun(this.#drops, open.start, open.end);
-					if (run.stale !== undefined) insertRun(this.#reportedStale, open.start, open.end);
+					// A skip is final, so no update reopens a stale report it replaced.
+					if (run.skip) this.#reportedStale = removeRun(this.#reportedStale, open.start, open.end);
+					else if (run.stale !== undefined) insertRun(this.#reportedStale, open.start, open.end);
 					return { kind: "drop", ...open, error: run.error, skip: run.skip, stale: run.stale };
 				}
 			}

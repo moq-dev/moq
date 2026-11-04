@@ -4,6 +4,19 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `track::Producer::skip_groups` declares groups never produced ([#7670](https://github.com/moq-dev/moq/pull/7670))
+
+`track::Producer::drop_groups` is no longer public. To say the track will never hold some groups, call `skip_groups(range)`: readers stop waiting for them, no reader ends, and a relay forwards a lite-07 SUBSCRIBE_SKIP.
+
+```rust
+// Before
+producer.drop_groups(from..to, moq_net::StreamError::NotFound);
+// After
+producer.skip_groups(from..to);
+```
+
+A skip is final: `create_group` and `append_group` at a skipped sequence fail with `Error::Skipped`, and a later drop leaves it skipped. It replaces an earlier drop of the same groups, whatever its error, but never a cached group. `append_group` now skips the holes below it that earlier `create_group` calls left since the last append; call `create_group` for every sequence you still mean to fill before appending.
+
 ### Datagrams are their own track kind ([#7752](https://github.com/moq-dev/moq/pull/7752))
 
 A stream track no longer carries datagrams. `track::Producer::{append_datagram, insert_datagram}` and `track::Subscriber/Ordered::{poll_recv_datagram, recv_datagram}` are removed; a datagram track is created and read through the broadcast, in a namespace apart from stream tracks, with its own sequence counter.

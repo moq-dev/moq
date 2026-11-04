@@ -1016,6 +1016,7 @@ export class Producer {
 		hooks.trackReleased = (producer) => producer.#state.closed;
 		hooks.trackFinished = (producer) => producer.#state.end.peek() !== undefined;
 		hooks.dropTrackGroups = (producer, start, end, hole) => producer.#drop(start, end, hole, true);
+		hooks.skipTrackGroups = (producer, start, end) => producer.#skipReceived(start, end);
 		hooks.supersedeStale = (producer, judgedEnd) => {
 			for (const state of [producer.#state, ...producer.#sinks]) {
 				state.judgedEnd = judgedEnd;
@@ -1118,15 +1119,19 @@ export class Producer {
 		return undefined;
 	}
 
-	// Record `[start, end)` given up as `hole` says. An upstream drop (`open`) also ends the
-	// groups still arriving in it with its error, so their readers settle now rather than once
-	// the stream's reset lands; one that finished here stays whole. A skip names nothing produced.
-	#drop(start: bigint, end: bigint, hole: Hole, open = false): void {
-		if (start >= end) return;
+	// Record `[start, end)` given up as `hole` says, returning the runs recorded. A skip is final
+	// and the most authoritative verdict, so a drop never replaces one. An upstream drop (`open`)
+	// also ends the groups still arriving in it with its error, so their readers settle now
+	// rather than once the stream's reset lands; one that finished here stays whole. A skip names
+	// nothing produced.
+	#drop(start: bigint, end: bigint, hole: Hole, open = false): Run[] {
+		if (start >= end) return [];
+		const skipped = hole.skip ? [] : this.#state.drops.peek().filter((run) => run.skip);
+		const runs = runGaps(skipped, start, end);
 		// A fill no longer owes what the track gave up.
 		this.#fills.dropped(start, end);
 		for (const state of [this.#state, ...this.#sinks]) {
-			state.drops.update((drops) => insertDrop(drops, start, end, hole));
+			state.drops.update((drops) => runs.reduce((drops, run) => insertDrop(drops, run.start, run.end, hole), drops));
 		}
 		if (open && !hole.skip) {
 			for (const [sequence, entry] of this.#cached) {
@@ -1140,6 +1145,7 @@ export class Producer {
 		if (hole.stale === undefined) this.#arrive(start, end);
 		// Giving up the last sequences below the end reaches it, as writing them would.
 		this.#endLargest();
+		return runs;
 	}
 
 	// A publisher may re-create a group it cut; the sequence is no longer given up.
@@ -1697,8 +1703,8 @@ export class Producer {
 	 * Append a new group with the next sequence number: one past this producer's own writes.
 	 *
 	 * Appending says the producer will not go back, so it skips every sequence below the new
-	 * group that it never produced and did not give up, from the lowest it produced since its
-	 * last append, as {@link skipGroups} would. Those sequences are then final: creating one
+	 * group that it never produced, from the lowest it produced since its last append, as
+	 * {@link skipGroups} would, replacing any drop there. Those sequences are then final: creating one
 	 * throws {@link Skipped}. Appending alone never leaves such a gap; one left by out-of-order
 	 * {@link createGroup} calls is what it names.
 	 *
@@ -1730,24 +1736,33 @@ export class Producer {
 	 * This and {@link appendGroup} are the only sources of a skip: a gap between created groups
 	 * says nothing, since groups may be created out of order, so only the producer knows a
 	 * sequence will never exist. A skip is final: creating a group at a skipped sequence throws
-	 * {@link Skipped}. A sequence already produced or given up for good keeps what it is; a stale
-	 * drop, which new terms may supersede, is replaced. Mirrors the Rust `skip_groups`.
+	 * {@link Skipped}, and a later drop of it is ignored.
+	 *
+	 * A skip replaces any drop of the same sequences, whatever its error: a reader the drop
+	 * already ended stays ended, and every later reader and relay sees the skip. A group already
+	 * cached keeps what it is, since it was produced after all. Mirrors the Rust `skip_groups`.
 	 */
 	skipGroups(start: bigint, end: bigint): void {
-		if (this.#state.closed.peek() !== undefined) return;
+		this.#skipReceived(start, end);
+	}
+
+	// `skipGroups`, returning the cached sequences it left alone: a skip naming a group that
+	// arrived contradicts it, which a subscriber reports.
+	#skipReceived(start: bigint, end: bigint): Run[] {
+		if (this.#state.closed.peek() !== undefined) return [];
 		const cached: Run[] = [];
 		for (const sequence of this.#cached.keys()) {
 			if (sequence >= start && sequence < end) insertRun(cached, sequence, sequence + 1n);
 		}
 		this.#skipGaps(cached, start, end);
+		return cached;
 	}
 
-	// Skip what of `[start, end)` neither `kept` nor a final drop already names. A stale drop is
-	// replaced: new terms would supersede it, leaving the sequence owed, while a skip is final.
+	// Skip what of `[start, end)` neither `kept` nor an earlier skip names, replacing any drop.
 	#skipGaps(kept: readonly Run[], start: bigint, end: bigint): void {
-		const settled = this.#state.drops.peek().filter((run) => run.stale === undefined);
+		const skipped = this.#state.drops.peek().filter((run) => run.skip);
 		for (const gap of runGaps(kept, start, end)) {
-			for (const open of runGaps(settled, gap.start, gap.end)) {
+			for (const open of runGaps(skipped, gap.start, gap.end)) {
 				this.#drop(open.start, open.end, skipHole());
 			}
 		}
@@ -1760,11 +1775,17 @@ export class Producer {
 	}
 
 	// Settle an append at `sequence`: skip every sequence below it this track's own publisher
-	// never produced and did not give up for good, from the lowest it produced since its last
-	// append, since appending says it will not go back. A final reason already given stands.
+	// never produced, from the lowest it produced since its last append, since appending says it
+	// will not go back. The skip replaces a drop given there, as `skipGroups` does.
 	#settleAppend(sequence: bigint): void {
 		const from = this.#appended ?? this.#produced[0]?.start;
-		if (from !== undefined) this.#skipGaps(this.#produced, from, sequence);
+		if (from !== undefined) {
+			const kept = [...this.#produced];
+			for (const cached of this.#cached.keys()) {
+				if (cached >= from && cached < sequence) insertRun(kept, cached, cached + 1n);
+			}
+			this.#skipGaps(kept, from, sequence);
+		}
 		this.#produced = [];
 		this.#appended = sequence + 1n;
 	}
@@ -2225,6 +2246,9 @@ export class Subscriber {
 	// The reported runs judged stale, for a wire whose update re-offers them; see
 	// `hooks.reofferStale`.
 	#reportedStale: Run[] = [];
+	// The reported runs skipped: a skip replaces a drop, so a run reported dropped is reported
+	// again once it is skipped, and only a skip already reported stops it.
+	#reportedSkip: Run[] = [];
 	// The group the frame-level helpers are currently draining, acquired through the
 	// sequence cursor so frame reads and {@link Ordered.nextGroup} share one floor.
 	#frameGroup?: GroupConsumer;
@@ -3517,14 +3541,19 @@ export class Subscriber {
 		return this.#parked(groups) ? { kind: "boundary" } : { kind: "done" };
 	}
 
-	// The first part of `[from, to)` this cursor has not reported yet, now reported, with why.
+	// The first part of `[from, to)` this cursor has not reported yet, now reported, with why. A
+	// skip goes out over a drop already reported, since it replaces it.
 	#report(from: bigint, to: bigint, hole: Hole): (Recv & { kind: "drop" }) | undefined {
 		const { start, end } = this.#cursor.peek();
 		for (const run of this.#window.runs(max(from, start), min(to, end ?? to))) {
-			const [gap] = runGaps(this.#reported, run.start, run.end);
+			const [gap] = runGaps(hole.skip ? this.#reportedSkip : this.#reported, run.start, run.end);
 			if (!gap) continue;
 			insertRun(this.#reported, gap.start, gap.end);
-			if (hole.stale !== undefined) insertRun(this.#reportedStale, gap.start, gap.end);
+			if (hole.skip) {
+				// Final, so no update reopens a stale report it replaced.
+				insertRun(this.#reportedSkip, gap.start, gap.end);
+				this.#reportedStale = removeRun(this.#reportedStale, gap.start, gap.end);
+			} else if (hole.stale !== undefined) insertRun(this.#reportedStale, gap.start, gap.end);
 			return { kind: "drop", ...gap, error: hole.error, skip: hole.skip, stale: hole.stale };
 		}
 		return undefined;

@@ -501,9 +501,15 @@ export const hooks: {
 	 * Record that the publisher gave up the groups `[start, end)` with `error`: none will
 	 * arrive, so a reader waiting on one moves past it, a group still arriving in them ends with
 	 * `error`, the declared end does not wait for them, and a relay serving this track forwards
-	 * the drop. A skip ends no reader. Mirrors the Rust `give_up`; assigned by `track.ts`.
+	 * the drop. A skip ends no reader, and replaces any drop; a drop leaves a skip in place.
+	 * Returns the runs recorded. Mirrors the Rust `give_up`; assigned by `track.ts`.
 	 */
-	dropTrackGroups: (producer: Producer, start: bigint, end: bigint, hole: Hole) => void;
+	dropTrackGroups: (producer: Producer, start: bigint, end: bigint, hole: Hole) => Run[];
+	/**
+	 * `Producer.skipGroups`, returning the cached sequences it left alone, which a skip naming a
+	 * group that arrived contradicts. Mirrors the Rust `skip_received`; assigned by `track.ts`.
+	 */
+	skipTrackGroups: (producer: Producer, start: bigint, end: bigint) => Run[];
 	/**
 	 * Forget every run a received copy holds as stale: the terms its upstream judged them under
 	 * were replaced, so they are unknown again. The new terms' ranges end at `judgedEnd`,
@@ -794,6 +800,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	dropTrackGroups: () => {
+		throw new Error("track.ts not loaded");
+	},
+	skipTrackGroups: () => {
 		throw new Error("track.ts not loaded");
 	},
 	producerLargest: () => {

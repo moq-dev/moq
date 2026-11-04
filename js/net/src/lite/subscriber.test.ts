@@ -2627,6 +2627,83 @@ test("a skip or final drop replaces an earlier stale one on lite-07", async () =
 	}
 });
 
+// A SKIP replaces an earlier final DROP of the same groups too: "never produced" is the most
+// authoritative verdict. A later DROP leaves the skip in place, and a SKIP naming a group that
+// arrived keeps the group, logging a protocol error without ending the session. Mirrors Rust.
+test("a skip replaces a final drop but not a cached group on lite-07", async () => {
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	type Entry = { track: Producer; tail: { covers(start: bigint, end: bigint): boolean } };
+	let entry: Entry | undefined;
+	const internal = subscriber as unknown as {
+		runResponses: (stream: unknown, entry: Entry) => Promise<void>;
+	};
+	const runResponses = internal.runResponses.bind(internal);
+	const responses = spyOn(internal, "runResponses").mockImplementation((stream, captured) => {
+		entry = captured;
+		return runResponses(stream, captured);
+	});
+	const warn = spyOn(console, "warn").mockImplementation(() => {});
+	const broadcast = subscriber.consume(Path.from("room"));
+	const track = broadcast.track("video").subscribe({ delay: { max: Milli(500) } });
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version);
+		const stream = await opened(1);
+		await stream.reading;
+		const send = async (resps: SubscribeResponse[]) => {
+			const chunks: Uint8Array[] = [];
+			const writer = new Writer(
+				new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
+				version,
+			);
+			for (const resp of resps) await encodeSubscribeResponse(writer, resp, version);
+			for (const chunk of chunks) stream.inbound.enqueue(chunk);
+			await drainReactions();
+		};
+		await send([
+			{ start: new SubscribeStart([0n]) },
+			{ drop: new SubscribeDrop({ start: 1n, end: 2n, error: StreamCode.NotFound }) },
+		]);
+		if (!entry) throw new Error("no subscription");
+		entry.track.createGroup(5n).finish();
+
+		await send([
+			{ skip: new SubscribeSkip({ start: 1n, end: 2n }) },
+			// A later drop leaves the skip in place.
+			{ drop: new SubscribeDrop({ start: 2n, end: 2n, error: StreamCode.NotFound }) },
+			// Group 5 arrived, so the skip names only 4 and 6.
+			{ skip: new SubscribeSkip({ start: 4n, end: 6n }) },
+		]);
+		expect(() => entry?.track.createGroup(1n)).toThrow(Skipped);
+		expect(() => entry?.track.createGroup(2n)).toThrow(Skipped);
+		expect(entry.tail.covers(4n, 7n)).toBe(true);
+		expect(warn).toHaveBeenCalledTimes(1);
+
+		const reader = entry.track.subscribe({ delay: { max: null } });
+		const got: unknown[] = [];
+		for (let next = hooks.tryRecvGroup(reader, true); next.kind !== "idle"; next = hooks.tryRecvGroup(reader, true)) {
+			if (next.kind === "group") got.push(next.group.sequence);
+			else if (next.kind === "drop") got.push([next.start, next.end, next.skip === true]);
+			else break;
+		}
+		expect(got).toEqual([
+			[1n, 3n, true],
+			[4n, 5n, true],
+			[6n, 7n, true],
+			5n,
+		]);
+		reader.close();
+	} finally {
+		warn.mockRestore();
+		responses.mockRestore();
+		track.close();
+		broadcast.close();
+		subscriber.close();
+	}
+});
+
 // A widening reopens a covered copy, and its readers leaving while the publisher never takes the
 // new SUBSCRIBE gives the setup up: its stream is reset and the copy released, not held forever.
 test("a reopened lite-07 subscription ends once its readers leave", async () => {

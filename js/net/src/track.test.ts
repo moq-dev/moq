@@ -4855,8 +4855,8 @@ test("an errored end keeps its history", async () => {
 
 // Creating a group says nothing about the gap it leaves: groups may be created out of order. An
 // append says the producer will not go back, so it skips every hole below it that was never
-// produced, keeping a reason already given. A received copy's groups arrive in any order, so its
-// gap is not skipped. Mirrors Rust.
+// produced, replacing a drop already given and reported. A received copy's groups arrive in any
+// order, so its gap is not skipped. Mirrors Rust.
 test("an append skips the holes created groups left below it", () => {
 	const producer = new TrackProducer("test");
 	producer.accept({});
@@ -4880,7 +4880,7 @@ test("an append skips the holes created groups left below it", () => {
 	expect(drain()).toEqual([[2n, 3n, false], 0n, 4n]);
 
 	producer.appendGroup().finish();
-	expect(drain()).toEqual([[1n, 2n, true], [3n, 4n, true], 5n]);
+	expect(drain()).toEqual([[1n, 4n, true], 5n]);
 
 	// The next append only names what was left since this one.
 	producer.createGroup(7n).finish();
@@ -4931,9 +4931,9 @@ test("declared skips up to the end settle the track", async () => {
 	reader.close();
 });
 
-// A skip is final: creating at a sequence an append or skipGroups skipped throws, while a dropped
-// sequence may be created again. skipGroups leaves cached sequences and final drops alone, and
-// replaces a stale drop, which new terms would otherwise supersede. Mirrors Rust.
+// A skip is final: creating at a sequence an append or skipGroups skipped throws, and a later drop
+// leaves it skipped, while a dropped sequence may be created again. skipGroups leaves cached
+// sequences alone and replaces every drop, final or stale. Mirrors Rust.
 test("creating a skipped sequence throws Skipped", () => {
 	const producer = new TrackProducer("test");
 	producer.accept({});
@@ -4946,9 +4946,12 @@ test("creating a skipped sequence throws Skipped", () => {
 	expect(() => producer.createGroup(6n)).toThrow(Skipped);
 	// The next sequence, 5, was skipped too.
 	expect(() => producer.appendGroup()).toThrow(Skipped);
+	// A later drop leaves a skipped sequence skipped.
+	expect(hooks.dropTrackGroups(producer, 1n, 2n, { error: DROPPED })).toEqual([]);
+	expect(() => producer.createGroup(1n)).toThrow(Skipped);
 	// A dropped sequence may be created again.
-	hooks.dropTrackGroups(producer, 2n, 3n, { error: DROPPED });
-	producer.createGroup(2n).finish();
+	hooks.dropTrackGroups(producer, 9n, 10n, { error: DROPPED });
+	producer.createGroup(9n).finish();
 
 	const other = new TrackProducer("test");
 	other.accept({});
@@ -4964,10 +4967,45 @@ test("creating a skipped sequence throws Skipped", () => {
 	}
 	expect(drops).toEqual([
 		[0n, 1n, true],
-		[2n, 3n, true],
-		[3n, 4n, false],
-		[4n, 5n, true],
+		[2n, 5n, true],
 	]);
+});
+
+// A skip after a drop already reported goes out again, replacing it, while a reader that moved past
+// the drop is handed nothing again; a skip already reported is not reported twice, and a later drop
+// leaves it skipped. Mirrors Rust.
+test("a skip is reported over a reported drop", () => {
+	const producer = new TrackProducer("test");
+	producer.accept({});
+	const reader = producer.subscribe({ delay: { max: null } });
+	const drain = () => {
+		const got: unknown[] = [];
+		for (
+			let next = hooks.tryRecvGroup(reader, true);
+			next.kind !== "idle";
+			next = hooks.tryRecvGroup(reader, true)
+		) {
+			if (next.kind === "group") got.push(next.group.sequence);
+			else if (next.kind === "drop") got.push([next.start, next.end, next.skip === true]);
+			else throw new Error(`unexpected ${next.kind}`);
+		}
+		return got;
+	};
+	producer.createGroup(0n).finish();
+	hooks.dropTrackGroups(producer, 1n, 3n, { error: DROPPED });
+	hooks.dropTrackGroups(producer, 4n, 5n, { error: DROPPED });
+	producer.createGroup(5n).finish();
+	expect(drain()).toEqual([[1n, 3n, false], [4n, 5n, false], 0n, 5n]);
+
+	// Group 0 arrived, so the skip leaves it; both drops and the gap between become one skip.
+	expect(hooks.skipTrackGroups(producer, 0n, 5n)).toEqual([{ start: 0n, end: 1n }]);
+	expect(drain()).toEqual([[1n, 5n, true]]);
+
+	expect(hooks.dropTrackGroups(producer, 2n, 3n, { error: DROPPED })).toEqual([]);
+	expect(drain()).toEqual([]);
+	expect(() => producer.createGroup(2n)).toThrow(Skipped);
+	reader.close();
+	producer.close();
 });
 
 // A received stale run is judged from where it meets the reader's span, as Rust clips it: a reader

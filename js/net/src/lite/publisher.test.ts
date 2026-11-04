@@ -1031,6 +1031,41 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 		}
 	});
 
+	// A skip replaces a drop, so a relay forwards it over a drop it already forwarded; lite-06,
+	// which names a skip as a drop, sends nothing more. Mirrors Rust.
+	test(`lite ${version}: a skip goes out over a forwarded drop`, async () => {
+		const sub = await servedSubscription({ version, startGroup: 0n, routed: true });
+		try {
+			sub.serve(0n);
+			expect(await sub.servedSequence()).toBe(0n);
+			expect("start" in (await decodeSubscribeResponse(sub.client.reader, version))).toBe(true);
+
+			hooks.dropTrackGroups(sub.track, 1n, 3n, { error: new StreamError(StreamCode(70), { message: "cut" }) });
+			const resp = await decodeSubscribeResponse(sub.client.reader, version);
+			if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
+			expect([resp.drop.start, resp.drop.end]).toEqual([1n, 2n]);
+
+			sub.track.skipGroups(1n, 3n);
+			if (version === Version.DRAFT_07) {
+				const skip = await decodeSubscribeResponse(sub.client.reader, version);
+				expect(skip).toMatchObject({ skip: { start: 1n, end: 2n } });
+			}
+			sub.track.finish();
+			sub.track.close();
+			const holes: unknown[] = [];
+			for (;;) {
+				const next = await decodeSubscribeResponseMaybe(sub.client.reader, version);
+				if (!next) break;
+				if ("drop" in next) holes.push(["drop", next.drop.start, next.drop.end]);
+				if ("skip" in next) holes.push(["skip", next.skip.start, next.skip.end]);
+				if ("end" in next && keepsSubscribeOpen(version)) break;
+			}
+			expect(holes).toEqual([]);
+		} finally {
+			await sub.close();
+		}
+	});
+
 	for (const declared of [false, true]) {
 		const named = declared && version === Version.DRAFT_07 ? "in SUBSCRIBE_SKIP" : "in SUBSCRIBE_DROP";
 		test(`lite ${version}: the end sweep names a ${declared ? "declared skip" : "gap never declared"} ${named}`, async () => {

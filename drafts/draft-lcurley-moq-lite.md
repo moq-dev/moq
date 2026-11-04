@@ -1650,6 +1650,10 @@ A relay that received a stale drop settles with it only a reader whose own budge
 
 A drop with any other Error Code is final, whatever its `Update`, and replaces a stale drop of the same sequences, so no update reopens them.
 
+A later [SUBSCRIBE_SKIP](#subscribe-skip) for the same sequences overrides a drop, whatever its Error Code: the subscriber records them as skipped from then on, and a relay forwards the skip even over a drop it already forwarded.
+A subscriber that already ended readers on the drop does not deliver anything again: those readers stay ended.
+A drop that follows a skip of the same sequences changes nothing.
+
 A Group Stream for a sequence the subscriber already saw dropped, as after such a re-offer, wins over the drop: the subscriber delivers it.
 
 For every sequence in the subscription's range, the publisher MUST send a Group Stream or name it in SUBSCRIBE_SKIP or SUBSCRIBE_DROP.
@@ -1678,7 +1682,9 @@ SUBSCRIBE_SKIP Message {
 A skip names only sequences the original publisher declared it will never produce, and it is final: no Group will ever exist at those sequences, whatever the terms.
 A publisher MUST NOT later create a Group at a sequence it skipped, and a subscriber MUST NOT deliver a Group Stream for one.
 It carries no error and ends no reader, since there is nothing to read; a subscriber stops waiting for those sequences.
-A skip replaces a stale (OLD) drop of the same sequences, so no update reopens them; a sequence already named in a final drop keeps it.
+A skip overrides an earlier SUBSCRIBE_DROP of the same sequences, whatever its Error Code, since never produced is the most authoritative account of a sequence: no update reopens them, and a relay forwards the skip downstream even over a drop it already forwarded.
+A subscriber that already ended readers on that drop does not deliver anything again: those readers stay ended.
+A skip never overrides a Group that arrived, since that Group was produced; a subscriber ignores a skip for such a sequence, which is a protocol error the publisher made, and MAY log it.
 
 A gap in the sequence numbers says nothing on its own: a publisher may create Groups out of order, or create again a sequence whose Group it aborted, so it never skips a sequence merely because a higher Group exists or the Track ended without it.
 Only the application producing the Track knows a sequence will never exist, for example when it numbers Groups sparsely, or when it moves on to the next Group and so declares that it will not go back to fill the sequences below.
@@ -2009,7 +2015,7 @@ The `Message Length` describes the payload size on the wire.
 - Restored SUBSCRIBE_DROP (type 0x2), replacing Stream Count on SUBSCRIBE_FINISH. Every sequence is accounted for by a Group Stream or a drop; a publisher SHOULD send a drop as soon as it gives a sequence up.
 - SUBSCRIBE_DROP's Error Code is a stream error code, which ends the dropped groups' readers, including one still arriving.
 - Refuse a SUBSCRIBE_DROP whose Group Start is greater than Group End plus one on every version that carries it.
-- Added SUBSCRIBE_SKIP (type 0x3) for sequences the publisher declared it will never produce, which ends no reader and is final: a Group is never created at a skipped sequence. A gap in the sequence numbers is not a skip, since Groups may be created out of order; a sequence never had and never declared skipped is named in SUBSCRIBE_DROP. SUBSCRIBE_DROP no longer names declared skips.
+- Added SUBSCRIBE_SKIP (type 0x3) for sequences the publisher declared it will never produce, which ends no reader and is final: a Group is never created at a skipped sequence. A skip overrides an earlier drop of the same sequences, whatever its Error Code, without re-delivering to readers the drop already ended, and never overrides a Group that arrived. A gap in the sequence numbers is not a skip, since Groups may be created out of order; a sequence never had and never declared skipped is named in SUBSCRIBE_DROP. SUBSCRIBE_DROP no longer names declared skips.
 - Added `Update` to SUBSCRIBE, SUBSCRIBE_UPDATE, and SUBSCRIBE_DROP: the number of the terms in effect. A stale (OLD) drop holds only under the update it names, judged against the budget the subscriber sent with it; every later SUBSCRIBE_UPDATE reopens it, and the publisher re-offers the group or drops it again under the new `Update`. Any other drop is final. A Group Stream wins over its earlier drop.
 - SUBSCRIBE_FINISH declares the final boundary while lower groups can still be in flight, and no longer closes the Subscribe Stream: the publisher keeps reading SUBSCRIBE_UPDATE, so an update can reach an ended Track's history.
 - A covered subscription, whose every Range has an End and whose every Group was sent or dropped, also stays open for an update; the publisher never FINs first.

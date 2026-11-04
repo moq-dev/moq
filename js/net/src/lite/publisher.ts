@@ -1284,11 +1284,30 @@ export class Publisher {
 				? { skip: new SubscribeSkip({ start, end }) }
 				: { drop: SubscribeDrop.given(start, end, hole.error, this.version, updateNumber) };
 
+		// Lite-07: the part of `served` named in SUBSCRIBE_DROP, never served. A skip replaces a
+		// drop, so it is sent over one of these, but never over a group served.
+		let dropped: Run[] = [];
+
 		// Give up, as `hole` says, whatever part of `[start, end)` this subscription has not been
 		// served or given up yet.
 		const drop = async (start: bigint, end: bigint, hole: Hole): Promise<boolean> => {
 			if (!served) return true;
-			for (const gap of runGaps(served, start, end)) {
+			const gaps = runGaps(served, start, end);
+			if (hasSkip(this.version)) {
+				if (hole.skip) {
+					// A skip replaces a drop already sent, so the subscriber learns the groups were
+					// never produced; a reader the drop ended stays ended.
+					for (const run of dropped) {
+						const from = max(run.start, start);
+						const to = min(run.end, end);
+						if (from < to) insertRun(gaps, from, to);
+					}
+					dropped = removeRun(dropped, start, end);
+				} else {
+					for (const gap of gaps) insertRun(dropped, gap.start, gap.end);
+				}
+			}
+			for (const gap of gaps) {
 				insertRun(served, gap.start, gap.end);
 				const msg = holeMessage(gap.start, gap.end - 1n, hole);
 				if (!(await controls.response(encodeSubscribeResponse(stream, msg, this.version)))) return false;
@@ -1436,6 +1455,7 @@ export class Publisher {
 							if (hasSkip(this.version)) {
 								const owe = (start: bigint, end: bigint) => {
 									if (served) served.splice(0, served.length, ...removeRun(served, start, end));
+									dropped = removeRun(dropped, start, end);
 								};
 								for (const run of hooks.reofferStale(track)) owe(run.start, run.end);
 								// A stale drop not sent yet, such as one an earlier update left to drop
