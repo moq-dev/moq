@@ -1,10 +1,7 @@
-The transmuxer: file/stream containers (`container/`) and codec parsers (`codec/`) in and out of hang broadcasts. `Producer<C>`/`Consumer<C>` are generic over the `Container` trait; the catalog picks the implementation per track.
+The transmuxer between containers/codecs and hang broadcasts.
 
-# Invariants
-
-- The keyframe bit drives grouping. Only the first frame of a group is a keyframe; for audio, mark one frame per intended group, not every frame, or each frame opens its own QUIC stream. `cut` closes a group early and the next write must be a keyframe.
-- Frame durations are backfilled from the next frame in decode order, never across a discontinuity; a backwards gap (B-frame reordering) stays unset. Frames that arrive with a duration keep it.
-- hang frames carry a timestamp normalized to microseconds (`hang::container::TIMESCALE`). Create media tracks with `hang::container::track_info`; a default `moq_net::track::Info` is untimed and refuses timestamped frames.
-- Reject an unsupported codec or container with a typed `Error` rather than warn and drop.
-- An fMP4 fragment's `tfdt` must advance past the previous fragment on that track. ffmpeg's `frag_every_frame` repeats one when it interleaves audio and video, so the demo recipes use `-frag_duration`.
-- Catalog fields that decide decoder configuration (codec, dimensions, description) are effectively immutable for a rendition; bitrate and similar hints are maximums.
+- The keyframe bit drives grouping: only a group's first frame is a keyframe. For audio, mark one frame per intended group, or each frame opens its own QUIC stream. After `cut`, the next write must be a keyframe.
+- Frame durations backfill from the next frame in decode order, never across a discontinuity or a backwards gap (B-frames). A given duration is kept.
+- Create media tracks with `hang::container::track_info`; a default `moq_net::track::Info` is untimed and refuses timestamped frames.
+- An fMP4 fragment's `tfdt` must advance past the previous fragment on its track. ffmpeg's `frag_every_frame` repeats one when interleaving audio and video; use `-frag_duration`.
+- Catalog fields that configure the decoder (codec, dimensions, description) are immutable for a rendition; bitrate and similar hints are maximums.
