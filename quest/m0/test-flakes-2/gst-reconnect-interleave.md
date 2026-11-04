@@ -49,11 +49,16 @@ in a fast run. Find each from the code under test before changing the test.
   `super::RUNTIME`. Prefer driving the session's timers with a mocked clock
   or waiting on an event, as the epic's rules say. If the session itself is
   slow under load, fix that.
-- The `Eos` breaks the test's own claim that no round ends the pad. Check
-  whether the pad's actor can retire the pad when a restart, the catalog
-  relist, and the unannounce and re-announce interleave, as moqsrc's
-  rendition actor ([moq-dev/moq#7368](https://github.com/moq-dev/moq/pull/7368))
-  promises it can't. A real retirement is a moqsrc bug, fixed in moqsrc.
+- The `Eos` breaks the test's own claim that no round ends the pad. The
+  pad actor retires a pad whose rendition is still delisted at its turn
+  (`retired()` checks the pad table's `listed`), and the test doesn't wait
+  for the catalog relist to apply before it unannounces. First lead: the
+  retirement is intended and the test is missing that wait (a relist of an
+  existing rendition adds no pad, so the sibling test's `await_pad` doesn't
+  apply). If the retirement happens even after the relist applied, it's a
+  moqsrc bug, fixed in moqsrc
+  ([moq-dev/moq#7368](https://github.com/moq-dev/moq/pull/7368) made the
+  actor own the pad).
 - Find which call returned `Unroutable` in #7296's run, and whether
   `publication.announce` or a follow can meet an unroutable path in the
   window after `unannounce`.

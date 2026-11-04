@@ -4,8 +4,10 @@
 
 A `Following` whose last resolution was refused asks again once the
 handler that refused it is replaced, even when the replacement registers
-the same instance with identical route details. Announcement listeners
-still see no change for such a swap.
+the same instance with identical route details while the old one is still
+up, so the path stays covered. Announcement listeners still see no change
+for such an overlapping swap. A swap that drops the old route first already
+ends and restarts the path, which a refused follower re-asks today.
 
 ## Plan
 
@@ -33,7 +35,10 @@ after an `Unroutable`. It moves on any
 change to the routes covering the path, including a handler swap, and
 wakes only what watches that path, so listeners see nothing new. Check that
 re-registering an identical route does bump it; if it doesn't, bump it
-there, not in the announcement. Not chosen: a timed retry, which #7836's
+there, not in the announcement. The watch wakes on any change to a
+covering route, including a lower-ranked one that leaves the refusing
+handler selected, so after each wake ask again only if the selected route
+entry is no longer the one that refused. Not chosen: a timed retry, which #7836's
 decision 2 (maintainer, 2026-11-04) ruled out.
 
 Fold this into whatever `follow` becomes under
@@ -41,9 +46,11 @@ Fold this into whatever `follow` becomes under
 instance changes inside `follow`. If the path watch changes under
 [front parking](/quest/m2/origin-front-parks.md), use its replacement.
 
-Tests: a refused follower asks the replacement after an identical-route
-handler swap; an announcement listener sees no event for that swap; and a
-follower that nothing replaced still doesn't ask the refusing handler again.
+Tests: a refused follower asks the replacement after an overlapping
+identical-route handler swap; an announcement listener sees no event for
+that swap; a change to a lower-ranked covering route doesn't re-ask the
+refusing handler; and a follower that nothing replaced doesn't ask it
+again.
 
 Public API: none. Wire: none.
 

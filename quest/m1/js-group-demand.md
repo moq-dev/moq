@@ -39,7 +39,8 @@ neither answered nor delivered live since it was asked").
   whichever has landed and leave the other a note.
 - Tests: a fill FETCH stops once the only remaining mirror belongs to a
   reader that passed the group, and keeps going while a mirror's reader
-  still has to reach it.
+  still has to reach it. An IETF range fetch stops once its last reader
+  passes the requested group.
 
 Public API: none. Wire: none.
 
