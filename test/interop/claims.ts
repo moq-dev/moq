@@ -79,6 +79,8 @@ try {
 			subscriber.close();
 		}
 	}
+	await publishing.close();
+	assert.equal(await publishing.closed, null, "publisher ended with a session error during claim teardown");
 } finally {
 	claim.close();
 	await requested.return?.(undefined);
