@@ -1029,6 +1029,7 @@ export class Subscriber {
 			const requests = producer.requests();
 			fills = this.#runFills(broadcast, producer, requests, signal);
 			staged.commit();
+			const subscribing = hooks.subscribing(producer);
 			for (;;) {
 				if (hooks.trackReleased(producer).peek() !== undefined) return;
 				const subscription = producer.subscription.peek();
@@ -1040,14 +1041,16 @@ export class Subscriber {
 					const span = wireSpan(subscription.ranges ?? [{}]);
 					if (
 						!bounded(subscription.ranges ?? [{}]) ||
-						(span.end !== undefined && span.end > (ok.largest ? ok.largest.groupId + 1n : 0n))
+						(subscribing.peek() &&
+							span.end !== undefined &&
+							span.end > (ok.largest ? ok.largest.groupId + 1n : 0n))
 					) {
 						await this.#runSubscribe(broadcast, request, signal, producer);
 						return;
 					}
 				}
 				await untilAborted(
-					Promise.resolve(Signal.race(producer.subscription, hooks.trackReleased(producer))),
+					Promise.resolve(Signal.race(producer.subscription, subscribing, hooks.trackReleased(producer))),
 					signal,
 				);
 			}

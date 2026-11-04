@@ -42,13 +42,16 @@ function fixture(version: IetfVersion) {
 		if (stream.done) throw new Error("missing request");
 		return new Stream({ ...stream.value, version });
 	};
-	const status = async (largest = 5n, provided?: Stream, typed = false) => {
+	const status = async (largest: bigint | null = 5n, provided?: Stream, typed = false) => {
 		const stream = provided ?? (await next());
 		if (!typed) expect(await stream.reader.u53()).toBe(TrackStatusRequest.id);
 		const request = await TrackStatusRequest.decode(stream.reader, version);
 		expect([request.trackNamespace, request.trackName]).toEqual([Path.from("room"), "video"]);
 		await stream.writer.u53(TrackStatusOk.id);
-		await new TrackStatusOk({ largest: { groupId: largest, objectId: 2n } }).encode(stream.writer, version);
+		await new TrackStatusOk({ largest: largest === null ? undefined : { groupId: largest, objectId: 2n } }).encode(
+			stream.writer,
+			version,
+		);
 		stream.writer.close();
 	};
 	const fetch = async (allowStatus = false) => {
@@ -105,7 +108,7 @@ for (const version of VERSIONS) {
 	test(`${version}: a one-group FETCH waits for FETCH_OK even when its stream overtakes it`, async () => {
 		const fx = fixture(version);
 		const pending = fx.broadcast.track("video").fetchGroup(1n);
-		await fx.status();
+		await fx.status(null);
 		const { stream, request } = await fx.fetch();
 		expect(request.groupOrder).toBe("ascending");
 		expect(request.type).toEqual(
