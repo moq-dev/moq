@@ -184,7 +184,6 @@ their end report, so an embedder's drain alert pages on real cuts.
 - [Prototype-safe rendition names in JS](/quest/m1/proto-safe-names.md) - `js/msf`'s `ext` and `js/publish`'s rendition maps keep `__proto__` and `constructor` names, like Rust
 - [The resume model ends #7739's clean-end seed](/quest/m1/resume-seed-17893651.md) - replay seed 17893651 after #7705's wake fix, and fix it if a long-budget reader still never gets the end
 - [Every moq-mux consumer gets the catalog warmup from one entry point](/quest/m1/mux-warmup.md) - one moq-mux call widens the subscription and configures the consumer, adopted by moq-audio, moq-c, moq-ffi's raw consumer, and moqsrc
-- [Codex shells never load another checkout's dev environment](/quest/m1/codex-env-snapshot.md) - the Codex dev-shell snapshot is skipped when stale or inside `nix develop`
 - [Rename moq-rtc to moq-webrtc](/quest/m1/webrtc-rename.md) - one published `moq-webrtc` crate holds the gateway, the ICE driver, and the data-channel transport
 - [Vendor and trim the WebRTC stack](/quest/m1/webrtc-vendor.md) - str0m, dimpl, `is`, and sctp-proto live in moq-webrtc with unused code removed, so moq-rtc can take rind
 - [MoQ on rind](/quest/m1/rind/README.md) - every MoQ crate takes its crypto from rind, a pure-Rust graviola fork, so no build compiles C crypto

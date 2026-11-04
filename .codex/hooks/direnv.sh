@@ -26,13 +26,26 @@ env_file="$PWD/.direnv/codex-env.sh"
 env_tmp="$env_file.tmp"
 trap 'rm -f "$env_tmp"' EXIT
 
+# Stamp before evaluation, so changing either file during capture leaves a
+# stale snapshot instead of validating an environment from another flake.
+flake_stamp='# codex-env-flake:'
+for flake_file in flake.nix flake.lock; do
+    flake_hash=missing
+    if [ -f "$flake_file" ]; then
+        flake_hash=$(git hash-object --no-filters -- "$flake_file")
+    fi
+    flake_stamp="$flake_stamp $flake_hash"
+done
+printf '%s\n' "$flake_stamp" >"$env_tmp"
+
 # Codex only needs the flake dev shell environment, so avoid depending on
 # nix-direnv's remote bootstrap when Nix can emit the shell exports directly.
 if command -v nix >/dev/null 2>&1 && [ -f flake.nix ]; then
     if nix --extra-experimental-features 'nix-command flakes' --accept-flake-config \
         print-dev-env --profile "$PWD/.direnv/codex-profile" .#default \
-        >"$env_tmp" 2>"$PWD/.direnv/codex-hook.log"; then
+        >>"$env_tmp" 2>"$PWD/.direnv/codex-hook.log"; then
         mv "$env_tmp" "$env_file"
+        rm -f "$env_file.stale"
         exit 0
     fi
 fi
@@ -43,7 +56,10 @@ fi
 unset DIRENV_DIR DIRENV_DIFF DIRENV_WATCHES DIRENV_FILE DIRENV_LAYOUT
 
 direnv allow . 2>>"$PWD/.direnv/codex-hook.log"
-direnv export bash >"$env_tmp" 2>>"$PWD/.direnv/codex-hook.log"
+# Discard any partial output from a failed Nix capture.
+printf '%s\n' "$flake_stamp" >"$env_tmp"
+direnv export bash >>"$env_tmp" 2>>"$PWD/.direnv/codex-hook.log"
 mv "$env_tmp" "$env_file"
+rm -f "$env_file.stale"
 
 exit 0
