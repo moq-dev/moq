@@ -462,11 +462,11 @@ class FeatureTest(unittest.TestCase):
                 calls = self.trace("net", net_features=f'moq-net feature "{feature}"', expected_returncode=1)
                 self.assertTrue(all(call.startswith("tree ") for call in calls), calls)
 
-    def test_tokio_keeps_extremes_and_crypto_contracts(self):
+    def test_tokio_keeps_extremes_and_transport_contracts(self):
         boundary = self.trace("tokio")
         exhaustive = self.trace("tokio", "--all")
         self.assertEqual(sum(call.startswith("clippy ") for call in boundary), 3)
-        self.assertEqual(sum(call.startswith("clippy ") for call in exhaustive), 12)
+        self.assertEqual(sum(call.startswith("clippy ") for call in exhaustive), 9)
         self.assertTrue(any(" --tests " in call for call in boundary))
         self.assertFalse(any(" --all-targets " in call for call in boundary))
         self.assertTrue(any(" --all-targets " in call for call in exhaustive))
@@ -490,10 +490,6 @@ class FeatureTest(unittest.TestCase):
 
 CARGO_STUB = r"""#!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FEATURE_CALLS"
-if [[ "$*" == 'check --locked -p moq-tokio --no-default-features --features quic' ]]; then
- echo 'a rustls QUIC backend requires a crypto provider: enable either the `aws-lc-rs` or `ring` feature' >&2
- exit 1
-fi
 if [[ $1 == tree ]]; then
  if [[ "$*" == *'-i moq-net'* ]]; then
   printf '%s\n' "${FEATURE_NET_FEATURES:-}"

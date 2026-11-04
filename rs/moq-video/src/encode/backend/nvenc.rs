@@ -797,7 +797,8 @@ mod tests {
 			kind: crate::decode::Kind::Software,
 			..crate::decode::Config::new()
 		};
-		let mut decoder = crate::decode::backend::open(crate::decode::backend::Codec::H264, &decode_config).unwrap();
+		let mut decoder =
+			crate::decode::backend::open(&crate::decode::backend::Codec::H264.into(), &decode_config).unwrap();
 
 		// A static image, so every decoded frame equals the input regardless of
 		// decoder latency or frame reordering.
