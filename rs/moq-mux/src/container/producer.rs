@@ -760,6 +760,9 @@ where
 		let Ok(end) = moq_net::Timestamp::from_micros(micros) else {
 			return;
 		};
+		if duration.is_some() {
+			self.estimator.reach(end);
+		}
 		if self.end.is_none_or(|prev| end >= prev) {
 			self.end = Some(end);
 			self.last_duration = duration.filter(|duration| !duration.is_zero());

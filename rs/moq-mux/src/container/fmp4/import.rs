@@ -1630,6 +1630,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		let bytes = run.samples.iter().map(|sample| sample.range.len()).sum();
 		self.sent.add(run.samples.len() as u64, bytes, keyframes);
 		self.estimator.burst(end.checked_sub(timestamp)?.into());
+		self.estimator.reach(end);
 		self.publish_estimate()?;
 		Ok(())
 	}

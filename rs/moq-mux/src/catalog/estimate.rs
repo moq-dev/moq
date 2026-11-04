@@ -209,14 +209,21 @@ impl Estimator {
 		self.jitter.max = self.jitter.max.max(duration);
 	}
 
-	/// The longest group seen so far, closed window or not, else the whole span written: what a
-	/// track that ends before its first window closes declares as its join interval.
+	/// The longest group seen so far, closed window or not, else the whole span written to the
+	/// furthest content end stated: what a track that ends before its first window closes
+	/// declares as its join interval.
 	pub(crate) fn partial_interval(&self) -> Option<Duration> {
 		let window = &self.window;
 		window
 			.interval
 			.max(window.group)
-			.or_else(|| elapsed(window.start?, window.high?))
+			.or_else(|| elapsed(window.start?, window.high?.max(window.reach.unwrap_or_default())))
+	}
+
+	/// Note that written content reaches `end`, as a fragment or a frame with a duration says.
+	pub(crate) fn reach(&mut self, end: Timestamp) {
+		let end = nanos(end);
+		self.window.reach = Some(self.window.reach.map_or(end, |reach| reach.max(end)));
 	}
 
 	/// Everything measured so far, with what a catalog rendition needs to decide when to publish it.
@@ -393,6 +400,9 @@ struct Window {
 	interval: Option<Duration>,
 	/// The lowest timestamp written since the timeline last broke.
 	start: Option<u128>,
+	/// The furthest content end a write stated, past its own timestamp, since the timeline last
+	/// broke: a fragment's or a timed frame's.
+	reach: Option<u128>,
 }
 
 impl Window {
@@ -772,6 +782,28 @@ mod tests {
 			assert_eq!(video.reading().interval, expected, "frame {i}");
 		}
 		assert_eq!(audio.reading().interval, Some(ms(20)));
+	}
+
+	/// A track ending before its first window closes declares the longest group it saw, else the
+	/// whole span it wrote, to the furthest end a fragment stated.
+	#[test]
+	fn a_partial_interval_covers_a_lone_fragment() {
+		let mut fragment = Estimator::new();
+		fragment.write(micros(0), 1);
+		assert_eq!(fragment.partial_interval(), None, "a lone timestamp spans nothing");
+		fragment.reach(micros(800_000));
+		assert_eq!(fragment.partial_interval(), Some(ms(800)));
+
+		let mut video = Estimator::new();
+		for (ms, cut) in [(0, false), (300, true), (600, false)] {
+			if cut {
+				video.cut(None);
+			}
+			video.write(micros(ms * 1_000), 1);
+		}
+		video.cut(None);
+		// The second group holds the frames at 300 and 600ms, so with 300ms frames it runs to 900ms.
+		assert_eq!(video.partial_interval(), Some(ms(600)));
 	}
 
 	/// A longer group in a later window raises the interval; a discontinuity keeps it.
