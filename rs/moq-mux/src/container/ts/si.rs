@@ -40,6 +40,20 @@ use super::mux_rate::{MAX_INTERVAL, PCR_WRAP};
 use super::passthrough::PCR_HZ;
 use super::psi::{self, CRC};
 
+/// Track properties for an SI table track.
+///
+/// Declares the media max age ([`hang::container::MAX_AGE`]) rather than moq-net's zero
+/// default: the TS export reads a clock table (TDT/TOT) in order and holds each revision
+/// until media reaches its stamped slot, leaving the next revisions on the subscription
+/// meanwhile. At zero, a revision superseded before the export reads it would be stale
+/// at once and skipped. SI describes the media it travels with, so it stays fresh as
+/// long as that media does.
+pub(crate) fn track_info() -> moq_net::track::Info {
+	moq_net::track::Info::default()
+		.with_timescale(moq_net::Timescale::MILLI)
+		.with_max_age(hang::container::MAX_AGE)
+}
+
 const SDT_PID: u16 = 0x0011;
 const SDT_ACTUAL: u8 = 0x42;
 const EIT_PID: u16 = 0x0012;
@@ -421,7 +435,7 @@ impl Entry {
 			// Deterministic, greppable name; fall back to a unique suffix on the
 			// (pathological) collision with an existing track.
 			None => {
-				let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
+				let info = track_info();
 				self.track.insert(
 					match broadcast.create_track(format!("{pid:#06x}-{table_id:#04x}.si"), info.clone()) {
 						Ok(track) => track,
@@ -773,6 +787,37 @@ impl Snapshot {
 mod tests {
 	use super::*;
 	use crate::container::ts::fixture::{Flags, Mux};
+
+	/// The TS export reads a clock table in order under its delay and holds each revision
+	/// until media reaches its stamped slot, so a revision superseded before the export reads
+	/// it has to stay on the subscription for that budget. The SI track's max age caps the
+	/// budget: at moq-net's zero default the superseded revision would be skipped at once.
+	#[test]
+	fn a_superseded_si_revision_stays_readable_within_the_export_budget() {
+		for (info, expected) in [
+			(track_info(), vec![0, 1]),
+			(track_info().with_max_age(Duration::ZERO), vec![1]),
+		] {
+			let broadcast = moq_net::broadcast::Info::new().produce();
+			let mut track = broadcast.create_track("0x0014-0x70.si", info).unwrap();
+			for revision in 0..2u64 {
+				track
+					.write_frame(Timestamp::from_millis(revision * 100).unwrap(), vec![revision as u8])
+					.unwrap();
+			}
+			// As the export subscribes: in order, with the CLI's default 500 ms delay.
+			let delay = moq_net::track::Delay::default().with_max(Duration::from_millis(500));
+			let mut reader = track
+				.subscribe(moq_net::track::Subscription::default().with_delay(delay))
+				.ordered();
+			let waiter = kio::Waiter::noop();
+			let mut read = Vec::new();
+			while let std::task::Poll::Ready(Ok(Some(group))) = reader.poll_next_group(&waiter) {
+				read.push(group.sequence);
+			}
+			assert_eq!(read, expected);
+		}
+	}
 
 	#[kio::test]
 	async fn program_clock_places_and_retires_si_without_media_pts() {

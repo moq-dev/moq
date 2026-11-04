@@ -1291,10 +1291,11 @@ struct SiTrack {
 	dirty: bool,
 	/// Media timestamp of the last emission ([`Export::mux`]).
 	last_emit: Option<Timestamp>,
-	/// The same budget the media sources use, asked of the SI track's publisher. It
-	/// reaches back only as far as that publisher's max age allows: an SI track the
-	/// TS importer publishes takes moq-net's zero default, so the export reads its
-	/// newest snapshot, which restates the table.
+	/// The same budget the media sources use, asked of the SI track's publisher, and
+	/// capped by that publisher's max age. A snapshot table needs only its newest group,
+	/// which never goes stale. A clock table (TDT/TOT) needs every revision to stay on
+	/// the subscription until media reaches its stamped slot ([`Self::advance`]), so the
+	/// TS importer's SI tracks declare the media max age ([`super::si::track_info`]).
 	max_age: Duration,
 }
 
