@@ -41,4 +41,3 @@ their frame.
 ## Required
 
 - [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - Rust fills multi-group ranges through the subscription
-- [JS ranges](/quest/m1/subscribe-ranges/js.md) - JS reads and serves ranges, so its multi-group reads need no FETCH
