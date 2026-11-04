@@ -8740,8 +8740,11 @@ pub(super) mod test {
 			}
 			import.decode(&next).unwrap();
 			if damage == "duplicate" {
-				assert_eq!(import.pending[&pid].pts, Some(90_000));
-				assert_eq!(import.pending[&pid].data, [0xde, 0xad]);
+				let super::Stream::Aac(stream) = &import.streams[&pid] else {
+					panic!("an AAC stream");
+				};
+				assert_eq!(stream.tail_pts, Some(Timestamp::from_micros(1_000_000)));
+				assert_eq!(stream.tail, [0xde, 0xad]);
 			} else {
 				assert!(!import.pending.contains_key(&pid));
 			}
