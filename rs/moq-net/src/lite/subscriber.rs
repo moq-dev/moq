@@ -5104,6 +5104,7 @@ mod tests {
 	async fn announce_interest_waits_for_credit() {
 		for version in [Version::Lite04, Version::Lite07] {
 			let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let _interest = origin.consume().announced();
 			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new()).without_credit();
 			let log = session.log.clone();
 			let subscriber = Subscriber::new(SubscriberConfig {

@@ -1406,6 +1406,7 @@ mod tests {
 	async fn announce_interest_waits_for_credit() {
 		for version in [Version::Draft18] {
 			let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let _interest = origin.consume().announced();
 			let scripted = crate::lite::test_transport::ScriptedSession::new(Vec::new()).without_credit();
 			let log = scripted.log.clone();
 			let session = crate::driver::Transport::new(scripted.clone());
@@ -1446,11 +1447,7 @@ mod tests {
 			assert!(log.closes().is_empty());
 
 			scripted.grant_credit();
-			for i in 0..5 {
-				let _ = futures::poll!(driver.as_mut());
-				eprintln!("DEBUG poll {i}: opens {} (before {opened})", log.bi_opens());
-				kio::clock::sleep(std::time::Duration::from_millis(1)).await;
-			}
+			let _ = futures::poll!(driver.as_mut());
 			assert!(log.bi_opens() > opened, "{version}: interest opens once credit returns");
 		}
 	}
