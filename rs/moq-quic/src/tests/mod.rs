@@ -1573,7 +1573,10 @@ fn streams_blocked() {
 	assert!(!pair.client_streams(client_ch).blocked(Dir::Uni));
 	assert_eq!(pair.client_streams(client_ch).open(Dir::Uni, Default::default()), None);
 	assert!(pair.client_streams(client_ch).blocked(Dir::Uni));
-	assert!(!pair.client_streams(client_ch).blocked(Dir::Bi), "each direction blocks alone");
+	assert!(
+		!pair.client_streams(client_ch).blocked(Dir::Bi),
+		"each direction blocks alone"
+	);
 
 	// Send data so the STREAMS_BLOCKED piggybacks on an outgoing packet
 	pair.client_send(client_ch, s).write(&mut &b"hi"[..]).unwrap();

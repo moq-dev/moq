@@ -1327,7 +1327,10 @@ mod tests {
 			);
 			assert!(pending.is_pending(), "framed: {framed}");
 			assert_eq!(client.stream_credit(Dir::Bi), Some(StreamCredit::new(0, true)));
-			assert!(!client.stream_credit(Dir::Uni).unwrap().blocked, "each direction blocks alone");
+			assert!(
+				!client.stream_credit(Dir::Uni).unwrap().blocked,
+				"each direction blocks alone"
+			);
 		}
 	}
 

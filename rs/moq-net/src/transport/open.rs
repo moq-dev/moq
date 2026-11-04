@@ -67,7 +67,10 @@ impl Line {
 	fn start(credit: Option<StreamCredit>) {
 		match credit {
 			Some(credit) if !credit.blocked => {
-				tracing::debug!(available = credit.available, "opens wait in priority order for the transport")
+				tracing::debug!(
+					available = credit.available,
+					"opens wait in priority order for the transport"
+				)
 			}
 			_ => tracing::debug!("out of the peer's stream credit: opens wait in priority order"),
 		}
@@ -387,7 +390,10 @@ mod tests {
 		assert!(session.poll_open_uni(&mut second, &waiter, options()).is_pending());
 		assert_eq!(session.stream_credit(Dir::Uni), Some(StreamCredit::new(0, true)));
 		let transport = session.opens.transport.clone();
-		assert_eq!(boxed::stream_credit(&transport, Dir::Uni), Some(StreamCredit::new(0, true)));
+		assert_eq!(
+			boxed::stream_credit(&transport, Dir::Uni),
+			Some(StreamCredit::new(0, true))
+		);
 
 		drop((second, session));
 		assert_eq!(boxed::stream_credit(&transport, Dir::Uni), None);
