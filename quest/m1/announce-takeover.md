@@ -58,11 +58,17 @@ this quest removes the predecessor machinery and grows to [XL].
   `lite/announce.ts` and `lite/subscriber.ts`. Remove the takeover sections
   from `drafts/draft-lcurley-moq-lite.md`, `doc/concept/identity.md` and
   `doc/concept/moq-lite.md`.
-- **Inheriting the instance.** `request.route(options)` from
-  [One Route handle](/quest/m1/api-audit/route/handle.md) creates the
-  path's exact route under the prefix route's instance by default, and the
-  answer it gives the waiting request is that route's broadcast. A job
-  that serves a held broadcast through `Request::serve`
+- **Inheriting the instance.** Decided 2026-11-03 (maintainer, on
+  [moq-dev/moq#7770](https://github.com/moq-dev/moq/pull/7770)):
+  `request.route(options)` from
+  [One Route handle](/quest/m1/api-audit/route/handle.md) mints a fresh
+  instance by default, and ending a job leaves its prefix route open, with
+  no history of ended paths. Carrying the prefix route's instance onto the
+  path's exact route, so that the answer the waiting request gets is that
+  route's broadcast, is this quest's change, and it must keep those
+  properties: a restarted job still gets a fresh instance, and job
+  lifetimes stay independent without per-path history of ended jobs.
+  A job that serves a held broadcast through `Request::serve`
   never announces an exact route, so it needs none of this.
 - **One stream per path and instance.** A claim may answer a path under
   its instance only while that stream is live. Once the job's route ends,
@@ -144,7 +150,7 @@ beyond [Instance and epoch](https://github.com/moq-dev/moq/pull/7489)'s fields.
 
 ## Required
 
-- [One Route handle](/quest/m1/api-audit/route/handle.md) - `request.route` creates the exact route under the claim's instance
+- [One Route handle](/quest/m1/api-audit/route/handle.md) - `request.route` creates the path's exact route, minting a fresh instance by default
 
 ## Related
 

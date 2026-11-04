@@ -45,12 +45,13 @@ These spawns stay and belong to [the spawn audit](/quest/m2/spawn-audit.md):
 reload (`rs/moq-relay/src/web.rs`), the io_uring handoff in
 `rs/moq-relay/src/connection.rs`, and moq-relay's web, shutdown, and uring
 spawns. Each UniFFI call's task on the bindings' runtime stays too: that is the
-binding boundary.
+binding boundary. So does moq-ffi's wake dispatch (decided 2026-11-03,
+[moq-dev/moq#7720](https://github.com/moq-dev/moq/pull/7720)): a wake its root
+raises for a parked host call runs on the blocking pool, so a host continuation
+never runs inside the root. It owns no state and polls no background work.
 
 ## Required
 
-- [Admissions and stats are polled](/quest/m1/poll-first/no-spawn/admissions.md) - HTTP admissions run inside their waiter, and the stats publisher runs in the cluster's driver
-- [moq-ffi spawns only its root](/quest/m1/poll-first/no-spawn/ffi.md) - one runtime-owned driver task holds every `Background` as `kio::Tasks` children
 - [The relay's in-memory tests run on kio's simulator](/quest/m1/poll-first/no-spawn/sim-tests.md) - `rs/moq-relay/tests/integration/connection.rs` runs on the simulator instead of paused tokio
 
 ## Related

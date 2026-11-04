@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Features gate signing and encryption
+
+The `sign` and `e2ee` modules sit behind default features of the same names.
+A dependency with default features off keeps only `sign::PublicKey` and `sign::InvalidKey`; enable `e2ee` or `sign` for the rest.
+`sign::PublicKey` gains public `from_bytes` and `as_bytes`, and the `serde` feature serializes it as its z-base-32 text.
+
 ### moq-e2ee and moq-sign are moq-crypto (#7702)
 
 `moq-e2ee` and the workspace-only `moq-sign` merged into `moq-crypto`, as its `e2ee` and `sign` modules.

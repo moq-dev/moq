@@ -12,8 +12,8 @@ the overlay, goes through relays. Content is signed by default, and each node
 publishes a `.status` track describing its links.
 
 This repository ships the libraries. The mesh binary and its UI live outside
-it: [kixelated](https://github.com/kixelated) builds a `kixel` daemon on these
-libraries, and any other binary can do the same.
+it: Kixel builds a `kixel` daemon on these libraries, and any other binary
+can do the same.
 
 Non-goals: a mesh daemon or CLI here (`moq mesh` is not added to moq-cli),
 MagicDNS, agent protocols, a graph UI, internet P2P or NAT traversal in m2

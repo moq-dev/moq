@@ -13,6 +13,9 @@ typealias TrackProducer = uniffi.moq.MoqMediaTrackProducer
 /** The write side of a media track fed a raw byte stream, with frame boundaries inferred. */
 typealias TrackStreamProducer = uniffi.moq.MoqMediaTrackStreamProducer
 
+/** A single-track producer of either kind, such as a video rendition's `lower`. */
+typealias Producer = uniffi.moq.MoqMediaProducer
+
 /** The write side of a container, which publishes each track it describes. */
 typealias ContainerProducer = uniffi.moq.MoqMediaContainerProducer
 

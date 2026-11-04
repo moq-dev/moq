@@ -1,8 +1,16 @@
 # Migrating moq-mux
 
-How to update your code for each breaking change, newest first.
+How to adopt new APIs and update for breaking changes, newest first.
 
 ## Unreleased
+
+### Shared playout timing
+
+Native players can use `timeline::Producer` and its read-only `Consumer` instead
+of building their own audio/video clock. Feed the speaker's buffered position
+and caller-selected jitter target to the producer; the consumer selects the
+newest due video frame without waiting. `moq play` now uses the same API. No
+existing public API or wire format changes.
 
 ### JSON writes take a broadcast-clock timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
 
@@ -199,7 +207,7 @@ Its `Hang`, `Msf`, and `Closed` variants and `catalog::msf::Consumer::track` are
 Every later request for a path, siblings included, stays on the broadcast first held there and fails once it ends, so build a new `Source` to follow a new instance.
 
 ```rust
-let broadcast = origin.request_broadcast(path, None).await?;
+let broadcast = origin.request(path, None).await?;
 let source = Source::new(origin, broadcast);
 ```
 

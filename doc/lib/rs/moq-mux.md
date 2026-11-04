@@ -10,6 +10,10 @@ description: Container import and export
 
 Turns existing container formats into [hang](/concept/hang) broadcasts and
 back. This is what `moq import` / `export` and the gateways are built on.
+Native players also use its `timeline` to present a broadcast's audio and video
+on one clock: audio drives the anchor while it plays, and video follows it.
+The caller supplies the jitter target, decoders, and output devices; a presenter
+can select the newest due picture without waiting and repeat it during a stall.
 
 | Format | Import | Export | Notes |
 | --- | --- | --- | --- |
