@@ -515,8 +515,9 @@ mod tests {
 		assert!(list <= 56, "WaiterList grew to {list} B");
 		// 184 B before the version counter, the value list's tag mirror (8 B each), and the
 		// waiter lists' own mutex moved the parking off the value's lock. Measured where a
-		// `Mutex` is 8 B; Darwin boxes its pthread mutex behind a 16 B one, once per lock.
-		let mutexes = 2 * (std::mem::size_of::<std::sync::Mutex<()>>() - 8);
+		// `Mutex` is 8 B; Darwin boxes its pthread mutex behind a 16 B one, once per lock, and a
+		// smaller one (2 B on Windows) leaves room.
+		let mutexes = 2 * std::mem::size_of::<std::sync::Mutex<()>>().saturating_sub(8);
 		assert!(state <= 200 + mutexes, "Channel<()> grew to {state} B");
 	}
 
