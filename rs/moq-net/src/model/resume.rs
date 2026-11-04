@@ -2164,18 +2164,39 @@ impl Recover {
 			_ => {}
 		}
 
-		// Finished history may still continue the group above. A subscribed group otherwise
-		// follows its track's verdict; an independent fetch judges its own outcome.
+		// Finished history may still continue the group above, and so may a fetch already
+		// answered. A subscribed group otherwise follows its track's verdict, even while its
+		// fetch is unanswered; an independent fetch judges its own outcome.
+		let mut verdict = None;
 		if self.reader.is_some()
 			&& serving.poll_closed(waiter).is_ready()
 			&& let Poll::Ready(Err(err)) = serving.poll_complete(&kio::Waiter::noop())
 			&& !route_failed(&err)
 		{
-			return Poll::Ready(Err(err));
+			verdict = Some(err);
 		}
+		match self.poll_fetch(generation, serving, index, failed, verdict.is_none(), waiter) {
+			Poll::Ready(Ok(replacement)) => Poll::Ready(Ok(replacement)),
+			res => verdict.map_or(res, |err| Poll::Ready(Err(err))),
+		}
+	}
 
-		// Otherwise ask for the rest. The subscription may still deliver it first.
+	/// Ask `serving` for the rest of the group from frame `index`, unless told not to `ask`, and
+	/// poll the answer: the group, a refusal that ends a copy that failed, or nothing yet.
+	fn poll_fetch(
+		&mut self,
+		generation: u64,
+		serving: &track::Consumer,
+		index: u64,
+		failed: Option<&Error>,
+		ask: bool,
+		waiter: &kio::Waiter,
+	) -> Poll<Result<Replacement>> {
+		// The subscription may still deliver it first.
 		if self.fetch.as_ref().is_none_or(|(asked, _)| *asked != generation) {
+			if !ask {
+				return Poll::Pending;
+			}
 			let options = group::Fetch {
 				max_delay: self.max_delay,
 				frame_start: index,
@@ -2220,6 +2241,7 @@ impl Recover {
 		};
 		// A refusal is a verdict only for a copy that failed, and once the serving
 		// subscription will not deliver the group either.
+		let same = generation == self.generation;
 		if failed.is_some() && (same || serving.poll_group(self.sequence, waiter).is_ready()) {
 			return Poll::Ready(Err(err));
 		}
@@ -3332,6 +3354,37 @@ mod test {
 				"fails={fails}, abort={abort}: {res:?}"
 			);
 		}
+	}
+
+	/// A fetch the serving route already answered continues the group, even when that route
+	/// aborts before the reader polls again. Asked of the route whose copy failed, the answer
+	/// arrives only through the fetch, not that copy's subscription.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_answered_fetch_outlives_the_serving_routes_abort() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		let dynamic = a.requests();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, Duration::from_secs(10));
+
+		let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
+		open.write_frame(ts(0), b"a".as_ref()).unwrap();
+		let mut reading = recv(&mut sub);
+		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+		open.abort(Error::Dropped).unwrap();
+		assert!(reading.read_frame().now_or_never().is_none());
+
+		let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
+		assert_eq!((request.sequence(), request.frame_start()), (0, 1));
+		let mut rest = request.accept(None).unwrap();
+		rest.write_frame(ts(1), b"b".as_ref()).unwrap();
+		rest.finish().unwrap();
+		a.abort(Error::Stream(StreamError::App(5))).unwrap();
+
+		assert_eq!(read(&mut reading), Some(b"b".to_vec()));
+		assert_eq!(read(&mut reading), None);
 	}
 
 	/// A drop judges the serving route's subscription, not whether the group exists, so a

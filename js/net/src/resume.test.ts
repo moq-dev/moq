@@ -3202,7 +3202,10 @@ test("only delivery codes are a route failing", () => {
  * A route serving `source` that records the groups it is asked to fetch, through every handle the
  * front clones from it, answering each with `answer` or as `source` would.
  */
-function counted(source: BroadcastProducer, answer?: (sequence: bigint) => GroupConsumer | undefined) {
+function counted(
+	source: BroadcastProducer,
+	answer?: (sequence: bigint) => GroupConsumer | Promise<GroupConsumer> | undefined,
+) {
 	const asked: bigint[] = [];
 	class Counted extends BroadcastConsumer {
 		constructor(shared?: never) {
@@ -3228,6 +3231,48 @@ function counted(source: BroadcastProducer, answer?: (sequence: bigint) => Group
 	}
 	return { route: Counted.of(source.consume()), asked };
 }
+
+test("a fetch its route already answered continues the group past that route's abort", async () => {
+	// Mirrors `an_answered_fetch_outlives_the_serving_routes_abort` in rs/moq-net/src/model/resume.rs.
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	const stalled = ta.write(0n, 1, false);
+	// Once the group is read, the route holds each fetch until the test answers it.
+	let answer: ((group: GroupConsumer) => void) | undefined;
+	let holding = false;
+	const { route } = counted(a, () => {
+		if (!holding) return undefined;
+		return new Promise<GroupConsumer>((resolve) => {
+			answer = resolve;
+		});
+	});
+	front.serve(route);
+	const sub = front.consumer.track("seq").subscribe();
+	const group = sub.tryRecvGroup();
+	if (!group) throw new Error("expected group 0");
+	expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+	holding = true;
+
+	// The copy fails delivering the group: recovery asks the same route for it again.
+	stalled.abort(new StreamError(StreamCode.SessionClosed));
+	const read = group.readFrame();
+	expect(await isPending(read)).toBe(true);
+	if (!answer) throw new Error("expected a recovery fetch");
+
+	// The route answers, then aborts its track before recovery looks again.
+	const rest = new GroupProducer(0n);
+	for (const frame of ["0.0", "0.1"]) rest.writeFrame({ payload: enc.encode(frame) });
+	rest.finish();
+	answer(rest.consume());
+	queueMicrotask(() => ta.producer.abort(new StreamError(StreamCode(70), { message: "cut" })));
+	expect(dec.decode((await read)?.payload)).toBe("0.1");
+	expect(await group.readFrame()).toBeUndefined();
+
+	sub.close();
+	front.consumer.close();
+	a.close();
+});
 
 for (const fetched of [false, true]) {
 	test(`a verdict ends a ${fetched ? "fetched" : "read"} group once, never asking its own route again`, async () => {

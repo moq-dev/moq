@@ -1518,27 +1518,30 @@ class Recover implements GroupRecover {
 					const cached = hooks.cachedGroup(serving.sub, this.sequence, index);
 					if (cached) return this.#replacement(cached, serving);
 				}
-				// Finished history may still continue the group above. Otherwise a terminal
-				// track verdict ends this wait even while a fetch is still unanswered.
+				// Finished history may still continue the group above, and so may a fetch already
+				// answered below. Otherwise a terminal track verdict ends this wait even while a
+				// fetch is still unanswered, and asks for nothing more.
 				const closed = serving.sub.closed.peek();
-				if (closed instanceof Error && !routeFailed(closed)) throw closed;
+				const verdict = closed instanceof Error && !routeFailed(closed) ? closed : undefined;
 				waits.push(serving.sub.closed);
 				// Otherwise ask for it, if the route's version can fetch. The subscription may still
 				// deliver it first. Without FETCH only a copy continues a failed group, and none
 				// holds it, so it ends as the failed copy left it.
 				const fetchGroup = serving.source.wire.fetchGroup;
-				if (!fetchGroup && failed) throw failed;
-				if (fetchGroup && fetch?.generation !== generation) {
+				if (!fetchGroup && failed) throw verdict ?? failed;
+				if (fetchGroup && !verdict && fetch?.generation !== generation) {
 					fetch = startFetch(fetchGroup, route.name, this.sequence, generation, signal);
 					started(fetch);
 				}
 				// A fetch from an earlier route answers for that route, not this one.
 				const asked = fetch?.generation === generation ? fetch : undefined;
+				const outcome = asked?.outcome;
+				// An answer carries its own expiry; the verdict and the budget only end the wait.
+				if (outcome && "group" in outcome) return this.#replacement(outcome.group, serving);
+				if (verdict) throw verdict;
 				const stale = hooks.staleAt(serving.sub, this.sequence);
 				if (stale.expired()) throw new StreamError(StreamCode.Old, { message: "group is past the budget" });
 				waits.push(...stale.changed, ...(asked && !asked.outcome ? [asked.settled] : []));
-				const outcome = asked?.outcome;
-				if (outcome && "group" in outcome) return this.#replacement(outcome.group, serving);
 				// That route failing too waits for the next one, and a refusal is a verdict only for
 				// a copy that failed, once the serving subscription will not deliver the group either.
 				if (outcome && failed && !routeFailed(outcome.error) && !copyFailed(serving)) {
