@@ -160,9 +160,10 @@ that onset. `path` follows the head frame from the press to projected output in 
 it: `capture` (worklet delivery and framing, after the media the frame still needed),
 `packetization` (that media, placed on the media clock by the newest chunk captured before the
 press), `encode` (codec and container write), `network` (write to arrival, through the relay),
-`decode` (arrival to decoded PCM), `jitter_buffer` (decoded PCM to the render onset: the playout
-delay filling, with the ring's render quantum), and `device`, as the stages below name them.
-`latency` and `path` give each one's min, median and max.
+`decode` (arrival to decoded PCM), `jitter_buffer` (the head's PCM to the newest PCM decoded before
+the onset, which filled the playout delay), `render` (that PCM to the render onset: the worklet
+hand-off and the context's render callback), and `device`, as the stages below name them. `latency`
+and `path` give each one's min, median and max.
 
 Nightly runs it and keeps the raw evidence alongside the audio quality rows.
 

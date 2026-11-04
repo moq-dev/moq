@@ -57,7 +57,15 @@ const presses = result.presses
 			const write = sent.get(first.timestamp);
 			const arrival = arrivals.get(first.timestamp);
 			const output = decoded.get(first.timestamp);
-			if (!write || !arrival || !output) return null;
+			// The utterance's newest PCM decoded before the render onset: the one that filled the delay.
+			const filled = input
+				.flatMap((frame) => decoded.get(frame.timestamp) ?? [])
+				.filter((frame) => frame.at <= audible.rendered)
+				.reduce<(typeof result.decoded)[number] | undefined>(
+					(newest, frame) => (newest && newest.at >= frame.at ? newest : frame),
+					undefined,
+				);
+			if (!write || !arrival || !output || !filled) return null;
 			const pressed = press.capture.end / 1000 + (press.at - press.capture.at);
 			const packetization = (first.timestamp + (first.duration ?? 0)) / 1000 - pressed;
 			return {
@@ -66,7 +74,8 @@ const presses = result.presses
 				encode: write.at - first.at,
 				network: arrival[0] - write.at,
 				decode: output.at - arrival[0],
-				jitter_buffer: audible.rendered - output.at,
+				jitter_buffer: filled.at - output.at,
+				render: audible.rendered - filled.at,
 				device: audible.at - audible.rendered,
 			};
 		})();
@@ -95,7 +104,7 @@ const spread = (values: (number | null)[]) => {
 	const median = sorted.length % 2 ? sorted[Math.floor(middle)] : (sorted[middle - 1] + sorted[middle]) / 2;
 	return { min: sorted[0], median, max: sorted[sorted.length - 1] };
 };
-const parts = ["capture", "packetization", "encode", "network", "decode", "jitter_buffer", "device"] as const;
+const parts = ["capture", "packetization", "encode", "network", "decode", "jitter_buffer", "render", "device"] as const;
 const summary = {
 	// The goal: at most 300 ms of playout added on top of one-way delivery.
 	latency: {
