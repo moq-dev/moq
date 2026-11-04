@@ -1016,6 +1016,21 @@ test("a copy that fails mid-serve on a route still serving is subscribed afresh"
 	close();
 });
 
+// Mirrors `a_copy_verdict_aborts_without_querying_again` in rs/moq-net/src/model/front.rs.
+test("a copy that loses its route mid-serve on a route still serving ends the read", async () => {
+	const { a, active, close } = await setup();
+	const ta = copy(a);
+	const sub = active.track("seq").subscribe();
+	ta.write(0n);
+	expect(drain(sub)).toEqual([0n]);
+
+	ta.producer.abort(new StreamError(StreamCode.Unroutable));
+	await expect(sub.recvGroup()).rejects.toMatchObject({ code: StreamCode.Unroutable });
+
+	sub.close();
+	close();
+});
+
 test("a datagram reader whose copy fails mid-serve on a route still serving is subscribed afresh", async () => {
 	const { a, active, close } = await setup();
 	const ta = copy(a);
