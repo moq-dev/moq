@@ -104,11 +104,16 @@ Publish the track with a `refresh` ratio so a joiner gets the value restated in 
 `TrackInfo.priority` defaulted to 127 and now defaults to 0.
 To keep a value's moq-lite byte, subtract 128 from it, widening first so it doesn't trap (`Int8(Int16(old) - 128)`): 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 
+### `request` and `follow` name the two resolutions ([#7193](https://github.com/moq-dev/moq/pull/7193), [#7489](https://github.com/moq-dev/moq/pull/7489))
+
+Rename `OriginConsumer.requestBroadcast(path:)` to `request(path:)`, `announcedBroadcast(path:)` to `follow(path:)`, and `AnnouncedBroadcast` to `Following`.
+Both take an optional `instance:` to refuse every other publisher instance.
+`request` resolves one publisher instance: it retries as the routes covering the path change, and fails with an unroutable error only once discovery has synced with no covering route. `follow` hands out each instance that serves the path in turn.
+
 ### A client asks only about what it watches (#6165)
 
-On moq-lite, a client session asks its relay for announcements only under paths something watches, through `announced()` or `announcedBroadcast()`, instead of under its whole scope at connect.
-`OriginConsumer.requestBroadcast()` watches nothing, so on a client it fails with an unroutable error for a path nothing watches, even when the relay announces it.
-Resolve the path with `announcedBroadcast()`, or hold `announced()` over its prefix while requesting.
+On moq-lite, a client session asks its relay for announcements only under paths something watches, through `announced()`, `request(path:)`, or `follow(path:)`, instead of under its whole scope at connect.
+`OriginConsumer.request(path:)` owns the discovery of its path, so it finds a broadcast the relay serves with nothing else watching first; no announcement stream is needed beside it.
 moq-transport and moq-lite-03/04 sessions are unchanged.
 
 ### `ContainerFormat.fmp4` unwraps to Legacy (#6250)
@@ -190,7 +195,7 @@ The connection stats no longer carry a receive estimate.
 Hold the consumer `Session.recvBandwidth` returns to request PROBE, read it with `rate()` or wait with `rateChanged()`, and drop it to stop.
 It returns `nil` when the version has no PROBE.
 
-### `AnnouncedBroadcast.available()` waits for the next publisher instance (#5700)
+### `Following.available()` waits for the next publisher instance (#5700)
 
 The first call returns the broadcast serving the path, as before.
 Each later call waits for the next instance to take over the path, instead of returning whatever serves it now.
