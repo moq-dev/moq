@@ -911,7 +911,7 @@ test("each reader reads only its own ranges, whatever the union asks for", () =>
 	expect(hooks.tryRecvGroup(sparse, false)).toEqual({ kind: "done" });
 });
 
-// Mirrors the Rust `a_bounded_read_ends_once_its_window_is_read` and its siblings: a read whose
+// Mirrors the Rust `a_bounded_read_stays_ended_until_widened` and its siblings: a read whose
 // ranges all end finishes once nothing in them is left, though the track goes on.
 test("a bounded read ends once its window is read, unless a cap or a wire publisher holds it", () => {
 	const producer = new TrackProducer("test");

@@ -3142,7 +3142,8 @@ export class Subscriber {
 	 * Once the track closes cleanly, a reader with nothing left in range finishes. So does a
 	 * read whose {@link Subscription.ranges} all end, once every group in them was handed out,
 	 * dropped, skipped as stale, or will never arrive, while the track goes on, as in Rust;
-	 * replacing the ranges with {@link update} reads on. A cap keeping a group out holds it
+	 * later reads return `undefined` immediately too, and widening the ranges with {@link update}
+	 * reads on without replaying groups already returned. A cap keeping a group out holds it
 	 * open, since the cap may rise.
 	 * A group whose presentation time is further behind the live edge than this
 	 * subscriber's `delay.max` is skipped. The default subscription's zero takes the live edge.
@@ -3794,7 +3795,8 @@ export class Ordered {
 	 * group whose every frame is further behind the live edge than `delay.max` (the default
 	 * subscription's zero keeps only what nothing newer has superseded). Honors the bounds set by
 	 * {@link withRange}. Like {@link Subscriber.recvGroup}, a read whose ranges all end
-	 * finishes once nothing in them is left to deliver.
+	 * finishes once nothing in them is left to deliver. Later reads return `undefined`
+	 * immediately too; widening the ranges with {@link update} reads on above the last sequence returned.
 	 */
 	nextGroup(): Promise<GroupConsumer | undefined> {
 		return ordered_.nextGroup(this.#subscriber);
