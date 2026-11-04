@@ -549,10 +549,7 @@ impl MoqFill {
 	pub fn accept(&self, sequence: u64) -> Result<Arc<MoqGroupProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let group = self.inner.accept(sequence, None)?;
-		Ok(Arc::new(MoqGroupProducer {
-			sequence: group.sequence,
-			inner: std::sync::Mutex::new(Some(group)),
-		}))
+		Ok(Arc::new(MoqGroupProducer::from_inner(group)))
 	}
 
 	/// Name groups `start` up to the exclusive `end` as never to be delivered.
@@ -788,10 +785,7 @@ impl MoqTrackProducer {
 		let mut guard = self.inner.lock().unwrap();
 		let raw = guard.as_mut().ok_or(MoqError::Closed)?;
 		let group = raw.append_group()?;
-		Ok(Arc::new(MoqGroupProducer {
-			sequence: group.sequence,
-			inner: std::sync::Mutex::new(Some(group)),
-		}))
+		Ok(Arc::new(MoqGroupProducer::from_inner(group)))
 	}
 
 	/// Create a group with an explicit sequence number.
@@ -803,10 +797,7 @@ impl MoqTrackProducer {
 		let mut guard = self.inner.lock().unwrap();
 		let raw = guard.as_mut().ok_or(MoqError::Closed)?;
 		let group = raw.create_group(moq_net::group::Info { sequence })?;
-		Ok(Arc::new(MoqGroupProducer {
-			sequence: group.sequence,
-			inner: std::sync::Mutex::new(Some(group)),
-		}))
+		Ok(Arc::new(MoqGroupProducer::from_inner(group)))
 	}
 
 	/// Write `frame` as a single-frame group.
@@ -882,6 +873,8 @@ impl MoqTrackProducer {
 pub struct MoqGroupProducer {
 	sequence: u64,
 	inner: std::sync::Mutex<Option<moq_net::group::Producer>>,
+	/// Shares the group's one writer wakeup among every concurrent [`ready`](Self::ready) call.
+	ready: kio::Bridge<()>,
 }
 
 impl Drop for MoqGroupProducer {
@@ -896,11 +889,12 @@ impl Drop for MoqGroupProducer {
 }
 
 impl MoqGroupProducer {
-	/// Wrap the single write half of a socket.
+	/// Wrap `group`, for a track's writer or a socket's write half.
 	pub(crate) fn from_inner(group: moq_net::group::Producer) -> Self {
 		Self {
 			sequence: group.sequence,
 			inner: std::sync::Mutex::new(Some(group)),
+			ready: kio::Bridge::new(()),
 		}
 	}
 }
@@ -945,12 +939,17 @@ impl MoqGroupProducer {
 	/// write reports why. Fails with `Closed` after [`abort`](Self::abort).
 	pub async fn ready(&self, size: u64) -> Result<(), MoqError> {
 		let frame = moq_net::frame::Info { size, timestamp: None };
+		// The group keeps one writer waker, so every call polls it with the bridge's, which
+		// wakes them all; a call's own waker would replace another's and strand it.
+		let mut park = kio::Park::default();
 		crate::ffi::run(kio::wait(|waiter| {
-			let guard = self.inner.lock().unwrap();
-			match guard.as_ref() {
-				Some(group) => group.poll_ready(waiter, &frame).map(Ok),
-				None => Poll::Ready(Err(MoqError::Closed)),
-			}
+			self.ready.poll(waiter, |_, cx| {
+				let guard = self.inner.lock().unwrap();
+				match guard.as_ref() {
+					Some(group) => group.poll_ready(park.hold(cx), &frame).map(Ok),
+					None => Poll::Ready(Err(MoqError::Closed)),
+				}
+			})
 		}))
 		.await
 	}
@@ -996,10 +995,7 @@ mod metadata_tests {
 		let track = broadcast.create_track("test", moq_net::track::Info::default()).unwrap();
 		let group = track.append_group().unwrap();
 		let mut consumer = group.consume();
-		let binding = MoqGroupProducer {
-			sequence: group.sequence,
-			inner: std::sync::Mutex::new(Some(group)),
-		};
+		let binding = MoqGroupProducer::from_inner(group);
 		drop(binding);
 		assert!(matches!(
 			consumer.poll_read_frame(&moq_net::kio::Waiter::noop()),

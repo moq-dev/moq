@@ -9472,3 +9472,77 @@ async fn ready_after_abort_is_closed() {
 	group.abort(1).unwrap();
 	assert!(matches!(group.ready(1).await, Err(MoqError::Closed)));
 }
+
+/// Two calls waiting on the same group both wake once the reader drains, though the group
+/// keeps only one writer waker.
+#[tokio::test]
+async fn concurrent_ready_calls_all_wake() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("tcp".into(), None).unwrap();
+	let group = track.append_group().unwrap();
+	let reader = group.consume().unwrap();
+	let frame = || MoqFrame {
+		payload: vec![7; MIB],
+		timestamp: None,
+	};
+	group.write_frame(frame()).unwrap();
+	assert!(
+		kio::clock::timeout(TIMEOUT, reader.read_frame())
+			.await
+			.unwrap()
+			.unwrap()
+			.is_some()
+	);
+	// Run the window full while the reader stalls one frame in.
+	for _ in 0..24 {
+		group.write_frame(frame()).unwrap();
+	}
+
+	let waits = [
+		spawn_parked(ready(group.clone())).await,
+		spawn_parked(ready(group.clone())).await,
+	];
+	assert!(waits.iter().all(|wait| !wait.is_finished()), "the window was not full");
+
+	while let Some(_frame) = kio::clock::timeout(TIMEOUT, reader.read_frame())
+		.await
+		.expect("the read stalled")
+		.unwrap()
+	{
+		if waits.iter().all(|wait| wait.is_finished()) {
+			break;
+		}
+		ffi_caught_up().await;
+	}
+	for wait in waits {
+		kio::clock::timeout(TIMEOUT, wait)
+			.await
+			.expect("a ready call was stranded")
+			.unwrap()
+			.unwrap();
+	}
+
+	async fn ready(group: Arc<MoqGroupProducer>) -> Result<(), MoqError> {
+		group.ready(MIB as u64).await
+	}
+}
+
+/// A call waiting for room ends with `Closed` once the group is aborted.
+#[tokio::test]
+async fn a_waiting_ready_ends_on_abort() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("tcp".into(), None).unwrap();
+	let group = track.append_group().unwrap();
+	// No reader holds the group, so the call waits.
+	let wait = {
+		let group = group.clone();
+		spawn_parked(async move { group.ready(1).await }).await
+	};
+	assert!(!wait.is_finished());
+	group.abort(1).unwrap();
+	let result = kio::clock::timeout(TIMEOUT, wait)
+		.await
+		.expect("ready stranded")
+		.unwrap();
+	assert!(matches!(result, Err(MoqError::Closed)), "{result:?}");
+}
