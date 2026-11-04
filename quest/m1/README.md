@@ -150,13 +150,13 @@ their end report, so an embedder's drain alert pages on real cuts.
 - [A job's exact route continues its claim's readers](/quest/m1/announce-takeover.md) - a job's route inherits its claim's instance, replacing the ANNOUNCE_TAKEOVER predecessor design
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - a lite-07 SUBSCRIBE asks for past and live ranges with absolute or relative ends, in either order, and replaces FETCH; merged ranges never starve a subscriber; relays fill misses by range, including over moq-transport
 - [Drop set](/quest/m1/drop-set.md) - each cursor judges missing groups against its own budget, so a narrow reader drops promptly and a widening re-offers groups already reported dropped on lite-07
+- [A group a subscriber gives up on is always reported](/quest/m1/group-drops.md) - the wire names every abandoned group and the drop signal is public, so readers count losses instead of stalling
 - [Datagram tracks](/quest/m1/datagram-tracks/README.md) - a track is datagrams or streams; datagram tracks have their own request and sequence, no ranges, no cache, and map to object ID 0 on moq-transport
 - [A routed JS read wakes when its track aborts](/quest/m1/js-follow-abort-wake.md) - a pending `readFrame()` on a group found through `request()`/`follow()` rejects on `track.abort()`
 - [Stream credit by priority](/quest/m1/stream-credit/README.md) - every stream opens through one priority entry point, and a higher-priority group takes over or resets a lower one when credit runs out
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [Sockets](/quest/m1/socket/README.md) - a generic dial/accept `Socket` in moq-net, Rust, JS, and Python, with tracks as streams; moq-boy and CARLA move onto it
 - [A smaller, safer API than release](/quest/m1/api-audit/README.md) - every surface added since release has a consumer or is gone, overlapping operations are collapsed, names mirror across Rust, JS, and the bindings, and every break says how to migrate
-- [Register moq-dev draft 20 in the interop runner](/quest/m1/ietf-drop/README.md) - land the external registry, notes, and README correction for drafts 18, 20, and 22
 - [Native rung disable proof](/quest/m1/simulcast-rung-disable.md) - a shaped uplink through moq-ffi proves the top rendition stops and resumes over real BBR3 probing
 - [Audio jitter target](/quest/m1/audio-jitter-target/README.md) - the playout target is default in both languages; time-stretched browser playback without steady-state underruns and a native trace replay remain
 - [A/V clock](/quest/m1/av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles
@@ -187,7 +187,6 @@ their end report, so an embedder's drain alert pages on real cuts.
 - [Vendor and trim the WebRTC stack](/quest/m1/webrtc-vendor.md) - str0m, dimpl, `is`, and sctp-proto live in moq-webrtc with unused code removed, so moq-rtc can take rind
 - [MoQ on rind](/quest/m1/rind/README.md) - every MoQ crate takes its crypto from rind, a pure-Rust graviola fork, so no build compiles C crypto
 - [A hardware decoder's capability refusal is an unsupported config](/quest/m1/hw-decoder-refusal.md) - a GPU that can't decode a stream reports `UnsupportedConfig`, so callers fall back to another rendition
-- [A JS audio capture gap keeps the audio before it](/quest/m1/js-audio-gap-flush.md) - every capture gap flushes the `AudioEncoder` before restarting it, like a disable
 - [A draft-18 resume of a cached group under a finite max-age settles](/quest/m1/ietf18-resume-cached-start.md) - the read delivers the group or refuses at once, never hangs
 - [Bot reviewers don't re-review every push](/quest/m1/review-bot-waves.md) - CodeRabbit and Pullfrog review on ready and on request, so fixes stop drawing new thread waves
 

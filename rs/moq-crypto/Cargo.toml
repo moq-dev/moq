@@ -17,17 +17,16 @@ all-features = true
 
 [features]
 # Without `sign` or `e2ee`, the crate holds only `sign::PublicKey`, the endpoint ID, and its
-# z-base-32 text: no `moq-net` and no crypto backend, for crates that only name endpoints.
+# z-base-32 text: no `moq-net` and no rind, for crates that only name endpoints.
 default = ["sign", "e2ee"]
 # Per-frame signing: `sign::SecretKey` and the signed broadcast wrappers.
-sign = ["dep:aws-lc-rs", "dep:bytes", "dep:kio", "dep:moq-net", "dep:zeroize"]
+sign = ["dep:bytes", "dep:kio", "dep:moq-net", "dep:rind", "dep:zeroize"]
 # End-to-end encryption: the `e2ee` module.
 e2ee = ["dep:base64", "dep:bytes", "dep:kio", "dep:moq-net", "dep:rind", "dep:uuid", "dep:zeroize"]
 # `sign::PublicKey` serializes as its canonical z-base-32 text.
 serde = ["dep:serde"]
 
 [dependencies]
-aws-lc-rs = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 data-encoding = { workspace = true }

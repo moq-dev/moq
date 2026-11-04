@@ -20,7 +20,6 @@ of the cut.
 
 ## Required
 
-- [A claimed path resolves through `origin.request()`](/quest/m1/js-claims/request.md) - a reader's request resolves for a claimed path, as `follow()` already does
 - [Re-serving a claimed path keeps the session](/quest/m1/js-claims/reserve.md) - a fresh broadcast whose first group is above 0 no longer closes the publisher with `invalid control encoding`
 
 ## Related

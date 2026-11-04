@@ -761,21 +761,18 @@ export class Encoder {
 					);
 				});
 
+				// Whether a gap (a lost track, or a capture discontinuity) separates `data` from the last
+				// frame the codec took. Chrome stamps encoder output from the first input's timestamp
+				// plus the samples encoded since, ignoring any later jump, so across a gap the output
+				// would trail the capture clock by the gap, and the next gap's marker would then sit
+				// ahead of everything encoded after it. So a gap restarts the codec, which re-bases it.
+				// Timestamps round to whole microseconds, so a chunk's timestamp and the marker placed
+				// at the next frame's start agree exactly.
+				const gap = (data: AudioFrame) => contiguous !== undefined && Math.round(data.timestamp) !== contiguous;
+
+				// Encode one frame, which must not follow a gap: the gap's flush and restart come first.
 				const submit = (data: AudioFrame) => {
-					// Round to whole microseconds once, here, so a chunk's timestamp and the marker
-					// placed at the next frame's start agree exactly.
 					const timestamp = Math.round(data.timestamp) as Micro;
-
-					// Chrome stamps encoder output from the first input's timestamp plus the samples
-					// encoded since, ignoring any later jump. Across a gap (a lost track, or a capture
-					// discontinuity) the output would trail the capture clock by the gap, and the
-					// next gap's marker would then sit ahead of everything encoded after it.
-					// Restarting re-bases the output clock; the chunks it drops predate the gap.
-					if (contiguous !== undefined && timestamp !== contiguous) {
-						encoder.reset();
-						encoder.configure(encoderConfig);
-					}
-
 					const joinedLength = data.channels.reduce((total, channel) => total + channel.length, 0);
 					const joined = new Float32Array(joinedLength);
 
@@ -801,12 +798,21 @@ export class Encoder {
 					) as Micro;
 					this.#next = contiguous;
 				};
+				// The next frame starts a new epoch, so it starts the codec afresh too.
+				const restart = () => {
+					encoder.reset();
+					encoder.configure(encoderConfig);
+					contiguous = undefined;
+				};
 				// End the epoch where the submitted audio ends, once the codec has emitted all of it: a
 				// marker placed while chunks are still in flight would drop them as pre-gap.
 				const cutAfterFlush = () => {
 					if (flushing) return;
 					// Nothing reached the codec since it last started, so nothing is in flight.
 					if (contiguous === undefined) return this.#cut();
+					// The epoch already ended without a flush (a lost track, or expired history), so what
+					// the codec holds sits below that marker and has nowhere to go.
+					if (this.#next === undefined) return restart();
 					flushing = true;
 					encoder
 						.flush()
@@ -814,10 +820,7 @@ export class Encoder {
 							if (aborted.aborted) return;
 							flushing = false;
 							this.#cut();
-							// The next frame starts a new epoch, so it starts the codec afresh too.
-							encoder.reset();
-							encoder.configure(encoderConfig);
-							contiguous = undefined;
+							restart();
 							if (this.#encoding) pipeline.drain();
 						})
 						.catch((error) => {
@@ -832,16 +835,18 @@ export class Encoder {
 						backlog.expire(clock());
 						// Expired history is a real gap, unlike a loss of demand: end the epoch where
 						// the encoded audio stops, so its last frame isn't stretched across the gap.
+						// What the codec still holds is older than the expired audio, so it is dropped.
 						if (backlog.takeEvicted()) this.#cut();
 						for (;;) {
-							// A disable broke the timeline here; the rest follows once the marker is down.
-							if (backlog.takeCut()) {
+							const frame = backlog.peek();
+							if (!frame) break;
+							// A disable or a gap broke the timeline here; the rest follows once the marker
+							// is down. A cut with nothing in flight lands at once.
+							if (backlog.takeCut() || gap(frame)) {
 								cutAfterFlush();
-								// A cut with nothing in flight lands at once, so the rest can follow.
 								if (flushing) break;
 							}
-							const frame = backlog.shift();
-							if (!frame) break;
+							backlog.shift();
 							submit(frame);
 							this.#history = this.#next;
 						}
@@ -862,14 +867,17 @@ export class Encoder {
 							if (!this.#live) continue;
 							const cut = breakPending;
 							breakPending = false;
-							if (this.#encoding && !flushing && backlog.empty) {
-								// Nothing was submitted since the retained audio before the break expired.
-								if (cut) this.#cut();
+							const live = this.#encoding && !flushing && backlog.empty;
+							// Started here rather than from the backlog, which may not keep the frame: a
+							// zero max age retains nothing.
+							if (live && (cut || gap(data))) cutAfterFlush();
+							if (live && !flushing) {
 								submit(data);
-							} else {
-								const end = frames[i + 1]?.timestamp ?? framer.next;
-								backlog.push(data, end, clock(), cut);
+								continue;
 							}
+							// It waits for a subscriber, or behind the flush before a break.
+							const end = frames[i + 1]?.timestamp ?? framer.next;
+							backlog.push(data, end, clock(), cut && !live);
 						}
 						deadline.set(backlog.deadline);
 					},

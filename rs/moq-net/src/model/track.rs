@@ -4248,6 +4248,12 @@ impl TrackWeak {
 		Some((self.state.try_consume()?, preferences))
 	}
 
+	/// Whether a producer serves the track, rather than a request still waiting for one.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(super) fn minted(&self) -> bool {
+		self.state.read().minted()
+	}
+
 	/// Read the cached track without joining its demand.
 	pub(super) fn peek(&self) -> kio::ConsumerWeak<TrackState> {
 		self.state.consume_weak()
