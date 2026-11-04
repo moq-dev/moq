@@ -106,9 +106,9 @@ catalog linger (#5305).
 
 ## Required
 
-- [Clock-table revisions land at their media position](/quest/m1/ts-reliability/tdt-placement.md) - two exports of one broadcast stay byte-identical across TDT/TOT revisions
 - [A skipped group flags the next PCR](/quest/m1/ts-reliability/skip-flag.md) - a within-instance skip reaches the wire as a flagged PCR discontinuity
 - [A republish announces as soon as its tracks are known](/quest/m1/ts-reliability/republish-announce.md) - a stitched export keeps the new instance's first group on a short-GOP feed
+- [A TS export never loses a queued clock revision](/quest/m1/ts-reliability/clock-revision-burst.md) - a burst of TDT/TOT revisions all reach their stamped slots, or the drop is shown to be the two-exporter fixture's
 
 ## Related
 

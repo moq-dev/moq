@@ -8,7 +8,7 @@
 //!
 //! A [`Producer`] writes, under its prefix:
 //!
-//! - `<track>/.info`: the track's properties as JSON, `{"version":3,"priority":0,"timescale":1000}`,
+//! - `<track>/.info`: the track's properties as JSON, `{"version":4,"priority":0,"timescale":1000}`,
 //!   written before its first object. `timescale` is absent on an untimed track. Properties never
 //!   change for a track name. The source's max age is not stored: it bounds the live cache, not
 //!   the archive.
@@ -32,8 +32,8 @@
 //!
 //! ```text
 //! Object {
-//!   Version (i) = 3,
-//!   Frame Start (i),      // the first group's first frame index; 0 when it starts with a datagram
+//!   Version (i) = 4,
+//!   Frame Start (i),      // the first group's first frame index
 //!   Entry Count (i),
 //!   Entry (..) ...,
 //!   Payload (..),         // every frame's bytes, in table order
@@ -41,9 +41,8 @@
 //!
 //! Entry {
 //!   Sequence (i),         // absolute for the first entry, then current - previous - 1
-//!   Form (i),             // 0 for a group, 1 for a datagram
-//!   [Frame Count (i)],    // a group only, at least 1
-//!   Frame (..) ...,       // a datagram has exactly one
+//!   Frame Count (i),      // at least 1
+//!   Frame (..) ...,
 //! }
 //!
 //! Frame {
@@ -52,8 +51,8 @@
 //! }
 //! ```
 //!
-//! A track's groups and datagrams share one sequence space, so each entry keeps its form, and a
-//! datagram replays as a datagram, never as a cached one-frame group.
+//! An archive records stream tracks only. A datagram track is live-only, so a broadcast's
+//! archive holds none of its datagram tracks.
 
 #![warn(missing_docs)]
 
@@ -78,10 +77,11 @@ pub use producer::Producer;
 pub use store::Store;
 
 /// Recording format version written into `.info` and the binary envelope.
-pub const VERSION: u64 = 3;
+pub const VERSION: u64 = 4;
 
 /// The oldest recording format version a [`Consumer`] accepts. Version 2 stored `.info`'s
-/// priority as its moq-lite byte and is otherwise identical.
+/// priority as its moq-lite byte, and versions 2 and 3 give each object entry a form, which
+/// a reader accepts only as a group.
 pub(crate) const VERSION_MIN: u64 = 2;
 
 /// Largest sequence, frame index, or timestamp value the format allows (`2^53 - 1`).
