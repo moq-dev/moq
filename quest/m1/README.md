@@ -143,7 +143,6 @@ their end report, so an embedder's drain alert pages on real cuts.
 - [Pre-cut audit findings](/quest/m1/cut-audit/README.md) - fix the crashes, hostile-input costs, and correctness bugs the 2026-10-24 audit of main found
 - [Vendored code has every upstream fix it needs](/quest/m1/vendor-sync/README.md) - quinn, libv4l-rs, nvidia-video-codec-sdk, rust-media-libs, cros-codecs, and UniFFI generator fixes are ported or planned, once per release cycle
 - [Media fuzz findings](/quest/m1/fuzz-findings/README.md) - the nightly media fuzz targets run clean: mp4-atom, MKV block, TS step, SPS overflow, and catalog encoder bugs they found are fixed
-- [moq-tokio clients redial from a fresh source port](/quest/m1/tokio-client-fresh-port.md) - after N failed dials a client on an ephemeral port rebinds, so one dropped 5-tuple can't strand it
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - prove shared routing contracts, implement per-origin routes, and connect outbound local clusters
 - [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation setup
 - [moq-c at parity](/quest/m1/c/README.md) - the hand-written `moq-c` ships at the cut with every m1 binding feature moq-ffi gains
