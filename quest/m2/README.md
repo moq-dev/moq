@@ -117,7 +117,6 @@ lite-07; bitrate enforcement is not part of this release.
 - [A moq-transport group head fills its hole in place](/quest/m2/ietf-fill-refill.md) - fills and joining FETCHes write into the tail's group, deleting the `Fill` handoff
 - [moq-transport hole markers](/quest/m2/ietf-hole-marker.md) - a negotiated extension names a SUBSCRIBE's holes, so our publishers answer multi-group FETCH from caches that know every group; built when an IETF client wants it
 - [Announce interest streams share one route table](/quest/m2/announce-interest-memory.md) - per-stream announce cost follows what is in flight, not every route
-- [One relay serve path for every runtime](/quest/m2/relay-serve-path.md) - io_uring serves through the shared `Connection::serve` and config mapping
 - [A parked read of a resumed group reads its budget without re-syncing](/quest/m2/recover-budget.md) - measure, then drop the per-frame reader sync
 - [One port](/quest/m2/one-port/README.md) - one UDP port carries QUIC, SRT, and WebRTC media through an embedder hook, and one TCP port carries HTTP, RTMP, and RTMPS
 - [WebSocket caps](/quest/m2/rate-websocket.md) - paced reads and writes over bounded socket buffers hold WebSocket to the same caps
@@ -299,3 +298,4 @@ lite-07; bitrate enforcement is not part of this release.
 - [The dev shell builds Kotlin with Gradle 9](/quest/m2/kt-gradle-9.md) - `gradle_9` in the dev shell, so the Android target builds there
 - [The publish support panel lists only codecs publishing accepts](/quest/m2/publish-support-probe.md) - the settings panel runs the publisher's Annex B encoder probe
 - [A hung Python test fails instead of hanging the suite](/quest/m2/py-test-timeouts.md) - one pytest-timeout bound covers every `py/` test
+- [Chromium's Opus encoder stamps chunks from their input](/quest/m2/chromium-opus-timestamps.md) - waiting on Chromium; unlocks native `usedtx` for push-to-talk

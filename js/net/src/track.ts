@@ -277,14 +277,14 @@ export interface Groups {
 
 /**
  * Where one end of a {@link Range} falls: a fixed group (`absolute`), a count of groups back from
- * the latest one (`relative`, clamped to group 0, so `{ relative: 0 }` is the latest group), or a
+ * the latest one (`relative`, clamped to group 0, so `{ relative: 0n }` is the latest group), or a
  * presentation time (`time`, the group containing it: the newest one starting at or before it).
  * Mirrors the Rust `Anchor`.
  *
  * Every anchor names a whole group: a subscription always starts at a group's first frame. A
  * relative or time anchor resolves at the hop that serves it, when it starts serving and again
  * whenever the subscriber replaces its ranges. Before any group exists a relative anchor resolves
- * at the first one, so `{ start: { relative: 0 } }` starts there.
+ * at the first one, so `{ start: { relative: 0n } }` starts there.
  *
  * A time anchor resolves from where the groups the hop holds start. A start before every group
  * held reaches back to the oldest one, and one resolved before any group has started waits for
@@ -299,7 +299,7 @@ export interface Groups {
  */
 export type Anchor =
 	| { absolute: bigint; relative?: never; time?: never }
-	| { relative: number; absolute?: never; time?: never }
+	| { relative: bigint; absolute?: never; time?: never }
 	| { time: Timestamp; absolute?: never; relative?: never };
 
 /**
@@ -308,7 +308,7 @@ export type Anchor =
  * An omitted start is the oldest group still around (Rust's `Range::oldest`), and an omitted end
  * keeps following the live edge. An absolute end is exclusive, so `{absolute: 2}..{absolute: 6}`
  * delivers groups 2 through 5; relative and time ends include their group, so
- * `{absolute: 0}..{relative: 0}` delivers through the latest group.
+ * `{absolute: 0}..{relative: 0n}` delivers through the latest group.
  */
 export interface Range {
 	/** Where delivery starts, or the oldest group when omitted. */
@@ -360,7 +360,7 @@ export interface Subscription {
 	 * The spans of the track to deliver; see {@link Range}.
 	 *
 	 * Defaults to `[{}]`: everything {@link Delay.max} still considers fresh.
-	 * `[{ start: { relative: 0 } }]` starts at the latest group instead, and an empty list asks
+	 * `[{ start: { relative: 0n } }]` starts at the latest group instead, and an empty list asks
 	 * for nothing. {@link Delay.max} caps every range: a range names what may be delivered, and
 	 * the budget skips what inside it has gone stale. A read whose ranges all end finishes once
 	 * nothing in them is left to deliver, as in Rust, while one left open follows the live edge.
@@ -3231,7 +3231,8 @@ export class Subscriber {
 	 * Once the track closes cleanly, a reader with nothing left in range finishes. So does a
 	 * read whose {@link Subscription.ranges} all end, once every group in them was handed out,
 	 * dropped, skipped as stale, or will never arrive, while the track goes on, as in Rust;
-	 * replacing the ranges with {@link update} reads on. A cap keeping a group out holds it
+	 * later reads return `undefined` immediately too, and widening the ranges with {@link update}
+	 * reads on without replaying groups already returned. A cap keeping a group out holds it
 	 * open, since the cap may rise.
 	 * A group whose presentation time is further behind the live edge than this
 	 * subscriber's `delay.max` is skipped. The default subscription's zero takes the live edge.
@@ -3883,7 +3884,8 @@ export class Ordered {
 	 * group whose every frame is further behind the live edge than `delay.max` (the default
 	 * subscription's zero keeps only what nothing newer has superseded). Honors the bounds set by
 	 * {@link withRange}. Like {@link Subscriber.recvGroup}, a read whose ranges all end
-	 * finishes once nothing in them is left to deliver.
+	 * finishes once nothing in them is left to deliver. Later reads return `undefined`
+	 * immediately too; widening the ranges with {@link update} reads on above the last sequence returned.
 	 */
 	nextGroup(): Promise<GroupConsumer | undefined> {
 		return ordered_.nextGroup(this.#subscriber);
