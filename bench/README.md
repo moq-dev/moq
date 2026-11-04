@@ -12,6 +12,16 @@ case dials. `lsof`, included in the Nix shell, verifies
 ownership. A collision uses the existing startup attempts; exhausted attempts
 fail with the relay log before any load starts.
 
+Every session from `run.sh`, `browser/run.sh`, or `local.py` (so every root
+`just bench*` recipe) holds the host's benchmark lock, `/tmp/moq-bench.lock`,
+from the end of its argument checks until it exits, across all checkouts and
+agents. A second session waits, printing the holder's PID, start time,
+directory, and command; the file holds that record. `lock.sh COMMAND` holds it
+for any other measurement. The kernel releases it once the session and every
+process it started exit. It serializes benchmarks only: builds and tests from
+other agents still run, so pick a quiet host and check the load each run
+records.
+
 ## Commands
 
 Run every Criterion target plus the local relay workloads:

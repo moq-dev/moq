@@ -21,6 +21,7 @@ source "$WORKSPACE/test/lib/harness.sh"
 
 RERUN="$(harness_env BENCH_PROFILE RELAY_BIN BROWSER_BIN)just bench-browser$(harness_argv "$@")"
 
+ARGS=("$@")
 BASE=
 DRIVER=()
 while [[ $# -gt 0 ]]; do
@@ -62,6 +63,10 @@ BASE_COMMIT=
 if [[ -n $BASE ]]; then
     BASE_COMMIT=$(git -C "$WORKSPACE" rev-parse --verify "$BASE^{commit}")
 fi
+
+# shellcheck source-path=SCRIPTDIR source=../lock.sh
+source "$HERE/../lock.sh"
+bench_lock "$0" ${ARGS[@]+"${ARGS[@]}"}
 
 harness_begin bench-browser "$RERUN"
 

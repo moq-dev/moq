@@ -200,6 +200,7 @@ class Orchestration(unittest.TestCase):
                 subprocess.run(["git", *command], cwd=checkout, env=environment, check=True, capture_output=True)
             (bench / "run.sh").write_text((root / "bench/run.sh").read_text())
             (bench / "metadata.py").write_text("")
+            (bench / "lock.sh").write_text("bench_lock() { :; }\n")
             (bench / "profile.py").write_text("")
             (bench / "relay.sh").write_text("""PROFILE=
 run_workload() {
