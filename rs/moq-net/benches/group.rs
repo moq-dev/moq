@@ -56,7 +56,9 @@ use moq_net::{Timestamp, broadcast, frame, group, track};
 
 /// A millisecond track: the frames written here carry timestamps.
 fn timed() -> track::Info {
-	track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	track::Info::default()
+		.with_max_age(None)
+		.with_timescale(moq_net::Timescale::MILLI)
 }
 
 /// A small, fixed payload shared across every frame. Cloning a `Bytes` is a
@@ -70,7 +72,7 @@ const PAYLOAD: usize = 64;
 const COUNTS: [usize; 7] = [4, 5, 32, 33, 512, 2_048, 8_192];
 
 /// Cached group counts to sweep for the track-level delivery benchmarks. A track
-/// publishing one group per frame at the default 5s retention sits in the hundreds,
+/// publishing one group per frame inside the default 30s cache expiry sits in the hundreds,
 /// so the top end is deliberately past anything realistic: a per-delivery scan over
 /// the cache shows up as a slope here, while a seek stays flat.
 const DEPTHS: [usize; 3] = [64, 512, 4_096];
@@ -641,7 +643,9 @@ fn contended(
 	readers: usize,
 ) {
 	let broadcast = broadcast::Producer::new(broadcast::Info::default());
-	let track = broadcast.create_track("bench", track::Info::default()).unwrap();
+	let track = broadcast
+		.create_track("bench", track::Info::default().with_max_age(None))
+		.unwrap();
 	let mut group = track.append_group().unwrap();
 	// The group readers move to once theirs ends.
 	let next = Arc::new(Mutex::new(group.consume()));
@@ -750,7 +754,9 @@ fn bench_streaming(c: &mut Criterion) {
 /// One [`bench_streaming`] case.
 fn streaming(b: &mut criterion::Bencher, chunk: &Bytes, arrivals: usize, threads: usize, readers: usize) {
 	let broadcast = broadcast::Producer::new(broadcast::Info::default());
-	let track = broadcast.create_track("bench", track::Info::default()).unwrap();
+	let track = broadcast
+		.create_track("bench", track::Info::default().with_max_age(None))
+		.unwrap();
 	let info = frame::Info {
 		size: (arrivals * chunk.len()) as u64,
 		timestamp: None,

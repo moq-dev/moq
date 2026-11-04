@@ -173,9 +173,10 @@ if [[ "$HAVE_ANDROID_LIBS" == true ]]; then
     GRADLE_ARGS+=("-Pandroid.enabled=true")
 fi
 
-GRADLE_CMD="${GRADLE_CMD:-$(command -v gradle || true)}"
-[[ -n "$GRADLE_CMD" ]] || {
-    echo "Error: gradle not on PATH" >&2
+# `type -P` resolves only executables, so an inherited shell function named gradle cannot stand in for Gradle.
+gradle_name="${GRADLE_CMD:-gradle}"
+GRADLE_CMD="$(type -P "$gradle_name")" || {
+    echo "Error: Gradle executable '$gradle_name' not found" >&2
     exit 1
 }
 

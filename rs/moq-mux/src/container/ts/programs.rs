@@ -74,6 +74,10 @@ pub struct Programs {
 	clock: Clock,
 	/// The [`Clock`] reading past which the longest-waiting program is late, while one waits.
 	deadline: Option<u64>,
+	/// Where the input can next expire a program's health check, so a program that reads no
+	/// packet is advanced without a scan of every program per packet. Kept early when a routed
+	/// packet moves its check later.
+	due: health::Due,
 	/// The packets on PIDs no program reads.
 	unclaimed: Unclaimed,
 }
@@ -203,17 +207,15 @@ struct Before {
 	stats: stats::Snapshot,
 	errors: health::Errors,
 	health: Health,
-	now: Option<u64>,
 }
 
 impl Before {
 	fn of(import: &Import<Ext>) -> Self {
-		let (health, now) = import.timing();
+		let health = import.timing();
 		Self {
 			stats: import.stats(),
 			errors: import.errors().clone(),
 			health: health.clone(),
-			now,
 		}
 	}
 }
@@ -319,6 +321,7 @@ impl Programs {
 			announced: false,
 			clock: Clock::default(),
 			deadline: None,
+			due: health::Due::default(),
 			unclaimed: Unclaimed::default(),
 		}
 	}
@@ -333,7 +336,20 @@ impl Programs {
 
 	fn decode_with(&mut self, demux: &mut Demux, data: &[u8]) -> anyhow::Result<()> {
 		demux.push(data);
+		let mut read = None;
 		while let Some(packet) = demux.next() {
+			let at = health::At {
+				count: packet.count,
+				arrival: packet.arrival,
+			};
+			read = Some(at.arrival);
+			if self.due.count.is_some_and(|due| at.count >= due) {
+				self.due = health::Due::default();
+				for program in &mut self.programs {
+					program.import.timing_mut().advance(at);
+					self.due = self.due.min(program.import.timing().due());
+				}
+			}
 			if let Some(pat) = &packet.pat {
 				self.follow(pat)?;
 			} else if self.pmt_pids[usize::from(packet.pid)] {
@@ -359,6 +375,7 @@ impl Programs {
 				let before = (self.pmt_pids[usize::from(packet.pid)] && import.pmt_pid() == Some(packet.pid))
 					.then(|| Before::of(import));
 				import.packet(&packet)?;
+				self.due = self.due.min(import.timing().due());
 				self.clock.offer(index, import);
 				if import.claims_changed() {
 					changed.push((index, before));
@@ -383,6 +400,16 @@ impl Programs {
 			}
 		}
 		demux.drain();
+		// Every packet this chunk completed is read: grade the input through its arrival.
+		if let Some(arrival) = read
+			&& self.due.arrival.is_some_and(|due| arrival >= due)
+		{
+			self.due = health::Due::default();
+			for program in &mut self.programs {
+				program.import.timing_mut().settle(arrival);
+				self.due = self.due.min(program.import.timing().due());
+			}
+		}
 		// Only a program that read something has anything to flush or announce, so a call
 		// costs what it carried rather than one pass over every program.
 		for index in self.touched.drain(..) {
@@ -741,6 +768,8 @@ impl Programs {
 	/// counts each PID in each way it reads it now or did, given its counts `before` the packet
 	/// that moved them, if that was a PMT.
 	fn reclaim(&mut self, index: usize, before: Option<&Before>) {
+		// A handover may bring an older interval into another program's health checks.
+		self.due = health::Due::NOW;
 		let program = &mut self.programs[index];
 		let claims = program.import.claims();
 		for &pid in program.claims.iter().filter(|pid| claims.binary_search(pid).is_err()) {
@@ -802,7 +831,7 @@ impl Programs {
 			return;
 		};
 		match before.filter(|_| current == index) {
-			Some(before) => (self.programs[next].import).take_over(read.0, (&before.health, before.now)),
+			Some(before) => (self.programs[next].import).take_over(read.0, &before.health),
 			None => {
 				let [from, to] = self
 					.programs
@@ -1259,6 +1288,132 @@ mod test {
 		assert_eq!(outage(Leave::Stay), 2, "the 1.5 s since the PTS");
 		assert_eq!(outage(Leave::Retire), 2, "counted on by the program left");
 		assert_eq!(outage(Leave::Drop), 2, "counted on by the program still carrying it");
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_shared_pts_timer_keeps_its_age_when_clocks_are_sampled_apart() {
+		let mut programs = Programs::new(
+			crate::source::produce_origin(),
+			moq_net::Path::from_static("event.hang"),
+			catalog::Config::default(),
+		);
+		let mut mux = Mux::default();
+		let both = [(1, 0x100), (2, 0x200)];
+		mux.pat(&both[..1]).pmt(0x100, 1, 0x1ff, &[(MP2, 0x61)], 0);
+		mux.packet(0x1ff, Flags::pcr(27_000_000));
+		mux.out.extend(mp2_pes(0x61, 0, 90_000, [0x61; 2]));
+		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+		tokio::time::advance(std::time::Duration::from_millis(200)).await;
+		mux.pat(&both).pmt(0x200, 2, 0x1f2, &[(MP2, 0x61)], 0);
+		mux.packet(0x1f2, Flags::pcr(27_000_000));
+		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+		tokio::time::advance(std::time::Duration::from_millis(1)).await;
+		mux.packet(0x1fff, Flags::default());
+		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+		tokio::time::advance(std::time::Duration::from_millis(19)).await;
+		mux.packet(0x1f2, Flags::pcr(27_000_000 + 20 * MS));
+		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+		tokio::time::advance(std::time::Duration::from_millis(30)).await;
+		mux.pmt_at(1, 0x100, 1, 0x1ff, &[(MP2, 0x62, &[])], 0);
+		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+		tokio::time::advance(std::time::Duration::from_millis(450)).await;
+		mux.packet(0x1fff, Flags::default());
+		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+		assert_eq!(programs.stats().pts_error, 0, "exactly 700 ms is on time");
+		tokio::time::advance(std::time::Duration::from_millis(1)).await;
+		mux.packet(0x1fff, Flags::default());
+		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+		assert_eq!(
+			programs.stats().pts_error,
+			1,
+			"701 ms since the PTS, across the handover"
+		);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_missing_shared_pcr_counts_once_across_a_late_handover() {
+		let mut programs = Programs::new(
+			crate::source::produce_origin(),
+			moq_net::Path::from_static("event.hang"),
+			catalog::Config::default(),
+		);
+		let mut mux = Mux::default();
+		let both = [(1, 0x100), (2, 0x200)];
+		mux.pat(&both[..1]).pmt(0x100, 1, 0x1ff, &[(MP2, 0x61)], 0);
+		mux.packet(0x1ff, Flags::pcr(27_000_000));
+		mux.out.extend(mp2_pes(0x61, 0, 90_000, [0x61; 2]));
+		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+		tokio::time::advance(std::time::Duration::from_millis(200)).await;
+		mux.pat(&both).pmt(0x200, 2, 0x1ff, &[(MP2, 0x61)], 0);
+		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+		assert_eq!(programs.stats().pcr_repetition_error, 1);
+		tokio::time::advance(std::time::Duration::from_millis(50)).await;
+		mux.pat(&both[1..]);
+		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+		for _ in 0..3 {
+			tokio::time::advance(std::time::Duration::from_millis(100)).await;
+			mux.packet(0x1fff, Flags::default());
+			programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+			assert_eq!(programs.stats().pcr_repetition_error, 1, "the same outage still runs");
+		}
+		// The PTS was seen at t=0. Rebasing against a stale destination clock must
+		// not turn its exact 700 ms boundary into an early PTS error.
+		tokio::time::advance(std::time::Duration::from_millis(150)).await;
+		mux.packet(0x1fff, Flags::default());
+		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+		assert_eq!(programs.stats().pts_error, 0);
+		tokio::time::advance(std::time::Duration::from_millis(1)).await;
+		mux.packet(0x1fff, Flags::default());
+		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+		assert_eq!(programs.stats().pts_error, 1);
+		programs.finish().unwrap();
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_stalled_owner_cannot_hide_a_shared_pids_outage() {
+		for shared_clock in [false, true] {
+			for continuing in [false, true] {
+				let mut programs = Programs::new(
+					crate::source::produce_origin(),
+					moq_net::Path::from_static("event.hang"),
+					catalog::Config::default(),
+				);
+				let mut mux = Mux::default();
+				let both = [(1, 0x100), (2, 0x200)];
+				let clocks = [0x1f1, if shared_clock { 0x1f1 } else { 0x1f2 }];
+				mux.pat(&both);
+				for ((number, pid), clock) in both.into_iter().zip(clocks) {
+					mux.pmt(pid, number, clock, &[(MP2, 0x61)], 0);
+					mux.packet(clock, Flags::pcr(27_000_000));
+				}
+				mux.out.extend(mp2_pes(0x61, 0, 90_000, [0x61; 2]));
+				programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+				for i in 1..=10 {
+					tokio::time::advance(std::time::Duration::from_millis(100)).await;
+					if continuing {
+						mux.pat(&both);
+						for ((number, pid), clock) in both.into_iter().zip(clocks) {
+							mux.pmt(pid, number, clock, &[(MP2, 0x61)], 0);
+						}
+						mux.out
+							.extend(mp2_pes(0x61, i, 90_000 + u64::from(i) * 9_000, [0x61; 2]));
+					}
+					if !shared_clock {
+						mux.packet(clocks[1], Flags::pcr(27_000_000 + u64::from(i) * 100 * MS));
+					}
+					// No program reads this packet: it must still advance every health check.
+					mux.packet(0x1fff, Flags::default());
+					programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+				}
+				let stats = programs.stats();
+				assert_eq!(stats.pcr_repetition_error, 1, "{shared_clock} {continuing}: {stats:?}");
+				assert_eq!(stats.pat_error, u64::from(!continuing), "{stats:?}");
+				assert_eq!(stats.pmt_error, 2 * u64::from(!continuing), "{stats:?}");
+				assert_eq!(stats.pts_error, u64::from(!continuing), "{stats:?}");
+				assert_eq!(stats.streams[&0x61].pts_error, stats.pts_error);
+				programs.finish().unwrap();
+			}
+		}
 	}
 
 	/// A section stream refused for want of a PCR keeps its refusal in the totals once, though
@@ -2075,6 +2230,7 @@ mod test {
 			assert!(fills.contains(&frame.payload[4]), "{path} carries only its own program");
 			let skew = Duration::from_secs(2);
 			let wall = catalog
+				.media
 				.clock
 				.expect("the catalog advertises a clock")
 				.wall_clock(frame.timestamp)

@@ -5,6 +5,38 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Separate datagram tracks
+
+`MoqTrackProducer::{append_datagram, insert_datagram}` and `MoqTrackConsumer::recv_datagram` are removed. Use `MoqBroadcastProducer::create_datagrams(name, info)` and `MoqBroadcastConsumer::datagrams(name)` for separate `MoqDatagramProducer`/`MoqDatagramConsumer` handles. `append(timestamp, payload)` assigns a sequence; `insert(MoqDatagram)` preserves one; `recv()` reads it. `MoqDatagramInfo` has only priority and optional timescale. Watch aggregate subscriber priority with `priority()` / `priority_changed(last)`, and handle dynamic tracks with `MoqBroadcastRequests::datagrams()` / `MoqDatagramRequests::requested()`. Stream and datagram tracks of the same name have independent demand and lifetimes.
+
+### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+A null `MoqTrackInfo.max_age`, and a null `MoqTrackInfo`, now advertise a zero max age, serving only the live edge, instead of no publisher limit. Set the new `max_age_unlimited`, which ignores `max_age`, where you relied on null meaning no limit.
+A received track's `info()` sets `max_age_unlimited` when its publisher advertised no limit, so the record republishes unchanged.
+
+### Viewer targets are bounded ([#7090](https://github.com/moq-dev/moq/pull/7090))
+
+Viewer ceilings and PROBE target overrides are refused with the new `MoqError::OutOfRange` once they would sum above 2^53 - 1 bps, the most a PROBE target carries; nothing changes on a refusal. `MoqViewers::watch` and `set_target` and `MoqViewer::update` return a `Result`. Handle the new variant wherever you match the error exhaustively. Regenerate bindings and rebuild the matching native library together.
+
+### `MoqVideoInit.lower` takes either producer kind ([#7699](https://github.com/moq-dev/moq/pull/7699))
+
+`MoqVideoInit.lower` is `Option<MoqMediaProducer>` instead of `Option<MoqMediaTrackProducer>`. Wrap a frame producer as `MoqMediaProducer::Track { producer }`; a `MoqMediaTrackStreamProducer` goes in as `MoqMediaProducer::Stream { producer }`.
+
+### Media setup refusals are typed
+
+Audio and video subscribe setup now reports `UnsupportedConfig` when the decoder refuses a codec, layout, or description. Handle this variant to try another rendition instead of inspecting an audio/video error message or `Unsupported`. Decoder faults, such as a backend that fails to open, and later peer and decode failures keep their existing errors. Regenerate bindings and rebuild the matching native library together.
+
+### JSON writes take a broadcast-clock timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
+
+`MoqJsonSnapshotProducer::update`, `MoqJsonStreamProducer::append`, and `MoqJsonWindowProducer::push` and `pop` take a required `MoqTimestamp` instead of an optional one that defaulted to null. Stamp it on the broadcast clock, read with `MoqMediaCatalogProducer::now`, so the data shares the media's epoch.
+Their constructors refuse a track created without a `timescale`: set one in `MoqTrackInfo`.
+
+### Subscriptions take a `MoqDelay` ([#7697](https://github.com/moq-dev/moq/pull/7697))
+
+`MoqSubscription.max_delay` is `delay: MoqDelay`, the record the decoder outputs take: set `delay.max` to the old `max_delay`.
+`MoqDelay.min` is `Option<Duration>`: null leaves the target latency unstated, which a decoder plays as zero, while `moq_subscription_defaults()` states zero. Wrap a decoder's `min: d` as `Some(d)`.
+Kotlin and Swift name both fields, and the Python, Go, and Dart wrappers default an omitted one to zero. A bare generated C or C++ record leaves both unset, so start from `moq_subscription_defaults()` there.
+
 ### `MoqTransport::Iroh` is removed ([#7345](https://github.com/moq-dev/moq/pull/7345))
 
 moq-tokio no longer accepts iroh sessions, so `MoqTransport` loses its `Iroh` variant and the later variants renumber; Go loses `TransportIroh`.
@@ -29,7 +61,7 @@ The `MoqFlate*` producers and `MoqFlateConfig` are deleted: publish opaque bytes
 
 ### Paths with an empty segment are refused ([#6648](https://github.com/moq-dev/moq/pull/6648))
 
-Every method taking a path, such as `MoqOriginProducer::create_broadcast` and `MoqOriginConsumer::request_broadcast`, returns an error for a path with a leading, trailing, or doubled `/` instead of collapsing it. Pass the canonical path, such as `room/cam`.
+Every method taking a path, such as `MoqOriginProducer::create_broadcast` and `MoqOriginConsumer::request`, returns an error for a path with a leading, trailing, or doubled `/` instead of collapsing it. Pass the canonical path, such as `room/cam`.
 
 ### Request handlers are `requests()` ([#6752](https://github.com/moq-dev/moq/pull/6752))
 
@@ -58,9 +90,6 @@ It defaults to empty in every generated binding; a Rust struct literal adds `tok
 Every duration is a UniFFI `Duration` instead of an integer microsecond field, and drops its `_us` suffix: each language receives its own duration type (`timedelta`, `TimeInterval`, `java.time.Duration`, `time.Duration`, Dart `Duration`, C++ `std::chrono` nanoseconds).
 The renamed fields are `MoqClientConfig.{timeout, race, resolution_delay}`, `MoqQuicConfig.{idle_timeout, keep_alive}`, `MoqWebSocketConfig.delay`, `MoqBackoff.{initial, max, timeout}`, `MoqConnectionStats.rtt`, `MoqGrant.expires`, `MoqTrackInfo.max_age`, `MoqSubscription.max_delay`, `MoqFetchGroupOptions.max_delay`, `MoqAudio.jitter`, `MoqAudioDecoderOutput.{max_delay, delay}`, and `MoqVideoDecoderOutput.max_delay`; the methods are `MoqFill::max_delay()` and `MoqAudioConsumer::delay()`.
 `MoqAudioEncoderOutput.frame_duration_us: u32` is `frame_duration: Option<Duration>`: pass null where you passed 0 for the codec's own frame.
-`MoqSubscription.max_delay` has no default, since UniFFI can't default a duration to 0: Kotlin and Swift must name it, `0` for moq-net's default or null for no subscriber limit.
-Dart, Go, and C can still omit it (Dart's optional parameter, Go's nil `*time.Duration`, a zeroed C struct), which means no subscriber limit; name it there too.
-Start from `moq_subscription_defaults()` where you relied on that default; a null subscription argument still means it.
 `MoqTrackConsumer::info()` no longer fails.
 A duration handed out saturates at `i64::MAX` nanoseconds (about 292 years), so C, C++, and Go hold every value.
 
@@ -124,11 +153,16 @@ Snapshot groups roll on joiner demand, which the producer answers on its own: pu
 `MoqTrackInfo.priority` defaulted to 127 and now defaults to 0.
 To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 
+### `request` and `follow` name the two resolutions ([#7193](https://github.com/moq-dev/moq/pull/7193), [#7489](https://github.com/moq-dev/moq/pull/7489))
+
+Rename `MoqOriginConsumer::request_broadcast(path)` to `request(path, instance)`, `announced_broadcast(path)` to `follow(path, instance)`, and `MoqAnnouncedBroadcast` to `MoqFollowing`.
+`instance` defaults to null in every generated binding, accepting whichever publisher instance serves the path; pass one to refuse every other.
+`request` resolves one publisher instance: it retries as the routes covering the path change, and fails with `MoqError::Unroutable` only once discovery has synced with no covering route. `follow` hands out each instance that serves the path in turn.
+
 ### A client asks only about what it watches (#6165)
 
-On moq-lite, a client session asks its relay for announcements only under paths something watches, through `announced` or `announced_broadcast`, instead of under its whole scope at connect.
-`MoqOriginConsumer::request_broadcast` watches nothing, so on a client it fails with `MoqError::Unroutable` for a path nothing watches, even when the relay announces it.
-Resolve the path with `announced_broadcast`, or hold `announced` over its prefix while requesting.
+On moq-lite, a client session asks its relay for announcements only under paths something watches, through `announced`, `request`, or `follow`, instead of under its whole scope at connect.
+`MoqOriginConsumer::request` owns the discovery of its path, so it finds a broadcast the relay serves with nothing else watching first; no announcement stream is needed beside it.
 moq-transport and moq-lite-03/04 sessions are unchanged.
 
 ### `MoqContainerFormat::Fmp4` unwraps to Legacy (#6250)
@@ -217,7 +251,7 @@ let rate = bandwidth.as_ref().and_then(|b| b.rate());
 
 ### `available()` waits for the next publisher instance (#5700)
 
-`MoqAnnouncedBroadcast::available` returns the broadcast serving the path on its first call, as before.
+`MoqFollowing::available` returns the broadcast serving the path on its first call, as before.
 Each later call waits for the next instance to take over the path, instead of returning whatever serves it now.
 
 ### A timed track refuses a group that rewinds (#5803)

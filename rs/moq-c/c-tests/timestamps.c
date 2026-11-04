@@ -1,8 +1,8 @@
 // Exact timestamps across the installed C ABI: a 90 kHz tick and a present zero
 // read back unchanged from raw frames and datagrams, a JSON value carries its
 // frame's timestamp, and a write refuses an out-of-range timestamp or an
-// untimed frame on a timed track. moq-c only creates timed tracks, so the
-// untimed read path is covered by the Rust tests.
+// untimed frame on a timed track. Stream tracks default to timed;
+// the untimed frame read path is covered by the Rust tests.
 #include <moq.h>
 
 #include <pthread.h>
@@ -88,6 +88,9 @@ int main(void) {
     info.timescale_present = true;
     int32_t track = moq_publish_track((uint32_t)broadcast, "ticks", 5, &info);
     CHECK(track > 0);
+    moq_datagram_info datagram_info = {.timescale = 90000};
+    int32_t datagram_track = moq_publish_datagrams(broadcast, "ticks", 5, &datagram_info);
+    CHECK(datagram_track > 0);
     int32_t json = moq_publish_json_stream((uint32_t)broadcast, "json", 4);
     CHECK(json > 0);
 
@@ -101,12 +104,14 @@ int main(void) {
               MOQ_ERROR_TIMESTAMP_OVERFLOW);
     }
     CHECK(moq_publish_track_frame((uint32_t)track, payload, sizeof(payload), NULL) == MOQ_ERROR_MOQ);
+    // A JSON write is never stamped for you.
+    CHECK(moq_publish_json_stream_append((uint32_t)json, doc, strlen(doc), NULL) == MOQ_ERROR_INVALID_POINTER);
 
     CHECK(moq_origin_request((uint32_t)origin, path, strlen(path), NULL, 0, on_broadcast, &c) > 0);
     WAIT_FOR(&c, c.broadcast);
     int32_t frames = moq_consume_track((uint32_t)c.broadcast, "ticks", 5, NULL, on_frame, &c);
     CHECK(frames > 0);
-    int32_t datagrams = moq_consume_datagrams((uint32_t)c.broadcast, "ticks", 5, on_datagram, &c);
+    int32_t datagrams = moq_consume_datagrams((uint32_t)c.broadcast, "ticks", 5, 0, on_datagram, &c);
     CHECK(datagrams > 0);
     int32_t values = moq_consume_json_stream((uint32_t)c.broadcast, "json", 4, on_value, &c);
     CHECK(values > 0);
@@ -118,7 +123,8 @@ int main(void) {
     WAIT_FOR(&c, c.frame_count == 1);
     CHECK(moq_publish_track_frame((uint32_t)track, payload, sizeof(payload), &tick) == 0);
     WAIT_FOR(&c, c.frame_count == 2);
-    CHECK(moq_publish_track_datagram((uint32_t)track, payload, sizeof(payload), &tick, NULL) == 0);
+    // Creating the datagram consumer joins its live cursor before this write.
+    CHECK(moq_publish_datagrams_append((uint32_t)datagram_track, payload, sizeof(payload), &tick, NULL) == 0);
     WAIT_FOR(&c, c.datagram);
     // JSON tracks moq-c creates count milliseconds.
     const moq_timestamp stamped = {1500, 1000};
@@ -151,6 +157,7 @@ int main(void) {
     CHECK(moq_consume_close((uint32_t)c.broadcast) == 0);
     CHECK(moq_publish_json_stream_finish((uint32_t)json) == 0);
     CHECK(moq_publish_track_finish((uint32_t)track) == 0);
+    CHECK(moq_publish_datagrams_finish((uint32_t)datagram_track) == 0);
     CHECK(moq_publish_close((uint32_t)broadcast) == 0);
     CHECK(moq_origin_close((uint32_t)origin) == 0);
     WAIT_FOR(&c, c.request_done);

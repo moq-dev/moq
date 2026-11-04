@@ -15,8 +15,8 @@ Compression is not a wrapper: it moves into moq-net as a track flag
 moq-flate, so moq-flate is out of scope.
 
 Non-goals:
-- A runtime seam: libraries poll and spawn nothing ([Libraries spawn nothing](/quest/m1/poll-first/no-spawn/README.md)).
-- The transport seam: custom transports implement moq-net's `transport::poll` traits ([native WebTransport](/quest/m1/quic-api/native-web.md) moves the last backend onto them).
+- A runtime seam: libraries poll and spawn nothing ([the remaining library spawns](/quest/m2/spawn-audit.md)).
+- The transport seam: custom transports implement moq-net's `transport::poll` traits, including both native WebTransport backends.
 
 ## Plan
 
@@ -39,7 +39,7 @@ and its trait-versus-bridge comparison:
   `recv_group`, `recv_datagram`, `read_frame`, `next_frame`, `read_chunk`,
   the broadcast consumer's `tracks` listing (maintainer, 2026-10-24), and
   their `poll_*` forms. A wrapper adapts
-  to moq-net, not the other way around: moq-e2ee's error converts into
+  to moq-net, not the other way around: `moq_crypto::e2ee::Error` converts into
   `moq_net::Error`.
 - **Datagrams follow the datagram types.** [Datagram tracks](/quest/m1/datagram-tracks/README.md) (m1) replaces
   `append_datagram`, `insert_datagram`, and `recv_datagram` on stream tracks
@@ -72,11 +72,11 @@ above.
 ## Required
 
 - [moq-net traits](/quest/m2/net-wrap/traits.md) - moq-net exports producer and consumer traits at every level, implemented by its own types
-- [moq-e2ee implements the traits](/quest/m2/net-wrap/e2ee.md) - the e2ee broadcast, track, and group wrappers implement the traits, proving them before the adopters land
+- [moq-crypto's e2ee implements the traits](/quest/m2/net-wrap/e2ee.md) - the e2ee broadcast, track, and group wrappers implement the traits, proving them before the adopters land
 - [moq-json, moq-stats, and hang take the traits](/quest/m2/net-wrap/json.md) - json snapshots, streams, windows, the stats producer, and hang's tracks write and read through the traits
 - [moq-mux takes the traits](/quest/m2/net-wrap/mux.md) - importers, catalog, container, timeline, json tracks, `Source`, TS export, and the moq-video and moq-audio encoders are generic over the traits
 - [CLI paths take the traits](/quest/m2/net-wrap/cli.md) - the CLI's publish and play paths hand moq-mux any broadcast that implements them
-- [JS mirror](/quest/m2/net-wrap/js.md) - `@moq/net` exports the same interfaces, taken by `@moq/hang`, `@moq/publish`, and `@moq/watch`, and implemented by `@moq/e2ee`
+- [JS mirror](/quest/m2/net-wrap/js.md) - `@moq/net` exports the same interfaces, taken by `@moq/hang`, `@moq/publish`, and `@moq/watch`, and implemented by `@moq/crypto`
 
 ## Related
 

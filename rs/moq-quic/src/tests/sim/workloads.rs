@@ -149,7 +149,7 @@ impl Transfer {
 				Err(error) => return Err(TestCaseError::fail(format!("{id} read: {error}"))),
 			}
 		}
-		let _ = chunks.finalize();
+		chunks.finalize();
 		if matches!(self.end, End::Stop) && self.read == self.cut {
 			stream.stop(CODE).unwrap();
 			self.received = true;

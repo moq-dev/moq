@@ -9,4 +9,4 @@ export MOQ_RESUME_SEED MOQ_RESUME_CASES
 echo "Resume model: MOQ_RESUME_SEED=$MOQ_RESUME_SEED MOQ_RESUME_CASES=$MOQ_RESUME_CASES"
 just rs test -p moq-net --lib -E 'test(=model::resume_model::readers_match_the_logical_track)'
 bun install --frozen-lockfile
-bun test js/net/src/resume.model.test.ts
+bun test ./js/net/src/resume.model.test.ts

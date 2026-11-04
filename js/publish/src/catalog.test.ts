@@ -87,8 +87,8 @@ test("catalog producer publishes every update as a snapshot group", async () => 
 	const subscriber = track.subscribe().ordered();
 
 	const first = await subscriber.nextGroup();
-	expect(first?.sequence).toBe(0);
-	expect(await first?.readJson()).toEqual({ clock: expect.anything(), video: { renditions: {} } });
+	expect(first?.sequence).toBe(0n);
+	expect(await first?.readJson()).toEqual({ media: { clock: expect.anything() }, video: { renditions: {} } });
 	expect(first?.done).toBe(true);
 
 	catalog.mutate((c) => {
@@ -96,9 +96,9 @@ test("catalog producer publishes every update as a snapshot group", async () => 
 	});
 
 	const second = await subscriber.nextGroup();
-	expect(second?.sequence).toBe(1);
+	expect(second?.sequence).toBe(1n);
 	expect(await second?.readJson()).toEqual({
-		clock: expect.anything(),
+		media: { clock: expect.anything() },
 		video: { renditions: {} },
 		scte35: { splices: [] },
 	});
@@ -120,12 +120,13 @@ test("catalog producer advertises the page clock from the first snapshot", async
 
 	// Before any rendition: a live-only publisher exposes its clock.
 	const first = Catalog.RootSchema.parse((await consumer.latest())?.value);
-	if (!first.clock) throw new Error("expected a root clock");
-	expect(first.clock.timescale).toBe(1_000_000);
+	const mapping = first.media?.clock;
+	if (!mapping) throw new Error("expected a media clock");
+	expect(mapping.timescale).toBe(1_000_000);
 
 	// A timestamp stamped the way capture does (the clock's instant in microseconds) maps onto the
 	// wall clock the page was reading at that instant.
-	const wall = Catalog.wallClockTime(first.clock, 5_000_000, 1_000_000).getTime();
+	const wall = Catalog.wallClockTime(mapping, 5_000_000, 1_000_000).getTime();
 	expect(wall).toBe(Manual.WALL_START + 5000);
 
 	// Later edits keep the mapping, even across a system-clock adjustment: it is fixed for the broadcast.
@@ -134,7 +135,7 @@ test("catalog producer advertises the page clock from the first snapshot", async
 		c.video = { renditions: {} };
 	});
 	const second = Catalog.RootSchema.parse((await consumer.latest())?.value);
-	expect(second.clock).toEqual(first.clock);
+	expect(second.media?.clock).toEqual(mapping);
 
 	effect.close();
 	installed.close();
@@ -358,7 +359,7 @@ describe("estimate publication window", () => {
 				catalog.video.renditions.v.jitter = Catalog.u53(jitter);
 			});
 		// The newest catalog group published so far, followed through the live largest stream.
-		let newest: number | undefined;
+		let newest: bigint | undefined;
 		const observer = track.subscribe();
 		void (async () => {
 			for (let largest = await observer.largest(); largest; largest = await observer.largest()) {
@@ -458,7 +459,7 @@ describe("estimate publication window", () => {
 		const leading = await sent();
 		await advance(990);
 		expect((await consumer.latest())?.value.video?.renditions.v.delay).toBe(Catalog.u53(7));
-		expect(await sent()).toBe((leading ?? 0) + 1);
+		expect(await sent()).toBe((leading ?? 0n) + 1n);
 		producer.mutate((catalog) => {
 			if (!catalog.video) throw new Error("video missing");
 			catalog.video.renditions.other = { codec: "avc1.640028", container: { kind: "legacy" } };

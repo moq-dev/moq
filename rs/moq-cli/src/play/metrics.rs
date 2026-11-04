@@ -11,7 +11,6 @@
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Context;
@@ -20,7 +19,7 @@ use moq_audio::playback::{Observation, Observer};
 use serde::Serialize;
 use tokio::sync::mpsc;
 
-use super::timeline::Presentation;
+use moq_mux::timeline::Consumer;
 
 /// How often a sample is taken, the browser probe's interval.
 const INTERVAL: Duration = Duration::from_millis(250);
@@ -92,7 +91,7 @@ impl Totals {
 /// The writer, fed an [`Observer`] each time playback opens a speaker.
 pub(super) struct Metrics {
 	file: BufWriter<File>,
-	presentation: Arc<Mutex<Presentation>>,
+	presentation: Consumer,
 	observers: mpsc::UnboundedReceiver<Observer>,
 	current: Option<(Observer, Totals)>,
 	/// What closed engines counted, added to the current one's totals.
@@ -105,7 +104,7 @@ impl Metrics {
 	/// Start writing to `path`, returning where to send each new speaker's observer.
 	pub(super) fn create(
 		path: &Path,
-		presentation: Arc<Mutex<Presentation>>,
+		presentation: Consumer,
 	) -> anyhow::Result<(Self, mpsc::UnboundedSender<Observer>)> {
 		let file = File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
 		let (observe, observers) = mpsc::unbounded_channel();
@@ -178,7 +177,7 @@ impl Metrics {
 		// Read straight after the device clock, so the two pair up.
 		let now = Instant::now();
 		let (playhead, target) = {
-			let presentation = self.presentation.lock().unwrap();
+			let presentation = &self.presentation;
 			(presentation.playhead(now), presentation.target())
 		};
 

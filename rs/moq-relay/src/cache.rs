@@ -44,16 +44,15 @@ pub struct Config {
 	#[usage(long = "cache-headroom", env = "MOQ_CACHE_HEADROOM", setting = "cache.headroom")]
 	pub headroom: Option<String>,
 
-	/// Maximum time a non-latest cached group is retained, e.g. "30s" or "500ms".
+	/// Maximum age of a non-latest cached group, e.g. "30s" or "500ms".
 	///
-	/// Sets both halves of the retention bound. The pool's wall-clock LRU window
-	/// becomes this: a group nobody has read or written for this long is
-	/// reclaimed, so actively-read history stays cached. Each track's own media-timestamp
-	/// retention window is also clamped down to this, so a publisher advertising
-	/// a longer window can't promise more history than the relay keeps. This
-	/// bounds memory by age where `capacity` bounds it by bytes. When unset, the
-	/// LRU window keeps its 30 second default and each track keeps its own
-	/// retention window.
+	/// Sets two separate bounds. The pool's wall-clock LRU window becomes this: a
+	/// group nobody has read or written for this long is reclaimed, so actively-read
+	/// history stays cached. Each track's max age, how long a superseded group stays
+	/// fresh, is also clamped down to this, so a publisher advertising a longer max
+	/// age can't promise more history than the relay serves. The LRU window bounds
+	/// memory by age where `capacity` bounds it by bytes. When unset, the LRU window
+	/// keeps its 30 second default and each track keeps its own max age.
 	///
 	/// One caveat: the latest group of every track is always retained, since it is
 	/// the live edge. This window otherwise holds whether or not a publisher is
@@ -67,7 +66,7 @@ pub struct Config {
 }
 
 /// The relay's resolved cache settings: the shared byte-budget pool plus the
-/// retention ceiling applied to every track.
+/// max age ceiling applied to every track.
 ///
 /// The headroom governor, when configured, moves into the
 /// [`Driver`](crate::cluster::Driver) that [`Cluster::new`](crate::cluster::Cluster::new)
@@ -84,9 +83,9 @@ pub struct Cache {
 	/// Also what owns the headroom governor; see the type docs.
 	pub pool: cache::Pool,
 
-	/// Ceiling on each track's media-timestamp retention window (the latest group of
-	/// every track is always kept). [`Duration::MAX`] imposes no ceiling, leaving
-	/// each track's own window in force.
+	/// Ceiling on each track's max age (the latest group of every track never goes
+	/// stale). [`Duration::MAX`] imposes no ceiling, leaving each track's own max age
+	/// in force.
 	pub duration: Duration,
 
 	/// The headroom governor, not yet running.

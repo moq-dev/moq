@@ -123,8 +123,8 @@ pub(super) enum Action {
 	/// Request the path through `route`; feed the outcome back as
 	/// [`Event::Resolved`].
 	Request { route: u64 },
-	/// Drop the driver's handle on a source.
-	Detach { source: u64 },
+	/// Drop the driver's source handle, keeping its pending track queries when `drain` is true.
+	Detach { source: u64, drain: bool },
 	/// Resolve the requesters parked on the front: it has a source.
 	Resolve,
 	/// Ask `source` for its copy of `track`; feed the answer back as
@@ -395,7 +395,7 @@ impl Front {
 		let Some(upstream) = self.upstream.filter(|upstream| upstream.route == route) else {
 			// A source for a request we no longer want: let it go.
 			if let Ok(source) = result {
-				actions.push(Action::Detach { source });
+				actions.push(Action::Detach { source, drain: false });
 			}
 			return;
 		};
@@ -423,11 +423,14 @@ impl Front {
 
 	fn attach(&mut self, source: u64, candidate: Candidate, actions: &mut Vec<Action>) {
 		if let Some((old, _)) = self.serving.take() {
-			actions.push(Action::Detach { source: old });
+			actions.push(Action::Detach {
+				source: old,
+				drain: false,
+			});
 		}
 		// Every copy is from an older source, including one a track still drains from a
 		// source the previous one replaced.
-		self.drain_copies();
+		self.drain_copies(false);
 		self.serving = Some((source, candidate));
 		self.serving_closing = false;
 		if !self.resolved {
@@ -459,22 +462,23 @@ impl Front {
 		self.excluded.insert(candidate.route);
 		self.serving = None;
 		self.serving_closing = false;
-		actions.push(Action::Detach { source });
-		self.drain_copies();
+		actions.push(Action::Detach { source, drain: true });
+		self.drain_copies(true);
 		actions.push(Action::Reselect);
 	}
 
 	/// The serving source is going: a spliced copy keeps feeding its track (readers read it
 	/// until a replacement's is spliced, or it runs out), and one still being asked for is
-	/// dropped.
-	fn drain_copies(&mut self) {
+	/// kept while that source can still answer, until a replacement attaches.
+	fn drain_copies(&mut self, keep_queries: bool) {
 		for track in self.tracks.values_mut() {
 			match track.state {
 				TrackState::Spliced { source } => {
 					track.draining = Some(source);
 					track.state = TrackState::Idle;
 				}
-				TrackState::Querying { .. } => track.state = TrackState::Idle,
+				TrackState::Querying { .. } if !keep_queries => track.state = TrackState::Idle,
+				TrackState::Querying { .. } => {}
 				TrackState::Idle | TrackState::Parked { .. } => {}
 			}
 		}
@@ -563,7 +567,7 @@ impl Front {
 			// failover, re-splice from the serving source at the first missing group.
 			Err(err)
 				if delivered
-					&& super::resume::route_failed(&err)
+					&& super::resume::retryable(&err)
 					&& self.serving.is_some_and(|(_, candidate)| candidate.carried) =>
 			{
 				track.state = TrackState::Idle;
@@ -759,8 +763,8 @@ mod tests {
 		assert_eq!(front.next_deadline(), scanned.first().map(|(at, _)| *at));
 	}
 
-	/// A front serving `source` through `candidate`, with `video` spliced and read.
-	fn serving(candidate: Candidate, source: u64) -> Front {
+	/// A front querying `source` through `candidate` for the read track `video`.
+	fn querying(candidate: Candidate, source: u64) -> Front {
 		let mut front = Front::new(LINGER);
 		assert_actions(
 			front.step(Event::Selected {
@@ -794,6 +798,12 @@ mod tests {
 				Action::Arm { at: None },
 			],
 		);
+		front
+	}
+
+	/// A front serving `source` through `candidate`, with `video` spliced and read.
+	fn serving(candidate: Candidate, source: u64) -> Front {
+		let mut front = querying(candidate, source);
 		assert_actions(
 			front.step(Event::TrackInfo {
 				track: name("video"),
@@ -857,7 +867,10 @@ mod tests {
 				result: Ok(200),
 			}),
 			&[
-				Action::Detach { source: 100 },
+				Action::Detach {
+					source: 100,
+					drain: false,
+				},
 				Action::Query {
 					track: name("video"),
 					source: 200,
@@ -865,6 +878,28 @@ mod tests {
 			],
 		);
 		assert_eq!(front.serving, Some((200, remote(2))));
+	}
+
+	#[test]
+	fn a_closing_source_answers_while_another_route_is_resolving() {
+		let mut front = querying(remote(1), 100);
+		front.step(Event::SourceClosed { source: 100 });
+		front.step(Event::Selected {
+			best: Some(remote(2)),
+			serving_closing: false,
+		});
+		assert_actions(
+			front.step(Event::TrackInfo {
+				track: name("video"),
+				source: 100,
+				closing: true,
+				result: Ok(info()),
+			}),
+			&[Action::Splice {
+				track: name("video"),
+				source: 100,
+			}],
+		);
 	}
 
 	#[test]
@@ -887,7 +922,10 @@ mod tests {
 				route: 2,
 				result: Ok(200),
 			}),
-			&[Action::Detach { source: 200 }],
+			&[Action::Detach {
+				source: 200,
+				drain: false,
+			}],
 		);
 	}
 
@@ -896,7 +934,13 @@ mod tests {
 		let mut front = serving(remote(1), 100);
 		assert_actions(
 			front.step(Event::SourceClosed { source: 100 }),
-			&[Action::Detach { source: 100 }, Action::Reselect],
+			&[
+				Action::Detach {
+					source: 100,
+					drain: true,
+				},
+				Action::Reselect,
+			],
 		);
 		assert_eq!(front.excluded_routes(), &HashSet::from([1]));
 		assert_actions(
@@ -1098,6 +1142,8 @@ mod tests {
 				Error::from(crate::StreamError::MalformedTrack),
 				Error::App(7),
 				Error::NotFound,
+				Error::Unroutable,
+				Error::from(crate::StreamError::Unroutable),
 				Error::Unsupported,
 			] {
 				let mut front = serving(candidate, 100);
@@ -1350,7 +1396,13 @@ mod tests {
 		front.step(Event::Forgotten { track: name("video") });
 		assert_actions(
 			front.step(Event::SourceClosed { source: 100 }),
-			&[Action::Detach { source: 100 }, Action::Reselect],
+			&[
+				Action::Detach {
+					source: 100,
+					drain: true,
+				},
+				Action::Reselect,
+			],
 		);
 		assert_actions(front.step(Event::Unheld), &[]);
 		assert_actions(
@@ -1425,7 +1477,10 @@ mod tests {
 				route: 2,
 				result: Ok(200),
 			}),
-			&[Action::Detach { source: 100 }],
+			&[Action::Detach {
+				source: 100,
+				drain: false,
+			}],
 		);
 		let t1 = t0 + LINGER;
 		front.step(Event::Unwanted {
@@ -1574,7 +1629,13 @@ mod tests {
 		let mut front = serving(local(1), 100);
 		assert_actions(
 			front.step(Event::SourceClosed { source: 100 }),
-			&[Action::Detach { source: 100 }, Action::Reselect],
+			&[
+				Action::Detach {
+					source: 100,
+					drain: true,
+				},
+				Action::Reselect,
+			],
 		);
 		assert_actions(
 			front.step(Event::Selected {
@@ -1760,7 +1821,7 @@ mod tests {
 				assert!(splices <= 1);
 				// A Detach names a source the front no longer serves from.
 				for action in &actions {
-					if let Action::Detach { source } = action {
+					if let Action::Detach { source, .. } = action {
 						assert_ne!(next.serving.map(|(s, _)| s), Some(*source));
 					}
 				}
@@ -1808,7 +1869,10 @@ mod tests {
 				result: Ok(300),
 			}),
 			&[
-				Action::Detach { source: 200 },
+				Action::Detach {
+					source: 200,
+					drain: false,
+				},
 				Action::Query {
 					track: name("video"),
 					source: 300,

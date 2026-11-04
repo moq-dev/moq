@@ -190,7 +190,7 @@ class Upstream extends BroadcastConsumer {
 		const local = wireOf(this).fetchGroup;
 		if (!local) throw new Error("a produced broadcast always fetches");
 		overrideBroadcastWire(this, {
-			fetchGroup: (name, sequence, options) => fill(sequence, () => local(name, sequence, options)),
+			fetchGroup: (name, sequence, options) => fill(Number(sequence), () => local(name, sequence, options)),
 		});
 		this.#fill = fill;
 	}
@@ -309,13 +309,13 @@ function observed(reader: Reader): string {
 }
 
 function groups(range: Range): track.Groups {
-	return range ? { start: { included: range[0] }, end: { excluded: range[1] } } : {};
+	return range ? { start: { included: BigInt(range[0]) }, end: { excluded: BigInt(range[1]) } } : {};
 }
 
 function subscription(budget: Budget, range: Range): track.Subscription {
 	return {
 		delay: { max: budget === "hour" ? HOUR : SHORT },
-		ranges: range ? [{ start: { absolute: range[0] }, end: { absolute: range[1] } }] : undefined,
+		ranges: range ? [{ start: { absolute: BigInt(range[0]) }, end: { absolute: BigInt(range[1]) } }] : undefined,
 	};
 }
 
@@ -391,7 +391,7 @@ class Model {
 					entry.writer.abort(giveUp());
 					entry.writer = undefined;
 				} else if (!entry) {
-					hooks.dropTrackGroups(copy.track, op.group, op.group + 1, giveUp());
+					hooks.dropTrackGroups(copy.track, BigInt(op.group), BigInt(op.group + 1), giveUp());
 				}
 				instance.givenUp.add(op.group);
 				break;
@@ -455,13 +455,10 @@ class Model {
 		});
 		const serving = wireOf(this.origin).receive(PATH, route);
 		const broadcast = new BroadcastProducer();
-		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 		void (async () => {
 			for await (const request of serving.requested()) {
-				hooks.acceptRequest(
-					request,
-					Upstream.of(broadcast, (sequence, local) => this.fill(instance, slot, sequence, local)),
-				);
+				request.serve(Upstream.of(broadcast, (sequence, local) => this.fill(instance, slot, sequence, local)));
 			}
 		})();
 		publisher.routes[slot] = { track: producer, serving, broadcast, groups: new Map(), givenUp: new Set() };
@@ -478,7 +475,7 @@ class Model {
 		}
 		if (entry.written === 0 && !entry.writer) {
 			try {
-				entry.writer = copy.track.createGroup(group);
+				entry.writer = copy.track.createGroup(BigInt(group));
 			} catch {
 				return;
 			}
@@ -522,7 +519,7 @@ class Model {
 		if (copy.groups.has(sequence)) return local();
 		const written = publisher.written.get(sequence) ?? 0;
 		if (sequence >= GROUPS || written === 0) throw new NotFound(`group ${sequence}`);
-		const writer = copy.track.createGroup(sequence);
+		const writer = copy.track.createGroup(BigInt(sequence));
 		copy.groups.set(sequence, { written: 0, writer });
 		const group = writer.consume();
 		this.write(instance, slot, sequence, written);
@@ -639,7 +636,7 @@ class Model {
 			}
 			if (recv.kind === "group") {
 				const group = recv.group;
-				const sequence = group.sequence;
+				const sequence = Number(group.sequence);
 				if (reader.reading.has(sequence)) {
 					throw fail(index, `group ${sequence} handed out twice: ${reader.handed}`);
 				}
@@ -671,14 +668,15 @@ class Model {
 		if (reader.spec.drops && !reader.spec.ordered) {
 			for (let drop = hooks.tryDrop(reader.sub); drop; drop = hooks.tryDrop(reader.sub)) {
 				for (let group = drop.start; group < drop.end; group++) {
-					if (reader.reading.has(group)) {
+					if (reader.reading.has(Number(group))) {
 						throw fail(
 							index,
 							`dropped ${drop.start}..${drop.end} (${drop.error}) after handing out ${group}`,
 						);
 					}
 				}
-				for (let group = drop.start; group < Math.min(drop.end, GROUPS); group++) reader.dropped.add(group);
+				for (let group = Number(drop.start); group < Math.min(Number(drop.end), GROUPS); group++)
+					reader.dropped.add(group);
 			}
 		}
 
@@ -689,7 +687,7 @@ class Model {
 
 	/** Read a group handed out to its end, checking each frame against the model. */
 	async #read(index: number, reader: Reader, reading: Reading): Promise<void> {
-		const sequence = reading.group.sequence;
+		const sequence = Number(reading.group.sequence);
 		for (;;) {
 			let frame: Frame | undefined;
 			try {
@@ -1015,6 +1013,39 @@ test("regressions", async () => {
 				{ kind: "bounds", reader: 0, range: undefined },
 				{ kind: "write", instance: 0, slot: 0, group: 1, frames: 1 },
 				{ kind: "down", instance: 0, slot: 0 },
+			],
+			finish: false,
+		},
+		// A read right after a fully read range is replaced by none follows live, not the old range's end.
+		{
+			ops: [
+				{ kind: "up", instance: 1, slot: 1 },
+				{ kind: "join", reader: 0, spec: spec(false, "hour", [0, 1], false) },
+				{ kind: "write", instance: 1, slot: 1, group: undefined, frames: 1 },
+				{ kind: "ranges", reader: 0, range: undefined },
+			],
+			finish: false,
+		},
+		// A read right after the ranges narrow hands out no buffered group they left out.
+		{
+			ops: [
+				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "join", reader: 1, spec: spec(false, "hour", [0, 1], false) },
+				{ kind: "write", instance: 0, slot: 1, group: 1, frames: 1 },
+				{ kind: "write", instance: 0, slot: 1, group: 0, frames: 1 },
+				{ kind: "down", instance: 0, slot: 1 },
+				{ kind: "ranges", reader: 1, range: [1, 2] },
+			],
+			finish: false,
+		},
+		// A read right after the ranges widen below a group the copy passed waits for it.
+		{
+			ops: [
+				{ kind: "up", instance: 1, slot: 0 },
+				{ kind: "join", reader: 0, spec: spec(true, "hour", undefined, false) },
+				{ kind: "ranges", reader: 0, range: [1, 2] },
+				{ kind: "write", instance: 1, slot: 0, group: 0, frames: 1 },
+				{ kind: "ranges", reader: 0, range: [0, 1] },
 			],
 			finish: false,
 		},

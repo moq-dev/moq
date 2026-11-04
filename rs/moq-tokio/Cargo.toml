@@ -16,10 +16,10 @@ categories = ["multimedia", "network-programming", "web-programming"]
 default = ["net", "quic", "aws-lc-rs", "websocket", "tcp", "uds"]
 # MoQ sessions over moq-net: `Client`, `Server`, `origin`, and the `connect`, `listen`,
 # and `transport` modules. Every transport feature turns it on, since none works without it.
-net = ["dep:moq-net", "dep:web-transport-trait"]
+net = ["dep:moq-net"]
 # The async QUIC driver alone (`quic::driver`): moq-quic on tokio, without moq-net or
 # the MoQ backend. Needs a crypto-provider feature.
-driver = ["dep:hmac", "dep:moq-congestion", "dep:moq-quic", "dep:pin-project-lite", "dep:rustc-hash", "dep:sha2"]
+driver = ["dep:hmac", "dep:moq-congestion", "dep:moq-quic", "dep:rustc-hash", "dep:sha2"]
 # QUIC and WebTransport over moq-quic, for `https://`, `moqt://`, and `moql://`.
 quic = ["_transport", "_certs", "driver", "dep:http", "dep:web-transport-proto", "dep:reqwest", "watch", "dep:dns-lookup"]
 # Server-side certificate handling: chains loaded from disk, self-signed generation,
@@ -81,7 +81,6 @@ moq-net = { workspace = true, optional = true }
 moq-quic = { workspace = true, optional = true }
 moq-sock = { workspace = true }
 notify = { version = "8", optional = true }
-pin-project-lite = { version = "0.2", optional = true }
 qmux = { workspace = true, features = ["wss", "tls", "tcp"], optional = true }
 rand = "0.10.1"
 rcgen = { workspace = true, optional = true }
@@ -109,7 +108,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = { version = "2", features = ["serde"] }
 usage-rs = { workspace = true, features = ["config"] }
 web-transport-proto = { workspace = true, optional = true }
-web-transport-trait = { workspace = true, optional = true }
 x509-parser = { workspace = true }
 
 [target.'cfg(target_os = "android")'.dependencies]

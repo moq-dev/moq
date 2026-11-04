@@ -139,13 +139,14 @@ case "$1" in
         ;;
     # Keep added coverage out of the rust-bench and rust-shared legs.
     rust-extra)
-        # The allocation/window/play-buffer/receive-bursts tables keep their stdout in the run;
+        # The allocation/window/play-buffer/batch/receive-bursts tables keep their stdout in the run;
         # only Criterion estimates enter the trend report.
-        criterion extra --no-fail-fast -p moq-e2ee -p moq-sign -p moq-json -p moq-archive -p moq-cli -p moq-mux -p moq-audio \
+        criterion extra --no-fail-fast -p moq-crypto -p moq-json -p moq-archive -p moq-cli -p moq-mux -p moq-audio \
             -p moq-quic -p moq-sock -p moq-tokio -p moq-transcode --features moq-quic/fuzz \
             --bench protect --bench sign --bench codec --bench table --bench allocations --bench window \
-            --bench producer --bench play_buffer --bench jitter --bench decode_clock --bench ts_programs --bench ts_video \
-            --bench bus --bench parameter_sets --bench sent_packets --bench demux --bench receive_bursts --bench ladder --bench fanout
+            --bench producer --bench play_buffer --bench jitter --bench timeline --bench decode_clock --bench ts_programs --bench ts_video \
+            --bench bus --bench batches --bench parameter_sets --bench sent_packets --bench demux --bench receive_bursts --bench ladder --bench fanout
+        criterion audio-capture -p moq-audio --features capture --bench capture
         # moq-auth's published release is its own dev-dependency, so `-p moq-auth` is ambiguous.
         # The concurrent cases' latency percentiles stay in the run's stdout.
         criterion auth --manifest-path rs/moq-auth/Cargo.toml --bench verify --bench jwt
@@ -153,12 +154,12 @@ case "$1" in
     rust-uring)
         # One run per target makes an unsupported/skipped ring fail report
         # validation instead of hiding behind the Tokio target's measurements.
-        for target in udp_tokio udp_uring echo_quic session_lite unreachable_dials timers; do
+        for target in udp_tokio udp_uring echo_quic session_lite unreachable_dials timers web_headers; do
             criterion "uring-$target" -p moq-uring --bench "$target"
         done
         ;;
     js)
-        for benchmark in broadcasts requests fills forward reader frames drift ledger bandwidth replay varint lite-varint track resume priority subscribe-drop refresh observed compression; do
+        for benchmark in broadcasts requests fills fetch forward reader frames drift ledger bandwidth replay varint lite-varint track resume priority subscribe-drop refresh observed compression; do
             javascript "$benchmark" just js bench "$benchmark"
         done
         javascript catalog just js catalog-bench
@@ -177,6 +178,7 @@ case "$1" in
         javascript jitter just js jitter-bench
         javascript audio-warmup just js audio-warmup-bench
         javascript audio-support just js audio-support-bench
+        javascript pattern just js pattern-bench
         javascript clock just js clock-bench
         ;;
     # The binding benchmark's runners at a token budget, so they keep working at this
@@ -187,12 +189,12 @@ case "$1" in
         MOQ_BENCH_DIR=${BENCH_RESULTS:-$(git rev-parse --show-toplevel)/target/bench/nightly/bindings}
         export MOQ_BENCH_DIR
         rm -rf "$MOQ_BENCH_DIR"
-        run just rs test -p moq-ffi --cargo-profile release -E 'test(bench::benchmark_ffi)' --run-ignored only
+        run just rs test -p moq-ffi --cargo-profile release -E 'test(bench::benchmark_ffi) | test(bench::benchmark_background)' --run-ignored only
         run just go bench -benchtime="${MOQ_BENCH_SECONDS}s"
         for runner in py kt cpp dart; do
             run just "$runner" bench
         done
-        for result in rust-ffi rust-net go python kotlin cpp dart; do
+        for result in rust-ffi rust-net rust-background go python kotlin cpp dart; do
             if [[ ! -s $MOQ_BENCH_DIR/$result.json ]]; then failed+=("no $MOQ_BENCH_DIR/$result.json"); fi
         done
         ;;

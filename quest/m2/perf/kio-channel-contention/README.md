@@ -454,7 +454,7 @@ Decided (maintainer, 2026-11-01, cluster spike):
   route it learned to every other peer, and hop chains prevent loops. How
   routes from outside the relay (other relays' peer links) reach every
   worker without re-announce is for the planning to settle.
-  [Routes and announces](/quest/m1/cluster-routing/routes.md) plans a
+  [Routes and announces](/quest/m1/cluster-routing/routes/README.md) plans a
   per-connection `proxy` preference (decided 2026-10-14, relays default on)
   that decides whether a connection is sent routes learned from other
   connections; a worker link with it off is this condition.
@@ -470,4 +470,5 @@ Decided (maintainer, 2026-11-01, cluster spike):
 
 ## Required
 
+- [Plan relay-per-thread on a worker mesh that never re-announces](/quest/m2/perf/kio-channel-contention/relay-per-thread.md) - measure no-re-announce, weigh it against per-track replicas, and decide whether log adoption waits on it
 - [Log adoption](/quest/m2/perf/kio-channel-contention/log-adoption.md) - the rest of moq-net's log-shaped state moves onto the log where it measures as a win

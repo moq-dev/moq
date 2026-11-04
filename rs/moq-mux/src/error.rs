@@ -172,25 +172,6 @@ pub enum Error {
 		composition_time_ms: i32,
 	},
 
-	/// An HLS record did not land at its window's next index: pushed out of order, or read where
-	/// its `sequence` differs from its window index.
-	#[error("HLS record {actual} where {expected} was next")]
-	HlsSequence {
-		/// The window's next index.
-		expected: u64,
-		/// The record's sequence.
-		actual: u64,
-	},
-
-	/// An HLS frame report named a group before the previous report's.
-	#[error("HLS report for group {group} after group {last}")]
-	HlsGroup {
-		/// The rejected report's group.
-		group: u64,
-		/// The previous report's group.
-		last: u64,
-	},
-
 	/// Error from a muxer/demuxer that reports via `anyhow` (currently the MPEG-TS demuxer).
 	/// Boxed in an `Arc` so the enum stays `Clone` (`anyhow::Error` is not).
 	#[error("{0}")]
