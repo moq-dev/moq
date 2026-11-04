@@ -136,6 +136,8 @@ interface DatagramEntry {
 
 interface SubscribeEntry {
 	datagrams?: DatagramEntry;
+	/** Release the stream demand held by readers of the legacy datagram track. */
+	datagramDemand?: Dispose;
 	legacyKey?: string;
 	// The write side: incoming GROUP streams are routed here. The application reads
 	// the matching track.Subscriber it got from broadcast.Consumer.subscribe.
@@ -846,9 +848,18 @@ export class Subscriber {
 		let producer: datagram.Producer | undefined;
 		let stream: Stream | undefined;
 		const id = this.#subscribeNext++;
+		const legacyKey =
+			hasDatagrams(this.version) && !hasDatagramTracks(this.version)
+				? JSON.stringify([consumed.id, request.name])
+				: undefined;
+		// A stream answer can arrive while this request waits for authorization.
+		if (legacyKey !== undefined) this.#legacyRequests.set(legacyKey, request);
 		const unused = async () => {
 			while (request.priority.peek() !== undefined && request.closed.peek() === undefined)
 				await Signal.race(request.priority, request.closed);
+			// An accepted legacy producer belongs to the stream subscription, including gaps
+			// between datagram readers. Its priority watcher releases only their extra demand.
+			if (legacyKey !== undefined && this.#legacyDatagrams.has(legacyKey)) return;
 			if (request.priority.peek() === undefined && (!producer || hooks.closeUnusedDatagrams(producer)))
 				cancel.abort(new StreamError(StreamCode.Cancel));
 		};
@@ -927,6 +938,8 @@ export class Subscriber {
 			request.reject(cause);
 			stream?.abort(cause);
 		} finally {
+			if (legacyKey !== undefined && this.#legacyRequests.get(legacyKey) === request)
+				this.#legacyRequests.delete(legacyKey);
 			grant?.();
 			this.#datagrams.delete(id);
 			cancel.abort(new StreamError(StreamCode.Cancel));
@@ -934,8 +947,7 @@ export class Subscriber {
 		}
 	}
 
-	// Lite-05/06: take datagrams from the name's single stream subscription. Merely creating
-	// the shared datagram track in #register adds no upstream demand of its own.
+	// Lite-05/06: the shared producer holds stream demand while any datagram reader exists.
 	async #legacyDatagramRequest(
 		consumed: Consumed,
 		consumer: broadcast.Consumer,
@@ -943,25 +955,18 @@ export class Subscriber {
 		signal: AbortSignal,
 	): Promise<void> {
 		const key = JSON.stringify([consumed.id, request.name]);
-		this.#legacyRequests.set(key, request);
 		const subscriber = wireOf(consumer).subscribe(request.name, { priority: request.priority.peek() ?? 0 });
 		try {
 			await untilAborted(subscriber.info(), signal);
 			const shared = this.#legacyDatagrams.get(key);
 			if (!shared) throw new Error("stream subscription did not bind its datagram track");
 			const producer = shared.producer;
-			while (producer.closed.peek() === undefined) {
-				const priority = producer.priority.peek();
-				if (priority === undefined && hooks.closeUnusedDatagrams(producer)) break;
-				subscriber.update({ ...subscriber.subscription.peek(), priority });
-				await untilAborted(race([Signal.race(producer.priority, producer.closed), subscriber.closed]), signal);
-				const closed = subscriber.closed.peek();
-				if (closed instanceof Error) throw closed;
-				if (closed !== undefined) break;
-			}
+			// Once registered, the shared producer owns demand regardless of which kind joined first.
+			subscriber.close();
+			const closed = await untilAborted(Promise.resolve(producer.closed), signal);
+			if (closed instanceof Error) throw closed;
 		} finally {
 			subscriber.close();
-			if (this.#legacyRequests.get(key) === request) this.#legacyRequests.delete(key);
 		}
 	}
 
@@ -1423,6 +1428,7 @@ export class Subscriber {
 		} finally {
 			answering?.removeEventListener("abort", replaced);
 			entry.held?.close();
+			entry.datagramDemand?.();
 			if (entry.datagrams) {
 				const closed = hooks.trackReleased(producer).peek();
 				if (closed instanceof Error) entry.datagrams.producer.abort(closed);
@@ -1591,10 +1597,29 @@ export class Subscriber {
 			const datagrams = request
 				? request.accept(info)
 				: wireOf(state.consumer).createDatagrams(producer.name, info);
+			if (request) this.#legacyRequests.delete(state.legacyKey);
 			entry.datagrams = { producer: datagrams, timescale: framing.scale };
 			entry.legacyKey = state.legacyKey;
 			this.#datagrams.set(id, entry.datagrams);
 			this.#legacyDatagrams.set(state.legacyKey, entry.datagrams);
+			let held: track.Subscriber | undefined;
+			const sync = () => {
+				const priority = datagrams.priority.peek();
+				if (priority === undefined) {
+					held?.close();
+					held = undefined;
+				} else if (held) {
+					held.update({ priority });
+				} else {
+					held = producer.subscribe({ priority });
+				}
+			};
+			const dispose = datagrams.priority.subscribe(sync);
+			sync();
+			entry.datagramDemand = () => {
+				dispose();
+				held?.close();
+			};
 		}
 
 		this.#subscribes.set(id, entry);

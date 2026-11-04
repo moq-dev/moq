@@ -150,3 +150,50 @@ test("lite-07 bounds and prioritizes independent createWritable datagram queues"
 		source.close();
 	}
 });
+
+for (const alpn of [ALPN_05, ALPN_06])
+	for (const first of ["stream", "datagram"]) {
+		test(`${alpn}: datagram readers rejoin and outlive streams (${first} first)`, async () => {
+			const source = new Origin();
+			const publication = source.createBroadcast(path);
+			const datagrams = publication.broadcast.createDatagrams("audio");
+			const track = publication.broadcast.createTrack("audio");
+			publication.announce();
+			const pair = createMockTransportPair(alpn);
+			const [client, server] = await Promise.all([
+				connect({ url, transport: pair.client }),
+				accept({ url, transport: pair.server, publish: source.consume() }),
+			]);
+			const remote = wireOf(client).consume(path);
+			let reader = first === "datagram" ? remote.datagrams("audio") : undefined;
+			const grouped = remote.track("audio").subscribe();
+			try {
+				await grouped.info();
+				track.writeFrame({ payload: new Uint8Array([1]) });
+				(await grouped.recvGroup())?.close();
+				reader ??= remote.datagrams("audio");
+				await reader.info();
+				reader.setPriority(37);
+				while (datagrams.priority.peek() !== 37) await datagrams.priority.changed();
+				reader.close();
+				while (datagrams.priority.peek() !== 0) await datagrams.priority.changed();
+				reader = remote.datagrams("audio");
+				await reader.info();
+				reader.setPriority(37);
+				while (datagrams.priority.peek() !== 37) await datagrams.priority.changed();
+				grouped.close();
+				datagrams.append(undefined, new Uint8Array([2]));
+				expect((await reader.recv())?.payload).toEqual(new Uint8Array([2]));
+				datagrams.finish();
+				track.finish();
+				expect(await reader.recv()).toBeUndefined();
+			} finally {
+				reader?.close();
+				grouped.close();
+				remote.close();
+				client.abort();
+				server.abort();
+				source.close();
+			}
+		});
+	}
