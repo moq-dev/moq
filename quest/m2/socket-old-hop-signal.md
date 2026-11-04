@@ -26,34 +26,39 @@ apart either, since it never sees `P`'s hidden path. What `R` does know is
 which of its sessions are older moq-lite with a publish half not opted into
 hidden, and each one's publish scope from its grants.
 
+The signal must be about the peer, not the grant. A session's publish
+grant says only that it *may* publish under a prefix, not that the dialed
+endpoint exists behind it. A marker covering an older session's grant would
+also fail a dial to a peer that isn't online yet under that grant, which is
+exactly the case that must keep waiting. So the grant only narrows where to
+look, and the evidence has to name the endpoint.
+
 Recommended design, to settle in this quest:
 
-- **What tells the dialer.** `R` sends a "hidden routes withheld" marker on
-  its announce stream for each such session, covering that session's
-  publish scope where it meets the request's prefix, and withdraws it when
-  the session ends. Relays forward markers like routes, so they cross
-  cluster links. `D`'s endpoint fails a dial with `Unsupported` while a
-  marker covers the peer's `.socket/<id>` path and no route serves it. An
-  announced route always wins over a marker.
-- **Scope by publish grant.** A session that may publish nothing (a viewer)
-  marks nothing, so one old viewer can't fail every dial on a relay. That
-  is why the signal can't reuse #7888's coarse, origin-wide count, which is
-  safe only for an endpoint's own hop. A session with an unrestricted
-  publish scope marks everything it may publish; the PR records that cost.
-- **When to judge.** The dial judges only once the dialer's announce sync
-  has settled, so it never misses a marker that arrives with the snapshot.
-- **Where it rides.** As its own announce-stream message, or as a flag on
-  the [route layer](/quest/m1/cluster-routing/routes/README.md)'s messages
-  if that layer has landed. Choose whichever leaves the draft simpler, and
-  say how markers merge across relays.
-
-Weigh this alternative before choosing: `R` forwards a dialer's narrow
-interest to its older sessions, since a lite-06 ANNOUNCE_REQUEST naming the
-`.socket/<id>` segment does list the hidden route (#7888's round-1 review
-response, `rs/moq-net/src/lite/publisher.rs`). The dial would then connect
-with no wire change, but `P` can't tell that its relay forwards interest,
-so `P`'s own refusal from #7888 would stay. Pick it only if that one-sided
-result is acceptable.
+- **Find the endpoint.** When a dial's interest in `<prefix>/.socket/<peer>`
+  reaches a relay, the relay asks each of its older sessions whose publish
+  grant covers that path, with an ANNOUNCE_REQUEST naming the path, held
+  open while the dial waits so a peer that comes online later is seen. Such a
+  request names the hidden segment, so a lite-06 peer does announce its
+  endpoint (#7888's round-1 review response,
+  `rs/moq-net/src/lite/publisher.rs`). A session that may publish nothing
+  (a viewer) is never asked.
+- **Tell the dialer.** If an older session announces the endpoint, the relay
+  sends a marker for that exact path on the wire: the endpoint exists behind
+  an older hop. `D`'s endpoint fails the dial with `Unsupported`, and only
+  for that path. With no answer, nothing is marked, and the dial waits as
+  for an absent peer. The marker is withdrawn when that session ends.
+- **Across a cluster.** Relay-to-relay links ask for everything, not for a
+  dialer's narrow interest, so the relay holding the older session may never
+  see the dial. Settle how the interest or the probe reaches it (for example,
+  the holding relay probes on a dial's SUBSCRIBE to the path, which it does
+  receive), and how markers cross cluster links.
+- **Where the marker rides.** Its own announce-stream message, or a flag on
+  the [route layer](/quest/m1/cluster-routing/routes/README.md)'s messages if
+  that layer has landed. Choose whichever leaves the draft simpler.
+- **Not chosen:** routing the dial once the probe finds the endpoint. The
+  peer can't tell that its relay probes, so it keeps failing its own dials
+  and accepts (#7888), and the session would connect from one side only.
 
 Versions and compatibility:
 
@@ -71,14 +76,15 @@ Versions and compatibility:
 
 Tests, in the relay harness (`rs/moq-net/tests/integration/socket.rs`): a
 lite-07 dial to a peer behind a lite-06 hop fails `Unsupported`, including
-across a cluster hop. A dial to an absent peer still waits. A viewer-only
-lite-06 session marks nothing. A peer opted into hidden routes over lite-06
+across a cluster hop. A dial to an absent peer still waits, including one
+whose path lies under another lite-06 session's publish grant. A viewer-only
+lite-06 session is never asked. A peer opted into hidden routes over lite-06
 (`an_older_hop_opted_into_hidden_connects`) still connects.
 
 Public API: none expected; dials return the existing `Error::Unsupported`.
-Wire: a new marker on the current moq-lite wip.
+Wire: a new per-path marker on the current moq-lite wip.
 
 ## Related
 
 - [Sockets](/quest/m1/socket/README.md) - the dial and accept this reports on, and #7888's first-hop check
-- [Routes and announces](/quest/m1/cluster-routing/routes/README.md) - the route layer a marker may ride
+- [Routes and announces](/quest/m1/cluster-routing/routes/README.md) - the route layer a marker may ride, and how interest crosses cluster links

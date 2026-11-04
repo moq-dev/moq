@@ -89,7 +89,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [A refused follower asks a replacement handler](/quest/m2/follow-refused-retry.md) - a same-instance handler swap with identical route details re-asks a refused `Following`, while listeners still see no change
 - [Route wakes](/quest/m2/route-wakes.md) - a route change wakes only the fronts it can move, so pool churn stops scaling with served paths
 - [A route stream's interest is a set of prefixes](/quest/m2/route-interest-prefixes.md) - one Announce Stream covers several subtrees, with floors and certification proved over the set
-- [A socket dial learns its peer is behind an older hop](/quest/m2/socket-old-hop-signal.md) - a relay marks what its older moq-lite sessions withhold, so a dial fails `Unsupported` instead of waiting like one to an absent peer
+- [A socket dial learns its peer is behind an older hop](/quest/m2/socket-old-hop-signal.md) - a relay finds the dialed endpoint behind its older moq-lite session and marks that path, so the dial fails `Unsupported` while one to an absent peer still waits
 - [Fewer allocations in announce fan-out](/quest/m2/announce-fanout-allocs.md) - a deep path costs no more allocations per subscriber than a shallow one
 - [moq-room scales to large rooms](/quest/m2/room-bench.md) - a benchmark measures `Room` with large participant counts, and polling narrows only if it shows a slope
 - [Route health](/quest/m2/route-health/README.md) - epoch-only active/passive track recovery over metadata-only subscriptions
