@@ -22,6 +22,11 @@ Decided 2026-10-28 (maintainer):
 - **Hold, not DTX.** DTX is for silence the app can't predict. Push-to-talk
   knows when it is silent, and a held subscription costs no media bytes and no
   encoder CPU. DTX is off on main anyway ([#4919](https://github.com/moq-dev/moq/pull/4919)).
+  **Reversed 2026-11-04 (maintainer):** a catalog toggle makes every listener
+  wait out the `enabled` flip, so the jitter buffer must hold at least a round
+  trip. Push-to-talk moves to DTX ([Push-to-talk suppresses
+  silence](/quest/m1/push-to-talk/dtx.md)), and hold retires when that lands;
+  until then hold stays on main.
 - **Players hold a disabled rendition**, audio and video, by default, in
   every first-party player. Exports keep dropping it, since a held track
   sends nothing and an interleaving muxer or HLS player may wait on it. The
@@ -52,6 +57,12 @@ reopen the microphone, which made a new source and so recovered a failed
 encoder. Capture now stays open, so only a device swap, a settings change or a
 new `source` recovers one. Decide whether re-enabling should retry a failed
 encoder, and record why.
+
+## Required
+
+- [Pick how the browser publisher suppresses silence](/quest/m1/push-to-talk/dtx-route.md) - measures the DTX routes
+- [Push-to-talk suppresses silence instead of toggling the catalog](/quest/m1/push-to-talk/dtx.md) - replaces hold with DTX
+- [Browser capture delivers audio frames on a steady cadence](/quest/m1/push-to-talk/capture-smoothing.md) - so `"auto"` measures the network
 
 ## Closes
 
