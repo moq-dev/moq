@@ -2,9 +2,11 @@ import { expect, test } from "bun:test";
 import { Manual, Milli, Nano } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
+import { accept as acceptSession, connect as connectSession } from "../connection/index.ts";
 import { error } from "../error.ts";
 import { hooks } from "../internal.ts";
 import { CACHE_EXPIRY } from "../ledger.ts";
+import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -57,6 +59,7 @@ function serve(version: IetfVersion, grant?: Signal<Grant | undefined>) {
 	return {
 		pair,
 		pub,
+		origin,
 		broadcast: publication.broadcast,
 		track,
 		uni,
@@ -441,6 +444,51 @@ test("a FETCH fills never-cached and evicted history, then reuses the cache", as
 			// No handler remains: the same responder serves the filled group from cache.
 			requests.close();
 			expect(served(await fetch(fx, msg)).objects).toEqual(first.objects);
+		}
+	}
+});
+
+test("a FETCH preserves relayed metadata and cached groups without upstream FETCH", async () => {
+	for (const version of VERSIONS) {
+		for (const warm of [false, true]) {
+			using fx = serve(version);
+			const upstream = new OriginProducer();
+			const publication = upstream.createBroadcast(Path.from("archive"));
+			publication.announce();
+			const track = publication.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+			writeGroup(track, 3n, ["3-0", "3-1"]);
+			// An IETF source cannot fetch standalone yet; lite-05 can, but refuses empty ranges.
+			const pair = createMockTransportPair(warm ? ALPN.DRAFT_20 : Lite.ALPN_05);
+			const url = new URL("https://localhost:4443/test");
+			const [client, server] = await Promise.all([
+				connectSession({ url, transport: pair.client }),
+				acceptSession({ url, transport: pair.server, publish: upstream.consume() }),
+			]);
+			try {
+				const source = wireOf(client).consume(Path.from("archive"));
+				const cached = warm ? source.track("video").subscribe({ delay: { max: null } }) : undefined;
+				if (cached) {
+					const group = await cached.recvGroup();
+					expect(group?.sequence).toBe(3n);
+					while (await group?.readFrame()) {}
+					group?.close();
+				}
+				const requests = fx.origin.requestsRoute(Path.from("relayed"));
+				const cursor = requests.requested();
+				const requested = cursor.next();
+				const type = { ...range(version, at(3, 0), at(3, 0)), trackNamespace: Path.from("relayed") };
+				const fetching = fetch(fx, new Fetch({ requestId: FETCH_ID, type }));
+				const next = await requested;
+				if (next.done) throw new Error("no relayed broadcast request");
+				next.value.serve(source);
+				await cursor.return();
+				expect(served(await fetching).objects).toEqual(pairs([3]));
+				cached?.close();
+			} finally {
+				client.abort();
+				server.abort();
+				upstream.close();
+			}
 		}
 	}
 });
