@@ -450,6 +450,17 @@ impl Consumer {
 /// copy may fix it. Anything else would repeat on every copy. Mirrors `routeFailed` in
 /// `js/net/src/resume.ts`.
 pub(super) fn route_failed(err: &Error) -> bool {
+	unroutable(err) || retryable(err)
+}
+
+/// Whether `err` is a source losing its route to the content: only another route continues it.
+fn unroutable(err: &Error) -> bool {
+	matches!(err, Error::Unroutable | Error::Stream(StreamError::Unroutable))
+}
+
+/// Whether the same source may deliver a fresh copy. An unroutable source needs a new
+/// route instead: asking it again can replace the withdrawal's cause with a refusal.
+pub(super) fn retryable(err: &Error) -> bool {
 	matches!(
 		err,
 		Error::Transport(_)
@@ -470,10 +481,10 @@ pub(super) fn route_failed(err: &Error) -> bool {
 	)
 }
 
-/// Whether `copy` failed rather than ended: its route went away, so an error read from it
-/// is no verdict on what it carried.
+/// Whether `copy` lost its route, so an error read from it is no verdict on what it carried.
+/// A terminal track verdict, unlike a delivery failure, still judges its content.
 fn copy_failed(copy: &track::Consumer) -> bool {
-	matches!(copy.poll_complete(&kio::Waiter::noop()), Poll::Ready(Err(_)))
+	matches!(copy.poll_complete(&kio::Waiter::noop()), Poll::Ready(Err(err)) if route_failed(&err))
 }
 
 /// A route's copy, as one reader reads it.
@@ -1630,10 +1641,12 @@ impl Reader {
 			.copies
 			.last()
 			.filter(|copy| Some(copy.generation) == self.generation);
-		// The serving copy drained a complete track: that is its end, whichever route
-		// would serve it next. A copy that failed is the front's to replace.
-		if let Some(Some(Ok(()))) = serving.map(&done) {
-			return Some(Poll::Ready(Ok(None)));
+		// A drained copy's clean end or content verdict ends the track. Only a delivery
+		// failure is the front's to replace. Mirrors the JS reader's `#end`.
+		match serving.and_then(&done) {
+			Some(Ok(())) => return Some(Poll::Ready(Ok(None))),
+			Some(Err(err)) if !route_failed(&err) => return Some(Poll::Ready(Err(err))),
+			_ => {}
 		}
 		let end = self.route.end();
 		let ended = end.is_some();
@@ -1692,11 +1705,15 @@ impl Reader {
 				match copy.poll_ready(groups, waiter) {
 					Poll::Ready(Ok(sub)) => match sub.poll_finished(waiter) {
 						Poll::Ready(Ok(fin)) => return Poll::Ready(Ok(fin)),
-						// The copy failed: only the end of the track if no front replaces it.
-						Poll::Ready(Err(err)) if concluded.is_some() => return Poll::Ready(Err(err)),
+						// Only a delivery failure waits for the front to replace its copy.
+						Poll::Ready(Err(err)) if !route_failed(&err) || concluded.is_some() => {
+							return Poll::Ready(Err(err));
+						}
 						_ => {}
 					},
-					Poll::Ready(Err(err)) if concluded.is_some() => return Poll::Ready(Err(err)),
+					Poll::Ready(Err(err)) if !route_failed(&err) || concluded.is_some() => {
+						return Poll::Ready(Err(err));
+					}
 					_ => {}
 				}
 			} else if concluded.is_some() {
@@ -2071,6 +2088,14 @@ impl Recover {
 			{
 				return Poll::Ready(Err(err.clone()));
 			}
+			// An unroutable copy waits for another route: asking its own again could only replace
+			// the withdrawal's cause with a refusal. None comes once the front is done.
+			let withdrawn = failed.filter(|err| generation == self.generation && unroutable(err));
+			if let Some(err) = withdrawn
+				&& terminal
+			{
+				return Poll::Ready(Err(err.clone()));
+			}
 			let Some(serving) = serving else {
 				// Nothing serves: a failed copy waits for a route, unless none will come.
 				return match (failed, terminal) {
@@ -2082,7 +2107,7 @@ impl Recover {
 			if generation == self.generation && failed.is_none() {
 				return Poll::Pending;
 			}
-			let res = self.poll_serving(generation, &serving, index, failed, waiter);
+			let res = self.poll_serving(generation, &serving, index, failed, withdrawn.is_none(), waiter);
 			// The serving route failed too, and no front is left to replace it.
 			if let (Poll::Pending, Some(err)) = (&res, failed)
 				&& terminal && copy_failed(&serving)
@@ -2122,13 +2147,15 @@ impl Recover {
 		})
 	}
 
-	/// [`Self::poll`] once a newer route serves, through its copy `serving`.
+	/// [`Self::poll`] once a newer route serves, through its copy `serving`, fetching the rest
+	/// from it only if it may `ask`.
 	fn poll_serving(
 		&mut self,
 		generation: u64,
 		serving: &track::Consumer,
 		index: u64,
 		failed: Option<&Error>,
+		ask: bool,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Replacement>> {
 		// A newer copy's subscription delivered it: continue from there. The copy that
@@ -2157,8 +2184,39 @@ impl Recover {
 			_ => {}
 		}
 
-		// Otherwise ask for the rest. The subscription may still deliver it first.
+		// Finished history may still continue the group above, and so may a fetch already
+		// answered. A subscribed group otherwise follows its track's verdict, even while its
+		// fetch is unanswered; an independent fetch judges its own outcome.
+		let mut verdict = None;
+		if self.reader.is_some()
+			&& serving.poll_closed(waiter).is_ready()
+			&& let Poll::Ready(Err(err)) = serving.poll_complete(&kio::Waiter::noop())
+			&& !route_failed(&err)
+		{
+			verdict = Some(err);
+		}
+		match self.poll_fetch(generation, serving, index, failed, ask && verdict.is_none(), waiter) {
+			Poll::Ready(Ok(replacement)) => Poll::Ready(Ok(replacement)),
+			res => verdict.map_or(res, |err| Poll::Ready(Err(err))),
+		}
+	}
+
+	/// Ask `serving` for the rest of the group from frame `index`, unless told not to `ask`, and
+	/// poll the answer: the group, a refusal that ends a copy that failed, or nothing yet.
+	fn poll_fetch(
+		&mut self,
+		generation: u64,
+		serving: &track::Consumer,
+		index: u64,
+		failed: Option<&Error>,
+		ask: bool,
+		waiter: &kio::Waiter,
+	) -> Poll<Result<Replacement>> {
+		// The subscription may still deliver it first.
 		if self.fetch.as_ref().is_none_or(|(asked, _)| *asked != generation) {
+			if !ask {
+				return Poll::Pending;
+			}
 			let options = group::Fetch {
 				max_delay: self.max_delay,
 				frame_start: index,
@@ -2203,6 +2261,7 @@ impl Recover {
 		};
 		// A refusal is a verdict only for a copy that failed, and once the serving
 		// subscription will not deliver the group either.
+		let same = generation == self.generation;
 		if failed.is_some() && (same || serving.poll_group(self.sequence, waiter).is_ready()) {
 			return Poll::Ready(Err(err));
 		}
@@ -2488,6 +2547,50 @@ mod test {
 
 	fn ts(ms: u64) -> Timestamp {
 		Timestamp::from_millis(ms).unwrap()
+	}
+
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_tracks_abort_wakes_its_handed_out_group_and_keeps_finished_history() {
+		for routed in [false, true] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let source = copy();
+			routes.serve(source.consume());
+			let mut sub = subscribe(if routed { &logical } else { &source }, HOUR);
+			let mut history = source.create_group(group::Info { sequence: 0 }).unwrap();
+			history.write_frame(ts(0), b"history".as_ref()).unwrap();
+			history.finish().unwrap();
+			let mut finished = recv(&mut sub);
+			let mut live = source.create_group(group::Info { sequence: 1 }).unwrap();
+			live.write_frame(ts(1), b"live".as_ref()).unwrap();
+			let mut reading = recv(&mut sub);
+			assert_eq!(read(&mut reading), Some(b"live".to_vec()));
+			let wake = Arc::new(Wake::default());
+			let waiter = kio::Waiter::new(wake.clone().into());
+			assert!(reading.poll_read_frame(&waiter).is_pending());
+			wake.0.store(false, std::sync::atomic::Ordering::Relaxed);
+			source.abort(Error::GroupTooLarge).unwrap();
+			assert!(wake.0.load(std::sync::atomic::Ordering::Relaxed), "routed={routed}");
+			let result = reading.poll_read_frame(&waiter);
+			assert!(
+				matches!(result, Poll::Ready(Err(Error::GroupTooLarge))),
+				"routed={routed}: {result:?}"
+			);
+			assert_eq!(read(&mut finished), Some(b"history".to_vec()));
+			assert_eq!(read(&mut finished), None);
+			assert!(matches!(
+				sub.poll_finished(&waiter),
+				Poll::Ready(Err(Error::GroupTooLarge))
+			));
+			let result = sub
+				.poll_recv_group(&waiter)
+				.map(|result| result.map(|group| group.map(|group| group.sequence)));
+			assert!(
+				matches!(result, Poll::Ready(Err(Error::GroupTooLarge))),
+				"routed={routed}: {result:?}"
+			);
+		}
 	}
 
 	/// A task that has not polled yet. Nothing drives these copies' pools, so no wall
@@ -3234,13 +3337,12 @@ mod test {
 		assert!(chunks.read_chunk().now_or_never().unwrap().unwrap().is_none());
 	}
 
-	/// A resumed group that the serving route then gives up ends with that route's error,
-	/// with the subscription still open, no successor, no later writes, and the fetch for
-	/// the rest still unanswered: whether the old route failed or only stalled.
+	/// A resumed group that the serving route gives up or aborts ends with that route's
+	/// error, even with no successor or later writes and its fetch still unanswered.
 	#[test]
 	#[cfg(feature = "async")]
-	fn a_resumed_group_ends_with_the_serving_routes_drop() {
-		for fails in [true, false] {
+	fn a_resumed_group_ends_with_the_serving_routes_verdict() {
+		for (fails, abort) in [(false, false), (true, false), (false, true), (true, true)] {
 			let routes = Producer::new();
 			let logical = logical(&routes);
 			let a = copy();
@@ -3261,12 +3363,104 @@ mod test {
 			assert!(reading.read_frame().now_or_never().is_none(), "fails={fails}");
 			let _pending = dynamic.requested_fill().now_or_never().unwrap().unwrap();
 
-			b.drop_groups(0..1, StreamError::App(5));
+			if abort {
+				b.abort(Error::Stream(StreamError::App(5))).unwrap();
+			} else {
+				b.drop_groups(0..1, StreamError::App(5));
+			}
 			let res = reading.read_frame().now_or_never();
 			assert!(
 				matches!(res, Some(Err(Error::Stream(StreamError::App(5))))),
-				"fails={fails}: {res:?}"
+				"fails={fails}, abort={abort}: {res:?}"
 			);
+		}
+	}
+
+	/// A fetch the serving route already answered continues the group, even when that route
+	/// aborts before the reader polls again. Asked of the route whose copy failed, the answer
+	/// arrives only through the fetch, not that copy's subscription.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_answered_fetch_outlives_the_serving_routes_abort() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		let dynamic = a.requests();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, Duration::from_secs(10));
+
+		let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
+		open.write_frame(ts(0), b"a".as_ref()).unwrap();
+		let mut reading = recv(&mut sub);
+		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+		open.abort(Error::Dropped).unwrap();
+		assert!(reading.read_frame().now_or_never().is_none());
+
+		let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
+		assert_eq!((request.sequence(), request.frame_start()), (0, 1));
+		let mut rest = request.accept(None).unwrap();
+		rest.write_frame(ts(1), b"b".as_ref()).unwrap();
+		rest.finish().unwrap();
+		a.abort(Error::Stream(StreamError::App(5))).unwrap();
+
+		assert_eq!(read(&mut reading), Some(b"b".to_vec()));
+		assert_eq!(read(&mut reading), None);
+	}
+
+	/// A copy whose route became unroutable waits for another route rather than asking its own
+	/// again, which could only replace the withdrawal's cause with a refusal. It keeps that
+	/// cause once no route will come.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_unroutable_group_waits_for_another_route() {
+		for (fetched, concluded) in [(false, false), (true, false), (false, true), (true, true)] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			let dynamic = a.requests();
+			routes.serve(a.consume());
+			let mut sub = subscribe(&logical, Duration::from_secs(10));
+
+			let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
+			open.write_frame(ts(0), b"a".as_ref()).unwrap();
+			let mut reading = if fetched {
+				logical.consume().fetch_group(0, None).now_or_never().unwrap().unwrap()
+			} else {
+				recv(&mut sub)
+			};
+			assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+			open.abort(Error::Unroutable).unwrap();
+			assert!(reading.read_frame().now_or_never().is_none(), "fetched={fetched}");
+
+			// The route still serves the track but no longer holds the group: it would refuse.
+			if let Some(request) = dynamic.requested_fill_group().now_or_never() {
+				request.unwrap().reject(Error::NotFound);
+			}
+			let res = reading.read_frame().now_or_never();
+			assert!(res.is_none(), "fetched={fetched}: {res:?}");
+
+			if concluded {
+				drop(routes);
+				let res = reading.read_frame().now_or_never();
+				assert!(
+					matches!(
+						res,
+						Some(Err(Error::Unroutable | Error::Stream(StreamError::Unroutable)))
+					),
+					"fetched={fetched}: {res:?}"
+				);
+				continue;
+			}
+
+			// Another route holds it: the group continues there.
+			let b = copy();
+			let mut whole = b.create_group(group::Info { sequence: 0 }).unwrap();
+			whole.write_frame(ts(0), b"a".as_ref()).unwrap();
+			whole.write_frame(ts(1), b"b".as_ref()).unwrap();
+			whole.finish().unwrap();
+			routes.serve(b.consume());
+			assert_eq!(read(&mut reading), Some(b"b".to_vec()), "fetched={fetched}");
+			assert_eq!(read(&mut reading), None, "fetched={fetched}");
 		}
 	}
 
@@ -3292,8 +3486,13 @@ mod test {
 		routes.serve(b.consume());
 		b.drop_groups(0..1, StreamError::Old);
 		assert!(fetched.read_frame().now_or_never().is_none());
-		let _pending = dynamic.requested_fill().now_or_never().unwrap().unwrap();
+		let pending = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
 		assert!(fetched.read_frame().now_or_never().is_none());
+		let mut rest = pending.accept(None).unwrap();
+		rest.write_frame(ts(1), b"b".as_ref()).unwrap();
+		rest.finish().unwrap();
+		assert_eq!(read(&mut fetched), Some(b"b".to_vec()));
+		assert_eq!(read(&mut fetched), None);
 	}
 
 	/// A session's copy whose info is still in flight, and its fetch handler.
@@ -6157,11 +6356,12 @@ mod test {
 	/// route failing to deliver; every other code judges the group.
 	#[test]
 	fn only_delivery_codes_are_a_route_failing() {
-		const DELIVERY: [u32; 5] = [0x0, 0x1, 0x3, 0x4, 0x31];
+		const DELIVERY: [u32; 6] = [0x0, 0x1, 0x3, 0x4, 0x31, 0x36];
 		for code in (0..0x40).chain([64, 64 + 5, 0xffff_ffff]) {
 			let err = Error::Stream(StreamError::from_code(code));
 			assert_eq!(route_failed(&err), DELIVERY.contains(&code), "{code:#x}: {err:?}");
 		}
+		assert!(route_failed(&Error::Unroutable));
 	}
 
 	/// A failure judging the group repeats on every copy from its route, so it ends a read or
