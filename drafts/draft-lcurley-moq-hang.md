@@ -279,14 +279,15 @@ type DrmSchema = {
 The `system` field is the DRM system ID and `kid` the default key ID, each a hyphenated UUID string, and `scheme` is the Common Encryption scheme {{cenc}}.
 The `pssh` field is the system's whole `pssh` box, base64-encoded ({{!RFC4648, Section 4}}).
 The `license` field names the server a consumer requests a license from, and `certificate` the server certificate a system such as FairPlay needs first; each `type` is the license protocol or the certificate's MIME type.
-Renditions encrypted under the same system, scheme, and key share an entry.
+Renditions encrypted under the same system, scheme, and key MAY share an entry.
 
 A protected audio or video rendition lists the IDs of the entries that can decrypt it in its `drm` field, an array of strings; absent or empty means the rendition is clear.
-Only a `cmaf` rendition ({{cmaf}}) can be protected: its `init` keeps the encrypted sample entry with its `sinf`, and the `pssh` boxes, while its `codec` names the codec the encrypted entry wraps.
+Common Encryption is defined for CMAF, so a protected rendition is in practice a `cmaf` one ({{cmaf}}): its `init` keeps the encrypted sample entry with its `sinf`, and the `pssh` boxes, while its `codec` names the codec the encrypted entry wraps.
 A consumer MUST reject a catalog with a malformed entry, or with a rendition listing an ID the root `drm` lacks.
 A consumer that cannot decrypt a rendition MUST treat it as one it cannot decode.
 
-Each entry maps 1:1 onto a CMSF `contentProtections` entry {{moqcmsf}}: the ID is its `refID`, `kid` its single `defaultKID`, `system`, `license`, `certificate`, and `pssh` its `drmSystem`'s `systemID`, `laURL`, `certURL`, and `pssh`, and a rendition's `drm` its `contentProtectionRefIDs`.
+Each entry maps onto a CMSF `contentProtections` entry {{moqcmsf}}: the ID is its `refID`, `kid` its single `defaultKID`, `system`, `license`, `certificate`, and `pssh` its `drmSystem`'s `systemID`, `laURL`, `certURL`, and `pssh`, and a rendition's `drm` its `contentProtectionRefIDs`.
+A CMSF entry naming several `defaultKID`s has no single hang entry, so a consumer converting it splits it into one entry per key.
 
 ## Track Identity {#identity}
 A track name always means the same content, so a catalog update never redefines an audio or video track.

@@ -3,8 +3,9 @@
 //! The catalog's root `drm` section maps an entry ID to an [`Entry`], and each protected video or
 //! audio rendition lists the IDs of the entries that protect it in its `drm` field. A rendition
 //! that lists none is clear. Every entry names one DRM system, one Common Encryption
-//! [`Scheme`], and one default key, so the entries map 1:1 onto draft-ietf-moq-cmsf's
-//! `contentProtections` and a rendition's IDs onto its `contentProtectionRefIDs`.
+//! [`Scheme`], and one default key, so each maps onto one of draft-ietf-moq-cmsf's
+//! `contentProtections` and a rendition's IDs onto its `contentProtectionRefIDs`; a CMSF entry
+//! naming several default keys splits into one entry per key on parse.
 //!
 //! ```json
 //! {

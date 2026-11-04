@@ -25,7 +25,8 @@ export type DrmServer = z.infer<typeof DrmServerSchema>;
  * One DRM system protecting renditions under one Common Encryption scheme and one default key.
  *
  * Each protected video or audio rendition lists the IDs of its entries in its own `drm` field;
- * the entries map 1:1 onto draft-ietf-moq-cmsf's `contentProtections`.
+ * each entry maps onto one of draft-ietf-moq-cmsf's `contentProtections`, and a CMSF entry naming
+ * several default keys splits into one entry per key on parse.
  */
 export const DrmSchema = z.object({
 	// The DRM system ID, as a UUID string (see `SYSTEM`).

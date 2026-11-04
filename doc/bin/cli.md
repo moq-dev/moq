@@ -161,9 +161,10 @@ timing.
 such as Shaka Packager's output, unchanged, and signals it in the catalog's
 [`drm`](/concept/hang#content-protection) section. Name each DRM system's
 license server with `--drm-license SYSTEM=URL`, and FairPlay's certificate with
-`--drm-certificate SYSTEM=URL`; SYSTEM is `widevine`, `playready`, `fairplay`,
-`clearkey`, or a system ID, and one the media carries no `pssh` for is
-refused. Encrypted media without `--cmaf`, key rotation, and a clear lead are
+`--drm-certificate SYSTEM=URL`, once per system; SYSTEM is `widevine`,
+`playready`, `fairplay`, `clearkey`, or a system ID, and one the media carries
+no `pssh` for is refused. `SYSTEM:TYPE=URL` also gives the server's type, such
+as `widevine:EME-1.0=…` or `fairplay:application/pkcs7-mime=…`. Encrypted media without `--cmaf`, key rotation, and a clear lead are
 refused too.
 
 ```bash
