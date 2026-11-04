@@ -60,7 +60,7 @@ fn echo_tokio_peer() {
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("socket");
 	let endpoint =
-		quic::Endpoint::new(socket, quic::endpoint::Config::default().with_server(server)).expect("endpoint");
+		quic::Endpoint::new(quic::endpoint::Config::default().with_server(server), socket).expect("endpoint");
 	let addr = endpoint.local_addr();
 	let payload: Vec<u8> = (0..PAYLOAD).map(|i| (i * 31 % 251) as u8).collect();
 	let expected = payload.clone();

@@ -155,11 +155,28 @@ pub(super) fn negotiate(device: &cpal::Device) -> Result<cpal::SupportedStreamCo
 /// ahead, and a new sink's writes are dropped until the next burst reads it.
 /// Ask PulseAudio for 20 ms periods, its own default request size, instead.
 #[cfg_attr(
-	not(feature = "pulseaudio"),
+	not(all(
+		feature = "pulseaudio",
+		any(
+			target_os = "linux",
+			target_os = "dragonfly",
+			target_os = "freebsd",
+			target_os = "netbsd"
+		)
+	)),
 	expect(unused_variables, reason = "only the PulseAudio host needs a size")
 )]
 pub(super) fn buffer_size(device: &cpal::Device, supported: &cpal::SupportedStreamConfig) -> cpal::BufferSize {
-	#[cfg(feature = "pulseaudio")]
+	// cpal has a PulseAudio host only on these targets; elsewhere the feature is a no-op.
+	#[cfg(all(
+		feature = "pulseaudio",
+		any(
+			target_os = "linux",
+			target_os = "dragonfly",
+			target_os = "freebsd",
+			target_os = "netbsd"
+		)
+	))]
 	if let (Ok(id), cpal::SupportedBufferSize::Range { min, max }) = (device.id(), supported.buffer_size())
 		&& id.host() == cpal::HostId::PulseAudio
 	{

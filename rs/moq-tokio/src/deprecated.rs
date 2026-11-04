@@ -7,8 +7,7 @@
 /// The deprecated spellings a config was parsed from, each paired with its
 /// replacement.
 ///
-/// Collect one per config section ([`crate::connect::Config::deprecated`] and its
-/// siblings), and refuse to start when it is non-empty: the [`std::fmt::Display`]
+/// Collect one per config section and refuse to start when it is non-empty: the [`std::fmt::Display`]
 /// is the migration to print. Honoring the old spelling instead is what this
 /// replaced, because a warning that scrolls past leaves a process running on
 /// settings it silently dropped.
