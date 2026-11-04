@@ -152,12 +152,10 @@ their end report, so an embedder's drain alert pages on real cuts.
 - [Drop set](/quest/m1/drop-set.md) - each cursor judges missing groups against its own budget, so a narrow reader drops promptly and a widening re-offers groups already reported dropped on lite-07
 - [A group a subscriber gives up on is always reported](/quest/m1/group-drops.md) - the wire names every abandoned group and the drop signal is public, so readers count losses instead of stalling
 - [Datagram tracks](/quest/m1/datagram-tracks/README.md) - a track is datagrams or streams; datagram tracks have their own request and sequence, no ranges, no cache, and map to object ID 0 on moq-transport
-- [A routed JS read wakes when its track aborts](/quest/m1/js-follow-abort-wake.md) - a pending `readFrame()` on a group found through `request()`/`follow()` rejects on `track.abort()`
 - [Stream credit by priority](/quest/m1/stream-credit/README.md) - every stream opens through one priority entry point, and a higher-priority group takes over or resets a lower one when credit runs out
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [Sockets](/quest/m1/socket/README.md) - a generic dial/accept `Socket` in moq-net, Rust, JS, and Python, with tracks as streams; moq-boy and CARLA move onto it
 - [A smaller, safer API than release](/quest/m1/api-audit/README.md) - every surface added since release has a consumer or is gone, overlapping operations are collapsed, names mirror across Rust, JS, and the bindings, and every break says how to migrate
-- [Register moq-dev draft 20 in the interop runner](/quest/m1/ietf-drop/README.md) - land the external registry, notes, and README correction for drafts 18, 20, and 22
 - [Native rung disable proof](/quest/m1/simulcast-rung-disable.md) - a shaped uplink through moq-ffi proves the top rendition stops and resumes over real BBR3 probing
 - [Audio jitter target](/quest/m1/audio-jitter-target/README.md) - the playout target is default in both languages; time-stretched browser playback without steady-state underruns and a native trace replay remain
 - [A/V clock](/quest/m1/av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles
@@ -179,14 +177,11 @@ their end report, so an embedder's drain alert pages on real cuts.
 - [Ordered reads can skip owed holes, and snapshot latest() does](/quest/m1/ordered-owed-holes.md) - moq-net's `Ordered` gains a read that skips past an owed hole to the newest buffered group, while keeping the reader's bounds
 - [The relay reports native sessions it force-closes at the drain deadline](/quest/m1/relay-drain-cuts.md) - the drain's public outcome and live tally separate sessions cut while open from sessions only finishing their end report, so an embedder's drain alert pages on real cuts
 - [A Rust relay never replays from group 0 to a lite-03/04 subscriber](/quest/m1/relay-inflight-replay.md) - A Rust relay or publisher serving a lite-03 or lite-04 SUBSCRIBE from a track copy that is still resolving starts at the newest group once the copy resolves
-- [The JS resume model passes seed 12345](/quest/m1/js-resume-model-12345.md) - a reader updated to no ranges keeps reading instead of ending cleanly
 - [Every moq-mux consumer gets the catalog warmup from one entry point](/quest/m1/mux-warmup.md) - one moq-mux call widens the subscription and configures the consumer, adopted by moq-audio, moq-c, moq-ffi's raw consumer, and moqsrc
-- [Codex shells never load another checkout's dev environment](/quest/m1/codex-env-snapshot.md) - the Codex dev-shell snapshot is skipped when stale or inside `nix develop`
 - [Rename moq-rtc to moq-webrtc](/quest/m1/webrtc-rename.md) - one published `moq-webrtc` crate holds the gateway, the ICE driver, and the data-channel transport
 - [Vendor and trim the WebRTC stack](/quest/m1/webrtc-vendor.md) - str0m, dimpl, `is`, and sctp-proto live in moq-webrtc with unused code removed, so moq-rtc can take rind
 - [MoQ on rind](/quest/m1/rind/README.md) - every MoQ crate takes its crypto from rind, a pure-Rust graviola fork, so no build compiles C crypto
 - [A hardware decoder's capability refusal is an unsupported config](/quest/m1/hw-decoder-refusal.md) - a GPU that can't decode a stream reports `UnsupportedConfig`, so callers fall back to another rendition
-- [A draft-18 resume of a cached group under a finite max-age settles](/quest/m1/ietf18-resume-cached-start.md) - the read delivers the group or refuses at once, never hangs
 - [Bot reviewers don't re-review every push](/quest/m1/review-bot-waves.md) - CodeRabbit and Pullfrog review on ready and on request, so fixes stop drawing new thread waves
 
 ## Related
