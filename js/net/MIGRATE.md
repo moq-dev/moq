@@ -4,6 +4,20 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Relative group anchors are `bigint`
+
+A `Track.Anchor.relative` count now uses `bigint`, like an absolute group sequence.
+Write `{ relative: 2n }` instead of `{ relative: 2 }`, including the live anchor
+`{ relative: 0n }`. Large relative counts round-trip exactly and resolve against
+large group sequences without narrowing to a number. First-party consumers use
+the new type. Frame indices and timestamps retain their bounded numeric API.
+
+The IETF codecs also hold subgroup IDs and datagram Object IDs as `bigint`.
+Unsupported subgroups and datagram objects still have the same model behavior.
+Unsafe numeric error/status codes and clock waits are now refused rather than
+rounded or saturated. Wire layouts and published version negotiation are unchanged.
+See [wire integer precision](INTEGERS.md) for each field's representation and bounds.
+
 ### Authored tracks default to a zero `maxAge` ([#7729](https://github.com/moq-dev/moq/pull/7729))
 
 A track created with `Broadcast.Producer.createTrack`, `Track.Request.accept`, or `Track.Producer.accept` takes a `Track.InfoInit`, whose omitted or `undefined` `maxAge` is now zero instead of no publisher limit: a superseded group is stale as soon as its successor arrives, so readers get only the live edge. The newest group never goes stale, so a track that writes one snapshot stays readable to a late joiner.

@@ -218,7 +218,7 @@ test("a lite-07 list decodes as the span covering it", async () => {
 	const relative = await update([2, 2, 3, 1, 5, 0, 1, 7, 0, 1, 9, 0]);
 	expect([relative.startGroup, relative.endGroup, relative.endFrame]).toEqual([undefined, 8n, undefined]);
 	expect(relative.ranges).toEqual([
-		{ start: { relative: 3 }, end: { absolute: 5n } },
+		{ start: { relative: 3n }, end: { absolute: 5n } },
 		{ start: { absolute: 7n }, end: { absolute: 9n } },
 	]);
 	// A time anchor carries ticks of the track's timescale, which only the serving track knows.
@@ -243,8 +243,8 @@ test("lite-07 carries every range, relative and time anchors included, and older
 	const ranges = toWireRanges(
 		[
 			{ start: { absolute: 2n }, end: { absolute: 5n } },
-			{ start: { relative: 1 } },
-			{ end: { relative: 0 } },
+			{ start: { relative: 1n } },
+			{ end: { relative: 0n } },
 			// In the track's timescale, rounded down.
 			{ start: { time: Timestamp.fromMicros(1_500_900) }, end: { time: Timestamp.fromMillis(3_000) } },
 		],

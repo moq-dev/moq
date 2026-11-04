@@ -135,7 +135,7 @@ interface Span {
  */
 export type WireAnchor =
 	| { absolute: bigint; relative?: never; time?: never }
-	| { relative: number; absolute?: never; time?: never }
+	| { relative: bigint; absolute?: never; time?: never }
 	| { time: number; absolute?: never; relative?: never };
 
 /** A lite-07 range as the wire carries it; see {@link WireAnchor}. */
@@ -177,7 +177,7 @@ async function encodeAnchor(w: Writer, anchor: WireAnchor | undefined) {
 		await w.u53(0);
 	} else if (anchor?.relative !== undefined) {
 		await w.u53(2);
-		await w.u53(anchor.relative);
+		await w.u62(anchor.relative);
 	} else if (anchor?.time !== undefined) {
 		await w.u53(3);
 		await w.u53(anchor.time);
@@ -279,7 +279,7 @@ async function decodeAnchor(r: Reader, end: boolean): Promise<{ point?: Point; a
 			return { point, anchor: { absolute: end && point[1] > 0 ? point[0] + 1n : point[0] } };
 		}
 		case 2:
-			return { anchor: { relative: await r.u53() } };
+			return { anchor: { relative: await r.u62() } };
 		case 3:
 			return { anchor: { time: await r.u53() } };
 		default:
