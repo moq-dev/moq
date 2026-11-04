@@ -65,6 +65,7 @@ import {
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
 import { decodeTracksEventMaybe, Tracks as TracksMessage } from "./tracks.ts";
 import {
+	fillsFromStart,
 	hasAnnounceId,
 	hasAnnounceOk,
 	hasDatagrams,
@@ -1052,6 +1053,9 @@ export class Subscriber {
 		valid?.removeEventListener("abort", retire);
 
 		let { stream, entry } = opened;
+		// Lite-05+ FETCHes what the copy's readers miss for as long as the copy lives, across
+		// every subscription that feeds it.
+		if (hasTrackStream(this.version)) void this.#runFills(broadcast, consumed, entry);
 		let current = { id, msg };
 		// A lite-07 publisher that FINs a covered bounded subscription leaves the copy to its
 		// readers. If the demand moved past what it covered, ask again on the same track, as the
@@ -1391,7 +1395,10 @@ export class Subscriber {
 		framing: { compress: boolean; timescale: number; scale: Time.Timescale | undefined },
 		state: SubscribeSetup,
 	): SubscribeEntry {
-		hooks.receiveTrack(producer);
+		hooks.receiveTrack(producer, {
+			resolvesStart: resolvesStart(this.version),
+			fillsFromStart: fillsFromStart(this.version),
+		});
 		if (!hasRanges(this.version)) hooks.dropAnchors(producer);
 		// Lite-06+ resolves where the feed starts only with SUBSCRIBE_START, so a relay serving
 		// this copy holds its first group until the answer arrives.
@@ -1707,6 +1714,121 @@ export class Subscriber {
 				readFrames(stream.reader, group, { scale: info.timescale ?? 0, compress: info.compress }),
 			);
 
+			group.finish();
+			stream.close();
+		} catch (err: unknown) {
+			const e = error(err);
+			group.abort(e);
+			stream.abort(e);
+		}
+	}
+
+	// Serve the received copy's misses as its request handler, until the copy closes: each fill
+	// FETCHes its groups upstream one at a time, newest first for a descending reader, as the
+	// Rust `FillServeRun` does.
+	async #runFills(broadcast: Path.Valid, consumed: Consumed, entry: SubscribeEntry): Promise<void> {
+		const producer = entry.track;
+		const framing = { compress: entry.compress, timescale: entry.timescale };
+		const requests = producer.requests();
+		const jobs = new Set<Promise<void>>();
+		try {
+			for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
+				const job = this.#serveFill(broadcast, consumed, producer.name, framing, fill);
+				jobs.add(job);
+				void job.then(() => jobs.delete(job));
+			}
+		} finally {
+			requests.close();
+			await Promise.all(jobs);
+		}
+	}
+
+	// Serve `fill` until nobody waits on it, then close it, naming what is left dropped.
+	async #serveFill(
+		broadcast: Path.Valid,
+		consumed: Consumed,
+		name: string,
+		framing: { compress: boolean; timescale: number },
+		fill: track.Fill,
+	): Promise<void> {
+		try {
+			let last: bigint | undefined;
+			for (let sequence = fill.wanted(); sequence !== undefined; sequence = fill.wanted()) {
+				// Every fetch answers its group, so the same one coming back is a bug: closing the
+				// fill names it dropped rather than fetching it forever.
+				if (sequence === last) break;
+				last = sequence;
+				await this.#fillGroup(broadcast, consumed, name, framing, fill, sequence);
+			}
+		} finally {
+			fill.close();
+		}
+	}
+
+	// FETCH group `sequence` of `fill` and write it into the copy once the publisher answers: lite
+	// has no FETCH_OK, so a publisher without the group resets the stream, which refuses the group
+	// to the readers waiting now, as the Rust `GroupFill::reject` does. A fetch nobody waits on any
+	// more is cancelled.
+	async #fillGroup(
+		broadcast: Path.Valid,
+		consumed: Consumed,
+		name: string,
+		framing: { compress: boolean; timescale: number },
+		fill: track.Fill,
+		sequence: bigint,
+	): Promise<void> {
+		const cancel = new AbortController();
+		void fill
+			.unwanted(sequence)
+			.then(() => cancel.abort(new StreamError(StreamCode.Cancel, { message: "cancel" })));
+		const signal = consumed.valid ? AbortSignal.any([consumed.valid, cancel.signal]) : cancel.signal;
+		let stream: Stream;
+		try {
+			if (this.#denied(broadcast)) throw unauthorized(broadcast);
+			const priority = fill.priority;
+			const maxDelay = fill.maxDelay ?? undefined;
+			const deadline = new Deadline();
+			stream = await deadline.wait(
+				this.#exchange(
+					{ sendOrder: sendOrder({ priority }), version: this.version },
+					async (stream) => {
+						await stream.writer.u53(StreamId.Fetch);
+						await new FetchMessage({
+							broadcast,
+							instance: consumed.instance,
+							track: name,
+							priority,
+							maxDelay: hasFetchMaxDelay(this.version) ? maxDelay : undefined,
+							group: sequence,
+						}).encode(stream.writer, this.version);
+						// A byte or an empty-group FIN accepts the fetch; a reset rejects it.
+						await stream.reader.done();
+						return stream;
+					},
+					signal,
+					deadline,
+				),
+			);
+		} catch (err) {
+			if (!cancel.signal.aborted) fill.refuseGroups(sequence, sequence + 1n, error(err));
+			return;
+		}
+		let group: netGroup.Producer;
+		try {
+			// The live feed may have brought it meanwhile, or every reader left.
+			if (!fill.isWanted(sequence)) throw new StreamError(StreamCode.Cancel, { message: "cancel" });
+			group = fill.accept(sequence);
+		} catch (err) {
+			stream.abort(error(err));
+			return;
+		} finally {
+			cancel.abort();
+		}
+		try {
+			await untilClosed(
+				group,
+				readFrames(stream.reader, group, { scale: framing.timescale, compress: framing.compress }),
+			);
 			group.finish();
 			stream.close();
 		} catch (err: unknown) {
