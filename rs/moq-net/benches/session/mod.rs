@@ -10,8 +10,9 @@
 //! as a slope. Unwatched broadcasts stay announced and silent: their cost is the
 //! route table they occupy, not a publisher writing into its own cache.
 //!
-//! `SESSION_ALLOCS=1` prints allocations, allocated bytes and, where Linux perf counters are
-//! readable, user instructions per viewer-group or delivered datagram instead of timing.
+//! `SESSION_ALLOCS=1` prints the group consumer size, allocations, allocated bytes and,
+//! where Linux perf counters are readable, user instructions per viewer-group or delivered
+//! datagram instead of timing.
 //! `SESSION_CPU=1` measures thread CPU time on Unix instead of elapsed time, excluding
 //! preemption while retaining all protocol work on this current-thread runtime. CPU-timed
 //! groups have a `_cpu` suffix. Cache-clock advancement remains outside both clocks.
@@ -95,7 +96,9 @@ use moq_net::{Hop, Timestamp, Version, broadcast, cache, datagram, group, origin
 
 /// A millisecond track: the frames written here carry timestamps.
 fn timed() -> track::Info {
-	track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	track::Info::default()
+		.with_max_age(None)
+		.with_timescale(moq_net::Timescale::MILLI)
 }
 
 /// The lite draft production negotiates, the next one (opt-in), and the newest
@@ -1574,10 +1577,12 @@ fn dash<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Ite
 	group.finish();
 }
 
-/// Print allocations, allocated bytes and, given perf access, user instructions per
-/// viewer-group or per delivered datagram instead of timing, to compare across revisions.
+/// Print Consumer size, allocations, allocated bytes and, given perf access, user
+/// instructions per viewer-group or delivered datagram, to compare across revisions.
 fn allocations<B: Backend>() {
 	const ROUNDS: usize = 256;
+
+	println!("group::Consumer: {} bytes", size_of::<moq_net::group::Consumer>());
 
 	let rt = runtime();
 	let fanout = Shape {
@@ -1664,10 +1669,18 @@ impl<B: Backend> ChurnRoom<B> {
 		let held: Vec<_> = (0..shape.held).map(|i| format!("held{i}")).collect();
 		let tracks: Vec<_> = held
 			.iter()
-			.map(|name| published.create_track(name.as_str(), None).unwrap())
+			.map(|name| {
+				published
+					.create_track(name.as_str(), moq_net::track::Info::default().with_max_age(None))
+					.unwrap()
+			})
 			.collect();
 		let churn: Vec<_> = (0..shape.sessions)
-			.map(|i| published.create_track(format!("churn{i}"), None).unwrap())
+			.map(|i| {
+				published
+					.create_track(format!("churn{i}"), moq_net::track::Info::default().with_max_age(None))
+					.unwrap()
+			})
 			.collect();
 
 		let mut viewers = Vec::new();

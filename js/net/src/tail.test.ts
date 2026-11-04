@@ -29,7 +29,7 @@ async function session(protocol: string) {
 	const broadcastPublication = origin.createBroadcast(Path.from("test"));
 	const broadcast = broadcastPublication.broadcast;
 	broadcastPublication.announce();
-	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	const remote = wireOf(client).consume(Path.from("test"));
 	const reader = remote
 		.track("video")

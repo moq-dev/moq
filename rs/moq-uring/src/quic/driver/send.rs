@@ -136,14 +136,6 @@ impl Stream {
 		self.0.state = HalfState::Open(offset, code);
 	}
 
-	/// The peer's STOP_SENDING code, if it already stopped the stream.
-	pub(crate) fn stop_code(&self) -> Option<VarInt> {
-		match self.0.shared.conn.borrow_mut().send_stream(self.0.id).end() {
-			Ok(Some(End::Stopped(code))) => Some(code),
-			_ => None,
-		}
-	}
-
 	/// Set the priority within the stream's send group, or session-wide when ungrouped.
 	///
 	/// Higher goes first.
@@ -447,7 +439,7 @@ impl From<Error> for std::io::Error {
 	}
 }
 
-/// What the `web_transport_trait` impls report, which have one error type per session.
+/// Preserve a stream failure when a connection-level operation, such as framing, reports it.
 impl From<Error> for ConnectionError {
 	fn from(err: Error) -> Self {
 		match err {

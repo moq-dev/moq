@@ -90,8 +90,7 @@ impl Viewer {
 		let (endpoint, conn) = dial(version, addr, Default::default()).await;
 
 		let origin = moq_tokio::origin::spawn();
-		let transport =
-			moq_tokio::transport::Session::new(web::Session::raw(conn.clone()), moq_net::transport::Address::Setup);
+		let transport = web::Session::raw(conn.clone());
 		let (session, driver) = moq_net::Client::new()
 			.with_versions(version.into())
 			.with_subscriber(origin.clone())
