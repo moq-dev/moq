@@ -5855,10 +5855,13 @@ impl Requests {
 		self.announcement.update(route)
 	}
 
-	/// Poll for the next requested path under this route, without blocking.
+	/// The next path a consumer requests under this route, as a [`Request`] to serve.
 	///
-	/// Returns [`Error::Closed`] once the origin's [`Driver`] has been dropped:
-	/// no request will ever arrive again, so handler loops should end.
+	/// Takes `&self` so a handler can serve from one task while another re-prices
+	/// the route; concurrent callers each receive distinct requests. Returns
+	/// [`Error::Closed`] once the origin's [`Driver`] has been dropped: no request will
+	/// ever arrive again, so handler loops should end.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_requested_broadcast(&self, waiter: &kio::Waiter) -> Poll<Result<Request, Error>> {
 		let mut state = ready!(self.state.poll(waiter, |state| {
 			if state.closed || state.requests.has_queued() {
@@ -5886,16 +5889,6 @@ impl Requests {
 			home: self.state.clone(),
 			publisher: self.publisher.clone(),
 		}))
-	}
-
-	/// Block until a consumer requests a path under this route, returning a
-	/// [`Request`] to serve.
-	///
-	/// Takes `&self` so a handler can serve from one task while another re-prices
-	/// the route; concurrent callers each receive distinct requests.
-	#[cfg(feature = "async")]
-	pub async fn requested_broadcast(&self) -> Result<Request, Error> {
-		kio::wait(|waiter| self.poll_requested_broadcast(waiter)).await
 	}
 }
 
@@ -7399,23 +7392,13 @@ impl AnnounceConsumer {
 		event
 	}
 
-	/// Returns the next route announcement, update, or retraction, its prefix
-	/// relative to this cursor's root.
+	/// The next route announcement, update, or retraction, its prefix relative to
+	/// this cursor's root, or `None` once the cursor is closed.
 	///
 	/// A retraction is only delivered for a previously announced prefix, and a
-	/// repeated announcement for the same prefix is a metadata update. Returns
-	/// None if the cursor is closed. The consumer is also a [`futures::Stream`]
-	/// of the same events.
-	#[cfg(feature = "async")]
-	pub async fn next(&mut self) -> Option<AnnounceEvent> {
-		kio::wait(|waiter| self.poll_next(waiter)).await
-	}
-
-	/// Poll for the next event, without blocking.
-	///
-	/// Returns `Poll::Ready(Some(_))` for an event, `Poll::Ready(None)` if the
-	/// cursor is closed, or `Poll::Pending` after registering `waiter` to be
-	/// notified when the next event arrives.
+	/// repeated announcement for the same prefix is a metadata update. With the
+	/// `async` feature, the consumer is also a `futures::Stream` of the same events.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<AnnounceEvent>> {
 		loop {
 			let now = self.timers.now();

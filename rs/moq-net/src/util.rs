@@ -14,6 +14,7 @@ pub(crate) use later::{Later, Learning};
 pub(crate) use wake::QueueWake;
 
 /// Prove a future's Send bound here rather than inside every caller's future.
+#[cfg(feature = "async")]
 pub(crate) fn sendable<F: Future + Send>(future: F) -> impl Future<Output = F::Output> + Send {
 	future
 }

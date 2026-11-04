@@ -20,7 +20,7 @@
 //! [`refresh`](moq_net::track::Info::refresh) ratio asks for one when a subscriber joins while the
 //! open group's deltas outweigh that ratio times its snapshot. The joiner still reads the cached
 //! group meanwhile: the ratio limits how often groups roll, not what a joiner downloads.
-//! [`Producer::refresh`] answers by restating the value as a snapshot in
+//! [`Producer::poll_refresh`] answers by restating the value as a snapshot in
 //! a new group; [`Encoder::snapshot`] does the same for a caller that owns the track. Without a ratio,
 //! or behind a relay that cannot forward the ask, a group runs to the encoder's frame and byte caps.
 //!

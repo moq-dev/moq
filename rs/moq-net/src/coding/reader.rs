@@ -220,7 +220,8 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		self.poll_with(waiter, consume, decode).map_ok(Some)
 	}
 
-	/// Poll for the next message on the stream.
+	/// The next message on the stream.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_decode<T: for<'a> Decode<'a, V> + Debug>(&mut self, waiter: &kio::Waiter) -> Poll<Result<T, Error>>
 	where
 		V: Into<Form> + Copy,
@@ -255,16 +256,9 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		self.poll_with_maybe(waiter, true, decode)
 	}
 
-	/// Decode the next message from the stream.
-	pub async fn decode<T: for<'a> Decode<'a, V> + Debug>(&mut self) -> Result<T, Error>
-	where
-		V: Into<Form> + Copy,
-	{
-		kio::wait(|waiter| self.poll_decode(waiter)).await
-	}
-
 	/// [`Self::poll_decode`], also returning the bytes it consumed, for a handshake to
 	/// count once the session's stats are known.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub(crate) fn poll_decode_sized<T: for<'a> Decode<'a, V> + Debug>(
 		&mut self,
 		waiter: &kio::Waiter,
@@ -276,15 +270,8 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		self.poll_with_sized(waiter, true, |r| T::decode(r, version))
 	}
 
-	/// [`Self::decode`], also returning the bytes it consumed.
-	pub(crate) async fn decode_sized<T: for<'a> Decode<'a, V> + Debug>(&mut self) -> Result<(T, usize), Error>
-	where
-		V: Into<Form> + Copy,
-	{
-		kio::wait(|waiter| self.poll_decode_sized(waiter)).await
-	}
-
-	/// Poll for the next message unless the stream is closed cleanly first.
+	/// The next message, or `None` if the stream closes cleanly first.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_decode_maybe<T: for<'a> Decode<'a, V> + Debug>(
 		&mut self,
 		waiter: &kio::Waiter,
@@ -296,15 +283,8 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		self.poll_with_maybe(waiter, true, |r| T::decode(r, version))
 	}
 
-	/// Decode the next message unless the stream is closed.
-	pub async fn decode_maybe<T: for<'a> Decode<'a, V> + Debug>(&mut self) -> Result<Option<T>, Error>
-	where
-		V: Into<Form> + Copy,
-	{
-		kio::wait(|waiter| self.poll_decode_maybe(waiter)).await
-	}
-
-	/// Poll for the next message without consuming it unless the stream closes cleanly first.
+	/// The next message without consuming it, or `None` if the stream closes cleanly first.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_decode_peek_maybe<T: for<'a> Decode<'a, V> + Debug>(
 		&mut self,
 		waiter: &kio::Waiter,
@@ -316,15 +296,8 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		self.poll_with_maybe(waiter, false, |r| T::decode(r, version))
 	}
 
-	/// Peek the next message unless the stream is closed.
-	pub async fn decode_peek_maybe<T: for<'a> Decode<'a, V> + Debug>(&mut self) -> Result<Option<T>, Error>
-	where
-		V: Into<Form> + Copy,
-	{
-		kio::wait(|waiter| self.poll_decode_peek_maybe(waiter)).await
-	}
-
-	/// Poll for the next varint on the stream.
+	/// The next varint on the stream.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_varint(&mut self, waiter: &kio::Waiter) -> Poll<Result<u64, Error>>
 	where
 		V: Into<Form> + Copy,
@@ -332,15 +305,8 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		self.poll_with(waiter, true, |r| r.varint())
 	}
 
-	/// Read the next varint from the stream.
-	pub async fn varint(&mut self) -> Result<u64, Error>
-	where
-		V: Into<Form> + Copy,
-	{
-		kio::wait(|waiter| self.poll_varint(waiter)).await
-	}
-
-	/// Poll for the next varint unless the stream is closed cleanly first.
+	/// The next varint, or `None` if the stream closes cleanly first.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_varint_maybe(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<u64>, Error>>
 	where
 		V: Into<Form> + Copy,
@@ -348,28 +314,13 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		self.poll_with_maybe(waiter, true, |r| r.varint())
 	}
 
-	/// Read the next varint unless the stream is closed.
-	pub async fn varint_maybe(&mut self) -> Result<Option<u64>, Error>
-	where
-		V: Into<Form> + Copy,
-	{
-		kio::wait(|waiter| self.poll_varint_maybe(waiter)).await
-	}
-
-	/// Poll for the next varint without consuming it.
+	/// The next varint without consuming it.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_varint_peek(&mut self, waiter: &kio::Waiter) -> Poll<Result<u64, Error>>
 	where
 		V: Into<Form> + Copy,
 	{
 		self.poll_with(waiter, false, |r| r.varint())
-	}
-
-	/// Read the next varint without consuming it.
-	pub async fn varint_peek(&mut self) -> Result<u64, Error>
-	where
-		V: Into<Form> + Copy,
-	{
-		kio::wait(|waiter| self.poll_varint_peek(waiter)).await
 	}
 
 	/// Poll for the next chunk of up to `max` bytes, or `None` once the stream finished.

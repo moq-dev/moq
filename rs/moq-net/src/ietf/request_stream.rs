@@ -170,20 +170,14 @@ impl Messages {
 		self.goaways.receive(redirect).map_err(|err| self.failed(err))
 	}
 
-	/// Read complete frames, consuming at most one GOAWAY without ending the request.
+	/// The next complete frame, consuming at most one GOAWAY without ending the request.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next<R: crate::transport::poll::RecvStream>(
 		&mut self,
 		reader: &mut crate::coding::Reader<R, Version>,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<Framed>, Error>> {
 		self.goaways.poll_next(reader, waiter).map_err(|err| self.failed(err))
-	}
-
-	pub async fn next<R: crate::transport::poll::RecvStream>(
-		&mut self,
-		reader: &mut crate::coding::Reader<R, Version>,
-	) -> Result<Option<Framed>, Error> {
-		kio::wait(|waiter| self.poll_next(reader, waiter)).await
 	}
 
 	pub async fn message<R: crate::transport::poll::RecvStream>(

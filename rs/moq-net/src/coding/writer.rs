@@ -135,21 +135,15 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 			.map_err(|err| self.version.transport_error(err))
 	}
 
-	/// Poll until the entire `Buf` has been written to the stream.
+	/// Write the entire `Buf` to the stream.
 	///
 	/// NOTE: This can avoid performing a copy when using `Bytes`.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_write_all<Buf: bytes::Buf>(&mut self, waiter: &kio::Waiter, buf: &mut Buf) -> Poll<Result<(), Error>> {
 		while buf.has_remaining() {
 			ready!(self.poll_write(waiter, buf))?;
 		}
 		Poll::Ready(Ok(()))
-	}
-
-	/// Write the entire `Buf` to the stream.
-	///
-	/// NOTE: This can avoid performing a copy when using `Bytes`.
-	pub async fn write_all<Buf: bytes::Buf + Send>(&mut self, buf: &mut Buf) -> Result<(), Error> {
-		kio::wait(|waiter| self.poll_write_all(waiter, buf)).await
 	}
 
 	/// Whether every buffered byte has hit the stream, so a FIN would not cut a message short.
@@ -215,7 +209,8 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 		kio::wait(|waiter| stream.poll_closed(waiter).map_err(|err| version.transport_error(err))).await
 	}
 
-	/// Poll until the stream is closed, or the [Self::finish] is acknowledged by the peer.
+	/// Resolves once the stream is closed, or the [Self::finish] is acknowledged by the peer.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_closed(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let version = &self.version;
 		self.stream
@@ -232,11 +227,6 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 		let res = ready!(self.poll_closed(waiter));
 		self.stream = None;
 		Poll::Ready(res)
-	}
-
-	/// Wait for the stream to be closed, or the [Self::finish] to be acknowledged by the peer.
-	pub async fn closed(&mut self) -> Result<(), Error> {
-		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
 
 	/// Set the priority within the stream's send group, or session-wide when ungrouped.

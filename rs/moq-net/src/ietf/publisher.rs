@@ -1012,15 +1012,11 @@ impl Publisher {
 
 	/// What the peer declared in its SETUP.
 	///
-	/// Blocks until the peer's SETUP arrives, because the extension changes the NAMESPACE
-	/// encoding: nothing can be advertised until we know whether the peer speaks it.
+	/// Resolves only once the peer's SETUP arrives, because the extension changes the
+	/// NAMESPACE encoding: nothing can be advertised until we know whether the peer speaks it.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	fn poll_peer(&self, waiter: &kio::Waiter) -> Poll<cluster::Peer> {
 		self.peer_setup.poll_get(waiter).map(|peer| peer.cluster)
-	}
-
-	/// Await [`Self::poll_peer`].
-	async fn peer(&self) -> cluster::Peer {
-		kio::wait(|waiter| self.poll_peer(waiter)).await
 	}
 
 	/// Whether the peer requires advertisements to be solicited, from the same SETUP.

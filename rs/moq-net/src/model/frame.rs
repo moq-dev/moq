@@ -1673,9 +1673,10 @@ impl Consumer {
 		true
 	}
 
-	/// Poll for the next chunk of bytes since the last read.
+	/// The next chunk of bytes since the last read.
 	///
 	/// Returns `None` once the frame is finished and all bytes have been consumed.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_read_chunk(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
 		if self.recover.is_none() {
 			return self.poll_read_chunk_once(waiter);
@@ -1735,12 +1736,6 @@ impl Consumer {
 				}
 			})?);
 		}
-	}
-
-	/// Return the next chunk of bytes since the last read.
-	#[cfg(feature = "async")]
-	pub async fn read_chunk(&mut self) -> Result<Option<Bytes>> {
-		kio::wait(|waiter| self.poll_read_chunk(waiter)).await
 	}
 
 	#[cfg(feature = "async")]
