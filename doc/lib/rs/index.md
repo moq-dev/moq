@@ -64,7 +64,7 @@ let mut announced = consumer.announced();
 while let Some(event) = announced.next().await {
     // Skip updates and retractions.
     let moq_net::announce::Event::Start(update) = event else { continue };
-    let broadcast = consumer.request(&update.prefix, update.route.instance).await?;
+    let broadcast = consumer.request(&update.prefix, Some(update.route.instance().clone())).await?;
     let catalog = broadcast
         .track(hang::Catalog::DEFAULT_NAME)?
         .subscribe(hang::Catalog::default_subscription())
@@ -74,12 +74,14 @@ while let Some(event) = announced.next().await {
 ```
 
 ```rust
-// Publish: create and announce a broadcast on the origin, then fill it.
-let mut broadcast = origin.publish("my-stream.hang", Default::default())?;
-// moq-mux (from a container) or moq-video / moq-audio (from a device) fill it.
-// The route retracts on `unannounce()` or when the broadcast ends. To serve a whole
-// subtree on demand instead, `origin.requests("room")?` yields each requested path:
-// `prepare()`, fill its broadcast, then `publish()`, or reject it.
+// Publish: create a route on the origin; it owns the broadcast to fill.
+let route = origin.route("my-stream.hang", RouteOptions::default())?;
+// moq-mux (from a container) or moq-video / moq-audio (from a device) fill
+// `route.broadcast()`. Keep the route: dropping it, or closing its broadcast,
+// retracts it, and `withdraw()`/`announce()` hide and show the same stream. To
+// serve a whole subtree on demand instead, `origin.route_prefix("room", ..)?`
+// yields each requested path: answer with `request.route(..)`, `serve` a held
+// broadcast, or `reject`.
 ```
 
 The connection and origin helpers spawn their drivers. Watch

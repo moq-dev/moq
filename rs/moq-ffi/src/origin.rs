@@ -480,7 +480,11 @@ impl MoqRoute {
 	}
 
 	/// The stream this route serves, minted at creation unless the options named one.
-	pub fn instance(&self) -> String {
+	///
+	/// Named `instance_id` rather than `instance` because the generated C and C++
+	/// objects keep their handle in a private field named `instance`; the wrappers
+	/// expose it as `instance`.
+	pub fn instance_id(&self) -> String {
 		self.instance.clone()
 	}
 

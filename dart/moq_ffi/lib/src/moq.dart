@@ -8,9 +8,7 @@ import "dart:ffi";
 import "dart:io" show Platform, File, Directory;
 import "dart:isolate";
 import "dart:typed_data";
-
 import "package:ffi/ffi.dart";
-
 import "uniffi_runtime.dart";
 export "uniffi_runtime.dart";
 
@@ -12999,7 +12997,7 @@ abstract class MoqRouteInterface {
   void announce();
   MoqBroadcastProducer broadcast();
   void cancel();
-  String instance();
+  String instanceId();
   UniffiRustFuture<MoqBroadcastRequest?> requested();
   void setCost({required int cost});
   void withdraw();
@@ -13063,9 +13061,9 @@ class MoqRoute implements MoqRouteInterface {
     }, null);
   }
 
-  String instance() {
+  String instanceId() {
     return rustCallWithLifter(
-      (status) => uniffi_moq_ffi_fn_method_moqroute_instance(
+      (status) => uniffi_moq_ffi_fn_method_moqroute_instance_id(
         uniffiClonePointer(),
         status,
       ),
@@ -19789,7 +19787,7 @@ external void uniffi_moq_ffi_fn_method_moqroute_cancel(
 @Native<RustBuffer Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
-external RustBuffer uniffi_moq_ffi_fn_method_moqroute_instance(
+external RustBuffer uniffi_moq_ffi_fn_method_moqroute_instance_id(
   Pointer<Void> ptr,
   Pointer<RustCallStatus> uniffiStatus,
 );
@@ -21523,7 +21521,7 @@ external int uniffi_moq_ffi_checksum_method_moqroute_broadcast();
 external int uniffi_moq_ffi_checksum_method_moqroute_cancel();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
-external int uniffi_moq_ffi_checksum_method_moqroute_instance();
+external int uniffi_moq_ffi_checksum_method_moqroute_instance_id();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqroute_requested();
@@ -22252,7 +22250,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqroute_cancel() != 41411) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqroute_instance() != 47971) {
+  if (uniffi_moq_ffi_checksum_method_moqroute_instance_id() != 18728) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqroute_requested() != 49558) {

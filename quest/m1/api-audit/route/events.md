@@ -11,7 +11,7 @@ preference) move to a relay-level `routes()` stream that moq-relay and
 stats use.
 
 Non-goals: the wire's ANNOUNCE and ANNOUNCE_RESTART messages, which stay as
-they are, and the route handle ([One Route handle](/quest/m1/api-audit/route/handle.md)).
+they are, and the route handle ([One Route handle](https://github.com/moq-dev/moq/pull/7806)).
 
 ## Plan
 

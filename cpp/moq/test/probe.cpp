@@ -273,7 +273,7 @@ int main()
 	moq::RouteOptions hidden;
 	hidden.hidden = true;
 	auto route = ok(origin->route("probe", hidden), "route");
-	CHECK(!route->instance().empty());
+	CHECK(!route->instance_id().empty());
 	auto broadcast = ok(route->broadcast(), "route broadcast");
 	moq::TrackInfo info;
 	info.timescale = 1000000;

@@ -60,8 +60,8 @@ this quest removes the predecessor machinery and grows to [XL].
   `doc/concept/moq-lite.md`.
 - **Inheriting the instance.** Decided 2026-11-03 (maintainer, on
   [moq-dev/moq#7770](https://github.com/moq-dev/moq/pull/7770)):
-  `request.route(options)` from
-  [One Route handle](/quest/m1/api-audit/route/handle.md) mints a fresh
+  `request.route(options)`, from
+  [One Route handle](https://github.com/moq-dev/moq/pull/7806), mints a fresh
   instance by default, and ending a job leaves its prefix route open, with
   no history of ended paths. Carrying the prefix route's instance onto the
   path's exact route, so that the answer the waiting request gets is that
@@ -147,10 +147,6 @@ separate from the identity rewrite of this Plan, which landed with
 Public API: breaking; removes `Takeover` and the predecessor fields in every
 language. Wire: removes lite-07's ANNOUNCE_TAKEOVER (0x5), adding nothing
 beyond [Instance and epoch](https://github.com/moq-dev/moq/pull/7489)'s fields.
-
-## Required
-
-- [One Route handle](/quest/m1/api-audit/route/handle.md) - `request.route` creates the path's exact route, minting a fresh instance by default
 
 ## Related
 

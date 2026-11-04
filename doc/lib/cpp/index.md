@@ -147,7 +147,7 @@ moq::VideoEncoderOutput output{moq::VideoCodec::kH264, std::nullopt, std::nullop
 auto catalog = ok(moq::MediaCatalogProducer::init(broadcast));
 auto video = ok(moq::VideoProducer::init(catalog, {{moq::VideoPixelFormat::kRgba, 1280, 720, {30000, 1001}}, output, "camera", nullptr}));
 ok(video->write({{0, 30'000}, rgba}));
-ok(route->announce()); // each route mints a fresh instance, route->instance()
+ok(route->announce()); // each route mints a fresh instance, route->instance_id()
 ok(broadcast->close()); // keep the producer alive while publishing, then close explicitly
 ```
 

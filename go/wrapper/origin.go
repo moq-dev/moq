@@ -98,7 +98,7 @@ func (r *Route) Broadcast() (*BroadcastProducer, error) {
 // Instance returns the stream this route serves, minted at creation unless
 // [RouteOptions] named one.
 func (r *Route) Instance() string {
-	return r.inner.Instance()
+	return r.inner.InstanceId()
 }
 
 // Announce makes the route visible, or keeps it so. A route from

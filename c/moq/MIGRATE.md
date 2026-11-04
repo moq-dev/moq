@@ -12,7 +12,7 @@ How to update your code for each breaking change, newest first.
 - `moq_publication_announce(publication, &route)` is `moq_route_announce(route)`, and re-pricing is `moq_route_set_cost(route, cost)`; `moq_publication_unannounce` is `moq_route_withdraw`.
 - `moq_origin_requests_requested_broadcast` is `moq_route_requested`, whose value is NULL once the origin closes.
 - `moq_broadcast_request_prepare` then `moq_broadcast_prepared_publish` is `moq_broadcast_request_route(request, &options, &route)`: create it hidden to fill it first, then announce it.
-- `moq_route_instance(route)` returns the stream's instance, kept across withdraw and announce.
+- `moq_route_instance_id(route)` returns the stream's instance, kept across withdraw and announce.
 
 `moq_announce_route` is `moq_route_options`, given at creation, with a leading `hidden`. The default route is visible at once, so set `hidden` and call `moq_route_announce` after filling the catalog to keep the old order. Hold the route while the broadcast should stay announced: `moq_route_cancel` or freeing its last handle retracts it, and `moq_broadcast_producer_close` ends both. The `moq_route` record on `moq_announce.route` is `moq_route_info`.
 

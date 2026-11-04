@@ -4,6 +4,44 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### One `origin::Route` handle replaces publications and claims
+
+On the publishing side ownership runs origin → route → broadcast. `origin::Publication`, `origin::Prepared` and `origin::Requests` are gone, as are `origin::Producer::{create_broadcast, publish, requests}` and the broadcast's own announcement.
+An `origin::Route` is created with `RouteOptions` and owns its broadcast. Dropping its last clone retracts it, and so does closing its broadcast; a broadcast producer clone alone no longer keeps it announced, so hold the route for as long as the content should stay up.
+
+| Before | After |
+| --- | --- |
+| `origin.publish(path, Route::default())` | `origin.route(path, RouteOptions::default())` |
+| `origin.create_broadcast(path)` then `publication.announce(route)` | `origin.route(path, RouteOptions::hidden())` then `route.announce()` |
+| `publication.broadcast()` / `Deref` | `route.broadcast()` |
+| `publication.unannounce()` | `route.withdraw()` |
+| `publication.announce(Route::default().with_cost(c))` | `route.set_cost(c)` |
+| `Route::default().with_auth(cred)` | `RouteOptions::default().with_auth(cred)`, or `route.set_auth(Some(cred))` |
+| `Route::default().with_instance(instance, epoch)` | `RouteOptions::default().with_instance(instance, epoch)`, at creation only |
+| `publication.route().and_then(\|r\| r.instance)` | `route.instance()` |
+| `origin.requests(prefix)` | `origin.route_prefix(prefix, RouteOptions::default())` |
+| `requests.requested_broadcast().await` (`Result`) | `route.requested().await` (`Option`, `None` once retracted or the origin closes) |
+| `request.prepare()?` … `prepared.publish()?` | `request.route(RouteOptions::hidden())?` … `job.announce()?` |
+
+A route mints its instance when it is created and keeps it for its lifetime, across `withdraw()` and `announce()`: re-announcing continues the same stream, and a new run is a new route.
+A job's route from `request.route(options)` serves a fresh instance unless `options` names one; created visible, it announces and answers the waiting requesters at once.
+`requested()` on an exact route returns `None` at once, and `broadcast()` on a prefix route panics.
+A prefix route takes a cost, a credential and hidden visibility like an exact one.
+
+The route metadata a reader receives is `origin::RouteInfo` (was `origin::Route`), with read-only getters: `announce.route.instance()` (an `&Instance`, no longer an `Option`), `cost()`, `hops()`, `is_anonymous()` and `source()`.
+Applications cannot build or edit one.
+
+```rust
+// Before
+let publication = origin.create_broadcast("live/alice")?;
+publication.create_track("catalog.json", info)?;
+publication.announce(Route::default().with_cost(5))?;
+// After
+let route = origin.route("live/alice", RouteOptions::hidden().with_cost(5))?;
+route.broadcast().create_track("catalog.json", info)?;
+route.announce()?;
+```
+
 ### `group::on_track` is `track::Info::rescale` ([#7702](https://github.com/moq-dev/moq/pull/7702))
 
 The free function `moq_net::group::on_track(timestamp, timescale)` is removed.

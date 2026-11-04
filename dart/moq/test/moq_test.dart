@@ -490,7 +490,7 @@ void main() {
     final first = await nextRoute(announced);
     expect(first, isA<AnnounceEventStart>());
     expect((first as AnnounceEventStart).announce.prefix, 'live');
-    expect(first.announce.route.instance, route.instance());
+    expect(first.announce.route.instance, route.instanceId());
 
     route.withdraw();
     final retracted = await nextRoute(announced);
@@ -504,7 +504,7 @@ void main() {
     // Announcing again continues the same stream.
     route.announce();
     final again = await nextRoute(announced) as AnnounceEventStart;
-    expect(again.announce.route.instance, route.instance());
+    expect(again.announce.route.instance, route.instanceId());
     await consumer.request(path: 'live').timeout(timeout);
 
     // Disposing the broadcast handle keeps the route; cancelling the route retracts it,
@@ -558,13 +558,13 @@ void main() {
       final first = origin.route(path: 'instance', options: RouteOptions());
 
       final start = await nextRoute(announced) as AnnounceEventStart;
-      expect(start.announce.route.instance, first.instance());
+      expect(start.announce.route.instance, first.instanceId());
 
       final second = origin.route(
         path: 'instance',
         options: RouteOptions(instance: 'camera', epoch: 1),
       );
-      expect(second.instance(), 'camera');
+      expect(second.instanceId(), 'camera');
       final restart = await nextRoute(announced) as AnnounceEventRestart;
       expect(restart.announce.route.instance, 'camera');
 
@@ -608,7 +608,7 @@ void main() {
     expect(request.path(), 'live/cam');
     // A hidden job route answers nobody until it announces.
     final served = request.route(options: RouteOptions(hidden: true));
-    expect(served.instance(), isNot(dynamic.instance()));
+    expect(served.instanceId(), isNot(dynamic.instanceId()));
     served.announce();
     await pending.timeout(timeout);
     // Closing the job's broadcast ends its route.

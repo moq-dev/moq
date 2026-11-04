@@ -295,7 +295,7 @@ int main(void)
 	ok(moq_origin_producer_route(origin, "probe", &route_options, &route), "route");
 	moq_broadcast_producer *broadcast = NULL;
 	ok(moq_route_broadcast(route, &broadcast), "route broadcast");
-	char *instance = moq_route_instance(route);
+	char *instance = moq_route_instance_id(route);
 	CHECK(instance && instance[0] != '\0');
 	moq_string_free(instance);
 	moq_track_info info = moq_track_info_default();

@@ -129,7 +129,7 @@ if (read is video.ReadFrame) {
 ```dart
 // Publish already-encoded frames. bytes comes from your encoder or application source.
 final route = moq.route('live/camera'); // visible at once, under a fresh instance
-print(route.instance());
+print(route.instanceId());
 final mine = route.broadcast();
 final track = mine.publishTrack(name: 'video', info: null);
 final group = track.appendGroup();

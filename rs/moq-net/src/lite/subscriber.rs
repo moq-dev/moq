@@ -2042,7 +2042,7 @@ impl AnnouncePrefix {
 				let path = self.prefix.join(&suffix)?;
 				// Lite01/02 don't carry hop information; the broadcast starts with
 				// an empty chain and an unpriced link. Stats are attributed in the
-				// model when this enters the origin via `create_broadcast`.
+				// model when this enters the origin via `route`.
 				self.subscriber.start_announce(
 					path,
 					None,

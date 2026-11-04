@@ -1322,7 +1322,7 @@ struct RouteEntry {
 	/// The link the entry arrived on, from the handle that inserted it.
 	link: Link,
 	/// The queue requests under this route are served from, when the announcer
-	/// serves content on demand (a [`Requests`]). `None` for an advertise-only
+	/// serves content on demand (a prefix [`Route`]). `None` for an advertise-only
 	/// announcement ([`Producer::announce`]) and for a local broadcast.
 	server: Option<kio::Shared<ServeState>>,
 	/// The broadcast published on this origin at exactly `prefix`, when the
@@ -1335,7 +1335,7 @@ struct RouteEntry {
 	advertised: bool,
 	/// Whether a peer the chain passes through has since withdrawn this prefix.
 	/// The route was derived from that peer's advertisement, so it serves nobody
-	/// until the peer announces again. See [`Requests::withdrawn`].
+	/// until the peer announces again. See [`Route::withdrawn`].
 	stale: bool,
 	/// [`prefix_claim`] of [`Self::prefix`], built once at announce time.
 	///
@@ -1463,7 +1463,7 @@ fn prefix_claim(prefix: &Path) -> Result<Pattern, InvalidPattern> {
 /// A served route's request queue: what materializes a requested path on demand.
 ///
 /// Shared by every requester resolving through the owning route and the
-/// [`Requests`] draining it, so both sides work under one lock.
+/// prefix [`Route`] draining it, so both sides work under one lock.
 #[derive(Default)]
 pub(super) struct ServeState {
 	// Result channels for pending requests, keyed by absolute path so concurrent
@@ -2418,7 +2418,7 @@ impl Producer {
 	/// Mint a standalone source broadcast for a served-route request: it carries
 	/// this origin's cache policy and ingress attribution, but
 	/// is *not* entered into the route table. Sessions answer
-	/// [`Requests`] requests with one of these; the requester already holds
+	/// a prefix route's requests with one of these; the requester already holds
 	/// the request's result channel, so the table never needs to resolve it.
 	/// The source takes new tracks only while `validity` holds.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
@@ -2446,10 +2446,9 @@ impl Producer {
 	/// can be served, answered by nothing.
 	///
 	/// A request under an advertise-only route resolves [`Error::Unroutable`]
-	/// unless an announced broadcast or a served route ([`Self::requests`]) covers
+	/// unless an announced broadcast or a prefix route ([`Self::route_prefix`]) covers
 	/// the path too. Tests use it to shape the route table; everything else
-	/// advertises through a broadcast ([`Publication::announce`]) or a
-	/// [`Requests`] handler, which serve what they claim.
+	/// advertises through an exact or prefix [`Route`], which serves what it claims.
 	#[cfg(test)]
 	pub(crate) fn announce(
 		&self,
@@ -2743,8 +2742,8 @@ impl Producer {
 }
 
 /// What it takes to insert a route: the prefixes it covers and the origin table
-/// to insert them into. Built by [`Producer::announce`], [`Producer::requests`],
-/// and [`Announcer`], which is the same advertisement re-issued from a broadcast.
+/// to insert them into. Built by [`Producer::route`], [`Producer::route_prefix`]
+/// and the advertise-only test helper.
 struct Announcing {
 	hop: Hop,
 	shared: SendCell<kio::Shared<OriginState>>,
@@ -3398,8 +3397,7 @@ impl Drop for AnnounceProducer {
 /// synchronously when a route is announced or retracted.
 ///
 /// It holds no [`Producer`] clone, so it never keeps the origin alive. It
-/// finishes once every owner is gone: each [`Producer`] clone, published
-/// broadcast, and [`Requests`]. Read handles ([`Consumer`], [`AnnounceConsumer`])
+/// finishes once every owner is gone: each [`Producer`] clone and [`Route`]. Read handles ([`Consumer`], [`AnnounceConsumer`])
 /// are not owners. Dropping it aborts active fronts, rejects pending requests,
 /// ends announcements, and makes subsequent producer mutations fail with
 /// [`Error::Closed`].
@@ -3430,8 +3428,7 @@ impl Driver {
 	/// Process ready origin work using caller-supplied monotonic time.
 	///
 	/// See [`crate::time::Driver`] for the contract. Finishes with
-	/// [`Error::Closed`] once every owner (a [`Producer`] clone, published
-	/// broadcast, or [`Requests`]) has dropped and the remaining lifecycle work
+	/// [`Error::Closed`] once every owner (a [`Producer`] clone or [`Route`]) has dropped and the remaining lifecycle work
 	/// has drained.
 	pub fn poll(&mut self, now: Instant, waiter: &kio::Waiter) -> Result<Option<Instant>, Error> {
 		waiter.batch(|| {
@@ -3473,7 +3470,7 @@ impl DriverState {
 		drop(std::mem::replace(&mut self.set, TaskSet::owned()));
 
 		// Refuse new work and take the pending requests, under the same lock
-		// `create_broadcast` holds across its attach: a concurrent create either
+		// `route` holds across its attach: a concurrent create either
 		// finishes before this (the walk below cleans its entry up) or observes
 		// `closed` and fails with `Closed`.
 		let (servers, cursors, fronts) = {
@@ -5485,7 +5482,7 @@ struct OriginState {
 	fronts: WeakCache<FrontKey, RemoteFront>,
 
 	// Peers that withdrew a prefix while routes there still passed through them,
-	// which are stale. See [`Requests::withdrawn`].
+	// which are stale. See [`Route::withdrawn`].
 	withdrawn: HashMap<Path, HashSet<Hop>>,
 
 	// Set when the origin's driver dropped: new requests fail with `Closed`
@@ -6636,7 +6633,7 @@ pub struct Consumer {
 	interested: bool,
 
 	// The cache policy remote fronts inherit, mirroring what
-	// `create_broadcast` gives a local front.
+	// `route` gives a local front.
 	pool: cache::Pool,
 	cache_duration: Duration,
 
@@ -10657,7 +10654,7 @@ mod tests {
 	}
 
 	#[kio::test]
-	async fn create_broadcast_accepts_a_path_at_the_wire_limits() {
+	async fn route_accepts_a_path_at_the_wire_limits() {
 		let producer = origin(1).produce();
 		let path = vec!["a"; Path::MAX_PARTS].join("/");
 		let _broadcast = producer
@@ -10729,7 +10726,7 @@ mod tests {
 
 	#[kio::test]
 	#[cfg(feature = "async")]
-	async fn requests_route_keeps_its_producer_scope() {
+	async fn forward_keeps_its_producer_scope() {
 		let producer = origin(1).produce();
 		let scope = Patterns::from("*/chat".parse::<Pattern>().unwrap());
 		let scoped = producer.scope("", &scope).unwrap();
@@ -14472,7 +14469,7 @@ mod tests {
 	}
 
 	#[kio::test]
-	async fn create_broadcast_refuses_a_path_no_pattern_can_spell() {
+	async fn route_refuses_a_path_no_pattern_can_spell() {
 		let producer = origin(1).produce();
 
 		// A `*` segment is a valid path but an invalid literal, so its route could

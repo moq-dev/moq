@@ -171,7 +171,7 @@ class Route(_Stream[BroadcastRequest]):
     def instance(self) -> str:
         """The stream this route serves, minted at creation unless one was named, and kept
         across :meth:`withdraw` and :meth:`announce`."""
-        return self._inner.instance()
+        return self._inner.instance_id()
 
     def announce(self) -> None:
         """Make the route visible, or keep it so.

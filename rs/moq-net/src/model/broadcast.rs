@@ -45,7 +45,7 @@ pub struct Info {
 	/// The path this broadcast is named by, which relative references in a catalog it
 	/// serves (hang's `broadcast` field) resolve against.
 	///
-	/// [`origin::Producer::create_broadcast`](super::origin::Producer::create_broadcast) stamps
+	/// [`origin::Producer::route`](super::origin::Producer::route) stamps
 	/// the path the broadcast was created at, relative to the origin root (including through a
 	/// scoped producer). Every [`Consumer`] an origin hands out is then re-stamped with the path
 	/// *that handle* was requested or announced at, relative to its cursor's root, since the
@@ -230,7 +230,7 @@ pub struct Producer {
 	state: kio::Shared<BroadcastState>,
 
 	// Ingress stats scope, set by a tagged `origin::Producer` at
-	// `create_broadcast`. Inherited by the tracks this producer creates. Empty
+	// `route`. Inherited by the tracks this producer creates. Empty
 	// (no-op) for an untagged broadcast.
 	stats: stats::Scope,
 }
@@ -248,7 +248,7 @@ impl Producer {
 	}
 
 	/// Attach an ingress stats scope, inherited by the tracks created on this
-	/// broadcast. Set by a tagged `origin::Producer` at `create_broadcast`.
+	/// broadcast. Set by a tagged `origin::Producer` at `route`.
 	pub(super) fn with_stats(mut self, scope: stats::Scope) -> Self {
 		self.stats = scope;
 		self

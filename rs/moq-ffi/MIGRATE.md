@@ -13,7 +13,7 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 - `MoqPublication::announce(MoqAnnounceRoute)` is `announce()`, and re-pricing is `set_cost(cost)`. `unannounce()` is `withdraw()`.
 - `MoqOriginRequests::requested_broadcast()` is `requested()`, which returns `None` once the origin closes instead of `Closed`. A call after `cancel()` fails with `Cancelled`.
 - `MoqBroadcastRequest::prepare()` then `MoqBroadcastPrepared::publish()` is `MoqBroadcastRequest::route(options)`: create it hidden to fill it first, then `announce()`.
-- `MoqRoute::instance()` is the stream's instance, minted at creation and kept across `withdraw` and `announce`.
+- `MoqRoute::instance_id()` is the stream's instance, minted at creation and kept across `withdraw` and `announce` (Kotlin names it `instance()`; the Python, Go and Swift wrappers expose `instance`). It is not `instance()` because the generated C and C++ objects reserve that name.
 
 `MoqAnnounceRoute` is `MoqRouteOptions { hidden, cost, instance, epoch }`, given once at creation. A route is visible at once unless `hidden`; pass `hidden: true` and call `announce()` after filling the catalog to keep the old create-then-announce order. A stable `instance` is fixed for the route's lifetime: announcing a different one is a new route.
 

@@ -229,7 +229,7 @@ bool MoQOutput::Start()
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		url = server;
-		instance = (*next_route)->instance();
+		instance = (*next_route)->instance_id();
 	}
 	{
 		std::lock_guard<std::mutex> lock(media_mutex);

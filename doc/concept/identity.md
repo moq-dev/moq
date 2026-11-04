@@ -165,26 +165,28 @@ already served, start a new prefix route. Its first subscription stays on
 the prefix route without a restart.
 
 A job that may restart independently, such as a transcoder claiming
-`transcode`, instead prepares and publishes each requested path. A claim
+`transcode`, instead creates each requested path's own exact route. A claim
 promises capability, not content. Each requested path is a separate job,
 announced at its exact path under a fresh instance of its own.
 
 ```rust
-let claim = origin.requests("transcode")?;
-while let Ok(request) = claim.requested_broadcast().await {
+let claim = origin.route_prefix("transcode", RouteOptions::default())?;
+while let Some(request) = claim.requested().await {
     // A fresh instance for this job, never one shared with another path or run.
-    let prepared = request.prepare()?;
-    let video = prepared.broadcast().create_track("video", info.clone())?;
+    // Hidden until its tracks exist.
+    let job = request.route(RouteOptions::hidden())?;
+    let video = job.broadcast().create_track("video", info.clone())?;
     // Announces the exact path under that instance and answers the waiting request.
-    let output = prepared.publish()?;
-    spawn(run_job(video, output));
+    job.announce()?;
+    spawn(run_job(video, job));
 }
 ```
 
-JavaScript mirrors this with `request.prepare()` and `prepared.publish()`;
-see [`@moq/net`](/lib/js/net) and [`moq-net`](/lib/rs/moq-net).
-A prepared answer is unannounced until published, and dropping it unpublished
-refuses the request.
+JavaScript mirrors this with `request.route({ hidden: true })` and
+`job.announce()`; see [`@moq/net`](/lib/js/net) and [`moq-net`](/lib/rs/moq-net).
+A hidden job route is unannounced until it announces, and dropping it before
+then refuses the request. Ending a job's route withdraws only its path: the
+prefix route keeps answering later requests.
 
 A lazy job's lifecycle, as a viewer of `transcode/alice` sees it through a relay:
 
@@ -204,7 +206,7 @@ A lazy job's lifecycle, as a viewer of `transcode/alice` sees it through a relay
    second request reaches job A.
 3. **Steady state.** Requests resolve instance A by its exact route. Routes
    carrying instance A through other relays fail over without a seam.
-4. **Job restart.** The worker closes job A's publication. The path falls back
+4. **Job restart.** The worker drops job A's route. The path falls back
    to the claim, the next request asks the worker again, and job B publishes
    under a fresh instance. Followers see each change as a restart; relays drop
    job A's cached groups, so a viewer returning within the cache window never

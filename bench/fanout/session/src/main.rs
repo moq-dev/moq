@@ -56,10 +56,10 @@ fn main() {
 			Server::new().with_versions(version.into()).with_subscriber(relay.clone()),
 		)
 		.await;
-		let broadcast = publisher.create_broadcast("room").unwrap();
+		let broadcast = publisher.route("room", moq_net::origin::RouteOptions::hidden()).unwrap();
 		let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
-		let mut track = broadcast.create_track("chat", info).unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let mut track = broadcast.broadcast().create_track("chat", info).unwrap();
+		broadcast.announce().unwrap();
 
 		let mut audience = Vec::new();
 		for viewer in 0..viewers {

@@ -29,7 +29,7 @@
 //!
 //! * `announces_started` / `announces_ended`: cumulative broadcast
 //!   announce/unannounce events on this `(tier, role)`. Driven by the tagged
-//!   announce stream on the egress side, and by `create_broadcast` route
+//!   announce stream on the egress side, and by `origin::Producer::route`
 //!   transitions on the ingress side.
 //! * `announced_bytes`: cumulative broadcast-name length summed over each
 //!   model-visible announce and unannounce of this broadcast (the name, not the

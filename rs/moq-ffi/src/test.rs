@@ -417,7 +417,7 @@ async fn route_options_reach_the_announced_route() {
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
 	let info = next_announced(&announced).await.route;
 	assert_eq!(info.cost, 9);
-	assert_eq!(info.instance, route.instance());
+	assert_eq!(info.instance, route.instance_id());
 	assert!(info.hops.is_empty());
 	assert!(!info.anonymous);
 
@@ -451,7 +451,7 @@ async fn route_options_name_an_instance_or_refuse() {
 			},
 		)
 		.unwrap();
-	assert_eq!(route.instance(), "cam");
+	assert_eq!(route.instance_id(), "cam");
 	assert_eq!(next_announced(&announced).await.route.instance, "cam");
 
 	// An instance is never empty, and the refusal creates nothing.
@@ -478,16 +478,16 @@ async fn a_new_route_at_a_path_restarts_its_readers() {
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
 	let first = origin.route("instance-route".into(), Default::default()).unwrap();
 	let announce = next_announced(&announced).await;
-	assert_eq!(announce.route.instance, first.instance());
+	assert_eq!(announce.route.instance, first.instance_id());
 
 	// A new run of the same publisher is a new route with its own instance: consumers
 	// restart onto it.
 	let second = origin.route("instance-route".into(), Default::default()).unwrap();
-	assert_ne!(first.instance(), second.instance());
+	assert_ne!(first.instance_id(), second.instance_id());
 	match next_event(&announced).await {
 		MoqAnnounceEvent::Restart { announce } => {
 			assert_eq!(announce.prefix, "instance-route");
-			assert_eq!(announce.route.instance, second.instance());
+			assert_eq!(announce.route.instance, second.instance_id());
 		}
 		other => panic!("expected a restart, got {other:?}"),
 	}
@@ -3805,7 +3805,7 @@ async fn announce_and_withdraw_toggle_discovery() {
 			}
 		}
 	}
-	assert_eq!(wait_live(&announced, true).await.route.instance, route.instance());
+	assert_eq!(wait_live(&announced, true).await.route.instance, route.instance_id());
 
 	route.withdraw().unwrap();
 	wait_live(&announced, false).await;
@@ -3818,7 +3818,7 @@ async fn announce_and_withdraw_toggle_discovery() {
 
 	// Announcing again brings the same stream back.
 	route.announce().unwrap();
-	assert_eq!(wait_live(&announced, true).await.route.instance, route.instance());
+	assert_eq!(wait_live(&announced, true).await.route.instance, route.instance_id());
 	kio::clock::timeout(TIMEOUT, consumer.request("live".into(), None))
 		.await
 		.expect("timed out requesting the reannounced broadcast")
@@ -5064,11 +5064,11 @@ async fn dynamic_broadcast_request() {
 	let served = job.broadcast().unwrap();
 	let track = served.publish_track("status".into(), Some(timed_info())).unwrap();
 	// Only announce answers the requester, under a fresh instance and after admission.
-	let instance = job.instance();
+	let instance = job.instance_id();
 	job.announce().unwrap();
 	// A re-price keeps the instance the answer was announced under.
 	job.set_cost(7).unwrap();
-	assert_eq!(job.instance(), instance);
+	assert_eq!(job.instance_id(), instance);
 	assert!(matches!(request.path(), Err(MoqError::Closed)));
 
 	let broadcast = kio::clock::timeout(TIMEOUT, requesting)

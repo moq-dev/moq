@@ -118,7 +118,7 @@ public final class Route: AsyncSequence, Sendable {
     }
 
     /// The stream this route serves, minted at creation unless `instance` named one.
-    public var instance: String { ffi.instance() }
+    public var instance: String { ffi.instanceId() }
 
     /// Make the route visible, or keep it so; throws `Closed` once its broadcast closed.
     public func announce() throws {
