@@ -68,7 +68,6 @@ impl Fixture {
 	}
 }
 
-
 const MB: usize = 1 << 20;
 
 /// Dial `acceptor` from `dialer` in a `tcp` session while `acceptor` accepts, returning
@@ -156,9 +155,17 @@ async fn tcp_sessions_carry_writes_both_ways() {
 
 		// FIN, each way.
 		dialed.producer.finish().unwrap();
-		assert_eq!(read(&mut accepted.consumer).await.unwrap(), None, "{dialer} to {acceptor}");
+		assert_eq!(
+			read(&mut accepted.consumer).await.unwrap(),
+			None,
+			"{dialer} to {acceptor}"
+		);
 		accepted.producer.finish().unwrap();
-		assert_eq!(read(&mut dialed.consumer).await.unwrap(), None, "{dialer} to {acceptor}");
+		assert_eq!(
+			read(&mut dialed.consumer).await.unwrap(),
+			None,
+			"{dialer} to {acceptor}"
+		);
 	}
 }
 
@@ -174,7 +181,13 @@ async fn a_long_tcp_session_stays_in_order() {
 	let write = async {
 		for i in 0..WRITES {
 			let payload = Bytes::copy_from_slice(&i.to_be_bytes());
-			dialed.producer.ready(&frame::Info { size: 4, timestamp: None }).await;
+			dialed
+				.producer
+				.ready(&frame::Info {
+					size: 4,
+					timestamp: None,
+				})
+				.await;
 			dialed.producer.write_frame(None, payload).unwrap();
 		}
 		dialed.producer.finish().unwrap();
@@ -200,7 +213,10 @@ async fn a_reset_tcp_half_fails_the_read() {
 		producer.write_frame(None, &b"partial"[..]).unwrap();
 		assert_eq!(read(&mut accepted.consumer).await.unwrap().unwrap(), b"partial");
 		producer.abort(Error::Cancel).unwrap();
-		assert!(read(&mut accepted.consumer).await.is_err(), "{version}: a reset read as FIN");
+		assert!(
+			read(&mut accepted.consumer).await.is_err(),
+			"{version}: a reset read as FIN"
+		);
 	}
 }
 
@@ -208,8 +224,8 @@ async fn a_reset_tcp_half_fails_the_read() {
 /// live tail loses nothing: the writer waits instead of running ahead.
 #[kio::test]
 async fn a_slow_tcp_reader_paces_the_writer() {
-	// Well past the 32 MiB a group copy holds.
-	const WRITES: usize = 64;
+	// Well past the 32 MiB a group copy holds, and the window every hop may buffer.
+	const WRITES: usize = 192;
 	let mut fixture = Fixture::new();
 	let alice = fixture.endpoint(LITE, "alice").await;
 	let bob = fixture.endpoint(LITE, "bob").await;
@@ -367,19 +383,22 @@ async fn a_lost_track_message_does_not_block_later_ones() {
 	let alice = fixture.endpoint(LITE, "alice").await;
 	let bob = fixture.endpoint(LITE, "bob").await;
 	let (dialed, accepted) = connect_track(&alice, &bob).await;
-	let lossy = accepted.consumer.subscription().with_delay(
-		track::Delay::default().with_max(Duration::from_millis(500)),
-	);
+	let lossy = accepted
+		.consumer
+		.subscription()
+		.with_delay(track::Delay::default().with_max(Duration::from_millis(500)));
 	accepted.consumer.control().update(lossy).unwrap();
 	let mut reader = accepted.consumer.ordered();
 
-	// Message 0 is never written.
-	for (sequence, payload) in [(1, &b"one"[..]), (2, &b"two"[..])] {
+	let write = |sequence: u64, payload: &'static [u8]| {
 		let mut group = dialed.producer.create_group(group::Info { sequence }).unwrap();
 		group.write_frame(None, payload).unwrap();
 		group.finish().unwrap();
-	}
+	};
+	// Message 0 is never written: message 1 waits out the budget, then is read.
+	write(1, b"one");
 	assert_eq!(recv(&mut reader).await.unwrap().unwrap(), b"one");
+	write(2, b"two");
 	assert_eq!(recv(&mut reader).await.unwrap().unwrap(), b"two");
 }
 
@@ -607,7 +626,8 @@ async fn closing_an_endpoint_ends_its_sessions() {
 	assert!(matches!(bob.accept_tcp().await, Err(Error::Closed)));
 	assert!(matches!(bob.accept_track().await, Err(Error::Closed)));
 	assert!(matches!(bob.dial_tcp("alice"), Err(Error::Closed)));
-	tcp_dialed.producer.finish().unwrap();
+	// Alice saw bob's half reset, so she reset hers: the session is gone both ways.
+	assert!(tcp_dialed.producer.finish().is_err());
 }
 
 /// Session tracks are the secret that keeps third parties out, so no listing names them:

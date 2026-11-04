@@ -212,13 +212,14 @@ impl sealed::Open for TcpStream {
 		} = parts;
 		let (producer, ours) = match track.create_group(group::Info { sequence: 0 }) {
 			Ok(group) => {
-				let handle = group.handle();
-				(group, Some(handle))
+				let demand = group.demand();
+				(group, Some(demand))
 			}
 			// The track already ended, such as by the endpoint closing: hand out a half
 			// that reports it.
 			Err(err) => {
-				let group = group::Producer::new(group::Info { sequence: 0 }, track::Info::default(), Default::default());
+				let group =
+					group::Producer::new(group::Info { sequence: 0 }, track::Info::default(), Default::default());
 				let _ = group.handle().abort(err);
 				(group, None)
 			}
@@ -943,8 +944,8 @@ struct Pump {
 	shared: Arc<Shared>,
 	/// This side's half, held so the application can write only its one group.
 	track: Option<track::Producer>,
-	/// This side's group, watched for how the application ends it.
-	ours: Option<group::Handle>,
+	/// This side's group, watched for how the application ends it without keeping it open.
+	ours: Option<group::Demand>,
 	/// The peer's half, watched for its one group, and for a second.
 	subscriber: Option<track::Subscriber>,
 	/// The peer's group, once it arrived.
@@ -1003,27 +1004,35 @@ impl Pump {
 
 		// The peer's half holds one group: a second is a protocol error.
 		if let Some(subscriber) = &mut self.subscriber {
-			loop {
+			if self.remote.is_none() {
 				match subscriber.poll_recv_group(waiter) {
-					Poll::Pending => break,
+					Poll::Pending => {}
 					Poll::Ready(Ok(Some(group))) => {
-						if self.remote.is_some() || group.sequence != 0 {
+						if group.sequence != 0 {
 							tracing::debug!(sequence = group.sequence, "a second group on a tcp session");
 							return Err(Error::ProtocolViolation);
 						}
 						self.remote = Some(group);
 					}
-					Poll::Ready(Ok(None)) => {
-						self.subscriber = None;
-						break;
-					}
-					Poll::Ready(Err(err)) => {
-						// Ended short of its group: the peer's reset.
-						if self.remote.is_none() {
-							return Err(err);
+					Poll::Ready(Ok(None)) => self.subscriber = None,
+					// Ended short of its group: the peer's reset.
+					Poll::Ready(Err(err)) => return Err(err),
+				}
+			}
+			if self.remote.is_some()
+				&& let Some(subscriber) = &mut self.subscriber
+			{
+				while let Poll::Ready(largest) = subscriber.poll_largest(waiter) {
+					match largest {
+						Some(largest) if largest.group > 0 => {
+							tracing::debug!(sequence = largest.group, "a second group on a tcp session");
+							return Err(Error::ProtocolViolation);
 						}
-						self.subscriber = None;
-						break;
+						Some(_) => {}
+						None => {
+							self.subscriber = None;
+							break;
+						}
 					}
 				}
 			}

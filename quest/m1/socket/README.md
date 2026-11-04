@@ -77,7 +77,10 @@ Implementation choices in
   that reader, so it can end that group itself: on a second group from the
   peer, on the endpoint closing, or when the peer resets. It also finishes or
   aborts this side's track the way the app ended its group, and resets the
-  session when the app drops its reader early.
+  session when the app drops its reader early. Once group 0 arrives, it
+  watches for a second group through the subscriber's largest position rather
+  than `poll_recv_group`: polling `poll_recv_group` on every wake while
+  reading the group it handed out stalled the group's delivery (see the PR).
 - `TrackStream::consumer` is the handshake's own `track::Subscriber`, not a bare
   `track::Consumer`: it is already subscribed reliably and in order, so no
   message falls between the accept and the app's first read, and the app
