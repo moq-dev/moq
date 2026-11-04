@@ -122,7 +122,7 @@ async function backlog(protocol: string, order: Order, update?: Order) {
 	const broadcastPublication = origin.createBroadcast(Path.from("test"));
 	const broadcast = broadcastPublication.broadcast;
 	broadcastPublication.announce();
-	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	const groups = [0, 1, 2].map(() => writeGroup(video));
 
 	const remote = wireOf(client).consume(Path.from("test"));
@@ -176,7 +176,7 @@ test.each(["ascending", "descending"] as const)("ietf serves GROUP_ORDER %s", as
 	const broadcastPublication = origin.createBroadcast(Path.from("test"));
 	const broadcast = broadcastPublication.broadcast;
 	broadcastPublication.announce();
-	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 
 	const remote = wireOf(client).consume(Path.from("test"));
 	const subscriber = remote.track("video").subscribe({ delay: { max: MAX_DELAY }, order });
@@ -244,7 +244,7 @@ test("ietf keeps a closing group stream ranked until it settles", async () => {
 	const broadcastPublication = origin.createBroadcast(Path.from("test"));
 	const broadcast = broadcastPublication.broadcast;
 	broadcastPublication.announce();
-	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 
 	const remote = wireOf(client).consume(Path.from("test"));
 	const subscriber = remote.track("video").subscribe({ delay: { max: MAX_DELAY }, order: "descending" });
@@ -285,7 +285,7 @@ test("a shared track aggregates descending and serves each subscriber in its own
 	const broadcastPublication = origin.createBroadcast(Path.from("test"));
 	const broadcast = broadcastPublication.broadcast;
 	broadcastPublication.announce();
-	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 
 	const ascendingRemote = wireOf(ascending.client).consume(Path.from("test"));
 	const ascendingTrack = ascendingRemote.track("video").subscribe({ delay: { max: MAX_DELAY }, order: "ascending" });

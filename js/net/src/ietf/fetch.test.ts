@@ -41,7 +41,9 @@ const INVALID_RANGE = 0x11;
 const INVALID_JOINING_REQUEST_ID = 0x32;
 
 /** A publisher serving the `room` broadcast, with its `video` track and the client's uni streams. */
-function serve(version: IetfVersion, grant?: Signal<Grant | undefined>, priority?: number) {
+// `maxAge` is the track's publisher max age: omitted is the authored zero, and a test that fills
+// superseded history passes `null`, since the publisher fills only groups still fresh.
+function serve(version: IetfVersion, grant?: Signal<Grant | undefined>, priority?: number, maxAge?: Milli | null) {
 	const pair = createMockTransportPair(ALPNS[version]);
 	const origin = new OriginProducer();
 	const pub = new Publisher({
@@ -53,7 +55,7 @@ function serve(version: IetfVersion, grant?: Signal<Grant | undefined>, priority
 	});
 	const publication = origin.createBroadcast(Path.from("room"));
 	publication.announce();
-	const track = publication.broadcast.createTrack("video", { timescale: Timescale.MILLI, priority });
+	const track = publication.broadcast.createTrack("video", { timescale: Timescale.MILLI, priority, maxAge });
 	const uni = pair.client.incomingUnidirectionalStreams.getReader() as ReadableStreamDefaultReader<
 		ReadableStream<Uint8Array>
 	>;
@@ -432,7 +434,7 @@ test("a FETCH fills never-cached and evicted history, then reuses the cache", as
 	for (const version of VERSIONS) {
 		for (const evicted of [false, true]) {
 			using clock = manual();
-			using fx = serve(version);
+			using fx = serve(version, undefined, undefined, null);
 			if (evicted) {
 				writeGroup(fx.track, 1n, ["1-0", "1-1", "1-2"]);
 				await clock.advance(ms(CACHE_EXPIRY * 2));
@@ -527,7 +529,7 @@ test("a FETCH preserves relayed metadata and cached groups without upstream FETC
 
 test("a FETCH refused by its history responder sends no FETCH_OK", async () => {
 	for (const version of VERSIONS) {
-		using fx = serve(version);
+		using fx = serve(version, undefined, undefined, null);
 		writeGroup(fx.track, 3n, ["live"]);
 		using requests = fx.track.requests();
 		const responding = (async () => {
@@ -545,7 +547,7 @@ test("a cancelled or unauthorized FETCH withdraws its unanswered history fill", 
 	for (const version of VERSIONS) {
 		for (const revoke of [false, true]) {
 			const grant = new Signal<Grant | undefined>(undefined);
-			using fx = serve(version, grant);
+			using fx = serve(version, grant, undefined, null);
 			writeGroup(fx.track, 3n, ["live"]);
 			using requests = fx.track.requests();
 			const requested = requests.requestedFill();
@@ -722,7 +724,8 @@ test("draft-18: a joining FETCH serves the head its subscription starts after", 
 		new FetchOk({
 			endOfTrack: false,
 			endLocation: at(5, 3),
-			properties: { timescale: Timescale.MILLI, priority: 127, groupOrder: 0x2 },
+			// The zero authored default max age, advertised as MAX_CACHE_DURATION.
+			properties: { timescale: Timescale.MILLI, priority: 127, groupOrder: 0x2, maxCacheDuration: 0n },
 		}),
 	);
 	expect(head.requestId).toBe(FETCH_ID);

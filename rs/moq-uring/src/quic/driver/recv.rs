@@ -504,7 +504,7 @@ impl From<Error> for std::io::Error {
 	}
 }
 
-/// What the `web_transport_trait` impls report, which have one error type per session.
+/// Preserve a stream failure when a connection-level operation, such as framing, reports it.
 impl From<Error> for ConnectionError {
 	fn from(err: Error) -> Self {
 		match err {

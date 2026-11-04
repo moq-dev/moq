@@ -12,8 +12,8 @@ fn timed() -> moq_net::track::Info {
 	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
 }
 
-/// The media track's full retention window, so an exporter started after publishing
-/// can still read every retained group. These tests write or import a whole broadcast
+/// The media track's full max age, so an exporter started after publishing
+/// can still read every fresh group. These tests write or import a whole broadcast
 /// and only then export it, which the
 /// exporter's default [`std::time::Duration::ZERO`](std::time::Duration::ZERO) collapses to the
 /// live edge: completeness has to be asked for, exactly as a real recorder does.
