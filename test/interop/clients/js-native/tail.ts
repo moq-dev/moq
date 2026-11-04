@@ -35,14 +35,15 @@ const status = mode === "status";
 const cached = mode === "cached";
 const history = mode === "history";
 const late = mode === "late";
+const fetch = mode === "fetch";
 if (
 	!url ||
 	!path ||
 	!["publish", "subscribe"].includes(role) ||
-	![undefined, "drop", "join", "compress", "datagram", "status", "cached", "history", "late"].includes(mode)
+	![undefined, "drop", "join", "compress", "datagram", "status", "cached", "history", "late", "fetch"].includes(mode)
 ) {
 	throw new Error(
-		"usage: tail.ts publish|subscribe URL BROADCAST [VERSION [drop|join|compress|datagram|status|cached|history|late]]",
+		"usage: tail.ts publish|subscribe URL BROADCAST [VERSION [drop|join|compress|datagram|status|cached|history|late|fetch]]",
 	);
 }
 
@@ -54,7 +55,7 @@ if (
 function frames(sequence: number): Uint8Array[] {
 	if (compress)
 		return [new Uint8Array(BYTES / 2).fill(sequence), new Uint8Array(0), new Uint8Array(BYTES / 2).fill(sequence)];
-	if (cached || history || late)
+	if (cached || history || late || fetch)
 		return [0, 1, 2].map((index) => new Uint8Array(BYTES / 4).fill(sequence * 16 + index));
 	return [new Uint8Array(BYTES).fill(sequence)];
 }
@@ -170,68 +171,78 @@ try {
 				await request.active.changed();
 				broadcast = request.active.peek();
 			}
-			// `late` names no start, joining the latest group as a player does: group 0, whose
-			// head predates the subscription.
-			const track = broadcast.track("tail").subscribe({
-				delay: { max: Milli(drop ? 60_000 : 5000) },
-				...(late ? {} : { ranges: [{ start: { absolute: 0n } }] }),
-			});
-			if (compress) assert.equal((await track.info()).compress, version === "moq-lite-07-wip");
-			const seen: number[] = [];
-			try {
-				if (datagram) {
-					await track.info();
-					process.stdout.write("datagram ready\n");
-					for (let sequence = 0; sequence < GROUPS; sequence++) {
-						const frame = await track.recvDatagram();
-						assert(frame, "missing datagram");
-						assert.equal(frame.sequence, BigInt(sequence), "wrong datagram sequence");
-						assert.equal(frame.payload.byteLength, 900, "truncated datagram");
-						assert(
-							frame.payload.every((byte) => byte === sequence),
-							"corrupt datagram",
-						);
-						assert.equal(frame.timestamp, undefined, "unexpected IETF timestamp");
-						process.stdout.write(`datagram ${sequence}\n`);
-					}
-					console.error("datagram clean groups=0,1,2,3 bytes=3600");
-				} else if (late) {
-					for (let sequence = 0; sequence < LATE_GROUPS; sequence++) {
-						const group = await track.recvGroup();
-						assert(group, "missing group");
-						try {
-							assert.equal(group.sequence, BigInt(sequence), "joined the wrong group");
-							await read(group);
-						} finally {
-							group.close();
-						}
-					}
-					assert.equal(await track.recvGroup(), undefined, "extra group");
-					assert.deepEqual(await track.finished(), { group: BigInt(LATE_GROUPS), frame: 0 });
-					console.error("late join clean groups=0,1 frames=6");
-				} else {
-					for (;;) {
-						const group = await track.recvGroup();
-						if (!group) break;
-						try {
-							assert(group.sequence < GROUPS, `unexpected group ${group.sequence}`);
-							await read(group);
-							seen.push(Number(group.sequence));
-						} finally {
-							group.close();
-						}
-					}
-					seen.sort((a, b) => a - b);
-					const first = join ? (seen[0] ?? 0) : 0;
-					const all = Array.from({ length: GROUPS - first }, (_, i) => first + i);
-					assert.deepEqual(seen, drop ? [0, 2, 3] : all);
-					assert.deepEqual(await track.finished(), { group: BigInt(GROUPS), frame: 0 });
-					if (join) console.error(`tail join clean end=4 groups=${seen.join(",")}`);
-					else if (drop) console.error("tail drop clean end=4 groups=0,2,3 bytes=786432");
-					else console.error("tail clean end=4 groups=0,1,2,3 bytes=1048576");
+			if (fetch) {
+				const group = await broadcast.track("tail").fetchGroup(1n);
+				try {
+					await read(group);
+				} finally {
+					group.close();
 				}
-			} finally {
-				track.close();
+				console.error("fetch clean group=1 frames=3 bytes=196608");
+			} else {
+				// `late` names no start, joining the latest group as a player does: group 0, whose
+				// head predates the subscription.
+				const track = broadcast.track("tail").subscribe({
+					delay: { max: Milli(drop ? 60_000 : 5000) },
+					...(late ? {} : { ranges: [{ start: { absolute: 0n } }] }),
+				});
+				if (compress) assert.equal((await track.info()).compress, version === "moq-lite-07-wip");
+				const seen: number[] = [];
+				try {
+					if (datagram) {
+						await track.info();
+						process.stdout.write("datagram ready\n");
+						for (let sequence = 0; sequence < GROUPS; sequence++) {
+							const frame = await track.recvDatagram();
+							assert(frame, "missing datagram");
+							assert.equal(frame.sequence, BigInt(sequence), "wrong datagram sequence");
+							assert.equal(frame.payload.byteLength, 900, "truncated datagram");
+							assert(
+								frame.payload.every((byte) => byte === sequence),
+								"corrupt datagram",
+							);
+							assert.equal(frame.timestamp, undefined, "unexpected IETF timestamp");
+							process.stdout.write(`datagram ${sequence}\n`);
+						}
+						console.error("datagram clean groups=0,1,2,3 bytes=3600");
+					} else if (late) {
+						for (let sequence = 0; sequence < LATE_GROUPS; sequence++) {
+							const group = await track.recvGroup();
+							assert(group, "missing group");
+							try {
+								assert.equal(group.sequence, BigInt(sequence), "joined the wrong group");
+								await read(group);
+							} finally {
+								group.close();
+							}
+						}
+						assert.equal(await track.recvGroup(), undefined, "extra group");
+						assert.deepEqual(await track.finished(), { group: BigInt(LATE_GROUPS), frame: 0 });
+						console.error("late join clean groups=0,1 frames=6");
+					} else {
+						for (;;) {
+							const group = await track.recvGroup();
+							if (!group) break;
+							try {
+								assert(group.sequence < GROUPS, `unexpected group ${group.sequence}`);
+								await read(group);
+								seen.push(Number(group.sequence));
+							} finally {
+								group.close();
+							}
+						}
+						seen.sort((a, b) => a - b);
+						const first = join ? (seen[0] ?? 0) : 0;
+						const all = Array.from({ length: GROUPS - first }, (_, i) => first + i);
+						assert.deepEqual(seen, drop ? [0, 2, 3] : all);
+						assert.deepEqual(await track.finished(), { group: BigInt(GROUPS), frame: 0 });
+						if (join) console.error(`tail join clean end=4 groups=${seen.join(",")}`);
+						else if (drop) console.error("tail drop clean end=4 groups=0,2,3 bytes=786432");
+						else console.error("tail clean end=4 groups=0,1,2,3 bytes=1048576");
+					}
+				} finally {
+					track.close();
+				}
 			}
 		} finally {
 			request.close();

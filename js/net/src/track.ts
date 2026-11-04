@@ -2570,6 +2570,15 @@ export class Subscriber {
 	#askFills(start: bigint, end: bigint, drift?: Drift): bigint | undefined {
 		const producer = this.#state.producer;
 		if (this.#resume || !producer || this.#closed) return undefined;
+		// An IETF live join supplies the current group, not all history. An explicit past
+		// anchor still fetches below it, while an implicit live join starts where it was served.
+		if (
+			this.#state.info.peek()?.ietf !== undefined &&
+			this.#window.ranges.every((range) => range.start === undefined || range.start.relative === 0)
+		) {
+			const floor = sourceStart(producer);
+			if (typeof floor === "bigint") start = max(start, max(floor, this.#state.first ?? floor));
+		}
 		const fills = fillsOf(producer);
 		// A fill already out can be joined even once its handler's handle closed.
 		if (fills.serving || fills.active) {
@@ -2582,7 +2591,10 @@ export class Subscriber {
 			// `NotFetchable`.
 			const gone = [...this.#state.drops.peek()];
 			for (const sequence of heldDatagrams(producer)) insertRun(gone, sequence, sequence + 1n);
-			for (const run of this.#wants(start, min(end, this.#state.received.peek()))) {
+			for (const run of this.#wants(
+				start,
+				min(end, max(this.#state.received.peek(), (this.#state.largest.peek()?.group ?? -1n) + 1n)),
+			)) {
 				for (const open of runGaps(gone, run.start, run.end)) {
 					let next = open.start;
 					for (let i = timelineIndex(timeline, open.start); i < timeline.length; i++) {
@@ -2710,7 +2722,7 @@ export class Subscriber {
 		// A fill still owes a group it reads.
 		if (this.#askFills(this.#window.floor() ?? 0n, end) !== undefined) return false;
 		const held = this.#state.groups.peek();
-		const received = this.#state.received.peek();
+		const received = max(this.#state.received.peek(), (this.#state.largest.peek()?.group ?? -1n) + 1n);
 		const drops = this.#state.drops.peek();
 		const producer = this.#state.producer;
 		for (const run of this.#window.runs(this.#window.floor() ?? 0n, end)) {

@@ -24,6 +24,7 @@ import { NativeSession } from "./session.ts";
 import { Subscribe, SubscribeOk, SubscribeUpdate } from "./subscribe.ts";
 import { SubscribeNamespace, SubscribeNamespaceEntry, SubscribeNamespaceEntryDone } from "./subscribe_namespace.ts";
 import { Subscriber } from "./subscriber.ts";
+import { TrackStatusOk, TrackStatusRequest } from "./track.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
 
 const VERSION = Version.DRAFT_18;
@@ -903,19 +904,18 @@ test("older peer without priority property inherits the default publisher priori
 	track.close();
 });
 
-test("an info-only lookup waits for SUBSCRIBE_OK instead of abandoning", async () => {
+test("an info-only lookup waits for TRACK_STATUS_OK instead of abandoning", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session });
 	const info = subscriber.consume(Path.from("room")).track("video").info();
 	const peer = await nextStream(pair.client);
-	if (!peer) throw new Error("missing SUBSCRIBE stream");
-	expect(await peer.reader.u53()).toBe(Subscribe.id);
-	await Subscribe.decode(peer.reader, VERSION);
+	if (!peer) throw new Error("missing TRACK_STATUS stream");
+	expect(await peer.reader.u53()).toBe(TrackStatusRequest.id);
+	await TrackStatusRequest.decode(peer.reader, VERSION);
 
-	await peer.writer.u53(SubscribeOk.id);
-	await new SubscribeOk({
-		trackAlias: ALIAS,
+	await peer.writer.u53(TrackStatusOk.id);
+	await new TrackStatusOk({
 		properties: { priority: 37 },
 	}).encode(peer.writer, VERSION);
 	expect((await info).priority).toBe(127 - 37);
