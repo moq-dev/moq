@@ -10036,7 +10036,7 @@ pub(super) mod test {
 			matches!(restart.step, crate::container::ts::Step::Rewind { flagged: true, .. }),
 			"{restart:?}"
 		);
-		assert_eq!(&restart.remainder[2 * 188..], mux.out[at..]);
+		assert_eq!(&restart.remainder[2 * 188..], &mux.out[at..]);
 	}
 
 	/// The same restart unflagged, as a looping playout wraps to the top of its file.
