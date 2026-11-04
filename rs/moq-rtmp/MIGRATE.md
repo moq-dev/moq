@@ -6,7 +6,7 @@ How to update your code for each breaking change, newest first.
 
 ### Handshake cryptography uses rind
 
-RTMP handshake HMAC-SHA256 uses rind. `Server::bind` checks CPU support before binding.
+RTMP handshake HMAC-SHA256 uses rind. `Server::bind` checks CPU support before binding; every stream handshake also checks before using crypto, including `accept_stream` and the dial client.
 The `tls` feature no longer selects rustls' aws-lc provider; build the supplied TLS configuration with `rind_rustls::default_provider()?` or `moq_tokio::tls::Listen::server_config`.
 RTMP and RTMPS wire formats are unchanged.
 

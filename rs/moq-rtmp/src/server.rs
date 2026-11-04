@@ -1470,7 +1470,7 @@ async fn feed_input<S: Stream>(
 /// Perform the RTMP server handshake, returning any leftover bytes that followed
 /// the client's final handshake packet (the start of the chunk stream).
 async fn run_handshake<S: Stream>(stream: &mut S, peer: SocketAddr) -> anyhow::Result<Vec<u8>> {
-	let mut handshake = Handshake::new(PeerType::Server);
+	let mut handshake = Handshake::new(PeerType::Server)?;
 	let mut buffer = [0u8; 4096];
 	loop {
 		let n = stream.read(&mut buffer).await?;
@@ -1953,7 +1953,7 @@ mod tests {
 
 	/// The client half of the RTMP handshake, returning the bytes read past it.
 	async fn client_handshake<S: Stream>(stream: &mut S) -> Vec<u8> {
-		let mut handshake = Handshake::new(PeerType::Client);
+		let mut handshake = Handshake::new(PeerType::Client).unwrap();
 		stream
 			.write_all(&handshake.generate_outbound_p0_and_p1().unwrap())
 			.await
@@ -2034,7 +2034,7 @@ mod tests {
 		media: tokio::sync::mpsc::UnboundedSender<Media>,
 	) {
 		// Handshake.
-		let mut handshake = Handshake::new(PeerType::Client);
+		let mut handshake = Handshake::new(PeerType::Client).unwrap();
 		stream
 			.write_all(&handshake.generate_outbound_p0_and_p1().unwrap())
 			.await
@@ -2122,7 +2122,7 @@ mod tests {
 			None
 		}
 
-		let mut handshake = Handshake::new(PeerType::Client);
+		let mut handshake = Handshake::new(PeerType::Client).unwrap();
 		stream
 			.write_all(&handshake.generate_outbound_p0_and_p1().unwrap())
 			.await
@@ -2863,7 +2863,7 @@ mod tests {
 		let mut stream = TcpStream::connect(addr).await.unwrap();
 
 		// Client handshake.
-		let mut handshake = Handshake::new(PeerType::Client);
+		let mut handshake = Handshake::new(PeerType::Client).unwrap();
 		stream
 			.write_all(&handshake.generate_outbound_p0_and_p1().unwrap())
 			.await

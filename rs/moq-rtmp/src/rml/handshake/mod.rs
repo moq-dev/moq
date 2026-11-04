@@ -107,8 +107,8 @@ enum Stage {
 /// ```ignore
 /// use rml_rtmp::handshake::{Handshake, PeerType, HandshakeProcessResult};
 ///
-/// let mut client = Handshake::new(PeerType::Client);
-/// let mut server = Handshake::new(PeerType::Server);
+/// let mut client = Handshake::new(PeerType::Client).unwrap();
+/// let mut server = Handshake::new(PeerType::Server).unwrap();
 ///
 /// let c0_and_c1 = client.generate_outbound_p0_and_p1().unwrap();
 /// let s0_s1_and_s2 = match server.process_bytes(&c0_and_c1[..]) {
@@ -148,15 +148,16 @@ impl Handshake {
 	/// The Flash Player 9 handshake requires generating a different packet 1 depending if you
 	/// are the client or the server, and thus this must be specified when creating a new
 	/// `Handshake` instance.
-	pub fn new(peer_type: PeerType) -> Handshake {
-		Handshake {
+	pub fn new(peer_type: PeerType) -> Result<Handshake, HandshakeError> {
+		rind::cpu::check().map_err(std::io::Error::other)?;
+		Ok(Handshake {
 			current_stage: Stage::NeedToSendP0AndP1,
 			command_byte: 0_u8,
 			input_buffer: Vec::with_capacity(RTMP_PACKET_SIZE),
 			sent_p1: [0_u8; RTMP_PACKET_SIZE],
 			peer_type,
 			sent_digest: [0_u8; SHA256_DIGEST_LENGTH],
-		}
+		})
 	}
 
 	/// Creates the packets 0 and 1 that should get sent to the peer.  This is only strictly
@@ -623,7 +624,7 @@ mod tests {
 
 	#[test]
 	fn bad_version_if_first_byte_is_not_a_3() {
-		let mut handshake = Handshake::new(PeerType::Server);
+		let mut handshake = Handshake::new(PeerType::Server).unwrap();
 		let input = [4_u8];
 
 		match handshake.process_bytes(&input) {
@@ -635,7 +636,7 @@ mod tests {
 
 	#[test]
 	fn can_accept_jw_player_example_p0_and_p1() {
-		let mut handshake = Handshake::new(PeerType::Server);
+		let mut handshake = Handshake::new(PeerType::Server).unwrap();
 		let s0_and_s1 = match handshake.generate_outbound_p0_and_p1() {
 			Err(x) => panic!("Unexpected error: {:?}", x),
 			Ok(x) => x,
@@ -683,7 +684,7 @@ mod tests {
 		c0_and_c1[0] = 3;
 		fill_with_random_data(&mut c0_and_c1[9..RTMP_PACKET_SIZE + 1]);
 
-		let mut handshake = Handshake::new(PeerType::Server);
+		let mut handshake = Handshake::new(PeerType::Server).unwrap();
 		let s0_and_s1 = match handshake.generate_outbound_p0_and_p1() {
 			Err(x) => panic!("Unexpected error: {:?}", x),
 			Ok(x) => x,
@@ -716,8 +717,8 @@ mod tests {
 		// This is the best way to verify we can handle the fp9 handshake method
 		// without reimplementing the exact algorithims for the test.
 
-		let mut client = Handshake::new(PeerType::Client);
-		let mut server = Handshake::new(PeerType::Server);
+		let mut client = Handshake::new(PeerType::Client).unwrap();
+		let mut server = Handshake::new(PeerType::Server).unwrap();
 
 		let c0_and_c1 = match client.generate_outbound_p0_and_p1() {
 			Ok(bytes) => bytes,
@@ -756,7 +757,7 @@ mod tests {
 
 	#[test]
 	fn sends_outbound_p0_p1_if_p0_received_and_outbound_p0_and_p1_not_yet_sent() {
-		let mut handshake = Handshake::new(PeerType::Server);
+		let mut handshake = Handshake::new(PeerType::Server).unwrap();
 		let input = [3_u8];
 
 		let response = match handshake.process_bytes(&input) {
