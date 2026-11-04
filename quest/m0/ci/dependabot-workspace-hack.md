@@ -69,19 +69,20 @@ Renovate runs self-hosted:
 - A workflow on `schedule` and `workflow_dispatch` runs Renovate against this
   repository. Only that job holds a write credential, through an Environment
   whose branch policy admits only `main`. Use a GitHub App installation token
-  with contents and pull-request write, so the PRs it opens trigger CI. The
+  with contents and pull-request write, so the PRs it opens trigger CI
+  (plus alert read and commit-status write, decision 3 below). The
   maintainer creates the App and the Environment secret; ask them when the
   workflow is ready. Grant no write token to any `pull_request` workflow, and
   never write back to `dependabot/cargo/*`.
 - The self-hosted `allowedCommands` admits exactly `^cargo hakari generate$`.
   The cargo manager's `postUpgradeTasks` runs it, with `fileFilters` limited to
-  `rs/workspace-hack/Cargo.toml`. `cargo hakari generate` reads `cargo
+  `rs/workspace-hack/Cargo.toml` and `Cargo.lock` (decision 1 below). `cargo hakari generate` reads `cargo
   metadata` and runs no build script, so the write-token job compiles no
   upgraded code. Install cargo-hakari at the dev shell's version (0.9.39 today)
   where Renovate runs.
 - Group every cargo update into one PR, and keep Dependabot's 7-day cooldown
-  as `minimumReleaseAge`. Remove the cargo entry from `.github/dependabot.yml`
-  in the same PR. Carry that entry's `ignore` caps into `packageRules`, with
+  as `minimumReleaseAge`. Reduce the cargo entry in `.github/dependabot.yml`
+  to a suppression-only entry in the same PR (decision 2 below). Carry that entry's `ignore` caps into `packageRules`, with
   their comments: `uniffi` `allowedVersions: "<0.33"` (uniffi-bindgen-go reads
   one uniffi minor) and `syn` `allowedVersions: "<3"` (kio-macros stays on
   syn 2). Check whether Dependabot security updates for cargo still hand-edit
@@ -103,40 +104,50 @@ The manifest-only filter loses hakari's refreshed lockfile: the returned
 fixes that, and both hakari's diff and locked Cargo metadata pass. The fixture
 runs nightly without credentials; fast workflow-boundary tests run in CI.
 
-Changes to the settled Plan are proposed, not yet approved: collect
-`Cargo.lock` alongside the generated manifest, and retain a Cargo-only
-Dependabot suppression entry, and permit commit-status reporting by the App.
-GitHub documents that `ignore` applies to
-security updates too; removing the Cargo entry alone leaves automatic security
-updates enabled. Renovate reads Cargo alerts with the App's additional
-Dependabot-alerts read permission. Other Dependabot ecosystems are unchanged.
+✅ Decided 2026-11-04 (maintainer): approve the three adjustments to the
+Plan above, as recommended and implemented in
+[moq-dev/moq#7877](https://github.com/moq-dev/moq/pull/7877):
+
+1. ✅ The hook's `fileFilters` collect exactly `rs/workspace-hack/Cargo.toml`
+   and `Cargo.lock`. Not chosen: keep the manifest-only filter and wait for
+   upstream support to refresh an existing lockfile artifact. The real
+   executor test proves the manifest-only filter publishes a stale lockfile.
+2. ✅ Keep a Cargo-only Dependabot entry that suppresses both version and
+   security update PRs (`open-pull-requests-limit: 0`, ignore `*`), while
+   Renovate reads Cargo alerts with the App's Dependabot-alerts read
+   permission. Not chosen: remove the entry and accept competing Dependabot
+   security PRs that can hand-edit the hack. GitHub documents that `ignore`
+   applies to security updates; removing the entry alone leaves automatic
+   Cargo security updates enabled. Other ecosystems keep Dependabot.
+3. ✅ Grant the App commit-status write for Renovate's release-age and
+   artifact reports. Not chosen: disable those optional reports while keeping
+   the queue checks and internal release-age filtering.
+
+The maintainer does the GitHub setup under Waiting; agents create no App,
+key, secret or setting. After that setup and this PR land, an approved
+Renovate run on `main` must publish a Cargo group PR passing hakari
+generation and locked metadata without a manual commit. Verify its App
+identity, the same-repository pinned-head landing request, and that branch
+or tag dispatches cannot enter the credentialed job. That production proof
+completes the Goal; local tests do not establish it.
 
 ## Waiting
 
-- Maintainer: create/install the dedicated Renovate App and the `renovate`
-  Environment admitting only branch `main`, supply its App secrets there, and
-  set `RENOVATE_BOT_LOGIN`. The setup and exact permissions are in
-  [the infrastructure guide](/infra/README.md#bootstrapping-cargo-dependency-updates).
-  App creation, permissions and secret handling were reserved for the maintainer;
-  no credentialed job has been dispatched by the implementation agent.
-- Maintainer: approve collecting exactly `Cargo.lock` in addition to the hack
-  manifest (recommended), or retain the original filter and wait for upstream
-  support to refresh an existing lockfile artifact after the hook. The real
-  executor test proves the original filter publishes stale lockfile contents.
-- Maintainer: approve the Cargo-only ignore-all suppression entry (recommended),
-  or keep the original removal and accept competing Dependabot security PRs
-  that can hand-edit the hack. Other ecosystems keep Dependabot in either case;
-  the suppression is needed for a complete Cargo security-update handoff.
-- Maintainer: approve the App's commit-status write permission (recommended),
-  needed for Renovate's release-age and artifact reports, or disable those
-  optional Renovate reports while retaining the queue checks and internal
-  release-age filtering. No App permissions have been granted by the agent.
-- GitHub Actions: after the reviewed workflow is installed on `main` and setup
-  is complete, an approved Renovate run must publish a Cargo group PR passing
-  hakari generation and locked metadata without a manual commit. Verify its
-  App identity, the same-repository pinned-head landing request, and that branch
-  or tag dispatches cannot enter the credentialed job. Local tests do not prove
-  this production acceptance condition.
+- Maintainer: do the GitHub setup in
+  [the infrastructure guide](/infra/README.md#bootstrapping-cargo-dependency-updates),
+  steps 1-5, before landing, since the PR hands Cargo security updates from
+  Dependabot to Renovate:
+  1. Create a dedicated GitHub App and install it on moq-dev/moq only, with
+     Contents and Pull requests read/write, Dependabot alerts read, and
+     Commit statuses read/write.
+  2. Create the `renovate` Environment with a selected-branch deployment rule
+     admitting only branch `main`, and no tag rule.
+  3. Put the App's client ID and private key in that Environment's
+     `APP_CLIENT_ID` and `APP_PRIVATE_KEY` secrets, not at repository or
+     organization scope.
+  4. Set the repository variable `RENOVATE_BOT_LOGIN` to the App slug plus
+     `[bot]`, exactly.
+  5. Keep Dependency graph and Dependabot alerts enabled.
 
 ## Related
 
