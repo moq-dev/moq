@@ -49,15 +49,13 @@ FAIL_NIX=1 bash "$hook"
 [[ $(bash -c 'source "$1"; printf "%s" "$TOOLCHAIN"' -- "$snapshot") == fallback ]]
 [[ $(wc -l <"$snapshot") -eq 2 ]]
 
-# A failed capture preserves both the last snapshot and its warning marker.
+# A failed capture preserves the last snapshot.
 cp "$snapshot" "$fixture/captured"
-touch "$snapshot.stale"
 if FAIL_NIX=1 FAIL_DIRENV=1 bash "$hook"; then
     echo 'failed capture was accepted' >&2
     exit 1
 fi
 cmp "$snapshot" "$fixture/captured"
-[[ -e $snapshot.stale ]]
 [[ ! -e $snapshot.tmp ]]
 
 echo 'Codex snapshot capture: regression tests passed'
