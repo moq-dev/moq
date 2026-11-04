@@ -28,13 +28,19 @@ without one.
 
 A threshold failure **does write history** before returning failure. Nightly
 uploads that history even when the check fails, then the next run uses it as
-its daily baseline. An intended jump therefore fails once against the previous
-point, rather than every night against the last passing point. The thirty-day
-anchor still applies; advancing the daily baseline does not waive slow growth.
-To accept measured growth, record the causing commits, before/after byte counts,
-and reason in the implementation PR, and let the next scheduled run compare
-against the retained point. Keep the thresholds unchanged. Confirm the next
-run's measured revision and baseline before declaring the regression resolved.
+its daily baseline. An intended jump therefore fails the **daily comparison**
+once against the previous point, rather than every night against the last
+passing point.
+
+The thirty-day comparison still applies. A step over 10% can keep Nightly red
+until a post-jump point becomes the anchor, thirty days after that point was
+recorded. Recording acceptance does not waive this comparison. To accept a
+measured daily step, record the causing commits, before/after byte counts, and
+reason in the implementation PR, and let the next scheduled run compare against
+the retained point. Keep the thresholds unchanged. If the thirty-day comparison
+still fails, reduction or further acceptance work remains; daily advancement
+alone does not resolve it. Confirm both comparisons, the measured revision, and
+their baselines before declaring the regression resolved.
 
 A report refused for invalid input or missing artifacts writes no history, so
 Nightly keeps loading the retained one. Only a reviewed restart of **all**

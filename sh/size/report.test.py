@@ -29,6 +29,21 @@ class Trends(unittest.TestCase):
         self.assertEqual(len(failures), 1)
         self.assertIn("30 days", failures[0])
 
+    def test_large_step_fails_monthly_until_it_becomes_the_anchor(self):
+        history = [row("2026-09-10"), row("2026-10-09")]
+        for date, previous, monthly in [
+            ("2026-10-10", True, True),
+            ("2026-10-11", False, True),
+            ("2026-11-08", False, True),
+            ("2026-11-09", False, False),
+        ]:
+            current = row(date, 112)
+            failures = report.compare(current, history)
+            with self.subTest(date=date):
+                self.assertEqual(any("previous:" in failure for failure in failures), previous)
+                self.assertEqual(any("30 days:" in failure for failure in failures), monthly)
+            history = report.retain(current, history)
+
     def test_refuses_missing_and_invalid_artifacts(self):
         for invalid in [0, -1, None, True, float("nan")]:
             with self.assertRaises(ValueError):

@@ -35,8 +35,10 @@ measurement and its attribution evidence:
 - The daily baseline already advances after a threshold failure. The failed
   run retained its current point, and there was no thirty-day anchor yet.
   `sh/size/README.md` documents acceptance using retained history, and tests
-  cover both daily advancement and the surviving thirty-day guard. Summaries
-  now identify the current and failing baseline commits.
+  cover both daily advancement and the surviving thirty-day guard. A step over
+  10% can still fail until a post-jump point becomes the thirty-day anchor;
+  recording acceptance alone does not waive that check. Summaries now identify
+  the current and failing baseline commits.
 
 Remaining work is the other targets' relay attribution, the acceptance
 decisions below or reductions that retain the required behavior, and scheduled
@@ -58,8 +60,11 @@ Public API: none. Wire: none.
   `cargo bloat` estimates. macOS and aarch64 Linux attribution also remains work.
 - moq-dev/moq: after the change lands, inspect the next scheduled Nightly
   shipping-size job on main, its measured revision and retained baseline, for
-  passing comparisons. No manual Nightly dispatch; retain this quest until that
-  evidence and the remaining attribution/acceptance work are settled.
+  passing daily and thirty-day comparisons. If a thirty-day comparison still
+  fails, reduction or further acceptance work remains, potentially until the
+  post-jump point is thirty days old. No manual Nightly dispatch; retain this
+  quest until that evidence and the remaining attribution/acceptance work are
+  settled.
 
 ## Related
 
