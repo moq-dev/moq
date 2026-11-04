@@ -285,7 +285,7 @@ Each subscription carries the knobs that decide behavior under congestion:
 | --- | --- |
 | **Priority** (-128..127, default 0) | Higher-priority tracks get bandwidth first. Audio above video, base layer above enhancement. The publisher's track priority breaks ties between subscriptions at one priority. From a native Rust publisher over QUIC or WebTransport, subscriptions at the same priority and publisher priority split bandwidth evenly by bytes, streams and datagrams alike, however many groups each has queued. A browser publisher and other transports without send groups are not covered. |
 | **Order** | Which group to send first when several are pending. Newest first for live (the default), oldest first for catch-up. Needs moq-lite 07 or moq-transport; older moq-lite always sends newest first. |
-| **Max delay** | How long a non-latest group stays worth delivering before it is skipped. Zero means "live edge only", and raising it is also what asks for history. Unset leaves the publisher's retention window alone to bound it. |
+| **Max delay** | How long a non-latest group stays worth delivering before it is skipped. Zero means "live edge only", and raising it is also what asks for history. Unset leaves the publisher's max age alone to bound it. |
 | **Ranges** | Which groups to ask for: from a group, a number of groups back from the latest, or the group containing a presentation time, optionally up to an end. Each group arrives whole, from its first frame. The default asks for everything max delay allows. Max delay still caps every range. |
 
 On moq-lite 05 and later, a publisher explicitly reports groups that will not arrive.
@@ -371,12 +371,16 @@ until then too, so a player starting at the latest waits for the answer instead
 of starting from what the ended feed left. A reader's latest group stays within
 the groups it limits itself to, and ends once the track does.
 
-The publisher may declare a retention window per track. Omission sets no limit;
-zero keeps only the live edge. Relays preserve that declaration, and may still
-evict sooner under their own cache ceiling. Media tracks explicitly use 30
-seconds so a segmented egress can still find its segments. Retention ages a
-group by the same two clocks as max delay and always keeps the newest group.
-A fetch obeys the same window, and may name a tighter max delay of its own.
+The publisher may declare a max age per track: how long a superseded group stays
+fresh. On the wire, omission sets no limit; zero makes a group stale as soon as
+its successor arrives. Relays preserve that declaration, and may still cap it
+lower under their own ceiling. The Rust and JS libraries give an authored track
+zero, the live edge only, unless its publisher asks for more or for no limit;
+media tracks declare 30 seconds, so a segmented egress can still find its
+segments. A relay bounds what it keeps with its own cache, not the publisher's
+default. Max age ages a group by the
+same two clocks as max delay and never makes the newest group stale. A fetch
+obeys the same bound, and may name a tighter max delay of its own.
 IETF carries the same idea as `MAX_CACHE_DURATION`, measured in wall time alone.
 
 Put together, a conference might use:

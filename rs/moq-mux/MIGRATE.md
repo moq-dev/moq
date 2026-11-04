@@ -4,6 +4,23 @@ How to adopt new APIs and update for breaking changes, newest first.
 
 ## Unreleased
 
+### `catalog::Config::with_max_age(None)` is unlimited ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+`Config::with_max_age` no longer treats `None` as "keep hang's default": an unset `Config` mints media tracks with `hang::container::MAX_AGE` (30 s), as before, `None` sets no publisher limit, and a value is that value.
+Callers that passed an optional override straight through call `with_max_age` only when it is set.
+
+```rust
+// Before
+Config::default().with_max_age(override_or_none);
+// After
+let mut config = Config::default();
+if let Some(max_age) = override_or_none {
+	config = config.with_max_age(max_age);
+}
+```
+
+The catalog and HLS record tracks take moq-net's new zero default instead of no limit; their newest group restates them.
+
 ### Shared playout timing
 
 Native players can use `timeline::Producer` and its read-only `Consumer` instead

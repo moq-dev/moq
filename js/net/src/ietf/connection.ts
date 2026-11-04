@@ -265,6 +265,7 @@ export class Connection implements Established {
 
 		this.#closed = true;
 
+		this.#publisher.close();
 		this.#auth.close();
 
 		// Before the session, whose own close would send a clean code first.

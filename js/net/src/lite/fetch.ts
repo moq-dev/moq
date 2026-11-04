@@ -23,7 +23,7 @@ export class Fetch {
 	instance?: Instance.Valid;
 	track: string;
 	priority: number;
-	/** Reader freshness budget. Lite-07+ only; omission uses publisher retention alone. */
+	/** Reader freshness budget. Lite-07+ only; omission leaves the publisher's max age as the only bound. */
 	maxDelay?: Milli;
 	group: bigint;
 

@@ -16,6 +16,9 @@ import { wireOf } from "./wire.ts";
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
+// Every track here states no publisher max age: a fill serves history, which the default zero
+// max age would leave stale.
+
 // The archive an in-memory responder serves: each group's frames, by sequence.
 type Archive = Map<bigint, string[]>;
 
@@ -65,7 +68,7 @@ async function drain(reader: { recvGroup(): Promise<GroupConsumer | undefined> }
 // A track whose first write is group `first`, so every group below it was never cached here.
 function resumed(first: bigint): { broadcast: BroadcastProducer; track: Producer } {
 	const broadcast = new BroadcastProducer();
-	const track = broadcast.createTrack("video");
+	const track = broadcast.createTrack("video", { maxAge: null });
 	const group = track.createGroup(first);
 	group.writeFrame({ payload: enc.encode(`live ${first}`) });
 	group.finish();
@@ -335,7 +338,7 @@ test("fill: a fill names the most urgent priority and loosest budget among its r
 
 test("fill: a group arriving live answers the fill", async () => {
 	const broadcast = new BroadcastProducer();
-	const track = broadcast.createTrack("video");
+	const track = broadcast.createTrack("video", { maxAge: null });
 	const requests = track.requests();
 	const late = track.createGroup(3n);
 	late.finish();
@@ -452,7 +455,7 @@ test("fill: a bounded reader keeps waiting on a fresh fill once an older one goe
 	const installed = clock.install();
 	try {
 		const broadcast = new BroadcastProducer();
-		const track = broadcast.createTrack("video");
+		const track = broadcast.createTrack("video", { maxAge: null });
 		const write = (sequence: bigint) => {
 			const group = track.createGroup(sequence);
 			group.writeFrame({ payload: enc.encode(`live ${sequence}`) });
@@ -690,7 +693,7 @@ test("fill: a cache-miss fetch of a dynamic track serves the one track the broad
 	const fetching = wireOf(broadcast).fetchGroup("video", 1n);
 	const request = await pulled;
 	if (!request) throw new Error("no track request");
-	const track = request.accept();
+	const track = request.accept({ maxAge: null });
 	const requests = track.requests();
 	const group = track.createGroup(4n);
 	group.finish();
@@ -726,7 +729,7 @@ async function session(alpn: string) {
 	const publication = origin.createBroadcast(Path.from("archive"));
 	publication.announce();
 	const broadcast = publication.broadcast;
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	// Groups 0 to 2 were published before this producer existed.
 	const live = track.createGroup(3n);
 	live.writeFrame({ payload: enc.encode("live 3"), timestamp: Timestamp.fromMillis(3000) });

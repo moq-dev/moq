@@ -24,6 +24,19 @@ Create a datagram track before or with its same-name stream track on those versi
 Lite-01..04 and transports without datagrams refuse datagram requests. moq-transport
 currently refuses them while its separate datagram-track adapter is implemented.
 
+### Authored tracks default to a zero `maxAge` ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+A track created with `Broadcast.Producer.createTrack`, `Track.Request.accept`, or `Track.Producer.accept` takes a `Track.InfoInit`, whose omitted or `undefined` `maxAge` is now zero instead of no publisher limit: a superseded group is stale as soon as its successor arrives, so readers get only the live edge. The newest group never goes stale, so a track that writes one snapshot stays readable to a late joiner.
+A track whose readers reach back for superseded groups (a subscription's `delay.max`, a fetch, or a range from an absolute start) passes `maxAge: null` for unlimited history, or a window, when it creates the track; changing it means a new track or broadcast. A relay or cache bounds what it keeps with its own window, not the publisher's default.
+Received metadata is unchanged: a decoded `Track.Info` without `maxAge` still means no publisher limit, and `Track.infoDefaults` keeps an absent `maxAge` absent. To serve a received `Track.Info` onward unchanged, pass `{ ...info, maxAge: info.maxAge ?? null }`.
+
+```ts
+// Before: no publisher limit
+broadcast.createTrack("history", { timescale: Time.Timescale.MILLI });
+// After: the same, stated explicitly
+broadcast.createTrack("history", { timescale: Time.Timescale.MILLI, maxAge: null });
+```
+
 ### Past group ranges work over moq-transport ([#7793](https://github.com/moq-dev/moq/pull/7793))
 
 `track.Consumer.fetchGroup()` and subscriptions to past group ranges now use standalone FETCH on drafts 18, 20, and 22. No API migration is needed. First-party publishers serve one group per FETCH; multi-group ranges require a publisher that serves them.

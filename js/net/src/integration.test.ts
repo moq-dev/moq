@@ -349,7 +349,7 @@ test("integration: lite applies initial and updated group bounds", async () => {
 	]);
 
 	const broadcast = publish(origin, Path.from("test"));
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	for (let sequence = 0n; sequence < GROUP_COUNT; sequence++) producer.appendGroup().finish();
 
 	const remote = wireOf(client).consume(Path.from("test"));
@@ -470,7 +470,7 @@ test("integration: lite-07 serves sparse and relative ranges", async () => {
 	]);
 
 	const broadcast = publish(origin, Path.from("test"));
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	for (let sequence = 0; sequence < 10; sequence++) producer.appendGroup().finish();
 
 	const remote = wireOf(client).consume(Path.from("test"));
@@ -513,7 +513,7 @@ test("integration: lite-07 keeps a covered bounded subscription open", async () 
 	]);
 
 	const broadcast = publish(origin, Path.from("test"));
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	for (const sequence of [0n, 1n, 2n, 4n, 5n]) producer.createGroup(sequence).finish();
 
 	const remote = wireOf(client).consume(Path.from("test"));
@@ -565,7 +565,7 @@ test("integration: lite-07 serves a time range", async () => {
 	]);
 
 	const broadcast = publish(origin, Path.from("test"));
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MICRO });
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MICRO, maxAge: null });
 	for (let sequence = 0; sequence < 10; sequence++) {
 		const group = producer.appendGroup();
 		group.writeFrame(textFrame(`${sequence}`, Timestamp.fromMillis(sequence * 1000)));
@@ -931,7 +931,7 @@ test("integration: lite draft-07 fetches a cached group", async () => {
 	]);
 
 	const broadcast = publish(origin, Path.from("test"));
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 
 	const group0 = producer.appendGroup();
 	group0.writeFrame({ payload: enc.encode("alpha"), timestamp: Timestamp.fromMillis(10) });
@@ -1174,6 +1174,51 @@ test("integration: lite draft-07 track info follows a republished broadcast", as
 	server.abort();
 });
 
+// An authored track omitting maxAge advertises the zero default, an explicit null advertises no
+// limit, which a consumer decodes as absence, and a number goes out as itself. Before lite-05
+// nothing is carried, and a received track without one has no publisher limit.
+test.each([Lite.ALPN_03, Lite.ALPN_05, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])(
+	"integration: %s carries the authored max age default, null, and a value",
+	async (alpn) => {
+		const pair = createMockTransportPair(alpn);
+		const origin = new OriginProducer();
+		const [client, server] = await Promise.all([
+			connect(url, { transport: pair.client }),
+			accept(pair.server, url, { publish: origin.consume() }),
+		]);
+
+		const path = Path.from("test");
+		const broadcast = publish(origin, path);
+		const tracks = {
+			omitted: broadcast.createTrack("omitted", { timescale: Timescale.MILLI }),
+			unlimited: broadcast.createTrack("unlimited", { timescale: Timescale.MILLI, maxAge: null }),
+			explicit: broadcast.createTrack("explicit", { timescale: Timescale.MILLI, maxAge: Milli(5000) }),
+		};
+		expect((await tracks.omitted.info()).maxAge).toBe(Milli.zero);
+		expect((await tracks.unlimited.info()).maxAge).toBeUndefined();
+
+		const remote = wireOf(client).consume(path);
+		const info = async (name: string) => {
+			// moq-transport answers info through a subscription, so hold one open.
+			const sub = remote.track(name).subscribe();
+			try {
+				return await withTimeout(sub.info(), Nano.fromMilli(Milli(5_000)), `${name} info`);
+			} finally {
+				sub.close();
+			}
+		};
+		const carried = alpn !== Lite.ALPN_03;
+		expect((await info("omitted")).maxAge).toBe(carried ? Milli.zero : undefined);
+		expect((await info("unlimited")).maxAge).toBeUndefined();
+		expect((await info("explicit")).maxAge).toBe(carried ? Milli(5000) : undefined);
+
+		broadcast.close();
+		remote.close();
+		client.abort();
+		server.abort();
+	},
+);
+
 // FETCH reads the same cache to decide the timescale it serves frames in, so a stale entry
 // quantizes the successor's timestamps to the predecessor's resolution.
 test("integration: lite draft-07 fetch uses the republished track's timescale", async () => {
@@ -1221,7 +1266,8 @@ test("integration: ietf fetches a past group of a finished track", async () => {
 		const origin = new OriginProducer();
 		const publication = origin.createBroadcast(Path.from("test"));
 		publication.announce();
-		const published = publication.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+		// No publisher limit, so the superseded group stays fresh to fetch, and no MAX_CACHE_DURATION.
+		const published = publication.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 		for (let sequence = 0; sequence < 3; sequence++) {
 			const group = published.appendGroup();
 			group.writeFrame({
@@ -1243,6 +1289,8 @@ test("integration: ietf fetches a past group of a finished track", async () => {
 		expect(frame?.timestamp).toEqual(new Timestamp(1000, Timescale.MILLI));
 		expect(await group.readFrame()).toBeUndefined();
 		group.close();
+		// The FETCH-only copy keeps the absent MAX_CACHE_DURATION as no limit, not the authored zero.
+		expect((await remote.track("video").info()).maxAge).toBeUndefined();
 		remote.close();
 		client.abort();
 		server.abort();

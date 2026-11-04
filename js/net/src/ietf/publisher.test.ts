@@ -2368,7 +2368,7 @@ async function readFill(
 test("draft-22: an absolute filter trims the range it serves", async () => {
 	using clock = manual();
 	const fx = fixture();
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	for (let i = 0; i < 4; i++) writeGroup(track, 3);
 
 	const { client } = await runSubscribe(
@@ -3519,7 +3519,7 @@ test("unsupported REQUEST_UPDATE is refused and ends with UPDATE_FAILED", async 
 test("a SUBSCRIBE pauses without demand and resumes as a new subscriber", async () => {
 	for (const startPaused of [false, true]) {
 		const fx = fixture(V22);
-		const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+		const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 		const write = (text: string) => {
 			const group = track.appendGroup();
 			group.writeFrame({ payload: new TextEncoder().encode(text), timestamp: Timestamp.now() });
@@ -3840,7 +3840,7 @@ test.each([0, Number.MAX_SAFE_INTEGER + 2])(
 
 test("draft-22: a range update replaces the live subscription bounds", async () => {
 	const fx = fixture();
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	const { client } = await runSubscribe(
 		fx,
 		new Subscribe({

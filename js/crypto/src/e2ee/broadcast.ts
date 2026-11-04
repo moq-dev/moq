@@ -43,7 +43,7 @@ export class Producer {
 	 * produced the name (even on another broadcast), or the net error if the broadcast already
 	 * holds it.
 	 */
-	async createTrack(semantic: string, info: Partial<NetTrack.Info> = {}): Promise<Track.Producer> {
+	async createTrack(semantic: string, info: NetTrack.InfoInit = {}): Promise<Track.Producer> {
 		const name = await this.generation.name(semantic);
 		return this.generation.produce(this.#inner.createTrack(name, info), semantic);
 	}

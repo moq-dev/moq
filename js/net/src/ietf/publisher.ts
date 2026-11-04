@@ -410,6 +410,9 @@ export class Publisher {
 		this.#advert = Cluster.advertise(cluster);
 	}
 
+	/** The origin owns broadcasts; transport teardown ends this publisher's served requests. @internal */
+	close(): void {}
+
 	/**
 	 * Handles an incoming SUBSCRIBE request on a bidi stream.
 	 * Owns the full lifecycle: sends response, serves track data, waits for close.

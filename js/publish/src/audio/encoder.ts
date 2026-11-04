@@ -439,9 +439,9 @@ export class Encoder {
 			const resolved = effect.get(this.#config);
 			if (!format || fatal || !resolved) return;
 
-			const maxAge =
-				effect.get(broadcast.in.maxAge) ?? Container.trackInfo({ priority: Catalog.PRIORITY.audio }).maxAge;
-			this.#encode(broadcast.order, format, Micro.fromMilli(maxAge ?? Milli(30_000)), effect);
+			// Raw history needs a finite bound, so an unlimited max age keeps the media default's worth.
+			const maxAge = effect.get(broadcast.in.maxAge) ?? Container.MAX_AGE;
+			this.#encode(broadcast.order, format, Micro.fromMilli(maxAge), effect);
 		});
 
 		// A network track change ends the epoch; subscriber changes keep the same producer.

@@ -1263,7 +1263,7 @@ test("a lite subscribe whose SUBSCRIBE write stalls past the deadline closes its
 });
 
 // On lite-05 and later a SUBSCRIBE goes out beside its TRACK, before the TRACK_INFO, and accepting
-// the info sends no SUBSCRIBE_UPDATE even when the publisher keeps groups for less than the
+// the info sends no SUBSCRIBE_UPDATE even when the publisher keeps groups fresh for less than the
 // subscriber waits.
 test.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])(
 	"lite %s: a subscribe goes out with its track",

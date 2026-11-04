@@ -108,7 +108,7 @@ export namespace Broadcast {
 		get closed(): Signals.GetPromise<null>;
 		consume(): Broadcast.Consumer;
 		createDatagrams(name: string, info?: Partial<Datagram.Info>): Datagram.Producer;
-		createTrack(name: string, info?: Partial<Track.Info>): Track.Producer;
+		createTrack(name: string, info?: Track.InfoInit): Track.Producer;
 		removeTrack(name: string): void;
 		track(name: string): Track.Consumer;
 	}
@@ -715,6 +715,9 @@ export namespace Track {
 		refresh?: number;
 		timescale?: Time.Timescale | null;
 	}
+	export interface InfoInit extends Partial<Omit<Track.Info, "maxAge">> {
+		maxAge?: Milli | null;
+	}
 	export type Order = "ascending" | "descending";
 	export class Ordered {
 		close(abort?: Error): void;
@@ -743,7 +746,7 @@ export namespace Track {
 	export class Producer {
 		constructor(name: string);
 		abort(error: Error): void;
-		accept(info?: Partial<Track.Info>): this;
+		accept(info?: Track.InfoInit): this;
 		appendGroup(): Group.Producer;
 		close(): void;
 		get closed(): Signals.GetPromise<Error | null>;
@@ -765,7 +768,7 @@ export namespace Track {
 		start?: Track.Anchor;
 	}
 	export class Request {
-		accept(info?: Partial<Track.Info>): Track.Producer;
+		accept(info?: Track.InfoInit): Track.Producer;
 		demand(): Track.Demand;
 		readonly name: string;
 		get priority(): number;
