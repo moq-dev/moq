@@ -18,10 +18,6 @@ failing test through a real relay on lite-07; the in-memory transport did
 not show them. They rank in m1 because claim continuity on lite-07 is part
 of the cut.
 
-## Required
-
-- [Re-serving a claimed path keeps the session](/quest/m1/js-claims/reserve.md) - a fresh broadcast whose first group is above 0 no longer closes the publisher with `invalid control encoding`
-
 ## Related
 
 - [A job's exact route continues its claim's readers](/quest/m1/announce-takeover.md) - the claim and route model these exercise
