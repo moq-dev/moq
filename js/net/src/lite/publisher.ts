@@ -408,7 +408,8 @@ function pin(entry: RangeEntry, resolved: Resolved | undefined): RangeEntry {
 		range.start = { absolute: resolved.start };
 		from = [resolved.start, 0];
 	}
-	if (range.end?.relative !== undefined && resolved.end !== undefined) {
+	// An end resolves once it settles; until then it is reported open.
+	if ((range.end?.relative !== undefined || range.end?.time !== undefined) && resolved.end !== undefined) {
 		range.end = { absolute: resolved.end };
 		to = [resolved.end, 0];
 	}

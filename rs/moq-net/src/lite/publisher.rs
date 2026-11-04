@@ -4784,7 +4784,8 @@ impl TrackRun {
 			if pinned {
 				range.start = Some(lite::Anchor::Absolute(track::Position::group(start)));
 			}
-			if let (Some(lite::Anchor::Relative(_)), Some(end)) = (range.end, end) {
+			// An end resolves once it settles; until then it is reported open.
+			if let (Some(lite::Anchor::Relative(_) | lite::Anchor::Time(_)), Some(end)) = (range.end, end) {
 				range.end = Some(lite::Anchor::Absolute(track::Position::group(end)));
 			}
 		}
