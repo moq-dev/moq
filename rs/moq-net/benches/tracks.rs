@@ -55,9 +55,11 @@ fn table(listings: usize, tracks: usize, broadcasts: usize) -> Table {
 	for _ in 0..broadcasts {
 		let broadcast = broadcast::Info::new().produce();
 		for i in 0..tracks {
-			table
-				._tracks
-				.push(broadcast.create_track(format!("t{i}"), None).unwrap());
+			table._tracks.push(
+				broadcast
+					.create_track(format!("t{i}"), moq_net::track::Info::default().with_max_age(None))
+					.unwrap(),
+			);
 		}
 		let consumer = broadcast.consume();
 		let mut readers: Vec<Tracks> = (0..listings).map(|_| consumer.tracks().unwrap()).collect();
@@ -79,13 +81,17 @@ fn bench_change(c: &mut Criterion) {
 			let broadcast = table.broadcasts[0].clone();
 			let readers = &mut table.listings[0];
 			b.iter(|| {
-				let track = broadcast.create_track("new", None).unwrap();
+				let track = broadcast
+					.create_track("new", moq_net::track::Info::default().with_max_age(None))
+					.unwrap();
 				drop(track);
 				for reader in readers.iter_mut() {
 					// The unread add and removal cancel; read the next pair as it lands.
 					assert_eq!(drain(reader), 0);
 				}
-				let track = broadcast.create_track("new", None).unwrap();
+				let track = broadcast
+					.create_track("new", moq_net::track::Info::default().with_max_age(None))
+					.unwrap();
 				for reader in readers.iter_mut() {
 					assert_eq!(drain(reader), 1);
 				}

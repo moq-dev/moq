@@ -38,8 +38,10 @@ if (!websocket) install();
 const origin = new Moq.Origin.Producer();
 const broadcastPublication = origin.createBroadcast(Moq.Path.from("room"));
 const broadcast = broadcastPublication.broadcast;
-const low = broadcast.createTrack("low");
-const high = broadcast.createTrack("high");
+// No publisher limit, so the open `low` group stays the receiver's to give up on rather than
+// going stale here once a newer group arrives.
+const low = broadcast.createTrack("low", { maxAge: null });
+const high = broadcast.createTrack("high", { maxAge: null });
 broadcastPublication.announce();
 
 const session = await Moq.Connection.connect({

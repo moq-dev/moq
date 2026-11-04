@@ -4,7 +4,7 @@ import { ProtocolViolation } from "../error.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
-import { infoDefaults } from "../track.ts";
+import { authoredInfo, infoDefaults } from "../track.ts";
 import { Track, TrackInfo } from "./track.ts";
 import { Version } from "./version.ts";
 
@@ -49,11 +49,12 @@ test("TrackInfo round-trips on draft-05", async () => {
 });
 
 test("TrackInfo for Rust's default Info matches cross-language wire bytes", async () => {
-	// The default track is untimed, which lite-05 declares as milliseconds.
-	const model = infoDefaults();
+	// The default authored track is untimed, which lite-05 declares as milliseconds, and
+	// advertises the default zero max age.
+	const model = authoredInfo();
 	const info = new TrackInfo({ ...model, timescale: model.timescale ?? undefined });
 	expect(await bytes((w) => info.encode(w, Version.DRAFT_05), Version.DRAFT_05)).toEqual(
-		new Uint8Array([0x0c, 0x80, 0x00, 0xc0, 0x1f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x43, 0xe8]),
+		new Uint8Array([0x05, 0x80, 0x00, 0x00, 0x43, 0xe8]),
 	);
 });
 

@@ -43,6 +43,7 @@ import {
 	Calibration,
 	failSafe,
 	type InputSource,
+	PedalHold,
 	shortName,
 	Wheel,
 	type WheelSample,
@@ -586,9 +587,16 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 		const id = focused.peek();
 		const truck = truckById(id);
 		if (!id || !truck) return undefined;
-		if (driving.peek() !== id && !truck.beginTakeover()) return undefined;
+		if (driving.peek() !== id && !takeover(truck)) return undefined;
 		if (!interaction.takeDrive(id)) return undefined;
 		return truck;
+	}
+
+	/** Reset the pedals for a new lease, keeping the wheel's off them until one moves. */
+	function takeover(truck: Truck): boolean {
+		if (!truck.beginTakeover()) return false;
+		pedalHold.start();
+		return true;
 	}
 
 	function safetyTruck(): Truck | undefined {
@@ -620,6 +628,7 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 	// hands it control. Any drive key takes the axes straight back.
 	const wheel = new Wheel();
 	const source = new Moq.Signals.Signal<InputSource>("keyboard");
+	const pedalHold = new PedalHold();
 
 	/**
 	 * Advance the arbitration, failing the truck safe if an armed wheel vanished.
@@ -687,8 +696,12 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 		const truck = activeTruck();
 		if (truck) {
 			const cur = truck.drive.peek();
+			const target =
+				pedalHold.update(sample) && sample ? { ...sample, throttle: cur.throttle, brake: cur.brake } : sample;
 			const next =
-				source.peek() === "wheel" && sample ? applyWheel(cur, sample, dt) : applyKeys(cur, held.peek(), dt);
+				source.peek() === "wheel" && target ? applyWheel(cur, target, dt) : applyKeys(cur, held.peek(), dt);
+			// A drive key changing a pedal ends the hold as well.
+			if (next.throttle !== cur.throttle || next.brake !== cur.brake) pedalHold.stop();
 			stepDrive(truck, next);
 		}
 	}
@@ -766,6 +779,7 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 		// the truck before it goes up rather than leaving whatever was commanded to
 		// keep heartbeating out for the duration.
 		activeTruck()?.setDrive({ ...REST });
+		pedalHold.start();
 		calEls.warn.hidden = true;
 		els.cal.hidden = false;
 		refreshCalibration();
@@ -906,7 +920,7 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 				e.stopPropagation();
 				if (this.truck.active.peek()) {
 					interaction.releaseDrive();
-				} else if (this.truck.beginTakeover()) {
+				} else if (takeover(this.truck)) {
 					interaction.takeDrive(truck.id);
 				}
 			});

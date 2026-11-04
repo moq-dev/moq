@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Container.trackInfo` takes `maxAge: null` ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+`TrackInfoOptions.maxAge` accepts `null` for no publisher limit, and `trackInfo` returns a `@moq/net` `Track.InfoInit`. An omitted `maxAge` is still 30 seconds for media, now exported as `Container.MAX_AGE`.
+Following `@moq/net`, report tracks now advertise a zero max age instead of no limit: a reader gets their newest group, which restates the whole state.
+
 ### The root `clock` is `media.clock`, and the catalog declares a join interval ([#7652](https://github.com/moq-dev/moq/pull/7652))
 
 The catalog root gains an optional `media` section holding what applies to every audio and video track: `clock`, moved from the root, and `join`, whose `interval` is the longest GOP in whole milliseconds.

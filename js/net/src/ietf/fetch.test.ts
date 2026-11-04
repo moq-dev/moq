@@ -2,13 +2,17 @@ import { expect, test } from "bun:test";
 import { Manual, Milli, Nano } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
+import { accept as acceptSession, connect as connectSession } from "../connection/index.ts";
 import { error } from "../error.ts";
+import { hooks } from "../internal.ts";
+import { CACHE_EXPIRY } from "../ledger.ts";
+import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
-import type { Order, Producer as TrackProducer } from "../track.ts";
+import type { Fill, Order, Producer as TrackProducer } from "../track.ts";
 import { SEGMENT_BYTES } from "../util/limits.ts";
 import { wireOf } from "../wire.ts";
 import { Fetch, FetchHeader, FetchOk, type FetchType, type Location } from "./fetch.ts";
@@ -37,7 +41,9 @@ const INVALID_RANGE = 0x11;
 const INVALID_JOINING_REQUEST_ID = 0x32;
 
 /** A publisher serving the `room` broadcast, with its `video` track and the client's uni streams. */
-function serve(version: IetfVersion, grant?: Signal<Grant | undefined>, priority?: number) {
+// `maxAge` is the track's publisher max age: omitted is the authored zero, and a test that fills
+// superseded history passes `null`, since the publisher fills only groups still fresh.
+function serve(version: IetfVersion, grant?: Signal<Grant | undefined>, priority?: number, maxAge?: Milli | null) {
 	const pair = createMockTransportPair(ALPNS[version]);
 	const origin = new OriginProducer();
 	const pub = new Publisher({
@@ -49,13 +55,14 @@ function serve(version: IetfVersion, grant?: Signal<Grant | undefined>, priority
 	});
 	const publication = origin.createBroadcast(Path.from("room"));
 	publication.announce();
-	const track = publication.broadcast.createTrack("video", { timescale: Timescale.MILLI, priority });
+	const track = publication.broadcast.createTrack("video", { timescale: Timescale.MILLI, priority, maxAge });
 	const uni = pair.client.incomingUnidirectionalStreams.getReader() as ReadableStreamDefaultReader<
 		ReadableStream<Uint8Array>
 	>;
 	return {
 		pair,
 		pub,
+		origin,
 		broadcast: publication.broadcast,
 		track,
 		uni,
@@ -423,6 +430,145 @@ test("a FETCH the cache cannot answer is refused before FETCH_OK", async () => {
 	}
 });
 
+test("a FETCH fills never-cached and evicted history, then reuses the cache", async () => {
+	for (const version of VERSIONS) {
+		for (const evicted of [false, true]) {
+			using clock = manual();
+			using fx = serve(version, undefined, undefined, null);
+			if (evicted) {
+				writeGroup(fx.track, 1n, ["1-0", "1-1", "1-2"]);
+				await clock.advance(ms(CACHE_EXPIRY * 2));
+			}
+			writeGroup(fx.track, 3n, ["live"]);
+			const cache = fx.track.subscribe({ ranges: [] });
+			expect(hooks.holdsGroup(cache, 1n)).toBe(false);
+			cache.close();
+			using requests = fx.track.requests();
+			let fill: Fill | undefined;
+			const requested = requests.requestedFill().then((value) => {
+				fill = value;
+			});
+			const msg = new Fetch({
+				requestId: FETCH_ID,
+				type: range(version, at(1, 1), at(1, 3)),
+				subscriberPriority: 3,
+				groupOrder: "ascending",
+			});
+			const fetching = fetch(fx, msg);
+			await flush();
+			expect(fill).toBeDefined();
+			if (!fill) throw new Error("no history fill");
+			expect([fill.start, fill.end, fill.priority, fill.maxDelay]).toEqual([1n, 2n, 124, null]);
+			const group = fill.accept(1n);
+			for (let object = 0; object < 3; object++)
+				group.writeFrame({
+					payload: new TextEncoder().encode(`1-${object}`),
+					timestamp: Timestamp.fromMillis(object),
+				});
+			group.finish();
+			fill.close();
+			await requested;
+			const first = served(await fetching);
+			expect(first.objects).toEqual([
+				[1, 1, "1-1"],
+				[1, 2, "1-2"],
+			]);
+			expect(first.ok.endLocation).toEqual(endAt(version, 1, 2));
+			expect(first.ok.endOfTrack).toBe(false);
+			// No handler remains: the same responder serves the filled group from cache.
+			requests.close();
+			expect(served(await fetch(fx, msg)).objects).toEqual(first.objects);
+		}
+	}
+});
+
+test("a FETCH preserves relayed metadata and cached groups without upstream FETCH", async () => {
+	for (const version of VERSIONS) {
+		for (const warm of [false, true]) {
+			using fx = serve(version);
+			const upstream = new OriginProducer();
+			const publication = upstream.createBroadcast(Path.from("archive"));
+			publication.announce();
+			const track = publication.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+			writeGroup(track, 3n, ["3-0", "3-1"]);
+			// lite-04 has no FETCH; lite-05 can fetch, but refuses empty subscription ranges.
+			const pair = createMockTransportPair(warm ? Lite.ALPN_04 : Lite.ALPN_05);
+			const url = new URL("https://localhost:4443/test");
+			const [client, server] = await Promise.all([
+				connectSession({ url, transport: pair.client }),
+				acceptSession({ url, transport: pair.server, publish: upstream.consume() }),
+			]);
+			try {
+				const source = wireOf(client).consume(Path.from("archive"));
+				const cached = warm ? source.track("video").subscribe({ delay: { max: null } }) : undefined;
+				if (cached) {
+					const group = await cached.recvGroup();
+					expect(group?.sequence).toBe(3n);
+					while (await group?.readFrame()) {}
+					group?.close();
+				}
+				const requests = fx.origin.requestsRoute(Path.from("relayed"));
+				const cursor = requests.requested();
+				const requested = cursor.next();
+				const type = { ...range(version, at(3, 0), at(3, 0)), trackNamespace: Path.from("relayed") };
+				const fetching = fetch(fx, new Fetch({ requestId: FETCH_ID, type }));
+				const next = await requested;
+				if (next.done) throw new Error("no relayed broadcast request");
+				next.value.serve(source);
+				await cursor.return?.();
+				expect(served(await fetching).objects).toEqual(pairs([3]));
+				cached?.close();
+			} finally {
+				client.abort();
+				server.abort();
+				upstream.close();
+			}
+		}
+	}
+});
+
+test("a FETCH refused by its history responder sends no FETCH_OK", async () => {
+	for (const version of VERSIONS) {
+		using fx = serve(version, undefined, undefined, null);
+		writeGroup(fx.track, 3n, ["live"]);
+		using requests = fx.track.requests();
+		const responding = (async () => {
+			using fill = await requests.requestedFill();
+			expect(fill?.wanted()).toBe(1n);
+		})();
+		const fetching = fetch(fx, new Fetch({ requestId: FETCH_ID, type: range(version, at(1, 0), at(1, 0)) }));
+		expect(refused(await fetching)).toBe(DOES_NOT_EXIST);
+		requests.close();
+		await responding;
+	}
+});
+
+test("a cancelled or unauthorized FETCH withdraws its unanswered history fill", async () => {
+	for (const version of VERSIONS) {
+		for (const revoke of [false, true]) {
+			const grant = new Signal<Grant | undefined>(undefined);
+			using fx = serve(version, grant, undefined, null);
+			writeGroup(fx.track, 3n, ["live"]);
+			using requests = fx.track.requests();
+			const requested = requests.requestedFill();
+			const request = requestStream(version);
+			const fetching = fx.pub.runFetch(
+				new Fetch({ requestId: FETCH_ID, type: range(version, at(1, 0), at(1, 0)) }),
+				request.stream,
+			);
+			using fill = await requested;
+			expect(fill?.wanted()).toBe(1n);
+			if (revoke) grant.set({ publish: new Path.Patterns([]), subscribe: new Path.Patterns([]) });
+			else request.withdraw();
+			if (revoke) expect(refused(await answer(fx, request.answer, "ascending"))).toBe(UNAUTHORIZED);
+			await fetching;
+			expect(await fill?.wantedChanged()).toBeUndefined();
+			const read = await request.answer.done().catch(error);
+			expect(read === true || read instanceof Error).toBe(true);
+		}
+	}
+});
+
 // Datagrams are never cached, so a FETCH reaching one finds no group there.
 test("a FETCH of a datagram is refused", async () => {
 	for (const version of VERSIONS) {
@@ -578,7 +724,8 @@ test("draft-18: a joining FETCH serves the head its subscription starts after", 
 		new FetchOk({
 			endOfTrack: false,
 			endLocation: at(5, 3),
-			properties: { timescale: Timescale.MILLI, priority: 127, groupOrder: 0x2 },
+			// The zero authored default max age, advertised as MAX_CACHE_DURATION.
+			properties: { timescale: Timescale.MILLI, priority: 127, groupOrder: 0x2, maxCacheDuration: 0n },
 		}),
 	);
 	expect(head.requestId).toBe(FETCH_ID);

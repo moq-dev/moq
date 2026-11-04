@@ -10,8 +10,8 @@ here rather than in a process each. That is also the point of the demo: they
 share a world and can see each other.
 
 Autonomy is the resting state. A truck nobody is driving runs on Traffic
-Manager. Takeover adopts its latest measured controls so switching to manual
-does not change steering or pedal demand underneath the driver.
+Manager. Takeover keeps measured steering and gear, but starts with zero
+throttle and full brake until the driver supplies pedal input.
 """
 
 from __future__ import annotations
@@ -439,7 +439,7 @@ class Truck:
         if not self._autonomous:
             return
         # Traffic Manager releases the vehicle where it is, still carrying its
-        # velocity. The takeover command preserves its latest measured controls.
+        # velocity. The takeover command preserves steering and gear, but brakes.
         self._vehicle.set_autopilot(False, self._tm_port)
         self._autonomous = False
         log.info("%s: autonomy disengaged, driver has control", self.name)
@@ -469,8 +469,8 @@ class Truck:
             self.release()
             return
 
-        # A player without feedback yet claims with the resting state. Applying
-        # that frame would make every click brake an autonomous truck.
+        # A neutral resting claim reserves the lease without replacing Traffic
+        # Manager's controls. Driving intent arrives in a non-resting state.
         if self._autonomous and accepted.state == DriveState.stopped():
             return
 
