@@ -53,9 +53,12 @@ async fn relay(
 	timescale: Option<moq_net::Timescale>,
 ) -> (Option<moq_net::Timescale>, Vec<Read>) {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let track = broadcast
-		.broadcast().create_track("data", Info::default().with_timescale(timescale))
+		.broadcast()
+		.create_track("data", Info::default().with_timescale(timescale))
 		.unwrap();
 	broadcast.announce().unwrap();
 
@@ -176,7 +179,9 @@ async fn a_timed_track_keeps_its_timestamps_through_a_relay() {
 /// timestamp.
 async fn fetch_only(version: &str) -> Vec<Result<Option<moq_net::Timestamp>, moq_net::Error>> {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let track = broadcast.broadcast().create_track("data", Info::default()).unwrap();
 	broadcast.announce().unwrap();
 	write_group(&track, 0);

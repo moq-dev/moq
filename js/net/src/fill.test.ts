@@ -750,8 +750,7 @@ async function session(alpn: string) {
 		connectSession({ url, transport: pair.client }),
 		acceptSession({ transport: pair.server, url, publish: origin.consume() }),
 	]);
-	const publication = origin.createBroadcast(Path.from("archive"));
-	publication.announce();
+	const publication = origin.route(Path.from("archive"));
 	const broadcast = publication.broadcast;
 	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	// Groups 0 to 2 were published before this producer existed.

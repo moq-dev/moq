@@ -28,8 +28,7 @@ async function received(reader: TrackSubscriber, count: number): Promise<bigint[
 test("a widened maxDelay re-offers what the publisher skipped below the start", async () => {
 	const pair = createMockTransportPair(ALPN_07_WIP);
 	const origin = new OriginProducer();
-	const publication = origin.createBroadcast(Path.from("room"));
-	publication.announce();
+	const publication = origin.route(Path.from("room"));
 	const broadcast = publication.broadcast;
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	// One group per second, so a budget picks how far back a reader reaches.

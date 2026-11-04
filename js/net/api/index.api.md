@@ -11,7 +11,7 @@ export namespace Announce {
 	export interface Announce {
 		captures: Path.Pattern[] | undefined;
 		prefix: Path.Valid;
-		route: Origin.Route;
+		route: Origin.RouteInfo;
 	}
 	export class Consumer {
 		[Symbol.asyncIterator](): AsyncGenerator<Announce.Event, void, undefined>;
@@ -403,36 +403,18 @@ export namespace Origin {
 	}
 	export type Hop = infer<typeof Origin.HopSchema>;
 	export const HopSchema: $ZodBranded<ZodMiniBigInt<bigint>, "Hop", "out">;
-	export class Prepared {
-		[Symbol.dispose](): void;
-		readonly broadcast: Broadcast.Producer;
-		close(): void;
-		publish(): Origin.Publication;
-	}
 	export class Producer implements Origin.Table {
 		constructor();
 		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
 		close(abort?: Error): void;
 		get closed(): Signals.GetPromise<Error | null>;
 		consume(): Origin.Consumer;
-		createBroadcast(path: Path.Valid): Origin.Publication;
 		get discovery(): Signals.Getter<boolean | undefined>;
 		follow(path: Path.Valid, options?: Origin.FollowOptions): Origin.Following;
 		request(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
-		requests(prefix: Path.Valid): Origin.Requests;
+		route(path: Path.Valid, options?: Origin.RouteOptions): Origin.Route;
+		routePrefix(prefix: Path.Valid, options?: Origin.RouteOptions): Origin.Route;
 		scope(root: Path.Valid, patterns: Path.Patterns): Origin.Producer;
-	}
-	export class Publication {
-		announce(route?: Origin.Route | {
-			auth?: Origin.Route["auth"];
-			cost?: Origin.Route["cost"];
-			epoch?: Origin.Route["epoch"];
-			hops?: Origin.Route["hops"];
-			instance?: Origin.Route["instance"];
-		}): void;
-		readonly broadcast: Broadcast.Producer;
-		get route(): Origin.Route | undefined;
-		unannounce(): void;
 	}
 	export interface Reader {
 		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
@@ -443,8 +425,8 @@ export namespace Origin {
 	}
 	export class Request {
 		readonly path: Path.Valid;
-		prepare(): Origin.Prepared;
 		reject(err: Error): void;
+		route(options?: Origin.RouteOptions): Origin.Route;
 		serve(source: Broadcast.Producer | Broadcast.Consumer): void;
 	}
 	export interface RequestOptions {
@@ -456,24 +438,37 @@ export namespace Origin {
 		readonly closed: Signals.GetPromise<Error | null>;
 		readonly path: Path.Valid;
 	}
-	export class Requests {
+	export class Route {
+		[Symbol.dispose](): void;
+		announce(): void;
+		get announced(): boolean;
+		get broadcast(): Broadcast.Producer;
 		close(): void;
-		readonly prefix: Path.Valid;
+		get instance(): Instance.Valid;
 		requested(): AsyncIterableIterator<Origin.Request>;
-		get route(): Origin.Route;
+		setAuth(auth?: Auth.Credential): void;
+		setCost(cost: Origin.Cost): void;
+		withdraw(): void;
 	}
-	export interface Route {
+	export interface RouteInfo {
+		readonly auth?: Auth.Credential;
+		readonly cost: Origin.Cost;
+		readonly epoch?: bigint;
+		readonly hops: readonly Origin.Hop[];
+		readonly instance?: Instance.Valid;
+	}
+	export interface RouteOptions {
 		auth?: Auth.Credential;
-		cost: Origin.Cost;
+		cost?: Origin.Cost;
 		epoch?: bigint;
-		hops: Origin.Hop[];
+		hidden?: boolean;
 		instance?: Instance.Valid;
 	}
 	export interface Table extends Origin.Reader {
-		createBroadcast(path: Path.Valid): Origin.Publication;
-		requests(prefix: Path.Valid): Origin.Requests;
+		route(path: Path.Valid, options?: Origin.RouteOptions): Origin.Route;
+		routePrefix(prefix: Path.Valid, options?: Origin.RouteOptions): Origin.Route;
 	}
-	export function isAnonymous(route: Origin.Route): boolean;
+	export function isAnonymous(route: Origin.RouteInfo): boolean;
 }
 
 export namespace Path {

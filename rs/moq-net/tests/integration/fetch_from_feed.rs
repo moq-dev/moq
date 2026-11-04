@@ -32,9 +32,12 @@ struct Relay {
 /// A publisher on `version` with group 0 of an untimed track written, and the relay's view of it.
 async fn relay(version: &str) -> Relay {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let mut track = broadcast
-		.broadcast().create_track("video", moq_net::track::Info::default().with_timescale(None))
+		.broadcast()
+		.create_track("video", moq_net::track::Info::default().with_timescale(None))
 		.unwrap();
 	broadcast.announce().unwrap();
 	track.write_frame(None, &b"0"[..]).unwrap();

@@ -45,7 +45,9 @@ async fn rejoin_recovers_the_group_reset_on_leave() {
 				let publisher = produce_origin(1);
 				let relay = produce_origin(2);
 
-				let broadcast = publisher.route("bench", moq_net::origin::RouteOptions::hidden()).unwrap();
+				let broadcast = publisher
+					.route("bench", moq_net::origin::RouteOptions::hidden())
+					.unwrap();
 				let track = broadcast.broadcast().create_track("video", timed()).unwrap();
 				broadcast.announce().unwrap();
 
@@ -139,7 +141,9 @@ async fn rejoin_skips_a_cache_kept_by_another_handle() {
 			let publisher = produce_origin(1);
 			let relay = produce_origin(2);
 
-			let broadcast = publisher.route("bench", moq_net::origin::RouteOptions::hidden()).unwrap();
+			let broadcast = publisher
+				.route("bench", moq_net::origin::RouteOptions::hidden())
+				.unwrap();
 			let track = broadcast.broadcast().create_track("video", timed()).unwrap();
 			broadcast.announce().unwrap();
 
@@ -197,7 +201,9 @@ async fn rejoin_keeps_the_cache_when_the_backlog_lands_newest_first() {
 			let publisher = produce_origin(1);
 			let relay = produce_origin(2);
 
-			let broadcast = publisher.route("bench", moq_net::origin::RouteOptions::hidden()).unwrap();
+			let broadcast = publisher
+				.route("bench", moq_net::origin::RouteOptions::hidden())
+				.unwrap();
 			let track = broadcast.broadcast().create_track("video", timed()).unwrap();
 			broadcast.announce().unwrap();
 
@@ -271,7 +277,9 @@ async fn rejoin_mid_group_keeps_the_head_for_later_readers() {
 			let relay = produce_origin(2);
 			let client = produce_origin(3);
 
-			let broadcast = publisher.route("bench", moq_net::origin::RouteOptions::hidden()).unwrap();
+			let broadcast = publisher
+				.route("bench", moq_net::origin::RouteOptions::hidden())
+				.unwrap();
 			let track = broadcast.broadcast().create_track("video", timed()).unwrap();
 			broadcast.announce().unwrap();
 			// Left open, as a JSON snapshot group stays open for its deltas.
@@ -343,7 +351,9 @@ async fn rejoin_goes_live_without_the_join_head() {
 			let relay = produce_origin(2);
 			let client = produce_origin(3);
 
-			let broadcast = publisher.route("bench", moq_net::origin::RouteOptions::hidden()).unwrap();
+			let broadcast = publisher
+				.route("bench", moq_net::origin::RouteOptions::hidden())
+				.unwrap();
 			let track = broadcast.broadcast().create_track("video", timed()).unwrap();
 			broadcast.announce().unwrap();
 			let mut open = track.append_group().unwrap();
@@ -412,7 +422,9 @@ async fn rejoin_during_the_cancel_skips_the_cache() {
 			let publisher = produce_origin(1);
 			let relay = produce_origin(2);
 
-			let broadcast = publisher.route("bench", moq_net::origin::RouteOptions::hidden()).unwrap();
+			let broadcast = publisher
+				.route("bench", moq_net::origin::RouteOptions::hidden())
+				.unwrap();
 			let track = broadcast.broadcast().create_track("video", timed()).unwrap();
 			broadcast.announce().unwrap();
 
@@ -475,7 +487,9 @@ async fn rejoin_waits_for_the_answers_first_frame() {
 			let publisher = produce_origin(1);
 			let relay = produce_origin(2);
 
-			let broadcast = publisher.route("bench", moq_net::origin::RouteOptions::hidden()).unwrap();
+			let broadcast = publisher
+				.route("bench", moq_net::origin::RouteOptions::hidden())
+				.unwrap();
 			let track = broadcast.broadcast().create_track("video", timed()).unwrap();
 			broadcast.announce().unwrap();
 
@@ -547,7 +561,9 @@ async fn leaving_after_the_cache_window_keeps_the_latest_group() {
 			let publisher = produce_origin(1);
 			let relay = produce_origin(2);
 
-			let broadcast = publisher.route("bench", moq_net::origin::RouteOptions::hidden()).unwrap();
+			let broadcast = publisher
+				.route("bench", moq_net::origin::RouteOptions::hidden())
+				.unwrap();
 			let track = broadcast.broadcast().create_track("catalog", timed()).unwrap();
 			broadcast.announce().unwrap();
 			let mut group = track.append_group().unwrap();
@@ -621,7 +637,9 @@ async fn rejoin_keeps_source_timestamps() {
 			let publisher = produce_origin(1);
 			let client = produce_origin(2);
 
-			let broadcast = publisher.route("bench", moq_net::origin::RouteOptions::hidden()).unwrap();
+			let broadcast = publisher
+				.route("bench", moq_net::origin::RouteOptions::hidden())
+				.unwrap();
 			let track = broadcast.broadcast().create_track("video", timed()).unwrap();
 			broadcast.announce().unwrap();
 
@@ -705,11 +723,11 @@ async fn quiet_catalog_survives_cache_expiry(version: Version, takeover: bool) {
 	kio::clock::timeout(TEST_TIMEOUT + moq_net::cache::DEFAULT_EXPIRY * 5, async {
 		let publisher = produce_origin(1);
 		let relay = produce_origin(2);
-		let broadcast = publisher.route("bench", moq_net::origin::RouteOptions::hidden()).unwrap();
-		let track = broadcast.broadcast().create_track("catalog", timed()).unwrap();
-		broadcast
-			.announce(moq_net::origin::RouteInfo::default().with_instance(moq_net::Instance::random(), 0))
+		let broadcast = publisher
+			.route("bench", moq_net::origin::RouteOptions::hidden())
 			.unwrap();
+		let track = broadcast.broadcast().create_track("catalog", timed()).unwrap();
+		broadcast.announce().unwrap();
 		let mut group = track.append_group().unwrap();
 		group.write_frame(Timestamp::ZERO, b"catalog".as_ref()).unwrap();
 		group.finish().unwrap();

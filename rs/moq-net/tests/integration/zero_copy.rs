@@ -54,7 +54,9 @@ async fn frames_cross_without_a_copy() {
 			}
 		);
 
-		let broadcast = publisher.route("room", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let broadcast = publisher
+			.route("room", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
 		let track = broadcast.broadcast().create_track("video", info).unwrap();
 		broadcast.announce().unwrap();

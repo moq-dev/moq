@@ -107,9 +107,8 @@ async function handover(kind: "lite" | "ietf"): Promise<void> {
 
 	const consume = new OriginProducer();
 	const publish = new OriginProducer();
-	const broadcastPublication = publish.createBroadcast(Path.from("room"));
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce();
+	const broadcastRoute = publish.route(Path.from("room"));
+	const broadcast = broadcastRoute.broadcast;
 
 	const served: TrackProducer[] = [];
 	let armVideo = true;
@@ -297,9 +296,8 @@ async function routeDeath(kind: "lite" | "ietf", after: boolean): Promise<void> 
 
 	const consume = new OriginProducer();
 	const publish = new OriginProducer();
-	const broadcastPublication = publish.createBroadcast(Path.from("room"));
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce();
+	const broadcastRoute = publish.route(Path.from("room"));
+	const broadcast = broadcastRoute.broadcast;
 
 	const served: TrackProducer[] = [];
 	const serving = (async () => {

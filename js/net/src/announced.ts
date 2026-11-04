@@ -4,7 +4,7 @@
  * @module
  */
 import { type GetPromise, type Getter, Once, Signal } from "@moq/signals";
-import type { Route } from "./hop.js";
+import type { RouteInfo } from "./hop.js";
 import type * as Path from "./path.js";
 
 /**
@@ -26,7 +26,7 @@ export interface Announce {
 	/** What the filter's wildcards stood for, when this prefix pins all of them. */
 	captures: Path.Pattern[] | undefined;
 	/** Hops and cost of the route; on a retraction, its last advertised values. */
-	route: Route;
+	route: RouteInfo;
 }
 
 /**

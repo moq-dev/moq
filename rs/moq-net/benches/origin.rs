@@ -82,7 +82,11 @@ fn fanout(publishers: usize, subscribers: usize) -> Fanout {
 	let (producer, driver) = origin::Producer::new(origin::Config::default());
 	let consumer = producer.consume();
 	let publishers = (0..publishers)
-		.map(|i| producer.route(format!("room/{i}"), moq_net::origin::RouteOptions::default()).unwrap())
+		.map(|i| {
+			producer
+				.route(format!("room/{i}"), moq_net::origin::RouteOptions::default())
+				.unwrap()
+		})
 		.collect();
 	let mut subscribers: Vec<announce::Consumer> = (0..subscribers).map(|_| consumer.announced()).collect();
 	// Drain the replay so each iteration measures only what it adds.
@@ -134,7 +138,11 @@ fn bench_announce_covering(c: &mut Criterion) {
 				group.bench_function(format!("{routes}routes_{readers}readers_covering{covering}"), |b| {
 					let (producer, _driver) = origin::Producer::new(origin::Config::default());
 					let _routes: Vec<_> = (0..routes)
-						.map(|i| producer.route_prefix(format!("room/{i}/mic.hang"), moq_net::origin::RouteOptions::default()).unwrap())
+						.map(|i| {
+							producer
+								.route_prefix(format!("room/{i}/mic.hang"), moq_net::origin::RouteOptions::default())
+								.unwrap()
+						})
 						.collect();
 					let consumer = producer
 						.consume()
@@ -147,7 +155,9 @@ fn bench_announce_covering(c: &mut Criterion) {
 					}
 					b.iter(|| {
 						for (name, delivered) in [("room/live.chat", true), ("room/mic.hang", covering)] {
-							let route = producer.route_prefix(name, moq_net::origin::RouteOptions::default()).unwrap();
+							let route = producer
+								.route_prefix(name, moq_net::origin::RouteOptions::default())
+								.unwrap();
 							for cursor in &mut cursors {
 								assert_eq!(cursor.next().now_or_never().flatten().is_some(), delivered);
 							}
@@ -172,7 +182,11 @@ fn bench_pending_churn(c: &mut Criterion) {
 			group.bench_function(format!("{routes}routes_{readers}readers"), |b| {
 				let (producer, _driver) = origin::Producer::new(origin::Config::default());
 				let _routes: Vec<_> = (0..routes)
-					.map(|i| producer.route(format!("z/{i}"), moq_net::origin::RouteOptions::default()).unwrap())
+					.map(|i| {
+						producer
+							.route(format!("z/{i}"), moq_net::origin::RouteOptions::default())
+							.unwrap()
+					})
 					.collect();
 				let mut cursors: Vec<_> = (0..readers).map(|_| producer.consume().announced()).collect();
 				let mut sequence = 0u64;
@@ -256,9 +270,7 @@ fn bench_withdraw_wave(c: &mut Criterion) {
 		for &hop in chain {
 			hops.push(Hop::new(hop).unwrap()).unwrap();
 		}
-		origin::RouteInfo::default()
-			.with_instance(instance.clone(), 0)
-			.with_hops(hops)
+		moq_net::fuzz::route_info(hops, 0, Some((instance.clone(), 0)))
 	};
 	for broadcasts in [1_000, 10_000] {
 		for subscribers in [1, 20, 100] {
@@ -401,7 +413,9 @@ fn bench_announce_mounted(c: &mut Criterion) {
 			}
 
 			b.iter(|| {
-				let handle = producer.route(".svc/p0/incoming", moq_net::origin::RouteOptions::default()).unwrap();
+				let handle = producer
+					.route(".svc/p0/incoming", moq_net::origin::RouteOptions::default())
+					.unwrap();
 				for cursor in &mut cursors {
 					cursor.next().now_or_never().flatten().expect("announce delivered");
 				}
@@ -431,7 +445,10 @@ fn bench_announce_fleet(c: &mut Criterion) {
 				.flat_map(|project| (0..nodes).map(move |node| (project, node)))
 				.map(|(project, node)| {
 					producer
-						.route(format!(".stats/p{project}/node/edge{node}"), moq_net::origin::RouteOptions::default())
+						.route(
+							format!(".stats/p{project}/node/edge{node}"),
+							moq_net::origin::RouteOptions::default(),
+						)
 						.unwrap()
 				})
 				.collect();
@@ -577,7 +594,10 @@ fn bench_reprice_duplicate(c: &mut Criterion) {
 							let moq_net::announce::Event::Restart(update) = event else {
 								panic!("expected a restart: got {event:?}");
 							};
-							assert_eq!(update.route.cost, moq_net::origin::Cost::new(cost.min(incumbent_cost)));
+							assert_eq!(
+								update.route.cost(),
+								moq_net::origin::Cost::new(cost.min(incumbent_cost))
+							);
 						}
 					}
 				});
@@ -596,9 +616,14 @@ const INCUMBENT_COST: u64 = 2;
 
 /// A route as `peer` would have announced it: one hop, at `cost`.
 fn peer_route(peer: u64, cost: u64) -> origin::RouteInfo {
+	peer_instance(peer, cost, None)
+}
+
+/// [`peer_route`], serving `instance` when it names one.
+fn peer_instance(peer: u64, cost: u64, instance: Option<Instance>) -> origin::RouteInfo {
 	let mut hops = Hops::new();
 	hops.push(Hop::new(peer).expect("peer id")).expect("hop chain");
-	origin::RouteInfo::default().with_hops(hops).with_cost(cost)
+	moq_net::fuzz::route_info(hops, cost, instance.map(|instance| (instance, 0)))
 }
 
 /// An announcement of an unrelated prefix with `fronts` remote fronts parked on
@@ -612,7 +637,9 @@ fn bench_announce_fronts(c: &mut Criterion) {
 			let (producer, mut driver) = origin::Producer::new(origin::Config::default());
 			let consumer = producer.consume();
 			// Served but never answered: every request under it parks a front.
-			let _served = producer.route_prefix("room", moq_net::origin::RouteOptions::default()).unwrap();
+			let _served = producer
+				.route_prefix("room", moq_net::origin::RouteOptions::default())
+				.unwrap();
 			let _requests: Vec<_> = (0..fronts)
 				.map(|i| consumer.request(format!("room/{i}"), None))
 				.collect();
@@ -620,7 +647,9 @@ fn bench_announce_fronts(c: &mut Criterion) {
 			// Run each front once so it parks on its upstream request.
 			driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
 			b.iter(|| {
-				let handle = producer.route("other/incoming", moq_net::origin::RouteOptions::default()).unwrap();
+				let handle = producer
+					.route("other/incoming", moq_net::origin::RouteOptions::default())
+					.unwrap();
 				driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
 				drop(handle);
 				driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
@@ -639,7 +668,7 @@ fn answer(claim: &origin::Route, path: &str) -> origin::Route {
 			.expect("the request reached the claim")
 			.unwrap();
 		if request.path().as_str() == path {
-			return request.route(moq_net::origin::RouteOptions::hidden()).unwrap().announce().unwrap();
+			return request.route(moq_net::origin::RouteOptions::default()).unwrap();
 		}
 	}
 }
@@ -656,7 +685,9 @@ fn bench_takeover(c: &mut Criterion) {
 			|b| {
 				let (producer, mut driver) = origin::Producer::new(origin::Config::default());
 				let consumer = producer.consume();
-				let claim = producer.route_prefix("room", moq_net::origin::RouteOptions::default()).unwrap();
+				let claim = producer
+					.route_prefix("room", moq_net::origin::RouteOptions::default())
+					.unwrap();
 				let waiter = kio::Waiter::noop();
 				let mut ask = |path: &str| {
 					let request = consumer.request(path, None);
@@ -710,7 +741,14 @@ fn bench_serve_idle(c: &mut Criterion) {
 			let (producer, _driver) = origin::Producer::new(origin::Config::default());
 			// One route per announced path, exactly as a session lands a peer's.
 			let dynamics: Vec<_> = (0..routes)
-				.map(|i| producer.route_prefix(format!(".stats/p{}/node/edge{i}", i % 8), moq_net::origin::RouteOptions::default()).unwrap())
+				.map(|i| {
+					producer
+						.route_prefix(
+							format!(".stats/p{}/node/edge{i}", i % 8),
+							moq_net::origin::RouteOptions::default(),
+						)
+						.unwrap()
+				})
 				.collect();
 			b.iter(|| {
 				// A fresh waiter per sweep, so every poll pays a real registration: a
@@ -718,7 +756,7 @@ fn bench_serve_idle(c: &mut Criterion) {
 				let waiter = kio::Waiter::noop();
 				// Nothing is queued, so every poll parks again: the idle sweep.
 				for dynamic in &dynamics {
-					assert!(dynamic.poll_requested_broadcast(&waiter).is_pending());
+					assert!(dynamic.poll_requested(&waiter).is_pending());
 				}
 			});
 		});
@@ -756,7 +794,10 @@ fn bench_request(c: &mut Criterion) {
 	for publishers in [100, 1_000] {
 		for requesters in [1, 8, 32] {
 			let mut fleet = fanout(publishers, 0);
-			let _covering = fleet.producer.route("room", moq_net::origin::RouteOptions::default()).unwrap();
+			let _covering = fleet
+				.producer
+				.route("room", moq_net::origin::RouteOptions::default())
+				.unwrap();
 			let waiter = kio::Waiter::noop();
 			let shape = format!("{publishers}p_{requesters}r");
 			group.throughput(Throughput::Elements(requesters));
@@ -876,9 +917,9 @@ fn pool(members: usize, paths: usize, cursors: usize) -> Pool {
 	driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
 	let mut producers = Vec::with_capacity(paths);
 	for member in &members {
-		while let Poll::Ready(request) = member.poll_requested_broadcast(&waiter) {
+		while let Poll::Ready(Some(request)) = member.poll_requested(&waiter) {
 			let broadcast = broadcast::Info::new().produce();
-			request.unwrap().serve(&broadcast);
+			request.serve(&broadcast);
 			producers.push(broadcast);
 		}
 	}
@@ -919,7 +960,7 @@ fn bench_restart_fronts(c: &mut Criterion) {
 						let pool = pool(1, fronts, 0);
 						moq_net::fuzz::update_route(
 							&pool._members[0],
-							pool_route(POOL_HOP).with_instance(Instance::random(), 0),
+							peer_instance(POOL_HOP, 3, Some(Instance::random())),
 						)
 						.unwrap();
 						let paths: Vec<_> = (0..restarting).map(|i| format!("pool/job-{i}")).collect();
@@ -1066,15 +1107,21 @@ fn bench_handoff(c: &mut Criterion) {
 			runtime.spawn(moq_net::time::run(driver));
 			let consumer = producer.consume();
 			let _others: Vec<_> = (0..publishers)
-				.map(|i| producer.route(format!("room/{i}"), moq_net::origin::RouteOptions::default()).unwrap())
+				.map(|i| {
+					producer
+						.route(format!("room/{i}"), moq_net::origin::RouteOptions::default())
+						.unwrap()
+				})
 				.collect();
 
 			b.iter_custom(|iterations| {
 				runtime.block_on(async {
 					let mut total = Duration::ZERO;
 					for _ in 0..iterations {
-						let incumbent = producer.route("room/live", moq_net::origin::RouteOptions::default()).unwrap();
-						let track = incumbent.create_track("video", timed()).unwrap();
+						let incumbent = producer
+							.route("room/live", moq_net::origin::RouteOptions::default())
+							.unwrap();
+						let track = incumbent.broadcast().create_track("video", timed()).unwrap();
 						let mut first = track.append_group().unwrap();
 						first.write_frame(Timestamp::ZERO, b"one".as_ref()).unwrap();
 						first.finish().unwrap();
@@ -1084,8 +1131,10 @@ fn bench_handoff(c: &mut Criterion) {
 						subscription.recv_group().await.unwrap().expect("first group");
 
 						let started = std::time::Instant::now();
-						let standby = producer.route("room/live", moq_net::origin::RouteOptions::hidden()).unwrap();
-						let track = standby.create_track("video", timed()).unwrap();
+						let standby = producer
+							.route("room/live", moq_net::origin::RouteOptions::hidden())
+							.unwrap();
+						let track = standby.broadcast().create_track("video", timed()).unwrap();
 						let mut second = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
 						second.write_frame(Timestamp::ZERO, b"two".as_ref()).unwrap();
 						second.finish().unwrap();
@@ -1100,8 +1149,8 @@ fn bench_handoff(c: &mut Criterion) {
 
 						drop(subscription);
 						drop(replacement);
-						incumbent.close();
-						standby.close();
+						incumbent.broadcast().close();
+						standby.broadcast().close();
 						// Wait for the fronts to close so the next iteration starts fresh ones.
 						resolved.closed().await;
 						replaced.closed().await;
@@ -1148,8 +1197,10 @@ async fn watching(routes: usize, subscribers: usize) -> Watching {
 	let mut broadcasts = Vec::new();
 	let mut tracks = Vec::new();
 	for index in 0..routes {
-		let broadcast = relay.route(watched_path(index), moq_net::origin::RouteOptions::default()).unwrap();
-		tracks.push(broadcast.create_track("video", timed()).unwrap());
+		let broadcast = relay
+			.route(watched_path(index), moq_net::origin::RouteOptions::default())
+			.unwrap();
+		tracks.push(broadcast.broadcast().create_track("video", timed()).unwrap());
 		broadcasts.push(broadcast);
 	}
 
@@ -1287,9 +1338,11 @@ fn bench_relay(c: &mut Criterion) {
 				.unwrap();
 			let (producer, driver) = origin::Producer::new(origin::Config::default());
 			runtime.spawn(moq_net::time::run(driver));
-			let broadcast = producer.route("room/live", moq_net::origin::RouteOptions::default()).unwrap();
+			let broadcast = producer
+				.route("room/live", moq_net::origin::RouteOptions::default())
+				.unwrap();
 			let sources: Vec<_> = (0..tracks)
-				.map(|i| broadcast.create_track(format!("{i}"), timed()).unwrap())
+				.map(|i| broadcast.broadcast().create_track(format!("{i}"), timed()).unwrap())
 				.collect();
 			let mut subscriptions = runtime.block_on(async {
 				let resolved = producer.consume().request("room/live", None).await.unwrap();
@@ -1347,8 +1400,10 @@ fn bench_passthrough(c: &mut Criterion) {
 				.unwrap();
 			let (producer, driver) = origin::Producer::new(origin::Config::default());
 			runtime.spawn(moq_net::time::run(driver));
-			let broadcast = producer.route("room/live", moq_net::origin::RouteOptions::default()).unwrap();
-			let source = broadcast.create_track("0", timed()).unwrap();
+			let broadcast = producer
+				.route("room/live", moq_net::origin::RouteOptions::default())
+				.unwrap();
+			let source = broadcast.broadcast().create_track("0", timed()).unwrap();
 			let mut subscriptions = runtime.block_on(async {
 				let resolved = producer.consume().request("room/live", None).await.unwrap();
 				let track = resolved.track("0").unwrap();
@@ -1402,9 +1457,11 @@ fn bench_parked(c: &mut Criterion) {
 					.unwrap();
 				let (producer, driver) = origin::Producer::new(origin::Config::default());
 				runtime.spawn(moq_net::time::run(driver));
-				let broadcast = producer.route("room/live", moq_net::origin::RouteOptions::default()).unwrap();
+				let broadcast = producer
+					.route("room/live", moq_net::origin::RouteOptions::default())
+					.unwrap();
 				let sources: Vec<_> = (0..tracks)
-					.map(|i| broadcast.create_track(format!("{i}"), None).unwrap())
+					.map(|i| broadcast.broadcast().create_track(format!("{i}"), None).unwrap())
 					.collect();
 				let _writers: Vec<_> = sources.iter().map(|source| source.append_group().unwrap()).collect();
 				let (subscriptions, mut groups) = runtime.block_on(async {
@@ -1452,13 +1509,18 @@ struct Generation {
 }
 
 impl Generation {
-	/// Create a hidden generation and leave a finished group on every track, so a
-	/// reader that does look has something to resume.
-	fn build(producer: &origin::Producer, tracks: usize) -> Self {
-		let broadcast = producer.route(COPY_PATH, moq_net::origin::RouteOptions::hidden()).unwrap();
+	/// Create a hidden generation of `instance` and leave a finished group on every
+	/// track, so a reader that does look has something to resume.
+	fn build(producer: &origin::Producer, tracks: usize, instance: &Instance) -> Self {
+		let broadcast = producer
+			.route(
+				COPY_PATH,
+				moq_net::origin::RouteOptions::hidden().with_instance(instance.clone(), 0),
+			)
+			.unwrap();
 		let mut held = Vec::with_capacity(tracks);
 		for i in 0..tracks {
-			let track = broadcast.create_track(format!("{i}"), timed()).unwrap();
+			let track = broadcast.broadcast().create_track(format!("{i}"), timed()).unwrap();
 			let mut written = track.append_group().unwrap();
 			written.write_frame(Timestamp::ZERO, b"f".as_ref()).unwrap();
 			written.finish().unwrap();
@@ -1471,10 +1533,8 @@ impl Generation {
 	}
 
 	/// Route the front to this generation without waiting.
-	fn route(&self, instance: &Instance) {
-		self.broadcast
-			.announce(origin::RouteInfo::default().with_instance(instance.clone(), 0))
-			.unwrap();
+	fn route(&self) {
+		self.broadcast.announce().unwrap();
 	}
 
 	/// Route the front to this generation and wait until every track is spliced.
@@ -1483,8 +1543,8 @@ impl Generation {
 	/// copy, before its splice. That bounds the splice only on a current-thread
 	/// runtime, where every local query is ready within the front poll that
 	/// splices it.
-	async fn announce(&self, instance: &Instance) {
-		self.route(instance);
+	async fn announce(&self) {
+		self.route();
 		for track in &self.tracks {
 			kio::clock::timeout(COPY_WAIT, support::wanted(track.demand()))
 				.await
@@ -1496,7 +1556,6 @@ impl Generation {
 
 /// A front serving [`COPY_PATH`], with `copies` route copies on each of its tracks.
 struct CopyWalk {
-	instance: Instance,
 	_producer: origin::Producer,
 	_subscribers: Vec<track::Subscriber>,
 	generations: Vec<Generation>,
@@ -1514,8 +1573,8 @@ async fn copy_walk(tracks: usize, copies: usize) -> CopyWalk {
 	let (producer, driver) = origin::Producer::new(origin::Config::default());
 	tokio::spawn(moq_net::time::run(driver));
 	let instance = Instance::random();
-	let first = Generation::build(&producer, tracks);
-	first.route(&instance);
+	let first = Generation::build(&producer, tracks, &instance);
+	first.route();
 	let resolved = kio::clock::timeout(COPY_WAIT, producer.consume().request(COPY_PATH, None))
 		.await
 		.expect("front did not resolve")
@@ -1532,13 +1591,12 @@ async fn copy_walk(tracks: usize, copies: usize) -> CopyWalk {
 	let mut generations = Vec::with_capacity(copies + 1);
 	generations.push(first);
 	for _ in 1..copies {
-		let generation = Generation::build(&producer, tracks);
-		generation.announce(&instance).await;
+		let generation = Generation::build(&producer, tracks, &instance);
+		generation.announce().await;
 		generations.push(generation);
 	}
 	CopyWalk {
-		next: Some(Generation::build(&producer, tracks)),
-		instance,
+		next: Some(Generation::build(&producer, tracks, &instance)),
 		_producer: producer,
 		_subscribers: subscribers,
 		generations,
@@ -1552,7 +1610,7 @@ impl CopyWalk {
 	/// every track, and each reader walks its copies in one driver turn.
 	async fn swap(&mut self) {
 		let generation = self.next.take().expect("one swap per setup");
-		generation.announce(&self.instance).await;
+		generation.announce().await;
 		self.generations.push(generation);
 	}
 }
@@ -1660,8 +1718,13 @@ async fn resume_overlap(shape: ResumeShape, ordered: bool) -> ResumeOverlap {
 	tokio::spawn(moq_net::time::run(driver));
 	let instance = Instance::random();
 	let generation = |order: &mut dyn Iterator<Item = usize>| {
-		let broadcast = producer.route(COPY_PATH, moq_net::origin::RouteOptions::hidden()).unwrap();
-		let track = broadcast.create_track("0", timed()).unwrap();
+		let broadcast = producer
+			.route(
+				COPY_PATH,
+				moq_net::origin::RouteOptions::hidden().with_instance(instance.clone(), 0),
+			)
+			.unwrap();
+		let track = broadcast.broadcast().create_track("0", timed()).unwrap();
 		for sequence in order {
 			let mut group = track
 				.create_group(moq_net::group::Info {
@@ -1671,9 +1734,7 @@ async fn resume_overlap(shape: ResumeShape, ordered: bool) -> ResumeOverlap {
 			group.write_frame(Timestamp::ZERO, b"f".as_ref()).unwrap();
 			group.finish().unwrap();
 		}
-		broadcast
-			.announce(origin::RouteInfo::default().with_instance(instance.clone(), 0))
-			.unwrap();
+		broadcast.announce().unwrap();
 		(broadcast, track)
 	};
 	let mut generations = vec![generation(&mut (0..retained))];

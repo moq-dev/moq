@@ -143,8 +143,9 @@ async fn moqt_22_renewing_a_cancelled_announce_keeps_the_session() {
 		let mut tokens = serve(pair.requests.take().unwrap(), |_| Some(Grant::all()));
 		let (first, answer) = pair.client.auth().add("first").await.expect("kept for requests");
 		assert_eq!(answer, auth::Answer::Requests);
-		let broadcast = client_origin.route("room/x", moq_net::origin::RouteOptions::hidden()).unwrap();
-		broadcast.announce(origin::RouteInfo::default().with_auth(first)).unwrap();
+		let broadcast = client_origin
+			.route("room/x", origin::RouteOptions::default().with_auth(first))
+			.unwrap();
 		let (_, first) = tokens.next().await.expect("the announce's token");
 
 		// Ending the grant cancels the announcement. The idle request reads that and the
@@ -155,7 +156,7 @@ async fn moqt_22_renewing_a_cancelled_announce_keeps_the_session() {
 		assert_eq!(token, b"first");
 		kio::clock::sleep(Duration::from_secs(1)).await;
 		let (second, _) = pair.client.auth().add("second").await.expect("kept for requests");
-		broadcast.announce(origin::RouteInfo::default().with_auth(second)).unwrap();
+		broadcast.set_auth(Some(second)).unwrap();
 		let (token, _second) = tokens.next().await.expect("announced again");
 		assert_eq!(token, b"second");
 		assert_eq!(pair.client_transport.close_reason(), None);
@@ -174,12 +175,13 @@ async fn moqt_22_a_cancelled_renewal_keeps_the_session() {
 			(token == b"first").then(Grant::all)
 		});
 		let (first, _) = pair.client.auth().add("first").await.expect("kept for requests");
-		let broadcast = client_origin.route("room/x", moq_net::origin::RouteOptions::hidden()).unwrap();
-		broadcast.announce(origin::RouteInfo::default().with_auth(first)).unwrap();
+		let broadcast = client_origin
+			.route("room/x", origin::RouteOptions::default().with_auth(first))
+			.unwrap();
 		let (_, first) = tokens.next().await.expect("the announce's token");
 
 		let (second, _) = pair.client.auth().add("second").await.expect("kept for requests");
-		broadcast.announce(origin::RouteInfo::default().with_auth(second)).unwrap();
+		broadcast.set_auth(Some(second)).unwrap();
 		kio::clock::sleep(Duration::from_secs(1)).await;
 		drop(first);
 		kio::clock::sleep(Duration::from_secs(1)).await;
@@ -198,8 +200,9 @@ async fn moqt_22_dropping_the_old_grant_with_its_renewal_keeps_the_announce() {
 		let (mut pair, client_origin, server_origin) = connect_route_auth(MOQT_22).await;
 		let mut requests = pair.requests.take().unwrap();
 		let (first, _) = pair.client.auth().add("first").await.expect("kept for requests");
-		let broadcast = client_origin.route("room/x", moq_net::origin::RouteOptions::hidden()).unwrap();
-		broadcast.announce(origin::RouteInfo::default().with_auth(first)).unwrap();
+		let broadcast = client_origin
+			.route("room/x", origin::RouteOptions::default().with_auth(first))
+			.unwrap();
 		let first = requests
 			.next()
 			.await
@@ -208,7 +211,7 @@ async fn moqt_22_dropping_the_old_grant_with_its_renewal_keeps_the_announce() {
 		wait_announced(&server_origin.consume(), "room/x", true).await;
 
 		let (second, _) = pair.client.auth().add("second").await.expect("kept for requests");
-		broadcast.announce(origin::RouteInfo::default().with_auth(second)).unwrap();
+		broadcast.set_auth(Some(second)).unwrap();
 		let renewal = requests.next().await.expect("the renewal's token");
 		assert_eq!(renewal.token().as_ref(), b"second");
 		let second = renewal.accept(Grant::all());
@@ -253,8 +256,9 @@ async fn moqt_22_a_revoked_route_auth_remakes_its_announce() {
 		let (first, _) = pair.client.auth().add("first").await.expect("granted");
 		let (token, presented) = tokens.next().await.expect("the AUTH stream's token");
 		assert_eq!(token, b"first");
-		let broadcast = client_origin.route("room/x", moq_net::origin::RouteOptions::hidden()).unwrap();
-		broadcast.announce(origin::RouteInfo::default().with_auth(first)).unwrap();
+		let _route = client_origin
+			.route("room/x", origin::RouteOptions::default().with_auth(first))
+			.unwrap();
 		let (token, carried) = tokens.next().await.expect("the announce's token");
 		assert_eq!(token, b"first");
 		wait_announced(&server_origin.consume(), "room/x", true).await;
@@ -313,8 +317,9 @@ async fn a_route_auth_survives_a_reconnect(version: &'static str) {
 		let mut first = connect_route_auth_on(version, &client_origin, &server_origin, Some(handle.clone())).await;
 		let mut tokens = serve(first.requests.take().unwrap(), |_| Some(Grant::all()));
 		let (token, _) = handle.add("first").await.expect("kept for requests");
-		let broadcast = client_origin.route("room/x", moq_net::origin::RouteOptions::hidden()).unwrap();
-		broadcast.announce(origin::RouteInfo::default().with_auth(token)).unwrap();
+		let _route = client_origin
+			.route("room/x", origin::RouteOptions::default().with_auth(token))
+			.unwrap();
 		let (token, _first) = tokens.next().await.expect("the announce's token");
 		assert_eq!(token, b"first");
 
@@ -339,14 +344,15 @@ async fn a_route_auth_renews_its_announce(version: &'static str) {
 		let mut tokens = serve(pair.requests.take().unwrap(), |_| Some(Grant::all()));
 
 		let (first, _) = pair.client.auth().add("first").await.expect("kept for requests");
-		let broadcast = client_origin.route("room/x", moq_net::origin::RouteOptions::hidden()).unwrap();
-		broadcast.announce(origin::RouteInfo::default().with_auth(first)).unwrap();
+		let route = client_origin
+			.route("room/x", origin::RouteOptions::default().with_auth(first))
+			.unwrap();
 		let (token, _first) = tokens.next().await.expect("the announce's token");
 		assert_eq!(token, b"first");
 		wait_announced(&server_origin.consume(), "room/x", true).await;
 
 		let (second, _) = pair.client.auth().add("second").await.expect("kept for requests");
-		broadcast.announce(origin::RouteInfo::default().with_auth(second)).unwrap();
+		route.set_auth(Some(second)).unwrap();
 		let (token, _second) = tokens.next().await.expect("the renewal's token");
 		assert_eq!(token, b"second");
 		wait_announced(&server_origin.consume(), "room/x", true).await;
@@ -608,12 +614,16 @@ async fn an_out_of_scope_announce_aborts_with_the_path(version: &'static str) {
 		.await;
 
 		// In scope: served, and nothing aborts.
-		let ok = publisher.route("baz/ok", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let ok = publisher
+			.route("baz/ok", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		ok.announce().unwrap();
 		wait_announced(&relay.consume(), "baz/ok", true).await;
 		assert_eq!(pair.client_transport.close_reason(), None);
 
-		let bad = publisher.route("foo/bar", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let bad = publisher
+			.route("foo/bar", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		bad.announce().unwrap();
 		let err = pair.server.closed().await;
 		assert!(
@@ -632,7 +642,9 @@ async fn an_out_of_scope_announce_aborts_with_the_path(version: &'static str) {
 async fn a_broadcast_published_before_the_grant_is_checked(version: &'static str) {
 	within(async {
 		let publisher = produce_origin(2);
-		let early = publisher.route("foo/bar", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let early = publisher
+			.route("foo/bar", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		early.announce().unwrap();
 
 		let pair = connect(Options {
@@ -674,7 +686,9 @@ async fn an_unanswered_token_holds_the_check(version: &'static str) {
 		let auth = pair.client.auth();
 		let pending = kio::clock::sim::spawn(async move { auth.add("new").await });
 		let unanswered = requests.next().await.unwrap();
-		let broadcast = publisher.route("foo/bar", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let broadcast = publisher
+			.route("foo/bar", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		broadcast.announce().unwrap();
 		kio::clock::sleep(Duration::from_secs(1)).await;
 		use futures::FutureExt;
@@ -685,7 +699,9 @@ async fn an_unanswered_token_holds_the_check(version: &'static str) {
 		let _issued = unanswered.accept(grant(&["foo"], &[]));
 		let _token = pending.await.unwrap().unwrap();
 		assert_eq!(granted(&pair.client).await, grant(&["baz", "foo"], &[]));
-		let bad = publisher.route("still-bad", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let bad = publisher
+			.route("still-bad", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		bad.announce().unwrap();
 		assert!(matches!(
 			pair.server.closed().await,
@@ -716,7 +732,9 @@ async fn a_broadcast_withdrawn_while_its_token_waits_is_not_refused(version: &'s
 		let auth = pair.client.auth();
 		let pending = kio::clock::sim::spawn(async move { auth.add("new").await });
 		let unanswered = requests.next().await.unwrap();
-		let withdrawn = publisher.route("foo/bar", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let withdrawn = publisher
+			.route("foo/bar", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		withdrawn.announce().unwrap();
 		kio::clock::sleep(Duration::from_secs(1)).await;
 		withdrawn.withdraw();
@@ -725,7 +743,9 @@ async fn a_broadcast_withdrawn_while_its_token_waits_is_not_refused(version: &'s
 		let _token = pending.await.unwrap().unwrap();
 		assert_eq!(granted(&pair.client).await, grant(&["baz", "other"], &[]));
 		// Still enforcing: the next uncovered broadcast is the one named.
-		let bad = publisher.route("still-bad", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let bad = publisher
+			.route("still-bad", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		bad.announce().unwrap();
 		assert!(matches!(
 			pair.server.closed().await,
@@ -1123,7 +1143,9 @@ async fn exact_and_subtree_grants_admit_their_broadcast(version: &'static str) {
 /// version with AUTH has opened its Auth Stream on both sides.
 async fn connect_announced(version: &'static str) -> (Pair, moq_net::origin::Route) {
 	let client_origin = produce_origin(2);
-	let broadcast = client_origin.route("room/x", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let broadcast = client_origin
+		.route("room/x", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	broadcast.announce().unwrap();
 	let server_origin = produce_origin(1);
 	let pair = connect(Options {
@@ -1140,7 +1162,9 @@ async fn connect_announced(version: &'static str) -> (Pair, moq_net::origin::Rou
 async fn a_live_subscription_survives_union_renewal(version: &'static str) {
 	within(async {
 		let publisher = produce_origin(1);
-		let broadcast = publisher.route("room/x", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let broadcast = publisher
+			.route("room/x", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let published = broadcast.broadcast().create_track("video", timed()).unwrap();
 		broadcast.announce().unwrap();
 		let received = produce_origin(2);
@@ -1210,12 +1234,16 @@ async fn a_revoked_grant_cancels_its_subscriptions(version: &'static str) {
 
 		// The server publishes room/x to the client; the client publishes up/y to the server.
 		let server_origin = produce_origin(1);
-		let down = server_origin.route("room/x", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let down = server_origin
+			.route("room/x", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let down_track = down.broadcast().create_track("video", timed()).unwrap();
 		down.announce().unwrap();
 
 		let client_origin = produce_origin(2);
-		let up = client_origin.route("up/y", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let up = client_origin
+			.route("up/y", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let up_track = up.broadcast().create_track("video", timed()).unwrap();
 		up.announce().unwrap();
 
@@ -1445,7 +1473,9 @@ async fn a_wildcard_grant_is_enforced(version: &'static str) {
 		}
 		assert_eq!(pair.client_transport.close_reason(), None);
 
-		let bad = publisher.route("room/alice/mic", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let bad = publisher
+			.route("room/alice/mic", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		bad.announce().unwrap();
 		assert!(matches!(
 			pair.server.closed().await,
@@ -1466,7 +1496,9 @@ async fn a_wildcard_grant_is_enforced(version: &'static str) {
 async fn nothing_outside_the_grant_reaches_the_peer(version: &'static str) {
 	within(async {
 		let publisher = produce_origin(2);
-		let early = publisher.route("foo/bar", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let early = publisher
+			.route("foo/bar", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		early.announce().unwrap();
 
 		// The relay accepts anything; only the grant it tells the client is narrow.
@@ -1506,7 +1538,9 @@ async fn a_broadcast_received_from_the_peer_is_not_ours_to_check(version: &'stat
 	within(async {
 		let local = produce_origin(2);
 		let relay = produce_origin(1);
-		let remote = relay.route("remote/x", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let remote = relay
+			.route("remote/x", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		remote.announce().unwrap();
 
 		let pair = connect(Options {
@@ -1611,10 +1645,14 @@ async fn a_narrowing_deafens_one_path(version: &'static str) {
 		};
 
 		let relay = produce_origin(1);
-		let audio = relay.route("room/alice/audio", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let audio = relay
+			.route("room/alice/audio", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let audio_track = audio.broadcast().create_track("opus", timed()).unwrap();
 		audio.announce().unwrap();
-		let video = relay.route("room/alice/video", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let video = relay
+			.route("room/alice/video", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let video_track = video.broadcast().create_track("h264", timed()).unwrap();
 		video.announce().unwrap();
 
@@ -1699,10 +1737,14 @@ async fn a_narrowing_aborts_what_the_peer_published(version: &'static str) {
 		};
 
 		let client_origin = produce_origin(2);
-		let mic = client_origin.route("room/bob/mic", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let mic = client_origin
+			.route("room/bob/mic", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let mic_track = mic.broadcast().create_track("opus", timed()).unwrap();
 		mic.announce().unwrap();
-		let cam = client_origin.route("room/bob/cam", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let cam = client_origin
+			.route("room/bob/cam", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let cam_track = cam.broadcast().create_track("h264", timed()).unwrap();
 		cam.announce().unwrap();
 
@@ -1836,7 +1878,9 @@ async fn a_widening_brings_back_a_deafened_path(version: &'static str) {
 		};
 
 		let relay = produce_origin(1);
-		let audio = relay.route("room/alice/audio", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let audio = relay
+			.route("room/alice/audio", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let audio_track = audio.broadcast().create_track("opus", timed()).unwrap();
 		audio.announce().unwrap();
 
@@ -1908,7 +1952,9 @@ async fn a_widening_brings_back_what_the_peer_published(version: &'static str) {
 		};
 
 		let client_origin = produce_origin(2);
-		let mic = client_origin.route("room/bob/mic", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let mic = client_origin
+			.route("room/bob/mic", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let mic_track = mic.broadcast().create_track("opus", timed()).unwrap();
 		mic.announce().unwrap();
 

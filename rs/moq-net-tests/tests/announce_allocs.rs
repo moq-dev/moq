@@ -76,18 +76,23 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
 
-/// A route as `peer` would have announced it: one hop, at `cost`.
-fn peer_route(peer: u64, cost: u64) -> origin::Route {
+/// Land `peer`'s route at `path`, as a session does: one hop, at `cost`.
+fn peer_route(producer: &origin::Producer, path: &'static str, peer: u64, cost: u64) -> origin::Route {
 	let mut hops = Hops::new();
 	hops.push(Hop::new(peer).unwrap()).unwrap();
-	origin::Route::default().with_hops(hops).with_cost(cost)
+	moq_net::fuzz::requests_route(
+		producer,
+		Path::from_static(path),
+		moq_net::fuzz::route_info(hops, cost, None),
+	)
+	.unwrap()
 }
 
 /// Allocations made by a worse route arriving at a watched prefix and leaving
 /// again, with `cursors` cursors rooted at `root` watching it.
 fn churn_allocs(root: &str, cursors: usize) -> usize {
 	let (producer, _driver) = origin::Producer::new(origin::Config::default());
-	let _winner = producer.publish("room/a", peer_route(1, 1)).unwrap();
+	let _winner = peer_route(&producer, "room/a", 1, 1);
 	let all = Patterns::from(Pattern::all());
 	let mut cursors: Vec<_> = (0..cursors)
 		.map(|_| producer.consume().scope(root, &all).unwrap().announced())
@@ -96,7 +101,7 @@ fn churn_allocs(root: &str, cursors: usize) -> usize {
 		while cursor.try_next().is_some() {}
 	}
 
-	let cycle = || drop(producer.publish("room/a", peer_route(2, 5)).unwrap());
+	let cycle = || drop(peer_route(&producer, "room/a", 2, 5));
 	// Reach the steady state first, with every table grown to what it settles at.
 	for _ in 0..4 {
 		cycle();
@@ -247,8 +252,11 @@ async fn a_lite_request_keeps_one_copy_of_its_track_name() {
 		let version: Version = version.parse().unwrap();
 		let (publisher, driver) = origin::Producer::new(origin::Config::new(Hop::new(1).unwrap()));
 		spawn(driver);
-		let broadcast = publisher.publish("room", Default::default()).unwrap();
-		let track = broadcast.create_track(TRACK, track::Info::default()).unwrap();
+		let broadcast = publisher.route("room", origin::RouteOptions::default()).unwrap();
+		let track = broadcast
+			.broadcast()
+			.create_track(TRACK, track::Info::default())
+			.unwrap();
 		let (viewer, driver) = origin::Producer::new(origin::Config::new(Hop::new(2).unwrap()));
 		spawn(driver);
 

@@ -156,7 +156,9 @@ async fn a_subscribe_after_track_status_keeps_timestamps() {
 	for version in ["moq-transport-18", "moq-transport-22"] {
 		kio::clock::timeout(TIMEOUT, async {
 			let publisher = produce_origin(1);
-			let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
+			let broadcast = publisher
+				.route("bcast", moq_net::origin::RouteOptions::hidden())
+				.unwrap();
 			let track = broadcast.broadcast().create_track("video", timed()).unwrap();
 			broadcast.announce().unwrap();
 
@@ -330,10 +332,7 @@ fn write_group(track: &moq_net::track::Producer, sequence: u64) {
 }
 
 /// Publish a live track of groups `0..groups`, which the publisher keeps writing.
-fn publish_live(
-	origin: &moq_net::origin::Producer,
-	groups: u64,
-) -> (moq_net::origin::Route, moq_net::track::Producer) {
+fn publish_live(origin: &moq_net::origin::Producer, groups: u64) -> (moq_net::origin::Route, moq_net::track::Producer) {
 	let broadcast = origin.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
 	let track = broadcast.broadcast().create_track("video", timed()).unwrap();
 	broadcast.announce().unwrap();

@@ -19,7 +19,9 @@ async fn largest_quic_sequence_reaches_the_subscriber() {
 			let publisher = produce_origin(1);
 			let relay = produce_origin(2);
 			let client = produce_origin(3);
-			let broadcast = publisher.route("ladder", moq_net::origin::RouteOptions::hidden()).unwrap();
+			let broadcast = publisher
+				.route("ladder", moq_net::origin::RouteOptions::hidden())
+				.unwrap();
 			let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MICRO);
 			let track = broadcast.broadcast().create_track("data", info).unwrap();
 			broadcast.announce().unwrap();
@@ -86,7 +88,9 @@ async fn wide_sequence_fails_only_its_subscription() {
 	let relay = produce_origin(2);
 	let client = produce_origin(3);
 
-	let broadcast = publisher.route("bench", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let broadcast = publisher
+		.route("bench", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let wide = broadcast.broadcast().create_track("wide", timed()).unwrap();
 	let narrow = broadcast.broadcast().create_track("narrow", timed()).unwrap();
 	broadcast.announce().unwrap();
@@ -146,7 +150,9 @@ async fn a_later_wide_group_fails_only_that_subscription() {
 	let relay = produce_origin(2);
 	let client = produce_origin(3);
 
-	let broadcast = publisher.route("bench", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let broadcast = publisher
+		.route("bench", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let wide = broadcast.broadcast().create_track("wide", timed()).unwrap();
 	let narrow = broadcast.broadcast().create_track("narrow", timed()).unwrap();
 	broadcast.announce().unwrap();

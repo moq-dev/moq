@@ -73,9 +73,12 @@ impl Chain {
 		if let Some(relay) = &relay {
 			links.push(peer(version, relay, &viewer).await);
 		}
-		let broadcast = publisher.route("live", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let broadcast = publisher
+			.route("live", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let source = broadcast
-			.broadcast().create_track("video", Info::default().with_timescale(Timescale::MILLI))
+			.broadcast()
+			.create_track("video", Info::default().with_timescale(Timescale::MILLI))
 			.unwrap();
 		broadcast.announce().unwrap();
 		Self {
@@ -299,9 +302,12 @@ async fn wider_newcomers_after_the_first_pull_nothing_upstream() {
 		.tier(moq_net::stats::Tier::new(moq_net::Path::from_static("upstream")))
 		.session(moq_net::Path::from_static(""));
 	let _upstream = connect_mock(options).await;
-	let broadcast = publisher.route("live", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let broadcast = publisher
+		.route("live", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let source = broadcast
-		.broadcast().create_track("video", Info::default().with_timescale(Timescale::MILLI))
+		.broadcast()
+		.create_track("video", Info::default().with_timescale(Timescale::MILLI))
 		.unwrap();
 	for sequence in 0..GROUPS {
 		let mut group = source.create_group(moq_net::group::Info { sequence }).unwrap();

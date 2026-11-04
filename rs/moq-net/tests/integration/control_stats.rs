@@ -29,9 +29,12 @@ async fn control_classes_cross_lite_and_ietf_sessions_without_counting_payload()
 		options.client_publish = Some(publisher.consume());
 		options.server_subscribe = Some(subscriber.clone());
 		let _pair = connect_mock(options).await;
-		let broadcast = publisher.route("room", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let broadcast = publisher
+			.route("room", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let track = broadcast
-			.broadcast().create_track(
+			.broadcast()
+			.create_track(
 				"video",
 				moq_net::track::Info::default().with_timescale(Timescale::MILLI),
 			)

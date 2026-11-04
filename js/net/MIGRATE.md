@@ -4,6 +4,48 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### One `Origin.Route` handle replaces publications, claims, and prepared answers
+
+`Origin.Producer.createBroadcast`, `requests`, and `requestsRoute`, and the `Origin.Publication`, `Origin.Prepared`, and `Origin.Requests` classes are gone.
+An `Origin.Route` owns what you publish: `origin.route(path, options?)` creates an exact route that owns a new broadcast, and `origin.routePrefix(prefix, options?)` creates a prefix route that yields requests.
+A route is visible at once unless created with `{ hidden: true }`; `announce()` and `withdraw()` toggle it, `announced` says which, and `close()` retracts it and closes its broadcast, as closing the broadcast does.
+Its `instance` is minted when the route is created and kept across `withdraw()` and `announce()`, so a reader continues rather than restarts. A new route is a new stream.
+`RouteOptions` sets what `announce(route)` took: `cost`, `auth`, and a stable `instance` with its `epoch`. Re-price with `setCost(cost)` and swap the credential with `setAuth(auth)`.
+
+```ts
+// Before
+const publication = origin.createBroadcast(path);
+publication.broadcast.createTrack("catalog.json");
+publication.announce({ cost: 5n });
+publication.unannounce();
+
+// After
+const route = origin.route(path, { hidden: true, cost: 5n });
+route.broadcast.createTrack("catalog.json");
+route.announce();
+route.withdraw(); // announce() again continues the same instance
+```
+
+Drop the separate `announce()` call when nothing needs filling first: `origin.route(path)` is already visible.
+A prefix route replaces `requests(prefix)`: iterate `route.requested()` as before, and answer each request with `serve(broadcast)`, `reject(err)`, or `request.route(options?)`, which replaces `prepare()` and `Prepared.publish()`.
+A job's route is visible at once and answers the waiting requesters unless created hidden; a hidden one answers them on `announce()`, and closing it or its broadcast before then refuses them as `Unroutable`.
+
+```ts
+// Before
+using prepared = request.prepare();
+prepared.broadcast.createTrack("video");
+const publication = prepared.publish();
+
+// After
+const job = request.route({ hidden: true });
+job.broadcast.createTrack("video");
+job.announce();
+```
+
+`route.broadcast` throws on a prefix route, and `requested()` ends at once on an exact one.
+The route metadata interface `Origin.Route` is now the read-only `Origin.RouteInfo`, carried on announce events; applications never build one.
+`Origin.Table` exposes `route` and `routePrefix` in place of `createBroadcast`, `requests`, and `requestsRoute`, and `Origin.RequestSlot` and `Origin.RouteEntry` are no longer exported.
+
 ### A timestamp out of range at the track's timescale is a `TimestampMismatch` ([#7702](https://github.com/moq-dev/moq/pull/7702))
 
 A frame or datagram whose timestamp leaves the safe range once converted to the track's timescale is refused at the write with `TimestampMismatch`, as Rust refuses it, rather than with a `RangeError` when it is encoded.

@@ -30,7 +30,7 @@ async fn started(announced: &mut announce::Consumer) -> Instance {
 		.expect("announce hung")
 		.expect("announce ended")
 	{
-		announce::Event::Start(announce) => announce.route.instance.expect("a delivered route has an instance"),
+		announce::Event::Start(announce) => announce.route.instance().clone(),
 		other => panic!("expected a start, got {other:?}"),
 	}
 }
@@ -56,7 +56,10 @@ async fn job_reannounced(version: &str) {
 	let relay = produce_origin(2);
 	let instance: Instance = "job".parse().unwrap();
 	let job = publisher
-		.route("job", moq_net::origin::RouteOptions::default().with_instance(instance.clone(), 0))
+		.route(
+			"job",
+			moq_net::origin::RouteOptions::default().with_instance(instance.clone(), 0),
+		)
 		.unwrap();
 	let _session = link(version, &publisher, &relay).await;
 	let mut announced = relay.consume().announced();

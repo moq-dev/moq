@@ -62,12 +62,12 @@ for (const [name, protocol, routed, timed] of transports) {
 		const cred = credential();
 		const generation = cred.produce();
 		const path = await cred.path("meeting.hang");
-		const broadcastPublication = publisher.createBroadcast(path);
-		const broadcast = broadcastPublication.broadcast;
+		const broadcastRoute = publisher.route(path, { hidden: true, instance: Epoch.instance(generation.epoch) });
+		const broadcast = broadcastRoute.broadcast;
 		const video = await new Protected.Producer(broadcast, generation).createTrack("video", {
 			timescale: Time.Timescale.MILLI,
 		});
-		broadcastPublication.announce({ instance: Epoch.instance(generation.epoch) });
+		broadcastRoute.announce();
 
 		const group = video.appendGroup();
 		await group.writeFrame(ms(1), encoder.encode("keyframe"));
@@ -119,12 +119,12 @@ for (const [name, protocol] of [
 		const cred = credential();
 		const generation = cred.produce();
 		const path = await cred.path("meeting.hang");
-		const broadcastPublication = publisher.createBroadcast(path);
-		const broadcast = broadcastPublication.broadcast;
+		const broadcastRoute = publisher.route(path, { hidden: true, instance: Epoch.instance(generation.epoch) });
+		const broadcast = broadcastRoute.broadcast;
 		const audio = await new Protected.Producer(broadcast, generation).createTrack("audio", {
 			timescale: Time.Timescale.MILLI,
 		});
-		broadcastPublication.announce({ instance: Epoch.instance(generation.epoch) });
+		broadcastRoute.announce();
 
 		// A group first, so the subscription is serving before datagrams, which are never cached.
 		const group = audio.appendGroup();

@@ -57,8 +57,7 @@ test("an unanswered track request is refused with the dropped producer's error",
 test("a lite protocol violation reaches the subscribed track and its open group", async () => {
 	const pair = createMockTransportPair(ALPN_06);
 	const origin = new OriginProducer();
-	const publication = origin.createBroadcast(Path.from("room"));
-	publication.announce();
+	const publication = origin.route(Path.from("room"));
 	const producer = publication.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	producer.appendGroup().writeFrame(textFrame("prefix"));
 	const url = new URL("https://example.com");

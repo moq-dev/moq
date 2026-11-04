@@ -24,7 +24,11 @@ fn registry(broadcasts: usize, tiers: usize) -> Registry {
 	let registry = stats::Registry::new(stats::Config::new());
 	let (producer, driver) = origin::Producer::new(origin::Config::default());
 	let publishers = (0..broadcasts)
-		.map(|i| producer.route(format!("room/{i}"), moq_net::origin::RouteOptions::default()).unwrap())
+		.map(|i| {
+			producer
+				.route(format!("room/{i}"), moq_net::origin::RouteOptions::default())
+				.unwrap()
+		})
 		.collect();
 	let cursors = (0..tiers)
 		.map(|t| {

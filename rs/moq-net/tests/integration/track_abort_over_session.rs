@@ -26,7 +26,9 @@ async fn after_abort(version: &str, hops: u32) {
 	let publisher = produce_origin(1);
 	let relay = produce_origin(2);
 	let far = produce_origin(3);
-	let broadcast = publisher.route("bench", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let broadcast = publisher
+		.route("bench", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let track = broadcast.broadcast().create_track("video", timed()).unwrap();
 	broadcast.announce().unwrap();
 	let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
@@ -77,9 +79,7 @@ abort_test!(abort_06_two, "moq-lite-06", 2);
 async fn recreate(finish: bool) {
 	let origin = produce_origin(1);
 	let broadcast = origin.route("bench", moq_net::origin::RouteOptions::hidden()).unwrap();
-	broadcast
-		.announce(moq_net::origin::RouteInfo::default().with_instance(moq_net::Instance::random(), 0))
-		.unwrap();
+	broadcast.announce().unwrap();
 	let track = broadcast.broadcast().create_track("video", timed()).unwrap();
 	let remote = origin.consume().request("bench", None).await.unwrap();
 	let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();

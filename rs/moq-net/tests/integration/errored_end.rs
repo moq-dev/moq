@@ -78,7 +78,9 @@ async fn an_errored_end_keeps_its_history_across_a_hop() {
 		let label = format!("{name} subscribe_first={subscribe_first}");
 		let version: Version = name.parse().unwrap();
 		let publisher = produce_origin(1);
-		let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let broadcast = publisher
+			.route("bcast", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
 		let mut track = broadcast.broadcast().create_track("video", info).unwrap();
 		broadcast.announce().unwrap();

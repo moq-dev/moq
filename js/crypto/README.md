@@ -36,10 +36,11 @@ const { Broadcast, SecretKey } = Sign;
 
 const key = await SecretKey.generate();
 const path = Path.from(`mesh/${key.public}/agent`);
-const publication = origin.createBroadcast(path);
-const signed = new Broadcast.Producer(publication.broadcast, key, path);
+const route = origin.route(path, { hidden: true });
+// Signs under the route's instance, which readers verify against.
+const signed = new Broadcast.Producer(route.broadcast, key, { path, instance: route.instance });
 const messages = signed.createTrack("messages");
-publication.announce({ instance: signed.instance });
+route.announce();
 
 const group = messages.appendGroup();
 await group.writeFrame(undefined, payload);
@@ -87,15 +88,19 @@ every write is checked against it. `close()` ends the wrapped broadcast.
 import { E2ee } from "@moq/crypto";
 import { Time } from "@moq/net";
 
-const { Broadcast, Credential } = E2ee;
+const { Broadcast, Credential, Epoch } = E2ee;
 
 const credential = new Credential({ context, kid, secret });
 const generation = credential.produce();
-const publication = origin.createBroadcast(await credential.path("meeting.hang"));
-const video = await new Broadcast.Producer(publication.broadcast, generation).createTrack("video", {
+// The route's instance names the generation's epoch, so subscribers find the key.
+const route = origin.route(await credential.path("meeting.hang"), {
+	hidden: true,
+	instance: Epoch.instance(generation.epoch),
+});
+const video = await new Broadcast.Producer(route.broadcast, generation).createTrack("video", {
 	timescale: Time.Timescale.MILLI,
 });
-publication.announce({ epoch: generation.epoch });
+route.announce();
 
 const group = video.appendGroup();
 await group.writeFrame(Time.Timestamp.now(), frame);
@@ -105,8 +110,8 @@ video.close();
 ```
 
 A subscriber follows `credential.path(semantic)` with `origin.follow(path)`. It takes each
-instance's epoch from the broadcast it resolved, `broadcast.epoch` (or from the application's
-channel on a wire without route epochs), so the key always matches the instance it reads. It
+instance's epoch from the broadcast it resolved, `Epoch.of(broadcast)` (or from the application's
+channel on a wire without route instances), so the key always matches the instance it reads. It
 binds the epoch with `credential.consume(epoch)` and wraps the broadcast in a
 `Broadcast.Consumer`. Its
 `subscribe(semantic)` opens the track a decrypted catalog names, and `close()` releases the

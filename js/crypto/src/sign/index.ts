@@ -13,10 +13,10 @@
  * ```ts
  * const key = await SecretKey.generate();
  * const path = Path.from(`mesh/${key.public}/agent`);
- * const publication = origin.createBroadcast(path);
- * const signed = new Broadcast.Producer(publication.broadcast, key, path);
+ * const route = origin.route(path, { hidden: true });
+ * const signed = new Broadcast.Producer(route.broadcast, key, { path, instance: route.instance });
  * const messages = signed.createTrack("messages");
- * publication.announce({ instance: signed.instance });
+ * route.announce();
  *
  * const group = messages.appendGroup();
  * await group.writeFrame(undefined, payload);

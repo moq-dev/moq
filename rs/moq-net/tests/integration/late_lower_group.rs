@@ -83,9 +83,12 @@ async fn read_all(sub: &mut moq_net::track::Subscriber) -> Vec<(u64, usize)> {
 async fn session(version: &str, relay: bool, start: Option<u64>) -> Vec<(u64, usize)> {
 	let version: Version = version.parse().unwrap();
 	let publisher = produce_origin(1);
-	let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let track = broadcast
-		.broadcast().create_track(
+		.broadcast()
+		.create_track(
 			"late",
 			Info::default()
 				.with_timescale(moq_net::Timescale::MILLI)
@@ -155,9 +158,12 @@ async fn session(version: &str, relay: bool, start: Option<u64>) -> Vec<(u64, us
 
 async fn in_process(start: Option<u64>) -> Vec<(u64, usize)> {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let track = broadcast
-		.broadcast().create_track(
+		.broadcast()
+		.create_track(
 			"late",
 			Info::default()
 				.with_timescale(moq_net::Timescale::MILLI)
@@ -208,9 +214,12 @@ async fn an_explicit_floor_receives_a_group_created_below_the_first_served_group
 async fn merged(version: &str) -> (Vec<(u64, usize)>, Vec<(u64, usize)>) {
 	let version: Version = version.parse().unwrap();
 	let publisher = produce_origin(1);
-	let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let track = broadcast
-		.broadcast().create_track(
+		.broadcast()
+		.create_track(
 			"late",
 			Info::default()
 				.with_timescale(moq_net::Timescale::MILLI)

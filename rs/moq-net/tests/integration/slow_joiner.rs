@@ -30,9 +30,12 @@ async fn stalled_read(version: Version, budget: Duration) -> BTreeSet<u64> {
 	let publisher = origin(1);
 	let relay = origin(2);
 	let viewer = origin(3);
-	let broadcast = publisher.route("live", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let broadcast = publisher
+		.route("live", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let source = broadcast
-		.broadcast().create_track("audio", track::Info::default().with_timescale(Timescale::MILLI))
+		.broadcast()
+		.create_track("audio", track::Info::default().with_timescale(Timescale::MILLI))
 		.unwrap();
 	broadcast.announce().unwrap();
 

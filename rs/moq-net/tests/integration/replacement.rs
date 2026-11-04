@@ -82,19 +82,21 @@ async fn replace(version: &str, instance: Option<Instance>) {
 	let publisher = produce_origin(1);
 	let viewer = produce_origin(3);
 
-	let mut route = origin::RouteInfo::default();
-	route.instance = instance.clone();
-	let cam = publisher.publish("cam", route).unwrap();
-	let video = cam.create_track("video", timed()).unwrap();
-	let audio = cam.create_track("audio", timed()).unwrap();
-	let meta = cam.create_track("meta", timed()).unwrap();
+	let options = match &instance {
+		Some(instance) => origin::RouteOptions::default().with_instance(instance.clone(), 0),
+		None => origin::RouteOptions::default(),
+	};
+	let cam = publisher.route("cam", options).unwrap();
+	let video = cam.broadcast().create_track("video", timed()).unwrap();
+	let audio = cam.broadcast().create_track("audio", timed()).unwrap();
+	let meta = cam.broadcast().create_track("meta", timed()).unwrap();
 
 	let _first = link(version, &publisher, &viewer).await;
 	let mut announced = viewer.consume().announced();
 	match next_event(&mut announced).await {
 		announce::Event::Start(announce) => {
 			assert_eq!(announce.prefix.as_str(), "cam");
-			let carried = announce.route.instance.as_ref().expect("every route has an instance");
+			let carried = announce.route.instance();
 			assert_eq!(carried.is_minted(), !carries, "{version}: minted {carried}");
 			if carries && let Some(instance) = &instance {
 				assert_eq!(carried, instance, "{version}: carried instance");
@@ -157,7 +159,7 @@ async fn minted_lite06() {
 		.expect("timed out");
 }
 
-/// lite-07 carries the instance the publication minted, or the stable one it names.
+/// lite-07 carries the instance the route minted, or the stable one it names.
 #[kio::test]
 async fn carried_lite07() {
 	for instance in [None, Some("cam".parse().unwrap())] {
@@ -190,7 +192,9 @@ async fn route_death(version: &str, relayed: bool, wait: Duration) {
 	let relay = produce_origin(2);
 	let viewer = produce_origin(3);
 
-	let cam = publisher.route("cam", moq_net::origin::RouteOptions::default()).unwrap();
+	let cam = publisher
+		.route("cam", moq_net::origin::RouteOptions::default())
+		.unwrap();
 	let video = cam.broadcast().create_track("video", timed()).unwrap();
 
 	let upstream = if relayed { &relay } else { &viewer };

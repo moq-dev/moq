@@ -57,9 +57,8 @@ for (const protocol of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18]) {
 			const fin = holdFin(pair.server);
 			const source = new Producer();
 			const destination = new Producer();
-			const broadcastPublication = source.createBroadcast(Path.from("room"));
-			const broadcast = broadcastPublication.broadcast;
-			broadcastPublication.announce();
+			const broadcastRoute = source.route(Path.from("room"));
+			const broadcast = broadcastRoute.broadcast;
 			const url = new URL("https://localhost/test");
 			const [client, server] = await Promise.all([
 				connect({ url, transport: pair.client, consume: destination }),

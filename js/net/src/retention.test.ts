@@ -81,9 +81,8 @@ async function session(alpn: string) {
 		accept({ transport: pair.server, url, publish: origin.consume() }),
 	]);
 
-	const broadcastPublication = origin.createBroadcast(Path.from("test"));
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce();
+	const broadcastRoute = origin.route(Path.from("test"));
+	const broadcast = broadcastRoute.broadcast;
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
 	const remote = wireOf(client).consume(Path.from("test"));

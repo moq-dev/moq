@@ -135,7 +135,7 @@ fn via_a(announce: &announce::Event) -> bool {
 		| announce::Event::Takeover { announce: a, .. } => &a.route,
 		announce::Event::End(_) => return false,
 	};
-	route.hops.iter().any(|hop| *hop == Hop::new(A).unwrap())
+	route.hops().iter().any(|hop| *hop == Hop::new(A).unwrap())
 }
 
 struct Topology {
@@ -161,11 +161,11 @@ impl Topology {
 		let cdn_b = produce_origin(3);
 		let subscriber = produce_origin(4);
 
-		let broadcast = publisher.route("live", moq_net::origin::RouteOptions::hidden()).unwrap();
-		let track = broadcast.broadcast().create_track("video", timed()).unwrap();
-		broadcast
-			.announce(origin::RouteInfo::default().with_instance(moq_net::Instance::random(), 0))
+		let broadcast = publisher
+			.route("live", moq_net::origin::RouteOptions::hidden())
 			.unwrap();
+		let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+		broadcast.announce().unwrap();
 
 		let pushes = vec![
 			push(lite, &publisher, &cdn_a).await,

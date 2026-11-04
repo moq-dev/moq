@@ -68,7 +68,8 @@ async fn first_frame(version: &str, relays: usize, arrival: Arrival) -> Duration
 
 	let broadcast = nodes[0].route("room", moq_net::origin::RouteOptions::hidden()).unwrap();
 	let track = broadcast
-		.broadcast().create_track(
+		.broadcast()
+		.create_track(
 			"video",
 			moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 		)

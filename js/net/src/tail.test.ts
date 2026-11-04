@@ -26,9 +26,8 @@ async function session(protocol: string) {
 		connect({ url, transport: pair.client }),
 		accept({ transport: pair.server, url, publish: origin.consume() }),
 	]);
-	const broadcastPublication = origin.createBroadcast(Path.from("test"));
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce();
+	const broadcastRoute = origin.route(Path.from("test"));
+	const broadcast = broadcastRoute.broadcast;
 	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const remote = wireOf(client).consume(Path.from("test"));
 	const reader = remote

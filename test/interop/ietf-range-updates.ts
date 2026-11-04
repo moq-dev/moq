@@ -16,7 +16,7 @@ const input: { draft: number; subscribe: number[]; updates: number[][] } = JSON.
 const version = (0xff000000 + input.draft) as IetfVersion;
 const pair = createMockTransportPair(`moqt-${input.draft}`);
 const origin = new OriginProducer();
-const publication = origin.createBroadcast(Path.from("room"));
+const publication = origin.route(Path.from("room"), { hidden: true });
 const track = publication.broadcast.createTrack("video");
 publication.announce();
 const publisher = new Publisher({

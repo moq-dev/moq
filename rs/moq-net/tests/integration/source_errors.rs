@@ -51,7 +51,9 @@ async fn relayed(version: &str) -> Relayed {
 	let publisher = produce_origin(1);
 	let relay = produce_origin(2);
 	let far = produce_origin(3);
-	let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	broadcast.announce().unwrap();
 
 	let mut options = MockConnectOptions::new(version);

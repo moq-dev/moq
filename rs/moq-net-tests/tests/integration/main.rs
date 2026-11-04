@@ -1,5 +1,6 @@
 //! Session tests that need JSON consumers or the hidden peer-claim hooks.
 
+mod hop_limit;
 mod ietf_conformance;
 mod refresh;
 mod restart;

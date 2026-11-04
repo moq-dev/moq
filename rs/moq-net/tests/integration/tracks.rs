@@ -64,7 +64,9 @@ async fn resolve(origin: &moq_net::origin::Producer) -> moq_net::broadcast::Cons
 #[kio::test]
 async fn a_session_lists_its_peers_tracks() {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let a = broadcast.broadcast().create_track("a", None).unwrap();
 	broadcast.announce().unwrap();
 
@@ -94,7 +96,9 @@ async fn a_session_lists_its_peers_tracks() {
 #[kio::test]
 async fn a_listing_carries_track_info() {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let info = moq_net::track::Info::default()
 		.with_timescale(moq_net::Timescale::MILLI)
 		.with_max_age(Duration::from_secs(3))
@@ -127,7 +131,9 @@ async fn a_listing_carries_track_info() {
 #[kio::test]
 async fn a_listed_track_serves_its_cached_group() {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	broadcast.announce().unwrap();
 
 	let (subscriber, _pair) = connect(&publisher, 2, lite07()).await;
@@ -160,7 +166,9 @@ async fn a_listed_track_serves_its_cached_group() {
 #[kio::test]
 async fn a_relay_shares_its_upstream_listing() {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let a = broadcast.broadcast().create_track("a", None).unwrap();
 	broadcast.announce().unwrap();
 
@@ -194,7 +202,9 @@ async fn a_relay_shares_its_upstream_listing() {
 #[kio::test]
 async fn lite06_cannot_list() {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let _a = broadcast.broadcast().create_track("a", None).unwrap();
 	broadcast.announce().unwrap();
 
@@ -211,7 +221,9 @@ async fn lite06_cannot_list() {
 #[kio::test]
 async fn a_listing_past_the_announces_cap_is_reset() {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	const CAP: usize = 10;
 	let _tracks: Vec<_> = (0..CAP)
 		.map(|i| broadcast.broadcast().create_track(format!("t{i}"), None).unwrap())

@@ -119,8 +119,8 @@ async fn relay_chain(version: &str) {
 	let _upstream = link(version, &publisher, &relay).await;
 	let _downstream = link(version, &relay, &viewer).await;
 
-	let old = publisher.publish("live", origin::Route::default()).unwrap();
-	let old_track = old.create_track("video", timed()).unwrap();
+	let old = publisher.route("live", origin::RouteOptions::default()).unwrap();
+	let old_track = old.broadcast().create_track("video", timed()).unwrap();
 	let mut announced = viewer.consume().announced();
 	match next_event(&mut announced).await {
 		announce::Event::Start(announce) => assert_eq!(announce.prefix.as_str(), "live"),
@@ -134,8 +134,8 @@ async fn relay_chain(version: &str) {
 	}
 
 	// The publisher restarts under another instance, its old session still open.
-	let new = publisher.publish("live", origin::Route::default()).unwrap();
-	let new_track = new.create_track("video", timed()).unwrap();
+	let new = publisher.route("live", origin::RouteOptions::default()).unwrap();
+	let new_track = new.broadcast().create_track("video", timed()).unwrap();
 	expect_restart(version, &mut announced, "live").await;
 
 	// The old subscription stays on the old instance.
@@ -174,7 +174,7 @@ relay_chain_tests! {
 /// the hidden `fuzz` module as a session lands it, so its answers carry no exact route.
 struct Worker {
 	origin: origin::Producer,
-	_claim: Rc<origin::Requests>,
+	_claim: Rc<origin::Route>,
 	_outputs: Rc<RefCell<Vec<(broadcast::Producer, track::Producer)>>>,
 }
 
@@ -185,14 +185,18 @@ impl Worker {
 			moq_net::fuzz::requests_route(
 				&origin,
 				moq_net::Path::from_static("pool"),
-				origin::Route::default().with_instance(format!("worker-{hop}").parse().unwrap(), 0),
+				moq_net::fuzz::route_info(
+					moq_net::Hops::new(),
+					0,
+					Some((format!("worker-{hop}").parse().unwrap(), 0)),
+				),
 			)
 			.unwrap(),
 		);
 		let outputs = Rc::new(RefCell::new(Vec::new()));
 		let (handler, served) = (claim.clone(), outputs.clone());
 		drop(kio::clock::sim::spawn(async move {
-			while let Ok(request) = handler.requested_broadcast().await {
+			while let Some(request) = handler.requested().await {
 				let output = broadcast::Info::new().produce();
 				let track = output.create_track("video", timed()).unwrap();
 				write(&track, &format!("{hop}"));
@@ -242,7 +246,7 @@ async fn prefix_pool(version: &str) {
 	// The worker whose instance `D`'s route for `pool` names.
 	let advertised = |announce: announce::Announce| {
 		assert_eq!(announce.prefix.as_str(), "pool");
-		let instance = announce.route.instance.expect("a delivered route has an instance");
+		let instance = announce.route.instance().clone();
 		instance.as_str().strip_prefix("worker-").expect("a worker").to_string()
 	};
 	let mut announced = downstream.consume().announced();
@@ -302,27 +306,32 @@ async fn prefix_pool_lite07() {
 /// claim moves to another instance or re-prices in place, so it lands through the hidden
 /// `fuzz` module as a session lands it.
 struct Claim {
-	dynamic: Rc<origin::Requests>,
+	dynamic: Rc<origin::Route>,
 	outputs: Rc<RefCell<Vec<(broadcast::Producer, track::Producer)>>>,
+	/// The price the claim advertises, kept across an instance move.
+	cost: std::cell::Cell<u64>,
 }
 
 impl Claim {
 	fn new(origin: &origin::Producer, instance: Option<Instance>) -> Self {
-		let mut route = origin::Route::default();
-		route.instance = instance;
+		let route = moq_net::fuzz::route_info(moq_net::Hops::new(), 0, instance.map(|instance| (instance, 0)));
 		let dynamic =
 			Rc::new(moq_net::fuzz::requests_route(origin, moq_net::Path::from_static("live"), route).unwrap());
 		let outputs = Rc::new(RefCell::new(Vec::new()));
 		let (handler, served) = (dynamic.clone(), outputs.clone());
 		drop(kio::clock::sim::spawn(async move {
-			while let Ok(request) = handler.requested_broadcast().await {
+			while let Some(request) = handler.requested().await {
 				let output = broadcast::Info::new().produce();
 				let track = output.create_track("video", timed()).unwrap();
 				request.serve(&output);
 				served.borrow_mut().push((output, track));
 			}
 		}));
-		Self { dynamic, outputs }
+		Self {
+			dynamic,
+			outputs,
+			cost: Default::default(),
+		}
 	}
 
 	/// Write `tag` into the output that answered the `n`th request.
@@ -336,11 +345,14 @@ impl Claim {
 
 	/// Move the claim to `instance` in place, keeping the rest of its route.
 	fn update_instance(&self, instance: Instance) {
-		let route = self.dynamic.route().with_instance(instance, 0);
-		self.update_route(route);
+		let route = moq_net::fuzz::route_info(moq_net::Hops::new(), self.cost.get(), Some((instance, 0)));
+		moq_net::fuzz::update_route(&self.dynamic, route).unwrap();
 	}
 
-	fn update_route(&self, route: origin::Route) {
+	/// Re-price the claim in place, keeping its instance.
+	fn update_cost(&self, cost: u64) {
+		self.cost.set(cost);
+		let route = moq_net::fuzz::route_info(moq_net::Hops::new(), cost, None);
 		moq_net::fuzz::update_route(&self.dynamic, route).unwrap();
 	}
 }
@@ -369,7 +381,7 @@ async fn dynamic_instance(version: &str, from: Option<Instance>, to: Instance) {
 	assert_eq!(read(&mut sticky).await, "old:0", "{version}");
 
 	// A re-price is an update at most: every handle survives.
-	claim.update_route(claim.dynamic.route().with_cost(5));
+	claim.update_cost(5);
 	while let Ok(event) = kio::clock::timeout(Duration::from_secs(1), announced.next()).await {
 		assert!(
 			matches!(event, Some(announce::Event::Update(_))),
@@ -451,17 +463,17 @@ async fn retired_fetch(version: &str, explicit: bool) {
 	let _session = link(version, &publisher, &viewer).await;
 	let (a, b) = instances();
 	let old_route = if explicit {
-		origin::Route::default().with_instance(a, 0)
+		origin::RouteOptions::default().with_instance(a, 0)
 	} else {
-		origin::Route::default()
+		origin::RouteOptions::default()
 	};
 	let new_route = if explicit {
-		origin::Route::default().with_instance(b, 0)
+		origin::RouteOptions::default().with_instance(b, 0)
 	} else {
-		origin::Route::default()
+		origin::RouteOptions::default()
 	};
-	let old = publisher.publish("live", old_route).unwrap();
-	let old_track = old.create_track("video", timed()).unwrap();
+	let old = publisher.route("live", old_route).unwrap();
+	let old_track = old.broadcast().create_track("video", timed()).unwrap();
 	let mut announced = viewer.consume().announced();
 	assert!(matches!(next_event(&mut announced).await, announce::Event::Start(_)));
 	let (held, mut subscription) = subscribe(&viewer, "live").await;
@@ -469,9 +481,10 @@ async fn retired_fetch(version: &str, explicit: bool) {
 	write(&old_track, "old:0");
 	assert_eq!(read(&mut subscription).await, "old:0");
 
-	let replacement = publisher.publish("live", new_route).unwrap();
-	let replacement_track = replacement.create_track("video", timed()).unwrap();
+	let replacement = publisher.route("live", new_route).unwrap();
+	let replacement_track = replacement.broadcast().create_track("video", timed()).unwrap();
 	let _late = replacement
+		.broadcast()
 		.create_track("late", Some(track::Info::default().with_priority(17)))
 		.unwrap();
 	write(&replacement_track, "new:0");
@@ -537,9 +550,9 @@ async fn unanswered_takeover(version: &str) {
 	let publisher = produce_origin(1);
 	let viewer = produce_origin(2);
 	let _session = link(version, &publisher, &viewer).await;
-	let old = publisher.publish("live", origin::Route::default()).unwrap();
+	let old = publisher.route("live", origin::RouteOptions::default()).unwrap();
 	// Quiet, so the publisher has nothing to answer the SUBSCRIBE with yet.
-	let old_track = old.create_track("video", timed()).unwrap();
+	let old_track = old.broadcast().create_track("video", timed()).unwrap();
 	let mut announced = viewer.consume().announced();
 	assert!(matches!(next_event(&mut announced).await, announce::Event::Start(_)));
 	let (_held, mut subscription) = subscribe(&viewer, "live").await;
@@ -549,8 +562,8 @@ async fn unanswered_takeover(version: &str) {
 		"{version}: the SUBSCRIBE reached the old instance"
 	);
 
-	let replacement = publisher.publish("live", origin::Route::default()).unwrap();
-	let replacement_track = replacement.create_track("video", timed()).unwrap();
+	let replacement = publisher.route("live", origin::RouteOptions::default()).unwrap();
+	let replacement_track = replacement.broadcast().create_track("video", timed()).unwrap();
 	write(&replacement_track, "new:0");
 	expect_restart(version, &mut announced, "live").await;
 	write(&old_track, "old:0");
@@ -597,15 +610,15 @@ async fn withdrawal_refuses_new_fetches_but_keeps_open_reads() {
 		let publisher = produce_origin(1);
 		let viewer = produce_origin(2);
 		let _session = link(version, &publisher, &viewer).await;
-		let source = publisher.publish("live", origin::Route::default()).unwrap();
-		let produced = source.create_track("video", timed()).unwrap();
+		let source = publisher.route("live", origin::RouteOptions::default()).unwrap();
+		let produced = source.broadcast().create_track("video", timed()).unwrap();
 		let mut announced = viewer.consume().announced();
 		assert!(matches!(next_event(&mut announced).await, announce::Event::Start(_)));
 		let (held, mut subscription) = subscribe(&viewer, "live").await;
 		let track = held.track("video").unwrap();
 		write(&produced, "old:0");
 		assert_eq!(read(&mut subscription).await, "old:0");
-		source.unannounce();
+		source.withdraw();
 		assert!(matches!(next_event(&mut announced).await, announce::Event::End(_)));
 		assert!(track.fetch_group(1, None).await.is_err(), "{version}");
 		write(&produced, "old:1");
@@ -627,8 +640,8 @@ async fn a_more_specific_source_cannot_fill_a_held_covering_track() {
 		let track = held.track("video").unwrap();
 		old.write(0, "old:0");
 		assert_eq!(read(&mut subscription).await, "old:0");
-		let replacement = publisher.publish("live/job", origin::Route::default()).unwrap();
-		let replacement_track = replacement.create_track("video", timed()).unwrap();
+		let replacement = publisher.route("live/job", origin::RouteOptions::default()).unwrap();
+		let replacement_track = replacement.broadcast().create_track("video", timed()).unwrap();
 		write(&replacement_track, "new:0");
 		write(&replacement_track, "new:1");
 		assert!(matches!(next_event(&mut announced).await, announce::Event::Start(_)));
@@ -641,26 +654,26 @@ async fn a_more_specific_source_cannot_fill_a_held_covering_track() {
 	}
 }
 
-/// A worker claiming `pool` through the public API: each request is prepared under a
-/// fresh instance and published at its exact path, and `outputs[path]` holds the latest.
+/// A worker claiming `pool` through the public API: each request is answered with its own
+/// exact route under a fresh instance, and `outputs[path]` holds the latest.
 struct Pool {
-	_claim: Rc<origin::Requests>,
-	outputs: Rc<RefCell<std::collections::HashMap<String, (origin::Publication, track::Producer)>>>,
+	_claim: Rc<origin::Route>,
+	outputs: Rc<RefCell<std::collections::HashMap<String, (origin::Route, track::Producer)>>>,
 	answered: Rc<RefCell<usize>>,
 }
 
 impl Pool {
 	fn new(origin: &origin::Producer) -> Self {
-		let claim = Rc::new(origin.requests("pool").unwrap());
+		let claim = Rc::new(origin.route_prefix("pool", origin::RouteOptions::default()).unwrap());
 		let outputs = Rc::new(RefCell::new(std::collections::HashMap::new()));
 		let answered = Rc::new(RefCell::new(0));
 		let (handler, served, count) = (claim.clone(), outputs.clone(), answered.clone());
 		drop(kio::clock::sim::spawn(async move {
-			while let Ok(request) = handler.requested_broadcast().await {
+			while let Some(request) = handler.requested().await {
 				let path = request.path().to_string();
-				let prepared = request.prepare().unwrap();
-				let track = prepared.broadcast().create_track("video", timed()).unwrap();
-				let output = prepared.publish().unwrap();
+				let output = request.route(origin::RouteOptions::hidden()).unwrap();
+				let track = output.broadcast().create_track("video", timed()).unwrap();
+				output.announce().unwrap();
 				served.borrow_mut().insert(path, (output, track));
 				*count.borrow_mut() += 1;
 			}
@@ -678,7 +691,7 @@ impl Pool {
 
 	/// End the output at `path`, as a worker does when it restarts that job.
 	fn close(&self, path: &str) {
-		self.outputs.borrow()[path].0.close();
+		self.outputs.borrow()[path].0.broadcast().close();
 	}
 }
 
@@ -775,9 +788,9 @@ async fn priority_update(version: &str, relayed: bool, switch: bool) {
 
 	let (a, b) = instances();
 	let old = publisher
-		.publish("live", origin::Route::default().with_instance(a, 0))
+		.route("live", origin::RouteOptions::default().with_instance(a, 0))
 		.unwrap();
-	let old_track = old.create_track("video", timed()).unwrap();
+	let old_track = old.broadcast().create_track("video", timed()).unwrap();
 	let mut announced = viewer.consume().announced();
 	assert!(
 		matches!(next_event(&mut announced).await, announce::Event::Start(_)),
@@ -790,7 +803,7 @@ async fn priority_update(version: &str, relayed: bool, switch: bool) {
 
 	let _new = switch.then(|| {
 		publisher
-			.publish("live", origin::Route::default().with_instance(b, 0))
+			.route("live", origin::RouteOptions::default().with_instance(b, 0))
 			.unwrap()
 	});
 	if switch {

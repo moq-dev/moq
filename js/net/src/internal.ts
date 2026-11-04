@@ -12,7 +12,7 @@ import type { Datagram } from "./datagram.ts";
 import type { Delivered } from "./delivered.ts";
 import { toStreamCode } from "./error.ts";
 import type { Frame, FrameConsumer, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
-import { isAnonymous, type Route } from "./hop.ts";
+import { isAnonymous, type RouteInfo } from "./hop.ts";
 import type * as Instance from "./instance.ts";
 import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
@@ -121,12 +121,12 @@ export function presented(
  * candidate supersedes. Supersession is decided among what the reader may see, so a higher epoch
  * it cannot see never hides a route it can.
  */
-export function firstEligible<T extends { readonly route: Route; readonly prefix?: Path.Valid }>(
+export function firstEligible<T extends { readonly route: RouteInfo; readonly prefix?: Path.Valid }>(
 	candidates: readonly T[],
 	admits: (candidate: T) => boolean = () => true,
 ): T | undefined {
 	const admitted = candidates.filter(admits);
-	const byPrefix = new Map<Path.Valid | undefined, Route[]>();
+	const byPrefix = new Map<Path.Valid | undefined, RouteInfo[]>();
 	for (const candidate of admitted) {
 		const routes = byPrefix.get(candidate.prefix);
 		if (routes) routes.push(candidate.route);
@@ -688,12 +688,6 @@ export const hooks: {
 	 * mirror is released too: not when its group reads on, or may yet, from another copy.
 	 */
 	evictGroup: (group: GroupConsumer) => boolean;
-	/** Attach the origin advertisement of a created broadcast. */
-	attachAnnouncer: (
-		producer: BroadcastProducer,
-		announcer: { announce(route: Route): void; unannounce(): void; route(): Route | undefined },
-	) => void;
-
 	/** Call `fn` synchronously when an open broadcast closes, from any handle. */
 	onClosed: (producer: BroadcastProducer, fn: () => void) => Dispose;
 	/** Name a broadcast handle by the path an origin created or resolved it at. */
@@ -948,10 +942,6 @@ export const hooks: {
 	evictGroup: () => {
 		throw new Error("group.ts not loaded");
 	},
-	attachAnnouncer: () => {
-		throw new Error("broadcast.ts not loaded");
-	},
-
 	onClosed: () => {
 		throw new Error("broadcast.ts not loaded");
 	},
@@ -1019,7 +1009,7 @@ export function* coveringPrefixes(path: Path.Valid): Generator<Path.Valid> {
  * a higher epoch at the same prefix. An older incarnation of an instance is never eligible,
  * however cheap, since its publisher was replaced.
  */
-export function superseded(route: Route, others: Iterable<Route>): boolean {
+export function superseded(route: RouteInfo, others: Iterable<RouteInfo>): boolean {
 	return new Epochs(others).supersedes(route);
 }
 
@@ -1031,7 +1021,7 @@ export function superseded(route: Route, others: Iterable<Route>): boolean {
 export class Epochs {
 	readonly #highest = new Map<Instance.Valid | undefined, bigint>();
 
-	constructor(routes: Iterable<Route>) {
+	constructor(routes: Iterable<RouteInfo>) {
 		for (const route of routes) {
 			const epoch = route.epoch ?? 0n;
 			if (epoch === 0n) continue;
@@ -1041,14 +1031,14 @@ export class Epochs {
 	}
 
 	/** Whether a route carries `route`'s instance at a higher epoch. */
-	supersedes(route: Route): boolean {
+	supersedes(route: RouteInfo): boolean {
 		const highest = this.#highest.get(route.instance);
 		return highest !== undefined && highest > (route.epoch ?? 0n);
 	}
 }
 
 /** Prefer identified publishers, then lower static cost. */
-export function compareRoutes(a: Route, b: Route): number {
+export function compareRoutes(a: RouteInfo, b: RouteInfo): number {
 	return Number(isAnonymous(a)) - Number(isAnonymous(b)) || (a.cost < b.cost ? -1 : a.cost > b.cost ? 1 : 0);
 }
 
@@ -1060,7 +1050,7 @@ export function compareRoutes(a: Route, b: Route): number {
  * matching `route_order` in rs/moq-net for routes a node did not get from a cluster peer, which
  * is every route here.
  */
-export function compareRouteCandidates(path: Path.Valid, prefix: Path.Valid, a: Route, b: Route): number {
+export function compareRouteCandidates(path: Path.Valid, prefix: Path.Valid, a: RouteInfo, b: RouteInfo): number {
 	const order = compareRoutes(a, b) || a.hops.length - b.hops.length;
 	if (order !== 0 || path === prefix) return order;
 	const ha = spreadHash(path, a.instance ?? "");

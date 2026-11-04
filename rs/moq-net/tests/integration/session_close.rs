@@ -42,7 +42,9 @@ async fn setup(version: &str) -> Setup {
 
 async fn setup_with_gate(version: &str, gate: Option<kio::Consumer<bool>>) -> Setup {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let track = broadcast.broadcast().create_track("video", timed()).unwrap();
 	broadcast.announce().unwrap();
 
@@ -104,7 +106,9 @@ async fn setup_with_gate(version: &str, gate: Option<kio::Consumer<bool>>) -> Se
 async fn track_info_interest_precedes_a_subscription() {
 	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
 		let publisher = produce_origin(1);
-		let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let broadcast = publisher
+			.route("bcast", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let track = broadcast.broadcast().create_track("video", timed()).unwrap();
 		broadcast.announce().unwrap();
 		let subscriber = produce_origin(2);
@@ -226,7 +230,9 @@ async fn abort_cuts_a_drain_short_for(version: &str) {
 async fn close_withdraws_announcements_before_closing_the_transport() {
 	for version in ["moq-lite-01", "moq-lite-07-wip", "moq-transport-18", "moq-transport-22"] {
 		let publisher = produce_origin(1);
-		let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let broadcast = publisher
+			.route("bcast", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		broadcast.announce().unwrap();
 		let subscriber = produce_origin(2);
 		let mut options = MockConnectOptions::new(version.parse().unwrap());
@@ -247,7 +253,9 @@ async fn close_withdraws_announcements_before_closing_the_transport() {
 async fn close_times_out_waiting_for_announcement_acknowledgements() {
 	for version in ["moq-lite-01", "moq-lite-07-wip", "moq-transport-18", "moq-transport-22"] {
 		let publisher = produce_origin(1);
-		let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let broadcast = publisher
+			.route("bcast", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		broadcast.announce().unwrap();
 		let subscriber = produce_origin(2);
 		let mut options = MockConnectOptions::new(version.parse().unwrap());

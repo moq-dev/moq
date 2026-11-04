@@ -585,8 +585,7 @@ async function publishing(version: IetfVersion) {
 		server.abort();
 	});
 
-	const publication = origin.createBroadcast(Path.from("room"));
-	publication.announce();
+	const publication = origin.route(Path.from("room"));
 	const broadcast = publication.broadcast;
 	// Written once, before anyone subscribed, and left open: only the head can deliver it.
 	const catalog = broadcast.createTrack("catalog.json", { timescale: Timescale.MILLI });

@@ -3,7 +3,7 @@ import { type Installed, Manual, Milli, Nano } from "@moq/clock";
 import * as Announce from "../announced.ts";
 import { AuthSession } from "../auth_session.ts";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "../broadcast.ts";
-import { Route } from "../hop.ts";
+import { RouteInfo } from "../hop.ts";
 import * as Instance from "../instance.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -132,7 +132,7 @@ class FakeSession {
 	}
 }
 
-function start(stream: Announce.Producer, prefix: string, route: Route = Route.default) {
+function start(stream: Announce.Producer, prefix: string, route: RouteInfo = RouteInfo.default) {
 	stream.append({ prefix: Path.from(prefix), captures: undefined, kind: "start", route });
 }
 
@@ -411,12 +411,12 @@ for (const [name, instances] of [
 
 		const narrow = origin.announced(Path.Pattern.subtree(Path.from("a/b")));
 		await settle();
-		start(session.stream("a/b/**"), "a/b/x", { ...Route.default, instance: instances[0] });
+		start(session.stream("a/b/**"), "a/b/x", { ...RouteInfo.default, instance: instances[0] });
 		await settle();
 		const broad = origin.announced(Path.Pattern.subtree(Path.from("a")));
 		const events = record(broad);
 		await settle();
-		start(session.stream("a/**"), "a/b/x", { ...Route.default, instance: instances[1] });
+		start(session.stream("a/**"), "a/b/x", { ...RouteInfo.default, instance: instances[1] });
 		await settle();
 		expect(events).toEqual(["start a/b/x"]);
 

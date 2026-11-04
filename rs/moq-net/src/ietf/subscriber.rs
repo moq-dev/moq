@@ -2697,7 +2697,9 @@ impl Subscriber {
 						entry.live = Default::default();
 					}
 					match &mut entry.dynamic {
-						Some(dynamic) => dynamic.poll_requested(waiter).map(|request| Some(request.ok_or(crate::Error::Closed))),
+						Some(dynamic) => dynamic
+							.poll_requested(waiter)
+							.map(|request| Some(request.ok_or(crate::Error::Closed))),
 						None => Poll::Ready(None),
 					}
 				})
@@ -8603,11 +8605,11 @@ mod tests {
 
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-			let source = origin.publish("broadcast", Default::default()).unwrap();
+			let source = origin.route("broadcast", Default::default()).unwrap();
 			let resolved = origin.consume().request("broadcast", None).await.unwrap();
 			let peer = Arc::new(Peer {
 				version,
-				dynamic: Mutex::new(Some(source.requests())),
+				dynamic: Mutex::new(Some(source.broadcast().requests())),
 				park: Default::default(),
 				log: Default::default(),
 			});
@@ -8967,7 +8969,10 @@ mod tests {
 		// What we are publishing to the peer: a real upstream route.
 		let upstream = crate::Hops::try_from(vec![crate::Hop::new(7).unwrap()]).unwrap();
 		let _source = origin
-			.announce("room/host", crate::origin::RouteInfo::default().with_hops(upstream.clone()))
+			.announce(
+				"room/host",
+				crate::origin::RouteInfo::default().with_hops(upstream.clone()),
+			)
 			.unwrap();
 		announced.expect_next_active("room/host").await;
 		let _advertised = publishing.expect_next_active("room/host").await;
@@ -13225,7 +13230,8 @@ mod stitch_tests {
 		let origin = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
 		let broadcast = origin.route("room", crate::origin::RouteOptions::default()).unwrap();
 		let track = broadcast
-			.broadcast().create_track(
+			.broadcast()
+			.create_track(
 				"video",
 				accepted_info(
 					&ietf::Properties {
@@ -13752,7 +13758,8 @@ mod stitch_tests {
 			let origin = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
 			let broadcast = origin.route("room", crate::origin::RouteOptions::default()).unwrap();
 			let track = broadcast
-				.broadcast().create_track("video", accepted_info(&Default::default(), version))
+				.broadcast()
+				.create_track("video", accepted_info(&Default::default(), version))
 				.unwrap();
 			let mut h = Harness::with_timescale(Fill::Done, vec![], None);
 			h.subscriber.version = version;

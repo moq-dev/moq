@@ -1318,7 +1318,8 @@ mod hop_tests {
 		let upstream = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
 		let broadcast = upstream.route("room", crate::origin::RouteOptions::default()).unwrap();
 		let mut track = broadcast
-			.broadcast().create_track("video", track::Info::timed().with_timescale(Timescale::MILLI))
+			.broadcast()
+			.create_track("video", track::Info::timed().with_timescale(Timescale::MILLI))
 			.unwrap();
 		let (downstream, sessions) = test_hop(&upstream, "room", [true, true]).await;
 		let (copy, mut subscriber) = subscribe(&downstream).await;

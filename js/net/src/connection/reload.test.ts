@@ -4,7 +4,7 @@ import { Effect, Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
 import type { Producer as BroadcastProducer } from "../broadcast.ts";
 import { ConnectTimeout, SessionCode, SessionError, StreamCode, toTransport } from "../error.ts";
-import { Route } from "../hop.ts";
+import { RouteInfo } from "../hop.ts";
 import { ALPN as IetfALPN } from "../ietf/version.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair, type MockTransport, textFrame } from "../mock.ts";
@@ -24,9 +24,8 @@ function accept(transport: WebTransport, url: URL, props: Omit<AcceptProps, "tra
 }
 
 function publish(origin: OriginProducer, path: Path.Valid) {
-	const broadcastPublication = origin.createBroadcast(path);
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce();
+	const broadcastRoute = origin.route(path);
+	const broadcast = broadcastRoute.broadcast;
 	return broadcast;
 }
 
@@ -738,9 +737,8 @@ for (const [name, teardown] of Object.entries(teardowns)) {
 		await waitUntil(() => handle.origin.peek() !== undefined);
 		const origin = handle.origin.peek();
 		if (!origin) throw new Error("no origin");
-		const broadcastPublication = origin.createBroadcast(Path.from("room"));
-		const broadcast = broadcastPublication.broadcast;
-		broadcastPublication.announce();
+		const broadcastRoute = origin.route(Path.from("room"));
+		const broadcast = broadcastRoute.broadcast;
 		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 		await waitUntil(() => dials.length > 0);
 		const first = dials[0];
@@ -826,9 +824,8 @@ for (const [name, drainEnd] of Object.entries(drainEnds)) {
 		globalThis.WebTransport = stub as unknown as typeof WebTransport;
 
 		const origin = new OriginProducer();
-		const broadcastPublication = origin.createBroadcast(Path.from("room"));
-		const broadcast = broadcastPublication.broadcast;
-		broadcastPublication.announce();
+		const broadcastRoute = origin.route(Path.from("room"));
+		const broadcast = broadcastRoute.broadcast;
 		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 		const reload = new Reload({
 			url: new URL("https://example.com/a"),
@@ -887,9 +884,8 @@ test("a retired GOAWAY predecessor still closes by its handover cap", async () =
 	globalThis.WebTransport = stub as unknown as typeof WebTransport;
 
 	const origin = new OriginProducer();
-	const broadcastPublication = origin.createBroadcast(Path.from("room"));
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce();
+	const broadcastRoute = origin.route(Path.from("room"));
+	const broadcast = broadcastRoute.broadcast;
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const reload = new Reload({
 		url: new URL("https://example.com/"),
@@ -971,9 +967,8 @@ test("closing the loop keeps the tokens until the session drains", async () => {
 	const origin = new OriginProducer();
 	const reload = new Reload({ url, websocket: { enabled: false }, publish: origin.consume() });
 	await reload.auth.add("token");
-	const broadcastPublication = origin.createBroadcast(Path.from("room"));
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce();
+	const broadcastRoute = origin.route(Path.from("room"));
+	const broadcast = broadcastRoute.broadcast;
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const first = dials[0];
 	if (!first) throw new Error("no first dial");
@@ -1025,7 +1020,7 @@ test("closing an announce consumer during upstream teardown does not append retr
 			prefix: Path.from("alice/camera.hang"),
 			captures: undefined,
 			kind: "start",
-			route: Route.default,
+			route: RouteInfo.default,
 		});
 		await consumer.next();
 		upstream.close();
@@ -1131,7 +1126,7 @@ test("a pump owes the retractions of the upstream it replaces", async () => {
 	const consumer = producer.consume();
 
 	const first = new Announce.Producer();
-	first.append({ prefix: Path.from("a"), captures: undefined, kind: "start", route: Route.default });
+	first.append({ prefix: Path.from("a"), captures: undefined, kind: "start", route: RouteInfo.default });
 	first.synced();
 	const upstream = new Signal(first);
 	const pump = new Effect((effect) => pumpAnnounced(effect, effect.get(upstream).consume(), producer));

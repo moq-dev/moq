@@ -216,8 +216,7 @@ async function measureOn(clock: Manual, { fronts, names: perRoute, routes, histo
 	const publisher = new OriginProducer();
 	const paths = Array.from({ length: fronts }, (_, index) => Path.from(`room/${index}`));
 	const broadcasts: BroadcastProducer[] = paths.map((path) => {
-		const publication = publisher.createBroadcast(path);
-		publication.announce();
+		const publication = publisher.route(path);
 		return publication.broadcast;
 	});
 	const payload = new Uint8Array(PAYLOAD).fill(7);

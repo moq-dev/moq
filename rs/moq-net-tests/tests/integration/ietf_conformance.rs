@@ -30,7 +30,7 @@ async fn routing(version: &str, cluster: bool) {
 	let serving = prefix.clone();
 	let answer = broadcast.consume();
 	kio::clock::sim::spawn(async move {
-		let request = serving.requested_broadcast().await.unwrap();
+		let request = serving.requested().await.unwrap();
 		assert_eq!(request.path().as_str(), NAMESPACE);
 		request.serve(answer);
 	});

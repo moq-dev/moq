@@ -261,7 +261,7 @@ test("serves no catalog until announced, so the first snapshot is the one at ann
 
 // Regression: a re-announce re-created the catalog track, restarting its group sequence under the
 // same instance, so a resumed viewer mistook the new catalog for the old one. Turning the announce off
-// unannounces at once and keeps the broadcast for the next announce.
+// withdraws the route at once and keeps it, broadcast and instance, for the next announce.
 test("a re-announce continues the catalog's group sequence", async () => {
 	const announce = new Signal(true);
 	const broadcast = new Broadcast({
@@ -278,6 +278,8 @@ test("a re-announce continues the catalog's group sequence", async () => {
 	const announced = broadcast.in.origin.peek()?.follow(broadcast.in.name.peek());
 	const first = net.track(Broadcast.CATALOG_TRACK).subscribe().ordered();
 	expect((await first.nextGroup())?.sequence).toBe(0n);
+	const instance = announced?.active.peek()?.instance;
+	expect(instance).toBeDefined();
 
 	announce.set(false);
 	await settle();
@@ -287,7 +289,9 @@ test("a re-announce continues the catalog's group sequence", async () => {
 	announce.set(true);
 	await settle();
 
-	// The same track keeps serving, and its newest group is past the first.
+	// The follower continues the same instance, the same track keeps serving, and its newest group
+	// is past the first.
+	expect(announced?.active.peek()?.instance).toBe(instance);
 	expect(broadcast.net.peek()).toBe(net);
 	const group = await first.nextGroup();
 	expect(group?.sequence).toBeGreaterThan(0);

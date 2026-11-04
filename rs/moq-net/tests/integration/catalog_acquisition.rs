@@ -26,11 +26,11 @@ async fn acquisition(version: &str, carries_instance: bool) {
 	let version: Version = version.parse().unwrap();
 	let publisher = origin(1);
 	let subscriber = origin(2);
-	let broadcast = publisher.route("live", moq_net::origin::RouteOptions::hidden()).unwrap();
-	let mut dynamic = broadcast.broadcast().requests();
-	broadcast
-		.announce(origin::RouteInfo::default().with_instance(moq_net::Instance::random(), 0))
+	let broadcast = publisher
+		.route("live", moq_net::origin::RouteOptions::hidden())
 		.unwrap();
+	let mut dynamic = broadcast.broadcast().requests();
+	broadcast.announce().unwrap();
 	let _old = link(version, &publisher, &subscriber, 100).await;
 	let remote = subscriber
 		.consume()
@@ -41,7 +41,7 @@ async fn acquisition(version: &str, carries_instance: bool) {
 		.unwrap();
 	let mut announced = subscriber.consume().announced();
 	let old_cost = match announced.next().await {
-		Some(moq_net::announce::Event::Start(announce)) => announce.route.cost,
+		Some(moq_net::announce::Event::Start(announce)) => announce.route.cost(),
 		other => panic!("expected the first route, got {other:?}"),
 	};
 	let mut pending = Box::pin(remote.track("catalog.json").unwrap().subscribe(None));
@@ -55,8 +55,8 @@ async fn acquisition(version: &str, carries_instance: bool) {
 	// A replacement under a minted instance restarts the advertisement; a carried one only
 	// updates it.
 	let new_cost = match announced.next().await {
-		Some(moq_net::announce::Event::Update(announce)) if carries_instance => announce.route.cost,
-		Some(moq_net::announce::Event::Restart(announce)) if !carries_instance => announce.route.cost,
+		Some(moq_net::announce::Event::Update(announce)) if carries_instance => announce.route.cost(),
+		Some(moq_net::announce::Event::Restart(announce)) if !carries_instance => announce.route.cost(),
 		other => panic!("{version}: unexpected route change {other:?}"),
 	};
 	assert!(new_cost < old_cost, "the cheaper session wins the route");

@@ -46,8 +46,7 @@ function serve(version: IetfVersion, grant?: Signal<Grant | undefined>, priority
 		requiresSolicitation: false,
 		grant,
 	});
-	const publication = origin.createBroadcast(Path.from("room"));
-	publication.announce();
+	const publication = origin.route(Path.from("room"));
 	const track = publication.broadcast.createTrack("video", { timescale: Timescale.MILLI, priority });
 	const uni = pair.client.incomingUnidirectionalStreams.getReader() as ReadableStreamDefaultReader<
 		ReadableStream<Uint8Array>

@@ -6,7 +6,6 @@
 import { type GetPromise, Once, Signal } from "@moq/signals";
 import { NotFound, StreamCode, StreamError, toStreamCode } from "./error.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
-import type { Route } from "./hop.ts";
 import type * as Instance from "./instance.ts";
 import { hooks } from "./internal.ts";
 import { Listing, listTracks, makeLister, type Tracks } from "./listing.ts";
@@ -17,17 +16,6 @@ import { registerWire, trackOf } from "./wire.ts";
 
 export { Tracks, type TracksEvent } from "./listing.ts";
 
-/** The origin callback a created broadcast uses to advertise its exact path. @internal */
-export interface Announcer {
-	/** Advertise or re-price this broadcast's path. */
-	announce(route: Route): void;
-	/** Retract the advertisement from local consumers and peers alike. */
-	unannounce(): void;
-	/** The route this broadcast's path is advertised with, if it is. */
-	route(): Route | undefined;
-}
-
-let attachAnnouncer: (producer: Producer, announcer: Announcer) => void;
 let stampProducer: (producer: Producer, path: Path.Valid) => void;
 
 // Info lookups pending or held on a track.
@@ -311,7 +299,6 @@ function adopt(state: BroadcastState, producer: track.Producer, info: track.Info
  */
 export class Producer {
 	#state = new BroadcastState();
-	#announcer?: Announcer;
 	#path = Path.empty();
 
 	constructor() {
@@ -327,11 +314,6 @@ export class Producer {
 	}
 
 	static {
-		attachAnnouncer = (producer, announcer) => {
-			producer.#announcer = announcer;
-		};
-		hooks.attachAnnouncer = attachAnnouncer;
-
 		hooks.onClosed = (producer, fn) => {
 			const closers = producer.#state.closers;
 			closers.add(fn);
@@ -408,10 +390,8 @@ export class Producer {
 		return trackOf(name, this);
 	}
 
-	/** End the broadcast for good: retract its route and serve no new tracks. Idempotent. */
+	/** End the broadcast for good: serve no new tracks. Idempotent. */
 	close(): void {
-		this.#announcer?.unannounce();
-		this.#announcer = undefined;
 		closeState(this.#state);
 	}
 }

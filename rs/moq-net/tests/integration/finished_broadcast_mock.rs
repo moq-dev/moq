@@ -39,7 +39,9 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 /// the subscriber read: the frame payloads and the error it ended with, if any.
 async fn round(finish_broadcast: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let track = broadcast.broadcast().create_track("video", timed()).unwrap();
 	broadcast.announce().unwrap();
 

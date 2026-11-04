@@ -58,7 +58,9 @@ struct Published {
 /// Announce one track described by `info`.
 fn publish(info: moq_net::track::Info) -> Published {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let track = broadcast.broadcast().create_track("data", info).unwrap();
 	broadcast.announce().unwrap();
 	Published {
@@ -266,7 +268,9 @@ async fn datagrams_meter_the_bytes_on_the_wire() {
 	for &version in &["moq-lite-07-wip", "moq-lite-06"] {
 		kio::clock::timeout(TIMEOUT, async {
 			let publisher = produce_origin(1);
-			let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
+			let broadcast = publisher
+				.route("bcast", moq_net::origin::RouteOptions::hidden())
+				.unwrap();
 			let mut track = broadcast.broadcast().create_track("data", compressed()).unwrap();
 			broadcast.announce().unwrap();
 
@@ -374,7 +378,9 @@ async fn ietf_fetch_keeps_the_stored_form() {
 	for version in ["moq-transport-18", "moq-transport-22"] {
 		kio::clock::timeout(TIMEOUT, async {
 			let publisher = produce_origin(1);
-			let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
+			let broadcast = publisher
+				.route("bcast", moq_net::origin::RouteOptions::hidden())
+				.unwrap();
 			let track = broadcast.broadcast().create_track("data", compressed()).unwrap();
 			let mut group = track.append_group().unwrap();
 			for index in 0..3 {

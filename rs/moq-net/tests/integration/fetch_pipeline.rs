@@ -54,7 +54,9 @@ async fn fetch_ahead(
 ) {
 	let version: Version = version.parse().unwrap();
 	let publisher = produce_origin(1);
-	let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let mut dynamic = broadcast.broadcast().requests();
 	broadcast.announce().unwrap();
 
@@ -135,7 +137,9 @@ async fn a_refused_info_fails_the_fetch_sent_with_it() {
 async fn first_fetch(version: &str, relays: u64, rtt: Duration) -> Duration {
 	let version: Version = version.parse().unwrap();
 	let publisher = produce_origin(1);
-	let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let track = broadcast.broadcast().create_track("video", timed()).unwrap();
 	broadcast.announce().unwrap();
 	let mut group = track.append_group().unwrap();

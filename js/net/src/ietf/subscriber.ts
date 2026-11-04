@@ -19,7 +19,7 @@ import {
 	unauthorized,
 } from "../error.ts";
 import type * as netGroup from "../group.ts";
-import { Cost, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
+import { Cost, type RouteInfo, routesEqual, UNKNOWN_HOP } from "../hop.ts";
 import * as Instance from "../instance.ts";
 import { finalSequence, hiddenBelow, hooks, maxDelayOf, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import type { Lister } from "../listing.ts";
@@ -119,7 +119,7 @@ type SubscribeSetupState = {
 };
 
 /** An announced path: each live advertisement referencing it, oldest first, and the route it holds. */
-type Announced = { adverts: { id: number; route: Route }[]; route: Route };
+type Announced = { adverts: { id: number; route: RouteInfo }[]; route: RouteInfo };
 
 /** A local announce reader's filter: its scope, the prefix it asked for, and its hidden opt-in. */
 type Filter = { scope: Path.Pattern; prefix: Path.Valid; hidden: boolean; covering: boolean };
@@ -264,7 +264,7 @@ export class Subscriber {
 	}
 
 	// What a route costs once the peer has asked us to leave.
-	#priced(route: Route): Route {
+	#priced(route: RouteInfo): RouteInfo {
 		if (!this.#goingAway()) return route;
 		if (route.cost === DRAIN_COST) return route;
 		return { ...route, cost: DRAIN_COST };
@@ -298,7 +298,7 @@ export class Subscriber {
 	/**
 	 * The route an advertisement carries, before it is minted an instance; one without a path is anonymous and free.
 	 */
-	#route({ cluster }: AdvertParams): Route {
+	#route({ cluster }: AdvertParams): RouteInfo {
 		return cluster === undefined ? { hops: [UNKNOWN_HOP], cost: Cost.zero } : { ...cluster };
 	}
 
@@ -368,7 +368,7 @@ export class Subscriber {
 	 * Record one more advertisement for a path, returning the id that names it. Consumers
 	 * hear `start` for the first; a later one stands as the newest (see `#settleAnnounce`).
 	 */
-	#attachAnnounce(path: Path.Valid, route: Route): number {
+	#attachAnnounce(path: Path.Valid, route: RouteInfo): number {
 		const id = this.#nextAdvert++;
 		const existing = this.#announced.get(path);
 		if (existing) {
@@ -394,7 +394,7 @@ export class Subscriber {
 	}
 
 	/** Replace the route of advertisement `id`, which moves the path only while it is the newest. */
-	#updateAnnounce(path: Path.Valid, id: number, route: Route) {
+	#updateAnnounce(path: Path.Valid, id: number, route: RouteInfo) {
 		const existing = this.#announced.get(path);
 		const advert = existing?.adverts.find((advert) => advert.id === id);
 		if (existing === undefined || advert === undefined) return;

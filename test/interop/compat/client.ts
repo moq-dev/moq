@@ -307,8 +307,14 @@ if (command === "sign") {
 } else if (command === "publish") {
 	install();
 	const origin = new Moq.Origin.Producer();
-	const publication = origin.createBroadcast(Moq.Path.from(args[1]));
-	// Released packages return the fill producer directly; current ones return its publication.
+	const path = Moq.Path.from(args[1]);
+	// Released packages create with `createBroadcast`, which returns the fill producer directly or,
+	// later, its publication; current ones create a route that owns its broadcast.
+	type Released = { createBroadcast(path: Moq.Path.Valid): { announce(): void } };
+	const publication =
+		"route" in origin
+			? origin.route(path, { hidden: true })
+			: (origin as unknown as Released).createBroadcast(path);
 	const broadcast = ("broadcast" in publication ? publication.broadcast : publication) as Moq.Broadcast.Producer;
 	const track = broadcast.createTrack("data", { timescale: Moq.Time.Timescale.MICRO });
 	publication.announce();

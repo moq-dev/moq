@@ -30,9 +30,8 @@ for (const protocol of protocols) {
 			const installed = clock.install();
 			const pair = createMockTransportPair(protocol.alpn);
 			const origin = new Origin();
-			const broadcastPublication = origin.createBroadcast(Path.from("parked"));
-			const broadcast = broadcastPublication.broadcast;
-			broadcastPublication.announce();
+			const broadcastRoute = origin.route(Path.from("parked"));
+			const broadcast = broadcastRoute.broadcast;
 			const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 			const write = (sequence: bigint) => {
 				const group = track.createGroup(sequence);
@@ -153,9 +152,8 @@ for (const protocol of protocols) {
 		const installed = clock.install();
 		const pair = createMockTransportPair(protocol.alpn);
 		const origin = new Origin();
-		const broadcastPublication = origin.createBroadcast(Path.from("parked"));
-		const broadcast = broadcastPublication.broadcast;
-		broadcastPublication.announce();
+		const broadcastRoute = origin.route(Path.from("parked"));
+		const broadcast = broadcastRoute.broadcast;
 		const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 		const write = (sequence: bigint, frames: number) => {
 			const group = track.createGroup(sequence);

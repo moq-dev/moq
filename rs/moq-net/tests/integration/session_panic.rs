@@ -125,7 +125,10 @@ async fn a_panicking_session_leaves_the_others_serving() {
 			.unwrap_or_else(|_| panic!("{version}: the panicked session never closed"));
 
 		// The other session still serves: a fresh announcement reaches the relay.
-		let later = healthy.origin.route("later", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let later = healthy
+			.origin
+			.route("later", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		later.announce().unwrap();
 		until(&mut announced, "later", true).await;
 		crate::support::announced(&relay.consume(), "healthy").await;

@@ -321,13 +321,10 @@ export class Game {
 		const viewerId = Math.random().toString(36).slice(2, 8);
 		this.viewerId.set(viewerId);
 
-		const viewerBroadcastPublication = origin.createBroadcast(
-			Moq.Path.from(this.#viewerPrefix, this.sessionId, viewerId),
-		);
-		const viewerBroadcast = viewerBroadcastPublication.broadcast;
-		viewerBroadcastPublication.announce();
+		const viewerRoute = origin.route(Moq.Path.from(this.#viewerPrefix, this.sessionId, viewerId));
+		const viewerBroadcast = viewerRoute.broadcast;
 		effect.cleanup(() => {
-			viewerBroadcast.close();
+			viewerRoute.close();
 			this.viewerId.set(undefined);
 		});
 

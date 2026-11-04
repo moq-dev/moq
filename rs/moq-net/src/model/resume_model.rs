@@ -458,7 +458,7 @@ impl Model {
 		let track = broadcast.create_track("video", track::Info::timed()).unwrap();
 		let upstream = broadcast.consume();
 		let serving = kio::clock::sim::spawn(async move {
-			while let Ok(request) = kio::wait(|waiter| requests.poll_requested_broadcast(waiter)).await {
+			while let Some(request) = kio::wait(|waiter| requests.poll_requested(waiter)).await {
 				request.serve(&upstream);
 			}
 		});

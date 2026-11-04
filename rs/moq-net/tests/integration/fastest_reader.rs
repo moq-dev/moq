@@ -37,9 +37,12 @@ async fn relay(version: &str) -> Relay {
 	let relay = origin(2);
 	let pair = peer(version.parse::<Version>().unwrap(), &publisher, &relay).await;
 
-	let broadcast = publisher.route("live", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let broadcast = publisher
+		.route("live", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let track = broadcast
-		.broadcast().create_track("data", track::Info::default().with_timescale(moq_net::Timescale::MILLI))
+		.broadcast()
+		.create_track("data", track::Info::default().with_timescale(moq_net::Timescale::MILLI))
 		.unwrap();
 	broadcast.announce().unwrap();
 

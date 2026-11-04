@@ -32,7 +32,7 @@ async function publish(config: Transport): Promise<void> {
 	// Fixture generation stays outside every timed interval.
 	const fixtures = Array.from({ length: config.frames }, (_, frame) => payload(config.size, frame));
 	const origin = new Moq.Origin.Producer();
-	const publication = origin.createBroadcast(Moq.Path.from(config.path));
+	const publication = origin.route(Moq.Path.from(config.path), { hidden: true });
 	const producer = publication.broadcast;
 	// Retention covers the whole run, so a slow consumer cannot lose a group to eviction.
 	const track = producer.createTrack("data", { timescale: Moq.Time.Timescale.MILLI, maxAge: Milli(600_000) });

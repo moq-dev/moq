@@ -44,7 +44,9 @@ async fn connect_datagram_track() -> Fixture {
 	let publisher = produce_origin(1);
 	let consumer_origin = produce_origin(2);
 
-	let broadcast = publisher.route("bench", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let broadcast = publisher
+		.route("bench", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let producer = broadcast.broadcast().create_track("datagrams", timed()).unwrap();
 	broadcast.announce().unwrap();
 
@@ -133,7 +135,9 @@ async fn ietf_delivers_datagrams_on(version: &str) {
 	let publisher = produce_origin(1);
 	let consumer_origin = produce_origin(2);
 
-	let broadcast = publisher.route("bench", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let broadcast = publisher
+		.route("bench", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let mut producer = broadcast.broadcast().create_track("datagrams", timed()).unwrap();
 	broadcast.announce().unwrap();
 

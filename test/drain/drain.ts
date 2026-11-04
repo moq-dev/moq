@@ -109,11 +109,11 @@ await new Promise<void>((resolve, reject) => {
 
 // ── publisher on B ────────────────────────────────────────────────────────────
 const published = new Moq.Origin.Producer();
-const broadcastPublication = published.createBroadcast(path);
-const broadcast = broadcastPublication.broadcast;
+const broadcastRoute = published.route(path, { hidden: true });
+const broadcast = broadcastRoute.broadcast;
 const track = broadcast.createTrack(trackName, { timescale: Moq.Time.Timescale.MILLI });
 // The instance the publication mints is what says B's route serves the same stream as A's.
-broadcastPublication.announce();
+broadcastRoute.announce();
 const publisher = new Moq.Connection({
 	url: new URL(`http://127.0.0.1:${bPort}/`),
 	publish: published.consume(),

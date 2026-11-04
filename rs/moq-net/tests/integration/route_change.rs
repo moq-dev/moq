@@ -118,11 +118,11 @@ impl Topology {
 		let relay_b = produce_origin(3);
 		let subscriber = produce_origin(4);
 
-		let broadcast = publisher.route("live", moq_net::origin::RouteOptions::hidden()).unwrap();
-		let track = broadcast.broadcast().create_track("video", timed()).unwrap();
-		broadcast
-			.announce(origin::RouteInfo::default().with_instance(moq_net::Instance::random(), 0))
+		let broadcast = publisher
+			.route("live", moq_net::origin::RouteOptions::hidden())
 			.unwrap();
+		let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+		broadcast.announce().unwrap();
 
 		let p_to_a = link(version, &publisher, &relay_a).await;
 		let p_to_b = link(version, &publisher, &relay_b).await;
@@ -387,14 +387,15 @@ async fn route_dies_across_instances(version: &str, trigger: Trigger) {
 	let relay_b = produce_origin(4);
 	let relay = produce_origin(5);
 	let downstream = produce_origin(6);
-	let broadcast_a = publisher_a.route("live", moq_net::origin::RouteOptions::default()).unwrap();
-	let broadcast_b = publisher_b.route("live", moq_net::origin::RouteOptions::default()).unwrap();
+	let broadcast_a = publisher_a
+		.route("live", moq_net::origin::RouteOptions::default())
+		.unwrap();
+	let broadcast_b = publisher_b
+		.route("live", moq_net::origin::RouteOptions::default())
+		.unwrap();
 	let track_a = broadcast_a.broadcast().create_track("video", timed()).unwrap();
 	let track_b = broadcast_b.broadcast().create_track("video", timed()).unwrap();
-	assert_ne!(
-		broadcast_a.route().unwrap().instance,
-		broadcast_b.route().unwrap().instance
-	);
+	assert_ne!(broadcast_a.instance(), broadcast_b.instance());
 
 	let p_to_a = link(version, &publisher_a, &relay_a).await;
 	let _p_to_b = link(version, &publisher_b, &relay_b).await;
@@ -441,8 +442,8 @@ async fn route_dies_across_instances(version: &str, trigger: Trigger) {
 			announce::Event::Restart(announce) => {
 				assert_eq!(announce.prefix.as_str(), "live");
 				assert_eq!(
-					announce.route.instance,
-					broadcast_b.route().unwrap().instance,
+					announce.route.instance(),
+					&broadcast_b.instance(),
 					"{version} {trigger:?}: restarted onto the wrong instance"
 				);
 			}
@@ -496,7 +497,7 @@ async fn better_route_restarts(version: &str) {
 	match announced.next().await.expect("announced") {
 		announce::Event::Restart(announce) => {
 			assert_eq!(announce.prefix.as_str(), "live");
-			assert_eq!(announce.route.hops.len(), 1, "{version}: the direct route");
+			assert_eq!(announce.route.hops().len(), 1, "{version}: the direct route");
 		}
 		other => panic!("{version}: expected a restart, got {other:?}"),
 	}
@@ -678,9 +679,7 @@ async fn lagging_route_dies(version: Version) {
 	);
 	let broadcast = p.route("live", moq_net::origin::RouteOptions::hidden()).unwrap();
 	let track = broadcast.broadcast().create_track("video", timed()).unwrap();
-	broadcast
-		.announce(origin::RouteInfo::default().with_instance(moq_net::Instance::random(), 0))
-		.unwrap();
+	broadcast.announce().unwrap();
 	let p_a = lagged(version, &p, &a, Duration::from_millis(300)).await;
 	let p_b = lagged(version, &p, &b, Duration::ZERO).await;
 	let a_r = lagged(version, &a, &r, Duration::ZERO).await;
@@ -767,9 +766,7 @@ async fn undetected_outage(budget: Duration) -> BTreeMap<u64, Vec<String>> {
 	);
 	let broadcast = p.route("live", moq_net::origin::RouteOptions::hidden()).unwrap();
 	let track = broadcast.broadcast().create_track("video", timed()).unwrap();
-	broadcast
-		.announce(origin::RouteInfo::default().with_instance(moq_net::Instance::random(), 0))
-		.unwrap();
+	broadcast.announce().unwrap();
 	let p_o = link(version, &p, &o).await;
 	let o_m1 = link(version, &o, &m1).await;
 	let o_m2 = link(version, &o, &m2).await;
@@ -902,9 +899,11 @@ async fn redundant_pair_follows_the_next_instance(version: &str, loss: Loss) {
 	let mut replicas = Vec::new();
 	for (name, hop, cost) in [("P1", 1, 1), ("P2", 2, 5)] {
 		let publisher = produce_origin(hop);
-		let broadcast = publisher.route("live", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let broadcast = publisher
+			.route("live", origin::RouteOptions::hidden().with_cost(cost))
+			.unwrap();
 		let track = broadcast.broadcast().create_track("video", timed()).unwrap();
-		broadcast.announce(origin::RouteInfo::default().with_cost(cost)).unwrap();
+		broadcast.announce().unwrap();
 		let link = link(version, &publisher, &subscriber).await;
 		replicas.push(Replica {
 			name,
@@ -1015,7 +1014,9 @@ async fn replaced_behind_a_relay(version: &str) {
 	let mut replicas = Vec::new();
 	for (name, hop, cost) in [("P1", 1, None), ("P2", 2, Some(1_000))] {
 		let publisher = produce_origin(hop);
-		let broadcast = publisher.route("live", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let broadcast = publisher
+			.route("live", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let track = broadcast.broadcast().create_track("video", timed()).unwrap();
 		broadcast.announce().unwrap();
 		let link = priced_link(version, &publisher, &relay, cost).await;
@@ -1108,13 +1109,17 @@ async fn compression_changes_behind_a_relay(compress: bool) {
 	let mut replicas = Vec::new();
 	for (name, hop, cost, compress) in [("P1", 1, None, true), ("P2", 2, Some(1_000), compress)] {
 		let publisher = produce_origin(hop);
-		let broadcast = publisher.route("live", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let broadcast = publisher
+			.route(
+				"live",
+				origin::RouteOptions::hidden().with_instance(instance.clone(), 0),
+			)
+			.unwrap();
 		let track = broadcast
-			.broadcast().create_track("video", timed().with_compress(compress))
+			.broadcast()
+			.create_track("video", timed().with_compress(compress))
 			.unwrap();
-		broadcast
-			.announce(origin::RouteInfo::default().with_instance(instance.clone(), 0))
-			.unwrap();
+		broadcast.announce().unwrap();
 		let link = priced_link(version, &publisher, &relay, cost).await;
 		replicas.push(Replica {
 			name,
@@ -1204,11 +1209,11 @@ async fn producer_replaced(version: &str) {
 	let relay = produce_origin(2);
 	let subscriber = produce_origin(3);
 
-	let broadcast = publisher.route("live", moq_net::origin::RouteOptions::hidden()).unwrap();
-	let mut dynamic = broadcast.broadcast().requests();
-	broadcast
-		.announce(origin::RouteInfo::default().with_instance(moq_net::Instance::random(), 0))
+	let broadcast = publisher
+		.route("live", moq_net::origin::RouteOptions::hidden())
 		.unwrap();
+	let mut dynamic = broadcast.broadcast().requests();
+	broadcast.announce().unwrap();
 	let (tx, mut producers) = mpsc::unbounded();
 	kio::clock::sim::spawn(async move {
 		while let Ok(request) = dynamic.requested_track().await {

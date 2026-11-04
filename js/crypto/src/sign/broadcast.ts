@@ -15,23 +15,32 @@ import * as Track from "./track.ts";
 /**
  * The publishing side of a signed broadcast.
  *
- * Mints a fresh instance, so a restart never signs a sequence an earlier instance already signed.
- * Announce the wrapped broadcast with {@link instance} on its route.
+ * Signs under the instance of the route that serves it, which a route mints fresh, so a restart
+ * never signs a sequence an earlier instance already signed.
  */
 export class Producer {
-	/** The instance this producer signs under, to announce on the broadcast's route. */
-	readonly instance: Instance.Valid = Instance.random();
+	/** The instance this producer signs under: the route's that serves the broadcast. */
+	readonly instance: Instance.Valid;
 	#inner: NetBroadcast.Producer;
 	#key: SecretKey;
 	#path: Path.Valid;
 	// Each track's lowest unsigned sequence, kept across the track's replacements.
 	#sequences = new Map<string, Track.Sequences>();
 
-	/** Sign `inner` with `key`, as the broadcast at application path `path`, taking ownership of it: {@link close} ends it. */
-	constructor(inner: NetBroadcast.Producer, key: SecretKey, path: Path.Valid) {
+	/**
+	 * Sign `inner` with `key`, as the broadcast at application path `path` served under `instance`,
+	 * taking ownership of it: {@link close} ends it. Pass the instance of the route that serves it,
+	 * such as `route.instance` for the route that owns `inner`.
+	 */
+	constructor(
+		inner: NetBroadcast.Producer,
+		key: SecretKey,
+		{ path, instance }: { path: Path.Valid; instance: Instance.Valid },
+	) {
 		this.#inner = inner;
 		this.#key = key;
 		this.#path = path;
+		this.instance = instance;
 	}
 
 	/** Settles with `null` once the wrapped broadcast closes, as `@moq/net`'s `closed` does. */

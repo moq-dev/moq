@@ -22,7 +22,9 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 
 /// Close a published broadcast and check what `reader`'s origin answers afterwards.
 async fn close_then_lookup(publisher: moq_net::origin::Producer, reader: moq_net::origin::Producer) {
-	let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let _track = broadcast.broadcast().create_track("video", None).unwrap();
 	broadcast.announce().unwrap();
 

@@ -172,7 +172,9 @@ async fn a_refetch_within_the_linger_stays_on_the_relay(version: &str) {
 	let relay = produce_origin(2);
 	let _pair = peer(version, &publisher, &relay).await;
 
-	let broadcast = publisher.route("room", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let broadcast = publisher
+		.route("room", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let mut dynamic = broadcast.broadcast().requests();
 	broadcast.announce().unwrap();
 	kio::clock::sleep(Duration::from_secs(1)).await;

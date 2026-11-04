@@ -130,7 +130,11 @@ fn requests() {
 		let (producer, mut driver) = origin::Producer::new(origin::Config::default());
 		let consumer = producer.consume();
 		let _pubs: Vec<_> = (0..1000)
-			.map(|i| producer.route(format!("{s}/{i}"), moq_net::origin::RouteOptions::default()).unwrap())
+			.map(|i| {
+				producer
+					.route(format!("{s}/{i}"), moq_net::origin::RouteOptions::default())
+					.unwrap()
+			})
 			.collect();
 		let _covering = producer.route(s, moq_net::origin::RouteOptions::default()).unwrap();
 		let waiter = kio::Waiter::noop();
@@ -171,7 +175,11 @@ fn fanout() {
 		let (producer, _driver) = origin::Producer::new(origin::Config::default());
 		let consumer = producer.consume();
 		let _pubs: Vec<_> = (0..100)
-			.map(|i| producer.route(format!("room/{i}"), moq_net::origin::RouteOptions::default()).unwrap())
+			.map(|i| {
+				producer
+					.route(format!("room/{i}"), moq_net::origin::RouteOptions::default())
+					.unwrap()
+			})
 			.collect();
 		let mut cursors: Vec<announce::Consumer> = (0..100).map(|_| consumer.announced()).collect();
 		for cursor in &mut cursors {

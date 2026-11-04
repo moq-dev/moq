@@ -133,7 +133,9 @@ async fn a_cold_relay_syncs_then_forwards_upstream_routes_as_live() {
 	assert!(announced.try_next().is_none());
 
 	let upstream = produce_origin(1);
-	let broadcast = upstream.route("room/cam", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let broadcast = upstream
+		.route("room/cam", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	broadcast.announce().unwrap();
 	let mut options = MockConnectOptions::new(version);
 	options.server_publish = Some(upstream.consume());

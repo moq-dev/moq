@@ -24,8 +24,9 @@ async fn json_snapshot_refresh_crosses_a_two_relay_cluster() {
 		let a = origin(2);
 		let b = origin(3);
 		let reader = origin(4);
-		let broadcast = source.create_broadcast("room").unwrap();
+		let broadcast = source.route("room", origin::RouteOptions::hidden()).unwrap();
 		let track = broadcast
+			.broadcast()
 			.create_track(
 				"state",
 				track::Info::default()
@@ -34,7 +35,7 @@ async fn json_snapshot_refresh_crosses_a_two_relay_cluster() {
 			)
 			.unwrap();
 		let mut producer = snapshot::Producer::<Value>::new(track.clone(), Default::default());
-		broadcast.announce(Default::default()).unwrap();
+		broadcast.announce().unwrap();
 		let mut links = vec![peer(version, &a, &b).await];
 		for (upstream, downstream) in [(&source, &a), (&b, &reader)] {
 			let mut options = MockConnectOptions::new(version);
@@ -154,11 +155,12 @@ async fn ratio_joins_cross_two_relays() {
 		let source = origin(1);
 		let a = origin(2);
 		let b = origin(3);
-		let broadcast = source.create_broadcast("room").unwrap();
+		let broadcast = source.route("room", origin::RouteOptions::hidden()).unwrap();
 		let producer = broadcast
+			.broadcast()
 			.create_track("data", track::Info::default().with_refresh(1))
 			.unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		broadcast.announce().unwrap();
 		let mut links = Vec::new();
 		for (upstream, downstream) in [(&source, &a), (&a, &b)] {
 			let mut options = MockConnectOptions::new(version);

@@ -6533,8 +6533,13 @@ mod tests {
 		let origin = origin::Config::new(relay).produce();
 		let assigned = crate::Hop::new(777).unwrap();
 
-		let local = origin.route("room/host", crate::origin::RouteOptions::default()).unwrap();
-		let track = local.broadcast().create_track("video", crate::track::Info::timed()).unwrap();
+		let local = origin
+			.route("room/host", crate::origin::RouteOptions::default())
+			.unwrap();
+		let track = local
+			.broadcast()
+			.create_track("video", crate::track::Info::timed())
+			.unwrap();
 		let mut group = track.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"local".as_ref()).unwrap();
 		group.finish().unwrap();

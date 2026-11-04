@@ -13,11 +13,8 @@ import { type AcceptProps, accept as acceptSession } from "./index.ts";
 import { Connection, resetShared } from "./pool.ts";
 import { Reload } from "./reload.ts";
 
-function publish(origin: Pick<Table, "createBroadcast">, path: Path.Valid) {
-	const broadcastPublication = origin.createBroadcast(path);
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce();
-	return broadcast;
+function publish(origin: Pick<Table, "route">, path: Path.Valid) {
+	return origin.route(path).broadcast;
 }
 
 const url = new URL("https://example.com/pool");
@@ -262,7 +259,7 @@ test("a borrowed connection origin exposes live routes and dynamic serving", asy
 			announcement = event;
 		});
 		const prefix = Path.from("on-demand");
-		const route = table.requestsRoute(prefix);
+		const route = table.routePrefix(prefix);
 		await advance();
 		expect(announcement).toMatchObject({ kind: "start", prefix });
 		let withdrawal: unknown;

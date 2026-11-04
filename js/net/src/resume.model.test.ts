@@ -17,7 +17,7 @@ import fc from "fast-check";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { NotFound, StreamCode, StreamError, TooFarBehind } from "./error.ts";
 import type { Frame, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
-import { HopSchema, Route } from "./hop.ts";
+import { HopSchema, RouteInfo } from "./hop.ts";
 import * as Instance from "./instance.ts";
 import { hooks } from "./internal.ts";
 import { type Consumer as OriginConsumer, Producer as OriginProducer, type Requesting } from "./origin.ts";
@@ -447,7 +447,7 @@ class Model {
 	up(instance: number, slot: number): void {
 		const publisher = this.instances[instance];
 		if (publisher.routes[slot]) return;
-		const route = Route.normalize({
+		const route = RouteInfo.normalize({
 			instance: INSTANCES[instance],
 			hops: [HopSchema.parse(BigInt(10 * (instance + 1) + slot))],
 			// The second instance's routes all undercut the first's.

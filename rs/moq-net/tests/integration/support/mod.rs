@@ -3,6 +3,7 @@
 pub mod harness;
 pub mod mock;
 
+use futures::channel::mpsc;
 use moq_net::{announce, goaway, origin, track};
 
 /// Wait until anyone wants the track, returning the group they want.
@@ -38,6 +39,51 @@ pub async fn announced(consumer: &origin::Consumer, path: &str) -> origin::Route
 			_ => {}
 		}
 	}
+}
+
+/// The kind of an [`announce::Event`] for a prefix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
+pub enum Kind {
+	Start,
+	Update,
+	Restart,
+	Takeover,
+	End,
+}
+
+/// Every update per prefix the watcher has seen. Await [`kio::clock::sim::idle`]
+/// first, so every link, hold and quarantine in the mesh has settled.
+#[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
+pub fn drain(watched: &mut mpsc::UnboundedReceiver<(String, Kind)>) -> std::collections::HashMap<String, Vec<Kind>> {
+	let mut updates = std::collections::HashMap::<String, Vec<Kind>>::new();
+	while let Ok((prefix, kind)) = watched.try_recv() {
+		updates.entry(prefix).or_default().push(kind);
+	}
+	updates
+}
+
+/// Watch `announced` from its own task, the way a session's announce writer does:
+/// it runs when woken, between the relays' own tasks, rather than only once the
+/// test task is polled again, which would coalesce every intermediate update.
+#[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
+pub fn watch(mut announced: announce::Consumer) -> mpsc::UnboundedReceiver<(String, Kind)> {
+	let (tx, rx) = mpsc::unbounded();
+	kio::clock::sim::spawn(async move {
+		while let Some(event) = announced.next().await {
+			let (kind, announce) = match event {
+				announce::Event::Start(announce) => (Kind::Start, announce),
+				announce::Event::Update(announce) => (Kind::Update, announce),
+				announce::Event::Restart(announce) => (Kind::Restart, announce),
+				announce::Event::Takeover { announce, .. } => (Kind::Takeover, announce),
+				announce::Event::End(announce) => (Kind::End, announce),
+			};
+			if tx.unbounded_send((announce.prefix.to_string(), kind)).is_err() {
+				break;
+			}
+		}
+	});
+	rx
 }
 
 /// Reads of the peer's GOAWAY over [`goaway::Consumer::poll`].

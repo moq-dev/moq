@@ -56,7 +56,7 @@ for (const { track, group, timescale, frames } of input.rust) {
 
 // Groups signed through the JS wrappers, tapped raw off the net broadcast.
 const inner = new Broadcast.Producer();
-const signed = new Signed.Producer(inner, key, path);
+const signed = new Signed.Producer(inner, key, { path, instance: Instance.random() });
 const producers = new Map<string, Track.Producer>();
 const taps = new Map<string, NetTrack.Subscriber>();
 const js: Group[] = [];

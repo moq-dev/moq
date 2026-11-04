@@ -44,9 +44,8 @@ async function roundTrip(wire: Wire, timescale: Timescale | undefined, timestamp
 		accept({ transport: pair.server, url, version: wire.version, publish: origin.consume() }),
 	]);
 
-	const broadcastPublication = origin.createBroadcast(Path.from("test"));
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce();
+	const broadcastRoute = origin.route(Path.from("test"));
+	const broadcast = broadcastRoute.broadcast;
 	// Every request is answered, including the TRACK lookup lite-05+ makes before subscribing.
 	const serving = (async () => {
 		for (;;) {
@@ -115,9 +114,8 @@ test("a forwarded untimed track stays untimed", async () => {
 		connect({ url, transport: downstream.client }),
 	]);
 
-	const broadcastPublication = source.createBroadcast(Path.from("test"));
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce();
+	const broadcastRoute = source.route(Path.from("test"));
+	const broadcast = broadcastRoute.broadcast;
 	const serving = (async () => {
 		for (;;) {
 			const request = await wireOf(broadcast).requested();
@@ -130,7 +128,7 @@ test("a forwarded untimed track stays untimed", async () => {
 
 	// Serve the downstream session from the upstream one through a copy the forwarding
 	// node produces.
-	const dynamic = relay.requestsRoute(Path.from("test"));
+	const dynamic = relay.routePrefix(Path.from("test"));
 	const inputs: BroadcastConsumer[] = [];
 	const forwarding = (async () => {
 		for await (const request of dynamic.requested()) {
@@ -191,9 +189,8 @@ for (const wire of WIRES.filter((wire) => wire.name === "lite-06" || wire.name =
 			accept({ transport: pair.server, url, publish: origin.consume() }),
 		]);
 
-		const broadcastPublication = origin.createBroadcast(Path.from("test"));
-		const broadcast = broadcastPublication.broadcast;
-		broadcastPublication.announce();
+		const broadcastRoute = origin.route(Path.from("test"));
+		const broadcast = broadcastRoute.broadcast;
 		const producer = broadcast.createTrack("video", {});
 		const subscriber = wireOf(client).consume(Path.from("test")).track("video").subscribe();
 

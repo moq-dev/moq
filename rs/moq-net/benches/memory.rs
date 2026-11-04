@@ -147,10 +147,17 @@ impl Link {
 			}
 		);
 
-		let broadcast = publisher.route("bench", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let broadcast = publisher
+			.route("bench", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let info = track::Info::default().with_timescale(moq_net::Timescale::MILLI);
 		let tracks: Vec<_> = (0..streams)
-			.map(|index| broadcast.broadcast().create_track(format!("{index}"), info.clone()).unwrap())
+			.map(|index| {
+				broadcast
+					.broadcast()
+					.create_track(format!("{index}"), info.clone())
+					.unwrap()
+			})
 			.collect();
 		broadcast.announce().unwrap();
 

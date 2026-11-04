@@ -13,10 +13,10 @@ for (const downstream of [ALPN_06, ALPN_07_WIP]) {
 		const installed = clock.install();
 		const source = new Producer();
 		const destination = new Producer();
-		const broadcastPublication = source.createBroadcast(Path.from("compressed"));
-		const broadcast = broadcastPublication.broadcast;
+		const broadcastRoute = source.route(Path.from("compressed"), { hidden: true });
+		const broadcast = broadcastRoute.broadcast;
 		const track = broadcast.createTrack("data", { compress: true });
-		broadcastPublication.announce();
+		broadcastRoute.announce();
 		const peers: { abort(): void }[] = [];
 		async function link(publish: Producer, consume: Producer, alpn: string) {
 			const pair = createMockTransportPair(alpn);

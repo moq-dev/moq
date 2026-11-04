@@ -31,7 +31,9 @@ async fn an_empty_group_arrives_empty() {
 		let subscriber = produce_origin(2);
 		let _pair = peer(version.parse::<Version>().unwrap(), &publisher, &subscriber).await;
 
-		let broadcast = publisher.route("room", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let broadcast = publisher
+			.route("room", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let track = broadcast.broadcast().create_track("data", timed()).unwrap();
 		broadcast.announce().unwrap();
 

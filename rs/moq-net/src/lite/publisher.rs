@@ -1175,7 +1175,11 @@ impl AnnounceRun {
 
 	/// The chain and cost to put on the wire for `route`, or `None` when it must
 	/// not be forwarded.
-	fn outgoing(&self, route: &crate::origin::RouteInfo, absolute: &crate::Path) -> Option<(Hops, crate::origin::Cost)> {
+	fn outgoing(
+		&self,
+		route: &crate::origin::RouteInfo,
+		absolute: &crate::Path,
+	) -> Option<(Hops, crate::origin::Cost)> {
 		let mut hops = route.hops.clone();
 
 		// A route that already passed through us is a reflection. The origin
@@ -2899,7 +2903,11 @@ mod announce_test {
 		drop(removed);
 		let mut churn = Vec::new();
 		for limit in 1..=4 {
-			churn.push(origin.announce(format!("a/{limit}"), origin::RouteInfo::default()).unwrap());
+			churn.push(
+				origin
+					.announce(format!("a/{limit}"), origin::RouteInfo::default())
+					.unwrap(),
+			);
 			*budget.write().ok().unwrap() = limit;
 			assert!(run.poll(&mut stream, &consumer, &mut announced, &waiter).is_pending());
 		}
@@ -3439,7 +3447,11 @@ mod announce_test {
 	#[kio::test]
 	async fn clamped_cost_change_is_quiet() {
 		let mut h = harness().await;
-		let route = |cost| crate::origin::RouteInfo::default().with_hops(pub_hops()).with_cost(cost);
+		let route = |cost| {
+			crate::origin::RouteInfo::default()
+				.with_hops(pub_hops())
+				.with_cost(cost)
+		};
 		h.announcement.update(route(u64::MAX)).unwrap();
 		kio::clock::sleep(crate::origin::Config::default().update_hold).await;
 		settle().await;
@@ -7181,7 +7193,10 @@ mod serve_group_test {
 			for warm in [false, true] {
 				let publisher = origin(1);
 				let broadcast = publisher.route("room", crate::origin::RouteOptions::hidden()).unwrap();
-				let mut track = broadcast.broadcast().create_track("test", crate::track::Info::timed()).unwrap();
+				let mut track = broadcast
+					.broadcast()
+					.create_track("test", crate::track::Info::timed())
+					.unwrap();
 				track.start_at(0).unwrap();
 				broadcast.announce().unwrap();
 				let relay = origin(2);
@@ -8712,7 +8727,10 @@ mod tests {
 		let version = Version::Lite07;
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
-		let _track = broadcast.broadcast().create_track("video", crate::track::Info::timed()).unwrap();
+		let _track = broadcast
+			.broadcast()
+			.create_track("video", crate::track::Info::timed())
+			.unwrap();
 		broadcast.announce().unwrap();
 		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
 		peer_setup.set(crate::lite::Setup::default());
@@ -8769,7 +8787,10 @@ mod tests {
 					let case = format!("{version:?}, {close:?}, blocked {blocked}");
 					let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 					let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
-					let track = broadcast.broadcast().create_track("video", crate::track::Info::timed()).unwrap();
+					let track = broadcast
+						.broadcast()
+						.create_track("video", crate::track::Info::timed())
+						.unwrap();
 					broadcast.announce().unwrap();
 
 					let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
@@ -9238,7 +9259,10 @@ mod tests {
 	async fn a_cold_bounded_fetch_requests_the_prefix() {
 		let origin = crate::origin::Config::new(Hop::new(1).unwrap()).produce();
 		let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
-		let track = broadcast.broadcast().create_track("video", track::Info::timed()).unwrap();
+		let track = broadcast
+			.broadcast()
+			.create_track("video", track::Info::timed())
+			.unwrap();
 		let dynamic = track.requests();
 		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
 		peer_setup.set(crate::lite::Setup::default());
@@ -9285,7 +9309,10 @@ mod tests {
 		const VERSION: Version = Version::Lite07;
 		let origin = crate::origin::Config::new(Hop::new(1).unwrap()).produce();
 		let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
-		let track = broadcast.broadcast().create_track("video", track::Info::timed()).unwrap();
+		let track = broadcast
+			.broadcast()
+			.create_track("video", track::Info::timed())
+			.unwrap();
 		broadcast.announce().unwrap();
 		let mut open = track.append_group().unwrap();
 		open.write_frame(crate::Timestamp::ZERO, b"a".to_vec()).unwrap();

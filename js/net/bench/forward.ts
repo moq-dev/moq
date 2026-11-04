@@ -10,7 +10,7 @@ import { AuthSession } from "../src/auth_session.ts";
 import { Producer as BroadcastProducer } from "../src/broadcast.ts";
 import type { Established } from "../src/connection/established.ts";
 import { forwardAnnounced } from "../src/connection/forward.ts";
-import { Route } from "../src/hop.ts";
+import { RouteInfo } from "../src/hop.ts";
 import { Producer } from "../src/origin.ts";
 import * as Path from "../src/path.ts";
 import { registerWire } from "../src/wire.ts";
@@ -52,7 +52,7 @@ class FakeSession {
 }
 
 const announce = (stream: Announce.Producer, prefix: Path.Valid, cost: bigint, kind: "start" | "update") =>
-	stream.append({ prefix, captures: undefined, kind, route: Route.normalize({ cost }) });
+	stream.append({ prefix, captures: undefined, kind, route: RouteInfo.normalize({ cost }) });
 
 console.log("touched,heads,routes,update_us");
 for (const touched of ["covering", "single"] as const) {

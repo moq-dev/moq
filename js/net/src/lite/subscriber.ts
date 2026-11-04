@@ -20,7 +20,7 @@ import {
 	unauthorized,
 } from "../error.ts";
 import * as netGroup from "../group.ts";
-import { Cost, type Hop, MAX_HOPS, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
+import { Cost, type Hop, MAX_HOPS, type RouteInfo, routesEqual, UNKNOWN_HOP } from "../hop.ts";
 import * as Instance from "../instance.ts";
 import { hiddenBelow, hooks, maxDelayOf, minDelayOf, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import type { Lister } from "../listing.ts";
@@ -390,7 +390,7 @@ export class Subscriber {
 		// retract that one's state.
 		type Advertisement = {
 			live: boolean;
-			route: Route;
+			route: RouteInfo;
 			captures: Path.Pattern[] | undefined;
 		};
 		// Each holds one of the session's announce slots, reflected and hidden ones included.
@@ -702,7 +702,7 @@ export class Subscriber {
 					});
 					continue;
 				}
-				const route: Route = { instance, epoch, hops: fullHops, cost: this.#cost(cost) };
+				const route: RouteInfo = { instance, epoch, hops: fullHops, cost: this.#cost(cost) };
 				const captures = scopeCaptures(scope, path);
 				if (!visible(path)) {
 					advertised.set(path, { live: false, route, captures });

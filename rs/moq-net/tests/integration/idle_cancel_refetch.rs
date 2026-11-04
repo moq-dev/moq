@@ -21,9 +21,12 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 #[kio::test]
 async fn a_group_cut_by_an_idle_cancel_is_refetched_whole() {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let track = broadcast
-		.broadcast().create_track("audio", moq_net::track::Info::default().with_timescale(None))
+		.broadcast()
+		.create_track("audio", moq_net::track::Info::default().with_timescale(None))
 		.unwrap();
 	broadcast.announce().unwrap();
 

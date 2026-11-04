@@ -36,11 +36,11 @@ const websocket = certificate === "websocket";
 if (!websocket) install();
 
 const origin = new Moq.Origin.Producer();
-const broadcastPublication = origin.createBroadcast(Moq.Path.from("room"));
-const broadcast = broadcastPublication.broadcast;
+const broadcastRoute = origin.route(Moq.Path.from("room"), { hidden: true });
+const broadcast = broadcastRoute.broadcast;
 const low = broadcast.createTrack("low");
 const high = broadcast.createTrack("high");
-broadcastPublication.announce();
+broadcastRoute.announce();
 
 const session = await Moq.Connection.connect({
 	url: new URL(address),

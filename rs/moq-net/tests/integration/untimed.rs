@@ -110,7 +110,9 @@ async fn next_frame(subscriber: &mut track::Subscriber) -> Option<Timestamp> {
 async fn frame_through(hops: &[&str], info: track::Info) -> (Option<Timestamp>, track::Info) {
 	let timestamp = info.timescale.map(|_| millis(7));
 	let chain = Chain::new(hops).await;
-	let broadcast = chain.nodes[0].route("room", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let broadcast = chain.nodes[0]
+		.route("room", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let mut producer = broadcast.broadcast().create_track("data", info).unwrap();
 	broadcast.announce().unwrap();
 	kio::clock::sleep(Duration::from_secs(1)).await;
@@ -176,7 +178,9 @@ async fn a_relay_forwards_an_untimed_track_untimed() {
 async fn an_explicit_start_holds_on_an_untimed_track() {
 	for version in ["moq-lite-03", "moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {
 		let chain = Chain::new(&[version]).await;
-		let broadcast = chain.nodes[0].route("room", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let broadcast = chain.nodes[0]
+			.route("room", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let mut producer = broadcast.broadcast().create_track("data", untimed()).unwrap();
 		broadcast.announce().unwrap();
 		for _ in 0..5 {
@@ -211,7 +215,9 @@ async fn an_explicit_start_holds_on_an_untimed_track() {
 async fn datagrams_arrive_as_published() {
 	for version in ["moq-lite-05", "moq-lite-07-wip", "moq-transport-22"] {
 		let chain = Chain::new(&[version]).await;
-		let broadcast = chain.nodes[0].route("room", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let broadcast = chain.nodes[0]
+			.route("room", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let mut producer = broadcast.broadcast().create_track("data", untimed()).unwrap();
 		broadcast.announce().unwrap();
 		kio::clock::sleep(Duration::from_secs(1)).await;
@@ -238,7 +244,9 @@ async fn datagrams_arrive_as_published() {
 async fn a_fetched_untimed_frame_arrives_untimed() {
 	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-18"] {
 		let chain = Chain::new(&[version]).await;
-		let broadcast = chain.nodes[0].route("room", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let broadcast = chain.nodes[0]
+			.route("room", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let mut dynamic = broadcast.broadcast().requests();
 		broadcast.announce().unwrap();
 		kio::clock::sleep(Duration::from_secs(1)).await;

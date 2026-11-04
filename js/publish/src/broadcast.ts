@@ -33,7 +33,7 @@ export type BroadcastInput = {
 	// see or subscribe to it. The flip rather than a gate on creating it: tracks can be
 	// populated while this is false, then announced once ready. The catalog is served from the
 	// first announce, so its first snapshot is the one current at announce time.
-	// Turning it off unannounces the broadcast.
+	// Turning it off withdraws the route, and turning it back on continues the same stream.
 	announce: Getter<boolean>;
 
 	// The broadcast name.
@@ -441,13 +441,13 @@ export class Broadcast {
 			);
 		}
 
-		// Creating into the origin outlives any single session: a reconnect re-announces the
-		// broadcast and new subscriptions land on the same producer.
-		const broadcastPublication = origin.createBroadcast(name);
-		const broadcast = broadcastPublication.broadcast;
-		// The publication mints one instance, kept across unannounce and announce, so a restart
-		// is a new stream rather than a resume into the old one.
-		effect.cleanup(() => broadcast.close());
+		// Routing into the origin outlives any single session: a reconnect re-announces the
+		// broadcast and new subscriptions land on the same producer. Hidden until the catalog is
+		// served. The route mints one instance, kept across withdraw and announce, so toggling
+		// `announce` continues the same stream for viewers; a new route is a new stream.
+		const route = origin.route(name, { hidden: true });
+		const broadcast = route.broadcast;
+		effect.cleanup(() => route.close());
 
 		// Expose it before serving so an application reacting to `net` can insert its own tracks.
 		this.#net.set(broadcast);
@@ -480,7 +480,7 @@ export class Broadcast {
 		let serving = false;
 		effect.run((inner) => {
 			if (!inner.get(this.in.announce)) {
-				broadcastPublication.unannounce();
+				route.withdraw();
 				return;
 			}
 
@@ -507,7 +507,7 @@ export class Broadcast {
 				this.catalog.serve(track, effect);
 			}
 
-			broadcastPublication.announce();
+			route.announce();
 		});
 
 		// Static tracks fan out to every subscriber. The encoder-facing handle stays set while the

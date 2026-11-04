@@ -23,9 +23,8 @@ try {
 			for (let rep = 0; rep < reps; rep++) {
 				const origins = Array.from({ length: publishers }, () => {
 					const origin = new OriginProducer();
-					const broadcastPublication = origin.createBroadcast(Path.from("bench"));
-					const broadcast = broadcastPublication.broadcast;
-					broadcastPublication.announce();
+					const broadcastRoute = origin.route(Path.from("bench"));
+					const broadcast = broadcastRoute.broadcast;
 					const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 					for (let sequence = 0n; sequence < BigInt(groups); sequence++) {
 						const group = track.createGroup(sequence);

@@ -7,10 +7,9 @@ async function main() {
 	const origin = new Moq.Origin.Producer();
 	const connection = await Moq.Connection.connect({ url, publish: origin.consume() });
 
-	// Create a broadcast (a collection of tracks) at a path on the origin
-	const broadcastPublication = origin.createBroadcast(Moq.Path.from("my-broadcast"));
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce();
+	// Route a path on the origin. The route owns a broadcast (a collection of tracks) and announces it.
+	const route = origin.route(Moq.Path.from("my-broadcast"));
+	const broadcast = route.broadcast;
 
 	// Create the "chat" track up front. A subscriber is served directly from this
 	// track, no requested() round-trip needed. Mirrors Rust's create_track.

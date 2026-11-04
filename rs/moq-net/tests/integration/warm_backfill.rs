@@ -65,9 +65,12 @@ async fn a_newcomer_on_a_warm_relay_gets_the_backfill() {
 		let publisher = origin(1);
 		let relay = origin(2);
 		let _link = peer(version.parse::<Version>().unwrap(), &publisher, &relay).await;
-		let broadcast = publisher.route("live", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let broadcast = publisher
+			.route("live", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let source = broadcast
-			.broadcast().create_track("video", Info::default().with_timescale(Timescale::MILLI))
+			.broadcast()
+			.create_track("video", Info::default().with_timescale(Timescale::MILLI))
 			.unwrap();
 		for sequence in 0..GROUPS {
 			let mut group = source.create_group(moq_net::group::Info { sequence }).unwrap();
@@ -96,9 +99,12 @@ async fn a_refused_transport_backfill_keeps_delivering_live() {
 		let publisher = origin(1);
 		let relay = origin(2);
 		let _link = peer(version.parse::<Version>().unwrap(), &publisher, &relay).await;
-		let broadcast = publisher.route("live", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let broadcast = publisher
+			.route("live", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let source = broadcast
-			.broadcast().create_track("video", Info::default().with_timescale(Timescale::MILLI))
+			.broadcast()
+			.create_track("video", Info::default().with_timescale(Timescale::MILLI))
 			.unwrap();
 		for sequence in 0..GROUPS {
 			let mut group = source.create_group(sequence.into()).unwrap();

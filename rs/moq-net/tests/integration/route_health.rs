@@ -56,9 +56,7 @@ async fn silent_kill(budget: Duration, detect: Duration) -> Vec<u64> {
 	);
 	let broadcast = p.route("live", moq_net::origin::RouteOptions::hidden()).unwrap();
 	let track = broadcast.broadcast().create_track("video", timed()).unwrap();
-	broadcast
-		.announce(origin::RouteInfo::default().with_instance(moq_net::Instance::random(), 0))
-		.unwrap();
+	broadcast.announce().unwrap();
 	let p_o = link(version, &p, &o).await;
 	let o_m1 = link(version, &o, &m1).await;
 	let o_m2 = link(version, &o, &m2).await;
@@ -193,9 +191,7 @@ async fn payload_stall(stall: Stall, span: Duration) -> (Observed, Observed) {
 	);
 	let broadcast = p.route("live", moq_net::origin::RouteOptions::hidden()).unwrap();
 	let track = broadcast.broadcast().create_track("video", timed()).unwrap();
-	broadcast
-		.announce(origin::RouteInfo::default().with_instance(moq_net::Instance::random(), 0))
-		.unwrap();
+	broadcast.announce().unwrap();
 	let p_o = link(version, &p, &o).await;
 	let o_m1 = link(version, &o, &m1).await;
 	let o_m2 = link(version, &o, &m2).await;

@@ -49,7 +49,9 @@ struct Setup {
 
 async fn setup(version: Version) -> Setup {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.route("room", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let broadcast = publisher
+		.route("room", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let track = broadcast.broadcast().create_track("video", timed()).unwrap();
 	broadcast.announce().unwrap();
 

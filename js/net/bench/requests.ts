@@ -28,9 +28,8 @@ for (const touched of ["watched", "unrelated"])
 			const origin = new Producer();
 			const path = Path.from("room/0");
 			const broadcasts = Array.from({ length: routes }, (_, i) => {
-				const broadcastPublication = origin.createBroadcast(Path.from(`room/${i}`));
-				const broadcast = broadcastPublication.broadcast;
-				broadcastPublication.announce();
+				const broadcastRoute = origin.route(Path.from(`room/${i}`));
+				const broadcast = broadcastRoute.broadcast;
 				return broadcast;
 			});
 			const requests = Array.from({ length: followers }, () => origin.follow(path));
@@ -41,9 +40,8 @@ for (const touched of ["watched", "unrelated"])
 			for (let round = 0; round < 6; round++) {
 				const start = performance.now();
 				for (let i = 0; i < 128; i++) {
-					const nextPublication = origin.createBroadcast(touched === "watched" ? path : Path.from("other"));
-					const next = nextPublication.broadcast;
-					nextPublication.announce();
+					const nextRoute = origin.route(touched === "watched" ? path : Path.from("other"));
+					const next = nextRoute.broadcast;
 					if (touched === "watched") {
 						current.close();
 						current = next;
@@ -73,7 +71,7 @@ console.log("unrelated,waiters,cancel_us");
 for (const unrelated of [8, 128, 2048])
 	for (const waiters of [1, 8, 32]) {
 		const origin = new Producer();
-		origin.requestsRoute(Path.from("pending"));
+		origin.routePrefix(Path.from("pending"));
 		const held = Array.from({ length: unrelated }, (_, i) => origin.request(Path.from(`pending/${i}`)));
 		const wire = wireOf(origin.consume());
 		const samples: number[] = [];
@@ -141,9 +139,9 @@ for (const failovers of [0, 1, 16, 128])
 			const sources: Broadcast[] = [];
 			for (let i = 0; i < failovers; i++) {
 				const instance = Instance.random();
-				const primary = origin.requestsRoute(prefix, { instance, cost: 0n });
+				const primary = origin.routePrefix(prefix, { instance, cost: 0n });
 				const ar = primary.requested();
-				const br = origin.requestsRoute(prefix, { instance, cost: 1n }).requested();
+				const br = origin.routePrefix(prefix, { instance, cost: 1n }).requested();
 				const held = origin.request(path);
 				const source = new Broadcast();
 				sources.push(source);
@@ -153,8 +151,8 @@ for (const failovers of [0, 1, 16, 128])
 				entries.push({ primary, ar, br, held });
 			}
 			const instance = Instance.random();
-			origin.requestsRoute(prefix, { instance });
-			for (let i = 0; i < extraRoutes; i++) origin.requestsRoute(prefix, { instance, cost: BigInt(i + 1) });
+			origin.routePrefix(prefix, { instance });
+			for (let i = 0; i < extraRoutes; i++) origin.routePrefix(prefix, { instance, cost: BigInt(i + 1) });
 			const pending = [];
 			for (const entry of entries) {
 				entry.primary.close();
@@ -216,7 +214,7 @@ for (const operation of ["cancel-forward", "cancel-reverse", "drain-local"])
 			const settled: number[] = [];
 			for (let round = 0; round < 4; round++) {
 				const origin = new Producer();
-				const dynamic = origin.requestsRoute(Path.from("pending"));
+				const dynamic = origin.routePrefix(Path.from("pending"));
 				const requests = dynamic.requested();
 				const wire = wireOf(origin.consume());
 				const names = Array.from({ length: paths }, (_, i) => Path.from(`pending/${i}`));
@@ -274,7 +272,7 @@ for (const survivor of [false, true])
 				const origin = new Producer();
 				const prefix = Path.from("competing");
 				const path = Path.from("competing/touched");
-				for (let i = 0; i < routes; i++) origin.requestsRoute(prefix, { cost: BigInt(i) });
+				for (let i = 0; i < routes; i++) origin.routePrefix(prefix, { cost: BigInt(i) });
 				const wire = wireOf(origin.consume());
 				const kept = survivor ? new AbortController() : undefined;
 				const remaining = kept ? wire.demand(path, undefined, kept.signal).catch(() => {}) : undefined;
@@ -314,9 +312,8 @@ for (const [version, alpn] of [
 			const sources = [];
 			for (const prefix of ["a", "b"])
 				for (let i = 0; i < namespaces; i++) {
-					const sourcePublication = origin.createBroadcast(Path.from(`${prefix}/${i}`));
-					const source = sourcePublication.broadcast;
-					sourcePublication.announce();
+					const sourceRoute = origin.route(Path.from(`${prefix}/${i}`));
+					const source = sourceRoute.broadcast;
 					sources.push(source);
 				}
 			const peers = await Promise.all(

@@ -47,7 +47,7 @@ const connection = await Moq.Connection.connect({
 	publish: origin.consume(),
 });
 try {
-	const publication = origin.createBroadcast(Moq.Path.from(path));
+	const publication = origin.route(Moq.Path.from(path), { hidden: true });
 	const broadcast = publication.broadcast;
 	const renditions: { video: Record<string, Catalog.VideoConfig>; audio: Record<string, Catalog.AudioConfig> } = {
 		video: {},
