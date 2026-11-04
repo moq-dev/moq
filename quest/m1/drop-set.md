@@ -155,6 +155,13 @@ Still to cover, beyond the memory work:
   copy with no media time asks a fill below the start even for a reader whose
   budget the publisher already exceeded. If the extra FETCH shows up in relay
   traffic, bound it with a run below the start carrying its budget.
+- **Re-serve an expired stream on an update.** A lite-07 group whose stream
+  the publisher reset as OLD is dropped again under every later update
+  (`TrackRun::expired`, `expired` in the JS run loop), even when the new
+  terms would serve it: the cursor already handed it out (`Delivered` has no
+  removal) and its consumer latched the expiry. Once the disposition record
+  above records it as a stale run instead, an update re-offers it like any
+  other.
 - **A fill's stale verdict is final for everyone.** `TrackState::drop_unfed`
   (`rs/moq-net/src/model/track/fill.rs`) records what a fill's source gave up
   as a budget-independent drop, including OLD judged under that fill's own

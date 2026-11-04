@@ -4122,6 +4122,8 @@ struct TrackRun {
 	// Lite-07 groups whose stream expired as stale, which every update drops again under its
 	// number: the subscriber reopens each stale drop then, and the stream already reset.
 	expired: RangeSet<u64>,
+	// The expired runs an update owes a drop again, sent as ranges on the next poll.
+	redrop: RangeSet<u64>,
 	end_sent: bool,
 	// Lite-07 with every range bounded: once every group in its ranges is given up, it is
 	// answered without a group to resolve its start, rather than left unanswered.
@@ -4185,6 +4187,7 @@ impl TrackRun {
 			skipped: RangeMap::new(),
 			update: 0,
 			expired: RangeSet::new(),
+			redrop: RangeSet::new(),
 			end_sent: false,
 			served,
 			datagrams,
@@ -4217,15 +4220,10 @@ impl TrackRun {
 		if self.ctx.version.has_skip() {
 			let reopened = self.track.reoffer_stale();
 			self.owe(reopened);
-			// A stream already reset as stale is not served again: dropped again below.
+			// A stream already reset as stale is not served again: dropped again, by run, on
+			// the next poll.
 			let expired = std::mem::take(&mut self.expired);
-			let mut dropped = self.ctx.outcomes.dropped.lock().unwrap();
-			dropped.extend(
-				expired
-					.iter()
-					.flat_map(|run| run.clone())
-					.map(|sequence| (sequence, StreamError::Old)),
-			);
+			self.redrop.extend(expired.iter().cloned());
 		}
 		// Every update restates the wanted group. Past our largest it is a join, which
 		// repeats the pending ask; at or below it the group already exists.
@@ -4399,6 +4397,14 @@ impl TrackRun {
 					err => Hole::drop(err),
 				};
 				writer.buffer(&self.hole(sequence..=sequence, &hole))?;
+			}
+			return Poll::Ready(Ok(ControlFlow::Continue(())));
+		}
+		if !self.redrop.is_empty() {
+			let hole = Hole::stale(self.track.budget());
+			for run in std::mem::take(&mut self.redrop).iter() {
+				writer.buffer(&self.hole(run.start..=run.end - 1, &hole))?;
+				self.expired.insert(run.clone());
 			}
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
 		}
@@ -6929,6 +6935,47 @@ mod serve_group_test {
 				assert_eq!(run.ctx.outcomes.opened.load(Ordering::Relaxed), opened, "{case}: {why}");
 				assert_eq!(drop_updates(&mut writer, &log, version).await, drops, "{case}: {why}");
 			}
+		}
+	}
+
+	/// A group whose stream expired as stale is dropped again under every later update on
+	/// lite-07, by run, since the subscriber reopens each stale drop and the stream already
+	/// reset. Earlier versions' drops are final.
+	#[kio::test]
+	async fn an_update_drops_expired_streams_again_on_lite07_alone() {
+		for version in [Version::Lite06, Version::Lite07] {
+			let mut track = track::Producer::new(
+				Arc::new(broadcast::Info::default()),
+				"test",
+				crate::track::Info::timed(),
+			);
+			let subscriber = track.subscribe(None);
+			let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
+			write_group(&mut track, 0, 0);
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			// Two group streams expired, as a blocked transport would leave them.
+			run.ctx
+				.outcomes
+				.dropped
+				.lock()
+				.unwrap()
+				.extend([(1, StreamError::Old), (2, StreamError::Old)]);
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			run.update(lite::SubscribeUpdate {
+				wanted_group: None,
+				priority: 1,
+				max_delay: Duration::from_secs(3600),
+				min_delay: None,
+				ranges: vec![lite::Range::span(None, 0, None, None)],
+				order: Order::Descending,
+				update: 1,
+			});
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			let expected: &[(u64, u64, u64)] = match version {
+				Version::Lite07 => &[(1, 1, 0), (2, 2, 0), (1, 2, 1)],
+				_ => &[(1, 1, 0), (2, 2, 0)],
+			};
+			assert_eq!(drop_updates(&mut writer, &log, version).await, expected, "{version:?}");
 		}
 	}
 

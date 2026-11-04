@@ -1342,8 +1342,8 @@ export class Publisher {
 		// Every group this subscription started serving, until its stream finishes or resets.
 		const groups = new Set<Promise<void>>();
 		const drops = new Signal(0);
-		// Groups whose stream failed, with why, for the control stream to name.
-		const pendingDrops: { sequence: bigint; error: Error }[] = [];
+		// Groups whose stream failed, with why, for the control stream to name, as runs.
+		const pendingDrops: { start: bigint; end: bigint; error: Error }[] = [];
 		// Lite-07 groups whose stream expired as stale, which every update drops again under its
 		// number: the subscriber reopens each stale drop then, and the stream already reset.
 		const expired: Run[] = [];
@@ -1368,11 +1368,11 @@ export class Publisher {
 					skipped.length = 0;
 				}
 				if (pendingDrops.length > 0) {
-					for (const { sequence, error } of pendingDrops.splice(0)) {
+					for (const { start, end, error } of pendingDrops.splice(0)) {
 						// A stream expired under this subscription's budget is a stale verdict.
 						if (hasSkip(this.version) && toStreamCode(error) === StreamCode.Old)
-							insertRun(expired, sequence, sequence + 1n);
-						const dropped = SubscribeDrop.given(sequence, sequence, error, this.version, updateNumber);
+							insertRun(expired, start, end);
+						const dropped = SubscribeDrop.given(start, end - 1n, error, this.version, updateNumber);
 						if (
 							!(await controls.response(encodeSubscribeResponse(stream, { drop: dropped }, this.version)))
 						)
@@ -1407,11 +1407,9 @@ export class Publisher {
 									for (const run of reopened)
 										served.splice(0, served.length, ...removeRun(served, run.start, run.end));
 								}
-								// A stream already reset as stale is not served again: dropped again.
-								for (const run of expired) {
-									for (let sequence = run.start; sequence < run.end; sequence++)
-										pendingDrops.push({ sequence, error: new StreamError(StreamCode.Old) });
-								}
+								// A stream already reset as stale is not served again: dropped again, by run.
+								for (const run of expired)
+									pendingDrops.push({ ...run, error: new StreamError(StreamCode.Old) });
 								expired.length = 0;
 							}
 							console.debug(`subscribe update: broadcast=${broadcast} track=${track.name}`);
@@ -1680,7 +1678,7 @@ export class Publisher {
 				const task = opened.then(async (writer) => {
 					const failed = writer instanceof Error ? writer : await this.#serveGroup(writer, options);
 					if (emitRange && failed instanceof Error) {
-						pendingDrops.push({ sequence: group.sequence, error: failed });
+						pendingDrops.push({ start: group.sequence, end: group.sequence + 1n, error: failed });
 						drops.update((revision) => revision + 1);
 					}
 				});
