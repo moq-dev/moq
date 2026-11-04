@@ -734,7 +734,12 @@ export class Subscriber {
 		]);
 	}
 
-	async #runSubscribe(broadcast: Path.Valid, request: track.Request, valid?: AbortSignal, known?: track.Producer) {
+	async #runSubscribe(
+		broadcast: Path.Valid,
+		request: track.Request,
+		valid?: AbortSignal,
+		known?: { producer: track.Producer; edge: bigint },
+	) {
 		const refused = unauthorized(broadcast);
 		try {
 			for (;;) {
@@ -785,7 +790,7 @@ export class Subscriber {
 		// and any registration if setup eventually finishes.
 		const state: SubscribeSetupState = {};
 		const deadline = new Deadline();
-		const setup = this.#openSubscribe(state, broadcast, request, requestId, deadline, known);
+		const setup = this.#openSubscribe(state, broadcast, request, requestId, deadline, known?.producer);
 
 		// The publisher can be serving before it answers, so waiting only on the response
 		// would miss the local side going away and leave it serving a track nobody reads.
@@ -825,7 +830,8 @@ export class Subscriber {
 			// A control request that timed out is not late content, so it carries its own code.
 			// Local abandonment must commit without yielding after the demand check.
 			const e = err === abandoned ? abandoned : await sessionCause(this.#quic, err);
-			request.reject(e);
+			if (known) hooks.refuseLive(known.producer, known.edge, e);
+			else request.reject(e);
 			console.warn(
 				`subscribe error: id=${requestId} broadcast=${broadcast} track=${request.name} error=${reason(e)}`,
 			);
@@ -881,6 +887,9 @@ export class Subscriber {
 			const localEnded = Symbol("local");
 			const revokedEnded = Symbol("revoked");
 			const idle = Symbol("idle");
+			const historical = known
+				? this.#historyOnly(producer, known.edge).then(() => idle)
+				: new Promise<never>(() => {});
 
 			// Losing the grant ends the subscription, leaving the session alone.
 			let revoke!: () => void;
@@ -902,7 +911,16 @@ export class Subscriber {
 				hooks.trackReleased(producer).then(() => localEnded),
 				revoked,
 			]);
-			const updates = this.#runUpdates(stream, requestId, producer, priority, maxAge, unanswered, done);
+			const stopped = Promise.withResolvers<void>();
+			const updates = this.#runUpdates(
+				stream,
+				requestId,
+				producer,
+				priority,
+				maxAge,
+				unanswered,
+				race([done, stopped.promise]),
+			);
 
 			// Serve until a terminal condition fires or the last local subscriber leaves. The unused
 			// wake is level-triggered: re-check demand so a subscriber that returns before we tear
@@ -910,7 +928,7 @@ export class Subscriber {
 			let terminal = localEnded;
 			const demand = producer.demand();
 			for (;;) {
-				const reason = await race([done, unwanted(demand).then(() => idle)]);
+				const reason = await race([done, unwanted(demand).then(() => idle), historical]);
 				if (
 					reason === idle &&
 					hooks.demandReleased(demand).peek() === undefined &&
@@ -925,16 +943,21 @@ export class Subscriber {
 			// reopens the window the demand re-check above just closed, and a subscriber that
 			// returned during it would be closed by this line. The lite subscriber closes
 			// straight out of its loop for the same reason.
+			if (known && terminal === publisherEnded && !hooks.trackFinished(producer)) {
+				const largest = producer.largest();
+				hooks.endTrack(producer, { group: largest ? largest.group + 1n : 0n, frame: 0 });
+			}
 			if (terminal === revokedEnded) {
 				console.info(`subscription no longer authorized: broadcast=${broadcast} track=${request.name}`);
 				producer.abort(refused);
 			} else {
 				// Only a received end declares one; a copy nobody wants anymore is released, not finished.
-				hooks.releaseTrack(producer);
+				if (!known) hooks.releaseTrack(producer);
 			}
 
 			// Closing settled `done`, so an update still being written finishes and nothing starts
 			// another. Its bytes must not interleave with the close.
+			stopped.resolve();
 			await updates;
 
 			stream.close();
@@ -942,12 +965,14 @@ export class Subscriber {
 		} catch (err) {
 			stream.abort(err);
 			const e = await sessionCause(this.#quic, err);
-			producer.abort(e);
+			if (known) hooks.refuseLive(producer, known.edge, e);
+			else producer.abort(e);
 			console.warn(
 				`subscribe error: id=${requestId} broadcast=${broadcast} track=${request.name} error=${reason(e)}`,
 			);
 		} finally {
 			joining.abort();
+			if (known) hooks.cacheTrack(producer);
 			// A track end already settled the head; anything else leaves it for a later join.
 			subscription.join?.cancel(new Error("subscription ended"));
 			for (const id of subscription.fetchIds) this.#fetches.delete(id);
@@ -955,6 +980,19 @@ export class Subscriber {
 			// Only the owner tears down the alias metadata: a later subscription may have
 			// reclaimed the alias and installed its own timescale.
 			if (this.#aliases.retire(trackAlias, subscription)) this.#timescales.delete(trackAlias);
+		}
+	}
+
+	#needsLive(producer: track.Producer, edge: bigint): boolean {
+		if (hooks.trackFinished(producer) || !hooks.subscribing(producer).peek()) return false;
+		const ranges = producer.subscription.peek()?.ranges ?? [];
+		const span = wireSpan(ranges);
+		return !bounded(ranges) || (span.end !== undefined && span.end > edge);
+	}
+
+	async #historyOnly(producer: track.Producer, edge: bigint): Promise<void> {
+		while (this.#needsLive(producer, edge) && hooks.trackReleased(producer).peek() === undefined) {
+			await Signal.race(producer.subscription, hooks.subscribing(producer), hooks.trackReleased(producer));
 		}
 	}
 
@@ -1037,17 +1075,10 @@ export class Subscriber {
 					hooks.releaseTrack(producer);
 					return;
 				}
-				if (subscription) {
-					const span = wireSpan(subscription.ranges ?? [{}]);
-					if (
-						!bounded(subscription.ranges ?? [{}]) ||
-						(subscribing.peek() &&
-							span.end !== undefined &&
-							span.end > (ok.largest ? ok.largest.groupId + 1n : 0n))
-					) {
-						await this.#runSubscribe(broadcast, request, signal, producer);
-						return;
-					}
+				const edge = (producer.largest()?.group ?? ok.largest?.groupId ?? -1n) + 1n;
+				if (this.#needsLive(producer, edge)) {
+					await this.#runSubscribe(broadcast, request, signal, { producer, edge });
+					continue;
 				}
 				await untilAborted(
 					Promise.resolve(Signal.race(producer.subscription, subscribing, hooks.trackReleased(producer))),
@@ -1144,11 +1175,7 @@ export class Subscriber {
 			active.throwIfAborted();
 			if (id === undefined) throw await this.#closedSession();
 			this.#ranges.set(id, accepted.promise);
-			stream = new RequestStream(
-				await this.#session.openBi({ ...requestOptions, waitUntilAvailable: true }),
-				this.#session,
-				this.#quic,
-			);
+			stream = new RequestStream(await this.#session.openBi(requestOptions), this.#session, this.#quic);
 			if (active.aborted) {
 				stream.abort(active.reason);
 				active.throwIfAborted();
@@ -1574,7 +1601,11 @@ export class Subscriber {
 		// is one of the subscription's own streams, so the Stream Count already waits for it.
 		if (ok.largest) {
 			subscription.join = new Join(ok.largest.groupId, tail, { counted: msg.fill !== undefined });
-			this.#joins.set(producer, subscription.join);
+			const join = subscription.join;
+			this.#joins.set(producer, join);
+			void join.settled.then(() => {
+				if (this.#joins.get(producer) === join) this.#joins.delete(producer);
+			});
 		}
 		if (msg.fill) subscription.fetchIds.push(requestId);
 		state.subscription = subscription;

@@ -10,7 +10,7 @@ import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
 import { Tail } from "../tail.ts";
 import { Timescale, Timestamp } from "../time.ts";
-import type * as track from "../track.ts";
+import * as track from "../track.ts";
 import * as demandUtil from "../util/demand.ts";
 import type * as Cluster from "./cluster.ts";
 import { Connection } from "./connection.ts";
@@ -769,7 +769,10 @@ async function subscribeTrack({
 	const session = new NativeSession(pair.server, version, true);
 	const subscriber = new Subscriber({ session });
 
-	const track = subscriber.consume(Path.from("room")).track("video").subscribe(subscription);
+	const consumer = subscriber
+		.consume(Path.from("room"))
+		.track("video")
+		.subscribe(subscription ?? { ...track.Subscription.default(), ranges: [{ start: { relative: 0 } }] });
 
 	const peer = await nextStream(pair.client);
 	if (!peer) throw new Error("the subscriber never opened a subscribe stream");
@@ -781,7 +784,7 @@ async function subscribeTrack({
 	await peer.writer.u53(SubscribeOk.id);
 	await new SubscribeOk({ trackAlias: ALIAS, properties }).encode(peer.writer, version);
 
-	return { subscriber, track };
+	return { subscriber, track: consumer };
 }
 
 // A refusal already ended the request: a reset back would tell the publisher we failed.

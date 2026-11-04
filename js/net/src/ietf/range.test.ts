@@ -1,13 +1,15 @@
 import { expect, onTestFinished, test } from "bun:test";
 import { StreamCode, StreamError } from "../error.ts";
+import { hooks } from "../internal.ts";
 import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
-import type { Subscription } from "../track.ts";
+import { type Subscription, Producer as TrackProducer } from "../track.ts";
 import { Fetch, FetchOk } from "./fetch.ts";
-import { FetchFrame } from "./object.ts";
+import { EndOfRange, FetchEndOfRange, FetchFrame } from "./object.ts";
 import { RequestError } from "./request.ts";
 import { NativeSession } from "./session.ts";
+import { Subscribe } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
 import { TrackStatusOk, TrackStatusRequest } from "./track.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
@@ -275,5 +277,85 @@ for (const version of VERSIONS) {
 		await fx.answer(stream, 1n);
 		await fx.data(request.requestId, [2n]);
 		expect(await pending).toBeInstanceOf(Error);
+	});
+	test(`${version}: a refused live widening leaves history FETCHes and cached groups readable`, async () => {
+		const fx = fixture(version);
+		const history = fx.broadcast.track("video").subscribe(ranges(1n, 3n));
+		fx.readers.push(history);
+		const ordered = history.ordered();
+		const first = ordered.nextGroup();
+		await fx.status();
+		const fetching = await fx.fetch();
+		await fx.answer(fetching.stream, 2n);
+		const live = fx.broadcast
+			.track("video")
+			.subscribe({ ranges: [{ start: { absolute: 6n } }], delay: { max: null } });
+		fx.readers.push(live);
+		const failed = live.recvGroup().catch((error) => error);
+		const widening = await fx.next();
+		expect(await widening.reader.u53()).toBe(Subscribe.id);
+		await Subscribe.decode(widening.reader, version);
+		await widening.writer.u53(RequestError.id);
+		await new RequestError({ errorCode: 0x10, reasonPhrase: "finished" }).encode(widening.writer, version);
+		expect(await failed).toBeInstanceOf(Error);
+		await fx.data(fetching.request.requestId, [1n, 2n]);
+		const group = await first;
+		expect(group?.sequence).toBe(1n);
+		if (!group) throw new Error("missing history group");
+		expect(await payloads(group)).toEqual(["1a", "", "1c"]);
+		group?.close();
+		const second = await ordered.nextGroup();
+		expect(second?.sequence).toBe(2n);
+		if (!second) throw new Error("missing history group");
+		expect(await payloads(second)).toEqual(["2a", "", "2c"]);
+		second?.close();
+		expect(await ordered.nextGroup()).toBeUndefined();
+		const cached = await fx.broadcast.track("video").fetchGroup(1n);
+		expect(await payloads(cached)).toEqual(["1a", "", "1c"]);
+		cached.close();
+	});
+
+	test(`${version}: a nonexistent trailing object range preserves the group's payloads`, async () => {
+		const fx = fixture(version);
+		const pending = fx.broadcast.track("video").fetchGroup(1n);
+		await fx.status();
+		const { stream, request } = await fx.fetch();
+		await fx.answer(stream, 1n, 5n);
+		const bytes = await Writer.collect(version, async (writer) => {
+			await writer.u62(request.requestId);
+			for (const [object, value] of [1, 2, 3].entries())
+				await new FetchFrame({ payload: new Uint8Array([value]) }).encode(
+					writer,
+					{ group: 1n, object, first: object === 0 },
+					undefined,
+					version,
+				);
+			await new FetchEndOfRange({ reason: EndOfRange.NonExistent, group: 1n, object: 5n }).encode(
+				writer,
+				version,
+			);
+		});
+		await fx.subscriber.handleFetch(new Reader(undefined, bytes, version));
+		const group = await pending;
+		for (const value of [1, 2, 3]) expect((await group.readFrame())?.payload).toEqual(new Uint8Array([value]));
+		expect(await group.readFrame()).toBeUndefined();
+		group.close();
+	});
+}
+
+for (const ietf of [undefined, Version.DRAFT_18]) {
+	test(`live metadata alone does not turn its pending data into a cache miss (${ietf ?? "lite"})`, async () => {
+		const producer = new TrackProducer("video").accept({ ietf });
+		hooks.receiveTrack(producer);
+		hooks.reportedGroup(producer, 5n);
+		const requests = producer.requests();
+		const reader = producer.subscribe(ranges(5n, 6n));
+		const reading = reader.recvGroup();
+		const missing = requests.requestedFill();
+		requests.close();
+		expect(await missing).toBeUndefined();
+		reader.close();
+		expect(await reading).toBeUndefined();
+		hooks.releaseTrack(producer);
 	});
 }

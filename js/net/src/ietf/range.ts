@@ -106,6 +106,7 @@ export class RangeFetch {
 		let prior: bigint | undefined;
 		let next = 0;
 		let first = true;
+		let trailing = false;
 		try {
 			const decode = (c: Cursor) => decodeFetchObject(c, this.#timescale);
 			for (;;) {
@@ -122,9 +123,9 @@ export class RangeFetch {
 					)
 						throw new ProtocolViolation("End of Range is outside FETCH_OK's range");
 					if (this.#current?.sequence === object.group) {
-						// The model cannot carry holes between frame ordinals. Refuse this group whole.
-						this.#current.producer?.abort(new NotFound("FETCH omitted objects within a group"));
-						this.#current.producer = undefined;
+						if (object.reason !== EndOfRange.NonExistent)
+							throw new NotFound("FETCH group suffix unavailable");
+						trailing = true;
 					} else {
 						this.#closeGroup();
 						if (object.reason === EndOfRange.NonExistent) this.fill.dropGroups(this.#next, object.group);
@@ -164,7 +165,9 @@ export class RangeFetch {
 				if (this.#current?.sequence !== sequence) {
 					this.#open(sequence);
 					next = 0;
+					trailing = false;
 				}
+				if (trailing) throw new Error("FETCH object gap is unsupported");
 				const id =
 					object.group === undefined
 						? object.object === undefined
