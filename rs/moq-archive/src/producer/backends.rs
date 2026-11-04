@@ -19,14 +19,6 @@ use super::*;
 const VIDEO: &str = "video/1080p";
 const CHAT: &str = "chat.json";
 
-/// The archive clock stays fixed while the real backends perform I/O.
-fn config() -> Config {
-	Config::default()
-		.with_duration(Duration::from_secs(2))
-		.with_flush(Duration::from_millis(200))
-		.with_max_delay(Duration::from_secs(10))
-}
-
 /// A source with `groups` one-second video groups, and the chat's groups as `(sequence, frames)`.
 fn source(groups: u64, chat: &[(u64, &[&str])]) -> (broadcast::Producer, [track::Producer; 2]) {
 	let source = broadcast::Info::new().produce();
@@ -94,7 +86,7 @@ async fn stored<S: ObjectStore>(store: &Store<S>, paths: &[Path]) {
 #[expect(clippy::disallowed_methods, reason = "the real backends progress on tokio time")]
 async fn record<S: ObjectStore + Clone>(store: &Store<S>) {
 	let (first, mut tracks) = source(4, &[(0, &["c0"])]);
-	let run = tokio::spawn(Producer::new(store.clone(), first.consume(), config()).run());
+	let run = tokio::spawn(Producer::new(store.clone(), first.consume(), Config::default()).run());
 	finish(&mut tracks).await;
 	stored(
 		store,
@@ -134,7 +126,7 @@ async fn record<S: ObjectStore + Clone>(store: &Store<S>) {
 	assert!(run.await.unwrap_err().is_cancelled());
 
 	let (second, mut tracks) = source(6, &[(0, &["c0", "c1"]), (1, &["c2"])]);
-	let run = tokio::spawn(Producer::new(store.clone(), second.consume(), config()).run());
+	let run = tokio::spawn(Producer::new(store.clone(), second.consume(), Config::default()).run());
 	finish(&mut tracks).await;
 	second.close();
 	tokio::time::timeout(Duration::from_secs(10), run)
@@ -172,6 +164,7 @@ fn decode(objects: &BTreeMap<String, Bytes>, key: &str, timed: bool) -> Vec<(u64
 #[tokio::test]
 async fn recordings_are_byte_identical_on_every_backend() {
 	// Only archive time is held still: socket I/O and the S3 client's timers stay real.
+	// Idle and mid-group flushing are covered on a paused clock in producer::tests.
 	let _clock = kio::clock::Manual::new().install(&tokio::runtime::Handle::current());
 	let memory = Store::new(InMemory::new(), "rec");
 	record(&memory).await;
