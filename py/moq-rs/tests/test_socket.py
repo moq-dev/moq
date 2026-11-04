@@ -5,7 +5,7 @@ import gc
 import subprocess
 import sys
 from collections.abc import Coroutine
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 import moq
 import pytest
@@ -208,9 +208,10 @@ async def test_dropping_the_endpoint_resets_a_live_session():
     gc.collect()
     # Withdrawal and the session's cancellation can reach either reader first;
     # the Rust contract guarantees a reset, with no clean EOF or promised cause.
-    with pytest.raises(moq.Error):
+    reset = cast(type[Exception], moq.Error)
+    with pytest.raises(reset):
         await server.consumer.read_frame()
-    with pytest.raises(moq.Error):
+    with pytest.raises(reset):
         await client.consumer.read_frame()
     b.close()
 
