@@ -705,7 +705,7 @@ impl Connection {
 			let bandwidth_probe =
 				space_id == SpaceId::Data
 					&& can_send.is_empty()
-					&& !close && match self.bandwidth_probe_ready(now, segment_size as u64 + untracked_bytes) {
+					&& !close && match self.bandwidth_probe_ready(now, untracked_bytes, segment_size as u64) {
 					bandwidth_probe::Ready::Idle => false,
 					bandwidth_probe::Ready::Blocked(until) => {
 						if let Some(until) = until {

@@ -249,8 +249,8 @@ pub struct Metrics {
     pub pacing_rate: Option<u64>,
     /// Estimated sustainable path bandwidth (bytes/s)
     pub bandwidth_estimate: Option<u64>,
-    /// Bytes in flight up to which an application-limited sender may resend in-flight data,
-    /// while the controller probes for bandwidth (bytes)
+    /// Bytes in flight an application-limited sender may fill by resending in-flight data, the
+    /// last packet crossing it, while the controller probes for bandwidth (bytes)
     ///
     /// `None` when the controller is not probing, or cannot learn from a sender that fills its
     /// pacing with redundant data.

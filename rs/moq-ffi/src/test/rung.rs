@@ -74,7 +74,10 @@ async fn shaped_uplink_disables_and_resumes() {
 					bitrate: Some(max),
 					..Default::default()
 				}),
-				lower: tracks.first().cloned(),
+				lower: tracks
+					.first()
+					.cloned()
+					.map(|producer| MoqMediaProducer::Track { producer }),
 				..video_init(MoqVideoFormat::Avc3, h264_init())
 			},
 		)
