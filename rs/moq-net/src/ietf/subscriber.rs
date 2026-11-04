@@ -9057,13 +9057,8 @@ mod tests {
 	/// The current best route covering `path`, if any (synchronous peek).
 	fn routed_now(consumer: &crate::origin::Consumer, path: &str) -> Option<crate::origin::Route> {
 		use futures::FutureExt;
-		match consumer.path_routes(path).ok()?.next().now_or_never()?? {
-			crate::origin::RouteEvent::End(_) => None,
-			crate::origin::RouteEvent::Start(announce)
-			| crate::origin::RouteEvent::Update(announce)
-			| crate::origin::RouteEvent::Restart(announce)
-			| crate::origin::RouteEvent::Takeover { announce, .. } => Some(announce.route),
-		}
+		let event = consumer.path_routes(path).ok()?.next().now_or_never()??;
+		(!event.is_end()).then(|| event.into_announce().route)
 	}
 
 	fn hop_path(ids: &[u64]) -> cluster::HopPath {

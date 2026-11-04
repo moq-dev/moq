@@ -1124,13 +1124,8 @@ impl OriginConsumerState {
 	/// Take the pending update at `prefix` for delivery.
 	fn take_prefix(&mut self, prefix: Path) -> RouteEvent {
 		let (event, owed) = self.take_update(prefix);
-		let (RouteEvent::Start(announce)
-		| RouteEvent::Update(announce)
-		| RouteEvent::Restart(announce)
-		| RouteEvent::Takeover { announce, .. }
-		| RouteEvent::End(announce)) = &event;
 		// A trailing announce left pending is still owed.
-		if owed && !self.pending.contains_key(&announce.prefix) {
+		if owed && !self.pending.contains_key(&event.announce().prefix) {
 			self.owed -= 1;
 		}
 		event
@@ -2049,6 +2044,35 @@ pub enum RouteEvent {
 		/// The prefix of the route it continues, relative to the cursor's root.
 		predecessor: Path,
 	},
+}
+
+impl RouteEvent {
+	/// The route the event carries; for [`End`](Self::End), its last advertised route.
+	pub fn announce(&self) -> &Announce {
+		match self {
+			Self::Start(announce)
+			| Self::Update(announce)
+			| Self::End(announce)
+			| Self::Restart(announce)
+			| Self::Takeover { announce, .. } => announce,
+		}
+	}
+
+	/// Consume the event, returning the route it carries.
+	pub fn into_announce(self) -> Announce {
+		match self {
+			Self::Start(announce)
+			| Self::Update(announce)
+			| Self::End(announce)
+			| Self::Restart(announce)
+			| Self::Takeover { announce, .. } => announce,
+		}
+	}
+
+	/// Whether no route covers the prefix any more; every other event leaves one in place.
+	pub fn is_end(&self) -> bool {
+		matches!(self, Self::End(_))
+	}
 }
 
 /// A route over a prefix, as an announcement listing or a [`Routes`] stream reports it.
@@ -6260,14 +6284,9 @@ impl Requesting {
 			if let Some(discovery) = &mut self.discovery {
 				loop {
 					match discovery.poll_next(waiter) {
-						Poll::Ready(Some(RouteEvent::End(_))) => self.routed = false,
-						Poll::Ready(Some(
-							RouteEvent::Start(announce)
-							| RouteEvent::Restart(announce)
-							| RouteEvent::Update(announce)
-							| RouteEvent::Takeover { announce, .. },
-						)) => {
-							self.routed = self.instance.is_none() || announce.route.instance == self.instance;
+						Poll::Ready(Some(event)) if event.is_end() => self.routed = false,
+						Poll::Ready(Some(event)) => {
+							self.routed = self.instance.is_none() || event.announce().route.instance == self.instance;
 						}
 						Poll::Ready(None) => return Poll::Ready(Err(Error::Closed)),
 						Poll::Pending => break,
@@ -7398,19 +7417,14 @@ impl Routes {
 
 	/// Drive the egress announce guards for one update.
 	fn hand_out(&mut self, event: RouteEvent) -> RouteEvent {
-		match &event {
-			RouteEvent::Start(announce)
-			| RouteEvent::Update(announce)
-			| RouteEvent::Restart(announce)
-			| RouteEvent::Takeover { announce, .. } => {
-				let scope = self.stats.egress(self.root.rejoin(&announce.prefix));
-				self.guards
-					.entry(announce.prefix.clone())
-					.or_insert_with(|| scope.announce());
-			}
-			RouteEvent::End(announce) => {
-				self.guards.remove(&announce.prefix);
-			}
+		let announce = event.announce();
+		if event.is_end() {
+			self.guards.remove(&announce.prefix);
+		} else {
+			let scope = self.stats.egress(self.root.rejoin(&announce.prefix));
+			self.guards
+				.entry(announce.prefix.clone())
+				.or_insert_with(|| scope.announce());
 		}
 		event
 	}

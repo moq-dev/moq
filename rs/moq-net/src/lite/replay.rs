@@ -9,13 +9,8 @@ pub(super) fn initial(events: impl IntoIterator<Item = origin::RouteEvent>) -> V
 	let mut pending: Vec<Option<announce::Announce>> = Vec::new();
 	let mut positions = HashMap::new();
 	for event in events {
-		let (update, active) = match event {
-			origin::RouteEvent::Start(update)
-			| origin::RouteEvent::Update(update)
-			| origin::RouteEvent::Restart(update)
-			| origin::RouteEvent::Takeover { announce: update, .. } => (update, true),
-			origin::RouteEvent::End(update) => (update, false),
-		};
+		let active = !event.is_end();
+		let update = event.into_announce();
 		if let Some(index) = positions.remove(&update.prefix) {
 			pending[index] = None;
 		}

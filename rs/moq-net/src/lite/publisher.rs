@@ -1172,16 +1172,12 @@ impl AnnounceRun {
 		let mut snapshot = origin.routes();
 		let mut current: HashMap<crate::Path, crate::origin::Route> = HashMap::new();
 		while let Some(event) = snapshot.try_next() {
-			match event {
-				origin::RouteEvent::Start(update)
-				| origin::RouteEvent::Update(update)
-				| origin::RouteEvent::Restart(update)
-				| origin::RouteEvent::Takeover { announce: update, .. } => {
-					current.insert(update.prefix, update.route);
-				}
-				origin::RouteEvent::End(update) => {
-					current.remove(&update.prefix);
-				}
+			let active = !event.is_end();
+			let update = event.into_announce();
+			if active {
+				current.insert(update.prefix, update.route);
+			} else {
+				current.remove(&update.prefix);
 			}
 		}
 

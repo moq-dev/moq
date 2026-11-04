@@ -4290,16 +4290,12 @@ impl Publisher {
 	fn snapshot(announced: &mut crate::origin::Routes) -> Vec<crate::announce::Announce> {
 		let mut initial = std::collections::BTreeMap::new();
 		while let Some(event) = announced.try_next() {
-			match event {
-				crate::origin::RouteEvent::Start(update)
-				| crate::origin::RouteEvent::Update(update)
-				| crate::origin::RouteEvent::Restart(update)
-				| crate::origin::RouteEvent::Takeover { announce: update, .. } => {
-					initial.insert(update.prefix.clone(), update);
-				}
-				crate::origin::RouteEvent::End(update) => {
-					initial.remove(&update.prefix);
-				}
+			let active = !event.is_end();
+			let update = event.into_announce();
+			if active {
+				initial.insert(update.prefix.clone(), update);
+			} else {
+				initial.remove(&update.prefix);
 			}
 		}
 		initial.into_values().collect()

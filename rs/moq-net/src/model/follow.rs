@@ -94,7 +94,7 @@ impl Follow {
 				return Poll::Ready(None);
 			};
 			if let Some(event) = self.fold(event) {
-				self.idle = matches!(event, RouteEvent::End(_));
+				self.idle = event.is_end();
 				return Poll::Ready(Some(event));
 			}
 		}
@@ -127,11 +127,7 @@ impl Follow {
 
 	/// Apply one route's event, returning what it means for the path, if anything.
 	fn fold(&mut self, event: RouteEvent) -> Option<RouteEvent> {
-		let (RouteEvent::Start(announce)
-		| RouteEvent::Update(announce)
-		| RouteEvent::Restart(announce)
-		| RouteEvent::Takeover { announce, .. }
-		| RouteEvent::End(announce)) = &event;
+		let announce = event.announce();
 		if !self.path.has_prefix(&announce.prefix) {
 			return None;
 		}
