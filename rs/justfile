@@ -158,6 +158,10 @@ macos-test:
 capture *args:
     bash sh/local.sh cargo clippy --locked -p moq-video -p moq-audio --all-targets --features moq-video/capture,moq-audio/capture,moq-audio/playback "$@" -- -D warnings
 
+# Lint media tests without the device features the gate's test build enables.
+media-defaults:
+    bash sh/local.sh cargo clippy --locked -p moq-audio -p moq-video --tests -- -D warnings
+
 # The capture and playback tests drive synthetic devices, so they need no hardware.
 
 # Test the capture and playback features, which the default test pass skips.
