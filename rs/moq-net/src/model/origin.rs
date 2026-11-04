@@ -4163,15 +4163,8 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 				let closing = sources.get(&source).is_some_and(|s| s.is_closing());
 				let Some(io) = tracks.get_mut(&name) else { continue };
 				let Some(asked) = io.query.take() else { continue };
-				// A copy that is already aborted cannot be spliced; its error is
-				// the source's answer for the track.
-				let result = match result {
-					Ok(info) => match asked.copy.poll_complete(&kio::Waiter::noop()) {
-						Poll::Ready(Err(err)) => Err(err),
-						_ => Ok(info),
-					},
-					Err(err) => Err(err),
-				};
+				// Known metadata still resolves after an abort: the copy's readers drain
+				// its finished history before reporting the outcome, as local readers do.
 				// Staged only while the track has a reader: without one the machine
 				// will not splice, and a held copy would keep the source subscribed.
 				if let Ok(info) = &result
@@ -7750,6 +7743,56 @@ mod tests {
 			.iter()
 			.map(|prefix| Pattern::subtree(prefix).unwrap())
 			.collect()
+	}
+
+	/// A track whose outcome is already an error still serves its finished history through
+	/// a front: learning the info and the outcome in one driver poll must not refuse it.
+	#[test]
+	fn an_errored_copy_serves_history_before_its_outcome() {
+		let now = Instant::ZERO;
+		let waiter = kio::Waiter::noop();
+		let (producer, mut driver) = Producer::new(Config::new(origin(1)));
+		let server = producer
+			.requests_route("room", Route::default().with_hops(hops(&[10])), None)
+			.unwrap();
+		let broadcast = broadcast::Info::new().produce();
+		let track = broadcast.reserve_track("video").unwrap();
+
+		let mut requesting = producer.consume().request("room", None);
+		driver.poll(now, &waiter).unwrap();
+		let Poll::Ready(Ok(request)) = server.poll_requested_broadcast(&waiter) else {
+			panic!("the route receives the request");
+		};
+		request.serve(&broadcast);
+		driver.poll(now, &waiter).unwrap();
+		let Poll::Ready(Ok(remote)) = requesting.poll_ok(&waiter) else {
+			panic!("the broadcast resolves");
+		};
+		let subscribing = remote.track("video").unwrap().subscribe(None);
+		driver.poll(now, &waiter).unwrap();
+		assert!(subscribing.poll_ok(&waiter).is_pending());
+
+		// The query is already in flight when metadata and the abort arrive together.
+		let track = track.accept(track::Info::timed());
+		let mut group = track.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"history".as_ref()).unwrap();
+		group.finish().unwrap();
+		track.abort(Error::App(7)).unwrap();
+		driver.poll(now, &waiter).unwrap();
+		let Poll::Ready(Ok(mut subscriber)) = subscribing.poll_ok(&waiter) else {
+			panic!("the errored copy's info resolves");
+		};
+		let Poll::Ready(Ok(Some(mut group))) = subscriber.poll_recv_group(&waiter) else {
+			panic!("the finished history is still readable");
+		};
+		let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
+			panic!("the history's frame is still readable");
+		};
+		assert_eq!(frame.payload.as_ref(), b"history");
+		assert!(matches!(
+			subscriber.poll_recv_group(&waiter),
+			Poll::Ready(Err(Error::App(7)))
+		));
 	}
 
 	/// Ending a logical track must finish its metadata producer as well as its routes,

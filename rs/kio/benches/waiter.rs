@@ -122,7 +122,7 @@ fn bench_cancel(c: &mut Criterion) {
 fn bench_park_cycle(c: &mut Criterion) {
 	let mut g = c.benchmark_group("waiter_park_cycle");
 	// Include broad polls that remain parked on many quiet lists.
-	for &lists in &[1usize, 2, 4, 8, 16] {
+	for &lists in &[1usize, 2, 4, 8, 16, 32] {
 		g.bench_with_input(BenchmarkId::from_parameter(lists), &lists, |b, &n| {
 			let cx = Context::from_waker(Waker::noop());
 			let mut park = Park::default();
