@@ -90,7 +90,7 @@ class LocalGate(unittest.TestCase):
                 f"#!{sys.executable}\n"
                 "import os, sys\n"
                 'assert sys.argv[1:] == ["review", "--base", "origin/main", "--responses", "a file.json"]\n'
-                f"assert os.getcwd() == {directory!r}\n"
+                f"assert os.getcwd() == os.path.realpath({directory!r})\n"
                 'print("pinned build failed", file=sys.stderr)\n'
                 "sys.exit(7)\n"
             )
