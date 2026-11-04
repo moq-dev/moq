@@ -3914,7 +3914,7 @@ impl<E: CatalogExt> AacStream<E> {
 					let mut config = aac::config(&asc)?;
 					config.container = self.container.clone();
 					// Consume the reservation held since the PMT: this resolves the gated rendition,
-					// and carries the catalog's declared media retention onto the track.
+					// and carries the catalog's declared media max age onto the track.
 					let reserved = self.reserved.take().unwrap_or_else(|| self.timebase.reserve());
 					let track = self
 						.broadcast
@@ -4476,7 +4476,7 @@ impl<E: CatalogExt> LegacyStream<E> {
 						container: self.container.clone(),
 					};
 					// Consume the reservation held since the PMT: this resolves the gated rendition,
-					// and carries the catalog's declared media retention onto the track. A track
+					// and carries the catalog's declared media max age onto the track. A track
 					// after a format change reserves anew on the same timebase.
 					let reserved = self.reserved.take().unwrap_or_else(|| self.timebase.reserve());
 					let track = self.broadcast.unique_track(
@@ -4684,8 +4684,8 @@ pub(super) mod test {
 
 	/// A drift budget no test timeline comes close to, so the reader sees every group.
 	///
-	/// The media track's full retention window, so a reader started after importing can
-	/// still read every retained group. These tests import a whole file first, which the default
+	/// The media track's full max age, so a reader started after importing can
+	/// still read every fresh group. These tests import a whole file first, which the default
 	/// [`Duration::ZERO`] budget collapses to the live
 	/// edge: completeness has to be asked for.
 	const RECORDING_MAX_AGE: std::time::Duration = Duration::from_secs(30);
@@ -8271,7 +8271,7 @@ pub(super) mod test {
 			import.decode(mp2_pes(pid, 0, 90_000, [0xAA, 0xBB]).as_slice()).unwrap();
 		}
 		// The encoder restarts: the clock declares the break and the media resumes 20 s
-		// ahead. Under the track's 30 s retention window, so a subscribe still reaches
+		// ahead. Within the track's 30 s max age, so a subscribe still reaches
 		// back to the first frame; the exported-clock tests cover the 30 s leap itself.
 		import.decode(clock_break_packet(PCR_PID).as_slice()).unwrap();
 		for pid in [PCR_PID, PEER_PID] {
@@ -9867,7 +9867,7 @@ pub(super) mod test {
 		let at = mux.out.len() - 188;
 		mux.out[at..].copy_from_slice(&video_pes(VIDEO, 7, 90_000 + 7 * FRAME, None, &last));
 		mux.out.extend_from_slice(&clock_break_packet(VIDEO));
-		// Inside the track's 30 s retention, so the reader still reaches the first pass.
+		// Inside the track's 30 s max age, so the reader still reaches the first pass.
 		mux.gops(VIDEO, 20 * 90_000, 2);
 		let frames = video_frames(&mux.out).await;
 		assert_eq!(frames.len(), 16);

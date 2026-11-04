@@ -1,4 +1,4 @@
-# moq-quic's API improves on quinn's
+# [S] moq-quic's API improves on quinn's
 
 ## Goal
 
@@ -43,10 +43,6 @@ Decided with the maintainer:
 This README's own work, after the children: read the three layers' rustdoc
 side by side and fix any name or signature that still differs, and check
 `doc/lib/rs/index.md`'s driver line still holds.
-
-## Required
-
-- [Native WebTransport](/quest/m1/quic-api/native-web.md) - `quic::web` in both crates implements moq-net's poll traits, deleting the generic `web_transport_trait` adapters and the dependency on it
 
 ## Related
 

@@ -13,8 +13,8 @@ use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::Duration;
 
+use moq_net::transport::poll::SendStream as _;
 use moq_uring::{Config, Error, Worker, quic, udp};
-use web_transport_trait::poll::{SendStream as _, Session as _};
 
 fn worker() -> Option<Worker> {
 	match Worker::new(Config::default()) {
@@ -136,12 +136,12 @@ fn dropped_raw_session_closes(explicit: bool) {
 				.expect("dial");
 			let peer = server.accept().await.expect("accept");
 			let session = quic::web::Session::raw(conn);
-			let mut remaining = session.clone();
+			let remaining = session.clone();
 			drop(session);
-			let mut send = std::future::poll_fn(|cx| remaining.poll_open_uni(cx))
+			let mut send = kio::wait(|waiter| remaining.poll_open_uni(waiter, Default::default()))
 				.await
 				.expect("surviving clone opens a stream");
-			std::future::poll_fn(|cx| send.poll_write(cx, b"alive"))
+			kio::wait(|waiter| send.poll_write(waiter, b"alive"))
 				.await
 				.expect("write");
 			let mut recv = peer.accept_uni().await.expect("accept stream");
@@ -158,7 +158,7 @@ fn dropped_raw_session_closes(explicit: bool) {
 			drop(remaining);
 			if !explicit {
 				// The stream outlives every session clone and keeps it open.
-				std::future::poll_fn(|cx| send.poll_write(cx, b"still"))
+				kio::wait(|waiter| send.poll_write(waiter, b"still"))
 					.await
 					.expect("the stream keeps the session open");
 				let read = recv.read(&mut &mut payload[..]).await.expect("read");

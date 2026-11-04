@@ -29,10 +29,16 @@ fn config() -> Config {
 }
 
 /// A source with `groups` one-second video groups, and the chat's groups as `(sequence, frames)`.
+/// Both are published before the recorder reads them, so neither sets a publisher max age.
 fn source(groups: u64, chat: &[(u64, &[&str])]) -> (broadcast::Producer, [track::Producer; 2]) {
 	let source = broadcast::Info::new().produce();
 	let video = source
-		.create_track(VIDEO, track::Info::default().with_timescale(Timescale::MILLI))
+		.create_track(
+			VIDEO,
+			track::Info::default()
+				.with_timescale(Timescale::MILLI)
+				.with_max_age(None),
+		)
 		.unwrap();
 	for sequence in 0..groups {
 		let mut group = video.create_group(group::Info { sequence }).unwrap();
@@ -42,7 +48,9 @@ fn source(groups: u64, chat: &[(u64, &[&str])]) -> (broadcast::Producer, [track:
 		}
 		group.finish().unwrap();
 	}
-	let text = source.create_track(CHAT, track::Info::default()).unwrap();
+	let text = source
+		.create_track(CHAT, track::Info::default().with_max_age(None))
+		.unwrap();
 	for (sequence, frames) in chat {
 		let mut group = text.create_group(group::Info { sequence: *sequence }).unwrap();
 		for frame in *frames {

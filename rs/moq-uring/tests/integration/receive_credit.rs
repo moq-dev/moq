@@ -123,10 +123,7 @@ fn partial_frame_gives_way() {
 			.with_publisher(&pub_origin)
 			.accept(
 				moq_net::time::Instant::now(),
-				moq_uring::transport::Local::new(moq_uring::transport::Session::new(
-					quic::web::Session::raw(conn),
-					moq_net::transport::Address::Setup,
-				)),
+				moq_uring::transport::Local::new(quic::web::Session::raw(conn)),
 			)
 			.await
 			.expect("accept");
@@ -144,10 +141,7 @@ fn partial_frame_gives_way() {
 				.with_subscriber(sub.clone())
 				.connect(
 					moq_net::time::Instant::now(),
-					moq_uring::transport::Local::new(moq_uring::transport::Session::new(
-						quic::web::Session::raw(conn),
-						moq_net::transport::Address::Setup,
-					)),
+					moq_uring::transport::Local::new(quic::web::Session::raw(conn)),
 				)
 				.await
 				.expect("connect");
@@ -294,18 +288,12 @@ fn javascript_partial_frame_gives_way() {
 				.await
 				.expect("handshake");
 			let session = request
-				.respond(quic::web::Response::default().with_protocol(ALPN))
+				.respond(quic::web::proto::ConnectResponse::OK.with_protocol(ALPN))
 				.await
 				.expect("respond");
 			let (session, driver) = moq_net::Server::new()
 				.with_subscriber(sub.clone())
-				.accept(
-					moq_net::time::Instant::now(),
-					moq_uring::transport::Local::new(moq_uring::transport::Session::new(
-						session,
-						moq_net::transport::Address::Uri,
-					)),
-				)
+				.accept(moq_net::time::Instant::now(), moq_uring::transport::Local::new(session))
 				.await
 				.expect("accept");
 			let task_handle = handle.clone();
