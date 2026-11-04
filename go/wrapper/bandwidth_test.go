@@ -2,6 +2,7 @@ package moq_test
 
 import (
 	"context"
+	"errors"
 	"math"
 	"runtime"
 	"testing"
@@ -106,26 +107,48 @@ func TestViewersWatchUpdateAndClose(t *testing.T) {
 	waitConnects(t, ctx, client.Session(), 1)
 
 	viewers := client.Session().Viewers()
-	first := viewers.Watch(4_000_000)
-	second := viewers.Watch(1_000_000)
+	first, err := viewers.Watch(4_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := viewers.Watch(1_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
 	// Whether QUIC has a receive estimate yet varies, but a slice never exceeds its ceiling.
 	if rate := second.Rate(); rate != nil && *rate > 1_000_000 {
 		t.Fatalf("rate = %d, above its 1000000 ceiling", *rate)
 	}
-	second.Update(500_000)
+	if err := second.Update(500_000); err != nil {
+		t.Fatal(err)
+	}
 	if rate := second.Rate(); rate != nil && *rate > 500_000 {
 		t.Fatalf("rate = %d, above its 500000 ceiling", *rate)
 	}
 	zero := uint64(0)
-	viewers.SetTarget(&zero)
-	viewers.SetTarget(nil)
+	if err := viewers.SetTarget(&zero); err != nil {
+		t.Fatal(err)
+	}
+	if err := viewers.SetTarget(nil); err != nil {
+		t.Fatal(err)
+	}
+	// Past what a PROBE target carries: refused.
+	if _, err := viewers.Watch(1 << 53); !errors.Is(err, moq.ErrOutOfRange) {
+		t.Fatalf("Watch(2^53) = %v, want ErrOutOfRange", err)
+	}
 
 	// Closing one viewer leaves the others and the registry usable.
 	second.Close()
-	first.Update(2_000_000)
+	if err := first.Update(2_000_000); err != nil {
+		t.Fatal(err)
+	}
 	if rate := first.Rate(); rate != nil && *rate > 2_000_000 {
 		t.Fatalf("rate = %d, above its 2000000 ceiling", *rate)
 	}
 	first.Close()
-	client.Session().Viewers().Watch(1).Close()
+	last, err := client.Session().Viewers().Watch(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last.Close()
 }

@@ -702,6 +702,8 @@ class SmokeTest {
                         }
                         viewers.setTarget(0uL)
                         viewers.setTarget(null)
+                        // Past what a PROBE target carries: refused.
+                        assertFailsWith<MoqException.OutOfRange> { viewers.watch(1uL shl 53) }
                     }
             }
     }

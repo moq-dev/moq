@@ -176,7 +176,8 @@ pub extern "C" fn moq_viewers_close(viewers: u32) -> i32 {
 /// `max_bps` is a ceiling: what the largest rendition you would switch to needs, not
 /// what you are receiving. Holding the viewer requests the receive estimate, like a
 /// [`moq_session_recv_bandwidth`] consumer. Close it with [`moq_viewer_close`] once the
-/// broadcast stops being watched.
+/// broadcast stops being watched. Returns [`MOQ_ERROR_OUT_OF_RANGE`](crate::MOQ_ERROR_OUT_OF_RANGE),
+/// watching nothing, when the ceilings would sum above `2^53 - 1`.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_viewers_watch(viewers: u32, max_bps: u64) -> i32 {
 	ffi::enter(move || {
@@ -187,7 +188,8 @@ pub extern "C" fn moq_viewers_watch(viewers: u32, max_bps: u64) -> i32 {
 			.viewers
 			.get(viewers)
 			.ok_or(Error::NotFound)?
-			.watch(moq_net::bandwidth::Rate::from_bps(max_bps));
+			.watch(moq_net::bandwidth::Rate::from_bps(max_bps))
+			.map_err(out_of_range)?;
 		state.bandwidth.viewer.insert(viewer)
 	})
 }
@@ -195,7 +197,8 @@ pub extern "C" fn moq_viewers_watch(viewers: u32, max_bps: u64) -> i32 {
 /// Send `target_bps` as the PROBE target instead of the viewers' sum.
 ///
 /// `present` false follows the viewers again. `present` true and `target_bps` 0 sends
-/// no target.
+/// no target. Returns [`MOQ_ERROR_OUT_OF_RANGE`](crate::MOQ_ERROR_OUT_OF_RANGE), keeping the
+/// previous override, for a target above `2^53 - 1`.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_viewers_set_target(viewers: u32, target_bps: u64, present: bool) -> i32 {
 	ffi::enter(move || {
@@ -205,8 +208,8 @@ pub extern "C" fn moq_viewers_set_target(viewers: u32, target_bps: u64, present:
 			.viewers
 			.get(viewers)
 			.ok_or(Error::NotFound)?
-			.set_target(present.then(|| moq_net::bandwidth::Rate::from_bps(target_bps)));
-		Ok(())
+			.set_target(present.then(|| moq_net::bandwidth::Rate::from_bps(target_bps)))
+			.map_err(out_of_range)
 	})
 }
 
@@ -236,6 +239,9 @@ pub unsafe extern "C" fn moq_viewer_rate(viewer: u32, bps: *mut u64, present: *m
 }
 
 /// Change the viewer's ceiling, keeping the same claim.
+///
+/// Returns [`MOQ_ERROR_OUT_OF_RANGE`](crate::MOQ_ERROR_OUT_OF_RANGE), keeping the previous
+/// ceiling, when the ceilings would sum above `2^53 - 1`.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_viewer_update(viewer: u32, max_bps: u64) -> i32 {
 	ffi::enter(move || {
@@ -245,9 +251,17 @@ pub extern "C" fn moq_viewer_update(viewer: u32, max_bps: u64) -> i32 {
 			.viewer
 			.get(viewer)
 			.ok_or(Error::NotFound)?
-			.update(moq_net::bandwidth::Rate::from_bps(max_bps));
-		Ok(())
+			.update(moq_net::bandwidth::Rate::from_bps(max_bps))
+			.map_err(out_of_range)
 	})
+}
+
+/// A viewer ceiling or target refused for passing the PROBE target's limit.
+fn out_of_range(err: moq_net::Error) -> Error {
+	Error::OutOfRange(format!(
+		"{err}: viewer targets sum to at most {} bps",
+		moq_net::bandwidth::Viewers::MAX_TARGET.as_bps()
+	))
 }
 
 /// Release a viewer, handing its share back to the others and lowering the PROBE target.

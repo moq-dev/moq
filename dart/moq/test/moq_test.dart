@@ -230,6 +230,11 @@ void main() {
     expect(viewer.rate() ?? 0, lessThanOrEqualTo(1000000));
     viewers.setTarget(targetBps: 0);
     viewers.setTarget(targetBps: null);
+    // Past what a PROBE target carries: refused.
+    expect(
+      () => viewers.watch(maxBps: 1 << 53),
+      throwsA(isA<OutOfRangeMoqException>()),
+    );
     viewer.dispose();
 
     final announcement = client.announced().updates().firstWhere(

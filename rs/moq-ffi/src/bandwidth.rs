@@ -113,19 +113,38 @@ impl MoqViewers {
 	/// needs, not what it is receiving. The claim lasts as long as the returned handle;
 	/// drop it once the broadcast stops being watched. Holding one requests the receive
 	/// estimate, like [`MoqSession::recv_bandwidth`](crate::session::MoqSession::recv_bandwidth).
-	pub fn watch(&self, max_bps: u64) -> Arc<MoqViewer> {
+	///
+	/// Errors with [`MoqError::OutOfRange`], watching nothing, when the ceilings would sum
+	/// above [`moq_net::bandwidth::Viewers::MAX_TARGET`] (`2^53 - 1`).
+	pub fn watch(&self, max_bps: u64) -> Result<Arc<MoqViewer>, MoqError> {
 		let _guard = crate::ffi::enter();
-		Arc::new(MoqViewer {
-			inner: self.inner.watch(moq_net::bandwidth::Rate::from_bps(max_bps)),
-		})
+		let inner = self
+			.inner
+			.watch(moq_net::bandwidth::Rate::from_bps(max_bps))
+			.map_err(out_of_range)?;
+		Ok(Arc::new(MoqViewer { inner }))
 	}
 
 	/// Send `target_bps` as the PROBE target instead of the viewers' sum, or `None` to
 	/// follow them again. `Some(0)` sends no target.
-	pub fn set_target(&self, target_bps: Option<u64>) {
+	///
+	/// Errors with [`MoqError::OutOfRange`], keeping the previous override, for a target
+	/// above `2^53 - 1`.
+	pub fn set_target(&self, target_bps: Option<u64>) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		self.inner
-			.set_target(target_bps.map(moq_net::bandwidth::Rate::from_bps));
+			.set_target(target_bps.map(moq_net::bandwidth::Rate::from_bps))
+			.map_err(out_of_range)
+	}
+}
+
+/// A viewer ceiling or target refused for passing the PROBE target's limit.
+fn out_of_range(err: moq_net::Error) -> MoqError {
+	MoqError::OutOfRange {
+		reason: format!(
+			"{err}: viewer targets sum to at most {} bps",
+			moq_net::bandwidth::Viewers::MAX_TARGET.as_bps()
+		),
 	}
 }
 
@@ -149,9 +168,14 @@ impl MoqViewer {
 	}
 
 	/// Change the ceiling, keeping the same claim.
-	pub fn update(&self, max_bps: u64) {
+	///
+	/// Errors with [`MoqError::OutOfRange`], keeping the previous ceiling, when the
+	/// ceilings would sum above `2^53 - 1`.
+	pub fn update(&self, max_bps: u64) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
-		self.inner.update(moq_net::bandwidth::Rate::from_bps(max_bps));
+		self.inner
+			.update(moq_net::bandwidth::Rate::from_bps(max_bps))
+			.map_err(out_of_range)
 	}
 }
 
@@ -354,8 +378,8 @@ mod tests {
 		let estimate = moq_net::bandwidth::Producer::new();
 		let viewers = MoqViewers::new(moq_net::bandwidth::Viewers::new(estimate.weak()));
 
-		let first = viewers.watch(4_000_000);
-		let second = viewers.watch(1_000_000);
+		let first = viewers.watch(4_000_000).unwrap();
+		let second = viewers.watch(1_000_000).unwrap();
 		assert_eq!(first.rate(), None);
 
 		estimate
@@ -364,11 +388,26 @@ mod tests {
 		assert_eq!(first.rate(), Some(2_000_000));
 		assert_eq!(second.rate(), Some(1_000_000));
 
-		second.update(4_000_000);
+		second.update(4_000_000).unwrap();
 		assert_eq!(first.rate(), Some(1_500_000));
 
 		drop(second);
 		assert_eq!(first.rate(), Some(3_000_000));
+	}
+
+	/// Ceilings and overrides past what a PROBE target carries are refused as out of range.
+	#[test]
+	fn viewer_targets_past_the_limit_are_out_of_range() {
+		let viewers = MoqViewers::new(moq_net::bandwidth::Viewers::default());
+		let max = moq_net::bandwidth::Viewers::MAX_TARGET.as_bps();
+		let refused = |res: Result<(), MoqError>| matches!(res, Err(MoqError::OutOfRange { .. }));
+
+		assert!(refused(viewers.watch(u64::MAX).map(drop)));
+		let viewer = viewers.watch(max).unwrap();
+		assert!(refused(viewers.watch(1).map(drop)));
+		assert!(refused(viewer.update(max + 1)));
+		assert!(refused(viewers.set_target(Some(max + 1))));
+		viewers.set_target(Some(max)).unwrap();
 	}
 
 	/// A rung follows its reservation's grant down, but never disables while no session

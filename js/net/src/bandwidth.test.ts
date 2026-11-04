@@ -393,6 +393,33 @@ test("viewers split the receive estimate max-min fair", () => {
 	viewers.close();
 });
 
+// The PROBE stream encodes at most MAX_TARGET, so a viewer, update, or override past it is
+// refused and leaves the target as it was.
+test("viewer targets stay encodable", () => {
+	const viewers = new Viewers();
+	const max = Viewers.MAX_TARGET;
+
+	expect(() => viewers.watch(max + 1)).toThrow(RangeError);
+	const first = viewers.watch(max - 1);
+	expect(() => viewers.watch(2)).toThrow(RangeError);
+	const second = viewers.watch(1);
+	expect(viewers.target.peek()).toBe(max);
+
+	expect(() => second.update(2)).toThrow(RangeError);
+	expect(viewers.target.peek()).toBe(max);
+	first.update(1);
+	second.update(max - 1);
+	expect(viewers.target.peek()).toBe(max);
+
+	viewers.setTarget(1_000_000);
+	expect(() => viewers.setTarget(max + 1)).toThrow(RangeError);
+	expect(viewers.target.peek()).toBe(1_000_000);
+
+	first.close();
+	second.close();
+	viewers.close();
+});
+
 test("the viewers' target sums their ceilings until overridden", () => {
 	const viewers = new Viewers(new Signal<number | undefined>(1_000_000));
 	expect(viewers.target.peek()).toBe(0);
@@ -404,7 +431,7 @@ test("the viewers' target sums their ceilings until overridden", () => {
 	second.update(4_000_000);
 	expect(viewers.target.peek()).toBe(5_000_000);
 
-	// Zero turns probing off; clearing the override follows the viewers again.
+	// Zero sends no target; clearing the override follows the viewers again.
 	viewers.setTarget(0);
 	expect(viewers.target.peek()).toBe(0);
 	viewers.setTarget(10_000_000);

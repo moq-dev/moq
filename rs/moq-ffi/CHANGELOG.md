@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `MoqSession::viewers` returns a `MoqViewers` that divides the receive estimate
   among watched broadcasts: `MoqViewers::watch` returns a `MoqViewer` reading its
   slice, and the viewers' ceilings summed are the PROBE target sent to the peer.
+  Ceilings or a target past 2^53 - 1 bps are refused with the new
+  `MoqError::OutOfRange`.
 - `MoqAudioEncoder::track_init` returns the init that publishes its packets, and
   `MoqAudioEncoder::set_bitrate` retunes it live.
 - `MoqAudioDecoderOutput::delay_us` fixes the audio playout delay, and

@@ -234,6 +234,11 @@ async def test_viewer_holds_without_an_estimate():
             viewers.set_target(0)
             viewers.set_target(None)
             assert viewer.rate() is None
+            # Past what a PROBE target carries: refused.
+            with pytest.raises(moq.Error.OutOfRange):
+                viewers.watch(2**53)
+            with pytest.raises(moq.Error.OutOfRange):
+                viewers.set_target(2**53)
             session.cancel(0)
 
 

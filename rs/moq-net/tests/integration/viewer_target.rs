@@ -51,11 +51,11 @@ async fn viewers_sum_into_the_peers_target() {
 		let pair = pair(version, true).await;
 		let viewers = pair.client.viewers();
 
-		let first = viewers.watch(mbps(3));
+		let first = viewers.watch(mbps(3)).unwrap();
 		probes_to(&pair.server_transport, mbps(3)).await;
-		let second = viewers.watch(mbps(2));
+		let second = viewers.watch(mbps(2)).unwrap();
 		probes_to(&pair.server_transport, mbps(5)).await;
-		first.update(mbps(1));
+		first.update(mbps(1)).unwrap();
 		probes_to(&pair.server_transport, mbps(3)).await;
 
 		drop(second);
@@ -74,12 +74,31 @@ async fn the_sender_probes_to_the_larger_target() {
 		let reserved = pair.server.allocator().reserve(&track.demand(), mbps(4));
 		probes_to(&pair.server_transport, mbps(4)).await;
 
-		let viewer = pair.client.viewers().watch(mbps(6));
+		let viewer = pair.client.viewers().watch(mbps(6)).unwrap();
 		probes_to(&pair.server_transport, mbps(6)).await;
-		viewer.update(mbps(2));
+		viewer.update(mbps(2)).unwrap();
 		probes_to(&pair.server_transport, mbps(4)).await;
 		drop(reserved);
 		probes_to(&pair.server_transport, mbps(2)).await;
+	}
+}
+
+/// The sender's override covers its own reservations only: zeroing it stops probing
+/// for them, while the peer's target still sets how high to probe.
+#[moq_net::kio::test]
+async fn a_local_override_leaves_the_peers_target() {
+	for version in VERSIONS {
+		let pair = pair(version, true).await;
+		let (_broadcast, track) = reservable();
+		let allocator = pair.server.allocator();
+		let reserved = allocator.reserve(&track.demand(), mbps(4));
+		allocator.set_target(Some(Rate::ZERO));
+
+		let viewer = pair.client.viewers().watch(mbps(2)).unwrap();
+		probes_to(&pair.server_transport, mbps(2)).await;
+		assert!(!reserved.consume().probed(), "{version}: nothing probes for the reservation");
+		drop(viewer);
+		probes_to(&pair.server_transport, Rate::ZERO).await;
 	}
 }
 
@@ -91,7 +110,7 @@ async fn the_directions_stay_apart() {
 		let pair = pair(version, true).await;
 		let (_broadcast, track) = reservable();
 		let _sent = pair.client.allocator().reserve(&track.demand(), mbps(1));
-		let _watched = pair.client.viewers().watch(mbps(6));
+		let _watched = pair.client.viewers().watch(mbps(6)).unwrap();
 
 		probes_to(&pair.client_transport, mbps(1)).await;
 		probes_to(&pair.server_transport, mbps(6)).await;
@@ -106,8 +125,8 @@ async fn opting_out_sends_no_target() {
 	for version in VERSIONS {
 		let pair = pair(version, true).await;
 		let viewers = pair.client.viewers();
-		viewers.set_target(Some(Rate::ZERO));
-		let viewer = viewers.watch(mbps(6));
+		viewers.set_target(Some(Rate::ZERO)).unwrap();
+		let viewer = viewers.watch(mbps(6)).unwrap();
 		let mut grant = viewer.consume();
 		// The estimate arrives, so the PROBE stream is up and the target would have too.
 		assert_eq!(grant.changed().await.unwrap(), Some(mbps(6)), "{version}");
@@ -115,7 +134,7 @@ async fn opting_out_sends_no_target() {
 		assert_eq!(pair.server_transport.probe_target(), Rate::ZERO, "{version}");
 		assert!(!grant.probed(), "{version}: opted out, nothing probes for it");
 
-		viewers.set_target(None);
+		viewers.set_target(None).unwrap();
 		probes_to(&pair.server_transport, mbps(6)).await;
 		assert!(grant.probed(), "{version}");
 	}
@@ -126,7 +145,7 @@ async fn opting_out_sends_no_target() {
 async fn a_peer_without_a_sender_is_sent_no_target() {
 	for version in VERSIONS {
 		let pair = pair(version, false).await;
-		let viewer = pair.client.viewers().watch(mbps(6));
+		let viewer = pair.client.viewers().watch(mbps(6)).unwrap();
 		let mut grant = viewer.consume();
 		assert_eq!(grant.changed().await.unwrap(), Some(mbps(6)), "{version}");
 		assert!(!grant.probed(), "{version}");

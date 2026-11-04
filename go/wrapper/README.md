@@ -85,7 +85,8 @@ A player divides the receive estimate among the broadcasts it watches with
 rendition it would switch to needs; the viewer's `Rate()` is its slice, nil
 while there is no estimate, and `Update(maxBps)` changes the ceiling. The
 session sends the viewers' summed ceilings as its PROBE target, which
-`SetTarget` overrides. Holding a viewer requests PROBE, so `Close()` it once
+`SetTarget` overrides. Ceilings or a target summing above 2^53 - 1 fail with
+`moq.ErrOutOfRange`. Holding a viewer requests PROBE, so `Close()` it once
 the broadcast stops being watched.
 
 Incoming server requests expose the query-free `Path()` before `Accept()`. It

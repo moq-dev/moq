@@ -195,14 +195,21 @@ type Viewers struct {
 // ceiling: what the largest rendition the player would switch to needs, not what
 // it is receiving. Holding the viewer requests the receive estimate, like
 // Session.RecvBandwidth; Close it once the broadcast stops being watched.
-func (v *Viewers) Watch(maxBps uint64) *Viewer {
-	return &Viewer{inner: v.inner.Watch(maxBps)}
+// Errors with ErrOutOfRange, watching nothing, when the ceilings would sum
+// above 2^53 - 1.
+func (v *Viewers) Watch(maxBps uint64) (*Viewer, error) {
+	inner, err := v.inner.Watch(maxBps)
+	if err != nil {
+		return nil, err
+	}
+	return &Viewer{inner: inner}, nil
 }
 
 // SetTarget sends targetBps as the PROBE target instead of the viewers' sum, or
-// nil to follow them again. Zero sends no target.
-func (v *Viewers) SetTarget(targetBps *uint64) {
-	v.inner.SetTarget(targetBps)
+// nil to follow them again. Zero sends no target. Errors with ErrOutOfRange,
+// keeping the previous override, above 2^53 - 1.
+func (v *Viewers) SetTarget(targetBps *uint64) error {
+	return v.inner.SetTarget(targetBps)
 }
 
 // Viewer is one watched broadcast's standing claim on Viewers.
@@ -220,9 +227,10 @@ func (v *Viewer) Rate() *uint64 {
 }
 
 // Update changes the ceiling, keeping the same claim, as when a catalog enables
-// or disables a rendition.
-func (v *Viewer) Update(maxBps uint64) {
-	v.inner.Update(maxBps)
+// or disables a rendition. Errors with ErrOutOfRange, keeping the previous
+// ceiling, when the ceilings would sum above 2^53 - 1.
+func (v *Viewer) Update(maxBps uint64) error {
+	return v.inner.Update(maxBps)
 }
 
 // Close releases the claim, handing its share to the other viewers, lowering

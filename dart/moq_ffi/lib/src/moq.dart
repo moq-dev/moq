@@ -5771,6 +5771,12 @@ class FfiConverterMoqException {
           lifted.value,
           lifted.bytesRead - subview.offsetInBytes + 4,
         );
+      case 35:
+        final lifted = OutOfRangeMoqException.read(subview);
+        return LiftRetVal<MoqException>(
+          lifted.value,
+          lifted.bytesRead - subview.offsetInBytes + 4,
+        );
       default:
         throw UniffiInternalError(
           UniffiInternalError.unexpectedEnumCase,
@@ -6965,6 +6971,44 @@ class UnsupportedConfigMoqException extends MoqException {
   @override
   int write(Uint8List buf) {
     buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 34);
+    int new_offset = buf.offsetInBytes + 4;
+    new_offset += FfiConverterString.write(
+      reason,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    return new_offset;
+  }
+}
+
+class OutOfRangeMoqException extends MoqException {
+  final String reason;
+  OutOfRangeMoqException(String this.reason);
+  OutOfRangeMoqException._(String this.reason);
+  static LiftRetVal<OutOfRangeMoqException> read(Uint8List buf) {
+    int new_offset = buf.offsetInBytes;
+    final reason_lifted = FfiConverterString.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final reason = reason_lifted.value;
+    new_offset += reason_lifted.bytesRead;
+    return LiftRetVal(OutOfRangeMoqException._(reason), new_offset);
+  }
+
+  @override
+  RustBuffer lower() {
+    final buf = Uint8List(allocationSize());
+    write(buf);
+    return toRustBuffer(buf);
+  }
+
+  @override
+  int allocationSize() {
+    return FfiConverterString.allocationSize(reason) + 4;
+  }
+
+  @override
+  int write(Uint8List buf) {
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 35);
     int new_offset = buf.offsetInBytes + 4;
     new_offset += FfiConverterString.write(
       reason,
@@ -10112,9 +10156,15 @@ class MoqViewer implements MoqViewerInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqViewerFinalizer.detach(this);
-    rustCall((status) => uniffi_moq_ffi_fn_free_moqviewer(_ptr, status));
+    try {
+      uniffi_moq_ffi_fn_free_moqviewer(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   int? rate() {
@@ -10133,7 +10183,7 @@ class MoqViewer implements MoqViewerInterface {
         FfiConverterUInt64.lower(maxBps),
         status,
       );
-    }, null);
+    }, moqExceptionErrorHandler);
   }
 }
 
@@ -10194,9 +10244,15 @@ class MoqViewers implements MoqViewersInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqViewersFinalizer.detach(this);
-    rustCall((status) => uniffi_moq_ffi_fn_free_moqviewers(_ptr, status));
+    try {
+      uniffi_moq_ffi_fn_free_moqviewers(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   void setTarget({required int? targetBps}) {
@@ -10206,7 +10262,7 @@ class MoqViewers implements MoqViewersInterface {
         FfiConverterOptionalUInt64.lower(targetBps),
         status,
       );
-    }, null);
+    }, moqExceptionErrorHandler);
   }
 
   MoqViewer watch({required int maxBps}) {
@@ -10217,7 +10273,7 @@ class MoqViewers implements MoqViewersInterface {
         status,
       ),
       FfiConverterMoqViewer.lift,
-      null,
+      moqExceptionErrorHandler,
     );
   }
 }
@@ -22217,13 +22273,13 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqviewer_rate() != 64505) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqviewer_update() != 13024) {
+  if (uniffi_moq_ffi_checksum_method_moqviewer_update() != 27767) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqviewers_set_target() != 23388) {
+  if (uniffi_moq_ffi_checksum_method_moqviewers_set_target() != 46661) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqviewers_watch() != 62773) {
+  if (uniffi_moq_ffi_checksum_method_moqviewers_watch() != 18224) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqbroadcastconsumer_closed() != 12232) {

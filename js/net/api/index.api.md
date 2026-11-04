@@ -81,6 +81,7 @@ export namespace Bandwidth {
 	}
 	export class Viewers {
 		constructor(estimate?: Signals.Getter<number | undefined>);
+		static readonly MAX_TARGET: number;
 		close(): void;
 		setTarget(target: number | undefined): void;
 		readonly target: Signals.Getter<number>;

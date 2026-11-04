@@ -120,11 +120,17 @@ final class SmokeTests: XCTestCase {
         defer { session.cancel(code: 0) }
 
         let viewers = session.viewers()
-        let viewer = viewers.watch(maxBps: 1_000_000)
-        viewer.update(maxBps: 2_000_000)
-        viewers.setTarget(targetBps: 0)
-        viewers.setTarget(targetBps: nil)
+        let viewer = try viewers.watch(maxBps: 1_000_000)
+        try viewer.update(maxBps: 2_000_000)
+        try viewers.setTarget(targetBps: 0)
+        try viewers.setTarget(targetBps: nil)
         XCTAssertNil(viewer.rate())
+        // Past what a PROBE target carries: refused.
+        XCTAssertThrowsError(try viewers.watch(maxBps: 1 << 53)) { error in
+            guard case MoqError.OutOfRange = error else {
+                return XCTFail("expected OutOfRange, got \(error)")
+            }
+        }
     }
 
     /// A value the native side cannot use throws from the constructor, not the dial.

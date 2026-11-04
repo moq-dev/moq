@@ -191,12 +191,21 @@ function ceiling(max: number): number {
 	return max;
 }
 
+/** The ceilings summed in order, the way {@link Viewers.target} sums them. */
+function total(entries: readonly { max: number }[]): number {
+	let sum = 0;
+	for (const entry of entries) sum += entry.max;
+	return sum;
+}
+
 /**
  * The registry behind {@link Allocator} and {@link Viewers}: divides one estimate
  * among its claims, publishing each claim's slice.
  */
 class Divider {
 	#estimate: Getter<number | undefined> | undefined;
+	/** The most the ceilings may sum to, or `undefined` for no limit. */
+	#limit: number | undefined;
 	readonly entries = new Signal<Entry[]>([]);
 	/** Whether a live claim reads the estimate; see {@link reserved}. */
 	readonly reserved = new Signal(false);
@@ -208,8 +217,9 @@ class Divider {
 	#version = 0;
 	#division: Division | undefined;
 
-	constructor(estimate?: Getter<number | undefined>) {
+	constructor(estimate?: Getter<number | undefined>, limit?: number) {
 		this.#estimate = estimate;
+		this.#limit = limit;
 
 		this.#registry = {
 			peek: (id) => this.#peek(id),
@@ -245,6 +255,8 @@ class Divider {
 	claim(demand: Demand | undefined, priority: number, max: number): Reservation {
 		max = ceiling(max);
 		this.#prune();
+
+		if (this.#limit !== undefined && this.#alive.peek()) this.#fits([...this.entries.peek(), { max }]);
 
 		const id = this.#nextId++;
 		const rate = new Signal<number | undefined>(undefined);
@@ -327,9 +339,20 @@ class Divider {
 		return shareOf(this.#plan(estimate, entries), entry);
 	}
 
+	/** Throw when `entries`' ceilings sum above the limit. */
+	#fits(entries: readonly { max: number }[]): void {
+		const sum = total(entries);
+		if (sum > (this.#limit ?? Number.POSITIVE_INFINITY)) {
+			throw new RangeError(`ceilings sum to ${sum}, above the limit of ${this.#limit}`);
+		}
+	}
+
 	#update(id: number, max: number): void {
 		if (!this.#alive.peek()) return;
 		max = ceiling(max);
+		if (this.#limit !== undefined) {
+			this.#fits(this.entries.peek().map((entry) => (entry.id === id ? { max } : entry)));
+		}
 		this.#mutate((entries) => {
 			const entry = entries.find((candidate) => candidate.id === id);
 			if (entry) entry.max = max;
@@ -471,6 +494,13 @@ export class Allocator implements Handle {
  * connection's receive estimate is what requests PROBE.
  */
 export class Viewers {
+	/**
+	 * The largest PROBE target: the most the viewers' ceilings, summed, or an override may be.
+	 *
+	 * `Number.MAX_SAFE_INTEGER` bits per second, the largest integer the PROBE stream encodes.
+	 */
+	static readonly MAX_TARGET = Number.MAX_SAFE_INTEGER;
+
 	#divider: Divider;
 	#override = new Signal<number | undefined>(undefined);
 
@@ -482,13 +512,10 @@ export class Viewers {
 
 	/** Divide `estimate`, normally a connection's receive estimate from PROBE. */
 	constructor(estimate?: Getter<number | undefined>) {
-		this.#divider = new Divider(estimate);
-		this.target = new Derived([this.#divider.entries, this.#override], (entries, override) => {
-			if (override !== undefined) return override;
-			let sum = 0;
-			for (const entry of entries) sum += entry.max;
-			return sum;
-		});
+		this.#divider = new Divider(estimate, Viewers.MAX_TARGET);
+		this.target = new Derived([this.#divider.entries, this.#override], (entries, override) =>
+			override !== undefined ? override : total(entries),
+		);
 	}
 
 	/**
@@ -498,6 +525,8 @@ export class Viewers {
 	 * not what it happens to be receiving. The claim lasts until {@link Viewer.close}:
 	 * change the ceiling with {@link Viewer.update}, and close it once the broadcast
 	 * stops being watched.
+	 *
+	 * @throws {RangeError} watching nothing, when the ceilings would sum above {@link Viewers.MAX_TARGET}.
 	 */
 	watch(max: number): Viewer {
 		return makeViewer(this.#divider.claim(undefined, 0, max));
@@ -506,10 +535,15 @@ export class Viewers {
 	/**
 	 * Send `target` as the PROBE target instead of the viewers' sum, or `undefined` to follow them again.
 	 *
-	 * `0` turns probing off: the connection sends no target.
+	 * `0` sends no target, so the peer stops probing for these viewers.
+	 *
+	 * @throws {RangeError} keeping the previous override, for a target above {@link Viewers.MAX_TARGET}.
 	 */
 	setTarget(target: number | undefined): void {
-		this.#override.set(target === undefined ? undefined : ceiling(target));
+		if (target !== undefined && ceiling(target) > Viewers.MAX_TARGET) {
+			throw new RangeError(`PROBE target ${target} is above the limit of ${Viewers.MAX_TARGET}`);
+		}
+		this.#override.set(target);
 	}
 
 	/** Stop dividing. Existing viewers report `undefined` and release their claims. */
@@ -551,7 +585,11 @@ export class Viewer implements Disposable {
 		return this.#reservation.rate;
 	}
 
-	/** Change the ceiling, keeping the same claim, as when a catalog enables or disables a rendition. */
+	/**
+	 * Change the ceiling, keeping the same claim, as when a catalog enables or disables a rendition.
+	 *
+	 * @throws {RangeError} keeping the previous ceiling, when the ceilings would sum above {@link Viewers.MAX_TARGET}.
+	 */
 	update(max: number): void {
 		this.#reservation.update(max);
 	}

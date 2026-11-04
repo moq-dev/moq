@@ -72,14 +72,16 @@ fn bench_viewers(c: &mut Criterion) {
 	for count in RESERVATIONS {
 		group.bench_function(BenchmarkId::from_parameter(count), |b| {
 			let viewers = Viewers::default();
-			let watched: Vec<_> = (0..count).map(|_| viewers.watch(Rate::from_kbps(1_000))).collect();
+			let watched: Vec<_> = (0..count).map(|_| viewers.watch(Rate::from_kbps(1_000)).expect("within the limit")).collect();
 			let mut target = fuzz::ProbeTarget::viewers(&viewers);
 			target.poll().expect("the first poll reports the target");
 			let touched = &watched[count / 2];
 			let mut raised = false;
 			b.iter(|| {
 				raised = !raised;
-				touched.update(Rate::from_kbps(if raised { 2_000 } else { 1_000 }));
+				touched
+					.update(Rate::from_kbps(if raised { 2_000 } else { 1_000 }))
+					.expect("within the limit");
 				std::hint::black_box(target.poll().expect("the target moved"));
 			});
 		});

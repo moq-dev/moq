@@ -74,14 +74,17 @@ public final class Viewers: Sendable {
     /// `maxBps` is a ceiling: what the largest rendition the player would switch to
     /// needs, not what it is receiving. Drop the viewer once the broadcast stops being
     /// watched. Holding one requests the receive estimate, like `Session.recvBandwidth()`.
-    public func watch(maxBps: UInt64) -> Viewer {
-        Viewer(ffi.watch(maxBps: maxBps))
+    /// Throws `MoqError.OutOfRange`, watching nothing, when the ceilings would sum above
+    /// `2^53 - 1`.
+    public func watch(maxBps: UInt64) throws -> Viewer {
+        Viewer(try ffi.watch(maxBps: maxBps))
     }
 
     /// Send `targetBps` as the PROBE target instead of the viewers' sum, or `nil` to
-    /// follow them again. `0` sends no target.
-    public func setTarget(targetBps: UInt64?) {
-        ffi.setTarget(targetBps: targetBps)
+    /// follow them again. `0` sends no target. Throws `MoqError.OutOfRange`, keeping the
+    /// previous override, above `2^53 - 1`.
+    public func setTarget(targetBps: UInt64?) throws {
+        try ffi.setTarget(targetBps: targetBps)
     }
 }
 
@@ -101,9 +104,10 @@ public final class Viewer: Sendable {
         ffi.rate()
     }
 
-    /// Change the ceiling, keeping the same claim.
-    public func update(maxBps: UInt64) {
-        ffi.update(maxBps: maxBps)
+    /// Change the ceiling, keeping the same claim. Throws `MoqError.OutOfRange`, keeping
+    /// the previous ceiling, when the ceilings would sum above `2^53 - 1`.
+    public func update(maxBps: UInt64) throws {
+        try ffi.update(maxBps: maxBps)
     }
 }
 

@@ -299,14 +299,17 @@ class Viewers:
         ``max_bps`` is a ceiling: what the largest rendition the player would
         switch to needs, not what it is receiving. Drop the viewer once the
         broadcast stops being watched. Holding one requests the receive
-        estimate, like :meth:`Session.recv_bandwidth`.
+        estimate, like :meth:`Session.recv_bandwidth`. Raises
+        ``moq.Error.OutOfRange``, watching nothing, when the ceilings would sum
+        above ``2**53 - 1``.
         """
         return Viewer(self._inner.watch(max_bps))
 
     def set_target(self, target_bps: int | None) -> None:
         """Send ``target_bps`` as the PROBE target instead of the viewers' sum.
 
-        ``None`` follows the viewers again, and ``0`` sends no target.
+        ``None`` follows the viewers again, and ``0`` sends no target. Raises
+        ``moq.Error.OutOfRange``, keeping the previous override, above ``2**53 - 1``.
         """
         self._inner.set_target(target_bps)
 
@@ -326,7 +329,11 @@ class Viewer:
         return self._inner.rate()
 
     def update(self, max_bps: int) -> None:
-        """Change the ceiling, keeping the same claim."""
+        """Change the ceiling, keeping the same claim.
+
+        Raises ``moq.Error.OutOfRange``, keeping the previous ceiling, when the
+        ceilings would sum above ``2**53 - 1``.
+        """
         self._inner.update(max_bps)
 
 
