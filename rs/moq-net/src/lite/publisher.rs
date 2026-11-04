@@ -6967,6 +6967,9 @@ mod serve_group_test {
 				]),
 		);
 		let (mut run, mut writer, log) = lite07_run(SinkSession::new(Log::default()), subscriber);
+		// The SUBSCRIBE carried the subscriber's four ranges.
+		run.initial = 4;
+		run.ids = (0..4).collect();
 		let mut run = std::pin::pin!(kio::wait(move |waiter| run.poll(&mut writer, waiter)));
 		assert!(futures::poll!(run.as_mut()).is_pending());
 
