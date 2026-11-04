@@ -15,7 +15,8 @@ the new type. Frame indices and timestamps retain their bounded numeric API.
 The IETF codecs also hold subgroup IDs and datagram Object IDs as `bigint`.
 Unsupported subgroups and datagram objects still have the same model behavior.
 Unsafe numeric error/status codes and clock waits are now refused rather than
-rounded or saturated. Wire layouts and published version negotiation are unchanged.
+rounded or saturated. Large IETF filter bounds remain exact bigint; their derived
+frame selection bounds clamp without changing the selected content. Wire layouts and published version negotiation are unchanged.
 See [wire integer precision](INTEGERS.md) for each field's representation and bounds.
 
 ### Authored tracks default to a zero `maxAge` ([#7729](https://github.com/moq-dev/moq/pull/7729))

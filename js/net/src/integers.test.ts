@@ -15,12 +15,12 @@ import { frameDecoder, Group as LiteGroup } from "./lite/group.ts";
 import * as LiteMessage from "./lite/message.ts";
 import { Probe } from "./lite/probe.ts";
 import { SessionInfo } from "./lite/session.ts";
-import { Subscribe, SubscribeStart, SubscribeUpdate } from "./lite/subscribe.ts";
+import { Subscribe, SubscribeStart, SubscribeUpdate, toWireRanges } from "./lite/subscribe.ts";
 import { TrackInfo } from "./lite/track.ts";
 import { Version as Lite } from "./lite/version.ts";
 import * as Path from "./path.ts";
 import { Cursor, concat, encodeVarint, Reader, Writer } from "./stream.ts";
-import { Timescale } from "./time.ts";
+import { Timescale, Timestamp } from "./time.ts";
 import { rangesOf, union, Window } from "./window.ts";
 
 const UNSAFE = (1n << 53n) + 1n;
@@ -190,4 +190,10 @@ test("legacy session bitrate refuses unsafe numbers", async () => {
 	const version = Lite.DRAFT_02;
 	const bytes = await Writer.collect(version, (w) => LiteMessage.encode(w, (w) => w.u62(UNSAFE)));
 	await expect(SessionInfo.decode(new Reader(undefined, bytes, version), version)).rejects.toThrow(RangeError);
+});
+
+test("time anchors convert at the declared scale without losing an aligned unit", () => {
+	expect(
+		toWireRanges([{ start: { time: new Timestamp(4611686021000000, Timescale.NANO) } }], Timescale.MILLI),
+	).toEqual([{ start: { time: 4611686021 } }]);
 });

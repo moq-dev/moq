@@ -1377,7 +1377,7 @@ export class Publisher {
 
 			// A fill we cannot serve is reset right after its header, so it needs no rank.
 			const sequence = fill.kind === "group" ? fill.start.group : undefined;
-			const object = fill.kind === "group" ? toNumber(fill.start.object) : 0;
+			const object = fill.kind === "group" ? frameBound(fill.start.object) : 0;
 			stream = await Writer.tryOpen(this.#quic, {
 				cancel: unsubscribed,
 				version,
@@ -2587,7 +2587,7 @@ export class Publisher {
 			});
 			stream = await Writer.tryOpen(this.#quic, { version, sendOrder: answer.sendOrder, cancel: stopped });
 			if (!stream) throw stop.reason ?? new Error("fetch stream failed to open");
-			ranking?.add(stream, range.start.group, toNumber(range.start.object));
+			ranking?.add(stream, range.start.group, frameBound(range.start.object));
 			await untilAborted(new FetchHeader({ requestId: msg.requestId }).encode(stream, version), stop);
 
 			const out = new FetchWriter({ stream, version, timescale, priority: publisherPriority });
@@ -2739,6 +2739,13 @@ interface FetchAnswer {
 	ranking?: Priority;
 }
 
+// A filter keeps its peer-chosen Object IDs as bigint. Its derived frame selection
+// bound can stop at the model's count ceiling: no object exists at or above it,
+// so clamping either a skip or an exclusive end selects exactly the same frames.
+function frameBound(object: bigint): number {
+	return object > BigInt(Number.MAX_SAFE_INTEGER) ? Number.MAX_SAFE_INTEGER : Number(object);
+}
+
 /** Whether `a` is past `b`. */
 function after(a: Location, b: Location): boolean {
 	return a.group > b.group || (a.group === b.group && a.object > b.object);
@@ -2761,8 +2768,8 @@ function fetchStart(filter: Filter.Filter, largest: Location): Location {
 /** The slice of one group a {@link FetchRange} selects. */
 function fetchSlice(range: FetchRange, sequence: bigint): GroupSlice {
 	return {
-		skip: range.start.group === sequence ? toNumber(range.start.object) : 0,
-		until: range.end.group === sequence && range.end.object > 0n ? toNumber(range.end.object) : undefined,
+		skip: range.start.group === sequence ? frameBound(range.start.object) : 0,
+		until: range.end.group === sequence && range.end.object > 0n ? frameBound(range.end.object) : undefined,
 	};
 }
 
@@ -2986,10 +2993,10 @@ function filterRange(filter: Filter.Filter, edge: LiveEdge): ServeRange {
  */
 function groupSlice(range: ServeRange, sequence: bigint): GroupSlice {
 	return {
-		skip: range.start?.group === sequence ? toNumber(range.start.object) : 0,
+		skip: range.start?.group === sequence ? frameBound(range.start.object) : 0,
 		until:
 			range.end?.group === sequence && range.end.object !== undefined
-				? toNumber(range.end.object + 1n)
+				? frameBound(range.end.object + 1n)
 				: undefined,
 	};
 }

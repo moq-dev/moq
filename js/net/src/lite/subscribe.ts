@@ -9,7 +9,7 @@ import {
 import type * as Instance from "../instance.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
-import { type Timescale, Timestamp } from "../time.ts";
+import { floorAt, type Timescale, Timestamp } from "../time.ts";
 import type { Anchor, Order, Position, Range } from "../track.ts";
 import { decodePin, encodePin } from "./instance.ts";
 import * as Message from "./message.ts";
@@ -152,7 +152,7 @@ export function toWireRanges(ranges: readonly Range[], timescale: Timescale | un
 	const anchor = (anchor: Anchor | undefined): WireAnchor | undefined => {
 		if (anchor?.time === undefined) return anchor as WireAnchor | undefined;
 		if (timescale === undefined) throw new TimestampMismatch();
-		return { time: Math.floor(anchor.time.as(timescale)) };
+		return { time: floorAt(anchor.time, timescale) };
 	};
 	return ranges.map((range) => {
 		const out: WireRange = {};
