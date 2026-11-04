@@ -863,6 +863,103 @@ mod tests {
 		}
 	}
 
+	/// An HLS-only viewer of an on-demand capture, as a default `moq import capture` publishes,
+	/// starts it and gets a playlist listing both renditions. The export holds every media track
+	/// wanted while the catalog declares no join interval, so the capture produces the media the
+	/// interval is measured from, and the video, captured only while wanted too, follows.
+	#[tokio::test(start_paused = true)]
+	async fn an_hls_viewer_starts_an_on_demand_capture() {
+		tokio::task::LocalSet::new()
+			.run_until(async {
+				let (capture, samples) = capture::test_source();
+				let (origin, origin_driver) = moq_net::origin::Producer::new(Default::default());
+				tokio::spawn(moq_net::time::run(origin_driver));
+				let publication = origin.create_broadcast("live").unwrap();
+				publication.announce(Default::default()).unwrap();
+				let mut broadcast = publication.broadcast().clone();
+				let catalog =
+					moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+
+				// Video captured only while wanted, its GOP declared as the encoder does.
+				let net = broadcast
+					.create_track("video", catalog.track_info(hang::catalog::PRIORITY.video))
+					.unwrap();
+				let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+				config.coded_width = Some(320);
+				config.coded_height = Some(240);
+				let mut video = catalog
+					.reserve()
+					.with_interval(Duration::from_secs(2))
+					.video(
+						net,
+						moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
+						config,
+					)
+					.unwrap();
+				let wanted = video.demand();
+
+				// Audio retains its PCM until wanted, the capture default.
+				let mut options = Capture::new(capture.consume());
+				options.encode.track = Some("audio".into());
+				assert!(options.on_demand, "on demand by default");
+				let (_control, driver) = Control::new(broadcast.clone(), catalog.clone(), options).unwrap();
+				let capture_task = tokio::task::spawn_local(capture.run());
+				let encode_task = tokio::spawn(driver.run());
+
+				let remote = origin
+					.consume()
+					.follow("live", None)
+					.unwrap()
+					.available()
+					.await
+					.unwrap();
+				let source = moq_mux::Source::new(origin.consume(), remote);
+				let (broadcaster, export) =
+					moq_hls::export::Broadcaster::new(source, moq_hls::export::Config::default()).unwrap();
+				tokio::spawn(export.run());
+
+				// The capture runs on, writing video only while the export wants it.
+				let listed = |kind, name| {
+					broadcaster.rendition(kind, name).is_some_and(|rendition| {
+						rendition.media_playlist(None).is_ok_and(|playlist| playlist.is_some())
+					})
+				};
+				let mut frame = 0u64;
+				while !(listed(moq_hls::export::Kind::Video, "video") && listed(moq_hls::export::Kind::Audio, "audio"))
+				{
+					assert!(frame < 1_000, "the viewer never got both renditions listed");
+					samples.try_push(Ok(Samples::plain(vec![0.25; 1920], false))).unwrap();
+					if frame.is_multiple_of(5) && wanted.wanted().is_some() {
+						// A 2s GOP, opening with a keyframe once the capture starts.
+						let keyframe = video.needs_keyframe() || frame.is_multiple_of(100);
+						let payload: &[u8] = match keyframe {
+							true => &[0x10, 0x00, 0x00, 0x9d, 0x01, 0x2a, 0x40, 0x01, 0xf0, 0x00],
+							false => &[0x31, 0x00, 0x00],
+						};
+						video
+							.write(moq_mux::container::Frame {
+								timestamp: catalog.timestamp(None).unwrap(),
+								payload: bytes::Bytes::copy_from_slice(payload),
+								keyframe,
+								duration: None,
+							})
+							.unwrap();
+					}
+					kio::clock::sleep(Duration::from_millis(20)).await;
+					frame += 1;
+				}
+				assert!(
+					catalog.snapshot().media.join.is_some(),
+					"the capture declared its interval"
+				);
+
+				drop(broadcaster);
+				encode_task.abort();
+				capture_task.abort();
+			})
+			.await;
+	}
+
 	#[tokio::test(start_paused = true)]
 	async fn one_capture_feeds_a_bus_and_encoder_and_losing_the_bus_does_not_stop_encoding() {
 		tokio::task::LocalSet::new()

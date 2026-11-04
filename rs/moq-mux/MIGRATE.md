@@ -33,7 +33,7 @@ Replace `consumer.set_max_delay(d)` with `consumer.set_delay(Delay::default().wi
 
 ### Compression moves to the track
 
-`catalog.json.z` is gone: `catalog::Producer` publishes one `catalog.json` with `compress: true` (the MSF `catalog` stays uncompressed), and HLS record tracks are compressed too.
+`catalog.json.z` is gone: `catalog::Producer` publishes one `catalog.json` with `compress: true` (the MSF `catalog` stays uncompressed).
 `CatalogFormat::HangZ` and `catalog::hang::Consumer::compressed` are removed; read `CatalogFormat::Hang` with `Consumer::new`, which reads a compressed track like a plain one.
 `json::Config::compression` and `with_compression` are removed: create the track with `moq_net::track::Info::default().with_compress(true)` instead. `Error::UnsupportedCompression` and `Error::Flate` are gone with them.
 The `binary` module and `catalog::Producer::binary_snapshot` and `binary_stream` are deleted, along with the moq-flate dependency: publish opaque bytes on a plain track, or JSON through `json_snapshot` and `json_stream`.
@@ -69,16 +69,14 @@ Match `Target::Enabled(rate)` where you took the rate before. A policy without `
 A TS PMT listing a PID twice routes it by the later entry instead of failing the import.
 Delete matches on `DuplicateTrackName`.
 
-### HLS records replace timelines
+### The join interval replaces timelines and HLS records
 
-The `timeline` module is replaced by `hls`, and records are still published by default.
-`catalog::Config::with_timeline(config)` is `with_hls(config)`, and `with_hls(None)` publishes none.
-`catalog::Reserved::with_timeline_hint` is `with_hls_hint`, and `catalog::Producer::timeline()` is gone.
-Each video and audio rendition advertises its own `hls` field and `<track>.hls` record track, cut at group boundaries; untimed and data tracks get none.
-Read records with `hls::Consumer::subscribe(&broadcast, &hls)`, whose `Event::Push` carries an `hls::Entry`, or publish your own with `hls::Producer`.
-`Config::duration_min` is `hls::Config::duration`, `with_duration_min` is `with_duration`, and `DEFAULT_DURATION_MIN` is `DEFAULT_DURATION`.
-It is now the spacing of a pts grid rather than a floor: a group starts a segment when its pts falls in a later multiple of it than the previous group's, so a segment may be shorter.
-Each rendition cuts and numbers its own segments, so they line up across renditions wherever keyframes share timestamps.
+The `timeline` and `hls` modules are gone: nothing publishes `<track>.hls` record tracks or a rendition `hls` field, and an HLS export reads the media tracks themselves.
+`catalog::Config::with_timeline` and `with_hls` are removed, along with `Config::duration_min`, `DEFAULT_DURATION_MIN`, `catalog::Producer::timeline()`, `Producer::retire`, and `Error::HlsSequence` and `Error::HlsGroup`.
+`catalog::Reserved::with_timeline_hint` (later `with_hls_hint`) is `with_interval`: the track's longest group, its GOP.
+Every video and audio track joins the broadcast's `media.join.interval`, declared once with the largest of their intervals, the hint or, without one, the longest group measured over the track's first second or group, whichever is longer.
+A catalog seeded or modified with its own `media.join` keeps it.
+The broadcast clock is advertised as `media.clock` rather than a root `clock`.
 `container::fmp4::Muxer::fragment` takes a third argument, where the content ends, which times the last sample when neither its codec nor a duration marker does; pass `None` to keep the old behavior.
 
 ### JSON snapshot encoder options move to `json::Options`

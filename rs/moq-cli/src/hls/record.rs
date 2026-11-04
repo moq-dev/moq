@@ -4,7 +4,7 @@
 //! `{kind}/{rendition}/media.m3u8` with its `init.{n}.mp4` and `{segment}.m4s` files. Each
 //! rendition keeps one continuous media playlist across decoder reconfigurations, so the whole
 //! recording stays playable from its master playlist. Its segments are numbered from the first
-//! one recorded, so a replacement reading another record track continues the numbering.
+//! one recorded, so a replacement reading another media track continues the numbering.
 
 use std::collections::{BTreeMap, VecDeque, btree_map};
 use std::path::{Path, PathBuf};
@@ -51,7 +51,7 @@ struct Slot {
 	/// The instance being recorded, if its cursor is in flight.
 	recording: Option<Instance>,
 	/// Replacements whose cursors wait for the current instance to drain, oldest first, each
-	/// with the record track it reads.
+	/// with the media track it reads.
 	queued: VecDeque<(Arc<str>, segments::Consumer)>,
 	/// How many instances started, which numbers their init files.
 	instances: u64,
@@ -84,7 +84,7 @@ struct Instance {
 	index: u64,
 	/// The init file name, once written.
 	init: Option<String>,
-	/// The record track its segment numbers come from.
+	/// The media track its segments come from.
 	track: Arc<str>,
 	/// The last segment the previous instance recorded, which this one must continue.
 	after: Option<Last>,
@@ -112,26 +112,26 @@ enum Admit {
 }
 
 impl Instance {
-	/// Admit the next segment. A replacement reading its predecessor's record track may repeat
-	/// the rows its predecessor recorded, since its cursor can start at the oldest row retained,
-	/// so those are discarded. Those numbers name the same span in both and only increase within
-	/// a broadcaster run, so a repeated number with a newer discontinuity is a source reset, and
-	/// a jump past the next number is a gap nothing recorded. Another record track's numbers name
-	/// other content, so all of it is recorded.
+	/// Admit the next segment. Every track numbers its segments on the broadcast's grid, so a
+	/// replacement's numbers name the same spans as its predecessor's, and those it repeats, since
+	/// its cursor can start at the oldest row retained, are discarded. On the same track numbers
+	/// only increase within a broadcaster run, so a repeated number with a newer discontinuity is a
+	/// source reset, and a jump past the next number is a gap nothing recorded. Another track may
+	/// start a few slots later, since it lists only the segments it saw start.
 	fn admit(&mut self, segment: u64, discontinuity: u64) -> anyhow::Result<Admit> {
 		let Some(after) = self.after.as_ref().filter(|_| !self.started) else {
 			self.started = true;
 			return Ok(Admit::Record { transition: false });
 		};
+		if segment <= after.segment {
+			anyhow::ensure!(
+				after.track != self.track || discontinuity <= after.discontinuity,
+				"the source restarted its timeline at segment {segment}"
+			);
+			self.overlapped |= segment == after.segment;
+			return Ok(Admit::Discard);
+		}
 		if after.track == self.track {
-			if segment <= after.segment {
-				anyhow::ensure!(
-					discontinuity <= after.discontinuity,
-					"the source restarted its timeline at segment {segment}"
-				);
-				self.overlapped |= segment == after.segment;
-				return Ok(Admit::Discard);
-			}
 			anyhow::ensure!(
 				self.overlapped || segment == after.segment + 1,
 				"missed segments {} to {}",
@@ -219,7 +219,7 @@ impl Recording {
 		let key = (rendition.kind, rendition.name.clone());
 		// Subscribe now: the cursor starts at the oldest row retained when it is created.
 		let cursor = rendition.segments();
-		let track = Arc::from(rendition.hls().track.as_str());
+		let track = Arc::from(rendition.track());
 		let slot = match self.slots.entry(key.clone()) {
 			btree_map::Entry::Occupied(entry) => entry.into_mut(),
 			btree_map::Entry::Vacant(entry) => {
@@ -613,10 +613,11 @@ mod tests {
 		fn new(names: &[&str]) -> Self {
 			let origin = moq_tokio::origin::spawn();
 			let broadcast = origin.create_broadcast("live").unwrap();
-			// Hinted records are advertised before any media, so every rendition is recorded
-			// from its first segment.
-			let hinted = moq_mux::hls::Config::default().with_duration_hint(Duration::from_secs(2));
-			let config = moq_mux::catalog::Config::default().with_hls(hinted);
+			// A join interval declared up front lists every rendition before any media, so each
+			// is recorded from its first segment.
+			let mut seeded = moq_mux::catalog::hang::Catalog::<()>::default();
+			seeded.media.join = hang::catalog::Join::new(Duration::from_secs(2));
+			let config = moq_mux::catalog::Config::default().with_catalog(seeded);
 			let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config).unwrap();
 			let reserved = catalog.reserve();
 			let video = names
@@ -785,7 +786,7 @@ mod tests {
 			let segments = listed(&playlist);
 			assert!(segments.len() > 1 && consecutive(&segments, 0), "{playlist}");
 			assert_eq!(duration(&playlist), Duration::from_secs(6), "{playlist}");
-			// The exporter's target: the declared duration, the 2s hint's multiple at the 4s grid.
+			// The exporter's target: twice the 2s join interval.
 			assert!(playlist.contains("\n#EXT-X-TARGETDURATION:4\n"), "{playlist}");
 			assert!(playlist.contains("\n#EXT-X-MEDIA-SEQUENCE:0\n"), "{playlist}");
 			assert!(
@@ -794,17 +795,9 @@ mod tests {
 			);
 			assert!(playlist.ends_with(".m4s\n#EXT-X-ENDLIST\n"), "{playlist}");
 			assert!(!playlist.contains("DISCONTINUITY"), "{playlist}");
-			// The finish's stop is listed as a gap, with no file.
-			let gaps = gaps(&playlist);
-			assert_eq!(
-				gaps,
-				segments.last().copied().into_iter().collect::<Vec<_>>(),
-				"{playlist}"
-			);
-			let files = segments
-				.iter()
-				.filter(|segment| !gaps.contains(segment))
-				.map(|segment| format!("{segment}.m4s"));
+			// Aligned GOPs on the grid leave no gap, and every segment has its file.
+			assert!(gaps(&playlist).is_empty(), "{playlist}");
+			let files = segments.iter().map(|segment| format!("{segment}.m4s"));
 			for file in files.chain(["init.0.mp4".to_string()]) {
 				assert!(
 					!std::fs::read(rendition.join(&file)).unwrap().is_empty(),
@@ -826,7 +819,7 @@ mod tests {
 		let dir = tempfile::tempdir().unwrap();
 		let recording = spawn(dir.path(), &broadcaster);
 
-		// A sibling resolves a segment once its own records pass the segment's end.
+		// A sibling resolves a segment once its own media passes the segment's end.
 		for n in 0..5 {
 			publisher.gop(n);
 		}
@@ -870,7 +863,7 @@ mod tests {
 		let broadcaster = publisher.broadcaster();
 		let dir = tempfile::tempdir().unwrap();
 		let recording = spawn(dir.path(), &broadcaster);
-		// A sibling resolves a segment once its own records pass the segment's end.
+		// A sibling resolves a segment once its own media passes the segment's end.
 		for n in 0..5 {
 			publisher.gop(n);
 		}
@@ -968,9 +961,9 @@ mod tests {
 		Instance {
 			index: 1,
 			init: None,
-			track: "video.hls".into(),
+			track: "video".into(),
 			after: after.map(|(segment, discontinuity)| Last {
-				track: "video.hls".into(),
+				track: "video".into(),
 				segment,
 				discontinuity,
 			}),
@@ -996,15 +989,17 @@ mod tests {
 		assert_eq!(first.admit(40, 3).unwrap(), Admit::Record { transition: false });
 	}
 
-	/// Another record track numbers other content, so its numbers repeat nothing recorded.
+	/// Another track numbers its segments on the same grid: it discards what the predecessor
+	/// recorded, and may start a few slots later.
 	#[test]
-	fn a_replacement_on_another_record_track_records_everything() {
+	fn a_replacement_on_another_track_continues_the_grid() {
 		let mut replacement = Instance {
-			track: "video-640.hls".into(),
+			track: "video-640".into(),
 			..instance(Some((5, 0)))
 		};
-		assert_eq!(replacement.admit(0, 0).unwrap(), Admit::Record { transition: true });
-		assert_eq!(replacement.admit(1, 0).unwrap(), Admit::Record { transition: false });
+		assert_eq!(replacement.admit(5, 1).unwrap(), Admit::Discard);
+		assert_eq!(replacement.admit(7, 1).unwrap(), Admit::Record { transition: true });
+		assert_eq!(replacement.admit(8, 1).unwrap(), Admit::Record { transition: false });
 
 		// The recording numbers its segments on from the predecessor's.
 		let mut playlist = Playlist::new(2);

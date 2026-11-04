@@ -361,7 +361,7 @@ pub(crate) fn populate(
 	out.audio = hang::catalog::Audio::default();
 	// The derivative republishes the child's timeline, so its timestamps only mean something under
 	// the child's wall mapping.
-	out.clock = source.clock;
+	out.media.clock = source.media.clock;
 
 	// Display metadata applies to the rungs too (same picture, smaller).
 	out.video.display = source.video.display.clone();
@@ -375,6 +375,12 @@ pub(crate) fn populate(
 	let Some(rel) = source_rel else {
 		return Ok(());
 	};
+
+	// The source's renditions are listed too, and they promise only the source's join interval,
+	// so the derivative joins on it unless its own tracks already declared one. Fixed once set.
+	if out.media.join.is_none() {
+		out.media.join = source.media.join;
+	}
 
 	for (name, config) in &source.video.renditions {
 		if config.broadcast.is_some() {
@@ -994,14 +1000,36 @@ mod tests {
 			.insert("video", source(1920, 1080, Some(6_000_000)))
 			.unwrap();
 		let clock = hang::catalog::Clock::new(moq_net::Timestamp::from_micros(1_751_846_400_000_000).unwrap()).unwrap();
-		child.clock = Some(clock);
+		child.media.clock = Some(clock);
 
 		let mut out = moq_mux::catalog::hang::Catalog::<()>::default();
 		populate(&mut out, &child, &[], None).unwrap();
-		assert_eq!(out.clock, Some(clock), "a derivative keeps the child's clock");
+		assert_eq!(out.media.clock, Some(clock), "a derivative keeps the child's clock");
 	}
 
-	/// A derivative runs on its source's mapping: `populate` writes the source's root clock through
+	/// A derivative listing the source's renditions joins on the source's interval, unless its own
+	/// tracks already declared one; one listing only its rungs declares its own.
+	#[test]
+	fn populate_carries_the_source_interval_with_its_renditions() {
+		let interval = |secs| hang::catalog::Join::new(std::time::Duration::from_secs(secs));
+		let mut child = moq_mux::catalog::hang::Catalog::<()>::default();
+		child.media.join = interval(4);
+		let rel = Relative::new(".").unwrap();
+
+		let mut out = moq_mux::catalog::hang::Catalog::<()>::default();
+		populate(&mut out, &child, &[], None).unwrap();
+		assert_eq!(out.media.join, None, "only rungs: the derivative measures its own");
+
+		populate(&mut out, &child, &[], Some(&rel)).unwrap();
+		assert_eq!(out.media.join, interval(4));
+
+		let mut out = moq_mux::catalog::hang::Catalog::<()>::default();
+		out.media.join = interval(2);
+		populate(&mut out, &child, &[], Some(&rel)).unwrap();
+		assert_eq!(out.media.join, interval(2), "fixed once declared");
+	}
+
+	/// A derivative runs on its source's mapping: `populate` writes the source's `media.clock` through
 	/// `modify()`, so the derivative's clock carries that mapping and its data is stamped on it.
 	#[tokio::test(start_paused = true)]
 	async fn a_derivative_stamps_on_its_source_clock() {
