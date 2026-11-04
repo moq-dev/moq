@@ -35,8 +35,10 @@ function credential(): Credential {
 const ms = (value: number) => Time.Timestamp.fromMillis(value);
 const text = (value: string) => encoder.encode(value);
 
+// No publisher limit, since the tests read groups a later one has superseded.
 function netTrack(name: string, timed = true): NetTrack.Producer {
-	return new Broadcast.Producer().createTrack(name, timed ? { timescale: Time.Timescale.MILLI } : {});
+	const timescale = timed ? Time.Timescale.MILLI : undefined;
+	return new Broadcast.Producer().createTrack(name, { timescale, maxAge: null });
 }
 
 function subscribe(net: NetTrack.Producer): NetTrack.Subscriber {

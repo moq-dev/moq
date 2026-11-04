@@ -135,7 +135,9 @@ pub async fn run(ctx: Connection) {
 		};
 		let track = match broadcast.create_track(
 			TRACK,
-			moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+			moq_net::track::Info::default()
+				.with_timescale(moq_net::Timescale::MILLI)
+				.with_max_age(None),
 		) {
 			Ok(track) => track,
 			Err(err) => {
@@ -800,9 +802,12 @@ mod tests {
 		}
 	}
 
-	/// A millisecond track: the frames written here carry timestamps.
+	/// A millisecond track with no publisher max age, for tests that write timestamps and
+	/// rely on the subscription's own delay rather than the authored zero default.
 	fn timed() -> moq_net::track::Info {
-		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+		moq_net::track::Info::default()
+			.with_timescale(moq_net::Timescale::MILLI)
+			.with_max_age(None)
 	}
 
 	async fn wait_for(counter: &AtomicU64, value: u64) {

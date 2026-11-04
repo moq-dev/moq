@@ -17,18 +17,18 @@ mod linux {
 	use std::time::Instant;
 
 	use criterion::{BenchmarkId, Criterion, Throughput};
+	use moq_net::transport::poll::SendStream as _;
 	use moq_uring::{Config, Error, Worker, quic, udp};
-	use web_transport_trait::poll::{RecvStream as _, SendStream as _, Session as _};
 
 	use super::support;
 
 	const PAYLOAD: usize = 1024 * 1024;
 
-	async fn drain(recv: &mut quic::web::RecvStream) -> Vec<u8> {
+	async fn drain(recv: &mut quic::web::recv::Stream) -> Vec<u8> {
 		let mut out = Vec::new();
 		let mut buf = [0u8; 64 * 1024];
 		loop {
-			match std::future::poll_fn(|cx| recv.poll_read(cx, &mut buf))
+			match kio::wait(|waiter| recv.poll_read(waiter, &mut buf))
 				.await
 				.expect("read")
 			{
@@ -38,14 +38,12 @@ mod linux {
 		}
 	}
 
-	async fn write_finish(send: &mut quic::web::SendStream, mut buf: &[u8]) {
+	async fn write_finish(mut send: quic::web::send::Stream, mut buf: &[u8]) {
 		while !buf.is_empty() {
-			let n = std::future::poll_fn(|cx| send.poll_write(cx, buf))
-				.await
-				.expect("write");
+			let n = kio::wait(|waiter| send.poll_write(waiter, buf)).await.expect("write");
 			buf = &buf[n..];
 		}
-		send.finish().expect("finish");
+		drop(send.finish());
 	}
 
 	fn measure(udp_config: udp::Config, iterations: u64) -> std::time::Duration {
@@ -87,14 +85,14 @@ mod linux {
 				while let Ok(done) = start_rx.recv() {
 					let (mut send, mut recv) = session.open_bi(Default::default()).await.expect("open stream");
 					send.write_all(&payload[..]).await.expect("write");
-					send.finish().expect("finish");
+					drop(send.finish());
 					assert_eq!(recv.read_to_end(PAYLOAD + 1).await.expect("read").len(), PAYLOAD);
 					done.send(()).expect("notify server");
 				}
 			});
 		});
 
-		let mut session = worker
+		let session = worker
 			.block_on(async {
 				let conn = endpoint.accept().await.expect("accept");
 				quic::web::Request::accept(conn)
@@ -112,11 +110,11 @@ mod linux {
 			start_tx.send(done_tx).expect("start");
 			worker
 				.block_on(async {
-					let (mut send, mut recv) = std::future::poll_fn(|cx| session.poll_accept_bi(cx))
+					let (send, mut recv) = kio::wait(|waiter| session.poll_accept_bi(waiter))
 						.await
 						.expect("accept stream");
 					let payload = drain(&mut recv).await;
-					write_finish(&mut send, &payload).await;
+					write_finish(send, &payload).await;
 					done_rx.await.expect("peer received echo");
 				})
 				.expect("worker");

@@ -154,6 +154,14 @@ mod tests {
 
 	const MAX_DELAY: Duration = Duration::from_secs(10);
 
+	/// A source track with no publisher max age, so a superseded group still reaches the reader
+	/// and only [`MAX_DELAY`] decides how long a gap is waited for.
+	fn source(broadcast: &broadcast::Producer) -> track::Producer {
+		broadcast
+			.create_track("t", track::Info::default().with_max_age(None))
+			.unwrap()
+	}
+
 	fn group(track: &track::Producer, sequence: u64) {
 		let mut group = track.create_group(group::Info { sequence }).unwrap();
 		group.write_frame(None, "x").unwrap();
@@ -187,7 +195,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn only_a_missing_sequence_waits_the_max_delay() {
 		let broadcast = broadcast::Info::new().produce();
-		let track = broadcast.create_track("t", track::Info::default()).unwrap();
+		let track = source(&broadcast);
 		let mut ordered = ordered(&broadcast, None).await;
 
 		group(&track, 0);
@@ -216,7 +224,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn lower_arrivals_never_extend_a_gap() {
 		let broadcast = broadcast::Info::new().produce();
-		let track = broadcast.create_track("t", track::Info::default()).unwrap();
+		let track = source(&broadcast);
 		let mut ordered = ordered(&broadcast, Some(0)).await;
 
 		group(&track, 10);
@@ -233,7 +241,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn handed_out_arrivals_are_dropped() {
 		let broadcast = broadcast::Info::new().produce();
-		let track = broadcast.create_track("t", track::Info::default()).unwrap();
+		let track = source(&broadcast);
 		let mut ordered = ordered(&broadcast, None).await;
 		for sequence in 0..100 {
 			group(&track, sequence);

@@ -124,14 +124,27 @@ class SelectTest(unittest.TestCase):
             self.assertEqual(self.selected(f"sh/rs/{owner}-features.sh"), [])
 
     def test_gate_leaves_send_depth_to_nightly(self):
-        # Nightly runs `rs send-depth` on the pinned toolchain; the gate's lint
-        # is the one cargo pass.
+        # Nightly runs `rs send-depth` on the pinned toolchain.
         for path in ("rs/moq-net/src/lib.rs", "rs/kio/src/lib.rs", "Cargo.lock"):
             with self.subTest(path=path):
                 calls = self.selected(path)
-                self.assertEqual(len(calls), 1, calls)
+                self.assertEqual(len(calls), 2, calls)
                 self.assertTrue(calls[0].startswith("rs lint "), calls)
+                self.assertEqual(calls[1], "rs media-defaults", calls)
         self.assertEqual(self.selected("sh/rs/send-depth.sh"), [])
+
+    def test_media_defaults_are_isolated_from_device_features(self):
+        for path in ("rs/moq-audio/src/lib.rs", "rs/moq-video/src/lib.rs", "Cargo.lock"):
+            for github_actions in (False, True):
+                with self.subTest(path=path, github_actions=github_actions):
+                    calls = self.selected(path, github_actions=github_actions)
+                    self.assertEqual(calls[-1], "rs media-defaults", calls)
+                    self.assertEqual(calls.count("rs media-defaults"), 1, calls)
+        # A crate with no media dependents needs no extra compile.
+        for action in ("lint", "test"):
+            self.assertNotIn("rs media-defaults", self.selected("rs/moq-auth/src/lib.rs", action=action))
+        # The device-feature test build stays a single build.
+        self.assertNotIn("rs media-defaults", self.selected("rs/moq-audio/src/lib.rs", action="test"))
 
     def test_device_features_join_the_one_test_build(self):
         for path, features in (

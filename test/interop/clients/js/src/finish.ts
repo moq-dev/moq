@@ -78,9 +78,10 @@ export function finish(
 			codedHeight: Catalog.u53(240),
 			container: { kind: "legacy" },
 		};
+		// Late readers read the finished video from group 0.
 		const track = broadcast.createTrack("video", {
 			timescale: Moq.Time.Timescale.MICRO,
-			maxAge: Milli(Number.MAX_SAFE_INTEGER),
+			maxAge: null,
 			priority: Catalog.PRIORITY.video,
 		});
 		const media = new Container.Legacy.Producer(track, new Container.Legacy.Format(config));
@@ -127,7 +128,6 @@ export function finish(
 		catalog.serve(
 			broadcast.createTrack(Catalog.TRACK, {
 				timescale: Moq.Time.Timescale.MILLI,
-				maxAge: Milli(Number.MAX_SAFE_INTEGER),
 				priority: Catalog.PRIORITY.catalog,
 			}),
 			serving,

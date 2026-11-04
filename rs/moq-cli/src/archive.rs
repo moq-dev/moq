@@ -412,7 +412,11 @@ mod tests {
 		let url = Url::from_directory_path(dir.path()).unwrap();
 
 		let source = moq_net::broadcast::Info::new().produce();
-		let info = track::Info::default().with_timescale(Timescale::MILLI);
+		// Both groups are written before the recorder reads them, so the superseded one must
+		// stay fresh.
+		let info = track::Info::default()
+			.with_timescale(Timescale::MILLI)
+			.with_max_age(None);
 		let video = source.create_track("video", info).unwrap();
 		for sequence in 0..2 {
 			let mut group = video.create_group(group::Info { sequence }).unwrap();
