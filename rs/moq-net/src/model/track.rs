@@ -7435,22 +7435,6 @@ impl Cursor {
 			|| self.heads.as_ref().is_some_and(|heads| !heads.fetching.is_empty())
 	}
 
-	/// Find the next group in arrival order, or in sequence order for `ordered`, without
-	/// moving past it.
-	fn poll_peek(&mut self, ordered: bool, taken: &Delivered, waiter: &kio::Waiter) -> Poll<Result<Option<Peeked>>> {
-		let walk = idle::Walk::new(ordered);
-		if self.parked(walk, waiter) {
-			return Poll::Pending;
-		}
-		let mut idle = idle::Idle::start(&mut self.idle, waiter);
-		let polled = match ordered {
-			true => self.poll_peek_next(taken, idle.waiter()),
-			false => self.poll_peek_recv(taken, idle.waiter()),
-		};
-		idle.finish(&mut self.idle, walk, polled.is_pending());
-		polled
-	}
-
 	/// Move past the group `peeked` found and hand it out: the exact group, even if its
 	/// producer evicted it since, so eviction cannot advance the reader past a gap.
 	fn take(&mut self, peeked: Peeked) -> group::Consumer {
@@ -8182,29 +8166,39 @@ impl Subscriber {
 	/// hands out that exact group, even if its producer evicted it meanwhile.
 	pub(super) fn poll_peek_group(&mut self, ordered: bool, waiter: &kio::Waiter) -> Poll<Result<Option<Reserved>>> {
 		match &mut self.inner {
-			Inner::Plain(cursor) => loop {
-				let peeked = match cursor.poll_peek(ordered, &self.delivered, waiter) {
-					Poll::Pending => {
-						// A read that only skipped since its last hand-out settles its write-offs too.
-						cursor.retire_written_off(&mut self.delivered);
-						if !self.parks && cursor.is_exhausted(&[&self.delivered]) {
-							// The cursor parked, but this read ended: its cached Pending is no longer our answer.
-							idle::Idle::disarm(&mut cursor.idle);
-							return Poll::Ready(Ok(None));
-						}
-						return Poll::Pending;
-					}
-					polled => ready!(polled)?,
-				};
-				let Some(peeked) = peeked else {
-					return Poll::Ready(Ok(None));
-				};
-				if !self.delivered.contains(peeked.group.sequence) {
-					return Poll::Ready(Ok(Some(Reserved::Plain(peeked))));
+			Inner::Plain(cursor) => {
+				let walk = idle::Walk::new(ordered);
+				if cursor.parked(walk, waiter) {
+					return Poll::Pending;
 				}
-				// A replay advances only this copy's cursor, as an ordinary read would.
-				cursor.take(peeked);
-			},
+				let mut idle = idle::Idle::start(&mut cursor.idle, waiter);
+				let polled = loop {
+					let peeked = match ordered {
+						true => cursor.poll_peek_next(&self.delivered, idle.waiter()),
+						false => cursor.poll_peek_recv(&self.delivered, idle.waiter()),
+					};
+					let peeked = match peeked {
+						Poll::Pending => {
+							// A read that only skipped since its last hand-out settles its write-offs too.
+							cursor.retire_written_off(&mut self.delivered);
+							break match !self.parks && cursor.is_exhausted(&[&self.delivered]) {
+								true => Poll::Ready(Ok(None)),
+								false => Poll::Pending,
+							};
+						}
+						Poll::Ready(Err(err)) => break Poll::Ready(Err(err)),
+						Poll::Ready(Ok(None)) => break Poll::Ready(Ok(None)),
+						Poll::Ready(Ok(Some(peeked))) => peeked,
+					};
+					if !self.delivered.contains(peeked.group.sequence) {
+						break Poll::Ready(Ok(Some(Reserved::Plain(peeked))));
+					}
+					// A replay advances only this copy's cursor, as an ordinary read would.
+					cursor.take(peeked);
+				};
+				idle.finish(&mut cursor.idle, walk, polled.is_pending());
+				polled
+			}
 			Inner::Resume(resume, _) => resume
 				.poll_peek_group(ordered, self.parks, &self.delivered, waiter)
 				.map(|res| res.map(|candidate| candidate.map(|candidate| Reserved::Resume(Box::new(candidate))))),
