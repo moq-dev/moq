@@ -12391,8 +12391,10 @@ struct Join {
 ///
 /// Earlier drafts have no fill parameter. Every subscription is a live join: Largest
 /// Object, followed by a joining FETCH relative at offset 0 for that group's head. An
-/// earlier start's groups are left to the copy's fills, one FETCH per run of them, and a
-/// later start skips the head locally. A bounded end has no joining-FETCH spelling
+/// earlier start's missing groups are left to the copy's fills, one FETCH per run of them,
+/// and a later start skips the head locally. A join landing past a gap after a resumed
+/// copy's cache leaves those cached groups unjudgeable, so a finite budget gives them up
+/// rather than fetching them again. A bounded end has no joining-FETCH spelling
 /// either, so the join stays open and readers stop at their own end: refusing it would
 /// abort a resumed copy for every reader it serves.
 ///

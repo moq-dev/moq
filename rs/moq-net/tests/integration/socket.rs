@@ -48,17 +48,27 @@ impl Fixture {
 	/// A client publishing and subscribing through one origin, connected to the relay over
 	/// `version`.
 	async fn client(&mut self, version: &str) -> origin::Producer {
-		let client = origin(self.next);
+		let client = self.origin();
+		self.connect(&client, version, client.consume()).await;
+		client
+	}
+
+	/// An origin for a client, not connected yet.
+	fn origin(&mut self) -> origin::Producer {
 		self.next += 1;
+		origin(self.next - 1)
+	}
+
+	/// Connect `client` to the relay over `version`, publishing `publish`.
+	async fn connect(&mut self, client: &origin::Producer, version: &str, publish: origin::Consumer) {
 		let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
-		options.client_publish = Some(client.consume());
+		options.client_publish = Some(publish);
 		options.client_subscribe = Some(client.clone());
 		options.server_publish = Some(self.relay.consume());
 		options.server_subscribe = Some(self.relay.clone());
 		// Discovery follows the endpoint's own requests, as it does for an application.
 		options.client_discovers_all = false;
 		self.sessions.push(connect_mock(options).await);
-		client
 	}
 
 	/// An endpoint `id` on its own client of the relay.
@@ -848,4 +858,86 @@ async fn an_endpoint_not_accepting_resets_dials() {
 		.await
 		.expect("dial timeout");
 	assert!(dialed.is_err(), "a dial to an endpoint not accepting connected");
+}
+
+/// The moq-lite versions before hidden broadcasts.
+const OLDER: [&str; 2] = ["moq-lite-06", "moq-lite-03"];
+
+/// An endpoint behind an older moq-lite hop, which never carries its hidden broadcast,
+/// fails its dials and accepts at once, so its peer never hears a dial it can't answer.
+#[kio::test]
+async fn an_older_hop_fails_dials_and_accepts() {
+	for older in OLDER {
+		let mut fixture = Fixture::new();
+		let alice = fixture.endpoint(older, "alice").await;
+		let bob = fixture.endpoint(LITE, "bob").await;
+
+		let dialed = kio::clock::timeout(SETTLE, alice.dial_tcp("bob").unwrap()).await;
+		assert!(matches!(dialed, Ok(Err(Error::Unsupported))), "{older} tcp dial");
+		let dialed = kio::clock::timeout(SETTLE, alice.dial_track("bob", None).unwrap()).await;
+		assert!(matches!(dialed, Ok(Err(Error::Unsupported))), "{older} track dial");
+		let accepted = kio::clock::timeout(SETTLE, alice.accept_tcp()).await;
+		assert!(matches!(accepted, Ok(Err(Error::Unsupported))), "{older} accept");
+		let accepted = kio::clock::timeout(SETTLE, alice.accept_track()).await;
+		assert!(matches!(accepted, Ok(Err(Error::Unsupported))), "{older} accept");
+
+		// So bob never heard a dial to hold an accept open for.
+		assert!(
+			kio::clock::timeout(SETTLE, bob.accept_tcp()).await.is_err(),
+			"{older}: bob heard a dial"
+		);
+	}
+}
+
+/// A dial to a peer behind an older moq-lite hop can't tell it from a peer not announced
+/// yet, so it waits, while the peer's own accepts fail.
+#[kio::test]
+async fn a_peer_behind_an_older_hop_fails_its_accepts() {
+	for older in OLDER {
+		let mut fixture = Fixture::new();
+		let alice = fixture.endpoint(LITE, "alice").await;
+		let bob = fixture.endpoint(older, "bob").await;
+
+		let accepted = kio::clock::timeout(SETTLE, bob.accept_tcp()).await;
+		assert!(matches!(accepted, Ok(Err(Error::Unsupported))), "{older} accept");
+		let mut dial = alice.dial_tcp("bob").unwrap();
+		assert!(
+			kio::clock::timeout(SETTLE, &mut dial).await.is_err(),
+			"{older}: a dial behind an older hop resolved"
+		);
+	}
+}
+
+/// A dial already waiting fails once its origin gains an older moq-lite session, as an
+/// endpoint whose client reconnects does.
+#[kio::test]
+async fn an_older_hop_fails_a_waiting_dial() {
+	let mut fixture = Fixture::new();
+	let client = fixture.origin();
+	let alice = Endpoint::new(&client, "room", "alice").unwrap();
+	let mut dial = alice.dial_tcp("bob").unwrap();
+	assert!(
+		kio::clock::timeout(SETTLE, &mut dial).await.is_err(),
+		"a dial to nobody resolved"
+	);
+
+	fixture.connect(&client, OLDER[0], client.consume()).await;
+	let dialed = kio::clock::timeout(SETTLE, dial).await;
+	assert!(matches!(dialed, Ok(Err(Error::Unsupported))));
+}
+
+/// A client whose publish half opts into hidden broadcasts, as a relay's link to a
+/// cluster peer does, still carries its endpoint over an older moq-lite hop.
+#[kio::test]
+async fn an_older_hop_opted_into_hidden_connects() {
+	let mut fixture = Fixture::new();
+	let client = fixture.origin();
+	fixture
+		.connect(&client, OLDER[0], client.consume().with_hidden(true))
+		.await;
+	let alice = Endpoint::new(&client, "room", "alice").unwrap();
+	let bob = fixture.endpoint(LITE, "bob").await;
+	let (mut dialed, accepted) = connect_tcp(&alice, &bob).await;
+	assert_eq!(dialed.session(), accepted.session());
+	dialed.producer.finish().unwrap();
 }
