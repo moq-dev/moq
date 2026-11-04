@@ -33,10 +33,17 @@ What holds the space (measured 2026-11-04):
   Most T3 worktrees there sit at a base commit or an unmerged branch, so even
   the merged-PR rule finds few: on 2026-11-04 only 2 of 742 were at a merged PR
   head.
+- `docs/mbx.md` points quest repositories at `quest worktree` to reclaim
+  finished checkouts. It already keeps a per-user disk budget (`quest worktree
+  capacity`), runs commands supervised so it knows when a checkout's processes
+  stop, and removes a finished checkout without forcing. But it manages only
+  the checkouts it creates under `.worktrees/`; T3's and Claude Code's
+  checkouts don't go through it.
 
 The work lands mostly in [kixelated/dotfiles](https://github.com/kixelated/dotfiles)
 (cleaner scope, a schedule, mbx retention), and possibly in how T3 retires
-thread worktrees. Keep the retention guarantee `docs/mbx.md` gives: never
+thread worktrees. Weigh routing agent checkouts through `quest worktree`
+against extending the dotfiles cleaner. Keep the retention guarantee `docs/mbx.md` gives: never
 reclaim a target whose owner is still using it. Find the signal that a T3 or
 Claude Code checkout is finished (its thread or task ended, its PR merged or
 closed, no process using it) and reclaim on that, rather than on idle time
