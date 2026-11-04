@@ -4186,11 +4186,10 @@ mod tests {
 
 	// A segment is the smallest whole multiple of the interval at least a second long
 	// (maintainer, 2026-11-03), so an audio-only broadcast's 20 ms groups pack into 1 s segments and
-	// an odd 300 ms interval gives 1.2 s ones. The target duration covers a segment plus the one
-	// interval its first group can start before its line.
+	// an odd 300 ms interval gives 1.2 s ones. The target duration is twice the segment.
 	#[tokio::test(start_paused = true)]
 	async fn short_intervals_pack_into_whole_second_segments() {
-		for (interval, groups, length, target) in [(20, 160, 1_000, 2), (300, 10, 1_200, 2)] {
+		for (interval, groups, length, target) in [(20, 160, 1_000, 2), (300, 10, 1_200, 3)] {
 			let test = Groups::joined(&[], &["audio0"], Duration::from_millis(interval));
 			let rendition = test.rendition("audio0");
 			assert_eq!(rendition.segment_length(), Duration::from_millis(length));
@@ -4206,6 +4205,31 @@ mod tests {
 			assert!(
 				durations.len() >= 2 && durations.iter().all(|d| *d == u128::from(length)),
 				"{interval} ms: {durations:?}"
+			);
+		}
+	}
+
+	// The last gap of a pause ends where the content resumes, which a group starting past its own
+	// line puts almost two segments after the gap's line: the target duration still covers it.
+	#[tokio::test(start_paused = true)]
+	async fn the_target_duration_covers_a_pauses_last_gap() {
+		// 999 ms intervals give 1998 ms segments. Group 1 resumes at 5990 ms and ends on line 3, so
+		// it is segment 2, and gap 1 runs from line 1 to 5990 ms.
+		let test = Groups::joined(&["video0"], &[], Duration::from_millis(999));
+		let mut media = test.publish("video0");
+		for (sequence, pts) in [0, 5_990, 5_994, 7_992].into_iter().enumerate() {
+			media.at(sequence as u64, pts);
+		}
+		let snapshot = test.listed("video0", 3).await;
+		assert_eq!(gaps(&snapshot), [1]);
+		for segment in &snapshot.segments {
+			let rounded = segment.duration.as_secs_f64().round() as u64;
+			assert!(
+				rounded <= snapshot.target_duration,
+				"segment {} lasts {:?}, past the {} s target",
+				segment.segment,
+				segment.duration,
+				snapshot.target_duration
 			);
 		}
 	}

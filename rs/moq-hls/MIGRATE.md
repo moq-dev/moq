@@ -22,7 +22,7 @@ Each rendition reads its media track and numbers its groups into segments on the
 Every rendition shares the grid's segment numbers while cutting at its own groups, and a grid slot no group starts a segment in is listed as a gap.
 `Rendition::hls()` is replaced by `Rendition::track()`, the media track it reads, and `Rendition::interval()`.
 `Error::TimelineFailed` is `Error::MediaFailed { track, source }`, naming the media track.
-`EXT-X-TARGETDURATION` is twice the interval, rounded up to whole seconds.
+A segment is the smallest whole multiple of the interval that is at least a second long, and `EXT-X-TARGETDURATION` is twice that, rounded up to whole seconds.
 Each rendition counts its own discontinuities, which start only where its timestamps go back or at a reconfigure's hand-over, so `Segment::discontinuity` from two renditions' cursors can differ.
 The DASH manifest has one period, with `t` and `d` in milliseconds, and no `segmentAlignment`.
 Segment URL tags hash each rendition's media track, the interval, and its config, so every URL changes once, and a reconfigured rendition lists its later segments under new URLs.

@@ -1009,7 +1009,7 @@ On a 2 second grid, a group spanning 0 to 7 seconds is segment 0, segments 1 and
 
 A segment starts at its first group's timestamp, or a gap at its line, and lasts until the next segment starts.
 A group longer than the segment is listed at its first line, so its duration understates its media, and the gaps after it overstate theirs.
-`EXT-X-TARGETDURATION` is the segment length plus one interval, rounded up to whole seconds, which is twice the interval when the segment is one interval: the group containing a line starts at most one interval before it, so only a group longer than the interval can exceed it.
+`EXT-X-TARGETDURATION` is twice the segment length, rounded up to whole seconds: the group containing a line starts at most one interval, and so one segment length, before it, and a gap ends where the next segment starts, under two lengths after its line, so only a group longer than the interval can exceed it.
 The HLS media sequence and the segment URL derive from the segment number, and DASH addresses the same segments by `$Time$`.
 
 An edge lists a segment once a later one starts or the track ends.

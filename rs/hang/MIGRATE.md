@@ -29,7 +29,7 @@ A catalog with an old root `archive` still parses, with the entry ignored.
 `catalog::MOQ_EPOCH_UNIX_MILLIS` moves to the `clock` module, re-exported at the same path.
 
 `catalog::Media` also carries `join: Option<catalog::Join>`, whose `interval` promises that every audio and video track starts a group at least that often.
-Set it with `catalog.media.join = Some(Join::new(gop))`.
+Set it with `catalog.media.join = Join::new(gop)`, which is `None` for a zero `gop`.
 An HLS or DASH export numbers its segments on that grid, so a broadcast without it is not HLS-renderable.
 A root `clock` written by an older publisher is ignored.
 

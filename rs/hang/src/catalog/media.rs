@@ -55,7 +55,8 @@ pub struct Join {
 	/// It is also the grid an HLS or DASH export numbers its segments on, so every rendition shares
 	/// segment numbers, and it is fixed for the broadcast instance since that numbering depends on
 	/// it. A broadcast without one is not HLS-renderable. Serialized as whole milliseconds, rounded
-	/// up; zero is refused.
+	/// up. Zero is no promise: [`Join::new`] refuses it, and a reader decodes it as absent, so set
+	/// the field only to a positive duration.
 	#[serde_as(as = "MillisCeil")]
 	pub interval: Duration,
 }

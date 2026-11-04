@@ -267,19 +267,20 @@ fn normalize_audio(config: &AudioConfig) -> AudioConfig {
 	config
 }
 
-/// `EXT-X-TARGETDURATION` for segments `length` long on a join interval of `interval`: their sum,
-/// in whole seconds rounded up, and at least one. That is twice the interval when a segment is one
-/// interval (maintainer, 2026-11-03), and 2 s for 1 s segments of 20 ms audio groups.
+/// `EXT-X-TARGETDURATION` for segments `length` long: twice that, in whole seconds rounded up, and
+/// at least one. That is twice the interval when a segment is one interval (maintainer,
+/// 2026-11-03), and 2 s for 1 s segments of 20 ms audio groups.
 ///
-/// A segment starts at the group containing its line, which can start up to one interval before
-/// it, and ends where the next segment starts, at or before the next line, so a segment of groups
-/// within the interval stays under its length plus one interval, whatever shifts the GOP phase: a
-/// join, a cut, a resize, or a live interval change. Only an overrun, a group longer than the
-/// interval, can exceed it; one whose rounded `EXTINF` does is listed anyway (see
-/// [`Rendition::overrun`]).
-fn target_duration(length: Duration, interval: Duration) -> u64 {
-	let bound = length.saturating_add(interval);
-	(bound.as_secs() + u64::from(bound.subsec_nanos() > 0)).max(1)
+/// A segment starts at the group containing its line, which can start up to one interval, at most
+/// one length, before it, and ends where the next segment starts, at or before the next line, so a
+/// segment of groups within the interval stays under twice the length, whatever shifts the GOP
+/// phase: a join, a cut, a resize, or a live interval change. A gap runs from its line to the next
+/// segment's start, which a resuming group past its own line puts under two lengths later. Only an
+/// overrun, a group longer than the interval, can exceed it; one whose rounded `EXTINF` does is
+/// listed anyway (see [`Rendition::overrun`]).
+fn target_duration(length: Duration) -> u64 {
+	let twice = length.saturating_mul(2);
+	(twice.as_secs() + u64::from(twice.subsec_nanos() > 0)).max(1)
 }
 
 /// The segment [tag](segments::tag) of `track` numbered on a grid of `interval` and muxed under
@@ -519,7 +520,7 @@ impl Rendition {
 			height: config.coded_height,
 			codec: config.codec.to_string(),
 			config: Config::Video(config.clone()),
-			target_duration: target_duration(grid::segment_length(interval), interval),
+			target_duration: target_duration(grid::segment_length(interval)),
 			overruns: AtomicU64::new(0),
 			interval,
 			segment: grid::segment_length(interval),
@@ -562,7 +563,7 @@ impl Rendition {
 			height: None,
 			codec: config.codec.to_string(),
 			config: Config::Audio(config.clone()),
-			target_duration: target_duration(grid::segment_length(interval), interval),
+			target_duration: target_duration(grid::segment_length(interval)),
 			overruns: AtomicU64::new(0),
 			interval,
 			segment: grid::segment_length(interval),
