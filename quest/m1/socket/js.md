@@ -37,6 +37,16 @@ After it lands, merge main and rerun the controlled cases, `just ci`,
 `just test interop --all`, and local cross-vendor review on the resulting head;
 then remove this quest and mark the JS PR ready.
 
+The merged-source all-language run passes every non-socket lane and 27 of 32
+socket lanes. Two draft18 JS-dialer TCP lanes fail during initial data. Three
+Rust-dialer TCP lanes (Node draft18/20 and Bun draft18) pass data, FIN, and RST,
+then stall after JS rejects an incoming request. Check whether late requests for
+a reset session are resurfacing before assuming that incoming request is the
+fresh rejected dial; preserve the refusal assertion. The temporary dependency
+run passed all eight controlled bursts, but still had the draft20 refusal stall.
+It does not establish final-head interoperability.
+
 ## Waiting
 
+- Maintainer: choose the generic adapter default in [moq-dev/moq#7883](https://github.com/moq-dev/moq/pull/7883). Its owner recommends canonical unrestricted/from-zero semantics, explicitly accepting retained-history replay for third-party filterless/no-fill subscriptions. Alternatively preserve filterless live joins, distinguish omitted filters from explicit absolute zero in both adapters, and settle draft20's encoding/presence rule. This JS socket port leaves that choice open; explicit socket absolute group0/frame0 remains settled.
 - moq-dev/moq: merge the generic IETF absolute-start correction from [moq-dev/moq#7883](https://github.com/moq-dev/moq/pull/7883), then verify all eight early-answer cases and the relay matrix pass on the JS PR's actual head. Absolute group 0 alone does not preserve early bursts on the current adapters; no new socket API or wire fields are needed.
