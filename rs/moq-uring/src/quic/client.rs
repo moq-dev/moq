@@ -58,6 +58,6 @@ pub async fn connect(
 	remote: SocketAddr,
 	server_name: &str,
 ) -> Result<Connection, Error> {
-	let endpoint = super::Endpoint::new(socket, super::endpoint::Config::default())?;
+	let endpoint = super::Endpoint::new(super::endpoint::Config::default(), socket)?;
 	endpoint.connect(config, remote, server_name).await
 }

@@ -632,7 +632,7 @@ fn serve_worker(spawn: Spawn) -> bool {
 		endpoint_config.handshake.timeout = serve.timeout;
 		endpoint_config.reset_secret = serve.reset_secret;
 		let endpoint =
-			moq_uring::quic::Endpoint::new(socket, endpoint_config).context("failed to build the QUIC endpoint")?;
+			moq_uring::quic::Endpoint::new(endpoint_config, socket).context("failed to build the QUIC endpoint")?;
 		Ok((worker, endpoint))
 	})();
 
@@ -658,10 +658,14 @@ fn serve_worker(spawn: Spawn) -> bool {
 					let id = serve.cluster.next_connection_id();
 					let conn_handle = accept_handle.clone();
 					let serve = serve.clone();
-					let lifecycle =
-						Lifecycle::new(serve.cluster.clone(), serve.auth.clone(), id, Some(conn.remote_addr()))
-							.with_shutdown(serve.shutdown.clone())
-							.with_sessions(serve.sessions.clone());
+					let lifecycle = Lifecycle::new(
+						serve.cluster.clone(),
+						serve.auth.clone(),
+						id,
+						Some(conn.remote_address()),
+					)
+					.with_shutdown(serve.shutdown.clone())
+					.with_sessions(serve.sessions.clone());
 					accept_handle.spawn(async move {
 						let shared = serve.tokio.clone();
 						lifecycle
@@ -739,7 +743,7 @@ async fn serve_connection(
 	let mut deadline = Deadline::new(&handle, &conn);
 
 	// Read the link facts now: the handshake below consumes the connection.
-	let remote = conn.remote_addr();
+	let remote = conn.remote_address();
 	let sni = conn.server_name().map(str::to_owned);
 	// TLS validated this against the configured roots before the connection
 	// existed, so a chain here is an authenticated peer.

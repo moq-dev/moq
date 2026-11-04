@@ -4,6 +4,7 @@ pub mod cache;
 pub mod datagram;
 pub mod frame;
 pub mod group;
+pub mod socket;
 pub mod track;
 
 // The origin + announce subsystem shares one implementation (a route table).
