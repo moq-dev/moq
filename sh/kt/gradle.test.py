@@ -11,6 +11,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 BASH = shutil.which("bash")
+RUNNERS = ("check", "package", "bench")
 
 
 class GradleTest(unittest.TestCase):
@@ -27,7 +28,7 @@ class GradleTest(unittest.TestCase):
             (self.tools / name).symlink_to(shutil.which(name))
         (self.tools / "python3").symlink_to(sys.executable)
         self.write("tools/java", "exit 0\n")
-        for name in ("check.sh", "package.sh"):
+        for name in (f"{runner}.sh" for runner in RUNNERS):
             target = self.root / "sh/kt" / name
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(ROOT / "sh/kt" / name, target)
@@ -89,7 +90,8 @@ class GradleTest(unittest.TestCase):
         return [json.loads(line) for line in self.calls.read_text().splitlines()]
 
     def test_path_executable_wins_over_exported_function(self):
-        for script in ("check", "package"):
+        first = {"check": ":moq:jvmTest", "package": ":moq-ffi:assemble", "bench": "dev.moq.FfiBench"}
+        for script in RUNNERS:
             for override in ({}, {"GRADLE_CMD": "gradle"}):
                 with self.subTest(script=script, override=override):
                     result = self.run_script(script, **override)
@@ -97,13 +99,13 @@ class GradleTest(unittest.TestCase):
                     calls = self.recorded()
                     self.assertEqual(len(calls), 2 if script == "check" else 1)
                     self.assertTrue(all(Path(call["executable"]) == self.tools / "gradle" for call in calls))
-                    self.assertIn(":moq:jvmTest" if script == "check" else ":moq-ffi:assemble", calls[0]["args"])
+                    self.assertIn(first[script], calls[0]["args"])
                     if script == "check":
                         self.assertTrue(all(call["runner_keys"] == [] for call in calls))
                         self.assertIn(":moq:generatePomFileForJvmPublication", calls[1]["args"])
 
     def test_explicit_executable_is_preserved(self):
-        for script in ("check", "package"):
+        for script in RUNNERS:
             for override in ("custom-gradle", "tools/custom-gradle", str(self.tools / "custom-gradle")):
                 with self.subTest(script=script, override=override):
                     result = self.run_script(script, GRADLE_CMD=override)
@@ -112,20 +114,29 @@ class GradleTest(unittest.TestCase):
 
     def test_function_without_executable_is_refused(self):
         (self.tools / "gradle").unlink()
-        for script in ("check", "package"):
+        for script in RUNNERS:
             with self.subTest(script=script):
                 result = self.run_script(script)
                 self.assertEqual(result.returncode, 1, result.stderr)
-                self.assertIn("gradle not on PATH", result.stderr)
+                self.assertIn("Gradle executable 'gradle' not found", result.stderr)
                 self.assertNotIn("inherited function called", result.stderr)
                 self.assertFalse(self.calls.exists())
 
+    def test_missing_override_is_named(self):
+        for script in RUNNERS:
+            with self.subTest(script=script):
+                result = self.run_script(script, GRADLE_CMD="tools/missing-gradle")
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("Gradle executable 'tools/missing-gradle' not found", result.stderr)
+                self.assertFalse(self.calls.exists())
+
     def test_gradle_failure_stops_the_runner(self):
-        for script in ("check", "package"):
+        for script in RUNNERS:
             with self.subTest(script=script):
                 result = self.run_script(script, GRADLE_STATUS="7")
                 self.assertEqual(result.returncode, 7, result.stderr)
                 self.assertEqual(len(self.recorded()), 1)
+                self.assertNotIn("kt bench: wrote", result.stdout)
 
 
 if __name__ == "__main__":
