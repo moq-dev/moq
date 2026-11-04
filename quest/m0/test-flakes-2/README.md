@@ -80,8 +80,8 @@ explains. That batch predates #7658's merge at 15:56Z, and no queue run since
 has failed it, so it needs no child of its own (noted 2026-11-03,
 `/quest-plan`).
 
-Added 2026-11-03 (maintainer, `/quest-plan`): three more merge-queue failures
-from 2026-11-03, one child each.
+Added 2026-11-03 (maintainer, `/quest-plan`): five more merge-queue failures
+from 2026-11-03 and early 2026-11-04 UTC, one child each.
 
 Public API: none. Wire: none.
 
@@ -93,3 +93,5 @@ Public API: none. Wire: none.
 - [moq-transcode's live multi-rung test survives load](/quest/m0/test-flakes-2/transcode-multi-rung.md) - `live_multi_rung` stops failing queue batches with a cancelled rung group
 - [moq-relay's embedded io_uring stop test survives load](/quest/m0/test-flakes-2/relay-embed-stop.md) - `uring_custom_route_and_quic` stops seeing HTTP accepted after its owner stopped
 - [The JS worklet library-build test survives load](/quest/m0/test-flakes-2/js-worklet-build.md) - the lazy-blob worklet build test stops timing out at bun's 5 seconds
+- [moq-archive's cross-backend recording test survives load](/quest/m0/test-flakes-2/archive-backends-identical.md) - `recordings_are_byte_identical_on_every_backend` stops splitting S3's video objects differently
+- [moq-ffi's panicked-origin supervision test survives load](/quest/m0/test-flakes-2/ffi-origin-panic.md) - a read the origin driver's panic ends always reports `MoqError::Task`
