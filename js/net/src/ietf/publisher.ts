@@ -861,15 +861,9 @@ export class Publisher {
 							? fillRange(msg.fill, msg.filter, snapshot.largest)
 							: undefined;
 					if (params.subscriptionFilter !== undefined || selected) {
-						// An update's unfiltered range explicitly lowers the floor to zero;
-						// an initial unfiltered subscription still joins the live group. A
-						// fill-only update keeps the range it already has.
+						// A fill-only update keeps the range it already has.
 						const requested: ServeRange =
-							params.subscriptionFilter === undefined
-								? bounds.peek()
-								: msg.filter.kind === "unfiltered"
-									? { start: { group: 0n, object: 0n } }
-									: filterRange(msg.filter, snapshot);
+							params.subscriptionFilter === undefined ? bounds.peek() : filterRange(msg.filter, snapshot);
 						const tail = afterFill(requested, selected, snapshot);
 						range.start = tail.start;
 						range.end = tail.end;

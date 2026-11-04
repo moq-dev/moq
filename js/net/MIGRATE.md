@@ -9,7 +9,9 @@ How to update your code for each breaking change, newest first.
 Explicit group ranges now keep their requested start when the subscription answer
 arrives after its first data. IETF publishers honor absolute and unfiltered starts
 on all supported drafts instead of silently joining at the live edge. Use a live
-range when only the current group is wanted. There is no API or wire-format change.
+range when only the current group is wanted. An omitted or unfiltered initial
+IETF filter without a fill now includes retained history from group 0 instead
+of joining live. There is no API or wire-format change.
 
 ### Relative group anchors are `bigint`
 

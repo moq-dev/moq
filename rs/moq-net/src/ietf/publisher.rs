@@ -4953,15 +4953,7 @@ impl TrackServe {
 		let edge = live_edge(&cache);
 		if let Some(filter) = update.filter {
 			self.filter = filter;
-			// Unfiltered on an update widens back to zero. A fresh live join here
-			// would discard history before an empty relay can request its fill.
-			self.requested = match filter {
-				Filter::Unfiltered if Filter::is_draft20(self.version) => ServeRange {
-					start: Some(Location { group: 0, object: 0 }),
-					end: None,
-				},
-				_ => filter_range(filter, edge),
-			};
+			self.requested = filter_range(filter, edge);
 		}
 		let mut range = self.requested;
 		if let Ok(mut bounds) = self.bounds.write() {
