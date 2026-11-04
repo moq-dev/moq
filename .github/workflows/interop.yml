@@ -218,7 +218,6 @@ jobs:
             "Playwright Chromium": "${{ steps.setup.outcome }}",
             "Optional publisher retention": "${{ steps.max-age.outcome }}",
             "Stream limits over WebSocket": "${{ steps.stream-limits.outcome }}",
-
             "Relay fills": "${{ steps.relay-fill.outcome }}",
             "Receive credit recovery": "${{ steps.receive-credit.outcome }}",
             "Harness regressions": "${{ steps.harness.outcome }}",
