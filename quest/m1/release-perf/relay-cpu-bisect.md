@@ -39,7 +39,7 @@ Decided 2026-11-03 (maintainer, on [moq-dev/moq#7605](https://github.com/moq-dev
    - ✅ A follow-up at m0, as a correctness bug: [a waiter's record limit changes no behavior](/quest/m0/kio-waiter-records.md).
    - Leave the limit at 8.
 3. `group::Consumer` moves:
-   - ✅ A follow-up in this epic: [a read moves a small group consumer](/quest/m1/release-perf/group-consumer-size.md).
+   - ✅ A follow-up in this epic, implemented in [moq-dev/moq#7791](https://github.com/moq-dev/moq/pull/7791).
    - Leave it.
 
 Remaining:
@@ -55,7 +55,6 @@ Public API: none expected. Wire: none.
 ## Related
 
 - [A waiter's record limit changes no behavior](/quest/m0/kio-waiter-records.md) - found here; the session's waiter registration cost waits on it
-- [A read moves a small group consumer](/quest/m1/release-perf/group-consumer-size.md) - found here; the session's largest remaining self cost
 
 - [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - the nightly series that should have caught this growth
 - [Performance audit](/quest/m2/audit-perf.md) - counts instructions when bisecting, for the same reason

@@ -2668,7 +2668,7 @@ mod tests {
 		);
 	}
 
-	/// An ACME-style resolver retains CA verification of presented client certificates.
+	/// An external resolver retains CA verification of presented client certificates.
 	#[cfg(all(feature = "watch", feature = "quic"))]
 	#[tokio::test]
 	async fn external_resolver_retains_client_roots() {

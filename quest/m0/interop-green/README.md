@@ -37,7 +37,7 @@ the fallback audio stall, which hit on
 [41668668824](https://github.com/moq-dev/moq/actions/runs/41668668824); see
 [the IETF22 fallback quest](/quest/m0/test-flakes-2/ietf22-fallback.md).
 
-Every child has landed. Video passed its scheduled
+Video passed its scheduled
 [run 41497602703](https://github.com/moq-dev/moq/actions/runs/41497602703).
 Interop runs
 [41317901057](https://github.com/moq-dev/moq/actions/runs/41317901057),
@@ -68,4 +68,4 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [The open-GOP recovery fixture provides the broadcast name](/quest/m0/interop-green/open-gop-fixture.md) - the open-GOP browser fixture stubs `in.name`, and an exception in an effect fails the test at once instead of timing out
+- [Confirm scheduled open-GOP recovery passes](/quest/m0/interop-green/open-gop-fixture.md) - a scheduled Interop run passes the open-GOP case with the typed fixture and direct effect/page error reporting

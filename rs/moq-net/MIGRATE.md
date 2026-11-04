@@ -17,6 +17,11 @@ producer.skip_groups(from..to);
 
 A skip is final: `create_group` and `append_group` at a skipped sequence fail with `Error::Skipped`, and a later drop leaves it skipped. It replaces an earlier drop of the same groups, whatever its error, but never a cached group. `append_group` now skips the holes below it that earlier `create_group` calls left since the last append; call `create_group` for every sequence you still mean to fill before appending.
 
+### A zero `Allocator::set_target` leaves the peer's PROBE target ([#7090](https://github.com/moq-dev/moq/pull/7090))
+
+A session with a sender now probes to the larger of its allocator's target and the PROBE target its peer sends, so `Allocator::set_target(Some(Rate::ZERO))` stops probing for this side's reservations only. A peer that advertises a target still raises the probe; a reservation's `Consumer::probed` stays `false`, since nothing probes for it.
+The new `Viewers::watch`, `Viewers::set_target`, and `Viewer::update` return `Result` and refuse ceilings summing above `Viewers::MAX_TARGET` with `Error::BoundsExceeded`.
+
 ### Datagrams are their own track kind ([#7752](https://github.com/moq-dev/moq/pull/7752))
 
 A stream track no longer carries datagrams. `track::Producer::{append_datagram, insert_datagram}` and `track::Subscriber/Ordered::{poll_recv_datagram, recv_datagram}` are removed; a datagram track is created and read through the broadcast, in a namespace apart from stream tracks, with its own sequence counter.

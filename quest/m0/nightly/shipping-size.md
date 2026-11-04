@@ -12,27 +12,67 @@ Decided 2026-11-03 (maintainer, /quest-plan of the follow-ups from
 [moq-dev/moq#7667](https://github.com/moq-dev/moq/pull/7667)): milestone m0,
 a child of the Nightly epic.
 
-The scheduled run of 2026-11-03
-([job](https://github.com/moq-dev/moq/actions/runs/41656613559/job/126039954216))
-failed on growth since the previous run:
+The [2026-11-03 shipping-size job](https://github.com/moq-dev/moq/actions/runs/41656613559/job/126039954216)
+failed nine daily comparisons between
+[dde50c699f](https://github.com/moq-dev/moq/commit/dde50c699f69507ced243754c2f700a6184d1576)
+and [801fd9a2f2](https://github.com/moq-dev/moq/commit/801fd9a2f2f5c88371fa833d805620d97d372465).
+[Investigation PR](https://github.com/moq-dev/moq/pull/7813) records every failing
+measurement and its attribution evidence:
 
-- `js/net` raw went from 444,692 to 467,348 bytes.
-- `js/watch` also grew past the threshold.
-- All four moq-relay archives grew to about 10.2–11.3 MB, from about
-  9.5–10.3 MB.
+- Rebuilt both JS endpoints and all 18 intervening JS/lockfile commits. All 21
+  retained endpoint measurements reproduce exactly. Net raw grows 22,656 bytes;
+  watch raw grows 30,479. Subscription ranges contribute 17,090 and 17,111
+  respectively, and stats/feedback adds 6,787 watch bytes. The remaining deltas,
+  including every failing compression format, are attributed in the PR.
+- Bigint group IDs are excluded as a cause: their merge happened after the
+  failed Nightly commit.
+- All four downloaded relay archives and executable code sections grew. Native
+  x86_64 Linux symbol attribution identifies new rind and rind-rustls alongside
+  transport's retained AWS-LC. The PR separates local diagnostic builds from
+  the actual shipping archive sizes. Native per-commit attribution on macOS,
+  aarch64 Linux, and Windows MSVC remains unfinished; do not label the Linux
+  measurements as those targets' results.
+- The daily baseline already advances after a threshold failure. The failed
+  run retained its current point, and there was no thirty-day anchor yet.
+  `sh/size/README.md` documents acceptance using retained history, and tests
+  cover both daily advancement and the surviving thirty-day guard. A step over
+  10% can still fail until a post-jump point becomes the thirty-day anchor;
+  recording acceptance alone does not waive that check. Summaries now identify
+  the current and failing baseline commits.
 
-Bisect each artifact between the two runs' commits. Likely suspects are the
-recent bigint group IDs ([moq-dev/moq#7681](https://github.com/moq-dev/moq/pull/7681))
-for js/net, and any new default feature or dependency for moq-relay.
-`cargo bloat` and the bundle's metafile name the code that grew.
+Decided 2026-11-04 (maintainer, on the investigation PR):
 
-If the threshold compares only against the previous run, one intended jump
-fails every night until the baseline moves. Check how the job sets its
-baseline, and give it a documented way to accept a reviewed growth.
-[Size audit](/quest/m2/audit-size.md) owns the release-time view of these
-sizes.
+- ✅ Accept the exactly attributed JS growth (`js/net` and `js/watch`,
+  +5.02–5.28%) as the cost of the retained features and correctness fixes.
+  The PR's per-commit table is the acceptance record; the retained November 3
+  point is the new daily baseline.
+- Require further JS reduction while retaining those behaviors.
+
+- ✅ Keep the 5% daily and 10% thirty-day guards unchanged.
+- Raise or exempt the guards for this step.
+
+Relay archive acceptance stays open until native per-commit attribution for
+macOS, aarch64 Linux, and Windows MSVC is supplied, or the maintainer
+explicitly accepts the evidence limit. Keep the retained history intact.
+[Size audit](/quest/m2/audit-size.md) owns the release-time view.
 
 Public API: none. Wire: none.
+
+## Waiting
+
+- moq-dev/moq: native per-commit relay archive attribution for macOS, aarch64
+  Linux, and Windows MSVC. Windows needs a matching build host; none of the
+  listed SSH hosts runs Windows. macOS needs the pinned Nix toolchain rather
+  than kixtop's ambient Rust. Supply before/after archive measurements for the
+  responsible commits rather than substituting Linux `cargo bloat` estimates,
+  then put relay acceptance to the maintainer.
+- moq-dev/moq: inspect the next scheduled Nightly shipping-size job on main,
+  its measured revision and retained baseline, for passing JS daily
+  comparisons and, when an anchor exists, thirty-day comparisons. If a
+  thirty-day comparison still fails, reduction or further acceptance work
+  remains, potentially until the post-jump point is thirty days old. No manual
+  Nightly dispatch; retain this quest until that evidence and the relay
+  attribution are settled.
 
 ## Related
 
