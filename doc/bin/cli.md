@@ -157,6 +157,20 @@ MP4 parser. `import fmp4 --cmaf` publishes each fragment whole as
 [`cmaf`](/concept/hang#container) instead, keeping the source's exact sample
 timing.
 
+`import fmp4 --cmaf` also publishes Common Encryption (`cenc` and `cbcs`) media,
+such as Shaka Packager's output, unchanged, and signals it in the catalog's
+[`drm`](/concept/hang#content-protection) section. Name each DRM system's
+license server with `--drm-license SYSTEM=URL`, and FairPlay's certificate with
+`--drm-certificate SYSTEM=URL`; SYSTEM is `widevine`, `playready`, `fairplay`,
+`clearkey`, or a system ID, and one the media carries no `pssh` for is
+refused. Encrypted media without `--cmaf`, key rotation, and a clear lead are
+refused too.
+
+```bash
+moq --connect https://relay.example.com/anon --broadcast movie.hang \
+    import fmp4 --cmaf --drm-license clearkey=https://license.example.com/clearkey < cbcs.mp4
+```
+
 `import rtsp` pulls an IP camera's H.264 or H.265 video and AAC audio without
 re-encoding. RTP rides the RTSP connection, so run it on the camera's network
 and the camera needs no inbound port. Credentials go in the URL

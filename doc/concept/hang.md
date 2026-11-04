@@ -64,6 +64,7 @@ A few things the catalog can express beyond decoder config:
 - **Labels.** Any rendition may carry a human-readable `label` for a track picker. The map key stays the rendition's ID, so labels need not be unique and renaming one doesn't rename the track.
 - **Renditions in another broadcast.** A rendition may point at a relative broadcast path, so a transcoder can publish a ladder that adds low rungs and references the source's original rendition without re-publishing its bytes. The path resolves against where the consumer found the catalog, so a reference that escapes above the root names nothing and the catalog is rejected. `@moq/watch` and `moqsrc` follow a referenced path's announcements like their own, restarting the rendition on each instance that serves it; every other reader, such as `moq play`, the exporters, and the bindings, waits for the first one announced and keeps it, and an exporter ends the rendition with it. An optional `instance` beside the path names the [stream](/concept/moq-lite#publisher-instances) it expects: a route of another instance ends the rendition instead of falling back to it, while a route whose instance a session minted (one that crossed an older version) cannot prove one, so there it is best effort. Omit `instance` for a broadcast produced on demand, which has none until a worker answers; see [identity and recovery](/concept/identity).
 - **Whole contributions.** A root `contributions` map names whole broadcasts, such as each guest feed in a composed room, by the same relative path and optional `instance` as a rendition's reference. Listing one opens nothing, so a contribution produced on demand starts only once a viewer selects it, which `@moq/watch` does with `broadcast.contribution(effect, id)`. Its rendition IDs stay its own.
+- **DRM.** A root `drm` map describes the DRM systems protecting Common Encryption (`cenc` or `cbcs`) CMAF renditions, one entry per system, scheme, and key: its `system` and `kid` UUIDs, the `pssh` box, and the `license` and `certificate` servers. A protected rendition lists its entries' IDs in its own `drm` field, keeps the encrypted sample entry in its `init`, and names the codec that entry wraps; a rendition listing an ID the root lacks refuses the catalog. Renditions under one key share an entry. The MSF catalog carries the same entries as CMSF `contentProtections`. See [Content protection](#content-protection).
 - **Track names.** The map key is a rendition's ID and, by default, its track name. A rendition sets `track` only when the two must differ, such as two renditions of same-named tracks in different broadcasts, or a rendition whose media changed and so needs a new name; readers subscribe to `track` when present. An ID can't name both a video and an audio rendition.
 - **Jitter.** A rendition can say how much media it writes behind a frame's timestamp, in whole milliseconds rounded up: the reorder delay of B-frames and the span of a fragment or batch written together. It is measured from media timestamps alone, never the time a frame was written, so neither a constant encoder delay nor a capture clock counts. It describes the publisher, never the network, only grows over the life of a stream, and a player sizes its buffer to at least this much. A `0` is read as absent.
 - **Delay.** A rendition can also say how far its frames' timestamps trail those another rendition already wrote, so a video encoder running 200 ms behind audio advertises `delay: 200` on video. A rendition alone measures none. It follows the same rules as jitter. A player holds the largest `delay + jitter` among the renditions it subscribes to, and never subtracts one rendition's `delay` from another's.
@@ -239,6 +240,36 @@ AES-GCM nonces. The broadcast path is an opaque name
 derived from the credential and a semantic name such as `foo.hang`; it carries
 no format marker. `moq-crypto` is the Rust implementation. Relays need no
 configuration to carry it.
+
+## Content protection
+
+DRM is separate from moq-e2ee: the media itself is Common Encryption CMAF,
+encrypted before it reaches MoQ by a packager such as Shaka Packager, and a
+relay carries it like any other CMAF. `moq import fmp4 --cmaf` publishes such a
+file unchanged and fills the catalog's `drm` section from each track's `schm`,
+`tenc`, and `pssh` boxes. The license and certificate servers are not in the
+media, so the publisher supplies them per DRM system, with `--drm-license` and
+`--drm-certificate` or `fmp4::Import::with_drm`.
+
+```json
+{
+  "drm": {
+    "1": {
+      "system": "1077efec-c0b2-4d02-ace3-3c1e52e2fb4b",
+      "scheme": "cbcs",
+      "kid": "a1b2c3d4-e5f6-0718-293a-4b5c6d7e8f90",
+      "pssh": "AAAANHBzc2gB...",
+      "license": { "url": "https://license.example.com/clearkey" }
+    }
+  },
+  "video": { "renditions": { "0.m4s": { "codec": "avc1.64000c", "drm": ["1"], "container": { "kind": "cmaf", "init": "..." } } } }
+}
+```
+
+WebCodecs cannot decrypt, so `@moq/watch` treats a protected rendition as
+unplayable and never selects it. Playback through MSE and EME is not built yet.
+Key rotation and a clear lead are refused on import, as is anything else the
+republished media could not decrypt.
 
 ## Your own format
 
