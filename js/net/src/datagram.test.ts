@@ -127,3 +127,17 @@ test("abandoned datagram requests leave neither a queued request nor a name clai
 	consumer.close();
 	broadcast.close();
 });
+
+test("closing one waiting datagram consumer releases its info wait while another still waits", async () => {
+	const track = new Datagram.Producer("waiting");
+	const first = track.consume();
+	const second = track.consume();
+	const info = first.info();
+	const cause = new StreamError(StreamCode.Cancel);
+	first.close(cause);
+	await expect(info).rejects.toBe(cause);
+	track.accept({ priority: 7 });
+	expect((await second.info()).priority).toBe(7);
+	second.close();
+	track.finish();
+});

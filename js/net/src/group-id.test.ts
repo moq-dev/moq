@@ -23,6 +23,7 @@ interface Wire {
 	name: string;
 	protocol: string;
 	version?: number;
+	datagrams?: boolean;
 }
 
 const WIRES: Wire[] = [
@@ -30,9 +31,9 @@ const WIRES: Wire[] = [
 	{ name: "lite-02", protocol: "", version: Lite.Version.DRAFT_02 },
 	{ name: "lite-03", protocol: Lite.ALPN_03 },
 	{ name: "lite-04", protocol: Lite.ALPN_04 },
-	{ name: "lite-05", protocol: Lite.ALPN_05 },
-	{ name: "lite-06", protocol: Lite.ALPN_06 },
-	{ name: "lite-07-wip", protocol: Lite.ALPN_07_WIP },
+	{ name: "lite-05", protocol: Lite.ALPN_05, datagrams: true },
+	{ name: "lite-06", protocol: Lite.ALPN_06, datagrams: true },
+	{ name: "lite-07-wip", protocol: Lite.ALPN_07_WIP, datagrams: true },
 	{ name: "ietf-18", protocol: Ietf.ALPN.DRAFT_18 },
 	{ name: "ietf-20", protocol: Ietf.ALPN.DRAFT_20 },
 	{ name: "ietf-22", protocol: Ietf.ALPN.DRAFT_22 },
@@ -42,9 +43,24 @@ const WIRES: Wire[] = [
  * Copy `input`'s video track into a broadcast this node produced, keeping every group's
  * ID, as a relay does. A JS origin refuses to serve a broadcast a session delivered.
  */
-async function forward(input: BroadcastConsumer): Promise<BroadcastProducer> {
+async function forward(input: BroadcastConsumer, carriesDatagrams: boolean): Promise<BroadcastProducer> {
 	const subscription = input.track("video").subscribe({ delay: { max: null } });
 	const copy = new BroadcastProducer();
+	if (carriesDatagrams) {
+		const reader = input.datagrams("video");
+		const writer = copy.createDatagrams("video", await reader.info());
+		void (async () => {
+			try {
+				for (let datagram = await reader.recv(); datagram; datagram = await reader.recv())
+					writer.insert(datagram);
+				writer.finish();
+			} catch (err) {
+				writer.abort(err instanceof Error ? err : new Error(String(err)));
+			} finally {
+				reader.close();
+			}
+		})();
+	}
 	const video = copy.createTrack("video", await subscription.info());
 	void (async () => {
 		for (let group = await subscription.recvGroup(); group; group = await subscription.recvGroup()) {
@@ -72,6 +88,7 @@ for (const wire of WIRES) {
 		const path = Path.from("big");
 		const publication = source.createBroadcast(path);
 		publication.announce();
+		const datagrams = wire.datagrams ? publication.broadcast.createDatagrams("video") : undefined;
 		const track = publication.broadcast.createTrack("video");
 
 		const dynamic = relay.requestsRoute(path);
@@ -80,7 +97,7 @@ for (const wire of WIRES) {
 			for await (const request of dynamic.requested()) {
 				const input = wireOf(ingest).consume(request.path);
 				inputs.push(input);
-				request.serve(await forward(input));
+				request.serve(await forward(input, wire.datagrams ?? false));
 			}
 		})();
 
@@ -103,6 +120,17 @@ for (const wire of WIRES) {
 			expect(dec.decode((await received?.readFrame())?.payload)).toBe(`second ${sequence}`);
 			expect(await received?.readFrame()).toBeUndefined();
 			received?.close();
+		}
+
+		if (datagrams) {
+			const unreliable = remote.datagrams("video");
+			await unreliable.info();
+			datagrams.insert({ sequence: PAST_SAFE + 1n, payload: enc.encode("datagram") });
+			const received = await unreliable.recv();
+			expect(received?.sequence).toBe(PAST_SAFE + 1n);
+			expect(dec.decode(received?.payload)).toBe("datagram");
+			unreliable.close();
+			datagrams.finish();
 		}
 
 		reader.close();

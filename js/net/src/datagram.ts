@@ -74,13 +74,15 @@ class State {
 	}
 }
 
-async function info(state: State): Promise<Info> {
+async function info(state: State, local?: GetPromise<Error | null>): Promise<Info> {
 	for (;;) {
 		const value = state.info.peek();
 		if (value) return value;
+		const left = local?.peek();
+		if (left !== undefined) throw left ?? new StreamError(StreamCode.Cancel);
 		const closed = state.closed.peek();
 		if (closed !== undefined) throw closed ?? new Error("datagram track closed before its info");
-		await Signal.race(state.info, state.closed);
+		await (local !== undefined ? Signal.race(state.info, state.closed, local) : Signal.race(state.info, state.closed));
 	}
 }
 
@@ -242,7 +244,7 @@ export class Consumer {
 
 	/** The track's publisher properties, once accepted. */
 	info(): Promise<Info> {
-		return info(this.#state);
+		return info(this.#state, this.#closed);
 	}
 
 	/** This consumer's subscriber priority. */

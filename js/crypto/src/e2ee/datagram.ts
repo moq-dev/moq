@@ -150,6 +150,7 @@ export class Consumer {
 			const iv = this.#key.admitOpen(sequence, 0, payload.byteLength, MAX_DATAGRAM_PAYLOAD);
 			plaintext = await this.#pump.run(() => this.#key.decrypt(iv, payload));
 		} catch (err) {
+			if (this.#closed) return;
 			if (!(err instanceof Failure)) throw err;
 			const kind = err.code;
 			if (kind === "authentication" || kind === "identity" || kind === "oversize") return { kind, sequence };
