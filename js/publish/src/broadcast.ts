@@ -94,9 +94,9 @@ export type BroadcastInput = {
 // The longest group among the video and audio renditions, the catalog's `media.join.interval`: the
 // promise that every one starts a group at least that often. Undefined while none declares one, so a
 // later listing tries again; it reads every hint until then, since none is fixed yet.
-function longestGroup(effect: Effect, renditions: Record<string, Rendition<unknown>>): Catalog.U53 | undefined {
+function longestGroup(effect: Effect, renditions: ReadonlyMap<string, Rendition<unknown>>): Catalog.U53 | undefined {
 	let longest: number | undefined;
-	for (const rendition of Object.values(renditions)) {
+	for (const rendition of renditions.values()) {
 		if (rendition.kind === "text") continue;
 		const hint = effect.get(rendition.joinInterval);
 		if (hint === undefined || !Number.isFinite(hint) || hint <= 0) continue;
@@ -149,9 +149,8 @@ export class Broadcast {
 	 */
 	readonly order = new Order();
 
-	// The registered renditions keyed by full track name. A plain object so deep-equality detects a
-	// key add/remove; the Rendition values compare by identity, which is stable.
-	readonly #renditions = new Signal<Record<string, Rendition<unknown>>>({});
+	// Replaced on add/remove so signal subscribers see every registry change.
+	readonly #renditions = new Signal<ReadonlyMap<string, Rendition<unknown>>>(new Map());
 
 	// The writable signals backing each Rendition's read-only `track` and `slot`, keyed by name.
 	// A static network track is exposed here while it is open. On-demand gates non-audio tracks
@@ -227,7 +226,7 @@ export class Broadcast {
 	}
 
 	#register<C>(name: string, kind: Kind): Rendition<C> {
-		if (this.#renditions.peek()[name]) {
+		if (this.#renditions.peek().has(name)) {
 			throw new Error(`rendition already registered: ${name}`);
 		}
 		this.#publication.peek()?.check(name, kind);
@@ -241,7 +240,7 @@ export class Broadcast {
 		// The slot is the one its producer fills, so it holds this rendition's config.
 		const slot = handle.slot as Getter<Slot<C> | undefined>;
 		const rendition = makeRendition<C>(name, kind, handle.track, slot, () => this.#unregister(name));
-		this.#renditions.update((renditions) => ({ ...renditions, [name]: rendition as Rendition<unknown> }));
+		this.#renditions.update((renditions) => new Map(renditions).set(name, rendition as Rendition<unknown>));
 
 		return rendition;
 	}
@@ -256,9 +255,9 @@ export class Broadcast {
 		}
 
 		this.#renditions.update((renditions) => {
-			if (!(name in renditions)) return renditions;
-			const next = { ...renditions };
-			delete next[name];
+			if (!renditions.has(name)) return renditions;
+			const next = new Map(renditions);
+			next.delete(name);
 			return next;
 		});
 	}
@@ -271,13 +270,13 @@ export class Broadcast {
 		const publication = effect.get(this.#publication);
 		if (publication) effect.get(publication.renames);
 
-		const video: Record<string, Catalog.VideoConfig> = {};
-		const audio: Record<string, Catalog.AudioConfig> = {};
-		const text: Record<string, Catalog.TextConfig> = {};
+		const video: Record<string, Catalog.VideoConfig> = Object.create(null);
+		const audio: Record<string, Catalog.AudioConfig> = Object.create(null);
+		const text: Record<string, Catalog.TextConfig> = Object.create(null);
 		const listed = new Map<string, Listing>();
 		const served: [Rendition<unknown>, string, Identity][] = [];
 
-		for (const rendition of Object.values(renditions)) {
+		for (const rendition of renditions.values()) {
 			const source = enabled ? effect.get(rendition.config) : undefined;
 			if (source === undefined) continue;
 			// The rendition's media is this broadcast's own track, so its config can't point elsewhere.
@@ -402,8 +401,8 @@ export class Broadcast {
 
 	// What each listed rendition has sent, keyed by its catalog ID, and the connection's round-trip time.
 	#stats(): { transport?: { rtt: number }; renditions: Record<string, RenditionStats> } {
-		const renditions: Record<string, RenditionStats> = {};
-		for (const rendition of Object.values(this.#renditions.peek())) {
+		const renditions: Record<string, RenditionStats> = Object.create(null);
+		for (const rendition of this.#renditions.peek().values()) {
 			const stats = rendition.stats.peek();
 			if (stats && rendition.config.peek() !== undefined) renditions[rendition.name] = stats;
 		}
@@ -414,7 +413,7 @@ export class Broadcast {
 	// The names outside a publication's own that a replacement must avoid: every registered ID, and
 	// every ID and track name in the catalog, including an application's own sections.
 	#reserved(): Set<string> {
-		const taken = new Set(Object.keys(this.#renditions.peek()));
+		const taken = new Set(this.#renditions.peek().keys());
 		// A no-op edit is the catalog's only read; it publishes nothing.
 		this.catalog.mutate((catalog) => {
 			for (const entries of [
@@ -520,7 +519,7 @@ export class Broadcast {
 			const renditions = inner.get(this.#renditions);
 			inner.get(publication.renames);
 
-			for (const rendition of Object.values(renditions)) {
+			for (const rendition of renditions.values()) {
 				const handle = this.#handles.get(rendition.name);
 				if (!handle) continue;
 
