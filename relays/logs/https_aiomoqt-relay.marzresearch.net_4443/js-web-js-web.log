@@ -1,11 +1,11 @@
 [page] negotiated protocol: moqt-22
 [page] subscribe_namespace written: requestId=0
-[page] announced: broadcast=smoke-js-web-4938-29413.hang active=true
-[page] subscribe start: id=2 broadcast=smoke-js-web-4938-29413.hang track=catalog.json
-[page] subscribe written: id=2 broadcast=smoke-js-web-4938-29413.hang track=catalog.json
-[page] subscribe ok: id=2 broadcast=smoke-js-web-4938-29413.hang track=catalog.json
-[page] received catalog hang smoke-js-web-4938-29413.hang {video: Object, clock: Object}
-[page] subscribe start: id=4 broadcast=smoke-js-web-4938-29413.hang track=video
-[page] subscribe written: id=4 broadcast=smoke-js-web-4938-29413.hang track=video
-[page] subscribe ok: id=4 broadcast=smoke-js-web-4938-29413.hang track=video
-decoded 6 frames from smoke-js-web-4938-29413.hang (vite)
+[page] announced: broadcast=smoke-js-web-4922-2119.hang active=true
+[page] subscribe start: id=2 broadcast=smoke-js-web-4922-2119.hang track=catalog.json
+[page] subscribe written: id=2 broadcast=smoke-js-web-4922-2119.hang track=catalog.json
+[page] subscribe ok: id=2 broadcast=smoke-js-web-4922-2119.hang track=catalog.json
+[page] received catalog hang smoke-js-web-4922-2119.hang {video: Object, clock: Object}
+[page] subscribe start: id=4 broadcast=smoke-js-web-4922-2119.hang track=video
+[page] subscribe written: id=4 broadcast=smoke-js-web-4922-2119.hang track=video
+[page] subscribe ok: id=4 broadcast=smoke-js-web-4922-2119.hang track=video
+decoded 5 frames from smoke-js-web-4922-2119.hang (vite)
