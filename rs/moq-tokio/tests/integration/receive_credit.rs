@@ -957,9 +957,9 @@ struct Measured {
 	overflowed: u64,
 }
 
-/// Deliver `bytes` over `cell.streams` tracks of one-frame groups, with [`INFLIGHT`]
-/// pacing per track. Connection-wide admission keeps their incomplete
-/// storage segments and framing inside the receive window, through `profile` or not.
+/// Deliver `bytes` over `cell.streams` tracks of one-frame groups, each track keeping
+/// [`INFLIGHT`] bytes outstanding. Every incomplete frame fits the window alongside the
+/// others, so nothing may be evicted, through `profile` or not.
 async fn measure(cell: Cell, profile: Option<moq_shaper::Profile>, bytes: usize) -> Measured {
 	let mut transport = transport(cell.window);
 	transport.limits.max_streams = std::num::NonZeroU64::new(moq_tokio::quic::DEFAULT_MAX_STREAMS);
@@ -982,27 +982,19 @@ async fn measure(cell: Cell, profile: Option<moq_shaper::Profile>, bytes: usize)
 
 	let rounds = (bytes / cell.frame / cell.streams).max(1);
 	let payload = Bytes::from(vec![7u8; cell.frame]);
-	// Credit returns at each sealed storage segment, even for a larger frame. Reserve
-	// the largest incomplete unit plus six maximum-width varints for its group/frame
-	// headers. Per-track pacing alone can offer streams * INFLIGHT against one window.
-	let credit = u32::try_from(cell.frame.min(moq_net::transport::MIN_RECEIVE_WINDOW as usize) + 6 * 8).unwrap();
-	let connection = Arc::new(tokio::sync::Semaphore::new(cell.window.try_into().unwrap()));
 	let start = kio::clock::now();
 	let tasks: Vec<_> = tracks
 		.into_iter()
 		.map(|(track, mut sub)| {
 			let payload = payload.clone();
-			let connection = connection.clone();
 			tokio::spawn(async move {
 				let inflight = Arc::new(tokio::sync::Semaphore::new((INFLIGHT / payload.len()).max(1)));
 				let sent = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
 				let writer = tokio::spawn({
-					let (inflight, sent, payload, connection) =
-						(inflight.clone(), sent.clone(), payload.clone(), connection.clone());
+					let (inflight, sent, payload) = (inflight.clone(), sent.clone(), payload.clone());
 					async move {
 						for _ in 0..rounds {
 							inflight.acquire().await.unwrap().forget();
-							connection.acquire_many(credit).await.unwrap().forget();
 							let mut group = track.append_group().unwrap();
 							sent.lock().unwrap().insert(group.sequence, kio::clock::now());
 							group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
@@ -1023,7 +1015,6 @@ async fn measure(cell: Cell, profile: Option<moq_shaper::Profile>, bytes: usize)
 					let sent = sent.lock().unwrap().remove(&group.sequence).expect("written");
 					latency.push(sent.elapsed());
 					inflight.add_permits(1);
-					connection.add_permits(credit as usize);
 				}
 				// Keep the track open until every group is read.
 				drop(writer.await.unwrap());

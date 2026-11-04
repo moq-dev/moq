@@ -35,6 +35,7 @@ Public API: none. Wire: none.
 
 ## Required
 
+- [The receive-windows benchmark runs to the end](/quest/m0/nightly/receive-windows-evicted.md) - `benchmark_receive_windows` stops failing `frame: Evicted`, so the Rust benchmark-tests job publishes its report
 - [The relay's startup fits its stack under all features](/quest/m0/nightly/relay-stack.md) - `debug_relay_load_and_run_fit_windows_stack` passes under `--all-features`, fixed at the feature that grew the future
 - [The binding benchmark's 64 KiB case measures](/quest/m0/nightly/bindings-bench-evicted.md) - the 64 KiB case completes instead of failing `evicted`
 - [The range-widening bench expects a narrowed read to end](/quest/m0/nightly/track-range-widening.md) - `track_range_widening/1r/64` stops asserting a pending read that #7545 made end
