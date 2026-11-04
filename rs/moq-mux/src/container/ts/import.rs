@@ -10874,9 +10874,12 @@ pub(super) mod test {
 		const OPUS: u16 = 0x62;
 		const GONE: u16 = 0x63;
 		let opus: &[u8] = &[5, 4, b'O', b'p', b'u', b's'];
-		let predecessor =
-			super::Pmt::parse(&pmt_section(1, 0, &[(0x03, KEPT, &[]), (0x06, OPUS, opus), (0x03, GONE, &[])]))
-				.unwrap();
+		let predecessor = super::Pmt::parse(&pmt_section(
+			1,
+			0,
+			&[(0x03, KEPT, &[]), (0x06, OPUS, opus), (0x03, GONE, &[])],
+		))
+		.unwrap();
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut initial = crate::catalog::hang::Catalog::<Ext>::default();
 		initial.ext.mpegts.mux_rate = Some(400_000);
@@ -10884,8 +10887,8 @@ pub(super) mod test {
 			crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default().with_catalog(initial))
 				.unwrap();
 		let mut published = catalog.consume().unwrap();
-		let mut import = super::Import::new(broadcast, catalog.reserve())
-			.with_provisional(super::Provisional(Some(predecessor)));
+		let mut import =
+			super::Import::new(broadcast, catalog.reserve()).with_provisional(super::Provisional(Some(predecessor)));
 
 		let payload = (1..=3).map(mp2_frame).collect::<Vec<_>>().concat();
 		let len = 8 + payload.len();
@@ -10906,14 +10909,25 @@ pub(super) mod test {
 		);
 
 		let mut tables = psi_packets(0, &mut 0, &[], &super::psi::section(0x00, 9, 0, 0, 0, &[0, 7, 0xe2, 0]));
-		tables.extend(psi_packets(0x200, &mut 0, &[], &pmt_section(7, 0, &[(0x03, KEPT, &[])])));
+		tables.extend(psi_packets(
+			0x200,
+			&mut 0,
+			&[],
+			&pmt_section(7, 0, &[(0x03, KEPT, &[])]),
+		));
 		import.decode(&tables).unwrap();
 		let std::task::Poll::Ready(Ok(Some(first))) = published.poll_next(&kio::Waiter::noop()) else {
 			panic!("the source's PMT releases the catalog");
 		};
 		assert_eq!(first.audio.renditions.len(), 1, "only the source's stream announces");
 		assert_eq!(
-			first.ext.mpegts.tracks.values().map(|track| track.pid).collect::<Vec<_>>(),
+			first
+				.ext
+				.mpegts
+				.tracks
+				.values()
+				.map(|track| track.pid)
+				.collect::<Vec<_>>(),
 			[KEPT]
 		);
 		let program = first.ext.mpegts.program.as_ref().unwrap();

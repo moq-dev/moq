@@ -210,7 +210,12 @@ async fn a_restart_routes_by_the_map_before_the_step() {
 	let (err, rest) = feed(&data, 188);
 	let provisional = err.unwrap().downcast::<Restart>().unwrap().provisional;
 	let pmt = pmt_pid(CLIP);
-	let repeat = rest.as_chunks::<188>().0.iter().position(|packet| pid(packet) == pmt).unwrap() * 188;
+	let repeat =
+		rest.as_chunks::<188>()
+			.0
+			.iter()
+			.position(|packet| pid(packet) == pmt)
+			.unwrap() * 188;
 	let open = || {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut initial = crate::catalog::hang::Catalog::<Ext>::default();
