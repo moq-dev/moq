@@ -22,7 +22,7 @@ impl Drop for Relay {
 }
 
 async fn relay() -> Relay {
-	let _ = moq_tokio::crypto::install_default();
+	moq_tokio::crypto::install_default().unwrap();
 	let mut config = moq_relay::Config::default();
 	config.drain_timeout = Some(Duration::ZERO.into());
 	config.listen.bind = Some("127.0.0.1:0".parse().unwrap());

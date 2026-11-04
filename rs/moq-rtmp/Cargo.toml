@@ -37,13 +37,12 @@ byteorder = "1"
 bytes = { workspace = true }
 futures = { workspace = true }
 hang = { workspace = true }
-hmac = "0.13"
 kio = { workspace = true, features = ["runtime"] }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 rand = { workspace = true }
-rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"], optional = true }
-sha2 = "0.11"
+rind = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["std"], optional = true }
 # TCP keepalive on accepted sockets, so a half-open connection (a peer that
 # vanished without a FIN/RST) is reaped instead of pinning a broadcast forever.
 socket2 = { workspace = true }
@@ -62,7 +61,8 @@ kio = { path = "../kio", features = ["sim"] }
 # `rustls::ServerConfig`. No transport feature: a QUIC backend here would be
 # unified into every other crate a `--workspace` build selects, which is exactly
 # what hid moq-tokio's backend-less build from the nightly feature matrix.
-moq-tokio = { path = "../moq-tokio", default-features = false, features = ["aws-lc-rs", "net"] }
+moq-tokio = { path = "../moq-tokio", default-features = false, features = ["net"] }
+rind-rustls = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tracing-test = { workspace = true }
 workspace-hack = { path = "../workspace-hack" }
