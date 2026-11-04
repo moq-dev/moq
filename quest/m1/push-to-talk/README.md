@@ -54,13 +54,16 @@ Decided 2026-11-03 (maintainer, on
   clocked live start or other startup machinery is added. The runner reports
   per press `delivery` (the slowest frame the onset waited on, from its first
   sample's capture, so packetization, queueing and retransmission count) and
-  `playout` (the rest); projected device output is reported apart. Re-graded on
-  2026-11-03 traces, playout was median 303 ms (152-545) on the reproduction
-  and 339 ms (307-895) behind bufferbloat. The player's target is its delay plus
-  measured jitter plus one frame (`js/watch/src/audio/latency.ts`), so the frame
-  is packetization, already counted in delivery. The bufferbloat tail is media
-  the 64 kbit/s link never delivered: about half of each utterance never arrived,
-  so the ring waited on later frames.
+  `playout` (the rest); projected device output (~73 ms) is reported apart.
+  The player's target is its delay plus measured jitter plus one frame
+  (`js/watch/src/audio/latency.ts`); the frame is packetization, already in
+  delivery. Graded on 2026-11-04 UTC runs of the merged head, over the 15
+  separated presses: the reproduction's playout was median 296 ms (279-424),
+  with 9 presses at or under 300 ms, 4 more under 320 ms, and two at 384 and
+  424 ms. Behind bufferbloat it was median 331 ms (301-595), with four presses
+  above 500 ms; delivery took 333-514 ms, and only 493 of 908 frames arrived,
+  since the 64 kbit/s link carries about half the stream. The tails are not
+  yet attributed; the player's jitter allowance is the likely term.
 - ✅ **No encoder recovery on re-enable.** Asked first why a fatal encoder error
   is expected at all: it is not. No push-to-talk run reported one (the runner
   fails on `out.error`), and no issue reports a publisher encoder failure; the
@@ -78,8 +81,8 @@ the encoder synchronously and can discard queued codec work.
 [Buffered audio across stop](/quest/m1/audio-across-stop.md) keeps the codec
 across a disable and flushes it before the discontinuity, which drains that
 tail to its original track. Once it lands, rerun the proof; the runner
-deliberately fails on this loss. If the rerun is complete and within the
-latency goal, this epic is done.
+deliberately fails on this loss. Grade the rerun against the latency goal
+above; a complete rerun within it finishes this epic.
 
 ## Required
 
