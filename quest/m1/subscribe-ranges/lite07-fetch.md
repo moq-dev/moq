@@ -1,4 +1,4 @@
-# [M] Lite-07 FETCH is single-group only
+# [L] Lite-07 FETCH is single-group only
 
 ## Goal
 
@@ -32,6 +32,20 @@ on lite-07 (`track.Consumer.fetchGroup` in JS).
   group; a fill of more than one group goes through the subscription, as the
   Rust copy does since
   [moq-dev/moq#7872](https://github.com/moq-dev/moq/pull/7872).
+- Decided 2026-11-04 (maintainer, on
+  [moq-dev/moq#7872](https://github.com/moq-dev/moq/pull/7872)): the JS port
+  of those subscription fills is this quest's, not #7872's. JS copies started
+  filling only in [moq-dev/moq#7845](https://github.com/moq-dev/moq/pull/7845),
+  after #7872 was scoped as the Rust copy's fill, and they FETCH each missing
+  group one at a time, which breaks no wire rule. Port all of #7872's Rust fill
+  rules to the JS subscriber (`Subscriber.#runFills`), with tests:
+  - Subscription ranges: a lite-07 miss of more than one whole group joins the
+    subscription's ranges beside the demand's, told apart by Range ID, or rides
+    a fills-only SUBSCRIBE when no demand is open.
+  - Recovery: a group the subscription drops as stale, or delivered before and
+    since evicted, is asked once on a SUBSCRIBE of its own with no max delay.
+  - Skips: a range start past what a fill asked refuses only the fills owing
+    those groups now, while that range is live, and records nothing.
 - `drafts/draft-lcurley-moq-lite.md` states the split in its Fetch and
   Subscribe sections. Run `just drafts check`.
 - Run `just test interop --all`.
