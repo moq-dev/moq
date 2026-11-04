@@ -125,6 +125,27 @@ struct State {
 	finished: Option<crate::Result<()>>,
 	// Cache catalog quality order without counting it as a holder.
 	audio: Vec<Weak<Rendition>>,
+	/// Each media track a catalog without a join interval yet lists, held subscribed so an
+	/// on-demand publisher produces the media its interval is measured from (see [`hold`]).
+	waiting: BTreeMap<Key, Owner>,
+}
+
+/// Hold `track` on `binding` subscribed until dropped, as demand for its media.
+///
+/// A publisher that measures its join interval does so from media, and an on-demand one produces
+/// media only for a subscriber: without this, an export that subscribes only once the interval
+/// is declared would never see one.
+async fn hold(binding: moq_mux::Binding, track: String) {
+	let Ok(broadcast) = binding.broadcast().await else {
+		return;
+	};
+	let Ok(track) = broadcast.track(&track) else {
+		return;
+	};
+	let Ok(_subscriber) = track.subscribe(moq_net::track::Subscription::default()).await else {
+		return;
+	};
+	std::future::pending::<()>().await
 }
 
 /// The shared state handle each rendition's record watcher reaches.
@@ -550,6 +571,31 @@ impl Producer {
 	/// all, so it is dropped with a warning rather than served. So is a rendition named `""`, `.`, or
 	/// `..`, which no URL path segment can address, so the master playlist, the DASH manifest, and
 	/// the router agree on what is served.
+	/// Hold every video and audio track `catalog` lists subscribed in `waiting`, releasing those
+	/// it no longer lists.
+	fn wait(&self, source: &moq_mux::Source, catalog: &Catalog, waiting: &mut BTreeMap<Key, Owner>) {
+		use hang::catalog::Reference;
+		let video = catalog.video.renditions.iter().map(|(name, config)| {
+			let reference = (config.broadcast.clone(), config.instance.clone(), config.track(name).to_string());
+			((Kind::Video, name.clone()), reference)
+		});
+		let audio = catalog.audio.renditions.iter().map(|(name, config)| {
+			let reference = (config.broadcast.clone(), config.instance.clone(), config.track(name).to_string());
+			((Kind::Audio, name.clone()), reference)
+		});
+		let listed: BTreeMap<Key, _> = video.chain(audio).collect();
+		waiting.retain(|key, _| listed.contains_key(key));
+		for (key, (broadcast, instance, track)) in listed {
+			if waiting.contains_key(&key) {
+				continue;
+			}
+			let Ok(binding) = source.bind(broadcast.as_ref(), instance.as_ref()) else {
+				continue;
+			};
+			waiting.insert(key, self.fanout.spawn(hold(binding, track)));
+		}
+	}
+
 	pub fn sync(&self, source: &moq_mux::Source, catalog: &Catalog) {
 		let clock = catalog.media.clock;
 		let interval = catalog.media.interval();
@@ -586,6 +632,13 @@ impl Producer {
 			if let Some(rendition) = current.renditions.remove(&key) {
 				handoffs.insert(key, rendition.retire());
 			}
+		}
+
+		// Until the interval is declared, nothing is listed, but every media track is held wanted.
+		let current = &mut *current;
+		match interval {
+			Some(_) => current.waiting.clear(),
+			None => self.wait(source, catalog, &mut current.waiting),
 		}
 
 		let mut added = Vec::new();
