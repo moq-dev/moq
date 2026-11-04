@@ -4698,6 +4698,63 @@ mod tests {
 		);
 	}
 
+	/// A group that arrives over a lite-07 stale (OLD) drop wins over it, whichever lands first:
+	/// the publisher serves a group after its stale drop, as a front that switched routes does,
+	/// and the group's stream may overtake the drop. The next update owes it no more, and a
+	/// group still arriving is never aborted by the drop.
+	#[kio::test]
+	async fn a_group_wins_over_its_stale_drop() {
+		let version = Version::Lite07;
+		let (serve, mut serving, tail, _broadcast) = lite07_serving(Duration::from_millis(500)).await;
+		let now = || serve.subscriber.runtime.now();
+		let code = u64::from(crate::coding::StreamCodes::encode_stream_code(
+			&version,
+			&crate::StreamError::Old,
+		));
+		let old = |sequence| {
+			lite::SubscribeResponse::Drop(lite::SubscribeDrop {
+				start: sequence,
+				end: sequence,
+				error: code,
+				update: 0,
+			})
+		};
+		let frame = |group: &mut crate::group::Producer| {
+			group.write_frame(crate::Timestamp::from_millis(1).unwrap(), &b"x"[..])?;
+			group.finish()
+		};
+		let mut arrive = |serving: &mut ServeLoop, sequence| {
+			let group = serving.serving.create_group(crate::group::Info { sequence }).unwrap();
+			(group, Reading::open(&tail, Some(sequence), now()))
+		};
+
+		// OLD, then the group, which finishes.
+		serving.apply_response(&serve, old(1)).unwrap();
+		let (mut one, reading) = arrive(&mut serving, 1);
+		frame(&mut one).unwrap();
+		drop(reading);
+		// The group first, still arriving when its OLD lands.
+		let (mut two, _two) = arrive(&mut serving, 2);
+		serving.apply_response(&serve, old(2)).unwrap();
+		// OLD, then the group, still arriving at the update.
+		serving.apply_response(&serve, old(3)).unwrap();
+		let (mut three, _three) = arrive(&mut serving, 3);
+		// OLD, and no group.
+		serving.apply_response(&serve, old(4)).unwrap();
+
+		{
+			let Sub::Active(active) = &mut serving.sub else {
+				unreachable!("an active subscription");
+			};
+			buffer_update(active, &serving.serving, now()).unwrap();
+		}
+		let covers = |groups: std::ops::Range<u64>| tail.read().covers(groups);
+		assert!(covers(1..4), "every group that arrived stays accounted for");
+		assert!(!covers(4..5), "the group that never arrived is owed again");
+		frame(&mut two).expect("the drop leaves a group still arriving");
+		frame(&mut three).expect("the update leaves a group still arriving");
+	}
+
 	/// A SKIP, or any final drop, that follows an OLD drop of the same groups replaces it: an
 	/// update reopens only stale verdicts, so the groups stay accounted for, and the skip
 	/// stays final rather than being superseded with the OLD drop. An empty range names
@@ -9026,14 +9083,17 @@ fn judged_end(ranges: &[lite::Range]) -> Option<u64> {
 ///
 /// A lite-07 publisher re-offers every group it reported stale on any update, and drops
 /// again under the new number what is still stale, so the tail owes every stale run again,
-/// from `now`.
+/// from `now`. A group that arrived since its stale drop won over it: the publisher served
+/// it, so it is neither re-offered nor owed again.
 fn buffer_update(active: &mut SubStream, serving: &track::Producer, now: crate::time::Instant) -> Result<(), Error> {
 	active.update += 1;
-	serving.supersede_stale(judged_end(&active.ranges));
-	let reopened = std::mem::take(&mut active.stale);
+	let held = serving.supersede_stale(judged_end(&active.ranges));
+	let recorded = std::mem::take(&mut active.stale);
 	if let Ok(mut tail) = active.tail.write() {
-		for run in reopened.iter() {
-			tail.unaccount(run.clone(), now);
+		for run in recorded.iter() {
+			for reopened in held.overlapping(run) {
+				tail.unaccount(reopened.start.max(run.start)..reopened.end.min(run.end), now);
+			}
 		}
 	}
 	active.stream.writer.buffer(&lite::SubscribeUpdate {
@@ -10242,7 +10302,9 @@ impl ServeLoop {
 			}
 			// The publisher will never send these groups, so they
 			// are accounted for without a stream, and a reader of
-			// one still arriving ends with the drop's error now.
+			// one still arriving ends with the drop's error now. A
+			// lite-07 stale drop leaves a group whose stream arrived,
+			// since the stream wins over it.
 			lite::SubscribeResponse::Drop(dropped) => {
 				let groups = dropped.start..dropped.end.saturating_add(1);
 				// An empty range (Group Start = Group End + 1) names nothing.
@@ -10262,7 +10324,8 @@ impl ServeLoop {
 					}
 					match stale {
 						// Judged under the budget this subscriber sent with that update. A
-						// sequence already skipped stays skipped, so no update reopens it.
+						// sequence already skipped stays skipped, and one whose group arrived
+						// keeps it, so no update reopens either.
 						true => {
 							let recorded = self.serving.give_up(groups, track::Hole::stale(active.max_delay));
 							active.stale.extend(recorded);

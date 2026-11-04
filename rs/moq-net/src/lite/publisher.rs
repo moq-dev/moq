@@ -4720,6 +4720,7 @@ impl TrackRun {
 							&& let Some(end) = sequence.checked_add(1)
 						{
 							self.expired.insert(sequence..end);
+							self.sent_stale(sequence..end);
 						}
 						Hole::stale(self.track.budget())
 					}
@@ -4734,6 +4735,7 @@ impl TrackRun {
 			for run in std::mem::take(&mut self.redrop).iter() {
 				writer.buffer(&self.hole(run.start..=run.end - 1, &hole))?;
 				self.expired.insert(run.clone());
+				self.sent_stale(run.clone());
 			}
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
 		}
@@ -4832,8 +4834,7 @@ impl TrackRun {
 					if self.dropped_stale.contains(&sequence)
 						&& let Some(end) = sequence.checked_add(1)
 					{
-						self.dropped_stale.remove(sequence..end);
-						self.dropped.remove(sequence..end);
+						self.replace_stale(sequence..end);
 					} else if self.served.as_ref().is_some_and(|served| served.contains(&sequence)) {
 						return Poll::Ready(Ok(ControlFlow::Continue(())));
 					}
@@ -4978,19 +4979,42 @@ impl TrackRun {
 		hole: &Hole,
 		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
 	) -> Result<bool, Error> {
-		if self.ctx.version.has_skip()
-			&& let Some(served) = &mut self.served
-		{
+		if self.ctx.version.has_skip() && self.served.is_some() {
 			let replaces = match hole {
 				Hole::Skip => Some(&self.dropped),
 				Hole::Drop { stale: None, .. } => Some(&self.dropped_stale),
 				Hole::Drop { .. } => None,
 			};
-			for run in replaces.into_iter().flat_map(|runs| runs.overlapping(&range)) {
-				served.remove(run.start.max(range.start)..run.end.min(range.end));
+			let replaced: Vec<_> = replaces
+				.into_iter()
+				.flat_map(|runs| runs.overlapping(&range))
+				.map(|run| run.start.max(range.start)..run.end.min(range.end))
+				.collect();
+			for run in replaced {
+				self.replace_stale(run.clone());
+				if let Some(served) = &mut self.served {
+					served.remove(run);
+				}
 			}
 		}
 		self.drop_range(range, hole, writer)
+	}
+
+	/// Record `run` as named stale (OLD) in a lite-07 drop, which a later verdict or group
+	/// replaces; see [`Self::dropped_stale`].
+	fn sent_stale(&mut self, run: Range<u64>) {
+		self.dropped.insert(run.clone());
+		self.dropped_stale.insert(run);
+	}
+
+	/// Forget that `run` went out as a drop: a verdict or group replaces it. A stream of this
+	/// subscription that expired there is no longer owed again on an update, since what
+	/// replaced it settles it.
+	fn replace_stale(&mut self, run: Range<u64>) {
+		self.dropped.remove(run.clone());
+		self.dropped_stale.remove(run.clone());
+		self.expired.remove(run.clone());
+		self.redrop.remove(run);
 	}
 
 	/// Give up, as `hole` says, whatever part of `range` this subscription has not been
@@ -7144,6 +7168,89 @@ mod serve_group_test {
 			assert_eq!(drop_updates(&mut writer, &log, version).await, drops, "{version}");
 			assert_eq!(run.ctx.outcomes.opened.load(Ordering::Relaxed), opened, "{version}");
 		}
+	}
+
+	/// A group that wins over a lite-07 stale drop already sent retires it: the next update
+	/// neither sends the drop again nor reopens the served group, and the end names nothing
+	/// for it. Here a relay's upstream reported group 1 stale, then delivered it, as a front
+	/// that switched routes does.
+	#[kio::test]
+	async fn a_group_served_over_a_stale_drop_retires_it() {
+		let budget = Duration::from_millis(1500);
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let subscriber =
+			track.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(budget)));
+		let (mut run, mut writer, log) = lite07_run(SinkSession::new(Log::default()), subscriber);
+		write_group(&mut track, 0, 0);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		track.give_up(1..2, Hole::stale(budget));
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(drop_updates(&mut writer, &log, Version::Lite07).await, [(1, 1, 0)]);
+		write_group(&mut track, 1, 1000);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(run.ctx.outcomes.opened.load(Ordering::Relaxed), 2, "the group wins");
+
+		run.update(lite::SubscribeUpdate {
+			wanted_group: None,
+			priority: 1,
+			max_delay: budget,
+			min_delay: None,
+			ranges: vec![lite::Range::span(None, 0, None, None)],
+			order: Order::Descending,
+			update: 1,
+		});
+		write_group(&mut track, 2, 2000);
+		track.finish().unwrap();
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(
+			run.ctx.outcomes.opened.load(Ordering::Relaxed),
+			3,
+			"group 1 is not served again"
+		);
+		assert_eq!(
+			drop_updates(&mut writer, &log, Version::Lite07).await,
+			[(1, 1, 0)],
+			"no second OLD, and no NOT_FOUND at the end"
+		);
+	}
+
+	/// A lite-07 stream that expired as stale is a stale drop like any other: a final drop
+	/// the reader reaches for it later replaces it, and no update drops it again then.
+	#[kio::test]
+	async fn a_final_drop_replaces_an_expired_stream_on_lite07() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let subscriber = track.subscribe(None);
+		let (mut run, mut writer, log) = lite07_run(SinkSession::new(Log::default()), subscriber);
+		write_group(&mut track, 0, 0);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		// Group 1's stream expired, as a blocked transport would leave it.
+		run.ctx.outcomes.dropped.lock().unwrap().push((1, StreamError::Old));
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		run.forward_range(1..2, &Hole::drop(StreamError::Cancel), &mut writer)
+			.unwrap();
+		run.update(lite::SubscribeUpdate {
+			wanted_group: None,
+			priority: 1,
+			max_delay: Duration::from_secs(3600),
+			min_delay: None,
+			ranges: vec![lite::Range::span(None, 0, None, None)],
+			order: Order::Descending,
+			update: 1,
+		});
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(
+			drop_updates(&mut writer, &log, Version::Lite07).await,
+			[(1, 1, 0), (1, 1, 0)],
+			"the final drop replaces the OLD, and the update drops nothing again"
+		);
 	}
 
 	/// A stale group already named in SUBSCRIBE_DROP stays dropped before lite-07 after any

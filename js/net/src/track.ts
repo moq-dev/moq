@@ -1018,12 +1018,14 @@ export class Producer {
 		hooks.dropTrackGroups = (producer, start, end, hole) => producer.#drop(start, end, hole, true);
 		hooks.skipTrackGroups = (producer, start, end) => producer.#skipReceived(start, end);
 		hooks.supersedeStale = (producer, judgedEnd) => {
+			const held = producer.#state.drops.peek().filter((run) => run.stale !== undefined);
 			for (const state of [producer.#state, ...producer.#sinks]) {
 				state.judgedEnd = judgedEnd;
 				const drops = state.drops.peek();
 				if (drops.some((run) => run.stale !== undefined))
 					state.drops.set(drops.filter((run) => run.stale === undefined));
 			}
+			return held.map(({ start, end }) => ({ start, end }));
 		};
 		hooks.dropAnchors = (producer) => {
 			for (const state of [producer.#state, ...producer.#sinks]) state.dropsAnchors.set(true);
@@ -1127,7 +1129,17 @@ export class Producer {
 	#drop(start: bigint, end: bigint, hole: Hole, open = false): Run[] {
 		if (start >= end) return [];
 		const skipped = hole.skip ? [] : this.#state.drops.peek().filter((run) => run.skip);
-		const runs = runGaps(skipped, start, end);
+		let runs = runGaps(skipped, start, end);
+		// A received stale verdict leaves a group that arrived and was not aborted: a lite-07
+		// publisher may serve a group after its stale drop, and the group's stream may land first.
+		// The group wins, still arriving or not.
+		if (open && hole.stale !== undefined) {
+			for (const [sequence, entry] of this.#cached) {
+				if (sequence >= start && sequence < end && !(entry.group.closed.peek() instanceof Error)) {
+					runs = removeRun(runs, sequence, sequence + 1n);
+				}
+			}
+		}
 		// A fill no longer owes what the track gave up.
 		this.#fills.dropped(start, end);
 		for (const state of [this.#state, ...this.#sinks]) {
@@ -1135,7 +1147,7 @@ export class Producer {
 				runs.reduce((drops, run) => insertDrop(drops, run.start, run.end, hole), drops),
 			);
 		}
-		if (open && !hole.skip) {
+		if (open && !hole.skip && hole.stale === undefined) {
 			for (const [sequence, entry] of this.#cached) {
 				if (sequence >= start && sequence < end && entry.group.closed.peek() === undefined) {
 					entry.group.abort(hole.error);
@@ -2499,6 +2511,11 @@ export class Subscriber {
 		if (ordered) this.#delivered.forgetBelow(sequence);
 		this.#delivered.add(sequence);
 		this.#skipped.delete(sequence);
+		// The group won over any stale report on it, so no update reopens it. A resumed reader
+		// retires its own.
+		if (this.#reportedStale.length > 0) {
+			this.#reportedStale = removeRun(this.#reportedStale, sequence, sequence + 1n);
+		}
 		if (this.#resume) this.#resume.forgetPastBudget(this.#delivered);
 		else this.#forgetPastBudget(this.#delivered);
 		// What it hands out, and forgets below it, it no longer wants from a fill: tell the fills
@@ -3544,18 +3561,21 @@ export class Subscriber {
 	}
 
 	// The first part of `[from, to)` this cursor has not reported yet, now reported, with why. A
-	// skip goes out over a drop already reported, since it replaces it.
+	// skip goes out over a drop already reported, and a final drop over a stale one, since each
+	// replaces what it goes out over.
 	#report(from: bigint, to: bigint, hole: Hole): (Recv & { kind: "drop" }) | undefined {
 		const { start, end } = this.#cursor.peek();
+		const final = !hole.skip && hole.stale === undefined;
 		for (const run of this.#window.runs(max(from, start), min(to, end ?? to))) {
-			const [gap] = runGaps(hole.skip ? this.#reportedSkip : this.#reported, run.start, run.end);
+			let blocked = hole.skip ? this.#reportedSkip : this.#reported;
+			if (final) for (const stale of this.#reportedStale) blocked = removeRun(blocked, stale.start, stale.end);
+			const [gap] = runGaps(blocked, run.start, run.end);
 			if (!gap) continue;
 			insertRun(this.#reported, gap.start, gap.end);
-			if (hole.skip) {
-				// Final, so no update reopens a stale report it replaced.
-				insertRun(this.#reportedSkip, gap.start, gap.end);
-				this.#reportedStale = removeRun(this.#reportedStale, gap.start, gap.end);
-			} else if (hole.stale !== undefined) insertRun(this.#reportedStale, gap.start, gap.end);
+			if (hole.skip) insertRun(this.#reportedSkip, gap.start, gap.end);
+			if (hole.stale !== undefined) insertRun(this.#reportedStale, gap.start, gap.end);
+			// A skip or final drop is final, so no update reopens a stale report it replaced.
+			else this.#reportedStale = removeRun(this.#reportedStale, gap.start, gap.end);
 			return { kind: "drop", ...gap, error: hole.error, skip: hole.skip, stale: hole.stale };
 		}
 		return undefined;

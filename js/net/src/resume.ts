@@ -798,9 +798,9 @@ class Reader implements ResumeSource {
 				if (open) {
 					// Report once without marking it delivered: a late fill may still land.
 					this.#drops = removeRun(this.#drops, open.start, open.end);
-					// A skip is final, so no update reopens a stale report it replaced.
-					if (run.skip) this.#reportedStale = removeRun(this.#reportedStale, open.start, open.end);
-					else if (run.stale !== undefined) insertRun(this.#reportedStale, open.start, open.end);
+					if (run.stale !== undefined) insertRun(this.#reportedStale, open.start, open.end);
+					// A skip or final drop is final, so no update reopens a stale report it replaced.
+					else this.#reportedStale = removeRun(this.#reportedStale, open.start, open.end);
 					return { kind: "drop", ...open, error: run.error, skip: run.skip, stale: run.stale };
 				}
 			}
@@ -1087,6 +1087,11 @@ class Reader implements ResumeSource {
 
 	#handOut(copy: Copy, group: GroupConsumer): GroupConsumer {
 		this.#newest = max(this.#newest ?? 0n, group.sequence);
+		// The group won over any stale report on it, whichever copy made it, so no update reopens
+		// it.
+		if (this.#reportedStale.length > 0) {
+			this.#reportedStale = removeRun(this.#reportedStale, group.sequence, group.sequence + 1n);
+		}
 		// Another copy holding the group, now or once it lands there, is where a failure continues
 		// it, so it stays while the group is read; see #backs. Recorded even with one copy, since a
 		// later route's copy may come to hold it.

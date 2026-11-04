@@ -1451,6 +1451,40 @@ test("a held-back stale run new terms supersede is not reported", async () => {
 	}
 });
 
+// A group the new route delivers over a stale run the old route reported retires that report, and
+// a final drop the new route gives replaces it: only what is still stale is taken back, so an
+// update reopens no group already served. Mirrors Rust.
+test("a resumed reader retires a stale report its group or final drop replaces", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe({ delay: { max: Milli(60_000) } });
+	ta.write(0n);
+	expect(drain(sub)).toEqual([0n]);
+	hooks.dropTrackGroups(ta.producer, 1n, 4n, staleHole(60_000));
+	expect(hooks.tryDrop(sub)).toMatchObject({ kind: "drop", start: 1n, end: 4n, stale: 60_000 });
+
+	front.serve(b.consume());
+	await settle();
+	tb.write(1n);
+	expect(drain(sub)).toEqual([1n]);
+	// Reported once the replaced route no longer feeds.
+	ta.producer.abort(new StreamError(StreamCode.SessionClosed));
+	await settle();
+	const cut = new StreamError(StreamCode(70), { message: "cut" });
+	hooks.dropTrackGroups(tb.producer, 2n, 3n, { error: cut });
+	expect(hooks.tryDrop(sub)).toMatchObject({ kind: "drop", start: 2n, end: 3n, stale: undefined });
+	// Only group 3 is still stale.
+	expect(hooks.reofferStale(sub)).toEqual([{ start: 3n, end: 4n }]);
+	sub.close();
+	front.consumer.close();
+	a.close();
+	b.close();
+});
+
 test("a drop a replaced route held back is no verdict on the route serving next", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();

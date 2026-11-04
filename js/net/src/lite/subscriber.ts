@@ -48,7 +48,7 @@ import { closeUnwanted } from "../util/announce.ts";
 import { Deadline, REQUEST_TIMEOUT_MS, requestOptions } from "../util/deadline.ts";
 import { abandoned, isAbandoned, unwanted } from "../util/demand.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
-import { min, UNBOUNDED } from "../util/sequence.ts";
+import { max, min, UNBOUNDED } from "../util/sequence.ts";
 import { Budget } from "../util/yield.ts";
 import { bounded, hasTime, rangesStart, sameRanges, Window, wireRanges, wireSpan } from "../window.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
@@ -1831,7 +1831,8 @@ export class Subscriber {
 				if (keepsSubscribeOpen(this.version)) void this.#finishTail(stream, entry).catch(() => {});
 			} else if ("drop" in resp) {
 				// The publisher will never send these groups, so they are accounted for without a
-				// stream, and a reader of one still arriving ends with the drop's error now.
+				// stream, and a reader of one still arriving ends with the drop's error now. A lite-07
+				// stale drop leaves a group whose stream arrived, since the stream wins over it.
 				const { start, end, update } = resp.drop;
 				const error = resp.drop.cause(this.version);
 				// On lite-07 an OLD drop is a stale verdict, which the next update reopens; every other
@@ -1846,7 +1847,8 @@ export class Subscriber {
 				const hole = stale ? staleHole(entry.maxDelay ?? 0) : { error };
 				const recorded = hooks.dropTrackGroups(entry.track, start, end + 1n, hole);
 				// A final drop is never reopened, even where it replaces a stale one. A sequence
-				// already skipped stays skipped, so no update reopens it either.
+				// already skipped stays skipped, and one whose group arrived keeps it, so no update
+				// reopens either.
 				entry.stale = stale
 					? recorded.reduce((runs, run) => insertDrop(runs, run.start, run.end, hole), entry.stale ?? [])
 					: removeRun(entry.stale ?? [], start, end + 1n);
@@ -2046,10 +2048,18 @@ export class Subscriber {
 			// unknown again: a reader fills them rather than trust an old verdict.
 			entry.update = update.update;
 			entry.maxDelay = update.maxDelay;
-			hooks.supersedeStale(entry.track, judgedEnd(ranges));
+			const held = hooks.supersedeStale(entry.track, judgedEnd(ranges));
 			// A lite-07 publisher re-offers every group it reported stale on any update, and drops
 			// again under the new number what is still stale, so the tail owes every stale run again.
-			for (const run of entry.stale ?? []) entry.tail.unaccount(run.start, run.end);
+			// A group that arrived since its stale drop won over it: the publisher served it, so it
+			// is neither re-offered nor owed again.
+			for (const run of entry.stale ?? []) {
+				for (const reopened of held) {
+					const start = max(run.start, reopened.start);
+					const end = min(run.end, reopened.end);
+					if (start < end) entry.tail.unaccount(start, end);
+				}
+			}
 			entry.stale = undefined;
 			// Encoded apart from the write, so a bound the wire can't carry still fails the track.
 			const encoded = await Writer.collect(this.version, (w) => update.encode(w, this.version));

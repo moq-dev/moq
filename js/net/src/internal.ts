@@ -516,9 +516,10 @@ export const hooks: {
 	/**
 	 * Forget every run a received copy holds as stale: the terms its upstream judged them under
 	 * were replaced, so they are unknown again. The new terms' ranges end at `judgedEnd`,
-	 * undefined past the live edge or unknown. Mirrors the Rust `supersede_stale`.
+	 * undefined past the live edge or unknown. Returns the runs forgotten: a group that arrived
+	 * since its stale drop replaced it, so it is not among them. Mirrors the Rust `supersede_stale`.
 	 */
-	supersedeStale: (producer: Producer, judgedEnd: bigint | undefined) => void;
+	supersedeStale: (producer: Producer, judgedEnd: bigint | undefined) => Run[];
 	/** Mark a track as fed by a wire subscription, which owes missing groups. Assigned by `track.ts`. */
 	receiveTrack: (producer: Producer) => void;
 	/** Create a received group at its wire offset before publishing it to readers. Assigned by `track.ts`. */

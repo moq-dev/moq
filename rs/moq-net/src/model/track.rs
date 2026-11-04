@@ -1213,16 +1213,17 @@ impl TrackState {
 	}
 
 	/// Forget every run held as stale; see [`Producer::supersede_stale`].
-	fn supersede_stale(&mut self) {
-		let stale: Vec<_> = self
+	fn supersede_stale(&mut self) -> RangeSet<u64> {
+		let stale: RangeSet<u64> = self
 			.drops
 			.iter()
 			.filter(|(_, hole)| hole.stale_budget().is_some())
 			.map(|(run, _)| run.clone())
 			.collect();
-		for run in stale {
-			self.change_drops(run, None);
+		for run in stale.iter() {
+			self.change_drops(run.clone(), None);
 		}
+		stale
 	}
 
 	/// Keep the change index aligned with the range map, including the neighbours an
@@ -3672,16 +3673,20 @@ impl Producer {
 	/// Forget every run held as stale: the terms a received copy's upstream judged them
 	/// under were replaced, so they are unknown again, and a reader that wants one fills it.
 	/// The new terms' ranges end at `judged_end`, `None` past the live edge or unknown.
+	/// Returns the runs forgotten; a group that arrived since its stale drop replaced it, so
+	/// it is not among them.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn supersede_stale(&self, judged_end: Option<u64>) {
-		if let Ok(mut state) = self.modify() {
-			state.supersede_stale();
-			state.judged_end = judged_end;
-		}
+	pub(crate) fn supersede_stale(&self, judged_end: Option<u64>) -> RangeSet<u64> {
+		let Ok(mut state) = self.modify() else {
+			return RangeSet::new();
+		};
+		state.judged_end = judged_end;
+		state.supersede_stale()
 	}
 
 	/// Record `groups` given up as `hole` describes, returning the runs recorded: a drop
-	/// leaves a skipped sequence skipped.
+	/// leaves a skipped sequence skipped, and a stale verdict leaves a group that arrived and
+	/// was not aborted, since a group stream wins over its drop.
 	pub(crate) fn give_up(&self, groups: ops::Range<u64>, hole: Hole) -> RangeSet<u64> {
 		let error = match &hole {
 			Hole::Drop { error, .. } => error.clone(),
@@ -3699,18 +3704,36 @@ impl Producer {
 		}
 		let (runs, open): (_, Vec<group::Handle>) = match self.modify() {
 			Ok(mut state) => {
-				let runs = state.drop_groups(groups.clone(), hole);
 				// Only the live feed's copy: a drop judges the subscription, so a fetched head
 				// or fetch-only backfill may still complete.
-				let open = state
+				let open: Vec<_> = state
 					.lookup
-					.range(groups)
-					.filter(|(_, slot)| slot.visible)
-					.map(|(_, slot)| &slot.group)
-					.filter(|group| !group.is_aborted())
-					.cloned()
+					.range(groups.clone())
+					.filter(|(_, slot)| slot.visible && !slot.group.is_aborted())
+					.map(|(&sequence, slot)| (sequence, slot.group.clone()))
 					.collect();
-				(runs, open)
+				match hole.stale_budget() {
+					// A lite-07 publisher may serve a group after its stale drop, and the group's
+					// stream may land first: the group wins, still arriving or not.
+					Some(_) => {
+						let mut left = RangeSet::new();
+						left.insert(groups);
+						for (sequence, _) in &open {
+							if let Some(end) = sequence.checked_add(1) {
+								left.remove(*sequence..end);
+							}
+						}
+						let mut runs = RangeSet::new();
+						for run in left.iter() {
+							runs.extend(state.drop_groups(run.clone(), hole.clone()).iter().cloned());
+						}
+						(runs, Vec::new())
+					}
+					None => (
+						state.drop_groups(groups, hole),
+						open.into_iter().map(|(_, group)| group).collect(),
+					),
+				}
 			}
 			Err(_) => return RangeSet::new(),
 		};
@@ -6820,6 +6843,14 @@ impl DropCursor {
 		stale.into_iter().collect()
 	}
 
+	/// Retire a stale report on `sequence` once its group is handed out: the group won over
+	/// the drop, so no update reopens it.
+	fn retire(&mut self, sequence: u64) {
+		if let Some(end) = sequence.checked_add(1) {
+			self.reported_stale.remove(sequence..end);
+		}
+	}
+
 	/// Record a run this cursor's fills gave up on as a miss, as `hole` says; a reason
 	/// already pending, such as the track's own drop, is kept.
 	fn give_up(&mut self, run: ops::Range<u64>, hole: Hole) {
@@ -6904,12 +6935,18 @@ impl DropCursor {
 			if clipped.end < range.end {
 				self.pending.insert(clipped.end..range.end, pending.clone());
 			}
-			// A skip goes out over a drop already reported, since it replaces it.
-			let reported = match pending.hole {
-				Hole::Skip => &self.reported_skip,
-				Hole::Drop { .. } => &self.reported,
+			// A skip goes out over a drop already reported, and a final drop over a stale one,
+			// since each replaces what it goes out over.
+			let mut blocked = match pending.hole {
+				Hole::Skip => self.reported_skip.overlapping(&clipped).cloned().collect(),
+				Hole::Drop { .. } => self.reported.overlapping(&clipped).cloned().collect::<RangeSet<u64>>(),
 			};
-			if let Some(gap) = reported.gaps(&clipped).next() {
+			if matches!(pending.hole, Hole::Drop { stale: None, .. }) {
+				for stale in self.reported_stale.overlapping(&clipped) {
+					blocked.remove(stale.clone());
+				}
+			}
+			if let Some(gap) = blocked.gaps(&clipped).next() {
 				if gap.end < range.end {
 					self.pending.insert(gap.end..range.end, pending.clone());
 				}
@@ -6922,7 +6959,7 @@ impl DropCursor {
 						self.reported_stale.remove(gap.clone());
 					}
 					hole if hole.stale_budget().is_some() => self.reported_stale.insert(gap.clone()),
-					Hole::Drop { .. } => {}
+					Hole::Drop { .. } => self.reported_stale.remove(gap.clone()),
 				}
 				return Some((gap, hole));
 			}
@@ -8692,6 +8729,12 @@ impl Subscriber {
 			cursor.prune_skipped();
 		}
 		self.delivered.insert(sequence);
+		// The group won over any stale report on it; a resumed reader retires its own.
+		if let Inner::Plain(cursor) = &mut self.inner
+			&& let Some(drops) = &mut cursor.drops
+		{
+			drops.retire(sequence);
+		}
 		let mut delivered = std::mem::take(&mut self.delivered);
 		self.forget_past_budget(&mut delivered);
 		self.delivered = delivered;

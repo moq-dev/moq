@@ -122,6 +122,25 @@ decision above and the PR's `## Waiting` item on out-of-order creation:
   draft requires no more. A received SKIP or final DROP also takes its groups
   out of the subscriber's stale record, so the next update doesn't owe them
   again. Not chosen: SKIP replacing only a stale OLD drop.
+- ✅ **A group or final drop replaces a lite-07 stale drop already sent**
+  (agent decision from review, 2026-11-04, `/quest-iterate`; the maintainer
+  chose to keep it and retire the stale report at the 2026-11-03 round-4
+  checkpoint, `/quest-complete`). A front that switches routes can hand out
+  the new route's group, or its final verdict, for a sequence the old route
+  reported stale, before the update that reopens it, so the publisher serves
+  the group, or sends the final drop, over the OLD it sent. Its own expired
+  streams' OLD drops count the same. Whatever replaces a stale report
+  retires it: a group handed out, a SKIP, or a final drop takes the sequence
+  out of the reader's stale record (`DropCursor::reported_stale`, the
+  resumed `Reader::reported_stale`, JS `#reportedStale`) and the publisher's
+  (`TrackRun::dropped_stale`, `expired`), so the next SUBSCRIBE_UPDATE
+  neither sends OLD for it again nor names it at the end. On the receiving
+  side a Group Stream wins over a stale drop of its sequence in either order:
+  an OLD that lands after the stream leaves the group, still arriving or
+  not, and an update owes again only the stale runs the track still holds.
+  The end sweep's NOT_FOUND never replaces a stale drop, so an update can
+  still reach an ended track's history. Not chosen: reverting the
+  replacement; merging with the stale report left in place.
 - ✅ **`append_group` is an implicit skip** (refinement, same session): it
   means "the next group", so the producer declares it won't go back, and it
   skips every sequence below it that never arrived and wasn't already given

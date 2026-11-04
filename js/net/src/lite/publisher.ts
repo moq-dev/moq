@@ -1290,6 +1290,9 @@ export class Publisher {
 		// Lite-07: the part of `dropped` named stale (OLD), which a final drop or a group replaces,
 		// as one a route the front switched to delivers after the update that reopens it.
 		let droppedStale: Run[] = [];
+		// Lite-07 groups whose stream expired as stale, which every update drops again under its
+		// number: the subscriber reopens each stale drop then, and the stream already reset.
+		const expired: Run[] = [];
 
 		// Give up, as `hole` says, whatever part of `[start, end)` this subscription has not been
 		// served or given up yet.
@@ -1322,13 +1325,24 @@ export class Publisher {
 		const forward = async (start: bigint, end: bigint, hole: Hole): Promise<boolean> => {
 			if (served && hasSkip(this.version)) {
 				const replaces = hole.skip ? dropped : hole.stale === undefined ? droppedStale : [];
-				for (const run of replaces) {
+				for (const run of [...replaces]) {
 					const from = max(run.start, start);
 					const to = min(run.end, end);
-					if (from < to) served.splice(0, served.length, ...removeRun(served, from, to));
+					if (from >= to) continue;
+					replaceStale(from, to);
+					served.splice(0, served.length, ...removeRun(served, from, to));
 				}
 			}
 			return drop(start, end, hole);
+		};
+
+		// Forget that `[start, end)` went out as a drop: a verdict or group replaces it. A stream of
+		// this subscription that expired there is no longer owed again on an update, since what
+		// replaced it settles it.
+		const replaceStale = (start: bigint, end: bigint) => {
+			dropped = removeRun(dropped, start, end);
+			droppedStale = removeRun(droppedStale, start, end);
+			expired.splice(0, expired.length, ...removeRun(expired, start, end));
 		};
 
 		// The track's exclusive final boundary. A Rust subscriber feeds SUBSCRIBE_END
@@ -1380,9 +1394,6 @@ export class Publisher {
 		const drops = new Signal(0);
 		// Groups whose stream failed, with why, for the control stream to name, as runs.
 		const pendingDrops: { start: bigint; end: bigint; error: Error }[] = [];
-		// Lite-07 groups whose stream expired as stale, which every update drops again under its
-		// number: the subscriber reopens each stale drop then, and the stream already reset.
-		const expired: Run[] = [];
 		// The expired groups an update re-offers, still cached and in range, served again in turn.
 		const reoffered: group.Consumer[] = [];
 
@@ -1407,13 +1418,15 @@ export class Publisher {
 				}
 				if (pendingDrops.length > 0) {
 					for (const { start, end, error } of pendingDrops.splice(0)) {
-						// A stream expired under this subscription's budget is a stale verdict.
-						if (hasSkip(this.version) && toStreamCode(error) === StreamCode.Old)
+						// A stream expired under this subscription's budget is a stale verdict, which
+						// a later verdict or group replaces as any stale drop sent.
+						if (hasSkip(this.version) && toStreamCode(error) === StreamCode.Old) {
 							insertRun(expired, start, end);
-						const dropped = SubscribeDrop.given(start, end - 1n, error, this.version, updateNumber);
-						if (
-							!(await controls.response(encodeSubscribeResponse(stream, { drop: dropped }, this.version)))
-						)
+							insertRun(dropped, start, end);
+							insertRun(droppedStale, start, end);
+						}
+						const msg = SubscribeDrop.given(start, end - 1n, error, this.version, updateNumber);
+						if (!(await controls.response(encodeSubscribeResponse(stream, { drop: msg }, this.version))))
 							return false;
 					}
 				}
@@ -1684,8 +1697,7 @@ export class Publisher {
 				// handed out after one is served, as one a route the front switched to delivers: the
 				// update that reopens the drop would never re-offer it.
 				if (runGaps(droppedStale, group.sequence, group.sequence + 1n).length === 0) {
-					droppedStale = removeRun(droppedStale, group.sequence, group.sequence + 1n);
-					dropped = removeRun(dropped, group.sequence, group.sequence + 1n);
+					replaceStale(group.sequence, group.sequence + 1n);
 				} else if (served && runGaps(served, group.sequence, group.sequence + 1n).length === 0) {
 					group.close();
 					continue;

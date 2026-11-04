@@ -1419,6 +1419,11 @@ impl Reader {
 	fn hand_out(&mut self, index: usize, group: group::Consumer) -> group::Consumer {
 		let sequence = group.sequence;
 		self.newest = self.newest.max(Some(sequence));
+		// The group won over any stale report on it, whichever copy made it, so no update
+		// reopens it.
+		if let Some(end) = sequence.checked_add(1) {
+			self.reported_stale.remove(sequence..end);
+		}
 		// Another copy holding the group, now or once it lands there, is where a failure
 		// continues it, so it stays while the group is read; see [`Copy::retains`]. Recorded
 		// even with one copy, since a later route's copy may come to hold it.
@@ -1840,10 +1845,9 @@ impl Reader {
 		// up) may still land, and is handed out if it does.
 		self.drops.remove(open.clone());
 		match &err {
-			// Final, so no update reopens a stale report it replaced.
-			track::Hole::Skip => self.reported_stale.remove(open.clone()),
 			err if err.stale_budget().is_some() => self.reported_stale.insert(open.clone()),
-			track::Hole::Drop { .. } => {}
+			// A skip or final drop is final, so no update reopens a stale report it replaced.
+			track::Hole::Skip | track::Hole::Drop { .. } => self.reported_stale.remove(open.clone()),
 		}
 		Poll::Ready((open, err))
 	}
@@ -3659,6 +3663,30 @@ mod test {
 		write(&b, 1);
 		write(&b, 2);
 		assert_eq!(drain(&mut sub, false), [1, 2]);
+	}
+
+	/// A group the new route delivers over a stale run the old route reported retires that
+	/// report, and a final drop that follows it replaces it: only what is still stale is taken
+	/// back, so an update reopens no group already served.
+	#[test]
+	fn a_resumed_reader_retires_a_stale_report_its_group_or_final_drop_replaces() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		write(&a, 0);
+		assert_eq!(drain(&mut sub, false), [0]);
+		a.give_up(1..4, track::Hole::stale(HOUR));
+		assert_eq!(dropped(&mut sub), [(1..4, StreamError::Old)]);
+		a.drop_groups(2..3, StreamError::App(5));
+		assert_eq!(dropped(&mut sub), [(2..3, StreamError::App(5))]);
+
+		let b = copy();
+		routes.serve(b.consume());
+		write(&b, 1);
+		assert_eq!(drain(&mut sub, false), [1]);
+		assert_eq!(sub.reoffer_stale(), vec![3..4], "only group 3 is still stale");
 	}
 
 	/// A run a replaced route held back is dropped with that route: the route serving next
