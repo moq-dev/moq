@@ -134,7 +134,7 @@ test("encoding tracks encoder config in its child effect", async () => {
 			track.close();
 		},
 	};
-	const broadcast = { video: () => rendition, order: new Order() };
+	const broadcast = { video: () => rendition, order: new Order(), join: new Signal(undefined) };
 	const capture = {
 		in: { source: new Signal(undefined) },
 		out: {
@@ -187,7 +187,7 @@ test("an on-demand gap marks a discontinuity and leaves the broadcast-owned trac
 	};
 	const encoder = new Encoder("video", {
 		enabled: true,
-		broadcast: { video: () => rendition, order: new Order() } as never,
+		broadcast: { video: () => rendition, order: new Order(), join: new Signal(undefined) } as never,
 		capture: capture as never,
 	});
 
@@ -252,7 +252,7 @@ test("a bandwidth estimate updates the bitrate without blanking the config or re
 
 	const encoder = new Encoder("video", {
 		enabled: true,
-		broadcast: { video: () => rendition, order: new Order() } as never,
+		broadcast: { video: () => rendition, order: new Order(), join: new Signal(undefined) } as never,
 		capture: capture as never,
 		bandwidth,
 	});
@@ -352,7 +352,7 @@ test("every published config fits a probe for its own codec", async () => {
 
 	const encoder = new Encoder("video", {
 		enabled: true,
-		broadcast: { video: () => rendition, order: new Order() } as never,
+		broadcast: { video: () => rendition, order: new Order(), join: new Signal(undefined) } as never,
 		capture: capture as never,
 		bandwidth,
 	});
@@ -699,7 +699,7 @@ test("disabling encodes one black keyframe and keeps the rendition with enabled:
 	const order = new Order();
 	const encoder = new Encoder("video", {
 		enabled,
-		broadcast: { video: () => rendition, order } as never,
+		broadcast: { video: () => rendition, order, join: new Signal(undefined) } as never,
 		capture: capture as never,
 	});
 
@@ -868,7 +868,7 @@ test("the probe encodes with the frame rate and bitrate ceiling", async () => {
 	const bandwidth = new Moq.Bandwidth.Allocator(estimate);
 	const encoder = new Encoder("video", {
 		enabled: true,
-		broadcast: { video: () => rendition, order: new Order() } as never,
+		broadcast: { video: () => rendition, order: new Order(), join: new Signal(undefined) } as never,
 		capture: capture as never,
 		bandwidth,
 	});
@@ -1072,7 +1072,7 @@ async function recordKeyframes(
 	};
 	const encoder = new Encoder("video", {
 		enabled: true,
-		broadcast: { video: () => rendition, order: new Order() } as never,
+		broadcast: { video: () => rendition, order: new Order(), join: new Signal(undefined) } as never,
 		capture: recording.capture as never,
 	});
 
@@ -1591,7 +1591,7 @@ test("a shrinking capture resizes in band below the advertised ceiling", async (
 	};
 	const encoder = new Encoder("video", {
 		enabled: true,
-		broadcast: { video: () => rendition, order: new Order() } as never,
+		broadcast: { video: () => rendition, order: new Order(), join: new Signal(undefined) } as never,
 		capture: capture as never,
 	});
 	const send = async (millis: number) => {
@@ -1668,7 +1668,7 @@ test("the catalog bitrate and frame rate only rise", async () => {
 	const bandwidth = new Moq.Bandwidth.Allocator(estimate);
 	const encoder = new Encoder("video", {
 		enabled: true,
-		broadcast: { video: () => rendition, order: new Order() } as never,
+		broadcast: { video: () => rendition, order: new Order(), join: new Signal(undefined) } as never,
 		capture: capture as never,
 		bandwidth,
 	});
@@ -1719,7 +1719,7 @@ test("each slot keeps its own ceiling and maxima", async () => {
 			joinInterval: new Signal(undefined),
 			close: () => {},
 		});
-		return { video: rendition, order: new Order() };
+		return { video: rendition, order: new Order(), join: new Signal(undefined) };
 	};
 	const first = fake();
 	const broadcast = new Signal<unknown>(first);
