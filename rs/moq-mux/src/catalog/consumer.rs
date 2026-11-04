@@ -51,9 +51,14 @@ impl<E: CatalogExt> Consumer<E> {
 	pub async fn new(broadcast: &moq_net::broadcast::Consumer, format: CatalogFormat) -> Result<Self, crate::Error> {
 		Ok(Self {
 			inner: match format {
-				CatalogFormat::Hang => State::Hang(super::hang::Consumer::new(
-					broadcast.track(hang::Catalog::DEFAULT_NAME)?,
-				)),
+				CatalogFormat::Hang => {
+					let track = broadcast.track(hang::Catalog::DEFAULT_NAME)?;
+					let consumer = super::hang::Consumer::new(track.clone());
+					// The consumer subscribes itself; resolving the info rides on that subscription,
+					// so a refused catalog fails here as it does for MSF.
+					track.info().await?;
+					State::Hang(consumer)
+				}
 				CatalogFormat::Msf => {
 					let track = broadcast.track(moq_msf::DEFAULT_NAME)?.subscribe(None).await?;
 					State::Msf(super::msf::Consumer::new(track))
