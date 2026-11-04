@@ -2654,7 +2654,7 @@ test("draft-22: a backwards range within one group serves nothing and ends the s
 });
 
 // Quarantined after the unchanged-main reproduction failed 30/200 runs.
-// Investigation is coordinated under quest/m0/test-flakes-2/README.md.
+// Investigation: quest/m0/test-flakes-2/ietf-wider-fill.md.
 test.skip.each(["ascending", "descending"] as const)("draft-22: a wider fill is refused in %s order", async (order) => {
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });

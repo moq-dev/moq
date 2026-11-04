@@ -10174,7 +10174,7 @@ mod serve_tests {
 		let mut serving = std::pin::pin!(
 			h.publisher
 				.clone()
-				.run_subscribe_stream(stream, subscribe(Filter::Unfiltered, None))
+					.run_subscribe_stream(stream, subscribe(Filter::Relative(1), None))
 		);
 		serve_until(serving.as_mut(), "the current group is open", || {
 			occurrences(&h.log, b"live") == 1
