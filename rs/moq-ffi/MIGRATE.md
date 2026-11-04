@@ -5,6 +5,11 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Catalog renditions carry their warmup ([#7864](https://github.com/moq-dev/moq/pull/7864))
+
+`MoqVideo` and `MoqAudio` gain `warmup`, the catalog's decoder warmup, null when absent. `MoqMediaTrackConsumer::subscribe` reads it from the rendition: it starts that much further back than the subscription's min delay and asks the publisher for its max delay plus the warmup, while it still skips at the max delay alone. `MoqAudioConsumer::subscribe` and `MoqVideoConsumer::subscribe` now honor it too.
+The field defaults to null, so only code that builds these records exhaustively, such as a Rust struct literal or an unkeyed Go literal, changes. Pass the rendition from the catalog unchanged to keep its warmup. Regenerate bindings and rebuild the matching native library together.
+
 ### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
 
 A null `MoqTrackInfo.max_age`, and a null `MoqTrackInfo`, now advertise a zero max age, serving only the live edge, instead of no publisher limit. Set the new `max_age_unlimited`, which ignores `max_age`, where you relied on null meaning no limit.

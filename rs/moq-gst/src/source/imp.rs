@@ -414,13 +414,27 @@ impl MoqSrc {
 /// The identity a rendition plays under: a change to any field restarts its stream on the same
 /// pad. Caps cover codec/resolution; the container descriptor covers the wire framing (e.g. legacy
 /// -> cmaf); the broadcast and track identify the media, apart from its catalog ID.
-#[derive(Clone, PartialEq)]
+///
+/// The catalog `warmup` rides along without being part of the shape: it matters only to a join,
+/// so a changed one reaches the next reader without restarting the current one.
+#[derive(Clone)]
 struct Shape {
 	caps: gst::Caps,
 	container: hang::catalog::Container,
 	track: String,
 	broadcast: Option<moq_net::path::Relative>,
 	instance: Option<moq_net::Instance>,
+	warmup: Duration,
+}
+
+impl PartialEq for Shape {
+	fn eq(&self, other: &Self) -> bool {
+		self.caps == other.caps
+			&& self.container == other.container
+			&& self.track == other.track
+			&& self.broadcast == other.broadcast
+			&& self.instance == other.instance
+	}
 }
 
 /// A rendition by kind and moq track name: what a pad is kept by.
@@ -1060,6 +1074,7 @@ fn reconcile(
 	                  kind,
 	                  caps: Result<gst::Caps>,
 	                  container: &hang::catalog::Container,
+	                  warmup: Option<Duration>,
 	                  reference: &dyn hang::catalog::Reference| match caps {
 		Ok(caps) => {
 			let shape = Shape {
@@ -1068,16 +1083,17 @@ fn reconcile(
 				track: reference.track(name).to_string(),
 				broadcast: reference.broadcast().cloned(),
 				instance: reference.instance().cloned(),
+				warmup: warmup.unwrap_or_default(),
 			};
 			desired.insert((kind, name.clone()), shape);
 		}
 		Err(err) => gst::warning!(CAT, "ignoring {kind:?} rendition {name}: {err:?}"),
 	};
 	for (name, config) in &playable.video.renditions {
-		insert(name, TrackKind::Video, video_caps(config), &config.container, config);
+		insert(name, TrackKind::Video, video_caps(config), &config.container, config.warmup, config);
 	}
 	for (name, config) in &playable.audio.renditions {
-		insert(name, TrackKind::Audio, audio_caps(config), &config.container, config);
+		insert(name, TrackKind::Audio, audio_caps(config), &config.container, config.warmup, config);
 	}
 
 	// A disabled rendition keeps its pad even when an enabled alternative displaced its reader,
@@ -1396,9 +1412,11 @@ impl Follower {
 		self.renditions
 			.retain(|rendition, entry| match wanted.remove(rendition) {
 				Some(shape) => {
-					// A new shape hands the pad to a new reader.
-					if shape != entry.shape {
-						entry.shape = shape;
+					// A new shape hands the pad to a new reader, and any shape keeps the latest
+					// warmup for the next one.
+					let reshaped = shape != entry.shape;
+					entry.shape = shape;
+					if reshaped {
 						entry.reader = None;
 						fresh.insert(rendition.clone());
 					}
@@ -1641,12 +1659,15 @@ impl Reader {
 		// ending a broadcast produces for a name nobody served). A publisher that answers neither
 		// leaves this waiting, so racing `cancel` keeps such a reader reapable, and holding the
 		// wait here keeps it off every other rendition.
+		// The catalog warmup reaches that much further back for a decoder to start clean.
+		let playout =
+			moq_mux::container::Playout::new(moq_net::track::Delay::default().with_max(max_delay), shape.warmup);
 		let subscriber = tokio::select! {
 			_ = cancel.changed() => return Exit::Done,
 			subscriber = async {
 				instance
 					.track(&shape.track)?
-					.subscribe(moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(max_delay)))
+					.subscribe(playout.subscription(moq_net::track::Subscription::default()))
 					.await
 			} => match subscriber {
 				Ok(subscriber) => subscriber,
@@ -1671,7 +1692,7 @@ impl Reader {
 				return Exit::Done;
 			}
 		};
-		let track = moq_mux::container::Consumer::new(subscriber, container);
+		let track = playout.consumer(subscriber, container);
 
 		// Only a rendition that gets this far claims a pad id.
 		let play = Play {
@@ -2822,6 +2843,56 @@ mod session_tests {
 		super::RUNTIME.block_on(session).unwrap().unwrap();
 	}
 
+	/// A rendition's catalog warmup widens its subscription past the session max delay, so the
+	/// publisher keeps the media its decoder needs before the start.
+	#[test]
+	fn a_rendition_subscribes_with_its_catalog_warmup() {
+		let warmup = Duration::from_millis(300);
+		for kind in [TrackKind::Video, TrackKind::Audio] {
+			let element = element();
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let mut dynamic = broadcast.requests();
+			let mut catalog =
+				moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+			{
+				let mut guard = catalog.modify().unwrap();
+				match kind {
+					TrackKind::Video => {
+						let mut video = video_rendition();
+						video.warmup = Some(warmup);
+						guard.video.renditions = BTreeMap::from([("media".to_string(), video)]);
+					}
+					TrackKind::Audio => {
+						let mut audio = audio_rendition();
+						audio.warmup = Some(warmup);
+						guard.audio.renditions = BTreeMap::from([("media".to_string(), audio)]);
+					}
+				}
+			}
+
+			let max_delay = Duration::from_secs(5);
+			let (shutdown, mut cancelled) = watch::channel(false);
+			let weak = element.downgrade();
+			let source = moq_mux::Source::new(origin().consume(), broadcast.consume());
+			let session = super::RUNTIME.spawn(async move {
+				let stopping = cancelled.clone();
+				Session::new(weak, stopping, max_delay)
+					.follow_catalog(source, &mut cancelled)
+					.await
+			});
+
+			let request = await_request(&mut dynamic);
+			assert_eq!(
+				request.subscription().unwrap().delay.max,
+				Some(max_delay + warmup),
+				"{kind:?}"
+			);
+
+			let _ = shutdown.send(true);
+			super::RUNTIME.block_on(session).unwrap().unwrap();
+		}
+	}
+
 	/// A rendition delisted while its reader is still subscribing ends that reader, and answering
 	/// the subscription afterwards must not resurrect it into a pad. Listing it again starts it
 	/// anew, since the reader that left is no longer the rendition's.
@@ -3699,6 +3770,7 @@ mod session_tests {
 				track: "video".into(),
 				broadcast: None,
 				instance: None,
+				warmup: Duration::ZERO,
 			},
 			instance,
 			serial: 1,

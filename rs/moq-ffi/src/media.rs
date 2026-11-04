@@ -156,6 +156,11 @@ pub struct MoqVideo {
 	pub framerate: Option<f64>,
 	/// The framing used to carry this rendition.
 	pub container: MoqContainer,
+	/// How much media a decoder needs before its output is clean: after a join, decode from the
+	/// group start, present at the start plus this, and join that much earlier. Absent means none.
+	/// [`MoqMediaTrackConsumer::subscribe`] and the decoding consumers start this much earlier.
+	#[uniffi(default = None)]
+	pub warmup: Option<std::time::Duration>,
 }
 
 /// An audio rendition and the configuration needed to decode it.
@@ -198,6 +203,11 @@ pub struct MoqAudio {
 	/// floors an estimated playout delay. Absent means frames flush at once.
 	#[uniffi(default = None)]
 	pub jitter: Option<std::time::Duration>,
+	/// How much media a decoder needs before its output is clean: after a join, decode from the
+	/// group start, present at the start plus this, and join that much earlier. Absent means none.
+	/// [`MoqMediaTrackConsumer::subscribe`] and the decoding consumers start this much earlier.
+	#[uniffi(default = None)]
+	pub warmup: Option<std::time::Duration>,
 }
 
 /// An exact media timestamp, `value` units at `scale` units per second, mirroring [`moq_net::Timestamp`].
@@ -624,6 +634,7 @@ pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux:
 					preference: config.preference,
 					framerate: config.framerate,
 					container: MoqContainer::from_catalog(&config.container)?,
+					warmup: config.warmup.map(crate::ffi::duration),
 				},
 			))
 		})
@@ -649,6 +660,7 @@ pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux:
 					enabled: config.enabled,
 					container: MoqContainer::from_catalog(&config.container)?,
 					jitter: config.jitter.map(crate::ffi::duration),
+					warmup: config.warmup.map(crate::ffi::duration),
 				},
 			))
 		})
@@ -1421,6 +1433,15 @@ pub enum MoqRendition {
 }
 
 impl MoqRendition {
+	/// The decoder warmup the catalog declares for this rendition, zero when absent.
+	pub(crate) fn warmup(&self) -> std::time::Duration {
+		match self {
+			Self::Video { config, .. } => config.warmup,
+			Self::Audio { config, .. } => config.warmup,
+		}
+		.unwrap_or_default()
+	}
+
 	/// Split into the broadcast reference and its instance, the track name, and the container.
 	pub(crate) fn into_parts(self) -> (Option<String>, Option<String>, String, MoqContainer) {
 		let (id, broadcast, instance, track, container) = match self {
@@ -1532,6 +1553,58 @@ mod read_tests {
 	use moq_mux::container::Container as _;
 	use std::time::Duration;
 
+	/// A catalog rendition's warmup survives conversion and widens the raw subscription past the
+	/// caller's max delay, keeping the min delay as asked.
+	#[tokio::test(start_paused = true)]
+	async fn raw_media_catalog_warmup_reaches_the_subscription() {
+		use crate::consumer::{MoqDelay, MoqSubscription, moq_subscription_defaults};
+
+		let warmup = Duration::from_millis(300);
+		let delay = Duration::from_millis(200);
+		for video in [false, true] {
+			let broadcast = moq_net::broadcast::Info::new().produce();
+			let track = broadcast
+				.create_track("media", hang::container::track_info(0))
+				.unwrap();
+			let mut catalog = moq_mux::catalog::hang::Catalog::default();
+			let mut audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+			audio.warmup = Some(warmup);
+			catalog.audio.renditions.insert("media".into(), audio);
+			let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+			config.warmup = Some(warmup);
+			catalog.video.renditions.insert("media".into(), config);
+			let catalog = convert_catalog(&catalog);
+			let rendition = match video {
+				true => MoqRendition::Video {
+					id: "media".into(),
+					config: catalog.video["media"].clone(),
+				},
+				false => MoqRendition::Audio {
+					id: "media".into(),
+					config: catalog.audio["media"].clone(),
+				},
+			};
+			let _consumer = MoqMediaTrackConsumer::subscribe(
+				&MoqBroadcastConsumer::new(broadcast.consume()),
+				MoqMediaTrackConfig {
+					rendition,
+					subscription: Some(MoqSubscription {
+						delay: MoqDelay {
+							min: Some(delay),
+							max: Some(delay),
+						},
+						..moq_subscription_defaults()
+					}),
+				},
+			)
+			.await
+			.unwrap();
+			let subscription = track.subscription().unwrap();
+			assert_eq!(subscription.delay.min, Some(delay), "video={video}");
+			assert_eq!(subscription.delay.max, Some(delay + warmup), "video={video}");
+		}
+	}
+
 	#[tokio::test(start_paused = true)]
 	async fn encoded_media_preserves_breaks() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
@@ -1557,6 +1630,7 @@ mod read_tests {
 						enabled: true,
 						container: MoqContainer::Legacy,
 						jitter: None,
+						warmup: None,
 					},
 				},
 				subscription: None,
@@ -1748,6 +1822,10 @@ impl MoqMediaTrackConsumer {
 	/// Follows the rendition's broadcast reference and track name, so a rendition served by a
 	/// sibling broadcast or under another track name subscribes to the right track, and fails
 	/// one whose broadcast is proven to serve another stream than its instance.
+	///
+	/// A rendition's [`warmup`](MoqVideo::warmup) starts the read that much further back than
+	/// the subscription's min delay, and widens the max delay the publisher serves by as much,
+	/// while the reader still skips at the max delay alone.
 	#[uniffi::constructor]
 	pub async fn subscribe(
 		broadcast: &MoqBroadcastConsumer,
@@ -1761,6 +1839,7 @@ impl MoqMediaTrackConsumer {
 			MoqRendition::Audio { .. } => moq_mux::container::Kind::Audio,
 			MoqRendition::Video { .. } => moq_mux::container::Kind::Video,
 		};
+		let warmup = rendition.warmup();
 		let (reference, instance, name, container) = rendition.into_parts();
 		// Parse the container before resolving or subscribing so we don't leave a dangling
 		// subscription if init parsing fails.
@@ -1772,11 +1851,13 @@ impl MoqMediaTrackConsumer {
 			.map(moq_net::track::Subscription::try_from)
 			.transpose()?
 			.unwrap_or_default();
+		let playout = moq_mux::container::Playout::new(subscription.delay, warmup);
+		let subscription = playout.subscription(subscription);
 		let track = broadcast
 			.driver
 			.watch(async { Ok(resolved.track(&name)?.subscribe(subscription).await?) })
 			.await?;
-		let consumer = moq_mux::container::Consumer::new(track, media);
+		let consumer = playout.consumer(track, media);
 		Ok(Arc::new(MoqMediaTrackConsumer {
 			reads: Polled::new(consumer).supervised(broadcast.driver.clone()),
 		}))

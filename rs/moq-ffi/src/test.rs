@@ -312,6 +312,7 @@ fn rendition(id: &str, container: MoqContainer) -> MoqRendition {
 			enabled: true,
 			framerate: None,
 			container,
+			warmup: None,
 		},
 	}
 }
@@ -345,6 +346,7 @@ fn sibling_audio(reference: &str) -> crate::media::MoqAudio {
 		enabled: true,
 		container: MoqContainer::Legacy,
 		jitter: None,
+		warmup: None,
 	}
 }
 
@@ -9633,6 +9635,7 @@ async fn video_subscribe_configuration_boundary() {
 			display_aspect: None,
 			bitrate: None,
 			framerate: None,
+			warmup: None,
 		};
 		let result = MoqVideoConsumer::subscribe(
 			&consumer,

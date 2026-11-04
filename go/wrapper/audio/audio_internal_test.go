@@ -26,9 +26,12 @@ func TestEncoderOutputFrameDuration(t *testing.T) {
 	}
 }
 
-func TestSubscribeRefusesNegativeJitter(t *testing.T) {
+func TestSubscribeRefusesNegativeDurations(t *testing.T) {
 	negative := -time.Millisecond
 	if _, err := Subscribe(context.Background(), nil, "audio", media.Audio{Jitter: &negative}, DecoderOutput{}); err == nil {
 		t.Fatal("a negative jitter was subscribed, want an error")
+	}
+	if _, err := Subscribe(context.Background(), nil, "audio", media.Audio{Warmup: &negative}, DecoderOutput{}); err == nil {
+		t.Fatal("a negative warmup was subscribed, want an error")
 	}
 }

@@ -200,20 +200,15 @@ impl Consumer {
 
 		let name = name.into();
 		let warmup = catalog.warmup.unwrap_or_default();
+		let playout = moq_mux::container::Playout::new(options.delay, warmup);
 		let track = broadcast.track(hang::catalog::Reference::track(catalog, &name))?;
 		// The whole delay from the start, as the container keeps it: the transport enforces the
 		// max too, so a narrower one while joining would drop the groups queued behind a reader
 		// slow to take its first, and the publisher should never see a stated zero min first.
 		let mut subscriber = track
-			.subscribe(
-				moq_net::track::Subscription::default()
-					.with_priority(hang::catalog::PRIORITY.audio)
-					.with_delay(
-						options
-							.delay
-							.with_max(options.delay.max.map(|max| max.saturating_add(warmup))),
-					),
-			)
+			.subscribe(playout.subscription(
+				moq_net::track::Subscription::default().with_priority(hang::catalog::PRIORITY.audio),
+			))
 			.await?;
 		// Latest skips cached history; a warmup is primed by trimming the newest group's
 		// start, like any other join. Move the local cursor, not Subscription::ranges: the
@@ -247,11 +242,9 @@ impl Consumer {
 		// wire: `moq import fmp4` publishes CMAF. Reading a moof+mdat fragment as a
 		// varint timestamp plus a payload decodes to garbage rather than failing.
 		let container = moq_mux::catalog::hang::Container::try_from(catalog)?;
-		// The subscription's budget includes the warmup, so the start reaches the playout delay
-		// plus the warmup back, while the container skips at the max delay alone.
-		let track = moq_mux::container::Consumer::new(track, container)
-			.with_warmup(warmup)
-			.with_delay(options.delay);
+		// The start reaches the playout delay plus the warmup back, while the container skips at
+		// the max delay alone.
+		let track = playout.consumer(track, container);
 
 		Ok(Self {
 			target: Target::new(delay, options.estimate, catalog.jitter),

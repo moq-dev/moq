@@ -62,6 +62,14 @@ func TestRefusesNegativeDurations(t *testing.T) {
 	if _, err := (&moq.BroadcastConsumer{}).Resolve(ctx, rendition); err == nil {
 		t.Fatal("a negative jitter was resolved, want an error")
 	}
+	for _, warmup := range []media.Rendition{
+		media.AudioRendition("audio", media.Audio{Warmup: &negative}),
+		media.VideoRendition("video", media.Video{Warmup: &negative}),
+	} {
+		if _, err := media.NewTrackConsumer(ctx, nil, media.TrackConfig{Rendition: warmup}); err == nil {
+			t.Fatal("a negative warmup was subscribed, want an error")
+		}
+	}
 }
 
 func TestContainerTimebaseBelongsToOneBroadcast(t *testing.T) {

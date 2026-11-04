@@ -319,14 +319,18 @@ impl Reader {
 			err => err,
 		})?;
 
+		// The max-delay decoder tolerates its warmup as lateness, so its delay already holds the
+		// warmup on both bounds: neither lane passes the catalog warmup to the container, which
+		// would carve it back out of the skip.
+		let playout = moq_mux::container::Playout::new(delay, std::time::Duration::ZERO);
 		let track = broadcast.track(hang::catalog::Reference::track(catalog, name))?;
 		let mut subscriber = track
 			.subscribe(
-				moq_net::track::Subscription::default()
-					.with_priority(hang::catalog::PRIORITY.video)
-					// The whole delay from the first request, as the container keeps it, so the
-					// publisher never sees a stated zero min before the container's update.
-					.with_delay(delay),
+				// The whole delay from the first request, as the container keeps it, so the
+				// publisher never sees a stated zero min before the container's update.
+				playout.subscription(
+					moq_net::track::Subscription::default().with_priority(hang::catalog::PRIORITY.video),
+				),
 			)
 			.await?;
 		// A decoder often opens on a track that is already cached: a replacement
@@ -360,8 +364,8 @@ impl Reader {
 		// On a cold network join the live edge's stream often lands first. The container starts
 		// at the group covering the live edge less the min delay, waiting for it, so the
 		// max-delay decoder, whose min delay includes the warmup, still gets the group its warmup
-		// needs. That decoder tolerates the warmup as lateness too, so it passes no further warmup.
-		let track = moq_mux::container::Consumer::new(track, container).with_delay(delay);
+		// needs.
+		let track = playout.consumer(track, container);
 
 		Ok(Self {
 			decoder,

@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Catalog renditions carry their warmup ([#7864](https://github.com/moq-dev/moq/pull/7864))
+
+`ffi.MoqVideo` and `ffi.MoqAudio` (`media.Video` and `media.Audio`) gain `Warmup`, the catalog's decoder warmup, nil when absent. `media.NewTrackConsumer` and the audio and video `Subscribe` read it from the rendition and start that much earlier; a negative one is refused with an error. Only unkeyed struct literals change.
+
 ### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
 
 `TrackInfo.MaxAge` is a `time.Duration` instead of a `*time.Duration`, like `Delay.Max`: the zero value, and a nil `*TrackInfo`, now advertise a zero max age, serving only the live edge, instead of no publisher limit. Assign the duration directly, and set the new `MaxAgeUnlimited`, which ignores `MaxAge`, where you relied on nil meaning no limit. A received track's `Info()` sets it when its publisher advertised no limit.

@@ -528,7 +528,7 @@ impl Consume {
 		// instead of assuming Legacy, otherwise CMAF/fMP4 sources (e.g. ffmpeg moqenc,
 		// browser @moq/publish) are misread as raw frames.
 		let container = moq_mux::catalog::hang::Container::try_from(config)?;
-		let warmup = config.warmup();
+		let playout = moq_mux::container::Playout::new(delay, config.warmup());
 		// The rendition may live in a sibling broadcast, so resolve its reference rather than
 		// assuming the catalog's own broadcast serves the track.
 		let reference = config.broadcast().cloned();
@@ -543,10 +543,9 @@ impl Consume {
 			|mut close| async move {
 				driver
 					.watch(async move {
-						let subscription = moq_net::track::Subscription::default()
-							.with_priority(C::PRIORITY)
-							// The publisher must retain the history the decoder needs too.
-							.with_delay(delay.with_max(delay.max.map(|max| max.saturating_add(warmup))));
+						// The publisher must retain the history the decoder needs too.
+						let subscription =
+							playout.subscription(moq_net::track::Subscription::default().with_priority(C::PRIORITY));
 						// Resolving a sibling broadcast can wait too, so the close races both steps.
 						let setup = async {
 							let broadcast = resolve(broadcast, origin, reference).await?;
@@ -555,9 +554,7 @@ impl Consume {
 						let Some(track) = Self::until_closed(&mut close, setup).await? else {
 							return Ok(());
 						};
-						let track = moq_mux::container::Consumer::new(track, container)
-							.with_warmup(warmup)
-							.with_delay(delay);
+						let track = playout.consumer(track, container);
 						Self::run_track(on_read, track, close).await
 					})
 					.await

@@ -53,10 +53,26 @@ func NonNegative(value *time.Duration, name string) error {
 	return nil
 }
 
-// Rendition refuses an audio rendition's negative jitter, for the same reason.
+// Rendition refuses a rendition's negative jitter or warmup, for the same reason.
 func Rendition(rendition ffi.MoqRendition) error {
-	if audio, ok := rendition.(ffi.MoqRenditionAudio); ok {
-		return NonNegative(audio.Config.Jitter, "jitter")
+	switch rendition := rendition.(type) {
+	case ffi.MoqRenditionAudio:
+		return Audio(rendition.Config)
+	case ffi.MoqRenditionVideo:
+		return Video(rendition.Config)
 	}
 	return nil
+}
+
+// Audio refuses an audio rendition's negative jitter or warmup.
+func Audio(audio ffi.MoqAudio) error {
+	if err := NonNegative(audio.Jitter, "jitter"); err != nil {
+		return err
+	}
+	return NonNegative(audio.Warmup, "warmup")
+}
+
+// Video refuses a video rendition's negative warmup.
+func Video(video ffi.MoqVideo) error {
+	return NonNegative(video.Warmup, "warmup")
 }
