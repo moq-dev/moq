@@ -264,10 +264,10 @@ impl Source {
 	///
 	/// Every export runs this on each catalog snapshot, so a disabled rendition reads as
 	/// absent: one that is disabled later leaves the snapshot, and one that re-enables
-	/// returns to it. A protected one (listing `drm` entries) reads as absent as well, since no
-	/// export decrypts it (see [`retain_clear`](crate::catalog::hang::retain_clear)). Every section carrying renditions must be listed here; one left out
-	/// silently exempts its renditions from the containment check, exactly as on the
-	/// consumer side.
+	/// returns to it. A protected one reads as absent as well, since no export decrypts it
+	/// (see [`retain_clear`](crate::catalog::hang::retain_clear)). Every section carrying
+	/// renditions must be listed here; one left out silently exempts its renditions from the
+	/// containment check, exactly as on the consumer side.
 	pub(crate) fn retain_selectable<E: crate::catalog::hang::CatalogExt>(
 		&self,
 		catalog: &mut crate::catalog::hang::Catalog<E>,

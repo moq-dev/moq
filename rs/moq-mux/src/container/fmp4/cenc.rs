@@ -239,6 +239,23 @@ impl Aux {
 	}
 }
 
+/// The first `sinf` of an encrypted sample entry in a CMAF init's `moov`, `None` for a clear init
+/// or one that does not decode.
+pub(crate) fn init_sinf(init: &[u8]) -> Option<mp4_atom::Sinf> {
+	use mp4_atom::{Any, DecodeMaybe};
+
+	let mut cursor = std::io::Cursor::new(init);
+	while let Ok(Some(atom)) = Any::decode_maybe(&mut cursor) {
+		if let Any::Moov(moov) = atom {
+			return (moov.trak.iter())
+				.flat_map(|trak| &trak.mdia.minf.stbl.stsd.codecs)
+				.find_map(sinf)
+				.cloned();
+		}
+	}
+	None
+}
+
 /// The `sinf` of an encrypted sample entry, `None` for a clear one.
 pub(crate) fn sinf(codec: &mp4_atom::Codec) -> Option<&mp4_atom::Sinf> {
 	match codec {

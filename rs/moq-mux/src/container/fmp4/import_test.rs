@@ -4108,6 +4108,39 @@ fn drm_renders_as_cmsf_content_protection_and_back() {
 	assert_eq!(back.audio.renditions.values().next().unwrap().drm, ["1"]);
 }
 
+/// An MSF CMAF track whose init is encrypted but that no `contentProtections` entry signals must not
+/// read as clear: parsing drops it, and a hang catalog listing such a rendition without `drm` has
+/// it removed by `retain_clear` all the same.
+#[test]
+fn an_encrypted_init_without_protection_is_never_clear() {
+	let (result, catalog, _, _importers) = import_protected(&[CENC], |fmp4| fmp4);
+	result.unwrap();
+	let catalog = catalog.snapshot();
+
+	let mut msf = crate::catalog::to_msf(&catalog, &moq_net::Path::empty());
+	msf.content_protections.clear();
+	for track in &mut msf.tracks {
+		track.content_protection_ref_ids.clear();
+	}
+	let wire: moq_msf::Catalog = msf.to_json().unwrap().parse().unwrap();
+	let back = crate::catalog::msf::from_msf(&wire, &moq_net::Path::empty()).unwrap();
+	assert!(back.video.renditions.is_empty(), "{:?}", back.video.renditions.keys());
+	assert!(back.audio.renditions.is_empty(), "{:?}", back.audio.renditions.keys());
+
+	let mut unsignalled = catalog.clone();
+	unsignalled.drm.clear();
+	for config in unsignalled.video.renditions.values_mut() {
+		config.drm.clear();
+	}
+	for config in unsignalled.audio.renditions.values_mut() {
+		config.drm.clear();
+	}
+	assert!(!unsignalled.video.renditions.is_empty());
+	crate::catalog::hang::retain_clear(&mut unsignalled);
+	assert!(unsignalled.video.renditions.is_empty());
+	assert!(unsignalled.audio.renditions.is_empty());
+}
+
 /// A license server for a DRM system the media carries no `pssh` for is a configuration mistake.
 #[test]
 fn a_drm_system_the_media_lacks_is_refused() {

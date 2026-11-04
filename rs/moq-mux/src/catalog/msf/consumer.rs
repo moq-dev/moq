@@ -118,7 +118,9 @@ impl<E: CatalogExt> From<moq_net::track::Subscriber> for Consumer<E> {
 /// lists the one its init's `tenc` uses (all of them when the init names none). An entry the hang
 /// catalog cannot carry (a malformed ID, URL, or `pssh`, a scheme other than `cenc` and `cbcs`, no
 /// default key, or a split ID that is another entry's `refID`) is dropped with a warning, and so is
-/// every video and audio track it protects; the other tracks remain.
+/// every video and audio track it protects; the other tracks remain. A CMAF track whose init is
+/// encrypted (`encv`/`enca`) but that lists no `contentProtectionRefIDs` is dropped the same way,
+/// rather than read as clear.
 pub(crate) fn from_msf<E: CatalogExt>(msf: &moq_msf::Catalog<E>, base: &moq_net::Path) -> Result<Catalog<E>> {
 	let mut catalog = Catalog::default();
 	catalog.ext = msf.ext.clone();
@@ -156,7 +158,7 @@ pub(crate) fn from_msf<E: CatalogExt>(msf: &moq_msf::Catalog<E>, base: &moq_net:
 			moq_msf::Role::Video => match video_config_from_msf(track)? {
 				Some(mut config) => {
 					let Some(drm) = protections.track(track, &config.container) else {
-						tracing::warn!(track = %track.name, "skipping MSF video track protected by an ignored content protection");
+						tracing::warn!(track = %track.name, "skipping MSF video track whose protection the catalog cannot signal");
 						continue;
 					};
 					config.broadcast = broadcast;
@@ -174,7 +176,7 @@ pub(crate) fn from_msf<E: CatalogExt>(msf: &moq_msf::Catalog<E>, base: &moq_net:
 			moq_msf::Role::Audio => match audio_config_from_msf(track)? {
 				Some(mut config) => {
 					let Some(drm) = protections.track(track, &config.container) else {
-						tracing::warn!(track = %track.name, "skipping MSF audio track protected by an ignored content protection");
+						tracing::warn!(track = %track.name, "skipping MSF audio track whose protection the catalog cannot signal");
 						continue;
 					};
 					config.broadcast = broadcast;
@@ -293,13 +295,23 @@ impl Protections {
 	}
 
 	/// The hang entry IDs protecting `track`, whose CMAF init is in `container`, or `None` when it
-	/// references an entry that was dropped: its samples are encrypted in a way the catalog cannot
-	/// describe, so the rendition is left out rather than signalled as clear.
+	/// references an entry that was dropped, or its init is encrypted (`encv`/`enca`) and it
+	/// references none: its samples are encrypted in a way the catalog cannot describe, so the
+	/// rendition is left out rather than signalled as clear.
 	fn track(&self, track: &moq_msf::Track, container: &Container) -> Option<Vec<String>> {
-		let kid = match container {
-			Container::Cmaf { init } => init_kid(init),
-			_ => None,
+		let (encrypted, kid) = match container {
+			Container::Cmaf { init } => match crate::container::fmp4::cenc::init_sinf(init) {
+				Some(_) => (true, init_kid(init)),
+				None => (false, None),
+			},
+			_ => (false, None),
 		};
+		// An encrypted init no content protection signals would read as clear, and every consumer
+		// would then decode ciphertext.
+		if encrypted && track.content_protection_ref_ids.is_empty() {
+			tracing::warn!(track = %track.name, "MSF track has an encrypted init but no contentProtectionRefIDs");
+			return None;
+		}
 		let mut ids = Vec::new();
 		// moq-msf refuses a refID the root lacks.
 		for split in track
@@ -321,19 +333,9 @@ impl Protections {
 
 /// The default key ID an encrypted CMAF init's `tenc` names, if any.
 fn init_kid(init: &[u8]) -> Option<hang::catalog::drm::Uuid> {
-	use mp4_atom::{Any, DecodeMaybe};
-
-	let mut cursor = std::io::Cursor::new(init);
-	while let Ok(Some(atom)) = Any::decode_maybe(&mut cursor) {
-		if let Any::Moov(moov) = atom {
-			let sinf = (moov.trak.iter())
-				.flat_map(|trak| &trak.mdia.minf.stbl.stsd.codecs)
-				.find_map(crate::container::fmp4::cenc::sinf)?;
-			let tenc = sinf.schi.as_ref()?.tenc.as_ref()?;
-			return Some(hang::catalog::drm::Uuid::from_bytes(tenc.default_kid));
-		}
-	}
-	None
+	let sinf = crate::container::fmp4::cenc::init_sinf(init)?;
+	let tenc = sinf.schi.as_ref()?.tenc.as_ref()?;
+	Some(hang::catalog::drm::Uuid::from_bytes(tenc.default_kid))
 }
 
 /// Decode the [`Container`] for a track based on its packaging and `init_data`.
