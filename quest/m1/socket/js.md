@@ -37,13 +37,11 @@ After it lands, merge main and rerun the controlled cases, `just ci`,
 `just test interop --all`, and local cross-vendor review on the resulting head;
 then remove this quest and mark the JS PR ready.
 
-The merged-source run exposed a harness assumption: a late FETCH can ask for a
-reset session again, surfacing the same unverified incoming identity before the
-fresh rejected dial. Diagnostics reproduced that identity match. The interop
-acceptor now refuses its two known completed identities before rejecting the
-fresh dial, preserving the refusal assertion. Final-head interop must still be
-rerun after the shared adapter correction. Earlier temporary dependency checks
-passed all eight controlled bursts, but are not final-head proof.
+Incoming requests carry claimed names; accepting checks that the original dial
+still answers before publishing a new half. Controlled late-query cases for both
+protocols verify that a closed session cannot be accepted again or receive the
+fresh session's content. The relay refusal probe runs before data sessions, so it
+uses one rejection independently of late requests for completed halves.
 
 ## Waiting
 

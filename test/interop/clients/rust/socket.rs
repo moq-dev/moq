@@ -44,6 +44,21 @@ async fn main() -> anyhow::Result<()> {
 	if !dial {
 		println!("socket ready");
 	}
+	// Probe refusal before data sessions can generate late queries for closed halves.
+	if dial {
+		if tcp {
+			ensure!(endpoint.dial_tcp("acceptor")?.await.is_err(), "rejected dial connected");
+		} else {
+			ensure!(
+				endpoint.dial_track("acceptor", None)?.await.is_err(),
+				"rejected dial connected"
+			);
+		}
+	} else if tcp {
+		endpoint.accept_tcp().await?.reject();
+	} else {
+		endpoint.accept_track().await?.reject();
+	}
 	let own: u8 = if dial { 16 } else { 32 };
 	let peer: u8 = if dial { 32 } else { 16 };
 	let _hold: Box<dyn std::any::Any> = if tcp {
@@ -101,7 +116,6 @@ async fn main() -> anyhow::Result<()> {
 			reset.producer.write_frame(None, vec![48])?;
 			ensure!(reset.consumer.read_frame().await.is_err(), "TCP RST became FIN");
 			eprintln!("socket reset verified tcp dial");
-			ensure!(endpoint.dial_tcp("acceptor")?.await.is_err(), "rejected dial connected");
 		} else {
 			ensure!(
 				reset
@@ -113,7 +127,6 @@ async fn main() -> anyhow::Result<()> {
 					.as_ref() == [48]
 			);
 			reset.producer.abort(moq_net::Error::App(6))?;
-			endpoint.accept_tcp().await?.reject();
 		}
 	} else {
 		let mut reset = if dial {
@@ -126,10 +139,6 @@ async fn main() -> anyhow::Result<()> {
 			reset.producer.write_frame(None, vec![48])?;
 			ensure!(reader.next_group().await.is_err(), "track RST became FIN");
 			eprintln!("socket reset verified track dial");
-			ensure!(
-				endpoint.dial_track("acceptor", None)?.await.is_err(),
-				"rejected dial connected"
-			);
 		} else {
 			let mut group = reader.next_group().await?.context("missing reset signal")?;
 			ensure!(
@@ -141,7 +150,6 @@ async fn main() -> anyhow::Result<()> {
 					.as_ref() == [48]
 			);
 			reset.producer.abort(moq_net::Error::App(6))?;
-			endpoint.accept_track().await?.reject();
 		}
 	}
 	eprintln!("socket verified {} {}", args[4], args[1]);

@@ -140,11 +140,11 @@ interface Parts {
 	session: string;
 }
 
-/** An incoming dial to accept (checking return routability) or reject. */
+/** An unverified incoming request to accept (checking its original dial is still open) or reject. */
 export class Incoming<S extends TcpStream | TrackStream> {
 	/** The id the dialer claims; accept verifies that endpoint really dialed this session. */
 	readonly peer: string;
-	/** The session id chosen by the dialer. */
+	/** The claimed session id; only accept verifies that its original dial is still open. */
 	readonly session: string;
 	#endpoint: Endpoint;
 	#protocol: Protocol;

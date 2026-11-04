@@ -197,6 +197,59 @@ test("finished track sessions release their unlisted producers after both halves
 	expect(hooks.trackReleased(remote.producer).peek()).toBeNull();
 });
 
+for (const protocol of ["tcp", "track"] as const) {
+	test(`late ${protocol} reads retain return-routability checks after the original dial closes`, async () => {
+		const clock = time();
+		const { origin, a, b, local, remote } = await (protocol === "tcp" ? tcp() : track());
+		const next = protocol === "tcp" ? b.acceptTcp() : b.acceptTrack();
+		void next.catch(() => {});
+		const reset = new StreamError(StreamCode(70));
+		const oldReader = local instanceof socket.TcpStream ? local.consumer : local.consumer.ordered();
+		remote.producer.abort(reset);
+		await expect(oldReader.readFrame()).rejects.toBeInstanceOf(Error);
+		const source = await broadcast(origin, "bob");
+		let outcome: unknown;
+		const fetched = source
+			.track(`${protocol}/alice/bob/${local.session}`)
+			.fetchGroup(0n)
+			.then(
+				(value) => {
+					outcome = value;
+				},
+				(error) => {
+					outcome = error;
+				},
+			);
+		try {
+			await clock.advance(Nano.zero);
+			const unverified = await next;
+			expect(unverified.session).toBe(local.session);
+			// A late query has the old name, but the original dial no longer answers.
+			// Verification must fail before a new producer can publish under that identity.
+			await expect(unverified.accept()).rejects.toBeInstanceOf(NotFound);
+			await fetched;
+			expect(outcome).toBeInstanceOf(Error);
+			const freshIncoming = protocol === "tcp" ? b.acceptTcp() : b.acceptTrack();
+			const dialing = protocol === "tcp" ? a.dialTcp("bob") : a.dialTrack("bob");
+			const incoming = await freshIncoming;
+			expect(incoming.session).not.toBe(local.session);
+			const remoteFresh = await incoming.accept();
+			const localFresh = await dialing;
+			localFresh.producer.writeFrame(bytes(9));
+			const frame =
+				remoteFresh instanceof socket.TcpStream
+					? await remoteFresh.consumer.readFrame()
+					: await remoteFresh.consumer.ordered().readFrame();
+			expect(frame?.payload).toEqual(bytes(9).payload);
+			await expect(oldReader.readFrame()).rejects.toBeInstanceOf(Error);
+		} finally {
+			a.close();
+			b.close();
+			await fetched;
+		}
+	});
+}
+
 test("a dial-only endpoint refuses incoming requests and answers only its reserved session", async () => {
 	const { origin, a } = setup();
 	await expect(a.dialTcp("alice")).rejects.toBeInstanceOf(Error);

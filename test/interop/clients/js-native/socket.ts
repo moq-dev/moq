@@ -17,7 +17,8 @@ assert(
 );
 const origin = new Moq.Origin.Producer();
 const endpoint = new Moq.socket.Endpoint(origin, Moq.Path.from(prefix), role === "dial" ? "dialer" : "acceptor");
-const next = role === "accept" ? (protocol === "tcp" ? endpoint.acceptTcp() : endpoint.acceptTrack()) : undefined;
+let next: Promise<Moq.socket.Incoming<Moq.socket.TcpStream> | Moq.socket.Incoming<Moq.socket.TrackStream>> | undefined =
+	role === "accept" ? (protocol === "tcp" ? endpoint.acceptTcp() : endpoint.acceptTrack()) : undefined;
 const connection = await Moq.Connection.connect({
 	url: new URL(address),
 	versions: [version],
@@ -29,6 +30,14 @@ const lines = createInterface({ input: process.stdin });
 const commands = lines[Symbol.asyncIterator]();
 try {
 	if (role === "accept") process.stdout.write("socket ready\n");
+	// Refuse before opening data sessions, so the probe is independent of late
+	// unverified queries for a completed half.
+	if (next) {
+		(await next).reject();
+		next = protocol === "tcp" ? endpoint.acceptTcp() : endpoint.acceptTrack();
+	} else {
+		await assert.rejects(protocol === "tcp" ? endpoint.dialTcp("acceptor") : endpoint.dialTrack("acceptor"));
+	}
 	const stream = next
 		? await (await next).accept()
 		: protocol === "tcp"
@@ -70,19 +79,6 @@ try {
 	} else {
 		assert.deepEqual((await resetReader.readFrame())?.payload, new Uint8Array([48]));
 		second.producer.abort(new Moq.Error.Stream(Moq.StreamCode(70)));
-	}
-	if (role === "dial") {
-		await assert.rejects(protocol === "tcp" ? endpoint.dialTcp("acceptor") : endpoint.dialTrack("acceptor"));
-	} else {
-		for (;;) {
-			const incoming: Moq.socket.Incoming<Moq.socket.TcpStream> | Moq.socket.Incoming<Moq.socket.TrackStream> =
-				await (protocol === "tcp" ? endpoint.acceptTcp() : endpoint.acceptTrack());
-			assert.equal(incoming.peer, "dialer");
-			incoming.reject();
-			// Incoming names are unverified. A late FETCH for a reset/finished half can
-			// ask for it again; refuse those known identities before the fresh test dial.
-			if (incoming.session !== stream.session && incoming.session !== second.session) break;
-		}
 	}
 	console.error(`socket verified ${protocol} ${role}`);
 	if (role === "accept") assert.equal((await commands.next()).value, "socket drained");
