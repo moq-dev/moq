@@ -490,7 +490,7 @@ impl Connection {
 
 	/// The peer's UDP address
 	///
-	/// If [`server::Config::migration`] is `true`, clients may change addresses at will, e.g. when
+	/// If [`moq_quic::server::Config::migration`] is `true`, clients may change addresses at will, e.g. when
 	/// switching to a cellular internet connection.
 	pub fn remote_address(&self) -> SocketAddr {
 		self.0.state.lock().inner.remote_address()
