@@ -33,7 +33,8 @@ for (const protocol of protocols) {
 			const broadcastPublication = origin.createBroadcast(Path.from("parked"));
 			const broadcast = broadcastPublication.broadcast;
 			broadcastPublication.announce();
-			const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+			// No publisher limit, so the cache eviction rather than a stale verdict ends a long budget.
+			const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 			const write = (sequence: bigint) => {
 				const group = track.createGroup(sequence);
 				group.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(0) });

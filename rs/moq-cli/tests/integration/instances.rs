@@ -74,10 +74,13 @@ fn publish(origin: &origin::Producer, instance: &Instance, tag: &str) -> Publish
 	let route = origin::Route::default().with_instance(instance.clone(), 0);
 	let broadcast = origin.publish("live/catalog.hang", route.clone()).unwrap();
 	let sibling = origin.publish("live/media", route).unwrap();
+	// Media's max age, so its superseded groups stay fetchable.
 	let media = sibling
 		.create_track(
 			"audio",
-			track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+			track::Info::default()
+				.with_timescale(moq_net::Timescale::MILLI)
+				.with_max_age(hang::container::MAX_AGE),
 		)
 		.unwrap();
 	write(&media, &format!("{tag}:0"));
