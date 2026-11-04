@@ -168,7 +168,7 @@ export class Broadcast {
 	 * the longest group any video or audio rendition promised when media was first listed. Fixed
 	 * for the network broadcast, so an encoder holds its groups within it. Undefined until declared.
 	 */
-	readonly join = new Signal<Catalog.U53 | undefined>(undefined);
+	readonly join = new Signal<Milli | undefined>(undefined);
 
 	// Each catalog ID in the latest catalog fold, which seeds a new network broadcast's publication.
 	#listed = new Map<string, Listing>();
@@ -311,7 +311,7 @@ export class Broadcast {
 			publication.join = longestGroup(effect, renditions);
 		}
 		const join = publication?.join;
-		this.join.set(join);
+		this.join.set(join === undefined ? undefined : Milli(join));
 
 		this.catalog.mutate((catalog) => {
 			if (join !== undefined) {
