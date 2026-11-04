@@ -20,9 +20,10 @@ use it without a dependency cycle.
 
 ## Provider
 
-MoQ runs all of its cryptography on rind, which needs certain CPU features (for example AES
-instructions on `x86_64`). Its primitives panic on a CPU without them, so the `provider` module
-refuses such a CPU up front:
+MoQ runs all of its cryptography on rind. Its primitives panic on a CPU missing a feature rind
+requires, so the `provider` module refuses such a CPU up front. Today that is NEON on aarch64;
+every `x86_64` CPU and armv7 are supported, and a CPU without AES or other crypto extensions
+runs rind's slower paths rather than being refused:
 
 - `provider::check()` returns `UnsupportedCpu`, naming the missing feature.
 - `provider::provider()` returns rind's rustls `CryptoProvider`, or that error. It ignores the
