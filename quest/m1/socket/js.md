@@ -25,3 +25,18 @@ as unsupported. JS reads without fastest-reader pacing until
 reader that falls a group tail behind fails with an eviction error; say so in
 the docs. Add the Rust/JS pairs to `just test interop`, and document the
 export in `doc/lib/js/net.md`.
+
+The JS implementation, documentation, relay lanes, and endpoint/session benchmark
+are present. Every new session subscribes from absolute group 0. The controlled
+metadata-before-burst regressions stay enabled: lite-07 passes, while draft 18
+stalls and drafts 20/22 lose the earlier track groups on the uncorrected base.
+The generic IETF adapter correction belongs to
+[moq-dev/moq#7883](https://github.com/moq-dev/moq/pull/7883), together with the
+Rust socket's matching start correction, and stays out of this JS socket diff.
+After it lands, merge main and rerun the controlled cases, `just ci`,
+`just test interop --all`, and local cross-vendor review on the resulting head;
+then remove this quest and mark the JS PR ready.
+
+## Waiting
+
+- moq-dev/moq: merge the generic IETF absolute-start correction from [moq-dev/moq#7883](https://github.com/moq-dev/moq/pull/7883), then verify all eight early-answer cases and the relay matrix pass on the JS PR's actual head. Absolute group 0 alone does not preserve early bursts on the current adapters; no new socket API or wire fields are needed.

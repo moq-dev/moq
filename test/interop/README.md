@@ -70,6 +70,12 @@ head with a joining FETCH before draft 22 and a fill from it.
 `--tail` runs the FETCH round, the late joins, and the five finite-tail lanes. The
 wire-compat lanes, which swap in released relays and clients, skip them.
 
+Socket lanes cross Rust and native JS in both dial directions under Node and Bun,
+using `tcp` and `track` through the relay. They verify both peers' bytes, FIN, RST,
+rejection, and separate rooted publish grants. Each pins moq-lite-07-wip or IETF
+draft 18, 20, or 22; older moq-lite hops do not carry hidden endpoints. These lanes
+run in the normal in-tree test when native JS is selected. `just test interop --sockets` runs them alone.
+
 The finite clients keep their session alive until the harness acknowledges the
 reader's complete clean end over stdin, so a lane tests delivery rather than
 shutdown. No sleep stands in for drain completion. A missing group, error, or

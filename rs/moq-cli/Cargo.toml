@@ -183,6 +183,10 @@ name = "interop-tail"
 path = "../../test/interop/clients/rust/tail.rs"
 
 [[example]]
+name = "interop-socket"
+path = "../../test/interop/clients/rust/socket.rs"
+
+[[example]]
 name = "interop-catalog"
 path = "../../test/interop/clients/rust/catalog.rs"
 

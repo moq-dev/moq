@@ -3309,3 +3309,34 @@ test("a route whose IETF session closed before subscribing moves the track to th
 	front.consumer.close();
 	b.close();
 });
+
+test("routed metadata receives a refusal without polling a group cursor", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const origin = new Producer();
+	try {
+		const publication = origin.createBroadcast(Path.from("missing-track"));
+		publication.announce();
+		for (const request of [origin.request(Path.from("missing-track")), origin.follow(Path.from("missing-track"))]) {
+			const broadcast = request.active.peek();
+			if (!broadcast) throw new Error("local broadcast missing");
+			const subscriber = broadcast.track("absent").subscribe();
+			let outcome: unknown;
+			void subscriber.info().then(
+				() => {
+					outcome = "accepted";
+				},
+				(error) => {
+					outcome = error;
+				},
+			);
+			await clock.advance(Nano.zero);
+			expect(outcome).toBeInstanceOf(NotFound);
+			subscriber.close();
+			request.close();
+		}
+	} finally {
+		origin.close();
+		installed.close();
+	}
+});

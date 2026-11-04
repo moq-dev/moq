@@ -785,4 +785,39 @@ export namespace Varint {
 	export function encodeTo(dst: ArrayBuffer, v: number | bigint): Uint8Array;
 	export function size(v: number): number;
 }
+
+export namespace socket {
+	export class Endpoint {
+		constructor(origin: Origin.Producer, prefix: Path.Valid, id: string);
+		acceptTcp(options?: socket.Options): Promise<socket.Incoming<socket.TcpStream>>;
+		acceptTrack(options?: socket.Options): Promise<socket.Incoming<socket.TrackStream>>;
+		close(): void;
+		get closed(): Signals.GetPromise<Error | null>;
+		dialTcp(peer: string, options?: socket.Options): Promise<socket.TcpStream>;
+		dialTrack(peer: string, info?: Track.InfoInit, options?: socket.Options): Promise<socket.TrackStream>;
+		readonly id: string;
+		readonly prefix: Path.Valid;
+	}
+	export class Incoming<S extends socket.TcpStream | socket.TrackStream> {
+		accept(...args: S extends socket.TcpStream ? [options?: socket.Options] : [info?: Track.InfoInit, options?: socket.Options]): Promise<S>;
+		readonly peer: string;
+		reject(): void;
+		readonly session: string;
+	}
+	export interface Options {
+		signal?: AbortSignal;
+	}
+	export class TcpStream {
+		readonly consumer: Group.Consumer;
+		readonly peer: string;
+		readonly producer: Group.Producer;
+		readonly session: string;
+	}
+	export class TrackStream {
+		readonly consumer: Track.Subscriber;
+		readonly peer: string;
+		readonly producer: Track.Producer;
+		readonly session: string;
+	}
+}
 ```

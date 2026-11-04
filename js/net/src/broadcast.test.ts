@@ -236,6 +236,7 @@ test("held info lookups keep a request until the last one lets go", async () => 
 	const opened = wireOf(broadcast).resolveTrackInfo("media", first.signal);
 	const request = await pulled;
 	if (!request) throw new Error("expected request");
+	expect(hooks.requestWanted(request).peek()).toBe(true);
 	const producer = request.accept();
 	const second = new AbortController();
 	await wireOf(broadcast).resolveTrackInfo("media", second.signal);
@@ -246,6 +247,7 @@ test("held info lookups keep a request until the last one lets go", async () => 
 	expect(producer.closed.peek()).toBeUndefined();
 
 	second.abort();
+	expect(hooks.requestWanted(request).peek()).toBe(false);
 	expect(producer.closed.peek()).toBeDefined();
 	broadcast.close();
 });

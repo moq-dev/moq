@@ -32,7 +32,7 @@ let stampProducer: (producer: Producer, path: Path.Valid) => void;
 
 // Info lookups pending or held on a track.
 class Lookups {
-	pending = 0;
+	pending = new Signal(0);
 	// Whether a lookup opened the request, so the last lookup to end closes it unless subscribed.
 	opened = false;
 }
@@ -157,7 +157,7 @@ function logical(state: BroadcastState, name: string): { producer: track.Produce
 	});
 
 	state.requested.mutate((requested) => {
-		requested.push(hooks.makeRequest({ name, producer, pending: state.pending }));
+		requested.push(hooks.makeRequest({ name, producer, pending: state.pending, lookups }));
 	});
 
 	return { producer, requested: true };
@@ -167,21 +167,21 @@ function subscribe(state: BroadcastState, name: string, options?: track.Subscrip
 	return logical(state, name).producer.subscribe(options);
 }
 
-// A lookup is held until `hold` aborts, which also abandons it before the answer. A request a lookup opened is let go once it is answered and nobody holds or subscribes
-// to it; closing it sooner would hand its handler a closed producer.
+// A lookup holds a request until `hold` aborts, even before the answer. An unanswered
+// request stays open for its handler; after acceptance nobody holding it releases it.
 async function resolveTrackInfo(state: BroadcastState, name: string, hold?: AbortSignal): Promise<track.Info> {
 	hold?.throwIfAborted();
 	const { producer, requested } = logical(state, name);
 	const lookups = state.lookups.get(producer);
 	if (!lookups) return producer.info();
 	if (requested) lookups.opened = true;
-	lookups.pending++;
+	lookups.pending.update((pending) => pending + 1);
 
 	const info = producer.info();
 	let answered = false;
 	let ended = false;
 	const release = () => {
-		if (lookups.opened && lookups.pending === 0 && producer.demand().wanted.peek() === undefined)
+		if (lookups.opened && lookups.pending.peek() === 0 && producer.demand().wanted.peek() === undefined)
 			hooks.releaseTrack(producer);
 	};
 	info.then(
@@ -193,7 +193,7 @@ async function resolveTrackInfo(state: BroadcastState, name: string, hold?: Abor
 	);
 	const end = () => {
 		ended = true;
-		lookups.pending--;
+		lookups.pending.update((pending) => pending - 1);
 		if (answered) release();
 	};
 
@@ -331,6 +331,19 @@ export class Producer {
 			producer.#announcer = announcer;
 		};
 		hooks.attachAnnouncer = attachAnnouncer;
+		hooks.reserveUnlistedTrack = (broadcast, name) => {
+			const state = broadcast.#state;
+			if (state.closed.peek() !== undefined) throw new Error("broadcast is closed");
+			if (lookup(state, name)) throw new Error("duplicate reserved track");
+			const producer = new track.Producer(name);
+			const lookups = new Lookups();
+			state.lookups.set(producer, lookups);
+			state.requests.set(name, producer);
+			void hooks.trackReleased(producer).then(() => {
+				if (state.requests.get(name) === producer) state.requests.delete(name);
+			});
+			return hooks.makeRequest({ name, producer, pending: state.pending, lookups });
+		};
 
 		hooks.onClosed = (producer, fn) => {
 			const closers = producer.#state.closers;
@@ -373,9 +386,7 @@ export class Producer {
 		const request = takeQueued(this.#state, name);
 		if (request) {
 			const producer = request.accept(info);
-			// The application owns it now: a lookup that opened the request must not close it.
-			const lookups = this.#state.lookups.get(producer);
-			if (lookups) lookups.opened = false;
+			hooks.keepRequest(request);
 			this.#state.requests.delete(name);
 			adopt(this.#state, producer, track.authoredInfo(info));
 			return producer;

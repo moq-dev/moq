@@ -5,7 +5,7 @@
  */
 
 import { Instant, Milli, Nano, now, sleepUntil } from "@moq/clock";
-import { type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
+import { Derived, type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import type { Datagram } from "./datagram.ts";
 import { Delivered } from "./delivered.ts";
 import {
@@ -487,17 +487,33 @@ export class Request {
 
 	#producer: Producer;
 	#pending: Set<Request>;
+	#lookups?: TrackRequestOptions["lookups"];
+	#wanted?: Getter<boolean>;
 
 	private constructor(options: TrackRequestOptions) {
 		this.name = options.name;
 		this.#producer = options.producer;
 		this.#pending = options.pending;
+		this.#lookups = options.lookups;
 		this.#pending.add(this);
 	}
 
 	static {
 		hooks.makeRequest = (options) => new Request(options);
 		hooks.stageRequest = (request, info) => request.#stage(info);
+		hooks.requestWanted = (request) => {
+			const wanted = request.#producer.demand().wanted;
+			request.#wanted ??= request.#lookups
+				? new Derived(
+						[wanted, request.#lookups.pending],
+						(group, lookups) => group !== undefined || lookups > 0,
+					)
+				: new Derived([wanted], (group) => group !== undefined);
+			return request.#wanted;
+		};
+		hooks.keepRequest = (request) => {
+			if (request.#lookups) request.#lookups.opened = false;
+		};
 	}
 
 	/** Watch the subscribers waiting for this request. */
@@ -2971,6 +2987,15 @@ export class Subscriber {
 				},
 			});
 			return subscriber;
+		};
+		hooks.watchSubscriberError = (subscriber, fn) => {
+			if (subscriber.#resume) return subscriber.#resume.watchError(fn);
+			const check = (error: Error | null | undefined) => {
+				if (error instanceof Error) fn(error);
+			};
+			const stop = subscriber.closed.subscribe(check);
+			check(subscriber.closed.peek());
+			return stop;
 		};
 		hooks.latestSequence = (subscriber) =>
 			subscriber.#resume ? subscriber.#resume.latest() : subscriber.#state.latest;

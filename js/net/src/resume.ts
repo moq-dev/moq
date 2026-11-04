@@ -456,7 +456,11 @@ class Reader implements ResumeSource {
 				record(info, source);
 				shell.commit(info);
 			},
-			() => {},
+			() => {
+				// A terminal refusal before metadata is the subscription's answer too. An info
+				// reader never polls the group cursor that would otherwise propagate it.
+				if (this.#shell.info() === undefined) this.#end((copy) => copy.sub.closed.peek());
+			},
 		);
 		copy.sub.finished().then(
 			// A copy already let go says nothing more about the track.
@@ -1216,6 +1220,25 @@ class Reader implements ResumeSource {
 				});
 			});
 		}
+	}
+
+	watchError(fn: (error: Error) => void): Dispose {
+		let stop: Dispose = () => {};
+		const check = () => {
+			stop();
+			stop = () => {};
+			this.sync();
+			const copy = this.#serving();
+			if (copy) stop = hooks.watchSubscriberError(copy.sub, fn);
+			const changed = this.route.changed.changed(check);
+			const previous = stop;
+			stop = () => {
+				previous();
+				changed();
+			};
+		};
+		check();
+		return () => stop();
 	}
 
 	bufferedLargest(): track.Position | undefined {

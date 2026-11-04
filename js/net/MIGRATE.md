@@ -4,6 +4,14 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Socket endpoints are available
+
+The additive `socket` namespace exports `Endpoint`, `TcpStream`, and `TrackStream`.
+Use `dialTcp` / `acceptTcp` or `dialTrack` / `acceptTrack` on endpoints sharing a prefix;
+cancel pending operations with an `AbortSignal`, and explicitly close endpoints when done.
+The existing wire is unchanged. Every hop must support moq-lite-07 (currently an
+explicit `moq-lite-07-wip` offer) or moq-transport.
+
 ### Authored tracks default to a zero `maxAge` ([#7729](https://github.com/moq-dev/moq/pull/7729))
 
 A track created with `Broadcast.Producer.createTrack`, `Track.Request.accept`, or `Track.Producer.accept` takes a `Track.InfoInit`, whose omitted or `undefined` `maxAge` is now zero instead of no publisher limit: a superseded group is stale as soon as its successor arrives, so readers get only the live edge. The newest group never goes stale, so a track that writes one snapshot stays readable to a late joiner.

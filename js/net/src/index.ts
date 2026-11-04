@@ -30,6 +30,8 @@ export * as Instance from "./instance.ts";
 export * as Origin from "./origin.ts";
 /** Broadcast path utilities with delimiter-aware prefix matching. Path patterns are re-exported from `@moq/pattern`. */
 export * as Path from "./path.ts";
+/** Point-to-point TCP and track sessions through an origin. */
+export * as socket from "./socket.ts";
 /** Presentation timestamps and their timescales; duration units live in `@moq/clock`. */
 export * as Time from "./time.ts";
 /** A value paired with the timestamp it was captured at, absent when untimed. */

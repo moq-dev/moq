@@ -89,3 +89,39 @@ frame.finish();
 const reader = await consumer.nextFrame();
 for (let chunk = await reader?.readChunk(); chunk; chunk = await reader?.readChunk()) save(chunk);
 ```
+
+## Sockets
+
+Use `Moq.socket.Endpoint` for [point-to-point sessions](/concept/socket), with the same
+origin publishing and consuming through the relay. Each endpoint announces one hidden
+broadcast; accepting verifies that the named peer actually dialed this session.
+Every hop needs moq-lite-07 or moq-transport. Lite-07 currently requires explicitly
+offering `moq-lite-07-wip`; older moq-lite hops do not carry these hidden endpoints.
+
+```ts
+const connection = await Moq.Connection.connect({
+    url, versions: ["moq-lite-07-wip"],
+    publish: origin.consume(), consume: origin,
+});
+const endpoint = new Moq.socket.Endpoint(origin, Moq.Path.from("game"), "viewer");
+const session = await endpoint.dialTcp("server", { signal: abort.signal });
+session.producer.writeFrame({ payload: new TextEncoder().encode("hello") });
+session.producer.finish(); // FIN in this direction; the peer may still reply.
+for (let frame = await session.consumer.readFrame(); frame; frame = await session.consumer.readFrame()) {
+    receive(frame.payload);
+}
+endpoint.close();
+connection.close();
+```
+
+A server takes `await endpoint.acceptTcp()`, then accepts or rejects that incoming dial.
+TCP and track dials have independent accept queues. For independent messages, use
+`dialTrack` / `acceptTrack`: the stream exposes a track producer and an already subscribed
+consumer, reliable and ascending until updated. Both stream types expose `peer` and
+`session`; read and write through their producer and consumer handles.
+
+JS TCP currently reads without fastest-reader pacing. A reader that falls behind the
+group's bounded tail fails with an eviction error, so keeping up is required for lossless
+delivery. Finishing a producer is FIN; aborting, closing the endpoint, or releasing a TCP
+reader early resets the session. Close endpoints explicitly, and use `AbortSignal` to
+cancel pending dials and accepts. Keep session ids secret.
