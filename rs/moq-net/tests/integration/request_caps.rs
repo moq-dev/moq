@@ -27,7 +27,7 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 struct Setup {
 	client: moq_net::origin::Producer,
 	_server: moq_net::origin::Producer,
-	_broadcast: moq_net::origin::Publication,
+	_broadcast: moq_net::origin::Route,
 	tracks: Vec<moq_net::track::Producer>,
 	_pair: MockPair,
 }
@@ -37,11 +37,11 @@ async fn setup(version: &str, limits: Limits, tracks: usize) -> Setup {
 	let server = produce_origin(1);
 	let client = produce_origin(2);
 
-	let broadcast = server.create_broadcast("bcast").unwrap();
+	let broadcast = server.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
 	let tracks = (0..tracks)
-		.map(|i| broadcast.create_track(format!("t{i}"), None).unwrap())
+		.map(|i| broadcast.broadcast().create_track(format!("t{i}"), None).unwrap())
 		.collect();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 
 	let mut options = MockConnectOptions::new(version);
 	options.server_publish = Some(server.consume());
@@ -112,11 +112,11 @@ async fn flow_control_bounds_the_subscriptions_a_peer_holds() {
 		let version: Version = version.parse().unwrap();
 		let server = produce_origin(1);
 		let client = produce_origin(2);
-		let broadcast = server.create_broadcast("bcast").unwrap();
+		let broadcast = server.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
 		let tracks: Vec<_> = (0..TRACKS)
-			.map(|i| broadcast.create_track(format!("t{i}"), None).unwrap())
+			.map(|i| broadcast.broadcast().create_track(format!("t{i}"), None).unwrap())
 			.collect();
-		broadcast.announce(Default::default()).unwrap();
+		broadcast.announce().unwrap();
 
 		let mut options = MockConnectOptions::new(version);
 		options.transport.max_concurrent_bi_streams = Some(BOUND);
@@ -162,10 +162,10 @@ async fn an_announce_past_the_cap_closes_the_session() {
 		let version: Version = version.parse().unwrap();
 		let client = produce_origin(1);
 		let server = produce_origin(2);
-		let a = client.create_broadcast("a").unwrap();
-		let b = client.create_broadcast("b").unwrap();
-		a.announce(Default::default()).unwrap();
-		b.announce(Default::default()).unwrap();
+		let a = client.route("a", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let b = client.route("b", moq_net::origin::RouteOptions::hidden()).unwrap();
+		a.announce().unwrap();
+		b.announce().unwrap();
 
 		let mut options = MockConnectOptions::new(version);
 		options.client_publish = Some(client.consume());

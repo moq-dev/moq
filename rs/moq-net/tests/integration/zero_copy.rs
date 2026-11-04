@@ -54,10 +54,10 @@ async fn frames_cross_without_a_copy() {
 			}
 		);
 
-		let broadcast = publisher.create_broadcast("room").unwrap();
+		let broadcast = publisher.route("room", moq_net::origin::RouteOptions::hidden()).unwrap();
 		let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
-		let track = broadcast.create_track("video", info).unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let track = broadcast.broadcast().create_track("video", info).unwrap();
+		broadcast.announce().unwrap();
 
 		let consumer = subscriber.consume();
 		let remote = kio::clock::timeout(TIMEOUT, consumer.follow("room", None).unwrap().available())

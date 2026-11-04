@@ -54,7 +54,7 @@ pub(crate) struct Tasks {
 }
 
 /// A claim on a [`TaskSet`]'s lifetime with no submission queue: what a
-/// broadcast published on an origin and an `origin::Requests` hold, so the
+/// broadcast published on an origin and an `origin::Route` hold, so the
 /// driver outlives the producer handles a session was given and dropped.
 pub(crate) struct Keepalive {
 	_alive: kio::Producer<()>,

@@ -34,7 +34,7 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 struct Fixture {
 	producer: moq_net::track::Producer,
 	subscriber: moq_net::track::Subscriber,
-	_broadcast: moq_net::origin::Publication,
+	_broadcast: moq_net::origin::Route,
 	_pair: MockPair,
 }
 
@@ -44,9 +44,9 @@ async fn connect_datagram_track() -> Fixture {
 	let publisher = produce_origin(1);
 	let consumer_origin = produce_origin(2);
 
-	let broadcast = publisher.create_broadcast("bench").unwrap();
-	let producer = broadcast.create_track("datagrams", timed()).unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = publisher.route("bench", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let producer = broadcast.broadcast().create_track("datagrams", timed()).unwrap();
+	broadcast.announce().unwrap();
 
 	let mut options = MockConnectOptions::new("moq-lite-07-wip".parse::<Version>().unwrap());
 	options.server_publish = Some(publisher.consume());
@@ -133,9 +133,9 @@ async fn ietf_delivers_datagrams_on(version: &str) {
 	let publisher = produce_origin(1);
 	let consumer_origin = produce_origin(2);
 
-	let broadcast = publisher.create_broadcast("bench").unwrap();
-	let mut producer = broadcast.create_track("datagrams", timed()).unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = publisher.route("bench", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let mut producer = broadcast.broadcast().create_track("datagrams", timed()).unwrap();
+	broadcast.announce().unwrap();
 
 	let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
 	options.server_publish = Some(publisher.consume());
@@ -240,9 +240,9 @@ async fn a_fetched_datagram_is_refused_per_version() {
 			_pairs.push(peer(version.parse().unwrap(), &pair[0], &pair[1]).await);
 		}
 
-		let broadcast = nodes[0].create_broadcast("room").unwrap();
-		let mut producer = broadcast.create_track("datagrams", timed()).unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = nodes[0].route("room", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let mut producer = broadcast.broadcast().create_track("datagrams", timed()).unwrap();
+		broadcast.announce().unwrap();
 		let sequence = producer.append_datagram(Timestamp::ZERO, &b"x"[..]).unwrap();
 
 		let consumer = nodes.last().unwrap().consume();

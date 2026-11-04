@@ -279,11 +279,11 @@ async fn execute(version: Version, ops: &[Op]) -> Result<(), Failure> {
 	let relay_b = produce_origin(3);
 	let subscriber = produce_origin(4);
 
-	let broadcast = publisher.create_broadcast("live").unwrap();
+	let broadcast = publisher.route("live", moq_net::origin::RouteOptions::hidden()).unwrap();
 	let info = track::Info::default().with_timescale(moq_net::Timescale::MILLI);
-	let track = broadcast.create_track("catalog.json", info).unwrap();
+	let track = broadcast.broadcast().create_track("catalog.json", info).unwrap();
 	broadcast
-		.announce(origin::Route::default().with_instance(moq_net::Instance::random(), 0))
+		.announce(origin::RouteInfo::default().with_instance(moq_net::Instance::random(), 0))
 		.unwrap();
 
 	let upstream = vec![

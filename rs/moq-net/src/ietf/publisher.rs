@@ -444,7 +444,7 @@ async fn read_fetch(
 /// namespace becoming (un)advertisable, or its path or cost moving.
 struct Watched {
 	/// The route last announced for this namespace, as the origin delivered it.
-	route: crate::origin::Route,
+	route: crate::origin::RouteInfo,
 	/// The advertisement last buffered for this namespace, or [`Advert::None`] while
 	/// filtered. A different selection needs another message once this one is answered.
 	sent: Advert,
@@ -497,7 +497,7 @@ impl Refused {
 }
 
 impl Watched {
-	fn new(route: crate::origin::Route) -> Self {
+	fn new(route: crate::origin::RouteInfo) -> Self {
 		Self {
 			route,
 			sent: Advert::None,
@@ -1085,7 +1085,7 @@ impl Publisher {
 	///
 	/// The origin's announce cursor already filters routes through the peer
 	/// (control-plane split horizon); this only shapes what the wire can carry.
-	fn select(&self, route: &crate::origin::Route, peer: &cluster::Peer) -> Advert {
+	fn select(&self, route: &crate::origin::RouteInfo, peer: &cluster::Peer) -> Advert {
 		// A route that already passed through us is a reflection. The origin
 		// filters these on receive, so this is defensive.
 		if self.self_origin != crate::Hop::UNKNOWN && route.hops.contains(&self.self_origin) {
@@ -1448,7 +1448,7 @@ impl Publisher {
 					};
 					// We just received a subscribe for this exact namespace, so the peer must have
 					// already seen the announcement. The immediate lookup resolves it at once, or
-					// falls back to the route covering it (an `origin::Requests`), if any.
+					// falls back to the route covering it (an `origin::Route`), if any.
 					let broadcast = match self
 						.resolve(
 							&mut stream,
@@ -7482,7 +7482,7 @@ mod serve_tests {
 		log: Log,
 		track: track::Producer,
 		_origin: origin::Producer,
-		_broadcast: crate::origin::Publication,
+		_broadcast: crate::origin::Route,
 	}
 
 	fn serve(version: Version) -> Serve {
@@ -7491,11 +7491,11 @@ mod serve_tests {
 
 	/// The same, with the track described by `info`.
 	fn serve_track(version: Version, info: crate::track::Info) -> Serve {
-		serve_route(version, info, crate::origin::Route::default())
+		serve_route(version, info, crate::origin::RouteInfo::default())
 	}
 
 	/// The same, with the broadcast announced on `route`.
-	fn serve_route(version: Version, info: crate::track::Info, route: crate::origin::Route) -> Serve {
+	fn serve_route(version: Version, info: crate::track::Info, route: crate::origin::RouteInfo) -> Serve {
 		serve_session(version, info, route, ScriptedSession::per_stream(vec![Vec::new()]))
 	}
 
@@ -7503,7 +7503,7 @@ mod serve_tests {
 	fn serve_session(
 		version: Version,
 		info: crate::track::Info,
-		route: crate::origin::Route,
+		route: crate::origin::RouteInfo,
 		session: ScriptedSession,
 	) -> Serve {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
@@ -8015,7 +8015,7 @@ mod serve_tests {
 		let h = serve_session(
 			version,
 			crate::track::Info::timed(),
-			crate::origin::Route::default(),
+			crate::origin::RouteInfo::default(),
 			session,
 		);
 		// Well past the cache window, which only dates idleness once a sweep passes.
@@ -8941,11 +8941,11 @@ mod serve_tests {
 			let h = serve(version);
 			let _old = h
 				._origin
-				.announce("old/first", crate::origin::Route::default())
+				.announce("old/first", crate::origin::RouteInfo::default())
 				.unwrap();
 			let _new = h
 				._origin
-				.announce("new/second", crate::origin::Route::default())
+				.announce("new/second", crate::origin::RouteInfo::default())
 				.unwrap();
 			settle().await;
 			let session = ScriptedSession::new(Vec::new());
@@ -9096,7 +9096,7 @@ mod serve_tests {
 			session.push(&update_with_tokens(&[TOKEN]));
 			let request = taken_token(&mut running, &mut requests).await;
 
-			let other = h._origin.announce("other", crate::origin::Route::default()).unwrap();
+			let other = h._origin.announce("other", crate::origin::RouteInfo::default()).unwrap();
 			settle().await;
 			assert!(futures::poll!(running.as_mut()).is_pending());
 			drop(other);
@@ -9268,7 +9268,7 @@ mod serve_tests {
 		let request = taken_token(&mut running, &mut requests).await;
 
 		session.log.fail_writes();
-		let _other = h._origin.announce("other", crate::origin::Route::default()).unwrap();
+		let _other = h._origin.announce("other", crate::origin::RouteInfo::default()).unwrap();
 		for _ in 0..10 {
 			assert!(
 				futures::poll!(running.as_mut()).is_pending(),
@@ -9511,7 +9511,7 @@ mod serve_tests {
 			let h = serve_session(
 				version,
 				track::Info::timed(),
-				crate::origin::Route::default(),
+				crate::origin::RouteInfo::default(),
 				ScriptedSession::per_stream_eof(vec![Vec::new()]),
 			);
 			let stream = Stream::open(&mut crate::driver::Transport::new(h.session.clone()), version)
@@ -9612,7 +9612,7 @@ mod serve_tests {
 			let mut h = serve(version);
 			let claim = h
 				._origin
-				.requests_route("live", crate::origin::Route::default(), None)
+				.forward("live", crate::origin::RouteInfo::default(), None)
 				.unwrap();
 			let auth = crate::auth::Link::new(false);
 			auth.handle().authorize(&nothing());
@@ -9626,7 +9626,7 @@ mod serve_tests {
 			assert_eq!(code, Some(unauthorized(version)), "{version}: denied up front");
 			use futures::FutureExt;
 			assert!(
-				claim.requested_broadcast().now_or_never().is_none(),
+				claim.requested().now_or_never().is_none(),
 				"{version}: a denied request reached the origin"
 			);
 		}
@@ -9635,7 +9635,7 @@ mod serve_tests {
 			let mut h = serve(version);
 			let claim = h
 				._origin
-				.requests_route("live", crate::origin::Route::default(), None)
+				.forward("live", crate::origin::RouteInfo::default(), None)
 				.unwrap();
 			let auth = crate::auth::Link::new(false);
 			h.publisher = h.publisher.clone().with_auth(auth.clone());
@@ -9654,7 +9654,7 @@ mod serve_tests {
 			assert!(futures::poll!(answer.as_mut()).is_pending(), "{version}");
 
 			// Parked resolving the broadcast when the grant narrows.
-			let request = claim.requested_broadcast().await.unwrap();
+			let request = claim.requested().await.unwrap();
 			auth.handle().authorize(&nothing());
 			let output = crate::broadcast::Info::new().produce();
 			let _track = output.create_track("video", None).unwrap();
@@ -9698,8 +9698,8 @@ mod serve_tests {
 	async fn track_status_narrowed_while_answering_is_reset() {
 		for version in ALL_VERSIONS {
 			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-			let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
-			let _track = broadcast.create_track("video", None).unwrap();
+			let broadcast = origin.route("room", crate::origin::RouteOptions::default()).unwrap();
+			let _track = broadcast.broadcast().create_track("video", None).unwrap();
 			settle().await;
 
 			let bi = kio::Producer::new(true);
@@ -9951,7 +9951,7 @@ mod serve_tests {
 			let h = serve(version);
 			let claim = h
 				._origin
-				.requests_route("", crate::origin::Route::default(), None)
+				.forward("", crate::origin::RouteInfo::default(), None)
 				.unwrap();
 			settle().await;
 			let stream = Stream::open(&mut crate::driver::Transport::new(h.session.clone()), version)
@@ -9967,7 +9967,7 @@ mod serve_tests {
 			);
 			let done = futures::poll!(serving.as_mut());
 			assert!(
-				claim.requested_broadcast().now_or_never().is_none(),
+				claim.requested().now_or_never().is_none(),
 				"{version}: {path} reached the application"
 			);
 			assert!(done.is_ready(), "{version}: {path} was left waiting");
@@ -11329,7 +11329,7 @@ mod serve_tests {
 			let mut h = serve_session(
 				version,
 				crate::track::Info::timed(),
-				crate::origin::Route::default(),
+				crate::origin::RouteInfo::default(),
 				ScriptedSession::new(Vec::new()),
 			);
 			publish_groups(&mut h, 5);
@@ -11369,8 +11369,8 @@ mod serve_tests {
 	async fn a_kept_join_ends_with_its_token_while_publish_done_waits() {
 		for version in JOINING_DRAFTS {
 			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-			let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
-			let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
+			let broadcast = origin.route("room", crate::origin::RouteOptions::default()).unwrap();
+			let track = broadcast.broadcast().create_track("video", crate::track::Info::timed()).unwrap();
 			let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
 			group.write_frame(timestamp(), b"frame".to_vec()).unwrap();
 			group.finish().unwrap();
@@ -11990,7 +11990,7 @@ mod serve_tests {
 				}
 				Some(
 					h._origin
-						.requests_route("lobby", crate::origin::Route::default(), None)
+						.forward("lobby", crate::origin::RouteInfo::default(), None)
 						.unwrap(),
 				)
 			}
@@ -12164,7 +12164,7 @@ mod serve_tests {
 			let opt_out = Filter::is_draft20(version).then_some(false);
 			for wanted in [Some(true), opt_out].into_iter().flatten() {
 				let h = serve(version);
-				let track = h._broadcast.create_track("timed", info.clone()).unwrap();
+				let track = h._broadcast.broadcast().create_track("timed", info.clone()).unwrap();
 				let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
 				group.write_frame(stamp, b"stamped".as_slice()).unwrap();
 				group.finish().unwrap();
@@ -12394,8 +12394,8 @@ mod serve_tests {
 	/// published with `info`.
 	async fn across_a_hop(info: track::Info) -> track::Info {
 		let upstream = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
-		let broadcast = upstream.publish("room", crate::origin::Route::default()).unwrap();
-		let _track = broadcast.create_track("video", info).unwrap();
+		let broadcast = upstream.route("room", crate::origin::RouteOptions::default()).unwrap();
+		let _track = broadcast.broadcast().create_track("video", info).unwrap();
 		let (downstream, _sessions) = crate::lite::ietf::test_hop(&upstream, "room", [true, true]).await;
 		let broadcast = downstream.consume().request("room", None).await.unwrap();
 		broadcast.track("video").unwrap().info().await.unwrap()
@@ -12691,7 +12691,7 @@ mod serve_tests {
 	async fn a_draft22_fetch_of_a_fetch_only_cache_is_not_capped() {
 		let version = Version::Draft22;
 		let h = serve(version);
-		let request = h._broadcast.reserve_track("cam").unwrap();
+		let request = h._broadcast.broadcast().reserve_track("cam").unwrap();
 		let dynamic = request.requests();
 		let fetching = request.consume().fetch_group(4, None);
 		let mut fetched = dynamic.requested_fill_group().await.unwrap().accept(None).unwrap();
@@ -12999,8 +12999,8 @@ mod serve_tests {
 	async fn a_standalone_fetch_narrowed_while_responding_stops() {
 		for version in FETCH_DRAFTS {
 			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-			let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
-			let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
+			let broadcast = origin.route("room", crate::origin::RouteOptions::default()).unwrap();
+			let track = broadcast.broadcast().create_track("video", crate::track::Info::timed()).unwrap();
 			let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
 			group.write_frame(timestamp(), b"0-0".to_vec()).unwrap();
 			group.finish().unwrap();
@@ -13095,8 +13095,8 @@ mod serve_tests {
 				},
 			] {
 				let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-				let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
-				let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
+				let broadcast = origin.route("room", crate::origin::RouteOptions::default()).unwrap();
+				let track = broadcast.broadcast().create_track("video", crate::track::Info::timed()).unwrap();
 				let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
 				group.write_frame(timestamp(), PAYLOAD.to_vec()).unwrap();
 				settle().await;
@@ -13226,8 +13226,8 @@ mod serve_tests {
 		}) {
 			let token = end != JoinEnd::Ended;
 			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-			let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
-			let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
+			let broadcast = origin.route("room", crate::origin::RouteOptions::default()).unwrap();
+			let track = broadcast.broadcast().create_track("video", crate::track::Info::timed()).unwrap();
 			let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
 			group.write_frame(timestamp(), PAYLOAD.to_vec()).unwrap();
 			settle().await;
@@ -13561,14 +13561,14 @@ mod serve_tests {
 			Parked::Resolving => (
 				Some(
 					origin
-						.requests_route("room", crate::origin::Route::default(), None)
+						.forward("room", crate::origin::RouteInfo::default(), None)
 						.unwrap(),
 				),
 				None,
 			),
 			Parked::Acking | Parked::Ending => {
-				let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
-				let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
+				let broadcast = origin.route("room", crate::origin::RouteOptions::default()).unwrap();
+				let track = broadcast.broadcast().create_track("video", crate::track::Info::timed()).unwrap();
 				match parked {
 					// One published group, so the subscription parks at the live edge.
 					Parked::Acking => {
@@ -13618,7 +13618,7 @@ mod serve_tests {
 		// Drive the subscription to where it parks.
 		let _route = match &claim {
 			Some(claim) => {
-				let requested = std::pin::pin!(claim.requested_broadcast());
+				let requested = std::pin::pin!(claim.requested());
 				match futures::future::select(requested, subscription.as_mut()).await {
 					futures::future::Either::Left((route, _)) => Some(route.unwrap()),
 					futures::future::Either::Right((res, _)) => panic!("{version} {parked:?}: ended: {res:?}"),
@@ -13798,10 +13798,10 @@ mod serve_tests {
 		match setup {
 			Setup::Resolving => {
 				let route = origin
-					.requests_route("room", crate::origin::Route::default(), None)
+					.forward("room", crate::origin::RouteInfo::default(), None)
 					.unwrap();
 				let request = {
-					let requested = std::pin::pin!(route.requested_broadcast());
+					let requested = std::pin::pin!(route.requested());
 					match futures::future::select(requested, serving.as_mut()).await {
 						futures::future::Either::Left((request, _)) => request.unwrap(),
 						futures::future::Either::Right((res, _)) => panic!("{version} {setup:?}: ended: {res:?}"),
@@ -13810,8 +13810,8 @@ mod serve_tests {
 				claim = Some((route, request));
 			}
 			Setup::Subscribing => {
-				let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
-				let mut dynamic = broadcast.requests();
+				let broadcast = origin.route("room", crate::origin::RouteOptions::default()).unwrap();
+				let mut dynamic = broadcast.broadcast().requests();
 				let request = {
 					let requested = std::pin::pin!(dynamic.requested_track());
 					match futures::future::select(requested, serving.as_mut()).await {
@@ -13822,8 +13822,8 @@ mod serve_tests {
 				asked = Some((broadcast, dynamic, request));
 			}
 			Setup::Live => {
-				let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
-				let mut track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
+				let broadcast = origin.route("room", crate::origin::RouteOptions::default()).unwrap();
+				let mut track = broadcast.broadcast().create_track("video", crate::track::Info::timed()).unwrap();
 				track.set_idle();
 				serve_until(serving.as_mut(), "the upstream subscription", || {
 					track.subscription().is_some()
@@ -14279,8 +14279,8 @@ mod serve_tests {
 	/// its script.
 	fn serve_on(version: Version, auth: crate::auth::Link, session: ScriptedSession) -> Serve {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
-		let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
+		let broadcast = origin.route("room", crate::origin::RouteOptions::default()).unwrap();
+		let track = broadcast.broadcast().create_track("video", crate::track::Info::timed()).unwrap();
 
 		let log = session.log.clone();
 
@@ -15906,7 +15906,7 @@ mod tests {
 		let echoed = origin
 			.announce(
 				"from/peer",
-				crate::origin::Route::default()
+				crate::origin::RouteInfo::default()
 					.with_hops(echoed_hops)
 					.with_via(assigned),
 			)
@@ -15915,7 +15915,7 @@ mod tests {
 		let mut local_hops = crate::Hops::new();
 		local_hops.push(other).unwrap();
 		let local = origin
-			.announce("from/us", crate::origin::Route::default().with_hops(local_hops))
+			.announce("from/us", crate::origin::RouteInfo::default().with_hops(local_hops))
 			.unwrap();
 
 		(publisher, consumer, vec![echoed, local])
@@ -15965,7 +15965,7 @@ mod tests {
 		let _echoed = origin
 			.announce(
 				"from/peer",
-				crate::origin::Route::default().with_hops(hops.clone()).with_via(r1),
+				crate::origin::RouteInfo::default().with_hops(hops.clone()).with_via(r1),
 			)
 			.unwrap();
 
@@ -16037,7 +16037,7 @@ mod tests {
 		let _echoed = origin
 			.announce(
 				"from/peer",
-				crate::origin::Route::default().with_hops(hops).with_via(assigned),
+				crate::origin::RouteInfo::default().with_hops(hops).with_via(assigned),
 			)
 			.unwrap();
 
@@ -16081,13 +16081,13 @@ mod tests {
 		let mut clean = crate::Hops::new();
 		clean.push(crate::Hop::new(778).unwrap()).unwrap();
 		let _clean = origin
-			.announce("cam-clean", crate::origin::Route::default().with_hops(clean))
+			.announce("cam-clean", crate::origin::RouteInfo::default().with_hops(clean))
 			.unwrap();
 		// A chain with no room left for our own hop cannot be forwarded.
 		let mut full = crate::Hops::new();
 		while full.push(crate::Hop::new(100 + full.len() as u64).unwrap()).is_ok() {}
 		let _full = origin
-			.announce("cam-full", crate::origin::Route::default().with_hops(full))
+			.announce("cam-full", crate::origin::RouteInfo::default().with_hops(full))
 			.unwrap();
 		settle().await;
 
@@ -16156,7 +16156,7 @@ mod tests {
 		let _tainted = origin
 			.announce(
 				"route-flip-cam",
-				crate::origin::Route::default()
+				crate::origin::RouteInfo::default()
 					.with_hops(tainted_hops)
 					.with_via(assigned),
 			)
@@ -16184,7 +16184,7 @@ mod tests {
 		let mut clean_hops = crate::Hops::new();
 		clean_hops.push(clean_publisher).unwrap();
 		let clean = origin
-			.announce("route-flip-cam", crate::origin::Route::default().with_hops(clean_hops))
+			.announce("route-flip-cam", crate::origin::RouteInfo::default().with_hops(clean_hops))
 			.unwrap();
 		settle().await;
 		assert!(futures::poll!(run.as_mut()).is_pending());
@@ -16239,7 +16239,7 @@ mod tests {
 		const VERSION: Version = Version::Draft18;
 
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let _cam = origin.announce("lonely-cam", crate::origin::Route::default()).unwrap();
+		let _cam = origin.announce("lonely-cam", crate::origin::RouteInfo::default()).unwrap();
 		settle().await;
 
 		// Every stream is answered with the same refusal, so a retry would show up as a
@@ -16311,7 +16311,7 @@ mod tests {
 		const VERSION: Version = Version::Draft18;
 
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let _local = origin.announce("local-cam", crate::origin::Route::default()).unwrap();
+		let _local = origin.announce("local-cam", crate::origin::RouteInfo::default()).unwrap();
 		settle().await;
 
 		// The only stream is the PUBLISH_NAMESPACE request we open ourselves.
@@ -16355,7 +16355,7 @@ mod tests {
 	async fn publish_namespace_withdraws_by_reset() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-			let local = origin.announce("local-cam", crate::origin::Route::default()).unwrap();
+			let local = origin.announce("local-cam", crate::origin::RouteInfo::default()).unwrap();
 			settle().await;
 
 			let session =
@@ -16419,7 +16419,7 @@ mod tests {
 		const VERSION: Version = Version::Draft18;
 
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let _local = origin.announce("local-cam", crate::origin::Route::default()).unwrap();
+		let _local = origin.announce("local-cam", crate::origin::RouteInfo::default()).unwrap();
 		settle().await;
 
 		let ok = crate::lite::test_transport::Log::default();
@@ -16510,8 +16510,8 @@ mod tests {
 			scoped,
 		} = case;
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let _cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
-		let _stats = origin.announce(".stats/node", crate::origin::Route::default()).unwrap();
+		let _cam = origin.announce("cam", crate::origin::RouteInfo::default()).unwrap();
+		let _stats = origin.announce(".stats/node", crate::origin::RouteInfo::default()).unwrap();
 		settle().await;
 
 		// Stream 1 is the peer's SUBSCRIBE_NAMESPACE; stream 2, if opened at all, is our
@@ -16657,7 +16657,7 @@ mod tests {
 	async fn a_non_solicit_subscribe_namespace_carries_namespace() {
 		for version in [Version::Draft18] {
 			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-			let early = origin.announce("early-cam", crate::origin::Route::default()).unwrap();
+			let early = origin.announce("early-cam", crate::origin::RouteInfo::default()).unwrap();
 			settle().await;
 
 			let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![Vec::new()]);
@@ -16701,7 +16701,7 @@ mod tests {
 				"{version:?}: existing match",
 			);
 
-			let _late = origin.announce("late-cam", crate::origin::Route::default()).unwrap();
+			let _late = origin.announce("late-cam", crate::origin::RouteInfo::default()).unwrap();
 			for _ in 0..100 {
 				assert!(futures::poll!(run.as_mut()).is_pending());
 				if occurrences(&log, b"late-cam") >= 1 {
@@ -16748,7 +16748,7 @@ mod tests {
 		const VERSION: Version = Version::Draft18;
 
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let first = origin.announce("first-cam", crate::origin::Route::default()).unwrap();
+		let first = origin.announce("first-cam", crate::origin::RouteInfo::default()).unwrap();
 		settle().await;
 
 		// The first advertisement has send capacity, and the peer answers it.
@@ -16783,7 +16783,7 @@ mod tests {
 
 		// Send capacity runs out before the second advertisement can send its header.
 		set_gate(&gate, false);
-		let _second = origin.announce("second-cam", crate::origin::Route::default()).unwrap();
+		let _second = origin.announce("second-cam", crate::origin::RouteInfo::default()).unwrap();
 		settle().await;
 
 		// Retiring the first needs no new stream, so the loop has to reach
@@ -16849,7 +16849,7 @@ mod tests {
 		// The state a refused or failed offer leaves behind: the peer holds nothing, and
 		// the loop is coming back to it on a timer.
 		let suffix: crate::Path = crate::Path::from_static("from/peer");
-		let mut watch = Watched::new(crate::origin::Route::default().with_hops(hops));
+		let mut watch = Watched::new(crate::origin::RouteInfo::default().with_hops(hops));
 		watch.deferred = true;
 
 		let mut ns = Namespaces::new(cluster::Peer::default(), Target::Requests);
@@ -16876,7 +16876,7 @@ mod tests {
 		let cam = origin
 			.announce(
 				"solo-cam",
-				crate::origin::Route::default().with_instance(instance.clone(), 0),
+				crate::origin::RouteInfo::default().with_instance(instance.clone(), 0),
 			)
 			.unwrap();
 		settle().await;
@@ -16912,7 +16912,7 @@ mod tests {
 		let _standby = origin
 			.announce(
 				"solo-cam",
-				crate::origin::Route::default().with_instance(instance, 0).with_cost(0),
+				crate::origin::RouteInfo::default().with_instance(instance, 0).with_cost(0),
 			)
 			.unwrap();
 
@@ -16980,7 +16980,7 @@ mod tests {
 		let _cold = origin
 			.announce(
 				"cam",
-				crate::origin::Route::default()
+				crate::origin::RouteInfo::default()
 					.with_instance(instance.clone(), 0)
 					.with_cost(4),
 			)
@@ -17017,7 +17017,7 @@ mod tests {
 		let _warm = origin
 			.announce(
 				"cam",
-				crate::origin::Route::default().with_instance(instance, 0).with_cost(0),
+				crate::origin::RouteInfo::default().with_instance(instance, 0).with_cost(0),
 			)
 			.unwrap();
 
@@ -17057,7 +17057,7 @@ mod tests {
 		let _cold = origin
 			.announce(
 				"cam",
-				crate::origin::Route::default()
+				crate::origin::RouteInfo::default()
 					.with_instance(instance.clone(), 0)
 					.with_cost(4),
 			)
@@ -17111,7 +17111,7 @@ mod tests {
 		let _warm = origin
 			.announce(
 				"cam",
-				crate::origin::Route::default().with_instance(instance, 0).with_cost(0),
+				crate::origin::RouteInfo::default().with_instance(instance, 0).with_cost(0),
 			)
 			.unwrap();
 
@@ -17144,7 +17144,7 @@ mod tests {
 		let _from_a = origin
 			.announce(
 				"cam",
-				crate::origin::Route::default()
+				crate::origin::RouteInfo::default()
 					.with_instance(instance.clone(), 0)
 					.with_hops(publisher_a)
 					.with_cost(4),
@@ -17182,7 +17182,7 @@ mod tests {
 		let _from_b = origin
 			.announce(
 				"cam",
-				crate::origin::Route::default()
+				crate::origin::RouteInfo::default()
 					.with_instance(instance, 0)
 					.with_hops(publisher_b)
 					.with_cost(0),
@@ -17285,7 +17285,7 @@ mod tests {
 			.present(bytes::Bytes::from_static(b"second-secret"), false)
 			.unwrap();
 		let cam = origin
-			.announce("cam", crate::origin::Route::default().with_auth(first))
+			.announce("cam", crate::origin::RouteInfo::default().with_auth(first))
 			.unwrap();
 		settle().await;
 
@@ -17307,7 +17307,7 @@ mod tests {
 			"{version}: PUBLISH_NAMESPACE carries the auth"
 		);
 
-		cam.update(crate::origin::Route::default().with_auth(second)).unwrap();
+		cam.update(crate::origin::RouteInfo::default().with_auth(second)).unwrap();
 		let expected = request_update(
 			version,
 			&ietf::PublishNamespaceUpdate {
@@ -17350,7 +17350,7 @@ mod tests {
 			.present(bytes::Bytes::from_static(b"foreign-secret"), false)
 			.unwrap();
 		let _cam = origin
-			.announce("cam", crate::origin::Route::default().with_auth(foreign))
+			.announce("cam", crate::origin::RouteInfo::default().with_auth(foreign))
 			.unwrap();
 		settle().await;
 
@@ -17376,7 +17376,7 @@ mod tests {
 		let origin = unheld_origin();
 		let auth = crate::auth::Link::ietf(false);
 		let token = auth.present(bytes::Bytes::from_static(b"late-secret"), false).unwrap();
-		let cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
+		let cam = origin.announce("cam", crate::origin::RouteInfo::default()).unwrap();
 		settle().await;
 
 		let ok = publish_namespace_ok(VERSION).await;
@@ -17385,7 +17385,7 @@ mod tests {
 		poll_until(&mut run, &log, b"cam", 1).await;
 		assert_eq!(occurrences(&log, b"late-secret"), 0, "named before it had an auth");
 
-		cam.update(crate::origin::Route::default().with_auth(token)).unwrap();
+		cam.update(crate::origin::RouteInfo::default().with_auth(token)).unwrap();
 		poll_until(&mut run, &log, b"cam", 2).await;
 
 		assert_eq!(occurrences(&log, b"cam"), 2, "the request was not made again");
@@ -17403,10 +17403,10 @@ mod tests {
 		let auth = crate::auth::Link::ietf(false);
 		let present = |token: &'static [u8]| auth.present(bytes::Bytes::from_static(token), false).unwrap();
 		let a = origin
-			.announce("cam-a", crate::origin::Route::default().with_auth(present(b"a-first")))
+			.announce("cam-a", crate::origin::RouteInfo::default().with_auth(present(b"a-first")))
 			.unwrap();
 		let b = origin
-			.announce("cam-b", crate::origin::Route::default().with_auth(present(b"b-first")))
+			.announce("cam-b", crate::origin::RouteInfo::default().with_auth(present(b"b-first")))
 			.unwrap();
 		settle().await;
 
@@ -17418,9 +17418,9 @@ mod tests {
 		assert_eq!(occurrences(&log, b"cam-a"), 1, "cam-a was never advertised");
 		assert_eq!(occurrences(&log, b"cam-b"), 1, "cam-b was never advertised");
 
-		a.update(crate::origin::Route::default().with_auth(present(b"a-second")))
+		a.update(crate::origin::RouteInfo::default().with_auth(present(b"a-second")))
 			.unwrap();
-		b.update(crate::origin::Route::default().with_auth(present(b"b-second")))
+		b.update(crate::origin::RouteInfo::default().with_auth(present(b"b-second")))
 			.unwrap();
 		poll_until(&mut run, &log, b"b-second", 1).await;
 		assert_eq!(occurrences(&log, b"a-second"), 1, "cam-a's renewal never went out");
@@ -17430,7 +17430,7 @@ mod tests {
 			"cam-b's renewal waited on cam-a's answer"
 		);
 
-		let _c = origin.announce("cam-c", crate::origin::Route::default()).unwrap();
+		let _c = origin.announce("cam-c", crate::origin::RouteInfo::default()).unwrap();
 		poll_until(&mut run, &log, b"cam-c", 1).await;
 		assert_eq!(
 			occurrences(&log, b"cam-c"),
@@ -17449,7 +17449,7 @@ mod tests {
 
 		for fin in [true, false] {
 			let origin = unheld_origin();
-			let _cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
+			let _cam = origin.announce("cam", crate::origin::RouteInfo::default()).unwrap();
 			settle().await;
 
 			let (session, peer) = memory::pair(memory::Config::default());
@@ -17517,7 +17517,7 @@ mod tests {
 		let origin = unheld_origin();
 		let mut cams: HashMap<&str, _> = ["a-cam", "b-cam"]
 			.into_iter()
-			.map(|name| (name, origin.announce(name, crate::origin::Route::default()).unwrap()))
+			.map(|name| (name, origin.announce(name, crate::origin::RouteInfo::default()).unwrap()))
 			.collect();
 		settle().await;
 
@@ -17602,7 +17602,7 @@ mod tests {
 			let auth = crate::auth::Link::ietf(false);
 			let token = auth.present(bytes::Bytes::from(vec![0; 70_000]), false).unwrap();
 			let _cam = origin
-				.announce("cam", crate::origin::Route::default().with_auth(token))
+				.announce("cam", crate::origin::RouteInfo::default().with_auth(token))
 				.unwrap();
 			settle().await;
 
@@ -17649,7 +17649,7 @@ mod tests {
 		let auth = crate::auth::Link::ietf(false);
 		let present = |token: &'static [u8]| auth.present(bytes::Bytes::from_static(token), false).unwrap();
 		let cam = origin
-			.announce("cam", crate::origin::Route::default().with_auth(present(b"first")))
+			.announce("cam", crate::origin::RouteInfo::default().with_auth(present(b"first")))
 			.unwrap();
 		settle().await;
 
@@ -17672,7 +17672,7 @@ mod tests {
 		// The idle request has read its OK and parked, so the reset waits for the renewal
 		// to wake it.
 		peer.close(crate::lite::test_transport::Close::Reset);
-		cam.update(crate::origin::Route::default().with_auth(present(b"second")))
+		cam.update(crate::origin::RouteInfo::default().with_auth(present(b"second")))
 			.unwrap();
 		poll_until(&mut run, &log, b"second", 1).await;
 		assert!(futures::poll!(run.as_mut()).is_pending());
@@ -17702,7 +17702,7 @@ mod tests {
 		let auth = crate::auth::Link::ietf(false);
 		let present = |token: &'static [u8]| auth.present(bytes::Bytes::from_static(token), false).unwrap();
 		let cam = origin
-			.announce("cam", crate::origin::Route::default().with_auth(present(b"first")))
+			.announce("cam", crate::origin::RouteInfo::default().with_auth(present(b"first")))
 			.unwrap();
 		settle().await;
 
@@ -17710,7 +17710,7 @@ mod tests {
 		let (publisher, log) = auth_publisher(&origin, &auth, vec![ok.clone(), ok], version);
 		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
 		poll_until(&mut run, &log, b"first", 1).await;
-		cam.update(crate::origin::Route::default().with_auth(present(b"second")))
+		cam.update(crate::origin::RouteInfo::default().with_auth(present(b"second")))
 			.unwrap();
 		poll_until(&mut run, &log, b"second", 1).await;
 		assert_eq!(occurrences(&log, b"second"), 1, "the renewal never went out");
@@ -17742,7 +17742,7 @@ mod tests {
 		}
 		.produce();
 		let _old = origin
-			.announce("cam", crate::origin::Route::default().with_cost(4))
+			.announce("cam", crate::origin::RouteInfo::default().with_cost(4))
 			.unwrap();
 		settle().await;
 
@@ -17771,7 +17771,7 @@ mod tests {
 		assert_eq!(occurrences(&log, b"cam"), 1, "the advertisement never went out");
 
 		let _new = origin
-			.announce("cam", crate::origin::Route::default().with_cost(0))
+			.announce("cam", crate::origin::RouteInfo::default().with_cost(0))
 			.unwrap();
 		for _ in 0..100 {
 			assert!(futures::poll!(run.as_mut()).is_pending());
@@ -17798,7 +17798,7 @@ mod tests {
 		let _cold = origin
 			.announce(
 				"cam",
-				crate::origin::Route::default()
+				crate::origin::RouteInfo::default()
 					.with_instance(instance.clone(), 0)
 					.with_cost(4),
 			)
@@ -17838,7 +17838,7 @@ mod tests {
 		let _warm = origin
 			.announce(
 				"cam",
-				crate::origin::Route::default().with_instance(instance, 0).with_cost(0),
+				crate::origin::RouteInfo::default().with_instance(instance, 0).with_cost(0),
 			)
 			.unwrap();
 
@@ -17871,8 +17871,8 @@ mod tests {
 		const VERSION: Version = Version::Draft18;
 
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let _first = origin.announce("first-cam", crate::origin::Route::default()).unwrap();
-		let _second = origin.announce("second-cam", crate::origin::Route::default()).unwrap();
+		let _first = origin.announce("first-cam", crate::origin::RouteInfo::default()).unwrap();
+		let _second = origin.announce("second-cam", crate::origin::RouteInfo::default()).unwrap();
 		settle().await;
 
 		// Every stream opens and then goes silent: an exhausted script parks rather than
@@ -17936,7 +17936,7 @@ mod tests {
 						let first = auth.present(bytes::Bytes::from_static(b"first"), false).unwrap();
 						let mut first_grant = first.grant();
 						let cam = origin
-							.announce("cam", crate::origin::Route::default().with_auth(first))
+							.announce("cam", crate::origin::RouteInfo::default().with_auth(first))
 							.unwrap();
 						settle().await;
 
@@ -17977,7 +17977,7 @@ mod tests {
 						assert!(futures::poll!(run.as_mut()).is_pending());
 						if matches!(stage, Stage::UpdateWrite) {
 							let second = auth.present(bytes::Bytes::from_static(b"second"), false).unwrap();
-							cam.update(crate::origin::Route::default().with_auth(second)).unwrap();
+							cam.update(crate::origin::RouteInfo::default().with_auth(second)).unwrap();
 							settle().await;
 							assert!(futures::poll!(run.as_mut()).is_pending());
 							assert!(
@@ -18029,7 +18029,7 @@ mod tests {
 	async fn an_unanswered_advertisement_is_withdrawn() {
 		for version in [Version::Draft18] {
 			let origin = unheld_origin();
-			let _cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
+			let _cam = origin.announce("cam", crate::origin::RouteInfo::default()).unwrap();
 			settle().await;
 
 			// The peer takes the request and answers nothing.
@@ -18070,7 +18070,7 @@ mod tests {
 		use std::sync::atomic::Ordering;
 		for version in [Version::Draft18] {
 			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-			let _cam = origin.announce("lonely-cam", crate::origin::Route::default()).unwrap();
+			let _cam = origin.announce("lonely-cam", crate::origin::RouteInfo::default()).unwrap();
 			settle().await;
 			let session =
 				crate::lite::test_transport::ScriptedSession::new(publish_namespace_ok(version).await).without_credit();
@@ -18121,7 +18121,7 @@ mod tests {
 		const VERSION: Version = Version::Draft18;
 
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let _cam = origin.announce("lonely-cam", crate::origin::Route::default()).unwrap();
+		let _cam = origin.announce("lonely-cam", crate::origin::RouteInfo::default()).unwrap();
 		settle().await;
 
 		// No send capacity from the start: an admitted header cannot finish.

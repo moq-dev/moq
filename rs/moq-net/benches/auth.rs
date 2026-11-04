@@ -194,12 +194,12 @@ fn renewal(c: &mut Criterion) {
 							auths
 						});
 						let broadcasts: Vec<_> = (0..routes)
-							.map(|route| origin.create_broadcast(format!("room/{route}").as_str()).unwrap())
+							.map(|route| origin.route(format!("room/{route}").as_str(), moq_net::origin::RouteOptions::hidden()).unwrap())
 							.collect();
 						let mut swap = |next: usize, touched: usize| {
 							for (index, broadcast) in broadcasts.iter().take(touched).enumerate() {
 								broadcast
-									.announce(origin::Route::default().with_auth(auths[index][next].clone()))
+									.announce(origin::RouteInfo::default().with_auth(auths[index][next].clone()))
 									.unwrap();
 							}
 							runtime.block_on(async {
@@ -275,8 +275,8 @@ fn waiting(c: &mut Criterion) {
 								let broadcasts: Vec<_> = (0..paths)
 									.map(|path| {
 										let broadcast =
-											publish.create_broadcast(format!("{prefix}{path}").as_str()).unwrap();
-										broadcast.announce(Default::default()).unwrap();
+											publish.route(format!("{prefix}{path}").as_str(), moq_net::origin::RouteOptions::hidden()).unwrap();
+										broadcast.announce().unwrap();
 										broadcast
 									})
 									.collect();
@@ -360,10 +360,7 @@ fn shared_requests(c: &mut Criterion) {
 								for request in 0..requests {
 									broadcasts.push(
 										origin
-											.publish(
-												format!("{prefix}/{token}/{request}").as_str(),
-												origin::Route::default().with_auth(auth.clone()),
-											)
+											.route(format!("{prefix}/{token}/{request}").as_str(), moq_net::origin::RouteOptions::default().with_auth(auth.clone()))
 											.unwrap(),
 									);
 								}

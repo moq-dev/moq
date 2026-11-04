@@ -147,9 +147,9 @@ async fn split_horizon(version: &str, [publisher_hop, subscriber_hop]: [Hop; 2])
 	let to_publisher = dial(version, &dialer, &publisher).await;
 	let to_subscriber = dial(version, &dialer, &subscriber).await;
 
-	let broadcast = publisher.create_broadcast("room").unwrap();
-	let track = broadcast.create_track("video", None).unwrap();
-	broadcast.announce(origin::Route::default()).unwrap();
+	let broadcast = publisher.route("room", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let track = broadcast.broadcast().create_track("video", None).unwrap();
+	broadcast.announce().unwrap();
 
 	let publisher_hop = learned_hop(&dialer, "room").await;
 	assert_ne!(

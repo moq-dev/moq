@@ -692,10 +692,10 @@ impl Subscriber {
 		link_cost: u64,
 		responder: Option<crate::Hop>,
 		announced: &Announced,
-	) -> crate::origin::Route {
+	) -> crate::origin::RouteInfo {
 		let mut route = match announced.instance(path) {
-			Some((instance, epoch)) => crate::origin::Route::default().with_instance(instance, epoch),
-			None => crate::origin::Route::default(),
+			Some((instance, epoch)) => crate::origin::RouteInfo::default().with_instance(instance, epoch),
+			None => crate::origin::RouteInfo::default(),
 		}
 		.with_hops(hops)
 		.with_cost(cost.charged(link_cost))
@@ -6533,8 +6533,8 @@ mod tests {
 		let origin = origin::Config::new(relay).produce();
 		let assigned = crate::Hop::new(777).unwrap();
 
-		let local = origin.publish("room/host", origin::Route::default()).unwrap();
-		let track = local.create_track("video", crate::track::Info::timed()).unwrap();
+		let local = origin.route("room/host", crate::origin::RouteOptions::default()).unwrap();
+		let track = local.broadcast().create_track("video", crate::track::Info::timed()).unwrap();
 		let mut group = track.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"local".as_ref()).unwrap();
 		group.finish().unwrap();
@@ -7656,7 +7656,7 @@ enum Held {
 	Declined,
 	/// Outside the session's limit: the route as advertised, attached once a
 	/// limit allows it.
-	Withheld(crate::origin::Route),
+	Withheld(crate::origin::RouteInfo),
 	/// In the origin, serving requests.
 	Attached(Box<AnnouncedRoute>),
 }
@@ -7696,7 +7696,7 @@ impl Announced {
 	}
 
 	/// Attach a route, queued for its first serve pass.
-	fn attach(&mut self, path: Path, route: crate::origin::Route, dynamic: crate::origin::Requests) {
+	fn attach(&mut self, path: Path, route: crate::origin::RouteInfo, dynamic: crate::origin::Route) {
 		let wake = crate::util::QueueWake::new(path.clone(), self.ready.clone());
 		let route = AnnouncedRoute::new(route, dynamic, wake);
 		route.waker.wake_by_ref();
@@ -7711,7 +7711,7 @@ impl Announced {
 		&mut self,
 		subscriber: &Subscriber,
 		path: Path,
-		route: crate::origin::Route,
+		route: crate::origin::RouteInfo,
 		predecessor: Option<&Path>,
 	) -> bool {
 		if !subscriber
@@ -7728,7 +7728,7 @@ impl Announced {
 			Held::Attached(attached) => Some(&attached.dynamic),
 			_ => None,
 		});
-		match subscriber.origin.requests_route(&path, route.clone(), predecessor) {
+		match subscriber.origin.forward(&path, route.clone(), predecessor) {
 			Ok(dynamic) => {
 				// In place, the successor continues the instance the predecessor's sources
 				// serve: they live on with it rather than closing with the advertisement.
@@ -7832,7 +7832,7 @@ impl Announced {
 			entry.wake.popped();
 			let cx = std::task::Context::from_waker(&entry.waker);
 			let route_waiter = entry.park.hold(&cx);
-			while let Poll::Ready(Ok(request)) = entry.dynamic.poll_requested_broadcast(route_waiter) {
+			while let Poll::Ready(Some(request)) = entry.dynamic.poll_requested(route_waiter) {
 				// The request path is absolute; the wire (and our origin handle)
 				// speak paths relative to the session's root.
 				let Some(path) = request.path().strip_prefix(root) else {
@@ -7914,9 +7914,9 @@ impl Announced {
 struct AnnouncedRoute {
 	/// The route as last announced (post-charge), so a drain can re-price it
 	/// without recomputing the chain.
-	route: crate::origin::Route,
+	route: crate::origin::RouteInfo,
 	/// Dropping it retracts the route and rejects its queued requests.
-	dynamic: crate::origin::Requests,
+	dynamic: crate::origin::Route,
 	/// Closes as the route goes, which closes every source it minted.
 	live: kio::Producer<()>,
 	/// Whether the GOAWAY drain already re-priced this route.
@@ -7930,8 +7930,8 @@ struct AnnouncedRoute {
 
 impl AnnouncedRoute {
 	fn new(
-		route: crate::origin::Route,
-		dynamic: crate::origin::Requests,
+		route: crate::origin::RouteInfo,
+		dynamic: crate::origin::Route,
 		wake: Arc<crate::util::QueueWake<Path>>,
 	) -> Self {
 		Self {
@@ -7946,10 +7946,10 @@ impl AnnouncedRoute {
 	}
 
 	/// Update the route metadata without changing its content identity.
-	fn update(&mut self, route: crate::origin::Route) {
+	fn update(&mut self, route: crate::origin::RouteInfo) {
 		self.route = route.clone();
 		self.drained = false;
-		let _ = self.dynamic.update_route(route);
+		let _ = self.dynamic.update(route);
 	}
 
 	/// Re-price the route to [`crate::origin::Cost::DRAIN`] (the peer sent a
@@ -7962,7 +7962,7 @@ impl AnnouncedRoute {
 		self.drained = true;
 		let mut route = self.route.clone();
 		route.cost = crate::origin::Cost::DRAIN;
-		let _ = self.dynamic.update_route(route);
+		let _ = self.dynamic.update(route);
 	}
 }
 

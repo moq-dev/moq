@@ -72,7 +72,7 @@ struct Pair {
 	track: moq_net::track::Producer,
 	remote: moq_net::broadcast::Consumer,
 	_keep: (
-		moq_net::origin::Publication,
+		moq_net::origin::Route,
 		moq_net::origin::Producer,
 		moq_net::origin::Producer,
 	),
@@ -80,9 +80,9 @@ struct Pair {
 
 async fn connect(version: &str) -> Pair {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("bcast").unwrap();
-	let track = broadcast.create_track("video", timed()).unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+	broadcast.announce().unwrap();
 
 	let subscriber = produce_origin(2);
 	let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());

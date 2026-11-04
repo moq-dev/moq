@@ -37,10 +37,10 @@ async fn resolve(origin: &moq_net::origin::Producer) -> moq_net::broadcast::Cons
 }
 
 /// Publish a finished track of three groups, and flag any subscription it ever gets.
-fn publish_finished(origin: &moq_net::origin::Producer) -> (moq_net::origin::Publication, Arc<AtomicBool>) {
-	let broadcast = origin.create_broadcast("bcast").unwrap();
-	let mut track = broadcast.create_track("video", timed()).unwrap();
-	broadcast.announce(Default::default()).unwrap();
+fn publish_finished(origin: &moq_net::origin::Producer) -> (moq_net::origin::Route, Arc<AtomicBool>) {
+	let broadcast = origin.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let mut track = broadcast.broadcast().create_track("video", timed()).unwrap();
+	broadcast.announce().unwrap();
 	for sequence in 0..3u64 {
 		let mut group = track.append_group().unwrap();
 		for frame in 0..2 {
@@ -156,9 +156,9 @@ async fn a_subscribe_after_track_status_keeps_timestamps() {
 	for version in ["moq-transport-18", "moq-transport-22"] {
 		kio::clock::timeout(TIMEOUT, async {
 			let publisher = produce_origin(1);
-			let broadcast = publisher.create_broadcast("bcast").unwrap();
-			let track = broadcast.create_track("video", timed()).unwrap();
-			broadcast.announce(Default::default()).unwrap();
+			let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
+			let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+			broadcast.announce().unwrap();
 
 			let client = produce_origin(2);
 			let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
@@ -333,10 +333,10 @@ fn write_group(track: &moq_net::track::Producer, sequence: u64) {
 fn publish_live(
 	origin: &moq_net::origin::Producer,
 	groups: u64,
-) -> (moq_net::origin::Publication, moq_net::track::Producer) {
-	let broadcast = origin.create_broadcast("bcast").unwrap();
-	let track = broadcast.create_track("video", timed()).unwrap();
-	broadcast.announce(Default::default()).unwrap();
+) -> (moq_net::origin::Route, moq_net::track::Producer) {
+	let broadcast = origin.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+	broadcast.announce().unwrap();
 	for sequence in 0..groups {
 		write_group(&track, sequence);
 	}

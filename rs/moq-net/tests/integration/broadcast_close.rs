@@ -22,9 +22,9 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 
 /// Close a published broadcast and check what `reader`'s origin answers afterwards.
 async fn close_then_lookup(publisher: moq_net::origin::Producer, reader: moq_net::origin::Producer) {
-	let broadcast = publisher.create_broadcast("bcast").unwrap();
-	let _track = broadcast.create_track("video", None).unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let _track = broadcast.broadcast().create_track("video", None).unwrap();
+	broadcast.announce().unwrap();
 
 	let consumer = reader.consume();
 	let handle = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
@@ -33,7 +33,7 @@ async fn close_then_lookup(publisher: moq_net::origin::Producer, reader: moq_net
 		.expect("broadcast resolves");
 	handle.track("video").expect("a live broadcast serves its track");
 
-	broadcast.close();
+	broadcast.broadcast().close();
 
 	kio::clock::timeout(TIMEOUT, handle.closed())
 		.await
@@ -41,7 +41,7 @@ async fn close_then_lookup(publisher: moq_net::origin::Producer, reader: moq_net
 	assert!(matches!(handle.track("video"), Err(Error::Unroutable)));
 	assert!(matches!(handle.track("audio"), Err(Error::Unroutable)));
 	assert!(matches!(consumer.request("bcast", None).await, Err(Error::Unroutable)));
-	assert!(matches!(broadcast.announce(Default::default()), Err(Error::Closed)));
+	assert!(matches!(broadcast.announce(), Err(Error::Closed)));
 }
 
 #[kio::test]

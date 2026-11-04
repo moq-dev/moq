@@ -6,7 +6,7 @@
 //! returns the [`Handle`]: [`grant`](Handle::grant) is the union of every token
 //! this side presented, and `add` presents another without
 //! reconnecting. The returned [`Credential`] is cloneable; dropping its last clone withdraws it.
-//! A [`Route`](crate::origin::Route) can name it, so the request advertising the route
+//! A [`Route`](crate::origin::RouteInfo) can name it, so the request advertising the route
 //! carries it too, and swapping it renews that request in place.
 //!
 //! A handle passed to `Client::with_auth` outlives its sessions: each session built on it
@@ -1385,7 +1385,7 @@ fn attached(links: &mut BTreeMap<u64, Attached>, id: u64) -> &mut Attached {
 ///
 /// Cheap to clone, and every clone names the same credential. It stays presented on
 /// every session of its handle until the last clone drops, which closes its streams and
-/// removes its grant from the union. A [`Route`](crate::origin::Route) holding one keeps
+/// removes its grant from the union. A [`Route`](crate::origin::RouteInfo) holding one keeps
 /// it presented while the route stands, across the handle's sessions.
 #[derive(Clone)]
 pub struct Credential {

@@ -113,14 +113,14 @@ fn carries_order(version: &str) -> bool {
 async fn round(version: &str, relay: bool, order: Order) -> Vec<u64> {
 	let version: Version = version.parse().unwrap();
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("bcast").unwrap();
+	let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
 	let track = broadcast
-		.create_track(
+		.broadcast().create_track(
 			"ordered",
 			Info::default().with_timescale(Timescale::MILLI).with_max_age(FOREVER),
 		)
 		.unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 
 	let upstream = match relay {
 		true => Some(connect(version, publisher.consume(), 2).await),
@@ -187,14 +187,14 @@ async fn merged_subscribers_keep_their_own_order() {
 	for version in ["moq-lite-07-wip", "moq-transport-18"] {
 		let version: Version = version.parse().unwrap();
 		let publisher = produce_origin(1);
-		let broadcast = publisher.create_broadcast("bcast").unwrap();
+		let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
 		let track = broadcast
-			.create_track(
+			.broadcast().create_track(
 				"ordered",
 				Info::default().with_timescale(Timescale::MILLI).with_max_age(FOREVER),
 			)
 			.unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		broadcast.announce().unwrap();
 
 		let (upstream, relay) = connect(version, publisher.consume(), 2).await;
 		let (descending_pair, descending_origin) = connect(version, relay.consume(), 3).await;

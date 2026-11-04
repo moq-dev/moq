@@ -20,12 +20,12 @@ async fn one_stream_credit_serves_every_backlogged_group() {
 		let version: Version = version.parse().unwrap();
 		let publisher = origin(1);
 		let viewer = origin(2);
-		let broadcast = publisher.create_broadcast("live").unwrap();
+		let broadcast = publisher.route("live", moq_net::origin::RouteOptions::hidden()).unwrap();
 		let info = track::Info::default().with_timescale(moq_net::Timescale::MILLI);
 		let tracks: Vec<_> = (0..2)
-			.map(|i| broadcast.create_track(format!("{i}"), info.clone()).unwrap())
+			.map(|i| broadcast.broadcast().create_track(format!("{i}"), info.clone()).unwrap())
 			.collect();
-		broadcast.announce(Default::default()).unwrap();
+		broadcast.announce().unwrap();
 
 		let mut options = MockConnectOptions::new(version);
 		// Draft 22 keeps its SETUP stream open, so it needs one more for groups.

@@ -66,9 +66,9 @@ async fn first_frame(version: &str, relays: usize, arrival: Arrival) -> Duration
 	}
 	let reader = &links.last().unwrap().client_transport;
 
-	let broadcast = nodes[0].create_broadcast("room").unwrap();
+	let broadcast = nodes[0].route("room", moq_net::origin::RouteOptions::hidden()).unwrap();
 	let track = broadcast
-		.create_track(
+		.broadcast().create_track(
 			"video",
 			moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 		)
@@ -76,7 +76,7 @@ async fn first_frame(version: &str, relays: usize, arrival: Arrival) -> Duration
 	let mut cached = track.append_group().unwrap();
 	cached.write_frame(Timestamp::ZERO, b"cached".as_ref()).unwrap();
 	cached.finish().unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 
 	let consumer = nodes.last().unwrap().consume();
 	let remote = consumer.follow("room", None).unwrap().available().await.unwrap();

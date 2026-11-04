@@ -16,7 +16,7 @@ const SHAPES: [(usize, usize); 4] = [(100, 1), (1_000, 1), (100, 10), (1_000, 10
 struct Registry {
 	registry: stats::Registry,
 	_driver: origin::Driver,
-	_publishers: Vec<origin::Publication>,
+	_publishers: Vec<origin::Route>,
 	_cursors: Vec<announce::Consumer>,
 }
 
@@ -24,7 +24,7 @@ fn registry(broadcasts: usize, tiers: usize) -> Registry {
 	let registry = stats::Registry::new(stats::Config::new());
 	let (producer, driver) = origin::Producer::new(origin::Config::default());
 	let publishers = (0..broadcasts)
-		.map(|i| producer.publish(format!("room/{i}"), origin::Route::default()).unwrap())
+		.map(|i| producer.route(format!("room/{i}"), moq_net::origin::RouteOptions::default()).unwrap())
 		.collect();
 	let cursors = (0..tiers)
 		.map(|t| {

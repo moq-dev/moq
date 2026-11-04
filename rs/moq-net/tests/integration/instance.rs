@@ -56,15 +56,15 @@ async fn job_reannounced(version: &str) {
 	let relay = produce_origin(2);
 	let instance: Instance = "job".parse().unwrap();
 	let job = publisher
-		.publish("job", origin::Route::default().with_instance(instance.clone(), 0))
+		.route("job", moq_net::origin::RouteOptions::default().with_instance(instance.clone(), 0))
 		.unwrap();
 	let _session = link(version, &publisher, &relay).await;
 	let mut announced = relay.consume().announced();
 
 	let first = started(&mut announced).await;
-	job.unannounce();
+	job.withdraw();
 	ended(&mut announced).await;
-	job.announce(origin::Route::default()).unwrap();
+	job.announce().unwrap();
 	let second = started(&mut announced).await;
 
 	match version.to_string().as_str() {

@@ -130,9 +130,9 @@ fn requests() {
 		let (producer, mut driver) = origin::Producer::new(origin::Config::default());
 		let consumer = producer.consume();
 		let _pubs: Vec<_> = (0..1000)
-			.map(|i| producer.publish(format!("{s}/{i}"), origin::Route::default()).unwrap())
+			.map(|i| producer.route(format!("{s}/{i}"), moq_net::origin::RouteOptions::default()).unwrap())
 			.collect();
-		let _covering = producer.publish(s, origin::Route::default()).unwrap();
+		let _covering = producer.route(s, moq_net::origin::RouteOptions::default()).unwrap();
 		let waiter = kio::Waiter::noop();
 
 		let mut local = |request: &dyn Fn() -> kio::Pending<origin::Requesting>| {
@@ -171,7 +171,7 @@ fn fanout() {
 		let (producer, _driver) = origin::Producer::new(origin::Config::default());
 		let consumer = producer.consume();
 		let _pubs: Vec<_> = (0..100)
-			.map(|i| producer.publish(format!("room/{i}"), origin::Route::default()).unwrap())
+			.map(|i| producer.route(format!("room/{i}"), moq_net::origin::RouteOptions::default()).unwrap())
 			.collect();
 		let mut cursors: Vec<announce::Consumer> = (0..100).map(|_| consumer.announced()).collect();
 		for cursor in &mut cursors {
@@ -180,7 +180,7 @@ fn fanout() {
 
 		// Per cursor, per publish and retract.
 		allocs(&format!("origin/announce_fanout/{name}"), 500, 100, || {
-			let publication = producer.publish(s, origin::Route::default()).unwrap();
+			let publication = producer.route(s, moq_net::origin::RouteOptions::default()).unwrap();
 			for cursor in &mut cursors {
 				cursor.next().now_or_never().flatten().expect("announce delivered");
 			}

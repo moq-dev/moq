@@ -15,7 +15,7 @@ use crate::track::Order;
 pub struct Subscribe<'a> {
 	pub id: u64,
 	pub broadcast: Path,
-	/// The instance the subscriber expects; see [`crate::origin::Route::instance`].
+	/// The instance the subscriber expects; see [`crate::origin::RouteInfo::instance`].
 	/// Lite07+ only.
 	pub instance: Option<crate::Instance>,
 	pub track: Cow<'a, str>,

@@ -60,9 +60,9 @@ enum Arrival {
 async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::Error>) {
 	let version: Version = name.parse().unwrap();
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("bcast").unwrap();
-	let mut track = broadcast.create_track("tail", timed()).unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let mut track = broadcast.broadcast().create_track("tail", timed()).unwrap();
+	broadcast.announce().unwrap();
 
 	let relay = produce_origin(2);
 	let mut options = MockConnectOptions::new(version);

@@ -90,15 +90,15 @@ async fn read(mut sub: moq_net::track::Subscriber) -> Outcome {
 async fn round(name: &str, end: End) -> Vec<Outcome> {
 	let version: Version = name.parse().unwrap();
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("bcast").unwrap();
+	let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
 	let tracks: Vec<_> = (0..TRACKS)
 		.map(|index| {
 			broadcast
-				.create_track(format!("track{index}").as_str(), timed())
+				.broadcast().create_track(format!("track{index}").as_str(), timed())
 				.unwrap()
 		})
 		.collect();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 
 	let relay = produce_origin(2);
 	let mut options = MockConnectOptions::new(version);

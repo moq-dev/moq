@@ -19,7 +19,7 @@ const SYNCED: u64 = 0x4;
 #[derive(Clone, Debug)]
 pub struct Tracks {
 	pub broadcast: Path,
-	/// The instance the subscriber expects; see [`crate::origin::Route::instance`].
+	/// The instance the subscriber expects; see [`crate::origin::RouteInfo::instance`].
 	pub instance: Option<crate::Instance>,
 }
 

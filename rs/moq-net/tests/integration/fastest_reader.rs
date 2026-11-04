@@ -27,7 +27,7 @@ fn origin(hop: u64) -> origin::Producer {
 struct Relay {
 	track: track::Producer,
 	subscriber: track::Subscriber,
-	_broadcast: origin::Publication,
+	_broadcast: origin::Route,
 	pair: MockPair,
 	_origins: [origin::Producer; 2],
 }
@@ -37,11 +37,11 @@ async fn relay(version: &str) -> Relay {
 	let relay = origin(2);
 	let pair = peer(version.parse::<Version>().unwrap(), &publisher, &relay).await;
 
-	let broadcast = publisher.create_broadcast("live").unwrap();
+	let broadcast = publisher.route("live", moq_net::origin::RouteOptions::hidden()).unwrap();
 	let track = broadcast
-		.create_track("data", track::Info::default().with_timescale(moq_net::Timescale::MILLI))
+		.broadcast().create_track("data", track::Info::default().with_timescale(moq_net::Timescale::MILLI))
 		.unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 
 	let remote = kio::clock::timeout(TIMEOUT, relay.consume().follow("live", None).unwrap().available())
 		.await

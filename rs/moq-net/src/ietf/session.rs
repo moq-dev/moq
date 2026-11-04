@@ -2127,7 +2127,7 @@ mod tests {
 	/// enough: the question is only whether the bytes went out unasked.
 	async fn announce_occurrences(peer_declared: Option<peer::Peer>) -> usize {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let _cam = origin.announce("solo-cam", crate::origin::Route::default()).unwrap();
+		let _cam = origin.announce("solo-cam", crate::origin::RouteInfo::default()).unwrap();
 
 		// An open gate: an unsolicited PUBLISH_NAMESPACE can reach the wire.
 		let gate = kio::Producer::new(true);
@@ -2232,7 +2232,7 @@ mod tests {
 
 	fn auth_session(auth: bool) -> AuthSession {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let cam = origin.announce("solo-cam", crate::origin::Route::default()).unwrap();
+		let cam = origin.announce("solo-cam", crate::origin::RouteInfo::default()).unwrap();
 
 		let gate = kio::Producer::new(true);
 		let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
@@ -2892,8 +2892,8 @@ mod tests {
 		// Stall before the type, then after it while the body has not arrived.
 		for stalled in [Vec::new(), vec![ietf::Subscribe::ID as u8]] {
 			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-			let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
-			let mut track = broadcast.create_track("video", None).unwrap();
+			let broadcast = origin.route("room", crate::origin::RouteOptions::default()).unwrap();
+			let mut track = broadcast.broadcast().create_track("video", None).unwrap();
 			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new())
 				.with_incoming_bidis(vec![stalled, subscribe.clone()]);
 			let driver = bidi_driver(session, Some(origin.consume()));

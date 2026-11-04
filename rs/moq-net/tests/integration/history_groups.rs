@@ -42,14 +42,14 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 async fn round(version: &str, relay: bool, newest_first: bool) -> Vec<(u64, usize)> {
 	let version: Version = version.parse().unwrap();
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("bcast").unwrap();
+	let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
 	let track = broadcast
-		.create_track(
+		.broadcast().create_track(
 			"history",
 			Info::default().with_timescale(Timescale::MILLI).with_max_age(FOREVER),
 		)
 		.unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 
 	let relay_origin = produce_origin(2);
 	let upstream = match relay {
@@ -200,14 +200,14 @@ async fn a_late_subscriber_receives_the_relays_cached_history() {
 	// Older drafts canonicalize group 0 to the live edge instead of replay.
 	let version: Version = "moq-lite-07-wip".parse().unwrap();
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("bcast").unwrap();
+	let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
 	let track = broadcast
-		.create_track(
+		.broadcast().create_track(
 			"history",
 			Info::default().with_timescale(Timescale::MILLI).with_max_age(FOREVER),
 		)
 		.unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 	let relay = produce_origin(2);
 	let mut options = MockConnectOptions::new(version);
 	options.server_publish = Some(publisher.consume());

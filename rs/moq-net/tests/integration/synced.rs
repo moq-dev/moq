@@ -48,10 +48,10 @@ async fn read_until_synced(announced: &mut announce::Consumer) -> BTreeSet<Strin
 /// origin's consumer had read when it synced.
 async fn synced(version: &str) -> BTreeSet<String> {
 	let publisher = produce_origin(1);
-	let a = publisher.create_broadcast("a").unwrap();
-	a.announce(Default::default()).unwrap();
-	let b = publisher.create_broadcast("b").unwrap();
-	b.announce(Default::default()).unwrap();
+	let a = publisher.route("a", moq_net::origin::RouteOptions::hidden()).unwrap();
+	a.announce().unwrap();
+	let b = publisher.route("b", moq_net::origin::RouteOptions::hidden()).unwrap();
+	b.announce().unwrap();
 
 	let subscriber = produce_origin(2);
 	let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
@@ -94,8 +94,8 @@ async fn a_best_effort_boundary_still_catches_up() {
 #[kio::test]
 async fn a_second_session_catches_up() {
 	let publisher = produce_origin(1);
-	let a = publisher.create_broadcast("a").unwrap();
-	a.announce(Default::default()).unwrap();
+	let a = publisher.route("a", moq_net::origin::RouteOptions::hidden()).unwrap();
+	a.announce().unwrap();
 
 	let subscriber = produce_origin(2);
 	let connect = || {
@@ -133,8 +133,8 @@ async fn a_cold_relay_syncs_then_forwards_upstream_routes_as_live() {
 	assert!(announced.try_next().is_none());
 
 	let upstream = produce_origin(1);
-	let broadcast = upstream.create_broadcast("room/cam").unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = upstream.route("room/cam", moq_net::origin::RouteOptions::hidden()).unwrap();
+	broadcast.announce().unwrap();
 	let mut options = MockConnectOptions::new(version);
 	options.server_publish = Some(upstream.consume());
 	options.client_subscribe = Some(relay.clone());

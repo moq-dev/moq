@@ -82,7 +82,7 @@ async fn replace(version: &str, instance: Option<Instance>) {
 	let publisher = produce_origin(1);
 	let viewer = produce_origin(3);
 
-	let mut route = origin::Route::default();
+	let mut route = origin::RouteInfo::default();
 	route.instance = instance.clone();
 	let cam = publisher.publish("cam", route).unwrap();
 	let video = cam.create_track("video", timed()).unwrap();
@@ -190,8 +190,8 @@ async fn route_death(version: &str, relayed: bool, wait: Duration) {
 	let relay = produce_origin(2);
 	let viewer = produce_origin(3);
 
-	let cam = publisher.publish("cam", origin::Route::default()).unwrap();
-	let video = cam.create_track("video", timed()).unwrap();
+	let cam = publisher.route("cam", moq_net::origin::RouteOptions::default()).unwrap();
+	let video = cam.broadcast().create_track("video", timed()).unwrap();
 
 	let upstream = if relayed { &relay } else { &viewer };
 	let old_session = link(version, &publisher, upstream).await;
@@ -273,8 +273,8 @@ async fn restart_while_the_old_session_lingers(version: &str, old_hop: u64, new_
 	let viewer = produce_origin(3);
 
 	let old = produce_origin(old_hop);
-	let old_cam = old.publish("cam", origin::Route::default()).unwrap();
-	let _old_video = old_cam.create_track("video", timed()).unwrap();
+	let old_cam = old.route("cam", moq_net::origin::RouteOptions::default()).unwrap();
+	let _old_video = old_cam.broadcast().create_track("video", timed()).unwrap();
 	let old_session = link(version, &old, &viewer).await;
 	let mut announced = viewer.consume().announced();
 	next_event(&mut announced).await;
@@ -284,8 +284,8 @@ async fn restart_while_the_old_session_lingers(version: &str, old_hop: u64, new_
 	old_session.server_transport.set_latency(Duration::from_secs(3600));
 
 	let new = produce_origin(new_hop);
-	let new_cam = new.publish("cam", origin::Route::default()).unwrap();
-	let new_video = new_cam.create_track("video", timed()).unwrap();
+	let new_cam = new.route("cam", moq_net::origin::RouteOptions::default()).unwrap();
+	let new_video = new_cam.broadcast().create_track("video", timed()).unwrap();
 	let _new_session = link(version, &new, &viewer).await;
 	kio::clock::sleep(PAST_HOLD).await;
 

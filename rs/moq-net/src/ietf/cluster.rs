@@ -12,7 +12,7 @@
 //!   ROUTE_COST of that path, as Key-Value-Pair message parameters.
 //!
 //! The semantics are the same ones moq-lite carries natively (see
-//! [`crate::origin::Route`]); this module is only the moq-transport binding.
+//! [`crate::origin::RouteInfo`]); this module is only the moq-transport binding.
 
 use crate::coding::{Decode, DecodeError, Decoder, Encode, EncodeError, Encoder};
 use crate::{Hop, Hops};
@@ -158,11 +158,11 @@ impl Advert {
 	/// instead of overflowing to best.
 	///
 	/// Add the arriving link price to the peer's static route cost.
-	pub fn route(&self, link_cost: u64) -> crate::origin::Route {
+	pub fn route(&self, link_cost: u64) -> crate::origin::RouteInfo {
 		let advertised = crate::origin::Cost::new(self.cost);
 		// The prefix travels separately: it is stamped where the advertisement
 		// attaches (the namespace).
-		crate::origin::Route::default()
+		crate::origin::RouteInfo::default()
 			.with_hops(self.hops.hops().clone())
 			.with_cost(advertised.charged(link_cost))
 	}

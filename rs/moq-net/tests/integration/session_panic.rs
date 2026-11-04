@@ -34,13 +34,13 @@ struct Publisher {
 	server_driver: kio::clock::sim::JoinHandle<moq_net::Error>,
 	/// The client's origin, which it publishes from.
 	origin: origin::Producer,
-	_broadcast: moq_net::origin::Publication,
+	_broadcast: moq_net::origin::Route,
 }
 
 async fn publish(version: Version, relay: &origin::Producer, hop: u64, name: &str) -> Publisher {
 	let origin = produce_origin(hop);
-	let broadcast = origin.create_broadcast(name).unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = origin.route(name, moq_net::origin::RouteOptions::hidden()).unwrap();
+	broadcast.announce().unwrap();
 
 	let mut mock = moq_net::transport::memory::Config::default();
 	mock.protocol = Some(version.alpn().to_string());
@@ -125,8 +125,8 @@ async fn a_panicking_session_leaves_the_others_serving() {
 			.unwrap_or_else(|_| panic!("{version}: the panicked session never closed"));
 
 		// The other session still serves: a fresh announcement reaches the relay.
-		let later = healthy.origin.create_broadcast("later").unwrap();
-		later.announce(Default::default()).unwrap();
+		let later = healthy.origin.route("later", moq_net::origin::RouteOptions::hidden()).unwrap();
+		later.announce().unwrap();
 		until(&mut announced, "later", true).await;
 		crate::support::announced(&relay.consume(), "healthy").await;
 		drop((healthy, broken.client, later));

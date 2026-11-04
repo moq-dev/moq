@@ -27,8 +27,8 @@ const GROUPS: u64 = 2;
 /// or in sequence order, and how the read ended.
 async fn round(abort: bool, ordered: bool) -> (Vec<u64>, Option<Error>) {
 	let origin = produce_origin(1);
-	let broadcast = origin.create_broadcast("bcast").unwrap();
-	let mut track = broadcast.create_track("video", timed()).unwrap();
+	let broadcast = origin.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let mut track = broadcast.broadcast().create_track("video", timed()).unwrap();
 	// From the first group with a replay window: a late reader is owed the whole track,
 	// not the live edge.
 	let subscription = moq_net::track::Subscription::default()

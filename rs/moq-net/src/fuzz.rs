@@ -407,13 +407,23 @@ pub fn excluding(origin: crate::origin::Consumer, peer: crate::Hop) -> crate::or
 	origin.excluding(peer)
 }
 
+/// A peer's wire route: its hop chain, cost, and instance at an epoch, as a session
+/// decodes one, for benches and tests that land or update forwarded routes.
+pub fn route_info(hops: crate::Hops, cost: u64, instance: Option<(crate::Instance, u64)>) -> crate::origin::RouteInfo {
+	let info = crate::origin::RouteInfo::default().with_hops(hops).with_cost(cost);
+	match instance {
+		Some((instance, epoch)) => info.with_instance(instance, epoch),
+		None => info,
+	}
+}
+
 /// Land a claim with a peer's wire route, as a session does, for the origin bench.
 pub fn requests_route(
 	origin: &crate::origin::Producer,
 	prefix: impl Into<crate::Path>,
-	route: crate::origin::Route,
-) -> Result<crate::origin::Requests, crate::Error> {
-	origin.requests_route(prefix, route, None)
+	route: crate::origin::RouteInfo,
+) -> Result<crate::origin::Route, crate::Error> {
+	origin.forward(prefix, route, None)
 }
 
 /// Land a claim taking over the peer's `predecessor` claim, as a session lands an
@@ -421,15 +431,15 @@ pub fn requests_route(
 pub fn takeover_route(
 	origin: &crate::origin::Producer,
 	prefix: impl Into<crate::Path>,
-	route: crate::origin::Route,
-	predecessor: &crate::origin::Requests,
-) -> Result<crate::origin::Requests, crate::Error> {
-	origin.requests_route(prefix, route, Some(predecessor))
+	route: crate::origin::RouteInfo,
+	predecessor: &crate::origin::Route,
+) -> Result<crate::origin::Route, crate::Error> {
+	origin.forward(prefix, route, Some(predecessor))
 }
 
 /// Replace a peer claim's route in place, as a session does on a route update.
-pub fn update_route(dynamic: &crate::origin::Requests, route: crate::origin::Route) -> Result<(), crate::Error> {
-	dynamic.update_route(route)
+pub fn update_route(dynamic: &crate::origin::Route, route: crate::origin::RouteInfo) -> Result<(), crate::Error> {
+	dynamic.update(route)
 }
 
 /// A session's snapshot of its peer's initial announcements, for the synced bench.
@@ -1848,7 +1858,7 @@ pub struct RequestValidity {
 
 impl RequestValidity {
 	/// Watch which instance this route's peer selects for a path.
-	pub fn new(route: &crate::origin::Requests, path: &crate::Path) -> Self {
+	pub fn new(route: &crate::origin::Route, path: &crate::Path) -> Self {
 		Self {
 			watch: crate::model::broadcast::RequestValidity::for_source(route, path),
 			periods: Vec::new(),
@@ -1884,7 +1894,7 @@ mod tests {
 		let _driver = driver;
 		let tier = crate::stats::Tier::new(crate::Path::from_static("t"));
 		let session = registry.tier(tier.clone()).session(crate::Path::from_static("root"));
-		let _broadcast = origin.publish("room/1", crate::origin::Route::default()).unwrap();
+		let _broadcast = origin.route("room/1", crate::origin::RouteOptions::default()).unwrap();
 		let mut cursor = origin.consume().with_stats(session).announced();
 		while cursor.next().now_or_never().flatten().is_some() {}
 

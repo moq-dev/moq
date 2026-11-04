@@ -86,8 +86,8 @@ async fn a_side_that_declines_solicit_takes_unsolicited_announces() {
 			}
 			let pair = connect_mock(options).await;
 
-			let broadcast = publisher.create_broadcast("room/cam").unwrap();
-			broadcast.announce(Default::default()).unwrap();
+			let broadcast = publisher.route("room/cam", moq_net::origin::RouteOptions::hidden()).unwrap();
+			broadcast.announce().unwrap();
 			kio::clock::sleep(SETTLE).await;
 
 			assert!(announced(&subscriber, "room/cam"), "{context}: never announced");

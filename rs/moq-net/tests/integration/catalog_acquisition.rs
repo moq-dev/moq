@@ -26,10 +26,10 @@ async fn acquisition(version: &str, carries_instance: bool) {
 	let version: Version = version.parse().unwrap();
 	let publisher = origin(1);
 	let subscriber = origin(2);
-	let broadcast = publisher.create_broadcast("live").unwrap();
-	let mut dynamic = broadcast.requests();
+	let broadcast = publisher.route("live", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let mut dynamic = broadcast.broadcast().requests();
 	broadcast
-		.announce(origin::Route::default().with_instance(moq_net::Instance::random(), 0))
+		.announce(origin::RouteInfo::default().with_instance(moq_net::Instance::random(), 0))
 		.unwrap();
 	let _old = link(version, &publisher, &subscriber, 100).await;
 	let remote = subscriber

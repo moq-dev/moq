@@ -103,7 +103,7 @@ struct Link {
 	tracks: Vec<track::Producer>,
 	subscribers: Vec<track::Subscriber>,
 	payload: Bytes,
-	_broadcast: origin::Publication,
+	_broadcast: origin::Route,
 	_sessions: (moq_net::Session, moq_net::Session),
 	_origins: (origin::Producer, origin::Producer),
 }
@@ -147,12 +147,12 @@ impl Link {
 			}
 		);
 
-		let broadcast = publisher.create_broadcast("bench").unwrap();
+		let broadcast = publisher.route("bench", moq_net::origin::RouteOptions::hidden()).unwrap();
 		let info = track::Info::default().with_timescale(moq_net::Timescale::MILLI);
 		let tracks: Vec<_> = (0..streams)
-			.map(|index| broadcast.create_track(format!("{index}"), info.clone()).unwrap())
+			.map(|index| broadcast.broadcast().create_track(format!("{index}"), info.clone()).unwrap())
 			.collect();
-		broadcast.announce(Default::default()).unwrap();
+		broadcast.announce().unwrap();
 
 		let consumer = subscriber.consume();
 		let remote = consumer.follow("bench", None).unwrap().available().await.unwrap();

@@ -30,11 +30,11 @@ async fn stalled_read(version: Version, budget: Duration) -> BTreeSet<u64> {
 	let publisher = origin(1);
 	let relay = origin(2);
 	let viewer = origin(3);
-	let broadcast = publisher.create_broadcast("live").unwrap();
+	let broadcast = publisher.route("live", moq_net::origin::RouteOptions::hidden()).unwrap();
 	let source = broadcast
-		.create_track("audio", track::Info::default().with_timescale(Timescale::MILLI))
+		.broadcast().create_track("audio", track::Info::default().with_timescale(Timescale::MILLI))
 		.unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 
 	let mut upstream = MockConnectOptions::new(version);
 	upstream.client_publish = Some(publisher.consume());

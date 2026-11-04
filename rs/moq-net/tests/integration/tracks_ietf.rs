@@ -98,9 +98,9 @@ async fn read(sub: &mut moq_net::track::Subscriber) -> Option<(u64, Vec<u8>)> {
 async fn a_listing_of_our_own_peer_fails_alone() {
 	for version in DRAFTS {
 		let publisher = produce_origin(1);
-		let broadcast = publisher.create_broadcast("bcast").unwrap();
-		let video = broadcast.create_track("video", None).unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let video = broadcast.broadcast().create_track("video", None).unwrap();
+		broadcast.announce().unwrap();
 
 		let (subscriber, pair) = connect(&publisher, version).await;
 		let remote = resolve(&subscriber, "bcast").await;

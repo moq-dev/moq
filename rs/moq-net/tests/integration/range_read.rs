@@ -63,14 +63,14 @@ async fn fixture(
 	relay: bool,
 ) -> (moq_net::broadcast::Consumer, moq_net::track::Producer, impl Sized) {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("bcast").unwrap();
+	let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
 	let mut track = broadcast
-		.create_track(
+		.broadcast().create_track(
 			"video",
 			moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 		)
 		.unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 	for sequence in 0..3 {
 		write_group(&mut track, sequence);
 	}

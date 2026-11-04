@@ -1012,7 +1012,7 @@ struct Advertised {
 type Served = (Option<crate::Instance>, u64);
 
 /// What `route` serves; see [`Served`].
-fn served(route: &crate::origin::Route) -> Served {
+fn served(route: &crate::origin::RouteInfo) -> Served {
 	(route.instance.clone(), route.epoch)
 }
 
@@ -1093,7 +1093,7 @@ impl AnnounceRun {
 		// whatever it has pending for the routes the peer holds (an update, a restart, an end
 		// still waiting out its hold) arrives through the loop as usual.
 		let mut snapshot = origin.announced();
-		let mut current: HashMap<crate::Path, crate::origin::Route> = HashMap::new();
+		let mut current: HashMap<crate::Path, crate::origin::RouteInfo> = HashMap::new();
 		while let Some(event) = snapshot.try_next() {
 			match event {
 				announce::Event::Start(update)
@@ -1175,7 +1175,7 @@ impl AnnounceRun {
 
 	/// The chain and cost to put on the wire for `route`, or `None` when it must
 	/// not be forwarded.
-	fn outgoing(&self, route: &crate::origin::Route, absolute: &crate::Path) -> Option<(Hops, crate::origin::Cost)> {
+	fn outgoing(&self, route: &crate::origin::RouteInfo, absolute: &crate::Path) -> Option<(Hops, crate::origin::Cost)> {
 		let mut hops = route.hops.clone();
 
 		// A route that already passed through us is a reflection. The origin
@@ -1807,7 +1807,7 @@ impl<R: Request> RequestServe<R> {
 					if requesting.is_none() {
 						// The peer requested this exact path, so it has already seen an
 						// announcement for it. The immediate lookup resolves it at once, is
-						// served on demand by the route covering it (an `origin::Requests`), or
+						// served on demand by the route covering it (an `origin::Route`), or
 						// errors when there is none.
 						let origin = ready!(self.shared.poll_serving_origin(waiter));
 						let path = R::target(msg).0.clone();
@@ -2847,7 +2847,7 @@ mod announce_test {
 		let update = |prefix: &'static str, cost| announce::Announce {
 			prefix: crate::Path::try_from(prefix).unwrap(),
 			captures: None,
-			route: origin::Route::default().with_cost(cost),
+			route: origin::RouteInfo::default().with_cost(cost),
 		};
 		let events = [
 			announce::Event::Start(update("a", 1)),
@@ -2875,8 +2875,8 @@ mod announce_test {
 	#[test]
 	fn synced_survives_a_removed_initial_route_and_live_churn() {
 		let origin = Hop::new(1).unwrap().produce();
-		let removed = origin.announce("z/removed", origin::Route::default()).unwrap();
-		let _initial = origin.announce("z/retained", origin::Route::default()).unwrap();
+		let removed = origin.announce("z/removed", origin::RouteInfo::default()).unwrap();
+		let _initial = origin.announce("z/retained", origin::RouteInfo::default()).unwrap();
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();
 		let budget = kio::Producer::new(0usize);
@@ -2899,7 +2899,7 @@ mod announce_test {
 		drop(removed);
 		let mut churn = Vec::new();
 		for limit in 1..=4 {
-			churn.push(origin.announce(format!("a/{limit}"), origin::Route::default()).unwrap());
+			churn.push(origin.announce(format!("a/{limit}"), origin::RouteInfo::default()).unwrap());
 			*budget.write().ok().unwrap() = limit;
 			assert!(run.poll(&mut stream, &consumer, &mut announced, &waiter).is_pending());
 		}
@@ -2917,8 +2917,8 @@ mod announce_test {
 	#[test]
 	fn a_partial_regrant_cannot_overtake_an_initial_route() {
 		let origin = Hop::new(1).unwrap().produce();
-		let _a = origin.announce("a", origin::Route::default()).unwrap();
-		let _b = origin.announce("b", origin::Route::default()).unwrap();
+		let _a = origin.announce("a", origin::RouteInfo::default()).unwrap();
+		let _b = origin.announce("b", origin::RouteInfo::default()).unwrap();
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();
 		let budget = kio::Producer::new(1usize);
@@ -2959,8 +2959,8 @@ mod announce_test {
 	#[test]
 	fn synced_cuts_a_regrant_burst_at_the_initial_bound() {
 		let origin = Hop::new(1).unwrap().produce();
-		let _a = origin.announce("a", origin::Route::default()).unwrap();
-		let _b = origin.announce("b", origin::Route::default()).unwrap();
+		let _a = origin.announce("a", origin::RouteInfo::default()).unwrap();
+		let _b = origin.announce("b", origin::RouteInfo::default()).unwrap();
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();
 		let budget = kio::Producer::new(0usize);
@@ -2986,7 +2986,7 @@ mod announce_test {
 			panic!("the changed grant is ready");
 		};
 		run.regrant(&mut stream, &consumer, restricted).unwrap();
-		let _live = origin.announce("c", origin::Route::default()).unwrap();
+		let _live = origin.announce("c", origin::RouteInfo::default()).unwrap();
 		run.regrant(&mut stream, &consumer, crate::auth::Permit::default())
 			.unwrap();
 		*budget.write().ok().unwrap() = 4;
@@ -3015,8 +3015,8 @@ mod announce_test {
 	#[test]
 	fn a_seen_retraction_can_precede_synced() {
 		let origin = Hop::new(1).unwrap().produce();
-		let first = origin.announce("a", origin::Route::default()).unwrap();
-		let unseen = origin.announce("b", origin::Route::default()).unwrap();
+		let first = origin.announce("a", origin::RouteInfo::default()).unwrap();
+		let unseen = origin.announce("b", origin::RouteInfo::default()).unwrap();
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();
 		let budget = kio::Producer::new(1usize);
@@ -3171,7 +3171,7 @@ mod announce_test {
 	#[kio::test]
 	async fn a_silent_upstream_never_delays_the_answer() {
 		let origin = Hop::new(1).unwrap().produce();
-		let _route = origin.announce("cam", crate::origin::Route::default()).unwrap();
+		let _route = origin.announce("cam", crate::origin::RouteInfo::default()).unwrap();
 		// An upstream that never answers its announce request.
 		let _silent = origin.clone().with_link(crate::origin::Link::Upstream).snapshot("");
 
@@ -3205,7 +3205,7 @@ mod announce_test {
 		let announcement = origin
 			.announce(
 				"cam",
-				crate::origin::Route::default().with_hops(pub_hops()).with_cost(7),
+				crate::origin::RouteInfo::default().with_hops(pub_hops()).with_cost(7),
 			)
 			.unwrap();
 
@@ -3262,7 +3262,7 @@ mod announce_test {
 
 		let late = h
 			.origin
-			.announce("mic", crate::origin::Route::default().with_hops(pub_hops()))
+			.announce("mic", crate::origin::RouteInfo::default().with_hops(pub_hops()))
 			.unwrap();
 		settle().await;
 		match h.wire.take_announces().as_slice() {
@@ -3286,7 +3286,7 @@ mod announce_test {
 		let mut h = harness().await;
 
 		h.announcement
-			.update(crate::origin::Route::default().with_hops(pub_hops()).with_cost(3))
+			.update(crate::origin::RouteInfo::default().with_hops(pub_hops()).with_cost(3))
 			.unwrap();
 		kio::clock::sleep(crate::origin::Config::default().update_hold).await;
 		settle().await;
@@ -3305,7 +3305,7 @@ mod announce_test {
 	async fn identical_update_is_quiet() {
 		let h = harness().await;
 		h.announcement
-			.update(crate::origin::Route::default().with_hops(pub_hops()).with_cost(7))
+			.update(crate::origin::RouteInfo::default().with_hops(pub_hops()).with_cost(7))
 			.unwrap();
 		settle().await;
 		h.assert_idle();
@@ -3319,7 +3319,7 @@ mod announce_test {
 	async fn source_flip_restarts() {
 		for version in [Version::Lite06, Version::Lite07] {
 			let mut h = harness_on(version).await;
-			let route = crate::origin::Route::default().with_hops(pub_hops()).with_cost(7);
+			let route = crate::origin::RouteInfo::default().with_hops(pub_hops()).with_cost(7);
 			let newer = h.origin.announce("cam", route.clone()).unwrap();
 			// A restart waits out the update hold like an update.
 			kio::clock::sleep(crate::origin::Config::default().update_hold).await;
@@ -3366,7 +3366,7 @@ mod announce_test {
 		let mut h = harness_on(Version::Lite07).await;
 		let instance = crate::Instance::random();
 		let route = |epoch| {
-			crate::origin::Route::default()
+			crate::origin::RouteInfo::default()
 				.with_instance(instance.clone(), epoch)
 				.with_hops(pub_hops())
 				.with_cost(7)
@@ -3409,7 +3409,7 @@ mod announce_test {
 			let mut h = harness_with(Version::Lite07, Some(auth.clone())).await;
 
 			// Same chain and cost, so only the instance changed. Both land before the loop polls.
-			let route = crate::origin::Route::default().with_hops(pub_hops()).with_cost(7);
+			let route = crate::origin::RouteInfo::default().with_hops(pub_hops()).with_cost(7);
 			let named = (!anonymous).then(crate::Instance::random);
 			let route = match &named {
 				Some(instance) => route.with_instance(instance.clone(), 0),
@@ -3439,7 +3439,7 @@ mod announce_test {
 	#[kio::test]
 	async fn clamped_cost_change_is_quiet() {
 		let mut h = harness().await;
-		let route = |cost| crate::origin::Route::default().with_hops(pub_hops()).with_cost(cost);
+		let route = |cost| crate::origin::RouteInfo::default().with_hops(pub_hops()).with_cost(cost);
 		h.announcement.update(route(u64::MAX)).unwrap();
 		kio::clock::sleep(crate::origin::Config::default().update_hold).await;
 		settle().await;
@@ -3460,10 +3460,10 @@ mod announce_test {
 
 		let tainted = Hops::try_from(vec![peer]).unwrap();
 		let _tainted = origin
-			.announce("echoed", crate::origin::Route::default().with_hops(tainted))
+			.announce("echoed", crate::origin::RouteInfo::default().with_hops(tainted))
 			.unwrap();
 		let _clean = origin
-			.announce("local", crate::origin::Route::default().with_hops(pub_hops()))
+			.announce("local", crate::origin::RouteInfo::default().with_hops(pub_hops()))
 			.unwrap();
 
 		let log = Log::default();
@@ -3499,7 +3499,7 @@ mod announce_test {
 		let mut h = harness().await;
 		let _late = h
 			.origin
-			.announce("mic", crate::origin::Route::default().with_hops(pub_hops()))
+			.announce("mic", crate::origin::RouteInfo::default().with_hops(pub_hops()))
 			.unwrap();
 		settle().await;
 		match h.wire.take_announces().as_slice() {
@@ -3515,7 +3515,7 @@ mod announce_test {
 		let mut h = harness().await;
 		h.announcement
 			.update(
-				crate::origin::Route::default()
+				crate::origin::RouteInfo::default()
 					.with_hops(pub_hops())
 					.with_cost(u64::MAX),
 			)
@@ -6457,7 +6457,7 @@ mod serve_group_test {
 			for objects in [&[1, 2][..], &[0, 1, 2]] {
 				for max in [1, 1200] {
 					let origin = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
-					let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
+					let broadcast = origin.route("room", crate::origin::RouteOptions::default()).unwrap();
 					let info = track::Info {
 						properties: Some(Arc::new(crate::model::object::TrackProperties {
 							version: crate::ietf::Version::Draft22,
@@ -6465,7 +6465,7 @@ mod serve_group_test {
 						})),
 						..track::Info::timed()
 					};
-					let _track = broadcast.create_track("test", info).unwrap();
+					let _track = broadcast.broadcast().create_track("test", info).unwrap();
 					let registry = crate::stats::Registry::new(Default::default());
 					let tagged = origin.consume().with_stats(
 						registry
@@ -7180,10 +7180,10 @@ mod serve_group_test {
 			let mut starts = Vec::new();
 			for warm in [false, true] {
 				let publisher = origin(1);
-				let broadcast = publisher.create_broadcast("room").unwrap();
-				let mut track = broadcast.create_track("test", crate::track::Info::timed()).unwrap();
+				let broadcast = publisher.route("room", crate::origin::RouteOptions::hidden()).unwrap();
+				let mut track = broadcast.broadcast().create_track("test", crate::track::Info::timed()).unwrap();
 				track.start_at(0).unwrap();
-				broadcast.announce(Default::default()).unwrap();
+				broadcast.announce().unwrap();
 				let relay = origin(2);
 				let _upstream = connect(version, &publisher, &relay).await;
 				let remote = relay.consume().follow("room", None).unwrap().available().await.unwrap();
@@ -7957,9 +7957,9 @@ mod tests {
 		let mut echoed_hops = Hops::new();
 		echoed_hops.push(crate::Hop::UNKNOWN).unwrap();
 		let _echoed = origin
-			.requests_route(
+			.forward(
 				"echoed",
-				crate::origin::Route::default()
+				crate::origin::RouteInfo::default()
 					.with_hops(echoed_hops)
 					.with_via(assigned),
 				None,
@@ -7969,7 +7969,7 @@ mod tests {
 		let mut local_hops = Hops::new();
 		local_hops.push(upstream).unwrap();
 		let _local = origin
-			.requests_route("local", crate::origin::Route::default().with_hops(local_hops), None)
+			.forward("local", crate::origin::RouteInfo::default().with_hops(local_hops), None)
 			.unwrap();
 
 		// A SETUP that declares no origin of its own, so only the assigned one applies.
@@ -8020,7 +8020,7 @@ mod tests {
 		let _tainted = origin
 			.announce(
 				"echoed",
-				crate::origin::Route::default()
+				crate::origin::RouteInfo::default()
 					.with_hops(tainted_hops)
 					.with_via(assigned),
 			)
@@ -8029,7 +8029,7 @@ mod tests {
 		let mut clean_hops = Hops::new();
 		clean_hops.push(clean_publisher).unwrap();
 		let _clean = origin
-			.announce("local", crate::origin::Route::default().with_hops(clean_hops))
+			.announce("local", crate::origin::RouteInfo::default().with_hops(clean_hops))
 			.unwrap();
 
 		let gate = kio::Producer::new(true);
@@ -8074,7 +8074,7 @@ mod tests {
 		let _broadcasts: Vec<_> = (0..max / 500 + 1)
 			.map(|i| {
 				origin
-					.announce(format!("{name}{i}"), crate::origin::Route::default())
+					.announce(format!("{name}{i}"), crate::origin::RouteInfo::default())
 					.unwrap()
 			})
 			.collect();
@@ -8105,7 +8105,7 @@ mod tests {
 	async fn announce_init_broadcast_ends() {
 		let self_origin = crate::Hop::new(1).unwrap();
 		let origin = crate::origin::Config::new(self_origin).produce();
-		let cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
+		let cam = origin.announce("cam", crate::origin::RouteInfo::default()).unwrap();
 
 		let gate = kio::Producer::new(true);
 		let session = SinkSession::gated_bi(gate.consume());
@@ -8141,7 +8141,7 @@ mod tests {
 	async fn withdraw_before_init_sends_the_initial_burst() {
 		let self_origin = crate::Hop::new(1).unwrap();
 		let origin = crate::origin::Config::new(self_origin).produce();
-		let _cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
+		let _cam = origin.announce("cam", crate::origin::RouteInfo::default()).unwrap();
 
 		let gate = kio::Producer::new(true);
 		let session = SinkSession::gated_bi(gate.consume());
@@ -8512,14 +8512,14 @@ mod tests {
 			Wait::Broadcast => {
 				_route = Some(
 					origin
-						.requests_route("room", crate::origin::Route::default(), None)
+						.forward("room", crate::origin::RouteInfo::default(), None)
 						.unwrap(),
 				)
 			}
 			Wait::Track => {
-				let broadcast = origin.create_broadcast("room").unwrap();
-				let dynamic = broadcast.requests();
-				broadcast.announce(Default::default()).unwrap();
+				let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
+				let dynamic = broadcast.broadcast().requests();
+				broadcast.announce().unwrap();
 				held = Some((broadcast, dynamic));
 			}
 		}
@@ -8711,9 +8711,9 @@ mod tests {
 	async fn track_info_outranks_the_track_groups() {
 		let version = Version::Lite07;
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let broadcast = origin.create_broadcast("room").unwrap();
-		let _track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
+		let _track = broadcast.broadcast().create_track("video", crate::track::Info::timed()).unwrap();
+		broadcast.announce().unwrap();
 		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
 		peer_setup.set(crate::lite::Setup::default());
 		let (_, goaway) = crate::goaway::Handle::new(true);
@@ -8768,9 +8768,9 @@ mod tests {
 				for blocked in [false, true] {
 					let case = format!("{version:?}, {close:?}, blocked {blocked}");
 					let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-					let broadcast = origin.create_broadcast("room").unwrap();
-					let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
-					broadcast.announce(Default::default()).unwrap();
+					let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
+					let track = broadcast.broadcast().create_track("video", crate::track::Info::timed()).unwrap();
+					broadcast.announce().unwrap();
 
 					let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
 					peer_setup.set(crate::lite::Setup::default());
@@ -8862,9 +8862,9 @@ mod tests {
 	#[kio::test]
 	async fn a_subscribe_update_is_not_a_close() {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let broadcast = origin.create_broadcast("room").unwrap();
-		let mut dynamic = broadcast.requests();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
+		let mut dynamic = broadcast.broadcast().requests();
+		broadcast.announce().unwrap();
 
 		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
 		peer_setup.set(crate::lite::Setup::default());
@@ -8966,7 +8966,7 @@ mod tests {
 		serve: RequestServe<SubscribeServe>,
 		session: ScriptedSession,
 		track: track::Producer,
-		_broadcast: crate::origin::Publication,
+		_broadcast: crate::origin::Route,
 		_origin: crate::origin::Producer,
 	}
 
@@ -8984,9 +8984,9 @@ mod tests {
 
 	async fn running() -> Running {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let broadcast = origin.create_broadcast("room").unwrap();
-		let mut dynamic = broadcast.requests();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
+		let mut dynamic = broadcast.broadcast().requests();
+		broadcast.announce().unwrap();
 
 		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
 		peer_setup.set(crate::lite::Setup::default());
@@ -9237,8 +9237,8 @@ mod tests {
 	#[kio::test]
 	async fn a_cold_bounded_fetch_requests_the_prefix() {
 		let origin = crate::origin::Config::new(Hop::new(1).unwrap()).produce();
-		let broadcast = origin.create_broadcast("room").unwrap();
-		let track = broadcast.create_track("video", track::Info::timed()).unwrap();
+		let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
+		let track = broadcast.broadcast().create_track("video", track::Info::timed()).unwrap();
 		let dynamic = track.requests();
 		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
 		peer_setup.set(crate::lite::Setup::default());
@@ -9270,7 +9270,7 @@ mod tests {
 				end_frame: Some(3),
 			},
 			"video",
-			broadcast.consume(),
+			broadcast.broadcast().consume(),
 		)
 		.unwrap();
 		let request = dynamic.requested_fill_group().await.unwrap();
@@ -9284,9 +9284,9 @@ mod tests {
 	async fn an_expired_fetch_resets_rather_than_finishing() {
 		const VERSION: Version = Version::Lite07;
 		let origin = crate::origin::Config::new(Hop::new(1).unwrap()).produce();
-		let broadcast = origin.create_broadcast("room").unwrap();
-		let track = broadcast.create_track("video", track::Info::timed()).unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
+		let track = broadcast.broadcast().create_track("video", track::Info::timed()).unwrap();
+		broadcast.announce().unwrap();
 		let mut open = track.append_group().unwrap();
 		open.write_frame(crate::Timestamp::ZERO, b"a".to_vec()).unwrap();
 
@@ -9427,9 +9427,9 @@ mod tests {
 		use kio::Task;
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			let origin = crate::origin::Config::new(Hop::random()).produce();
-			let broadcast = origin.create_broadcast("room").unwrap();
-			let _dynamic = broadcast.requests();
-			broadcast.announce(Default::default()).unwrap();
+			let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
+			let _dynamic = broadcast.broadcast().requests();
+			broadcast.announce().unwrap();
 			let request = lite::Subscribe {
 				order: crate::track::Order::Descending,
 				instance: None,
@@ -9486,8 +9486,8 @@ mod tests {
 		use kio::Task;
 		let version = Version::Lite07;
 		let origin = crate::origin::Config::new(Hop::random()).produce();
-		let broadcast = origin.create_broadcast("room").unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
+		broadcast.announce().unwrap();
 		let request = lite::Tracks {
 			broadcast: crate::Path::from_static("room"),
 			instance: None,
@@ -9539,9 +9539,9 @@ mod tests {
 		use kio::Task;
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			let origin = crate::origin::Config::new(Hop::random()).produce();
-			let broadcast = origin.create_broadcast("room").unwrap();
-			let mut dynamic = broadcast.requests();
-			broadcast.announce(Default::default()).unwrap();
+			let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
+			let mut dynamic = broadcast.broadcast().requests();
+			broadcast.announce().unwrap();
 			let request = lite::Subscribe {
 				order: crate::track::Order::Descending,
 				instance: None,
@@ -9725,9 +9725,9 @@ mod tests {
 	#[kio::test]
 	async fn send_group_ranks_by_the_subscriber_then_the_publisher() {
 		let origin = crate::origin::Config::new(Hop::new(1).unwrap()).produce();
-		let broadcast = origin.create_broadcast("a").unwrap();
-		let mut dynamic = broadcast.requests();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = origin.route("a", crate::origin::RouteOptions::hidden()).unwrap();
+		let mut dynamic = broadcast.broadcast().requests();
+		broadcast.announce().unwrap();
 		let (publisher, log) = grouped_publisher(origin.consume());
 
 		let video = track::Info::timed().with_priority(60);

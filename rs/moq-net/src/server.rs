@@ -1541,7 +1541,7 @@ mod tests {
 		let _echoed = origin
 			.announce(
 				"echoed-route",
-				crate::origin::Route::default()
+				crate::origin::RouteInfo::default()
 					.with_hops(echoed_hops)
 					.with_via(assigned),
 			)
@@ -1550,7 +1550,7 @@ mod tests {
 		let mut local_hops = crate::Hops::new();
 		local_hops.push(other).unwrap();
 		let _local = origin
-			.announce("local-route", crate::origin::Route::default().with_hops(local_hops))
+			.announce("local-route", crate::origin::RouteInfo::default().with_hops(local_hops))
 			.unwrap();
 
 		let (session, driver) = request.ok().await.unwrap();

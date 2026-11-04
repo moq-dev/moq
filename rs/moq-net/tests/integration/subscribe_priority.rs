@@ -48,11 +48,11 @@ async fn priority(track: &moq_net::track::Producer, want: i8) -> Result<(), Stri
 /// publisher sees the priority rise and fall back.
 async fn follows(version: Version, relay: bool) -> Result<(), String> {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("bcast").unwrap();
+	let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
 	let track = broadcast
-		.create_track("video", Info::default().with_timescale(Timescale::MILLI))
+		.broadcast().create_track("video", Info::default().with_timescale(Timescale::MILLI))
 		.unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 
 	let relay_origin = produce_origin(2);
 	let subscriber = produce_origin(3);

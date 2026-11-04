@@ -45,14 +45,14 @@ fn millis(ms: u64) -> Timestamp {
 /// over one session on it.
 async fn read(version: Option<&str>, range: Range) -> Result<Vec<u64>, Error> {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("room").unwrap();
+	let broadcast = publisher.route("room", moq_net::origin::RouteOptions::hidden()).unwrap();
 	let track = broadcast
-		.create_track(
+		.broadcast().create_track(
 			"data",
 			Info::default().with_timescale(Timescale::MILLI).with_max_age(FOREVER),
 		)
 		.unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 	for sequence in 0..5 {
 		let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
 		group.write_frame(millis(sequence * 1000), &b"x"[..]).unwrap();

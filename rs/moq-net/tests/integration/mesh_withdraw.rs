@@ -99,14 +99,14 @@ impl Mesh {
 
 	/// Publish `count` broadcasts spread over every relay but the watcher, starting
 	/// at relay `offset`, and require the watcher to see each announced.
-	async fn publish(&mut self, count: usize, offset: usize) -> Vec<moq_net::origin::Publication> {
+	async fn publish(&mut self, count: usize, offset: usize) -> Vec<moq_net::origin::Route> {
 		let relays = self.nodes.len() - 1;
 		let broadcasts = (0..count)
 			.map(|i| {
 				let broadcast = self.nodes[(i + offset) % relays]
-					.create_broadcast(format!("room/{i}"))
+					.route(format!("room/{i}"), moq_net::origin::RouteOptions::hidden())
 					.unwrap();
-				broadcast.announce(Default::default()).unwrap();
+				broadcast.announce().unwrap();
 				broadcast
 			})
 			.collect();
@@ -226,8 +226,8 @@ async fn partial_mesh_withdraw_retracts_once() {
 	let mut watched: Vec<_> = nodes.iter().map(|node| watch(node.consume().announced())).collect();
 
 	for publisher in [5, 13, 22, 26, 32] {
-		let broadcast = nodes[publisher].create_broadcast(format!("room/{publisher}")).unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = nodes[publisher].route(format!("room/{publisher}"), moq_net::origin::RouteOptions::hidden()).unwrap();
+		broadcast.announce().unwrap();
 		kio::clock::sim::idle().await;
 		for (relay, watched) in watched.iter_mut().enumerate() {
 			let updates = drain(watched);
@@ -280,8 +280,8 @@ async fn retracted_relay_ignores_a_stale_path() {
 	}
 	let mut watched: Vec<_> = nodes.iter().map(|node| watch(node.consume().announced())).collect();
 
-	let broadcast = nodes[7].create_broadcast("room/7").unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = nodes[7].route("room/7", moq_net::origin::RouteOptions::hidden()).unwrap();
+	broadcast.announce().unwrap();
 	kio::clock::sim::idle().await;
 	for watched in watched.iter_mut() {
 		drain(watched);
@@ -362,9 +362,9 @@ impl Cluster {
 
 	/// Publish `path` from the client and require everyone to see it. Returns
 	/// what the watching client saw.
-	async fn publish(&mut self, path: &str) -> (moq_net::origin::Publication, Vec<Kind>) {
-		let broadcast = self.publisher.create_broadcast(path).unwrap();
-		broadcast.announce(Default::default()).unwrap();
+	async fn publish(&mut self, path: &str) -> (moq_net::origin::Route, Vec<Kind>) {
+		let broadcast = self.publisher.route(path, moq_net::origin::RouteOptions::hidden()).unwrap();
+		broadcast.announce().unwrap();
 		kio::clock::sim::idle().await;
 		let client = drain(&mut self.client).remove(path).unwrap();
 		assert_ne!(client.last(), Some(&Kind::End), "client: {client:?}");
@@ -376,7 +376,7 @@ impl Cluster {
 	}
 
 	/// Close `broadcast` cleanly: what the watching client, then each relay, saw.
-	async fn close(&mut self, path: &str, broadcast: moq_net::origin::Publication) -> (Vec<Kind>, Vec<Vec<Kind>>) {
+	async fn close(&mut self, path: &str, broadcast: moq_net::origin::Route) -> (Vec<Kind>, Vec<Vec<Kind>>) {
 		drop(broadcast);
 		kio::clock::sim::idle().await;
 		let client = drain(&mut self.client).remove(path).unwrap();
@@ -474,8 +474,8 @@ async fn late_better_path(mesh: &str, client: &str) -> (Vec<Kind>, Vec<Kind>) {
 	kio::clock::sim::idle().await;
 	assert!(drain(&mut watcher).is_empty());
 
-	let broadcast = publishing.create_broadcast("room/a").unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = publishing.route("room/a", moq_net::origin::RouteOptions::hidden()).unwrap();
+	broadcast.announce().unwrap();
 	kio::clock::sim::idle().await;
 	let published = drain(&mut watcher).remove("room/a").unwrap();
 	drop(broadcast);
@@ -713,7 +713,7 @@ async fn hop_limit_bounds_receive_and_send() {
 		let mut sent = watch(sink.consume().announced());
 		kio::clock::sim::idle().await;
 		let route = |count: u64| {
-			origin::Route::default().with_hops(
+			origin::RouteInfo::default().with_hops(
 				moq_net::Hops::try_from((100..100 + count).map(|id| Hop::new(id).unwrap()).collect::<Vec<_>>())
 					.unwrap(),
 			)
@@ -778,7 +778,7 @@ async fn hop_limit_falls_back_to_a_forwardable_route() {
 		kio::clock::sim::idle().await;
 
 		let route = |first: u64, count: u64, cost: u64| {
-			origin::Route::default()
+			origin::RouteInfo::default()
 				.with_hops(
 					moq_net::Hops::try_from(
 						(first..first + count)

@@ -37,20 +37,20 @@ async fn settle() {
 /// A worker claiming `claim`, answering each request with an output whose `video` track
 /// carries the worker's name.
 struct Worker {
-	_claim: Rc<origin::Requests>,
-	outputs: Rc<RefCell<Vec<(origin::Publication, track::Producer)>>>,
+	_claim: Rc<origin::Route>,
+	outputs: Rc<RefCell<Vec<(origin::Route, track::Producer)>>>,
 	origin: origin::Producer,
 }
 
 impl Worker {
 	fn new(hop: u64, claim: &str, name: &'static str) -> Self {
 		let origin = produce_origin(hop);
-		let claim = Rc::new(origin.requests(claim).unwrap());
+		let claim = Rc::new(origin.route_prefix(claim, moq_net::origin::RouteOptions::default()).unwrap());
 		let outputs = Rc::new(RefCell::new(Vec::new()));
 		let (handler, served) = (claim.clone(), outputs.clone());
 		drop(kio::clock::sim::spawn(async move {
-			while let Ok(request) = handler.requested_broadcast().await {
-				let prepared = request.prepare().unwrap();
+			while let Ok(request) = handler.requested().await {
+				let prepared = request.route(moq_net::origin::RouteOptions::hidden()).unwrap();
 				let track = prepared
 					.broadcast()
 					.create_track(
@@ -61,7 +61,7 @@ impl Worker {
 				let mut group = track.append_group().unwrap();
 				group.write_frame(Timestamp::ZERO, name.as_bytes().to_vec()).unwrap();
 				group.finish().unwrap();
-				served.borrow_mut().push((prepared.publish().unwrap(), track));
+				served.borrow_mut().push((prepared.announce().unwrap(), track));
 			}
 		}));
 		Self {
@@ -220,7 +220,7 @@ async fn an_unrequested_publish_is_a_start() {
 		let mut announced = relay.consume().announced();
 		assert_eq!(drain(&mut announced).await, [("start", "pool".to_string(), None)]);
 
-		let _direct = worker.origin.publish("pool/q", origin::Route::default()).unwrap();
+		let _direct = worker.origin.route("pool/q", moq_net::origin::RouteOptions::default()).unwrap();
 		settle().await;
 		assert_eq!(drain(&mut announced).await, [("start", "pool/q".to_string(), None)]);
 	})

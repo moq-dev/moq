@@ -30,10 +30,10 @@ async fn a_segmented_frame_crosses_whole() {
 		let version: Version = version.parse().unwrap();
 		let publisher = origin(1);
 		let viewer = origin(2);
-		let broadcast = publisher.create_broadcast("room").unwrap();
+		let broadcast = publisher.route("room", moq_net::origin::RouteOptions::hidden()).unwrap();
 		let info = track::Info::default().with_timescale(moq_net::Timescale::MILLI);
-		let track = broadcast.create_track("file", info).unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let track = broadcast.broadcast().create_track("file", info).unwrap();
+		broadcast.announce().unwrap();
 
 		let mut options = MockConnectOptions::new(version);
 		options.server_publish = Some(publisher.consume());

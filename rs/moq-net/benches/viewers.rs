@@ -67,7 +67,7 @@ struct Room {
 	producer: origin::Producer,
 	driver: origin::Driver,
 	broadcasts: usize,
-	_sources: Vec<(origin::Publication, moq_net::track::Producer)>,
+	_sources: Vec<(origin::Route, moq_net::track::Producer)>,
 }
 
 impl Room {
@@ -75,7 +75,7 @@ impl Room {
 		let (producer, driver) = origin::Producer::new(origin::Config::default());
 		let _sources = (0..broadcasts)
 			.map(|i| {
-				let broadcast = producer.publish(format!("room/{i}"), origin::Route::default()).unwrap();
+				let broadcast = producer.route(format!("room/{i}"), moq_net::origin::RouteOptions::default()).unwrap();
 				let track = broadcast.create_track("video", timed()).unwrap();
 				let mut group = track.append_group().unwrap();
 				group.write_frame(Timestamp::ZERO, b"frame".as_ref()).unwrap();
@@ -181,7 +181,7 @@ fn bench_churn(c: &mut Criterion) {
 				room.leave(subscription);
 			}
 			b.iter(|| {
-				let covering = room.producer.requests("room").unwrap();
+				let covering = room.producer.route_prefix("room", moq_net::origin::RouteOptions::default()).unwrap();
 				room.poll();
 				drop(covering);
 				room.poll();

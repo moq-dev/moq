@@ -19,10 +19,10 @@ async fn largest_quic_sequence_reaches_the_subscriber() {
 			let publisher = produce_origin(1);
 			let relay = produce_origin(2);
 			let client = produce_origin(3);
-			let broadcast = publisher.create_broadcast("ladder").unwrap();
+			let broadcast = publisher.route("ladder", moq_net::origin::RouteOptions::hidden()).unwrap();
 			let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MICRO);
-			let track = broadcast.create_track("data", info).unwrap();
-			broadcast.announce(Default::default()).unwrap();
+			let track = broadcast.broadcast().create_track("data", info).unwrap();
+			broadcast.announce().unwrap();
 			let mut options = MockConnectOptions::new(version);
 			options.server_publish = Some(publisher.consume());
 			options.client_subscribe = Some(if relayed { relay.clone() } else { client.clone() });
@@ -86,10 +86,10 @@ async fn wide_sequence_fails_only_its_subscription() {
 	let relay = produce_origin(2);
 	let client = produce_origin(3);
 
-	let broadcast = publisher.create_broadcast("bench").unwrap();
-	let wide = broadcast.create_track("wide", timed()).unwrap();
-	let narrow = broadcast.create_track("narrow", timed()).unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = publisher.route("bench", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let wide = broadcast.broadcast().create_track("wide", timed()).unwrap();
+	let narrow = broadcast.broadcast().create_track("narrow", timed()).unwrap();
+	broadcast.announce().unwrap();
 	let mut group = wide.create_group(moq_net::group::Info { sequence: WIDE }).unwrap();
 	group.write_frame(Timestamp::ZERO, b"wide".as_ref()).unwrap();
 	let mut group = narrow.append_group().unwrap();
@@ -146,10 +146,10 @@ async fn a_later_wide_group_fails_only_that_subscription() {
 	let relay = produce_origin(2);
 	let client = produce_origin(3);
 
-	let broadcast = publisher.create_broadcast("bench").unwrap();
-	let wide = broadcast.create_track("wide", timed()).unwrap();
-	let narrow = broadcast.create_track("narrow", timed()).unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = publisher.route("bench", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let wide = broadcast.broadcast().create_track("wide", timed()).unwrap();
+	let narrow = broadcast.broadcast().create_track("narrow", timed()).unwrap();
+	broadcast.announce().unwrap();
 	let mut group = wide.append_group().unwrap();
 	group.write_frame(Timestamp::ZERO, b"first".as_ref()).unwrap();
 	let mut group = narrow.append_group().unwrap();

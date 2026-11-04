@@ -30,9 +30,9 @@ async fn abandoned_request_reaches_the_publisher(version: &str, relays: u64) {
 		_pairs.push(peer(version, &pair[0], &pair[1]).await);
 	}
 
-	let broadcast = nodes[0].create_broadcast("room").unwrap();
-	let mut dynamic = broadcast.requests();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = nodes[0].route("room", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let mut dynamic = broadcast.broadcast().requests();
+	broadcast.announce().unwrap();
 	kio::clock::sleep(Duration::from_secs(1)).await;
 
 	let consumer = nodes[relays as usize].consume().request("room", None).await.unwrap();
@@ -70,9 +70,9 @@ async fn withdrawn_broadcast_releases_track_info(version: &str, answered: bool, 
 	let version: Version = version.parse().unwrap();
 	let publisher = produce_origin(1);
 	let reader = produce_origin(2);
-	let broadcast = publisher.create_broadcast("room").unwrap();
-	let mut dynamic = broadcast.requests();
-	let mut route = origin::Route::default();
+	let broadcast = publisher.route("room", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let mut dynamic = broadcast.broadcast().requests();
+	let mut route = origin::RouteInfo::default();
 	if explicit {
 		route.instance = Some("019a1234-5678-7000-8000-000000000001".parse().unwrap());
 	}
@@ -104,7 +104,7 @@ async fn withdrawn_broadcast_releases_track_info(version: &str, answered: bool, 
 		None
 	};
 	let finished = pair.client_transport.finished_streams();
-	broadcast.close();
+	broadcast.broadcast().close();
 	kio::clock::timeout(Duration::from_secs(5), crate::support::unwanted(demand))
 		.await
 		.unwrap_or_else(|_| panic!("{version}, answered={answered}, explicit={explicit}: TRACK outlived its broadcast"))

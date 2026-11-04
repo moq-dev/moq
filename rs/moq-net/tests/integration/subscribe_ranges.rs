@@ -61,11 +61,11 @@ async fn subscribe(remote: &moq_net::broadcast::Consumer, subscription: Subscrip
 /// one joins.
 async fn ahead_then_live(version: Option<&str>, relay: bool) -> (Vec<u64>, Vec<u64>) {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("bcast").unwrap();
+	let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
 	let track = broadcast
-		.create_track("quiet", Info::default().with_timescale(moq_net::Timescale::MILLI))
+		.broadcast().create_track("quiet", Info::default().with_timescale(moq_net::Timescale::MILLI))
 		.unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 	for sequence in 0..=3 {
 		write_group(&track, sequence);
 	}
@@ -74,7 +74,7 @@ async fn ahead_then_live(version: Option<&str>, relay: bool) -> (Vec<u64>, Vec<u
 	let subscriber = produce_origin(3);
 	let mut sessions = Vec::new();
 	let remote = match version {
-		None => broadcast.consume(),
+		None => broadcast.broadcast().consume(),
 		Some(version) => {
 			let version: Version = version.parse().unwrap();
 			if relay {
@@ -126,11 +126,11 @@ async fn sparse_ranges_reach_the_publisher_on_lite07() {
 	let sparse = [Range::groups(0..1), Range::groups(3..4)];
 	for version in LITE {
 		let publisher = produce_origin(1);
-		let broadcast = publisher.create_broadcast("bcast").unwrap();
+		let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
 		let track = broadcast
-			.create_track("quiet", Info::default().with_timescale(moq_net::Timescale::MILLI))
+			.broadcast().create_track("quiet", Info::default().with_timescale(moq_net::Timescale::MILLI))
 			.unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		broadcast.announce().unwrap();
 
 		let subscriber = produce_origin(2);
 		let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
@@ -197,7 +197,7 @@ struct RangeFixture {
 	remote: moq_net::broadcast::Consumer,
 	_sessions: Vec<support::harness::MockPair>,
 	_origins: [moq_net::origin::Producer; 3],
-	_broadcast: moq_net::origin::Publication,
+	_broadcast: moq_net::origin::Route,
 }
 
 async fn range_fixture(relay: bool) -> RangeFixture {
@@ -210,11 +210,11 @@ async fn range_fixture_version(version: &str, relay: bool) -> RangeFixture {
 
 async fn range_fixture_history(version: &str, relay: bool, history: u64) -> RangeFixture {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("ranges").unwrap();
+	let broadcast = publisher.route("ranges", moq_net::origin::RouteOptions::hidden()).unwrap();
 	let track = broadcast
-		.create_track("quiet", Info::default().with_timescale(moq_net::Timescale::MILLI))
+		.broadcast().create_track("quiet", Info::default().with_timescale(moq_net::Timescale::MILLI))
 		.unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 	for sequence in 0..history {
 		let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
 		group
@@ -745,11 +745,11 @@ async fn unresolved_time_reader_never_changes_sibling_demand() {
 async fn a_covered_bounded_subscription_stays_open() {
 	for version in LITE {
 		let publisher = produce_origin(1);
-		let broadcast = publisher.create_broadcast("bcast").unwrap();
+		let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
 		let track = broadcast
-			.create_track("quiet", Info::default().with_timescale(moq_net::Timescale::MILLI))
+			.broadcast().create_track("quiet", Info::default().with_timescale(moq_net::Timescale::MILLI))
 			.unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		broadcast.announce().unwrap();
 		for sequence in [0, 1, 2, 4, 5] {
 			write_group(&track, sequence);
 		}

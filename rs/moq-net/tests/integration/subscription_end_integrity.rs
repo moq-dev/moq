@@ -56,9 +56,9 @@ fn expected() -> Vec<Vec<u8>> {
 /// payloads and the error it ended with, if any.
 async fn round(drop_session: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("bcast").unwrap();
-	let track = broadcast.create_track("video", timed()).unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+	broadcast.announce().unwrap();
 
 	let subscriber = produce_origin(2);
 	let mut options = MockConnectOptions::new("moq-lite-05".parse::<Version>().unwrap());
@@ -213,9 +213,9 @@ enum Kill {
 /// `recv_group` and that group end with once it drains what arrived.
 async fn killed(version: &str, kill: Kill) -> (Option<moq_net::Error>, Option<moq_net::Error>) {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("bcast").unwrap();
-	let track = broadcast.create_track("video", timed()).unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+	broadcast.announce().unwrap();
 
 	let subscriber = produce_origin(2);
 	let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
@@ -318,9 +318,9 @@ async fn a_session_close_cancels_the_track_from_either_side() {
 /// the error the fetch ends with.
 async fn fetch_killed(version: &str, kill: Kill) -> moq_net::Error {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("bcast").unwrap();
-	let mut dynamic = broadcast.requests();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let mut dynamic = broadcast.broadcast().requests();
+	broadcast.announce().unwrap();
 
 	let subscriber = produce_origin(2);
 	let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());

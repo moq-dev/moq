@@ -16,9 +16,9 @@ fn origin_front_serves_media_with_only_explicit_polls() {
 	let waiter = kio::Waiter::noop();
 	let (origin, mut driver) = origin::Producer::new(origin::Config::new(Hop::new(1).unwrap()));
 	driver.poll(now, &waiter).unwrap();
-	let broadcast = origin.create_broadcast("room/live").unwrap();
+	let broadcast = origin.route("room/live", moq_net::origin::RouteOptions::hidden()).unwrap();
 	let track = broadcast
-		.create_track(
+		.broadcast().create_track(
 			"video",
 			track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 		)
@@ -26,7 +26,7 @@ fn origin_front_serves_media_with_only_explicit_polls() {
 	let mut group = track.create_group(group::Info { sequence: 7 }).unwrap();
 	group.write_frame(Timestamp::ZERO, b"media").unwrap();
 	group.finish().unwrap();
-	broadcast.announce(origin::Route::default()).unwrap();
+	broadcast.announce().unwrap();
 
 	// Resolving and subscribing pass through the origin's core front tasks.
 	let mut requesting = origin.consume().request("room/live", None);
@@ -44,7 +44,7 @@ fn origin_front_serves_media_with_only_explicit_polls() {
 
 	// Driver teardown also works without any executor-owned tasks.
 	drop(driver);
-	assert!(matches!(origin.create_broadcast("after-close"), Err(Error::Closed)));
+	assert!(matches!(origin.route("after-close", moq_net::origin::RouteOptions::hidden()), Err(Error::Closed)));
 }
 
 #[test]
@@ -57,11 +57,11 @@ fn follow_resolves_with_only_explicit_polls() {
 	// Nothing covers the path yet: the follower waits for an announcement.
 	let mut following = origin.consume().follow("room/live", None).unwrap();
 	assert!(following.poll_available(&waiter).is_pending());
-	let broadcast = origin.create_broadcast("room/live").unwrap();
+	let broadcast = origin.route("room/live", moq_net::origin::RouteOptions::hidden()).unwrap();
 	assert!(following.poll_available(&waiter).is_pending());
 
 	// Announcing starts the path, so the next poll asks and the driver serves it.
-	broadcast.announce(origin::Route::default()).unwrap();
+	broadcast.announce().unwrap();
 	assert!(following.poll_available(&waiter).is_pending());
 	driver.poll(now, &waiter).unwrap();
 	let resolved = ready(following.poll_available(&waiter)).unwrap();

@@ -73,11 +73,11 @@ impl Chain {
 		if let Some(relay) = &relay {
 			links.push(peer(version, relay, &viewer).await);
 		}
-		let broadcast = publisher.create_broadcast("live").unwrap();
+		let broadcast = publisher.route("live", moq_net::origin::RouteOptions::hidden()).unwrap();
 		let source = broadcast
-			.create_track("video", Info::default().with_timescale(Timescale::MILLI))
+			.broadcast().create_track("video", Info::default().with_timescale(Timescale::MILLI))
 			.unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		broadcast.announce().unwrap();
 		Self {
 			source,
 			viewer,
@@ -299,9 +299,9 @@ async fn wider_newcomers_after_the_first_pull_nothing_upstream() {
 		.tier(moq_net::stats::Tier::new(moq_net::Path::from_static("upstream")))
 		.session(moq_net::Path::from_static(""));
 	let _upstream = connect_mock(options).await;
-	let broadcast = publisher.create_broadcast("live").unwrap();
+	let broadcast = publisher.route("live", moq_net::origin::RouteOptions::hidden()).unwrap();
 	let source = broadcast
-		.create_track("video", Info::default().with_timescale(Timescale::MILLI))
+		.broadcast().create_track("video", Info::default().with_timescale(Timescale::MILLI))
 		.unwrap();
 	for sequence in 0..GROUPS {
 		let mut group = source.create_group(moq_net::group::Info { sequence }).unwrap();
@@ -310,7 +310,7 @@ async fn wider_newcomers_after_the_first_pull_nothing_upstream() {
 			.unwrap();
 		group.finish().unwrap();
 	}
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 
 	let mut links = Vec::new();
 	let mut readers = Vec::new();

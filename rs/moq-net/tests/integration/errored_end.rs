@@ -78,10 +78,10 @@ async fn an_errored_end_keeps_its_history_across_a_hop() {
 		let label = format!("{name} subscribe_first={subscribe_first}");
 		let version: Version = name.parse().unwrap();
 		let publisher = produce_origin(1);
-		let broadcast = publisher.create_broadcast("bcast").unwrap();
+		let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
 		let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
-		let mut track = broadcast.create_track("video", info).unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let mut track = broadcast.broadcast().create_track("video", info).unwrap();
+		broadcast.announce().unwrap();
 		for _ in 0..GROUPS {
 			let mut group = track.append_group().unwrap();
 			for frame in FRAMES {

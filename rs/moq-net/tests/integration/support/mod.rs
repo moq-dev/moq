@@ -24,7 +24,7 @@ pub async fn unwanted(mut demand: track::Demand) -> moq_net::Result<()> {
 
 /// Wait until `consumer` sees a route announced at exactly `path`, and return it.
 #[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
-pub async fn announced(consumer: &origin::Consumer, path: &str) -> origin::Route {
+pub async fn announced(consumer: &origin::Consumer, path: &str) -> origin::RouteInfo {
 	let mut announced = consumer.announced();
 	loop {
 		match announced.next().await.expect("the origin closed") {

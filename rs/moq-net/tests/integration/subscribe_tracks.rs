@@ -44,14 +44,14 @@ struct Setup {
 	pair: MockPair,
 	track: moq_net::track::Producer,
 	frames: futures::channel::mpsc::UnboundedReceiver<Vec<u8>>,
-	_broadcast: moq_net::origin::Publication,
+	_broadcast: moq_net::origin::Route,
 }
 
 async fn setup(version: Version) -> Setup {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("room").unwrap();
-	let track = broadcast.create_track("video", timed()).unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = publisher.route("room", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+	broadcast.announce().unwrap();
 
 	let subscriber = produce_origin(2);
 	let mut options = MockConnectOptions::new(version);
