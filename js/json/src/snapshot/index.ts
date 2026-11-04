@@ -3,8 +3,8 @@
  *
  * One JSON value updated over time, for consumers that care about the state rather than every
  * record (a catalog, a status document). This mode is **lossy** by design: a new group supersedes
- * the older ones, which are dropped. {@link Consumer.next} yields every state it still receives,
- * in order, each with its frame's timestamp, for a caller that picks the state at a playhead.
+ * the older ones, which are dropped. {@link Consumer.next} yields each state in order, each with
+ * its frame's timestamp, skipping every group a newer one supersedes.
  * {@link Consumer.latest} jumps straight to the newest group and collapses any buffered backlog
  * into a single yield, for a caller that only wants the current value. For an ordered log where
  * every record is preserved, use the `Stream` module instead.

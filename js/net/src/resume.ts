@@ -300,6 +300,8 @@ class Reader implements ResumeSource {
 	#shell: ResumeShell;
 	/** The route generation last read. */
 	#generation?: number;
+	/** The reader's preferences as last mirrored into its copies; see {@link #mirror}. */
+	#mirrored?: track.Subscription;
 	/**
 	 * Oldest first, except that a backfill goes before the copy of the route it backfills: the last
 	 * one is the serving route's own, when it is subscribed.
@@ -359,11 +361,10 @@ class Reader implements ResumeSource {
 		this.#shell = shell;
 		this.#record = record;
 		this.#start = shell.cursor.peek().start;
+		this.#mirrored = shell.subscription.peek();
 		route.readers.add(this);
 		this.#dispose.push(
-			shell.subscription.subscribe(() => {
-				for (const copy of this.#copies) this.#update(copy);
-			}),
+			shell.subscription.subscribe(() => this.#mirror()),
 			shell.cursor.subscribe(() => {
 				for (const copy of this.#copies) this.#bound(copy);
 				const passed = this.#start;
@@ -390,8 +391,12 @@ class Reader implements ResumeSource {
 		this.sync();
 	}
 
-	/** Follow the route: subscribe to a new copy and mark the ones it replaced. */
+	/**
+	 * Follow the route: mirror the reader's preferences into its copies, subscribe to a new copy,
+	 * and mark the ones it replaced.
+	 */
 	sync(): void {
+		this.#mirror();
 		if (this.#closed || this.#ended) return;
 		const route = this.route;
 		if (this.#generation === route.generation) return;
@@ -495,6 +500,19 @@ class Reader implements ResumeSource {
 
 	#update(copy: Copy): void {
 		if (copy.sub.closed.peek() === undefined) copy.sub.update(this.#wire(copy));
+	}
+
+	/**
+	 * Ask every copy for the reader's preferences once they changed. The subscription signal
+	 * notifies a microtask after an update, so every read mirrors first too: a group a copy picks
+	 * then follows the preferences the reader holds, such as a pinned `delay.max`, not its last
+	 * ones. Mirrors the Rust `Reader::sync`.
+	 */
+	#mirror(): void {
+		const subscription = this.#shell.subscription.peek();
+		if (subscription === this.#mirrored) return;
+		this.#mirrored = subscription;
+		for (const copy of this.#copies) this.#update(copy);
 	}
 
 	/**

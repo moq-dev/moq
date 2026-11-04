@@ -167,7 +167,7 @@ Application calls are unchanged.
 ### JSON consumers yield `Json.Timed` (#5677)
 
 `Json.SnapshotConsumer` and `Json.StreamConsumer` yield `Json.Timed<Value>` (`value`, `timestampUs`) instead of the bare value; `timestampUs` is `nil` when untimed.
-A snapshot consumer's `next()` now yields every state in order; call `latest()` for the newest.
+A snapshot consumer's `next()` now yields each state in order, skipping every group a newer one supersedes (see the zero-delay entry above); call `latest()` for the newest.
 Timestamps are rounded down to a whole microsecond.
 
 ### Ranges filter reads (#5929)

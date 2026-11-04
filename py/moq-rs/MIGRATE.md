@@ -171,7 +171,7 @@ and native library together; application calls are unchanged.
 ### JSON consumers yield `json.Timed` (#5677)
 
 `json.SnapshotConsumer` and `json.StreamConsumer` yield `Timed(value, timestamp)` instead of the bare value; `timestamp` is a `timedelta`, or `None` when untimed.
-Iterating a snapshot consumer now yields every state in order; `await consumer.latest()` returns the newest.
+Iterating a snapshot consumer now yields each state in order, skipping every group a newer one supersedes (see the zero-delay entry above); `await consumer.latest()` returns the newest.
 Timestamps are rounded down to a whole microsecond.
 
 ### Ranges filter reads (#5929)

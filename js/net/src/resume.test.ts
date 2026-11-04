@@ -1114,6 +1114,29 @@ test("an ordered reader takes a replaced copy's buffered group before the new co
 	b.close();
 });
 
+test("a routed read right after an update picks its group under the new preferences", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	front.serve(a.consume());
+	const ordered = front.consumer
+		.track("seq")
+		.subscribe({ delay: { max: null } })
+		.ordered();
+	try {
+		ta.write(0n);
+		ta.write(1n);
+		await settle();
+		// The copy learns of the pin a microtask later; the read must not pick under its old budget.
+		ordered.pinMaxDelay(Milli.zero);
+		expect(ordered.tryNextGroup()?.sequence).toBe(1n);
+	} finally {
+		ordered.close();
+		front.consumer.close();
+		a.close();
+	}
+});
+
 for (const resolution of ["arrival", "drop", "other copy", "budget"] as const) {
 	test(`an ordered resumed reader keeps an older copy's owed hole until ${resolution}`, async () => {
 		const clock = new Manual();

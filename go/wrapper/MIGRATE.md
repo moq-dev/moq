@@ -183,7 +183,7 @@ Application calls are unchanged.
 ### JSON consumers return `*json.Timed` (#5677)
 
 `SnapshotConsumer.Next`, `StreamConsumer.Next`, and `All` return `*Timed{Value, Timestamp}` instead of the raw message; `Timestamp` is a `*time.Duration`, nil when untimed.
-A snapshot consumer's `Next` now yields every state in order; call `Latest(ctx)` for the newest.
+A snapshot consumer's `Next` now yields each state in order, skipping every group a newer one supersedes (see the zero-delay entry above); call `Latest(ctx)` for the newest.
 Timestamps are rounded down to a whole microsecond.
 
 ### Ranges filter reads (#5929)

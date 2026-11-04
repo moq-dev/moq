@@ -17,7 +17,7 @@ const GAPS: Moq.StreamCode[] = [
  *
  * A {@link Decoder} that owns its track: it reads groups, routes each frame by its position, and
  * yields each reconstructed value with the timestamp of the frame that produced it. Two reads:
- * {@link next} yields every state in order, for a caller that picks the state matching a playhead,
+ * {@link next} yields each state in order, skipping every group a newer one supersedes,
  * and {@link latest} skips to the newest state, for a caller that only wants the current value.
  * What {@link latest} skips is gone, so a later {@link next} resumes after it.
  * When something else already owns the track, use the {@link Decoder} directly.

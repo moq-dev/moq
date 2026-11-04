@@ -36,7 +36,7 @@ Fix any publisher that writes a repeated key.
 
 The snapshot, stream, and window consumers' `next()` and async iterator yield `{ value, at }`, where `at` is the frame's timestamp and absent on an untimed track.
 A window event's `value` is the `Event` that `next()` used to return; a record restated by a group header carries the header frame's time.
-A snapshot consumer's `next()` yields every state in order; call `latest()` to skip to the newest, as `next()` used to.
+A snapshot consumer's `next()` yields each state in order, skipping every group a newer one supersedes (see the zero-delay entry above); call `latest()` to skip to the newest, as `next()` used to.
 Where you awaited `next()` for the newest value, read `(await consumer.latest())?.value`.
 A caller that passes the result on as `any` or `unknown` still compiles, so search for every `next()` and `for await` rather than relying on type errors.
 

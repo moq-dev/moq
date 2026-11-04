@@ -175,7 +175,7 @@ Application calls are unchanged.
 ### JSON consumers emit timestamps (#5677)
 
 `values()` emits `json.Value` (`value`, plus `timestamp` as a `Duration?`) instead of a string, and `valuesAs<T>()` emits `Timed<T>(value, timestamp)`.
-A snapshot consumer's `next()` now yields every state in order; call `latest()` for the newest.
+A snapshot consumer's `next()` now yields each state in order, skipping every group a newer one supersedes (see the zero-delay entry above); call `latest()` for the newest.
 Timestamps are rounded down to a whole microsecond.
 
 ### Ranges filter reads (#5929)
