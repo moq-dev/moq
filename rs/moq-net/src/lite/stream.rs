@@ -16,6 +16,7 @@ pub enum ControlType {
 	Track = 6,
 	Auth = 7,
 	Tracks = 8,
+	Datagrams = 9,
 }
 
 impl<'a> Decode<'a, Version> for ControlType {

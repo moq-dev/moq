@@ -1883,7 +1883,7 @@ pub(crate) mod tests {
 			.await
 			.unwrap()
 			.expect("a catalog");
-		let clock = catalog.clock.expect("the catalog advertises a clock");
+		let clock = catalog.media.clock.expect("the catalog advertises a clock");
 		let (name, config) = catalog.video.renditions.iter().next().expect("a video rendition");
 		let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
 		let container = moq_mux::catalog::hang::Container::try_from(config).unwrap();
