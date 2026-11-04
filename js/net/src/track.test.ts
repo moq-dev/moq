@@ -9,7 +9,14 @@ import { Version as IetfVersion } from "./ietf/version.ts";
 import { hooks } from "./internal.ts";
 import { textFrame } from "./mock.ts";
 import { Timescale, Timestamp } from "./time.ts";
-import { authoredInfo, DEFAULT_MAX_AGE, infoDefaults, rescale, Subscription, Producer as TrackProducer } from "./track.ts";
+import {
+	authoredInfo,
+	DEFAULT_MAX_AGE,
+	infoDefaults,
+	rescale,
+	Subscription,
+	Producer as TrackProducer,
+} from "./track.ts";
 import { unwanted } from "./util/demand.ts";
 
 const enc = new TextEncoder();
