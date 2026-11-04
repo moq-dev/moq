@@ -154,12 +154,12 @@ case "$1" in
     rust-uring)
         # One run per target makes an unsupported/skipped ring fail report
         # validation instead of hiding behind the Tokio target's measurements.
-        for target in udp_tokio udp_uring echo_quic session_lite unreachable_dials timers; do
+        for target in udp_tokio udp_uring echo_quic session_lite unreachable_dials timers web_headers; do
             criterion "uring-$target" -p moq-uring --bench "$target"
         done
         ;;
     js)
-        for benchmark in broadcasts requests fills forward reader frames drift ledger bandwidth replay varint lite-varint track resume priority subscribe-drop refresh observed compression; do
+        for benchmark in broadcasts requests fills fetch forward reader frames drift ledger bandwidth replay varint lite-varint track resume priority subscribe-drop refresh observed compression; do
             javascript "$benchmark" just js bench "$benchmark"
         done
         javascript catalog just js catalog-bench

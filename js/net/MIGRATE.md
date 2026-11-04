@@ -4,6 +4,42 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Relative group anchors are `bigint`
+
+A `Track.Anchor.relative` count now uses `bigint`, like an absolute group sequence.
+Write `{ relative: 2n }` instead of `{ relative: 2 }`, including the live anchor
+`{ relative: 0n }`. Large relative counts round-trip exactly and resolve against
+large group sequences without narrowing to a number. First-party consumers use
+the new type. Frame indices and timestamps retain their bounded numeric API.
+
+The IETF codecs also hold subgroup IDs and datagram Object IDs as `bigint`.
+Unsupported subgroups and datagram objects still have the same model behavior.
+Unsafe numeric error/status codes and clock waits are now refused rather than
+rounded or saturated. Large IETF filter bounds remain exact bigint; their derived
+frame selection bounds clamp without changing the selected content. Wire layouts and published version negotiation are unchanged.
+See [wire integer precision](INTEGERS.md) for each field's representation and bounds.
+
+### Authored tracks default to a zero `maxAge` ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+A track created with `Broadcast.Producer.createTrack`, `Track.Request.accept`, or `Track.Producer.accept` takes a `Track.InfoInit`, whose omitted or `undefined` `maxAge` is now zero instead of no publisher limit: a superseded group is stale as soon as its successor arrives, so readers get only the live edge. The newest group never goes stale, so a track that writes one snapshot stays readable to a late joiner.
+A track whose readers reach back for superseded groups (a subscription's `delay.max`, a fetch, or a range from an absolute start) passes `maxAge: null` for unlimited history, or a window, when it creates the track; changing it means a new track or broadcast. A relay or cache bounds what it keeps with its own window, not the publisher's default.
+Received metadata is unchanged: a decoded `Track.Info` without `maxAge` still means no publisher limit, and `Track.infoDefaults` keeps an absent `maxAge` absent. To serve a received `Track.Info` onward unchanged, pass `{ ...info, maxAge: info.maxAge ?? null }`.
+
+```ts
+// Before: no publisher limit
+broadcast.createTrack("history", { timescale: Time.Timescale.MILLI });
+// After: the same, stated explicitly
+broadcast.createTrack("history", { timescale: Time.Timescale.MILLI, maxAge: null });
+```
+
+### Past group ranges work over moq-transport ([#7793](https://github.com/moq-dev/moq/pull/7793))
+
+`track.Consumer.fetchGroup()` and subscriptions to past group ranges now use standalone FETCH on drafts 18, 20, and 22. No API migration is needed. First-party publishers serve one group per FETCH; multi-group ranges require a publisher that serves them.
+
+### IETF FETCH serves on-demand history ([#7794](https://github.com/moq-dev/moq/pull/7794))
+
+A single-group IETF FETCH now asks `track.requests()` for groups the publisher's cache no longer holds, or never held, using the same `Track.Fill` responder as moq-lite. Existing responders need no changes. Multi-group IETF FETCH remains unsupported.
+
 ### A timestamp out of range at the track's timescale is a `TimestampMismatch` ([#7702](https://github.com/moq-dev/moq/pull/7702))
 
 A frame or datagram whose timestamp leaves the safe range once converted to the track's timescale is refused at the write with `TimestampMismatch`, as Rust refuses it, rather than with a `RangeError` when it is encoded.

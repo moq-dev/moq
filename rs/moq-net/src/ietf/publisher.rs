@@ -18,7 +18,7 @@ use crate::transport::poll::{GroupOf, SendOptions};
 
 use crate::{
 	DecodeError, Error, Timescale, Timestamp,
-	coding::{Encode as _, Encoder, Stream, Writer},
+	coding::{Encoder, Stream, Writer},
 	ietf::{self, Control, EndLocation, FetchHeader, FetchType, Filter, Location, RequestId},
 	priority::{Priority, PriorityHandle, PriorityQueue},
 	track::{Order, Subscription},
@@ -27,11 +27,11 @@ use crate::{
 
 use super::{Message, Version, cluster, error::request, peer, request_update};
 
-/// Preserve retained groups when the subscriber supplies no age budget.
+/// Leave only the publisher's max age when the subscriber supplies no age budget.
 fn serving_subscription(subscriber_priority: u8) -> Subscription {
 	Subscription {
 		priority: super::priority::from_wire(subscriber_priority),
-		// No Max Age is the publisher's retention alone, whatever it turns out to be, and
+		// No Max Age leaves the publisher's max age alone, whatever it turns out to be, and
 		// moq-transport has no field for a minimum.
 		delay: crate::track::Delay { min: None, max: None },
 		// SUBSCRIBE_OK names the live edge, which a relay learns only from its upstream's
@@ -4871,9 +4871,6 @@ struct TrackServe {
 	/// The track's exclusive end, once its groups ran out because it finished.
 	end: Option<track::Position>,
 	terminal: Arc<Terminal>,
-	/// Serve the track's datagrams too, as OBJECT_DATAGRAMs. Off when the transport has no
-	/// datagrams; there is no stream fallback.
-	datagrams: bool,
 	compression: bool,
 	/// A track that always has another group ready still lets the session's other tasks run.
 	budget: kio::coop::Budget,
@@ -4897,7 +4894,6 @@ impl TrackServe {
 		};
 		let end = range.end.map_or(Bound::Unbounded, |end| Bound::Included(end.group));
 		let track = track.with_range((Bound::Included(floor), end));
-		let datagrams = session.max_datagram_size() > 0;
 		let dynamic = track.info().refresh.is_some();
 		let priority = kio::Producer::new(track.subscription().priority);
 		let publisher = track.info().priority;
@@ -4913,7 +4909,6 @@ impl TrackServe {
 		};
 
 		Self {
-			datagrams,
 			compression: false,
 			session,
 			track,
@@ -5172,7 +5167,7 @@ impl TrackServe {
 
 		let _ = self.children.poll(waiter);
 		loop {
-			// Still serves the datagrams and the groups already started below.
+			// Still serves the groups already started below.
 			if self.budget.poll_yield(waiter).is_pending() {
 				break;
 			}
@@ -5233,8 +5228,6 @@ impl TrackServe {
 						let _ = self.children.poll(waiter);
 						return Poll::Pending;
 					}
-					// Datagrams written before the track finished still go out.
-					self.poll_datagrams(waiter)?;
 					self.draining = true;
 					if let Poll::Ready(Ok(end)) = self.track.poll_finished(waiter) {
 						self.end = Some(end);
@@ -5245,137 +5238,9 @@ impl TrackServe {
 				Poll::Pending => break,
 			}
 		}
-		// Groups first, so a burst of datagrams cannot starve them.
-		self.poll_datagrams(waiter)?;
 		// Newly created group machines start now rather than on the next wake.
 		let _ = self.children.poll(waiter);
 		Poll::Pending
-	}
-
-	/// Send every buffered datagram as an OBJECT_DATAGRAM, best-effort, like moq-lite.
-	///
-	/// Public datagrams are Object 0 and end their group; relayed ones retain their fields.
-	/// The track's end or failure surfaces through its groups, so this only stops.
-	fn poll_datagrams(&mut self, waiter: &kio::Waiter) -> Result<(), Error> {
-		if !self.datagrams {
-			return Ok(());
-		}
-		while let Poll::Ready(Ok(Some(datagram))) = self.track.poll_recv_wire_datagram(waiter) {
-			let sequence = datagram.sequence;
-			let id = datagram.wire.as_ref().and_then(|wire| wire.object_id).unwrap_or(0);
-			if self
-				.range
-				.start
-				.is_some_and(|start| start.group == sequence && id < start.object)
-				|| self
-					.range
-					.end
-					.is_some_and(|end| end.group == sequence && end.object.is_some_and(|end| id > end))
-			{
-				continue;
-			}
-			let (object_id, priority, end_of_group, status, properties) = match &datagram.wire {
-				Some(wire) => {
-					// A datagram this draft cannot carry is dropped like an oversized one: it
-					// is best-effort, and the track's groups do not depend on it.
-					if wire.status.is_some_and(|status| !super::object::status_defined(status)) {
-						tracing::debug!(sequence, "dropping a datagram status this draft cannot carry");
-						continue;
-					}
-					// A status keeps its meaning without the properties this draft forbids
-					// beside it, as a stream's status object does.
-					let stripped = Default::default();
-					let forwarded = match wire.status.is_some_and(|status| status != 0) {
-						true => &stripped,
-						false => &wire.properties,
-					};
-					let properties = match super::object::write(
-						forwarded,
-						self.track.info().ietf(),
-						datagram.datagram.timestamp,
-						self.version,
-						self.timescale,
-					) {
-						Ok(properties) => properties,
-						Err(err) => {
-							tracing::debug!(%err, sequence, "dropping a datagram whose properties cannot be forwarded");
-							continue;
-						}
-					};
-					let object = wire.object_id;
-					// An omitted priority inherited the source track's default, which this
-					// response may not carry (or carry the same), so resolve it here.
-					let priority = wire
-						.priority
-						.or_else(|| Some(super::priority::to_wire(self.track.info().priority)));
-					(
-						object,
-						priority,
-						wire.end_of_group,
-						wire.status,
-						(!properties.is_empty()).then_some(properties),
-					)
-				}
-				None => {
-					let mut properties = Vec::new();
-					if let Some(timescale) = self.timescale {
-						let timestamp = datagram.timestamp.ok_or(Error::TimestampMismatch)?;
-						ietf::encode_object_time(
-							&mut Encoder::new(&mut properties, self.version.into()),
-							timestamp,
-							timescale,
-						)?;
-					}
-					(
-						None,
-						Some(super::priority::to_wire(self.track.info().priority)),
-						true,
-						None,
-						(!properties.is_empty()).then_some(properties),
-					)
-				}
-			};
-			let (payload, inflated) = datagram.sent(self.compression);
-			let properties = super::object::compression(properties.unwrap_or_default(), self.version, inflated)?;
-			let properties = (!properties.is_empty()).then_some(properties);
-			let body = ietf::ObjectDatagram {
-				track_alias: self.request_id.0,
-				group_id: sequence,
-				object_id,
-				publisher_priority: priority,
-				end_of_group,
-				properties,
-				body: match status {
-					Some(status) => ietf::DatagramBody::Status(status),
-					None => ietf::DatagramBody::Payload(payload.clone()),
-				},
-			};
-			let body = match body.encode_bytes(self.version) {
-				Ok(body) => body,
-				Err(err) => {
-					tracing::debug!(%err, sequence, "dropping a datagram this draft cannot encode");
-					continue;
-				}
-			};
-			let max = self.session.max_datagram_size();
-			if body.len() > max {
-				tracing::debug!(
-					sequence,
-					size = body.len(),
-					max,
-					"dropping datagram larger than the transport limit"
-				);
-				continue;
-			}
-			// Ranked like a stream carrying the group from its start, so it merges into the
-			// subscription's group order and wins a tie with that group's stream.
-			let options = SendOptions {
-				group: self.ranking.group.as_ref(),
-				priority: crate::priority::in_group(sequence, 0, self.ranking.order),
-			};
-			let _ = self.session.send_datagram(body, options);
-		}
-		Ok(())
 	}
 }
 
@@ -6763,49 +6628,6 @@ mod group_priority_test {
 		assert_eq!(log.orders().len(), 2, "the streams keep their place in the group");
 	}
 
-	/// An OBJECT_DATAGRAM goes in its subscription's send group, ranked like the stream
-	/// carrying its group from the start, so the transport merges it into the group order.
-	#[test]
-	fn datagrams_rank_within_their_subscription() {
-		let log = crate::lite::test_transport::Log::default();
-		let session = SinkSession::new(log.clone())
-			.with_groups()
-			.with_datagrams(1200)
-			.with_unacked_fin();
-		let mut track = track::Producer::new(
-			std::sync::Arc::new(crate::broadcast::Info::default()),
-			"test",
-			crate::track::Info::timed(),
-		);
-		let subscriber = track.subscribe(
-			track::Subscription::default()
-				.with_priority(3)
-				.with_delay(track::Delay::default().with_max(std::time::Duration::from_secs(3600))),
-		);
-		let mut serve = TrackServe::new(
-			crate::driver::Transport::new(session.clone()),
-			subscriber,
-			RequestId(0),
-			Version::Draft18,
-			ServeRange::default(),
-			None,
-		);
-		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
-		group
-			.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"x".as_slice())
-			.unwrap();
-		group.finish().unwrap();
-		let sequence = track
-			.append_datagram(crate::Timestamp::from_millis(1).unwrap(), b"d".as_slice())
-			.unwrap();
-
-		let waiter = kio::Waiter::noop();
-		assert!(serve.poll(&waiter).is_pending());
-		let order = crate::priority::in_group(sequence, 0, Order::Descending);
-		assert_eq!(log.datagram_ranks(), [(Some(0), order)]);
-		assert_eq!(log.orders(), [(0, 1)], "the stream for group 0 ranks below");
-	}
-
 	/// A group with more objects ready than one poll's budget drains over several polls.
 	#[kio::test]
 	async fn a_long_group_drains_within_the_budget() {
@@ -7249,10 +7071,10 @@ mod subscribe_cursor_test {
 	use super::*;
 	use crate::lite::test_transport::{Log, SinkSession};
 
-	/// A group retention gives up on while a FETCH reads it is refused as too old, rather
+	/// A group that goes stale while a FETCH reads it is refused as too old, rather
 	/// than answered with the prefix read so far.
 	#[kio::test]
-	async fn a_fetch_past_retention_is_refused_not_truncated() {
+	async fn a_fetch_past_max_age_is_refused_not_truncated() {
 		let track = track::Producer::new(
 			std::sync::Arc::new(crate::broadcast::Info::default()),
 			"video",
@@ -7318,7 +7140,7 @@ mod subscribe_cursor_test {
 #[cfg(test)]
 mod serve_tests {
 	use super::*;
-	use crate::coding::{Decode, Decoder};
+	use crate::coding::{Decode, Decoder, Encode as _};
 	use crate::ietf::GroupOrder;
 	use crate::lite::test_transport::{Close, Log, ScriptedSession, Sent, SinkSession};
 	use crate::model::ProduceTest;
@@ -12532,8 +12354,6 @@ mod serve_tests {
 		IdleEnded,
 		/// An idle copy whose track ends after its newest group: that group's last object.
 		IdleFinished,
-		/// A live feed whose newest group is a datagram the cache cannot read: unknown.
-		Datagram,
 		/// A live feed whose newest group was aborted mid-write: unknown.
 		Aborted,
 	}
@@ -12561,10 +12381,6 @@ mod serve_tests {
 				h.track.finish().unwrap();
 				None
 			}
-			Largest::Datagram => {
-				h.track.append_datagram(timestamp(), b"d".as_slice()).unwrap();
-				None
-			}
 			Largest::Aborted => {
 				let mut newer = h.track.create_group(group::Info { sequence: 5 }).unwrap();
 				newer.write_frame(timestamp(), b"5-0".to_vec()).unwrap();
@@ -12586,7 +12402,6 @@ mod serve_tests {
 			Largest::Idle,
 			Largest::IdleEnded,
 			Largest::IdleFinished,
-			Largest::Datagram,
 			Largest::Aborted,
 		] {
 			for start in [2, 3] {
@@ -12657,7 +12472,6 @@ mod serve_tests {
 			(4, Largest::Finished, 1),
 			(4, Largest::Idle, 7),
 			(4, Largest::IdleEnded, 7),
-			(4, Largest::Datagram, 7),
 			(4, Largest::Aborted, 7),
 		] {
 			let mut h = serve(version);
@@ -13908,34 +13722,6 @@ mod serve_tests {
 				.unwrap();
 			settle().await;
 			assert!(h.track.subscription().is_none(), "{version}: held its demand");
-		}
-	}
-
-	/// A datagram group is never fetchable: a FETCH for one is refused like a group that
-	/// does not exist, newest or not, and opens no fetch stream for its payload.
-	#[kio::test]
-	async fn a_standalone_fetch_of_a_datagram_group_is_refused() {
-		for version in FETCH_DRAFTS {
-			for newest in [true, false] {
-				let mut h = serve(version);
-				publish_pairs(&mut h, 2, None);
-				let sequence = h.track.append_datagram(timestamp(), b"d".as_slice()).unwrap();
-				if !newest {
-					h.track.append_group().unwrap().finish().unwrap();
-				}
-				settle().await;
-
-				let location = Location {
-					group: sequence,
-					object: 0,
-				};
-				let buf = standalone_fetch(&h, location, location, GroupOrder::Ascending).await;
-				assert_eq!(
-					fetch_refusal(buf, version),
-					DOES_NOT_EXIST,
-					"{version}: newest={newest}"
-				);
-			}
 		}
 	}
 
@@ -15842,7 +15628,8 @@ mod tests {
 		slot
 	}
 
-	/// An absent max age preserves everything the producer still retains.
+	/// An absent subscriber Max Age serves every cached group the publisher's max age still
+	/// leaves fresh.
 	#[test]
 	fn serving_subscription_keeps_retained_backlog() {
 		let producer = track::Producer::new(
@@ -15861,7 +15648,7 @@ mod tests {
 		let subscription = serving_subscription(128);
 		assert_eq!(
 			subscription.delay.max, None,
-			"no Max Age is the publisher's retention alone"
+			"no Max Age leaves the publisher's max age alone"
 		);
 		let mut subscriber = producer.subscribe(subscription);
 		for sequence in [0, 1] {
@@ -19208,6 +18995,7 @@ mod fill_range_tests {
 #[cfg(test)]
 mod compression_tests {
 	use super::*;
+	use crate::coding::Encode as _;
 	#[test]
 	fn sealed_compression_refuses_incompatible_egress() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {

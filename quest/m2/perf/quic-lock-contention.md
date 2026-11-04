@@ -9,9 +9,9 @@ share, and the per-packet hop from the endpoint task to the connection task.
 
 ## Plan
 
-Planned 2026-10-23 (maintainer) from the moq-quic API audit. Measure on the
-shape the [moq-quic API](/quest/m1/quic-api/README.md) epic leaves behind,
-since the async-to-poll adapter and leases that hold the lock both go first.
+Planned 2026-10-23 (maintainer) from the moq-quic API audit. Measure the
+mirrored, caller-owned poll API after removing the async-to-poll adapter
+and leases that hold the lock.
 
 - **Lock contention.** One `Mutex<State>` per connection guards moq-quic's
   state; the driver takes it at about 58 sites, from every stream handle on
@@ -61,10 +61,6 @@ weighs.
 
 A measured no-win is a valid outcome. Report public API and wire impact; the
 staging queue and batch dispatch should need none.
-
-## Required
-
-- [Native WebTransport](/quest/m1/quic-api/native-web.md) - removes the adapter's per-operation boxing, which would otherwise dominate the profile
 
 ## Related
 

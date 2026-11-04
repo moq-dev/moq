@@ -122,9 +122,9 @@ pub struct Config {
 	/// one policy.
 	pub pool: cache::Pool,
 
-	/// Ceiling on each track's media-timestamp retention window under this origin.
-	/// This caps the local retention and delivery budget without changing the
-	/// publisher's [`max_age`](track::Info::max_age) metadata. Wall-clock
+	/// Local ceiling on each track's max age under this origin.
+	/// This caps how long a superseded group stays fresh here, and the delivery budget,
+	/// without changing the publisher's [`max_age`](track::Info::max_age) metadata. Wall-clock
 	/// reclamation of idle content is separate: [`Self::pool`]'s
 	/// [`expiry`](cache::Pool::expiry) window. [`Duration::MAX`] (the default)
 	/// imposes no ceiling, leaving each track's own window in force.
@@ -2057,7 +2057,7 @@ pub struct Producer {
 	// mint their remote broadcasts with it). Unbounded by default.
 	pool: cache::Pool,
 
-	// Retention ceiling inherited by broadcasts created under this origin (see
+	// Max age ceiling inherited by broadcasts created under this origin (see
 	// [`Config::cache_duration`]). `Duration::MAX` (no ceiling) by default.
 	cache_duration: Duration,
 
@@ -2087,6 +2087,12 @@ pub struct Producer {
 }
 
 impl Producer {
+	/// A handle that queues work on this origin's [`Driver`] without keeping the origin
+	/// alive: work queued once the driver is gone is dropped.
+	pub(super) fn tasks(&self) -> crate::util::TasksWeak {
+		self.tasks.downgrade()
+	}
+
 	/// Build a producer from a [`Config`] (identity + cache pool) with no scoped
 	/// prefix and no pre-existing broadcasts, paired with the [`Driver`] that runs
 	/// the origin's lifecycle work.
@@ -3526,6 +3532,11 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 	// discovering its path for as long as it lives, so the route outlives whatever
 	// reader found it, such as a listing that has since closed.
 	let mut discovered: Option<Interest> = None;
+	// The source the broadcast's datagram lookups go to, as last handed over: datagram
+	// tracks are live only, so a lookup joins the serving source's own track rather than a
+	// copy the front would splice.
+	let mut datagram_source: Option<u64> = None;
+	broadcast.serve_datagrams_from(None);
 
 	// Read the table for the machine: the best route and whether
 	// the serving source is on its way out. Also what the watch wakes for.
@@ -3968,6 +3979,11 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 			{
 				io.staged = None;
 			}
+		}
+
+		if front.serving() != datagram_source {
+			datagram_source = front.serving();
+			broadcast.serve_datagrams_from(datagram_source.and_then(|id| sources.get(&id)).cloned());
 		}
 
 		let step = kio::wait(|waiter| {
@@ -11711,6 +11727,25 @@ mod tests {
 		assert!(matches!(err, Error::Closed), "unexpected end: {err}");
 	}
 
+	/// A datagram track a published broadcast creates reaches a reader through the origin:
+	/// the front looks it up on the source it serves from.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_front_serves_its_sources_datagram_tracks() {
+		let producer = origin(1).produce();
+		let publication = producer.publish("room", Route::default()).unwrap();
+		let mut datagrams = publication
+			.create_datagrams("audio", crate::datagram::Info::default())
+			.unwrap();
+
+		let front = producer.consume().request("room", None).await.unwrap();
+		let mut reader = front.datagrams("audio").unwrap();
+		datagrams.append(None, "x").unwrap();
+		let datagram = reader.recv().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(datagram.sequence, 0);
+		assert!(matches!(front.datagrams("video"), Err(Error::NotFound)));
+	}
+
 	/// A track first subscribed after the front is already serving another still
 	/// replays what its source holds, like the first track did.
 	#[kio::test]
@@ -14488,8 +14523,8 @@ mod tests {
 		let mut stalled = track.append_group().unwrap();
 		stalled.write_frame(crate::Timestamp::ZERO, b"x".as_slice()).unwrap();
 		// A successor, so the stalled group is not the protected live edge. Its
-		// timestamp is inside the retention budget, so subscription expiry keeps the
-		// stalled group: only reclamation can bound it.
+		// timestamp is inside the max age, so the stalled group stays fresh and
+		// subscription expiry never skips it: only reclamation can bound it.
 		let _successor = track.append_group().unwrap();
 
 		let mut reading = stalled.consume();

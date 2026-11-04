@@ -241,7 +241,7 @@ listen = "[::]:4443"                 # HTTP: fingerprint, announced, fetch, heal
 
 [web.https]
 listen = "[::]:443"                  # HTTPS, the WebSocket fallback, and tls:// with the listen certificate.
-cert = "cert.pem"                    # cert, key, and root need listen. Omit cert and key with [acme].
+cert = "cert.pem"                    # cert, key, and root need listen.
 key = "key.pem"
 
 [internal]
@@ -254,38 +254,6 @@ and HTTP/2 peers that acknowledge keep-alive PINGs. Active response bodies
 keep the connection open; a WebSocket upgrade hands its lifetime to MoQ.
 
 See [HTTP endpoints](/bin/relay/http).
-
-## \[acme]
-
-The relay provisions and renews a publicly trusted certificate itself, for QUIC
-and HTTPS alike (Unix only, where the key can be kept owner-only). This needs
-the default `acme` Cargo feature; builds without it refuse configured issuance:
-
-```toml
-[acme]
-domains = ["relay.example.com"]      # Enables ACME. No wildcards.
-contact = ["mailto:ops@example.com"] # Optional account contact.
-cache = "/var/lib/moq-relay/acme"      # Required: account key and certificate, kept owner-only.
-# directory = "https://acme-staging-v02.api.letsencrypt.org/directory"  # Default: Let's Encrypt production.
-# timeout = "5m"                     # How long the first issuance may take before startup fails.
-```
-
-Validation is TLS-ALPN-01 only: the directory connects to TCP port 443 of each
-domain, so `web.https.listen` is required and must be reachable there, directly
-or forwarded. `[acme]` cannot be combined with `listen.tls.cert`, `key`, or
-`generate`, or with `web.https.cert` and `key`.
-
-With no usable certificate in `cache` (missing, expired, missing a domain, or
-from another directory), startup answers only the challenge until one is
-issued; QUIC, the other routes, and readiness wait for it, and startup fails
-with the ACME error once `timeout` runs out. It also fails after 3 failed
-validations within an hour, counting earlier starts and renewals recorded in
-`cache`, so a restart loop stops short of Let's Encrypt's limit of 5 per
-hostname per hour. Renewal runs in the background well before expiry and
-reaches every listener on its next handshake. A failed renewal keeps the
-current certificate serving and retries, pausing once the same budget is spent
-until the oldest failure is an hour old; a restart in the meantime still serves
-the cached certificate.
 
 ## \[stun]
 
@@ -381,12 +349,14 @@ replacement is up and it carries no subscription or fetch.
 [cache]
 capacity = "8GiB"                    # Target bytes of cached groups and buffered datagrams. "75%" of memory also works.
 headroom = "2GiB"                    # Or: keep this much system memory free and grow into the rest.
-duration = "30s"                     # Cap how long a non-latest group is kept, whatever the publisher asked.
+duration = "30s"                     # Reclaim groups idle this long, and cap every track's max age at it.
 ```
 
 `capacity` is a byte target, repaid as active publishers write. `duration`
 (30s by default) bounds memory by age, and sweeps on a timer, so a publisher
-that stalls but stays connected still has its idle groups reclaimed. The latest
+that stalls but stays connected still has its idle groups reclaimed. Set
+explicitly, it also caps how long a superseded group stays fresh, whatever max
+age the publisher declared; unset, each track keeps its own max age. The latest
 group of every track, and any group still being read, is kept past `capacity` but
 sheds its oldest frames instead. Whatever the capacity, a group holds at most its
 newest 32 MB. A reader of a track's newest group that reaches a shed frame asks

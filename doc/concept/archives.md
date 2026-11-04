@@ -45,9 +45,9 @@ cannot negotiate moq-lite 07.
 
 Recording starts with content the subscription can still receive. A missing
 group is given up after the publisher's max age capped by the producer's max
-delay, so a gap cannot stall later groups. Datagrams are uncached and can only
-be recorded from when the subscription takes effect. An archive cannot recover
-content already lost or evicted before it subscribed. The same max delay
+delay, so a gap cannot stall later groups. Only stream tracks are recorded: a
+datagram track is live-only, so an archive's playback never includes it. An
+archive cannot recover content already lost or evicted before it subscribed. The same max delay
 (`producer::Config::max_delay`, 10 s by default and in `moq export archive`)
 bounds the backlog: content further behind the live edge is skipped, even when
 the publisher still caches it.
@@ -74,7 +74,7 @@ segment. Within one broadcast prefix:
 Objects coalesce content by duration, using media time for timed tracks and
 wall time for untimed ones. A flush deadline also stores idle tracks, splitting
 long groups between frames when needed. Groups, frame positions, timestamps,
-payloads, and the distinction between groups and datagrams survive storage.
+and payloads survive storage.
 With DVR pruning enabled, old superseded objects are deleted after the retention
 window and grace; the newest object of each track stays. Pruning runs only while
 the recorder runs: once a recording completes or its recorder stops, objects not
@@ -96,19 +96,18 @@ like any other broadcast; it does not look in object storage on a cache miss.
 
 Each track starts live at its newest stored sequence and serves older groups
 from storage when requested by group position. It advertises no max age, so the
-source's live retention cannot expire archived history. A growing recording is
+source's live max age cannot make archived history stale. A growing recording is
 periodically listed for new tracks and objects. Once `.end` appears, refreshing
 stops and tracks end as recorded; without it, including when a recorder stopped
 early, the archive stays live. Empty or unrecognized prefixes are refused.
 
-Serving history is not paced playback from the beginning. Datagrams remain
-lossy datagrams, never fetchable groups. Time ranges currently resolve against
-the served track's cache, not the archive's stored keys, so they cannot reliably
-seek old stored content. There is no automatic switch from a live broadcast to
-its archive at the original path.
+Serving history is not paced playback from the beginning. Time ranges currently
+resolve against the served track's cache, not the archive's stored keys, so they
+cannot reliably seek old stored content. There is no automatic switch from a
+live broadcast to its archive at the original path.
 
-The archived catalog is an ordinary track. [HLS](/bin/hls) can serve a recording
-whose renditions include their `hls` record tracks, just as it serves a live
-broadcast; a rendition without those records gets no playlist. The catalog's
-per-rendition [`hls`](/concept/hang#catalog) field describes HLS segmentation,
-not archive discovery. Protected broadcasts are outside this archive workflow.
+The archived catalog is an ordinary track. [HLS](/bin/hls) serves a recording
+from its media tracks, numbered on the catalog's `media.join.interval`, just as
+it serves a live broadcast; a recording whose catalog declares no interval gets
+no playlists. The [join interval](/concept/hang#catalog) describes HLS
+segmentation, not archive discovery. Protected broadcasts are outside this archive workflow.

@@ -80,6 +80,15 @@ return its share and automatic probe ceiling immediately, even while the track
 stays subscribed. A later update can resume the same claim. While the track
 stays open, dropping the Go reference alone leaves release to garbage collection.
 
+A player divides the receive estimate among the broadcasts it watches with
+`Client.Session().Viewers()`. `Watch(maxBps)` claims up to what the largest
+rendition it would switch to needs; the viewer's `Rate()` is its slice, nil
+while there is no estimate, and `Update(maxBps)` changes the ceiling. The
+session sends the viewers' summed ceilings as its PROBE target, which
+`SetTarget` overrides. Ceilings or a target summing above 2^53 - 1 fail with
+`moq.ErrOutOfRange`. Holding a viewer requests PROBE, so `Close()` it once
+the broadcast stops being watched.
+
 Incoming server requests expose the query-free `Path()` before `Accept()`. It
 is consistent across transports and returns an empty string for the root or
 missing path. `Query()` returns the encoded query and may contain credentials.
@@ -163,7 +172,7 @@ sends one `Frame` and returns its sequence number (`InsertDatagram` takes the ca
 own sequence instead), while `TrackConsumer.RecvDatagram`
 and `TrackConsumer.Datagrams` receive them in arrival order. Payloads are capped at
 1200 bytes. Datagram delivery requires a datagram-capable transport and lite-05 or
-newer moq-lite, or moq-transport; pre-lite-05, WebSocket, and TCP paths do not
+newer moq-lite; moq-transport, pre-lite-05, WebSocket, and TCP paths do not
 deliver them, and there is no stream fallback.
 
 ## Versioning

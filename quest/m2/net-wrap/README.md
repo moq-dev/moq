@@ -15,8 +15,8 @@ Compression is not a wrapper: it moves into moq-net as a track flag
 moq-flate, so moq-flate is out of scope.
 
 Non-goals:
-- A runtime seam: libraries poll and spawn nothing ([Libraries spawn nothing](/quest/m1/poll-first/no-spawn/README.md)).
-- The transport seam: custom transports implement moq-net's `transport::poll` traits ([native WebTransport](/quest/m1/quic-api/native-web.md) moves the last backend onto them).
+- A runtime seam: libraries poll and spawn nothing ([the remaining library spawns](/quest/m2/spawn-audit.md)).
+- The transport seam: custom transports implement moq-net's `transport::poll` traits, including both native WebTransport backends.
 
 ## Plan
 

@@ -84,6 +84,8 @@ pub const MOQ_ERROR_EXPIRED: i32 = -42;
 pub const MOQ_ERROR_UNSUPPORTED_CATALOG: i32 = -43;
 /// The rendition's codec, layout, or description was refused during setup; another rendition may work.
 pub const MOQ_ERROR_UNSUPPORTED_CONFIG: i32 = -44;
+/// A number is outside the range the call accepts.
+pub const MOQ_ERROR_OUT_OF_RANGE: i32 = -45;
 
 /// Whether a protocol code is from the session or stream registry.
 #[repr(C)]
@@ -347,6 +349,11 @@ pub enum Error {
 	/// resolved through an origin, so there is nothing to resolve the reference against.
 	#[error("unresolvable broadcast reference: {0}")]
 	UnresolvableBroadcast(String),
+
+	/// A number was outside the range the call accepts, such as viewer ceilings summing
+	/// above what a PROBE target carries.
+	#[error("out of range: {0}")]
+	OutOfRange(String),
 }
 
 impl From<moq_json::Error> for Error {
@@ -472,8 +479,7 @@ fn stream_kind(err: &moq_net::StreamError) -> moq_protocol_kind {
 		moq_net::StreamError::GoingAway => MOQ_PROTOCOL_KIND_GOING_AWAY,
 		moq_net::StreamError::TooFarBehind => MOQ_PROTOCOL_KIND_TOO_FAR_BEHIND,
 		moq_net::StreamError::MalformedTrack => MOQ_PROTOCOL_KIND_MALFORMED_TRACK,
-		// A datagram reached by a FETCH is, to a binding, a miss like any other.
-		moq_net::StreamError::NotFound | moq_net::StreamError::NotFetchable => MOQ_PROTOCOL_KIND_NOT_FOUND,
+		moq_net::StreamError::NotFound => MOQ_PROTOCOL_KIND_NOT_FOUND,
 		moq_net::StreamError::Unroutable => MOQ_PROTOCOL_KIND_UNROUTABLE,
 		moq_net::StreamError::Old => MOQ_PROTOCOL_KIND_OLD,
 		moq_net::StreamError::Evicted => MOQ_PROTOCOL_KIND_EVICTED,
@@ -538,6 +544,7 @@ impl ffi::ReturnCode for Error {
 			Error::JsonTrack(_) => MOQ_ERROR_JSON_TRACK,
 			Error::InvalidConfig(_) => MOQ_ERROR_INVALID_CONFIG,
 			Error::UnresolvableBroadcast(_) => MOQ_ERROR_UNRESOLVABLE_BROADCAST,
+			Error::OutOfRange(_) => MOQ_ERROR_OUT_OF_RANGE,
 		}
 	}
 }

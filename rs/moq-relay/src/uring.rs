@@ -632,7 +632,7 @@ fn serve_worker(spawn: Spawn) -> bool {
 		endpoint_config.handshake.timeout = serve.timeout;
 		endpoint_config.reset_secret = serve.reset_secret;
 		let endpoint =
-			moq_uring::quic::Endpoint::new(socket, endpoint_config).context("failed to build the QUIC endpoint")?;
+			moq_uring::quic::Endpoint::new(endpoint_config, socket).context("failed to build the QUIC endpoint")?;
 		Ok((worker, endpoint))
 	})();
 
@@ -658,10 +658,14 @@ fn serve_worker(spawn: Spawn) -> bool {
 					let id = serve.cluster.next_connection_id();
 					let conn_handle = accept_handle.clone();
 					let serve = serve.clone();
-					let lifecycle =
-						Lifecycle::new(serve.cluster.clone(), serve.auth.clone(), id, Some(conn.remote_addr()))
-							.with_shutdown(serve.shutdown.clone())
-							.with_sessions(serve.sessions.clone());
+					let lifecycle = Lifecycle::new(
+						serve.cluster.clone(),
+						serve.auth.clone(),
+						id,
+						Some(conn.remote_address()),
+					)
+					.with_shutdown(serve.shutdown.clone())
+					.with_sessions(serve.sessions.clone());
 					accept_handle.spawn(async move {
 						let shared = serve.tokio.clone();
 						lifecycle
@@ -709,7 +713,6 @@ impl Deadline {
 		&mut self,
 		handshake: impl Future<Output = Result<T, E>>,
 	) -> anyhow::Result<T> {
-		use web_transport_trait::poll::Session as _;
 		let timer = std::pin::pin!(self.timer.wait());
 		let handshake = std::pin::pin!(handshake);
 		match futures::future::select(timer, handshake).await {
@@ -740,7 +743,7 @@ async fn serve_connection(
 	let mut deadline = Deadline::new(&handle, &conn);
 
 	// Read the link facts now: the handshake below consumes the connection.
-	let remote = conn.remote_addr();
+	let remote = conn.remote_address();
 	let sni = conn.server_name().map(str::to_owned);
 	// TLS validated this against the configured roots before the connection
 	// existed, so a chain here is an authenticated peer.
@@ -756,13 +759,13 @@ async fn serve_connection(
 				.bound(moq_uring::quic::web::Request::accept(conn))
 				.await
 				.context("WebTransport handshake failed")?;
-			let url = request.url().clone();
+			let url = request.url.clone();
 			let protocol = request
-				.protocols()
+				.protocols
 				.iter()
 				.find(|offered| serve.alpns.iter().any(|alpn| alpn == *offered))
 				.cloned();
-			let mut response = moq_uring::quic::web::Response::default();
+			let mut response = moq_uring::quic::web::proto::ConnectResponse::OK;
 			if let Some(protocol) = &protocol {
 				response = response.with_protocol(protocol);
 			}
@@ -779,13 +782,7 @@ async fn serve_connection(
 	deadline.close = Some(transport.clone());
 	let conn = transport.clone();
 	let server = serve.moq.clone();
-	let address = match url {
-		Some(_) => moq_net::transport::Address::Uri,
-		None => moq_net::transport::Address::Setup,
-	};
-	// moq-net boxes the transport with a native `Send` bound, which only a `Local`
-	// session meets; it still never leaves this worker.
-	let session = moq_uring::transport::Local::new(moq_uring::transport::Session::new(transport, address));
+	let session = moq_uring::transport::Local::new(transport);
 	let now = moq_net::time::Instant::now();
 	let mut accepted = Accepted {
 		handle,
