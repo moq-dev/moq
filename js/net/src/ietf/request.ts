@@ -1,4 +1,5 @@
 import type { Reader, Writer } from "../stream.ts";
+import { toNumber } from "../util/bigint.ts";
 import * as Message from "./message.ts";
 import { Parameters } from "./parameters.ts";
 import * as Properties from "./properties.ts";
@@ -56,7 +57,7 @@ export class RequestError {
 	}
 
 	async #encode(w: Writer): Promise<void> {
-		await w.u62(BigInt(this.errorCode));
+		await w.u53(this.errorCode);
 		await w.u62(this.retryInterval);
 		await w.string(this.reasonPhrase);
 	}
@@ -66,8 +67,9 @@ export class RequestError {
 	}
 
 	static async #decode(r: Reader): Promise<RequestError> {
-		const errorCode = Number(await r.u62());
+		const errorCode = await r.u53();
 		const retryInterval = await r.u62();
+		toNumber(retryInterval); // The namespace re-offer timer uses numeric milliseconds.
 		const reasonPhrase = await r.string();
 		return new RequestError({ errorCode, reasonPhrase, retryInterval });
 	}
