@@ -434,7 +434,7 @@ fn local_priorities_loop_path_only_requests() {
 
 /// The same ring with every relay subscribing at once. Each forwarded request
 /// joins the subscription its neighbor already opened, and no source feeds the
-/// cycle. Joining by path or by epoch deadlocks; joining only a subscription to
+/// cycle. Joining by path or by instance deadlocks; joining only a subscription to
 /// the same identity, or one within the request's bound, does not.
 #[test]
 fn aggregation_cycles_starve_without_a_forwarding_constraint() {
@@ -445,7 +445,7 @@ fn aggregation_cycles_starve_without_a_forwarding_constraint() {
 		"live/x",
 		&all,
 		Forward::Pinned,
-		Aggregate::Epoch
+		Aggregate::Instance
 	)));
 	for (mode, aggregate) in [
 		(Forward::Pinned, Aggregate::Identity),
@@ -464,7 +464,7 @@ fn aggregation_cycles_starve_without_a_forwarding_constraint() {
 /// publisher under the requester's announced one, with no Restart. Only a
 /// request naming the identity keeps the instance the requester announced.
 #[test]
-fn epochless_reselection_splices_another_publisher() {
+fn reselection_without_an_instance_splices_another_publisher() {
 	let (edge, core, first, second) = (0, 1, 2, 3);
 	let mut net = Net::new(Config::default(), 4);
 	net.join(edge, core, 1);
@@ -526,7 +526,7 @@ fn overlapping_wildcards_loop_where_specific_claims_are_unheard() {
 }
 
 /// A deterministic sweep over small random meshes: priorities, overlapping
-/// wildcards, epochs, and claims some nodes have not heard. Pinned and bounded
+/// wildcards, instances, and claims some nodes have not heard. Pinned and bounded
 /// requests never loop or deadlock; path-only requests and the wire-free
 /// downstream condition do. A pinned request always arrives, while a bounded
 /// one stalls where a transit hop has not heard the claim.
@@ -621,8 +621,8 @@ fn random_mesh(rng: &mut XorShift) -> Net {
 		net.join(origin, rng.next(RELAYS as u64) as usize, 1);
 		net.originate(origin, origin as u64, 0);
 		let prefix = prefixes[rng.next(3) as usize];
-		let epoch = if rng.chance(50) { Some(1) } else { None };
-		let claim = net.claim(origin as u64, prefix, rng.next(3), epoch);
+		let instance = if rng.chance(50) { Some(1) } else { None };
+		let claim = net.claim(origin as u64, prefix, rng.next(3), instance);
 		for relay in 0..RELAYS {
 			if rng.chance(20) {
 				net.hide(relay, claim);

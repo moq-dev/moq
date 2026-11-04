@@ -77,7 +77,10 @@ relay.with_web(web).run().await?;
 
 - `Relay::load` binds every socket, so a taken port fails there, and the
   accessors report the bound addresses, including ports assigned for `:0`.
-- `run` consumes the relay, so clone the handles your tasks need first.
+- `run` consumes the relay, so clone the handles your tasks need first. Stats
+  publishing starts when `run` drives the cluster; an application building a
+  `Cluster` itself sets stats in `cluster::Options` and must keep polling the
+  returned driver while serving.
 - Build on `web().routes()`: `with_web` replaces the router, so `Router::new()`
   drops the built-in routes.
 - A route reads the connection's peer address with axum's

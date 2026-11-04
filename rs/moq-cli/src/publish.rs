@@ -699,8 +699,8 @@ impl Publish {
 							let mut publish = std::pin::pin!(driver.run());
 							tokio::select! {
 								result = capture.run() => {
-									// Let the encoder abort its track with the source error
-									// before its future is dropped.
+									// Let the encoder serve its retained audio, then end its
+									// track with the source error, before its future is dropped.
 									let published = publish.await;
 									result.and(published).map_err(anyhow::Error::from)
 								}

@@ -214,6 +214,17 @@ budget drops. Tests: a
 group still in flight on the existing subscription sends no second SUBSCRIBE,
 and a dropped group is recovered exactly once.
 
+### JavaScript names the explicit end
+
+Moved here from JS ranges on 2026-11-03 (maintainer, on
+[moq-dev/moq#7696](https://github.com/moq-dev/moq/pull/7696)), which finished
+that quest: the SUBSCRIBE_FINISH JS work belongs with
+[moq-dev/moq#7675](https://github.com/moq-dev/moq/pull/7675), which brought the
+JS lite-07 publisher and subscriber to the explicit end. What it left: rename
+SUBSCRIBE_END to SUBSCRIBE_FINISH in `js/net`, as Rust and the draft did, and
+delete the JS subscriber's covered-FIN path (`#parkCovered`, `#demandCovered`,
+the `short` reopen), which no lite-07 publisher triggers any more.
+
 ### Draft and checks
 
 Update `drafts/draft-lcurley-moq-lite.md` with each wire change here,
