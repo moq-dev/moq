@@ -70,7 +70,19 @@ try {
 	write(0n);
 	ordered = subscribe(0, 0n);
 	check(await ordered.readFrame(), 0n);
-	for (const [index, sequence] of [2n, 4n].entries()) {
+	// Leave the old-group miss to the relay's automatic FETCH path, as a failed live
+	// source does. With the old decoder that closes the publisher, the next read is unroutable.
+	for (let sequence = 1n; sequence <= 64n; sequence++) {
+		const continued = ordered.readFrame();
+		track.abort(new Moq.Error.Stream(Moq.StreamCode.Internal, { message: "source failed" }));
+		track = broadcast.createTrack("value", { maxAge: null });
+		write(sequence);
+		check(await continued, sequence);
+		ordered.close();
+		ordered = subscribe(0, sequence);
+		check(await ordered.readFrame(), sequence);
+	}
+	for (const [index, sequence] of [66n, 68n].entries()) {
 		const continued: ReturnType<Moq.Track.Ordered["readFrame"]> = ordered.readFrame();
 		track.abort(new Moq.Error.Stream(Moq.StreamCode.Internal, { message: "source failed" }));
 		track = broadcast.createTrack("value", { maxAge: null });
@@ -122,7 +134,7 @@ try {
 		ordered = next;
 	}
 	for (const request of following) assert.equal(request.closed.peek(), undefined);
-	console.log("replacement immediate=2 resumed=2 missing-group-fetch=2");
+	console.log("replacement automatic=64 immediate=2 resumed=2 missing-group-fetch=2");
 } finally {
 	ordered?.close();
 	for (const request of following) request.close();

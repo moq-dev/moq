@@ -434,6 +434,20 @@ test("min delay survives lite-07 and decodes as not stated on legacy wires", asy
 	}
 });
 
+test("optional subscriber milliseconds reject unsafe budgets", async () => {
+	for (const minDelay of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1]) {
+		await expect(
+			encodeMessage(
+				Version.DRAFT_07,
+				new Subscribe({ id: 1n, broadcast: Path.from("room"), track: "video", priority: 3, minDelay }),
+			),
+		).rejects.toThrow(RangeError);
+		await expect(encodeMessage(Version.DRAFT_07, new SubscribeUpdate({ priority: 3, minDelay }))).rejects.toThrow(
+			RangeError,
+		);
+	}
+});
+
 test("wanted group survives lite-07 and disappears on legacy wires", async () => {
 	for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 		for (const wantedGroup of [undefined, 0n, 3n, BigInt(Number.MAX_SAFE_INTEGER)]) {

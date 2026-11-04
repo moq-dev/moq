@@ -72,7 +72,8 @@ wire-compat lanes, which swap in released relays and clients, skip them.
 
 On lite-07, Node and Bun also replace tracks in a claimed broadcast through the
 relay over WebSocket and WebTransport. Pre-connected readers subscribe immediately
-after each replacement while an existing reader resumes. A missing-group FETCH
+after each replacement while an existing reader resumes. The case also repeats the
+automatic failed-source lifecycle 64 times. A missing-group FETCH
 crosses both hops with the unlimited subscriber budget, checking its optional
 millisecond encoding at the safe-integer boundary.
 

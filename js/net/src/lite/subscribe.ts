@@ -11,6 +11,7 @@ import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import { type Timescale, Timestamp } from "../time.ts";
 import type { Anchor, Order, Position, Range } from "../track.ts";
+import * as Duration from "./duration.ts";
 import { decodePin, encodePin } from "./instance.ts";
 import * as Message from "./message.ts";
 import { fromWire, toWire } from "./priority.ts";
@@ -398,15 +399,13 @@ export function inclusiveGroupEnd(exclusive?: bigint): bigint | undefined {
  * on a wire without the field. */
 async function encodeMinDelay(w: Writer, version: Version, minDelay: number | undefined) {
 	if (!hasMinDelay(version)) return;
-	await w.u62(minDelay === undefined ? 0n : BigInt(minDelay) + 1n);
+	await Duration.encodeOptional(w, minDelay);
 }
 
 /** Decode the `Subscriber Min Age`, as not stated on a wire without the field. */
 async function decodeMinDelay(r: Reader, version: Version): Promise<number | undefined> {
 	if (!hasMinDelay(version)) return undefined;
-	const value = await r.u62();
-	if (value > BigInt(Number.MAX_SAFE_INTEGER) + 1n) throw new RangeError("min delay exceeds safe integer");
-	return value === 0n ? undefined : Number(value - 1n);
+	return Duration.decodeOptional(r);
 }
 
 export class SubscribeUpdate {
