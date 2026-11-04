@@ -54,8 +54,6 @@ webrtc = ["_transport", "dep:qmux", "dep:moq-ice", "dep:str0m", "dep:if-addrs", 
 sim = ["kio/sim", "moq-quic?/sim"]
 
 [dependencies]
-rind = { workspace = true }
-rind-rcgen = { workspace = true, optional = true }
 bytes = "1"
 # Family-restricted `getaddrinfo`, so the AAAA and A queries can be issued separately
 # (RFC 8305 section 3) while still going through the system resolver.
@@ -80,6 +78,8 @@ qmux = { workspace = true, features = ["wss", "tls", "tcp"], optional = true }
 rand = "0.10.1"
 rcgen = { workspace = true, optional = true }
 reqwest = { version = "0.13", default-features = false, optional = true }
+rind = { workspace = true }
+rind-rcgen = { workspace = true, optional = true }
 rind-rustls = { workspace = true }
 rustc-hash = { workspace = true, optional = true }
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }

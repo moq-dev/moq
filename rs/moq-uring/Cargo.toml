@@ -25,7 +25,6 @@ qlog = ["moq-quic?/qlog"]
 _manual = ["kio/manual"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
-rind = { workspace = true }
 bytes = "1"
 futures = "0.3"
 http = "1"
@@ -37,6 +36,7 @@ moq-congestion = { workspace = true, optional = true }
 moq-net = { workspace = true }
 moq-quic = { workspace = true, features = [], optional = true }
 moq-sock = { workspace = true }
+rind = { workspace = true }
 rind-rustls = { workspace = true }
 rustc-hash = { workspace = true }
 rustls = { version = "0.23", default-features = false, features = ["std"], optional = true }

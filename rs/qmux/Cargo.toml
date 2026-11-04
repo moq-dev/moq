@@ -21,14 +21,14 @@ ws = ["dep:tokio-tungstenite", "dep:futures"]
 wss = ["ws", "dep:rind-rustls", "dep:rustls-native-certs", "dep:rustls", "tokio-tungstenite/rustls-tls-native-roots"]
 
 [dependencies]
-rind = { workspace = true }
-rind-rustls = { workspace = true, optional = true }
 bytes = { workspace = true }
 futures = { workspace = true, optional = true }
 kio = { workspace = true, features = ["runtime"] }
 moq-net = { workspace = true }
 # The stream state machine, shared with QUIC. `mux` drives it over a reliable transport.
 moq-quic = { workspace = true, features = ["mux"] }
+rind = { workspace = true }
+rind-rustls = { workspace = true, optional = true }
 rustls = { version = "0.23", default-features = false, optional = true }
 rustls-native-certs = { workspace = true, optional = true }
 thiserror = { workspace = true }

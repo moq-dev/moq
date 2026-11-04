@@ -29,7 +29,6 @@ sim = []
 fuzz = ["dep:arbitrary"]
 
 [dependencies]
-rind = { workspace = true }
 arbitrary = { version = "1.5", features = ["derive"], optional = true }
 bytes = { workspace = true }
 fastbloom = { version = "0.17", default-features = false }
@@ -41,6 +40,7 @@ lru-slab = "0.1.2"
 moq-congestion = { workspace = true }
 qlog = { version = "0.18", optional = true }
 rand = { workspace = true }
+rind = { workspace = true }
 rind-rustls = { workspace = true }
 rustc-hash = { workspace = true }
 rustls = { version = "0.23.5", default-features = false, features = ["std"] }

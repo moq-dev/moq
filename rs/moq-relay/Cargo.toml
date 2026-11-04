@@ -52,7 +52,6 @@ io-uring = ["_uring", "moq-uring/quic"]
 _uring = ["dep:moq-sock", "dep:moq-uring"]
 
 [dependencies]
-rind = { workspace = true }
 anyhow = { workspace = true, features = ["backtrace"] }
 axum = { workspace = true }
 axum-server = { workspace = true, features = ["tls-rustls-no-provider"] }
@@ -81,6 +80,7 @@ qmux = { workspace = true, features = ["ws"], optional = true }
 rand = { workspace = true }
 reqwest = { workspace = true, features = ["rustls-no-provider"] }
 reqwest-middleware = "0.5"
+rind = { workspace = true }
 rind-rustls = { workspace = true }
 rustls = { version = "0.23", features = ["std"], default-features = false }
 serde = { workspace = true }
