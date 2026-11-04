@@ -527,6 +527,9 @@ pub struct Config {
 
 	/// Send from this local UDP address. Defaults to an ephemeral dual-stack port.
 	///
+	/// With port 0, two consecutive failed dial rounds give the reconnecting connection
+	/// a fresh port. Established sessions keep their sockets; a nonzero port never changes.
+	///
 	/// Kept optional because the compatibility fold must distinguish an explicit
 	/// wildcard bind from an unset bind.
 	#[serde(default, skip_serializing_if = "Option::is_none")]

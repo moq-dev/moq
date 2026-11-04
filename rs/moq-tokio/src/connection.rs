@@ -1118,6 +1118,10 @@ impl Connection {
 	}
 
 	async fn run(shared: &Shared, client: Client, addrs: Addrs) -> crate::Result<()> {
+		#[cfg(feature = "quic")]
+		let mut client = client;
+		#[cfg(feature = "quic")]
+		let mut failed_dials = 0;
 		let backoff = client.backoff.clone();
 		let goaway = client.goaway.resolve();
 		let pacing = Pacing::new(&backoff);
@@ -1141,11 +1145,22 @@ impl Connection {
 			if let Poll::Ready(Err(err)) = shared.auth.grant().poll_changed(&kio::Waiter::noop()) {
 				return Err(err.into());
 			}
+			#[cfg(feature = "quic")]
+			if failed_dials == 2 {
+				// Retry one transient failure on the same socket. Two failed walks
+				// are enough to try another flow, even with an unlimited retry window.
+				client.fresh_port()?;
+				failed_dials = 0;
+			}
 
 			// What the last dial presented, so a refusal is judged against it.
 			let mut presented = None;
 			match Self::dial_any(shared, &client, &addrs, &mut draining, &mut presented).await {
 				Ok((addr, dialed)) => {
+					#[cfg(feature = "quic")]
+					{
+						failed_dials = 0;
+					}
 					let url = addr.url().clone();
 					tracing::info!(peer = %Endpoint(&url), transport = %dialed.transport, "connected");
 					shared.connected(&dialed.session, dialed.transport);
@@ -1351,6 +1366,18 @@ impl Connection {
 					if (err.is_terminal() && !refreshed(&err, &shared.tokens, presented.as_ref())) || !client.reconnect
 					{
 						return Err(err);
+					}
+					#[cfg(feature = "quic")]
+					if addrs
+						.as_slice()
+						.iter()
+						.any(|addr| matches!(addr.url().scheme(), "http" | "https" | "moqt" | "moql"))
+					{
+						// Explicit shutdown cannot recover by retrying or opening another socket.
+						if client.quic_closed() {
+							return Err(err);
+						}
+						failed_dials += 1;
 					}
 					shared.retrying(&err);
 					retry.last_error = Some(err);
