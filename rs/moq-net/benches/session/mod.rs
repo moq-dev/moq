@@ -96,7 +96,9 @@ use moq_net::{Hop, Timestamp, Version, broadcast, cache, datagram, group, origin
 
 /// A millisecond track: the frames written here carry timestamps.
 fn timed() -> track::Info {
-	track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	track::Info::default()
+		.with_max_age(None)
+		.with_timescale(moq_net::Timescale::MILLI)
 }
 
 /// The lite draft production negotiates, the next one (opt-in), and the newest
@@ -1667,10 +1669,18 @@ impl<B: Backend> ChurnRoom<B> {
 		let held: Vec<_> = (0..shape.held).map(|i| format!("held{i}")).collect();
 		let tracks: Vec<_> = held
 			.iter()
-			.map(|name| published.create_track(name.as_str(), None).unwrap())
+			.map(|name| {
+				published
+					.create_track(name.as_str(), moq_net::track::Info::default().with_max_age(None))
+					.unwrap()
+			})
 			.collect();
 		let churn: Vec<_> = (0..shape.sessions)
-			.map(|i| published.create_track(format!("churn{i}"), None).unwrap())
+			.map(|i| {
+				published
+					.create_track(format!("churn{i}"), moq_net::track::Info::default().with_max_age(None))
+					.unwrap()
+			})
 			.collect();
 
 		let mut viewers = Vec::new();

@@ -6,7 +6,7 @@ use std::task::Poll;
 /// A worker's transport, usable where moq-net wants a `Send` one.
 ///
 /// moq-net boxes every transport with a native `Send` bound, which a worker's
-/// `!Send` [`Session`](super::Session) cannot meet, so wrap the session in this
+/// `!Send` session cannot meet, so wrap the session in this
 /// before `Server::accept_request` or `Client::connect`. The session, its
 /// streams, and its send groups never leave the worker that polls them, so
 /// this checks the thread on every use and panics anywhere else instead of
@@ -202,7 +202,7 @@ mod tests {
 	#[test]
 	fn meets_the_boxed_driver_bounds() {
 		fn boxable<S: poll::Boxable>() {}
-		boxable::<Local<super::super::Session<crate::quic::web::Session>>>();
+		boxable::<Local<crate::quic::web::Session>>();
 	}
 
 	/// Touching it off its thread fails loud rather than racing the worker.

@@ -41,7 +41,7 @@ pub struct Info {
 	/// The cache pool this broadcast's tracks and groups inherit.
 	pub pool: cache::Pool,
 
-	/// Ceiling on each track's media-timestamp retention window.
+	/// Local ceiling on each track's max age: how long a superseded group stays fresh here.
 	pub cache_duration: std::time::Duration,
 
 	/// The path this broadcast is named by, which relative references in a catalog it

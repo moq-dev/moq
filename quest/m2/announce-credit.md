@@ -42,6 +42,13 @@ Decided 2026-11-01 with the maintainer (the follow-up to the
   the session advertises, and the session never closes for count.
   moq-transport and older lite versions have no credit and keep today's
   close at the cap.
+- Decided 2026-11-03 (maintainer, follow-up planning after the 2026-11-03 /quest-afk and /quest-complete runs): weigh per-socket stream credit here,
+  like QUIC's MAX_STREAMS. With
+  [moq-dev/moq#7677](https://github.com/moq-dev/moq/pull/7677)'s sockets, a peer can keep
+  as many live socket streams listed as the session's announce cap allows,
+  with no per-socket bound. Decide whether the route credit covers it or a
+  socket needs its own, for byte streams and the mesh. Options shown: m0;
+  m1; ✅ m2, in this quest.
 - Settle and record here how SYNCED behaves when the initial set exceeds the
   credit. For example, SYNCED could follow the credited part, and the rest
   arrives as live updates.

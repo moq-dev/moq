@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { Manual, Milli, Nano } from "@moq/clock";
 import { Stats } from "@moq/hang";
 import * as Catalog from "@moq/hang/catalog";
+import * as Container from "@moq/hang/container";
 import * as Json from "@moq/json";
 import { Origin, Path, Track } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
@@ -400,7 +401,7 @@ test("replacing a closed rendition track keeps the broadcast and publishes a fre
 });
 
 test("changing maxAge publishes a new network broadcast", async () => {
-	const maxAge = new Signal<Milli | undefined>(Milli(1000));
+	const maxAge = new Signal<Milli | null | undefined>(Milli(1000));
 	const broadcast = new Broadcast({
 		enabled: true,
 		origin: new Origin.Producer(),
@@ -419,6 +420,22 @@ test("changing maxAge publishes a new network broadcast", async () => {
 	expect(after).not.toBe(before);
 	expect((await after?.track("video").info())?.maxAge).toBe(Milli(2000));
 
+	// Omitted is the media max age, and null is no publisher limit.
+	maxAge.set(undefined);
+	await settle();
+	expect((await broadcast.net.peek()?.track("video").info())?.maxAge).toBe(Container.MAX_AGE);
+	maxAge.set(null);
+	await settle();
+	expect((await broadcast.net.peek()?.track("video").info())?.maxAge).toBeUndefined();
+
+	broadcast.close();
+});
+
+test("the catalog track takes the zero default max age", async () => {
+	const broadcast = new Broadcast({ enabled: true, origin: new Origin.Producer(), name: Path.from("test.hang") });
+	await settle();
+	const info = await broadcast.net.peek()?.track(Broadcast.CATALOG_TRACK).info();
+	expect(info?.maxAge).toBe(Milli.zero);
 	broadcast.close();
 });
 

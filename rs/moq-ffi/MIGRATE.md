@@ -5,6 +5,15 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+A null `MoqTrackInfo.max_age`, and a null `MoqTrackInfo`, now advertise a zero max age, serving only the live edge, instead of no publisher limit. Set the new `max_age_unlimited`, which ignores `max_age`, where you relied on null meaning no limit.
+A received track's `info()` sets `max_age_unlimited` when its publisher advertised no limit, so the record republishes unchanged.
+
+### Viewer targets are bounded ([#7090](https://github.com/moq-dev/moq/pull/7090))
+
+Viewer ceilings and PROBE target overrides are refused with the new `MoqError::OutOfRange` once they would sum above 2^53 - 1 bps, the most a PROBE target carries; nothing changes on a refusal. `MoqViewers::watch` and `set_target` and `MoqViewer::update` return a `Result`. Handle the new variant wherever you match the error exhaustively. Regenerate bindings and rebuild the matching native library together.
+
 ### Datagrams are a track of their own
 
 A raw track's datagrams travel on a separate datagram track of the same name, so the API is unchanged but some results differ:
