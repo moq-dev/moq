@@ -150,21 +150,23 @@ impl Endpoint {
 	/// [`server`](Config::server) configuration, and with the socket's error
 	/// once the endpoint has died, its worker included.
 	pub async fn accept(&self) -> Result<Connection, Error> {
-		kio::wait(|waiter| {
-			if let Some(err) = self.inner.closed() {
-				return Poll::Ready(Err(err));
-			}
-			let mut accepting = self.inner.accepting.borrow_mut();
-			let Some(accepting) = accepting.as_mut() else {
-				return Poll::Ready(Err(Error::NotServer));
-			};
-			if let Some(conn) = accepting.queue.pop_front() {
-				return Poll::Ready(Ok(conn));
-			}
-			waiter.register(&mut self.inner.accept_waiters.borrow_mut());
-			Poll::Pending
-		})
-		.await
+		kio::wait(|waiter| self.poll_accept(waiter)).await
+	}
+
+	/// The next handshaken incoming connection, or the endpoint's terminal error.
+	pub fn poll_accept(&self, waiter: &kio::Waiter) -> Poll<Result<Connection, Error>> {
+		if let Some(err) = self.inner.closed() {
+			return Poll::Ready(Err(err));
+		}
+		let mut accepting = self.inner.accepting.borrow_mut();
+		let Some(accepting) = accepting.as_mut() else {
+			return Poll::Ready(Err(Error::NotServer));
+		};
+		if let Some(conn) = accepting.queue.pop_front() {
+			return Poll::Ready(Ok(conn));
+		}
+		waiter.register(&mut self.inner.accept_waiters.borrow_mut());
+		Poll::Pending
 	}
 
 	/// Dial `remote` through this endpoint's socket, verifying it as
