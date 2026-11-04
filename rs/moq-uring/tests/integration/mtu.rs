@@ -203,11 +203,11 @@ fn endpoints(
 	);
 	server_config.transport = transport.clone();
 	let server = quic::Endpoint::new(
-		socket(handle),
 		quic::endpoint::Config::default().with_server(server_config),
+		socket(handle),
 	)
 	.expect("server endpoint");
-	let client = quic::Endpoint::new(socket(handle), quic::endpoint::Config::default()).expect("client endpoint");
+	let client = quic::Endpoint::new(quic::endpoint::Config::default(), socket(handle)).expect("client endpoint");
 	let path = Path::new(server.local_addr(), mtu);
 	let mut dial = quic::client::Config::default();
 	dial.alpn = vec![ALPN.to_string()];
@@ -236,7 +236,7 @@ async fn transfer(handle: &moq_uring::Handle, from: &mut quic::Connection, to: &
 	let mut send = from.open_uni(Default::default()).await.expect("open_uni");
 	handle.spawn(async move {
 		if send.write_all(bytes::Bytes::from(vec![7u8; len])).await.is_ok() {
-			let _ = send.finish().stopped().await;
+			let _ = send.finish().closed().await;
 		}
 	});
 
