@@ -3832,7 +3832,7 @@ mod test {
 		assert_eq!(drain(&mut sub, false), [0]);
 		a.give_up(1..3, track::Hole::stale(HOUR));
 		assert_eq!(dropped(&mut sub), [(1..3, StreamError::Old)]);
-		assert_eq!(sub.reoffer_stale(), [1..3]);
+		assert_eq!(sub.reoffer_stale(), vec![1..3]);
 		assert_eq!(sub.reoffer_stale(), Vec::<std::ops::Range<u64>>::new());
 	}
 

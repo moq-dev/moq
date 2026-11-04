@@ -23593,7 +23593,7 @@ mod test {
 	fn an_aborted_sequence_is_created_again() {
 		let producer = track_producer("test", Info::timed());
 		let mut subscriber = producer.subscribe(replay().with_range(0..));
-		let mut group = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		let group = producer.create_group(group::Info { sequence: 0 }).unwrap();
 		group.abort(Error::Stream(StreamError::Cancel)).unwrap();
 		write_group(&producer, 0);
 		producer.append_group().unwrap().finish().unwrap();

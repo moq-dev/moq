@@ -408,8 +408,8 @@ function localStreamCode(err: unknown): StreamCode {
 /**
  * A group was created at a sequence its track declared skipped.
  *
- * A skip says the sequence will never be produced, so it is final. See
- * {@link TrackProducer.skipGroups}. Mirrors the Rust `Error::Skipped`.
+ * A skip says the sequence will never be produced, so it is final. See the track producer's
+ * `skipGroups`. Mirrors the Rust `Error::Skipped`.
  *
  * @public
  */
