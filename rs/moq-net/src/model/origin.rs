@@ -3798,6 +3798,12 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 						let Some((instance, asked)) = instances.get(&source).cloned() else {
 							continue;
 						};
+						// Route datagram lookups before a requester can see the broadcast,
+						// which would otherwise find no source to ask.
+						if datagram_source != Some(source) {
+							datagram_source = Some(source);
+							broadcast.serve_datagrams_from(sources.get(&source).cloned());
+						}
 						resolved = Some(instance.clone());
 						if let Ok(mut pending) = request.write()
 							&& pending.resolved.is_none()

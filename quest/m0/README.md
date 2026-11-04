@@ -35,5 +35,4 @@ edge, which embeds moq-relay; it moved there on 2026-09-28.
 - [Benchmark sessions can't overlap on a host](/quest/m0/bench-host-lock.md) - a host-level lock keeps a second benchmark or profile session from measuring under the first's load
 - [A waiter's record limit changes no behavior](/quest/m0/kio-waiter-records.md) - two moq-net tests stop failing when kio's waiters remember 16 lists, and the limit becomes a tuning knob worth 3.9% per delivered group
 - [Backport the relay and auth hardening to release](/quest/m0/backport-release-hardening.md) - `release`'s relay refuses dot-segment paths, serves its HTTP routes with main's response hardening, and withdraws advertisements a peer starves of send credit; its auth client refuses redirects
-- [quest init keeps moq's nix-wrapped worktree hooks](/quest/m0/quest-worktree-hooks.md) - quest pin bumps keep the hooks that run moq's pinned `quest`
 - [@moq/net passes qmux stream limits through](/quest/m0/qmux-stream-limits.md) - Node and WebSocket JS clients stop failing near 100 live tracks

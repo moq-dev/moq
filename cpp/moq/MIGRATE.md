@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Separate datagram tracks
+
+Replace stream-track datagram methods with `BroadcastProducer::create_datagrams(name, info)` and `BroadcastConsumer::datagrams(name)`. The generated `DatagramProducer` exposes `append(timestamp, payload)` and `insert(Datagram)`; `DatagramConsumer::recv()` returns an optional datagram through a future. `DatagramInfo` has only priority and optional timescale. Demand is aggregate subscriber `priority()` / `priority_changed(last)`; on-demand datagram requests come from `BroadcastRequests::datagrams()` / `DatagramRequests::requested()`. Stream tracks of the same name are independent.
+
 ### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
 
 An unset `moq::TrackInfo::max_age`, and a `std::nullopt` info, now advertise a zero max age, serving only the live edge, instead of no publisher limit. Set the new `max_age_unlimited`, which ignores `max_age`, where you relied on `std::nullopt` meaning no limit. A received track's `info()` sets it when its publisher advertised no limit.

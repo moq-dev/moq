@@ -4593,7 +4593,6 @@ dependencies = [
 name = "moq-crypto"
 version = "0.0.11"
 dependencies = [
- "aws-lc-rs",
  "base64 0.23.1",
  "bench-harness",
  "bytes",

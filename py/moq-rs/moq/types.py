@@ -22,6 +22,7 @@ from moq_ffi import (
 from moq_ffi import (
     MoqConnectionState as ConnectionState,
 )
+from moq_ffi import MoqDatagramInfo as DatagramInfo
 from moq_ffi import (
     MoqErrorScope as ErrorScope,
 )
@@ -95,6 +96,7 @@ __all__ = [
     "ConnectionPhase",
     "ConnectionState",
     "Datagram",
+    "DatagramInfo",
     "Delay",
     "ErrorScope",
     "Frame",
