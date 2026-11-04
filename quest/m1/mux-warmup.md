@@ -43,7 +43,9 @@ the two missing consumers get the warmup.
   `Delay { min, max }` and edited `rs/moq-ffi/src/media.rs`.
 
 Public API: moq-mux's container consumer setup changes (breaking). The
-bindings' subscribe surface is unchanged. Wire: none.
+bindings' subscribe method stays unchanged. If the maintainer chooses
+optional FFI catalog `warmup` fields below, update the public records,
+every language wrapper, and moq-ffi's `MIGRATE.md` too. Wire: none.
 
 Implementation evidence, 2026-11-04:
 
@@ -56,9 +58,10 @@ Implementation evidence, 2026-11-04:
   converted native audio and video catalogs with 300 ms warmup, then passed
   those renditions to the public raw FFI subscribe method with a 200 ms
   delay. Both producer-side subscription maxima were 200 ms, rather than
-  the required 500 ms. Command: `quest gate just rs test -p moq-ffi -E
-  'test(raw_media_catalog_warmup_reaches_the_subscription)'`. The temporary
-  regression was removed after reproduction; no production code changed.
+  the required 500 ms. The temporary regression was removed after
+  reproduction; no production code changed. These are recorded observations,
+  not a regression checked into the suite. Permanent adoption regressions
+  remain required by the Plan.
 - `moqsrc` also discards warmup while constructing its private `Shape` and
   subscribes using only `Session::max_delay`. Carrying the value privately
   would not require a GStreamer property change.
