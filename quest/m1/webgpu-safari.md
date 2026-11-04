@@ -43,37 +43,47 @@ Pixel readback checked four colored quadrants, with no renderer changes.
 - `<moq-publish>` passed 10/12 landscape image-source preview cases, covering
   `source` and `encoded` with both backends for H.264 High, HEVC and VP8. Both
   HEVC `encoded` cases failed before rendering with
-  `preview: decode error EncodingError: Decoder failure`.
-- The HEVC reproduction requested `hevc: { format: "annexb" }`, but Safari
-  returned a length-prefixed chunk (prefix `00 00 00 3b 4e 01`) and an hvcC
-  decoder description. `preview.ts` configures its decoder without that
-  description. The publishing probe also assumes the requested Annex B
-  format was honored, so a preview-only decoder change would leave the
-  publishing path unresolved.
+  `preview: decode error EncodingError: Decoder failure`: Safari accepts
+  `hevc: { format: "annexb" }` but returns length-prefixed chunks (prefix
+  `00 00 00 3b 4e 01`) with a 109-byte hvcC description.
+
+✅ Safari HEVC: probe and refuse (maintainer, 2026-11-03, on
+[moq-dev/moq#7765](https://github.com/moq-dev/moq/pull/7765)). The encoder
+setup probe in `@moq/publish` now checks that H.264 and HEVC output opens with
+an Annex B start code and otherwise skips that codec, so publishing and the
+encoded preview pick the next one. No runtime fallback. On the same Safari
+26.6.2 Mac, the probe refused `hev1.1.6.L93.B0` and resolved `avc1.640028`,
+whose output was Annex B.
 
 Remaining evidence includes real iOS capture and physical orientation,
 publisher preview orientation, and a valid frame that actually fails import.
 A deliberately closed RGBA frame did not induce an import exception or
-validation error in this Safari session; it does not verify failure handling.
+validation error in the macOS session; it does not verify failure handling.
 Keep the renderer's existing error behavior pending such evidence.
 
 Public API: possibly a new `out.error` name. Wire: none.
 
 ## Waiting
 
-- Maintainer: connect real iOS hardware running Safari 26 to an interactive
-  or hosted session. The available device tools expose only a Linux host and
-  no iOS devices; SSH/WebDriver supplied macOS evidence only. Recommend a
-  physical iPhone or iPad session that permits capture and rotation. A
-  simulator does not clear this wait. Resume the remaining matrix once that
-  session is reachable.
-- Maintainer: decide how to handle Safari ignoring HEVC Annex B encoding.
-  Recommend verifying the output format in the existing encoder setup probe
-  and refusing HEVC when unsupported, covering both publishing and encoded
-  preview. The alternative is supporting Safari's length-prefixed output
-  while preserving the publisher's inline parameter sets and adaptive
-  resizing. This changes supported publishing behavior, so the verification
-  attempt leaves the choice open rather than adding a runtime fallback.
+- Maintainer: run Safari 26 on a physical iPhone or iPad (a simulator does not
+  count), with Web Inspector attached from a Mac. Serve the `main` demo
+  (`just demo`) to the device over HTTPS, since camera capture needs a secure
+  context. Then:
+  1. Open `publish.html`, publish the rear camera, then the front camera. In
+     the console, run `document.querySelector("moq-publish").backend = "webgpu"`,
+     then `"auto"`. For each, rotate the device through portrait, landscape
+     left, landscape right, and upside down. Check that the preview stays
+     upright and matches the scene.
+  2. Open `watch.html` on the same broadcast and set
+     `document.querySelector("moq-watch").backend` to `"webgpu"`, then `"auto"`.
+     Repeat the rotations and check that the picture stays upright.
+  3. In the console, run `(await navigator.gpu.requestAdapter()).info`. Record
+     its result, the iOS and Safari versions, any `moq-publish: skipping`
+     warning, and any `importExternalTexture` or WebGPU validation error in
+     this quest.
+
+  Done when those results are recorded here, so the remaining work can be
+  fixed at its source or the quest finished.
 
 ## Related
 

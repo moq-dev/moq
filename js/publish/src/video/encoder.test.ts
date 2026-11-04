@@ -83,7 +83,9 @@ class FakeVideoEncoder {
 		const codec = this.#codec && FakeVideoEncoder.report(this.#codec);
 		// A slice NAL unit behind an Annex B start code, or behind Safari's four-byte length.
 		const data = new Uint8Array(
-			this.#codec && FakeVideoEncoder.lengthPrefixed(this.#codec) ? [0, 0, 0, 2, 0x26, 0x01] : [0, 0, 0, 1, 0x26, 0x01],
+			this.#codec && FakeVideoEncoder.lengthPrefixed(this.#codec)
+				? [0, 0, 0, 2, 0x26, 0x01]
+				: [0, 0, 0, 1, 0x26, 0x01],
 		);
 		const chunk = {
 			type: "key",
