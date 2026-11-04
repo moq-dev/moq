@@ -4,7 +4,7 @@
 //! advertises and yields [`Catalog<E>`](super::hang::Catalog) snapshots so callers
 //! and exporters only deal with one shape.
 
-use std::task::Poll;
+use std::task::{Poll, ready};
 
 use super::hang::{Catalog, CatalogExt};
 use super::{CatalogFormat, Stream};
@@ -48,22 +48,49 @@ impl<E: CatalogExt> Consumer<E> {
 	}
 
 	/// Subscribe to the catalog track advertised by `format`.
+	#[cfg(feature = "async")]
 	pub async fn new(broadcast: &moq_net::broadcast::Consumer, format: CatalogFormat) -> Result<Self, crate::Error> {
-		Ok(Self {
-			inner: match format {
-				CatalogFormat::Hang => {
-					let track = broadcast
-						.track(hang::Catalog::DEFAULT_NAME)?
-						.subscribe(hang::Catalog::default_subscription())
-						.await?;
-					State::Hang(super::hang::Consumer::new(track))
-				}
-				CatalogFormat::Msf => {
-					let track = broadcast.track(moq_msf::DEFAULT_NAME)?.subscribe(None).await?;
-					State::Msf(super::msf::Consumer::new(track))
-				}
-			},
-		})
+		let subscribing = Subscribing::new(broadcast, format);
+		kio::wait(|waiter| subscribing.poll_ok(waiter)).await
+	}
+}
+
+/// A catalog subscription awaiting its track: [`Consumer::new`] for a caller that polls.
+pub(crate) struct Subscribing<E: CatalogExt> {
+	format: CatalogFormat,
+	track: Result<moq_net::track::Subscribing, crate::Error>,
+	_ext: std::marker::PhantomData<E>,
+}
+
+impl<E: CatalogExt> Subscribing<E> {
+	/// Subscribe to the catalog track advertised by `format`.
+	pub(crate) fn new(broadcast: &moq_net::broadcast::Consumer, format: CatalogFormat) -> Self {
+		let track = match format {
+			CatalogFormat::Hang => broadcast
+				.track(hang::Catalog::DEFAULT_NAME)
+				.map(|track| track.subscribe(hang::Catalog::default_subscription())),
+			CatalogFormat::Msf => broadcast
+				.track(moq_msf::DEFAULT_NAME)
+				.map(|track| track.subscribe(None)),
+		};
+		Self {
+			format,
+			track: track.map(kio::Pending::into_inner).map_err(Into::into),
+			_ext: std::marker::PhantomData,
+		}
+	}
+
+	/// The catalog consumer, once the track subscription is confirmed.
+	pub(crate) fn poll_ok(&self, waiter: &kio::Waiter) -> Poll<Result<Consumer<E>, crate::Error>> {
+		let track = match &self.track {
+			Ok(track) => ready!(track.poll_ok(waiter))?,
+			Err(err) => return Poll::Ready(Err(err.clone())),
+		};
+		let inner = match self.format {
+			CatalogFormat::Hang => State::Hang(super::hang::Consumer::new(track)),
+			CatalogFormat::Msf => State::Msf(super::msf::Consumer::new(track)),
+		};
+		Poll::Ready(Ok(Consumer { inner }))
 	}
 }
 

@@ -61,11 +61,12 @@ impl Instances {
 		}
 	}
 
-	/// Poll for the next change, registering `waiter` when there is none yet.
+	/// The next change.
 	///
 	/// Each announcement that brings an instance hands it out, so the same one returns after an
 	/// end. Fails once the origin closes, and with any resolution failure, such as a handler
 	/// refusing the path.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Event>> {
 		loop {
 			let next = match &mut self.feed {
@@ -101,11 +102,6 @@ impl Instances {
 			}
 			return Poll::Pending;
 		}
-	}
-
-	/// The next change; see [`Self::poll_next`].
-	pub async fn next(&mut self) -> crate::Result<Event> {
-		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 }
 

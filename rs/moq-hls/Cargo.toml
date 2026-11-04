@@ -14,7 +14,9 @@ categories = ["multimedia", "network-programming", "web-programming"]
 
 [features]
 default = ["server"]
-server = ["dep:axum"]
+# The import and export gateways, which drive HTTP fetches and background watchers as async code.
+async = ["kio/async", "moq-mux/async"]
+server = ["async", "dep:axum"]
 
 [dependencies]
 # Only needed by the HTTP export server (gated by `server`).
@@ -43,6 +45,8 @@ url = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
 moq-archive = { path = "../moq-archive" }
+# Compile the gateways for the tests, with or without the `server` feature.
+moq-hls = { path = ".", default-features = false, features = ["async"] }
 moq-json = { path = "../moq-json" }
 moq-tokio = { path = "../moq-tokio", default-features = false, features = ["tcp", "quic", "aws-lc-rs"] }
 mp4-atom = { workspace = true }

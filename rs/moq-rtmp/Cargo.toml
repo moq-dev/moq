@@ -39,7 +39,7 @@ futures = { workspace = true }
 hang = { workspace = true }
 hmac = "0.13"
 kio = { workspace = true, features = ["runtime"] }
-moq-mux = { workspace = true }
+moq-mux = { workspace = true, features = ["async"] }
 moq-net = { workspace = true }
 rand = { workspace = true }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"], optional = true }

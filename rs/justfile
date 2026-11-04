@@ -270,6 +270,12 @@ coroutines:
     bash sh/rs/coroutines.sh moq-net -- --no-default-features
     bash sh/rs/coroutines.sh moq-json -- --no-default-features
     RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-json --no-deps --no-default-features
+    bash sh/rs/coroutines.sh hang -- --no-default-features
+    RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p hang --no-deps --no-default-features
+    bash sh/rs/coroutines.sh moq-mux -- --no-default-features
+    RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-mux --no-deps --no-default-features
+    bash sh/rs/coroutines.sh moq-hls -- --no-default-features
+    RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-hls --no-deps --no-default-features
     bash sh/rs/coroutines.sh moq-room -- --no-default-features
     RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-room --no-deps --no-default-features
     bash sh/rs/coroutines.sh moq-stats -- --no-default-features

@@ -12,6 +12,14 @@ rust-version.workspace = true
 keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
+[package.metadata.docs.rs]
+features = ["async"]
+
+[features]
+default = []
+# Generated async wrappers for the poll methods, and `Catalog::subscribe`. Enable where you `.await` them.
+async = ["kio/async"]
+
 [dependencies]
 bytes = { workspace = true }
 hex = { workspace = true }
@@ -30,7 +38,9 @@ features = ["from", "display", "debug"]
 
 [dev-dependencies]
 anyhow = { workspace = true }
-moq-mux = { path = "../moq-mux" }
+# Compile the async API used by the tests.
+hang = { path = ".", features = ["async"] }
+moq-mux = { path = "../moq-mux", features = ["async"] }
 moq-tokio = { path = "../moq-tokio", default-features = false, features = ["quic", "aws-lc-rs", "websocket"] }
 tokio = { workspace = true, features = ["macros", "fs"] }
 tracing = { workspace = true }
