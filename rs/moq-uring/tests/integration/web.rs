@@ -48,7 +48,7 @@ fn h3_endpoint(handle: &moq_uring::Handle, certs: &support::Certs) -> quic::Endp
 	let sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("socket");
-	quic::Endpoint::new(sock, quic::endpoint::Config::default().with_server(server)).expect("endpoint")
+	quic::Endpoint::new(quic::endpoint::Config::default().with_server(server), sock).expect("endpoint")
 }
 
 /// The tokio-side client, in its own runtime on its own thread.
@@ -140,7 +140,7 @@ fn webtransport_echo_end_to_end() {
 			session
 				.send_datagram(PAYLOAD, Default::default())
 				.expect("send datagram");
-			let echoed = session.read_datagram().await.expect("read datagram");
+			let echoed = session.recv_datagram().await.expect("read datagram");
 			assert_eq!(&echoed[..], PAYLOAD, "datagram echo");
 
 			// The close code and reason must reach the server intact.
@@ -221,7 +221,7 @@ fn webtransport_accepts_a_buffered_uni_after_the_peer_close() {
 			let mut send = session.open_uni(Default::default()).await.expect("open uni");
 			send.write_all(PAYLOAD).await.expect("write");
 			let send = send.finish();
-			assert!(send.stopped().await.expect("FIN delivered").is_none());
+			assert!(send.closed().await.expect("FIN delivered").is_none());
 			session.close(0, "done");
 			session.closed().await;
 		})
@@ -307,7 +307,7 @@ fn a_stray_datagram_is_dropped() {
 			session
 				.send_datagram(PAYLOAD, Default::default())
 				.expect("send datagram");
-			let echoed = session.read_datagram().await.expect("read datagram");
+			let echoed = session.recv_datagram().await.expect("read datagram");
 			assert_eq!(&echoed[..], PAYLOAD, "datagram echo");
 			session.close(0, "done");
 			session.closed().await;
@@ -343,7 +343,7 @@ fn a_stray_datagram_is_dropped() {
 #[test]
 fn an_unread_lease_holds_the_close_watch_off() {
 	use bytes::Buf as _;
-	use std::task::{Context, Poll, Waker};
+	use std::task::Poll;
 
 	let Some(mut worker) = worker() else { return };
 	let handle = worker.handle();
@@ -376,7 +376,7 @@ fn an_unread_lease_holds_the_close_watch_off() {
 				&handle,
 				"the FIN",
 				kio::wait(|waiter| {
-					recv.poll_lease(&mut waiter.context(), PAYLOAD.len() + 1)
+					recv.poll_lease(waiter, PAYLOAD.len() + 1)
 						.map(|lease| lease.map(|lease| lease.is_fin()))
 				}),
 			)
@@ -384,8 +384,8 @@ fn an_unread_lease_holds_the_close_watch_off() {
 			assert!(fin.expect("lease"));
 			assert!(recv.poll_closed(&kio::Waiter::noop()).is_pending());
 
-			let mut cx = Context::from_waker(Waker::noop());
-			let Poll::Ready(lease) = recv.poll_lease(&mut cx, PAYLOAD.len()) else {
+			let waiter = kio::Waiter::noop();
+			let Poll::Ready(lease) = recv.poll_lease(&waiter, PAYLOAD.len()) else {
 				panic!("restored bytes are leasable");
 			};
 			let mut lease = lease.expect("lease");
@@ -961,7 +961,7 @@ fn dropped_session_delivers_close(explicit: bool) {
 	let sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("client socket");
-	let client = quic::Endpoint::new(sock, quic::endpoint::Config::default()).expect("client endpoint");
+	let client = quic::Endpoint::new(quic::endpoint::Config::default(), sock).expect("client endpoint");
 	let mut dial = quic::client::Config::default();
 	dial.alpn = vec!["h3".to_string()];
 	dial.verify = false;
@@ -1063,7 +1063,7 @@ fn dropped_session_delivers_close(explicit: bool) {
 			}
 
 			// The peer acts on the capsule, as a browser would.
-			peer.close(0u32.into(), b"");
+			peer.close(0u32.into(), "");
 			within(&handle, "the connection to close", watch.closed()).await;
 			drop(control);
 		})
@@ -1080,7 +1080,7 @@ fn cancelling_a_pending_web_handshake(send_settings: bool) {
 	let sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("client socket");
-	let client = quic::Endpoint::new(sock, quic::endpoint::Config::default()).expect("client endpoint");
+	let client = quic::Endpoint::new(quic::endpoint::Config::default(), sock).expect("client endpoint");
 	let mut dial = quic::client::Config::default();
 	dial.alpn = vec!["h3".to_string()];
 	dial.verify = false;

@@ -123,7 +123,7 @@ impl Stream {
 	}
 
 	/// Wait until all data was acknowledged, the peer stopped the stream, or the session closed.
-	pub async fn stopped(&self) -> Result<Option<u32>, Error> {
+	pub async fn closed(&self) -> Result<Option<u32>, Error> {
 		kio::wait(|w| self.poll_closed(w)).await
 	}
 
@@ -141,9 +141,9 @@ impl Stream {
 		self.reset_mut(code);
 	}
 
-	pub(super) fn poll_header(&mut self, cx: &mut Context<'_>, header: &mut bytes::Bytes) -> Poll<Result<(), Error>> {
+	pub(super) fn poll_header(&mut self, waiter: &kio::Waiter, header: &mut bytes::Bytes) -> Poll<Result<(), Error>> {
 		while header.has_remaining() {
-			let result = std::task::ready!(self.open()?.poll_write(cx, header));
+			let result = std::task::ready!(self.open()?.poll_write_buf(waiter, header));
 			result.map_err(|err| self.map_error(err))?;
 		}
 		let offset = self.open()?.offset();
@@ -224,7 +224,7 @@ impl moq_net::transport::poll::SendStream for Stream {
 		self.poll_write_buf(waiter, &mut buf)
 	}
 	fn poll_write_buf<B: Buf>(&mut self, waiter: &kio::Waiter, buf: &mut B) -> Poll<Result<usize, Self::Error>> {
-		let result = self.open()?.poll_write(&waiter.context(), buf);
+		let result = self.open()?.poll_write_buf(waiter, buf);
 		result.map_err(|e| self.map_error(e))
 	}
 	fn set_priority(&mut self, priority: i64) {
@@ -267,8 +267,8 @@ impl Finished {
 		self.stream.poll_closed(waiter)
 	}
 	/// Wait until the peer acknowledges or stops the stream, or the session closes.
-	pub async fn stopped(&self) -> Result<Option<u32>, Error> {
-		self.stream.stopped().await
+	pub async fn closed(&self) -> Result<Option<u32>, Error> {
+		self.stream.closed().await
 	}
 	/// Reset the stream while still delivering its WebTransport header.
 	pub fn reset(self, code: u32) {
