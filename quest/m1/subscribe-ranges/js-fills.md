@@ -20,7 +20,7 @@ Decided 2026-11-03 (maintainer, follow-up planning after the 2026-11-03 /quest-a
 The maintainer chose to plan these separately from
 [moq-dev/moq#7696](https://github.com/moq-dev/moq/pull/7696), which lands
 JS's on-demand request surface (`Track.Requests`, `Track.Fill`) and deletes
-[JS ranges](/quest/m1/subscribe-ranges/js.md). There, received copies never
+the JS ranges quest. There, received copies never
 fill: no handle can reach one.
 
 - The session acts as its received copy's `Requests` handler and asks
@@ -39,7 +39,3 @@ fill: no handle can reach one.
   copy.
 
 Public API: none expected beyond #7696's surface. Wire: none.
-
-## Required
-
-- [JS ranges](/quest/m1/subscribe-ranges/js.md) - the request surface this answers through
