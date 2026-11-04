@@ -31,6 +31,12 @@ MOCK
 chmod +x "$fixture/bin/nix" "$fixture/bin/direnv"
 export PATH="$fixture/bin:$PATH"
 
+no_temp_files() {
+    local leftover
+    leftover=$(find "$fixture/project/.direnv" -maxdepth 1 -name 'codex-env.sh.tmp*')
+    [[ -z $leftover ]]
+}
+
 cd "$fixture/project"
 bash "$hook"
 snapshot="$PWD/.direnv/codex-env.sh"
@@ -63,7 +69,7 @@ if FAIL_NIX=1 FAIL_DIRENV=1 bash "$hook"; then
     exit 1
 fi
 cmp "$snapshot" "$fixture/captured"
-[[ ! -e $snapshot.tmp ]]
+no_temp_files
 
 # nix-direnv's cached profile may belong to another flake, so it must not be
 # stamped as current, even when the marker was inherited.
@@ -74,6 +80,6 @@ if FAIL_NIX=1 NIX_FALLBACK=1 NIX_DIRENV_DID_FALLBACK=1 bash "$hook"; then
 fi
 cmp "$snapshot" "$fixture/captured"
 [[ -e $snapshot.stale ]]
-[[ ! -e $snapshot.tmp ]]
+no_temp_files
 
 echo 'Codex snapshot capture: regression tests passed'

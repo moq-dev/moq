@@ -23,7 +23,9 @@ export DIRENV_CONFIG="$XDG_CONFIG_HOME/direnv"
 mkdir -p "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME"
 
 env_file="$PWD/.direnv/codex-env.sh"
-env_tmp="$env_file.tmp"
+# Concurrent captures in one worktree each need their own file, or one could
+# publish another's stamp over mixed output.
+env_tmp=$(mktemp "$env_file.tmp.XXXXXX")
 trap 'rm -f "$env_tmp"' EXIT
 
 # Stamp before evaluation, so changing either file during capture leaves a
