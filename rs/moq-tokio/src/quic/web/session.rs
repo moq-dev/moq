@@ -1260,7 +1260,6 @@ mod tests {
 		(client_conn, server_conn, [client, server], gate)
 	}
 
-	/// An empty FIN needs no read; payload remains readable before the close watch ends.
 	/// Rejecting a CONNECT cannot accidentally advertise success or an interim response.
 	#[tokio::test]
 	async fn a_rejection_refuses_non_error_statuses() {
@@ -1284,6 +1283,7 @@ mod tests {
 		}
 	}
 
+	/// An empty FIN needs no read; payload remains readable before the close watch ends.
 	#[tokio::test]
 	async fn clean_fin_ends_close_watch() {
 		for framed in [false, true] {
