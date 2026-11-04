@@ -90,6 +90,7 @@ async fn main() -> anyhow::Result<()> {
 		ensure!(reader.next_group().await?.is_none(), "extra track frame");
 		Box::new((stream.producer, reader))
 	};
+	eprintln!("socket data verified {} {}", args[4], args[1]);
 	if tcp {
 		let mut reset = if dial {
 			endpoint.dial_tcp("acceptor")?.await?
@@ -99,6 +100,7 @@ async fn main() -> anyhow::Result<()> {
 		if dial {
 			reset.producer.write_frame(None, vec![48])?;
 			ensure!(reset.consumer.read_frame().await.is_err(), "TCP RST became FIN");
+			eprintln!("socket reset verified tcp dial");
 			ensure!(endpoint.dial_tcp("acceptor")?.await.is_err(), "rejected dial connected");
 		} else {
 			ensure!(
@@ -123,6 +125,7 @@ async fn main() -> anyhow::Result<()> {
 		if dial {
 			reset.producer.write_frame(None, vec![48])?;
 			ensure!(reader.next_group().await.is_err(), "track RST became FIN");
+			eprintln!("socket reset verified track dial");
 			ensure!(
 				endpoint.dial_track("acceptor", None)?.await.is_err(),
 				"rejected dial connected"
