@@ -13,21 +13,29 @@ requested, and the PR records that PR as evidence.
 
 [moq-dev/moq#7896](https://github.com/moq-dev/moq/pull/7896) added
 `.coderabbit.yaml` (no incremental reviews, drafts skipped, UI settings
-inherited). Pullfrog's re-review trigger has no repo-side setting; its docs
-place it only in the console. Agents never request an online review
-(`CONTRIBUTING.md`), so `AGENTS.md` stays unchanged; a maintainer requests one
-with `@coderabbitai review` or an `@pullfrog` mention.
+inherited). Pullfrog keeps its review triggers in its own repository settings,
+not in a file: the console's Automations → Review PRs card, or the
+[Pullfrog CLI](https://docs.pullfrog.com/cli-configuration) keys
+`review.re-review` and `review.drafts`, which need repo write. Agents never
+request or wait for an online review (`CONTRIBUTING.md`), so `AGENTS.md` stays
+unchanged; a maintainer requests one with `@coderabbitai review` or an
+`@pullfrog` mention.
 
-Once both waits clear, take that PR, check each bot's reviews and threads against the Goal, request one
-review per bot if none was requested, and delete this quest in a PR citing it.
+Once both waits clear, take the evidence PR, check each bot's reviews and
+threads against the Goal, and delete this quest in a PR that cites it.
 
 ## Waiting
 
-- Maintainer: in the Pullfrog console, Automations → Review PRs, turn off
-  "Re-review when new commits are pushed" and leave "Include draft PRs" off.
-  No API or repo file sets it. Check: a push to a ready PR draws no new
-  `pullfrog[bot]` review.
+- Maintainer: turn off Pullfrog's re-review on push and leave draft reviews
+  off, either in the console (Automations → Review PRs: "Re-review when new
+  commits are pushed" off, "Include draft PRs" off) or with
+  `pullfrog config set review.re-review false --repo moq-dev/moq` and
+  `pullfrog config set review.drafts false --repo moq-dev/moq`. Check:
+  `pullfrog config get review.re-review --repo moq-dev/moq` prints `false`,
+  and a push to a ready PR draws no new `pullfrog[bot]` review.
 - moq-dev/moq: a PR whose branch holds `.coderabbit.yaml` (CodeRabbit reads
   it from the PR branch) gets three or more pushes after ready, after the
-  Pullfrog toggle above. Check: its timeline's `ready_for_review` event and
-  the `committed` events after it.
+  Pullfrog change above, and then a maintainer requests one review from each
+  bot on it and each bot answers. Check: its timeline's `ready_for_review`
+  event, the `committed` events after it, the maintainer's request comments,
+  and a bot review after each request.
