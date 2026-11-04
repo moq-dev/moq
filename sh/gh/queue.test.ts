@@ -120,10 +120,11 @@ for (const file of files) {
 	assert.equal(config.on.pull_request, undefined, `${file} must run on release PRs through release-gate.yml`);
 	for (const [id, job] of Object.entries(config.jobs ?? {})) {
 		if (JSON.stringify(job).includes("APP_PRIVATE_KEY")) {
-			// `bot` holds only the key; `publish`, for release refs alone, also
-			// holds it for jobs that need it beside a registry credential.
+			// The Cargo updater has its own App and main-only Environment. Every
+			// other job still uses moq-bot from bot or a release's publish Environment.
+			const environments = name === "renovate" && id === "cargo" ? ["renovate"] : ["bot", "publish"];
 			assert.ok(
-				["bot", "publish"].includes((job as { environment?: string }).environment ?? ""),
+				environments.includes((job as { environment?: string }).environment ?? ""),
 				`${file}/${id} must scope the bot key`,
 			);
 		}
