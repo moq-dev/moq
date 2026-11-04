@@ -366,6 +366,34 @@ async fn a_second_tcp_group_after_fin_resets_the_session() {
 	assert!(accepted.producer.write_frame(None, &b"late"[..]).is_err());
 }
 
+/// The peer resetting its half after its group finished, and was read to its end, resets
+/// the half that remains open, as a TCP RST after FIN does. Finishing it instead leaves
+/// that half open, as a half-close does.
+#[kio::test]
+async fn a_peer_reset_after_fin_resets_the_session() {
+	for reset in [true, false] {
+		let mut fixture = Fixture::new();
+		let bob = fixture.endpoint(LITE, "bob").await;
+		// Bound whole, so carol's endpoint and read stay open to the end.
+		let session = dial_by_hand(&mut fixture, &bob).await;
+		let ByHand { mut accepted, half, .. } = session;
+
+		write_group(&half, 0);
+		assert_eq!(read(&mut accepted.consumer).await.unwrap().unwrap(), b"data");
+		assert_eq!(read(&mut accepted.consumer).await.unwrap(), None);
+		accepted.producer.write_frame(None, &b"still open"[..]).unwrap();
+
+		if reset {
+			half.abort(Error::Cancel).unwrap();
+		} else {
+			half.finish().unwrap();
+		}
+		kio::clock::sleep(SETTLE).await;
+		let late = accepted.producer.write_frame(None, &b"late"[..]);
+		assert_eq!(late.is_err(), reset, "reset: {reset}");
+	}
+}
+
 /// Messages flow both ways, in order, over every pairing of moq-lite-07 and
 /// moq-transport.
 #[kio::test]

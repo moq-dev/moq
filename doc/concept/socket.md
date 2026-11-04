@@ -8,7 +8,8 @@ description: Dial and accept point-to-point sessions over MoQ, as reliable byte 
 A socket connects two endpoints through relays, the way a TCP connection
 connects two hosts. Each endpoint announces one hidden broadcast, dials other
 endpoints, and accepts their dials. Each connection is a session that only the
-two ends can read, in one of two protocols: `tcp`, a reliable, ordered byte
+two ends can read while its id stays secret (see [Hidden names](#hidden-names)),
+in one of two protocols: `tcp`, a reliable, ordered byte
 pipe each way, or `track`, a track each way whose groups are messages. Use a
 socket for per-client state that only the two ends need, such as a viewer's
 commands and the replies to them, while whatever every client needs stays in an
@@ -78,7 +79,8 @@ or others.
    and resets any other. That makes the exchange a return-routability check:
    a dial forged in `A`'s name, by anyone who can subscribe to `B`, reaches an
    `A` that never dialed it, so `A` resets `B`'s subscription and `B` resets the
-   forger's.
+   forger's. A dial replayed from a session `A` really dialed passes; see
+   [Hidden names](#hidden-names).
 3. Once `A` answers, `B` answers `A`'s subscription, and the session is open
    for both. `B` writes nothing before `A` answers.
 
@@ -92,8 +94,9 @@ track nobody serves. A dial that gives up resets `B`'s subscription in turn.
 ## Protocols
 
 Each side writes its own half and reads the peer's. A reader subscribes
-reliably and in order: oldest group first, with no delay budget, so it never
-skips anything. The protocol decides what a half holds.
+reliably and in order: oldest group first, with no delay budget, so it waits
+for a late group rather than skipping it. The protocol decides what a half
+holds.
 
 ### `tcp`
 
@@ -128,7 +131,10 @@ such as a proxied TCP connection, a file transfer, or a request and its reply.
 
 Each half is a whole track, and a message is one group. A slow message never
 holds up the next, and each group can carry its own priority. Messages are
-ordered by group sequence.
+ordered by group sequence. A reader that keeps up gets every message, but each
+hop's cache reclaims a message nobody read within its idle window (30 s by
+default), or under memory pressure, except the newest, so a reader that stalls
+longer can miss messages.
 
 The reader's subscription starts reliable and in order, like `tcp`. An
 application may make it lossy for messages that go stale, such as positions or
@@ -156,8 +162,17 @@ as a game's status, stays an ordinary broadcast.
 
 The session id is the secret that keeps a session to its two ends: the token
 grants below let any endpoint subscribe to any other, so whoever learns a
-session's track name can read it, or answer it before its peer. A session
-track therefore never appears where a third party can read it:
+session's track name can read it, or answer it before its peer.
+
+That includes the acceptor. The name says who dialed, but not whom, so the
+return-routability check proves only that `A` dialed `S`, not that it dialed
+`B`. An endpoint `A` dialed knows `P/A/S`, and can dial a third endpoint `C`
+with it: `C`'s accept finds `A` serving that half, so `C` accepts a session
+that claims to be from `A`, reads what `A` writes to the replaying endpoint,
+and sends its replies to that endpoint. Until ids are keys, the peer id of an
+accepted session says only that the peer dialed `S`, to somebody.
+
+A session track therefore never appears where a third party can read it:
 
 - It is never announced.
 - It is never listed: an endpoint serves its session tracks only on request,

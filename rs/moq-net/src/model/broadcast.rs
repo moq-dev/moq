@@ -873,6 +873,10 @@ impl Requests {
 		// Cache the served track so concurrent lookups coalesce onto it. If a live track already
 		// holds the name (a publish raced the request), `insert` keeps it rather than shadowing it.
 		let _ = state.cache_track(pending.weak());
+		// Claimed after the lock is released, since claiming wakes the track's subscribers
+		// and an inline executor can re-enter the broadcast from that wake. A close landing
+		// in between rejects the request, as it would one still queued.
+		drop(state);
 		// Attribute the served track to this broadcast's ingress scope (no-op untagged).
 		Poll::Ready(Ok(pending.claim().with_stats(self.stats.clone())))
 	}

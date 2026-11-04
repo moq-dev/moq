@@ -18,7 +18,9 @@
 //! the track `<protocol>/A/S`. Endpoint `B` surfaces that request as an [`Incoming`] dial
 //! from `A` in its protocol's queue. To accept it, `B` subscribes to `<prefix>/.socket/<A>`
 //! for the same track name, and `A` answers only a session it dialed, so the exchange
-//! checks that `A` really asked: a dial forged in `A`'s name is reset. Each side then
+//! checks that `A` really asked: a dial forged in `A`'s name is reset. It does not check
+//! that `A` asked `B`: an endpoint `A` dialed knows `<protocol>/A/S`, and can replay it to
+//! a third endpoint, which then accepts a session claiming to be from `A`. Each side then
 //! writes its own half and reads the peer's.
 //!
 //! See `doc/concept/socket.md` for the convention other languages follow.
@@ -252,7 +254,10 @@ impl sealed::Open for TcpStream {
 /// A `track` session: each half is a whole track, and each message a group.
 ///
 /// [`Self::consumer`] starts subscribed reliably and in order: oldest first, with no
-/// delay budget, so every group arrives. Update its subscription, such as with a finite
+/// delay budget, so a late group is waited for rather than skipped. Each hop's cache
+/// still reclaims a group nobody read within its idle window (30 s by default), or under
+/// memory pressure, except the newest, so a reader that stalls longer can miss groups.
+/// Update its subscription, such as with a finite
 /// [`Delay`] or [`Order::Descending`], to make it lossy or newest first, and read it in
 /// group order with [`track::Subscriber::ordered`]. Groups are written with
 /// [`track::Producer::append_group`], each with its own priority on the wire.
@@ -311,7 +316,8 @@ struct Queue {
 struct State {
 	/// The dials peers send, from the first accept on; `None` until then, so the endpoint
 	/// answers a request for a session it does not hold with [`Error::NotFound`] at once.
-	requests: Option<super::broadcast::Requests>,
+	/// Behind its own lock, so it is polled outside this one.
+	requests: Option<kio::Lock<super::broadcast::Requests>>,
 	tcp: Queue,
 	track: Queue,
 	/// This side's half of every session handed out, aborted when the endpoint closes.
@@ -343,35 +349,62 @@ impl Shared {
 	/// under this endpoint's id names a session it never dialed, or one it gave up, such
 	/// as an accept of a dial forged in this endpoint's name: it is reset with
 	/// [`Error::NotFound`], which fails that accept. A request in a protocol nobody accepts
-	/// is reset with [`Error::Unsupported`]. Resets and wakes go out after the lock is
-	/// released.
+	/// is reset with [`Error::Unsupported`].
+	///
+	/// The handler is polled outside the lock, since taking a request wakes the dialer's
+	/// subscription, and resets and wakes go out after the lock is released too.
 	fn poll_dial(&self, protocol: Protocol, waiter: &kio::Waiter) -> Poll<Result<track::Request, Error>> {
+		let requests = {
+			let mut state = self.state.lock();
+			state.queue(protocol).listening = true;
+			match state.end {
+				None => Some(
+					state
+						.requests
+						.get_or_insert_with(|| kio::Lock::new(self.publication.requests()))
+						.clone(),
+				),
+				Some(_) => None,
+			}
+		};
+		let mut taken = Vec::new();
+		let mut ended = None;
+		if let Some(requests) = &requests {
+			let mut requests = requests.lock();
+			loop {
+				match requests.poll_requested_track(waiter) {
+					Poll::Pending => break,
+					Poll::Ready(Ok(request)) => taken.push(request),
+					Poll::Ready(Err(err)) => {
+						ended = Some(err);
+						break;
+					}
+				}
+			}
+		}
+
 		let mut resets = Vec::new();
 		let mut wakes = Vec::new();
 		let mut state = self.state.lock();
-		state.queue(protocol).listening = true;
-		while state.end.is_none() {
-			let requests = state.requests.get_or_insert_with(|| self.publication.requests());
-			match requests.poll_requested_track(waiter) {
-				Poll::Pending => break,
-				Poll::Ready(Ok(request)) => {
-					// `None` for a name naming no dial: outside the scheme, or this
-					// endpoint's own.
-					let target = match parse(request.name()) {
-						Some(name) if name.dialer != &*self.id => Some(Protocol::parse(name.protocol)),
-						_ => None,
-					};
-					match target {
-						Some(Some(protocol)) if state.queue(protocol).listening => {
-							let queue = state.queue(protocol);
-							queue.dials.push_back(request);
-							wakes.push(queue.waiting.take());
-						}
-						Some(_) => resets.push((request, Error::Unsupported)),
-						None => resets.push((request, Error::NotFound)),
-					}
+		if let Some(err) = ended {
+			state.end.get_or_insert(err);
+		}
+		for request in taken {
+			// `None` for a name naming no dial: outside the scheme, or this endpoint's own.
+			let target = match parse(request.name()) {
+				Some(name) if name.dialer != &*self.id => Some(Protocol::parse(name.protocol)),
+				_ => None,
+			};
+			match target {
+				// Taken while the endpoint closed: reset like the dials it queued.
+				_ if state.end.is_some() => resets.push((request, Error::Cancel)),
+				Some(Some(protocol)) if state.queue(protocol).listening => {
+					let queue = state.queue(protocol);
+					queue.dials.push_back(request);
+					wakes.push(queue.waiting.take());
 				}
-				Poll::Ready(Err(err)) => state.end = Some(err),
+				Some(_) => resets.push((request, Error::Unsupported)),
+				None => resets.push((request, Error::NotFound)),
 			}
 		}
 		let next = match &state.end {
@@ -618,7 +651,8 @@ pub struct Incoming<S: Stream> {
 
 impl<S: Stream> Incoming<S> {
 	/// The id the dialer claims. An accept checks it: the dial connects only if that
-	/// endpoint really dialed this session.
+	/// endpoint really dialed this session, though not necessarily to this endpoint, since
+	/// an endpoint it dialed can replay the session to another.
 	pub fn peer(&self) -> &str {
 		&self.peer
 	}
@@ -1029,10 +1063,16 @@ impl Pump {
 						return Err(Error::ProtocolViolation);
 					}
 					Some(_) => {}
-					None => {
-						self.subscriber = None;
-						break;
-					}
+					// The track ended, finished or reset: `poll_largest` reports both
+					// alike, so ask which, and pass on the peer's reset.
+					None => match subscriber.poll_finished(waiter) {
+						Poll::Ready(Ok(_)) => {
+							self.subscriber = None;
+							break;
+						}
+						Poll::Ready(Err(err)) => return Err(err),
+						Poll::Pending => break,
+					},
 				}
 			}
 		}
@@ -1139,6 +1179,62 @@ mod tests {
 		assert!(endpoint_path(&prefix, "a/b").is_err());
 		assert!(endpoint_path(&prefix, "").is_err());
 		assert!(endpoint_path(&prefix, "a\\b").is_err());
+	}
+
+	/// Taking a dial wakes the dialer's subscription, and an inline executor can re-enter
+	/// the endpoint from that wake, such as to close it, so the endpoint polls its handler
+	/// outside its lock.
+	#[test]
+	fn taking_a_dial_wakes_outside_the_lock() {
+		use std::sync::atomic::{AtomicBool, Ordering};
+		use std::task::Wake;
+
+		struct Close {
+			shared: Arc<Shared>,
+			woken: AtomicBool,
+		}
+		impl Wake for Close {
+			fn wake(self: Arc<Self>) {
+				self.shared.close();
+				self.woken.store(true, Ordering::SeqCst);
+			}
+		}
+
+		let (done, finished) = std::sync::mpsc::channel();
+		let thread = std::thread::spawn(move || {
+			let (origin, _driver) = origin::Producer::new(origin::Config::new(crate::Hop::new(1).unwrap()));
+			let endpoint = Endpoint::new(&origin, "room", "bob").unwrap();
+			let noop = kio::Waiter::noop();
+			// Listening, so the dial queues for the handler.
+			assert!(endpoint.poll_accept_tcp(&noop).is_pending());
+
+			let broadcast = endpoint.shared.publication.broadcast().consume();
+			let dial = broadcast
+				.track("tcp/alice/0123456789abcdef0123456789abcdef")
+				.unwrap()
+				.subscribe(None)
+				.into_inner();
+			let close = Arc::new(Close {
+				shared: endpoint.shared.clone(),
+				woken: AtomicBool::new(false),
+			});
+			let waiter = kio::Waiter::new(std::task::Waker::from(close.clone()));
+			assert!(dial.poll_ok(&waiter).is_pending());
+
+			// The wake closes the endpoint while this takes the dial, which it resets.
+			assert!(matches!(
+				endpoint.poll_accept_tcp(&noop),
+				Poll::Ready(Err(Error::Closed))
+			));
+			assert!(close.woken.load(Ordering::SeqCst));
+			assert!(matches!(dial.poll_ok(&noop), Poll::Ready(Err(_))));
+			done.send(()).unwrap();
+		});
+		let timeout = std::time::Duration::from_secs(10);
+		if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) = finished.recv_timeout(timeout) {
+			panic!("deadlocked re-entering the endpoint");
+		}
+		thread.join().unwrap();
 	}
 
 	#[test]
