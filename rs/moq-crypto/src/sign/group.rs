@@ -7,8 +7,8 @@ use std::task::{Poll, ready};
 use bytes::Bytes;
 
 use crate::sign::error::{Error, Result};
-use crate::sign::key::{PublicKey, SecretKey};
 use crate::sign::scope::Scope;
+use crate::sign::{PublicKey, SecretKey};
 
 /// A grouped frame whose signature verified.
 #[derive(Clone, Debug, PartialEq, Eq)]
