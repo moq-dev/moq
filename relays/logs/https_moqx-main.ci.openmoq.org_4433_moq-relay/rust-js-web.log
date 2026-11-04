@@ -1,13 +1,20 @@
 [page] negotiated protocol: moqt-16
 [page] subscribe_namespace written: requestId=0
-[page] announced: broadcast=smoke-rust-4965-4407.hang active=true
-[page] subscribe start: id=2 broadcast=smoke-rust-4965-4407.hang track=catalog.json
+[page] announced: broadcast=smoke-rust-4733-6483.hang active=true
+[page] subscribe start: id=2 broadcast=smoke-rust-4733-6483.hang track=catalog.json
+[page] announced: broadcast=g5-6783b116 active=true
 [page] announced: broadcast=com/wowza/techdemos/moqrelay/relay1 active=true
-[page] subscribe written: id=2 broadcast=smoke-rust-4965-4407.hang track=catalog.json
-[page] subscribe ok: id=2 broadcast=smoke-rust-4965-4407.hang track=catalog.json
-[page] received catalog hang smoke-rust-4965-4407.hang {video: Object, audio: Object, archive: Object, clock: Object}
-[page] subscribe start: id=4 broadcast=smoke-rust-4965-4407.hang track=0.avc3
-[page] subscribe written: id=4 broadcast=smoke-rust-4965-4407.hang track=0.avc3
-[page] subscribe ok: id=4 broadcast=smoke-rust-4965-4407.hang track=0.avc3
+[page] announced: broadcast=ci/player-soak/41863582511/moqx-main/loc active=true
+[page] announced: broadcast=ci/player-soak/41863573756/moqx-main/loc active=true
+[page] subscribe written: id=2 broadcast=smoke-rust-4733-6483.hang track=catalog.json
+[page] announced: broadcast=ci/player-soak/41863573756/moqx-main/cmaf active=true
+[page] announced: broadcast=ci/player-soak/41863573756/moqx-main/locmaf active=true
+[page] announced: broadcast=openmoq/aiomoqt/mtt_00/clock/loc/h264/720/30/aac/2 active=true
+[page] subscribe ok: id=2 broadcast=smoke-rust-4733-6483.hang track=catalog.json
+[page] received catalog hang smoke-rust-4733-6483.hang {video: Object, audio: Object, archive: Object, clock: Object}
+[page] subscribe start: id=4 broadcast=smoke-rust-4733-6483.hang track=0.avc3
+[page] subscribe written: id=4 broadcast=smoke-rust-4733-6483.hang track=0.avc3
+[page] subscribe ok: id=4 broadcast=smoke-rust-4733-6483.hang track=0.avc3
 [page] dropping a group with no head: alias=4 group=2
-decoded 2 frames from smoke-rust-4965-4407.hang (vite)
+[page] received catalog hang smoke-rust-4733-6483.hang {video: Object, audio: Object, archive: Object, clock: Object}
+decoded 2 frames from smoke-rust-4733-6483.hang (vite)

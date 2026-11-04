@@ -2,16 +2,20 @@ https://us-west-2.relay.quicr.org:33437/relay connected via WebTransport
 https://us-west-2.relay.quicr.org:33437/relay negotiated ALPN: moqt-18
 connected version=moq-transport-18
 subscribe_namespace written: requestId=0
-announced: broadcast=smoke-rust-4965-5628.hang active=true
-subscribe start: id=2 broadcast=smoke-rust-4965-5628.hang track=catalog.json
+announced: broadcast=smoke-rust-4733-3280.hang active=true
+subscribe start: id=2 broadcast=smoke-rust-4733-3280.hang track=catalog.json
 announced: broadcast=metrics/us-west-2.relay.public active=true
-subscribe written: id=2 broadcast=smoke-rust-4965-5628.hang track=catalog.json
-subscribe ok: id=2 broadcast=smoke-rust-4965-5628.hang track=catalog.json
-subscribe start: id=4 broadcast=smoke-rust-4965-5628.hang track=0.avc3
-subscribe written: id=4 broadcast=smoke-rust-4965-5628.hang track=0.avc3
-subscribe ok: id=4 broadcast=smoke-rust-4965-5628.hang track=0.avc3
-received 7474 bytes from smoke-rust-4965-5628.hang
-subscribe error: id=2 broadcast=smoke-rust-4965-5628.hang track=catalog.json error=remote error: 0 (connection error: closed)
-announced: broadcast=smoke-rust-4965-5628.hang active=false
+subscribe written: id=2 broadcast=smoke-rust-4733-3280.hang track=catalog.json
+subscribe ok: id=2 broadcast=smoke-rust-4733-3280.hang track=catalog.json
+announced: broadcast=moq-test/join/461710ec7932c88c9e1aef0c29730214 active=true
+announced: broadcast=moq-test/fetch/346016a76f22e294680f148676f9948d active=true
+subscribe start: id=4 broadcast=smoke-rust-4733-3280.hang track=0.avc3
+subscribe written: id=4 broadcast=smoke-rust-4733-3280.hang track=0.avc3
+subscribe ok: id=4 broadcast=smoke-rust-4733-3280.hang track=0.avc3
+received 7474 bytes from smoke-rust-4733-3280.hang
+announced: broadcast=smoke-rust-4733-3280.hang active=false
 announced: broadcast=metrics/us-west-2.relay.public active=false
-subscribe error: id=4 broadcast=smoke-rust-4965-5628.hang track=0.avc3 error=remote error: 0 (connection error: closed)
+announced: broadcast=moq-test/join/461710ec7932c88c9e1aef0c29730214 active=false
+announced: broadcast=moq-test/fetch/346016a76f22e294680f148676f9948d active=false
+subscribe error: id=2 broadcast=smoke-rust-4733-3280.hang track=catalog.json error=remote error: 0 (connection error: closed)
+subscribe error: id=4 broadcast=smoke-rust-4733-3280.hang track=0.avc3 error=remote error: 0 (connection error: closed)

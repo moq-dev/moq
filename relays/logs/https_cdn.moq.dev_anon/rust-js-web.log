@@ -3,10 +3,11 @@
 [page] announce: prefix=
 [page] announced: broadcast=iori-dev active=true
 [page] announced: broadcast=lcb-6830765-6165.hang active=true
-[page] announced: broadcast=smoke-rust-4965-13877.hang active=true
-[page] subscribe start: id=0 broadcast=smoke-rust-4965-13877.hang track=catalog.json
-[page] subscribe ok: id=0 broadcast=smoke-rust-4965-13877.hang track=catalog.json
-[page] received catalog hang smoke-rust-4965-13877.hang {video: Object, audio: Object, archive: Object, clock: Object}
-[page] subscribe start: id=1 broadcast=smoke-rust-4965-13877.hang track=0.avc3
-[page] subscribe ok: id=1 broadcast=smoke-rust-4965-13877.hang track=0.avc3
-decoded 11 frames from smoke-rust-4965-13877.hang (vite)
+[page] announced: broadcast=smoke-rust-4733-10032.hang active=true
+[page] subscribe start: id=0 broadcast=smoke-rust-4733-10032.hang track=catalog.json
+[page] subscribe ok: id=0 broadcast=smoke-rust-4733-10032.hang track=catalog.json
+[page] received catalog hang smoke-rust-4733-10032.hang {video: Object, audio: Object, archive: Object, clock: Object}
+[page] subscribe start: id=1 broadcast=smoke-rust-4733-10032.hang track=0.avc3
+[page] subscribe ok: id=1 broadcast=smoke-rust-4733-10032.hang track=0.avc3
+[page] skipping slow groups: track=0.avc3 0 -> 1 count=1
+decoded 28 frames from smoke-rust-4733-10032.hang (vite)

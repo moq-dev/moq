@@ -4,15 +4,15 @@ announced: prefix=
 connected version=moq-lite-06
 announced: broadcast=iori-dev active=true
 announced: broadcast=lcb-6830765-6165.hang active=true
-announced: broadcast=smoke-rust-4965-13877.hang active=true
-subscribe start: id=0 broadcast=smoke-rust-4965-13877.hang track=catalog.json
 announce: prefix=
-subscribe ok: id=0 broadcast=smoke-rust-4965-13877.hang track=catalog.json
-subscribe start: id=1 broadcast=smoke-rust-4965-13877.hang track=0.avc3
-subscribe ok: id=1 broadcast=smoke-rust-4965-13877.hang track=0.avc3
-received 6721 bytes from smoke-rust-4965-13877.hang
-subscribe close: id=0 broadcast=smoke-rust-4965-13877.hang track=catalog.json
-subscribe close: id=1 broadcast=smoke-rust-4965-13877.hang track=0.avc3
+announced: broadcast=smoke-rust-4733-10032.hang active=true
+subscribe start: id=0 broadcast=smoke-rust-4733-10032.hang track=catalog.json
+subscribe ok: id=0 broadcast=smoke-rust-4733-10032.hang track=catalog.json
+subscribe start: id=1 broadcast=smoke-rust-4733-10032.hang track=0.avc3
+subscribe ok: id=1 broadcast=smoke-rust-4733-10032.hang track=0.avc3
+received 6721 bytes from smoke-rust-4733-10032.hang
+subscribe close: id=0 broadcast=smoke-rust-4733-10032.hang track=catalog.json
+subscribe close: id=1 broadcast=smoke-rust-4733-10032.hang track=0.avc3
 broadcast discovery failed; broadcasts resolve on request only. WebTransportError {
   source: "session",
   streamErrorCode: null,

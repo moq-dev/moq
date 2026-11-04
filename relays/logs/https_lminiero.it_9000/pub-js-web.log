@@ -1,5 +1,7 @@
-publishing smoke-js-web-4965-2525.hang (fake camera, vite) to https://lminiero.it:9000
+publishing smoke-js-web-4733-8151.hang (fake camera, vite) to https://lminiero.it:9000
 [page] negotiated protocol: moqt-22
 [page] subscribe_namespace written: requestId=2
-[page] publish ok: broadcast=smoke-js-web-4965-2525.hang track=catalog.json
-[page] publish ok: broadcast=smoke-js-web-4965-2525.hang track=video
+[page] publish ok: broadcast=smoke-js-web-4733-8151.hang track=catalog.json
+[page] publish ok: broadcast=smoke-js-web-4733-8151.hang track=video
+[page] announced: broadcast=moq-test/data-subgroup-basic/d9c88483cb717af4c39be7d950b89c5c active=true
+[page] announced: broadcast=moq-test/data-subgroup-basic/d9c88483cb717af4c39be7d950b89c5c active=false

@@ -5,14 +5,14 @@ connected version=moq-lite-06
 announced: broadcast=iori-dev active=true
 announced: broadcast=lcb-6830765-6165.hang active=true
 announce: prefix=
-announced: broadcast=smoke-js-web-4965-4303.hang active=true
-subscribe start: id=0 broadcast=smoke-js-web-4965-4303.hang track=catalog.json
-subscribe ok: id=0 broadcast=smoke-js-web-4965-4303.hang track=catalog.json
-subscribe start: id=1 broadcast=smoke-js-web-4965-4303.hang track=video
-subscribe ok: id=1 broadcast=smoke-js-web-4965-4303.hang track=video
-received 6755 bytes from smoke-js-web-4965-4303.hang
-subscribe close: id=0 broadcast=smoke-js-web-4965-4303.hang track=catalog.json
-subscribe close: id=1 broadcast=smoke-js-web-4965-4303.hang track=video
+announced: broadcast=smoke-js-web-4733-843.hang active=true
+subscribe start: id=0 broadcast=smoke-js-web-4733-843.hang track=catalog.json
+subscribe ok: id=0 broadcast=smoke-js-web-4733-843.hang track=catalog.json
+subscribe start: id=1 broadcast=smoke-js-web-4733-843.hang track=video
+subscribe ok: id=1 broadcast=smoke-js-web-4733-843.hang track=video
+received 7366 bytes from smoke-js-web-4733-843.hang
+subscribe close: id=0 broadcast=smoke-js-web-4733-843.hang track=catalog.json
+subscribe close: id=1 broadcast=smoke-js-web-4733-843.hang track=video
 broadcast discovery failed; broadcasts resolve on request only. WebTransportError {
   source: "session",
   streamErrorCode: null,

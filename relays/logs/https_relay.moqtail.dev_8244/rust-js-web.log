@@ -1,11 +1,11 @@
-[page] Failed to establish a connection to https://relay.moqtail.dev:8244/: net::ERR_QUIC_PROTOCOL_ERROR.QUIC_NETWORK_IDLE_TIMEOUT (No recent network activity after 4001810us. Timeout:4s num_undecryptable_packets: 0 {}).
+[page] Failed to establish a connection to https://relay.moqtail.dev:8244/: net::ERR_QUIC_PROTOCOL_ERROR.QUIC_NETWORK_IDLE_TIMEOUT (No recent network activity after 4001707us. Timeout:4s num_undecryptable_packets: 0 {}).
 [page] connection error: AggregateError: All promises were rejected
-[page] Failed to establish a connection to https://relay.moqtail.dev:8244/: net::ERR_QUIC_PROTOCOL_ERROR.QUIC_NETWORK_IDLE_TIMEOUT (No recent network activity after 4002622us. Timeout:4s num_undecryptable_packets: 0 {}).
+[page] Failed to establish a connection to https://relay.moqtail.dev:8244/: net::ERR_QUIC_PROTOCOL_ERROR.QUIC_NETWORK_IDLE_TIMEOUT (No recent network activity after 4002419us. Timeout:4s num_undecryptable_packets: 0 {}).
 [page] connection error: AggregateError: All promises were rejected
-[page] Failed to establish a connection to https://relay.moqtail.dev:8244/: net::ERR_QUIC_PROTOCOL_ERROR.QUIC_NETWORK_IDLE_TIMEOUT (No recent network activity after 4000211us. Timeout:4s num_undecryptable_packets: 0 {}).
+[page] Failed to establish a connection to https://relay.moqtail.dev:8244/: net::ERR_QUIC_PROTOCOL_ERROR.QUIC_NETWORK_IDLE_TIMEOUT (No recent network activity after 4002483us. Timeout:4s num_undecryptable_packets: 0 {}).
 [page] connection error: AggregateError: All promises were rejected
-[page] Failed to establish a connection to https://relay.moqtail.dev:8244/: net::ERR_QUIC_PROTOCOL_ERROR.QUIC_NETWORK_IDLE_TIMEOUT (No recent network activity after 4000743us. Timeout:4s num_undecryptable_packets: 0 {}).
+[page] Failed to establish a connection to https://relay.moqtail.dev:8244/: net::ERR_QUIC_PROTOCOL_ERROR.QUIC_NETWORK_IDLE_TIMEOUT (No recent network activity after 4002539us. Timeout:4s num_undecryptable_packets: 0 {}).
 [page] connection error: AggregateError: All promises were rejected
-[page] Failed to establish a connection to https://relay.moqtail.dev:8244/: net::ERR_QUIC_PROTOCOL_ERROR.QUIC_NETWORK_IDLE_TIMEOUT (No recent network activity after 4002181us. Timeout:4s num_undecryptable_packets: 0 {}).
+[page] Failed to establish a connection to https://relay.moqtail.dev:8244/: net::ERR_QUIC_PROTOCOL_ERROR.QUIC_NETWORK_IDLE_TIMEOUT (No recent network activity after 4002168us. Timeout:4s num_undecryptable_packets: 0 {}).
 [page] connection error: AggregateError: All promises were rejected
-decoded 0 frames from smoke-rust-4965-7521.hang (vite)
+decoded 0 frames from smoke-rust-4733-4738.hang (vite)
