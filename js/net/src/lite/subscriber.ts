@@ -7,6 +7,7 @@ import * as broadcast from "../broadcast.ts";
 import type { Drain } from "../connection/goaway.ts";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
 import { BroadcastCache } from "../consume.ts";
+import type * as datagram from "../datagram.ts";
 import * as DatagramStream from "../datagram_stream.ts";
 import {
 	error,
@@ -46,7 +47,7 @@ import {
 	AnnounceRequest,
 	decodeAnnounceBroadcastMaybe,
 } from "./announce.ts";
-import { Datagram as DatagramMessage } from "./datagram.ts";
+import { Datagram as DatagramMessage, Datagrams, DatagramsInfo, DatagramsUpdate } from "./datagram.ts";
 import { closeViolation } from "./error.ts";
 import { Fetch as FetchMessage } from "./fetch.ts";
 import { type Group as GroupMessage, readFrames } from "./group.ts";
@@ -68,6 +69,7 @@ import {
 	hasAnnounceId,
 	hasAnnounceOk,
 	hasDatagrams,
+	hasDatagramTracks,
 	hasFetchMaxDelay,
 	hasMediaTime,
 	hasMinDelay,
@@ -89,6 +91,7 @@ import {
 // A peer's buffered TRACKS events decode without reaching a task boundary, and a flood of adds
 // and removals of one name never reaches the announces cap: yield so it cannot starve the host.
 const listingBudget = new Budget();
+const datagramBudget = new Budget();
 
 // Request streams refuse exhausted peer credit, with one deadline covering create and answer.
 export const SUBSCRIBE_SETUP_TIMEOUT_MS = REQUEST_TIMEOUT_MS;
@@ -101,6 +104,8 @@ const DRAIN_COST: Cost = 2n ** 62n - 1n;
 // What a subscription has set up so far, so a revocation (or a timeout) can reach it at
 // any stage.
 interface SubscribeSetup {
+	consumer?: broadcast.Consumer;
+	legacyKey?: string;
 	stream?: Stream;
 	track?: Stream;
 	producer?: track.Producer;
@@ -124,7 +129,14 @@ interface Consumed {
 	readonly answering?: AbortSignal;
 }
 
+interface DatagramEntry {
+	producer: datagram.Producer;
+	timescale?: Time.Timescale;
+}
+
 interface SubscribeEntry {
+	datagrams?: DatagramEntry;
+	legacyKey?: string;
 	// The write side: incoming GROUP streams are routed here. The application reads
 	// the matching track.Subscriber it got from broadcast.Consumer.subscribe.
 	track: track.Producer;
@@ -228,6 +240,9 @@ export class Subscriber {
 	// Registered only after immutable TRACK_INFO or the older drafts' defaults resolve,
 	// so every incoming group and datagram already knows its timestamp framing.
 	#subscribes = new Map<bigint, SubscribeEntry>();
+	#datagrams = new Map<bigint, DatagramEntry>();
+	#legacyDatagrams = new Map<string, DatagramEntry>();
+	#legacyRequests = new Map<string, datagram.Request>();
 	// A SUBSCRIBE sent alongside its TRACK, until its TRACK_INFO lands: settles with the
 	// entry, or `undefined` if it never does.
 	#pending = new Map<bigint, Promise<SubscribeEntry | undefined>>();
@@ -801,11 +816,153 @@ export class Subscriber {
 			for (;;) {
 				const request = await wireOf(consumer).requested();
 				if (!request) break;
-				void this.#runSubscribe(path, consumed, request);
+				void this.#runSubscribe(path, consumed, request, consumer);
 			}
 		})();
 
+		void (async () => {
+			for (;;) {
+				const request = await wireOf(consumer).requestedDatagrams();
+				if (!request) return;
+				void this.#runDatagramRequest(path, consumed, consumer, request);
+			}
+		})();
 		return this.#consumes.insert(path, instance, consumer);
+	}
+
+	// Each request owns its setup and subscription until it ends or loses its last reader.
+	async #runDatagramRequest(
+		path: Path.Valid,
+		consumed: Consumed,
+		consumer: broadcast.Consumer,
+		request: datagram.Request,
+	): Promise<void> {
+		const cancel = new AbortController();
+		const signal = AbortSignal.any([
+			cancel.signal,
+			this.#closed.signal,
+			...(consumed.valid ? [consumed.valid] : []),
+		]);
+		let producer: datagram.Producer | undefined;
+		let stream: Stream | undefined;
+		const id = this.#subscribeNext++;
+		const unused = async () => {
+			while (request.priority.peek() !== undefined && request.closed.peek() === undefined)
+				await Signal.race(request.priority, request.closed);
+			if (request.priority.peek() === undefined && (!producer || hooks.closeUnusedDatagrams(producer)))
+				cancel.abort(new StreamError(StreamCode.Cancel));
+		};
+		void unused();
+		const grant = this.#grant?.subscribe(() => {
+			if (this.#denied(path)) cancel.abort(unauthorized(path));
+		});
+		try {
+			if (
+				!hasDatagrams(this.version) ||
+				DatagramStream.maxDatagramSize(this.#quic) === 0 ||
+				!DatagramStream.canReceiveDatagrams(this.#quic)
+			)
+				throw new Error("transport does not support datagram tracks");
+			const ready = await this.#auth?.ready(path, "subscribe", {
+				signal,
+				until: () => Promise.resolve(request.closed),
+			});
+			if (ready === false) throw new StreamError(StreamCode.Cancel);
+			if (this.#denied(path)) throw unauthorized(path);
+			signal.throwIfAborted();
+			if (!hasDatagramTracks(this.version)) {
+				await this.#legacyDatagramRequest(consumed, consumer, request, signal);
+				return;
+			}
+			const deadline = new Deadline();
+			let priority = request.priority.peek() ?? 0;
+			const answered = await deadline.wait(
+				this.#exchange(
+					{ version: this.version },
+					async (opened) => {
+						stream = opened;
+						await opened.writer.u53(StreamId.Datagrams);
+						await new Datagrams({
+							id,
+							broadcast: path,
+							instance: consumed.instance,
+							track: request.name,
+							priority,
+						}).encode(opened.writer, this.version);
+						const info = await DatagramsInfo.decode(opened.reader, this.version);
+						return info;
+					},
+					signal,
+					deadline,
+				),
+			);
+			signal.throwIfAborted();
+			if (!stream) throw new Error("datagram stream was not opened");
+			producer = request.accept(answered);
+			this.#datagrams.set(id, { producer, timescale: answered.timescale });
+			const opened = stream;
+			const receiving = producer;
+			// The only thing following DATAGRAMS_INFO is the publisher's FIN.
+			const ended = opened.reader.done().then((done) => {
+				if (!done) throw new ProtocolViolation("data after DATAGRAMS_INFO");
+				receiving.finish();
+			});
+			void ended.catch(() => {});
+			while (producer.closed.peek() === undefined) {
+				const next = producer.priority.peek();
+				if (next === undefined && hooks.closeUnusedDatagrams(producer)) break;
+				if (next !== undefined && next !== priority) {
+					await untilAborted(new DatagramsUpdate(next).encode(opened.writer, this.version), signal);
+					priority = next;
+				}
+				await untilAborted(race([ended, Signal.race(producer.priority, producer.closed)]), signal);
+			}
+			const closed = producer.closed.peek();
+			if (closed instanceof Error) throw closed;
+			stream.writer.close();
+		} catch (err) {
+			closeViolation(this.#quic, err);
+			const cause = error(err);
+			cancel.abort(cause);
+			request.reject(cause);
+			stream?.abort(cause);
+		} finally {
+			grant?.();
+			this.#datagrams.delete(id);
+			cancel.abort(new StreamError(StreamCode.Cancel));
+			stream?.reader.stop(StreamCode.Cancel);
+		}
+	}
+
+	// Lite-05/06: take datagrams from the name's single stream subscription. Merely creating
+	// the shared datagram track in #register adds no upstream demand of its own.
+	async #legacyDatagramRequest(
+		consumed: Consumed,
+		consumer: broadcast.Consumer,
+		request: datagram.Request,
+		signal: AbortSignal,
+	): Promise<void> {
+		const key = JSON.stringify([consumed.id, request.name]);
+		this.#legacyRequests.set(key, request);
+		const subscriber = wireOf(consumer).subscribe(request.name, { priority: request.priority.peek() ?? 0 });
+		try {
+			await untilAborted(subscriber.info(), signal);
+			const shared = this.#legacyDatagrams.get(key);
+			if (!shared) throw new Error("stream subscription did not bind its datagram track");
+			const producer = shared.producer;
+			while (producer.closed.peek() === undefined) {
+				const priority = producer.priority.peek();
+				if (priority === undefined && hooks.closeUnusedDatagrams(producer)) break;
+				subscriber.update({ ...subscriber.subscription.peek(), priority });
+				await untilAborted(race([Signal.race(producer.priority, producer.closed), subscriber.closed]), signal);
+				const closed = subscriber.closed.peek();
+				if (closed instanceof Error) throw closed;
+				if (closed !== undefined) break;
+			}
+		} finally {
+			subscriber.close();
+			if (this.#legacyRequests.get(key) === request) this.#legacyRequests.delete(key);
+		}
 	}
 
 	// Answer listings of a consumed broadcast from the peer's TRACKS while anyone lists it, until
@@ -955,7 +1112,12 @@ export class Subscriber {
 		}
 	}
 
-	async #runSubscribe(broadcast: Path.Valid, consumed: Consumed, request: track.Request) {
+	async #runSubscribe(
+		broadcast: Path.Valid,
+		consumed: Consumed,
+		request: track.Request,
+		consumer: broadcast.Consumer,
+	) {
 		const id = this.#subscribeNext++;
 		if (wireRanges(request.subscription.ranges ?? [{}]).length === 0) {
 			request.reject(new Error(EMPTY_RANGE));
@@ -980,7 +1142,11 @@ export class Subscriber {
 		}
 		// Armed before the first check and held to the end, so a shrink while the
 		// subscription sets up is never missed: it resets whatever reached the wire.
-		const state: SubscribeSetup = { cancel: new AbortController() };
+		const state: SubscribeSetup = {
+			cancel: new AbortController(),
+			consumer,
+			legacyKey: JSON.stringify([consumed.id, request.name]),
+		};
 		const disposeGrant = this.#grant?.subscribe(() => {
 			if (state.revoked || !this.#denied(broadcast)) return;
 			state.revoked = refused;
@@ -1257,6 +1423,16 @@ export class Subscriber {
 		} finally {
 			answering?.removeEventListener("abort", replaced);
 			entry.held?.close();
+			if (entry.datagrams) {
+				const closed = hooks.trackReleased(producer).peek();
+				if (closed instanceof Error) entry.datagrams.producer.abort(closed);
+				else if (entry.end !== undefined) entry.datagrams.producer.finish();
+				else entry.datagrams.producer.abort(new StreamError(StreamCode.Cancel));
+				this.#datagrams.delete(id);
+				if (entry.legacyKey && this.#legacyDatagrams.get(entry.legacyKey) === entry.datagrams)
+					this.#legacyDatagrams.delete(entry.legacyKey);
+			}
+
 			this.#subscribes.delete(id);
 		}
 	}
@@ -1407,6 +1583,18 @@ export class Subscriber {
 			bounded: hasRanges(this.version) && bounded(ranges),
 			asked: [...ranges],
 		};
+		if (hasDatagrams(this.version) && !hasDatagramTracks(this.version) && state.consumer && state.legacyKey) {
+			const info = { priority: producer.priority, timescale: framing.scale };
+			const request = this.#legacyRequests.get(state.legacyKey);
+			const datagrams = request
+				? request.accept(info)
+				: wireOf(state.consumer).createDatagrams(producer.name, info);
+			entry.datagrams = { producer: datagrams, timescale: framing.scale };
+			entry.legacyKey = state.legacyKey;
+			this.#datagrams.set(id, entry.datagrams);
+			this.#legacyDatagrams.set(state.legacyKey, entry.datagrams);
+		}
+
 		this.#subscribes.set(id, entry);
 		state.producer = producer;
 		return entry;
@@ -2094,6 +2282,8 @@ export class Subscriber {
 		try {
 			try {
 				for (;;) {
+					const yielded = datagramBudget.poll();
+					if (yielded !== undefined) await yielded;
 					const { value, done } = await reader.read();
 					if (done) break;
 					if (!value) continue;
@@ -2124,22 +2314,17 @@ export class Subscriber {
 		// Read with the entry it was decoded with: one registered while the decode awaited would
 		// read a datagram parsed with the defaults. An unknown subscription's datagram, or one
 		// whose TRACK_INFO had not landed, which a datagram cannot wait for, is dropped below.
-		let entry: SubscribeEntry | undefined;
+		let entry: DatagramEntry | undefined;
 		const dg = await DatagramMessage.decode(payload, this.version, (id) => {
-			entry = this.#subscribes.get(id);
-			return { timed: !!entry?.timescale, compressed: entry?.compress ?? false };
+			entry = this.#datagrams.get(id);
+			return { timed: entry?.timescale !== undefined };
 		});
-		if (!dg) return;
-		// Gone since, too: the subscription ended while the decode awaited.
-		if (!entry || this.#subscribes.get(dg.subscribe) !== entry) return;
-
-		const scale = entry.timescale;
-
+		if (!dg || !entry || this.#datagrams.get(dg.subscribe) !== entry) return;
 		const timestamp =
-			dg.timestamp === undefined ? undefined : new Time.Timestamp(dg.timestamp, Time.Timescale(scale));
-		// A datagram's sequence is never owed a stream, so it never holds the tail open.
-		entry.tail.account(dg.sequence, dg.sequence + 1n);
-		hooks.writeDatagram(entry.track, { sequence: dg.sequence, timestamp, payload: dg.payload }, dg.inflated);
+			dg.timestamp === undefined || entry.timescale === undefined
+				? undefined
+				: new Time.Timestamp(dg.timestamp, entry.timescale);
+		entry.producer.insert({ sequence: dg.sequence, timestamp, payload: dg.payload });
 	}
 
 	/**
@@ -2280,6 +2465,9 @@ export class Subscriber {
 		}
 
 		this.#subscribes.clear();
+		for (const { producer } of this.#datagrams.values()) producer.abort(err);
+		this.#datagrams.clear();
+		this.#legacyDatagrams.clear();
 
 		// This also releases callers still awaiting acceptance.
 		for (const { group } of this.#fetches.values()) {

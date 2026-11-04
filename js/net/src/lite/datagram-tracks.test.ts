@@ -1,0 +1,133 @@
+import { expect, test } from "bun:test";
+import { accept, connect } from "../connection/index.ts";
+import { createMockTransportPair } from "../mock.ts";
+import { Producer as Origin } from "../origin.ts";
+import * as Path from "../path.ts";
+import { Timescale, Timestamp } from "../time.ts";
+import { wireOf } from "../wire.ts";
+import { ALPN_04, ALPN_05, ALPN_06, ALPN_07_WIP } from "./version.ts";
+
+const url = new URL("https://localhost/datagrams");
+const path = Path.from("live");
+
+for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
+	for (const streams of [false, true]) {
+		test(`${alpn}: ${streams ? "same-name kinds" : "datagram-only track"} delivery`, async () => {
+			const source = new Origin();
+			const publication = source.createBroadcast(path);
+			const datagrams = publication.broadcast.createDatagrams("audio", {
+				timescale: Timescale.MICRO,
+				priority: -7,
+			});
+			const track = streams
+				? publication.broadcast.createTrack("audio", { timescale: Timescale.MILLI })
+				: undefined;
+			publication.announce();
+			const pair = createMockTransportPair(alpn);
+			const peers = await Promise.all([
+				connect({ url, transport: pair.client }),
+				accept({ url, transport: pair.server, publish: source.consume() }),
+			]);
+			const remote = wireOf(peers[0]).consume(path);
+			const reader = remote.datagrams("audio");
+			reader.setPriority(17);
+			try {
+				const info = await reader.info();
+				while (datagrams.priority.peek() !== 17) await datagrams.priority.changed();
+				expect(info.priority).toBe(streams && alpn !== ALPN_07_WIP ? 0 : -7);
+				const stamp = Timestamp.fromMicros(1234567);
+				const sequence = (1n << 53n) + 1n;
+				datagrams.insert({ sequence, timestamp: stamp, payload: new Uint8Array([7, 8]) });
+				const received = await reader.recv();
+				expect(received?.sequence).toBe(sequence);
+				expect(received?.timestamp?.asMicros()).toBe(streams && alpn !== ALPN_07_WIP ? 1234000 : 1234567);
+				expect(received?.payload).toEqual(new Uint8Array([7, 8]));
+				if (track) {
+					const grouped = remote.track("audio").subscribe();
+					track.writeFrame({ timestamp: Timestamp.fromMillis(1), payload: new Uint8Array([9]) });
+					expect((await grouped.recvGroup())?.sequence).toBe(0n);
+					grouped.close();
+				}
+				reader.setPriority(-9);
+				while (datagrams.priority.peek() !== -9) await datagrams.priority.changed();
+				datagrams.finish();
+				track?.finish();
+				expect(await reader.recv()).toBeUndefined();
+			} finally {
+				reader.close();
+				remote.close();
+				for (const peer of peers) peer.abort();
+				source.close();
+			}
+		});
+	}
+}
+
+for (const options of [{ datagrams: false }, { datagramReadable: false }]) {
+	test(`unsupported datagram receive setup is refused (${JSON.stringify(options)})`, async () => {
+		const pair = createMockTransportPair(ALPN_07_WIP, options);
+		const [client, server] = await Promise.all([
+			connect({ url, transport: pair.client }),
+			accept({ url, transport: pair.server }),
+		]);
+		const remote = wireOf(client).consume(path);
+		const reader = remote.datagrams("missing");
+		try {
+			await expect(reader.info()).rejects.toThrow("does not support datagram");
+		} finally {
+			reader.close();
+			remote.close();
+			client.abort();
+			server.abort();
+		}
+	});
+}
+
+test("lite-04 refuses datagram tracks at setup", async () => {
+	const pair = createMockTransportPair(ALPN_04);
+	const [client, server] = await Promise.all([
+		connect({ url, transport: pair.client }),
+		accept({ url, transport: pair.server }),
+	]);
+	const remote = wireOf(client).consume(path);
+	const reader = remote.datagrams("missing");
+	try {
+		await expect(reader.info()).rejects.toThrow("does not support datagram");
+	} finally {
+		reader.close();
+		remote.close();
+		client.abort();
+		server.abort();
+	}
+});
+
+test("lite-07 bounds datagram bodies with createWritable, independently of stream compression", async () => {
+	const source = new Origin();
+	const publication = source.createBroadcast(path);
+	const datagrams = publication.broadcast.createDatagrams("audio");
+	publication.broadcast.createTrack("audio", { compress: true });
+	publication.announce();
+	const pair = createMockTransportPair(ALPN_07_WIP, { datagramWritable: "createWritable" });
+	Object.defineProperty(pair.server.datagrams, "maxDatagramSize", { value: 900 });
+	const [client, server] = await Promise.all([
+		connect({ url, transport: pair.client }),
+		accept({ url, transport: pair.server, publish: source.consume() }),
+	]);
+	const remote = wireOf(client).consume(path);
+	const reader = remote.datagrams("audio");
+	reader.setPriority(19);
+	try {
+		await reader.info();
+		while (datagrams.priority.peek() !== 19) await datagrams.priority.changed();
+		// Type, Subscribe ID, and Sequence each occupy one byte on this untimed track.
+		datagrams.append(undefined, new Uint8Array(898));
+		datagrams.append(undefined, new Uint8Array(897));
+		expect((await reader.recv())?.sequence).toBe(1n);
+	} finally {
+		reader.close();
+		remote.close();
+		client.abort();
+		server.abort();
+		source.close();
+	}
+});

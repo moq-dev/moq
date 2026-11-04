@@ -27,9 +27,9 @@ import { finalSequence, hiddenBelow, hooks, maxDelayOf, scopeCaptures, scopeHead
 import type { Lister } from "../listing.ts";
 import * as Path from "../path.ts";
 import { receiveFrame, skipPayload } from "../payload.ts";
-import { type Cursor, Reader, type Stream } from "../stream.ts";
+import type { Cursor, Reader, Stream } from "../stream.ts";
 import { Tail } from "../tail.ts";
-import type { Timescale, Timestamp } from "../time.ts";
+import type { Timescale } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { closeUnwanted } from "../util/announce.ts";
@@ -48,14 +48,7 @@ import { isDraft20 } from "./filter.ts";
 import { Join } from "./join.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
-import {
-	decodeFetchObject,
-	decodeObjectTime,
-	EndOfTrackProperties,
-	Frame,
-	type Group as GroupMessage,
-	ObjectIdGap,
-} from "./object.ts";
+import { decodeFetchObject, EndOfTrackProperties, Frame, type Group as GroupMessage, ObjectIdGap } from "./object.ts";
 import { Parameters } from "./parameters.ts";
 import { DEFAULT_WIRE, fromWire, toWire } from "./priority.ts";
 import { type Publish, PublishDone, PublishDoneStatus, publishDoneClean } from "./publish.ts";
@@ -700,6 +693,13 @@ export class Subscriber {
 				const request = await wireOf(consumer).requested();
 				if (!request) break;
 				void this.#runSubscribe(path, request, instance.validity?.signal);
+			}
+		})();
+		void (async () => {
+			for (;;) {
+				const request = await wireOf(consumer).requestedDatagrams();
+				if (!request) return;
+				request.reject(new NotFound("datagram tracks over moq-transport"));
 			}
 		})();
 		return this.#consumes.insert(path, instance, consumer);
@@ -2151,67 +2151,10 @@ export class Subscriber {
 		}
 	}
 
-	/**
-	 * Deliver one OBJECT_DATAGRAM as a datagram on its subscription's track: a single-frame
-	 * group at the Group ID.
-	 *
-	 * One the model cannot carry is dropped like any lost datagram: an Object past ID 0 (the
-	 * group would need a second object), a status other than Normal, an alias that is not
-	 * bound yet (the draft lets us drop rather than buffer), or no Timestamp on a track that
-	 * declared a timescale.
-	 */
+	// Stream subscriptions never admit datagrams; the separate IETF datagram-track adapter
+	// owns mapping DATAGRAMS demand onto SUBSCRIBE/OBJECT_DATAGRAM.
 	async #recvDatagram(data: Uint8Array): Promise<void> {
-		const version = this.#session.version;
-		const datagram = await ObjectDatagram.decode(data, version);
-		const { trackAlias: alias, groupId: sequence } = datagram;
-
-		if ((datagram.objectId ?? 0) !== 0) {
-			console.debug(`dropping a datagram past object 0: alias=${alias} group=${sequence}`);
-			return;
-		}
-		let payload: Uint8Array;
-		if ("status" in datagram.body) {
-			if (datagram.body.status !== 0) {
-				console.debug(
-					`dropping a datagram status: alias=${alias} group=${sequence} status=${datagram.body.status}`,
-				);
-				return;
-			}
-			payload = new Uint8Array();
-		} else {
-			payload = datagram.body.payload;
-		}
-
-		const subscription = this.#aliases.peek(alias);
-		if (!subscription) {
-			console.debug(`dropping a datagram for an unbound alias: alias=${alias} group=${sequence}`);
-			return;
-		}
-
-		// Like a subgroup object: a track that declared no timescale is untimed.
-		const timescale = this.#timescales.get(alias);
-		let timestamp: Timestamp | undefined;
-		if (timescale !== undefined && datagram.properties !== undefined) {
-			try {
-				timestamp = await new Reader(undefined, datagram.properties, version).decode((c) =>
-					decodeObjectTime(c, timescale),
-				);
-			} catch (err: unknown) {
-				throw new ProtocolViolation(`malformed OBJECT_DATAGRAM properties: ${reason(error(err))}`, {
-					cause: err,
-				});
-			}
-		}
-		if (timescale !== undefined && timestamp === undefined) {
-			console.debug(`dropping an unstamped datagram: alias=${alias} group=${sequence}`);
-			return;
-		}
-
-		try {
-			subscription.track.insertDatagram(sequence, timestamp, payload);
-		} catch (err: unknown) {
-			console.debug(`dropping datagram: alias=${alias} group=${sequence} error=${reason(error(err))}`);
-		}
+		await ObjectDatagram.decode(data, this.#session.version);
 	}
 }
 

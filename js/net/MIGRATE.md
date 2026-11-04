@@ -4,6 +4,26 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Datagrams use separate track types ([#7846](https://github.com/moq-dev/moq/pull/7846))
+
+Create a datagram track with `broadcast.createDatagrams(name, info)` and read it with
+`broadcast.datagrams(name)`. Replace `Track.Producer.appendDatagram(timestamp, payload)`
+with `Datagram.Producer.append(timestamp, payload)`, `insertDatagram(sequence, timestamp, payload)`
+with `insert({ sequence, timestamp, payload })`, and `Subscriber.recvDatagram()` or
+`Ordered.recvDatagram()` with `Datagram.Consumer.recv()`. The payload type is now
+`Datagram.Datagram`, replacing `Track.Datagram`.
+
+Stream and datagram tracks may share a name, with separate sequence counters. Datagram
+consumers start live, have only a priority (`setPriority`), and have no range, order,
+compression, FETCH, or cache API. `finish()` drains existing readers; `abort(error)`
+fails them immediately. Close consumers when done.
+
+Lite-07-wip uses DATAGRAMS on stream type 0x9 and carries no Inflated Size. Lite-05/06
+keep their wire format and carry both kinds of a name on one SUBSCRIBE, without deduplication.
+Create a datagram track before or with its same-name stream track on those versions.
+Lite-01..04 and transports without datagrams refuse datagram requests. moq-transport
+currently refuses them while its separate datagram-track adapter is implemented.
+
 ### Past group ranges work over moq-transport ([#7793](https://github.com/moq-dev/moq/pull/7793))
 
 `track.Consumer.fetchGroup()` and subscriptions to past group ranges now use standalone FETCH on drafts 18, 20, and 22. No API migration is needed. First-party publishers serve one group per FETCH; multi-group ranges require a publisher that serves them.

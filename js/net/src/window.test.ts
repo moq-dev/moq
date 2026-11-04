@@ -309,40 +309,6 @@ test("a time end walks each group once behind a missing sequence", () => {
 	expect(groups.asked).toBeLessThan(8 * count);
 });
 
-test("a datagram is judged by its own timestamp, one range at a time", () => {
-	const window = new Window([{ start: { absolute: 0n }, end: time(3500) }], undefined, new Groups());
-	expect(window.admitsDatagram(9n, Timestamp.fromMillis(3500))).toBe(true);
-	expect(window.admitsDatagram(9n, Timestamp.fromMillis(3600))).toBe(false);
-
-	// A start still waiting judges a datagram by its time alone.
-	expect(window.admitsDatagram(0n, Timestamp.fromMillis(0))).toBe(true);
-	const waiting = new Window([{ start: time(3000), end: time(3500) }], undefined, new Groups());
-	expect(waiting.admitsDatagram(0n, Timestamp.fromMillis(2900))).toBe(false);
-	expect(waiting.admitsDatagram(1n, Timestamp.fromMillis(3000))).toBe(true);
-	expect(waiting.admitsDatagram(3n, Timestamp.fromMillis(3600))).toBe(false);
-
-	// Group 1 arrived only as a datagram: the end settles before 2 by sequence, but 1 presents past it.
-	const groups = new Groups([
-		[0n, started(0)],
-		[2n, started(10_000)],
-	]);
-	groups.gones.push({ start: 1n, end: 2n });
-	const settled = new Window([{ start: time(0), end: time(5000) }], undefined, groups);
-	expect(settled.resolved()).toEqual([{ start: 0n, end: 2n }]);
-	expect(settled.admitsDatagram(1n, Timestamp.fromMillis(4000))).toBe(true);
-	expect(settled.admitsDatagram(1n, Timestamp.fromMillis(7000))).toBe(false);
-
-	// The sequence and the time must pass the same range.
-	const both = new Window(
-		[{ start: { absolute: 6n } }, { start: time(5500) }],
-		5n,
-		new Groups([[5n, started(5000)]]),
-	);
-	expect(both.admitsDatagram(5n, Timestamp.fromMillis(5000))).toBe(false);
-	expect(both.admitsDatagram(5n, Timestamp.fromMillis(5500))).toBe(true);
-	expect(both.admitsDatagram(6n, Timestamp.fromMillis(5000))).toBe(true);
-});
-
 test("a time anchor needs moq-lite-07, is resolved by the copy, and clamps to its group", () => {
 	expect(isWire({ start: time(1) })).toBe(false);
 	expect(isWire({ start: { absolute: 1n }, end: time(1) })).toBe(false);

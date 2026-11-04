@@ -9,13 +9,12 @@ import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
 import { Tail } from "../tail.ts";
-import { Timescale, Timestamp } from "../time.ts";
+import { Timescale } from "../time.ts";
 import * as track from "../track.ts";
 import * as demandUtil from "../util/demand.ts";
 import type * as Cluster from "./cluster.ts";
 import { Connection } from "./connection.ts";
-import { ObjectDatagram } from "./datagram.ts";
-import { encodeObjectExtensions, type GroupFlags, Group as GroupMessage } from "./object.ts";
+import { type GroupFlags, Group as GroupMessage } from "./object.ts";
 import { Parameters } from "./parameters.ts";
 import type { Properties } from "./properties.ts";
 import { PublishNamespace, PublishNamespaceUpdate } from "./publish_namespace.ts";
@@ -1426,63 +1425,6 @@ test("object extension limit accepts 64 KiB and stops one byte over before readi
 			track.close();
 		}
 	}
-});
-
-/**
- * An OBJECT_DATAGRAM at object 0 is a datagram at its Group ID; anything the model cannot
- * carry is dropped like a lost datagram, and a malformed one ends the session.
- */
-test("an object datagram is a datagram group", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_18);
-	const subscriber = new Subscriber({ session: new NativeSession(pair.server, VERSION, true), quic: pair.server });
-	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
-
-	const peer = await nextStream(pair.client);
-	if (!peer) throw new Error("the subscriber never opened a subscribe stream");
-	expect(await peer.reader.u53()).toBe(Subscribe.id);
-	await Subscribe.decode(peer.reader, VERSION);
-	await peer.writer.u53(SubscribeOk.id);
-	await new SubscribeOk({
-		trackAlias: ALIAS,
-		properties: { timescale: Timescale.MILLI },
-	}).encode(peer.writer, VERSION);
-	await track.info();
-
-	const receiving = subscriber.runDatagrams();
-	const writer = pair.client.datagrams.writable.getWriter();
-	const send = (fields: Partial<ConstructorParameters<typeof ObjectDatagram>[0]>) =>
-		writer.write(
-			new ObjectDatagram({
-				trackAlias: ALIAS,
-				groupId: 4n,
-				endOfGroup: true,
-				body: { payload: new TextEncoder().encode("no") },
-				...fields,
-			}).encode(VERSION),
-		);
-
-	// Past object 0, an unbound alias, a status other than Normal, and no Timestamp on a timed track.
-	await send({ objectId: 1 });
-	await send({ trackAlias: ALIAS + 1n });
-	await send({ endOfGroup: false, body: { status: 3 } });
-	await send({ groupId: 5n, objectId: 0 });
-	const properties = encodeObjectExtensions(Timestamp.fromMillis(1234), Timescale.MILLI, VERSION);
-	await send({ groupId: 9n, objectId: 0, publisherPriority: 7, properties, body: { payload: Uint8Array.of(1) } });
-
-	const datagram = await track.recvDatagram();
-	expect(datagram?.sequence).toBe(9n);
-	expect(datagram?.payload).toEqual(Uint8Array.of(1));
-	expect(datagram?.timestamp?.as(Timescale.MILLI)).toBe(1234);
-
-	// A status cannot end the group.
-	await writer.write(Uint8Array.of(0x22, Number(ALIAS), 4, 0, 0));
-	expect(
-		await receiving.then(
-			() => undefined,
-			(err: unknown) => err,
-		),
-	).toBeInstanceOf(ProtocolViolation);
-	track.close();
 });
 
 test("a more specific unnamed announcement replaces the consumed source", async () => {

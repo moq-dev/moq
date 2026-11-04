@@ -264,7 +264,6 @@ export class Connection implements Established {
 		if (this.#closed) return;
 
 		this.#closed = true;
-		this.#publisher.close();
 
 		this.#auth.close();
 

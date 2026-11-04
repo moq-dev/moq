@@ -17,6 +17,8 @@ export * as Bandwidth from "./bandwidth_api.ts";
 export * as Broadcast from "./broadcast.ts";
 /** A reconnecting, shareable handle on a MoQ session. */
 export { Connection } from "./connection/index.ts";
+/** Live datagram track producers, consumers, and payloads. */
+export * as Datagram from "./datagram.ts";
 /** The codes a session closes with and a stream resets with. */
 export { SessionCode, StreamCode } from "./error.ts";
 /** Session, stream, and local request errors. */

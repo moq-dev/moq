@@ -8,8 +8,9 @@
  *
  * @module
  */
-import type { Track as NetTrack } from "@moq/net";
+import type { Datagram as NetDatagram, Track as NetTrack } from "@moq/net";
 import type { Credential } from "./credential.ts";
+import * as Datagram from "./datagram.ts";
 import { DATAGRAM, GROUP, type Name, pad } from "./derive.ts";
 import * as Epoch from "./epoch.ts";
 import { Failure } from "./failure.ts";
@@ -81,7 +82,16 @@ export class Consumer {
 			shared = keys(this.credential, this.epoch, semantic);
 			this.#keys.set(semantic, shared);
 		}
-		return Track.Consumer.make(track, shared);
+		return Track.Consumer.make(track, shared.group);
+	}
+	/** Decrypt a net datagram track under the semantic name's datagram key. @internal */
+	consumeDatagrams(track: NetDatagram.Consumer, semantic: string): Datagram.Consumer {
+		let shared = this.#keys.get(semantic);
+		if (!shared) {
+			shared = keys(this.credential, this.epoch, semantic);
+			this.#keys.set(semantic, shared);
+		}
+		return Datagram.Consumer.make(track, shared.datagram);
 	}
 }
 
@@ -99,6 +109,7 @@ export class Producer {
 	#consumer: Consumer;
 	// Keyed by semantic name, and so by physical name.
 	#claims = new Set<string>();
+	#datagramClaims = new Set<string>();
 
 	private constructor(credential: Credential) {
 		this.credential = credential;
@@ -157,6 +168,25 @@ export class Producer {
 			this.#claims.delete(semantic);
 			throw err;
 		}
-		return Track.Producer.make(track, info, keys(this.credential, this.epoch, semantic));
+		return Track.Producer.make(track, info, keys(this.credential, this.epoch, semantic).group);
+	}
+	/** Protect a net datagram track, claiming its semantic name in the datagram namespace. @internal */
+	async produceDatagrams(track: NetDatagram.Producer, semantic: string): Promise<Datagram.Producer> {
+		try {
+			pad(semantic);
+			if (this.#datagramClaims.has(semantic)) throw new Failure("reuse");
+		} catch (err) {
+			track.abort(err as Failure);
+			throw err;
+		}
+		this.#datagramClaims.add(semantic);
+		let info: NetDatagram.Info;
+		try {
+			info = await track.info();
+		} catch (err) {
+			this.#datagramClaims.delete(semantic);
+			throw err;
+		}
+		return Datagram.Producer.make(track, info, keys(this.credential, this.epoch, semantic).datagram);
 	}
 }

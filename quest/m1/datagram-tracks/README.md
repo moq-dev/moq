@@ -105,7 +105,6 @@ datagram track on lite-07, direct and through a relay.
 
 ## Required
 
-- [JS datagram tracks](/quest/m1/datagram-tracks/js.md) - `@moq/net` datagram types and the lite-07 datagram request
 - [moq-transport datagram tracks](/quest/m1/datagram-tracks/ietf.md) - Rust and JS map a datagram track to SUBSCRIBE and OBJECT_DATAGRAM with object ID 0, keeping the requested kind
 - [Bindings datagram tracks](/quest/m1/datagram-tracks/bindings.md) - moq-ffi, moq-c, and every wrapper expose the separate datagram types
 

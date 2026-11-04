@@ -4,6 +4,7 @@
  * @module
  */
 import { type GetPromise, Once, Signal } from "@moq/signals";
+import * as datagram from "./datagram.ts";
 import { NotFound, StreamCode, StreamError, toStreamCode } from "./error.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
 import type { Route } from "./hop.ts";
@@ -13,7 +14,7 @@ import { Listing, listTracks, makeLister, type Tracks } from "./listing.ts";
 import * as Path from "./path.ts";
 import * as track from "./track.ts";
 import { untilAborted } from "./util/abort.ts";
-import { registerWire, trackOf } from "./wire.ts";
+import { registerWire, trackOf, wireOf } from "./wire.ts";
 
 export { Tracks, type TracksEvent } from "./listing.ts";
 
@@ -40,6 +41,10 @@ class Lookups {
 /** Reactive backing state shared by broadcast producers and consumers. */
 class BroadcastState {
 	requested = new Signal<track.Request[]>([]);
+	datagramRequested = new Signal<datagram.Request[]>([]);
+	datagramPending = new Set<datagram.Request>();
+	datagrams = new Map<string, datagram.Producer>();
+	datagramServed = false;
 	pending = new Set<track.Request>();
 	closed = new Once<null>();
 	// The tracks the broadcast lists, and the readers listing them.
@@ -61,6 +66,71 @@ class BroadcastState {
 	unheld = false;
 	// Run synchronously once the broadcast closes, before `closed` notifies its observers.
 	closers = new Set<() => void>();
+}
+
+// Datagram tracks never enter the stream listing or cache.
+function liveDatagrams(state: BroadcastState, name: string): datagram.Consumer | undefined {
+	const producer = state.datagrams.get(name);
+	if (!producer) return;
+	if (producer.closed.peek() !== undefined) {
+		state.datagrams.delete(name);
+		return;
+	}
+	return producer.consume();
+}
+
+function createDatagrams(state: BroadcastState, name: string, info: Partial<datagram.Info>): datagram.Producer {
+	if (state.closed.peek() !== undefined) throw new Error("broadcast is closed");
+	const queued = state.datagramRequested.peek().find((request) => request.name === name);
+	if (queued) {
+		state.datagramRequested.mutate((requests) => requests.splice(requests.indexOf(queued), 1));
+		return queued.accept(info);
+	}
+	const existing = state.datagrams.get(name);
+	if (existing?.closed.peek() === undefined && existing) throw new Error(`duplicate datagram track: ${name}`);
+	const producer = new datagram.Producer(name).accept(info);
+	state.datagrams.set(name, producer);
+	void producer.closed.then(() => {
+		if (state.datagrams.get(name) === producer) state.datagrams.delete(name);
+	});
+	return producer;
+}
+
+function datagrams(state: BroadcastState, name: string): datagram.Consumer {
+	if (state.closed.peek() !== undefined) throw new Error("broadcast is closed");
+	const existing = liveDatagrams(state, name);
+	if (existing) return existing;
+	const producer = new datagram.Producer(name);
+	const consumer = producer.consume();
+	if (!state.datagramServed) {
+		producer.abort(new NotFound(`datagram track ${name}`));
+		return consumer;
+	}
+	const request = hooks.datagramRequest(producer, state.datagramPending);
+	state.datagrams.set(name, producer);
+	state.datagramRequested.mutate((requests) => requests.push(request));
+	void producer.closed.then(() => {
+		state.datagramPending.delete(request);
+		if (state.datagrams.get(name) === producer) state.datagrams.delete(name);
+		state.datagramRequested.mutate((requests) => {
+			const index = requests.indexOf(request);
+			if (index !== -1) requests.splice(index, 1);
+		});
+	});
+	return consumer;
+}
+
+async function requestedDatagrams(state: BroadcastState): Promise<datagram.Request | undefined> {
+	state.datagramServed = true;
+	for (;;) {
+		const requests = state.datagramRequested.peek();
+		requests.sort((a, b) => (a.priority.peek() ?? -128) - (b.priority.peek() ?? -128));
+		const request = requests.pop();
+		if (request && request.closed.peek() === undefined) return request;
+		if (request) continue;
+		if (state.closed.peek() !== undefined) return;
+		await Signal.race(state.datagramRequested, state.closed);
+	}
 }
 
 function dequeueRequest(state: BroadcastState): track.Request | undefined {
@@ -96,6 +166,8 @@ function closeState(state: BroadcastState) {
 	if (state.closed.peek() !== undefined) return;
 	state.closed.set(null);
 	state.listing.close();
+	for (const request of state.datagramPending) request.reject(new StreamError(StreamCode.Cancel));
+	state.datagramRequested.set([]);
 	for (const request of state.pending)
 		request.reject(
 			new StreamError(StreamCode.Internal, {
@@ -321,6 +393,10 @@ export class Producer {
 			largest: (name) => largest(this.#state, name),
 			fetchGroup: (name, sequence, options) => fetchGroup(this.#state, name, sequence, options),
 			requested: () => requested(this.#state),
+			datagrams: (name) => datagrams(this.#state, name),
+			liveDatagrams: (name) => liveDatagrams(this.#state, name),
+			createDatagrams: (name, info) => createDatagrams(this.#state, name, info),
+			requestedDatagrams: () => requestedDatagrams(this.#state),
 			tracks: (owner) => listTracks(this.#state.listing, owner),
 			lister: () => makeLister(this.#state.listing),
 		});
@@ -392,6 +468,11 @@ export class Producer {
 		return producer;
 	}
 
+	/** Create a live datagram track in a namespace separate from stream tracks. */
+	createDatagrams(name: string, info: Partial<datagram.Info> = {}): datagram.Producer {
+		return createDatagrams(this.#state, name, info);
+	}
+
 	/**
 	 * Remove a statically inserted track, including a finished cached one, and stop listing it
 	 * at once.
@@ -457,6 +538,7 @@ export class Consumer {
 			// A standalone consumer is a wire layer's, which serves every track on demand.
 			this.#state = new BroadcastState();
 			this.#state.served = true;
+			this.#state.datagramServed = true;
 			this.#state.unheld = true;
 		}
 		this.#state.consumers++;
@@ -466,6 +548,10 @@ export class Consumer {
 			largest: (name) => largest(this.#state, name),
 			fetchGroup: (name, sequence, options) => fetchGroup(this.#state, name, sequence, options),
 			requested: () => requested(this.#state),
+			datagrams: (name) => datagrams(this.#state, name),
+			liveDatagrams: (name) => liveDatagrams(this.#state, name),
+			createDatagrams: (name, info) => createDatagrams(this.#state, name, info),
+			requestedDatagrams: () => requestedDatagrams(this.#state),
 			tracks: (owner) => this.#tracks(owner),
 			lister: () => makeLister(this.#state.listing),
 		});
@@ -544,6 +630,11 @@ export class Consumer {
 			instance: this.#instance,
 			unlisted: this.#unlisted,
 		} satisfies Shared as never;
+	}
+
+	/** Read a datagram track live from now, independently of any same-name stream track. */
+	datagrams(name: string): datagram.Consumer {
+		return wireOf(this).datagrams(name);
 	}
 
 	/** Get a lazy handle for a track on this broadcast. Repeat subscriptions dedupe onto one upstream subscription. */

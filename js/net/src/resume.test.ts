@@ -8,7 +8,7 @@ import type { Session as IetfSession } from "./ietf/session.ts";
 import { Subscriber as IetfSubscriber } from "./ietf/subscriber.ts";
 import { Version as IetfVersion } from "./ietf/version.ts";
 import * as Instance from "./instance.ts";
-import { hooks, MAX_DATAGRAMS } from "./internal.ts";
+import { hooks } from "./internal.ts";
 import type { Lister } from "./listing.ts";
 import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
@@ -866,103 +866,6 @@ test("a fetched group failing as it is handed out releases its route once", asyn
 	}
 });
 
-test("datagrams a new copy replays are handed out once", async () => {
-	const { a, b, swap, active, close } = await setup();
-	const ta = copy(a);
-	const tb = copy(b);
-	const sub = active.track("seq").subscribe();
-	ta.producer.appendDatagram(undefined, enc.encode("a0"));
-	expect(dec.decode((await sub.recvDatagram())?.payload)).toBe("a0");
-
-	tb.producer.appendDatagram(undefined, enc.encode("b0"));
-	await swap();
-	tb.producer.appendDatagram(undefined, enc.encode("b1"));
-	expect(dec.decode((await sub.recvDatagram())?.payload)).toBe("b1");
-
-	sub.close();
-	close();
-});
-
-test("a replacement delivers unseen datagrams below the newest sequence", async () => {
-	const clock = new Manual();
-	const installed = clock.install();
-	try {
-		const { a, b, swap, active, close } = await setup();
-		const ta = copy(a);
-		const tb = copy(b);
-		const sub = active.track("seq").subscribe({ delay: { max: Milli(100) } });
-		ta.producer.insertDatagram(10n, undefined, enc.encode("10"));
-		expect((await sub.recvDatagram())?.sequence).toBe(10n);
-		await swap();
-		tb.producer.insertDatagram(10n, undefined, enc.encode("10"));
-		tb.producer.insertDatagram(5n, undefined, enc.encode("5"));
-		const next = hooks.tryRecvDatagram(sub);
-		expect(next.kind).toBe("datagram");
-		if (next.kind === "datagram") expect(next.datagram.sequence).toBe(5n);
-		expect(hooks.tryRecvDatagram(sub).kind).toBe("idle");
-		sub.close();
-		close();
-	} finally {
-		installed.close();
-	}
-});
-
-test.each([0, 100])("datagram identities stay within the reader's %p ms budget", async (budget) => {
-	const clock = new Manual();
-	const installed = clock.install();
-	try {
-		const front = new Front();
-		const a = new BroadcastProducer();
-		const ta = copy(a);
-		front.serve(a.consume());
-		const sub = front.consumer.track("seq").subscribe({ delay: { max: Milli(budget) } });
-		const send = (sequence: number) => ta.producer.insertDatagram(BigInt(sequence), undefined, enc.encode("d"));
-		const recv = () => hooks.tryRecvDatagram(sub);
-		send(10);
-		expect(recv().kind).toBe("datagram");
-		await clock.advance(Nano(60_000_000_000));
-		send(10);
-		expect(recv().kind).toBe("idle");
-		send(5);
-		expect(recv().kind).toBe("datagram");
-		if (budget > 0) {
-			await clock.advance(Nano(budget * 500_000));
-			send(10);
-			expect(recv().kind).toBe("idle");
-			await clock.advance(Nano(budget * 500_000));
-		}
-		send(10);
-		expect(recv().kind).toBe("datagram");
-		sub.close();
-		front.consumer.close();
-		a.close();
-	} finally {
-		installed.close();
-	}
-});
-
-test("datagram identities are capped by the replay buffer", () => {
-	const front = new Front();
-	const a = new BroadcastProducer();
-	const ta = copy(a);
-	front.serve(a.consume());
-	// Superseded identities never expire within an hour, so only the cap bounds them.
-	const sub = front.consumer.track("seq").subscribe({ delay: { max: Milli(3_600_000) } });
-	const send = (sequence: number) => ta.producer.insertDatagram(BigInt(sequence), undefined, enc.encode("d"));
-	const recv = () => hooks.tryRecvDatagram(sub).kind;
-	for (let sequence = 0; sequence <= MAX_DATAGRAMS + 1; sequence++) {
-		send(sequence);
-		expect(recv()).toBe("datagram");
-	}
-	send(1);
-	expect(recv()).toBe("idle");
-	send(0);
-	expect(recv()).toBe("datagram");
-	sub.close();
-	front.consumer.close();
-	a.close();
-});
-
 test("a route that goes for good ends the track as its last copy does", async () => {
 	const { a, active, disposeA, request, close } = await setup();
 	const ta = copy(a);
@@ -1459,28 +1362,6 @@ for (const [field, first, second] of [
 	});
 }
 
-test("a datagram reader lets go of the copies a swap replaced", async () => {
-	const front = new Front();
-	const a = new BroadcastProducer();
-	const b = new BroadcastProducer();
-	const ta = copy(a);
-	copy(b);
-	front.serve(a.consume());
-	const sub = front.consumer.track("seq").subscribe();
-	expect(ta.producer.demand().wanted.peek()).toBeDefined();
-	front.serve(b.consume());
-	await settle();
-	// A read with nothing to deliver is the pass that lets go of a's copy.
-	void sub.recvDatagram();
-	await settle();
-	expect(ta.producer.demand().wanted.peek()).toBeUndefined();
-
-	sub.close();
-	front.consumer.close();
-	a.close();
-	b.close();
-});
-
 test("a failed group on a route whose replacement was refused ends with the refusal", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();
@@ -1557,48 +1438,6 @@ test("a failed group whose replacement cannot fetch ends with the failure, or co
 		a.close();
 		b.close();
 	}
-});
-
-test("draining groups to their end leaves buffered datagrams readable", async () => {
-	const front = new Front();
-	const a = new BroadcastProducer();
-	const ta = copy(a);
-	front.serve(a.consume());
-	const sub = front.consumer.track("seq").subscribe();
-	ta.write(0n);
-	ta.producer.appendDatagram(undefined, enc.encode("d"));
-	ta.producer.finish();
-	ta.producer.close();
-	expect(drain(sub)).toEqual([0n]);
-	expect(await sub.recvGroup()).toBeUndefined();
-	expect(dec.decode((await sub.recvDatagram())?.payload)).toBe("d");
-
-	sub.close();
-	front.consumer.close();
-	a.close();
-});
-
-test("a datagram read keeps a replaced copy a group reader still needs", async () => {
-	const front = new Front();
-	const a = new BroadcastProducer();
-	const b = new BroadcastProducer();
-	const ta = copy(a);
-	copy(b);
-	front.serve(a.consume());
-	const sub = front.consumer.track("seq").subscribe({ delay: { max: 10_000 as track.Delay["max"] } });
-	ta.write(0n);
-	expect(drain(sub)).toEqual([0n]);
-	ta.write(1n);
-
-	front.serve(b.consume());
-	await settle();
-	void sub.recvDatagram();
-	expect(drain(sub)).toEqual([1n]);
-
-	sub.close();
-	front.consumer.close();
-	a.close();
-	b.close();
 });
 
 test("a fetch never reads a replacement refused for its track properties", async () => {
@@ -2488,62 +2327,6 @@ test("a clean end waits for a group the replaced copy still carries", async () =
 	}
 });
 
-test.each([false, true])(
-	"a reader that asked for groups keeps a replaced copy's unread group across a datagram read (datagrams first: %p)",
-	async (datagramsFirst) => {
-		const front = new Front();
-		const a = new BroadcastProducer();
-		const b = new BroadcastProducer();
-		const ta = copy(a);
-		copy(b);
-		front.serve(a.consume());
-		const sub = front.consumer.track("seq").subscribe({ delay: { max: Milli(10_000) } });
-		expect(hooks.tryRecvGroup(sub, false).kind).toBe("idle");
-		expect(hooks.tryRecvDatagram(sub).kind).toBe("idle");
-		ta.write(0n);
-		front.serve(b.consume());
-		await settle();
-		if (datagramsFirst) expect(hooks.tryRecvDatagram(sub).kind).toBe("idle");
-		expect(drain(sub)).toEqual([0n]);
-
-		sub.close();
-		front.consumer.close();
-		a.close();
-		b.close();
-	},
-);
-
-test.each([Milli(100), Milli(3_600_000)])(
-	"a datagram reader keeps no replaced copy, whatever its budget (%p ms)",
-	async (maxDelay) => {
-		const front = new Front();
-		const sources: BroadcastProducer[] = [];
-		const copies: ReturnType<typeof copy>[] = [];
-		const sub = front.consumer.track("seq").subscribe({ delay: { max: maxDelay } });
-		try {
-			for (let sequence = 0n; sequence < 20n; sequence++) {
-				const source = new BroadcastProducer();
-				const held = copy(source);
-				sources.push(source);
-				copies.push(held);
-				front.serve(source.consume());
-				await settle();
-				held.write(sequence);
-				expect(hooks.tryRecvDatagram(sub).kind).toBe("idle");
-				await settle();
-				const subscribed = copies.filter((held) => held.producer.demand().wanted.peek() !== undefined);
-				expect(subscribed).toEqual([held]);
-			}
-			// Only the serving copy's group is left.
-			expect(drain(sub)).toEqual([19n]);
-		} finally {
-			sub.close();
-			front.consumer.close();
-			for (const source of sources) source.close();
-		}
-	},
-);
-
 test("a group-only reader of a finite track settles closed and lets go of its copy", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();
@@ -2606,28 +2389,6 @@ test("a group-only fork of a finite track settles closed and lets go of its copy
 	a.close();
 });
 
-test("the serving copy closing cleanly settles closed and leaves its datagrams readable", async () => {
-	const front = new Front();
-	const a = new BroadcastProducer();
-	const ta = copy(a);
-	front.serve(a.consume());
-	const sub = front.consumer.track("seq").subscribe();
-	ta.write(0n);
-	ta.producer.appendDatagram(undefined, enc.encode("d"));
-	ta.producer.finish();
-	ta.producer.close();
-	await settle();
-	expect(sub.closed.peek()).toBeNull();
-	expect(drain(sub)).toEqual([0n]);
-	expect(dec.decode((await sub.recvDatagram())?.payload)).toBe("d");
-	expect(await sub.recvDatagram()).toBeUndefined();
-	expect(await sub.recvGroup()).toBeUndefined();
-
-	sub.close();
-	front.consumer.close();
-	a.close();
-});
-
 test("an end a replaced copy declared holds across a swap", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();
@@ -2654,32 +2415,6 @@ test("an end a replaced copy declared holds across a swap", async () => {
 	// Refused, the reader holds no copy.
 	expect(ta.producer.demand().wanted.peek()).toBeUndefined();
 	expect(tb.producer.demand().wanted.peek()).toBeUndefined();
-
-	sub.close();
-	front.consumer.close();
-	a.close();
-	b.close();
-});
-
-test("an end a replaced copy declared holds once the copy is let go in the same turn", async () => {
-	const front = new Front();
-	const a = new BroadcastProducer();
-	const b = new BroadcastProducer();
-	const ta = copy(a);
-	const tb = copy(b);
-	front.serve(a.consume());
-	const sub = front.consumer.track("seq").subscribe();
-	front.serve(b.consume());
-	await settle();
-
-	// A datagram read lets go of the replaced copy before its end is reported.
-	ta.producer.finishAt({ group: 2n, frame: 0 });
-	expect(hooks.tryRecvDatagram(sub).kind).toBe("idle");
-	expect(hooks.subscriberEnd(sub)).toEqual({ group: 2n, frame: 0 });
-
-	tb.producer.finishAt({ group: 3n, frame: 0 });
-	await settle();
-	expect(sub.closed.peek()).toBeInstanceOf(Error);
 
 	sub.close();
 	front.consumer.close();
@@ -2891,29 +2626,6 @@ test.each([
 	},
 );
 
-test("a datagram below the group floor does not keep a finite track's copy", async () => {
-	const front = new Front();
-	const a = new BroadcastProducer();
-	const ta = copy(a);
-	front.serve(a.consume());
-	const sub = front.consumer.track("seq").subscribe();
-	ta.producer.appendDatagram(undefined, enc.encode("d"));
-	await settle();
-	// The floor passes the datagram: a datagram read would only discard it.
-	sub.withRange({ start: { included: 1n } });
-	ta.write(1n);
-	ta.producer.finishAt({ group: 2n, frame: 0 });
-	expect(drain(sub)).toEqual([1n]);
-	expect(await sub.recvGroup()).toBeUndefined();
-	await settle();
-	expect(sub.closed.peek()).toBeNull();
-	expect(ta.producer.demand().wanted.peek()).toBeUndefined();
-
-	sub.close();
-	front.consumer.close();
-	a.close();
-});
-
 test("a clean end keeps the serving copy while a group read from a replaced one may continue from it", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();
@@ -3046,34 +2758,6 @@ test.each(["handed out", "buffered"])("an end below a group another copy %s is r
 		tb.producer.finishAt({ group: 3n, frame: 0 });
 		await settle();
 		expect(() => sub.tryRecvGroup()).toThrow("changed its properties");
-		expect(sub.closed.peek()).toBeInstanceOf(Error);
-	} finally {
-		sub.close();
-		front.consumer.close();
-		a.close();
-		b.close();
-	}
-});
-
-test.each(["handed out", "buffered"])("an end below a datagram another copy %s is refused", async (seen) => {
-	const front = new Front();
-	const a = new BroadcastProducer();
-	const b = new BroadcastProducer();
-	const ta = copy(a);
-	const tb = copy(b);
-	front.serve(a.consume());
-	const sub = front.consumer.track("seq").subscribe();
-	try {
-		ta.producer.insertDatagram(5n, undefined, enc.encode("5"));
-		if (seen === "handed out") expect(hooks.tryRecvDatagram(sub).kind).toBe("datagram");
-		front.serve(b.consume());
-		await settle();
-		// The new route delivers an older datagram last, then ends the track before the old route's.
-		tb.producer.insertDatagram(2n, undefined, enc.encode("2"));
-		if (seen === "handed out") expect(hooks.tryRecvDatagram(sub).kind).toBe("datagram");
-		tb.producer.finishAt({ group: 3n, frame: 0 });
-		await settle();
-		expect(hooks.tryRecvDatagram(sub).kind).toBe("error");
 		expect(sub.closed.peek()).toBeInstanceOf(Error);
 	} finally {
 		sub.close();

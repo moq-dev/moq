@@ -442,7 +442,8 @@ datagrams and `audio` as streams are two independent tracks. Nothing on the
 wire says which kind a name is: the application knows from its catalog or by
 convention, so a broadcast's track listing never includes a datagram track. In
 Rust, `broadcast.create_datagrams(name, info)` publishes one and
-`broadcast.datagrams(name)` reads it.
+`broadcast.datagrams(name)` reads it. In JavaScript use
+`broadcast.createDatagrams(name, info)` and `broadcast.datagrams(name)`.
 
 A datagram subscription is live from when it starts: it has no ranges, order,
 or max delay, only a priority, which a subscriber can change. A datagram still

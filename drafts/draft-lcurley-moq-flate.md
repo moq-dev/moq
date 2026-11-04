@@ -53,7 +53,7 @@ Each subgroup is a separate DEFLATE stream: its object payloads share one window
 
 The application decides which subgroups a track uses; a consumer knows which to expect and decodes each one's objects in order.
 
-A datagram carries a group of one object, so it is a stream of its own: compressed alone, starting cold.
+Datagram tracks are never compressed.
 
 An object with no payload is skipped, neither advancing nor resetting the window.
 
@@ -77,7 +77,7 @@ The compression level is a publisher's choice; any conformant stream decodes.
 
 # Declaring Compression {#declare}
 The transport declares a track compressed, and gives each object's inflated size beside its compressed one.
-{{moql}} does both from moq-lite-07: a Compression codec id in TRACK_INFO, and an Inflated Size on each FRAME and datagram.
+{{moql}} does both from moq-lite-07: a Compression codec id in TRACK_INFO, and an Inflated Size on each FRAME.
 A consumer MUST NOT infer compression from the payload: raw DEFLATE has no magic number, so a wrong guess yields plausible garbage.
 
 A consumer MUST treat an object that inflates to more or less than its declared size as malformed, and abandon the subgroup.
@@ -109,7 +109,7 @@ Every Normal Object on a compressed track MUST carry it, including an empty payl
 A plain track or a status object MUST NOT carry it.
 It can appear in the mutable list or Immutable Properties, but MUST NOT appear more than once across them.
 The base Object Payload Length remains the size of the compressed bytes.
-The same rules apply to subgroup streams, FETCH streams, and datagrams.
+The same rules apply to subgroup streams and FETCH streams.
 
 A receiver MUST validate the declared size against the same resource limits as an uncompressed payload before admitting it, and MUST NOT allocate a buffer solely from that declaration.
 Incremental inflate output is charged to the receiver's cache budget and shared across its plain readers.
@@ -150,9 +150,9 @@ It also requests these entries in the MOQ Properties registry, outside the appli
 ## Since draft-lcurley-moq-flate-00 (in progress)
 
 - Negotiated FLATE signaling adds COMPRESSION and INFLATED_SIZE properties to MoQ Transport draft-18 and later; sealed declarations are forwarded unchanged or refused when incompatible.
-- Compression is declared by the transport instead of the application: {{moql}} carries a Compression codec in TRACK_INFO and each object's Inflated Size on FRAME and datagrams.
+- Compression is declared by the transport instead of the application: {{moql}} carries a Compression codec in TRACK_INFO and each object's Inflated Size on FRAME.
 - A relay inflates for a peer whose transport does not declare compression.
-- A datagram is compressed alone, as a stream of its own.
+- Datagram tracks are not compressed and carry no Inflated Size.
 - A consumer rejects an object that inflates to other than its declared size, or that ends in a final block.
 
 # Acknowledgments

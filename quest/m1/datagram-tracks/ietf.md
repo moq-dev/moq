@@ -37,7 +37,3 @@ NOT_FOUND, and a stream track never sends one. Restore what it removed:
 - the OBJECT_DATAGRAM sentence in `doc/concept/standard.md`.
 
 Public API: none beyond the model. Wire: no format change.
-
-## Required
-
-- [JS datagram tracks](/quest/m1/datagram-tracks/js.md) - the JS datagram types this maps

@@ -29,7 +29,6 @@ import { SEGMENT_BYTES } from "../util/limits.ts";
 import { Budget } from "../util/yield.ts";
 import * as Varint from "../varint.ts";
 import { type AnnounceBroadcast, AnnounceInit, AnnounceOk, encodeAnnounceBroadcast } from "./announce.ts";
-import { Datagram as DatagramMessage } from "./datagram.ts";
 import { Group } from "./group.ts";
 import { Probe } from "./probe.ts";
 import { ProbeLevel, Setup } from "./setup.ts";
@@ -1113,41 +1112,6 @@ async function answerTrackInfo(
 	for (const chunk of chunks) stream.inbound.enqueue(chunk);
 	stream.inbound.close();
 }
-
-test.each([Version.DRAFT_06, Version.DRAFT_07])(
-	"lite %s: oversized incoming datagrams are dropped",
-	async (version) => {
-		const installed = new Manual().install();
-		const { quic, opened } = fakeSession();
-		const incoming = new TransformStream<Uint8Array, Uint8Array>();
-		Object.defineProperty(quic, "datagrams", { value: { readable: incoming.readable, maxDatagramSize: 1400 } });
-		const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
-		const track = subscriber.consume(Path.from("room")).track("video").subscribe();
-		const writer = incoming.writable.getWriter();
-		const receiving = subscriber.runDatagrams();
-		try {
-			await answerTrackInfo(await opened(0), version, 1000);
-			const request = await opened(1);
-			await request.reading;
-			await respond(request, version, [{ start: new SubscribeStart([0n]) }]);
-			const received = track.recvDatagram();
-			if (version === Version.DRAFT_07) {
-				await writer.write(new Uint8Array([1]));
-				await writer.write(new Uint8Array([1, ...new Uint8Array(1199).fill(0xff)]));
-			}
-			const size = version === Version.DRAFT_07 ? 1196 : 1197;
-			await writer.write(new DatagramMessage(0n, 0n, 0, new Uint8Array(size + 1)).encode(version));
-			await writer.write(new DatagramMessage(0n, 1n, 1, new Uint8Array(size)).encode(version));
-			expect((await received)?.sequence).toBe(1n);
-		} finally {
-			await writer.close();
-			await receiving;
-			track.close();
-			subscriber.close();
-			installed.close();
-		}
-	},
-);
 
 function expectCut(err: unknown, cause: Error | undefined) {
 	if (cause) {

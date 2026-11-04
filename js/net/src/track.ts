@@ -1,12 +1,11 @@
 /**
- * Track role handles: a live stream of groups (and best-effort datagrams) within a broadcast.
+ * Track role handles: a live stream of groups within a broadcast.
  *
  * @module
  */
 
 import { Instant, Milli, Nano, now, sleepUntil } from "@moq/clock";
 import { type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
-import type { Datagram } from "./datagram.ts";
 import { Delivered } from "./delivered.ts";
 import {
 	GroupTooLarge,
@@ -18,7 +17,6 @@ import {
 	toStreamCode,
 } from "./error.ts";
 import { type Asker, FillState, type Requests, requestsOf } from "./fill.ts";
-import { datagramSlice, type Stored, sliceView } from "./flate/group.ts";
 import { type Frame, type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import type { IetfVersion } from "./ietf/version.ts";
 import {
@@ -30,11 +28,9 @@ import {
 	insertDrop,
 	insertRun,
 	type Land,
-	MAX_DATAGRAMS,
 	maxDelayOf,
 	NO_MAX_DELAY,
 	type Recv,
-	type RecvDatagram,
 	type ResumeSource,
 	type Run,
 	removeRun,
@@ -62,7 +58,6 @@ import {
 } from "./window.ts";
 import { type Broadcast as BroadcastWire, registerTrackConsumer } from "./wire.ts";
 
-export type { Datagram } from "./datagram.ts";
 export { Fill, Requests } from "./fill.ts";
 
 // The group a non-blocking read takes, skipping drops and throwing the track's error;
@@ -86,13 +81,6 @@ const PRUNE_SLICES = 8;
 // The unset priority, the midpoint of the signed range: moq-lite carries it as 128 and
 // moq-transport as 127, one urgency on both.
 const DEFAULT_PRIORITY = 0;
-
-/**
- * Sanity cap on a datagram payload: the QUIC DATAGRAM frame ceiling. The real limit is
- * per-hop (the negotiated transport datagram size minus a small header) and oversize
- * datagrams are dropped there; a payload above this cap could never fit anywhere.
- */
-const MAX_DATAGRAM_BYTES = 65535;
 
 // A group ended with one of these is a deliberate hole, never a cut readers see: cache policy,
 // a reader that fell behind, or a cancel such as a relay's own unsubscribe. Mirrors Rust's
@@ -143,7 +131,7 @@ export interface Info {
 	compress?: boolean;
 	/**
 	 * Units per second for this track's frame timestamps, or omitted (`undefined` or `null`,
-	 * which mean the same) for an untimed track, whose frames and datagrams carry no timestamp.
+	 * which mean the same) for an untimed track, whose frames carry no timestamp.
 	 *
 	 * There is no default: a timed track declares its scale, such as {@link Timescale | Timescale.MILLI},
 	 * or {@link Timescale | Timescale.MICRO} for media that needs sub-millisecond timing. Reported in
@@ -259,7 +247,7 @@ export interface Groups {
  * one that has, reading nothing of its range meanwhile. An end settles once a group starting
  * after it is known and every sequence below that one is accounted for; until then reads stop
  * at the first held group that may still start, so at most that one group past the end is read
- * before its first frame shows where it starts. A datagram is judged by its own timestamp. A time anchor on an untimed track is refused
+ * before its first frame shows where it starts. A time anchor on an untimed track is refused
  * with {@link TimestampMismatch}, and on a moq-transport copy, whose timestamps may rewind.
  *
  * Older moq-lite versions carry only absolute anchors, the live start, and the oldest start,
@@ -659,15 +647,12 @@ class TrackState {
 	// Bumped when a wire subscription declares or resolves where its live feed starts, so a
 	// publisher holding its first group for that answer wakes.
 	startChanged = new Signal(0);
-	/** Best-effort datagram channel, parallel to {@link groups}; a bounded send buffer per subscriber. */
-	datagrams = new Signal<Datagram[]>([]);
 	latest?: bigint;
-	// One past the highest group or datagram received, including evicted content.
+	// One past the highest group received, including evicted content.
 	received = new Signal(0n);
 	/**
 	 * The exclusive end, declared by {@link Producer.finishAt} or stamped by a clean close
-	 * at the head of the sequence after the highest produced. Groups and datagrams share
-	 * the namespace, so it can sit past `latest + 1` (which only tracks groups). Mirrors
+	 * at the head of the sequence after the highest produced. Mirrors
 	 * the Rust `end`.
 	 */
 	end = new Signal<Position | undefined>(undefined);
@@ -684,7 +669,7 @@ class TrackState {
 	update: Signal<Subscription | undefined>;
 	/** Resolved once the producer commits the immutable properties. */
 	info = new Signal<Info | undefined>(undefined);
-	/** Newest group head, datagram, frame, or location reported by the publisher. */
+	/** Newest group head, frame, or location reported by the publisher. */
 	largest = new Signal<Position | undefined>(undefined);
 	// The group {@link largest} first named, where a relative anchor resolved before any group
 	// existed starts.
@@ -777,8 +762,6 @@ let goneAt: (producer: Producer, sequence: bigint) => bigint | undefined;
 let objectLargest: (producer: Producer) => Position | undefined;
 // The fills serving the producer's misses; assigned in its static block.
 let fillsOf: (producer: Producer) => FillState;
-// The sequences of the newest datagrams the producer holds; assigned in its static block.
-let heldDatagrams: (producer: Producer) => readonly bigint[];
 
 // The sequence-order cursor lives inside `Subscriber` (it shares the group buffer and the
 // drift anchor with the arrival cursor), so `Ordered` reaches it through this bridge,
@@ -792,7 +775,6 @@ let ordered_: {
 	readString(subscriber: Subscriber): Promise<string | undefined>;
 	readJson(subscriber: Subscriber): Promise<unknown | undefined>;
 	readBool(subscriber: Subscriber): Promise<boolean | undefined>;
-	recvDatagram(subscriber: Subscriber): Promise<Datagram | undefined>;
 };
 
 // Constructs a Demand from within this module; assigned in the class's static block.
@@ -829,8 +811,7 @@ export class Demand {
 	 * The group subscribers want: `undefined` while nobody subscribes, otherwise the sequence
 	 * the next group should have at least. A publisher opens a group whenever it passes its
 	 * largest. The first subscriber of a track with no group wants `0`, and a join judged by
-	 * {@link Info.refresh} wants the next free sequence until a group lands there, so a
-	 * datagram taking it moves the ask past. It never goes back. Watch it
+	 * {@link Info.refresh} wants the next free sequence until a group lands there. It never goes back. Watch it
 	 * (`effect.get` / `.peek()`) to follow demand.
 	 */
 	get wanted(): Getter<bigint | undefined> {
@@ -871,7 +852,7 @@ export class Producer {
 	// The producer's own state is the source of truth (info/closed); subscribers
 	// read mirrored sinks, never this state directly.
 	#state = new TrackState();
-	// One past the highest group or datagram this producer received, like the Rust
+	// One past the highest group this producer received, like the Rust
 	// `max_sequence`, and where the next append lands.
 	#received = 0n;
 	#subscribing = new Signal(false);
@@ -909,12 +890,10 @@ export class Producer {
 	// The lowest group they want while no refresh is pending, never lowered.
 	#floor = 0n;
 	// A join over the refresh ratio asked for a group past every sequence written, and none
-	// has landed yet. Read against `#received` rather than stored as a number, so a datagram
-	// taking the next sequence can never leave the ask behind.
+	// has landed yet.
 	#refresh = false;
 	#demand: Demand;
-	// The largest group's content may still grow: it has not closed cleanly, and it is not a
-	// datagram. An aborted one stays open, since it can be recreated.
+	// The largest group may still grow until it closes cleanly; an aborted one can be recreated.
 	#largestOpen = false;
 	// Only real objects or upstream metadata advance this, never the head of an empty group.
 	#objectLargest?: Position;
@@ -930,11 +909,7 @@ export class Producer {
 	#subscribed = false;
 	// The misses its readers asked of a {@link Requests} handle.
 	#fills: FillState;
-	// The sequences of the newest datagrams, as many as a reader buffers: the track's own record
-	// that a datagram took them, like the Rust track's datagram buffer, which a reader reading its
-	// copy does not empty. A fill never asks for one.
-	#datagramSequences: bigint[] = [];
-	// The sequences the live feed delivered, as a group or a datagram: what a pending tail is
+	// The sequences the live feed delivered, as a group: what a pending tail is
 	// judged by. Eviction never touches it. A gap folds away a subscription's grace after a
 	// later arrival opened it, as the session's tail does, so this holds only the gaps still
 	// worth waiting for.
@@ -982,7 +957,6 @@ export class Producer {
 			producer.#subscribed = true;
 		};
 		hooks.receiveGroup = (producer, { sequence, start }) => producer.#createGroup(sequence, start);
-		hooks.writeDatagram = (producer, datagram, inflated) => producer.#insertDatagram(datagram, inflated);
 		sourceStart = (producer) => producer.#served && producer.#feedStart();
 		startsOf = (producer) => producer.#bounds;
 		goneAt = (producer, sequence) => {
@@ -1014,7 +988,6 @@ export class Producer {
 		hooks.reportedGroup = (producer, group) => producer.#advanceLargest({ group, frame: 0 });
 		objectLargest = (producer) => producer.#objectLargest;
 		fillsOf = (producer) => producer.#fills;
-		heldDatagrams = (producer) => producer.#datagramSequences;
 		cachedHolds = (producer, sequence) => {
 			const entry = producer.#cached.get(sequence);
 			return entry !== undefined && !(entry.group.closed.peek() instanceof Error);
@@ -1173,34 +1146,13 @@ export class Producer {
 				hooks.bindGroupTimed(group, resolved);
 				hooks.bindGroupCompression(group, resolved.compress ?? false);
 			}
-			for (const sink of this.#sinks) {
-				for (const datagram of sink.datagrams.peek()) {
-					rescale(resolved, datagram.timestamp);
-				}
-			}
 		} catch (err) {
 			this.abort(err instanceof Error ? err : new Error(String(err)));
 			throw err;
 		}
 		this.#state.info.set(resolved);
 		// Propagate to any sink handed out before accept (the on-demand path).
-		const compressed = new Map<Datagram, Stored>();
-		for (const sink of this.#sinks) {
-			if (resolved.compress) {
-				sink.datagrams.mutate((datagrams) => {
-					for (let index = 0; index < datagrams.length; index++) {
-						const { sequence, timestamp, payload } = datagrams[index];
-						let slice = compressed.get(datagrams[index]);
-						if (!slice) {
-							slice = datagramSlice(payload);
-							compressed.set(datagrams[index], slice);
-						}
-						datagrams[index] = Object.assign(sliceView(timestamp, slice), { sequence });
-					}
-				});
-			}
-			sink.info.set(resolved);
-		}
+		for (const sink of this.#sinks) sink.info.set(resolved);
 		this.#updateSubscription();
 		return this;
 	}
@@ -1487,7 +1439,7 @@ export class Producer {
 		this.#advanceLargest(largest);
 	}
 
-	/** The track's largest location: its newest group or datagram at the newest frame, or undefined before any. */
+	/** The track's largest location: its newest group at the newest frame, or undefined before any. */
 	largest(): Position | undefined {
 		return this.#state.largest.peek();
 	}
@@ -1645,12 +1597,6 @@ export class Producer {
 		}
 	}
 
-	// Refuse a datagram whose timedness disagrees with this track's.
-	#checkDatagram(timestamp: Timestamp | undefined): void {
-		const info = this.#state.info.peek();
-		if (info) rescale(info, timestamp);
-	}
-
 	// Refuse a write once the track is closed, or at or past its declared end.
 	#writable(sequence: bigint): void {
 		if (this.#state.closed.peek() !== undefined) throw new Error("track is closed");
@@ -1726,87 +1672,13 @@ export class Producer {
 		return info?.unchecked === true || info?.ietf !== undefined;
 	}
 
-	// Fan a datagram out to every live subscriber, dropping the oldest once the ring is full.
-	// Late subscribers do NOT replay old datagrams (best-effort, unlike the group cache). A
-	// compressed track's rings share only `slice`: each holds its own lazy view of it.
-	#publishDatagram(datagram: Datagram, slice?: Stored): void {
-		this.#settle();
-		const { sequence, timestamp } = datagram;
-		this.#advanceObject({ group: sequence, frame: 0 });
-		this.#advance(sequence, false);
-		this.#arrive(sequence);
-		this.#finishLargest(sequence);
-		if (this.#datagramSequences.length === MAX_DATAGRAMS) this.#datagramSequences.shift();
-		this.#datagramSequences.push(sequence);
-		for (const sink of this.#sinks) {
-			sink.received.set(this.#received);
-			const queued = slice ? Object.assign(sliceView(timestamp, slice), { sequence }) : datagram;
-			sink.datagrams.mutate((list) => {
-				if (list.length === MAX_DATAGRAMS) list.shift();
-				list.push(queued);
-			});
-		}
-	}
-
-	/**
-	 * Append a datagram with the next sequence number, returning the assigned sequence.
-	 *
-	 * A datagram is delivered best-effort over a single QUIC datagram, parallel to the track's
-	 * groups but drawing from the same sequence namespace (interleaving with {@link appendGroup}
-	 * never reuses a number). The payload must fit the negotiated transport datagram size minus
-	 * a small header; an oversize payload is dropped at each hop (there is no group fallback), so
-	 * keep datagram payloads small (e.g. a single audio frame). Datagrams are never delivered
-	 * over stream-only transports (the WebSocket fallback). A payload over
-	 * 65535 bytes (the QUIC datagram frame ceiling) throws. An origin publisher uses this; a
-	 * relay preserving upstream numbering uses {@link insertDatagram}.
-	 *
-	 * Pass `undefined` for the timestamp on an untimed track; a timestamp whose presence
-	 * disagrees with the track's {@link Info.timescale} throws {@link TimestampMismatch}.
-	 */
-	appendDatagram(timestamp: Timestamp | undefined, payload: Uint8Array): bigint {
-		const sequence = this.#nextSequence();
-		if (payload.byteLength > MAX_DATAGRAM_BYTES) throw new Error("datagram payload too large");
-		this.#checkDatagram(timestamp);
-
-		this.#insertDatagram({ sequence, timestamp, payload });
-		return sequence;
-	}
-
-	/**
-	 * Insert a datagram with an explicit sequence number.
-	 *
-	 * Preserves the supplied sequence (later appends continue past it) so a relay can
-	 * forward a datagram without renumbering it. The size and timestamp rules of
-	 * {@link appendDatagram} apply. Most origin publishers want {@link appendDatagram} instead.
-	 */
-	insertDatagram(sequence: bigint, timestamp: Timestamp | undefined, payload: Uint8Array) {
-		this.#insertDatagram({ sequence, timestamp, payload });
-	}
-
-	#insertDatagram(datagram: Datagram, inflated?: number): void {
-		const { sequence, timestamp, payload } = datagram;
-		checkSequence(sequence);
-		this.#writable(sequence);
-		this.#checkDatagram(timestamp);
-		if (payload.length > MAX_DATAGRAM_BYTES || (inflated ?? 0) > MAX_DATAGRAM_BYTES)
-			throw new Error("datagram payload too large");
-		if (
-			inflated !== undefined &&
-			(!Number.isSafeInteger(inflated) || inflated < 0 || !this.#state.info.peek()?.compress)
-		)
-			throw new ProtocolViolation("unexpected inflated datagram size");
-		// A bad best-effort datagram is dropped on arrival, before any reader receives it.
-		const slice = this.#state.info.peek()?.compress ? datagramSlice(payload, inflated) : undefined;
-		this.#publishDatagram(datagram, slice);
-	}
-
 	/**
 	 * Declare the track's exclusive end, possibly ahead of the live edge, mirroring the Rust
 	 * `finish_at`.
 	 *
 	 * `end` is the first position that will never be produced: a track whose last group is
 	 * 89 finishes at `{ group: 90, frame: 0 }`, and `{ group: 89, frame: 5 }` also caps group
-	 * 89 at frames 0 to 4. Groups, frames, and datagrams below it are still accepted; anything
+	 * 89 at frames 0 to 4. Groups and frames below it are still accepted; anything
 	 * at or past it is refused. Unlike {@link close} it is not terminal: call `close()` once
 	 * the remaining groups are written. Readers end once the live edge reaches the end's
 	 * group, independently of closure. Throws if the track is closed, already has an end, or
@@ -1880,8 +1752,8 @@ export class Producer {
 	}
 
 	// Whether the pending tail misses a sequence from where the feed starts up to `final`: one
-	// no live group or datagram delivered, in a gap younger than the grace. Judged by the
-	// arrivals, not the cache, so an evicted group or a datagram counts as delivered.
+	// no live group delivered, in a gap younger than the grace. Judged by the
+	// arrivals, not the cache, so an evicted group counts as delivered.
 	//
 	// The feed starts at the declared start while the demand keeps the floor its SUBSCRIBE asked
 	// for, since an update gets no fresh START: a moved floor stands on its own, and moving
@@ -1925,7 +1797,7 @@ export class Producer {
 		this.#endLargest();
 	}
 
-	// Group `sequence` holds every frame it will have: it closed cleanly, or it is a datagram.
+	// Group `sequence` holds every frame it will have: it closed cleanly, its stream finished.
 	// A group name fixes its content, so no legal write raises the largest past it.
 	#finishLargest(sequence: bigint): void {
 		if (this.#state.largest.peek()?.group === sequence) this.#largestOpen = false;
@@ -2107,7 +1979,6 @@ export class Subscriber {
 	// Which cursor owns this subscription. Both cursors draw from one buffer, so the
 	// first group read commits the track to arrival order and {@link ordered} commits
 	// it to sequence order; whichever wins is the only one allowed from here on.
-	// Datagrams are a separate cursor and never commit.
 	#mode?: "arrival" | "ordered";
 	// What this cursor reports as drops: sequences given up and not reported yet,
 	// the track's drops last folded in, and every sequence already reported. Drops are
@@ -2615,16 +2486,12 @@ export class Subscriber {
 			const asker = this.#askerOf();
 			this.#clipAsked();
 			const timeline = this.#state.timeline;
-			// A datagram the track still holds took its sequence, so no group is missed there, as
-			// the Rust judge skips its track's datagram buffer; the Rust fetch names it
-			// `NotFetchable`.
 			const gone = [...this.#state.drops.peek()];
 			// Reordered streams still owed by the live feed are not cache misses.
 			for (const run of owedRuns(producer, start, end)) {
 				insertRun(gone, run.start, run.end);
 				if (run.folds !== undefined) this.#wakeAt(run.folds);
 			}
-			for (const sequence of heldDatagrams(producer)) insertRun(gone, sequence, sequence + 1n);
 			for (const run of this.#wants(
 				start,
 				min(end, max(this.#state.received.peek(), (fillEdge(producer) ?? -1n) + 1n)),
@@ -2667,14 +2534,12 @@ export class Subscriber {
 	}
 
 	// Ask a fill for a fetch's group at once, written yet or not, as the Rust `fetch_group` queues
-	// one; a group the live feed writes meanwhile answers it. `false` with no handler to ask, or
-	// for a sequence a buffered datagram took; `"pending"` until the track is accepted.
+	// one; a group the live feed writes meanwhile answers it. `false` with no handler to ask; `"pending"` until the track is accepted.
 	#askFetch(sequence: bigint): boolean | "pending" {
 		const producer = this.#state.producer;
 		if (!producer) return false;
 		if (this.#state.info.peek() === undefined && this.#state.closed.peek() === undefined) return "pending";
 		if (cachedHolds(producer, sequence)) return true;
-		if (heldDatagrams(producer).includes(sequence)) return false;
 		// Joins a fill already bringing it, handler or not; asks a new one only while one is open.
 		const asked = fillsOf(producer).ask(sequence, sequence + 1n, this.#askerOf());
 		if (asked.length === 0) return false;
@@ -2846,23 +2711,8 @@ export class Subscriber {
 		hooks.unreport = (subscriber, start, end) => {
 			subscriber.#reported = removeRun(subscriber.#reported, start, end);
 		};
-		hooks.tryRecvDatagram = (subscriber) => subscriber.#tryDatagram();
 		hooks.deliveredRuns = (subscriber) => subscriber.#delivered.runs;
 		hooks.handedOut = (subscriber, sequence) => subscriber.#delivered.has(sequence);
-		hooks.datagramChanged = (subscriber, fn) => {
-			if (subscriber.#resume) return subscriber.#groupChanged(fn);
-			const state = subscriber.#state;
-			const dispose = [
-				state.datagrams.changed(fn),
-				state.closed.changed(fn),
-				state.end.changed(fn),
-				state.received.changed(fn),
-				state.owed.changed(fn),
-			];
-			return () => {
-				for (const close of dispose) close();
-			};
-		};
 		hooks.hasUnreadGroup = (subscriber, start, end, delivered) =>
 			subscriber.#state.groups
 				.peek()
@@ -2873,24 +2723,9 @@ export class Subscriber {
 						!delivered.has(group.sequence) &&
 						!(group.closed.peek() instanceof Error),
 				);
-		hooks.spent = (subscriber, start, end, delivered) => {
-			const state = subscriber.#state;
-			// A datagram outside the cursor is gone for good, as a read would discard it.
-			const cursor = subscriber.#cursor.peek();
-			const readable = state.datagrams
-				.peek()
-				.some(
-					(datagram) =>
-						datagram.sequence >= cursor.start &&
-						(cursor.end === undefined || datagram.sequence < cursor.end) &&
-						subscriber.#window.admitsDatagram(datagram.sequence, datagram.timestamp),
-				);
-			return (
-				(state.closed.peek() !== undefined || subscriber.#complete()) &&
-				!readable &&
-				!hooks.hasUnreadGroup(subscriber, start, end, delivered)
-			);
-		};
+		hooks.spent = (subscriber, start, end, delivered) =>
+			(subscriber.#state.closed.peek() !== undefined || subscriber.#complete()) &&
+			!hooks.hasUnreadGroup(subscriber, start, end, delivered);
 		hooks.staleAt = (subscriber, sequence) => {
 			const held: Superseded = {};
 			return {
@@ -2985,8 +2820,6 @@ export class Subscriber {
 			readString: (subscriber) => subscriber.#readString(),
 			readJson: (subscriber) => subscriber.#readJson(),
 			readBool: (subscriber) => subscriber.#readBool(),
-			// Unordered either way, so both handles reach the same cursor.
-			recvDatagram: (subscriber) => subscriber.#recvDatagram(),
 		};
 	}
 
@@ -3042,7 +2875,7 @@ export class Subscriber {
 	 * The largest location within {@link withRange}: the current one at first, then each newer
 	 * one (skipping any in between), and `undefined` once the track ends.
 	 *
-	 * The largest is the track's newest group or datagram at the newest frame (0 while empty), as
+	 * The largest is the track's newest group at the newest frame (0 while empty), as
 	 * the publisher reported it and its feed delivered since, so it can name a frame before its
 	 * group arrives. A largest past the cap or below the floor reports nothing: the cache does not
 	 * stand in for it, so a cap moved below the largest stays pending. Moving the bounds wakes a
@@ -3407,12 +3240,7 @@ export class Subscriber {
 			this.#state.owed.changed(fn),
 		];
 		if (this.#state.waitingOrdered)
-			dispose.push(
-				this.#state.timelineChanged.changed(fn),
-				this.#wall.revision.changed(fn),
-				// A datagram shares the sequence namespace, so it can fill the owed hole.
-				this.#state.datagrams.changed(fn),
-			);
+			dispose.push(this.#state.timelineChanged.changed(fn), this.#wall.revision.changed(fn));
 		// A bounded window ends once the feed stops owing its last hole, which only time decides,
 		// and a fill's hole stops holding a read once the budget convicts it.
 		else if (this.#window.end() !== undefined || this.#fillWait) dispose.push(this.#wall.revision.changed(fn));
@@ -3437,77 +3265,6 @@ export class Subscriber {
 			() => this.#tryRecvGroup(),
 			() => this.#ended(),
 		);
-	}
-
-	/**
-	 * Receive the next datagram in arrival order.
-	 *
-	 * Datagrams are a separate best-effort channel from groups (see
-	 * {@link Producer.appendDatagram}); they share only the sequence namespace. Those outside
-	 * the group range are skipped. A consumer that falls too far behind silently loses the
-	 * oldest datagrams. Read this alongside
-	 * {@link recvGroup} (e.g. in a separate loop) to receive both channels concurrently.
-	 * The two cursors are independent: a datagram never moves the group cursor.
-	 */
-	async recvDatagram(): Promise<Datagram | undefined> {
-		this.#live();
-		return this.#recvDatagram();
-	}
-
-	// The datagram cursor, reachable from either handle: unordered by construction, so the
-	// choice of group order says nothing about it.
-	async #recvDatagram(): Promise<Datagram | undefined> {
-		for (;;) {
-			const recv = this.#tryDatagram();
-			switch (recv.kind) {
-				case "datagram":
-					return recv.datagram;
-				case "done":
-					return this.#ended();
-				case "error":
-					throw recv.error;
-			}
-			if (this.#resume) await this.#wait();
-			else
-				await Signal.race(
-					this.#state.datagrams,
-					// Either may refuse the ranges, with no datagram arriving to say so.
-					this.#state.info,
-					this.#state.dropsAnchors,
-					this.#state.closed,
-					this.#state.end,
-					this.#state.received,
-					this.#state.owed,
-				);
-		}
-	}
-
-	// The synchronous half of #recvDatagram.
-	#tryDatagram(): RecvDatagram {
-		const closed = this.#state.closed.peek();
-		if (this.#resume && closed instanceof Error) return { kind: "error", error: closed };
-		// The group range bounds datagrams too, judged when each is read. One outside it is
-		// gone for good: nothing holds it for a later raise, unlike a group past the cap.
-		const refused = this.#settle();
-		if (refused) return { kind: "error", error: refused };
-		const { start, end } = this.#cursor.peek();
-		const inRange = (datagram: Datagram) =>
-			datagram.sequence >= start &&
-			(end === undefined || datagram.sequence < end) &&
-			this.#window.admitsDatagram(datagram.sequence, datagram.timestamp);
-		if (this.#resume) {
-			for (;;) {
-				const recv = this.#resume.tryDatagram(this.#delivered);
-				if (recv.kind !== "datagram" || inRange(recv.datagram)) return recv;
-			}
-		}
-		const datagrams = this.#state.datagrams.peek();
-		for (let datagram = datagrams.shift(); datagram; datagram = datagrams.shift()) {
-			if (inRange(datagram)) return { kind: "datagram", datagram };
-		}
-		if (closed instanceof Error) return { kind: "error", error: closed };
-		if (closed !== undefined || this.#complete()) return { kind: "done" };
-		return { kind: "idle" };
 	}
 
 	// The sequence cursor behind {@link Ordered}, which owns the only public door to it.
@@ -3721,11 +3478,9 @@ export class Subscriber {
 	 *
 	 * Both cursors draw from the same buffer, so a track is read one way or the other: this
 	 * hands the subscription to the returned {@link Ordered} and leaves this handle inert.
-	 * {@link recvGroup} and {@link recvDatagram} throw afterwards. Throws once a
+	 * {@link recvGroup} throw afterwards. Throws once a
 	 * {@link recvGroup} call has already committed the track to arrival order.
 	 *
-	 * Datagrams come along: they are a separate cursor either way, so the choice of group
-	 * order says nothing about them, and reading them commits nothing.
 	 */
 	ordered(): Ordered {
 		if (this.#mode === "ordered") throw new Error("track is already read in sequence order");
@@ -3884,18 +3639,5 @@ export class Ordered {
 	/** Read the next frame and decode it as a one-byte boolean, throwing on a malformed frame. */
 	readBool(): Promise<boolean | undefined> {
 		return ordered_.readBool(this.#subscriber);
-	}
-
-	/**
-	 * Receive the next datagram in arrival order.
-	 *
-	 * Datagrams are a separate best-effort channel from groups (see
-	 * {@link Producer.appendDatagram}); they share only the sequence namespace, and
-	 * neither cursor moves the other. Unordered by construction, so this behaves
-	 * identically on either handle; it is here so a track carrying both channels needs
-	 * one subscription rather than two.
-	 */
-	recvDatagram(): Promise<Datagram | undefined> {
-		return ordered_.recvDatagram(this.#subscriber);
 	}
 }

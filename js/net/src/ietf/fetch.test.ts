@@ -567,19 +567,6 @@ test("a cancelled or unauthorized FETCH withdraws its unanswered history fill", 
 	}
 });
 
-// Datagrams are never cached, so a FETCH reaching one finds no group there.
-test("a FETCH of a datagram is refused", async () => {
-	for (const version of VERSIONS) {
-		using fx = serve(version);
-		publishPairs(fx.track, 3);
-		expect(fx.track.appendDatagram(new Timestamp(0, Timescale.MILLI), new Uint8Array([1]))).toBe(3n);
-		writeGroup(fx.track, 4n, ["4-0"]);
-
-		const only = new Fetch({ requestId: FETCH_ID, type: range(version, at(3, 0), at(3, 0)) });
-		expect(refused(await fetch(fx, only))).toBe(DOES_NOT_EXIST);
-	}
-});
-
 // A filter other than a bounded absolute one resolves against Largest Object.
 test("draft-22: a FETCH filter resolves against Largest Object", async () => {
 	const cases: [Filter.Filter, number[] | number][] = [

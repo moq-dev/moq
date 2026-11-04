@@ -8,6 +8,7 @@ export const StreamId = {
 	Track: 6,
 	Auth: 7,
 	Tracks: 8,
+	Datagrams: 9,
 	ClientCompat: 0x20,
 	ServerCompat: 0x21,
 } as const;

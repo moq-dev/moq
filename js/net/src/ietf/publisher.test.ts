@@ -25,7 +25,6 @@ import type { Producer as TrackProducer } from "../track.ts";
 import { unwanted } from "../util/demand.ts";
 import { wireOf } from "../wire.ts";
 import type * as Cluster from "./cluster.ts";
-import { ObjectDatagram } from "./datagram.ts";
 import { toRequestCode } from "./error.ts";
 import { Fetch, FetchHeader } from "./fetch.ts";
 import * as Filter from "./filter.ts";
@@ -2418,39 +2417,6 @@ test("draft-22: an absolute filter trims the range it serves", async () => {
 	} finally {
 		fx.close();
 		client.close();
-	}
-});
-
-test.each([Version.DRAFT_22])("IETF %s: datagrams honor the absolute object range", async (version) => {
-	using _clock = manual();
-	const fx = fixture(version);
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
-	const { client } = await runSubscribe(
-		fx,
-		new Subscribe({
-			requestId: 7n,
-			trackNamespace: Path.from("test"),
-			trackName: "video",
-			subscriberPriority: 0,
-			filter: { kind: "absolute", startGroup: 0n, startObject: 1n, endGroup: 1n, endObject: 0n },
-		}),
-	);
-	const reader = fx.pair.client.datagrams.readable.getReader();
-	try {
-		// Datagrams go out in arrival order, so the in-range one arrives last: receiving it
-		// first proves both out-of-range ones ahead of it were dropped.
-		for (const sequence of [0, 2, 1])
-			track.insertDatagram(BigInt(sequence), Timestamp.fromMillis(sequence), new Uint8Array([sequence]));
-		const next = await reader.read();
-		if (next.done) throw new Error("the in-range datagram was never sent");
-		const datagram = await ObjectDatagram.decode(next.value, version);
-		expect(datagram.trackAlias).toBe(7n);
-		expect(datagram.groupId).toBe(1n);
-		expect(datagram.objectId ?? 0).toBe(0);
-	} finally {
-		await reader.cancel();
-		client.close();
-		fx.close();
 	}
 });
 

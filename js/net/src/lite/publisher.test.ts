@@ -17,7 +17,6 @@ import { Timescale, Timestamp } from "../time.ts";
 import { Subscriber as TrackSubscriber } from "../track.ts";
 import { wireOf } from "../wire.ts";
 import { type AnnounceBroadcast, AnnounceOk, AnnounceRequest, decodeAnnounceBroadcast } from "./announce.ts";
-import { Datagram as DatagramMessage } from "./datagram.ts";
 import { Fetch } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
 import { Probe as ProbeMessage } from "./probe.ts";
@@ -1052,96 +1051,6 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 		}
 	});
 }
-
-for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
-	for (const transport of [900, 1400]) {
-		test(`lite ${version}: datagram bodies fit the wire and ${transport}-byte transport`, async () => {
-			const installed = new Manual().install();
-			const sub = await servedSubscription({ version, startGroup: 0n, maxDatagramSize: transport });
-			const reader = sub.datagrams.getReader();
-			const max = Math.min(1200, transport);
-			try {
-				// Lite-07's type adds one byte to the three one-byte group fields.
-				const header = version === Version.DRAFT_07 ? 4 : 3;
-				sub.track.insertDatagram(0n, Timestamp.fromMillis(0), new Uint8Array(max - header + 1));
-				sub.track.insertDatagram(1n, Timestamp.fromMillis(1), new Uint8Array(max - header));
-				const next = await reader.read();
-				if (next.done) throw new Error("datagrams ended early");
-				expect(next.value.byteLength).toBe(max);
-				expect((await DatagramMessage.decode(next.value, version, () => ({ timed: true })))?.sequence).toBe(1n);
-			} finally {
-				await reader.cancel();
-				await sub.close();
-				await sub.serving;
-				installed.close();
-			}
-		});
-	}
-}
-
-test.each([Version.DRAFT_06, Version.DRAFT_07])("lite %s: datagrams honor group and frame bounds", async (version) => {
-	const clock = new Manual();
-	const installed = clock.install();
-	const sub = await servedSubscription({ version, startGroup: 0n, startFrame: 1, endGroup: 1n, endFrame: 0 });
-	const reader = sub.datagrams.getReader();
-	// Datagrams go out in arrival order, so each batch inserts its out-of-range ones ahead of
-	// the last in-range one: reading exactly the in-range ones proves the rest were dropped.
-	const send = (sequences: number[]) => {
-		for (const sequence of sequences)
-			sub.track.insertDatagram(BigInt(sequence), Timestamp.fromMillis(sequence), new Uint8Array([sequence]));
-	};
-	const recv = async () => {
-		const next = await reader.read();
-		if (next.done) throw new Error("datagrams ended early");
-		return (await DatagramMessage.decode(next.value, version, () => ({ timed: true })))?.sequence;
-	};
-	// The publisher applies an update's datagram bounds before forwarding its group range, and
-	// each update here moves the range's end.
-	const applied = async (end: bigint) => {
-		let ranges = sub.track.subscription.peek()?.ranges;
-		while (ranges?.[0]?.end?.absolute !== end) ranges = (await sub.track.subscription.changed())?.ranges;
-	};
-	try {
-		send([0, 2, 1]);
-		expect(await recv()).toBe(1n);
-		// Widen both boundaries, then narrow to one datagram.
-		await replayUpdate({ priority: 0, startGroup: 0n, startFrame: 0, endGroup: 4n, endFrame: 0 }).encode(
-			sub.client.writer,
-			version,
-		);
-		await applied(5n);
-		send([2, 3, 5, 4]);
-		expect([await recv(), await recv(), await recv()]).toEqual([2n, 3n, 4n]);
-		await replayUpdate({ priority: 0, startGroup: 6n, startFrame: 1, endGroup: 7n, endFrame: 0 }).encode(
-			sub.client.writer,
-			version,
-		);
-		await applied(8n);
-		send([6, 8, 7]);
-		expect(await recv()).toBe(7n);
-	} finally {
-		await reader.cancel();
-		await sub.close();
-		await sub.serving;
-		installed.close();
-	}
-});
-
-// A sent datagram is accounted for, so the end sweep does not drop it, as the Rust publisher does.
-test("lite draft-06: the end sweep does not drop a sent datagram", async () => {
-	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 0n });
-	try {
-		sub.serve(0n);
-		expect(await sub.servedSequence()).toBe(0n);
-		sub.track.insertDatagram(1n, Timestamp.fromMillis(1), new Uint8Array([1]));
-		await flush();
-		sub.track.finish();
-		sub.track.close();
-		expect(await drops(sub.client.reader, Version.DRAFT_06)).toEqual([]);
-	} finally {
-		await sub.close();
-	}
-});
 
 // A drop describes what was missing then; a late copy of the same group is still served.
 test("lite draft-06: a reported cut still allows a late group", async () => {

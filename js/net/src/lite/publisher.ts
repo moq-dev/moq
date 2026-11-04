@@ -6,6 +6,7 @@ import type { AuthSession } from "../auth_session.ts";
 import { enforceGrant } from "../auth_session.ts";
 import type * as broadcast from "../broadcast.ts";
 import { Withdrawal } from "../connection/withdrawal.ts";
+import type * as datagram from "../datagram.ts";
 import * as DatagramStream from "../datagram_stream.ts";
 import {
 	error,
@@ -17,7 +18,6 @@ import {
 	toStreamCode,
 	unauthorized,
 } from "../error.ts";
-import { stored } from "../flate/group.ts";
 import type * as group from "../group.ts";
 import { Cost, type Hop, type Route, routesEqual } from "../hop.ts";
 import { finalSequence, hiddenBelow, hooks, insertRun, presented, type Run, runGaps } from "../internal.ts";
@@ -33,9 +33,10 @@ import { untilAborted } from "../util/abort.ts";
 import { nextChange } from "../util/change.ts";
 import { GivenUp } from "../util/given_up.ts";
 import { max, min } from "../util/sequence.ts";
+import { Budget } from "../util/yield.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
 import { AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounceBroadcast } from "./announce.ts";
-import { Datagram as DatagramMessage } from "./datagram.ts";
+import { Datagram as DatagramMessage, type Datagrams, DatagramsInfo, DatagramsUpdate } from "./datagram.ts";
 import { closeViolation } from "./error.ts";
 import type { Fetch } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
@@ -59,6 +60,7 @@ import {
 	hasAnnounceRestart,
 	hasCompression,
 	hasDatagrams,
+	hasDatagramTracks,
 	hasEndError,
 	hasInstance,
 	hasLargest,
@@ -78,6 +80,7 @@ const PROBE_INTERVAL = 100; // ms
 const PROBE_MAX_AGE = 10_000; // ms
 const PROBE_MAX_DELTA = 0.25;
 const PROBE_RTT_DELTA = 0.25;
+const datagramBudget = new Budget();
 
 /** Map a signed delta to an unsigned zigzag varint value (mirrors Rust `varint::zigzag`). */
 function zigzag(delta: bigint): bigint {
@@ -960,9 +963,7 @@ export class Publisher {
 		// The ranges cap what is served; the floor only pins where an older wire starts.
 		track.withRange({ start: { included: floor } });
 
-		// The best-effort datagram loop, started once serving begins. It parks when the
-		// track finishes (recvDatagram returns undefined), so #runTrack alone ends the
-		// subscription; awaited during teardown so it doesn't outlive the subscription.
+		// An old subscription carries both kinds until its stream track ends.
 		let datagrams = Promise.resolve();
 		const bounds: FrameBounds = {
 			startGroup: msg.startGroup,
@@ -970,13 +971,11 @@ export class Publisher {
 			endGroup: msg.endGroup,
 			endFrame: msg.endFrame,
 		};
-		// Datagram reads continue while a reliable response is blocked, so they use
-		// the latest decoded bounds rather than the reliable loop's next-pop snapshot.
-		const datagramBounds = { ...bounds };
+		let legacy: datagram.Consumer | undefined;
 		let controls: SubscriptionControls | undefined;
 		// Lite-05 and later name every sequence below the end that this subscription never
 		// got with SUBSCRIBE_DROP, so the subscriber settles without waiting out its grace
-		// for a group that will not come. The sequences served (as a group or a datagram) or
+		// for a group that will not come. The group sequences served or
 		// dropped. A gap that never arrived stays until the end sweep names it: this side
 		// cannot tell when the subscriber stopped waiting for it. Undefined on other versions.
 		const served: Run[] | undefined = hasTrackStream(this.version) ? [] : undefined;
@@ -986,7 +985,21 @@ export class Publisher {
 			// (accept never called, track closed) as an error here, which resets the stream, and
 			// its priority breaks ties between this session's subscriptions at one subscriber
 			// priority.
-			const info = await untilAborted(track.info(), left.signal);
+			let info: track.Info;
+			try {
+				info = await untilAborted(track.info(), left.signal);
+			} catch (err) {
+				if (
+					hasDatagrams(this.version) &&
+					!hasDatagramTracks(this.version) &&
+					toStreamCode(error(err)) === StreamCode.NotFound
+				) {
+					track.close();
+					await this.#serveLegacyDatagrams(front, msg, stream, left.signal);
+					return;
+				}
+				throw err;
+			}
 			const publisher = info.priority;
 			// A SUBSCRIBE can arrive before its track resolves, such as one a relay serves from a
 			// copy still fetching upstream, or on lite-05 one sent alongside its TRACK, when no
@@ -1026,8 +1039,14 @@ export class Publisher {
 
 			// Serve datagrams concurrently with groups whenever the transport carries them
 			// (the writer exists iff so). No group fallback: otherwise they simply aren't sent.
-			if (this.#datagramWriter) {
-				datagrams = this.#runDatagrams(track, { sub: msg.id, stamp, served, bounds: datagramBounds });
+			if (this.#datagramWriter && !hasDatagramTracks(this.version)) {
+				legacy = wireOf(front).liveDatagrams(msg.track);
+				if (legacy) {
+					legacy.setPriority(msg.priority);
+					datagrams = this.#runDatagrams(legacy, { sub: msg.id, stamp })
+						.then(() => {})
+						.catch((err) => console.debug(`datagram send stopped: ${reason(err)}`));
+				}
 			}
 
 			controls = new SubscriptionControls({
@@ -1036,12 +1055,7 @@ export class Publisher {
 				writer: stream.writer,
 				version: this.version,
 				apply: (update) => {
-					Object.assign(datagramBounds, {
-						startGroup: update.startGroup,
-						startFrame: update.startFrame,
-						endGroup: update.endGroup,
-						endFrame: update.endFrame,
-					});
+					legacy?.setPriority(update.priority);
 					// Every update restates the wanted group. Past our largest it is a join, which
 					// repeats the pending ask; at or below it the group already exists.
 					const largest = hooks.peekLargest(track).largest?.group;
@@ -1075,8 +1089,9 @@ export class Publisher {
 			// here, which ends the decoder.
 			if (waitsForSubscriberFin(this.version)) stream.writer.close();
 			else stream.close();
-			// Ends the datagram loop.
+			// Ends both kinds carried by this old subscription.
 			track.close();
+			legacy?.close();
 			// A subscriber that left is owed nothing more, and its stream may already be reset.
 			await Promise.all([datagrams, controls.decoding, finished && acknowledged(stream.writer)]);
 		} catch (err: unknown) {
@@ -1085,6 +1100,7 @@ export class Publisher {
 			if (e === cancel) console.debug(`publish cancelled: broadcast=${msg.broadcast} track=${track.name}`);
 			else console.warn(`publish error: broadcast=${msg.broadcast} track=${track.name} error=${reason(e)}`);
 			track.close(e);
+			legacy?.close(e);
 			stream.abort(e);
 			await Promise.all([datagrams, controls?.decoding]);
 		}
@@ -1681,7 +1697,23 @@ export class Publisher {
 					(await wireOf(this.#publish).demand(msg.broadcast, msg.instance, hold.signal)));
 			if (!front) throw new NotFound(`broadcast ${msg.broadcast}`);
 
-			const info = await this.#resolveTrackInfo(front, msg.track, hold.signal);
+			let info: TrackInfoMessage;
+			try {
+				info = await this.#resolveTrackInfo(front, msg.track, hold.signal);
+			} catch (err) {
+				if (
+					!hasDatagrams(this.version) ||
+					hasDatagramTracks(this.version) ||
+					toStreamCode(error(err)) !== StreamCode.NotFound
+				)
+					throw err;
+				const datagrams = front.datagrams(msg.track);
+				try {
+					info = trackInfoMessage(await untilAborted(datagrams.info(), hold.signal), this.version);
+				} finally {
+					datagrams.close();
+				}
+			}
 			if (watch.revoked()) throw unauthorized(msg.broadcast);
 			await info.encode(stream.writer, this.version);
 			console.debug(`track info: broadcast=${msg.broadcast} track=${msg.track}`);
@@ -1819,56 +1851,125 @@ export class Publisher {
 		return untilAborted(held.info, hold);
 	}
 
-	/**
-	 * Forwards a track's datagrams best-effort over QUIC datagrams (lite-05 §6.4), parallel to
-	 * its groups. Each datagram is dropped (there is no group fallback) if the encoded body
-	 * doesn't fit the wire and transport datagram limits or the send fails. Returns once the track
-	 * finishes; a failure never tears down the subscription.
-	 *
-	 * @internal
-	 */
-	async #runDatagrams(
-		track: track.Subscriber,
-		options: {
-			sub: bigint;
-			stamp: Stamp | undefined;
-			served: Run[] | undefined;
-			bounds: FrameBounds;
-		},
-	) {
-		const { sub, stamp, served, bounds } = options;
-		const writer = this.#datagramWriter;
-		if (!writer) return; // Only reached with a writer (see the #datagramWriter gate).
-		const maxSize = Math.min(DatagramMessage.MAX_SIZE, DatagramStream.maxDatagramSize(this.#quic));
-
+	/** Serve a lite-07 datagram-track request until its publisher or subscriber ends it. */
+	async runDatagrams(msg: Datagrams, stream: Stream): Promise<void> {
+		const cancel = new AbortController();
+		let track: datagram.Consumer | undefined;
+		const watch = this.#gate.watch(msg.broadcast, () => cancel.abort(unauthorized(msg.broadcast)));
+		let updates: Promise<void> | undefined;
 		try {
-			for (;;) {
-				const datagram = await track.recvDatagram();
-				if (!datagram) return; // Track finished; #runTrack tears the subscription down.
-				// A datagram is frame 0 of its group, subject to the reliable frame range.
-				if (frameRange(bounds, datagram.sequence).start > 0) continue;
-
-				// Convert the timestamp to the track's advertised timescale, matching #serveGroup.
-				const ts = stamp === undefined ? undefined : wireTime(datagram.timestamp, stamp);
-				const slice = hasCompression(this.version) ? stored(datagram) : undefined;
-				const message = new DatagramMessage(sub, datagram.sequence, ts, slice?.payload ?? datagram.payload);
-				message.inflated = slice?.inflated;
-				const body = message.encode(this.version);
-
-				// No group fallback: drop anything that doesn't fit a single datagram.
-				if (body.byteLength > maxSize) {
-					console.debug(`dropping oversize datagram: sub=${sub} size=${body.byteLength} max=${maxSize}`);
-					continue;
+			if (watch.revoked()) throw unauthorized(msg.broadcast);
+			if (!this.#datagramWriter) throw new Error("transport does not support datagrams");
+			// Read updates from dispatch so a requester leaving releases even an unanswered lookup.
+			updates = (async () => {
+				let next = msg.priority;
+				for (;;) {
+					const yielded = datagramBudget.poll();
+					if (yielded !== undefined) await yielded;
+					const update = await DatagramsUpdate.decodeMaybe(stream.reader, this.version);
+					if (!update) return;
+					next = update.priority;
+					msg.priority = next;
+					track?.setPriority(next);
 				}
+			})();
+			void updates.then(
+				() => cancel.abort(new StreamError(StreamCode.Cancel)),
+				(err) => cancel.abort(error(err)),
+			);
+			const origin = this.#publish && wireOf(this.#publish);
+			const front =
+				origin &&
+				(origin.local(msg.broadcast, msg.instance) ??
+					(await origin.demand(msg.broadcast, msg.instance, cancel.signal)));
+			if (!front) throw new NotFound(`broadcast ${msg.broadcast}`);
+			track = front.datagrams(msg.track);
+			track.setPriority(msg.priority);
+			const info = await untilAborted(track.info(), cancel.signal);
+			await untilAborted(new DatagramsInfo(info).encode(stream.writer, this.version), cancel.signal);
+			await untilAborted(
+				this.#runDatagrams(track, { sub: msg.id, stamp: stamping(this.version, info) }),
+				cancel.signal,
+			);
+			stream.writer.close();
+			await updates;
+		} catch (err) {
+			closeViolation(this.#quic, err);
+			stream.abort(error(err));
+		} finally {
+			track?.close();
+			watch.dispose();
+			stream.reader.stop(StreamCode.Cancel);
+			await updates?.catch(() => {});
+		}
+	}
 
-				// A sent datagram counts as delivered even if it is lost, so the end sweep skips it.
-				if (served) insertRun(served, datagram.sequence, datagram.sequence + 1n);
-				await writer.ready;
-				await writer.write(body);
+	// Lite-05/06: a name with no stream track serves its datagram track alone.
+	async #serveLegacyDatagrams(
+		front: broadcast.Consumer,
+		msg: Subscribe,
+		stream: Stream,
+		signal: AbortSignal,
+	): Promise<void> {
+		const track = front.datagrams(msg.track);
+		track.setPriority(msg.priority);
+		const updates = (async () => {
+			for (;;) {
+				const yielded = datagramBudget.poll();
+				if (yielded !== undefined) await yielded;
+				const update = await SubscribeUpdate.decodeMaybe(stream.reader, this.version);
+				if (!update) return;
+				track.setPriority(update.priority);
 			}
-		} catch (err: unknown) {
-			// Best-effort: a datagram send failure stops sending but never fails the subscription.
-			console.debug(`datagram send stopped: sub=${sub} error=${reason(err)}`);
+		})();
+		void updates.then(
+			() => track.close(),
+			(err) => track.close(error(err)),
+		);
+		try {
+			const info = await untilAborted(track.info(), signal);
+			await encodeSubscribeResponse(stream.writer, { start: new SubscribeStart([0n]) }, this.version);
+			const end = await untilAborted(
+				this.#runDatagrams(track, { sub: msg.id, stamp: stamping(this.version, info) }),
+				signal,
+			);
+			await encodeSubscribeResponse(stream.writer, { end: new SubscribeEnd(end) }, this.version);
+			stream.writer.close();
+			await updates;
+		} finally {
+			track.close();
+			stream.reader.stop(StreamCode.Cancel);
+			await updates.catch(() => {});
+		}
+	}
+
+	// Shared by dedicated lite-07 requests and the old SUBSCRIBE carry-both mapping.
+	async #runDatagrams(track: datagram.Consumer, options: { sub: bigint; stamp?: Stamp }): Promise<bigint> {
+		const writer = this.#datagramWriter;
+		if (!writer) throw new Error("transport does not support datagrams");
+		const maxSize = Math.min(DatagramMessage.MAX_SIZE, DatagramStream.maxDatagramSize(this.#quic));
+		let end = 0n;
+		for (;;) {
+			const datagram = await track.recv();
+			if (!datagram) return end;
+			end = max(end, datagram.sequence + 1n);
+			const stamp = options.stamp;
+			// An old subscription uses its stream track's timescale for both kinds.
+			const timestamp =
+				stamp === undefined
+					? undefined
+					: datagram.timestamp === undefined
+						? floorAt(Timestamp.now(), stamp.timescale)
+						: floorAt(datagram.timestamp, stamp.timescale);
+			const body = new DatagramMessage(options.sub, datagram.sequence, timestamp, datagram.payload).encode(
+				this.version,
+			);
+			if (body.byteLength > maxSize) {
+				console.debug(`dropping oversize datagram: sub=${options.sub} size=${body.byteLength} max=${maxSize}`);
+				continue;
+			}
+			await writer.ready;
+			await writer.write(body);
 		}
 	}
 

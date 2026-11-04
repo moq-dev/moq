@@ -644,33 +644,6 @@ test("fill: a reader parked on a miss asks once a handler opens", async () => {
 	broadcast.close();
 });
 
-test("fill: a sequence the track's datagram took is never asked, even once a reader read it", async () => {
-	const broadcast = new BroadcastProducer();
-	const track = broadcast.createTrack("video");
-	// Subscribed first: a datagram is not replayed to a later reader.
-	const reader = track.subscribe(history);
-	track.insertDatagram(2n, undefined, enc.encode("datagram 2"));
-	const group = track.createGroup(5n);
-	group.writeFrame({ payload: enc.encode("live 5") });
-	group.finish();
-	// The reader takes the datagram out of its own buffer; the track still holds it.
-	expect((await reader.recvDatagram())?.sequence).toBe(2n);
-
-	const requests = track.requests();
-	const ordered = reader.ordered();
-	void ordered.nextGroup();
-	const fills = [await requests.requestedFill(), await requests.requestedFill()];
-	expect(fills.map((fill) => [fill?.start, fill?.end])).toEqual([
-		[0n, 2n],
-		[3n, 5n],
-	]);
-
-	for (const fill of fills) fill?.close();
-	reader.close();
-	requests.close();
-	broadcast.close();
-});
-
 test("fill: a reader joins a fill still served after its handler's handle closed", async () => {
 	const { broadcast, track } = resumed(5n);
 	const requests = track.requests();

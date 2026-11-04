@@ -18,6 +18,11 @@ export function maxDatagramSize(quic: WebTransport): number {
 	return typeof size === "number" && size > 0 ? size : 0;
 }
 
+/** Whether this transport exposes a receive channel for datagrams. */
+export function canReceiveDatagrams(quic: WebTransport): boolean {
+	return datagrams(quic)?.readable !== undefined;
+}
+
 /** Get a datagram reader, or undefined when this browser/transport does not expose one. */
 export function datagramReader(quic: WebTransport): ReadableStreamDefaultReader<Uint8Array> | undefined {
 	const readable = datagrams(quic)?.readable;

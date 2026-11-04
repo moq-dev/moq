@@ -149,7 +149,7 @@ test("latest abandons a held group when a newer snapshot group rolls", async () 
 });
 
 // Skipping to the head never widens the reader's range: a capped reader reads the newest state
-// below its cap, and a datagram past every group does not strand it.
+// below its cap.
 test("latest stays inside the reader's range", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Value>({ track, deltas: false });
@@ -157,7 +157,6 @@ test("latest stays inside the reader's range", async () => {
 	const consumer = new Consumer<Value>({ track: subscriber });
 
 	for (let n = 0; n < 4; n++) producer.update({ value: { a: n } });
-	track.appendDatagram(Time.Timestamp.now(), new Uint8Array([0]));
 	expect((await consumer.latest())?.value).toEqual({ a: 1 });
 	producer.finish();
 });

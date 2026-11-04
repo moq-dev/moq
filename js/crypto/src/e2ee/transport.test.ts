@@ -112,7 +112,7 @@ for (const [name, protocol, routed, timed] of transports) {
 
 for (const [name, protocol] of [
 	["moq-lite-07", "moq-lite-07-wip"],
-	["moq-transport-18", "moqt-18"],
+	["moq-lite-05", "moq-lite-05"],
 ] as const)
 	test(`${name}: datagrams roundtrip encrypted`, async () => {
 		const { publisher, subscriber, close } = await session(protocol);
@@ -121,36 +121,28 @@ for (const [name, protocol] of [
 		const path = await cred.path("meeting.hang");
 		const broadcastPublication = publisher.createBroadcast(path);
 		const broadcast = broadcastPublication.broadcast;
-		const audio = await new Protected.Producer(broadcast, generation).createTrack("audio", {
+		const audio = await new Protected.Producer(broadcast, generation).createDatagrams("audio", {
 			timescale: Time.Timescale.MILLI,
 		});
 		broadcastPublication.announce({ instance: Epoch.instance(generation.epoch) });
-
-		// A group first, so the subscription is serving before datagrams, which are never cached.
-		const group = audio.appendGroup();
-		await group.writeFrame(ms(0), encoder.encode("init"));
-		group.finish();
 
 		const remote = await active(subscriber, path);
 		const consumer = await new Protected.Consumer(
 			remote,
 			cred.consume(Epoch.of(remote) ?? generation.epoch),
-		).subscribe("audio", { delay: { max: Milli(60_000) } });
-		expect(decoder.decode((await (await consumer.recvGroup())?.readFrame())?.plaintext)).toBe("init");
-
-		// Sequences continue past the group, preserved hop to hop by insertDatagram.
-		const sequence = await audio.appendDatagram(ms(20), encoder.encode("opus"));
-		expect(sequence).toBe(1n);
-		const event = await consumer.recvDatagram();
+		).datagrams("audio");
+		while (audio.priority.peek() === undefined) await audio.priority.changed();
+		const sequence = await audio.append(ms(20), encoder.encode("opus"));
+		expect(sequence).toBe(0n);
+		const event = await consumer.recv();
 		expect(event?.kind).toBe("datagram");
 		if (event?.kind !== "datagram") return;
-		expect(event.datagram.sequence).toBe(1n);
+		expect(event.datagram.sequence).toBe(0n);
 		expect(event.datagram.timestamp?.as(Time.Timescale.MILLI)).toBe(20);
 		expect(decoder.decode(event.datagram.plaintext)).toBe("opus");
 
 		consumer.close();
 		audio.finish();
-		audio.close();
 		broadcast.close();
 		close();
 	});

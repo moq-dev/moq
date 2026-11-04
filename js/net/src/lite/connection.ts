@@ -18,6 +18,7 @@ import { withTimeout } from "../util/timeout.ts";
 import { registerWire } from "../wire.ts";
 import { AnnounceRequest } from "./announce.ts";
 import { LiteAuthWire } from "./auth.ts";
+import { Datagrams } from "./datagram.ts";
 import { closeViolation } from "./error.ts";
 import { Fetch } from "./fetch.ts";
 import { Goaway } from "./goaway.ts";
@@ -33,6 +34,7 @@ import { Tracks as TracksMessage } from "./tracks.ts";
 import {
 	hasAuth,
 	hasDatagrams,
+	hasDatagramTracks,
 	hasGoaway,
 	hasPadding,
 	hasProbeRtt,
@@ -422,6 +424,14 @@ export class Connection implements Established {
 				(async () => {
 					const msg = await Subscribe.decode(stream.reader, this.#version);
 					await this.#publisher.runSubscribe(msg, stream);
+				})(),
+			);
+		} else if (typ === StreamId.Datagrams) {
+			if (!hasDatagramTracks(this.#version)) throw new Error("DATAGRAMS is not supported on this version");
+			await this.#publisher.owe(
+				(async () => {
+					const msg = await Datagrams.decode(stream.reader, this.#version);
+					await this.#publisher.runDatagrams(msg, stream);
 				})(),
 			);
 		} else if (typ === StreamId.Fetch) {
