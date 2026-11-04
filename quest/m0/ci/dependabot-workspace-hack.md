@@ -81,9 +81,16 @@ Renovate runs self-hosted:
   where Renovate runs.
 - Group every cargo update into one PR, and keep Dependabot's 7-day cooldown
   as `minimumReleaseAge`. Remove the cargo entry from `.github/dependabot.yml`
-  in the same PR. Check whether Dependabot security updates for cargo still
-  hand-edit the hack; if so, let Renovate's vulnerability alerts take them
-  over.
+  in the same PR. Carry that entry's `ignore` caps into `packageRules`, with
+  their comments: `uniffi` `allowedVersions: "<0.33"` (uniffi-bindgen-go reads
+  one uniffi minor) and `syn` `allowedVersions: "<3"` (kio-macros stays on
+  syn 2). Check whether Dependabot security updates for cargo still hand-edit
+  the hack; if so, let Renovate's vulnerability alerts take them over.
+- Land Renovate's PRs the way Dependabot's land, through `quest merge --land`
+  on the pinned head. `.github/workflows/dependabot.yml` requests landing only
+  for `dependabot[bot]`, so admit the Renovate App's bot login there too,
+  keeping the same-repository head check. Leave Renovate's own `automerge`
+  off, since it would bypass that pinned-head request.
 
 Public API: none. Wire: none.
 
