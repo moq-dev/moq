@@ -1355,7 +1355,10 @@ mod tests {
 				}
 			}
 			for _ in 0..2 {
-				assert!(matches!(recv.closed().await, Err(crate::quic::web::recv::Error::Reset(7))));
+				assert!(matches!(
+					recv.closed().await,
+					Err(crate::quic::web::recv::Error::Reset(7))
+				));
 			}
 		}
 	}
@@ -1403,7 +1406,7 @@ mod tests {
 			client.connection().send_datagram(stray, Default::default()).unwrap();
 		}
 		client.send_datagram(&b"ok"[..], Default::default()).unwrap();
-		let datagram = tokio::time::timeout(std::time::Duration::from_secs(10), server.read_datagram())
+		let datagram = kio::clock::timeout(Duration::from_secs(10), server.read_datagram())
 			.await
 			.expect("no datagram arrived")
 			.unwrap();

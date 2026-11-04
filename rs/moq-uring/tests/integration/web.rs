@@ -321,9 +321,13 @@ fn a_stray_datagram_is_dropped() {
 				.respond(quic::web::proto::ConnectResponse::OK.with_protocol(PROTO))
 				.await
 				.expect("respond");
-			let datagram = within(&handle, "the datagram", kio::wait(|waiter| session.poll_recv_datagram(waiter)))
-				.await
-				.expect("a stray datagram does not end the session");
+			let datagram = within(
+				&handle,
+				"the datagram",
+				kio::wait(|waiter| session.poll_recv_datagram(waiter)),
+			)
+			.await
+			.expect("a stray datagram does not end the session");
 			assert_eq!(&datagram[..], PAYLOAD);
 			session
 				.send_datagram(datagram, Default::default())
