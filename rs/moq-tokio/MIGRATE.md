@@ -23,7 +23,7 @@ Session polls take `&self` and a caller-owned `&kio::Waiter`; opens also take th
 
 `Request` dereferences to `proto::ConnectRequest`; read its `url` and `protocols` fields there.
 `Request::connection()` names the underlying QUIC connection.
-`Request::respond` takes `impl Into<proto::ConnectResponse>` and requires status OK; `reject` takes an `http::StatusCode`.
+`Request::respond` takes `impl Into<proto::ConnectResponse>` and requires status OK; `reject` takes an `http::StatusCode` and requires a 4xx or 5xx status.
 The Tokio `web::Server` helper and `Request::connect()` accessor are removed; accept from the driver endpoint, then call `Request::accept(connection)`.
 `send::Stream`, `send::Finished`, and `recv::Stream` expose their stream ID as `id()`.
 

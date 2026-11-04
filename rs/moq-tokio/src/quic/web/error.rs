@@ -239,6 +239,15 @@ impl moq_net::transport::Error for SessionError {
 
 		None
 	}
+	fn stream_error(&self) -> Option<u32> {
+		// An open can fail while writing its WebTransport header, before it returns a stream.
+		if let Self::WebTransportError(WebTransportError::WriteError(crate::quic::driver::send::Error::Stopped(code))) =
+			self
+		{
+			return web_transport_proto::error_from_http3(code.into_inner());
+		}
+		None
+	}
 }
 
 #[cfg(test)]
@@ -270,6 +279,15 @@ mod tests {
 		let stream = super::super::recv::Error::Reset(7);
 		assert_eq!(stream.session_error(), None);
 		assert_eq!(stream.stream_error(), Some(7));
+		let close = CloseReason::new(false);
+		let header = SessionError::WebTransportError(WebTransportError::WriteError(
+			crate::quic::driver::send::Error::Stopped(close.encode_stream_code(7)),
+		));
+		assert_eq!(header.stream_error(), Some(7));
+		let invalid = SessionError::WebTransportError(WebTransportError::WriteError(
+			crate::quic::driver::send::Error::Stopped(7u32.into()),
+		));
+		assert_eq!(invalid.stream_error(), None);
 	}
 
 	/// WebTransport keeps the HTTP/3 mapping in both directions, and a code outside its

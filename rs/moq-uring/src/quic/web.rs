@@ -264,7 +264,7 @@ impl Request {
 		self.respond(proto::ConnectResponse::OK).await
 	}
 
-	/// Refuse with `reason`, ending the handshake.
+	/// Refuse with a 4xx or 5xx status code, ending the handshake.
 	///
 	/// Returns once the peer has the response, or after a grace period if it
 	/// never acknowledges one, and closes the connection deliberately. The
@@ -273,6 +273,9 @@ impl Request {
 	/// error, so tearing them down here would show the peer an H3 failure
 	/// instead of the status it was sent.
 	pub async fn reject(mut self, status: http::StatusCode) -> Result<(), Error> {
+		if !status.is_client_error() && !status.is_server_error() {
+			return Err(Error::Web("reject requires a 4xx or 5xx status".into()));
+		}
 		let response = proto::ConnectResponse::new(status);
 		let mut buf = Vec::new();
 		response.encode(&mut buf).map_err(|err| Error::Web(err.to_string()))?;

@@ -45,8 +45,11 @@ impl Request {
 		Ok(Session::new(self.conn, self.settings, connect))
 	}
 
-	/// Reject the session with the given status code.
+	/// Reject the session with a 4xx or 5xx status code.
 	pub async fn reject(self, status: http::StatusCode) -> Result<(), ServerError> {
+		if !status.is_client_error() && !status.is_server_error() {
+			return Err(super::ConnectError::ErrorStatus(status).into());
+		}
 		self.connect.reject(status).await?;
 		Ok(())
 	}

@@ -540,6 +540,38 @@ fn a_rejection_reaches_the_peer() {
 	);
 }
 
+/// A local rejection refuses success and non-error statuses before writing any response.
+#[test]
+fn a_rejection_refuses_non_error_statuses() {
+	use futures::FutureExt;
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let certs = support::certs().expect("certificates");
+	let endpoint = h3_endpoint(&handle, &certs);
+	let addr = endpoint.local_addr();
+	for status in [
+		http::StatusCode::CONTINUE,
+		http::StatusCode::OK,
+		http::StatusCode::NO_CONTENT,
+		http::StatusCode::FOUND,
+	] {
+		let client = tokio_client_err(format!("https://{addr}/nope"));
+		worker
+			.block_on(async {
+				let conn = endpoint.accept().await.unwrap();
+				let watch = conn.clone();
+				let request = quic::web::Request::accept(conn).await.unwrap();
+				assert!(matches!(
+					request.reject(status).now_or_never(),
+					Some(Err(quic::Error::Web(_)))
+				));
+				watch.closed().await;
+			})
+			.unwrap();
+		client.join().expect("client thread");
+	}
+}
+
 /// Dropping a web-mode stream cancels it with a WebTransport code, not the
 /// raw zero the inner stream would send.
 ///

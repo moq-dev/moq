@@ -1261,6 +1261,29 @@ mod tests {
 	}
 
 	/// An empty FIN needs no read; payload remains readable before the close watch ends.
+	/// Rejecting a CONNECT cannot accidentally advertise success or an interim response.
+	#[tokio::test]
+	async fn a_rejection_refuses_non_error_statuses() {
+		use futures::FutureExt;
+		for status in [
+			http::StatusCode::CONTINUE,
+			http::StatusCode::OK,
+			http::StatusCode::NO_CONTENT,
+			http::StatusCode::FOUND,
+		] {
+			let (client, server, _endpoints) = pair().await;
+			let (client, ()) = tokio::join!(
+				Session::connect(client, url::Url::parse("https://localhost/").unwrap()),
+				async {
+					let request = crate::quic::web::Request::accept(server).await.unwrap();
+					assert!(matches!(request.reject(status).now_or_never(),
+						Some(Err(crate::quic::web::ServerError::ConnectError(crate::quic::web::ConnectError::ErrorStatus(actual)))) if actual == status));
+				},
+			);
+			assert!(client.is_err());
+		}
+	}
+
 	#[tokio::test]
 	async fn clean_fin_ends_close_watch() {
 		for framed in [false, true] {
