@@ -6,16 +6,16 @@ use std::sync::Arc;
 use std::task::Poll;
 
 /// Runs a [`Broadcaster`](super::Broadcaster)'s background work: its catalog watcher, each
-/// rendition's record watcher, and the init builds.
+/// rendition's media watcher, and the init builds.
 ///
 /// Poll it, or [`run`](Self::run) it, for as long as the broadcaster serves. It finishes once
 /// the broadcaster and every rendition it created have dropped and their tasks ended, so a
-/// recording cursor that outlives the broadcaster keeps its rendition's records flowing.
+/// recording cursor that outlives the broadcaster keeps its rendition's media flowing.
 /// Dropping it early stops all of that work.
 #[must_use = "the broadcaster does nothing until its driver runs"]
 pub struct Driver {
 	/// The catalog watcher, polled before the other tasks in every pass: a reconfigure must
-	/// retire its rendition before that rendition's watcher reads records published after it.
+	/// retire its rendition before that rendition's watcher reads groups published after it.
 	lead: Option<Job>,
 	inbox: kio::Queue<Job>,
 	tasks: kio::Tasks<Job>,
