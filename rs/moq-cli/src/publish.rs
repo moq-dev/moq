@@ -767,14 +767,17 @@ impl Republish {
 	/// A new instance of the broadcast under a new instance, announced once its catalog goes out.
 	///
 	/// `mux_rate` is the previous instance's measurement of the same multiplex, which the new
-	/// catalog carries from its first media rather than waiting on a fresh window.
-	fn instance(&self, mux_rate: Option<u64>) -> anyhow::Result<Instance> {
+	/// catalog carries from its first media rather than waiting on a fresh window. `provisional`
+	/// is the program map the previous instance followed, which routes the media before the
+	/// source repeats its own.
+	fn instance(&self, mux_rate: Option<u64>, provisional: ts::Provisional) -> anyhow::Result<Instance> {
 		let control = self
 			.origin
 			.create_broadcast(&self.name)
 			.context("failed to create broadcast")?;
 		let mut broadcast = control.broadcast().clone();
 		let (import, mut catalog) = ts_import(&mut broadcast, self.config.clone(), self.program, mux_rate)?;
+		let import = import.with_provisional(provisional);
 		// Before the import declares a track, so the sections ride the first catalog.
 		let report = match &self.report {
 			Some(connection) => Some(crate::report::Stats::new(&mut broadcast, &catalog, connection.clone())?),
@@ -944,7 +947,7 @@ impl Instance {
 			}
 			self.catalog.finish()?;
 			// The finished broadcast ends as its handles drop, withdrawing its announcement.
-			*self = republish.instance(self.catalog.mux_rate())?;
+			*self = republish.instance(self.catalog.mux_rate(), restart.provisional)?;
 			*log = ts::stats::Log::default();
 			match feed(&mut self.decoder, &mut self.pending, &restart.remainder)? {
 				Some(next) => restart = next,

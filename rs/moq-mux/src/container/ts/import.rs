@@ -31,6 +31,7 @@ use super::mux_rate::PCR_WRAP;
 use super::passthrough::{PCR_HZ, PCR_OFFSET, Sample, locate};
 use super::psi::{self, PesStart, Pmt};
 use super::stats;
+use super::step::Provisional;
 use crate::catalog::Offset;
 use crate::catalog::hang::CatalogExt;
 use crate::codec::{aac, ac3, eac3, h264, h265, legacy, mp2, opus};
@@ -150,10 +151,14 @@ pub struct Import<E: catalog::Catalog = ()> {
 	/// The PMT PID the latest PAT names for the imported program, with its reassembler.
 	/// Several programs' PMTs may share one.
 	pmt: Option<(Pid, SectionReassembler)>,
-	/// The last complete source PAT and selected PMT, so a replacement can route the input
-	/// from the step even when those tables already routed before it. Codec configs stay fresh.
-	pat_sections: Arc<[bytes::Bytes]>,
-	pmt_section: Option<bytes::Bytes>,
+	/// The PMT in force, or the provisional one followed until it arrives, handed to a
+	/// replacement import at a clock step.
+	program_map: Option<Pmt>,
+	/// A predecessor's map to route by until the source's own PMT arrives.
+	provisional: Option<Pmt>,
+	/// Held while only a provisional map describes the program, so the catalog waits for the
+	/// source's own layout.
+	provisional_reservation: Option<crate::catalog::Reserved<E>>,
 	/// PMT sections dropped for a CRC mismatch, keyed by PID.
 	crc_errors: BTreeMap<u16, u64>,
 	/// Per elementary-stream-PID codec routing.
@@ -291,8 +296,9 @@ impl<E: catalog::Catalog> Import<E> {
 			restarts: Vec::new(),
 			claims_changed: false,
 			pmt: None,
-			pat_sections: Arc::default(),
-			pmt_section: None,
+			program_map: None,
+			provisional: None,
+			provisional_reservation: None,
 			crc_errors: BTreeMap::new(),
 			streams: HashMap::new(),
 			retired_stats: BTreeMap::new(),
@@ -350,6 +356,19 @@ impl<E: catalog::Catalog> Import<E> {
 	/// this input demuxes, since the tracks are discovered rather than named by the caller.
 	pub fn with_container(mut self, container: hang::catalog::Container) -> Self {
 		self.container = container;
+		self
+	}
+
+	/// Route by the program map a predecessor import followed before its source's clock stepped
+	/// ([`Restart::provisional`](super::Restart::provisional)), until this source's own PAT and
+	/// PMT arrive.
+	///
+	/// Only streams whose config comes from their own bytes route provisionally, so a track
+	/// appears only for media this source sends. The catalog waits for the source's PMT, which
+	/// alone sets the program's identity and layout and ends a provisional route it does not
+	/// list under the same `stream_type`.
+	pub fn with_provisional(mut self, provisional: Provisional) -> Self {
+		self.provisional = provisional.0;
 		self
 	}
 
@@ -429,10 +448,12 @@ impl<E: catalog::Catalog> Import<E> {
 	/// without `discontinuity_indicator`, forward by more than 10 s or back, or the streams
 	/// stepping back after a flagged break. Until the streams have spoken, which a cadenced one
 	/// does within 0.7 s, the input after a suspected step is held rather than published, up to
-	/// half a group's bytes. The restart's input carries the current PAT/PMT ahead of the unread
-	/// packets, so a new importer can route their first keyframe. Every later call repeats the
-	/// restart; [`finish`](Self::finish) ends the instance before the step.
+	/// half a group's bytes. Every later call repeats the restart; [`finish`](Self::finish) ends the
+	/// instance before the step.
 	pub fn decode(&mut self, data: &[u8]) -> anyhow::Result<()> {
+		if let Some(pmt) = self.provisional.take() {
+			self.route_provisional(pmt)?;
+		}
 		let mut demux = std::mem::take(&mut self.demux);
 		let result = self.decode_with(&mut demux, data);
 		self.demux = demux;
@@ -468,10 +489,16 @@ impl<E: catalog::Catalog> Import<E> {
 					return self.flush_batch();
 				}
 				super::step::Verdict::Restart(step) => {
-					let remainder = self.restart_input(demux);
+					let remainder = demux.remainder();
 					demux.drain();
 					self.flush_batch()?;
-					return Err(super::Restart { step, remainder }.into());
+					let provisional = Provisional(self.program_map.clone());
+					return Err(super::Restart {
+						step,
+						remainder,
+						provisional,
+					}
+					.into());
 				}
 			}
 			let Some(packet) = demux.next() else { break };
@@ -483,19 +510,30 @@ impl<E: catalog::Catalog> Import<E> {
 		self.flush_batch()
 	}
 
-	/// Seed the unread input with its current program map, which may precede the step.
-	fn restart_input(&self, demux: &Demux) -> bytes::Bytes {
-		let mut input = Vec::new();
-		psi::packets(&mut input, (Pid::PAT, demux.pat_counter()), &self.pat_sections);
-		if let (Some((pid, reassembler)), Some(section)) = (&self.pmt, &self.pmt_section) {
-			psi::packets(
-				&mut input,
-				(pid.as_u16(), reassembler.continuity.counter()),
-				std::slice::from_ref(section),
+	/// Route the streams of a predecessor's map whose config comes from their own bytes, so
+	/// media that precedes this source's PMT is not lost. Nothing the map alone configures, such
+	/// as an Opus or verbatim track, opens before the source lists it.
+	fn route_provisional(&mut self, pmt: Pmt) -> anyhow::Result<()> {
+		for es in &pmt.streams {
+			if !self_configured(es.stream_type) {
+				continue;
+			}
+			self.ensure_stream(es.pid, es.stream_type, &es.descriptors)?;
+			self.listed.insert(
+				es.pid,
+				Listing {
+					stream_type: es.stream_type,
+					descriptors: es.descriptors.clone(),
+					sections: false,
+				},
 			);
 		}
-		input.extend_from_slice(&demux.remainder());
-		input.into()
+		self.has_video = self.streams.values().any(Stream::video);
+		if !self.listed.is_empty() {
+			self.provisional_reservation = self.initial_reservation.clone();
+		}
+		self.program_map = Some(pmt);
+		Ok(())
 	}
 
 	/// Cut the snapshot groups for whatever SI committed since the last call, and flush the
@@ -758,11 +796,7 @@ impl<E: catalog::Catalog> Import<E> {
 				continue;
 			}
 			if let Some(pmt) = Pmt::parse(&section) {
-				if self.program.is_some_and(|program| program != pmt.program_number) {
-					continue;
-				}
 				self.handle_pmt(pmt)?;
-				self.pmt_section = Some(section.into());
 				self.seed_clock(packet)?;
 			}
 		}
@@ -802,6 +836,8 @@ impl<E: catalog::Catalog> Import<E> {
 			return Ok(());
 		}
 		self.claims_changed = true;
+		// Held until this map's streams have reserved, then the catalog follows the source's own.
+		let provisional = self.provisional_reservation.take();
 		// Which PID speaks for the program clock, so a `discontinuity_indicator` there
 		// can be read as a timebase reset rather than a counter jump.
 		if self.pcr_pid != pmt.pcr_pid {
@@ -854,7 +890,12 @@ impl<E: catalog::Catalog> Import<E> {
 		let mut ended: Vec<Pid> = self
 			.listed
 			.iter()
-			.filter(|(pid, listing)| listed.get(pid) != Some(listing))
+			.filter(|(pid, listing)| match listed.get(pid) {
+				// A provisional route keeps its media if the source lists the same codec; the
+				// source's descriptors replace the predecessor's.
+				Some(new) if provisional.is_some() => new.stream_type != listing.stream_type,
+				new => new != Some(*listing),
+			})
 			.map(|(&pid, _)| pid)
 			.collect();
 		ended.sort_by_key(Pid::as_u16);
@@ -904,6 +945,8 @@ impl<E: catalog::Catalog> Import<E> {
 		let pids: Vec<u16> = pmt.streams.iter().map(|es| es.pid.as_u16()).collect();
 		self.health.pmt_streams(&pids);
 		self.described = true;
+		self.program_map = Some(pmt);
+		drop(provisional);
 		Ok(())
 	}
 
@@ -1792,7 +1835,8 @@ impl<E: catalog::Catalog> Import<E> {
 	/// once per track. No-op without the `mpegts` section, before the track exists,
 	/// or for verbatim streams (which self-register).
 	fn record_media_track(&mut self, pid: Pid) -> anyhow::Result<()> {
-		if !self.supports_mpegts {
+		// A provisional map's descriptors are the predecessor's; the source's PMT records them.
+		if !self.supports_mpegts || self.provisional_reservation.is_some() {
 			return Ok(());
 		}
 		let Some(name) = self.streams.get(&pid).and_then(|s| s.media_track_name()) else {
@@ -1853,7 +1897,6 @@ impl<E: catalog::Catalog> Import<E> {
 				identity.1
 			);
 		}
-		self.pat_sections.clone_from(&pat.sections);
 		let first = self.identity.replace(identity).is_none();
 		self.health.pmt_pids(&[entry.pmt_pid.as_u16()], self.health.now());
 		let moved = self.pmt.as_ref().is_none_or(|(pid, _)| *pid != entry.pmt_pid);
@@ -1955,6 +1998,7 @@ impl<E: catalog::Catalog> Import<E> {
 		// EOF releases an unmeasured short source as well as its decoder reservations.
 		self.mux_rate_reservation = None;
 		self.initial_reservation = None;
+		self.provisional_reservation = None;
 		for pid in self.streams.keys().copied().collect::<Vec<_>>() {
 			let units = self.finish_stream(pid)?;
 			self.published |= units > 0;
@@ -2105,6 +2149,23 @@ struct Listing {
 /// 0x86 is also a DTS audio type, so without it the stream is not read as cues.
 fn section_framed(stream_type: u8, cuei: bool) -> bool {
 	matches!(stream_type, 0x05 | 0x0a..=0x0d) || (cuei && stream_type == StreamType::Dts8ChannelLosslessAudio as u8)
+}
+
+/// Whether a stream of `stream_type` is decoded with a config read from its own bytes, so a route
+/// a provisional map opens publishes only media the source sends.
+fn self_configured(stream_type: u8) -> bool {
+	matches!(
+		StreamType::from_u8(stream_type).ok(),
+		Some(
+			StreamType::H264
+				| StreamType::H265
+				| StreamType::AdtsAac
+				| StreamType::Mpeg1Audio
+				| StreamType::Mpeg2HalvedSampleRateAudio
+				| StreamType::DolbyDigitalUpToSixChannelAudio
+				| StreamType::DolbyDigitalPlusUpTo16ChannelAudioForAtsc
+		)
+	)
 }
 
 // Match the raw TS accumulator's group roll triggers: they bound one program's staged input.
@@ -3018,11 +3079,6 @@ pub(super) struct PatReader {
 }
 
 impl PatReader {
-	/// The last payload counter, to continue a program map across an import restart.
-	pub(super) fn counter(&self) -> Option<u8> {
-		self.sections.continuity.counter()
-	}
-
 	/// Consume one packet on PID 0, counting each section dropped for a bad CRC into
 	/// `crc_error`. Returns the whole PAT if this packet completed one.
 	pub(super) fn push(&mut self, pkt: &[u8; TsPacket::SIZE], crc_error: &mut u64) -> Option<psi::Pat> {
@@ -6135,7 +6191,7 @@ pub(super) mod test {
 			"{restart:?}"
 		);
 		assert!(
-			looped.ends_with(&restart.remainder[2 * 188..]) && restart.remainder.len() - 2 * 188 <= data.len(),
+			looped.ends_with(&restart.remainder) && restart.remainder.len() <= data.len(),
 			"the new instance starts at the wrap"
 		);
 		import.finish().unwrap();
@@ -8518,11 +8574,7 @@ pub(super) mod test {
 				flagged: true
 			}
 		);
-		assert_eq!(
-			&restart.remainder[2 * 188..],
-			after,
-			"the unread media starts at the break after its PAT/PMT"
-		);
+		assert_eq!(restart.remainder, after, "the new instance starts at the break");
 		import.finish().unwrap();
 	}
 
@@ -10044,7 +10096,7 @@ pub(super) mod test {
 			matches!(restart.step, crate::container::ts::Step::Rewind { flagged: true, .. }),
 			"{restart:?}"
 		);
-		assert_eq!(&restart.remainder[2 * 188..], &mux.out[at..]);
+		assert_eq!(restart.remainder, mux.out[at..]);
 	}
 
 	/// The same restart unflagged, as a looping playout wraps to the top of its file.
@@ -10803,11 +10855,73 @@ pub(super) mod test {
 			"the first snapshot carries the PID"
 		);
 		assert_eq!(
-			first.clock,
-			catalog.snapshot().clock,
+			first.media.clock,
+			catalog.snapshot().media.clock,
 			"the first snapshot carries the anchored clock"
 		);
 		import.decode(&pes_fragment(PID, false, 1, &body)).unwrap();
+		import.finish().unwrap();
+	}
+
+	/// A provisional map routes only media whose config comes from its own bytes, and the catalog
+	/// waits for the source's own tables. Those set the program even under another identity and
+	/// PMT PID, after a clock that leads them, and end a provisional route they do not list
+	/// without announcing it, as they never open the Opus track only the predecessor listed.
+	#[tokio::test(start_paused = true)]
+	async fn a_provisional_map_yields_to_the_source_tables() {
+		use super::super::catalog::Ext;
+		const KEPT: u16 = 0x61;
+		const OPUS: u16 = 0x62;
+		const GONE: u16 = 0x63;
+		let opus: &[u8] = &[5, 4, b'O', b'p', b'u', b's'];
+		let predecessor =
+			super::Pmt::parse(&pmt_section(1, 0, &[(0x03, KEPT, &[]), (0x06, OPUS, opus), (0x03, GONE, &[])]))
+				.unwrap();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut initial = crate::catalog::hang::Catalog::<Ext>::default();
+		initial.ext.mpegts.mux_rate = Some(400_000);
+		let catalog =
+			crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default().with_catalog(initial))
+				.unwrap();
+		let mut published = catalog.consume().unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve())
+			.with_provisional(super::Provisional(Some(predecessor)));
+
+		let payload = (1..=3).map(mp2_frame).collect::<Vec<_>>().concat();
+		let len = 8 + payload.len();
+		let mut pes = vec![0, 0, 1, 0xc0, (len >> 8) as u8, len as u8, 0x80, 0x80, 5];
+		pes.extend_from_slice(&pes_timestamp(2, 90_000));
+		pes.extend_from_slice(&payload);
+		let (_, packets) = super::super::fixture::Mux::default().split(KEPT, &pes);
+		import.decode(&pcr_packet(KEPT, 27_000_000)).unwrap();
+		import.decode(&packets.concat()).unwrap();
+		assert_eq!(
+			catalog.snapshot().audio.renditions.len(),
+			1,
+			"the first frames configure their own track"
+		);
+		assert!(
+			published.poll_next(&kio::Waiter::noop()).is_pending(),
+			"the source has not confirmed its layout"
+		);
+
+		let mut tables = psi_packets(0, &mut 0, &[], &super::psi::section(0x00, 9, 0, 0, 0, &[0, 7, 0xe2, 0]));
+		tables.extend(psi_packets(0x200, &mut 0, &[], &pmt_section(7, 0, &[(0x03, KEPT, &[])])));
+		import.decode(&tables).unwrap();
+		let std::task::Poll::Ready(Ok(Some(first))) = published.poll_next(&kio::Waiter::noop()) else {
+			panic!("the source's PMT releases the catalog");
+		};
+		assert_eq!(first.audio.renditions.len(), 1, "only the source's stream announces");
+		assert_eq!(
+			first.ext.mpegts.tracks.values().map(|track| track.pid).collect::<Vec<_>>(),
+			[KEPT]
+		);
+		let program = first.ext.mpegts.program.as_ref().unwrap();
+		assert_eq!(
+			(program.transport_stream_id, program.program_number, program.pmt_pid),
+			(9, 7, 0x200),
+			"the source's PAT sets the identity"
+		);
 		import.finish().unwrap();
 	}
 
@@ -11348,7 +11462,6 @@ pub(super) mod test {
 				program_number,
 				pmt_pid: Pid::new(0x20).unwrap(),
 			}],
-			sections: Default::default(),
 		};
 		for (selected, transport_stream_id, program_number) in [(None, 2, 1), (None, 1, 2), (Some(1), 2, 1)] {
 			let (_catalog, import) = psi_import();

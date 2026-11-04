@@ -37,28 +37,22 @@ stitched export's first replacement picture and last old picture. The
 announcement comment is corrected, and a restart benchmark sweeps program
 count and bitrate.
 
-Remaining: replace the draft's synthetic program-map prefix with a handoff
-that preserves the first media without treating the predecessor's map as
-the new source's authoritative layout. Local review found that a source
-whose PCR precedes its new PAT can inherit the old identity and then fail
-when the new identity arrives. A PMT-configured old track can also announce
-before the source's new layout is known; moving the PMT PID can replay an
-obsolete section under its new PID. Cover those source changes before
-claiming readiness.
+Decided 2026-11-04 (maintainer, /quest-unblock): how a replacement gets the
+program map that already routed before the step.
 
-Public API: the handoff shape needs a maintainer decision. Wire: none.
+- ✅ Explicit provisional context in the Rust TS restart API, keeping
+  `Restart::remainder` as unread source bytes. The first actual PAT/PMT
+  establishes the new identity and layout, and predecessor-only tracks must
+  not announce.
+- Not chosen: preserve the API and refactor importer/step ownership so
+  program-map packets stay with their media.
 
-## Waiting
+Replace the draft's synthetic PAT/PMT prefix with that context. Cover a
+source whose PCR precedes its new PAT under another identity, a moved PMT
+PID, and a PMT-configured track only the predecessor listed.
 
-- Maintainer: choose the program-map handoff for a replacement. Recommended:
-  explicit provisional context in the Rust TS restart API, keeping
-  `Restart::remainder` as unread source bytes and allowing the first real
-  PAT/PMT to establish identity and layout. Alternative: keep the API and
-  refactor importer/step ownership so source program-map packets remain
-  with the media they describe; this is a larger internal change. Either
-  must prevent a provisional PMT from advertising predecessor-only tracks.
-  This changes API shape or step ownership beyond the original no-API-change
-  expectation, so the implementation agent cannot settle it unasked.
+Public API: `Restart` gains the provisional map, which a new `Import`
+follows until the source's own tables arrive. Wire: none.
 
 ## Closes
 

@@ -4,6 +4,16 @@ How to adopt new APIs and update for breaking changes, newest first.
 
 ## Unreleased
 
+### TS restarts carry a provisional program map ([#7780](https://github.com/moq-dev/moq/pull/7780))
+
+`container::ts::Restart` gains `provisional`, the program map the ended import followed.
+A caller that republishes `remainder` into a new `Import` passes it with `with_provisional`, so media the source sends before repeating its PAT and PMT is routed rather than dropped.
+The new import's catalog still waits for the source's own tables, which set the program's identity and layout.
+
+```rust
+let import = Import::new(broadcast, catalog.reserve()).with_provisional(restart.provisional);
+```
+
 ### `catalog::Config::with_max_age(None)` is unlimited ([#7729](https://github.com/moq-dev/moq/pull/7729))
 
 `Config::with_max_age` no longer treats `None` as "keep hang's default": an unset `Config` mints media tracks with `hang::container::MAX_AGE` (30 s), as before, `None` sets no publisher limit, and a value is that value.

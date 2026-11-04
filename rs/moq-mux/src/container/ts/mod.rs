@@ -52,7 +52,7 @@ pub use import::*;
 pub use passthrough::Passthrough;
 pub use programs::Programs;
 pub use release::Release;
-pub use step::{Restart, Step};
+pub use step::{Provisional, Restart, Step};
 
 pub mod stats;
 

@@ -330,7 +330,8 @@ fn restarts(c: &mut Criterion) {
 							.unwrap()
 							.downcast::<moq_mux::container::ts::Restart>()
 							.unwrap();
-						let (mut replacement, catalog) = open();
+						let (replacement, catalog) = open();
+						let mut replacement = replacement.with_provisional(restart.provisional);
 						replacement.decode(&restart.remainder).unwrap();
 						for chunk in chunks {
 							replacement.decode(chunk).unwrap();

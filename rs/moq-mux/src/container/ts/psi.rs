@@ -136,8 +136,6 @@ pub(super) struct Association {
 pub(super) struct Pat {
 	pub transport_stream_id: u16,
 	pub programs: Vec<Association>,
-	/// Complete source sections, retained for a replacement import's program-map context.
-	pub sections: std::sync::Arc<[bytes::Bytes]>,
 }
 
 /// Collects PAT sections until every section of one version has arrived.
@@ -148,7 +146,7 @@ pub(super) struct Pat {
 pub(super) struct PatAssembler {
 	/// The version, transport_stream_id, and last_section_number being collected.
 	table: Option<(u8, u16, u8)>,
-	sections: BTreeMap<u8, (Vec<Association>, bytes::Bytes)>,
+	sections: BTreeMap<u8, Vec<Association>>,
 }
 
 impl PatAssembler {
@@ -176,39 +174,14 @@ impl PatAssembler {
 			self.table = Some(table);
 			self.sections.clear();
 		}
-		self.sections
-			.insert(header.number, (programs, bytes::Bytes::copy_from_slice(section)));
+		self.sections.insert(header.number, programs);
 		if self.sections.len() <= usize::from(header.last) {
 			return None;
 		}
 		Some(Pat {
 			transport_stream_id: header.extension,
-			programs: self
-				.sections
-				.values()
-				.flat_map(|(programs, _)| programs)
-				.copied()
-				.collect(),
-			sections: self.sections.values().map(|(_, section)| section.clone()).collect(),
+			programs: self.sections.values().flatten().copied().collect(),
 		})
-	}
-}
-
-/// Packetize source sections, ending at the PID's last counter so the unread input continues it.
-pub(super) fn packets(out: &mut Vec<u8>, (pid, last): (u16, Option<u8>), sections: &[bytes::Bytes]) {
-	let count: usize = sections.iter().map(|section| (1 + section.len()).div_ceil(184)).sum();
-	let mut cc = last.unwrap_or(15).wrapping_add(1).wrapping_sub((count % 16) as u8) & 15;
-	for section in sections {
-		let mut payload = Vec::with_capacity(1 + section.len());
-		payload.push(0); // pointer_field: the section starts here.
-		payload.extend_from_slice(section);
-		for (i, chunk) in payload.chunks(184).enumerate() {
-			let end = out.len() + 188;
-			out.extend_from_slice(&[0x47, u8::from(i == 0) << 6 | (pid >> 8) as u8, pid as u8, 0x10 | cc]);
-			out.extend_from_slice(chunk);
-			out.resize(end, 0xff);
-			cc = (cc + 1) & 15;
-		}
 	}
 }
 
@@ -587,45 +560,6 @@ mod test {
 		// A new version starts over rather than mixing with the old one's sections.
 		let next = section(0, 7, 4, 0, 1, &[0x00, 0x03, 0xe3, 0x00]);
 		assert_eq!(pat.section(&next), None);
-	}
-
-	/// A restart preserves a multi-section PAT, including a section spanning packets, and
-	/// continues the source's counter even when the prefix wraps through zero.
-	#[test]
-	fn restart_packets_preserve_whole_sections_and_the_counter() {
-		let entries: Vec<_> = (1u16..=200)
-			.flat_map(|program| {
-				let mut entry = program.to_be_bytes().to_vec();
-				entry.extend_from_slice(&(0xe000 | (0x100 + program)).to_be_bytes());
-				entry
-			})
-			.collect();
-		let sections: Vec<bytes::Bytes> = [
-			section(0, 7, 3, 0, 1, &entries),
-			section(0, 7, 3, 1, 1, &[0, 201, 0xe3, 1]),
-		]
-		.into_iter()
-		.map(Into::into)
-		.collect();
-		let mut input = Vec::new();
-		packets(&mut input, (0, Some(1)), &sections);
-		let mut continuity = super::super::health::Continuity::default();
-		let mut reader = super::super::import::PatReader::default();
-		let mut errors = 0;
-		let mut pat = None;
-		for packet in input.as_chunks::<188>().0 {
-			assert_eq!(
-				continuity.observe(packet),
-				super::super::health::Continuation::Contiguous
-			);
-			pat = reader.push(packet, &mut errors).or(pat);
-		}
-		let pat = pat.unwrap();
-		assert_eq!(pat.sections.as_ref(), sections);
-		assert_eq!(pat.programs.len(), 201);
-		assert_eq!(pat.programs.last().unwrap().program_number, 201);
-		assert_eq!(reader.counter(), Some(1));
-		assert_eq!(errors, 0);
 	}
 
 	#[test]

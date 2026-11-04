@@ -191,11 +191,6 @@ impl Demux {
 		self.health.errors()
 	}
 
-	/// The PAT's last payload counter, to seed a replacement import's program map.
-	pub fn pat_counter(&self) -> Option<u8> {
-		self.pat.counter()
-	}
-
 	/// PAT sections dropped for a bad CRC.
 	pub fn pat_crc_error(&self) -> u64 {
 		self.pat_crc_error

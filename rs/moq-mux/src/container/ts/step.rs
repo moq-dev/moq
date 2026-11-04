@@ -24,7 +24,7 @@ use super::health::{Continuation, Continuity, Delta, PTS_LIMIT};
 use super::import::{Framer, Payload, STAGING_BYTES_MAX, adaptation_valid, discontinuity_indicator, payload, pcr};
 use super::mux_rate::PCR_WRAP;
 use super::passthrough::PCR_HZ;
-use super::psi::PesStart;
+use super::psi::{PesStart, Pmt};
 
 /// A forward step beyond this is another timeline: ffmpeg's `dts_delta_threshold`.
 const LEAP: Duration = Duration::from_secs(10);
@@ -35,17 +35,24 @@ const PTS_WRAP: u64 = 1 << 33;
 /// instance there.
 ///
 /// What follows is another broadcast. A caller that carries on finishes this import and
-/// publishes [`remainder`](Self::remainder) into a new one, as a new instance under a new instance.
+/// publishes [`remainder`](Self::remainder) into a new one, as a new instance under a new instance,
+/// routed by [`provisional`](Self::provisional) until the source repeats its PAT and PMT.
 #[derive(Clone, Debug, thiserror::Error)]
 #[non_exhaustive]
 #[error("the source's clock {step}; what follows is a new broadcast")]
 pub struct Restart {
 	/// How the clock stepped.
 	pub step: Step,
-	/// The current PAT/PMT followed by the input from the step on, which this import did not read.
-	/// The tables let a new importer route media whose map already arrived before the step.
+	/// The input from the step on, which this import did not read.
 	pub remainder: Bytes,
+	/// The program map this import followed, which may have arrived just before the step.
+	pub provisional: Provisional,
 }
+
+/// A program map from before a clock step, which routes a new import's first media only until
+/// the source's own PAT and PMT arrive ([`Import::with_provisional`](super::Import::with_provisional)).
+#[derive(Clone, Debug, Default)]
+pub struct Provisional(pub(super) Option<Pmt>);
 
 /// How the source's clock stepped, ending an import's instance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
