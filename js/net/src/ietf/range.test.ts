@@ -143,7 +143,8 @@ for (const version of VERSIONS) {
 		const fx = fixture(version);
 		const reader = fx.broadcast.track("video").subscribe(ranges(1n, 5n));
 		fx.readers.push(reader);
-		const read = reader.recvGroup();
+		const ordered = reader.ordered();
+		const read = ordered.nextGroup();
 		await fx.status();
 		const { stream, request } = await fx.fetch();
 		await fx.answer(stream, 4n);
@@ -154,20 +155,37 @@ for (const version of VERSIONS) {
 		expect(await payloads(first)).toEqual(["1a", "", "1c"]);
 		first.close();
 		for (const sequence of [3n, 4n]) {
-			const group = await reader.recvGroup();
+			const group = await ordered.nextGroup();
 			expect(group?.sequence).toBe(sequence);
 			if (!group) throw new Error("missing group");
 			expect(await payloads(group)).toEqual([`${sequence}a`, "", `${sequence}c`]);
 			group.close();
 		}
-		expect(await reader.recvGroup()).toBeUndefined();
-		reader.update(ranges(0n, 1n));
-		const more = reader.recvGroup();
+		expect(await ordered.nextGroup()).toBeUndefined();
+		const overlapping = fx.broadcast.track("video").subscribe(ranges(0n, 5n));
+		fx.readers.push(overlapping);
+		const overlap = overlapping.ordered();
+		const missing = overlap.nextGroup();
+		const backfill = await fx.fetch();
+		await fx.answer(backfill.stream, 0n);
+		await fx.data(backfill.request.requestId, [0n]);
+		const zero = await missing;
+		expect(zero?.sequence).toBe(0n);
+		zero?.close();
+		for (const sequence of [1n, 3n, 4n]) {
+			const group = await overlap.nextGroup();
+			expect(group?.sequence).toBe(sequence);
+			group?.close();
+		}
+		expect(await overlap.nextGroup()).toBeUndefined();
+		overlapping.close();
+		reader.update(ranges(5n, 6n));
+		const more = ordered.nextGroup();
 		const second = await fx.fetch();
-		await fx.answer(second.stream, 0n);
-		await fx.data(second.request.requestId, [0n]);
+		await fx.answer(second.stream, 5n);
+		await fx.data(second.request.requestId, [5n]);
 		const group = await more;
-		expect(group?.sequence).toBe(0n);
+		expect(group?.sequence).toBe(5n);
 		group?.close();
 	});
 

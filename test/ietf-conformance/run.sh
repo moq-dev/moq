@@ -11,7 +11,10 @@ fetch_only=0
 case "${1:-}" in
     "") ;;
     --fetch) fetch_only=1 ;;
-    *) echo "usage: run.sh [--fetch]" >&2; exit 2 ;;
+    *)
+        echo "usage: run.sh [--fetch]" >&2
+        exit 2
+        ;;
 esac
 
 CONFORMANCE_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)

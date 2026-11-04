@@ -1024,8 +1024,7 @@ export class Subscriber {
 				ietf: this.#session.version,
 			});
 			producer = staged.producer;
-			hooks.receiveTrack(producer);
-			hooks.startTrack(producer, { start: null });
+			// Only FETCH feeds this copy. Mark it live if a later widening opens SUBSCRIBE.
 			if (ok.largest) hooks.reportedGroup(producer, ok.largest.groupId);
 			const requests = producer.requests();
 			fills = this.#runFills(broadcast, producer, requests, signal);
