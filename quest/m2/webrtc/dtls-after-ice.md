@@ -12,4 +12,4 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [Vendor and trim the stack](/quest/m2/webrtc/vendor.md) - the DTLS activation this moves
+- [Vendor and trim the stack](/quest/m1/webrtc-vendor.md) - the DTLS activation this moves

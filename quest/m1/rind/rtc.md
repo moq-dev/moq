@@ -30,4 +30,4 @@ offered.
 
 ## Required
 
-- [Vendor and trim the stack](/quest/m2/webrtc/vendor.md) - where str0m and dimpl live once vendored
+- [Vendor and trim the stack](/quest/m1/webrtc-vendor.md) - where str0m and dimpl live once vendored

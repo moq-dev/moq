@@ -8,13 +8,15 @@ moq-webrtc builds str0m, dimpl, `is`, and sctp-proto from private in-tree module
 
 Decided 2026-10-30 with the maintainer (planning interview); see the [epic](/quest/m2/webrtc/README.md) for what goes and why.
 
+Milestone: ✅ m1 (moved from m2, maintainer, 2026-11-03). Not chosen: keep it in m2, or send [moq-rtc on rind](/quest/m1/rind/rtc.md) back to m2. m1's [moq-rtc on rind](/quest/m1/rind/rtc.md) requires this, so it sits at the m1 top level. It stays a child of the m2 [WebRTC epic](/quest/m2/webrtc/README.md).
+
 - Vendor str0m and str0m-proto at the main-branch revision moq-dev/rind's `rind-str0m` targeted (`dc317173`, on dimpl 0.9 with str0m's pluggable crypto provider), with the dimpl, `is`, and sctp-proto versions it depends on (maintainer, 2026-10-31), so [moq-rtc on rind](/quest/m1/rind/rtc.md) can port rind's provider code unchanged. Commit them unchanged first so later diffs show only our changes, then trim.
 - Remove: str0m's `bwe/`, leaky pacer, H.266, RED, DTMF, G.7xx and comfort noise, VLA and simulcast layers, RTCP XR and app feedback, stats, `_internal_test_exports`, the crypto backends other than the one rind will replace (keep the provider trait until [moq-rtc on rind](/quest/m1/rind/rtc.md)); dimpl's `dtls13/` and `auto.rs`. Keep upstream's tests for what remains.
 - Keep the license files and record each upstream version in the module docs.
 - Drop the crates.io dependencies on str0m and friends from the workspace once nothing uses them.
 
-Public API: none beyond what [rename](/quest/m2/webrtc/rename.md) changed. Wire: unchanged; the same DTLS 1.2 suites and SRTP profiles are offered.
+Public API: none beyond what [rename](/quest/m1/webrtc-rename.md) changed. Wire: unchanged; the same DTLS 1.2 suites and SRTP profiles are offered.
 
 ## Required
 
-- [Rename moq-rtc to moq-webrtc](/quest/m2/webrtc/rename.md) - the crate the stack is vendored into
+- [Rename moq-rtc to moq-webrtc](/quest/m1/webrtc-rename.md) - the crate the stack is vendored into

@@ -20,8 +20,8 @@ Decided 2026-10-30 with the maintainer (planning interview), after the str0m wor
 
 ## Required
 
-- [Rename moq-rtc to moq-webrtc](/quest/m2/webrtc/rename.md) - one crate holds the gateway, the ICE driver, and the data-channel transport
-- [Vendor and trim the stack](/quest/m2/webrtc/vendor.md) - str0m, dimpl, `is`, and sctp-proto live in moq-webrtc with unused code removed
+- [Rename moq-rtc to moq-webrtc](/quest/m1/webrtc-rename.md) - one crate holds the gateway, the ICE driver, and the data-channel transport
+- [Vendor and trim the stack](/quest/m1/webrtc-vendor.md) - str0m, dimpl, `is`, and sctp-proto live in moq-webrtc with unused code removed
 - [Several bandwidth lines per media section](/quest/m2/webrtc/sdp-bandwidth.md) - answers carry both `b=TIAS` and `b=AS` without splicing
 - [DTLS waits for ICE](/quest/m2/webrtc/dtls-after-ice.md) - DTLS flights start once ICE nominates a pair, so a late ICE path can't exhaust them
 - [The stack takes kio clock time](/quest/m2/webrtc/clock.md) - the vendored code takes `kio::clock::Instant`, so sim tests drive it directly
