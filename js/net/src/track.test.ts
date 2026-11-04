@@ -1055,7 +1055,7 @@ test("a relative range counts back from the latest group, or waits for the first
 	for (let sequence = 0n; sequence < 5n; sequence++) producer.createGroup(sequence).finish();
 	const back = producer.subscribe({
 		delay: { max: null },
-		ranges: [{ start: { relative: 2 }, end: { relative: 1 } }],
+		ranges: [{ start: { relative: 2n }, end: { relative: 1n } }],
 	});
 	expect([back.tryRecvGroup()?.sequence, back.tryRecvGroup()?.sequence, back.tryRecvGroup()]).toEqual([
 		2n,
@@ -1064,7 +1064,7 @@ test("a relative range counts back from the latest group, or waits for the first
 	]);
 
 	const empty = new TrackProducer("test");
-	const live = empty.subscribe({ delay: { max: null }, ranges: [{ start: { relative: 0 } }] });
+	const live = empty.subscribe({ delay: { max: null }, ranges: [{ start: { relative: 0n } }] });
 	empty.createGroup(7n).finish();
 	empty.createGroup(6n).finish();
 	empty.createGroup(8n).finish();
@@ -1078,8 +1078,8 @@ test("a relative range counts back from the latest group, or waits for the first
 
 test("a copy over a wire without ranges refuses a relative anchor it cannot carry", () => {
 	const producer = new TrackProducer("test");
-	const back = producer.subscribe({ ranges: [{ start: { relative: 3 } }] });
-	const live = producer.subscribe({ ranges: [{ start: { relative: 0 } }] });
+	const back = producer.subscribe({ ranges: [{ start: { relative: 3n } }] });
+	const live = producer.subscribe({ ranges: [{ start: { relative: 0n } }] });
 	hooks.dropAnchors(producer);
 	producer.createGroup(0n).finish();
 	expect(() => back.tryRecvGroup()).toThrow("moq-lite-07");
