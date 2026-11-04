@@ -1,77 +1,93 @@
-# [S] Dependabot leaves the workspace-hack to hakari
+# [M] Renovate keeps the workspace-hack generated
 
 ## Goal
 
-A Dependabot cargo group PR arrives with `rs/workspace-hack/Cargo.toml`
-matching `cargo hakari generate`, so nobody regenerates it by hand. Dependabot
-no longer bumps the hack's transitive pins and pulls in duplicate majors.
-Dependabot still updates every other cargo manifest and `Cargo.lock`. Done
-when a Dependabot cargo group PR passes `cargo hakari generate --diff` (in
-`just rs lint`) without a manual commit.
+Cargo dependency update PRs arrive with `rs/workspace-hack/Cargo.toml`
+matching `cargo hakari generate`, so nobody regenerates it by hand and no
+update bumps the hack's transitive pins into duplicate majors. A scheduled,
+self-hosted Renovate run from `main` opens them and runs `cargo hakari
+generate` after each cargo upgrade. Dependabot stops updating cargo and keeps
+every other ecosystem. Pull-request CI stays read-only. Done when a Renovate
+cargo group PR passes `cargo hakari generate --diff` (in `just rs lint`)
+without a manual commit.
 
 ## Plan
 
-Planned 2026-11-03 (maintainer, `/quest-plan`), from
-[moq-dev/moq#7782](https://github.com/moq-dev/moq/pull/7782). Dependabot
-edited the hakari-generated `rs/workspace-hack/Cargo.toml` by hand, bumping
-transitive pins (rustc-hash 1→2, num-bigint, rand_chacha, spin, const-oid,
-itertools, quick-xml, tower-http, windows-core). Those bumps only added
-duplicate majors, and a maintainer commit had to regenerate the file back to
-main's contents. Every cargo group PR does the same, since the cargo entry in
-`.github/dependabot.yml` groups `"*"` from `/`.
+✅ Decided 2026-11-04 (maintainer, on
+[moq-dev/moq#7819](https://github.com/moq-dev/moq/pull/7819)): measure
+hakari's cache benefit and drop it if small. If it is big, keep it and
+evaluate Renovate as a protected scheduled updater that runs `cargo hakari
+generate`. The benefit measured big, so hakari stays.
 
-Tested 2026-11-03 in [moq-dev/moq#7819](https://github.com/moq-dev/moq/pull/7819),
-using a disposable archive of
-[cd5a8476cb](https://github.com/moq-dev/moq/commit/cd5a8476cb21681ad08f5ac96eb433253f57547c)
-and the official Cargo updater image at digest
+**Measurement**, 2026-11-04, on `nixos2` (12 cores, 15 GiB). mbx's memory
+budget held it near two parallel compilations, close to a 4-vCPU hosted
+runner. Source was [17a81d6c64](https://github.com/moq-dev/moq/commit/17a81d6c64c0ec05e85df3557d688a8963d9f524),
+with CI's mbx 1.28.0, a private local store and no remote cache. Each PR
+shape is the build CI's Check runs, `sh/rs/select.sh test`, compiled with
+`--no-run`, for a one-line `pub const` added to that crate's `lib.rs`.
+"Warm" starts from a copy of the store that a cold full-workspace build
+left; that build is Nightly's `gate`, which writes the hosted cache. "Cold"
+starts empty, as a fork PR without cache credentials does. "No hack" ran
+`cargo hakari disable && cargo update --workspace` first.
+
+| PR shape (crates selected) | Warm, hack | Warm, no hack | Cold, hack | Cold, no hack |
+| --- | --- | --- | --- | --- |
+| moq-relay (2) | 147 s | 288 s | 430 s | 407 s |
+| moq-video (7) | 169 s | 310 s | 450 s | 462 s |
+| moq-net (30) | 451 s | 610 s | 814 s | 1007 s |
+| JS-only | no Rust build | no Rust build | no Rust build | no Rust build |
+
+The hack saves 141-159 s per warm Rust PR build, 26-49% of it. That is
+about a fifth of the median hosted Check run: 688 s over the last 40
+successful runs. mbx served 725-873 compilations per warm build with the hack
+and 425-602 without. Without the hack, 333-396 compilations had no recording
+to look up (60-108 with it), because each selection resolves its own
+dependency features. Cold builds stay within noise. The moq-net cold gap ran
+under higher host load, and its CPU time differs by only 10%: 1663 s
+against 1828 s. Hosted R2 hits are partial today (for example, 116 hits and
+239 misses with missing-blob warnings in
+[run 41789499917](https://github.com/moq-dev/moq/actions/runs/41789499917)),
+which [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) tracks. The
+self-hosted queue and agents share persistent local stores, which the warm
+case models.
+
+**Dependabot cannot do this.** Tested 2026-11-03 in
+[moq-dev/moq#7819](https://github.com/moq-dev/moq/pull/7819) by running
+Dependabot's own Cargo code in its official updater image, digest
 `sha256:a49f8e5edbcbd179325a7cffbde6541cbc17b9ade1d86f61ff8d217b1eca5983`.
-The Dependabot CLI verified its producer commit as
-[6a43f5c18a](https://github.com/dependabot/dependabot-core/commit/6a43f5c18a7120386064c4afabb6a3e803d63d90).
-The tests called the image's real Cargo fetcher, parser, update checker and
-file updater without credentials; they did not create hosted update PRs.
+Excluding the hack (`exclude-paths`) drops the required manifest, so update
+checks fail with `failed to load manifest for dependency workspace-hack`.
+Without exclusion it hand-edits the hack's pins, as in
+[moq-dev/moq#7782](https://github.com/moq-dev/moq/pull/7782). Ignore rules have
+no file scope.
 
-- **Exclusion fails.** GitHub
-  [documents `exclude-paths`](https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference#exclude-paths),
-  but both `rs/workspace-hack/**` and the exact manifest path remove the
-  required manifest from the resolver's temporary workspace. Fetching and
-  parsing succeed; checking a root `rustc-hash` update then fails with
-  `failed to load manifest for dependency workspace-hack` and a missing
-  `rs/workspace-hack/Cargo.toml`. No update can be produced by that path.
-- **The control reproduces the bug.** With no exclusion, Dependabot changes
-  the hack's `rustc-hash` requirement from 1 to 2 and updates `Cargo.lock`,
-  while the root requirement already uses 2.1.3. `cargo hakari generate --diff`
-  passes on the original archive and fails on the updater's output, restoring
-  the four generated requirements to 1.
-- **Ignore rules have no file scope.** They match a dependency name, versions
-  and update types, so excluding the hack's older line also excludes the same
-  crate's legitimate direct updates. Do not maintain a generated list of pins.
+**Renovate**, following hakari's maintainer
+([nextest-rs/renovate](https://github.com/nextest-rs/renovate)). The
+Mend-hosted app allows only its own undisclosed post-upgrade commands, so
+Renovate runs self-hosted:
 
-No configuration-only fix was proven. Remaining work is to choose and test
-an updater that regenerates the hack after dependency resolution, or wait for
-Dependabot support. Hakari's maintainer
-[uses Renovate for this reason](https://github.com/guppy-rs/guppy/issues/320#issuecomment-2408686014),
-with a post-upgrade generation hook. Merely preserving an excluded manifest
-as resolver input would still need testing when legitimate updates change
-hakari's generated graph.
-
-Do not build a workflow that writes back to `dependabot/cargo/*` before the
-maintainer decides its scope and credential policy; it conflicts with
-[Read-only pull-request CI](/quest/m0/ci/read-only-secrets.md).
+- A workflow on `schedule` and `workflow_dispatch` runs Renovate against this
+  repository. Only that job holds a write credential, through an Environment
+  whose branch policy admits only `main`. Use a GitHub App installation token
+  with contents and pull-request write, so the PRs it opens trigger CI. The
+  maintainer creates the App and the Environment secret; ask them when the
+  workflow is ready. Grant no write token to any `pull_request` workflow, and
+  never write back to `dependabot/cargo/*`.
+- The self-hosted `allowedCommands` admits exactly `^cargo hakari generate$`.
+  The cargo manager's `postUpgradeTasks` runs it, with `fileFilters` limited to
+  `rs/workspace-hack/Cargo.toml`. `cargo hakari generate` reads `cargo
+  metadata` and runs no build script, so the write-token job compiles no
+  upgraded code. Install cargo-hakari at the dev shell's version (0.9.39 today)
+  where Renovate runs.
+- Group every cargo update into one PR, and keep Dependabot's 7-day cooldown
+  as `minimumReleaseAge`. Remove the cargo entry from `.github/dependabot.yml`
+  in the same PR. Check whether Dependabot security updates for cargo still
+  hand-edit the hack; if so, let Renovate's vulnerability alerts take them
+  over.
 
 Public API: none. Wire: none.
-
-## Waiting
-
-- Maintainer: choose the updater and write-credential boundary now that
-  exclusion fails. Recommend evaluating a protected scheduled Cargo updater
-  with hakari generation before it publishes its PR, such as Renovate, rather
-  than granting a pushed branch a write token. Alternatively retain Dependabot
-  and manual generation while seeking upstream support. Changing the updater
-  or granting branch-writing CI a policy exception needs the maintainer's
-  decision; no workaround or credential change has been implemented. Clear
-  this wait by recording the choice and its credential policy here, then test
-  a complete grouped update against the Goal.
 
 ## Related
 
 - [Unify dependency features with cargo-hakari](/quest/m0/ci/hakari.md) - the workspace-hack this keeps generated
+- [Read-only pull-request CI](/quest/m0/ci/read-only-secrets.md) - the credential boundary the updater must keep
