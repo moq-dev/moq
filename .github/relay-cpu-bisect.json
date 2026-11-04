@@ -5111,6 +5111,263 @@
 					"per_group": 113142.93781887754
 				}
 			]
+		},
+		{
+			"artifact": "nixos2:run.4rAIYS",
+			"note": "moq-dev/moq#6995 and moq-dev/moq#7542 each against its parent, beside main at fa9c1bf2a7 (current), with callgrind",
+			"harness_revision": "fa9c1bf2a713e5cddf1ec9600a831662308f77a0",
+			"frame_pointers": false,
+			"counts": [
+				{
+					"label": "base-3f5939eb2ee3",
+					"revision": "3f5939eb2ee39f4ff9d52f6c061ff366110ced6a",
+					"scenario": "model",
+					"subscribers": 64,
+					"per_group": 11383.62037
+				},
+				{
+					"label": "base-3f5939eb2ee3",
+					"revision": "3f5939eb2ee39f4ff9d52f6c061ff366110ced6a",
+					"scenario": "model",
+					"subscribers": 512,
+					"per_group": 11183.88592810421
+				},
+				{
+					"label": "base-81fe8a6631cf",
+					"revision": "81fe8a6631cf4c3402ab7e04a1dbf3ccb61ba264",
+					"scenario": "model",
+					"subscribers": 64,
+					"per_group": 11946.947874
+				},
+				{
+					"label": "base-81fe8a6631cf",
+					"revision": "81fe8a6631cf4c3402ab7e04a1dbf3ccb61ba264",
+					"scenario": "model",
+					"subscribers": 512,
+					"per_group": 11741.044139225627
+				},
+				{
+					"label": "base-4eb9c23db5de",
+					"revision": "4eb9c23db5de2baa48ef838c357392fa6424fa2a",
+					"scenario": "model",
+					"subscribers": 64,
+					"per_group": 12130.777
+				},
+				{
+					"label": "base-4eb9c23db5de",
+					"revision": "4eb9c23db5de2baa48ef838c357392fa6424fa2a",
+					"scenario": "model",
+					"subscribers": 512,
+					"per_group": 11924.981775164726
+				},
+				{
+					"label": "base-f1034b7cc973",
+					"revision": "f1034b7cc973009bb33abfd06404be1a1dea0266",
+					"scenario": "model",
+					"subscribers": 64,
+					"per_group": 13030.641598
+				},
+				{
+					"label": "base-f1034b7cc973",
+					"revision": "f1034b7cc973009bb33abfd06404be1a1dea0266",
+					"scenario": "model",
+					"subscribers": 512,
+					"per_group": 12824.633319272965
+				},
+				{
+					"label": "current",
+					"revision": "fa9c1bf2a713e5cddf1ec9600a831662308f77a0",
+					"scenario": "model",
+					"subscribers": 64,
+					"per_group": 9842.698621
+				},
+				{
+					"label": "current",
+					"revision": "fa9c1bf2a713e5cddf1ec9600a831662308f77a0",
+					"scenario": "model",
+					"subscribers": 512,
+					"per_group": 9636.831055687053
+				},
+				{
+					"label": "base-3f5939eb2ee3",
+					"revision": "3f5939eb2ee39f4ff9d52f6c061ff366110ced6a",
+					"scenario": "session",
+					"subscribers": 64,
+					"per_group": 142667.32649552144
+				},
+				{
+					"label": "base-3f5939eb2ee3",
+					"revision": "3f5939eb2ee39f4ff9d52f6c061ff366110ced6a",
+					"scenario": "session",
+					"subscribers": 512,
+					"per_group": 140201.8951291454
+				},
+				{
+					"label": "base-81fe8a6631cf",
+					"revision": "81fe8a6631cf4c3402ab7e04a1dbf3ccb61ba264",
+					"scenario": "session",
+					"subscribers": 64,
+					"per_group": 146173.30892114525
+				},
+				{
+					"label": "base-81fe8a6631cf",
+					"revision": "81fe8a6631cf4c3402ab7e04a1dbf3ccb61ba264",
+					"scenario": "session",
+					"subscribers": 512,
+					"per_group": 143490.09075055804
+				},
+				{
+					"label": "base-4eb9c23db5de",
+					"revision": "4eb9c23db5de2baa48ef838c357392fa6424fa2a",
+					"scenario": "session",
+					"subscribers": 64,
+					"per_group": 118886.59577935061
+				},
+				{
+					"label": "base-4eb9c23db5de",
+					"revision": "4eb9c23db5de2baa48ef838c357392fa6424fa2a",
+					"scenario": "session",
+					"subscribers": 512,
+					"per_group": 116810.04079639669
+				},
+				{
+					"label": "base-f1034b7cc973",
+					"revision": "f1034b7cc973009bb33abfd06404be1a1dea0266",
+					"scenario": "session",
+					"subscribers": 64,
+					"per_group": 121965.10142754318
+				},
+				{
+					"label": "base-f1034b7cc973",
+					"revision": "f1034b7cc973009bb33abfd06404be1a1dea0266",
+					"scenario": "session",
+					"subscribers": 512,
+					"per_group": 119858.4774593431
+				},
+				{
+					"label": "current",
+					"revision": "fa9c1bf2a713e5cddf1ec9600a831662308f77a0",
+					"scenario": "session",
+					"subscribers": 64,
+					"per_group": 111825.13812579974
+				},
+				{
+					"label": "current",
+					"revision": "fa9c1bf2a713e5cddf1ec9600a831662308f77a0",
+					"scenario": "session",
+					"subscribers": 512,
+					"per_group": 110023.01396085777
+				}
+			],
+			"callgrind_session_512": {
+				"unit": "instructions per delivered group, from bench/fanout.py functions and compare",
+				"moq-dev/moq#6995 merge against parent, self": {
+					"TrackState::live": 2042.1,
+					"Chain<Flatten<..>> in live": 738.7,
+					"btree Range::next_back": 340.1,
+					"BTreeMap<u64, Slot>::range, removed": -1724.3,
+					"Cursor::probe": 1115.0,
+					"TrackState::drift_edge": -328.3,
+					"program total": 2974.5
+				},
+				"moq-dev/moq#7542 merge against parent": {
+					"runs::Layered::first inclusive": 2921.7,
+					"runs::Layered::last inclusive": 887.7,
+					"program total": 3042.7
+				},
+				"inclusive by revision": {
+					"TrackState::live": {
+						"81fe8a6631": 3782.1,
+						"f1034b7cc9": 2816.9,
+						"fa9c1bf2a7": 2839.6
+					},
+					"runs::Layered::first": {
+						"f1034b7cc9": 2921.7,
+						"fa9c1bf2a7": 1515.4
+					},
+					"runs::Layered::last": {
+						"f1034b7cc9": 887.7,
+						"fa9c1bf2a7": 601.7
+					},
+					"Cursor::probe": {
+						"81fe8a6631": 19258.3,
+						"f1034b7cc9": 16174.8,
+						"fa9c1bf2a7": 9399.6
+					}
+				},
+				"self by revision": {
+					"Cursor::probe": {
+						"81fe8a6631": 4343.2,
+						"f1034b7cc9": 3226.0,
+						"fa9c1bf2a7": 1842.4
+					}
+				},
+				"TrackState::live callers on fa9c1bf2a7": "drift_edge 18.2M and arrival 6.7M of 24.9M inclusive instructions over the run"
+			}
+		},
+		{
+			"artifact": "nixos2:run.m71Z8E",
+			"note": "this PR's live walk (92b877834f, counted as a working-tree patch on fa9c1bf2a7, so both labels record fa9c1bf2a7) against main at fa9c1bf2a7 (base)",
+			"harness_revision": "fa9c1bf2a713e5cddf1ec9600a831662308f77a0",
+			"frame_pointers": false,
+			"counts": [
+				{
+					"label": "base",
+					"revision": "fa9c1bf2a713e5cddf1ec9600a831662308f77a0",
+					"scenario": "model",
+					"subscribers": 64,
+					"per_group": 9842.699317
+				},
+				{
+					"label": "base",
+					"revision": "fa9c1bf2a713e5cddf1ec9600a831662308f77a0",
+					"scenario": "model",
+					"subscribers": 512,
+					"per_group": 9636.831806350754
+				},
+				{
+					"label": "current",
+					"revision": "fa9c1bf2a713e5cddf1ec9600a831662308f77a0",
+					"scenario": "model",
+					"subscribers": 64,
+					"per_group": 9572.745755
+				},
+				{
+					"label": "current",
+					"revision": "fa9c1bf2a713e5cddf1ec9600a831662308f77a0",
+					"scenario": "model",
+					"subscribers": 512,
+					"per_group": 9366.837443825167
+				},
+				{
+					"label": "base",
+					"revision": "fa9c1bf2a713e5cddf1ec9600a831662308f77a0",
+					"scenario": "session",
+					"subscribers": 64,
+					"per_group": 111823.2947856686
+				},
+				{
+					"label": "base",
+					"revision": "fa9c1bf2a713e5cddf1ec9600a831662308f77a0",
+					"scenario": "session",
+					"subscribers": 512,
+					"per_group": 110014.30896245217
+				},
+				{
+					"label": "current",
+					"revision": "fa9c1bf2a713e5cddf1ec9600a831662308f77a0",
+					"scenario": "session",
+					"subscribers": 64,
+					"per_group": 110923.76357565579
+				},
+				{
+					"label": "current",
+					"revision": "fa9c1bf2a713e5cddf1ec9600a831662308f77a0",
+					"scenario": "session",
+					"subscribers": 512,
+					"per_group": 109123.37050581952
+				}
+			]
 		}
 	],
 	"quiet_host_runs": [

@@ -94,7 +94,7 @@ In-tree qmux ([moq-dev/moq#6231](https://github.com/moq-dev/moq/pull/6231)) and 
 
 The session column starts at the 2026-11-01 harness; blank cells predate it. [moq-dev/moq#6995](https://github.com/moq-dev/moq/pull/6995)'s session cost is the probe's walk of the live groups (`TrackState::live`, +4.0k inclusive) on both the reader's cursor and its forward-drop cursor.
 
-## Fixes in this PR
+## Fixes in moq-dev/moq#7605
 
 Each is its own commit, counted in one run (run.s6IjbN in the evidence) at 512 subscribers per delivered group, each row on top of the one above:
 
@@ -103,7 +103,7 @@ Each is its own commit, counted in one run (run.s6IjbN in the evidence) at 512 s
 | `main` | 13,300 | 120,948 |
 | A live reader's probe skips the fills while it misses nothing | 10,477 (-2,823) | 114,139 (-6,809) |
 | A window with one set of runs reads without growing across two | 10,126 (-351) | 113,133 (-1,007) |
-| This branch | 10,126 (-23.9%) | 113,133 (-6.5%) |
+| All of them | 10,126 (-23.9%) | 113,133 (-6.5%) |
 
 Against `main` at [619df6e1b3](https://github.com/moq-dev/moq/commit/619df6e1b3) (run.evL1wx), after merging it: model 13,368 to 10,119 (-24.3%), session 121,114 to 113,143 (-6.6%).
 
@@ -112,6 +112,27 @@ Against `main` at [619df6e1b3](https://github.com/moq-dev/moq/commit/619df6e1b3)
 kio's `WaiterList::register` is the session path's second-largest self cost: 7.2k per group. A waiter records 8 lists, and a relay session's control and serving tasks park on more, so every list past the eighth takes a duplicate entry on every poll. Remembering 16 cut the session by 4,424 (-3.9%) and was reverted: with it, two moq-net integration tests (`errored_end::an_errored_end_keeps_its_history_across_a_hop`, `quiet_catalog::a_quiet_catalog_reaches_an_unfloored_relay_reader_when_a_peer_resumes_past_it`) fail, and they pass with 8. A read whose waiter parks on more lists than it records is retired and walks again; with more records those reads stay parked, and something they depend on doesn't wake them. That is now an m0 correctness quest, [a waiter's record limit changes no behavior](../quest/m0/kio-waiter-records.md), and the per-group costs this report attributes and nothing here cut are accepted in the [release-perf epic](../quest/m1/release-perf/README.md).
 
 On the quiet test host (run.we4umM, one-minute load at most 4.7), chat over io\_uring went from 154.5k \[154.1-155.0] instructions per frame on `main` to 148.9k \[148.3-150.8] with the probe and window changes (-3.6%), four rounds each, every cell at 20,000 frames/s with no loss. The relay's QUIC, crypto, and syscalls are most of its cost, so the model's -23% shows as a few percent there.
+
+## The ranged reads' session cost on `main`
+
+[moq-dev/moq#6995](https://github.com/moq-dev/moq/pull/6995) and [moq-dev/moq#7542](https://github.com/moq-dev/moq/pull/7542) each added about 3k instructions per group to the session when they landed. Run 4rAIYS counts each against its parent again, beside `main` at [fa9c1bf2a7](https://github.com/moq-dev/moq/commit/fa9c1bf2a7), with callgrind attribution (512 subscribers, per delivered group):
+
+| Change | Parent | Merge | Change |
+| --- | ---: | ---: | ---: |
+| Fill linearly in range count and span, [moq-dev/moq#6995](https://github.com/moq-dev/moq/pull/6995) | 140,202 | 143,490 | +3,288 |
+| Layered windows, [moq-dev/moq#7542](https://github.com/moq-dev/moq/pull/7542) | 116,810 | 119,859 | +3,049 |
+
+Neither cost is in the probe's judgement, so the fast path left both in place:
+
+- **[moq-dev/moq#6995](https://github.com/moq-dev/moq/pull/6995), the live index's walk.** It indexed the live feed's groups apart from fetched backfill, so every search for live content (`TrackState::live`) walked a chain of two flattened options where it had walked the cache's range. The walk's callers are the drift edge each read measures (`poll_drift` → `drift_edge` → `live_edge`) and the arrival walk, on the reader's cursor and its forward-drop cursor alike; the judgement never calls it. It still cost 2,840 inclusive per group on `main`, as at [moq-dev/moq#7542](https://github.com/moq-dev/moq/pull/7542)'s merge (2,817). The probe's own share of the PR (+1,115 self) did fall with the fast path: the probe's self cost went from 4,343 at the merge to 1,842 on `main`.
+- **[moq-dev/moq#7542](https://github.com/moq-dev/moq/pull/7542), layered window queries.** A window answers each query from its shared fixed runs and a layer of moving ones (`runs::Layered::first` and `last`): +3,810 inclusive at the merge, less about 800 in the range-map queries they replaced. [moq-dev/moq#7605](https://github.com/moq-dev/moq/pull/7605)'s single-set fast path brought them to 2,117 on `main`, about 40 queries per delivery at about 50 instructions each, from the forward-drop walk, peeks, admission, and the probe. That is the number of window queries a per-reader window answers, not a walk, so it is accepted in the [release-perf epic](../quest/m1/release-perf/README.md).
+
+`TrackState::live` now walks either the cache or the live index through one branch per call, and the drift edge's single-run search scans it statically rather than through a `dyn` iterator (run.m71Z8E, against `main` at [fa9c1bf2a7](https://github.com/moq-dev/moq/commit/fa9c1bf2a7)):
+
+| Scenario | `main` | Live walk | Change |
+| --- | ---: | ---: | ---: |
+| Model | 9,637 | 9,367 | -270 (-2.8%) |
+| Session | 110,014 | 109,123 | -891 (-0.8%) |
 
 ## Validation
 
