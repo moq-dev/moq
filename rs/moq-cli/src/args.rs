@@ -887,6 +887,7 @@ impl ImportSource {
 			Self::Avc3 => PublishFormat::Avc3,
 			Self::Fmp4(args) => PublishFormat::Fmp4 {
 				passthrough: args.passthrough,
+				drm: args.drm(),
 			},
 			Self::Ts(args) if args.passthrough => PublishFormat::TsPassthrough {
 				pcr_pid: args.pcr_pid.map(|pid| pid.0),
@@ -939,14 +940,69 @@ impl ImportSource {
 	}
 }
 
-/// The fMP4 stdin container: whether to unwrap its fragments.
+/// The fMP4 stdin container: whether to unwrap its fragments, and where a player gets the
+/// licenses for encrypted ones.
 #[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Fmp4Import {
 	/// Publish each fragment whole as CMAF instead of splitting it into one frame per sample.
 	/// Keeps the source's exact sample timing, but every player has to parse ISO BMFF.
+	/// Encrypted (Common Encryption) media needs it.
 	#[usage(long = "cmaf")]
 	pub passthrough: bool,
+
+	/// The license server of a DRM system the media is encrypted for, as `SYSTEM=URL`. SYSTEM is
+	/// `widevine`, `playready`, `fairplay`, `clearkey`, or a system ID. Repeat for each system;
+	/// a system the media carries no `pssh` for is refused.
+	#[usage(long = "drm-license", value_name = "SYSTEM=URL", requires = "--cmaf")]
+	pub drm_license: Vec<DrmServer>,
+
+	/// The certificate server of a DRM system, such as FairPlay's, as `SYSTEM=URL`.
+	#[usage(long = "drm-certificate", value_name = "SYSTEM=URL", requires = "--cmaf")]
+	pub drm_certificate: Vec<DrmServer>,
+}
+
+impl Fmp4Import {
+	/// The servers of each DRM system the flags name.
+	fn drm(&self) -> std::collections::BTreeMap<hang::catalog::drm::Uuid, hang::catalog::drm::Servers> {
+		let mut drm = std::collections::BTreeMap::<_, hang::catalog::drm::Servers>::new();
+		for server in &self.drm_license {
+			drm.entry(server.system).or_default().license = Some(hang::catalog::drm::Server::new(server.url.clone()));
+		}
+		for server in &self.drm_certificate {
+			drm.entry(server.system).or_default().certificate =
+				Some(hang::catalog::drm::Server::new(server.url.clone()));
+		}
+		drm
+	}
+}
+
+/// An `import fmp4 --drm-license` or `--drm-certificate` value: a DRM system and a server URL.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DrmServer {
+	/// The DRM system ID.
+	pub system: hang::catalog::drm::Uuid,
+	/// The server's URL.
+	pub url: url::Url,
+}
+
+impl std::str::FromStr for DrmServer {
+	type Err = String;
+
+	fn from_str(arg: &str) -> Result<Self, Self::Err> {
+		let (system, url) = arg
+			.split_once('=')
+			.ok_or_else(|| format!("expected SYSTEM=URL, got `{arg}`"))?;
+		let system = hang::catalog::drm::system::named(system)
+			.or_else(|| hang::catalog::drm::Uuid::try_parse(system).ok())
+			.ok_or_else(|| {
+				format!(
+					"unknown DRM system `{system}`: expected widevine, playready, fairplay, clearkey, or a system ID"
+				)
+			})?;
+		let url = url.parse().map_err(|err| format!("invalid URL `{url}`: {err}"))?;
+		Ok(Self { system, url })
+	}
 }
 
 /// The MPEG-TS stdin container: which programs of a multiplex to publish.
@@ -1986,6 +2042,48 @@ mod tests {
 		assert!(format(&["--passthrough", "--pcr-pid", "0"]).is_none(), "the PAT");
 		assert!(format(&["--passthrough", "--pcr-pid", "clock"]).is_none());
 		assert!(matches!(format(&[]), Some(PublishFormat::Ts { program: None })));
+	}
+
+	/// `import fmp4 --drm-license` and `--drm-certificate` name a system and need `--cmaf`.
+	#[test]
+	fn import_fmp4_takes_drm_servers() {
+		use hang::catalog::drm;
+
+		let format = |args: &[&str]| {
+			let argv = ["moq", "import", "fmp4"].into_iter().chain(args.iter().copied());
+			let cli = Invocation::try_parse_from(argv).ok()?;
+			let Command::Import(import) = &cli.stages[0] else {
+				panic!("an import stage");
+			};
+			import.source.stdin_format()
+		};
+		let Some(PublishFormat::Fmp4 { passthrough: true, drm }) = format(&[
+			"--cmaf",
+			"--drm-license",
+			"clearkey=https://license.example.com/clearkey",
+			"--drm-license",
+			"edef8ba9-79d6-4ace-a3c8-27dcd51d21ed=https://wv.example.com/",
+			"--drm-certificate",
+			"FairPlay=https://fps.example.com/cert",
+		]) else {
+			panic!("an fmp4 import");
+		};
+		assert_eq!(drm.len(), 3);
+		assert_eq!(
+			drm[&drm::system::CLEARKEY].license.as_ref().unwrap().url.as_str(),
+			"https://license.example.com/clearkey"
+		);
+		assert!(drm[&drm::system::WIDEVINE].certificate.is_none());
+		assert!(drm[&drm::system::FAIRPLAY].license.is_none());
+		assert!(drm[&drm::system::FAIRPLAY].certificate.is_some());
+
+		assert!(
+			format(&["--drm-license", "clearkey=https://a.example/"]).is_none(),
+			"needs --cmaf"
+		);
+		assert!(format(&["--cmaf", "--drm-license", "primetime=https://a.example/"]).is_none());
+		assert!(format(&["--cmaf", "--drm-license", "clearkey"]).is_none());
+		assert!(format(&["--cmaf", "--drm-license", "clearkey=not a url"]).is_none());
 	}
 
 	/// `import srt` takes the same `--program` as `import ts`; `export srt` has no program to pick.

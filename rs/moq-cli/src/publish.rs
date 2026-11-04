@@ -3,12 +3,16 @@ use hang::moq_net;
 use moq_mux::container::{flv, fmp4, ts};
 
 /// Container format read from stdin on the import (source) side.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub enum PublishFormat {
 	/// Raw AVC (H.264) Annex B elementary stream.
 	Avc3,
-	/// Fragmented MP4 (CMAF), republished whole as CMAF when `passthrough`.
-	Fmp4 { passthrough: bool },
+	/// Fragmented MP4 (CMAF), republished whole as CMAF when `passthrough`, with the license and
+	/// certificate servers of each DRM system encrypted media is for.
+	Fmp4 {
+		passthrough: bool,
+		drm: std::collections::BTreeMap<hang::catalog::drm::Uuid, hang::catalog::drm::Servers>,
+	},
 	/// MPEG-TS (transport stream), limited to one `program` of a multiplex when given.
 	Ts { program: Option<u16> },
 	/// MPEG-TS published whole, paced on `pcr_pid` when given rather than the PMT's clock.
@@ -432,9 +436,12 @@ impl Publish {
 					import: Box::new(import),
 				}
 			}
-			PublishFormat::Fmp4 { passthrough } => {
+			PublishFormat::Fmp4 { passthrough, drm } => {
 				let timebase = catalog.timebase();
-				let fmp4 = fmp4::Import::new(broadcast.clone(), timebase.reserve()).with_passthrough(*passthrough);
+				let mut fmp4 = fmp4::Import::new(broadcast.clone(), timebase.reserve()).with_passthrough(*passthrough);
+				for (system, servers) in drm {
+					fmp4 = fmp4.with_drm(*system, servers.clone());
+				}
 				PublishDecoder::Fmp4(Box::new(fmp4))
 			}
 			PublishFormat::Ts { .. } => unreachable!("TS is handled above with the mpegts catalog extension"),
@@ -2135,8 +2142,20 @@ pub(crate) mod tests {
 		for (format, input) in [
 			(PublishFormat::Ts { program: None }, TS),
 			(PublishFormat::TsPassthrough { pcr_pid: None }, TS),
-			(PublishFormat::Fmp4 { passthrough: false }, FMP4),
-			(PublishFormat::Fmp4 { passthrough: true }, FMP4),
+			(
+				PublishFormat::Fmp4 {
+					passthrough: false,
+					drm: Default::default(),
+				},
+				FMP4,
+			),
+			(
+				PublishFormat::Fmp4 {
+					passthrough: true,
+					drm: Default::default(),
+				},
+				FMP4,
+			),
 		] {
 			let origin = moq_tokio::origin::spawn();
 			let consumer = origin.consume();
