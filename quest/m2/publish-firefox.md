@@ -32,8 +32,9 @@ What remains before the lane joins Nightly's `media-firefox` job:
 - Then add a Firefox-publisher step to `media-firefox` in
   `.github/workflows/nightly.yml`.
 
-Playwright WebKit and a macOS Safari lane stay with the m3 Safari work;
-Playwright's WebKit is not Safari.
+Playwright WebKit stays out, since Playwright's WebKit is not Safari. The
+[macOS browser lane](/quest/m2/macos-browser-lane.md) adds Chrome and Safari on
+macOS, and the m3 Safari work publishes from Safari there.
 
 ## Related
 

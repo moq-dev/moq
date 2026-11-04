@@ -65,6 +65,12 @@ jobs:
         run: nix develop --command just test max-age
         shell: bash -leo pipefail {0}
 
+      - name: Stream limits over WebSocket
+        id: stream-limits
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: nix develop --command just test stream-limits
+        shell: bash -leo pipefail {0}
+
       - name: Relay fills
         id: relay-fill
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
@@ -211,6 +217,7 @@ jobs:
             "Rust cache": "${{ steps.rust-cache.outcome }}",
             "Playwright Chromium": "${{ steps.setup.outcome }}",
             "Optional publisher retention": "${{ steps.max-age.outcome }}",
+            "Stream limits over WebSocket": "${{ steps.stream-limits.outcome }}",
             "Relay fills": "${{ steps.relay-fill.outcome }}",
             "Receive credit recovery": "${{ steps.receive-credit.outcome }}",
             "Harness regressions": "${{ steps.harness.outcome }}",
