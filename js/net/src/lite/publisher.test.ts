@@ -1220,6 +1220,44 @@ test("lite draft-06: a group stream that never completes is reset once the group
 	}
 });
 
+// Lite-07 reopens every stale drop on an update, including one for a stream the publisher reset
+// as stale: a group still stale under the new terms is dropped again under the new update's
+// number, so the subscriber settles at once. Mirrors the Rust
+// `an_update_reoffers_a_cached_expired_stream_on_lite07`.
+test("lite draft-07: an update drops an expired stream again while it is still stale", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const budget = Milli(1_000);
+	const sub = await servedSubscription({ version: Version.DRAFT_07, startGroup: 0n, maxAge: budget });
+	try {
+		sub.serve(0n);
+		expect(await sub.servedSequence()).toBe(0n);
+		expect("start" in (await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_07))).toBe(true);
+
+		const reset = sub.stall();
+		sub.serve(1n);
+		expect(await sub.servedHeader()).toBe(1n);
+		await flush();
+		await clock.advance(Nano.fromMilli(Milli(budget * 10)));
+		sub.serve(2n);
+		expect(await sub.servedSequence()).toBe(2n);
+		await clock.advance(Nano.fromMilli(budget));
+		expect(toStreamCode(fromTransport(await reset))).toBe(StreamCode.Old);
+		const first = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_07);
+		if (!("drop" in first)) throw new Error("expected SUBSCRIBE_DROP");
+		expect([first.drop.start, first.drop.end, first.drop.update]).toEqual([1n, 1n, 0n]);
+
+		// The track's max age still caps the budget, so group 1 is still stale.
+		await replayUpdate({ priority: 1, startGroup: 0n, update: 1n }).encode(sub.client.writer, Version.DRAFT_07);
+		const again = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_07);
+		if (!("drop" in again)) throw new Error("expected SUBSCRIBE_DROP");
+		expect([again.drop.start, again.drop.end, again.drop.update]).toEqual([1n, 1n, 1n]);
+	} finally {
+		await sub.close();
+		installed.close();
+	}
+});
+
 // An update that lowers the start below SUBSCRIBE_START asks for those groups too, so the
 // end sweep drops them, as the Rust publisher does.
 test("lite draft-06: an update lowering the start is swept at the end", async () => {

@@ -4124,6 +4124,9 @@ struct TrackRun {
 	expired: RangeSet<u64>,
 	// The expired runs an update owes a drop again, sent as ranges on the next poll.
 	redrop: RangeSet<u64>,
+	// The expired groups an update re-offers, still cached and in range, each served again
+	// on its own stream as stream credit allows.
+	reoffered: std::collections::VecDeque<group::Consumer>,
 	end_sent: bool,
 	// Lite-07 with every range bounded: once every group in its ranges is given up, it is
 	// answered without a group to resolve its start, rather than left unanswered.
@@ -4188,6 +4191,7 @@ impl TrackRun {
 			update: 0,
 			expired: RangeSet::new(),
 			redrop: RangeSet::new(),
+			reoffered: Default::default(),
 			end_sent: false,
 			served,
 			datagrams,
@@ -4215,16 +4219,6 @@ impl TrackRun {
 		// notifies nothing it parked on.
 		Idle::disarm(&mut self.idle);
 		self.update = upd.update;
-		// Lite-07 reopens every stale drop on any update: what was reported stale is offered
-		// again, and dropped again under this update's number if still stale.
-		if self.ctx.version.has_skip() {
-			let reopened = self.track.reoffer_stale();
-			self.owe(reopened);
-			// A stream already reset as stale is not served again: dropped again, by run, on
-			// the next poll.
-			let expired = std::mem::take(&mut self.expired);
-			self.redrop.extend(expired.iter().cloned());
-		}
 		// Every update restates the wanted group. Past our largest it is a join, which
 		// repeats the pending ask; at or below it the group already exists.
 		if upd
@@ -4316,6 +4310,27 @@ impl TrackRun {
 		}
 		self.bounded = bounds.ends(self.ctx.version);
 		self.frames = bounds.frames;
+		// Lite-07 reopens every stale drop on any update, judged under its new terms: what was
+		// reported stale is offered again, and dropped again under this update's number if
+		// still stale.
+		if self.ctx.version.has_skip() {
+			let reopened = self.track.reoffer_stale();
+			self.owe(reopened);
+			// A group whose stream already reset as stale is judged again under the new terms:
+			// one still cached, in range, and fresh under the new budget is served again. The
+			// rest is dropped again, by run, on the next poll.
+			for run in std::mem::take(&mut self.expired).iter() {
+				let (groups, gone) = self.track.reoffer_groups(run.clone());
+				self.owe(
+					groups
+						.iter()
+						.filter_map(|group| Some(group.sequence..group.sequence.checked_add(1)?))
+						.collect(),
+				);
+				self.reoffered.extend(groups);
+				self.redrop.extend(gone.iter().cloned());
+			}
+		}
 	}
 
 	/// Apply [`Self::floor`] and [`Self::cap`] to the read cursor.
@@ -4473,6 +4488,22 @@ impl TrackRun {
 				starts: self.starts(start),
 			}))?;
 			self.raise_floor(start);
+			return Poll::Ready(Ok(ControlFlow::Continue(())));
+		}
+
+		// A group an update re-offers takes the next stream credit, ahead of new ones.
+		if self.opening.is_none()
+			&& let Some(group) = self.reoffered.pop_front()
+		{
+			let sequence = group.sequence;
+			match position_group(group, &self.frames) {
+				Some(group) => self.serve(group),
+				None => {
+					if let Some(end) = sequence.checked_add(1) {
+						self.drop_range(sequence..end, &Hole::drop(StreamError::NotFound), writer)?;
+					}
+				}
+			}
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
 		}
 
@@ -6976,6 +7007,60 @@ mod serve_group_test {
 				_ => &[(1, 1, 0), (2, 2, 0)],
 			};
 			assert_eq!(drop_updates(&mut writer, &log, version).await, expected, "{version:?}");
+		}
+	}
+
+	/// A lite-07 group whose stream expired but that the track still caches is judged again
+	/// under an update: served again once the budget covers it, and dropped again under the
+	/// new update while it is still stale.
+	#[kio::test]
+	async fn an_update_reoffers_a_cached_expired_stream_on_lite07() {
+		for widen in [true, false] {
+			let mut track = track::Producer::new(
+				Arc::new(broadcast::Info::default()),
+				"test",
+				crate::track::Info::timed(),
+			);
+			let budget = Duration::from_millis(500);
+			let subscriber =
+				track.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(budget)));
+			let (mut run, mut writer, log) = lite07_run(SinkSession::new(Log::default()), subscriber);
+			write_group(&mut track, 0, 0);
+			write_group(&mut track, 1, 1000);
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			let opened = run.ctx.outcomes.opened.load(Ordering::Relaxed);
+			// Group 2 lands at 3s, so group 0's successor is 2s behind the edge, past the 500ms
+			// budget, and its stream expired.
+			write_group(&mut track, 2, 3000);
+			run.ctx.outcomes.dropped.lock().unwrap().push((0, StreamError::Old));
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			assert_eq!(drop_updates(&mut writer, &log, Version::Lite07).await, [(0, 0, 0)]);
+
+			run.update(lite::SubscribeUpdate {
+				wanted_group: None,
+				priority: 0,
+				max_delay: if widen { Duration::from_secs(10) } else { budget },
+				min_delay: None,
+				ranges: vec![lite::Range::span(None, 0, None, None)],
+				order: Order::Descending,
+				update: 1,
+			});
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			// Group 2 is served either way.
+			assert_eq!(
+				run.ctx.outcomes.opened.load(Ordering::Relaxed),
+				opened + 1 + u64::from(widen),
+				"widen={widen}: the cached group is offered again on its own stream once fresh"
+			);
+			let drops: &[(u64, u64, u64)] = match widen {
+				true => &[(0, 0, 0)],
+				false => &[(0, 0, 0), (0, 0, 1)],
+			};
+			assert_eq!(
+				drop_updates(&mut writer, &log, Version::Lite07).await,
+				drops,
+				"widen={widen}: still stale, it is dropped again under update 1"
+			);
 		}
 	}
 

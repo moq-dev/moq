@@ -2,7 +2,7 @@
 // as stale, including those below where SUBSCRIBE_START resolved, and never one twice.
 
 import { expect, test } from "bun:test";
-import { Milli } from "@moq/clock";
+import { Milli, now } from "@moq/clock";
 import { accept, connect } from "../connection/index.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
@@ -199,11 +199,12 @@ test("an update keeping the budget drops the stale groups again on lite-07", asy
 
 	// Only the priority changes: groups 1 and 2 are still stale, so they are dropped again.
 	reader.update({ priority: 5 });
-	const before = performance.now();
+	const before = now();
 	producer.finish();
 	producer.close();
 	expect(await reader.recvGroup()).toBeUndefined();
-	expect(performance.now() - before).toBeLessThan(500);
+	// Well inside the 1.5s grace a missing re-drop would wait out, in nanoseconds.
+	expect(now() - before).toBeLessThan(500_000_000);
 
 	reader.close();
 	remote.close();

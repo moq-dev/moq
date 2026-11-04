@@ -9422,6 +9422,43 @@ impl Subscriber {
 		}
 	}
 
+	/// Fresh reads of the groups in `run` this subscriber's track still caches, its range
+	/// still admits, and its current budget no longer judges stale, each expiring against
+	/// that budget, and the runs still given up: no longer cached, or still stale. For a wire
+	/// whose update re-offers a group whose stream it gave up as stale. A front's reader holds
+	/// no cache of its own, so it re-offers none.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn reoffer_groups(&self, run: ops::Range<u64>) -> (Vec<group::Consumer>, RangeSet<u64>) {
+		let mut given_up = RangeSet::new();
+		given_up.insert(run.clone());
+		let Inner::Plain(cursor) = &self.inner else {
+			return (Vec::new(), given_up);
+		};
+		let budget = cursor.subscription.read().budget();
+		let fresh: Vec<_> = {
+			let state = cursor.state.read();
+			let budget = clamp_max_delay(budget, state.max_age_bound());
+			let edge = state.drift_edge(&cursor.servable);
+			state
+				.lookup
+				.range(run)
+				.filter(|&(&sequence, slot)| {
+					slot.serves_end() && cursor.admits(sequence) && !state.is_stale(sequence, &edge, budget)
+				})
+				.map(|(&sequence, slot)| (sequence, slot.serving().consume()))
+				.collect()
+		};
+		let mut groups = Vec::new();
+		for (sequence, group) in fresh {
+			if let Some(end) = sequence.checked_add(1) {
+				given_up.remove(sequence..end);
+				group.cache_refresh();
+				groups.push(cursor.deliver(group));
+			}
+		}
+		(groups, given_up)
+	}
+
 	/// The parts of `run` this subscriber's track still holds as a received stale run: one
 	/// new terms superseded is gone (see [`Producer::supersede_stale`]).
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]

@@ -2408,6 +2408,27 @@ export class Subscriber {
 		return taken;
 	}
 
+	// Fresh reads of the cached groups in `[start, end)` this cursor admits and no longer judges
+	// stale, each expiring against the budget, and the runs still given up. A resumed reader holds
+	// no cache of its own, so it re-offers none. Mirrors the Rust `reoffer_groups`.
+	#reofferGroups(start: bigint, end: bigint): { groups: GroupConsumer[]; givenUp: Run[] } {
+		const groups: GroupConsumer[] = [];
+		const givenUp: Run[] = [];
+		const producer = this.#resume ? undefined : this.#state.producer;
+		const drift = this.#drift();
+		const cap = this.#cursor.peek().end;
+		for (let sequence = start; sequence < end; sequence++) {
+			const admitted = (cap === undefined || sequence < cap) && this.#window.contains(sequence);
+			const group =
+				producer && admitted && !this.#staleAt(sequence, drift)
+					? cachedMirror(producer, sequence, 0)
+					: undefined;
+			if (group) groups.push(this.#guard(group));
+			else insertRun(givenUp, sequence, sequence + 1n);
+		}
+		return { groups, givenUp };
+	}
+
 	private constructor(name: string, state: TrackState) {
 		this.name = name;
 		this.#state = state;
@@ -2640,6 +2661,7 @@ export class Subscriber {
 			subscriber.#reported = removeRun(subscriber.#reported, start, end);
 		};
 		hooks.reofferStale = (subscriber) => subscriber.#reofferStale();
+		hooks.reofferGroups = (subscriber, start, end) => subscriber.#reofferGroups(start, end);
 		hooks.isReceived = (subscriber) => {
 			if (subscriber.#resume) return true;
 			const producer = subscriber.#state.producer;

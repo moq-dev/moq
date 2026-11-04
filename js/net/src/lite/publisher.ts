@@ -1347,6 +1347,8 @@ export class Publisher {
 		// Lite-07 groups whose stream expired as stale, which every update drops again under its
 		// number: the subscriber reopens each stale drop then, and the stream already reset.
 		const expired: Run[] = [];
+		// The expired groups an update re-offers, still cached and in range, served again in turn.
+		const reoffered: group.Consumer[] = [];
 
 		// Cancels groups still queued for a stream slot. Only the subscriber leaving counts:
 		// a track that ran out of groups still has to flush the ones already queued, and the
@@ -1399,19 +1401,6 @@ export class Publisher {
 							finished = false;
 							const update = control.update;
 							updateNumber = update.update;
-							// Lite-07 reopens every stale drop on any update: what was reported stale is
-							// offered again, and dropped again under this update's number if still stale.
-							if (hasSkip(this.version)) {
-								const reopened = hooks.reofferStale(track);
-								if (served) {
-									for (const run of reopened)
-										served.splice(0, served.length, ...removeRun(served, run.start, run.end));
-								}
-								// A stream already reset as stale is not served again: dropped again, by run.
-								for (const run of expired)
-									pendingDrops.push({ ...run, error: new StreamError(StreamCode.Old) });
-								expired.length = 0;
-							}
 							console.debug(`subscribe update: broadcast=${broadcast} track=${track.name}`);
 							// `cursorFloor` pins an unfloored pre-06 SUBSCRIBE to the latest
 							// group, so an update that drops a named floor re-pins there too. On
@@ -1440,6 +1429,26 @@ export class Publisher {
 							bounds.endGroup = update.endGroup;
 							bounds.endFrame = update.endFrame;
 							moveCursor();
+							// Lite-07 reopens every stale drop on any update, judged under its new terms
+							// (applied as the update was decoded): what was reported stale is offered
+							// again, and dropped again under this update's number if still stale.
+							if (hasSkip(this.version)) {
+								const owe = (start: bigint, end: bigint) => {
+									if (served) served.splice(0, served.length, ...removeRun(served, start, end));
+								};
+								for (const run of hooks.reofferStale(track)) owe(run.start, run.end);
+								// A group whose stream already reset as stale: one still cached, in range, and
+								// fresh under the new budget is served again; the rest is dropped again, by run.
+								for (const run of expired.splice(0)) {
+									const { groups, givenUp } = hooks.reofferGroups(track, run.start, run.end);
+									for (const group of groups) {
+										owe(group.sequence, group.sequence + 1n);
+										reoffered.push(group);
+									}
+									for (const gone of givenUp)
+										pendingDrops.push({ ...gone, error: new StreamError(StreamCode.Old) });
+								}
+							}
 							// A microtask is too short: decoding one framed update crosses several
 							// awaits, each of which can requeue behind the serving continuation. A
 							// task boundary usually lets the decoder finish whatever the transport
@@ -1461,9 +1470,13 @@ export class Publisher {
 					!startSent && hasLargest(this.version)
 						? newer(first?.largest, newer(hooks.bufferedLargest(track), hooks.peekLargest(track).largest))
 						: undefined;
+				// A group an update re-offers goes ahead of new ones.
+				const again = first ? undefined : reoffered.shift();
 				const recv = first
 					? ({ kind: "group", group: first.group } as const)
-					: hooks.tryRecvGroup(track, emitRange);
+					: again
+						? ({ kind: "group", group: again } as const)
+						: hooks.tryRecvGroup(track, emitRange);
 				first = undefined;
 				switch (recv.kind) {
 					case "error":

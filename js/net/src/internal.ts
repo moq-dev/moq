@@ -649,6 +649,13 @@ export const hooks: {
 	 */
 	reofferStale: (subscriber: Subscriber) => Run[];
 	/**
+	 * Fresh reads of the groups in `[start, end)` a subscriber's track still caches, its range still
+	 * admits, and its current budget no longer judges stale, each expiring against that budget, and
+	 * the runs still given up: for a wire whose update re-offers a group whose stream it gave up as
+	 * stale. Mirrors the Rust crate-private `track::Subscriber::reoffer_groups`.
+	 */
+	reofferGroups: (subscriber: Subscriber, start: bigint, end: bigint) => { groups: GroupConsumer[]; givenUp: Run[] };
+	/**
 	 * Whether a subscriber reads a copy received from a remote publisher, which cannot tell a group
 	 * its source never produced from one it never received. A resumed reader always does.
 	 */
@@ -872,6 +879,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	reofferStale: () => {
+		throw new Error("track.ts not loaded");
+	},
+	reofferGroups: () => {
 		throw new Error("track.ts not loaded");
 	},
 	isReceived: () => {
