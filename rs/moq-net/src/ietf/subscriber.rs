@@ -3371,7 +3371,9 @@ impl Subscriber {
 			// already rejected the parked request; dropping what remains is not a second one.
 			let aborted = self.remove_subscribe(request_id).is_none();
 			let mut cancelling = std::pin::pin!(self.cancel_subscribe(stream));
-			group_fetches.drive(|waiter| waiter.poll_future(cancelling.as_mut())).await;
+			group_fetches
+				.drive(|waiter| waiter.poll_future(cancelling.as_mut()))
+				.await;
 			// A resumed copy goes back to lingering, unless the session took it.
 			return resumed.filter(|_| !aborted);
 		};
@@ -16053,7 +16055,11 @@ mod joining_fetch_tests {
 			!run.subscriber.state.lock().subscribes.is_empty(),
 			"the grace is still running"
 		);
-		assert_eq!(fetches(), 1, "a settled fill leaves the miss to a FETCH during the grace");
+		assert_eq!(
+			fetches(),
+			1,
+			"a settled fill leaves the miss to a FETCH during the grace"
+		);
 
 		kio::clock::sleep(crate::ledger::GRACE * 2).await;
 		assert!(
