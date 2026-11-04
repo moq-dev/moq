@@ -1272,6 +1272,12 @@ async function supported(config: Catalog.VideoConfig): Promise<boolean> {
 		return false;
 	}
 
+	// WebCodecs cannot decrypt, so an encrypted rendition is unplayable here.
+	if (Catalog.isProtected(config)) {
+		console.warn(`video: ignoring protected rendition ${config.codec}: playback cannot decrypt it`);
+		return false;
+	}
+
 	let description: Uint8Array | undefined;
 	if (config.description) {
 		description = Util.Hex.toBytes(config.description);

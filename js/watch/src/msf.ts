@@ -119,8 +119,48 @@ function namesCatalog(namespace: Path.Valid, base: Path.Valid): boolean {
 	return endsWith(a, b) || endsWith(b, a);
 }
 
+/**
+ * The hang `drm` entries an MSF catalog's `contentProtections` describe, and each `refID`'s entry IDs.
+ *
+ * Mirrors moq-mux: an entry naming several default keys becomes one hang entry per key,
+ * `{refID}:{kid}`. A track referencing it lists all of them here, which is enough to know it is
+ * protected; moq-mux picks the one its init's `tenc` names.
+ */
+function toDrm(msf: Msf.Catalog): { drm: Record<string, Catalog.Drm>; byRef: Map<string, string[]> } {
+	const drm: Record<string, Catalog.Drm> = Object.create(null);
+	const byRef = new Map<string, string[]>();
+	for (const cp of msf.contentProtections ?? []) {
+		if (cp.scheme !== "cenc" && cp.scheme !== "cbcs") {
+			throw new Error(`MSF content protection ${cp.refID} has unsupported scheme ${cp.scheme}`);
+		}
+		if (cp.defaultKID.length === 0) throw new Error(`MSF content protection ${cp.refID} has no defaultKID`);
+		const ids: string[] = [];
+		for (const kid of cp.defaultKID) {
+			const id = cp.defaultKID.length === 1 ? cp.refID : `${cp.refID}:${kid.toLowerCase()}`;
+			drm[id] = {
+				system: cp.drmSystem.systemID,
+				scheme: cp.scheme,
+				kid,
+				pssh: cp.drmSystem.pssh,
+				license: cp.drmSystem.laURL,
+				certificate: cp.drmSystem.certURL,
+			};
+			ids.push(id);
+		}
+		byRef.set(cp.refID, ids);
+	}
+	return { drm, byRef };
+}
+
 /** Convert an MSF catalog to a hang catalog Root. */
 export function toHang(msf: Msf.Catalog, base?: Path.Valid): Catalog.Root {
+	const { drm, byRef } = toDrm(msf);
+	// The hang entry IDs a track's refIDs name; @moq/msf refuses a refID the root lacks.
+	const protection = (track: Msf.Track) => {
+		const ids = (track.contentProtectionRefIDs ?? []).flatMap((id) => byRef.get(id) ?? []);
+		return ids.length > 0 ? { drm: ids } : {};
+	};
+
 	// Track names are untrusted keys; a null prototype keeps `__proto__` an ordinary rendition.
 	const videoRenditions: Record<string, Catalog.VideoConfig> = Object.create(null);
 	const audioRenditions: Record<string, Catalog.AudioConfig> = Object.create(null);
@@ -151,10 +191,10 @@ export function toHang(msf: Msf.Catalog, base?: Path.Valid): Catalog.Root {
 		}
 		if (track.role === "video") {
 			const config = toVideoConfig(track);
-			if (config) videoRenditions[track.name] = { ...config, broadcast };
+			if (config) videoRenditions[track.name] = { ...config, broadcast, ...protection(track) };
 		} else if (track.role === "audio") {
 			const config = toAudioConfig(track);
-			if (config) audioRenditions[track.name] = { ...config, broadcast };
+			if (config) audioRenditions[track.name] = { ...config, broadcast, ...protection(track) };
 		} else if (
 			track.role === "caption" ||
 			track.role === "subtitle" ||
@@ -191,6 +231,8 @@ export function toHang(msf: Msf.Catalog, base?: Path.Valid): Catalog.Root {
 	}
 
 	if (Object.keys(textRenditions).length > 0) root.text = { renditions: textRenditions };
+
+	if (Object.keys(drm).length > 0) root.drm = drm;
 
 	return root;
 }

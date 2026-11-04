@@ -1020,6 +1020,12 @@ async function supported(config: Catalog.AudioConfig): Promise<boolean> {
 		return false;
 	}
 
+	// WebCodecs cannot decrypt, so an encrypted rendition is unplayable here.
+	if (Catalog.isProtected(config)) {
+		console.warn(`audio: ignoring protected rendition ${config.codec}: playback cannot decrypt it`);
+		return false;
+	}
+
 	// Opus only runs at its native rates, so a catalog advertising anything else is wrong and Safari
 	// refuses to decode it. Warn rather than reject: Chrome and Firefox ignore the configured rate and
 	// play these streams fine, so rejecting would silence them for a publisher they handle today.

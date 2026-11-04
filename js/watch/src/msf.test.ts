@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import * as Catalog from "@moq/hang/catalog";
 import { u53 } from "@moq/hang/catalog";
 import * as Msf from "@moq/msf";
 import { Path } from "@moq/net";
@@ -316,4 +317,43 @@ test("a later MSF track with a name replaces the earlier one, whatever its role"
 	expect(toHang({ tracks: [video, { ...video, codec: "vp09.00.10.08" }] }).video?.renditions.main?.codec).toBe(
 		"vp09.00.10.08",
 	);
+});
+
+// A protected MSF track lands as a hang rendition listing its `drm` entries, so `<moq-watch>`
+// knows it cannot play it; an entry with two keys splits into one hang entry per key.
+test("maps CMSF content protection onto hang drm entries", () => {
+	const catalog: Msf.Catalog = {
+		contentProtections: [
+			{
+				refID: "ck",
+				defaultKID: ["a1b2c3d4-e5f6-0718-293a-4b5c6d7e8f90"],
+				scheme: "cbcs",
+				drmSystem: { systemID: "1077efec-c0b2-4d02-ace3-3c1e52e2fb4b", laURL: { url: "https://l.example/" } },
+			},
+			{
+				refID: "wv",
+				defaultKID: ["01234567-89ab-cdef-0123-456789abcdef", "a1b2c3d4-e5f6-0718-293a-4b5c6d7e8f90"],
+				scheme: "cbcs",
+				drmSystem: { systemID: "edef8ba9-79d6-4ace-a3c8-27dcd51d21ed" },
+			},
+		],
+		tracks: [
+			{ name: "video", packaging: "loc", role: "video", codec: "vp8", contentProtectionRefIDs: ["ck", "wv"] },
+			{ name: "audio", packaging: "loc", role: "audio", codec: "opus" },
+		],
+	};
+	const root = Catalog.checkRenditions(toHang(catalog));
+	expect(Object.keys(root.drm ?? {}).sort()).toEqual([
+		"ck",
+		"wv:01234567-89ab-cdef-0123-456789abcdef",
+		"wv:a1b2c3d4-e5f6-0718-293a-4b5c6d7e8f90",
+	]);
+	expect(root.drm?.ck?.license?.url).toBe("https://l.example/");
+	expect(root.video?.renditions.video?.drm).toHaveLength(3);
+	expect(Catalog.isProtected(root.video?.renditions.video ?? { drm: [] })).toBe(true);
+	expect(root.audio?.renditions.audio?.drm).toBeUndefined();
+
+	const cens = structuredClone(catalog);
+	if (cens.contentProtections?.[0]) cens.contentProtections[0].scheme = "cens";
+	expect(() => toHang(cens)).toThrow("unsupported scheme");
 });
