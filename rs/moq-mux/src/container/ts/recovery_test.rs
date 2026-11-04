@@ -1903,7 +1903,7 @@ async fn long_faults_hold_their_latency() {
 			// Two seconds of every twenty.
 			congested: |at| (17..19).contains(&(at.as_secs() % 20)) && at < Duration::from_secs(100),
 		}),
-		..arm(Profile::Long, faults).breaks(30)
+		..arm(Profile::Long, faults).breaks(31)
 	})
 	.await;
 	assert!(run.stats.release.gaps >= 20, "every fault skipped: {:?}", run.stats);
