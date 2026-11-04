@@ -38,7 +38,9 @@ Without a subscriber the encoder keeps raw PCM
 up to the track's `max_age`, then encodes that history before continuing live when
 someone subscribes. With no declared retention it keeps at most 30 seconds
 (about 11.5 MB for 48 kHz stereo f32). Set `encode::Capture::on_demand` to false
-to encode continuously instead. Stopping an encoder leaves the shared capture running. Its consumer can be swapped without
+to encode continuously instead. Stopping an encoder leaves the shared capture running, and the
+history it retained stays on the track until it is subscribed or expires; a device failure keeps
+it the same way before the encoder returns the error. Its consumer can be swapped without
 changing the track subscribers know. Opus packs 20 ms per packet by default,
 or 10 ms with a shorter `frame_duration`. Groups carry at least 20 ms by default,
 so 10 ms packets pair up. `encode::Options::group_duration`

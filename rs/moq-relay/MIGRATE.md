@@ -12,6 +12,22 @@ A peer that is connecting, retrying, or has never connected has an empty `connec
 Each connection adds `transport`, and each peer adds `last_connected_seconds_ago`, null until its first successful connect.
 A LAN peer is named by its mDNS identity instead of the first address dialed, whose path carried its credential.
 
+### Stats are configured in `cluster::Options` ([#7673](https://github.com/moq-dev/moq/pull/7673))
+
+`Cluster::with_stats` is removed, and `stats::Config::build` is no longer public. Pass the stats config to `Cluster::new` instead, which builds the producer on the cluster's origin and runs its publisher in the returned `Driver`:
+
+```rust
+// Before
+let (cluster, driver) = Cluster::new(options)?;
+let (stats, publisher) = stats_config.build(cluster.origin.clone())?;
+let cluster = cluster.with_stats(stats, publisher);
+
+// After
+let (cluster, driver) = Cluster::new(options.with_stats(stats_config))?;
+```
+
+Read the registry from `cluster.stats`; `Relay::stats` still returns the producer. Publishing runs only while the driver is polled, which `Relay::run` does, and stops when the driver drops. Building stats needs no Tokio runtime, and an invalid stats config now fails `Cluster::new`.
+
 ### The iroh transport is removed ([#7345](https://github.com/moq-dev/moq/pull/7345))
 
 The `iroh` feature, the `[iroh]` table, the `--iroh-*` flags, and `Cluster::with_iroh` are gone.
