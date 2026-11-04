@@ -109,6 +109,82 @@ fn parent_catalog() -> Catalog {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_contribution_does_not_hide_the_parents_first_variants() {
+	let origin = moq_tokio::origin::spawn();
+	let root = Instance::random();
+	let child = Instance::random();
+	let parent = publish(&origin, "room/live", &root, &parent_catalog());
+	let _contribution = publish(&origin, "room/ladder", &child, &catalog());
+	let server = Server::new(origin.consume(), Default::default()).unwrap();
+	let broadcaster = server.broadcaster("room/live").await.unwrap();
+	let at = crate::export::Contribution {
+		id: "rung/a".into(),
+		instance: child.to_string(),
+	};
+	assert!(
+		broadcaster
+			.contribution(&at, crate::export::Kind::Video, "same")
+			.await
+			.unwrap()
+			.is_some()
+	);
+	let mut pending = Box::pin(request(&server, "/room/live/master.m3u8"));
+	assert!(futures::poll!(pending.as_mut()).is_pending());
+	frames(&parent.video, 0);
+	frames(&parent.audio, 0);
+	let (status, body) = pending.await;
+	assert_eq!(status, StatusCode::OK);
+	assert!(body.contains(&format!("@{root}/video/same/media.m3u8")));
+	assert!(body.contains(&format!("contribution/rung%2Fa/video/same/@{child}/media.m3u8")));
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_idle_predecessor_does_not_strand_a_requested_reconfigure() {
+	let origin = moq_tokio::origin::spawn();
+	let root = Instance::random();
+	let child = Instance::random();
+	let parent = publish(&origin, "room/live", &root, &parent_catalog());
+	frames(&parent.video, 0);
+	let mut value = catalog();
+	let mut contribution = publish(&origin, "room/ladder", &child, &value);
+	frames(&contribution.video, 0);
+	let server = Server::new(origin.consume(), Default::default()).unwrap();
+	master(&server, "contribution/", true).await;
+	let uri = format!("/room/live/@{root}/contribution/rung%2Fa/video/same/@{child}/media.m3u8");
+	assert_eq!(request(&server, &uri).await.0, StatusCode::OK);
+	let next = contribution
+		.publication
+		.create_track("next", hang::container::track_info(1))
+		.unwrap();
+	let video = value.video.renditions.get_mut("same").unwrap();
+	video.track = Some("next".into());
+	video.coded_width = Some(640);
+	contribution
+		.catalog
+		.update(moq_net::Timed::from(&value).at(Timestamp::ZERO))
+		.unwrap();
+	master(&server, "RESOLUTION=640x240", true).await;
+	// The new response lists the predecessor's retained rows while waiting for its
+	// last pending segment. Its body keeps the replacement requested past that idle window.
+	let held = server
+		.router()
+		.oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
+		.await
+		.unwrap();
+	assert_eq!(held.status(), StatusCode::OK);
+	tokio::time::advance(Duration::from_secs(13)).await;
+	let mut demand = next.demand();
+	kio::clock::timeout(Duration::from_secs(1), async {
+		while demand.wanted_changed().await.unwrap().is_none() {}
+	})
+	.await
+	.expect("the requested replacement must start after the idle predecessor releases");
+	assert_eq!(contribution.video.demand().wanted(), None);
+	frames(&next, 3);
+	drop(held);
+}
+
+#[tokio::test(start_paused = true)]
 #[tracing_test::traced_test]
 async fn listing_is_catalog_only_and_requests_own_the_lazy_media_lifetime() {
 	let origin = moq_tokio::origin::spawn();

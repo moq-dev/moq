@@ -35,8 +35,15 @@ struct State {
 
 struct Entry {
 	reference: Contribution,
-	current: kio::Producer<crate::Result<Option<Arc<Instance>>>>,
+	current: kio::Producer<Current>,
 	_owner: Option<driver::Owner>,
+}
+
+enum Current {
+	Pending,
+	Offline,
+	Online(Arc<Instance>),
+	Failed(crate::Error),
 }
 
 struct Instance {
@@ -74,7 +81,7 @@ impl Producer {
 			if state.entries.contains_key(id) || !master::is_path_segment(id) {
 				continue;
 			}
-			let current = kio::Producer::new(Ok(None));
+			let current = kio::Producer::new(Current::Pending);
 			let owner = match source.follow(Some(&reference.broadcast), reference.instance.as_ref()) {
 				Ok(instances) => Some(self.context.spawner.spawn(follow_instances(
 					instances,
@@ -82,7 +89,8 @@ impl Producer {
 					self.context.clone(),
 				))),
 				Err(err) => {
-					*current.write().unwrap_or_else(|_| unreachable!("new entry is open")) = Err(err.into());
+					*current.write().unwrap_or_else(|_| unreachable!("new entry is open")) =
+						Current::Failed(err.into());
 					None
 				}
 			};
@@ -108,7 +116,7 @@ impl Producer {
 			.poll_ref(waiter, |state| {
 				for entry in state.entries.values() {
 					let ready = entry.current.poll_ref(waiter, |current| {
-						if let Ok(Some(instance)) = &**current {
+						if let Current::Online(instance) = &**current {
 							let listed = instance.renditions.poll_advertised(waiter);
 							if listed.is_ready() && compatible(state.media, instance.renditions.media()) {
 								return Poll::Ready(());
@@ -135,7 +143,7 @@ impl Producer {
 		let mut audio = Vec::new();
 		for (id, entry) in &state.entries {
 			let current = entry.current.read();
-			let Ok(Some(instance)) = &*current else { continue };
+			let Current::Online(instance) = &*current else { continue };
 			if !compatible(state.media, instance.renditions.media()) {
 				continue;
 			}
@@ -189,10 +197,11 @@ impl Producer {
 		};
 		match entry.current.poll_ref(waiter, |current| {
 			let instance = match &**current {
-				Err(err) => return Poll::Ready(Err(err.clone())),
-				Ok(None) => return Poll::Ready(Ok(None)),
-				Ok(Some(instance)) if instance.id != at.instance => return Poll::Ready(Ok(None)),
-				Ok(Some(instance)) => instance,
+				Current::Pending => return Poll::Pending,
+				Current::Failed(err) => return Poll::Ready(Err(err.clone())),
+				Current::Offline => return Poll::Ready(Ok(None)),
+				Current::Online(instance) if instance.id != at.instance => return Poll::Ready(Ok(None)),
+				Current::Online(instance) => instance,
 			};
 			let rendition = ready!(instance.renditions.poll_get(waiter, kind, name));
 			Poll::Ready(Ok(
@@ -212,11 +221,7 @@ fn compatible(parent: Media, contribution: Option<Media>) -> bool {
 	})
 }
 
-async fn follow_instances(
-	mut instances: follow::Instances,
-	current: kio::Producer<crate::Result<Option<Arc<Instance>>>>,
-	context: Context,
-) {
+async fn follow_instances(mut instances: follow::Instances, current: kio::Producer<Current>, context: Context) {
 	loop {
 		let next = instances.next().await;
 		let next = match next {
@@ -232,20 +237,71 @@ async fn follow_instances(
 				let owner = context
 					.spawner
 					.spawn(super::watch_catalog(source, renditions.clone(), None));
-				Ok(Some(Arc::new(Instance {
+				Current::Online(Arc::new(Instance {
 					id,
 					renditions,
 					_owner: owner,
-				})))
+				}))
 			}
-			Ok(follow::Event::End) => Ok(None),
-			Err(err) => Err(err.into()),
+			Ok(follow::Event::End) => Current::Offline,
+			Err(err) => Current::Failed(err.into()),
 		};
-		let failed = next.is_err();
+		let failed = matches!(&next, Current::Failed(_));
 		let Ok(mut state) = current.write() else { return };
 		*state = next;
 		if failed {
 			return;
 		}
+	}
+}
+
+#[cfg(all(test, feature = "server"))]
+mod tests {
+	use super::*;
+
+	#[tokio::test(start_paused = true)]
+	async fn a_cold_lookup_waits_for_the_first_follow_event() {
+		let origin = moq_tokio::origin::spawn();
+		let _parent = origin.publish("room/live", Default::default()).unwrap();
+		let child_id = moq_net::Instance::random();
+		let child = origin
+			.publish(
+				"room/child",
+				moq_net::origin::Route::default().with_instance(child_id.clone(), 0),
+			)
+			.unwrap();
+		let source = crate::resolved(&origin, "room/live").await;
+		let mut catalog = Catalog::default();
+		catalog.media.join = hang::catalog::Join::new(Duration::from_secs(2));
+		let mut video = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		video.coded_width = Some(320);
+		video.coded_height = Some(240);
+		catalog.video.renditions.insert("v".into(), video);
+		let track = child
+			.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
+			.unwrap();
+		let mut json = moq_json::snapshot::Producer::new(track, Default::default());
+		json.update(moq_net::Timed::from(&catalog).at(moq_net::Timestamp::ZERO))
+			.unwrap();
+		catalog.video.renditions.clear();
+		catalog.contributions.insert(
+			"child".into(),
+			Contribution::new(moq_net::path::Relative::new("./child").unwrap()),
+		);
+		let (spawner, driver) = driver::Spawner::new();
+		let contributions = Producer::new(origin.consume(), Duration::from_secs(16), spawner);
+		contributions.sync(&source, &catalog);
+		let at = super::super::Contribution {
+			id: "child".into(),
+			instance: child_id.to_string(),
+		};
+		let mut lookup = Box::pin(contributions.rendition(&at, Kind::Video, "v"));
+		// The catalog has been read, but the driver has not yet polled its follow task.
+		assert!(futures::poll!(lookup.as_mut()).is_pending());
+		let running = tokio::spawn(driver.run());
+		let rendition = lookup.await.unwrap().unwrap();
+		assert_eq!(rendition.name, "v");
+		drop((rendition, contributions));
+		running.await.unwrap();
 	}
 }

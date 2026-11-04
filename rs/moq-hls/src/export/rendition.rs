@@ -448,7 +448,11 @@ impl Drop for Demand {
 					// partial segment it had open when the last player left.
 					claim.start = claim.next;
 					claim.pending = false;
-					if !claim.retired {
+					if claim.retired {
+						// A replacement waits for this window to close before reading its own
+						// track. Stopping the watcher must finish that handover too.
+						rendition.live.cut();
+					} else {
 						rendition.live.clear();
 						rendition.previous.lock().expect("previous lock poisoned").take();
 					}

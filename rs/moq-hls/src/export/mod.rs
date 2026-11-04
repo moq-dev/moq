@@ -269,7 +269,7 @@ impl Broadcaster {
 				.contributions
 				.as_ref()
 				.is_some_and(|contributions| contributions.poll_advertised(waiter).is_ready());
-			if own.is_ready() || contribution {
+			if own.is_ready() || (self.renditions.is_empty() && contribution) {
 				std::task::Poll::Ready(())
 			} else {
 				std::task::Poll::Pending

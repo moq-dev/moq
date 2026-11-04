@@ -210,7 +210,14 @@ async fn rendition_for(server: &Server, at: At<'_>) -> crate::Result<Option<Arc<
 		return Ok(None);
 	};
 	if let Some(contribution) = &at.route.contribution {
-		return broadcaster.contribution(contribution, at.kind, at.rendition).await;
+		// Resolve a cold edge's contribution before looking up its rendition. This
+		// bounds discovery only; the requested rendition's first encode waits below.
+		return kio::clock::timeout(
+			READY_TIMEOUT,
+			broadcaster.contribution(contribution, at.kind, at.rendition),
+		)
+		.await
+		.unwrap_or(Ok(None));
 	}
 	let _ = kio::clock::timeout(READY_TIMEOUT, broadcaster.ready()).await;
 	Ok(broadcaster.rendition(at.kind, at.rendition))
