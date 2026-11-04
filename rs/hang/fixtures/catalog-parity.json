@@ -3723,5 +3723,367 @@
 			}
 		},
 		"refused": true
+	},
+	{
+		"name": "drm entries protect video and audio",
+		"catalog": {
+			"drm": {
+				"1": {
+					"system": "1077efec-c0b2-4d02-ace3-3c1e52e2fb4b",
+					"scheme": "cbcs",
+					"kid": "a1b2c3d4-e5f6-0718-293a-4b5c6d7e8f90",
+					"pssh": "AAAA",
+					"license": {
+						"url": "https://license.example.com/",
+						"type": "EME-1.0"
+					}
+				},
+				"2": {
+					"system": "edef8ba9-79d6-4ace-a3c8-27dcd51d21ed",
+					"scheme": "cbcs",
+					"kid": "a1b2c3d4-e5f6-0718-293a-4b5c6d7e8f90",
+					"certificate": {
+						"url": "https://cert.example.com/"
+					}
+				}
+			},
+			"video": {
+				"renditions": {
+					"v": {
+						"codec": "avc1.64001f",
+						"container": {
+							"kind": "cmaf",
+							"init": "AAAA"
+						},
+						"drm": ["1", "2"]
+					}
+				}
+			},
+			"audio": {
+				"renditions": {
+					"a": {
+						"codec": "mp4a.40.2",
+						"sampleRate": 48000,
+						"numberOfChannels": 2,
+						"container": {
+							"kind": "cmaf",
+							"init": "AAAA"
+						},
+						"drm": ["1"]
+					}
+				}
+			}
+		},
+		"video": ["v"],
+		"audio": ["a"]
+	},
+	{
+		"name": "drm unknown entry members are ignored",
+		"catalog": {
+			"drm": {
+				"1": {
+					"system": "1077efec-c0b2-4d02-ace3-3c1e52e2fb4b",
+					"scheme": "cbcs",
+					"kid": "a1b2c3d4-e5f6-0718-293a-4b5c6d7e8f90",
+					"future": true
+				}
+			},
+			"video": {
+				"renditions": {
+					"v": {
+						"codec": "avc1.64001f",
+						"container": {
+							"kind": "cmaf",
+							"init": "AAAA"
+						},
+						"drm": ["1"]
+					}
+				}
+			},
+			"audio": {
+				"renditions": {
+					"a": {
+						"codec": "mp4a.40.2",
+						"sampleRate": 48000,
+						"numberOfChannels": 2,
+						"container": {
+							"kind": "cmaf",
+							"init": "AAAA"
+						},
+						"drm": ["1"]
+					}
+				}
+			}
+		},
+		"video": ["v"],
+		"audio": ["a"]
+	},
+	{
+		"name": "drm unreferenced entry is accepted",
+		"catalog": {
+			"drm": {
+				"1": {
+					"system": "1077efec-c0b2-4d02-ace3-3c1e52e2fb4b",
+					"scheme": "cbcs",
+					"kid": "a1b2c3d4-e5f6-0718-293a-4b5c6d7e8f90"
+				}
+			}
+		}
+	},
+	{
+		"name": "drm dangling video reference refuses the catalog",
+		"catalog": {
+			"drm": {
+				"1": {
+					"system": "1077efec-c0b2-4d02-ace3-3c1e52e2fb4b",
+					"scheme": "cbcs",
+					"kid": "a1b2c3d4-e5f6-0718-293a-4b5c6d7e8f90"
+				}
+			},
+			"video": {
+				"renditions": {
+					"v": {
+						"codec": "avc1.64001f",
+						"container": {
+							"kind": "cmaf",
+							"init": "AAAA"
+						},
+						"drm": ["2"]
+					}
+				}
+			},
+			"audio": {
+				"renditions": {
+					"a": {
+						"codec": "mp4a.40.2",
+						"sampleRate": 48000,
+						"numberOfChannels": 2,
+						"container": {
+							"kind": "cmaf",
+							"init": "AAAA"
+						},
+						"drm": ["1"]
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "drm dangling audio reference refuses the catalog",
+		"catalog": {
+			"drm": {},
+			"video": {
+				"renditions": {
+					"v": {
+						"codec": "avc1.64001f",
+						"container": {
+							"kind": "cmaf",
+							"init": "AAAA"
+						},
+						"drm": []
+					}
+				}
+			},
+			"audio": {
+				"renditions": {
+					"a": {
+						"codec": "mp4a.40.2",
+						"sampleRate": 48000,
+						"numberOfChannels": 2,
+						"container": {
+							"kind": "cmaf",
+							"init": "AAAA"
+						},
+						"drm": ["1"]
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "drm scheme cens refuses the catalog",
+		"catalog": {
+			"drm": {
+				"1": {
+					"system": "1077efec-c0b2-4d02-ace3-3c1e52e2fb4b",
+					"scheme": "cens",
+					"kid": "a1b2c3d4-e5f6-0718-293a-4b5c6d7e8f90"
+				}
+			},
+			"video": {
+				"renditions": {
+					"v": {
+						"codec": "avc1.64001f",
+						"container": {
+							"kind": "cmaf",
+							"init": "AAAA"
+						},
+						"drm": ["1"]
+					}
+				}
+			},
+			"audio": {
+				"renditions": {
+					"a": {
+						"codec": "mp4a.40.2",
+						"sampleRate": 48000,
+						"numberOfChannels": 2,
+						"container": {
+							"kind": "cmaf",
+							"init": "AAAA"
+						},
+						"drm": ["1"]
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "drm malformed system refuses the catalog",
+		"catalog": {
+			"drm": {
+				"1": {
+					"system": "widevine",
+					"scheme": "cbcs",
+					"kid": "a1b2c3d4-e5f6-0718-293a-4b5c6d7e8f90"
+				}
+			},
+			"video": {
+				"renditions": {
+					"v": {
+						"codec": "avc1.64001f",
+						"container": {
+							"kind": "cmaf",
+							"init": "AAAA"
+						},
+						"drm": ["1"]
+					}
+				}
+			},
+			"audio": {
+				"renditions": {
+					"a": {
+						"codec": "mp4a.40.2",
+						"sampleRate": 48000,
+						"numberOfChannels": 2,
+						"container": {
+							"kind": "cmaf",
+							"init": "AAAA"
+						},
+						"drm": ["1"]
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "drm entry without kid refuses the catalog",
+		"catalog": {
+			"drm": {
+				"1": {
+					"system": "1077efec-c0b2-4d02-ace3-3c1e52e2fb4b",
+					"scheme": "cenc"
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "drm license without url refuses the catalog",
+		"catalog": {
+			"drm": {
+				"1": {
+					"system": "1077efec-c0b2-4d02-ace3-3c1e52e2fb4b",
+					"scheme": "cbcs",
+					"kid": "a1b2c3d4-e5f6-0718-293a-4b5c6d7e8f90",
+					"license": {
+						"type": "EME-1.0"
+					}
+				}
+			},
+			"video": {
+				"renditions": {
+					"v": {
+						"codec": "avc1.64001f",
+						"container": {
+							"kind": "cmaf",
+							"init": "AAAA"
+						},
+						"drm": ["1"]
+					}
+				}
+			},
+			"audio": {
+				"renditions": {
+					"a": {
+						"codec": "mp4a.40.2",
+						"sampleRate": 48000,
+						"numberOfChannels": 2,
+						"container": {
+							"kind": "cmaf",
+							"init": "AAAA"
+						},
+						"drm": ["1"]
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "drm references must be a list",
+		"catalog": {
+			"drm": {
+				"1": {
+					"system": "1077efec-c0b2-4d02-ace3-3c1e52e2fb4b",
+					"scheme": "cbcs",
+					"kid": "a1b2c3d4-e5f6-0718-293a-4b5c6d7e8f90"
+				}
+			},
+			"video": {
+				"renditions": {
+					"v": {
+						"codec": "avc1.64001f",
+						"container": {
+							"kind": "cmaf",
+							"init": "AAAA"
+						},
+						"drm": "1"
+					}
+				}
+			},
+			"audio": {
+				"renditions": {
+					"a": {
+						"codec": "mp4a.40.2",
+						"sampleRate": 48000,
+						"numberOfChannels": 2,
+						"container": {
+							"kind": "cmaf",
+							"init": "AAAA"
+						},
+						"drm": ["1"]
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "drm unhyphenated kid refuses the catalog",
+		"catalog": {
+			"drm": {
+				"1": {
+					"system": "1077efec-c0b2-4d02-ace3-3c1e52e2fb4b",
+					"scheme": "cenc",
+					"kid": "a1b2c3d4e5f60718293a4b5c6d7e8f90"
+				}
+			}
+		},
+		"refused": true
 	}
 ]

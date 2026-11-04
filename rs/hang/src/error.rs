@@ -17,6 +17,19 @@ pub enum Error {
 	#[error("catalog rendition ID is both video and audio: {0}")]
 	DuplicateRendition(String),
 
+	/// A protected rendition lists a `drm` entry the catalog's root `drm` section lacks.
+	#[error("rendition {rendition} references missing drm entry {id}")]
+	MissingDrm {
+		/// The rendition listing the entry.
+		rendition: String,
+		/// The entry ID the root lacks.
+		id: String,
+	},
+
+	/// A Common Encryption scheme other than `cenc` and `cbcs`.
+	#[error("unsupported encryption scheme: {0}")]
+	UnsupportedScheme(String),
+
 	/// A catalog needs a newer moq-hang draft than this reader implements.
 	#[error("unsupported catalog version {0}: upgrade to read it")]
 	UnsupportedVersion(u64),

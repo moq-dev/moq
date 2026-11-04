@@ -11,6 +11,7 @@ mod clock;
 mod consumer;
 mod container;
 mod contribution;
+pub mod drm;
 mod echo;
 mod hex;
 mod json;

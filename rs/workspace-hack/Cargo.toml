@@ -129,7 +129,7 @@ typenum = { version = "1", default-features = false, features = ["const-generics
 url = { version = "2", features = ["serde"] }
 usage-argv = { version = "7", default-features = false, features = ["complete", "diagnostics", "help-advanced"] }
 usage-rs = { version = "7", features = ["completions", "config"] }
-uuid = { version = "1", features = ["v4", "v7"] }
+uuid = { version = "1", features = ["serde", "v4", "v7"] }
 winnow-dff4ba8e3ae991db = { package = "winnow", version = "1", features = ["simd"] }
 zeroize = { version = "1", features = ["derive"] }
 
@@ -246,7 +246,7 @@ typenum = { version = "1", default-features = false, features = ["const-generics
 url = { version = "2", features = ["serde"] }
 usage-argv = { version = "7", default-features = false, features = ["complete", "diagnostics", "help-advanced"] }
 usage-rs = { version = "7", features = ["completions", "config"] }
-uuid = { version = "1", features = ["v4", "v7"] }
+uuid = { version = "1", features = ["serde", "v4", "v7"] }
 winnow-ca01ad9e24f5d932 = { package = "winnow", version = "0.7" }
 winnow-dff4ba8e3ae991db = { package = "winnow", version = "1", features = ["simd"] }
 zeroize = { version = "1", features = ["derive"] }
@@ -343,7 +343,6 @@ tokio = { version = "1", default-features = false, features = ["tracing"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs", "tls12"] }
 tower = { version = "0.5", default-features = false, features = ["retry", "timeout"] }
 tower-http = { version = "0.6", default-features = false, features = ["decompression-gzip", "follow-redirect"] }
-uuid = { version = "1", default-features = false, features = ["serde"] }
 zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
 
 [target.aarch64-unknown-linux-gnu.build-dependencies]
@@ -376,7 +375,6 @@ tokio = { version = "1", default-features = false, features = ["tracing"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs", "tls12"] }
 tower = { version = "0.5", default-features = false, features = ["retry", "timeout"] }
 tower-http = { version = "0.6", default-features = false, features = ["decompression-gzip", "follow-redirect"] }
-uuid = { version = "1", default-features = false, features = ["serde"] }
 zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
 
 [target.x86_64-pc-windows-msvc.dependencies]
@@ -447,7 +445,6 @@ tokio = { version = "1", default-features = false, features = ["tracing"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs", "tls12"] }
 tower = { version = "0.5", default-features = false, features = ["retry", "timeout"] }
 tower-http = { version = "0.6", default-features = false, features = ["decompression-gzip", "follow-redirect"] }
-uuid = { version = "1", default-features = false, features = ["serde"] }
 zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
 
 [target.x86_64-unknown-linux-gnu.build-dependencies]
@@ -480,7 +477,6 @@ tokio = { version = "1", default-features = false, features = ["tracing"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs", "tls12"] }
 tower = { version = "0.5", default-features = false, features = ["retry", "timeout"] }
 tower-http = { version = "0.6", default-features = false, features = ["decompression-gzip", "follow-redirect"] }
-uuid = { version = "1", default-features = false, features = ["serde"] }
 zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
 
 ### END HAKARI SECTION

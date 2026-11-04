@@ -135,6 +135,11 @@ export const VideoConfigSchema = z.object({
 	// The container format, used to decode the timestamp and more.
 	container: ContainerSchema,
 
+	// The IDs of the root `drm` entries protecting this rendition, one per DRM system that can
+	// decrypt it. Absent or empty means clear. Only a CMAF rendition can be protected; `codec` names
+	// the codec its encrypted sample entry wraps. A consumer that can't decrypt skips it.
+	drm: z.optional(z.array(z.string())),
+
 	// The description is used for some codecs.
 	// If provided, we can initialize the decoder based on the catalog alone.
 	// Otherwise, the initialization information is (repeated) before each key-frame.

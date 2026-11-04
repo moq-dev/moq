@@ -5,6 +5,7 @@ import * as z from "zod/mini";
 import { AudioSchema } from "./audio";
 import { BinarySchema } from "./binary";
 import { ContributionSchema } from "./contribution";
+import { DrmSchema, MissingDrm } from "./drm";
 import { EchoSchema } from "./echo";
 import { TRACK } from "./format";
 import { JsonSchema } from "./json";
@@ -86,6 +87,9 @@ export const RootSchema = z.looseObject({
 	binary: section(BinarySchema, "tracks"),
 	// A new key, so a malformed entry fails the catalog, the same as Rust.
 	contributions: z.optional(renditions(ContributionSchema, "contribution")),
+	// The DRM systems protecting the CMAF renditions, keyed by entry ID; each protected rendition
+	// lists its entries' IDs in its own `drm`. A new key, so a malformed entry fails the catalog.
+	drm: z.optional(renditions(DrmSchema, "drm entry")),
 });
 
 /** The root catalog object: the media sections, `media`, the data track sections, plus any app extensions. */
@@ -125,11 +129,26 @@ export class DuplicateRendition extends Error {
 	}
 }
 
-/** Refuse an update with an ID naming both a video and an audio rendition. */
+/**
+ * Refuse an update with an ID naming both a video and an audio rendition, or with a rendition
+ * listing a `drm` entry the root lacks.
+ *
+ * Throws {@link DuplicateRendition} or {@link MissingDrm}.
+ */
 export function checkRenditions(root: Root): Root {
 	const audio = root.audio?.renditions ?? {};
 	const duplicate = Object.keys(root.video?.renditions ?? {}).find((id) => Object.hasOwn(audio, id));
 	if (duplicate !== undefined) throw new DuplicateRendition(duplicate);
+
+	// A protected rendition whose entry is missing would read as clear, or name no system.
+	const drm = root.drm ?? {};
+	const sections: (Record<string, { drm?: string[] }> | undefined)[] = [root.video?.renditions, audio];
+	for (const section of sections) {
+		for (const [rendition, config] of Object.entries(section ?? {})) {
+			const missing = config.drm?.find((id) => !Object.hasOwn(drm, id));
+			if (missing !== undefined) throw new MissingDrm(rendition, missing);
+		}
+	}
 	return root;
 }
 

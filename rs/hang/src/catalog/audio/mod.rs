@@ -175,6 +175,15 @@ pub struct AudioConfig {
 	#[serde(default)]
 	pub container: Container,
 
+	/// The IDs of the root `drm` entries protecting this rendition, one per DRM system that can
+	/// decrypt it. Empty means the rendition is clear, and is left off the wire.
+	///
+	/// Only a [`Cmaf`](Container::Cmaf) rendition can be protected: its init segment carries the
+	/// encrypted sample entry (`encv`/`enca`), while `codec` names the codec it wraps. A consumer
+	/// that cannot decrypt treats a protected rendition as undecodable.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub drm: Vec<String>,
+
 	/// The maximum delay between a frame being ready and the publisher flushing it.
 	/// The player's jitter buffer should be larger than this value.
 	/// If not provided, the player should assume each frame is flushed immediately.
@@ -240,6 +249,7 @@ impl AudioConfig {
 			enabled: true,
 			description: None,
 			container: Container::default(),
+			drm: Vec::new(),
 			jitter: None,
 			warmup: None,
 			delay: None,
