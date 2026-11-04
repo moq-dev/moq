@@ -13,7 +13,7 @@ MoQ transport crates share.
 
 `sign` and `e2ee`, both default, enable the two modules. With default features off, the crate is
 only `sign::PublicKey`, the endpoint ID, with its canonical z-base-32 text: it builds without
-`moq-net` or aws-lc-rs, for crates such as `moq-auth` that name endpoints but sign nothing.
+`moq-net` or rind, for crates such as `moq-auth` that name endpoints but sign nothing.
 `serde` adds the key's string serialization. `provider`, off by default, enables the `provider`
 module; it depends only on rind and rustls, never on `moq-net`, so the transport crates can
 use it without a dependency cycle.
