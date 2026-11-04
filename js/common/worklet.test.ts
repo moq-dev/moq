@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { rolldown } from "rolldown";
+import type { EmittedAsset, EmittedFile, PluginContext } from "rolldown";
 import { createServer, type MinimalPluginContextWithoutEnvironment, type ResolvedConfig } from "vite";
 import { worklet } from "./vite-plugin-worklet";
 
@@ -14,39 +14,42 @@ import { worklet } from "./vite-plugin-worklet";
 //
 // A bundler child process would outlive `vite build` and be reaped by init, so its CPU escapes the
 // build's accounting and it lingers after the build.
-// Bundle the plugin's modules without Vite's build setup. The full Vite library
+// Check the plugin's modules with its real compiler, without Vite's build setup. The full library
 // build and its child-process check run in the nightly test/worklet/matrix.ts on the real worklets.
 test("worklet modules load a lazy blob or a hosted script, leaving no child process", async () => {
 	const dir = mkdtempSync(join(tmpdir(), "worklet-"));
 	try {
 		const path = join(dir, "render.ts");
 		writeFileSync(path, `registerProcessor("render", class extends AudioWorkletProcessor {});\n`);
-		const index = join(dir, "index.ts");
-		writeFileSync(index, `export { default } from "./render.ts?worklet";\n`);
 		const plugin = worklet();
-		if (typeof plugin.configResolved !== "function") throw new Error("worklet must configure its build mode");
+		if (typeof plugin.configResolved !== "function" || typeof plugin.load !== "function")
+			throw new Error("worklet hooks must be functions");
 		await plugin.configResolved.call(
 			{} as MinimalPluginContextWithoutEnvironment,
 			{ command: "build" } as ResolvedConfig,
 		);
-		const bundle = await rolldown({ input: index, plugins: [plugin] });
-		try {
-			const { output } = await bundle.generate({ format: "es" });
-			const assets = output.filter((file) => file.type === "asset");
-			expect(assets.map((file) => file.fileName)).toEqual(["assets/render.js"]);
-			expect(assets[0].source).toContain("registerProcessor");
-			const chunks = output.filter((file) => file.type === "chunk");
-			for (const { code } of chunks) expect(code).not.toContain("import.meta.url");
-			const blobs = chunks.filter(({ code }) => code.includes("createObjectURL"));
-			expect(blobs).toHaveLength(1);
-			expect(blobs[0].code).toContain(JSON.stringify(assets[0].source));
-			const entry = chunks.find((chunk) => chunk.isEntry);
-			expect(entry?.dynamicImports).toEqual([blobs[0].fileName]);
-			expect(entry?.code).not.toContain("createObjectURL");
-			expect(entry?.code).toContain(`new URL("render.js", `);
-		} finally {
-			await bundle.close();
-		}
+		const assets: EmittedAsset[] = [];
+		const context = {
+			emitFile(file: EmittedFile) {
+				if (file.type !== "asset") throw new Error("worklet must emit an asset");
+				assets.push(file);
+				return "hosted";
+			},
+			addWatchFile(_path: string) {},
+		} as PluginContext;
+		const entry = await plugin.load.call(context, `${path}?worklet`);
+		const blob = await plugin.load.call(context, `${path}?worklet-blob`);
+
+		expect(assets).toHaveLength(1);
+		expect(assets[0].fileName).toBe("assets/render.js");
+		expect(assets[0].source).toContain("registerProcessor");
+		expect(entry).not.toContain("import.meta.url");
+		expect(blob).not.toContain("import.meta.url");
+		expect(entry).not.toContain("createObjectURL");
+		expect(blob).toContain("URL.createObjectURL");
+		expect(blob).toContain(JSON.stringify(assets[0].source));
+		expect(entry).toContain(`import(${JSON.stringify(`${path}?worklet-blob`)})`);
+		expect(entry).toContain(`new URL("render.js", base)`);
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
