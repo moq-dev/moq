@@ -69,6 +69,19 @@ Decided with the maintainer on 2026-10-20:
   The `js/net` send target moved to [padding](/quest/m2/probe/padding.md), its
   only sender.
 
+Decided with the maintainer on 2026-11-03, in review of
+[moq-dev/moq#7090](https://github.com/moq-dev/moq/pull/7090):
+
+- **A local override covers local reservations only.** ✅ Keep the larger of
+  the two targets: `Allocator::set_target(Some(0))` stops probing for this
+  side's reservations, and the peer's PROBE target still sets how high to
+  probe. Rejected: a local zero that also disables peer-driven probing.
+- **Unencodable viewer targets are refused at the public API.** ✅ Viewer
+  ceilings and overrides that would sum above 2^53 - 1 bps fail
+  (`Error::BoundsExceeded` in Rust, `MoqError::OutOfRange` through moq-ffi, a
+  `RangeError` in JS) and change nothing. Rejected: saturating the advertised
+  target, which silently changes what an oversized target means.
+
 This README's own work, once the children land:
 
 - An end-to-end shaped-uplink test, at least nightly: a Chrome publisher
