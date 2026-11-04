@@ -3150,3 +3150,57 @@ test("lite-07 SYNCED survives an initial removal and continuous earlier-prefix c
 		pair.server.close();
 	}
 });
+
+test("lite-06: a datagram request failing behind the shared writer resets rather than ends", async () => {
+	const version = Version.DRAFT_06;
+	const pair = createMockTransportPair(ALPN_06);
+	// The legacy API's one session queue, stalled on its first write.
+	let writes = 0;
+	const stall = Promise.withResolvers<void>();
+	Object.defineProperty(pair.server.datagrams, "writable", {
+		value: new WritableStream<Uint8Array>({
+			write() {
+				writes++;
+				return writes === 1 ? stall.promise : undefined;
+			},
+		}),
+	});
+	const origin = new OriginProducer();
+	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
+	const broadcast = publish(origin, Path.from("test"));
+	const first = broadcast.createDatagrams("a");
+	const second = broadcast.createDatagrams("b");
+
+	const subscribe = async (id: bigint, track: string) => {
+		const client = await Stream.open(pair.client, { version });
+		const server = await Stream.accept(pair.server, version);
+		if (!server) throw new Error("publisher never accepted the subscribe stream");
+		void publisher.runSubscribe(new Subscribe({ id, broadcast: Path.from("test"), track, priority: 0 }), server);
+		expect("start" in (await decodeSubscribeResponse(client.reader, version))).toBe(true);
+		return client;
+	};
+	const settle = async () => {
+		for (let i = 0; i < 20; i++) await new Promise((resolve) => setImmediate(resolve));
+	};
+	const a = await subscribe(0n, "a");
+	const b = await subscribe(1n, "b");
+	try {
+		first.append(undefined, Uint8Array.of(0xaa));
+		while (writes === 0) await settle();
+		// The second request now waits on the writer the first one holds.
+		second.append(undefined, Uint8Array.of(0xbb));
+		await settle();
+		// A SUBSCRIBE_UPDATE holding only its priority fails decoding, while the stream stays open.
+		await b.writer.u53(1);
+		await b.writer.u8(0);
+		await expect(decodeSubscribeResponse(b.reader, version)).rejects.toThrow();
+	} finally {
+		stall.resolve();
+		a.close();
+		b.close();
+		publisher.close();
+		origin.close();
+		pair.client.close();
+		pair.server.close();
+	}
+});

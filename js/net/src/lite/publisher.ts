@@ -1977,7 +1977,12 @@ export class Publisher {
 				// stop waiting once this request ends, and send nothing after it does.
 				// Raced directly, so a ready writer drops its close listener rather than keep one per send.
 				await race([writer.ready, left]);
-				if (left.peek() !== undefined) return end;
+				// As recv() does: a clean close ends the request, an error close fails it.
+				const reason = left.peek();
+				if (reason !== undefined) {
+					if (reason) throw reason;
+					return end;
+				}
 				await writer.write(body);
 			}
 		} finally {
