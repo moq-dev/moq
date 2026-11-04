@@ -905,36 +905,50 @@ impl LiveRanges {
 	///
 	/// A range already live keeps its Range ID, so an update that changes one range sends
 	/// only that one, and the publisher keeps where the rest resolved.
+	#[cfg(test)]
 	pub fn edit(&mut self, ranges: &[Range]) -> Result<RangeEdit, EncodeError> {
+		let keyed: Vec<_> = ranges.iter().map(|range| ((), *range)).collect();
+		self.edit_keyed(&keyed, |_| ()).map(|(edit, _)| edit)
+	}
+
+	/// [`Self::edit`] for ranges asked for by different owners: a live range keeps its Range
+	/// ID only for a wanted range of the same key, `key_of` giving each live one's. Returns
+	/// the edit and the Range ID each range it adds takes, with that range's key.
+	pub fn edit_keyed<K: Copy + Eq + std::hash::Hash>(
+		&mut self,
+		ranges: &[(K, Range)],
+		key_of: impl Fn(u64) -> K,
+	) -> Result<(RangeEdit, Vec<(u64, K)>), EncodeError> {
 		if ranges.is_empty() {
 			return Err(EncodeError::InvalidState);
 		}
 		if !self.version.has_ranges() {
 			// Replaced ranges take fresh Range IDs, so nothing said of the old ones applies.
-			if !self.live.values().eq(ranges) {
+			let ranges: Vec<Range> = ranges.iter().map(|(_, range)| *range).collect();
+			if !self.live.values().eq(&ranges) {
 				self.live.clear();
 				self.size = 0;
 				self.add(ranges.iter().copied());
 			}
-			return Ok(RangeEdit::Replace(ranges.to_vec()));
+			return Ok((RangeEdit::Replace(ranges), Vec::new()));
 		}
 		// Each live range keeps at most one wanted copy, so duplicates edit like any other.
-		let mut wanted = std::collections::HashMap::<Range, usize>::new();
-		for range in ranges {
-			*wanted.entry(*range).or_default() += 1;
+		let mut wanted = std::collections::HashMap::<(K, Range), usize>::new();
+		for wanted_range in ranges {
+			*wanted.entry(*wanted_range).or_default() += 1;
 		}
 		let mut remove = Vec::new();
 		for (&id, range) in &self.live {
-			match wanted.get_mut(range) {
+			match wanted.get_mut(&(key_of(id), *range)) {
 				Some(count) if *count > 0 => *count -= 1,
 				_ => remove.push(id),
 			}
 		}
 		// In the order asked for, so the publisher numbers them the way this side does.
-		let add: Vec<Range> = ranges
+		let added: Vec<(K, Range)> = ranges
 			.iter()
-			.filter(|range| {
-				let count = wanted.get_mut(*range).expect("counted above");
+			.filter(|wanted_range| {
+				let count = wanted.get_mut(*wanted_range).expect("counted above");
 				let keep = *count > 0;
 				*count = count.saturating_sub(1);
 				keep
@@ -944,11 +958,13 @@ impl LiveRanges {
 		for &id in &remove {
 			self.remove(id);
 		}
+		let ids = (self.next..).zip(added.iter().map(|(key, _)| *key)).collect();
+		let add: Vec<Range> = added.into_iter().map(|(_, range)| range).collect();
 		self.add(add.iter().copied());
 		if self.size > super::message::MAX_MESSAGE_SIZE {
 			return Err(EncodeError::TooLarge);
 		}
-		Ok(RangeEdit::Edit { remove, add })
+		Ok((RangeEdit::Edit { remove, add }, ids))
 	}
 }
 

@@ -282,6 +282,7 @@ type SubscriptionControlOptions = {
  */
 class SubscriptionControls {
 	#writer: Writer;
+	#live: LiveRanges;
 	#update?: { update: SubscribeUpdate; ids: bigint[] };
 	// Sticky, first one wins: null once the stream is over, an Error once it failed.
 	#end?: Error | null;
@@ -293,8 +294,9 @@ class SubscriptionControls {
 	readonly decoding: Promise<void>;
 
 	constructor(options: SubscriptionControlOptions) {
-		const { writer } = options;
+		const { writer, live } = options;
 		this.#writer = writer;
+		this.#live = live;
 		this.#ended = new Promise((resolve) => {
 			this.#resolveEnd = resolve;
 		});
@@ -315,6 +317,15 @@ class SubscriptionControls {
 		if (update) return { kind: "update", ...update };
 		if (this.#end === undefined) return undefined;
 		return this.#end === null ? { kind: "done" } : { kind: "error", error: this.#end };
+	}
+
+	/**
+	 * Where each live Range ID sits among the track model's ranges. The decoder applies each
+	 * update to the model as it decodes it, ahead of {@link take}, so this rather than the
+	 * last control taken is what indexes the model.
+	 */
+	positions(): Map<bigint, number> {
+		return new Map(this.#live.ids().map((id, index) => [id, index]));
 	}
 
 	/** Whether {@link take} has a control to answer with now. */
@@ -385,12 +396,15 @@ class SubscriptionControls {
 }
 
 // `entry`, a range this subscription already held, resolved as it was: a range resolves once, so
-// an update that leaves it live never counts its relative anchors back from a newer latest group.
+// an update that leaves it live never counts its relative anchors back from a newer latest group,
+// nor looks a time start up again in newer holdings. A time start resolved at group 0 stays: it
+// either names group 0, below which nothing sits, or reaches back to the oldest group held,
+// which an absolute start would turn into a floor the subscriber never named.
 function pin(entry: RangeEntry, resolved: Resolved | undefined): RangeEntry {
 	if (!resolved) return entry;
 	const range = { ...entry.range };
 	let { from, to } = entry;
-	if (range.start?.relative !== undefined) {
+	if (range.start?.relative !== undefined || (range.start?.time !== undefined && resolved.start > 0n)) {
 		range.start = { absolute: resolved.start };
 		from = [resolved.start, 0];
 	}
@@ -1058,7 +1072,8 @@ export class Publisher {
 
 			// The SUBSCRIBE's ranges, and the Range ID of each range the model holds, in its order.
 			const asked = entriesOf(msg);
-			let ids = asked.map((_, index) => BigInt(index));
+			// Where each Range ID sits among the model's ranges, as of the last update applied.
+			let positions = new Map(asked.map((_, index) => [BigInt(index), index]));
 			controls = new SubscriptionControls({
 				quic: this.#quic,
 				reader: stream.reader,
@@ -1069,11 +1084,11 @@ export class Publisher {
 					if (hasRanges(this.version)) {
 						const resolved = hooks.servingResolved(track);
 						const entries = live.map(({ id, entry }) => {
-							const index = ids.indexOf(id);
-							return index < 0 ? entry : pin(entry, resolved[index]);
+							const index = positions.get(id);
+							return index === undefined ? entry : pin(entry, resolved[index]);
 						});
 						Object.assign(update, spanOf(this.version, entries));
-						ids = live.map(({ id }) => id);
+						positions = new Map(live.map(({ id }, index) => [id, index]));
 					}
 					Object.assign(datagramBounds, {
 						startGroup: update.startGroup,
@@ -1300,8 +1315,8 @@ export class Publisher {
 		// resolves where its feed starts.
 		let first: { group: group.Consumer; largest: track.Position | undefined } | undefined;
 		let endSent = false;
-		// The Range ID of each requested range, in the order the model holds them, and those an
-		// update added whose start no SUBSCRIBE_STARTED reported yet. Lite-07 only.
+		// The Range IDs of the last update taken, and those an update added whose start no
+		// SUBSCRIBE_STARTED reported yet. Lite-07 only.
 		let ids = Array.from({ length: Number(initial) }, (_, index) => BigInt(index));
 		let unstarted: bigint[] = [];
 
@@ -1311,9 +1326,10 @@ export class Publisher {
 		const rangeStarts = (from: bigint): (bigint | undefined)[] => {
 			if (!hasRanges(this.version)) return [from];
 			const starts = hooks.servingStarts(track, from);
+			const positions = controls.positions();
 			return Array.from({ length: Number(initial) }, (_, id) => {
-				const index = ids.indexOf(BigInt(id));
-				return index < 0 ? undefined : starts[index];
+				const index = positions.get(BigInt(id));
+				return index === undefined ? undefined : starts[index];
 			});
 		};
 
@@ -1322,9 +1338,16 @@ export class Publisher {
 		const reportStarted = async (finished: boolean): Promise<boolean> => {
 			if (startSequence === undefined || unstarted.length === 0) return true;
 			const resolved = hooks.servingResolved(track);
+			const positions = controls.positions();
 			const waiting: bigint[] = [];
 			for (const id of unstarted) {
-				const range = resolved[ids.indexOf(id)];
+				const index = positions.get(id);
+				// An update not taken yet retired it, and taking that update forgets it.
+				if (index === undefined) {
+					waiting.push(id);
+					continue;
+				}
+				const range = resolved[index];
 				if (!range && !finished) {
 					waiting.push(id);
 					continue;
@@ -1453,9 +1476,10 @@ export class Publisher {
 							const update = control.update;
 							if (hasRanges(this.version)) {
 								// A range retired before its start resolved is owed no SUBSCRIBE_STARTED.
-								unstarted = unstarted.filter((id) => control.ids.includes(id));
-								for (const id of control.ids)
-									if (id >= initial && !ids.includes(id)) unstarted.push(id);
+								const live = new Set(control.ids);
+								unstarted = unstarted.filter((id) => live.has(id));
+								const held = new Set(ids);
+								for (const id of control.ids) if (id >= initial && !held.has(id)) unstarted.push(id);
 								ids = control.ids;
 							}
 							console.debug(`subscribe update: broadcast=${broadcast} track=${track.name}`);

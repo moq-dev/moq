@@ -947,6 +947,47 @@ test("lite-07 SUBSCRIBE_STARTED reports an added range's start, which later upda
 	}
 });
 
+// A time start resolves once too: a newer group starting before its time doesn't move it once
+// an update leaves the range live. Mirrors the Rust `lite07_an_added_time_start_keeps_its_start`.
+test("lite-07 keeps where an added time start resolved", async () => {
+	const version = Version.DRAFT_07;
+	const sub = await servedSubscription({
+		version,
+		prefill: [0n, 1n, 2n, 3n, 4n],
+		maxAge: Milli(3_600_000),
+		ranges: [{ start: { absolute: 0n }, end: { absolute: 1n } }],
+	});
+	const next = async () => {
+		for (;;) {
+			const resp = await decodeSubscribeResponse(sub.client.reader, version);
+			if ("start" in resp || "started" in resp) return resp;
+		}
+	};
+	try {
+		const start = await next();
+		if (!("start" in start)) throw new Error("expected SUBSCRIBE_OK");
+
+		// 10 ms falls in group 4, the newest one starting at or before it.
+		await replayUpdate({ priority: 0, ranges: [{ start: { time: 10 } }] }).encode(sub.client.writer, version);
+		const started = await next();
+		if (!("started" in started)) throw new Error("expected SUBSCRIBE_STARTED");
+		expect([started.started.id, started.started.start]).toEqual([1n, 4n]);
+
+		// Group 5 starts at 5 ms, before 10 ms, and another update leaves the range live: it
+		// still starts at 4.
+		sub.serve(5n);
+		await replayUpdate({ priority: 0, ranges: [{ start: { absolute: 9n } }] }).encode(sub.client.writer, version);
+		const pinned = await next();
+		if (!("started" in pinned)) throw new Error("expected SUBSCRIBE_STARTED");
+		expect(pinned.started.id).toBe(2n);
+		const ranges = sub.track.subscription.peek()?.ranges ?? [];
+		expect(ranges.some((range) => range.start?.absolute === 4n)).toBe(true);
+		expect(ranges.some((range) => range.start?.time !== undefined)).toBe(false);
+	} finally {
+		await sub.close();
+	}
+});
+
 // An edit naming a Range ID the subscription never assigned violates the protocol.
 test("lite-07 refuses an update retiring an unknown Range ID", async () => {
 	const version = Version.DRAFT_07;

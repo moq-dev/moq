@@ -4741,32 +4741,47 @@ impl TrackRun {
 		self.frames = bounds.frames;
 		if self.ctx.version.has_ranges() {
 			// A range retired before its start resolved is owed no SUBSCRIBE_STARTED.
-			self.unstarted.retain(|id| ids.contains(id));
-			let added = ids.iter().filter(|id| **id >= self.initial && !self.ids.contains(id));
+			// Both list Range IDs in ascending order, since each one assigned is the next.
+			self.unstarted.retain(|id| ids.binary_search(id).is_ok());
+			let added = ids
+				.iter()
+				.filter(|id| **id >= self.initial && self.ids.binary_search(id).is_err());
 			self.unstarted.extend(added);
 		}
 		self.ids = ids;
 	}
 
+	/// Where each live Range ID sits among the model's ranges.
+	fn positions(&self) -> HashMap<u64, usize> {
+		self.ids.iter().enumerate().map(|(index, id)| (*id, index)).collect()
+	}
+
 	/// `ranges`, numbered by `ids`, with each range this subscription already held resolved
 	/// as it was: a range resolves once, so an update that leaves it live never counts its
-	/// relative anchors back from a newer latest group. Lite-07 only: an older update
+	/// relative anchors back from a newer latest group, nor looks a time start up again in
+	/// newer groups. A time start resolved at group 0 stays: it either names group 0, below
+	/// which nothing sits, or reaches back to the oldest group held, which an absolute start
+	/// would turn into a floor the subscriber never named. Lite-07 only: an older update
 	/// replaces every range.
 	fn pin(&mut self, ids: &[u64], mut ranges: Vec<lite::Range>) -> Vec<lite::Range> {
 		if !self.ctx.version.has_ranges() {
 			return ranges;
 		}
 		let resolved = self.track.resolved();
+		let positions = self.positions();
 		for (id, range) in ids.iter().zip(&mut ranges) {
-			let Some((start, end)) = self
-				.ids
-				.iter()
-				.position(|held| held == id)
-				.and_then(|index| resolved.get(index).copied().flatten())
+			let Some((start, end)) = positions
+				.get(id)
+				.and_then(|index| resolved.get(*index).copied().flatten())
 			else {
 				continue;
 			};
-			if let Some(lite::Anchor::Relative(_)) = range.start {
+			let pinned = match range.start {
+				Some(lite::Anchor::Relative(_)) => true,
+				Some(lite::Anchor::Time(_)) => start > 0,
+				_ => false,
+			};
+			if pinned {
 				range.start = Some(lite::Anchor::Absolute(track::Position::group(start)));
 			}
 			if let (Some(lite::Anchor::Relative(_)), Some(end)) = (range.end, end) {
@@ -4791,14 +4806,11 @@ impl TrackRun {
 			return Ok(false);
 		}
 		let resolved = self.track.resolved();
+		let positions = self.positions();
 		let mut waiting = Vec::new();
 		let mut reported = false;
 		for id in std::mem::take(&mut self.unstarted) {
-			let index = self
-				.ids
-				.iter()
-				.position(|held| *held == id)
-				.expect("unstarted ranges are live");
+			let index = *positions.get(&id).expect("unstarted ranges are live");
 			let start = match resolved.get(index).copied().flatten() {
 				Some((start, end)) => {
 					let start = start.max(from);
@@ -5160,11 +5172,9 @@ impl TrackRun {
 		// SUBSCRIBE_START answers the SUBSCRIBE's ranges, by Range ID: none for one an update
 		// retired already, and SUBSCRIBE_STARTED answers each one an update added.
 		let starts = self.track.starts(start);
+		let positions = self.positions();
 		(0..self.initial)
-			.map(|id| {
-				let index = self.ids.iter().position(|held| *held == id)?;
-				starts.get(index).copied().flatten()
-			})
+			.map(|id| starts.get(*positions.get(&id)?).copied().flatten())
 			.collect()
 	}
 
@@ -7064,6 +7074,50 @@ mod serve_group_test {
 		let live = [(0, first), (1, back)];
 		run.update(lite07_add(&live, 2, &[lite::Range::span(Some(9), 0, None, None)]));
 		assert_eq!(run.track.resolved()[1], Some((2, None)), "the update resolved it again");
+	}
+
+	/// A time start resolves once too: a newer group starting before its time doesn't move it
+	/// once an update leaves the range live.
+	#[kio::test]
+	async fn lite07_an_added_time_start_keeps_its_start() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		for sequence in 0..5 {
+			write_group(&mut track, sequence, sequence * 1000);
+		}
+		let first = lite::Range::span(Some(0), 0, Some(0), None);
+		let subscriber = track.subscribe(
+			track::Subscription::default()
+				.with_delay(track::Delay::default().with_max(Duration::from_secs(3600)))
+				.with_range(0..1),
+		);
+		let (mut run, mut writer, _log) = lite07_run(SinkSession::new(Log::default()), subscriber);
+		while run.start.is_none() {
+			assert!(run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready());
+		}
+
+		// 4.5 s falls in group 4, the newest group starting at or before it.
+		let time = lite::Range {
+			start: Some(lite::Anchor::Time(4500)),
+			end: None,
+		};
+		run.update(lite07_add(&[(0, first)], 1, &[time]));
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(run.track.resolved()[1], Some((4, None)));
+
+		// Group 5 starts before 4.5 s, and another update leaves the range live: it still
+		// starts at 4.
+		write_group(&mut track, 5, 4200);
+		let live = [(0, first), (1, time)];
+		run.update(lite07_add(&live, 2, &[lite::Range::span(Some(9), 0, None, None)]));
+		assert_eq!(
+			run.track.resolved()[1],
+			Some((4, None)),
+			"the update kept where it started"
+		);
 	}
 
 	/// A range retired before SUBSCRIBE_STARTED reported it gets none, and one still waiting

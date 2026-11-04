@@ -157,6 +157,25 @@ async fn evicted_history_is_recovered_once_on_its_own_subscription() {
 	.expect("timed out");
 }
 
+/// The track finishing while a recovery is still out doesn't cut it: the copy ends only once
+/// the recovered groups arrived, which the live subscription's tail never waits for.
+#[kio::test]
+async fn a_recovery_outlives_the_track_finishing() {
+	kio::clock::timeout(TIMEOUT + cache::DEFAULT_EXPIRY * 3, async {
+		let fixture = Fixture::new(6).await;
+		let mut first = fixture.subscribe([Range::oldest()]).await;
+		assert_eq!(receive(&mut first, 6).await, (0..6).collect());
+
+		// Superseded, the copy expires them, while the reader keeps the subscription live.
+		kio::clock::sleep(cache::DEFAULT_EXPIRY * 2 + Duration::from_secs(2)).await;
+		let mut second = fixture.subscribe([Range::groups(1..4)]).await;
+		fixture.track.finish().unwrap();
+		assert_eq!(receive(&mut second, 3).await, (1..4).collect());
+	})
+	.await
+	.expect("timed out");
+}
+
 /// One group, or a slice of one, is what lite-07 FETCH carries, so a miss of one group still
 /// fetches it.
 #[kio::test]

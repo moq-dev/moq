@@ -2912,7 +2912,7 @@ mod tests {
 			requested: None,
 			live: lite::LiveRanges::new(Version::Lite04, &[lite::Range::OLDEST]),
 			demand: Some(Subscription::default()),
-			demand_ranges: vec![lite::Range::OLDEST],
+			fill_ids: Default::default(),
 			fill_groups: Default::default(),
 			tail: tail.clone(),
 			served: None,
@@ -3066,7 +3066,7 @@ mod tests {
 				requested: Some(floor),
 				live: lite::LiveRanges::new(Version::Lite04, &[lite::Range::span(Some(floor), 0, None, None)]),
 				demand: Some(Subscription::default()),
-				demand_ranges: vec![lite::Range::span(Some(floor), 0, None, None)],
+				fill_ids: Default::default(),
 				fill_groups: Default::default(),
 				tail: Default::default(),
 				served: None,
@@ -3531,7 +3531,7 @@ mod tests {
 			requested: Some(2),
 			live: lite::LiveRanges::new(VERSION, &[lite::Range::span(Some(2), 0, None, None)]),
 			demand: Some(Subscription::default()),
-			demand_ranges: vec![lite::Range::span(Some(2), 0, None, None)],
+			fill_ids: Default::default(),
 			fill_groups: Default::default(),
 			tail: Default::default(),
 			served: None,
@@ -3551,7 +3551,7 @@ mod tests {
 		// An update moves the floor and the ranges together, as `begin_subscription` does.
 		let update = |sub: &mut SubStream, start: Option<u64>, ranges: Vec<lite::Range>| {
 			sub.start = start;
-			sub.edit(&ranges).unwrap();
+			sub.edit(&ranges, 0).unwrap();
 		};
 		sub.started = true;
 		update(&mut sub, Some(1), vec![lite::Range::span(Some(1), 0, None, None)]);
@@ -3562,10 +3562,13 @@ mod tests {
 		);
 
 		sub.start = Some(2);
-		sub.edit(&[
-			lite::Range::span(Some(2), 0, Some(3), None),
-			lite::Range::span(Some(6), 0, None, None),
-		])
+		sub.edit(
+			&[
+				lite::Range::span(Some(2), 0, Some(3), None),
+				lite::Range::span(Some(6), 0, None, None),
+			],
+			0,
+		)
 		.unwrap();
 		assert_eq!(
 			sub.owed(None),
@@ -3616,6 +3619,62 @@ mod tests {
 		);
 	}
 
+	/// A fill asking for exactly what a demand range does is still a fill, judged by its own
+	/// Range ID, and keeps that ID while it stays held.
+	#[kio::test]
+	async fn a_lite07_fill_is_known_by_its_range_id() {
+		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), Version::Lite07)
+			.await
+			.unwrap();
+		// As a fill asks on the wire.
+		let groups = |range: std::ops::Range<u64>| lite::Range {
+			start: Some(lite::Anchor::Absolute(Position::group(range.start))),
+			end: Some(lite::Anchor::Absolute(Position::group(range.end))),
+		};
+		let demand = groups(4..8);
+		let mut sub = SubStream {
+			order: crate::track::Order::Descending,
+			stream,
+			id: 0,
+			max_delay: Duration::ZERO,
+			min_delay: None,
+			start: Some(4),
+			priority: 0,
+			requested: Some(4),
+			live: lite::LiveRanges::new(Version::Lite07, &[demand]),
+			demand: Some(Subscription::default()),
+			fill_ids: Default::default(),
+			fill_groups: Default::default(),
+			tail: Default::default(),
+			served: Some(4),
+			started: true,
+			starts: [(0, Some(4))].into(),
+			end: None,
+			wanted: None,
+			unanswered: None,
+			_working: crate::session::Work::default().start(),
+		};
+		assert_eq!(sub.fill_range(0), None, "the demand's range is no fill");
+
+		// The same bounds again, as a fill.
+		sub.edit(&[demand, demand], 1).unwrap();
+		assert_eq!(sub.fill_range(0), None, "the demand keeps its range");
+		assert_eq!(sub.fill_range(1), Some(4..8), "the copy the edit added is the fill");
+
+		// Another fill joins, and the first keeps its Range ID.
+		let other = groups(10..12);
+		sub.edit(&[demand, demand, other], 2).unwrap();
+		assert_eq!(sub.fill_ids.iter().copied().collect::<Vec<_>>(), [1, 2]);
+
+		// The demand moves away while the fill stays: the fill keeps Range ID 1.
+		let moved = lite::Range::span(Some(20), 0, None, None);
+		sub.edit(&[moved, demand, other], 2).unwrap();
+		assert_eq!(sub.fill_ids.iter().copied().collect::<Vec<_>>(), [1, 2]);
+		assert_eq!(sub.fill_range(1), Some(4..8));
+		assert_eq!(sub.fill_range(3), None, "the demand's new range is no fill");
+	}
+
 	/// A lite-07 range an update adds owes nothing known until SUBSCRIBE_STARTED says where it
 	/// starts, and then owes from there; one retired since owes nothing.
 	#[kio::test]
@@ -3640,7 +3699,7 @@ mod tests {
 			requested: Some(4),
 			live: lite::LiveRanges::new(Version::Lite07, &[first]),
 			demand: Some(Subscription::default()),
-			demand_ranges: vec![first],
+			fill_ids: Default::default(),
 			fill_groups: Default::default(),
 			tail: Default::default(),
 			served: Some(4),
@@ -3658,7 +3717,7 @@ mod tests {
 			start: Some(lite::Anchor::Relative(2)),
 			end: None,
 		};
-		let (edit, changed) = sub.edit(&[first, back]).unwrap();
+		let (edit, changed) = sub.edit(&[first, back], 0).unwrap();
 		assert!(changed);
 		assert_eq!(
 			edit,
@@ -3672,7 +3731,7 @@ mod tests {
 		assert_eq!(sub.owed(None), Some(vec![4..10, 1..10]));
 
 		// Retiring the first range forgets its start.
-		sub.edit(&[back]).unwrap();
+		sub.edit(&[back], 0).unwrap();
 		assert_eq!(sub.starts.keys().copied().collect::<Vec<_>>(), [1]);
 		assert_eq!(sub.owed(Some(8)), Some(vec![1..8]));
 	}
@@ -8024,8 +8083,9 @@ struct SubStream {
 	live: lite::LiveRanges,
 	/// The demand the ranges ask for, `None` when they ask only for fills.
 	demand: Option<Subscription>,
-	/// The demand's ranges on the wire, which alone set where the live feed is.
-	demand_ranges: Vec<lite::Range>,
+	/// The Range IDs of the fills' ranges; the rest are the demand's, which alone set where
+	/// the live feed is. Held by ID, since a fill may ask for exactly what a demand range does.
+	fill_ids: std::collections::BTreeSet<u64>,
 	/// The groups the ranges ask for fills.
 	fill_groups: rangemap::RangeSet<u64>,
 	priority: i8,
@@ -8149,24 +8209,36 @@ impl SubStream {
 
 	/// The groups the live range `id` asks for a fill, `None` for one of the demand's.
 	fn fill_range(&self, id: u64) -> Option<std::ops::Range<u64>> {
-		let range = self.live.get(id)?;
-		if self.demand_ranges.contains(range) {
+		if !self.fill_ids.contains(&id) {
 			return None;
 		}
+		let range = self.live.get(id)?;
 		match (range.start, range.end) {
 			(Some(lite::Anchor::Absolute(start)), Some(lite::Anchor::Absolute(end))) => Some(start.group..end.group),
 			_ => None,
 		}
 	}
 
-	/// Edit the live ranges into `ranges`, forgetting the starts of those retired. Returns the
-	/// edit, and whether it changed anything.
-	fn edit(&mut self, ranges: &[lite::Range]) -> Result<(lite::RangeEdit, bool), Error> {
+	/// Edit the live ranges into `ranges`, the last `fills` of which are the held fills',
+	/// forgetting the starts of those retired. A fill asking for what a demand range does
+	/// still takes a range of its own, so each Range ID stays the demand's or a fill's.
+	/// Returns the edit, and whether it changed anything.
+	fn edit(&mut self, ranges: &[lite::Range], fills: usize) -> Result<(lite::RangeEdit, bool), Error> {
 		let before: Vec<_> = self.live.iter().map(|(id, _)| id).collect();
-		let edit = self.live.edit(ranges)?;
+		let demand = ranges.len().saturating_sub(fills);
+		let keyed: Vec<_> = ranges
+			.iter()
+			.enumerate()
+			.map(|(index, range)| (index >= demand, *range))
+			.collect();
+		let fill_ids = &self.fill_ids;
+		let (edit, added) = self.live.edit_keyed(&keyed, |id| fill_ids.contains(&id))?;
 		let changed = !self.live.iter().map(|(id, _)| id).eq(before);
 		let live = &self.live;
 		self.starts.retain(|id, _| live.get(*id).is_some());
+		self.fill_ids.retain(|id| live.get(*id).is_some());
+		self.fill_ids
+			.extend(added.into_iter().filter(|(_, fill)| *fill).map(|(id, _)| id));
 		Ok((edit, changed))
 	}
 }
@@ -8633,7 +8705,7 @@ impl TrackServe {
 						// So do changed ranges that keep the floor, such as a widening that joins
 						// two: each gap they reach waits a fresh grace, which only delays giving up
 						// on one still owed.
-						let (edit, changed) = active.edit(&ranges)?;
+						let (edit, changed) = active.edit(&ranges, ranges.len() - demand_ranges.len())?;
 						let widened = (changed && demand.is_some())
 							.then(|| subscription.start().or(active.served).unwrap_or(0)..u64::MAX);
 						if let Ok(mut tail) = active.tail.write() {
@@ -8652,7 +8724,6 @@ impl TrackServe {
 						}
 						active.fill_groups = fills.groups.clone();
 						active.demand = demand;
-						active.demand_ranges = demand_ranges;
 						active.start = subscription.start();
 						if supports_update {
 							// The floor follows the requested start, in both directions:
@@ -9059,7 +9130,8 @@ impl Establish {
 			start: self.subscription.start(),
 			live: lite::LiveRanges::new(self.serve.subscriber.version, &self.ranges),
 			demand: self.demand.clone(),
-			demand_ranges: self.demand_ranges.clone(),
+			// The ranges take Range IDs in order, the demand's first.
+			fill_ids: (self.demand_ranges.len() as u64..self.ranges.len() as u64).collect(),
 			fill_groups: self.fill_groups.clone(),
 			priority: self.subscription.priority,
 			order: self.subscription.order,
@@ -10156,7 +10228,7 @@ impl ServeLoop {
 							if let Ok(mut tail) = active.tail.write() {
 								tail.account(skipped.clone(), now);
 							}
-							self.range_fills.refuse(skipped, crate::StreamError::NotFound);
+							self.range_fills.skip(groups, skipped);
 						}
 						// Only the demand's ranges say where the live feed is served from. No range
 						// starting anywhere leaves nothing owed.
@@ -10229,7 +10301,7 @@ impl ServeLoop {
 						if let Ok(mut tail) = active.tail.write() {
 							tail.account(skipped.clone(), now);
 						}
-						self.range_fills.refuse(skipped, crate::StreamError::NotFound);
+						self.range_fills.skip(groups, skipped);
 					}
 					// The tail judges what is owed again.
 					if let Ok(mut tail) = active.tail.write() {
@@ -10517,18 +10589,23 @@ impl ServeLoop {
 					};
 					// A stream still arriving on a recovery is kept only for someone reading it.
 					let read = crate::util::poll_unwanted(&mut self.demand, waiter).is_pending();
-					if self
+					match self
 						.range_fills
 						.poll(serve, &self.serving, accounted.as_ref(), read, waiter)
 					{
-						if let Err(err) = self.begin(serve, self.serving.subscription()) {
-							return Poll::Ready(ServeEnd::GiveBack(err));
+						Ok(true) => {
+							if let Err(err) = self.begin(serve, self.serving.subscription()) {
+								return Poll::Ready(ServeEnd::GiveBack(err));
+							}
+							continue;
 						}
-						continue;
+						Ok(false) => {}
+						Err(err) => return Poll::Ready(ServeEnd::GiveBack(err)),
 					}
 
-					// A lite-07 track the publisher finished ends once its tail settles.
-					if self.poll_finishing(waiter).is_ready() {
+					// A lite-07 track the publisher finished ends once its tail settles, and once
+					// every recovery delivered what the tail no longer waits for: ending drops it.
+					if self.poll_finishing(waiter).is_ready() && !self.range_fills.recovering() {
 						return Poll::Ready(ServeEnd::Finished);
 					}
 
