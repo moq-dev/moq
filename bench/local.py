@@ -96,7 +96,9 @@ def main():
                                 stderr=log,
                                 # quest gate closes the lock's descriptor, so workers can't hold
                                 # it: they stop with this process, even when it is killed outright,
-                                # rather than measure after the lock is gone.
+                                # rather than measure after the lock is gone. macOS has no
+                                # parent-death signal, so a SIGKILL there leaves them running:
+                                # an accepted gap, documented in bench/README.md.
                                 preexec_fn=(lambda: die_with(coordinator)) if sys.platform == "linux" else None,
                             )
                             processes.append((process, began, stamp))

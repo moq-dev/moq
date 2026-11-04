@@ -932,3 +932,10 @@ the module lanes `just check` runs at once, sweep `--jobs 1 3` over
 `bash sh/dispatch.sh check BASE`, which is then admitted once as a whole.
 Admission remains outside the suite's timeout clocks. Use separate checkouts to
 avoid measuring Cargo's artifact lock instead of competing work.
+
+Its workers run through `quest gate`, which closes the benchmark lock's
+descriptor, so only `local.py` itself holds the lock. Every exit of `local.py`
+stops its workers first, and on Linux a SIGKILL or OOM kill does too, through
+`PR_SET_PDEATHSIG`. On macOS it does not: killing `local.py` with SIGKILL frees
+the lock while its workers keep measuring until their own gates exit. Stop it
+with Ctrl-C or SIGTERM instead.
