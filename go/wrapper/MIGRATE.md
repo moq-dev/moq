@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Separate datagram tracks
+
+Replace stream-track `AppendDatagram` / `InsertDatagram` / `RecvDatagram` with `BroadcastProducer.CreateDatagrams(name, info)` and `BroadcastConsumer.Datagrams(name)`. `DatagramProducer.Append(timestamp, payload)` assigns a sequence and `Insert(Datagram)` preserves one. `DatagramConsumer.Recv(ctx)` and `All(ctx)` read its independent cursor. `DatagramInfo` carries priority and optional timescale. Watch `Priority()` / `PriorityChanged(ctx, last)` and serve on-demand tracks through `BroadcastRequests.Datagrams()` / `DatagramRequests.Requested(ctx)`.
+
 ### Viewer targets are bounded ([#7090](https://github.com/moq-dev/moq/pull/7090))
 
 Viewer ceilings and PROBE target overrides are refused with the new `ErrOutOfRange` once they would sum above 2^53 - 1 bps, the most a PROBE target carries; nothing changes on a refusal. `Viewers.Watch` returns `(*Viewer, error)`, and `Viewers.SetTarget` and `Viewer.Update` return an `error`. Handle the new variant wherever you match the error exhaustively. Regenerate bindings and rebuild the matching native library together.

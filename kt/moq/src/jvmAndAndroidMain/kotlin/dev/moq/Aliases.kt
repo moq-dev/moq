@@ -341,3 +341,18 @@ typealias ProtocolError = uniffi.moq.MoqProtocolError
 // variants still need the full name (`uniffi.moq.MoqContainer.Loc`). Enums
 // (AudioFormat) are fine: entry access through the alias works. Objects
 // (AudioCodec) expose constructors through the alias (`AudioCodec.opus()`).
+
+/** Writes live datagrams with an independent sequence counter and no cache. */
+typealias DatagramProducer = uniffi.moq.MoqDatagramProducer
+
+/** Reads a live datagram track in arrival order from its own cursor. */
+typealias DatagramConsumer = uniffi.moq.MoqDatagramConsumer
+
+/** A requested datagram track awaiting acceptance or rejection. */
+typealias DatagramRequest = uniffi.moq.MoqDatagramRequest
+
+/** Serves on-demand datagram tracks through their own request queue. */
+typealias DatagramRequests = uniffi.moq.MoqDatagramRequests
+
+/** Publisher priority and optional timestamp scale fixed for a datagram track. */
+typealias DatagramInfo = uniffi.moq.MoqDatagramInfo

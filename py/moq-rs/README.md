@@ -183,8 +183,6 @@ client = moq.Client(
   - `.finish()` ends at the live edge; the handle remains so `.abort(error_code)` can still run.
   - `.finish_at(final_sequence)` declares the first group that will never be produced while leaving lower groups writable.
   - `.abort(error_code)` terminates the track or group with an application error.
-  - `.append_datagram(payload, timestamp=None) -> sequence` (`TrackProducer`) sends a best-effort datagram. Payloads are capped at 1200 bytes and there is no stream fallback.
-  - `.insert_datagram(sequence, payload, timestamp=None)` (`TrackProducer`) sends one at the caller's own sequence.
   - `.largest() -> Position | None` (`TrackProducer`) reports the newest group written, at its newest frame. Datagrams are numbered apart from groups and never move it.
 
 ### Media
@@ -244,7 +242,6 @@ same either way. Opaque bytes go on a plain `TrackProducer`.
   - `await .recv_group() → GroupConsumer | None`. Arrival order, which may be out of sequence. Prefer it when latency matters more than order.
   - `.groups_as_arrived()`. Async iterator over `recv_group()`.
   - `.read_frame() -> Frame | None` returns the first frame of the next group. Empty groups are skipped; `None` is track EOF.
-  - `await .recv_datagram() -> Datagram | None` for best-effort raw track datagrams.
   - `.info() → TrackInfo`
   - `.update(subscription)`. Change delivery priority, staleness, or group range after subscribing.
 - **`GroupConsumer`**. Async iterator of raw `Frame`s.
@@ -295,3 +292,13 @@ Every handle whose cleanup is `cancel()` is an async context manager, so exiting
 
 - [`moq-ffi`](https://pypi.org/project/moq-ffi/). The raw UniFFI bindings this package wraps. Use it directly only if you need the unwrapped `Moq`-prefixed API.
 - [MoQ project](https://github.com/moq-dev/moq). Full monorepo with Rust server, TypeScript browser lib, and more.
+
+## Datagram tracks
+
+Create a separate live track with `broadcast.create_datagrams(name, info)` and subscribe
+with `broadcast.consume().datagrams(name)`. The `DatagramProducer` writes with
+`append(payload, timestamp=...)` or `insert(Datagram(...))`, and the `DatagramConsumer`
+reads with `await recv()` or async iteration. Demand is aggregate subscriber `priority()` /
+`await priority_changed(last)`; `broadcast.requests().datagrams()` handles on-demand tracks.
+Keep payloads below the path MTU. Delivery needs a datagram-capable transport and lite-05 or
+newer, without a stream fallback. Stream tracks of the same name are independent.

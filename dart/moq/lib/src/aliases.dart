@@ -240,3 +240,18 @@ typedef ProtocolKind = MoqProtocolKind;
 
 /// A protocol failure: scope, verbatim wire code, kind, and a diagnostic message.
 typedef ProtocolException = MoqProtocolException;
+
+/// Writes live datagrams with an independent sequence counter and no cache.
+typedef DatagramProducer = MoqDatagramProducer;
+
+/// Reads a live datagram track in arrival order from its own cursor.
+typedef DatagramConsumer = MoqDatagramConsumer;
+
+/// A requested datagram track awaiting acceptance or rejection.
+typedef DatagramRequest = MoqDatagramRequest;
+
+/// Serves on-demand datagram tracks through their own request queue.
+typedef DatagramRequests = MoqDatagramRequests;
+
+/// Publisher priority and optional timestamp scale fixed for a datagram track.
+typedef DatagramInfo = MoqDatagramInfo;

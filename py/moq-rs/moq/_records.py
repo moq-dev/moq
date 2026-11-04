@@ -127,6 +127,9 @@ class Datagram:
     timestamp: Timestamp | None
     payload: bytes
 
+    def _ffi(self) -> MoqDatagram:
+        return MoqDatagram(sequence=self.sequence, timestamp=_opt_ts(self.timestamp), payload=self.payload)
+
     @staticmethod
     def _from_ffi(datagram: MoqDatagram) -> Datagram:
         return Datagram(

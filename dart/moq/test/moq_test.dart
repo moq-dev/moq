@@ -19,6 +19,31 @@ Future<AnnounceEvent> nextRoute(AnnounceConsumer announced) async {
 }
 
 void main() {
+  test('datagram-only requests have independent priority demand', () async {
+    final broadcast = BroadcastProducer();
+    final stream = broadcast.publishTrack(name: 'events', info: null);
+    final requests = broadcast.requests().datagrams();
+    final consumer = broadcast.consume().datagrams(name: 'events');
+    consumer.setPriority(priority: 12);
+    final request = await requests.requested().timeout(timeout);
+    expect(request.name(), 'events');
+    expect(request.priority(), 12);
+    final producer = request.accept(info: null);
+    expect(producer.priority(), 12);
+    expect(stream.demand().wanted(), isNull);
+    producer.insert(
+      datagram: Datagram(sequence: 7, payload: utf8.encode('seven')),
+    );
+    final datagram = await consumer.recv().timeout(timeout);
+    expect(datagram?.sequence, 7);
+    expect(datagram?.payload, utf8.encode('seven'));
+    consumer.cancel();
+    expect(await producer.priorityChanged(last: 12).timeout(timeout), isNull);
+    producer.finish();
+    requests.cancel();
+    broadcast.close();
+  });
+
   test('container timebase belongs to one broadcast', () {
     final owner = BroadcastProducer();
     final other = BroadcastProducer();

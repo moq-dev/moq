@@ -143,3 +143,6 @@ extension Subscription {
     /// `Subscription(...)` must name `delay`.
     public static var `default`: Subscription { moqSubscriptionDefaults() }
 }
+
+/// Publisher priority and optional timestamp scale fixed for a datagram track.
+public typealias DatagramInfo = MoqFFI.MoqDatagramInfo

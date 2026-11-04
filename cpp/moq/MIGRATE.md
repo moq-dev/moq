@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Separate datagram tracks
+
+Replace stream-track datagram methods with `BroadcastProducer::create_datagrams(name, info)` and `BroadcastConsumer::datagrams(name)`. The generated `DatagramProducer` exposes `append(timestamp, payload)` and `insert(Datagram)`; `DatagramConsumer::recv()` returns an optional datagram through a future. `DatagramInfo` has only priority and optional timescale. Demand is aggregate subscriber `priority()` / `priority_changed(last)`; on-demand datagram requests come from `BroadcastRequests::datagrams()` / `DatagramRequests::requested()`. Stream tracks of the same name are independent.
+
 ### Viewer targets are bounded ([#7090](https://github.com/moq-dev/moq/pull/7090))
 
 Viewer ceilings and PROBE target overrides are refused with the new `moq::Error::kOutOfRange` once they would sum above 2^53 - 1 bps, the most a PROBE target carries; nothing changes on a refusal. `Viewers::watch` and `set_target` and `Viewer::update` return a `moq::expected` carrying it. Handle the new variant wherever you match the error exhaustively. Regenerate bindings and rebuild the matching native library together.

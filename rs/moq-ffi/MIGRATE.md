@@ -5,19 +5,13 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Separate datagram tracks
+
+`MoqTrackProducer::{append_datagram, insert_datagram}` and `MoqTrackConsumer::recv_datagram` are removed. Use `MoqBroadcastProducer::create_datagrams(name, info)` and `MoqBroadcastConsumer::datagrams(name)` for separate `MoqDatagramProducer`/`MoqDatagramConsumer` handles. `append(timestamp, payload)` assigns a sequence; `insert(MoqDatagram)` preserves one; `recv()` reads it. `MoqDatagramInfo` has only priority and optional timescale. Watch aggregate subscriber priority with `priority()` / `priority_changed(last)`, and handle dynamic tracks with `MoqBroadcastRequests::datagrams()` / `MoqDatagramRequests::requested()`. Stream and datagram tracks of the same name have independent demand and lifetimes.
+
 ### Viewer targets are bounded ([#7090](https://github.com/moq-dev/moq/pull/7090))
 
 Viewer ceilings and PROBE target overrides are refused with the new `MoqError::OutOfRange` once they would sum above 2^53 - 1 bps, the most a PROBE target carries; nothing changes on a refusal. `MoqViewers::watch` and `set_target` and `MoqViewer::update` return a `Result`. Handle the new variant wherever you match the error exhaustively. Regenerate bindings and rebuild the matching native library together.
-
-### Datagrams are a track of their own
-
-A raw track's datagrams travel on a separate datagram track of the same name, so the API is unchanged but some results differ:
-
-- `append_datagram` numbers datagrams on their own, apart from groups, and `MoqDatagram.sequence` is that number. Don't compare it with group sequences.
-- `MoqTrackProducer::largest` reports groups only: a datagram never moves it.
-- `insert_datagram` ignores a `finish_at` boundary.
-- A `MoqTrackConsumer` from `subscribe_track` subscribes to datagrams on its first `recv_datagram` and receives only those sent from then on, so start reading before the datagrams you need are sent. One from `MoqTrackProducer::consume` receives those sent after it was created.
-- `recv_datagram` fails with `NotFound` on a track with no datagram track, such as a media or JSON track, and over moq-transport, which carries no datagrams. Every raw track has one.
 
 ### `MoqVideoInit.lower` takes either producer kind ([#7699](https://github.com/moq-dev/moq/pull/7699))
 

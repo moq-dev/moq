@@ -16,6 +16,7 @@ pub mod audio;
 pub mod auth;
 pub mod bandwidth;
 pub mod consumer;
+pub mod datagram;
 pub mod demand;
 pub mod error;
 mod ffi;

@@ -49,6 +49,9 @@ type Frame = ffi.MoqFrame
 // (nil from an untimed track), and payload.
 type Datagram = ffi.MoqDatagram
 
+// DatagramInfo fixes a datagram track's publisher priority and optional timestamp scale.
+type DatagramInfo = ffi.MoqDatagramInfo
+
 // Delay is how far behind the live edge a subscriber or decoder plays: where it starts, and
 // how late it may fall. The zero Delay is moq-net's default, a stated zero for both, which
 // starts at the newest group and skips a superseded group at once.

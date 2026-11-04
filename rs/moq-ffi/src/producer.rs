@@ -5,7 +5,7 @@ use std::task::{Poll, ready};
 
 use moq_mux::catalog::hang::Extra;
 
-use crate::consumer::{Datagrams, MoqBroadcastConsumer, MoqGroupConsumer, MoqOrder, MoqSubscription, MoqTrackConsumer};
+use crate::consumer::{MoqBroadcastConsumer, MoqGroupConsumer, MoqOrder, MoqSubscription, MoqTrackConsumer};
 use crate::demand::MoqTrackDemand;
 use crate::error::MoqError;
 use crate::ffi::{Background, Polled};
@@ -82,13 +82,6 @@ fn raw_track_info(info: Option<MoqTrackInfo>) -> Result<moq_net::track::Info, Mo
 	info.map(moq_net::track::Info::try_from)
 		.transpose()
 		.map(|info| info.unwrap_or_default())
-}
-
-/// The datagram track a raw track with `info` carries its datagrams on.
-fn datagram_info(info: &moq_net::track::Info) -> moq_net::datagram::Info {
-	moq_net::datagram::Info::default()
-		.with_timescale(info.timescale)
-		.with_priority(info.priority)
 }
 
 impl From<&moq_net::track::Info> for MoqTrackInfo {
@@ -180,7 +173,7 @@ impl Children {
 	}
 
 	/// The broadcast, while a handle keeping it open still holds it.
-	fn broadcast(&self) -> Option<Arc<moq_net::broadcast::Producer>> {
+	pub(crate) fn broadcast(&self) -> Option<Arc<moq_net::broadcast::Producer>> {
 		self.broadcast.upgrade()
 	}
 
@@ -249,14 +242,15 @@ pub struct MoqBroadcastProducer {
 /// A handler for requests for tracks in a broadcast.
 #[derive(uniffi::Object)]
 pub struct MoqBroadcastRequests {
-	reads: Polled<RequestsInner>,
-	children: Children,
+	pub(crate) reads: Polled<RequestsInner>,
+	pub(crate) children: Children,
+	pub(crate) driver: Background,
 }
 
-struct RequestsInner {
-	requests: moq_net::broadcast::Requests,
+pub(crate) struct RequestsInner {
+	pub(crate) requests: moq_net::broadcast::Requests,
 	/// Holds the broadcast for [`Children::broadcast`] as long as `requests` keeps it open, so a
-	/// request accepted after the broadcast handle dropped still creates its datagram track.
+	/// request can still be accepted after the broadcast handle dropped.
 	_broadcast: Arc<moq_net::broadcast::Producer>,
 }
 
@@ -344,6 +338,7 @@ impl MoqBroadcastProducer {
 			};
 			Ok(Arc::new(MoqBroadcastRequests {
 				reads: Polled::new(inner).supervised(state.driver.clone()),
+				driver: state.driver.clone(),
 				children: state.children.clone(),
 			}))
 		})
@@ -371,15 +366,8 @@ impl MoqBroadcastProducer {
 		let _guard = crate::ffi::enter();
 		self.with_state(|state| {
 			let info = raw_track_info(info)?;
-			let datagrams = state.broadcast.create_datagrams(name.as_str(), datagram_info(&info))?;
-			let track = match state.broadcast.create_track(name, Some(info)) {
-				Ok(track) => track,
-				Err(err) => {
-					datagrams.abort(err.clone());
-					return Err(err.into());
-				}
-			};
-			MoqTrackProducer::child(Raw::new(track, datagrams), &state.children)
+			let track = state.broadcast.create_track(name, Some(info))?;
+			MoqTrackProducer::child(track, &state.children)
 		})
 	}
 
@@ -633,21 +621,12 @@ impl MoqTrackRequest {
 		let info = raw_track_info(info)?;
 		let request = self.take()?;
 		// Without a handle keeping it open, the broadcast has ended.
-		let Some(broadcast) = self.children.broadcast() else {
+		let Some(_broadcast) = self.children.broadcast() else {
 			request.reject(moq_net::Error::Unroutable);
 			return Err(MoqError::Closed);
 		};
-		// The datagram track first: accepting wakes the track's subscribers, and one that asks
-		// for its datagrams, or a lite-05/06 subscription that carries them, must find it.
-		let datagrams = match broadcast.create_datagrams(request.name(), datagram_info(&info)) {
-			Ok(datagrams) => datagrams,
-			Err(err) => {
-				request.reject(err.clone());
-				return Err(err.into());
-			}
-		};
 		let track = request.accept(Some(info));
-		MoqTrackProducer::child(Raw::new(track, datagrams), &self.children)
+		MoqTrackProducer::child(track, &self.children)
 	}
 
 	/// Reject the request with an application error code, failing the waiting subscriber.
@@ -661,54 +640,25 @@ impl MoqTrackRequest {
 
 // ---- Track Producer ----
 
-/// A track to which groups, frames, or datagrams can be published.
+/// A stream track to which groups and frames can be published.
 ///
 /// Released before its finish, or still open when its broadcast closes, it ends its track with
 /// `Unroutable`, which a moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqTrackProducer {
-	inner: std::sync::Mutex<Option<Raw>>,
+	inner: std::sync::Mutex<Option<moq_net::track::Producer>>,
 	// Taken by the first finish, so repeating it keeps the track only once.
 	keep: std::sync::Mutex<Option<Children>>,
-}
-
-/// A raw track and the datagram track of the same name that carries its datagrams.
-struct Raw {
-	track: moq_net::track::Producer,
-	/// Ended with the track, so `None` once it finished.
-	datagrams: Option<moq_net::datagram::Producer>,
-}
-
-impl Raw {
-	fn new(track: moq_net::track::Producer, datagrams: moq_net::datagram::Producer) -> Self {
-		Self {
-			track,
-			datagrams: Some(datagrams),
-		}
-	}
-
-	/// End both tracks with `err`. A track with a declared end ends there instead, as when its
-	/// handle drops, and its datagrams finish with it.
-	fn abort(self, err: moq_net::Error) {
-		let finished = self.track.finished().is_some();
-		if let Some(datagrams) = self.datagrams {
-			match finished {
-				true => datagrams.finish(),
-				false => datagrams.abort(err.clone()),
-			}
-		}
-		if !finished {
-			let _ = self.track.abort(err);
-		}
-	}
 }
 
 impl Child for MoqTrackProducer {
 	fn abort(&self, err: moq_net::Error) {
 		let _guard = crate::ffi::enter();
 		let raw = self.inner.lock().unwrap().take();
-		if let Some(raw) = raw {
-			raw.abort(err);
+		if let Some(raw) = raw
+			&& raw.finished().is_none()
+		{
+			let _ = raw.abort(err);
 		}
 	}
 }
@@ -717,15 +667,17 @@ impl Drop for MoqTrackProducer {
 	fn drop(&mut self) {
 		let _guard = crate::ffi::enter();
 		// A finished track lives on in its broadcast, and may still take groups below its end.
-		if let Some(raw) = self.inner.get_mut().unwrap().take() {
-			raw.abort(moq_net::Error::Unroutable);
+		if let Some(raw) = self.inner.get_mut().unwrap().take()
+			&& raw.finished().is_none()
+		{
+			let _ = raw.abort(moq_net::Error::Unroutable);
 		}
 	}
 }
 
 impl MoqTrackProducer {
 	/// Wrap `raw` as a child of the broadcast `children` belongs to.
-	fn child(raw: Raw, children: &Children) -> Result<Arc<Self>, MoqError> {
+	fn child(raw: moq_net::track::Producer, children: &Children) -> Result<Arc<Self>, MoqError> {
 		children.adopt(Arc::new(Self {
 			inner: std::sync::Mutex::new(Some(raw)),
 			keep: std::sync::Mutex::new(Some(children.clone())),
@@ -735,7 +687,7 @@ impl MoqTrackProducer {
 	pub(crate) fn track_demand(&self) -> Result<moq_net::track::Demand, MoqError> {
 		let guard = self.inner.lock().unwrap();
 		let raw = guard.as_ref().ok_or(MoqError::Closed)?;
-		Ok(raw.track.demand())
+		Ok(raw.demand())
 	}
 
 	/// Hand the track to a typed writer that `f` builds (a JSON producer, say), closing this
@@ -748,7 +700,7 @@ impl MoqTrackProducer {
 		// Taken for the whole construction, so a racing adopt finds the handle closed. `f` runs
 		// outside the lock: it may take the broadcast's, which a close holds while it takes this one.
 		let raw = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
-		let writer = match f(raw.track.clone()) {
+		let writer = match f(raw.clone()) {
 			Ok(writer) => Arc::new(writer),
 			Err(err) => {
 				*self.inner.lock().unwrap() = Some(raw);
@@ -760,10 +712,6 @@ impl MoqTrackProducer {
 				return Err(err);
 			}
 		};
-		// The writer publishes groups only.
-		if let Some(datagrams) = raw.datagrams {
-			datagrams.finish();
-		}
 		// A finished track has no family left to join, and ends at its declared end.
 		let children = self.keep.lock().unwrap().clone();
 		match children {
@@ -783,7 +731,7 @@ impl MoqTrackProducer {
 		let _guard = crate::ffi::enter();
 		let guard = self.inner.lock().unwrap();
 		let raw = guard.as_ref().ok_or(MoqError::Closed)?;
-		Ok(Arc::new(MoqTrackRequests::new(raw.track.requests())))
+		Ok(Arc::new(MoqTrackRequests::new(raw.requests())))
 	}
 
 	/// A watch-only handle to this track's name and whether it has subscribers.
@@ -800,17 +748,8 @@ impl MoqTrackProducer {
 		let guard = self.inner.lock().unwrap();
 		let raw = guard.as_ref().ok_or(MoqError::Closed)?;
 		let subscription = subscription.map(moq_net::track::Subscription::try_from).transpose()?;
-		let track = raw.track.subscribe(subscription);
-		// Opened now: a local reader costs no subscription, and reads what is sent from here on.
-		let datagrams = match &raw.datagrams {
-			Some(datagrams) => {
-				let mut datagrams = datagrams.consume();
-				datagrams.set_priority(track.control().subscription().priority);
-				Datagrams::Open(datagrams)
-			}
-			None => Datagrams::Ended,
-		};
-		Ok(Arc::new(MoqTrackConsumer::new(track, datagrams, Background::default())))
+		let track = raw.subscribe(subscription);
+		Ok(Arc::new(MoqTrackConsumer::new(track, Background::default())))
 	}
 
 	/// Append a new group to the track, returning a producer for writing frames into it.
@@ -818,7 +757,7 @@ impl MoqTrackProducer {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
 		let raw = guard.as_mut().ok_or(MoqError::Closed)?;
-		let group = raw.track.append_group()?;
+		let group = raw.append_group()?;
 		Ok(Arc::new(MoqGroupProducer {
 			sequence: group.sequence,
 			inner: std::sync::Mutex::new(Some(group)),
@@ -833,7 +772,7 @@ impl MoqTrackProducer {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
 		let raw = guard.as_mut().ok_or(MoqError::Closed)?;
-		let group = raw.track.create_group(moq_net::group::Info { sequence })?;
+		let group = raw.create_group(moq_net::group::Info { sequence })?;
 		Ok(Arc::new(MoqGroupProducer {
 			sequence: group.sequence,
 			inner: std::sync::Mutex::new(Some(group)),
@@ -850,41 +789,8 @@ impl MoqTrackProducer {
 		let timestamp = frame.timestamp.map(TryInto::try_into).transpose()?;
 		let mut guard = self.inner.lock().unwrap();
 		let raw = guard.as_mut().ok_or(MoqError::Closed)?;
-		raw.track.write_frame(timestamp, frame.payload)?;
+		raw.write_frame(timestamp, frame.payload)?;
 		Ok(())
-	}
-
-	/// Send `frame` as a best-effort datagram, returning the sequence number assigned to it.
-	///
-	/// Datagrams are numbered on their own, apart from groups. A reader receives only those
-	/// sent after it subscribed to datagrams; see
-	/// [`recv_datagram`](crate::consumer::MoqTrackConsumer::recv_datagram). The payload must be
-	/// at most 1200 bytes. Datagrams are only delivered on transports and wire
-	/// versions with a datagram channel; there is no stream fallback. Like a frame, its
-	/// timestamp must match the track's timedness.
-	pub fn append_datagram(&self, frame: MoqFrame) -> Result<u64, MoqError> {
-		let _guard = crate::ffi::enter();
-		let timestamp = frame.timestamp.map(TryInto::try_into).transpose()?;
-		let mut guard = self.inner.lock().unwrap();
-		let datagrams = guard.as_mut().and_then(|raw| raw.datagrams.as_mut());
-		Ok(datagrams.ok_or(MoqError::Closed)?.append(timestamp, frame.payload)?)
-	}
-
-	/// Send `frame` as a best-effort datagram at an explicit `sequence`.
-	///
-	/// [`append_datagram`](Self::append_datagram) continues past the highest sequence sent; this
-	/// is for a caller that allocates its own, such as an encryption layer binding the sequence
-	/// into its nonce. The same payload, transport, and timedness rules apply.
-	pub fn insert_datagram(&self, sequence: u64, frame: MoqFrame) -> Result<(), MoqError> {
-		let _guard = crate::ffi::enter();
-		let timestamp = frame.timestamp.map(TryInto::try_into).transpose()?;
-		let mut guard = self.inner.lock().unwrap();
-		let datagrams = guard.as_mut().and_then(|raw| raw.datagrams.as_mut());
-		Ok(datagrams.ok_or(MoqError::Closed)?.insert(moq_net::Datagram {
-			sequence,
-			timestamp,
-			payload: frame.payload.into(),
-		})?)
 	}
 
 	/// The newest content this track holds: its newest group, at that group's newest frame
@@ -896,7 +802,7 @@ impl MoqTrackProducer {
 		let _guard = crate::ffi::enter();
 		let guard = self.inner.lock().unwrap();
 		let raw = guard.as_ref().ok_or(MoqError::Closed)?;
-		Ok(raw.track.largest().map(MoqPosition::from))
+		Ok(raw.largest().map(MoqPosition::from))
 	}
 
 	/// Abort this track with an application error code.
@@ -905,10 +811,7 @@ impl MoqTrackProducer {
 		let mut guard = self.inner.lock().unwrap();
 		let raw = guard.take().ok_or(MoqError::Closed)?;
 		let err = moq_net::Error::App(error_code);
-		if let Some(datagrams) = raw.datagrams {
-			datagrams.abort(err.clone());
-		}
-		raw.track.abort(err)?;
+		raw.abort(err)?;
 		Ok(())
 	}
 
@@ -921,14 +824,11 @@ impl MoqTrackProducer {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
 		let raw = guard.as_mut().ok_or(MoqError::Closed)?;
-		if raw.track.finished().is_none() {
-			raw.track.finish()?;
-		}
-		if let Some(datagrams) = raw.datagrams.take() {
-			datagrams.finish();
+		if raw.finished().is_none() {
+			raw.finish()?;
 		}
 		if let Some(children) = self.keep.lock().unwrap().take() {
-			children.keep(raw.track.clone());
+			children.keep(raw.clone());
 		}
 		Ok(())
 	}
@@ -942,8 +842,7 @@ impl MoqTrackProducer {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
 		let raw = guard.as_mut().ok_or(MoqError::Closed)?;
-		raw.track
-			.finish_at(moq_net::track::Position::group(final_sequence), None)?;
+		raw.finish_at(moq_net::track::Position::group(final_sequence), None)?;
 		Ok(())
 	}
 }

@@ -4,13 +4,9 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Datagrams are a track of their own
+### Separate datagram tracks
 
-A raw track's datagrams travel on a separate datagram track of the same name, so the C ABI is unchanged but some results differ:
-
-- `moq_publish_track_datagram` numbers datagrams on their own, apart from groups, and `moq_datagram.sequence` is that number. Don't compare it with group sequences.
-- `moq_consume_datagrams` receives only the datagrams sent once its subscription is answered. Every raw track carries a datagram track, but a name with none, such as a media or JSON track, ends the callback with a not-found error.
-- moq-transport carries no datagrams.
+Create a separate producer with `moq_publish_datagrams` and `moq_datagram_info`; replace `moq_publish_track_datagram` with `moq_publish_datagrams_append` on that handle, or `moq_publish_datagrams_insert` for an explicit sequence. `moq_consume_datagrams` now takes a subscriber priority before its callback and never subscribes to a stream track. Use `moq_publish_datagrams_demand` and `moq_datagram_demand_priority` for aggregate priority, and `moq_publish_datagrams_requests` / `moq_datagram_request_accept` for on-demand publishing. Finish or abort datagram producers separately. A zeroed datagram info is untimed, unlike the microsecond default of stream-track info.
 
 ### JSON writes refuse a NULL timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
 

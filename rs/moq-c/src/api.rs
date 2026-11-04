@@ -3170,23 +3170,15 @@ pub unsafe extern "C" fn moq_publish_track_frame(
 	})
 }
 
-/// Send a best-effort datagram on a raw track created by [moq_publish_track].
+/// Append a datagram to a producer from [crate::moq_publish_datagrams], returning its sequence.
 ///
-/// Takes `payload` then `timestamp`, matching [moq_publish_track_frame]. The payload must
-/// be at most 1200 bytes. On success the datagram's sequence number, counted apart from the
-/// track's groups, is written to `out_sequence` when it is non-NULL. A subscriber receives the
-/// datagrams sent once its [moq_consume_datagrams] subscription is answered, and counts toward
-/// the track's demand. Datagrams are delivered only on
-/// transports and wire versions with a datagram channel; there is no group fallback.
-///
-/// Returns a zero on success, or a negative code on failure.
+/// Keep the payload well below the path MTU. No stream fallback is available.
 ///
 /// # Safety
-/// - The caller must ensure that payload is a valid pointer to payload_size bytes of data.
-/// - `timestamp` must be NULL or a valid pointer to a [moq_timestamp].
-/// - `out_sequence` must be NULL or a valid pointer to a `uint64_t`.
+/// `payload` must point to `payload_size` bytes, `timestamp` must be NULL or valid,
+/// and `out_sequence` must be NULL or writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_publish_track_datagram(
+pub unsafe extern "C" fn moq_publish_datagrams_append(
 	track: u32,
 	payload: *const u8,
 	payload_size: usize,
@@ -3197,7 +3189,7 @@ pub unsafe extern "C" fn moq_publish_track_datagram(
 		let track = ffi::parse_id(track)?;
 		let payload = unsafe { ffi::parse_slice(payload, payload_size)? };
 		let timestamp = unsafe { ffi::parse_timestamp(timestamp)? };
-		let sequence = State::lock().publish.track_datagram(track, timestamp, payload)?;
+		let sequence = State::lock().publish.datagrams_append(track, timestamp, payload)?;
 		if let Some(out) = unsafe { out_sequence.as_mut() } {
 			*out = sequence;
 		}
@@ -4300,7 +4292,7 @@ pub extern "C" fn moq_consume_track_cancel(track: u32) -> i32 {
 	})
 }
 
-/// Subscribe to a raw track's best-effort datagrams by name.
+/// Subscribe to a live datagram track by name, at the given subscriber priority.
 ///
 /// The datagram counterpart to [moq_consume_track], on its own subscription, delivering the
 /// datagrams sent once the publisher answered it. `on_datagram`
@@ -4322,6 +4314,7 @@ pub unsafe extern "C" fn moq_consume_datagrams(
 	broadcast: u32,
 	name: *const c_char,
 	name_len: usize,
+	priority: i8,
 	on_datagram: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
@@ -4329,7 +4322,9 @@ pub unsafe extern "C" fn moq_consume_datagrams(
 		let broadcast = ffi::parse_id(broadcast)?;
 		let name = unsafe { ffi::parse_str(name, name_len)? };
 		let on_datagram = unsafe { ffi::OnStatus::new(user_data, on_datagram)? };
-		State::lock().consume.datagram_track(broadcast, name, on_datagram)
+		State::lock()
+			.consume
+			.datagram_track(broadcast, name, priority, on_datagram)
 	})
 }
 
