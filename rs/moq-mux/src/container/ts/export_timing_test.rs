@@ -790,6 +790,41 @@ async fn an_unmarked_step_keeps_the_export_rendering() {
 	}
 }
 
+/// The same step back, smaller than the delay, while the export is still acquiring its first
+/// clock: what it read before the step and what it reads after cannot share one clock, so
+/// audio still never regresses within a clock period, and the export renders on.
+#[tokio::test(start_paused = true)]
+async fn an_unmarked_step_while_acquiring_keeps_the_export_rendering() {
+	for declared in [false, true] {
+		for lag in [0, LAGS[0], LAGS[1]] {
+			let mut live = Live::new(1.0, lag).await;
+			// Far enough into the timeline that the step stays on it.
+			live.offset = 10_000_000;
+			if declared {
+				live.reorder();
+			}
+			let mut leg = live.join(Duration::ZERO).await;
+			live.run(4, &mut [&mut leg], |_| false);
+			let case = format!("declared {declared}, lag {lag}");
+			assert!(leg.units().is_empty(), "{case}: output began before the step");
+			live.offset -= 300_000;
+			live.run(live.tick + 8 * GOP, &mut [&mut leg], |_| false);
+
+			assert_eq!(leg.export.dropped(), 0, "{case}");
+			let units = leg.units();
+			let audio: Vec<_> = units.iter().filter(|unit| unit.pid == AUDIO_PID).collect();
+			for pair in audio.windows(2) {
+				assert!(
+					pair[0].period != pair[1].period || diff90(pair[1].decode, pair[0].decode) >= 0,
+					"{case}: audio regressed on one clock: {pair:?}"
+				);
+			}
+			let video = units.iter().filter(|unit| unit.pid == VIDEO_PID).count() as u64;
+			assert!(video >= 6 * GOP, "{case}: only {video} video units");
+		}
+	}
+}
+
 // A publisher that dies leaves the last video frames it sent held for their DTS, and nothing
 // settles them until frames come again. Where the receiver is not told the source changed (a
 // replacement on a protocol under another instance, or the other half of a 1+1 pair), those come on the
