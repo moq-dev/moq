@@ -2129,10 +2129,18 @@ impl Request for TrackInfoServe {
 		waiter: &kio::Waiter,
 	) -> Poll<Result<ControlFlow<()>, Error>> {
 		let ietf = ready!(shared.peer_setup.poll_ietf(waiter));
-		if let Self::Track(querying, legacy) = self
-			&& let Poll::Ready(Err(err)) = querying.poll_ok(waiter)
-		{
-			*self = Self::Datagrams(Legacy::datagrams(legacy.take(), err)?);
+		if let Self::Track(querying, legacy) = self {
+			match querying.poll_ok(waiter) {
+				Poll::Ready(Err(err)) => *self = Self::Datagrams(Legacy::datagrams(legacy.take(), err)?),
+				// The stream track answers: let a pending datagram ask go, rather than hold it
+				// as long as the requester keeps the stream open.
+				Poll::Ready(Ok(_)) => drop(legacy.take()),
+				Poll::Pending => {
+					if let Poll::Ready(consumer) = Legacy::poll_datagrams(legacy, waiter) {
+						*self = Self::Datagrams(consumer);
+					}
+				}
+			}
 		}
 		let querying = match self {
 			Self::Track(querying, _) => querying,
@@ -2372,8 +2380,24 @@ impl Request for SubscribeServe {
 	) -> Poll<Result<ControlFlow<()>, Error>> {
 		loop {
 			match self {
-				Self::Query { querying, .. } => {
-					let info = ready!(querying.poll_ok(waiter));
+				Self::Query { querying, legacy, .. } => {
+					let info = match querying.poll_ok(waiter) {
+						Poll::Ready(info) => info,
+						Poll::Pending => {
+							let consumer = ready!(Legacy::poll_datagrams(legacy, waiter));
+							let Self::Query { msg, update, .. } = std::mem::replace(
+								self,
+								Self::Drain {
+									children: Default::default(),
+									_track: None,
+								},
+							) else {
+								unreachable!()
+							};
+							*self = Self::datagrams(consumer, &msg, update);
+							continue;
+						}
+					};
 					let Self::Query {
 						msg,
 						track,
@@ -2401,9 +2425,27 @@ impl Request for SubscribeServe {
 					let bounds = Bounds::new(&msg.ranges, info.timescale)?;
 					*self = Self::subscribe(shared, *msg, bounds, &track, latest, update, legacy);
 				}
-				Self::Confirm { subscribing, .. } => {
+				Self::Confirm {
+					subscribing, legacy, ..
+				} => {
 					let ietf = ready!(shared.peer_setup.poll_ietf(waiter));
-					let track = ready!(subscribing.poll_ok(waiter));
+					let track = match subscribing.poll_ok(waiter) {
+						Poll::Ready(track) => track,
+						Poll::Pending => {
+							let consumer = ready!(Legacy::poll_datagrams(legacy, waiter));
+							let Self::Confirm { msg, update, .. } = std::mem::replace(
+								self,
+								Self::Drain {
+									children: Default::default(),
+									_track: None,
+								},
+							) else {
+								unreachable!()
+							};
+							*self = Self::datagrams(consumer, &msg, update);
+							continue;
+						}
+					};
 					let Self::Confirm {
 						msg,
 						bounds,
@@ -2571,11 +2613,22 @@ impl Request for SubscribeServe {
 
 /// Lite-05/06 carry a name's stream track and datagram track on one subscription: a name
 /// with a stream track carries its datagram track beside it (see [`LegacyDatagrams`]), and
-/// one with none is served from its datagram track alone. The stream track's lookup
-/// resolves later through an origin, so the request keeps this until it does.
+/// one with none is served from its datagram track alone.
+///
+/// Once the stream track's lookup is pending, the request asks for the datagram track too,
+/// since a handler may leave a name it doesn't serve unanswered: a local datagram track
+/// answers the name without waiting for the stream track's lookup, which resolves later
+/// through an origin, so the request keeps this until one of them answers. A datagram track
+/// waits for the stream track's answer instead while a producer serves the stream track. A
+/// relayed broadcast's is asked for only once its stream track is not found (see
+/// [`crate::broadcast::Consumer::has_local_datagrams`]). Of a name whose two kinds are both
+/// asked for on demand, the first answered serves it.
 struct Legacy {
 	broadcast: crate::broadcast::Consumer,
 	name: String,
+	/// The name's datagram track, asked for beside the stream track: `None` until asked, as
+	/// a relayed broadcast's stays, and `Some(None)` once a handler refused it.
+	datagrams: Option<Option<datagram::Consumer>>,
 }
 
 impl Legacy {
@@ -2585,8 +2638,42 @@ impl Legacy {
 			Box::new(Self {
 				broadcast: broadcast.clone(),
 				name: name.to_string(),
+				datagrams: None,
 			})
 		})
+	}
+
+	/// The datagram track to serve before the stream track answers: one a local handler or
+	/// producer answered while no producer serves the stream track. Pending otherwise,
+	/// waking with the stream track's lookup, which the caller polls first.
+	fn poll_datagrams(legacy: &mut Option<Box<Self>>, waiter: &kio::Waiter) -> Poll<datagram::Consumer> {
+		let Some(this) = legacy else {
+			return Poll::Pending;
+		};
+		if this.datagrams.is_none() {
+			// A relayed broadcast is left unasked, for the stream track's not-found to ask.
+			if !this.broadcast.has_local_datagrams() {
+				return Poll::Pending;
+			}
+			// So is a name nothing can answer yet, such as before a handler exists: only a
+			// handler's refusal is final.
+			let Ok(consumer) = this.broadcast.datagrams(&this.name) else {
+				return Poll::Pending;
+			};
+			this.datagrams = Some(Some(consumer));
+		}
+		let asked = this.datagrams.as_mut().expect("asked above");
+		let Some(consumer) = asked else {
+			return Poll::Pending;
+		};
+		match ready!(consumer.poll_info(waiter)) {
+			Ok(_) if this.broadcast.publishes_track(&this.name) => Poll::Pending,
+			Ok(_) => Poll::Ready(asked.take().expect("checked above")),
+			Err(_) => {
+				*asked = None;
+				Poll::Pending
+			}
+		}
 	}
 
 	/// The datagram track to serve instead when the stream track's lookup failed with `err`,
@@ -2598,7 +2685,10 @@ impl Legacy {
 		if !matches!(err, Error::NotFound | Error::Stream(StreamError::NotFound)) {
 			return Err(err);
 		}
-		legacy.broadcast.datagrams(&legacy.name).map_err(|_| err)
+		let asked = legacy
+			.datagrams
+			.unwrap_or_else(|| legacy.broadcast.datagrams(&legacy.name).ok());
+		asked.ok_or(err)
 	}
 }
 
@@ -2620,9 +2710,18 @@ impl LegacyDatagrams {
 	/// of a stream track with `timescale`, or `None` when the version has no fallback or
 	/// no datagram track is live. A relay holds one for each old-version stream track it
 	/// subscribes to, so this asks no handler: a request would subscribe to the name again.
+	/// The request's own ask joins only once answered, the track then being live.
 	fn join(legacy: Option<Box<Legacy>>, id: u64, priority: i8, timescale: Option<crate::Timescale>) -> Option<Self> {
-		let legacy = legacy?;
-		let mut consumer = legacy.broadcast.datagrams_live(&legacy.name)?;
+		let Legacy {
+			broadcast,
+			name,
+			datagrams,
+		} = *legacy?;
+		// An unanswered ask is dropped, which withdraws it.
+		let answered = datagrams
+			.flatten()
+			.filter(|asked| matches!(asked.poll_info(&kio::Waiter::noop()), Poll::Ready(Ok(_))));
+		let mut consumer = answered.or_else(|| broadcast.datagrams_live(&name))?;
 		consumer.set_priority(priority);
 		Some(Self {
 			consumer,

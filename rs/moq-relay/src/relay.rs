@@ -766,12 +766,13 @@ impl Relay {
 			let auth = auth.clone();
 			let shutdown = shutdown.clone();
 			let sessions = sessions.clone();
-			async move {
+			// Boxed like the serving futures in the `select!` below.
+			Box::pin(async move {
 				match idle {
 					true => std::future::pending().await,
 					false => serve_listening(server, cluster, auth, shutdown, sessions).await,
 				}
-			}
+			})
 		};
 
 		let stun = async move {
@@ -783,9 +784,11 @@ impl Relay {
 			#[cfg(not(feature = "stun"))]
 			std::future::pending::<anyhow::Result<()>>().await
 		};
+		// Box the large serving futures: a debug build copies each one into this poll's
+		// stack frame several times, and an embedder's main thread pays for that frame.
 		let result = tokio::select! {
-			Err(err) = started.run() => Err(err).context("cluster failed"),
-			Err(err) = web.serve(web_routes) => Err(err).context("web server failed"),
+			Err(err) = Box::pin(started.run()) => Err(err).context("cluster failed"),
+			Err(err) = Box::pin(web.serve(web_routes)) => Err(err).context("web server failed"),
 			Err(err) = stun => Err(err).context("STUN server failed"),
 			Err(err) = internal.serve(internal_routes) => Err(err).context("internal server failed"),
 			Err(err) = serve_shared => Err(err).context("server failed"),
