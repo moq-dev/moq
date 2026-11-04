@@ -23,7 +23,7 @@ step (removing aws-lc-rs) can't land until this one does.
   rind 0.1.2 now.
 - Test that keys and signatures from the aws-lc-rs build round-trip through
   the rind build (fixed vectors), so stored keys keep working.
-- Overlap: [the mesh key codec](/quest/m1/mesh-key-codec.md)
+- Overlap: [the mesh key codec](https://github.com/moq-dev/moq/pull/7733)
   ([moq-dev/moq#7733](https://github.com/moq-dev/moq/pull/7733)) makes
   moq-auth use moq-sign's key type, which pulls aws-lc-rs into auth. This
   quest removes that blocker. Whichever lands second rebases onto the
