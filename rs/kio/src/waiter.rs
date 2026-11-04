@@ -514,8 +514,10 @@ mod tests {
 		let state = std::mem::size_of::<crate::channel::Channel<()>>();
 		assert!(list <= 56, "WaiterList grew to {list} B");
 		// 184 B before the version counter, the value list's tag mirror (8 B each), and the
-		// waiter lists' own mutex moved the parking off the value's lock.
-		assert!(state <= 200, "Channel<()> grew to {state} B");
+		// waiter lists' own mutex moved the parking off the value's lock. Measured where a
+		// `Mutex` is 8 B; Darwin boxes its pthread mutex behind a 16 B one, once per lock.
+		let mutexes = 2 * (std::mem::size_of::<std::sync::Mutex<()>>() - 8);
+		assert!(state <= 200 + mutexes, "Channel<()> grew to {state} B");
 	}
 
 	#[test]
