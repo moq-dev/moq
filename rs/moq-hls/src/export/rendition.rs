@@ -305,12 +305,17 @@ struct Claim {
 	/// Segments numbered below this are a predecessor's (see [`Rendition::after`]).
 	start: u64,
 	/// The first segment this instance will not list: the one after its open segment, else the
-	/// one after the newest it listed.
+	/// one after the newest it listed. Final once a retired instance's window closes.
 	next: u64,
-	/// Set by [`Rendition::retire`]: nothing at or past `next` is listed.
+	/// Set by [`Rendition::retire`]: only the groups it had already read are listed.
 	retired: bool,
 	/// A segment waits on a later one to start before it is listed.
 	pending: bool,
+	/// The newest group this instance read from its track.
+	seen: Option<u64>,
+	/// Set by [`Rendition::retire`] to [`seen`](Self::seen): the groups this instance still lists
+	/// are those up to it, and a replacement on the same track lists only groups past it.
+	boundary: Option<u64>,
 }
 
 /// A single HLS rendition: master-playlist metadata, its window over its media track's groups
@@ -402,6 +407,14 @@ impl Rendition {
 			return false;
 		};
 		normalize_audio(current) == normalize_audio(config)
+	}
+
+	/// The container its media track carries, to decode a frame the transport left unstamped.
+	fn container(&self) -> moq_mux::Result<moq_mux::catalog::hang::Container> {
+		match &self.config {
+			Config::Video(config) => moq_mux::catalog::hang::Container::try_from(config),
+			Config::Audio(config) => moq_mux::catalog::hang::Container::try_from(config),
+		}
 	}
 
 	/// The media track this rendition lists and serves.
@@ -556,8 +569,7 @@ impl Rendition {
 		self.claim = Mutex::new(Claim {
 			start,
 			next: start,
-			retired: false,
-			pending: false,
+			..Claim::default()
 		});
 		self.live = Arc::new(segments::Producer::new(start));
 		self.previous = Mutex::new(handoff.previous.clone());
@@ -574,6 +586,7 @@ impl Rendition {
 		let (next, pending) = {
 			let mut claim = self.claim.lock().expect("claim lock poisoned");
 			claim.retired = true;
+			claim.boundary = claim.seen;
 			(claim.next, claim.pending)
 		};
 		self.retiring.send_replace(true);
@@ -1462,19 +1475,34 @@ fn broken(segments: &[u64], inherited: usize) -> usize {
 /// lists nothing before the first segment it sees start (see [`grid::Grid::starts`]): another edge
 /// lists that segment whole, and the same URL must name the same bytes everywhere.
 async fn watch_media(rendition: Weak<Rendition>, mut retiring: tokio::sync::watch::Receiver<bool>) {
-	let Some((track, interval)) = rendition.upgrade().map(|r| (r.track().to_string(), r.interval)) else {
+	let Some((track, interval, container)) = rendition
+		.upgrade()
+		.map(|r| (r.track().to_string(), r.interval, r.container()))
+	else {
 		return;
 	};
 	let result: Result<()> = async {
 		// A replacement lists nothing until its predecessor has listed all it will, so their
 		// segments never interleave and its own start a new discontinuity: they decode under
-		// another init.
+		// another init. It then starts where the predecessor finally stopped, and on the same
+		// track past the last group the predecessor read, which another config may have muxed.
 		let previous = rendition.upgrade().and_then(|rendition| rendition.previous());
 		let mut broken = previous.is_some();
+		let mut after: Option<u64> = None;
 		if let Some(previous) = previous {
 			tokio::select! {
 				_ = previous.live.closed() => {}
 				_ = retiring.wait_for(|retiring| *retiring) => return Ok(()),
+			}
+			let (next, boundary) = {
+				let claim = previous.claim.lock().expect("claim lock poisoned");
+				(claim.next, claim.boundary)
+			};
+			after = boundary.filter(|_| previous.track() == track);
+			if let Some(rendition) = rendition.upgrade() {
+				let mut claim = rendition.claim.lock().expect("claim lock poisoned");
+				claim.start = claim.start.max(next);
+				claim.next = claim.next.max(next);
 			}
 		}
 		let (media, binding) = match rendition.upgrade() {
@@ -1499,8 +1527,10 @@ async fn watch_media(rendition: Weak<Rendition>, mut retiring: tokio::sync::watc
 		};
 
 		let mut grid = grid::Grid::new(interval, segments::MAX_SEGMENTS);
-		// The newest group, read again for its content's end if the track ends after it.
-		let mut latest: Option<moq_net::group::Consumer> = None;
+		// The newest group and its first pts, read again for its content's end if the track ends
+		// after it, and the gap from the group before it.
+		let mut latest: Option<(moq_net::group::Consumer, moq_net::Timestamp)> = None;
+		let mut spacing: Option<std::time::Duration> = None;
 		// Nothing is listed before the first segment this watcher saw start.
 		let mut whole = false;
 		loop {
@@ -1513,28 +1543,39 @@ async fn watch_media(rendition: Weak<Rendition>, mut retiring: tokio::sync::watc
 				_ = retiring.wait_for(|retiring| *retiring), if !pending => return Ok(()),
 			};
 			let ended = next.is_none();
+			let mut sequence = None;
 			let slots = match next {
 				Some(mut group) => {
-					// A group's place is its first frame's pts, which the transport carries, so
-					// no payload is read.
+					// A group's place is its first frame's pts: the transport's stamp, or the
+					// container's own where the session carries none.
 					let first = tokio::select! {
-						first = group.next_frame() => first?,
+						first = group.read_frame() => first?,
 						_ = retiring.wait_for(|retiring| *retiring), if !pending => return Ok(()),
 					};
-					let Some(pts) = first.and_then(|frame| frame.timestamp) else {
+					let Some(first) = first.and_then(|frame| first_frame(container.as_ref().ok()?, frame)) else {
 						tracing::warn!(%track, group = group.sequence, "skipping a group without a timed first frame");
 						continue;
 					};
-					let sequence = group.sequence;
-					latest = Some(group);
-					grid.group(sequence, pts)
+					// A discontinuity marker carries no media: the content before it ends, and the
+					// grid numbers what resumes by its own timestamps, as every edge does.
+					let Some(pts) = first else {
+						continue;
+					};
+					sequence = Some(group.sequence);
+					if let Some((_, previous)) = &latest {
+						spacing = pts.checked_sub(*previous).ok().map(Duration::from).or(spacing);
+					}
+					latest = Some((group, pts));
+					grid.group(sequence.expect("set above"), pts)
 				}
 				None => {
-					let end = match latest.take() {
-						Some(group) => content_end(group).await,
-						None => None,
+					let (reach, end) = match latest.take() {
+						Some((group, first)) => {
+							content_end(group, container.as_ref().ok(), first, spacing, interval).await
+						}
+						None => (None, None),
 					};
-					grid.finish(end)
+					grid.finish(reach, end)
 				}
 			};
 			let Some(rendition) = rendition.upgrade() else {
@@ -1542,6 +1583,10 @@ async fn watch_media(rendition: Weak<Rendition>, mut retiring: tokio::sync::watc
 			};
 			// Held while listing, so a retire sees exactly what this instance lists.
 			let mut claim = rendition.claim.lock().expect("claim lock poisoned");
+			// Retired, a group past the last it had read is the replacement's: this instance lists
+			// the segments and gaps before the first holding one, and stops there.
+			let boundary = claim.boundary;
+			let theirs = |groups: &std::ops::Range<u64>| boundary.is_none_or(|boundary| groups.end > boundary + 1);
 			for slot in slots {
 				let Some(segment) = slot.segment() else {
 					tracing::warn!(%track, "media timestamps went back; resetting the playlist window");
@@ -1553,27 +1598,36 @@ async fn watch_media(rendition: Weak<Rendition>, mut retiring: tokio::sync::watc
 				if segment < claim.start {
 					continue;
 				}
-				// It completed the segment a retired rendition was waiting on, and starts what the
-				// replacement lists.
-				if claim.retired && segment >= claim.next {
+				if claim.retired
+					&& let grid::Slot::Media { groups, .. } = &slot
+					&& theirs(groups)
+				{
 					return Ok(());
 				}
-				claim.next = segment + 1;
 				if !whole {
-					if !grid.starts(&slot) {
+					// The first segment listed holds only this instance's groups, and starts whole.
+					let own = match &slot {
+						grid::Slot::Media { groups, .. } => after.is_none_or(|after| groups.start > after),
+						_ => false,
+					};
+					if !own || !grid.starts(&slot) {
 						continue;
 					}
 					whole = true;
 				}
+				claim.next = segment + 1;
 				rendition.push(row(&rendition, slot, broken));
 				broken = false;
 			}
-			// Retired, it only completes the segment it was waiting on: one opening at or past `next`
-			// is the replacement's.
-			if claim.retired && grid.open().is_none_or(|open| open >= claim.next) {
+			if claim.retired && grid.open_groups().is_some_and(|groups| theirs(&(groups.start..groups.start + 1))) {
 				return Ok(());
 			}
-			if let Some(open) = grid.open() {
+			if let Some(sequence) = sequence {
+				claim.seen = Some(sequence);
+			}
+			if !claim.retired
+				&& let Some(open) = grid.open()
+			{
 				claim.next = claim.next.max(open + 1);
 			}
 			claim.pending = grid.waiting();
@@ -1603,18 +1657,63 @@ async fn watch_media(rendition: Weak<Rendition>, mut retiring: tokio::sync::watc
 	}
 	rendition.close();
 }
-/// Where a group's content ends: its newest frame's pts, read once the track has ended so every
-/// frame is in. `None` when nothing after its first frame is timed.
-async fn content_end(mut group: moq_net::group::Consumer) -> Option<moq_net::Timestamp> {
-	let mut end: Option<moq_net::Timestamp> = None;
-	while let Ok(Some(frame)) = group.next_frame().await {
-		if let Some(pts) = frame.timestamp
-			&& end.is_none_or(|end| pts.as_nanos() > end.as_nanos())
-		{
-			end = Some(pts);
+/// The pts of `frame`, the first of its group: the transport's stamp, else the first media frame
+/// `container` decodes from it. `Some(None)` for a discontinuity marker, a frame with no payload;
+/// `None` when it can't be read.
+fn first_frame(
+	container: &moq_mux::catalog::hang::Container,
+	frame: moq_net::frame::Frame,
+) -> Option<Option<moq_net::Timestamp>> {
+	use moq_mux::container::Container as _;
+	let stamp = frame.timestamp;
+	let decoded = container.decode(frame).ok()?;
+	let first = decoded.first()?;
+	if first.payload.is_empty() {
+		return Some(None);
+	}
+	Some(Some(stamp.unwrap_or(first.timestamp)))
+}
+
+/// How far a group's content reaches, read once the track has ended so every frame is in: where
+/// its last frame starts, which places the group on the grid, and where its content ends, which
+/// times its segment.
+///
+/// A duration marker (a frame with no payload) is both. Otherwise the end adds the shortest
+/// spacing between its frames to its newest, else `spacing`, the gap from the group before it,
+/// capped at `interval` so a lone frame after a long group never claims that group's length.
+async fn content_end(
+	mut group: moq_net::group::Consumer,
+	container: Option<&moq_mux::catalog::hang::Container>,
+	first: moq_net::Timestamp,
+	spacing: Option<std::time::Duration>,
+	interval: std::time::Duration,
+) -> (Option<moq_net::Timestamp>, Option<moq_net::Timestamp>) {
+	use moq_mux::container::Container as _;
+	let mut stamps = vec![first.as_nanos()];
+	let mut marker = None;
+	while let Ok(Some(frame)) = group.read_frame().await {
+		// The container says what a frame holds: a marker's payload is empty only once decoded.
+		let decoded = container.and_then(|container| container.decode(frame).ok()).unwrap_or_default();
+		for frame in decoded {
+			match frame.payload.is_empty() {
+				true => marker = Some(frame.timestamp),
+				false => stamps.push(frame.timestamp.as_nanos()),
+			}
 		}
 	}
-	end
+	if marker.is_some() {
+		return (marker, marker);
+	}
+	stamps.sort_unstable();
+	stamps.dedup();
+	let newest = *stamps.last().expect("the first frame");
+	let timestamp = |nanos: u128| moq_net::Timestamp::from_nanos(u64::try_from(nanos).ok()?).ok();
+	let step = stamps
+		.windows(2)
+		.map(|pair| pair[1] - pair[0])
+		.min()
+		.or_else(|| spacing.map(|spacing| spacing.min(interval).as_nanos()));
+	(timestamp(newest), step.and_then(|step| timestamp(newest + step)))
 }
 
 /// The row listing `slot`, starting a new discontinuity when `broken`.

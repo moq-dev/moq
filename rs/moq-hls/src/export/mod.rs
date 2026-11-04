@@ -2366,7 +2366,7 @@ mod tests {
 		let _ = kio::clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let _ = kio::clock::timeout(Duration::from_secs(5), broadcaster.represented()).await;
 
-		// A clean finish stops the open segment and ends the records.
+		// A clean finish lists the open segment and ends the playlist.
 		media.finish().unwrap();
 		catalog.finish().unwrap();
 
@@ -2379,15 +2379,9 @@ mod tests {
 			assert!(kio::clock::now() < deadline, "manifest never turned static");
 			kio::clock::sleep(Duration::from_millis(50)).await;
 		};
-		// The trailing segment holds one frame that nothing bounds, so it lasts no time. HLS
-		// lists it, but a SegmentTimeline entry at the presentation end would never be
-		// requested, so the manifest omits it and the presentation ends at the last bounded one.
+		// The trailing segment runs to the duration marker the finish wrote after its one frame.
 		assert!(manifest.contains("<S t=\"0\" d=\"2000\"/>"), "{manifest}");
-		assert!(
-			!manifest.contains("<S t=\"2000\""),
-			"the zero-duration tail is not listed"
-		);
-		assert!(manifest.contains(" mediaPresentationDuration=\"PT2.000S\""));
+		assert!(manifest.contains("<S t=\"2000\""), "the bounded tail is listed: {manifest}");
 		assert!(!manifest.contains("presentationTimeOffset"));
 		assert!(!manifest.contains("availabilityStartTime"));
 
@@ -3669,6 +3663,49 @@ mod tests {
 		assert_eq!(dash.segments, [(5_500, 2_500), (8_000, 2_000)]);
 	}
 
+	// A discontinuity marker carries no media, so it starts no segment: the content before it
+	// ends, the slots the pause skipped are gaps, and every listed segment serves media.
+	#[tokio::test(start_paused = true)]
+	async fn a_discontinuity_marker_lists_no_segment() {
+		let origin = produce_origin();
+		let broadcast = origin.create_broadcast("live").expect("publish allowed");
+		broadcast.announce(Default::default()).expect("publish allowed");
+		settle().await;
+		let catalog = hls_catalog(&mut broadcast.broadcast().clone());
+		let mut media = video(&catalog, &broadcast, "video0", video_config());
+		for micros in [0, 1_000_000, 2_000_000, 3_000_000] {
+			media.write(vp8_frame(micros, micros % 2_000_000 == 0)).unwrap();
+		}
+		media.discontinuity().unwrap();
+		for micros in [10_000_000, 12_000_000, 14_000_000] {
+			media.write(vp8_frame(micros, true)).unwrap();
+		}
+
+		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
+		let _ = kio::clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
+		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
+		let snapshot = kio::clock::timeout(Duration::from_secs(5), async {
+			loop {
+				let snapshot = rendition.snapshot();
+				if snapshot.segments.last().is_some_and(|s| s.segment >= 6) {
+					return snapshot;
+				}
+				kio::clock::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("the resumed content is listed");
+		assert_eq!(numbers(&snapshot), [0, 1, 2, 3, 4, 5, 6]);
+		assert_eq!(gaps(&snapshot), [2, 3, 4]);
+		for segment in [0, 1, 5] {
+			assert!(
+				rendition.listed_segment(segment).await.unwrap().is_some(),
+				"segment {segment} serves media"
+			);
+		}
+		drop((catalog, media, broadcast));
+	}
+
 	// A pause leaves the grid slots it skipped as gaps, listed once content resumes, and needs no
 	// discontinuity, since the timestamps never broke.
 	#[tokio::test(start_paused = true)]
@@ -3994,14 +4031,14 @@ mod tests {
 		let test = Records::with(&["video0"], &[]);
 		let mut records = test.publish("video0");
 		records.gop(0);
-		// 25 frames 200ms apart: the content runs to 6.8s.
+		// 25 frames 200ms apart: the last starts at 6.8s, so the content runs to 7s.
 		records.group(1, 2_000, 25);
 		records.finish();
 		let snapshot = test.finished("video0").await;
 		let durations: Vec<_> = snapshot.segments.iter().map(|s| s.duration.as_millis()).collect();
-		assert_eq!(durations, [2_000, 4_800]);
+		assert_eq!(durations, [2_000, 5_000]);
 		assert_eq!(snapshot.target_duration, 4);
-		assert_eq!(test.rendition("video0").overruns(), 1, "only the 4.8s segment rounds past it");
+		assert_eq!(test.rendition("video0").overruns(), 1, "only the 5s segment rounds past it");
 	}
 
 	// Each playlist URI keeps the EXT-X-TARGETDURATION it first got: a rendition rebuilt on another

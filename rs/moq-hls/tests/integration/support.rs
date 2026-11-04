@@ -87,14 +87,14 @@ fn origin(config: moq_net::origin::Config) -> moq_net::origin::Producer {
 	origin
 }
 
-/// One publisher run of a broadcast: a catalog and a single VP8 rendition whose HLS records the
-/// catalog advertises.
+/// One publisher run of a broadcast: a catalog declaring its join interval and a single VP8
+/// rendition.
 pub struct Publisher {
 	/// The broadcast, which announces its path while it lives.
 	pub broadcast: moq_net::origin::Publication,
 	/// The catalog.
 	pub catalog: moq_mux::catalog::Producer,
-	/// The media track, recording its HLS records as it is written.
+	/// The media track.
 	pub media: moq_mux::container::Producer<moq_mux::catalog::hang::Container, hang::catalog::VideoConfig>,
 }
 
@@ -123,7 +123,7 @@ impl Publisher {
 	}
 
 	/// Write one-second frames for each second in `start..end`, a keyframe on every even second.
-	/// Segments are cut every four seconds, so writing up to 13 completes segments 0 to 2 and
+	/// Segments are cut on a four-second grid, so writing up to 13 completes segments 0 to 2 and
 	/// leaves the GOP at 12s open.
 	pub fn write(&mut self, start: u64, end: u64, payload: u8) {
 		for second in start..end {
@@ -138,11 +138,11 @@ impl Publisher {
 	}
 }
 
-/// A catalog config declaring a two-second join interval up front, so renditions are listed before
-/// any media and a recorder can start first.
+/// A catalog config declaring a four-second join interval up front, so renditions are listed before
+/// any media and a recorder can start first. The two-second GOPs pack two to a segment.
 pub fn catalog_config() -> moq_mux::catalog::Config {
 	let mut catalog = moq_mux::catalog::hang::Catalog::default();
-	catalog.media.join = Some(hang::catalog::Join::new(Duration::from_secs(2)));
+	catalog.media.join = Some(hang::catalog::Join::new(Duration::from_secs(4)));
 	moq_mux::catalog::Config::default().with_catalog(catalog)
 }
 

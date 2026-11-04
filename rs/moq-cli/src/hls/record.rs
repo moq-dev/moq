@@ -786,7 +786,7 @@ mod tests {
 			let segments = listed(&playlist);
 			assert!(segments.len() > 1 && consecutive(&segments, 0), "{playlist}");
 			assert_eq!(duration(&playlist), Duration::from_secs(6), "{playlist}");
-			// The exporter's target: the declared duration, the 2s hint's multiple at the 4s grid.
+			// The exporter's target: twice the 2s join interval.
 			assert!(playlist.contains("\n#EXT-X-TARGETDURATION:4\n"), "{playlist}");
 			assert!(playlist.contains("\n#EXT-X-MEDIA-SEQUENCE:0\n"), "{playlist}");
 			assert!(
@@ -795,17 +795,9 @@ mod tests {
 			);
 			assert!(playlist.ends_with(".m4s\n#EXT-X-ENDLIST\n"), "{playlist}");
 			assert!(!playlist.contains("DISCONTINUITY"), "{playlist}");
-			// The finish's stop is listed as a gap, with no file.
-			let gaps = gaps(&playlist);
-			assert_eq!(
-				gaps,
-				segments.last().copied().into_iter().collect::<Vec<_>>(),
-				"{playlist}"
-			);
-			let files = segments
-				.iter()
-				.filter(|segment| !gaps.contains(segment))
-				.map(|segment| format!("{segment}.m4s"));
+			// Aligned GOPs on the grid leave no gap, and every segment has its file.
+			assert!(gaps(&playlist).is_empty(), "{playlist}");
+			let files = segments.iter().map(|segment| format!("{segment}.m4s"));
 			for file in files.chain(["init.0.mp4".to_string()]) {
 				assert!(
 					!std::fs::read(rendition.join(&file)).unwrap().is_empty(),

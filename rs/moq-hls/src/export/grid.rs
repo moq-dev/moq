@@ -130,6 +130,11 @@ impl Grid {
 		self.open.as_ref().map(|open| open.segment)
 	}
 
+	/// The groups of the open segment so far.
+	pub fn open_groups(&self) -> Option<std::ops::Range<u64>> {
+		self.open.as_ref().map(|open| open.groups.clone())
+	}
+
 	/// Whether a segment waits to be completed: one is open, or a group waits for its end.
 	pub fn waiting(&self) -> bool {
 		self.open.is_some() || self.pending.is_some()
@@ -158,16 +163,21 @@ impl Grid {
 		out
 	}
 
-	/// The track ended, its content reaching `end` when known. Returns the segments left.
-	pub fn finish(&mut self, end: Option<Timestamp>) -> Vec<Slot> {
+	/// The track ended, its last group's last frame starting at `reach` and its content ending at
+	/// `end`, when known. Returns the segments left.
+	pub fn finish(&mut self, reach: Option<Timestamp>, end: Option<Timestamp>) -> Vec<Slot> {
 		let mut out = Vec::new();
 		if let Some(pending) = self.pending.take() {
-			// Without an end, the last group is placed as if it reached no further line.
-			let segment = self.segment(pending.pts, Some(end.unwrap_or(pending.pts))).expect("bounded");
+			// The last group spans to its last frame: without one, it reaches no further line.
+			let segment = self.segment(pending.pts, Some(reach.unwrap_or(pending.pts))).expect("bounded");
 			self.place(pending, segment, &mut out);
 		}
 		if let Some(open) = self.open.take() {
-			let end = end.filter(|end| end.as_nanos() > open.pts.as_nanos()).unwrap_or(open.pts);
+			let end = [end, reach]
+				.into_iter()
+				.flatten()
+				.find(|end| end.as_nanos() > open.pts.as_nanos())
+				.unwrap_or(open.pts);
 			out.push(Slot::Media {
 				segment: open.segment,
 				groups: open.groups,
@@ -266,7 +276,7 @@ mod test {
 		for (sequence, start) in starts.iter().enumerate() {
 			slots.extend(grid.group(sequence as u64, ms(*start)));
 		}
-		slots.extend(grid.finish(Some(ms(end))));
+		slots.extend(grid.finish(Some(ms(end)), Some(ms(end))));
 		listed(slots)
 	}
 
@@ -355,7 +365,7 @@ mod test {
 		let mut grid = Grid::new(Duration::from_secs(2), 256);
 		let mut late = grid.group(1, ms(7000));
 		late.extend(grid.group(2, ms(7200)));
-		late.extend(grid.finish(Some(ms(7400))));
+		late.extend(grid.finish(Some(ms(7400)), Some(ms(7400))));
 		assert_eq!(listed(late), [(3, 1..3, 7000, 7400)]);
 		assert_eq!(early.last(), Some(&(3, 1..3, 7000, 7400)));
 	}
@@ -389,7 +399,7 @@ mod test {
 		let mut grid = Grid::new(Duration::from_secs(2), 256);
 		grid.group(0, ms(10_000));
 		assert_eq!(grid.group(1, ms(0)), [Slot::Reset]);
-		assert_eq!(listed(grid.finish(Some(ms(2000)))), [(0, 1..2, 0, 2000)]);
+		assert_eq!(listed(grid.finish(Some(ms(2000)), Some(ms(2000)))), [(0, 1..2, 0, 2000)]);
 	}
 }
 
