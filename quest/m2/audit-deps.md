@@ -101,7 +101,8 @@ Advisories waiting on upstream:
   `@tailwindcss/typography` and VitePress own the other parser/bundler ranges.
   All seven tracked Bun lockfiles audit clean after the 2026-11-03 repair.
 - proc-macro-error2 (RUSTSEC-2026-0173) is unmaintained, not a reported
-  vulnerability. rind reaches it through libcrux-intrinsics 0.0.9's
+  vulnerability. moq-auth, moq-crypto, moq-hls and moq-cli reach it through
+  rind's libcrux stack, then libcrux-intrinsics 0.0.9's
   `cfg(hax)` dependency on core-models 0.0.7, which still requires hax-lib
   0.3.7 and its build-time hax-lib-macros. Those are the latest stable
   libcrux-intrinsics/core-models releases as of 2026-11-03. The advisory is
