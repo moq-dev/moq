@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Separate datagram tracks
+
+Generated bindings now expose separate `MoqDatagramProducer`, `MoqDatagramConsumer`, `MoqDatagramInfo`, `MoqDatagramRequest`, and `MoqDatagramRequests` types. Create or subscribe through the broadcast's datagram methods, write with `append` / `insert`, and read with `recv`; stream-track datagram methods are removed. Demand is aggregate subscriber priority, and the broadcast request handler has a separate `datagrams` queue. Regenerate and rebuild native bindings together with your wrapper.
+
 ### Viewer targets are bounded ([#7090](https://github.com/moq-dev/moq/pull/7090))
 
 Viewer ceilings and PROBE target overrides are refused with the new `MoqError.OutOfRange` once they would sum above 2^53 - 1 bps, the most a PROBE target carries; nothing changes on a refusal. `MoqViewers.watch` and `set_target` and `MoqViewer.update` raise it. Handle the new variant wherever you match the error exhaustively. Regenerate bindings and rebuild the matching native library together.
