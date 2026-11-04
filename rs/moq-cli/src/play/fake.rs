@@ -53,14 +53,12 @@ impl Recorder {
 	/// [`present`](Self::present), returning the picture itself.
 	pub fn present_frame(&self, media: &super::media::Media<Self>) -> Option<moq_video::Frame> {
 		let mut video = media.video.lock().unwrap();
-		let presentation = media.presentation.lock().unwrap();
-		let now = kio::clock::now();
+		let presentation = media.presentation.consume();
 		let mut shown = None;
-		while video
-			.front()
-			.is_some_and(|frame| presentation.due(frame.timestamp).is_none_or(|at| at <= now))
-		{
-			shown = video.pop_front();
+		if let Some(index) = presentation.present(video.iter().map(|frame| frame.timestamp), kio::clock::now()) {
+			for _ in 0..=index {
+				shown = video.pop_front();
+			}
 		}
 		if shown.is_some() {
 			media.drained.notify_one();
