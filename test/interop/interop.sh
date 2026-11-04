@@ -2444,8 +2444,7 @@ run_tails() {
     for runtime in js-native-node js-native-bun; do
         needs "$runtime" || continue
         run_fetch_round "$runtime"
-        # A moq-transport FETCH is not served from the request handler yet.
-        [[ "$(pinned_version)" == moq-transport-* ]] || run_fetch_round "$runtime" history
+        run_fetch_round "$runtime" history
     done
     echo "=== late join ==="
     run_late_pair rust rust

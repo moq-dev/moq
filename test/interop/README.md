@@ -55,8 +55,8 @@ Node and Bun. The current CLI also FETCHes group 1 of a finished track from the 
 publisher and each selected native JS runtime, requires exactly its three objects, each
 with its own bytes, and closes under the relay idle-out check. Each native JS runtime also serves
 that FETCH from history (`CLI FETCH history`): its publisher writes only group 3 live and answers
-groups 0 through 2, which it never cached, from an in-memory responder on `track.requests()`. A
-moq-transport pass skips it, since JavaScript does not route an IETF FETCH to the responder yet.
+groups 0 through 2, which it never cached, from an in-memory responder on `track.requests()`.
+This runs on moq-lite and every supported IETF draft.
 
 A late-join lane runs Rust-to-Rust and Rust/Node/Bun in both directions. The publisher
 writes the first two objects of group 0 before any subscriber exists and leaves the group

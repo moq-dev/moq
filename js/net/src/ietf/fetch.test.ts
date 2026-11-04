@@ -3,12 +3,14 @@ import { Manual, Milli, Nano } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { error } from "../error.ts";
+import { hooks } from "../internal.ts";
+import { CACHE_EXPIRY } from "../ledger.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
-import type { Order, Producer as TrackProducer } from "../track.ts";
+import type { Fill, Order, Producer as TrackProducer } from "../track.ts";
 import { wireOf } from "../wire.ts";
 import { Fetch, FetchHeader, FetchOk, type FetchType, type Location } from "./fetch.ts";
 import type * as Filter from "./filter.ts";
@@ -388,6 +390,100 @@ test("a FETCH the cache cannot answer is refused before FETCH_OK", async () => {
 		// A newest group with no objects starts past Largest Object too.
 		writeGroup(fx.track, 4n, []);
 		expect(await ask(at(4, 0), at(4, 4))).toBe(INVALID_RANGE);
+	}
+});
+
+test("a FETCH fills never-cached and evicted history, then reuses the cache", async () => {
+	for (const version of VERSIONS) {
+		for (const evicted of [false, true]) {
+			using clock = manual();
+			using fx = serve(version);
+			if (evicted) {
+				writeGroup(fx.track, 1n, ["1-0", "1-1", "1-2"]);
+				await clock.advance(ms(CACHE_EXPIRY * 2));
+			}
+			writeGroup(fx.track, 3n, ["live"]);
+			const cache = fx.track.subscribe({ ranges: [] });
+			expect(hooks.holdsGroup(cache, 1n)).toBe(false);
+			cache.close();
+			using requests = fx.track.requests();
+			let fill: Fill | undefined;
+			const requested = requests.requestedFill().then((value) => {
+				fill = value;
+			});
+			const msg = new Fetch({
+				requestId: FETCH_ID,
+				type: range(version, at(1, 1), at(1, 3)),
+				subscriberPriority: 3,
+				groupOrder: "ascending",
+			});
+			const fetching = fetch(fx, msg);
+			await flush();
+			expect(fill).toBeDefined();
+			if (!fill) throw new Error("no history fill");
+			expect([fill.start, fill.end, fill.priority, fill.maxDelay]).toEqual([1n, 2n, 124, null]);
+			const group = fill.accept(1n);
+			for (let object = 0; object < 3; object++)
+				group.writeFrame({
+					payload: new TextEncoder().encode(`1-${object}`),
+					timestamp: Timestamp.fromMillis(object),
+				});
+			group.finish();
+			fill.close();
+			await requested;
+			const first = served(await fetching);
+			expect(first.objects).toEqual([
+				[1, 1, "1-1"],
+				[1, 2, "1-2"],
+			]);
+			expect(first.ok.endLocation).toEqual(endAt(version, 1, 2));
+			expect(first.ok.endOfTrack).toBe(false);
+			// No handler remains: the same responder serves the filled group from cache.
+			requests.close();
+			expect(served(await fetch(fx, msg)).objects).toEqual(first.objects);
+		}
+	}
+});
+
+test("a FETCH refused by its history responder sends no FETCH_OK", async () => {
+	for (const version of VERSIONS) {
+		using fx = serve(version);
+		writeGroup(fx.track, 3n, ["live"]);
+		using requests = fx.track.requests();
+		const responding = (async () => {
+			using fill = await requests.requestedFill();
+			expect(fill?.wanted()).toBe(1n);
+		})();
+		const fetching = fetch(fx, new Fetch({ requestId: FETCH_ID, type: range(version, at(1, 0), at(1, 0)) }));
+		expect(refused(await fetching)).toBe(DOES_NOT_EXIST);
+		requests.close();
+		await responding;
+	}
+});
+
+test("a cancelled or unauthorized FETCH withdraws its unanswered history fill", async () => {
+	for (const version of VERSIONS) {
+		for (const revoke of [false, true]) {
+			const grant = new Signal<Grant | undefined>(undefined);
+			using fx = serve(version, grant);
+			writeGroup(fx.track, 3n, ["live"]);
+			using requests = fx.track.requests();
+			const requested = requests.requestedFill();
+			const request = requestStream(version);
+			const fetching = fx.pub.runFetch(
+				new Fetch({ requestId: FETCH_ID, type: range(version, at(1, 0), at(1, 0)) }),
+				request.stream,
+			);
+			using fill = await requested;
+			expect(fill?.wanted()).toBe(1n);
+			if (revoke) grant.set({ publish: new Path.Patterns([]), subscribe: new Path.Patterns([]) });
+			else request.withdraw();
+			if (revoke) expect(refused(await answer(fx, request.answer, "ascending"))).toBe(UNAUTHORIZED);
+			await fetching;
+			expect(await fill?.wantedChanged()).toBeUndefined();
+			const read = await request.answer.done().catch(error);
+			expect(read === true || read instanceof Error).toBe(true);
+		}
 	}
 });
 

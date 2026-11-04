@@ -2326,8 +2326,8 @@ export class Publisher {
 	}
 
 	/**
-	 * Resolve a standalone or draft-22 FETCH against its track and read the highest group it
-	 * holds, or the refusal to answer with.
+	 * Resolve a standalone or draft-22 FETCH against its track, filling uncached history
+	 * through the producer's request handler, or return the refusal to answer with.
 	 *
 	 * A whole-group request waits for the group to finish, so a downstream cache never
 	 * mistakes a prefix for a complete group.
@@ -2371,9 +2371,10 @@ export class Publisher {
 
 		const broadcast = await this.#resolve(named.trackNamespace, signal);
 		const priority = fromWire(msg.subscriberPriority);
-		const cache = broadcast
-			.track(named.trackName)
-			.subscribe({ priority, delay: { max: Milli(Varint.MAX_U53), min: null } });
+		const track = broadcast.track(named.trackName);
+		// Metadata and the publisher edge do not ask for live groups. The single-group read
+		// below owns the FETCH's demand, including withdrawing a fill when it is cancelled.
+		const cache = track.subscribe({ priority, ranges: [] });
 		let answer: FetchAnswer | undefined;
 		try {
 			const info = await untilAborted(cache.info(), signal);
@@ -2405,8 +2406,7 @@ export class Publisher {
 			}
 
 			const selected = range.start.group;
-			const group = hooks.cachedGroup(cache, selected);
-			if (!group) return { condition: "does_not_exist", reasonPhrase: `group ${range.start.group}` };
+			const group = await track.fetchGroup(selected, { priority, signal });
 			let last: FetchedGroup;
 			try {
 				last = await readFetched(group, fetchSlice(range, selected), signal);
