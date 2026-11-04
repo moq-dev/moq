@@ -15,7 +15,10 @@ nix develop --profile "$roots/devshell" --command true
 just infra nix push nix-ci-moq-dev "$roots/devshell"
 
 # `bun install` builds @moq/libav outside the dev shell (js/libav/build.ts).
-# With its sources here too, a PR that changes its build still never
-# downloads from the upstream mirrors.
-nix build .#moq-libav .#moq-libav.sources --out-link "$roots/libav"
-just infra nix push nix-ci-moq-dev "$roots/libav" "$roots/libav-1"
+# The package copies the wasm build's files rather than referencing them, so
+# the wasm build goes up separately: a change to the package alone (a version
+# bump, README or index.d.ts) still substitutes the ffmpeg compile. With the
+# sources here too, a PR that changes the wasm build never downloads from the
+# upstream mirrors.
+nix build .#moq-libav .#moq-libav.wasm .#moq-libav.sources --out-link "$roots/libav"
+just infra nix push nix-ci-moq-dev "$roots"/libav*

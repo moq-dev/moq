@@ -269,8 +269,8 @@ released packages, pushed by `release-nix.yml` on a release tag, and never
 expires. `nix-ci-moq-dev` holds the dev shells `cache.yml` pushes after every
 merge to `main`, for x86 Linux, ARM Linux, and ARM macOS. It publishes the full
 build closure from `nix develop --profile`, uploading only missing paths, plus
-`moq-libav` and its downloaded sources, which `bun install` builds outside the
-dev shell.
+`moq-libav`, its wasm build, and its downloaded sources, which `bun install`
+builds outside the dev shell.
 Its lifecycle rule (`infra/nix/lifecycle.json`) deletes each object 30 days
 after upload; the next warm re-uploads what it still needs. `flake.nix`
 sets `fallback = true` because that expiry can remove a path before one that
