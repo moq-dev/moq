@@ -64,7 +64,24 @@ pub(in crate::capture) async fn cameras(v4l2: &[Camera]) -> Result<Vec<Camera>, 
 			Err(error) => return Err(err("pipewire connect", error)),
 		};
 		let registry = core.get_registry_rc().map_err(|e| err("pipewire registry", e))?;
-		scan(&mainloop, &core, &registry)
+		let nodes = scan(&mainloop, &core, &registry)?;
+		// Hide a node with no format we convert, as the V4L2 listing does: an IR
+		// camera that offers only GREY would list an id `open` refuses. A node
+		// whose formats cannot be read stays, since `open` reports why.
+		Ok(nodes
+			.into_iter()
+			.filter(|node| match formats(&mainloop, &core, &registry, node) {
+				Ok(formats) if formats.is_empty() => {
+					tracing::debug!(node = %node.name, "PipeWire camera offers no format we convert");
+					false
+				}
+				Ok(_) => true,
+				Err(error) => {
+					tracing::debug!(node = %node.name, %error, "could not list PipeWire camera formats");
+					true
+				}
+			})
+			.collect())
 	})
 	.await?;
 

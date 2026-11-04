@@ -295,6 +295,11 @@ pub(super) const DEFAULT_HEIGHT: u32 = 720;
 /// Driver buffers to keep in flight; a small ring lets capture overlap encode.
 const BUFFER_COUNT: u32 = 4;
 
+/// How long one read waits for a frame before it hands control back to the
+/// pump, which then checks its stop flag. A camera that opens and never
+/// streams would otherwise block the read, and the pump's join, forever.
+const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// The negotiated source format, chosen once at open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Source {
@@ -361,8 +366,9 @@ impl Camera {
 
 		// The stream owns a clone of the device's `Arc<Handle>`, so the fd stays
 		// open after `device` drops here; the mmap'd buffers live with the stream.
-		let stream = MmapStream::with_buffers(&device, BufType::VideoCapture, BUFFER_COUNT)
+		let mut stream = MmapStream::with_buffers(&device, BufType::VideoCapture, BUFFER_COUNT)
 			.map_err(|e| Error::Codec(anyhow::anyhow!("V4L2 stream init: {e}")))?;
+		stream.set_timeout(READ_TIMEOUT);
 
 		tracing::info!(device = %name, width, height, "opened V4L2 capture");
 		Ok(Self {
@@ -376,11 +382,17 @@ impl Camera {
 		})
 	}
 
-	/// Pull the next frame. Blocks one frame interval; the pump thread calls this
-	/// in a loop and checks its stop flag between calls.
+	/// Pull the next frame. Blocks one frame interval, or at most [`READ_TIMEOUT`];
+	/// the pump thread calls this in a loop and checks its stop flag between calls.
 	fn read(&mut self) -> Result<pump::Read, Error> {
-		let (buf, meta) = CaptureStream::next(&mut self.stream)
-			.map_err(|error| Error::SourceUnavailable(format!("V4L2 camera {}: {error}", self.name)))?;
+		let (buf, meta) = match CaptureStream::next(&mut self.stream) {
+			Ok(next) => next,
+			// No frame yet. The stream stays open, so a slow camera can still start.
+			Err(error) if error.kind() == std::io::ErrorKind::TimedOut => return Ok(pump::Read::Idle),
+			Err(error) => {
+				return Err(Error::SourceUnavailable(format!("V4L2 camera {}: {error}", self.name)));
+			}
+		};
 
 		let i420 = match self.source {
 			Source::Yuyv => I420::from_yuyv(buf, self.stride, crate::Size::new(self.width, self.height))?,

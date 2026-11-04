@@ -22,6 +22,9 @@ pub struct Stream<'a> {
 	timeout: Option<i32>,
 
 	active: bool,
+	/// Whether userspace holds the buffer at `arena_index`, so the next frame
+	/// queues it back first. A dequeue that timed out holds none.
+	held: bool,
 }
 
 impl<'a> Stream<'a> {
@@ -62,6 +65,7 @@ impl<'a> Stream<'a> {
 			buf_meta,
 			active: false,
 			timeout: None,
+			held: false,
 		})
 	}
 
@@ -195,11 +199,15 @@ impl<'a, 'b> CaptureStream<'b> for Stream<'a> {
 			}
 
 			self.start()?;
-		} else {
+		} else if self.held {
+			// After a timed-out dequeue the driver already holds every buffer, and
+			// queueing one twice fails with EINVAL.
 			CaptureStream::queue(self, self.arena_index)?;
+			self.held = false;
 		}
 
 		self.arena_index = CaptureStream::dequeue(self)?;
+		self.held = true;
 
 		// The index used to access the buffer elements is given to us by v4l2, so we assume it
 		// will always be valid.

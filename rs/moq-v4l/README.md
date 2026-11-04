@@ -12,6 +12,8 @@ The `libv4l` backend did not survive the fork; every call is an ioctl on the
 device node and nothing links at build time.
 The unused high-level control API is removed; `moq-video` sets scalar controls
 through the raw `sys` and `v4l2` layers instead.
+`CaptureStream::next` can be retried after a timeout; upstream queues a buffer
+the driver already holds and fails with EINVAL.
 
 The bindings are arch-independent: layout tests are off, integer types are
 fixed-width, and `timeval` / `timespec` come from `libc`. Regenerate them on a
