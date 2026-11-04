@@ -4,7 +4,7 @@ use kio::clock::Instant;
 use std::cell::{Cell, RefCell};
 use std::net::SocketAddr;
 use std::rc::{Rc, Weak};
-use std::task::{Context, Poll, ready};
+use std::task::{Poll, ready};
 
 use bytes::{Buf, Bytes};
 use moq_quic::endpoint::ConnectionHandle;
@@ -183,8 +183,7 @@ impl Inner {
 /// Created by [`Endpoint`](super::Endpoint) (or its
 /// [`client::connect`](crate::quic::client::connect) /
 /// [`server::accept`](crate::quic::server::accept) shorthands), already
-/// established. Clones share the connection; each carries its own parking so
-/// concurrent pending operations don't trample each other's wakeups. Dropping
+/// established. Clones share the connection. Dropping
 /// the last handle, streams included, closes the connection with code 0.
 ///
 /// Once the connection ends, or the worker driving it is dropped, every
@@ -197,8 +196,6 @@ impl Inner {
 /// it, or the packet is never built and the peer idles out instead.
 pub struct Connection {
 	shared: Shared,
-	// Retains this clone's waiter registrations across polls.
-	park: kio::Park,
 	/// The negotiated ALPN, cached at establishment so `protocol()` can
 	/// borrow from the handle.
 	alpn: Option<String>,
@@ -274,7 +271,7 @@ impl Connection {
 
 	/// Wait for the connection to close, returning why.
 	pub async fn closed(&self) -> Error {
-		kio::wait(|waiter| poll_closed(&self.shared, waiter)).await
+		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
 
 	/// The connection's statistics.
@@ -349,7 +346,6 @@ impl Clone for Connection {
 		self.shared.hold();
 		Self {
 			shared: self.shared.clone(),
-			park: kio::Park::default(),
 			alpn: self.alpn.clone(),
 			server_name: self.server_name.clone(),
 			remote: self.remote,
@@ -467,7 +463,6 @@ pub(crate) async fn establish(shared: Shared, deadline: Option<Instant>) -> Resu
 	shared.hold();
 	let conn = Connection {
 		shared,
-		park: kio::Park::default(),
 		alpn,
 		server_name,
 		remote,
@@ -500,12 +495,12 @@ impl Connection {
 impl Connection {
 	/// Accept the next unidirectional stream the peer opens.
 	pub async fn accept_uni(&self) -> Result<recv::Stream, Error> {
-		kio::wait(|waiter| accept_uni(&self.shared, waiter)).await
+		kio::wait(|waiter| self.poll_accept_uni(waiter)).await
 	}
 
 	/// Accept the next bidirectional stream the peer opens.
 	pub async fn accept_bi(&self) -> Result<(send::Stream, recv::Stream), Error> {
-		kio::wait(|waiter| accept_bi(&self.shared, waiter)).await
+		kio::wait(|waiter| self.poll_accept_bi(waiter)).await
 	}
 
 	/// Open a unidirectional stream scheduled by `options`, once the peer's stream credit
@@ -514,9 +509,7 @@ impl Connection {
 	/// # Panics
 	/// - when `options.group` belongs to another connection
 	pub async fn open_uni(&self, options: send::Options<'_>) -> Result<send::Stream, Error> {
-		kio::wait(|waiter| open(&self.shared, Dir::Uni, options, waiter))
-			.await
-			.map(|(send, _)| send)
+		kio::wait(|waiter| self.poll_open_uni(waiter, options)).await
 	}
 
 	/// Open a bidirectional stream scheduled by `options`, once the peer's stream credit
@@ -525,53 +518,46 @@ impl Connection {
 	/// # Panics
 	/// - when `options.group` belongs to another connection
 	pub async fn open_bi(&self, options: send::Options<'_>) -> Result<(send::Stream, recv::Stream), Error> {
-		kio::wait(|waiter| open(&self.shared, Dir::Bi, options, waiter))
-			.await
-			.map(|(send, recv)| (send, recv.expect("bidirectional")))
+		kio::wait(|waiter| self.poll_open_bi(waiter, options)).await
 	}
 
 	/// Receive the next datagram.
 	pub async fn read_datagram(&self) -> Result<Bytes, Error> {
-		kio::wait(|waiter| recv_datagram(&self.shared, waiter)).await
+		kio::wait(|waiter| self.poll_recv_datagram(waiter)).await
 	}
 
 	/// [`Self::accept_uni`], as a poll.
-	pub(crate) fn poll_accept_uni(&mut self, cx: &Context<'_>) -> Poll<Result<recv::Stream, Error>> {
-		accept_uni(&self.shared, self.park.hold(cx))
+	pub fn poll_accept_uni(&self, waiter: &kio::Waiter) -> Poll<Result<recv::Stream, Error>> {
+		accept_uni(&self.shared, waiter)
 	}
 
 	/// [`Self::accept_bi`], as a poll.
-	pub(crate) fn poll_accept_bi(&mut self, cx: &Context<'_>) -> Poll<Result<(send::Stream, recv::Stream), Error>> {
-		accept_bi(&self.shared, self.park.hold(cx))
+	pub fn poll_accept_bi(&self, waiter: &kio::Waiter) -> Poll<Result<(send::Stream, recv::Stream), Error>> {
+		accept_bi(&self.shared, waiter)
 	}
 
 	/// [`Self::open_uni`], as a poll.
-	pub(crate) fn poll_open_uni(
-		&mut self,
-		cx: &Context<'_>,
-		options: send::Options<'_>,
-	) -> Poll<Result<send::Stream, Error>> {
-		open(&self.shared, Dir::Uni, options, self.park.hold(cx)).map_ok(|(send, _)| send)
+	pub fn poll_open_uni(&self, waiter: &kio::Waiter, options: send::Options<'_>) -> Poll<Result<send::Stream, Error>> {
+		open(&self.shared, Dir::Uni, options, waiter).map_ok(|(send, _)| send)
 	}
 
 	/// [`Self::open_bi`], as a poll.
-	pub(crate) fn poll_open_bi(
-		&mut self,
-		cx: &Context<'_>,
+	pub fn poll_open_bi(
+		&self,
+		waiter: &kio::Waiter,
 		options: send::Options<'_>,
 	) -> Poll<Result<(send::Stream, recv::Stream), Error>> {
-		open(&self.shared, Dir::Bi, options, self.park.hold(cx))
-			.map_ok(|(send, recv)| (send, recv.expect("bidirectional")))
+		open(&self.shared, Dir::Bi, options, waiter).map_ok(|(send, recv)| (send, recv.expect("bidirectional")))
 	}
 
 	/// [`Self::read_datagram`], as a poll.
-	pub(crate) fn poll_recv_datagram(&mut self, cx: &Context<'_>) -> Poll<Result<Bytes, Error>> {
-		recv_datagram(&self.shared, self.park.hold(cx))
+	pub fn poll_recv_datagram(&self, waiter: &kio::Waiter) -> Poll<Result<Bytes, Error>> {
+		recv_datagram(&self.shared, waiter)
 	}
 
 	/// [`Self::closed`], as a poll.
-	pub(crate) fn poll_closed(&mut self, cx: &Context<'_>) -> Poll<Error> {
-		poll_closed(&self.shared, self.park.hold(cx))
+	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
+		poll_closed(&self.shared, waiter)
 	}
 
 	/// The connection's counters in [`web_transport_trait::Stats`] shape.

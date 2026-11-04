@@ -157,10 +157,17 @@ demand, which has none until a worker answers.
 
 ## Work on demand
 
-A worker can advertise a prefix it serves on demand, such as a transcoder
-claiming `transcode`. A claim promises capability, not content. Each requested
-path is a separate job, announced at its exact path under a fresh instance of
-its own.
+A worker can advertise a prefix it serves on demand and answer with a
+broadcast it already holds. This announces no exact route: the answer belongs
+to the prefix route's instance at that path. Every answer there must continue
+one sequence space with the same bytes. To serve different content at a path
+already served, start a new prefix route. Its first subscription stays on
+the prefix route without a restart.
+
+A job that may restart independently, such as a transcoder claiming
+`transcode`, instead prepares and publishes each requested path. A claim
+promises capability, not content. Each requested path is a separate job,
+announced at its exact path under a fresh instance of its own.
 
 ```rust
 let claim = origin.requests("transcode")?;

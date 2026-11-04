@@ -12,6 +12,11 @@ import MoqFFI
 ///
 /// Compression is the track's: publish JSON with `TrackInfo(compress: true)`, and a consumer reads
 /// it with no option of its own.
+///
+/// Every write (a snapshot update, a stream append, a window push or pop) takes a timestamp on the
+/// broadcast clock, the epoch every track in the broadcast shares: read it with
+/// `Media.CatalogProducer.now()`. The track needs a timescale (`TrackInfo(timescale: 1000)`); one
+/// without is refused.
 public enum Json {}
 
 extension Json {
@@ -42,7 +47,7 @@ extension Json {
 
         /// Publish `track` as a JSON snapshot track, advertised in `broadcast`'s catalog until it
         /// finishes. Takes over `track`, whose handle is closed afterward; throws if the catalog
-        /// already carries the track's name.
+        /// already carries the track's name or `track` has no timescale.
         ///
         /// `deltas` encodes updates as merge-patch deltas; with it off every update is a full
         /// snapshot in its own group. With deltas on, give the track a `refresh` ratio so a joiner
@@ -59,9 +64,9 @@ extension Json {
             )
         }
 
-        /// Publish a new value, encoded as a snapshot or merge-patch delta automatically. A no-op
-        /// if unchanged from the previous update.
-        public func update(_ value: Value, timestamp: Timestamp? = nil) throws {
+        /// Publish a new value at `timestamp` on the broadcast clock, encoded as a snapshot or
+        /// merge-patch delta automatically. A no-op if unchanged from the previous update.
+        public func update(_ value: Value, timestamp: Timestamp) throws {
             try ffi.update(value: encodeJson(value), timestamp: timestamp)
         }
 
@@ -123,13 +128,13 @@ extension Json {
 
         /// Publish `track` as a JSON stream track, advertised in `broadcast`'s catalog until it
         /// finishes. Takes over `track`, whose handle is closed afterward; throws if the catalog
-        /// already carries the track's name.
+        /// already carries the track's name or `track` has no timescale.
         public init(broadcast: BroadcastProducer, track: TrackProducer) throws {
             ffi = try MoqJsonStreamProducer(broadcast: broadcast.ffi, track: track.ffi)
         }
 
-        /// Append one record to the log.
-        public func append(_ value: Value, timestamp: Timestamp? = nil) throws {
+        /// Append one record to the log at `timestamp` on the broadcast clock.
+        public func append(_ value: Value, timestamp: Timestamp) throws {
             try ffi.append(value: encodeJson(value), timestamp: timestamp)
         }
 
@@ -186,7 +191,7 @@ extension Json {
         let ffi: MoqJsonWindowProducer
 
         /// Publish `track` as a JSON window track. Takes over `track`, whose handle is closed
-        /// afterward.
+        /// afterward; throws if `track` has no timescale.
         ///
         /// `checkpointRecords` bounds the records retained and restated for a window that is never
         /// popped: a reader that keeps up still sees every record, while a later joiner is told the
@@ -199,13 +204,14 @@ extension Json {
             )
         }
 
-        /// Append one record to the back of the window.
-        public func push(_ value: Value, timestamp: Timestamp? = nil) throws {
+        /// Append one record to the back of the window at `timestamp` on the broadcast clock.
+        public func push(_ value: Value, timestamp: Timestamp) throws {
             try ffi.push(value: encodeJson(value), timestamp: timestamp)
         }
 
-        /// Drop `count` records from the front of the window, clamped to what it holds.
-        public func pop(_ count: UInt64, timestamp: Timestamp? = nil) throws {
+        /// Drop `count` records from the front of the window at `timestamp` on the broadcast
+        /// clock, clamped to what it holds.
+        public func pop(_ count: UInt64, timestamp: Timestamp) throws {
             try ffi.pop(count: count, timestamp: timestamp)
         }
 

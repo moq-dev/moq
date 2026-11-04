@@ -454,7 +454,7 @@ Decided (maintainer, 2026-11-01, cluster spike):
   route it learned to every other peer, and hop chains prevent loops. How
   routes from outside the relay (other relays' peer links) reach every
   worker without re-announce is for the planning to settle.
-  [Routes and announces](/quest/m1/cluster-routing/routes.md) plans a
+  [Routes and announces](/quest/m1/cluster-routing/routes/README.md) plans a
   per-connection `proxy` preference (decided 2026-10-14, relays default on)
   that decides whether a connection is sent routes learned from other
   connections; a worker link with it off is this condition.
