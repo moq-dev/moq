@@ -315,7 +315,6 @@ subscribers.
 ## Required
 
 - [Relay CPU per frame since #5926](/quest/m1/release-perf/relay-cpu-bisect.md) - the 18-56% rise in relay instructions per delivered frame is bisected, attributed, and its avoidable cost fixed
-- [A read moves a small group consumer](/quest/m1/release-perf/group-consumer-size.md) - `group::Consumer` shrinks from 280 bytes, so a read stops copying it through every layer
 
 ## Related
 

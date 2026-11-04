@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### IETF FETCH serves on-demand history ([#7794](https://github.com/moq-dev/moq/pull/7794))
+
+A single-group IETF FETCH now asks `track.requests()` for groups the publisher's cache no longer holds, or never held, using the same `Track.Fill` responder as moq-lite. Existing responders need no changes. Multi-group IETF FETCH remains unsupported.
+
 ### A timestamp out of range at the track's timescale is a `TimestampMismatch` ([#7702](https://github.com/moq-dev/moq/pull/7702))
 
 A frame or datagram whose timestamp leaves the safe range once converted to the track's timescale is refused at the write with `TimestampMismatch`, as Rust refuses it, rather than with a `RangeError` when it is encoded.
