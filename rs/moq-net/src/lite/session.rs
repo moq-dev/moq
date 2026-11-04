@@ -278,8 +278,8 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 	// Before lite-07 the peer can't ask for hidden routes, so a client publishes none of
 	// them unless its publish half opted in, and a socket endpoint behind it is
 	// unreachable. A server leaves it to the client, whose origin holds that endpoint.
-	let withholding = (client && !version.has_hidden() && !publish.includes_hidden())
-		.then(|| publish.hidden_withheld().hold());
+	let withholding =
+		(client && !version.has_hidden() && !publish.includes_hidden()).then(|| publish.hidden_withheld().hold());
 	let subscriptions = crate::session::Slots::default().with_stats(publish.stats(), crate::stats::Cap::Subscriptions);
 	let announces =
 		crate::session::Slots::new(limits.announces).with_stats(subscribe.stats(), crate::stats::Cap::Announces);

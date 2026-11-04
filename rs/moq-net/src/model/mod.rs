@@ -56,11 +56,11 @@ pub mod origin {
 	#[cfg(feature = "async")]
 	// private: capability gap
 	pub(crate) use super::origin_impl::Lookup;
-	pub(crate) use super::origin_impl::{HiddenWithheld, HiddenWithholding};
 	pub use super::origin_impl::{
 		Config, Consumer, Cost, Driver, HopLimit, Link, Preference, Prepared, Producer, Publication, Request,
 		Requesting, Requests, Route, Source,
 	};
+	pub(crate) use super::origin_impl::{HiddenWithheld, HiddenWithholding};
 }
 
 /// Subscribing to route (un)announcements from an origin.
