@@ -73,6 +73,31 @@ pub(crate) fn supported(rendition: &str, container: &hang::catalog::Container) -
 	}
 }
 
+/// Drop the protected video and audio renditions, those listing `drm` entries, logging each one.
+///
+/// Their samples are encrypted, and the hang spec has a consumer that cannot decrypt a rendition
+/// treat it as one it cannot decode. Nothing here decrypts, and a re-encoded file would also lose
+/// the `pssh`, `senc`, `saiz`, and `saio` a decrypting player needs, so every export and player in
+/// this workspace runs this on each catalog snapshot instead of writing undecryptable media.
+pub fn retain_clear<E>(catalog: &mut hang::Catalog<E>) {
+	catalog
+		.video
+		.renditions
+		.retain(|name, config| clear("video", name, &config.drm));
+	catalog
+		.audio
+		.renditions
+		.retain(|name, config| clear("audio", name, &config.drm));
+}
+
+fn clear(kind: &'static str, rendition: &str, drm: &[String]) -> bool {
+	if drm.is_empty() {
+		return true;
+	}
+	tracing::warn!(rendition, kind, "ignoring encrypted rendition: decryption is not supported");
+	false
+}
+
 impl ContainerTrait for Container {
 	type Error = crate::Error;
 

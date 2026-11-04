@@ -709,6 +709,35 @@ mod tests {
 		assert!(renditions.get(Kind::Video, "video").is_none());
 	}
 
+	/// A protected rendition is not served: its segments would lose the `pssh`, `senc`, `saiz`,
+	/// and `saio` a decrypting player needs. Its clear sibling is.
+	#[tokio::test(start_paused = true)]
+	async fn protected_rendition_is_not_advertised() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let source = moq_mux::Source::new(produce_origin().consume(), broadcast.consume());
+		let mut catalog = joined();
+		let mut protected = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		protected.drm = vec!["1".into()];
+		catalog.drm.insert(
+			"1".into(),
+			hang::catalog::drm::Entry::new(
+				hang::catalog::drm::system::CLEARKEY,
+				hang::catalog::drm::Scheme::Cenc,
+				hang::catalog::drm::Uuid::nil(),
+			),
+		);
+		catalog.video.renditions.insert("protected".to_string(), protected);
+		catalog.video.renditions.insert(
+			"clear".to_string(),
+			hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8),
+		);
+
+		let renditions = renditions::Producer::spawned(Config::default().window);
+		renditions.sync(&source, &catalog);
+		assert!(renditions.get(Kind::Video, "protected").is_none());
+		assert!(renditions.get(Kind::Video, "clear").is_some());
+	}
+
 	#[tokio::test(start_paused = true)]
 	async fn audio_renditions_follow_catalog_quality_order() {
 		let broadcast = moq_net::broadcast::Info::new().produce();

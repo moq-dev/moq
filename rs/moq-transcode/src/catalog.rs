@@ -148,6 +148,7 @@ impl Decoders {
 		let mut config = rendition.clone();
 		config.description = None;
 		config.container = Container::Legacy;
+		config.drm.clear();
 		match &mut config.codec {
 			VideoCodec::H264(h264) => h264.inline = true,
 			VideoCodec::H265(h265) => h265.in_band = true,
@@ -172,6 +173,8 @@ pub(crate) async fn choose_source(video: &Video, decoders: &mut Decoders) -> Res
 		// A rendition that itself lives in another broadcast can't be subscribed
 		// through this one; composing relative references is a follow-up.
 		.filter(|(_, config)| config.broadcast.is_none())
+		// A protected rendition's samples are encrypted, and nothing here decrypts them.
+		.filter(|(_, config)| config.drm.is_empty())
 		.filter_map(|(name, config)| Some((name, config, codec(config)?)));
 
 	let mut refused = None;
@@ -220,6 +223,7 @@ pub(crate) async fn follow_source(
 	let mut kept = None;
 	if let Some(config) = video.renditions.get(current)
 		&& config.broadcast.is_none()
+		&& config.drm.is_empty()
 		&& dimensions(config).is_some()
 		&& let Some(codec) = codec(config)
 		// The name can stay while the codec changes under it.
@@ -359,6 +363,8 @@ pub(crate) fn populate(
 ) -> Result<(), Error> {
 	out.video = Video::default();
 	out.audio = hang::catalog::Audio::default();
+	// The rungs are clear; only the source renditions listed below may reference an entry.
+	out.drm.clear();
 	// The derivative republishes the child's timeline, so its timestamps only mean something under
 	// the child's wall mapping.
 	out.media.clock = source.media.clock;
@@ -381,6 +387,8 @@ pub(crate) fn populate(
 	if out.media.join.is_none() {
 		out.media.join = source.media.join;
 	}
+	// A protected source rendition keeps its `drm` IDs, so the entries come along.
+	out.drm = source.drm.clone();
 
 	for (name, config) in &source.video.renditions {
 		if config.broadcast.is_some() {
@@ -1075,5 +1083,38 @@ mod tests {
 			panic!("the update is published");
 		};
 		assert_eq!(frame.timestamp.unwrap().as_millis(), adopted.now().as_millis());
+	}
+
+	/// A protected rendition's samples are encrypted, so it is never the source, however well it
+	/// ranks; the derivative still lists it, with the `drm` entries it references.
+	#[tokio::test]
+	async fn a_protected_rendition_is_not_transcoded() {
+		use hang::catalog::drm;
+
+		let mut child = moq_mux::catalog::hang::Catalog::<()>::default();
+		child.drm.insert(
+			"1".into(),
+			drm::Entry::new(drm::system::CLEARKEY, drm::Scheme::Cbcs, drm::Uuid::nil()),
+		);
+		let mut protected = source(1920, 1080, None);
+		protected.drm = vec!["1".into()];
+		child.video.insert("protected", protected).unwrap();
+		child.video.insert("clear", source(640, 360, None)).unwrap();
+
+		let (name, _) = choose_source(&child.video, &mut decodes_all()).await.unwrap();
+		assert_eq!(name, "clear");
+		let (name, _) = follow_source(&child.video, "protected", &mut decodes_all())
+			.await
+			.unwrap();
+		assert_eq!(name, "clear");
+
+		let rel = Relative::new(".").unwrap();
+		let mut out = moq_mux::catalog::hang::Catalog::<()>::default();
+		populate(&mut out, &child, &[], Some(&rel)).unwrap();
+		assert_eq!(out.drm, child.drm);
+		out.check_renditions().unwrap();
+
+		populate(&mut out, &child, &[], None).unwrap();
+		assert!(out.drm.is_empty(), "only the rungs, which are clear");
 	}
 }

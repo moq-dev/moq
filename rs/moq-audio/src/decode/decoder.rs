@@ -54,7 +54,15 @@ impl Decoder {
 	/// catalog fields directly and requires an absent `description`. AAC reads
 	/// its AudioSpecificConfig; without one, legacy and LOC packets carry ADTS headers,
 	/// while demuxed CMAF samples remain raw.
+	///
+	/// A protected rendition (one listing `drm` entries) is refused, since its samples are
+	/// encrypted and nothing here decrypts them.
 	pub fn new(catalog: &hang::catalog::AudioConfig, config: &Config) -> Result<Self, Error> {
+		if !catalog.drm.is_empty() {
+			return Err(Error::Unsupported(
+				"the rendition is encrypted, and decryption is not supported".into(),
+			));
+		}
 		let backend = backend::open(catalog, config)?;
 		let delay = backend.delay();
 		Ok(Self {
@@ -404,6 +412,17 @@ pub(crate) mod tests {
 				"{name}"
 			);
 		}
+	}
+
+	/// A protected rendition's samples are encrypted, so it is refused before any backend opens.
+	#[test]
+	fn a_protected_rendition_is_unsupported() {
+		let mut catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+		catalog.drm = vec!["1".into()];
+		assert!(matches!(
+			Decoder::new(&catalog, &Config::default()),
+			Err(Error::Unsupported(_))
+		));
 	}
 
 	/// Without a description the catalog shapes the stream, which has no pre-skip.

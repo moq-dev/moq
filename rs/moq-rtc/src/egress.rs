@@ -199,7 +199,9 @@ async fn follow_catalog(mut consumer: moq_mux::catalog::Consumer<()>, tx: watch:
 	loop {
 		tokio::select! {
 			next = consumer.next() => match next {
-				Ok(Some(catalog)) => {
+				Ok(Some(mut catalog)) => {
+					// WebRTC egress would forward ciphertext as media; it does not decrypt.
+					moq_mux::catalog::hang::retain_clear(&mut catalog);
 					tx.send_replace(catalog);
 				}
 				Ok(None) => return Ok(()),

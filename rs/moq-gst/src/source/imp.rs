@@ -1049,6 +1049,8 @@ fn reconcile(
 		.video(Default::default())
 		.audio(Default::default())
 		.retain(&mut playable, &selected);
+	// Encrypted samples would reach the decoders as ciphertext; this source does not decrypt.
+	moq_mux::catalog::hang::retain_clear(&mut playable);
 
 	// Build the desired shape for each rendition. This is deliberately cheap: caps come from the
 	// catalog config and the container is just the hang descriptor. The reader parses the wire

@@ -612,6 +612,11 @@ impl Producer {
 	}
 
 	pub fn sync(&self, source: &moq_mux::Source, catalog: &Catalog) {
+		// A protected rendition is neither listed nor held: the segments would lose the `pssh`,
+		// `senc`, `saiz`, and `saio` a decrypting player needs.
+		let mut catalog = catalog.clone();
+		moq_mux::catalog::hang::retain_clear(&mut catalog);
+		let catalog = &catalog;
 		let clock = catalog.media.clock;
 		let interval = catalog.media.interval();
 
