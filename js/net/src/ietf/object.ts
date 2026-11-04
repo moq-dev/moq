@@ -3,6 +3,7 @@ import { decodePayload } from "../payload.ts";
 import type { Cursor, Reader } from "../stream.ts";
 import { concat, encodeVarint, Writer } from "../stream.ts";
 import { floorAt, type Timescale, Timestamp } from "../time.ts";
+import { toNumber } from "../util/bigint.ts";
 import { U64 } from "../util/u64.ts";
 import { DEFAULT_WIRE } from "./priority.ts";
 import { type IetfVersion, Version } from "./version.ts";
@@ -75,7 +76,7 @@ export function decodeObjectTime(c: Cursor, timescale: Timescale): Timestamp | u
 		return undefined;
 	}
 
-	return new Timestamp(Number(timestamp), timescale);
+	return new Timestamp(toNumber(timestamp), timescale);
 }
 
 export interface GroupFlags {
@@ -104,7 +105,7 @@ export class Group {
 	flags: GroupFlags;
 	trackAlias: bigint;
 	groupId: bigint;
-	subGroupId: number;
+	subGroupId: bigint;
 	publisherPriority: number;
 
 	constructor({
@@ -116,7 +117,7 @@ export class Group {
 	}: {
 		trackAlias: bigint;
 		groupId: bigint;
-		subGroupId: number;
+		subGroupId: bigint;
 		publisherPriority: number;
 		flags: GroupFlags;
 	}) {
@@ -136,7 +137,7 @@ export class Group {
 	}
 
 	async #encode(w: Writer, _version: IetfVersion): Promise<void> {
-		if (!this.flags.hasSubgroup && this.subGroupId !== 0) {
+		if (!this.flags.hasSubgroup && this.subGroupId !== 0n) {
 			throw new Error(`Subgroup ID must be 0 if hasSubgroup is false: ${this.subGroupId}`);
 		}
 
@@ -161,7 +162,7 @@ export class Group {
 		await w.u62(this.trackAlias);
 		await w.u62(this.groupId);
 		if (this.flags.hasSubgroup) {
-			await w.u53(this.subGroupId);
+			await w.u62(this.subGroupId);
 		}
 		if (this.flags.hasPriority) {
 			await w.u8(this.publisherPriority);
@@ -171,6 +172,7 @@ export class Group {
 	/** Decode a SUBGROUP_HEADER. Pass `type` when the caller already read it to classify the stream. */
 	static async decode(r: Reader, _version: IetfVersion, type?: number): Promise<Group> {
 		const raw = type ?? (await r.u53());
+		if (raw > 0x7f) throw new ProtocolViolation(`Unsupported group type: ${raw}`);
 		// Strip the FIRST_OBJECT bit before the range check, but keep the value: it is the only
 		// signal that a subgroup starts partway through.
 		const firstObject = (raw & FIRST_OBJECT_BIT) !== 0;
@@ -198,7 +200,7 @@ export class Group {
 
 		const trackAlias = await r.u62();
 		const groupId = await r.u62();
-		const subGroupId = flags.hasSubgroup ? await r.u53() : 0;
+		const subGroupId = flags.hasSubgroup ? await r.u62() : 0n;
 		const publisherPriority = hasPriority ? await r.u8() : DEFAULT_WIRE;
 
 		return new Group({ trackAlias, groupId, subGroupId, publisherPriority, flags });
@@ -557,7 +559,7 @@ export type FetchedObject =
 			/** How the Subgroup ID is spelled. */
 			subgroup: FetchSubgroup;
 			/** The explicit Subgroup ID, for `subgroup: "explicit"`. */
-			subgroupId?: number;
+			subgroupId?: bigint;
 			/** The Object ID field: absolute with `group`, otherwise a delta from the prior one. */
 			object?: number;
 			/** The Publisher Priority, absent when it repeats the prior object's. */
@@ -587,7 +589,7 @@ export function decodeFetchObject(c: Cursor, timescale: Timescale | undefined): 
 	// Wire order: Group ID, Subgroup ID, Object ID, Priority, Properties.
 	const group = flags & FETCH_GROUP_ID ? c.u62() : undefined;
 	let subgroup: FetchSubgroup;
-	let subgroupId: number | undefined;
+	let subgroupId: bigint | undefined;
 	if (flags & FETCH_DATAGRAM) {
 		subgroup = "datagram";
 	} else {
@@ -603,7 +605,7 @@ export function decodeFetchObject(c: Cursor, timescale: Timescale | undefined): 
 				break;
 			default:
 				subgroup = "explicit";
-				subgroupId = c.u53();
+				subgroupId = c.u62();
 		}
 	}
 	const object = flags & FETCH_OBJECT_ID ? c.u53() : undefined;

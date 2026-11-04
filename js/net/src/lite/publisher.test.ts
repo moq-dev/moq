@@ -878,13 +878,13 @@ test("lite-07 SUBSCRIBE_START names each resolved range start", async () => {
 		prefill: [0n, 1n, 2n, 3n, 4n],
 		maxAge: Milli(3_600_000),
 		ranges: [
-			{ start: { relative: 1 } },
+			{ start: { relative: 1n } },
 			// Group 1 starts at 1 ms.
 			{ start: { time: 1 }, end: { absolute: 2n } },
 			// Empty, so it starts nowhere.
 			{ start: { absolute: 3n }, end: { absolute: 3n } },
 			// Empty only once its start resolves to group 4.
-			{ start: { relative: 0 }, end: { absolute: 2n } },
+			{ start: { relative: 0n }, end: { absolute: 2n } },
 		],
 	});
 	try {
@@ -905,7 +905,7 @@ test("lite-07 answers a bounded window that resolves empty and FINs in reply", a
 		version,
 		prefill: [0n, 1n, 2n, 3n, 4n, 5n],
 		maxAge: Milli(3_600_000),
-		ranges: [{ start: { relative: 0 }, end: { absolute: 3n } }],
+		ranges: [{ start: { relative: 0n }, end: { absolute: 3n } }],
 	});
 	try {
 		const resp = await decodeSubscribeResponse(sub.client.reader, version);

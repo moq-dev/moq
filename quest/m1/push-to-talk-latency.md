@@ -1,11 +1,12 @@
-# [S] Push-to-talk's press-to-audible latency is chosen, not inherited
+# [M] Push-to-talk's press-to-audible latency fits a budget on the defaults
 
 ## Goal
 
-Each part of a push-to-talk press's latency on an ideal path, from capture to
-device output, is either reduced through the knob that controls it or kept
-with a recorded reason. `just test push-to-talk` reports the result with the
-same breakdown.
+On an ideal path with the browser defaults (`<moq-watch>` `delay: "auto"`,
+20 ms Opus), push-to-talk's press-to-audible latency, excluding device output,
+stays under a budget set from a real-device measurement on `kixtop`, and
+`just test push-to-talk` enforces it with the per-part breakdown. Native
+playback is out of scope.
 
 ## Plan
 
@@ -67,8 +68,24 @@ network, would make the measured term nonzero; that is the estimator working
 as specified in [Audio jitter
 target](/quest/m1/audio-jitter-target/README.md).
 
-Open: decide which knob to turn first, and whether to measure on a real
-device before deciding.
+Decided 2026-11-04 (maintainer, planning in
+[moq-dev/moq#7816](https://github.com/moq-dev/moq/pull/7816)):
+
+- ✅ Budget the default path with realistic settings, not the fixed 300 ms /
+  60 ms setup above; drop the fixed-delay row from `just test push-to-talk`.
+  The maintainer is fine assuming the constants are the problem.
+- ✅ Measure capture and output latency on real macOS hardware (`kixtop`)
+  first; set the budget from those numbers, and keep output-side knobs until
+  then.
+- ✅ Browser only.
+- The catalog toggle forces at least a round trip of jitter buffer, so the
+  budget is measured once push-to-talk runs on DTX (Required below), and once
+  capture delivers frames steadily.
+
+## Required
+
+- [Push-to-talk suppresses silence instead of toggling the catalog](/quest/m1/push-to-talk/dtx.md) - removes the catalog round trip the budget would otherwise carry
+- [Browser capture delivers audio frames on a steady cadence](/quest/m1/push-to-talk/capture-smoothing.md) - so `"auto"` measures the network, not capture bursts
 
 ## Related
 
