@@ -9101,17 +9101,19 @@ impl Subscriber {
 		Ok(())
 	}
 
-	/// Set this subscriber's [`max`](Delay::max) delay, keeping the rest of its preferences.
+	/// Hold this subscriber's [`max`](Delay::max) delay at `max`, keeping the rest of its
+	/// preferences, for as long as the subscription lives.
 	///
-	/// Unlike passing [`Self::subscription`] back to [`Self::update`], the change applies in
-	/// place, so a [`Control`] updating another preference meanwhile keeps its change.
-	/// Returns [`Error::Closed`] if the track already ended.
-	pub fn set_max_delay(&mut self, max: Option<Duration>) -> Result<()> {
+	/// Every later [`Self::update`], or one through a [`Control`] or a clone, keeps the pinned
+	/// max delay and applies the rest. The pin applies in place, under the same lock as those
+	/// updates, so no update lands in between and none made meanwhile is lost. Returns
+	/// [`Error::Closed`] if the track already ended.
+	pub fn pin_max_delay(&mut self, max: Duration) -> Result<()> {
 		let channel = match &self.inner {
 			Inner::Plain(cursor) => &cursor.subscription,
 			Inner::Resume(resume, _) => resume.subscription(),
 		};
-		channel.update_with(|subscription| subscription.delay.max = max)?;
+		channel.pin_max_delay(max)?;
 		self.synced();
 		Ok(())
 	}
@@ -9353,10 +9355,10 @@ impl Ordered {
 		self.inner.update(subscription)
 	}
 
-	/// Set this subscriber's [`max`](Delay::max) delay, keeping the rest of its preferences;
-	/// see [`Subscriber::set_max_delay`].
-	pub fn set_max_delay(&mut self, max: Option<Duration>) -> Result<()> {
-		self.inner.set_max_delay(max)
+	/// Hold this subscriber's [`max`](Delay::max) delay at `max` through every later update;
+	/// see [`Subscriber::pin_max_delay`].
+	pub fn pin_max_delay(&mut self, max: Duration) -> Result<()> {
+		self.inner.pin_max_delay(max)
 	}
 
 	/// Block until the track declares its end, returning the exclusive end position.
@@ -14818,7 +14820,7 @@ mod test {
 	}
 
 	#[test]
-	fn set_max_delay_keeps_a_controls_change() {
+	fn pinned_max_delay_survives_every_update() {
 		let producer = track_producer("test", Info::timed());
 		let asked = Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(1)));
 		let mut subscriber = producer.subscribe(asked.clone()).ordered();
@@ -14826,16 +14828,23 @@ mod test {
 
 		// Another handle changes the priority after this side last read its preferences.
 		let stale = subscriber.subscription();
-		control.update(asked.with_priority(7)).unwrap();
-		subscriber.set_max_delay(Some(Duration::ZERO)).unwrap();
-
-		let expected = Subscription::default()
+		control.update(asked.clone().with_priority(7)).unwrap();
+		subscriber.pin_max_delay(Duration::ZERO).unwrap();
+		let pinned = Subscription::default()
 			.with_priority(7)
 			.with_delay(Delay::default().with_max(Duration::ZERO));
-		assert_eq!(subscriber.subscription(), expected);
-		assert_eq!(producer.subscription(), Some(expected));
+		assert_eq!(subscriber.subscription(), pinned);
 		// Writing back the copy read before the change would have lost it.
 		assert_eq!(stale.priority, 0);
+
+		// Restoring the budget through either handle keeps the pin and applies the rest.
+		control.update(asked.clone().with_priority(3)).unwrap();
+		assert_eq!(subscriber.subscription(), pinned.clone().with_priority(3));
+		let unlimited = Subscription::default().with_delay(Delay::default().with_max(None));
+		subscriber.update(unlimited).unwrap();
+		let expected = Subscription::default().with_delay(Delay::default().with_max(Duration::ZERO));
+		assert_eq!(subscriber.subscription(), expected);
+		assert_eq!(producer.subscription(), Some(expected));
 	}
 
 	#[test]

@@ -6,7 +6,7 @@ use std::{task::Poll, time::Duration};
 
 /// Group 2 arrives while group 1 is still owed: `latest()` and `next()` return it at once,
 /// whatever budget the caller subscribed with or later restores through a retained handle,
-/// since a snapshot consumer always reads at zero.
+/// since a snapshot consumer pins its max delay at zero.
 #[test]
 fn reads_skip_an_owed_hole() {
 	for max in [Some(Duration::ZERO), Some(Duration::from_secs(1)), None] {
@@ -21,10 +21,10 @@ fn reads_skip_an_owed_hole() {
 			let control = subscriber.control();
 			let consumer = snapshot::Consumer::<Value>::new(subscriber, Default::default());
 			control.update(subscription.clone()).unwrap();
-			consumer
+			(consumer, control)
 		};
-		let mut latest = reader();
-		let mut next = reader();
+		let (mut latest, latest_control) = reader();
+		let (mut next, next_control) = reader();
 		let waiter = kio::Waiter::noop();
 		let put = |sequence: u64| {
 			let mut group = track.create_group(group::Info { sequence }).unwrap();
@@ -44,6 +44,11 @@ fn reads_skip_an_owed_hole() {
 		};
 		assert_eq!(state.value, json!({ "n": 0 }));
 
+		// Restored again while both reads wait: every update keeps the pinned zero.
+		for control in [&latest_control, &next_control] {
+			control.update(subscription.clone()).unwrap();
+			assert_eq!(control.subscription().delay.max, Some(Duration::ZERO));
+		}
 		put(2);
 		let Poll::Ready(Ok(Some(state))) = latest.poll_latest(&waiter) else {
 			panic!("latest waited on owed group 1 with max {max:?}")

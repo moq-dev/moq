@@ -200,8 +200,7 @@ test("next skips every superseded group, whatever the subscription's max delay",
 	}
 });
 
-// An update restores its budget a microtask before anything is notified, so a read starting right
-// after it still skips to the newest group.
+// An update right before a read keeps the pinned zero, so the read still skips to the newest group.
 test("a read right after a restored budget skips superseded groups", async () => {
 	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI });
 	const producer = new Producer<Value>({ track, deltas: false });
@@ -211,6 +210,7 @@ test("a read right after a restored budget skips superseded groups", async () =>
 	const subscriber = track.subscribe();
 	const consumer = new Consumer<Value>({ track: subscriber });
 	subscriber.update({ delay: { max: null } });
+	expect(subscriber.subscription.peek()?.delay?.max).toBe(Milli.zero);
 	expect((await consumer.next())?.value).toEqual({ n: 2 });
 });
 
@@ -236,7 +236,7 @@ test("reads skip a group the subscription still owes", async () => {
 		put(0n);
 		expect((await latest.latest())?.value).toEqual({ n: 0 });
 		expect((await next.next())?.value).toEqual({ n: 0 });
-		// Restored again while both reads wait, so the pin must come from the update itself.
+		// Restored again while both reads wait: every update keeps the pinned zero.
 		const reads = [latest.latest(), next.next()];
 		await sleep(Nano.fromMilli(Milli(1)));
 		restore();
@@ -252,9 +252,9 @@ test("reads skip a group the subscription still owes", async () => {
 	}
 });
 
-// An update that undoes the consumer's pin before the microtask ends nets no change, so the signal
-// notifies nobody, not even a read already waiting on the subscription. The pin still holds.
-test("reads skip an owed group when an update undoes the pin in the same microtask", async () => {
+// An update in the same microtask as the consumer's pin keeps it too, so a read already waiting
+// never sees the restored budget.
+test("reads skip an owed group when an update follows the pin in the same microtask", async () => {
 	for (const max of [Milli(1_000), null]) {
 		const track = new Track.Producer("test").accept({});
 		hooks.receiveTrack(track);

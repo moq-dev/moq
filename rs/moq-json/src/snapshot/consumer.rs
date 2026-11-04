@@ -43,28 +43,19 @@ pub struct Consumer<T> {
 impl<T: DeserializeOwned> Consumer<T> {
 	/// Create a consumer reading from the given track subscriber.
 	///
-	/// Sets the subscription's [`max`](moq_net::track::Delay::max) delay to zero, whatever the
-	/// caller asked for, and again on every read if a retained handle changed it; its other
-	/// preferences, such as ranges and priority, stay.
+	/// Pins the subscription's [`max`](moq_net::track::Delay::max) delay at zero, whatever the
+	/// caller asked for, then or later through a retained handle; its other preferences, such
+	/// as ranges and priority, stay and still update.
 	/// A [`compress`](moq_net::track::Info::compress)ed track reads the same: moq-net inflates it.
 	pub fn new(track: moq_net::track::Subscriber, config: Config) -> Self {
-		let mut consumer = Self {
-			track: track.ordered(),
+		let mut track = track.ordered();
+		// Refused only once the track has ended, which leaves nothing to read anyway.
+		let _ = track.pin_max_delay(std::time::Duration::ZERO);
+		Self {
+			track,
 			group: None,
 			decoder: Decoder::new(config),
 			frames_read: 0,
-		};
-		consumer.pin_delay();
-		consumer
-	}
-
-	/// Hold the subscription's max delay at zero, keeping the rest of it.
-	fn pin_delay(&mut self) {
-		const ZERO: Option<std::time::Duration> = Some(std::time::Duration::ZERO);
-		if self.track.subscription().delay.max != ZERO {
-			// In place, so a retained handle's concurrent change to the ranges or priority stays.
-			// Refused only once the track has ended, which leaves nothing to read anyway.
-			let _ = self.track.set_max_delay(ZERO);
 		}
 	}
 
@@ -101,9 +92,6 @@ impl<T: DeserializeOwned> Consumer<T> {
 	}
 
 	fn poll_read(&mut self, waiter: &kio::Waiter, skip: bool) -> Poll<Result<Option<moq_net::Timed<T>>>> {
-		// Every wait ends in another poll, so pinning here undoes a retained handle's update
-		// before a read could hold at an owed group under it.
-		self.pin_delay();
 		if skip {
 			// Jump to the newest group the reader already has; a newer one supersedes the rest.
 			// Taking groups, not the track's largest position, ignores datagrams (which share

@@ -2066,6 +2066,8 @@ export class Subscriber {
 	// A FETCH's own budget in place of the subscription's; unlike SUBSCRIBE's zero
 	// default, an omitted one is unbounded, leaving publisher retention alone.
 	#fetchBudget?: number;
+	// The max delay every {@link update} keeps, once {@link pinMaxDelay} sets one.
+	#maxDelayPin?: Milli;
 	// Which cursor owns this subscription. Both cursors draw from one buffer, so the
 	// first group read commits the track to arrival order and {@link ordered} commits
 	// it to sequence order; whichever wins is the only one allowed from here on.
@@ -3694,12 +3696,24 @@ export class Subscriber {
 	 */
 	update(options: Subscription) {
 		const subscription = subscriptionDefaults(options);
+		if (this.#maxDelayPin !== undefined) subscription.delay = { ...subscription.delay, max: this.#maxDelayPin };
 		const replaced = !sameRanges(subscription.ranges ?? [], this.#window.ranges);
 		const reordered = subscription.order !== this.#state.update.peek()?.order;
 		this.#state.update.set(subscription);
 		if (replaced) this.#resolve();
 		// A fill's order follows its readers, so its handler wakes to serve the new first group.
 		else if (reordered) this.#fillsMoved();
+	}
+
+	/**
+	 * Hold this subscription's `delay.max` at `max`, keeping its other options, for as long as
+	 * the subscription lives: every later {@link update}, through this handle or the
+	 * {@link Ordered} one, keeps the pinned max delay and applies the rest. Mirrors the Rust
+	 * `Subscriber::pin_max_delay`.
+	 */
+	pinMaxDelay(max: Milli) {
+		this.#maxDelayPin = wireMillis("delay.max", max);
+		this.update(this.#state.update.peek() ?? Subscription.default());
 	}
 }
 
@@ -3780,6 +3794,11 @@ export class Ordered {
 	/** Update this subscription's options; see {@link Subscriber.update}. */
 	update(options: Subscription) {
 		this.#subscriber.update(options);
+	}
+
+	/** Hold this subscription's `delay.max` at `max` through every later update; see {@link Subscriber.pinMaxDelay}. */
+	pinMaxDelay(max: Milli) {
+		this.#subscriber.pinMaxDelay(max);
 	}
 
 	/** Close the track (optionally with an error), closing any pending groups. Idempotent. */

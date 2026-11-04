@@ -2,7 +2,7 @@
 use std::{
 	collections::BTreeMap,
 	sync::{
-		Arc,
+		Arc, Mutex, PoisonError,
 		atomic::{self, AtomicU64},
 	},
 	task::Poll,
@@ -209,6 +209,9 @@ struct Preference {
 	subscriptions: Option<kio::Lock<Subscriptions>>,
 	/// Bumped under the write whenever the ranges change.
 	ranges_revision: AtomicU64,
+	/// The max delay every write keeps, once [`Preferences::pin_max_delay`] sets one. Set
+	/// and read only under `value`'s write lock, so no write lands between a pin and its use.
+	max_delay_pin: Mutex<Option<Duration>>,
 }
 
 impl Preferences {
@@ -223,6 +226,7 @@ impl Preferences {
 			value: kio::Producer::new(value),
 			subscriptions,
 			ranges_revision: AtomicU64::new(0),
+			max_delay_pin: Mutex::new(None),
 		}))
 	}
 
@@ -236,6 +240,9 @@ impl Preferences {
 		let mut value = self.0.value.write().map_err(|_| crate::Error::Closed)?;
 		let mut next = value.clone();
 		change(&mut next);
+		if let Some(max) = *self.0.max_delay_pin.lock().unwrap_or_else(PoisonError::into_inner) {
+			next.delay.max = Some(max);
+		}
 		if *value == next {
 			return Ok(());
 		}
@@ -253,6 +260,12 @@ impl Preferences {
 			wakes.wake();
 		}
 		Ok(())
+	}
+
+	/// Hold the max delay at `max` from now on, whatever a later write asks for.
+	pub(super) fn pin_max_delay(&self, max: Duration) -> crate::Result<()> {
+		// Pinned inside the write, which then applies it.
+		self.update_with(|_| *self.0.max_delay_pin.lock().unwrap_or_else(PoisonError::into_inner) = Some(max))
 	}
 }
 
@@ -299,6 +312,7 @@ impl From<kio::Producer<Subscription>> for Preferences {
 			value,
 			subscriptions: None,
 			ranges_revision: AtomicU64::new(0),
+			max_delay_pin: Mutex::new(None),
 		}))
 	}
 }
