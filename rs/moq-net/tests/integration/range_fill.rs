@@ -44,7 +44,10 @@ impl Fixture {
 		let publisher = origin(1, Some(cache::Pool::unbounded()));
 		let broadcast = publisher.create_broadcast("bcast").unwrap();
 		let track = broadcast
-			.create_track("video", Info::default().with_timescale(Timescale::MILLI).with_max_age(None))
+			.create_track(
+				"video",
+				Info::default().with_timescale(Timescale::MILLI).with_max_age(None),
+			)
 			.unwrap();
 		broadcast.announce(Default::default()).unwrap();
 		for sequence in 0..groups {
@@ -128,8 +131,13 @@ async fn evicted_history_is_recovered_once_on_its_own_subscription() {
 		assert_eq!(fixture.opened(FETCH), 0, "nothing fetched");
 
 		// The live subscription goes on.
-		let mut group = fixture.track.create_group(moq_net::group::Info { sequence: 6 }).unwrap();
-		group.write_frame(Timestamp::from_millis(6000).unwrap(), b"x".as_slice()).unwrap();
+		let mut group = fixture
+			.track
+			.create_group(moq_net::group::Info { sequence: 6 })
+			.unwrap();
+		group
+			.write_frame(Timestamp::from_millis(6000).unwrap(), b"x".as_slice())
+			.unwrap();
 		group.finish().unwrap();
 		assert_eq!(receive(&mut first, 1).await, [6].into());
 		assert_eq!(fixture.opened(SUBSCRIBE), subscribes + 1, "recovered once");

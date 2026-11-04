@@ -1533,10 +1533,7 @@ export class Publisher {
 								startSent = true;
 								startSequence = bounds.startGroup;
 								raiseFloor(bounds.startGroup);
-								const start = new SubscribeStart(
-									rangeStarts(bounds.startGroup),
-									largest,
-								);
+								const start = new SubscribeStart(rangeStarts(bounds.startGroup), largest);
 								if (
 									!(await controls.response(encodeSubscribeResponse(stream, { start }, this.version)))
 								)
@@ -1578,10 +1575,7 @@ export class Publisher {
 							) {
 								startSent = true;
 								startSequence = runs[0].start;
-								const start = new SubscribeStart(
-									rangeStarts(startSequence),
-									largest,
-								);
+								const start = new SubscribeStart(rangeStarts(startSequence), largest);
 								if (
 									!(await controls.response(encodeSubscribeResponse(stream, { start }, this.version)))
 								)
