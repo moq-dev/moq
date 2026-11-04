@@ -36,6 +36,7 @@ futures = { workspace = true }
 json-patch = "4"
 # Compile the generated wrappers used by the tests.
 moq-json = { path = ".", features = ["async"] }
+moq-net = { path = "../moq-net", features = ["async"] }
 proptest = { workspace = true, features = ["handle-panics"] }
 workspace-hack = { path = "../workspace-hack" }
 

@@ -33,7 +33,7 @@ io-uring = { workspace = true }
 kio = { workspace = true, features = ["async", "runtime"] }
 libc = { workspace = true }
 moq-congestion = { workspace = true, optional = true }
-moq-net = { workspace = true }
+moq-net = { workspace = true, features = ["async"] }
 moq-quic = { workspace = true, features = ["rustls-aws-lc-rs"], optional = true }
 moq-sock = { workspace = true }
 rustc-hash = { workspace = true }

@@ -46,6 +46,7 @@ hex = { workspace = true }
 kio = { workspace = true, features = ["runtime"] }
 # Compile the generated wrappers used by the tests and benches, keeping the features they pick.
 moq-crypto = { path = ".", default-features = false, features = ["async"] }
+moq-net = { path = "../moq-net", features = ["async"] }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "test-util", "time"] }

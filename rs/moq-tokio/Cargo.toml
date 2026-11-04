@@ -16,7 +16,7 @@ categories = ["multimedia", "network-programming", "web-programming"]
 default = ["net", "quic", "aws-lc-rs", "websocket", "tcp", "uds"]
 # MoQ sessions over moq-net: `Client`, `Server`, `origin`, and the `connect`, `listen`,
 # and `transport` modules. Every transport feature turns it on, since none works without it.
-net = ["dep:moq-net"]
+net = ["dep:moq-net", "moq-net/async"]
 # The async QUIC driver alone (`quic::driver`): moq-quic on tokio, without moq-net or
 # the MoQ backend. Needs a crypto-provider feature.
 driver = ["dep:hmac", "dep:moq-congestion", "dep:moq-quic", "dep:rustc-hash", "dep:sha2"]
