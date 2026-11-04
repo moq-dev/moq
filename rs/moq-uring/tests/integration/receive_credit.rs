@@ -226,8 +226,9 @@ fn partial_frame_gives_way() {
 }
 
 /// A Bun publisher (`test/receive-credit/sender.ts`) dials a WebTransport endpoint whose
-/// connection window is [`WINDOW`] and sends a low-priority frame twice that size. The
-/// subscriber stops it, a high-priority frame completes, and a later low group arrives.
+/// connection window is [`WINDOW`] and holds an unsealed low-priority prefix in a frame
+/// declared twice that size. The subscriber evicts it, a high-priority frame completes, and a
+/// later low group arrives.
 /// The worker speaks moq-lite only.
 #[test]
 #[ignore = "requires Bun; run by just test receive-credit in the interop workflow"]
@@ -321,7 +322,7 @@ fn javascript_partial_frame_gives_way() {
 			let mut low = within(&handle, "the low subscription", subscribe("low", 1)).await;
 			let mut high = within(&handle, "the high subscription", subscribe("high", 100)).await;
 
-			// Wait until three quarters of the window holds a frame that can never complete.
+			// The sender holds back the rest, so no segment can seal and return this credit.
 			commands.write_all(b"low\n").expect("command");
 			let mut partial = within(&handle, "the low group", low.recv_group())
 				.await
@@ -343,13 +344,10 @@ fn javascript_partial_frame_gives_way() {
 			// Half the window, which only fits once the low frame lets go.
 			commands.write_all(b"high\n").expect("command");
 			assert_eq!(next_frame(&handle, &mut high).await, vec![2u8; WINDOW / 2]);
-			loop {
-				match within(&handle, "the low stop", partial.read_chunk()).await {
-					Ok(Some(_)) => {}
-					Ok(None) => panic!("a frame larger than the window completed"),
-					Err(_) => break,
-				}
-			}
+			let err = within(&handle, "the low stop", partial.read_chunk())
+				.await
+				.expect_err("the partial frame must be evicted");
+			assert!(matches!(err, moq_net::Error::Evicted), "{err}");
 
 			// The session survives, and the low track keeps delivering what fits.
 			commands.write_all(b"after\n").expect("command");
