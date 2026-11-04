@@ -40,7 +40,9 @@ if (
 	!["publish", "subscribe"].includes(role) ||
 	![undefined, "drop", "join", "compress", "status", "cached", "history", "late"].includes(mode)
 ) {
-	throw new Error("usage: tail.ts publish|subscribe URL BROADCAST [VERSION [drop|join|compress|status|cached|history|late]]");
+	throw new Error(
+		"usage: tail.ts publish|subscribe URL BROADCAST [VERSION [drop|join|compress|status|cached|history|late]]",
+	);
 }
 
 /**
