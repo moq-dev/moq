@@ -1036,6 +1036,17 @@ test("a hidden route is invisible to everyone until announce", async () => {
 	origin.close();
 });
 
+test("closing the origin ends a hidden or withdrawn prefix route's requests", async () => {
+	const origin = new Producer();
+	const hidden = origin.routePrefix(Path.from("hidden"), { hidden: true });
+	const withdrawn = origin.routePrefix(Path.from("withdrawn"));
+	withdrawn.withdraw();
+	const pending = [hidden.requested().next(), withdrawn.requested().next()];
+
+	origin.close();
+	for (const next of await Promise.all(pending)) expect(next.done).toBe(true);
+});
+
 test("a prefix route can start hidden, withdraw and come back while it keeps yielding requests", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();

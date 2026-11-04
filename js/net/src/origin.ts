@@ -588,6 +588,10 @@ class OriginState {
 	// republish diffs as retract-then-announce and a re-price as another active.
 	originated = new Signal<Advertisements | undefined>(new Map());
 
+	// Every open prefix route's server, advertised or not, so the origin's close ends each
+	// handler loop even for a route that is hidden or withdrawn.
+	servers = new Set<ServeState>();
+
 	// Broadcasts materialized from a served route, keyed by exact path. Shared by every
 	// request for the path so repeats reuse one accept; dropped (and closed) when the
 	// providing route goes away or the last request releases it.
@@ -1623,14 +1627,16 @@ export class Producer implements Table {
 		};
 		const release = this.#hold(() => {
 			ended = true;
+			this.#state.servers.delete(server);
 			remove(() => server.close());
 		});
 		// A route made after its origin (or this handle) closed is born retracted.
 		if (this.#borrowed?.closed || !this.#state.routes.peek()) {
 			ended = true;
 			server.close();
-		} else if (visible) {
-			insert();
+		} else {
+			this.#state.servers.add(server);
+			if (visible) insert();
 		}
 
 		const update = (next: RouteInfo) => {
@@ -1820,6 +1826,9 @@ export class Producer implements Table {
 			}
 			return undefined;
 		});
+		// A hidden or withdrawn prefix route is out of the table but its handler still waits.
+		for (const server of this.#state.servers) server.close(abort);
+		this.#state.servers.clear();
 		this.#state.originated.update(() => undefined);
 		// Materialized broadcasts are handles we opened; release them.
 		for (const cached of this.#state.materialized.values()) {
