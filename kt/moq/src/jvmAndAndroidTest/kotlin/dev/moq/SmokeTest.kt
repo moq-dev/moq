@@ -682,6 +682,33 @@ class SmokeTest {
     }
 
     @Test
+    fun `viewers watch, update, and release before the session connects`() = runTest {
+        Server.listen(
+                ServerConfig(bind = "127.0.0.1:0", tls = ServerTls(generate = listOf("localhost")))
+            )
+            .use { server ->
+                Moq.connect(
+                        "https://${server.localAddr}",
+                        ClientConfig(tls = ClientTls(insecure = true)),
+                    )
+                    .use { moq ->
+                        val viewers: Viewers = moq.viewers()
+                        // The server never accepts, so there is no receive estimate to divide.
+                        val viewer: Viewer = viewers.watch(4_000_000uL)
+                        viewer.use {
+                            assertNull(it.rate())
+                            it.update(1_000_000uL)
+                            assertNull(it.rate())
+                        }
+                        viewers.setTarget(0uL)
+                        viewers.setTarget(null)
+                        // Past what a PROBE target carries: refused.
+                        assertFailsWith<MoqException.OutOfRange> { viewers.watch(1uL shl 53) }
+                    }
+            }
+    }
+
+    @Test
     fun `closing a server releases its port`() = runTest {
         val first =
             Server.listen(

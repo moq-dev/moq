@@ -39,6 +39,13 @@ int32_t moq_allocator_close(uint32_t allocator);
 int32_t moq_reservation_rate(uint32_t reservation, uint64_t *bps, bool *present);
 int32_t moq_reservation_update(uint32_t reservation, uint64_t max_bps);
 int32_t moq_reservation_close(uint32_t reservation);
+int32_t moq_session_viewers(uint32_t session);
+int32_t moq_viewers_watch(uint32_t viewers, uint64_t max_bps);
+int32_t moq_viewers_set_target(uint32_t viewers, uint64_t target_bps, bool present);
+int32_t moq_viewers_close(uint32_t viewers);
+int32_t moq_viewer_rate(uint32_t viewer, uint64_t *bps, bool *present);
+int32_t moq_viewer_update(uint32_t viewer, uint64_t max_bps);
+int32_t moq_viewer_close(uint32_t viewer);
 
 // Server
 int32_t moq_server_listen(const moq_server_config *config, moq_status_callback on_request, void *user_data);

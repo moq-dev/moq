@@ -8,6 +8,10 @@ How to update your code for each breaking change, newest first.
 
 `Json.SnapshotConsumer(broadcast:name:)` takes the `BroadcastConsumer` and the track name instead of `track:`, and subscribes to the track itself at a zero `delay.max`. Drop the `subscribeTrack` call; a refused subscription now throws from the first read. Iteration skips every group a newer one supersedes, and `latest()` no longer waits for a lower group the track still owes. Publish a stream track when every state must survive, or a window track for a bounded recent history.
 
+### Viewer targets are bounded ([#7090](https://github.com/moq-dev/moq/pull/7090))
+
+Viewer ceilings and PROBE target overrides are refused with the new `MoqError.OutOfRange` once they would sum above 2^53 - 1 bps, the most a PROBE target carries; nothing changes on a refusal. `Viewers.watch(maxBps:)` and `setTarget(targetBps:)` and `Viewer.update(maxBps:)` throw it, so call them with `try`. Handle the new variant wherever you match the error exhaustively. Regenerate bindings and rebuild the matching native library together.
+
 ### `lower` is a `Media.Producer` ([#7699](https://github.com/moq-dev/moq/pull/7699))
 
 `Media.TrackProducer.video` and `Media.TrackStreamProducer.video` take `lower: Media.Producer?` instead of `TrackProducer?`. Pass `lower: .track(producer)`, or `.stream(producer)` for a byte-stream rendition.

@@ -8,6 +8,10 @@ How to update your code for each breaking change, newest first.
 
 `json.NewSnapshotConsumer(broadcast, name)` takes the `*BroadcastConsumer` and the track name instead of a `*TrackConsumer`, and subscribes to the track itself at a zero `Delay.Max`. Drop the `SubscribeTrack` call; a refused subscription now fails the first read. `Next` skips every group a newer one supersedes, and `Latest` no longer waits for a lower group the track still owes. Publish a stream track when every state must survive, or a window track for a bounded recent history.
 
+### Viewer targets are bounded ([#7090](https://github.com/moq-dev/moq/pull/7090))
+
+Viewer ceilings and PROBE target overrides are refused with the new `ErrOutOfRange` once they would sum above 2^53 - 1 bps, the most a PROBE target carries; nothing changes on a refusal. `Viewers.Watch` returns `(*Viewer, error)`, and `Viewers.SetTarget` and `Viewer.Update` return an `error`. Handle the new variant wherever you match the error exhaustively. Regenerate bindings and rebuild the matching native library together.
+
 ### `media.VideoInit.Lower` is a `media.Producer` ([#7699](https://github.com/moq-dev/moq/pull/7699))
 
 `Lower` is the `media.Producer` interface instead of `*media.TrackProducer`, so a `*media.TrackStreamProducer` fits too. Assigning a `*media.TrackProducer`, nil included, compiles unchanged; code that reads `Lower` back type-asserts it.

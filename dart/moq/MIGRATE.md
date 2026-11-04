@@ -8,6 +8,10 @@ How to update your code for each breaking change, newest first.
 
 `SnapshotConsumer(broadcast: ..., name: ...)` takes the `BroadcastConsumer` and the track name instead of `track:`, and subscribes to the track itself at a zero `delay.max`. Drop the `subscribeTrack` call; a refused subscription now throws from the first read. `next()` skips every group a newer one supersedes, and `latest()` no longer waits for a lower group the track still owes. Publish a stream track when every state must survive, or a window track for a bounded recent history.
 
+### Viewer targets are bounded ([#7090](https://github.com/moq-dev/moq/pull/7090))
+
+Viewer ceilings and PROBE target overrides are refused with the new `OutOfRangeMoqException` once they would sum above 2^53 - 1 bps, the most a PROBE target carries; nothing changes on a refusal. `Viewers.watch` and `setTarget` and `Viewer.update` throw it. Handle the new variant wherever you match the error exhaustively. Regenerate bindings and rebuild the matching native library together.
+
 ### `VideoInit.lower` takes either producer kind ([#7699](https://github.com/moq-dev/moq/pull/7699))
 
 `VideoInit.lower` is a `Producer` (`MoqMediaProducer`) instead of a `TrackProducer`. Pass `TrackMoqMediaProducer(producer: ...)`, or `StreamMoqMediaProducer(producer: ...)` for a byte-stream rendition.

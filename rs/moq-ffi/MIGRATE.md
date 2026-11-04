@@ -9,6 +9,10 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 `MoqJsonSnapshotConsumer::new(broadcast, name)` takes a `MoqBroadcastConsumer` and the track name instead of a `MoqTrackConsumer`, and subscribes to the track itself at a zero `delay.max`. Drop the `subscribe_track` call; a refused subscription now fails the first read. `next()` skips every group a newer one supersedes, and `latest()` no longer waits for a lower group the track still owes.
 
+### Viewer targets are bounded ([#7090](https://github.com/moq-dev/moq/pull/7090))
+
+Viewer ceilings and PROBE target overrides are refused with the new `MoqError::OutOfRange` once they would sum above 2^53 - 1 bps, the most a PROBE target carries; nothing changes on a refusal. `MoqViewers::watch` and `set_target` and `MoqViewer::update` return a `Result`. Handle the new variant wherever you match the error exhaustively. Regenerate bindings and rebuild the matching native library together.
+
 ### Datagrams are a track of their own
 
 A raw track's datagrams travel on a separate datagram track of the same name, so the API is unchanged but some results differ:
