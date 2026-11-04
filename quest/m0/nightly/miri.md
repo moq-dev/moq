@@ -19,25 +19,31 @@ since the missing `rust-src` keeps the m0 Nightly red. The scheduled run of
 2026-11-03 ([run 41656613559](https://github.com/moq-dev/moq/actions/runs/41656613559/job/125988511062))
 still fails the same way.
 
-Act on the first Nightly runs' timings, not ahead of them. Locally (24
-cores) `just rs miri` took 11.5 min wall: strict pass 118 tests in 109 s,
-epoch pass 94 in 307 s.
+The setup fix in [moq-dev/moq#7812](https://github.com/moq-dev/moq/pull/7812)
+installs `miri, rust-src` together. The scheduled failure above is before
+any test, so there is still no scheduled ARM timing evidence. Keep this
+quest until a scheduled run containing that fix records the job duration,
+strict and epoch pass durations, slowest test, and headroom against both
+budgets. Do not dispatch Nightly by hand to obtain it.
 
-- No Nightly timing exists yet: the first run with the job
-  ([run 41483654426](https://github.com/moq-dev/moq/actions/runs/41483654426),
-  2026-11-02) failed in 2 minutes before any test, as cargo-miri found no
-  `rust-src` ("given Rust source directory ... does not exist"). Install it
-  with the toolchain (`components: miri` in `.github/workflows/nightly.yml`
-  becomes `miri, rust-src`), then read the timings from the next run.
-- `a_group_has_no_frame_cap` (`rs/moq-net/src/model/group.rs:5228` as of
-  be39188000) took 307 s alone, writing 10,000 one-byte frames. Under `cfg(miri)`
-  write fewer, still more than any former per-group frame cap, so the test
-  keeps its meaning.
-- `rs/moq-net/src/coding/reader.rs:1232` builds its payload byte by byte
-  (`(0..SIZE).map(|i| (i % 251) as u8)`); switch to a cheaper fill if
-  Miri starts running that module.
+Act on those timings before optimizing. Earlier local measurements on 24
+cores took 11.5 min wall: strict pass 118 tests in 109 s, epoch pass 94 in
+307 s. These are desktop measurements, not proof of the 4-core ARM budget.
+
+- `a_group_has_no_frame_cap` (`rs/moq-net/src/model/group.rs`) took 307 s
+  alone, writing 10,000 one-byte frames. If scheduled timings warrant a
+  smaller Miri workload, it must still exceed the former 8192-frame cap.
+- `rs/moq-net/src/coding/reader.rs` builds its payload byte by byte
+  (`(0..SIZE).map(|i| (i % 251) as u8)`); consider a cheaper fill only if
+  Miri starts running that module and measurements justify it.
 - If the job nears 60 minutes, split the strict and epoch passes into
-  separate matrix entries (`.github/workflows/nightly.yml` Tests matrix,
-  `timeout-minutes: 60` at line 328) rather than raising the timeout.
+  separate matrix entries rather than raising the timeout. Preserve
+  nextest's 15-minute per-test cap.
 
 Public API: none. Wire: none.
+
+## Waiting
+
+- moq-dev/moq: After the setup fix lands, the next scheduled Nightly on
+  `main` must run `Tests (rs miri)` on `ubuntu-24.04-arm`. Read its log and
+  record the timings and headroom above; local runs do not clear this wait.
