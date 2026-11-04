@@ -1,5 +1,5 @@
 import { Elapsed, Milli, Nano, sleep, timeout } from "@moq/clock";
-import Session, { type Version as QmuxVersion } from "@moq/qmux";
+import Session, { type Config as QmuxConfig, type Version as QmuxVersion } from "@moq/qmux";
 import { type Getter, race } from "@moq/signals";
 import type * as Auth from "../auth.ts";
 import { vacant } from "../auth_session.ts";
@@ -34,6 +34,11 @@ const WEBTRANSPORT_HEDGE = DEFAULT_WEBSOCKET_DELAY_MS;
 // since script cannot tell a silent connect from a slow one; Firefox and socket.io give a
 // WebSocket 20 s to open.
 const WEBSOCKET_REDIAL = Milli(10_000);
+
+// MoQ holds a stream open per subscription and per live group, far past qmux's default of
+// 100 each way, where the peer's opens are refused or wait on credit forever. Matches the
+// stream limit of Rust's sessions and the relay.
+const QMUX_CONFIG = { maxStreamsBidi: 10_000n, maxStreamsUni: 10_000n } satisfies QmuxConfig;
 
 // RESET_STREAM and CONNECTION_CLOSE are separate transport notifications. Give the latter
 // time to surface its authoritative code without letting a reset-only peer stall SETUP forever.
@@ -828,6 +833,7 @@ async function connectWebSocket(
 		const quic = new Session(url, {
 			protocols: alpns,
 			versions: Object.fromEntries(alpns.map((alpn) => [alpn, QMUX[alpn] ?? null])),
+			config: QMUX_CONFIG,
 		});
 
 		// Wait for the WebSocket to connect, for the cancel promise to resolve, or for the

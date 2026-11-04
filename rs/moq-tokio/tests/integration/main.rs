@@ -18,6 +18,7 @@ mod runtime;
 mod scream;
 mod sim;
 mod stream_code;
+mod stream_limits;
 mod subscription_end_integrity;
 mod tokens;
 mod unannounce;

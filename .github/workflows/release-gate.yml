@@ -140,6 +140,8 @@ jobs:
               - "test/max-age/**"
               - "test/portrait/**"
               - "rs/moq-tokio/tests/integration/max_age.rs"
+              - "test/stream-limits/**"
+              - "rs/moq-tokio/tests/integration/stream_limits.rs"
               - "test/receive-credit/**"
               - "rs/moq-tokio/tests/integration/receive_credit.rs"
               - "rs/moq-uring/tests/integration/receive_credit.rs"
