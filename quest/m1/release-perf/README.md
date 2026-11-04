@@ -312,6 +312,24 @@ The first four were counted with frame pointers forced and the last two
 without, so compare each only with its own parent. None grows with
 subscribers.
 
+Re-measured on `main` with the probe fast path, as that decision asked, and
+accepted under it (see the
+[report](/.github/relay-cpu-bisect.md#the-ranged-reads-session-cost-on-main)),
+per delivered group at 512 subscribers through the in-process session:
+
+- Filling linearly in range count and span
+  ([moq-dev/moq#6995](https://github.com/moq-dev/moq/pull/6995)): +3,288
+  when it landed, mostly the live index's walk, which the drift edge reads on
+  every poll. The fast path never reached it; walking it through one branch
+  took back 891 (session) and 270 (model). What remains looks up the live
+  groups apart from fetched backfill, which keeps backfill out of every
+  search for live content.
+- Layered windows
+  ([moq-dev/moq#7542](https://github.com/moq-dev/moq/pull/7542)): +3,049
+  when it landed, the window queries `runs::Layered::first` and `last`. They
+  cost 2,117 on `main`, about 40 queries per delivery at about 50
+  instructions each: per-reader windows answered by search, not a walk.
+
 ## Required
 
 - [Relay CPU per frame since #5926](/quest/m1/release-perf/relay-cpu-bisect.md) - the 18-56% rise in relay instructions per delivered frame is bisected, attributed, and its avoidable cost fixed
