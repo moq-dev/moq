@@ -3,7 +3,7 @@
 ## Goal
 
 Pull requests are validated locally with `just ci` and get their cloud verdict
-from the [merge queue](/quest/m0/ci/land.md) without waiting behind the
+from the [merge queue](https://github.com/moq-dev/moq/blob/17a81d6c64/quest/m0/ci/land.md) without waiting behind the
 hosted runner limits, and every job spends its minutes on the work its diff
 selected rather than on setup, cold caches, or repeated builds. Concurrent local agents share
 expensive-command capacity, and retained tests earn their cost through useful
@@ -71,7 +71,7 @@ Decided 2026-10-26 (maintainer), from 414 queue merges over 2026-10-23 to
 (about 1 minute per merge), with a median of 18 entries ahead and 12.7% of
 runs failing. GitHub's merge queue cannot test several PRs in one run, so a
 batched gate replaces it: `quest land`, shared through moq-dev/quest, lands
-a tested chain of squash commits ([land](/quest/m0/ci/land.md)). Decided
+a tested chain of squash commits ([land](https://github.com/moq-dev/moq/blob/17a81d6c64/quest/m0/ci/land.md)). Decided
 2026-10-30 (maintainer): it runs as a daemon on the maintainer's host, not as
 a workflow on the self-hosted runner. This supersedes concurrent queue
 entries on a second runner. Batching gains most when failures are rare, so the
@@ -152,7 +152,6 @@ The historical samples locate candidates; they are not controlled benchmarks.
 ## Required
 
 - [Read-only pull-request CI](/quest/m0/ci/read-only-secrets.md) - write secrets and publisher identities reach only protected branches and tags, never a pushed branch
-- [Land main through GitHub's merge queue](/quest/m0/ci/land.md) - one PR at a time on the self-hosted runner; the host's Codex fixer fixes and re-enqueues every dropped PR
 - [A cache error is a miss](/quest/m0/ci/nix-cache-5xx.md) - a transient `nix.moq.dev` 5xx no longer fails `just ci`
 - [Gate each diff in under five minutes](/quest/m0/ci/five-minutes.md) - `just check`, test phases included, finishes within a worker's 5-minute prompt cache, admission wait included
 - [Measure the parallel frontend](/quest/m0/ci/nightly-levers.md) - a pinned nightly's parallel frontend, adopted only if the numbers beat its risks; Cranelift is ruled out
@@ -168,3 +167,5 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [Dependabot leaves the workspace-hack to hakari](/quest/m0/ci/dependabot-workspace-hack.md) - cargo group PRs stop hand-editing `rs/workspace-hack/Cargo.toml`
 - [mbx's free-space GC never removes a live target](/quest/m0/ci/mbx-gc.md) - the cargo shim stops deleting targets other sessions use when the host disk runs low
 - [Bun runs only the test files we name](/quest/m0/ci/bun-test-paths.md) - scripted `bun test` calls pass exact paths, so generated copies never run
+- [Build two queue entries at once if it helps](/quest/m0/ci/queue-concurrency.md) - a measured trial of `maximumEntriesToBuild: 2` against the serial lane's burst latency
+- [CI never downloads libav's sources](/quest/m0/ci/libav-sources.md) - `moq-libav` substitutes from `nix.moq.dev`, so an upstream mirror can't fail Check

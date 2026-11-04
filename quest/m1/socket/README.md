@@ -20,9 +20,8 @@ one-driver lease and 1 s watchdog); announcement backpressure, which
 
 Decided 2026-11-02 (maintainer, Kixel planning): the whole epic moves from
 m2 to m1, so the next cut publishes sockets in `@moq/net` and moq.pro's
-relays carry them. Why: Kixel's T3 Code prototype
-([moq-dev/kixel.ai T3 epic](https://github.com/moq-dev/kixel.ai/blob/main/quest/m0/t3/README.md))
-sends T3's commands over sockets, one group per message, in place of byte
+relays carry them. Why: Kixel's T3 Code prototype (its T3 epic, in the
+private kixel.ai repo) sends T3's commands over sockets, one group per message, in place of byte
 streams. `@moq/net` publishes from `release`, and accept relies on lite-07's
 Tracks stream, which only `main` has, so a backport was declined and the cut
 is the route. Byte streams, fastest-reader pacing, and the mesh libraries

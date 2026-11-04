@@ -37,7 +37,7 @@ Added 2026-10-21 and 2026-10-22 (maintainer): failures from the m0/m1
 merge runs, one child each.
 
 Decided 2026-10-26 (maintainer): the epic moved from m1 to m0, since every
-flake now fails a whole batch of the [batched merge gate](/quest/m0/ci/land.md)
+flake now fails a whole batch of the [batched merge gate](https://github.com/moq-dev/moq/blob/17a81d6c64/quest/m0/ci/land.md)
 rather than one PR. The queue's recurring flakes from 2026-10-23 to 10-26
 were already fixed (the moq-rtsp stall tests, the moq-gst pinned-instance and
 sibling-restart tests, the moq-mux missing-sequence test,
