@@ -46,6 +46,7 @@ test:
     python3 bench/profile.test.py
     python3 bench/fanout.test.py
     python3 bench/lock.test.py
+    python3 bench/local.test.py
     python3 sh/gh/gst-formula.test.py
     python3 sh/changed.test.py
     python3 sh/large-files.test.py

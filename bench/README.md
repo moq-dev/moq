@@ -935,10 +935,8 @@ avoid measuring Cargo's artifact lock instead of competing work.
 
 `local.py` starts its workers without the benchmark lock's descriptor, which
 `quest gate` and Bun would close anyway, so only `local.py` itself holds the
-lock. Every exit of `local.py` stops its workers first, and on Linux a SIGKILL
-or OOM kill does too: `PR_SET_PDEATHSIG` sends each worker's `quest gate` a
-SIGTERM. It does not where that SIGTERM never reaches the work: on macOS, which
-has no parent-death signal, and inside a Quest scope or Quest's process group,
-whose gate leaves signals to the enclosing owner. There, killing `local.py`
-with SIGKILL frees the lock while its workers keep measuring until their own
-gates exit, an accepted gap. Stop it with Ctrl-C or SIGTERM instead.
+lock. Every exit of `local.py` stops its workers first. On Linux a SIGKILL or
+OOM kill does too, even inside a Quest scope: each worker watches `local.py`
+through a pidfd and stops once it exits. macOS has no pidfd, so there killing
+`local.py` with SIGKILL frees the lock while its workers keep measuring until
+their own gates exit, an accepted gap. Stop it with Ctrl-C or SIGTERM instead.
