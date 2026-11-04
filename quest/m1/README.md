@@ -189,7 +189,6 @@ their end report, so an embedder's drain alert pages on real cuts.
 - [MoQ on rind](/quest/m1/rind/README.md) - every MoQ crate takes its crypto from rind, a pure-Rust graviola fork, so no build compiles C crypto
 - [A hardware decoder's capability refusal is an unsupported config](/quest/m1/hw-decoder-refusal.md) - a GPU that can't decode a stream reports `UnsupportedConfig`, so callers fall back to another rendition
 - [A JS audio capture gap keeps the audio before it](/quest/m1/js-audio-gap-flush.md) - every capture gap flushes the `AudioEncoder` before restarting it, like a disable
-- [A draft-18 resume of a cached group under a finite max-age settles](/quest/m1/ietf18-resume-cached-start.md) - the read delivers the group or refuses at once, never hangs
 
 ## Related
 
