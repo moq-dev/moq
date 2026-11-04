@@ -651,14 +651,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		Ok(protections)
 	}
 
-	/// Add the catalog's `drm` entries for `protection`, one per DRM system with the servers
-	/// [`with_drm`](Self::with_drm) set for it, returning their IDs for the rendition to list.
-	///
-	/// An entry identical to one another rendition already lists (the same system, scheme, key,
-	/// `pssh`, and servers) is shared, so video and audio under one key list the same IDs. Any
-	/// difference, such as another importer's servers for the same key, takes a new entry with the
-	/// lowest free numeric ID, so no importer's rendition is signalled with another's servers.
-	fn register_drm(&mut self, protection: &super::cenc::Protection) -> Result<Vec<String>> {
+	/// The catalog's `drm` entries for `protection`, one per DRM system, each with the servers
+	/// [`with_drm`](Self::with_drm) set for it.
+	fn drm_entries(&self, protection: &super::cenc::Protection) -> Result<Vec<hang::catalog::drm::Entry>> {
 		let mut entries = protection.entries()?;
 		for entry in &mut entries {
 			if let Some(servers) = self.drm.get(&entry.system) {
@@ -666,26 +661,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				entry.certificate = servers.certificate.clone();
 			}
 		}
-
-		let mut ids = Vec::with_capacity(entries.len());
-		self.catalog.mutate(|catalog| {
-			for entry in entries {
-				let existing = catalog.drm.iter().find(|(_, other)| **other == entry);
-				let id = match existing {
-					Some((id, _)) => id.clone(),
-					None => {
-						let id = (1..)
-							.map(|n: u64| n.to_string())
-							.find(|id| !catalog.drm.contains_key(id))
-							.expect("a free entry ID");
-						catalog.drm.insert(id.clone(), entry);
-						id
-					}
-				};
-				ids.push(id);
-			}
-		})?;
-		Ok(ids)
+		Ok(entries)
 	}
 
 	fn init_passthrough(
@@ -710,21 +686,22 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 		// Whatever the descriptor declared (a bitrate) is authoritative; the rest is filled by
 		// `estimate` as fragments arrive.
-		// The entries go in before the rendition listing them, so no catalog has a dangling one.
-		let drm = protection.map(|protection| self.register_drm(protection)).transpose()?;
+		// The entries go in with the rendition listing them, in one catalog edit.
+		let drm = match protection {
+			Some(protection) => self.drm_entries(protection)?,
+			None => Vec::new(),
+		};
 		let rendition = match kind {
 			Kind::Video => {
-				let mut config = self.init_video(trak, moov, protection)?;
-				config.drm = drm.unwrap_or_default();
+				let config = self.init_video(trak, moov, protection)?;
 				let mut rendition = reserved.init(track.name())?;
-				rendition.set(config)?;
+				rendition.set_protected(config, drm)?;
 				Rendition::Video(rendition)
 			}
 			Kind::Audio => {
-				let mut config = self.init_audio(trak, moov, protection)?;
-				config.drm = drm.unwrap_or_default();
+				let config = self.init_audio(trak, moov, protection)?;
 				let mut rendition = reserved.init(track.name())?;
-				rendition.set(config)?;
+				rendition.set_protected(config, drm)?;
 				Rendition::Audio(rendition)
 			}
 		};

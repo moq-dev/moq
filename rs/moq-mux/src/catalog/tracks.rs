@@ -111,6 +111,12 @@ pub trait RenditionConfig<E: CatalogExt>: Clone + Send + 'static {
 
 	/// Replace the config's [`Estimate`] fields. Defaults to discarding them.
 	fn set_estimate(&mut self, _estimate: Estimate) {}
+
+	/// The IDs of the root `drm` entries the config lists, for a config that can be protected.
+	/// Defaults to `None`: only video and audio renditions carry protected media.
+	fn drm_mut(&mut self) -> Option<&mut Vec<String>> {
+		None
+	}
 }
 
 impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::JsonConfig {
@@ -294,6 +300,32 @@ impl VideoHint {
 	}
 }
 
+/// Add `entries` to the catalog's `drm` section, returning their IDs for a rendition to list.
+///
+/// An entry identical to one already present (the same system, scheme, key, `pssh`, and servers)
+/// is shared, so video and audio under one key list the same IDs. Any difference, such as another
+/// importer's servers for the same key, takes a new entry with the lowest free numeric ID, so no
+/// rendition is signalled with another's servers.
+fn register_drm<E: CatalogExt>(catalog: &mut Catalog<E>, entries: Vec<hang::catalog::drm::Entry>) -> Vec<String> {
+	let mut ids = Vec::with_capacity(entries.len());
+	for entry in entries {
+		let existing = catalog.drm.iter().find(|(_, other)| **other == entry);
+		let id = match existing {
+			Some((id, _)) => id.clone(),
+			None => {
+				let id = (1..)
+					.map(|n: u64| n.to_string())
+					.find(|id| !catalog.drm.contains_key(id))
+					.expect("a free entry ID");
+				catalog.drm.insert(id.clone(), entry);
+				id
+			}
+		};
+		ids.push(id);
+	}
+	ids
+}
+
 /// Remove the `drm` entries among `ids` that no video or audio rendition lists any more, so an
 /// entry leaves the catalog with the last rendition it protects.
 fn release_drm<E: CatalogExt>(catalog: &mut Catalog<E>, ids: &[String]) {
@@ -337,6 +369,9 @@ impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::VideoConfig {
 		self.delay = estimate.delay;
 		self.framerate = estimate.framerate;
 	}
+	fn drm_mut(&mut self) -> Option<&mut Vec<String>> {
+		Some(&mut self.drm)
+	}
 }
 
 impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::AudioConfig {
@@ -366,6 +401,9 @@ impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::AudioConfig {
 		self.jitter = estimate.jitter;
 		self.bitrate = estimate.bitrate;
 		self.delay = estimate.delay;
+	}
+	fn drm_mut(&mut self) -> Option<&mut Vec<String>> {
+		Some(&mut self.drm)
 	}
 }
 
@@ -685,7 +723,21 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 	/// the MSF catalog. A caller who wants to pre-empt detection sets the field on the config, or (for
 	/// a config an importer builds out of the bitstream) hands the importer a hint like [`VideoHint`].
 	/// Unset jitter and delay keep the published floor across reconfiguration.
-	pub(crate) fn set(&mut self, mut config: C) -> crate::Result<()> {
+	pub(crate) fn set(&mut self, config: C) -> crate::Result<()> {
+		self.set_protected(config, Vec::new())
+	}
+
+	/// [`set`](Self::set) a protected rendition, adding the `drm` entries protecting it in the same
+	/// catalog edit and listing their IDs in its config.
+	///
+	/// One edit adds the entries and the rendition listing them, so no catalog holds one without the
+	/// other: an entry another rendition's removal released in between would dangle and fail every
+	/// later catalog publish, and one added for a rendition that then failed would be left behind.
+	pub(crate) fn set_protected(
+		&mut self,
+		mut config: C,
+		entries: Vec<hang::catalog::drm::Entry>,
+	) -> crate::Result<()> {
 		let supplied = config.estimate();
 		let mut resolved = Self::resolved(&supplied, &self.detected);
 		if self.present {
@@ -701,7 +753,15 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		config.set_estimate(resolved.clone());
 		{
 			let mut guard = self.catalog.modify()?;
-			write(&mut guard, &self.name, config)?;
+			let ids = register_drm(&mut guard, entries);
+			if !ids.is_empty() {
+				let drm = config.drm_mut().expect("only video and audio renditions are protected");
+				drm.clone_from(&ids);
+			}
+			if let Err(err) = write(&mut guard, &self.name, config) {
+				release_drm(&mut guard, &ids);
+				return Err(err);
+			}
 			self.present = true;
 			guard.list::<C>(&self.name);
 			if C::detects() {
