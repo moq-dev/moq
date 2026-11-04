@@ -2685,17 +2685,16 @@ test("a skip replaces a final drop but not a cached group on lite-07", async () 
 
 		const reader = entry.track.subscribe({ delay: { max: null } });
 		const got: unknown[] = [];
-		for (let next = hooks.tryRecvGroup(reader, true); next.kind !== "idle"; next = hooks.tryRecvGroup(reader, true)) {
+		for (
+			let next = hooks.tryRecvGroup(reader, true);
+			next.kind !== "idle";
+			next = hooks.tryRecvGroup(reader, true)
+		) {
 			if (next.kind === "group") got.push(next.group.sequence);
 			else if (next.kind === "drop") got.push([next.start, next.end, next.skip === true]);
 			else break;
 		}
-		expect(got).toEqual([
-			[1n, 3n, true],
-			[4n, 5n, true],
-			[6n, 7n, true],
-			5n,
-		]);
+		expect(got).toEqual([[1n, 3n, true], [4n, 5n, true], [6n, 7n, true], 5n]);
 		reader.close();
 	} finally {
 		warn.mockRestore();

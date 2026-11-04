@@ -6,7 +6,7 @@ How to update your code for each breaking change, newest first.
 
 ### `Track.Producer.skipGroups` declares groups never produced ([#7670](https://github.com/moq-dev/moq/pull/7670))
 
-`skipGroups(start, end)` says the track will never hold `[start, end)`: readers stop waiting for them, no reader ends, and a relay forwards a lite-07 SUBSCRIBE_SKIP.
+`skipGroups(start, end)` says the track will never hold `[start, end)`: readers stop waiting for them, no reader ends, and a relay forwards a lite-07 `SUBSCRIBE_SKIP`.
 A skip is final: `createGroup` and `appendGroup` at a skipped sequence throw `Skipped`, and a later drop leaves it skipped. It replaces an earlier drop of the same groups, whatever its error, but never a cached group.
 `appendGroup` now skips the holes below it that earlier `createGroup` calls left since the last append; create every sequence you still mean to fill before appending.
 

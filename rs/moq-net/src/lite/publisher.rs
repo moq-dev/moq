@@ -4834,11 +4834,7 @@ impl TrackRun {
 					{
 						self.dropped_stale.remove(sequence..end);
 						self.dropped.remove(sequence..end);
-					} else if self
-						.served
-						.as_ref()
-						.is_some_and(|served| served.contains(&sequence))
-					{
+					} else if self.served.as_ref().is_some_and(|served| served.contains(&sequence)) {
 						return Poll::Ready(Ok(ControlFlow::Continue(())));
 					}
 					let Some(group) = position_group(group, &self.frames) else {
@@ -7125,7 +7121,8 @@ mod serve_group_test {
 			assert!(run.start.is_some(), "{version}: started");
 			let stale = Hole::stale(Duration::from_secs(1));
 			run.drop_range(1..3, &stale, &mut writer).unwrap();
-			run.drop_range(1..2, &Hole::drop(StreamError::Cancel), &mut writer).unwrap();
+			run.drop_range(1..2, &Hole::drop(StreamError::Cancel), &mut writer)
+				.unwrap();
 			write_group(&mut track, 2, 2);
 			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 

@@ -1131,7 +1131,9 @@ export class Producer {
 		// A fill no longer owes what the track gave up.
 		this.#fills.dropped(start, end);
 		for (const state of [this.#state, ...this.#sinks]) {
-			state.drops.update((drops) => runs.reduce((drops, run) => insertDrop(drops, run.start, run.end, hole), drops));
+			state.drops.update((drops) =>
+				runs.reduce((drops, run) => insertDrop(drops, run.start, run.end, hole), drops),
+			);
 		}
 		if (open && !hole.skip) {
 			for (const [sequence, entry] of this.#cached) {

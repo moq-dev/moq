@@ -6,7 +6,7 @@ How to update your code for each breaking change, newest first.
 
 ### `track::Producer::skip_groups` declares groups never produced ([#7670](https://github.com/moq-dev/moq/pull/7670))
 
-`track::Producer::drop_groups` is no longer public. To say the track will never hold some groups, call `skip_groups(range)`: readers stop waiting for them, no reader ends, and a relay forwards a lite-07 SUBSCRIBE_SKIP.
+`track::Producer::drop_groups` is no longer public. To say the track will never hold some groups, call `skip_groups(range)`: readers stop waiting for them, no reader ends, and a relay forwards a lite-07 `SUBSCRIBE_SKIP`.
 
 ```rust
 // Before
