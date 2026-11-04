@@ -5614,6 +5614,8 @@ const JOIN: u64 = 75;
 /// arrive between the two drains, before their stamped media position: each leg sees the same
 /// snapshot at a different media position. The SDT's unchanged repeats and TDT/TOT revisions
 /// must still land on the same frames.
+/// The zero-delay exports request no superseded history; queued bursts need an explicit
+/// delay budget, as in `queued_clock_revisions_reach_both_exporters_at_their_stamped_slots`.
 async fn export_twice(with_video: bool, late_clock: bool) -> (Vec<Frame>, Vec<Frame>) {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
@@ -6726,7 +6728,13 @@ async fn si_cadence_rig(pid: u16, table_id: u8, interval: Duration) -> SiCadence
 	.unwrap();
 
 	let si_name = format!("{pid:#06x}-{table_id:#04x}.si");
-	let si_track = broadcast.create_track(si_name.as_str(), timed()).unwrap();
+	// Clock fixtures may queue several revisions; snapshot tables still need only the latest.
+	let info = if matches!(table_id, 0x70 | 0x73) {
+		timed().with_max_age(None)
+	} else {
+		timed()
+	};
+	let si_track = broadcast.create_track(si_name.as_str(), info).unwrap();
 
 	let avcc = crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(PPS)]).unwrap();
 	let track = broadcast
@@ -6941,6 +6949,78 @@ async fn clock_revisions_wait_for_their_stamped_grid_slots() {
 		rig.si_track.finish().unwrap();
 		rig.catalog.finish().unwrap();
 		assert_eq!(count_pid(&drain_frames(&mut rig.exporter).await, 0x0014), 0);
+	}
+}
+
+/// A whole burst arrives without polling between writes. Both subscriptions must keep
+/// later revisions while holding the first, under an explicit budget longer than the burst.
+/// The zero-budget control asks for only the live edge, even on an unlimited SI track.
+#[tokio::test(start_paused = true)]
+async fn queued_clock_revisions_reach_both_exporters_at_their_stamped_slots() {
+	for table_id in [0x70, 0x73] {
+		for delay in [Duration::ZERO, Duration::from_secs(6)] {
+			let section = |value| make_short_section(table_id, &[value; 5]);
+			let mut rig = si_cadence_rig(0x0014, table_id, Duration::from_secs(30)).await;
+			rig.catalog
+				.modify()
+				.unwrap()
+				.video
+				.renditions
+				.values_mut()
+				.next()
+				.unwrap()
+				.reorder = Some(0);
+			rig.exporter = rig.exporter.with_delay(delay).with_replay();
+			rig.si_track.write_frame(Timestamp::ZERO, section(0)).unwrap();
+			let mut joining = open_ts(
+				crate::source::announced(&rig._broadcast.consume()).await,
+				crate::catalog::CatalogFormat::Hang,
+			)
+			.await
+			.unwrap()
+			.with_delay(delay)
+			.with_replay();
+			let (mut initial, mut initial_b) = tokio::join!(rig.media_frames(0), drain_frames(&mut joining));
+			let (a, b) = tokio::join!(rig.media_frames(1_000), drain_frames(&mut joining));
+			initial.extend(a);
+			initial_b.extend(b);
+			assert_eq!(count_pid(&initial, 0x0014), 1, "the running export acquired SI");
+			assert_eq!(count_pid(&initial_b, 0x0014), 1, "the joining export acquired SI");
+
+			for (millis, value) in [(2_501, 1), (3_500, 2), (4_501, 3)] {
+				rig.si_track
+					.write_frame(Timestamp::from_millis(millis).unwrap(), section(value))
+					.unwrap();
+			}
+			let (mut a, mut b) = (Vec::new(), Vec::new());
+			for millis in (1_040..=5_520).step_by(40) {
+				let (next_a, next_b) = tokio::join!(rig.media_frames(millis), drain_frames(&mut joining));
+				a.extend(next_a);
+				b.extend(next_b);
+			}
+			for (leg, frames) in [("running", a), ("joining", b)] {
+				let emitted: Vec<_> = frames
+					.iter()
+					.flat_map(|frame| {
+						// SI leads the PES it describes. Video's send-ahead can put that PES
+						// on an earlier PCR slice, so check its media slot from the wire's PTS.
+						let pts = video_pes_timing(&frame.payload).first().map(|(pts, _)| *pts);
+						ts_sections(&frame.payload, 0x0014)
+							.into_iter()
+							.map(move |section| (pts.expect("SI must lead a media PES"), section))
+					})
+					.collect();
+				let mut expected = vec![
+					(3 * 90_000, Bytes::from(section(1))),
+					(4 * 90_000, Bytes::from(section(2))),
+					(5 * 90_000, Bytes::from(section(3))),
+				];
+				if delay.is_zero() {
+					expected.drain(..2);
+				}
+				assert_eq!(emitted, expected, "{leg}, table={table_id:#x}, delay={delay:?}");
+			}
+		}
 	}
 }
 

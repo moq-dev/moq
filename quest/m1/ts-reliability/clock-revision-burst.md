@@ -55,3 +55,15 @@ Steps:
   superseded ones.
 
 Public API: none. Wire: the TS output gains any revision that was dropped.
+
+Investigated 2026-11-04: `export_twice` opens zero-delay exporters, so their SI
+subscriptions request zero superseded history even when the publisher's max-age
+is unlimited. A three-revision burst on unlimited tracks reproduced only the
+newest revision in both outputs. The new paired cadence test gives both readers
+an explicit six-second budget: all three revisions reach media slots 3, 4, and
+5 seconds, with their full section bytes intact, for both TDT and TOT. Its
+zero-delay control still emits only the newest revision. Clock fixtures now
+declare unlimited publisher age explicitly after the default-age change.
+The omission is the fixture's no-history budget, not replacement of a held
+revision. No exporter, snapshot-table, retention, public API, or TS-output
+behavior changes are needed.
