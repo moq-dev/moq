@@ -3789,7 +3789,7 @@ mod test {
 		assert_eq!(drain(&mut sub, false), [0]);
 		let (groups, given_up) = sub.reoffer_groups(0..3);
 		assert_eq!(groups.iter().map(|group| group.sequence).collect::<Vec<_>>(), [0]);
-		assert_eq!(given_up.iter().cloned().collect::<Vec<_>>(), [1..3]);
+		assert_eq!(given_up, std::iter::once(1..3).collect::<RangeSet<u64>>());
 	}
 
 	/// A run a replaced route held back is dropped with that route: the route serving next
