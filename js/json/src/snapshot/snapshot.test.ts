@@ -200,6 +200,20 @@ test("next skips every superseded group, whatever the subscription's max delay",
 	}
 });
 
+// An update restores its budget a microtask before anything is notified, so a read starting right
+// after it still skips to the newest group.
+test("a read right after a restored budget skips superseded groups", async () => {
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI });
+	const producer = new Producer<Value>({ track, deltas: false });
+	for (let n = 0; n <= 2; n++) producer.update({ value: { n }, at: Time.Timestamp.fromMillis(n * 1_000) });
+	producer.finish();
+
+	const subscriber = track.subscribe();
+	const consumer = new Consumer<Value>({ track: subscriber });
+	subscriber.update({ delay: { max: null } });
+	expect((await consumer.next())?.value).toEqual({ n: 2 });
+});
+
 // A session-fed track owes the groups between its arrivals. A snapshot reader never waits on one:
 // group 2 arriving while group 1 is still owed supersedes it at once, whatever budget the caller
 // subscribed with or later restores through the subscriber it kept.

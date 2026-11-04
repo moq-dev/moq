@@ -47,6 +47,8 @@ export class Consumer<T> {
 	// before that microtask ends notifies nobody: not the subscriber above, nor a read waiting on
 	// the subscription inside `@moq/net`. Every pin that writes checks again a microtask later,
 	// after that update could have run.
+	//
+	// Notifications come a microtask late, so each read also pins before it picks a group.
 	#pin(): void {
 		const zero = Moq.Track.Subscription.default().delay?.max;
 		const current = this.#track.subscription.peek();
@@ -81,6 +83,8 @@ export class Consumer<T> {
 
 	async #read(skip: boolean): Promise<Timed<T> | undefined> {
 		for (;;) {
+			// An update just before this read hasn't notified yet, and the read picks its group now.
+			this.#pin();
 			if (skip) {
 				// Jump to the newest group the reader already has; a newer one supersedes the rest.
 				// Taking groups, not the track's largest position, ignores datagrams (which share
