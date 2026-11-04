@@ -7612,14 +7612,37 @@ impl Cursor {
 			return Vec::new();
 		};
 		let runs = drops.take_stale();
+		// What neither a skip nor a miss offers again: a group written off at the track's max
+		// age bound, which no budget reverses. It is still stale under the new terms.
+		let mut kept = RangeSet::new();
 		for run in &runs {
+			kept.insert(run.clone());
 			if let Some(misses) = &mut self.misses {
+				for missed in misses.given_up().overlapping(run) {
+					kept.remove(missed.clone());
+				}
 				misses.retry(run.clone());
 			}
 			if let Some(last) = run.end.checked_sub(1) {
 				for skipped in self.skipped.within(run.start..=last) {
+					kept.remove(*skipped.start()..skipped.end().saturating_add(1));
 					self.reowe(skipped);
 				}
+			}
+		}
+		let budget = {
+			let state = self.state.read();
+			// A received stale run is folded in again by the next scan, if the track holds it.
+			for run in kept.clone().iter() {
+				for (dropped, _) in state.drops.overlapping(run) {
+					kept.remove(dropped.clone());
+				}
+			}
+			clamp_max_delay(self.subscription.read().budget(), state.max_age_bound())
+		};
+		if let Some(drops) = &mut self.drops {
+			for run in kept.iter() {
+				drops.give_up(run.clone(), Hole::stale(budget));
 			}
 		}
 		runs

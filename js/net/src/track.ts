@@ -2479,6 +2479,16 @@ export class Subscriber {
 		const sequences = [...this.#skipped.keys()].filter((sequence) =>
 			taken.some((run) => run.start <= sequence && sequence < run.end),
 		);
+		// What no skip offers again, such as a group written off at the track's max age bound,
+		// which no budget reverses, is still stale under the new terms: reported again. A
+		// received stale run is left to the scan above. Mirrors Rust.
+		let kept: Run[] = taken.map((run) => ({ ...run }));
+		for (const sequence of sequences) kept = removeRun(kept, sequence, sequence + 1n);
+		for (const dropped of this.#state.drops.peek()) kept = removeRun(kept, dropped.start, dropped.end);
+		if (kept.length > 0) {
+			const hole = staleHole(this.#drift().budget);
+			for (const run of kept) this.#pending = insertDrop(this.#pending, run.start, run.end, hole);
+		}
 		const producer = this.#state.producer;
 		if (sequences.length > 0 && producer && !this.#closed) reofferSequences(producer, this.#state, sequences);
 		return taken;

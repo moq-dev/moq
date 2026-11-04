@@ -4996,3 +4996,35 @@ test("a huge skip costs one run", () => {
 		expect(got.filter((entry) => typeof entry !== "bigint")).toEqual([[1n, FAR, true]]);
 	}
 });
+
+// A group stale at the track's max age bound is final under any budget, yet an update that reopens
+// its stale drop must report it again rather than leave it owed: no skip offers it again. Mirrors
+// Rust.
+test("reopening stale drops reports again what is stale at the max age bound", () => {
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(1500) });
+	const reader = producer.subscribe({ delay: { max: Milli(1500) } });
+	const drain = () => {
+		const got: unknown[] = [];
+		for (
+			let next = hooks.tryRecvGroup(reader, true);
+			next.kind !== "idle";
+			next = hooks.tryRecvGroup(reader, true)
+		) {
+			if (next.kind === "group") got.push(next.group.sequence);
+			else if (next.kind === "drop") got.push([next.start, next.end, next.stale]);
+		}
+		return got;
+	};
+	putGroup(producer, 0n, 0);
+	expect(drain()).toEqual([0n]);
+	for (const [sequence, millis] of [
+		[1n, 1000],
+		[2n, 2000],
+		[3n, 3000],
+		[4n, 6000],
+	] as const)
+		putGroup(producer, sequence, millis);
+	expect(drain()).toEqual([[1n, 2n, 1500], [2n, 3n, 1500], 3n, 4n]);
+	expect(hooks.reofferStale(reader)).toEqual([{ start: 1n, end: 3n }]);
+	expect(drain()).toEqual([[1n, 3n, 1500]]);
+});

@@ -7032,6 +7032,53 @@ mod serve_group_test {
 		}
 	}
 
+	/// A group stale at the track's max age bound is final under any budget, yet a lite-07
+	/// update still reopens its drop at the subscriber, so it is dropped again under the new
+	/// update rather than left owed.
+	#[kio::test]
+	async fn an_update_drops_again_what_is_stale_at_the_bound() {
+		for widen in [false, true] {
+			let budget = Duration::from_millis(1500);
+			let mut track = track::Producer::new(
+				Arc::new(broadcast::Info::default()),
+				"test",
+				crate::track::Info::timed().with_max_age(budget),
+			);
+			let subscriber =
+				track.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(budget)));
+			let (mut run, mut writer, log) = lite07_run(SinkSession::new(Log::default()), subscriber);
+			write_group(&mut track, 0, 0);
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			for (sequence, millis) in [(1, 1000), (2, 2000), (3, 3000), (4, 6000)] {
+				write_group(&mut track, sequence, millis);
+			}
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			assert_eq!(drop_updates(&mut writer, &log, Version::Lite07).await, [(1, 2, 0)]);
+			let opened = run.ctx.outcomes.opened.load(Ordering::Relaxed);
+
+			run.update(lite::SubscribeUpdate {
+				wanted_group: None,
+				priority: 5,
+				max_delay: if widen { Duration::from_secs(10) } else { budget },
+				min_delay: None,
+				ranges: vec![lite::Range::span(None, 0, None, None)],
+				order: Order::Descending,
+				update: 1,
+			});
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			assert_eq!(
+				run.ctx.outcomes.opened.load(Ordering::Relaxed),
+				opened,
+				"widen={widen}: the bound keeps them stale"
+			);
+			assert_eq!(
+				drop_updates(&mut writer, &log, Version::Lite07).await,
+				[(1, 2, 0), (1, 2, 1)],
+				"widen={widen}: dropped again under update 1"
+			);
+		}
+	}
+
 	/// A group whose stream expired as stale is dropped again under every later update on
 	/// lite-07, by run, since the subscriber reopens each stale drop and the stream already
 	/// reset. Earlier versions' drops are final.
