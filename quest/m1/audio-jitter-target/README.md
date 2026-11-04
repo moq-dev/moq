@@ -29,7 +29,9 @@ clock and worker release contracts depend on it. Native quality expansion
 remains separately scoped in m2. The 2026-11-03 proof run found the 0.95
 quantile leaves about six re-stalls a minute on real paths by design; decided
 2026-11-03 (maintainer), Watch closes that by time stretch rather than a deeper
-target.
+target, and `moq play` copies NetEq's stretch in m1 as
+[Native stretch](/quest/m1/audio-jitter-target/native-stretch.md), sharing
+one algorithm and its vectors with the browser's.
 
 What the line still owes once Watch lands: its recorded trace replayed through
 the native decode path too, asserting the same target series the browser's
@@ -39,6 +41,7 @@ native playback against its budgets.
 ## Required
 
 - [Watch](/quest/m1/audio-jitter-target/watch.md) - the browser plays the measured real-microphone rows with zero steady-state underruns by time-stretching the ring
+- [Native stretch](/quest/m1/audio-jitter-target/native-stretch.md) - `moq play` copies NetEq's accelerate and preemptive expand, sharing the browser's algorithm and vectors, so its native rows reach zero steady-state underruns
 - [Capped budgets](/quest/m1/audio-jitter-target/capped-budgets.md) - post-cap nightlies confirm AAC bursty discards about as much audio as Opus bursty and the first row no longer stalls, and every browser row's budgets are re-measured from them
 
 ## Closes

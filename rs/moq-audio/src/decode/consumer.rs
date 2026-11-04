@@ -82,7 +82,7 @@ pub struct Options {
 	/// [`Delay::min`] is the playout delay: the jitter buffer a player holds ahead of the
 	/// playhead, reported by [`Consumer::delay`], and where a cold join starts. With
 	/// [`estimate`](Self::estimate) it is a floor under the measured delay instead. A `min`
-	/// beyond the track's retention is refused. [`Delay::max`] is how far a group may fall
+	/// beyond the track's max age is refused. [`Delay::max`] is how far a group may fall
 	/// behind the live edge before the subscription skips it; it adds no buffering.
 	pub delay: Delay,
 	/// Measure the playout delay from arrival timing, never below [`Delay::min`] (default:
@@ -227,20 +227,20 @@ impl Consumer {
 			subscriber = subscriber.with_range(live_edge.group..);
 		}
 		let track = subscriber;
-		let retention = track.info().max_age;
+		let max_age = track.info().max_age;
 		let max_delay = options
 			.delay
 			.max
 			.unwrap_or(Duration::MAX)
-			.min(retention.unwrap_or(Duration::MAX));
-		// Holding more than the publisher keeps would wait on media it has already
-		// discarded, so the caller asked for something impossible.
+			.min(max_age.unwrap_or(Duration::MAX));
+		// Holding longer than the publisher's max age would wait on groups that go stale
+		// before they play, so the caller asked for something impossible.
 		let delay = options.delay.min.unwrap_or_default();
-		if let Some(retention) = retention
-			&& delay > retention
+		if let Some(max_age) = max_age
+			&& delay > max_age
 		{
 			return Err(Error::Unsupported(format!(
-				"playout delay {delay:?} exceeds the track's retention of {retention:?}"
+				"playout delay {delay:?} exceeds the track's max age of {max_age:?}"
 			)));
 		}
 		// The catalog says how the track is framed, and it is not always the legacy
@@ -291,7 +291,7 @@ impl Consumer {
 		&self.options
 	}
 
-	/// The effective skip budget after clamping to retention, excluding decoder warmup.
+	/// The effective skip budget after clamping to the track's max age, excluding decoder warmup.
 	pub fn max_delay(&self) -> std::time::Duration {
 		self.max_delay
 	}
@@ -2326,7 +2326,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn a_delay_beyond_retention_is_refused() {
+	async fn a_delay_beyond_max_age_is_refused() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let info = hang::container::track_info(hang::catalog::PRIORITY.audio)
 			.with_max_age(std::time::Duration::from_millis(100));
@@ -2355,7 +2355,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn max_delay_is_clamped_to_publisher_retention() {
+	async fn max_delay_is_clamped_to_publisher_max_age() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let info = hang::container::track_info(hang::catalog::PRIORITY.audio)
 			.with_max_age(std::time::Duration::from_millis(100));

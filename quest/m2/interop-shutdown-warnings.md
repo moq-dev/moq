@@ -17,8 +17,8 @@ Decided 2026-11-03 (maintainer, /quest-plan of the follow-ups from
   (around lines 1138–1152) warns "publisher '$lang' was still running 10 s
   after it was stopped; killing it". #7701 saw it for Rust. The comment near
   `interop.sh:1077` says a finished import stays up for its linger
-  (max-age), so a longer default max-age, such as
-  [the 30 s default](/quest/m1/max-age-defaults.md), may outlast the 10 s.
+  (max-age), so an explicit max-age, such as media's 30 s, may outlast the
+  10 s.
   Decide whether a stop should end the linger, or the harness should wait
   for it.
 - Unfinished producer: `track::Producer dropped without finish() or

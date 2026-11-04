@@ -309,7 +309,7 @@ export function hasRanges(version: Version): boolean {
 }
 
 /** Whether FETCH carries the subscriber's optional max delay. Added in lite-07; an earlier
- * fetch is bounded by the publisher's retention alone. */
+ * fetch is bounded by the publisher's max age alone. */
 export function hasFetchMaxDelay(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-07+ behavior.
 	switch (version) {

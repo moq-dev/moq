@@ -164,7 +164,7 @@ impl Inner {
 
 	/// Close the connection with a full-width application code.
 	///
-	/// The [`web_transport_trait::poll::Session::close`] surface narrows codes
+	/// The [`moq_net::transport::poll::Session::close`] surface narrows codes
 	/// to `u32`; the WebTransport layer maps its codes into HTTP/3's error
 	/// space, which needs the whole varint range.
 	pub(crate) fn close_code(&self, code: u64, reason: &str) {
@@ -209,7 +209,7 @@ pub struct Connection {
 impl Connection {
 	/// Close the connection with a full-width application code.
 	///
-	/// The [`web_transport_trait::poll::Session::close`] surface narrows codes
+	/// The [`moq_net::transport::poll::Session::close`] surface narrows codes
 	/// to `u32`; the WebTransport layer maps its codes into HTTP/3's error
 	/// space, which needs the whole varint range.
 	pub(crate) fn close_code(&self, code: u64, reason: &str) {
@@ -327,11 +327,6 @@ impl Connection {
 	/// The target this connection probes up to, or `None` when its congestion controller cannot probe.
 	pub(crate) fn probe(&self) -> Option<moq_net::transport::Probe> {
 		self.shared.probe.clone()
-	}
-
-	/// Receive streams evicted to free a stuck receive window.
-	pub(crate) fn streams_evicted(&self) -> u64 {
-		self.shared.conn.borrow().stats().credit.evicted
 	}
 
 	/// The receive windows now in force: the connection's, and the most one stream holds.
@@ -560,13 +555,12 @@ impl Connection {
 		poll_closed(&self.shared, waiter)
 	}
 
-	/// The connection's counters in [`web_transport_trait::Stats`] shape.
-	pub(crate) fn transport_stats(&self) -> impl web_transport_trait::Stats + use<> {
+	/// The connection's metrics for moq-net.
+	pub(crate) fn transport_stats(&self) -> impl moq_net::transport::Metrics + use<> {
 		let stats = self.stats();
 		Stats {
-			bytes_sent: stats.udp_tx.bytes,
-			bytes_received: stats.udp_rx.bytes,
 			bytes_lost: stats.path.lost_bytes,
+			streams_evicted: stats.credit.evicted,
 			packets_sent: stats.udp_tx.datagrams,
 			packets_received: stats.udp_rx.datagrams,
 			packets_lost: stats.path.lost_packets,
@@ -646,12 +640,10 @@ impl std::fmt::Debug for Connection {
 	}
 }
 
-/// A snapshot of moq-quic's counters in [`web_transport_trait::Stats`]
-/// shape.
+/// A snapshot of moq-quic's metrics for moq-net.
 struct Stats {
-	bytes_sent: u64,
-	bytes_received: u64,
 	bytes_lost: u64,
+	streams_evicted: u64,
 	packets_sent: u64,
 	packets_received: u64,
 	packets_lost: u64,
@@ -660,15 +652,10 @@ struct Stats {
 	bandwidth: Option<u64>,
 }
 
-impl web_transport_trait::Stats for Stats {
-	fn bytes_sent(&self) -> Option<u64> {
-		Some(self.bytes_sent)
+impl moq_net::transport::Metrics for Stats {
+	fn streams_evicted(&self) -> Option<u64> {
+		Some(self.streams_evicted)
 	}
-
-	fn bytes_received(&self) -> Option<u64> {
-		Some(self.bytes_received)
-	}
-
 	fn bytes_lost(&self) -> Option<u64> {
 		Some(self.bytes_lost)
 	}
