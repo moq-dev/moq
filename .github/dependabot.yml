@@ -74,6 +74,12 @@ updates:
       # hand; see the uniffi-bindgen-go comment in flake.nix.
       - dependency-name: "uniffi"
         versions: [">=0.33"]
+      # kio-macros is the only direct syn user, and it stays on syn 2 because
+      # moq-net's graph already builds syn 2 (thiserror, tracing); syn 3 would
+      # add a second syn build there and needs an API migration. Lift this
+      # once those proc-macro crates move to syn 3; see rs/kio/macros/Cargo.toml.
+      - dependency-name: "syn"
+        versions: [">=3"]
 
   - package-ecosystem: "bun"
     # Every infra/ directory is a standalone Worker with its own lockfile; the

@@ -26,11 +26,12 @@ Ported since the fork point:
 - [`a2c55b36`](https://github.com/quinn-rs/quinn/commit/a2c55b36817ccaac1c39c6db92de8294f281819f) (`moq_sock::udp`, [moq-dev/moq#7418](https://github.com/moq-dev/moq/pull/7418)): send IPv4 source overrides with Apple's `IP_PKTINFO` in both `sendmsg` and `sendmsg_x`; `IP_RECVDSTADDR` only selects received destination metadata there.
 - [`2c575013`](https://github.com/quinn-rs/quinn/commit/2c5750139fa09aab588bf0f939c83f521d658baf): already covered by the `MIN_PACKET_SPACE` check when choosing a GSO segment size, carried with bandwidth probing.
 - [`c2a47f6d`](https://github.com/quinn-rs/quinn/commit/c2a47f6d06447a997451568b90d5495c7e7bc3a9) (`0.11.x`, `moq_tokio::quic::driver`): already covered by `poll_recv`, which propagates every error except `WouldBlock`. The fork has no async-io runtime.
+- [`aea1e538`](https://github.com/quinn-rs/quinn/commit/aea1e5384927258887119fa1dc4fe3f23f1182c7) ([quinn#2981](https://github.com/quinn-rs/quinn/pull/2981), and [`77a51bdc`](https://github.com/quinn-rs/quinn/commit/77a51bdc5dc8b63bfba30429ab79fbb142bc8e2a) on `0.11.x`): send an MTU probe only on a validated path. A probe is built after the anti-amplification check, so a server probed a migrated peer address beyond three times what it had received from it, spending the budget its `PATH_CHALLENGE` needed.
 
 Dependency bumps are not ported. The `0.11.x` accept refactors are already covered by this fork's split acceptance and CID routing.
 [`2697de1e`](https://github.com/quinn-rs/quinn/commit/2697de1e1314cb9f98502b7323acd5bdd836b582)'s batched datagram API is not carried: the current WebTransport reader consumes one at a time, and the [planned driver lock profile](../../quest/m2/perf/quic-lock-contention.md) measures contention before adding batching.
 
-Checked through quinn `main` at [`2c575013`](https://github.com/quinn-rs/quinn/commit/2c5750139fa09aab588bf0f939c83f521d658baf), and the `0.11.x` branch through [`4b84837d`](https://github.com/quinn-rs/quinn/commit/4b84837df1d25424bc37b0ed990e7b376d40a9c0) (2026-10-31); start the next sync there.
+Checked through quinn `main` at [`aea1e538`](https://github.com/quinn-rs/quinn/commit/aea1e5384927258887119fa1dc4fe3f23f1182c7), and the `0.11.x` branch through [`77a51bdc`](https://github.com/quinn-rs/quinn/commit/77a51bdc5dc8b63bfba30429ab79fbb142bc8e2a) (2026-11-03); start the next sync there.
 
 The fork never merges upstream, and takes the workspace's formatting and names, so upstream patches no longer apply.
 Upstream fixes are ported by hand, together with their regression tests.
