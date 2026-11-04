@@ -1488,8 +1488,8 @@ fn dash<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Ite
 	group.finish();
 }
 
-/// Print allocations, allocated bytes and, given perf access, user instructions per
-/// viewer-group or per delivered datagram instead of timing, to compare across revisions.
+/// Print Consumer size, allocations, allocated bytes and, given perf access, user
+/// instructions per viewer-group or delivered datagram, to compare across revisions.
 fn allocations<B: Backend>() {
 	const ROUNDS: usize = 256;
 

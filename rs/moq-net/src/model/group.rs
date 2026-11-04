@@ -3362,6 +3362,10 @@ pub struct Consumer {
 	parked: bool,
 }
 
+// Poll layers repeatedly move this value; keep cold state shared or lazy.
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(size_of::<Consumer>() <= 184);
+
 /// Per-delivery state shared by a consumer's clones and its frame readers.
 /// Kept across replacement copies, so provenance and arrival remain the original's.
 pub(super) struct Delivery {
