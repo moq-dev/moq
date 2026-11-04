@@ -1,11 +1,11 @@
 /** Exchange signed groups with Rust: verify the ones Rust signed, and sign through the JS wrappers. */
 import assert from "node:assert/strict";
+import * as Signed from "../../js/crypto/src/sign/broadcast.ts";
+import { Failure } from "../../js/crypto/src/sign/failure.ts";
+import { SecretKey } from "../../js/crypto/src/sign/key.ts";
+import { Scope } from "../../js/crypto/src/sign/scope.ts";
+import * as Track from "../../js/crypto/src/sign/track.ts";
 import { Broadcast, Instance, type Track as NetTrack, Path, Time } from "../../js/net/src/index.ts";
-import * as Signed from "../../js/sign/src/broadcast.ts";
-import { Failure } from "../../js/sign/src/failure.ts";
-import { SecretKey } from "../../js/sign/src/key.ts";
-import { Scope } from "../../js/sign/src/scope.ts";
-import * as Track from "../../js/sign/src/track.ts";
 
 /** One frame as it crosses the wire: its body, signature included, and its timestamp at the track's timescale. */
 type Frame = { body: string; timestamp?: number | null };
@@ -34,7 +34,7 @@ for (const { track, group, timescale, frames } of input.rust) {
 	const scale = timescale == null ? undefined : Time.Timescale(timescale);
 	const net = new Broadcast.Producer().createTrack(track, { timescale: scale });
 	const consumer = Track.Consumer.make(net.subscribe(), key.public, new Scope(path, instance, track));
-	const writer = net.createGroup(group);
+	const writer = net.createGroup(BigInt(group));
 	for (const { body, timestamp } of frames) {
 		const at = scale === undefined || timestamp == null ? undefined : new Time.Timestamp(timestamp, scale);
 		writer.writeFrame({ payload: unhex(body), timestamp: at });
@@ -79,7 +79,7 @@ for (const { track, timescale, frames } of input.js) {
 	for (let frame = await raw.readFrame(); frame; frame = await raw.readFrame()) {
 		bodies.push({ body: hex(frame.payload), timestamp: frame.timestamp?.value });
 	}
-	js.push({ track, group: raw.sequence, timescale, frames: bodies });
+	js.push({ track, group: Number(raw.sequence), timescale, frames: bodies });
 }
 
 process.stdout.write(JSON.stringify({ public: key.public.toString(), verified, instance: signed.instance, js }));

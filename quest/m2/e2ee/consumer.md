@@ -9,7 +9,7 @@ reinvent decryption and physical-name mapping.
 ## Plan
 
 Decided 2026-10-20 (maintainer): the shape is the moq-net consumer traits.
-`moq_e2ee::broadcast::Consumer` and its track and group consumers implement
+`moq_crypto::e2ee::broadcast::Consumer` and its track and group consumers implement
 them ([net-wrap](/quest/m2/net-wrap/README.md)), so a Rust player, the CLI,
 and `@moq/watch` open an encrypted broadcast as they open any other,
 because every reader already takes the traits. Kept in m2 (decided
@@ -29,7 +29,7 @@ What remains here:
 - Rust and JS only (decided 2026-10-20, maintainer): the e2ee publisher has
   no moq-ffi half either, so an FFI consumer waits for a quest that adds both.
 
-Public API: an e2ee consumer entry point in `moq-e2ee` and `@moq/e2ee`.
+Public API: an e2ee consumer entry point in `moq-crypto` and `@moq/crypto`.
 Wire: none.
 
 ## Required

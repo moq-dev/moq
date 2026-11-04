@@ -6,8 +6,8 @@ use crate::support;
 
 use std::net::UdpSocket;
 
+use moq_net::transport::poll::SendStream as _;
 use moq_uring::{Config, Error, Worker, quic, udp};
-use web_transport_trait::poll::{RecvStream as _, SendStream as _, Session as _};
 
 const PAYLOAD: usize = 512 * 1024;
 
@@ -22,11 +22,11 @@ fn worker() -> Option<Worker> {
 	}
 }
 
-async fn drain(recv: &mut quic::web::RecvStream) -> Vec<u8> {
+async fn drain(recv: &mut quic::web::recv::Stream) -> Vec<u8> {
 	let mut out = Vec::new();
 	let mut buf = [0u8; 64 * 1024];
 	loop {
-		match std::future::poll_fn(|cx| recv.poll_read(cx, &mut buf))
+		match kio::wait(|waiter| recv.poll_read(waiter, &mut buf))
 			.await
 			.expect("read")
 		{
@@ -36,14 +36,12 @@ async fn drain(recv: &mut quic::web::RecvStream) -> Vec<u8> {
 	}
 }
 
-async fn write_finish(send: &mut quic::web::SendStream, mut buf: &[u8]) {
+async fn write_finish(mut send: quic::web::send::Stream, mut buf: &[u8]) {
 	while !buf.is_empty() {
-		let n = std::future::poll_fn(|cx| send.poll_write(cx, buf))
-			.await
-			.expect("write");
+		let n = kio::wait(|waiter| send.poll_write(waiter, buf)).await.expect("write");
 		buf = &buf[n..];
 	}
-	send.finish().expect("finish");
+	drop(send.finish());
 }
 
 #[test]
@@ -62,7 +60,7 @@ fn echo_tokio_peer() {
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("socket");
 	let endpoint =
-		quic::Endpoint::new(socket, quic::endpoint::Config::default().with_server(server)).expect("endpoint");
+		quic::Endpoint::new(quic::endpoint::Config::default().with_server(server), socket).expect("endpoint");
 	let addr = endpoint.local_addr();
 	let payload: Vec<u8> = (0..PAYLOAD).map(|i| (i * 31 % 251) as u8).collect();
 	let expected = payload.clone();
@@ -85,7 +83,7 @@ fn echo_tokio_peer() {
 				.expect("connect");
 			let (mut send, mut recv) = session.open_bi(Default::default()).await.expect("open stream");
 			send.write_all(&payload[..]).await.expect("write");
-			send.finish().expect("finish");
+			drop(send.finish());
 			let echoed = recv.read_to_end(PAYLOAD + 1).await.expect("read");
 			done_tx.send(()).expect("notify server");
 			echoed
@@ -96,12 +94,12 @@ fn echo_tokio_peer() {
 		.block_on(async move {
 			let conn = endpoint.accept().await.expect("accept");
 			let request = quic::web::Request::accept(conn).await.expect("handshake");
-			let mut session = request.ok().await.expect("respond");
-			let (mut send, mut recv) = std::future::poll_fn(|cx| session.poll_accept_bi(cx))
+			let session = request.ok().await.expect("respond");
+			let (send, mut recv) = kio::wait(|waiter| session.poll_accept_bi(waiter))
 				.await
 				.expect("accept stream");
 			let payload = drain(&mut recv).await;
-			write_finish(&mut send, &payload).await;
+			write_finish(send, &payload).await;
 			done_rx.await.expect("peer received echo");
 		})
 		.expect("worker");

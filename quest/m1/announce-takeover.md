@@ -58,11 +58,17 @@ this quest removes the predecessor machinery and grows to [XL].
   `lite/announce.ts` and `lite/subscriber.ts`. Remove the takeover sections
   from `drafts/draft-lcurley-moq-lite.md`, `doc/concept/identity.md` and
   `doc/concept/moq-lite.md`.
-- **Inheriting the instance.** `request.route(options)` from
-  [One Route handle](/quest/m1/api-audit/route/handle.md) creates the
-  path's exact route under the prefix route's instance by default, and the
-  answer it gives the waiting request is that route's broadcast. A job
-  that serves a held broadcast through [serve](/quest/m1/api-audit/route/serve.md)
+- **Inheriting the instance.** Decided 2026-11-03 (maintainer, on
+  [moq-dev/moq#7770](https://github.com/moq-dev/moq/pull/7770)):
+  `request.route(options)` from
+  [One Route handle](/quest/m1/api-audit/route/handle.md) mints a fresh
+  instance by default, and ending a job leaves its prefix route open, with
+  no history of ended paths. Carrying the prefix route's instance onto the
+  path's exact route, so that the answer the waiting request gets is that
+  route's broadcast, is this quest's change, and it must keep those
+  properties: a restarted job still gets a fresh instance, and job
+  lifetimes stay independent without per-path history of ended jobs.
+  A job that serves a held broadcast through `Request::serve`
   never announces an exact route, so it needs none of this.
 - **One stream per path and instance.** A claim may answer a path under
   its instance only while that stream is live. Once the job's route ends,
@@ -126,8 +132,8 @@ separate from the identity rewrite of this Plan, which landed with
 - Reword "takeover" as an event or operation, in terms of identity
   continuity, in [moq-bench pins the instances it measures](/quest/m2/bench-epoch-pin.md)
   (Goal and Plan), [the HLS server follows each path once](/quest/m2/hls-follow-once.md)
-  (Goal and Tests), and [routes and announces](/quest/m1/cluster-routing/routes.md)
-  (around line 37, "the separately proven Takeover operation").
+  (Goal and Tests), and [lite-07 route wire](/quest/m1/cluster-routing/routes/wire.md)
+  (the wire sketch, "the separately proven Takeover operation").
 - Rewrite the EPOCH references in `drafts/draft-lcurley-moq-cluster.md` and
   `drafts/draft-lcurley-moq-epoch.md` in terms of IDENTITY.
 - Add a regression test where a publisher restart's new announcement
@@ -144,11 +150,11 @@ beyond [Instance and epoch](https://github.com/moq-dev/moq/pull/7489)'s fields.
 
 ## Required
 
-- [One Route handle](/quest/m1/api-audit/route/handle.md) - `request.route` creates the exact route under the claim's instance
+- [One Route handle](/quest/m1/api-audit/route/handle.md) - `request.route` creates the path's exact route, minting a fresh instance by default
 
 ## Related
 
 - [Listing and follow](/quest/m1/api-audit/route/events.md) - continuity shows up inside `follow`, not as an event
 - [Claim answer epochs](https://github.com/moq-dev/moq/pull/5678) - why a restarted job must never be stitched to its predecessor
 - [Retired requests](https://github.com/moq-dev/moq/pull/5294) - replacements never substitute content into held handles
-- [Routes and announces](/quest/m1/cluster-routing/routes.md) - the route layer whose ANNOUNCE_START layout carries the instance
+- [Routes and announces](/quest/m1/cluster-routing/routes/README.md) - the route layer whose ANNOUNCE_START layout carries the instance

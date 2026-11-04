@@ -22,27 +22,6 @@ pub struct MoqDimensions {
 	pub height: u32,
 }
 
-/// How far behind the live edge a decoder plays, the counterpart of `moq_net::track::Delay`.
-#[derive(Clone, Copy, Debug, uniffi::Record)]
-pub struct MoqDelay {
-	/// The target latency: the playout or jitter-buffer delay held behind the live edge, and
-	/// where a cold join starts. The subscription carries it too, which moq-lite-07 sends
-	/// upstream. A `min` past `max` starts at `max`, since the publisher serves nothing older.
-	pub min: std::time::Duration,
-	/// How far a group may fall behind the live edge before it is skipped, or null for no limit.
-	/// It bounds lateness only, never the start.
-	pub max: Option<std::time::Duration>,
-}
-
-impl From<MoqDelay> for moq_net::track::Delay {
-	fn from(delay: MoqDelay) -> Self {
-		Self {
-			min: Some(delay.min),
-			max: delay.max,
-		}
-	}
-}
-
 /// Where an audio or video decoder starts on a track that already holds groups.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, uniffi::Enum)]
 pub enum MoqDecodeStart {
@@ -275,19 +254,16 @@ pub struct MoqMediaFrame {
 	pub keyframe: bool,
 }
 
-/// A best-effort raw track datagram, as received.
-///
-/// Send one with [`append_datagram`](crate::producer::MoqTrackProducer::append_datagram), which
-/// takes a [`MoqFrame`] and assigns the sequence number for you.
+/// A datagram payload with its own sequence and optional timestamp.
 #[derive(uniffi::Record)]
 pub struct MoqDatagram {
-	/// Per-track sequence number, shared with groups.
+	/// The datagram track's own sequence number.
 	#[uniffi(default = 0)]
 	pub sequence: u64,
 	/// Presentation timestamp, or null on an untimed track, on both publish and receive.
 	#[uniffi(default = None)]
 	pub timestamp: Option<MoqTimestamp>,
-	/// Datagram payload, capped at 1200 bytes.
+	/// Datagram payload; keep it well below the path MTU so each hop can carry it.
 	pub payload: Vec<u8>,
 }
 
@@ -400,7 +376,47 @@ pub struct MoqVideoInit {
 	/// it. This track then sits one priority below it, so a bandwidth allocator funds the
 	/// lower rendition first.
 	#[uniffi(default = None)]
-	pub lower: Option<Arc<MoqMediaTrackProducer>>,
+	pub lower: Option<MoqMediaProducer>,
+}
+
+/// A single-track media producer of either kind, such as a rendition's [`lower`](MoqVideoInit::lower).
+#[derive(Clone, uniffi::Enum)]
+pub enum MoqMediaProducer {
+	/// Imports complete encoded frames.
+	Track {
+		/// The frame producer.
+		producer: Arc<MoqMediaTrackProducer>,
+	},
+	/// Imports a byte stream.
+	Stream {
+		/// The byte-stream producer.
+		producer: Arc<MoqMediaTrackStreamProducer>,
+	},
+}
+
+impl MoqMediaProducer {
+	/// The priority of the video track this producer publishes.
+	fn video_priority(&self) -> Result<i8, MoqError> {
+		match self {
+			Self::Track { producer } => {
+				let guard = producer.inner.lock().unwrap();
+				guard
+					.as_ref()
+					.ok_or(MoqError::Closed)?
+					.video
+					.ok_or_else(|| MoqError::Codec {
+						reason: "the lower rendition is not a video track".into(),
+					})
+			}
+			Self::Stream { producer } => Ok(producer
+				.inner
+				.lock()
+				.unwrap()
+				.as_ref()
+				.ok_or(MoqError::Closed)?
+				.priority),
+		}
+	}
 }
 
 /// Shares one source's timestamp offset across containers without keeping its broadcast open.
@@ -571,12 +587,7 @@ impl MoqVideoInit {
 			out.hint = hint.into();
 		}
 		if let Some(lower) = self.lower {
-			let guard = lower.inner.lock().unwrap();
-			let below = guard.as_ref().ok_or(MoqError::Closed)?;
-			let priority = below.video.ok_or_else(|| MoqError::Codec {
-				reason: "the lower rendition is not a video track".into(),
-			})?;
-			out.priority = priority.saturating_sub(1);
+			out.priority = lower.video_priority()?.saturating_sub(1);
 		}
 		Ok(out)
 	}
@@ -831,7 +842,7 @@ impl MoqMediaCatalogProducer {
 	/// Set an application catalog section from JSON, refusing reserved section names.
 	///
 	/// `json` is any JSON document. Errors with [`MoqError::Json`] if it doesn't parse, or with
-	/// the reserved-section error if `name` is a HANG root (`video`, `audio`, `text`, `archive`, `clock`, `json`, `binary`, or
+	/// the reserved-section error if `name` is a HANG root (`video`, `audio`, `media`, `text`, `archive`, `clock`, `json`, `binary`, or
 	/// retired `timeline`) or an MSF root (`version`, `generatedAt`, `isComplete`, `tracks`, or
 	/// `initDataList`).
 	pub fn set_section(&self, name: String, json: String) -> Result<(), MoqError> {
@@ -891,6 +902,8 @@ struct ContainerProducer {
 /// A byte-stream importer for one codec track, where frame boundaries are inferred.
 struct MediaStreamProducer {
 	import: Box<moq_mux::import::TrackStream>,
+	/// The video track's priority, which a higher rung takes one below.
+	priority: i8,
 }
 
 /// Imports a container into a broadcast, from chunks split anywhere such as a raw byte stream.
@@ -1065,6 +1078,7 @@ impl MoqMediaTrackStreamProducer {
 		let _guard = crate::ffi::enter();
 		let init = init.resolve()?;
 		broadcast.with_state(|state| {
+			let priority = init.priority;
 			let request = target.resolve(&state.broadcast, &init.format)?;
 
 			let import =
@@ -1077,6 +1091,7 @@ impl MoqMediaTrackStreamProducer {
 			state.children.adopt(Arc::new(MoqMediaTrackStreamProducer {
 				inner: std::sync::Mutex::new(Some(MediaStreamProducer {
 					import: Box::new(import),
+					priority,
 				})),
 				children: state.children.clone(),
 			}))
@@ -1173,8 +1188,8 @@ impl MoqMediaTrackProducer {
 	///
 	/// Audio has no boundary of its own (every packet is independently decodable), so this is the
 	/// only thing that gives it groups: call it after every frame for one group (one QUIC stream)
-	/// the relay forwards without waiting, or at a segment cadence to align with video for
-	/// HLS/DASH. Video groups at its own keyframes and needs this only to override that.
+	/// the relay forwards without waiting, or less often to batch frames into fewer groups. Video
+	/// groups at its own keyframes and needs this only to override that.
 	pub fn cut(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
@@ -1319,6 +1334,23 @@ impl MoqMediaTrackStreamProducer {
 		let media = guard.as_mut().ok_or(MoqError::Closed)?;
 		media.import.decode(&payload).map_err(|err| MoqError::Codec {
 			reason: format!("decode failed: {err}"),
+		})?;
+		Ok(())
+	}
+
+	/// Stop or resume publishing this rendition, advertised as its catalog `enabled`.
+	///
+	/// Disable it when its sender stops for lack of bandwidth (a
+	/// [`MoqRateTarget::Disabled`](crate::bandwidth::MoqRateTarget::Disabled)): this marks a
+	/// discontinuity and drops every access unit written until it is enabled again, so the
+	/// stream may keep flowing. Enabled again, it resumes, and advertises itself enabled, at
+	/// the next keyframe in the stream.
+	pub fn set_enabled(&self, enabled: bool) -> Result<(), MoqError> {
+		let _guard = crate::ffi::enter();
+		let mut guard = self.inner.lock().unwrap();
+		let media = guard.as_mut().ok_or(MoqError::Closed)?;
+		media.import.set_enabled(enabled).map_err(|err| MoqError::Codec {
+			reason: format!("set enabled failed: {err}"),
 		})?;
 		Ok(())
 	}
@@ -1755,7 +1787,7 @@ impl MoqMediaGroupConsumer {
 	/// Pair it with [`MoqTrackConsumer::recv_group`](crate::consumer::MoqTrackConsumer::recv_group)
 	/// to read media in arrival order: frame timestamps are container media time, not the
 	/// transport's. Which groups arrive, and how long a stalled one stays readable, is the
-	/// subscription's `max_delay`. Takes over `group`, whose handle is closed afterward; errors
+	/// subscription's `delay.max`. Takes over `group`, whose handle is closed afterward; errors
 	/// if it has already read a frame.
 	#[uniffi::constructor]
 	pub fn new(group: &MoqGroupConsumer, container: MoqContainer) -> Result<Arc<Self>, MoqError> {

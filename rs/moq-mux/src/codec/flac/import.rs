@@ -14,7 +14,7 @@ use crate::container::Frame;
 /// keyframe (the rest extend it): frames accumulate into the current group until the caller
 /// [`cut`](Self::cut)s or [`seek`](Self::seek)s. The [`import::Track`](crate::import::Track) facade
 /// passes that through, so boundaries are the caller's either way: cut per frame for one group per
-/// frame, or at a segment cadence to align with video.
+/// frame, or less often to batch frames into fewer groups.
 pub struct Import {
 	track: crate::container::Producer<crate::catalog::hang::Container, hang::catalog::AudioConfig>,
 }

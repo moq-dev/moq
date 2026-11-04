@@ -938,7 +938,7 @@ mod cache_duration_tests {
 	use std::time::Duration;
 
 	/// FETCH_OK carries MAX_CACHE_DURATION where SUBSCRIBE_OK does, so a track fetched with no
-	/// subscription still learns its retention window.
+	/// subscription still learns its max age.
 	#[test]
 	fn max_cache_duration_is_read_in_each_drafts_field() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {

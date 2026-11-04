@@ -5,6 +5,45 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### Built-in ACME is removed ([#7803](https://github.com/moq-dev/moq/pull/7803))
+
+Remove the `acme` Cargo feature, `[acme]` table, `--acme-*` flags, and `MOQ_ACME_*` variables.
+In Rust, remove `Config::acme` and uses of `moq_relay::acme::Config`.
+The removed flags, TOML table, and environment variables are refused as unknown settings.
+Have an external certificate manager issue and renew the certificate, then set `listen.tls.cert` / `key` and, for HTTPS, `web.https.cert` / `key` to its PEM files; both listeners reload changes.
+For local development, `listen.tls.generate` still creates self-signed certificates.
+
+The NixOS module also removes `services.moq-relay.acme.*`: use `services.moq-relay.tls.certs` for externally managed certificates, or `tls.generate` for development.
+If you used `acme.httpsPort`, configure the HTTPS listener separately through the service's `MOQ_WEB_HTTPS_LISTEN`, `MOQ_WEB_HTTPS_CERT`, and `MOQ_WEB_HTTPS_KEY` environment variables, and grant `CAP_NET_BIND_SERVICE` if its port is below 1024.
+
+### `/nodes` lists peers that are down ([#7776](https://github.com/moq-dev/moq/pull/7776))
+
+The internal `/nodes` endpoint lists every configured outbound peer, not only those with a live session.
+A peer that is connecting, retrying, or has never connected has an empty `connections` array, so tooling that counts entries as live peers must count those with a nonempty `connections` instead.
+Each connection adds `transport`, and each peer adds `last_connected_seconds_ago`, null until its first successful connect.
+A LAN peer is named by its mDNS identity instead of the first address dialed, whose path carried its credential.
+
+### Stats are configured in `cluster::Options` ([#7673](https://github.com/moq-dev/moq/pull/7673))
+
+`Cluster::with_stats` is removed, and `stats::Config::build` is no longer public. Pass the stats config to `Cluster::new` instead, which builds the producer on the cluster's origin and runs its publisher in the returned `Driver`:
+
+```rust
+// Before
+let (cluster, driver) = Cluster::new(options)?;
+let (stats, publisher) = stats_config.build(cluster.origin.clone())?;
+let cluster = cluster.with_stats(stats, publisher);
+
+// After
+let (cluster, driver) = Cluster::new(options.with_stats(stats_config))?;
+```
+
+Read the registry from `cluster.stats`; `Relay::stats` still returns the producer. Publishing runs only while the driver is polled, which `Relay::run` does, and stops when the driver drops. Building stats needs no Tokio runtime, and an invalid stats config now fails `Cluster::new`.
+
+### The iroh transport is removed ([#7345](https://github.com/moq-dev/moq/pull/7345))
+
+The `iroh` feature, the `[iroh]` table, the `--iroh-*` flags, and `Cluster::with_iroh` are gone.
+An `[iroh]` table is refused as an unknown field, and a `MOQ_IROH_*` variable stops startup like any other unknown `MOQ_*` variable: remove them, and serve clients and cluster peers over QUIC or WebTransport.
+
 ### Smaller default receive windows ([#7624](https://github.com/moq-dev/moq/pull/7624))
 
 `[quic]` defaults to a 4 MiB `receive_window`, a 1 MiB `stream_receive_window`, and a 4 MiB `send_window`, down from 128 MiB, 4 MiB, and 16 MiB, and the smallest `receive_window` accepted here or in `[limits.peer.quic]` is 1 MiB instead of about 64 MiB.
@@ -131,7 +170,7 @@ Add `--quic-keylog` (`MOQ_QUIC_KEYLOG`, `[quic] keylog = true`) to capture them;
 ### Cluster dials build from a template (#5674)
 
 `Relay::client()` and `Cluster::with_client` are removed.
-Give the cluster `with_connect(connect, quic)`, plus `with_iroh(endpoint)` for `iroh://` peers, and build your own `moq_tokio::Client` for other outbound dials.
+Give the cluster `with_connect(connect, quic)`, and build your own `moq_tokio::Client` for other outbound dials.
 
 ### `max_streams = 0` is refused (#5871)
 
@@ -153,11 +192,6 @@ Set it to keep the old placement.
 [runtime]
 pin = true
 ```
-
-### iroh is opt-in (#5223)
-
-The default build has no iroh listener and no `--iroh-*` flags or `[iroh]` table.
-Build with `--features iroh` to keep it.
 
 ### The `noq` cargo feature is `quic`
 

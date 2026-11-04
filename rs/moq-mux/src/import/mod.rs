@@ -15,7 +15,7 @@
 //! catalog rendition through their container producer.
 //!
 //! A single-codec importer takes a track the caller mints, typically
-//! `broadcast.unique_track(suffix, catalog.track_info())`, so the retention the catalog
+//! `broadcast.unique_track(suffix, catalog.track_info())`, so the max age the catalog
 //! declares reaches the track.
 
 mod container;
@@ -60,10 +60,7 @@ mod tests {
 	/// frees while every published track is still held.
 	fn retire(sources: usize, import: Import) -> isize {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		// No HLS records: retiring them frees their compressed groups' encoders, which the
-		// catalog owns rather than the importer.
-		let config = crate::catalog::Config::default().with_hls(None);
-		let catalog = crate::catalog::Producer::new(&mut broadcast, config).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let consumer = broadcast.consume();
 
 		let finished: Vec<Finished> = (0..sources).map(|_| import(&broadcast, &catalog)).collect();

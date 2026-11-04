@@ -2,6 +2,7 @@
 """Exercise pre-setup selection with real diffs and no development toolchain."""
 
 import os
+import select
 import shutil
 import statistics
 import subprocess
@@ -595,13 +596,19 @@ esac
                 started.read_text()
                 # A job timeout can kill the run without a signal it traps, so
                 # a buffered lane names its running phase before the phase ends.
-                os.set_blocking(run.stderr.fileno(), False)
-                live = (run.stderr.read() or b"").decode()
-                if jobs != "1":
-                    self.assertIn("ci: check rs started", live)
-                run.terminate()
-                os.set_blocking(run.stderr.fileno(), True)
-                stderr = live + run.communicate(timeout=60)[1].decode()
+                live = b""
+                try:
+                    if jobs != "1":
+                        deadline = time.monotonic() + 60
+                        while b"ci: check rs started\n" not in live:
+                            readable, _, _ = select.select([run.stderr], [], [], max(0, deadline - time.monotonic()))
+                            self.assertTrue(readable, live.decode(errors="replace"))
+                            chunk = os.read(run.stderr.fileno(), 4096)
+                            self.assertTrue(chunk, live.decode(errors="replace"))
+                            live += chunk
+                finally:
+                    run.terminate()
+                    stderr = (live + run.communicate(timeout=60)[1]).decode()
                 self.assertEqual(run.returncode, 143, stderr)
                 self.assertRegex(stderr, r"\d+  check rs \(cancelled\)")
                 with self.assertRaises(ProcessLookupError):

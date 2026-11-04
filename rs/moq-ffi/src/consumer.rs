@@ -16,27 +16,59 @@ fn raw_frame(frame: moq_net::frame::Frame) -> MoqFrame {
 	}
 }
 
+/// How far behind the live edge a subscriber plays, mirroring [`moq_net::track::Delay`]: where
+/// it starts, and how late it may fall.
+///
+/// [`moq_subscription_defaults`] carries moq-net's default, zero for both. Uniffi can't default
+/// a duration, so Kotlin and Swift name both fields, the Python, Go, and Dart wrappers default
+/// an omitted one to zero, and a bare C or C++ record leaves both unset.
+#[derive(Clone, Copy, Debug, uniffi::Record)]
+pub struct MoqDelay {
+	/// The target latency: the playout or jitter-buffer delay held behind the live edge, and
+	/// where a cold join starts, or null to leave it unstated. A media consumer plays an
+	/// unstated minimum as zero, while the subscription keeps it unstated, so it never pulls
+	/// the aggregate across subscribers to zero. moq-lite-07 sends it upstream. A `min` past
+	/// `max` starts at `max`, since the publisher serves nothing older.
+	pub min: Option<Duration>,
+	/// How far a non-latest group may fall behind the live edge before it is skipped, or null
+	/// for no subscriber limit, leaving the publisher's max age alone to bound it. `0` skips
+	/// immediately; a larger value tolerates that much reordering. It bounds lateness only,
+	/// never the start.
+	///
+	/// Enforced both by the publisher's cache (sent on the wire) and by any local buffering,
+	/// such as [`MoqMediaTrackConsumer`]'s jitter buffer. It caps every range.
+	pub max: Option<Duration>,
+}
+
+impl From<MoqDelay> for moq_net::track::Delay {
+	fn from(delay: MoqDelay) -> Self {
+		Self::default().with_min(delay.min).with_max(delay.max)
+	}
+}
+
+impl From<moq_net::track::Delay> for MoqDelay {
+	fn from(delay: moq_net::track::Delay) -> Self {
+		Self {
+			min: delay.min,
+			max: delay.max,
+		}
+	}
+}
+
 /// Subscriber-side delivery preferences, mirroring [`moq_net::track::Subscription`].
 ///
-/// Start from [`moq_subscription_defaults`] for moq-net's defaults (priority 0, a `max_delay`
-/// of 0, everything still fresh, newest first) and change the fields you care about. Kotlin and
-/// Swift make a record built field by field name `max_delay`; Dart, Go, and C can still omit it,
-/// which means no subscriber limit.
+/// Start from [`moq_subscription_defaults`] for moq-net's defaults (priority 0, a zero
+/// `delay`, everything still fresh, newest first) and change the fields you care about.
 #[derive(Clone, uniffi::Record)]
 pub struct MoqSubscription {
 	/// Delivery priority; higher values preempt lower ones under bandwidth contention.
 	/// The default 0 is the midpoint.
 	#[uniffi(default = 0)]
 	pub priority: i8,
-	/// Maximum age of a non-latest group before it is skipped.
-	/// `0` skips immediately; a larger value tolerates that much reordering; null sets no
-	/// subscriber limit and leaves the publisher's max age alone to bound it. Required,
-	/// since uniffi can't default a duration to `0`.
-	///
-	/// Enforced both by the publisher's cache (sent on the wire) and by any local
-	/// buffering, such as [`MoqMediaTrackConsumer`]'s jitter buffer. It caps every range.
-	pub max_delay: Option<Duration>,
-	/// The spans of the track to deliver, or null for everything `max_delay` still
+	/// How far behind the live edge this subscriber plays: where a cold join starts, and how
+	/// late a non-latest group may fall before it is skipped.
+	pub delay: MoqDelay,
+	/// The spans of the track to deliver, or null for everything `delay.max` still
 	/// considers fresh. An empty list asks for nothing.
 	///
 	/// A request to the publisher, aggregated across every subscriber, and this
@@ -48,7 +80,8 @@ pub struct MoqSubscription {
 	pub order: Option<MoqOrder>,
 }
 
-/// A subscription with moq-net's defaults, which skips a superseded group at once.
+/// A subscription with moq-net's defaults, which starts at the newest group and skips a
+/// superseded group at once.
 ///
 /// A null subscription argument means the same; build from this one to change a field.
 #[uniffi::export]
@@ -56,7 +89,7 @@ pub fn moq_subscription_defaults() -> MoqSubscription {
 	let defaults = moq_net::track::Subscription::default();
 	MoqSubscription {
 		priority: defaults.priority,
-		max_delay: defaults.delay.max,
+		delay: defaults.delay.into(),
 		ranges: None,
 		order: None,
 	}
@@ -153,7 +186,7 @@ pub struct MoqFetchGroupOptions {
 	/// The default 0 is the midpoint.
 	#[uniffi(default = 0)]
 	pub priority: i8,
-	/// Maximum age behind the live edge; null uses publisher retention alone.
+	/// Maximum age behind the live edge; null uses the publisher's max age alone.
 	#[uniffi(default = None)]
 	pub max_delay: Option<Duration>,
 }
@@ -174,7 +207,7 @@ impl TryFrom<MoqSubscription> for moq_net::track::Subscription {
 	fn try_from(s: MoqSubscription) -> Result<Self, MoqError> {
 		let mut subscription = moq_net::track::Subscription::default()
 			.with_priority(s.priority)
-			.with_delay(moq_net::track::Delay::default().with_max(s.max_delay));
+			.with_delay(s.delay.into());
 		if let Some(ranges) = s.ranges {
 			subscription = subscription.with_ranges(
 				ranges
@@ -358,7 +391,7 @@ impl MoqBroadcastConsumer {
 
 pub(crate) fn map_fetch_error(err: moq_net::Error) -> MoqError {
 	match err {
-		moq_net::Error::NotFound | moq_net::Error::NotFetchable => MoqError::NotFound,
+		moq_net::Error::NotFound => MoqError::NotFound,
 		moq_net::Error::Unsupported | moq_net::Error::Version => MoqError::Unsupported,
 		err => err.into(),
 	}
@@ -372,7 +405,6 @@ pub(crate) fn map_fetch_error(err: moq_net::Error) -> MoqError {
 /// binding can't express in its type system, so the handle commits on the first group
 /// read instead: whichever group cursor a caller reaches for first is the one this
 /// track keeps, and reaching for the other afterwards is [`MoqError::AlreadyCommitted`].
-/// Datagrams are a separate cursor on either handle, so reading them never commits.
 enum Cursor {
 	/// No group read has happened yet; the track can still commit either way.
 	Uncommitted(moq_net::track::Subscriber),
@@ -492,35 +524,12 @@ impl TrackInner {
 			}
 		}
 	}
-
-	fn poll_recv_datagram(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<MoqDatagram>, MoqError>> {
-		// Datagrams are unordered on either handle; reading them never commits the
-		// group cursor.
-		let poll = match &mut self.track {
-			Cursor::Uncommitted(track) | Cursor::Arrival(track) => track.poll_recv_datagram(waiter),
-			Cursor::Ordered(ordered) => ordered.track.poll_recv_datagram(waiter),
-			// Poisoned mid-conversion; see `arrival`. Datagrams never commit a cursor,
-			// so this is the only way they can fail on a live handle.
-			Cursor::Converting => return Poll::Ready(Err(MoqError::Closed)),
-		};
-		let datagram = match ready!(poll) {
-			Ok(Some(datagram)) => datagram,
-			Ok(None) => return Poll::Ready(Ok(None)),
-			Err(err) => return Poll::Ready(Err(err.into())),
-		};
-		Poll::Ready(Ok(Some(MoqDatagram {
-			sequence: datagram.sequence,
-			timestamp: datagram.timestamp.map(Into::into),
-			payload: datagram.payload.to_vec(),
-		})))
-	}
 }
 
-/// A subscribed track whose groups, frames, or datagrams can be read.
+/// A subscribed stream track whose groups and frames can be read.
 #[derive(uniffi::Object)]
 pub struct MoqTrackConsumer {
-	/// Every read polls this; none holds it across a wait, so a datagram read progresses while
-	/// a group read is parked, and vice versa.
+	/// Reads poll in place without holding a lock across a wait.
 	reads: Polled<TrackInner>,
 	control: moq_net::track::Control,
 	info: moq_net::track::Info,
@@ -546,7 +555,7 @@ impl MoqTrackConsumer {
 	/// Hand the subscription to a typed reader (a JSON consumer, say), closing this handle.
 	///
 	/// Errors with [`MoqError::AlreadyCommitted`] once a group read has started, since the reader
-	/// would miss whatever that read consumed. A datagram read still parked resolves `Cancelled`.
+	/// would miss whatever that read consumed.
 	pub(crate) fn take(&self) -> Result<(moq_net::track::Subscriber, Background), MoqError> {
 		let inner = self
 			.reads
@@ -575,7 +584,7 @@ impl MoqTrackConsumer {
 	///
 	/// Groups are returned as they arrive on the wire, which may be out of sequence
 	/// order (e.g. if a later group lands before an earlier one on a separate stream).
-	/// One that drifts further behind the live edge than the subscription's `max_delay`
+	/// One that drifts further behind the live edge than the subscription's `delay.max`
 	/// is skipped, or ends its pending read if already returned; raise it to keep stalled groups.
 	///
 	/// The first call commits this track to arrival order: sequence-order reads
@@ -614,17 +623,6 @@ impl MoqTrackConsumer {
 		Ok(frame.map(raw_frame))
 	}
 
-	/// Receive the next best-effort datagram in arrival order.
-	///
-	/// Returns `None` when the track ends. Datagram delivery is unavailable over
-	/// pre-lite-05 moq-lite and stream-only transports.
-	/// Datagrams are a separate cursor from groups, so this works alongside either
-	/// group order, never commits the track to one, and progresses while a group
-	/// read is pending.
-	pub async fn recv_datagram(&self) -> Result<Option<MoqDatagram>, MoqError> {
-		self.reads.wait(|inner, waiter| inner.poll_recv_datagram(waiter)).await
-	}
-
 	/// Return the publisher-side track properties learned during subscription.
 	pub fn info(&self) -> MoqTrackInfo {
 		MoqTrackInfo::from(&self.info)
@@ -636,10 +634,12 @@ impl MoqTrackConsumer {
 	/// that point. Errors on a time anchor the track can't serve, leaving the
 	/// preferences as they were.
 	pub fn update(&self, subscription: MoqSubscription) -> Result<(), MoqError> {
-		match self.control.update(subscription.try_into()?) {
-			Ok(()) | Err(moq_net::Error::Closed) => Ok(()),
-			Err(err) => Err(err.into()),
+		let subscription: moq_net::track::Subscription = subscription.try_into()?;
+		match self.control.update(subscription) {
+			Ok(()) | Err(moq_net::Error::Closed) => {}
+			Err(err) => return Err(err.into()),
 		}
+		Ok(())
 	}
 
 	/// Cancel all current and future reads.

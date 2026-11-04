@@ -32,8 +32,7 @@ Decided 2026-11-01 (maintainer, in `/quest-plan`):
     of those rules carry a datagram exception.
 - **Own request.** ✅ A datagram track is subscribed through its own lite-07
   request, not SUBSCRIBE, and that request carries only a priority. ✅ It is
-  live from now: no start, end, order, or `Delay`
-  ([Subscription delay](/quest/m1/subscription-delay.md) exempts it). An update changes only
+  live from now: no start, end, order, or `Delay`. An update changes only
   the priority. A datagram still waits behind higher-priority traffic.
 - **No group terminology.** ✅ A datagram carries a sequence number and a
   timestamp, with no group. The sequence is the datagram track's own, not
@@ -62,29 +61,67 @@ Decided 2026-11-01 (maintainer, in `/quest-plan`):
   - Outbound, a datagram track sends only OBJECT_DATAGRAM with object ID 0.
 - **Archive.** ✅ moq-archive skips datagram tracks. A datagram track is
   live-only, and an archive's playback doesn't include it.
+- **Old versions carry both kinds.** ✅ Decided 2026-11-03 (maintainer, on
+  [moq-dev/moq#7752](https://github.com/moq-dev/moq/pull/7752)): "carry both
+  on old versions, like moq-transport. Ignore duplicates because in practice,
+  only one was being used anyway."
+  - A lite-05/06 SUBSCRIBE for a name carries its stream track's groups and
+    its datagram track's datagrams, as one moq-transport subscription does. A
+    name with only a datagram track is served from it alone.
+  - A subscriber keeps the kind it asked for. One upstream SUBSCRIBE serves
+    readers of both kinds: the stream track's subscription feeds the name's
+    datagram track, so a relay between old peers carries datagrams without a
+    second subscription.
+  - No dedup: a name using both kinds can deliver a datagram to an old
+    subscriber that also holds a group of the same sequence.
+  - Reason: lite-05/06 are the default connections, and moq-ffi/moq-c publish
+    every raw track's datagrams beside it, so serving a name only one kind
+    stopped their datagrams on the default path.
+- **Old-version lookup.** ✅ Decided 2026-11-04 (maintainer, for
+  [moq-dev/moq#7847](https://github.com/moq-dev/moq/pull/7847)): change
+  Rust's lite-05/06 on-demand lookup to discover datagrams without waiting
+  for a stream-handler answer, keeping the independent binding request API.
+  Not chosen: requiring stream handlers to reject missing names, with a
+  not-found rejection added to the bindings.
+  - A published stream track still serves the name, with its datagram track
+    beside it. Otherwise a local datagram track answers as soon as its
+    handler does. Of a name whose two kinds are both requested on demand,
+    the first answer serves it.
+  - A session's broadcast is asked for datagrams only once its stream track
+    is not found: an old session answers a datagram request by subscribing to
+    the stream track, which a fetch-only or query-only relay must not do.
+  - Reason: a stream handler need not answer a name it doesn't serve, and
+    the bindings' rejection carries only an application error.
 - **Version.** ✅ lite-07, before it is finalized.
   [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) requires this epic.
   lite-01..06 keep today's group datagrams.
 
-Not settled by the maintainer, so the first child decides it and records why:
-the datagram request's answer carries the track's timescale and
-compression, as TRACK_INFO does for a stream track.
+Decided by the Rust child ([moq-dev/moq#7752](https://github.com/moq-dev/moq/pull/7752)),
+not the maintainer, so open to revisiting:
 
-This README owns the work no child owns:
+- **The answer.** The lite-07 request (Datagrams Stream 0x9: DATAGRAMS, then
+  DATAGRAMS_UPDATE) is answered with DATAGRAMS_INFO, carrying the publisher
+  priority and the timescale, and no compression: a datagram track is never
+  compressed. Why: a subscriber needs the timescale to read a datagram (its
+  Timestamp is present only on a timed track), so the answer must carry it,
+  and a separate TRACK lookup would need a kind signal TRACK does not have. A
+  payload under 1200 bytes, compressed alone with a fresh window, saves little,
+  while compression would cost every datagram an Inflated Size and a decoder.
+- **Timestamp on a `Timescale` 0 track.** The datagram carries none, and its
+  Sequence stands in for its time. Why: it mirrors the
+  [model](/quest/m1/time-addressing/model.md)'s rule that a scale-less frame's
+  timestamp is its group's key, since a datagram's address is its sequence.
+  Until that model lands, Rust's datagram writes take `Option<Timestamp>` like
+  frame writes do (`None` on an untimed track), and the model quest converts
+  both.
 
-- the Rust-JS interop test of a datagram track on lite-07, direct and
-  through a relay;
-- rewriting the Datagrams section of `doc/concept/moq-lite.md`.
-
-The draft's own Datagrams section changes with the
-[Rust child](/quest/m1/datagram-tracks/rust.md).
+This README owns the work no child owns: the Rust-JS interop test of a
+datagram track on lite-07, direct and through a relay.
 
 ## Required
 
-- [Rust datagram tracks](/quest/m1/datagram-tracks/rust.md) - Rust model types, the lite-07 datagram request and body, the draft, the relay, and moq-archive skipping datagram tracks
 - [JS datagram tracks](/quest/m1/datagram-tracks/js.md) - `@moq/net` datagram types and the lite-07 datagram request
 - [moq-transport datagram tracks](/quest/m1/datagram-tracks/ietf.md) - Rust and JS map a datagram track to SUBSCRIBE and OBJECT_DATAGRAM with object ID 0, keeping the requested kind
-- [Bindings datagram tracks](/quest/m1/datagram-tracks/bindings.md) - moq-ffi, moq-c, and every wrapper expose the separate datagram types
 
 ## Related
 

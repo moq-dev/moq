@@ -68,7 +68,7 @@ It uses `quest review` to have the other vendor's model review against the PR's 
 
 The PR body's `## Review` section records the reviewer harness, model and effort, reviewed head SHA, and each finding's disposition, or a skip and its reason when the author judges the change too trivial to review.
 A record naming the head being merged counts as the required review when the PR's author has write access to the repository.
-Otherwise, or if the record is missing or stale, the merging session checks out the head and runs `/quest-review`, following `quest guide`'s rules for untrusted heads and review exemptions.
+Otherwise, or if the record is missing or stale, the merging session checks out the head and runs `/quest-review`, following `quest context`'s rules for untrusted heads and review exemptions.
 
 Address online reviewers' findings already posted on the head when merging; never wait for or request an online review.
 For each local or online finding:
@@ -83,7 +83,7 @@ Focus on the core problem, offering a potential solution only if it's obvious.
 
 # Forks
 
-`rs/moq-quic` is our hard fork of quinn, the QUIC stack MoQ builds on; iroh keeps upstream noq.
+`rs/moq-quic` is our hard fork of quinn, the QUIC stack MoQ builds on.
 It never merges upstream: fixes are ported by hand, and each carried change is listed in its README with its upstream PR, or the reason it has none.
 For an advisory against Quinn, follow the advisory triage in [`rs/moq-quic/README.md`](rs/moq-quic/README.md).
 

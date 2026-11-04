@@ -239,7 +239,7 @@ pub mod poll {
 
 	/// A transport session, shared by reference between the tasks that use it.
 	///
-	/// Every operation takes `&self` and keeps no per-caller progress between polls: the
+	/// Every session operation takes `&self` and keeps no per-caller progress between polls: the
 	/// caller owns the [`kio::Waiter`] it parks, so an abandoned wait leaves nothing behind.
 	/// Share a session with [`Arc`](std::sync::Arc) rather than cloning it. Poll operations
 	/// never borrow caller buffers between calls, and shared resources must not be held
@@ -280,8 +280,8 @@ pub mod poll {
 		///
 		/// `None` refuses the request before opening a stream. `Pending` means the stream
 		/// already has credit but its transport header is waiting for send capacity.
-		/// Native QUIC and qmux implement this admission check. Iroh retains its waiting
-		/// open behavior, and browser-backed sessions retain their browser's behavior.
+		/// Native QUIC and qmux implement this admission check; browser-backed sessions
+		/// retain their browser's behavior.
 		fn poll_open_request(
 			&self,
 			waiter: &kio::Waiter,
@@ -697,8 +697,7 @@ pub mod poll {
 		/// Set the priority within the stream's send group, or session-wide when ungrouped.
 		///
 		/// Streams with higher values will be sent first, but are not guaranteed to
-		/// arrive first. This matches the W3C WebTransport `sendOrder` convention (and
-		/// quinn's scheduler).
+		/// arrive first. This matches the W3C WebTransport `sendOrder` convention.
 		///
 		/// Backends with a narrower priority saturate or approximate it, so treat the
 		/// ordering as best-effort.
@@ -713,8 +712,8 @@ pub mod poll {
 		/// [`poll_closed`](Self::poll_closed) should resolve when the FIN is acknowledged
 		/// by the peer.
 		///
-		/// NOTE: Quinn implicitly calls this on Drop, but it's a common footgun.
-		/// Implementations SHOULD [`reset`](Self::reset) on Drop instead.
+		/// Dropping an unfinished stream must [`reset`](Self::reset) it, so the peer cannot
+		/// mistake truncated data for a complete stream.
 		fn finish(&mut self) -> Result<(), Self::Error>;
 
 		/// Immediately closes the stream and discards any remaining data.
@@ -723,7 +722,7 @@ pub mod poll {
 		/// The peer may not receive the reset code if the stream is already closed.
 		///
 		/// Takes `&mut self` rather than `self` even though it is terminal, so a caller
-		/// can still [`poll_closed`](Self::poll_closed) afterwards to await the peer ,
+		/// can still [`poll_closed`](Self::poll_closed) afterwards to await the peer,
 		/// and so it matches [`finish`](Self::finish), which must not consume the stream
 		/// for exactly that reason.
 		fn reset(&mut self, code: u32);

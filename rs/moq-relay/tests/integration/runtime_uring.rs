@@ -1118,8 +1118,8 @@ async fn uring_workers_offer_the_configured_extensions() {
 #[cfg(feature = "quic")]
 #[test]
 fn uring_workers_bound_stalled_handshakes() {
+	use moq_net::transport::Error as _;
 	use moq_tokio::quic::{driver, web};
-	use web_transport_trait::Error as _;
 
 	const LISTEN: Duration = Duration::from_millis(200);
 

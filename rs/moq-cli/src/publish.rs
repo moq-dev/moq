@@ -331,7 +331,7 @@ enum Source {
 		broadcast: moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer,
 		video: Option<moq_video::encode::Capture>,
-		audio: Option<moq_audio::encode::Capture>,
+		audio: Option<(moq_audio::capture::Config, moq_audio::encode::Options, bool)>,
 		/// Withholds the catalog until [`Publish::run`] starts the encoders, so the `stats` and
 		/// `echo` sections set before then ride the first catalog rather than an empty one.
 		gate: moq_mux::catalog::Reserved,
@@ -690,9 +690,23 @@ impl Publish {
 				};
 				let audio_fut = async move {
 					match audio {
-						Some(options) => moq_audio::encode::publish_capture(broadcast, catalog, options)
-							.await
-							.map_err(anyhow::Error::from),
+						Some((config, encode, on_demand)) => {
+							let capture = moq_audio::capture::Producer::open(config).await?;
+							let mut options = moq_audio::encode::Capture::new(capture.consume());
+							options.encode = encode;
+							options.on_demand = on_demand;
+							let (_control, driver) = moq_audio::encode::Control::new(broadcast, catalog, options)?;
+							let mut publish = std::pin::pin!(driver.run());
+							tokio::select! {
+								result = capture.run() => {
+									// Let the encoder serve its retained audio, then end its
+									// track with the source error, before its future is dropped.
+									let published = publish.await;
+									result.and(published).map_err(anyhow::Error::from)
+								}
+								result = &mut publish => result.map_err(anyhow::Error::from),
+							}
+						}
 						None => Ok(()),
 					}
 				};
@@ -1159,12 +1173,15 @@ impl CaptureArgs {
 	}
 
 	/// The audio counterpart to [`video_capture`](Self::video_capture).
-	fn audio_capture(&self, bandwidth: moq_net::bandwidth::Allocator) -> moq_audio::encode::Capture {
-		let mut options = moq_audio::encode::Capture::default();
-		options.capture = self.audio_config();
-		options.encode = self.audio_encode(bandwidth);
-		options.on_demand = self.audio == Mode::Demand;
-		options
+	fn audio_capture(
+		&self,
+		bandwidth: moq_net::bandwidth::Allocator,
+	) -> (moq_audio::capture::Config, moq_audio::encode::Options, bool) {
+		(
+			self.audio_config(),
+			self.audio_encode(bandwidth),
+			self.audio == Mode::Demand,
+		)
 	}
 }
 
@@ -1211,7 +1228,7 @@ pub(crate) mod tests {
 
 		let args = capture_args(&[]);
 		assert!(!args.video_capture(Allocator::unlimited()).unwrap().on_demand);
-		assert!(args.audio_capture(Allocator::unlimited()).on_demand);
+		assert!(args.audio_capture(Allocator::unlimited()).2);
 
 		for (video, audio) in [("on", "on"), ("on", "demand"), ("demand", "on"), ("demand", "demand")] {
 			let args = capture_args(&["--video", video, "--audio", audio]);
@@ -1220,7 +1237,7 @@ pub(crate) mod tests {
 				args.video_capture(Allocator::unlimited()).unwrap().on_demand,
 				video == "demand"
 			);
-			assert_eq!(args.audio_capture(Allocator::unlimited()).on_demand, audio == "demand");
+			assert_eq!(args.audio_capture(Allocator::unlimited()).2, audio == "demand");
 		}
 	}
 
@@ -1646,8 +1663,6 @@ pub(crate) mod tests {
 			ready.wait().await.unwrap();
 			let net = crate::Net {
 				quic: Default::default(),
-				#[cfg(feature = "iroh")]
-				iroh: None,
 			};
 			let url = fixture.url.to_string();
 			let client = || {
@@ -1868,7 +1883,7 @@ pub(crate) mod tests {
 			.await
 			.unwrap()
 			.expect("a catalog");
-		let clock = catalog.clock.expect("the catalog advertises a clock");
+		let clock = catalog.media.clock.expect("the catalog advertises a clock");
 		let (name, config) = catalog.video.renditions.iter().next().expect("a video rendition");
 		let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
 		let container = moq_mux::catalog::hang::Container::try_from(config).unwrap();

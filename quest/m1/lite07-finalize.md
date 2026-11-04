@@ -29,7 +29,7 @@ The route layer of [Cluster routing](/quest/m1/cluster-routing/README.md)
 lite-07, decided 2026-10-05. That removes lite-07's `Hop Base`/`Hop Keep`
 announce compression along with the hop list, and moq.pro's lite-07 rollout
 has to plan for a lite-07 without hop lists. Only
-[Routes and announces](/quest/m1/cluster-routing/routes.md) gates the cut,
+[Routes and announces](/quest/m1/cluster-routing/routes/README.md) gates the cut,
 not the later federation/P2P integrations. Decided 2026-10-13: routes now
 owns the tier/partition correctness tests, so they run before the cut. Peer
 grants and metadata-only subscriptions do not gate it: neither is clustering
@@ -82,8 +82,8 @@ The `Time(pts)` range end rides in the subscribe-ranges children already Require
 Decided 2026-10-27 (maintainer): of [Subscribe ranges](/quest/m1/subscribe-ranges/README.md),
 only the children that change the lite-07 wire gate the cut:
 [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md),
-[JS ranges](/quest/m1/subscribe-ranges/js.md), and
-[Remove FETCH from lite-07](/quest/m1/subscribe-ranges/lite07-fetch.md). The
+JS ranges ([moq-dev/moq#7696](https://github.com/moq-dev/moq/pull/7696)), and
+[Lite-07 FETCH is single-group only](/quest/m1/subscribe-ranges/lite07-fetch.md). The
 fill path, fetch as a range, and the start bookkeeping change no wire.
 
 Decided 2026-10-25 (maintainer): addressing groups by timestamp gates the
@@ -106,14 +106,14 @@ timestamp bound in [#6168](https://github.com/moq-dev/moq/pull/6168).
 
 ## Required
 
-- [Routes and announces](/quest/m1/cluster-routing/routes.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the hop list gone
+- [Routes and announces](/quest/m1/cluster-routing/routes/README.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the hop list gone
 - [Drop set](/quest/m1/drop-set.md) - lite-07's SUBSCRIBE_DROP carries `Max Age`, so a widening re-offers groups reported dropped
 - [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - a relay fills a lite-07 upstream through the subscription
-- [JS ranges](/quest/m1/subscribe-ranges/js.md) - JS speaks lite-07 ranges
-- [Remove FETCH from lite-07](/quest/m1/subscribe-ranges/lite07-fetch.md) - lite FETCH is gone from lite-07, in Rust and JS
+- [Lite-07 FETCH is single-group only](/quest/m1/subscribe-ranges/lite07-fetch.md) - lite-07 FETCH reads one group or a slice of one, and SUBSCRIBE ranges of whole groups
 - [Lite-07 by start](/quest/m1/time-addressing/lite07.md) - lite-07 carries group starts, previous-start links, GROUP_END, and time bounds instead of sequence numbers
 - [@moq/net by start](/quest/m1/time-addressing/js.md) - JS speaks the same lite-07 wire
 - [A job's exact route continues its claim's readers](/quest/m1/announce-takeover.md) - the job's route inherits the claim's instance, with no new wire message
+- [A higher-priority group makes room](/quest/m1/stream-credit/make-room.md) - lite-07 lets a group stream take over for another group
 - [Datagram tracks](/quest/m1/datagram-tracks/README.md) - lite-07 subscribes to datagram tracks through their own request, and datagrams carry their own sequence
 
 ## Related
