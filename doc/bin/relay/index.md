@@ -87,9 +87,7 @@ relay.with_web(web).run().await?;
   `ConnectInfo<SocketAddr>` extractor. It is the accepted socket, never a
   forwarding header, so behind a proxy it is the proxy.
 - `run` drains on SIGTERM or SIGINT from the moment it serves. Before that they
-  keep their default action, and still do after a startup error. With ACME, they
-  are caught from the first issuance on instead, which they end, so a container
-  can be stopped while it waits for a certificate. To own the signals, for
+  keep their default action, and still do after a startup error. To own the signals, for
   example to leave DNS before draining, call `with_signals(false)` and fire
   `shutdown_trigger()` yourself. The drain reaches only MoQ sessions, so stop any extra listener
   (RTMP, SRT, ...) on your own deadline.
