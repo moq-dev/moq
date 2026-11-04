@@ -5619,12 +5619,11 @@ const JOIN: u64 = 75;
 /// Produce one broadcast and export it twice, the second exporter joining partway in, and
 /// return what each rendered.
 ///
-/// Both exporters are drained after every write, so neither skips a group and the two see the
-/// same arrival order. That isolates the question under test (does the *rendering* depend on
-/// when the process started) from the separate question of whether two legs received the same
-/// groups in the same order. The program carries an SDT, whose unchanged repeats have to land on
-/// the same media times in both legs too (#3948).
-async fn export_twice(with_video: bool) -> (Vec<Frame>, Vec<Frame>) {
+/// Media drains after each write so neither exporter skips a group. Clock-table revisions
+/// arrive between the two drains, before their stamped media position: each leg sees the same
+/// snapshot at a different media position. The SDT's unchanged repeats and TDT/TOT revisions
+/// must still land on the same frames.
+async fn export_twice(with_video: bool, late_clock: bool) -> (Vec<Frame>, Vec<Frame>) {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog = crate::catalog::Producer::new(
@@ -5633,6 +5632,29 @@ async fn export_twice(with_video: bool) -> (Vec<Frame>, Vec<Frame>) {
 	)
 	.unwrap();
 	let _sdt = publish_sdt(&mut broadcast, &mut catalog);
+	let mut clocks = [0x70, 0x73].map(|table_id| {
+		let mut track = broadcast.create_track(format!("clock-{table_id}"), timed()).unwrap();
+		track
+			.write_frame(Timestamp::ZERO, Bytes::from(make_short_section(table_id, &[0; 5])))
+			.unwrap();
+		catalog
+			.modify()
+			.unwrap()
+			.ext
+			.mpegts
+			.si
+			.entry(0x0014)
+			.or_default()
+			.insert(
+				table_id,
+				tscat::SiEntry {
+					track: track.name().to_string(),
+					interval: Some(Duration::from_secs(30)),
+					..Default::default()
+				},
+			);
+		(table_id, track)
+	});
 
 	let mut video = with_video.then(|| {
 		let track = broadcast
@@ -5718,6 +5740,22 @@ async fn export_twice(with_video: bool) -> (Vec<Frame>, Vec<Frame>) {
 		}
 
 		out_a.extend(drain_frames(&mut a).await);
+		if if late_clock { tick == 100 } else { tick % 30 == 10 } {
+			for (table_id, track) in &mut clocks {
+				track
+					.write_frame(
+						Timestamp::from_micros(if late_clock {
+							(tick - 5) * VIDEO_US
+						} else {
+							(tick + 5) * VIDEO_US + 1_000
+						})
+						.unwrap(),
+						Bytes::from(make_short_section(*table_id, &[tick as u8; 5])),
+					)
+					.unwrap();
+			}
+		}
+
 		if let Some(b) = b.as_mut() {
 			out_b.extend(drain_frames(b).await);
 		}
@@ -5796,7 +5834,7 @@ fn assert_only_continuity_differs(a: &[Frame], b: &[Frame], from: Timestamp) {
 
 #[tokio::test(start_paused = true)]
 async fn late_join_matches_a_running_exporter() {
-	let (a, b) = export_twice(true).await;
+	let (a, b) = export_twice(true, false).await;
 
 	// Skip to the joiner's second keyframe: its first group covers tune-in, where the two legs
 	// legitimately differ because only the joiner has to lead with the program tables.
@@ -5810,7 +5848,7 @@ async fn late_join_matches_a_running_exporter() {
 /// timeline on its own.
 #[tokio::test(start_paused = true)]
 async fn late_join_matches_a_running_exporter_without_video() {
-	let (a, b) = export_twice(false).await;
+	let (a, b) = export_twice(false, false).await;
 
 	// The joiner's first frame leads with PAT/PMT, while the running exporter has no
 	// reason to repeat them there, and its SDT waits for a PCR interval after them. They can
@@ -5827,6 +5865,26 @@ async fn late_join_matches_a_running_exporter_without_video() {
 		.expect("a periodic PAT/PMT refresh")
 		.timestamp;
 	assert_only_continuity_differs(&a, &b, from);
+}
+
+/// A revision missing its stamped slot cannot be reconstructed there. It goes out at the
+/// next grid slot each leg can still serve, and byte identity returns after both emit it.
+#[tokio::test(start_paused = true)]
+async fn a_late_clock_revision_remains_visible_between_exports() {
+	let (a, b) = export_twice(true, true).await;
+	let revision = make_short_section(0x70, &[100; 5]);
+	let at = |frames: &[Frame]| {
+		frames
+			.iter()
+			.find(|frame| frame.payload.windows(revision.len()).any(|w| w == revision))
+			.unwrap()
+			.timestamp
+	};
+	// This fixture sends each PES in the PCR slice before its decode boundary.
+	// Pin both decisions to the media grid, including the late leg's next slot.
+	assert_eq!(Duration::from(at(&b)) + PCR_INTERVAL, Duration::from_secs(4));
+	assert_eq!(Duration::from(at(&a)) + PCR_INTERVAL, Duration::from_secs(5));
+	assert_only_continuity_differs(&a, &b, Timestamp::from_millis(5_250).unwrap());
 }
 
 // The interleave is a function of the media, not of arrival (moq-dev/moq#2829): each frame
@@ -6844,6 +6902,57 @@ async fn si_clock_tables_do_not_repeat_unchanged() {
 	assert_eq!(rig.media(11_000, 0x0014).await, 0, "and only that one");
 }
 
+/// Several complete snapshots can arrive before the media they describe. Reading one
+/// revision ahead preserves each stamped slot without replacing an earlier one with a
+/// future clock value, and a stamp between grid boundaries rounds up rather than down.
+#[tokio::test(start_paused = true)]
+async fn clock_revisions_wait_for_their_stamped_grid_slots() {
+	for table_id in [0x70, 0x73] {
+		let section = |value| make_short_section(table_id, &[value; 5]);
+		let mut rig = si_cadence_rig(0x0014, table_id, Duration::from_secs(30)).await;
+		rig.si_track
+			.write_frame(Timestamp::ZERO, Bytes::from(section(0)))
+			.unwrap();
+		rig.media(0, 0x0014).await;
+		assert_eq!(rig.media(1_000, 0x0014).await, 1);
+		for (millis, value) in [(2_501, 1), (3_500, 2)] {
+			rig.si_track
+				.write_frame(Timestamp::from_millis(millis).unwrap(), Bytes::from(section(value)))
+				.unwrap();
+			assert!(
+				drain_frames(&mut rig.exporter).await.is_empty(),
+				"SI alone cannot advance media"
+			);
+		}
+		for millis in [1_500, 2_500, 2_999] {
+			assert_eq!(rig.media(millis, 0x0014).await, 0, "future revision at {millis}");
+		}
+		for (millis, value) in [(3_000, 1), (4_000, 2)] {
+			let mut frames = rig.media_frames(millis).await;
+			// A 1ms media step need not close a 25ms PCR slice. Collect that slice
+			// independently of which read returns it. SI rides the media PES, whose
+			// delivery precedes its decode time.
+			frames.extend(rig.media_frames(millis + 40).await);
+			assert_eq!(count_pid(&frames, 0x0014), 1, "revision at {millis}");
+			assert!(
+				frames
+					.iter()
+					.any(|frame| frame.payload.windows(section(value).len()).any(|w| w == section(value)))
+			);
+		}
+		assert_eq!(rig.media(5_000, 0x0014).await, 0, "unchanged clocks never repeat");
+		// End of stream cannot move a future clock value ahead of its media position,
+		// or repeat the value already emitted at 4s.
+		rig.si_track
+			.write_frame(Timestamp::from_millis(6_500).unwrap(), Bytes::from(section(3)))
+			.unwrap();
+		rig.producer.finish().unwrap();
+		rig.si_track.finish().unwrap();
+		rig.catalog.finish().unwrap();
+		assert_eq!(count_pid(&drain_frames(&mut rig.exporter).await, 0x0014), 0);
+	}
+}
+
 /// A reordered (B-frame) timestamp below the emission anchor earns no credit:
 /// `si_due` saturates elapsed time, so a revision arriving there is deferred, the
 /// anchor never moves backwards, and neither revisions nor repeats can fire early
@@ -6943,31 +7052,39 @@ async fn si_anchor_survives_a_zero_interval_reorder() {
 /// snapshot track, so the bound has to hold here too.
 #[tokio::test(start_paused = true)]
 async fn si_rapid_revisions_are_rate_bounded() {
-	let section = |version: u8| make_long_section(0x42, 1, version, 0, 0, &[version; 8]);
-	let mut rig = si_cadence_rig(0x0011, 0x42, Duration::from_secs(30)).await;
+	for (pid, table_id) in [(0x0011, 0x42), (0x0014, 0x70), (0x0014, 0x73)] {
+		let section = |version: u8| {
+			if table_id == 0x42 {
+				make_long_section(table_id, 1, version, 0, 0, &[version; 8])
+			} else {
+				make_short_section(table_id, &[version; 5])
+			}
+		};
+		let mut rig = si_cadence_rig(pid, table_id, Duration::from_secs(30)).await;
 
-	let mut emitted = 0;
-	for i in 0..13u8 {
-		rig.si_track
-			.write_frame(Timestamp::ZERO, Bytes::from(section(i)))
-			.unwrap();
-		let frames = rig.media_frames(u64::from(i) * 250).await;
-		let count = count_pid(&frames, 0x0011);
-		emitted += count;
-		if i == 4 {
-			// The 1s floor lapses here, and the emission carries the newest revision.
-			assert_eq!(count, 1, "the 1s emission");
-			let needle = section(4);
-			assert!(
-				frames
-					.iter()
-					.any(|f| f.payload.windows(needle.len()).any(|w| w == needle)),
-				"the floored emission carries the newest revision"
-			);
+		let mut emitted = 0;
+		for i in 0..13u8 {
+			rig.si_track
+				.write_frame(Timestamp::ZERO, Bytes::from(section(i)))
+				.unwrap();
+			let frames = rig.media_frames(u64::from(i) * 250).await;
+			let count = count_pid(&frames, pid);
+			emitted += count;
+			if i == 4 {
+				// The 1s floor lapses here, and the emission carries the newest revision.
+				assert_eq!(count, 1, "the 1s emission");
+				let needle = section(4);
+				assert!(
+					frames
+						.iter()
+						.any(|f| f.payload.windows(needle.len()).any(|w| w == needle)),
+					"the floored emission carries the newest revision"
+				);
+			}
 		}
+		emitted += rig.media(3_250, pid).await;
+		assert_eq!(emitted, 4, "lead plus one per second, not one per revision");
 	}
-	emitted += rig.media(3_250, 0x0011).await;
-	assert_eq!(emitted, 4, "lead plus one per second, not one per revision");
 }
 
 /// Two captures overlapping on one broadcast (a supervisor restarting its
@@ -8863,7 +8980,7 @@ async fn a_return_keeps_catalog_and_group_history() {
 	let (broadcast, mut catalog) = publish_live::<()>(&origin, route.clone());
 	let mut track = aac_rendition(&mut broadcast.broadcast().clone(), &mut catalog, "a.aac");
 	let mut groups = track.consume();
-	let clock = catalog.snapshot().clock;
+	let clock = catalog.snapshot().media.clock;
 	let source = crate::source::resolved(&origin, "live").await;
 	let old = source.broadcast();
 	let mut export = open_export(source)
@@ -8883,7 +9000,11 @@ async fn a_return_keeps_catalog_and_group_history() {
 	tokio::time::advance(Duration::from_secs(1)).await;
 	crate::clock::fake_host_wall(wall + start.elapsed());
 	broadcast.announce(route).unwrap();
-	assert_eq!(catalog.snapshot().clock, clock, "a return must keep the catalog clock");
+	assert_eq!(
+		catalog.snapshot().media.clock,
+		clock,
+		"a return must keep the catalog clock"
+	);
 	let back = origin
 		.consume()
 		.follow("live", None)

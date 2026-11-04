@@ -699,8 +699,8 @@ impl Publish {
 							let mut publish = std::pin::pin!(driver.run());
 							tokio::select! {
 								result = capture.run() => {
-									// Let the encoder abort its track with the source error
-									// before its future is dropped.
+									// Let the encoder serve its retained audio, then end its
+									// track with the source error, before its future is dropped.
 									let published = publish.await;
 									result.and(published).map_err(anyhow::Error::from)
 								}
@@ -1883,7 +1883,7 @@ pub(crate) mod tests {
 			.await
 			.unwrap()
 			.expect("a catalog");
-		let clock = catalog.clock.expect("the catalog advertises a clock");
+		let clock = catalog.media.clock.expect("the catalog advertises a clock");
 		let (name, config) = catalog.video.renditions.iter().next().expect("a video rendition");
 		let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
 		let container = moq_mux::catalog::hang::Container::try_from(config).unwrap();

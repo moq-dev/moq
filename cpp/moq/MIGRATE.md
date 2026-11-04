@@ -6,6 +6,10 @@
 
 Viewer ceilings and PROBE target overrides are refused with the new `moq::Error::kOutOfRange` once they would sum above 2^53 - 1 bps, the most a PROBE target carries; nothing changes on a refusal. `Viewers::watch` and `set_target` and `Viewer::update` return a `moq::expected` carrying it. Handle the new variant wherever you match the error exhaustively. Regenerate bindings and rebuild the matching native library together.
 
+### `moq::VideoInit::lower` takes either producer kind ([#7699](https://github.com/moq-dev/moq/pull/7699))
+
+`lower` is `std::optional<moq::MediaProducer>` instead of a `std::shared_ptr<moq::MediaTrackProducer>`. Assign `moq::MediaProducer(moq::MediaProducer::kTrack{producer})`, or `kStream` for a `moq::MediaTrackStreamProducer`.
+
 ### Media setup refusals are typed
 
 Audio and video subscribe setup now reports `moq::Error::kUnsupportedConfig` when the decoder refuses a codec, layout, or description. Handle this variant to try another rendition instead of inspecting an audio/video error message or `Unsupported`. Decoder faults, such as a backend that fails to open, and later peer and decode failures keep their existing errors. Regenerate bindings and rebuild the matching native library together.

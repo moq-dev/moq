@@ -40,7 +40,7 @@ struct Body {
 /// default-tier egress.
 struct Node {
 	source: moq_net::origin::Publication,
-	epoch: Instance,
+	instance: Instance,
 	group: moq_json::snapshot::Producer<Body>,
 	frame: Body,
 }
@@ -48,9 +48,9 @@ struct Node {
 impl Node {
 	fn new(origin: &origin::Producer, name: &str) -> Self {
 		let source = origin.create_broadcast(format!(".stats/node/{name}").as_str()).unwrap();
-		let epoch = Instance::random();
+		let instance = Instance::random();
 		source
-			.announce(origin::Route::default().with_instance(epoch.clone(), 0))
+			.announce(origin::Route::default().with_instance(instance.clone(), 0))
 			.unwrap();
 		let track = source
 			.create_track(
@@ -71,7 +71,7 @@ impl Node {
 		};
 		Self {
 			source,
-			epoch,
+			instance,
 			group: moq_json::snapshot::Producer::new(track, config),
 			frame,
 		}
@@ -144,7 +144,7 @@ async fn measure(live: usize, departed: usize, grace: Duration, state: State) ->
 				}
 			}
 			node.source
-				.announce(origin::Route::default().with_instance(node.epoch.clone(), 0))
+				.announce(origin::Route::default().with_instance(node.instance.clone(), 0))
 				.unwrap();
 			node.publish(1);
 			total += 1;

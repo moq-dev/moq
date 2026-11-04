@@ -246,6 +246,7 @@ jobs:
               - "rs/moq-auth/**"
               - "rs/moq-cli/**"
               - "rs/moq-congestion/**"
+              - "rs/moq-crypto/**"
               - "rs/moq-hls/**"
               - "rs/moq-ice/**"
               - "rs/moq-json/**"

@@ -25,7 +25,9 @@ import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import type { Producer, Subscriber as TrackSubscriber } from "../track.ts";
+import { SEGMENT_BYTES } from "../util/limits.ts";
 import { Budget } from "../util/yield.ts";
+import * as Varint from "../varint.ts";
 import { type AnnounceBroadcast, AnnounceInit, AnnounceOk, encodeAnnounceBroadcast } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
 import { Group } from "./group.ts";
@@ -3170,4 +3172,32 @@ test("an interleaved replacement mints a fresh instance", () => {
 	// A stream closing ends nothing: the other's advertisement keeps its instance.
 	minted.release(path, replacement, false);
 	expect(minted.acquire(path)).toBe(replacement);
+});
+
+// Reader demand applies inside a frame too, including when its peer never sends another byte.
+test("a FETCH stops a stalled frame only after its last coalesced reader leaves", async () => {
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
+	try {
+		const a = subscriber.fetchGroup(Path.from("room"), "video", 0n);
+		const b = subscriber.fetchGroup(Path.from("room"), "video", 0n);
+		await opened(0);
+		await answerTrackInfo(streams[0]);
+		await opened(1);
+		await streams[1].reading;
+		streams[1].inbound.enqueue(new Uint8Array([0, ...Varint.encode(SEGMENT_BYTES * 2)]));
+		const first = await a;
+		const last = await b;
+		const firstFrame = await first.nextFrame();
+		const lastFrame = await last.nextFrame();
+		if (!firstFrame || !lastFrame) throw new Error("missing frame header");
+		first.close();
+		streams[1].inbound.enqueue(Uint8Array.of(7));
+		expect(await lastFrame.readChunk()).toEqual(Uint8Array.of(7));
+		last.close();
+		const err = fromTransport(await streams[1].aborted) as StreamError;
+		expect(err.code).toBe(StreamCode.Cancel);
+	} finally {
+		subscriber.close();
+	}
 });

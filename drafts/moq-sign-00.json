@@ -28,6 +28,11 @@
 			"id": "ones",
 			"public": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
 			"endpoint": "999999999999999999999999999999999999999999999999999o"
+		},
+		{
+			"id": "zeros",
+			"public": "0000000000000000000000000000000000000000000000000000000000000000",
+			"endpoint": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
 		}
 	],
 	"frames": [
@@ -405,6 +410,26 @@
 		{
 			"id": "empty",
 			"text": ""
+		},
+		{
+			"id": "ones-trailing-bits",
+			"text": "9999999999999999999999999999999999999999999999999999"
+		},
+		{
+			"id": "padding",
+			"text": "eyamftwcf3sck8rs5m1meugf8odwqg78473t7p3st9wxob9csz8y===="
+		},
+		{
+			"id": "leading-whitespace",
+			"text": " eyamftwcf3sck8rs5m1meugf8odwqg78473t7p3st9wxob9csz8y"
+		},
+		{
+			"id": "trailing-newline",
+			"text": "eyamftwcf3sck8rs5m1meugf8odwqg78473t7p3st9wxob9csz8y\n"
+		},
+		{
+			"id": "base64url",
+			"text": "QDCyxowubMUcltrktEzFPAdHG6fXcx63No_o-Afstc4"
 		}
 	]
 }
