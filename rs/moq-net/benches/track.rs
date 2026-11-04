@@ -93,11 +93,6 @@
 //! cached, and the runs it skipped: a widening costs the runs it re-offers, so a scan of the
 //! cache or the audience shows up as a slope.
 //!
-//! `track_datagram_pressure` appends datagrams across tracks sharing a bounded pool, each
-//! holding a backlog for a reader that never reads, with small plain payloads and with
-//! compressed zeros that inflate far past their wire size: the pool bills both forms, so the
-//! retained bytes stay near capacity and the append cost stays flat over tracks and backlog.
-//!
 //! `track_time_end` lands groups one at a time behind a sequence that never arrives, each
 //! drained by readers whose range ends at a time no group reaches, swept over the groups and
 //! the readers: an unsettled time end walks on from where it stopped, so a rescan of the
@@ -1080,100 +1075,6 @@ fn bench_range_serving(c: &mut Criterion) {
 				);
 			});
 			drop((track, broadcast));
-		}
-	}
-	group.finish();
-}
-
-/// Late joins scan a bounded datagram ring; sweep both the backlog and the joining audience.
-fn bench_datagram_subscriber_join(c: &mut Criterion) {
-	let mut group = c.benchmark_group("track_datagram_subscriber_join");
-	for buffered in [0, 1, 8, 64] {
-		for join in [1, 8, 64] {
-			group.throughput(Throughput::Elements(join as u64));
-			group.bench_function(BenchmarkId::new(format!("{buffered}d"), join), |b| {
-				b.iter_batched(
-					|| {
-						let broadcast = broadcast::Info::default().produce();
-						let mut track = broadcast.create_track("bench", timed()).unwrap();
-						for millis in 0..buffered {
-							track
-								.append_datagram(Timestamp::from_millis(millis).unwrap(), b"x".as_slice())
-								.unwrap();
-						}
-						(broadcast, track)
-					},
-					|(broadcast, track)| {
-						let preferences = track::Subscription::default()
-							.with_delay(track::Delay::default().with_max(Duration::from_millis(5)));
-						let viewers: Vec<_> = (0..join).map(|_| track.subscribe(preferences.clone())).collect();
-						(broadcast, track, viewers)
-					},
-					BatchSize::SmallInput,
-				);
-			});
-		}
-	}
-	group.finish();
-}
-
-/// Datagram payloads for `track_datagram_pressure`: a small plain one, and the largest
-/// payload of zeros on a compressed track, which inflates far past its DEFLATE form.
-const DATAGRAM_PAYLOADS: [(&str, usize, bool); 2] = [("plain", PAYLOAD, false), ("zeros", u16::MAX as usize, true)];
-
-/// Tracks sharing one bounded pool, each holding `queued` datagrams for a reader that never
-/// reads, while one datagram is appended to the next track and read by its fast reader.
-///
-/// The pool bills every buffered datagram, so what the slow readers retain stays near the
-/// pool's capacity however many tracks or queued datagrams there are (printed per case), and
-/// appending must cost the same: a walk over the other tracks or the backlog shows as a slope.
-fn bench_datagram_pressure(c: &mut Criterion) {
-	let mut group = c.benchmark_group("track_datagram_pressure");
-	group.throughput(Throughput::Elements(1));
-	for (name, size, compress) in DATAGRAM_PAYLOADS {
-		let payload = Bytes::from(vec![0u8; size]);
-		for tracks in [1, 16, 64] {
-			for queued in [1, 8, 64] {
-				let mut info = broadcast::Info::default();
-				info.pool = cache::Pool::new(cache::Config::default().with_capacity(CACHE_CAPACITY));
-				let pool = info.pool.clone();
-				let broadcast = broadcast::Producer::new(info);
-				let mut held: Vec<_> = (0..tracks)
-					.map(|index| {
-						let mut track = broadcast
-							.create_track(format!("bench{index}").as_str(), timed().with_compress(compress))
-							.unwrap();
-						let slow = track.subscribe(None);
-						let fast = track.subscribe(None);
-						for _ in 0..queued {
-							track.append_datagram(Timestamp::ZERO, payload.clone()).unwrap();
-						}
-						(track, slow, fast)
-					})
-					.collect();
-				let waiter = kio::Waiter::noop();
-				for (_, _, fast) in &mut held {
-					while let Poll::Ready(Ok(Some(_))) = fast.poll_recv_datagram(&waiter) {}
-				}
-				eprintln!(
-					"track_datagram_pressure/{name}/{tracks}t/{queued}q: {} bytes retained",
-					pool.used()
-				);
-
-				let mut next = 0;
-				group.bench_function(BenchmarkId::new(format!("{name}/{tracks}t"), queued), |b| {
-					b.iter(|| {
-						let (track, _, fast) = &mut held[next % tracks];
-						next += 1;
-						track.append_datagram(Timestamp::ZERO, payload.clone()).unwrap();
-						let Poll::Ready(Ok(Some(datagram))) = fast.poll_recv_datagram(&waiter) else {
-							panic!("the fast reader takes each datagram");
-						};
-						black_box(datagram);
-					});
-				});
-				drop((held, broadcast));
-			}
 		}
 	}
 	group.finish();
@@ -2208,8 +2109,6 @@ criterion_group!(
 	bench_subscription_ranges,
 	bench_range_serving,
 	bench_subscriber_preferences,
-	bench_datagram_subscriber_join,
-	bench_datagram_pressure,
 	bench_parked_read,
 	bench_sparse_read,
 	bench_sparse_poll,

@@ -25,6 +25,7 @@ Decided 2026-11-03 (maintainer, follow-up planning after the 2026-11-03 /quest-a
   locally, extend the selection if any are missed, and check the Nightly log
   shows them run.
 - The rest of the job's time budget stays with
-  [Miri nightly budget](/quest/m2/miri-nightly-budget.md) in m2.
+  [Nightly's Miri job stays inside its time budget](/quest/m0/nightly/miri.md),
+  which requires this quest.
 
 Public API: none. Wire: none.

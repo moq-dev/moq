@@ -13,6 +13,12 @@ Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31 /que
 (merged), which finished the Miri for in-memory unsafe quest.
 Milestone m2 (user: "use recommended for any CI/flakes").
 
+Decided 2026-11-03 (maintainer, /quest-plan of the follow-ups from [moq-dev/moq#7667](https://github.com/moq-dev/moq/pull/7667)):
+moved from m2 under [Nightly passes on main](/quest/m0/nightly/README.md),
+since the missing `rust-src` keeps the m0 Nightly red. The scheduled run of
+2026-11-03 ([run 41656613559](https://github.com/moq-dev/moq/actions/runs/41656613559/job/125988511062))
+still fails the same way.
+
 Act on the first Nightly runs' timings, not ahead of them. Locally (24
 cores) `just rs miri` took 11.5 min wall: strict pass 118 tests in 109 s,
 epoch pass 94 in 307 s.

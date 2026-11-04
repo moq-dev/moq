@@ -40,6 +40,7 @@ production stability proven merely because upstream artifacts published.
 - [Final libmoq stub](/quest/m2/release/libmoq-final-release.md) - publish the migration notice before removing its source
 - [Retire libmoq](/quest/m2/release/libmoq-retire.md) - cleanup only after that publication
 - [Retire the moq-e2ee stub](/quest/m2/release/moq-e2ee-retire.md) - waiting on the stub's release above 0.0.20, then delete `rs/moq-e2ee`
+- [Retire the moq-e2ee stub](/quest/m2/release/e2ee-retire.md) - delete `rs/moq-e2ee` once the cut publishes it as the final release
 - [Retire hand-written C](/quest/m2/release/c-retire.md) - delete the hand-written crate once generated C publishes
 - [Retire the web-transport JS qmux](/quest/m2/release/qmux-js-retire.md) - once `@moq/qmux` publishes from `js/qmux`, deprecate `@moq/web-socket-stream` and stop the second publisher
 - [moq.sh deployment](/quest/m2/release/moq-sh-deploy.md) - verify its release-triggered publication

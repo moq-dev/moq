@@ -40,3 +40,7 @@ Public API: none. Wire: none.
 - [The binding benchmark's 64 KiB case measures](/quest/m0/nightly/bindings-bench-evicted.md) - the 64 KiB case completes instead of failing `evicted`
 - [The range-widening bench expects a narrowed read to end](/quest/m0/nightly/track-range-widening.md) - `track_range_widening/1r/64` stops asserting a pending read that #7545 made end
 - [Nightly Miri installs rust-src and covers the lock-free frame path](/quest/m0/nightly/miri-frame.md) - the Miri job gets past setup and runs `model::frame::tests`
+- [Nightly's Rust and JS audits pass](/quest/m0/nightly/audits.md) - RUSTSEC-2026-0173 and the root `bun.lock` glob and minimatch advisories are upgraded away or ignored with a reason
+- [moq-net's ingest fuzz target finds no stall](/quest/m0/nightly/ingest-fuzz.md) - the 13-byte stream that stalls ingest is fixed at its cause and kept as a regression test
+- [Nightly's shipping-size check passes](/quest/m0/nightly/shipping-size.md) - js/net, js/watch, and moq-relay growth over 5% is traced to its commits, then shrunk or accepted
+- [Nightly's Miri job stays inside its time budget](/quest/m0/nightly/miri.md) - Miri gets `rust-src`, then finishes inside its 60-minute job and 15-minute-per-test budgets
