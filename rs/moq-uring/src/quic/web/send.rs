@@ -81,6 +81,8 @@ impl Stream {
 	/// belongs to.
 	fn reset_mut(&mut self, code: u32) {
 		let code = self.close.encode_stream_code(code);
+		// The connection is driven on this thread, so no STOP_SENDING lands between this check
+		// and the reset: what the stream reports now is what the reset settles.
 		let stopped = match &self.state {
 			State::Open(stream) => stream.poll_closed(&kio::Waiter::noop()),
 			State::Finished(stream) => stream.poll_closed(&kio::Waiter::noop()),
