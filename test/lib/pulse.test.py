@@ -95,17 +95,22 @@ class Pulse(unittest.TestCase):
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
             ) as session:
+                timed_out = False
                 try:
-                    output, _ = session.communicate(timeout=30)
+                    session.communicate(timeout=30)
+                except subprocess.TimeoutExpired:
+                    timed_out = True
                 finally:
                     # Reap the whole test tree even if startup or a playback client hangs.
                     try:
                         os.killpg(session.pid, signal.SIGKILL)
                     except ProcessLookupError:
                         pass
-                    session.wait()
+                    output, _ = session.communicate()
             logs = "\n".join(f"{log}:\n{log.read_text()}" for log in root.glob("*/pulse.log"))
-            self.assertEqual(session.returncode, 0, output.decode() + logs)
+            diagnostics = output.decode() + logs
+            self.assertFalse(timed_out, "private audio test timed out\n" + diagnostics)
+            self.assertEqual(session.returncode, 0, diagnostics)
 
 
 if __name__ == "__main__":
