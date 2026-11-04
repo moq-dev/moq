@@ -50,10 +50,14 @@ Biggest contributors and their knobs:
   AudioContext's `latencyHint` (`"interactive"` in
   `js/watch/src/audio/decoder.ts`), otherwise the platform. A real device,
   such as `kixtop`'s macOS output, should be measured before acting on it.
-- **Capture and render, about 52 ms together.** Both follow the AudioContext
-  callback cadence on this host. The capture graph also delivers 60 ms frames
-  in bursts, 25-109 ms apart. Knob: the capture AudioContext's `latencyHint`
-  (`js/publish/src/audio/capture.ts`), otherwise the platform.
+- **Capture and render, about 52 ms together.** Both followed the
+  AudioContext callback cadence on this host: PipeWire gives Chromium 2048
+  samples (43 ms) per callback even at `"interactive"`. Capture no longer
+  does, since its context renders to no device
+  ([moq-dev/moq#7881](https://github.com/moq-dev/moq/pull/7881)): on this host
+  its median dropped from 29 ms to 1-9 ms, and the median per-press arrival
+  spread from 45 ms to 12 ms. Render still does. Knob: the watch AudioContext's
+  `latencyHint`, otherwise the platform.
 - **Opus frame, 60 ms.** This test chooses it; the publisher defaults to
   20 ms. Under a fixed delay it is absorbed by the delay. In `"auto"` it adds
   one frame to the target. Knob: the encoder's `frameDuration`.
@@ -66,7 +70,9 @@ fixed delay bypasses the jitter estimator. In `"auto"`, the 46 ms median
 per-press arrival-lateness spread, from capture bursts rather than the
 network, would make the measured term nonzero; that is the estimator working
 as specified in [Audio jitter
-target](/quest/m1/audio-jitter-target/README.md).
+target](/quest/m1/audio-jitter-target/README.md). With capture fixed, the
+spread left is Chromium's 10 ms capture chunks, plus the release flush's
+lookahead chunk, which goes out up to a frame ahead of its media.
 
 Decided 2026-11-04 (maintainer, planning in
 [moq-dev/moq#7816](https://github.com/moq-dev/moq/pull/7816)):
@@ -79,13 +85,11 @@ Decided 2026-11-04 (maintainer, planning in
   then.
 - ✅ Browser only.
 - The catalog toggle forces at least a round trip of jitter buffer, so the
-  budget is measured once push-to-talk runs on DTX (Required below), and once
-  capture delivers frames steadily.
+  budget is measured once push-to-talk runs on DTX (Required below).
 
 ## Required
 
 - [Push-to-talk suppresses silence instead of toggling the catalog](/quest/m1/push-to-talk/dtx.md) - removes the catalog round trip the budget would otherwise carry
-- [Browser capture delivers audio frames on a steady cadence](/quest/m1/push-to-talk/capture-smoothing.md) - so `"auto"` measures the network, not capture bursts
 
 ## Related
 

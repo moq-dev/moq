@@ -34,6 +34,11 @@ and the maintainer would rather fix DTX and avoid the catalog entirely.
 - The publisher's mute becomes "suppress", not `enabled: false`. Keep
   `enabled` for a real stop (leaving the call), where a catalog change is
   correct.
+- Mind the release flush's lookahead chunk. The disable path's `flush()`
+  sends it at once, up to a frame ahead of its media
+  ([moq-dev/moq#7881](https://github.com/moq-dev/moq/pull/7881) measured it adding
+  10-22 ms to the median per-press spread). `"auto"` then measures an utterance that starts
+  within its 2 s window against it, so suppression should not reintroduce it.
 
 Update the epic's acceptance and `doc/` pages that describe hold.
 
