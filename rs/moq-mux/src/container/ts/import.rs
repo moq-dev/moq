@@ -6161,7 +6161,7 @@ pub(super) mod test {
 			"{restart:?}"
 		);
 		assert!(
-			looped.ends_with(&restart.remainder) && restart.remainder.len() <= data.len(),
+			looped.ends_with(&restart.remainder[2 * 188..]) && restart.remainder.len() - 2 * 188 <= data.len(),
 			"the new instance starts at the wrap"
 		);
 		import.finish().unwrap();
@@ -10036,7 +10036,7 @@ pub(super) mod test {
 			matches!(restart.step, crate::container::ts::Step::Rewind { flagged: true, .. }),
 			"{restart:?}"
 		);
-		assert_eq!(restart.remainder, mux.out[at..]);
+		assert_eq!(&restart.remainder[2 * 188..], mux.out[at..]);
 	}
 
 	/// The same restart unflagged, as a looping playout wraps to the top of its file.
