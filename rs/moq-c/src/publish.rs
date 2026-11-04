@@ -29,6 +29,7 @@ struct TrackRequest {
 enum Request {
 	Track(Box<TrackRequest>),
 	Fill(moq_net::track::Fill),
+	Datagram(DatagramRequest),
 }
 
 /// One group of a fill, handed to C as a group request: the frozen ABI answers fills a
@@ -46,6 +47,7 @@ enum Dynamic {
 	Broadcast(moq_net::broadcast::Requests, Id, Children),
 	/// Group requests (fetches of uncached groups) on a track.
 	Track(moq_net::track::Requests),
+	Datagrams(moq_net::broadcast::DatagramRequests, Children),
 }
 
 /// A published broadcast: its producer, its catalog, and the renditions the caller authored by
@@ -70,6 +72,7 @@ pub(crate) enum Child {
 	Media(Id),
 	Container(Id),
 	Track(Id),
+	Datagrams(Id),
 	Audio(Id),
 	Video(Id),
 	JsonSnapshot(Id),
@@ -90,8 +93,6 @@ enum Family {
 		open: HashSet<Child>,
 		/// Finished producers, kept so a late subscriber still finds their tracks.
 		kept: Vec<Box<dyn Send>>,
-		/// The broadcast, which a raw track creates its datagram track on.
-		broadcast: moq_net::broadcast::Producer,
 	},
 	/// The broadcast closed: its children ended and new ones are refused.
 	Closed,
@@ -111,16 +112,15 @@ pub struct Children(Arc<std::sync::Mutex<Family>>);
 #[cfg(test)]
 impl Default for Children {
 	fn default() -> Self {
-		Self::new(moq_net::broadcast::Info::new().produce())
+		Self::new()
 	}
 }
 
 impl Children {
-	fn new(broadcast: moq_net::broadcast::Producer) -> Self {
+	fn new() -> Self {
 		Self(Arc::new(std::sync::Mutex::new(Family::Open {
 			open: HashSet::new(),
 			kept: Vec::new(),
-			broadcast,
 		})))
 	}
 
@@ -157,17 +157,6 @@ impl Children {
 			open.remove(&child);
 			kept.push(producer);
 		}
-	}
-
-	/// Create the datagram track carrying the datagrams of the raw track `name` with `info`.
-	fn datagrams(&self, name: &str, info: &moq_net::track::Info) -> Result<moq_net::datagram::Producer, Error> {
-		let Family::Open { broadcast, .. } = &*self.lock() else {
-			return Err(Error::BroadcastNotFound);
-		};
-		let info = moq_net::datagram::Info::default()
-			.with_timescale(info.timescale)
-			.with_priority(info.priority);
-		Ok(broadcast.create_datagrams(name, info)?)
 	}
 
 	/// Stop tracking `child`, which ended on its own.
@@ -213,22 +202,11 @@ impl Abort for Kept<Box<import::Track>> {
 	}
 }
 
-/// A raw track and the datagram track of the same name that carries its datagrams.
-struct Raw {
-	track: moq_net::track::Producer,
-	datagrams: moq_net::datagram::Producer,
-}
-
-impl Abort for Kept<Raw> {
+impl Abort for Kept<moq_net::track::Producer> {
 	fn abort(self, err: moq_net::Error) {
-		let Raw { track, datagrams } = self.inner;
-		// A track with a declared end ends there, as when its last producer drops.
-		if track.finished().is_some() {
-			datagrams.finish();
-			return;
+		if self.inner.finished().is_none() {
+			let _ = self.inner.abort(err);
 		}
-		datagrams.abort(err.clone());
-		let _ = track.abort(err);
 	}
 }
 
@@ -315,7 +293,10 @@ pub struct Publish {
 	containers: NonZeroSlab<Container>,
 
 	/// Raw track producers (no media/container/catalog framing).
-	tracks: NonZeroSlab<Kept<Raw>>,
+	tracks: NonZeroSlab<Kept<moq_net::track::Producer>>,
+	datagrams: NonZeroSlab<Datagrams>,
+	datagram_request: NonZeroSlab<DatagramRequest>,
+	datagram_demand: NonZeroSlab<DatagramDemand>,
 
 	/// Raw group producers, created from a raw track producer.
 	groups: NonZeroSlab<moq_net::group::Producer>,
@@ -381,7 +362,7 @@ impl Publish {
 
 		let id = self.broadcasts.insert(Broadcast {
 			driver,
-			children: Children::new(broadcast.clone()),
+			children: Children::new(),
 			producer: broadcast,
 			catalog,
 			video: BTreeMap::new(),
@@ -398,8 +379,8 @@ impl Publish {
 	) -> Result<(Id, Id), Error> {
 		let broadcast = self.create((publication.broadcast().clone(), driver.clone()))?;
 		let id = self.publications.insert(Publication {
-			driver,
 			broadcast,
+			driver,
 			inner: publication,
 		});
 		match id {
@@ -813,22 +794,21 @@ impl Publish {
 		Ok(())
 	}
 
+	#[cfg(test)]
+	pub(crate) fn datagram_producer(&self, id: Id) -> Option<moq_net::datagram::Producer> {
+		self.datagrams.get(id).map(|track| track.producer.clone())
+	}
+
 	/// The raw track producer behind a handle, for tests that publish what the C API
 	/// can't express (an untimed frame).
 	#[cfg(test)]
 	pub(crate) fn track_producer(&mut self, track: Id) -> Option<&mut moq_net::track::Producer> {
-		self.tracks.get_mut(track).map(|raw| &mut raw.inner.track)
-	}
-
-	/// A raw track's datagram producer, for tests that send a datagram once a reader listens.
-	#[cfg(test)]
-	pub(crate) fn datagram_producer(&self, track: Id) -> Option<moq_net::datagram::Producer> {
-		self.tracks.get(track).map(|raw| raw.inner.datagrams.clone())
+		self.tracks.get_mut(track).map(|raw| &mut raw.inner)
 	}
 
 	/// A watch-only handle to a raw track's subscriber demand.
 	pub fn track_demand(&self, track: Id) -> Result<moq_net::track::Demand, Error> {
-		Ok(self.tracks.get(track).ok_or(Error::TrackNotFound)?.track.demand())
+		Ok(self.tracks.get(track).ok_or(Error::TrackNotFound)?.inner.demand())
 	}
 
 	/// A watch-only handle to a media importer's subscriber demand.
@@ -925,7 +905,7 @@ impl Publish {
 	/// Serve fetches of uncached groups on a raw track, delivering each as a group-request
 	/// handle via `on_group`.
 	pub fn track_dynamic(&mut self, track: Id, on_group: OnStatus) -> Result<Id, Error> {
-		let dynamic = self.tracks.get(track).ok_or(Error::TrackNotFound)?.track.requests();
+		let dynamic = self.tracks.get(track).ok_or(Error::TrackNotFound)?.inner.requests();
 		self.spawn_dynamic(Dynamic::Track(dynamic), on_group, Default::default())
 	}
 
@@ -981,6 +961,7 @@ impl Publish {
 								}))
 							})
 						}
+						Dynamic::Datagrams(dynamic, children) => dynamic.poll_requested(waiter).map_ok(|request| Request::Datagram(DatagramRequest { request, children: children.clone() })),
 						Dynamic::Track(dynamic) => dynamic.poll_requested_fill(waiter).map_ok(Request::Fill),
 					}
 				}) => res,
@@ -996,6 +977,7 @@ impl Publish {
 			// Hold the lock only to buffer the request; release it before the callback.
 			let id = match request {
 				Request::Track(request) => State::lock().publish.track_request.insert(*request)?,
+				Request::Datagram(request) => State::lock().publish.datagram_request.insert(request)?,
 				Request::Fill(fill) => {
 					let mut serve = Box::pin(Self::serve_fill(callback, Arc::new(fill)));
 					fills.push(move |waiter: &kio::Waiter| waiter.poll_future(serve.as_mut()));
@@ -1054,22 +1036,8 @@ impl Publish {
 	/// Accept a track request as a raw track, returning a track handle like [`Self::track`].
 	pub fn track_request_accept(&mut self, request: Id, info: moq_net::track::Info) -> Result<Id, Error> {
 		let TrackRequest { children, request, .. } = self.track_request.remove(request).ok_or(Error::NotFound)?;
-		let datagrams = match children.datagrams(request.name(), &info) {
-			Ok(datagrams) => datagrams,
-			Err(err) => {
-				// A closed broadcast ends its subscribers the way a publisher leaving does.
-				request.reject(match &err {
-					Error::Moq(err) => err.clone(),
-					_ => moq_net::Error::Unroutable,
-				});
-				return Err(err);
-			}
-		};
 		let raw = Kept {
-			inner: Raw {
-				track: request.accept(info),
-				datagrams,
-			},
+			inner: request.accept(info),
 			children: children.clone(),
 		};
 		children.insert(&mut self.tracks, raw, Child::Track)
@@ -1166,16 +1134,9 @@ impl Publish {
 		let children = self.children(broadcast)?;
 		let broadcast = self.producer(broadcast)?;
 		let info = info.unwrap_or_default();
-		let datagrams = children.datagrams(name, &info)?;
-		let track = match broadcast.create_track(name, info) {
-			Ok(track) => track,
-			Err(err) => {
-				datagrams.abort(err.clone());
-				return Err(err.into());
-			}
-		};
+		let track = broadcast.create_track(name, info)?;
 		let raw = Kept {
-			inner: Raw { track, datagrams },
+			inner: track,
 			children: children.clone(),
 		};
 		children.insert(&mut self.tracks, raw, Child::Track)
@@ -1184,14 +1145,14 @@ impl Publish {
 	/// Append a new group to a raw track, returning a group producer.
 	pub fn track_group(&mut self, track: Id) -> Result<Id, Error> {
 		let raw = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
-		let group = raw.track.append_group()?;
+		let group = raw.inner.append_group()?;
 		self.groups.insert(group)
 	}
 
 	/// Create a raw group with an explicit sequence number.
 	pub fn track_group_at(&mut self, track: Id, sequence: u64) -> Result<Id, Error> {
 		let raw = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
-		let group = raw.track.create_group(moq_net::group::Info { sequence })?;
+		let group = raw.inner.create_group(moq_net::group::Info { sequence })?;
 		self.groups.insert(group)
 	}
 
@@ -1203,25 +1164,9 @@ impl Publish {
 		payload: &[u8],
 	) -> Result<(), Error> {
 		let raw = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
-		raw.track
+		raw.inner
 			.write_frame(timestamp, bytes::Bytes::copy_from_slice(payload))?;
 		Ok(())
-	}
-
-	/// Send a best-effort datagram on a raw track's datagram track, returning its sequence.
-	///
-	/// Datagrams are delivered only on transports and wire versions with a datagram channel;
-	/// there is no group fallback.
-	pub fn track_datagram(
-		&mut self,
-		track: Id,
-		timestamp: Option<moq_net::Timestamp>,
-		payload: &[u8],
-	) -> Result<u64, Error> {
-		let raw = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
-		Ok(raw
-			.datagrams
-			.append(timestamp, bytes::Bytes::copy_from_slice(payload))?)
 	}
 
 	/// Finish a raw track. No more groups or frames can be written.
@@ -1230,14 +1175,10 @@ impl Publish {
 	/// boundary and only releases the handle; the broadcast keeps the track.
 	pub fn track_finish(&mut self, track: Id) -> Result<(), Error> {
 		let id = track;
-		let Kept {
-			inner: Raw { track, datagrams },
-			children,
-		} = self.tracks.remove(id).ok_or(Error::TrackNotFound)?;
+		let Kept { inner: track, children } = self.tracks.remove(id).ok_or(Error::TrackNotFound)?;
 		if track.finished().is_none() {
 			track.finish()?;
 		}
-		datagrams.finish();
 		Kept { inner: track, children }.keep(Child::Track(id));
 		Ok(())
 	}
@@ -1245,7 +1186,7 @@ impl Publish {
 	/// Declare a raw track's exclusive final group sequence.
 	pub fn track_finish_at(&mut self, track: Id, final_sequence: u64) -> Result<(), Error> {
 		let raw = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
-		raw.track
+		raw.inner
 			.finish_at(moq_net::track::Position::group(final_sequence), None)?;
 		Ok(())
 	}
@@ -1256,8 +1197,7 @@ impl Publish {
 		let raw = self.tracks.remove(id).ok_or(Error::TrackNotFound)?;
 		raw.children.forget(Child::Track(id));
 		let err = moq_net::Error::App(error_code);
-		raw.inner.datagrams.abort(err.clone());
-		raw.inner.track.abort(err)?;
+		raw.inner.abort(err)?;
 		Ok(())
 	}
 
@@ -1522,6 +1462,7 @@ impl State {
 			match child {
 				Child::Media(id) => self.publish.media.remove(id).map(|media| media.abort(err.clone())),
 				Child::Container(id) => self.publish.containers.remove(id).map(|media| media.abort(err.clone())),
+				Child::Datagrams(id) => self.publish.datagrams.remove(id).map(|track| track.abort(err.clone())),
 				Child::Track(id) => self.publish.tracks.remove(id).map(|track| track.abort(err.clone())),
 				Child::Audio(id) => self
 					.audio
@@ -1684,7 +1625,7 @@ mod children_tests {
 		let mut datagram_reader = datagrams.consume();
 		let mut tracks = NonZeroSlab::default();
 		let kept = Kept {
-			inner: Raw { track, datagrams },
+			inner: track,
 			children: children.clone(),
 		};
 		assert!(matches!(
@@ -1692,6 +1633,16 @@ mod children_tests {
 			Err(Error::BroadcastNotFound)
 		));
 		assert!(matches!(reader.recv_group().await, Err(moq_net::Error::Unroutable)));
+		let mut producers = NonZeroSlab::default();
+		let datagrams = Datagrams {
+			producer: datagrams,
+			children: children.clone(),
+			alive: kio::Producer::new(()),
+		};
+		assert!(matches!(
+			children.insert(&mut producers, datagrams, Child::Datagrams),
+			Err(Error::BroadcastNotFound)
+		));
 		assert!(matches!(datagram_reader.recv().await, Err(moq_net::Error::Unroutable)));
 	}
 }
@@ -1788,5 +1739,177 @@ mod supervision_tests {
 			Err(Error::Panic)
 		));
 		assert!(consumer.is_closed());
+	}
+}
+
+/// A datagram producer and the signal ending its demand watchers.
+struct Datagrams {
+	producer: moq_net::datagram::Producer,
+	children: Children,
+	alive: kio::Producer<()>,
+}
+
+impl Abort for Datagrams {
+	fn abort(self, err: moq_net::Error) {
+		self.producer.abort(err);
+	}
+}
+
+struct DatagramRequest {
+	request: moq_net::datagram::Request,
+	children: Children,
+}
+
+struct DatagramDemand {
+	task: Task,
+	producer: moq_net::datagram::Producer,
+}
+
+impl Publish {
+	pub fn datagrams(&mut self, broadcast: Id, name: &str, info: moq_net::datagram::Info) -> Result<Id, Error> {
+		let children = self.children(broadcast)?;
+		let producer = self.producer(broadcast)?.create_datagrams(name, info)?;
+		let entry = Datagrams {
+			producer,
+			children: children.clone(),
+			alive: kio::Producer::new(()),
+		};
+		children.insert(&mut self.datagrams, entry, Child::Datagrams)
+	}
+
+	pub fn datagrams_append(
+		&mut self,
+		track: Id,
+		timestamp: Option<moq_net::Timestamp>,
+		payload: &[u8],
+	) -> Result<u64, Error> {
+		Ok(self
+			.datagrams
+			.get_mut(track)
+			.ok_or(Error::TrackNotFound)?
+			.producer
+			.append(timestamp, bytes::Bytes::copy_from_slice(payload))?)
+	}
+
+	pub fn datagrams_insert(&mut self, track: Id, datagram: moq_net::Datagram) -> Result<(), Error> {
+		Ok(self
+			.datagrams
+			.get_mut(track)
+			.ok_or(Error::TrackNotFound)?
+			.producer
+			.insert(datagram)?)
+	}
+
+	pub fn datagrams_priority(&self, track: Id) -> Result<Option<i8>, Error> {
+		Ok(self
+			.datagrams
+			.get(track)
+			.ok_or(Error::TrackNotFound)?
+			.producer
+			.priority())
+	}
+
+	pub fn datagrams_finish(&mut self, id: Id) -> Result<(), Error> {
+		let entry = self.datagrams.remove(id).ok_or(Error::TrackNotFound)?;
+		entry.children.forget(Child::Datagrams(id));
+		entry.producer.finish();
+		Ok(())
+	}
+
+	pub fn datagrams_abort(&mut self, id: Id, code: u16) -> Result<(), Error> {
+		let entry = self.datagrams.remove(id).ok_or(Error::TrackNotFound)?;
+		entry.children.forget(Child::Datagrams(id));
+		entry.abort(moq_net::Error::App(code));
+		Ok(())
+	}
+
+	pub fn datagrams_dynamic(&mut self, broadcast: Id, callback: OnStatus) -> Result<Id, Error> {
+		let broadcast = self.broadcast(broadcast)?;
+		let dynamic = Dynamic::Datagrams(broadcast.producer.requests().datagrams(), broadcast.children.clone());
+		let driver = broadcast.driver.clone();
+		self.spawn_dynamic(dynamic, callback, driver)
+	}
+
+	pub fn datagram_request_name(&self, id: Id, dst: &mut crate::moq_string) -> Result<(), Error> {
+		let name = self.datagram_request.get(id).ok_or(Error::NotFound)?.request.name();
+		*dst = crate::moq_string {
+			data: name.as_ptr().cast(),
+			len: name.len(),
+		};
+		Ok(())
+	}
+
+	pub fn datagram_request_priority(&self, id: Id) -> Result<Option<i8>, Error> {
+		Ok(self.datagram_request.get(id).ok_or(Error::NotFound)?.request.priority())
+	}
+
+	pub fn datagram_request_accept(&mut self, id: Id, info: moq_net::datagram::Info) -> Result<Id, Error> {
+		let request = self.datagram_request.remove(id).ok_or(Error::NotFound)?;
+		let entry = Datagrams {
+			producer: request.request.accept(info),
+			children: request.children.clone(),
+			alive: kio::Producer::new(()),
+		};
+		request.children.insert(&mut self.datagrams, entry, Child::Datagrams)
+	}
+
+	pub fn datagram_request_abort(&mut self, id: Id, code: u16) -> Result<(), Error> {
+		self.datagram_request
+			.remove(id)
+			.ok_or(Error::NotFound)?
+			.request
+			.reject(moq_net::Error::App(code));
+		Ok(())
+	}
+
+	pub fn datagram_request_free(&mut self, id: Id) -> Result<(), Error> {
+		self.datagram_request.remove(id).ok_or(Error::NotFound)?;
+		Ok(())
+	}
+
+	pub fn datagrams_demand(&mut self, track: Id, callback: OnStatus) -> Result<Id, Error> {
+		let entry = self.datagrams.get(track).ok_or(Error::TrackNotFound)?;
+		let producer = entry.producer.clone();
+		let alive = entry.alive.consume();
+		let (task, mut close) = Task::new(callback);
+		let id = self.datagram_demand.insert(DatagramDemand {
+			task,
+			producer: producer.clone(),
+		})?;
+		tokio::spawn(async move {
+			let res = crate::ffi::run(async move {
+				let mut priority = producer.priority();
+				loop {
+					callback.call(match priority {
+						Some(_) => moq_demand::MOQ_DEMAND_WANTED as i32,
+						None => moq_demand::MOQ_DEMAND_UNWANTED as i32,
+					});
+					priority = tokio::select! {
+					 biased;
+					 _ = &mut close => return Ok(()),
+					 _ = alive.closed() => return Ok(()),
+					 priority = kio::wait(|waiter| producer.poll_priority(waiter, priority)) => priority,
+					};
+				}
+			})
+			.await;
+			let entry = State::lock().publish.datagram_demand.remove(id);
+			if let Some(entry) = entry {
+				entry.task.callback.call(res);
+			}
+		});
+		Ok(id)
+	}
+
+	pub fn datagram_demand_priority(&self, id: Id) -> Result<Option<i8>, Error> {
+		Ok(self.datagram_demand.get(id).ok_or(Error::NotFound)?.producer.priority())
+	}
+
+	pub fn datagram_demand_close(&mut self, id: Id) -> Result<(), Error> {
+		self.datagram_demand
+			.get_mut(id)
+			.ok_or(Error::NotFound)?
+			.task
+			.close(Error::NotFound)
 	}
 }

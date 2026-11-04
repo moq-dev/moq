@@ -71,6 +71,12 @@ jobs:
         run: nix develop --command just test stream-limits
         shell: bash -leo pipefail {0}
 
+      - name: Relay fills
+        id: relay-fill
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: nix develop --command just test relay-fill
+        shell: bash -leo pipefail {0}
+
       - name: Receive credit recovery
         id: receive-credit
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
@@ -212,6 +218,8 @@ jobs:
             "Playwright Chromium": "${{ steps.setup.outcome }}",
             "Optional publisher retention": "${{ steps.max-age.outcome }}",
             "Stream limits over WebSocket": "${{ steps.stream-limits.outcome }}",
+
+            "Relay fills": "${{ steps.relay-fill.outcome }}",
             "Receive credit recovery": "${{ steps.receive-credit.outcome }}",
             "Harness regressions": "${{ steps.harness.outcome }}",
             "Subscription termination interop": "${{ steps.bare-fin.outcome }}",

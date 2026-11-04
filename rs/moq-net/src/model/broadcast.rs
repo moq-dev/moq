@@ -135,6 +135,8 @@ struct BroadcastState {
 	datagram_handlers: usize,
 	// Set on an origin's front: datagram lookups go to the source it serves from, if any.
 	datagram_source: Option<Option<Consumer>>,
+	// A session's source, relaying a peer's broadcast; see [`Consumer::has_local_datagrams`].
+	relayed: bool,
 }
 
 impl BroadcastState {
@@ -755,6 +757,7 @@ pub(crate) struct SourceGuard(Producer);
 impl SourceGuard {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn new(producer: Producer) -> Self {
+		producer.state.lock().relayed = true;
 		Self(producer)
 	}
 }
@@ -1154,6 +1157,41 @@ impl Consumer {
 			return Some(source.datagrams_live(name)?.with_stats(self.stats.clone()));
 		}
 		state.datagrams.get(name)?.try_consume(self.stats.clone())
+	}
+
+	/// Whether datagram lookups reach a local producer or handler, rather than a session that
+	/// relays a peer's broadcast, here or at the source an origin serves this broadcast from.
+	///
+	/// A session always answers a lookup, and a moq-lite 05/06 one subscribes to the stream
+	/// track of the same name to answer one, so a lite-05/06 publisher only asks a local one
+	/// for a name's datagram track before its stream track answers.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn has_local_datagrams(&self) -> bool {
+		let state = self.state.lock();
+		match &state.datagram_source {
+			Some(Some(source)) => {
+				let source = source.clone();
+				drop(state);
+				source.has_local_datagrams()
+			}
+			Some(None) => false,
+			None => !state.relayed,
+		}
+	}
+
+	/// Whether a producer serves the stream track `name`, here or at the source an origin
+	/// serves this broadcast from, rather than a request still waiting for an answer.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn publishes_track(&self, name: &str) -> bool {
+		let mut state = self.state.lock();
+		if BroadcastState::live_track(&mut state, name).is_some_and(|live| live.minted()) {
+			return true;
+		}
+		let Some(Some(source)) = state.datagram_source.clone() else {
+			return false;
+		};
+		drop(state);
+		source.publishes_track(name)
 	}
 
 	/// Join the demand of the track serving `name`, requesting it from a [`Requests`]

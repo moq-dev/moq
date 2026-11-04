@@ -11,7 +11,7 @@ with its `track::Info::rescale`, so a frame either half accepts is one `moq-net`
 
 `sign` and `e2ee`, both default, enable the two modules. With default features off, the crate is
 only `sign::PublicKey`, the endpoint ID, with its canonical z-base-32 text: it builds without
-`moq-net` or aws-lc-rs, for crates such as `moq-auth` that name endpoints but sign nothing.
+`moq-net` or rind, for crates such as `moq-auth` that name endpoints but sign nothing.
 `serde` adds the key's string serialization.
 
 ## Signing
