@@ -10,8 +10,9 @@
 //! as a slope. Unwatched broadcasts stay announced and silent: their cost is the
 //! route table they occupy, not a publisher writing into its own cache.
 //!
-//! `SESSION_ALLOCS=1` prints allocations, allocated bytes and, where Linux perf counters are
-//! readable, user instructions per viewer-group or delivered datagram instead of timing.
+//! `SESSION_ALLOCS=1` prints the group consumer size, allocations, allocated bytes and,
+//! where Linux perf counters are readable, user instructions per viewer-group or delivered
+//! datagram instead of timing.
 //! `SESSION_CPU=1` measures thread CPU time on Unix instead of elapsed time, excluding
 //! preemption while retaining all protocol work on this current-thread runtime. CPU-timed
 //! groups have a `_cpu` suffix. Cache-clock advancement remains outside both clocks.
