@@ -21547,7 +21547,7 @@ mod test {
 	#[test]
 	#[cfg(feature = "async")]
 	fn history_below_a_resumed_live_floor_is_refilled_after_a_live_arrival() {
-		let mut producer = track_producer("test", Info::default());
+		let mut producer = track_producer("test", None);
 		let dynamic = producer.requests();
 		producer.received();
 		for sequence in 0..5 {
