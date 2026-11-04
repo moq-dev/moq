@@ -27,8 +27,9 @@ same optional capture time when opened, including when they publish on drop.
 Consumers return `Timed<T>`: read `.value` for the decoded value and `.at` for
 its optional frame timestamp, with the track's exact scale preserved. Snapshot
 `next()` yields states in order, skipping every group a newer one supersedes:
-the consumer always reads at a zero `delay.max`, whatever the subscription
-asked for. Use `latest()` to skip to the newest buffered state. Skipped states
+`snapshot::Consumer::new` takes the track and subscribes to it itself at a zero
+`delay.max`, so nothing can raise its budget. Use `latest()` to skip to the
+newest buffered state. Skipped states
 are gone, and a later `next()` continues after them.
 
 Upgrading from an older release: see moq-json's

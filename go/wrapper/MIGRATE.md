@@ -4,9 +4,9 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Snapshot consumers always read at a zero delay ([#7736](https://github.com/moq-dev/moq/pull/7736))
+### Snapshot consumers subscribe themselves at a zero delay ([#7736](https://github.com/moq-dev/moq/pull/7736))
 
-`json.SnapshotConsumer` reads at a zero `Delay.Max`, whatever the subscription asked for: `Next` skips every group a newer one supersedes, and `Latest` no longer waits for a lower group the track still owes. Publish a stream track when every state must survive, or a window track for a bounded recent history.
+`json.NewSnapshotConsumer(broadcast, name)` takes the `*BroadcastConsumer` and the track name instead of a `*TrackConsumer`, and subscribes to the track itself at a zero `Delay.Max`. Drop the `SubscribeTrack` call; a refused subscription now fails the first read. `Next` skips every group a newer one supersedes, and `Latest` no longer waits for a lower group the track still owes. Publish a stream track when every state must survive, or a window track for a bounded recent history.
 
 ### `media.VideoInit.Lower` is a `media.Producer` ([#7699](https://github.com/moq-dev/moq/pull/7699))
 

@@ -343,11 +343,7 @@ impl<E: DeserializeOwned + Default> FromStr for Catalog<E> {
 impl<E: DeserializeOwned + Default> Catalog<E> {
 	/// Subscribe to catalog updates on a broadcast.
 	pub async fn subscribe(broadcast: &moq_net::broadcast::Consumer) -> Result<super::Consumer<E>> {
-		let track = broadcast
-			.track(Catalog::DEFAULT_NAME)?
-			.subscribe(Catalog::default_subscription())
-			.await?;
-		Ok(super::Consumer::new(track))
+		Ok(super::Consumer::new(broadcast.track(Catalog::DEFAULT_NAME)?))
 	}
 
 	/// Parse a catalog from a slice of bytes.

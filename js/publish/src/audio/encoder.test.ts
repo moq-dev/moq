@@ -798,7 +798,7 @@ test("audio failure stays local through demand changes and capture format re-arm
 	const encoder = new Encoder("audio", { broadcast, capture: capture as never, bandwidth, enabled });
 	let subscriber: Moq.Track.Subscriber | undefined;
 	let siblingSubscriber: Moq.Track.Subscriber | undefined;
-	let catalogSubscriber: Moq.Track.Subscriber | undefined;
+	let catalog: Json.Snapshot.Consumer<Catalog.Root> | undefined;
 	let recovered: Moq.Track.Subscriber | undefined;
 	const push = async (first: number, channels: number) => {
 		for (let i = 0; i < 3; i++) {
@@ -828,8 +828,7 @@ test("audio failure stays local through demand changes and capture format re-arm
 		expect(siblingTrack.appendGroup().sequence).toBe(0n);
 		await push(0, 1);
 		expect((await subscriber.largest())?.group).toBe(0n);
-		catalogSubscriber = net.track(Broadcast.CATALOG_TRACK).subscribe();
-		const catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track: catalogSubscriber });
+		catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track: net.track(Broadcast.CATALOG_TRACK) });
 		expect((await catalog.latest())?.value.audio?.renditions.audio?.enabled).not.toBe(false);
 		const live = LaggingAudioEncoder.instances.at(-1);
 		if (!live) throw new Error("expected live audio encoder");
@@ -879,7 +878,7 @@ test("audio failure stays local through demand changes and capture format re-arm
 	} finally {
 		subscriber?.close();
 		siblingSubscriber?.close();
-		catalogSubscriber?.close();
+		catalog?.close();
 		recovered?.close();
 		encoder.close();
 		bandwidth.close();
@@ -894,7 +893,7 @@ test("an audio failure without demand still recovers under a fresh track name", 
 	const broadcast = new Broadcast({ origin: new Moq.Origin.Producer(), name: Moq.Path.from("idle.hang") });
 	const configuring = configured();
 	const encoder = new Encoder("audio", { broadcast, capture: fakeCapture(new Feed()) as never });
-	let catalogSubscriber: Moq.Track.Subscriber | undefined;
+	let catalog: Json.Snapshot.Consumer<Catalog.Root> | undefined;
 	try {
 		await configuring;
 		await settle();
@@ -914,15 +913,14 @@ test("an audio failure without demand still recovers under a fresh track name", 
 		encoder.codec.set({ mime: "opus", bitrate: 64_000 });
 		await reconfiguring;
 		await settle();
-		catalogSubscriber = net.track(Broadcast.CATALOG_TRACK).subscribe();
-		const catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track: catalogSubscriber });
+		catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track: net.track(Broadcast.CATALOG_TRACK) });
 		const config = (await catalog.latest())?.value.audio?.renditions.audio;
 		expect(config?.track).toBeDefined();
 		expect(config?.track).not.toBe("audio");
 		expect(encoder.out.error.peek()).toBeUndefined();
 		expect(broadcast.net.peek()).toBe(net);
 	} finally {
-		catalogSubscriber?.close();
+		catalog?.close();
 		encoder.close();
 		broadcast.close();
 	}
@@ -940,7 +938,7 @@ test.each(["failure first", "config first"])(
 		});
 		const configuring = configured();
 		const encoder = new Encoder("audio", { broadcast, capture: fakeCapture(new Feed()) as never });
-		let catalogSubscriber: Moq.Track.Subscriber | undefined;
+		let catalog: Json.Snapshot.Consumer<Catalog.Root> | undefined;
 		try {
 			await configuring;
 			await settle();
@@ -954,8 +952,7 @@ test.each(["failure first", "config first"])(
 			if (order === "failure first") encoder.codec.set({ mime: "opus", bitrate: 64_000 });
 			await reconfiguring;
 			await settle();
-			catalogSubscriber = net.track(Broadcast.CATALOG_TRACK).subscribe();
-			const catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track: catalogSubscriber });
+			catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track: net.track(Broadcast.CATALOG_TRACK) });
 			const config = (await catalog.latest())?.value.audio?.renditions.audio;
 			expect(config?.track).toBeDefined();
 			expect(config?.track).not.toBe("audio");
@@ -964,7 +961,7 @@ test.each(["failure first", "config first"])(
 			expect(encoder.out.active.peek()).toBe(true);
 			expect(broadcast.net.peek()).toBe(net);
 		} finally {
-			catalogSubscriber?.close();
+			catalog?.close();
 			encoder.close();
 			broadcast.close();
 		}

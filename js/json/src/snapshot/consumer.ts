@@ -22,9 +22,10 @@ const GAPS: Moq.StreamCode[] = [
  * What {@link latest} skips is gone, so a later {@link next} resumes after it.
  * When something else already owns the track, use the {@link Decoder} directly.
  *
- * A snapshot is superseded the moment a newer one exists, so the consumer pins its subscription's
- * `delay.max` at zero, whatever the subscription asks for, then or later: a group is skipped once
- * a newer one arrives, and a lower group the subscription still owes never holds up a newer one.
+ * A snapshot is superseded the moment a newer one exists, so the consumer subscribes itself at a
+ * zero `delay.max` and keeps that subscription to itself: a group is skipped once a newer one
+ * arrives, and a lower group the subscription still owes never holds up a newer one.
+ * {@link close} ends the subscription.
  */
 export class Consumer<T> {
 	#track: Moq.Track.Ordered;
@@ -34,9 +35,17 @@ export class Consumer<T> {
 	#framesRead = 0;
 
 	constructor(config: Consumer.Config<T>) {
-		this.#track = config.track.ordered();
-		this.#track.pinMaxDelay(Milli.zero);
+		this.#track = config.track
+			.subscribe({ ...Moq.Track.Subscription.default(), priority: config.priority ?? 0, delay: { max: Milli.zero } })
+			.ordered();
 		this.#decoder = new Decoder(config);
+	}
+
+	/** End the consumer's subscription, closing any pending read. Idempotent. */
+	close(): void {
+		this.#group?.close();
+		this.#group = undefined;
+		this.#track.close();
 	}
 
 	/**
@@ -68,7 +77,7 @@ export class Consumer<T> {
 			if (skip) {
 				// Jump to the newest group the reader already has; a newer one supersedes the rest.
 				// Taking groups, not the track's largest position, ignores datagrams (which share
-				// the sequence space) and stays inside any range the caller set on the reader.
+				// the sequence space).
 				// Mirrors the Rust consumer. A newer group restarts from a full snapshot, so switching mid-group loses
 				// nothing but stale state.
 				for (let group = this.#track.tryNextGroup(); group; group = this.#track.tryNextGroup()) {
@@ -141,7 +150,13 @@ export class Consumer<T> {
 export namespace Consumer {
 	/** Snapshot consumer options, including the source track. */
 	export type Config<T> = Pick<CodecConfig<T>, "schema"> & {
-		/** The track to read, whose `delay.max` the consumer pins at zero. */
-		track: Moq.Track.Subscriber;
+		/**
+		 * The track to read: a {@link Moq.Track.Consumer}, or a {@link Moq.Track.Producer} to read
+		 * in-process. The consumer subscribes to it at a zero `delay.max`, with default options
+		 * otherwise.
+		 */
+		track: Pick<Moq.Track.Consumer, "subscribe">;
+		/** Delivery priority of the consumer's subscription, higher first; defaults to 0. */
+		priority?: number;
 	};
 }

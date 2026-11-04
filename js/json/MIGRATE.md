@@ -4,10 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Snapshot consumers always read at a zero delay ([#7736](https://github.com/moq-dev/moq/pull/7736))
+### Snapshot consumers subscribe themselves at a zero delay ([#7736](https://github.com/moq-dev/moq/pull/7736))
 
-`Snapshot.Consumer` sets its subscription's `delay.max` to zero, replacing whatever the subscriber asked for.
-`next()` now skips every group a newer one supersedes, and `latest()` no longer waits for a lower group a received track still owes.
+`Snapshot.Consumer`'s `track` option is the track itself, a `Track.Consumer` (`broadcast.track(name)`) or an in-process `Track.Producer`, instead of a `Track.Subscriber`. The consumer subscribes to it at a zero `delay.max` and default options otherwise; the new `priority` option sets the subscription's priority.
+Call the consumer's new `close()` to end that subscription, where you closed your subscriber before.
+No handle to the subscription leaves the consumer, so ranges, order, and `delay.max` can no longer be set on a snapshot reader.
+
+`next()` skips every group a newer one supersedes, and `latest()` no longer waits for a lower group a received track still owes, whatever another reader of the track asks for.
 A reader that set `delay.max` to replay a snapshot track's history or trail a playhead gets only the newest group: read the track's groups yourself and feed them to a `Snapshot.Decoder`, or publish a `Stream` track when every state must survive, or a `Window` track for a bounded recent history.
 
 ### Compression moves to the track

@@ -584,11 +584,10 @@ void main() {
       ),
       config: moq_json.SnapshotConfig(),
     );
-    final track = await broadcast
-        .consume()
-        .subscribeTrack(name: 'status', subscription: null)
-        .timeout(timeout);
-    final consumer = moq_json.SnapshotConsumer(track: track);
+    final consumer = moq_json.SnapshotConsumer(
+      broadcast: broadcast.consume(),
+      name: 'status',
+    );
 
     for (var n = 1; n <= 4; n++) {
       producer.update(

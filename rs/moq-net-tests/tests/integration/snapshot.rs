@@ -5,8 +5,8 @@ use serde_json::{Value, json};
 use std::{task::Poll, time::Duration};
 
 /// Group 2 arrives while group 1 is still owed: `latest()` and `next()` return it at once,
-/// whatever budget the caller subscribed with or later restores through a retained handle,
-/// since a snapshot consumer pins its max delay at zero.
+/// whatever budget another reader of the track asks for, since a snapshot consumer subscribes
+/// itself at a zero max delay.
 #[test]
 fn reads_skip_an_owed_hole() {
 	for max in [Some(Duration::ZERO), Some(Duration::from_secs(1)), None] {
@@ -15,16 +15,10 @@ fn reads_skip_an_owed_hole() {
 			.create_track("state", track::Info::default())
 			.unwrap();
 		fuzz::received(&track);
-		let subscription = track::Subscription::default().with_delay(track::Delay::default().with_max(max));
-		let reader = || {
-			let subscriber = track.subscribe(subscription.clone());
-			let control = subscriber.control();
-			let consumer = snapshot::Consumer::<Value>::new(subscriber, Default::default());
-			control.update(subscription.clone()).unwrap();
-			(consumer, control)
-		};
-		let (mut latest, latest_control) = reader();
-		let (mut next, next_control) = reader();
+		// The caller's own reader of the track, at the budget it might have wanted.
+		let _other = track.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(max)));
+		let mut latest = snapshot::Consumer::<Value>::new(track.consume(), Default::default());
+		let mut next = snapshot::Consumer::<Value>::new(track.consume(), Default::default());
 		let waiter = kio::Waiter::noop();
 		let put = |sequence: u64| {
 			let mut group = track.create_group(group::Info { sequence }).unwrap();
@@ -44,11 +38,6 @@ fn reads_skip_an_owed_hole() {
 		};
 		assert_eq!(state.value, json!({ "n": 0 }));
 
-		// Restored again while both reads wait: every update keeps the pinned zero.
-		for control in [&latest_control, &next_control] {
-			control.update(subscription.clone()).unwrap();
-			assert_eq!(control.subscription().delay.max, Some(Duration::ZERO));
-		}
 		put(2);
 		let Poll::Ready(Ok(Some(state))) = latest.poll_latest(&waiter) else {
 			panic!("latest waited on owed group 1 with max {max:?}")

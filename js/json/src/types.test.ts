@@ -23,7 +23,7 @@ test("track-owning wrappers take one options object", () => {
 	expect(arities).toEqual([1, 1, 1, 1, 1, 1]);
 
 	const producerTrack: SnapshotProducerInit["track"] = new Track.Producer("test");
-	const consumerTrack: SnapshotConsumerInit["track"] = producerTrack.subscribe();
+	const consumerTrack: SnapshotConsumerInit["track"] = producerTrack;
 	expect(producerTrack).toBeDefined();
 	expect(consumerTrack).toBeDefined();
 });
@@ -51,16 +51,17 @@ test("consumer options omit producer-only knobs", () => {
 });
 
 test("object literals reject producer knobs and positional tracks", () => {
-	const track = new Track.Producer("test").subscribe();
+	const source = new Track.Producer("test");
+	const track = source.subscribe();
 	const reject = () => {
 		// @ts-expect-error deltas is producer-only
-		new Snapshot.Consumer({ track, deltas: true });
+		new Snapshot.Consumer({ track: source, deltas: true });
 		// @ts-expect-error initial is producer-only
-		new Snapshot.Consumer({ track, initial: {} });
+		new Snapshot.Consumer({ track: source, initial: {} });
 		// @ts-expect-error a positional track is not an options object
-		new Snapshot.Consumer(track);
-		// @ts-expect-error a producer track is not a subscriber
-		new Snapshot.Consumer({ track: new Track.Producer("test") });
+		new Snapshot.Consumer(source);
+		// @ts-expect-error a snapshot consumer subscribes itself, so it takes the track, not a subscriber
+		new Snapshot.Consumer({ track });
 		// @ts-expect-error ops is producer-only
 		new Window.Consumer({ track, ops: true });
 		// @ts-expect-error checkpointRecords is producer-only

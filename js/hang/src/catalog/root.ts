@@ -1,6 +1,6 @@
 import * as Json from "@moq/json";
 import type * as Moq from "@moq/net";
-import { Path, Track } from "@moq/net";
+import { Path } from "@moq/net";
 import * as z from "zod/mini";
 import { AudioSchema } from "./audio";
 import { BinarySchema } from "./binary";
@@ -186,15 +186,18 @@ export function checkResolvable(root: Root, base: Moq.Path.Valid): Root {
  * yielded unresolved.
  */
 export async function* watch(broadcast: Moq.Broadcast.Consumer): AsyncIterable<Root> {
-	const track = broadcast.track(TRACK).subscribe({ ...Track.Subscription.default(), priority: PRIORITY.catalog });
+	const consumer = new Json.Snapshot.Consumer<Root>({
+		track: broadcast.track(TRACK),
+		schema: RootSchema,
+		priority: PRIORITY.catalog,
+	});
 	try {
-		const consumer = new Json.Snapshot.Consumer<Root>({ track, schema: RootSchema });
 		for (;;) {
 			const root = await consumer.latest();
 			if (!root) return;
 			yield checkResolvable(checkRenditions(root.value), broadcast.path);
 		}
 	} finally {
-		track.close();
+		consumer.close();
 	}
 }

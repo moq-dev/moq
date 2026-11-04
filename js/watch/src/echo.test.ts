@@ -44,12 +44,11 @@ async function read(origin: Origin.Producer, path: string, clock: Manual): Promi
 	await flush();
 	const broadcast = request.active.peek();
 	if (!broadcast) throw new Error(`no feedback at ${path}`);
-	const track = broadcast.track(Schema.TRACK).subscribe();
-	const consumer = new Json.Snapshot.Consumer<Schema.Snapshot>({ track, schema: Schema.SnapshotSchema });
+	const consumer = new Json.Snapshot.Consumer<Schema.Snapshot>({ track: broadcast.track(Schema.TRACK), schema: Schema.SnapshotSchema });
 	await flush();
 	await clock.advance(Nano.fromMilli(Milli(1000)));
 	const value = (await consumer.latest())?.value;
-	track.close();
+	consumer.close();
 	request.close();
 	return value;
 }

@@ -1485,9 +1485,9 @@ mod tests {
 			let mut previous = None;
 			for (reading, delta) in [(40, 11), (1_000, 7)] {
 				store(reading);
-				let subscriber = pumping(&mut drain, broadcast.track(&name).unwrap().subscribe(None))
-					.await
-					.unwrap();
+				let track = broadcast.track(&name).unwrap();
+				let mut reader = moq_json::snapshot::Consumer::<PresenceFrame>::new(track.clone(), Default::default());
+				pumping(&mut drain, track.info()).await.unwrap();
 				let mut cursor = pumping(&mut drain, broadcast.track(&name).unwrap().subscribe(None))
 					.await
 					.unwrap();
@@ -1497,7 +1497,6 @@ mod tests {
 				}
 				drop(group);
 				drop(cursor);
-				let mut reader = moq_json::snapshot::Consumer::<PresenceFrame>::new(subscriber, Default::default());
 				let initial = pumping(&mut drain, reader.next()).await.unwrap().unwrap().value;
 				assert_eq!(
 					(initial[""].wire_tx, initial[""].wire_rx),
@@ -1577,10 +1576,6 @@ mod tests {
 
 		let track = consumer
 			.track("t.json")
-			.unwrap()
-			.subscribe(None)
-			.now_or_never()
-			.unwrap()
 			.unwrap();
 		let mut reader = moq_json::snapshot::Consumer::<Value>::new(track, Default::default());
 		let mut next = || {
@@ -1745,10 +1740,7 @@ mod tests {
 	async fn read_group(broadcast: &moq_net::broadcast::Consumer, group: &str) -> crate::GroupFrame {
 		let track = broadcast
 			.track(&crate::group_track(moq_net::Path::new(group).unwrap()))
-			.expect("track")
-			.subscribe(None)
-			.await
-			.expect("subscribe");
+			.expect("track");
 		let mut reader = moq_json::snapshot::Consumer::<crate::GroupFrame>::new(track, Default::default());
 		reader.latest().await.expect("read").expect("frame").value
 	}
@@ -1768,7 +1760,7 @@ mod tests {
 	struct Reader<T>(moq_json::snapshot::Consumer<T>);
 
 	impl<T: serde::de::DeserializeOwned + Unpin> Reader<T> {
-		fn new(track: track::Subscriber) -> Self {
+		fn new(track: track::Consumer) -> Self {
 			Self(moq_json::snapshot::Consumer::new(track, Default::default()))
 		}
 
@@ -1795,24 +1787,17 @@ mod tests {
 		broadcast: &moq_net::broadcast::Consumer,
 		name: &str,
 	) -> Reader<T> {
-		Reader::new(
-			broadcast
-				.track(name)
-				.expect("track")
-				.subscribe(None)
-				.await
-				.expect("subscribe"),
-		)
+		let track = broadcast.track(name).expect("track");
+		let reader = Reader::new(track.clone());
+		track.info().await.expect("subscribe");
+		reader
 	}
 
 	/// The latest buffered totals frame.
 	async fn read_totals(broadcast: &moq_net::broadcast::Consumer) -> TotalsFrame {
 		let track = broadcast
 			.track(crate::TOTALS)
-			.expect("track")
-			.subscribe(None)
-			.await
-			.expect("subscribe");
+			.expect("track");
 		let mut reader = moq_json::snapshot::Consumer::<TotalsFrame>::new(track, Default::default());
 		reader.latest().await.expect("read").expect("frame").value
 	}
@@ -2281,13 +2266,11 @@ mod tests {
 			.request(moq_net::Path::from_static("acme"));
 		drive_tick().await;
 		let (_, broadcast) = announced(&origin).await;
-		let track = broadcast
+		let handle = broadcast
 			.track(&crate::group_track(moq_net::Path::from_static("")))
-			.expect("track")
-			.subscribe(None)
-			.await
-			.expect("subscribe");
-		let mut track = moq_json::snapshot::Consumer::<crate::GroupFrame>::new(track, Default::default());
+			.expect("track");
+		let mut track = moq_json::snapshot::Consumer::<crate::GroupFrame>::new(handle.clone(), Default::default());
+		handle.info().await.expect("subscribe");
 		let drain = |track: &mut moq_json::snapshot::Consumer<crate::GroupFrame>| {
 			use futures::FutureExt;
 			let mut frames = Vec::new();
@@ -2358,12 +2341,9 @@ mod tests {
 	/// Subscribe to `label`'s presence track on `broadcast`, driving a tick so
 	/// the producer adopts the request.
 	async fn hold_presence(broadcast: &moq_net::broadcast::Consumer, label: &str) -> Reader<PresenceFrame> {
-		let subscribing = broadcast
-			.track(&presence_track(moq_net::Path::new(label).unwrap()))
-			.expect("track")
-			.subscribe(None);
+		let reader = Reader::new(broadcast.track(&presence_track(moq_net::Path::new(label).unwrap())).expect("track"));
 		drive_tick().await;
-		Reader::new(subscribing.await.expect("held"))
+		reader
 	}
 
 	/// A held presence track is cumulative from when it was first held: it
@@ -2442,15 +2422,11 @@ mod tests {
 		let broadcast = origin.consume().request(".stats/node", None).await.expect("resolve");
 
 		// Let the request reach the stats broadcast's queue before the drain.
-		let subscribing = broadcast
-			.track(&presence_track(moq_net::Path::from_static("")))
-			.expect("track")
-			.subscribe(None);
+		let mut track = Reader::new(broadcast.track(&presence_track(moq_net::Path::from_static(""))).expect("track"));
 		for _ in 0..8 {
 			tokio::task::yield_now().await;
 		}
 		assert_eq!(tick(), 1, "held");
-		let mut track = Reader::new(subscribing.await.expect("held"));
 		assert_eq!(try_presence(&mut track), Some(PresenceFrame::new()), "held at zero");
 
 		// The label records while held: the same subscription carries it.
@@ -2498,12 +2474,9 @@ mod tests {
 	/// Subscribe to `path`'s prefix track on `broadcast`, driving a tick so the
 	/// producer adopts the request.
 	async fn hold_prefix(broadcast: &moq_net::broadcast::Consumer, path: &str) -> Reader<PrefixFrame> {
-		let subscribing = broadcast
-			.track(&prefix_track(moq_net::Path::new(path).unwrap()))
-			.expect("track")
-			.subscribe(None);
+		let reader = Reader::new(broadcast.track(&prefix_track(moq_net::Path::new(path).unwrap())).expect("track"));
 		drive_tick().await;
-		Reader::new(subscribing.await.expect("held"))
+		reader
 	}
 
 	/// The latest buffered prefix frame, `None` when nothing is buffered.
@@ -2696,15 +2669,11 @@ mod tests {
 		};
 		let broadcast = origin.consume().request(".stats/node", None).await.expect("resolve");
 
-		let subscribing = broadcast
-			.track(&prefix_track(moq_net::Path::from_static("acme")))
-			.expect("track")
-			.subscribe(None);
+		let mut track = Reader::new(broadcast.track(&prefix_track(moq_net::Path::from_static("acme"))).expect("track"));
 		for _ in 0..8 {
 			tokio::task::yield_now().await;
 		}
 		assert_eq!(tick(), 1, "held");
-		let mut track = Reader::new(subscribing.await.expect("held"));
 		assert_eq!(last_prefix(&mut track), Some(PrefixFrame::new()), "held at zero");
 
 		let _feed = feed(&registry, Tier::default(), "acme/live", true, 1, 7).await;

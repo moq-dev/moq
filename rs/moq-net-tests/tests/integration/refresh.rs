@@ -76,7 +76,7 @@ async fn json_snapshot_refresh_crosses_a_two_relay_cluster() {
 			);
 			if n == 1 || n == 2 * u64::from(ratio) {
 				let mut join =
-					snapshot::Consumer::<Value>::new(remote.subscribe(None).await.unwrap(), Default::default());
+					snapshot::Consumer::<Value>::new(remote.clone(), Default::default());
 				let received = join.latest().await.unwrap().unwrap();
 				assert_eq!((received.value, received.at), (value(n), Some(at(n))));
 				assert!(producer.poll_refresh(&kio::Waiter::noop()).is_pending());
@@ -138,7 +138,7 @@ async fn json_snapshot_refresh_crosses_a_two_relay_cluster() {
 			serde_json::from_slice::<Value>(&delta.payload).unwrap(),
 			json!({ "n": n + 1 })
 		);
-		let mut current = snapshot::Consumer::<Value>::new(remote.subscribe(None).await.unwrap(), Default::default());
+		let mut current = snapshot::Consumer::<Value>::new(remote.clone(), Default::default());
 		let received = current.latest().await.unwrap().unwrap();
 		assert_eq!((received.value, received.at), (value(n + 1), Some(at(n + 1))));
 		assert!(producer.poll_refresh(&kio::Waiter::noop()).is_pending());

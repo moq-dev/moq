@@ -14,7 +14,7 @@ use std::time::Duration;
 use kio::clock::Instant;
 use moq_net::kio::{self, Pending, Waiter};
 use moq_net::stats::{Presence, Traffic};
-use moq_net::track::Subscribing;
+use moq_net::track::Resolving;
 use moq_net::{Instance, Path, broadcast, origin};
 
 use crate::{
@@ -697,8 +697,9 @@ enum Reader<F> {
 	Resolving(Box<Pending<origin::Requesting>>),
 	/// Waiting for the node's listing to offer the track.
 	Waiting,
-	/// Awaiting the subscription handshake.
-	Subscribing(Pending<Subscribing>),
+	/// Awaiting the subscription handshake: the reader has subscribed, and the
+	/// track's info resolving shows whether the track exists.
+	Subscribing(Box<moq_json::snapshot::Consumer<F>>, Pending<Resolving>),
 	/// Reading frames. Boxed: the snapshot consumer dwarfs the other variants,
 	/// and one lives per node in a map.
 	Active(Box<moq_json::snapshot::Consumer<F>>),
@@ -1001,7 +1002,7 @@ fn advance<S: Shape>(
 					}
 				},
 				Poll::Ready(Ok(broadcast)) => match broadcast.track(name) {
-					Ok(track) => node.reader = Reader::Subscribing(track.subscribe(None)),
+					Ok(track) => node.reader = subscribing(track, config),
 					Err(err) => {
 						tracing::debug!(?err, name, "stats: node missing track");
 						return changed | node.depart();
@@ -1030,17 +1031,19 @@ fn advance<S: Shape>(
 				}
 				node.offered = false;
 				match listing.broadcast().track(name) {
-					Ok(track) => node.reader = Reader::Subscribing(track.subscribe(None)),
+					Ok(track) => node.reader = subscribing(track, config),
 					Err(err) => {
 						tracing::debug!(?err, name, "stats: node missing track");
 						return changed | node.depart();
 					}
 				}
 			}
-			Reader::Subscribing(pending) => match pending.poll_ok(waiter) {
-				Poll::Ready(Ok(subscriber)) => {
-					node.reader =
-						Reader::Active(Box::new(moq_json::snapshot::Consumer::new(subscriber, config.clone())));
+			Reader::Subscribing(_, pending) => match pending.poll_ok(waiter) {
+				Poll::Ready(Ok(_)) => {
+					let Reader::Subscribing(reader, _) = std::mem::replace(&mut node.reader, Reader::Waiting) else {
+						unreachable!("matched above");
+					};
+					node.reader = Reader::Active(reader);
 				}
 				// The listed instance ended before the subscription landed: wait for
 				// the next one.
@@ -1098,6 +1101,16 @@ fn advance<S: Shape>(
 fn resolve<F>(origin: &origin::Consumer, path: &Path, instance: Instance) -> Reader<F> {
 	let pending = origin.request(path, instance);
 	Reader::Resolving(Box::new(pending))
+}
+
+/// Subscribe a node's reader to `track`, awaiting the handshake.
+fn subscribing<F: serde::de::DeserializeOwned>(
+	track: moq_net::track::Consumer,
+	config: &moq_json::snapshot::consumer::Config,
+) -> Reader<F> {
+	// The reader subscribes first, so resolving the info rides on its subscription.
+	let reader = Box::new(moq_json::snapshot::Consumer::new(track.clone(), config.clone()));
+	Reader::Subscribing(reader, track.info())
 }
 
 #[cfg(test)]

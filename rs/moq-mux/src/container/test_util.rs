@@ -278,9 +278,6 @@ impl Clocks {
 	pub(crate) async fn subscribe(consumer: &moq_net::broadcast::Consumer) -> Self {
 		let track = consumer
 			.track(hang::Catalog::DEFAULT_NAME)
-			.unwrap()
-			.subscribe(None)
-			.await
 			.unwrap();
 		Self(crate::catalog::hang::Consumer::new(track))
 	}

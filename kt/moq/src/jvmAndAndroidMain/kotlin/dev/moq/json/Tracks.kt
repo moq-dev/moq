@@ -12,7 +12,7 @@ package dev.moq.json
 //     val track = broadcast.publishTrack("status", TrackInfo(timescale = 1_000uL, compress = true))
 //     val status = SnapshotProducer(broadcast, track, SnapshotConfig())
 //     status.update(Status(state = "live"), CatalogProducer(broadcast).now())
-//     val reader = SnapshotConsumer(consumer.subscribeTrack("status", null))
+//     val reader = SnapshotConsumer(consumer, "status")
 
 import dev.moq.MoqJson
 import dev.moq.Timestamp
@@ -24,7 +24,7 @@ import kotlinx.serialization.serializer
 /** Publishes lossy latest-value JSON snapshots on a track it takes over. */
 typealias SnapshotProducer = uniffi.moq.MoqJsonSnapshotProducer
 
-/** Consumes reconstructed latest-value JSON snapshots from a track it takes over. */
+/** Consumes reconstructed latest-value JSON snapshots from a track it subscribes to itself. */
 typealias SnapshotConsumer = uniffi.moq.MoqJsonSnapshotConsumer
 
 /** Publishes a lossless stream of JSON records on a track it takes over. */
@@ -100,7 +100,7 @@ inline fun <reified T> WindowEventPush.decode(): T =
 /**
  * Stream of each JSON state from a snapshot track, in order.
  *
- * Skips every group a newer one supersedes, whatever the subscription's `delay.max`. Call
+ * Skips every group a newer one supersedes, at the zero `delay.max` the consumer subscribes with. Call
  * [SnapshotConsumer.latest] to skip to the newest state.
  */
 fun SnapshotConsumer.values(): Flow<Value> = pull({ cancel() }) { next() }

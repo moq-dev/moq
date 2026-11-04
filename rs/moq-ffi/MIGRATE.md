@@ -5,6 +5,10 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Snapshot consumers subscribe themselves at a zero delay ([#7736](https://github.com/moq-dev/moq/pull/7736))
+
+`MoqJsonSnapshotConsumer::new(broadcast, name)` takes a `MoqBroadcastConsumer` and the track name instead of a `MoqTrackConsumer`, and subscribes to the track itself at a zero `delay.max`. Drop the `subscribe_track` call; a refused subscription now fails the first read. `next()` skips every group a newer one supersedes, and `latest()` no longer waits for a lower group the track still owes.
+
 ### `MoqVideoInit.lower` takes either producer kind ([#7699](https://github.com/moq-dev/moq/pull/7699))
 
 `MoqVideoInit.lower` is `Option<MoqMediaProducer>` instead of `Option<MoqMediaTrackProducer>`. Wrap a frame producer as `MoqMediaProducer::Track { producer }`; a `MoqMediaTrackStreamProducer` goes in as `MoqMediaProducer::Stream { producer }`.

@@ -12,7 +12,7 @@ use std::task::{Poll, ready};
 
 use serde_json::Value;
 
-use crate::consumer::MoqTrackConsumer;
+use crate::consumer::{MoqBroadcastConsumer, MoqTrackConsumer};
 use crate::demand::MoqTrackDemand;
 use crate::error::MoqError;
 use crate::ffi::Polled;
@@ -228,23 +228,23 @@ pub struct MoqJsonSnapshotConsumer {
 
 #[uniffi::export]
 impl MoqJsonSnapshotConsumer {
-	/// Read `track` as a JSON snapshot track (lossy latest-value).
+	/// Subscribe to the track `name` on `broadcast` and read it as a JSON snapshot track (lossy
+	/// latest-value).
 	///
-	/// Reads a compressed track the same as a plain one. Takes over `track`, whose handle is
-	/// closed afterward; errors if it has already read a group.
+	/// The consumer owns its subscription, at a zero `delay.max`: a read waits for it to resolve and
+	/// fails if it cannot. Reads a compressed track the same as a plain one.
 	#[uniffi::constructor]
-	pub fn new(track: &MoqTrackConsumer) -> Result<Arc<Self>, MoqError> {
+	pub fn new(broadcast: &MoqBroadcastConsumer, name: String) -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::enter();
-		let (track, driver) = track.take()?;
-		let consumer = moq_json::snapshot::Consumer::<Value>::new(track, Default::default());
+		let consumer = moq_json::snapshot::Consumer::<Value>::new(broadcast.inner.track(&name)?, Default::default());
 		Ok(Arc::new(Self {
-			reads: Polled::new(consumer).supervised(driver),
+			reads: Polled::new(consumer).supervised(broadcast.driver.clone()),
 		}))
 	}
 
 	/// Get the next state in order. Returns `None` once the track ends.
 	///
-	/// Skips every group a newer one supersedes, whatever the subscription's `delay.max`.
+	/// Skips every group a newer one supersedes.
 	pub async fn next(&self) -> Result<Option<MoqJsonValue>, MoqError> {
 		let value = self
 			.reads

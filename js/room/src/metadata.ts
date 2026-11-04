@@ -267,10 +267,9 @@ function subscribeJson<T>(
 	effect: Effect,
 	update: (value: T) => void,
 ): void {
-	const track = broadcast.track(name).subscribe({ ...Moq.Track.Subscription.default(), priority: PRIORITY });
-	effect.cleanup(() => track.close());
+	const consumer = new Json.Snapshot.Consumer<T>({ track: broadcast.track(name), schema, priority: PRIORITY });
+	effect.cleanup(() => consumer.close());
 
-	const consumer = new Json.Snapshot.Consumer<T>({ track, schema });
 	effect.spawn(async () => {
 		for (;;) {
 			let state: Moq.Timed<T> | undefined;

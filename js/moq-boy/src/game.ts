@@ -269,13 +269,11 @@ export class Game {
 		const active = effect.get(this.broadcast.out.active);
 		if (!active) return;
 
-		const statusTrack = active.track("status").subscribe({ ...Moq.Track.Subscription.default(), priority: 10 });
-		effect.cleanup(() => statusTrack.close());
-
 		// Reconstruct each status from snapshots and deltas, validated against the schema.
-		const consumer = new Json.Snapshot.Consumer({ track: statusTrack, schema: GameStatusSchema });
+		const consumer = new Json.Snapshot.Consumer({ track: active.track("status"), schema: GameStatusSchema, priority: 10 });
+		effect.cleanup(() => consumer.close());
 
-		// Closing the track on cleanup unblocks a pending latest() (it returns undefined), so the loop
+		// Closing the consumer on cleanup unblocks a pending latest() (it returns undefined), so the loop
 		// ends without racing the teardown.
 		effect.spawn(async () => {
 			for (;;) {

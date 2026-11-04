@@ -755,31 +755,6 @@ test("subscriber options and updates are forwarded to the producer's aggregate",
 	});
 });
 
-test("a pinned max delay survives every later update and reaches the aggregate", async () => {
-	const producer = new TrackProducer("test");
-	const track = producer.subscribe({ priority: 2, delay: { max: Milli(1_000) } });
-	const ordered = track.ordered();
-	ordered.pinMaxDelay(Milli.zero);
-	expect(track.subscription.peek()?.delay?.max).toBe(Milli.zero);
-	expect(track.subscription.peek()?.priority).toBe(2);
-
-	// Either handle restoring the budget keeps the pin and applies the rest.
-	track.update({ priority: 5, delay: { max: null } });
-	ordered.update({ priority: 6, delay: { max: Milli(250) } });
-	const expected: Subscription = {
-		priority: 6,
-		delay: { min: Milli(0), max: Milli(0) },
-		order: "descending",
-		ranges: [{}],
-	};
-	expect(track.subscription.peek()).toEqual(expected);
-	await Promise.resolve();
-	expect(producer.subscription.peek()).toEqual(expected);
-	track.close();
-	producer.finish();
-	producer.close();
-});
-
 test("subscriber maxAge and maxDelay are refused before defaults or updates take effect", () => {
 	const producer = new TrackProducer("test");
 	const track = producer.subscribe({ delay: { max: Milli(250) } });

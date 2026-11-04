@@ -21,6 +21,10 @@ pub struct Config {
 	/// reconstructed value costs no more than that. Set it to hold a smaller document, at the cost
 	/// of re-measuring the value after every delta.
 	pub max_size: Option<usize>,
+
+	/// Delivery priority of the consumer's subscription, higher first, as
+	/// [`Subscription::priority`](moq_net::track::Subscription::priority).
+	pub priority: i8,
 }
 
 /// Consumes a JSON value from a track, reconstructing it from snapshots and deltas.
@@ -30,29 +34,33 @@ pub struct Config {
 /// When something else already owns the track, use the [`Decoder`]
 /// directly.
 ///
-/// A snapshot is superseded the moment a newer one exists, so the consumer always reads at a
-/// zero [`max`](moq_net::track::Delay::max) delay: a group is skipped once a newer one arrives,
-/// and a lower group the subscription still owes never holds up a newer one.
+/// A snapshot is superseded the moment a newer one exists, so the consumer subscribes itself at a
+/// zero [`max`](moq_net::track::Delay::max) delay and keeps that subscription to itself: a group
+/// is skipped once a newer one arrives, and a lower group the subscription still owes never holds
+/// up a newer one.
 pub struct Consumer<T> {
-	track: moq_net::track::Ordered,
+	track: Track,
+	name: String,
 	group: Option<moq_net::group::Consumer>,
 	decoder: Decoder<T>,
 	frames_read: usize,
 }
 
 impl<T: DeserializeOwned> Consumer<T> {
-	/// Create a consumer reading from the given track subscriber.
+	/// Create a consumer reading from the given track.
 	///
-	/// Pins the subscription's [`max`](moq_net::track::Delay::max) delay at zero, whatever the
-	/// caller asked for, then or later through a retained handle; its other preferences, such
-	/// as ranges and priority, stay and still update.
-	/// A [`compress`](moq_net::track::Info::compress)ed track reads the same: moq-net inflates it.
-	pub fn new(track: moq_net::track::Subscriber, config: Config) -> Self {
-		let mut track = track.ordered();
-		// Refused only once the track has ended, which leaves nothing to read anyway.
-		let _ = track.pin_max_delay(std::time::Duration::ZERO);
+	/// Subscribes right away at [`Config::priority`] and a zero
+	/// [`max`](moq_net::track::Delay::max) delay, with default preferences otherwise; no handle to that subscription leaves the
+	/// consumer, so nothing can change its budget. A read waits until the subscription resolves,
+	/// and fails if it cannot. A [`compress`](moq_net::track::Info::compress)ed track reads the
+	/// same: moq-net inflates it.
+	pub fn new(track: moq_net::track::Consumer, config: Config) -> Self {
+		let subscription = moq_net::track::Subscription::default()
+			.with_priority(config.priority)
+			.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::ZERO));
 		Self {
-			track,
+			name: track.name().to_string(),
+			track: Track::Subscribing(track.subscribe(subscription).into_inner()),
 			group: None,
 			decoder: Decoder::new(config),
 			frames_read: 0,
@@ -95,7 +103,7 @@ impl<T: DeserializeOwned> Consumer<T> {
 		if skip {
 			// Jump to the newest group the reader already has; a newer one supersedes the rest.
 			// Taking groups, not the track's largest position, ignores datagrams (which share
-			// the sequence space) and stays inside any cap the caller set on the reader.
+			// the sequence space).
 			while let Poll::Ready(Some(group)) = self.track.poll_next_group(waiter)? {
 				self.group = Some(group);
 				self.frames_read = 0;
@@ -144,7 +152,7 @@ impl<T: DeserializeOwned> Consumer<T> {
 					) =>
 				{
 					// A later group starts a fresh snapshot.
-					tracing::warn!(track = self.track.name(), group = group.sequence, error = ?err,
+					tracing::warn!(track = self.name, group = group.sequence, error = ?err,
 						"snapshot group lost; waiting for a newer one");
 					self.group = None;
 				}
@@ -172,6 +180,24 @@ impl<T: DeserializeOwned> Consumer<T> {
 	}
 }
 
+/// The consumer's own subscription, resolved by the first read.
+enum Track {
+	Subscribing(moq_net::track::Subscribing),
+	Ordered(moq_net::track::Ordered),
+}
+
+impl Track {
+	fn poll_next_group(&mut self, waiter: &kio::Waiter) -> Poll<moq_net::Result<Option<moq_net::group::Consumer>>> {
+		if let Self::Subscribing(pending) = self {
+			*self = Self::Ordered(std::task::ready!(pending.poll_ok(waiter))?.ordered());
+		}
+		match self {
+			Self::Ordered(track) => track.poll_next_group(waiter),
+			Self::Subscribing(_) => unreachable!("resolved above"),
+		}
+	}
+}
+
 #[cfg(test)]
 mod timestamps {
 	use super::*;
@@ -187,10 +213,9 @@ mod timestamps {
 				.produce()
 				.create_track("data", info)
 				.unwrap();
-			let subscriber = track.subscribe(None);
+			let mut consumer = Consumer::<serde_json::Value>::new(track.consume(), Default::default());
+			let mut newest = Consumer::<serde_json::Value>::new(track.consume(), Default::default());
 			let mut producer = crate::snapshot::Producer::new(track, crate::snapshot::Config::default());
-			let mut consumer = Consumer::<serde_json::Value>::new(subscriber, Default::default());
-			let mut newest = Consumer::<serde_json::Value>::new(producer.consume(), Default::default());
 			let times = [0, 810_001, 990_007];
 			for (n, ticks) in times.into_iter().enumerate() {
 				let at = moq_net::Timestamp::new(ticks, scale).unwrap();
@@ -231,9 +256,8 @@ mod timestamps {
 			.produce()
 			.create_track("data", moq_net::track::Info::default().with_compress(true))
 			.unwrap();
-		let subscriber = track.subscribe(None);
+		let mut consumer = Consumer::<serde_json::Value>::new(track.consume(), Default::default());
 		let mut producer = crate::snapshot::Producer::new(track, crate::snapshot::Config::default());
-		let mut consumer = Consumer::<serde_json::Value>::new(subscriber, Default::default());
 		let waiter = kio::Waiter::noop();
 		for n in 0..3 {
 			producer
@@ -266,47 +290,14 @@ mod timestamps {
 	}
 
 	#[test]
-	fn latest_keeps_a_cap_set_before_the_consumer() {
-		let track = moq_net::broadcast::Info::new()
-			.produce()
-			.create_track("data", moq_net::track::Info::default())
-			.unwrap();
-		let mut subscriber = track.subscribe(None);
-		subscriber = subscriber.with_range(..5);
-		let mut producer = crate::snapshot::Producer::new(track, crate::snapshot::Config::default());
-		let mut consumer = Consumer::<serde_json::Value>::new(subscriber, Default::default());
-		let waiter = kio::Waiter::noop();
-		let mut write = |n: u64| {
-			producer.update(&serde_json::json!({ "n": n })).unwrap();
-			producer.cut().unwrap();
-		};
-		for n in 0..4 {
-			write(n);
-		}
-		let Poll::Ready(Ok(Some(value))) = consumer.poll_latest(&waiter) else {
-			panic!("missing latest state")
-		};
-		assert_eq!(value.value["n"], 3);
-		for n in 4..7 {
-			write(n);
-		}
-		let Poll::Ready(Ok(Some(value))) = consumer.poll_latest(&waiter) else {
-			panic!("missing capped state")
-		};
-		assert_eq!(value.value["n"], 4, "latest crossed the cap");
-		assert!(consumer.poll_next(&waiter).is_pending());
-	}
-
-	#[test]
 	fn latest_ignores_datagrams() {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
 			.create_track("data", moq_net::track::Info::default())
 			.unwrap();
 		let mut raw = track.clone();
-		let subscriber = track.subscribe(None);
+		let mut consumer = Consumer::<serde_json::Value>::new(track.consume(), Default::default());
 		let mut producer = crate::snapshot::Producer::new(track, crate::snapshot::Config::default());
-		let mut consumer = Consumer::<serde_json::Value>::new(subscriber, Default::default());
 		let waiter = kio::Waiter::noop();
 		for n in 0..2 {
 			producer.update(&serde_json::json!({ "n": n })).unwrap();

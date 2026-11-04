@@ -1724,17 +1724,7 @@ impl MoqMediaCatalogConsumer {
 	/// Subscribe to this broadcast's catalog snapshots.
 	#[uniffi::constructor]
 	pub async fn subscribe(broadcast: &MoqBroadcastConsumer) -> Result<Arc<MoqMediaCatalogConsumer>, MoqError> {
-		let track = broadcast
-			.driver
-			.watch(async {
-				Ok(broadcast
-					.inner
-					.track(hang::catalog::Catalog::DEFAULT_NAME)?
-					.subscribe(hang::catalog::Catalog::default_subscription())
-					.await?)
-			})
-			.await?;
-		let consumer = moq_mux::catalog::hang::Consumer::from(track);
+		let consumer = moq_mux::catalog::hang::Consumer::new(broadcast.inner.track(hang::catalog::Catalog::DEFAULT_NAME)?);
 		Ok(Arc::new(MoqMediaCatalogConsumer {
 			reads: Polled::new(consumer).supervised(broadcast.driver.clone()),
 		}))
@@ -2076,9 +2066,6 @@ mod timebase_tests {
 				.consume_inner()
 				.unwrap()
 				.track(hang::catalog::Catalog::DEFAULT_NAME)
-				.unwrap()
-				.subscribe(moq_net::track::Subscription::default())
-				.await
 				.unwrap();
 			let mut catalog = moq_mux::catalog::hang::Consumer::<Extra>::new(track);
 			assert!(catalog.poll_next(&kio::Waiter::noop()).is_pending());
@@ -2104,9 +2091,6 @@ mod timebase_tests {
 			.consume_inner()
 			.unwrap()
 			.track(hang::catalog::Catalog::DEFAULT_NAME)
-			.unwrap()
-			.subscribe(moq_net::track::Subscription::default())
-			.await
 			.unwrap();
 		let mut reader = moq_mux::catalog::hang::Consumer::<Extra>::new(track);
 		let catalog = MoqMediaCatalogProducer::new(owner.clone()).unwrap();

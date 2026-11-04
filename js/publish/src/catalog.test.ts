@@ -17,7 +17,7 @@ test("catalog producer seeds subscribers and fans out edits", async () => {
 	const effect = new Effect();
 	const track = new Track.Producer("catalog.json");
 	catalog.serve(track, effect);
-	const consumer = new Json.Snapshot.Consumer<Catalog.Root>({ track: track.subscribe() });
+	const consumer = new Json.Snapshot.Consumer<Catalog.Root>({ track });
 
 	// A new subscriber is seeded with the current catalog.
 	expect((await consumer.latest())?.value.video).toEqual({ renditions: {} });
@@ -57,7 +57,7 @@ test("catalog producer computes the version from the fields it uses", async () =
 	const effect = new Effect();
 	const track = new Track.Producer("catalog.json");
 	catalog.serve(track, effect);
-	const consumer = new Json.Snapshot.Consumer<Catalog.Root>({ track: track.subscribe() });
+	const consumer = new Json.Snapshot.Consumer<Catalog.Root>({ track });
 	const video = { codec: "avc1.64001f", container: { kind: "legacy" as const } };
 
 	// A caller's own version is replaced by the computed one.
@@ -116,7 +116,7 @@ test("catalog producer advertises the page clock from the first snapshot", async
 	const effect = new Effect();
 	const track = new Track.Producer("catalog.json");
 	catalog.serve(track, effect);
-	const consumer = new Json.Snapshot.Consumer<Catalog.Root>({ track: track.subscribe() });
+	const consumer = new Json.Snapshot.Consumer<Catalog.Root>({ track });
 
 	// Before any rendition: a live-only publisher exposes its clock.
 	const first = Catalog.RootSchema.parse((await consumer.latest())?.value);
@@ -179,7 +179,7 @@ test("a reconnecting subscriber is seeded with the full current catalog", async 
 	const effect = new Effect();
 	const track = new Track.Producer("catalog.json");
 	catalog.serve(track, effect);
-	const seeded = (await new Json.Snapshot.Consumer<Catalog.Root>({ track: track.subscribe() }).latest())?.value;
+	const seeded = (await new Json.Snapshot.Consumer<Catalog.Root>({ track }).latest())?.value;
 	expect(seeded?.video).toEqual({ renditions: {} });
 	expect(seeded?.scte35).toEqual({ splices: [] });
 
@@ -351,7 +351,7 @@ describe("estimate publication window", () => {
 		scopes.push(effect);
 		const track = new Track.Producer("catalog.json");
 		producer.serve(track, effect);
-		const consumer = new Json.Snapshot.Consumer<Catalog.Root>({ track: track.subscribe() });
+		const consumer = new Json.Snapshot.Consumer<Catalog.Root>({ track });
 		const estimate = (jitter: number) =>
 			producer.mutate((catalog) => {
 				if (!catalog.video) throw new Error("video missing");
@@ -440,7 +440,7 @@ describe("estimate publication window", () => {
 		scopes.push(again);
 		const track = new Track.Producer("catalog.json");
 		producer.serve(track, again);
-		const reader = new Json.Snapshot.Consumer<Catalog.Root>({ track: track.subscribe() });
+		const reader = new Json.Snapshot.Consumer<Catalog.Root>({ track });
 		await reader.latest();
 		estimate(3);
 		expect((await reader.latest())?.value.video?.renditions.v.jitter).toBe(Catalog.u53(3));

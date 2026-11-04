@@ -393,10 +393,10 @@ async fn next<S: Stream>(catalog: &mut Option<S>) -> moq_mux::Result<Option<moq_
 }
 
 /// Read a report track, holding at most [`MAX_REPORT`] of it.
-fn reader(subscriber: moq_net::track::Subscriber) -> moq_json::snapshot::Consumer<serde_json::Value> {
+fn reader(track: moq_net::track::Consumer) -> moq_json::snapshot::Consumer<serde_json::Value> {
 	let mut config = moq_json::snapshot::consumer::Config::default();
 	config.max_size = Some(MAX_REPORT);
-	moq_json::snapshot::Consumer::new(subscriber, config)
+	moq_json::snapshot::Consumer::new(track, config)
 }
 
 /// The next snapshot of a report track, or never while there is none.
@@ -437,10 +437,7 @@ pub async fn print_report(origin: moq_net::origin::Consumer, path: String) -> an
 				let stats = update.stats.map(|stats| stats.track);
 				if stats != named {
 					track = match &stats {
-						Some(name) => {
-							let subscriber = broadcast.track(name)?.subscribe(None).await?;
-							Some(reader(subscriber))
-						}
+						Some(name) => Some(reader(broadcast.track(name)?)),
 						None => None,
 					};
 					named = stats;
@@ -567,8 +564,7 @@ impl Readers {
 async fn read_echo(origin: moq_net::origin::Consumer, path: moq_net::Path, lines: tokio::sync::mpsc::Sender<String>) {
 	let read = async {
 		let broadcast = origin.request(&path, None).await?;
-		let subscriber = broadcast.track(hang::echo::TRACK)?.subscribe(None).await?;
-		let mut track = reader(subscriber);
+		let mut track = reader(broadcast.track(hang::echo::TRACK)?);
 		while let Some(moq_net::Timed { value: feedback, .. }) = track.latest().await? {
 			let line = EchoLine {
 				broadcast: path.as_str(),
@@ -601,7 +597,7 @@ mod tests {
 			.produce()
 			.create_track(STATS_TRACK, None)
 			.unwrap();
-		let mut read = reader(track.subscribe(None));
+		let mut read = reader(track.consume());
 		let mut report = moq_json::snapshot::Producer::<serde_json::Value>::new(track, Default::default());
 		report
 			.update(&serde_json::json!({ "pad": "x".repeat(MAX_REPORT) }))

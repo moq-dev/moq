@@ -505,8 +505,8 @@ class Reader implements ResumeSource {
 	/**
 	 * Ask every copy for the reader's preferences once they changed. The subscription signal
 	 * notifies a microtask after an update, so every read mirrors first too: a group a copy picks
-	 * then follows the preferences the reader holds, such as a pinned `delay.max`, not its last
-	 * ones. Mirrors the Rust `Reader::sync`.
+	 * then follows the preferences the reader holds, such as a just-lowered `delay.max`, not its
+	 * last ones. Mirrors the Rust `Reader::sync`.
 	 */
 	#mirror(): void {
 		const subscription = this.#shell.subscription.peek();

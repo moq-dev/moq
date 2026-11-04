@@ -4,10 +4,14 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Snapshot consumers always read at a zero delay ([#7736](https://github.com/moq-dev/moq/pull/7736))
+### Snapshot consumers subscribe themselves at a zero delay ([#7736](https://github.com/moq-dev/moq/pull/7736))
 
-`snapshot::Consumer::new` sets its subscription's `delay.max` to zero, replacing whatever the subscriber asked for.
-`next()` now skips every group a newer one supersedes, and `latest()` no longer waits for a lower group a received track still owes.
+`snapshot::Consumer::new` takes the track, a `moq_net::track::Consumer`, instead of a `track::Subscriber`, and subscribes to it itself at a zero `delay.max` and default preferences otherwise; the new `Config::priority` sets the subscription's priority.
+Pass `broadcast.track(name)?` rather than `broadcast.track(name)?.subscribe(..).await?`, or `producer.consume()` for an in-process `track::Producer`.
+A refused or failed subscription now surfaces from the first read instead of before construction.
+No handle to that subscription leaves the consumer, so ranges, order, and `delay.max` can no longer be set on a snapshot reader.
+
+`next()` skips every group a newer one supersedes, and `latest()` no longer waits for a lower group a received track still owes, whatever another reader of the track asks for.
 A reader that set `delay.max` to replay a snapshot track's history or trail a playhead gets only the newest group: read the track's groups yourself and feed them to a `snapshot::Decoder`, or publish a `stream` track when every state must survive, or a `window` track for a bounded recent history.
 
 ### Compression moves to the track

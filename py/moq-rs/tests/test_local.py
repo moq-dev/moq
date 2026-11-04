@@ -537,7 +537,7 @@ async def test_json_snapshot_roundtrip():
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("status", moq.TrackInfo(timescale=1_000_000, compress=True))
     producer = moq.json.SnapshotProducer(broadcast, track)
-    consumer = moq.json.SnapshotConsumer(await broadcast.consume().subscribe_track("status"))
+    consumer = moq.json.SnapshotConsumer(broadcast.consume(), "status")
 
     for viewers in range(1, 5):
         producer.update({"viewers": viewers}, moq.Timestamp(viewers, 1_000))
@@ -664,7 +664,7 @@ async def test_json_producers_report_demand():
     assert snapshot_demand.wanted() is None
 
     consumer = broadcast.consume()
-    snapshot_consumer = moq.json.SnapshotConsumer(await consumer.subscribe_track("status"))
+    snapshot_consumer = moq.json.SnapshotConsumer(consumer, "status")
     stream_consumer = moq.json.StreamConsumer(await consumer.subscribe_track("events"))
     await asyncio.wait_for(until_wanted(snapshot_demand), timeout=5.0)
     await asyncio.wait_for(until_wanted(stream_demand), timeout=5.0)
@@ -1783,7 +1783,7 @@ async def test_dynamic_and_json_handles_are_async_context_managers():
     await assert_cancelled(track_dynamic.requested_fill())
 
     snapshot = moq.json.SnapshotProducer(broadcast, broadcast.publish_track("state", moq.TrackInfo(timescale=1_000)))
-    async with moq.json.SnapshotConsumer(await broadcast.consume().subscribe_track("state")) as snapshot_consumer:
+    async with moq.json.SnapshotConsumer(broadcast.consume(), "state") as snapshot_consumer:
         pass
     await assert_cancelled(anext(snapshot_consumer))
 

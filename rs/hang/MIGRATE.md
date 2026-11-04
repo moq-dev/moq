@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Snapshot consumers subscribe themselves at a zero delay ([#7736](https://github.com/moq-dev/moq/pull/7736))
+
+`catalog::Consumer::new` takes the catalog track, a `moq_net::track::Consumer`, instead of a `track::Subscriber`, and subscribes to it itself at `Catalog::default_subscription()`'s priority and a zero `delay.max`, so `latest` never waits on a catalog group the track still owes.
+Pass `broadcast.track(Catalog::DEFAULT_NAME)?` rather than subscribing first; `Catalog::subscribe` is unchanged.
+A refused subscription now surfaces from the first read.
+
 ### Compression moves to the track
 
 `catalog::Compression`, the `compression` field on `JsonConfig` and `BinaryConfig`, `Catalog::COMPRESSED_NAME`, and `catalog::Consumer::compressed` are gone.

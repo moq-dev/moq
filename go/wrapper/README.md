@@ -108,8 +108,9 @@ so the media importer selects the timescale.
 JSON tracks live in the `moq.dev/moq/json` subpackage, mirroring the `moq-json` crate.
 Import it under an alias next to `encoding/json`. Each type wraps a track:
 `NewSnapshotProducer` / `NewStreamProducer` take over a `TrackProducer` and advertise it
-in the broadcast's catalog, and `NewSnapshotConsumer` / `NewStreamConsumer` take over a
-`TrackConsumer` that has not read a group yet. Snapshots carry lossy latest state; streams
+in the broadcast's catalog, `NewStreamConsumer` takes over a `TrackConsumer` that has not
+read a group yet, and `NewSnapshotConsumer` takes the `BroadcastConsumer` and track name and
+subscribes itself at a zero `Delay.Max`. Snapshots carry lossy latest state; streams
 carry every record in order. `NewWindowProducer` / `NewWindowConsumer` carry a sliding window
 of records a reader can join at any point; the catalog has no window mode, so the producer
 takes only the track. Producers accept any `encoding/json` value; consumers return

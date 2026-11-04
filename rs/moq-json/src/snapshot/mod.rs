@@ -181,27 +181,24 @@ mod test {
 		moq_net::track::Info::default().with_compress(true)
 	}
 
-	fn producer(config: Config) -> (Producer<Value>, moq_net::track::Subscriber) {
+	fn producer(config: Config) -> (Producer<Value>, moq_net::track::Consumer) {
 		producer_on(config, moq_net::track::Info::default())
 	}
 
-	fn producer_on(config: Config, info: moq_net::track::Info) -> (Producer<Value>, moq_net::track::Subscriber) {
+	fn producer_on(config: Config, info: moq_net::track::Info) -> (Producer<Value>, moq_net::track::Consumer) {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
 			.create_track("test", info)
 			.unwrap();
-		let consumer = track.subscribe(None);
+		let consumer = track.consume();
 		(Producer::new(track, config), consumer)
 	}
 
 	/// Demand follows the track's subscribers, so a producer can idle while nobody is watching.
 	#[test]
 	fn demand_follows_subscribers() {
-		let (producer, consumer) = producer(Config::default());
+		let (producer, _track) = producer(Config::default());
 		let demand = producer.demand();
-		assert_eq!(demand.wanted(), Some(0));
-
-		drop(consumer);
 		assert_eq!(demand.wanted(), None);
 
 		let _consumer = producer.consume();
@@ -209,7 +206,7 @@ mod test {
 	}
 
 	/// Drain newest states currently available from a plaintext consumer without blocking.
-	fn drain(track: moq_net::track::Subscriber) -> Vec<Value> {
+	fn drain(track: moq_net::track::Consumer) -> Vec<Value> {
 		drain_with(Consumer::<Value>::new(track, consumer::Config::default()))
 	}
 
@@ -254,7 +251,7 @@ mod test {
 				.produce()
 				.create_track("test", timed())
 				.unwrap();
-			let mut consumer = Consumer::<Value>::new(track.subscribe(None), consumer::Config::default());
+			let mut consumer = Consumer::<Value>::new(track.consume(), consumer::Config::default());
 			let waiter = kio::Waiter::noop();
 
 			// Group 0 delivers a value, then stays open with the reader parked on its next frame.
@@ -289,7 +286,7 @@ mod test {
 			.produce()
 			.create_track("test", timed())
 			.unwrap();
-		let mut consumer = Consumer::<Value>::new(track.subscribe(None), consumer::Config::default());
+		let mut consumer = Consumer::<Value>::new(track.consume(), consumer::Config::default());
 		let waiter = kio::Waiter::noop();
 
 		let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
@@ -717,7 +714,7 @@ mod test {
 			.produce()
 			.create_track("test", moq_net::track::Info::default())
 			.unwrap();
-		let consumer = track.subscribe(None);
+		let consumer = Consumer::<Value>::new(track.consume(), consumer::Config::default());
 		let mut producer = Producer::<Doc>::new(track, Config::default());
 		producer.update(&Doc { count: 1 }).unwrap();
 
@@ -725,7 +722,7 @@ mod test {
 
 		// The refused edit published nothing after the original value.
 		producer.finish().unwrap();
-		assert_eq!(drain(consumer), vec![json!({ "count": "1", "other": 1 })]);
+		assert_eq!(drain_with(consumer), vec![json!({ "count": "1", "other": 1 })]);
 	}
 
 	/// An end declared ahead of the live edge still admits the edit below it, and refuses the one
@@ -762,7 +759,7 @@ mod test {
 			.produce()
 			.create_track("test", moq_net::track::Info::default())
 			.unwrap();
-		let consumer = track.subscribe(None);
+		let mut consumer = Consumer::<Doc>::new(track.consume(), consumer::Config::default());
 		let mut producer = Producer::<Doc>::new(track, Config::default());
 
 		// First owner sets its field.
@@ -776,7 +773,6 @@ mod test {
 
 		producer.finish().unwrap();
 
-		let mut consumer = Consumer::<Doc>::new(consumer, consumer::Config::default());
 		let waiter = kio::Waiter::noop();
 		let mut last = None;
 		while let Poll::Ready(Ok(Some(value))) = consumer.poll_latest(&waiter) {
@@ -806,7 +802,8 @@ mod test {
 			.produce()
 			.create_track("test", moq_net::track::Info::default())
 			.unwrap();
-		let mut consumer = track.subscribe(None);
+		let mut raw = track.subscribe(None);
+		let mut consumer = Consumer::<Doc>::new(track.consume(), consumer::Config::default());
 		let mut producer = Producer::<Doc>::new(track, cfg(false));
 
 		producer.mutate(|doc| doc.video = Some("v1".to_string()), None).unwrap();
@@ -818,7 +815,7 @@ mod test {
 		// otherwise open a group of its own.
 		producer.mutate(|_| {}, None).unwrap();
 		assert_eq!(
-			consumer
+			raw
 				.largest()
 				.now_or_never()
 				.flatten()
@@ -828,7 +825,6 @@ mod test {
 
 		producer.finish().unwrap();
 
-		let mut consumer = Consumer::<Doc>::new(consumer, consumer::Config::default());
 		let waiter = kio::Waiter::noop();
 		let mut last = None;
 		while let Poll::Ready(Ok(Some(value))) = consumer.poll_latest(&waiter) {
@@ -893,7 +889,7 @@ mod test {
 	fn a_dropped_failed_edit_aborts_the_track() {
 		let (mut producer, track) = producer(cfg(false));
 		producer.update(&json!({ "keep": true })).unwrap();
-		let mut subscriber = track.ordered();
+		let mut subscriber = track.subscribe(None).now_or_never().unwrap().unwrap().ordered();
 
 		*producer.modify(None).unwrap() = json!({ "big": "x".repeat(moq_net::group::MAX_CACHE_BYTES as usize + 1) });
 
@@ -1112,10 +1108,8 @@ mod test {
 			.create_track("test", timed())
 			.unwrap();
 		let mut group = track.append_group().unwrap();
-		let consumer_track = track.subscribe(None);
+		let mut consumer = Consumer::<Value>::new(track.consume(), consumer::Config::default());
 		track.finish().unwrap();
-
-		let mut consumer = Consumer::<Value>::new(consumer_track, consumer::Config::default());
 		let waiter = kio::Waiter::noop();
 
 		// Track is finished but the open group is empty: pending, not end-of-stream.
@@ -1203,7 +1197,7 @@ mod test {
 		for n in 0..=40 {
 			producer.update(&json!({ "n": n })).unwrap();
 		}
-		let late = producer.consume();
+		let late = Consumer::<Value>::new(track.clone(), consumer::Config::default());
 		assert!(matches!(
 			producer.poll_refresh(&kio::Waiter::noop()),
 			Poll::Ready(Ok(()))
@@ -1215,7 +1209,7 @@ mod test {
 			track.largest().now_or_never().flatten().map(|position| position.group),
 			Some(1)
 		);
-		assert_eq!(drain(late).last().unwrap(), &json!({ "n": 41 }));
+		assert_eq!(drain_with(late).last().unwrap(), &json!({ "n": 41 }));
 	}
 
 	#[test]

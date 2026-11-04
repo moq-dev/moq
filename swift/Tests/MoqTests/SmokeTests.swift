@@ -418,7 +418,7 @@ final class SmokeTests: XCTestCase {
             broadcast: broadcast,
             track: try broadcast.publishTrack(name: "status", info: TrackInfo(timescale: 1_000_000, compress: true)))
         let consumer = try Json.SnapshotConsumer<Status>(
-            track: try await broadcast.consume().subscribeTrack(name: "status"))
+            broadcast: try broadcast.consume(), name: "status")
 
         for viewers in 1...4 {
             try producer.update(Status(state: "live", viewers: viewers), timestamp: micros(UInt64(viewers) * 1000))
@@ -511,7 +511,7 @@ final class SmokeTests: XCTestCase {
         let consumer = try broadcast.consume()
 
         let snapshotConsumer = try Json.SnapshotConsumer<[String: Int]>(
-            track: try await consumer.subscribeTrack(name: "status"))
+            broadcast: consumer, name: "status")
         let streamConsumer = try Json.StreamConsumer<[String: Int]>(
             track: try await consumer.subscribeTrack(name: "events"))
         while try await snapshotDemand.wantedChanged() == nil {}

@@ -198,12 +198,11 @@ pub fn catalog(data: &[u8]) -> bool {
 	let track = broadcast
 		.create_track(name, info)
 		.expect("a fresh broadcast has no catalog");
-	let subscriber = track.subscribe(None);
 	let mut next: Box<dyn FnMut() -> Poll<CatalogUpdate>> = if selector & 1 == 0 {
-		let mut consumer = crate::catalog::hang::Consumer::<()>::new(subscriber);
+		let mut consumer = crate::catalog::hang::Consumer::<()>::new(track.consume());
 		Box::new(move || consumer.poll_next(&waiter))
 	} else {
-		let mut consumer = crate::catalog::msf::Consumer::<()>::new(subscriber);
+		let mut consumer = crate::catalog::msf::Consumer::<()>::new(track.subscribe(None));
 		Box::new(move || consumer.poll_next(&waiter))
 	};
 

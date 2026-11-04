@@ -383,20 +383,23 @@ export class Broadcast {
 
 		this.#out.status.set("loading");
 
-		const trackName = format === "hang" ? Catalog.TRACK : "catalog";
-		const track = broadcast.track(trackName).subscribe({
-			...Track.Subscription.default(),
-			priority: Catalog.PRIORITY.catalog,
-		});
-		effect.cleanup(() => track.close());
-
 		// The hang catalog is reconstructed from snapshots (and future deltas) via @moq/json, which reads
-		// it compressed or not; MSF stays on its own one-blob-per-group fetch.
+		// it compressed or not and subscribes itself; MSF stays on its own one-blob-per-group fetch.
 		let fetchNext: () => Promise<Catalog.Root | undefined>;
 		if (format === "hang") {
-			const consumer = new Json.Snapshot.Consumer<Catalog.Root>({ track, schema: Catalog.RootSchema });
+			const consumer = new Json.Snapshot.Consumer<Catalog.Root>({
+				track: broadcast.track(Catalog.TRACK),
+				schema: Catalog.RootSchema,
+				priority: Catalog.PRIORITY.catalog,
+			});
+			effect.cleanup(() => consumer.close());
 			fetchNext = async () => (await consumer.latest())?.value;
 		} else {
+			const track = broadcast.track("catalog").subscribe({
+				...Track.Subscription.default(),
+				priority: Catalog.PRIORITY.catalog,
+			});
+			effect.cleanup(() => track.close());
 			const ordered = track.ordered();
 			fetchNext = async () => {
 				const update = await Msf.fetch(ordered);

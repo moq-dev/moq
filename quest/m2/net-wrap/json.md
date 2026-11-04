@@ -12,9 +12,10 @@ types, so each publishes into and reads from a wrapped track unchanged.
 
 - moq-json takes the trait, not a wrapper role (decided 2026-10-20,
   maintainer): its `Encoder`/`Decoder` codec layer stays as it is, and only
-  `Producer::new(track::Producer)` and `Consumer::new(track::Subscriber)` in
-  `snapshot`, `stream`, and `window` become generic.
-- hang: `catalog::Consumer::new(track::Subscriber)`,
+  `Producer::new(track::Producer)` in `snapshot`, `stream`, and `window`,
+  `snapshot::Consumer::new(track::Consumer)`, which subscribes itself, and
+  `Consumer::new(track::Subscriber)` in `stream` and `window` become generic.
+- hang: `catalog::Consumer::new(track::Consumer)`,
   `Root::subscribe(&broadcast::Consumer)`, and
   `container::Frame::write_to(&mut group::Producer)` are the entry points.
 - moq-stats: the produce and consume paths that hold moq-net broadcasts and

@@ -20,8 +20,10 @@ pub struct Consumer<E: CatalogExt = ()> {
 }
 
 impl<E: CatalogExt> Consumer<E> {
-	/// Create a new catalog consumer from a `catalog.json` track subscriber, compressed or not.
-	pub fn new(track: moq_net::track::Subscriber) -> Self {
+	/// Create a new catalog consumer reading a `catalog.json` track, compressed or not.
+	///
+	/// Subscribes to the track itself; see [`hang::catalog::Consumer::new`].
+	pub fn new(track: moq_net::track::Consumer) -> Self {
 		Self {
 			inner: hang::catalog::Consumer::new(track),
 		}
@@ -54,8 +56,8 @@ impl<E: CatalogExt> Consumer<E> {
 	}
 }
 
-impl<E: CatalogExt> From<moq_net::track::Subscriber> for Consumer<E> {
-	fn from(inner: moq_net::track::Subscriber) -> Self {
+impl<E: CatalogExt> From<moq_net::track::Consumer> for Consumer<E> {
+	fn from(inner: moq_net::track::Consumer) -> Self {
 		Self::new(inner)
 	}
 }

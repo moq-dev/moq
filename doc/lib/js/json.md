@@ -35,9 +35,10 @@ for await (const { value, at } of consumer) {
 ```
 
 `next()` yields every buffered state of the group it is reading and skips a
-group once a newer one supersedes it: the consumer always reads at a zero
-`delay.max`, whatever the subscription asked for. Use `latest()` to skip
-straight to the head.
+group once a newer one supersedes it: the consumer takes the track, a
+`Track.Consumer` such as `broadcast.track(name)`, and subscribes to it itself at
+a zero `delay.max`, so nothing can raise its budget. Use `latest()` to skip
+straight to the head, and `close()` to end the subscription.
 
 A stream rides one group with no record-count or cumulative byte limit. The
 group retains a 32 MiB tail; a reader that falls behind gets `Evicted` rather

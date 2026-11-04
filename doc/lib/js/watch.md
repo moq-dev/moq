@@ -145,13 +145,11 @@ const dispose = el.signals.run((effect) => {
     const name = metadata?.[0];
     if (!active || !name) return;
 
-    const track = active.track(name).subscribe({
-        ...Moq.Track.Subscription.default(),
+    const consumer = new Json.Snapshot.Consumer<unknown>({
+        track: active.track(name),
         priority: Hang.Catalog.PRIORITY.catalog,
     });
-    effect.cleanup(() => track.close());
-
-    const consumer = new Json.Snapshot.Consumer<unknown>({ track });
+    effect.cleanup(() => consumer.close());
     effect.spawn(async () => {
         for (;;) {
             const state = await effect.race(consumer.latest());

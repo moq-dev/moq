@@ -155,10 +155,11 @@ type SnapshotConsumer struct {
 	inner *ffi.MoqJsonSnapshotConsumer
 }
 
-// NewSnapshotConsumer reads track as a lossy latest-value JSON track. It takes over
-// track, whose handle is closed afterward, and fails if track has already read a group.
-func NewSnapshotConsumer(track *moq.TrackConsumer) (*SnapshotConsumer, error) {
-	inner, err := ffi.NewMoqJsonSnapshotConsumer(bridge.TrackConsumer(track))
+// NewSnapshotConsumer subscribes to the track named name on broadcast and reads it as a
+// lossy latest-value JSON track. The consumer owns its subscription, at a zero Delay.Max;
+// a read waits for it to resolve and fails if it cannot.
+func NewSnapshotConsumer(broadcast *moq.BroadcastConsumer, name string) (*SnapshotConsumer, error) {
+	inner, err := ffi.NewMoqJsonSnapshotConsumer(bridge.BroadcastConsumer(broadcast), name)
 	if err != nil {
 		return nil, err
 	}
@@ -166,7 +167,7 @@ func NewSnapshotConsumer(track *moq.TrackConsumer) (*SnapshotConsumer, error) {
 }
 
 // Next returns the next state in order, or nil when the track ends. It skips
-// every group a newer one supersedes, whatever the subscription's Delay.Max.
+// every group a newer one supersedes.
 func (c *SnapshotConsumer) Next(ctx context.Context) (*Timed, error) {
 	value, err := bridge.Call(ctx, c.inner.Cancel, c.inner.Next)
 	return timed(value), err
