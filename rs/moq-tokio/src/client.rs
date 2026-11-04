@@ -4,8 +4,7 @@
 //! QUIC settings ([`crate::quic::Config`]) a binary shares with its accept half. The
 //! accept side is [`crate::server`].
 
-use crate::connection::Goaway;
-use crate::{Addrs, Backoff, Connection, Error, Restart};
+use crate::{Addrs, Connection, Error, Restart};
 #[cfg(all(feature = "websocket", feature = "quic"))]
 use std::future::Future;
 use url::Url;
@@ -51,16 +50,8 @@ pub struct Client {
 	connect: Option<Url>,
 	/// The credentials each new connection starts presenting.
 	pub(crate) tokens: Vec<moq_net::auth::Token>,
-	/// Deadline for one [`Client::connect`], from [`crate::connect::Config::timeout`]. Zero waits forever.
-	#[cfg(feature = "_transport")]
-	timeout: std::time::Duration,
-	pub(crate) reconnect: bool,
-	pub(crate) backoff: Backoff,
-	pub(crate) goaway: Goaway,
-	pub(crate) restart: Restart,
-	/// Whether the TLS config pins a certificate fingerprint, which only verifies
-	/// the configured host, so a GOAWAY may not redirect elsewhere.
-	pub(crate) pinned: bool,
+	/// The connect deadline, backoff, and GOAWAY handling each [`Connection`] runs under.
+	pub(crate) policy: moq_net::reconnect::Config,
 	/// The resolved Happy Eyeballs timings, used by the `tcp://` and `tls://`
 	/// dials here; the QUIC backend captures its own copy from the config.
 	#[cfg(feature = "tcp")]
@@ -91,10 +82,12 @@ pub struct Client {
 	pub(crate) dialer: Option<std::sync::Arc<Dialer>>,
 }
 
-/// A test stand-in for [`Client::dial`].
+/// A test stand-in for [`Client::dial`], handed the address and the MoQ client a real dial
+/// would handshake with.
 #[cfg(test)]
-pub(crate) type Dialer =
-	dyn Fn(crate::connect::Addr) -> std::pin::Pin<Box<dyn Future<Output = crate::Result<Dialed>> + Send>> + Send + Sync;
+pub(crate) type Dialer = dyn Fn(crate::connect::Addr, moq_net::Client) -> std::pin::Pin<Box<dyn Future<Output = crate::Result<Dialed>> + Send>>
+	+ Send
+	+ Sync;
 
 impl Client {
 	/// Build a client from its config.
@@ -146,7 +139,11 @@ impl Client {
 		let tcp_tls = config.tls.clone();
 		#[cfg(feature = "websocket")]
 		let tls_host_name = config.tls.host_name.clone();
-		let timeout = resolved.timeout;
+		let mut policy = moq_net::reconnect::Config::default();
+		policy.backoff = config.backoff.resolve();
+		policy.goaway = config.goaway.resolve();
+		policy.timeout = resolved.timeout;
+		policy.pinned = !config.tls.fingerprint.is_empty();
 
 		let mut moq = moq_net::Client::new()
 			.with_versions(versions.clone())
@@ -160,12 +157,7 @@ impl Client {
 			versions,
 			connect: config.url,
 			tokens: config.tokens,
-			timeout,
-			reconnect: true,
-			backoff: config.backoff,
-			goaway: config.goaway,
-			restart: Restart::default(),
-			pinned: !config.tls.fingerprint.is_empty(),
+			policy,
 			#[cfg(feature = "tcp")]
 			failover_delay,
 			#[cfg(feature = "tcp")]
@@ -247,13 +239,13 @@ impl Client {
 	///
 	/// Defaults to true. Each clone can choose its own reconnect policy.
 	pub fn with_reconnect(mut self, reconnect: bool) -> Self {
-		self.reconnect = reconnect;
+		self.policy.once = !reconnect;
 		self
 	}
 
 	/// Choose what a GOAWAY naming no URI does. Defaults to [`Restart::Redial`].
 	pub fn with_restart(mut self, restart: Restart) -> Self {
-		self.restart = restart;
+		self.policy.restart = restart;
 		self
 	}
 
@@ -339,11 +331,12 @@ impl Client {
 				Ok::<_, Error>(connect_session(&self.moq, session).await?)
 			};
 
-			let session = match self.timeout.is_zero() {
+			let timeout = self.policy.timeout;
+			let session = match timeout.is_zero() {
 				true => attempt.await?,
-				false => kio::clock::timeout(self.timeout, attempt)
+				false => kio::clock::timeout(timeout, attempt)
 					.await
-					.map_err(|_| Error::ConnectTimeout(self.timeout))??,
+					.map_err(|_| Error::ConnectTimeout(timeout))??,
 			};
 			tracing::info!(version = %session.version(), transport = %crate::Transport::WebRtc, "connected");
 			Ok(session)
@@ -351,39 +344,31 @@ impl Client {
 		.await
 	}
 
-	/// What a dial to `url` presents of `tokens`, given the versions this client offers.
-	/// Dial the given URL and complete the MoQ handshake.
+	/// Dial one attempt of a [`Connection`]'s policy and complete the MoQ handshake.
 	///
 	/// Errors if no transport feature is compiled in.
 	#[cfg(not(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds")))]
 	pub(crate) async fn dial(
 		&self,
-		_addr: crate::connect::Addr,
-		_presented: &moq_net::auth::Dial,
+		_attempt: moq_net::reconnect::Attempt<crate::connect::Addr>,
 	) -> crate::Result<Dialed> {
 		Err(Error::NoBackend(
 			"no backend compiled; enable quic, websocket, tcp, or uds feature",
 		))
 	}
 
-	/// Dial the given URL and complete the MoQ handshake, presenting what `presented` decided.
+	/// Dial one attempt of a [`Connection`]'s policy and complete the MoQ handshake,
+	/// presenting the URL and credential the attempt carries.
 	///
 	/// The scheme picks the transport, and `https://` races QUIC against the
 	/// WebSocket fallback so a blocked UDP path still connects. The session's
 	/// protocol driver is spawned on the current tokio runtime, else the fallback; the session
-	/// closes once the last returned handle drops.
+	/// closes once the last returned handle drops. The policy bounds the attempt: dropping
+	/// it cancels whichever arm is still pending.
 	#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds"))]
-	pub(crate) async fn dial(
-		&self,
-		addr: crate::connect::Addr,
-		presented: &moq_net::auth::Dial,
-	) -> crate::Result<Dialed> {
-		let addr = addr.with_url(presented.url.clone());
-		#[cfg(test)]
-		if let Some(dialer) = &self.dialer {
-			return dialer(addr).await;
-		}
-		let client = match &presented.token {
+	pub(crate) async fn dial(&self, attempt: moq_net::reconnect::Attempt<crate::connect::Addr>) -> crate::Result<Dialed> {
+		let addr = attempt.target().with_url(attempt.url().clone());
+		let client = match attempt.token() {
 			Some(token) => {
 				let mut client = self.clone();
 				client.moq = client.moq.with_token(token.clone());
@@ -391,22 +376,14 @@ impl Client {
 			}
 			None => std::borrow::Cow::Borrowed(self),
 		};
+		#[cfg(test)]
+		if let Some(dialer) = &self.dialer {
+			return dialer(addr, client.moq.clone()).await;
+		}
 
 		// Each compiled backend adds state to this dispatch future. Keep it off the
 		// caller's stack so all-feature builds remain safe on standard 2 MiB threads.
-		let attempt = Box::pin(client.connect_inner(addr));
-
-		// The deadline covers the dial AND the handshake, for every transport: it is the
-		// only bound some of them have. Dropping `attempt` on expiry cancels whichever
-		// arm was still pending.
-		let dialed = match self.timeout.is_zero() {
-			true => attempt.await?,
-			false => match kio::clock::timeout(self.timeout, attempt).await {
-				Ok(res) => res?,
-				Err(_) => return Err(Error::ConnectTimeout(self.timeout)),
-			},
-		};
-
+		let dialed = Box::pin(client.connect_inner(addr)).await?;
 		tracing::info!(version = %dialed.session.version(), transport = %dialed.transport, "connected");
 		Ok(dialed)
 	}
@@ -1347,20 +1324,21 @@ mod tests {
 			..Default::default()
 		};
 		config.websocket.delay = Some((std::time::Duration::ZERO).into());
-		let client = config.init(Default::default()).unwrap();
+		// Connecting once: this is about one attempt's deadline, which a reconnecting
+		// connection would redial past.
+		let client = config.init(Default::default()).unwrap().with_reconnect(false);
 
 		// Nothing is listening on UDP, so the QUIC arm fails and leaves the WebSocket
 		// arm alone against the silent peer.
 		let url: Url = format!("https://127.0.0.1:{}/", addr.port()).parse().unwrap();
 
-		// `dial` rather than `connect`: this is about one attempt's deadline, and
-		// `connect` now hands back a reconnect loop that would redial past it.
-		let presented = moq_net::auth::Tokens::new(Vec::new()).dial(&url, &client.versions);
-		let mut attempt = Box::pin(client.dial(url.into(), &presented));
+		let connection = client.connect(url);
+		let closed = connection.closed();
+		tokio::pin!(closed);
 		let _silent = tokio::select! {
-			res = &mut attempt => match res {
+			res = &mut closed => match res {
 				Err(err) => panic!("connect failed before the silent peer accepted it: {err}"),
-				Ok(_) => panic!("connected to a peer that never spoke"),
+				Ok(()) => panic!("stopped before the silent peer accepted it"),
 			},
 			res = listener.accept() => res.unwrap().0,
 		};
@@ -1370,11 +1348,7 @@ mod tests {
 		tokio::time::pause();
 		tokio::time::advance(timeout).await;
 
-		let err = match attempt.await {
-			Err(err) => err,
-			Ok(_) => panic!("connected to a peer that never spoke"),
-		};
-
+		let err = closed.await.expect_err("connected to a peer that never spoke");
 		assert!(matches!(err, Error::ConnectTimeout(_)), "unexpected error: {err}");
 	}
 }

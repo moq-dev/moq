@@ -299,11 +299,7 @@ impl Session {
 	/// Both protocols withdraw this session's announcements and wait for their
 	/// delivery.
 	pub async fn close(self) -> Result<(), Error> {
-		if let Ok(mut close) = self.close.write()
-			&& close.is_none()
-		{
-			*close = Some(Close::Drain);
-		}
+		self.start_close();
 		// The drain outlives this handle, so dropping it cannot cut the drain short.
 		let closed = self.closed.clone();
 		drop(self);
@@ -336,17 +332,28 @@ impl Session {
 	/// completion, this resolves with [`Error::Cancel`]. A panic while polling the driver is
 	/// a transport failure instead.
 	pub async fn closed(&self) -> Error {
-		match self
-			.closed
-			.wait(|state| match &**state {
-				Some(ended) => Poll::Ready(ended.err.clone()),
-				None => Poll::Pending,
-			})
-			.await
-		{
-			Ok(err) => err,
+		kio::wait(|waiter| self.poll_closed(waiter)).await
+	}
+
+	/// Poll form of [`closed`](Self::closed).
+	pub(crate) fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
+		match self.closed.poll(waiter, |state| match &**state {
+			Some(ended) => Poll::Ready(ended.err.clone()),
+			None => Poll::Pending,
+		}) {
+			Poll::Ready(Ok(err)) => Poll::Ready(err),
 			// The driver was dropped before it could observe the close.
-			Err(kio::Closed) => Error::Cancel,
+			Poll::Ready(Err(_)) => Poll::Ready(Error::Cancel),
+			Poll::Pending => Poll::Pending,
+		}
+	}
+
+	/// Start the drain [`close`](Self::close) runs, without waiting for it or giving up this handle.
+	pub(crate) fn start_close(&self) {
+		if let Ok(mut close) = self.close.write()
+			&& close.is_none()
+		{
+			*close = Some(Close::Drain);
 		}
 	}
 

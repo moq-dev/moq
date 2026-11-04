@@ -13,8 +13,9 @@ lands only if the measurement shows a win.
 serves inbound traffic, so a ring relay forwards its cluster media through
 tokio. A port needs the ring client to grow what `moq-tokio` provides:
 DNS and address racing, reconnect, and fingerprint pinning (the raw ring
-client takes one `SocketAddr`). Share that policy with `moq-tokio` rather
-than duplicate it.
+client takes one `SocketAddr`). The reconnect half already lives in
+moq-net as `moq_net::Reconnect`, which a ring client drives with its own
+dials; share the rest with `moq-tokio` rather than duplicate it.
 
 Measure first with a prototype dialing a fixed address from a worker:
 CPU per Gbps and latency on the relay-to-relay fanout shape, ring against

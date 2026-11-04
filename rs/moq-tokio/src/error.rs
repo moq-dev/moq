@@ -275,13 +275,8 @@ impl Error {
 			#[cfg(feature = "websocket")]
 			Self::TransportRace { quic, websocket } => quic.is_terminal() && websocket.is_terminal(),
 			Self::MoqNet(err) => matches!(
-				moq_net::SessionError::from(err),
-				moq_net::SessionError::Unauthorized
-					| moq_net::SessionError::Expired
-					| moq_net::SessionError::MalformedAuthToken
-					| moq_net::SessionError::ProtocolViolation
-					| moq_net::SessionError::KeyValueFormatting
-					| moq_net::SessionError::InvalidRequestId
+				moq_net::reconnect::Verdict::from(err),
+				moq_net::reconnect::Verdict::Refused | moq_net::reconnect::Verdict::Fatal
 			),
 			Self::Tls(err) => err.is_terminal(),
 			Self::NoBackend(_)
@@ -363,6 +358,20 @@ impl Error {
 			#[cfg(feature = "websocket")]
 			Self::WebSocket(err) => err.status(),
 			_ => None,
+		}
+	}
+}
+
+/// What a connection reports when moq-net's reconnect policy fails an attempt or gives up.
+#[cfg(feature = "net")]
+impl From<moq_net::reconnect::Failure> for Error {
+	fn from(failure: moq_net::reconnect::Failure) -> Self {
+		use moq_net::reconnect::Failure;
+		match failure {
+			Failure::Timeout(timeout) => Self::ConnectTimeout(timeout),
+			Failure::Refused(reason) => Self::RefusedRedirect(reason.to_string()),
+			Failure::Fixed => Self::PinnedRedirect,
+			failure => Self::Reconnect(failure.to_string()),
 		}
 	}
 }

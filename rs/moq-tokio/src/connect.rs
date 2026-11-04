@@ -102,6 +102,16 @@ impl From<Url> for Addr {
 	}
 }
 
+impl moq_net::reconnect::Target for Addr {
+	fn url(&self) -> &Url {
+		&self.url
+	}
+
+	fn fixed(&self) -> bool {
+		self.resolved.is_some()
+	}
+}
+
 /// One or more addresses for the same peer, tried in order until one connects.
 ///
 /// Most callers have a single URL and never name this type:

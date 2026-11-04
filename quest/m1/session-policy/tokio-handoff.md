@@ -37,4 +37,3 @@ it re-exported, with MIGRATE notes. Wire: none.
 ## Required
 
 - [Accept policy in moq-net](/quest/m1/session-policy/accept.md) - the accept policy the handoff runs
-- [Connect policy in moq-net](/quest/m1/session-policy/connect.md) - the connect policy the handoff runs
