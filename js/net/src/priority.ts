@@ -187,7 +187,8 @@ export class Priority {
 		for (let i = 0; i < queue.length; i++) {
 			const [stream, start] = queue[i];
 			if (i > 0 && compareStarts(queue[i - 1][1], start, order) !== 0) position = i;
-			if ("setPriority" in stream) stream.setPriority(sendOrder({ priority, publisher: this.#publisher, position }));
+			if ("setPriority" in stream)
+				stream.setPriority(sendOrder({ priority, publisher: this.#publisher, position }));
 		}
 	}
 }

@@ -37,7 +37,3 @@ a cap with no acknowledged stream resets exactly one stream per waiting open;
 a group that lost its stream resumes without loss.
 
 Public API: none. Wire: lite-07 group stream takeover.
-
-## Required
-
-- [One priority entry point for streams](/quest/m1/stream-credit/scheduler.md) - the entry point that decides when room is needed

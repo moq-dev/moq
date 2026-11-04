@@ -537,7 +537,6 @@ impl poll::Session for DeadStreamSession {
 		)))
 	}
 
-
 	fn poll_open_uni(
 		&self,
 		_waiter: &kio::Waiter,
@@ -767,7 +766,6 @@ impl poll::Session for SinkSession {
 		send.prefix = self.bi_prefix;
 		Poll::Ready(Ok((send, PendingRecv)))
 	}
-
 
 	fn poll_open_uni(
 		&self,
@@ -1207,7 +1205,6 @@ impl poll::Session for ScriptedSession {
 			}),
 		)))
 	}
-
 
 	fn poll_open_uni(
 		&self,

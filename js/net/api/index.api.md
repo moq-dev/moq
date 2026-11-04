@@ -276,9 +276,6 @@ export namespace Error {
 			cause?: unknown;
 		});
 	}
-	export class NoStreamCredit extends Error {
-		constructor(options?: ErrorOptions);
-	}
 	export class NotFound extends Error.Stream {
 		constructor(what: string, options?: {
 			cause?: unknown;

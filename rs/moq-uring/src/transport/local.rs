@@ -62,7 +62,6 @@ impl<S: poll::Session> poll::Session for Local<S> {
 			.map_ok(|(send, recv)| (Local::new(send), Local::new(recv)))
 	}
 
-
 	fn send_group(&self, priority: i64) -> Option<Local<<S::SendStream as poll::SendStream>::Group>> {
 		self.0.send_group(priority).map(Local::new)
 	}

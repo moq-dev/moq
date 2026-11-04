@@ -322,7 +322,6 @@ impl poll::Session for Session {
 		})
 	}
 
-
 	fn send_group(&self, priority: i64) -> Option<SendGroup> {
 		Some(Session::send_group(self, priority))
 	}

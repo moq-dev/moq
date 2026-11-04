@@ -660,10 +660,11 @@ impl PresentToken {
 					}
 					let token = token.clone();
 					let answered = *answered;
-					let mut stream = match ready!(Stream::poll_open(&self.session, &mut self.open, self.version, waiter)) {
-						Ok(stream) => stream,
-						Err(err) => return Poll::Ready(err),
-					};
+					let mut stream =
+						match ready!(Stream::poll_open(&self.session, &mut self.open, self.version, waiter)) {
+							Ok(stream) => stream,
+							Err(err) => return Poll::Ready(err),
+						};
 					stream = stream.with_stats(&self.stats);
 					let res = stream
 						.writer

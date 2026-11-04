@@ -357,7 +357,6 @@ impl poll::Session for Session {
 		Poll::Ready(opened.map(|()| (send, recv)))
 	}
 
-
 	fn send_group(&self, _: i64) -> Option<poll::Ungrouped> {
 		None
 	}

@@ -366,9 +366,7 @@ export class Subscriber {
 		let stream: Stream;
 		try {
 			const deadline = new Deadline();
-			stream = await deadline.wait(
-				deadline.open(Stream.open(this.#quic, { version: this.version })),
-			);
+			stream = await deadline.wait(deadline.open(Stream.open(this.#quic, { version: this.version })));
 		} catch (err: unknown) {
 			announced.close(error(err));
 			return;

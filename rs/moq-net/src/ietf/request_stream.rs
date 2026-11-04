@@ -451,7 +451,7 @@ mod tests {
 			// GOAWAY, REQUEST_OK, then another GOAWAY on the same stream.
 			let script = vec![0x10, 0, 2, 0, 0, 0x07, 0, 0, 0x10, 0, 2, 0, 0];
 			let session = ScriptedSession::eof(script);
-			let mut stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+			let mut stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 				.await
 				.unwrap();
 			let mut messages = Messages::new(crate::driver::Transport::new(session.clone()), true);
@@ -474,7 +474,7 @@ mod tests {
 		let stats = registry.tier(Tier::default()).session(crate::Path::from_static(""));
 		let version = Version::Draft22;
 		let session = ScriptedSession::new(vec![0x10, 0, 2, 0, 0, 0x07, 0, 0]);
-		let mut stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+		let mut stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 			.await
 			.unwrap()
 			.with_stats(&stats);
@@ -493,7 +493,7 @@ mod tests {
 		use crate::lite::test_transport::ScriptedSession;
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let session = ScriptedSession::new(vec![0x10, 0, 2, 0, 0]);
-			let mut stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+			let mut stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 				.await
 				.unwrap();
 			let mut messages = Messages::new(crate::driver::Transport::new(session.clone()), false);

@@ -504,7 +504,6 @@ impl moq_net::transport::poll::Session for Gated {
 		self.inner.poll_open_bi(waiter, options)
 	}
 
-
 	fn send_group(&self, priority: i64) -> Option<moq_net::transport::poll::Ungrouped> {
 		self.inner.send_group(priority)
 	}

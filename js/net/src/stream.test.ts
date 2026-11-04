@@ -784,10 +784,7 @@ test("opens ask the transport to wait for a stream slot at their send order", as
 	await Stream.open(quic, { sendOrder: 7, version: QUIC });
 	await Writer.open(quic, { version: QUIC });
 
-	expect(options).toEqual([
-		{ sendOrder: 7, waitUntilAvailable: true },
-		{ waitUntilAvailable: true },
-	]);
+	expect(options).toEqual([{ sendOrder: 7, waitUntilAvailable: true }, { waitUntilAvailable: true }]);
 });
 
 // A moq-transport code has to be one the negotiated draft assigns the same meaning to, so

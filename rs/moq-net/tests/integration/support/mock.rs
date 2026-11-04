@@ -569,7 +569,6 @@ impl poll::Session for MockSession {
 		Poll::Ready(Ok((send, self.recv(recv, back))))
 	}
 
-
 	fn poll_open_uni(
 		&self,
 		waiter: &kio::Waiter,

@@ -412,7 +412,6 @@ impl<S: poll::Boxable> ErasedSession for S {
 			.map(|res| res.map(|bis| bi::<S>(bis, budget)).map_err(Error::new))
 	}
 
-
 	fn send_group(&self, priority: i64) -> Option<Group> {
 		poll::Session::send_group(self, priority).map(|group| Group {
 			inner: Box::new(group),

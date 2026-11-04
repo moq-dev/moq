@@ -2644,8 +2644,13 @@ impl DatagramServe {
 						self.state = DatagramState::Subscribe { request, subscribing };
 						continue;
 					}
-					let mut stream = ready!(Stream::poll_open(&self.subscriber.session, &mut self.open, version, waiter))?
-						.with_stats(self.subscriber.origin.stats());
+					let mut stream = ready!(Stream::poll_open(
+						&self.subscriber.session,
+						&mut self.open,
+						version,
+						waiter
+					))?
+					.with_stats(self.subscriber.origin.stats());
 					let DatagramState::Open { request } = std::mem::replace(&mut self.state, DatagramState::Done)
 					else {
 						unreachable!()
@@ -2907,7 +2912,7 @@ mod tests {
 		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
 		Sub::Active(SubStream {
 			order: crate::track::Order::Descending,
-			stream: Stream::open(&mut crate::driver::Transport::new(session.clone()), Version::Lite04)
+			stream: Stream::open(&crate::driver::Transport::new(session.clone()), Version::Lite04)
 				.await
 				.unwrap(),
 			id: 0,
@@ -3056,7 +3061,7 @@ mod tests {
 			let floor = if update { 5 } else { 2 };
 			let mut sub = Sub::Active(SubStream {
 				order: crate::track::Order::Descending,
-				stream: Stream::open(&mut crate::driver::Transport::new(h.session.clone()), Version::Lite04)
+				stream: Stream::open(&crate::driver::Transport::new(h.session.clone()), Version::Lite04)
 					.await
 					.unwrap(),
 				id: 0,
@@ -3514,7 +3519,7 @@ mod tests {
 	)]
 	async fn the_owed_floor_follows_the_demand() {
 		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 		let mut sub = SubStream {
@@ -3613,7 +3618,7 @@ mod tests {
 
 	async fn receive_padding(version: Version, bytes: Vec<u8>) {
 		let session = crate::lite::test_transport::ScriptedSession::new(bytes);
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 			.await
 			.unwrap();
 		let log = session.log.clone();
@@ -10559,16 +10564,20 @@ impl kio::Task for FetchServeRun {
 					ready!(self.gate.poll_ready(waiter));
 					// The fill already has readers holding its demand. Backpressure keeps their
 					// owned request alive; abandoning it above releases this wait too.
-					let mut stream =
-						match ready!(Stream::poll_open(&self.session, &mut self.open, self.serve.subscriber.version, waiter)) {
-							Ok(stream) => stream,
-							Err(err) => {
-								tracing::warn!(track = %self.serve.name, %err, "fetch stream open failed");
-								request.take().expect("request pending").reject(err);
-								self.state = FetchRunState::Done;
-								return Poll::Ready(());
-							}
-						};
+					let mut stream = match ready!(Stream::poll_open(
+						&self.session,
+						&mut self.open,
+						self.serve.subscriber.version,
+						waiter
+					)) {
+						Ok(stream) => stream,
+						Err(err) => {
+							tracing::warn!(track = %self.serve.name, %err, "fetch stream open failed");
+							request.take().expect("request pending").reject(err);
+							self.state = FetchRunState::Done;
+							return Poll::Ready(());
+						}
+					};
 
 					// Only once the stream opens: credit and its header can wait, and
 					// re-polls this state, so logging before it repeats per poll.

@@ -3612,7 +3612,7 @@ mod tests {
 		] {
 			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
 			let log = session.log.clone();
-			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 				.await
 				.unwrap();
 			refuse_going_away(stream, id, VERSION).await.unwrap();

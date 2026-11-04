@@ -112,7 +112,9 @@ async fn a_subscription_past_the_credit_is_served_once_credit_returns() {
 		let held = remote.track("first").unwrap().subscribe(prefs.clone()).await.unwrap();
 		let mut waiting = std::pin::pin!(remote.track("second").unwrap().subscribe(prefs));
 		assert!(
-			kio::clock::timeout(Duration::from_secs(5), waiting.as_mut()).await.is_err(),
+			kio::clock::timeout(Duration::from_secs(5), waiting.as_mut())
+				.await
+				.is_err(),
 			"{version}: the second subscription had no credit to wait for"
 		);
 

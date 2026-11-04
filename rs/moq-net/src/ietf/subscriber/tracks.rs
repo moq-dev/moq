@@ -1504,7 +1504,7 @@ mod tests {
 
 		/// Send `publish`, returning the answer.
 		async fn offer(&mut self, publish: ietf::Publish<'_>) -> (PeerStream, u64, ietf::Body) {
-			let mut stream = Stream::open(&mut crate::driver::Transport::new(self.peer.clone()), self.version)
+			let mut stream = Stream::open(&crate::driver::Transport::new(self.peer.clone()), self.version)
 				.await
 				.unwrap();
 			stream.writer.encode_message(&publish).await.unwrap();

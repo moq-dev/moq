@@ -97,7 +97,9 @@ export class Deadline {
 	/** Reject once the request goes the whole budget with none of its streams waiting to open. */
 	async #expire(done: AbortSignal): Promise<never> {
 		const budget = Nano.fromMilli(Milli(REQUEST_TIMEOUT_MS));
-		const answered = new Promise<void>((resolve) => done.addEventListener("abort", () => resolve(), { once: true }));
+		const answered = new Promise<void>((resolve) =>
+			done.addEventListener("abort", () => resolve(), { once: true }),
+		);
 		for (;;) {
 			const changed = this.#changed;
 			const restart = new AbortController();
@@ -105,7 +107,11 @@ export class Deadline {
 				this.#opening > 0
 					? new Promise<void>(() => {})
 					: sleep(budget, { signal: AbortSignal.any([restart.signal, done]) }).catch(() => undefined);
-			const why = await race([timer.then(() => "expired" as const), changed.then(() => "changed" as const), answered]);
+			const why = await race([
+				timer.then(() => "expired" as const),
+				changed.then(() => "changed" as const),
+				answered,
+			]);
 			restart.abort();
 			// Answered: the waiting is over, and nothing is left to reject.
 			if (why === undefined) return new Promise<never>(() => {});

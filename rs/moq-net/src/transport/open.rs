@@ -164,7 +164,10 @@ impl Open {
 		};
 		self.place = Some((lines.clone(), dir, key));
 
-		line.waiting.get_mut(&key).expect("an open's place stays in line").register(waiter);
+		line.waiting
+			.get_mut(&key)
+			.expect("an open's place stays in line")
+			.register(waiter);
 		if line.head() != Some(key) {
 			return Poll::Pending;
 		}

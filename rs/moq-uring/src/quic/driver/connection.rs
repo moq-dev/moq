@@ -459,7 +459,6 @@ pub(crate) async fn establish(shared: Shared, deadline: Option<Instant>) -> Resu
 	Ok(conn)
 }
 
-
 impl Connection {
 	/// Accept the next unidirectional stream the peer opens.
 	pub async fn accept_uni(&self) -> Result<recv::Stream, Error> {
