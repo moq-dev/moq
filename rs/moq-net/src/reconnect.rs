@@ -425,6 +425,12 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 		}
 	}
 
+	/// The addresses the next walk dials, in order: the configured ones, or the one a
+	/// GOAWAY redirected to.
+	pub fn targets(&self) -> &[A] {
+		&self.targets
+	}
+
 	/// The session draining after a GOAWAY, and the deadline its handover ends by.
 	pub fn predecessor(&self) -> Option<(&Session, Instant)> {
 		self.predecessor

@@ -933,14 +933,21 @@ impl Connection {
 
 	/// Drive moq-net's policy: dial each attempt it asks for and publish what it does.
 	async fn run(shared: &Shared, client: Client, addrs: Addrs) -> crate::Result<()> {
+		#[cfg(feature = "quic")]
+		let mut client = client;
 		let mut policy = moq_net::Reconnect::new(client.policy, addrs.as_slice().to_vec(), kio::clock::now())
 			.map_err(|_| Error::BackoffHealthy)?
 			.with_tokens(shared.tokens.clone(), client.versions.clone());
-		// The dial in flight, and the address it was asked for.
-		let mut dial: Option<(url::Url, std::pin::Pin<Box<Dial<'_>>>)> = None;
+		// The dial in flight, and the address it was asked for. It owns its client, so a
+		// fresh port can replace the loop's between walks.
+		let mut dial: Option<(url::Url, std::pin::Pin<Box<Dial>>)> = None;
 		// Mirrors the live session's estimates while it serves.
 		let mut forward: Option<Forward> = None;
 		let mut timer: Option<kio::clock::Sleep> = None;
+		// Consecutive walks that failed since the last session, and whether a dial failed
+		// since then, which tells a failed walk from a session that ended too soon.
+		#[cfg(feature = "quic")]
+		let (mut failed_walks, mut dial_failed) = (0, false);
 
 		loop {
 			let action = kio::wait(|waiter| {
@@ -952,11 +959,26 @@ impl Connection {
 						match res {
 							Ok(crate::client::Dialed { session, transport }) => {
 								tracing::info!(peer = %Endpoint(&url), %transport, "connected");
+								#[cfg(feature = "quic")]
+								{
+									(failed_walks, dial_failed) = (0, false);
+								}
 								shared.connected(&session, transport);
 								forward = Some(Forward::new(&session));
 								policy.connected(kio::clock::now(), session);
 							}
 							Err(err) => {
+								#[cfg(feature = "quic")]
+								{
+									dial_failed = true;
+								}
+								// An explicit shutdown cannot recover by retrying or opening another socket.
+								#[cfg(feature = "quic")]
+								let verdict = match quic_scheme(&url) && client.quic_closed() {
+									true => Verdict::Fatal,
+									false => verdict(&err),
+								};
+								#[cfg(not(feature = "quic"))]
 								let verdict = verdict(&err);
 								policy.failed(kio::clock::now(), err, verdict);
 							}
@@ -985,10 +1007,17 @@ impl Connection {
 			match action {
 				Action::Dial(attempt) => {
 					let url = attempt.target().url().clone();
-					dial = Some((url, Box::pin(client.dial(attempt))));
+					let client = client.clone();
+					dial = Some((url, Box::pin(async move { client.dial(attempt).await })));
 				}
 				// The policy already counted the timeout; dropping the dial cancels it.
-				Action::Abandon => dial = None,
+				Action::Abandon => {
+					#[cfg(feature = "quic")]
+					{
+						dial_failed = true;
+					}
+					dial = None;
+				}
 				Action::Migrating => {
 					forward = None;
 					// After the predecessor is published, so a close woken by this status
@@ -1001,7 +1030,26 @@ impl Connection {
 					forward = None;
 					shared.offline(failure.as_ref());
 				}
-				Action::Retrying(err) => shared.retrying(&err),
+				Action::Retrying(err) => {
+					shared.retrying(&err);
+					// A failed walk of a QUIC peer: retry one transient failure on the same
+					// socket, then try another flow before the next walk. Only a retry window
+					// that allows a third walk gets there: a black-holed handshake outlasts the
+					// default window after the first walk.
+					#[cfg(feature = "quic")]
+					if std::mem::take(&mut dial_failed) && policy.targets().iter().any(|addr| quic_scheme(addr.url())) {
+						failed_walks += 1;
+						if failed_walks >= 2 {
+							match client.fresh_port() {
+								Ok(()) => failed_walks = 0,
+								// The old flow may have recovered, so dial it anyway. The count
+								// stays at the threshold, so the next failed walk retries the
+								// allocation.
+								Err(err) => tracing::warn!(%err, "no fresh UDP port; redialing from the old one"),
+							}
+						}
+					}
+				}
 				// The terminal snapshot does the offline bookkeeping, so a watcher never sees a
 				// `Disconnected` the loop will not redial from.
 				Action::Done(res) => {
@@ -1204,7 +1252,13 @@ impl Connection {
 }
 
 /// A dial in flight.
-type Dial<'a> = dyn Future<Output = crate::Result<crate::client::Dialed>> + Send + 'a;
+type Dial = dyn Future<Output = crate::Result<crate::client::Dialed>> + Send;
+
+/// Whether a dial to `url` runs over the QUIC endpoint, whose socket a fresh port replaces.
+#[cfg(feature = "quic")]
+fn quic_scheme(url: &url::Url) -> bool {
+	matches!(url.scheme(), "http" | "https" | "moqt" | "moql")
+}
 
 /// Mirrors one live session's send and receive estimates into the persistent producers, so
 /// [`Connection`] consumers track the live estimates across the connection.

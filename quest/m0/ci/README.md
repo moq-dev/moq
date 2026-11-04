@@ -175,4 +175,3 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [A release merge opens no stale release PR](/quest/m0/ci/release-pr-after-release.md) - `just rs release` publishes before it proposes, so a merged release isn't re-proposed
 - [Renovate keeps the workspace-hack generated](/quest/m0/ci/dependabot-workspace-hack.md) - a protected scheduled Renovate runs `cargo hakari generate` in cargo update PRs, replacing Dependabot's cargo updates
 - [Build two queue entries at once if it helps](/quest/m0/ci/queue-concurrency.md) - a measured trial of `maximumEntriesToBuild: 2` against the serial lane's burst latency
-- [CI never downloads libav's sources](/quest/m0/ci/libav-sources.md) - `moq-libav` substitutes from `nix.moq.dev`, so an upstream mirror can't fail Check

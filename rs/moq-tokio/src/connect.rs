@@ -537,6 +537,11 @@ pub struct Config {
 
 	/// Send from this local UDP address. Defaults to an ephemeral dual-stack port.
 	///
+	/// With port 0, two consecutive failed dial rounds give the reconnecting connection
+	/// a fresh port. Established sessions keep their sockets; a nonzero port never changes.
+	/// The [retry window](Backoff::timeout) must allow that third round: with the default
+	/// window, a black-holed dial ends the connection after its first round instead.
+	///
 	/// Kept optional because the compatibility fold must distinguish an explicit
 	/// wildcard bind from an unset bind.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
