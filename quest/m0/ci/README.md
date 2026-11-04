@@ -165,4 +165,3 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [The queue host keeps the queue's disk](/quest/m0/ci/queue-host-disk.md) - agent sessions can't starve the queue runner of disk, and a crashed runner restarts
 - [The bench comparison builds moq-gst's catalog bench on its base](/quest/m0/ci/bench-base-build.md) - A paired bench comparison that selects `rust/gst/moq-gst/catalog` against `origin/main` builds the base side and reports a comparison, instead of marking it unavailable with "base build failed"
 - [The workspace-hack refuses trybuild edges and spares non-media builds](/quest/m0/ci/hakari-followups.md) - `hakari.py` refuses trybuild dev-dependency edges, and non-media Linux test builds stop needing libpipewire and libclang
-- [The flake lane skips hosts that can't map user namespaces](/quest/m0/ci/userns-uid-map.md) - `check flake` skips instead of failing where `/proc/self/uid_map` is unwritable
