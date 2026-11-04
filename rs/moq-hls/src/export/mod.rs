@@ -3422,6 +3422,22 @@ mod tests {
 			self.group(sequence, pts_ms, 1);
 		}
 
+		/// Write group `sequence` at `pts_ms` with a single keyframe declaring a `width`x`height`
+		/// picture in band.
+		fn sized(&mut self, sequence: u64, pts_ms: u64, (width, height): (u16, u16)) {
+			let mut group = self.track.create_group(moq_net::group::Info { sequence }).unwrap();
+			let mut payload = KEYFRAME.to_vec();
+			payload[6..8].copy_from_slice(&width.to_le_bytes());
+			payload[8..10].copy_from_slice(&height.to_le_bytes());
+			hang::container::Frame {
+				timestamp: moq_net::Timestamp::from_micros(pts_ms * 1_000).unwrap(),
+				payload: payload.into(),
+			}
+			.write_to(&mut group)
+			.unwrap();
+			group.finish().unwrap();
+		}
+
 		/// Write group `sequence` at `2 * sequence` seconds: one GOP per grid line.
 		fn gop(&mut self, sequence: u64) {
 			self.at(sequence, sequence * INTERVAL.as_millis() as u64);
@@ -4237,6 +4253,71 @@ mod tests {
 		assert!(
 			new.segment(&id).await.unwrap().is_some(),
 			"the predecessor's part serves"
+		);
+	}
+
+	// The catalog and the media are separate tracks, so a resize's first group can reach the
+	// retiring instance before the catalog update declaring it. Its keyframe's size says it is the
+	// replacement's, so it is listed under the new init rather than muxed under the old.
+	#[tokio::test(start_paused = true)]
+	async fn a_resizes_first_group_ahead_of_the_catalog_is_the_replacements() {
+		let mut test = Groups::with(&["video0"], &[]);
+		let mut media = test.publish("video0");
+		for sequence in 0..3 {
+			media.gop(sequence);
+		}
+		test.listed("video0", 1).await;
+		let old = test.rendition("video0");
+		// Group 3 opens segment 3 at 640x480 before the catalog says so.
+		media.sized(3, 6_000, (640, 480));
+		kio::clock::sleep(Duration::from_millis(100)).await;
+		let config = test.catalog.video.renditions.get_mut("video0").unwrap();
+		config.coded_width = Some(640);
+		config.coded_height = Some(480);
+		test.sync();
+		let new = test.rendition("video0");
+		kio::clock::sleep(Duration::from_millis(100)).await;
+		media.sized(4, 8_000, (640, 480));
+		media.sized(5, 10_000, (640, 480));
+		let snapshot = test.listed("video0", 4).await;
+		assert_eq!(numbers(&snapshot), [0, 1, 2, 3, 4]);
+		let tags: Vec<_> = snapshot.segments.iter().map(|s| s.tag.as_str()).collect();
+		assert_eq!(tags, [old.tag(), old.tag(), old.tag(), new.tag(), new.tag()]);
+		let breaks: Vec<_> = snapshot.segments.iter().map(|s| s.discontinuity).collect();
+		assert_eq!(breaks, [false, false, false, true, false]);
+	}
+
+	// Mid-segment, the retiring instance lists its part of the segment, ending where the resize's
+	// first group starts, even though it read that group before the catalog update.
+	#[tokio::test(start_paused = true)]
+	async fn a_resize_ahead_of_the_catalog_mid_segment_ends_the_predecessors_part() {
+		let mut test = Groups::with(&["video0"], &[]);
+		let mut media = test.publish("video0");
+		// Four groups to a two-second slot: 0-3 are segment 0, and 4 and 5 open segment 1.
+		for sequence in 0..6 {
+			media.at(sequence, sequence * 500);
+		}
+		test.listed("video0", 0).await;
+		let old = test.rendition("video0");
+		media.sized(6, 3_000, (640, 480));
+		kio::clock::sleep(Duration::from_millis(100)).await;
+		let config = test.catalog.video.renditions.get_mut("video0").unwrap();
+		config.coded_width = Some(640);
+		config.coded_height = Some(480);
+		test.sync();
+		let new = test.rendition("video0");
+		for sequence in 7..13 {
+			media.sized(sequence, sequence * 500, (640, 480));
+		}
+		let snapshot = test.listed("video0", 2).await;
+		assert_eq!(numbers(&snapshot), [0, 1, 2]);
+		let tags: Vec<_> = snapshot.segments.iter().map(|s| s.tag.as_str()).collect();
+		assert_eq!(tags, [old.tag(), old.tag(), new.tag()]);
+		let durations: Vec<_> = snapshot.segments.iter().map(|s| s.duration.as_millis()).collect();
+		assert_eq!(
+			durations,
+			[2_000, 1_000, 2_000],
+			"the predecessor's part ends at group 6"
 		);
 	}
 

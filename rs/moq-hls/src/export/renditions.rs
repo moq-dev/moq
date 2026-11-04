@@ -695,7 +695,11 @@ impl Producer {
 		let mut handoffs = BTreeMap::new();
 		for key in stale {
 			if let Some(rendition) = current.renditions.remove(&key) {
-				handoffs.insert(key, rendition.retire());
+				let successor = match &key {
+					(Kind::Video, name) => catalog.video.renditions.get(name),
+					(Kind::Audio, _) => None,
+				};
+				handoffs.insert(key, rendition.retire(successor));
 			}
 		}
 

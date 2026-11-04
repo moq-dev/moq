@@ -174,6 +174,13 @@ impl Grid {
 		self.open.as_ref().map(|open| open.groups.clone())
 	}
 
+	/// The oldest group no completed segment holds: the open segment's first, else the group
+	/// waiting for its end.
+	pub fn unplaced(&self) -> Option<u64> {
+		let open = self.open.as_ref().map(|open| open.groups.start);
+		open.or(self.pending.map(|group| group.sequence))
+	}
+
 	/// Whether a segment waits to be completed: one is open, or a group waits for its end.
 	pub fn waiting(&self) -> bool {
 		self.open.is_some() || self.pending.is_some()
