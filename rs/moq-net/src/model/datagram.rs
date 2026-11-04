@@ -387,6 +387,11 @@ impl Request {
 		self.producer.name()
 	}
 
+	/// Whether the request ended, such as by its last waiting consumer leaving.
+	pub(super) fn is_closed(&self) -> bool {
+		self.producer.state.read().end.is_some()
+	}
+
 	/// The highest subscriber priority among the consumers waiting, or `None` once they all left.
 	pub fn priority(&self) -> Option<i8> {
 		self.producer.priority()
@@ -559,7 +564,13 @@ impl Clone for Consumer {
 impl Drop for Consumer {
 	fn drop(&mut self) {
 		if let Some(slot) = self.slot {
-			self.state.lock().priorities.remove(slot);
+			let mut state = self.state.lock();
+			state.priorities.remove(slot);
+			// Nobody waits for a request no handler accepted yet: withdraw it, so a handler
+			// that stops polling never holds requests nobody reads.
+			if state.priorities.is_empty() && state.info.is_none() {
+				state.end(Err(Error::Cancel));
+			}
 		}
 	}
 }

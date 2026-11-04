@@ -291,7 +291,8 @@ async fn lite05_and_lite06_map_a_datagram_track_onto_a_subscription() {
 
 /// Lite-05/06 carry a name's stream track and datagram track on one subscription, as
 /// moq-transport does, so a name with both delivers each to its own reader, directly and
-/// through a relay whose hops are both old.
+/// through a relay whose hops are both old. The datagrams ride the subscription, at its
+/// priority.
 #[kio::test]
 async fn lite05_and_lite06_carry_both_kinds_of_a_name() {
 	for hops in [&["moq-lite-05"][..], &["moq-lite-06"], &["moq-lite-06", "moq-lite-06"]] {
@@ -300,18 +301,30 @@ async fn lite05_and_lite06_carry_both_kinds_of_a_name() {
 			.publication
 			.create_track(TRACK, moq_net::track::Info::default().with_timescale(Timescale::MILLI))
 			.unwrap();
-		let mut producer = chain.publication.create_datagrams(TRACK, timed()).unwrap();
+		// Another scale than the stream track's, whose TRACK_INFO declares the one both
+		// kinds are stamped in on the wire.
+		let info = datagram::Info::default().with_timescale(Timescale::MICRO);
+		let mut producer = chain.publication.create_datagrams(TRACK, info).unwrap();
 		let remote = chain.remote().await;
 		let mut subscriber = kio::clock::timeout(TIMEOUT, remote.track(TRACK).unwrap().subscribe(None))
 			.await
 			.expect("subscribe timeout")
 			.unwrap_or_else(|err| panic!("{hops:?}: {err:?}"));
-		let mut consumer = chain.consume(&producer, 2).await;
+		// The publisher sends the datagrams on the stream subscription.
+		kio::clock::timeout(TIMEOUT, datagram_priority(&producer, Some(0)))
+			.await
+			.unwrap_or_else(|_| panic!("{hops:?}: the subscription never carried the datagrams"));
+		let mut consumer = remote.datagrams(TRACK).unwrap();
+		kio::clock::timeout(TIMEOUT, consumer.info())
+			.await
+			.expect("info timeout")
+			.unwrap_or_else(|err| panic!("{hops:?}: {err:?}"));
 
 		producer.append(millis(1), &b"datagram"[..]).unwrap();
 		let datagram = recv(&mut consumer).await.unwrap().expect("a datagram");
 		assert_eq!(&datagram.payload[..], b"datagram", "{hops:?}");
-		assert_eq!(datagram.timestamp, Some(millis(1)), "{hops:?}");
+		let timestamp = datagram.timestamp.expect("a timestamp");
+		assert_eq!(timestamp.convert(Timescale::MILLI).unwrap(), millis(1), "{hops:?}");
 
 		track.write_frame(millis(2), &b"frame"[..]).unwrap();
 		let mut group = kio::clock::timeout(TIMEOUT, subscriber.recv_group())
@@ -325,7 +338,8 @@ async fn lite05_and_lite06_carry_both_kinds_of_a_name() {
 			"{hops:?}"
 		);
 
-		consumer.set_priority(6);
+		let subscription = subscriber.subscription().with_priority(6);
+		subscriber.update(subscription).unwrap();
 		kio::clock::timeout(TIMEOUT, datagram_priority(&producer, Some(6)))
 			.await
 			.unwrap_or_else(|_| panic!("{hops:?}: the priority never arrived"));

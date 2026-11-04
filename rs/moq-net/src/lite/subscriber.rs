@@ -2396,6 +2396,7 @@ impl kio::Task for SourceServe {
 					let serve = TrackServe {
 						validity: self.dynamic.validity().clone(),
 						route: Some(self.route.clone()),
+						source: Some((*self.source).clone()),
 						subscriber: self.subscriber.clone(),
 						path: self.path.clone(),
 						instance: self.instance.clone(),
@@ -4347,6 +4348,7 @@ mod tests {
 			let serve = TrackServe {
 				validity: Default::default(),
 				route: None,
+				source: None,
 				subscriber,
 				path: Path::from_static("room"),
 				instance: None,
@@ -4370,6 +4372,7 @@ mod tests {
 				serve,
 				state: TrackRunState::Serve(serving),
 				gate,
+				datagrams: None,
 			};
 			kio::wait(|waiter| kio::Task::poll(&mut running, waiter)).await;
 
@@ -4409,6 +4412,7 @@ mod tests {
 		let serve = TrackServe {
 			validity: selection.validity(),
 			route: None,
+			source: None,
 			subscriber,
 			path: Path::from_static("room"),
 			instance: None,
@@ -4429,6 +4433,7 @@ mod tests {
 			serve,
 			state: TrackRunState::Serve(serving),
 			gate,
+			datagrams: None,
 		};
 		assert!(kio::Task::poll(&mut running, &kio::Waiter::noop()).is_pending());
 
@@ -4513,6 +4518,7 @@ mod tests {
 		let serve = TrackServe {
 			validity: Default::default(),
 			route: None,
+			source: None,
 			subscriber,
 			path: Path::from_static("room"),
 			instance: None,
@@ -4533,6 +4539,7 @@ mod tests {
 			serve,
 			state: TrackRunState::Serve(serving),
 			gate,
+			datagrams: None,
 		};
 		kio::wait(|waiter| kio::Task::poll(&mut running, waiter)).await;
 
@@ -4583,6 +4590,7 @@ mod tests {
 			let serve = TrackServe {
 				validity: Default::default(),
 				route: None,
+				source: None,
 				subscriber,
 				path: Path::from_static("room"),
 				instance: None,
@@ -4609,6 +4617,7 @@ mod tests {
 				serve,
 				state: TrackRunState::Serve(serving),
 				gate,
+				datagrams: None,
 			};
 			assert!(kio::Task::poll(&mut running, &kio::Waiter::noop()).is_pending());
 
@@ -4655,6 +4664,7 @@ mod tests {
 		let serve = TrackServe {
 			validity: Default::default(),
 			route: None,
+			source: None,
 			subscriber,
 			path: Path::from_static("room"),
 			instance: None,
@@ -4675,6 +4685,7 @@ mod tests {
 			serve,
 			state: TrackRunState::Serve(serving),
 			gate,
+			datagrams: None,
 		};
 		assert!(
 			kio::Task::poll(&mut running, &kio::Waiter::noop()).is_ready(),
@@ -4769,6 +4780,7 @@ mod tests {
 		let serve = TrackServe {
 			validity: Default::default(),
 			route: None,
+			source: None,
 			subscriber,
 			path: Path::from_static("room"),
 			instance: None,
@@ -4788,6 +4800,7 @@ mod tests {
 			serve,
 			state: TrackRunState::Serve(serving),
 			gate,
+			datagrams: None,
 		};
 		assert!(
 			kio::Task::poll(&mut running, &kio::Waiter::noop()).is_pending(),
@@ -4839,6 +4852,7 @@ mod tests {
 			let serve = TrackServe {
 				validity: Default::default(),
 				route: None,
+				source: None,
 				subscriber,
 				path: Path::from_static("room"),
 				instance: None,
@@ -4862,6 +4876,7 @@ mod tests {
 				serve,
 				state: TrackRunState::Serve(serving),
 				gate,
+				datagrams: None,
 			};
 			assert!(kio::Task::poll(&mut running, &kio::Waiter::noop()).is_pending());
 
@@ -5014,6 +5029,7 @@ mod tests {
 			TrackServe {
 				validity: Default::default(),
 				route: None,
+				source: None,
 				subscriber: subscriber.clone(),
 				path: Path::from_static("room"),
 				instance: None,
@@ -5088,6 +5104,7 @@ mod tests {
 				let serve = TrackServe {
 					validity: crate::model::broadcast::RequestValidity::token(Some(route.consume())),
 					route: None,
+					source: None,
 					subscriber,
 					path: Path::from_static("room"),
 					instance: None,
@@ -5161,6 +5178,7 @@ mod tests {
 				TrackServe {
 					validity: Default::default(),
 					route: None,
+					source: None,
 					subscriber,
 					path: Path::from_static("room"),
 					instance: None,
@@ -5213,6 +5231,7 @@ mod tests {
 		let serve = TrackServe {
 			validity: Default::default(),
 			route: None,
+			source: None,
 			subscriber: subscriber.clone(),
 			path: Path::from_static("room"),
 			instance: None,
@@ -5544,6 +5563,7 @@ mod tests {
 			TrackServe {
 				validity: Default::default(),
 				route: None,
+				source: None,
 				subscriber,
 				path: Path::from_static("room"),
 				instance: None,
@@ -5744,6 +5764,7 @@ mod tests {
 			TrackServe {
 				validity: Default::default(),
 				route: None,
+				source: None,
 				subscriber,
 				path: Path::from_static("room"),
 				instance: None,
@@ -5795,6 +5816,7 @@ mod tests {
 		let serve = TrackServe {
 			validity: Default::default(),
 			route: None,
+			source: None,
 			subscriber,
 			path: Path::from_static("room/host"),
 			instance: None,
@@ -5862,6 +5884,7 @@ mod tests {
 		let serve = TrackServe {
 			validity: Default::default(),
 			route: None,
+			source: None,
 			subscriber,
 			path: Path::from_static("room/host"),
 			instance: None,
@@ -5879,6 +5902,7 @@ mod tests {
 			serve,
 			state: TrackRunState::Serve(serving),
 			gate: gate_run,
+			datagrams: None,
 		};
 
 		assert!(kio::Task::poll(&mut running, &kio::Waiter::noop()).is_pending());
@@ -5931,6 +5955,7 @@ mod tests {
 				serve: TrackServe {
 					validity: Default::default(),
 					route: None,
+					source: None,
 					subscriber,
 					path: Path::from_static("room/host"),
 					instance: None,
@@ -6005,6 +6030,7 @@ mod tests {
 			let serve = TrackServe {
 				validity: Default::default(),
 				route: None,
+				source: None,
 				subscriber,
 				path: Path::from_static("room"),
 				instance: None,
@@ -6077,6 +6103,7 @@ mod tests {
 			let serve = TrackServe {
 				validity: Default::default(),
 				route: None,
+				source: None,
 				subscriber,
 				path: Path::from_static("room"),
 				instance: None,
@@ -6109,6 +6136,7 @@ mod tests {
 				serve,
 				state: TrackRunState::Serve(serving),
 				gate,
+				datagrams: None,
 			};
 			assert!(kio::Task::poll(&mut running, &kio::Waiter::noop()).is_ready());
 			let end = reader.recv_group().now_or_never().expect("the track ended").map(|_| ());
@@ -8359,6 +8387,9 @@ struct TrackServe {
 	validity: crate::model::broadcast::RequestValidity,
 	/// The advertisement that minted this source, absent for standalone test sources.
 	route: Option<kio::Consumer<()>>,
+	/// The source broadcast, which a lite-05/06 track adds its name's datagram track to.
+	/// Absent for standalone test sources.
+	source: Option<crate::broadcast::Producer>,
 	subscriber: Subscriber,
 	path: Path,
 	/// The instance to ask for; the peer refuses a request for another.
@@ -8860,6 +8891,67 @@ struct TrackServeRun {
 	state: TrackRunState,
 	/// Cancels the track once the session stops allowing its broadcast.
 	gate: crate::auth::Gate,
+	/// Lite-05/06: the name's datagram track, taking the datagrams its subscription carries.
+	datagrams: Option<SharedDatagrams>,
+}
+
+/// Lite-05/06: the datagram track of a stream track's name, which the session adds to the
+/// source once the track's TRACK_INFO arrives and routes the datagrams of the track's
+/// subscription to. It adds no demand of its own, so a reader of either kind shares the
+/// one upstream SUBSCRIBE. It finishes with the track's serve.
+struct SharedDatagrams {
+	subscriber: Subscriber,
+	key: (Path, String),
+	producer: Option<datagram::Producer>,
+}
+
+impl SharedDatagrams {
+	/// The datagram track of `serve`'s name, unless its version carries none beside a
+	/// stream track or the source already has one, such as a reader's request.
+	fn new(serve: &TrackServe, info: &track::Info) -> Option<Self> {
+		let version = serve.subscriber.version;
+		if !version.has_datagrams() || version.has_datagram_tracks() {
+			return None;
+		}
+		let info = datagram::Info::default()
+			.with_timescale(info.timescale)
+			.with_priority(info.priority);
+		let producer = serve
+			.source
+			.as_ref()?
+			.create_datagrams(serve.name.as_str(), info)
+			.ok()?;
+		let key = (serve.path.clone(), serve.name.clone());
+		serve.subscriber.legacy_datagrams.lock().insert(
+			key.clone(),
+			DatagramEntry {
+				producer: producer.clone(),
+				timescale: info.timescale,
+			},
+		);
+		Some(Self {
+			subscriber: serve.subscriber.clone(),
+			key,
+			producer: Some(producer),
+		})
+	}
+}
+
+impl Drop for SharedDatagrams {
+	fn drop(&mut self) {
+		let Some(producer) = self.producer.take() else {
+			return;
+		};
+		let mut shared = self.subscriber.legacy_datagrams.lock();
+		if shared
+			.get(&self.key)
+			.is_some_and(|entry| entry.producer.is_clone(&producer))
+		{
+			shared.remove(&self.key);
+		}
+		drop(shared);
+		producer.finish();
+	}
 }
 
 #[expect(
@@ -8916,7 +9008,12 @@ impl TrackServeRun {
 			TrackRunState::Serve(ServeLoop::new(&serve, request, info))
 		};
 		let gate = serve.gate();
-		Self { serve, state, gate }
+		Self {
+			serve,
+			state,
+			gate,
+			datagrams: None,
+		}
 	}
 
 	/// The session no longer allows the broadcast: end the track and cancel the
@@ -9066,6 +9163,8 @@ impl kio::Task for TrackServeRun {
 							// Lite05/06 timestamps may be send times, so the copy's groups
 							// skip the rewind check.
 							info.unchecked = !self.serve.subscriber.version.has_media_time();
+							// Before the accept, so a relay serving the track on sees it.
+							self.datagrams = SharedDatagrams::new(&self.serve, &info);
 							let mut serve_loop = ServeLoop::adopt(&self.serve, request, info.clone(), dynamic, fetches);
 							serve_loop.held = Some(held);
 							if let Some(pipelined) = pipelined {

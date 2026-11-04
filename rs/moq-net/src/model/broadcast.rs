@@ -1111,8 +1111,27 @@ impl Consumer {
 			.try_consume(self.stats.clone())
 			.expect("a fresh request is open");
 		state.datagrams.insert(name.into(), request.weak());
+		// Requests their readers left are withdrawn, so the queue holds only what someone
+		// still waits for, however long a handler goes without taking any.
+		state.datagram_requests.retain(|queued| !queued.is_closed());
 		state.datagram_requests.push_back(request);
 		Ok(consumer)
+	}
+
+	/// Join the datagram track `name` if one is published or already asked for, asking no
+	/// handler for it otherwise.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn datagrams_live(&self, name: &str) -> Option<datagram::Consumer> {
+		let state = self.state.lock();
+		if state.closing {
+			return None;
+		}
+		if let Some(source) = &state.datagram_source {
+			let source = source.clone()?;
+			drop(state);
+			return Some(source.datagrams_live(name)?.with_stats(self.stats.clone()));
+		}
+		state.datagrams.get(name)?.try_consume(self.stats.clone())
 	}
 
 	/// Join the demand of the track serving `name`, requesting it from a [`Requests`]
@@ -2583,6 +2602,25 @@ mod test {
 			handler.poll_requested(&kio::Waiter::noop()),
 			Poll::Ready(Err(Error::Closed))
 		));
+	}
+
+	/// A request whose readers all left is withdrawn, so a handler that never polls holds
+	/// only the requests someone still waits for.
+	#[test]
+	fn a_datagram_request_nobody_waits_for_is_withdrawn() {
+		let producer = Info::new().produce();
+		let _handler = producer.requests().datagrams();
+		let consumer = producer.consume();
+		for name in ["a", "b", "c", "d"] {
+			let left = consumer.datagrams(name).unwrap();
+			drop(left);
+		}
+		let mut waiting = consumer.datagrams("e").unwrap();
+		assert_eq!(producer.state.lock().datagram_requests.len(), 1);
+		assert!(recv_datagram(&mut waiting).is_pending());
+		// A withdrawn name is asked for afresh.
+		let _again = consumer.datagrams("a").unwrap();
+		assert_eq!(producer.state.lock().datagram_requests.len(), 2);
 	}
 
 	/// Losing the last datagram handler drops the requests it never took, and readers find

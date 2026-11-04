@@ -2321,6 +2321,7 @@ impl Request for SubscribeServe {
 
 					let session = shared.session.clone();
 					let publisher = track.info().priority;
+					let timescale = track.info().timescale;
 					let group = session.send_group(crate::priority::group(msg.priority, publisher));
 					let sub = Subscription {
 						session,
@@ -2344,7 +2345,7 @@ impl Request for SubscribeServe {
 					};
 					let floor = cursor_floor(shared.version, bounds.groups().start(), latest);
 					let mut run = TrackRun::new(sub, track, bounds, floor, steer_tx);
-					run.datagrams = LegacyDatagrams::join(legacy, msg.id, msg.priority);
+					run.datagrams = LegacyDatagrams::join(legacy, msg.id, msg.priority, timescale);
 					if let Some(update) = update {
 						run.update(update);
 					}
@@ -2467,21 +2468,27 @@ struct LegacyDatagrams {
 	consumer: datagram::Consumer,
 	id: u64,
 	priority: i8,
+	/// The stream track's timescale, which TRACK_INFO declared for the subscription and so
+	/// stamps its datagrams too.
+	timescale: Option<crate::Timescale>,
 	/// Set once the track's info is known.
 	send: Option<DatagramSend>,
 }
 
 impl LegacyDatagrams {
-	/// The datagram track of the name `legacy` serves, for subscription `id` at `priority`,
-	/// or `None` when the version has no fallback or nothing would serve one.
-	fn join(legacy: Option<Box<Legacy>>, id: u64, priority: i8) -> Option<Self> {
+	/// The datagram track of the name `legacy` serves, for subscription `id` at `priority`
+	/// of a stream track with `timescale`, or `None` when the version has no fallback or
+	/// no datagram track is live. A relay holds one for each old-version stream track it
+	/// subscribes to, so this asks no handler: a request would subscribe to the name again.
+	fn join(legacy: Option<Box<Legacy>>, id: u64, priority: i8, timescale: Option<crate::Timescale>) -> Option<Self> {
 		let legacy = legacy?;
-		let mut consumer = legacy.broadcast.datagrams(&legacy.name).ok()?;
+		let mut consumer = legacy.broadcast.datagrams_live(&legacy.name)?;
 		consumer.set_priority(priority);
 		Some(Self {
 			consumer,
 			id,
 			priority,
+			timescale,
 			send: None,
 		})
 	}
@@ -2502,6 +2509,7 @@ impl LegacyDatagrams {
 			let Ok(info) = ready!(self.consumer.poll_info(waiter)) else {
 				return Poll::Ready(false);
 			};
+			let info = info.with_timescale(self.timescale);
 			self.send = Some(DatagramSend::new(shared, self.id, info, self.priority));
 		}
 		let send = self.send.as_ref().expect("set above");
