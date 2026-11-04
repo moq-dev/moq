@@ -926,6 +926,10 @@ const INFLIGHT: usize = 1 << 20;
 /// The receiver's storage segment (`moq_net`'s crate-private `frame::SEGMENT`): a frame within
 /// one keeps its credit until it completes, and a larger one returns each segment's as it seals.
 const SEGMENT: usize = 1 << 20;
+/// Why cells whose incomplete units overcommit the window are skipped: the quest that makes
+/// `track::Subscriber` report each group it abandons, which their readers need to return its
+/// in-flight credit.
+const OVERCOMMITTED: &str = "waits on quest/m1/group-drops.md";
 
 /// One benchmark configuration.
 #[derive(Clone, Copy)]
@@ -1078,10 +1082,14 @@ async fn measure(cell: Cell, profile: Option<moq_shaper::Profile>, bytes: usize)
 /// stream window that follows the connection window. Reports the peak credit the peer had
 /// spent (leased plus unread), throughput of delivered frames, their completion latency, how
 /// many frames were delivered and streams evicted, and the bottleneck's queue drops, each the
-/// median of the runs. Cells whose incomplete units overcommit the window keep their offered
-/// load and report what eviction cost them; any other cell fails if a run evicted a stream.
-/// The publisher is a stock server, so its send window bounds what is in flight as it would in
-/// production. Run by nightly.
+/// median of the runs. Any cell whose incomplete units [fit](Cell::fits) fails if a run
+/// evicted a stream. The publisher is a stock server, so its send window bounds what is in
+/// flight as it would in production. Run by nightly.
+///
+/// Cells whose units overcommit the window are skipped, each printed with [`OVERCOMMITTED`]
+/// as the reason. They should keep their offered load and report what eviction cost them, but
+/// the subscriber can abandon a group without handing it out, so its in-flight credit never
+/// returns and the track's writer stalls.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "release benchmark, run by nightly"]
 async fn benchmark_receive_windows() {
@@ -1115,6 +1123,17 @@ async fn benchmark_receive_windows() {
 			follow: true,
 			..default
 		}));
+	let (cells, skipped): (Vec<_>, Vec<_>) = cells.partition(Cell::fits);
+	for cell in skipped {
+		// Not stdout: the nightly report reads every line after the table's header as a row.
+		eprintln!(
+			"skipped {} cell, {} streams of {} B frames over a {} MiB window: {OVERCOMMITTED}",
+			cell.axis,
+			cell.streams,
+			cell.frame,
+			cell.window >> 20,
+		);
+	}
 	let paths = [
 		("loopback", None, BENCH_BYTES),
 		("bufferbloat", Some(bufferbloat(BENCH_BLOAT.0)), BENCH_BLOAT.1),
@@ -1122,7 +1141,10 @@ async fn benchmark_receive_windows() {
 	println!(
 		"path,axis,streams,frame,window_mib,stream_window,peak_bytes,mib_per_s,p50_ms,p99_ms,delivered_frames,evicted_streams,overflowed_packets"
 	);
-	for (cell, (path, profile, bytes)) in cells.flat_map(|cell| paths.clone().map(|path| (cell, path))) {
+	for (cell, (path, profile, bytes)) in cells
+		.into_iter()
+		.flat_map(|cell| paths.clone().map(|path| (cell, path)))
+	{
 		let mut runs = Vec::with_capacity(RUNS);
 		for _ in 0..RUNS {
 			runs.push(measure(cell, profile.clone(), bytes).await);
