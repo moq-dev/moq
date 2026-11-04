@@ -8,7 +8,8 @@ widening the receive window on admit, and reconnect with backoff come from
 moq-net for tokio, io_uring and WebRTC sessions alike. moq-tokio keeps only
 sockets, DNS, TLS, accept loops, the fallback runtime and spawning. The epic is
 done when moq-relay's hand-copied policy in `uring.rs` is deleted in favour of
-the moq-net calls, and moq-webrtc's session runs through the same policy.
+the moq-net calls, and the WebRTC transport's session runs through the same
+policy.
 
 ## Plan
 
@@ -35,7 +36,9 @@ in moq-net, and decided:
 Research (2026-11-04, `origin/main` at e6be13d5f8):
 
 - moq-tokio owns the accept deadline (`server.rs` `Setup::deadline`,
-  `within`, `Deadline::bound`, default 10 s in `listen.rs`), the connect
+  `within`, `Deadline::bound`, default 10 s in `listen.rs`) up to the SETUP
+  reply, which moq-net already bounds through `Handshake::with_deadline`
+  (`rs/moq-net/src/server.rs`), the connect
   deadline (`client.rs`, default 30 s in `connect.rs`), receive-window holding
   and widening on admit (`Request::ok`, `qmux_limits`), `Request`
   construction per transport, and reconnect (`connection.rs` `Backoff`,
@@ -44,7 +47,8 @@ Research (2026-11-04, `origin/main` at e6be13d5f8):
   spawning and WebRTC's own UDP socket are tokio-specific.
 - moq-relay's io_uring path re-implements the server side by hand
   (`rs/moq-relay/src/uring.rs`: its own `Deadline`, the admission bound,
-  `with_deadline`, `set_limits`, the drain-bounded reply). Eight commits
+  the drain-bounded reply, and the `with_deadline` and `set_limits` calls
+  that wire them up). Eight commits
   patched drift between the copies (58eaa6afd5, 8a13d58910, 6bd1306d6e,
   1f56330d21, d17b84ee7f, 4576bb1231, c11192c7e6, 67df70012d). moq-uring
   itself has no client side.
@@ -54,7 +58,7 @@ Research (2026-11-04, `origin/main` at e6be13d5f8):
   reports unsupported, the same move [QUIC deadline](/quest/m2/quic-deadline.md)
   plans for per-stream deadlines.
 - moq-net stays poll-first and spawns nothing
-  ([Libraries spawn nothing](https://github.com/moq-dev/moq/pull/7805)):
+  ([libraries spawn nothing](https://github.com/moq-dev/moq/pull/6849)):
   policy returns drivers and machines, and the caller spawns and does the I/O.
 
 ## Required

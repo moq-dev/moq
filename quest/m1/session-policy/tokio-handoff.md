@@ -7,7 +7,9 @@ spawning, and calls moq-net for all session policy. It gains two public
 handoffs for transports established elsewhere: `accept_with(transport, link)`
 on the listener and `connect_with(transport)` on the client, which run the
 moq-net accept or connect policy over an already-connected session and return
-the usual request or session. moq-webrtc uses them.
+the usual request or session. moq-tokio's own `webrtc` module goes through
+them, so the [WebRTC rename](/quest/m1/webrtc-rename.md) moves it into
+moq-webrtc without reaching into moq-tokio's internals.
 
 ## Plan
 
@@ -20,10 +22,14 @@ moq-net rather than a copy of the policy.
 
 - The handoff's signature (transport plus link metadata in, request or session
   out) is fixed by this quest and does not change if policy moves further.
-- Delete moq-tokio's now-unused `Deadline`, `within`, `Backoff` and the like,
-  and its per-transport `Request` construction that moq-net now owns.
-- Its consumer is moq-webrtc, so the [API audit](/quest/m1/api-audit/README.md)
-  rule (a new public surface needs a consumer) is met.
+- Delete moq-tokio's now-unused `Deadline`, `Backoff` and the like, and its
+  per-transport `Request` construction that moq-net now owns. Bounding the
+  transport handshake (`within`) stays here, since moq-net has no session yet
+  at that point.
+- Its consumer is the WebRTC transport: moq-tokio's `webrtc` module here, and
+  moq-webrtc once the rename moves it, so the
+  [API audit](/quest/m1/api-audit/README.md) rule (a new public surface needs a
+  consumer) is met.
 
 Public API: moq-tokio adds `accept_with` and `connect_with` and drops internals
 it re-exported, with MIGRATE notes. Wire: none.
