@@ -4723,7 +4723,7 @@ mod tests {
 			group.write_frame(crate::Timestamp::from_millis(1).unwrap(), &b"x"[..])?;
 			group.finish()
 		};
-		let mut arrive = |serving: &mut ServeLoop, sequence| {
+		let arrive = |serving: &mut ServeLoop, sequence| {
 			let group = serving.serving.create_group(crate::group::Info { sequence }).unwrap();
 			(group, Reading::open(&tail, Some(sequence), now()))
 		};
