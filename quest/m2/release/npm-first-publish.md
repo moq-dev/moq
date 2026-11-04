@@ -32,7 +32,12 @@ real version is published by hand. `release.ts` compares against the
 
 Until the cut publishes `@moq/libav` 0.1.0, Windows `bun install` keeps
 failing, since `js/libav/build.ts` there unpacks the published tarball of
-the workspace version. The placeholder does not change that.
+the workspace version. The placeholder does not change that. Pullfrog's
+review setup, which has no Nix, hits the same `@moq/libav@0.1.0 is not
+published to npm yet` install failure on every run (noted 2026-11-03 from
+[moq-dev/moq#7714](https://github.com/moq-dev/moq/pull/7714), e.g.
+[run 41591680387](https://github.com/moq-dev/moq/actions/runs/41591680387));
+it clears with the same publication.
 
 `@moq/p2p` is out of scope: it is private with no release script, so the cut
 does not publish it. [Watch opts in](/quest/m2/p2p/watch.md) owns its first

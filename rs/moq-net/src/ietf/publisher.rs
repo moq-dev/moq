@@ -114,22 +114,6 @@ enum FetchPrior {
 	None,
 	/// The next object of the same group.
 	Same(Option<u64>),
-	/// The first object of a group after another one's, carrying its Group ID field.
-	Group(u64),
-}
-
-/// Where a fetch object sits, given the group written before its own, if any.
-fn fetch_position(prior_group: Option<u64>, group: u64, prior: Option<u64>, object: u64) -> Result<FetchPrior, Error> {
-	match (prior_group, prior) {
-		// A later group is spelled as its distance from the prior one, less one.
-		(Some(prior_group), None) => Ok(FetchPrior::Group(
-			group
-				.abs_diff(prior_group)
-				.checked_sub(1)
-				.ok_or(Error::MalformedTrack)?,
-		)),
-		_ => fetch_prior(prior, object),
-	}
 }
 
 /// The span a FETCH answers, as a standalone FETCH spells it.
@@ -309,6 +293,8 @@ struct FetchObjectInfo<'a> {
 	sequence: u64,
 	object: u64,
 	prior: FetchPrior,
+	/// The track's Publisher Priority on the wire, which the first object states for all.
+	priority: u8,
 	timestamp: Option<Timestamp>,
 	inflated: Option<u64>,
 	timescale: Option<Timescale>,
@@ -2555,6 +2541,8 @@ impl Publisher {
 		let res = async {
 			stream.varint(FetchHeader::TYPE).await?;
 			stream.encode(&FetchHeader { request_id }).await?;
+			// Resolved already: the subscription this fills described the track.
+			let publisher_priority = super::priority::to_wire(track.info().await?.priority);
 
 			let FillServe::Group { sequence, skip, until } = fill else {
 				return Err(Error::Unsupported);
@@ -2580,7 +2568,7 @@ impl Publisher {
 				GroupSlice { skip, until },
 				timescale,
 				self.version,
-				&mut None,
+				publisher_priority,
 			)
 			.await?;
 			Ok(())
@@ -2615,7 +2603,7 @@ impl Publisher {
 		slice: GroupSlice,
 		timescale: Option<Timescale>,
 		version: Version,
-		prior_group: &mut Option<u64>,
+		priority: u8,
 	) -> Result<(), Error> {
 		let GroupSlice { skip, until } = slice;
 		let mut index: u64 = 0;
@@ -2673,7 +2661,8 @@ impl Publisher {
 								FetchObjectInfo {
 									sequence,
 									object: index,
-									prior: fetch_position(*prior_group, sequence, prior, index)?,
+									prior: fetch_prior(prior, index)?,
+									priority,
 									timestamp: frame.timestamp,
 									inflated: frame.inflated,
 									timescale,
@@ -2721,7 +2710,8 @@ impl Publisher {
 						FetchObjectInfo {
 							sequence,
 							object: index,
-							prior: fetch_position(*prior_group, sequence, prior, index)?,
+							prior: fetch_prior(prior, index)?,
+							priority,
 							timestamp: frame.timestamp,
 							inflated: frame.inflated,
 							timescale,
@@ -2760,10 +2750,6 @@ impl Publisher {
 		if until.is_some_and(|until| index < until) {
 			return Err(Error::NotFound);
 		}
-
-		if prior.is_some() {
-			*prior_group = Some(sequence);
-		}
 		Ok(())
 	}
 
@@ -2776,6 +2762,7 @@ impl Publisher {
 			sequence,
 			object,
 			prior,
+			priority,
 			timestamp,
 			inflated,
 			timescale,
@@ -2806,12 +2793,13 @@ impl Publisher {
 
 		let header = match prior {
 			// The first object must carry its absolute Group and Object IDs. Include the
-			// priority too: "same as the prior object" has no prior to refer to.
+			// priority too: "same as the prior object" has no prior to refer to. It is the
+			// track's, as a subgroup header's Publisher Priority is.
 			FetchPrior::None => ietf::FetchObject::Object {
 				subgroup: ietf::FetchSubgroup::Zero,
 				group: Some(sequence),
 				object: Some(object),
-				priority: Some(0),
+				priority: Some(priority),
 				properties,
 			},
 			// Same group and priority; the Object ID is the prior one plus one.
@@ -2822,14 +2810,6 @@ impl Publisher {
 				priority: None,
 				properties,
 			},
-			// A new group restates its Object ID absolutely, and keeps the prior priority.
-			FetchPrior::Group(group) => ietf::FetchObject::Object {
-				subgroup: ietf::FetchSubgroup::Zero,
-				group: Some(group),
-				object: Some(object),
-				priority: None,
-				properties,
-			},
 		};
 
 		stream.encode(&header).await?;
@@ -2837,22 +2817,21 @@ impl Publisher {
 		Ok(())
 	}
 
-	/// Write one group's objects to a fetch stream, after those of `prior_group`, which it
-	/// becomes once the group wrote any.
+	/// Write one group's objects to a fetch stream, which carries no other group.
 	async fn write_fetched_group(
 		writer: &mut Writer<Ranked<crate::transport::boxed::SendStream>, Version>,
 		group: FetchedGroup,
-		prior_group: &mut Option<u64>,
 		version: Version,
 		timescale: Option<Timescale>,
 	) -> Result<(), Error> {
 		let source = group.info.ietf();
+		let priority = super::priority::to_wire(group.info.priority);
 		let mut prior = None;
 		let mut budget = kio::coop::Budget::new(32);
 		for (ordinal, frame) in (group.first..).zip(group.frames) {
 			kio::wait(|waiter| budget.poll_yield(waiter)).await;
 			let object = frame.fields.as_ref().map_or(ordinal, |fields| fields.id);
-			let position = fetch_position(*prior_group, group.sequence, prior, object)?;
+			let position = fetch_prior(prior, object)?;
 			prior = Some(object);
 			Self::write_fetch_object(
 				writer,
@@ -2860,6 +2839,7 @@ impl Publisher {
 					sequence: group.sequence,
 					object,
 					prior: position,
+					priority,
 					timestamp: frame.timestamp,
 					inflated: frame.inflated,
 					timescale,
@@ -2870,9 +2850,6 @@ impl Publisher {
 			)
 			.await?;
 			Self::write_fetch_payload(writer, frame.frame.payload).await?;
-		}
-		if prior.is_some() {
-			*prior_group = Some(group.sequence);
 		}
 		Ok(())
 	}
@@ -3322,8 +3299,7 @@ impl Publisher {
 					request_id: msg.request_id,
 				})
 				.await?;
-			let mut prior_group = None;
-			Self::write_fetched_group(&mut writer, group, &mut prior_group, self.version, timescale).await?;
+			Self::write_fetched_group(&mut writer, group, self.version, timescale).await?;
 			settle(&mut writer).await?;
 			Ok::<(), Error>(())
 		};
@@ -10808,7 +10784,8 @@ mod serve_tests {
 				if index == 0 {
 					assert_eq!(crate::coding::decode_varint(&mut buf, version).unwrap(), LATEST);
 					assert_eq!(crate::coding::decode_varint(&mut buf, version).unwrap(), 0);
-					assert_eq!(bytes::Buf::try_get_u8(&mut buf).unwrap(), 0);
+					// The track's Publisher Priority, as FETCH_OK states it: unset is wire 127.
+					assert_eq!(bytes::Buf::try_get_u8(&mut buf).unwrap(), 127);
 				}
 				let properties = crate::coding::decode_buf(&mut buf, version, |r, _| Ok(r.bytes()?.to_vec())).unwrap();
 				assert!(!properties.is_empty(), "{version}: missing Timestamp");
@@ -12041,6 +12018,93 @@ mod serve_tests {
 				);
 			}
 		}
+	}
+
+	/// The Publisher Priority each object on a fetch stream states, after its FETCH_HEADER.
+	fn fetch_object_priorities(buf: &mut Decoder<'_>, version: Version) -> Vec<Option<u8>> {
+		assert_eq!(buf.varint().unwrap(), FetchHeader::TYPE, "{version}");
+		FetchHeader::decode(buf, version).unwrap();
+		let mut priorities = Vec::new();
+		while !buf.is_empty() {
+			let ietf::FetchObject::Object { priority, .. } = ietf::FetchObject::decode(buf, version).unwrap() else {
+				panic!("{version}: unexpected End of Range");
+			};
+			let size = buf.varint().unwrap() as usize;
+			buf.slice(size).unwrap();
+			priorities.push(priority);
+		}
+		priorities
+	}
+
+	/// A fetch stream's first object states the track's Publisher Priority, as a subgroup
+	/// header does, and every later one inherits it. Model 72 is wire 55 (lower first).
+	#[kio::test]
+	async fn a_standalone_fetch_states_the_track_priority() {
+		for version in FETCH_DRAFTS {
+			let mut h = serve_track(
+				version,
+				track::Info {
+					priority: 72,
+					..track::Info::timed()
+				},
+			);
+			publish_pairs(&mut h, 3, None);
+			settle().await;
+
+			let wire = standalone_fetch(
+				&h,
+				Location { group: 2, object: 0 },
+				Location { group: 2, object: 0 },
+				GroupOrder::Ascending,
+			)
+			.await;
+			let mut buf = Decoder::new(&wire, version.into());
+			assert_eq!(buf.varint().unwrap(), ietf::FetchOk::ID, "{version}");
+			ietf::FetchOk::decode(&mut buf, version).unwrap();
+			assert_eq!(
+				fetch_object_priorities(&mut buf, version),
+				[Some(55), None],
+				"{version}"
+			);
+		}
+	}
+
+	/// A fill's fetch stream states the track's Publisher Priority the same way.
+	#[kio::test]
+	async fn a_fill_states_the_track_priority() {
+		let version = Version::Draft22;
+		let h = serve_track(
+			version,
+			track::Info {
+				priority: 72,
+				..track::Info::timed()
+			},
+		);
+		let mut group = h.track.create_group(group::Info { sequence: 4 }).unwrap();
+		group.write_frame(timestamp(), b"fill".as_slice()).unwrap();
+		group.finish().unwrap();
+
+		let ranking = Ranking {
+			queue: h.publisher.priority.clone(),
+			group: None,
+			request_id: RequestId(REQUEST_ID),
+			priority: kio::Producer::new(PRIORITY).consume(),
+			publisher: 0,
+			order: Order::Descending,
+			lapse: Lapse::default(),
+		};
+		let opened = AtomicU64::new(0);
+		let fill = FillServe::Group {
+			sequence: 4,
+			skip: 0,
+			until: None,
+		};
+		h.publisher
+			.run_fill(fill, &ranking, h.track.consume(), None, &opened, ranking.request_id)
+			.await;
+		let wire = bytes::Bytes::from(h.log.writes.lock().unwrap().to_vec());
+		let mut buf = Decoder::new(&wire, version.into());
+		assert_eq!(fetch_object_priorities(&mut buf, version), [Some(55)]);
 	}
 
 	/// The Track Properties block a publisher upstream of a relay sent on `version`: an even

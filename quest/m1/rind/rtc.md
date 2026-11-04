@@ -10,7 +10,7 @@ hold no aws-lc-rs or str0m-aws-lc-rs, and a browser still connects.
 ## Plan
 
 Decided with the maintainer on 2026-10-26; see the
-[epic](/quest/m2/rind/README.md). str0m's workspace dependency drops its
+[epic](/quest/m1/rind/README.md). str0m's workspace dependency drops its
 `aws-lc-rs` feature, the test-only HMAC-SHA1 in `server/mux.rs` moves to rind,
 and reqwest switches to its no-provider feature. The existing browser
 interop tests prove the switch.
@@ -30,4 +30,4 @@ offered.
 
 ## Required
 
-- [Vendor and trim the stack](/quest/m2/webrtc/vendor.md) - where str0m and dimpl live once vendored
+- [Vendor and trim the stack](/quest/m1/webrtc-vendor.md) - where str0m and dimpl live once vendored
