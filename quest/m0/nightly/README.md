@@ -27,8 +27,9 @@ This README's own work, after the children:
 - Confirm a scheduled run passes. Failures already owned elsewhere stay
   there: the audio near-zero p95 row belongs to
   [audio jitter target](/quest/m1/audio-jitter-target/README.md), the
-  macOS `receive_credit` timeout to
-  [test flakes](/quest/m0/test-flakes-2/README.md), and the paired bench
+  macOS `receive_credit` timeout has no owner since its quest was deleted in
+  [moq-dev/moq#6732](https://github.com/moq-dev/moq/pull/6732), so plan one under
+  [test flakes](/quest/m0/test-flakes-2/README.md) if it recurs, and the paired bench
   threshold to [bench CI](/quest/m1/bench-ci.md).
 
 Public API: none. Wire: none.
@@ -36,8 +37,6 @@ Public API: none. Wire: none.
 ## Required
 
 - [The receive-windows benchmark runs to the end](/quest/m0/nightly/receive-windows-evicted.md) - `benchmark_receive_windows` stops failing `frame: Evicted`, so the Rust benchmark-tests job publishes its report
-- [The relay's startup fits its stack under all features](/quest/m0/nightly/relay-stack.md) - `debug_relay_load_and_run_fit_windows_stack` passes under `--all-features`, fixed at the feature that grew the future
-- [The binding benchmark's 64 KiB case measures](/quest/m0/nightly/bindings-bench-evicted.md) - the 64 KiB case completes instead of failing `evicted`
 - [moq-net's ingest fuzz target finds no stall](/quest/m0/nightly/ingest-fuzz.md) - the 13-byte stream that stalls ingest is fixed at its cause and kept as a regression test
 - [Nightly's shipping-size check passes](/quest/m0/nightly/shipping-size.md) - js/net, js/watch, and moq-relay growth over 5% is traced to its commits, then shrunk or accepted
 - [Nightly's Miri job stays inside its time budget](/quest/m0/nightly/miri.md) - Miri gets `rust-src`, then finishes inside its 60-minute job and 15-minute-per-test budgets

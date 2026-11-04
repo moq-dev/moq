@@ -45,6 +45,7 @@ default:
 # from plain `bun test` so unit tests do not launch a browser.
 harness:
     ./lib/harness.test.sh
+    python3 lib/pulse.test.py
     ./interop/relay-log.test.sh
     python3 interop/staging.test.py
     python3 ../rs/moq-gst/smoke.test.py
@@ -256,6 +257,14 @@ video:
 # Optional publisher max age across Rust/JS sessions through a Rust relay.
 max-age:
     bash ../sh/local.sh cargo nextest run --locked -p moq-tokio --test integration -E 'test(/^max_age::/)' --run-ignored all
+
+# JavaScript publisher and reader over WebSocket, through a Rust relay, past qmux's default stream limit.
+stream-limits:
+    bash ../sh/local.sh cargo nextest run --locked -p moq-tokio --test integration -E 'test(/^stream_limits::/)' --run-ignored only
+
+# A JavaScript relay between Rust peers FETCHes upstream what its copy misses, below its start and once evicted.
+relay-fill:
+    bash ../sh/local.sh cargo nextest run --locked -p moq-tokio --test integration -E 'test(/^relay_fill::/)' --run-ignored all
 
 # A JavaScript sender exhausts each native receiver's connection credit, which recovers.
 receive-credit:

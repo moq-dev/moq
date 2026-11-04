@@ -57,6 +57,9 @@ updates:
     cooldown:
       default-days: 7
 
+  # Dependabot edits rs/workspace-hack/Cargo.toml's pins by hand, so its PRs
+  # (security fixes included) can fail `cargo hakari generate --diff` in the
+  # merge queue. The land fixer then regenerates the hack and re-enqueues them.
   - package-ecosystem: "cargo"
     directory: "/"
     schedule:

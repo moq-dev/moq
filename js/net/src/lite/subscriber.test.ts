@@ -41,6 +41,7 @@ import {
 	SubscribeOk,
 	type SubscribeResponse,
 	SubscribeStart,
+	SubscribeUpdate,
 } from "./subscribe.ts";
 import { Minted, SUBSCRIBE_SETUP_TIMEOUT_MS, Subscriber } from "./subscriber.ts";
 import { Track, TrackInfo } from "./track.ts";
@@ -1009,6 +1010,8 @@ test("an unknown announce type between starts keeps the stream", async () => {
 
 interface FakeStream {
 	inbound: ReadableStreamDefaultController<Uint8Array>;
+	// The subscriber's writes as they arrive, so a decoder can wait for a whole message.
+	outbound: ReadableStream<Uint8Array>;
 	// Resolves once the subscriber waits on a read the test has not answered.
 	reading: Promise<void>;
 	aborted: Promise<unknown>;
@@ -1039,6 +1042,8 @@ function fakeSession(park: number[] = [], stall: number[] = []) {
 		close: (info?: WebTransportCloseInfo) => void closes.push(info),
 		createBidirectionalStream: () => {
 			let inbound!: ReadableStreamDefaultController<Uint8Array>;
+			let sent!: ReadableStreamDefaultController<Uint8Array>;
+			const outbound = new ReadableStream<Uint8Array>({ start: (controller) => (sent = controller) });
 			let onRead!: () => void;
 			let onAbort!: (reason: unknown) => void;
 			let onFinish!: () => void;
@@ -1067,7 +1072,9 @@ function fakeSession(park: number[] = [], stall: number[] = []) {
 						stopped.refused();
 						return Promise.reject(stopped.reason);
 					}
-					written.push(new Uint8Array(chunk));
+					const copy = new Uint8Array(chunk);
+					written.push(copy);
+					sent.enqueue(copy);
 					onWrite();
 					return new Promise<void>((resolve) => {
 						if (stalled) return;
@@ -1081,8 +1088,14 @@ function fakeSession(park: number[] = [], stall: number[] = []) {
 						channel.port2.postMessage(null);
 					});
 				},
-				close: () => onFinish(),
-				abort: (reason) => void onAbort(reason),
+				close: () => {
+					sent.close();
+					onFinish();
+				},
+				abort: (reason) => {
+					sent.error(reason);
+					onAbort(reason);
+				},
 			});
 			const opened = new Promise((resolve) => (release = () => resolve({ readable, writable })));
 			if (!park.includes(streams.length)) release();
@@ -1090,7 +1103,7 @@ function fakeSession(park: number[] = [], stall: number[] = []) {
 				new Promise<void>((refused) => {
 					stopped = { reason, refused };
 				});
-			streams.push({ inbound, reading, aborted, finished, writing, written, release, stop });
+			streams.push({ inbound, outbound, reading, aborted, finished, writing, written, release, stop });
 			count.set(streams.length);
 			return opened;
 		},
@@ -1265,47 +1278,51 @@ test("a lite subscribe whose SUBSCRIBE write stalls past the deadline closes its
 // On lite-05 and later a SUBSCRIBE goes out beside its TRACK, before the TRACK_INFO, and accepting
 // the info sends no SUBSCRIBE_UPDATE even when the publisher keeps groups fresh for less than the
 // subscriber waits.
-test.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])(
-	"lite %s: a subscribe goes out with its track",
-	async (version) => {
-		const { quic, streams, opened } = fakeSession();
-		const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
-		const track = subscriber
-			.consume(Path.from("room"))
-			.track("video")
-			.subscribe({ priority: 3, delay: { max: Milli(10_000) } });
-		try {
-			await opened(0);
-			await streams[0].reading;
-			await (await opened(1)).writing;
-			const sent = new Reader(undefined, new Uint8Array(Buffer.concat(streams[0].written)), version);
-			expect(await sent.u53()).toBe(StreamId.Track);
-			await drainReactions();
-			const wire = () => new Reader(undefined, new Uint8Array(Buffer.concat(streams[1].written)), version);
-			let subscribe = wire();
-			expect(await subscribe.u53()).toBe(StreamId.Subscribe);
-			const msg = await Subscribe.decode(subscribe, version);
-			expect([msg.id, msg.track, msg.priority, msg.maxDelay]).toEqual([0n, "video", 3, 10_000]);
+test.each(
+	[Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07].flatMap((version) =>
+		[false, true].map((forced) => ({ name: versionName(version), version, forced })),
+	),
+)("$name: a subscribe goes out with its track (forced yields: $forced)", async ({ version, forced }) => {
+	const yielding = forced ? spyOn(Budget.prototype, "poll").mockImplementation(() => yieldNow()) : undefined;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const track = subscriber
+		.consume(Path.from("room"))
+		.track("video")
+		.subscribe({ priority: 3, delay: { max: Milli(10_000) } });
+	try {
+		await opened(0);
+		await streams[0].reading;
+		const sent = new Reader(undefined, new Uint8Array(Buffer.concat(streams[0].written)), version);
+		expect(await sent.u53()).toBe(StreamId.Track);
+		const request = await opened(1);
+		const subscribe = new Reader(request.outbound, undefined, version);
+		expect(await subscribe.u53()).toBe(StreamId.Subscribe);
+		// Reading the request waits for its body without needing TRACK_INFO first.
+		const msg = await Subscribe.decode(subscribe, version);
+		expect([msg.id, msg.track, msg.priority, msg.maxDelay]).toEqual([0n, "video", 3, 10_000]);
 
-			const chunks: Uint8Array[] = [];
-			const writer = new Writer(
-				new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
-				version,
-			);
-			await new TrackInfo({ timescale: 1000, maxAge: 1000 }).encode(writer, version);
-			for (const chunk of chunks) streams[0].inbound.enqueue(chunk);
-			await track.info();
-			await drainReactions();
-			subscribe = wire();
-			await subscribe.u53();
-			await Subscribe.decode(subscribe, version);
-			expect(await subscribe.done()).toBe(true);
-		} finally {
-			track.close();
-			subscriber.close();
-		}
-	},
-);
+		const chunks: Uint8Array[] = [];
+		const writer = new Writer(
+			new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
+			version,
+		);
+		await new TrackInfo({ timescale: 1000, maxAge: 1000 }).encode(writer, version);
+		for (const chunk of chunks) streams[0].inbound.enqueue(chunk);
+		await track.info();
+		await request.reading;
+		// An explicit change orders after any update caused by TRACK_INFO, even if its encoding yields.
+		track.update({ priority: 4, delay: { max: Milli(10_000) } });
+		const update = await SubscribeUpdate.decode(subscribe, version);
+		expect([update.priority, update.maxDelay]).toEqual([4, 10_000]);
+		track.close();
+		expect(await subscribe.done()).toBe(true);
+	} finally {
+		track.close();
+		subscriber.close();
+		yielding?.mockRestore();
+	}
+});
 
 // A GROUP that beats its subscription's TRACK_INFO waits unread for it, then is read with it.
 test("a group that beats its track info waits for it", async () => {

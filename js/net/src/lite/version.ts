@@ -371,6 +371,16 @@ export function resolvesStart(version: Version): boolean {
 	}
 }
 
+/**
+ * Whether a copy's fills stop at the start its publisher resolved from the budget. Lite-06
+ * resolves the start, but drops media time and sends FETCH without a max delay, so nothing
+ * judges a group below that start against a reader's budget: a widened budget reaches lower
+ * groups through the feed's re-offer instead. Mirrors the Rust `Version::fills_from_start`.
+ */
+export function fillsFromStart(version: Version): boolean {
+	return resolvesStart(version) && !hasMediaTime(version) && !hasFetchMaxDelay(version);
+}
+
 /** Whether ANNOUNCE_REQUEST carries the hidden opt-in. Added in lite-07. */
 export function hasHidden(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-07+ behavior.

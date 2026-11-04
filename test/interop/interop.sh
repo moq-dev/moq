@@ -473,7 +473,7 @@ plan_cases() {
 
 # One version's share of plan_cases.
 plan_pass() {
-    local pub sub runtime version
+    local pub sub runtime version transport
     if [[ "$TAIL_ONLY" -eq 0 && "$FINISH_ONLY" -eq 0 ]]; then
         for pub in "${PUB_LIST[@]}"; do
             for sub in "${SUB_LIST[@]}"; do record "not run" case=media publisher="$pub" subscriber="$sub"; done
@@ -533,6 +533,14 @@ plan_pass() {
         done
         record "not run" case="compressed catalog" publisher=rust subscriber="$runtime"
         record "not run" case="hls grid" publisher="$runtime" subscriber=rust
+        for transport in websocket webtransport; do
+            record "not run" case="track replacement $transport" publisher="$runtime" subscriber="$runtime" version=moq-lite-07-wip
+        done
+        if [[ "$COMPAT" -eq 0 ]]; then
+            for transport in websocket webtransport; do
+                record "not run" case="claims $transport" publisher="$runtime" subscriber="$runtime" version=moq-lite-07-wip
+            done
+        fi
     done
     needs js-native-node || return 0
     for version in "${DROP_VERSIONS[@]}"; do
@@ -2261,6 +2269,33 @@ run_matrix() {
     fi
 }
 
+# A publisher and fresh readers exercise on-demand claims through this run's relay.
+run_claims_case() {
+    local runtime="$1" transport="$2" name="claims-$1-$2" started=$SECONDS
+    local prefix="claims-$1-$2-$$-$RANDOM" command=(bun)
+    local cell=(case="claims $transport" publisher="$runtime" subscriber="$runtime" version=moq-lite-07-wip log="$LOGS/$name.log")
+    [[ "$runtime" != js-native-node ]] || command=(node --import tsx)
+    if is_broken "$runtime"; then
+        record fail "${cell[@]}" detail="client unavailable"
+        overall=1
+        return
+    fi
+    harness_spawn "$name" "$LOGS/$name.log" timeout -k 3 "$TIMEOUT" "${command[@]}" "$CLIENTS/js-native/claims.ts" \
+        "$(token_url --publish "$prefix/**")" "$(token_url --subscribe "$prefix/**")" "$prefix" "$transport"
+    # Judged by its printed marker, as run_native is: the addon can crash during Bun's exit
+    # teardown after every assertion has passed.
+    harness_wait "$HARNESS_PID" || true
+    if grep -qx 'claims resolved own-path=2 child-path=2 late-follow=1 absent=Unroutable' "$LOGS/$name.log"; then
+        echo "  PASS  claims $runtime $transport"
+        record pass "${cell[@]}" seconds=$((SECONDS - started))
+    else
+        echo "  FAIL  claims $runtime $transport"
+        record fail "${cell[@]}" seconds=$((SECONDS - started)) detail="claim resolution failed"
+        cat "$LOGS/$name.log"
+        overall=1
+    fi
+}
+
 # Standalone control peers use the same pinned draft, with OS-assigned endpoint ports.
 run_control_case() {
     local runtime="$1" kind="$2" version name="$2-$1" started=$SECONDS
@@ -2288,6 +2323,34 @@ run_control_case() {
     else
         echo "  FAIL  $kind rust <-> $runtime"
         record fail "${cell[@]}" seconds=$((SECONDS - started)) detail="control peer failed"
+        cat "$LOGS/$name.log"
+        overall=1
+    fi
+}
+
+run_replacement_case() {
+    local runtime="$1" transport="$2" name="replace-$1-$2" started=$SECONDS
+    local prefix="replace-$1-$2-$$-$RANDOM"
+    local cell=(case="track replacement $transport" publisher="$runtime" subscriber="$runtime" version=moq-lite-07-wip log="$LOGS/$name.log")
+    if is_broken "$runtime"; then
+        record fail "${cell[@]}" detail="client unavailable"
+        overall=1
+        return
+    fi
+    local command=(bun)
+    [[ "$runtime" != js-native-node ]] || command=(node --import tsx)
+    harness_spawn "$name" "$LOGS/$name.log" timeout -k 3 "$TIMEOUT" \
+        "${command[@]}" "$CLIENTS/js-native/replace.ts" \
+        "$(token_url --publish "$prefix/**")" "$(token_url --subscribe "$prefix/**")" "$prefix" "$transport"
+    # Judged by its printed marker, as run_native is: the addon can crash during Bun's exit
+    # teardown after every assertion has passed.
+    harness_wait "$HARNESS_PID" || true
+    if grep -qx 'replacement automatic=64 immediate=2 resumed=2 missing-group-fetch=2' "$LOGS/$name.log"; then
+        echo "  PASS  track replacement $runtime ($transport)"
+        record pass "${cell[@]}" seconds=$((SECONDS - started))
+    else
+        echo "  FAIL  track replacement $runtime ($transport)"
+        record fail "${cell[@]}" seconds=$((SECONDS - started)) detail="replacement did not reach the new track"
         cat "$LOGS/$name.log"
         overall=1
     fi
@@ -2431,7 +2494,7 @@ run_hls_grid() {
 
 # This checkout's CLI FETCH and finite track tails in this pass, then the lite drop lanes.
 run_tails() {
-    local runtime version
+    local runtime version transport
     echo "=== CLI FETCH close ==="
     local pub sub
     for pub in rust js-native-node js-native-bun; do
@@ -2474,12 +2537,19 @@ run_tails() {
     [[ "$VERSION" == auto ]] || return 0
     for runtime in js-native-node js-native-bun; do
         needs "$runtime" || continue
+        run_replacement_case "$runtime" websocket
+        run_replacement_case "$runtime" webtransport
         for version in "${COMPRESS_VERSIONS[@]}"; do
             run_tail_pair rust "$runtime" compress "$version"
             run_tail_pair "$runtime" rust compress "$version"
         done
         run_catalog_fanout "$runtime"
         run_hls_grid "$runtime"
+        if [[ "$COMPAT" -eq 0 ]]; then
+            for transport in websocket webtransport; do
+                run_claims_case "$runtime" "$transport"
+            done
+        fi
     done
     if needs js-native-node; then
         for version in "${DROP_VERSIONS[@]}"; do

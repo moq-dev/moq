@@ -2,6 +2,7 @@ import { Milli } from "@moq/clock";
 import type { Drain } from "../connection/goaway.ts";
 import { ProtocolViolation } from "../error.ts";
 import type { Reader, Writer } from "../stream.ts";
+import { toNumber } from "../util/bigint.ts";
 import * as Message from "./message.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
@@ -47,7 +48,7 @@ export class GoAway {
 	drain(): Drain {
 		return {
 			uri: this.newSessionUri,
-			timeout: this.timeout > 0n ? Milli(Number(this.timeout)) : undefined,
+			timeout: this.timeout > 0n ? Milli(toNumber(this.timeout)) : undefined,
 		};
 	}
 
@@ -59,6 +60,7 @@ export class GoAway {
 			throw new ProtocolViolation("GOAWAY new session URI exceeds 8,192 bytes");
 		}
 		const timeout = await r.u62();
+		toNumber(timeout); // The drain deadline uses numeric milliseconds.
 		let requestId: bigint | undefined;
 		if (version === Version.DRAFT_18 && !(await r.done())) {
 			requestId = await r.u62();

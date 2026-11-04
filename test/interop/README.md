@@ -15,6 +15,11 @@ broadcast and confirms every subscriber sees data flowing before the timeout.
 Most subscribers check for a non-empty video frame. The browser additionally verifies
 WebCodecs output painted to a canvas and drives the player's pause/resume controls.
 
+The native JS tail lanes also resolve on-demand claims on lite-07, under Node
+and Bun over WebSocket and WebTransport. Fresh readers request or follow the
+claim's own path and child paths. A reader-first case checks that an absent
+request ends while its follower waits for the publisher to arrive.
+
 Every publisher also sends an Opus tone, one sine per channel, and every subscriber
 decodes it. Python and C++ send a mono 440 Hz tone; the rest send 440 Hz left and
 660 Hz right, so a channel swap fails too. The Rust CLI imports it from ffmpeg in
@@ -69,6 +74,13 @@ head with a joining FETCH before draft 22 and a fill from it.
 
 `--tail` runs the FETCH round, the late joins, and the five finite-tail lanes. The
 wire-compat lanes, which swap in released relays and clients, skip them.
+
+On lite-07, Node and Bun also replace tracks in a claimed broadcast through the
+relay over WebSocket and WebTransport. Pre-connected readers subscribe immediately
+after each replacement while an existing reader resumes. The case also repeats the
+automatic failed-source lifecycle 64 times. A missing-group FETCH
+crosses both hops with the unlimited subscriber budget, checking its optional
+millisecond encoding at the safe-integer boundary.
 
 The finite clients keep their session alive until the harness acknowledges the
 reader's complete clean end over stdin, so a lane tests delivery rather than

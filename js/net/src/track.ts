@@ -22,6 +22,7 @@ import type { IetfVersion } from "./ietf/version.ts";
 import {
 	type DropRun,
 	dropAt,
+	type FillStarts,
 	finalSequence,
 	groupBounds,
 	hooks,
@@ -265,14 +266,14 @@ export interface Groups {
 
 /**
  * Where one end of a {@link Range} falls: a fixed group (`absolute`), a count of groups back from
- * the latest one (`relative`, clamped to group 0, so `{ relative: 0 }` is the latest group), or a
+ * the latest one (`relative`, clamped to group 0, so `{ relative: 0n }` is the latest group), or a
  * presentation time (`time`, the group containing it: the newest one starting at or before it).
  * Mirrors the Rust `Anchor`.
  *
  * Every anchor names a whole group: a subscription always starts at a group's first frame. A
  * relative or time anchor resolves at the hop that serves it, when it starts serving and again
  * whenever the subscriber replaces its ranges. Before any group exists a relative anchor resolves
- * at the first one, so `{ start: { relative: 0 } }` starts there.
+ * at the first one, so `{ start: { relative: 0n } }` starts there.
  *
  * A time anchor resolves from where the groups the hop holds start. A start before every group
  * held reaches back to the oldest one, and one resolved before any group has started waits for
@@ -287,7 +288,7 @@ export interface Groups {
  */
 export type Anchor =
 	| { absolute: bigint; relative?: never; time?: never }
-	| { relative: number; absolute?: never; time?: never }
+	| { relative: bigint; absolute?: never; time?: never }
 	| { time: Timestamp; absolute?: never; relative?: never };
 
 /**
@@ -296,7 +297,7 @@ export type Anchor =
  * An omitted start is the oldest group still around (Rust's `Range::oldest`), and an omitted end
  * keeps following the live edge. An absolute end is exclusive, so `{absolute: 2}..{absolute: 6}`
  * delivers groups 2 through 5; relative and time ends include their group, so
- * `{absolute: 0}..{relative: 0}` delivers through the latest group.
+ * `{absolute: 0}..{relative: 0n}` delivers through the latest group.
  */
 export interface Range {
 	/** Where delivery starts, or the oldest group when omitted. */
@@ -348,7 +349,7 @@ export interface Subscription {
 	 * The spans of the track to deliver; see {@link Range}.
 	 *
 	 * Defaults to `[{}]`: everything {@link Delay.max} still considers fresh.
-	 * `[{ start: { relative: 0 } }]` starts at the latest group instead, and an empty list asks
+	 * `[{ start: { relative: 0n } }]` starts at the latest group instead, and an empty list asks
 	 * for nothing. {@link Delay.max} caps every range: a range names what may be delivered, and
 	 * the budget skips what inside it has gone stale. A read whose ranges all end finishes once
 	 * nothing in them is left to deliver, as in Rust, while one left open follows the live edge.
@@ -786,6 +787,8 @@ let owedRuns: (producer: Producer, start: bigint, end: bigint) => Iterable<Run &
 let owedGroup: (producer: Producer, start: bigint, end: bigint) => { sequence: bigint; folds?: number } | undefined;
 let fillEdge: (producer: Producer) => bigint | undefined;
 let sourceStart: (producer: Producer) => bigint | "pending" | undefined;
+// The lowest group a reader naming `named` asks a fill for; see `Producer.#fillFloor`.
+let fillFloor: (producer: Producer, named: bigint | undefined) => bigint | undefined;
 // The producer's checked group starts, sorted by sequence; assigned in its static block.
 let startsOf: (producer: Producer) => readonly Start[];
 // The exclusive end of the run of sequences from `sequence` the producer's feed can no longer
@@ -940,6 +943,8 @@ export class Producer {
 	#served?: { start?: bigint | null; requested?: bigint };
 	// Only copies fed by a wire subscription owe missing groups.
 	#subscribed = false;
+	// How the subscription's start bounds the fills readers ask below it.
+	#starts: FillStarts = {};
 	// The misses its readers asked of a {@link Requests} handle.
 	#fills: FillState;
 	// The sequences the live feed delivered, as a group: what a pending tail is
@@ -989,11 +994,13 @@ export class Producer {
 			!producer.#subscribed && producer.#state.info.peek()?.ietf !== undefined
 				? producer.#state.largest.peek()?.group
 				: undefined;
-		hooks.receiveTrack = (producer) => {
+		hooks.receiveTrack = (producer, starts = {}) => {
 			producer.#subscribed = true;
+			producer.#starts = starts;
 		};
 		hooks.receiveGroup = (producer, { sequence, start }) => producer.#createGroup(sequence, start);
 		sourceStart = (producer) => producer.#served && producer.#feedStart();
+		fillFloor = (producer, named) => producer.#fillFloor(named);
 		startsOf = (producer) => producer.#bounds;
 		goneAt = (producer, sequence) => {
 			// Without a declared start, the first arrival stands in for it, as the tail's does.
@@ -1810,6 +1817,28 @@ export class Producer {
 		return this.#state.closed.peek() === undefined ? "pending" : requested;
 	}
 
+	// The lowest group a reader whose ranges name `named` (undefined for one reaching back to
+	// the oldest group) asks a fill for, or undefined for no bound. Below a start resolved from
+	// the budget, each reader fills what its own budget reaches; otherwise only what its ranges
+	// name; and never on a wire whose fills cannot judge a group by that budget. Mirrors the
+	// Rust `Misses::judge`. Fetches are never bounded by it.
+	#fillFloor(named: bigint | undefined): bigint | undefined {
+		if (!this.#subscribed) return undefined;
+		const feed = this.#feedStart();
+		const start = feed === "pending" ? this.#served?.requested : feed;
+		if (start === undefined || start === 0n) return undefined;
+		if (this.#starts.fillsFromStart) return start;
+		// The START applies only while the demand keeps the floor it answered, as `#feedStart`.
+		const ranges = this.#state.update.peek()?.ranges;
+		const served = this.#served;
+		const resolved =
+			this.#starts.resolvesStart === true &&
+			typeof served?.start === "bigint" &&
+			served.requested === (ranges && wireSpan(ranges).start);
+		if (resolved) return undefined;
+		return named === undefined || named >= start ? start : undefined;
+	}
+
 	#owes(final: bigint): boolean {
 		if (!this.#tailPending) return false;
 		const feed = this.#feedStart();
@@ -2532,8 +2561,10 @@ export class Subscriber {
 				insertRun(gone, run.start, run.end);
 				if (run.folds !== undefined) this.#wakeAt(run.folds);
 			}
+			// Below where the feed starts, only the history the copy's start rule leaves fillable.
+			const floor = fillFloor(producer, this.#window.start());
 			for (const run of this.#wants(
-				start,
+				floor === undefined ? start : max(start, floor),
 				min(end, max(this.#state.received.peek(), (fillEdge(producer) ?? -1n) + 1n)),
 			)) {
 				for (const open of runGaps(gone, run.start, run.end)) {
@@ -3064,7 +3095,8 @@ export class Subscriber {
 	 * Once the track closes cleanly, a reader with nothing left in range finishes. So does a
 	 * read whose {@link Subscription.ranges} all end, once every group in them was handed out,
 	 * dropped, skipped as stale, or will never arrive, while the track goes on, as in Rust;
-	 * replacing the ranges with {@link update} reads on. A cap keeping a group out holds it
+	 * later reads return `undefined` immediately too, and widening the ranges with {@link update}
+	 * reads on without replaying groups already returned. A cap keeping a group out holds it
 	 * open, since the cap may rise.
 	 * A group whose presentation time is further behind the live edge than this
 	 * subscriber's `delay.max` is skipped. The default subscription's zero takes the live edge.
@@ -3638,7 +3670,8 @@ export class Ordered {
 	 * group whose every frame is further behind the live edge than `delay.max` (the default
 	 * subscription's zero keeps only what nothing newer has superseded). Honors the bounds set by
 	 * {@link withRange}. Like {@link Subscriber.recvGroup}, a read whose ranges all end
-	 * finishes once nothing in them is left to deliver.
+	 * finishes once nothing in them is left to deliver. Later reads return `undefined`
+	 * immediately too; widening the ranges with {@link update} reads on above the last sequence returned.
 	 */
 	nextGroup(): Promise<GroupConsumer | undefined> {
 		return ordered_.nextGroup(this.#subscriber);
