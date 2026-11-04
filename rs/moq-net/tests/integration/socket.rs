@@ -667,7 +667,10 @@ async fn a_replayed_session_never_connects() {
 	// Carol accepts first, so the replay reaches her listening.
 	let accept = async { kio::clock::timeout(SETTLE, carol.accept_tcp()).await };
 	let (accepted_by_carol, replayed) = futures::join!(accept, async { kio::clock::timeout(TIMEOUT, replayed).await });
-	assert!(replayed.expect("replay timeout").is_err(), "carol served a replayed session");
+	assert!(
+		replayed.expect("replay timeout").is_err(),
+		"carol served a replayed session"
+	);
 	assert!(accepted_by_carol.is_err(), "a session for bob surfaced at carol");
 
 	// Renamed for carol: alice never dialed it, so she resets carol's accept.
@@ -680,9 +683,10 @@ async fn a_replayed_session_never_connects() {
 		.expect("accept timeout")
 		.unwrap();
 	assert_eq!(incoming.peer(), "alice");
-	let (accepted_by_carol, renamed) = kio::clock::timeout(TIMEOUT, async { futures::join!(incoming.accept(), renamed) })
-		.await
-		.expect("connect timeout");
+	let (accepted_by_carol, renamed) =
+		kio::clock::timeout(TIMEOUT, async { futures::join!(incoming.accept(), renamed) })
+			.await
+			.expect("connect timeout");
 	assert!(accepted_by_carol.is_err(), "carol connected to a replayed session");
 	assert!(renamed.is_err(), "the replayer read carol's half");
 
