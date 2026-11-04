@@ -29,7 +29,7 @@ async function session(protocol: string) {
 	const broadcastPublication = origin.createBroadcast(Path.from("test"));
 	const broadcast = broadcastPublication.broadcast;
 	broadcastPublication.announce();
-	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	const remote = wireOf(client).consume(Path.from("test"));
 	const reader = remote
 		.track("video")
@@ -69,15 +69,15 @@ test.each([Lite.ALPN_05, Lite.ALPN_06])(
 			video.writeFrame(textFrame("1"));
 			expect(await reader.readString()).toBe("1");
 
-			video.finishAt({ group: 3, frame: 0 });
-			expect(await reader.finished()).toEqual({ group: 3, frame: 0 });
+			video.finishAt({ group: 3n, frame: 0 });
+			expect(await reader.finished()).toEqual({ group: 3n, frame: 0 });
 
 			video.writeFrame(textFrame("2"));
 			video.finish();
 			video.close();
 			expect(await readAll(reader)).toEqual(["2"]);
 			expect(await reader.closed).toBeNull();
-			expect(await reader.finished()).toEqual({ group: 3, frame: 0 });
+			expect(await reader.finished()).toEqual({ group: 3n, frame: 0 });
 		} finally {
 			close();
 		}
@@ -93,7 +93,7 @@ test.each([Ietf.ALPN.DRAFT_22])("%s: END_OF_TRACK carries the declared end", asy
 		video.writeFrame(textFrame("0"));
 		expect(await reader.readString()).toBe("0");
 
-		video.finishAt({ group: 4, frame: 0 });
+		video.finishAt({ group: 4n, frame: 0 });
 		video.writeFrame(textFrame("1"));
 		video.writeFrame(textFrame("2"));
 		const ended = now();
@@ -102,7 +102,7 @@ test.each([Ietf.ALPN.DRAFT_22])("%s: END_OF_TRACK carries the declared end", asy
 
 		expect(await readAll(reader)).toEqual(["1", "2"]);
 		expect(await reader.closed).toBeNull();
-		expect(await reader.finished()).toEqual({ group: 4, frame: 0 });
+		expect(await reader.finished()).toEqual({ group: 4n, frame: 0 });
 		// Every counted stream arrived, so nothing waited out the grace.
 		expect(Nano.toMilli(Instant.durationSince(now(), ended))).toBeLessThan(TAIL_GRACE_MS);
 	} finally {
@@ -126,53 +126,53 @@ describe("Tail", () => {
 
 	test("a gap older than the grace folds away", () => {
 		const { at, tail: t } = tail();
-		t.account(0, 1);
-		t.account(2, 3);
+		t.account(0n, 1n);
+		t.account(2n, 3n);
 		at(GRACE / 2);
-		t.account(4, 5);
-		expect(t.covers(0, 3)).toBe(false);
+		t.account(4n, 5n);
+		expect(t.covers(0n, 3n)).toBe(false);
 
 		// Splitting the younger gap keeps it as late as it was.
-		t.account(6, 7);
+		t.account(6n, 7n);
 		at(GRACE);
-		t.account(8, 9);
-		expect(t.covers(0, 3)).toBe(true);
-		expect(t.covers(0, 5)).toBe(false);
+		t.account(8n, 9n);
+		expect(t.covers(0n, 3n)).toBe(true);
+		expect(t.covers(0n, 5n)).toBe(false);
 	});
 
 	test("splitting a gap leaves both halves with its age", () => {
 		const { at, tail: t } = tail();
-		t.account(0, 1);
-		t.account(9, 10);
+		t.account(0n, 1n);
+		t.account(9n, 10n);
 		at(GRACE / 2);
-		t.account(5, 6);
-		expect(t.covers(0, 10)).toBe(false);
+		t.account(5n, 6n);
+		expect(t.covers(0n, 10n)).toBe(false);
 
 		at(GRACE);
-		t.account(9, 10);
-		expect(t.covers(0, 10)).toBe(true);
+		t.account(9n, 10n);
+		expect(t.covers(0n, 10n)).toBe(true);
 	});
 
 	test("a lowered floor restarts the gap age", () => {
 		const { at, tail: t } = tail();
-		t.account(3, 4);
-		t.account(9, 10);
+		t.account(3n, 4n);
+		t.account(9n, 10n);
 
 		at(GRACE * 2);
-		t.demand(1, 3);
-		t.account(1, 2);
-		expect(t.covers(1, 4)).toBe(false);
+		t.demand(1n, 3n);
+		t.account(1n, 2n);
+		expect(t.covers(1n, 4n)).toBe(false);
 		// Only the gap the floor reached restarts.
-		expect(t.covers(3, 10)).toBe(true);
+		expect(t.covers(3n, 10n)).toBe(true);
 
 		at(GRACE * 3);
-		t.account(9, 10);
-		expect(t.covers(1, 10)).toBe(true);
+		t.account(9n, 10n);
+		expect(t.covers(1n, 10n)).toBe(true);
 	});
 
 	test("the grace waits for a stream being read", async () => {
 		const { clock, tail: t } = tail(Milli(10));
-		const read = t.open(0);
+		const read = t.open(0n);
 		let settled = false;
 		const settling = t
 			.settle(() => false, new Once<unknown>())

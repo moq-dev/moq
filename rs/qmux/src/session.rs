@@ -2,8 +2,9 @@
 //!
 //! [`mux::Connection`] owns the streams, flow control, and timers, and the
 //! [`Driver`](crate::Driver) moves its records over the transport. The handles call straight
-//! into the connection under its lock and park on the per-stream waiter lists the driver
-//! wakes, the way the QUIC drivers do.
+//! into the connection under its lock and park on the connection's own waiter lists, which it
+//! wakes as the driver feeds it. Whatever a handle queues wakes the driver through
+//! [`mux::Connection::poll_transmit`] itself.
 
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Poll, ready};
@@ -13,7 +14,6 @@ use bytes::{Buf, Bytes};
 use moq_net::transport::{self as net, Address, poll};
 use moq_quic::stream::{Dir, Id as StreamId};
 use moq_quic::{Side, VarInt, connection::Error as ConnectionError, mux, recv, send};
-use rustc_hash::FxHashMap;
 
 use crate::transport::Transport;
 use crate::{Config, Driver, Error, SharedSocketStats};
@@ -29,115 +29,67 @@ pub(crate) struct Inner {
 
 pub(crate) struct State {
 	pub(crate) conn: mux::Connection,
-	/// Wakes the driver; handles kick it after mutating the connection so fresh egress
-	/// reaches the transport.
-	pub(crate) driver: kio::WaiterList,
 
-	established: bool,
-	establish_waiters: kio::WaiterList,
-	accept_bi_waiters: kio::WaiterList,
-	accept_uni_waiters: kio::WaiterList,
-	/// Whoever is blocked on the peer's MAX_STREAMS credit.
-	open_waiters: kio::WaiterList,
-
-	/// Per-stream read/write parking, keyed by stream id.
-	readable: FxHashMap<StreamId, kio::WaiterList>,
-	writable: FxHashMap<StreamId, kio::WaiterList>,
-	/// Send streams waiting for their end: a FIN serialized, or a `STOP_SENDING`.
-	finishing: FxHashMap<StreamId, kio::WaiterList>,
-
-	datagram_waiters: kio::WaiterList,
-
-	/// The terminal error, set exactly once; everything fails with it after.
+	/// The terminal error, set exactly once. Handles report it in place of the connection's
+	/// own reason once it is set, since it can say more (the transport's I/O error, say).
+	///
+	/// The connection's `poll_closed` resolves the moment it is closed, but a close this side
+	/// asked for is published here only once the driver delivered it and shut the transport, or
+	/// gave up after [`CLOSE_TIMEOUT`](crate::driver::CLOSE_TIMEOUT) (see `local_close`), so
+	/// [`Session`]'s `poll_closed` keeps this latch and its own list.
+	/// Only the driver knows when the close frame reached the transport, which the sans-I/O
+	/// connection cannot see, and a caller may exit the moment `poll_closed` resolves, so
+	/// publishing earlier would leave the frame unwritten.
 	closed: Option<Error>,
 	closed_waiters: kio::WaiterList,
 	/// The error for a close this side asked for, published once the driver has delivered
-	/// the close frame, so a caller that exits the moment `poll_closed` resolves already
-	/// handed it to the transport.
+	/// the close frame or gave up on a stalled one, so a caller that exits the moment
+	/// `poll_closed` resolves already handed it to the transport.
 	pub(crate) local_close: Option<Error>,
 }
 
 impl State {
-	/// Terminate with `err` (the first one wins) and wake absolutely everyone.
+	/// Terminate with `err` (the first one wins), waking whoever waits on the session's
+	/// `poll_closed`.
+	///
+	/// Every caller loses the connection under the same lock, which wakes everyone parked on
+	/// it, the driver included.
 	pub(crate) fn fail(&mut self, err: Error) {
 		if self.closed.is_some() {
 			return;
 		}
 		self.closed = Some(err);
-		self.driver.wake();
 		self.closed_waiters.wake();
-		self.establish_waiters.wake();
-		self.accept_bi_waiters.wake();
-		self.accept_uni_waiters.wake();
-		self.open_waiters.wake();
-		self.datagram_waiters.wake();
-		for waiters in self.readable.values_mut() {
-			waiters.wake();
+	}
+
+	/// Publish a loss the connection recorded since the last check: a remote close or a
+	/// violation fails the session now, while a close this side asked for waits for the driver
+	/// to deliver its frame.
+	///
+	/// Called after every call that can lose the connection: a record, a timeout, a close.
+	pub(crate) fn check_lost(&mut self) {
+		if self.closed.is_some() || self.local_close.is_some() {
+			return;
 		}
-		for waiters in self.writable.values_mut() {
-			waiters.wake();
-		}
-		for waiters in self.finishing.values_mut() {
-			waiters.wake();
+		let Some(reason) = self.conn.error() else {
+			return;
+		};
+		let local = matches!(reason, ConnectionError::LocallyClosed { .. });
+		let err = Error::lost(reason.clone());
+		match local {
+			// The driver publishes a local close once its frame is out.
+			true => self.local_close = Some(err),
+			false => self.fail(err),
 		}
 	}
 
-	/// Apply every pending connection event to the parking tables.
-	pub(crate) fn sweep(&mut self) {
-		while let Some(event) = self.conn.poll() {
-			match event {
-				mux::Event::Connected => {
-					self.established = true;
-					self.establish_waiters.wake();
-				}
-				mux::Event::Stream(event) => self.sweep_stream(event),
-				mux::Event::DatagramReceived => self.datagram_waiters.wake(),
-				mux::Event::ConnectionLost { reason } => {
-					let local = matches!(reason, ConnectionError::LocallyClosed { .. });
-					let err = Error::lost(reason);
-					match local {
-						// The driver publishes a local close once its frame is out.
-						true => self.local_close = Some(err),
-						false => self.fail(err),
-					}
-				}
-			}
+	/// What a handle reports once the connection is lost: the session's terminal error, or
+	/// why the connection ended while a local close is still being delivered.
+	fn lost(&self) -> Error {
+		if let Some(err) = &self.closed {
+			return err.clone();
 		}
-	}
-
-	fn sweep_stream(&mut self, event: moq_quic::StreamEvent) {
-		use moq_quic::StreamEvent;
-
-		// Waking removes the entry: a still-interested poller re-registers on its next poll,
-		// so the maps only hold streams somebody is parked on.
-		match event {
-			StreamEvent::Opened { dir: Dir::Bi } => self.accept_bi_waiters.wake(),
-			StreamEvent::Opened { dir: Dir::Uni } => self.accept_uni_waiters.wake(),
-			StreamEvent::Available { .. } => self.open_waiters.wake(),
-			StreamEvent::Readable { id } => wake(&mut self.readable, id),
-			StreamEvent::Writable { id } => wake(&mut self.writable, id),
-			StreamEvent::Finished { id } => wake(&mut self.finishing, id),
-			StreamEvent::Stopped { id, .. } => {
-				wake(&mut self.finishing, id);
-				// A writer blocked on capacity has to learn it will never come.
-				wake(&mut self.writable, id);
-			}
-			// Nothing waits on a send stream's acknowledgment yet.
-			StreamEvent::Acked { .. } => {}
-		}
-	}
-
-	/// Drop send stream `id`'s bookkeeping, parking and its end included.
-	fn forget_send(&mut self, id: StreamId) {
-		self.finishing.remove(&id);
-		self.writable.remove(&id);
-		self.conn.send_stream(id).release();
-	}
-}
-
-fn wake(lists: &mut FxHashMap<StreamId, kio::WaiterList>, id: StreamId) {
-	if let Some(mut waiters) = lists.remove(&id) {
-		waiters.wake();
+		self.conn.error().cloned().map_or(Error::Closed, Error::lost)
 	}
 }
 
@@ -152,11 +104,13 @@ impl Inner {
 		if state.closed.is_some() || state.conn.is_closed() {
 			return;
 		}
+		// Closing wakes everyone parked on the connection. The driver hears it too, through
+		// `poll_transmit` to deliver the close, or `poll_closed` to start a stalled one's close
+		// bound.
 		state
 			.conn
 			.close(VarInt::from_u64(code).unwrap_or(VarInt::MAX), reason.to_string());
-		state.sweep();
-		state.driver.wake();
+		state.check_lost();
 	}
 }
 
@@ -217,16 +171,6 @@ impl Session {
 		let inner = Arc::new(Inner {
 			state: Mutex::new(State {
 				conn,
-				driver: kio::WaiterList::new(),
-				established: false,
-				establish_waiters: kio::WaiterList::new(),
-				accept_bi_waiters: kio::WaiterList::new(),
-				accept_uni_waiters: kio::WaiterList::new(),
-				open_waiters: kio::WaiterList::new(),
-				readable: FxHashMap::default(),
-				writable: FxHashMap::default(),
-				finishing: FxHashMap::default(),
-				datagram_waiters: kio::WaiterList::new(),
 				closed: None,
 				closed_waiters: kio::WaiterList::new(),
 				local_close: None,
@@ -254,14 +198,7 @@ impl Session {
 			// A finished driver already published why, so only the state needs checking.
 			let _ = waiter.poll_future(std::pin::Pin::new(&mut *driver));
 			let mut state = inner.lock();
-			if state.established {
-				return Poll::Ready(Ok(()));
-			}
-			if let Some(err) = &state.closed {
-				return Poll::Ready(Err(err.clone()));
-			}
-			waiter.register(&mut state.establish_waiters);
-			Poll::Pending
+			state.conn.poll_connected(waiter).map_err(|_| state.lost())
 		})
 		.await?;
 		if self.protocol.is_none() {
@@ -294,9 +231,8 @@ impl Session {
 		if capped(limits.receive_rate) || capped(limits.send_rate) {
 			return Err(Error::InvalidConfig("qmux does not pace, so it takes no rate cap"));
 		}
-		let mut state = self.inner.lock();
-		state.conn.set_limits(limits)?;
-		state.driver.wake();
+		// moq-quic wakes the driver for any MAX_DATA or MAX_STREAMS this owes the peer.
+		self.inner.lock().conn.set_limits(limits)?;
 		Ok(())
 	}
 
@@ -313,17 +249,7 @@ impl Session {
 
 	fn poll_accept_dir(&self, waiter: &kio::Waiter, dir: Dir) -> Poll<Result<StreamId, Error>> {
 		let mut state = self.inner.lock();
-		if let Some(id) = state.conn.streams().accept(dir) {
-			return Poll::Ready(Ok(id));
-		}
-		if let Some(err) = &state.closed {
-			return Poll::Ready(Err(err.clone()));
-		}
-		match dir {
-			Dir::Bi => waiter.register(&mut state.accept_bi_waiters),
-			Dir::Uni => waiter.register(&mut state.accept_uni_waiters),
-		}
-		Poll::Pending
+		state.conn.streams().poll_accept(waiter, dir).map_err(|_| state.lost())
 	}
 
 	fn poll_open_dir(
@@ -333,17 +259,9 @@ impl Session {
 		options: poll::SendOptions<'_, SendGroup>,
 	) -> Poll<Result<StreamId, Error>> {
 		let mut state = self.inner.lock();
-		if let Some(err) = &state.closed {
-			return Poll::Ready(Err(err.clone()));
-		}
-		// The peer's MAX_STREAMS credit is what gates us: `open` hands back nothing while it
-		// is spent.
-		if let Some(id) = state.conn.streams().open(dir, to_quic(options)) {
-			state.driver.wake();
-			return Poll::Ready(Ok(id));
-		}
-		waiter.register(&mut state.open_waiters);
-		Poll::Pending
+		// The peer's MAX_STREAMS credit is what gates us: this parks while it is spent.
+		let id = ready!(state.conn.streams().poll_open(waiter, dir, to_quic(options))).map_err(|_| state.lost())?;
+		Poll::Ready(Ok(id))
 	}
 }
 
@@ -410,19 +328,13 @@ impl poll::Session for Session {
 		options: poll::SendOptions<'_, SendGroup>,
 	) -> Poll<Result<Option<poll::BiStreams<Self>>, Error>> {
 		let mut state = self.inner.lock();
-		if let Some(err) = &state.closed {
-			return Poll::Ready(Err(err.clone()));
+		if state.conn.is_closed() {
+			return Poll::Ready(Err(state.lost()));
 		}
 		// A session started on an out-of-band protocol (a WebSocket subprotocol) runs before
 		// the peer's transport parameters arrive. Until then its credit is unknown, not spent.
-		if !state.established {
-			waiter.register(&mut state.establish_waiters);
-			return Poll::Pending;
-		}
+		ready!(state.conn.poll_connected(waiter)).map_err(|_| state.lost())?;
 		let id = state.conn.streams().open(Dir::Bi, to_quic(options));
-		if id.is_some() {
-			state.driver.wake();
-		}
 		drop(state);
 		Poll::Ready(Ok(id.map(|id| {
 			(
@@ -446,20 +358,12 @@ impl poll::Session for Session {
 			Err(send::Error::TooLarge) => return Err(Error::DatagramTooLarge),
 			Err(_) => return Err(Error::DatagramsUnsupported),
 		}
-		state.driver.wake();
 		Ok(())
 	}
 
 	fn poll_recv_datagram(&self, waiter: &kio::Waiter) -> Poll<Result<Bytes, Error>> {
 		let mut state = self.inner.lock();
-		if let Some(datagram) = state.conn.datagrams().recv() {
-			return Poll::Ready(Ok(datagram));
-		}
-		if let Some(err) = &state.closed {
-			return Poll::Ready(Err(err.clone()));
-		}
-		waiter.register(&mut state.datagram_waiters);
-		Poll::Pending
+		state.conn.datagrams().poll_recv(waiter).map_err(|_| state.lost())
 	}
 
 	fn max_datagram_size(&self) -> usize {
@@ -558,7 +462,6 @@ impl poll::SendGroup for SendGroup {
 	fn set_priority(&mut self, priority: i64) {
 		let mut state = self.0.inner.lock();
 		state.conn.send_groups().set_priority(self.id(), priority);
-		state.driver.wake();
 	}
 }
 
@@ -605,7 +508,6 @@ impl SendStream {
 		let mut state = self.inner.lock();
 		// Err means the stream is already gone, which is what we wanted.
 		let _ = state.conn.send_stream(self.id).reset(code);
-		state.driver.wake();
 		self.reset = true;
 	}
 }
@@ -623,20 +525,11 @@ impl poll::SendStream for SendStream {
 			return Poll::Ready(Err(Error::StreamClosed));
 		}
 		let mut state = self.inner.lock();
-		if let Some(err) = &state.closed {
-			return Poll::Ready(Err(err.clone()));
-		}
 		// Takes only what the connection accepts, which for a `Bytes` source is no copy at all.
-		match state.conn.send_stream(self.id).write(buf) {
-			Ok(n) => {
-				state.driver.wake();
-				Poll::Ready(Ok(n))
-			}
-			Err(send::Error::Blocked) => {
-				waiter.register(state.writable.entry(self.id).or_default());
-				Poll::Pending
-			}
+		match ready!(state.conn.send_stream(self.id).poll_write(waiter, buf)) {
+			Ok(n) => Poll::Ready(Ok(n)),
 			Err(send::Error::Stopped(code)) => Poll::Ready(Err(Error::StreamStop(code.into_inner()))),
+			Err(send::Error::ConnectionLost) => Poll::Ready(Err(state.lost())),
 			Err(_) => Poll::Ready(Err(Error::StreamClosed)),
 		}
 	}
@@ -659,7 +552,7 @@ impl poll::SendStream for SendStream {
 		match state.conn.send_stream(self.id).finish() {
 			Ok(()) => {}
 			// A STOP_SENDING beat us here; carry its code like `poll_write` does. The stream is
-			// over without our reset, so `poll_closed` reports the stop the sweep recorded.
+			// over without our reset, so `poll_closed` reports the stop the connection recorded.
 			Err(send::Error::Stopped(code)) => {
 				self.fin = true;
 				return Err(Error::StreamStop(code.into_inner()));
@@ -667,7 +560,6 @@ impl poll::SendStream for SendStream {
 			// Already finished or reset, so the FIN it wanted is out.
 			Err(_) => {}
 		}
-		state.driver.wake();
 		self.fin = true;
 		Ok(())
 	}
@@ -683,18 +575,14 @@ impl poll::SendStream for SendStream {
 		let mut state = self.inner.lock();
 		// A finish is acknowledged once its FIN goes to the transport, which on a reliable
 		// transport is delivery.
-		match state.conn.send_stream(self.id).end() {
-			Ok(Some(send::End::Stopped(code))) => Poll::Ready(Err(Error::StreamStop(code.into_inner()))),
-			Ok(Some(_)) => Poll::Ready(Ok(())),
+		match ready!(state.conn.send_stream(self.id).poll_end(waiter)) {
+			Ok(send::End::Stopped(code)) => Poll::Ready(Err(Error::StreamStop(code.into_inner()))),
+			Ok(_) => Poll::Ready(Ok(())),
 			// The end never came. If the session died first, the caller cannot read success
 			// as "every byte arrived".
-			Ok(None) | Err(_) => match &state.closed {
-				Some(err) => Poll::Ready(Err(err.clone())),
-				None => {
-					waiter.register(state.finishing.entry(self.id).or_default());
-					Poll::Pending
-				}
-			},
+			Err(send::Error::ConnectionLost) => Poll::Ready(Err(state.lost())),
+			// The ID is only released on drop, so this does not happen.
+			Err(_) => Poll::Ready(Err(Error::StreamClosed)),
 		}
 	}
 }
@@ -705,9 +593,8 @@ impl Drop for SendStream {
 		// Reset before giving up the ID, which refuses every later call on it.
 		if !self.fin && !self.reset {
 			let _ = state.conn.send_stream(self.id).reset(VarInt::from_u32(0));
-			state.driver.wake();
 		}
-		state.forget_send(self.id);
+		state.conn.send_stream(self.id).release();
 	}
 }
 
@@ -753,33 +640,24 @@ impl RecvStream {
 			return Poll::Ready(Err(Error::StreamClosed));
 		}
 		let mut state = self.inner.lock();
-		let (result, transmit) = state.conn.recv_stream(self.id).lease(want);
-		// Freed credit, or an eviction whose reader the driver's sweep wakes.
-		if transmit.should_transmit() {
-			state.driver.wake();
-		}
-		match result {
+		// moq-quic wakes the driver for any credit the lease frees, and the reader of any stream
+		// it evicts.
+		let result = state.conn.recv_stream(self.id).poll_lease(waiter, want);
+		match ready!(result) {
 			Ok(lease) => Poll::Ready(Ok(lease)),
-			Err(recv::Error::Blocked) => {
-				if let Some(err) = &state.closed {
-					return Poll::Ready(Err(err.clone()));
-				}
-				waiter.register(state.readable.entry(self.id).or_default());
-				Poll::Pending
-			}
 			Err(recv::Error::Reset(code)) => {
 				// Observing the reset frees the stream and the credit its lease withheld; only
 				// then may later calls skip it.
 				let _ = state.conn.recv_stream(self.id).received_reset();
-				state.readable.remove(&self.id);
-				state.driver.wake();
 				self.reset = Some(code.into_inner());
 				Poll::Ready(Err(Error::StreamReset(code.into_inner())))
 			}
 			Err(recv::Error::Evicted) => Poll::Ready(Err(Error::Evicted)),
 			Err(recv::Error::TooLarge) => Poll::Ready(Err(Error::LeaseTooLarge)),
-			// The stream is gone, which only a lost connection does to one we hold.
-			Err(_) => Poll::Ready(Err(state.closed.clone().unwrap_or(Error::Closed))),
+			// The connection was lost, once everything that arrived before it was taken. The
+			// stream being gone means the same, since only a lost connection does that to one
+			// we hold.
+			Err(_) => Poll::Ready(Err(state.lost())),
 		}
 	}
 }
@@ -808,10 +686,8 @@ impl poll::RecvStream for RecvStream {
 			return;
 		}
 		let mut state = self.inner.lock();
-		state.readable.remove(&self.id);
 		// Err means the stream is already gone, which is what we wanted.
 		let _ = state.conn.recv_stream(self.id).stop(VarInt::from_u32(code));
-		state.driver.wake();
 		self.stopped = true;
 	}
 
@@ -823,25 +699,18 @@ impl poll::RecvStream for RecvStream {
 			return Poll::Ready(Error::StreamClosed);
 		}
 		let mut state = self.inner.lock();
-		match state.conn.recv_stream(self.id).received_reset() {
-			// Evicted, so its bytes are gone: nothing frees the window until it is stopped.
-			Err(recv::Error::Evicted) => Poll::Ready(Error::Evicted),
-			// Every byte arrived, so nothing is left to reset.
-			Err(_) => Poll::Pending,
-			Ok(Some(code)) => {
-				// Observing it freed the stream, which may owe the peer credit.
+		match ready!(state.conn.recv_stream(self.id).poll_received_reset(waiter)) {
+			Ok(code) => {
+				// Observing it freed the stream, and moq-quic wakes the driver for any credit
+				// that owes the peer.
 				self.reset = Some(code.into_inner());
-				state.driver.wake();
 				Poll::Ready(Error::StreamReset(code.into_inner()))
 			}
-			Ok(None) => {
-				if let Some(err) = &state.closed {
-					return Poll::Ready(err.clone());
-				}
-				// A reset notifies readers, since it is an immediate read error.
-				waiter.register(state.readable.entry(self.id).or_default());
-				Poll::Pending
-			}
+			// Evicted, so its bytes are gone: nothing frees the window until it is stopped.
+			Err(recv::Error::Evicted) => Poll::Ready(Error::Evicted),
+			Err(recv::Error::ConnectionLost) => Poll::Ready(state.lost()),
+			// Every byte arrived, so nothing is left to reset.
+			Err(_) => Poll::Pending,
 		}
 	}
 }
@@ -852,11 +721,9 @@ impl Drop for RecvStream {
 			return;
 		}
 		let mut state = self.inner.lock();
-		state.readable.remove(&self.id);
 		// A leased stream keeps its state until stopped, even once it ended; Err means it is
 		// already gone.
 		let _ = state.conn.recv_stream(self.id).stop(VarInt::from_u32(0));
-		state.driver.wake();
 	}
 }
 
@@ -917,9 +784,8 @@ impl poll::Lease for RecvLease<'_> {
 	fn release(mut self) {
 		let lease = self.lease.take().expect("only taken to hand it back");
 		let mut state = self.stream.inner.lock();
-		if state.conn.recv_stream(self.stream.id).release(lease).should_transmit() {
-			state.driver.wake();
-		}
+		// moq-quic wakes the driver for the credit this returns.
+		state.conn.recv_stream(self.stream.id).release(lease);
 	}
 }
 
@@ -929,9 +795,8 @@ impl Drop for RecvLease<'_> {
 			return;
 		};
 		let mut state = self.stream.inner.lock();
-		if state.conn.recv_stream(self.stream.id).restore(lease).should_transmit() {
-			state.driver.wake();
-		}
+		// moq-quic wakes the driver if the window was stuck on this lease.
+		state.conn.recv_stream(self.stream.id).restore(lease);
 	}
 }
 

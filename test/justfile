@@ -32,8 +32,8 @@ harness_browser_tests := '''
 '''
 
 harness_compat_tests := '''
-    test/interop/compat/claims.test.ts
-    test/interop/compat/resolve.test.ts
+    ./test/interop/compat/claims.test.ts
+    ./test/interop/compat/resolve.test.ts
 '''
 
 # List the cross-language suites.
@@ -45,7 +45,9 @@ default:
 # from plain `bun test` so unit tests do not launch a browser.
 harness:
     ./lib/harness.test.sh
+    python3 lib/pulse.test.py
     ./interop/relay-log.test.sh
+    python3 interop/staging.test.py
     python3 ../rs/moq-gst/smoke.test.py
     python3 interop/report.test.py
     python3 interop/tone.test.py
@@ -65,7 +67,7 @@ harness:
 [positional-arguments]
 interop *args:
     cd .. && bun install --frozen-lockfile
-    just rs test -p moq-net -p moq-sign --lib \
+    just rs test -p moq-net -p moq-crypto --lib \
         auth_unsupported_interop \
         ietf_compression_fallback_interop \
         ietf_datagram_interop \
@@ -94,8 +96,9 @@ wire-compat *args:
     ./interop/compat.sh "$@"
 
 # Pinned Moxygen sections 1-7, subgroup zero, through one relay under the conformance profile.
-ietf-conformance:
-    ./ietf-conformance/run.sh
+[positional-arguments]
+ietf-conformance *args:
+    ./ietf-conformance/run.sh "$@"
 
 # Installs each client from its public registry, inside test/smoke's own Nix
 # shell rather than this repo's toolchain. The first argument picks a smoke
@@ -161,9 +164,15 @@ native-play:
 audio-quality *args:
     ./audio-quality/run.sh "$@"
 
+# Measure 22 push-to-talk presses at 300 ms on an ideal local path.
+push-to-talk:
+    ./audio-quality/ptt.sh
+
 # Records the arrival traces under audio-quality/traces/ that the replay rows grade: the
 # public relay's bbb.hang, a local relay's AAC tone, and a browser microphone through the
-# public relay. Needs the network. Narrow it with `--lanes relay-bbb --duration 35`.
+# public relay. Needs the network. Narrow it with `--lanes relay-bbb --duration 35`; record a
+# real microphone with `--lanes relay-mic --mic-broadcast <name>`, published by hand to the
+# public relay's anon path.
 
 # Re-record the audio quality arrival traces.
 [positional-arguments]
@@ -245,7 +254,7 @@ video:
     # A desktop display makes software Vulkan request unsupported window surfaces.
     cd video && bash ../../sh/local.sh env -u DISPLAY -u WAYLAND_DISPLAY bun test ./renderer.browser.ts
 
-# Optional publisher retention across Rust/JS sessions through a Rust relay.
+# Optional publisher max age across Rust/JS sessions through a Rust relay.
 max-age:
     bash ../sh/local.sh cargo nextest run --locked -p moq-tokio --test integration -E 'test(/^max_age::/)' --run-ignored all
 
@@ -274,7 +283,7 @@ resume-model:
 qmux:
     cargo build --locked --quiet --manifest-path ../rs/qmux/Cargo.toml --example interop-server --example interop-client
     cd .. && bun install --frozen-lockfile
-    cd .. && QMUX_INTEROP_BIN={{ quote(qmux_examples) }} bun test test/qmux/interop.test.ts
+    cd .. && QMUX_INTEROP_BIN={{ quote(qmux_examples) }} bun test ./test/qmux/interop.test.ts
 
 # Complete MoQ SETUP and transfer a frame over a real browser data-channel pair.
 p2p:

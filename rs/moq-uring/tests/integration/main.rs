@@ -10,10 +10,6 @@
 
 #![cfg(target_os = "linux")]
 
-// `transport` includes the adapter source, which names `crate::quic`.
-#[cfg(feature = "quic")]
-use moq_uring::quic;
-
 mod credit;
 mod echo;
 mod ecn;
@@ -24,8 +20,9 @@ mod mtu;
 mod qlog;
 mod receive_credit;
 mod session;
+mod socket_queues;
 mod support;
 mod teardown;
-mod transport;
 mod web;
+mod web_headers;
 mod workers;

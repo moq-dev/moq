@@ -192,6 +192,7 @@ module python '(\.pyi?|(^|/)pyproject\.toml)$' \
 module shell '' \
     tools='shellcheck shfmt' fix
 module large_files ''
+module text ''
 module toml '' \
     tools='taplo' fix
 module nix '' \
@@ -329,8 +330,8 @@ step() {
         check:js) just js check-changed "$js_list" ;;
         check:workers) just js workers ;;
         check:moq_sh) just infra moq-sh test ;;
-        # The check keeps docs; the test phase enforces default-feature clippy
-        # without a second compile.
+        # The check keeps docs and the isolated default-media lint; the test
+        # phase enforces the other clippy checks in its existing build.
         check:rs) just rs lint-changed "$rs_list" ;;
         check:bench)
             python3 bench/compare.test.py
@@ -375,6 +376,7 @@ step() {
             sh/markdown.sh check
             ;;
         check:large_files) sh/large-files.sh "$large_base" ;;
+        check:text) sh/text.sh ;;
         check:python)
             files '*.py' '*.pyi' | xargs -0 ruff check --force-exclude
             files '*.py' '*.pyi' | xargs -0 ruff format --check --force-exclude

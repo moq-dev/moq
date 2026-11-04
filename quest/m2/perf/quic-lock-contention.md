@@ -9,9 +9,9 @@ share, and the per-packet hop from the endpoint task to the connection task.
 
 ## Plan
 
-Planned 2026-10-23 (maintainer) from the moq-quic API audit. Measure on the
-shape the [moq-quic API](/quest/m1/quic-api/README.md) epic leaves behind,
-since the async-to-poll adapter and leases that hold the lock both go first.
+Planned 2026-10-23 (maintainer) from the moq-quic API audit. Measure the
+mirrored, caller-owned poll API after removing the async-to-poll adapter
+and leases that hold the lock.
 
 - **Lock contention.** One `Mutex<State>` per connection guards moq-quic's
   state; the driver takes it at about 58 sites, from every stream handle on
@@ -43,8 +43,8 @@ Levers, only where the profile shows a cost:
   with [the I/O boundary redesign](/quest/m2/quic-io-boundary.md), whose
   "one `handle` call takes a whole GRO batch" is the state-machine half.
 - Stream handles that carry a slab key instead of a `StreamId`, removing
-  moq-quic's per-stream lookups (the driver's own maps go with
-  [waits](/quest/m1/quic-api/waits.md)). FxHash is cheap, so this is last
+  moq-quic's per-stream lookups (the driver's own maps are already gone,
+  now that moq-quic owns its waits). FxHash is cheap, so this is last
   and only on evidence.
 
 The maintainer wants the connection state free of runtime borrow checks
@@ -61,11 +61,6 @@ weighs.
 
 A measured no-win is a valid outcome. Report public API and wire impact; the
 staging queue and batch dispatch should need none.
-
-## Required
-
-- [Native WebTransport](/quest/m1/quic-api/native-web.md) - removes the adapter's per-operation boxing, which would otherwise dominate the profile
-- [Waits](/quest/m1/quic-api/waits.md) - moves the waiter tables under the lock this profiles
 
 ## Related
 

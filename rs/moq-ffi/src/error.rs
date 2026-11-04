@@ -163,8 +163,7 @@ fn stream_kind(err: &moq_net::StreamError) -> MoqProtocolKind {
 		moq_net::StreamError::GoingAway => MoqProtocolKind::GoingAway,
 		moq_net::StreamError::TooFarBehind => MoqProtocolKind::TooFarBehind,
 		moq_net::StreamError::MalformedTrack => MoqProtocolKind::MalformedTrack,
-		// A datagram reached by a FETCH is, to a binding, a miss like any other.
-		moq_net::StreamError::NotFound | moq_net::StreamError::NotFetchable => MoqProtocolKind::NotFound,
+		moq_net::StreamError::NotFound => MoqProtocolKind::NotFound,
 		moq_net::StreamError::Unroutable => MoqProtocolKind::Unroutable,
 		moq_net::StreamError::Old => MoqProtocolKind::Old,
 		moq_net::StreamError::Evicted => MoqProtocolKind::Evicted,
@@ -401,6 +400,20 @@ pub enum MoqError {
 		/// The catalog version this build cannot read.
 		version: u64,
 	},
+	/// The rendition's codec, layout, or description was refused during setup; another rendition may work.
+	/// Decoder faults keep [`MoqError::Audio`] or [`MoqError::Video`].
+	#[error("unsupported configuration: {reason}")]
+	UnsupportedConfig {
+		/// A diagnostic message describing the refusal.
+		reason: String,
+	},
+	/// A number was outside the range the call accepts, such as viewer ceilings summing
+	/// above what a PROBE target carries.
+	#[error("out of range: {reason}")]
+	OutOfRange {
+		/// A diagnostic message describing the refusal.
+		reason: String,
+	},
 }
 
 impl From<moq_net::Error> for MoqError {
@@ -410,7 +423,7 @@ impl From<moq_net::Error> for MoqError {
 			moq_net::Error::IdleTimeout => Self::Transport {
 				reason: "transport idle timeout".into(),
 			},
-			moq_net::Error::NotFound | moq_net::Error::NotFetchable => Self::NotFound,
+			moq_net::Error::NotFound => Self::NotFound,
 			// A track whose own session closed aborts its open groups with this; a remote
 			// SESSION_CLOSED decodes as `Internal`, so only the local close lands here.
 			moq_net::Error::Closed
@@ -493,8 +506,11 @@ impl From<moq_json::Error> for MoqError {
 #[cfg(feature = "audio")]
 impl From<moq_audio::Error> for MoqError {
 	fn from(err: moq_audio::Error) -> Self {
-		Self::Audio {
-			reason: err.to_string(),
+		match err {
+			moq_audio::Error::UnsupportedConfig(reason) => Self::UnsupportedConfig { reason },
+			err => Self::Audio {
+				reason: err.to_string(),
+			},
 		}
 	}
 }
@@ -502,8 +518,11 @@ impl From<moq_audio::Error> for MoqError {
 #[cfg(feature = "video")]
 impl From<moq_video::Error> for MoqError {
 	fn from(err: moq_video::Error) -> Self {
-		Self::Video {
-			reason: err.to_string(),
+		match err {
+			moq_video::Error::UnsupportedConfig(reason) => Self::UnsupportedConfig { reason },
+			err => Self::Video {
+				reason: err.to_string(),
+			},
 		}
 	}
 }

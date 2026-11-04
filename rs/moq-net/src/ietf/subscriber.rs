@@ -516,7 +516,7 @@ impl<'a> RangeWriter<'a> {
 
 	/// Finish the current group and open group `sequence`, returning the first Object ID it
 	/// starts at. The sequences between them do not exist. A group cached since it was asked
-	/// is read past, as is a datagram, which no request ever gets.
+	/// is read past, as is a datagram, which a stream track never holds.
 	fn open(&mut self, sequence: u64, datagram: bool) -> Result<u64, Error> {
 		if sequence < self.next || sequence > self.fetch.last {
 			tracing::warn!(
@@ -536,8 +536,8 @@ impl<'a> RangeWriter<'a> {
 		};
 		let producer = match datagram {
 			true => {
-				tracing::debug!(sequence, "a datagram group is not fetchable");
-				fill.reject_groups(sequence..sequence + 1, Error::NotFetchable);
+				tracing::debug!(sequence, "dropping a datagram group from a fetch");
+				fill.drop_groups(sequence..sequence + 1);
 				None
 			}
 			false => match fill.accept(sequence, None) {
@@ -908,6 +908,23 @@ enum Admit {
 	/// Its own request token, which stands in for the limit. Carries the announce slot
 	/// taken before verification, when the namespace was not attached yet.
 	Token(Option<crate::auth::Hold>),
+}
+
+/// What admitted a PUBLISH_NAMESPACE: its own token's grant, if one did, and the announce
+/// slot it took, which a re-attach reuses.
+struct Admission {
+	grant: Option<crate::auth::RequestGrant>,
+	slot: Option<crate::auth::Hold>,
+}
+
+impl Admission {
+	/// How [`Subscriber::start_announce`] attaches it.
+	fn admit(&self) -> Admit {
+		match self.grant {
+			Some(_) => Admit::Token(self.slot.clone()),
+			None => Admit::Session(self.slot.clone()),
+		}
+	}
 }
 
 /// How a live advertisement ends, written once its route is released.
@@ -1441,6 +1458,7 @@ impl Subscriber {
 		let stream = &mut request.stream;
 
 		let msg = ietf::SubscribeNamespace {
+			authorization_token: None,
 			request_id,
 			namespace: prefix.clone(),
 			hidden,
@@ -1866,7 +1884,8 @@ impl Subscriber {
 		};
 
 		// Our authorization of the peer (the limit) admits an announce without a token, and
-		// holds back one it does not cover until it does. An AUTHORIZATION TOKEN on the
+		// refuses one it does not cover: the peer learns at once rather than publishing into
+		// nothing, and re-announces once its limit widens. An AUTHORIZATION TOKEN on the
 		// announce goes to the application to verify for this announce alone (MoQ
 		// request-token), even where the limit covers it, and a verified one is exempt from the
 		// limit while it lasts.
@@ -1874,15 +1893,21 @@ impl Subscriber {
 			Some(token) if gate.token_decides() => Some(token.0.clone()),
 			_ => None,
 		};
+		if token.is_none() && !self.auth.within_limit(crate::auth::Direction::Subscribe, path.as_str()) {
+			tracing::debug!(%path, "refusing publish_namespace outside the limit");
+			let reason = crate::auth::unauthorized_reason(&path);
+			self.write_error(&mut stream, &Error::Unauthorized, &reason).await?;
+			let _ = stream.writer.close().await;
+			return Ok(());
+		}
+		let existing = self.state.lock().broadcasts.get(&path).map(|entry| entry._slot.clone());
+		let slot: Option<crate::auth::Hold> = Some(match existing {
+			Some(slot) => slot,
+			None => std::sync::Arc::new(self.acquire_announce()?),
+		});
 		let (admit, token_grant) = match token {
-			None => (Admit::Session(None), None),
+			None => (Admit::Session(slot.clone()), None),
 			Some(token) => {
-				// Counted against the cap while the application verifies, unless the
-				// namespace already holds a slot.
-				let slot: Option<crate::auth::Hold> = match self.state.lock().broadcasts.contains_key(&path) {
-					true => None,
-					false => Some(std::sync::Arc::new(self.acquire_announce()?)),
-				};
 				let verdict = gate.verify(token, slot.clone());
 				// The session closing or the peer withdrawing the announce withdraws the token.
 				let session = self.session.clone();
@@ -1913,7 +1938,7 @@ impl Subscriber {
 					slot.clone(),
 				);
 				match admitted {
-					Ok(grant) => (Admit::Token(slot), Some(grant)),
+					Ok(grant) => (Admit::Token(slot.clone()), Some(grant)),
 					Err(refusal) => {
 						self.write_error(&mut stream, &refusal.error, &refusal.reason).await?;
 						let _ = stream.writer.close().await;
@@ -1924,35 +1949,62 @@ impl Subscriber {
 		};
 		let token = token_grant.is_some();
 
-		// Everything the advertisement does once admitted runs under its grant: one that ends
-		// at any await, the first answer included, drops it right there. `attached` says the
-		// route is up, and `acked` that the OK went out, which decides how the peer is told.
+		// Everything the advertisement does once admitted runs under what admitted it: its
+		// token's grant, or the session's limit, which never holds an announce back. Either
+		// ending at any await, the first answer included, drops it right there, and a
+		// publisher whose limit widens again re-announces. `attached` says the route is up, and
+		// `acked` that the OK went out, which decides how the peer is told.
 		let mut attached = None;
 		let mut acked = false;
-		let lived = crate::auth::RequestGrant::guard(token_grant.as_ref(), async {
-			match self.start_announce(path.clone(), advert, admit) {
-				Ok(id) => attached = Some(id),
-				Err(err) => return Ok(Withdraw::Reject(err.into())),
+		let auth = self.auth.clone();
+		let mut epoch = 0;
+		let mut limited = |waiter: &kio::Waiter| {
+			let mut excluded = false;
+			while let Poll::Ready(permit) = auth.poll_permit(crate::auth::Direction::Subscribe, &mut epoch, waiter) {
+				excluded = !permit.within_limit(path.as_str());
 			}
-			// Buffered whole before its first await, so however this is dropped from here, the
-			// advertisement can still end on the wire.
-			acked = true;
-			self.write_ok(&mut stream).await?;
+			match excluded {
+				true => Poll::Ready(crate::auth::Refusal {
+					error: Error::Unauthorized,
+					reason: crate::auth::unauthorized_reason(&path),
+				}),
+				false => Poll::Pending,
+			}
+		};
+		let mut ended = |waiter: &kio::Waiter| match &token_grant {
+			Some(grant) => grant.poll_ended(waiter),
+			None => limited(waiter),
+		};
+		let lived = crate::auth::until(
+			async {
+				match self.start_announce(path.clone(), advert, admit) {
+					Ok(id) => attached = Some(id),
+					Err(err) => return Ok(Withdraw::Reject(err.into())),
+				}
+				// Buffered whole before its first await, so however this is dropped from here, the
+				// advertisement can still end on the wire.
+				acked = true;
+				self.write_ok(&mut stream).await?;
 
-			// An endpoint updates an advertisement with REQUEST_UPDATE on the stream that
-			// already carries it, so keep reading until the stream closes.
-			self.run_publish_namespace_updates(
-				&mut stream,
-				&path,
-				Held {
-					cluster: msg.params.cluster,
-				},
-				peer,
-				&mut attached,
-				token_grant.clone(),
-			)
-			.await
-		})
+				// An endpoint updates an advertisement with REQUEST_UPDATE on the stream that
+				// already carries it, so keep reading until the stream closes.
+				self.run_publish_namespace_updates(
+					&mut stream,
+					&path,
+					Held {
+						cluster: msg.params.cluster,
+					},
+					peer,
+					&mut attached,
+					Admission {
+						grant: token_grant.clone(),
+						slot: slot.clone(),
+					},
+				)
+				.await
+			},
+			&mut ended,
+		)
 		.await;
 
 		// The route goes before anything waits on the peer, so a peer that stops reading
@@ -1963,11 +2015,19 @@ impl Subscriber {
 		let withdraw = match lived {
 			Ok(withdraw) => withdraw?,
 			Err(refusal) => {
-				tracing::info!(%path, err = %refusal.error, reason = %refusal.reason, "request token grant ended");
+				tracing::info!(%path, err = %refusal.error, reason = %refusal.reason, "announce no longer authorized");
 				if !acked {
 					self.write_error(&mut stream, &refusal.error, &refusal.reason).await?;
 					let _ = stream.writer.close().await;
 					return Ok(());
+				}
+				// A lapsed token cancels the request, resetting what we send and stopping what we
+				// read, so the publisher knows to announce again with a fresh one (moq-transport
+				// sections 6.4.2.3 and 9.14). It takes any OK still buffered with it.
+				if super::error::token_expired(&refusal.error) {
+					stream.reader.stop(super::error::EXPIRED_AUTH_TOKEN);
+					stream.writer.reset(super::error::EXPIRED_AUTH_TOKEN);
+					return Err(refusal.error);
 				}
 				self.cancel_announce(&mut stream).await?;
 				return Err(refusal.error);
@@ -2004,8 +2064,9 @@ impl Subscriber {
 		held: Held,
 		peer: cluster::Peer,
 		attached: &mut Option<u64>,
-		token_grant: Option<crate::auth::RequestGrant>,
+		admission: Admission,
 	) -> Result<Withdraw, Error> {
+		let token_grant = &admission.grant;
 		let Held { cluster: mut held } = held;
 		// A REQUEST_UPDATE carrying a fresh token refreshes the announce's request grant (MoQ
 		// request-token); its verify is raced against the stream in the loop's single wait
@@ -2227,11 +2288,7 @@ impl Subscriber {
 							// Re-attach: a clean path replaced the reflected one we detached from.
 							None => {
 								// The grant still holds the slot it was admitted with, so reuse it.
-								let admit = match &token_grant {
-									Some(grant) => Admit::Token(grant.hold()),
-									None => Admit::Session(None),
-								};
-								self.start_announce(path.clone(), advert, admit)
+								self.start_announce(path.clone(), advert, admission.admit())
 									.map(|id| *attached = Some(id))
 							}
 						}
@@ -2252,23 +2309,20 @@ impl Subscriber {
 			// awaited here: it becomes the pending renewal raced against the deadline above.
 			// The routing above is already applied, so the renewal's answer (written when its
 			// verdict resolves) is this update's single response, cluster parameters included.
-			if let Some(token) = msg.authorization_token {
-				match &token_grant {
-					Some(grant) => {
-						renewal.verify(grant.verify_renewal(&self.auth, token.0));
-						continue;
-					}
-					// Where tokens decide, a token on an announce admitted without one is refused
-					// rather than taken unread, so every token this side admits is verified.
-					None if self.auth.token_decides(crate::auth::Direction::Subscribe) => {
-						let refusal = crate::auth::Refusal {
-							error: Error::Unsupported,
-							reason: "AUTHORIZATION TOKEN on an announce admitted without one".to_string(),
-						};
-						return Ok(Withdraw::Cancel(refusal));
-					}
-					None => {}
-				}
+			if let Some(token) = msg
+				.authorization_token
+				.filter(|_| self.auth.token_decides(crate::auth::Direction::Subscribe))
+			{
+				let Some(grant) = &token_grant else {
+					// An announce is admitted by the session or by a token, and that never
+					// changes, so a token here is refused rather than taken unread.
+					return Ok(Withdraw::Cancel(crate::auth::Refusal {
+						error: Error::Unsupported,
+						reason: "AUTHORIZATION TOKEN on an announce admitted without one".to_string(),
+					}));
+				};
+				renewal.verify(grant.verify_renewal(&self.auth, token.0));
+				continue;
 			}
 
 			// No token rides this update: acknowledge it now.
@@ -2488,8 +2542,10 @@ impl Subscriber {
 					Some(slot) => slot,
 					None => std::sync::Arc::new(self.acquire_announce()?),
 				};
-				// Outside the session's limit: held, not refused, so a wider limit can
-				// attach it while the peer still advertises it.
+				// Outside the session's limit: held, not refused, so a wider limit can attach
+				// it while the peer still advertises it. Only a NAMESPACE entry gets here
+				// outside it: nothing can refuse one, and the peer never repeats it. A
+				// PUBLISH_NAMESPACE the limit does not cover is refused before it attaches.
 				if !token && !self.auth.within_limit(crate::auth::Direction::Subscribe, path.as_str()) {
 					tracing::debug!(route = %crate::path::Rooted(self.origin.root(), &path), "withholding announce outside the limit");
 					entry.insert(BroadcastState {
@@ -2682,7 +2738,7 @@ impl Subscriber {
 			// The handler exists before the requester sees the source, so a track it asks
 			// for before `run_broadcast` first polls queues instead of failing `NotFound`.
 			let dynamic = source.requests();
-			request.accept(&*source);
+			request.serve(&*source);
 
 			// The namespace's token closes the source as it is retracted. If it was
 			// retracted since the accept, close it here as that retraction would have,
@@ -2941,6 +2997,9 @@ impl Subscriber {
 		group_fetches: &mut TaskSet,
 		gate: &mut crate::auth::Gate,
 	) -> Option<Idle> {
+		let mut request_gate = gate.unnamed();
+		let gate = &mut request_gate;
+		let mut token_grant = None;
 		let _working = self.session.work().start();
 		let validity = self.validity.start();
 		let mut resolved = ResolvedRanges::default();
@@ -3033,6 +3092,7 @@ impl Subscriber {
 			Some(upstream) => {
 				self.adopted(&key, upstream.request_id);
 				let tracks::Upstream {
+					token_grant: token,
 					stream,
 					messages,
 					request_id,
@@ -3042,6 +3102,10 @@ impl Subscriber {
 					// This subscription forwards into the copy itself from here.
 					copy: _,
 				} = upstream;
+				if let Some(token) = &token {
+					gate.bind(token.clone());
+				}
+				token_grant = token;
 				held = Some(tracks::Resumed {
 					alias,
 					properties,
@@ -3287,6 +3351,7 @@ impl Subscriber {
 				&& self.state.lock().subscribes.contains_key(&request_id)
 			{
 				let upstream = tracks::Upstream {
+					token_grant: token_grant.clone(),
 					stream,
 					messages,
 					request_id,
@@ -3670,25 +3735,22 @@ impl Subscriber {
 						_ => false,
 					};
 					let ranges = if bounds != sent_bounds {
-						let mut join = if Filter::is_draft20(self.version) {
-							subscribe_join(bounds.0, bounds.1, self.version)
-						} else {
-							Join {
-								filter: match bounds {
-									(None | Some(0), None) => Filter::Unfiltered,
-									(start, end) => Filter::Absolute {
-										start: ietf::Location {
-											group: start.unwrap_or(0),
-											object: 0,
-										},
-										end: end
-											.and_then(|end| end.checked_sub(1))
-											.map(|group| ietf::EndLocation { group, object: None }),
+						// Widen from the requested group bounds, not a fresh Next Object edge:
+						// that would cut the unread tail of a group already in flight.
+						let mut join = Join {
+							filter: match bounds {
+								(None | Some(0), None) => Filter::Unfiltered,
+								(start, end) => Filter::Absolute {
+									start: ietf::Location {
+										group: start.unwrap_or(0),
+										object: 0,
 									},
+									end: end
+										.and_then(|end| end.checked_sub(1))
+										.map(|group| ietf::EndLocation { group, object: None }),
 								},
-								fill: None,
-								fetch: false,
-							}
+							},
+							..Default::default()
 						};
 						if widened && Filter::is_draft20(self.version) {
 							join.fill = Some(ietf::Fill {
@@ -3699,8 +3761,6 @@ impl Subscriber {
 								group_order: Some(GroupOrder::Ascending),
 								range_filters: false,
 							});
-						} else {
-							join.fill = None;
 						}
 						Some(join)
 					} else {
@@ -3926,6 +3986,7 @@ impl Subscriber {
 			// A listed track's subscription pauses rather than ends, held again as its entry.
 			track.set_idle();
 			let upstream = tracks::Upstream {
+				token_grant: token_grant.clone(),
 				stream,
 				messages,
 				request_id,
@@ -4230,6 +4291,7 @@ impl Subscriber {
 				stream.writer.buffer_message(
 					ietf::Fetch::ID,
 					&ietf::Fetch {
+						authorization_token: None,
 						request_id: fetch_id,
 						subscriber_priority: super::priority::to_wire(
 							track.subscription().map(|s| s.priority).unwrap_or(0),
@@ -4438,6 +4500,7 @@ impl Subscriber {
 		let written = stream.writer.buffer_message(
 			ietf::TrackStatus::ID,
 			&ietf::TrackStatus {
+				authorization_token: None,
 				request_id,
 				track_namespace: broadcast_path.clone(),
 				track_name: track_name.into(),
@@ -4768,76 +4831,21 @@ impl Subscriber {
 		Ok(())
 	}
 
-	/// Deliver an OBJECT_DATAGRAM with private relay metadata on its subscription.
+	/// Drop an OBJECT_DATAGRAM: a subscription is a stream track's, which takes no datagrams.
 	///
-	/// A malformed datagram is a protocol error. An unbound alias is dropped, as the
-	/// draft permits instead of buffering; public readers receive only Normal payloads.
+	/// A malformed datagram is still a protocol error.
 	pub fn recv_datagram(&self, payload: bytes::Bytes) -> Result<(), Error> {
 		let (datagram, _) = ietf::ObjectDatagram::decode_slice(&payload, self.version)?;
-		let (alias, sequence) = (datagram.track_alias, datagram.group_id);
-
-		let (payload, status) = match datagram.body {
-			ietf::DatagramBody::Payload(payload) => (payload, None),
-			ietf::DatagramBody::Status(status) if super::object::status_defined(status) => {
-				(bytes::Bytes::new(), Some(status))
-			}
-			ietf::DatagramBody::Status(_) => return Err(Error::Session(SessionError::ProtocolViolation)),
-		};
-
-		let mut state = self.state.lock();
-		let request_id = match state.aliases.read().map.get(&alias) {
-			Some(Alias::Active(request_id)) => *request_id,
-			_ => {
-				tracing::debug!(alias, sequence, "dropping a datagram for an unbound alias");
-				return Ok(());
-			}
-		};
-		let Some(track) = state.subscribes.get_mut(&request_id) else {
-			return Ok(());
-		};
-
-		// Like a subgroup object: a track that declared no timescale is untimed. One on a
-		// timed track without a Timestamp is refused by the model.
-		let properties = bytes::Bytes::from(datagram.properties.unwrap_or_default());
-		// A status object has no frame to hold its time, so its block keeps it.
-		let (timestamp, properties, inflated) = match status.is_some_and(|status| status != 0) {
-			true => (
-				None,
-				super::object::unframed(&properties, self.version, track.timescale)?,
-				None,
-			),
-			false => {
-				let decoded = super::object::read(&properties, self.version, track.timescale)?;
-				super::object::check_frame(&decoded.properties, track.timescale)?;
-				(decoded.timestamp, decoded.properties, decoded.inflated)
-			}
-		};
-		let Some(producer) = track.producer.as_mut() else {
-			return Ok(());
-		};
-		let inflated = match status.is_some_and(|s| s != 0) {
-			true => None,
-			false => super::object::inflated(inflated, producer.info().compress)?,
-		};
-		let stored = crate::model::datagram::Stored {
-			datagram: crate::Datagram {
-				sequence,
-				timestamp,
-				payload,
-			},
-			wire: Some(std::sync::Arc::new(crate::model::datagram::Wire {
-				object_id: datagram.object_id,
-				priority: datagram.publisher_priority,
-				end_of_group: datagram.end_of_group,
-				status,
-				properties,
-			})),
-			deflated: None,
-		};
-		match inflated {
-			Some(size) => producer.insert_deflated_datagram(stored, size)?,
-			None => producer.insert_wire_datagram(stored)?,
+		if let ietf::DatagramBody::Status(status) = datagram.body
+			&& !super::object::status_defined(status)
+		{
+			return Err(Error::Session(SessionError::ProtocolViolation));
 		}
+		tracing::debug!(
+			alias = datagram.track_alias,
+			group = datagram.group_id,
+			"dropping a datagram on a stream track's subscription"
+		);
 		Ok(())
 	}
 }
@@ -5375,10 +5383,10 @@ impl Subscriber {
 				prior_group = Some(sequence);
 			}
 
-			// A datagram cannot be reconstructed from a FETCH stream.
+			// A datagram is never a stream track's, so a FETCH stream has no group to rebuild.
 			if object.datagram {
 				tracing::debug!(?group, "a datagram group is not fetchable");
-				return Err(Error::NotFetchable);
+				return Err(Error::NotFound);
 			}
 
 			let raw = bytes::Bytes::from(object.properties.unwrap_or_default());
@@ -5627,6 +5635,7 @@ impl Subscriber {
 		let res = stream.writer.buffer_message(
 			ietf::Fetch::ID,
 			&ietf::Fetch {
+				authorization_token: None,
 				request_id: fetch_id,
 				subscriber_priority: super::priority::to_wire(fill.priority()),
 				group_order: GroupOrder::Ascending,
@@ -6455,6 +6464,24 @@ mod tests {
 	use futures::poll;
 
 	use super::*;
+
+	/// A publisher that sends no MAX_CACHE_DURATION sets no publisher limit, never the zero an
+	/// authored track defaults to; one that sends it keeps that value.
+	#[test]
+	fn a_received_track_keeps_its_max_cache_duration() {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+			let absent = accepted_info(&ietf::Properties::default(), version);
+			assert_eq!(absent.max_age, None, "{version}");
+			let present = accepted_info(
+				&ietf::Properties {
+					max_cache_duration: Some(std::time::Duration::from_secs(7)),
+					..Default::default()
+				},
+				version,
+			);
+			assert_eq!(present.max_age, Some(std::time::Duration::from_secs(7)), "{version}");
+		}
+	}
 
 	/// What keeps a SUBSCRIBE_NAMESPACE open until the peer ends it, while the first lives.
 	fn live() -> (kio::Producer<()>, kio::Consumer<()>) {
@@ -7314,124 +7341,46 @@ mod tests {
 		);
 	}
 
-	/// Relays keep datagram Object IDs, while plain readers see only normal object 0.
-	/// An unbound alias is dropped, and a malformed datagram is the peer's violation.
+	/// An OBJECT_DATAGRAM is dropped, since a subscription is a stream track's and a stream
+	/// track takes no datagrams, but a malformed one is still the peer's violation.
 	#[kio::test]
-	async fn an_object_datagram_is_a_datagram_group() {
+	async fn an_object_datagram_is_dropped() {
 		use crate::coding::Encode as _;
 		use futures::FutureExt as _;
 
 		let subscriber = subscriber_with_tracks(&[(RequestId(11), "cam", "audio")]);
 		subscriber.register_alias(RequestId(11), 7).unwrap();
-		let (mut consumer, mut relay) = {
-			let mut state = subscriber.state.lock();
-			let track = state.subscribes.get_mut(&RequestId(11)).unwrap();
-			track.timescale = Some(Timescale::MILLI);
-			let producer = track.producer.as_ref().unwrap();
-			(producer.subscribe(None), producer.subscribe(None))
-		};
-
-		let timestamp = crate::Timestamp::new(96_000, Timescale::MILLI).unwrap();
-		let datagram = |alias: u64, group_id: u64, object_id: Option<u64>, body: ietf::DatagramBody| {
-			let mut properties = Vec::new();
-			ietf::encode_object_time(
-				&mut crate::coding::Encoder::new(&mut properties, Version::Draft18.into()),
-				timestamp,
-				Timescale::MILLI,
-			)
-			.unwrap();
-			ietf::ObjectDatagram {
-				track_alias: alias,
-				group_id,
-				object_id,
-				publisher_priority: None,
-				// Only a Normal Object may carry Properties, and a status cannot end the group.
-				end_of_group: matches!(body, ietf::DatagramBody::Payload(_)),
-				properties: matches!(body, ietf::DatagramBody::Payload(_)).then_some(properties),
-				body,
-			}
-			.encode_bytes(Version::Draft18)
-			.unwrap()
-		};
-		let payload = |bytes: &'static [u8]| ietf::DatagramBody::Payload(bytes::Bytes::from_static(bytes));
-
-		// Nonzero objects survive for relays; plain readers skip them, unbound aliases, and statuses.
-		subscriber
-			.recv_datagram(datagram(7, 4, Some(1), payload(b"no")))
-			.unwrap();
-		subscriber.recv_datagram(datagram(8, 4, None, payload(b"no"))).unwrap();
-		subscriber
-			.recv_datagram(datagram(7, 9, Some(0), payload(b"yes")))
-			.unwrap();
-		subscriber
-			.recv_datagram(datagram(7, 10, None, ietf::DatagramBody::Status(END_OF_TRACK)))
-			.unwrap();
-		let Poll::Ready(Ok(Some(first))) = relay.poll_recv_stored_datagram(&kio::Waiter::noop()) else {
-			panic!("the relay did not receive the object");
-		};
-		assert_eq!(first.sequence, 4);
-		assert_eq!(first.wire.as_ref().unwrap().object_id, Some(1));
-		assert_eq!(&first.payload[..], b"no");
-		let received = consumer.recv_datagram().now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(received.sequence, 9, "the Group ID is the sequence");
-		assert_eq!(received.timestamp, Some(timestamp));
-		assert_eq!(&received.payload[..], b"yes");
-		assert!(
-			consumer.recv_datagram().now_or_never().is_none(),
-			"only the normal object 0 payload got through"
-		);
-
-		// A status datagram cannot end the group.
-		let malformed = bytes::Bytes::from_static(&[0x22, 0x07, 0x04, 0x00]);
-		assert!(is_protocol_violation(&subscriber.recv_datagram(malformed).unwrap_err()));
-	}
-
-	/// A datagram that lands before SUBSCRIBE_OK binds its alias is dropped, not held for the
-	/// subscription to replay once it is bound. The reader was already subscribed, so only the
-	/// missing alias can have dropped it.
-	#[kio::test]
-	async fn a_datagram_before_its_alias_is_dropped() {
-		use crate::coding::Encode as _;
-		use futures::FutureExt as _;
-
-		let subscriber = subscriber_with_tracks(&[(RequestId(11), "cam", "audio")]);
 		let mut consumer = {
 			let mut state = subscriber.state.lock();
 			let track = state.subscribes.get_mut(&RequestId(11)).unwrap();
 			track.timescale = Some(Timescale::MILLI);
 			track.producer.as_ref().unwrap().subscribe(None)
 		};
-		let datagram = |group_id: u64| {
-			let mut properties = Vec::new();
-			ietf::encode_object_time(
-				&mut crate::coding::Encoder::new(&mut properties, Version::Draft18.into()),
-				crate::Timestamp::new(96_000, Timescale::MILLI).unwrap(),
-				Timescale::MILLI,
-			)
-			.unwrap();
-			ietf::ObjectDatagram {
-				track_alias: 7,
-				group_id,
-				object_id: None,
-				publisher_priority: None,
-				end_of_group: true,
-				properties: Some(properties),
-				body: ietf::DatagramBody::Payload(bytes::Bytes::from_static(b"d")),
-			}
-			.encode_bytes(Version::Draft18)
-			.unwrap()
-		};
 
-		subscriber.recv_datagram(datagram(4)).unwrap();
-		subscriber.register_alias(RequestId(11), 7).unwrap();
-		subscriber.recv_datagram(datagram(5)).unwrap();
+		let mut properties = Vec::new();
+		ietf::encode_object_time(
+			&mut crate::coding::Encoder::new(&mut properties, Version::Draft18.into()),
+			crate::Timestamp::new(96_000, Timescale::MILLI).unwrap(),
+			Timescale::MILLI,
+		)
+		.unwrap();
+		let datagram = ietf::ObjectDatagram {
+			track_alias: 7,
+			group_id: 4,
+			object_id: None,
+			publisher_priority: None,
+			end_of_group: true,
+			properties: Some(properties),
+			body: ietf::DatagramBody::Payload(bytes::Bytes::from_static(b"d")),
+		}
+		.encode_bytes(Version::Draft18)
+		.unwrap();
+		subscriber.recv_datagram(datagram).unwrap();
+		assert!(consumer.recv_group().now_or_never().is_none(), "no group arrives");
 
-		let received = consumer.recv_datagram().now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(received.sequence, 5);
-		assert!(
-			consumer.recv_datagram().now_or_never().is_none(),
-			"group 4 never arrives"
-		);
+		// A status datagram cannot end the group.
+		let malformed = bytes::Bytes::from_static(&[0x22, 0x07, 0x04, 0x00]);
+		assert!(is_protocol_violation(&subscriber.recv_datagram(malformed).unwrap_err()));
 	}
 
 	/// One alias naming two different tracks is the collision section 11.1 makes fatal.
@@ -9870,7 +9819,10 @@ mod tests {
 				},
 				peer,
 				&mut attached,
-				None,
+				Admission {
+					grant: None,
+					slot: None,
+				},
 			));
 
 			for _ in 0..100 {
@@ -9919,7 +9871,10 @@ mod tests {
 				},
 				peer,
 				&mut attached,
-				None,
+				Admission {
+					grant: None,
+					slot: None,
+				},
 			));
 
 			// Both updates apply, then the loop parks on the exhausted script. The
@@ -9978,7 +9933,12 @@ mod tests {
 			kind: crate::setup::Token::OUT_OF_BAND,
 			value: vec![0x00, 0xff],
 		};
-		let verdict = auth.verify_request(token, Some(hold.clone()));
+		let verdict = auth.verify_request(
+			token,
+			Some(hold.clone()),
+			crate::auth::RequestKind::PublishNamespace,
+			&path,
+		);
 		let _issued = requests.next().await.unwrap().accept(crate::auth::Grant::all());
 		let answered = verdict.grant().await;
 		let grant = crate::auth::RequestGrant::new(
@@ -10008,7 +9968,10 @@ mod tests {
 				},
 				peer,
 				&mut attached,
-				Some(grant),
+				Admission {
+					grant: Some(grant.clone()),
+					slot: grant.hold(),
+				},
 			));
 			for _ in 0..20 {
 				assert!(
@@ -10080,7 +10043,10 @@ mod tests {
 				},
 				peer,
 				&mut attached,
-				None,
+				Admission {
+					grant: None,
+					slot: None,
+				},
 			));
 			for _ in 0..20 {
 				assert!(futures::poll!(run.as_mut()).is_pending(), "the stream stays open");
@@ -10131,7 +10097,10 @@ mod tests {
 				},
 				peer,
 				&mut attached,
-				None,
+				Admission {
+					grant: None,
+					slot: None,
+				},
 			));
 			for _ in 0..20 {
 				if let std::task::Poll::Ready(res) = futures::poll!(run.as_mut()) {
@@ -10184,7 +10153,10 @@ mod tests {
 				},
 				peer,
 				&mut attached,
-				None,
+				Admission {
+					grant: None,
+					slot: None,
+				},
 			));
 			for _ in 0..20 {
 				assert!(
@@ -10251,7 +10223,10 @@ mod tests {
 			},
 			peer,
 			&mut attached,
-			None,
+			Admission {
+				grant: None,
+				slot: None,
+			},
 		));
 		let mut result = None;
 		for _ in 0..20 {
@@ -10329,6 +10304,7 @@ mod tests {
 				.await
 				.unwrap();
 			let msg = ietf::Publish {
+				authorization_token: None,
 				request_id: RequestId(1),
 				track_namespace: crate::Path::from_static("room/host"),
 				track_name: "video".into(),
@@ -10501,7 +10477,10 @@ mod tests {
 			request_id: RequestId(3),
 			hops: None,
 			cost: None,
-			authorization_token: Some(announce_token()),
+			authorization_token: Some(crate::ietf::token::RequestToken(crate::setup::Token {
+				kind: 0,
+				value: 3_u64.to_be_bytes().to_vec(),
+			})),
 		};
 		writer.varint(ietf::PublishNamespaceUpdate::ID).await.unwrap();
 		writer.encode(&msg).await.unwrap();
@@ -10520,7 +10499,10 @@ mod tests {
 			request_id: RequestId(3),
 			hops: Some(hop_path(&[7, 9])),
 			cost: Some(0),
-			authorization_token: Some(announce_token()),
+			authorization_token: Some(crate::ietf::token::RequestToken(crate::setup::Token {
+				kind: 0,
+				value: 3_u64.to_be_bytes().to_vec(),
+			})),
 		};
 		writer.varint(ietf::PublishNamespaceUpdate::ID).await.unwrap();
 		writer.encode(&msg).await.unwrap();
@@ -11024,10 +11006,10 @@ mod tests {
 		}
 	}
 
-	/// A lapsed grant retracts its announce at once, even while the withdrawal waits on a peer
-	/// that never acknowledges the closed stream.
+	/// A lapsed grant retracts its announce at once, and its withdrawal, a reset, waits on
+	/// nothing from a peer that never acknowledges a closed stream.
 	#[kio::test]
-	async fn a_lapsed_announce_grant_retracts_before_the_peer_reads() {
+	async fn a_lapsed_announce_grant_retracts_without_waiting_on_the_peer() {
 		const VERSION: Version = Version::Draft18;
 		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![Vec::new()]).with_unacked_fin();
 		let (mut subscriber, mut requests, _cred, consumer, session) =
@@ -11063,23 +11045,96 @@ mod tests {
 		assert!(routed, "the token must authorize the announce");
 
 		kio::clock::sim::advance(std::time::Duration::from_secs(120)).await;
-		let mut retracted = false;
-		for _ in 0..50 {
-			let _ = futures::poll!(acceptor.as_mut());
-			assert!(
-				futures::poll!(run.as_mut()).is_pending(),
-				"the withdrawal waits on the peer's acknowledgement"
-			);
-			if routed_now(&consumer, "room/alice").is_none() {
-				retracted = true;
-				break;
-			}
-			settle().await;
-		}
+		let res = kio::clock::timeout(std::time::Duration::from_secs(1), run.as_mut())
+			.await
+			.expect("a lapse waits on nothing from the peer");
+		assert!(matches!(res, Err(Error::Expired)), "{res:?}");
 		assert!(
-			retracted,
-			"a lapsed grant must retract the route without waiting on the peer"
+			routed_now(&consumer, "room/alice").is_none(),
+			"a lapsed grant must retract the route"
 		);
+		assert_eq!(session.log.resets(), vec![crate::ietf::error::EXPIRED_AUTH_TOKEN]);
+	}
+
+	/// How an announce's token grant ends after its OK.
+	#[derive(Clone, Copy, Debug)]
+	enum TokenEnd {
+		/// The grant's deadline passes.
+		Lapsed,
+		/// The acceptor revokes it as expired.
+		RevokedExpired,
+		/// The acceptor revokes it.
+		Revoked,
+	}
+
+	/// A token announce whose token expires after its OK is cancelled, with RESET_STREAM and
+	/// STOP_SENDING carrying EXPIRED_AUTH_TOKEN, so the publisher knows to announce again with
+	/// a fresh token (moq-transport sections 6.4.2.3 and 9.14). A revoked token still finishes
+	/// the stream.
+	#[kio::test]
+	async fn a_lapsed_announce_token_cancels_its_request_as_expired() {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+			for end in [TokenEnd::Lapsed, TokenEnd::RevokedExpired, TokenEnd::Revoked] {
+				let (mut subscriber, mut requests, _cred, consumer, session) =
+					auth_announce_harness(version, Vec::new());
+				let rt = subscriber.runtime.clone();
+				let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+					.await
+					.unwrap();
+				let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
+					stream,
+					token_publish_namespace(),
+					cluster::Peer::default(),
+					None,
+				));
+				let accepted = async { requests.next().await.expect("a request") };
+				let request = match futures::future::select(std::pin::pin!(accepted), run.as_mut()).await {
+					futures::future::Either::Left((request, _)) => request,
+					futures::future::Either::Right((res, _)) => panic!("{version} {end:?}: ended unverified: {res:?}"),
+				};
+				let enforced = request.accept(publish_grant_expiring(&rt, Some(60)));
+				for _ in 0..50 {
+					assert!(
+						futures::poll!(run.as_mut()).is_pending(),
+						"{version} {end:?}: ended early"
+					);
+					settle().await;
+				}
+				assert!(
+					routed_now(&consumer, "room/alice").is_some(),
+					"{version} {end:?}: never routed"
+				);
+				assert!(
+					!session.log.writes.lock().unwrap().is_empty(),
+					"{version} {end:?}: no OK"
+				);
+
+				match end {
+					TokenEnd::Lapsed => kio::clock::sleep(std::time::Duration::from_secs(61)).await,
+					TokenEnd::RevokedExpired => enforced.revoke(crate::SessionError::Expired, "expired"),
+					TokenEnd::Revoked => enforced.revoke(crate::SessionError::Unauthorized, "revoked"),
+				}
+				let _ = kio::clock::timeout(std::time::Duration::from_secs(1), run.as_mut())
+					.await
+					.unwrap_or_else(|_| panic!("{version} {end:?}: outlived its grant"));
+
+				assert!(
+					routed_now(&consumer, "room/alice").is_none(),
+					"{version} {end:?}: still routed"
+				);
+				let (resets, stops) = (session.log.resets(), session.log.stops());
+				match end {
+					TokenEnd::Lapsed | TokenEnd::RevokedExpired => {
+						assert_eq!(resets, vec![0x7], "{version} {end:?}");
+						assert_eq!(stops, vec![0x7], "{version} {end:?}");
+					}
+					TokenEnd::Revoked => {
+						assert!(resets.is_empty(), "{version} {end:?}: {resets:?}");
+						assert!(stops.is_empty(), "{version} {end:?}: {stops:?}");
+					}
+				}
+			}
+		}
 	}
 
 	/// An update repeating its token withdraws a token-authorized announce, retracting the route
@@ -11196,47 +11251,135 @@ mod tests {
 		}
 	}
 
-	/// Where tokens decide, a token arriving on an update for an announce the limit admitted
-	/// without one is refused rather than taken unread: it ends only that announce, unverified.
+	/// Poll `run` until it ends, failing if it never does.
+	async fn run_to_end<F: std::future::Future>(mut run: std::pin::Pin<&mut F>) -> F::Output {
+		for _ in 0..100 {
+			if let Poll::Ready(res) = futures::poll!(run.as_mut()) {
+				return res;
+			}
+			settle().await;
+		}
+		panic!("the announce never ended");
+	}
+
+	/// A PUBLISH_NAMESPACE for `path`, presenting no token.
+	fn tokenless_announce(path: &'static str) -> ietf::PublishNamespace {
+		ietf::PublishNamespace {
+			request_id: RequestId(1),
+			track_namespace: crate::Path::from_static(path),
+			params: Default::default(),
+			authorization_token: None,
+		}
+	}
+
+	/// A token an update names on an announce the session admitted is refused and never
+	/// reaches the acceptor: an announce is admitted by the session or by a token, and that
+	/// never changes. The refusal withdraws the announce.
 	#[kio::test]
-	async fn a_token_on_an_announce_admitted_without_one_is_refused() {
-		for version in [Version::Draft18] {
+	async fn a_token_on_a_session_announce_update_is_refused() {
+		for version in [Version::Draft18, Version::Draft22] {
 			let (mut subscriber, mut requests, _cred, consumer, session) =
 				auth_announce_harness(version, publish_namespace_update_with_token(version).await);
 			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
 				.await
 				.unwrap();
-			let tokenless = ietf::PublishNamespace {
-				request_id: RequestId(1),
-				track_namespace: crate::Path::from_static("other/alice"),
-				params: Default::default(),
-				authorization_token: None,
-			};
-			let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
+			let run = std::pin::pin!(subscriber.run_publish_namespace_stream(
 				stream,
-				tokenless,
+				tokenless_announce("other/alice"),
 				cluster::Peer::default(),
-				None,
+				None
 			));
-
-			let mut result = None;
-			for _ in 0..500 {
-				if let std::task::Poll::Ready(res) = futures::poll!(run.as_mut()) {
-					result = Some(res);
-					break;
-				}
-				settle().await;
-			}
-			assert!(
-				matches!(result, Some(Ok(()))),
-				"{version}: the update's token ends the announce, got {result:?}"
+			run_to_end(run).await.unwrap();
+			assert_eq!(
+				replies(&session.log, ietf::RequestOk::ID),
+				1,
+				"{version}: never admitted"
 			);
-			assert!(routed_now(&consumer, "other/alice").is_none(), "{version}");
+			assert_eq!(
+				occurrences(&session.log, b"AUTHORIZATION TOKEN on an announce admitted without one"),
+				1,
+				"{version}: the update was not refused"
+			);
 			assert!(
 				requests.poll_next(&kio::Waiter::noop()).is_pending(),
-				"{version}: the token reached the verifier"
+				"{version}: the token reached the acceptor"
 			);
-			assert!(session.log.closes().is_empty(), "{version}: the session closed");
+			assert!(routed_now(&consumer, "other/alice").is_none(), "{version}");
+			assert!(session.log.closes().is_empty(), "{version}");
+		}
+	}
+
+	/// A tokenless PUBLISH_NAMESPACE the limit does not cover is refused UNAUTHORIZED rather
+	/// than acknowledged and held, so the publisher learns it at once.
+	#[kio::test]
+	async fn a_tokenless_announce_outside_the_limit_is_refused() {
+		for version in [Version::Draft18, Version::Draft22] {
+			let (mut subscriber, _requests, _cred, consumer, session) = auth_announce_harness(version, Vec::new());
+			let probe = subscriber.clone();
+			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+				.await
+				.unwrap();
+			let run = std::pin::pin!(subscriber.run_publish_namespace_stream(
+				stream,
+				tokenless_announce("room/alice"),
+				cluster::Peer::default(),
+				None
+			));
+			run_to_end(run).await.unwrap();
+			assert_eq!(replies(&session.log, ietf::RequestOk::ID), 0, "{version}: acknowledged");
+			assert_eq!(
+				replies(&session.log, ietf::RequestError::ID),
+				1,
+				"{version}: not refused"
+			);
+			assert_eq!(occurrences(&session.log, b"unauthorized: room/alice"), 1, "{version}");
+			assert!(routed_now(&consumer, "room/alice").is_none(), "{version}");
+			assert!(probe.state.lock().broadcasts.is_empty(), "{version}: held");
+			assert!(session.log.closes().is_empty(), "{version}");
+		}
+	}
+
+	/// A session-authorized announce ends once the limit stops covering it, rather than being
+	/// held for a wider limit to bring back: the publisher re-announces.
+	#[kio::test]
+	async fn a_narrowed_limit_ends_a_session_announce() {
+		for version in [Version::Draft18, Version::Draft22] {
+			let (mut subscriber, _requests, _cred, consumer, session) = auth_announce_harness(version, Vec::new());
+			let auth = subscriber.auth.clone();
+			let probe = subscriber.clone();
+			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+				.await
+				.unwrap();
+			let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
+				stream,
+				tokenless_announce("other/alice"),
+				cluster::Peer::default(),
+				None
+			));
+			for _ in 0..20 {
+				assert!(futures::poll!(run.as_mut()).is_pending());
+				settle().await;
+			}
+			assert!(routed_now(&consumer, "other/alice").is_some(), "{version}: admitted");
+
+			auth.handle().authorize(&crate::auth::Grant::default());
+			let res = run_to_end(run).await;
+			assert!(matches!(res, Err(Error::Unauthorized)), "{version}: {res:?}");
+			assert!(
+				routed_now(&consumer, "other/alice").is_none(),
+				"{version}: still routed"
+			);
+
+			// Nothing was held for the limit to bring back.
+			auth.handle().authorize(&crate::auth::Grant {
+				publish: crate::Pattern::subtree("other").unwrap().into(),
+				subscribe: crate::Patterns::new(),
+				expires: None,
+			});
+			settle().await;
+			assert!(probe.state.lock().broadcasts.is_empty(), "{version}: held");
+			assert!(routed_now(&consumer, "other/alice").is_none(), "{version}: came back");
+			assert!(session.log.closes().is_empty(), "{version}");
 		}
 	}
 
@@ -11313,7 +11456,10 @@ mod tests {
 			request_id: RequestId(rid),
 			hops,
 			cost,
-			authorization_token: Some(announce_token()),
+			authorization_token: Some(crate::ietf::token::RequestToken(crate::setup::Token {
+				kind: 0,
+				value: rid.to_be_bytes().to_vec(),
+			})),
 		};
 		writer.varint(ietf::PublishNamespaceUpdate::ID).await.unwrap();
 		writer.encode(&msg).await.unwrap();
@@ -13033,6 +13179,7 @@ mod stitch_tests {
 				}
 			};
 			ietf::Fetch {
+				authorization_token: None,
 				request_id: RequestId(3),
 				subscriber_priority: 128,
 				group_order: ietf::GroupOrder::Ascending,
@@ -13479,130 +13626,6 @@ mod stitch_tests {
 	}
 
 	#[kio::test]
-	async fn passthrough_preserves_datagram_objects_through_dispatch() {
-		// Also through a second relay behind a moq-lite hop with the `ietf` extension.
-		for (version, ranged, hop) in [Version::Draft22]
-			.into_iter()
-			.flat_map(|version| [(version, false), (version, true)])
-			.filter(|(version, ranged)| !*ranged || *version == Version::Draft22)
-			.flat_map(|(version, ranged)| [(version, ranged, false), (version, ranged, true)])
-		{
-			let origin = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
-			let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
-			let track = broadcast
-				.create_track("video", accepted_info(&Default::default(), version))
-				.unwrap();
-			let mut h = Harness::with_timescale(Fill::Done, vec![], None);
-			h.subscriber.version = version;
-			h.subscriber.state.lock().subscribes.get_mut(&REQUEST).unwrap().producer = Some(track.clone());
-			let properties = vec![2, 7, 3, 1, 42];
-			let mut original = Vec::new();
-			for id in [6, 7, 8] {
-				let datagram = ietf::ObjectDatagram {
-					track_alias: ALIAS,
-					group_id: SEQUENCE,
-					object_id: Some(id),
-					// An omitted priority inherits the track default, which the
-					// downstream response need not carry.
-					publisher_priority: (id != 6).then_some(200),
-					end_of_group: false,
-					properties: (id != 8).then(|| properties.clone()),
-					body: if id == 8 {
-						ietf::DatagramBody::Status(END_OF_GROUP)
-					} else {
-						ietf::DatagramBody::Payload(bytes::Bytes::from_static(b"object"))
-					},
-				};
-				h.subscriber
-					.recv_datagram(datagram.encode_bytes(version).unwrap())
-					.unwrap();
-				original.push(datagram);
-			}
-			track.finish().unwrap();
-			let (served, _sessions, _copy) = match hop {
-				true => {
-					let (served, sessions) = crate::lite::ietf::test_hop(&origin, "room", [true, true]).await;
-					// The hop learns the track's info first, and holds the copy for the SUBSCRIBE
-					// below: a SUBSCRIBE sent alongside the TRACK has the cache replayed as
-					// datagrams before the TRACK_INFO they are read with, and they are dropped.
-					let copy = served
-						.consume()
-						.request("room", None)
-						.await
-						.unwrap()
-						.track("video")
-						.unwrap();
-					copy.info().await.unwrap();
-					(served, Some(sessions), Some(copy))
-				}
-				false => (origin, None, None),
-			};
-			let downstream = ScriptedSession::per_stream(vec![vec![]]).with_datagrams(65535);
-			let peer = peer::PeerSetup::default();
-			peer.set(peer::Peer::default());
-			let publisher = crate::ietf::Publisher::new(
-				crate::time::sim(),
-				crate::driver::Transport::new(downstream.clone()),
-				served.consume(),
-				Control::new(false),
-				None,
-				peer,
-				version,
-			);
-			let subscribe = ietf::Subscribe {
-				max_age: None,
-				new_group: None,
-				request_id: RequestId(3),
-				track_namespace: Path::from_static("room"),
-				track_name: "video".into(),
-				subscriber_priority: 128,
-				group_order: ietf::GroupOrder::Ascending,
-				filter: if ranged {
-					Filter::Absolute {
-						start: ietf::Location {
-							group: SEQUENCE,
-							object: 7,
-						},
-						end: Some(ietf::EndLocation {
-							group: SEQUENCE,
-							object: Some(7),
-						}),
-					}
-				} else {
-					Filter::Unfiltered
-				},
-				fill: None,
-				properties_wanted: true,
-				forward: true,
-				rendezvous: false,
-				range_filters: false,
-				authorization_token: None,
-			};
-			let mut body = Vec::new();
-			subscribe
-				.encode_msg(&mut Encoder::new(&mut body, version.into()), version)
-				.unwrap();
-			let stream = Stream::open(&mut crate::driver::Transport::new(downstream.clone()), version)
-				.await
-				.unwrap();
-			publisher
-				.handle_stream(ietf::Subscribe::ID, ietf::Body(body.into()), stream)
-				.unwrap()
-				.await;
-			let sent = downstream.log.datagrams.lock().unwrap();
-			original.retain(|datagram| !ranged || datagram.object_id == Some(7));
-			assert_eq!(sent.len(), original.len(), "{version} ranged={ranged} hop={hop}");
-			let inherited = super::super::priority::to_wire(track.publisher_priority());
-			for (bytes, mut expected) in sent.iter().zip(original) {
-				expected.track_alias = 3;
-				expected.publisher_priority = expected.publisher_priority.or(Some(inherited));
-				let (actual, _) = ietf::ObjectDatagram::decode_slice(bytes, version).unwrap();
-				assert_eq!(actual, expected);
-			}
-		}
-	}
-
-	#[kio::test]
 	async fn passthrough_translates_mutable_property_encodings() {
 		for ingress in [Version::Draft22] {
 			let mut properties = Vec::new();
@@ -13654,45 +13677,6 @@ mod stitch_tests {
 			h.subscriber.clone().recv_group(&mut stream).await.unwrap();
 			assert_eq!(read_group(&mut consumer).await, (SEQUENCE, vec![(None, vec![42]); 3]));
 		}
-	}
-
-	/// Relays retain a datagram's Object ID; a plain reader skips it until object 0 arrives.
-	#[kio::test]
-	async fn passthrough_accepts_datagrams_past_object_zero() {
-		let version = Version::Draft22;
-		let mut h = Harness::with_timescale(Fill::Done, vec![], None);
-		h.subscriber.version = version;
-		let mut consumer = h.track.subscribe(None);
-		let mut plain = h.track.subscribe(None);
-		let mut datagram = ietf::ObjectDatagram {
-			track_alias: ALIAS,
-			group_id: SEQUENCE,
-			object_id: Some(6),
-			publisher_priority: Some(128),
-			end_of_group: false,
-			properties: None,
-			body: ietf::DatagramBody::Payload(bytes::Bytes::from_static(b"object-six")),
-		};
-		h.subscriber
-			.recv_datagram(datagram.encode_bytes(version).unwrap())
-			.unwrap();
-		let received = consumer.poll_recv_stored_datagram(&kio::Waiter::noop());
-		assert!(
-			matches!(&received, Poll::Ready(Ok(Some(data)))
-				if data.payload == b"object-six"[..] && data.wire.as_ref().unwrap().object_id == Some(6)),
-			"{received:?}"
-		);
-		assert!(plain.poll_recv_datagram(&kio::Waiter::noop()).is_pending());
-		datagram.object_id = Some(0);
-		datagram.body = ietf::DatagramBody::Payload(bytes::Bytes::from_static(b"object-zero"));
-		h.subscriber
-			.recv_datagram(datagram.encode_bytes(version).unwrap())
-			.unwrap();
-		let received = plain.poll_recv_datagram(&kio::Waiter::noop());
-		assert!(
-			matches!(&received, Poll::Ready(Ok(Some(data))) if data.payload == b"object-zero"[..]),
-			"{received:?}"
-		);
 	}
 
 	#[kio::test]
@@ -15000,8 +14984,8 @@ mod stitch_tests {
 		buf
 	}
 
-	/// A datagram group is never fetchable, so a group fetch answered with one names it
-	/// dropped as not fetchable, caching nothing, and reads on past its payload.
+	/// A stream track takes no datagrams, so a group fetch answered with a datagram Object
+	/// drops its group, caching nothing, and reads on past its payload.
 	#[kio::test]
 	async fn a_group_fetch_drops_a_datagram_group() {
 		let mut run = GroupFetchRun::new(VERSION, datagram_object(SEQUENCE)).await;
@@ -15009,8 +14993,62 @@ mod stitch_tests {
 
 		let res = run.subscriber.recv_group_fetch(&mut run.stream, slot).await;
 		assert!(res.is_ok(), "{res:?}");
-		assert!(matches!(fetch.await, Err(Error::NotFetchable)));
+		assert!(matches!(fetch.await, Err(Error::NotFound)));
 		assert!(run.track.consume().peek_group(SEQUENCE).is_none(), "nothing is cached");
+	}
+
+	/// A refused multi-group FETCH names every owed group dropped, without retrying
+	/// each group or ending the live track. This exercises the wire refusal decoder.
+	#[kio::test]
+	async fn a_refused_range_fetch_reports_every_owed_group_dropped() {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+			let mut refusal = Vec::new();
+			let mut writer = Encoder::new(&mut refusal, version.into());
+			writer.varint(ietf::RequestError::ID).unwrap();
+			ietf::RequestError {
+				error_code: request::NOT_SUPPORTED,
+				reason_phrase: "FETCH spans more than one group".into(),
+				retry_interval: 0,
+			}
+			.encode(&mut writer, version)
+			.unwrap();
+			let session = ScriptedSession::per_stream_eof(vec![vec![], refusal]);
+			let mut run = GroupFetchRun::with_session(version, session.clone()).await;
+			let now = kio::clock::now();
+			run.track.broadcast().pool.poll(now, &kio::Waiter::noop());
+			run.track.received();
+			run.track.start_at(3).unwrap();
+			run.track.create_group(3u64.into()).unwrap().finish().unwrap();
+			let requests = run.track.requests();
+			let mut reader = run.track.subscribe(
+				track::Subscription::default()
+					.with_range(1..3)
+					.with_delay(track::Delay::default().with_max(None)),
+			);
+			let waiter = kio::Waiter::noop();
+			assert!(reader.poll_drop(&waiter).is_pending());
+			assert!(reader.poll_recv_group(&waiter).is_pending());
+			let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
+				panic!("{version}: missing history was not requested");
+			};
+			assert_eq!((fill.start().group, fill.end()), (1, 3));
+			run.subscriber
+				.clone()
+				.run_group_fetch(Path::from_static("broadcast"), "video".into(), fill, None)
+				.await;
+			// The peer may still deliver a late subgroup stream during the arrival grace.
+			run.track.broadcast().pool.poll(now + crate::ledger::GRACE, &waiter);
+			assert_eq!(
+				reader.poll_drop(&waiter),
+				Poll::Ready((1..3, crate::StreamError::NotFound)),
+				"{version}"
+			);
+			assert!(reader.poll_drop(&waiter).is_pending(), "each drop is reported once");
+			assert!(matches!(reader.poll_recv_group(&waiter), Poll::Ready(Ok(None))));
+			assert!(!run.track.is_closed(), "the live track survives");
+			// The harness opened its unused data stream, then the one range FETCH.
+			assert_eq!(session.log.bi_opens(), 2, "no per-group fallback");
+		}
 	}
 
 	/// A third-party publisher may answer a range even though ours refuses it. The subscriber
@@ -15108,7 +15146,7 @@ mod stitch_tests {
 
 		assert!(matches!(
 			h.subscriber.clone().recv_fill(&mut fill).await,
-			Err(Error::NotFetchable)
+			Err(Error::NotFound)
 		));
 		h.subscriber
 			.clone()
@@ -15211,7 +15249,7 @@ mod stitch_tests {
 			let track = track::Producer::new(
 				std::sync::Arc::new(crate::broadcast::Info::default()),
 				"video",
-				track::Info::default().with_timescale(None),
+				track::Info::default().with_timescale(None).with_max_age(None),
 			);
 
 			Self {
@@ -16991,6 +17029,44 @@ mod new_group_tests {
 		assert!(msg.fill.is_some(), "the widening superseded the unidentified fill");
 		assert!(matches!(*fill.read(), Fill::Done), "the old request was retired");
 		relay.serving.abort();
+	}
+
+	/// Widening to an open start must retain the objects already being streamed. Next
+	/// Object would snapshot a later edge and cut that stream before its tail arrives.
+	#[kio::test]
+	async fn widening_to_an_open_start_does_not_rejoin_at_the_next_object() {
+		for end in [None, Some(7)] {
+			let (mut relay, mut first) = relay().await;
+			let (mut stream, _) = relay.accept().await;
+			accept(&mut stream, false, 5).await;
+
+			first.update(track::Subscription::default().with_range(6..)).unwrap();
+			let _ = read(&mut stream).await;
+			answer(&mut stream).await;
+
+			let wanted = track::Subscription::default();
+			let wanted = match end {
+				Some(end) => wanted.with_range(..end),
+				None => wanted,
+			};
+			first.update(wanted).unwrap();
+			let (id, body) = read(&mut stream).await;
+			assert_eq!(id, ietf::SubscribeUpdate::ID);
+			let msg = ietf::SubscribeUpdate::decode_msg(&mut body.decoder(VERSION), VERSION).unwrap();
+			let expected = match end {
+				None => ietf::Filter::Unfiltered,
+				Some(end) => ietf::Filter::Absolute {
+					start: ietf::Location { group: 0, object: 0 },
+					end: Some(ietf::EndLocation {
+						group: end - 1,
+						object: None,
+					}),
+				},
+			};
+			assert_eq!(msg.filter, Some(expected));
+			assert_eq!(msg.fill.unwrap().filter, Some(ietf::Filter::Relative(1)));
+			relay.serving.abort();
+		}
 	}
 
 	/// Delayed headers, including one already waiting for REQUEST_OK, belong to the

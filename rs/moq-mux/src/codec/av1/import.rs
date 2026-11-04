@@ -30,6 +30,9 @@ pub struct Import {
 	track: crate::container::Producer<crate::catalog::hang::Container, hang::catalog::VideoConfig>,
 	catalog: crate::codec::video::Catalog,
 	last_seq: Option<Bytes>,
+	/// A sequence header only a [`dropped`](Self::dropped) keyframe carried, which the next
+	/// keyframe written takes if it carries none, so a subscriber can still decode it.
+	owed_seq: bool,
 }
 
 impl Import {
@@ -52,6 +55,7 @@ impl Import {
 			track,
 			catalog,
 			last_seq: None,
+			owed_seq: false,
 		};
 		if let Some(config) = import.catalog.initial_config() {
 			import.apply_config(config)?;
@@ -232,24 +236,20 @@ impl Import {
 	/// Write split frames to the track, resolving the config from the first
 	/// keyframe's inline sequence header and refining the catalog jitter.
 	fn write_frames(&mut self, frames: impl IntoIterator<Item = Frame>) -> Result<()> {
-		for frame in frames {
-			if frame.keyframe {
-				let seq = find_sequence_header(&frame.payload);
-				// A new sequence header starts a coded sequence whose HDR metadata replaces the last
-				// one's. It goes first, so a keyframe that also configures publishes once.
-				// The first header after an av1C is the record's own sequence, which sync samples repeat.
-				let sequence = seq
-					.as_ref()
-					.is_some_and(|seq| self.last_seq.as_ref().is_some_and(|last| last != seq));
-				self.catalog.hdr(&mut self.track, find_hdr(&frame.payload), sequence)?;
-				if let Some(seq) = seq {
-					self.configure_from_seq(&seq)?;
-				}
-			}
+		for mut frame in frames {
+			self.configure(&frame)?;
 
 			// A keyframe we couldn't configure (no sequence header) is undecodable.
 			if frame.keyframe && !self.catalog.configured() {
 				return Err(Error::MissingSequenceHeader.into());
+			}
+
+			if frame.keyframe
+				&& std::mem::take(&mut self.owed_seq)
+				&& let Some(seq) = &self.last_seq
+				&& find_sequence_header(&frame.payload).is_none()
+			{
+				frame.payload = with_sequence_header(&frame.payload, seq)?;
 			}
 
 			// A pre-keyframe delta has no group to anchor it: the producer returns
@@ -259,11 +259,57 @@ impl Import {
 		Ok(())
 	}
 
+	/// Account for a frame its caller drops rather than writes: a keyframe still configures the
+	/// rendition, and its sequence header goes out with the next keyframe written.
+	pub(crate) fn dropped(&mut self, frame: &Frame) -> Result<()> {
+		self.configure(frame)?;
+		if frame.keyframe && find_sequence_header(&frame.payload).is_some() {
+			self.owed_seq = true;
+		}
+		Ok(())
+	}
+
+	/// Resolve the config and HDR metadata a keyframe carries inline, without publishing it.
+	fn configure(&mut self, frame: &Frame) -> Result<()> {
+		if !frame.keyframe {
+			return Ok(());
+		}
+		let seq = find_sequence_header(&frame.payload);
+		// A new sequence header starts a coded sequence whose HDR metadata replaces the last
+		// one's. It goes first, so a keyframe that also configures publishes once.
+		// The first header after an av1C is the record's own sequence, which sync samples repeat.
+		let sequence = seq
+			.as_ref()
+			.is_some_and(|seq| self.last_seq.as_ref().is_some_and(|last| last != seq));
+		self.catalog.hdr(&mut self.track, find_hdr(&frame.payload), sequence)?;
+		if let Some(seq) = seq {
+			self.configure_from_seq(&seq)?;
+		}
+		Ok(())
+	}
+
 	/// Publish split frames, resolving the config from the first keyframe's inline
 	/// sequence header and refining the catalog jitter.
 	pub fn decode(&mut self, frames: impl IntoIterator<Item = Frame>) -> Result<()> {
 		self.write_frames(frames)
 	}
+}
+
+/// `payload` with the sequence header `seq` after its leading temporal delimiter, where a temporal
+/// unit carries it.
+fn with_sequence_header(payload: &Bytes, seq: &Bytes) -> Result<Bytes> {
+	let mut buf = payload.clone();
+	let first = ObuIterator::new(&mut buf).next().transpose()?;
+	let delimiter = first.filter(|obu| {
+		let mut reader = &obu[..];
+		ObuHeader::parse(&mut reader).is_ok_and(|header| header.obu_type == ObuType::TemporalDelimiter)
+	});
+	let at = delimiter.map_or(0, |obu| obu.len());
+	let mut out = bytes::BytesMut::with_capacity(payload.len() + seq.len());
+	out.extend_from_slice(&payload[..at]);
+	out.extend_from_slice(seq);
+	out.extend_from_slice(&payload[at..]);
+	Ok(out.freeze())
 }
 
 fn is_sequence_header(obu: &[u8]) -> bool {
@@ -290,8 +336,8 @@ fn sequence_color(seq_header: &SequenceHeaderObu) -> Option<hang::catalog::Color
 	)
 }
 
-/// The colour a run of OBUs signals, such as av1C's `configOBUs`: the first parseable sequence
-/// header's, plus the static HDR metadata OBUs that the AV1 ISOBMFF binding places after it.
+/// The colour a run of OBUs signals, such as av1C's `configOBUs`: the last sequence header's, if
+/// it parses, plus the static HDR metadata OBUs that the AV1 ISOBMFF binding places after it.
 pub(crate) fn color(obus: &[u8]) -> Option<hang::catalog::Color> {
 	let mut color = find_sequence_header(obus)
 		.and_then(|seq| parse_sequence_header(&seq).ok().flatten())
@@ -324,7 +370,7 @@ pub(crate) fn config_obus_supported(obus: &[u8]) -> bool {
 	matches!(iter.flush(), Ok(None))
 }
 
-/// Read encoded dimensions from the first parseable sequence header in a frame.
+/// Read encoded dimensions from the last sequence header in a frame.
 pub(crate) fn dimensions(payload: &[u8]) -> Result<Option<(u32, u32)>> {
 	let Some(sequence) = find_sequence_header(payload) else {
 		return Ok(None);
@@ -360,16 +406,24 @@ fn find_hdr(payload: &Bytes) -> crate::codec::color::Hdr {
 	hdr
 }
 
-/// Find the first sequence-header OBU in a payload, if any.
+/// Find the last sequence-header OBU in a payload, if any: the one a decoder applies.
+///
+/// A splitter that retained its init's header across a reset puts it ahead of the keyframe's own,
+/// so the first one can be stale.
 fn find_sequence_header(payload: &[u8]) -> Option<Bytes> {
 	let mut buf = Bytes::copy_from_slice(payload);
 	let mut obus = ObuIterator::new(&mut buf);
+	let mut last = None;
 	while let Some(Ok(obu)) = obus.next() {
 		if is_sequence_header(&obu) {
-			return Some(obu);
+			last = Some(obu);
 		}
 	}
-	obus.flush().ok().flatten().filter(|obu| is_sequence_header(obu))
+	obus.flush()
+		.ok()
+		.flatten()
+		.filter(|obu| is_sequence_header(obu))
+		.or(last)
 }
 
 #[cfg(test)]

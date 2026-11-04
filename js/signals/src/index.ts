@@ -1271,11 +1271,23 @@ export class Derived<const S extends readonly Getter<unknown>[], T> implements G
 
 	// Calls `fn` with the derived value the first time it changes, then unsubscribes.
 	#once(fn: Subscriber<T>): Dispose {
+		let active = true;
 		const dispose = this.subscribe((value) => {
-			dispose();
-			fn(value);
+			if (!active) return;
+			active = false;
+			// Call `fn` before letting go of the sources: a reactive reader schedules its next
+			// run there, so its replacement subscription coalesces away the gap a source that
+			// counts its listeners (such as demand for an estimate) would otherwise see.
+			try {
+				fn(value);
+			} finally {
+				dispose();
+			}
 		});
-		return dispose;
+		return () => {
+			active = false;
+			dispose();
+		};
 	}
 
 	// Subscribes to every source, recomputing on any notification.

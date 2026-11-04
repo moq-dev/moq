@@ -18,7 +18,7 @@ whose C, C++, and Kotlin bindings drive it from their own loops
 Decided with the maintainer on 2026-10-28, from
 [moq-dev/rust2#215](https://github.com/moq-dev/rust2/pull/215):
 
-- **After [waits](/quest/m1/quic-api/waits.md) and [poll](/quest/m1/quic-api/poll.md).**
+- **The waits and driver poll forms have landed.**
   Once moq-quic owns its waits, a driver is I/O, timers, and a lock. This one is the
   timers and the lock, with the caller doing the I/O. Built earlier, it would carry the
   waiter tables that waits deletes.
@@ -35,7 +35,7 @@ Open, for whoever starts it:
 - Where it lives: a module in moq-quic, which doesn't depend on moq-net today, or a crate
   of its own.
 - Whether it ships with WebTransport over HTTP/3, sharing
-  [native WebTransport](/quest/m1/quic-api/native-web.md)'s `quic::web`, or with raw
+  the drivers' supported `quic::web` API, or with raw
   QUIC's moq ALPN first.
 - How it builds its TLS configs (identity, roots, fingerprint pinning) without
   moq-tokio's `tls` module.
@@ -46,8 +46,3 @@ other drivers do.
 
 Public API: a new driver, its endpoint and connection types, and their `poll::Session`
 impl.
-
-## Required
-
-- [Waits](/quest/m1/quic-api/waits.md) - moq-quic owns every wait, so the driver keeps no waiter table
-- [Poll forms](/quest/m1/quic-api/poll.md) - the drivers' poll shape this one mirrors

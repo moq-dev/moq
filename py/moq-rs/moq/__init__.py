@@ -49,6 +49,8 @@ from .session import (
     Reservation,
     Session,
     Tokens,
+    Viewer,
+    Viewers,
 )
 from .subscribe import (
     BroadcastConsumer,
@@ -67,6 +69,7 @@ from .types import (
     ConnectionState,
     ConnectionStats,
     Datagram,
+    Delay,
     ErrorScope,
     FetchGroupOptions,
     Frame,
@@ -120,6 +123,7 @@ __all__ = [
     "ConnectionPhase",
     "ConnectionState",
     "Datagram",
+    "Delay",
     "Error",
     "ErrorScope",
     "Frame",
@@ -163,6 +167,8 @@ __all__ = [
     "VideoEncoderOutput",
     "VideoDecodedFrame",
     "VideoPixelFormat",
+    "Viewer",
+    "Viewers",
     "WebSocketConfig",
     "connect",
     "is_auth",

@@ -89,15 +89,11 @@ pub struct Relay {
 	/// config named a source; `run` refuses to start while this is still held.
 	admissions: Option<Admissions>,
 	cluster: cluster::Cluster,
-	/// The cluster's origin and cache work, polled for as long as [`Self::run`]
+	/// The cluster's origin, cache, and stats work, polled for as long as [`Self::run`]
 	/// runs. `None` only once `run` took it.
 	driver: Option<cluster::Driver>,
-	stats: moq_stats::Producer,
 	internal: internal::Internal,
 	web: web::Web,
-	/// The ACME client, issuing before [`Self::run`] serves and renewing after.
-	#[cfg(feature = "acme")]
-	acme: Option<crate::acme::Acme>,
 	#[cfg(feature = "stun")]
 	stun: Option<crate::stun::Server>,
 	addr: Option<std::net::SocketAddr>,
@@ -137,7 +133,7 @@ impl Relay {
 	/// reading key material), so a returned `Relay` reports its ephemeral ports and
 	/// a taken port fails here. Nothing runs yet: the cluster's
 	/// [`Driver`](crate::cluster::Driver), which holds the origin's lifecycle work and
-	/// the cache governor, is only stored, and no session is admitted until
+	/// the cache governor and stats publisher, is only stored, and no session is admitted until
 	/// [`Self::run`] drives both.
 	pub async fn load(config: Config) -> anyhow::Result<Self> {
 		// Keep the large debug state machine off the embedder's main-thread stack.
@@ -158,9 +154,6 @@ impl Relay {
 			.get_or_insert_with(|| format!("moq-relay/{} {}", env!("CARGO_PKG_VERSION"), moq_net::IMPLEMENTATION))
 			.clone();
 		config.connect.implementation = Some(implementation.clone());
-		// Every TLS listener serves the ACME certificate, so install it before any is built.
-		#[cfg(feature = "acme")]
-		let acme = config.acme.init(&config.listen.tls, &config.web.https)?;
 		let resolved_config = Box::new(config.clone());
 		let drain_timeout = config.drain_timeout();
 		// The name this relay reports in every auth request: the stats node label,
@@ -220,17 +213,7 @@ impl Relay {
 
 		// Workers and the stream server split one relay across listeners, so they share
 		// one loaded identity. A lone server loads its own, only if a listener needs it.
-		#[cfg(feature = "acme")]
-		let resolved = acme
-			.as_ref()
-			.map(|acme| moq_tokio::tls::Serve::resolver(acme.resolver(), &config.listen.tls))
-			.transpose()?;
-		#[cfg(not(feature = "acme"))]
-		let resolved = None;
-		let served = match resolved {
-			Some(served) => Some(served),
-			None => config.runtime.workers().map(|_| config.listen.tls.load()).transpose()?,
-		};
+		let served = config.runtime.workers().map(|_| config.listen.tls.load()).transpose()?;
 		let mut listen = config.listen.clone();
 		if served.is_some() {
 			listen.tls = Default::default();
@@ -283,9 +266,6 @@ impl Relay {
 		#[cfg(not(all(target_os = "linux", feature = "_uring")))]
 		let quic_owned_elsewhere = workers_addr.is_some();
 
-		#[cfg(feature = "iroh")]
-		let iroh = config.iroh.bind(&config.quic).await?;
-
 		let mut server_config = moq_tokio::server::Config::default();
 		server_config.listen = listen;
 		server_config.tls = served;
@@ -294,10 +274,6 @@ impl Relay {
 		#[cfg(feature = "_quic")]
 		{
 			server_config.demux = demux.clone();
-		}
-		#[cfg(feature = "iroh")]
-		{
-			server_config.iroh = iroh.clone();
 		}
 		let server = match quic_owned_elsewhere {
 			true => server_config.init_streams()?,
@@ -343,22 +319,15 @@ impl Relay {
 		if generated && let Some(fingerprint) = certificates.fingerprints().into_iter().next() {
 			advertise = advertise.with_fingerprint(fingerprint);
 		}
-		let mut cluster_options = cluster::Options::new(config.cluster).with_cache(cache);
+		let mut cluster_options = cluster::Options::new(config.cluster)
+			.with_cache(cache)
+			.with_stats(config.stats);
 		cluster_options.session = config.limits.client;
 		cluster_options.peer = config.limits.peer;
 		let (cluster, driver) = cluster::Cluster::new(cluster_options)?;
 		let cluster = cluster
 			.with_connect(config.connect.clone(), config.quic.clone())
 			.with_advertise(advertise);
-		#[cfg(feature = "iroh")]
-		let cluster = match iroh {
-			Some(iroh) => cluster.with_iroh(iroh),
-			None => cluster,
-		};
-		let (stats, publisher) = config.stats.build(cluster.origin.clone())?;
-		// The cluster takes over keeping the publish task alive, so an embedder that
-		// drops the producer keeps publishing for as long as it serves.
-		let cluster = cluster.with_stats(stats.clone(), publisher);
 
 		let sessions = crate::session::Registry::new();
 		let (ready, _) = tokio::sync::watch::channel(Startup::Starting);
@@ -371,8 +340,6 @@ impl Relay {
 			.with_quic(&config.quic)
 			.with_sessions(sessions.clone())
 			.with_tls_acceptor(server.tls_acceptor());
-		#[cfg(feature = "acme")]
-		let web = web.with_acme(acme.as_ref().map(crate::acme::Acme::resolver));
 		let web = web.bind()?;
 		// `bind`, not `listen`: the TCP/Unix accept loops handshake as soon as
 		// they run, and `load` is not yet willing to take a session. `run`
@@ -423,11 +390,8 @@ impl Relay {
 			admissions,
 			cluster,
 			driver: Some(driver),
-			stats,
 			internal,
 			web,
-			#[cfg(feature = "acme")]
-			acme,
 			#[cfg(feature = "stun")]
 			stun,
 			addr,
@@ -518,11 +482,11 @@ impl Relay {
 		&self.cluster
 	}
 
-	/// The stats producer, for publishing extra counters through the same
-	/// registry. [`Self::cluster`] holds a clone, so the publish task lives as
-	/// long as the cluster whether or not this handle is kept.
+	/// The stats producer, for publishing extra counters through the same registry.
+	/// The cluster holds it, so publishing lasts as long as the cluster and its
+	/// driver do, whether or not this handle is cloned.
 	pub fn stats(&self) -> &moq_stats::Producer {
-		&self.stats
+		&self.cluster.stats_producer
 	}
 
 	/// Graceful-shutdown signal shared by every accepted session and web handler.
@@ -594,9 +558,8 @@ impl Relay {
 	/// [`Self::shutdown_trigger`] itself, e.g. after withdrawing the node from DNS.
 	///
 	/// `run` installs the handlers just before it serves, once its startup can no
-	/// longer fail, so a signal before that takes its default action. With ACME
-	/// it installs them before the first issuance instead, so a stop request
-	/// there still ends `run`. They stay installed for the life of the process,
+	/// longer fail, so a signal before that takes its default action.
+	/// They stay installed for the life of the process,
 	/// since tokio never removes one, even after `run` fails.
 	#[must_use = "the relay with the signal choice is returned"]
 	pub fn with_signals(mut self, signals: bool) -> Self {
@@ -654,8 +617,6 @@ impl Relay {
 			cluster,
 			internal,
 			web,
-			#[cfg(feature = "acme")]
-			acme,
 			#[cfg(feature = "stun")]
 			stun,
 			shutdown,
@@ -681,27 +642,6 @@ impl Relay {
 			"no --auth-url or --auth-public configured; nobody can authenticate (an embedder decides by taking Relay::admissions)"
 		);
 
-		let mut handlers = None;
-
-		// Nothing else serves or reports ready until the certificate exists: a
-		// self-signed placeholder would only fail every browser that connects.
-		#[cfg(feature = "acme")]
-		if let Some(mut acme) = acme {
-			let listener = web.https_listener().context("ACME needs the HTTPS listener")?;
-			// Issuance can take minutes, and as a container's PID 1 the relay
-			// ignores a signal left at its default action, so a stop would wait it
-			// out. That outweighs leaving the handlers installed if a later step fails.
-			if signals {
-				handlers = Some(shutdown::Signals::new()?);
-			}
-			tokio::select! {
-				res = acme.issue(listener) => res?,
-				// No session exists yet, so this returns as soon as it starts.
-				() = drain(shutdown_trigger.clone(), shutdown.clone(), handlers.as_mut()) => return Ok(()),
-			}
-			cluster.critical.spawn("ACME renewal", acme.run());
-		}
-
 		// Validate the cluster and bind its LAN advertisement before claiming to be
 		// ready: the `cluster.run()` below is first polled after the notify, so a bad
 		// key or an mDNS failure would otherwise release the units depending on a
@@ -721,14 +661,12 @@ impl Relay {
 			})
 			.transpose()?;
 
-		// Without ACME, after the last step that can fail, since a handler outlives a
+		// After the last step that can fail, since a handler outlives a
 		// failed `run`, and before anything accepts a session a signal would kill
 		// without a GOAWAY.
 		// Nothing awaits from here to the drain below, so a signal caught in between
 		// starts the drain at its first poll, as one just after READY would.
-		if signals && handlers.is_none() {
-			handlers = Some(shutdown::Signals::new()?);
-		}
+		let mut handlers = signals.then(shutdown::Signals::new).transpose()?;
 
 		#[cfg(all(target_os = "linux", feature = "_uring"))]
 		if let Some(uring) = uring.as_mut() {
@@ -821,15 +759,8 @@ impl Relay {
 		let quic_on_workers = has_workers || uring_serving;
 		#[cfg(not(all(target_os = "linux", feature = "_uring")))]
 		let quic_on_workers = has_workers;
-		// Iroh is not an `accept(2)` listener, so it never shows up in the
-		// health list; pending on the shared loop would leave its endpoint
-		// unpolled and every inbound `iroh://` connection hanging.
-		#[cfg(feature = "iroh")]
-		let has_iroh = server.iroh_endpoint().is_some();
-		#[cfg(not(feature = "iroh"))]
-		let has_iroh = false;
 		let serve_shared = {
-			let idle = quic_on_workers && server.accept_health().is_empty() && !has_iroh;
+			let idle = quic_on_workers && server.accept_health().is_empty();
 			let server = &mut server;
 			let cluster = cluster.clone();
 			let auth = auth.clone();

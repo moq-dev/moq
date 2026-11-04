@@ -5,10 +5,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { build } from "vite";
 import { worklet } from "../../../../js/common/vite-plugin-worklet";
-import { launch } from "./harness";
+import { launch, open, throwPageErrors, waitFor } from "./harness";
 import type { Packet } from "./open-gop/main";
 
+declare global {
+	interface Window {
+		recoveryResult?: Awaited<ReturnType<Window["runRecovery"]>>;
+	}
+}
+
 test("software video recovery trims orphan pictures after join and later gap", async () => {
+	const deadline = Date.now() + 60_000;
 	const run = mkdtempSync(join(tmpdir(), "moq-open-gop-"));
 	const file = join(run, "fixture.ts");
 	const command = (cmd: string[]) => {
@@ -104,17 +111,27 @@ test("software video recovery trims orphan pictures after join and later gap", a
 				return (await file.exists()) ? new Response(file) : new Response("not found", { status: 404 });
 			},
 		});
-		const page = await browser.newPage();
-		page.on("pageerror", (error) => console.error(error));
-		page.on("console", (message) => {
-			if (message.type() === "error") console.error(message.text());
+		const [page, errors] = await open(browser, `http://127.0.0.1:${server.port}`, "open-gop");
+		await waitFor(page, errors, (page) => page.evaluate(() => typeof window.runRecovery === "function"), {
+			deadline,
+			description: "the recovery fixture to load",
+			predicate: (ready) => ready,
 		});
-		await page.goto(`http://127.0.0.1:${server.port}`);
-		await page.waitForFunction(() => typeof window.runRecovery === "function");
-		const result = await page.evaluate((packets) => window.runRecovery(packets), packets);
-		expect(result.software).toBe(true);
-		expect(result.submitted).toEqual(expected);
-		expect(result.decoded).toBeGreaterThan(0);
+		await page.evaluate((packets) => {
+			// Keep page reads responsive while recovery runs, so an effect error can end the wait.
+			void window.runRecovery(packets).then((result) => {
+				window.recoveryResult = result;
+			});
+		}, packets);
+		const result = await waitFor(page, errors, (page) => page.evaluate(() => window.recoveryResult), {
+			deadline,
+			description: "open-GOP recovery",
+			predicate: (result) => result !== undefined,
+		});
+		throwPageErrors(errors);
+		expect(result?.software).toBe(true);
+		expect(result?.submitted).toEqual(expected);
+		expect(result?.decoded).toBeGreaterThan(0);
 	} finally {
 		await browser.close();
 		server?.stop();

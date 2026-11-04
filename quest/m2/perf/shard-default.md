@@ -63,4 +63,3 @@ Update `doc/bin/relay/` for the default change.
 
 - [kio channel contention](/quest/m2/perf/kio-channel-contention/README.md) - its per-thread spikes run on the workers
 - [Performance survey](/quest/m2/performance-survey/README.md) - paired benchmark evidence and memory/settings controls
-- [Socket queues](/quest/m2/performance-survey/socket-queues.md) - queue sizing and local drop attribution

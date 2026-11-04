@@ -82,7 +82,7 @@ Raw tracks also expose best-effort datagrams: `TrackProducer.appendDatagram(_:ti
 returns the assigned sequence number (`insertDatagram(_:sequence:timestamp:)` takes the
 caller's own), `TrackConsumer.recvDatagram()` receives one datagram,
 and `TrackConsumer.datagrams` streams them in arrival order. Payloads are capped at 1200 bytes.
-Datagrams require a datagram-capable transport and lite-05 or newer moq-lite, or moq-transport;
+Datagrams require a datagram-capable transport and lite-05 or newer moq-lite; moq-transport,
 pre-lite-05, WebSocket, and TCP paths do not deliver them, and there is no stream fallback.
 
 JSON tracks live under the `Json` namespace, mirroring the `moq-json` crate, and carry your own
@@ -93,7 +93,9 @@ JSON tracks live under the `Json` namespace, mirroring the `moq-json` crate, and
 (lossless append-log, every record preserved in order), or `Json.WindowProducer`/`Json.WindowConsumer`
 (a sliding window of records a reader can join at any point, not advertised in the catalog). Values encode/decode at the boundary with
 `JSONEncoder`/`JSONDecoder`; the consumer is an `AsyncSequence` of the decoded type. Publish the
-track with `TrackInfo(compress: true)`; consumers read it the same either way.
+track with `TrackInfo(compress: true)`; consumers read it the same either way. Every JSON write
+(snapshot update, stream append, window push or pop) takes a timestamp on the broadcast clock (`Media.CatalogProducer.now()`), so the
+track needs a timescale.
 
 ## Local development
 

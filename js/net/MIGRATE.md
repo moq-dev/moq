@@ -4,6 +4,58 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Relative group anchors are `bigint`
+
+A `Track.Anchor.relative` count now uses `bigint`, like an absolute group sequence.
+Write `{ relative: 2n }` instead of `{ relative: 2 }`, including the live anchor
+`{ relative: 0n }`. Large relative counts round-trip exactly and resolve against
+large group sequences without narrowing to a number. First-party consumers use
+the new type. Frame indices and timestamps retain their bounded numeric API.
+
+The IETF codecs also hold subgroup IDs and datagram Object IDs as `bigint`.
+Unsupported subgroups and datagram objects still have the same model behavior.
+Unsafe numeric error/status codes and clock waits are now refused rather than
+rounded or saturated. Large IETF filter bounds remain exact bigint; their derived
+frame selection bounds clamp without changing the selected content. Wire layouts and published version negotiation are unchanged.
+See [wire integer precision](INTEGERS.md) for each field's representation and bounds.
+
+### Authored tracks default to a zero `maxAge` ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+A track created with `Broadcast.Producer.createTrack`, `Track.Request.accept`, or `Track.Producer.accept` takes a `Track.InfoInit`, whose omitted or `undefined` `maxAge` is now zero instead of no publisher limit: a superseded group is stale as soon as its successor arrives, so readers get only the live edge. The newest group never goes stale, so a track that writes one snapshot stays readable to a late joiner.
+A track whose readers reach back for superseded groups (a subscription's `delay.max`, a fetch, or a range from an absolute start) passes `maxAge: null` for unlimited history, or a window, when it creates the track; changing it means a new track or broadcast. A relay or cache bounds what it keeps with its own window, not the publisher's default.
+Received metadata is unchanged: a decoded `Track.Info` without `maxAge` still means no publisher limit, and `Track.infoDefaults` keeps an absent `maxAge` absent. To serve a received `Track.Info` onward unchanged, pass `{ ...info, maxAge: info.maxAge ?? null }`.
+
+```ts
+// Before: no publisher limit
+broadcast.createTrack("history", { timescale: Time.Timescale.MILLI });
+// After: the same, stated explicitly
+broadcast.createTrack("history", { timescale: Time.Timescale.MILLI, maxAge: null });
+```
+
+### Past group ranges work over moq-transport ([#7793](https://github.com/moq-dev/moq/pull/7793))
+
+`track.Consumer.fetchGroup()` and subscriptions to past group ranges now use standalone FETCH on drafts 18, 20, and 22. No API migration is needed. First-party publishers serve one group per FETCH; multi-group ranges require a publisher that serves them.
+
+### IETF FETCH serves on-demand history ([#7794](https://github.com/moq-dev/moq/pull/7794))
+
+A single-group IETF FETCH now asks `track.requests()` for groups the publisher's cache no longer holds, or never held, using the same `Track.Fill` responder as moq-lite. Existing responders need no changes. Multi-group IETF FETCH remains unsupported.
+
+### A timestamp out of range at the track's timescale is a `TimestampMismatch` ([#7702](https://github.com/moq-dev/moq/pull/7702))
+
+A frame or datagram whose timestamp leaves the safe range once converted to the track's timescale is refused at the write with `TimestampMismatch`, as Rust refuses it, rather than with a `RangeError` when it is encoded.
+Catch `TimestampMismatch` where you caught that `RangeError`.
+
+### A timestamp finer than the track's timescale is rounded down ([#7702](https://github.com/moq-dev/moq/pull/7702))
+
+A timestamp that is fractional at the track's timescale, such as 1500µs on a millisecond track or a fractional `Timestamp.now()`, now goes out rounded down instead of to the nearest unit: 1500µs is 1 ms, not 2. Rust's `Timestamp::convert` and `track::Info::rescale` already round down, and `Track.rescale` does too.
+Write timestamps at the track's own scale where the exact value matters.
+
+### Group sequences are `bigint` ([#7681](https://github.com/moq-dev/moq/pull/7681))
+
+Every group sequence is a `bigint`, so a group ID past 2^53 decodes, relays, and encodes again instead of being refused: `Group.Producer`/`Consumer.sequence`, `Track.Position.group`, `Track.Bound`, an `absolute` `Track.Anchor`, `Track.Datagram.sequence`, `Track.Demand.wanted`, the `group` of `Ordered.readFrame()`, and the `sequence` that `createGroup`, `insertDatagram`, and `fetchGroup` take and `appendDatagram` returns.
+Write literals with an `n` (`track.createGroup(5n)`, `{ absolute: 10n }`), convert with `BigInt(n)`, and compare with `===` against another bigint: `5n === 5` is `false`. `Math.min` and `Math.max` refuse a bigint, and `JSON.stringify` throws on one.
+Frame indices, a `relative` anchor's count, and timestamps stay `number`. A number where a sequence belongs throws a `TypeError`, and a negative one a `RangeError`.
+
 ### `Subscription.maxDelay` is `delay: Track.Delay` ([#7597](https://github.com/moq-dev/moq/pull/7597))
 
 `Track.Subscription` carries a `delay: Track.Delay` (`{ min?: Milli | null; max?: Milli | null }`) in place of `maxDelay`, which is now refused at runtime.
@@ -11,14 +63,25 @@ Replace `maxDelay: d` with `delay: { max: d }`. `max` keeps `maxDelay`'s meaning
 `min` is the subscriber's target latency; `null` means not stated, which only a peer on moq-lite before 07 or moq-transport sends. moq-lite-07 SUBSCRIBE and SUBSCRIBE\_UPDATE carry it, and a track's aggregate takes the smallest stated one.
 `FetchGroupOptions.maxDelay` is unchanged.
 
+### `Subscription.groups` is `ranges` ([#6949](https://github.com/moq-dev/moq/pull/6949))
+
+`Track.Subscription` asks for `ranges: Track.Range[]` in place of `groups`, which is now refused at runtime. Each `Track.Range` starts and ends at a `Track.Anchor`: an `absolute` group, one `relative` to the latest, or the group containing a `time`.
+Replace `groups: { start: { included: a }, end: { excluded: b } }` with `ranges: [{ start: { absolute: a }, end: { absolute: b } }]`. An inclusive end `b` becomes `absolute: b + 1`, and an excluded start `a` becomes `absolute: a + 1`.
+A reader reads only its own ranges, whatever another subscriber widens the request to. `withRange` only narrows them; widen with `update({ ranges })`.
+
+### Bounded reads end ([#6949](https://github.com/moq-dev/moq/pull/6949))
+
+A `recvGroup` or `nextGroup` whose ranges all end now returns `undefined` once every group in them was handed out, dropped, skipped as stale, or will never arrive, as Rust's reads do since [#7545](https://github.com/moq-dev/moq/pull/7545). The track goes on: replacing the ranges with `update` reads on from the same subscriber. A `withRange` cap holding a group back keeps the read open, since the cap may rise.
+A loop that read a bounded range until a timeout now ends on its own; one that waited for more groups past the end of its ranges must widen them first.
+
 ### Ordered subscriptions wait for owed groups
 
 An ordered reader on a subscribed track now waits at a missing group while the feed may still deliver it, up to `delay.max` by media time or wall clock. Local tracks still skip gaps, and the zero default waits for nothing.
-With `delay: { max: null }`, there is no subscriber deadline. Use a finite budget for bounded waiting: a moq-transport SUBSCRIBE signals no gaps, so an unlimited wait can last until the track ends. Publisher retention still bounds the budget.
+With `delay: { max: null }`, there is no subscriber deadline. Use a finite budget for bounded waiting: a moq-transport SUBSCRIBE signals no gaps, so an unlimited wait can last until the track ends. The publisher's `Track.Info.maxAge` still bounds the budget.
 
 ### `maxDelay: null` sets no subscriber limit ([#7403](https://github.com/moq-dev/moq/pull/7403))
 
-A `Track.Subscription` whose `maxDelay` is `null` reaches back as far as the publisher's `Track.Info.maxAge` keeps, as `None` does in Rust. An omitted or `undefined` `maxDelay` is still zero.
+A `Track.Subscription` whose `maxDelay` is `null` reaches back as far as the publisher's `Track.Info.maxAge` allows, as `None` does in Rust. An omitted or `undefined` `maxDelay` is still zero.
 
 ### Paths fit moq-transport's 4096-byte namespace ([#6927](https://github.com/moq-dev/moq/pull/6927))
 
@@ -30,11 +93,11 @@ A moq-transport namespace whose escaped path would exceed it is refused when dec
 `Path.from` throws on a component with a leading, trailing, or doubled `/` instead of collapsing it, so a path has one spelling, and `Path.decode` refuses one off the wire. A moq-transport namespace field ending in `/`, which escapes to an empty segment, is refused too.
 Pass canonical components: `Path.from("room/cam")` or `Path.from(prefix, "cam")`, where an empty component is the root, rather than ``Path.from(`${prefix}/cam`)`` or `Path.from("room/")`.
 
-### moq-transport drafts 14 through 17 are removed ([#6753](https://github.com/moq-dev/moq/pull/6753))
+### moq-transport drafts 14 through 17, 19, and 21 are removed ([moq-dev/moq#6753](https://github.com/moq-dev/moq/pull/6753), [moq-dev/moq#6754](https://github.com/moq-dev/moq/pull/6754))
 
-The `"moq-transport-14"` through `"moq-transport-17"` version names now throw a `TypeError`, and a peer offering only those versions fails the handshake.
+A peer offering only removed drafts fails the handshake.
 The moql SETUP (no ALPN, or `moql`) negotiates only moq-lite versions.
-Peers must speak moq-transport draft 18 or later, or moq-lite.
+Peers must speak moq-transport draft 18, 20, or 22, or moq-lite.
 
 ### Request handlers are `requests()` ([#6752](https://github.com/moq-dev/moq/pull/6752))
 
@@ -118,7 +181,8 @@ Only `publish` announces it: `prepared.broadcast` has no announcement methods.
 `Prepared.reject(err)` is replaced by idempotent `close()` and `[Symbol.dispose]()`; either refuses the unpublished answer as `Unroutable` and closes its broadcast. Closing that broadcast also refuses the request. `using` handles normal scope exit and exceptions; after `publish()`, disposal leaves the returned publication and its fill producer live.
 Use `request.reject(err)` to refuse before preparing. A retained, unclosed `Prepared` keeps its request pending; garbage collection provides no prompt cleanup guarantee.
 Construct a `Prepared` only with `request.prepare()`. Its constructor and the `Request.publisher`, `publishPrepared`, and `rejectPrepared` completion hooks are no longer public.
-`Dynamic.update` is no longer part of the public API, and `Request` has no `accept` (#6496): only the built-in sessions answer with a broadcast they already hold.
+`Dynamic.update` is no longer part of the public API (#6496).
+`Request.serve(broadcast)` additively exposes the former private answer path: serve held content without announcing an exact route. The prefix route promises the same bytes and continuous sequences at each served path; start a new prefix route for different content, or prepare and publish an independent job.
 Close the claim and claim again to change it, and close an answer's producer to end that output.
 
 ### `largest()` reports within a reader's `setGroups` bounds
@@ -187,10 +251,12 @@ const sub = track.subscribe({ maxDelay: Milli(1000) });
 `Time.Nano`, `Time.Micro`, `Time.Milli`, and `Time.Second` are gone.
 Import them from `@moq/clock`, which throws on negative or non-finite values.
 
-### Announced requests follow restarts, and `broadcasts()` is gone
+### `follow(path)` replaces `request(path, { announced: true })`, and `broadcasts()` is gone ([#7173](https://github.com/moq-dev/moq/pull/7173), [#7476](https://github.com/moq-dev/moq/pull/7476))
 
-An unpinned `request(path, { announced: true })` stays open across publisher instances: its `active` moves to each new instance's broadcast and clears between them, instead of ending with `Unroutable`.
-Read `active` reactively and close the request when done, or pass `instance` to keep the old single-instance behavior.
+`RequestOptions.announced` is removed: replace `request(path, { announced: true })` with `follow(path)`, which returns an `Origin.Following`.
+An unpinned `follow(path)` stays open across publisher instances: its `active` moves to each new instance's broadcast and clears between them, instead of ending with `Unroutable`.
+Read `active` reactively and close the follower when done, or use `request(path)` to stay on one instance.
+A follower needs discovery: a session without it never serves one.
 `Origin.Producer` and `Origin.Consumer` drop `broadcasts(scope)`; iterate `announced(scope)` instead.
 
 ```ts
@@ -201,8 +267,9 @@ for await (const event of origin.announced(scope)) {
 
 ### Discovery follows what something watches, and `discovery` is gone
 
-A `consume` origin stays empty until a reader watches it with `announced(scope)` or `request(path, { announced: true })`; the session then asks the relay about those prefixes only.
-Code that called `request(path)` expecting a route without watching should hold an `announced(scope)` stream.
+A `consume` origin stays empty until a reader watches it with `announced(scope)`, `request(path)`, or `follow(path)`; the session then asks the relay about those prefixes only.
+`request(path)` owns the discovery of its path until closed, so it finds a broadcast the relay serves with nothing else watching first, and retries as the routes covering the path change.
+It fails `Unroutable` once at least one session is attached and every session's discovery has synced without a route for it; with no session attached, such as between reconnects, it waits. Drop any `announced(scope)` stream held only so a request could resolve.
 The `discovery` option on `connect`, `accept`, and `Connection`, and `Established.discovery`, are removed; passing the option throws a `TypeError`.
 Drop the option.
 
@@ -217,7 +284,7 @@ A `"restart"` means another publisher instance now serves the prefix: request th
 
 Every route carries an `Instance`: non-empty text naming one continuous run of group numbers at its path. Every broadcast mints a random one and keeps it across re-announcing, so most publishers set nothing.
 A publisher that continues its group sequences across restarts may name a stable one with `announce({ instance, epoch })`, raising `epoch` on each run.
-Read `Route.instance` and `Broadcast.Consumer.instance`; pin a request or follow to one with `request(path, { instance })`.
+Read `Route.instance` and `Broadcast.Consumer.instance`; pin a request or follower to one with `request(path, { instance })` or `follow(path, { instance })`.
 
 ### Publishing never invents a timestamp (#5070)
 
@@ -236,10 +303,10 @@ A write whose timedness does not match its track throws `Error.TimestampMismatch
 
 ### Subscriber staleness is `maxDelay`
 
-`Track.Subscription`'s `maxAge` is `maxDelay`; `maxAge` stays the publisher's retention on `Track.Info`.
+`Track.Subscription`'s `maxAge` is `maxDelay`; `maxAge` stays the publisher's staleness bound on `Track.Info`.
 A `maxAge` key in subscription options throws a `TypeError`, even when `undefined` or beside `maxDelay`.
 
-### Publisher retention is optional (#4242)
+### `Track.Info.maxAge` is optional (#4242)
 
 `Track.Info.maxAge` is optional, absent meaning no publisher limit, and `DEFAULT_MAX_AGE_MS` is gone.
 Pass an explicit value such as `Milli(30_000)` where you used the constant.

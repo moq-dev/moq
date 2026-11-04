@@ -4,16 +4,41 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+A `nil` `TrackInfo.maxAge`, the default, and a `nil` info now advertise a zero max age, serving only the live edge, instead of no publisher limit. Pass `maxAgeUnlimited: true`, which ignores `maxAge`, where you relied on `nil` meaning no limit. A received track's `info()` sets it when its publisher advertised no limit.
+
+### Viewer targets are bounded ([#7090](https://github.com/moq-dev/moq/pull/7090))
+
+Viewer ceilings and PROBE target overrides are refused with the new `MoqError.OutOfRange` once they would sum above 2^53 - 1 bps, the most a PROBE target carries; nothing changes on a refusal. `Viewers.watch(maxBps:)` and `setTarget(targetBps:)` and `Viewer.update(maxBps:)` throw it, so call them with `try`. Handle the new variant wherever you match the error exhaustively. Regenerate bindings and rebuild the matching native library together.
+
+### `lower` is a `Media.Producer` ([#7699](https://github.com/moq-dev/moq/pull/7699))
+
+`Media.TrackProducer.video` and `Media.TrackStreamProducer.video` take `lower: Media.Producer?` instead of `TrackProducer?`. Pass `lower: .track(producer)`, or `.stream(producer)` for a byte-stream rendition.
+
+### Media setup refusals are typed
+
+Audio and video subscribe setup now reports `UnsupportedConfig` when the decoder refuses a codec, layout, or description. Handle this variant to try another rendition instead of inspecting an audio/video error message or `Unsupported`. Decoder faults, such as a backend that fails to open, and later peer and decode failures keep their existing errors. Regenerate bindings and rebuild the matching native library together.
+
+### JSON writes take a broadcast-clock timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
+
+`Json.SnapshotProducer.update(_:timestamp:)`, `Json.StreamProducer.append(_:timestamp:)`, and `Json.WindowProducer.push(_:timestamp:)` / `pop(_:timestamp:)` require a `Timestamp` on the broadcast clock instead of defaulting to `nil`. Read it with `Media.CatalogProducer(broadcast:).now()`. Their track needs a timescale, such as `TrackInfo(timescale: 1000)`; one without is refused.
+
+### Subscriptions take a `Delay` ([#7697](https://github.com/moq-dev/moq/pull/7697))
+
+`Subscription.maxDelay` is `delay: Delay`: pass `delay: Delay(min: 0, max: maxDelay)`, where a `nil` `max` sets no subscriber limit, or start from `Subscription.default`.
+`Media.Delay` moves to the root `Delay`, and its `min` is optional: `nil` leaves the target latency unstated, which a decoder plays as zero.
+
 ### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
 
 `Announce.captures` is `[String]` instead of `[String]?`. Remove optional checks and pass `captures: []` when constructing an announcement for a filter without wildcards. Rebuild with the matching MoqFFI package and native library.
 
-### Decoder outputs take a `Media.Delay` ([#7311](https://github.com/moq-dev/moq/pull/7311))
+### Decoder outputs take a `Delay` ([#7311](https://github.com/moq-dev/moq/pull/7311))
 
-`Audio.DecoderOutput` replaces `maxDelay` and the playout `delay: TimeInterval?` with `delay: Media.Delay?` and `estimate: Bool = true`.
-`Video.DecoderOutput.maxDelay` is `delay: Media.Delay?`.
-`Media.Delay(min:max:)`: `max` (nil for no limit) is the old `maxDelay`, and `min` is the playout delay, where a cold join starts.
-A fixed audio playout delay `d` is `delay: Media.Delay(min: d, max: ...)` with `estimate: false`.
+`Audio.DecoderOutput` replaces `maxDelay` and the playout `delay: TimeInterval?` with `delay: Delay?` and `estimate: Bool = true`.
+`Video.DecoderOutput.maxDelay` is `delay: Delay?`.
+`Delay(min:max:)`: `max` (nil for no limit) is the old `maxDelay`, and `min` is the playout delay, where a cold join starts.
+A fixed audio playout delay `d` is `delay: Delay(min: d, max: ...)` with `estimate: false`.
 
 ### Compression moves to the track
 
@@ -42,7 +67,6 @@ Their handles `OriginDynamic`, `BroadcastDynamic`, and `TrackDynamic` are `Origi
 Every duration is a `TimeInterval` in seconds instead of a `UInt64` `...Us` field, and drops the suffix: `Client(timeout:race:resolutionDelay:)`, `Backoff(initial:max:timeout:)`, `QuicConfig(idleTimeout:keepAlive:)`, `WebSocketConfig(delay:)`, `ConnectionStats.rtt`, `Grant.expires`, `TrackInfo.maxAge`, `Subscription.maxDelay`, `Fill.maxDelay`, `Audio.Consumer.delay`, and the decoder outputs' `maxDelay` and `delay`.
 Divide a microsecond value by 1,000,000. A negative interval traps.
 `AudioEncoderOutput.frameDuration` is optional: pass `nil` where you passed `frameDurationUs: 0` for the codec's own frame.
-`Subscription.maxDelay` has no default: start from `Subscription.default`, or pass `0`, for the old default. `nil` sets no subscriber limit.
 `TrackConsumer.info()` no longer throws.
 
 ### Connection state
@@ -92,11 +116,16 @@ Publish the track with a `refresh` ratio so a joiner gets the value restated in 
 `TrackInfo.priority` defaulted to 127 and now defaults to 0.
 To keep a value's moq-lite byte, subtract 128 from it, widening first so it doesn't trap (`Int8(Int16(old) - 128)`): 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 
+### `request` and `follow` name the two resolutions ([#7193](https://github.com/moq-dev/moq/pull/7193), [#7489](https://github.com/moq-dev/moq/pull/7489))
+
+Rename `OriginConsumer.requestBroadcast(path:)` to `request(path:)`, `announcedBroadcast(path:)` to `follow(path:)`, and `AnnouncedBroadcast` to `Following`.
+Both take an optional `instance:` to refuse every other publisher instance.
+`request` resolves one publisher instance: it retries as the routes covering the path change, and fails with an unroutable error only once discovery has synced with no covering route. `follow` hands out each instance that serves the path in turn.
+
 ### A client asks only about what it watches (#6165)
 
-On moq-lite, a client session asks its relay for announcements only under paths something watches, through `announced()` or `announcedBroadcast()`, instead of under its whole scope at connect.
-`OriginConsumer.requestBroadcast()` watches nothing, so on a client it fails with an unroutable error for a path nothing watches, even when the relay announces it.
-Resolve the path with `announcedBroadcast()`, or hold `announced()` over its prefix while requesting.
+On moq-lite, a client session asks its relay for announcements only under paths something watches, through `announced()`, `request(path:)`, or `follow(path:)`, instead of under its whole scope at connect.
+`OriginConsumer.request(path:)` owns the discovery of its path, so it finds a broadcast the relay serves with nothing else watching first; no announcement stream is needed beside it.
 moq-transport and moq-lite-03/04 sessions are unchanged.
 
 ### `ContainerFormat.fmp4` unwraps to Legacy (#6250)
@@ -125,6 +154,7 @@ Publish a replacement under a new name, and expect a finished track's demand wat
 
 `OriginProducer.dynamic(prefix:)` takes no route, and `OriginDynamic.update(route:)` is gone.
 Replace `request.accept(broadcast:)` with `let prepared = try request.prepare()`, fill `prepared.broadcast`, then `try prepared.publish()`, which announces it at the exact path under a fresh instance of its own and returns its producer.
+To answer with a broadcast you already hold, `try request.serve(broadcast: producer.consume())` serves it under the prefix route without announcing an exact route.
 
 ### Anchors can name a time (#6074)
 
@@ -177,7 +207,7 @@ The connection stats no longer carry a receive estimate.
 Hold the consumer `Session.recvBandwidth` returns to request PROBE, read it with `rate()` or wait with `rateChanged()`, and drop it to stop.
 It returns `nil` when the version has no PROBE.
 
-### `AnnouncedBroadcast.available()` waits for the next publisher instance (#5700)
+### `Following.available()` waits for the next publisher instance (#5700)
 
 The first call returns the broadcast serving the path, as before.
 Each later call waits for the next instance to take over the path, instead of returning whatever serves it now.

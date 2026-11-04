@@ -142,11 +142,13 @@ void timestamp_roundtrip()
 	ok(broadcast->close(), "close timestamp broadcast");
 }
 
-// Only the defaults carry moq-net's zero max delay; a bare record sets no subscriber limit.
+// Only the defaults carry moq-net's zero delay; a bare record leaves both bounds unset.
 void subscription_defaults()
 {
-	CHECK(moq::subscription_defaults().max_delay == std::chrono::nanoseconds::zero());
-	CHECK(!moq::Subscription{}.max_delay.has_value());
+	auto defaults = moq::subscription_defaults();
+	CHECK(defaults.delay.min == std::chrono::nanoseconds::zero());
+	CHECK(defaults.delay.max == std::chrono::nanoseconds::zero());
+	CHECK(!moq::Subscription{}.delay.max.has_value());
 }
 
 // Exercise the installed audio publisher and consumer rather than only generated signatures.
@@ -165,7 +167,7 @@ void audio_roundtrip()
 	CHECK(snapshot.has_value());
 	moq::AudioDecoderOutput decoded{};
 	decoded.format = moq::AudioSampleFormat::kF32;
-	// The track's whole retention: reading starts only after finish, and the budget ages
+	// The track's whole max age: reading starts only after finish, and the budget ages
 	// groups by wall clock, so a stalled host would otherwise skip the start.
 	decoded.delay = moq::Delay{std::chrono::seconds(0), std::chrono::seconds(30)};
 	auto consumer = ok(moq::AudioConsumer::subscribe(receiver, "tone", snapshot->audio.at("tone"), decoded).get(),

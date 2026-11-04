@@ -6,6 +6,9 @@
 //! string, coded size and hvcC header only need the SPS head, which ends at
 //! `bit_depth_chroma_minus8`. So when scuffle_h265 refuses a value (`InvalidData`), [`Sps::parse`]
 //! reads the head itself. A truncated SPS, or one whose head is invalid, is still an error.
+//!
+//! scuffle_h265 also overflows on hostile values, so [`parse_full`] walks the SPS with moq-mux's
+//! own reader before handing it over, and an SPS that walk refuses falls back to its head too.
 
 use h264_reader::rbsp::{BitRead, BitReaderError};
 use scuffle_h265::{NALUnitType, SpsNALUnit};
@@ -41,10 +44,10 @@ pub(crate) struct Sps {
 impl Sps {
 	/// Parse an SPS NAL unit, keeping only its head when scuffle_h265 refuses a later value.
 	pub(crate) fn parse(nal: &[u8]) -> Result<Self> {
-		match SpsNALUnit::parse(&mut &nal[..]) {
-			Ok(sps) => Ok(Self {
-				head: SpsHead::from_rbsp(&sps.rbsp)?,
-				full: Some(sps.rbsp),
+		match parse_full(nal) {
+			Ok(rbsp) => Ok(Self {
+				head: SpsHead::from_rbsp(&rbsp)?,
+				full: Some(rbsp),
 			}),
 			// A value scuffle_h265 refused, not a bitstream that ran out.
 			Err(err) if err.kind() == std::io::ErrorKind::InvalidData => {
@@ -147,7 +150,7 @@ impl SpsHead {
 		let constraint_flags = [r.read::<4, u8>("general_constraint_flags")? << 4, 0, 0, 0, 0, 0];
 		r.skip(44, "general_reserved_zero_43bits")?; // and general_inbld_flag
 		let level_idc = r.read::<8, u8>("general_level_idc")?;
-		skip_sub_layers(r, max_sub_layers_minus1)?;
+		skip_sub_layers(r, max_sub_layers_minus1, false)?;
 
 		let sps_seq_parameter_set_id = r.read_ue("sps_seq_parameter_set_id")?;
 		let chroma_format_idc = r.read_ue("chroma_format_idc")?;
@@ -209,12 +212,19 @@ pub(crate) fn id(r: &mut impl BitRead) -> std::result::Result<u32, BitReaderErro
 	let max_sub_layers_minus1 = r.read::<3, u8>("sps_max_sub_layers_minus1")?;
 	r.skip(1, "sps_temporal_id_nesting_flag")?;
 	r.skip(96, "general_profile_and_level")?; // the general profile's 88 bits and general_level_idc
-	skip_sub_layers(r, max_sub_layers_minus1)?;
+	skip_sub_layers(r, max_sub_layers_minus1, false)?;
 	r.read_ue("sps_seq_parameter_set_id")
 }
 
 /// Skip the sub-layer half of profile_tier_level (7.3.3), which follows `general_level_idc`.
-fn skip_sub_layers(r: &mut impl BitRead, max_sub_layers_minus1: u8) -> std::result::Result<(), BitReaderError> {
+///
+/// With `level_twice`, a sub-layer that signals both its profile and its level carries
+/// `sub_layer_level_idc` twice, as scuffle_h265 0.2.2 reads it.
+fn skip_sub_layers(
+	r: &mut impl BitRead,
+	max_sub_layers_minus1: u8,
+	level_twice: bool,
+) -> std::result::Result<(), BitReaderError> {
 	// 7.4.3.2.1: at most 7 sub-layers.
 	if max_sub_layers_minus1 > 6 {
 		return Err(BitReaderError::ReaderError(
@@ -235,11 +245,377 @@ fn skip_sub_layers(r: &mut impl BitRead, max_sub_layers_minus1: u8) -> std::resu
 	}
 	for &(profile, level) in &present[..sub_layers] {
 		// A sub-layer profile is the same 88 bits as the general one; sub_layer_level_idc is 8.
+		let twice = level_twice && profile && level;
 		r.skip(
-			88 * u32::from(profile) + 8 * u32::from(level),
+			88 * u32::from(profile) + 8 * u32::from(level) + 8 * u32::from(twice),
 			"sub_layer_profile_and_level",
 		)?;
 	}
+	Ok(())
+}
+
+/// Parse an SPS NAL unit with scuffle_h265, once [`check`] has walked it.
+///
+/// Every scuffle_h265 SPS parse in moq-mux goes through here, so no hostile SPS reaches its overflows.
+pub(crate) fn parse_full(nal: &[u8]) -> std::io::Result<scuffle_h265::SpsRbsp> {
+	check(nal)?;
+	Ok(SpsNALUnit::parse(&mut &nal[..])?.rbsp)
+}
+
+/// Walk an SPS NAL unit as scuffle_h265 0.2.2 reads it, refusing the values its parser would
+/// overflow on.
+///
+/// scuffle_h265 subtracts and indexes with SPS fields unchecked, and scuffle-expgolomb 0.1.5 wraps
+/// an Exp-Golomb code of 64 or more leading zeros
+/// ([ScuffleCloud/scuffle#653](https://github.com/ScuffleCloud/scuffle/issues/653),
+/// [ScuffleCloud/scuffle#654](https://github.com/ScuffleCloud/scuffle/issues/654)). This reads
+/// every field scuffle_h265 does, in its layout rather than the spec's where the two differ, with
+/// h264_reader's reader, whose `ue(v)` stops at 2^32 - 2 as ITU-T H.265 9.2 bounds it. That keeps
+/// scuffle_h265's sums inside a `u64`, and the checks below cover its subtractions, its scaling
+/// list index, and its palette allocation.
+///
+/// An SPS that runs out of bits is `UnexpectedEof`, the kind scuffle_h265 reports for it. One with
+/// a refused value, or with a byte sequence emulation prevention forbids, is `InvalidData`.
+fn check(nal: &[u8]) -> std::io::Result<()> {
+	use std::io::{Error, ErrorKind};
+
+	let [header, _, ..] = *nal else {
+		return Err(ErrorKind::UnexpectedEof.into());
+	};
+	if super::split::nal_unit_type(header) != NALUnitType::SpsNut {
+		return Err(Error::new(ErrorKind::InvalidData, "not an SPS"));
+	}
+	match walk(&mut crate::codec::annexb::rbsp(nal, 2)) {
+		Ok(()) => Ok(()),
+		Err(BitReaderError::ReaderError(_, err)) if err.kind() == ErrorKind::UnexpectedEof => Err(err),
+		Err(err) => Err(Error::new(ErrorKind::InvalidData, format!("{err:?}"))),
+	}
+}
+
+/// Refuse `field` unless `valid`.
+fn ensure(valid: bool, field: &'static str) -> std::result::Result<(), BitReaderError> {
+	match valid {
+		true => Ok(()),
+		false => Err(BitReaderError::ReaderError(
+			field,
+			std::io::ErrorKind::InvalidData.into(),
+		)),
+	}
+}
+
+/// `seq_parameter_set_rbsp` (7.3.2.2.1), as [`check`] describes.
+fn walk(r: &mut impl BitRead) -> std::result::Result<(), BitReaderError> {
+	r.skip(4, "sps_video_parameter_set_id")?;
+	let max_sub_layers_minus1 = r.read::<3, u8>("sps_max_sub_layers_minus1")?;
+	r.skip(1, "sps_temporal_id_nesting_flag")?;
+	r.skip(96, "general_profile_and_level")?;
+	skip_sub_layers(r, max_sub_layers_minus1, true)?;
+
+	r.read_ue("sps_seq_parameter_set_id")?;
+	let chroma_format_idc = r.read_ue("chroma_format_idc")?;
+	ensure(chroma_format_idc <= 3, "chroma_format_idc")?;
+	if chroma_format_idc == 3 {
+		r.skip(1, "separate_colour_plane_flag")?;
+	}
+	r.read_ue("pic_width_in_luma_samples")?;
+	r.read_ue("pic_height_in_luma_samples")?;
+	if r.read_bit("conformance_window_flag")? {
+		for field in [
+			"conf_win_left_offset",
+			"conf_win_right_offset",
+			"conf_win_top_offset",
+			"conf_win_bottom_offset",
+		] {
+			r.read_ue(field)?;
+		}
+	}
+	let bit_depth_luma = r.read_ue("bit_depth_luma_minus8")?;
+	let bit_depth_chroma = r.read_ue("bit_depth_chroma_minus8")?;
+	ensure(bit_depth_luma <= 8 && bit_depth_chroma <= 8, "bit_depth_minus8")?;
+	let log2_max_pic_order_cnt_lsb_minus4 = r.read_ue("log2_max_pic_order_cnt_lsb_minus4")?;
+	ensure(
+		log2_max_pic_order_cnt_lsb_minus4 <= 12,
+		"log2_max_pic_order_cnt_lsb_minus4",
+	)?;
+
+	let first = match r.read_bit("sps_sub_layer_ordering_info_present_flag")? {
+		true => 0,
+		false => max_sub_layers_minus1,
+	};
+	for _ in first..=max_sub_layers_minus1 {
+		r.read_ue("sps_max_dec_pic_buffering_minus1")?;
+		r.read_ue("sps_max_num_reorder_pics")?;
+		r.read_ue("sps_max_latency_increase_plus1")?;
+	}
+
+	let min_cb_log2_size = u64::from(r.read_ue("log2_min_luma_coding_block_size_minus3")?) + 3;
+	let ctb_log2_size = min_cb_log2_size + u64::from(r.read_ue("log2_diff_max_min_luma_coding_block_size")?);
+	let min_tb_log2_size = u64::from(r.read_ue("log2_min_luma_transform_block_size_minus2")?) + 2;
+	// scuffle_h265 bounds the transform hierarchy depths by CtbLog2SizeY - MinTbLog2SizeY. 7.4.3.2.1
+	// keeps MinTbLog2SizeY below MinCbLog2SizeY, and so below CtbLog2SizeY.
+	ensure(
+		min_tb_log2_size <= ctb_log2_size,
+		"log2_min_luma_transform_block_size_minus2",
+	)?;
+	r.read_ue("log2_diff_max_min_luma_transform_block_size")?;
+	r.read_ue("max_transform_hierarchy_depth_inter")?;
+	r.read_ue("max_transform_hierarchy_depth_intra")?;
+
+	if r.read_bit("scaling_list_enabled_flag")? && r.read_bit("sps_scaling_list_data_present_flag")? {
+		scaling_list_data(r)?;
+	}
+	r.skip(2, "amp_enabled_flag")?; // and sample_adaptive_offset_enabled_flag
+	if r.read_bit("pcm_enabled_flag")? {
+		r.skip(8, "pcm_sample_bit_depth_minus1")?; // luma, then chroma
+		r.read_ue("log2_min_pcm_luma_coding_block_size_minus3")?;
+		r.read_ue("log2_diff_max_min_pcm_luma_coding_block_size")?;
+		r.skip(1, "pcm_loop_filter_disabled_flag")?;
+	}
+	short_term_ref_pic_sets(r)?;
+	if r.read_bit("long_term_ref_pics_present_flag")? {
+		let count = r.read_ue("num_long_term_ref_pics_sps")?;
+		ensure(count <= 32, "num_long_term_ref_pics_sps")?;
+		for _ in 0..count {
+			// lt_ref_pic_poc_lsb_sps, then used_by_curr_pic_lt_sps_flag.
+			r.skip(log2_max_pic_order_cnt_lsb_minus4 + 5, "lt_ref_pic_poc_lsb_sps")?;
+		}
+	}
+	r.skip(2, "sps_temporal_mvp_enabled_flag")?; // and strong_intra_smoothing_enabled_flag
+	if r.read_bit("vui_parameters_present_flag")? {
+		vui_parameters(r, max_sub_layers_minus1)?;
+	}
+
+	if r.read_bit("sps_extension_present_flag")? {
+		let range = r.read_bit("sps_range_extension_flag")?;
+		let multilayer = r.read_bit("sps_multilayer_extension_flag")?;
+		let three_d = r.read_bit("sps_3d_extension_flag")?;
+		let scc = r.read_bit("sps_scc_extension_flag")?;
+		ensure(r.read::<4, u8>("sps_extension_4bits")? == 0, "sps_extension_4bits")?;
+		if range {
+			r.skip(9, "sps_range_extension")?;
+		}
+		if multilayer {
+			r.skip(1, "inter_view_mv_vert_constraint_flag")?;
+		}
+		if three_d {
+			// scuffle_h265 reads iv_di_mc_enabled_flag and iv_mv_scal_enabled_flag once, not per d.
+			r.skip(2, "iv_di_mc_enabled_flag")?;
+			r.read_ue("log2_ivmc_sub_pb_size_minus3")?;
+			r.skip(5, "iv_res_pred_enabled_flag")?; // through tex_mc_enabled_flag
+			r.read_ue("log2_texmc_sub_pb_size_minus3")?;
+			r.skip(5, "intra_contour_enabled_flag")?; // through skip_intra_enabled_flag
+		}
+		if scc {
+			let bit_depths = [bit_depth_luma + 8, bit_depth_chroma + 8, bit_depth_chroma + 8];
+			let components = if chroma_format_idc == 0 { 1 } else { 3 };
+			sps_scc_extension(r, &bit_depths[..components])?;
+		}
+	}
+	ensure(r.read_bit("rbsp_stop_one_bit")?, "rbsp_stop_one_bit")
+}
+
+/// `scaling_list_data` (7.3.4).
+fn scaling_list_data(r: &mut impl BitRead) -> std::result::Result<(), BitReaderError> {
+	for size_id in 0..4 {
+		let step = if size_id == 3 { 3 } else { 1 };
+		for matrix_id in (0..6).step_by(step) {
+			if !r.read_bit("scaling_list_pred_mode_flag")? {
+				let delta = r.read_ue("scaling_list_pred_matrix_id_delta")?;
+				// 7.4.5: the reference is this matrix or an earlier one; scuffle_h265 subtracts unchecked.
+				ensure(
+					u64::from(delta) * step as u64 <= matrix_id as u64,
+					"scaling_list_pred_matrix_id_delta",
+				)?;
+				continue;
+			}
+			if size_id > 1 {
+				r.read_se("scaling_list_dc_coef_minus8")?;
+			}
+			for _ in 0..(16 << (2 * size_id)).min(64) {
+				r.read_se("scaling_list_delta_coef")?;
+			}
+		}
+	}
+	Ok(())
+}
+
+/// The `st_ref_pic_set` (7.3.7) list. Inter prediction sizes a set by the one before it, so each
+/// set's delta POCs are derived (7-61, 7-62) to know how many flags the next one reads.
+fn short_term_ref_pic_sets(r: &mut impl BitRead) -> std::result::Result<(), BitReaderError> {
+	let count = r.read_ue("num_short_term_ref_pic_sets")?;
+	ensure(count <= 64, "num_short_term_ref_pic_sets")?;
+	// The delta POCs of the set before: S0 (negative) then S1 (positive), in the order
+	// inter_ref_pic_set_prediction_flag's use_delta_flag indexes them.
+	let (mut s0, mut s1) = (Vec::<i32>::new(), Vec::<i32>::new());
+	for index in 0..count {
+		if index != 0 && r.read_bit("inter_ref_pic_set_prediction_flag")? {
+			// delta_idx_minus1 is only present in a slice header, so the reference is the set before.
+			let negative = r.read_bit("delta_rps_sign")?;
+			let abs_delta_rps_minus1 = r.read_ue("abs_delta_rps_minus1")?;
+			ensure(abs_delta_rps_minus1 < 1 << 15, "abs_delta_rps_minus1")?;
+			let delta = (abs_delta_rps_minus1 as i32 + 1) * if negative { -1 } else { 1 };
+			let mut use_delta = Vec::with_capacity(s0.len() + s1.len() + 1);
+			for _ in 0..=s0.len() + s1.len() {
+				// use_delta_flag follows only a used_by_curr_pic_flag of 0, and is inferred 1.
+				use_delta.push(r.read_bit("used_by_curr_pic_flag")? || r.read_bit("use_delta_flag")?);
+			}
+			let (use0, rest) = use_delta.split_at(s0.len());
+			let (use1, own) = rest.split_at(s1.len());
+			let shifted = |pocs: &[i32], used: &[bool]| -> Vec<i32> {
+				pocs.iter()
+					.zip(used)
+					.filter(|(_, used)| **used)
+					.map(|(poc, _)| poc + delta)
+					.collect()
+			};
+			let (from0, from1) = (shifted(&s0, use0), shifted(&s1, use1));
+			let own = own[0].then_some(delta);
+			// (7-61): S1 reversed, deltaRps, then S0; (7-62): S0 reversed, deltaRps, then S1.
+			let next0 = (from1.iter().rev().chain(&own).chain(&from0).copied()).filter(|poc| *poc < 0);
+			let next0: Vec<_> = next0.collect();
+			let next1 = (from0.iter().rev().chain(&own).chain(&from1).copied()).filter(|poc| *poc > 0);
+			let next1: Vec<_> = next1.collect();
+			(s0, s1) = (next0, next1);
+		} else {
+			let negative = r.read_ue("num_negative_pics")?;
+			let positive = r.read_ue("num_positive_pics")?;
+			ensure(negative <= 16 && positive <= 16, "num_delta_pics")?;
+			let mut read = |count: u32, sign: i32| -> std::result::Result<Vec<i32>, BitReaderError> {
+				let mut poc = 0;
+				(0..count)
+					.map(|_| {
+						let delta = r.read_ue("delta_poc_minus1")?;
+						ensure(delta < 1 << 15, "delta_poc_minus1")?;
+						r.skip(1, "used_by_curr_pic_flag")?;
+						poc += sign * (delta as i32 + 1);
+						Ok(poc)
+					})
+					.collect()
+			};
+			s0 = read(negative, -1)?;
+			s1 = read(positive, 1)?;
+		}
+		// MaxDpbSize is at most 16 (A.4.2), which bounds both lists in any layer.
+		ensure(s0.len() <= 16 && s1.len() <= 16, "num_delta_pocs")?;
+	}
+	Ok(())
+}
+
+/// `vui_parameters` (E.2.1).
+fn vui_parameters(r: &mut impl BitRead, max_sub_layers_minus1: u8) -> std::result::Result<(), BitReaderError> {
+	if r.read_bit("aspect_ratio_info_present_flag")? && r.read::<8, u8>("aspect_ratio_idc")? == 255 {
+		r.skip(32, "sar_width")?; // and sar_height
+	}
+	if r.read_bit("overscan_info_present_flag")? {
+		r.skip(1, "overscan_appropriate_flag")?;
+	}
+	if r.read_bit("video_signal_type_present_flag")? {
+		r.skip(4, "video_format")?; // and video_full_range_flag
+		if r.read_bit("colour_description_present_flag")? {
+			r.skip(24, "colour_description")?;
+		}
+	}
+	if r.read_bit("chroma_loc_info_present_flag")? {
+		r.read_ue("chroma_sample_loc_type_top_field")?;
+		r.read_ue("chroma_sample_loc_type_bottom_field")?;
+	}
+	r.skip(3, "neutral_chroma_indication_flag")?; // field_seq_flag, frame_field_info_present_flag
+	if r.read_bit("default_display_window_flag")? {
+		for field in [
+			"def_disp_win_left_offset",
+			"def_disp_win_right_offset",
+			"def_disp_win_top_offset",
+			"def_disp_win_bottom_offset",
+		] {
+			r.read_ue(field)?;
+		}
+	}
+	if r.read_bit("vui_timing_info_present_flag")? {
+		r.skip(64, "vui_num_units_in_tick")?; // and vui_time_scale
+		if r.read_bit("vui_poc_proportional_to_timing_flag")? {
+			r.read_ue("vui_num_ticks_poc_diff_one_minus1")?;
+		}
+		if r.read_bit("vui_hrd_parameters_present_flag")? {
+			hrd_parameters(r, max_sub_layers_minus1)?;
+		}
+	}
+	if r.read_bit("bitstream_restriction_flag")? {
+		r.skip(3, "tiles_fixed_structure_flag")?; // through restricted_ref_pic_lists_flag
+		for field in [
+			"min_spatial_segmentation_idc",
+			"max_bytes_per_pic_denom",
+			"max_bits_per_min_cu_denom",
+			"log2_max_mv_length_horizontal",
+			"log2_max_mv_length_vertical",
+		] {
+			r.read_ue(field)?;
+		}
+	}
+	Ok(())
+}
+
+/// `hrd_parameters(1, sps_max_sub_layers_minus1)` (E.2.2), with its `sub_layer_hrd_parameters`
+/// (E.2.3).
+fn hrd_parameters(r: &mut impl BitRead, max_sub_layers_minus1: u8) -> std::result::Result<(), BitReaderError> {
+	let nal = r.read_bit("nal_hrd_parameters_present_flag")?;
+	let vcl = r.read_bit("vcl_hrd_parameters_present_flag")?;
+	let mut sub_pic = false;
+	if nal || vcl {
+		sub_pic = r.read_bit("sub_pic_hrd_params_present_flag")?;
+		if sub_pic {
+			r.skip(19, "tick_divisor_minus2")?; // through dpb_output_delay_du_length_minus1
+		}
+		r.skip(8, "bit_rate_scale")?; // and cpb_size_scale
+		if sub_pic {
+			r.skip(4, "cpb_size_du_scale")?;
+		}
+		r.skip(15, "initial_cpb_removal_delay_length_minus1")?; // through dpb_output_delay_length_minus1
+	}
+	for _ in 0..=max_sub_layers_minus1 {
+		let fixed = r.read_bit("fixed_pic_rate_general_flag")? || r.read_bit("fixed_pic_rate_within_cvs_flag")?;
+		let low_delay = match fixed {
+			true => r.read_ue("elemental_duration_in_tc_minus1").map(|_| false)?,
+			false => r.read_bit("low_delay_hrd_flag")?,
+		};
+		let cpb_cnt_minus1 = match low_delay {
+			true => 0,
+			false => r.read_ue("cpb_cnt_minus1")?,
+		};
+		ensure(cpb_cnt_minus1 <= 31, "cpb_cnt_minus1")?;
+		for _ in 0..u32::from(nal) + u32::from(vcl) {
+			for _ in 0..=cpb_cnt_minus1 {
+				r.read_ue("bit_rate_value_minus1")?;
+				r.read_ue("cpb_size_value_minus1")?;
+				if sub_pic {
+					r.read_ue("cpb_size_du_value_minus1")?;
+					r.read_ue("bit_rate_du_value_minus1")?;
+				}
+				r.skip(1, "cbr_flag")?;
+			}
+		}
+	}
+	Ok(())
+}
+
+/// `sps_scc_extension` (7.3.2.2.3), with each component's bit depth.
+fn sps_scc_extension(r: &mut impl BitRead, bit_depths: &[u32]) -> std::result::Result<(), BitReaderError> {
+	r.skip(1, "sps_curr_pic_ref_enabled_flag")?;
+	if r.read_bit("palette_mode_enabled_flag")? {
+		let palette_max_size = r.read_ue("palette_max_size")?;
+		// 7.4.3.3.8 bounds it at 64; scuffle_h265 allocates the predictor initializers it sizes.
+		ensure(palette_max_size <= 64, "palette_max_size")?;
+		r.read_ue("delta_palette_max_predictor_size")?;
+		if r.read_bit("sps_palette_predictor_initializers_present_flag")? {
+			let initializers = r.read_ue("sps_num_palette_predictor_initializers_minus1")?;
+			ensure(
+				initializers < palette_max_size,
+				"sps_num_palette_predictor_initializers_minus1",
+			)?;
+			let bits: u32 = bit_depths.iter().sum();
+			r.skip((initializers + 1) * bits, "sps_palette_predictor_initializer")?;
+		}
+	}
+	r.skip(3, "motion_vector_resolution_control_idc")?; // and intra_boundary_filtering_disabled_flag
 	Ok(())
 }
 
@@ -361,5 +737,247 @@ mod tests {
 		}
 		assert_eq!(SpsHead::parse(fixtures::PPS), None);
 		assert_eq!(SpsHead::parse(fixtures::VPS), None);
+	}
+
+	/// scuffle_h265's `sps_parse5` test SPS, which carries `scaling_list_data`.
+	const SPS_SCALING_LIST: &[u8] = &[
+		0x42, 0x01, 0x01, 0x24, 0x08, 0x00, 0x00, 0x03, 0x00, 0x9d, 0x08, 0x00, 0x00, 0x03, 0x00, 0x00, 0x99, 0xb0,
+		0x01, 0xe0, 0x20, 0x02, 0x1c, 0x4d, 0x94, 0xd6, 0xed, 0xbe, 0x41, 0x12, 0x64, 0xeb, 0x25, 0x11, 0x44, 0x1a,
+		0x6c, 0x9d, 0x64, 0xa2, 0x29, 0x09, 0x26, 0xba, 0xf5, 0xff, 0xeb, 0xfa, 0xfd, 0x7f, 0xeb, 0xf5, 0x44, 0x51,
+		0x04, 0x93, 0x5d, 0x7a, 0xff, 0xf5, 0xfd, 0x7e, 0xbf, 0xf5, 0xfa, 0xc8, 0xa4, 0x92, 0x4d, 0x75, 0xeb, 0xff,
+		0xd7, 0xf5, 0xfa, 0xff, 0xd7, 0xea, 0x88, 0xa2, 0x24, 0x93, 0x5d, 0x7a, 0xff, 0xf5, 0xfd, 0x7e, 0xbf, 0xf5,
+		0xfa, 0xc8, 0x94, 0x08, 0x53, 0x49, 0x29, 0x24, 0x89, 0x55, 0x12, 0xa5, 0x2a, 0x94, 0xc1, 0x35, 0x01, 0x01,
+		0x01, 0x03, 0xb8, 0x40, 0x20, 0x80,
+	];
+
+	/// scuffle_h265's `sps_parse_inter_ref_prediction` test SPS: 26 short-term RPSs, most of them
+	/// predicted from the one before.
+	const SPS_INTER_RPS: &[u8] = &[
+		0x42, 0x01, 0x01, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00,
+		0x00, 0xa0, 0x0b, 0x08, 0x04, 0x85, 0x96, 0x5e, 0x49, 0x1b, 0x60, 0xd9, 0x78, 0x88, 0x88, 0x8f, 0xe7, 0x9f,
+		0xcf, 0xe7, 0xf3, 0xf9, 0xfc, 0xf2, 0xff, 0xff, 0xff, 0xcf, 0xe7, 0xf3, 0xf9, 0xfc, 0xfe, 0x7f, 0x3f, 0x3f,
+		0x9f, 0xcf, 0xe7, 0xf3, 0xf9, 0xdb, 0x20,
+	];
+
+	/// A syntax element of a synthetic SPS RBSP.
+	#[derive(Clone, Copy)]
+	enum Field {
+		/// `u(n)`: the low `n` bits of the value.
+		U(u32, u64),
+		Ue(u32),
+		/// An Exp-Golomb code with 64 leading zeros, which only a wrapping reader decodes.
+		Ue64,
+	}
+	use Field::*;
+
+	/// A Main 4:2:0 64x64 SPS through `bit_depth_chroma_minus8`.
+	const HEAD: &[Field] = &[
+		U(4, 0),                 // sps_video_parameter_set_id
+		U(3, 0),                 // sps_max_sub_layers_minus1
+		U(1, 1),                 // sps_temporal_id_nesting_flag
+		U(8, 1),                 // general_profile_space, tier and profile_idc: Main
+		U(32, 0x6000_0000),      // general_profile_compatibility_flags
+		U(48, 0x9000_0000_0000), // progressive and frame-only, then the reserved bits
+		U(8, 93),                // general_level_idc
+		Ue(0),                   // sps_seq_parameter_set_id
+		Ue(1),                   // chroma_format_idc
+		Ue(64),                  // pic_width_in_luma_samples
+		Ue(64),                  // pic_height_in_luma_samples
+		U(1, 0),                 // conformance_window_flag
+		Ue(0),                   // bit_depth_luma_minus8
+		Ue(0),                   // bit_depth_chroma_minus8
+		Ue(0),                   // log2_max_pic_order_cnt_lsb_minus4
+		U(1, 1),                 // sps_sub_layer_ordering_info_present_flag
+		Ue(4),                   // sps_max_dec_pic_buffering_minus1
+		Ue(0),                   // sps_max_num_reorder_pics
+		Ue(0),                   // sps_max_latency_increase_plus1
+	];
+
+	/// 8x8 coding blocks in 16x16 CTBs, 4x4 to 16x16 transform blocks.
+	const BLOCKS: &[Field] = &[Ue(0), Ue(1), Ue(0), Ue(2), Ue(0), Ue(0)];
+
+	/// The RBSP ends: no PCM, RPS, long-term pictures, VUI or extension.
+	const END: &[Field] = &[U(2, 0), U(1, 0), Ue(0), U(1, 0), U(2, 0), U(1, 0), U(1, 0)];
+
+	/// An SPS NAL unit holding `fields`, with its trailing bits and emulation prevention.
+	fn synthetic(fields: &[&[Field]]) -> Vec<u8> {
+		use h264_reader::rbsp::{BitWrite, BitWriter, ByteWriter};
+		use std::io::Write;
+
+		let mut w = BitWriter::new(Vec::new());
+		for field in fields.iter().copied().flatten() {
+			match *field {
+				U(bits, value) => w.write_var(bits, value).unwrap(),
+				Ue(value) => w.write_ue(value).unwrap(),
+				Ue64 => {
+					w.write_var(64, 0u64).unwrap();
+					w.write_bit(true).unwrap();
+					w.write_var(64, 0u64).unwrap();
+				}
+			}
+		}
+		w.write_rbsp_trailing_bits().unwrap();
+		let mut nal = ByteWriter::new(vec![0x42, 0x01]);
+		nal.write_all(&w.into_writer()).unwrap();
+		nal.into_writer()
+	}
+
+	/// `check` reads an SPS scuffle_h265 accepts to its stop bit, with only zeros after it in
+	/// that byte, so it read the fields scuffle_h265 did.
+	fn assert_walks_to_the_end(nal: &[u8]) {
+		SpsNALUnit::parse(&mut &nal[..]).expect("scuffle_h265 accepts this SPS");
+		let mut r = crate::codec::annexb::rbsp(nal, 2);
+		walk(&mut r).unwrap();
+		while !r.byte_aligned() {
+			assert!(!r.read_bit("rbsp_alignment_zero_bit").unwrap());
+		}
+		parse_full(nal).unwrap();
+	}
+
+	/// The walk keeps pace with scuffle_h265 through every branch it takes.
+	#[test]
+	fn check_reads_what_scuffle_reads() {
+		for nal in [
+			fixtures::SPS,
+			fixtures::SPS_HDR10,
+			fixtures::SPS_PYRAMID,
+			fixtures::SPS_NVENC,
+			fixtures::SPS_ANAMORPHIC,
+			SPS_SUB_LAYERS,
+			SPS_SCALING_LIST,
+			SPS_INTER_RPS,
+		] {
+			assert_walks_to_the_end(nal);
+		}
+		assert_walks_to_the_end(&synthetic(&[HEAD, BLOCKS, &[U(1, 0)], END]));
+
+		// PCM, long-term pictures, a VUI with sub-picture HRD parameters, and every extension.
+		let nal = synthetic(&[
+			HEAD,
+			BLOCKS,
+			&[U(1, 0), U(2, 0)], // scaling_list_enabled_flag, amp and sao
+			// pcm_enabled_flag, its sample bit depths, 8x8 to 16x16 blocks, loop filter flag.
+			&[U(1, 1), U(4, 7), U(4, 7), Ue(0), Ue(1), U(1, 0)],
+			// Two short-term RPSs: {-1, +1}, then the second predicted from it with deltaRps -1.
+			&[Ue(2), Ue(1), Ue(1), Ue(0), U(1, 1), Ue(0), U(1, 1)],
+			&[U(1, 1), U(1, 1), Ue(0), U(1, 1), U(1, 1), U(1, 1)],
+			// Two long-term pictures, then sps_temporal_mvp and strong_intra_smoothing.
+			&[U(1, 1), Ue(2), U(4, 3), U(1, 1), U(4, 5), U(1, 0), U(2, 0)],
+			// vui_parameters_present_flag, an extended SAR, overscan, video signal type.
+			&[U(1, 1), U(1, 1), U(8, 255), U(16, 4), U(16, 3), U(1, 1), U(1, 0)],
+			&[U(1, 1), U(3, 5), U(1, 0), U(1, 1), U(24, 0x01_01_01)],
+			// Chroma location, three flags, a default display window.
+			&[U(1, 1), Ue(0), Ue(0), U(3, 0), U(1, 1), Ue(1), Ue(1), Ue(1), Ue(1)],
+			// Timing with POC proportional to it, then NAL and VCL HRD parameters.
+			&[
+				U(1, 1),
+				U(32, 1001),
+				U(32, 60000),
+				U(1, 1),
+				Ue(1),
+				U(1, 1),
+				U(1, 1),
+				U(1, 1),
+			],
+			&[U(1, 1), U(19, 0), U(8, 0), U(4, 0), U(15, 0x5ef7)],
+			// One sub-layer without a fixed picture rate, two CPBs.
+			&[U(1, 0), U(1, 0), U(1, 0), Ue(1)],
+			&[
+				Ue(10),
+				Ue(20),
+				Ue(1),
+				Ue(1),
+				U(1, 0),
+				Ue(11),
+				Ue(19),
+				Ue(1),
+				Ue(1),
+				U(1, 0),
+			],
+			&[
+				Ue(10),
+				Ue(20),
+				Ue(1),
+				Ue(1),
+				U(1, 0),
+				Ue(11),
+				Ue(19),
+				Ue(1),
+				Ue(1),
+				U(1, 0),
+			],
+			// Bitstream restriction.
+			&[U(1, 1), U(3, 0), Ue(0), Ue(0), Ue(0), Ue(0), Ue(0)],
+			// Every extension: range, multilayer, 3D, then SCC with two palette initializers.
+			&[U(1, 1), U(4, 0xf), U(4, 0), U(9, 0), U(1, 0)],
+			&[U(2, 0), Ue(0), U(5, 0), Ue(1), U(5, 0)],
+			&[U(1, 0), U(1, 1), Ue(4), Ue(2), U(1, 1), Ue(1), U(48, 0x0102_0304_0506)],
+			&[U(2, 0), U(1, 0)],
+		]);
+		let full = SpsNALUnit::parse(&mut &nal[..]).unwrap().rbsp;
+		assert!(full.pcm.is_some() && full.long_term_ref_pics.is_some());
+		assert_eq!(full.short_term_ref_pic_sets.num_negative_pics, [1, 2]);
+		let timing = full.vui_parameters.as_ref().unwrap().vui_timing_info.as_ref().unwrap();
+		assert!(
+			timing
+				.hrd_parameters
+				.as_ref()
+				.unwrap()
+				.common_inf
+				.sub_pic_hrd_params
+				.is_some()
+		);
+		assert!(full.range_extension.is_some() && full.multilayer_extension.is_some());
+		assert!(full.sps_3d_extension.is_some() && full.scc_extension.is_some());
+		assert_walks_to_the_end(&nal);
+	}
+
+	/// An SPS `check` refuses: [`parse_full`] reports `InvalidData` without calling scuffle_h265,
+	/// and [`Sps::parse`] keeps the head.
+	fn assert_refused(nal: &[u8]) {
+		let err = parse_full(nal).unwrap_err();
+		assert_eq!(err.kind(), std::io::ErrorKind::InvalidData, "{err}");
+		assert!(Sps::parse(nal).unwrap().full.is_none());
+	}
+
+	/// Each SPS reaches an overflow in scuffle_h265 0.2.2 or scuffle-expgolomb 0.1.5.
+	#[test]
+	fn overflowing_fields_are_refused() {
+		// A 32x32 transform block in an 8x8 CTB: CtbLog2SizeY - MinTbLog2SizeY underflows.
+		assert_refused(&synthetic(&[
+			HEAD,
+			&[Ue(0), Ue(0), Ue(3), Ue(0), Ue(0), Ue(0), U(1, 0)],
+			END,
+		]));
+
+		// A 8x8 scaling list predicted from the matrix before the first: matrixId - delta wraps.
+		let size_0 = [U(1, 0), Ue(0)].repeat(6);
+		assert_refused(&synthetic(&[
+			HEAD,
+			BLOCKS,
+			&[U(1, 1), U(1, 1)],
+			&size_0,
+			&[U(1, 0), Ue(1)],
+			END,
+		]));
+
+		// 64 leading zeros: scuffle-expgolomb's `result - 1` wraps.
+		let mut head = HEAD.to_vec();
+		head[14] = Ue64; // log2_max_pic_order_cnt_lsb_minus4
+		assert_refused(&synthetic(&[&head, BLOCKS, &[U(1, 0)], END]));
+
+		// A palette of 2^32 - 2 entries, whose predictor initializers scuffle_h265 allocates.
+		let end = &END[..END.len() - 1];
+		let scc = [
+			U(1, 1),
+			U(4, 1),
+			U(4, 0),
+			U(1, 0),
+			U(1, 1),
+			Ue(u32::MAX - 1),
+			Ue(0),
+			U(1, 1),
+		];
+		assert_refused(&synthetic(&[HEAD, BLOCKS, &[U(1, 0)], end, &scc, &[Ue(u32::MAX - 2)]]));
 	}
 }

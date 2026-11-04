@@ -309,14 +309,18 @@ class SmokeTest {
 
     @Test
     fun `a default subscription skips superseded groups at once`() {
-        assertEquals(java.time.Duration.ZERO, Subscription.default().maxDelay)
-        assertNull(Subscription(maxDelay = null).maxDelay)
+        assertEquals(java.time.Duration.ZERO, Subscription.default().delay.min)
+        assertEquals(java.time.Duration.ZERO, Subscription.default().delay.max)
     }
 
     @Test
     fun `an ascending subscription reads a cached backlog oldest first`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val track = broadcast.publishTrack("backlog", TrackInfo(timescale = 1_000_000uL))
+            val track =
+                broadcast.publishTrack(
+                    "backlog",
+                    TrackInfo(maxAgeUnlimited = true, timescale = 1_000_000uL),
+                )
             for (ms in 0uL until 3uL) {
                 val group = track.appendGroup()
                 group.writeFrame(
@@ -327,7 +331,11 @@ class SmokeTest {
             val consumer =
                 track.consume(
                     Subscription(
-                        maxDelay = java.time.Duration.ofSeconds(10),
+                        delay =
+                            Delay(
+                                min = java.time.Duration.ZERO,
+                                max = java.time.Duration.ofSeconds(10),
+                            ),
                         ranges = listOf(Range(start = AnchorRelative(groups = 2uL))),
                         order = Order.ASCENDING,
                     )
@@ -367,6 +375,21 @@ class SmokeTest {
             assertNull(frame?.timestamp)
             assertNull(consumer.info().timescale)
             track.finish()
+        }
+    }
+
+    @Test
+    fun `an omitted max age is zero and the unlimited flag sets none`() {
+        BroadcastProducer().use { broadcast ->
+            val omitted = broadcast.publishTrack("omitted", null).consume(null).info()
+            assertEquals(java.time.Duration.ZERO, omitted.maxAge)
+            val unlimited =
+                broadcast
+                    .publishTrack("unlimited", TrackInfo(maxAgeUnlimited = true))
+                    .consume(null)
+                    .info()
+            assertNull(unlimited.maxAge)
+            assertTrue(unlimited.maxAgeUnlimited)
         }
     }
 
@@ -574,8 +597,8 @@ class SmokeTest {
     fun `json producer demand follows subscribers`() = runTest {
         BroadcastProducer().use { broadcast ->
             val config = SnapshotConfig(deltas = false)
-            SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config).use {
-                producer ->
+            val track = broadcast.publishTrack("status", TrackInfo(timescale = 1_000uL))
+            SnapshotProducer(broadcast, track, config).use { producer ->
                 val demand: TrackDemand = producer.demand()
                 assertEquals("status", demand.name())
                 assertEquals(null, demand.wanted())
@@ -593,10 +616,10 @@ class SmokeTest {
         BroadcastProducer().use { broadcast ->
             val config = SnapshotConfig(deltas = false)
             // A demand watcher does not own the writer; keep it alive through collection.
-            SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config).use {
-                producer ->
+            val track = broadcast.publishTrack("status", TrackInfo(timescale = 1_000uL))
+            SnapshotProducer(broadcast, track, config).use { producer ->
                 val demand: TrackDemand = producer.demand()
-                producer.update(Status(state = "live"))
+                producer.update(Status(state = "live"), Timestamp(1uL, 1_000uL))
 
                 val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
                 while (demand.wantedChanged() == null) {}
@@ -616,13 +639,13 @@ class SmokeTest {
     fun `raw json string passes through unencoded`() = runTest {
         BroadcastProducer().use { broadcast ->
             val config = SnapshotConfig(deltas = false)
-            SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config).use {
-                producer ->
-                producer.update("""{"state":"raw"}""")
+            val track = broadcast.publishTrack("status", TrackInfo(timescale = 1_000uL))
+            SnapshotProducer(broadcast, track, config).use { producer ->
+                producer.update("""{"state":"raw"}""", Timestamp(1uL, 1_000uL))
 
                 val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
                 assertEquals(
-                    Timed(Status(state = "raw"), null),
+                    Timed(Status(state = "raw"), Timestamp(1uL, 1_000uL)),
                     consumer.valuesAs<Status>().first(),
                 )
             }
@@ -673,6 +696,33 @@ class SmokeTest {
                                 "advertised: $advertised",
                             )
                         }
+                    }
+            }
+    }
+
+    @Test
+    fun `viewers watch, update, and release before the session connects`() = runTest {
+        Server.listen(
+                ServerConfig(bind = "127.0.0.1:0", tls = ServerTls(generate = listOf("localhost")))
+            )
+            .use { server ->
+                Moq.connect(
+                        "https://${server.localAddr}",
+                        ClientConfig(tls = ClientTls(insecure = true)),
+                    )
+                    .use { moq ->
+                        val viewers: Viewers = moq.viewers()
+                        // The server never accepts, so there is no receive estimate to divide.
+                        val viewer: Viewer = viewers.watch(4_000_000uL)
+                        viewer.use {
+                            assertNull(it.rate())
+                            it.update(1_000_000uL)
+                            assertNull(it.rate())
+                        }
+                        viewers.setTarget(0uL)
+                        viewers.setTarget(null)
+                        // Past what a PROBE target carries: refused.
+                        assertFailsWith<MoqException.OutOfRange> { viewers.watch(1uL shl 53) }
                     }
             }
     }

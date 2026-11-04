@@ -4,6 +4,7 @@ use std::{
 	future::Future,
 	pin::Pin,
 	task::{Poll, ready},
+	time::Duration,
 };
 use tokio::sync::oneshot;
 
@@ -56,12 +57,19 @@ pub(crate) trait Media: hang::catalog::Reference + Clone {
 	/// The delivery priority its tracks subscribe with.
 	const PRIORITY: i8;
 
+	/// The history needed to prime a decoder.
+	fn warmup(&self) -> Duration;
+
 	/// Its renditions, keyed by ID.
 	fn renditions(catalog: &moq_mux::catalog::hang::Catalog<moq_mux::catalog::hang::Extra>) -> &BTreeMap<String, Self>;
 }
 
 impl Media for hang::catalog::VideoConfig {
 	const PRIORITY: i8 = hang::catalog::PRIORITY.video;
+
+	fn warmup(&self) -> Duration {
+		self.warmup.unwrap_or_default()
+	}
 
 	fn renditions(catalog: &moq_mux::catalog::hang::Catalog<moq_mux::catalog::hang::Extra>) -> &BTreeMap<String, Self> {
 		&catalog.video.renditions
@@ -70,6 +78,10 @@ impl Media for hang::catalog::VideoConfig {
 
 impl Media for hang::catalog::AudioConfig {
 	const PRIORITY: i8 = hang::catalog::PRIORITY.audio;
+
+	fn warmup(&self) -> Duration {
+		self.warmup.unwrap_or_default()
+	}
 
 	fn renditions(catalog: &moq_mux::catalog::hang::Catalog<moq_mux::catalog::hang::Extra>) -> &BTreeMap<String, Self> {
 		&catalog.audio.renditions
@@ -241,6 +253,15 @@ pub struct Consume {
 }
 
 impl Consume {
+	/// Borrow held content for an on-demand answer without consuming the caller's handle.
+	pub fn broadcast(&self, id: Id) -> Result<moq_net::broadcast::Consumer, Error> {
+		let context = self.broadcast.get(id).ok_or(Error::BroadcastNotFound)?;
+		if let Some(origin) = &context.origin {
+			origin.driver.check()?;
+		}
+		Ok(context.broadcast.clone())
+	}
+
 	/// Buffer a broadcast the origin handed out, keeping the cursor that named it so a catalog
 	/// rendition referencing a sibling broadcast resolves through the same origin.
 	pub fn start(
@@ -507,6 +528,7 @@ impl Consume {
 		// instead of assuming Legacy, otherwise CMAF/fMP4 sources (e.g. ffmpeg moqenc,
 		// browser @moq/publish) are misread as raw frames.
 		let container = moq_mux::catalog::hang::Container::try_from(config)?;
+		let warmup = config.warmup();
 		// The rendition may live in a sibling broadcast, so resolve its reference rather than
 		// assuming the catalog's own broadcast serves the track.
 		let reference = config.broadcast().cloned();
@@ -523,9 +545,8 @@ impl Consume {
 					.watch(async move {
 						let subscription = moq_net::track::Subscription::default()
 							.with_priority(C::PRIORITY)
-							// The whole delay, as the container keeps it, so the first request
-							// already states the min.
-							.with_delay(delay);
+							// The publisher must retain the history the decoder needs too.
+							.with_delay(delay.with_max(delay.max.map(|max| max.saturating_add(warmup))));
 						// Resolving a sibling broadcast can wait too, so the close races both steps.
 						let setup = async {
 							let broadcast = resolve(broadcast, origin, reference).await?;
@@ -534,7 +555,9 @@ impl Consume {
 						let Some(track) = Self::until_closed(&mut close, setup).await? else {
 							return Ok(());
 						};
-						let track = moq_mux::container::Consumer::new(track, container).with_delay(delay);
+						let track = moq_mux::container::Consumer::new(track, container)
+							.with_warmup(warmup)
+							.with_delay(delay);
 						Self::run_track(on_read, track, close).await
 					})
 					.await
@@ -821,7 +844,11 @@ impl Consume {
 		let broadcast = context.broadcast.clone();
 		let name = name.to_string();
 
-		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
+		// The datagrams ride a datagram track of the track's name. Subscribing to the track
+		// first keeps what a datagram reader always was to its publisher: demand on the track,
+		// and a request a dynamic publisher creates both from. A name with no stream track,
+		// whose publisher made only a datagram track, is read without one. `subscribe` blocks
+		// on the publisher's answer, so run it inside the task.
 		self.datagram_task.spawn(
 			on_datagram,
 			|state| &mut state.consume.datagram_task,
@@ -829,20 +856,46 @@ impl Consume {
 				driver
 					.watch(async move {
 						let Some(track) =
-							Self::until_closed(&mut close, Self::subscribe(&broadcast, &name, None)).await?
+							Self::until_closed(&mut close, Self::subscribe_demand(&broadcast, &name)).await?
 						else {
 							return Ok(());
 						};
-						Self::run_datagrams(on_datagram, track, close).await
+						let datagrams = broadcast.datagrams(&name)?;
+						Self::run_datagrams(on_datagram, datagrams, track, close).await
 					})
 					.await
 			},
 		)
 	}
 
+	/// Subscribe to `name`'s stream track for its demand, or `None` when the name has none.
+	async fn subscribe_demand(
+		broadcast: &moq_net::broadcast::Consumer,
+		name: &str,
+	) -> Result<Option<moq_net::track::Subscriber>, Error> {
+		let missing = |err: &moq_net::Error| {
+			matches!(
+				err,
+				moq_net::Error::NotFound | moq_net::Error::Stream(moq_net::StreamError::NotFound)
+			)
+		};
+		let track = match broadcast.track(name) {
+			Ok(track) => track,
+			Err(err) if missing(&err) => return Ok(None),
+			Err(err) => return Err(err.into()),
+		};
+		match track.subscribe(None).await {
+			Ok(subscriber) => Ok(Some(subscriber)),
+			Err(err) if missing(&err) => Ok(None),
+			Err(err) => Err(err.into()),
+		}
+	}
+
 	async fn run_datagrams(
 		callback: OnStatus,
-		mut track: moq_net::track::Subscriber,
+		mut track: moq_net::datagram::Consumer,
+		// Held for its demand only; its groups go unread.
+		_subscriber: Option<moq_net::track::Subscriber>,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
 		loop {
@@ -850,7 +903,7 @@ impl Consume {
 			let datagram = tokio::select! {
 				biased;
 				_ = &mut close => return Ok(()),
-				datagram = track.recv_datagram() => match datagram? {
+				datagram = track.recv() => match datagram? {
 					Some(datagram) => datagram,
 					None => return Ok(()),
 				},
@@ -1259,6 +1312,176 @@ mod read_tests {
 			}
 			assert_eq!(crate::moq_consume_read_free(id as u32), 0);
 			assert!(crate::moq_consume_read_free(id as u32) < 0);
+		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use moq_net::track::Delay;
+	use std::{ffi::c_void, time::Duration};
+
+	struct MediaConsumer {
+		_broadcast: moq_net::broadcast::Producer,
+		track: moq_net::track::Producer,
+		task: Id,
+		initial_delay: Delay,
+		reads: Box<kio::Queue<i32>>,
+	}
+
+	extern "C" fn on_read(user_data: *mut c_void, code: i32) {
+		let reads = unsafe { &*user_data.cast::<kio::Queue<i32>>() }.clone();
+		let _ = reads.try_push(code);
+	}
+
+	impl MediaConsumer {
+		async fn new(video: bool, warmup: Option<Duration>, delay: Delay) -> Self {
+			let broadcast = moq_net::broadcast::Info::new().produce();
+			let mut request = broadcast.reserve_track("media").unwrap();
+			let mut catalog = moq_mux::catalog::hang::Catalog::default();
+			let mut audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+			audio.warmup = warmup;
+			catalog.audio.renditions.insert("media".into(), audio);
+			let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+			config.warmup = warmup;
+			catalog.video.renditions.insert("media".into(), config);
+			let reads = Box::new(kio::Queue::new());
+			let callback =
+				unsafe { OnStatus::new(std::ptr::from_ref(reads.as_ref()).cast_mut().cast(), Some(on_read)).unwrap() };
+			let task = {
+				let mut state = State::lock();
+				let snapshot = state
+					.consume
+					.catalog
+					.insert(ConsumeCatalog {
+						broadcast: broadcast.consume(),
+						origin: None,
+						catalog,
+						audio_codec: Vec::new(),
+						video_codec: Vec::new(),
+						sections: Vec::new(),
+					})
+					.unwrap();
+				// Exercise the shared C media path on this runtime so time stays controlled.
+				let task = if video {
+					state
+						.consume
+						.media::<hang::catalog::VideoConfig>(snapshot, 0, delay, callback)
+				} else {
+					state
+						.consume
+						.media::<hang::catalog::AudioConfig>(snapshot, 0, delay, callback)
+				}
+				.unwrap();
+				state.consume.catalog_free(snapshot).unwrap();
+				task
+			};
+			let initial_delay = request.subscription_changed().await.unwrap().delay;
+			let track = request.accept(hang::container::track_info(if video {
+				hang::catalog::PRIORITY.video
+			} else {
+				hang::catalog::PRIORITY.audio
+			}));
+			Self {
+				_broadcast: broadcast,
+				track,
+				task,
+				initial_delay,
+				reads,
+			}
+		}
+
+		fn write(&mut self, sequence: u64, micros: u64) {
+			let mut group = self.track.create_group(moq_net::group::Info { sequence }).unwrap();
+			hang::container::Frame {
+				timestamp: moq_net::Timestamp::from_micros(micros).unwrap(),
+				payload: bytes::Bytes::from_static(b"frame"),
+			}
+			.write_to(&mut group)
+			.unwrap();
+			group.finish().unwrap();
+		}
+
+		async fn frame(&self) -> Option<u128> {
+			let code = self.reads.pop().await.unwrap();
+			assert!(code >= 0, "media consumer failed: {code}");
+			if code == 0 {
+				return None;
+			}
+			let mut state = State::lock();
+			let read = state.consume.reads.remove(Id::try_from(code).unwrap()).unwrap();
+			let Read::Frame(frame) = read else {
+				panic!("expected a frame");
+			};
+			Some(frame.item.timestamp.as_micros())
+		}
+
+		async fn cancel(self) {
+			State::lock().consume.track_close(self.task).unwrap();
+			assert_eq!(self.reads.pop().await.unwrap(), 0);
+		}
+	}
+
+	/// Warmup changes the first request too, before the container can update it.
+	#[tokio::test(start_paused = true)]
+	async fn media_subscription_includes_warmup() {
+		for video in [false, true] {
+			for warmup in [None, Some(Duration::ZERO), Some(Duration::from_millis(300))] {
+				for max in [
+					None,
+					Some(Duration::from_millis(200)),
+					Some(Duration::MAX - Duration::from_millis(100)),
+				] {
+					let delay = Delay {
+						min: Some(Duration::from_millis(200)),
+						max,
+					};
+					let consumer = MediaConsumer::new(video, warmup, delay).await;
+					assert_eq!(
+						consumer.initial_delay,
+						// The request aggregate represents Duration::MAX as unlimited.
+						delay.with_max(
+							max.map(|max| max.saturating_add(warmup.unwrap_or_default()))
+								.filter(|max| *max != Duration::MAX)
+						)
+					);
+					consumer.cancel().await;
+				}
+			}
+		}
+	}
+
+	/// Newest-first delivery must leave time for history covering min plus warmup.
+	#[tokio::test(start_paused = true)]
+	async fn media_warmup_reaches_history() {
+		for video in [false, true] {
+			for warmup in [None, Some(Duration::ZERO), Some(Duration::from_millis(300))] {
+				let delay = Delay {
+					min: Some(Duration::from_millis(200)),
+					max: Some(Duration::from_millis(200)),
+				};
+				let mut consumer = MediaConsumer::new(video, warmup, delay).await;
+				consumer.write(5, 5_000_000);
+				consumer.write(4, 4_700_000);
+				let first = kio::clock::timeout(Duration::from_millis(50), consumer.frame()).await;
+				let warming = warmup.is_some_and(|warmup| !warmup.is_zero());
+				assert_eq!(first.is_err(), warming, "video={video}, warmup={warmup:?}");
+				consumer.write(3, 4_400_000);
+				consumer.track.finish().unwrap();
+				let mut stamps: Vec<_> = first.ok().flatten().into_iter().collect();
+				while let Some(stamp) = consumer.frame().await {
+					stamps.push(stamp);
+				}
+				assert_eq!(
+					stamps,
+					if warming {
+						vec![4_400_000, 4_700_000, 5_000_000]
+					} else {
+						vec![4_700_000, 5_000_000]
+					}
+				);
+			}
 		}
 	}
 }

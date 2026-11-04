@@ -35,7 +35,7 @@ export function install(options?: InstallOptions): boolean {
 	if ("WebTransport" in globalThis) return false;
 	const versions = options?.versions;
 	const requireProtocol = options?.requireProtocol;
-	// biome-ignore lint/suspicious/noExplicitAny: polyfill — extending Session to match the WebTransport constructor signature
+	// biome-ignore lint/suspicious/noExplicitAny: polyfill - extending Session to match the WebTransport constructor signature
 	(globalThis as any).WebTransport = class extends Session {
 		constructor(url: string | URL, options?: WebTransportOptions) {
 			super(url, { ...options, versions, requireProtocol });

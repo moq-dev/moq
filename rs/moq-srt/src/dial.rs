@@ -43,14 +43,13 @@ pub struct Client {
 	/// for loss recovery. It doubles as [`publish`]'s egress skip threshold.
 	max_delay: Duration,
 
-	/// How long relays keep a non-latest group of an ingested media track fetchable, or
-	/// `None` for hang's own default.
+	/// How long a superseded group of an ingested media track stays fresh, or `None` for
+	/// no publisher limit. Defaults to [`MAX_AGE`](hang::container::MAX_AGE).
 	///
-	/// A retention budget, not a delivery one: it never makes a subscriber play further
+	/// A freshness bound, not a delivery one: it never makes a subscriber play further
 	/// behind live, it caps how far back a FETCH can still reach. The default suits a
 	/// segmented egress (HLS/DASH) reading the broadcast downstream, which may only
-	/// advertise segments that are still fetchable. Lower it when nothing reads history
-	/// and the memory matters. [`pull`] only; [`publish`] reads a broadcast someone else
+	/// advertise segments that are still fetchable. Lower it when nothing reads history. [`pull`] only; [`publish`] reads a broadcast someone else
 	/// declared.
 	max_age: Option<Duration>,
 
@@ -75,13 +74,13 @@ pub struct Client {
 
 impl Client {
 	/// Dial `addr` for `resource`, with the default SRT latency (500ms) and the
-	/// publisher's own media retention.
+	/// authored media max age.
 	pub fn new(addr: SocketAddr, resource: impl Into<String>) -> Self {
 		Self {
 			addr,
 			resource: resource.into(),
 			max_delay: DEFAULT_LATENCY,
-			max_age: None,
+			max_age: Some(hang::container::MAX_AGE),
 			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
 			program: None,
 			linger: moq_mux::Linger::DEFAULT,

@@ -277,7 +277,7 @@ impl<F: Container> Consumer<F> {
 	/// Create a Consumer wrapping the given moq-lite consumer, decoding `format`.
 	///
 	/// The ordering window inherits the subscriber's current max delay budget, clamped
-	/// to the track's retention window. Put that budget on the
+	/// to the track's max age. Put that budget on the
 	/// [`moq_net::track::Subscription`] before awaiting the subscription, so the
 	/// publisher preserves the same replay window.
 	pub fn new(track: moq_net::track::Subscriber, format: F) -> Self {
@@ -285,9 +285,9 @@ impl<F: Container> Consumer<F> {
 		// Delivery starts at the subscription floor; without one it starts wherever
 		// the publisher does, adopted from the first arrivals (see poll_read). Either
 		// way the age budget is the one rule that catches the cursor up to the live
-		// edge from there. The budget is clamped to the track's retention window,
-		// since history the publisher no longer keeps can't be waited for and would
-		// otherwise stall the catch-up by the excess.
+		// edge from there. The budget is clamped to the track's max age, since a group
+		// the publisher already marks stale can't be waited for and would otherwise
+		// stall the catch-up by the excess.
 		let start = track.floor();
 		let max_delay = subscription
 			.delay
@@ -357,8 +357,8 @@ impl<F: Container> Consumer<F> {
 	/// A subscription that names a start already waits for it, and a live start takes the newest
 	/// group.
 	pub fn with_warmup(mut self, warmup: std::time::Duration) -> Self {
-		// Carve the warmup out of what was asked for, then clamp to retention as `new` does, so a
-		// budget the track can keep is not cut by the clamp too.
+		// Carve the warmup out of what was asked for, then clamp to max age as `new` does, so a
+		// budget within the track's max age is not cut by the clamp too.
 		if let Some(track) = &self.track {
 			let requested = track.subscription().delay.max.unwrap_or(std::time::Duration::MAX);
 			self.max_delay = requested
@@ -1117,7 +1117,7 @@ impl<F: Container> Consumer<F> {
 
 	/// Set the [`Delay`], mid-stream or before the first read.
 	///
-	/// [`Delay::max`] is clamped to the track's retention window like [`new`](Self::new). The
+	/// [`Delay::max`] is clamped to the track's max age like [`new`](Self::new). The
 	/// subscription keeps the requested delay verbatim, its max plus any
 	/// [`with_warmup`](Self::with_warmup). An unstated [`Delay::min`] reads as zero here, and moves
 	/// only a start still to come. A min past the max starts at the max, since the publisher serves
@@ -1480,9 +1480,12 @@ mod tests {
 
 	use bytes::Bytes;
 
-	/// A millisecond track: the frames written here carry timestamps.
+	/// A millisecond track: the frames written here carry timestamps. It sets no publisher max
+	/// age, so the test's delay budget alone decides which superseded groups are read.
 	fn timed() -> moq_net::track::Info {
-		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+		moq_net::track::Info::default()
+			.with_timescale(moq_net::Timescale::MILLI)
+			.with_max_age(None)
 	}
 
 	/// Mint a standalone track for tests via a throwaway broadcast, since tracks are
@@ -1601,8 +1604,8 @@ mod tests {
 	}
 
 	/// Wrap `track` so only the container consumer performs age skips. The
-	/// transport gets the media track's full retention window and hands over every
-	/// retained group; what the container does with them is what the test measures.
+	/// transport gets the media track's full max age and hands over every
+	/// fresh group; what the container does with them is what the test measures.
 	///
 	/// Both layers enforce the same budget, and normally should: the transport skipping
 	/// a group the consumer was going to skip anyway just saves the bandwidth. These
@@ -3541,10 +3544,10 @@ mod tests {
 		assert_eq!(frame.timestamp, ts(4_400_000));
 	}
 
-	/// The warmup is carved out of the requested budget before the retention clamp, so a max delay
-	/// the track can keep stays whole.
+	/// The warmup is carved out of the requested budget before the max age clamp, so a max delay
+	/// within the track's max age stays whole.
 	#[tokio::test]
-	async fn the_warmup_is_carved_before_the_retention_clamp() {
+	async fn the_warmup_is_carved_before_the_max_age_clamp() {
 		let mut info = hang::container::track_info(hang::catalog::PRIORITY.audio);
 		info.max_age = Some(Duration::from_secs(1));
 		let mut track = track_producer("test", info);
@@ -4212,7 +4215,7 @@ mod tests {
 			frames
 		})
 		.await
-		.expect("consumer hung — possible infinite loop regression");
+		.expect("consumer hung - possible infinite loop regression");
 
 		assert_eq!(frames.len(), 3);
 		finisher.await.expect("finisher task panicked");
@@ -4302,7 +4305,7 @@ mod tests {
 			frames
 		})
 		.await
-		.expect("consumer hung — max_timestamp regression");
+		.expect("consumer hung - max_timestamp regression");
 
 		assert_eq!(frames.len(), 4, "Expected all 4 frames, got {}", frames.len());
 		assert_eq!(frames[0].timestamp, ts(0));
@@ -4704,7 +4707,7 @@ mod tests {
 		// Group 0: finished normally, its first frame read before group 2 lands.
 		write_group(&mut track, 0, &[ts(0), ts(20_000)]);
 		assert_eq!(consumer.read_frame().await.unwrap().unwrap().timestamp, ts(0));
-		// Group 2: finished (group 1 is missing — sequence gap)
+		// Group 2: finished (group 1 is missing - sequence gap)
 		write_group(&mut track, 2, &[ts(200_000)]);
 		track.finish().unwrap();
 
@@ -4730,7 +4733,7 @@ mod tests {
 		assert_eq!(frames.len(), 1);
 	}
 
-	/// A finished group aborted afterwards (aged out of the track's max age window)
+	/// A finished group aborted afterwards (idle past the cache pool's expiry window)
 	/// keeps serving the frames it still holds: an abort only matters where a frame is
 	/// missing, so a reader that stopped short of the end drains the rest and moves on
 	/// to the next buffered group instead of ending the track.
@@ -4923,7 +4926,7 @@ mod tests {
 
 		let frames = kio::clock::timeout(Duration::from_secs(2), async { continuous_frames(&mut consumer).await })
 			.await
-			.expect("consumer hung — duration skip regression");
+			.expect("consumer hung - duration skip regression");
 
 		assert_eq!(frames.len(), 2);
 		assert_eq!(frames[0].timestamp, ts(0));

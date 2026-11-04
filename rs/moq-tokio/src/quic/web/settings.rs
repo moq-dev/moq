@@ -71,15 +71,12 @@ impl Settings {
 	async fn accept(
 		conn: &crate::quic::driver::connection::Connection,
 	) -> Result<(crate::quic::driver::recv::Stream, Vec<Pin<Box<PendingUni>>>), SettingsError> {
-		let mut accept = std::pin::pin!(futures::stream::unfold(conn.clone(), |conn| async {
-			Some((conn.accept_uni().await, conn))
-		}));
 		let mut pending = FuturesUnordered::<Pin<Box<PendingUni>>>::new();
 		let mut early = Vec::<Pin<Box<PendingUni>>>::new();
 
 		let mut recv = loop {
 			tokio::select! {
-				Some(recv) = accept.next() => pending.push(Box::pin(read_uni_header(recv?))),
+				recv = kio::wait(|waiter| conn.poll_accept_uni(waiter)) => pending.push(Box::pin(read_uni_header(recv?))),
 				Some(header) = pending.next() => match header {
 					Ok((StreamUni::CONTROL, _, recv)) => break recv,
 					Ok(header) => early.push(Box::pin(std::future::ready(Ok(header)))),

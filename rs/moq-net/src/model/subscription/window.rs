@@ -172,6 +172,10 @@ pub(in crate::model) struct Window {
 	/// The spans still looking up their time start (see [`Self::found`]), which read nothing
 	/// meanwhile: kept apart so a probe finds them without visiting every span.
 	looking: Vec<usize>,
+	/// The spans whose time start waits on a group starting, which read nothing meanwhile.
+	/// Their end resolved when asked, so a relative one counts back from that latest group
+	/// however many arrive while they wait.
+	waiting: Vec<usize>,
 	/// The unsettled time ends, grouped by walk.
 	walks: Vec<Walk>,
 	/// The walks waiting out a gap below the group their ends fall before, which move only
@@ -207,8 +211,6 @@ pub(in crate::model) struct Window {
 	/// [`Self::named`] and [`Self::start`]. Kept so a probe reads them without a walk.
 	named: Option<u64>,
 	all_named: bool,
-	/// The ranges' bounds on a datagram, indexed for [`Self::admits_datagram`].
-	admission: Admission,
 }
 
 /// Parked walks whose waits overlap, so a change reaching any of them wakes them all: the
@@ -232,6 +234,8 @@ struct Span {
 	/// A time start the groups held can't place, looked up from the track's history: the
 	/// span reads nothing until the lookup answers.
 	looking: Option<Looking>,
+	/// A time start no group has started for yet: the span reads nothing until one has.
+	waiting: bool,
 }
 
 /// A time start being looked up: its time, and the exclusive end of the run below every
@@ -468,11 +472,6 @@ impl Walk {
 
 		// Settle once every sequence up to the first group starting past the ends can no
 		// longer start inside them.
-		//
-		// Datagrams stay ephemeral and never index where their group starts, so a sequence
-		// that arrived only as a datagram counts as gone here. A stream copy of that group
-		// arriving later is read even if it starts past the ends: accepted, since a
-		// publisher that streams a group it also sent as a datagram is rare.
 		let after = self.trail.after?;
 		// Everything at or below `known` is in range, and `after` lies above it.
 		self.trail.accounted = self.trail.accounted.max(self.trail.unknown().unwrap_or(after));
@@ -573,6 +572,7 @@ impl Window {
 			ranges: ranges.to_vec(),
 			spans: Vec::new(),
 			looking: Vec::new(),
+			waiting: Vec::new(),
 			walks: Vec::new(),
 			parked: BTreeMap::new(),
 			seen: Seen::default(),
@@ -586,7 +586,6 @@ impl Window {
 			covered: None,
 			named: None,
 			all_named: true,
-			admission: Admission::default(),
 		};
 		window.place(latest, holdings)?;
 		Ok(window)
@@ -603,7 +602,7 @@ impl Window {
 	}
 
 	/// Resolve what the groups now held settle: relative anchors once `latest` exists, and
-	/// time ends as groups start. Returns whether the groups in range moved.
+	/// time starts and ends as groups start. Returns whether the groups in range moved.
 	pub fn settle(&mut self, latest: Option<u64>, holdings: &impl Holdings) -> bool {
 		if self.pending {
 			if latest.is_none() {
@@ -613,14 +612,84 @@ impl Window {
 			let _ = self.place(latest, holdings);
 			return !self.pending;
 		}
-		if self.walks.is_empty() && self.parked.is_empty() {
-			return false;
+		let mut moved = !self.waiting.is_empty() && self.start_waiting(holdings);
+		if !self.walks.is_empty() || !self.parked.is_empty() {
+			moved |= self.walk(holdings);
 		}
-		let moved = self.walk(holdings);
 		if moved || self.stale {
 			self.rebuild();
 		}
 		moved
+	}
+
+	/// Start the spans whose time start waits on a group starting, once one has, or once
+	/// nothing can start any more. Returns whether any did.
+	fn start_waiting(&mut self, holdings: &impl Holdings) -> bool {
+		let mut started = false;
+		for position in std::mem::take(&mut self.waiting) {
+			let Anchor::Time(pts) = self.ranges[self.spans[position].index].start else {
+				unreachable!("only a time start waits on a group starting");
+			};
+			let (start, floored) = match holdings.containing(pts) {
+				Containing::Group(group) => (group, true),
+				// The group holding it is older than any held, or nothing held can start.
+				Containing::Before => (0, false),
+				Containing::Unknown if holdings.complete() => (0, false),
+				Containing::Unknown => {
+					self.waiting.push(position);
+					continue;
+				}
+			};
+			started = true;
+			self.start_span(position, pts, start, floored, holdings);
+		}
+		if started {
+			self.stale = true;
+			self.name();
+		}
+		started
+	}
+
+	/// Start the span at `position`, whose time start `pts` waited, at `start`: looked up
+	/// where the groups held can't place it, as when first resolved, and otherwise reading
+	/// its groups, its time end walking from there.
+	fn start_span(&mut self, position: usize, pts: Timestamp, start: u64, floored: bool, holdings: &impl Holdings) {
+		let span = &mut self.spans[position];
+		(span.start, span.floored, span.waiting) = (start, floored, false);
+		if let Some(below) = unresolved(start, floored, holdings) {
+			span.looking = Some(Looking { pts, below });
+			self.looking.push(position);
+			return;
+		}
+		let reach = match floored {
+			true => start,
+			false => holdings.next_start(0).map_or(start, |(oldest, _)| oldest),
+		};
+		let limit = match span.end {
+			End::Before(end) => Some(end),
+			End::Open => None,
+			End::Time(end) => {
+				self.walks.push(Walk {
+					ends: BTreeSet::from([Ending {
+						pts: end,
+						span: position,
+					}]),
+					trail: Trail::new(start, reach),
+					low: start,
+					low_reach: reach,
+					was: Some(start),
+				});
+				return;
+			}
+		};
+		if let Some(last) = limit.map_or(Some(u64::MAX), |end| end.checked_sub(1))
+			&& last >= start
+		{
+			self.resolved.insert(start..=last);
+			if reach <= last {
+				self.resolved_missable.insert(reach..=last);
+			}
+		}
 	}
 
 	/// Walk each unsettled time end on, settling those that can be, and merge the walks
@@ -745,9 +814,12 @@ impl Window {
 		self.walks.iter().filter_map(|walk| walk.trail.speculative)
 	}
 
-	/// The lowest sequence whose start could still move an unsettled time end not parked,
-	/// `None` without one or once the last sequence is in range.
+	/// The lowest sequence whose start could still move an unsettled time start, or a time
+	/// end not parked, `None` without one or once the last sequence is in range.
 	pub fn watch_starts(&self) -> Option<u64> {
+		if !self.waiting.is_empty() {
+			return Some(0);
+		}
 		self.walks.iter().filter_map(|walk| walk.trail.unknown()).min()
 	}
 
@@ -756,27 +828,17 @@ impl Window {
 		self.pending || self.groups.contains(sequence)
 	}
 
-	/// Whether a datagram is in range, judged on its own and never through a time end's
-	/// settling: its `timestamp` against each range's times, and its `sequence` against the
-	/// range's absolute groups and the relative ones resolved so far.
-	pub fn admits_datagram(&self, sequence: u64, timestamp: Option<Timestamp>) -> bool {
-		let Some(timestamp) = timestamp else {
-			return self.contains(sequence);
-		};
-		self.admission.admits(sequence, timestamp)
-	}
-
-	/// The lowest group in range, `None` while a relative anchor waits. Nothing in range
-	/// floors nowhere: group 0.
+	/// The lowest group in range, `None` while an anchor waits. Nothing in range floors
+	/// nowhere: group 0.
 	pub fn floor(&self) -> Option<u64> {
-		match self.pending {
+		match self.pending || !self.waiting.is_empty() {
 			true => None,
 			false => Some(self.groups.lowest().unwrap_or(0)),
 		}
 	}
 
 	/// The lowest group the ranges name, `None` while one reaches back to the oldest group
-	/// or a relative anchor waits on a first group.
+	/// or an anchor waits.
 	pub fn start(&self) -> Option<u64> {
 		match self.pending || !self.all_named {
 			true => None,
@@ -784,22 +846,22 @@ impl Window {
 		}
 	}
 
-	/// The lowest group a range names, `None` when none does or a relative anchor waits.
+	/// The lowest group a range names, `None` when none does or an anchor waits.
 	/// Unlike [`Self::start`], a range reaching back to the oldest group names nothing.
 	pub fn named(&self) -> Option<u64> {
-		match self.pending {
+		match self.pending || !self.waiting.is_empty() {
 			true => None,
 			false => self.named,
 		}
 	}
 
-	/// Each range resolved, in the order given: `None` for one empty as given, still
-	/// waiting on a first group, or still looking up its start. One that only resolves
-	/// empty keeps its span, ending at or below its start. An unsettled time end is reported
-	/// open, never at its cap.
+	/// Each range resolved, in the order given: `None` for one empty as given, whose start
+	/// still waits, or still looking up its start. One that only resolves empty keeps its
+	/// span, ending at or below its start. An unsettled time end is reported open, never at
+	/// its cap.
 	pub fn resolved(&self) -> Vec<Option<Resolved>> {
 		let mut resolved = vec![None; self.ranges.len()];
-		for span in self.spans.iter().filter(|span| span.looking.is_none()) {
+		for span in self.spans.iter().filter(|span| span.looking.is_none() && !span.waiting) {
 			resolved[span.index] = Some(Resolved {
 				start: span.start,
 				end: match span.end {
@@ -812,7 +874,7 @@ impl Window {
 	}
 
 	/// Where each range starts once delivery starts at `from`, in the order given: `None`
-	/// for one with no group there, or still waiting on a first group.
+	/// for one with no group there, or whose start still waits.
 	pub fn starts(&self, from: u64) -> Vec<Option<u64>> {
 		self.resolved()
 			.into_iter()
@@ -824,8 +886,8 @@ impl Window {
 			.collect()
 	}
 
-	/// The exclusive end past every group in range, `None` when one stays open. An
-	/// unsettled time end counts as open: its cap only holds reads back meanwhile.
+	/// The exclusive end past every group in range, `None` when one stays open or an anchor
+	/// waits. An unsettled time end counts as open: its cap only holds reads back meanwhile.
 	pub fn end(&self) -> Option<u64> {
 		if !self.settled {
 			return None;
@@ -1000,6 +1062,7 @@ impl Window {
 		}
 		self.spans.clear();
 		self.looking.clear();
+		self.waiting.clear();
 		self.walks.clear();
 		self.parked.clear();
 		let (mut fixed, mut fixed_missable) = (Vec::new(), Vec::new());
@@ -1007,10 +1070,29 @@ impl Window {
 		// The time ends that start alike walk alike, until a group starts between them.
 		let mut walks = std::collections::BTreeMap::<(u64, u64), BTreeSet<Ending>>::new();
 		for (index, range) in self.ranges.iter().enumerate().filter(|(_, range)| !range.is_empty()) {
-			let (Some((start, floored)), Some(end)) = (start(range.start, latest, holdings), end(range.end, latest))
-			else {
+			let Some(end) = end(range.end, latest) else {
 				self.pending = true;
 				continue;
+			};
+			let (start, floored) = match start(range.start, latest, holdings) {
+				Start::At(start, floored) => (start, floored),
+				Start::Pending => {
+					self.pending = true;
+					continue;
+				}
+				// Reads nothing until a group starts; see [`Self::start_waiting`].
+				Start::Waiting => {
+					self.waiting.push(self.spans.len());
+					self.spans.push(Span {
+						index,
+						start: 0,
+						end,
+						floored: false,
+						looking: None,
+						waiting: true,
+					});
+					continue;
+				}
 			};
 			// A time start the groups held can't place reads nothing until its lookup answers.
 			let looking = match range.start {
@@ -1025,6 +1107,7 @@ impl Window {
 					end,
 					floored,
 					looking,
+					waiting: false,
 				});
 				continue;
 			}
@@ -1057,9 +1140,9 @@ impl Window {
 				end,
 				floored,
 				looking: None,
+				waiting: false,
 			});
 		}
-		self.admission = Admission::new(&self.ranges, &self.spans);
 		self.name();
 		self.resolved = Runs::new(fixed);
 		self.resolved_missable = Runs::new(fixed_missable);
@@ -1097,8 +1180,13 @@ impl Window {
 	/// parking or waking changed them.
 	fn rebuild(&mut self) {
 		self.covered = None;
-		// A span still looking up its start reads nothing until it knows which group that is.
-		self.settled = !self.pending && self.walks.is_empty() && self.parked.is_empty() && self.looking.is_empty();
+		// A span still looking up or waiting on its start reads nothing until it knows which
+		// group that is.
+		self.settled = !self.pending
+			&& self.walks.is_empty()
+			&& self.parked.is_empty()
+			&& self.looking.is_empty()
+			&& self.waiting.is_empty();
 		let (groups, missable): (Vec<_>, Vec<_>) = self.walks.iter().map(Walk::runs).unzip();
 		self.groups.set_layer(Runs::new(groups.into_iter().flatten()));
 		self.missable.set_layer(Runs::new(missable.into_iter().flatten()));
@@ -1123,149 +1211,36 @@ impl Window {
 	}
 }
 
-/// The ranges' bounds on a datagram, split by the kind of anchor at each end, so judging one
-/// costs a few sorted lookups however many ranges there are.
-///
-/// A datagram is one frame, so a time anchor judges its own timestamp, and a group anchor
-/// its sequence: each range bounds it from below by one and from above by one. Within each
-/// pairing, the ranges sorted by their lower bound carry the highest upper bound of any
-/// range at or below them, so the ranges whose lower bound admits a datagram admit it once
-/// the last of them reaches it.
-#[derive(Debug, Default)]
-struct Admission {
-	groups: Stab<u64, u64>,
-	group_to_time: Stab<u64, Timestamp>,
-	time_to_group: Stab<Timestamp, u64>,
-	times: Stab<Timestamp, Timestamp>,
+/// Where a range starts.
+enum Start {
+	/// At this group, and whether it names that group rather than reaching back to the
+	/// oldest one.
+	At(u64, bool),
+	/// A time start no group has started for yet, so it reads nothing.
+	Waiting,
+	/// Waiting on a latest group, reading everything meanwhile.
+	Pending,
 }
 
-/// One bound of a range on a datagram: the first or last sequence it admits, or the time
-/// it presents from or through.
-#[derive(Clone, Copy)]
-enum Bound {
-	Group(u64),
-	Time(Timestamp),
-}
-
-impl Admission {
-	/// Index `ranges`, with `spans` their resolution in the same order.
-	fn new(ranges: &[Range], spans: &[Span]) -> Self {
-		let mut admission = Self::default();
-		let mut spans = spans.iter().peekable();
-		for (index, range) in ranges.iter().enumerate().filter(|(_, range)| !range.is_empty()) {
-			// A relative anchor still waiting on a latest group bounds nothing yet.
-			let span = spans.next_if(|span| span.index == index);
-			let lower = match range.start {
-				Anchor::Time(pts) => Bound::Time(pts),
-				Anchor::Absolute(start) => Bound::Group(start),
-				Anchor::Relative(_) => Bound::Group(span.map_or(0, |span| span.start)),
-			};
-			// The last sequence a group end admits: one ending at group 0 admits none.
-			let last = |end: u64| end.checked_sub(1).map(Bound::Group);
-			let upper = match range.end {
-				None => Some(Bound::Group(u64::MAX)),
-				Some(Anchor::Time(pts)) => Some(Bound::Time(pts)),
-				Some(Anchor::Absolute(end)) => last(end),
-				Some(Anchor::Relative(_)) => match span.map(|span| span.end) {
-					Some(End::Before(end)) => last(end),
-					_ => Some(Bound::Group(u64::MAX)),
-				},
-			};
-			match (lower, upper) {
-				(_, None) => {}
-				(Bound::Group(lower), Some(Bound::Group(upper))) => admission.groups.push(lower, upper),
-				(Bound::Group(lower), Some(Bound::Time(upper))) => admission.group_to_time.push(lower, upper),
-				(Bound::Time(lower), Some(Bound::Group(upper))) => admission.time_to_group.push(lower, upper),
-				(Bound::Time(lower), Some(Bound::Time(upper))) => admission.times.push(lower, upper),
-			}
-		}
-		admission.groups.index();
-		admission.group_to_time.index();
-		admission.time_to_group.index();
-		admission.times.index();
-		admission
-	}
-
-	/// Whether any one range admits a datagram's `sequence` and `timestamp` together.
-	fn admits(&self, sequence: u64, timestamp: Timestamp) -> bool {
-		self.groups.admits(sequence, sequence)
-			|| self.group_to_time.admits(sequence, timestamp)
-			|| self.time_to_group.admits(timestamp, sequence)
-			|| self.times.admits(timestamp, timestamp)
-	}
-}
-
-/// A point a datagram is judged at, ordered as instants for a time.
-trait Point: Copy {
-	fn order(self, other: Self) -> std::cmp::Ordering;
-}
-
-impl Point for u64 {
-	fn order(self, other: Self) -> std::cmp::Ordering {
-		self.cmp(&other)
-	}
-}
-
-impl Point for Timestamp {
-	fn order(self, other: Self) -> std::cmp::Ordering {
-		instant(self, other)
-	}
-}
-
-/// Ranges bounded below by an `L` and above by a `U`, both inclusive, sorted by the lower
-/// bound, each carrying the highest upper bound at or before it once indexed.
-#[derive(Debug)]
-struct Stab<L, U> {
-	bounds: Vec<(L, U)>,
-}
-
-impl<L, U> Default for Stab<L, U> {
-	fn default() -> Self {
-		Self { bounds: Vec::new() }
-	}
-}
-
-impl<L: Point, U: Point> Stab<L, U> {
-	fn push(&mut self, lower: L, upper: U) {
-		self.bounds.push((lower, upper));
-	}
-
-	fn index(&mut self) {
-		self.bounds.sort_by(|a, b| a.0.order(b.0));
-		let mut highest: Option<U> = None;
-		for (_, upper) in &mut self.bounds {
-			let top = match highest {
-				Some(top) if top.order(*upper).is_gt() => top,
-				_ => *upper,
-			};
-			*upper = top;
-			highest = Some(top);
-		}
-	}
-
-	/// Whether a range bounded at or below `lower` reaches `upper`.
-	fn admits(&self, lower: L, upper: U) -> bool {
-		let below = self.bounds.partition_point(|(start, _)| start.order(lower).is_le());
-		below
-			.checked_sub(1)
-			.is_some_and(|last| upper.order(self.bounds[last].1).is_le())
-	}
-}
-
-/// The first group a range starts at, and whether it names that group rather than
-/// reaching back to the oldest one. `None` while it waits on a latest group.
-fn start(anchor: Anchor, latest: Option<u64>, holdings: &impl Holdings) -> Option<(u64, bool)> {
+fn start(anchor: Anchor, latest: Option<u64>, holdings: &impl Holdings) -> Start {
 	match anchor {
-		Anchor::Absolute(start) => Some((start, true)),
+		Anchor::Absolute(start) => Start::At(start, true),
 		// Nothing sits below group 0, so the farthest offset needs no latest group.
-		Anchor::Relative(u64::MAX) => Some((0, false)),
-		Anchor::Relative(back) => Some((latest?.saturating_sub(back), true)),
+		Anchor::Relative(u64::MAX) => Start::At(0, false),
+		Anchor::Relative(back) => latest.map_or(Start::Pending, |latest| Start::At(latest.saturating_sub(back), true)),
 		Anchor::Time(pts) => match holdings.containing(pts) {
-			Containing::Group(group) => Some((group, true)),
+			Containing::Group(group) => Start::At(group, true),
 			// The group holding it is older than any held, so reach back to the oldest.
-			Containing::Before => Some((0, false)),
-			// Nothing has started yet: like the live edge, the latest group.
-			Containing::Unknown => Some((latest?, true)),
+			Containing::Before => Start::At(0, false),
+			// Before any group, as for a relative anchor, which a hop that holds none (such as
+			// a reader following route copies) leaves to the copies to resolve.
+			Containing::Unknown if latest.is_none() => Start::Pending,
+			// Nothing can start any more, so nothing held reaches past it.
+			Containing::Unknown if holdings.complete() => Start::At(0, false),
+			// Nothing has started yet, so wait for a group that has, rather than guess the
+			// latest: groups arrive before the frames that show where they start, so a copy
+			// can see the live edge before the groups its publisher resolved the time to.
+			Containing::Unknown => Start::Waiting,
 		},
 	}
 }
@@ -1549,10 +1524,14 @@ mod tests {
 		let window = Window::new(&[range(time(1000), time(2500))], Some(6), &groups).unwrap();
 		assert_eq!(covered(&window, 8), vec![0, 1, 2]);
 
-		// Nothing started yet: a time start waits like the live edge.
+		// Nothing started yet: a time start waits on a first group, then on one starting.
 		let mut window = Window::new(&[range(time(1000), None)], None, &Groups::default()).unwrap();
 		assert!(window.is_pending());
-		assert!(window.settle(Some(4), &Groups::new([(4, Held::Pending)])));
+		let mut held = Groups::new([(4, Held::Pending)]);
+		assert!(window.settle(Some(4), &held));
+		assert!(!window.contains(4), "4 has not started");
+		held.held.insert(4, Held::Started(at(1000)));
+		assert!(window.settle(Some(4), &held));
 		assert_eq!(window.floor(), Some(4));
 	}
 
@@ -1822,14 +1801,6 @@ mod tests {
 		}
 	}
 
-	/// A datagram is one frame, so its own timestamp places it against a time end.
-	#[test]
-	fn a_datagram_is_judged_by_its_own_timestamp() {
-		let window = Window::new(&[range(Anchor::Absolute(0), time(3500))], None, &Groups::default()).unwrap();
-		assert!(window.admits_datagram(9, Some(at(3500))));
-		assert!(!window.admits_datagram(9, Some(at(3600))));
-	}
-
 	/// Groups whose `racing` one starts past the end after the first time it is asked
 	/// about, as when its first frame lands between the walks of one settle.
 	struct Racing {
@@ -1911,136 +1882,78 @@ mod tests {
 		assert_eq!(window.watch_starts(), None, "nothing above the last sequence can start");
 	}
 
+	/// A time start no held group has started for yet reads nothing of its range, rather
+	/// than guess the latest group, and resolves once one starts. A track that can start
+	/// nothing more reaches back to the oldest group.
 	#[test]
-	fn a_settled_window_still_judges_a_datagram_by_its_times() {
-		// 1 is a datagram the starts index never sees: the end settles before 2 by
-		// sequence, but 1 presents past it.
-		let groups = Groups {
-			gone: std::iter::once(1..2).collect(),
-			..Groups::new([Groups::started(0, 0), Groups::started(2, 10_000)])
-		};
-		let window = Window::new(&[range(time(0), time(5000))], None, &groups).unwrap();
-		assert_eq!(window.resolved(), vec![Some(Resolved { start: 0, end: Some(2) })]);
-		assert!(window.admits_datagram(1, Some(at(4000))));
-		assert!(!window.admits_datagram(1, Some(at(7000))));
-	}
-
-	#[test]
-	fn a_waiting_window_judges_a_datagram_against_both_times() {
-		let window = Window::new(&[range(time(3000), time(3500))], None, &Groups::default()).unwrap();
-		assert!(window.is_pending(), "no group has started");
-		assert!(!window.admits_datagram(0, Some(at(2900))));
-		assert!(window.admits_datagram(1, Some(at(3000))));
-		assert!(window.admits_datagram(2, Some(at(3500))));
-		assert!(!window.admits_datagram(3, Some(at(3600))));
-	}
-
-	#[test]
-	fn a_waiting_window_judges_a_datagram_against_absolute_groups_too() {
-		let window = Window::new(
-			&[range(time(3000), Some(Anchor::Absolute(10)))],
-			None,
-			&Groups::default(),
-		)
-		.unwrap();
-		assert!(window.is_pending(), "no group has started");
-		assert!(window.admits_datagram(9, Some(at(3500))));
-		assert!(!window.admits_datagram(10, Some(at(3500))));
-		assert!(!window.admits_datagram(9, Some(at(2900))));
-	}
-
-	/// A datagram is in range only when one range admits its sequence and time together,
-	/// not when each passes a different range.
-	#[test]
-	fn a_datagram_is_judged_against_one_range_at_a_time() {
-		let groups = Groups::new([Groups::started(5, 5000)]);
-		// The time range covers group 5 whole, but only from 5500 on.
-		let window = Window::new(
-			&[range(Anchor::Absolute(6), None), range(time(5500), None)],
-			Some(5),
-			&groups,
-		)
-		.unwrap();
-		assert!(!window.admits_datagram(5, Some(at(5000))));
-		assert!(window.admits_datagram(5, Some(at(5500))));
-		assert!(window.admits_datagram(6, Some(at(5000))));
-	}
-
-	/// The indexed admission agrees with judging each range on its own, over mixed anchors,
-	/// scales, and relative anchors resolved or still waiting.
-	#[test]
-	fn datagram_admission_matches_each_range_judged_alone() {
-		fn admits_alone(window: &Window, sequence: u64, timestamp: Timestamp) -> bool {
-			window.ranges.iter().enumerate().any(|(index, range)| {
-				if range.is_empty() {
-					return false;
-				}
-				let span = window.spans.iter().find(|span| span.index == index);
-				let started = match range.start {
-					Anchor::Time(pts) => !later(pts, timestamp),
-					Anchor::Absolute(start) => sequence >= start,
-					Anchor::Relative(_) => span.is_none_or(|span| sequence >= span.start),
-				};
-				let ended = match range.end {
-					None => true,
-					Some(Anchor::Time(pts)) => !later(timestamp, pts),
-					Some(Anchor::Absolute(end)) => sequence < end,
-					Some(Anchor::Relative(_)) => {
-						span.is_none_or(|span| !matches!(span.end, End::Before(end) if sequence >= end))
-					}
-				};
-				started && ended
-			})
-		}
-
-		// A small deterministic generator, so a failure replays.
-		let seed = Cell::new(0x9e37_79b9_7f4a_7c15_u64);
-		let next = |bound: u64| {
-			let mut x = seed.get();
-			x ^= x << 13;
-			x ^= x >> 7;
-			x ^= x << 17;
-			seed.set(x);
-			x % bound
-		};
-		let micros = |value| Timestamp::new(value, crate::Timescale::MICRO).unwrap();
-		let groups = Groups::new((0..20).map(|sequence| Groups::started(sequence, sequence * 100)));
-		for round in 0..300 {
-			let anchor = |end: bool| match next(if end { 4 } else { 3 }) {
-				0 => Anchor::Absolute(next(20)),
-				1 => Anchor::Relative(next(6)),
-				2 if next(2) == 0 => time(next(2000)),
-				2 => Anchor::Time(micros(next(2_000_000))),
-				_ => Anchor::Absolute(u64::MAX),
-			};
-			let ranges: Vec<Range> = (0..1 + next(6))
-				.map(|_| {
-					let start = anchor(false);
-					let end = match next(4) {
-						0 => None,
-						_ => Some(anchor(true)),
-					};
-					range(start, end)
+	fn a_time_start_waits_for_a_group_to_start() {
+		let pending = (2..10).map(|sequence| (sequence, Held::Pending));
+		let mut groups = Groups::new(pending.clone());
+		let ranges = [
+			range(time(2500), None),
+			range(Anchor::Absolute(20), Anchor::Absolute(21)),
+		];
+		let mut window = Window::new(&ranges, Some(9), &groups).unwrap();
+		assert!(!window.is_pending() && !window.is_settled());
+		assert_eq!(covered(&window, 22), vec![20], "only the other range reads");
+		assert_eq!((window.floor(), window.start(), window.end()), (None, None, None));
+		assert_eq!(
+			window.resolved(),
+			vec![
+				None,
+				Some(Resolved {
+					start: 20,
+					end: Some(21)
 				})
-				.collect();
-			let latest = (round % 3 != 0).then(|| next(20));
-			let held = match latest {
-				Some(_) => &groups,
-				None => &Groups::default(),
-			};
-			let window = Window::new(&ranges, latest, held).unwrap();
-			for _ in 0..40 {
-				let sequence = next(24);
-				let timestamp = match next(2) {
-					0 => at(next(2400)),
-					_ => micros(next(2_400_000)),
-				};
-				assert_eq!(
-					window.admits_datagram(sequence, Some(timestamp)),
-					admits_alone(&window, sequence, timestamp),
-					"{ranges:?} at {latest:?}: datagram {sequence} at {timestamp:?}"
-				);
-			}
+			]
+		);
+		assert_eq!(window.watch_starts(), Some(0), "any group starting may resolve it");
+		assert!(!window.settle(Some(9), &groups), "nothing started");
+
+		groups.held.insert(3, Held::Started(at(3000)));
+		assert!(window.settle(Some(9), &groups));
+		assert_eq!(
+			window.resolved()[0],
+			Some(Resolved { start: 0, end: None }),
+			"3 starts past it"
+		);
+		groups.held.insert(2, Held::Started(at(2000)));
+		let window = Window::new(&ranges, Some(9), &groups).unwrap();
+		assert_eq!(window.resolved()[0], Some(Resolved { start: 2, end: None }));
+		assert!(window.is_settled());
+
+		let groups = Groups {
+			complete: true,
+			..Groups::new(pending)
+		};
+		let window = Window::new(&ranges, Some(9), &groups).unwrap();
+		assert_eq!(window.resolved()[0], Some(Resolved { start: 0, end: None }));
+	}
+
+	/// A relative end counts back from the latest group it was asked against, however many
+	/// arrive while its time start waits.
+	#[test]
+	fn a_waiting_time_start_keeps_its_relative_end() {
+		for latest in [None, Some(9)] {
+			let mut groups = Groups::default();
+			let ranges = [range(time(2500), Anchor::Relative(0))];
+			let mut window = Window::new(&ranges, latest, &groups).unwrap();
+			assert_eq!(window.is_pending(), latest.is_none());
+			groups.held.extend((2..10).map(|sequence| (sequence, Held::Pending)));
+			window.settle(Some(9), &groups);
+			assert!(!window.is_pending());
+			groups.held.insert(10, Held::Pending);
+			assert!(!window.settle(Some(10), &groups), "nothing started");
+
+			groups.held.insert(2, Held::Started(at(2000)));
+			assert!(window.settle(Some(10), &groups));
+			assert_eq!(
+				window.resolved()[0],
+				Some(Resolved {
+					start: 2,
+					end: Some(10)
+				})
+			);
 		}
 	}
 
