@@ -29,7 +29,11 @@ fn default_bandwidth(kind: Kind) -> u64 {
 }
 
 /// The fewest groups one segment request may fetch: see [`Rendition::max_groups`].
-const MAX_SEGMENT_GROUPS: u64 = 1024;
+const MIN_SEGMENT_GROUPS: u64 = 1024;
+
+/// The most groups one segment request ever fetches, whatever interval the catalog declares: see
+/// [`Rendition::max_groups`]. 20 ms audio groups fill it in about 22 minutes.
+const MAX_SEGMENT_GROUPS: u64 = 1 << 16;
 
 /// DASH timelines are in milliseconds.
 const TIMESCALE: u32 = 1000;
@@ -442,14 +446,14 @@ impl Rendition {
 		self.segment
 	}
 
-	/// The most groups one segment request fetches: one per millisecond of the segment length, and
-	/// at least [`MAX_SEGMENT_GROUPS`]. This bounds a request's work by the media it serves, while
-	/// a publisher grouping far finer than its interval can't turn one request into an endless
-	/// fetch loop.
+	/// The most groups one segment request fetches: one per millisecond of the segment length,
+	/// between [`MIN_SEGMENT_GROUPS`] and [`MAX_SEGMENT_GROUPS`]. This bounds a request's work by
+	/// the media it serves, while neither a publisher grouping far finer than its interval nor one
+	/// declaring a huge interval can turn one request into an endless fetch loop.
 	pub(crate) fn max_groups(&self) -> u64 {
 		u64::try_from(self.segment.as_millis())
 			.unwrap_or(u64::MAX)
-			.max(MAX_SEGMENT_GROUPS)
+			.clamp(MIN_SEGMENT_GROUPS, MAX_SEGMENT_GROUPS)
 	}
 
 	/// The advertised bitrate in bits per second, for the master playlist `BANDWIDTH` attribute
@@ -2035,6 +2039,32 @@ mod tests {
 	/// A one-second join interval.
 	fn interval() -> Duration {
 		Duration::from_secs(1)
+	}
+
+	// One request fetches a group per millisecond of the segment, within fixed bounds the catalog's
+	// interval can't move.
+	#[tokio::test]
+	async fn a_segment_request_fetches_a_bounded_number_of_groups() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let source = moq_mux::Source::new(produce_origin().consume(), broadcast.consume());
+		let renditions = renditions::Producer::spawned(Duration::from_secs(30));
+		let config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		let max_groups = |interval| {
+			Rendition::video("video".into(), &config, &source, interval, None, renditions.fanout())
+				.unwrap()
+				.max_groups()
+		};
+		assert_eq!(
+			max_groups(Duration::from_millis(20)),
+			MIN_SEGMENT_GROUPS,
+			"a 1 s segment"
+		);
+		assert_eq!(max_groups(Duration::from_secs(4)), 4_000);
+		assert_eq!(
+			max_groups(Duration::from_secs(3_600)),
+			MAX_SEGMENT_GROUPS,
+			"an hour declared"
+		);
 	}
 
 	// A replacement skips the groups its predecessor read only on the same track: the same name in
