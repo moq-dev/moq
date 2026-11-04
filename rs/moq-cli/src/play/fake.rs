@@ -129,6 +129,11 @@ pub(super) struct FakeSink {
 }
 
 impl Sink for FakeSink {
+	fn set_latency(&mut self, latency: Duration) -> anyhow::Result<()> {
+		self.latency = latency;
+		Ok(())
+	}
+
 	async fn finish(self) {
 		kio::clock::sleep_until(self.end).await;
 	}

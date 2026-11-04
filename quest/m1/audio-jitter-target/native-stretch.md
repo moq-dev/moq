@@ -16,59 +16,66 @@ specifies it.
 ## Plan
 
 Decided 2026-11-03 (maintainer, on
-[moq-dev/moq#7679](https://github.com/moq-dev/moq/pull/7679): "m1 please copy
-what NetEQ does"), milestone:
+[moq-dev/moq#7679](https://github.com/moq-dev/moq/pull/7679)): copy NetEq in m1.
+The implementation now ports its received-audio accelerate and preemptive
+expand into the native playback callback. The estimator is unchanged.
+`doc/concept/audio-jitter.md` specifies the shared floating-point algorithm;
+`doc/concept/audio-jitter/stretch/corpus.json` supplies literal PCM vectors
+for both languages. The browser half remains
+[Watch](/quest/m1/audio-jitter-target/watch.md); neither implementation waits
+for the other.
 
-- m0
-- ✅ m1, in this epic
-- m2
+The port retains WebRTC's BSD notice and patent grant, 4 kHz analysis,
+50-sample correlation at lags 10 through 59, 14746/16384 normal and
+8192/16384 fast admission thresholds, passive-speech VAD, 20 ms decision
+band, 4x fast threshold, and 60 ms startup / 50 ms successful-stretch
+cooldowns. Analysis samples NetEq's 48 kHz FIR on a virtual clock for other
+device rates and uses floating-point peak refinement and fades. Those
+arithmetic adaptations are documented, not claimed bit-identical to int16
+WebRTC. No threshold was tuned.
 
-This is the native half. The browser half is
-[Watch](/quest/m1/audio-jitter-target/watch.md), into which #7679 (merged)
-folded the browser stretch, scoping native playback out of it. The two share
-the algorithm and vectors below.
-Today the native ring (`rs/moq-audio/src/ring.rs`) pads a dry ring with
-silence back up to its latency and trims when the writer runs ahead, so
-jitter and drift cost a glitch.
+Callback state is preallocated and uses the existing SPSC ring. Startup
+silence and short/finished input bypass stretching. A genuine underrun
+emits emergency silence until received PCM refills the target; it never
+reanalyses padding or repeats history after input ends. Only the existing
+capacity watermark and an incoming excess at the fast threshold trim.
 
-**Copy NetEq.** Accelerate removes, and preemptive expand repeats, whole pitch
-periods found by autocorrelation, overlap-adding at the seam. Start from
-NetEq's thresholds and change one only with a measurement:
+Remaining verification:
 
-- [`time_stretch.h`](https://webrtc.googlesource.com/src/+/refs/heads/main/modules/audio_coding/neteq/time_stretch.h) and
-  [`time_stretch.cc`](https://webrtc.googlesource.com/src/+/refs/heads/main/modules/audio_coding/neteq/time_stretch.cc): the shared search. It downsamples
-  to 4 kHz, autocorrelates over `kCorrelationLen` 50 samples for lags
-  `kMinLag` 10 to `kMaxLag` 60 (2.5 to 15 ms), runs a simple VAD, and
-  stretches only on `kCorrelationThreshold` 14746 (0.9 in Q14) or passive
-  speech.
-- [`accelerate.cc`](https://webrtc.googlesource.com/src/+/refs/heads/main/modules/audio_coding/neteq/accelerate.cc): about 30 ms of input, and a 0.5
-  threshold (8192 in Q14) in fast mode.
-- [`preemptive_expand.cc`](https://webrtc.googlesource.com/src/+/refs/heads/main/modules/audio_coding/neteq/preemptive_expand.cc): the 0.9 threshold and
-  at least 15 ms of new data.
-- [`decision_logic.cc`](https://webrtc.googlesource.com/src/+/refs/heads/main/modules/audio_coding/neteq/decision_logic.cc): when to accelerate or expand
-  against the target, at `kDelayAdjustmentGranularityMs` (20 ms).
+- Native `test/audio-quality` rows must show zero steady-state underruns
+  once their targets settle. Keep a failed or void row explicit and fix
+  any implementation cause before calling this complete.
+- Re-measure the provisional native budgets from seven scheduled nightly
+  artifacts using `budgets.json`'s rule: worst clean run times 1.25, plus
+  its documented native hiccup, rounded to two significant figures. A
+  developer run is not that calibration.
+- Run `just rs bench-playback` on a quiet host with no other agents. It
+  now sweeps both sink count and callback size with and without stretch
+  and is included in nightly CI. A loaded-host smoke run is not a timing
+  acceptance claim.
+- Listen to real speech with 2 ms/s drift and the measured expansions on
+  a real output device. Deterministic PCM and allocation checks do not
+  establish perceptual acceptance.
 
-WebRTC is BSD-3-Clause; keep its notice with any code ported from it.
+Public API proposal: `playback::Sink::set_latency(Duration)` passes the
+moving target from `moq play` to the callback and preserves it across device
+rebuilds. Existing fixed-latency callers need no change. Wire: none.
 
-**Share with JS.** Like the estimator, the stretch is specified once and
-implemented in both languages. Whichever of this quest and the browser stretch lands first
-adds the stretch to `doc/concept/audio-jitter.md` (normative), with test
-vectors beside the [conformance corpus](/doc/concept/audio-jitter.md):
-input PCM, buffered distance, target, and hysteresis state, the expected accelerate, expand, or hold, and the expected output. The
-second one conforms to them. Neither waits on the other, since the design
-is NetEq's, not either implementation's.
+## Waiting
 
-- Stretch on the PCM the ring hands to the device callback, driven by the
-  distance between buffered audio and the target. The callback stays
-  allocation-free and lock-free, as the ring is today.
-- Padding with silence remains only for a ring the stretch couldn't keep fed,
-  and a trim only for a distance it can't close within a bound.
-- Verification: the native rows reach 0 `underruns` per minute after the
-  target settles, and their provisional budgets are re-measured on the nightly
-  runner by the budgets note's rule. A listening check confirms that a 2 ms/s
-  drift and the measured expansions are inaudible or close to it.
-
-Public API: none expected. Wire: none.
+- Maintainer: accept the proposed `Sink::set_latency(Duration)` API and
+  documented floating-point NetEq adaptation, or request a different target
+  handoff / an int16 port. Recommend the proposed setter and shared float
+  corpus, consistent with the estimator's cross-language arithmetic. The
+  quest expected no API addition; the callback otherwise knows only its
+  opening target, while the CLI owns the moving estimate. The AFK brief
+  reserves consequential API choices for the maintainer.
+- Maintainer: confirm listening evidence for 2 ms/s drift and measured
+  expansions on a real device. Recommend retaining this check before
+  claiming the perceptual goal; automated amplitude tests cannot decide it.
+- moq-dev/moq: collect seven scheduled native nightly rows for this
+  implementation, then apply the existing calibration rule. Keep the
+  current provisional budgets until those artifacts exist.
 
 ## Related
 

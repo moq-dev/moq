@@ -16,7 +16,7 @@ use kio::clock::Instant;
 use super::args::Args;
 use super::output::{Output, Sink, Speaker};
 use super::playback::{Kind, Playback, Track, joined};
-use super::timeline::{AudioTimeline, fit};
+use super::timeline::AudioTimeline;
 use super::video::{Refresh, Video};
 use super::window::Event;
 use moq_mux::timeline::{Producer as Presentation, Transition};
@@ -34,13 +34,9 @@ enum Crossing {
 /// network jitter, and one with no depth at all can never be read from.
 const AUDIO_BUFFER_MIN: Duration = Duration::from_millis(50);
 
-/// How far the speaker may hold more than its target, ahead of a write, before
-/// the write skips back onto it.
-///
-/// The level moves by a device period each time the speaker pulls, so a margin
-/// under that would skip on ordinary cadence. Anything over it is latency nobody
-/// asked for, since a live stream arrives as fast as it plays and never drains
-/// the excess on its own.
+/// NetEq's delay adjustment granularity. The callback handles ordinary
+/// differences by stretching; the write path re-anchors only at four times
+/// the target plus this granularity.
 const AUDIO_SLACK: Duration = Duration::from_millis(20);
 
 /// Maximum sample frames per silence write, independent of the catalog rate.
@@ -579,13 +575,11 @@ async fn play_audio<O: Output>(
 	input.format = moq_audio::Format::F32;
 	input.sample_rate = sample_rate;
 	input.layout = layout;
-	// The floor the sink opens on and pads an underflow back to, and what sizes
-	// its ring, so a fixed delay has to be it or the ring could not hold it. An
-	// estimated target moves, so it gets the floor, and `fit` steers the sink
-	// onto the target on every write.
+	// The floor the sink opens on, and what sizes its ring, so a fixed delay
+	// must fit from setup. An estimated target moves: update the callback's
+	// target on each write and let it stretch received PCM to converge.
 	input.latency = latency;
 	let mut sink = speaker.sink(input.clone())?;
-	let mut dry = true;
 
 	// One sample across every channel, the unit a write has to stay aligned to.
 	let stride = channels as usize * size_of::<f32>();
@@ -738,7 +732,6 @@ async fn play_audio<O: Output>(
 							sequential = true;
 							timeline = AudioTimeline::default();
 							sink = speaker.sink(input.clone())?;
-							dry = true;
 						}
 						None => {}
 					}
@@ -785,7 +778,6 @@ async fn play_audio<O: Output>(
 				drop(sink);
 				presentation.audio_restarted();
 				sink = speaker.sink(input.clone())?;
-				dry = true;
 			}
 
 			// Resumed media was received while the old tail played. Keep its
@@ -806,20 +798,27 @@ async fn play_audio<O: Output>(
 			// re-anchors, taking the video with it. So the hole goes in as silence ahead
 			// of the frame, and the pair is fitted to the target as one write.
 			let buffered = samples(sink.buffered());
-			dry |= buffered == 0;
 			// Capped at the age budget: audio older than it is skipped rather than held,
 			// so a deeper target could never fill. The advertised floor needs the cap,
 			// being a number the publisher declared about itself, unbounded. The budget
 			// is also what the sink's ring was sized to hold.
 			let held = delay.min(max_delay).max(AUDIO_BUFFER_MIN);
 			let target = samples(held);
-			let fit = fit(dry, buffered, target, slack, timing.silence, length as u64);
-			dry = false;
+			sink.set_latency(held)?;
+			// Leave normal convergence to the callback. Only an excess at NetEq's
+			// fast threshold (four times target + granularity) is an emergency
+			// re-anchor; a 20 ms trim would compete with every pitch correction.
+			let ahead = buffered + timing.silence;
+			let skip = if ahead >= 4 * (target + slack) {
+				(ahead - target).min(timing.silence + length as u64)
+			} else {
+				0
+			};
 
 			// The packet pays for the channel count; the catalog cannot allocate
 			// a duration's worth of silence before any samples arrive.
 			silence.resize(length.min(AUDIO_SILENCE) * stride, 0);
-			let mut quiet = fit.pad + timing.silence.saturating_sub(fit.skip);
+			let mut quiet = timing.silence.saturating_sub(skip);
 			while quiet > 0 && !silence.is_empty() {
 				let frames = quiet.min((silence.len() / stride) as u64) as usize;
 				let written = sink.write(&silence[..frames * stride])?;
@@ -830,7 +829,7 @@ async fn play_audio<O: Output>(
 				}
 				quiet -= frames as u64;
 			}
-			let skip = fit.skip.saturating_sub(timing.silence) as usize * stride;
+			let skip = skip.saturating_sub(timing.silence) as usize * stride;
 			let _ = sink.write(&frame.data[skip.min(frame.data.len())..])?;
 
 			// Anchor the playout clock on where the speaker has actually reached, which

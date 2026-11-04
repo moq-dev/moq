@@ -4,6 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Playback follows a changing latency with received-audio stretch
+
+`Sink::set_latency(duration)?` updates the device callback's playout target
+without replacing the sink. The duration must fit the ring allocated at open
+(the opening latency plus three seconds, less a 30 ms processing window) and
+remain within `Input::LATENCY_MAX`. Existing callers need no change: sinks
+stretch toward `Input::latency` by default. `buffered()` includes output staged
+by the stretcher, and `finish()` drains it. Missing input still plays silence;
+this adds no packet loss concealment.
+
 ### The bus routes sources into several mixes, advanced by a driver
 
 `Bus::new(config)?` returns `(Bus, Driver)`. The `Bus` stays the cloneable
