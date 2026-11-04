@@ -60,11 +60,12 @@ These land with the next breaking release.
 - **Auth roles are pattern arrays.** Uncapped tokens and grants keep their
   format. An object role, including one with a `rate` cap, is refused; use
   pattern arrays for `publish` and `subscribe`.
-- **HLS records replace archive timelines.** The hang catalog's root `archive`
-  section is gone. A video or audio rendition carries its own `hls` field
-  naming a `<track>.hls` record track, which Rust publishers write by default.
-  Neither side reads the other's shape, so upgrade HLS exporters and their
-  publishers together.
+- **The join interval replaces archive timelines.** The hang catalog's root
+  `archive` section is gone, and the root `clock` moved to `media.clock`. The
+  catalog's `media.join.interval`, the longest GOP of any track, is the grid an
+  HLS exporter numbers segments on from the media tracks themselves; Rust
+  publishers and `@moq/publish` declare it. Neither side reads the other's
+  shape, so upgrade HLS exporters and their publishers together.
 - **Announce restarts.** moq-lite 07 adds `ANNOUNCE_RESTART` (0x3): another
   instance, or a higher epoch of the same one, now serves the prefix. lite-06's
   `ANNOUNCE_RESTART` is named `ANNOUNCE_UPDATE`, as it always meant. Elsewhere,
