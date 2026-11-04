@@ -62,7 +62,7 @@ VAAPI's completed cycle adopted crates.io `moq-vaapi 0.1.1` after
 the next cycle, always include moq-dev/vaapi even though it is a crates.io
 dependency outside this tree. Restore its Goal of auditing both ChromeOS
 upstreams and publishing/adopting any needed fixes. Carry checked heads and
-dispositions from [VAAPI's Upstream audit](https://github.com/moq-dev/vaapi/blob/v0.1.1/README.md#upstream-audit),
+dispositions from [VAAPI's Upstream audit](https://github.com/moq-dev/vaapi/blob/v0.1.1/README.md#upstream),
 which records cros-libva `59384456ac2ae78c0c3e5515f41ef1efd9b802cf` and
 cros-codecs `a050c6cde530e563197ee9e3e72ab01f48a0c41f`.
 

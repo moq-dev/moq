@@ -11,7 +11,7 @@ surfaces.
 
 Decided in the 2026-09-30 audit: moved from m4, and the "gated on a
 `moq-dev/vaapi` release" blocker is gone. That crate is our own repo (last
-release 0.1.1 on 2026-09-24), so this quest includes the crate work (HEVC
+release 0.1.1 on 2026-11-04), so this quest includes the crate work (HEVC
 encode, H.265 decode, pre-generated bindings, the resize pool) and cutting the
 release, then bumping the workspace requirement here. The resize-pool quest
 folds in for the same reason.
