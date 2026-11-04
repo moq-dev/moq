@@ -9763,7 +9763,7 @@ mod test {
 
 	#[test]
 	fn a_missing_group_uses_the_subscription_grace() {
-		let producer = track_producer("test", Info::default());
+		let producer = track_producer("test", None);
 		let budget = Duration::from_millis(50);
 		let _sub = producer.subscribe(Subscription::default().with_delay(Delay::default().with_max(budget)));
 		let feed = producer.consume();
@@ -9980,7 +9980,7 @@ mod test {
 	/// it gets that group, which ends with nothing, then the next one.
 	#[test]
 	fn a_live_edge_reader_starts_on_an_empty_largest_group() {
-		let producer = track_producer("test", Info::default());
+		let producer = track_producer("test", None);
 		let noop = kio::Waiter::noop();
 		let mut first = producer.append_group().unwrap();
 		first.write_frame(None, &b"a"[..]).unwrap();
@@ -10161,7 +10161,7 @@ mod test {
 	/// aggregate.
 	#[test]
 	fn a_range_reads_only_its_groups() {
-		let producer = track_producer("test", Info::default());
+		let producer = track_producer("test", None);
 		let _groups: Vec<_> = (3..8)
 			.map(|sequence| {
 				let mut group = framed(&producer, sequence, 8);
@@ -10416,7 +10416,7 @@ mod test {
 
 	/// A relay copy holding groups 0 to 3 from an ended feed, idle until its route answers.
 	fn idle_copy() -> Producer {
-		let mut producer = track_producer("test", Info::default());
+		let mut producer = track_producer("test", None);
 		for sequence in 0..4 {
 			framed(&producer, sequence, 1).finish().unwrap();
 		}
@@ -11832,7 +11832,7 @@ mod test {
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_parked_read_wakes_at_its_wall_deadline() {
-		for (info, primed) in [Info::default(), Info::timed()]
+		for (info, primed) in [Info::default().with_max_age(None), Info::timed()]
 			.into_iter()
 			.flat_map(|info| [(info.clone(), true), (info, false)])
 		{
@@ -11882,7 +11882,7 @@ mod test {
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_frameless_successor_ages_its_predecessor() {
-		for info in [Info::default(), Info::timed()] {
+		for info in [Info::default().with_max_age(None), Info::timed()] {
 			let producer = track_producer("test", info.clone());
 			let at = info.timescale.map(|_| Timestamp::ZERO);
 			elapse(&producer, Duration::ZERO);
@@ -12359,7 +12359,7 @@ mod test {
 	#[test]
 	#[cfg(feature = "async")]
 	fn an_unjudgeable_gap_does_not_hide_a_fresh_ordered_gap() {
-		let mut producer = track_producer("test", Info::default());
+		let mut producer = track_producer("test", None);
 		producer.received();
 		for sequence in [0, 4] {
 			framed(&producer, sequence, 1).finish().unwrap();
@@ -18500,7 +18500,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn answered_heads_go_out_in_the_subscription_order() {
 		for (order, expected) in [(Order::Ascending, [0, 1]), (Order::Descending, [1, 0])] {
-			let producer = track_producer("test", Info::default());
+			let producer = track_producer("test", None);
 			let dynamic = producer.requests();
 			for sequence in 0..2 {
 				let mut live = producer.create_group(group::Info { sequence }).unwrap();
@@ -18542,7 +18542,7 @@ mod test {
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_head_answered_outside_the_ranges_is_not_handed_out() {
-		let producer = track_producer("test", Info::default());
+		let producer = track_producer("test", None);
 		let dynamic = producer.requests();
 
 		let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
@@ -18572,7 +18572,7 @@ mod test {
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_bounded_read_gives_up_a_group_whose_head_is_refused() {
-		let producer = track_producer("test", Info::default());
+		let producer = track_producer("test", None);
 		let dynamic = producer.requests();
 
 		let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
@@ -20727,7 +20727,7 @@ mod test {
 			group.write_frame(None, &b"x"[..]).unwrap();
 			group.finish().unwrap();
 		};
-		let mut producer = track_producer("test", Info::default());
+		let mut producer = track_producer("test", None);
 		producer.fills_from_start();
 		let dynamic = producer.requests();
 		let mut subscriber = producer.subscribe(replay().with_range(0..));

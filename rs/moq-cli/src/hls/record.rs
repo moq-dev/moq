@@ -622,7 +622,10 @@ mod tests {
 			let video = names
 				.iter()
 				.map(|name| {
-					let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
+					// Media's max age, so a segment stays fetchable once its successor starts.
+					let info = moq_net::track::Info::default()
+						.with_timescale(moq_net::Timescale::MILLI)
+						.with_max_age(hang::container::MAX_AGE);
 					let track = broadcast.create_track(*name, info).unwrap();
 					let container = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
 					reserved.video(track, container, config_of(320)).unwrap()

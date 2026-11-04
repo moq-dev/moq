@@ -11,9 +11,12 @@
 use moq_tokio::moq_net::{self, Hop};
 use std::time::Duration;
 
-/// A millisecond track: the frames written here carry timestamps.
+/// A millisecond track with no publisher max age: the frames written here carry timestamps,
+/// and superseded groups stay readable.
 fn timed() -> moq_net::track::Info {
-	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	moq_net::track::Info::default()
+		.with_timescale(moq_net::Timescale::MILLI)
+		.with_max_age(None)
 }
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -497,7 +500,9 @@ async fn lite05_fetch_during_subscribe(scheme: &str) {
 	let track = broadcast
 		.create_track(
 			"video",
-			moq_net::track::Info::default().with_timescale(Timescale::MICRO),
+			moq_net::track::Info::default()
+				.with_timescale(Timescale::MICRO)
+				.with_max_age(None),
 		)
 		.expect("failed to create track");
 

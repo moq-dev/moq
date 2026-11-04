@@ -139,10 +139,12 @@ impl Recording {
 
 		let mut sources = HashMap::new();
 		for name in ["360p", "1080p", "audio"] {
-			// Legacy media is stamped in microseconds.
+			// Legacy media is stamped in microseconds. It is published in bursts, so it sets no
+			// publisher max age and the recorder stores every superseded group.
 			let media = track::Info::default()
 				.with_timescale(Timescale::new(1_000_000).unwrap())
-				.with_priority(1);
+				.with_priority(1)
+				.with_max_age(None);
 			let media = broadcast.create_track(name, media).unwrap();
 			let track = broadcast
 				.create_track(hang::hls::default_name(name), moq_mux::hls::Producer::info())

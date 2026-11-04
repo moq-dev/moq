@@ -145,9 +145,12 @@ pub fn catalog_config() -> moq_mux::catalog::Config {
 	moq_mux::catalog::Config::default().with_hls(hls)
 }
 
-/// A millisecond track: the frames written here carry timestamps.
+/// A millisecond track: the frames written here carry timestamps. It sets no publisher max
+/// age, so the segments a playlist lists stay fetchable once superseded.
 pub fn timed() -> moq_net::track::Info {
-	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	moq_net::track::Info::default()
+		.with_timescale(moq_net::Timescale::MILLI)
+		.with_max_age(None)
 }
 
 /// A 320x240 VP8 rendition, whose init its catalog config alone describes.

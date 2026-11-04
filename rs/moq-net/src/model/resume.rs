@@ -5667,18 +5667,14 @@ mod test {
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn an_untimed_group_no_route_continues_is_given_up_by_wall_clock() {
-		let untimed = || {
-			track::Producer::new(
-				Arc::new(broadcast::Info::default()),
-				"video",
-				crate::track::Info::default(),
-			)
-		};
+		// No publisher max age, so only the subscription's budget gives the group up.
+		let info = || crate::track::Info::default().with_max_age(None);
+		let untimed = || track::Producer::new(Arc::new(broadcast::Info::default()), "video", info());
 		for warm in [false, true] {
 			let routes = Producer::new();
 			let logical = track::Request::new(Arc::new(broadcast::Info::default()), "video")
 				.routes(routes.consume())
-				.accept(crate::track::Info::default());
+				.accept(info());
 			let a = untimed();
 			routes.serve(a.consume());
 			let mut sub = subscribe(&logical, Duration::from_secs(1));

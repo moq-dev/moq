@@ -62,8 +62,9 @@ fn millis(ms: u64) -> Timestamp {
 	Timestamp::from_millis(ms).unwrap()
 }
 
+/// An untimed track with no publisher max age, so superseded groups stay readable.
 fn untimed() -> track::Info {
-	track::Info::default().with_timescale(None)
+	track::Info::default().with_timescale(None).with_max_age(None)
 }
 
 /// Origins chained by one session per hop, each hop on its own version.

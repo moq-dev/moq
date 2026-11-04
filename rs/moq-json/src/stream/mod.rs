@@ -370,11 +370,12 @@ mod test {
 	fn a_second_group_is_reported_while_the_first_is_open() {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", timed())
+			.create_track("test", timed().with_max_age(None))
 			.unwrap();
 
 		// Ask for a replay window, so the first group is delivered rather than skipped by the
-		// subscriber's default max delay budget once a newer group exists.
+		// subscriber's default max delay budget once a newer group exists. The track keeps it
+		// fresh with an unlimited max age.
 		let subscription = moq_net::track::Subscription::default()
 			.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(30)));
 		let subscriber = track.subscribe(subscription);

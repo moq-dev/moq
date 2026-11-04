@@ -2433,7 +2433,7 @@ mod tests {
 
 	/// A pre-lite-05 relay's track, untimed, with a fetch of `sequence` queued on it.
 	fn feed_fetch(sequence: u64) -> (track::Producer, kio::Pending<track::Fetching>, track::Fill) {
-		let info = track::Info::default().with_timescale(None);
+		let info = track::Info::default().with_timescale(None).with_max_age(None);
 		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", info);
 		let dynamic = track.requests();
 		let fetching = track.consume().fetch_group(sequence, None);
@@ -2652,7 +2652,7 @@ mod tests {
 	fn feed_batch(
 		sequences: impl IntoIterator<Item = u64>,
 	) -> (track::Producer, Vec<kio::Pending<track::Fetching>>, Vec<track::Fill>) {
-		let info = track::Info::default().with_timescale(None);
+		let info = track::Info::default().with_timescale(None).with_max_age(None);
 		let track = track::Producer::new(Arc::new(crate::broadcast::Info::default()), "video", info);
 		let dynamic = track.requests();
 		let mut callers = Vec::new();
@@ -2824,7 +2824,7 @@ mod tests {
 		let clock = crate::time::Deadlines::new(start);
 		let tail = kio::Producer::new(Tail::default());
 		let sub = feed_sub(&tail).await;
-		let info = track::Info::default().with_timescale(None);
+		let info = track::Info::default().with_timescale(None).with_max_age(None);
 		let mut track = track::Producer::new(Arc::new(crate::broadcast::Info::default()), "video", info);
 		let dynamic = track.requests();
 		let mut reader = track.subscribe(
@@ -5044,7 +5044,9 @@ mod tests {
 		let track = crate::track::Producer::new(
 			Arc::new(crate::broadcast::Info::default()),
 			"video",
-			crate::track::Info::default().with_timescale(Timescale::MILLI),
+			crate::track::Info::default()
+				.with_timescale(Timescale::MILLI)
+				.with_max_age(None),
 		);
 		// Every group, oldest first, however late.
 		let every = Subscription::default()

@@ -1230,10 +1230,10 @@ struct SiTrack {
 	dirty: bool,
 	/// Media timestamp of the last emission ([`Export::mux`]).
 	last_emit: Option<Timestamp>,
-	/// The same budget the media sources use. SI carries table snapshots at a low
-	/// rate, so the real-time default would take only the newest group and drop
-	/// the revisions between: an SI track needs the export's replay window as much
-	/// as the media it describes.
+	/// The same budget the media sources use, asked of the SI track's publisher. It
+	/// reaches back only as far as that publisher's max age allows: an SI track the
+	/// TS importer publishes takes moq-net's zero default, so the export reads its
+	/// newest snapshot, which restates the table.
 	max_age: Duration,
 }
 

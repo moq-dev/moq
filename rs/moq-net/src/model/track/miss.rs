@@ -1736,7 +1736,9 @@ mod tests {
 	#[kio::test]
 	async fn a_grace_change_with_nothing_deferred_times_the_next_gap() {
 		let broadcast = crate::broadcast::Info::default().produce();
-		let track = broadcast.create_track("grace", crate::track::Info::default()).unwrap();
+		let track = broadcast
+			.create_track("grace", crate::track::Info::default().with_max_age(None))
+			.unwrap();
 		let budget = Duration::from_secs(5);
 		let _reader = track.subscribe(Subscription::default().with_delay(Delay::default().with_max(budget)));
 		for sequence in 0..3 {
@@ -2097,7 +2099,9 @@ mod tests {
 		}
 
 		let broadcast = crate::broadcast::Info::default().produce();
-		let mut track = broadcast.create_track("fills", crate::track::Info::default()).unwrap();
+		let mut track = broadcast
+			.create_track("fills", crate::track::Info::default().with_max_age(None))
+			.unwrap();
 		let requests = track.requests();
 		track.start_at(8).unwrap();
 		track
@@ -2170,7 +2174,9 @@ mod tests {
 		}
 
 		let broadcast = crate::broadcast::Info::default().produce();
-		let mut track = broadcast.create_track("fills", crate::track::Info::default()).unwrap();
+		let mut track = broadcast
+			.create_track("fills", crate::track::Info::default().with_max_age(None))
+			.unwrap();
 		let requests = track.requests();
 		track.start_at(8).unwrap();
 		track

@@ -10,9 +10,12 @@ use hang::catalog::{AudioCodec, VideoCodec};
 
 use super::{Export, Import};
 
-/// A millisecond track: the frames written here carry timestamps.
+/// A millisecond media track: the frames written here carry timestamps. It declares media's
+/// max age, so an exporter started after publishing still reads the superseded groups.
 fn timed() -> moq_net::track::Info {
-	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	moq_net::track::Info::default()
+		.with_timescale(moq_net::Timescale::MILLI)
+		.with_max_age(hang::container::MAX_AGE)
 }
 
 /// Open an FLV export on the hang catalog of `source`.

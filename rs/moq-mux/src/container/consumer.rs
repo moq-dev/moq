@@ -1480,9 +1480,12 @@ mod tests {
 
 	use bytes::Bytes;
 
-	/// A millisecond track: the frames written here carry timestamps.
+	/// A millisecond track: the frames written here carry timestamps. It sets no publisher max
+	/// age, so the test's delay budget alone decides which superseded groups are read.
 	fn timed() -> moq_net::track::Info {
-		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+		moq_net::track::Info::default()
+			.with_timescale(moq_net::Timescale::MILLI)
+			.with_max_age(None)
 	}
 
 	/// Mint a standalone track for tests via a throwaway broadcast, since tracks are
