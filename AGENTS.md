@@ -45,7 +45,7 @@ just fix     # Auto-fix lint/formatting, same scope
 
 Quests: before any work, run `quest context` and follow it.
 The `quest` binary and its skills come from the moq-dev/quest flake input; change them upstream and bump the input.
-Quest's Claude Code worktree hooks are a user-level opt-in: drop any `quest init` adds to `.claude/settings.json` until the pinned `quest` stops writing them.
+`quest init` refuses Claude Code's worktree hooks: drop them from `.claude/settings.json` for its run, then restore them.
 
 # Cross-Package Sync
 
