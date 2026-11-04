@@ -24,6 +24,8 @@ import dev.moq.video.FrameRate as VideoFrameRate
 import dev.moq.video.Producer as VideoProducer
 import dev.moq.video.ProducerOptions as VideoProducerOptions
 import dev.moq.video.ReadFrame as VideoReadFrame
+import java.net.DatagramSocket
+import java.net.InetAddress
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -966,25 +968,24 @@ class SmokeTest {
     /** The returned Session owns its pending dial even after Client cancellation. */
     @Test
     fun `session owns and cancels its first dial`() = runTest {
-        Server.listen(
-                ServerConfig(bind = "127.0.0.1:0", tls = ServerTls(generate = listOf("localhost")))
-            )
-            .use { server ->
-                val client =
-                    Client(
-                        ClientConfig(
-                            bind = "127.0.0.1:0",
-                            tls = ClientTls(insecure = true),
-                            once = true,
-                        )
+        // A bound socket that never answers keeps the first dial pending, so `connects`
+        // cannot advance between the read below and the cancel.
+        DatagramSocket(0, InetAddress.getByName("127.0.0.1")).use { silent ->
+            val client =
+                Client(
+                    ClientConfig(
+                        bind = "127.0.0.1:0",
+                        tls = ClientTls(insecure = true),
+                        once = true,
                     )
-                val session = client.connect("https://${server.localAddr}")
-                client.cancel()
-                assertEquals(0uL, session.state().connects)
-                session.cancel(0u)
-                session.closed()
-                assertEquals(ConnectionPhase.CLOSED, session.state().phase)
-            }
+                )
+            val session = client.connect("https://127.0.0.1:${silent.localPort}")
+            client.cancel()
+            assertEquals(0uL, session.state().connects)
+            session.cancel(0u)
+            session.closed()
+            assertEquals(ConnectionPhase.CLOSED, session.state().phase)
+        }
     }
 
     /**
