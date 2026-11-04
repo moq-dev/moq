@@ -3808,6 +3808,7 @@ impl Producer {
 	/// Record that the publisher gave up `groups` with `err`: none will arrive, so a reader
 	/// waiting on one moves past it, a group still arriving in them ends with `err`, the
 	/// declared end does not wait for them, and a relay serving this track forwards the drop.
+	#[cfg(any(test, feature = "fuzz"))]
 	pub(crate) fn drop_groups(&self, groups: ops::Range<u64>, err: StreamError) {
 		self.give_up(groups, Hole::drop(err));
 	}
