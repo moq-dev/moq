@@ -23,7 +23,7 @@ class BuildTest(unittest.TestCase):
                 metadata = json.dumps({"target_directory": str(target)})
                 library = target / "release/libmoq_ffi.so" if release else ROOT / "target/dart/debug/libmoq_ffi.so"
                 for name, source in {
-                    "cargo": f'#!/bin/sh\nif [ "$1" = metadata ]; then echo \'{metadata}\'; exit; fi\n'
+                    "cargo": f"#!/bin/sh\nif [ \"$1\" = metadata ]; then echo '{metadata}'; exit; fi\n"
                     f'printf "%s\\n" "$*" >> "{calls}"\n'
                     f'printf "%s" "${{CC:-unset}}" > "{compiler_env}"\n',
                     "rustc": '#!/bin/sh\necho "host: x86_64-unknown-linux-gnu"\n',
