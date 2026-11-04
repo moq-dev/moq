@@ -1,8 +1,16 @@
 # Migrating moq-mux
 
-How to update your code for each breaking change, newest first.
+How to adopt new APIs and update for breaking changes, newest first.
 
 ## Unreleased
+
+### Shared playout timing
+
+Native players can use `timeline::Producer` and its read-only `Consumer` instead
+of building their own audio/video clock. Feed the speaker's buffered position
+and caller-selected jitter target to the producer; the consumer selects the
+newest due video frame without waiting. `moq play` now uses the same API. No
+existing public API or wire format changes.
 
 ### JSON writes take a broadcast-clock timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
 
