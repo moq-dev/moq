@@ -1097,7 +1097,7 @@ impl Started {
 
 	/// Run the cluster's dials and peer sources on this task until they stop, or
 	/// until one of them or a task the relay cannot serve without (its
-	/// ACME renewal or certificate reload) panics. The origin, cache governor, and
+	/// certificate reload) panics. The origin, cache governor, and
 	/// stats publisher are the [`Driver`]'s work.
 	///
 	/// Standalone, this only waits for such a panic. Returning, a failure
@@ -1284,7 +1284,7 @@ pub struct Cluster {
 	/// view always points at the same session in the logs.
 	connection_ids: Arc<AtomicU64>,
 
-	/// ACME renewal and certificate reload: a panic in either stops
+	/// Certificate reload: a panic stops
 	/// [`Relay::run`](crate::Relay::run).
 	pub(crate) critical: crate::critical::Critical,
 

@@ -94,9 +94,6 @@ pub struct Relay {
 	driver: Option<cluster::Driver>,
 	internal: internal::Internal,
 	web: web::Web,
-	/// The ACME client, issuing before [`Self::run`] serves and renewing after.
-	#[cfg(feature = "acme")]
-	acme: Option<crate::acme::Acme>,
 	#[cfg(feature = "stun")]
 	stun: Option<crate::stun::Server>,
 	addr: Option<std::net::SocketAddr>,
@@ -157,9 +154,6 @@ impl Relay {
 			.get_or_insert_with(|| format!("moq-relay/{} {}", env!("CARGO_PKG_VERSION"), moq_net::IMPLEMENTATION))
 			.clone();
 		config.connect.implementation = Some(implementation.clone());
-		// Every TLS listener serves the ACME certificate, so install it before any is built.
-		#[cfg(feature = "acme")]
-		let acme = config.acme.init(&config.listen.tls, &config.web.https)?;
 		let resolved_config = Box::new(config.clone());
 		let drain_timeout = config.drain_timeout();
 		// The name this relay reports in every auth request: the stats node label,
@@ -219,17 +213,7 @@ impl Relay {
 
 		// Workers and the stream server split one relay across listeners, so they share
 		// one loaded identity. A lone server loads its own, only if a listener needs it.
-		#[cfg(feature = "acme")]
-		let resolved = acme
-			.as_ref()
-			.map(|acme| moq_tokio::tls::Serve::resolver(acme.resolver(), &config.listen.tls))
-			.transpose()?;
-		#[cfg(not(feature = "acme"))]
-		let resolved = None;
-		let served = match resolved {
-			Some(served) => Some(served),
-			None => config.runtime.workers().map(|_| config.listen.tls.load()).transpose()?,
-		};
+		let served = config.runtime.workers().map(|_| config.listen.tls.load()).transpose()?;
 		let mut listen = config.listen.clone();
 		if served.is_some() {
 			listen.tls = Default::default();
@@ -356,8 +340,6 @@ impl Relay {
 			.with_quic(&config.quic)
 			.with_sessions(sessions.clone())
 			.with_tls_acceptor(server.tls_acceptor());
-		#[cfg(feature = "acme")]
-		let web = web.with_acme(acme.as_ref().map(crate::acme::Acme::resolver));
 		let web = web.bind()?;
 		// `bind`, not `listen`: the TCP/Unix accept loops handshake as soon as
 		// they run, and `load` is not yet willing to take a session. `run`
@@ -410,8 +392,6 @@ impl Relay {
 			driver: Some(driver),
 			internal,
 			web,
-			#[cfg(feature = "acme")]
-			acme,
 			#[cfg(feature = "stun")]
 			stun,
 			addr,
@@ -578,9 +558,8 @@ impl Relay {
 	/// [`Self::shutdown_trigger`] itself, e.g. after withdrawing the node from DNS.
 	///
 	/// `run` installs the handlers just before it serves, once its startup can no
-	/// longer fail, so a signal before that takes its default action. With ACME
-	/// it installs them before the first issuance instead, so a stop request
-	/// there still ends `run`. They stay installed for the life of the process,
+	/// longer fail, so a signal before that takes its default action.
+	/// They stay installed for the life of the process,
 	/// since tokio never removes one, even after `run` fails.
 	#[must_use = "the relay with the signal choice is returned"]
 	pub fn with_signals(mut self, signals: bool) -> Self {
@@ -638,8 +617,6 @@ impl Relay {
 			cluster,
 			internal,
 			web,
-			#[cfg(feature = "acme")]
-			acme,
 			#[cfg(feature = "stun")]
 			stun,
 			shutdown,
@@ -665,27 +642,6 @@ impl Relay {
 			"no --auth-url or --auth-public configured; nobody can authenticate (an embedder decides by taking Relay::admissions)"
 		);
 
-		let mut handlers = None;
-
-		// Nothing else serves or reports ready until the certificate exists: a
-		// self-signed placeholder would only fail every browser that connects.
-		#[cfg(feature = "acme")]
-		if let Some(mut acme) = acme {
-			let listener = web.https_listener().context("ACME needs the HTTPS listener")?;
-			// Issuance can take minutes, and as a container's PID 1 the relay
-			// ignores a signal left at its default action, so a stop would wait it
-			// out. That outweighs leaving the handlers installed if a later step fails.
-			if signals {
-				handlers = Some(shutdown::Signals::new()?);
-			}
-			tokio::select! {
-				res = acme.issue(listener) => res?,
-				// No session exists yet, so this returns as soon as it starts.
-				() = drain(shutdown_trigger.clone(), shutdown.clone(), handlers.as_mut()) => return Ok(()),
-			}
-			cluster.critical.spawn("ACME renewal", acme.run());
-		}
-
 		// Validate the cluster and bind its LAN advertisement before claiming to be
 		// ready: the `cluster.run()` below is first polled after the notify, so a bad
 		// key or an mDNS failure would otherwise release the units depending on a
@@ -705,14 +661,12 @@ impl Relay {
 			})
 			.transpose()?;
 
-		// Without ACME, after the last step that can fail, since a handler outlives a
+		// After the last step that can fail, since a handler outlives a
 		// failed `run`, and before anything accepts a session a signal would kill
 		// without a GOAWAY.
 		// Nothing awaits from here to the drain below, so a signal caught in between
 		// starts the drain at its first poll, as one just after READY would.
-		if signals && handlers.is_none() {
-			handlers = Some(shutdown::Signals::new()?);
-		}
+		let mut handlers = signals.then(shutdown::Signals::new).transpose()?;
 
 		#[cfg(all(target_os = "linux", feature = "_uring"))]
 		if let Some(uring) = uring.as_mut() {
