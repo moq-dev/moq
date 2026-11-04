@@ -1498,6 +1498,31 @@ mod tests {
 		);
 	}
 
+	/// A device that cannot decode the stream refuses the rendition, so a caller
+	/// can pick another one, the same as for a codec this build lacks.
+	#[tokio::test]
+	async fn a_device_refusal_is_an_unsupported_config() {
+		let (broadcast, _track) = live_track();
+		let result = Consumer::new(
+			&broadcast.consume(),
+			&warmup_catalog(None),
+			"video",
+			Options {
+				decoder: Config {
+					kind: Kind::Named(probe::REFUSING_NAME.into()),
+					..Config::new()
+				},
+				..Options::new()
+			},
+		)
+		.await;
+		match result {
+			Err(Error::UnsupportedConfig(reason)) => assert!(reason.contains("cannot decode"), "{reason}"),
+			Err(other) => panic!("expected UnsupportedConfig, got {other:?}"),
+			Ok(_) => panic!("the consumer opened a decoder its device refused"),
+		}
+	}
+
 	/// A max-delay decode error reaches the caller, like a min-delay one.
 	#[tokio::test]
 	async fn a_max_delay_decode_error_fails_the_read() {

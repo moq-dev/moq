@@ -1284,8 +1284,8 @@ impl MoqVideoConsumer {
 	///
 	/// `catalog_video` comes from the catalog (see
 	/// [`MoqMediaCatalogConsumer::next`](crate::media::MoqMediaCatalogConsumer::next)); the codec is read
-	/// from it. A codec or description no native backend can open returns
-	/// [`MoqError::UnsupportedConfig`] before decoding starts. Also fails with [`MoqError::Unsupported`] when
+	/// from it. A codec or description this build cannot decode, or a stream every decoder's device
+	/// refuses, returns [`MoqError::UnsupportedConfig`] before decoding starts. Also fails with [`MoqError::Unsupported`] when
 	/// [`surface`](MoqVideoDecoderOutput::surface) is set on a platform with no surface to expose.
 	///
 	/// A [disabled](crate::media::MoqVideo::enabled) rendition subscribes too, and decodes once its

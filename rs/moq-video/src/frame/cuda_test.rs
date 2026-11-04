@@ -211,7 +211,7 @@ async fn vulkan_cuda_convert_resize_encode() {
 		kind: crate::decode::Kind::Software,
 		..crate::decode::Config::new()
 	};
-	let mut decoder = crate::decode::backend::open(crate::decode::backend::Codec::H264, &decode).unwrap();
+	let mut decoder = crate::decode::backend::open(&crate::decode::backend::Codec::H264.into(), &decode).unwrap();
 	let mut decoded = None;
 	let mut sd_packets = 0;
 	let mut expected = None;
@@ -550,7 +550,7 @@ async fn vulkan_cuda_auto_external_encode() {
 			.expect("probe the declared input device before capture");
 		let encoder = crate::encode::Encoder::new(&config).expect("automatic external-image selection");
 		assert_eq!(encoder.name(), "nvenc");
-		let decoder = crate::decode::backend::open(crate::decode::backend::Codec::H264, &decode).unwrap();
+		let decoder = crate::decode::backend::open(&crate::decode::backend::Codec::H264.into(), &decode).unwrap();
 		renditions.push((encoder, decoder));
 	}
 

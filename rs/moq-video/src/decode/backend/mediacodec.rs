@@ -34,7 +34,7 @@ use ndk::media::media_codec::{self, DequeuedInputBufferResult, DequeuedOutputBuf
 use ndk::media::media_format::MediaFormat;
 use ndk::media_error::MediaError;
 
-use super::{Backend, Codec, Config};
+use super::{Backend, Codec, Config, Stream};
 use crate::frame::{
 	Surface,
 	android::{HardwareBuffer, Reader},
@@ -155,7 +155,8 @@ impl MediaCodec {
 	/// `config` is accepted for signature parity: MediaCodec decodes at the
 	/// stream's native size and has no scaler to point
 	/// [`Config::scale_hint`](crate::decode::Config) at.
-	pub(crate) fn open(codec: Codec, _config: &Config) -> Result<Box<dyn Backend>, Error> {
+	pub(crate) fn open(stream: &Stream, _config: &Config) -> Result<Box<dyn Backend>, Error> {
+		let codec = stream.codec;
 		let mime = match codec {
 			Codec::H264 => MIME_H264,
 			Codec::H265 => MIME_H265,
@@ -551,7 +552,7 @@ mod tests {
 
 		let i420 = crate::I420::new(size, vec![0x80; crate::I420::len(size).unwrap()]).unwrap();
 
-		let mut decoder = MediaCodec::open(Codec::H264, &Config::new()).expect("a MediaCodec decoder");
+		let mut decoder = MediaCodec::open(&Codec::H264.into(), &Config::new()).expect("a MediaCodec decoder");
 		let mut frames = Vec::new();
 		for index in 0..30u64 {
 			let timestamp = Timestamp::from_micros(index * 33_333).unwrap();

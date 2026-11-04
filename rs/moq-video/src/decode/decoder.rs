@@ -105,8 +105,13 @@ enum Conversion {
 	/// avc1 / hvc1, and every CMAF H.264 / H.265 track: length-prefixed NALs.
 	/// Replace the length prefixes with start codes and prepend `keyframe_prefix`
 	/// (the description's parameter sets, empty when they are all in band) ahead
-	/// of every keyframe.
-	LengthPrefixed { length_size: usize, keyframe_prefix: Bytes },
+	/// of every keyframe. `pins_size` is whether the description carries an
+	/// SPS, which fixes the picture size for the whole track.
+	LengthPrefixed {
+		length_size: usize,
+		keyframe_prefix: Bytes,
+		pins_size: bool,
+	},
 }
 
 impl Conversion {
@@ -118,6 +123,7 @@ impl Conversion {
 			Self::LengthPrefixed {
 				length_size,
 				keyframe_prefix,
+				..
 			} => {
 				let prefix = keyframe.then(|| keyframe_prefix.as_ref());
 				Ok(annexb::from_length_prefixed(payload, *length_size, prefix).map_err(moq_mux::Error::from)?)
@@ -166,8 +172,10 @@ impl Decoder {
 	/// Build a decoder for the catalog's video config.
 	///
 	/// A codec or description this build cannot decode is
-	/// [`Error::UnsupportedCodec`]. A backend that exists for the codec but fails to
-	/// open is [`Error::NoDecoder`], a fault rather than a property of the track.
+	/// [`Error::UnsupportedCodec`], and so is a stream every decoder for its codec
+	/// refused because its device cannot decode it. When any of them failed to open
+	/// for another reason, such as a missing driver, the result is
+	/// [`Error::NoDecoder`], a fault rather than a property of the track.
 	pub fn new(catalog: &VideoConfig, config: &Config) -> Result<Self, Error> {
 		// CMAF samples are length-prefixed whatever the sample entry; Legacy and LOC
 		// carry Annex-B exactly when the parameter sets are in band.
@@ -183,6 +191,7 @@ impl Decoder {
 						Conversion::LengthPrefixed {
 							length_size: params.length_size,
 							keyframe_prefix,
+							pins_size: !params.sps.is_empty(),
 						}
 					}
 					(true, None) if cmaf => {
@@ -211,6 +220,7 @@ impl Decoder {
 					Conversion::LengthPrefixed {
 						length_size: params.length_size,
 						keyframe_prefix,
+						pins_size: !params.sps.is_empty(),
 					}
 				};
 				(Codec::H265, conversion)
@@ -228,7 +238,7 @@ impl Decoder {
 			size.validate("decoder scale hint")?;
 		}
 
-		let backend = backend::open(codec, config)?;
+		let backend = backend::open(&stream(catalog, codec, &conversion), config)?;
 		tracing::debug!(decoder = backend.name(), "opened video decoder");
 		Ok(Self {
 			backend,
@@ -364,6 +374,38 @@ fn declared(catalog: &VideoConfig) -> Option<Color> {
 	Color::from_code_points(Some(codes), range, coded.unwrap_or_default())
 }
 
+/// What the catalog says about the stream before its first picture, for the
+/// backends to ask their devices with.
+fn stream(catalog: &VideoConfig, codec: Codec, conversion: &Conversion) -> backend::Stream {
+	let (parameter_sets, pins_size) = match conversion {
+		Conversion::LengthPrefixed {
+			keyframe_prefix,
+			pins_size,
+			..
+		} => (
+			(!keyframe_prefix.is_empty()).then(|| keyframe_prefix.clone()),
+			*pins_size,
+		),
+		Conversion::Passthrough => (None, false),
+	};
+	backend::Stream {
+		codec,
+		h264_profile: match &catalog.codec {
+			VideoCodec::H264(h264) => Some(h264.profile),
+			_ => None,
+		},
+		// The catalog's coded size is a ceiling the picture resizes below in
+		// band, so it is the picture's size only when the description's SPS
+		// pins it.
+		size: catalog
+			.coded_width
+			.zip(catalog.coded_height)
+			.filter(|_| pins_size)
+			.map(|(width, height)| Size::new(width, height)),
+		parameter_sets,
+	}
+}
+
 fn is_supported_av1(av1: &AV1) -> bool {
 	av1.bitdepth == 8 && !av1.mono_chrome && av1.chroma_subsampling_x && av1.chroma_subsampling_y
 }
@@ -484,7 +526,8 @@ mod tests {
 	#[test]
 	#[cfg(feature = "openh264")]
 	fn openh264_round_trip() {
-		let decoder = backend::open(Codec::H264, &decode_config(super::Kind::Software)).expect("openh264 decoder");
+		let decoder =
+			backend::open(&Codec::H264.into(), &decode_config(super::Kind::Software)).expect("openh264 decoder");
 		round_trip(h264_software_encoder(gray_size()), decoder, "openh264");
 	}
 
@@ -843,6 +886,37 @@ mod tests {
 		assert_eq!(opened.scale_hint, Some(hint));
 	}
 
+	/// The catalog's coded size reaches the backends only when the description's
+	/// SPS pins it. Otherwise it is a ceiling the picture resizes below in band,
+	/// so a device must not refuse the stream by it.
+	#[test]
+	fn only_a_pinned_size_reaches_the_backends() {
+		let mut catalog = probe_catalog();
+		catalog.coded_width = Some(8192);
+		catalog.coded_height = Some(8192);
+
+		let in_band = super::stream(&catalog, Codec::H264, &super::Conversion::Passthrough);
+		assert_eq!(in_band.size, None);
+
+		// A description with only a PPS leaves the SPS, and so the size, in band.
+		let unpinned = super::Conversion::LengthPrefixed {
+			length_size: 4,
+			keyframe_prefix: bytes::Bytes::from_static(b"\0\0\0\x01pps"),
+			pins_size: false,
+		};
+		let pps_only = super::stream(&catalog, Codec::H264, &unpinned);
+		assert_eq!(pps_only.size, None);
+		assert!(pps_only.parameter_sets.is_some());
+
+		let pinned = super::Conversion::LengthPrefixed {
+			length_size: 4,
+			keyframe_prefix: bytes::Bytes::from_static(b"\0\0\0\x01sps"),
+			pins_size: true,
+		};
+		let described = super::stream(&catalog, Codec::H264, &pinned);
+		assert_eq!(described.size, Some(crate::Size::new(8192, 8192)));
+	}
+
 	/// CPU output is enforced by the front end, so a backend that hands back
 	/// its native surface still delivers I420, and native output leaves the
 	/// surface alone.
@@ -934,8 +1008,11 @@ mod tests {
 	#[cfg(all(apple, feature = "openh264"))]
 	#[test]
 	fn videotoolbox_round_trip() {
-		let decoder = backend::open(Codec::H264, &decode_config(super::Kind::Named("videotoolbox".into())))
-			.expect("videotoolbox decoder");
+		let decoder = backend::open(
+			&Codec::H264.into(),
+			&decode_config(super::Kind::Named("videotoolbox".into())),
+		)
+		.expect("videotoolbox decoder");
 		round_trip(h264_software_encoder(gray_size()), decoder, "videotoolbox");
 	}
 
@@ -944,8 +1021,11 @@ mod tests {
 	#[cfg(all(apple, feature = "openh264"))]
 	fn decode_gray(count: u64) -> Vec<Frame> {
 		let mut encoder = h264_software_encoder(gray_size());
-		let mut decoder = backend::open(Codec::H264, &decode_config(super::Kind::Named("videotoolbox".into())))
-			.expect("videotoolbox decoder");
+		let mut decoder = backend::open(
+			&Codec::H264.into(),
+			&decode_config(super::Kind::Named("videotoolbox".into())),
+		)
+		.expect("videotoolbox decoder");
 
 		let mut decoded = Vec::new();
 		for i in 0..count {
@@ -1037,8 +1117,11 @@ mod tests {
 			eprintln!("skipping: no VideoToolbox H.265 hardware encoder available");
 			return;
 		};
-		let decoder = backend::open(Codec::H265, &decode_config(super::Kind::Named("videotoolbox".into())))
-			.expect("videotoolbox H.265 decoder");
+		let decoder = backend::open(
+			&Codec::H265.into(),
+			&decode_config(super::Kind::Named("videotoolbox".into())),
+		)
+		.expect("videotoolbox H.265 decoder");
 		round_trip(encoder, decoder, "videotoolbox");
 	}
 
@@ -1048,7 +1131,7 @@ mod tests {
 		// Requires a hardware decoder MFT (GPU). Skip on machines without one
 		// rather than fail: CI runners are often headless.
 		let Ok(decoder) = backend::open(
-			Codec::H264,
+			&Codec::H264.into(),
 			&decode_config(super::Kind::Named("mediafoundation".into())),
 		) else {
 			eprintln!("skipping: no Media Foundation H.264 hardware decoder available");
@@ -1079,7 +1162,7 @@ mod tests {
 	fn decode_levels(count: u64, size: crate::Size) -> Option<(Vec<Frame>, Box<dyn backend::Backend>)> {
 		let mut encoder = h264_software_encoder(size);
 		let decoder = backend::open(
-			Codec::H264,
+			&Codec::H264.into(),
 			&decode_config(super::Kind::Named("mediafoundation".into())),
 		);
 		let Ok(mut decoder) = decoder else {
@@ -1240,7 +1323,8 @@ mod tests {
 
 		// Back to pixels through the software decoder, so this leans on nothing the
 		// hardware path just did.
-		let mut decoder = backend::open(Codec::H264, &decode_config(super::Kind::Software)).expect("openh264 decoder");
+		let mut decoder =
+			backend::open(&Codec::H264.into(), &decode_config(super::Kind::Software)).expect("openh264 decoder");
 		let mut out = Vec::new();
 		for (i, encoded) in reencoded.iter().enumerate() {
 			out.extend(
@@ -1339,7 +1423,7 @@ mod tests {
 			return;
 		};
 		let Ok(decoder) = backend::open(
-			Codec::H265,
+			&Codec::H265.into(),
 			&decode_config(super::Kind::Named("mediafoundation".into())),
 		) else {
 			eprintln!("skipping: no Media Foundation H.265 hardware decoder available");

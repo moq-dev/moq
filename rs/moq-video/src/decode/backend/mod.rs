@@ -14,12 +14,18 @@
 //! requested codec are considered: there is no software H.265 or AV1 decoder, so
 //! those tracks have no fallback below the hardware path. VP8 / VP9 backends
 //! take one coded frame per call.
+//!
+//! A backend that fails to open either refuses the [`Stream`] or faults. A
+//! refusal is [`Error::UnsupportedCodec`]: the device answered that it cannot
+//! decode this stream, so no retry on this machine helps but another rendition
+//! may. Anything else is a fault: missing drivers, no device, or a library
+//! error. A backend that cannot tell the two apart reports a fault.
 
 use bytes::Bytes;
 use moq_net::Timestamp;
 
 use super::decoder::{Config, Kind};
-use crate::{Error, Frame};
+use crate::{Error, Frame, Size};
 
 #[cfg(feature = "openh264")]
 mod openh264;
@@ -78,6 +84,52 @@ impl Codec {
 	}
 }
 
+/// The stream a decoder opens for, as far as the catalog describes it before
+/// the first picture arrives.
+///
+/// What a backend needs to ask its device whether it decodes the stream at
+/// all. The catalog is the peer's claim, so a stream that turns out otherwise
+/// still fails at its first keyframe.
+#[derive(Clone, Debug)]
+pub(crate) struct Stream {
+	pub codec: Codec,
+	/// The H.264 `profile_idc` the codec string declares.
+	#[cfg_attr(
+		not(all(target_os = "linux", feature = "vaapi")),
+		allow(dead_code, reason = "only VA-API asks its driver by profile")
+	)]
+	pub h264_profile: Option<u8>,
+	/// The catalog's coded size, when the description's SPS pins it. It may be
+	/// the cropped picture size, so the macroblock-aligned size a decoder
+	/// allocates can be larger. Without an SPS the catalog's size is only a
+	/// ceiling the picture resizes below in band, so it says nothing a device
+	/// could refuse.
+	#[cfg_attr(
+		not(all(target_os = "linux", feature = "nvidia")),
+		allow(dead_code, reason = "only NVDEC checks a size before the first keyframe")
+	)]
+	pub size: Option<Size>,
+	/// Annex-B parameter sets from the description, for a track that carries
+	/// them out of band.
+	#[cfg_attr(
+		not(apple),
+		allow(dead_code, reason = "only VideoToolbox builds its session from them")
+	)]
+	pub parameter_sets: Option<Bytes>,
+}
+
+impl From<Codec> for Stream {
+	/// A stream of `codec` the catalog says nothing more about.
+	fn from(codec: Codec) -> Self {
+		Self {
+			codec,
+			h264_profile: None,
+			size: None,
+			parameter_sets: None,
+		}
+	}
+}
+
 /// An opened decoder. Feed it prepared access units in decode order; get back
 /// zero or more decoded frames (zero while the decoder is still buffering, e.g.
 /// before the first keyframe's parameter sets).
@@ -116,8 +168,9 @@ pub const NAMES: &[&str] = &[
 	"vpx",
 ];
 
-/// A backend opener: builds a decoder for a codec and config.
-type Open = fn(Codec, &Config) -> Result<Box<dyn Backend>, Error>;
+/// A backend opener: builds a decoder for a stream and config, refusing a
+/// stream its device cannot decode with [`Error::UnsupportedCodec`].
+type Open = fn(&Stream, &Config) -> Result<Box<dyn Backend>, Error>;
 
 /// A backend constructor: name, the codecs it can decode, and an opener.
 struct Candidate {
@@ -215,6 +268,11 @@ const NAMED_ONLY: &[Candidate] = &[
 		supports: |c| matches!(c, Codec::H264),
 		open: probe::Native::open,
 	},
+	Candidate {
+		name: probe::REFUSING_NAME,
+		supports: |c| matches!(c, Codec::H264),
+		open: probe::Refusing::open,
+	},
 	#[cfg(not(apple))]
 	Candidate {
 		name: probe::BLOCKING_FLUSH_NAME,
@@ -228,7 +286,7 @@ const NAMED_ONLY: &[Candidate] = &[];
 
 /// A candidate paired with the tier it came from, so [`select`] can tell a
 /// software decoder that was asked for from one reached by falling past
-/// hardware that refused to open.
+/// hardware that failed to open.
 struct Attempt<'a> {
 	candidate: &'a Candidate,
 	hardware: bool,
@@ -253,7 +311,7 @@ impl<'a> Attempt<'a> {
 /// Open the best decoder for `codec` and `config`, trying candidates in priority
 /// order and falling back until one succeeds. Candidates that don't support the
 /// codec are skipped before they're even tried.
-pub(crate) fn open(codec: Codec, config: &Config) -> Result<Box<dyn Backend>, Error> {
+pub(crate) fn open(stream: &Stream, config: &Config) -> Result<Box<dyn Backend>, Error> {
 	let attempts: Vec<Attempt> = match &config.kind {
 		Kind::Auto => HARDWARE
 			.iter()
@@ -270,21 +328,27 @@ pub(crate) fn open(codec: Codec, config: &Config) -> Result<Box<dyn Backend>, Er
 			.collect(),
 	};
 
-	select(codec, attempts, config)
+	select(stream, attempts, config)
 }
 
 /// Try `attempts` in order and return the first decoder that opens, warning when
 /// that means falling past hardware.
 ///
+/// Fails with [`Error::UnsupportedCodec`] only when every candidate that takes
+/// the codec refused the stream: one fault among them could be what stopped a
+/// decoder that would have worked, so the whole is a fault.
+///
 /// Split out from [`open`] for the same reason as its encode counterpart: the
 /// candidate lists are platform-gated consts, so a test supplies its own
 /// attempts rather than depending on what the host GPU can do.
-fn select(codec: Codec, attempts: Vec<Attempt>, config: &Config) -> Result<Box<dyn Backend>, Error> {
-	// Each entry is "name: why it refused". The names alone say which backends
+fn select(stream: &Stream, attempts: Vec<Attempt>, config: &Config) -> Result<Box<dyn Backend>, Error> {
+	let codec = stream.codec;
+	// Each entry is "name: why it failed". The names alone say which backends
 	// exist, which is what a reader already knows; the reasons say why this
 	// machine has none, which is the question being asked.
 	let mut tried: Vec<String> = Vec::new();
-	let mut refused = Vec::new();
+	let mut skipped = Vec::new();
+	let mut faulted = false;
 
 	for attempt in attempts {
 		if !(attempt.candidate.supports)(codec) {
@@ -293,15 +357,15 @@ fn select(codec: Codec, attempts: Vec<Attempt>, config: &Config) -> Result<Box<d
 
 		let name = attempt.candidate.name;
 
-		match (attempt.candidate.open)(codec, config) {
+		match (attempt.candidate.open)(stream, config) {
 			Ok(backend) => {
 				// Same reasoning as the encode side: a compiled-in hardware decoder that
-				// refuses to open is otherwise invisible, since `Auto` hands back a
+				// fails to open is otherwise invisible, since `Auto` hands back a
 				// working software decoder and says nothing above DEBUG.
-				if !attempt.hardware && !refused.is_empty() {
+				if !attempt.hardware && !skipped.is_empty() {
 					tracing::warn!(
 						decoder = name,
-						refused = %refused.join(", "),
+						skipped = %skipped.join(", "),
 						"no hardware decoder available, falling back to software"
 					);
 				}
@@ -309,9 +373,15 @@ fn select(codec: Codec, attempts: Vec<Attempt>, config: &Config) -> Result<Box<d
 			}
 			Err(e) => {
 				tracing::debug!(decoder = name, error = %e, "decoder unavailable, trying next");
-				tried.push(format!("{name}: {e}"));
+				// The one variant a backend opens with to say its device answered.
+				faulted |= !matches!(e, Error::UnsupportedCodec(_));
+				let reason = match e {
+					Error::UnsupportedCodec(reason) => reason,
+					e => e.to_string(),
+				};
+				tried.push(format!("{name}: {reason}"));
 				if attempt.hardware {
-					refused.push(format!("{name}: {e}"));
+					skipped.push(format!("{name}: {reason}"));
 				}
 			}
 		}
@@ -337,8 +407,14 @@ fn select(codec: Codec, attempts: Vec<Attempt>, config: &Config) -> Result<Box<d
 			))),
 		};
 	}
-	// Every candidate that decodes the codec failed to open: missing drivers, no
-	// device, or a library fault. Those are faults, not a property of the track.
+	if !faulted {
+		return Err(Error::UnsupportedCodec(format!(
+			"no decoder here takes this {} stream ({})",
+			codec.label(),
+			tried.join(", ")
+		)));
+	}
+	// Missing drivers, no device, or a library fault: not a property of the track.
 	Err(Error::NoDecoder(tried.join(", ")))
 }
 
@@ -364,7 +440,7 @@ mod tests {
 	struct Stub;
 
 	impl Stub {
-		fn open(_codec: Codec, _config: &Config) -> Result<Box<dyn Backend>, Error> {
+		fn open(_stream: &Stream, _config: &Config) -> Result<Box<dyn Backend>, Error> {
 			Ok(Box::new(Self))
 		}
 	}
@@ -389,9 +465,9 @@ mod tests {
 		open: Stub::open,
 	};
 
-	/// Compiled in but refusing at runtime, the way NVDEC does on a host whose
+	/// Compiled in but faulting at runtime, the way NVDEC does on a host whose
 	/// driver libraries aren't on the loader path.
-	const REFUSING: Candidate = Candidate {
+	const DRIVERLESS: Candidate = Candidate {
 		name: "driverless",
 		supports: |c| matches!(c, Codec::H264),
 		open: |_, _| Err(Error::Codec(anyhow::anyhow!("driver libraries not found"))),
@@ -401,8 +477,8 @@ mod tests {
 	#[test]
 	fn falling_past_hardware_warns() {
 		let config = Config::new();
-		let attempts = vec![Attempt::hardware(&REFUSING), Attempt::software(&WORKING)];
-		let backend = select(Codec::H264, attempts, &config).unwrap();
+		let attempts = vec![Attempt::hardware(&DRIVERLESS), Attempt::software(&WORKING)];
+		let backend = select(&Codec::H264.into(), attempts, &config).unwrap();
 		assert_eq!(backend.name(), "stub");
 
 		logs_assert(
@@ -429,7 +505,7 @@ mod tests {
 		};
 
 		let attempts = vec![Attempt::hardware(&H265_ONLY), Attempt::software(&WORKING)];
-		select(Codec::H264, attempts, &Config::new()).unwrap();
+		select(&Codec::H264.into(), attempts, &Config::new()).unwrap();
 		assert!(!logs_contain("no hardware decoder available"));
 	}
 
@@ -440,7 +516,7 @@ mod tests {
 		let mut config = Config::new();
 		config.kind = Kind::Named("vappi".to_owned());
 
-		match open(Codec::H264, &config) {
+		match open(&Codec::H264.into(), &config) {
 			Err(Error::UnknownDecoder { name, codec, available }) => {
 				assert_eq!(name, "vappi");
 				assert_eq!(codec, crate::decode::Codec::H264);
@@ -459,20 +535,26 @@ mod tests {
 	fn disabled_software_backend_is_not_selected() {
 		let mut config = Config::new();
 		config.kind = Kind::Software;
-		assert!(matches!(open(Codec::H264, &config), Err(Error::UnsupportedCodec(_))));
+		assert!(matches!(
+			open(&Codec::H264.into(), &config),
+			Err(Error::UnsupportedCodec(_))
+		));
 
 		config.kind = Kind::Named("openh264".to_owned());
-		assert!(matches!(open(Codec::H264, &config), Err(Error::UnknownDecoder { .. })));
+		assert!(matches!(
+			open(&Codec::H264.into(), &config),
+			Err(Error::UnknownDecoder { .. })
+		));
 	}
 
-	/// The reason each candidate refused belongs in the error. Only the DEBUG
+	/// The reason each candidate faulted belongs in the error. Only the DEBUG
 	/// line used to carry it, which is no use to a caller holding the `Err`.
 	#[test]
-	fn every_candidate_refusing_reports_why() {
+	fn every_candidate_faulting_reports_why() {
 		let mut config = Config::new();
 		config.kind = Kind::Named("driverless".to_owned());
 
-		match select(Codec::H264, vec![Attempt::hardware(&REFUSING)], &config) {
+		match select(&Codec::H264.into(), vec![Attempt::hardware(&DRIVERLESS)], &config) {
 			Err(Error::NoDecoder(tried)) => {
 				assert!(tried.contains("driverless"), "does not name the backend: {tried}");
 				assert!(
@@ -483,6 +565,66 @@ mod tests {
 			Err(other) => panic!("expected NoDecoder, got {other:?}"),
 			Ok(backend) => panic!("expected NoDecoder, opened {}", backend.name()),
 		}
+	}
+
+	/// The test-only candidate answering to `name`.
+	fn named(name: &str) -> &'static Candidate {
+		NAMED_ONLY
+			.iter()
+			.find(|candidate| candidate.name == name)
+			.expect("a test-only candidate")
+	}
+
+	/// Every candidate's device saying it cannot decode the stream is a property
+	/// of the stream on this machine, which a caller can answer with another
+	/// rendition.
+	#[test]
+	fn every_candidate_refusing_is_unsupported() {
+		let refusing = named(probe::REFUSING_NAME);
+		let attempts = vec![Attempt::hardware(refusing), Attempt::hardware(refusing)];
+		match select(&Codec::H264.into(), attempts, &Config::new()) {
+			Err(Error::UnsupportedCodec(reason)) => {
+				assert!(
+					reason.contains(probe::REFUSING_NAME),
+					"does not name the backend: {reason}"
+				);
+				assert!(reason.contains("cannot decode"), "does not carry the reason: {reason}");
+			}
+			Err(other) => panic!("expected UnsupportedCodec, got {other:?}"),
+			Ok(backend) => panic!("expected UnsupportedCodec, opened {}", backend.name()),
+		}
+	}
+
+	/// A fault among the refusals could be what stopped a decoder that would have
+	/// taken the stream, so in either order the whole stays a fault.
+	#[test]
+	fn a_fault_among_refusals_is_a_fault() {
+		let refusing = named(probe::REFUSING_NAME);
+		for attempts in [
+			vec![Attempt::hardware(refusing), Attempt::hardware(&DRIVERLESS)],
+			vec![Attempt::hardware(&DRIVERLESS), Attempt::software(refusing)],
+		] {
+			match select(&Codec::H264.into(), attempts, &Config::new()) {
+				Err(Error::NoDecoder(tried)) => {
+					assert!(tried.contains(probe::REFUSING_NAME), "drops the refusal: {tried}");
+					assert!(tried.contains("driverless"), "drops the fault: {tried}");
+				}
+				Err(other) => panic!("expected NoDecoder, got {other:?}"),
+				Ok(backend) => panic!("expected NoDecoder, opened {}", backend.name()),
+			}
+		}
+	}
+
+	/// A refusal is no different from any other failure when a later candidate
+	/// opens: `Auto` still lands on it.
+	#[test]
+	fn a_refusal_falls_through_to_the_next_candidate() {
+		let attempts = vec![
+			Attempt::hardware(named(probe::REFUSING_NAME)),
+			Attempt::software(&WORKING),
+		];
+		let backend = select(&Codec::H264.into(), attempts, &Config::new()).unwrap();
+		assert_eq!(backend.name(), "stub");
 	}
 
 	/// The decode half of the same guarantee the encode side keeps.
