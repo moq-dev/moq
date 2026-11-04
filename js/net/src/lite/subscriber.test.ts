@@ -3165,3 +3165,61 @@ test("a FETCH stops a stalled frame only after its last coalesced reader leaves"
 		subscriber.close();
 	}
 });
+
+test("a cancelled legacy datagram lookup cannot refuse a stream answer arriving before auth settles", async () => {
+	const { quic, streams, opened } = fakeSession();
+	Object.defineProperty(quic, "datagrams", {
+		value: { maxDatagramSize: 1200, readable: new ReadableStream<Uint8Array>() },
+	});
+	const waiting = Promise.withResolvers<void>();
+	const release = Promise.withResolvers<void>();
+	let calls = 0;
+	const auth = {
+		async ready() {
+			if (++calls === 2) {
+				waiting.resolve();
+				await release.promise;
+			}
+			return true;
+		},
+	} as unknown as AuthSession;
+	const version = Version.DRAFT_06;
+	const subscriber = new Subscriber(
+		quic,
+		version,
+		HopSchema.parse(1n),
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		auth,
+	);
+	const remote = subscriber.consume(Path.from("room"));
+	const grouped = remote.track("video").subscribe();
+	let datagrams: ReturnType<typeof remote.datagrams> | undefined;
+	try {
+		await opened(1);
+		datagrams = remote.datagrams("video");
+		await waiting.promise;
+		const info = datagrams.info();
+		datagrams.close();
+		await expect(info).rejects.toBeInstanceOf(StreamError);
+		await answerTrackInfo(streams[0], version);
+		await grouped.info();
+		const writer = new Writer(
+			new WritableStream<Uint8Array>({ write: (chunk) => streams[1].inbound.enqueue(new Uint8Array(chunk)) }),
+			version,
+		);
+		await encodeSubscribeResponse(writer, { start: new SubscribeStart([0n]) }, version);
+		await encodeSubscribeResponse(writer, { end: new SubscribeEnd(0n) }, version);
+		streams[1].inbound.close();
+		expect(await grouped.recvGroup()).toBeUndefined();
+	} finally {
+		release.resolve();
+		datagrams?.close();
+		grouped.close();
+		remote.close();
+		subscriber.close();
+	}
+});

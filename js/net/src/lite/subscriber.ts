@@ -1593,11 +1593,12 @@ export class Subscriber {
 		};
 		if (hasDatagrams(this.version) && !hasDatagramTracks(this.version) && state.consumer && state.legacyKey) {
 			const info = { priority: producer.priority, timescale: framing.scale };
-			const request = this.#legacyRequests.get(state.legacyKey);
+			const pending = this.#legacyRequests.get(state.legacyKey);
+			const request = pending?.closed.peek() === undefined ? pending : undefined;
+			this.#legacyRequests.delete(state.legacyKey);
 			const datagrams = request
 				? request.accept(info)
 				: wireOf(state.consumer).createDatagrams(producer.name, info);
-			if (request) this.#legacyRequests.delete(state.legacyKey);
 			entry.datagrams = { producer: datagrams, timescale: framing.scale };
 			entry.legacyKey = state.legacyKey;
 			this.#datagrams.set(id, entry.datagrams);
