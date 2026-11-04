@@ -1658,7 +1658,11 @@ async fn watch_media(rendition: Weak<Rendition>, mut retiring: tokio::sync::watc
 				}
 				let (slot, last) = match slot {
 					grid::Slot::Media {
-						segment, groups, pts, ..
+						segment,
+						groups,
+						pts,
+						start,
+						..
 					} if claim.retired && theirs(&groups) => match (boundary, theirs_at) {
 						// The replacement can't list this segment's number again, so this instance
 						// lists the groups it had read, ending where the replacement's media starts.
@@ -1667,6 +1671,7 @@ async fn watch_media(rendition: Weak<Rendition>, mut retiring: tokio::sync::watc
 								segment,
 								groups: groups.start..boundary + 1,
 								pts,
+								start,
 								end: at,
 								content: Some(at),
 							};
@@ -1852,7 +1857,7 @@ fn row(rendition: &Rendition, slot: grid::Slot, broken: bool) -> segments::Row {
 		grid::Slot::Media {
 			segment,
 			groups,
-			pts,
+			start,
 			end,
 			..
 		} if groups.end.saturating_sub(groups.start) > rendition.max_groups() => {
@@ -1862,15 +1867,17 @@ fn row(rendition: &Rendition, slot: grid::Slot, broken: bool) -> segments::Row {
 				?groups,
 				"a segment holds more groups than one request fetches; listing it as a gap"
 			);
-			(segment, 0..0, pts, end, None, true)
+			(segment, 0..0, start, end, None, true)
 		}
+		// Timed from where its EXTINF starts, which a group resuming past its line puts at the line.
 		grid::Slot::Media {
 			segment,
 			groups,
-			pts,
+			start,
 			end,
 			content,
-		} => (segment, groups, pts, end, content, false),
+			..
+		} => (segment, groups, start, end, content, false),
 		grid::Slot::Gap { segment, pts, end } => (segment, 0..0, pts, end, None, true),
 		grid::Slot::Reset => unreachable!("a reset lists no row"),
 	};

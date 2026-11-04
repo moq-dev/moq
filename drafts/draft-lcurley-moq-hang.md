@@ -1007,7 +1007,7 @@ Every rendition numbers its segments on the one grid, so they share segment numb
 A line no group starts a segment at, because a group longer than the segment or a pause skipped it, is a gap: the edge lists it as HLS `EXT-X-GAP`, omits it from the DASH SegmentTimeline, and never serves media for it, so the numbering never skips.
 On a 2 second grid, a group spanning 0 to 7 seconds is segment 0, segments 1 and 2 are gaps, and the group after it, starting at 7 seconds, starts segment 3; an edge that joins at that group numbers it alike without the one before.
 
-A segment starts at its first group's timestamp, or a gap at its line, and lasts until the next segment starts.
+A segment starts at its first group's timestamp, or at its line when that group starts after it, as a group resuming from a pause does; a gap starts at its line; and each lasts until the next segment starts.
 A group longer than the segment is listed at its first line, so its duration understates its media, and the gaps after it overstate theirs.
 `EXT-X-TARGETDURATION` is twice the segment length, rounded up to whole seconds: the group containing a line starts at most one interval, and so one segment length, before it, and a gap ends where the next segment starts, under two lengths after its line, so only a group longer than the interval can exceed it.
 The HLS media sequence and the segment URL derive from the segment number, and DASH addresses the same segments by `$Time$`.

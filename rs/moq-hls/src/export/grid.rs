@@ -16,8 +16,10 @@
 //! starts segment 3. An edge joining at B derives that from B's and its successor's timestamps,
 //! without A.
 //!
-//! A segment starts at its first group's pts, or a gap at its line, and its `EXTINF` runs to the
-//! next segment's start. A group overrunning the segment length is listed at its first line, so its
+//! A segment starts at its first group's pts, or at its line when that group starts after it, as
+//! a group resuming from a pause does, and a gap at its line; its `EXTINF` runs to the next
+//! segment's start. Every segment then starts after the line before its own and ends at or before
+//! the next, so every `EXTINF` fits twice the segment length, the target duration. A group overrunning the segment length is listed at its first line, so its
 //! `EXTINF` understates its media, and the gaps after it overstate theirs; the playlist timeline
 //! still meets the media again at the next segment.
 
@@ -50,6 +52,11 @@ pub(crate) enum Slot {
 		groups: std::ops::Range<u64>,
 		/// Its first group's pts.
 		pts: Timestamp,
+		/// Where its `EXTINF` starts: its first group's pts, or its line when that group starts
+		/// after it, as a group resuming from a pause in the slot it lands in does. The time from the
+		/// line to the group heads the segment, as a gap's does, rather than trailing the segment
+		/// before it.
+		start: Timestamp,
 		/// Where its `EXTINF` ends: the next segment's start.
 		end: Timestamp,
 		/// Where its last group's content ends, the next group's pts, when known: a fallback for
@@ -172,6 +179,19 @@ impl Grid {
 		self.open.is_some() || self.pending.is_some()
 	}
 
+	/// Where segment `segment`, whose first group starts at `pts`, starts its `EXTINF`: that group,
+	/// or its line when the group starts after it.
+	///
+	/// Every `EXTINF` then fits twice the segment length, the target duration: a segment's first
+	/// group contains its line or starts after it, so the segment starts after the line before its
+	/// own, and it ends where the next starts, at or before the next line. A gap runs from its line
+	/// to the next start, at most one length. Only a final segment whose content runs past the next
+	/// line can exceed it.
+	fn start(&self, segment: u64, pts: Timestamp) -> Timestamp {
+		let line = self.line(segment);
+		if pts.as_nanos() > line.as_nanos() { line } else { pts }
+	}
+
 	/// The pts of line `segment`.
 	fn line(&self, segment: u64) -> Timestamp {
 		let nanos = (segment as u128).saturating_mul(self.length);
@@ -237,6 +257,7 @@ impl Grid {
 				segment: open.segment,
 				groups: open.groups,
 				pts: open.pts,
+				start: self.start(open.segment, open.pts),
 				end,
 				content: Some(end),
 			});
@@ -264,13 +285,14 @@ impl Grid {
 		}
 		let open = self.open.take().expect("checked above");
 		let start = |next: u64| match next == segment {
-			true => group.pts,
+			true => self.start(segment, group.pts),
 			false => self.line(next),
 		};
 		out.push(Slot::Media {
 			segment: open.segment,
 			groups: open.groups,
 			pts: open.pts,
+			start: self.start(open.segment, open.pts),
 			end: start(open.segment + 1),
 			content: Some(open.stop.unwrap_or(group.pts)),
 		});
@@ -294,7 +316,7 @@ mod test {
 		Timestamp::from_millis(ms).unwrap()
 	}
 
-	/// A slot as `(segment, groups, pts ms, end ms)`, with no groups for a gap.
+	/// A slot as `(segment, groups, EXTINF start ms, end ms)`, with no groups for a gap.
 	type Listed = (u64, std::ops::Range<u64>, u64, u64);
 
 	fn listed(slots: Vec<Slot>) -> Vec<Listed> {
@@ -304,10 +326,10 @@ mod test {
 				Slot::Media {
 					segment,
 					groups,
-					pts,
+					start,
 					end,
 					..
-				} => (segment, groups, pts.as_millis() as u64, end.as_millis() as u64),
+				} => (segment, groups, start.as_millis() as u64, end.as_millis() as u64),
 				Slot::Gap { segment, pts, end } => (segment, 0..0, pts.as_millis() as u64, end.as_millis() as u64),
 				Slot::Reset => panic!("unexpected reset"),
 			})
@@ -343,7 +365,7 @@ mod test {
 				&[500, 1900, 3800, 5700],
 				7600,
 				&[
-					(0, 0..1, 500, 1900),
+					(0, 0..1, 0, 1900),
 					(1, 1..2, 1900, 3800),
 					(2, 2..3, 3800, 5700),
 					(3, 3..4, 5700, 7600),
@@ -376,8 +398,8 @@ mod test {
 				&[
 					(0, 0..1, 0, 2000),
 					(1, 0..0, 2000, 4000),
-					(2, 0..0, 4000, 7000),
-					(3, 1..3, 7000, 8000),
+					(2, 0..0, 4000, 6000),
+					(3, 1..3, 6000, 8000),
 				],
 			),
 			(
@@ -400,9 +422,16 @@ mod test {
 				&[
 					(0, 0..1, 0, 500),
 					(1, 1..2, 500, 4000),
-					(2, 0..0, 4000, 7300),
-					(3, 2..3, 7300, 8000),
+					(2, 0..0, 4000, 6000),
+					(3, 2..3, 6000, 8000),
 				],
+			),
+			(
+				"a pause resuming past its slot's line times that segment from the line",
+				2000,
+				&[10, 5990],
+				5995,
+				&[(1, 0..1, 10, 4000), (2, 1..2, 4000, 5995)],
 			),
 			(
 				"a pause ending past the next line",
@@ -413,8 +442,8 @@ mod test {
 					(0, 0..1, 0, 2000),
 					(1, 1..2, 2000, 4000),
 					(2, 0..0, 4000, 6000),
-					(3, 0..0, 6000, 9000),
-					(4, 2..3, 9000, 10000),
+					(3, 0..0, 6000, 8000),
+					(4, 2..3, 8000, 10000),
 				],
 			),
 		];
@@ -448,6 +477,61 @@ mod test {
 		assert_eq!(segment_length(Duration::ZERO), MIN_SEGMENT);
 	}
 
+	/// Every `EXTINF` fits the target duration, twice the segment length (RFC 8216 4.3.3.1), across
+	/// GOPs within the interval, overruns, pauses, and groups resuming just past a line, for edges
+	/// joining at any group. Only a final segment can reach past two lengths, by its last frame.
+	#[test]
+	fn every_extinf_fits_the_target() {
+		// A small LCG, so the cases are the same on every run.
+		let mut seed: u64 = 0x5eed;
+		let mut next = move |below: u64| {
+			seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+			(seed >> 33) % below.max(1)
+		};
+		for interval in [20u64, 300, 999, 2_000, 3_000] {
+			let length = segment_length(Duration::from_millis(interval)).as_millis() as u64;
+			let target = (2 * length).div_ceil(1_000);
+			for _ in 0..50 {
+				let mut starts = vec![next(length)];
+				for _ in 0..60 {
+					let last = *starts.last().unwrap();
+					let step = match next(10) {
+						// A GOP within the interval.
+						0..=5 => 1 + next(interval),
+						// An overrun: a group longer than the interval.
+						6 => interval + next(3 * length),
+						// A pause.
+						7 => length + next(5 * length),
+						// A group resuming just past a line, or on it.
+						_ => (last / length + 1 + next(3)) * length + next(4) - last,
+					};
+					starts.push(last + step.max(1));
+				}
+				let end = starts.last().unwrap() + 1;
+				for join in [0, 1, starts.len() / 2] {
+					let mut grid = Grid::new(Duration::from_millis(length), 256);
+					let mut slots = Vec::new();
+					for (sequence, start) in starts.iter().enumerate().skip(join) {
+						slots.extend(grid.group(sequence as u64, ms(*start)));
+					}
+					slots.extend(grid.finish(Some(ms(end - 1)), Some(ms(end))));
+					let listed = listed(slots);
+					for (index, (segment, _, start, end)) in listed.iter().enumerate() {
+						let extinf = end - start;
+						let fits = ((extinf as f64) / 1_000.0).round() as u64 <= target;
+						assert!(fits, "{interval} ms: segment {segment} lasts {extinf} ms: {starts:?}");
+						if index + 1 < listed.len() {
+							assert!(
+								extinf < 2 * length,
+								"{interval} ms: segment {segment} lasts {extinf} ms: {starts:?}"
+							);
+						}
+					}
+				}
+			}
+		}
+	}
+
 	/// The maintainer's 2026-11-03 rule: an edge joining at B numbers it 3, as one that saw A does.
 	#[test]
 	fn a_late_join_numbers_like_an_early_one() {
@@ -456,8 +540,8 @@ mod test {
 		let mut late = grid.group(1, ms(7000));
 		late.extend(grid.group(2, ms(7200)));
 		late.extend(grid.finish(Some(ms(7400)), Some(ms(7400))));
-		assert_eq!(listed(late), [(3, 1..3, 7000, 7400)]);
-		assert_eq!(early.last(), Some(&(3, 1..3, 7000, 7400)));
+		assert_eq!(listed(late), [(3, 1..3, 6000, 7400)]);
+		assert_eq!(early.last(), Some(&(3, 1..3, 6000, 7400)));
 	}
 
 	/// A group off the grid waits for its successor; one on a line is placed at once.
@@ -498,7 +582,7 @@ mod test {
 		assert_eq!(grid.group(1, ms(10_200)), [Slot::Reset]);
 		assert_eq!(
 			listed(grid.finish(Some(ms(10_400)), Some(ms(10_400)))),
-			[(5, 1..2, 10_200, 10_400)],
+			[(5, 1..2, 10_000, 10_400)],
 			"only what follows the rewind is listed"
 		);
 	}
