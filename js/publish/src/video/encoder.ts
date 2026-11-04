@@ -1010,17 +1010,21 @@ const PROBE_FRAMES = 4;
 // - Output that reorders. The catalog declares none, but Firefox's software H.264 still emits
 //   B-frames for High and Main under realtime latency.
 // - H.264 or HEVC that isn't Annex B. Safari 26 accepts `hevc: { format: "annexb" }` but emits
-//   length-prefixed NAL units with an hvcC description, which no subscriber can decode.
+//   length-prefixed NAL units with an hvcC description, which no subscriber can decode. A
+//   description means length-prefixed output (per the AVC and HEVC WebCodecs registrations), which
+//   also catches a four-byte length that happens to read as a start code, such as `00 00 01 2c`.
 async function probeEncoder(config: VideoEncoderConfig): Promise<{ reported: string } | { refused: string }> {
 	let reported: string | undefined;
 	let reordered = false;
 	let last: number | undefined;
 	let first: Uint8Array | undefined;
+	let described = false;
 	const encoder = new VideoEncoder({
 		output: (chunk, metadata) => {
 			reported ??= metadata?.decoderConfig?.codec;
 			if (last !== undefined && chunk.timestamp <= last) reordered = true;
 			last = chunk.timestamp;
+			if (metadata?.decoderConfig?.description) described = true;
 			if (!first) {
 				first = new Uint8Array(chunk.byteLength);
 				chunk.copyTo(first);
@@ -1057,7 +1061,7 @@ async function probeEncoder(config: VideoEncoderConfig): Promise<{ reported: str
 
 	if (!reported) throw new Error(`${config.codec} encoder reported no codec string`);
 	if (reordered) return { refused: "its encoder reorders frames despite realtime latency" };
-	if (requestsAnnexB(config.codec) && !(first && startsWithStartCode(first))) {
+	if (requestsAnnexB(config.codec) && (described || !(first && startsWithStartCode(first)))) {
 		return { refused: "its encoder ignored the requested Annex B format" };
 	}
 	return { reported };
