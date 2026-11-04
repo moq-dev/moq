@@ -8,9 +8,9 @@ in input timestamps. Check by running the repro attached to
 [chromium#581458361](https://issues.chromium.org/issues/581458361) in a released
 Chrome: scenario A ends near 13.98 s with steps across
 suppressed spans, and scenario C follows the +1 s jump. Delete this quest once a stable Chrome
-passes, and tell [Pick how the browser publisher suppresses
-silence](/quest/m1/push-to-talk/dtx-route.md)'s successor that native
-`usedtx` (its route 3) is usable there.
+passes. Nothing of ours waits on it: the publisher gates silence before the
+encoder and stamps chunks from its own inputs ([Push-to-talk suppresses
+silence](/quest/m1/push-to-talk/dtx.md)), and Safari ignores `usedtx`.
 
 ## Plan
 
@@ -36,7 +36,3 @@ chunks from its own inputs, so nothing depends on this.
   input jumps. Check by running the attached repro in the latest stable Chrome
   (scenario A ends near 13.98 s, scenario C follows the +1 s jump); advance it
   by commenting on the bug with each stable release that still fails.
-
-## Related
-
-- [Pick how the browser publisher suppresses silence](/quest/m1/push-to-talk/dtx-route.md) - the workaround and the native-DTX route this unlocks
