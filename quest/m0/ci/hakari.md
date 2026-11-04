@@ -2,10 +2,15 @@
 
 ## Goal
 
-Nightly's hosted macOS and Windows jobs record their mbx hit rate and CPU time
-before and after the workspace-hack.
+Nightly's hosted macOS and Windows jobs record their mbx cache-hit evidence and
+estimated compiler work saved before and after the workspace-hack.
 
 ## Plan
+
+Decided 2026-11-04 (maintainer, /quest-unblock): ✅ accept the mbx cache-hit
+evidence and estimated compiler savings as sufficient. Not chosen: add per-job
+CPU instrumentation and measure CPU totals. The estimates are not measured CPU
+savings.
 
 Decided with the maintainer on 2026-10-25: use cargo-hakari rather than only
 trimming CI's feature permutations.
@@ -46,8 +51,10 @@ Public API and wire: none.
 ## Waiting
 
 - moq-dev/moq: inspect the next scheduled Nightly for a second complete macOS
-  after-run. Recommend retaining this measurement wait; never dispatch Nightly.
-- Maintainer: the existing logs contain estimated compiler work saved, not
-  measured CPU totals. Accept those estimates as sufficient, or add CPU
-  instrumentation before collecting future scheduled evidence. Recommend adding
-  instrumentation if measured CPU remains required; do not relabel wall time.
+  after-run. As of 2026-11-04, the latest scheduled run is
+  [Nov 4](https://github.com/moq-dev/moq/actions/runs/41852517544); its
+  [macOS job](https://github.com/moq-dev/moq/actions/runs/41852517544/job/126656206251)
+  was cancelled with no steps. Run
+  `gh run list --repo moq-dev/moq --workflow nightly.yml --event schedule`,
+  inspect the next macOS job and record its mbx summaries alongside Nov 3.
+  This measurement wait outlives the implementation PR; never dispatch Nightly.
