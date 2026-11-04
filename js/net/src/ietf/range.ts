@@ -98,7 +98,10 @@ export class RangeFetch {
 
 	/** Read one fetch stream after its header, bounded by FETCH_OK, accepting each group at its first object. */
 	async receive(stream: Reader): Promise<void> {
-		if (this.#taken || this.#finished) throw new Error("FETCH stream no longer wanted");
+		if (this.#taken || this.#finished) {
+			stream.stop(new StreamError(StreamCode.Cancel, { message: "FETCH stream no longer wanted" }));
+			return;
+		}
 		this.#taken = true;
 		let prior: bigint | undefined;
 		let next = 0;
