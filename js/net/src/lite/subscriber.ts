@@ -1020,15 +1020,34 @@ export class Subscriber {
 		const deadline = new Deadline();
 		const setup = this.#openSubscribe(state, msg, ranges, request, id, deadline);
 
+		// The readers leaving gives the setup up, even while its streams wait for credit. An
+		// info-only lookup attaches no reader, so only demand that arrived and left counts.
+		const left = new AbortController();
+		const demand = request.demand();
+		let arrived = false;
+		let unwatch: Dispose | undefined;
+		const watch = () => {
+			if (demand.wanted.peek() !== undefined) arrived = true;
+			if (hooks.demandReleased(demand).peek() !== undefined || (arrived && demand.wanted.peek() === undefined)) {
+				left.abort(
+					new StreamError(StreamCode.Cancel, { message: "subscribe abandoned before it was accepted" }),
+				);
+			} else {
+				unwatch = Signal.race(demand.wanted, hooks.demandReleased(demand)).changed(watch);
+			}
+		};
+		watch();
+
 		let opened: { stream: Stream; entry: SubscribeEntry };
 		try {
-			opened = await deadline.wait(untilAborted(setup, valid));
+			opened = await deadline.wait(untilAborted(untilAborted(setup, valid), left.signal));
 			console.debug(`subscribe ok: id=${id} broadcast=${broadcast} track=${request.name}`);
 		} catch (err) {
 			closeViolation(this.#quic, err);
 			// The setup outlived its deadline waiting for the first response: a control
-			// timeout, not content that arrived late. A revocation says so instead.
-			const e = state.revoked ?? (await sessionCause(this.#quic, err));
+			// timeout, not content that arrived late. A revocation or the readers leaving says
+			// so instead.
+			const e = state.revoked ?? (left.signal.aborted ? left.signal.reason : await sessionCause(this.#quic, err));
 			state.cancel.abort(e);
 			valid?.removeEventListener("abort", retire);
 			request.reject(e);
@@ -1045,6 +1064,8 @@ export class Subscriber {
 			leave();
 			setup.then(leave, leave);
 			return;
+		} finally {
+			unwatch?.();
 		}
 		valid?.removeEventListener("abort", retire);
 
