@@ -866,8 +866,9 @@ impl Consume {
 		tokio::spawn(async move {
 			let res = crate::ffi::run(driver.watch(Self::run_datagrams(on_datagram, track, close))).await;
 			let entry = State::lock().consume.datagram_task.remove(id);
-			if let Some(entry) = entry {
-				entry.task.callback.call(res);
+			if let Some(DatagramTaskEntry { task, track }) = entry {
+				drop(track);
+				task.callback.call(res);
 			}
 		});
 		Ok(id)
