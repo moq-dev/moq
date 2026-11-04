@@ -5,8 +5,9 @@
 CodeRabbit and Pullfrog review a PR when it's marked ready (and on request),
 not on every push, so fixing review findings stops drawing a fresh wave of
 threads that holds the PR out of the merge queue. Done when a PR iterated
-through three or more pushes after ready gets no new bot threads unless one is
-requested, and the PR records the configuration and one such PR as evidence.
+through three or more pushes after ready gets a bot review when marked ready,
+no new bot threads on the later pushes, and a new bot review when one is
+requested, and the PR records the configuration and that PR as evidence.
 
 ## Plan
 
