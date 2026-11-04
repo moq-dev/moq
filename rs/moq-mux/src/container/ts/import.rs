@@ -3927,7 +3927,9 @@ impl<E: CatalogExt> AacStream<E> {
 					match self.resync.recover(data, offset, &SyncWord::ADTS) {
 						Recover::At(next) => {
 							if in_tail {
-								pts = pes_base;
+								if !pending.continuation {
+									pts = pes_base;
+								}
 								in_tail = false;
 							}
 							offset = next;
@@ -3945,7 +3947,9 @@ impl<E: CatalogExt> AacStream<E> {
 								}
 								None => {
 									if in_tail {
-										pts = pes_base;
+										if !pending.continuation {
+											pts = pes_base;
+										}
 										in_tail = false;
 									}
 									offset = next;
@@ -4534,7 +4538,9 @@ impl<E: CatalogExt> LegacyStream<E> {
 					match self.resync.recover(data, offset, &self.descriptor.into()) {
 						Recover::At(next) => {
 							if in_tail {
-								pts = pes_base;
+								if !pending.continuation {
+									pts = pes_base;
+								}
 								in_tail = false;
 							}
 							offset = next;
@@ -4552,7 +4558,9 @@ impl<E: CatalogExt> LegacyStream<E> {
 								}
 								None => {
 									if in_tail {
-										pts = pes_base;
+										if !pending.continuation {
+											pts = pes_base;
+										}
 										in_tail = false;
 									}
 									offset = next;
@@ -6560,6 +6568,56 @@ pub(super) mod test {
 				.collect::<Vec<_>>(),
 			(0..10).map(|i| 1_000_000 + i * 72_000).collect::<Vec<_>>()
 		);
+	}
+
+	/// Resync within one PES keeps its clock, whether it finds a frame immediately or
+	/// discards a whole piece before the next candidate arrives.
+	#[tokio::test(start_paused = true)]
+	async fn audio_resync_in_a_pes_continuation_keeps_its_timestamp() {
+		const PID: u16 = 0x61;
+		for stream_type in [StreamType::AdtsAac, StreamType::Mpeg1Audio] {
+			for carry in [false, true] {
+				let frame = |fill| match stream_type {
+					StreamType::AdtsAac => adts_frame(65, fill),
+					_ => mp2_frame(fill),
+				};
+				let mut broadcast = moq_net::broadcast::Info::new().produce();
+				let consumer = broadcast.consume();
+				let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+				let mut import = super::Import::new(broadcast, catalog.reserve());
+				import.decode(&synth_pmt(&[(stream_type, PID)], false)).unwrap();
+				let recovered = [frame(0xcc), frame(0xdd)].concat();
+				let junk = vec![0; if carry { 40 } else { 8 }];
+				let declared = 40 + junk.len() + recovered.len();
+				import
+					.decode(&audio_pes_open(PID, 0, 90_000, declared, &frame(0xaa)[..40]))
+					.unwrap();
+				if carry {
+					import.decode(&ts_continuation(PID, 1, &junk)).unwrap();
+					import.decode(&ts_continuation(PID, 2, &recovered)).unwrap();
+				} else {
+					import
+						.decode(&ts_continuation(PID, 1, &[junk, recovered].concat()))
+						.unwrap();
+				}
+				import.finish().unwrap();
+				let frames = read_audio_frames(&consumer, &catalog).await;
+				assert_eq!(frames.len(), 2, "{stream_type:?} carry={carry}");
+				let step = if stream_type == StreamType::AdtsAac {
+					21_333
+				} else {
+					72_000
+				};
+				assert_eq!(
+					frames
+						.iter()
+						.map(|frame| frame.timestamp.as_micros())
+						.collect::<Vec<_>>(),
+					[1_000_000, 1_000_000 + step],
+					"{stream_type:?} carry={carry}"
+				);
+			}
+		}
 	}
 
 	// A frame header that changes the channel count is a new decoder identity: the frames after
