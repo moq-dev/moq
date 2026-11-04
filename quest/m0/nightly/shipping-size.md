@@ -40,32 +40,39 @@ measurement and its attribution evidence:
   recording acceptance alone does not waive that check. Summaries now identify
   the current and failing baseline commits.
 
-Remaining work is the other targets' relay attribution, the acceptance
-decisions below or reductions that retain the required behavior, and scheduled
-evidence on main. Keep the 5% and 10% limits and the retained history intact.
+Decided 2026-11-04 (maintainer, on the investigation PR):
+
+- ✅ Accept the exactly attributed JS growth (`js/net` and `js/watch`,
+  +5.02–5.28%) as the cost of the retained features and correctness fixes.
+  The PR's per-commit table is the acceptance record; the retained November 3
+  point is the new daily baseline.
+- Require further JS reduction while retaining those behaviors.
+
+- ✅ Keep the 5% daily and 10% thirty-day guards unchanged.
+- Raise or exempt the guards for this step.
+
+Relay archive acceptance stays open until native per-commit attribution for
+macOS, aarch64 Linux, and Windows MSVC is supplied, or the maintainer
+explicitly accepts the evidence limit. Keep the retained history intact.
 [Size audit](/quest/m2/audit-size.md) owns the release-time view.
 
 Public API: none. Wire: none.
 
 ## Waiting
 
-- Maintainer: accept the exactly attributed JS feature and correctness costs,
-  or require further reduction while retaining those behaviors. Recommend
-  accepting the measured JS step; the PR records the consumers and byte costs.
-  Relay acceptance stays open until the other targets' attribution is supplied,
-  or the maintainer explicitly accepts the evidence limit in the PR.
-- moq-dev/moq: historical Windows MSVC measurements need a matching build host;
-  none of the listed SSH hosts runs Windows. Supply before/after archive
-  measurements for the responsible commits, rather than substituting Linux
-  `cargo bloat` estimates. macOS and aarch64 Linux attribution also remains work.
-- moq-dev/moq: after the change lands, inspect the next scheduled Nightly
-  shipping-size job on main, its measured revision and retained baseline, for
-  passing daily comparisons and, when an anchor exists, thirty-day comparisons.
-  If a thirty-day comparison still
-  fails, reduction or further acceptance work remains, potentially until the
-  post-jump point is thirty days old. No manual Nightly dispatch; retain this
-  quest until that evidence and the remaining attribution/acceptance work are
-  settled.
+- moq-dev/moq: native per-commit relay archive attribution for macOS, aarch64
+  Linux, and Windows MSVC. Windows needs a matching build host; none of the
+  listed SSH hosts runs Windows. macOS needs the pinned Nix toolchain rather
+  than kixtop's ambient Rust. Supply before/after archive measurements for the
+  responsible commits rather than substituting Linux `cargo bloat` estimates,
+  then put relay acceptance to the maintainer.
+- moq-dev/moq: inspect the next scheduled Nightly shipping-size job on main,
+  its measured revision and retained baseline, for passing JS daily
+  comparisons and, when an anchor exists, thirty-day comparisons. If a
+  thirty-day comparison still fails, reduction or further acceptance work
+  remains, potentially until the post-jump point is thirty days old. No manual
+  Nightly dispatch; retain this quest until that evidence and the relay
+  attribution are settled.
 
 ## Related
 
