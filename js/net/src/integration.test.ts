@@ -2521,6 +2521,38 @@ for (const alpn of [Lite.ALPN_06, Lite.ALPN_07_WIP]) {
 	}
 }
 
+// As Rust's lazy discovery tests: a request owns its discovery, so nothing watches first.
+test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
+	"%s: a request on an unwatched path resolves it, or fails Unroutable once the peer syncs",
+	async (alpn) => {
+		const pair = createMockTransportPair(alpn);
+		const serverOrigin = new OriginProducer();
+		const clientOrigin = new OriginProducer();
+		const [client, server] = await Promise.all([
+			connect(url, { transport: pair.client, consume: clientOrigin }),
+			accept(pair.server, url, { publish: serverOrigin.consume() }),
+		]);
+		const broadcast = publish(serverOrigin, Path.from("room/cam"));
+
+		const reader = clientOrigin.consume();
+		const found = reader.request(Path.from("room/cam"));
+		const missing = reader.request(Path.from("room/missing"));
+		await until(() => found.active.peek() !== undefined && missing.closed.peek() !== undefined);
+		expect(found.closed.peek()).toBeUndefined();
+		const err = missing.closed.peek();
+		expect(err).toBeInstanceOf(StreamError);
+		expect((err as StreamError).code).toBe(StreamCode.Unroutable);
+
+		found.close();
+		missing.close();
+		broadcast.close();
+		client.abort();
+		server.abort();
+		serverOrigin.close();
+		clientOrigin.close();
+	},
+);
+
 test.each([Ietf.ALPN.DRAFT_18])(
 	"%s: closing an announce consumer before the namespace answer ends the peer's stream",
 	async (alpn) => {

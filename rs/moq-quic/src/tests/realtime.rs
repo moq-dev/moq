@@ -229,7 +229,7 @@ fn run(preset: &Preset, candidate: &Candidate, seed: u64, competing: bool) -> Ou
 			while let Ok(Some(chunk)) = chunks.next(usize::MAX) {
 				flow.read[bin] += chunk.bytes.len() as u64;
 			}
-			let _ = chunks.finalize();
+			chunks.finalize();
 		}
 
 		if now >= start + END {

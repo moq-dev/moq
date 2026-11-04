@@ -1186,7 +1186,9 @@ export class Publisher {
 				} finally {
 					hold.abort();
 				}
-				// A group that has not arrived yet holds this FETCH's slot until the requester leaves.
+				// A group the track does not cache goes to its request handler at once, written yet
+				// or not, as in Rust; with none open it is NotFound. A pending answer holds this
+				// FETCH's slot until the requester leaves.
 				group = await front.track(msg.track).fetchGroup(msg.group, {
 					priority: msg.priority,
 					maxDelay: msg.maxDelay,

@@ -60,7 +60,3 @@ SUBSCRIBE_OK, now landed, and JS ranges, not the whole
 
 Public API: no type change; the ordered read changes in Rust and JS (the
 floor comes from reported bounds, and JS drops backfill). Wire: none.
-
-## Required
-
-- [JS ranges](/quest/m1/subscribe-ranges/js.md) - the JS reader's requested ranges set its floor

@@ -183,7 +183,7 @@ fn assert_protocol(err: &MoqError, scope: crate::error::MoqErrorScope, kind: cra
 }
 
 #[tokio::test]
-async fn detached_cancels_inner_on_drop() {
+async fn call_cancels_inner_on_drop() {
 	struct DropSignal(Option<tokio::sync::oneshot::Sender<()>>);
 
 	impl Drop for DropSignal {
@@ -194,7 +194,7 @@ async fn detached_cancels_inner_on_drop() {
 
 	let (started_tx, started_rx) = tokio::sync::oneshot::channel();
 	let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
-	let outer = tokio::spawn(crate::ffi::detached(async move {
+	let outer = tokio::spawn(crate::ffi::run(async move {
 		let _drop = DropSignal(Some(dropped_tx));
 		started_tx.send(()).unwrap();
 		std::future::pending::<Result<(), MoqError>>().await
@@ -202,13 +202,13 @@ async fn detached_cancels_inner_on_drop() {
 
 	kio::clock::timeout(TIMEOUT, started_rx)
 		.await
-		.expect("timed out waiting for detached task to start")
+		.expect("timed out waiting for call to start")
 		.unwrap();
 	outer.abort();
 	assert!(outer.await.unwrap_err().is_cancelled());
 	kio::clock::timeout(TIMEOUT, dropped_rx)
 		.await
-		.expect("timed out waiting for detached task to be dropped")
+		.expect("timed out waiting for call to be dropped")
 		.unwrap();
 }
 
@@ -2940,7 +2940,7 @@ async fn video_rung_sits_below_its_lower_and_disables() {
 		&broadcast,
 		named("high"),
 		MoqVideoInit {
-			lower: Some(low.clone()),
+			lower: Some(MoqMediaProducer::Track { producer: low.clone() }),
 			..video_init(MoqVideoFormat::Avc3, h264_init())
 		},
 	)
@@ -2966,6 +2966,99 @@ async fn video_rung_sits_below_its_lower_and_disables() {
 		}
 	};
 	assert!(disabled.video["low"].enabled);
+}
+
+/// A byte-stream rung above another sits one priority below it, so a grant short of both funds
+/// the lower one first. Disabled, it drops what is written to it, and enabled again it resumes at
+/// the next keyframe in the stream.
+#[tokio::test]
+async fn stream_rung_is_funded_after_its_lower_and_resumes_at_a_keyframe() {
+	let estimate = moq_net::bandwidth::Producer::new();
+	let bandwidth = crate::bandwidth::MoqAllocator::new(moq_net::bandwidth::Allocator::new(estimate.consume()));
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let consumer = broadcast.consume().unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer).await.unwrap();
+
+	let named = |name: &str| MoqMediaTarget::Named {
+		name: Some(name.into()),
+	};
+	let low =
+		MoqMediaTrackStreamProducer::video(&broadcast, named("low"), video_init(MoqVideoFormat::Avc3, h264_init()))
+			.unwrap();
+	let high = MoqMediaTrackStreamProducer::video(
+		&broadcast,
+		named("high"),
+		MoqVideoInit {
+			lower: Some(MoqMediaProducer::Stream { producer: low.clone() }),
+			..video_init(MoqVideoFormat::Avc3, h264_init())
+		},
+	)
+	.unwrap();
+
+	let low_track = consumer.subscribe_track("low".into(), None).await.unwrap();
+	let high_track = consumer.subscribe_track("high".into(), None).await.unwrap();
+	assert_eq!(low_track.info().priority, hang::catalog::PRIORITY.video);
+	assert_eq!(high_track.info().priority, hang::catalog::PRIORITY.video - 1);
+
+	// The higher rung asks for more, but strict priority fills the lower one first.
+	let low_reservation = bandwidth.reserve(&low.demand().unwrap(), 2_000_000);
+	let high_reservation = bandwidth.reserve(&high.demand().unwrap(), 4_000_000);
+	estimate
+		.set(Some(moq_net::bandwidth::Rate::from_bps(3_000_000)))
+		.unwrap();
+	assert_eq!(low_reservation.rate(), Some(2_000_000));
+	assert_eq!(high_reservation.rate(), Some(1_000_000));
+
+	// Each keyframe ends in its own slice bytes, to tell which one went out.
+	let keyframe = |last: u8| {
+		let mut bytes = h264_init();
+		bytes.extend_from_slice(&[0, 0, 0, 1, 0x65, 0x88, 0x84, last]);
+		bytes
+	};
+	let delta = [0, 0, 0, 1, 0x41, 0x9a, 0x21, 0x22];
+	// The splitter emits an access unit once the next one starts, hence the trailing deltas.
+	let write = |bytes: &[&[u8]]| {
+		for bytes in bytes {
+			high.write(bytes.to_vec()).unwrap();
+		}
+	};
+	let next_frame = async || {
+		loop {
+			let frame = kio::clock::timeout(TIMEOUT, high_track.read_frame())
+				.await
+				.expect("timed out waiting for a frame")
+				.unwrap()
+				.expect("the track ended");
+			// The discontinuity marker is empty.
+			if !frame.payload.is_empty() {
+				return frame.payload;
+			}
+		}
+	};
+	let high_enabled = async |enabled: bool| loop {
+		let catalog = kio::clock::timeout(TIMEOUT, catalog_consumer.next())
+			.await
+			.expect("timed out waiting for catalog")
+			.unwrap()
+			.expect("expected a catalog");
+		if catalog.video.get("high").is_some_and(|high| high.enabled == enabled) {
+			assert!(catalog.video["low"].enabled);
+			break;
+		}
+	};
+
+	write(&[&keyframe(0x21), &delta, &delta]);
+	assert!(next_frame().await.ends_with(&[0x21]));
+
+	high.set_enabled(false).unwrap();
+	high_enabled(false).await;
+	// The stream keeps flowing, but none of it goes out, the keyframe included.
+	write(&[&delta, &keyframe(0x23), &delta, &delta]);
+
+	high.set_enabled(true).unwrap();
+	write(&[&delta, &keyframe(0x24), &delta, &delta]);
+	high_enabled(true).await;
+	assert!(next_frame().await.ends_with(&[0x24]), "resumed on another keyframe");
 }
 
 /// A keyframe whose SPS names another level is a new decoder identity, so the track producer moves
@@ -8422,7 +8515,7 @@ async fn shutdown_delivers_the_finished_track() {
 		let closing = publisher.clone();
 		kio::clock::timeout(
 			TIMEOUT,
-			crate::ffi::detached(async move {
+			crate::ffi::run(async move {
 				let group = track.append_group()?;
 				group.write_frame(MoqFrame {
 					timestamp: Some(us(0)),
@@ -9190,4 +9283,175 @@ fn shutdown_waits_for_a_polled_call() {
 	shutdown.join().unwrap();
 	let parked = parked.join().unwrap();
 	assert!(matches!(parked, Err(MoqError::Cancelled)), "{parked:?}");
+}
+
+/// A cancelled foreign wait can remain allocated until the host frees it. It must neither
+/// consume another demand change nor prevent a second call from observing that change.
+#[tokio::test]
+async fn demand_cancelled_before_free_leaves_the_change() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("events".into(), None).unwrap();
+	let demand = track.demand().unwrap();
+	assert_eq!(demand.wanted_changed().await.unwrap(), None);
+	let mut abandoned = Box::pin(demand.wanted_changed());
+	assert!(
+		abandoned
+			.as_mut()
+			.poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+			.is_pending()
+	);
+	ffi_caught_up().await;
+	let consumer = track.consume(None).unwrap();
+	let wanted = kio::clock::timeout(TIMEOUT, demand.wanted_changed())
+		.await
+		.expect("the abandoned wait stole the change")
+		.unwrap();
+	assert!(wanted.is_some());
+	drop(abandoned);
+	drop(consumer);
+}
+
+/// Setup, rather than the first packet, decides whether a rendition is usable.
+#[cfg(feature = "audio")]
+#[tokio::test]
+async fn audio_subscribe_configuration_boundary() {
+	use crate::audio::MoqAudioConsumer;
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let _track = broadcast.publish_track("audio".into(), None).unwrap();
+	let consumer = broadcast.consume().unwrap();
+	// The names alone cannot decide: the AAC-LC description may declare SBR,
+	// and a present, malformed OpusHead must never be replaced by catalog fields.
+	for (codec, description, channels, supported) in [
+		("opus", None, 2, true),
+		("opus", Some(opus_head()), 2, true),
+		("opus", Some(vec![]), 2, false),
+		("opus", Some(opus_head()[..18].to_vec()), 2, false),
+		("opus", None, 6, false),
+		("pcm", None, 6, true),
+		("pcm", Some(vec![]), 2, false),
+		("flac", None, 2, false),
+		("unknown", None, 2, false),
+		("mp4a.40.bad", None, 2, false),
+		("mp4a.40.2", Some(vec![0x11, 0x90]), 2, true),
+		("mp4a.40.2", Some(vec![0x12, 0x10, 0x56, 0xe5, 0x98]), 2, false),
+		("mp4a.40.2", Some(vec![0x11]), 2, false),
+		// Frequency index 15 promises a 24-bit rate that is absent from these two bytes.
+		("mp4a.40.2", Some(vec![0x17, 0x90]), 2, false),
+		("mp4a.40.2", None, 6, false),
+		("mp4a.40.5", None, 2, false),
+	] {
+		let mut config = sibling_audio("");
+		config.codec = codec.into();
+		config.description = description;
+		config.channel_count = channels;
+		let result = MoqAudioConsumer::subscribe(&consumer, "audio".into(), config, audio_output()).await;
+		if supported {
+			result.unwrap().cancel();
+		} else {
+			let error = result.err();
+			assert!(
+				matches!(&error, Some(MoqError::UnsupportedConfig { .. })),
+				"{codec}/{channels}: {error:?}"
+			);
+		}
+	}
+	// An output layout the decoder cannot produce is refused too. A zero output rate
+	// is a caller error no rendition avoids, and a missing track is not a refusal.
+	let layout = crate::audio::MoqAudioDecoderOutput {
+		channels: Some(0),
+		..audio_output()
+	};
+	assert!(matches!(
+		MoqAudioConsumer::subscribe(&consumer, "audio".into(), sibling_audio(""), layout).await,
+		Err(MoqError::UnsupportedConfig { .. })
+	));
+	let rate = crate::audio::MoqAudioDecoderOutput {
+		sample_rate: Some(0),
+		..audio_output()
+	};
+	assert!(matches!(
+		MoqAudioConsumer::subscribe(&consumer, "audio".into(), sibling_audio(""), rate).await,
+		Err(MoqError::Audio { .. })
+	));
+	let missing = MoqAudioConsumer::subscribe(&consumer, "missing".into(), sibling_audio(""), audio_output()).await;
+	assert!(matches!(missing, Err(MoqError::Audio { .. })));
+	let _limited = broadcast
+		.publish_track(
+			"limited".into(),
+			Some(MoqTrackInfo {
+				priority: 0,
+				max_age: Some(Duration::from_millis(10)),
+				refresh: None,
+				timescale: None,
+				compress: false,
+			}),
+		)
+		.unwrap();
+	let retained = MoqAudioConsumer::subscribe(
+		&consumer,
+		"limited".into(),
+		sibling_audio(""),
+		crate::audio::MoqAudioDecoderOutput {
+			delay: Some(MoqDelay {
+				min: Some(Duration::from_millis(20)),
+				max: None,
+			}),
+			..audio_output()
+		},
+	)
+	.await;
+	assert!(matches!(retained, Err(MoqError::Audio { .. })));
+	broadcast.close().unwrap();
+}
+
+#[cfg(feature = "video")]
+#[tokio::test]
+async fn video_subscribe_configuration_boundary() {
+	use crate::video::{MoqVideoConsumer, MoqVideoDecoderOutput};
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let _track = broadcast.publish_track("video".into(), None).unwrap();
+	let consumer = broadcast.consume().unwrap();
+	for (codec, description, supported) in [
+		("avc1.42001e", None, true),
+		("avc1.42001e", Some(vec![]), false),
+		("avc1.42001e", Some(vec![1, 0x42, 0, 0x1e]), false),
+		// hvc1 requires hvcC before any backend is opened, even on HEVC-capable hosts.
+		("hvc1.1.6.L93.B0", None, false),
+		("vp09.02.10.10", None, false),
+		("avc1.invalid", None, false),
+		("unknown", None, false),
+	] {
+		let config = MoqVideo {
+			codec: codec.into(),
+			description,
+			enabled: true,
+			container: MoqContainer::Legacy,
+			preference: 0,
+			label: None,
+			broadcast: None,
+			instance: None,
+			track: None,
+			coded: None,
+			display_aspect: None,
+			bitrate: None,
+			framerate: None,
+		};
+		let result = MoqVideoConsumer::subscribe(
+			&consumer,
+			"video".into(),
+			config.clone(),
+			MoqVideoDecoderOutput::default(),
+		)
+		.await;
+		if supported {
+			result.unwrap().cancel();
+			let missing =
+				MoqVideoConsumer::subscribe(&consumer, "missing".into(), config, MoqVideoDecoderOutput::default())
+					.await;
+			assert!(matches!(missing, Err(MoqError::Video { .. })));
+		} else {
+			assert!(matches!(result, Err(MoqError::UnsupportedConfig { .. })), "{codec}");
+		}
+	}
+	broadcast.close().unwrap();
 }
