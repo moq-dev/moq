@@ -481,7 +481,7 @@ test("a FETCH preserves relayed metadata and cached groups without upstream FETC
 				const next = await requested;
 				if (next.done) throw new Error("no relayed broadcast request");
 				next.value.serve(source);
-				await cursor.return();
+				await cursor.return?.();
 				expect(served(await fetching).objects).toEqual(pairs([3]));
 				cached?.close();
 			} finally {
