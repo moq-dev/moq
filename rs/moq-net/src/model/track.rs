@@ -9463,7 +9463,7 @@ mod test {
 		let consumer = request.consume();
 		let pending = consumer.subscribe(None);
 		{
-			let mut state = request.state.write().unwrap();
+			let mut state = request.state.write().ok().unwrap();
 			state
 				.insert_group_request(3, group::Bounds { start: 0, end: Some(1) }, None)
 				.unwrap();
