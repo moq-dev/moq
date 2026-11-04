@@ -3046,6 +3046,8 @@ impl Subscriber {
 				}
 				loop {
 					let adopt = kio::wait(|waiter| {
+						// Every wait here drives the fetches a lingering copy started.
+						let _ = group_fetches.poll(waiter);
 						if gate.poll_denied(waiter).is_ready() {
 							return Poll::Ready(Err(Abandon::Failed(Error::Unauthorized)));
 						}
@@ -3117,6 +3119,7 @@ impl Subscriber {
 			None => {
 				let opening = self.session.clone();
 				let stream = match kio::wait(|waiter| {
+					let _ = group_fetches.poll(waiter);
 					if gate.poll_denied(waiter).is_ready() {
 						return Poll::Ready(Err(Error::Unauthorized));
 					}
@@ -3270,6 +3273,7 @@ impl Subscriber {
 			});
 			loop {
 				let setup = kio::wait(|waiter| {
+					let _ = group_fetches.poll(waiter);
 					let response = waiter.poll_future(response.as_mut());
 					if let Poll::Ready(Err(err)) = response {
 						return Poll::Ready(Setup::Response(Err(err)));
@@ -3366,7 +3370,8 @@ impl Subscriber {
 			// The publisher may already be serving before it answers. A session abort
 			// already rejected the parked request; dropping what remains is not a second one.
 			let aborted = self.remove_subscribe(request_id).is_none();
-			self.cancel_subscribe(stream).await;
+			let mut cancelling = std::pin::pin!(self.cancel_subscribe(stream));
+			group_fetches.drive(|waiter| waiter.poll_future(cancelling.as_mut())).await;
 			// A resumed copy goes back to lingering, unless the session took it.
 			return resumed.filter(|_| !aborted);
 		};
@@ -3935,6 +3940,9 @@ impl Subscriber {
 												tracing::debug!(%err, "joining FETCH failed, joining at the next whole group");
 											}
 										}
+										// Cache misses keep going meanwhile, such as one the fill
+										// settling just released to FETCH the joined group.
+										let _ = group_fetches.poll(waiter);
 										poll_settled(&mut settle, waiter, &fill, count)
 									})
 									.await;
@@ -8688,6 +8696,81 @@ mod tests {
 			);
 			serving.abort();
 		}
+	}
+
+	/// A lingering copy's fetches keep going while a returning subscriber's SUBSCRIBE awaits
+	/// its answer: a reader leaving cancels its FETCH then, not once the answer arrives.
+	#[kio::test]
+	async fn a_resubscribe_keeps_driving_the_lingering_fetches() {
+		let version = Version::Draft22;
+		let status_ok = message(
+			ietf::TrackStatusOk::ID,
+			&ietf::TrackStatusOk {
+				largest: Some(ietf::Location { group: 3, object: 42 }),
+				properties: Default::default(),
+			},
+			version,
+		);
+		// Neither the FETCH nor the SUBSCRIBE is ever answered.
+		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![status_ok]);
+		let log = session.log.clone();
+		let (tasks, _task_set) = crate::util::TaskSet::new();
+		let mut subscriber = Subscriber::new(
+			crate::time::sim(),
+			crate::driver::Transport::new(session.clone()),
+			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			Control::new(false),
+			None,
+			peer::PeerSetup::declared(peer::Peer::default()),
+			crate::Hop::new(1).unwrap(),
+			None,
+			version,
+			tasks,
+			Default::default(),
+		);
+		let producer = crate::broadcast::Info::default().produce();
+		let mut dynamic = producer.requests();
+		let consumer = producer.consume();
+		let track = consumer.track("video").unwrap();
+		// Demand with nobody subscribing learns the track from TRACK_STATUS, then lingers.
+		let mut query = std::pin::pin!(track.info());
+		assert!(futures::poll!(query.as_mut()).is_pending());
+		let request = dynamic.requested_track().await.expect("no track requested");
+		let serving = kio::clock::sim::spawn(async move {
+			subscriber
+				.run_subscribe(Path::from_static("broadcast"), dynamic, None, request)
+				.await;
+		});
+		settle().await;
+
+		let mut fetch = Box::pin(track.fetch_group(2, None));
+		assert!(futures::poll!(fetch.as_mut()).is_pending());
+		settle().await;
+		let _subscription = track.subscribe(None);
+		settle().await;
+		let requests = |id| {
+			let writes = log.writes.lock().unwrap().clone();
+			let mut buf = Decoder::new(&writes, version.into());
+			let mut count = 0;
+			while !buf.is_empty() {
+				let type_id = buf.varint().unwrap();
+				let size = buf.u16().unwrap();
+				buf.slice(size as usize).unwrap();
+				count += usize::from(type_id == id);
+			}
+			count
+		};
+		assert_eq!(requests(ietf::Fetch::ID), 1, "the miss FETCHed while lingering");
+		assert_eq!(requests(ietf::Subscribe::ID), 1, "the returning subscriber subscribed");
+
+		let stops = log.stops().len();
+		drop(fetch);
+		settle().await;
+		assert!(
+			log.stops().len() > stops,
+			"the abandoned FETCH is cancelled while SUBSCRIBE awaits its answer"
+		);
+		serving.abort();
 	}
 
 	/// The publisher opens no fetch stream for an empty range, so a fill against a track
@@ -15411,7 +15494,10 @@ mod joining_fetch_tests {
 			scripts: [Vec<u8>; 2],
 			control: Control,
 		) -> Self {
-			let session = ScriptedSession::per_stream(Vec::from(scripts));
+			Self::subscribe(version, start, ScriptedSession::per_stream(Vec::from(scripts)), control).await
+		}
+
+		async fn subscribe(version: Version, start: Option<u64>, session: ScriptedSession, control: Control) -> Self {
 			let (tasks, _task_set) = crate::util::TaskSet::new();
 			let subscriber = Subscriber::new(
 				crate::time::sim(),
@@ -15914,6 +16000,66 @@ mod joining_fetch_tests {
 		*fill.write().ok().unwrap() = Fill::Done;
 		settle().await;
 		assert_eq!(fetches(), 1, "a settled fill leaves the miss to a FETCH");
+	}
+
+	/// The grace PUBLISH_DONE waits out for reordered data streams keeps driving cache
+	/// misses: one parked on the joined head FETCHes as soon as the fill settles, rather
+	/// than once the grace ends.
+	#[kio::test]
+	async fn a_miss_fetches_during_the_publish_done_grace() {
+		let version = Version::Draft22;
+		let largest = Some(ietf::Location { group: 4, object: 1 });
+		let session = ScriptedSession::new(subscribe_ok(version, largest)).with_read_wakes();
+		let run = JoinRun::subscribe(version, None, session, Control::new(false)).await;
+		let fetches = || {
+			decode_messages(&run.session.log, version)
+				.iter()
+				.filter(|(id, _)| *id == ietf::Fetch::ID)
+				.count()
+		};
+		let mut fetch = Box::pin(run._hold.1.fetch_group(4, None));
+		assert!(futures::poll!(fetch.as_mut()).is_pending());
+		settle().await;
+		assert_eq!(fetches(), 0, "the miss waits for the subscription's fill");
+
+		run.session.push(&message_bytes(
+			ietf::PublishDone::ID,
+			&ietf::PublishDone {
+				status_code: ietf::PublishDoneStatus::TrackEnded.code(),
+				stream_count: 0,
+				reason_phrase: "done".into(),
+			},
+			version,
+		));
+		settle().await;
+		assert!(
+			!run.subscriber.state.lock().subscribes.is_empty(),
+			"the grace is still running"
+		);
+
+		let fill = run
+			.subscriber
+			.state
+			.lock()
+			.subscribes
+			.values()
+			.next()
+			.unwrap()
+			.fill
+			.clone();
+		*fill.write().ok().unwrap() = Fill::Done;
+		settle().await;
+		assert!(
+			!run.subscriber.state.lock().subscribes.is_empty(),
+			"the grace is still running"
+		);
+		assert_eq!(fetches(), 1, "a settled fill leaves the miss to a FETCH during the grace");
+
+		kio::clock::sleep(crate::ledger::GRACE * 2).await;
+		assert!(
+			run.subscriber.state.lock().subscribes.is_empty(),
+			"PUBLISH_DONE ended the subscription"
+		);
 	}
 
 	/// A malformed answer to the joining FETCH is not a refusal: the peer broke the
