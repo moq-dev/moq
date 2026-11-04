@@ -23,6 +23,11 @@ step (removing aws-lc-rs) can't land until this one does.
   rind 0.1.2 now.
 - Test that keys and signatures from the aws-lc-rs build round-trip through
   the rind build (fixed vectors), so stored keys keep working.
+- Map rind's errors by hand, as #7570 did, so its types stay out of
+  moq-crypto's API; `cargo tree -p moq-crypto -e normal,build` then holds no
+  aws-lc or ring. Compare `cargo bench -p moq-crypto --bench sign` before and
+  after. (Folded in from moq-dev/moq#7748's duplicate "moq-crypto signs on
+  rind", 2026-11-04.)
 - Overlap: [the mesh key codec](https://github.com/moq-dev/moq/pull/7733)
   ([moq-dev/moq#7733](https://github.com/moq-dev/moq/pull/7733)) makes
   moq-auth use moq-sign's key type, which pulls aws-lc-rs into auth. This

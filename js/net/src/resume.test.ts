@@ -46,9 +46,12 @@ function serve(origin: Producer, source: BroadcastProducer, cost: bigint) {
 	return () => handle.close();
 }
 
-/** A copy of the logical track: every route's copy holds the same groups under the same sequences. */
+/**
+ * A copy of the logical track: every route's copy holds the same groups under the same sequences.
+ * Resumed readers backfill superseded groups, so it sets no publisher limit.
+ */
 function copy(source: BroadcastProducer) {
-	const producer = source.createTrack("seq");
+	const producer = source.createTrack("seq", { maxAge: null });
 	return {
 		producer,
 		write(sequence: bigint, frames = 1, close = true) {
@@ -485,13 +488,13 @@ test("a lagging same-instance replica resumes from one publisher's bytes exactly
 	const originalPublication = publisher.createBroadcast(path);
 	const original = originalPublication.broadcast;
 	originalPublication.announce({ instance: INSTANCE });
-	const source = original.createTrack("seq");
+	const source = original.createTrack("seq", { maxAge: null });
 	const origin = new Producer();
 
 	// Both replicas forward this one source. Only the incumbent pauses mid-group.
 	function replica(lagging: boolean) {
 		const broadcast = new BroadcastProducer();
-		const output = broadcast.createTrack("seq");
+		const output = broadcast.createTrack("seq", { maxAge: null });
 		const input = source.subscribe({ delay: { max: Milli(60_000) } });
 		const release = Promise.withResolvers<void>();
 		let stopped = false;
@@ -740,7 +743,7 @@ for (const [name, before, after] of [
 // `unchecked` records how a copy arrived (lite-05/06), so it splices beside a lite-07 copy.
 test("a replacement differing only in unchecked takes over", async () => {
 	const { a, b, swap, active, close } = await setup();
-	const old = a.createTrack("seq", { unchecked: true });
+	const old = a.createTrack("seq", { unchecked: true, maxAge: null });
 	const tb = copy(b);
 	const sub = active.track("seq").subscribe();
 	await sub.info();
@@ -2144,7 +2147,7 @@ test("a fetch still out on the old route moves to the new one", async () => {
 	const a = new BroadcastProducer();
 	const b = new BroadcastProducer();
 	// a has the track but not group 5 yet, so its fetch waits on a's request handler.
-	const pending = a.createTrack("seq").requests();
+	const pending = a.createTrack("seq", { maxAge: null }).requests();
 	const tb = copy(b);
 	tb.write(5n);
 	front.serve(a.consume());

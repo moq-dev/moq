@@ -4,7 +4,16 @@
 import argparse
 import datetime as dt
 import json
+import re
 from pathlib import Path
+
+
+def source(row):
+    """Name the measured revision, keeping older reports without revision metadata readable."""
+    revision = row.get("revision")
+    if revision is None:
+        return row["date"]
+    return f"{row['date']} [{revision[:10]}](https://github.com/moq-dev/moq/commit/{revision})"
 
 
 def compare(current, history):
@@ -14,6 +23,10 @@ def compare(current, history):
         if row.get("version") != 1 or not row.get("bytes"):
             raise ValueError("expected a nonempty version 1 size report")
         date = dt.date.fromisoformat(row["date"])
+        if "revision" in row and (
+            not isinstance(row["revision"], str) or not re.fullmatch(r"[0-9a-f]{40}", row["revision"])
+        ):
+            raise ValueError("expected a full Git commit SHA for revision")
         for name, size in row["bytes"].items():
             if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
                 raise ValueError(f"invalid byte count for {name}: {size}")
@@ -36,7 +49,7 @@ def compare(current, history):
     if anchors:
         comparisons.append(("30 days", anchors[-1], 0.10))
     return [
-        f"{name}: {size} > {row['bytes'][name]} bytes + {limit:.0%} ({label})"
+        f"{name}: {size} > {row['bytes'][name]} bytes + {limit:.0%} ({label}: {source(row)})"
         for label, row, limit in comparisons
         for name, size in current["bytes"].items()
         if name in row["bytes"] and size > row["bytes"][name] * (1 + limit)
@@ -67,7 +80,7 @@ def main():
     history = json.loads(args.history.read_text()) if args.history else []
     failures = compare(current, history)
     (args.directory / "history.json").write_text(json.dumps(retain(current, history), indent=2) + "\n")
-    summary = "| Artifact | Bytes |\n|---|---:|\n"
+    summary = f"Measured {source(current)}.\n\n| Artifact | Bytes |\n|---|---:|\n"
     summary += "".join(f"| {name} | {size:,} |\n" for name, size in sorted(current["bytes"].items()))
     if failures:
         summary += "\n" + "\n".join(failures) + "\n"

@@ -49,16 +49,17 @@ export type BroadcastInput = {
 	rotation: Getter<number>;
 
 	/**
-	 * How long relays keep a non-latest group of this broadcast's media tracks fetchable, in
-	 * milliseconds. Declared on every media track we accept; see {@link Container.trackInfo},
-	 * whose default (`undefined` here) is sized so a segmented egress (HLS/DASH) can serve a
-	 * full playlist window.
+	 * How long, in milliseconds, a superseded group of this broadcast's media tracks stays fresh,
+	 * so a fetch can still reach it. Declared on every media track we accept; see
+	 * {@link Container.trackInfo}. Omitted (`undefined`) is `Container.MAX_AGE`, 30 seconds,
+	 * sized so a segmented egress (HLS/DASH) can serve a full playlist window; `null` sets no
+	 * publisher limit. The catalog and HLS record tracks keep `@moq/net`'s zero default.
 	 *
-	 * A retention budget, not a delivery one, so lowering it does not reduce latency: it only
-	 * shortens how far back a fetch can reach. A track's retention is fixed when it is created,
+	 * A freshness bound, not a delivery budget, so lowering it does not reduce latency: it only
+	 * shortens how far back a fetch can reach. A track's max age is fixed when it is created,
 	 * so changing this publishes a new network broadcast.
 	 */
-	maxAge: Getter<Milli | undefined>;
+	maxAge: Getter<Milli | null | undefined>;
 
 	/**
 	 * Whether to publish a stats track and name it in the catalog's `stats` section. Defaults to
@@ -84,7 +85,8 @@ export type BroadcastInput = {
 	/**
 	 * Override when renditions encode. Omitted: audio retains raw PCM until subscribed, while
 	 * video encodes continuously. False encodes both continuously; true gates video too, losing
-	 * its past. Unless false, audio keeps raw history up to `maxAge`. Capture stays open.
+	 * its past. Unless false, audio keeps raw history up to `maxAge`, or 30 seconds when it is
+	 * `null`. Capture stays open.
 	 */
 	onDemand: Getter<boolean | undefined>;
 };
@@ -491,13 +493,13 @@ export class Broadcast {
 			// is whatever the catalog holds at announce time.
 			if (!serving) {
 				serving = true;
-				// A catalog may publish once and stay unchanged for the broadcast's whole life. Keep that
-				// sole closed snapshot replayable so a viewer arriving after the ordinary media retention
-				// window can still bootstrap.
+				// The zero default max age, as Rust's catalog track takes: a viewer needs only the newest
+				// snapshot. A catalog may publish once and stay unchanged for the broadcast's whole life,
+				// and a viewer arriving long after still bootstraps from it: max age only stales a
+				// superseded group, and the cache never ages out an open track's newest group.
 				const track = broadcast.createTrack(Broadcast.CATALOG_TRACK, {
 					// Each catalog snapshot is stamped when written.
 					timescale: Moq.Time.Timescale.MILLI,
-					maxAge: Milli(Number.MAX_SAFE_INTEGER),
 					priority: Catalog.PRIORITY.catalog,
 					// Catalog JSON is small and repetitive.
 					compress: true,

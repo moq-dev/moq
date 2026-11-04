@@ -32,18 +32,23 @@ impl From<moq_net::track::Position> for MoqPosition {
 /// Publisher-side track properties, mirroring [`moq_net::track::Info`].
 ///
 /// Construct with the fields you care about; the rest use raw-track defaults
-/// (priority 0, no publisher age limit, untimed).
+/// (priority 0, a zero max age, untimed).
 #[derive(Clone, uniffi::Record)]
 pub struct MoqTrackInfo {
 	/// Priority, used only to break ties between subscriptions of equal subscriber priority.
 	/// Higher is more urgent; the default 0 is the midpoint.
 	#[uniffi(default = 0)]
 	pub priority: i8,
-	/// Maximum age of a non-latest group before the publisher evicts it. Null imposes no
-	/// publisher age limit. This is the publisher-side half of
-	/// [`MoqDelay::max`](crate::consumer::MoqDelay::max).
+	/// How long a superseded group stays fresh, or null for the default, zero: only the live
+	/// edge is served. The publisher-side half of
+	/// [`MoqDelay::max`](crate::consumer::MoqDelay::max). Ignored when `max_age_unlimited` is
+	/// set. Uniffi can't default a duration, hence null rather than zero.
 	#[uniffi(default = None)]
 	pub max_age: Option<std::time::Duration>,
+	/// Set no publisher age limit, ignoring `max_age` and leaving only the cache to bound how
+	/// long a superseded group is served. A received track that advertised none reports this.
+	#[uniffi(default = false)]
+	pub max_age_unlimited: bool,
 	/// How many times its first frame a group's later bytes may grow before a joining
 	/// subscriber asks for a new group, or null to never ask. See
 	/// [`MoqTrackDemand::wanted`](crate::demand::MoqTrackDemand::wanted).
@@ -65,7 +70,9 @@ impl TryFrom<MoqTrackInfo> for moq_net::track::Info {
 		let mut out = moq_net::track::Info::default()
 			.with_priority(info.priority)
 			.with_refresh(info.refresh);
-		if let Some(max_age) = info.max_age {
+		if info.max_age_unlimited {
+			out = out.with_max_age(None);
+		} else if let Some(max_age) = info.max_age {
 			out = out.with_max_age(max_age);
 		}
 		if let Some(ticks) = info.timescale {
@@ -96,6 +103,7 @@ impl From<&moq_net::track::Info> for MoqTrackInfo {
 		Self {
 			priority: info.priority,
 			max_age: info.max_age.map(crate::ffi::duration),
+			max_age_unlimited: info.max_age.is_none(),
 			refresh: info.refresh,
 			timescale: info.timescale.map(|timescale| timescale.as_u64()),
 			compress: info.compress,
@@ -1061,28 +1069,36 @@ mod metadata_tests {
 	}
 
 	#[test]
-	fn optional_retention_survives_binding_conversion() {
-		for max_age in [
-			None,
-			Some(std::time::Duration::ZERO),
-			Some(std::time::Duration::from_secs(30)),
+	fn max_age_survives_binding_conversion() {
+		let info = |max_age, max_age_unlimited| MoqTrackInfo {
+			priority: 0,
+			max_age,
+			max_age_unlimited,
+			refresh: None,
+			timescale: None,
+			compress: false,
+		};
+		let zero = Some(std::time::Duration::ZERO);
+		let five = Some(std::time::Duration::from_secs(5));
+		assert_eq!(raw_track_info(None).unwrap().max_age, zero);
+		for (max_age, unlimited, want) in [
+			(None, false, zero),
+			(five, false, five),
+			(None, true, None),
+			// The flag wins over a stated age.
+			(five, true, None),
 		] {
-			let info = MoqTrackInfo {
-				priority: 0,
-				max_age,
-				refresh: None,
-				timescale: None,
-				compress: false,
-			};
-			let model = moq_net::track::Info::try_from(info).unwrap();
-			assert_eq!(model.max_age, max_age);
-			assert_eq!(MoqTrackInfo::from(&model).max_age, max_age);
+			let model = moq_net::track::Info::try_from(info(max_age, unlimited)).unwrap();
+			assert_eq!(model.max_age, want);
+			// A received record republishes unchanged.
+			let back = MoqTrackInfo::from(&model);
+			assert_eq!(moq_net::track::Info::try_from(back).unwrap().max_age, want);
 		}
 	}
 
 	/// C and C++ abort on a duration past `i64::MAX` nanoseconds, so a peer's longer age saturates.
 	#[test]
-	fn oversized_retention_saturates_for_the_bindings() {
+	fn oversized_max_age_saturates_for_the_bindings() {
 		let model = moq_net::track::Info::default().with_max_age(std::time::Duration::MAX);
 		let max_age = MoqTrackInfo::from(&model).max_age.unwrap();
 		assert_eq!(max_age, std::time::Duration::from_nanos(i64::MAX as u64));

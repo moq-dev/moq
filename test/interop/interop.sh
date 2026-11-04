@@ -498,14 +498,21 @@ plan_pass() {
         done
     fi
     [[ "$FINISH_ONLY" -eq 0 ]] || return 0
-    record "not run" case="CLI FETCH" publisher=rust subscriber=rust
+    for pub in rust js-native-node js-native-bun; do
+        [[ "$pub" == rust ]] || needs "$pub" || continue
+        for sub in rust js-native-node js-native-bun; do
+            [[ "$sub" == rust ]] || needs "$sub" || continue
+            record "not run" case="CLI FETCH" publisher="$pub" subscriber="$sub"
+        done
+    done
     record "not run" case="late join" publisher=rust subscriber=rust
     record "not run" case=tail publisher=rust subscriber=rust
     for runtime in js-native-node js-native-bun; do
         needs "$runtime" || continue
-        record "not run" case="CLI FETCH" publisher="$runtime" subscriber=rust
-        # run_tails skips it on moq-transport, so only plan it where it runs.
-        [[ "$VERSION" == moq-transport-* ]] || record "not run" case="CLI FETCH history" publisher="$runtime" subscriber=rust
+        for sub in rust js-native-node js-native-bun; do
+            [[ "$sub" == rust ]] || needs "$sub" || continue
+            record "not run" case="CLI FETCH history" publisher="$runtime" subscriber="$sub"
+        done
         record "not run" case="late join" publisher=rust subscriber="$runtime"
         record "not run" case="late join" publisher="$runtime" subscriber=rust
         record "not run" case=tail publisher=rust subscriber="$runtime"
@@ -2031,18 +2038,18 @@ run_late_pair() {
     rm "$fifo" "$heads"
 }
 
-# This checkout's CLI FETCHes a past group of a finished track, under the same relay close check as
+# Rust and native JS FETCH a past group of a finished track, under the same relay close check as
 # live readers. Every object has its own bytes, so a FETCH that drops, repeats, or reorders one fails.
 # The `history` mode (native JS only) serves the group from the publisher's request handler: it
 # was never in its cache.
 run_fetch_round() {
-    local pub="$1" mode="${2:-cached}" pid from version
-    local name="fetch-$1${2:+-$2}" fifo="$LOGS/fetch-ack" broadcast="fetch-$1-$$-$RANDOM"
-    local label="CLI FETCH${2:+ $2}"
+    local pub="$1" sub="$2" mode="${3:-cached}" pid from version
+    local name="fetch-$1-$2${3:+-$3}" fifo="$LOGS/fetch-ack" broadcast="fetch-$1-$$-$RANDOM"
+    local label="CLI FETCH${3:+ $3}"
     local started=$SECONDS why=""
-    local cell=(case="$label" publisher="$pub" subscriber=rust log="$LOGS/$name-pub.log")
-    if is_broken "$pub"; then
-        echo "  FAIL  $label $pub (client unavailable)"
+    local cell=(case="$label" publisher="$pub" subscriber="$sub" log="$LOGS/$name-sub.log")
+    if is_broken "$pub" || is_broken "$sub"; then
+        echo "  FAIL  $label $pub -> $sub (client unavailable)"
         record fail "${cell[@]}" detail="client unavailable"
         overall=1
         return
@@ -2053,30 +2060,22 @@ run_fetch_round() {
     exec 9<>"$fifo"
     harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_tail_publisher "$fifo" "$pub" publish "$broadcast" "$(token_url --publish "$(publish_grant "$broadcast")")" "$version" "$mode"
     pid="$HARNESS_PID"
-    if timeout -k 3 "$TIMEOUT" "$MOQ" --connect "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" ${version:+--connect-version "$version"} \
-        --broadcast "$broadcast" fetch tail --group 1 --json >"$LOGS/$name.json" &&
-        python3 - "$LOGS/$name.json" <<'PYCODE'
-import base64, json, sys
-frames = [json.loads(line) for line in open(sys.argv[1])]
-assert [(frame["group"], frame["frame"], frame["size"]) for frame in frames] == [(1, index, 64 * 1024) for index in range(3)], frames
-assert [base64.b64decode(frame["payload"], validate=True) for frame in frames] == [bytes([16 + index]) * (64 * 1024) for index in range(3)], "incorrect FETCH payload"
-PYCODE
-    then
+    if run_fetch_subscriber "$sub" "$broadcast" "$version" "$name"; then
         printf 'clean end\n' >&9
         harness_wait "$pid" || true
         if grep -qx 'tail acknowledged' "$LOGS/$name-pub.log"; then
-            echo "  PASS  $label $pub (group 1; 3 objects)"
+            echo "  PASS  $label $pub -> $sub (group 1; 3 objects)"
         else
-            echo "  FAIL  $label $pub (publisher did not acknowledge)"
+            echo "  FAIL  $label $pub -> $sub (publisher did not acknowledge)"
             why="publisher did not acknowledge"
             overall=1
             cat "$LOGS/$name-pub.log"
         fi
     else
-        echo "  FAIL  $label $pub"
+        echo "  FAIL  $label $pub -> $sub"
         why="incorrect or missing FETCH payload"
         overall=1
-        cat "$LOGS/$name-pub.log"
+        cat "$LOGS/$name-pub.log" "$LOGS/$name-sub.log"
         harness_reap "$pid"
     fi
     exec 9>&-
@@ -2088,6 +2087,23 @@ PYCODE
     fi
     cell+=(seconds=$((SECONDS - started)))
     if [[ -z "$why" ]]; then record pass "${cell[@]}"; else record fail "${cell[@]}" detail="$why"; fi
+}
+
+run_fetch_subscriber() {
+    local sub="$1" broadcast="$2" version="$3" name="$4"
+    if [[ "$sub" != rust ]]; then
+        run_tail_client "$sub" subscribe "$broadcast" "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" "$version" fetch >"$LOGS/$name-sub.log" 2>&1 &&
+            grep -qx 'fetch clean group=1 frames=3 bytes=196608' "$LOGS/$name-sub.log"
+        return
+    fi
+    timeout -k 3 "$TIMEOUT" "$MOQ" --connect "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" ${version:+--connect-version "$version"} \
+        --broadcast "$broadcast" fetch tail --group 1 --json >"$LOGS/$name.json" 2>"$LOGS/$name-sub.log" &&
+        python3 - "$LOGS/$name.json" <<'PYCODE'
+import base64, json, sys
+frames = [json.loads(line) for line in open(sys.argv[1])]
+assert [(frame["group"], frame["frame"], frame["size"]) for frame in frames] == [(1, index, 64 * 1024) for index in range(3)], frames
+assert [base64.b64decode(frame["payload"], validate=True) for frame in frames] == [bytes([16 + index]) * (64 * 1024) for index in range(3)], "incorrect FETCH payload"
+PYCODE
 }
 
 # One media.ts invocation. It reports its own verdict (a negative control passes by failing on the
@@ -2417,12 +2433,20 @@ run_hls_grid() {
 run_tails() {
     local runtime version
     echo "=== CLI FETCH close ==="
-    run_fetch_round rust
+    local pub sub
+    for pub in rust js-native-node js-native-bun; do
+        [[ "$pub" == rust ]] || needs "$pub" || continue
+        for sub in rust js-native-node js-native-bun; do
+            [[ "$sub" == rust ]] || needs "$sub" || continue
+            run_fetch_round "$pub" "$sub"
+        done
+    done
     for runtime in js-native-node js-native-bun; do
         needs "$runtime" || continue
-        run_fetch_round "$runtime"
-        # A moq-transport FETCH is not served from the request handler yet.
-        [[ "$(pinned_version)" == moq-transport-* ]] || run_fetch_round "$runtime" history
+        for sub in rust js-native-node js-native-bun; do
+            [[ "$sub" == rust ]] || needs "$sub" || continue
+            run_fetch_round "$runtime" "$sub" history
+        done
     done
     echo "=== late join ==="
     run_late_pair rust rust

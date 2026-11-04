@@ -33,7 +33,10 @@ support it. The TypeScript client is pickier than the browsers: it uses
 WebTransport on Firefox only from 153 (earlier releases allow too few incoming
 streams) and keeps Safari on the WebSocket fallback, since WebKit bugs stall
 long sessions even though Safari 26.4 ships the API. Native
-clients can use WebTransport too, but usually skip it.
+clients can use WebTransport too, but usually skip it. Both Rust runtime
+crates expose `quic::web` as a WebTransport library usable without MoQ;
+see [moq-tokio](https://docs.rs/moq-tokio/latest/moq_tokio/quic/web/) and
+[moq-uring](https://docs.rs/moq-uring/latest/moq_uring/quic/web/).
 
 ## WebSocket fallback
 

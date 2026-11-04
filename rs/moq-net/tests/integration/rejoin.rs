@@ -9,9 +9,12 @@ use std::time::Duration;
 use moq_net::{Hop, Timestamp, Version, announce, group, track};
 use support::harness::{MockConnectOptions, connect_mock};
 
-/// A millisecond track: the frames written here carry timestamps.
+/// A millisecond track with no publisher max age: the frames written here carry timestamps,
+/// and superseded groups stay readable.
 fn timed() -> moq_net::track::Info {
-	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	moq_net::track::Info::default()
+		.with_timescale(moq_net::Timescale::MILLI)
+		.with_max_age(None)
 }
 
 /// Maximum time any single test may run before being treated as a deadlock.
