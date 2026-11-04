@@ -544,6 +544,45 @@ async fn a_dropped_answer_still_answers_the_open() {
 	assert_eq!(recv(&request).await, b"request");
 }
 
+/// Closing or dropping a socket stops it reading the opener's half of the bi streams it
+/// accepted, even while the opener keeps its half: the read that told the opener of the
+/// accept is the socket's own, not the application's.
+#[kio::test]
+async fn closing_a_socket_releases_its_accepted_streams() {
+	for drop_it in [false, true] {
+		let shared = origin(1);
+		let mut listener = Listener::new(&shared, "room").unwrap();
+		let (dialer, accepted) = connect(&shared, &mut listener, "alice").await;
+
+		let open = dialer.open_bi(None).unwrap();
+		let answered = kio::clock::timeout(TIMEOUT, accepted.accept_bi())
+			.await
+			.expect("accept timeout")
+			.unwrap()
+			.expect("a stream");
+		// The application is done with the stream; only the socket's own read is left.
+		drop(answered);
+		let opened = kio::clock::timeout(TIMEOUT, open)
+			.await
+			.expect("open timeout")
+			.expect("open");
+		let mut demand = opened.producer.demand();
+		assert!(demand.wanted().is_some(), "the accept reads the opener's half");
+
+		match drop_it {
+			true => drop(accepted),
+			false => accepted.close(),
+		}
+		kio::clock::timeout(TIMEOUT, async {
+			while demand.wanted().is_some() {
+				demand.wanted_changed().await.unwrap();
+			}
+		})
+		.await
+		.expect("the closed socket still reads the opener's half");
+	}
+}
+
 /// A fixed-name track sits beside the streams: accept skips it, and the peer reads it by
 /// name from [`Socket::remote`].
 #[kio::test]

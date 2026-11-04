@@ -53,8 +53,12 @@ listener's path `L`, each grant is a prefix:
 The dialer's grant names its id, which is what stops one dialer from dialing as
 another, and so replacing its socket, or reading another's answer. A pattern
 matches `.`-prefixed segments like any other, so `**` would cover sockets too;
-hiding narrows only discovery. No mid-path wildcard is needed, because the
-root carries `L`. It's the same shape as a request/response pair, such as
+hiding narrows only discovery. Keep reads of `.dial` and `.accept` to the two
+ends: a bi open counts any read of its track as the accept (see
+[Streams](#streams)), so a third party that may read them, such as an archiver
+granted `**` or anyone on an origin without auth, can resolve an open before
+the peer accepts it. No mid-path wildcard is needed, because the root carries
+`L`. It's the same shape as a request/response pair, such as
 `request/<id>` and `response/<id>`.
 
 `moq auth sign` writes these as, for example:
@@ -105,9 +109,9 @@ alike, and is never reused within a socket, so each open is a new track.
   accepts it and subscribes.
 - **Bi.** The opener publishes the track in its own broadcast. The peer accepts
   it by publishing the same name in its broadcast, with the opener's track
-  info, and subscribes to the opener's track until the opener drops it. That
-  subscription is the accept: the opener's stream resolves once its track is
-  read. A listing can't carry it, because it drops an add its reader never
+  info, and subscribes to the opener's track until the opener drops it or the
+  peer closes the socket. That subscription is the accept: the opener's stream
+  resolves once its track is read. A listing can't carry it, because it drops an add its reader never
   reached, so an answer dropped at once might never be seen. As with any
   stream, the answer reaches the opener only while the peer holds it, finished
   or not.

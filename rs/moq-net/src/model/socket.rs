@@ -139,11 +139,13 @@ struct Listing {
 	/// Bi streams the peer opened, with the opener's track info, not yet accepted.
 	bi: LinkedHashMap<Arc<str>, track::Info>,
 	/// This side reading the opener's half of each bi stream it accepted, by track name,
-	/// until the opener's half leaves the listing. The opener learns of the accept from
-	/// this demand, not from the answer's listing: a listing drops a track that comes and
-	/// goes before its reader reaches it, so an answer dropped at once would never be
-	/// seen, and the application may not read the opener's half before it hears back.
-	reading: HashMap<Arc<str>, kio::Pending<track::Subscribing>>,
+	/// until the opener's half leaves the listing or this side closes. The opener learns
+	/// of the accept from this demand, not from the answer's listing: a listing drops a
+	/// track that comes and goes before its reader reaches it, so an answer dropped at once
+	/// would never be seen, and the application may not read the opener's half before it
+	/// hears back. `None` while an accept is answering the stream, so a removal drained
+	/// meanwhile, by any poller, also drops the read the accept is about to register.
+	reading: HashMap<Arc<str>, Option<kio::Pending<track::Subscribing>>>,
 	/// How the listing ended: `Ok` once the peer's broadcast ended, or why it failed.
 	end: Option<Result<(), Error>>,
 }
@@ -247,7 +249,17 @@ impl Inner {
 	/// End the socket for `reason`, retracting this side's broadcast.
 	fn close(&self, reason: Closed) {
 		self.closed.lock().get_or_insert(reason);
+		self.retract();
+	}
+
+	/// Retract this side's broadcast and stop reading the opener's half of every bi stream
+	/// it accepted. Closed first, so an accept registering a read after the release sees
+	/// the close and drops it.
+	fn retract(&self) {
 		self.local.close();
+		// Dropped outside the lock.
+		let reading = std::mem::take(&mut self.listing.lock().reading);
+		drop(reading);
 	}
 
 	/// Whether this side's broadcast ended, registering `waiter` for when it does.
@@ -377,8 +389,8 @@ impl Socket {
 	/// the opener's info; `None` once the peer's broadcast ended, and [`Error::Closed`]
 	/// once this side closed. Skips streams as [`Self::poll_accept_uni`] does.
 	///
-	/// The socket reads the opener's half until the opener drops it, which is how the
-	/// opener learns of the accept. As with any stream, the answer reaches the opener only
+	/// The socket reads the opener's half until the opener drops it or this side closes,
+	/// which is how the opener learns of the accept. As with any stream, the answer reaches the opener only
 	/// while this side holds it: finishing it at once is fine, dropping it before the
 	/// opener reads it is not.
 	pub fn poll_accept_bi(&self, waiter: &kio::Waiter) -> Poll<Result<Option<Bi>, Error>> {
@@ -395,33 +407,80 @@ impl Socket {
 					None => Poll::Pending,
 				};
 			};
+			// Already answered: the peer listed it again, which it does only by opening a
+			// number twice.
+			if listing.reading.contains_key(&track) {
+				continue;
+			}
+			listing.reading.insert(track.clone(), None);
 			drop(listing);
-			let consumer = match inner.remote.track(&track) {
-				Ok(consumer) => consumer,
-				// The peer's broadcast ended.
-				Err(Error::Unroutable) => return Poll::Ready(Ok(None)),
-				// The peer dropped the track since the listing read it.
-				Err(Error::NotFound) => continue,
-				Err(err) => return Poll::Ready(Err(err)),
+
+			let answered = self.answer_bi(&track, info);
+			let mut listing = inner.listing.lock();
+			let (bi, read) = match answered {
+				Ok(Some(answered)) => answered,
+				Ok(None) => {
+					listing.reading.remove(&track);
+					continue;
+				}
+				Err(err) => {
+					listing.reading.remove(&track);
+					return match err {
+						// The peer's broadcast ended.
+						Error::Unroutable => Poll::Ready(Ok(None)),
+						err => Poll::Ready(Err(err)),
+					};
+				}
 			};
-			// The opener's track info, minus how its copy reached this hop.
-			let info = track::Info {
-				properties: None,
-				unchecked: false,
-				..info
-			};
-			// Answered under the opener's track name.
-			let producer = match inner.create_track(track.to_string(), info) {
-				Ok(producer) => producer,
-				// The peer listed a stream again that this side already answered, which it
-				// does only by opening a number twice.
-				Err(Error::Duplicate) => continue,
-				Err(err) => return Poll::Ready(Err(err)),
-			};
-			// How the opener learns of the accept.
-			inner.listing.lock().reading.insert(track, consumer.subscribe(None));
-			return Poll::Ready(Ok(Some(Bi { producer, consumer })));
+			// Under the lock, so a close or a removal of the stream either comes after this
+			// and drops the read, or came first and is seen here.
+			let closed = inner.poll_local_closed(&kio::Waiter::noop());
+			if !closed && let Some(slot) = listing.reading.get_mut(&track) {
+				// How the opener learns of the accept.
+				*slot = Some(read);
+				return Poll::Ready(Ok(Some(bi)));
+			}
+			// Dropped outside the lock.
+			let stale = listing.reading.remove(&track);
+			drop(listing);
+			drop((stale, read, bi));
+			if closed {
+				return Poll::Ready(Err(Error::Closed));
+			}
+			// The opener dropped its half while this answered it.
 		}
+	}
+
+	/// Answer the peer's bi stream `track` with a track mirroring the opener's `info`, and
+	/// start reading the opener's half. `None` for a stream to skip.
+	fn answer_bi(
+		&self,
+		track: &str,
+		info: track::Info,
+	) -> Result<Option<(Bi, kio::Pending<track::Subscribing>)>, Error> {
+		let inner = &self.inner;
+		let consumer = match inner.remote.track(track) {
+			Ok(consumer) => consumer,
+			// The peer dropped the track since the listing read it.
+			Err(Error::NotFound) => return Ok(None),
+			Err(err) => return Err(err),
+		};
+		// The opener's track info, minus how its copy reached this hop.
+		let info = track::Info {
+			properties: None,
+			unchecked: false,
+			..info
+		};
+		// Answered under the opener's track name.
+		let producer = match inner.create_track(track.to_string(), info) {
+			Ok(producer) => producer,
+			// This side still holds an answer under the name, which the peer listed again
+			// only by opening a number twice.
+			Err(Error::Duplicate) => return Ok(None),
+			Err(err) => return Err(err),
+		};
+		let read = consumer.subscribe(None);
+		Ok(Some((Bi { producer, consumer }, read)))
 	}
 
 	/// Wait for the next bi stream the peer opened; see [`Self::poll_accept_bi`].
@@ -459,7 +518,7 @@ impl Socket {
 impl Drop for Socket {
 	fn drop(&mut self) {
 		// A pending bi open still holds the shared half, but not the socket.
-		self.inner.local.close();
+		self.inner.retract();
 	}
 }
 
@@ -475,7 +534,9 @@ pub struct OpenBi {
 }
 
 impl OpenBi {
-	/// Poll for the peer's answer, which it gives by reading this side's half. Fails with
+	/// Poll for the peer's answer, which it gives by reading this side's half. Any reader
+	/// counts, so only the peer should be able to read this side's broadcast; see the
+	/// authorization section of `doc/concept/socket.md`. Fails with
 	/// [`Error::Unroutable`] once the peer's broadcast ends without one, and with
 	/// [`Error::Closed`] once this side closed, even if the answer came.
 	pub fn poll_ok(&mut self, waiter: &kio::Waiter) -> Poll<Result<Bi, Error>> {
