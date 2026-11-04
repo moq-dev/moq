@@ -57,16 +57,32 @@ updates:
     cooldown:
       default-days: 7
 
-  # Removing Cargo's version-update entry does not stop automatic security
-  # updates. Keep this suppression entry until GitHub supports a per-ecosystem
-  # switch: Renovate handles Cargo alerts and regenerates hakari for their fixes.
+  # Dependabot edits rs/workspace-hack/Cargo.toml's pins by hand, so its PRs
+  # (security fixes included) can fail `cargo hakari generate --diff` in the
+  # merge queue. The land fixer then regenerates the hack and re-enqueues them.
   - package-ecosystem: "cargo"
     directory: "/"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 0
+    cooldown:
+      default-days: 7
+    groups:
+      cargo:
+        patterns:
+          - "*"
     ignore:
-      - dependency-name: "*"
+      # The Go bindings come from a uniffi-bindgen-go build that only reads the
+      # metadata of one uniffi minor (0.32 today). The generator is pinned in
+      # flake.nix and five other places, so a uniffi minor moves with it by
+      # hand; see the uniffi-bindgen-go comment in flake.nix.
+      - dependency-name: "uniffi"
+        versions: [">=0.33"]
+      # kio-macros is the only direct syn user, and it stays on syn 2 because
+      # moq-net's graph already builds syn 2 (thiserror, tracing); syn 3 would
+      # add a second syn build there and needs an API migration. Lift this
+      # once those proc-macro crates move to syn 3; see rs/kio/macros/Cargo.toml.
+      - dependency-name: "syn"
+        versions: [">=3"]
 
   - package-ecosystem: "bun"
     # Every infra/ directory is a standalone Worker with its own lockfile; the

@@ -1,7 +1,0 @@
-{
-	"name": "moq-renovate",
-	"private": true,
-	"dependencies": {
-		"renovate": "44.213.0"
-	}
-}

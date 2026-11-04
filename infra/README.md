@@ -54,7 +54,6 @@ names the Environment, and a branch that is not on the list fails to start it.
 | Environment | Deployable from | Holds |
 | --- | --- | --- |
 | `bot` | `main`, `release`, `moq-ffi-v*` | The moq-bot key (`APP_CLIENT_ID`, `APP_PRIVATE_KEY`) alone |
-| `renovate` | `main` only | The dedicated Renovate App key (`APP_CLIENT_ID`, `APP_PRIVATE_KEY`) |
 | `publish` | `release`, `moq-ffi-v*`, `moq-relay-v*`, `moq-cli-v*` | Registry, signing, and deploy credentials, and the moq-bot key for jobs that also need one of those |
 | `alert` | `main` | `DISCORD_WEBHOOK`, for `alert.yml`'s failure posts |
 | `cache-write` | `main`, its merge queue, binary release tags | The mbx and Nix cache write keys ([below](#bootstrapping-the-rust-build-cache)) |
@@ -82,74 +81,6 @@ first requires its `head_branch` to be such a tag at that commit, since a
 branch can share a release's name. JSR's GitHub trust checks only the repository, not an
 Environment, so `release-js` publishes to JSR with `JSR_TOKEN` instead and the
 JSR packages do not trust the repository.
-
-## Bootstrapping Cargo dependency updates
-
-Renovate handles Cargo; Dependabot keeps the other ecosystems. The scheduled
-[Renovate workflow](../.github/workflows/renovate.yml) always checks out `main`
-and uses its [self-hosted configuration](../.github/renovate.cjs). It runs
-weekly, or by dispatch on `main`. It installs the pinned Renovate CLI before
-minting a token. The Nix dev shell supplies Cargo and cargo-hakari, so the
-updater uses the same hakari version as development.
-
-A maintainer completes this setup after reviewing the workflow:
-
-1. Create a dedicated GitHub App and install it on **moq-dev/moq only**.
-   Grant repository **Contents: read/write**, **Pull requests: read/write**,
-   and **Dependabot alerts: read** plus **Commit statuses: read/write**.
-   The latter reports release age and artifact failures; it cannot enqueue
-   a merge. Metadata read is implicit. It needs no
-   workflow, administration, issues, or merge-queue permission. Renovate's
-   automerge is disabled; the existing landing workflow uses moq-bot's
-   separate token to request a landing pinned to the update PR's head.
-2. Create the **`renovate` Environment** with selected-branch deployment
-   rules admitting the **branch `main` only**, and no tag rule. Do not use
-   the generic protected-branches policy, which also admits `release`.
-3. Put the dedicated App's client ID and private key in that Environment's
-   **`APP_CLIENT_ID`** and **`APP_PRIVATE_KEY`** secrets. Do not put them at
-   repository or organization scope. This step is a maintainer action;
-   implementation agents do not create the App or handle its key.
-4. Set the repository variable **`RENOVATE_BOT_LOGIN`** to the App slug plus
-   **`[bot]`**, exactly. The updater refuses a mismatch with its token's App
-   slug, and the landing workflow trusts that login only on a same-repository
-   PR. An unset variable admits only Dependabot to the landing workflow.
-5. Keep **Dependency graph** and **Dependabot alerts** enabled. Renovate
-   reads those alerts for Cargo fixes. The Cargo-only entry in
-   [Dependabot's configuration](../.github/dependabot.yml) suppresses both
-   version and security update PRs; deleting it would re-enable default
-   automatic Cargo security updates. Other ecosystems retain their existing
-   update policy.
-
-Only `cargo hakari generate` is permitted as a post-upgrade command. It reads
-Cargo metadata and regenerates the hack and its lockfile edges, without
-building repository code or executing its build scripts. The two exact paths
-collected from the hook are `rs/workspace-hack/Cargo.toml` and `Cargo.lock`;
-manifest and lockfile updates from Cargo itself are also retained. Excluding
-the generated manifest from Renovate extraction leaves it on disk for Cargo
-resolution. Only the root Cargo workspace is extracted; standalone smoke and benchmark
-workspaces keep their existing policy. Ordinary updates share one Cargo PR and wait seven days after
-release. Security fixes bypass that hold, retain the version caps, and run the
-same hook. Pull-request builds receive no Renovate write token.
-
-Before calling setup complete, an approved run on `main` must publish a
-Cargo group PR whose generated manifest and locked workspace pass
-`cargo hakari generate --diff` and `cargo metadata --locked`. Check that the
-PR is authored by the configured App and that the landing request names that
-same head. A branch or tag dispatch must not reach the credentialed job.
-The initial production proof requires the workflow to be installed on `main`;
-local validation does not establish this acceptance result.
-
-For credential-free validation from the Nix shell:
-
-```bash
-just gh renovate-install
-just gh renovate-check
-```
-
-The real updater fixture runs nightly with no App token or Environment. It
-checks a grouped major update, verifies the returned manifest and lockfile,
-rejects a compilation command, and uses build scripts that fail if compiled.
-The fast trust-boundary tests run on every `just ci`.
 
 ## Bootstrapping a new package repository
 

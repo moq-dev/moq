@@ -52,7 +52,7 @@ test:
     python3 sh/dispatch-query.test.py
     python3 sh/dispatch-query.test.py --bench
     python3 sh/gh/test-inventory.test.py
-    bun test ./sh/gh/setup.test.ts ./sh/gh/renovate.test.ts
+    bun test ./sh/gh/setup.test.ts
     bun sh/gh/queue.test.ts
     python3 sh/gh/install-formula.test.py
     sh/gh/release.test.sh
@@ -148,27 +148,3 @@ pages-publish directory report site:
 # Delete this run's Pages artifact before uploading a replacement on a rerun.
 pages-clean:
     sh/gh/pages-clean.sh
-
-# Install the pinned updater before minting its write token.
-renovate-install:
-    mkdir -p .tmp/renovate-cli
-    cp .github/renovate/package.json .github/renovate/package-lock.json .tmp/renovate-cli/
-    npm ci --prefix .tmp/renovate-cli --ignore-scripts
-
-# Run the trusted main configuration with the dedicated App's installation token.
-renovate:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    : "${RENOVATE_TOKEN:?the renovate Environment must supply the App token}"
-    : "${EXPECTED_RENOVATE_LOGIN:?set the repository variable RENOVATE_BOT_LOGIN}"
-    if [[ "${RENOVATE_USERNAME:-}" != "$EXPECTED_RENOVATE_LOGIN" ]]; then
-        echo 'RENOVATE_BOT_LOGIN must match the token App slug followed by [bot]' >&2
-        exit 1
-    fi
-    RENOVATE_CONFIG_FILE=.github/renovate.cjs exec .tmp/renovate-cli/node_modules/.bin/renovate
-
-# Validate the global config and exercise Cargo updates without credentials.
-renovate-check:
-    .tmp/renovate-cli/node_modules/.bin/renovate-config-validator .github/renovate.cjs
-    RENOVATE_REPOSITORIES='[]' RENOVATE_CONFIG_FILE=.github/renovate.cjs .tmp/renovate-cli/node_modules/.bin/renovate --platform=local --dry-run=extract
-    node --test sh/gh/renovate.integration.test.mjs
