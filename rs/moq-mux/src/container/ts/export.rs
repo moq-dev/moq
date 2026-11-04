@@ -525,32 +525,36 @@ impl Track {
 
 	/// Count a frame that steps the track's timeline back with no marker as a marker of its own:
 	/// presented further below the highest PTS read on the timeline than the export's `delay`,
-	/// and than any reordering a video rendition declares or its decode clock has seen. A
-	/// rendition that declares its catalog `reorder` bounds it by frames rather than time, so
-	/// there the frame must also follow more frames than that in presentation order.
+	/// where a reorder bound proves no valid reordering explains it.
 	///
-	/// No reordering the export carries explains that, and the jitter buffer would not see it
-	/// as a step. A video decode clock that went on would hold the frame as reordered and clamp
-	/// its DTS, and every later frame's, onto the old timeline, so they would only arrive late
-	/// until it caught up. Audio with slack left would decode before the frames ahead of it on
-	/// the same clock, which the output's buffers cannot carry. As a marker, the step restarts
+	/// Audio presents in decode order, so any frame below one read before it is out of order.
+	/// Video reorders within only the catalog `reorder` its rendition declares, so the frame must
+	/// also follow more frames than that in presentation order ([`DeclaredClock::reorders_past`]).
+	/// Video that declares none is left as it is: its decode clock infers reordering from the
+	/// timestamps, so nothing tells a step back from a reorder deeper than any it has seen, and a
+	/// guess would restart a healthy stream.
+	///
+	/// The jitter buffer would not see the step: the group's declared clock would refuse the frame
+	/// and fail the export, and audio with slack left would decode before the frames ahead of it
+	/// on the same clock, which the output's buffers cannot carry. As a marker, the step restarts
 	/// the decode clock and opens a new generation, as one the source declared would. A placed
-	/// frame's timestamp is its arrival rather than its decode time, so it never steps. Without
-	/// a delay nothing is late, so a step costs nothing there.
+	/// frame's timestamp is its arrival rather than its decode time, so it never steps. Without a
+	/// delay nothing is late, so a step costs nothing there.
 	fn steps_back(&mut self, pending: &mut Pending, delay: Duration) {
 		if self.kind.placed() {
 			return;
 		}
 		let pts = pending.frame.timestamp;
 		let high = (self.high).and_then(|(restart, high)| (restart == pending.restart).then_some(high));
-		let (_, lookahead) = self.timing.inferred();
 		let delay = u64::try_from(delay.as_micros() * 90_000 / 1_000_000).unwrap_or(u64::MAX);
-		let bound = delay.max(lookahead).max(self.timing.jitter).max(self.clock.reach());
-		let reordered = (self.declared)
-			.as_ref()
-			.is_none_or(|clock| clock.reorders_past(to_ticks(pts)));
-		let stepped =
-			delay > 0 && reordered && high.is_some_and(|high| to_ticks(pts).saturating_add(bound) < to_ticks(high));
+		let below = delay > 0 && high.is_some_and(|high| to_ticks(pts).saturating_add(delay) < to_ticks(high));
+		let stepped = below
+			&& match self.kind {
+				Kind::Video(_) => (self.declared)
+					.as_ref()
+					.is_some_and(|clock| clock.reorders_past(to_ticks(pts))),
+				_ => true,
+			};
 		if stepped {
 			tracing::debug!(track = %self.key.name, ?pts, ?high, "unmarked step back; restarting the timeline");
 			self.steps += 1;
@@ -5043,6 +5047,111 @@ mod tests {
 		assert_eq!(versions(&moved), (31, 1));
 		let pat = super::psi::PatAssembler::default().section(&moved.pat).unwrap();
 		assert_eq!(pat.programs[0].pmt_pid.as_u16(), 0x30);
+	}
+
+	/// How many unmarked steps back [`super::Track::steps_back`] counts on video read in decode
+	/// order, each frame presented at `(ms, keyframe)`, clocked as [`super::Track::queue`] clocks
+	/// it: on a clock per group at the catalog `reorder` depth, or inferred when it declares none.
+	async fn video_steps(reorder: Option<usize>, frames: &[(u64, bool)]) -> u64 {
+		use crate::catalog::hang::Container;
+		use crate::container::{Kind as MediaKind, Producer};
+
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let publisher = broadcast.create_track("video", hang::container::track_info(0)).unwrap();
+		let _publisher = Producer::new(publisher, Container::Legacy(MediaKind::Video));
+		let source = crate::source::announced(&broadcast.consume()).await;
+		let source = super::ExportSource::for_stream(&source, "video", Duration::from_secs(2)).unwrap();
+		let mut track = super::Track::new(source, Kind::Video(mpeg2ts::es::StreamType::H264));
+		let arrived = kio::clock::now();
+		for &(at, keyframe) in frames {
+			let mut pending = super::Pending {
+				frame: super::Frame {
+					timestamp: ms(at),
+					duration: None,
+					payload: bytes::Bytes::new(),
+					keyframe,
+				},
+				restart: track.steps,
+				skip: track.steps,
+				cut: 0,
+				arrived,
+				read: arrived,
+			};
+			track.steps_back(&mut pending, Duration::from_millis(500));
+			if pending.restart != track.restart {
+				track.restart = pending.restart;
+				track.clock = DecodeClock::default();
+				track.declared = None;
+			}
+			if keyframe {
+				track.declared = reorder.map(super::DeclaredClock::new);
+			}
+			let pts = super::to_ticks(ms(at));
+			match &mut track.declared {
+				Some(clock) => {
+					clock.push(Some((pending, None)), pts).unwrap();
+					while clock.pop(false).unwrap().is_some() {}
+				}
+				None => track.clock.push((pending, None), pts, arrived, 0),
+			}
+		}
+		track.steps
+	}
+
+	/// Two groups of a B-pyramid two frames deep, 40 ms a frame, in decode order from `at` ms, its
+	/// second group stepped back `step` ms after its first `before` frames.
+	fn pyramid(at: u64, step: u64, before: usize) -> Vec<(u64, bool)> {
+		const ORDER: [u64; 9] = [0, 4, 2, 1, 3, 8, 6, 5, 7];
+		(0..2)
+			.flat_map(|group| ORDER.map(move |place| (group, place)))
+			.enumerate()
+			.map(|(index, (group, place))| {
+				let pts = at + (group * 9 + place) * 40;
+				let pts = if index >= 9 + before { pts - step } else { pts };
+				(pts, place == 0)
+			})
+			.collect()
+	}
+
+	/// A rendition that declares its `reorder` proves a frame following more frames than that in
+	/// presentation order stepped back, while its own reordering is left as it is.
+	#[tokio::test(start_paused = true)]
+	async fn a_declared_reorder_bounds_a_step_back() {
+		assert_eq!(
+			video_steps(Some(2), &pyramid(10_000, 0, 0)).await,
+			0,
+			"in-bound reordering"
+		);
+		assert_eq!(
+			video_steps(Some(2), &pyramid(10_000, 560, 4)).await,
+			1,
+			"a step within a group"
+		);
+		assert_eq!(
+			video_steps(Some(2), &pyramid(10_000, 560, 0)).await,
+			1,
+			"a group stepped whole"
+		);
+		// Two frames back is within the declared depth, however far back they are presented.
+		let deep = [(10_000, true), (11_000, false), (11_040, false), (10_040, false)];
+		assert_eq!(
+			video_steps(Some(2), &deep).await,
+			0,
+			"in-bound reordering past the delay"
+		);
+	}
+
+	/// Video that declares no `reorder` is left as it is: neither a deep reorder nor a step back
+	/// can be told apart from the timestamps, so neither restarts the timeline.
+	#[tokio::test(start_paused = true)]
+	async fn undeclared_reordering_never_steps_back() {
+		let slow = [(0, true), (1_600, false), (800, false)];
+		assert_eq!(video_steps(None, &slow).await, 0, "reordering past the delay");
+		assert_eq!(
+			video_steps(None, &pyramid(10_000, 560, 4)).await,
+			0,
+			"a step past the delay"
+		);
 	}
 
 	/// The same available video/audio backlog must choose the same start in either fill order.

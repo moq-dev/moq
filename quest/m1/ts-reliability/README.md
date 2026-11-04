@@ -93,6 +93,13 @@ measurement (decided 2026-10-28). Re-planned the same day: decode order covers M
 absorbs the release audit's export-reorder quest, and the shared parser lands
 before the open stream-routes and PAT drafts, which rebase onto it.
 
+Decided 2026-11-03 (maintainer, #7221): the TS export counts an unmarked step
+back as a restart only where a reorder bound proves the frame falls outside
+valid reordering: audio, which never reorders, and video that steps back past
+its catalog `reorder` depth, in both cases by more than the export's delay.
+Video that declares no `reorder` is left untouched: no detection, no rewrite,
+no error.
+
 PMT fragmentation (#5220), initial mux-rate measurement (#5287), and
 decoder-time admission (#5306) have landed, as have PSI runs (#5606) and
 catalog linger (#5305).
