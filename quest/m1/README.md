@@ -133,6 +133,10 @@ since BBR3 is the default controller the cut ships; a truncated MKV that
 left its tracks open; and, under release performance, a bisect of the relay's
 per-frame CPU growth since #5926.
 
+Added 2026-11-04 (maintainer): the relay reports the native sessions its
+drain deadline force-closes while still open, apart from those only finishing
+their end report, so an embedder's drain alert pages on real cuts.
+
 ## Required
 
 - [Address groups by timestamp](/quest/m1/time-addressing/README.md) - group start timestamps replace sequence numbers in the moq-net API and lite-07 wire, while old subscribers, old publishers, and published JS clients keep working
@@ -175,6 +179,7 @@ per-frame CPU growth since #5926.
 - [Authored tracks default to a 30 s max-age](/quest/m1/max-age-defaults.md) - raw and media tracks advertise 30 s unless their author chooses otherwise, with explicit unlimited in every binding
 - [HLS export lists a same-codec reconfigure's first group under the new init](/quest/m1/hls-reinit-same-codec.md) - the hand-over pick, whichever of the catalog and the records arrives first, after the catalog `hls` removal is planned
 - [Ordered reads can skip owed holes, and snapshot latest() does](/quest/m1/ordered-owed-holes.md) - moq-net's `Ordered` gains a read that skips past an owed hole to the newest buffered group, while keeping the reader's bounds
+- [The relay reports native sessions it force-closes at the drain deadline](/quest/m1/relay-drain-cuts.md) - the drain's public outcome and live tally separate sessions cut while open from sessions only finishing their end report, so an embedder's drain alert pages on real cuts
 - [A Rust relay never replays from group 0 to a lite-03/04 subscriber](/quest/m1/relay-inflight-replay.md) - A Rust relay or publisher serving a lite-03 or lite-04 SUBSCRIBE from a track copy that is still resolving starts at the newest group once the copy resolves
 - [The resume model ends #7739's clean-end seed](/quest/m1/resume-seed-17893651.md) - replay seed 17893651 after #7705's wake fix, and fix it if a long-budget reader still never gets the end
 - [Every moq-mux consumer gets the catalog warmup from one entry point](/quest/m1/mux-warmup.md) - one moq-mux call widens the subscription and configures the consumer, adopted by moq-audio, moq-c, moq-ffi's raw consumer, and moqsrc
