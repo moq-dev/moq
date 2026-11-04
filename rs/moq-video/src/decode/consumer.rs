@@ -320,8 +320,8 @@ impl Reader {
 		})?;
 
 		// The max-delay decoder tolerates its warmup as lateness, so its delay already holds the
-		// warmup on both bounds: neither lane passes the catalog warmup to the container, which
-		// would carve it back out of the skip.
+		// warmup on both bounds: neither lane passes the catalog warmup to the playout, which would
+		// count it twice, on the subscription and in the start's reach.
 		let playout = moq_mux::container::Playout::new(delay, std::time::Duration::ZERO);
 		let track = broadcast.track(hang::catalog::Reference::track(catalog, name))?;
 		let mut subscriber = track

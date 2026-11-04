@@ -319,7 +319,8 @@ impl Playout {
 	/// Decode `track` as `format` at this playout.
 	///
 	/// Subscribe `track` with [`subscription`](Self::subscription): the publisher may already
-	/// have skipped what a narrower one left out. A track subscribed otherwise is widened here.
+	/// have skipped what a narrower one left out. A track subscribed otherwise has its subscription
+	/// set to that delay here, widened or narrowed.
 	pub fn consumer<F: Container>(&self, track: moq_net::track::Subscriber, format: F) -> Consumer<F> {
 		let mut consumer = Consumer::new(track, format);
 		consumer.warmup = self.warmup;
