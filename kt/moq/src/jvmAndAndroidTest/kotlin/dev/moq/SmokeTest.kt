@@ -316,7 +316,11 @@ class SmokeTest {
     @Test
     fun `an ascending subscription reads a cached backlog oldest first`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val track = broadcast.publishTrack("backlog", TrackInfo(maxAgeUnlimited = true, timescale = 1_000_000uL))
+            val track =
+                broadcast.publishTrack(
+                    "backlog",
+                    TrackInfo(maxAgeUnlimited = true, timescale = 1_000_000uL),
+                )
             for (ms in 0uL until 3uL) {
                 val group = track.appendGroup()
                 group.writeFrame(
