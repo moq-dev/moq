@@ -395,6 +395,20 @@ instructions per group, and `python3 bench/fanout.py compare BASE CURRENT
 SUBSCRIBERS` ranks what moved between two revisions' `callgrind/` directories. `BENCH_FANOUT_VERSION` picks the session's protocol
 version (default `moq-lite-06`).
 
+To check that a layout change does not add allocations, build the session
+harness with `--features counts`. It prints `consumer_bytes`, total allocation
+requests (including reallocations), and requested bytes. Run the same viewer
+count with zero and many cycles, subtract the totals, and divide by viewers
+times cycles. For example:
+
+```bash
+cargo run --release --features counts --manifest-path bench/fanout/session/Cargo.toml -- 64 0
+cargo run --release --features counts --manifest-path bench/fanout/session/Cargo.toml -- 64 1563
+```
+
+Use the same harness and cycle counts against each revision. The feature is off
+for instruction counts.
+
 ### Heap
 
 The heap mode builds the relay with `moq-relay/jemalloc` (the other modes keep

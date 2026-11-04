@@ -8,6 +8,9 @@ publish = false
 
 [workspace]
 
+[features]
+counts = []
+
 [dependencies]
 bytes = "1"
 futures = "0.3"
