@@ -4,10 +4,10 @@
 
 Seven scheduled nightlies on `main`, all after the TS importer began publishing
 each PES as one group, show the AAC `bursty` browser rows discarding about as
-much audio a minute as the Opus `bursty` rows, and AAC `wide` no longer running
-dry. `test/audio-quality/budgets.json` carries the six AAC browser rows'
-ceilings re-measured from them, by the rule in its note, and the note's
-sentence that the AAC rows predate the grouping is dropped.
+much audio a minute as the Opus `bursty` rows. `test/audio-quality/budgets.json`
+carries the six AAC browser rows' ceilings re-measured from them, by the rule in
+its note, and the note's sentence that the AAC rows predate the grouping is
+dropped.
 
 ## Waiting
 
@@ -24,11 +24,18 @@ sentence that the AAC rows predate the grouping is dropped.
 browser row from the 2026-10-29 to 2026-11-04 nightlies (its body keeps each
 night's metrics) and changed the publisher: `moq import ts` used to send each
 seven-frame AAC PES as seven one-frame groups, which the transport delivers
-newest first, so the oldest frame of every flush waited behind the rest. Each
-PES is now one group, its frames in presentation order. On those seven nights,
-before the change, AAC `bursty` discarded 0 to 368.3 ms a minute (worst) against
-0 to 117.4 for Opus `bursty`, and AAC `wide` 0 to 205.6 at a 323.2 ms target.
+newest first, so 82 to 86% of AAC frames arrived behind a newer one. Each PES is
+now one group, its frames in presentation order.
+
+On those nights, before the change, AAC `bursty` discarded up to 368.3 ms a
+minute against Opus `bursty`'s 117.4. Replaying their captures with each PES's
+arrival slots handed to its frames oldest first, as one group, halved the AAC
+`bursty` and `wide` discards (worst `bursty` night 362.7 to 190.1 ms a minute)
+and lowered both rows' target by 20 to 60 ms. That shallower target doubled AAC
+`wide`'s player re-stalls (mean 3.0 to 6.6 a minute), which is the 0.95
+quantile's trade and [Watch](/quest/m1/audio-jitter-target/watch.md)'s time
+stretch to absorb, not a reason to deepen the target here.
 
 Grade the same `chromium-aac-*` rows. If AAC `bursty` still discards several
 times what Opus `bursty` does, compare the rows' `.arrivals.ndjson` captures:
-with one group per PES every flush should arrive oldest first.
+with one group per PES nearly every frame should arrive in order.
