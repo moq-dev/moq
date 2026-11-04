@@ -11,8 +11,7 @@ replacement.
 
 ## Plan
 
-Planned 2026-11-03 (maintainer) from Kixel's T3 tracks
-([kixelated/t3code#1](https://github.com/kixelated/t3code/pull/1)), which
+Planned 2026-11-03 (maintainer) from Kixel's T3 tracks, which
 serves T3's subscriptions as claimed broadcasts per entity and hit each of
 these against a local `moq-relay` built from `main`. Each child starts with a
 failing test through a real relay on lite-07; the in-memory transport did
@@ -21,7 +20,6 @@ of the cut.
 
 ## Required
 
-- [A claimed path resolves through `origin.request()`](/quest/m1/js-claims/request.md) - a reader's request resolves for a claimed path, as `follow()` already does
 - [Re-serving a claimed path keeps the session](/quest/m1/js-claims/reserve.md) - a fresh broadcast whose first group is above 0 no longer closes the publisher with `invalid control encoding`
 
 ## Related
