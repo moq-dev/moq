@@ -202,6 +202,9 @@ def test_every_new_lease_resets_pedals_without_changing_steering_or_gear(gear: G
     assert state.apply(command)
     assert state.state == DriveState(steering=0.3, throttle=0.0, brake=1.0, gear=gear)
 
+    assert state.apply(command)
+    assert state.state == DriveState(steering=0.3, throttle=0.0, brake=1.0, gear=gear)
+
 
 def test_takeover_brake_allows_a_forward_claim_without_autonomous_feedback() -> None:
     state = Drive()

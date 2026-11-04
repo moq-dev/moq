@@ -468,8 +468,8 @@ class Truck:
             self.release()
             return
 
-        # A player without feedback yet claims with the resting state. Applying
-        # that frame would make every click brake an autonomous truck.
+        # A neutral resting claim reserves the lease without replacing Traffic
+        # Manager's controls. Driving intent arrives in a non-resting state.
         if self._autonomous and accepted.state == DriveState.stopped():
             return
 

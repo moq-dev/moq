@@ -117,6 +117,7 @@ The worker's gate (`sim/moq_carla_sim/drive.py`) owns every truck's controls:
   but sets zero throttle and full brake until the driver changes the pedals.
   The worker holds these pedals on every new driving lease until the holder
   changes a pedal, including for older clients sending unchanged heartbeats.
+  Reclaiming after a watchdog expiry is another takeover and requires pedal input.
   A resting-state claim still leaves Traffic Manager in control.
 - **An unclaimed truck goes back to autonomy**, not to full brake. It first
   coasts onto the nearest lane running its way (`handback.py`), because

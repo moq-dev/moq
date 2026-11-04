@@ -178,10 +178,8 @@ class TruckSession:
                 self._publish()
                 continue
             if command.kind == "drive" and self._drive.driver is None and self._truck.autonomous:
-                # The browser seeds its first command from the latest status, but
-                # the gate still holds its no-driver resting state. Synchronize the
-                # gear from fresher local feedback so the shift interlock does not
-                # turn a moving takeover into a neutral coast.
+                # Prime the unclaimed gate from local steering and gear feedback;
+                # Drive resets pedal demand before any manual command can act.
                 self._drive.synchronize(self._truck.telemetry().measured)
             accepted = self._drive.apply(command)
             changed = accepted

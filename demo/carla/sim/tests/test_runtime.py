@@ -76,15 +76,18 @@ def test_takeover_preserves_steering_and_gear_but_resets_pedals(gear: Gear) -> N
         session._publish = published.set
 
         task = asyncio.create_task(session._loop())
+        published_waiter = asyncio.create_task(published.wait())
         try:
-            await published.wait()
+            await asyncio.wait({task, published_waiter}, return_when=asyncio.FIRST_COMPLETED)
+            if task.done():
+                await task
             assert session._drive.driver == "driver"
             assert session._drive.state == DriveState(steering=-0.3, throttle=0.0, brake=1.0, gear=gear)
             assert actuated == [(session._drive.accepted(), True)]
         finally:
             task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+            published_waiter.cancel()
+            await asyncio.gather(task, published_waiter, return_exceptions=True)
 
     asyncio.run(scenario())
 
