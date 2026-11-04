@@ -110,7 +110,6 @@ impl Scan {
 				self.groups += sgpd(data)?;
 				return Ok(());
 			}
-			b"iloc" => return iloc(data),
 			b"moov" | b"trak" | b"mdia" | b"minf" | b"stbl" | b"dinf" | b"edts" | b"mvex" | b"moof" | b"traf"
 			| b"mfra" | b"iprp" | b"ipco" => Namespace::Any,
 			b"udta" => Namespace::Udta,
@@ -231,8 +230,7 @@ fn take<'a>(data: &mut &'a [u8], size: usize) -> Result<&'a [u8]> {
 	Ok(body)
 }
 
-// mp4-atom 0.17.0 still accepts zero-byte descriptions. Keep the upstream #264 bound here
-// until our dependency includes it: every entry must be paid for by at least one input byte.
+// Count descriptions across boxes before allocating the metadata tree.
 fn sgpd(mut data: &[u8]) -> Result<u64> {
 	let version = u32::decode(&mut data)? >> 24;
 	take(&mut data, 4)?; // grouping_type
@@ -243,54 +241,7 @@ fn sgpd(mut data: &[u8]) -> Result<u64> {
 		take(&mut data, 4)?; // default_group_description_index
 	}
 	let count = u32::decode(&mut data)?;
-	if count as usize > data.len() {
-		return Err(mp4_atom::Error::OutOfBounds.into());
-	}
 	Ok(count.into())
-}
-
-// The same dependency also lacks #267. A single zero-size extent names the whole reference;
-// several would allocate without consuming input, and are refused before decoding any item.
-fn iloc(mut data: &[u8]) -> Result<()> {
-	let version = u32::decode(&mut data)? >> 24;
-	let sizes0 = u8::decode(&mut data)?;
-	let sizes1 = u8::decode(&mut data)?;
-	let offset = sizes0 >> 4;
-	let length = sizes0 & 15;
-	let base = sizes1 >> 4;
-	let index = if version == 0 { 0 } else { sizes1 & 15 };
-	if version > 2
-		|| [offset, length, base, index]
-			.iter()
-			.any(|size| ![0, 4, 8].contains(size))
-	{
-		return Err(mp4_atom::Error::InvalidSize.into());
-	}
-	let count = if version < 2 {
-		u32::from(u16::decode(&mut data)?)
-	} else {
-		u32::decode(&mut data)?
-	};
-	for _ in 0..count {
-		take(
-			&mut data,
-			if version == 0 {
-				4
-			} else if version == 1 {
-				6
-			} else {
-				8
-			},
-		)?;
-		take(&mut data, base as usize)?;
-		let extents = u16::decode(&mut data)? as usize;
-		let width = usize::from(offset + length + index);
-		if width == 0 && extents > 1 {
-			return Err(mp4_atom::Error::OutOfBounds.into());
-		}
-		take(&mut data, extents * width)?;
-	}
-	Ok(())
 }
 
 #[cfg(test)]
@@ -398,7 +349,7 @@ pub(crate) mod tests {
 				data.extend_from_slice(&0u32.to_be_bytes());
 			}
 			data.extend_from_slice(&1u32.to_be_bytes());
-			assert!(check(&boxed(b"sgpd", &data)).is_err());
+			assert!(mp4_atom::Any::decode(&mut boxed(b"sgpd", &data).as_slice()).is_err());
 		}
 		for version in 0..=2 {
 			for count in [1u16, 2] {
@@ -419,7 +370,10 @@ pub(crate) mod tests {
 					}
 				]);
 				data.extend_from_slice(&count.to_be_bytes());
-				assert_eq!(check(&boxed(b"iloc", &data)).is_ok(), count == 1);
+				assert_eq!(
+					mp4_atom::Any::decode(&mut boxed(b"iloc", &data).as_slice()).is_ok(),
+					count == 1
+				);
 			}
 		}
 	}

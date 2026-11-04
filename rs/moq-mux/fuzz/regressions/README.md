@@ -17,5 +17,5 @@ ingest skips other top-level boxes. Both paths replay the malformed metadata wit
 the allocation bound enabled.
 
 mp4-atom 0.17.1 contains the `sgpd` entry-count and zero-size `iloc` extent
-bounds; 0.17.0 already fixed the `iref` subtraction overflow. moq-mux's metadata
-preflight also bounds these inputs before calling the dependency.
+bounds; 0.17.0 already fixed the `iref` subtraction overflow. moq-mux keeps its aggregate
+sample-group budget and relies on the dependency for per-entry bounds.
