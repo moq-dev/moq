@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { runInNewContext } from "node:vm";
 import { CatalogSchema, decode, encode } from "./catalog.ts";
 
 function encodeJson(value: unknown): Uint8Array {
@@ -277,6 +278,14 @@ test("shared Rust extension names survive decoding and the public schema", async
 	for (const bad of [new Map([["mpegts", 1]]), new Set(["mpegts"]), [1, 2], "mpegts"]) {
 		expect(() => CatalogSchema.parse({ tracks: [], ext: bad })).toThrow();
 	}
+	// A plain object from another realm has a different `Object.prototype`, yet is still plain.
+	const foreign = runInNewContext(`JSON.parse('{"mpegts":1,"constructor":2,"__proto__":3}')`);
+	expect(Object.getPrototypeOf(foreign)).not.toBe(Object.prototype);
+	expect(Object.keys(CatalogSchema.parse({ tracks: [], ext: foreign }).ext ?? {}).sort()).toEqual([
+		"__proto__",
+		"constructor",
+		"mpegts",
+	]);
 });
 
 test("caption role, label, language and codec survive the wire", () => {

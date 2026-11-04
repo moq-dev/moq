@@ -77,11 +77,15 @@ export const CatalogSchema = z.object({
 		z.pipe(
 			// A record parser drops `__proto__`; every own extension member is application data.
 			// Only plain objects qualify, as with a record: a `Map` or class instance has no
-			// own members to copy, so accepting one would silently empty the extension.
+			// own members to copy, so accepting one would silently empty the extension. A plain
+			// object's prototype is null or some realm's `Object.prototype`, recognized by shape
+			// rather than identity so an object parsed in another realm (an iframe, `vm`) passes.
 			z.custom<Record<string, unknown>>((value) => {
 				if (typeof value !== "object" || value === null) return false;
 				const proto = Object.getPrototypeOf(value);
-				return proto === Object.prototype || proto === null;
+				return (
+					proto === null || (Object.getPrototypeOf(proto) === null && Object.hasOwn(proto, "isPrototypeOf"))
+				);
 			}),
 			z.transform((value) => Object.assign(Object.create(null), value) as Record<string, unknown>),
 		),

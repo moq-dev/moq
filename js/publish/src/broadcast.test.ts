@@ -69,11 +69,30 @@ for (const kind of ["video", "audio", "text"] as const) {
 			}
 			await settle();
 			expect((await readCatalog(broadcast))?.[kind]).toBeUndefined();
-			register();
+			const again = register();
 			await settle();
 			const restored = (await readCatalog(broadcast))?.[kind]?.renditions ?? {};
 			expect(Object.keys(restored).sort()).toEqual(Object.keys(configs).sort());
 			expect(restored).toEqual(configs);
+			for (const rendition of again) expect(rendition.track.peek()?.name).toBe(rendition.name);
+
+			// A codec change replaces each prototype-named track under a fresh name. Text has no codec identity.
+			if (kind === "text") return;
+			const codec = kind === "video" ? "vp8" : "mp4a.40.2";
+			const byName = new Map(again.map((rendition) => [rendition.name, rendition]));
+			for (const [name, config] of Object.entries(configs)) {
+				expect(config.codec).not.toBe(codec);
+				byName.get(name)?.config.set({ ...config, codec });
+			}
+			await settle();
+			const replaced = (await readCatalog(broadcast))?.[kind]?.renditions ?? {};
+			expect(Object.keys(replaced).sort()).toEqual(Object.keys(configs).sort());
+			for (const rendition of again) {
+				const track = `${rendition.name}/1`;
+				expect(rendition.track.peek()?.name).toBe(track);
+				expect(replaced[rendition.name]?.codec).toBe(codec);
+				expect(replaced[rendition.name]?.track).toBe(track);
+			}
 		} finally {
 			broadcast.close();
 			origin.close();
