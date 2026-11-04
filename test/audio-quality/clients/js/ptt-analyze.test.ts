@@ -107,6 +107,17 @@ test("a head that never reaches the listener fails the run", async () => {
 	expect(stderr).toContain("utterance head was not received");
 });
 
+test("a head that arrives but never reaches the decoder fails the run", async () => {
+	// A head reordered behind the next frame's group, then dropped before decode.
+	const result = trace();
+	const head = result.submitted.find((frame) => frame.at >= result.presses[2].at);
+	result.decoding = result.decoding.filter((frame) => frame.timestamp !== head?.timestamp);
+	result.decoded = result.decoded.filter((frame) => frame.timestamp !== head?.timestamp);
+	const { exitCode, stderr } = await analyze(result);
+	expect(exitCode).toBe(1);
+	expect(stderr).toContain("utterance head was not decoded");
+});
+
 test("a new encoder fails as a probe, but the live encoder's release flush does not", async () => {
 	// A flush leaves no trace in the page's records, so the passing run above is the release flush.
 	const result = trace();

@@ -45,7 +45,7 @@ grant; `Options::bandwidth` documents that
   2026-10-04 with the enabled flag), through the disable and re-enable rule
   [simulcast rung disable](/quest/m1/simulcast-rung-disable.md) puts beside
   `Control` rather than a second one; the encoder never errors. Viewers with
-  no enabled alternative hold it (the push-to-talk hold, [#7101](https://github.com/moq-dev/moq/issues/7101)),
+  no enabled alternative hold it ([push-to-talk](/quest/m1/push-to-talk/README.md)),
   so its demand can stay while its grant is below the floor; recovery evaluates a
   hypothetical share against the current estimate, as the ladder controller
   does. The reservation's ceiling is

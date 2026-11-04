@@ -91,6 +91,7 @@ const presses = result.presses
 			received: received.length,
 			firstEncoded: input[0] ? encoded.has(input[0].timestamp) : false,
 			firstReceived: input[0] ? arrivals.has(input[0].timestamp) : false,
+			firstDecoded: input[0] ? decoded.has(input[0].timestamp) : false,
 			arrival: earliest ? earliest[0] - press.at : null,
 			audible: audible ? audible.at - press.at : null,
 			delivery,
@@ -141,6 +142,8 @@ if (result.subscriptions.length) failures.push("subscription reopened");
 if (presses.some((press) => !press.submitted || !press.firstEncoded)) failures.push("utterance head was not encoded");
 if (summary.unencoded || summary.unsent) failures.push("submitted audio was not encoded and sent completely");
 if (presses.some((press) => !press.firstReceived)) failures.push("utterance head was not received");
+if (presses.some((press) => press.firstReceived && !press.firstDecoded))
+	failures.push("utterance head was not decoded");
 if (summary.unreceived) failures.push("written audio did not all reach the listener");
 if (failures.length) {
 	console.error(failures.join("; "));
