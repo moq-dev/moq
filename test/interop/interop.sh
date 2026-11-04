@@ -2293,6 +2293,31 @@ run_control_case() {
     fi
 }
 
+run_replacement_case() {
+    local runtime="$1" transport="$2" name="replace-$1-$2" started=$SECONDS
+    local prefix="replace-$1-$2-$$-$RANDOM"
+    local cell=(case="track replacement $transport" publisher="$runtime" subscriber="$runtime" version=moq-lite-07-wip log="$LOGS/$name.log")
+    if is_broken "$runtime"; then
+        record fail "${cell[@]}" detail="client unavailable"
+        overall=1
+        return
+    fi
+    local command=(bun)
+    [[ "$runtime" != js-native-node ]] || command=(node --import tsx)
+    harness_spawn "$name" "$LOGS/$name.log" timeout -k 3 "$TIMEOUT" \
+        "${command[@]}" "$CLIENTS/js-native/replace.ts" \
+        "$(token_url --publish "$prefix/**")" "$(token_url --subscribe "$prefix/**")" "$prefix" "$transport"
+    if harness_wait "$HARNESS_PID"; then
+        echo "  PASS  track replacement $runtime ($transport)"
+        record pass "${cell[@]}" seconds=$((SECONDS - started))
+    else
+        echo "  FAIL  track replacement $runtime ($transport)"
+        record fail "${cell[@]}" seconds=$((SECONDS - started)) detail="replacement did not reach the new track"
+        cat "$LOGS/$name.log"
+        overall=1
+    fi
+}
+
 # The bytes the relay has inflated for plain readers, summed over every tier and role.
 relay_inflated() {
     curl -sf --max-time 5 "$METRICS_URL" | awk '/^moq_relay_inflated_bytes_total\{/ { sum += $2 } END { print sum + 0 }'
@@ -2474,6 +2499,8 @@ run_tails() {
     [[ "$VERSION" == auto ]] || return 0
     for runtime in js-native-node js-native-bun; do
         needs "$runtime" || continue
+        run_replacement_case "$runtime" websocket
+        run_replacement_case "$runtime" webtransport
         for version in "${COMPRESS_VERSIONS[@]}"; do
             run_tail_pair rust "$runtime" compress "$version"
             run_tail_pair "$runtime" rust compress "$version"

@@ -70,8 +70,11 @@ export class Fetch {
 		await encodePin(w, version, this.instance);
 		await w.string(this.track);
 		await w.u8(toWire(this.priority));
-		if (hasFetchMaxDelay(version)) await w.u53(this.maxDelay === undefined ? 0 : this.maxDelay + 1);
-		else if (this.maxDelay !== undefined) throw new Error("fetch maxDelay not supported for this version");
+		if (hasFetchMaxDelay(version)) {
+			if (this.maxDelay !== undefined && (!Number.isSafeInteger(this.maxDelay) || this.maxDelay < 0))
+				throw new RangeError("max delay exceeds safe milliseconds");
+			await w.u62(this.maxDelay === undefined ? 0n : BigInt(this.maxDelay) + 1n);
+		} else if (this.maxDelay !== undefined) throw new Error("fetch maxDelay not supported for this version");
 		await w.u62(this.group);
 
 		if (hasFrameBounds(version)) {
@@ -88,8 +91,11 @@ export class Fetch {
 		const instance = await decodePin(r, version);
 		const track = await r.string();
 		const priority = fromWire(await r.u8());
-		const encodedMaxDelay = hasFetchMaxDelay(version) ? await r.u53() : 0;
-		const maxDelay = encodedMaxDelay > 0 ? ((encodedMaxDelay - 1) as Milli) : undefined;
+		// The optional encoding adds one, so even a safe millisecond budget can exceed u53.
+		const encodedMaxDelay = hasFetchMaxDelay(version) ? await r.u62() : 0n;
+		if (encodedMaxDelay > BigInt(Number.MAX_SAFE_INTEGER) + 1n)
+			throw new RangeError("max delay exceeds safe milliseconds");
+		const maxDelay = encodedMaxDelay === 0n ? undefined : (Number(encodedMaxDelay - 1n) as Milli);
 		const group = await r.u62();
 
 		if (!hasFrameBounds(version)) {
