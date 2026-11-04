@@ -41,7 +41,11 @@ Decided with the maintainer, 2026-10-13:
 - An origin declares its own routing identity, fresh per process or tab
   restart and shared across its live sessions. It is unverified. Decided 2026-11-02 (maintainer, /quest-unblock): no
   key proof is planned; if a use case needs a provable identity, moq-lite-07's
-  route identity becomes a public key, independent of P2P. Receiver-stamped
+  route identity becomes a public key, independent of P2P. Decided 2026-11-04
+  (maintainer, /quest-unblock): scoped forgery is that use case. A peer proves
+  a route key once per announce stream, and its own identity derives from it
+  ([Scoped peers prove a route key](/quest/m1/cluster-routing/routes/proof.md)).
+  Receiver-stamped
   per-session identities were dropped 2026-10-26 (maintainer): in a mesh,
   two relays stamping their sessions from one origin forward its routes as
   two identities a third relay cannot recognize as one. Keep administrative
@@ -51,9 +55,9 @@ Decided with the maintainer, 2026-10-13:
   qualified when its publish grant is scoped, and stays bare when it is
   unscoped, so a forger only damages routes inside its own scope. (Decided
   2026-10-14; own identities included 2026-10-26, since they are no longer
-  proven.) How a scoped peer's identities are keyed waits on the maintainer in
-  [Route session integration](/quest/m1/cluster-routing/routes/session.md): the
-  issuer-qualified subject key was dropped 2026-11-02 (maintainer).
+  proven.) The issuer-qualified subject key was dropped 2026-11-02
+  (maintainer); since 2026-11-04 a scoped peer's identities are keyed by the
+  route key it proves ([Route session integration](/quest/m1/cluster-routing/routes/session.md)).
 - Matching explicit epochs authorize resume. Epochless changes retain
   Restart and fresh resolution; neither node identity nor a healthy
   alternate grants permission to splice content.

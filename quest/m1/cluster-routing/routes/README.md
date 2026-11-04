@@ -87,7 +87,10 @@ The wire sketch is in [wire](/quest/m1/cluster-routing/routes/wire.md); the bull
   shared across its live sessions, decided 2026-10-13. It is unverified.
   Decided 2026-11-02 (maintainer, /quest-unblock): peer grants are dropped and no key proof is
   planned; a provable identity, if a use case needs one, makes this route
-  identity a public key, independent of P2P.
+  identity a public key, independent of P2P. Decided 2026-11-04 (maintainer,
+  /quest-unblock): scoped forgery is that use case; a peer proves a route key
+  once per announce stream and its own identity derives from that key
+  ([Scoped peers prove a route key](/quest/m1/cluster-routing/routes/proof.md)).
   Decided 2026-10-26 (maintainer): receivers do not stamp a fresh identity
   per session. In a mesh, two relays stamping their sessions from one origin
   forward its routes as two identities a third relay cannot recognize as
@@ -496,6 +499,7 @@ benchmarks.
 
 - [lite-07 route wire](/quest/m1/cluster-routing/routes/wire.md) - lite-07 and the draft carry ROUTE, ANNOUNCE_FLOOR, ROUTE_REQUEST, and path-less ANNOUNCE
 - [Route session integration](/quest/m1/cluster-routing/routes/session.md) - one router per origin node drives the origin and every lite-07 announce stream
+- [Scoped peers prove a route key](/quest/m1/cluster-routing/routes/proof.md) - a peer proves a route key once per announce stream, and its forwarded identities are qualified by it
 - [Announcement availability](/quest/m1/cluster-routing/routes/availability.md) - announcements report availability, and a let-go is offline rather than END, in Rust and JS
 - [js/net route layer](/quest/m1/cluster-routing/routes/js.md) - `js/net` encodes, decodes, and resolves the route layer
 - [Route layer acceptance](/quest/m1/cluster-routing/routes/acceptance.md) - forwarding fixtures ported and the model deleted, incident fixtures, end-to-end checks, and benchmarks

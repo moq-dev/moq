@@ -96,57 +96,27 @@ epoch. The route layer's own origin-node identity, with its seqno and
 revision, stays separate ("keep administrative identity and broadcast epoch
 separate", in the epic).
 
-## Waiting
+Decided 2026-11-04 (maintainer, /quest-unblock): a scoped peer's identities
+are keyed by a route key the peer proves, specified in
+[Scoped peers prove a route key](/quest/m1/cluster-routing/routes/proof.md).
+A proven peer's own identity is derived from its key and stays bare; every
+identity it forwards is qualified under its proven key. A peer that proves no
+key gets a per-session key. `Scope::qualify` still takes the key from the
+caller, so this quest does not wait on the proof. Options shown:
 
-- Maintainer: how a scoped peer's routing identities are keyed. The router
-  takes the key from the caller (`Scope::qualify`), so nothing else waits on
-  it. Recommendation: (1), a route label carried in the grant.
+- ✅ A route key the peer proves once per announce stream, before the lite-07 cut
+- A route label carried in the grant (the earlier recommendation), with the
+  proven key added after the cut
+- A per-session key now
+- A key the relay operator configures per scoped remote
 
-  What the key is for. Every origin declares a routing identity: an opaque
-  number nobody verifies. A peer admitted under a scoped grant (say it may
-  publish only `acme/**`) could declare a victim's identity. One route
-  serves every claim of an identity, so the forgery would capture the
-  victim's claims outside `acme/`, and its seqno would outlive it
-  (`forged_identity_hijacks_claims_outside_the_forgers_scope`). So a relay
-  files every identity a scoped peer sends under a qualified key, derived
-  from something about that peer and the identity, and counts claims under
-  the key only inside the grant. The question is what that something is.
-  It must stay the same across token refresh, be shared by one operator's
-  sessions so losing one uplink fails over instead of restarting readers
-  (`scoped_delivery_through_two_uplinks_reaches_one_key`), differ between
-  operators, and work for sessions admitted with no token (public rules,
-  mTLS certificates, or a third-party auth server).
-
-  Why not the credential subject: `hash(subject, id)` was decided
-  2026-10-15 and dropped by the maintainer 2026-11-02, together with
-  refusing scoped tokens that carry no subject; the implementation is in
-  [moq-dev/moq@453e1ec](https://github.com/moq-dev/moq/commit/453e1ece7c5435ee19541cfc2e9bbe0b6fbc430e).
-  It existed only for tokens, so token-less admission had no key. Rejected
-  earlier: the grant's pattern union, which refresh and withdrawal change
-  and two uplinks need not share, and the connection root, which two scoped
-  operators under one root would share.
-
-  Example: operator Acme runs a local relay L with uplinks to CDN relays C1
-  and C2. Each admits L with a token scoped to `acme/**`, refreshed hourly.
-
-  1. A route label carried in the grant. Whoever issues it names it: a
-     token claim such as `route: "acme"`, a public rule's entry, or an mTLS
-     mapping. The key hashes the label with the identity in its own domain.
-     Both of Acme's tokens say `acme`, so C1 and C2 file L's origins under
-     one key, refresh keeps it, and losing C1 fails over through C2.
-     Another operator's label differs. A grant with no label gets a
-     per-session key, as in (2). Costs a grant field in `moq-auth`,
-     `js/auth`, and the docs, and issuers must not hand two operators one
-     label.
-  2. A per-session key, with nothing to configure. L's sessions to C1 and
-     C2 get two keys, so losing C1 restarts the readers it served onto C2's
-     key instead of failing over, and so does a refresh that reconnects.
-     Simplest; gives up the two-uplink fixture.
-  3. A key the relay operator configures per scoped remote, such as C1 and
-     C2 both mapping admissions under `acme/**` to `acme`. No grant change,
-     but every CDN relay's configuration must agree, and it names patterns
-     rather than who connected, so two operators admitted under one pattern
-     share a key.
+Research behind it: proving a neighbor's own key cannot remove qualification,
+since a public key is public and a scoped peer could still forward a victim's
+key with an inflated seqno; origin-signed routes still leave cost lies and
+blackholing, at the price of per-update signatures and expiry refreshes. Keyed
+by a proven key, every remaining attack stays inside the forger's grant, with
+no grant field, no issuer-coordinated labels, and support for token-less
+admission.
 
 ## Required
 

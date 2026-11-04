@@ -9,13 +9,6 @@ declaring every merged flag a second time) are deleted after a bump. Source
 presence, precedence, deprecated-name rejection, and provenance keep working.
 CLI behavior and wire are unchanged.
 
-## Waiting
-
-- jdx/usage: a usage-rs release ships
-  [jdx/usage#1608](https://github.com/jdx/usage/issues/1608). Check the issue
-  and usage-rs releases. If upstream declines, delete this quest and keep the
-  drift test.
-
 ## Plan
 
 Filed 2026-11-02 (maintainer-approved, /quest-unblock), building on the
@@ -26,6 +19,11 @@ Today `usage::Cli` and `usage::Config` reject each other's attributes, and
 `env` and `setting` per field; the registry side adds the type and `parse`.
 Propose inferring those from the field so one declaration serves both. If
 upstream declines, delete this quest and keep the drift test.
+
+Shipped 2026-11-03 (checked 2026-11-04, /quest-unblock): usage-lib
+[7.2.0](https://github.com/jdx/usage/releases/tag/v7.2.0) lets derive flags
+declare their own settings ([jdx/usage#1610](https://github.com/jdx/usage/pull/1610),
+closing jdx/usage#1608).
 
 ## Related
 

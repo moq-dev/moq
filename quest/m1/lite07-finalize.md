@@ -36,7 +36,11 @@ grants and metadata-only subscriptions do not gate it: neither is clustering
 stability. Both are additive and, per the freeze policy, target whichever lite
 wip is current when they land. Decided 2026-10-25: no routing identity proof
 gates the cut, and lite-07 routing identities stay declared and unverified
-(2026-11-02: peer grants are dropped and no key proof is planned). Decided 2026-10-26
+(2026-11-02: peer grants are dropped and no key proof is planned). Reversed
+2026-11-04 (maintainer, /quest-unblock): a peer proves a route key once per
+announce stream before the cut, through
+[Scoped peers prove a route key](/quest/m1/cluster-routing/routes/proof.md) in
+[Routes and announces](/quest/m1/cluster-routing/routes/README.md). Decided 2026-10-26
 (maintainer): receivers do not stamp per-session identities either, since
 that splits one origin into several identities across a relay mesh.
 

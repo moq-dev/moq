@@ -9,10 +9,10 @@ Delete this quest once every crate has one.
 
 ## Waiting
 
-- Maintainer: add the trusted publisher in each crate's crates.io settings,
-  after a first publish by token for the crates not yet on crates.io (listed
-  under Plan). Settings pages need a crates.io login, so check with a
-  `release-rs.yml` run that publishes through OIDC.
+- Maintainer: after the next release publishes kio-macros, moq-c,
+  moq-congestion, moq-crypto, moq-ice, moq-quic, and moq-rtsp by token, add
+  their trusted publishers the same way. Settings pages need a crates.io
+  login, so check with a `release-rs.yml` run that publishes through OIDC.
 
 ## Plan
 
@@ -39,3 +39,6 @@ moq-quic, moq-rtsp. moq-crypto became publishable in
 [moq-dev/moq#7733](https://github.com/moq-dev/moq/pull/7733). `CARGO_REGISTRY_TOKEN` is revoked only after all of them have one.
 Settings pages need a crates.io login, so the check is a `release-rs.yml` run
 publishing through OIDC.
+
+Done 2026-11-04 (maintainer, /quest-unblock): all 31 published crates have
+the trusted publisher. Only the 7 unpublished crates remain.

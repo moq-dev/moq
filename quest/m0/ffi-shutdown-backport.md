@@ -52,6 +52,13 @@ publishes 0.1.1 and exercises the unproven path in
 [A Dart tag publishes unattended](/quest/m2/release/dart-publish.md). Decided
 2026-10-30 (maintainer): push it during the combined cut, not before.
 
+Decided 2026-11-04 (maintainer, /quest-unblock): ✅ cut the combined patch
+release on `release` soon, once [moq-dev/moq#7596](https://github.com/moq-dev/moq/pull/7596)'s
+remaining ports and [moq-dev/moq#7680](https://github.com/moq-dev/moq/pull/7680)
+are ready, and merge `main` into `release` for the next minor line
+separately, later. Not chosen: one combined cut that merges `main` first, or
+neither this week.
+
 Public API: none. Wire: none.
 
 ## Related

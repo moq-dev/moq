@@ -38,6 +38,13 @@ What remains is the maintainer's, in order:
 2. Then drop `main` from `publish`'s deployment policy, and remove
    `DISCORD_WEBHOOK` and `CACHIX_AUTH_TOKEN` from `publish`.
 
+Decided 2026-11-04 (maintainer, /quest-unblock): ✅ cut the combined patch
+release on `release` soon, once [moq-dev/moq#7596](https://github.com/moq-dev/moq/pull/7596)'s
+remaining ports and [moq-dev/moq#7680](https://github.com/moq-dev/moq/pull/7680)
+are ready, and merge `main` into `release` for the next minor line
+separately, later. Not chosen: one combined cut that merges `main` first, or
+neither this week.
+
 Public API: none. Wire: none.
 
 ## Related
