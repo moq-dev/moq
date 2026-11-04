@@ -666,6 +666,7 @@ export namespace Track {
 		largest(): Promise<Track.Position | undefined>;
 		readonly name: string;
 		nextGroup(): Promise<Group.Consumer | undefined>;
+		pinMaxDelay(max: Milli): void;
 		readBool(): Promise<boolean | undefined>;
 		readFrame(): Promise<{
 			frame: number;
@@ -731,6 +732,7 @@ export namespace Track {
 		largest(): Promise<Track.Position | undefined>;
 		readonly name: string;
 		ordered(): Track.Ordered;
+		pinMaxDelay(max: Milli): void;
 		recvDatagram(): Promise<Track.Datagram | undefined>;
 		recvGroup(): Promise<Group.Consumer | undefined>;
 		get subscription(): Signals.Getter<Track.Subscription | undefined>;
