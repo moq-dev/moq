@@ -64,11 +64,25 @@ JS and the bindings identical.
 - **Prefix routes.** A prefix route yields requests, and each one is
   answered by `serve(consumer)`,
   by `route(options)`, or by `reject`. `route(options)` creates the path's
-  exact `Route`, which inherits the prefix route's instance by default so
-  that the reader continues (see [announce takeover](/quest/m1/announce-takeover.md)).
-  A prefix route takes cost and auth as an exact one does, so claims can
-  be priced. Today `Requests::route()` is always the default and
-  `update_route` is crate-private.
+  exact `Route`. A prefix route takes cost and auth as an exact one does,
+  so claims can be priced. Today `Requests::route()` is always the default
+  and `update_route` is crate-private.
+- **A job's instance.** ✅ Decided 2026-11-03 (maintainer, on
+  [moq-dev/moq#7770](https://github.com/moq-dev/moq/pull/7770)):
+  `request.route(options)` mints a fresh instance by default, as
+  `Request::prepare` does today, so a job that ends and restarts beneath
+  the same prefix gets a new instance for its restarted sequences. An
+  explicit stable instance in the options is only for a caller that
+  continues its sequences. Ending a job's route withdraws only that path:
+  the prefix route stays open and keeps answering later requests, each
+  with its own job lifetime, and the origin keeps no history of ended
+  paths. The existing predecessor handling stays until
+  [announce takeover](/quest/m1/announce-takeover.md) replaces it, and
+  that quest owns continuing the claim's readers on the job's route.
+  Rejected: inheriting the prefix route's instance by default and making
+  the prefix terminal once a materialized job ends, which would change
+  long-lived services; and inheriting it with automatic restarts, which
+  needs ended-path history or a retirement design this quest does not own.
 - **Visibility, not unannounced broadcasts.** Callers that fill the catalog
   first (`moq-cli` hls, rtsp and publish; moq-mux
   `ts/programs.rs`) or announce after SDP (`moq-rtc/server/whip.rs`) create
@@ -105,24 +119,6 @@ Run `just check` and `just test interop --all`.
 
 Public API: breaking across moq-net, @moq/net, moq-ffi, moq-c and the
 wrappers. Wire: none.
-
-## Waiting
-
-- Maintainer: choose the default when a job ends and the same prefix serves its
-  path again. The inherited-instance default above would reuse the ended job's
-  instance even though its group sequences restart. The dependent
-  [takeover quest](/quest/m1/announce-takeover.md) requires a fresh instance and
-  refusal of pins to the ended job before relying on inheritance. Recommend
-  making `request.route(options)` mint a fresh instance by default, with an
-  explicit stable instance only for callers that continue its sequences;
-  keep the existing predecessor handling until that quest replaces it.
-  Alternatively, preserve the inherited default by making the prefix terminal
-  when a materialized job ends, requiring a new prefix route for later jobs.
-  Keeping both an immutable prefix instance and automatic per-path restarts
-  needs an ownership bound for ended-path history: serial requests must not
-  leave a growing tombstone map. Resolve the default and its safety scope before
-  migrating the public API. See
-  [the implementation audit](https://github.com/moq-dev/moq/pull/7770).
 
 ## Related
 
