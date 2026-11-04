@@ -1907,7 +1907,7 @@ export class Publisher {
 			const deadline = new Deadline();
 			const answer = await deadline.wait(
 				(async (): Promise<Answer> => {
-					const opened = await RequestStream.open(this.#session, deadline, this.#quic);
+					const opened = await RequestStream.open(this.#session, deadline, { quic: this.#quic });
 					request = opened;
 					const version = this.#session.version;
 					const token = this.#auth?.carried(auth);

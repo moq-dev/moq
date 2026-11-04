@@ -2,9 +2,13 @@ import { SessionCode, SessionError } from "../error.ts";
 import { type OpenOptions, Stream } from "../stream.ts";
 import type { IetfVersion } from "./version.ts";
 
+/** How {@link Session.openBi} opens: its send order, and a signal that gives up the wait. */
+export type BiOptions = Partial<OpenOptions> & { signal?: AbortSignal };
+
 /** Opens request streams and allocates request IDs. Implemented by {@link NativeSession}; tests substitute their own. */
 export interface Session {
-	openBi(options?: Partial<OpenOptions>): Stream | Promise<Stream>;
+	/** Open a request stream, rejecting with `signal`'s reason if it aborts while the open waits. */
+	openBi(options?: BiOptions): Stream | Promise<Stream>;
 	acceptBi(): Promise<Stream | undefined>;
 	nextRequestId(signal?: AbortSignal): Promise<bigint | undefined>;
 	/** Check a request ID the peer used, closing the session on a wrong-parity one. */
@@ -40,8 +44,14 @@ export class NativeSession implements Session {
 		}
 	}
 
-	async openBi(options?: Partial<OpenOptions>): Promise<Stream> {
-		return Stream.open(this.#quic, { ...options, version: this.version });
+	async openBi(options: BiOptions = {}): Promise<Stream> {
+		const { signal, ...rest } = options;
+		const open = { ...rest, version: this.version };
+		if (!signal) return Stream.open(this.#quic, open);
+		// Giving up leaves the line, so the stream it waited for goes to the next open.
+		const stream = await Stream.tryOpen(this.#quic, { ...open, signal });
+		if (!stream) throw signal.reason;
+		return stream;
 	}
 
 	async acceptBi(): Promise<Stream | undefined> {

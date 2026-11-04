@@ -183,8 +183,15 @@ export class RequestStream {
 	 * Open a request's stream under `deadline`, whose failure then resets the request through
 	 * {@link abort} like any other end, so the request ends once whatever ends it.
 	 */
-	static open(session: Session, deadline: Deadline, quic?: WebTransport): Promise<RequestStream> {
-		return deadline.open(session.openBi(), (stream) => new RequestStream(stream, session, quic));
+	static open(
+		session: Session,
+		deadline: Deadline,
+		options: { quic?: WebTransport; signal?: AbortSignal } = {},
+	): Promise<RequestStream> {
+		return deadline.open(
+			session.openBi({ signal: options.signal }),
+			(stream) => new RequestStream(stream, session, options.quic),
+		);
 	}
 
 	/**

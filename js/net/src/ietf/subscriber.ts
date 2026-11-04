@@ -529,7 +529,7 @@ export class Subscriber {
 
 		try {
 			const deadline = new Deadline();
-			const request = await deadline.wait(RequestStream.open(this.#session, deadline, this.#quic));
+			const request = await deadline.wait(RequestStream.open(this.#session, deadline, { quic: this.#quic }));
 
 			const run = async () => {
 				const msg = new SubscribeNamespace({ namespace: prefix, requestId, hidden });
@@ -1018,7 +1018,7 @@ export class Subscriber {
 			const setup = async () => {
 				const id = await this.#session.nextRequestId(signal);
 				if (id === undefined) throw await this.#closedSession();
-				stream = await RequestStream.open(this.#session, deadline, this.#quic);
+				stream = await RequestStream.open(this.#session, deadline, { quic: this.#quic, signal });
 				if (signal.aborted) {
 					stream.abort(signal.reason);
 					signal.throwIfAborted();
@@ -1182,7 +1182,7 @@ export class Subscriber {
 			active.throwIfAborted();
 			if (id === undefined) throw await this.#closedSession();
 			this.#ranges.set(id, accepted.promise);
-			stream = new RequestStream(await this.#session.openBi(), this.#session, this.#quic);
+			stream = new RequestStream(await this.#session.openBi({ signal: active }), this.#session, this.#quic);
 			if (active.aborted) {
 				stream.abort(active.reason);
 				active.throwIfAborted();
@@ -1451,11 +1451,11 @@ export class Subscriber {
 			this.#fetches.set(fetchId, Promise.resolve(subscription));
 			subscription.fetchIds.push(fetchId);
 
-			request = new RequestStream(
-				await untilAborted(Promise.resolve(this.#session.openBi()), signal),
-				this.#session,
-				this.#quic,
-			);
+			request = new RequestStream(await this.#session.openBi({ signal }), this.#session, this.#quic);
+			if (signal.aborted) {
+				request.abort(signal.reason);
+				signal.throwIfAborted();
+			}
 			const msg = new Fetch({
 				requestId: fetchId,
 				type: { kind: "relativeJoining", subscription: subscribeId, offset: 0n },
@@ -1528,7 +1528,7 @@ export class Subscriber {
 	}> {
 		const version = this.#session.version;
 
-		state.stream = await RequestStream.open(this.#session, deadline, this.#quic);
+		state.stream = await RequestStream.open(this.#session, deadline, { quic: this.#quic });
 
 		// The timeout can fire while the open is still in flight, in which case cleanup ran
 		// with nothing to release. Bail now that the stream is recorded, so settling this
