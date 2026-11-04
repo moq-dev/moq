@@ -41,8 +41,7 @@ Impact section describes migration for the published crates whose API changes.
 Wire: none.
 
 These spawns stay and belong to [the spawn audit](/quest/m2/spawn-audit.md):
-`Critical`'s ACME renewal (`rs/moq-relay/src/relay.rs`) and web certificate
-reload (`rs/moq-relay/src/web.rs`), the io_uring handoff in
+`Critical`'s web certificate reload (`rs/moq-relay/src/web.rs`), the io_uring handoff in
 `rs/moq-relay/src/connection.rs`, and moq-relay's web, shutdown, and uring
 spawns. Each UniFFI call's task on the bindings' runtime stays too: that is the
 binding boundary. So does moq-ffi's wake dispatch (decided 2026-11-03,
