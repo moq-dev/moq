@@ -84,6 +84,7 @@ const ROUTE_FAILURES: ReadonlySet<number> = new Set([
 	StreamCode.SessionClosed,
 	StreamCode.GoingAway,
 	StreamCode.ControlTimeout,
+	StreamCode.Unroutable,
 ]);
 
 /** A copy claiming the same content with different metadata: refused rather than reinterpreted. */
@@ -104,6 +105,13 @@ class Incompatible extends Error {
 export function routeFailed(err: Error): boolean {
 	if (err instanceof StreamError) return ROUTE_FAILURES.has(err.code);
 	return err instanceof SessionError || sessionClosed(err);
+}
+
+// A copy's delivery failure says nothing about its content. A terminal track verdict does.
+// Mirrors the Rust `copy_failed`.
+function copyFailed(copy: Copy): boolean {
+	const error = copy.sub.closed.peek();
+	return error instanceof Error && routeFailed(error);
 }
 
 // Every `track.Info` field but `unchecked`, so one added later fails to compile until it is
@@ -1439,7 +1447,7 @@ class Recover implements GroupRecover {
 	 * route is asked, which bounds a hostile route to one bad answer per route change.
 	 */
 	#undelivered(failed: Error, copy: Copy): boolean {
-		return routeFailed(failed) || copy.sub.closed.peek() instanceof Error;
+		return routeFailed(failed) || copyFailed(copy);
 	}
 
 	async replace(index: number, failed: Error | undefined, signal: AbortSignal): Promise<Replacement> {
@@ -1501,7 +1509,7 @@ class Recover implements GroupRecover {
 				// a fetch of the rest would answer. A copy that failed dropped its open groups with
 				// it, and a group the route failed is no verdict either.
 				const given = hooks.givenUp(serving.sub, this.sequence);
-				if (given.error && !routeFailed(given.error) && !(serving.sub.closed.peek() instanceof Error)) {
+				if (given.error && !routeFailed(given.error) && !copyFailed(serving)) {
 					throw given.error;
 				}
 				waits.push(given.changed);
@@ -1510,6 +1518,11 @@ class Recover implements GroupRecover {
 					const cached = hooks.cachedGroup(serving.sub, this.sequence, index);
 					if (cached) return this.#replacement(cached, serving);
 				}
+				// Finished history may still continue the group above. Otherwise a terminal
+				// track verdict ends this wait even while a fetch is still unanswered.
+				const closed = serving.sub.closed.peek();
+				if (closed instanceof Error && !routeFailed(closed)) throw closed;
+				waits.push(serving.sub.closed);
 				// Otherwise ask for it, if the route's version can fetch. The subscription may still
 				// deliver it first. Without FETCH only a copy continues a failed group, and none
 				// holds it, so it ends as the failed copy left it.
@@ -1528,7 +1541,7 @@ class Recover implements GroupRecover {
 				if (outcome && "group" in outcome) return this.#replacement(outcome.group, serving);
 				// That route failing too waits for the next one, and a refusal is a verdict only for
 				// a copy that failed, once the serving subscription will not deliver the group either.
-				if (outcome && failed && !routeFailed(outcome.error) && !(serving.sub.closed.peek() instanceof Error)) {
+				if (outcome && failed && !routeFailed(outcome.error) && !copyFailed(serving)) {
 					const subscription = serving.sub.subscription.peek();
 					const maxDelay = subscription ? maxDelayOf(subscription) : Milli.zero;
 					const land = { start: this.sequence, end: this.sequence + 1n, floor: true, grace: grace(maxDelay) };

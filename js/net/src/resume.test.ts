@@ -1222,42 +1222,47 @@ test("a recovery fetch a later route supersedes is abandoned", async () => {
 	c.close();
 });
 
-// With the subscription still open, no successor, no later writes, and the fetch for the rest
-// still unanswered: whether the old route failed or only stalled.
+// With no successor or later writes, and the fetch for the rest still unanswered: whether
+// the old route failed or only stalled.
 for (const fails of [true, false]) {
-	test(`a resumed group ends with the serving route's drop${fails ? " once its old route failed" : ""}`, async () => {
-		const front = new Front();
-		const a = new BroadcastProducer();
-		const b = new BroadcastProducer();
-		const ta = copy(a);
-		const tb = copy(b);
-		// Neither route has the rest of group 0: request handlers hold a refetch from a, should the
-		// failure land before b serves, and from b until b drops it.
-		const pending = [ta.producer.requests(), tb.producer.requests()];
-		const stalled = ta.write(0n, 1, false);
-		front.serve(a.consume());
-		const sub = front.consumer.track("seq").subscribe({ delay: { max: Milli(60_000) } });
-		const group = sub.tryRecvGroup();
-		if (!group) throw new Error("expected group 0");
-		expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
-		if (fails) stalled.abort(new StreamError(StreamCode.SessionClosed));
+	test.each(["drop", "abort"] as const)(
+		`a resumed group ends with the serving route's %s${fails ? " once its old route failed" : ""}`,
+		async (terminal) => {
+			const front = new Front();
+			const a = new BroadcastProducer();
+			const b = new BroadcastProducer();
+			const ta = copy(a);
+			const tb = copy(b);
+			// Neither route has the rest of group 0: request handlers hold a refetch from a, should the
+			// failure land before b serves, and from b until b drops it.
+			const pending = [ta.producer.requests(), tb.producer.requests()];
+			const stalled = ta.write(0n, 1, false);
+			front.serve(a.consume());
+			const sub = front.consumer.track("seq").subscribe({ delay: { max: Milli(60_000) } });
+			const group = sub.tryRecvGroup();
+			if (!group) throw new Error("expected group 0");
+			expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+			if (fails) stalled.abort(new StreamError(StreamCode.SessionClosed));
 
-		front.serve(b.consume());
-		const read = group.readFrame();
-		await settle();
-		expect(await isPending(read)).toBe(true);
-		expect(tb.producer.demand().wanted.peek()).not.toBeUndefined();
+			front.serve(b.consume());
+			const read = group.readFrame();
+			await settle();
+			expect(await isPending(read)).toBe(true);
+			expect(tb.producer.demand().wanted.peek()).not.toBeUndefined();
 
-		const cut = new StreamError(StreamCode(70), { message: "cut" });
-		hooks.dropTrackGroups(tb.producer, 0n, 1n, cut);
-		await expect(read).rejects.toBe(cut);
+			const cut = new StreamError(StreamCode(70), { message: "cut" });
+			if (terminal === "drop") hooks.dropTrackGroups(tb.producer, 0n, 1n, cut);
+			else tb.producer.abort(cut);
+			expect(await isPending(read)).toBe(false);
+			await expect(read).rejects.toBe(cut);
 
-		for (const handler of pending) handler.close();
-		sub.close();
-		front.consumer.close();
-		a.close();
-		b.close();
-	});
+			for (const handler of pending) handler.close();
+			sub.close();
+			front.consumer.close();
+			a.close();
+			b.close();
+		},
+	);
 }
 
 /** What a resumed read with dispositions found: a group's sequence, or a drop's run and code. */
@@ -3182,7 +3187,7 @@ test("a concluded front's listing keeps its closed source's finishes", async () 
 
 test("only delivery codes are a route failing", () => {
 	// Mirrors `only_delivery_codes_are_a_route_failing` in rs/moq-net/src/model/resume.rs.
-	const delivery = [0x0, 0x1, 0x3, 0x4, 0x31];
+	const delivery = [0x0, 0x1, 0x3, 0x4, 0x31, 0x36];
 	const codes = [...Array.from({ length: 0x40 }, (_, code) => code), 64, 64 + 5, 0xffffffff];
 	for (const code of codes) {
 		expect([code, routeFailed(new StreamError(code as StreamCode))]).toEqual([code, delivery.includes(code)]);
