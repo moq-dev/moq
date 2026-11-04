@@ -61,7 +61,7 @@ async function subscribed(largest?: bigint) {
 	const reader = subscriber
 		.consume(Path.from("room"))
 		.track("video")
-		.subscribe({ delay: { max: Milli(60_000) } });
+		.subscribe({ ranges: [{ start: { relative: 0 } }], delay: { max: Milli(60_000) } });
 
 	const peer = await Stream.accept(pair.client, VERSION);
 	if (!peer) throw new Error("the subscriber never opened a subscribe stream");

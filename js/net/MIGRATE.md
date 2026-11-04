@@ -10,6 +10,10 @@ How to update your code for each breaking change, newest first.
 A skip is final: `createGroup` and `appendGroup` at a skipped sequence throw `Skipped`, and a later drop leaves it skipped. It replaces an earlier drop of the same groups, whatever its error, but never a cached group.
 `appendGroup` now skips the holes below it that earlier `createGroup` calls left since the last append; create every sequence you still mean to fill before appending.
 
+### Past group ranges work over moq-transport ([#7793](https://github.com/moq-dev/moq/pull/7793))
+
+`track.Consumer.fetchGroup()` and subscriptions to past group ranges now use standalone FETCH on drafts 18, 20, and 22. No API migration is needed. First-party publishers serve one group per FETCH; multi-group ranges require a publisher that serves them.
+
 ### IETF FETCH serves on-demand history ([#7794](https://github.com/moq-dev/moq/pull/7794))
 
 A single-group IETF FETCH now asks `track.requests()` for groups the publisher's cache no longer holds, or never held, using the same `Track.Fill` responder as moq-lite. Existing responders need no changes. Multi-group IETF FETCH remains unsupported.
