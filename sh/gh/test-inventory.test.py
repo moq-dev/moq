@@ -368,7 +368,8 @@ class InventoryTest(unittest.TestCase):
         self.write("sh/local.sh", '"$@"\n')
         self.write(
             "sh/run.sh",
-            'bun test \\\n    "test/codec.test.ts" test/a.test.jsx test/b.test.cjs ./test/exact.test.ts # bun test commented.test.ts\n',
+            'bun test \\\n    "test/codec.test.ts" test/a.test.jsx test/b.test.cjs '
+            "./test/exact.test.ts # bun test commented.test.ts\n",
         )
         self.write("package.json", '{"scripts": {"test": "bun test test/codec.spec.ts test/codec.test.cts"}}')
         workflow = self.root / ".github/workflows/ci.yml"
