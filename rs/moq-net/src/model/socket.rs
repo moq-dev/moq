@@ -72,7 +72,7 @@ fn reliable() -> Subscription {
 /// One session: this side's half and the peer's.
 ///
 /// Each message is one group, so a slow message never holds up the next one, and messages
-/// are ordered by group sequence. [`Self::consumer`] starts reliable and in order (oldest
+/// are read in group sequence. [`Self::consumer`] starts reliable and in order (oldest
 /// first, with no delay budget); update its subscription to make it lossy.
 ///
 /// Finishing [`Self::producer`] closes the session for the peer, and aborting it is an
@@ -80,8 +80,8 @@ fn reliable() -> Subscription {
 pub struct Stream {
 	/// This side's half: the session's track in this endpoint's broadcast.
 	pub producer: track::Producer,
-	/// The peer's half: the session's track in the peer's broadcast.
-	pub consumer: track::Subscriber,
+	/// The peer's half: the session's track in the peer's broadcast, read in sequence.
+	pub consumer: track::Ordered,
 	peer: Arc<str>,
 	session: Arc<str>,
 }
@@ -187,11 +187,14 @@ impl Shared {
 		drop(state);
 
 		self.publication.close();
+		// Reset outside the lock.
 		for stream in streams {
 			stream.abort(Error::Cancel);
 		}
-		// Reset outside the lock.
-		drop((requests, incoming));
+		for request in incoming {
+			request.reject(Error::Cancel);
+		}
+		drop(requests);
 	}
 }
 
@@ -269,7 +272,7 @@ impl Endpoint {
 			.publication
 			.reserve_unlisted_track(track_name(&shared.id, &session))?;
 		// Followed rather than requested, so a peer not announced yet is waited for.
-		let resolving = Resolving::Follow(shared.origin.follow(path, None)?);
+		let resolving = Resolving::Follow(Box::new(shared.origin.follow(path, None)?));
 		Ok(kio::Pending::new(Dialing {
 			shared: shared.clone(),
 			peer: peer.into(),
@@ -294,7 +297,7 @@ impl Endpoint {
 			shared: shared.clone(),
 			peer: peer.into(),
 			session: session.into(),
-			request,
+			request: Some(request),
 		}))
 	}
 
@@ -318,12 +321,13 @@ impl Drop for Endpoint {
 
 /// A dial from a peer, from [`Endpoint::accept`]: accept or reject it.
 ///
-/// Dropping it rejects it.
+/// Dropping it rejects it with [`Error::Cancel`].
 pub struct Incoming {
 	shared: Arc<Shared>,
 	peer: Arc<str>,
 	session: Arc<str>,
-	request: track::Request,
+	/// The dialer's request for this side's half; taken by an accept or a reject.
+	request: Option<track::Request>,
 }
 
 impl Incoming {
@@ -341,17 +345,14 @@ impl Incoming {
 	/// Accept the dial, resolving once the dialer answers, which proves it dialed.
 	///
 	/// `info` describes this side's half. Nothing is written before the dialer answers.
-	pub fn accept(self, info: impl Into<Option<track::Info>>) -> kio::Pending<Accepting> {
-		let Self {
-			shared,
-			peer,
-			session,
-			request,
-		} = self;
+	pub fn accept(mut self, info: impl Into<Option<track::Info>>) -> kio::Pending<Accepting> {
+		let shared = self.shared.clone();
+		let (peer, session) = (self.peer.clone(), self.session.clone());
+		let request = self.request.take();
 		// Requested, so a dial claiming an endpoint nobody announces fails at once: the
 		// dialer announced its endpoint before it dialed.
 		let resolving = endpoint_path(&shared.prefix, &peer)
-			.map(|path| Resolving::Request(shared.origin.request(path, None).into_inner()));
+			.map(|path| Resolving::Request(Box::new(shared.origin.request(path, None).into_inner())));
 		let step = match resolving {
 			Ok(resolving) => Step::Resolving(resolving),
 			Err(err) => Step::Failed(err),
@@ -361,24 +362,34 @@ impl Incoming {
 			peer,
 			session,
 			info: info.into(),
-			request: Some(request),
+			request,
 			step,
 		})
 	}
 
 	/// Reject the dial, resetting the dialer's request with [`Error::NotFound`], as for a
 	/// session that does not exist.
-	pub fn reject(self) {
-		self.request.reject(Error::NotFound);
+	pub fn reject(mut self) {
+		if let Some(request) = self.request.take() {
+			request.reject(Error::NotFound);
+		}
+	}
+}
+
+impl Drop for Incoming {
+	fn drop(&mut self) {
+		if let Some(request) = self.request.take() {
+			request.reject(Error::Cancel);
+		}
 	}
 }
 
 /// Resolving the peer's endpoint broadcast.
 enum Resolving {
 	/// Failing once the endpoint is not announced.
-	Request(origin::Requesting),
+	Request(Box<origin::Requesting>),
 	/// Waiting for the endpoint to be announced.
-	Follow(origin::Following),
+	Follow(Box<origin::Following>),
 }
 
 impl Resolving {
@@ -397,7 +408,7 @@ enum Step {
 	/// Subscribed to the peer's half, waiting for the peer to serve it.
 	Subscribing(track::Subscribing),
 	/// The peer serves its half.
-	Subscribed(track::Subscriber),
+	Subscribed(Box<track::Subscriber>),
 	/// It failed before it started.
 	Failed(Error),
 	/// Handed out, or failed.
@@ -416,7 +427,7 @@ impl Step {
 				}
 				Self::Subscribing(subscribing) => {
 					let subscriber = ready!(subscribing.poll_ok(waiter))?;
-					*self = Self::Subscribed(subscriber);
+					*self = Self::Subscribed(Box::new(subscriber));
 				}
 				Self::Subscribed(_) => return Poll::Ready(Ok(())),
 				Self::Failed(err) => return Poll::Ready(Err(err.clone())),
@@ -427,7 +438,7 @@ impl Step {
 
 	fn take_subscriber(&mut self) -> track::Subscriber {
 		match std::mem::replace(self, Self::Done) {
-			Self::Subscribed(subscriber) => subscriber,
+			Self::Subscribed(subscriber) => *subscriber,
 			_ => unreachable!("taken once subscribed"),
 		}
 	}
@@ -439,6 +450,18 @@ enum Answer {
 	Reserved(track::Request),
 	/// Served, once the peer asked.
 	Served(track::Producer),
+}
+
+impl Answer {
+	/// Reset the half for the peer with `err`.
+	fn reset(self, err: Error) {
+		match self {
+			Self::Reserved(request) => request.reject(err),
+			Self::Served(producer) => {
+				let _ = producer.abort(err);
+			}
+		}
+	}
 }
 
 /// A dial, from [`Endpoint::dial`]: resolves once the peer accepts.
@@ -464,9 +487,10 @@ impl Dialing {
 	/// Poll for the peer to accept; see [`Endpoint::dial`].
 	pub fn poll_ok(&mut self, waiter: &kio::Waiter) -> Poll<Result<Stream, Error>> {
 		let result = self.poll_inner(waiter);
-		if let Poll::Ready(Err(_)) = &result {
-			// Resets the session for the peer.
-			self.answer = None;
+		if let Poll::Ready(Err(err)) = &result {
+			if let Some(answer) = self.answer.take() {
+				answer.reset(err.clone());
+			}
 			self.step = Step::Done;
 		}
 		result
@@ -513,7 +537,7 @@ impl Dialing {
 		drop(state);
 		Poll::Ready(Ok(Stream {
 			producer,
-			consumer: self.step.take_subscriber(),
+			consumer: self.step.take_subscriber().ordered(),
 			peer: self.peer.clone(),
 			session: self.session.clone(),
 		}))
@@ -525,6 +549,15 @@ impl kio::Task for Dialing {
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Self::Output> {
 		self.poll_ok(waiter)
+	}
+}
+
+impl Drop for Dialing {
+	fn drop(&mut self) {
+		// Given up: reset the session for the peer.
+		if let Some(answer) = self.answer.take() {
+			answer.reset(Error::Cancel);
+		}
 	}
 }
 
@@ -574,7 +607,7 @@ impl Accepting {
 		drop(state);
 		Poll::Ready(Ok(Stream {
 			producer,
-			consumer: self.step.take_subscriber(),
+			consumer: self.step.take_subscriber().ordered(),
 			peer: self.peer.clone(),
 			session: self.session.clone(),
 		}))
@@ -586,6 +619,15 @@ impl kio::Task for Accepting {
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Self::Output> {
 		self.poll_ok(waiter)
+	}
+}
+
+impl Drop for Accepting {
+	fn drop(&mut self) {
+		// Given up: reset the dialer's request.
+		if let Some(request) = self.request.take() {
+			request.reject(Error::Cancel);
+		}
 	}
 }
 

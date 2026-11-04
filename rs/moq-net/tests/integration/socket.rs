@@ -85,10 +85,10 @@ fn send(track: &track::Producer, payload: &'static [u8]) {
 	group.finish().unwrap();
 }
 
-/// Read the next message from `subscriber`, or `None` once the peer finished.
-async fn recv(subscriber: &mut track::Subscriber) -> Result<Option<Vec<u8>>, Error> {
+/// Read the next message from `reader`, or `None` once the peer finished.
+async fn recv(reader: &mut track::Ordered) -> Result<Option<Vec<u8>>, Error> {
 	kio::clock::timeout(TIMEOUT, async {
-		let Some(mut group) = subscriber.recv_group().await? else {
+		let Some(mut group) = reader.next_group().await? else {
 			return Ok(None);
 		};
 		let frame = group.read_frame().await?.expect("a frame");
@@ -336,4 +336,29 @@ async fn an_endpoint_not_accepting_resets_dials() {
 		.await
 		.expect("dial timeout");
 	assert!(dialed.is_err(), "a dial to an endpoint not accepting connected");
+}
+
+/// Messages are read in sequence even when they are written, and so arrive, out of order.
+#[kio::test]
+async fn messages_are_read_in_sequence() {
+	let mut fixture = Fixture::new();
+	let alice = fixture.endpoint(LITE, "alice").await;
+	let bob = fixture.endpoint(LITE, "bob").await;
+	let (dialed, mut accepted) = connect(&alice, &bob).await;
+
+	let write = |sequence: u64, payload: &'static [u8]| {
+		let mut group = dialed.producer.create_group(moq_net::group::Info { sequence }).unwrap();
+		group.write_frame(None, payload).unwrap();
+		group.finish().unwrap();
+	};
+	write(1, b"second");
+	// Let the later message arrive first.
+	assert!(
+		kio::clock::timeout(SETTLE, accepted.consumer.next_group())
+			.await
+			.is_err()
+	);
+	write(0, b"first");
+	assert_eq!(recv(&mut accepted.consumer).await.unwrap().unwrap(), b"first");
+	assert_eq!(recv(&mut accepted.consumer).await.unwrap().unwrap(), b"second");
 }

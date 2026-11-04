@@ -82,7 +82,7 @@ confirm (see the PR's Waiting section):
   session it never dialed: a forged dial surfaced at the claimed dialer as a
   dial from the victim and deadlocked both accepts. With the dialer's id
   leading both names, a request under an endpoint's own id is always an answer.
-- `Stream::consumer` is a `track::Subscriber`, already subscribed reliably and
+- `Stream::consumer` is a `track::Ordered`, already subscribed reliably and
   in order, not a bare `track::Consumer`, whose default subscription is lossy
   and newest first. The handshake's subscription becomes the stream's, so no
   message falls between the accept and the app's first read; `update` makes it
