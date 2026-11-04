@@ -157,9 +157,10 @@ The latency goal is at most 300 ms of playout added on top of one-way delivery, 
 path is not charged to the player. For each separated press, `delivery` is the slowest of the
 utterance's frames that arrived before its onset, measured from that frame's first sample (its media
 offset after the press): it covers packetization, transport, queueing and retransmission. `playout`
-is what remains of the onset's port-message arrival after the press and that delivery. `output` is
-the projected device output latency, reported apart from the player. `latency` gives each one's min,
-median and max.
+is what remains of the render onset after the press and that delivery. The render onset is the
+projected output less the context's declared `baseLatency` and `outputLatency`, so a late port
+message moves neither; that declared path is `output`, reported apart from the player. `latency`
+gives each one's min, median and max.
 
 Nightly runs the bufferbloated arm and keeps the raw evidence alongside the audio quality rows.
 

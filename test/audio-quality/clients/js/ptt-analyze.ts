@@ -41,7 +41,7 @@ const presses = result.presses
 		const head = input[0]?.timestamp;
 		const waited = input.flatMap((frame) => {
 			const arrival = arrivals.get(frame.timestamp);
-			if (!audible || head === undefined || !arrival || arrival[0] > audible.received) return [];
+			if (!audible || head === undefined || !arrival || arrival[0] > audible.rendered) return [];
 			return [arrival[0] - press.at - (frame.timestamp - head) / 1000];
 		});
 		const delivery = waited.length ? Math.max(...waited) : null;
@@ -58,8 +58,8 @@ const presses = result.presses
 			arrival: first ? first[0] - press.at : null,
 			audible: audible ? audible.at - press.at : null,
 			delivery,
-			playout: audible && delivery !== null ? audible.received - press.at - delivery : null,
-			output: audible ? audible.at - audible.received : null,
+			playout: audible && delivery !== null ? audible.rendered - press.at - delivery : null,
+			output: audible ? audible.at - audible.rendered : null,
 		};
 	});
 const activeDuration = presses.reduce((total, press) => total + press.duration, 0);

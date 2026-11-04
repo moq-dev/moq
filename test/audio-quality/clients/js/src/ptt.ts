@@ -18,7 +18,7 @@ const records = {
 	encoded: [] as Frame[],
 	sent: [] as Frame[],
 	subscriptions: [] as { at: number; name: string }[],
-	audible: [] as { at: number; received: number }[],
+	audible: [] as { at: number; rendered: number; received: number }[],
 	presses: [] as { at: number; on: boolean }[],
 	captures: [] as { at: number; audio: boolean }[],
 	probes: [] as number[],
@@ -141,8 +141,12 @@ async function attach() {
 			records.errors.push("missing output clock");
 			return;
 		}
+		// The render onset on the page clock is its projected output less the context's declared
+		// output path, so a late port message moves neither boundary.
+		const at = stamp.performanceTime + (data - stamp.contextTime) * 1000;
 		records.audible.push({
-			at: stamp.performanceTime + (data - stamp.contextTime) * 1000,
+			at,
+			rendered: at - (context.baseLatency + context.outputLatency) * 1000,
 			received: performance.now(),
 		});
 	};
