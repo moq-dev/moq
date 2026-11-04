@@ -1946,7 +1946,12 @@ async fn dropped_lease_waiter_leaves_no_registration() {
 		let waiter = kio::Waiter::new(waker);
 		assert!(recv.poll_lease(&waiter, 1).is_pending());
 		assert_eq!(counter.wakes(), 0);
-		let waiter = if cancel { None } else { Some(waiter) };
+		let waiter = if cancel {
+			drop(waiter);
+			None
+		} else {
+			Some(waiter)
+		};
 		accepted.close(0u32.into(), "done");
 		assert_eq!(counter.wakes(), usize::from(!cancel));
 		drop((waiter, recv));
