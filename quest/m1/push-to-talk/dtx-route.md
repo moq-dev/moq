@@ -21,7 +21,8 @@ emitted, so every suppressed frame pulls later audio earlier (14 s of input
 ended at 8.92 s), and no WebCodecs output maps a chunk back to its input
 ([moq-dev/moq#4783](https://github.com/moq-dev/moq/issues/4783),
 [moq-dev/moq#4902](https://github.com/moq-dev/moq/pull/4902)). Firefox kept
-the timeline; Safari wasn't measured. `usedtx` was removed in
+the timeline; Safari wasn't measured until the 2026-11-04 repro below.
+`usedtx` was removed in
 [moq-dev/moq#4919](https://github.com/moq-dev/moq/pull/4919).
 
 Measured 2026-11-04 (repro in
@@ -36,9 +37,10 @@ this is a Chromium bug, not a spec gap.
 
 Decided 2026-11-04 (maintainer): measure before choosing. The routes:
 
-1. **Gate before the encoder, stamp from our own inputs ✅ as the workaround.**
-   The publisher decides silence itself (energy threshold or VAD) and neither
-   encodes nor sends silent frames. Inputs are already cut to one codec frame
+1. **Gate before the encoder, stamp from our own inputs.** Confirmed
+   2026-11-04 as a workaround for the Chromium bug; it is measured like the
+   others and is not yet the pick. The publisher decides silence itself
+   (energy threshold or VAD) and neither encodes nor sends silent frames. Inputs are already cut to one codec frame
    each (`js/publish/src/audio/encoder.ts`, "Align those inputs to codec
    frames"), and without DTX every browser emits one chunk per input in order,
    so each chunk is stamped from a queue of the input timestamps fed, not from
