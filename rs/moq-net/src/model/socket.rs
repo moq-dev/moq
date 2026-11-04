@@ -312,12 +312,25 @@ struct Queue {
 	waiting: kio::WaiterList,
 }
 
+/// An endpoint's handler for the requests to its broadcast: the dials peers send.
+///
+/// A poller takes it out to poll it with no lock held, since taking a request wakes the
+/// dialer's subscription, and an inline executor can re-enter the endpoint from that wake.
+enum Handler {
+	/// Not made yet, until the first accept, so the endpoint answers a request for a
+	/// session it does not hold with [`Error::NotFound`] at once.
+	None,
+	/// Waiting for a poller.
+	Idle(super::broadcast::Requests),
+	/// Taken by a poller, which puts it back and wakes the pollers that found it taken,
+	/// so each polls it, and is woken by it, in turn.
+	Taken(kio::WaiterList),
+}
+
 /// What the endpoint's pollers share.
 struct State {
-	/// The dials peers send, from the first accept on; `None` until then, so the endpoint
-	/// answers a request for a session it does not hold with [`Error::NotFound`] at once.
-	/// Behind its own lock, so it is polled outside this one.
-	requests: Option<kio::Lock<super::broadcast::Requests>>,
+	/// Where the dials peers send arrive.
+	handler: Handler,
 	tcp: Queue,
 	track: Queue,
 	/// This side's half of every session handed out, aborted when the endpoint closes.
@@ -351,26 +364,28 @@ impl Shared {
 	/// [`Error::NotFound`], which fails that accept. A request in a protocol nobody accepts
 	/// is reset with [`Error::Unsupported`].
 	///
-	/// The handler is polled outside the lock, since taking a request wakes the dialer's
-	/// subscription, and resets and wakes go out after the lock is released too.
+	/// The handler is polled with no lock held (see [`Handler`]), and resets and wakes go
+	/// out after the lock is released.
 	fn poll_dial(&self, protocol: Protocol, waiter: &kio::Waiter) -> Poll<Result<track::Request, Error>> {
-		let requests = {
+		let mut requests = {
 			let mut state = self.state.lock();
 			state.queue(protocol).listening = true;
-			match state.end {
-				None => Some(
-					state
-						.requests
-						.get_or_insert_with(|| kio::Lock::new(self.publication.requests()))
-						.clone(),
-				),
-				Some(_) => None,
+			if state.end.is_some() {
+				None
+			} else if let Handler::Taken(waiting) = &mut state.handler {
+				waiting.register(waiter);
+				None
+			} else {
+				match std::mem::replace(&mut state.handler, Handler::Taken(kio::WaiterList::new())) {
+					Handler::Idle(requests) => Some(requests),
+					Handler::None => Some(self.publication.requests()),
+					Handler::Taken(_) => unreachable!("checked above"),
+				}
 			}
 		};
 		let mut taken = Vec::new();
 		let mut ended = None;
-		if let Some(requests) = &requests {
-			let mut requests = requests.lock();
+		if let Some(requests) = &mut requests {
 			loop {
 				match requests.poll_requested_track(waiter) {
 					Poll::Pending => break,
@@ -385,9 +400,24 @@ impl Shared {
 
 		let mut resets = Vec::new();
 		let mut wakes = Vec::new();
+		let mut retired = None;
 		let mut state = self.state.lock();
 		if let Some(err) = ended {
 			state.end.get_or_insert(err);
+		}
+		// Put the handler back, unless the endpoint ended meanwhile: then it is dropped
+		// after the lock is released.
+		if let Some(handler) = requests.take() {
+			let next = match state.end {
+				None => Handler::Idle(handler),
+				Some(_) => {
+					retired = Some(handler);
+					Handler::None
+				}
+			};
+			if let Handler::Taken(mut waiting) = std::mem::replace(&mut state.handler, next) {
+				wakes.push(waiting.take());
+			}
 		}
 		for request in taken {
 			// `None` for a name naming no dial: outside the scheme, or this endpoint's own.
@@ -421,6 +451,7 @@ impl Shared {
 			}
 		};
 		drop(state);
+		drop(retired);
 		for mut wake in wakes {
 			wake.wake();
 		}
@@ -447,9 +478,17 @@ impl Shared {
 		let mut guard = self.state.lock();
 		let state = &mut *guard;
 		state.end.get_or_insert(Error::Closed);
-		let requests = state.requests.take();
-		let mut queued = Vec::new();
 		let mut wakes = Vec::new();
+		// A poller holding the handler drops it once it sees the end.
+		let requests = match std::mem::replace(&mut state.handler, Handler::None) {
+			Handler::Idle(requests) => Some(requests),
+			Handler::Taken(mut waiting) => {
+				wakes.push(waiting.take());
+				None
+			}
+			Handler::None => None,
+		};
+		let mut queued = Vec::new();
 		for queue in [&mut state.tcp, &mut state.track] {
 			queued.extend(queue.dials.drain(..));
 			wakes.push(queue.waiting.take());
@@ -514,7 +553,7 @@ impl Endpoint {
 				tasks: origin.tasks(),
 				publication,
 				state: kio::Lock::new(State {
-					requests: None,
+					handler: Handler::None,
 					tcp: Queue::default(),
 					track: Queue::default(),
 					streams: Vec::new(),
@@ -1182,8 +1221,8 @@ mod tests {
 	}
 
 	/// Taking a dial wakes the dialer's subscription, and an inline executor can re-enter
-	/// the endpoint from that wake, such as to close it, so the endpoint polls its handler
-	/// outside its lock.
+	/// the endpoint from that wake, such as to accept again or to close it, so the endpoint
+	/// polls its handler with no lock held.
 	#[test]
 	fn taking_a_dial_wakes_outside_the_lock() {
 		use std::sync::atomic::{AtomicBool, Ordering};
@@ -1195,6 +1234,9 @@ mod tests {
 		}
 		impl Wake for Close {
 			fn wake(self: Arc<Self>) {
+				// The handler is out being polled, so this waits for it.
+				let accept = self.shared.poll_dial(Protocol::Track, &kio::Waiter::noop());
+				assert!(accept.is_pending());
 				self.shared.close();
 				self.woken.store(true, Ordering::SeqCst);
 			}
