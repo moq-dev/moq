@@ -129,6 +129,8 @@ moq-archive = { version = "0.0.11", path = "rs/moq-archive" }
 moq-audio = { version = "0.1.10", path = "rs/moq-audio", default-features = false }
 moq-auth = { version = "0.2.1", path = "rs/moq-auth" }
 moq-congestion = { version = "0.1.0", path = "rs/moq-congestion" }
+# default-features off: moq-auth takes only the endpoint key and its text codec.
+moq-crypto = { version = "0.0.11", path = "rs/moq-crypto", default-features = false }
 moq-hls = { version = "0.5.11", path = "rs/moq-hls", default-features = false }
 moq-ice = { version = "0.1.0", path = "rs/moq-ice" }
 moq-json = { version = "0.5.8", path = "rs/moq-json" }

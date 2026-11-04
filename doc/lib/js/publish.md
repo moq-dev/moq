@@ -77,7 +77,11 @@ a late subscription's `delay.max` or a fetch. The cache keeps an idle group for
 may reach into it. Audio keeps raw PCM while nobody listens, then encodes that
 history ahead of live audio when a subscriber arrives. Raw audio keeps up to
 `maxAge`, or at most 30 seconds without one (about 11.5 MB for 48 kHz stereo
-f32). Capture stays open.
+f32). Capture stays open. Disabling an audio encoder keeps what it retained: a
+subscriber still gets that history, and it expires on its own. Players skip a
+disabled rendition, so that history reaches subscribers that are already held
+on it or that subscribe directly. The codec stays
+configured across the disable, so re-enabling resumes at once.
 
 Pass `onDemand: false` to `Publish.Broadcast` to encode audio continuously too.
 `onDemand: true` also gates video, which then loses its unsubscribed past.
