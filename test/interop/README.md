@@ -70,6 +70,13 @@ head with a joining FETCH before draft 22 and a fill from it.
 `--tail` runs the FETCH round, the late joins, and the five finite-tail lanes. The
 wire-compat lanes, which swap in released relays and clients, skip them.
 
+On lite-07, Node and Bun also replace tracks in a claimed broadcast through the
+relay over WebSocket and WebTransport. Pre-connected readers subscribe immediately
+after each replacement while an existing reader resumes. The case also repeats the
+automatic failed-source lifecycle 64 times. A missing-group FETCH
+crosses both hops with the unlimited subscriber budget, checking its optional
+millisecond encoding at the safe-integer boundary.
+
 The finite clients keep their session alive until the harness acknowledges the
 reader's complete clean end over stdin, so a lane tests delivery rather than
 shutdown. No sleep stands in for drain completion. A missing group, error, or

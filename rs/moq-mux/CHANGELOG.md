@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Received CMAF init segments and fragments use the importer's metadata and sample limits before mp4-atom parses any box, including discarded known types and the children it keeps from spatial sample-entry boxes. MSF catalog derivation and regular MP4 recording share the checks; zero-byte entry counts cannot amplify a small input.
+
 - fMP4 import bounds what a `moov` or `moof` costs to parse and plan: a body over `fmp4::MAX_METADATA_BYTES` (2 MiB) is refused at its header, since parsing expands it up to tenfold, a `moof` of more than `fmp4::MAX_FRAGMENT_SAMPLES` (now 131,072) samples is refused before planning, and a `moov` of more than `fmp4::MAX_TRACKS` (256) tracks with `Error::TooManyTracks` before any is created. `fmp4::MAX_HELD_BYTES` (32 MiB) now bounds only a text sample. A 116-byte `moof` no longer plans 584 MB.
 - Declaring a catalog rendition costs the same however many the catalog already holds: it is checked on its own rather than by cloning and serializing the whole catalog, which made N tracks cost N².
 - `container::Consumer` no longer plays a backlog that landed before its first read from the oldest group: until the first item, the start moves past each group whose first frame trails the newest content by more than the max delay plus the warmup, as `@moq/hang`'s consumer does, keeping the group covering the live edge less `Delay::min` and the warmup. A join starts at the same group in Rust and the browser. Once reading begins, only a blocking group is skipped, as before.
