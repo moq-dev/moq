@@ -4440,7 +4440,10 @@ async fn a_mid_gop_start_restates_the_kept_samples_encryption() {
 		let sizes: Vec<_> = kept.iter().map(|entry| entry.len()).collect();
 		match saiz.default_sample_info_size {
 			0 => assert_eq!(
-				saiz.sample_info_size.iter().map(|&size| size as usize).collect::<Vec<_>>(),
+				saiz.sample_info_size
+					.iter()
+					.map(|&size| size as usize)
+					.collect::<Vec<_>>(),
 				sizes
 			),
 			size => assert!(sizes.iter().all(|&entry| entry == size as usize)),

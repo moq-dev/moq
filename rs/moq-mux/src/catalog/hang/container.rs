@@ -94,7 +94,11 @@ fn clear(kind: &'static str, rendition: &str, drm: &[String]) -> bool {
 	if drm.is_empty() {
 		return true;
 	}
-	tracing::warn!(rendition, kind, "ignoring encrypted rendition: decryption is not supported");
+	tracing::warn!(
+		rendition,
+		kind,
+		"ignoring encrypted rendition: decryption is not supported"
+	);
 	false
 }
 

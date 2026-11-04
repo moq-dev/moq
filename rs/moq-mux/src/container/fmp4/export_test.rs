@@ -494,7 +494,11 @@ async fn a_protected_rendition_is_left_out() {
 	let moov = moov.expect("moov");
 	assert_eq!(moov.trak.len(), 2, "only bbb's clear video and audio");
 	let codecs = moov.trak.iter().flat_map(|trak| &trak.mdia.minf.stbl.stsd.codecs);
-	assert!(!codecs.into_iter().any(|codec| matches!(codec, mp4_atom::Codec::Encv(_))));
+	assert!(
+		!codecs
+			.into_iter()
+			.any(|codec| matches!(codec, mp4_atom::Codec::Encv(_)))
+	);
 }
 
 /// Per-rendition export (a single non-first source track, e.g. moq-hls exporting
