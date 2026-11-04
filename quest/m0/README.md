@@ -38,3 +38,4 @@ edge, which embeds moq-relay; it moved there on 2026-09-28.
 - [Backport the relay and auth hardening to release](/quest/m0/backport-release-hardening.md) - `release`'s relay refuses dot-segment paths, serves its HTTP routes with main's response hardening, and withdraws advertisements a peer starves of send credit; its auth client refuses redirects
 - [quest init keeps moq's nix-wrapped worktree hooks](/quest/m0/quest-worktree-hooks.md) - quest pin bumps keep the hooks that run moq's pinned `quest`
 - [HLS lists contributions](/quest/m0/hls-contributions.md) - an HLS master lists each catalog contribution's renditions, and a contribution's media is subscribed only while players fetch it
+- [@moq/net passes qmux stream limits through](/quest/m0/qmux-stream-limits.md) - Node and WebSocket JS clients stop failing near 100 live tracks
