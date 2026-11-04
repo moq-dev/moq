@@ -20,6 +20,8 @@ class Builds(unittest.TestCase):
                 repo = Path(directory) / "repo"
                 repo.mkdir()
                 shutil.copytree(ROOT / "bench", repo / "bench", ignore=shutil.ignore_patterns("__pycache__"))
+                (repo / ".cargo").mkdir()
+                (repo / ".cargo/config.toml").touch()
                 (repo / ".gitignore").write_text(".tmp/\ntarget/\n")
                 (repo / "Cargo.toml").write_text('[workspace]\nmembers=["rs/moq-relay"]\nresolver="3"\n')
                 package = repo / "rs/moq-relay"
