@@ -333,7 +333,7 @@ fn javascript_partial_frame_gives_way() {
 			let mut low = within(&handle, "the low subscription", subscribe("low", 1)).await;
 			let mut high = within(&handle, "the high subscription", subscribe("high", 100)).await;
 
-			// Wait until three quarters of the window holds a frame that can never complete.
+			// The sender holds back the rest, so no segment can seal and return this credit.
 			commands.write_all(b"low\n").expect("command");
 			let mut partial = within(&handle, "the low group", low.recv_group())
 				.await
@@ -359,7 +359,10 @@ fn javascript_partial_frame_gives_way() {
 				match within(&handle, "the low stop", partial.read_chunk()).await {
 					Ok(Some(_)) => {}
 					Ok(None) => panic!("a frame larger than the window completed"),
-					Err(_) => break,
+					Err(err) => {
+						assert!(matches!(err, moq_net::Error::Evicted), "{err}");
+						break;
+					}
 				}
 			}
 

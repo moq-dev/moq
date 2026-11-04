@@ -756,7 +756,7 @@ async fn javascript_exhausts(
 	let mut low = subscribe(&remote, "low", 1).await;
 	let mut high = subscribe(&remote, "high", 100).await;
 
-	// Wait until three quarters of the window holds a frame that can never complete.
+	// The sender holds back the rest, so no segment can seal and return this credit.
 	commands.write_all(&b"low\n"[..]).await.unwrap();
 	let mut partial = partial_frame(&mut low).await;
 	read_partial(&mut partial, window * 3 / 4).await;
@@ -771,7 +771,10 @@ async fn javascript_exhausts(
 		match chunk {
 			Ok(Some(_)) => {}
 			Ok(None) => panic!("{version}: a frame larger than the window completed"),
-			Err(_) => break,
+			Err(err) => {
+				assert!(matches!(err, moq_net::Error::Evicted), "{version}: {err}");
+				break;
+			}
 		}
 	}
 
