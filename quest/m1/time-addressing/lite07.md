@@ -36,6 +36,13 @@ Decided 2026-10-25 (maintainer), from the spike:
   0 not start before a lower-sequence Group's becomes the strictly
   increasing start.
 
+SUBSCRIBE_OK also says whether the newest group it reports has already ended
+(finished or closed), so a reader joining a cached track knows at once
+whether that group is the live one. Added 2026-11-04 (maintainer) from
+Kixel's T3 readers, which today infer it by waiting a moment for the group's end after
+its last frame, because the end only follows the last frame. It rides this
+quest's SUBSCRIBE_OK change instead of a later wire bump.
+
 Update `drafts/draft-lcurley-moq-lite.md` (fields, the group-end rules, and the
 lite-07 changelog) and `doc/concept/moq-lite.md`, and run `just drafts check`
 and `just test interop --all`.

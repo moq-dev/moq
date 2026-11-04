@@ -80,8 +80,8 @@ const CATALOG_RETRY_MAX: Duration = Duration::from_secs(5);
 pub struct Config {
 	/// Minimum duration of media listed in each rendition's playlist window. Older segments are
 	/// evicted once the remaining ones still cover this span. Past 256 segments they are evicted
-	/// however short they are. Keep it within the relay's group-cache retention, since segments
-	/// are fetched from there on request. It also caps segment `Cache-Control: max-age`.
+	/// however short they are. Keep it within the media's max age and the relay's group-cache
+	/// retention, since segments are fetched from there on request. It also caps segment `Cache-Control: max-age`.
 	///
 	/// A durable archive gets the same window: a live playlist stays bounded however much its store
 	/// retains.
@@ -562,8 +562,12 @@ async fn watch_catalog(
 #[cfg(test)]
 mod tests {
 	/// A millisecond track: the frames written here carry timestamps.
+	/// A millisecond track with no publisher max age, so a test's playlist window may span more
+	/// media than the default max age keeps fresh.
 	fn timed() -> moq_net::track::Info {
-		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+		moq_net::track::Info::default()
+			.with_timescale(moq_net::Timescale::MILLI)
+			.with_max_age(None)
 	}
 
 	/// Build an origin producer, spawning its driver on the ambient runtime.

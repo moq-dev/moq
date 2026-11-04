@@ -178,9 +178,11 @@ mod timestamps {
 	fn exact_timestamps_survive_reads() {
 		for compress in [false, true] {
 			let scale = moq_net::Timescale::new(90_000).unwrap();
+			// Every state is read, superseded groups included, so they must stay fresh.
 			let info = moq_net::track::Info::default()
 				.with_timescale(scale)
-				.with_compress(compress);
+				.with_compress(compress)
+				.with_max_age(None);
 			let track = moq_net::broadcast::Info::new()
 				.produce()
 				.create_track("data", info)

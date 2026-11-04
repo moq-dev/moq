@@ -723,9 +723,7 @@ impl Server {
 							// (like the stream bindings).
 							let Accepted { session, url, identity, authority, mut link } = within(deadline, crate::quic::accept(_conn, alpns)).await?;
 							link.local = local;
-							let address = match url { Some(_) => moq_net::transport::Address::Uri, None => moq_net::transport::Address::Setup };
-							let quic = Some((*session).clone());
-							let session = crate::transport::Session::new(session, address);
+							let quic = Some(session.connection().clone());
 							let (request, deadline) = accept_request(&setup.server, session, deadline).await?;
 							// Only WebTransport carries a request URL; raw QUIC puts the path in the SETUP.
 							let transport = match url { Some(_) => Transport::WebTransport, None => Transport::Quic };
@@ -2402,144 +2400,144 @@ mod tests {
 	struct ScriptedError;
 
 	#[cfg(feature = "websocket")]
-	impl web_transport_trait::Error for ScriptedError {
+	impl moq_net::transport::Error for ScriptedError {
 		fn session_error(&self) -> Option<(u32, String)> {
 			None
 		}
 	}
 
-	/// Records every write, or accepts none at all when `stalled`.
+	/// Records every write, or accepts none when stalled.
 	#[cfg(feature = "websocket")]
 	struct ScriptedSend {
 		written: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
 		stalled: bool,
 	}
-
 	#[cfg(feature = "websocket")]
-	impl web_transport_trait::SendStream for ScriptedSend {
+	impl moq_net::transport::poll::SendStream for ScriptedSend {
 		type Error = ScriptedError;
-
-		async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+		type Group = moq_net::transport::poll::Ungrouped;
+		fn poll_write(&mut self, _: &kio::Waiter, buf: &[u8]) -> std::task::Poll<Result<usize, ScriptedError>> {
 			if self.stalled {
-				std::future::pending::<()>().await;
+				return std::task::Poll::Pending;
 			}
 			self.written.lock().unwrap().extend_from_slice(buf);
-			Ok(buf.len())
+			std::task::Poll::Ready(Ok(buf.len()))
 		}
-
-		fn set_priority(&mut self, _order: i32) {}
-
-		fn finish(&mut self) -> Result<(), Self::Error> {
-			Ok(())
-		}
-
-		fn reset(&mut self, _code: u32) {}
-
-		async fn closed(&mut self) -> Result<(), Self::Error> {
-			std::future::pending().await
-		}
-	}
-
-	#[cfg(feature = "websocket")]
-	impl crate::transport::GroupedSend for ScriptedSend {
-		type Group = moq_net::transport::poll::Ungrouped;
-
+		fn set_priority(&mut self, _: i64) {}
 		fn set_group(&mut self, group: &Self::Group) {
 			match *group {}
 		}
-	}
-
-	#[cfg(feature = "websocket")]
-	impl crate::transport::Grouped for Scripted {
-		type Recv = moq_net::transport::poll::Buffered<crate::transport::RecvStream<ScriptedRecv>>;
-
-		fn recv(stream: crate::transport::RecvStream<ScriptedRecv>) -> Self::Recv {
-			moq_net::transport::poll::Buffered::new(stream)
+		fn finish(&mut self) -> Result<(), ScriptedError> {
+			Ok(())
+		}
+		fn reset(&mut self, _: u32) {}
+		fn poll_closed(&self, _: &kio::Waiter) -> std::task::Poll<Result<(), ScriptedError>> {
+			std::task::Poll::Pending
 		}
 	}
 
-	/// Delivers `data` once, then nothing more.
+	/// Delivers data once, then parks.
 	#[cfg(feature = "websocket")]
 	struct ScriptedRecv {
 		data: Option<bytes::Bytes>,
 	}
-
 	#[cfg(feature = "websocket")]
-	impl web_transport_trait::RecvStream for ScriptedRecv {
+	impl moq_net::transport::poll::Chunks for ScriptedRecv {
 		type Error = ScriptedError;
-
-		async fn read(&mut self, dst: &mut [u8]) -> Result<Option<usize>, Self::Error> {
-			let Some(mut data) = self.data.take() else {
-				return std::future::pending().await;
+		fn poll_read_chunk(
+			&mut self,
+			_: &kio::Waiter,
+			max: usize,
+		) -> std::task::Poll<Result<Option<bytes::Bytes>, ScriptedError>> {
+			let Some(data) = &mut self.data else {
+				return std::task::Poll::Pending;
 			};
-			let n = dst.len().min(data.len());
-			dst[..n].copy_from_slice(&data.split_to(n));
-			self.data = (!data.is_empty()).then_some(data);
-			Ok(Some(n))
+			let chunk = data.split_to(max.min(data.len()));
+			if data.is_empty() {
+				self.data = None;
+			}
+			std::task::Poll::Ready(Ok(Some(chunk)))
 		}
-
-		fn stop(&mut self, _code: u32) {}
-
-		async fn closed(&mut self) -> Result<(), Self::Error> {
-			std::future::pending().await
-		}
+		fn stop(&mut self, _: u32) {}
 	}
 
 	#[cfg(feature = "websocket")]
-	impl web_transport_trait::Session for Scripted {
+	impl moq_net::transport::poll::Session for Scripted {
 		type SendStream = ScriptedSend;
-		type RecvStream = ScriptedRecv;
+		type RecvStream = moq_net::transport::poll::Buffered<ScriptedRecv>;
 		type Error = ScriptedError;
-
-		async fn accept_uni(&self) -> Result<Self::RecvStream, Self::Error> {
-			std::future::pending().await
+		fn poll_accept_uni(&self, _: &kio::Waiter) -> std::task::Poll<Result<Self::RecvStream, ScriptedError>> {
+			std::task::Poll::Pending
 		}
-
-		async fn accept_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
+		fn poll_accept_bi(
+			&self,
+			_: &kio::Waiter,
+		) -> std::task::Poll<Result<moq_net::transport::poll::BiStreams<Self>, ScriptedError>> {
 			let Some(setup) = self.setup.clone() else {
-				return std::future::pending().await;
+				return std::task::Poll::Pending;
 			};
-			let send = ScriptedSend {
-				written: Default::default(),
-				stalled: true,
-			};
-			Ok((send, ScriptedRecv { data: Some(setup) }))
+			std::task::Poll::Ready(Ok((
+				ScriptedSend {
+					written: Default::default(),
+					stalled: true,
+				},
+				moq_net::transport::poll::Buffered::new(ScriptedRecv { data: Some(setup) }),
+			)))
 		}
-
-		async fn open_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
-			let send = ScriptedSend {
-				written: self.written.clone(),
-				stalled: false,
-			};
-			Ok((send, ScriptedRecv { data: None }))
+		fn poll_open_uni(
+			&self,
+			_: &kio::Waiter,
+			_: moq_net::transport::poll::SendOptions<'_, moq_net::transport::poll::Ungrouped>,
+		) -> std::task::Poll<Result<ScriptedSend, ScriptedError>> {
+			std::task::Poll::Pending
 		}
-
-		async fn open_uni(&self) -> Result<Self::SendStream, Self::Error> {
-			std::future::pending().await
+		fn poll_open_bi(
+			&self,
+			_: &kio::Waiter,
+			_: moq_net::transport::poll::SendOptions<'_, moq_net::transport::poll::Ungrouped>,
+		) -> std::task::Poll<Result<moq_net::transport::poll::BiStreams<Self>, ScriptedError>> {
+			std::task::Poll::Ready(Ok((
+				ScriptedSend {
+					written: self.written.clone(),
+					stalled: false,
+				},
+				moq_net::transport::poll::Buffered::new(ScriptedRecv { data: None }),
+			)))
 		}
-
-		fn send_datagram(&self, _payload: bytes::Bytes) -> Result<(), Self::Error> {
+		fn poll_open_request(
+			&self,
+			waiter: &kio::Waiter,
+			options: moq_net::transport::poll::SendOptions<'_, moq_net::transport::poll::Ungrouped>,
+		) -> std::task::Poll<Result<Option<moq_net::transport::poll::BiStreams<Self>>, ScriptedError>> {
+			self.poll_open_bi(waiter, options).map_ok(Some)
+		}
+		fn send_group(&self, _: i64) -> Option<moq_net::transport::poll::Ungrouped> {
+			None
+		}
+		fn send_datagram(
+			&self,
+			_: bytes::Bytes,
+			_: moq_net::transport::poll::SendOptions<'_, moq_net::transport::poll::Ungrouped>,
+		) -> Result<(), ScriptedError> {
 			Ok(())
 		}
-
-		async fn recv_datagram(&self) -> Result<bytes::Bytes, Self::Error> {
-			std::future::pending().await
+		fn poll_recv_datagram(&self, _: &kio::Waiter) -> std::task::Poll<Result<bytes::Bytes, ScriptedError>> {
+			std::task::Poll::Pending
 		}
-
 		fn max_datagram_size(&self) -> usize {
 			0
 		}
-
 		fn protocol(&self) -> Option<&str> {
 			Some(self.alpn)
 		}
-
-		fn close(&self, code: u32, _reason: &str) {
+		fn address(&self) -> moq_net::transport::Address {
+			moq_net::transport::Address::Uri
+		}
+		fn close(&self, code: u32, _: &str) {
 			self.closed.lock().unwrap().get_or_insert(code);
 		}
-
-		async fn closed(&self) -> Self::Error {
-			std::future::pending().await
+		fn poll_closed(&self, _: &kio::Waiter) -> std::task::Poll<ScriptedError> {
+			std::task::Poll::Pending
 		}
 	}
 
@@ -2567,13 +2565,7 @@ mod tests {
 			timeout: Some(timeout),
 		};
 		let start = kio::clock::now();
-		let Err(err) = accept_request(
-			&setup.server,
-			crate::transport::Session::new(peer.clone(), moq_net::transport::Address::Uri),
-			setup.deadline(),
-		)
-		.await
-		else {
+		let Err(err) = accept_request(&setup.server, peer.clone(), setup.deadline()).await else {
 			panic!("a peer that never sent SETUP was accepted");
 		};
 		assert!(matches!(err, Error::MoqNet(moq_net::Error::Timeout)), "{err}");
@@ -2595,7 +2587,7 @@ mod tests {
 		// then waits on a reply that never comes.
 		let recorder = Scripted::new("moql");
 		let client = tokio::spawn({
-			let recorder = crate::transport::Session::new(recorder.clone(), moq_net::transport::Address::Uri);
+			let recorder = recorder.clone();
 			async move {
 				let _ = moq_net::Client::new()
 					.with_versions("moq-lite-02".parse::<moq_net::Version>().unwrap().into())
@@ -2617,13 +2609,7 @@ mod tests {
 			timeout: Some(timeout),
 		};
 		let start = kio::clock::now();
-		let Ok((request, deadline)) = accept_request(
-			&setup.server,
-			crate::transport::Session::new(peer.clone(), moq_net::transport::Address::Uri),
-			setup.deadline(),
-		)
-		.await
-		else {
+		let Ok((request, deadline)) = accept_request(&setup.server, peer.clone(), setup.deadline()).await else {
 			panic!("a readable SETUP was refused");
 		};
 		assert_eq!(start.elapsed(), std::time::Duration::ZERO);

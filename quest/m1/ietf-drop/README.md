@@ -44,7 +44,3 @@ protocol implementation or release work remains here.
 ## Waiting
 
 - englishm/moq-interop-runner: review and merge [englishm/moq-interop-runner#183](https://github.com/englishm/moq-interop-runner/pull/183); verify both registry entries and README rows list drafts 18, 20, and 22 before deleting this quest
-
-## Related
-
-- [Interop coverage](/quest/m1/interop-coverage/README.md) - cross-implementation cases target drafts 18, 20, and 22

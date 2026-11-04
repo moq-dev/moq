@@ -287,9 +287,12 @@ fn server_error(err: crate::Error) -> Response {
 mod tests {
 	use super::*;
 
-	/// A millisecond track: the frames written here carry timestamps.
+	/// A millisecond track: the frames written here carry timestamps. It sets no publisher max
+	/// age, so the segments a playlist lists stay fetchable once superseded.
 	fn timed() -> moq_net::track::Info {
-		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+		moq_net::track::Info::default()
+			.with_timescale(moq_net::Timescale::MILLI)
+			.with_max_age(None)
 	}
 
 	const TIMEOUT: Duration = Duration::from_secs(10);
