@@ -1148,20 +1148,19 @@ impl Connection {
 
 			// What the last dial presented, so a refusal is judged against it.
 			let mut presented = None;
-			let dialed = async {
-				#[cfg(feature = "quic")]
-				if failed_dials == 2 {
-					// Retry one transient failure on the same socket. Two failed walks
-					// are enough to try another flow, even with an unlimited retry window.
-					failed_dials = 0;
-					// A failed allocation spends this attempt through the normal backoff.
-					// The next dial can still use the existing endpoint.
-					client.fresh_port()?;
+			// Retry one transient failure on the same socket. Two failed walks are enough
+			// to try another flow. Only a retry window that allows a third walk gets here:
+			// a black-holed handshake outlasts the default window after the first walk.
+			#[cfg(feature = "quic")]
+			if failed_dials >= 2 {
+				match client.fresh_port() {
+					Ok(()) => failed_dials = 0,
+					// The old flow may have recovered, so dial it anyway. The count stays
+					// at the threshold, so the next walk retries the allocation.
+					Err(err) => tracing::warn!(%err, "no fresh UDP port; redialing from the old one"),
 				}
-				Self::dial_any(shared, &client, &addrs, &mut draining, &mut presented).await
 			}
-			.await;
-			match dialed {
+			match Self::dial_any(shared, &client, &addrs, &mut draining, &mut presented).await {
 				Ok((addr, dialed)) => {
 					#[cfg(feature = "quic")]
 					{
