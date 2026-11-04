@@ -1550,8 +1550,9 @@ mod read_tests {
 	use moq_mux::container::Container as _;
 	use std::time::Duration;
 
-	/// A catalog rendition's warmup survives conversion and widens the raw subscription past the
-	/// caller's max delay, keeping the min delay as asked.
+	/// A catalog rendition's warmup survives conversion, widens the raw subscription past the
+	/// caller's max delay, keeping the min delay as asked, and starts the reader that much further
+	/// back: with newest-first delivery it waits for a group covering the min delay plus the warmup.
 	#[tokio::test(start_paused = true)]
 	async fn raw_media_catalog_warmup_reaches_the_subscription() {
 		use crate::consumer::{MoqDelay, MoqSubscription, moq_subscription_defaults};
@@ -1560,7 +1561,9 @@ mod read_tests {
 		let delay = Duration::from_millis(200);
 		for video in [false, true] {
 			let broadcast = moq_net::broadcast::Info::new().produce();
-			let track = broadcast.create_track("media", hang::container::track_info(0)).unwrap();
+			let mut track = broadcast
+				.create_track("media", hang::container::track_info(0))
+				.unwrap();
 			let mut catalog = moq_mux::catalog::hang::Catalog::default();
 			let mut audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
 			audio.warmup = Some(warmup);
@@ -1569,17 +1572,23 @@ mod read_tests {
 			config.warmup = Some(warmup);
 			catalog.video.renditions.insert("media".into(), config);
 			let catalog = convert_catalog(&catalog);
-			let rendition = match video {
-				true => MoqRendition::Video {
-					id: "media".into(),
-					config: catalog.video["media"].clone(),
-				},
-				false => MoqRendition::Audio {
-					id: "media".into(),
-					config: catalog.audio["media"].clone(),
-				},
+			let (rendition, kind) = match video {
+				true => (
+					MoqRendition::Video {
+						id: "media".into(),
+						config: catalog.video["media"].clone(),
+					},
+					moq_mux::container::Kind::Video,
+				),
+				false => (
+					MoqRendition::Audio {
+						id: "media".into(),
+						config: catalog.audio["media"].clone(),
+					},
+					moq_mux::container::Kind::Audio,
+				),
 			};
-			let _consumer = MoqMediaTrackConsumer::subscribe(
+			let reader = MoqMediaTrackConsumer::subscribe(
 				&MoqBroadcastConsumer::new(broadcast.consume()),
 				MoqMediaTrackConfig {
 					rendition,
@@ -1597,6 +1606,40 @@ mod read_tests {
 			let subscription = track.subscription().unwrap();
 			assert_eq!(subscription.delay.min, Some(delay), "video={video}");
 			assert_eq!(subscription.delay.max, Some(delay + warmup), "video={video}");
+
+			let mut write = |sequence: u64, micros| {
+				let mut group = track.create_group(sequence.into()).unwrap();
+				moq_mux::catalog::hang::Container::Legacy(kind)
+					.write(
+						&mut group,
+						&[moq_mux::container::Frame {
+							timestamp: moq_net::Timestamp::from_micros(micros).unwrap(),
+							payload: bytes::Bytes::from_static(b"media"),
+							keyframe: true,
+							duration: None,
+						}],
+					)
+					.unwrap();
+				group.finish().unwrap();
+			};
+			// Newest first: group 4 covers the min delay alone, but not the warmup too.
+			write(5, 5_000_000);
+			write(4, 4_700_000);
+			assert!(
+				kio::clock::timeout(Duration::from_millis(50), reader.next())
+					.await
+					.is_err(),
+				"video={video}: the start waits for a group covering the warmup"
+			);
+			write(3, 4_400_000);
+			track.finish().unwrap();
+			let mut micros = Vec::new();
+			while let Some(read) = reader.next().await.unwrap() {
+				if let MoqMediaRead::Frame { frame } = read {
+					micros.push(frame.timestamp.value);
+				}
+			}
+			assert_eq!(micros, [4_400_000, 4_700_000, 5_000_000], "video={video}");
 		}
 	}
 

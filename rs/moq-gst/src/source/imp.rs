@@ -1759,7 +1759,7 @@ impl Play {
 		let (kind, name) = (rendition.0, &rendition.1);
 		let mut sent_segment = false;
 		// Each play starts a new stream on the pad, which opusdec decodes from a fresh state.
-		let mut pre_skip = PreSkip::new(&shape.caps);
+		let mut clip = OpusClip::new(&shape.caps, shape.warmup);
 		loop {
 			tokio::select! {
 				// The follower stopped this reader (the instance changed, the rendition was
@@ -1783,8 +1783,8 @@ impl Play {
 								return;
 							}
 						};
-						if let Some(pre_skip) = &mut pre_skip
-							&& let Err(err) = pre_skip.apply(buffer.get_mut().unwrap())
+						if let Some(clip) = &mut clip
+							&& let Err(err) = clip.apply(buffer.get_mut().unwrap())
 						{
 							if let Some(obj) = element.upgrade() {
 								gst::element_error!(obj, gst::StreamError::Format, ("track {name} has an invalid Opus packet"), ["{err:#}"]);
@@ -1938,51 +1938,77 @@ fn build_buffer(frame: moq_mux::container::Frame, kind: TrackKind) -> Result<gst
 	Ok(buffer)
 }
 
-/// The Opus pre-skip moqsrc clips: opusdec trims only what a buffer's `GstAudioClippingMeta`
-/// asks for, never the OpusHead's pre-skip, and stamps each output at its input's pts.
-struct PreSkip {
+/// What moqsrc clips from the start of an Opus play: opusdec trims only what a buffer's
+/// `GstAudioClippingMeta` asks for, never the OpusHead's pre-skip, and stamps each output at its
+/// input's pts.
+///
+/// After the pre-skip it clips the catalog `warmup` too, the media the decoder needs before its
+/// output is clean: every packet still reaches the decoder, but nothing decoded before the first
+/// frame plus the warmup plays, as `moq-audio` presents a join. The clipped packets keep their
+/// place on the shared timeline.
+struct OpusClip {
 	/// The OpusHead's pre-skip, in 48 kHz samples.
 	total: u64,
-	/// What the next packets still have to clip.
+	/// What the next packets still have to clip of the pre-skip.
 	remaining: u64,
+	/// What the next packets still have to clip of the warmup, in 48 kHz samples.
+	warmup: u64,
 }
 
-impl PreSkip {
-	/// The pre-skip of an `audio/x-opus` caps' OpusHead, or `None` for other caps or none to skip.
-	fn new(caps: &gst::CapsRef) -> Option<Self> {
+impl OpusClip {
+	/// The clip of an `audio/x-opus` caps' OpusHead pre-skip and the rendition's `warmup`, or `None`
+	/// for other caps or nothing to clip.
+	fn new(caps: &gst::CapsRef, warmup: Duration) -> Option<Self> {
 		let structure = caps.structure(0).filter(|s| s.name() == "audio/x-opus")?;
-		let headers = structure.get_optional::<gst::Array>("streamheader").ok()??;
-		let head = headers.first()?.get::<gst::Buffer>().ok()?;
-		let head = head.map_readable().ok()?;
-		let total = moq_mux::codec::opus::Config::parse(&mut head.as_slice())
-			.ok()?
-			.pre_skip
-			.into();
-		(total > 0).then_some(Self {
+		let total = structure
+			.get_optional::<gst::Array>("streamheader")
+			.ok()
+			.flatten()
+			.and_then(|headers| {
+				let head = headers.first()?.get::<gst::Buffer>().ok()?;
+				let head = head.map_readable().ok()?;
+				let config = moq_mux::codec::opus::Config::parse(&mut head.as_slice()).ok()?;
+				Some(u64::from(config.pre_skip))
+			})
+			.unwrap_or(0);
+		// Rounded up, so presentation never starts inside the warmup.
+		let warmup = u64::try_from((warmup.as_nanos() * 48_000).div_ceil(1_000_000_000)).unwrap_or(u64::MAX);
+		(total > 0 || warmup > 0).then_some(Self {
 			total,
 			remaining: total,
+			warmup,
 		})
 	}
 
-	/// Clip this packet's share of the pre-skip, and stamp it where its first kept sample plays.
-	/// A packet's timestamp is where its decode would start without the pre-skip, so each one plays
-	/// the pre-skip earlier, less what it clips itself.
+	/// Clip this packet's share of the pre-skip and then of the warmup, and stamp it where its
+	/// first kept sample plays. A packet's timestamp is where its decode would start without the
+	/// pre-skip, so each one plays the pre-skip earlier, less what it clips of it, and later by
+	/// what it clips of the warmup.
 	fn apply(&mut self, buffer: &mut gst::BufferRef) -> Result<()> {
-		let mut clip = 0;
-		if self.remaining > 0 {
-			let samples =
-				moq_mux::codec::opus::packet_samples(&buffer.map_readable()?).context("malformed Opus packet")?;
-			clip = self.remaining.min(samples.into());
+		let (mut clip, mut warm) = (0, 0);
+		if self.remaining > 0 || self.warmup > 0 {
+			let samples: u64 = moq_mux::codec::opus::packet_samples(&buffer.map_readable()?)
+				.context("malformed Opus packet")?
+				.into();
+			clip = self.remaining.min(samples);
 			self.remaining -= clip;
-			gst_audio::AudioClippingMeta::add(buffer, gst::format::Default::from_u64(clip), gst::format::Default::ZERO);
+			warm = self.warmup.min(samples - clip);
+			self.warmup -= warm;
+			gst_audio::AudioClippingMeta::add(
+				buffer,
+				gst::format::Default::from_u64(clip + warm),
+				gst::format::Default::ZERO,
+			);
 		}
-		let early = gst::ClockTime::from_nseconds(
-			(self.total - clip)
+		let time = |samples: u64| {
+			samples
 				.mul_div_round(gst::ClockTime::SECOND.nseconds(), 48_000)
-				.context("pre-skip overflows the clock")?,
-		);
+				.map(gst::ClockTime::from_nseconds)
+				.context("clip overflows the clock")
+		};
+		let (early, late) = (time(self.total - clip)?, time(warm)?);
 		// Only a packet clipped whole can reach before zero, and it plays nothing.
-		buffer.set_pts(buffer.pts().map(|pts| pts.saturating_sub(early)));
+		buffer.set_pts(buffer.pts().map(|pts| pts.saturating_add(late).saturating_sub(early)));
 		Ok(())
 	}
 }
@@ -2285,7 +2311,7 @@ mod tests {
 	fn opus_pre_skip_is_clipped_across_packets() {
 		gst::init().unwrap();
 		let mut config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
-		assert!(super::PreSkip::new(&super::audio_caps(&config).unwrap()).is_none());
+		assert!(super::OpusClip::new(&super::audio_caps(&config).unwrap(), Duration::ZERO).is_none());
 		config.description = Some(
 			moq_mux::codec::opus::Config::new(48_000, 2)
 				.with_pre_skip(312)
@@ -2299,7 +2325,7 @@ mod tests {
 			(0xe0, 2_500, &[(120, 0), (120, 0), (72, 0), (0, 1_000), (0, 3_500)][..]),
 			(0xf8, 20_000, &[(312, 0), (0, 13_500)][..]),
 		] {
-			let mut pre_skip = super::PreSkip::new(&caps).unwrap();
+			let mut pre_skip = super::OpusClip::new(&caps, Duration::ZERO).unwrap();
 			for (index, &(clip, pts)) in expected.iter().enumerate() {
 				let mut buffer = gst::Buffer::from_slice([toc]);
 				let buffer = buffer.get_mut().unwrap();
@@ -2314,6 +2340,54 @@ mod tests {
 					buffer.pts(),
 					Some(gst::ClockTime::from_useconds(pts)),
 					"packet {index} of {micros}us"
+				);
+			}
+		}
+	}
+
+	/// The catalog warmup is clipped from the decoded output after the pre-skip, so the first
+	/// sample that plays is the first frame plus the warmup, while every packet still reaches the
+	/// decoder and keeps its place on the timeline.
+	#[test]
+	fn opus_warmup_is_clipped_after_the_pre_skip() {
+		gst::init().unwrap();
+		let warmup = Duration::from_millis(80);
+		let mut config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+		let bare = super::audio_caps(&config).unwrap();
+		config.description = Some(
+			moq_mux::codec::opus::Config::new(48_000, 2)
+				.with_pre_skip(312)
+				.encode()
+				.unwrap(),
+		);
+		let headed = super::audio_caps(&config).unwrap();
+		assert!(super::OpusClip::new(&gst::Caps::new_empty_simple("video/x-h264"), warmup).is_none());
+
+		// 20 ms (960-sample) CELT packets: (clipped samples, pts in microseconds) for each.
+		for (caps, expected) in [
+			(
+				&bare,
+				&[(960, 20_000), (960, 40_000), (960, 60_000), (960, 80_000), (0, 80_000), (0, 100_000)][..],
+			),
+			(
+				&headed,
+				&[(960, 13_500), (960, 33_500), (960, 53_500), (960, 73_500), (312, 80_000), (0, 93_500)][..],
+			),
+		] {
+			let mut clip = super::OpusClip::new(caps, warmup).unwrap();
+			for (index, &(clipped, pts)) in expected.iter().enumerate() {
+				let mut buffer = gst::Buffer::from_slice([0xf8u8]);
+				let buffer = buffer.get_mut().unwrap();
+				buffer.set_pts(gst::ClockTime::from_useconds(index as u64 * 20_000));
+				clip.apply(buffer).unwrap();
+				let meta = buffer
+					.meta::<gst_audio::AudioClippingMeta>()
+					.map(|meta| meta.start().value() as u64);
+				assert_eq!(meta.unwrap_or(0), clipped, "packet {index} of {caps}");
+				assert_eq!(
+					buffer.pts(),
+					Some(gst::ClockTime::from_useconds(pts)),
+					"packet {index} of {caps}"
 				);
 			}
 		}
@@ -3589,6 +3663,8 @@ mod session_tests {
 		broadcast: moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer,
 		video: moq_mux::container::Producer<moq_mux::catalog::hang::Container>,
+		/// The video track, for what its readers subscribe with.
+		track: moq_net::track::Producer,
 		start: kio::clock::Instant,
 	}
 
@@ -3621,6 +3697,7 @@ mod session_tests {
 				let mut guard = catalog.modify().unwrap();
 				guard.video.renditions = BTreeMap::from([("video".to_string(), config)]);
 			}
+			let track = video.clone();
 			let video = moq_mux::container::Producer::new(
 				video,
 				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
@@ -3630,6 +3707,7 @@ mod session_tests {
 				broadcast,
 				catalog,
 				video,
+				track,
 				start: kio::clock::now(),
 			}
 		}
@@ -4134,6 +4212,66 @@ mod session_tests {
 			"no new stream on the kept pad"
 		);
 		recorder.assert_one_pad_held();
+	}
+
+	/// A warmup-only catalog update neither restarts the reader playing the rendition nor is lost:
+	/// the next instance's reader subscribes with the updated warmup.
+	#[test]
+	fn a_warmup_update_keeps_the_reader_and_reaches_the_next_one() {
+		let _pad_ids = pad_ids();
+		let element = element();
+		let recorder = Recorder::attach(&element);
+		let origin = origin();
+		let mut config = video_rendition();
+		config.broadcast = Some(moq_net::path::Relative::new("./cam").unwrap());
+		config.warmup = Some(Duration::from_millis(300));
+		let mut room = Publisher::new(&origin, Default::default(), config);
+		let session = follow(&element, &origin);
+
+		let mut first = Publisher::sibling(&origin, Default::default());
+		let pad = recorder.written(&mut first, 1);
+		assert_eq!(
+			first.track.subscription().unwrap().delay.max,
+			Some(DEFAULT_MAX_DELAY + Duration::from_millis(300))
+		);
+
+		// Change only the warmup, then list an audio rendition in the same catalog. Its pad shows
+		// the run took the warmup too, since a catalog snapshot carries both.
+		let audio = room
+			.broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let mut audio =
+			moq_mux::container::Producer::new(audio, moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio));
+		{
+			let mut guard = room.catalog.modify().unwrap();
+			guard.video.renditions.get_mut("video").unwrap().warmup = Some(Duration::from_millis(600));
+			guard.audio.renditions = BTreeMap::from([("audio".to_string(), audio_rendition())]);
+		}
+		audio.write(room.frame(9)).unwrap();
+		recorder.wait("the audio rendition never reached a pad", |seen| {
+			reached(seen, 9).into_iter().next()
+		});
+		assert_eq!(recorder.written(&mut first, 2), pad);
+
+		let mut follow = watch(&origin, "cam");
+		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
+		drop(first);
+		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::End(_)));
+		let mut second = Publisher::sibling(&origin, Default::default());
+		assert_eq!(recorder.written(&mut second, 3), pad, "the return moved to another pad");
+		assert_eq!(
+			second.track.subscription().unwrap().delay.max,
+			Some(DEFAULT_MAX_DELAY + Duration::from_millis(600))
+		);
+		stop(session);
+
+		let seen = recorder.seen();
+		assert_eq!(
+			recorder.count(|seen| matches!(seen, Seen::Start(start) if *start == pad)),
+			1,
+			"only the next instance starts a new stream on the pad: {seen:?}"
+		);
 	}
 
 	/// A rendition that joins a sibling instance after another started on it shares that instance's
