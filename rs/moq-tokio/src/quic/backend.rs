@@ -9,7 +9,7 @@ use crate::quic::Resolved;
 use crate::quic::ServerId;
 use crate::tls::FingerprintVerifier;
 use std::net;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// The transport config the resolved quic knobs describe, for either role.
@@ -297,6 +297,10 @@ type Result<T> = std::result::Result<T, Error>;
 #[derive(Clone)]
 pub(crate) struct Client {
 	pub quic: driver::endpoint::Endpoint,
+	/// Each reconnect loop may replace its endpoint without moving other sessions.
+	/// Weak handles let close reach all of them without retaining abandoned sockets.
+	endpoints: Arc<Mutex<Endpoints>>,
+	bind: net::SocketAddr,
 	pub transport: driver::transport::Config,
 	/// Whether an `http://` URL may bootstrap a pin (see [crate::tls::Connect::allows_http_bootstrap]).
 	pub http_bootstrap: bool,
@@ -315,7 +319,16 @@ pub(crate) struct Client {
 	keylog: Option<Arc<crate::tls::KeyLog>>,
 }
 
+struct Endpoints {
+	closed: bool,
+	all: Vec<driver::endpoint::WeakEndpoint>,
+}
+
 impl Client {
+	pub fn is_closed(&self) -> bool {
+		self.endpoints.lock().unwrap().closed
+	}
+
 	pub fn new(config: &connect::Config, quic: &crate::quic::Config) -> Result<Self> {
 		let resolved = config.resolve();
 		let socket = crate::bind::udp(crate::bind::Udp::new(resolved.bind)).map_err(Error::BindSocket)?;
@@ -332,9 +345,15 @@ impl Client {
 
 		let quic = driver::endpoint::Endpoint::new(driver::endpoint::Config::default(), socket)
 			.map_err(Error::CreateEndpoint)?;
+		let endpoints = Arc::new(Mutex::new(Endpoints {
+			closed: false,
+			all: vec![quic.downgrade()],
+		}));
 
 		Ok(Self {
 			quic,
+			endpoints,
+			bind: resolved.bind,
 			transport,
 			http_bootstrap: config.tls.allows_http_bootstrap(),
 			host_name: config.tls.host_name.clone(),
@@ -345,9 +364,43 @@ impl Client {
 		})
 	}
 
-	/// Close every connection, then wait until each has sent its close to the peer.
+	/// Give only this clone a fresh ephemeral socket; fixed bind ports never move.
+	pub fn fresh_port(&mut self) -> Result<()> {
+		if self.bind.port() != 0 {
+			return Ok(());
+		}
+		let mut endpoints = self.endpoints.lock().unwrap();
+		if endpoints.closed {
+			return Ok(());
+		}
+		// Bind before dropping the old endpoint so the kernel cannot reuse its port.
+		let socket = crate::bind::udp(crate::bind::Udp::new(self.bind)).map_err(Error::BindSocket)?;
+		let dual_stack = crate::bind::udp_is_dual_stack(&socket);
+		let quic = driver::endpoint::Endpoint::new(driver::endpoint::Config::default(), socket)
+			.map_err(Error::CreateEndpoint)?;
+		endpoints.all.retain(|endpoint| endpoint.upgrade().is_some());
+		endpoints.all.push(quic.downgrade());
+		tracing::info!(old = %self.quic.local_addr(), new = %quic.local_addr(), "redialing from a fresh UDP port");
+		self.quic = quic;
+		self.dual_stack = dual_stack;
+		Ok(())
+	}
+
+	/// Close every connection, including endpoints replaced by reconnect loops.
 	pub async fn close(self) {
-		self.quic.close(driver::VarInt::from_u32(0), "client shutdown").await;
+		let closes: Vec<_> = {
+			let mut endpoints = self.endpoints.lock().unwrap();
+			endpoints.closed = true;
+			endpoints
+				.all
+				.iter()
+				.filter_map(|endpoint| endpoint.upgrade())
+				.map(|endpoint| async move {
+					endpoint.close(driver::VarInt::from_u32(0), "client shutdown").await;
+				})
+				.collect()
+		};
+		futures::future::join_all(closes).await;
 	}
 
 	pub async fn connect(

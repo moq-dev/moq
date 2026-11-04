@@ -9,9 +9,10 @@ import {
 import type * as Instance from "../instance.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
-import { type Timescale, Timestamp } from "../time.ts";
+import { floorAt, type Timescale, Timestamp } from "../time.ts";
 import type { Anchor, Order, Position, Range } from "../track.ts";
 import { lengthLeadingOnes, parts, split } from "../util/varint.ts";
+import * as Duration from "./duration.ts";
 import { decodePin, encodePin } from "./instance.ts";
 import * as Message from "./message.ts";
 import { fromWire, toWire } from "./priority.ts";
@@ -136,7 +137,7 @@ interface Span {
  */
 export type WireAnchor =
 	| { absolute: bigint; relative?: never; time?: never }
-	| { relative: number; absolute?: never; time?: never }
+	| { relative: bigint; absolute?: never; time?: never }
 	| { time: number; absolute?: never; relative?: never };
 
 /** A lite-07 range as the wire carries it; see {@link WireAnchor}. */
@@ -153,7 +154,7 @@ export function toWireRanges(ranges: readonly Range[], timescale: Timescale | un
 	const anchor = (anchor: Anchor | undefined): WireAnchor | undefined => {
 		if (anchor?.time === undefined) return anchor as WireAnchor | undefined;
 		if (timescale === undefined) throw new TimestampMismatch();
-		return { time: Math.floor(anchor.time.as(timescale)) };
+		return { time: floorAt(anchor.time, timescale) };
 	};
 	return ranges.map((range) => {
 		const out: WireRange = {};
@@ -178,7 +179,7 @@ async function encodeAnchor(w: Writer, anchor: WireAnchor | undefined) {
 		await w.u53(0);
 	} else if (anchor?.relative !== undefined) {
 		await w.u53(2);
-		await w.u53(anchor.relative);
+		await w.u62(anchor.relative);
 	} else if (anchor?.time !== undefined) {
 		await w.u53(3);
 		await w.u53(anchor.time);
@@ -280,7 +281,7 @@ async function decodeAnchor(r: Reader, end: boolean): Promise<{ point?: Point; a
 			return { point, anchor: { absolute: end && point[1] > 0 ? point[0] + 1n : point[0] } };
 		}
 		case 2:
-			return { anchor: { relative: await r.u53() } };
+			return { anchor: { relative: await r.u62() } };
 		case 3:
 			return { anchor: { time: await r.u53() } };
 		default:
@@ -612,15 +613,13 @@ export function inclusiveGroupEnd(exclusive?: bigint): bigint | undefined {
  * on a wire without the field. */
 async function encodeMinDelay(w: Writer, version: Version, minDelay: number | undefined) {
 	if (!hasMinDelay(version)) return;
-	await w.u62(minDelay === undefined ? 0n : BigInt(minDelay) + 1n);
+	await Duration.encodeOptional(w, minDelay);
 }
 
 /** Decode the `Subscriber Min Age`, as not stated on a wire without the field. */
 async function decodeMinDelay(r: Reader, version: Version): Promise<number | undefined> {
 	if (!hasMinDelay(version)) return undefined;
-	const value = await r.u62();
-	if (value > BigInt(Number.MAX_SAFE_INTEGER) + 1n) throw new RangeError("min delay exceeds safe integer");
-	return value === 0n ? undefined : Number(value - 1n);
+	return Duration.decodeOptional(r);
 }
 
 export class SubscribeUpdate {

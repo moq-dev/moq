@@ -223,7 +223,7 @@ test("a lite-07 list decodes as the span covering it", async () => {
 	const relative = await update([2, 2, 3, 1, 5, 0, 1, 7, 0, 1, 9, 0]);
 	expect([relative.startGroup, relative.endGroup, relative.endFrame]).toEqual([undefined, 8n, undefined]);
 	expect(relative.ranges).toEqual([
-		{ start: { relative: 3 }, end: { absolute: 5n } },
+		{ start: { relative: 3n }, end: { absolute: 5n } },
 		{ start: { absolute: 7n }, end: { absolute: 9n } },
 	]);
 	// A time anchor carries ticks of the track's timescale, which only the serving track knows.
@@ -249,8 +249,8 @@ test("lite-07 carries every range, relative and time anchors included, and older
 	const ranges = toWireRanges(
 		[
 			{ start: { absolute: 2n }, end: { absolute: 5n } },
-			{ start: { relative: 1 } },
-			{ end: { relative: 0 } },
+			{ start: { relative: 1n } },
+			{ end: { relative: 0n } },
 			// In the track's timescale, rounded down.
 			{ start: { time: Timestamp.fromMicros(1_500_900) }, end: { time: Timestamp.fromMillis(3_000) } },
 		],
@@ -442,6 +442,20 @@ test("min delay survives lite-07 and decodes as not stated on legacy wires", asy
 	}
 });
 
+test("optional subscriber milliseconds reject unsafe budgets", async () => {
+	for (const minDelay of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1]) {
+		await expect(
+			encodeMessage(
+				Version.DRAFT_07,
+				new Subscribe({ id: 1n, broadcast: Path.from("room"), track: "video", priority: 3, minDelay }),
+			),
+		).rejects.toThrow(RangeError);
+		await expect(encodeMessage(Version.DRAFT_07, new SubscribeUpdate({ priority: 3, minDelay }))).rejects.toThrow(
+			RangeError,
+		);
+	}
+});
+
 test("wanted group survives lite-07 and disappears on legacy wires", async () => {
 	for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 		for (const wantedGroup of [undefined, 0n, 3n, BigInt(Number.MAX_SAFE_INTEGER)]) {
@@ -483,7 +497,7 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 test("lite-07 updates edit only the changed ranges", async () => {
 	const version = Version.DRAFT_07;
 	const a = { start: { absolute: 1n }, end: { absolute: 5n } };
-	const b = { start: { relative: 3 } };
+	const b = { start: { relative: 3n } };
 	const c = { start: { time: 9_000 } };
 	const sent = new LiveRanges(version, [a, b]);
 	const live = new LiveRanges(version, [a, b]);

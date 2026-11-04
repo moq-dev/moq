@@ -888,13 +888,13 @@ test("lite-07 SUBSCRIBE_START names each resolved range start", async () => {
 		prefill: [0n, 1n, 2n, 3n, 4n],
 		maxAge: Milli(3_600_000),
 		ranges: [
-			{ start: { relative: 1 } },
+			{ start: { relative: 1n } },
 			// Group 1 starts at 1 ms.
 			{ start: { time: 1 }, end: { absolute: 2n } },
 			// Empty, so it starts nowhere.
 			{ start: { absolute: 3n }, end: { absolute: 3n } },
 			// Empty only once its start resolves to group 4.
-			{ start: { relative: 0 }, end: { absolute: 2n } },
+			{ start: { relative: 0n }, end: { absolute: 2n } },
 		],
 	});
 	try {
@@ -928,7 +928,7 @@ test("lite-07 SUBSCRIBE_STARTED reports an added range's start, which later upda
 		expect(start.start.starts).toEqual([0n]);
 
 		// Two groups back from the latest, group 2, which takes Range ID 1.
-		await replayUpdate({ priority: 0, ranges: [{ start: { relative: 2 } }] }).encode(sub.client.writer, version);
+		await replayUpdate({ priority: 0, ranges: [{ start: { relative: 2n } }] }).encode(sub.client.writer, version);
 		const started = await next();
 		if (!("started" in started)) throw new Error("expected SUBSCRIBE_STARTED");
 		expect([started.started.id, started.started.start]).toEqual([1n, 2n]);
@@ -969,7 +969,7 @@ test("lite-07 answers a bounded window that resolves empty and FINs in reply", a
 		version,
 		prefill: [0n, 1n, 2n, 3n, 4n, 5n],
 		maxAge: Milli(3_600_000),
-		ranges: [{ start: { relative: 0 }, end: { absolute: 3n } }],
+		ranges: [{ start: { relative: 0n }, end: { absolute: 3n } }],
 	});
 	try {
 		const resp = await decodeSubscribeResponse(sub.client.reader, version);

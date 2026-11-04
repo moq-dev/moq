@@ -112,6 +112,7 @@ timestamp bound in [#6168](https://github.com/moq-dev/moq/pull/6168).
 - [Lite-07 by start](/quest/m1/time-addressing/lite07.md) - lite-07 carries group starts, previous-start links, GROUP_END, and time bounds instead of sequence numbers
 - [@moq/net by start](/quest/m1/time-addressing/js.md) - JS speaks the same lite-07 wire
 - [A job's exact route continues its claim's readers](/quest/m1/announce-takeover.md) - the job's route inherits the claim's instance, with no new wire message
+- [A higher-priority group makes room](/quest/m1/stream-credit/make-room.md) - lite-07 lets a group stream take over for another group
 - [Datagram tracks](/quest/m1/datagram-tracks/README.md) - lite-07 subscribes to datagram tracks through their own request, and datagrams carry their own sequence
 
 ## Related

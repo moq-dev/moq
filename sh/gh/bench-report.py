@@ -15,8 +15,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
 
-BIGGER = {"MB/s", "MiB/s", "B/s", "ops/s", "frames/s"}
-SMALLER = {"ns", "us", "µs", "ms", "s", "ms/MB", "x", "bytes", "B", "MiB", "packets"}
+BIGGER = {"MB/s", "MiB/s", "B/s", "ops/s", "frames/s", "frames"}
+SMALLER = {"ns", "us", "µs", "ms", "s", "ms/MB", "x", "bytes", "B", "MiB", "packets", "streams"}
 
 
 def value(number):
@@ -135,6 +135,11 @@ def measurement_unit(column):
     """The unit a benchmark CSV column measures, or None for a workload dimension."""
     if column in ("size_bytes", "peak_bytes"):
         return "bytes"
+    # Named exactly: other benchmarks print frame and stream counts as workload dimensions.
+    if column == "delivered_frames":
+        return "frames"
+    if column == "evicted_streams":
+        return "streams"
     if column == "mib_per_s" or column.endswith("_mib_per_s"):
         return "MiB/s"
     if column.endswith("_packets"):
