@@ -294,6 +294,19 @@ impl VideoHint {
 	}
 }
 
+/// Remove the `drm` entries among `ids` that no video or audio rendition lists any more, so an
+/// entry leaves the catalog with the last rendition it protects.
+fn release_drm<E: CatalogExt>(catalog: &mut Catalog<E>, ids: &[String]) {
+	for id in ids {
+		let listed = (catalog.video.renditions.values().map(|config| &config.drm))
+			.chain(catalog.audio.renditions.values().map(|config| &config.drm))
+			.any(|drm| drm.contains(id));
+		if !listed {
+			catalog.drm.remove(id);
+		}
+	}
+}
+
 impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::VideoConfig {
 	fn detects() -> bool {
 		true
@@ -306,7 +319,9 @@ impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::VideoConfig {
 		catalog.video.renditions.get_mut(name)
 	}
 	fn remove(catalog: &mut Catalog<E>, name: &str) {
-		catalog.video.renditions.remove(name);
+		if let Some(config) = catalog.video.renditions.remove(name) {
+			release_drm(catalog, &config.drm);
+		}
 	}
 
 	fn estimate(&self) -> Estimate {
@@ -336,7 +351,9 @@ impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::AudioConfig {
 		catalog.audio.renditions.get_mut(name)
 	}
 	fn remove(catalog: &mut Catalog<E>, name: &str) {
-		catalog.audio.renditions.remove(name);
+		if let Some(config) = catalog.audio.renditions.remove(name) {
+			release_drm(catalog, &config.drm);
+		}
 	}
 
 	fn estimate(&self) -> Estimate {

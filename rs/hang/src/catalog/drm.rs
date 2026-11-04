@@ -103,11 +103,6 @@ impl Entry {
 			certificate: None,
 		}
 	}
-
-	/// Whether `other` describes the same system, scheme, and key, which renditions share.
-	pub fn same_key(&self, other: &Self) -> bool {
-		self.system == other.system && self.scheme == other.scheme && self.kid == other.kid
-	}
 }
 
 /// A UUID in its hyphenated form only, as draft-ietf-moq-cmsf writes one, refusing the simple,

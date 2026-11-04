@@ -4447,3 +4447,44 @@ async fn a_mid_gop_start_restates_the_kept_samples_encryption() {
 		}
 	}
 }
+
+/// Importers sharing a key but not their servers get an entry each, so neither rendition is
+/// signalled with the other's license server.
+#[test]
+fn different_servers_for_one_key_take_their_own_entries() {
+	use hang::catalog::drm;
+
+	let servers = [
+		drm::Servers::license("https://a.example.com/".parse().unwrap()),
+		drm::Servers::license("https://b.example.com/".parse().unwrap()),
+	];
+	let index = std::cell::Cell::new(0);
+	let (result, catalog, _, _importers) = import_protected(&[CBCS_VIDEO, CBCS_AUDIO], |fmp4| {
+		let servers = servers[index.replace(index.get() + 1)].clone();
+		fmp4.with_drm(drm::system::CLEARKEY, servers)
+	});
+	result.unwrap();
+	let catalog = catalog.snapshot();
+	assert_eq!(catalog.drm.len(), 2, "{:?}", catalog.drm);
+	let video = &catalog.video.renditions.values().next().unwrap().drm;
+	let audio = &catalog.audio.renditions.values().next().unwrap().drm;
+	assert_ne!(video, audio);
+	assert_eq!(catalog.drm[&video[0]].license, servers[0].license);
+	assert_eq!(catalog.drm[&audio[0]].license, servers[1].license);
+}
+
+/// A shared entry stays while any rendition lists it and leaves with the last one.
+#[test]
+fn a_drm_entry_leaves_with_its_last_rendition() {
+	let (result, catalog, _, mut importers) = import_protected(&[CBCS_VIDEO, CBCS_AUDIO], |fmp4| fmp4);
+	result.unwrap();
+	assert_eq!(catalog.snapshot().drm.len(), 1);
+
+	drop(importers.remove(0));
+	let snapshot = catalog.snapshot();
+	assert!(snapshot.video.renditions.is_empty());
+	assert_eq!(snapshot.drm.len(), 1, "the audio still lists it");
+
+	drop(importers);
+	assert!(catalog.snapshot().drm.is_empty());
+}

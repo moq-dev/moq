@@ -654,8 +654,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Add the catalog's `drm` entries for `protection`, one per DRM system with the servers
 	/// [`with_drm`](Self::with_drm) set for it, returning their IDs for the rendition to list.
 	///
-	/// A system, scheme, and key another rendition already uses shares its entry, so video and
-	/// audio under one key list the same IDs. A new entry takes the lowest free numeric ID.
+	/// An entry identical to one another rendition already lists (the same system, scheme, key,
+	/// `pssh`, and servers) is shared, so video and audio under one key list the same IDs. Any
+	/// difference, such as another importer's servers for the same key, takes a new entry with the
+	/// lowest free numeric ID, so no importer's rendition is signalled with another's servers.
 	fn register_drm(&mut self, protection: &super::cenc::Protection) -> Result<Vec<String>> {
 		let mut entries = protection.entries()?;
 		for entry in &mut entries {
@@ -668,7 +670,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		let mut ids = Vec::with_capacity(entries.len());
 		self.catalog.mutate(|catalog| {
 			for entry in entries {
-				let existing = catalog.drm.iter().find(|(_, other)| other.same_key(&entry));
+				let existing = catalog.drm.iter().find(|(_, other)| **other == entry);
 				let id = match existing {
 					Some((id, _)) => id.clone(),
 					None => {
