@@ -1133,13 +1133,27 @@ impl TrackState {
 		}
 	}
 
-	/// Record sequences the upstream publisher gave up, with why.
-	fn drop_groups(&mut self, groups: ops::Range<u64>, hole: Hole) {
+	/// Record sequences the upstream publisher gave up, with why. A skip is final and the
+	/// most authoritative verdict, so a drop never replaces one; see [`Self::skip_groups`].
+	/// Returns the runs recorded.
+	fn drop_groups(&mut self, groups: ops::Range<u64>, hole: Hole) -> RangeSet<u64> {
+		let mut runs = RangeSet::new();
 		if groups.is_empty() {
-			return;
+			return runs;
 		}
-		self.cache.wakes().arrived(groups.clone());
-		self.change_drops(groups, Some(hole));
+		runs.insert(groups.clone());
+		if hole != Hole::Skip {
+			for (run, given) in self.drops.overlapping(&groups) {
+				if *given == Hole::Skip {
+					runs.remove(run.clone());
+				}
+			}
+		}
+		self.cache.wakes().arrived(groups);
+		for run in runs.iter() {
+			self.change_drops(run.clone(), Some(hole.clone()));
+		}
+		runs
 	}
 
 	/// Whether the publisher declared `sequence` skipped: never produced, which is final.
@@ -1147,51 +1161,51 @@ impl TrackState {
 		self.drops.get(&sequence).is_some_and(|hole| *hole == Hole::Skip)
 	}
 
-	/// What of `groups` no final verdict names: a gap, or a stale drop, which new terms may
-	/// supersede and so says nothing for good.
-	fn unsettled(&self, groups: ops::Range<u64>) -> RangeSet<u64> {
-		let mut left = RangeSet::new();
+	/// Skip what of `groups` holds no cached group, replacing any drop of it, final or stale:
+	/// "never produced" is the most authoritative verdict on a sequence. A reader a drop
+	/// already ended stays ended, and a relay forwards the skip over the drop it reported.
+	/// A group that arrived is never overwritten, since it was produced after all. Returns
+	/// the cached sequences left alone. See [`Producer::skip_groups`].
+	fn skip_groups(&mut self, groups: ops::Range<u64>) -> RangeSet<u64> {
+		let mut cached = RangeSet::new();
 		if groups.is_empty() {
-			return left;
+			return cached;
 		}
+		let mut left = RangeSet::new();
 		left.insert(groups.clone());
-		for (run, hole) in self.drops.overlapping(&groups) {
-			if hole.stale_budget().is_none() {
-				left.remove(run.clone());
+		for (sequence, _) in self.lookup.range(groups.clone()) {
+			if let Some(end) = sequence.checked_add(1) {
+				left.remove(*sequence..end);
+				cached.insert(*sequence..end);
 			}
 		}
-		left
-	}
-
-	/// Skip what of `groups` is neither cached nor given up for good, replacing a stale drop:
-	/// a skip is final, and an update would otherwise supersede that drop and leave the
-	/// sequence owed. See [`Producer::skip_groups`].
-	fn skip_groups(&mut self, groups: ops::Range<u64>) {
-		let mut left = self.unsettled(groups.clone());
-		for (sequence, slot) in self.lookup.range(groups) {
-			if slot.visible
-				&& let Some(end) = sequence.checked_add(1)
-			{
-				left.remove(*sequence..end);
+		// Already skipped: nothing changes, so no reader rescans.
+		for (run, hole) in self.drops.overlapping(&groups) {
+			if *hole == Hole::Skip {
+				left.remove(run.clone());
 			}
 		}
 		for run in left.iter().cloned().collect::<Vec<_>>() {
 			self.drop_groups(run, Hole::Skip);
 		}
+		cached
 	}
 
 	/// Settle an append at `sequence`: skip every sequence below it that this track's own
-	/// publisher never produced and did not give up for good, from the lowest it produced
-	/// since its last append, since appending says it will not go back. A final reason
-	/// already given stands.
+	/// publisher never produced, from the lowest it produced since its last append, since
+	/// appending says it will not go back. The skip replaces a drop given there, as
+	/// [`Self::skip_groups`] does.
 	fn appended(&mut self, sequence: u64) {
-		if let Some(from) = self.appended.or(self.produced.iter().next().map(|run| run.start)) {
-			let mut left = self.unsettled(from..sequence);
+		if let Some(from) = self.appended.or(self.produced.iter().next().map(|run| run.start))
+			&& from < sequence
+		{
+			let mut left = RangeSet::new();
+			left.insert(from..sequence);
 			for run in self.produced.iter() {
 				left.remove(run.clone());
 			}
 			for run in left.iter().cloned().collect::<Vec<_>>() {
-				self.drop_groups(run, Hole::Skip);
+				self.skip_groups(run);
 			}
 		}
 		self.produced.clear();
@@ -3633,15 +3647,26 @@ impl Producer {
 	/// This and [`Self::append_group`] are the only sources of a skip: a gap between created
 	/// groups says nothing, since groups may be created out of order, so only the producer
 	/// knows a sequence will never exist. A skip is final: creating a group at a skipped
-	/// sequence is refused with [`Error::Skipped`]. A sequence already produced or given up
-	/// for good keeps what it is; a stale drop, which new terms may supersede, is replaced.
+	/// sequence is refused with [`Error::Skipped`], and a later drop of it is ignored.
+	///
+	/// A skip replaces any drop of the same sequences, whatever its error: a reader the drop
+	/// already ended stays ended, and every later reader and relay sees the skip. A group
+	/// already cached keeps what it is, since it was produced after all.
 	pub fn skip_groups(&self, groups: ops::Range<u64>) {
-		if let Ok(mut state) = self.modify() {
-			state.skip_groups(groups);
-			let deferred = state.deferred();
-			drop(state);
-			deferred.wake();
-		}
+		self.skip_received(groups);
+	}
+
+	/// [`Self::skip_groups`], returning the cached sequences it left alone: a skip naming a
+	/// group that arrived contradicts it, which a subscriber reports.
+	pub(crate) fn skip_received(&self, groups: ops::Range<u64>) -> RangeSet<u64> {
+		let Ok(mut state) = self.modify() else {
+			return RangeSet::new();
+		};
+		let cached = state.skip_groups(groups);
+		let deferred = state.deferred();
+		drop(state);
+		deferred.wake();
+		cached
 	}
 
 	/// Forget every run held as stale: the terms a received copy's upstream judged them
@@ -3655,41 +3680,46 @@ impl Producer {
 		}
 	}
 
-	/// Record `groups` given up as `hole` describes.
-	pub(crate) fn give_up(&self, groups: ops::Range<u64>, hole: Hole) {
-		if groups.is_empty() {
-			return;
-		}
+	/// Record `groups` given up as `hole` describes, returning the runs recorded: a drop
+	/// leaves a skipped sequence skipped.
+	pub(crate) fn give_up(&self, groups: ops::Range<u64>, hole: Hole) -> RangeSet<u64> {
 		let error = match &hole {
-			Hole::Drop { error, .. } => Some(error.clone()),
-			Hole::Skip => None,
-		};
-		let open: Vec<group::Handle> = match self.modify() {
-			Ok(mut state) => {
-				state.drop_groups(groups.clone(), hole);
-				// Only the live feed's copy: a drop judges the subscription, so a fetched head
-				// or fetch-only backfill may still complete. A skip names nothing produced.
-				match error {
-					None => Vec::new(),
-					Some(_) => state
-						.lookup
-						.range(groups)
-						.filter(|(_, slot)| slot.visible)
-						.map(|(_, slot)| &slot.group)
-						.filter(|group| !group.is_aborted())
-						.cloned()
-						.collect(),
+			Hole::Drop { error, .. } => error.clone(),
+			Hole::Skip => {
+				let mut runs = RangeSet::new();
+				runs.insert(groups.clone());
+				for cached in self.skip_received(groups).iter() {
+					runs.remove(cached.clone());
 				}
+				return runs;
 			}
-			Err(_) => return,
+		};
+		if groups.is_empty() {
+			return RangeSet::new();
+		}
+		let (runs, open): (_, Vec<group::Handle>) = match self.modify() {
+			Ok(mut state) => {
+				let runs = state.drop_groups(groups.clone(), hole);
+				// Only the live feed's copy: a drop judges the subscription, so a fetched head
+				// or fetch-only backfill may still complete.
+				let open = state
+					.lookup
+					.range(groups)
+					.filter(|(_, slot)| slot.visible)
+					.map(|(_, slot)| &slot.group)
+					.filter(|group| !group.is_aborted())
+					.cloned()
+					.collect();
+				(runs, open)
+			}
+			Err(_) => return RangeSet::new(),
 		};
 		// Settle the readers of a group still arriving now, rather than once its stream's
 		// reset lands, with the track guard released.
-		if let Some(error) = error {
-			for group in open {
-				group.abort_open(Error::Stream(error.clone()));
-			}
+		for group in open {
+			group.abort_open(Error::Stream(error.clone()));
 		}
+		runs
 	}
 
 	/// Readers get nothing from the cache until [`Self::set_live`]: the upstream
@@ -6749,6 +6779,10 @@ struct DropCursor {
 	/// [`Subscriber::reoffer_stale`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	reported_stale: RangeSet<u64>,
+	/// The reported runs skipped. A skip replaces a drop, so a run reported dropped is
+	/// reported again once it is skipped, and only a skip already reported stops it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	reported_skip: RangeSet<u64>,
 }
 
 #[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
@@ -6761,6 +6795,7 @@ impl DropCursor {
 			scanned: None,
 			reported: RangeSet::new(),
 			reported_stale: RangeSet::new(),
+			reported_skip: RangeSet::new(),
 		}
 	}
 
@@ -6869,14 +6904,25 @@ impl DropCursor {
 			if clipped.end < range.end {
 				self.pending.insert(clipped.end..range.end, pending.clone());
 			}
-			if let Some(gap) = self.reported.gaps(&clipped).next() {
+			// A skip goes out over a drop already reported, since it replaces it.
+			let reported = match pending.hole {
+				Hole::Skip => &self.reported_skip,
+				Hole::Drop { .. } => &self.reported,
+			};
+			if let Some(gap) = reported.gaps(&clipped).next() {
 				if gap.end < range.end {
 					self.pending.insert(gap.end..range.end, pending.clone());
 				}
 				let hole = pending.hole;
 				self.reported.insert(gap.clone());
-				if hole.stale_budget().is_some() {
-					self.reported_stale.insert(gap.clone());
+				match &hole {
+					// Final, so no update reopens a stale report it replaced.
+					Hole::Skip => {
+						self.reported_skip.insert(gap.clone());
+						self.reported_stale.remove(gap.clone());
+					}
+					hole if hole.stale_budget().is_some() => self.reported_stale.insert(gap.clone()),
+					Hole::Drop { .. } => {}
 				}
 				return Some((gap, hole));
 			}
@@ -22202,10 +22248,11 @@ mod test {
 		assert_eq!(skipped, [(3..5, Hole::Skip), (6..7, Hole::Skip), (9..10, Hole::Skip)]);
 	}
 
-	/// A sequence already given up keeps its reason when an append skips around it.
+	/// An append's skip replaces a drop below it, whatever its error: the sequence was never
+	/// produced, which is the most authoritative verdict.
 	#[test]
 	#[cfg(feature = "async")]
-	fn appending_keeps_a_reason_already_given() {
+	fn appending_replaces_a_drop_with_a_skip() {
 		let producer = track_producer("test", Info::timed());
 		write_group(&producer, 0);
 		write_group(&producer, 4);
@@ -22218,7 +22265,7 @@ mod test {
 			.iter()
 			.map(|(run, hole)| (run.clone(), hole.clone()))
 			.collect();
-		assert_eq!(drops, [(1..2, Hole::drop(StreamError::Cancel)), (2..4, Hole::Skip)]);
+		assert_eq!(drops, [(1..4, Hole::Skip)]);
 	}
 
 	/// A skip is final: creating a group at a sequence an append or `skip_groups` skipped is
@@ -22242,9 +22289,15 @@ mod test {
 		));
 		// The next sequence, 5, was skipped too.
 		assert!(matches!(producer.append_group(), Err(Error::Skipped)));
+		// A later drop leaves a skipped sequence skipped.
+		producer.give_up(1..2, Hole::drop(StreamError::Cancel));
+		assert!(matches!(
+			producer.create_group(group::Info { sequence: 1 }),
+			Err(Error::Skipped)
+		));
 		// A dropped sequence may be created again.
-		producer.give_up(2..3, Hole::drop(StreamError::Cancel));
-		write_group(&producer, 2);
+		producer.give_up(9..10, Hole::drop(StreamError::Cancel));
+		write_group(&producer, 9);
 	}
 
 	/// Skips are kept and reported as runs: a huge `skip_groups` or append gap costs one
@@ -22299,11 +22352,11 @@ mod test {
 		assert_eq!(read.last(), Some(&1));
 	}
 
-	/// `skip_groups` leaves a cached group and a final reason already given alone, and
-	/// replaces a stale drop, which new terms would otherwise supersede: the skip is final.
+	/// `skip_groups` leaves a cached group alone, and replaces every drop, final or stale: the
+	/// skip is final, so new terms never supersede it.
 	#[test]
 	#[cfg(feature = "async")]
-	fn skipping_leaves_produced_and_given_up_sequences() {
+	fn skipping_replaces_every_drop_but_leaves_a_cached_group() {
 		let producer = track_producer("test", Info::timed());
 		write_group(&producer, 1);
 		producer.give_up(3..4, Hole::drop(StreamError::Cancel));
@@ -22317,15 +22370,42 @@ mod test {
 			.iter()
 			.map(|(run, hole)| (run.clone(), hole.clone()))
 			.collect();
+		assert_eq!(drops, [(0..1, Hole::Skip), (2..5, Hole::Skip)]);
+	}
+
+	/// A skip after a drop already reported goes out again, replacing it, while a reader that
+	/// moved past the drop is not handed anything again; one already reported as a skip is
+	/// not reported twice, and a later drop leaves it skipped.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_skip_is_reported_over_a_reported_drop() {
+		let producer = track_producer("test", Info::timed());
+		let mut subscriber = producer.subscribe(replay().with_range(0..));
+		let waiter = kio::Waiter::noop();
+		write_group(&producer, 0);
+		producer.give_up(1..3, Hole::drop(StreamError::Cancel));
+		producer.give_up(4..5, Hole::drop(StreamError::NotFound));
+		write_group(&producer, 5);
 		assert_eq!(
-			drops,
-			[
-				(0..1, Hole::Skip),
-				(2..3, Hole::Skip),
-				(3..4, Hole::drop(StreamError::Cancel)),
-				(4..5, Hole::Skip)
-			]
+			subscriber.poll_drop(&waiter),
+			Poll::Ready((1..3, Hole::drop(StreamError::Cancel)))
 		);
+		assert_eq!(
+			subscriber.poll_drop(&waiter),
+			Poll::Ready((4..5, Hole::drop(StreamError::NotFound)))
+		);
+		assert!(subscriber.poll_drop(&waiter).is_pending());
+		assert_eq!(drain_groups(&mut subscriber), [0, 5]);
+
+		// Group 0 arrived, so the skip leaves it; both drops and the gap between become one skip.
+		producer.skip_groups(0..5);
+		assert_eq!(subscriber.poll_drop(&waiter), Poll::Ready((1..5, Hole::Skip)));
+		assert!(subscriber.poll_drop(&waiter).is_pending());
+		assert!(drain_groups(&mut subscriber).is_empty(), "nothing is delivered again");
+
+		producer.give_up(2..3, Hole::drop(StreamError::Cancel));
+		assert!(subscriber.poll_drop(&waiter).is_pending(), "the skip stands");
+		assert!(producer.state.read().skipped(2));
 	}
 
 	/// Appending and a first group leave no gap, so they skip nothing; nor is anything below

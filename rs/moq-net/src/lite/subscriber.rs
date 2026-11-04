@@ -4761,6 +4761,63 @@ mod tests {
 		);
 	}
 
+	/// A SKIP replaces an earlier final DROP of the same groups too: "never produced" is the
+	/// most authoritative verdict. A later DROP leaves the skip in place, and a SKIP naming a
+	/// group that arrived keeps the group, without ending the session.
+	#[kio::test]
+	async fn a_skip_replaces_a_final_drop_but_not_a_cached_group() {
+		let version = Version::Lite07;
+		let (serve, mut serving, tail, _broadcast) = lite07_serving(Duration::from_millis(500)).await;
+		let drop = |start, end, error: &crate::StreamError| {
+			lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(start..=end, error, 0, version))
+		};
+		let skip = |start, end| lite::SubscribeResponse::Skip(lite::SubscribeSkip { start, end });
+		let mut group = serving
+			.serving
+			.create_group(crate::group::Info { sequence: 5 })
+			.unwrap();
+		group
+			.write_frame(crate::Timestamp::from_millis(5).unwrap(), &b"x"[..])
+			.unwrap();
+		group.finish().unwrap();
+
+		serving
+			.apply_response(&serve, drop(1, 2, &crate::StreamError::App(5)))
+			.unwrap();
+		serving.apply_response(&serve, skip(1, 2)).unwrap();
+		assert!(
+			matches!(
+				serving.serving.create_group(crate::group::Info { sequence: 2 }),
+				Err(Error::Skipped)
+			),
+			"the skip replaced the final drop"
+		);
+		serving
+			.apply_response(&serve, drop(2, 2, &crate::StreamError::NotFound))
+			.unwrap();
+		assert!(
+			matches!(
+				serving.serving.create_group(crate::group::Info { sequence: 2 }),
+				Err(Error::Skipped)
+			),
+			"a later drop leaves the skip"
+		);
+
+		// Group 5 arrived, so the skip names only 4 and 6.
+		serving.apply_response(&serve, skip(4, 6)).unwrap();
+		assert!(tail.read().covers(4..7));
+		let mut reader = serving
+			.serving
+			.subscribe(crate::track::Subscription::default().with_ranges([crate::track::Range::groups(0..)]));
+		let waiter = kio::Waiter::noop();
+		assert_eq!(reader.poll_drop(&waiter), Poll::Ready((1..3, track::Hole::Skip)));
+		assert_eq!(reader.poll_drop(&waiter), Poll::Ready((4..5, track::Hole::Skip)));
+		assert_eq!(reader.poll_drop(&waiter), Poll::Ready((6..7, track::Hole::Skip)));
+		assert!(reader.poll_drop(&waiter).is_pending());
+		let group = reader.recv_group().await.unwrap().unwrap();
+		assert_eq!(group.sequence, 5, "the group that arrived is kept");
+	}
+
 	/// A SUBSCRIBE_DROP ends a group still arriving now, with its Error Code on lite-07.
 	/// Earlier versions carry an application code there, so the same bytes read as
 	/// OLD.
@@ -10203,23 +10260,24 @@ impl ServeLoop {
 					if let Ok(mut tail) = active.tail.write() {
 						tail.account(groups.clone(), serve.subscriber.runtime.now());
 					}
-					let hole = match stale {
-						// Judged under the budget this subscriber sent with that update.
+					match stale {
+						// Judged under the budget this subscriber sent with that update. A
+						// sequence already skipped stays skipped, so no update reopens it.
 						true => {
-							active.stale.insert(groups.clone());
-							track::Hole::stale(active.max_delay)
+							let recorded = self.serving.give_up(groups, track::Hole::stale(active.max_delay));
+							active.stale.extend(recorded);
 						}
 						// Final, so no update reopens it, even where it replaces a stale drop.
 						false => {
 							active.stale.remove(groups.clone());
-							track::Hole::drop(error)
+							self.serving.give_up(groups, track::Hole::drop(error));
 						}
-					};
-					self.serving.give_up(groups, hole);
+					}
 				}
 			}
-			// Never produced, so nothing is waited for and no reader ends. A skip is final: it
-			// replaces a stale drop of the same groups, which an update would otherwise reopen.
+			// Never produced, so nothing is waited for and no reader ends. A skip is final and
+			// replaces any drop of the same groups, stale or final, so no update reopens them;
+			// a reader a drop already ended stays ended.
 			lite::SubscribeResponse::Skip(skipped) => {
 				let groups = skipped.start..skipped.end.saturating_add(1);
 				// An empty range (Group Start = Group End + 1) names nothing.
@@ -10230,7 +10288,18 @@ impl ServeLoop {
 					tail.account(groups.clone(), serve.subscriber.runtime.now());
 				}
 				active.stale.remove(groups.clone());
-				self.serving.skip_groups(groups);
+				// A group that arrived was produced after all, so the skip contradicts it: it
+				// keeps the group, and the session goes on, since the draft requires no more.
+				let cached = self.serving.skip_received(groups);
+				if let Some(first) = cached.iter().next() {
+					tracing::warn!(
+						track = %serve.name,
+						start = skipped.start,
+						end = skipped.end,
+						cached = first.start,
+						"protocol error: SUBSCRIBE_SKIP names a group that arrived; keeping the group"
+					);
+				}
 			}
 			// OK just resolves the range (the producer already orders
 			// groups).

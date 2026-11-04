@@ -4441,6 +4441,9 @@ struct TrackRun {
 	// cannot tell when the subscriber stopped waiting for it.
 	// `None` on other versions.
 	served: Option<RangeSet<u64>>,
+	// Lite-07: the part of `served` named in SUBSCRIBE_DROP, never served. A skip replaces a
+	// drop, so it is sent over one of these, but never over a group served.
+	dropped: RangeSet<u64>,
 	/// The one group waiting for stream credit. The rest of the backlog waits in the cache,
 	/// which bills, ages, and evicts it, and the cursor's budget skips whatever went stale
 	/// meanwhile: a machine per parked group would hold state for as long as the peer
@@ -4494,6 +4497,7 @@ impl TrackRun {
 			reoffered: Default::default(),
 			end_sent: false,
 			served,
+			dropped: RangeSet::new(),
 			opening: None,
 			children: kio::Tasks::new(),
 			idle: None,
@@ -4939,6 +4943,7 @@ impl TrackRun {
 	fn owe(&mut self, reopened: Vec<Range<u64>>) {
 		if let Some(served) = &mut self.served {
 			for run in reopened {
+				self.dropped.remove(run.clone());
 				served.remove(run);
 			}
 		}
@@ -4968,9 +4973,27 @@ impl TrackRun {
 		if range.is_empty() {
 			return Ok(false);
 		}
-		let gaps: Vec<_> = served.gaps(&range).collect();
+		let mut gaps: RangeSet<u64> = served.gaps(&range).collect();
+		if self.ctx.version.has_skip() {
+			match hole {
+				// A skip replaces a drop already sent, so the subscriber learns the groups
+				// were never produced; a reader the drop ended stays ended.
+				Hole::Skip => {
+					let replaced: Vec<_> = self
+						.dropped
+						.overlapping(&range)
+						.map(|run| run.start.max(range.start)..run.end.min(range.end))
+						.collect();
+					for run in replaced {
+						self.dropped.remove(run.clone());
+						gaps.insert(run);
+					}
+				}
+				Hole::Drop { .. } => self.dropped.extend(gaps.iter().cloned()),
+			}
+		}
 		served.extend(gaps.iter().cloned());
-		for gap in &gaps {
+		for gap in gaps.iter() {
 			let msg = self.hole(gap.start..=gap.end - 1, hole);
 			writer.buffer(&msg)?;
 		}
@@ -6904,6 +6927,49 @@ mod serve_group_test {
 		// SUBSCRIBE_START with the range starting at 0, a SKIP for group 1, and
 		// SUBSCRIBE_FINISH at 3.
 		assert_eq!(*log.writes.lock().unwrap(), [0, 4, 1, 0, 1, 1, 3, 2, 1, 1, 1, 2, 3, 0]);
+	}
+
+	/// A relay forwards a SKIP over a DROP it already forwarded for the same groups, since the
+	/// skip replaces it; lite-06, which names a skip as a drop, sends nothing more.
+	#[kio::test]
+	async fn a_skip_goes_out_over_a_forwarded_drop() {
+		for version in [Version::Lite07, Version::Lite06] {
+			let mut track = track::Producer::new(
+				Arc::new(broadcast::Info::default()),
+				"test",
+				crate::track::Info::timed(),
+			);
+			track.received();
+			let subscriber = track.subscribe(None);
+			let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
+			write_group(&mut track, 0, 0);
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			assert!(run.start.is_some(), "{version}: started");
+			track.give_up(1..3, Hole::drop(StreamError::Cancel));
+			write_group(&mut track, 3, 3);
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			track.skip_groups(0..4);
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			kio::wait(|waiter| writer.poll_flush(waiter)).await.unwrap();
+
+			let writes = log.writes.lock().unwrap().clone();
+			let mut buf = writes.as_slice();
+			let mut holes = Vec::new();
+			while !buf.is_empty() {
+				let (msg, size) = lite::SubscribeResponse::decode_slice(buf, version).unwrap();
+				buf = &buf[size..];
+				match msg {
+					lite::SubscribeResponse::Skip(skip) => holes.push(("skip", skip.start, skip.end)),
+					lite::SubscribeResponse::Drop(drop) => holes.push(("drop", drop.start, drop.end)),
+					_ => {}
+				}
+			}
+			let expected = match version.has_skip() {
+				true => vec![("drop", 1, 2), ("skip", 1, 2)],
+				false => vec![("drop", 1, 2)],
+			};
+			assert_eq!(holes, expected, "{version}");
+		}
 	}
 
 	/// A huge declared skip goes out as one SUBSCRIBE_SKIP, at a cost independent of its

@@ -1839,8 +1839,11 @@ impl Reader {
 		// Reported once. As on a plain cursor, the report is not final: a miss (a fill given
 		// up) may still land, and is handed out if it does.
 		self.drops.remove(open.clone());
-		if err.stale_budget().is_some() {
-			self.reported_stale.insert(open.clone());
+		match &err {
+			// Final, so no update reopens a stale report it replaced.
+			track::Hole::Skip => self.reported_stale.remove(open.clone()),
+			err if err.stale_budget().is_some() => self.reported_stale.insert(open.clone()),
+			track::Hole::Drop { .. } => {}
 		}
 		Poll::Ready((open, err))
 	}
@@ -3507,6 +3510,34 @@ mod test {
 		write(&a, 4);
 		assert_eq!(drain(&mut sub, false), [3, 4]);
 		assert_eq!(dropped(&mut sub), []);
+	}
+
+	/// A skip of a run the serving copy already dropped replaces the drop, so the resumed
+	/// reader reports it again, as a skip, and only once.
+	#[kio::test]
+	async fn a_resumed_reader_reports_a_skip_over_a_reported_drop() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		write(&a, 0);
+		assert_eq!(drain(&mut sub, false), [0]);
+		let holes = |sub: &mut track::Subscriber| {
+			let mut runs = Vec::new();
+			while let Poll::Ready(run) = sub.poll_drop(&kio::Waiter::noop()) {
+				runs.push(run);
+			}
+			runs
+		};
+
+		a.drop_groups(1..3, StreamError::NotFound);
+		assert_eq!(holes(&mut sub), [(1..3, track::Hole::drop(StreamError::NotFound))]);
+		a.skip_groups(1..3);
+		assert_eq!(holes(&mut sub), [(1..3, track::Hole::Skip)]);
+		assert_eq!(holes(&mut sub), []);
+		write(&a, 3);
+		assert_eq!(drain(&mut sub, false), [3]);
 	}
 
 	/// A run the serving copy gave up waits while a copy it replaced may still deliver it
