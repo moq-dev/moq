@@ -209,6 +209,16 @@ impl Estimator {
 		self.jitter.max = self.jitter.max.max(duration);
 	}
 
+	/// The longest group seen so far, closed window or not, else the whole span written: what a
+	/// track that ends before its first window closes declares as its join interval.
+	pub(crate) fn partial_interval(&self) -> Option<Duration> {
+		let window = &self.window;
+		window
+			.interval
+			.max(window.group)
+			.or_else(|| elapsed(window.start?, window.high?))
+	}
+
 	/// Everything measured so far, with what a catalog rendition needs to decide when to publish it.
 	pub(crate) fn reading(&self) -> Reading {
 		Reading {
@@ -381,6 +391,8 @@ struct Window {
 	group: Option<Duration>,
 	/// The longest group span of any closed window.
 	interval: Option<Duration>,
+	/// The lowest timestamp written since the timeline last broke.
+	start: Option<u128>,
 }
 
 impl Window {
@@ -389,6 +401,7 @@ impl Window {
 			self.shortest = Some(self.shortest.map_or(advance, |shortest| shortest.min(advance)));
 		}
 		self.high = Some(self.high.map_or(ts, |high| high.max(ts)));
+		self.start = Some(self.start.map_or(ts, |start| start.min(ts)));
 		self.frames += 1;
 	}
 

@@ -205,10 +205,13 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 	fn finish(&mut self) -> crate::Result<()> {
 		self.close()?;
 		self.track.finish()?;
+		// A track that ended before measuring declares what it saw, and no longer holds the join
+		// interval back.
+		if let Some(mut member) = self.member.take() {
+			member.finish(self.estimator.partial_interval());
+		}
 		// The importer may be kept around, but its media stops holding the other tracks back.
 		self.estimator.discontinuity();
-		// A track that ended before measuring no longer holds the join interval back.
-		self.member = None;
 		Ok(())
 	}
 

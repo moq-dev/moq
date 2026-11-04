@@ -2027,6 +2027,21 @@ mod test {
 		assert_eq!(catalog.declared_interval(), Some(std::time::Duration::from_secs(2)));
 	}
 
+	/// A track that finishes before its first window closes declares what it saw, so a short
+	/// publication is still HLS-renderable.
+	#[test]
+	fn a_short_track_declares_its_interval_when_it_finishes() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		let mut video = video0(&mut broadcast, &catalog, &[0, 500]);
+		assert_eq!(catalog.snapshot().media.join, None, "still measuring");
+		video.finish().unwrap();
+		assert_eq!(
+			catalog.snapshot().media.interval(),
+			Some(std::time::Duration::from_millis(500))
+		);
+	}
+
 	/// A text track groups only when it has something to say, so it never holds the interval back.
 	#[test]
 	fn a_text_track_does_not_join_the_interval() {

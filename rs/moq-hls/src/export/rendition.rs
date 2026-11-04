@@ -1529,9 +1529,9 @@ async fn watch_media(rendition: Weak<Rendition>, mut retiring: tokio::sync::watc
 		};
 
 		let mut grid = grid::Grid::new(interval, segments::MAX_SEGMENTS);
-		// The newest group and its first pts, read again for its content's end if the track ends
-		// after it, and the gap from the group before it.
-		let mut latest: Option<(moq_net::group::Consumer, moq_net::Timestamp)> = None;
+		// The newest group, its first pts, and what its first frame reached, read again for its
+		// content's end if the track ends after it, and the gap from the group before it.
+		let mut latest: Option<(moq_net::group::Consumer, moq_net::Timestamp, Reach)> = None;
 		let mut spacing: Option<std::time::Duration> = None;
 		// Nothing is listed before the first segment this watcher saw start.
 		let mut whole = false;
@@ -1560,20 +1560,20 @@ async fn watch_media(rendition: Weak<Rendition>, mut retiring: tokio::sync::watc
 					};
 					// A discontinuity marker carries no media: the content before it ends, and the
 					// grid numbers what resumes by its own timestamps, as every edge does.
-					let Some(pts) = first else {
+					let Some((pts, reach)) = first else {
 						continue;
 					};
 					sequence = Some(group.sequence);
-					if let Some((_, previous)) = &latest {
+					if let Some((_, previous, _)) = &latest {
 						spacing = pts.checked_sub(*previous).ok().map(Duration::from).or(spacing);
 					}
-					latest = Some((group, pts));
+					latest = Some((group, pts, reach));
 					grid.group(sequence.expect("set above"), pts)
 				}
 				None => {
 					let (reach, end) = match latest.take() {
-						Some((group, first)) => {
-							content_end(group, container.as_ref().ok(), first, spacing, interval).await
+						Some((group, _, reach)) => {
+							content_end(group, container.as_ref().ok(), reach, spacing, interval).await
 						}
 						None => (None, None),
 					};
@@ -1663,13 +1663,75 @@ async fn watch_media(rendition: Weak<Rendition>, mut retiring: tokio::sync::watc
 	}
 	rendition.close();
 }
-/// The pts of `frame`, the first of its group: the transport's stamp, else the first media frame
-/// `container` decodes from it. `Some(None)` for a discontinuity marker, a frame with no payload;
+/// What a group's frames reach: the timestamps of its samples, where one ends explicitly, and a
+/// discontinuity marker, read as they are decoded.
+#[derive(Default)]
+struct Reach {
+	/// Each sample's pts, in nanoseconds.
+	stamps: Vec<u128>,
+	/// The latest end a sample states with its own duration, in nanoseconds.
+	ends: Option<u128>,
+	/// A frame with no payload: where the publisher says the content stops.
+	marker: Option<moq_net::Timestamp>,
+}
+
+impl Reach {
+	/// Count every sample `frames` decodes to.
+	fn add(&mut self, frames: Vec<moq_mux::container::Frame>) {
+		for frame in frames {
+			if frame.payload.is_empty() {
+				self.marker = Some(frame.timestamp);
+				continue;
+			}
+			let pts = frame.timestamp.as_nanos();
+			self.stamps.push(pts);
+			if let Some(duration) = frame.duration {
+				self.ends = self.ends.max(Some(pts + duration.as_nanos()));
+			}
+		}
+	}
+
+	/// Where the last sample starts, which places the group on the grid, and where the content
+	/// ends, which times its segment.
+	///
+	/// A duration marker is both. Otherwise the end is the latest a sample states, else its newest
+	/// sample plus the shortest spacing between them, else `spacing`, the gap from the group
+	/// before, capped at `interval` so a lone frame after a long group never claims its length.
+	fn finish(
+		mut self,
+		spacing: Option<std::time::Duration>,
+		interval: std::time::Duration,
+	) -> (Option<moq_net::Timestamp>, Option<moq_net::Timestamp>) {
+		if self.marker.is_some() {
+			return (self.marker, self.marker);
+		}
+		self.stamps.sort_unstable();
+		self.stamps.dedup();
+		let timestamp = |nanos: u128| moq_net::Timestamp::from_nanos(u64::try_from(nanos).ok()?).ok();
+		let Some(&newest) = self.stamps.last() else {
+			return (None, None);
+		};
+		let step = self
+			.stamps
+			.windows(2)
+			.map(|pair| pair[1] - pair[0])
+			.min()
+			.or_else(|| spacing.map(|spacing| spacing.min(interval).as_nanos()));
+		let end = self
+			.ends
+			.filter(|end| *end > newest)
+			.or_else(|| step.map(|step| newest + step));
+		(timestamp(newest), end.and_then(timestamp))
+	}
+}
+
+/// The first frame of a group: its pts, the transport's stamp or else its first sample's, with
+/// what its samples reach. `Some(None)` for a discontinuity marker, a frame with no payload;
 /// `None` when it can't be read.
 fn first_frame(
 	container: &moq_mux::catalog::hang::Container,
 	frame: moq_net::frame::Frame,
-) -> Option<Option<moq_net::Timestamp>> {
+) -> Option<Option<(moq_net::Timestamp, Reach)>> {
 	use moq_mux::container::Container as _;
 	let stamp = frame.timestamp;
 	let decoded = container.decode(frame).ok()?;
@@ -1677,51 +1739,29 @@ fn first_frame(
 	if first.payload.is_empty() {
 		return Some(None);
 	}
-	Some(Some(stamp.unwrap_or(first.timestamp)))
+	let pts = stamp.unwrap_or(first.timestamp);
+	let mut reach = Reach::default();
+	reach.add(decoded);
+	Some(Some((pts, reach)))
 }
 
-/// How far a group's content reaches, read once the track has ended so every frame is in: where
-/// its last frame starts, which places the group on the grid, and where its content ends, which
-/// times its segment.
-///
-/// A duration marker (a frame with no payload) is both. Otherwise the end adds the shortest
-/// spacing between its frames to its newest, else `spacing`, the gap from the group before it,
-/// capped at `interval` so a lone frame after a long group never claims that group's length.
+/// What a group's content reaches, read once the track has ended so every frame is in, starting
+/// from what its first frame reached (see [`Reach::finish`]).
 async fn content_end(
 	mut group: moq_net::group::Consumer,
 	container: Option<&moq_mux::catalog::hang::Container>,
-	first: moq_net::Timestamp,
+	mut reach: Reach,
 	spacing: Option<std::time::Duration>,
 	interval: std::time::Duration,
 ) -> (Option<moq_net::Timestamp>, Option<moq_net::Timestamp>) {
 	use moq_mux::container::Container as _;
-	let mut stamps = vec![first.as_nanos()];
-	let mut marker = None;
 	while let Ok(Some(frame)) = group.read_frame().await {
 		// The container says what a frame holds: a marker's payload is empty only once decoded.
-		let decoded = container
-			.and_then(|container| container.decode(frame).ok())
-			.unwrap_or_default();
-		for frame in decoded {
-			match frame.payload.is_empty() {
-				true => marker = Some(frame.timestamp),
-				false => stamps.push(frame.timestamp.as_nanos()),
-			}
+		if let Some(decoded) = container.and_then(|container| container.decode(frame).ok()) {
+			reach.add(decoded);
 		}
 	}
-	if marker.is_some() {
-		return (marker, marker);
-	}
-	stamps.sort_unstable();
-	stamps.dedup();
-	let newest = *stamps.last().expect("the first frame");
-	let timestamp = |nanos: u128| moq_net::Timestamp::from_nanos(u64::try_from(nanos).ok()?).ok();
-	let step = stamps
-		.windows(2)
-		.map(|pair| pair[1] - pair[0])
-		.min()
-		.or_else(|| spacing.map(|spacing| spacing.min(interval).as_nanos()));
-	(timestamp(newest), step.and_then(|step| timestamp(newest + step)))
+	reach.finish(spacing, interval)
 }
 
 /// The row listing `slot`, starting a new discontinuity when `broken`.
@@ -2103,6 +2143,53 @@ mod tests {
 			.await
 			.expect("the failure wakes the wait")
 			.unwrap();
+	}
+
+	fn sample(ms: u64, duration_ms: Option<u64>, payload: &'static [u8]) -> moq_mux::container::Frame {
+		moq_mux::container::Frame {
+			timestamp: moq_net::Timestamp::from_millis(ms).unwrap(),
+			payload: Bytes::from_static(payload),
+			keyframe: ms == 0,
+			duration: duration_ms.map(|ms| moq_net::Timestamp::from_millis(ms).unwrap()),
+		}
+	}
+
+	fn millis(reach: (Option<moq_net::Timestamp>, Option<moq_net::Timestamp>)) -> (Option<u128>, Option<u128>) {
+		(reach.0.map(|t| t.as_millis()), reach.1.map(|t| t.as_millis()))
+	}
+
+	// A fragment carrying all its samples in one frame reaches as far as its samples say, however
+	// far apart the groups before it were.
+	#[test]
+	fn a_whole_fragment_in_one_frame_reaches_its_last_sample() {
+		let mut reach = Reach::default();
+		reach.add([0, 40, 80].map(|ms| sample(ms, Some(40), b"x")).to_vec());
+		assert_eq!(
+			millis(reach.finish(Some(Duration::from_secs(2)), Duration::from_secs(2))),
+			(Some(80), Some(120))
+		);
+
+		// Without durations, the spacing between its samples times the last.
+		let mut reach = Reach::default();
+		reach.add([0, 40, 80].map(|ms| sample(ms, None, b"x")).to_vec());
+		assert_eq!(
+			millis(reach.finish(Some(Duration::from_secs(2)), Duration::from_secs(2))),
+			(Some(80), Some(120))
+		);
+
+		// A lone frame borrows the group spacing, capped at the interval; a marker says where it ends.
+		let mut reach = Reach::default();
+		reach.add(vec![sample(0, None, b"x")]);
+		assert_eq!(
+			millis(reach.finish(Some(Duration::from_secs(7)), Duration::from_secs(2))),
+			(Some(0), Some(2000))
+		);
+		let mut reach = Reach::default();
+		reach.add(vec![sample(0, None, b"x"), sample(500, None, b"")]);
+		assert_eq!(
+			millis(reach.finish(None, Duration::from_secs(2))),
+			(Some(500), Some(500))
+		);
 	}
 
 	// A jump in the numbering, from segments skipped across a hand-over, drops the inherited rows

@@ -27,8 +27,11 @@ struct State {
 	/// Each present member's interval, `None` while it is still measuring.
 	members: BTreeMap<u64, Option<Duration>>,
 	next: u64,
-	/// Some track has written a whole window, so the publisher has had time to add its tracks.
+	/// Some track has written a whole window or finished, so the publisher has had time to add
+	/// its tracks.
 	measured: bool,
+	/// The longest interval of a member that left, which the declaration still covers.
+	departed: Option<Duration>,
 	/// The interval declared, once declared.
 	declared: Option<Duration>,
 	/// A member's longer group was already warned about, so the warning does not repeat.
@@ -39,13 +42,17 @@ impl State {
 	/// The interval to declare now, if this is the moment: nothing is declared yet, some track has
 	/// written a whole window, and every present member has its interval.
 	fn ready(&mut self) -> Option<Duration> {
-		if self.declared.is_some() || !self.measured || self.members.is_empty() {
+		if self.declared.is_some() || !self.measured {
 			return None;
 		}
-		let interval = self
+		let present = self
 			.members
 			.values()
 			.try_fold(Duration::ZERO, |max, interval| Some(max.max((*interval)?)))?;
+		let interval = present.max(self.departed.unwrap_or_default());
+		if interval.is_zero() {
+			return None;
+		}
 		self.declared = Some(interval);
 		Some(interval)
 	}
@@ -86,6 +93,7 @@ impl Intervals {
 			interval: hint,
 			hinted: hint.is_some(),
 			reported: None,
+			finished: false,
 			declare,
 		}
 	}
@@ -111,6 +119,8 @@ pub(crate) struct Member {
 	hinted: bool,
 	/// The longest group reported, so an unchanged report costs no lock.
 	reported: Option<Duration>,
+	/// The track ended cleanly, so its media is all it will measure (see [`finish`](Self::finish)).
+	finished: bool,
 	declare: Declare,
 }
 
@@ -150,12 +160,34 @@ impl Member {
 	}
 }
 
+impl Member {
+	/// The track ended cleanly, having measured `partial` at most: a track shorter than a window
+	/// declares what it saw, the longest group or else its whole span, so a short publication
+	/// still declares its interval.
+	pub fn finish(&mut self, partial: Option<Duration>) {
+		if !self.hinted
+			&& let Some(partial) = partial.filter(|partial| !partial.is_zero())
+		{
+			let mut state = self.intervals.lock();
+			if let Some(slot @ None) = state.members.get_mut(&self.id) {
+				*slot = Some(partial);
+				self.interval = Some(partial);
+			}
+		}
+		self.finished = true;
+	}
+}
+
 impl Drop for Member {
 	fn drop(&mut self) {
-		// A track that ends before measuring no longer holds the declaration back.
+		// A track that ends no longer holds the declaration back, but what it measured or hinted
+		// still counts, and a finished one is all it will ever measure.
 		let ready = {
 			let mut state = self.intervals.lock();
-			state.members.remove(&self.id);
+			if let Some(Some(interval)) = state.members.remove(&self.id) {
+				state.departed = state.departed.max(Some(interval));
+			}
+			state.measured |= self.finished;
 			state.ready()
 		};
 		if let Some(interval) = ready {
@@ -227,6 +259,26 @@ mod test {
 		audio.report(Some(secs(1.0)));
 		drop(video);
 		assert_eq!(*declared.lock().unwrap(), [secs(1.0)]);
+	}
+
+	/// A publication shorter than a window still declares: each finished track counts what it
+	/// saw, or its hint.
+	#[test]
+	fn a_short_publication_declares_at_its_end() {
+		let (declared, declare) = recorder();
+		let intervals = Intervals::default();
+		let mut video = intervals.join(Some(secs(2.0)), declare());
+		let mut audio = intervals.join(None, declare());
+		video.finish(Some(secs(0.5)));
+		drop(video);
+		assert!(declared.lock().unwrap().is_empty(), "the audio is still measuring");
+		audio.finish(Some(secs(0.1)));
+		drop(audio);
+		assert_eq!(
+			*declared.lock().unwrap(),
+			[secs(2.0)],
+			"the hint, though the video left first"
+		);
 	}
 
 	#[test]
