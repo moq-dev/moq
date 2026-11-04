@@ -99,7 +99,7 @@ every sequence delivered or dropped.
 ## Required
 
 - [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - the lite-07 wire, Rust publisher and subscriber, and the draft
-- [JS received copies fill what they missed](/quest/m1/subscribe-ranges/js-fills.md) - a JS subscriber session asks upstream for its copy's misses, with Rust's below-start and head-fill rules
+- [JS head fills and time lookups](/quest/m1/subscribe-ranges/js-fills.md) - JS readers fill a cached group's missing head before handing it out, and look a time start up through `Fill.time`
 - [Lite-07 FETCH is single-group only](/quest/m1/subscribe-ranges/lite07-fetch.md) - lite-07 FETCH reads one group or a slice of one, and SUBSCRIBE ranges of whole groups, in Rust, JS, and the draft
 - [Delete the old start bookkeeping](/quest/m1/subscribe-ranges/start-bookkeeping.md) - what each lite cursor is owed and dropped lives in the model, and `TrackRun` only translates it per version
 - [A bounded read that ended keeps returning None](/quest/m1/subscribe-ranges/repeated-eof.md) - a repeated read after a bounded range's end returns `Ok(None)` instead of parking
