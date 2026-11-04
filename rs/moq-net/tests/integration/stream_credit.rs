@@ -21,7 +21,9 @@ async fn one_stream_credit_serves_every_backlogged_group() {
 		let publisher = origin(1);
 		let viewer = origin(2);
 		let broadcast = publisher.create_broadcast("live").unwrap();
-		let info = track::Info::default().with_timescale(moq_net::Timescale::MILLI);
+		let info = track::Info::default()
+			.with_timescale(moq_net::Timescale::MILLI)
+			.with_max_age(None);
 		let tracks: Vec<_> = (0..2)
 			.map(|i| broadcast.create_track(format!("{i}"), info.clone()).unwrap())
 			.collect();

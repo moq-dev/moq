@@ -529,6 +529,8 @@ async fn end_waits_for_catalog_and_media() {
 #[derive(Debug, Clone, Copy)]
 struct Unit {
 	pid: u16,
+	/// PCR clock period, advanced by a flagged PCR.
+	period: u64,
 	/// Decode time (DTS, else PTS), 90 kHz, as carried.
 	decode: u64,
 	/// Decode time less the PCR of the slot carrying the PES start, in milliseconds: how long
@@ -559,10 +561,14 @@ fn units(out: &[(Instant, Frame)]) -> Vec<Unit> {
 	let mut reader = TsPacketReader::new(Cursor::new(bytes));
 	let mut units = Vec::new();
 	let mut pcr: Option<u64> = None;
+	let mut period = 0;
 	for sent in &slot_of {
 		let packet = reader.read_ts_packet().unwrap().expect("a packet per slot entry");
-		if let Some(clock) = packet.adaptation_field.as_ref().and_then(|af| af.pcr) {
+		if let Some(af) = packet.adaptation_field.as_ref()
+			&& let Some(clock) = af.pcr
+		{
 			pcr = Some(clock.as_u64() / 300);
+			period += u64::from(af.discontinuity_indicator);
 		}
 		if let Some(TsPayload::PesStart(pes)) = &packet.payload
 			&& let Some(pts) = pes.header.pts
@@ -571,6 +577,7 @@ fn units(out: &[(Instant, Frame)]) -> Vec<Unit> {
 			let decode = pes.header.dts.unwrap_or(pts).as_u64();
 			units.push(Unit {
 				pid: packet.header.pid.as_u16(),
+				period,
 				decode,
 				lead: diff90(decode, pcr) as f64 / 90.0,
 				sent: *sent,
@@ -740,27 +747,80 @@ async fn a_track_sent_later_than_the_delay_loses_nothing() {
 
 /// A changeover between two encoders whose clocks started hours apart steps the whole timeline
 /// forward with no marker, mid-group, as in the field. The export re-acquires its clock as at
-/// startup, rather than read the step as drift and end, and renders on without a drop. (A step
-/// back further than the group before its own never reaches it: the reader refuses it.)
+/// startup, rather than read the step as drift and end, and renders on without a drop. So it
+/// does for a step back, even smaller than the delay: audio never regresses on one clock, and
+/// video that declares its `reorder` restarts when the step exceeds that depth. Video that
+/// declares none is left as it is. A step back into an earlier group never reaches the export:
+/// the reader refuses it.
 #[tokio::test(start_paused = true)]
 async fn an_unmarked_step_keeps_the_export_rendering() {
-	for step in [16_844_500_000, 2_000_000] {
+	let forward = [16_844_500_000, 2_000_000].map(|step| [(step, false), (step, true)]);
+	let cases = forward
+		.into_iter()
+		.flatten()
+		.chain([(-300_000, false), (-300_000, true), (-560_000, true)]);
+	for (step, declared) in cases {
 		for lag in [0, LAGS[0], LAGS[1]] {
 			let mut live = Live::new(1.0, lag).await;
+			if declared {
+				live.reorder();
+			}
 			let mut leg = live.join(Duration::ZERO).await;
 			live.run(8 * GOP + GOP / 2, &mut [&mut leg], |_| false);
 			live.offset += step;
 			let stepped = kio::clock::now();
 			live.run(live.tick + 8 * GOP, &mut [&mut leg], |_| false);
 
-			let case = format!("{} s step, lag {lag}", step as f64 / 1e6);
+			let case = format!("{} s step, declared {declared}, lag {lag}", step as f64 / 1e6);
 			assert_eq!(leg.export.dropped(), 0, "{case}");
-			let video = leg
-				.units()
+			let units = leg.units();
+			let audio: Vec<_> = units.iter().filter(|unit| unit.pid == AUDIO_PID).collect();
+			for pair in audio.windows(2) {
+				assert!(
+					pair[0].period != pair[1].period || diff90(pair[1].decode, pair[0].decode) >= 0,
+					"{case}: audio regressed on one clock: {pair:?}"
+				);
+			}
+			let video = units
 				.into_iter()
 				.filter(|unit| unit.pid == VIDEO_PID && unit.sent >= stepped)
 				.count() as u64;
 			assert!(video >= 6 * GOP, "{case}: only {video} video units after it");
+		}
+	}
+}
+
+/// The same step back, smaller than the delay, while the export is still acquiring its first
+/// clock: what it read before the step and what it reads after cannot share one clock, so
+/// audio still never regresses within a clock period, and the export renders on.
+#[tokio::test(start_paused = true)]
+async fn an_unmarked_step_while_acquiring_keeps_the_export_rendering() {
+	for declared in [false, true] {
+		for lag in [0, LAGS[0], LAGS[1]] {
+			let mut live = Live::new(1.0, lag).await;
+			// Far enough into the timeline that the step stays on it.
+			live.offset = 10_000_000;
+			if declared {
+				live.reorder();
+			}
+			let mut leg = live.join(Duration::ZERO).await;
+			live.run(4, &mut [&mut leg], |_| false);
+			let case = format!("declared {declared}, lag {lag}");
+			assert!(leg.units().is_empty(), "{case}: output began before the step");
+			live.offset -= 300_000;
+			live.run(live.tick + 8 * GOP, &mut [&mut leg], |_| false);
+
+			assert_eq!(leg.export.dropped(), 0, "{case}");
+			let units = leg.units();
+			let audio: Vec<_> = units.iter().filter(|unit| unit.pid == AUDIO_PID).collect();
+			for pair in audio.windows(2) {
+				assert!(
+					pair[0].period != pair[1].period || diff90(pair[1].decode, pair[0].decode) >= 0,
+					"{case}: audio regressed on one clock: {pair:?}"
+				);
+			}
+			let video = units.iter().filter(|unit| unit.pid == VIDEO_PID).count() as u64;
+			assert!(video >= 6 * GOP, "{case}: only {video} video units");
 		}
 	}
 }

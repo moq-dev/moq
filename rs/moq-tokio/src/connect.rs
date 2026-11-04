@@ -87,13 +87,7 @@ impl Addr {
 	}
 
 	/// The same peer and addresses, requested at `url`.
-	#[cfg(any(
-		feature = "quic",
-		feature = "iroh",
-		feature = "websocket",
-		feature = "tcp",
-		feature = "uds"
-	))]
+	#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds"))]
 	pub(crate) fn with_url(&self, url: Url) -> Self {
 		Self {
 			url,
@@ -502,7 +496,7 @@ pub struct Config {
 	/// The URL to dial.
 	///
 	/// Supports WebTransport (`https`/`http`), WebSocket (`ws`/`wss`), raw QUIC
-	/// (`moqt`/`moql`), qmux over `tcp`/`unix`, and `iroh`. The URL path is the
+	/// (`moqt`/`moql`), and qmux over `tcp`/`unix`. The URL path is the
 	/// request/auth path (e.g. `/anon` for a public relay) and `?jwt=` supplies a
 	/// token. `http://` first fetches `/certificate.sha256` for the (insecure)
 	/// self-signed fingerprint; `https://` connects directly.
@@ -532,6 +526,11 @@ pub struct Config {
 	pub(crate) connect: Option<Url>,
 
 	/// Send from this local UDP address. Defaults to an ephemeral dual-stack port.
+	///
+	/// With port 0, two consecutive failed dial rounds give the reconnecting connection
+	/// a fresh port. Established sessions keep their sockets; a nonzero port never changes.
+	/// The [retry window](Backoff::timeout) must allow that third round: with the default
+	/// window, a black-holed dial ends the connection after its first round instead.
 	///
 	/// Kept optional because the compatibility fold must distinguish an explicit
 	/// wildcard bind from an unset bind.
@@ -784,7 +783,7 @@ mod addr_tests {
 	#[test]
 	fn fixed_addresses_require_a_supported_nonempty_target() {
 		let peer: net::SocketAddr = "127.0.0.1:443".parse().unwrap();
-		for scheme in ["http", "ws", "tcp", "unix", "iroh"] {
+		for scheme in ["http", "ws", "tcp", "unix"] {
 			let url = format!("{scheme}://relay.example/path").parse().unwrap();
 			assert_eq!(Addr::pinned(url, [peer]), Err(Error::UnsupportedScheme(scheme.into())));
 		}

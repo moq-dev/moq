@@ -184,11 +184,14 @@ impl Server {
 			lite::Setup::default()
 		};
 
+		// One registry, which the subscriber sends and the session hands out.
+		let viewers = crate::bandwidth::Viewers::default();
 		let start = lite::start(lite::Config {
 			runtime: runtime.clone(),
 			stats: self.stats.clone(),
 			client: false,
 			limits: self.limits,
+			viewers: viewers.clone(),
 			session: session.clone(),
 			setup_stream: None,
 			publish,
@@ -212,7 +215,9 @@ impl Server {
 				auth: start.auth,
 				credential: start.credential,
 				estimate: Some(start.estimate),
+				peer_target: Some(start.peer_target),
 				bandwidth: crate::bandwidth::Allocator::default(),
+				viewers,
 				peer_implementation: start.peer_implementation,
 			},
 		))
@@ -552,7 +557,9 @@ impl PausedIetf {
 				auth,
 				credential,
 				estimate: None,
+				peer_target: None,
 				bandwidth: crate::bandwidth::Allocator::default(),
+				viewers: Default::default(),
 				peer_implementation,
 			},
 		))
@@ -596,11 +603,14 @@ impl PausedNegotiated {
 
 		let stream = stream.with_version(version);
 		// Pre-lite-05: no Setup Stream, so nothing to advertise or seed.
+		// One registry, which the subscriber sends and the session hands out.
+		let viewers = crate::bandwidth::Viewers::default();
 		let start = lite::start(lite::Config {
 			runtime: runtime.clone(),
 			stats: server.stats.clone(),
 			client: false,
 			limits: server.limits,
+			viewers: viewers.clone(),
 			session: session.clone(),
 			setup_stream: Some(stream),
 			publish,
@@ -624,7 +634,9 @@ impl PausedNegotiated {
 				auth: start.auth,
 				credential: start.credential,
 				estimate: Some(start.estimate),
+				peer_target: Some(start.peer_target),
 				bandwidth: crate::bandwidth::Allocator::default(),
+				viewers,
 				peer_implementation: start.peer_implementation,
 			},
 		))
@@ -1162,8 +1174,8 @@ mod tests {
 
 	/// An acceptor taken with `Handshake::requests()` BEFORE `ok()` must govern the
 	/// session the driver then runs, through the REAL accept path (`accept_request` -> `ok`).
-	/// The session's own `auth()` (the handle the driver polls) routes a request token to that
-	/// pre-ok consumer instead of falling to the `Unsupported` default, and granting admits.
+	/// Its auth link routes a request token to that pre-ok consumer after `ok()`, instead of
+	/// falling to the `Unsupported` default, and granting admits.
 	/// A QUIC server has no other point to install the verifier.
 	#[kio::test]
 	async fn a_pre_ok_verifier_governs_the_session() {
@@ -1180,17 +1192,18 @@ mod tests {
 
 			// Install the verifier before ok(), as a QUIC server must.
 			let mut requests = request.requests();
-			let (net_session, _driver) = request.ok().await.unwrap_or_else(|e| panic!("ok at {version:?}: {e}"));
+			let auth = request.auth.clone();
+			let (_net_session, _driver) = request.ok().await.unwrap_or_else(|e| panic!("ok at {version:?}: {e}"));
 
-			// The session's own handle is the one the driver polls. Verifying a request token on
-			// it must reach the pre-ok consumer; if the handle were not shared it would fall to
-			// the Unsupported default and the consumer would never see this request.
-			let verdict = net_session.auth().verify_request(
+			// The same link passed to the driver must still reach the pre-ok consumer.
+			let verdict = auth.verify_request(
 				crate::setup::Token {
 					kind: crate::setup::Token::OUT_OF_BAND,
 					value: b"jwt".to_vec(),
 				},
 				None,
+				crate::auth::RequestKind::Subscribe,
+				&crate::Path::from_static("room"),
 			);
 			let received = requests.next().await.expect("the pre-ok consumer receives the request");
 			assert_eq!(received.token().as_ref(), b"jwt", "{version:?}");

@@ -8,25 +8,17 @@ use std::net;
 #[cfg(any(test, all(feature = "uds", unix)))]
 use std::path::PathBuf;
 
-#[cfg(feature = "iroh")]
-use crate::iroh;
 use crate::{Error, Transport};
 use moq_net::Session;
 use url::Url;
 
 // Only the transports that finish their handshake in a spawned future need `.boxed()`;
 // the stream listeners hand back an already-built `Request`.
-#[cfg(any(feature = "quic", feature = "iroh", feature = "websocket"))]
+#[cfg(any(feature = "quic", feature = "websocket"))]
 use futures::FutureExt;
 // The pending handshakes of the transports `Server` accepts itself; WebRTC
 // signaling is the caller's, so a WebRTC-only build has none.
-#[cfg(any(
-	feature = "quic",
-	feature = "iroh",
-	feature = "websocket",
-	feature = "tcp",
-	all(feature = "uds", unix)
-))]
+#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", all(feature = "uds", unix)))]
 use futures::{
 	future::BoxFuture,
 	stream::{FuturesUnordered, StreamExt},
@@ -177,14 +169,6 @@ pub struct Config {
 	#[cfg(feature = "websocket")]
 	pub websocket: Option<crate::websocket::Listener>,
 
-	/// An Iroh endpoint to accept sessions from.
-	///
-	/// The server owns the endpoint's listener: it replaces the endpoint's ALPN set with its
-	/// configured versions, accepts every incoming connection, and closes it on shutdown.
-	/// Don't give one endpoint to two servers; dialing through clones of it is fine.
-	#[cfg(feature = "iroh")]
-	pub iroh: Option<iroh::Endpoint>,
-
 	/// The origin published to every accepted session.
 	pub publisher: Option<moq_net::origin::Consumer>,
 
@@ -221,8 +205,6 @@ impl Config {
 			quic: self.quic.clone(),
 			#[cfg(feature = "websocket")]
 			websocket: None,
-			#[cfg(feature = "iroh")]
-			iroh: None,
 			publisher: self.publisher.clone(),
 			subscriber: self.subscriber.clone(),
 			stats: self.stats.clone(),
@@ -243,13 +225,7 @@ pub struct Server {
 	versions: moq_net::Versions,
 	/// From [`crate::listen::Config::resolved_timeout`].
 	timeout: Option<std::time::Duration>,
-	#[cfg(any(
-		feature = "quic",
-		feature = "iroh",
-		feature = "websocket",
-		feature = "tcp",
-		all(feature = "uds", unix)
-	))]
+	#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", all(feature = "uds", unix)))]
 	/// Pending handshakes, each isolated: one panicking (`None`) must not end the listener.
 	/// Each is boxed before `isolate` wraps it, so a debug build never holds a
 	/// handshake's large state twice on the accept loop's stack.
@@ -259,8 +235,6 @@ pub struct Server {
 	/// The `tls://` config another listener can serve, when a listen identity is loaded.
 	#[cfg(all(feature = "tcp", feature = "_certs"))]
 	tls_stream: Option<std::sync::Arc<rustls::ServerConfig>>,
-	#[cfg(feature = "iroh")]
-	iroh: Option<iroh::Endpoint>,
 	#[cfg(feature = "quic")]
 	quic: Option<crate::quic::Server>,
 	#[cfg(feature = "websocket")]
@@ -286,8 +260,6 @@ impl Server {
 			tls,
 			#[cfg(feature = "websocket")]
 			websocket,
-			#[cfg(feature = "iroh")]
-			iroh,
 			publisher,
 			subscriber,
 			stats,
@@ -439,13 +411,6 @@ impl Server {
 			.transpose()?
 			.map(|tls| tls.config);
 
-		// The endpoint was bound before this server's versions were known, so it
-		// accepts nothing until they name its ALPNs.
-		#[cfg(feature = "iroh")]
-		if let Some(endpoint) = iroh.as_ref() {
-			iroh::listen(endpoint, &versions)?;
-		}
-
 		let mut moq = moq_net::Server::new()
 			.with_versions(versions.clone())
 			.with_extensions(config.extensions)
@@ -462,13 +427,7 @@ impl Server {
 
 		Ok(Server {
 			activity,
-			#[cfg(any(
-				feature = "quic",
-				feature = "iroh",
-				feature = "websocket",
-				feature = "tcp",
-				all(feature = "uds", unix)
-			))]
+			#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", all(feature = "uds", unix)))]
 			accept: Default::default(),
 			moq,
 			versions,
@@ -477,8 +436,6 @@ impl Server {
 			streams,
 			#[cfg(all(feature = "tcp", feature = "_certs"))]
 			tls_stream,
-			#[cfg(feature = "iroh")]
-			iroh,
 			#[cfg(feature = "quic")]
 			quic,
 			#[cfg(feature = "websocket")]
@@ -574,13 +531,7 @@ impl Server {
 		crate::tls::Certificates::empty()
 	}
 
-	#[cfg(not(any(
-		feature = "quic",
-		feature = "iroh",
-		feature = "websocket",
-		feature = "tcp",
-		all(feature = "uds", unix)
-	)))]
+	#[cfg(not(any(feature = "quic", feature = "websocket", feature = "tcp", all(feature = "uds", unix))))]
 	/// Fails, since no compiled transport is one this server listens on (WebRTC
 	/// sessions arrive through [`Listener::accept_webrtc`]).
 	async fn accept_next(&mut self) -> crate::Result<Request> {
@@ -670,13 +621,7 @@ impl Server {
 
 	/// The body of [`Listener::accept`]. Stream accept loops start here if
 	/// [`Server::bind`] left them stopped; [`Server::listen`] already started them.
-	#[cfg(any(
-		feature = "quic",
-		feature = "iroh",
-		feature = "websocket",
-		feature = "tcp",
-		all(feature = "uds", unix)
-	))]
+	#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", all(feature = "uds", unix)))]
 	async fn accept_next(&mut self) -> crate::Result<Request> {
 		// A `bind` (rather than `listen`) leaves the stream loops stopped so an
 		// embedder can read the port before it is willing to take sessions.
@@ -707,17 +652,6 @@ impl Server {
 			};
 			#[cfg(not(feature = "quic"))]
 			let quic_accept = async { None::<()> };
-
-			#[cfg(feature = "iroh")]
-			let iroh_accept = async {
-				#[cfg(feature = "iroh")]
-				if let Some(endpoint) = self.iroh.as_mut() {
-					return Some(endpoint.accept().await);
-				}
-				None
-			};
-			#[cfg(not(feature = "iroh"))]
-			let iroh_accept = async { None::<()> };
 
 			#[cfg(feature = "websocket")]
 			let ws_ref = self.websocket.as_ref();
@@ -789,53 +723,11 @@ impl Server {
 							// (like the stream bindings).
 							let Accepted { session, url, identity, authority, mut link } = within(deadline, crate::quic::accept(_conn, alpns)).await?;
 							link.local = local;
-							let address = match url { Some(_) => moq_net::transport::Address::Uri, None => moq_net::transport::Address::Setup };
-							let quic = Some((*session).clone());
-							let session = crate::transport::Session::new(session, address);
+							let quic = Some(session.connection().clone());
 							let (request, deadline) = accept_request(&setup.server, session, deadline).await?;
 							// Only WebTransport carries a request URL; raw QUIC puts the path in the SETUP.
 							let transport = match url { Some(_) => Transport::WebTransport, None => Transport::Quic };
 							Ok(Request { transport, url, identity, authority, link, handshake: Box::new(request), quic, window, quic_limits: Default::default(), #[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))] qmux: None, deadline, active })
-						}.boxed()).boxed());
-					}
-				}
-				Some(_conn) = iroh_accept => {
-					#[cfg(feature = "iroh")]
-					{
-						// Only a closed endpoint stops yielding; like QUIC, its loss ends the listener.
-						let Some(_conn) = _conn else {
-							self.shutdown().await;
-							return Err(Error::Accept(Transport::Iroh));
-						};
-						let alpns = versions.alpns();
-						let deadline = setup.deadline();
-						let Some(active) = setup.activity.enter() else {
-							_conn.refuse();
-							continue;
-						};
-						self.accept.push(crate::panic::isolate(async move {
-							let Accepted { session, url, identity, authority, link } = within(deadline, super::iroh::accept(_conn, alpns)).await?;
-							let address = match url { Some(_) => moq_net::transport::Address::Uri, None => moq_net::transport::Address::Setup };
-							let session = crate::iroh::Session::new(session, address);
-							let (request, deadline) = accept_request(&setup.server, session, deadline).await?;
-							Ok(Request {
-								transport: Transport::Iroh,
-								url,
-								identity,
-								authority,
-								link,
-								handshake: Box::new(request),
-								#[cfg(feature = "quic")]
-								quic: None,
-								#[cfg(feature = "quic")]
-								window: None,
-								#[cfg(feature = "_transport")]
-								quic_limits: Default::default(),
-								#[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
-								qmux: None,
-								deadline,
-								active,
-							})
 						}.boxed()).boxed());
 					}
 				}
@@ -877,12 +769,6 @@ impl Server {
 		}
 	}
 
-	/// The Iroh endpoint from [`Config::iroh`], if one was set.
-	#[cfg(feature = "iroh")]
-	pub fn iroh_endpoint(&self) -> Option<&iroh::Endpoint> {
-		self.iroh.as_ref()
-	}
-
 	/// The address the QUIC listener bound to, useful when the config asked for
 	/// port 0.
 	///
@@ -917,10 +803,6 @@ impl Server {
 		#[cfg(feature = "quic")]
 		if let Some(quic) = self.quic.take() {
 			quic.shutdown().await;
-		}
-		#[cfg(feature = "iroh")]
-		if let Some(iroh) = self.iroh.take() {
-			iroh.close().await;
 		}
 		#[cfg(feature = "websocket")]
 		{
@@ -1067,12 +949,6 @@ impl Listener {
 	pub fn accept_health(&self) -> Vec<crate::accept::Health> {
 		self.server.accept_health()
 	}
-
-	/// The Iroh endpoint from [`Config::iroh`], if one was set.
-	#[cfg(feature = "iroh")]
-	pub fn iroh_endpoint(&self) -> Option<&iroh::Endpoint> {
-		self.server.iroh_endpoint()
-	}
 }
 
 impl Drop for Listener {
@@ -1088,13 +964,7 @@ async fn serve_session(request: Request) -> crate::Result<()> {
 }
 
 /// The MoQ server an accepted connection handshakes against, and how long it has.
-#[cfg(any(
-	feature = "quic",
-	feature = "iroh",
-	feature = "websocket",
-	feature = "tcp",
-	all(feature = "uds", unix)
-))]
+#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", all(feature = "uds", unix)))]
 #[derive(Clone)]
 struct Setup {
 	activity: moq_net::server::Activity,
@@ -1102,13 +972,7 @@ struct Setup {
 	timeout: Option<std::time::Duration>,
 }
 
-#[cfg(any(
-	feature = "quic",
-	feature = "iroh",
-	feature = "websocket",
-	feature = "tcp",
-	all(feature = "uds", unix)
-))]
+#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", all(feature = "uds", unix)))]
 impl Setup {
 	/// When a connection accepted now must finish its handshake, or `None` to wait
 	/// forever, including past the clock's range.
@@ -1119,7 +983,6 @@ impl Setup {
 
 #[cfg(any(
 	feature = "quic",
-	feature = "iroh",
 	feature = "websocket",
 	feature = "tcp",
 	all(feature = "uds", unix),
@@ -1195,7 +1058,6 @@ struct Deadline {
 impl Deadline {
 	#[cfg(any(
 		feature = "quic",
-		feature = "iroh",
 		feature = "websocket",
 		feature = "tcp",
 		all(feature = "uds", unix),
@@ -1241,7 +1103,6 @@ impl Deadline {
 /// handshake is dropped, which closes its connection.
 #[cfg(any(
 	feature = "quic",
-	feature = "iroh",
 	feature = "websocket",
 	feature = "tcp",
 	all(feature = "uds", unix),
@@ -1729,7 +1590,7 @@ pub(crate) async fn accept_stream(
 /// The transport-level facts a backend captures while accepting a connection, before the
 /// MoQ SETUP. Grouped so the shared accept loop builds a [`Request`] from named fields
 /// rather than a wide tuple.
-#[cfg(any(feature = "quic", feature = "iroh"))]
+#[cfg(feature = "quic")]
 pub(crate) struct Accepted<S> {
 	pub session: S,
 	pub url: Option<Url>,
@@ -1739,8 +1600,8 @@ pub(crate) struct Accepted<S> {
 }
 
 /// What the transport knows about an accepted session's link, reported to whoever
-/// authorizes it. Every field is optional: a unix socket has no addresses, a qmux
-/// stream negotiates no ALPN, and iroh dials by node id.
+/// authorizes it. Every field is optional: a unix socket has no addresses, and a qmux
+/// stream negotiates no ALPN.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Link {
@@ -1770,7 +1631,7 @@ pub struct Request {
 	url: Option<Url>,
 	/// The authority the client dialed, when it offered one: the TLS SNI on raw QUIC and
 	/// `tls://`, the CONNECT authority on WebTransport. `None` on the plaintext stream
-	/// bindings and on iroh.
+	/// bindings.
 	authority: Option<String>,
 	/// The peer's validated mTLS identity, captured at the transport handshake (before
 	/// the MoQ SETUP), when the backend supports it.
@@ -1837,14 +1698,14 @@ impl Request {
 	}
 
 	/// The QUIC connection under this request, to change its limits once the session runs.
-	/// `None` on a transport moq-quic does not drive (qmux streams, iroh).
+	/// `None` on a transport moq-quic does not drive (qmux streams).
 	#[cfg(feature = "quic")]
 	pub fn quic(&self) -> Option<&crate::quic::driver::connection::Connection> {
 		self.quic.as_ref()
 	}
 
 	/// Set the QUIC limits [`Self::ok`] applies before answering SETUP, replacing any set
-	/// before. Ignored on iroh, which moq-quic does not drive.
+	/// before.
 	///
 	/// Until then a QUIC connection holds only [`moq_net::transport::SETUP_RECEIVE_WINDOW`];
 	/// `ok` opens `receive_window`, or `[quic] receive_window` when it is unset, after the
@@ -1940,7 +1801,7 @@ impl Request {
 	}
 
 	/// The host authority the client dialed, or `None` when the client offered none or the
-	/// transport carries no host (iroh, plaintext stream bindings). On raw QUIC and
+	/// transport carries no host (plaintext stream bindings). On raw QUIC and
 	/// `tls://` it is the TLS SNI.
 	///
 	/// Reported as offered: rustls sends no SNI for an IP-literal dial (RFC 6066),
@@ -2539,144 +2400,144 @@ mod tests {
 	struct ScriptedError;
 
 	#[cfg(feature = "websocket")]
-	impl web_transport_trait::Error for ScriptedError {
+	impl moq_net::transport::Error for ScriptedError {
 		fn session_error(&self) -> Option<(u32, String)> {
 			None
 		}
 	}
 
-	/// Records every write, or accepts none at all when `stalled`.
+	/// Records every write, or accepts none when stalled.
 	#[cfg(feature = "websocket")]
 	struct ScriptedSend {
 		written: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
 		stalled: bool,
 	}
-
 	#[cfg(feature = "websocket")]
-	impl web_transport_trait::SendStream for ScriptedSend {
+	impl moq_net::transport::poll::SendStream for ScriptedSend {
 		type Error = ScriptedError;
-
-		async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+		type Group = moq_net::transport::poll::Ungrouped;
+		fn poll_write(&mut self, _: &kio::Waiter, buf: &[u8]) -> std::task::Poll<Result<usize, ScriptedError>> {
 			if self.stalled {
-				std::future::pending::<()>().await;
+				return std::task::Poll::Pending;
 			}
 			self.written.lock().unwrap().extend_from_slice(buf);
-			Ok(buf.len())
+			std::task::Poll::Ready(Ok(buf.len()))
 		}
-
-		fn set_priority(&mut self, _order: i32) {}
-
-		fn finish(&mut self) -> Result<(), Self::Error> {
-			Ok(())
-		}
-
-		fn reset(&mut self, _code: u32) {}
-
-		async fn closed(&mut self) -> Result<(), Self::Error> {
-			std::future::pending().await
-		}
-	}
-
-	#[cfg(feature = "websocket")]
-	impl crate::transport::GroupedSend for ScriptedSend {
-		type Group = moq_net::transport::poll::Ungrouped;
-
+		fn set_priority(&mut self, _: i64) {}
 		fn set_group(&mut self, group: &Self::Group) {
 			match *group {}
 		}
-	}
-
-	#[cfg(feature = "websocket")]
-	impl crate::transport::Grouped for Scripted {
-		type Recv = moq_net::transport::poll::Buffered<crate::transport::RecvStream<ScriptedRecv>>;
-
-		fn recv(stream: crate::transport::RecvStream<ScriptedRecv>) -> Self::Recv {
-			moq_net::transport::poll::Buffered::new(stream)
+		fn finish(&mut self) -> Result<(), ScriptedError> {
+			Ok(())
+		}
+		fn reset(&mut self, _: u32) {}
+		fn poll_closed(&self, _: &kio::Waiter) -> std::task::Poll<Result<(), ScriptedError>> {
+			std::task::Poll::Pending
 		}
 	}
 
-	/// Delivers `data` once, then nothing more.
+	/// Delivers data once, then parks.
 	#[cfg(feature = "websocket")]
 	struct ScriptedRecv {
 		data: Option<bytes::Bytes>,
 	}
-
 	#[cfg(feature = "websocket")]
-	impl web_transport_trait::RecvStream for ScriptedRecv {
+	impl moq_net::transport::poll::Chunks for ScriptedRecv {
 		type Error = ScriptedError;
-
-		async fn read(&mut self, dst: &mut [u8]) -> Result<Option<usize>, Self::Error> {
-			let Some(mut data) = self.data.take() else {
-				return std::future::pending().await;
+		fn poll_read_chunk(
+			&mut self,
+			_: &kio::Waiter,
+			max: usize,
+		) -> std::task::Poll<Result<Option<bytes::Bytes>, ScriptedError>> {
+			let Some(data) = &mut self.data else {
+				return std::task::Poll::Pending;
 			};
-			let n = dst.len().min(data.len());
-			dst[..n].copy_from_slice(&data.split_to(n));
-			self.data = (!data.is_empty()).then_some(data);
-			Ok(Some(n))
+			let chunk = data.split_to(max.min(data.len()));
+			if data.is_empty() {
+				self.data = None;
+			}
+			std::task::Poll::Ready(Ok(Some(chunk)))
 		}
-
-		fn stop(&mut self, _code: u32) {}
-
-		async fn closed(&mut self) -> Result<(), Self::Error> {
-			std::future::pending().await
-		}
+		fn stop(&mut self, _: u32) {}
 	}
 
 	#[cfg(feature = "websocket")]
-	impl web_transport_trait::Session for Scripted {
+	impl moq_net::transport::poll::Session for Scripted {
 		type SendStream = ScriptedSend;
-		type RecvStream = ScriptedRecv;
+		type RecvStream = moq_net::transport::poll::Buffered<ScriptedRecv>;
 		type Error = ScriptedError;
-
-		async fn accept_uni(&self) -> Result<Self::RecvStream, Self::Error> {
-			std::future::pending().await
+		fn poll_accept_uni(&self, _: &kio::Waiter) -> std::task::Poll<Result<Self::RecvStream, ScriptedError>> {
+			std::task::Poll::Pending
 		}
-
-		async fn accept_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
+		fn poll_accept_bi(
+			&self,
+			_: &kio::Waiter,
+		) -> std::task::Poll<Result<moq_net::transport::poll::BiStreams<Self>, ScriptedError>> {
 			let Some(setup) = self.setup.clone() else {
-				return std::future::pending().await;
+				return std::task::Poll::Pending;
 			};
-			let send = ScriptedSend {
-				written: Default::default(),
-				stalled: true,
-			};
-			Ok((send, ScriptedRecv { data: Some(setup) }))
+			std::task::Poll::Ready(Ok((
+				ScriptedSend {
+					written: Default::default(),
+					stalled: true,
+				},
+				moq_net::transport::poll::Buffered::new(ScriptedRecv { data: Some(setup) }),
+			)))
 		}
-
-		async fn open_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
-			let send = ScriptedSend {
-				written: self.written.clone(),
-				stalled: false,
-			};
-			Ok((send, ScriptedRecv { data: None }))
+		fn poll_open_uni(
+			&self,
+			_: &kio::Waiter,
+			_: moq_net::transport::poll::SendOptions<'_, moq_net::transport::poll::Ungrouped>,
+		) -> std::task::Poll<Result<ScriptedSend, ScriptedError>> {
+			std::task::Poll::Pending
 		}
-
-		async fn open_uni(&self) -> Result<Self::SendStream, Self::Error> {
-			std::future::pending().await
+		fn poll_open_bi(
+			&self,
+			_: &kio::Waiter,
+			_: moq_net::transport::poll::SendOptions<'_, moq_net::transport::poll::Ungrouped>,
+		) -> std::task::Poll<Result<moq_net::transport::poll::BiStreams<Self>, ScriptedError>> {
+			std::task::Poll::Ready(Ok((
+				ScriptedSend {
+					written: self.written.clone(),
+					stalled: false,
+				},
+				moq_net::transport::poll::Buffered::new(ScriptedRecv { data: None }),
+			)))
 		}
-
-		fn send_datagram(&self, _payload: bytes::Bytes) -> Result<(), Self::Error> {
+		fn poll_open_request(
+			&self,
+			waiter: &kio::Waiter,
+			options: moq_net::transport::poll::SendOptions<'_, moq_net::transport::poll::Ungrouped>,
+		) -> std::task::Poll<Result<Option<moq_net::transport::poll::BiStreams<Self>>, ScriptedError>> {
+			self.poll_open_bi(waiter, options).map_ok(Some)
+		}
+		fn send_group(&self, _: i64) -> Option<moq_net::transport::poll::Ungrouped> {
+			None
+		}
+		fn send_datagram(
+			&self,
+			_: bytes::Bytes,
+			_: moq_net::transport::poll::SendOptions<'_, moq_net::transport::poll::Ungrouped>,
+		) -> Result<(), ScriptedError> {
 			Ok(())
 		}
-
-		async fn recv_datagram(&self) -> Result<bytes::Bytes, Self::Error> {
-			std::future::pending().await
+		fn poll_recv_datagram(&self, _: &kio::Waiter) -> std::task::Poll<Result<bytes::Bytes, ScriptedError>> {
+			std::task::Poll::Pending
 		}
-
 		fn max_datagram_size(&self) -> usize {
 			0
 		}
-
 		fn protocol(&self) -> Option<&str> {
 			Some(self.alpn)
 		}
-
-		fn close(&self, code: u32, _reason: &str) {
+		fn address(&self) -> moq_net::transport::Address {
+			moq_net::transport::Address::Uri
+		}
+		fn close(&self, code: u32, _: &str) {
 			self.closed.lock().unwrap().get_or_insert(code);
 		}
-
-		async fn closed(&self) -> Self::Error {
-			std::future::pending().await
+		fn poll_closed(&self, _: &kio::Waiter) -> std::task::Poll<ScriptedError> {
+			std::task::Poll::Pending
 		}
 	}
 
@@ -2704,13 +2565,7 @@ mod tests {
 			timeout: Some(timeout),
 		};
 		let start = kio::clock::now();
-		let Err(err) = accept_request(
-			&setup.server,
-			crate::transport::Session::new(peer.clone(), moq_net::transport::Address::Uri),
-			setup.deadline(),
-		)
-		.await
-		else {
+		let Err(err) = accept_request(&setup.server, peer.clone(), setup.deadline()).await else {
 			panic!("a peer that never sent SETUP was accepted");
 		};
 		assert!(matches!(err, Error::MoqNet(moq_net::Error::Timeout)), "{err}");
@@ -2732,7 +2587,7 @@ mod tests {
 		// then waits on a reply that never comes.
 		let recorder = Scripted::new("moql");
 		let client = tokio::spawn({
-			let recorder = crate::transport::Session::new(recorder.clone(), moq_net::transport::Address::Uri);
+			let recorder = recorder.clone();
 			async move {
 				let _ = moq_net::Client::new()
 					.with_versions("moq-lite-02".parse::<moq_net::Version>().unwrap().into())
@@ -2754,13 +2609,7 @@ mod tests {
 			timeout: Some(timeout),
 		};
 		let start = kio::clock::now();
-		let Ok((request, deadline)) = accept_request(
-			&setup.server,
-			crate::transport::Session::new(peer.clone(), moq_net::transport::Address::Uri),
-			setup.deadline(),
-		)
-		.await
-		else {
+		let Ok((request, deadline)) = accept_request(&setup.server, peer.clone(), setup.deadline()).await else {
 			panic!("a readable SETUP was refused");
 		};
 		assert_eq!(start.elapsed(), std::time::Duration::ZERO);

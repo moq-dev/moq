@@ -90,7 +90,7 @@ pub struct Http {
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
 pub struct Https {
-	/// Socket address to bind the HTTPS listener to, serving `cert`/`key` or the `[acme]` certificate.
+	/// Socket address to bind the HTTPS listener to, serving `cert`/`key`.
 	#[usage(
 		long = "web-https-listen",
 		name = "web-https-listen",
@@ -198,8 +198,6 @@ pub struct Web {
 	http_listener: Option<net::TcpListener>,
 	https_listener: Option<net::TcpListener>,
 	https_tls: Option<RustlsConfig>,
-	/// The ACME certificate resolver HTTPS serves instead of `https.cert`/`https.key`.
-	acme: Option<Arc<dyn rustls::server::ResolvesServerCert>>,
 	rtmp: rtmp::Handoff,
 	/// Serves `tls://` on the HTTPS listener, when the relay has a listen identity.
 	tls_stream: Option<moq_tokio::tcp::TlsAcceptor>,
@@ -235,7 +233,6 @@ impl Web {
 			http_listener: None,
 			https_listener: None,
 			https_tls: None,
-			acme: None,
 			rtmp: rtmp::Handoff::default(),
 			tls_stream: None,
 			addrs: Addrs::default(),
@@ -255,10 +252,7 @@ impl Web {
 			}
 		}
 		if self.https_tls.is_none() && self.config.https.listen.is_some() {
-			let tls = match &self.acme {
-				Some(resolver) => build_acme_config(resolver.clone(), &self.config.https.root)?,
-				None => build_https_config(&self.config.https.cert, &self.config.https.key, &self.config.https.root)?,
-			};
+			let tls = build_https_config(&self.config.https.cert, &self.config.https.key, &self.config.https.root)?;
 			self.https_tls = Some(RustlsConfig::from_config(tls));
 		}
 		if let Some(listen) = self.config.http.listen
@@ -280,19 +274,6 @@ impl Web {
 			self.https_listener = Some(listener);
 		}
 		Ok(self)
-	}
-
-	/// Serve HTTPS from the ACME resolver, which also answers TLS-ALPN-01 challenges.
-	#[cfg(feature = "acme")]
-	pub(crate) fn with_acme(mut self, resolver: Option<Arc<dyn rustls::server::ResolvesServerCert>>) -> Self {
-		self.acme = resolver;
-		self
-	}
-
-	/// The bound HTTPS socket, where ACME answers challenges before serving starts.
-	#[cfg(feature = "acme")]
-	pub(crate) fn https_listener(&self) -> Option<&net::TcpListener> {
-		self.https_listener.as_ref()
 	}
 
 	/// Take the RTMP and RTMPS connections the HTTP and HTTPS listeners classify.
@@ -484,7 +465,6 @@ impl Web {
 			http_listener,
 			https_listener,
 			https_tls,
-			acme,
 			rtmp,
 			tls_stream,
 			..
@@ -512,25 +492,22 @@ impl Web {
 				WebAcceptor::plain(ws, rtmp.clone(), state.clone()),
 			)?;
 			server.http_builder().http2().max_concurrent_streams(streams);
-			Some(server.serve(app.clone()))
+			Some(Box::pin(server.serve(app.clone())))
 		} else {
 			None
 		};
 
 		let https = if let Some(listener) = https_listener {
 			let rustls_config = https_tls.expect("HTTPS config was built before binding");
-			// The ACME resolver renews in place, so there are no files to watch.
-			if acme.is_none() {
-				state.cluster.critical.spawn(
-					"HTTPS certificate reload",
-					reload_https_config(
-						rustls_config.clone(),
-						config.https.cert,
-						config.https.key,
-						config.https.root,
-					),
-				);
-			}
+			state.cluster.critical.spawn(
+				"HTTPS certificate reload",
+				reload_https_config(
+					rustls_config.clone(),
+					config.https.cert,
+					config.https.key,
+					config.https.root,
+				),
+			);
 			let mut server = crate::listener::server(
 				listener,
 				crate::listener::Config {
@@ -549,11 +526,13 @@ impl Web {
 				),
 			)?;
 			server.http_builder().http2().max_concurrent_streams(streams);
-			Some(server.serve(app))
+			Some(Box::pin(server.serve(app)))
 		} else {
 			None
 		};
 
+		// Both servers are boxed, since a debug build copies each one into this poll's
+		// stack frame several times.
 		tokio::select! {
 			Some(res) = async move { Some(http?.await) } => res?,
 			Some(res) = async move { Some(https?.await) } => res?,
@@ -635,22 +614,6 @@ fn build_https_config(
 	tls.root = root.to_vec();
 
 	tls.server_config(vec![b"h2".to_vec(), b"http/1.1".to_vec()])
-		.context("failed to build https TLS config")
-}
-
-/// Build the HTTPS config around the ACME resolver, also offering the TLS-ALPN-01 protocol.
-///
-/// [`WebAcceptor`] closes a challenge connection once its handshake completes.
-fn build_acme_config(
-	resolver: Arc<dyn rustls::server::ResolvesServerCert>,
-	root: &[PathBuf],
-) -> anyhow::Result<Arc<rustls::ServerConfig>> {
-	let mut tls = moq_tokio::tls::Listen::default();
-	tls.root = root.to_vec();
-
-	let alpn = vec![b"h2".to_vec(), b"http/1.1".to_vec(), b"acme-tls/1".to_vec()];
-	moq_tokio::tls::Serve::resolver(resolver, &tls)?
-		.config(alpn)
 		.context("failed to build https TLS config")
 }
 
@@ -829,10 +792,6 @@ impl<S: Send + 'static> Accept<crate::listener::Accepted, S> for WebAcceptor {
 				}
 			};
 			let tls = stream.tls();
-			if tls.is_some_and(|tls| tls.alpn_protocol() == Some(b"acme-tls/1")) {
-				// The validator checked the certificate during the handshake; RFC 8737 has the server close.
-				return Err(std::io::Error::other("answered an ACME TLS-ALPN-01 challenge"));
-			}
 			let peer = tls
 				.and_then(|tls| tls.peer_certificates())
 				.filter(|certs| !certs.is_empty())
@@ -1143,16 +1102,12 @@ async fn serve_fetch(
 		};
 		let group = match async { crate::fetch_group(&broadcast.track(&track)?, sequence).await }.await {
 			Ok(group) => group,
-			// A miss upstream arrives as the stream reset that refused the FETCH. A datagram
-			// group is never cached, and a group past the track's max age is gone, so both
-			// are misses too.
+			// A miss upstream arrives as the stream reset that refused the FETCH. A group past
+			// the track's max age is gone, so it is a miss too.
 			Err(
 				moq_net::Error::NotFound
-				| moq_net::Error::NotFetchable
 				| moq_net::Error::Old
-				| moq_net::Error::Stream(
-					moq_net::StreamError::NotFound | moq_net::StreamError::NotFetchable | moq_net::StreamError::Old,
-				),
+				| moq_net::Error::Stream(moq_net::StreamError::NotFound | moq_net::StreamError::Old),
 			) => {
 				return Err(StatusCode::NOT_FOUND);
 			}

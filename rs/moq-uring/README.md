@@ -35,12 +35,11 @@ local (`!Send`) task set, and the UDP sockets bound through it.
   the application protocol.
 - **WebTransport**: browsers negotiate `h3` and `quic::web::Request` runs the
   HTTP/3 CONNECT handshake (SETTINGS, subprotocol selection, capsule close)
-  over the same adapter via `web-transport-proto`. `quic::web::Session` is
-  a raw or web transport (`Session::raw`). Wrap it with
-  `transport::Session::new(session, address)`, using `moq_net::transport::Address::Uri`
-  for WebTransport or `Setup` for raw QUIC. moq-net boxes the transport with a
-  native `Send` bound, so wrap the session once more in `transport::Local`, which
-  checks the thread on every use, before `connect`/`accept`. They return the
+  over the same driver via `web-transport-proto`. `quic::web::Session` is
+  a raw or web transport (`Session::raw`) implementing moq-net's poll traits directly.
+  moq-net boxes the transport with a native `Send` bound, so wrap the session in
+  `transport::Local::new(session)`, which checks the thread on every use, before
+  `connect`/`accept`. They return the
   session and its driver; poll the driver or await it inside a `Handle::spawn`
   task to run it on the worker. Web mode maps stream and close codes through the
   HTTP/3 error space.
@@ -130,6 +129,21 @@ series in the nightly `rust-shared` group.
 ```bash
 just rs bench-udp --sample-size 20 --measurement-time 2 --warm-up-time 1
 just rs bench-echo
+```
+
+`benchmark_socket_queues` (an ignored integration test, run nightly) attributes
+UDP loss between a sender and a steered worker group, on this ring and on
+moq-sock's `recvmmsg` under Tokio. It sweeps the kernel queue, the receive pool
+depth, workers, flows and GSO one at a time across worker stalls, CPU
+contention, sustained overload, and a rate-limited path with a deep finite
+queue (moq-shaper). Each row accounts for every datagram: delivered, dropped
+at a socket (`sk_drops` via `SO_MEMINFO`), dropped on the path, or
+unattributed, beside `rx_enobufs`, peak queued bytes, delay and receive CPU.
+`rx_enobufs` is pool starvation, which leaves datagrams queued in the socket:
+with a 16-buffer pool it fired hundreds of times and dropped nothing.
+
+```bash
+just rs test -p moq-uring --release -E 'test(benchmark_socket_queues)' --run-ignored only --success-output immediate
 ```
 
 ## Parallel test runs

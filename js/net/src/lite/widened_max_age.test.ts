@@ -15,14 +15,14 @@ import { ALPN_07_WIP, Version } from "./version.ts";
 const url = new URL("https://localhost:4443/test");
 
 /** The next `count` groups `reader` hands out, in sequence order. */
-async function received(reader: TrackSubscriber, count: number): Promise<number[]> {
-	const got: number[] = [];
+async function received(reader: TrackSubscriber, count: number): Promise<bigint[]> {
+	const got: bigint[] = [];
 	while (got.length < count) {
 		const group = await reader.recvGroup();
 		if (!group) throw new Error("the track ended");
 		got.push(group.sequence);
 	}
-	return got.sort((a, b) => a - b);
+	return got.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
 test("a widened maxDelay re-offers what the publisher skipped below the start", async () => {
@@ -31,7 +31,7 @@ test("a widened maxDelay re-offers what the publisher skipped below the start", 
 	const publication = origin.createBroadcast(Path.from("room"));
 	publication.announce();
 	const broadcast = publication.broadcast;
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	// One group per second, so a budget picks how far back a reader reaches.
 	for (let sequence = 0; sequence < 10; sequence++) {
 		const group = producer.appendGroup();
@@ -46,10 +46,10 @@ test("a widened maxDelay re-offers what the publisher skipped below the start", 
 	const remote = wireOf(client).consume(Path.from("room"));
 	// Group 5 ends at 6s, a full 3s behind the 9s edge.
 	const reader = remote.track("video").subscribe({ delay: { max: Milli(2500) } });
-	expect(await received(reader, 4)).toEqual([6, 7, 8, 9]);
+	expect(await received(reader, 4)).toEqual([6n, 7n, 8n, 9n]);
 
 	reader.update({ delay: { max: Milli(6500) } });
-	expect(await received(reader, 4)).toEqual([2, 3, 4, 5]);
+	expect(await received(reader, 4)).toEqual([2n, 3n, 4n, 5n]);
 	// Ending the track flushes anything else the publisher would send: nothing, not even a repeat.
 	producer.finish();
 	producer.close();

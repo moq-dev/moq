@@ -5,9 +5,13 @@
  * an {@link Allocator} rather than each targeting the whole thing. How a sender
  * then follows its share is policy and lives with the sender.
  *
+ * The receive direction mirrors it: {@link Viewers} divides the receive estimate
+ * among the broadcasts watched over one connection, and their ceilings summed are
+ * the PROBE target the connection asks its peer to probe up to.
+ *
  * @module
  */
-import { Effect, type Getter, Signal } from "@moq/signals";
+import { Derived, Effect, type Getter, Signal } from "@moq/signals";
 import { hooks } from "./internal.ts";
 import type { Demand } from "./track.ts";
 
@@ -135,7 +139,8 @@ export function allocate(estimate: number, wants: readonly Want[], id: number): 
 
 interface Entry {
 	id: number;
-	demand: Demand;
+	/** The track whose demand gates the claim, or undefined for a claim that is always active. */
+	demand?: Demand;
 	priority: number;
 	max: number;
 	rate: Signal<number | undefined>;
@@ -147,9 +152,11 @@ interface Registry {
 	release(id: number): void;
 }
 
-/** Whether `entry` claims its share from the others: its track is demanded and not released. */
 function demanded(entry: Entry): boolean {
-	return hooks.demandReleased(entry.demand).peek() === undefined && entry.demand.wanted.peek() !== undefined;
+	return (
+		!entry.demand ||
+		(hooks.demandReleased(entry.demand).peek() === undefined && entry.demand.wanted.peek() !== undefined)
+	);
 }
 
 /** A division and what it divided, so a read that finds them unchanged reuses it. */
@@ -170,8 +177,10 @@ interface Division {
  * needs that to know when to resume.
  */
 function shareOf(plan: Plan, entry: Entry): number | undefined {
-	if (entry.demand.closed.peek() !== undefined) return undefined;
-	if (entry.demand.wanted.peek() === undefined) return plan.rejoin(entry);
+	if (entry.demand) {
+		if (entry.demand.closed.peek() !== undefined) return undefined;
+		if (entry.demand.wanted.peek() === undefined) return plan.rejoin(entry);
+	}
 	return plan.grant(entry.id);
 }
 
@@ -180,6 +189,185 @@ function ceiling(max: number): number {
 		throw new Error(`reservation ceiling must be a finite non-negative number, got ${max}`);
 	}
 	return max;
+}
+
+/** The ceilings summed in order, the way {@link Viewers.target} sums them. */
+function total(entries: readonly { max: number }[]): number {
+	let sum = 0;
+	for (const entry of entries) sum += entry.max;
+	return sum;
+}
+
+/**
+ * The registry behind {@link Allocator} and {@link Viewers}: divides one estimate
+ * among its claims, publishing each claim's slice.
+ */
+class Divider {
+	#estimate: Getter<number | undefined> | undefined;
+	/** The most the ceilings may sum to, or `undefined` for no limit. */
+	#limit: number | undefined;
+	readonly entries = new Signal<Entry[]>([]);
+	/** Whether a live claim reads the estimate; see {@link reserved}. */
+	readonly reserved = new Signal(false);
+	#alive = new Signal(true);
+	#nextId = 0;
+	#signals = new Effect();
+	#registry: Registry;
+	/** Bumped whenever an entry is added, moved or removed. */
+	#version = 0;
+	#division: Division | undefined;
+
+	constructor(estimate?: Getter<number | undefined>, limit?: number) {
+		this.#estimate = estimate;
+		this.#limit = limit;
+
+		this.#registry = {
+			peek: (id) => this.#peek(id),
+			update: (id, max) => this.#update(id, max),
+			release: (id) => this.#release(id),
+		};
+
+		this.#signals.run((effect) => {
+			if (!effect.get(this.#alive)) return;
+			const entries = effect.get(this.entries);
+			let reserved = false;
+			for (const entry of entries) {
+				// A claim without a demand always reads its slice.
+				if (!entry.demand) {
+					reserved = true;
+					continue;
+				}
+				effect.get(entry.demand.wanted);
+				effect.get(hooks.demandReleased(entry.demand));
+				// The same test shareOf applies: a closed demand reads no slice.
+				if (effect.get(entry.demand.closed) === undefined) reserved = true;
+			}
+			this.reserved.set(reserved);
+			// Observe the estimate only while something claims it: reading a session's
+			// receive estimate is what requests PROBE, so an empty registry asks for nothing.
+			if (entries.length === 0) return;
+			if (this.#estimate) effect.get(this.#estimate);
+			this.#publish();
+		});
+	}
+
+	/** Claim up to `max`, active whenever `demand` is, or always without one. */
+	claim(demand: Demand | undefined, priority: number, max: number): Reservation {
+		max = ceiling(max);
+		this.#prune();
+
+		if (this.#limit !== undefined && this.#alive.peek()) this.#fits([...this.entries.peek(), { max }]);
+
+		const id = this.#nextId++;
+		const rate = new Signal<number | undefined>(undefined);
+		// A closed registry hands back an inert reservation, so its target stays zero.
+		if (this.#alive.peek()) {
+			this.#mutate((entries) => {
+				entries.push({ id, demand, priority, max, rate });
+			});
+		}
+
+		const reservation = makeReservation(this.#registry, id, rate);
+		this.#publish();
+		return reservation;
+	}
+
+	close(): void {
+		if (!this.#alive.peek()) return;
+		this.#alive.set(false);
+		this.reserved.set(false);
+		for (const entry of this.entries.peek()) {
+			entry.rate.set(undefined);
+		}
+		this.entries.set([]);
+		this.#division = undefined;
+		this.#signals.close();
+	}
+
+	#prune(): void {
+		const entries = this.entries.peek();
+		const live = entries.filter(
+			(entry) => !entry.demand || hooks.demandReleased(entry.demand).peek() === undefined,
+		);
+		if (live.length !== entries.length) {
+			this.#version++;
+			this.entries.set(live);
+		}
+	}
+
+	#mutate(fn: (entries: Entry[]) => void): void {
+		this.#version++;
+		this.entries.mutate(fn);
+	}
+
+	/** The division of `estimate` among `entries`, divided again only when either moved. */
+	#plan(estimate: number, entries: readonly Entry[]): Plan {
+		const last = this.#division;
+		if (
+			last?.estimate === estimate &&
+			last.version === this.#version &&
+			entries.every((entry, index) => demanded(entry) === last.demanded[index])
+		) {
+			return last.plan;
+		}
+		const flags = entries.map(demanded);
+		const plan = new Plan(
+			estimate,
+			entries.filter((_, index) => flags[index]),
+		);
+		this.#division = { plan, estimate, version: this.#version, demanded: flags };
+		return plan;
+	}
+
+	#publish(): void {
+		if (!this.#alive.peek()) return;
+		const estimate = this.#estimate?.peek();
+		const entries = this.entries.peek();
+		const plan = estimate == null ? undefined : this.#plan(estimate, entries);
+		for (const entry of entries) {
+			entry.rate.set(plan && shareOf(plan, entry));
+		}
+	}
+
+	#peek(id: number): number | undefined {
+		if (!this.#alive.peek()) return undefined;
+		const estimate = this.#estimate?.peek();
+		if (estimate == null) return undefined;
+		const entries = this.entries.peek();
+		const entry = entries.find((candidate) => candidate.id === id);
+		if (!entry) return undefined;
+		return shareOf(this.#plan(estimate, entries), entry);
+	}
+
+	/** Throw when `entries`' ceilings sum above the limit. */
+	#fits(entries: readonly { max: number }[]): void {
+		const sum = total(entries);
+		if (sum > (this.#limit ?? Number.POSITIVE_INFINITY)) {
+			throw new RangeError(`ceilings sum to ${sum}, above the limit of ${this.#limit}`);
+		}
+	}
+
+	#update(id: number, max: number): void {
+		if (!this.#alive.peek()) return;
+		max = ceiling(max);
+		if (this.#limit !== undefined) {
+			this.#fits(this.entries.peek().map((entry) => (entry.id === id ? { max } : entry)));
+		}
+		this.#mutate((entries) => {
+			const entry = entries.find((candidate) => candidate.id === id);
+			if (entry) entry.max = max;
+		});
+		this.#publish();
+	}
+
+	#release(id: number): void {
+		if (!this.#alive.peek()) return;
+		this.#mutate((entries) => {
+			const index = entries.findIndex((entry) => entry.id === id);
+			if (index >= 0) entries.splice(index, 1);
+		});
+		this.#publish();
+	}
 }
 
 /**
@@ -194,6 +382,20 @@ function ceiling(max: number): number {
 export interface Handle {
 	/** Reserve up to `max` for `track`; see {@link Allocator.reserve}. */
 	reserve(track: Demand, max: number): Reservation;
+}
+
+// Assigned by Allocator's static block, which runs before any instance exists.
+let reservedOf: (allocator: Allocator) => Getter<boolean>;
+
+/**
+ * Whether `allocator` holds a reservation that reads the estimate.
+ *
+ * The estimate's source can stop sampling while this is false: nothing reads it.
+ *
+ * @internal
+ */
+export function reserved(allocator: Allocator): Getter<boolean> {
+	return reservedOf(allocator);
 }
 
 /**
@@ -211,15 +413,7 @@ export interface Handle {
  * Hand the same instance to every sender on the connection.
  */
 export class Allocator implements Handle {
-	#estimate: Getter<number | undefined> | undefined;
-	#entries = new Signal<Entry[]>([]);
-	#alive = new Signal(true);
-	#nextId = 0;
-	#signals = new Effect();
-	#registry: Registry;
-	/** Bumped whenever an entry is added, moved or removed. */
-	#version = 0;
-	#division: Division | undefined;
+	#divider: Divider;
 
 	/**
 	 * Divide `estimate`, normally a connection's sampled send rate.
@@ -228,24 +422,11 @@ export class Allocator implements Handle {
 	 * reports `undefined`, which already means "no opinion, hold your rate".
 	 */
 	constructor(estimate?: Getter<number | undefined>) {
-		this.#estimate = estimate;
+		this.#divider = new Divider(estimate);
+	}
 
-		this.#registry = {
-			peek: (id) => this.#peek(id),
-			update: (id, max) => this.#update(id, max),
-			release: (id) => this.#release(id),
-		};
-
-		this.#signals.run((effect) => {
-			if (!effect.get(this.#alive)) return;
-			if (this.#estimate) effect.get(this.#estimate);
-			const entries = effect.get(this.#entries);
-			for (const entry of entries) {
-				effect.get(entry.demand.wanted);
-				effect.get(hooks.demandReleased(entry.demand));
-			}
-			this.#publish();
-		});
+	static {
+		reservedOf = (allocator) => allocator.#divider.reserved;
 	}
 
 	/**
@@ -282,24 +463,7 @@ export class Allocator implements Handle {
 	 * report the slice the track would get back, without claiming it from the others.
 	 */
 	reserve(track: Demand, max: number): Reservation {
-		max = ceiling(max);
-		this.#prune();
-
-		const id = this.#nextId++;
-		const rate = new Signal<number | undefined>(undefined);
-		this.#mutate((entries) => {
-			entries.push({
-				id,
-				demand: track,
-				priority: hooks.demandPriority(track),
-				max,
-				rate,
-			});
-		});
-
-		const reservation = makeReservation(this.#registry, id, rate);
-		this.#publish();
-		return reservation;
+		return this.#divider.claim(track, hooks.demandPriority(track), max);
 	}
 
 	/**
@@ -307,87 +471,144 @@ export class Allocator implements Handle {
 	 * {@link reserve} calls still return a handle that never claims.
 	 */
 	close(): void {
-		if (!this.#alive.peek()) return;
-		this.#alive.set(false);
-		for (const entry of this.#entries.peek()) {
-			entry.rate.set(undefined);
-		}
-		this.#entries.set([]);
-		this.#division = undefined;
-		this.#signals.close();
+		this.#divider.close();
 	}
+}
 
-	#prune(): void {
-		const entries = this.#entries.peek();
-		const live = entries.filter((entry) => hooks.demandReleased(entry.demand).peek() === undefined);
-		if (live.length !== entries.length) {
-			this.#version++;
-			this.#entries.set(live);
-		}
-	}
+/**
+ * Divides one connection's receive estimate among the broadcasts watched over it.
+ *
+ * The receive-side mirror of {@link Allocator}. Every player on a connection reads the
+ * same receive estimate, so N players each selecting against all of it oversubscribe
+ * the downlink N times over. {@link watch} a broadcast here and its {@link Viewer}
+ * reports only its own slice, split max-min fair by each viewer's ceiling, so the
+ * slices sum to the estimate instead of each matching it. Viewers carry no priority:
+ * a viewer asking for less than an even cut takes all it asked for and leaves the
+ * rest to the others.
+ *
+ * The viewers' ceilings summed are also the PROBE target the connection sends its
+ * peer, which probes up to it when it advertised `Increase`, so the estimate can rise
+ * to fund a larger rendition. The target never leaves this hop.
+ *
+ * The estimate is observed only while a viewer is live, since observing a
+ * connection's receive estimate is what requests PROBE.
+ */
+export class Viewers {
+	/**
+	 * The largest PROBE target: the most the viewers' ceilings, summed, or an override may be.
+	 *
+	 * `Number.MAX_SAFE_INTEGER` bits per second, the largest integer the PROBE stream encodes.
+	 */
+	static readonly MAX_TARGET = Number.MAX_SAFE_INTEGER;
 
-	#mutate(fn: (entries: Entry[]) => void): void {
-		this.#version++;
-		this.#entries.mutate(fn);
-	}
+	#divider: Divider;
+	#override = new Signal<number | undefined>(undefined);
+	#closed = false;
 
-	/** The division of `estimate` among `entries`, divided again only when either moved. */
-	#plan(estimate: number, entries: readonly Entry[]): Plan {
-		const last = this.#division;
-		if (
-			last?.estimate === estimate &&
-			last.version === this.#version &&
-			entries.every((entry, index) => demanded(entry) === last.demanded[index])
-		) {
-			return last.plan;
-		}
-		const flags = entries.map(demanded);
-		const plan = new Plan(
-			estimate,
-			entries.filter((_, index) => flags[index]),
+	/**
+	 * The PROBE target: the live viewers' ceilings summed, or the {@link setTarget} override.
+	 * Zero sends no target.
+	 */
+	readonly target: Getter<number>;
+
+	/** Divide `estimate`, normally a connection's receive estimate from PROBE. */
+	constructor(estimate?: Getter<number | undefined>) {
+		this.#divider = new Divider(estimate, Viewers.MAX_TARGET);
+		this.target = new Derived([this.#divider.entries, this.#override], (entries, override) =>
+			override !== undefined ? override : total(entries),
 		);
-		this.#division = { plan, estimate, version: this.#version, demanded: flags };
-		return plan;
 	}
 
-	#publish(): void {
-		if (!this.#alive.peek()) return;
-		const estimate = this.#estimate?.peek();
-		const entries = this.#entries.peek();
-		// Divided once for every reservation rather than once per reservation.
-		const plan = estimate == null ? undefined : this.#plan(estimate, entries);
-		for (const entry of entries) {
-			entry.rate.set(plan && shareOf(plan, entry));
+	/**
+	 * Watch a broadcast receiving at most `max` bits per second, returning its viewer.
+	 *
+	 * `max` is a ceiling: what the largest rendition the player would switch to needs,
+	 * not what it happens to be receiving. The claim lasts until {@link Viewer.close}:
+	 * change the ceiling with {@link Viewer.update}, and close it once the broadcast
+	 * stops being watched.
+	 *
+	 * @throws {RangeError} watching nothing, when the ceilings would sum above {@link Viewers.MAX_TARGET}.
+	 */
+	watch(max: number): Viewer {
+		return makeViewer(this.#divider.claim(undefined, 0, max));
+	}
+
+	/**
+	 * Send `target` as the PROBE target instead of the viewers' sum, or `undefined` to follow them again.
+	 *
+	 * `0` sends no target, so the peer stops probing for these viewers.
+	 *
+	 * @throws {RangeError} keeping the previous override, for a target above {@link Viewers.MAX_TARGET}.
+	 */
+	setTarget(target: number | undefined): void {
+		if (this.#closed) return;
+		if (target !== undefined && ceiling(target) > Viewers.MAX_TARGET) {
+			throw new RangeError(`PROBE target ${target} is above the limit of ${Viewers.MAX_TARGET}`);
 		}
+		this.#override.set(target);
 	}
 
-	#peek(id: number): number | undefined {
-		if (!this.#alive.peek()) return undefined;
-		const estimate = this.#estimate?.peek();
-		if (estimate == null) return undefined;
-		const entries = this.#entries.peek();
-		const entry = entries.find((candidate) => candidate.id === id);
-		if (!entry) return undefined;
-		return shareOf(this.#plan(estimate, entries), entry);
+	/**
+	 * Stop dividing. Existing viewers report `undefined` and release their claims, and the
+	 * target drops to zero for good, override included.
+	 */
+	close(): void {
+		this.#closed = true;
+		this.#override.set(undefined);
+		this.#divider.close();
+	}
+}
+
+let makeViewer: (reservation: Reservation) => Viewer;
+
+/**
+ * One watched broadcast's standing claim on {@link Viewers}, held for as long as it is watched.
+ *
+ * Close it to release the claim and lower the PROBE target.
+ */
+export class Viewer implements Disposable {
+	readonly #reservation: Reservation;
+
+	private constructor(reservation: Reservation) {
+		this.#reservation = reservation;
 	}
 
-	#update(id: number, max: number): void {
-		if (!this.#alive.peek()) return;
-		max = ceiling(max);
-		this.#mutate((entries) => {
-			const entry = entries.find((candidate) => candidate.id === id);
-			if (entry) entry.max = max;
-		});
-		this.#publish();
+	static {
+		makeViewer = (reservation) => new Viewer(reservation);
 	}
 
-	#release(id: number): void {
-		if (!this.#alive.peek()) return;
-		this.#mutate((entries) => {
-			const index = entries.findIndex((entry) => entry.id === id);
-			if (index >= 0) entries.splice(index, 1);
-		});
-		this.#publish();
+	/** This viewer's slice of the receive estimate right now; see {@link Reservation.peek}. */
+	peek(): number | undefined {
+		return this.#reservation.peek();
+	}
+
+	/**
+	 * This viewer's current slice of the receive estimate.
+	 *
+	 * `undefined` while the connection has no receive estimate or this viewer has been
+	 * closed, telling a player to hold its current selection.
+	 */
+	get rate(): Getter<number | undefined> {
+		return this.#reservation.rate;
+	}
+
+	/**
+	 * Change the ceiling, keeping the same claim, as when a catalog enables or disables a rendition.
+	 *
+	 * @throws {RangeError} keeping the previous ceiling, when the ceilings would sum above {@link Viewers.MAX_TARGET}.
+	 */
+	update(max: number): void {
+		this.#reservation.update(max);
+	}
+
+	/** Release the claim so other viewers take the room. Idempotent. */
+	close(): void {
+		this.#reservation.close();
+	}
+
+	/** Calls {@link close}, so `using` releases the claim. */
+	[Symbol.dispose](): void {
+		this.close();
 	}
 }
 

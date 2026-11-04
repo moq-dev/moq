@@ -6,7 +6,7 @@
  * is `websocket`, and announces broadcast `room` with tracks `low` and `high`.
  * Each stdin line asks for one group, so the receiver decides when each one is written:
  *
- * - `low`: a frame twice the window on `low`, which can never complete.
+ * - `low`: three quarters of the window in a frame declared twice the window on `low`.
  * - `high`: half a window on `high`, which only fits once the receiver stops `low`.
  * - `after`: a small group on `low`, which has to arrive after that stream is stopped.
  *
@@ -38,8 +38,10 @@ if (!websocket) install();
 const origin = new Moq.Origin.Producer();
 const broadcastPublication = origin.createBroadcast(Moq.Path.from("room"));
 const broadcast = broadcastPublication.broadcast;
-const low = broadcast.createTrack("low");
-const high = broadcast.createTrack("high");
+// No publisher limit, so the open `low` group stays the receiver's to give up on rather than
+// going stale here once a newer group arrives.
+const low = broadcast.createTrack("low", { maxAge: null });
+const high = broadcast.createTrack("high", { maxAge: null });
 broadcastPublication.announce();
 
 const session = await Moq.Connection.connect({
@@ -66,7 +68,9 @@ try {
 		if (command === "") continue;
 		if (command === "low") {
 			partial = low.appendGroup();
-			partial.writeFrame({ payload: new Uint8Array(2 * window).fill(1) });
+			// A whole frame can return credit at each sealed segment and finish before `high`
+			// reaches stdin. Keep this prefix unsealed until the receiver evicts its stream.
+			partial.createFrame({ size: 2 * window }).write(new Uint8Array((window * 3) / 4).fill(1));
 		} else if (command === "high") {
 			const group = high.appendGroup();
 			group.writeFrame({ payload: new Uint8Array(window / 2).fill(2) });

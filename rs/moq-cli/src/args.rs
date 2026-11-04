@@ -208,15 +208,11 @@ impl Invocation {
 
 	/// Refuse every MoQ-side flag but the dial and those in `allow`, on a verb that
 	/// only reads from a relay: a listener, cluster, or auth policy it would never
-	/// serve is not silently ignored. The dial is `--connect*` and the `--quic-*` and
-	/// `--iroh-*` settings it dials with. Answered from the command line, like
+	/// serve is not silently ignored. The dial is `--connect*` and the `--quic-*`
+	/// settings it dials with. Answered from the command line, like
 	/// [`Self::reject`].
 	pub fn dial_only(&self, command: &str, allow: &[&str]) -> anyhow::Result<()> {
 		let dials = |flag: &&&usage_rs::Flag<'_>| {
-			#[cfg(feature = "iroh")]
-			if owns::<moq_tokio::iroh::Config>(flag) {
-				return true;
-			}
 			owns::<moq_tokio::connect::Config>(flag)
 				|| owns::<moq_tokio::quic::Config>(flag)
 				|| allow
@@ -520,11 +516,6 @@ pub struct MoqSide {
 	#[usage(flatten)]
 	pub server: moq_tokio::listen::Config,
 
-	/// Iroh transport config (`--iroh-*`), used by both the client and server.
-	#[cfg(feature = "iroh")]
-	#[usage(flatten)]
-	pub iroh: moq_tokio::iroh::Config,
-
 	/// Clustering config (`--cluster-*`, including LAN). The same flags as
 	/// `moq-relay`, so a CLI process and a relay on the same network mesh
 	/// through one implementation.
@@ -799,15 +790,15 @@ pub struct Import {
 	#[usage(long = "name", hide = true)]
 	name: Option<String>,
 
-	/// How long relays keep a non-latest group of the published media tracks fetchable,
-	/// e.g. "30s" or "5s". Defaults to hang's 30s.
+	/// How long a superseded group of the published media tracks stays fresh, e.g. "30s" or
+	/// "5s". Defaults to 30s.
 	///
-	/// A RETENTION budget, not a delivery one: it never makes a subscriber play further behind
+	/// A freshness bound, not a delivery one: it never makes a subscriber play further behind
 	/// live, it caps how far back a FETCH can still reach (and how long a subscriber may ask to
 	/// wait for a late group). The default suits a segmented egress (HLS/DASH), which may only
-	/// advertise segments that are still fetchable; lower it when nothing reads history and the
-	/// memory matters. Media tracks only -- the catalog and HLS records are read at the live
-	/// edge, which is retained unconditionally.
+	/// advertise segments that are still fetchable; lower it when nothing reads history. Media
+	/// tracks only -- the catalog and HLS records keep moq-net's zero default, since they are read at the
+	/// live edge, which never goes stale.
 	#[usage(long)]
 	pub max_age: Option<moq_tokio::cli::Duration>,
 
@@ -2560,10 +2551,10 @@ mod tests {
 		assert!(err.to_string().contains("--latency-max -> --delay"), "{}", err);
 	}
 
-	/// A publisher's retention is `--max-age` on `import`; a subscriber's staleness budget is
+	/// A publisher's freshness bound is `--max-age` on `import`; a subscriber's staleness budget is
 	/// `--max-delay` for immediate exports and `--delay` for buffered exports.
 	#[test]
-	fn export_staleness_is_max_delay_and_import_retention_is_max_age() {
+	fn export_staleness_is_max_delay_and_import_freshness_is_max_age() {
 		let export = |args: &[&str]| {
 			let mut argv = vec!["moq", "export", "--broadcast", "b"];
 			argv.extend_from_slice(args);
@@ -2762,8 +2753,6 @@ mod tests {
 			&["--connect-tls-insecure"],
 			&["--connect-backoff-initial", "2s"],
 			&["--quic-idle-timeout", "10s"],
-			#[cfg(feature = "iroh")]
-			&["--iroh-enabled"],
 			&["--broadcast", "room"],
 		];
 
