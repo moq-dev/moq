@@ -208,7 +208,7 @@ export default class MoqPublish extends HTMLElement {
 
 	// Set when the element is connected to the DOM.
 	#enabled = new Signal(false);
-	#connected = false;
+	#root = new Signal<Document | ShadowRoot | undefined>(undefined);
 	#invalid = new Signal<ReadonlySet<string>>(new Set());
 	// Whether clearing the last invalid attribute re-enables media: false when the page had
 	// already disabled the connection, so recovery does not override that.
@@ -315,16 +315,28 @@ export default class MoqPublish extends HTMLElement {
 			if (preview instanceof HTMLCanvasElement) {
 				// Own only the empty-state rule, leaving the page's inline and stylesheet display intact.
 				const hidden = "moq-publish-preview-hidden";
-				const style = document.createElement("style");
-				style.textContent = `canvas.${hidden} { display: none !important; }`;
-				this.append(style);
 				effect.cleanup(() => {
 					preview.classList.remove(hidden);
-					style.remove();
+				});
+				effect.run((inner) => {
+					const root = inner.get(this.#root);
+					if (!root) return;
+					// CSSOM styles need no inline-style permission. Reattach in the current root on reconnect.
+					const view = this.ownerDocument.defaultView as Window & typeof globalThis;
+					const sheet = new view.CSSStyleSheet();
+					sheet.replaceSync(`canvas.${hidden} { display: none !important; }`);
+					root.adoptedStyleSheets = [...root.adoptedStyleSheets, sheet];
+					inner.cleanup(() => {
+						root.adoptedStyleSheets = root.adoptedStyleSheets.filter((current) => current !== sheet);
+					});
 				});
 				effect.run((inner) => {
 					const source = inner.get(this.#videoEnabled) ? inner.get(this.#videoSource) : undefined;
-					preview.classList.toggle(hidden, !source || inner.get(this.controls.preview) === "none");
+					const display = inner.get(this.#capture.out.display);
+					preview.classList.toggle(
+						hidden,
+						!source || !display || inner.get(this.controls.preview) === "none",
+					);
 				});
 
 				// Keep the renderer while hidden, but release it when the publisher disconnects.
@@ -421,14 +433,14 @@ export default class MoqPublish extends HTMLElement {
 
 	/** Called by the browser when the element joins a document. */
 	connectedCallback() {
-		this.#connected = true;
+		this.#root.set(this.getRootNode() as Document | ShadowRoot);
 		if (this.#invalid.peek().size) this.#resume = true;
 		else this.#enabled.set(true);
 	}
 
 	/** Called by the browser when the element leaves its document. */
 	disconnectedCallback() {
-		this.#connected = false;
+		this.#root.set(undefined);
 		this.#enabled.set(false);
 	}
 
@@ -471,7 +483,7 @@ export default class MoqPublish extends HTMLElement {
 		});
 		if (this.#invalid.peek().size || !this.#resume) return;
 		this.#resume = false;
-		this.#enabled.set(this.#connected);
+		this.#enabled.set(this.#root.peek() !== undefined);
 	}
 
 	#reflect(effect: Effect, name: (typeof OBSERVED)[number], value: string | undefined) {

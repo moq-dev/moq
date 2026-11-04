@@ -328,6 +328,157 @@ test.each(["video", "canvas"] as const)(
 	30_000,
 );
 
+test("canvas previews wait for dimensions and paint fresh frames under a strict style policy", async () => {
+	const server = await createServer({
+		configFile: false,
+		root: `${import.meta.dir}/publish-ui`,
+		plugins: [
+			worklet(),
+			{
+				name: "standalone-publish",
+				transformIndexHtml: () =>
+					'<!doctype html><html><body><moq-publish><canvas></canvas></moq-publish><script type="module" src="/main.ts"></script></body></html>',
+			},
+		],
+		server: { host: "127.0.0.1", port: 0, headers: { "Content-Security-Policy": "style-src 'self'" } },
+	});
+	await server.listen();
+	const browser = await launch(["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"]);
+	try {
+		const page = await browser.newPage();
+		const errors: string[] = [];
+		page.on("pageerror", (error) => errors.push(error.message));
+		await page.goto(server.resolvedUrls?.local[0] ?? "");
+		const fixture = await page.evaluateHandle(async () => {
+			await customElements.whenDefined("moq-publish");
+			const publish = document.querySelector<MoqPublish>("moq-publish");
+			const preview = publish?.querySelector("canvas");
+			if (!publish || !preview) throw new Error("missing preview");
+			publish.backend = "2d";
+			publish.capture = "hold";
+			publish.muted = true;
+			publish.style.display = "block";
+			preview.style.width = "320px";
+			preview.style.height = "auto";
+			const fixture = {
+				publish,
+				preview,
+				writer: undefined as WritableStreamDefaultWriter<VideoFrame> | undefined,
+				violations: [] as string[],
+			};
+			document.addEventListener("securitypolicyviolation", (event) => {
+				fixture.violations.push(event.effectiveDirective);
+			});
+			const original = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+			const { MediaStreamTrackGenerator } = globalThis as unknown as {
+				MediaStreamTrackGenerator: new (init: {
+					kind: "video";
+				}) => MediaStreamTrack & {
+					writable: WritableStream<VideoFrame>;
+				};
+			};
+			navigator.mediaDevices.getUserMedia = async (constraints) => {
+				if (!constraints?.video) return original(constraints);
+				const track = new MediaStreamTrackGenerator({ kind: "video" });
+				fixture.writer = track.writable.getWriter();
+				return new MediaStream([track]);
+			};
+			return fixture;
+		});
+		const hidden = async () => {
+			await page.waitForFunction(({ preview }) => getComputedStyle(preview).display === "none", fixture);
+			expect(await fixture.evaluate(({ preview }) => preview.getBoundingClientRect().height)).toBe(0);
+		};
+		const frame = async (color: "red" | "blue", width = 64, height = 36) => {
+			await fixture.evaluate(
+				async (fixture, { color, width, height }) => {
+					if (!fixture.writer) throw new Error("missing video writer");
+					const canvas = new OffscreenCanvas(width, height);
+					const context = canvas.getContext("2d");
+					if (!context) throw new Error("missing frame context");
+					context.fillStyle = color;
+					context.fillRect(0, 0, width, height);
+					// Live capture timestamps advance with real time, including time spent hidden.
+					const frame = new VideoFrame(canvas, { timestamp: Math.round(performance.now() * 1000) });
+					try {
+						await fixture.writer.write(frame);
+					} finally {
+						frame.close();
+					}
+				},
+				{ color, width, height },
+			);
+			await page.waitForFunction(
+				({ preview, color, width, height }) => {
+					const pixel = preview.getContext("2d")?.getImageData(0, 0, 1, 1).data;
+					return (
+						getComputedStyle(preview).display !== "none" &&
+						preview.width === width &&
+						preview.height === height &&
+						pixel &&
+						pixel[color === "red" ? 0 : 2] > 200 &&
+						pixel[color === "red" ? 2 : 0] < 30
+					);
+				},
+				{ preview: await fixture.getProperty("preview"), color, width, height },
+			);
+		};
+		await hidden();
+		await fixture.evaluate(({ publish }) => {
+			publish.source = "camera";
+		});
+		await page.waitForFunction(({ publish }) => !!publish.video.in.capture.peek()?.in.source.peek(), fixture);
+		// Acquisition alone must not expose the default 300x150 canvas before any frame arrives.
+		await hidden();
+		await frame("red");
+		for (const control of ["invisible", "preview"] as const) {
+			await fixture.evaluate(({ publish }, control) => {
+				if (control === "invisible") publish.invisible = true;
+				else publish.preview = "none";
+			}, control);
+			await hidden();
+			await fixture.evaluate(({ publish }, control) => {
+				if (control === "invisible") publish.invisible = false;
+				else publish.preview = "source";
+			}, control);
+			// A different picture proves recovery draws new content, not merely a retained bitmap.
+			await frame("blue");
+			await frame("red");
+		}
+		await fixture.evaluate(({ publish }) => {
+			publish.source = undefined;
+		});
+		await hidden();
+		await fixture.evaluate(({ publish }) => {
+			publish.source = "camera";
+		});
+		await page.waitForFunction(({ publish }) => !!publish.video.in.capture.peek()?.in.source.peek(), fixture);
+		await hidden();
+		await frame("blue", 128, 96);
+		// A move to a shadow tree must attach the hiding rule to the new styling root.
+		await fixture.evaluate(({ publish }) => {
+			const host = document.createElement("div");
+			document.body.append(host);
+			host.attachShadow({ mode: "open" }).append(publish);
+			publish.preview = "none";
+		});
+		await hidden();
+		// Constructed stylesheets belong to their document, including after adoption into an iframe.
+		await fixture.evaluate(({ publish }) => {
+			const frame = document.createElement("iframe");
+			document.body.append(frame);
+			if (!frame.contentDocument) throw new Error("missing frame document");
+			frame.contentDocument.body.append(publish);
+		});
+		await hidden();
+		expect(await fixture.evaluate(({ violations }) => violations)).toEqual([]);
+		expect(errors).toEqual([]);
+	} finally {
+		await browser.close();
+		await server.close();
+	}
+}, 30_000);
+
 test("a selected camera stays announced while real capture is reopening", async () => {
 	const server = await createServer({
 		configFile: false,
