@@ -122,6 +122,11 @@ impl Aux {
 	///
 	/// mp4-atom reads only the ISO `senc`, so this also refuses one that carries its information
 	/// only in PIFF's `uuid` box, which the rebuilt fragment would drop.
+	///
+	/// A fragment kept whole passes through as the source wrote it, so its `senc` and `saiz` sample
+	/// counts are not held to its `trun`: ffmpeg's `cenc` audio (as of Lavf 63) carries every earlier
+	/// fragment's entries too, and refusing that would refuse ffmpeg's own output. Only a fragment
+	/// the importer drops samples from is held to it, by [`restate`](Self::restate).
 	pub fn check(&self, traf: &mp4_atom::Traf) -> Result<()> {
 		if self.senc && traf.senc.is_none() {
 			return Err(Error::InvalidProtection("encrypted fragment without senc").into());
@@ -155,10 +160,9 @@ impl Aux {
 		let mut data = Vec::with_capacity(senc.data.len());
 		data.extend_from_slice(&(indices.len() as u32).to_be_bytes());
 		for &index in indices {
-			let entry = entries.get(index).ok_or(Error::ProtectionLacksSample {
-				aux: "senc",
-				sample: index,
-			})?;
+			let entry = entries
+				.get(index)
+				.ok_or(Error::InvalidProtection("a kept sample past senc"))?;
 			data.extend_from_slice(entry);
 		}
 		kept.senc = Some(mp4_atom::Senc {
@@ -174,13 +178,9 @@ impl Aux {
 			}
 			if saiz.default_sample_info_size == 0 {
 				let sizes = (indices.iter())
-					.map(|&index| {
-						(saiz.sample_info_size.get(index).copied()).ok_or(Error::ProtectionLacksSample {
-							aux: "saiz",
-							sample: index,
-						})
-					})
-					.collect::<std::result::Result<Vec<_>, _>>()?;
+					.map(|&index| saiz.sample_info_size.get(index).copied())
+					.collect::<Option<Vec<_>>>()
+					.ok_or(Error::InvalidProtection("a kept sample past saiz"))?;
 				kept.saiz.push(mp4_atom::Saiz {
 					aux_info: saiz.aux_info.clone(),
 					default_sample_info_size: 0,
