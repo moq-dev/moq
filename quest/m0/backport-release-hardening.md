@@ -15,9 +15,15 @@ Added 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31 /quest
 
 Decided 2026-11-04 (maintainer, /quest-unblock): one quest, one `release` PR per port, as [moq-dev/moq#7599](https://github.com/moq-dev/moq/pull/7599) did, with [moq-dev/moq#7596](https://github.com/moq-dev/moq/pull/7596) kept as the main-side checkpoint; not splitting the ports into two quests. The maintainer cuts the combined patch release once both land.
 
+Open ports, both ready for review with local checks and a cross-vendor review: [moq-dev/moq#7920](https://github.com/moq-dev/moq/pull/7920) (relay HTTP hardening) and [moq-dev/moq#7922](https://github.com/moq-dev/moq/pull/7922) (withdrawal without send credit).
+
 Shipped: the dot-segment and auth-redirect refusals landed on `release` in [moq-dev/moq#7599](https://github.com/moq-dev/moq/pull/7599) (2026-11-02) and published in `moq-auth` 0.2.3 and `moq-relay` 0.17.11 (2026-11-03). That also settles the redirect follow-up [moq-dev/moq#7298](https://github.com/moq-dev/moq/pull/7298) and [moq-dev/moq#7278](https://github.com/moq-dev/moq/pull/7278) suggested. [moq-dev/moq#7596](https://github.com/moq-dev/moq/pull/7596) holds this quest's claim.
 
 Public API: none. Wire: none; as on main, a withdrawal resets a partially written request without waiting for peer credit.
+
+## Waiting
+
+- Maintainer: review and merge [moq-dev/moq#7920](https://github.com/moq-dev/moq/pull/7920) and [moq-dev/moq#7922](https://github.com/moq-dev/moq/pull/7922) into `release`, then cut the combined patch release and choose its versions. Agents never merge into `release`, bump versions, tag, or publish (version bumps stay with a human by the 2026-10-30 decision). Check: the `moq-relay` and `moq-net` versions next published from `release` include both ports; then delete this quest and its milestone link.
 
 ## Related
 
