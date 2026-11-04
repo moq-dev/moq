@@ -86,9 +86,10 @@ assigns a sequence, `insert(_:)` preserves one, and `DatagramConsumer.recv()` or
 Keep payloads below the path MTU. Delivery needs a datagram-capable transport and lite-05
 or newer, with no stream fallback. A stream track of the same name is independent.
 
-On lite-05/06, an on-demand datagram name reaches its handler only after the stream
-lookup reports not-found. Keeping a stream handler alive without rejecting that name
-leaves the datagram request pending; lite-07 uses independent requests.
+On lite-05/06, a local datagram handler is asked for an on-demand name without waiting
+for the stream handler, and answers it unless a stream track of that name is published. A
+relayed broadcast asks its upstream for the datagram track only once the stream track is
+not found. lite-07 uses independent requests.
 
 JSON tracks live under the `Json` namespace, mirroring the `moq-json` crate, and carry your own
 `Codable` types with the framing handled for you. Each type wraps a track: a producer takes over a

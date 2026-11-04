@@ -303,6 +303,7 @@ reads with `await recv()` or async iteration. Demand is aggregate subscriber `pr
 Keep payloads below the path MTU. Delivery needs a datagram-capable transport and lite-05 or
 newer, without a stream fallback. Stream tracks of the same name are independent.
 
-On lite-05/06, an on-demand datagram name reaches its handler only after the stream
-lookup reports not-found. Keeping a stream handler alive without rejecting that name
-leaves the datagram request pending; lite-07 uses independent requests.
+On lite-05/06, a local datagram handler is asked for an on-demand name without waiting
+for the stream handler, and answers it unless a stream track of that name is published. A
+relayed broadcast asks its upstream for the datagram track only once the stream track is
+not found. lite-07 uses independent requests.

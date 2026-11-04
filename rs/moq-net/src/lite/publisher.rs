@@ -2563,7 +2563,7 @@ struct Legacy {
 	broadcast: crate::broadcast::Consumer,
 	name: String,
 	/// The name's datagram track, asked for beside the stream track: `None` until asked, as
-	/// a relayed broadcast's stays, and `Some(None)` once refused.
+	/// a relayed broadcast's stays, and `Some(None)` once a handler refused it.
 	datagrams: Option<Option<datagram::Consumer>>,
 }
 
@@ -2586,13 +2586,19 @@ impl Legacy {
 		let Some(this) = legacy else {
 			return Poll::Pending;
 		};
-		// A relayed broadcast is left unasked, for the stream track's not-found to ask.
-		if this.datagrams.is_none() && !this.broadcast.has_local_datagrams() {
-			return Poll::Pending;
+		if this.datagrams.is_none() {
+			// A relayed broadcast is left unasked, for the stream track's not-found to ask.
+			if !this.broadcast.has_local_datagrams() {
+				return Poll::Pending;
+			}
+			// So is a name nothing can answer yet, such as before a handler exists: only a
+			// handler's refusal is final.
+			let Ok(consumer) = this.broadcast.datagrams(&this.name) else {
+				return Poll::Pending;
+			};
+			this.datagrams = Some(Some(consumer));
 		}
-		let asked = this
-			.datagrams
-			.get_or_insert_with(|| this.broadcast.datagrams(&this.name).ok());
+		let asked = this.datagrams.as_mut().expect("asked above");
 		let Some(consumer) = asked else {
 			return Poll::Pending;
 		};

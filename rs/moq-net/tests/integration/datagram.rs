@@ -439,6 +439,36 @@ async fn lite05_and_lite06_answer_a_datagram_request_beside_a_silent_stream_hand
 	}
 }
 
+/// A datagram handler that registers while a lite-06 name's stream lookup is pending is
+/// still asked for the name once the stream track is not found.
+#[kio::test]
+async fn lite06_asks_a_late_datagram_handler_once_the_stream_track_is_not_found() {
+	let chain = Chain::new(&["moq-lite-06"]).await;
+	let mut requests = chain.publication.requests();
+	let mut consumer = chain.remote().await.datagrams(TRACK).unwrap();
+	let stream = kio::clock::timeout(TIMEOUT, requests.requested_track())
+		.await
+		.expect("the stream lookup never reached the publisher")
+		.unwrap();
+	let mut handler = requests.datagrams();
+	stream.reject(Error::NotFound);
+	let request = kio::clock::timeout(TIMEOUT, handler.requested())
+		.await
+		.expect("the datagram handler was never asked")
+		.unwrap();
+	let mut producer = request.accept(timed());
+	kio::clock::timeout(TIMEOUT, consumer.info())
+		.await
+		.expect("info timeout")
+		.expect("the handler answered");
+	kio::clock::timeout(TIMEOUT, datagram_priority(&producer, Some(0)))
+		.await
+		.expect("the subscription never reached the publisher");
+	producer.append(millis(2), &b"late"[..]).unwrap();
+	let datagram = recv(&mut consumer).await.unwrap().expect("a datagram");
+	assert_eq!(&datagram.payload[..], b"late");
+}
+
 /// A relay serving an old subscriber asks its upstream session for a name's datagram track
 /// once the stream track is not found there, as one asks a lite-07 upstream.
 #[kio::test]
