@@ -126,7 +126,7 @@ impl Nvdec {
 			.map_err(|e| codec_err(format!("CUDA bind: {e:?}")))?;
 		// The decoder itself waits for the first sequence header, so ask now
 		// whether the GPU decodes the codec at all, at the one format this backend
-		// outputs and the size the catalog declares.
+		// outputs and the size the description pins.
 		check_caps(api, cuda_codec, stream.size.map(|size| (size.width, size.height)))?;
 
 		let mut state = Box::new(State {
@@ -406,8 +406,6 @@ impl State {
 	}
 }
 
-/// Sequence callback: a new (or repeated) sequence header. Returns the number of
-/// decode surfaces the parser should assume, or 0 on failure.
 /// Ask the GPU whether it decodes `codec` as 8-bit 4:2:0 into NV12, the one
 /// format this backend handles, at `coded` size when known.
 ///
@@ -451,6 +449,8 @@ fn check_caps(api: &cuvid::Api, codec: cudaVideoCodec, coded: Option<(u32, u32)>
 	Ok(())
 }
 
+/// Sequence callback: a new (or repeated) sequence header. Returns the number of
+/// decode surfaces the parser should assume, or 0 on failure.
 unsafe extern "C" fn sequence_callback(user: *mut c_void, format: *mut CUVIDEOFORMAT) -> c_int {
 	// SAFETY: `user` is the boxed State passed at parser creation, and cuvid
 	// invokes callbacks synchronously inside the parse call, so no other

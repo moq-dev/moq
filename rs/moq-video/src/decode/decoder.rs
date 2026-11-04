@@ -230,24 +230,7 @@ impl Decoder {
 			size.validate("decoder scale hint")?;
 		}
 
-		let stream = backend::Stream {
-			codec,
-			h264_profile: match &catalog.codec {
-				VideoCodec::H264(h264) => Some(h264.profile),
-				_ => None,
-			},
-			size: catalog
-				.coded_width
-				.zip(catalog.coded_height)
-				.map(|(width, height)| Size::new(width, height)),
-			parameter_sets: match &conversion {
-				Conversion::LengthPrefixed { keyframe_prefix, .. } if !keyframe_prefix.is_empty() => {
-					Some(keyframe_prefix.clone())
-				}
-				_ => None,
-			},
-		};
-		let backend = backend::open(&stream, config)?;
+		let backend = backend::open(&stream(catalog, codec, &conversion), config)?;
 		tracing::debug!(decoder = backend.name(), "opened video decoder");
 		Ok(Self {
 			backend,
@@ -381,6 +364,32 @@ fn declared(catalog: &VideoConfig) -> Option<Color> {
 	// An unspecified field among declared ones takes the guess for the coded
 	// size, or for SD when the catalog has none.
 	Color::from_code_points(Some(codes), range, coded.unwrap_or_default())
+}
+
+/// What the catalog says about the stream before its first picture, for the
+/// backends to ask their devices with.
+fn stream(catalog: &VideoConfig, codec: Codec, conversion: &Conversion) -> backend::Stream {
+	let parameter_sets = match conversion {
+		Conversion::LengthPrefixed { keyframe_prefix, .. } if !keyframe_prefix.is_empty() => {
+			Some(keyframe_prefix.clone())
+		}
+		_ => None,
+	};
+	backend::Stream {
+		codec,
+		h264_profile: match &catalog.codec {
+			VideoCodec::H264(h264) => Some(h264.profile),
+			_ => None,
+		},
+		// The catalog's coded size is a ceiling the picture resizes below in
+		// band, so it is the picture's size only when the description's
+		// parameter sets pin it.
+		size: parameter_sets
+			.as_ref()
+			.and(catalog.coded_width.zip(catalog.coded_height))
+			.map(|(width, height)| Size::new(width, height)),
+		parameter_sets,
+	}
 }
 
 fn is_supported_av1(av1: &AV1) -> bool {
@@ -861,6 +870,26 @@ mod tests {
 		let opened = probe::native_opened().expect("the backend recorded its config");
 		assert_eq!(opened.output, crate::Output::Cpu);
 		assert_eq!(opened.scale_hint, Some(hint));
+	}
+
+	/// The catalog's coded size reaches the backends only when the description's
+	/// parameter sets pin it. Otherwise it is a ceiling the picture resizes below
+	/// in band, so a device must not refuse the stream by it.
+	#[test]
+	fn only_a_pinned_size_reaches_the_backends() {
+		let mut catalog = probe_catalog();
+		catalog.coded_width = Some(8192);
+		catalog.coded_height = Some(8192);
+
+		let in_band = super::stream(&catalog, Codec::H264, &super::Conversion::Passthrough);
+		assert_eq!(in_band.size, None);
+
+		let pinned = super::Conversion::LengthPrefixed {
+			length_size: 4,
+			keyframe_prefix: bytes::Bytes::from_static(b"\0\0\0\x01sps"),
+		};
+		let described = super::stream(&catalog, Codec::H264, &pinned);
+		assert_eq!(described.size, Some(crate::Size::new(8192, 8192)));
 	}
 
 	/// CPU output is enforced by the front end, so a backend that hands back

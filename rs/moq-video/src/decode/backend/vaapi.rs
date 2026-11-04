@@ -86,13 +86,19 @@ impl Vaapi {
 			return Err(Error::Codec(anyhow::anyhow!("VAAPI cannot decode {}", codec.label())));
 		}
 
-		if let Some(profile) = stream.h264_profile.and_then(va_profile)
-			&& offered(profile) == Some(false)
-		{
-			return Err(Error::UnsupportedCodec(format!(
-				"no VA-API driver here decodes H.264 profile_idc {}",
-				stream.h264_profile.unwrap_or_default()
-			)));
+		if let Some(profile_idc) = stream.h264_profile {
+			// `moq-vaapi` fails a profile it has no mapping for at the first SPS,
+			// whatever the driver offers, so a declared one is refused here.
+			let Some(profile) = va_profile(profile_idc) else {
+				return Err(Error::UnsupportedCodec(format!(
+					"VA-API decodes no H.264 profile_idc {profile_idc}"
+				)));
+			};
+			if offered(profile) == Some(false) {
+				return Err(Error::UnsupportedCodec(format!(
+					"no VA-API driver here decodes H.264 profile_idc {profile_idc}"
+				)));
+			}
 		}
 
 		let vaapi = VaapiConfig {
@@ -206,12 +212,13 @@ impl Backend for Vaapi {
 }
 
 /// The VA profile an H.264 `profile_idc` decodes under, the mapping `moq-vaapi`
-/// opens its config with; `None` for a profile it has none for.
+/// opens its config with; `None` for a profile it can't decode, such as High
+/// 4:4:4 Predictive (244), which its SPS parser rejects.
 fn va_profile(profile_idc: u8) -> Option<VAProfile::Type> {
 	match profile_idc {
 		66 => Some(VAProfile::VAProfileH264ConstrainedBaseline),
 		77 | 88 => Some(VAProfile::VAProfileH264Main),
-		100 | 110 | 122 | 244 => Some(VAProfile::VAProfileH264High),
+		100 | 110 | 122 => Some(VAProfile::VAProfileH264High),
 		_ => None,
 	}
 }
@@ -307,6 +314,21 @@ mod tests {
 			return;
 		}
 		assert!(Vaapi::open(&Codec::H264.into(), &decode_config()).is_err());
+	}
+
+	/// A declared profile `moq-vaapi` can't decode, such as High 4:4:4 Predictive,
+	/// is refused before any driver is asked, on any host.
+	#[test]
+	fn an_unmapped_profile_is_refused() {
+		let stream = Stream {
+			h264_profile: Some(244),
+			..Codec::H264.into()
+		};
+		match Vaapi::open(&stream, &decode_config()) {
+			Err(Error::UnsupportedCodec(reason)) => assert!(reason.contains("244"), "{reason}"),
+			Err(other) => panic!("expected a refusal, got {other:?}"),
+			Ok(_) => panic!("opened a High 4:4:4 Predictive decoder"),
+		}
 	}
 
 	/// A static RGBA gradient that varies in both axes, so the chroma planes have

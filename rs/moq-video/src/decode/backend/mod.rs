@@ -99,7 +99,9 @@ pub(crate) struct Stream {
 		allow(dead_code, reason = "only VA-API asks its driver by profile")
 	)]
 	pub h264_profile: Option<u8>,
-	/// The coded size, when the catalog declares one.
+	/// The coded size, when the description's parameter sets pin it. Without
+	/// them the catalog's coded size is only a ceiling the picture resizes
+	/// below in band, so it says nothing a device could refuse.
 	#[cfg_attr(
 		not(all(target_os = "linux", feature = "nvidia")),
 		allow(dead_code, reason = "only NVDEC checks a size before the first keyframe")

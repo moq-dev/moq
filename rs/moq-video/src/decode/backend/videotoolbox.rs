@@ -62,8 +62,6 @@ enum NalKind {
 	Slice,
 }
 
-/// Where the C output callback drops decoded frames, drained after each
-/// `decode_frame`. Boxed so its address is a stable refcon for the session.
 /// One access unit taken apart: the parameter sets it carries and its slices
 /// in the 4-byte length-prefixed form VideoToolbox decodes.
 #[derive(Default)]
@@ -106,6 +104,8 @@ impl Split {
 	}
 }
 
+/// Where the C output callback drops decoded frames, drained after each
+/// `decode_frame`. Boxed so its address is a stable refcon for the session.
 #[derive(Default)]
 struct Sink {
 	frames: Vec<(PixelBuffer, i64)>,
