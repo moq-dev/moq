@@ -10145,10 +10145,11 @@ impl ServeLoop {
 				let now = serve.subscriber.runtime.now();
 				let mut served: Option<u64> = None;
 				for (id, start) in (0..).zip(&start.starts) {
-					if active.live.get(id).is_none() {
-						continue;
+					// One an update retired since owes nothing, though before lite-07 its start
+					// still says where the SUBSCRIBE's demand was served from.
+					if active.live.get(id).is_some() {
+						active.starts.insert(id, *start);
 					}
-					active.starts.insert(id, *start);
 					match active.fill_range(id) {
 						Some(groups) => {
 							let skipped = groups.start..start.unwrap_or(groups.end).clamp(groups.start, groups.end);
