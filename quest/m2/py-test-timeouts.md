@@ -34,10 +34,18 @@ mean editing about 30 sites and remembering the rule in every new test.
 
 - Keep the existing `wait_for` calls. They give a precise failure, and the
   global bound only catches what they miss.
-- Check which `timeout_method` fires on a hang inside a native moq-ffi call
-  that holds the GIL. The default `signal` method can't interrupt that, and
-  `thread` can, at the cost of ending the run. Pick the method that fires
-  for both an awaited hang and a native one, and note why in the config.
+- Pick the `timeout_method` from how the suite can hang, and note why in the
+  config. The default `signal` method stops an awaited hang, because the
+  event loop keeps running Python and CPython runs the handler there. It
+  can't stop a synchronous moq-ffi call that blocks: the generated bindings
+  load the library with `ctypes.cdll`, which releases the GIL for the call,
+  and CPython runs a signal handler only once the call returns. `thread` stops
+  both, since its timer thread can take the released GIL and call
+  `os._exit`, but it ends the whole run. Neither method can stop code that
+  holds the GIL forever, and pytest-timeout doesn't try to cover that. A
+  moq-ffi call doesn't hold the GIL, so that case is out of scope. Use
+  `thread` only if a test makes a blocking synchronous moq-ffi call. Prove
+  the chosen method with a deliberately hung test, then remove the test.
 - Update `uv.lock`. Dependabot's `uv` entry for `/` then covers the new
   dependency.
 
