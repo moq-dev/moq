@@ -482,6 +482,7 @@ mod tests {
 	/// A stale drop of groups a fill asked for is recovered once; a second one stands, and a
 	/// drop of groups no fill asked for refuses nothing.
 	#[test]
+	#[expect(clippy::single_range_in_vec_init, reason = "the recovered runs are a list, here one")]
 	fn a_stale_drop_is_recovered_once() {
 		let mut fills = RangeFills::default();
 		fills.ask.groups.insert(2..6);
