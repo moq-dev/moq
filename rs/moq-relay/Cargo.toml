@@ -53,7 +53,6 @@ _uring = ["dep:moq-sock", "dep:moq-uring"]
 
 [dependencies]
 anyhow = { workspace = true, features = ["backtrace"] }
-async-trait = { workspace = true }
 aws-lc-rs = { workspace = true }
 axum = { workspace = true }
 axum-server = { workspace = true, features = ["tls-rustls"] }
@@ -65,7 +64,6 @@ http-body = "1.0.1"
 # A 1.0 prerelease: the latest stable (0.16) is still on reqwest 0.12 and
 # reqwest-middleware 0.4, while this line matches reqwest 0.13 below.
 http-cache-reqwest = { version = "1.0.0-alpha.6", features = ["manager-moka", "reqwest-middleware", "url-standard"], default-features = false }
-humantime = { workspace = true }
 # Reclaims the socket under a WebSocket upgrade.
 hyper = { workspace = true, optional = true }
 # `server-auto` reclaims the socket from under the auto builder `axum_server` serves with.

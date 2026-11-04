@@ -4937,7 +4937,6 @@ name = "moq-relay"
 version = "0.17.2"
 dependencies = [
  "anyhow",
- "async-trait",
  "aws-lc-rs",
  "axum",
  "axum-server",
@@ -4949,7 +4948,6 @@ dependencies = [
  "hex",
  "http-body",
  "http-cache-reqwest",
- "humantime",
  "hyper",
  "hyper-util",
  "kio",
