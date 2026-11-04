@@ -352,8 +352,9 @@ pub struct Consumer<T> {
 
 /// Which moq-json consumer is doing the reading. Private: the caller sees one `Consumer`.
 enum Inner<T> {
-	Snapshot(moq_json::snapshot::Consumer<T>),
-	Stream(moq_json::stream::Consumer<T>),
+	// Boxed: the two readers differ in size by hundreds of bytes.
+	Snapshot(Box<moq_json::snapshot::Consumer<T>>),
+	Stream(Box<moq_json::stream::Consumer<T>>),
 }
 
 impl<T: DeserializeOwned> Consumer<T> {
@@ -369,11 +370,11 @@ impl<T: DeserializeOwned> Consumer<T> {
 	/// must skip rather than guess at.
 	pub async fn from_track(track: moq_net::track::Consumer, config: &JsonConfig) -> crate::Result<Self> {
 		let inner = match &config.mode {
-			Mode::Snapshot => Inner::Snapshot(moq_json::snapshot::Consumer::new(track, Default::default())),
-			Mode::Stream => Inner::Stream(moq_json::stream::Consumer::new(
+			Mode::Snapshot => Inner::Snapshot(Box::new(moq_json::snapshot::Consumer::new(track, Default::default()))),
+			Mode::Stream => Inner::Stream(Box::new(moq_json::stream::Consumer::new(
 				track.subscribe(None).await?,
 				Default::default(),
-			)),
+			))),
 			other => return Err(crate::Error::UnsupportedMode(other.to_string())),
 		};
 
