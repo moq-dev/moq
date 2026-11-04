@@ -4,6 +4,26 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+`TrackInfo.MaxAge` is a `time.Duration` instead of a `*time.Duration`, like `Delay.Max`: the zero value, and a nil `*TrackInfo`, now advertise a zero max age, serving only the live edge, instead of no publisher limit. Assign the duration directly, and set the new `MaxAgeUnlimited`, which ignores `MaxAge`, where you relied on nil meaning no limit. A received track's `Info()` sets it when its publisher advertised no limit.
+
+### Viewer targets are bounded ([#7090](https://github.com/moq-dev/moq/pull/7090))
+
+Viewer ceilings and PROBE target overrides are refused with the new `ErrOutOfRange` once they would sum above 2^53 - 1 bps, the most a PROBE target carries; nothing changes on a refusal. `Viewers.Watch` returns `(*Viewer, error)`, and `Viewers.SetTarget` and `Viewer.Update` return an `error`. Handle the new variant wherever you match the error exhaustively. Regenerate bindings and rebuild the matching native library together.
+
+### `media.VideoInit.Lower` is a `media.Producer` ([#7699](https://github.com/moq-dev/moq/pull/7699))
+
+`Lower` is the `media.Producer` interface instead of `*media.TrackProducer`, so a `*media.TrackStreamProducer` fits too. Assigning a `*media.TrackProducer`, nil included, compiles unchanged; code that reads `Lower` back type-asserts it.
+
+### Media setup refusals are typed
+
+Audio and video subscribe setup now reports `ErrUnsupportedConfig` when the decoder refuses a codec, layout, or description. Handle this variant to try another rendition instead of inspecting an audio/video error message or `Unsupported`. Decoder faults, such as a backend that fails to open, and later peer and decode failures keep their existing errors. Regenerate bindings and rebuild the matching native library together.
+
+### JSON writes take a broadcast-clock timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
+
+`json.SnapshotProducer.Update`, `json.StreamProducer.Append`, and `json.WindowProducer.Push` / `Pop` take a `moq.Timestamp` instead of a `*moq.Timestamp`, so there is no untimed write. Stamp it from `media.CatalogProducer.Now()`, the broadcast clock every track shares. Their track needs a `TrackInfo.Timescale`; one without is refused.
+
 ### Subscriptions take a `moq.Delay` ([#7697](https://github.com/moq-dev/moq/pull/7697))
 
 `Subscription.MaxDelay` is `Delay moq.Delay`, and the zero `Subscription{}` is moq-net's defaults, the same as `DefaultSubscription()`: set `Delay.Max` to the old `*MaxDelay`, and `Delay.MaxUnlimited` where `MaxDelay` was nil.
@@ -107,11 +127,16 @@ Publish the track with a `Refresh` ratio so a joiner gets the value restated in 
 Higher is first and the zero value is the unset midpoint, so a `TrackInfo` that leaves `Priority` zero now gets the default rather than the least urgent priority; drop any `Priority: 127` that asked for the midpoint.
 To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 
+### `Request` and `Follow` name the two resolutions ([#7193](https://github.com/moq-dev/moq/pull/7193), [#7489](https://github.com/moq-dev/moq/pull/7489))
+
+On `OriginConsumer` and `Client`, `RequestBroadcast(ctx, path)` is `Request(ctx, path, nil)`, `AnnouncedBroadcast(path)` is `Follow(path, nil)`, and `*moq.AnnouncedBroadcast` is `*moq.Following`.
+Pass `&instance` instead of `nil` to refuse every other publisher instance.
+`Request` resolves one publisher instance: it retries as the routes covering the path change, and fails with an unroutable error only once discovery has synced with no covering route. `Follow` hands out each instance that serves the path in turn.
+
 ### A client asks only about what it watches (#6165)
 
-On moq-lite, a client session asks its relay for announcements only under paths something watches, through `Announced()` or `AnnouncedBroadcast()`, instead of under its whole scope at connect.
-`OriginConsumer.RequestBroadcast()` watches nothing, so on a client it fails with an unroutable error for a path nothing watches, even when the relay announces it.
-Resolve the path with `AnnouncedBroadcast()`, or hold `Announced()` over its prefix while requesting.
+On moq-lite, a client session asks its relay for announcements only under paths something watches, through `Announced()`, `Request()`, or `Follow()`, instead of under its whole scope at connect.
+`OriginConsumer.Request()` owns the discovery of its path, so it finds a broadcast the relay serves with nothing else watching first; no announcement stream is needed beside it.
 moq-transport and moq-lite-03/04 sessions are unchanged.
 
 ### `media.ContainerFormatFmp4` unwraps to Legacy (#6250)
@@ -140,6 +165,7 @@ Publish a replacement under a new name, and expect a finished track's demand wat
 
 `OriginProducer.Dynamic(prefix)` takes no route, and `OriginDynamic.Update` is gone.
 Replace `request.Accept(broadcast)` with `request.Prepare()`, which returns a `*BroadcastPrepared`: fill its `Broadcast()`, then `Publish()` announces it at the exact path under a fresh instance of its own and returns its producer.
+To answer with a broadcast you already hold, `request.Serve(consumer)` serves it under the prefix route without announcing an exact route; the consumer stays yours to close.
 Where you rejected a request after a failed setup, `Close()` the prepared answer instead.
 
 ### `TrackInfo` gains `Compress` (#5928)
@@ -196,7 +222,7 @@ The connection stats no longer carry a receive estimate.
 Hold the consumer `Session.RecvBandwidth` returns to request PROBE, read it with `Rate()` or wait with `RateChanged(ctx)`, and `Close()` it to stop.
 It returns `nil` when the version has no PROBE.
 
-### `AnnouncedBroadcast.Available` waits for the next publisher instance (#5700)
+### `Following.Available` waits for the next publisher instance (#5700)
 
 The first call returns the broadcast serving the path, as before.
 Each later call waits for the next instance to take over the path, instead of returning whatever serves it now.

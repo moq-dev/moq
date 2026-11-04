@@ -9,6 +9,6 @@ export MOQ_JSON_SEED MOQ_JSON_CASES
 echo "JSON codec properties: MOQ_JSON_SEED=$MOQ_JSON_SEED MOQ_JSON_CASES=$MOQ_JSON_CASES"
 bun install --frozen-lockfile
 just rs test -p moq-json --lib -E 'test(snapshot_codec_property) | test(window_codec_property)'
-bun test js/json/src/snapshot/properties.test.ts js/json/src/window/properties.test.ts
+bun test ./js/json/src/snapshot/properties.test.ts ./js/json/src/window/properties.test.ts
 bunx tsc --noEmit --project js/json/bench/tsconfig.json
 bun js/json/bench/codec.ts

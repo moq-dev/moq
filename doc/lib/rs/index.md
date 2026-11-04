@@ -20,7 +20,7 @@ see [Applications](/bin/). [Examples](/setup/examples) links runnable consumers;
 | --- | --- |
 | [moq-net](/lib/rs/moq-net) | The pub/sub layer: sessions, origins, broadcasts, tracks, groups, frames. Transport-agnostic. |
 | [moq-pattern](https://docs.rs/moq-pattern) | Path patterns such as `room/**`. Re-exported by moq-net and moq-auth. |
-| [moq-tokio](https://docs.rs/moq-tokio) | Connects and listens over QUIC, WebTransport, WebSocket, TCP, or Unix sockets, from config or CLI flags, and runs WebRTC data channels that the caller signals (`webrtc` feature). Its `driver` feature alone is a tokio QUIC stack without MoQ. |
+| [moq-tokio](https://docs.rs/moq-tokio) | Connects and listens over QUIC, WebTransport, WebSocket, TCP, or Unix sockets, from config or CLI flags, and runs WebRTC data channels that the caller signals (`webrtc` feature). With default features off, `driver` plus `aws-lc-rs` or `ring` builds a Tokio QUIC stack without MoQ. |
 | [qmux](https://docs.rs/qmux) | QUIC streams, datagrams, and flow control over TCP, TLS, WebSocket, and Unix sockets, on moq-quic's state machine. |
 | [moq-sock](https://docs.rs/moq-sock) | Socket binding and CPU pinning for thread-per-core listeners. |
 | [moq-ice](https://github.com/moq-dev/moq/tree/main/rs/moq-ice) | Internal infrastructure with no stability promise; the ICE agent behind native WebRTC: drives a str0m connection over UDP, with a STUN client. |
@@ -35,8 +35,7 @@ see [Applications](/bin/). [Examples](/setup/examples) links runnable consumers;
 | [moq-auth](/lib/rs/moq-auth) | Relay authorization: JWT signing and verification, and the auth server contract. |
 | [moq-room](/lib/rs/moq-room) | Workspace-only native rooms; use the published JS room API for applications. |
 | [moq-json](/lib/rs/moq-json) | JSON over tracks: snapshots with merge-patch deltas, or append logs. |
-| [moq-e2ee](https://github.com/moq-dev/moq/tree/main/rs/moq-e2ee) | Workspace-only end-to-end encryption of groups, datagrams, and track names, scoped to a publisher run's epoch. |
-| [moq-sign](https://github.com/moq-dev/moq/tree/main/rs/moq-sign) | Workspace-only per-frame Ed25519 signatures, so relays forward content they cannot forge, retime, or relocate. |
+| [moq-crypto](https://github.com/moq-dev/moq/tree/main/rs/moq-crypto) | Workspace-only end-to-end encryption of groups, datagrams, and track names, scoped to a publisher run's epoch, and per-frame Ed25519 signatures, so relays forward content they cannot read, forge, retime, or relocate. |
 | [moq-loc](https://docs.rs/moq-loc), [moq-msf](https://docs.rs/moq-msf) | The IETF LOC container and MSF catalog. |
 | [moq-stats](https://docs.rs/moq-stats) | Publish and consume relay traffic counters as tracks. |
 | [kio](/lib/rs/kio) | The async primitives everything polls through, and one clock for time and timers on tokio and a deterministic test simulator. |

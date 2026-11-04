@@ -253,6 +253,15 @@ pub struct Consume {
 }
 
 impl Consume {
+	/// Borrow held content for an on-demand answer without consuming the caller's handle.
+	pub fn broadcast(&self, id: Id) -> Result<moq_net::broadcast::Consumer, Error> {
+		let context = self.broadcast.get(id).ok_or(Error::BroadcastNotFound)?;
+		if let Some(origin) = &context.origin {
+			origin.driver.check()?;
+		}
+		Ok(context.broadcast.clone())
+	}
+
 	/// Buffer a broadcast the origin handed out, keeping the cursor that named it so a catalog
 	/// rendition referencing a sibling broadcast resolves through the same origin.
 	pub fn start(
@@ -835,7 +844,11 @@ impl Consume {
 		let broadcast = context.broadcast.clone();
 		let name = name.to_string();
 
-		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
+		// The datagrams ride a datagram track of the track's name. Subscribing to the track
+		// first keeps what a datagram reader always was to its publisher: demand on the track,
+		// and a request a dynamic publisher creates both from. A name with no stream track,
+		// whose publisher made only a datagram track, is read without one. `subscribe` blocks
+		// on the publisher's answer, so run it inside the task.
 		self.datagram_task.spawn(
 			on_datagram,
 			|state| &mut state.consume.datagram_task,
@@ -843,20 +856,46 @@ impl Consume {
 				driver
 					.watch(async move {
 						let Some(track) =
-							Self::until_closed(&mut close, Self::subscribe(&broadcast, &name, None)).await?
+							Self::until_closed(&mut close, Self::subscribe_demand(&broadcast, &name)).await?
 						else {
 							return Ok(());
 						};
-						Self::run_datagrams(on_datagram, track, close).await
+						let datagrams = broadcast.datagrams(&name)?;
+						Self::run_datagrams(on_datagram, datagrams, track, close).await
 					})
 					.await
 			},
 		)
 	}
 
+	/// Subscribe to `name`'s stream track for its demand, or `None` when the name has none.
+	async fn subscribe_demand(
+		broadcast: &moq_net::broadcast::Consumer,
+		name: &str,
+	) -> Result<Option<moq_net::track::Subscriber>, Error> {
+		let missing = |err: &moq_net::Error| {
+			matches!(
+				err,
+				moq_net::Error::NotFound | moq_net::Error::Stream(moq_net::StreamError::NotFound)
+			)
+		};
+		let track = match broadcast.track(name) {
+			Ok(track) => track,
+			Err(err) if missing(&err) => return Ok(None),
+			Err(err) => return Err(err.into()),
+		};
+		match track.subscribe(None).await {
+			Ok(subscriber) => Ok(Some(subscriber)),
+			Err(err) if missing(&err) => Ok(None),
+			Err(err) => Err(err.into()),
+		}
+	}
+
 	async fn run_datagrams(
 		callback: OnStatus,
-		mut track: moq_net::track::Subscriber,
+		mut track: moq_net::datagram::Consumer,
+		// Held for its demand only; its groups go unread.
+		_subscriber: Option<moq_net::track::Subscriber>,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
 		loop {
@@ -864,7 +903,7 @@ impl Consume {
 			let datagram = tokio::select! {
 				biased;
 				_ = &mut close => return Ok(()),
-				datagram = track.recv_datagram() => match datagram? {
+				datagram = track.recv() => match datagram? {
 					Some(datagram) => datagram,
 					None => return Ok(()),
 				},

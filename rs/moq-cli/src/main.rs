@@ -754,7 +754,7 @@ fn spawn_import(
 		reject_listener_cors(&rtc.cors, "import rtc")?;
 	}
 
-	let max_age = import.max_age.map(Into::into);
+	let max_age = Some(import.max_age.map_or(hang::container::MAX_AGE, Into::into));
 	let linger = import.linger.map_or(moq_mux::Linger::DEFAULT, Into::into);
 	// The MoQ side every gateway publishes into, minted per source since each takes it
 	// by value onto its own task.
@@ -830,8 +830,11 @@ fn spawn_import(
 				}
 			}
 			ImportSource::Archive(args) => {
-				// A replay serves the retention the recording was made with.
-				anyhow::ensure!(max_age.is_none(), "`--max-age` does not apply to `import archive`");
+				// A replay advertises no max age: the archive's retention bounds what it serves.
+				anyhow::ensure!(
+					import.max_age.is_none(),
+					"`--max-age` does not apply to `import archive`"
+				);
 				tasks.spawn(archive::import(origin.clone(), name, args, instance));
 			}
 			#[cfg(feature = "capture")]

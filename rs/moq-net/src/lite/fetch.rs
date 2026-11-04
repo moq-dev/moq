@@ -18,7 +18,7 @@ pub struct Fetch<'a> {
 	pub instance: Option<crate::Instance>,
 	pub track: Cow<'a, str>,
 	pub priority: i8,
-	/// Reader freshness budget. Lite07+ only; omission uses publisher retention alone.
+	/// Reader freshness budget. Lite07+ only; omission uses the publisher's max age alone.
 	pub max_delay: Option<std::time::Duration>,
 	pub group: u64,
 	/// Index of the first frame to return; 0 is the start of the group. Lite06+ only.

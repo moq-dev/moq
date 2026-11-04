@@ -516,7 +516,7 @@ impl<'a> RangeWriter<'a> {
 
 	/// Finish the current group and open group `sequence`, returning the first Object ID it
 	/// starts at. The sequences between them do not exist. A group cached since it was asked
-	/// is read past, as is a datagram, which no request ever gets.
+	/// is read past, as is a datagram, which a stream track never holds.
 	fn open(&mut self, sequence: u64, datagram: bool) -> Result<u64, Error> {
 		if sequence < self.next || sequence > self.fetch.last {
 			tracing::warn!(
@@ -536,8 +536,8 @@ impl<'a> RangeWriter<'a> {
 		};
 		let producer = match datagram {
 			true => {
-				tracing::debug!(sequence, "a datagram group is not fetchable");
-				fill.reject_groups(sequence..sequence + 1, Error::NotFetchable);
+				tracing::debug!(sequence, "dropping a datagram group from a fetch");
+				fill.drop_groups(sequence..sequence + 1);
 				None
 			}
 			false => match fill.accept(sequence, None) {
@@ -2738,7 +2738,7 @@ impl Subscriber {
 			// The handler exists before the requester sees the source, so a track it asks
 			// for before `run_broadcast` first polls queues instead of failing `NotFound`.
 			let dynamic = source.requests();
-			request.accept(&*source);
+			request.serve(&*source);
 
 			// The namespace's token closes the source as it is retracted. If it was
 			// retracted since the accept, close it here as that retraction would have,
@@ -4831,76 +4831,21 @@ impl Subscriber {
 		Ok(())
 	}
 
-	/// Deliver an OBJECT_DATAGRAM with private relay metadata on its subscription.
+	/// Drop an OBJECT_DATAGRAM: a subscription is a stream track's, which takes no datagrams.
 	///
-	/// A malformed datagram is a protocol error. An unbound alias is dropped, as the
-	/// draft permits instead of buffering; public readers receive only Normal payloads.
+	/// A malformed datagram is still a protocol error.
 	pub fn recv_datagram(&self, payload: bytes::Bytes) -> Result<(), Error> {
 		let (datagram, _) = ietf::ObjectDatagram::decode_slice(&payload, self.version)?;
-		let (alias, sequence) = (datagram.track_alias, datagram.group_id);
-
-		let (payload, status) = match datagram.body {
-			ietf::DatagramBody::Payload(payload) => (payload, None),
-			ietf::DatagramBody::Status(status) if super::object::status_defined(status) => {
-				(bytes::Bytes::new(), Some(status))
-			}
-			ietf::DatagramBody::Status(_) => return Err(Error::Session(SessionError::ProtocolViolation)),
-		};
-
-		let mut state = self.state.lock();
-		let request_id = match state.aliases.read().map.get(&alias) {
-			Some(Alias::Active(request_id)) => *request_id,
-			_ => {
-				tracing::debug!(alias, sequence, "dropping a datagram for an unbound alias");
-				return Ok(());
-			}
-		};
-		let Some(track) = state.subscribes.get_mut(&request_id) else {
-			return Ok(());
-		};
-
-		// Like a subgroup object: a track that declared no timescale is untimed. One on a
-		// timed track without a Timestamp is refused by the model.
-		let properties = bytes::Bytes::from(datagram.properties.unwrap_or_default());
-		// A status object has no frame to hold its time, so its block keeps it.
-		let (timestamp, properties, inflated) = match status.is_some_and(|status| status != 0) {
-			true => (
-				None,
-				super::object::unframed(&properties, self.version, track.timescale)?,
-				None,
-			),
-			false => {
-				let decoded = super::object::read(&properties, self.version, track.timescale)?;
-				super::object::check_frame(&decoded.properties, track.timescale)?;
-				(decoded.timestamp, decoded.properties, decoded.inflated)
-			}
-		};
-		let Some(producer) = track.producer.as_mut() else {
-			return Ok(());
-		};
-		let inflated = match status.is_some_and(|s| s != 0) {
-			true => None,
-			false => super::object::inflated(inflated, producer.info().compress)?,
-		};
-		let stored = crate::model::datagram::Stored {
-			datagram: crate::Datagram {
-				sequence,
-				timestamp,
-				payload,
-			},
-			wire: Some(std::sync::Arc::new(crate::model::datagram::Wire {
-				object_id: datagram.object_id,
-				priority: datagram.publisher_priority,
-				end_of_group: datagram.end_of_group,
-				status,
-				properties,
-			})),
-			deflated: None,
-		};
-		match inflated {
-			Some(size) => producer.insert_deflated_datagram(stored, size)?,
-			None => producer.insert_wire_datagram(stored)?,
+		if let ietf::DatagramBody::Status(status) = datagram.body
+			&& !super::object::status_defined(status)
+		{
+			return Err(Error::Session(SessionError::ProtocolViolation));
 		}
+		tracing::debug!(
+			alias = datagram.track_alias,
+			group = datagram.group_id,
+			"dropping a datagram on a stream track's subscription"
+		);
 		Ok(())
 	}
 }
@@ -5438,10 +5383,10 @@ impl Subscriber {
 				prior_group = Some(sequence);
 			}
 
-			// A datagram cannot be reconstructed from a FETCH stream.
+			// A datagram is never a stream track's, so a FETCH stream has no group to rebuild.
 			if object.datagram {
 				tracing::debug!(?group, "a datagram group is not fetchable");
-				return Err(Error::NotFetchable);
+				return Err(Error::NotFound);
 			}
 
 			let raw = bytes::Bytes::from(object.properties.unwrap_or_default());
@@ -6520,6 +6465,24 @@ mod tests {
 
 	use super::*;
 
+	/// A publisher that sends no MAX_CACHE_DURATION sets no publisher limit, never the zero an
+	/// authored track defaults to; one that sends it keeps that value.
+	#[test]
+	fn a_received_track_keeps_its_max_cache_duration() {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+			let absent = accepted_info(&ietf::Properties::default(), version);
+			assert_eq!(absent.max_age, None, "{version}");
+			let present = accepted_info(
+				&ietf::Properties {
+					max_cache_duration: Some(std::time::Duration::from_secs(7)),
+					..Default::default()
+				},
+				version,
+			);
+			assert_eq!(present.max_age, Some(std::time::Duration::from_secs(7)), "{version}");
+		}
+	}
+
 	/// What keeps a SUBSCRIBE_NAMESPACE open until the peer ends it, while the first lives.
 	fn live() -> (kio::Producer<()>, kio::Consumer<()>) {
 		let live = kio::Producer::new(());
@@ -7378,124 +7341,46 @@ mod tests {
 		);
 	}
 
-	/// Relays keep datagram Object IDs, while plain readers see only normal object 0.
-	/// An unbound alias is dropped, and a malformed datagram is the peer's violation.
+	/// An OBJECT_DATAGRAM is dropped, since a subscription is a stream track's and a stream
+	/// track takes no datagrams, but a malformed one is still the peer's violation.
 	#[kio::test]
-	async fn an_object_datagram_is_a_datagram_group() {
+	async fn an_object_datagram_is_dropped() {
 		use crate::coding::Encode as _;
 		use futures::FutureExt as _;
 
 		let subscriber = subscriber_with_tracks(&[(RequestId(11), "cam", "audio")]);
 		subscriber.register_alias(RequestId(11), 7).unwrap();
-		let (mut consumer, mut relay) = {
-			let mut state = subscriber.state.lock();
-			let track = state.subscribes.get_mut(&RequestId(11)).unwrap();
-			track.timescale = Some(Timescale::MILLI);
-			let producer = track.producer.as_ref().unwrap();
-			(producer.subscribe(None), producer.subscribe(None))
-		};
-
-		let timestamp = crate::Timestamp::new(96_000, Timescale::MILLI).unwrap();
-		let datagram = |alias: u64, group_id: u64, object_id: Option<u64>, body: ietf::DatagramBody| {
-			let mut properties = Vec::new();
-			ietf::encode_object_time(
-				&mut crate::coding::Encoder::new(&mut properties, Version::Draft18.into()),
-				timestamp,
-				Timescale::MILLI,
-			)
-			.unwrap();
-			ietf::ObjectDatagram {
-				track_alias: alias,
-				group_id,
-				object_id,
-				publisher_priority: None,
-				// Only a Normal Object may carry Properties, and a status cannot end the group.
-				end_of_group: matches!(body, ietf::DatagramBody::Payload(_)),
-				properties: matches!(body, ietf::DatagramBody::Payload(_)).then_some(properties),
-				body,
-			}
-			.encode_bytes(Version::Draft18)
-			.unwrap()
-		};
-		let payload = |bytes: &'static [u8]| ietf::DatagramBody::Payload(bytes::Bytes::from_static(bytes));
-
-		// Nonzero objects survive for relays; plain readers skip them, unbound aliases, and statuses.
-		subscriber
-			.recv_datagram(datagram(7, 4, Some(1), payload(b"no")))
-			.unwrap();
-		subscriber.recv_datagram(datagram(8, 4, None, payload(b"no"))).unwrap();
-		subscriber
-			.recv_datagram(datagram(7, 9, Some(0), payload(b"yes")))
-			.unwrap();
-		subscriber
-			.recv_datagram(datagram(7, 10, None, ietf::DatagramBody::Status(END_OF_TRACK)))
-			.unwrap();
-		let Poll::Ready(Ok(Some(first))) = relay.poll_recv_stored_datagram(&kio::Waiter::noop()) else {
-			panic!("the relay did not receive the object");
-		};
-		assert_eq!(first.sequence, 4);
-		assert_eq!(first.wire.as_ref().unwrap().object_id, Some(1));
-		assert_eq!(&first.payload[..], b"no");
-		let received = consumer.recv_datagram().now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(received.sequence, 9, "the Group ID is the sequence");
-		assert_eq!(received.timestamp, Some(timestamp));
-		assert_eq!(&received.payload[..], b"yes");
-		assert!(
-			consumer.recv_datagram().now_or_never().is_none(),
-			"only the normal object 0 payload got through"
-		);
-
-		// A status datagram cannot end the group.
-		let malformed = bytes::Bytes::from_static(&[0x22, 0x07, 0x04, 0x00]);
-		assert!(is_protocol_violation(&subscriber.recv_datagram(malformed).unwrap_err()));
-	}
-
-	/// A datagram that lands before SUBSCRIBE_OK binds its alias is dropped, not held for the
-	/// subscription to replay once it is bound. The reader was already subscribed, so only the
-	/// missing alias can have dropped it.
-	#[kio::test]
-	async fn a_datagram_before_its_alias_is_dropped() {
-		use crate::coding::Encode as _;
-		use futures::FutureExt as _;
-
-		let subscriber = subscriber_with_tracks(&[(RequestId(11), "cam", "audio")]);
 		let mut consumer = {
 			let mut state = subscriber.state.lock();
 			let track = state.subscribes.get_mut(&RequestId(11)).unwrap();
 			track.timescale = Some(Timescale::MILLI);
 			track.producer.as_ref().unwrap().subscribe(None)
 		};
-		let datagram = |group_id: u64| {
-			let mut properties = Vec::new();
-			ietf::encode_object_time(
-				&mut crate::coding::Encoder::new(&mut properties, Version::Draft18.into()),
-				crate::Timestamp::new(96_000, Timescale::MILLI).unwrap(),
-				Timescale::MILLI,
-			)
-			.unwrap();
-			ietf::ObjectDatagram {
-				track_alias: 7,
-				group_id,
-				object_id: None,
-				publisher_priority: None,
-				end_of_group: true,
-				properties: Some(properties),
-				body: ietf::DatagramBody::Payload(bytes::Bytes::from_static(b"d")),
-			}
-			.encode_bytes(Version::Draft18)
-			.unwrap()
-		};
 
-		subscriber.recv_datagram(datagram(4)).unwrap();
-		subscriber.register_alias(RequestId(11), 7).unwrap();
-		subscriber.recv_datagram(datagram(5)).unwrap();
+		let mut properties = Vec::new();
+		ietf::encode_object_time(
+			&mut crate::coding::Encoder::new(&mut properties, Version::Draft18.into()),
+			crate::Timestamp::new(96_000, Timescale::MILLI).unwrap(),
+			Timescale::MILLI,
+		)
+		.unwrap();
+		let datagram = ietf::ObjectDatagram {
+			track_alias: 7,
+			group_id: 4,
+			object_id: None,
+			publisher_priority: None,
+			end_of_group: true,
+			properties: Some(properties),
+			body: ietf::DatagramBody::Payload(bytes::Bytes::from_static(b"d")),
+		}
+		.encode_bytes(Version::Draft18)
+		.unwrap();
+		subscriber.recv_datagram(datagram).unwrap();
+		assert!(consumer.recv_group().now_or_never().is_none(), "no group arrives");
 
-		let received = consumer.recv_datagram().now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(received.sequence, 5);
-		assert!(
-			consumer.recv_datagram().now_or_never().is_none(),
-			"group 4 never arrives"
-		);
+		// A status datagram cannot end the group.
+		let malformed = bytes::Bytes::from_static(&[0x22, 0x07, 0x04, 0x00]);
+		assert!(is_protocol_violation(&subscriber.recv_datagram(malformed).unwrap_err()));
 	}
 
 	/// One alias naming two different tracks is the collision section 11.1 makes fatal.
@@ -13741,130 +13626,6 @@ mod stitch_tests {
 	}
 
 	#[kio::test]
-	async fn passthrough_preserves_datagram_objects_through_dispatch() {
-		// Also through a second relay behind a moq-lite hop with the `ietf` extension.
-		for (version, ranged, hop) in [Version::Draft22]
-			.into_iter()
-			.flat_map(|version| [(version, false), (version, true)])
-			.filter(|(version, ranged)| !*ranged || *version == Version::Draft22)
-			.flat_map(|(version, ranged)| [(version, ranged, false), (version, ranged, true)])
-		{
-			let origin = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
-			let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
-			let track = broadcast
-				.create_track("video", accepted_info(&Default::default(), version))
-				.unwrap();
-			let mut h = Harness::with_timescale(Fill::Done, vec![], None);
-			h.subscriber.version = version;
-			h.subscriber.state.lock().subscribes.get_mut(&REQUEST).unwrap().producer = Some(track.clone());
-			let properties = vec![2, 7, 3, 1, 42];
-			let mut original = Vec::new();
-			for id in [6, 7, 8] {
-				let datagram = ietf::ObjectDatagram {
-					track_alias: ALIAS,
-					group_id: SEQUENCE,
-					object_id: Some(id),
-					// An omitted priority inherits the track default, which the
-					// downstream response need not carry.
-					publisher_priority: (id != 6).then_some(200),
-					end_of_group: false,
-					properties: (id != 8).then(|| properties.clone()),
-					body: if id == 8 {
-						ietf::DatagramBody::Status(END_OF_GROUP)
-					} else {
-						ietf::DatagramBody::Payload(bytes::Bytes::from_static(b"object"))
-					},
-				};
-				h.subscriber
-					.recv_datagram(datagram.encode_bytes(version).unwrap())
-					.unwrap();
-				original.push(datagram);
-			}
-			track.finish().unwrap();
-			let (served, _sessions, _copy) = match hop {
-				true => {
-					let (served, sessions) = crate::lite::ietf::test_hop(&origin, "room", [true, true]).await;
-					// The hop learns the track's info first, and holds the copy for the SUBSCRIBE
-					// below: a SUBSCRIBE sent alongside the TRACK has the cache replayed as
-					// datagrams before the TRACK_INFO they are read with, and they are dropped.
-					let copy = served
-						.consume()
-						.request("room", None)
-						.await
-						.unwrap()
-						.track("video")
-						.unwrap();
-					copy.info().await.unwrap();
-					(served, Some(sessions), Some(copy))
-				}
-				false => (origin, None, None),
-			};
-			let downstream = ScriptedSession::per_stream(vec![vec![]]).with_datagrams(65535);
-			let peer = peer::PeerSetup::default();
-			peer.set(peer::Peer::default());
-			let publisher = crate::ietf::Publisher::new(
-				crate::time::sim(),
-				crate::driver::Transport::new(downstream.clone()),
-				served.consume(),
-				Control::new(false),
-				None,
-				peer,
-				version,
-			);
-			let subscribe = ietf::Subscribe {
-				max_age: None,
-				new_group: None,
-				request_id: RequestId(3),
-				track_namespace: Path::from_static("room"),
-				track_name: "video".into(),
-				subscriber_priority: 128,
-				group_order: ietf::GroupOrder::Ascending,
-				filter: if ranged {
-					Filter::Absolute {
-						start: ietf::Location {
-							group: SEQUENCE,
-							object: 7,
-						},
-						end: Some(ietf::EndLocation {
-							group: SEQUENCE,
-							object: Some(7),
-						}),
-					}
-				} else {
-					Filter::Unfiltered
-				},
-				fill: None,
-				properties_wanted: true,
-				forward: true,
-				rendezvous: false,
-				range_filters: false,
-				authorization_token: None,
-			};
-			let mut body = Vec::new();
-			subscribe
-				.encode_msg(&mut Encoder::new(&mut body, version.into()), version)
-				.unwrap();
-			let stream = Stream::open(&mut crate::driver::Transport::new(downstream.clone()), version)
-				.await
-				.unwrap();
-			publisher
-				.handle_stream(ietf::Subscribe::ID, ietf::Body(body.into()), stream)
-				.unwrap()
-				.await;
-			let sent = downstream.log.datagrams.lock().unwrap();
-			original.retain(|datagram| !ranged || datagram.object_id == Some(7));
-			assert_eq!(sent.len(), original.len(), "{version} ranged={ranged} hop={hop}");
-			let inherited = super::super::priority::to_wire(track.publisher_priority());
-			for (bytes, mut expected) in sent.iter().zip(original) {
-				expected.track_alias = 3;
-				expected.publisher_priority = expected.publisher_priority.or(Some(inherited));
-				let (actual, _) = ietf::ObjectDatagram::decode_slice(bytes, version).unwrap();
-				assert_eq!(actual, expected);
-			}
-		}
-	}
-
-	#[kio::test]
 	async fn passthrough_translates_mutable_property_encodings() {
 		for ingress in [Version::Draft22] {
 			let mut properties = Vec::new();
@@ -13916,45 +13677,6 @@ mod stitch_tests {
 			h.subscriber.clone().recv_group(&mut stream).await.unwrap();
 			assert_eq!(read_group(&mut consumer).await, (SEQUENCE, vec![(None, vec![42]); 3]));
 		}
-	}
-
-	/// Relays retain a datagram's Object ID; a plain reader skips it until object 0 arrives.
-	#[kio::test]
-	async fn passthrough_accepts_datagrams_past_object_zero() {
-		let version = Version::Draft22;
-		let mut h = Harness::with_timescale(Fill::Done, vec![], None);
-		h.subscriber.version = version;
-		let mut consumer = h.track.subscribe(None);
-		let mut plain = h.track.subscribe(None);
-		let mut datagram = ietf::ObjectDatagram {
-			track_alias: ALIAS,
-			group_id: SEQUENCE,
-			object_id: Some(6),
-			publisher_priority: Some(128),
-			end_of_group: false,
-			properties: None,
-			body: ietf::DatagramBody::Payload(bytes::Bytes::from_static(b"object-six")),
-		};
-		h.subscriber
-			.recv_datagram(datagram.encode_bytes(version).unwrap())
-			.unwrap();
-		let received = consumer.poll_recv_stored_datagram(&kio::Waiter::noop());
-		assert!(
-			matches!(&received, Poll::Ready(Ok(Some(data)))
-				if data.payload == b"object-six"[..] && data.wire.as_ref().unwrap().object_id == Some(6)),
-			"{received:?}"
-		);
-		assert!(plain.poll_recv_datagram(&kio::Waiter::noop()).is_pending());
-		datagram.object_id = Some(0);
-		datagram.body = ietf::DatagramBody::Payload(bytes::Bytes::from_static(b"object-zero"));
-		h.subscriber
-			.recv_datagram(datagram.encode_bytes(version).unwrap())
-			.unwrap();
-		let received = plain.poll_recv_datagram(&kio::Waiter::noop());
-		assert!(
-			matches!(&received, Poll::Ready(Ok(Some(data))) if data.payload == b"object-zero"[..]),
-			"{received:?}"
-		);
 	}
 
 	#[kio::test]
@@ -15262,8 +14984,8 @@ mod stitch_tests {
 		buf
 	}
 
-	/// A datagram group is never fetchable, so a group fetch answered with one names it
-	/// dropped as not fetchable, caching nothing, and reads on past its payload.
+	/// A stream track takes no datagrams, so a group fetch answered with a datagram Object
+	/// drops its group, caching nothing, and reads on past its payload.
 	#[kio::test]
 	async fn a_group_fetch_drops_a_datagram_group() {
 		let mut run = GroupFetchRun::new(VERSION, datagram_object(SEQUENCE)).await;
@@ -15271,7 +14993,7 @@ mod stitch_tests {
 
 		let res = run.subscriber.recv_group_fetch(&mut run.stream, slot).await;
 		assert!(res.is_ok(), "{res:?}");
-		assert!(matches!(fetch.await, Err(Error::NotFetchable)));
+		assert!(matches!(fetch.await, Err(Error::NotFound)));
 		assert!(run.track.consume().peek_group(SEQUENCE).is_none(), "nothing is cached");
 	}
 
@@ -15424,7 +15146,7 @@ mod stitch_tests {
 
 		assert!(matches!(
 			h.subscriber.clone().recv_fill(&mut fill).await,
-			Err(Error::NotFetchable)
+			Err(Error::NotFound)
 		));
 		h.subscriber
 			.clone()
@@ -15527,7 +15249,7 @@ mod stitch_tests {
 			let track = track::Producer::new(
 				std::sync::Arc::new(crate::broadcast::Info::default()),
 				"video",
-				track::Info::default().with_timescale(None),
+				track::Info::default().with_timescale(None).with_max_age(None),
 			);
 
 			Self {

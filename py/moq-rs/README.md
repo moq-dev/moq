@@ -163,6 +163,7 @@ client = moq.Client(
   - `.stats() → ConnectionStats`. Snapshot RTT, bandwidth estimates, and byte/packet counters.
   - `.state()` and `await .state_changed(after)`. Read one lifecycle snapshot and wait with its revision; first-dial failures and reconnects share the same session.
   - `.allocator() → Allocator`. Divide the send estimate between encoders and app-owned tracks.
+  - `.viewers() → Viewers`. Divide the receive estimate between watched broadcasts: `.watch(max_bps) → Viewer` claims up to a ceiling, `Viewer.rate()` reads its slice (`None` while there is no estimate), and dropping the viewer releases it. The summed ceilings are the PROBE target; `.set_target(bps)` overrides it (`0` sends none, `None` follows the viewers again).
   - `.grants() → GrantConsumer`. On `moq-lite-07-wip` and on moq-transport draft-18+ with the MoQ Auth extension, `.grant()` reads the peer's `Grant` and `async for grant in session.grants()` follows it.
   - `.tokens() → Tokens | None`. A client session's credentials: `.set([...])` replaces them without reconnecting and `await .answered()` raises the relay's refusal.
 
@@ -184,7 +185,7 @@ client = moq.Client(
   - `.abort(error_code)` terminates the track or group with an application error.
   - `.append_datagram(payload, timestamp=None) -> sequence` (`TrackProducer`) sends a best-effort datagram. Payloads are capped at 1200 bytes and there is no stream fallback.
   - `.insert_datagram(sequence, payload, timestamp=None)` (`TrackProducer`) sends one at the caller's own sequence.
-  - `.largest() -> Position | None` (`TrackProducer`) reports the newest group or datagram written, at its newest frame.
+  - `.largest() -> Position | None` (`TrackProducer`) reports the newest group written, at its newest frame. Datagrams are numbered apart from groups and never move it.
 
 ### Media
 
@@ -222,13 +223,15 @@ subscriber waits. `.cut()` / `.seek(sequence)` draw group boundaries; `.finish()
 
 ### Data
 
-`moq.json.SnapshotProducer.update(value, timestamp=None)`,
-`moq.json.StreamProducer.append(value, timestamp=None)`, and
-`moq.json.WindowProducer.push(value, timestamp=None)` / `.pop(count, timestamp=None)` preserve
-optional capture time. A window keeps a sliding run of records a reader can join at any point,
+`moq.json.SnapshotProducer.update(value, timestamp)`,
+`moq.json.StreamProducer.append(value, timestamp)`, and
+`moq.json.WindowProducer.push(value, timestamp)` / `.pop(count, timestamp)` require a capture time
+on the broadcast clock, read with `media.CatalogProducer.now()`, so their track needs a `timescale`.
+A window keeps a sliding run of records a reader can join at any point,
 and `.cut()` ends its open group so the next edit opens one restating the window; the catalog has
 no window mode, so `WindowProducer` takes only the track.
-Omitting time leaves data untimed; choose the track's `timescale` to match. Publish JSON tracks with
+A raw frame may omit its timestamp on an untimed track, but every JSON write takes one on the
+broadcast clock. Publish JSON tracks with
 `TrackInfo(compress=True)`: the track compresses each group on the wire, and consumers read it the
 same either way. Opaque bytes go on a plain `TrackProducer`.
 
@@ -259,7 +262,7 @@ Every handle whose cleanup is `cancel()` is an async context manager, so exiting
   - `.broadcast → BroadcastProducer`. The broadcast to fill.
   - `.announce(route=None)`, `.unannounce()`. Advertise or retract its exact path; both raise `Closed` once the broadcast closed.
 - **`OriginRequests`**. Async source of broadcasts requested by consumers.
-  - `await .requested_broadcast() → BroadcastRequest`. Call `.prepare()`, fill its `.broadcast`, then `.publish() → Publication` to serve it as a new stream under a fresh instance, or `.reject(code)` to fail the requester.
+  - `await .requested_broadcast() → BroadcastRequest`. Call `.serve(consumer)` to answer with held content under the prefix route's continuous sequence space, `.prepare()` then fill its `.broadcast` and `.publish() → Publication` for an independently restarting job under a fresh instance, or `.reject(code)` to fail the requester.
   - Async iterator yielding `BroadcastRequest`
 - **`OriginConsumer`**. Discover broadcasts.
   - `.announced(prefix, filter=None) → AnnounceConsumer` (async iterator of `AnnounceEvent`: `AnnounceEventStart`, `AnnounceEventUpdate`, `AnnounceEventEnd`, `AnnounceEventRestart`, or `AnnounceEventTakeover`, each carrying an `Announce` whose `.route.instance` names the stream; on a restart, request the path again; a takeover continues what the route at `.predecessor` served); `filter` is a pattern relative to the literal prefix, while each `Announce.prefix` stays origin-relative and `.captures` is a required list of wildcard matches, empty without wildcards
@@ -272,7 +275,7 @@ Every handle whose cleanup is `cancel()` is an async context manager, so exiting
 - **`Timestamp`**. `.value: int` units at `.scale: int` units per second, exact at any scale such as 90 kHz. `Timestamp.from_timedelta(duration)` is exact at microsecond scale; `.to_timedelta()` rounds down to a whole microsecond. A write with a scale of 0 or past `2**62 - 1`, or a value past `2**61 - 1`, raises `Error.TimeOverflow`.
 - **`Frame`**. `.payload: bytes`, `.timestamp: Timestamp | None`. The unit of every write and every raw read; `None` means untimed when publishing or reading.
 - **`media.MediaFrame`**. `.payload: bytes`, `.timestamp: Timestamp`, `.keyframe: bool`. The frame variant of a media read. `keyframe` marks a group start or video keyframe; for audio it is true only at a group start.
-- **`Datagram`**. `.sequence: int`, `.timestamp: Timestamp | None`, `.payload: bytes`. Delivered only on datagram-capable transports with lite-05 or newer moq-lite, or moq-transport.
+- **`Datagram`**. `.sequence: int`, `.timestamp: Timestamp | None`, `.payload: bytes`. Delivered only on datagram-capable transports with lite-05 or newer moq-lite.
 - **`media.Audio`**. `.codec`, `.sample_rate`, `.channel_count`, `.bitrate`, `.enabled`, `.description`.
 - **`media.Video`**. `.codec`, `.coded: Dimensions`, `.display_aspect`, `.bitrate`, `.enabled`, `.framerate`, `.description`. A false `.enabled` means no frames are coming, so don't select the rendition.
 - **`Subscription`**. Subscriber delivery preferences: priority, staleness, and optional group range.

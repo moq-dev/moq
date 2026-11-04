@@ -17,8 +17,9 @@ type BroadcastProducer struct {
 }
 
 // NewBroadcastProducer creates a standalone broadcast, not attached to any
-// origin: use it to serve a dynamic request ([BroadcastRequest.Accept]) or for
-// local pub/sub. To publish at a path, use [OriginProducer.CreateBroadcast].
+// origin: pass its [BroadcastProducer.Consume] result to [BroadcastRequest.Serve]
+// for a dynamic request, or use it for local pub/sub. To publish at a path, use
+// [OriginProducer.CreateBroadcast].
 func NewBroadcastProducer() (*BroadcastProducer, error) {
 	inner, err := ffi.NewMoqBroadcastProducer()
 	if err != nil {
@@ -221,7 +222,7 @@ func (t *TrackProducer) InsertDatagram(sequence uint64, frame Frame) error {
 	return t.inner.InsertDatagram(sequence, frame)
 }
 
-// Largest reports the newest group or datagram written, at its newest frame, or nil
+// Largest reports the newest group written, at its newest frame, or nil
 // before any.
 func (t *TrackProducer) Largest() (*Position, error) {
 	return t.inner.Largest()

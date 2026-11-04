@@ -312,7 +312,12 @@ impl Reader {
 		delay: Delay,
 		lookback: u64,
 	) -> Result<Self, Error> {
-		let decoder = Sink::open(catalog, &options.decoder).await?;
+		let decoder = Sink::open(catalog, &options.decoder).await.map_err(|err| match err {
+			// Only a codec or description this build cannot decode is a refusal of the
+			// rendition. Backend and worker faults keep their own variants.
+			Error::UnsupportedCodec(reason) => Error::UnsupportedConfig(reason),
+			err => err,
+		})?;
 
 		let track = broadcast.track(hang::catalog::Reference::track(catalog, name))?;
 		let mut subscriber = track
@@ -481,7 +486,7 @@ mod tests {
 		let rendition = config.probe().await.unwrap();
 		let reserved = source_catalog
 			.reserve()
-			.with_hls_hint(config.gop.duration(config.framerate));
+			.with_interval(config.gop.duration(config.framerate));
 		let mut producer = EncodeProducer::new(source_broadcast, reserved, rendition).unwrap();
 		let mut encoder = Encoder::new(&config).unwrap();
 		let rgba = vec![0x80u8; 320 * 240 * 4];

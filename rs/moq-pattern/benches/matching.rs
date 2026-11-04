@@ -151,8 +151,8 @@ const MAX_MESSAGE: usize = u16::MAX as usize;
 /// A QUIC varint's size, as `AUTH_OK` writes counts and lengths.
 fn varint(value: usize) -> usize {
 	match value {
-		..64 => 1,
-		..16384 => 2,
+		0..64 => 1,
+		64..16384 => 2,
 		_ => 4,
 	}
 }

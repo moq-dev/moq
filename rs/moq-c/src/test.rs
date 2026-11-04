@@ -20,6 +20,13 @@ fn read_timestamp(timestamp: *const moq_timestamp) -> Option<moq_timestamp> {
 	unsafe { timestamp.as_ref() }.copied()
 }
 
+/// The broadcast clock's current time, which every write on the broadcast is stamped from.
+fn catalog_now(broadcast: u32) -> moq_timestamp {
+	let mut now = moq_timestamp::default();
+	assert_eq!(unsafe { moq_publish_catalog_now(broadcast, &mut now) }, 0);
+	now
+}
+
 /// A ten-second max delay, the media consumers' usual budget here.
 const TEN_SECONDS: moq_delay = moq_delay {
 	min_us: 0,
@@ -52,38 +59,10 @@ fn publish_broadcast(origin: u32, path: &[u8]) -> u32 {
 }
 
 /// Request a published broadcast via `moq_origin_request` and return its handle.
-///
-/// A broadcast created with `moq_origin_create_broadcast` becomes reachable
-/// asynchronously, so an early request can race the attach and fail as unroutable;
-/// retry until the deadline.
 fn request_broadcast(origin: u32, path: &[u8]) -> u32 {
-	let deadline = kio::clock::now() + TIMEOUT;
-	loop {
-		let cb = Callback::new();
-		let _task = id(unsafe {
-			moq_origin_request(
-				origin,
-				path.as_ptr() as *const c_char,
-				path.len(),
-				std::ptr::null(),
-				0,
-				Some(channel_callback),
-				cb.ptr,
-			)
-		});
-		let code = cb.recv();
-		if code > 0 {
-			cb.recv_terminal();
-			return code as u32;
-		}
-		// A failed request already delivered its terminal code; back off and retry.
-		assert!(kio::clock::now() < deadline, "timed out requesting broadcast: {code}");
-		#[expect(
-			clippy::disallowed_methods,
-			reason = "the test thread has no runtime; it polls the C API's runtime between real retries"
-		)]
-		std::thread::sleep(Duration::from_millis(10));
-	}
+	let code = request_once(origin, path);
+	assert!(code > 0, "requesting the broadcast failed: {code}");
+	code as u32
 }
 
 /// Request `path` once and return the first callback code: a broadcast handle, or
@@ -1753,7 +1732,7 @@ fn publish_track_invalid_broadcast() {
 	let info = moq_track_info {
 		priority: 1,
 		max_age_us: 0,
-		max_age_present: false,
+		max_age_unlimited: false,
 		timescale: 0,
 		timescale_present: false,
 		refresh: 0,
@@ -1788,7 +1767,7 @@ fn publish_track_with_info_rejects_invalid_timescale() {
 	let info = moq_track_info {
 		priority: 0,
 		max_age_us: 0,
-		max_age_present: false,
+		max_age_unlimited: false,
 		timescale: 0,
 		timescale_present: true,
 		refresh: 0,
@@ -1798,6 +1777,41 @@ fn publish_track_with_info_rejects_invalid_timescale() {
 
 	assert!(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), &info) } < 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
+}
+
+/// A zeroed struct serves only the live edge, and the unlimited flag wins over a stated age,
+/// like `moq_delay.max_unlimited`.
+#[test]
+fn track_info_max_age() {
+	let zeroed = || moq_track_info {
+		priority: 0,
+		max_age_us: 0,
+		max_age_unlimited: false,
+		timescale: 0,
+		timescale_present: false,
+		refresh: 0,
+		refresh_present: false,
+		compress: false,
+	};
+	let max_age = |info: moq_track_info| moq_net::track::Info::try_from(&info).unwrap().max_age;
+
+	assert_eq!(max_age(zeroed()), Some(Duration::ZERO));
+	let stated = moq_track_info {
+		max_age_us: 5_000_000,
+		..zeroed()
+	};
+	assert_eq!(max_age(stated), Some(Duration::from_secs(5)));
+	let unlimited = moq_track_info {
+		max_age_unlimited: true,
+		..zeroed()
+	};
+	assert_eq!(max_age(unlimited), None);
+	let both = moq_track_info {
+		max_age_us: 5_000_000,
+		max_age_unlimited: true,
+		..zeroed()
+	};
+	assert_eq!(max_age(both), None);
 }
 
 /// Raw frames, datagrams, and JSON values read back exactly the timestamp written: a 90 kHz
@@ -1882,7 +1896,8 @@ fn timestamps_round_trip_exactly() {
 		assert_eq!(read_timestamp(frame.timestamp), written, "{name} frame");
 		assert_eq!(moq_consume_track_frame_free(frame_id), 0);
 
-		// The datagram subscription is live once the frame arrived on the same track.
+		// The datagram consumer is live once its subscription is answered.
+		wait_datagram_reader(track);
 		assert_eq!(
 			unsafe {
 				moq_publish_track_datagram(track, payload.as_ptr(), payload.len(), timestamp, std::ptr::null_mut())
@@ -2074,6 +2089,135 @@ fn raw_track_publish_consume() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// Wait until a raw track's datagram track has a reader, which a datagram consumer becomes
+/// once its subscription is answered.
+fn wait_datagram_reader(track: u32) {
+	let datagrams = State::lock()
+		.publish
+		.datagram_producer(Id::try_from(track).unwrap())
+		.expect("a raw track");
+	let reader = kio::wait(|waiter| match datagrams.poll_priority(waiter, None) {
+		std::task::Poll::Ready(Some(_)) => std::task::Poll::Ready(()),
+		_ => std::task::Poll::Pending,
+	});
+	crate::ffi::RUNTIME
+		.block_on(async { kio::clock::timeout(TIMEOUT, reader).await })
+		.expect("no datagram reader arrived");
+}
+
+/// A datagram reader subscribes to its track, as before datagrams had a track of their own:
+/// the publisher sees it as demand, and a dynamic publisher learns of the track from it.
+#[test]
+fn a_datagram_reader_is_demand_and_requests_its_track() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"datagram-demand");
+	let request_cb = Callback::new();
+	let dynamic = id(unsafe { moq_publish_requests(broadcast, Some(channel_callback), request_cb.ptr) });
+	let consume = consume_local(broadcast);
+
+	// Nothing publishes the track yet: the reader's request reaches the handler.
+	let name = b"events";
+	let dg_cb = Callback::new();
+	let consumer = id(unsafe {
+		moq_consume_datagrams(
+			consume,
+			name.as_ptr() as *const c_char,
+			name.len(),
+			Some(channel_callback),
+			dg_cb.ptr,
+		)
+	});
+	let request = id(request_cb.recv());
+	let track = id(unsafe { moq_track_request_accept(request, std::ptr::null()) });
+
+	let demand_cb = Callback::new();
+	let _watcher = id(unsafe { moq_publish_track_demand(track, Some(channel_callback), demand_cb.ptr) });
+	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_WANTED as i32);
+
+	wait_datagram_reader(track);
+	let payload = b"on demand";
+	assert_eq!(
+		unsafe { moq_publish_track_datagram(track, payload.as_ptr(), payload.len(), &micros(7), std::ptr::null_mut()) },
+		0
+	);
+	let dg_id = id(dg_cb.recv());
+	let mut datagram = moq_datagram {
+		payload: std::ptr::null(),
+		payload_size: 0,
+		timestamp: std::ptr::null(),
+		sequence: u64::MAX,
+	};
+	assert_eq!(unsafe { moq_consume_datagram(dg_id, &mut datagram) }, 0);
+	assert_eq!(
+		unsafe { std::slice::from_raw_parts(datagram.payload, datagram.payload_size) },
+		payload
+	);
+	assert_eq!(datagram.sequence, 0);
+	assert_eq!(moq_consume_datagram_free(dg_id), 0);
+
+	// The reader leaving is the demand leaving.
+	assert_eq!(moq_consume_datagrams_cancel(consumer), 0);
+	assert_eq!(dg_cb.recv_terminal(), 0);
+	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNWANTED as i32);
+
+	assert_eq!(moq_publish_requests_cancel(dynamic), 0);
+	assert_eq!(request_cb.recv_terminal(), 0);
+	assert_eq!(moq_publish_track_finish(track), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(demand_cb.recv_terminal(), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// A name with only a datagram track, as a moq-net publisher makes one, is read without a
+/// stream track.
+#[test]
+fn a_datagram_only_track_is_read() {
+	let broadcast = moq_net::broadcast::Info::new().produce();
+	let mut datagrams = broadcast
+		.create_datagrams("events", moq_net::datagram::Info::default())
+		.unwrap();
+	let consume = i32::from(State::lock().consume.start(broadcast.consume(), None).unwrap()) as u32;
+
+	let name = b"events";
+	let dg_cb = Callback::new();
+	let consumer = id(unsafe {
+		moq_consume_datagrams(
+			consume,
+			name.as_ptr() as *const c_char,
+			name.len(),
+			Some(channel_callback),
+			dg_cb.ptr,
+		)
+	});
+	let reader = kio::wait(|waiter| match datagrams.poll_priority(waiter, None) {
+		std::task::Poll::Ready(Some(_)) => std::task::Poll::Ready(()),
+		_ => std::task::Poll::Pending,
+	});
+	crate::ffi::RUNTIME
+		.block_on(async { kio::clock::timeout(TIMEOUT, reader).await })
+		.expect("no datagram reader arrived");
+
+	assert_eq!(datagrams.append(None, &b"only"[..]).unwrap(), 0);
+	let dg_id = id(dg_cb.recv());
+	let mut datagram = moq_datagram {
+		payload: std::ptr::null(),
+		payload_size: 0,
+		timestamp: std::ptr::null(),
+		sequence: u64::MAX,
+	};
+	assert_eq!(unsafe { moq_consume_datagram(dg_id, &mut datagram) }, 0);
+	assert_eq!(
+		unsafe { std::slice::from_raw_parts(datagram.payload, datagram.payload_size) },
+		b"only"
+	);
+	assert_eq!(moq_consume_datagram_free(dg_id), 0);
+
+	assert_eq!(moq_consume_datagrams_cancel(consumer), 0);
+	assert_eq!(dg_cb.recv_terminal(), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+}
+
 #[test]
 fn raw_track_datagram_publish_consume() {
 	let origin = id(moq_origin_create());
@@ -2103,6 +2247,7 @@ fn raw_track_datagram_publish_consume() {
 		)
 	});
 
+	wait_datagram_reader(track);
 	let payload = b"hello datagram";
 	let mut sequence: u64 = u64::MAX;
 	assert_eq!(
@@ -2178,7 +2323,7 @@ fn raw_track_subscription_options_and_update() {
 	let info = moq_track_info {
 		priority: 3,
 		max_age_us: 1_000_000,
-		max_age_present: true,
+		max_age_unlimited: false,
 		timescale: 1_000_000,
 		timescale_present: true,
 		refresh: 0,
@@ -2313,7 +2458,7 @@ fn raw_track_time_anchor() {
 	let info = moq_track_info {
 		priority: 3,
 		max_age_us: 1_000_000,
-		max_age_present: true,
+		max_age_unlimited: false,
 		timescale: 1_000_000,
 		timescale_present: true,
 		refresh: 0,
@@ -2612,14 +2757,17 @@ fn json_snapshot_publish_consume() {
 
 	let mut last = 0;
 	for expected in [r#"{"a":1}"#, r#"{"a":2}"#] {
+		// Nothing stamps a write for the caller, so a NULL timestamp publishes nothing.
 		assert_eq!(
 			unsafe {
-				moq_publish_json_snapshot_update(
-					producer,
-					expected.as_ptr() as *const c_char,
-					expected.len(),
-					std::ptr::null(),
-				)
+				moq_publish_json_snapshot_update(producer, r#"{"a":0}"#.as_ptr() as *const c_char, 7, std::ptr::null())
+			},
+			MOQ_ERROR_INVALID_POINTER
+		);
+		let now = catalog_now(broadcast);
+		assert_eq!(
+			unsafe {
+				moq_publish_json_snapshot_update(producer, expected.as_ptr() as *const c_char, expected.len(), &now)
 			},
 			0
 		);
@@ -2630,7 +2778,6 @@ fn json_snapshot_publish_consume() {
 			timestamp: std::ptr::null(),
 		};
 		assert_eq!(unsafe { moq_consume_json_value(value_id, &mut value) }, 0);
-		// The producer stamps each value with the broadcast clock.
 		let at = read_timestamp(value.timestamp).expect("a stamped value is timed");
 		assert!(at.value >= last);
 		last = at.value;
@@ -2680,14 +2827,17 @@ fn json_stream_publish_consume() {
 
 	let mut last = 0;
 	for expected in [r#"{"n":0}"#, r#"{"n":1}"#, r#"{"n":2}"#] {
+		// Nothing stamps a write for the caller, so a NULL timestamp appends nothing.
 		assert_eq!(
 			unsafe {
-				moq_publish_json_stream_append(
-					producer,
-					expected.as_ptr() as *const c_char,
-					expected.len(),
-					std::ptr::null(),
-				)
+				moq_publish_json_stream_append(producer, r#"{"n":-1}"#.as_ptr() as *const c_char, 8, std::ptr::null())
+			},
+			MOQ_ERROR_INVALID_POINTER
+		);
+		let now = catalog_now(broadcast);
+		assert_eq!(
+			unsafe {
+				moq_publish_json_stream_append(producer, expected.as_ptr() as *const c_char, expected.len(), &now)
 			},
 			0
 		);
@@ -2698,7 +2848,6 @@ fn json_stream_publish_consume() {
 			timestamp: std::ptr::null(),
 		};
 		assert_eq!(unsafe { moq_consume_json_value(value_id, &mut value) }, 0);
-		// The producer stamps each value with the broadcast clock.
 		let at = read_timestamp(value.timestamp).expect("a stamped value is timed");
 		assert!(at.value >= last);
 		last = at.value;
@@ -2710,7 +2859,7 @@ fn json_stream_publish_consume() {
 		assert_eq!(moq_consume_json_value_free(value_id), 0);
 	}
 
-	// A caller's timestamp replaces the clock's, floored to the track's millisecond scale.
+	// A timestamp at another scale is floored to the track's milliseconds.
 	let expected = r#"{"n":3}"#;
 	let at = moq_timestamp {
 		value: (last + 1_000) * 90 + 45,
@@ -2775,10 +2924,12 @@ fn recv_window(cb: &Callback) -> WindowEvent {
 	(event.kind, event.start..event.end, json, timestamp)
 }
 
+/// Push record `n` at `n` milliseconds.
 fn window_push(handle: u32, n: u64) {
 	let value = format!(r#"{{"n":{n}}}"#);
+	let at = micros(n * 1_000);
 	assert_eq!(
-		unsafe { moq_publish_json_window_push(handle, value.as_ptr() as *const c_char, value.len(), std::ptr::null()) },
+		unsafe { moq_publish_json_window_push(handle, value.as_ptr() as *const c_char, value.len(), &at) },
 		0
 	);
 }
@@ -2795,8 +2946,8 @@ fn window_consume(consume: u32, name: &[u8], cb: &Callback) -> u32 {
 	})
 }
 
-/// A live reader sees each push and pop in order, stamped by the broadcast clock, and closing the
-/// broadcast ends a window still open.
+/// A live reader sees each push and pop in order at its timestamp, a NULL timestamp is refused, and
+/// closing the broadcast ends a window still open.
 #[test]
 fn json_window_publish_consume() {
 	use moq_json_window_kind::*;
@@ -2818,32 +2969,50 @@ fn json_window_publish_consume() {
 	let event_cb = Callback::new();
 	let consumer = window_consume(consume, name, &event_cb);
 
+	// Nothing stamps an edit for the caller, so a NULL timestamp publishes nothing.
+	let value = br#"{"n":-1}"#;
+	assert_eq!(
+		unsafe { moq_publish_json_window_push(producer, value.as_ptr().cast(), value.len(), std::ptr::null()) },
+		MOQ_ERROR_INVALID_POINTER
+	);
+	assert_eq!(
+		unsafe { moq_publish_json_window_pop(producer, 1, std::ptr::null()) },
+		MOQ_ERROR_INVALID_POINTER
+	);
 	for n in 0..3 {
 		window_push(producer, n);
 	}
-	assert_eq!(unsafe { moq_publish_json_window_pop(producer, 2, std::ptr::null()) }, 0);
+	assert_eq!(unsafe { moq_publish_json_window_pop(producer, 2, &micros(3_000)) }, 0);
 
-	let mut last = moq_net::Timestamp::ZERO;
 	for n in 0..3 {
 		let (kind, range, json, timestamp) = recv_window(&event_cb);
 		assert_eq!(
-			(kind, range, json),
-			(MOQ_JSON_WINDOW_KIND_PUSH, n..n + 1, Some(serde_json::json!({ "n": n })))
+			(kind, range, json, timestamp),
+			(
+				MOQ_JSON_WINDOW_KIND_PUSH,
+				n..n + 1,
+				Some(serde_json::json!({ "n": n })),
+				Some(moq_net::Timestamp::from_millis(n).unwrap())
+			)
 		);
-		let timestamp = timestamp.expect("the producer stamps each edit with the broadcast clock");
-		assert!(timestamp >= last);
-		last = timestamp;
 	}
 	let (kind, range, json, timestamp) = recv_window(&event_cb);
-	assert_eq!((kind, range, json), (MOQ_JSON_WINDOW_KIND_POP, 0..2, None));
-	assert!(timestamp.expect("the pop is stamped too") >= last);
+	assert_eq!(
+		(kind, range, json, timestamp),
+		(
+			MOQ_JSON_WINDOW_KIND_POP,
+			0..2,
+			None,
+			Some(moq_net::Timestamp::from_millis(3).unwrap())
+		)
+	);
 
 	// Closing the broadcast ends the open window and releases its handle.
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert!(event_cb.recv_terminal() < 0, "an aborted window is not a clean end");
 	assert!(moq_consume_json_cancel(consumer) < 0, "the task removed itself");
 	assert!(
-		unsafe { moq_publish_json_window_pop(producer, 1, std::ptr::null()) } < 0,
+		unsafe { moq_publish_json_window_pop(producer, 1, &micros(4_000)) } < 0,
 		"the handle was released"
 	);
 	assert!(moq_publish_json_window_finish(producer) < 0, "the handle was released");
@@ -3027,6 +3196,19 @@ type NamedConsumer = (
 
 const NAMED_CONSUMERS: [NamedConsumer; 5] = [
 	(
+		b"datagrams",
+		|consume, name, user_data| unsafe {
+			moq_consume_datagrams(
+				consume,
+				name.as_ptr() as *const c_char,
+				name.len(),
+				Some(channel_callback),
+				user_data,
+			)
+		},
+		moq_consume_datagrams_cancel,
+	),
+	(
 		b"raw",
 		|consume, name, user_data| unsafe {
 			moq_consume_track(
@@ -3039,19 +3221,6 @@ const NAMED_CONSUMERS: [NamedConsumer; 5] = [
 			)
 		},
 		moq_consume_track_cancel,
-	),
-	(
-		b"datagrams",
-		|consume, name, user_data| unsafe {
-			moq_consume_datagrams(
-				consume,
-				name.as_ptr() as *const c_char,
-				name.len(),
-				Some(channel_callback),
-				user_data,
-			)
-		},
-		moq_consume_datagrams_cancel,
 	),
 	(
 		b"snapshot",
@@ -3233,7 +3402,7 @@ fn publish_finish_serves_finished_tracks_until_closed() {
 	let info = moq_track_info {
 		priority: 0,
 		max_age_us: 0,
-		max_age_present: false,
+		max_age_unlimited: false,
 		timescale: 0,
 		timescale_present: false,
 		refresh: 0,
@@ -3788,6 +3957,39 @@ fn dynamic_serves_a_request_under_a_prefix() {
 }
 
 #[test]
+fn dynamic_serves_a_held_consumer_without_taking_its_handle() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"source");
+	let held = consume_local(broadcast);
+	let cb = Callback::new();
+	let dynamic =
+		id(unsafe { moq_origin_requests(origin, b"live".as_ptr().cast(), 4, Some(channel_callback), cb.ptr) });
+	let result = Callback::new();
+	let _task = id(unsafe {
+		moq_origin_request(
+			origin,
+			b"live/cam".as_ptr().cast(),
+			8,
+			std::ptr::null(),
+			0,
+			Some(channel_callback),
+			result.ptr,
+		)
+	});
+	let request = id(cb.recv());
+	assert_eq!(moq_broadcast_request_serve(request, held), 0);
+	let served = id(result.recv());
+	assert!(moq_broadcast_request_serve(request, held) < 0, "request is consumed");
+	assert_eq!(moq_consume_close(held), 0, "source handle remains caller-owned");
+	result.recv_terminal();
+	assert_eq!(moq_consume_close(served), 0);
+	assert_eq!(moq_origin_requests_cancel(dynamic), 0);
+	cb.recv_terminal();
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
 fn dynamic_refuses_a_missing_callback() {
 	let origin = id(moq_origin_create());
 	let prefix = b"live";
@@ -3948,7 +4150,7 @@ fn track_demand_reports_the_wanted_group() {
 	let info = moq_track_info {
 		priority: 0,
 		max_age_us: 0,
-		max_age_present: false,
+		max_age_unlimited: false,
 		timescale: 0,
 		timescale_present: false,
 		refresh: 0,
@@ -4356,8 +4558,18 @@ fn a_group_request_nobody_reads_is_withdrawn() {
 	let origin = id(moq_origin_create());
 	let broadcast = publish_broadcast(origin, b"track-dynamic-narrowed");
 	let name = b"data";
-	let track =
-		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
+	// No publisher age limit, so the requested groups behind the live one stay fresh.
+	let info = moq_track_info {
+		priority: 0,
+		max_age_us: 0,
+		max_age_unlimited: true,
+		timescale: 0,
+		timescale_present: false,
+		refresh: 0,
+		refresh_present: false,
+		compress: false,
+	};
+	let track = id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), &info) });
 	let group_cb = Callback::new();
 	let dynamic = id(unsafe { moq_publish_track_requests(track, Some(channel_callback), group_cb.ptr) });
 
@@ -6977,6 +7189,55 @@ fn bandwidth_reservations_split_the_estimate() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// Two viewers split a 3 Mbps receive estimate max-min fair by ceiling, and closing
+/// one hands its share back.
+#[test]
+fn viewers_split_the_receive_estimate() {
+	let estimate = moq_net::bandwidth::Producer::new();
+	let viewers = {
+		let mut state = State::lock();
+		let viewers = moq_net::bandwidth::Viewers::new(estimate.weak());
+		id(i32::from(state.bandwidth.insert_viewers(viewers).unwrap()))
+	};
+	let viewer_rate = |viewer: u32| {
+		let mut bps = 0;
+		let mut present = false;
+		assert_eq!(unsafe { moq_viewer_rate(viewer, &mut bps, &mut present) }, 0);
+		present.then_some(bps)
+	};
+
+	let first = id(moq_viewers_watch(viewers, 4_000_000));
+	let second = id(moq_viewers_watch(viewers, 1_000_000));
+	assert_eq!(viewer_rate(first), None);
+
+	estimate
+		.set(Some(moq_net::bandwidth::Rate::from_bps(3_000_000)))
+		.unwrap();
+	assert_eq!(viewer_rate(first), Some(2_000_000));
+	assert_eq!(viewer_rate(second), Some(1_000_000));
+
+	assert_eq!(moq_viewer_update(second, 4_000_000), 0);
+	assert_eq!(viewer_rate(first), Some(1_500_000));
+	assert_eq!(moq_viewers_set_target(viewers, 0, true), 0);
+	assert_eq!(moq_viewers_set_target(viewers, 0, false), 0);
+
+	// Past what a PROBE target carries: refused, and nothing changes.
+	let max = moq_net::bandwidth::Viewers::MAX_TARGET.as_bps();
+	assert_eq!(moq_viewers_watch(viewers, max), crate::MOQ_ERROR_OUT_OF_RANGE);
+	assert_eq!(moq_viewer_update(second, max), crate::MOQ_ERROR_OUT_OF_RANGE);
+	assert_eq!(
+		moq_viewers_set_target(viewers, max + 1, true),
+		crate::MOQ_ERROR_OUT_OF_RANGE
+	);
+	assert_eq!(viewer_rate(first), Some(1_500_000));
+
+	assert_eq!(moq_viewer_close(second), 0);
+	assert_eq!(viewer_rate(first), Some(3_000_000));
+	assert_eq!(moq_viewer_close(first), 0);
+	assert!(moq_viewer_close(first) < 0);
+	assert_eq!(moq_viewers_close(viewers), 0);
+}
+
 /// Two allocator handles share one registry.
 #[test]
 fn bandwidth_handles_share_the_registry() {
@@ -7559,6 +7820,59 @@ fn json_tracks_are_advertised_in_the_catalog() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// Media and data stamped from the broadcast clock share one epoch, so a JSON track gives the
+/// media no `delay`: a media frame trails no data write.
+#[test]
+fn a_shared_epoch_gives_media_no_delay() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"shared-epoch");
+	let before: Vec<String> = published_catalog(broadcast).audio.renditions.keys().cloned().collect();
+	let media = id(publish_audio(
+		broadcast,
+		moq_audio_format::MOQ_AUDIO_FORMAT_OPUS,
+		&opus_head(),
+		None,
+	));
+	let name = (published_catalog(broadcast).audio.renditions.keys())
+		.find(|name| !before.contains(name))
+		.expect("rendition listed")
+		.clone();
+	let status = b"status";
+	let json = id(unsafe {
+		moq_publish_json_snapshot(
+			broadcast,
+			status.as_ptr() as *const c_char,
+			status.len(),
+			&moq_json_snapshot_config { deltas: true },
+		)
+	});
+
+	let now = catalog_now(broadcast);
+	let value = br#"{"live":true}"#;
+	assert_eq!(
+		unsafe { moq_publish_json_snapshot_update(json, value.as_ptr() as *const c_char, value.len(), &now) },
+		0
+	);
+	let start = moq_net::Timestamp::try_from(now).unwrap().as_micros() as u64;
+	write_opus(media, start, 50, 100);
+
+	let delay = audio_rendition(broadcast, &name).delay;
+	assert!(delay.unwrap_or_default().is_zero(), "{delay:?}");
+
+	assert_eq!(
+		unsafe { moq_publish_catalog_now(broadcast, std::ptr::null_mut()) },
+		MOQ_ERROR_INVALID_POINTER
+	);
+	assert_eq!(moq_publish_json_snapshot_finish(json), 0);
+	assert_eq!(moq_publish_media_finish(media), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert!(
+		unsafe { moq_publish_catalog_now(broadcast, &mut moq_timestamp::default()) } < 0,
+		"a closed broadcast has no clock"
+	);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 #[test]
 fn data_track_names_cannot_collide() {
 	let origin = id(moq_origin_create());
@@ -7751,37 +8065,6 @@ fn zeroed_audio_hint_measures() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// A video group duration hint declares the HLS duration up front, as the smallest multiple of the
-/// hint at or above the grid.
-#[test]
-fn video_group_duration_hint_declares_hls() {
-	let origin = id(moq_origin_create());
-	let broadcast = publish_broadcast(origin, b"video-group-duration");
-	let init = h264_init();
-	let config = moq_video_init {
-		format: moq_video_format::MOQ_VIDEO_FORMAT_AVC3 as u32,
-		init: init.as_ptr(),
-		init_len: init.len(),
-		label: std::ptr::null(),
-		label_len: 0,
-		hint: moq_video_hint {
-			group_duration_us: 3_000_000,
-			has_group_duration: true,
-			..moq_video_hint::default()
-		},
-	};
-	let media = id(unsafe { moq_publish_video(broadcast, &config) });
-
-	let catalog = published_catalog(broadcast);
-	let rendition = catalog.video.renditions.values().next().expect("rendition listed");
-	let hls = rendition.hls.clone().expect("records listed before any frame");
-	assert_eq!(hls.duration, std::time::Duration::from_secs(6));
-
-	assert_eq!(moq_publish_media_finish(media), 0);
-	assert_eq!(moq_publish_close(broadcast), 0);
-	assert_eq!(moq_origin_close(origin), 0);
-}
-
 /// Hints reach a track published for a request, as for moq_publish_audio and moq_publish_video.
 #[test]
 fn track_request_media_carries_hints() {
@@ -7833,16 +8116,8 @@ fn track_request_media_carries_hints() {
 	let catalog = published_catalog(broadcast);
 	let audio_rendition = catalog.audio.renditions.values().next().expect("audio listed");
 	assert_eq!(audio_rendition.bitrate, Some(96_000));
-	assert_eq!(
-		audio_rendition.hls.as_ref().map(|hls| hls.duration),
-		Some(std::time::Duration::from_secs(4))
-	);
 	let video_rendition = catalog.video.renditions.values().next().expect("video listed");
 	assert_eq!(video_rendition.bitrate, Some(2_000_000));
-	assert_eq!(
-		video_rendition.hls.as_ref().map(|hls| hls.duration),
-		Some(std::time::Duration::from_secs(6))
-	);
 
 	assert_eq!(moq_consume_track_cancel(audio_consumer), 0);
 	assert_eq!(audio_cb.recv_terminal(), 0);
@@ -7937,32 +8212,13 @@ fn invalid_hints_are_refused() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// A group duration hint lists the track's HLS records in the first catalog, so the first group
-/// doesn't republish it; without one they arrive once a group has been written.
+/// A group duration hint is the track's join interval, declared once its first window closes,
+/// rather than the shorter groups it measured.
 #[test]
-fn group_duration_hint_lists_hls_up_front() {
+fn group_duration_hint_declares_the_join_interval() {
 	let origin = id(moq_origin_create());
 	let broadcast = publish_broadcast(origin, b"group-duration");
 	let init = opus_head();
-
-	let free = id(publish_audio(
-		broadcast,
-		moq_audio_format::MOQ_AUDIO_FORMAT_OPUS,
-		&init,
-		None,
-	));
-	let free_name = published_catalog(broadcast)
-		.audio
-		.renditions
-		.keys()
-		.next()
-		.unwrap()
-		.clone();
-	assert!(
-		audio_rendition(broadcast, &free_name).hls.is_none(),
-		"unhinted: no records yet"
-	);
-
 	let config = moq_audio_init {
 		format: moq_audio_format::MOQ_AUDIO_FORMAT_OPUS as u32,
 		init: init.as_ptr(),
@@ -7970,24 +8226,23 @@ fn group_duration_hint_lists_hls_up_front() {
 		label: std::ptr::null(),
 		label_len: 0,
 		hint: moq_audio_hint {
-			group_duration_us: 100_000,
+			group_duration_us: 500_000,
 			has_group_duration: true,
 			..moq_audio_hint::default()
 		},
 	};
 	let hinted = id(unsafe { moq_publish_audio(broadcast, &config) });
-	let name = (published_catalog(broadcast).audio.renditions.keys())
-		.find(|name| **name != free_name)
-		.expect("hinted rendition listed")
-		.clone();
-	let listed = audio_rendition(broadcast, &name);
-	let hls = listed.hls.clone().expect("hinted: records listed before any frame");
-	// The smallest multiple of the 100 ms hint at or above the 4 s grid.
-	assert_eq!(hls.duration, std::time::Duration::from_secs(4));
 
-	// 100 ms groups of five 20 ms packets.
+	// 100 ms groups of five 20 ms packets, for longer than the second a window lasts.
 	let payload = [0u8; 100];
-	for i in 0..20u64 {
+	for i in 0..60u64 {
+		if i == 50 {
+			assert_eq!(
+				published_catalog(broadcast).media.join,
+				None,
+				"no window has closed yet"
+			);
+		}
 		assert_eq!(
 			unsafe { moq_publish_media_frame(hinted, payload.as_ptr(), payload.len(), micros(i * 20_000)) },
 			0
@@ -7997,13 +8252,12 @@ fn group_duration_hint_lists_hls_up_front() {
 		}
 	}
 	assert_eq!(
-		audio_rendition(broadcast, &name).hls,
-		listed.hls,
-		"the first groups don't change the listed records"
+		published_catalog(broadcast).media.interval(),
+		Some(std::time::Duration::from_millis(500)),
+		"the hint, not the 100 ms groups measured"
 	);
 
 	assert_eq!(moq_publish_media_finish(hinted), 0);
-	assert_eq!(moq_publish_media_finish(free), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }

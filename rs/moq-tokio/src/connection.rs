@@ -590,6 +590,7 @@ struct State {
 	/// Advanced by `Shared::connected` with the same write that publishes `status`,
 	/// so a reader can't see `Connected` without its count.
 	connects: u64,
+	last_connected: Option<kio::clock::Instant>,
 	/// Cumulative connects and disconnects, bumped by the reconnect loop itself so a session that
 	/// connects and drops before a consumer polls still counts.
 	presence: moq_net::stats::Presence,
@@ -650,6 +651,7 @@ impl Shared {
 			state.revision += 1;
 			state.status = Some(Status::Connected);
 			state.connects += 1;
+			state.last_connected = Some(kio::clock::now());
 			state.presence.sessions_started += 1;
 			state.failure = None;
 			state.version = Some(session.version());
@@ -775,6 +777,10 @@ pub struct Observation {
 	pub phase: Phase,
 	/// How many sessions have connected, including replacements.
 	pub connects: u64,
+	/// When a session last connected, retained while offline.
+	pub last_connected: Option<kio::clock::Instant>,
+	/// The live session's transport, or none while offline.
+	pub transport: Option<crate::Transport>,
 	/// The latest failed attempt or terminal failure, cleared by a successful connect.
 	pub failure: Option<Error>,
 	/// The live session's negotiated version, or none while offline.
@@ -811,6 +817,8 @@ impl State {
 				}
 			},
 			connects: self.connects,
+			last_connected: self.last_connected,
+			transport: self.transport,
 			failure: self.error.clone().or_else(|| self.failure.clone()),
 			version: self.version,
 		}
@@ -937,6 +945,8 @@ pub struct Connection {
 	bandwidth: moq_net::bandwidth::Allocator,
 	/// Persistent recv-bitrate estimate, fed by the loop from each live session.
 	recv_bandwidth: moq_net::bandwidth::Weak,
+	/// Divides `recv_bandwidth`, and every session the loop dials sends its viewers' target.
+	viewers: moq_net::bandwidth::Viewers,
 	/// The last status returned by [`status`](Self::status), for change detection.
 	/// Per-clone: a clone starts from its parent's cursor and diverges from there.
 	last_reported: Option<Status>,
@@ -981,7 +991,8 @@ impl Connection {
 		let send_bandwidth = send_bw.consume();
 		let recv_bandwidth = recv_bw.weak();
 		let bandwidth = moq_net::bandwidth::Allocator::new(send_bandwidth.clone());
-		let client = client.with_allocator(bandwidth.clone());
+		let viewers = moq_net::bandwidth::Viewers::new(recv_bandwidth.clone());
+		let client = client.with_allocator(bandwidth.clone()).with_viewers(viewers.clone());
 
 		let closed: CloseGuard = Default::default();
 		let task_closed = closed.clone();
@@ -1029,6 +1040,7 @@ impl Connection {
 			send_bandwidth,
 			recv_bandwidth,
 			bandwidth,
+			viewers,
 			last_reported: None,
 		}
 	}
@@ -1561,6 +1573,15 @@ impl Connection {
 	/// [`send_bandwidth`](Self::send_bandwidth); `None` while disconnected or unavailable.
 	pub fn recv_bandwidth(&self) -> BandwidthConsumer {
 		self.recv_bandwidth.consume()
+	}
+
+	/// Divides [`recv_bandwidth`](Self::recv_bandwidth) among the broadcasts watched over
+	/// this connection, mirroring [`moq_net::Session::viewers`].
+	///
+	/// Persistent like the estimate: every session the loop dials sends these viewers'
+	/// target, so they survive reconnects. Viewers report `None` while disconnected.
+	pub fn viewers(&self) -> moq_net::bandwidth::Viewers {
+		self.viewers.clone()
 	}
 
 	/// Poll whether the connection loop has stopped.

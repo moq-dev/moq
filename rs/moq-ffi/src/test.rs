@@ -46,9 +46,18 @@ fn timed_info() -> MoqTrackInfo {
 	MoqTrackInfo {
 		priority: 0,
 		max_age: None,
+		max_age_unlimited: false,
 		refresh: None,
 		timescale: Some(1_000_000),
 		compress: false,
+	}
+}
+
+/// [`timed_info`] with no publisher age limit, for a test that reads superseded groups.
+fn unlimited_info() -> MoqTrackInfo {
+	MoqTrackInfo {
+		max_age_unlimited: true,
+		..timed_info()
 	}
 }
 
@@ -94,6 +103,23 @@ where
 		.await
 		.expect("timed out waiting for the FFI runtime to poll the read");
 	handle
+}
+
+/// The datagram `send` writes, read by a `recv_datagram` started first: a subscription
+/// receives only datagrams sent after its first read.
+async fn datagram_sent_by<T>(consumer: &Arc<MoqTrackConsumer>, send: impl FnOnce() -> T) -> (T, MoqDatagram) {
+	let read = {
+		let consumer = consumer.clone();
+		spawn_parked(async move { consumer.recv_datagram().await }).await
+	};
+	let sent = send();
+	let datagram = kio::clock::timeout(TIMEOUT, read)
+		.await
+		.expect("timed out waiting for a datagram")
+		.expect("datagram read panicked")
+		.unwrap()
+		.expect("expected a datagram");
+	(sent, datagram)
 }
 
 /// Trust any certificate, for dialing a server with a generated one.
@@ -183,7 +209,7 @@ fn assert_protocol(err: &MoqError, scope: crate::error::MoqErrorScope, kind: cra
 }
 
 #[tokio::test]
-async fn detached_cancels_inner_on_drop() {
+async fn call_cancels_inner_on_drop() {
 	struct DropSignal(Option<tokio::sync::oneshot::Sender<()>>);
 
 	impl Drop for DropSignal {
@@ -194,7 +220,7 @@ async fn detached_cancels_inner_on_drop() {
 
 	let (started_tx, started_rx) = tokio::sync::oneshot::channel();
 	let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
-	let outer = tokio::spawn(crate::ffi::detached(async move {
+	let outer = tokio::spawn(crate::ffi::run(async move {
 		let _drop = DropSignal(Some(dropped_tx));
 		started_tx.send(()).unwrap();
 		std::future::pending::<Result<(), MoqError>>().await
@@ -202,13 +228,13 @@ async fn detached_cancels_inner_on_drop() {
 
 	kio::clock::timeout(TIMEOUT, started_rx)
 		.await
-		.expect("timed out waiting for detached task to start")
+		.expect("timed out waiting for call to start")
 		.unwrap();
 	outer.abort();
 	assert!(outer.await.unwrap_err().is_cancelled());
 	kio::clock::timeout(TIMEOUT, dropped_rx)
 		.await
-		.expect("timed out waiting for detached task to be dropped")
+		.expect("timed out waiting for call to be dropped")
 		.unwrap();
 }
 
@@ -793,7 +819,7 @@ async fn audio_raw_publish_from_many_threads() {
 		"tone".into(),
 		snapshot.audio["tone"].clone(),
 		MoqAudioDecoderOutput {
-			// The track's whole retention: reading starts only after finish, and the budget
+			// The track's whole max age: reading starts only after finish, and the budget
 			// ages groups by wall clock, so a stalled host would otherwise skip the start.
 			delay: Some(MoqDelay {
 				min: Some(Duration::ZERO),
@@ -1235,6 +1261,7 @@ async fn raw_track_datagram_roundtrip() {
 			Some(MoqTrackInfo {
 				priority: 0,
 				max_age: None,
+				max_age_unlimited: false,
 				refresh: None,
 				timescale: Some(1_000_000),
 				compress: false,
@@ -1244,6 +1271,7 @@ async fn raw_track_datagram_roundtrip() {
 	let consumer = track.consume(None).unwrap();
 	let payload = b"hello datagram".to_vec();
 
+	// A local reader receives what is sent after it was created, before its first read.
 	let sequence = track
 		.append_datagram(MoqFrame {
 			payload: payload.clone(),
@@ -1267,6 +1295,7 @@ async fn raw_track_info_reports_publisher_properties() {
 	let info = MoqTrackInfo {
 		priority: 7,
 		max_age: Some(Duration::from_millis(2_500)),
+		max_age_unlimited: false,
 		refresh: Some(2),
 		timescale: Some(90_000),
 		compress: true,
@@ -1277,6 +1306,7 @@ async fn raw_track_info_reports_publisher_properties() {
 	let got = consumer.info();
 	assert_eq!(got.priority, 7);
 	assert_eq!(got.max_age, Some(Duration::from_millis(2_500)));
+	assert!(!got.max_age_unlimited);
 	assert_eq!(got.refresh, Some(2));
 	assert_eq!(got.timescale, Some(90_000));
 	assert!(got.compress);
@@ -1337,56 +1367,52 @@ async fn subscribe(broadcast: &MoqBroadcastProducer, name: &str) -> Arc<MoqTrack
 }
 
 #[tokio::test(start_paused = true)]
-async fn data_writes_preserve_optional_timestamps() {
+async fn data_writes_preserve_the_callers_timestamp() {
 	// A 90 kHz tick, which no microsecond count holds exactly.
-	for timestamp in [
-		None,
-		Some(MoqTimestamp {
-			value: 123_457,
-			scale: 90_000,
-		}),
-	] {
-		for kind in ["json snapshot", "json stream"] {
-			let broadcast = MoqBroadcastProducer::new().unwrap();
-			let track = broadcast
-				.publish_track(
-					"data".into(),
-					Some(MoqTrackInfo {
-						priority: 0,
-						max_age: None,
-						refresh: None,
-						timescale: timestamp.map(|timestamp| timestamp.scale),
-						compress: false,
-					}),
-				)
-				.unwrap();
-			let consumer = subscribe(&broadcast, "data").await;
-			let payload = b"{\"n\":1}";
-			match kind {
-				"json snapshot" => {
-					let producer =
-						MoqJsonSnapshotProducer::new(&broadcast, &track, MoqJsonSnapshotConfig { deltas: false })
-							.unwrap();
-					producer
-						.update(String::from_utf8(payload.to_vec()).unwrap(), timestamp)
-						.unwrap();
-					producer.finish().unwrap();
-				}
-				"json stream" => {
-					let producer = MoqJsonStreamProducer::new(&broadcast, &track).unwrap();
-					producer
-						.append(String::from_utf8(payload.to_vec()).unwrap(), timestamp)
-						.unwrap();
-					producer.finish().unwrap();
-				}
-				_ => unreachable!(),
+	let timestamp = MoqTimestamp {
+		value: 123_457,
+		scale: 90_000,
+	};
+	for kind in ["json snapshot", "json stream"] {
+		let broadcast = MoqBroadcastProducer::new().unwrap();
+		let track = broadcast
+			.publish_track(
+				"data".into(),
+				Some(MoqTrackInfo {
+					priority: 0,
+					max_age: None,
+					max_age_unlimited: false,
+					refresh: None,
+					timescale: Some(timestamp.scale),
+					compress: false,
+				}),
+			)
+			.unwrap();
+		let consumer = subscribe(&broadcast, "data").await;
+		let payload = b"{\"n\":1}";
+		match kind {
+			"json snapshot" => {
+				let producer =
+					MoqJsonSnapshotProducer::new(&broadcast, &track, MoqJsonSnapshotConfig { deltas: false }).unwrap();
+				producer
+					.update(String::from_utf8(payload.to_vec()).unwrap(), timestamp)
+					.unwrap();
+				producer.finish().unwrap();
 			}
-			let frame = consumer.read_frame().await.unwrap().unwrap();
-			assert_eq!(frame.payload, payload, "{kind}");
-			assert_eq!(frame.timestamp, timestamp, "{kind}");
-			assert_eq!(consumer.info().timescale, timestamp.map(|timestamp| timestamp.scale));
-			broadcast.close().unwrap();
+			"json stream" => {
+				let producer = MoqJsonStreamProducer::new(&broadcast, &track).unwrap();
+				producer
+					.append(String::from_utf8(payload.to_vec()).unwrap(), timestamp)
+					.unwrap();
+				producer.finish().unwrap();
+			}
+			_ => unreachable!(),
 		}
+		let frame = consumer.read_frame().await.unwrap().unwrap();
+		assert_eq!(frame.payload, payload, "{kind}");
+		assert_eq!(frame.timestamp, Some(timestamp), "{kind}");
+		assert_eq!(consumer.info().timescale, Some(timestamp.scale));
+		broadcast.close().unwrap();
 	}
 }
 
@@ -1421,7 +1447,7 @@ async fn catalog_now_fixes_the_clock_for_later_media() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let catalog = MoqMediaCatalogProducer::new(broadcast.clone()).unwrap();
 	let clock = broadcast
-		.with_state(|state| Ok(state.catalog.snapshot().clock))
+		.with_state(|state| Ok(state.catalog.snapshot().media.clock))
 		.unwrap();
 	// Withhold publication so only the explicit clock read can fix it before the first frame.
 	let reserved = broadcast.with_state(|state| Ok(state.catalog.reserve())).unwrap();
@@ -1441,7 +1467,7 @@ async fn catalog_now_fixes_the_clock_for_later_media() {
 		.unwrap();
 	assert_eq!(
 		broadcast
-			.with_state(|state| Ok(state.catalog.snapshot().clock))
+			.with_state(|state| Ok(state.catalog.snapshot().media.clock))
 			.unwrap(),
 		clock
 	);
@@ -1459,6 +1485,7 @@ async fn json_snapshot_roundtrip() {
 	let info = MoqTrackInfo {
 		priority: 0,
 		max_age: None,
+		max_age_unlimited: false,
 		timescale: Some(1_000_000),
 		refresh: None,
 		compress: true,
@@ -1472,7 +1499,7 @@ async fn json_snapshot_roundtrip() {
 	let consumer = MoqJsonSnapshotConsumer::new(&*subscribe(&broadcast, "meta").await).unwrap();
 
 	for n in 1..=4 {
-		producer.update(format!(r#"{{"a":{n}}}"#), Some(us(n * 1000))).unwrap();
+		producer.update(format!(r#"{{"a":{n}}}"#), us(n * 1000)).unwrap();
 	}
 
 	let value = kio::clock::timeout(TIMEOUT, consumer.next())
@@ -1511,7 +1538,7 @@ async fn json_snapshot_roundtrip() {
 
 	producer.finish().unwrap();
 	assert!(matches!(
-		producer.update(r#"{"a":5}"#.into(), Some(us(5000))),
+		producer.update(r#"{"a":5}"#.into(), us(5000)),
 		Err(MoqError::Closed)
 	));
 	let end = kio::clock::timeout(TIMEOUT, consumer.next())
@@ -1532,8 +1559,9 @@ async fn json_snapshot_refreshes_for_a_joiner() {
 			Some(MoqTrackInfo {
 				priority: 127,
 				max_age: None,
+				max_age_unlimited: false,
 				refresh: Some(1),
-				timescale: None,
+				timescale: Some(1_000_000),
 				compress: false,
 			}),
 		)
@@ -1541,7 +1569,7 @@ async fn json_snapshot_refreshes_for_a_joiner() {
 	let config = MoqJsonSnapshotConfig { deltas: true };
 	let producer = MoqJsonSnapshotProducer::new(&broadcast, &track, config.clone()).unwrap();
 	for n in 0..4 {
-		producer.update(format!(r#"{{"n":{n}}}"#), None).unwrap();
+		producer.update(format!(r#"{{"n":{n}}}"#), us(n * 1000)).unwrap();
 	}
 
 	// The join crosses the ratio, so the producer restates the value without another update. The
@@ -1577,9 +1605,9 @@ async fn json_snapshot_refreshes_for_a_joiner() {
 async fn json_demand() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let snapshot_config = MoqJsonSnapshotConfig { deltas: true };
-	let track = broadcast.publish_track("status".into(), None).unwrap();
+	let track = broadcast.publish_track("status".into(), Some(timed_info())).unwrap();
 	let snapshot = MoqJsonSnapshotProducer::new(&broadcast, &track, snapshot_config.clone()).unwrap();
-	let track = broadcast.publish_track("events".into(), None).unwrap();
+	let track = broadcast.publish_track("events".into(), Some(timed_info())).unwrap();
 	let stream = MoqJsonStreamProducer::new(&broadcast, &track).unwrap();
 	let snapshot_demand = snapshot.demand().unwrap();
 	let stream_demand = stream.demand().unwrap();
@@ -1650,9 +1678,9 @@ async fn json_window_roundtrip() {
 	let consumer = MoqJsonWindowConsumer::new(&*subscribe(&broadcast, "log").await).unwrap();
 
 	for n in 0..3 {
-		producer.push(format!(r#"{{"n":{n}}}"#), Some(us(n * 1000))).unwrap();
+		producer.push(format!(r#"{{"n":{n}}}"#), us(n * 1000)).unwrap();
 	}
-	producer.pop(2, Some(us(3000))).unwrap();
+	producer.pop(2, us(3000)).unwrap();
 
 	for n in 0..3 {
 		let event = next_window(&consumer).await.expect("expected a push");
@@ -1674,10 +1702,10 @@ async fn json_window_roundtrip() {
 
 	producer.finish().unwrap();
 	assert!(matches!(
-		producer.push(r#"{"n":3}"#.into(), Some(us(4000))),
+		producer.push(r#"{"n":3}"#.into(), us(4000)),
 		Err(MoqError::Closed)
 	));
-	assert!(matches!(producer.pop(1, Some(us(4000))), Err(MoqError::Closed)));
+	assert!(matches!(producer.pop(1, us(4000)), Err(MoqError::Closed)));
 	assert_eq!(next_window(&consumer).await, None);
 }
 
@@ -1689,31 +1717,34 @@ async fn json_window_cut_restates_the_window() {
 	let config = MoqJsonWindowConfig {
 		checkpoint_records: None,
 	};
-	let track = broadcast.publish_track("log".into(), None).unwrap();
+	let track = broadcast.publish_track("log".into(), Some(timed_info())).unwrap();
 	let producer = MoqJsonWindowProducer::new(&track, config.clone()).unwrap();
 	let raw = subscribe(&broadcast, "log").await;
 	let consumer = MoqJsonWindowConsumer::new(&*subscribe(&broadcast, "log").await).unwrap();
 
 	for n in 0..3 {
-		producer.push(format!(r#"{{"n":{n}}}"#), None).unwrap();
+		producer.push(format!(r#"{{"n":{n}}}"#), us(n * 1000)).unwrap();
 	}
-	producer.pop(1, None).unwrap();
+	producer.pop(1, us(3000)).unwrap();
 	let events = [
-		window_push(0, 0),
-		window_push(1, 1),
-		window_push(2, 2),
-		MoqJsonWindowEvent::Pop { start: 0, end: 1 },
+		(window_push(0, 0), 0),
+		(window_push(1, 1), 1000),
+		(window_push(2, 2), 2000),
+		(MoqJsonWindowEvent::Pop { start: 0, end: 1 }, 3000),
 	];
-	for event in events {
+	for (event, at) in events {
 		assert_eq!(
 			next_window(&consumer).await,
-			Some(MoqJsonWindowTimed { event, timestamp: None })
+			Some(MoqJsonWindowTimed {
+				event,
+				timestamp: Some(us(at)),
+			})
 		);
 	}
 
 	producer.cut().unwrap();
 	producer.cut().unwrap();
-	producer.push(r#"{"n":3}"#.into(), None).unwrap();
+	producer.push(r#"{"n":3}"#.into(), us(4000)).unwrap();
 
 	let group = kio::clock::timeout(TIMEOUT, async {
 		loop {
@@ -1737,7 +1768,7 @@ async fn json_window_cut_restates_the_window() {
 		next_window(&consumer).await,
 		Some(MoqJsonWindowTimed {
 			event: window_push(3, 3),
-			timestamp: None,
+			timestamp: Some(us(4000)),
 		})
 	);
 
@@ -1756,8 +1787,9 @@ async fn json_window_refreshes_a_bounded_checkpoint_for_a_joiner() {
 			Some(MoqTrackInfo {
 				priority: 127,
 				max_age: None,
+				max_age_unlimited: false,
 				refresh: Some(1),
-				timescale: None,
+				timescale: Some(1_000_000),
 				compress: false,
 			}),
 		)
@@ -1767,7 +1799,7 @@ async fn json_window_refreshes_a_bounded_checkpoint_for_a_joiner() {
 	};
 	let producer = MoqJsonWindowProducer::new(&track, config.clone()).unwrap();
 	for n in 0..5 {
-		producer.push(format!(r#"{{"n":{n}}}"#), None).unwrap();
+		producer.push(format!(r#"{{"n":{n}}}"#), us(n * 1000)).unwrap();
 	}
 
 	// The join crosses the ratio, so the producer restates the window without another edit.
@@ -1785,10 +1817,7 @@ async fn json_window_refreshes_a_bounded_checkpoint_for_a_joiner() {
 		window_push(4, 4),
 	];
 	for event in events {
-		assert_eq!(
-			next_window(&consumer).await,
-			Some(MoqJsonWindowTimed { event, timestamp: None })
-		);
+		assert_eq!(next_window(&consumer).await.map(|timed| timed.event), Some(event));
 	}
 
 	producer.finish().unwrap();
@@ -1808,6 +1837,23 @@ fn json_window_refuses_zero_checkpoint_records() {
 	assert!(track.demand().is_ok(), "a refused config leaves the track open");
 }
 
+/// Every edit is timed, so a track without a timescale is refused up front and handed back.
+#[test]
+fn json_window_refuses_an_untimed_track() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("log".into(), None).unwrap();
+	let config = MoqJsonWindowConfig {
+		checkpoint_records: None,
+	};
+	let refused = MoqJsonWindowProducer::new(&track, config);
+	assert!(
+		matches!(&refused, Err(MoqError::Protocol { details }) if details.kind == MoqProtocolKind::TimestampMismatch),
+		"{:?}",
+		refused.err()
+	);
+	assert!(track.demand().is_ok(), "a refused track stays open");
+}
+
 /// The window producer reports subscriber demand, and drops it once finished.
 #[tokio::test]
 async fn json_window_demand() {
@@ -1815,7 +1861,7 @@ async fn json_window_demand() {
 	let config = MoqJsonWindowConfig {
 		checkpoint_records: None,
 	};
-	let track = broadcast.publish_track("log".into(), None).unwrap();
+	let track = broadcast.publish_track("log".into(), Some(timed_info())).unwrap();
 	let producer = MoqJsonWindowProducer::new(&track, config.clone()).unwrap();
 	let demand = producer.demand().unwrap();
 	assert_eq!(demand.name(), "log");
@@ -1880,12 +1926,12 @@ async fn demand_handle_outlives_finish() {
 #[tokio::test]
 async fn json_stream_roundtrip() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let track = broadcast.publish_track("events".into(), None).unwrap();
+	let track = broadcast.publish_track("events".into(), Some(timed_info())).unwrap();
 	let producer = MoqJsonStreamProducer::new(&broadcast, &track).unwrap();
 	let consumer = MoqJsonStreamConsumer::new(&*subscribe(&broadcast, "events").await).unwrap();
 
 	for n in 0..3 {
-		producer.append(format!(r#"{{"n":{n}}}"#), None).unwrap();
+		producer.append(format!(r#"{{"n":{n}}}"#), us(n * 1000)).unwrap();
 		let value = kio::clock::timeout(TIMEOUT, consumer.next())
 			.await
 			.expect("timed out waiting for json stream record")
@@ -1895,7 +1941,7 @@ async fn json_stream_roundtrip() {
 			serde_json::from_str::<serde_json::Value>(&value.value).unwrap(),
 			serde_json::json!({ "n": n })
 		);
-		assert_eq!(value.timestamp, None, "an untimed track yields no timestamp");
+		assert_eq!(value.timestamp.map(micros), Some(n * 1000));
 	}
 	producer.finish().unwrap();
 }
@@ -1915,7 +1961,7 @@ async fn json_on_requested_track() {
 		.await
 		.expect("timed out waiting for requested track")
 		.unwrap();
-	let producer = MoqJsonStreamProducer::new(&broadcast, &request.accept(None).unwrap()).unwrap();
+	let producer = MoqJsonStreamProducer::new(&broadcast, &request.accept(Some(timed_info())).unwrap()).unwrap();
 	let track = kio::clock::timeout(TIMEOUT, subscribe)
 		.await
 		.expect("timed out waiting for the subscribe")
@@ -1923,7 +1969,7 @@ async fn json_on_requested_track() {
 		.unwrap();
 	let consumer = MoqJsonStreamConsumer::new(&track).unwrap();
 
-	producer.append(r#"{"n":1}"#.into(), None).unwrap();
+	producer.append(r#"{"n":1}"#.into(), us(1000)).unwrap();
 	let value = kio::clock::timeout(TIMEOUT, consumer.next())
 		.await
 		.expect("timed out waiting for json stream record")
@@ -1994,6 +2040,49 @@ async fn track_request_demand_survives_accept() {
 	);
 }
 
+/// A requested track carries datagrams, even accepted once only its request handler keeps
+/// the broadcast open.
+#[tokio::test]
+async fn requested_track_carries_datagrams() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let dynamic = broadcast.requests().unwrap();
+	let consumer = broadcast.consume().unwrap();
+	drop(broadcast);
+	let subscribe = tokio::spawn(async move { consumer.subscribe_track("events".into(), None).await });
+	let request = kio::clock::timeout(TIMEOUT, dynamic.requested_track())
+		.await
+		.expect("timed out waiting for the request")
+		.unwrap();
+	let track = request.accept(Some(timed_info())).unwrap();
+	let consumer = subscribe.await.unwrap().unwrap();
+	let (sequence, datagram) =
+		datagram_sent_by(&consumer, || track.append_datagram(datagram_frame(b"beep")).unwrap()).await;
+	assert_eq!((datagram.sequence, datagram.payload), (sequence, b"beep".to_vec()));
+}
+
+/// A track that finished before its first datagram read has none to come: its datagram
+/// track finished with it and is no longer found, which reads as the end, not an error.
+#[tokio::test]
+async fn a_finished_track_reads_no_datagrams() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("events".into(), Some(timed_info())).unwrap();
+	let consumer = broadcast
+		.consume()
+		.unwrap()
+		.subscribe_track("events".into(), None)
+		.await
+		.unwrap();
+	track.finish().unwrap();
+	let read = kio::clock::timeout(TIMEOUT, consumer.recv_datagram())
+		.await
+		.expect("timed out waiting for the end");
+	assert!(
+		matches!(read, Ok(None)),
+		"{:?}",
+		read.map(|datagram| datagram.map(|d| d.sequence))
+	);
+}
+
 #[tokio::test]
 async fn track_request_demand_ends_on_rejection() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
@@ -2054,7 +2143,7 @@ async fn dynamic_track_request() {
 	track.finish().unwrap();
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn raw_untimed_frames_and_datagrams_roundtrip() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("untimed".into(), None).unwrap();
@@ -2081,16 +2170,21 @@ async fn raw_untimed_frames_and_datagrams_roundtrip() {
 	let frame = reader.read_frame().await.unwrap().unwrap();
 	assert_eq!(frame.payload, b"group");
 	assert_eq!(frame.timestamp, None);
-	track
-		.append_datagram(MoqFrame {
-			payload: b"datagram".to_vec(),
-			timestamp: None,
-		})
-		.unwrap();
-	let datagram = consumer.recv_datagram().await.unwrap().unwrap();
+	let (_, datagram) = datagram_sent_by(&consumer, || {
+		track
+			.append_datagram(MoqFrame {
+				payload: b"datagram".to_vec(),
+				timestamp: None,
+			})
+			.unwrap()
+	})
+	.await;
 	assert_eq!(datagram.payload, b"datagram");
 	assert_eq!(datagram.timestamp, None);
 	track.finish().unwrap();
+	// The datagrams end with the track, for readers from before and after the finish.
+	assert!(consumer.recv_datagram().await.unwrap().is_none());
+	assert!(track.consume(None).unwrap().recv_datagram().await.unwrap().is_none());
 }
 
 /// An explicitly timed raw track refuses frames and datagrams without a timestamp.
@@ -2196,20 +2290,18 @@ async fn timestamps_are_exact() {
 		value: 1,
 		scale: 90_000,
 	};
-	track
-		.insert_datagram(
-			7,
-			MoqFrame {
-				payload: b"datagram".to_vec(),
-				timestamp: Some(tick),
-			},
-		)
-		.unwrap();
-	let datagram = kio::clock::timeout(TIMEOUT, consumer.recv_datagram())
-		.await
-		.unwrap()
-		.unwrap()
-		.unwrap();
+	let (_, datagram) = datagram_sent_by(&consumer, || {
+		track
+			.insert_datagram(
+				7,
+				MoqFrame {
+					payload: b"datagram".to_vec(),
+					timestamp: Some(tick),
+				},
+			)
+			.unwrap()
+	})
+	.await;
 	assert_eq!(datagram.sequence, 7);
 	assert_eq!(datagram.timestamp, Some(tick));
 
@@ -2928,7 +3020,7 @@ async fn video_rung_sits_below_its_lower_and_disables() {
 		&broadcast,
 		named("high"),
 		MoqVideoInit {
-			lower: Some(low.clone()),
+			lower: Some(MoqMediaProducer::Track { producer: low.clone() }),
 			..video_init(MoqVideoFormat::Avc3, h264_init())
 		},
 	)
@@ -2954,6 +3046,99 @@ async fn video_rung_sits_below_its_lower_and_disables() {
 		}
 	};
 	assert!(disabled.video["low"].enabled);
+}
+
+/// A byte-stream rung above another sits one priority below it, so a grant short of both funds
+/// the lower one first. Disabled, it drops what is written to it, and enabled again it resumes at
+/// the next keyframe in the stream.
+#[tokio::test]
+async fn stream_rung_is_funded_after_its_lower_and_resumes_at_a_keyframe() {
+	let estimate = moq_net::bandwidth::Producer::new();
+	let bandwidth = crate::bandwidth::MoqAllocator::new(moq_net::bandwidth::Allocator::new(estimate.consume()));
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let consumer = broadcast.consume().unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer).await.unwrap();
+
+	let named = |name: &str| MoqMediaTarget::Named {
+		name: Some(name.into()),
+	};
+	let low =
+		MoqMediaTrackStreamProducer::video(&broadcast, named("low"), video_init(MoqVideoFormat::Avc3, h264_init()))
+			.unwrap();
+	let high = MoqMediaTrackStreamProducer::video(
+		&broadcast,
+		named("high"),
+		MoqVideoInit {
+			lower: Some(MoqMediaProducer::Stream { producer: low.clone() }),
+			..video_init(MoqVideoFormat::Avc3, h264_init())
+		},
+	)
+	.unwrap();
+
+	let low_track = consumer.subscribe_track("low".into(), None).await.unwrap();
+	let high_track = consumer.subscribe_track("high".into(), None).await.unwrap();
+	assert_eq!(low_track.info().priority, hang::catalog::PRIORITY.video);
+	assert_eq!(high_track.info().priority, hang::catalog::PRIORITY.video - 1);
+
+	// The higher rung asks for more, but strict priority fills the lower one first.
+	let low_reservation = bandwidth.reserve(&low.demand().unwrap(), 2_000_000);
+	let high_reservation = bandwidth.reserve(&high.demand().unwrap(), 4_000_000);
+	estimate
+		.set(Some(moq_net::bandwidth::Rate::from_bps(3_000_000)))
+		.unwrap();
+	assert_eq!(low_reservation.rate(), Some(2_000_000));
+	assert_eq!(high_reservation.rate(), Some(1_000_000));
+
+	// Each keyframe ends in its own slice bytes, to tell which one went out.
+	let keyframe = |last: u8| {
+		let mut bytes = h264_init();
+		bytes.extend_from_slice(&[0, 0, 0, 1, 0x65, 0x88, 0x84, last]);
+		bytes
+	};
+	let delta = [0, 0, 0, 1, 0x41, 0x9a, 0x21, 0x22];
+	// The splitter emits an access unit once the next one starts, hence the trailing deltas.
+	let write = |bytes: &[&[u8]]| {
+		for bytes in bytes {
+			high.write(bytes.to_vec()).unwrap();
+		}
+	};
+	let next_frame = async || {
+		loop {
+			let frame = kio::clock::timeout(TIMEOUT, high_track.read_frame())
+				.await
+				.expect("timed out waiting for a frame")
+				.unwrap()
+				.expect("the track ended");
+			// The discontinuity marker is empty.
+			if !frame.payload.is_empty() {
+				return frame.payload;
+			}
+		}
+	};
+	let high_enabled = async |enabled: bool| loop {
+		let catalog = kio::clock::timeout(TIMEOUT, catalog_consumer.next())
+			.await
+			.expect("timed out waiting for catalog")
+			.unwrap()
+			.expect("expected a catalog");
+		if catalog.video.get("high").is_some_and(|high| high.enabled == enabled) {
+			assert!(catalog.video["low"].enabled);
+			break;
+		}
+	};
+
+	write(&[&keyframe(0x21), &delta, &delta]);
+	assert!(next_frame().await.ends_with(&[0x21]));
+
+	high.set_enabled(false).unwrap();
+	high_enabled(false).await;
+	// The stream keeps flowing, but none of it goes out, the keyframe included.
+	write(&[&delta, &keyframe(0x23), &delta, &delta]);
+
+	high.set_enabled(true).unwrap();
+	write(&[&delta, &keyframe(0x24), &delta, &delta]);
+	high_enabled(true).await;
+	assert!(next_frame().await.ends_with(&[0x24]), "resumed on another keyframe");
 }
 
 /// A keyframe whose SPS names another level is a new decoder identity, so the track producer moves
@@ -4284,7 +4469,7 @@ async fn video_decode_start() {
 			rendition.clone(),
 			MoqVideoDecoderOutput {
 				start,
-				// The track's whole retention, so a slow host does not skip the first group.
+				// The track's whole max age, so a slow host does not skip the first group.
 				delay: Some(MoqDelay {
 					min: Some(Duration::ZERO),
 					max: Some(Duration::from_secs(30)),
@@ -4768,7 +4953,7 @@ async fn data_children(
 	[Arc<MoqTrackConsumer>; 3],
 ) {
 	let consumer = broadcast.consume().unwrap();
-	let track = |name: &str| broadcast.publish_track(name.into(), None).unwrap();
+	let track = |name: &str| broadcast.publish_track(name.into(), Some(timed_info())).unwrap();
 	let writers = (
 		MoqJsonSnapshotProducer::new(
 			broadcast,
@@ -4802,9 +4987,9 @@ async fn closing_a_broadcast_ends_its_open_data_tracks() {
 	broadcast.close().unwrap();
 	assert_left(readers).await;
 
-	assert!(matches!(json_snapshot.update("1".into(), None), Err(MoqError::Closed)));
-	assert!(matches!(json_stream.append("1".into(), None), Err(MoqError::Closed)));
-	assert!(matches!(json_window.push("1".into(), None), Err(MoqError::Closed)));
+	assert!(matches!(json_snapshot.update("1".into(), us(0)), Err(MoqError::Closed)));
+	assert!(matches!(json_stream.append("1".into(), us(0)), Err(MoqError::Closed)));
+	assert!(matches!(json_window.push("1".into(), us(0)), Err(MoqError::Closed)));
 }
 
 /// A data writer released without a finish ends its track as a publisher leaving.
@@ -4822,7 +5007,7 @@ async fn dropping_an_unfinished_data_writer_ends_it() {
 #[tokio::test(start_paused = true)]
 async fn a_track_is_adopted_by_one_writer() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let track = broadcast.publish_track("json".into(), None).unwrap();
+	let track = broadcast.publish_track("json".into(), Some(timed_info())).unwrap();
 	let config = || MoqJsonSnapshotConfig { deltas: false };
 	let failed = track.adopt::<MoqJsonSnapshotProducer>(|_| {
 		assert!(matches!(
@@ -5152,18 +5337,24 @@ async fn raw_track_group_order_commits_on_first_read() {
 		.expect("expected a group");
 	assert_eq!(group.sequence(), 1);
 
-	// Datagrams never commit and keep working after a commitment.
-	let sequence = track
+	// A subscription subscribes to datagrams on its first read, so one sent before is not
+	// delivered.
+	track
 		.append_datagram(MoqFrame {
-			payload: b"beep".to_vec(),
+			payload: b"early".to_vec(),
 			timestamp: Some(us(0)),
 		})
 		.unwrap();
-	let datagram = kio::clock::timeout(TIMEOUT, consumer.recv_datagram())
-		.await
-		.expect("timed out waiting for a datagram")
-		.unwrap()
-		.expect("expected a datagram");
+	// Datagrams never commit and keep working after a commitment.
+	let (sequence, datagram) = datagram_sent_by(&consumer, || {
+		track
+			.append_datagram(MoqFrame {
+				payload: b"beep".to_vec(),
+				timestamp: Some(us(0)),
+			})
+			.unwrap()
+	})
+	.await;
 	assert_eq!(datagram.sequence, sequence);
 	assert_eq!(datagram.payload, b"beep".to_vec());
 }
@@ -5208,12 +5399,8 @@ where
 	};
 	assert!(!group_read.is_finished(), "group read should still be pending");
 
-	let sequence = track.append_datagram(datagram_frame(b"beep")).unwrap();
-	let datagram = kio::clock::timeout(TIMEOUT, consumer.recv_datagram())
-		.await
-		.expect("timed out waiting for datagram behind a pending group read")
-		.unwrap()
-		.expect("expected a datagram");
+	let (sequence, datagram) =
+		datagram_sent_by(&consumer, || track.append_datagram(datagram_frame(b"beep")).unwrap()).await;
 	assert_eq!(datagram.sequence, sequence);
 	assert_eq!(datagram.payload, b"beep".to_vec());
 	assert!(!group_read.is_finished(), "group read should stay pending");
@@ -5264,12 +5451,10 @@ where
 async fn raw_track_insert_datagram_keeps_its_sequence() {
 	let (_broadcast, track, consumer) = raw_track();
 
-	track.insert_datagram(7, datagram_frame(b"seven")).unwrap();
-	let datagram = kio::clock::timeout(TIMEOUT, consumer.recv_datagram())
-		.await
-		.expect("timed out waiting for the inserted datagram")
-		.unwrap()
-		.expect("expected a datagram");
+	let ((), datagram) = datagram_sent_by(&consumer, || {
+		track.insert_datagram(7, datagram_frame(b"seven")).unwrap()
+	})
+	.await;
 	assert_eq!(datagram.sequence, 7);
 	assert_eq!(datagram.payload, b"seven".to_vec());
 	assert_eq!(datagram.timestamp.map(micros), Some(1));
@@ -5368,12 +5553,10 @@ async fn raw_track_update_during_pending_group_still_reads_datagram() {
 		})
 		.unwrap();
 
-	let sequence = track.append_datagram(datagram_frame(b"after-update")).unwrap();
-	let datagram = kio::clock::timeout(TIMEOUT, consumer.recv_datagram())
-		.await
-		.expect("timed out waiting for datagram after update")
-		.unwrap()
-		.expect("expected a datagram");
+	let (sequence, datagram) = datagram_sent_by(&consumer, || {
+		track.append_datagram(datagram_frame(b"after-update")).unwrap()
+	})
+	.await;
 	assert_eq!(datagram.sequence, sequence);
 	assert_eq!(datagram.payload, b"after-update".to_vec());
 
@@ -5401,12 +5584,10 @@ async fn raw_track_dropping_a_pending_group_read_does_not_cancel_datagrams() {
 		Ok(_) => panic!("aborting the call should cancel only that future"),
 	}
 
-	let sequence = track.append_datagram(datagram_frame(b"still-open")).unwrap();
-	let datagram = kio::clock::timeout(TIMEOUT, consumer.recv_datagram())
-		.await
-		.expect("timed out waiting for datagram after a cancelled group read")
-		.unwrap()
-		.expect("expected a datagram");
+	let (sequence, datagram) = datagram_sent_by(&consumer, || {
+		track.append_datagram(datagram_frame(b"still-open")).unwrap()
+	})
+	.await;
 	assert_eq!(datagram.sequence, sequence);
 
 	track.write_frame(group_frame(b"group")).unwrap();
@@ -5572,7 +5753,11 @@ async fn raw_read_frame_skips_a_group_reset_as_old() {
 			Some(moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)),
 		)
 		.unwrap();
-	let consumer = MoqTrackConsumer::new(track.subscribe(None), crate::ffi::Background::default());
+	let consumer = MoqTrackConsumer::new(
+		track.subscribe(None),
+		crate::consumer::Datagrams::Remote(broadcast.consume()),
+		crate::ffi::Background::default(),
+	);
 
 	let expired = track.append_group().unwrap();
 	// The read holds the group when the reset lands, as one arriving over the wire does.
@@ -6145,6 +6330,115 @@ async fn roundtrip(media: &MoqMediaTrackProducer, track: &MoqMediaTrackConsumer,
 			return;
 		}
 	}
+}
+
+/// A server publishing `path` and a client following it over default versions, which
+/// negotiate lite-06: the server's broadcast, the client's view of it, the client's session,
+/// and what keeps the server side alive.
+async fn default_connection(
+	path: &str,
+) -> (
+	Arc<MoqBroadcastProducer>,
+	Arc<MoqBroadcastConsumer>,
+	Arc<MoqSession>,
+	impl Sized,
+) {
+	let server_origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		publish: Some(server_origin.clone()),
+		..Default::default()
+	})
+	.unwrap();
+	let addr = kio::clock::timeout(TIMEOUT, server.listen())
+		.await
+		.expect("listen timed out")
+		.expect("listen failed");
+	let accepting = server.clone();
+	let accept = tokio::spawn(async move {
+		let request = accepting.accept().await.unwrap().expect("a session");
+		request.accept(None, None).await.expect("handshake failed")
+	});
+	let broadcast = create_announced(&server_origin, path);
+
+	let viewer = MoqOriginProducer::new(MoqOriginConfig::default());
+	let client = MoqClient::new(MoqClientConfig {
+		tls: insecure_tls(),
+		bind: Some("127.0.0.1:0".into()),
+		consume: Some(viewer.clone()),
+		..Default::default()
+	})
+	.unwrap();
+	let session = kio::clock::timeout(TIMEOUT, client.connect(format!("https://{addr}")))
+		.await
+		.expect("connect timed out")
+		.expect("connect failed");
+	let server_session = kio::clock::timeout(TIMEOUT, accept).await.unwrap().unwrap();
+	let followed = viewer.consume().follow(path.into(), None).unwrap();
+	let remote = kio::clock::timeout(TIMEOUT, followed.available())
+		.await
+		.expect("timed out waiting for the broadcast")
+		.unwrap();
+	(broadcast, remote, session, (server, server_origin, server_session))
+}
+
+/// Read one datagram from `consumer`, resending `track`'s until one arrives: the reader joins
+/// the datagrams on its first read, which lands a moment later, and one sent before is gone.
+async fn resend_until_read(track: &MoqTrackProducer, consumer: &Arc<MoqTrackConsumer>) -> MoqDatagram {
+	let read = {
+		let consumer = consumer.clone();
+		spawn_parked(async move { consumer.recv_datagram().await }).await
+	};
+	let send = async {
+		loop {
+			track
+				.append_datagram(MoqFrame {
+					payload: b"reading".to_vec(),
+					timestamp: Some(us(5_000)),
+				})
+				.unwrap();
+			kio::clock::sleep(Duration::from_millis(10)).await;
+		}
+	};
+	tokio::select! {
+		read = kio::clock::timeout(TIMEOUT, read) => read.expect("timed out waiting for a datagram"),
+		_ = send => unreachable!(),
+	}
+	.expect("datagram read panicked")
+	.unwrap()
+	.expect("expected a datagram")
+}
+
+/// A raw track's datagrams reach a remote reader over a default connection, which negotiates
+/// lite-06: its subscription to the track carries the track's datagrams too.
+#[tokio::test]
+async fn raw_track_datagrams_cross_a_default_connection() {
+	let (broadcast, remote, session, _server) = default_connection("sensor").await;
+	let track = broadcast.publish_track("events".into(), Some(timed_info())).unwrap();
+	let consumer = remote.subscribe_track("events".into(), None).await.unwrap();
+	let datagram = resend_until_read(&track, &consumer).await;
+	assert_eq!(datagram.payload, b"reading");
+	assert_eq!(datagram.timestamp.map(micros), Some(5_000));
+	assert_eq!(session.state().version.as_deref(), Some("moq-lite-06"));
+}
+
+/// So do a requested track's: its datagram track exists before the accept answers the
+/// subscription that carries them.
+#[tokio::test]
+async fn requested_track_datagrams_cross_a_default_connection() {
+	let (broadcast, remote, session, _server) = default_connection("sensor").await;
+	let dynamic = broadcast.requests().unwrap();
+	let subscribe = tokio::spawn(async move { remote.subscribe_track("events".into(), None).await });
+	let request = kio::clock::timeout(TIMEOUT, dynamic.requested_track())
+		.await
+		.expect("timed out waiting for the request")
+		.unwrap();
+	let track = request.accept(Some(timed_info())).unwrap();
+	let consumer = kio::clock::timeout(TIMEOUT, subscribe).await.unwrap().unwrap().unwrap();
+	let datagram = resend_until_read(&track, &consumer).await;
+	assert_eq!(datagram.payload, b"reading");
+	assert_eq!(session.state().version.as_deref(), Some("moq-lite-06"));
 }
 
 /// A replacement session from the same publisher re-announces every route while the old one
@@ -8177,12 +8471,15 @@ async fn json_tracks_are_advertised_in_the_catalog() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let snapshot = MoqJsonSnapshotProducer::new(
 		&broadcast,
-		&broadcast.publish_track("status".into(), None).unwrap(),
+		&broadcast.publish_track("status".into(), Some(timed_info())).unwrap(),
 		MoqJsonSnapshotConfig { deltas: true },
 	)
 	.unwrap();
-	let stream =
-		MoqJsonStreamProducer::new(&broadcast, &broadcast.publish_track("events".into(), None).unwrap()).unwrap();
+	let stream = MoqJsonStreamProducer::new(
+		&broadcast,
+		&broadcast.publish_track("events".into(), Some(timed_info())).unwrap(),
+	)
+	.unwrap();
 
 	let catalog = published_catalog(&broadcast);
 	let entry = catalog.json.tracks.get("status").expect("snapshot track advertised");
@@ -8210,12 +8507,12 @@ async fn data_track_names_cannot_collide() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let first = MoqJsonSnapshotProducer::new(
 		&broadcast,
-		&broadcast.publish_track("state".into(), None).unwrap(),
+		&broadcast.publish_track("state".into(), Some(timed_info())).unwrap(),
 		MoqJsonSnapshotConfig { deltas: false },
 	)
 	.unwrap();
 	let other = MoqBroadcastProducer::new().unwrap();
-	let track = other.publish_track("state".into(), None).unwrap();
+	let track = other.publish_track("state".into(), Some(timed_info())).unwrap();
 	assert!(
 		MoqJsonStreamProducer::new(&broadcast, &track).is_err(),
 		"a duplicate data track name should fail"
@@ -8407,7 +8704,7 @@ async fn shutdown_delivers_the_finished_track() {
 		let closing = publisher.clone();
 		kio::clock::timeout(
 			TIMEOUT,
-			crate::ffi::detached(async move {
+			crate::ffi::run(async move {
 				let group = track.append_group()?;
 				group.write_frame(MoqFrame {
 					timestamp: Some(us(0)),
@@ -8489,7 +8786,9 @@ async fn shutdown_times_out_on_an_unfinished_track() {
 #[tokio::test]
 async fn ascending_subscription_reads_a_cached_backlog_oldest_first() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let track = broadcast.publish_track("events".into(), Some(timed_info())).unwrap();
+	let track = broadcast
+		.publish_track("events".into(), Some(unlimited_info()))
+		.unwrap();
 	for timestamp_us in [0, 1_000, 2_000] {
 		let group = track.append_group().unwrap();
 		group
@@ -8701,7 +9000,9 @@ async fn auth_tokens_join_and_leave_the_union() {
 #[tokio::test]
 async fn time_anchors_start_at_the_containing_group() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let track = broadcast.publish_track("events".into(), Some(timed_info())).unwrap();
+	let track = broadcast
+		.publish_track("events".into(), Some(unlimited_info()))
+		.unwrap();
 	for timestamp_us in [0, 1_000, 2_000] {
 		let group = track.append_group().unwrap();
 		group
@@ -8932,7 +9233,9 @@ fn raw_group_read_frame_cancelled_unfreed_does_not_block_the_next() {
 #[tokio::test]
 async fn raw_read_frame_moves_on_when_next_group_takes_its_group() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let track = broadcast.publish_track("events".into(), Some(timed_info())).unwrap();
+	let track = broadcast
+		.publish_track("events".into(), Some(unlimited_info()))
+		.unwrap();
 	let consumer = track
 		.consume(Some(MoqSubscription {
 			delay: MoqDelay {
@@ -9043,7 +9346,9 @@ async fn raw_next_group_wakes_read_frame_after_unlocking() {
 async fn raw_track_concurrent_reads_take_every_group_once() {
 	const GROUPS: u64 = 200;
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let track = broadcast.publish_track("events".into(), Some(timed_info())).unwrap();
+	let track = broadcast
+		.publish_track("events".into(), Some(unlimited_info()))
+		.unwrap();
 	// No age limit, so a group nobody has read yet is never skipped for a newer one.
 	let consumer = track
 		.consume(Some(MoqSubscription {
@@ -9175,4 +9480,176 @@ fn shutdown_waits_for_a_polled_call() {
 	shutdown.join().unwrap();
 	let parked = parked.join().unwrap();
 	assert!(matches!(parked, Err(MoqError::Cancelled)), "{parked:?}");
+}
+
+/// A cancelled foreign wait can remain allocated until the host frees it. It must neither
+/// consume another demand change nor prevent a second call from observing that change.
+#[tokio::test]
+async fn demand_cancelled_before_free_leaves_the_change() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("events".into(), None).unwrap();
+	let demand = track.demand().unwrap();
+	assert_eq!(demand.wanted_changed().await.unwrap(), None);
+	let mut abandoned = Box::pin(demand.wanted_changed());
+	assert!(
+		abandoned
+			.as_mut()
+			.poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+			.is_pending()
+	);
+	ffi_caught_up().await;
+	let consumer = track.consume(None).unwrap();
+	let wanted = kio::clock::timeout(TIMEOUT, demand.wanted_changed())
+		.await
+		.expect("the abandoned wait stole the change")
+		.unwrap();
+	assert!(wanted.is_some());
+	drop(abandoned);
+	drop(consumer);
+}
+
+/// Setup, rather than the first packet, decides whether a rendition is usable.
+#[cfg(feature = "audio")]
+#[tokio::test]
+async fn audio_subscribe_configuration_boundary() {
+	use crate::audio::MoqAudioConsumer;
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let _track = broadcast.publish_track("audio".into(), None).unwrap();
+	let consumer = broadcast.consume().unwrap();
+	// The names alone cannot decide: the AAC-LC description may declare SBR,
+	// and a present, malformed OpusHead must never be replaced by catalog fields.
+	for (codec, description, channels, supported) in [
+		("opus", None, 2, true),
+		("opus", Some(opus_head()), 2, true),
+		("opus", Some(vec![]), 2, false),
+		("opus", Some(opus_head()[..18].to_vec()), 2, false),
+		("opus", None, 6, false),
+		("pcm", None, 6, true),
+		("pcm", Some(vec![]), 2, false),
+		("flac", None, 2, false),
+		("unknown", None, 2, false),
+		("mp4a.40.bad", None, 2, false),
+		("mp4a.40.2", Some(vec![0x11, 0x90]), 2, true),
+		("mp4a.40.2", Some(vec![0x12, 0x10, 0x56, 0xe5, 0x98]), 2, false),
+		("mp4a.40.2", Some(vec![0x11]), 2, false),
+		// Frequency index 15 promises a 24-bit rate that is absent from these two bytes.
+		("mp4a.40.2", Some(vec![0x17, 0x90]), 2, false),
+		("mp4a.40.2", None, 6, false),
+		("mp4a.40.5", None, 2, false),
+	] {
+		let mut config = sibling_audio("");
+		config.codec = codec.into();
+		config.description = description;
+		config.channel_count = channels;
+		let result = MoqAudioConsumer::subscribe(&consumer, "audio".into(), config, audio_output()).await;
+		if supported {
+			result.unwrap().cancel();
+		} else {
+			let error = result.err();
+			assert!(
+				matches!(&error, Some(MoqError::UnsupportedConfig { .. })),
+				"{codec}/{channels}: {error:?}"
+			);
+		}
+	}
+	// An output layout the decoder cannot produce is refused too. A zero output rate
+	// is a caller error no rendition avoids, and a missing track is not a refusal.
+	let layout = crate::audio::MoqAudioDecoderOutput {
+		channels: Some(0),
+		..audio_output()
+	};
+	assert!(matches!(
+		MoqAudioConsumer::subscribe(&consumer, "audio".into(), sibling_audio(""), layout).await,
+		Err(MoqError::UnsupportedConfig { .. })
+	));
+	let rate = crate::audio::MoqAudioDecoderOutput {
+		sample_rate: Some(0),
+		..audio_output()
+	};
+	assert!(matches!(
+		MoqAudioConsumer::subscribe(&consumer, "audio".into(), sibling_audio(""), rate).await,
+		Err(MoqError::Audio { .. })
+	));
+	let missing = MoqAudioConsumer::subscribe(&consumer, "missing".into(), sibling_audio(""), audio_output()).await;
+	assert!(matches!(missing, Err(MoqError::Audio { .. })));
+	let _limited = broadcast
+		.publish_track(
+			"limited".into(),
+			Some(MoqTrackInfo {
+				priority: 0,
+				max_age: Some(Duration::from_millis(10)),
+				max_age_unlimited: false,
+				refresh: None,
+				timescale: None,
+				compress: false,
+			}),
+		)
+		.unwrap();
+	let retained = MoqAudioConsumer::subscribe(
+		&consumer,
+		"limited".into(),
+		sibling_audio(""),
+		crate::audio::MoqAudioDecoderOutput {
+			delay: Some(MoqDelay {
+				min: Some(Duration::from_millis(20)),
+				max: None,
+			}),
+			..audio_output()
+		},
+	)
+	.await;
+	assert!(matches!(retained, Err(MoqError::Audio { .. })));
+	broadcast.close().unwrap();
+}
+
+#[cfg(feature = "video")]
+#[tokio::test]
+async fn video_subscribe_configuration_boundary() {
+	use crate::video::{MoqVideoConsumer, MoqVideoDecoderOutput};
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let _track = broadcast.publish_track("video".into(), None).unwrap();
+	let consumer = broadcast.consume().unwrap();
+	for (codec, description, supported) in [
+		("avc1.42001e", None, true),
+		("avc1.42001e", Some(vec![]), false),
+		("avc1.42001e", Some(vec![1, 0x42, 0, 0x1e]), false),
+		// hvc1 requires hvcC before any backend is opened, even on HEVC-capable hosts.
+		("hvc1.1.6.L93.B0", None, false),
+		("vp09.02.10.10", None, false),
+		("avc1.invalid", None, false),
+		("unknown", None, false),
+	] {
+		let config = MoqVideo {
+			codec: codec.into(),
+			description,
+			enabled: true,
+			container: MoqContainer::Legacy,
+			preference: 0,
+			label: None,
+			broadcast: None,
+			instance: None,
+			track: None,
+			coded: None,
+			display_aspect: None,
+			bitrate: None,
+			framerate: None,
+		};
+		let result = MoqVideoConsumer::subscribe(
+			&consumer,
+			"video".into(),
+			config.clone(),
+			MoqVideoDecoderOutput::default(),
+		)
+		.await;
+		if supported {
+			result.unwrap().cancel();
+			let missing =
+				MoqVideoConsumer::subscribe(&consumer, "missing".into(), config, MoqVideoDecoderOutput::default())
+					.await;
+			assert!(matches!(missing, Err(MoqError::Video { .. })));
+		} else {
+			assert!(matches!(result, Err(MoqError::UnsupportedConfig { .. })), "{codec}");
+		}
+	}
+	broadcast.close().unwrap();
 }

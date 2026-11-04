@@ -4,17 +4,36 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+A NULL or zeroed `moq_track_info` now advertises a zero max age, serving only the live edge, instead of no publisher limit.
+`max_age_present` is gone and `max_age_us` always applies: drop the assignment where you set it to true, and set the new `max_age_unlimited`, which ignores `max_age_us`, where you relied on it being false for no limit.
+Recompile against the new header, since an old binary's `max_age_present` byte now reads as `max_age_unlimited`, and zero-initialize the struct (`moq_track_info info = {0};`) or assign every member, since an indeterminate member is undefined behavior.
+
+### Datagrams are a track of their own
+
+A raw track's datagrams travel on a separate datagram track of the same name, so the C ABI is unchanged but some results differ:
+
+- `moq_publish_track_datagram` numbers datagrams on their own, apart from groups, and `moq_datagram.sequence` is that number. Don't compare it with group sequences.
+- `moq_consume_datagrams` receives only the datagrams sent once its subscription is answered. Every raw track carries a datagram track, but a name with none, such as a media or JSON track, ends the callback with a not-found error.
+- moq-transport carries no datagrams.
+
+### JSON writes refuse a NULL timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
+
+`moq_publish_json_snapshot_update`, `moq_publish_json_stream_append`, `moq_publish_json_window_push`, and `moq_publish_json_window_pop` fail with `MOQ_ERROR_INVALID_POINTER` and publish nothing on a NULL `timestamp`, instead of stamping the broadcast clock's current time.
+Read the broadcast clock with the new `moq_publish_catalog_now(broadcast, &now)` and stamp both media frames and JSON writes from it, so every track shares its epoch; media on a timeline of its own advertises the gap to the JSON tracks as catalog `delay`.
+
+### JSON window edits take a timestamp
+
+`moq_publish_json_window_push` and `moq_publish_json_window_pop` take a final
+`const moq_timestamp *timestamp`: a pointer to the edit's capture time on the
+broadcast clock, converted to track milliseconds. NULL fails, as above.
+Recompile callers against the regenerated `moq.h`.
+
 ### Subscriptions take a `moq_delay` ([#7697](https://github.com/moq-dev/moq/pull/7697))
 
 `moq_subscription.max_delay_us` and `max_delay_present` are `moq_delay delay`. A zeroed `moq_subscription` is moq-net's defaults again, the same as `moq_subscription_defaults()` and a NULL pointer: set `delay.max_us` to the old `max_delay_us`, and `delay.max_unlimited` where `max_delay_present` was false.
 `moq_delay` gains `min_unstated`, after `max_unlimited`, which leaves the target latency unstated; the struct keeps its layout, and a zeroed one still states zero.
-
-### JSON window edits take an optional timestamp
-
-`moq_publish_json_window_push` and `moq_publish_json_window_pop` take a final
-`const moq_timestamp *timestamp`. Pass `NULL` to keep stamping the broadcast
-clock, or a pointer to the edit's capture time, converted to track milliseconds.
-Recompile callers against the regenerated `moq.h`.
 
 ### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
 
@@ -101,11 +120,16 @@ With deltas on, the track carries a refresh ratio of 8 and the producer restates
 Higher is first and 0 is the unset midpoint, so a zeroed `moq_track_info` now uses the default priority rather than the least urgent one.
 To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 
+### `moq_origin_follow` replaces `moq_origin_announced_broadcast`, and both resolutions take an instance ([#7193](https://github.com/moq-dev/moq/pull/7193), [#7489](https://github.com/moq-dev/moq/pull/7489))
+
+Rename `moq_origin_announced_broadcast` and `moq_origin_announced_broadcast_cancel` to `moq_origin_follow` and `moq_origin_follow_cancel`.
+`moq_origin_request` and `moq_origin_follow` take `instance, instance_len` after `path_len`: pass `NULL, 0` to accept whichever publisher instance serves the path, or an instance to refuse every other.
+`moq_origin_request` resolves one publisher instance: it retries as the routes covering the path change, and fails as unroutable only once discovery has synced with no covering route. `moq_origin_follow` hands out each instance that serves the path in turn.
+
 ### A client asks only about what it watches (#6165)
 
-On moq-lite, a client session asks its relay for announcements only under paths something watches, through `moq_origin_announced` or `moq_origin_announced_broadcast`, instead of under its whole scope at connect.
-`moq_origin_request` watches nothing, so on a client it fails with a negative code for a path nothing watches, even when the relay announces it.
-Resolve the path with `moq_origin_announced_broadcast`, or hold `moq_origin_announced` over its prefix while requesting.
+On moq-lite, a client session asks its relay for announcements only under paths something watches, through `moq_origin_announced`, `moq_origin_request`, or `moq_origin_follow`, instead of under its whole scope at connect.
+`moq_origin_request` owns the discovery of its path, so it finds a broadcast the relay serves with nothing else watching first; no announcement stream is needed beside it.
 moq-transport and moq-lite-03/04 sessions are unchanged.
 
 ### `MOQ_CONTAINER_FORMAT_FMP4` unwraps to Legacy (#6250)
@@ -128,6 +152,7 @@ Publish a replacement under a new name, and expect a finished track's demand ter
 
 `moq_origin_dynamic` takes no route, and `moq_origin_dynamic_update` is gone.
 `moq_broadcast_request_accept` is replaced by `moq_broadcast_request_prepare`, which returns a prepared answer: fill its broadcast, then `moq_broadcast_prepared_publish` announces it at the exact path under a fresh instance of its own.
+To answer with a broadcast you already hold, `moq_broadcast_request_serve(request, consumer)` serves it under the prefix route without announcing an exact route; the consumer stays yours to free.
 `moq_broadcast_prepared_free` refuses an answer you will not publish.
 
 ### `moq_track_info` gains `compress` (#5928)
@@ -193,7 +218,7 @@ if (consumer > 0) {
 }
 ```
 
-### `moq_origin_announced_broadcast` delivers every publisher instance (#5700)
+### `moq_origin_follow` delivers every publisher instance (#5700)
 
 Its callback gets a new broadcast handle each time another instance takes over the path or the broadcast returns, and its terminal `0` only on cancel.
 Free each handle with `moq_consume_close` once its successor arrives.

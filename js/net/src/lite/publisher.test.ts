@@ -30,7 +30,7 @@ import {
 	SubscribeUpdate,
 } from "./subscribe.ts";
 import { Track as TrackMessage } from "./track.ts";
-import { ALPN_05, ALPN_06, ALPN_07_WIP, Version } from "./version.ts";
+import { ALPN_05, ALPN_06, ALPN_07_WIP, keepsSubscribeOpen, Version } from "./version.ts";
 
 function publish(origin: OriginProducer, path: Path.Valid) {
 	const broadcastPublication = origin.createBroadcast(path);
@@ -272,7 +272,11 @@ async function groupSendOrders(options: {
 	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
 
 	const broadcast = publish(origin, Path.from("test"));
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, priority: options.publisher });
+	const track = broadcast.createTrack("video", {
+		timescale: Timescale.MILLI,
+		priority: options.publisher,
+		maxAge: null,
+	});
 
 	const client = await Stream.open(pair.client, { version });
 	const server = await Stream.accept(pair.server, version);
@@ -475,7 +479,7 @@ test("lite draft-05: many concurrent groups share one subscription listener", as
 	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), origin.consume());
 
 	const broadcast = publish(origin, Path.from("test"));
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 
 	const client = await Stream.open(pair.client, { version: Version.DRAFT_05 });
 	const server = await Stream.accept(pair.server, Version.DRAFT_05);
@@ -721,13 +725,14 @@ async function servedSubscription(
 		front.serve(broadcast.consume());
 		const dynamic = origin.requestsRoute(Path.from("test"));
 		void (async () => {
-			for await (const request of dynamic.requested()) hooks.acceptRequest(request, front.consumer);
+			for await (const request of dynamic.requested()) request.serve(front.consumer);
 		})();
 		routed = { front, dynamic };
 	} else {
 		broadcast = publish(origin, Path.from("test"));
 	}
-	const info = { timescale: Timescale.MILLI, maxAge: options.maxAge };
+	// Unset is no publisher limit: these fixtures serve superseded groups.
+	const info = { timescale: Timescale.MILLI, maxAge: options.maxAge ?? null };
 	let track = options.pending ? undefined : broadcast.createTrack("video", info);
 	for (const sequence of options.prefill ?? []) {
 		if (!track) throw new Error("a pending track holds nothing to prefill");
@@ -873,13 +878,13 @@ test("lite-07 SUBSCRIBE_START names each resolved range start", async () => {
 		prefill: [0n, 1n, 2n, 3n, 4n],
 		maxAge: Milli(3_600_000),
 		ranges: [
-			{ start: { relative: 1 } },
+			{ start: { relative: 1n } },
 			// Group 1 starts at 1 ms.
 			{ start: { time: 1 }, end: { absolute: 2n } },
 			// Empty, so it starts nowhere.
 			{ start: { absolute: 3n }, end: { absolute: 3n } },
 			// Empty only once its start resolves to group 4.
-			{ start: { relative: 0 }, end: { absolute: 2n } },
+			{ start: { relative: 0n }, end: { absolute: 2n } },
 		],
 	});
 	try {
@@ -892,19 +897,21 @@ test("lite-07 SUBSCRIBE_START names each resolved range start", async () => {
 });
 
 // A bounded window that resolves empty has no group to answer it, so the publisher answers it
-// at once and ends the subscription as covered, as a local read of it ends at once.
-test("lite-07 answers and ends a bounded window that resolves empty", async () => {
+// at once. The stream stays open for an update until the subscriber FINs, and the publisher
+// FINs in reply.
+test("lite-07 answers a bounded window that resolves empty and FINs in reply", async () => {
 	const version = Version.DRAFT_07;
 	const sub = await servedSubscription({
 		version,
 		prefill: [0n, 1n, 2n, 3n, 4n, 5n],
 		maxAge: Milli(3_600_000),
-		ranges: [{ start: { relative: 0 }, end: { absolute: 3n } }],
+		ranges: [{ start: { relative: 0n }, end: { absolute: 3n } }],
 	});
 	try {
 		const resp = await decodeSubscribeResponse(sub.client.reader, version);
 		if (!("start" in resp)) throw new Error("expected SUBSCRIBE_START");
 		expect(resp.start.starts).toEqual([undefined]);
+		sub.client.writer.close();
 		expect(await decodeSubscribeResponseMaybe(sub.client.reader, version)).toBeUndefined();
 	} finally {
 		await sub.close();
@@ -1041,6 +1048,8 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 				const resp = await decodeSubscribeResponseMaybe(sub.client.reader, version);
 				if (!resp) break;
 				if ("drop" in resp) codes.push(resp.drop.error);
+				// Lite-07 keeps the stream open past SUBSCRIBE_END, after the sweep's drops.
+				if ("end" in resp && keepsSubscribeOpen(version)) break;
 			}
 			expect(codes).toEqual([version === Version.DRAFT_07 ? StreamCode.NotFound : 0]);
 		} finally {
@@ -2077,7 +2086,7 @@ test("blocked DROP responses stop opening later groups", async () => {
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, Version.DRAFT_07, randomHop(), origin.consume());
 	const broadcast = publish(origin, Path.from("test"));
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	const client = await Stream.open(pair.client, { version: Version.DRAFT_07 });
 	const server = await Stream.accept(pair.server, Version.DRAFT_07);
 	if (!server) throw new Error("missing subscribe stream");
@@ -2124,7 +2133,8 @@ test("blocked DROP responses stop opening later groups", async () => {
 		track.finish();
 		track.close();
 		let dropped = 0;
-		for (;;) {
+		// Lite-07 keeps the stream open past SUBSCRIBE_END, so read until every group is named.
+		while (dropped < 72) {
 			const response = await decodeSubscribeResponseMaybe(client.reader, Version.DRAFT_07);
 			if (!response) break;
 			if ("drop" in response) dropped += Number(response.drop.end - response.drop.start) + 1;
@@ -2809,7 +2819,7 @@ test("lite draft-06: a grant that shrinks while a TRACK resolves refuses it", as
 		const request = await requests.next();
 		if (request.done) throw new Error("the handler never saw the request");
 		grant.set(grantOf("other"));
-		hooks.acceptRequest(request.value, produced);
+		request.value.serve(produced);
 		await serving;
 
 		expect(unauthorizedResets(resets)).toContain("unauthorized: live/cam");
@@ -2865,7 +2875,7 @@ test("lite draft-06: a grant that shrinks while TRACK_INFO is blocked resets it"
 		const serving = publisher.runTrackInfo(new TrackMessage(Path.from("live/cam"), "video"), stream);
 		const request = await requests.next();
 		if (request.done) throw new Error("the handler never saw the request");
-		hooks.acceptRequest(request.value, produced);
+		request.value.serve(produced);
 		await writing;
 
 		grant.set(grantOf("other"));
@@ -2914,7 +2924,7 @@ test("lite draft-06: a grant that shrinks while the broadcast resolves resets th
 		if (request.done) throw new Error("the handler never saw the request");
 		grant.set(grantOf("other"));
 		await Promise.resolve();
-		hooks.acceptRequest(request.value, produced);
+		request.value.serve(produced);
 		await serving;
 
 		expect(unauthorizedResets(resets)).toContain("unauthorized: live/cam");

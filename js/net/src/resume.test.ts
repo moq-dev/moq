@@ -41,14 +41,17 @@ async function isPending(promise: Promise<unknown>): Promise<boolean> {
 function serve(origin: Producer, source: BroadcastProducer, cost: bigint) {
 	const handle = wireOf(origin).receive(path, Route.normalize({ instance: INSTANCE, cost }));
 	void (async () => {
-		for await (const request of handle.requested()) hooks.acceptRequest(request, source.consume());
+		for await (const request of handle.requested()) request.serve(source.consume());
 	})();
 	return () => handle.close();
 }
 
-/** A copy of the logical track: every route's copy holds the same groups under the same sequences. */
+/**
+ * A copy of the logical track: every route's copy holds the same groups under the same sequences.
+ * Resumed readers backfill superseded groups, so it sets no publisher limit.
+ */
 function copy(source: BroadcastProducer) {
-	const producer = source.createTrack("seq");
+	const producer = source.createTrack("seq", { maxAge: null });
 	return {
 		producer,
 		write(sequence: bigint, frames = 1, close = true) {
@@ -296,7 +299,7 @@ test("a routed reader serves its relative ranges as the serving copy resolves th
 	front.serve(a.consume());
 	const sub = front.consumer
 		.track("seq")
-		.subscribe({ delay: { max: null }, ranges: [{ start: { relative: 2 }, end: { relative: 1 } }] });
+		.subscribe({ delay: { max: null }, ranges: [{ start: { relative: 2n }, end: { relative: 1n } }] });
 	try {
 		await settle();
 		// The copy holds the groups the anchors count back from, so the ranges end there.
@@ -361,6 +364,9 @@ test("a fork continues its open group across a route failure after its parent cl
 	const b = new BroadcastProducer();
 	const ta = copy(a);
 	const tb = copy(b);
+	// A refetch from route a, should the failure land before b serves, waits on a's request
+	// handler rather than failing at once.
+	const pending = ta.producer.requests();
 	const front = new Front();
 	front.serve(a.consume());
 	const parent = front.consumer.track("seq").subscribe();
@@ -380,6 +386,7 @@ test("a fork continues its open group across a route failure after its parent cl
 		expect(dec.decode((await group.readFrame())?.payload)).toBe("0.2");
 		expect(await group.readFrame()).toBeUndefined();
 	} finally {
+		pending.close();
 		parent.close();
 		fork.close();
 		front.consumer.close();
@@ -481,13 +488,13 @@ test("a lagging same-instance replica resumes from one publisher's bytes exactly
 	const originalPublication = publisher.createBroadcast(path);
 	const original = originalPublication.broadcast;
 	originalPublication.announce({ instance: INSTANCE });
-	const source = original.createTrack("seq");
+	const source = original.createTrack("seq", { maxAge: null });
 	const origin = new Producer();
 
 	// Both replicas forward this one source. Only the incumbent pauses mid-group.
 	function replica(lagging: boolean) {
 		const broadcast = new BroadcastProducer();
-		const output = broadcast.createTrack("seq");
+		const output = broadcast.createTrack("seq", { maxAge: null });
 		const input = source.subscribe({ delay: { max: Milli(60_000) } });
 		const release = Promise.withResolvers<void>();
 		let stopped = false;
@@ -736,7 +743,7 @@ for (const [name, before, after] of [
 // `unchecked` records how a copy arrived (lite-05/06), so it splices beside a lite-07 copy.
 test("a replacement differing only in unchecked takes over", async () => {
 	const { a, b, swap, active, close } = await setup();
-	const old = a.createTrack("seq", { unchecked: true });
+	const old = a.createTrack("seq", { unchecked: true, maxAge: null });
 	const tb = copy(b);
 	const sub = active.track("seq").subscribe();
 	await sub.info();
@@ -994,7 +1001,7 @@ test("between routes a reader keeps reading the copy it has", async () => {
 	expect(drain(sub)).toEqual([1n]);
 
 	const { value: pending } = await asked.next();
-	hooks.acceptRequest(pending, b.consume());
+	pending.serve(b.consume());
 	await settle();
 	await settle();
 	tb.write(1n);
@@ -1224,6 +1231,9 @@ for (const fails of [true, false]) {
 		const b = new BroadcastProducer();
 		const ta = copy(a);
 		const tb = copy(b);
+		// Neither route has the rest of group 0: request handlers hold a refetch from a, should the
+		// failure land before b serves, and from b until b drops it.
+		const pending = [ta.producer.requests(), tb.producer.requests()];
 		const stalled = ta.write(0n, 1, false);
 		front.serve(a.consume());
 		const sub = front.consumer.track("seq").subscribe({ delay: { max: Milli(60_000) } });
@@ -1242,6 +1252,7 @@ for (const fails of [true, false]) {
 		hooks.dropTrackGroups(tb.producer, 0n, 1n, cut);
 		await expect(read).rejects.toBe(cut);
 
+		for (const handler of pending) handler.close();
 		sub.close();
 		front.consumer.close();
 		a.close();
@@ -1471,19 +1482,6 @@ test("a datagram reader lets go of the copies a swap replaced", async () => {
 	front.consumer.close();
 	a.close();
 	b.close();
-});
-
-test("a front remembers it served a session's broadcast between routes", () => {
-	const front = new Front();
-	const a = new BroadcastProducer();
-	const session = a.consume();
-	overrideBroadcastWire(session, {});
-	front.serve(session);
-	expect(front.fromSession).toBe(true);
-	front.park();
-	expect(front.fromSession).toBe(true);
-	front.consumer.close();
-	a.close();
 });
 
 test("a failed group on a route whose replacement was refused ends with the refusal", async () => {
@@ -1918,6 +1916,9 @@ test("a fetched group that fails on the route still serving waits for the next r
 	const b = new BroadcastProducer();
 	const ta = copy(a);
 	const tb = copy(b);
+	// Route a's request handler holds the refetch of its failed group open, as Rust's tests do
+	// with `requests()`: without one, a miss there is NotFound at once.
+	const pending = ta.producer.requests();
 	const failing = ta.write(5n, 1, false);
 	front.serve(a.consume());
 	const group = await front.consumer.track("seq").fetchGroup(5n);
@@ -1935,6 +1936,7 @@ test("a fetched group that fails on the route still serving waits for the next r
 	expect(dec.decode((await read)?.payload)).toBe("5.1");
 	expect(await group.readFrame()).toBeUndefined();
 
+	pending.close();
 	front.consumer.close();
 	a.close();
 	b.close();
@@ -1946,6 +1948,8 @@ test("a group handed out already failed with its route still continues on the ne
 	const b = new BroadcastProducer();
 	const ta = copy(a);
 	const tb = copy(b);
+	// Route a's request handler holds the refetch of its failed group open until the next route.
+	const pending = ta.producer.requests();
 	front.serve(a.consume());
 	const sub = front.consumer.track("seq").subscribe();
 	// The old route fails group 0 before the reader takes it.
@@ -1960,6 +1964,7 @@ test("a group handed out already failed with its route still continues on the ne
 	front.serve(b.consume());
 	expect(dec.decode((await read)?.payload)).toBe("0.1");
 
+	pending.close();
 	sub.close();
 	front.consumer.close();
 	a.close();
@@ -2141,8 +2146,8 @@ test("a fetch still out on the old route moves to the new one", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();
 	const b = new BroadcastProducer();
-	// a has the track but not group 5 yet, so its fetch waits.
-	a.createTrack("seq");
+	// a has the track but not group 5 yet, so its fetch waits on a's request handler.
+	const pending = a.createTrack("seq", { maxAge: null }).requests();
 	const tb = copy(b);
 	tb.write(5n);
 	front.serve(a.consume());
@@ -2152,6 +2157,7 @@ test("a fetch still out on the old route moves to the new one", async () => {
 	const group = await fetching;
 	expect(dec.decode((await group.readFrame())?.payload)).toBe("5.0");
 
+	pending.close();
 	group.close();
 	front.consumer.close();
 	a.close();

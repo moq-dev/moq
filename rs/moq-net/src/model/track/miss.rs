@@ -97,15 +97,16 @@ pub(super) struct Misses {
 pub(super) type GivenUp = Vec<ops::Range<u64>>;
 
 /// The joins whose fills changed their answer, recorded by each join's own waiter before it
-/// wakes the reader's task.
+/// wakes the reader's tasks.
 ///
-/// The task is the one the reader last resolved for. A reader polled by another task since
-/// still learns of every answer, since the joins' waiters stay registered and wake whichever
-/// task the reader resolved for last.
+/// Every waiter the reader resolved with since the last answer wakes, as each would had it
+/// polled the fills itself: a read parked behind its idle gate and a drop poll each resolve
+/// with a waiter of their own, and an answer only one of them saw would leave the other
+/// parked on a want already settled.
 #[derive(Default)]
 struct Answered {
 	keys: Mutex<BTreeSet<u64>>,
-	task: Mutex<Option<Waker>>,
+	tasks: Mutex<kio::WaiterList>,
 }
 
 /// Wakes the reader once join `key`'s fill answers, recording which join it was.
@@ -128,10 +129,8 @@ impl Wake for JoinWake {
 			.unwrap_or_else(PoisonError::into_inner)
 			.insert(self.key);
 		// Woken with no lock held: an executor may poll inline.
-		let task = answered.task.lock().unwrap_or_else(PoisonError::into_inner).clone();
-		if let Some(task) = task {
-			task.wake();
-		}
+		let mut tasks = answered.tasks.lock().unwrap_or_else(PoisonError::into_inner).take();
+		tasks.wake();
 	}
 }
 
@@ -262,6 +261,12 @@ impl Misses {
 			self.wanted.remove(run.clone());
 		}
 		self.release(lost);
+	}
+
+	/// Whether no fill can answer this reader and no gap is timed: nothing joined, nothing
+	/// deferred. Its probe then has nothing to resolve.
+	pub fn is_idle(&self) -> bool {
+		self.joins.is_empty() && self.deferred.runs.is_empty()
 	}
 
 	/// Whether a fill still owes this reader a group.
@@ -476,13 +481,12 @@ impl Misses {
 		waiter: &kio::Waiter,
 	) -> RangeSet<u64> {
 		let mut retry = RangeSet::new();
-		{
-			let mut task = self.answered.task.lock().unwrap_or_else(PoisonError::into_inner);
-			if !task.as_ref().is_some_and(|task| task.will_wake(waiter.waker())) {
-				*task = Some(waiter.waker().clone());
-			}
-		}
-		// Taken after the task is set: an answer landing since wakes the task set above.
+		self.answered
+			.tasks
+			.lock()
+			.unwrap_or_else(PoisonError::into_inner)
+			.register(waiter);
+		// Taken after registering: an answer landing since wakes the waiter registered above.
 		let keys = std::mem::take(&mut *self.answered.keys.lock().unwrap_or_else(PoisonError::into_inner));
 		let mut keys = keys.into_iter().peekable();
 		while let Some(&key) = keys.peek() {
@@ -632,6 +636,10 @@ impl Misses {
 			return asks;
 		}
 		let grace = state.miss_grace();
+		if self.judge_arrivals(state, key, at, view, &mut target, taken, drift, grace, ended) {
+			self.ledger_revision = ledger.revision();
+			return asks;
+		}
 		let unchanged = unchanged && self.grace == Some(grace);
 		let deadline = self.deferred.deadline();
 		if unchanged && deadline.is_none() {
@@ -784,7 +792,7 @@ impl Misses {
 				.register(inbox.clone());
 			inbox
 		});
-		let evicted = inbox.judge(state.cached, low, top);
+		let evicted = inbox.judge(state.cached, inbox_floor(low, taken), top);
 		self.evictions = state.evictions;
 		let mut refills = RangeSet::new();
 		let mut again = RangeSet::new();
@@ -905,10 +913,6 @@ impl Misses {
 		for run in asks.iter() {
 			self.deferred.remove(run.clone());
 		}
-		// A buffered datagram arrived, and is served as one.
-		for datagram in &state.datagrams {
-			asks.remove(datagram.sequence..datagram.sequence.saturating_add(1));
-		}
 		// A gap the feed still waits for becomes a miss when it folds.
 		if let Some(at) = self.deferred.deadline() {
 			state.cache.watch_wall(at, waiter);
@@ -937,6 +941,99 @@ impl Misses {
 			self.give_up(run, given_up);
 		}
 		asks
+	}
+
+	/// Judge what changed when only the feed's newest group moved up, and the reader's floor
+	/// with it, returning whether that was all. Each group arriving live changes nothing else,
+	/// so a reader that takes them as they come judges every one here.
+	///
+	/// With nothing deferred or refused, the arrival ledger's changes touch nothing this
+	/// reader holds, and with no eviction counted, its inbox holds none. A new group the
+	/// arrival walk serves is then neither a hole nor backfill: judged, with nothing to ask.
+	/// Anything else, a group not walked included, is left to [`Self::judge`] whole.
+	#[expect(
+		clippy::too_many_arguments,
+		reason = "the judgement's inputs, as Self::judge takes them"
+	)]
+	fn judge_arrivals(
+		&mut self,
+		state: &TrackState,
+		key: (u64, u64, Option<u64>),
+		at: JudgedAt,
+		view: Option<&Layered>,
+		target: &mut impl FnMut(RangeInclusive<u64>) -> RangeInclusiveSet<u64>,
+		taken: &Delivered,
+		drift: &Drift,
+		grace: Duration,
+		ended: bool,
+	) -> bool {
+		let Some(previous) = self.at else {
+			return false;
+		};
+		let (Some(judged_to), Some(newest)) = (previous.3, at.3) else {
+			return false;
+		};
+		let only_arrivals = previous.0 <= at.0
+			&& judged_to <= newest
+			&& (previous.1, previous.2, previous.4, previous.5, previous.6) == (at.1, at.2, at.4, at.5, at.6);
+		if !only_arrivals
+			|| !self.deferred.runs.is_empty()
+			|| !self.refused.is_empty()
+			|| self.budget != Some(drift.budget)
+			|| self.grace != Some(grace)
+			|| self.ended != ended
+			|| self.drops_revision != state.drops_changes.revision()
+			|| self.evictions != state.evictions
+			|| self.view.as_ref() != view
+		{
+			return false;
+		}
+		let Some(inbox) = &self.inbox else {
+			return false;
+		};
+		// The reader's floor, as the whole judgement takes it: a resumed copy's live floor
+		// can sit above history the reader still reads.
+		let low = key.0;
+		let top = newest.min(u64::MAX - 1);
+		let first = judged_to.saturating_add(1).max(low);
+		let mut fresh = RangeSet::new();
+		if first <= top {
+			for run in target(first..=top).iter() {
+				for gap in self.judged.gaps(&(*run.start()..*run.end() + 1)) {
+					fresh.insert(gap);
+				}
+			}
+		}
+		let walked = fresh.iter().all(|run| {
+			let mut next = run.start;
+			for (&sequence, slot) in state.lookup.range(run.clone()) {
+				if sequence != next || !slot.is_walked() {
+					return false;
+				}
+				next = sequence + 1;
+			}
+			next == run.end
+		});
+		if !walked {
+			return false;
+		}
+		if low > 0 {
+			for set in [
+				&mut self.judged,
+				&mut self.refused,
+				&mut self.given_up,
+				&mut self.refilled,
+			] {
+				set.remove(0..low);
+			}
+		}
+		let evicted = inbox.judge(state.cached, inbox_floor(low, taken), top);
+		debug_assert!(evicted.is_empty(), "an eviction landed without counting");
+		for run in fresh.iter() {
+			self.judged.insert(run.clone());
+		}
+		self.at = Some(at);
+		true
 	}
 
 	/// Give up what a fill still owes this reader once it is stale under the reader's budget,
@@ -1287,6 +1384,14 @@ impl TrackState {
 }
 
 /// The runs of `run` the cache holds as backfill: servable, but out of the arrival walk.
+/// Where a reader's inbox starts taking evictions: no lower than what it handed out every
+/// group below, since an evicted group it took is never a miss again. A live reader that
+/// reads by arrival never raises its floor, so without this every old group the cache
+/// evicts would land with it and count as an eviction to judge again.
+fn inbox_floor(low: u64, taken: &Delivered) -> u64 {
+	low.max(taken.floor().unwrap_or(u64::MAX))
+}
+
 fn backfill(state: &TrackState, run: ops::Range<u64>) -> RangeSet<u64> {
 	state
 		.lookup
@@ -1738,7 +1843,9 @@ mod tests {
 	#[kio::test]
 	async fn a_grace_change_with_nothing_deferred_times_the_next_gap() {
 		let broadcast = crate::broadcast::Info::default().produce();
-		let track = broadcast.create_track("grace", crate::track::Info::default()).unwrap();
+		let track = broadcast
+			.create_track("grace", crate::track::Info::default().with_max_age(None))
+			.unwrap();
 		let budget = Duration::from_secs(5);
 		let _reader = track.subscribe(Subscription::default().with_delay(Delay::default().with_max(budget)));
 		for sequence in 0..3 {
@@ -2084,7 +2191,8 @@ mod tests {
 
 	/// A reader waiting on many fills looks only at the ones that answered, yet each still
 	/// wakes it, and wakes the task that read it last: a reader read by another task since
-	/// parked learns of the answer too.
+	/// parked learns of the answer too. The read resolves through its idle gate, which wakes
+	/// only the task that parked it last.
 	#[kio::test]
 	async fn an_answered_fill_wakes_the_task_that_read_last() {
 		use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2098,7 +2206,9 @@ mod tests {
 		}
 
 		let broadcast = crate::broadcast::Info::default().produce();
-		let mut track = broadcast.create_track("fills", crate::track::Info::default()).unwrap();
+		let mut track = broadcast
+			.create_track("fills", crate::track::Info::default().with_max_age(None))
+			.unwrap();
 		let requests = track.requests();
 		track.start_at(8).unwrap();
 		track
@@ -2152,6 +2262,74 @@ mod tests {
 			cursor.misses.as_ref().unwrap().joins.len(),
 			3,
 			"the answered fill's join is gone"
+		);
+	}
+
+	/// A read parked on a fill wakes once it answers, though a drop poll resolved with a
+	/// waiter of its own after the read parked: the read then sees the fill give up its
+	/// group and ends with the track.
+	#[kio::test]
+	async fn an_answered_fill_wakes_a_read_a_drop_poll_resolved_after() {
+		use std::sync::atomic::{AtomicUsize, Ordering};
+
+		#[derive(Default)]
+		struct Count(AtomicUsize);
+		impl Wake for Count {
+			fn wake(self: Arc<Self>) {
+				self.0.fetch_add(1, Ordering::Relaxed);
+			}
+		}
+
+		let broadcast = crate::broadcast::Info::default().produce();
+		let mut track = broadcast
+			.create_track("fills", crate::track::Info::default().with_max_age(None))
+			.unwrap();
+		let requests = track.requests();
+		track.start_at(8).unwrap();
+		track
+			.create_group(crate::group::Info { sequence: 8 })
+			.unwrap()
+			.finish()
+			.unwrap();
+		track.finish().unwrap();
+		// Group 0 lies below where the feed starts: only a fill may deliver it.
+		let ranges = [crate::track::Range::groups(0..1), crate::track::Range::groups(8..)];
+		let mut reader = track.subscribe(
+			Subscription::default()
+				.with_delay(Delay::default().with_max(Duration::from_secs(60)))
+				.with_ranges(ranges),
+		);
+		let (read, drops) = (Arc::new(Count::default()), Arc::new(Count::default()));
+		let read_waiter = kio::Waiter::new(Waker::from(read.clone()));
+		let drops_waiter = kio::Waiter::new(Waker::from(drops.clone()));
+		let mut handed = Vec::new();
+		while let Poll::Ready(Ok(Some(group))) = reader.poll_recv_group(&read_waiter) {
+			handed.push(group.sequence);
+		}
+		assert_eq!(handed, [8]);
+		assert!(
+			reader.poll_recv_group(&read_waiter).is_pending(),
+			"the read waits on the fill for group 0"
+		);
+		assert!(reader.poll_drop(&drops_waiter).is_pending(), "nothing given up yet");
+		assert!(
+			reader.poll_drop(&kio::Waiter::noop()).is_pending(),
+			"a no-op poll leaves the real registrations in place"
+		);
+
+		let fill = std::future::poll_fn(|cx| requests.poll_requested_fill(&kio::Waiter::new(cx.waker().clone())))
+			.await
+			.unwrap();
+		let (read_woken, drops_woken) = (read.0.load(Ordering::Relaxed), drops.0.load(Ordering::Relaxed));
+		fill.drop_groups(fill.start().group..fill.end());
+		assert!(read.0.load(Ordering::Relaxed) > read_woken, "the parked read wakes");
+		assert!(drops.0.load(Ordering::Relaxed) > drops_woken, "the drop poll wakes");
+
+		// The drop poll takes the answer first, as a publisher forwarding drops may.
+		assert!(matches!(reader.poll_drop(&drops_waiter), Poll::Ready((groups, _)) if groups == (0..1)));
+		assert!(
+			matches!(reader.poll_recv_group(&read_waiter), Poll::Ready(Ok(None))),
+			"the read ends once the fill gave up the last group it owed"
 		);
 	}
 

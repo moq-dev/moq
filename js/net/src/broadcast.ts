@@ -4,7 +4,7 @@
  * @module
  */
 import { type GetPromise, Once, Signal } from "@moq/signals";
-import { NotFound, StreamCode, StreamError } from "./error.ts";
+import { NotFound, StreamCode, StreamError, toStreamCode } from "./error.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
 import type { Route } from "./hop.ts";
 import type * as Instance from "./instance.ts";
@@ -214,9 +214,12 @@ function largest(state: BroadcastState, name: string): track.Position | undefine
 	return producer && hooks.cachedLargest(producer);
 }
 
-// Serve a group from the local retained window by subscribing and scanning to the
-// requested sequence. The default for a produced broadcast; the consuming wire layer
-// overrides it to fetch over the network (or to reject when the transport has no FETCH).
+// Fetch one group as a one-range subscription: the cached group at once, or else one the track's
+// {@link track.Requests} handler answers, asked at once whether the group was written yet or not,
+// as the Rust `fetch_group` does. A group the producer writes meanwhile answers it too. With no
+// handler open, a miss fails at once with `NotFound`. The default for a produced broadcast; the
+// consuming wire layer overrides it to fetch over the network (or to reject when the transport has
+// no FETCH).
 async function fetchGroup(
 	state: BroadcastState,
 	name: string,
@@ -224,27 +227,56 @@ async function fetchGroup(
 	options: track.FetchGroupOptions = {},
 ): Promise<GroupConsumer> {
 	options.signal?.throwIfAborted();
-	const subscriber = subscribe(state, name, { ...track.Subscription.default(), priority: options.priority });
+	const subscriber = subscribe(state, name, {
+		...track.Subscription.default(),
+		priority: options.priority,
+		ranges: [{ start: { absolute: sequence }, end: { absolute: sequence + 1n } }],
+	});
 	hooks.fetchBudget(subscriber, options.maxDelay);
 	try {
+		// Judged in this turn when the track is known, so a cached group is taken before anything
+		// else can change it. A track requested on demand opens its handler once accepted, so its
+		// miss is judged then.
+		let asked = hooks.askFetch(subscriber, sequence);
+		if (asked === "pending") {
+			await untilAborted(subscriber.info(), options.signal);
+			asked = hooks.askFetch(subscriber, sequence);
+		}
+		if (asked !== true) throw new NotFound(`group ${sequence}`);
 		for (;;) {
-			const group = await untilAborted(subscriber.recvGroup(), options.signal);
-			if (!group) throw new NotFound(`group ${sequence}`);
-			if (group.sequence === sequence) {
-				// Close the subscription when the returned group finishes, not now: an
-				// in-progress group must keep receiving frames for its lifetime (mirrors
-				// Rust poll_fetch). Also fires if the caller closes the group early.
-				void group.closed.then(() => subscriber.close());
-				return group;
+			const recv = hooks.tryRecvGroup(subscriber, true);
+			switch (recv.kind) {
+				case "group":
+					// Close the subscription when the returned group finishes, not now: an
+					// in-progress group must keep receiving frames for its lifetime (mirrors
+					// Rust poll_fetch). Also fires if the caller closes the group early.
+					void recv.group.closed.then(() => subscriber.close());
+					return recv.group;
+				case "drop":
+					// A fill's refusal says why; anything else given up is just gone.
+					if (toStreamCode(recv.error) === StreamCode.Old) throw new NotFound(`group ${sequence}`);
+					throw recv.error;
+				case "error":
+					throw recv.error;
+				case "done":
+					throw new NotFound(`group ${sequence}`);
 			}
-
-			group.close();
-			if (group.sequence > sequence) throw new NotFound(`group ${sequence}`);
+			await untilAborted(changed(subscriber), options.signal);
 		}
 	} catch (err) {
 		subscriber.close();
 		throw err;
 	}
+}
+
+// Settles once a read of `subscriber` may go differently.
+function changed(subscriber: track.Subscriber): Promise<void> {
+	return new Promise((resolve) => {
+		const dispose = hooks.groupChanged(subscriber, () => {
+			dispose();
+			resolve();
+		});
+	});
 }
 
 // Remove and return the request queued for `name`, if no handler has taken it yet.
@@ -330,9 +362,10 @@ export class Producer {
 	 * from the returned producer. A request a handler has already taken stays a duplicate.
 	 * An append on the track throws if it would reuse a sequence an earlier track of the name
 	 * wrote in this broadcast, so a replacement writes its first group explicitly. Throws if an
-	 * open track or a live request already holds the name.
+	 * open track or a live request already holds the name. `info` resolves as
+	 * {@link track.Producer.accept} does, so an omitted `maxAge` is zero, the live edge only.
 	 */
-	createTrack(name: string, info: Partial<track.Info> = {}): track.Producer {
+	createTrack(name: string, info: track.InfoInit = {}): track.Producer {
 		if (this.#state.closed.peek() !== undefined) {
 			throw new Error("broadcast is closed");
 		}
@@ -344,7 +377,7 @@ export class Producer {
 			const lookups = this.#state.lookups.get(producer);
 			if (lookups) lookups.opened = false;
 			this.#state.requests.delete(name);
-			adopt(this.#state, producer, track.infoDefaults(info));
+			adopt(this.#state, producer, track.authoredInfo(info));
 			return producer;
 		}
 
@@ -356,7 +389,7 @@ export class Producer {
 		}
 
 		const producer = new track.Producer(name).accept(info);
-		adopt(this.#state, producer, track.infoDefaults(info));
+		adopt(this.#state, producer, track.authoredInfo(info));
 		return producer;
 	}
 

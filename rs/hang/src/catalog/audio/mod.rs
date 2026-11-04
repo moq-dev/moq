@@ -197,21 +197,26 @@ pub struct AudioConfig {
 	#[serde(default)]
 	pub warmup: Option<std::time::Duration>,
 
-	/// How far this rendition's frames reach the transport behind the broadcast's earliest
-	/// rendition, measured at the publisher from each rendition's minimum flush lateness.
-	/// Absent on the earliest rendition and on any rendition the publisher did not measure.
+	/// How far this rendition's frames reach the transport behind the broadcast's other
+	/// renditions: a constant offset, either supplied by the publisher or measured as the least
+	/// its frames trailed the others' over a window of a second of media, keeping the largest
+	/// window. Lateness only some frames have, such as B-frame reorder, is left out, since a
+	/// consumer measures it. Absent on a rendition that trails nothing, and on any rendition the
+	/// publisher neither supplied nor measured.
+	///
+	/// A consumer adds a frame duration on top, so a publisher that knows its frames trail by no
+	/// more than their own duration, such as an encoder configured not to reorder or queue, states
+	/// `Some(Duration::ZERO)`. It is never measured, and is omitted on the
+	/// wire like an absent value, which means the same to a consumer. `None` leaves it to
+	/// measurement.
 	///
 	/// A consumer holds `delay + jitter` for this rendition and MUST NOT subtract one rendition's
-	/// `delay` from another's: each is a lifetime maximum, so two need not share an origin. It only
-	/// ever grows over the life of a stream, and is serialized like [`jitter`](Self::jitter).
+	/// `delay` from another's: each is taken against whichever rendition was ahead, so two need not
+	/// share an origin. It only ever grows over the life of a stream, and is serialized like
+	/// [`jitter`](Self::jitter).
 	#[serde_as(as = "MillisCeil")]
-	#[serde(default)]
+	#[serde(default, skip_serializing_if = "crate::catalog::millis::no_delay")]
 	pub delay: Option<std::time::Duration>,
-	/// This rendition's HLS segment records, when the publisher opted in. Without it the rendition
-	/// is not HLS-renderable. An undecodable value is absent, so it can never reject the media.
-	#[serde(default)]
-	#[serde_as(as = "serde_with::DefaultOnError<_>")]
-	pub hls: Option<crate::catalog::Hls>,
 }
 
 impl AudioConfig {
@@ -238,7 +243,6 @@ impl AudioConfig {
 			jitter: None,
 			warmup: None,
 			delay: None,
-			hls: None,
 		}
 	}
 

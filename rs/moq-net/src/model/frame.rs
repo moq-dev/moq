@@ -1465,7 +1465,7 @@ pub(super) enum Source {
 pub(super) struct Expiry {
 	policy: Arc<dyn group::Expiry>,
 	stale_stats: stats::Meter,
-	stale_counted: Arc<AtomicBool>,
+	delivery: Arc<group::Delivery>,
 	tail: Range<usize>,
 	count_payload: bool,
 }
@@ -1474,12 +1474,12 @@ impl Expiry {
 	pub(super) fn new(
 		policy: Arc<dyn group::Expiry>,
 		stale_stats: stats::Meter,
-		stale_counted: Arc<AtomicBool>,
+		delivery: Arc<group::Delivery>,
 	) -> Self {
 		Self {
 			policy,
 			stale_stats,
-			stale_counted,
+			delivery,
 			tail: 0..0,
 			count_payload: false,
 		}
@@ -1663,7 +1663,7 @@ impl Consumer {
 		}
 
 		self.expired = true;
-		if !expiry.stale_counted.swap(true, Ordering::Relaxed) {
+		if !expiry.delivery.stale_counted.swap(true, Ordering::Relaxed) {
 			let mut stale = self.state.read().content_range(expiry.tail.start, expiry.tail.end);
 			if expiry.count_payload {
 				stale.bytes += self.size().saturating_sub(self.read_idx) as u64;

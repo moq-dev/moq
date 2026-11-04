@@ -52,9 +52,7 @@ mod bloom_token_log;
 use bloom_token_log::BloomTokenLog;
 
 pub mod connection;
-pub use crate::connection::{
-	CreditStats, Datagrams, Event, FrameStats, PathStats, ShouldTransmit, Streams, UdpStats, recv, send,
-};
+pub use crate::connection::{CreditStats, Datagrams, Event, FrameStats, PathStats, Streams, UdpStats, recv, send};
 
 pub mod stream;
 #[cfg(feature = "mux")]

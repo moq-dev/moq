@@ -90,6 +90,8 @@ enum Family {
 		open: HashSet<Child>,
 		/// Finished producers, kept so a late subscriber still finds their tracks.
 		kept: Vec<Box<dyn Send>>,
+		/// The broadcast, which a raw track creates its datagram track on.
+		broadcast: moq_net::broadcast::Producer,
 	},
 	/// The broadcast closed: its children ended and new ones are refused.
 	Closed,
@@ -105,16 +107,23 @@ enum Family {
 #[derive(Clone)]
 pub struct Children(Arc<std::sync::Mutex<Family>>);
 
+/// The family of a standalone broadcast of its own.
+#[cfg(test)]
 impl Default for Children {
 	fn default() -> Self {
-		Self(Arc::new(std::sync::Mutex::new(Family::Open {
-			open: HashSet::new(),
-			kept: Vec::new(),
-		})))
+		Self::new(moq_net::broadcast::Info::new().produce())
 	}
 }
 
 impl Children {
+	fn new(broadcast: moq_net::broadcast::Producer) -> Self {
+		Self(Arc::new(std::sync::Mutex::new(Family::Open {
+			open: HashSet::new(),
+			kept: Vec::new(),
+			broadcast,
+		})))
+	}
+
 	fn lock(&self) -> std::sync::MutexGuard<'_, Family> {
 		self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 	}
@@ -144,10 +153,21 @@ impl Children {
 	/// Keep `child`'s finished producer until the broadcast ends, or drop it now if it already has.
 	pub(crate) fn keep(&self, child: Child, producer: impl Send + 'static) {
 		let producer: Box<dyn Send> = Box::new(producer);
-		if let Family::Open { open, kept } = &mut *self.lock() {
+		if let Family::Open { open, kept, .. } = &mut *self.lock() {
 			open.remove(&child);
 			kept.push(producer);
 		}
+	}
+
+	/// Create the datagram track carrying the datagrams of the raw track `name` with `info`.
+	fn datagrams(&self, name: &str, info: &moq_net::track::Info) -> Result<moq_net::datagram::Producer, Error> {
+		let Family::Open { broadcast, .. } = &*self.lock() else {
+			return Err(Error::BroadcastNotFound);
+		};
+		let info = moq_net::datagram::Info::default()
+			.with_timescale(info.timescale)
+			.with_priority(info.priority);
+		Ok(broadcast.create_datagrams(name, info)?)
 	}
 
 	/// Stop tracking `child`, which ended on its own.
@@ -161,10 +181,7 @@ impl Children {
 	fn close(&self) -> HashSet<Child> {
 		let family = std::mem::replace(&mut *self.lock(), Family::Closed);
 		match family {
-			Family::Open { open, kept } => {
-				drop(kept);
-				open
-			}
+			Family::Open { open, .. } => open,
 			Family::Closed => HashSet::new(),
 		}
 	}
@@ -196,12 +213,22 @@ impl Abort for Kept<Box<import::Track>> {
 	}
 }
 
-impl Abort for Kept<moq_net::track::Producer> {
+/// A raw track and the datagram track of the same name that carries its datagrams.
+struct Raw {
+	track: moq_net::track::Producer,
+	datagrams: moq_net::datagram::Producer,
+}
+
+impl Abort for Kept<Raw> {
 	fn abort(self, err: moq_net::Error) {
+		let Raw { track, datagrams } = self.inner;
 		// A track with a declared end ends there, as when its last producer drops.
-		if self.inner.finished().is_none() {
-			let _ = self.inner.abort(err);
+		if track.finished().is_some() {
+			datagrams.finish();
+			return;
 		}
+		datagrams.abort(err.clone());
+		let _ = track.abort(err);
 	}
 }
 
@@ -252,11 +279,9 @@ impl<T> std::ops::DerefMut for Kept<T> {
 	}
 }
 
-// C data methods stamp a write the caller left unstamped on one fixed broadcast clock,
-// without retaining another catalog handle after a failed stream retires its listing.
+/// A data producer, kept beside its broadcast's children.
 struct Data<T> {
 	producer: T,
-	clock: moq_mux::Clock,
 	children: Children,
 }
 
@@ -290,7 +315,7 @@ pub struct Publish {
 	containers: NonZeroSlab<Container>,
 
 	/// Raw track producers (no media/container/catalog framing).
-	tracks: NonZeroSlab<Kept<moq_net::track::Producer>>,
+	tracks: NonZeroSlab<Kept<Raw>>,
 
 	/// Raw group producers, created from a raw track producer.
 	groups: NonZeroSlab<moq_net::group::Producer>,
@@ -356,11 +381,11 @@ impl Publish {
 
 		let id = self.broadcasts.insert(Broadcast {
 			driver,
+			children: Children::new(broadcast.clone()),
 			producer: broadcast,
 			catalog,
 			video: BTreeMap::new(),
 			audio: BTreeMap::new(),
-			children: Children::default(),
 			ended: false,
 		})?;
 		Ok(id)
@@ -496,6 +521,13 @@ impl Publish {
 		result
 	}
 
+	/// Read the broadcast clock, the epoch every track in the broadcast is stamped in.
+	///
+	/// Reading it fixes the clock, as [`moq_mux::catalog::Producer::clock`] does.
+	pub fn catalog_now(&mut self, broadcast: Id) -> Result<moq_net::Timestamp, Error> {
+		Ok(self.catalog(broadcast)?.clock().now())
+	}
+
 	/// End the broadcast's content by finishing its catalog, with its entries still listed, so
 	/// a late subscriber finds the finished tracks until [`State::publish_close`].
 	pub fn catalog_finish(&mut self, broadcast: Id) -> Result<(), Error> {
@@ -520,14 +552,15 @@ impl Publish {
 		children.insert(&mut self.media, media, Child::Media)
 	}
 
-	/// `hls` is the longest span between the track's group starts, when known (see [`Reserved::with_hls_hint`]).
+	/// `interval` is the longest span between the track's group starts, when known (see
+	/// [`Reserved::with_interval`]).
 	///
-	/// [`Reserved::with_hls_hint`]: moq_mux::catalog::Reserved::with_hls_hint
+	/// [`Reserved::with_interval`]: moq_mux::catalog::Reserved::with_interval
 	pub fn audio(
 		&mut self,
 		broadcast: Id,
 		init: import::AudioInit,
-		hls: Option<std::time::Duration>,
+		interval: Option<std::time::Duration>,
 	) -> Result<Id, Error> {
 		let Broadcast {
 			producer: broadcast,
@@ -539,17 +572,17 @@ impl Publish {
 		let name = broadcast.unique_name(&format!(".{}", init.format));
 		let request = broadcast.reserve_track(name)?;
 
-		let track = import::Track::audio(request, catalog.reserve().with_hls_hint(hls), init)?;
+		let track = import::Track::audio(request, catalog.reserve().with_interval(interval), init)?;
 		let children = children.clone();
 		self.insert_media(track, children)
 	}
 
-	/// `hls` as in [`Self::audio`].
+	/// `interval` as in [`Self::audio`].
 	pub fn video(
 		&mut self,
 		broadcast: Id,
 		init: import::VideoInit,
-		hls: Option<std::time::Duration>,
+		interval: Option<std::time::Duration>,
 	) -> Result<Id, Error> {
 		let Broadcast {
 			producer: broadcast,
@@ -561,7 +594,7 @@ impl Publish {
 		let name = broadcast.unique_name(&format!(".{}", init.format));
 		let request = broadcast.reserve_track(name)?;
 
-		let track = import::Track::video(request, catalog.reserve().with_hls_hint(hls), init)?;
+		let track = import::Track::video(request, catalog.reserve().with_interval(interval), init)?;
 		let children = children.clone();
 		self.insert_media(track, children)
 	}
@@ -601,8 +634,8 @@ impl Publish {
 	///
 	/// This ends the open group; the next frame starts a new one. Audio has no boundary of its own
 	/// (every frame is independently decodable), so this is the only thing that gives it groups:
-	/// call it per frame for one group (one QUIC stream) forwarded without waiting, or at a segment
-	/// cadence to align with video.
+	/// call it per frame for one group (one QUIC stream) forwarded without waiting, or less often
+	/// to batch frames into fewer groups.
 	pub fn media_cut(&mut self, media: Id) -> Result<(), Error> {
 		let track = self.media.get_mut(media).ok_or(Error::MediaNotFound)?;
 		track.cut(None)?;
@@ -757,7 +790,7 @@ impl Publish {
 
 	/// Insert or replace a top-level application catalog section by name.
 	///
-	/// `value` is any JSON document. Errors if `name` is a HANG root (`video`, `audio`, `text`,
+	/// `value` is any JSON document. Errors if `name` is a HANG root (`video`, `audio`, `media`, `text`,
 	/// `archive`, `clock`, `json`, `binary`, or retired `timeline`) or an MSF root (`version`,
 	/// `generatedAt`, `isComplete`, `tracks`, or `initDataList`). The catalog is republished
 	/// automatically.
@@ -784,12 +817,18 @@ impl Publish {
 	/// can't express (an untimed frame).
 	#[cfg(test)]
 	pub(crate) fn track_producer(&mut self, track: Id) -> Option<&mut moq_net::track::Producer> {
-		self.tracks.get_mut(track).map(|track| &mut track.inner)
+		self.tracks.get_mut(track).map(|raw| &mut raw.inner.track)
+	}
+
+	/// A raw track's datagram producer, for tests that send a datagram once a reader listens.
+	#[cfg(test)]
+	pub(crate) fn datagram_producer(&self, track: Id) -> Option<moq_net::datagram::Producer> {
+		self.tracks.get(track).map(|raw| raw.inner.datagrams.clone())
 	}
 
 	/// A watch-only handle to a raw track's subscriber demand.
 	pub fn track_demand(&self, track: Id) -> Result<moq_net::track::Demand, Error> {
-		Ok(self.tracks.get(track).ok_or(Error::TrackNotFound)?.demand())
+		Ok(self.tracks.get(track).ok_or(Error::TrackNotFound)?.track.demand())
 	}
 
 	/// A watch-only handle to a media importer's subscriber demand.
@@ -886,7 +925,7 @@ impl Publish {
 	/// Serve fetches of uncached groups on a raw track, delivering each as a group-request
 	/// handle via `on_group`.
 	pub fn track_dynamic(&mut self, track: Id, on_group: OnStatus) -> Result<Id, Error> {
-		let dynamic = self.tracks.get(track).ok_or(Error::TrackNotFound)?.requests();
+		let dynamic = self.tracks.get(track).ok_or(Error::TrackNotFound)?.track.requests();
 		self.spawn_dynamic(Dynamic::Track(dynamic), on_group, Default::default())
 	}
 
@@ -1015,11 +1054,25 @@ impl Publish {
 	/// Accept a track request as a raw track, returning a track handle like [`Self::track`].
 	pub fn track_request_accept(&mut self, request: Id, info: moq_net::track::Info) -> Result<Id, Error> {
 		let TrackRequest { children, request, .. } = self.track_request.remove(request).ok_or(Error::NotFound)?;
-		let track = Kept {
-			inner: request.accept(info),
+		let datagrams = match children.datagrams(request.name(), &info) {
+			Ok(datagrams) => datagrams,
+			Err(err) => {
+				// A closed broadcast ends its subscribers the way a publisher leaving does.
+				request.reject(match &err {
+					Error::Moq(err) => err.clone(),
+					_ => moq_net::Error::Unroutable,
+				});
+				return Err(err);
+			}
+		};
+		let raw = Kept {
+			inner: Raw {
+				track: request.accept(info),
+				datagrams,
+			},
 			children: children.clone(),
 		};
-		children.insert(&mut self.tracks, track, Child::Track)
+		children.insert(&mut self.tracks, raw, Child::Track)
 	}
 
 	/// Accept a track request as an audio track, returning a media handle like [`Self::audio`].
@@ -1027,7 +1080,7 @@ impl Publish {
 		&mut self,
 		request: Id,
 		init: import::AudioInit,
-		hls: Option<std::time::Duration>,
+		interval: Option<std::time::Duration>,
 	) -> Result<Id, Error> {
 		let TrackRequest {
 			broadcast,
@@ -1035,7 +1088,7 @@ impl Publish {
 			request,
 		} = self.track_request.remove(request).ok_or(Error::NotFound)?;
 		let catalog = self.catalog(broadcast)?;
-		let track = import::Track::audio(request, catalog.reserve().with_hls_hint(hls), init)?;
+		let track = import::Track::audio(request, catalog.reserve().with_interval(interval), init)?;
 		self.insert_media(track, children)
 	}
 
@@ -1044,7 +1097,7 @@ impl Publish {
 		&mut self,
 		request: Id,
 		init: import::VideoInit,
-		hls: Option<std::time::Duration>,
+		interval: Option<std::time::Duration>,
 	) -> Result<Id, Error> {
 		let TrackRequest {
 			broadcast,
@@ -1052,7 +1105,7 @@ impl Publish {
 			request,
 		} = self.track_request.remove(request).ok_or(Error::NotFound)?;
 		let catalog = self.catalog(broadcast)?;
-		let track = import::Track::video(request, catalog.reserve().with_hls_hint(hls), init)?;
+		let track = import::Track::video(request, catalog.reserve().with_interval(interval), init)?;
 		self.insert_media(track, children)
 	}
 
@@ -1112,25 +1165,33 @@ impl Publish {
 	pub fn track(&mut self, broadcast: Id, name: &str, info: Option<moq_net::track::Info>) -> Result<Id, Error> {
 		let children = self.children(broadcast)?;
 		let broadcast = self.producer(broadcast)?;
-		let track = broadcast.create_track(name, info)?;
-		let track = Kept {
-			inner: track,
+		let info = info.unwrap_or_default();
+		let datagrams = children.datagrams(name, &info)?;
+		let track = match broadcast.create_track(name, info) {
+			Ok(track) => track,
+			Err(err) => {
+				datagrams.abort(err.clone());
+				return Err(err.into());
+			}
+		};
+		let raw = Kept {
+			inner: Raw { track, datagrams },
 			children: children.clone(),
 		};
-		children.insert(&mut self.tracks, track, Child::Track)
+		children.insert(&mut self.tracks, raw, Child::Track)
 	}
 
 	/// Append a new group to a raw track, returning a group producer.
 	pub fn track_group(&mut self, track: Id) -> Result<Id, Error> {
-		let track = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
-		let group = track.append_group()?;
+		let raw = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
+		let group = raw.track.append_group()?;
 		self.groups.insert(group)
 	}
 
 	/// Create a raw group with an explicit sequence number.
 	pub fn track_group_at(&mut self, track: Id, sequence: u64) -> Result<Id, Error> {
-		let track = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
-		let group = track.create_group(moq_net::group::Info { sequence })?;
+		let raw = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
+		let group = raw.track.create_group(moq_net::group::Info { sequence })?;
 		self.groups.insert(group)
 	}
 
@@ -1141,24 +1202,26 @@ impl Publish {
 		timestamp: Option<moq_net::Timestamp>,
 		payload: &[u8],
 	) -> Result<(), Error> {
-		let track = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
-		track.write_frame(timestamp, bytes::Bytes::copy_from_slice(payload))?;
+		let raw = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
+		raw.track
+			.write_frame(timestamp, bytes::Bytes::copy_from_slice(payload))?;
 		Ok(())
 	}
 
-	/// Send a best-effort datagram on a raw track, returning its per-track sequence.
+	/// Send a best-effort datagram on a raw track's datagram track, returning its sequence.
 	///
-	/// The payload must be at most [`moq_net::MAX_DATAGRAM_PAYLOAD`] bytes. Datagrams are
-	/// delivered only on transports and wire versions with a datagram channel; there is no
-	/// group fallback.
+	/// Datagrams are delivered only on transports and wire versions with a datagram channel;
+	/// there is no group fallback.
 	pub fn track_datagram(
 		&mut self,
 		track: Id,
 		timestamp: Option<moq_net::Timestamp>,
 		payload: &[u8],
 	) -> Result<u64, Error> {
-		let track = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
-		Ok(track.append_datagram(timestamp, bytes::Bytes::copy_from_slice(payload))?)
+		let raw = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
+		Ok(raw
+			.datagrams
+			.append(timestamp, bytes::Bytes::copy_from_slice(payload))?)
 	}
 
 	/// Finish a raw track. No more groups or frames can be written.
@@ -1167,27 +1230,34 @@ impl Publish {
 	/// boundary and only releases the handle; the broadcast keeps the track.
 	pub fn track_finish(&mut self, track: Id) -> Result<(), Error> {
 		let id = track;
-		let track = self.tracks.remove(id).ok_or(Error::TrackNotFound)?;
+		let Kept {
+			inner: Raw { track, datagrams },
+			children,
+		} = self.tracks.remove(id).ok_or(Error::TrackNotFound)?;
 		if track.finished().is_none() {
 			track.finish()?;
 		}
-		track.keep(Child::Track(id));
+		datagrams.finish();
+		Kept { inner: track, children }.keep(Child::Track(id));
 		Ok(())
 	}
 
 	/// Declare a raw track's exclusive final group sequence.
 	pub fn track_finish_at(&mut self, track: Id, final_sequence: u64) -> Result<(), Error> {
-		let track = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
-		track.finish_at(moq_net::track::Position::group(final_sequence), None)?;
+		let raw = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
+		raw.track
+			.finish_at(moq_net::track::Position::group(final_sequence), None)?;
 		Ok(())
 	}
 
 	/// Abort a raw track with an application error code.
 	pub fn track_abort(&mut self, track: Id, error_code: u16) -> Result<(), Error> {
 		let id = track;
-		let track = self.tracks.remove(id).ok_or(Error::TrackNotFound)?;
-		track.children.forget(Child::Track(id));
-		track.inner.abort(moq_net::Error::App(error_code))?;
+		let raw = self.tracks.remove(id).ok_or(Error::TrackNotFound)?;
+		raw.children.forget(Child::Track(id));
+		let err = moq_net::Error::App(error_code);
+		raw.inner.datagrams.abort(err.clone());
+		raw.inner.track.abort(err)?;
 		Ok(())
 	}
 
@@ -1212,7 +1282,6 @@ impl Publish {
 		let producer = publish(&broadcast.catalog, track)?;
 		Ok(Data {
 			producer,
-			clock: broadcast.catalog.clock(),
 			children: broadcast.children.clone(),
 		})
 	}
@@ -1288,16 +1357,16 @@ impl Publish {
 		Ok(id)
 	}
 
-	/// Publish a new value to a JSON snapshot track. A no-op if unchanged.
+	/// Publish a new value to a JSON snapshot track at `timestamp` on the broadcast clock. A no-op
+	/// if unchanged.
 	pub fn json_snapshot_update(
 		&mut self,
 		json: Id,
 		value: serde_json::Value,
-		timestamp: Option<moq_net::Timestamp>,
+		timestamp: moq_net::Timestamp,
 	) -> Result<(), Error> {
 		let json = &mut self.json_snapshot.get_mut(json).ok_or(Error::TrackNotFound)?.data;
-		let at = timestamp.unwrap_or_else(|| json.clock.now());
-		json.producer.update(moq_net::Timed::from(&value).at(at))?;
+		json.producer.update(&value, timestamp)?;
 		Ok(())
 	}
 
@@ -1322,16 +1391,15 @@ impl Publish {
 		children.insert(&mut self.json_stream, producer, Child::JsonStream)
 	}
 
-	/// Append one record to a JSON stream track.
+	/// Append one record to a JSON stream track at `timestamp` on the broadcast clock.
 	pub fn json_stream_append(
 		&mut self,
 		stream: Id,
 		value: serde_json::Value,
-		timestamp: Option<moq_net::Timestamp>,
+		timestamp: moq_net::Timestamp,
 	) -> Result<(), Error> {
 		let producer = self.json_stream.get_mut(stream).ok_or(Error::TrackNotFound)?;
-		let at = timestamp.unwrap_or_else(|| producer.clock.now());
-		producer.producer.append(moq_net::Timed::from(&value).at(at))?;
+		producer.producer.append(&value, timestamp)?;
 		Ok(())
 	}
 
@@ -1368,29 +1436,23 @@ impl Publish {
 		)
 	}
 
-	/// Append one record to the back of a JSON window.
+	/// Append one record to the back of a JSON window at `timestamp` on the broadcast clock.
 	pub fn json_window_push(
 		&mut self,
 		window: Id,
 		value: serde_json::Value,
-		timestamp: Option<moq_net::Timestamp>,
+		timestamp: moq_net::Timestamp,
 	) -> Result<(), Error> {
 		let window = &mut self.json_window.get_mut(window).ok_or(Error::TrackNotFound)?.data;
-		let at = timestamp.unwrap_or_else(|| window.clock.now());
-		window.producer.push(moq_net::Timed::from(&value).at(at))?;
+		window.producer.push(moq_net::Timed::from(&value).at(timestamp))?;
 		Ok(())
 	}
 
-	/// Drop `count` records from the front of a JSON window, clamped to what it holds.
-	pub fn json_window_pop(
-		&mut self,
-		window: Id,
-		count: u64,
-		timestamp: Option<moq_net::Timestamp>,
-	) -> Result<(), Error> {
+	/// Drop `count` records from the front of a JSON window, clamped to what it holds, at
+	/// `timestamp` on the broadcast clock.
+	pub fn json_window_pop(&mut self, window: Id, count: u64, timestamp: moq_net::Timestamp) -> Result<(), Error> {
 		let window = &mut self.json_window.get_mut(window).ok_or(Error::TrackNotFound)?.data;
-		let at = timestamp.unwrap_or_else(|| window.clock.now());
-		window.producer.pop(moq_net::Timed::from(count).at(at))?;
+		window.producer.pop(moq_net::Timed::from(count).at(timestamp))?;
 		Ok(())
 	}
 
@@ -1582,11 +1644,15 @@ mod children_tests {
 		}
 		let json = serde_json::Value::Null;
 		assert!(matches!(
-			state.publish.json_snapshot_update(json_snapshot, json.clone(), None),
+			state
+				.publish
+				.json_snapshot_update(json_snapshot, json.clone(), moq_net::Timestamp::ZERO),
 			Err(Error::TrackNotFound)
 		));
 		assert!(matches!(
-			state.publish.json_stream_append(json_stream, json, None),
+			state
+				.publish
+				.json_stream_append(json_stream, json, moq_net::Timestamp::ZERO),
 			Err(Error::TrackNotFound)
 		));
 	}
@@ -1611,14 +1677,14 @@ mod children_tests {
 	async fn a_child_of_a_closed_broadcast_is_refused() {
 		let children = Children::default();
 		children.close();
-		let track = moq_net::broadcast::Info::new()
-			.produce()
-			.create_track("late", None)
-			.unwrap();
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast.create_track("late", None).unwrap();
+		let datagrams = broadcast.create_datagrams("late", Default::default()).unwrap();
 		let mut reader = track.subscribe(None);
+		let mut datagram_reader = datagrams.consume();
 		let mut tracks = NonZeroSlab::default();
 		let kept = Kept {
-			inner: track,
+			inner: Raw { track, datagrams },
 			children: children.clone(),
 		};
 		assert!(matches!(
@@ -1626,6 +1692,7 @@ mod children_tests {
 			Err(Error::BroadcastNotFound)
 		));
 		assert!(matches!(reader.recv_group().await, Err(moq_net::Error::Unroutable)));
+		assert!(matches!(datagram_reader.recv().await, Err(moq_net::Error::Unroutable)));
 	}
 }
 

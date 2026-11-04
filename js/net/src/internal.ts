@@ -14,10 +14,20 @@ import { toStreamCode } from "./error.ts";
 import type { Frame, FrameConsumer, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { isAnonymous, type Route } from "./hop.ts";
 import type * as Instance from "./instance.ts";
-import type { Request as OriginRequest } from "./origin.ts";
 import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
-import type { Delay, Demand, Groups, Info, Position, Producer, Request, Subscriber, Subscription } from "./track.ts";
+import type {
+	Delay,
+	Demand,
+	Groups,
+	Info,
+	InfoInit,
+	Position,
+	Producer,
+	Request,
+	Subscriber,
+	Subscription,
+} from "./track.ts";
 import { max, min } from "./util/sequence.ts";
 import * as Varint from "./varint.ts";
 import type { Window } from "./window.ts";
@@ -496,7 +506,7 @@ export const hooks: {
 	 * Take a request's producer without resolving its subscribers, so content written before
 	 * {@link StagedTrack.commit} is there when the first reader looks; assigned by `track.ts`.
 	 */
-	stageRequest: (request: Request, info: Partial<Info>) => StagedTrack;
+	stageRequest: (request: Request, info: InfoInit) => StagedTrack;
 	/** The newest frame a producer's cache holds, read without subscribing; assigned by `track.ts`. */
 	cachedLargest: (producer: Producer) => Position | undefined;
 	/** The publisher priority from a demanded track's committed {@link Info}; assigned by `track.ts`. */
@@ -616,11 +626,23 @@ export const hooks: {
 	groupChanged: (subscriber: Subscriber, fn: () => void) => Dispose;
 	/** Apply a FETCH reader budget without inheriting SUBSCRIBE's zero default. */
 	fetchBudget: (subscriber: Subscriber, maxDelay: Milli | undefined) => void;
+	/** Whether a reader beyond one-shot fetches subscribes to this copy. */
+	subscribing: (producer: Producer) => Getter<boolean>;
+	/** Leave a wire copy serving its cache and fills without a live feed. */
+	cacheTrack: (producer: Producer) => void;
+	/** Fail subscriptions reaching beyond `edge`, keeping history readers and one-shot fetches. */
+	refuseLive: (producer: Producer, edge: bigint, error: Error) => void;
 	/**
-	 * Bind a group to its track's timedness, so a frame whose timestamp disagrees is refused.
-	 * Throws `TimestampMismatch` if a buffered frame already disagrees.
+	 * A fetch's group `sequence`, before it reads: `true` once it is cached or asked of a fill,
+	 * written yet or not, as the Rust `fetch_group` queues one; `false` with no handler to ask;
+	 * `"pending"` while the track awaits its accept, which opens its handler.
 	 */
-	bindGroupTimed: (group: GroupProducer, timed: boolean) => void;
+	askFetch: (subscriber: Subscriber, sequence: bigint) => boolean | "pending";
+	/**
+	 * Bind a group to its track's info, so a frame whose timestamp doesn't `rescale` to the track
+	 * is refused. Throws `TimestampMismatch` if a buffered frame already disagrees.
+	 */
+	bindGroupTimed: (group: GroupProducer, track: Info) => void;
 	/** Admit a datagram in its stored wire form. */
 	writeDatagram: (producer: Producer, datagram: Datagram, inflated?: number) => void;
 	/** Bind the group to its immutable track codec. */
@@ -666,6 +688,8 @@ export const hooks: {
 	/** The next absolute frame this reader can serve. Assigned by `group.ts`. */
 	groupIndex: (group: GroupConsumer) => number;
 	groupStarted: (group: GroupConsumer) => boolean;
+	/** Wait for the selected headers or this reader's group end, without retaining payloads. */
+	groupEnd: (group: GroupConsumer, until?: number) => Promise<{ end: number; complete: boolean }>;
 	/** Watch the error a group's copy closes with, ignoring readers' verdicts, without holding the consumer. */
 	groupFate: (group: GroupConsumer) => () => Error | undefined;
 	/** Record when a track's mirror of a group joined that track at this hop. */
@@ -674,6 +698,8 @@ export const hooks: {
 	expireGroup: (group: GroupConsumer, expiry: Expiry) => void;
 	/** Carry a handed-out group across its logical track's route changes. */
 	recoverGroup: (group: GroupConsumer, recover: GroupRecover) => void;
+	/** Read a payload chunk, releasing its wait when the output stream closes. */
+	readFrameChunk: (frame: FrameConsumer, closed: Promise<void>) => Promise<Uint8Array | undefined>;
 	/** Read the next frame, as its stored DEFLATE slice when `compressed`, so a lite-07 publisher forwards it without inflating. */
 	readGroupFrame: (group: GroupConsumer, compressed: boolean, from?: number) => Promise<ReadGroupFrame | undefined>;
 	/** Notify the owning track when a reader reaches its shed front. */
@@ -699,11 +725,6 @@ export const hooks: {
 	stampUnlisted: (target: BroadcastConsumer) => void;
 	/** Whether a broadcast handle was {@link stampUnlisted marked unlisted}. */
 	unlisted: (target: BroadcastConsumer) => boolean;
-	/**
-	 * Resolve a session-forwarded request with its peer's routed broadcast. An application
-	 * claim answers through `prepare` and `publish` instead. Assigned by `origin.ts`.
-	 */
-	acceptRequest: (request: OriginRequest, source: BroadcastProducer | BroadcastConsumer) => void;
 } = {
 	endTrack: () => {
 		throw new Error("track.ts not loaded");
@@ -858,7 +879,19 @@ export const hooks: {
 	groupChanged: () => {
 		throw new Error("track.ts not loaded");
 	},
+	cacheTrack: () => {
+		throw new Error("track.ts not loaded");
+	},
+	refuseLive: () => {
+		throw new Error("track.ts not loaded");
+	},
+	subscribing: () => {
+		throw new Error("track module not loaded");
+	},
 	fetchBudget: () => {
+		throw new Error("track.ts not loaded");
+	},
+	askFetch: () => {
 		throw new Error("track.ts not loaded");
 	},
 	writeDatagram: () => {
@@ -927,6 +960,9 @@ export const hooks: {
 	groupStarted: () => {
 		throw new Error("group.ts not loaded");
 	},
+	groupEnd: () => {
+		throw new Error("group.ts not loaded");
+	},
 	groupFate: () => {
 		throw new Error("group.ts not loaded");
 	},
@@ -934,6 +970,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	recoverGroup: () => {
+		throw new Error("group.ts not loaded");
+	},
+	readFrameChunk: () => {
 		throw new Error("group.ts not loaded");
 	},
 	readGroupFrame: () => {
@@ -963,9 +1002,6 @@ export const hooks: {
 	},
 	unlisted: () => {
 		throw new Error("broadcast.ts not loaded");
-	},
-	acceptRequest: () => {
-		throw new Error("origin.ts not loaded");
 	},
 };
 
