@@ -47,8 +47,9 @@ instead, so every crate drops C, not just the relay.
   Decided 2026-10-31 (maintainer): each area waits only on the rind pieces it
   uses, so most areas switch on rind 0.1.2 (published 2026-11-01), which runs on
   CPUs without the crypto extensions (e2ee, which no binary links, switched
-  on 0.1.0), and only relay
-  ACME waits on `rind-instant-acme`. aws-lc-rs stays in the workspace until
+  on 0.1.0). Relay ACME, the one area that waited on `rind-instant-acme`, is
+  removed for now instead (maintainer, 2026-11-03), and returns on rind in m3.
+  aws-lc-rs stays in the workspace until
   the last area lands, which is when this epic removes it.
 - Split per area, each landing once rind covers it. Docs a change makes stale
   (CPU requirements, removed features) are edited inline in that area's PR; no
@@ -64,8 +65,7 @@ The epic's own work, once every child has merged:
 
 ## Required
 
-- [rind-instant-acme is on crates.io](/quest/m2/rind/instant-acme.md) - waiting on the adapter relay ACME needs
-- [Transport on rind](/quest/m2/rind/transport.md) - moq-quic, moq-tokio, moq-uring, moq-rtmp, and qmux take rind, and the `aws-lc-rs`/`ring` features go
-- [moq-rtc on rind](/quest/m2/rind/rtc.md) - str0m and dimpl run DTLS, SRTP, and STUN on rind
-- [moq-crypto signs on rind](/quest/m2/rind/crypto.md) - moq-crypto's Ed25519 keygen, sign, and verify move off aws-lc-rs
-- [Relay ACME on instant-acme](/quest/m2/rind/acme.md) - moq-relay replaces rustls-acme with instant-acme on rind and owns renewal
+- [moq-crypto signs on rind](/quest/m1/rind/crypto.md) - moq-crypto's Ed25519 keygen, sign, and verify move off aws-lc-rs
+- [Transport on rind](/quest/m1/rind/transport.md) - moq-quic, moq-tokio, moq-uring, moq-rtmp, and qmux take rind, and the `aws-lc-rs`/`ring` features go
+- [moq-rtc on rind](/quest/m1/rind/rtc.md) - str0m and dimpl run DTLS, SRTP, and STUN on rind
+- [moq-relay drops ACME for now](/quest/m1/rind/acme-remove.md) - the `acme` feature and rustls-acme go until ACME returns on rind

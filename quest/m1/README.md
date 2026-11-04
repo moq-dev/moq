@@ -180,6 +180,9 @@ per-frame CPU growth since #5926.
 - [A Rust relay never replays from group 0 to a lite-03/04 subscriber](/quest/m1/relay-inflight-replay.md) - A Rust relay or publisher serving a lite-03 or lite-04 SUBSCRIBE from a track copy that is still resolving starts at the newest group once the copy resolves
 - [The JS resume model passes seed 12345](/quest/m1/js-resume-model-12345.md) - a reader updated to no ranges keeps reading instead of ending cleanly
 - [Prototype-safe rendition names in JS](/quest/m1/proto-safe-names.md) - `js/msf`'s `ext` and `js/publish`'s rendition maps keep `__proto__` and `constructor` names, like Rust
+- [Rename moq-rtc to moq-webrtc](/quest/m1/webrtc-rename.md) - one published `moq-webrtc` crate holds the gateway, the ICE driver, and the data-channel transport
+- [Vendor and trim the WebRTC stack](/quest/m1/webrtc-vendor.md) - str0m, dimpl, `is`, and sctp-proto live in moq-webrtc with unused code removed, so moq-rtc can take rind
+- [MoQ on rind](/quest/m1/rind/README.md) - every MoQ crate takes its crypto from rind, a pure-Rust graviola fork, so no build compiles C crypto
 
 ## Related
 
