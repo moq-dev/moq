@@ -220,7 +220,11 @@ async fn an_immediate_close_loop_escalates_until_the_timeout() {
 		matches!(err, TestError::Policy(Failure::Exhausted { last: Some(_), .. })),
 		"{err}"
 	);
-	assert_eq!(kio::clock::now() - started, TIMEOUT, "the timeout did not end the policy");
+	assert_eq!(
+		kio::clock::now() - started,
+		TIMEOUT,
+		"the timeout did not end the policy"
+	);
 	assert!(run.accepts.len() >= 6, "only {} sessions", run.accepts.len());
 	assert_paced(&run.accepts, INITIAL, MAX);
 }
@@ -267,10 +271,18 @@ async fn an_immediate_redirect_loop_escalates_until_the_timeout() {
 		.unwrap()
 		.expect_err("a redirect loop kept the connection");
 	assert!(err.to_string().contains("redirect"), "{err}");
-	assert_eq!(kio::clock::now() - started, TIMEOUT, "the timeout did not end the policy");
+	assert_eq!(
+		kio::clock::now() - started,
+		TIMEOUT,
+		"the timeout did not end the policy"
+	);
 	assert!(run.accepts.len() >= 6, "only {} sessions", run.accepts.len());
 	for (index, (peer, _)) in run.accepts.iter().enumerate() {
-		assert_eq!(*peer, if index % 2 == 0 { a.clone() } else { b.clone() }, "session {index}");
+		assert_eq!(
+			*peer,
+			if index % 2 == 0 { a.clone() } else { b.clone() },
+			"session {index}"
+		);
 	}
 	assert_paced(&run.accepts, INITIAL, MAX);
 }
@@ -288,7 +300,10 @@ async fn a_zero_initial_redials_at_once() {
 	.unwrap();
 	let mut run = Run::default();
 
-	drive(&mut machine, &[(peer, Peer::Close)], &mut run, |run| run.accepts.len() == 11).await;
+	drive(&mut machine, &[(peer, Peer::Close)], &mut run, |run| {
+		run.accepts.len() == 11
+	})
+	.await;
 	for (_, at) in &run.accepts {
 		assert_eq!(*at, first, "a zero initial waited before a retry");
 	}
@@ -309,7 +324,11 @@ async fn the_walk_lands_on_the_first_address_that_answers() {
 
 	drive(&mut machine, &peers, &mut run, |run| !run.accepts.is_empty()).await;
 	assert_eq!(run.dials, targets, "every address in order");
-	assert_eq!(run.accepts, [(targets[2].clone(), started)], "no wait between addresses");
+	assert_eq!(
+		run.accepts,
+		[(targets[2].clone(), started)],
+		"no wait between addresses"
+	);
 	assert!(machine.session().is_some());
 }
 
@@ -349,11 +368,20 @@ async fn a_settled_answer_stops_the_walk() {
 		(targets[0].clone(), Peer::Fail(Verdict::Settled)),
 		(targets[1].clone(), Peer::Serve),
 	];
-	let mut machine = Reconnect::new(config(INITIAL, Duration::from_secs(1)), targets.clone(), kio::clock::now()).unwrap();
+	let mut machine = Reconnect::new(
+		config(INITIAL, Duration::from_secs(1)),
+		targets.clone(),
+		kio::clock::now(),
+	)
+	.unwrap();
 	let mut run = Run::default();
 
 	drive(&mut machine, &peers, &mut run, |run| run.dials.len() == 2).await;
-	assert_eq!(run.dials, [targets[0].clone(), targets[0].clone()], "the walk stopped at the answer");
+	assert_eq!(
+		run.dials,
+		[targets[0].clone(), targets[0].clone()],
+		"the walk stopped at the answer"
+	);
 	assert_eq!(run.events, ["retrying"]);
 }
 
@@ -374,10 +402,15 @@ async fn an_unusable_address_ends_only_a_walk_without_hope() {
 	let lone = url("tcp://c:1/");
 	let started = kio::clock::now();
 	let mut machine = Reconnect::new(config(INITIAL, Duration::ZERO), vec![lone.clone()], started).unwrap();
-	let err = drive(&mut machine, &[(lone, Peer::Fail(Verdict::Unusable))], &mut Run::default(), |_| false)
-		.await
-		.unwrap()
-		.expect_err("an unusable address connected");
+	let err = drive(
+		&mut machine,
+		&[(lone, Peer::Fail(Verdict::Unusable))],
+		&mut Run::default(),
+		|_| false,
+	)
+	.await
+	.unwrap()
+	.expect_err("an unusable address connected");
 	assert!(matches!(err, TestError::Dial), "{err}");
 	assert_eq!(kio::clock::now(), started, "ended without waiting");
 }
@@ -419,7 +452,10 @@ async fn an_ended_auth_handle_ends_the_policy() {
 		.with_tokens(tokens.clone(), version().into());
 	let mut run = Run::default();
 
-	drive(&mut machine, &[(peer.clone(), Peer::Serve)], &mut run, |run| !run.accepts.is_empty()).await;
+	drive(&mut machine, &[(peer.clone(), Peer::Serve)], &mut run, |run| {
+		!run.accepts.is_empty()
+	})
+	.await;
 	tokens.handle().abort(Error::App(9));
 	run.servers.clear();
 	let ended = drive(&mut machine, &[(peer, Peer::Serve)], &mut run, |_| false).await;
@@ -440,16 +476,40 @@ async fn connecting_once_ends_with_the_session() {
 	};
 
 	let mut machine = Reconnect::new(config, vec![peer.clone()], kio::clock::now()).unwrap();
-	let ended = drive(&mut machine, &[(peer.clone(), Peer::Goaway(String::new()))], &mut Run::default(), |_| false).await;
+	let ended = drive(
+		&mut machine,
+		&[(peer.clone(), Peer::Goaway(String::new()))],
+		&mut Run::default(),
+		|_| false,
+	)
+	.await;
 	assert!(matches!(ended, Some(Ok(()))), "a GOAWAY is the cue to leave");
 
 	let mut machine = Reconnect::new(config, vec![peer.clone()], kio::clock::now()).unwrap();
-	let ended = drive(&mut machine, &[(peer.clone(), Peer::Close)], &mut Run::default(), |_| false).await;
-	assert!(matches!(ended, Some(Err(TestError::Net(_)))), "the close reason ends it");
+	let ended = drive(
+		&mut machine,
+		&[(peer.clone(), Peer::Close)],
+		&mut Run::default(),
+		|_| false,
+	)
+	.await;
+	assert!(
+		matches!(ended, Some(Err(TestError::Net(_)))),
+		"the close reason ends it"
+	);
 
 	let mut machine = Reconnect::new(config, vec![peer.clone()], kio::clock::now()).unwrap();
-	let ended = drive(&mut machine, &[(peer, Peer::Fail(Verdict::Retry))], &mut Run::default(), |_| false).await;
-	assert!(matches!(ended, Some(Err(TestError::Dial))), "a failed dial is not retried");
+	let ended = drive(
+		&mut machine,
+		&[(peer, Peer::Fail(Verdict::Retry))],
+		&mut Run::default(),
+		|_| false,
+	)
+	.await;
+	assert!(
+		matches!(ended, Some(Err(TestError::Dial))),
+		"a failed dial is not retried"
+	);
 }
 
 /// A target dialing fixed socket addresses cannot follow a redirect.
@@ -458,7 +518,13 @@ async fn a_fixed_target_refuses_a_redirect() {
 	let peer = url("moqt://relay.example:4443/");
 	let moved = url("moqt://relay.example:5443/");
 	let mut machine = Reconnect::new(Config::default(), vec![Fixed(peer.clone())], kio::clock::now()).unwrap();
-	let ended = drive(&mut machine, &[(peer, Peer::Goaway(moved.to_string()))], &mut Run::default(), |_| false).await;
+	let ended = drive(
+		&mut machine,
+		&[(peer, Peer::Goaway(moved.to_string()))],
+		&mut Run::default(),
+		|_| false,
+	)
+	.await;
 	assert!(matches!(ended, Some(Err(TestError::Policy(Failure::Fixed)))));
 }
 
@@ -485,17 +551,27 @@ async fn a_healthy_goaway_hands_over_to_the_redirect() {
 	let b = url("tcp://peer:2/");
 	let mut machine = Reconnect::new(Config::default(), vec![a.clone()], kio::clock::now()).unwrap();
 	let mut run = Run::default();
-	drive(&mut machine, &[(a.clone(), Peer::Serve)], &mut run, |run| !run.accepts.is_empty()).await;
+	drive(&mut machine, &[(a.clone(), Peer::Serve)], &mut run, |run| {
+		!run.accepts.is_empty()
+	})
+	.await;
 
 	// Past the healthy bar, the GOAWAY is a handover, not a failure.
 	kio::clock::sleep(Duration::from_secs(2)).await;
-	run.servers[0].drain().send(goaway::Goaway::redirect(b.to_string())).unwrap();
+	run.servers[0]
+		.drain()
+		.send(goaway::Goaway::redirect(b.to_string()))
+		.unwrap();
 	let peers = [(a.clone(), Peer::Serve), (b.clone(), Peer::Serve)];
 	let migrated = kio::clock::now();
 	drive(&mut machine, &peers, &mut run, |run| run.events.contains(&"retired")).await;
 	assert_eq!(run.dials, [a, b.clone()]);
 	assert_eq!(run.accepts[1], (b, migrated), "migrated without a backoff");
-	assert_eq!(run.events, ["migrating", "retired"], "a replacement serves, so nothing went offline");
+	assert_eq!(
+		run.events,
+		["migrating", "retired"],
+		"a replacement serves, so nothing went offline"
+	);
 	assert!(machine.predecessor().is_none());
 	assert!(machine.session().is_some());
 }
@@ -510,7 +586,10 @@ async fn the_handover_takes_the_earlier_deadline() {
 	config.goaway.handover = HANDOVER;
 	let mut machine = Reconnect::new(config, vec![peer.clone()], kio::clock::now()).unwrap();
 	let mut run = Run::default();
-	drive(&mut machine, &[(peer.clone(), Peer::Serve)], &mut run, |run| !run.accepts.is_empty()).await;
+	drive(&mut machine, &[(peer.clone(), Peer::Serve)], &mut run, |run| {
+		!run.accepts.is_empty()
+	})
+	.await;
 
 	kio::clock::sleep(Duration::from_secs(2)).await;
 	run.servers[0]
@@ -518,9 +597,16 @@ async fn the_handover_takes_the_earlier_deadline() {
 		.send(goaway::Goaway::new().with_timeout(Duration::from_secs(3600)))
 		.unwrap();
 	let drained = kio::clock::now();
-	drive(&mut machine, &[(peer, Peer::Hang)], &mut run, |run| run.events.contains(&"offline")).await;
+	drive(&mut machine, &[(peer, Peer::Hang)], &mut run, |run| {
+		run.events.contains(&"offline")
+	})
+	.await;
 	assert_eq!(run.events, ["migrating", "retired", "offline"]);
-	assert_eq!(kio::clock::now() - drained, HANDOVER, "a longer peer deadline must not extend our cap");
+	assert_eq!(
+		kio::clock::now() - drained,
+		HANDOVER,
+		"a longer peer deadline must not extend our cap"
+	);
 
 	let goaway = Goaway::default();
 	assert_eq!(goaway.handover(None), Duration::from_secs(10), "no deadline: ours");
@@ -540,18 +626,27 @@ async fn a_waited_restart_redials_only_once_the_session_closes() {
 	config.restart = Restart::Wait;
 	let mut machine = Reconnect::new(config, vec![peer.clone()], kio::clock::now()).unwrap();
 	let mut run = Run::default();
-	drive(&mut machine, &[(peer.clone(), Peer::Serve)], &mut run, |run| !run.accepts.is_empty()).await;
+	drive(&mut machine, &[(peer.clone(), Peer::Serve)], &mut run, |run| {
+		!run.accepts.is_empty()
+	})
+	.await;
 
 	kio::clock::sleep(Duration::from_secs(2)).await;
 	run.servers[0].drain().send(goaway::Goaway::new()).unwrap();
 	kio::clock::sim::idle().await;
 	assert!(
-		matches!(machine.poll(kio::clock::now(), &kio::Waiter::noop()), Action::Wait(None)),
+		matches!(
+			machine.poll(kio::clock::now(), &kio::Waiter::noop()),
+			Action::Wait(None)
+		),
 		"the policy left the session"
 	);
 
 	run.servers.remove(0).abort(Error::GoawayTimeout);
-	drive(&mut machine, &[(peer, Peer::Serve)], &mut run, |run| run.accepts.len() == 2).await;
+	drive(&mut machine, &[(peer, Peer::Serve)], &mut run, |run| {
+		run.accepts.len() == 2
+	})
+	.await;
 	assert_eq!(run.events, ["offline"]);
 }
 
@@ -565,7 +660,9 @@ async fn a_waited_restart_redials_only_once_the_session_closes() {
 fn dialing_never_logs_the_credential() {
 	const SECRET: &str = "b91d7fe20c4a";
 	let targets = vec![
-		url(&format!("moqt://user:{SECRET}@a.example/.cluster/{SECRET}?jwt={SECRET}")),
+		url(&format!(
+			"moqt://user:{SECRET}@a.example/.cluster/{SECRET}?jwt={SECRET}"
+		)),
 		url(&format!("moqt://b.example/.cluster/{SECRET}")),
 	];
 	let started = Instant::now();
@@ -640,7 +737,11 @@ fn zero_turns_each_pacing_knob_off() {
 		multiplier: 0,
 		..defaults
 	});
-	assert_eq!(pacing.next(pacing.initial), pacing.initial, "zero multiplier never grows");
+	assert_eq!(
+		pacing.next(pacing.initial),
+		pacing.initial,
+		"zero multiplier never grows"
+	);
 
 	// A cap below the first delay caps it too.
 	let pacing = Pacing::new(&Backoff {

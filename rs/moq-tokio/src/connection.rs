@@ -1748,12 +1748,18 @@ mod tests {
 		let dead_a = dead().await;
 		let dead_b = dead().await;
 		let addrs = Addrs::collect([dead_a, dead_b, live.clone()]).expect("not empty");
-		let connection = kio::clock::timeout(WALK_TIMEOUT, client().with_reconnect(false).connect(addrs).established())
-			.await
-			.expect("the walk must not hang")
-			.expect("the live address must connect");
+		let connection = kio::clock::timeout(
+			WALK_TIMEOUT,
+			client().with_reconnect(false).connect(addrs).established(),
+		)
+		.await
+		.expect("the walk must not hang")
+		.expect("the live address must connect");
 		assert_eq!(connection.connects(), 1);
-		assert!(sessions.recv().await.is_some(), "the walk must land on the one that answers");
+		assert!(
+			sessions.recv().await.is_some(),
+			"the walk must land on the one that answers"
+		);
 	}
 
 	/// With nothing reachable the walk reports a failure rather than hanging.
@@ -2129,9 +2135,15 @@ mod tests {
 			verdict(&Error::Connect(crate::ConnectError::Unauthorized)),
 			Verdict::Refused
 		);
-		assert_eq!(verdict(&Error::Connect(crate::ConnectError::Forbidden)), Verdict::Refused);
+		assert_eq!(
+			verdict(&Error::Connect(crate::ConnectError::Forbidden)),
+			Verdict::Refused
+		);
 		assert_eq!(verdict(&Error::MoqNet(moq_net::Error::Unauthorized)), Verdict::Refused);
-		assert_eq!(verdict(&Error::MoqNet(moq_net::Error::ProtocolViolation)), Verdict::Fatal);
+		assert_eq!(
+			verdict(&Error::MoqNet(moq_net::Error::ProtocolViolation)),
+			Verdict::Fatal
+		);
 		assert_eq!(verdict(&Error::MoqNet(moq_net::Error::Closed)), Verdict::Retry);
 		assert_eq!(
 			verdict(&Error::Io(std::sync::Arc::new(
@@ -2484,65 +2496,67 @@ mod tests {
 		};
 		let mut client = config.init(Default::default()).expect("build client");
 		let server_dial = server_origin.clone();
-		client.dialer = Some(std::sync::Arc::new(move |_addr: crate::connect::Addr, moq: moq_net::Client| {
-			let server_origin = server_dial.clone();
-			Box::pin(async move {
-				let versions = moq_net::Versions::from(version);
-				let config = || {
-					let mut config = qmux::Config::new(qmux::Version::QMux01);
-					config.protocol =
-						qmux::Protocol::Negotiate(versions.alpns().iter().map(|alpn| alpn.to_string()).collect());
-					config
-				};
-				let (client, server) = tokio::io::duplex(64 * 1024);
-				let (client, server) = tokio::try_join!(
-					qmux::Session::connect(qmux::transport::Stream::new(client), config()),
-					qmux::Session::accept(qmux::transport::Stream::new(server), config())
-				)
-				.unwrap();
-				let (client, server) = (crate::spawn_qmux(client), crate::spawn_qmux(server));
-				let now = moq_net::time::Instant::now();
-				let client = moq.connect(now, client);
-				let server = async {
-					let mut request = moq_net::Server::new()
-						.with_versions(versions.clone())
-						.with_subscriber(server_origin)
-						.accept_request(now, server)
-						.await
-						.unwrap();
-					// The connection credential grants nothing; only the configured token
-					// covers the broadcast.
-					let mut requests = request.requests();
-					let (session, driver) = request.ok().await.unwrap();
-					tokio::spawn(moq_net::time::run(driver));
-					tokio::spawn(async move {
-						let _session = session;
-						let mut issued = Vec::new();
-						while let Some(request) = requests.next().await {
-							let grant = match request.token().is_empty() {
-								true => moq_net::auth::Grant::default(),
-								false => moq_net::auth::Grant::all(),
-							};
-							issued.push(request.accept(grant));
-						}
-					});
-				};
-				let client = async {
-					let (session, driver) = client.await.unwrap();
-					tokio::spawn(moq_net::time::run(driver));
-					session
-				};
-				let (session, ()) = tokio::join!(client, server);
-				// Leave the session the time a multithreaded runtime may give it before the dial
-				// returns: on the paused clock, every exchange the session can make lands first,
-				// the connection credential's answer included.
-				kio::clock::sleep(Duration::from_millis(10)).await;
-				Ok(crate::client::Dialed {
-					session,
-					transport: crate::Transport::Tcp,
+		client.dialer = Some(std::sync::Arc::new(
+			move |_addr: crate::connect::Addr, moq: moq_net::Client| {
+				let server_origin = server_dial.clone();
+				Box::pin(async move {
+					let versions = moq_net::Versions::from(version);
+					let config = || {
+						let mut config = qmux::Config::new(qmux::Version::QMux01);
+						config.protocol =
+							qmux::Protocol::Negotiate(versions.alpns().iter().map(|alpn| alpn.to_string()).collect());
+						config
+					};
+					let (client, server) = tokio::io::duplex(64 * 1024);
+					let (client, server) = tokio::try_join!(
+						qmux::Session::connect(qmux::transport::Stream::new(client), config()),
+						qmux::Session::accept(qmux::transport::Stream::new(server), config())
+					)
+					.unwrap();
+					let (client, server) = (crate::spawn_qmux(client), crate::spawn_qmux(server));
+					let now = moq_net::time::Instant::now();
+					let client = moq.connect(now, client);
+					let server = async {
+						let mut request = moq_net::Server::new()
+							.with_versions(versions.clone())
+							.with_subscriber(server_origin)
+							.accept_request(now, server)
+							.await
+							.unwrap();
+						// The connection credential grants nothing; only the configured token
+						// covers the broadcast.
+						let mut requests = request.requests();
+						let (session, driver) = request.ok().await.unwrap();
+						tokio::spawn(moq_net::time::run(driver));
+						tokio::spawn(async move {
+							let _session = session;
+							let mut issued = Vec::new();
+							while let Some(request) = requests.next().await {
+								let grant = match request.token().is_empty() {
+									true => moq_net::auth::Grant::default(),
+									false => moq_net::auth::Grant::all(),
+								};
+								issued.push(request.accept(grant));
+							}
+						});
+					};
+					let client = async {
+						let (session, driver) = client.await.unwrap();
+						tokio::spawn(moq_net::time::run(driver));
+						session
+					};
+					let (session, ()) = tokio::join!(client, server);
+					// Leave the session the time a multithreaded runtime may give it before the dial
+					// returns: on the paused clock, every exchange the session can make lands first,
+					// the connection credential's answer included.
+					kio::clock::sleep(Duration::from_millis(10)).await;
+					Ok(crate::client::Dialed {
+						session,
+						transport: crate::Transport::Tcp,
+					})
 				})
-			})
-		}));
+			},
+		));
 
 		let connection = client
 			.with_publisher(&publish)

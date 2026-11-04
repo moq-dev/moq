@@ -261,9 +261,11 @@ mod tests {
 		// A public endpoint may not redirect us inward, but a local one may stay local.
 		let public = url("https://relay.example/");
 		let localhost = url("https://127.0.0.1:4443/");
-		assert!(refused(
-			Redirect::Follow.target("https://[::ffff:127.0.0.1]/", &public, false)
-		));
+		assert!(refused(Redirect::Follow.target(
+			"https://[::ffff:127.0.0.1]/",
+			&public,
+			false
+		)));
 		assert_eq!(
 			Redirect::Follow
 				.target("https://127.0.0.1:9999/", &localhost, false)
@@ -299,7 +301,11 @@ mod tests {
 		let secure = url("https://relay.example/");
 		let plain = url("http://relay.example/");
 
-		assert!(refused(Redirect::Follow.target("http://other.example/", &secure, false)));
+		assert!(refused(Redirect::Follow.target(
+			"http://other.example/",
+			&secure,
+			false
+		)));
 		assert!(refused(Redirect::Follow.target("unix:///tmp/moq.sock", &secure, false)));
 
 		// Same tier and upgrades are followed.
@@ -311,7 +317,9 @@ mod tests {
 			Some(same.clone())
 		);
 		assert_eq!(
-			Redirect::Follow.target("https://other.example/", &plain, false).unwrap(),
+			Redirect::Follow
+				.target("https://other.example/", &plain, false)
+				.unwrap(),
 			Some(same)
 		);
 	}
@@ -433,9 +441,16 @@ mod tests {
 	#[test]
 	fn a_certificate_pin_holds_the_host() {
 		let current = url("https://relay.example/");
-		assert!(refused(Redirect::Follow.target("https://other.example/", &current, true)));
+		assert!(refused(Redirect::Follow.target(
+			"https://other.example/",
+			&current,
+			true
+		)));
 		let moved = "https://relay.example:5443/";
-		assert_eq!(Redirect::Follow.target(moved, &current, true).unwrap(), Some(url(moved)));
+		assert_eq!(
+			Redirect::Follow.target(moved, &current, true).unwrap(),
+			Some(url(moved))
+		);
 	}
 
 	/// `SameHost` lets a peer move us between ports or schemes on the endpoint we
@@ -453,7 +468,11 @@ mod tests {
 			.target("https://relay.example:5443/", &current, false)
 			.unwrap()
 			.unwrap();
-		assert_eq!(moved.port(), Some(5443), "a different port on the same host is followed");
+		assert_eq!(
+			moved.port(),
+			Some(5443),
+			"a different port on the same host is followed"
+		);
 	}
 
 	#[test]
@@ -512,4 +531,3 @@ mod tests {
 		assert_eq!(Shown(&url("unix:///run/moq.sock")).to_string(), "unix:///run/moq.sock");
 	}
 }
-

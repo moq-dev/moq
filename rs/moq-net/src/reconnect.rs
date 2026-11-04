@@ -334,7 +334,9 @@ enum Phase {
 	/// Check the retry window, then walk the targets.
 	Start,
 	/// Ask the caller to dial the target at `index`.
-	Next { index: usize },
+	Next {
+		index: usize,
+	},
 	Dialing(Dialing),
 	Live(Box<Live>),
 	Backoff {

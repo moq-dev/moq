@@ -366,7 +366,10 @@ impl Client {
 	/// closes once the last returned handle drops. The policy bounds the attempt: dropping
 	/// it cancels whichever arm is still pending.
 	#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds"))]
-	pub(crate) async fn dial(&self, attempt: moq_net::reconnect::Attempt<crate::connect::Addr>) -> crate::Result<Dialed> {
+	pub(crate) async fn dial(
+		&self,
+		attempt: moq_net::reconnect::Attempt<crate::connect::Addr>,
+	) -> crate::Result<Dialed> {
 		let addr = attempt.target().with_url(attempt.url().clone());
 		let client = match attempt.token() {
 			Some(token) => {
