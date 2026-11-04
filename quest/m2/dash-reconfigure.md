@@ -36,10 +36,6 @@ which the manifest never lists today; drop that exemption.
 
 Public API: none. Wire: none.
 
-## Required
-
-- [HLS export follows a resolution change](/quest/m1/hls-reinit-same-codec.md) - the instance hand-over (#7436) this extends to DASH
-
 ## Related
 
 - [HLS and DASH browser playback](/quest/m2/hls-player-test.md) - dash.js survives reconfiguration nightly

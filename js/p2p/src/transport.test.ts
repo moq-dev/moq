@@ -161,6 +161,21 @@ test("malformed binary input and an overflowing receive queue close the channel"
 	}
 });
 
+test("each side holds more than qmux's default of 100 streams open in each direction", async () => {
+	const { client, server } = pair();
+	await Promise.all([client.ready, server.ready]);
+	// Refused at once, rather than waiting, past the peer's stream limit.
+	const now = { waitUntilAvailable: false };
+	for (let i = 0; i < 150; i++) {
+		await client.createUnidirectionalStream(now);
+		await client.createBidirectionalStream(now);
+		await server.createUnidirectionalStream(now);
+		await server.createBidirectionalStream(now);
+	}
+	client.close();
+	await Promise.all([client.closed, server.closed]);
+});
+
 test("incoming stream cancellation waits for the channel to open", async () => {
 	const mock = peers();
 	const client = Transport.connect({ peer: mock.left.asPeer(), protocol });
