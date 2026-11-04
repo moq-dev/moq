@@ -16,7 +16,7 @@ draft 18 or a fill on draft 22
 fetch-stream decoder and head stitching are what a standalone FETCH reuses.
 
 Decided 2026-10-28 (maintainer): one [M] quest in m1, after
-[JS ranges](/quest/m1/subscribe-ranges/js.md), which turns `fetchGroup` into
+JS ranges ([moq-dev/moq#7696](https://github.com/moq-dev/moq/pull/7696)), which turns `fetchGroup` into
 a one-range subscription. Map a past range to a standalone FETCH, the way
 Rust's subscriber does. Then add the native JS runtimes as subscribers to the
 `run_fetch_round` cells in the tail suite. Our publishers answer only one
@@ -25,7 +25,3 @@ past-range FETCH against them is refused. Test ranges against a third-party
 publisher, and one group against ours.
 
 Public API: none beyond JS ranges' surface. Wire: none.
-
-## Required
-
-- [JS ranges](/quest/m1/subscribe-ranges/js.md) - the one-range subscription this maps onto FETCH

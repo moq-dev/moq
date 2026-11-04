@@ -31,5 +31,5 @@ Critical fixes continue to reach the existing release through backports.
 
 - [m0: immediate priorities](/quest/m0/README.md) - urgent correctness fixes and maintenance of the current release
 - [m1: next wave](/quest/m1/README.md) - everything before the next release cut, breaking or not, with its required correctness and validation
-- [m2: later work](/quest/m2/README.md) - release execution first, then deferred features, optimization, and design studies
+- [m2: later work](/quest/m2/README.md) - byte streams and mesh libraries first, then release execution, deferred features, optimization, and design studies
 - [m3: deferred](/quest/m3/README.md) - gated on the outside world (hardware, a partner, a consumer, a provider's offer, or an upstream release), or speculative with no named consumer

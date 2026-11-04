@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `VideoInit.lower` takes either producer kind ([#7699](https://github.com/moq-dev/moq/pull/7699))
+
+`VideoInit.lower` is a `dev.moq.media.Producer` (`uniffi.moq.MoqMediaProducer`) instead of a `TrackProducer`. Pass `MoqMediaProducer.Track(producer)`, or `MoqMediaProducer.Stream(producer)` for a byte-stream rendition.
+
 ### Media setup refusals are typed
 
 Audio and video subscribe setup now reports `MoqException.UnsupportedConfig` when the decoder refuses a codec, layout, or description. Handle this variant to try another rendition instead of inspecting an audio/video error message or `Unsupported`. Decoder faults, such as a backend that fails to open, and later peer and decode failures keep their existing errors. Regenerate bindings and rebuild the matching native library together.
