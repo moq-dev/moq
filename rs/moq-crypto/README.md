@@ -21,7 +21,7 @@ use it without a dependency cycle.
 ## Provider
 
 MoQ runs all of its cryptography on rind, which needs certain CPU features (for example AES
-instructions on x86_64). Its primitives panic on a CPU without them, so the `provider` module
+instructions on `x86_64`). Its primitives panic on a CPU without them, so the `provider` module
 refuses such a CPU up front:
 
 - `provider::check()` returns `UnsupportedCpu`, naming the missing feature.
