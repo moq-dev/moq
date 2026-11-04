@@ -1069,7 +1069,7 @@ mod metadata_tests {
 		drop(binding);
 		assert!(matches!(
 			consumer.poll_read_frame(&moq_net::kio::Waiter::noop()),
-			std::task::Poll::Ready(Err(moq_net::Error::Dropped))
+			std::task::Poll::Ready(Err(moq_net::Error::Unroutable))
 		));
 	}
 
