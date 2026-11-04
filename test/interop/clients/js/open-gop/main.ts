@@ -60,10 +60,8 @@ window.runRecovery = async (packets) => {
 	};
 	const origin = new Moq.Origin.Producer();
 	const name = Moq.Path.from("open-gop");
-	const publication = origin.createBroadcast(name);
-	publication.announce();
-	const producer = publication.broadcast;
-	const track = producer.createTrack("video", { timescale: Moq.Time.Timescale.MICRO });
+	const route = origin.route(name);
+	const track = route.broadcast.createTrack("video", { timescale: Moq.Time.Timescale.MICRO });
 	let group: Moq.Group.Producer | undefined;
 	for (const packet of packets) {
 		if (group?.sequence !== BigInt(packet.group)) {
