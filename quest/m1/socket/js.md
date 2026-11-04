@@ -18,7 +18,7 @@ group `producer` and `consumer` (one group each way: frames are writes, finish
 is FIN, abort is RST, and a second group resets the session); and a
 `TrackStream` with a track `producer` and a reliably subscribed `consumer`.
 Both carry `peer` and `session`, and no message methods of their own. Session
-tracks are `<protocol>/<dialer>/<session>` in both endpoints, served only on
+tracks are `<protocol>/<dialer>/<acceptor>/<session>` in both endpoints, served only on
 request so no listing names them; an unknown or unaccepted protocol is reset
 as unsupported. JS reads without fastest-reader pacing until
 [JS fastest-reader pacing](/quest/m2/js-fastest-reader.md), so a JS `tcp`

@@ -3,7 +3,7 @@
 //! An [`Endpoint`] announces one hidden broadcast, `<prefix>/.socket/<id>`, used only to
 //! route dials to it. From it, an endpoint dials other endpoints and accepts their dials.
 //! Each connection is a session: two tracks, one in each endpoint's broadcast, both named
-//! `<protocol>/<dialer>/<session>`. Sessions are never announced or listed.
+//! `<protocol>/<dialer>/<acceptor>/<session>`. Sessions are never announced or listed.
 //!
 //! A session speaks one of two protocols:
 //!
@@ -15,13 +15,13 @@
 //!   [`Endpoint::accept_track`], and read and write a [`TrackStream`].
 //!
 //! A dialer `A` picks a random session id `S` and subscribes to `<prefix>/.socket/<B>` for
-//! the track `<protocol>/A/S`. Endpoint `B` surfaces that request as an [`Incoming`] dial
+//! the track `<protocol>/A/B/S`. Endpoint `B` surfaces that request as an [`Incoming`] dial
 //! from `A` in its protocol's queue. To accept it, `B` subscribes to `<prefix>/.socket/<A>`
 //! for the same track name, and `A` answers only a session it dialed, so the exchange
-//! checks that `A` really asked: a dial forged in `A`'s name is reset. It does not check
-//! that `A` asked `B`: an endpoint `A` dialed knows `<protocol>/A/S`, and can replay it to
-//! a third endpoint, which then accepts a session claiming to be from `A`. Each side then
-//! writes its own half and reads the peer's.
+//! checks that `A` really asked `B`: a dial forged in `A`'s name is reset. Naming both ends
+//! binds a session to them, so an endpoint `A` dialed cannot replay the session to a third
+//! endpoint `C`: `C` resets a name for another acceptor, and `A` never dialed
+//! `<protocol>/A/C/S`. Each side then writes its own half and reads the peer's.
 //!
 //! See `doc/concept/socket.md` for the convention other languages follow.
 
@@ -60,10 +60,10 @@ fn session_id() -> Arc<str> {
 	format!("{:032x}", rand::rng().random::<u128>()).into()
 }
 
-/// The track name of a session: `<protocol>/<dialer>/<session>`, the same in both
-/// endpoints.
-fn track_name(protocol: &str, dialer: &str, session: &str) -> String {
-	format!("{protocol}/{dialer}/{session}")
+/// The track name of a session: `<protocol>/<dialer>/<acceptor>/<session>`, the same in
+/// both endpoints.
+fn track_name(protocol: &str, dialer: &str, acceptor: &str, session: &str) -> String {
+	format!("{protocol}/{dialer}/{acceptor}/{session}")
 }
 
 /// A session's track name, split.
@@ -71,21 +71,32 @@ fn track_name(protocol: &str, dialer: &str, session: &str) -> String {
 struct Name<'a> {
 	protocol: &'a str,
 	dialer: &'a str,
+	acceptor: &'a str,
 	session: &'a str,
 }
 
 /// Split a session's track name, or `None` for a name outside the scheme.
 fn parse(name: &str) -> Option<Name<'_>> {
-	let (protocol, rest) = name.split_once('/')?;
-	let (dialer, session) = rest.split_once('/')?;
-	for segment in [protocol, dialer, session] {
+	let mut segments = name.split('/');
+	let [protocol, dialer, acceptor, session] = std::array::from_fn(|_| segments.next().unwrap_or_default());
+	if segments.next().is_some() {
+		return None;
+	}
+	for segment in [protocol, dialer, acceptor, session] {
 		check_id(segment).ok()?;
 	}
 	Some(Name {
 		protocol,
 		dialer,
+		acceptor,
 		session,
 	})
+}
+
+/// A `track` session half's default: every message stays until read, rather than only
+/// the newest as for an authored track.
+fn messages() -> track::Info {
+	track::Info::default().with_max_age(None)
 }
 
 /// What a session's reader asks for: every group, oldest first, however late it is.
@@ -359,10 +370,11 @@ impl Shared {
 	/// more, and fail with the endpoint's end once it stopped.
 	///
 	/// A dial of this endpoint's reserves its own track, so a request reaching the handler
-	/// under this endpoint's id names a session it never dialed, or one it gave up, such
-	/// as an accept of a dial forged in this endpoint's name: it is reset with
-	/// [`Error::NotFound`], which fails that accept. A request in a protocol nobody accepts
-	/// is reset with [`Error::Unsupported`].
+	/// with this endpoint as the dialer names a session it never dialed, or one it gave up,
+	/// such as an accept of a dial forged or replayed in this endpoint's name: it is reset
+	/// with [`Error::NotFound`], which fails that accept. So is a request naming another
+	/// acceptor, such as a session replayed from the endpoint it was dialed to. A request in
+	/// a protocol nobody accepts is reset with [`Error::Unsupported`].
 	///
 	/// The handler is polled with no lock held (see [`Handler`]), and resets and wakes go
 	/// out after the lock is released.
@@ -420,9 +432,12 @@ impl Shared {
 			}
 		}
 		for request in taken {
-			// `None` for a name naming no dial: outside the scheme, or this endpoint's own.
+			// `None` for a name naming no dial to this endpoint: outside the scheme, this
+			// endpoint's own, or for another acceptor.
 			let target = match parse(request.name()) {
-				Some(name) if name.dialer != &*self.id => Some(Protocol::parse(name.protocol)),
+				Some(name) if name.acceptor == &*self.id && name.dialer != &*self.id => {
+					Some(Protocol::parse(name.protocol))
+				}
 				_ => None,
 			};
 			match target {
@@ -451,7 +466,12 @@ impl Shared {
 			}
 		};
 		drop(state);
-		drop(retired);
+		if let Some(retired) = retired {
+			// Closed first, as `close` may not have yet: dropping the last handler rejects
+			// the dials still queued with `Dropped`, rather than the close's `Unroutable`.
+			self.publication.close();
+			drop(retired);
+		}
 		for mut wake in wakes {
 			wake.wake();
 		}
@@ -585,13 +605,14 @@ impl Endpoint {
 
 	/// Dial the endpoint `peer` in a new `track` session; see [`Self::dial_tcp`].
 	///
-	/// `info` describes this side's half.
+	/// `info` describes this side's half; `None` keeps every message until read, with no
+	/// max age.
 	pub fn dial_track(
 		&self,
 		peer: &str,
 		info: impl Into<Option<track::Info>>,
 	) -> Result<kio::Pending<Dialing<TrackStream>>, Error> {
-		self.dial(peer, info.into())
+		self.dial(peer, Some(info.into().unwrap_or_else(messages)))
 	}
 
 	fn dial<S: Stream>(&self, peer: &str, info: Option<track::Info>) -> Result<kio::Pending<Dialing<S>>, Error> {
@@ -604,12 +625,12 @@ impl Endpoint {
 			return Err(err.clone());
 		}
 		let session = session_id();
-		let name = track_name(S::PROTOCOL.as_str(), &shared.id, &session);
+		let name = track_name(S::PROTOCOL.as_str(), &shared.id, peer, &session);
 		// This side's half, waiting for the peer to ask for it, which only the peer can:
 		// nobody else knows the session.
 		let answer = shared.publication.reserve_unlisted_track(name.clone())?;
 		// Followed rather than requested, so a peer not announced yet is waited for.
-		let resolving = Resolving::Follow(Box::new(shared.origin.follow(path, None)?));
+		let resolving = Box::new(shared.origin.follow(path, None)?);
 		Ok(kio::Pending::new(Dialing {
 			shared: shared.clone(),
 			peer: peer.into(),
@@ -690,8 +711,7 @@ pub struct Incoming<S: Stream> {
 
 impl<S: Stream> Incoming<S> {
 	/// The id the dialer claims. An accept checks it: the dial connects only if that
-	/// endpoint really dialed this session, though not necessarily to this endpoint, since
-	/// an endpoint it dialed can replay the session to another.
+	/// endpoint really dialed this session to this endpoint.
 	pub fn peer(&self) -> &str {
 		&self.peer
 	}
@@ -712,22 +732,22 @@ impl<S: Stream> Incoming<S> {
 	fn accept_with(mut self, info: Option<track::Info>) -> kio::Pending<Accepting<S>> {
 		let shared = self.shared.clone();
 		let (peer, session) = (self.peer.clone(), self.session.clone());
-		let request = self.request.take();
-		// Requested, so a dial claiming an endpoint nobody announces fails at once: the
-		// dialer announced its endpoint before it dialed.
-		let resolving = endpoint_path(&shared.prefix, &peer)
-			.map(|path| Resolving::Request(Box::new(shared.origin.request(path, None).into_inner())));
-		let step = match resolving {
-			Ok(resolving) => Step::Resolving(resolving),
+		let request = self.request.take().expect("taken only by accept, reject or drop");
+		// Followed rather than requested: the dialer announced its endpoint before it
+		// dialed, but a relay can deliver the dial first. A dial claiming an endpoint
+		// nobody announces waits for as long as its dialer holds it open.
+		let step = match endpoint_path(&shared.prefix, &peer).and_then(|path| shared.origin.follow(path, None)) {
+			Ok(following) => Step::Resolving(Box::new(following)),
 			Err(err) => Step::Failed(err),
 		};
 		kio::Pending::new(Accepting {
-			shared,
-			name: track_name(S::PROTOCOL.as_str(), &peer, &session),
+			shared: shared.clone(),
+			name: track_name(S::PROTOCOL.as_str(), &peer, &shared.id, &session),
 			peer,
 			session,
 			info,
-			request,
+			demand: request.demand(),
+			request: Some(request),
 			step,
 			stream: PhantomData,
 		})
@@ -746,9 +766,10 @@ impl Incoming<TcpStream> {
 impl Incoming<TrackStream> {
 	/// Accept the dial, resolving once the dialer answers, which proves it dialed.
 	///
-	/// `info` describes this side's half. Nothing is written before the dialer answers.
+	/// `info` describes this side's half, as for [`Endpoint::dial_track`]. Nothing is
+	/// written before the dialer answers.
 	pub fn accept(self, info: impl Into<Option<track::Info>>) -> kio::Pending<Accepting<TrackStream>> {
-		self.accept_with(info.into())
+		self.accept_with(Some(info.into().unwrap_or_else(messages)))
 	}
 }
 
@@ -760,27 +781,10 @@ impl<S: Stream> Drop for Incoming<S> {
 	}
 }
 
-/// Resolving the peer's endpoint broadcast.
-enum Resolving {
-	/// Failing once the endpoint is not announced.
-	Request(Box<origin::Requesting>),
-	/// Waiting for the endpoint to be announced.
-	Follow(Box<origin::Following>),
-}
-
-impl Resolving {
-	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<super::broadcast::Consumer, Error>> {
-		match self {
-			Self::Request(request) => request.poll_ok(waiter),
-			Self::Follow(follow) => follow.poll_available(waiter),
-		}
-	}
-}
-
 /// How far a dial or an accept got in reading the peer's half.
 enum Step {
-	/// Resolving the peer's endpoint broadcast.
-	Resolving(Resolving),
+	/// Waiting for the peer's endpoint broadcast to be announced.
+	Resolving(Box<origin::Following>),
 	/// Subscribed to the peer's half, waiting for the peer to serve it.
 	Subscribing(track::Subscribing),
 	/// The peer serves its half.
@@ -796,8 +800,8 @@ impl Step {
 	fn poll(&mut self, waiter: &kio::Waiter, track: &str) -> Poll<Result<(), Error>> {
 		loop {
 			match self {
-				Self::Resolving(resolving) => {
-					let broadcast = ready!(resolving.poll(waiter))?;
+				Self::Resolving(following) => {
+					let broadcast = ready!(following.poll_available(waiter))?;
 					let subscribing = broadcast.track(track)?.subscribe(reliable()).into_inner();
 					*self = Self::Subscribing(subscribing);
 				}
@@ -960,6 +964,9 @@ pub struct Accepting<S: Stream> {
 	info: Option<track::Info>,
 	/// The dialer's request for this side's half, served once the dialer answers.
 	request: Option<track::Request>,
+	/// Whether the dialer still subscribes to this side's half: the dial stays open while
+	/// it does.
+	demand: track::Demand,
 	step: Step,
 	stream: PhantomData<fn() -> S>,
 }
@@ -967,8 +974,10 @@ pub struct Accepting<S: Stream> {
 impl<S: Stream> Accepting<S> {
 	/// Poll for the dialer to answer, which proves it dialed.
 	///
-	/// Fails with the dialer's reset when it never dialed this session, such as a dial
-	/// forged in its name, and resets the dialer's request with the same error.
+	/// Waits for the dialer's endpoint to be announced for as long as the dial stays open,
+	/// and fails with [`Error::Cancel`] once the dialer gives up. Fails with the dialer's
+	/// reset when it never dialed this session, such as a dial forged in its name, and
+	/// resets the dialer's request with the same error.
 	pub fn poll_ok(&mut self, waiter: &kio::Waiter) -> Poll<Result<S, Error>> {
 		let result = self.poll_inner(waiter);
 		if let Poll::Ready(Err(err)) = &result {
@@ -982,6 +991,9 @@ impl<S: Stream> Accepting<S> {
 
 	fn poll_inner(&mut self, waiter: &kio::Waiter) -> Poll<Result<S, Error>> {
 		self.shared.poll_end(waiter)?;
+		if self.demand.poll_state(waiter) != track::DemandState::Active {
+			return Poll::Ready(Err(Error::Cancel));
+		}
 		ready!(self.step.poll(waiter, &self.name))?;
 
 		// Accepted outside the lock, since it wakes the dialer.
@@ -1183,13 +1195,14 @@ mod tests {
 
 	#[test]
 	fn track_names_round_trip() {
-		let name = track_name("tcp", "alice", "0123abcd");
-		assert_eq!(name, "tcp/alice/0123abcd");
+		let name = track_name("tcp", "alice", "bob", "0123abcd");
+		assert_eq!(name, "tcp/alice/bob/0123abcd");
 		assert_eq!(
 			parse(&name),
 			Some(Name {
 				protocol: "tcp",
 				dialer: "alice",
+				acceptor: "bob",
 				session: "0123abcd"
 			})
 		);
@@ -1200,12 +1213,14 @@ mod tests {
 		for name in [
 			"command",
 			"alice/s",
-			"tcp/alice/",
-			"tcp//s",
-			"/alice/s",
-			"tcp/alice/s/0",
-			"tcp/a\\b/s",
-			"tcp/alice/s\\",
+			"tcp/alice/s",
+			"tcp/alice/bob/",
+			"tcp//bob/s",
+			"tcp/alice//s",
+			"/alice/bob/s",
+			"tcp/alice/bob/s/0",
+			"tcp/a\\b/bob/s",
+			"tcp/alice/bob/s\\",
 		] {
 			assert_eq!(parse(name), None, "{name}");
 		}
@@ -1252,7 +1267,7 @@ mod tests {
 
 			let broadcast = endpoint.shared.publication.broadcast().consume();
 			let dial = broadcast
-				.track("tcp/alice/0123456789abcdef0123456789abcdef")
+				.track("tcp/alice/bob/0123456789abcdef0123456789abcdef")
 				.unwrap()
 				.subscribe(None)
 				.into_inner();

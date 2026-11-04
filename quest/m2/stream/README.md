@@ -44,7 +44,7 @@ Amended 2026-11-01 with the maintainer (socket planning interview),
 `tcp` protocol became one group each way: connection setup is the
 [socket](/quest/m1/socket/README.md) epic's `Endpoint`, `dial_tcp`, and
 `accept_tcp`, which settle the layout (`<prefix>/.socket/<id>`, a
-`tcp/<dialer>/<session>` track each way). Each TCP connection is one `tcp`
+`tcp/<dialer>/<acceptor>/<session>` track each way). Each TCP connection is one `tcp`
 session, whose halves are a single group each way for the connection's life:
 frames are writes, finishing is FIN, resetting is RST, and the writer awaits
 `group::Producer::ready` for backpressure. Each session gets its own priority,

@@ -17,8 +17,10 @@ ordinary broadcast.
 
 A socket is a convention over announcements, broadcasts, and track
 subscriptions, not a wire extension. It uses no instances and no track
-listings, so it works over every moq-lite version and moq-transport, and relays
-carry it unchanged. This page is the convention, enough to implement it in any
+listings, and relays carry it unchanged. It needs moq-lite-07 or
+moq-transport on every hop: an endpoint's broadcast is
+[hidden](/concept/moq-lite#hidden-broadcasts), and an older moq-lite hop
+never carries hidden broadcasts, so a dial across one never finds its peer. This page is the convention, enough to implement it in any
 language.
 [`moq_net::socket`](https://docs.rs/moq-net/latest/moq_net/socket/) implements
 it in Rust.
@@ -42,45 +44,49 @@ session tracks, served on request, whatever their protocol.
 
 ## Sessions
 
-A session between a dialer `A` and an acceptor `B` is named by its protocol `P`
-and a session id `S` that `A` picks: random and unguessable, at least 128 bits,
-such as 32 hex digits. Both halves of the session are tracks with the same
-name, `<protocol>/<dialer>/<session>`, one in each endpoint's broadcast:
+A session between a dialer `A` and an acceptor `B` is named by its protocol `P`,
+both ends, and a session id `S` that `A` picks: random and unguessable, at
+least 128 bits, such as 32 hex digits. Both halves of the session are tracks
+with the same name, `<protocol>/<dialer>/<acceptor>/<session>`, one in each
+endpoint's broadcast:
 
 | Track | In broadcast | Written by | Read by |
 | --- | --- | --- | --- |
-| `P/A/S` | `<prefix>/.socket/A` | `A` | `B` |
-| `P/A/S` | `<prefix>/.socket/B` | `B` | `A` |
+| `P/A/B/S` | `<prefix>/.socket/A` | `A` | `B` |
+| `P/A/B/S` | `<prefix>/.socket/B` | `B` | `A` |
 
 The protocol is `tcp` or `track`; see [Protocols](#protocols). An endpoint
 resets a request whose protocol it doesn't speak, or isn't accepting, as
 unsupported.
 
 The dialer's id follows the protocol in both broadcasts, so an endpoint tells a
-dial from an answer by the name alone: a request under another endpoint's id is
-that endpoint dialing, and a request under its own id answers one of its own
-dials. Since `S` is random per dial, every session is distinct, and one
-endpoint can dial and accept any number of sessions at once, with the same peer
-or others.
+dial from an answer by the name alone: a request with another endpoint as the
+dialer and itself as the acceptor is that endpoint dialing, and a request with
+itself as the dialer answers one of its own dials. An endpoint resets any other
+request, such as one naming another acceptor, as not found. Since `S` is random
+per dial, every session is distinct, and one endpoint can dial and accept any
+number of sessions at once, with the same peer or others.
 
 ### Dial
 
-1. `A` picks `S` and holds its own half, `P/A/S` in its broadcast, unanswered.
-2. `A` subscribes to `<prefix>/.socket/B` for the track `P/A/S`, waiting for
+1. `A` picks `S` and holds its own half, `P/A/B/S` in its broadcast,
+   unanswered.
+2. `A` subscribes to `<prefix>/.socket/B` for the track `P/A/B/S`, waiting for
    `B`'s endpoint to be announced if it is not yet.
 3. `B` receives that subscription as a request for a track it does not have:
    an incoming dial in protocol `P`, claiming to be from `A`, with session `S`.
 
 ### Accept
 
-1. `B` subscribes to `<prefix>/.socket/A` for the track `P/A/S`, and holds
-   `A`'s subscription unanswered.
-2. `A` answers that subscription only if it dialed `S` and is still waiting,
-   and resets any other. That makes the exchange a return-routability check:
-   a dial forged in `A`'s name, by anyone who can subscribe to `B`, reaches an
-   `A` that never dialed it, so `A` resets `B`'s subscription and `B` resets the
-   forger's. A dial replayed from a session `A` really dialed passes; see
-   [Hidden names](#hidden-names).
+1. `B` subscribes to `<prefix>/.socket/A` for the track `P/A/B/S`, and holds
+   `A`'s subscription unanswered. A relay can deliver the dial before `A`'s
+   announcement, so `B` waits for `A`'s endpoint to be announced for as long as
+   `A`'s subscription stays open, and gives up once it closes.
+2. `A` answers that subscription only if it dialed `S` to `B` and is still
+   waiting, and resets any other. That makes the exchange a return-routability
+   check: a dial forged in `A`'s name, by anyone who can subscribe to `B`,
+   reaches an `A` that never dialed it, so `A` resets `B`'s subscription and `B`
+   resets the forger's.
 3. Once `A` answers, `B` answers `A`'s subscription, and the session is open
    for both. `B` writes nothing before `A` answers.
 
@@ -131,7 +137,9 @@ such as a proxied TCP connection, a file transfer, or a request and its reply.
 
 Each half is a whole track, and a message is one group. A slow message never
 holds up the next, and each group can carry its own priority. Messages are
-ordered by group sequence. A reader that keeps up gets every message, but each
+ordered by group sequence. A half has no max age unless its writer sets one, so
+a newer message never makes an older one stale. A reader that keeps up gets
+every message, but each
 hop's cache reclaims a message nobody read within its idle window (30 s by
 default), or under memory pressure, except the newest, so a reader that stalls
 longer can miss messages.
@@ -164,13 +172,10 @@ The session id is the secret that keeps a session to its two ends: the token
 grants below let any endpoint subscribe to any other, so whoever learns a
 session's track name can read it, or answer it before its peer.
 
-That includes the acceptor. The name says who dialed, but not whom, so the
-return-routability check proves only that `A` dialed `S`, not that it dialed
-`B`. An endpoint `A` dialed knows `P/A/S`, and can dial a third endpoint `C`
-with it: `C`'s accept finds `A` serving that half, so `C` accepts a session
-that claims to be from `A`, reads what `A` writes to the replaying endpoint,
-and sends its replies to that endpoint. Until ids are keys, the peer id of an
-accepted session says only that the peer dialed `S`, to somebody.
+The acceptor learns the name too, but cannot replay it to a third endpoint
+`C`: the name binds both ends. `C` resets `P/A/B/S` as a session for another
+acceptor, and `A` never dialed `P/A/C/S`, so it resets `C`'s accept of that.
+The peer id of an accepted session is the endpoint that dialed it to this one.
 
 A session track therefore never appears where a third party can read it:
 
@@ -214,5 +219,5 @@ planned mesh layer makes ids public keys.
 
 Later protocols are other prefixes on the same endpoint, with no new
 announcement. A multiplexed `quic` mode, with many streams per session like
-QUIC, would name its sessions `quic/<dialer>/<session>` and bring back several
+QUIC, would name its sessions `quic/<dialer>/<acceptor>/<session>` and bring back several
 groups or streams per session.

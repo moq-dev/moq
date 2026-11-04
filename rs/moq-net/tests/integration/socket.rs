@@ -284,7 +284,7 @@ async fn dial_by_hand(fixture: &mut Fixture, bob: &Endpoint) -> ByHand {
 	let endpoint = carol.create_broadcast("room/.socket/carol").unwrap();
 	endpoint.announce(Default::default()).unwrap();
 	let mut requests = endpoint.requests();
-	let name = "tcp/carol/0123456789abcdef0123456789abcdef";
+	let name = "tcp/carol/bob/0123456789abcdef0123456789abcdef";
 	let broadcast = kio::clock::timeout(TIMEOUT, carol.consume().request("room/.socket/bob", None))
 		.await
 		.expect("request timeout")
@@ -537,7 +537,7 @@ async fn a_protocol_nobody_accepts_is_reset() {
 		.expect("request timeout")
 		.expect("bob's endpoint");
 	let unknown = broadcast
-		.track("quic/mallory/0123456789abcdef0123456789abcdef")
+		.track("quic/mallory/bob/0123456789abcdef0123456789abcdef")
 		.unwrap()
 		.subscribe(None);
 	let unknown = async { kio::clock::timeout(TIMEOUT, unknown).await };
@@ -569,9 +569,51 @@ async fn a_dial_waits_for_its_peer() {
 	dialed.producer.finish().unwrap();
 }
 
-/// An accept of a dial claiming an endpoint nobody announces fails.
+/// An accept waits for the dialer's endpoint while the dial stays open, since a relay can
+/// deliver a dial before the dialer's announcement: carol dials bob before she announces
+/// her endpoint, and bob's accept connects once she does.
 #[kio::test]
-async fn a_dial_from_nobody_fails() {
+async fn an_accept_waits_for_its_dialer() {
+	let mut fixture = Fixture::new();
+	let bob = fixture.endpoint(LITE, "bob").await;
+	let carol = fixture.client(LITE).await;
+	let name = "tcp/carol/bob/0123456789abcdef0123456789abcdef";
+	let broadcast = kio::clock::timeout(TIMEOUT, carol.consume().request("room/.socket/bob", None))
+		.await
+		.expect("request timeout")
+		.expect("bob's endpoint");
+	let dial = broadcast.track(name).unwrap().subscribe(None);
+
+	let incoming = kio::clock::timeout(TIMEOUT, bob.accept_tcp())
+		.await
+		.expect("accept timeout")
+		.unwrap();
+	assert_eq!(incoming.peer(), "carol");
+	let mut accept = incoming.accept();
+	assert!(
+		kio::clock::timeout(SETTLE, &mut accept).await.is_err(),
+		"bob's accept ended before carol announced"
+	);
+
+	let endpoint = carol.create_broadcast("room/.socket/carol").unwrap();
+	let mut requests = endpoint.requests();
+	endpoint.announce(Default::default()).unwrap();
+	let answer = async {
+		let request = kio::wait(|waiter| requests.poll_requested_track(waiter)).await.unwrap();
+		assert_eq!(request.name(), name);
+		request.accept(None)
+	};
+	let (accepted, _half, dialed) = kio::clock::timeout(TIMEOUT, async { futures::join!(accept, answer, dial) })
+		.await
+		.expect("connect timeout");
+	assert_eq!(accepted.expect("accept").peer(), "carol");
+	dialed.expect("bob's half");
+}
+
+/// An accept of a dial claiming an endpoint nobody announces waits only while the dial
+/// stays open: the forger dropping it fails the accept.
+#[kio::test]
+async fn an_accept_ends_with_its_dial() {
 	let mut fixture = Fixture::new();
 	let bob = fixture.endpoint(LITE, "bob").await;
 	let mallory = fixture.client(LITE).await;
@@ -580,7 +622,7 @@ async fn a_dial_from_nobody_fails() {
 		.expect("request timeout")
 		.expect("bob's endpoint");
 	let forged = broadcast
-		.track("tcp/carol/0123456789abcdef0123456789abcdef")
+		.track("tcp/carol/bob/0123456789abcdef0123456789abcdef")
 		.unwrap()
 		.subscribe(None);
 	let incoming = kio::clock::timeout(TIMEOUT, bob.accept_tcp())
@@ -588,16 +630,65 @@ async fn a_dial_from_nobody_fails() {
 		.expect("accept timeout")
 		.unwrap();
 	assert_eq!(incoming.peer(), "carol");
-	let accepted = kio::clock::timeout(TIMEOUT, incoming.accept())
-		.await
-		.expect("accept timeout");
-	assert!(accepted.is_err(), "bob connected to nobody");
+	let mut accept = incoming.accept();
 	assert!(
-		kio::clock::timeout(TIMEOUT, forged)
-			.await
-			.expect("forged timeout")
-			.is_err()
+		kio::clock::timeout(SETTLE, &mut accept).await.is_err(),
+		"bob's accept ended while the dial was open"
 	);
+
+	drop(forged);
+	let accepted = kio::clock::timeout(TIMEOUT, accept).await.expect("accept timeout");
+	assert!(accepted.is_err(), "bob connected to nobody");
+}
+
+/// A session is bound to both its ends: an endpoint alice dialed knows the session's id,
+/// but replaying it to carol connects neither under bob's name nor under carol's.
+#[kio::test]
+async fn a_replayed_session_never_connects() {
+	let mut fixture = Fixture::new();
+	let alice = fixture.endpoint(LITE, "alice").await;
+	let bob = fixture.endpoint(LITE, "bob").await;
+	let carol = fixture.endpoint(LITE, "carol").await;
+	let (mut dialed, mut accepted) = connect_tcp(&alice, &bob).await;
+	let session = accepted.session().to_string();
+
+	// Replayed from bob's side, which knows the session.
+	let mallory = fixture.client(LITE).await;
+	let broadcast = kio::clock::timeout(TIMEOUT, mallory.consume().request("room/.socket/carol", None))
+		.await
+		.expect("request timeout")
+		.expect("carol's endpoint");
+
+	// Under the name alice dialed: carol is not its acceptor, so she resets it unheard.
+	let replayed = broadcast
+		.track(&format!("tcp/alice/bob/{session}"))
+		.unwrap()
+		.subscribe(None);
+	// Carol accepts first, so the replay reaches her listening.
+	let accept = async { kio::clock::timeout(SETTLE, carol.accept_tcp()).await };
+	let (accepted_by_carol, replayed) = futures::join!(accept, async { kio::clock::timeout(TIMEOUT, replayed).await });
+	assert!(replayed.expect("replay timeout").is_err(), "carol served a replayed session");
+	assert!(accepted_by_carol.is_err(), "a session for bob surfaced at carol");
+
+	// Renamed for carol: alice never dialed it, so she resets carol's accept.
+	let renamed = broadcast
+		.track(&format!("tcp/alice/carol/{session}"))
+		.unwrap()
+		.subscribe(None);
+	let incoming = kio::clock::timeout(TIMEOUT, carol.accept_tcp())
+		.await
+		.expect("accept timeout")
+		.unwrap();
+	assert_eq!(incoming.peer(), "alice");
+	let (accepted_by_carol, renamed) = kio::clock::timeout(TIMEOUT, async { futures::join!(incoming.accept(), renamed) })
+		.await
+		.expect("connect timeout");
+	assert!(accepted_by_carol.is_err(), "carol connected to a replayed session");
+	assert!(renamed.is_err(), "the replayer read carol's half");
+
+	// The real session is untouched.
+	dialed.producer.write_frame(None, &b"still here"[..]).unwrap();
+	assert_eq!(read(&mut accepted.consumer).await.unwrap().unwrap(), b"still here");
 }
 
 /// A third party asking bob for a session in alice's name surfaces at bob as a dial from
@@ -616,7 +707,7 @@ async fn a_forged_dial_never_connects() {
 			.expect("request timeout")
 			.expect("bob's endpoint");
 		let forged = broadcast
-			.track(&format!("{protocol}/alice/0123456789abcdef0123456789abcdef"))
+			.track(&format!("{protocol}/alice/bob/0123456789abcdef0123456789abcdef"))
 			.unwrap()
 			.subscribe(None);
 

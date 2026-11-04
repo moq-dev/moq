@@ -236,7 +236,7 @@ async fn a_forged_dial_never_connects() {
 			.await
 			.expect("bob's endpoint");
 		let forged = broadcast
-			.track("tcp/alice/0123456789abcdef0123456789abcdef")
+			.track("tcp/alice/bob/0123456789abcdef0123456789abcdef")
 			.expect("track")
 			.subscribe(None);
 		let incoming = bob.accept_tcp().await.expect("accept");
