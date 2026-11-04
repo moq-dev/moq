@@ -501,6 +501,33 @@ async fn a_protected_rendition_is_left_out() {
 	);
 }
 
+/// A selected export of a broadcast whose media is all protected fails, rather than writing
+/// nothing and ending as if it succeeded.
+#[tokio::test(start_paused = true)]
+async fn an_export_of_only_protected_media_fails() {
+	use crate::catalog::Stream as _;
+
+	let broadcast = moq_net::broadcast::Info::new();
+	let mut producer = broadcast.produce();
+	let consumer = producer.consume();
+
+	let catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
+	let mut protected = crate::container::fmp4::Import::new(producer, catalog.reserve()).with_passthrough(true);
+	protected
+		.decode(include_bytes!("test_data/cenc-clearkey.mp4"))
+		.expect("protected import");
+
+	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
+		.await
+		.expect("catalog consumer");
+	let selected = catalog_stream.select(crate::select::Broadcast::default());
+	let mut exporter = crate::container::fmp4::Export::new(crate::source::announced(&consumer).await, selected);
+	let result = kio::clock::timeout(std::time::Duration::from_secs(1), exporter.next())
+		.await
+		.expect("exporter timed out");
+	assert!(matches!(result, Err(crate::Error::Protected)), "{result:?}");
+}
+
 /// Per-rendition export (a single non-first source track, e.g. moq-hls exporting
 /// the audio rendition alone) must give the init moov the SAME track id its
 /// re-encoded fragments carry.

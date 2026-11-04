@@ -4,6 +4,10 @@
 //! to each snapshot, dropping renditions that aren't selected before handing the
 //! catalog on. Each snapshot holds what the previous one selected, so a rendition its
 //! publisher disables stays while nothing else of its role is enabled.
+//!
+//! Protected renditions (see [`retain_clear`](super::hang::retain_clear)) are dropped before
+//! selecting, since nothing that consumes a selection decrypts, and a snapshot whose video and
+//! audio are all protected fails with [`Error::Protected`](crate::Error::Protected).
 
 use std::task::{Poll, ready};
 
@@ -39,12 +43,22 @@ impl<S: Stream> Stream for Select<S> {
 	type Ext = S::Ext;
 
 	fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Catalog<S::Ext>>>> {
-		let next = ready!(self.inner.poll_next(waiter))?;
-		Poll::Ready(Ok(next.map(|mut catalog| {
-			self.selection.retain(&mut catalog, &self.selected);
-			self.selected = select::Selected::of(&catalog);
-			catalog
-		})))
+		let Some(mut catalog) = ready!(self.inner.poll_next(waiter))? else {
+			return Poll::Ready(Ok(None));
+		};
+		// Nothing downstream of a selection decrypts, so a protected rendition is absent before it
+		// is chosen from: otherwise one could displace a clear rendition, then be dropped.
+		let media = |catalog: &Catalog<S::Ext>| catalog.video.renditions.len() + catalog.audio.renditions.len();
+		let listed = media(&catalog);
+		super::hang::retain_clear(&mut catalog);
+		// A broadcast whose media is all protected can never export anything; say so rather than
+		// export nothing and succeed.
+		if listed > 0 && media(&catalog) == 0 {
+			return Poll::Ready(Err(crate::Error::Protected));
+		}
+		self.selection.retain(&mut catalog, &self.selected);
+		self.selected = select::Selected::of(&catalog);
+		Poll::Ready(Ok(Some(catalog)))
 	}
 }
 
@@ -90,6 +104,48 @@ mod tests {
 		});
 		config.container = Container::Legacy;
 		(name.to_string(), config)
+	}
+
+	/// A protected rendition is dropped before selecting, so a held clear rendition the publisher
+	/// disabled is not passed over for an enabled protected one that is then removed too.
+	#[test]
+	fn protected_renditions_never_displace_a_clear_one() {
+		let snapshot = |enabled: bool| {
+			let mut catalog = Catalog::default();
+			let (name, mut clear) = h264("clear");
+			clear.enabled = enabled;
+			catalog.video.renditions.insert(name, clear);
+			let (name, mut protected) = h264("protected");
+			protected.drm = vec!["1".to_string()];
+			catalog.video.renditions.insert(name, protected);
+			catalog
+		};
+		let selection = select::Broadcast::default().video(select::Video::default());
+		let mut stream = Snapshots::new([snapshot(true), snapshot(false)]).select(selection);
+		assert_eq!(next(&mut stream).video.renditions.keys().collect::<Vec<_>>(), ["clear"]);
+		assert_eq!(
+			next(&mut stream).video.renditions.keys().collect::<Vec<_>>(),
+			["clear"],
+			"held while disabled"
+		);
+	}
+
+	/// A broadcast whose media is all protected fails rather than exporting nothing; one with no
+	/// media yet just waits for it.
+	#[test]
+	fn only_protected_media_is_an_error() {
+		let (name, mut protected) = h264("protected");
+		protected.drm = vec!["1".to_string()];
+		let mut catalog = Catalog::default();
+		catalog.video.renditions.insert(name, protected);
+
+		let selection = select::Broadcast::default().video(select::Video::default());
+		let mut stream = Snapshots::new([Catalog::default(), catalog]).select(selection);
+		assert!(next(&mut stream).video.renditions.is_empty());
+		assert!(matches!(
+			stream.poll_next(&kio::Waiter::noop()),
+			Poll::Ready(Err(crate::Error::Protected))
+		));
 	}
 
 	#[test]

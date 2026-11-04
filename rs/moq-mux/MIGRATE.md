@@ -9,8 +9,12 @@ How to adopt new APIs and update for breaking changes, newest first.
 `fmp4::Import` with passthrough publishes Common Encryption (`cenc` and `cbcs`) fMP4 instead of refusing its `encv`/`enca` entries, filling the catalog's `drm` section; set license and certificate servers with `Import::with_drm`.
 Without passthrough, an encrypted file now fails with `fmp4::Error::ProtectedNeedsPassthrough` rather than `UnsupportedCodec`.
 
-Every export (fMP4, MP4, MKV, MPEG-TS, FLV, Annex-B) leaves out a protected rendition, one whose `drm` lists entries, as it does a disabled one: nothing here decrypts, and a re-encoded file would lose its IVs.
-A consumer of your own can do the same with `catalog::hang::retain_clear`.
+Every export (fMP4, MP4, MKV, MPEG-TS, FLV, Annex-B) leaves out a protected rendition as it does a disabled one: nothing here decrypts, and a re-encoded file would lose its IVs.
+A rendition is protected when its `drm` lists entries, or when it is CMAF and its init holds an encrypted (`encv`/`enca`) sample entry, so a publisher that encrypts without signalling it is never read as clear.
+A consumer of your own can do the same with `catalog::hang::retain_clear`, or test one rendition with `catalog::hang::protected`.
+`catalog::Select` drops protected renditions before it selects, and fails a snapshot whose video and audio are all protected with the new `Error::Protected`, so an export of such a broadcast fails instead of writing nothing.
+An MSF CMAF track whose init is encrypted but that lists no `contentProtectionRefIDs` is dropped on parse rather than read as clear.
+`RenditionConfig` gains `drm_mut`, defaulting to `None`; an implementation of your own needs no change.
 
 The re-exported `fmp4::mp4_atom` moves to the release with Common Encryption's boxes: a sample entry's `colr` is a `Vec<Colr>`, `Moov` and `Moof` gain `pssh: Vec<Pssh>`, and `Codec` gains `Encv` and `Enca`.
 Build a `Moov` or `Moof` literal with `pssh: Vec::new()`, and match the new `Codec` variants.

@@ -1045,12 +1045,13 @@ fn reconcile(
 		}
 	}
 	let mut playable = catalog.clone();
+	// Encrypted samples would reach the decoders as ciphertext; this source does not decrypt. Drop
+	// them before selecting, so a clear rendition is never passed over for a protected one.
+	moq_mux::catalog::hang::retain_clear(&mut playable);
 	moq_mux::select::Broadcast::default()
 		.video(Default::default())
 		.audio(Default::default())
 		.retain(&mut playable, &selected);
-	// Encrypted samples would reach the decoders as ciphertext; this source does not decrypt.
-	moq_mux::catalog::hang::retain_clear(&mut playable);
 
 	// Build the desired shape for each rendition. This is deliberately cheap: caps come from the
 	// catalog config and the container is just the hang descriptor. The reader parses the wire

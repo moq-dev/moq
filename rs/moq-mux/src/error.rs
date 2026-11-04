@@ -282,6 +282,11 @@ pub enum Error {
 	#[error("rendition `{0}` changed identity; publish it under a new track name")]
 	IdentityChanged(String),
 
+	/// Every video and audio rendition of a catalog is protected, so a selection has nothing it can
+	/// export: nothing here decrypts (see [`retain_clear`](crate::catalog::hang::retain_clear)).
+	#[error("no rendition can be exported: every one is protected")]
+	Protected,
+
 	/// A rendition moved to a track whose media goes back before what the export already read for it.
 	#[error(
 		"rendition {rendition} moved to a track that goes back in time: a group starts at {start:?}, not past {read:?}"
