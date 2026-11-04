@@ -16,26 +16,28 @@ requested, and the PR records that PR as evidence.
 inherited). Pullfrog keeps its review triggers in its own repository settings,
 not in a file: the console's Automations → Review PRs card, or the
 [Pullfrog CLI](https://docs.pullfrog.com/cli-configuration) keys
-`review.re-review` and `review.drafts`, which need repo write. Agents never
+`review.re-review` and `review.drafts`, which need repo write.
+
+- ✅ 2026-11-04: Pullfrog re-review on push turned off and draft reviews left
+  off, with the maintainer's authorization:
+  `pullfrog config set review.re-review false --repo moq-dev/moq` and
+  `pullfrog config set review.drafts false --repo moq-dev/moq`.
+  `pullfrog config get` now prints `false` for both (`review.re-review` was
+  `true`).
+
+Agents never
 request or wait for an online review (`CONTRIBUTING.md`), so `AGENTS.md` stays
 unchanged; a maintainer requests one with `@coderabbitai review` or an
 `@pullfrog` mention.
 
-Once both waits clear, take the evidence PR, check each bot's reviews and
+Once the wait below clears, take the evidence PR, check each bot's reviews and
 threads against the Goal, and delete this quest in a PR that cites it.
 
 ## Waiting
 
-- Maintainer: turn off Pullfrog's re-review on push and leave draft reviews
-  off, either in the console (Automations → Review PRs: "Re-review when new
-  commits are pushed" off, "Include draft PRs" off) or with
-  `pullfrog config set review.re-review false --repo moq-dev/moq` and
-  `pullfrog config set review.drafts false --repo moq-dev/moq`. Check:
-  `pullfrog config get review.re-review --repo moq-dev/moq` prints `false`,
-  and a push to a ready PR draws no new `pullfrog[bot]` review.
 - moq-dev/moq: a PR whose branch holds `.coderabbit.yaml` (CodeRabbit reads
   it from the PR branch) gets three or more pushes after ready, after the
-  Pullfrog change above, and then a maintainer requests one review from each
+  Pullfrog change of 2026-11-04, and then a maintainer requests one review from each
   bot on it and each bot answers. Check: its timeline's `ready_for_review`
   event, the `committed` events after it, the maintainer's request comments,
   and a bot review after each request.
