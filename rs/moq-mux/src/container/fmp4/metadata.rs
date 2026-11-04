@@ -1,4 +1,7 @@
 //! Inspect framing and expanding counts without building mp4-atom's metadata tree.
+//!
+//! The traversal follows the pinned dependency's Any dispatch, including boxes it discards.
+//! Changes to that dispatch need matching preflight coverage when the dependency is upgraded.
 
 use mp4_atom::{Decode, FourCC, Header};
 
@@ -53,8 +56,8 @@ impl Scan {
 
 	fn boxes(&mut self, mut data: &[u8], namespace: Namespace) -> Result<()> {
 		while !data.is_empty() {
-			// mp4-atom permits a short zero terminator after nested boxes.
-			if data.len() < 8 && data.iter().all(|&byte| byte == 0) {
+			// mp4-atom drains any remainder shorter than a box header as trailing padding.
+			if data.len() < 8 {
 				break;
 			}
 			let (header, body) = next(&mut data)?;
@@ -145,8 +148,9 @@ impl Scan {
 			b"mett" | b"metx" => {
 				take(&mut data, 8)?;
 				for _ in 0..if kind.as_ref() == b"mett" { 2 } else { 3 } {
-					let end = data.iter().position(|&b| b == 0).ok_or(mp4_atom::Error::OutOfBounds)?;
-					take(&mut data, end + 1)?;
+					// Its string decoder accepts EOF as well as a NUL terminator.
+					let size = data.iter().position(|&b| b == 0).map_or(data.len(), |end| end + 1);
+					take(&mut data, size)?;
 				}
 				Namespace::Any
 			}
@@ -319,6 +323,31 @@ pub(crate) mod tests {
 			mp4_atom::Hdlr::default().encode(&mut meta).unwrap();
 			meta.extend(&run);
 			assert!(matches!(check(&boxed(b"meta", &meta)), Err(Error::TooManySamples(_))));
+		}
+	}
+
+	#[test]
+	fn trailing_padding_matches_the_dependency() {
+		for size in 1..8 {
+			let mut body = Vec::new();
+			mp4_atom::Mfhd { sequence_number: 1 }.encode(&mut body).unwrap();
+			body.resize(body.len() + size, 0x5a);
+			let data = boxed(b"moof", &body);
+			mp4_atom::Any::decode(&mut data.as_slice()).unwrap();
+			check(&data).unwrap();
+		}
+	}
+
+	#[test]
+	fn metadata_strings_match_the_dependency_at_end_of_box() {
+		for kind in [b"mett", b"metx"] {
+			for strings in [b"".as_slice(), b"text/plain", b"\0text/plain", b"\0text/plain\0"] {
+				let mut body = vec![0; 8];
+				body.extend_from_slice(strings);
+				let data = boxed(kind, &body);
+				mp4_atom::Any::decode(&mut data.as_slice()).unwrap();
+				check(&data).unwrap();
+			}
 		}
 	}
 
