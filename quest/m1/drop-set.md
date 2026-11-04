@@ -130,11 +130,13 @@ decision above and the PR's `## Waiting` item on out-of-order creation:
 - ✅ **`create_group` refuses a skipped sequence and allows a dropped one**
   (refinement, same session): a group stream wins over its drop, which fills
   answering a miss and `claim_sequence` retries of an aborted sequence need.
-- **A `create_group` gap error** (maintainer's idea, same session): not
-  implemented. No principled bound exists in the model: the cache and the
-  budget bound bytes and time, not sequence counts, a gap costs one run
-  whatever its length, and under time addressing every group leaves a gap
-  between starts. Left to the maintainer in the PR's `## Waiting`.
+- ✅ **No `create_group` gap error, for now** (maintainer, same session):
+  gaps stay legal, and `append_group` or `skip_groups` declares them. No
+  principled bound exists in the model: the cache and the budget bound bytes
+  and time, not sequence counts, a gap costs one run whatever its length,
+  and under time addressing every group leaves a gap between starts. Not
+  chosen: a debug log on a gap; a configurable size limit (an arbitrary
+  knob).
 - Not chosen: eager skip on `create_group` with a late group winning over
   it (the shipped design, which inferred SKIP from a gap that out-of-order
   creation makes meaningless); refusing every `create_group` below the last
