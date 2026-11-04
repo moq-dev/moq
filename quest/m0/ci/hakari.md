@@ -46,5 +46,8 @@ Public API and wire: none.
 ## Waiting
 
 - moq-dev/moq: inspect the next scheduled Nightly for a second complete macOS
-  after-run and comparable compiler CPU evidence. Recommend retaining this
-  measurement wait; never dispatch Nightly or claim CPU savings from wall time.
+  after-run. Recommend retaining this measurement wait; never dispatch Nightly.
+- Maintainer: the existing logs contain estimated compiler work saved, not
+  measured CPU totals. Accept those estimates as sufficient, or add CPU
+  instrumentation before collecting future scheduled evidence. Recommend adding
+  instrumentation if measured CPU remains required; do not relabel wall time.
