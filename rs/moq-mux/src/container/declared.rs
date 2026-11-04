@@ -64,6 +64,11 @@ impl<T> DeclaredClock<T> {
 		}
 	}
 
+	/// Restart the clock at the same declared depth.
+	pub(crate) fn restart(self) -> Self {
+		Self::new(self.depth)
+	}
+
 	/// How many frames are held.
 	#[cfg(test)]
 	pub(crate) fn len(&self) -> usize {

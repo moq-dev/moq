@@ -1077,7 +1077,7 @@ async function livePlayback(burst: number) {
 	const sync = new Sync({ delay: new Signal<Delay>("auto") });
 	// Published before the decoder subscribes, since a broadcast with no request handler refuses
 	// an unknown track.
-	let track = producer.createTrack("audio", { timescale: Moq.Time.Timescale.MILLI });
+	let track = producer.createTrack("audio", { timescale: Moq.Time.Timescale.MILLI, maxAge: Container.MAX_AGE });
 	const decoder = new Decoder({ source, sync });
 
 	const samples = (48_000 * FRAME) / 1000;
@@ -1111,7 +1111,7 @@ async function livePlayback(burst: number) {
 		rename(name: string, patch: Record<string, unknown> = {}) {
 			track.finish();
 			track.close();
-			track = producer.createTrack(name, { timescale: Moq.Time.Timescale.MILLI });
+			track = producer.createTrack(name, { timescale: Moq.Time.Timescale.MILLI, maxAge: Container.MAX_AGE });
 			sequence = 0n;
 			catalog.set({ audio: { renditions: { [name]: Catalog.AudioConfigSchema.parse({ ...audio, ...patch }) } } });
 		},
@@ -1119,7 +1119,7 @@ async function livePlayback(burst: number) {
 		move(path: string) {
 			media.peek().close();
 			producer = new Moq.Origin.Producer().createBroadcast(Moq.Path.from(path)).broadcast;
-			track = producer.createTrack("audio", { timescale: Moq.Time.Timescale.MILLI });
+			track = producer.createTrack("audio", { timescale: Moq.Time.Timescale.MILLI, maxAge: Container.MAX_AGE });
 			sequence = 0n;
 			media.set(producer.consume());
 		},

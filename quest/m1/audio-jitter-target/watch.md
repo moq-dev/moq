@@ -166,4 +166,5 @@ A/V clock work.
 ## Related
 
 - [Capped budgets](/quest/m1/audio-jitter-target/capped-budgets.md) - confirms the build-flush fix on the nightlies, no gate on this proof
+- [Native stretch](/quest/m1/audio-jitter-target/native-stretch.md) - the native time-stretch sharing one NetEq algorithm and its test vectors with this one
 - [Watch worker](/quest/m2/watch-worker.md) - moves the worklet this stretch changes

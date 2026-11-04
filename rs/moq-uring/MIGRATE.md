@@ -4,6 +4,29 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Native WebTransport implements moq-net's poll traits ([#7771](https://github.com/moq-dev/moq/pull/7771))
+
+`quic::web` is supported as a WebTransport library without running MoQ.
+Pass its `Session` directly to moq-net through `transport::Local::new(session)`.
+Remove the generic `transport::Session::new(session, address)` wrapper; a WebTransport session reports `Address::Uri` and `Session::raw(connection)` reports `Address::Setup`.
+The generic send/receive adapters, their error wrapper, and the sealed `Grouped`/`GroupedSend` traits are removed, along with every `web_transport_trait` implementation and dependency.
+Custom transports implement `moq_net::transport::poll` directly.
+
+Use `quic::web::send::Stream` and `recv::Stream` instead of `SendStream` and `RecvStream`.
+Their errors are `send::Error` and `recv::Error`.
+`finish(self)` returns a `send::Finished`, which can be awaited for acknowledgements or a peer stop; `reset(self, code)` and `stop(self, code)` consume their stream.
+Code using moq-net's poll traits keeps their mutable terminal methods.
+Session polls take `&self` and a caller-owned `&kio::Waiter`; opens also take the driver's `send::Options`, preserving full `i64` priorities and real send groups.
+
+`Request` dereferences to `proto::ConnectRequest`; read its `url` and `protocols` fields there.
+`Request::connection()` names the underlying QUIC connection.
+`Request::respond` takes `impl Into<proto::ConnectResponse>` and requires status OK; `reject` takes an `http::StatusCode` and requires a 4xx or 5xx status.
+Replace `web::Response::default()` with `web::proto::ConnectResponse::OK` and `web::Rejected` variants with HTTP status codes.
+`send::Stream`, `send::Finished`, and `recv::Stream` expose their stream ID as `id()`.
+
+A receive stream's `closed()` observes an empty FIN without a read. When there is payload, read it before waiting for close. `poll_reset` still watches only failures, so it remains pending after a clean end.
+Invalid stream error codes fail as `InvalidReset` or `InvalidStopped`, rather than looking like a clean end.
+
 ### QUIC waits have caller-owned poll forms ([#7707](https://github.com/moq-dev/moq/pull/7707))
 
 The QUIC driver connection's stream opens, accepts, datagram receive and close waits,
@@ -43,7 +66,7 @@ Pass a received `Packet::dst_ip()` as `src_ip` to answer from the address the pe
 ### Wrap sessions in `transport::Local` (#6176)
 
 moq-net dropped `connect_lite`, `accept_lite`, and `accept_request_lite`, and every session now needs a `Send` transport.
-Wrap the worker's session as `transport::Local::new(transport::Session::new(conn, address))` and call `connect`, `accept`, or `accept_request`.
+Wrap the worker's `quic::web::Session` as `transport::Local::new(session)` and call `connect`, `accept`, or `accept_request`.
 
 ### Timers run on `kio::clock`
 
@@ -74,12 +97,3 @@ A qlog directory gets one file per endpoint and one per dial instead of one per 
 
 `quic::server::Config` drops `identity`, `alpn`, and `client_auth` for one `tls: Arc<rustls::ServerConfig>`, and `Config::new` takes it.
 Build it from an identity with `identity.server(&alpns, client_auth)?`, or share a resolver with other listeners.
-
-### Sessions are wrapped for moq-net
-
-moq-net no longer takes a `web_transport_trait` session.
-Wrap a moq-uring session with `transport::Session::new`, naming how the request target travels.
-
-```rust
-let session = moq_uring::transport::Session::new(connection, moq_net::transport::Address::Uri);
-```

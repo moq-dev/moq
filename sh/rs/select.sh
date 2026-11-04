@@ -161,6 +161,12 @@ case "$action" in
         # Nightly runs the Send-depth proof (`just rs send-depth`) on its
         # pinned toolchain.
         just rs "$action" "${flags[@]}"
+        # The test build enables device features, which can hide unused items
+        # in the default-feature test cfg. Keep this compile isolated from the
+        # selected dependents, whose features would unify capture back in.
+        if [[ "$action" == lint ]] && wants '(moq-video|moq-audio)'; then
+            just rs media-defaults
+        fi
         # Device code behind the off-by-default `capture` feature. check-test
         # lints it through the test build, as for the default features.
         if [[ "$action" != lint ]] && wants '(moq-video|moq-audio)'; then

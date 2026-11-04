@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### The catalog track advertises a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+`Catalog::default_track_info` takes moq-net's new zero default, so the catalog track advertises the live edge only where it advertised no limit. A late joiner still reads the newest snapshot, which never goes stale.
+`container::track_info` still declares `container::MAX_AGE` (30 s) on media tracks.
+
 ### Compression moves to the track
 
 `catalog::Compression`, the `compression` field on `JsonConfig` and `BinaryConfig`, `Catalog::COMPRESSED_NAME`, and `catalog::Consumer::compressed` are gone.

@@ -272,7 +272,11 @@ async function groupSendOrders(options: {
 	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
 
 	const broadcast = publish(origin, Path.from("test"));
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, priority: options.publisher });
+	const track = broadcast.createTrack("video", {
+		timescale: Timescale.MILLI,
+		priority: options.publisher,
+		maxAge: null,
+	});
 
 	const client = await Stream.open(pair.client, { version });
 	const server = await Stream.accept(pair.server, version);
@@ -475,7 +479,7 @@ test("lite draft-05: many concurrent groups share one subscription listener", as
 	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), origin.consume());
 
 	const broadcast = publish(origin, Path.from("test"));
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 
 	const client = await Stream.open(pair.client, { version: Version.DRAFT_05 });
 	const server = await Stream.accept(pair.server, Version.DRAFT_05);
@@ -727,7 +731,8 @@ async function servedSubscription(
 	} else {
 		broadcast = publish(origin, Path.from("test"));
 	}
-	const info = { timescale: Timescale.MILLI, maxAge: options.maxAge };
+	// Unset is no publisher limit: these fixtures serve superseded groups.
+	const info = { timescale: Timescale.MILLI, maxAge: options.maxAge ?? null };
 	let track = options.pending ? undefined : broadcast.createTrack("video", info);
 	for (const sequence of options.prefill ?? []) {
 		if (!track) throw new Error("a pending track holds nothing to prefill");
@@ -2081,7 +2086,7 @@ test("blocked DROP responses stop opening later groups", async () => {
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, Version.DRAFT_07, randomHop(), origin.consume());
 	const broadcast = publish(origin, Path.from("test"));
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	const client = await Stream.open(pair.client, { version: Version.DRAFT_07 });
 	const server = await Stream.accept(pair.server, Version.DRAFT_07);
 	if (!server) throw new Error("missing subscribe stream");

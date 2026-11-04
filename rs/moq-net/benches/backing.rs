@@ -281,7 +281,9 @@ impl Cache {
 		let broadcast = info.produce();
 		let tracks = (0..media.tracks)
 			.map(|index| {
-				let info = track::Info::default().with_timescale(Timescale::MILLI);
+				let info = track::Info::default()
+					.with_max_age(None)
+					.with_timescale(Timescale::MILLI);
 				broadcast.create_track(format!("{index}").as_str(), info).unwrap()
 			})
 			.collect();

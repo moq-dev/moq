@@ -12,7 +12,6 @@
 
 #![warn(missing_docs)]
 
-pub mod acme;
 pub mod auth;
 pub mod cache;
 /// Joining other relays into a cluster that shares one origin.

@@ -18,7 +18,9 @@ use moq_net::{Hop, Timestamp, kio, origin};
 
 /// A millisecond track: the frames written here carry timestamps.
 fn timed() -> moq_net::track::Info {
-	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	moq_net::track::Info::default()
+		.with_max_age(None)
+		.with_timescale(moq_net::Timescale::MILLI)
 }
 
 /// `(viewers, broadcasts)` shapes: viewers spread round-robin over the broadcasts.
