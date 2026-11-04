@@ -25,18 +25,26 @@ Compare the mbx summaries of the last scheduled Nightly before the
 [2026-11-02 merge](https://github.com/moq-dev/moq/commit/8e53bf32185fec578e460ff6ccbe41a80a039a6a)
 with the first two after. Query only scheduled runs on `main`:
 `gh run list --workflow nightly.yml --branch main --event schedule`.
-The baseline is [2026-11-01](https://github.com/moq-dev/moq/actions/runs/41313466339);
-the first after is [2026-11-02](https://github.com/moq-dev/moq/actions/runs/41483654426).
-The first after has no Windows compilation evidence: NASM installation failed
-with a Chocolatey HTTP 503 before the build. macOS has partial mbx summaries
-but its Rust suite failed. Do not infer a completed-job CPU saving from either. Separate this FFI alignment's later landing
-from the workspace-hack landing when interpreting the results.
+The baseline is [2026-11-01](https://github.com/moq-dev/moq/actions/runs/41313466339).
+The [2026-11-02 run](https://github.com/moq-dev/moq/actions/runs/41483654426)
+has partial macOS summaries before a websocket-test timeout and no Windows
+compilation (NASM installation returned HTTP 503).
+[2026-11-03](https://github.com/moq-dev/moq/actions/runs/41656613559) completed
+both platform jobs. [2026-11-04](https://github.com/moq-dev/moq/actions/runs/41852517544)
+completed Windows, but cancelled macOS before any step ran. Windows therefore
+has two complete after-runs; macOS has only one. Logs expose object-cache counts
+and estimated compiler work saved, but no measured user/system CPU totals.
+Do not call elapsed time CPU time, or attribute these earlier runs to the FFI
+alignment that has not landed yet.
+
+The 2026-11-04 maintainer decision accepts hosted CI as the strict Nix gate;
+a local namespace-probe skip is expected. The pkg-config and Gradle repairs
+have landed, so neither remains an external prerequisite.
 
 Public API and wire: none.
 
 ## Waiting
 
-- moq-dev/moq: the second scheduled Nightly on `main` after the workspace-hack
-  merge has not run yet. Once it completes, collect both platforms' before and
-  first-two-after mbx summaries and CPU measurements, recording missing or
-  partial evidence explicitly. A manual Nightly dispatch is not a substitute.
+- moq-dev/moq: inspect the next scheduled Nightly for a second complete macOS
+  after-run and comparable compiler CPU evidence. Recommend retaining this
+  measurement wait; never dispatch Nightly or claim CPU savings from wall time.
