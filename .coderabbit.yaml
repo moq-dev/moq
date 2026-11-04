@@ -1,0 +1,10 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# Keep every other setting from the CodeRabbit UI; this file only sets review cadence.
+inheritance: true
+reviews:
+  auto_review:
+    # Review once when a PR opens ready or a draft is marked ready.
+    # A push answering findings would otherwise draw a new wave of threads,
+    # which holds the PR out of the merge queue. Comment `@coderabbitai review` for another.
+    drafts: false
+    auto_incremental_review: false

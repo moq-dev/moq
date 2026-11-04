@@ -1,4 +1,4 @@
-# [S] Bot reviewers don't re-review every push
+# [XS] Bot reviewers don't re-review every push
 
 ## Goal
 
@@ -7,26 +7,27 @@ not on every push, so fixing review findings stops drawing a fresh wave of
 threads that holds the PR out of the merge queue. Done when a PR iterated
 through three or more pushes after ready gets a bot review when marked ready,
 no new bot threads on the later pushes, and a new bot review when one is
-requested, and the PR records the configuration and that PR as evidence.
+requested, and the PR records that PR as evidence.
 
 ## Plan
 
-Planned 2026-11-04 with the maintainer. On 2026-11-03/04 each push to a ready
-PR drew new bot threads, and agents only queue a PR with zero open threads, so
-iterations looped: [moq-dev/moq#7652](https://github.com/moq-dev/moq/pull/7652)
-collected 24 threads over six pushes, and
-[moq-dev/moq#7752](https://github.com/moq-dev/moq/pull/7752) and
-[moq-dev/moq#7729](https://github.com/moq-dev/moq/pull/7729) each lost a queue
-slot to a thread that landed seconds after a push. Several were real bugs, so
-the bots stay; the cadence changes.
+[moq-dev/moq#7896](https://github.com/moq-dev/moq/pull/7896) added
+`.coderabbit.yaml` (no incremental reviews, drafts skipped, UI settings
+inherited). Pullfrog's re-review trigger has no repo-side setting; its docs
+place it only in the console. Agents never request an online review
+(`CONTRIBUTING.md`), so `AGENTS.md` stays unchanged; a maintainer requests one
+with `@coderabbitai review` or an `@pullfrog` mention.
 
-- **CodeRabbit:** the repo has no `.coderabbit.yaml`, so it runs the app
-  defaults (incremental reviews on every push). Add one that turns off
-  automatic incremental reviews and skips drafts, keeping the full review on
-  ready and `@coderabbitai review` on request.
-- **Pullfrog:** its reviews are triggered by the app, not
-  `.github/workflows/pullfrog.yml` (dispatch-only). Find whether its trigger is
-  repo-configurable; if it's only in the Pullfrog console, the PR names the
-  exact setting for the maintainer to change.
-- Keep the queue rule "no open threads" as is. Record in `AGENTS.md`, if
-  anywhere, how an agent requests a re-review after its last push.
+Once both waits clear, take that PR, check each bot's reviews and threads against the Goal, request one
+review per bot if none was requested, and delete this quest in a PR citing it.
+
+## Waiting
+
+- Maintainer: in the Pullfrog console, Automations → Review PRs, turn off
+  "Re-review when new commits are pushed" and leave "Include draft PRs" off.
+  No API or repo file sets it. Check: a push to a ready PR draws no new
+  `pullfrog[bot]` review.
+- moq-dev/moq: a PR whose branch holds `.coderabbit.yaml` (CodeRabbit reads
+  it from the PR branch) gets three or more pushes after ready, after the
+  Pullfrog toggle above. Check: its timeline's `ready_for_review` event and
+  the `committed` events after it.
