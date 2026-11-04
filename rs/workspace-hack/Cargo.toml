@@ -35,7 +35,7 @@ camino = { version = "1", default-features = false, features = ["serde1"] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["cargo", "derive"] }
 clap_builder = { version = "4", default-features = false, features = ["cargo", "color", "help", "std", "suggestions", "usage"] }
-const-oid = { version = "0.10", default-features = false, features = ["db"] }
+const-oid = { version = "0.9", default-features = false, features = ["db"] }
 crossbeam-utils = { version = "0.8" }
 crypto-common-6f8ce4dd05d13bba = { package = "crypto-common", version = "0.2", default-features = false, features = ["getrandom"] }
 crypto-common-c65f7effa3be6d31 = { package = "crypto-common", version = "0.1", default-features = false, features = ["std"] }
@@ -73,7 +73,7 @@ md-5-a6292c17cd707f01 = { package = "md-5", version = "0.11" }
 memchr = { version = "2" }
 mio = { version = "1", features = ["net", "os-ext"] }
 nom-181b0d20215bb231 = { package = "nom", version = "8" }
-num-bigint = { version = "0.5" }
+num-bigint = { version = "0.4" }
 num-complex = { version = "0.4" }
 num-integer = { version = "0.1", features = ["i128"] }
 num-iter = { version = "0.1", default-features = false, features = ["i128", "std"] }
@@ -89,7 +89,7 @@ ppv-lite86 = { version = "0.2", default-features = false, features = ["simd", "s
 proptest = { version = "1", default-features = false, features = ["handle-panics"] }
 rand-274715c4dabd11b0 = { package = "rand", version = "0.9" }
 rand-c38e5c1d305a1b54 = { package = "rand", version = "0.8" }
-rand_chacha = { version = "0.9", default-features = false, features = ["std"] }
+rand_chacha = { version = "0.3", default-features = false, features = ["std"] }
 rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem", "ring"] }
 regex-automata = { version = "0.4", default-features = false, features = ["dfa-build", "dfa-onepass", "hybrid", "meta", "nfa-backtrack", "perf-inline", "perf-literal", "std", "unicode"] }
 regex-syntax = { version = "0.8" }
@@ -110,7 +110,7 @@ siphasher = { version = "1" }
 slab = { version = "0.4" }
 smallvec = { version = "1", default-features = false, features = ["const_new", "union", "write"] }
 socket2 = { version = "0.6", default-features = false, features = ["all"] }
-spin = { version = "0.10" }
+spin = { version = "0.9" }
 spki-c38e5c1d305a1b54 = { package = "spki", version = "0.8", default-features = false, features = ["pem", "std"] }
 spki-ca01ad9e24f5d932 = { package = "spki", version = "0.7", default-features = false, features = ["pem", "std"] }
 subtle = { version = "2", features = ["const-generics"] }
@@ -146,7 +146,7 @@ cc = { version = "1", default-features = false, features = ["parallel"] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["cargo", "derive"] }
 clap_builder = { version = "4", default-features = false, features = ["cargo", "color", "help", "std", "suggestions", "usage"] }
-const-oid = { version = "0.10", default-features = false, features = ["db"] }
+const-oid = { version = "0.9", default-features = false, features = ["db"] }
 crossbeam-utils = { version = "0.8" }
 crypto-common-6f8ce4dd05d13bba = { package = "crypto-common", version = "0.2", default-features = false, features = ["getrandom"] }
 crypto-common-c65f7effa3be6d31 = { package = "crypto-common", version = "0.1", default-features = false, features = ["std"] }
@@ -186,7 +186,7 @@ md-5-a6292c17cd707f01 = { package = "md-5", version = "0.11" }
 memchr = { version = "2" }
 mio = { version = "1", features = ["net", "os-ext"] }
 nom-181b0d20215bb231 = { package = "nom", version = "8" }
-num-bigint = { version = "0.5" }
+num-bigint = { version = "0.4" }
 num-complex = { version = "0.4" }
 num-integer = { version = "0.1", features = ["i128"] }
 num-iter = { version = "0.1", default-features = false, features = ["i128", "std"] }
@@ -204,7 +204,7 @@ proptest = { version = "1", default-features = false, features = ["handle-panics
 quote = { version = "1" }
 rand-274715c4dabd11b0 = { package = "rand", version = "0.9" }
 rand-c38e5c1d305a1b54 = { package = "rand", version = "0.8" }
-rand_chacha = { version = "0.9", default-features = false, features = ["std"] }
+rand_chacha = { version = "0.3", default-features = false, features = ["std"] }
 rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem", "ring"] }
 regex-automata = { version = "0.4", default-features = false, features = ["dfa-build", "dfa-onepass", "hybrid", "meta", "nfa-backtrack", "perf-inline", "perf-literal", "std", "unicode"] }
 regex-syntax = { version = "0.8" }
@@ -225,7 +225,7 @@ siphasher = { version = "1" }
 slab = { version = "0.4" }
 smallvec = { version = "1", default-features = false, features = ["const_new", "union", "write"] }
 socket2 = { version = "0.6", default-features = false, features = ["all"] }
-spin = { version = "0.10" }
+spin = { version = "0.9" }
 spki-c38e5c1d305a1b54 = { package = "spki", version = "0.8", default-features = false, features = ["pem", "std"] }
 spki-ca01ad9e24f5d932 = { package = "spki", version = "0.7", default-features = false, features = ["pem", "std"] }
 subtle = { version = "2", features = ["const-generics"] }
@@ -278,7 +278,7 @@ rustix = { version = "1", features = ["fs", "termios"] }
 security-framework-sys = { version = "2" }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs", "tls12"] }
 tower = { version = "0.5", default-features = false, features = ["retry", "timeout"] }
-tower-http = { version = "0.7", default-features = false, features = ["decompression-gzip", "follow-redirect"] }
+tower-http = { version = "0.6", default-features = false, features = ["decompression-gzip", "follow-redirect"] }
 zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
 
 [target.aarch64-apple-darwin.build-dependencies]
@@ -308,7 +308,7 @@ rustix = { version = "1", features = ["fs", "termios"] }
 security-framework-sys = { version = "2" }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs", "tls12"] }
 tower = { version = "0.5", default-features = false, features = ["retry", "timeout"] }
-tower-http = { version = "0.7", default-features = false, features = ["decompression-gzip", "follow-redirect"] }
+tower-http = { version = "0.6", default-features = false, features = ["decompression-gzip", "follow-redirect"] }
 zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
 
 [target.aarch64-unknown-linux-gnu.dependencies]
@@ -324,7 +324,7 @@ getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4", default-f
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
-itertools = { version = "0.15" }
+itertools = { version = "0.13" }
 libc = { version = "0.2", features = ["extra_traits"] }
 libspa = { version = "0.10", default-features = false, features = ["v0_3_33"] }
 linux-raw-sys = { version = "0.12", features = ["auxvec", "elf", "if_ether", "ioctl", "net", "netlink", "no_std", "prctl", "system", "xdp"] }
@@ -333,16 +333,16 @@ nix = { version = "0.31", features = ["net", "uio"] }
 nom-15128469a54ed75a = { package = "nom", version = "7" }
 pipewire = { version = "0.10", default-features = false, features = ["v0_3_53"] }
 proc-macro2 = { version = "1" }
-quick-xml = { version = "0.42", features = ["overlapped-lists", "serialize"] }
+quick-xml = { version = "0.41", features = ["overlapped-lists", "serialize"] }
 quote = { version = "1" }
 regex = { version = "1" }
-rustc-hash = { version = "2" }
+rustc-hash = { version = "1" }
 rustix = { version = "1", features = ["event", "net", "param", "pipe", "process", "shm", "system", "termios", "thread", "time"] }
 syn-7b89eefb6aaa9bf3 = { package = "syn", version = "3", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 tokio = { version = "1", default-features = false, features = ["tracing"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs", "tls12"] }
 tower = { version = "0.5", default-features = false, features = ["retry", "timeout"] }
-tower-http = { version = "0.7", default-features = false, features = ["decompression-gzip", "follow-redirect"] }
+tower-http = { version = "0.6", default-features = false, features = ["decompression-gzip", "follow-redirect"] }
 uuid = { version = "1", default-features = false, features = ["serde"] }
 zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
 
@@ -360,7 +360,7 @@ getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4", default-f
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
-itertools = { version = "0.15" }
+itertools = { version = "0.13" }
 libc = { version = "0.2", features = ["extra_traits"] }
 libspa = { version = "0.10", default-features = false, features = ["v0_3_33"] }
 linux-raw-sys = { version = "0.12", features = ["auxvec", "elf", "if_ether", "ioctl", "net", "netlink", "no_std", "prctl", "system", "xdp"] }
@@ -368,14 +368,14 @@ log = { version = "0.4", default-features = false, features = ["release_max_leve
 nix = { version = "0.31", features = ["net", "uio"] }
 nom-15128469a54ed75a = { package = "nom", version = "7" }
 pipewire = { version = "0.10", default-features = false, features = ["v0_3_53"] }
-quick-xml = { version = "0.42", features = ["overlapped-lists", "serialize"] }
+quick-xml = { version = "0.41", features = ["overlapped-lists", "serialize"] }
 regex = { version = "1" }
-rustc-hash = { version = "2" }
+rustc-hash = { version = "1" }
 rustix = { version = "1", features = ["event", "net", "param", "pipe", "process", "shm", "system", "termios", "thread", "time"] }
 tokio = { version = "1", default-features = false, features = ["tracing"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs", "tls12"] }
 tower = { version = "0.5", default-features = false, features = ["retry", "timeout"] }
-tower-http = { version = "0.7", default-features = false, features = ["decompression-gzip", "follow-redirect"] }
+tower-http = { version = "0.6", default-features = false, features = ["decompression-gzip", "follow-redirect"] }
 uuid = { version = "1", default-features = false, features = ["serde"] }
 zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
 
@@ -389,10 +389,10 @@ hyper-util = { version = "0.1", default-features = false, features = ["client-le
 regex = { version = "1" }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs", "tls12"] }
 tower = { version = "0.5", default-features = false, features = ["retry", "timeout"] }
-tower-http = { version = "0.7", default-features = false, features = ["decompression-gzip", "follow-redirect"] }
+tower-http = { version = "0.6", default-features = false, features = ["decompression-gzip", "follow-redirect"] }
 winapi = { version = "0.3", default-features = false, features = ["cfg", "evntrace", "in6addr", "inaddr", "minwinbase", "minwindef", "ntsecapi", "processthreadsapi", "sysinfoapi", "winbase", "windef", "winioctl"] }
 windows = { version = "0.62", features = ["Foundation_Metadata", "Graphics_Capture", "Graphics_DirectX_Direct3D11", "Security_Authorization_AppCapabilityAccess", "Wdk_System_SystemInformation", "Wdk_System_SystemServices", "Wdk_System_Threading", "Win32_Devices_DeviceAndDriverInstallation", "Win32_Devices_Display", "Win32_Devices_Properties", "Win32_Graphics_Direct3D10", "Win32_Graphics_Direct3D11", "Win32_Graphics_Direct3D12", "Win32_Graphics_Direct3D_Dxc", "Win32_Graphics_Direct3D_Fxc", "Win32_Graphics_DirectComposition", "Win32_Graphics_Dwm", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Gdi", "Win32_Graphics_OpenGL", "Win32_Media_Audio", "Win32_Media_KernelStreaming", "Win32_Media_MediaFoundation", "Win32_Media_Multimedia", "Win32_Security_Authorization", "Win32_System_Com_StructuredStorage", "Win32_System_Diagnostics_Debug", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Kernel", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_Performance", "Win32_System_Power", "Win32_System_ProcessStatus", "Win32_System_Registry", "Win32_System_RemoteDesktop", "Win32_System_SystemInformation", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_System_Variant", "Win32_System_WinRT_Direct3D11", "Win32_System_WinRT_Graphics_Capture", "Win32_UI_HiDpi", "Win32_UI_Shell_PropertiesSystem", "Win32_UI_WindowsAndMessaging"] }
-windows-core = { version = "0.100" }
+windows-core = { version = "0.62" }
 windows-sys-b21d60becc0929df = { package = "windows-sys", version = "0.52", features = ["Win32_Devices_HumanInterfaceDevice", "Win32_Foundation", "Win32_Globalization", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Media", "Win32_Networking_WinSock", "Win32_Security", "Win32_System_Com_StructuredStorage", "Win32_System_IO", "Win32_System_LibraryLoader", "Win32_System_Ole", "Win32_System_SystemInformation", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_System_WindowsProgramming", "Win32_UI_Accessibility", "Win32_UI_Controls", "Win32_UI_HiDpi", "Win32_UI_Input_Ime", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Input_Pointer", "Win32_UI_Input_Touch", "Win32_UI_Shell", "Win32_UI_TextServices", "Win32_UI_WindowsAndMessaging"] }
 windows-sys-d4189bed749088b6 = { package = "windows-sys", version = "0.61", features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Wdk_System_IO", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_Security_Authentication_Identity", "Win32_Security_Credentials", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Pipes", "Win32_System_SystemInformation", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_System_WindowsProgramming"] }
 zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
@@ -407,10 +407,10 @@ hyper-util = { version = "0.1", default-features = false, features = ["client-le
 regex = { version = "1" }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs", "tls12"] }
 tower = { version = "0.5", default-features = false, features = ["retry", "timeout"] }
-tower-http = { version = "0.7", default-features = false, features = ["decompression-gzip", "follow-redirect"] }
+tower-http = { version = "0.6", default-features = false, features = ["decompression-gzip", "follow-redirect"] }
 winapi = { version = "0.3", default-features = false, features = ["cfg", "evntrace", "in6addr", "inaddr", "minwinbase", "minwindef", "ntsecapi", "processthreadsapi", "sysinfoapi", "winbase", "windef", "winioctl"] }
 windows = { version = "0.62", features = ["Foundation_Metadata", "Graphics_Capture", "Graphics_DirectX_Direct3D11", "Security_Authorization_AppCapabilityAccess", "Wdk_System_SystemInformation", "Wdk_System_SystemServices", "Wdk_System_Threading", "Win32_Devices_DeviceAndDriverInstallation", "Win32_Devices_Display", "Win32_Devices_Properties", "Win32_Graphics_Direct3D10", "Win32_Graphics_Direct3D11", "Win32_Graphics_Direct3D12", "Win32_Graphics_Direct3D_Dxc", "Win32_Graphics_Direct3D_Fxc", "Win32_Graphics_DirectComposition", "Win32_Graphics_Dwm", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Gdi", "Win32_Graphics_OpenGL", "Win32_Media_Audio", "Win32_Media_KernelStreaming", "Win32_Media_MediaFoundation", "Win32_Media_Multimedia", "Win32_Security_Authorization", "Win32_System_Com_StructuredStorage", "Win32_System_Diagnostics_Debug", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Kernel", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_Performance", "Win32_System_Power", "Win32_System_ProcessStatus", "Win32_System_Registry", "Win32_System_RemoteDesktop", "Win32_System_SystemInformation", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_System_Variant", "Win32_System_WinRT_Direct3D11", "Win32_System_WinRT_Graphics_Capture", "Win32_UI_HiDpi", "Win32_UI_Shell_PropertiesSystem", "Win32_UI_WindowsAndMessaging"] }
-windows-core = { version = "0.100" }
+windows-core = { version = "0.62" }
 windows-sys-b21d60becc0929df = { package = "windows-sys", version = "0.52", features = ["Win32_Devices_HumanInterfaceDevice", "Win32_Foundation", "Win32_Globalization", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Media", "Win32_Networking_WinSock", "Win32_Security", "Win32_System_Com_StructuredStorage", "Win32_System_IO", "Win32_System_LibraryLoader", "Win32_System_Ole", "Win32_System_SystemInformation", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_System_WindowsProgramming", "Win32_UI_Accessibility", "Win32_UI_Controls", "Win32_UI_HiDpi", "Win32_UI_Input_Ime", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Input_Pointer", "Win32_UI_Input_Touch", "Win32_UI_Shell", "Win32_UI_TextServices", "Win32_UI_WindowsAndMessaging"] }
 windows-sys-d4189bed749088b6 = { package = "windows-sys", version = "0.61", features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Wdk_System_IO", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_Security_Authentication_Identity", "Win32_Security_Credentials", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Pipes", "Win32_System_SystemInformation", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_System_WindowsProgramming"] }
 zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
@@ -428,7 +428,7 @@ getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4", default-f
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
-itertools = { version = "0.15" }
+itertools = { version = "0.13" }
 libc = { version = "0.2", features = ["extra_traits"] }
 libspa = { version = "0.10", default-features = false, features = ["v0_3_33"] }
 linux-raw-sys = { version = "0.12", features = ["auxvec", "elf", "if_ether", "ioctl", "net", "netlink", "no_std", "prctl", "system", "xdp"] }
@@ -437,16 +437,16 @@ nix = { version = "0.31", features = ["net", "uio"] }
 nom-15128469a54ed75a = { package = "nom", version = "7" }
 pipewire = { version = "0.10", default-features = false, features = ["v0_3_53"] }
 proc-macro2 = { version = "1" }
-quick-xml = { version = "0.42", features = ["overlapped-lists", "serialize"] }
+quick-xml = { version = "0.41", features = ["overlapped-lists", "serialize"] }
 quote = { version = "1" }
 regex = { version = "1" }
-rustc-hash = { version = "2" }
+rustc-hash = { version = "1" }
 rustix = { version = "1", features = ["event", "net", "param", "pipe", "process", "shm", "system", "termios", "thread", "time"] }
 syn-7b89eefb6aaa9bf3 = { package = "syn", version = "3", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 tokio = { version = "1", default-features = false, features = ["tracing"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs", "tls12"] }
 tower = { version = "0.5", default-features = false, features = ["retry", "timeout"] }
-tower-http = { version = "0.7", default-features = false, features = ["decompression-gzip", "follow-redirect"] }
+tower-http = { version = "0.6", default-features = false, features = ["decompression-gzip", "follow-redirect"] }
 uuid = { version = "1", default-features = false, features = ["serde"] }
 zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
 
@@ -464,7 +464,7 @@ getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4", default-f
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
-itertools = { version = "0.15" }
+itertools = { version = "0.13" }
 libc = { version = "0.2", features = ["extra_traits"] }
 libspa = { version = "0.10", default-features = false, features = ["v0_3_33"] }
 linux-raw-sys = { version = "0.12", features = ["auxvec", "elf", "if_ether", "ioctl", "net", "netlink", "no_std", "prctl", "system", "xdp"] }
@@ -472,14 +472,14 @@ log = { version = "0.4", default-features = false, features = ["release_max_leve
 nix = { version = "0.31", features = ["net", "uio"] }
 nom-15128469a54ed75a = { package = "nom", version = "7" }
 pipewire = { version = "0.10", default-features = false, features = ["v0_3_53"] }
-quick-xml = { version = "0.42", features = ["overlapped-lists", "serialize"] }
+quick-xml = { version = "0.41", features = ["overlapped-lists", "serialize"] }
 regex = { version = "1" }
-rustc-hash = { version = "2" }
+rustc-hash = { version = "1" }
 rustix = { version = "1", features = ["event", "net", "param", "pipe", "process", "shm", "system", "termios", "thread", "time"] }
 tokio = { version = "1", default-features = false, features = ["tracing"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs", "tls12"] }
 tower = { version = "0.5", default-features = false, features = ["retry", "timeout"] }
-tower-http = { version = "0.7", default-features = false, features = ["decompression-gzip", "follow-redirect"] }
+tower-http = { version = "0.6", default-features = false, features = ["decompression-gzip", "follow-redirect"] }
 uuid = { version = "1", default-features = false, features = ["serde"] }
 zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
 
