@@ -72,6 +72,21 @@ export namespace Bandwidth {
 		get rate(): Signals.Getter<number | undefined>;
 		update(max: number): void;
 	}
+	export class Viewer implements Disposable {
+		[Symbol.dispose](): void;
+		close(): void;
+		peek(): number | undefined;
+		get rate(): Signals.Getter<number | undefined>;
+		update(max: number): void;
+	}
+	export class Viewers {
+		constructor(estimate?: Signals.Getter<number | undefined>);
+		static readonly MAX_TARGET: number;
+		close(): void;
+		setTarget(target: number | undefined): void;
+		readonly target: Signals.Getter<number>;
+		watch(max: number): Bandwidth.Viewer;
+	}
 }
 
 export namespace Broadcast {
@@ -91,7 +106,7 @@ export namespace Broadcast {
 		close(): void;
 		get closed(): Signals.GetPromise<null>;
 		consume(): Broadcast.Consumer;
-		createTrack(name: string, info?: Partial<Track.Info>): Track.Producer;
+		createTrack(name: string, info?: Track.InfoInit): Track.Producer;
 		removeTrack(name: string): void;
 		track(name: string): Track.Consumer;
 	}
@@ -148,6 +163,7 @@ export namespace Connection {
 		transport?: WebTransport;
 		url: URL;
 		versions?: readonly string[];
+		viewers?: Bandwidth.Viewers;
 		websocket?: Connection.WebSocketProps;
 		webtransport?: Connection.WebTransportProps;
 	}
@@ -213,6 +229,7 @@ export namespace Connection {
 	export interface WebSocketProps {
 		delay?: Milli;
 		enabled?: boolean;
+		maxStreams?: number;
 		url?: URL;
 	}
 	export interface WebTransportProps extends Omit<WebTransportOptions, "serverCertificateHashes" | "protocols"> {
@@ -242,6 +259,7 @@ export class Connection {
 	readonly transport: Signals.Getter<Connection.Transport | undefined>;
 	url: Signals.Signal<URL | undefined>;
 	versions: Signals.Signal<readonly string[] | undefined>;
+	readonly viewers: Signals.Getter<Pick<Bandwidth.Viewers, "watch" | "setTarget" | "target"> | undefined>;
 }
 
 export namespace Error {
@@ -591,7 +609,7 @@ export namespace Track {
 		time?: never;
 	} | {
 		absolute?: never;
-		relative: number;
+		relative: bigint;
 		time?: never;
 	} | {
 		absolute?: never;
@@ -630,6 +648,22 @@ export namespace Track {
 		priority?: number;
 		signal?: AbortSignal;
 	}
+	export class Fill {
+		[Symbol.dispose](): void;
+		accept(sequence: bigint, info?: Partial<Track.Info>): Group.Producer;
+		close(): void;
+		dropGroups(start: bigint, end: bigint): void;
+		readonly end: bigint;
+		isWanted(sequence: bigint): boolean;
+		get maxDelay(): Milli | null;
+		get order(): Track.Order;
+		get priority(): number;
+		refuseGroups(start: bigint, end: bigint, error: Error): void;
+		readonly start: bigint;
+		unwanted(sequence: bigint): Promise<void>;
+		wanted(): bigint | undefined;
+		wantedChanged(): Promise<bigint | undefined>;
+	}
 	export interface Groups {
 		end?: Track.Bound;
 		start?: Track.Bound;
@@ -640,6 +674,9 @@ export namespace Track {
 		priority: number;
 		refresh?: number;
 		timescale?: Time.Timescale | null;
+	}
+	export interface InfoInit extends Partial<Omit<Track.Info, "maxAge">> {
+		maxAge?: Milli | null;
 	}
 	export type Order = "ascending" | "descending";
 	export class Ordered {
@@ -670,7 +707,7 @@ export namespace Track {
 	export class Producer {
 		constructor(name: string);
 		abort(error: Error): void;
-		accept(info?: Partial<Track.Info>): this;
+		accept(info?: Track.InfoInit): this;
 		appendDatagram(timestamp: Time.Timestamp | undefined, payload: Uint8Array): bigint;
 		appendGroup(): Group.Producer;
 		close(): void;
@@ -684,6 +721,7 @@ export namespace Track {
 		largest(): Track.Position | undefined;
 		readonly name: string;
 		get priority(): number;
+		requests(): Track.Requests;
 		subscribe(options?: Track.Subscription): Track.Subscriber;
 		get subscription(): Signals.Getter<Track.Subscription | undefined>;
 		writeFrame(frame: Group.Frame): void;
@@ -693,12 +731,18 @@ export namespace Track {
 		start?: Track.Anchor;
 	}
 	export class Request {
-		accept(info?: Partial<Track.Info>): Track.Producer;
+		accept(info?: Track.InfoInit): Track.Producer;
 		demand(): Track.Demand;
 		readonly name: string;
 		get priority(): number;
 		reject(err: Error): void;
 		get subscription(): Readonly<Track.Subscription>;
+	}
+	export class Requests {
+		[Symbol.dispose](): void;
+		close(): void;
+		get name(): string;
+		requestedFill(): Promise<Track.Fill | undefined>;
 	}
 	export class Subscriber {
 		close(abort?: Error): void;

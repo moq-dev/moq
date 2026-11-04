@@ -177,14 +177,17 @@ def status_payload(status: Status) -> dict[str, Any]:
 
 
 class StatusPublisher:
-    """The `status` track: JSON snapshots on a compressed track.
+    """The `status` track: JSON snapshots on a compressed, timed track.
 
     Snapshot rather than stream, because a late joiner wants the truck's current
-    state, not the history of every command it ever accepted.
+    state, not the history of every command it ever accepted. Every update is
+    stamped from the broadcast clock, the same epoch the media tracks use, so
+    the catalog never reads the JSON track's timeline as a delay.
     """
 
     def __init__(self, broadcast: moq.BroadcastProducer) -> None:
-        track = broadcast.publish_track("status", moq.TrackInfo(compress=True))
+        track = broadcast.publish_track("status", moq.TrackInfo(timescale=1_000, compress=True))
+        self._catalog = moq.media.CatalogProducer(broadcast)
         self._producer = moq.json.SnapshotProducer(broadcast, track)
         # Weak: watching demand neither keeps the track open nor locks it.
         self._demand = self._producer.demand()
@@ -199,7 +202,7 @@ class StatusPublisher:
         truck that cannot answer is not one anybody should be steering: let it
         reach the session, exactly as the video pump does with its own track.
         """
-        self._producer.update(payload)
+        self._producer.update(payload, self._catalog.now())
 
     async def used(self) -> None:
         while await self._demand.wanted_changed() is None:

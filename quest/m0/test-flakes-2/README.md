@@ -37,7 +37,7 @@ Added 2026-10-21 and 2026-10-22 (maintainer): failures from the m0/m1
 merge runs, one child each.
 
 Decided 2026-10-26 (maintainer): the epic moved from m1 to m0, since every
-flake now fails a whole batch of the [batched merge gate](/quest/m0/ci/land.md)
+flake now fails a whole batch of the [batched merge gate](https://github.com/moq-dev/moq/blob/17a81d6c64/quest/m0/ci/land.md)
 rather than one PR. The queue's recurring flakes from 2026-10-23 to 10-26
 were already fixed (the moq-rtsp stall tests, the moq-gst pinned-instance and
 sibling-restart tests, the moq-mux missing-sequence test,
@@ -56,6 +56,11 @@ moq-relay's auth-trust test was never load-bound either: its fixture left each
 lease's background `end` POST unserved, so a reused port let one steal the next
 trial's accept. Fixed by [moq-dev/moq#7550](https://github.com/moq-dev/moq/pull/7550).
 
+The embedded relay stop test probed freed ports after its Linux socket-inode
+check had already proved the owner's HTTP and QUIC sockets closed. A successful
+TCP connect could reach a replacement listener. Linux now uses the ownership
+proof alone, fixed by [moq-dev/moq#7823](https://github.com/moq-dev/moq/pull/7823).
+
 The Kotlin flow-cancel test's `unroutable` was not load-bound: its snapshot
 writer became unreachable, so JVM cleanup aborted the track mid-read. The JS
 IETF blind-handle test's one identified cause was the session-closing reset
@@ -71,7 +76,17 @@ yields covering lite-03 and lite-04, fixed by [moq-dev/moq#7663](https://github.
 The JS close-drain fixture advanced after the setup group's first payload, so a
 zero-delay subscription could expire its sender while the write budget yielded.
 It now reads that group through FIN before starting the next one, fixed by
-[moq-dev/moq#7658](https://github.com/moq-dev/moq/pull/7658).
+[moq-dev/moq#7658](https://github.com/moq-dev/moq/pull/7658). The lite-04 case
+of the same test failed once more in the batch for
+[moq-dev/moq#7431](https://github.com/moq-dev/moq/pull/7431)
+([run 41573678257](https://github.com/moq-dev/moq/actions/runs/41573678257),
+2026-11-03 03:45Z) with `Session: remote error: 0`, the cancellation that PR
+explains. That batch predates #7658's merge at 15:56Z, and no queue run since
+has failed it, so it needs no child of its own (noted 2026-11-03,
+`/quest-plan`).
+
+Added 2026-11-03 (maintainer, `/quest-plan`): five more merge-queue failures
+from 2026-11-03 and early 2026-11-04 UTC, one child each.
 
 Public API: none. Wire: none.
 
@@ -79,4 +94,4 @@ Public API: none. Wire: none.
 
 - [IETF22 fallback](/quest/m0/test-flakes-2/ietf22-fallback.md) - an IETF22 browser viewer follows a fallback within the media lane's bound, keeping its session and its audio
 - [Browser buffering and Firefox audio-tone tests pass under load](/quest/m0/test-flakes-2/browser-media-flakes.md) - the two `harness.browser.ts` buffering tests and the Firefox player's audio-tone checks pass reliably in Interop and Nightly, each fixed at its cause under the epic's rules
-- [moq-tokio's close-drain test survives load](/quest/m0/test-flakes-2/tokio-close-drain.md) - `quic_client_close_drains_finished_track` stops failing land batches with "Unroutable"
+- [reload.test.ts's close-drain tests pass under load](/quest/m0/test-flakes-2/reload-close-drain.md) - the drain cases in `js/net`'s reload tests pass in loaded multi-file runs

@@ -3,6 +3,8 @@
 //! - update: one reservation's ceiling moves and the session reads the new target.
 //!   Swept over the reservations sharing the allocator, so an update that rescans
 //!   every reservation shows up as a slope.
+//! - viewers: one viewer's ceiling moves and the session reads the new PROBE target.
+//!   Swept over the viewers sharing the connection, for the same slope.
 //! - grants/estimate, grants/demand, grants/ceiling: one change (every connection's
 //!   estimate, one track's demand on each connection, one ceiling on each connection),
 //!   then every observer drains its parked [`Consumer`], as each sender's task does.
@@ -26,7 +28,7 @@ use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, criterion_group};
-use moq_net::bandwidth::{Allocator, Consumer, Producer, Rate, Reservation};
+use moq_net::bandwidth::{Allocator, Consumer, Producer, Rate, Reservation, Viewers};
 use moq_net::{broadcast, fuzz, kio, track};
 
 /// Reservations sharing the allocator.
@@ -39,7 +41,9 @@ fn table(count: usize) -> (Allocator, broadcast::Producer, Vec<track::Producer>,
 	let mut tracks = Vec::with_capacity(count);
 	let mut reservations = Vec::with_capacity(count);
 	for i in 0..count {
-		let track = broadcast.create_track(format!("t{i}"), None).unwrap();
+		let track = broadcast
+			.create_track(format!("t{i}"), moq_net::track::Info::default().with_max_age(None))
+			.unwrap();
 		reservations.push(allocator.reserve(&track.demand(), Rate::from_kbps(1_000)));
 		tracks.push(track);
 	}
@@ -58,6 +62,30 @@ fn bench_update(c: &mut Criterion) {
 			b.iter(|| {
 				raised = !raised;
 				touched.update(Rate::from_kbps(if raised { 2_000 } else { 1_000 }));
+				std::hint::black_box(target.poll().expect("the target moved"));
+			});
+		});
+	}
+	group.finish();
+}
+
+fn bench_viewers(c: &mut Criterion) {
+	let mut group = c.benchmark_group("bandwidth/viewers");
+	for count in RESERVATIONS {
+		group.bench_function(BenchmarkId::from_parameter(count), |b| {
+			let viewers = Viewers::default();
+			let watched: Vec<_> = (0..count)
+				.map(|_| viewers.watch(Rate::from_kbps(1_000)).expect("within the limit"))
+				.collect();
+			let mut target = fuzz::ProbeTarget::viewers(&viewers);
+			target.poll().expect("the first poll reports the target");
+			let touched = &watched[count / 2];
+			let mut raised = false;
+			b.iter(|| {
+				raised = !raised;
+				touched
+					.update(Rate::from_kbps(if raised { 2_000 } else { 1_000 }))
+					.expect("within the limit");
 				std::hint::black_box(target.poll().expect("the target moved"));
 			});
 		});
@@ -257,7 +285,7 @@ impl Connection {
 		let slots = (0..shape.reservations)
 			.map(|index| {
 				let priority = priority(shape, index);
-				let info = track::Info::default().with_priority(priority);
+				let info = track::Info::default().with_max_age(None).with_priority(priority);
 				let track = broadcast.create_track(format!("t{index}"), info).unwrap();
 				let subscriber = (!shape.idle || index % 2 == 0).then(|| track.subscribe(None));
 				let max = ceiling(index);
@@ -499,7 +527,7 @@ fn counts(iterations: usize, case: Option<&str>) {
 	}
 }
 
-criterion_group!(benches, bench_update, bench_grants);
+criterion_group!(benches, bench_update, bench_viewers, bench_grants);
 
 // Let each harness initialize and finalize its own Criterion implementation.
 mod harness {

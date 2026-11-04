@@ -210,19 +210,7 @@ func (t *TrackProducer) WriteFrame(frame Frame) error {
 	return t.inner.WriteFrame(frame)
 }
 
-// AppendDatagram sends frame as a best-effort datagram and returns the sequence number
-// assigned to it. Payloads are capped at 1200 bytes. There is no stream fallback.
-func (t *TrackProducer) AppendDatagram(frame Frame) (uint64, error) {
-	return t.inner.AppendDatagram(frame)
-}
-
-// InsertDatagram sends frame as a best-effort datagram at an explicit sequence, for a
-// caller that allocates its own. AppendDatagram continues after the largest one.
-func (t *TrackProducer) InsertDatagram(sequence uint64, frame Frame) error {
-	return t.inner.InsertDatagram(sequence, frame)
-}
-
-// Largest reports the newest group or datagram written, at its newest frame, or nil
+// Largest reports the newest group written, at its newest frame, or nil
 // before any.
 func (t *TrackProducer) Largest() (*Position, error) {
 	return t.inner.Largest()

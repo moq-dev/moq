@@ -646,10 +646,7 @@ impl MoqTokens {
 	/// [`MoqError::Unsupported`] when the session cannot carry an in-band token, and the
 	/// connection's end, such as a refused dial, is its close reason.
 	pub async fn answered(&self) -> Result<(), MoqError> {
-		{
-			let tokens = self.inner.clone();
-			crate::ffi::detached(async move { tokens.answered().await.map_err(MoqError::from) }).await
-		}
+		crate::ffi::run(self.inner.answered()).await
 	}
 }
 
@@ -810,13 +807,13 @@ impl Shutdown {
 	async fn finished(&self) -> Result<(), MoqError> {
 		// Publish a background panic before reading the channel it dropped.
 		self.task.finished().await?;
-		self.result
-			.wait(|result| match &**result {
-				Some(result) => std::task::Poll::Ready(result.clone()),
-				None => std::task::Poll::Pending,
-			})
-			.await
-			.map_err(|_| MoqError::Cancelled)?
+		// The drain is a root child, so its wake must not run the host's continuation there.
+		crate::ffi::host(self.result.wait(|result| match &**result {
+			Some(result) => std::task::Poll::Ready(result.clone()),
+			None => std::task::Poll::Pending,
+		}))
+		.await
+		.map_err(|_| MoqError::Cancelled)?
 	}
 }
 
@@ -1051,6 +1048,19 @@ impl MoqSession {
 	/// an unlimited allocator, which reports `None` for every reservation.
 	pub fn allocator(&self) -> Arc<MoqAllocator> {
 		self.allocator.clone()
+	}
+
+	/// The session's viewers, used to divide the connection's receive estimate among
+	/// the broadcasts watched over it.
+	///
+	/// Every call returns a handle to the same registry, and the session sends what its
+	/// viewers add up to as its PROBE target. A client handle survives reconnects: a
+	/// viewer reads `None` while disconnected and resumes on the next connection.
+	pub fn viewers(&self) -> Arc<crate::bandwidth::MoqViewers> {
+		Arc::new(crate::bandwidth::MoqViewers::new(match &self.inner {
+			Inner::Connection(connection) => connection.viewers(),
+			Inner::Session(session) => session.viewers(),
+		}))
 	}
 
 	/// Follow the grant the peer gave this session.

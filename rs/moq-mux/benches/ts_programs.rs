@@ -290,61 +290,54 @@ fn programs(c: &mut Criterion) {
 	group.finish();
 }
 
-/// Reacquire one program after a clock step while the multiplex's programs and bitrate vary.
-fn restarts(c: &mut Criterion) {
-	let mut group = c.benchmark_group("ts_restart");
+/// Packet batching and program fanout vary independently while each PCR repeats its first
+/// value, so no rate is measured and each program's health clock falls back to arrival,
+/// settled per input chunk, even for programs no packet routes to.
+fn stalled(c: &mut Criterion) {
+	let mut group = c.benchmark_group("ts_stalled");
 	group.measurement_time(Duration::from_secs(2));
 	group.warm_up_time(Duration::from_millis(300));
 	group.sample_size(10);
-	for programs in [1, 4, 16] {
-		for mbps in [1, 4] {
-			let input = multiplex(
-				programs,
-				Extra {
-					idle: 0,
-					strays: 0,
-					null: false,
+	for programs in [1u16, 4, 16] {
+		let mut input = multiplex(
+			programs,
+			Extra {
+				idle: 0,
+				strays: 0,
+				null: false,
+			},
+			1_000_000,
+		);
+		for packet in input.as_chunks_mut::<188>().0 {
+			if packet[3] & 0x20 != 0 && packet[5] & 0x10 != 0 {
+				// Repeat the first PCR (one second), preserving every PES and its PTS.
+				packet[6..12].copy_from_slice(&[0, 0, 0xaf, 0xc8, 0x7e, 0]);
+			}
+		}
+		let (stats, _driver) = ingest(programs, &input);
+		assert_eq!(stats.streams.len(), usize::from(programs));
+		assert!(stats.streams.values().all(|stream| stream.units == FPS));
+		group.throughput(Throughput::Bytes(input.len() as u64));
+		for packets in [1, 7, 256] {
+			group.bench_function(
+				BenchmarkId::new(programs.to_string(), format!("{packets}packets")),
+				|b| {
+					b.iter_batched(
+						setup,
+						|(mut programs, driver)| {
+							for chunk in input.chunks(188 * packets) {
+								programs.decode(chunk).unwrap();
+							}
+							(programs, driver)
+						},
+						BatchSize::PerIteration,
+					)
 				},
-				mbps * 1_000_000,
 			);
-			let open = || {
-				let mut broadcast = moq_net::broadcast::Info::new().produce();
-				let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-				(
-					moq_mux::container::ts::Import::new(broadcast, catalog.reserve()).with_program(1),
-					catalog,
-				)
-			};
-			group.throughput(Throughput::Bytes(input.len() as u64));
-			group.bench_function(BenchmarkId::new(programs.to_string(), format!("{mbps}mbps")), |b| {
-				b.iter_batched(
-					|| {
-						let (mut import, catalog) = open();
-						import.decode(&input).unwrap();
-						(import, catalog)
-					},
-					|(mut import, _catalog)| {
-						let mut chunks = input.chunks(188 * 7);
-						let restart = chunks
-							.find_map(|chunk| import.decode(chunk).err())
-							.unwrap()
-							.downcast::<moq_mux::container::ts::Restart>()
-							.unwrap();
-						let (mut replacement, catalog) = open();
-						replacement.decode(&restart.remainder).unwrap();
-						for chunk in chunks {
-							replacement.decode(chunk).unwrap();
-						}
-						assert_eq!(catalog.snapshot().video.renditions.len(), 1);
-						std::hint::black_box((import, replacement, catalog));
-					},
-					BatchSize::PerIteration,
-				)
-			});
 		}
 	}
 	group.finish();
 }
-criterion_group!(benches, programs, restarts);
 
+criterion_group!(benches, programs, stalled);
 criterion_main!(benches);

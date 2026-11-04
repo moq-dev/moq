@@ -5,6 +5,40 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### Built-in ACME is removed ([#7803](https://github.com/moq-dev/moq/pull/7803))
+
+Remove the `acme` Cargo feature, `[acme]` table, `--acme-*` flags, and `MOQ_ACME_*` variables.
+In Rust, remove `Config::acme` and uses of `moq_relay::acme::Config`.
+The removed flags, TOML table, and environment variables are refused as unknown settings.
+Have an external certificate manager issue and renew the certificate, then set `listen.tls.cert` / `key` and, for HTTPS, `web.https.cert` / `key` to its PEM files; both listeners reload changes.
+For local development, `listen.tls.generate` still creates self-signed certificates.
+
+The NixOS module also removes `services.moq-relay.acme.*`: use `services.moq-relay.tls.certs` for externally managed certificates, or `tls.generate` for development.
+If you used `acme.httpsPort`, configure the HTTPS listener separately through the service's `MOQ_WEB_HTTPS_LISTEN`, `MOQ_WEB_HTTPS_CERT`, and `MOQ_WEB_HTTPS_KEY` environment variables, and grant `CAP_NET_BIND_SERVICE` if its port is below 1024.
+
+### `/nodes` lists peers that are down ([#7776](https://github.com/moq-dev/moq/pull/7776))
+
+The internal `/nodes` endpoint lists every configured outbound peer, not only those with a live session.
+A peer that is connecting, retrying, or has never connected has an empty `connections` array, so tooling that counts entries as live peers must count those with a nonempty `connections` instead.
+Each connection adds `transport`, and each peer adds `last_connected_seconds_ago`, null until its first successful connect.
+A LAN peer is named by its mDNS identity instead of the first address dialed, whose path carried its credential.
+
+### Stats are configured in `cluster::Options` ([#7673](https://github.com/moq-dev/moq/pull/7673))
+
+`Cluster::with_stats` is removed, and `stats::Config::build` is no longer public. Pass the stats config to `Cluster::new` instead, which builds the producer on the cluster's origin and runs its publisher in the returned `Driver`:
+
+```rust
+// Before
+let (cluster, driver) = Cluster::new(options)?;
+let (stats, publisher) = stats_config.build(cluster.origin.clone())?;
+let cluster = cluster.with_stats(stats, publisher);
+
+// After
+let (cluster, driver) = Cluster::new(options.with_stats(stats_config))?;
+```
+
+Read the registry from `cluster.stats`; `Relay::stats` still returns the producer. Publishing runs only while the driver is polled, which `Relay::run` does, and stops when the driver drops. Building stats needs no Tokio runtime, and an invalid stats config now fails `Cluster::new`.
+
 ### The iroh transport is removed ([#7345](https://github.com/moq-dev/moq/pull/7345))
 
 The `iroh` feature, the `[iroh]` table, the `--iroh-*` flags, and `Cluster::with_iroh` are gone.

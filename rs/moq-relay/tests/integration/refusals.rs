@@ -505,7 +505,7 @@ async fn uri_setup_paths(io_uring: bool) {
 			let mut setup = peer.open_uni(Default::default()).await.unwrap();
 			setup.write_all(&bytes[..]).await.unwrap();
 			if version.is_lite() {
-				setup.finish().unwrap();
+				drop(setup.finish());
 			}
 			if path.is_some() {
 				let error = kio::clock::timeout(TIMEOUT, async {

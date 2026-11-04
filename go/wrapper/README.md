@@ -80,6 +80,15 @@ return its share and automatic probe ceiling immediately, even while the track
 stays subscribed. A later update can resume the same claim. While the track
 stays open, dropping the Go reference alone leaves release to garbage collection.
 
+A player divides the receive estimate among the broadcasts it watches with
+`Client.Session().Viewers()`. `Watch(maxBps)` claims up to what the largest
+rendition it would switch to needs; the viewer's `Rate()` is its slice, nil
+while there is no estimate, and `Update(maxBps)` changes the ceiling. The
+session sends the viewers' summed ceilings as its PROBE target, which
+`SetTarget` overrides. Ceilings or a target summing above 2^53 - 1 fail with
+`moq.ErrOutOfRange`. Holding a viewer requests PROBE, so `Close()` it once
+the broadcast stops being watched.
+
 Incoming server requests expose the query-free `Path()` before `Accept()`. It
 is consistent across transports and returns an empty string for the root or
 missing path. `Query()` returns the encoded query and may contain credentials.
@@ -158,13 +167,19 @@ See the package doc for details.
 
 ## Raw datagrams
 
-Raw tracks support best-effort datagrams alongside groups: `TrackProducer.AppendDatagram`
-sends one `Frame` and returns its sequence number (`InsertDatagram` takes the caller's
-own sequence instead), while `TrackConsumer.RecvDatagram`
-and `TrackConsumer.Datagrams` receive them in arrival order. Payloads are capped at
-1200 bytes. Datagram delivery requires a datagram-capable transport and lite-05 or
-newer moq-lite, or moq-transport; pre-lite-05, WebSocket, and TCP paths do not
-deliver them, and there is no stream fallback.
+Create a separate live track with `BroadcastProducer.CreateDatagrams(name, info)` and
+subscribe with `BroadcastConsumer.Datagrams(name)`. `DatagramProducer.Append(timestamp, payload)`
+assigns a sequence, `Insert(Datagram)` preserves one, and `DatagramConsumer.Recv(ctx)` or
+`All(ctx)` reads in arrival order. Stream tracks of the same name are independent.
+Watch aggregate subscriber demand with `Priority()` / `PriorityChanged(ctx, last)`, and
+serve on-demand datagram tracks with `BroadcastRequests.Datagrams()`.
+Keep payloads well below the path MTU. Delivery requires a datagram-capable transport and
+lite-05 or newer; there is no stream fallback.
+
+On lite-05/06, a local datagram handler is asked for an on-demand name without waiting
+for the stream handler, and answers it unless a stream track of that name is published. A
+relayed broadcast asks its upstream for the datagram track only once the stream track is
+not found. lite-07 uses independent requests.
 
 ## Versioning
 

@@ -1,6 +1,6 @@
 //! The packet layer of a TS import, run once however many programs read the input.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use bytes::Bytes;
 use mpeg2ts::ts::{Pid, TsPacket};
@@ -26,6 +26,10 @@ pub(super) struct Demux {
 	position: u64,
 	/// Packets framed so far, every PID and null stuffing included.
 	packets: u64,
+	/// When each pushed input chunk not yet wholly framed arrived, oldest first, with the input
+	/// offset it ends at. A packet is stamped with the chunk that completed it, so input held
+	/// back for a later call keeps its own arrival.
+	arrivals: VecDeque<(u64, kio::clock::Instant)>,
 	health: Multiplex,
 	pat: PatReader,
 	/// PAT sections dropped for a bad CRC.
@@ -42,6 +46,7 @@ pub(super) struct Demux {
 /// One packet, and what the shared layer read out of it.
 pub(super) struct Packet<'a> {
 	pub pkt: &'a [u8; TsPacket::SIZE],
+	pub arrival: kio::clock::Instant,
 	pub pid: u16,
 	/// The packet's offset in the input.
 	pub offset: u64,
@@ -69,6 +74,10 @@ impl Demux {
 	/// Append input; [`next`](Self::next) frames it.
 	pub fn push(&mut self, data: &[u8]) {
 		self.scratch.extend_from_slice(data);
+		if !data.is_empty() {
+			let end = self.position + self.scratch.len() as u64;
+			self.arrivals.push_back((end, kio::clock::Instant::now()));
+		}
 	}
 
 	/// The next whole packet pushed, or `None` once only a partial packet remains, at which
@@ -111,8 +120,16 @@ impl Demux {
 			self.sections.extend(sections.into_iter().map(Bytes::from));
 		}
 
+		// Chunks that ended before this packet did are framed already: forget them.
+		let end = offset + TsPacket::SIZE as u64;
+		while self.arrivals.len() > 1 && self.arrivals[0].0 < end {
+			self.arrivals.pop_front();
+		}
+		let arrival = self.arrivals.front().expect("a packet was pushed").1;
+
 		Some(Packet {
 			pkt,
+			arrival,
 			pid,
 			offset,
 			count: self.packets,
@@ -152,11 +169,16 @@ impl Demux {
 		self.scratch.drain(..self.off);
 		self.position += self.off as u64;
 		self.off = 0;
+		// Input a resync skipped frames no packet, so its chunks would otherwise linger.
+		while self.arrivals.front().is_some_and(|&(end, _)| end <= self.position) {
+			self.arrivals.pop_front();
+		}
 	}
 
 	/// No input follows: release the storage that held a partial packet for the next push.
 	pub fn finish(&mut self) {
 		self.scratch = Vec::new();
+		self.arrivals = VecDeque::new();
 	}
 
 	/// `pid` changed route: its next packet starts a fresh chain.
@@ -183,5 +205,21 @@ impl Demux {
 	#[cfg(test)]
 	pub fn held(&self) -> usize {
 		self.scratch.len()
+	}
+}
+
+#[cfg(test)]
+mod test {
+	/// Input that never frames a packet keeps no arrival record once drained.
+	#[tokio::test(start_paused = true)]
+	async fn junk_keeps_no_arrival_history() {
+		let mut demux = super::Demux::default();
+		for _ in 0..100 {
+			demux.push(&[0; 1_000]);
+			while demux.next().is_some() {}
+			demux.drain();
+		}
+		assert!(demux.held() < 188, "held {} bytes", demux.held());
+		assert!(demux.arrivals.len() <= 1, "{} arrival records", demux.arrivals.len());
 	}
 }

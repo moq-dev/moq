@@ -131,8 +131,8 @@ requirement landed. Reuse its design:
   If the demand leaves while fills are out, the subscription keeps the
   demand's ranges until they are answered.
 - A NotFound drop names the fill's groups dropped
-  (`Fill::drop_groups`), as a FETCH miss does; Old and NOT_FETCHABLE reject
-  them, and any other error refuses only that request.
+  (`Fill::drop_groups`), as a FETCH miss does; Old rejects them, and any
+  other error refuses only that request.
 
 Its integration tests (`range_fill.rs`: a miss subscribes and sends no FETCH,
 a miss rides the live subscription then retires its range, a group the
@@ -157,19 +157,9 @@ whole) passed. These failed, and must pass on #7545's miss judging:
 Open questions the attempt raised, now decided (2026-11-03, above), kept for
 their detail:
 
-- **Datagram sequences.** A range fill of a sequence served only as a datagram
-  never completes: datagrams resolve no SUBSCRIBE_START, so a FIN or end
-  overtaking them leaves the receiver no owed range to wait on
-  (`datagram::a_fetched_datagram_is_refused_per_version`). Recommended: a
-  lite-07 publisher sends SUBSCRIBE_START for a bounded past range, then
-  SUBSCRIBE_DROP with NOT_FETCHABLE for each sequence it holds only as a
-  datagram; the subscriber already maps that drop onto the fill. This is a
-  wire change. The alternative keeps FETCH for a fill the first answer shows is
-  a datagram, at a round trip and a second path.
-  Since settled in part: datagrams become their own track kind, which takes
-  no ranges (maintainer, 2026-11-01). Today a lite-07 publisher that served a
-  bounded range's only group as a datagram never answers it with SUBSCRIBE_OK
-  (`TrackRun::unservable`), so such a fill parks until its readers leave.
+- **Datagram sequences.** Settled: datagrams are their own track kind, which
+  takes no ranges, and a stream track never holds one (maintainer, 2026-11-01;
+  NOT_FETCHABLE is gone).
 - **Fills from partway through a group.** Route recovery (`resume::Recover`)
   fills from frame N, which a whole-group range cannot say. Recommended: keep
   FETCH on lite-07 for a fill whose first group starts past frame 0, as
@@ -223,6 +213,17 @@ with the fill budget decided 2026-11-03 it also recovers what the live
 budget drops. Tests: a
 group still in flight on the existing subscription sends no second SUBSCRIBE,
 and a dropped group is recovered exactly once.
+
+### JavaScript names the explicit end
+
+Moved here from JS ranges on 2026-11-03 (maintainer, on
+[moq-dev/moq#7696](https://github.com/moq-dev/moq/pull/7696)), which finished
+that quest: the SUBSCRIBE_FINISH JS work belongs with
+[moq-dev/moq#7675](https://github.com/moq-dev/moq/pull/7675), which brought the
+JS lite-07 publisher and subscriber to the explicit end. What it left: rename
+SUBSCRIBE_END to SUBSCRIBE_FINISH in `js/net`, as Rust and the draft did, and
+delete the JS subscriber's covered-FIN path (`#parkCovered`, `#demandCovered`,
+the `short` reopen), which no lite-07 publisher triggers any more.
 
 ### Draft and checks
 

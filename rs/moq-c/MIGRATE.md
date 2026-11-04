@@ -4,6 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Separate datagram tracks
+
+Create a separate producer with `moq_publish_datagrams` and `moq_datagram_info`; replace `moq_publish_track_datagram` with `moq_publish_datagrams_append` on that handle, or `moq_publish_datagrams_insert` for an explicit sequence. `moq_consume_datagrams` now takes a subscriber priority before its callback and never subscribes to a stream track. Use `moq_publish_datagrams_demand` and `moq_datagram_demand_priority` for aggregate priority, and `moq_publish_datagrams_requests` / `moq_datagram_request_accept` for on-demand publishing. Finish or abort datagram producers separately. A zeroed datagram info is untimed, unlike the microsecond default of stream-track info. `moq_consume_datagrams` returns a negative code at once when the broadcast has neither the datagram track nor a datagram request handler, and a remote name without one ends its callback with a not-found error.
+
+### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+A NULL or zeroed `moq_track_info` now advertises a zero max age, serving only the live edge, instead of no publisher limit.
+`max_age_present` is gone and `max_age_us` always applies: drop the assignment where you set it to true, and set the new `max_age_unlimited`, which ignores `max_age_us`, where you relied on it being false for no limit.
+Recompile against the new header, since an old binary's `max_age_present` byte now reads as `max_age_unlimited`, and zero-initialize the struct (`moq_track_info info = {0};`) or assign every member, since an indeterminate member is undefined behavior.
+
 ### JSON writes refuse a NULL timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
 
 `moq_publish_json_snapshot_update`, `moq_publish_json_stream_append`, `moq_publish_json_window_push`, and `moq_publish_json_window_pop` fail with `MOQ_ERROR_INVALID_POINTER` and publish nothing on a NULL `timestamp`, instead of stamping the broadcast clock's current time.
@@ -106,11 +116,16 @@ With deltas on, the track carries a refresh ratio of 8 and the producer restates
 Higher is first and 0 is the unset midpoint, so a zeroed `moq_track_info` now uses the default priority rather than the least urgent one.
 To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 
+### `moq_origin_follow` replaces `moq_origin_announced_broadcast`, and both resolutions take an instance ([#7193](https://github.com/moq-dev/moq/pull/7193), [#7489](https://github.com/moq-dev/moq/pull/7489))
+
+Rename `moq_origin_announced_broadcast` and `moq_origin_announced_broadcast_cancel` to `moq_origin_follow` and `moq_origin_follow_cancel`.
+`moq_origin_request` and `moq_origin_follow` take `instance, instance_len` after `path_len`: pass `NULL, 0` to accept whichever publisher instance serves the path, or an instance to refuse every other.
+`moq_origin_request` resolves one publisher instance: it retries as the routes covering the path change, and fails as unroutable only once discovery has synced with no covering route. `moq_origin_follow` hands out each instance that serves the path in turn.
+
 ### A client asks only about what it watches (#6165)
 
-On moq-lite, a client session asks its relay for announcements only under paths something watches, through `moq_origin_announced` or `moq_origin_announced_broadcast`, instead of under its whole scope at connect.
-`moq_origin_request` watches nothing, so on a client it fails with a negative code for a path nothing watches, even when the relay announces it.
-Resolve the path with `moq_origin_announced_broadcast`, or hold `moq_origin_announced` over its prefix while requesting.
+On moq-lite, a client session asks its relay for announcements only under paths something watches, through `moq_origin_announced`, `moq_origin_request`, or `moq_origin_follow`, instead of under its whole scope at connect.
+`moq_origin_request` owns the discovery of its path, so it finds a broadcast the relay serves with nothing else watching first; no announcement stream is needed beside it.
 moq-transport and moq-lite-03/04 sessions are unchanged.
 
 ### `MOQ_CONTAINER_FORMAT_FMP4` unwraps to Legacy (#6250)
@@ -199,7 +214,7 @@ if (consumer > 0) {
 }
 ```
 
-### `moq_origin_announced_broadcast` delivers every publisher instance (#5700)
+### `moq_origin_follow` delivers every publisher instance (#5700)
 
 Its callback gets a new broadcast handle each time another instance takes over the path or the broadcast returns, and its terminal `0` only on cancel.
 Free each handle with `moq_consume_close` once its successor arrives.

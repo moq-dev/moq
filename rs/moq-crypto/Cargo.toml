@@ -1,5 +1,4 @@
 [package]
-publish = false
 name = "moq-crypto"
 description = "Content signing and end-to-end encryption for MoQ broadcasts."
 authors = ["Luke Curley <kixelated@gmail.com>"]
@@ -13,17 +12,31 @@ rust-version.workspace = true
 keywords = ["quic", "webtransport", "encryption", "signature", "live"]
 categories = ["cryptography", "multimedia", "network-programming"]
 
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+# Without `sign` or `e2ee`, the crate holds only `sign::PublicKey`, the endpoint ID, and its
+# z-base-32 text: no `moq-net` and no rind, for crates that only name endpoints.
+default = ["sign", "e2ee"]
+# Per-frame signing: `sign::SecretKey` and the signed broadcast wrappers.
+sign = ["dep:bytes", "dep:kio", "dep:moq-net", "dep:rind", "dep:zeroize"]
+# End-to-end encryption: the `e2ee` module.
+e2ee = ["dep:base64", "dep:bytes", "dep:kio", "dep:moq-net", "dep:rind", "dep:uuid", "dep:zeroize"]
+# `sign::PublicKey` serializes as its canonical z-base-32 text.
+serde = ["dep:serde"]
+
 [dependencies]
-aws-lc-rs = { workspace = true }
-base64 = { workspace = true }
-bytes = { workspace = true }
+base64 = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
 data-encoding = { workspace = true }
-kio = { workspace = true }
-moq-net = { workspace = true }
-rind = { workspace = true }
+kio = { workspace = true, optional = true }
+moq-net = { workspace = true, optional = true }
+rind = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
 thiserror = { workspace = true }
-uuid = { workspace = true }
-zeroize = { workspace = true }
+uuid = { workspace = true, optional = true }
+zeroize = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion = { package = "bench-harness", path = "../bench-harness" }
@@ -37,10 +50,16 @@ workspace-hack = { path = "../workspace-hack" }
 [[bench]]
 name = "protect"
 harness = false
+required-features = ["e2ee"]
 
 [[bench]]
 name = "sign"
 harness = false
+required-features = ["sign"]
+
+[[test]]
+name = "transport"
+required-features = ["e2ee"]
 
 [lints]
 workspace = true

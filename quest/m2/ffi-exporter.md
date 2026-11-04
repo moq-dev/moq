@@ -81,6 +81,14 @@ which publishes `rust2-uniffi`, `rust2-uniffi-core`, `rust2-uniffi-macros`, and
   Delete `rs/uniffi-bindgen`, the "five places" comments in `flake.nix`, and the
   `nix/uniffi-dart-*` lockfile and patch. The `sh/{kt,swift,dart,cpp}`
   packaging scripts stay: they package moq.
+- Zero-default durations (Decided 2026-11-03 (maintainer, follow-up planning after the 2026-11-03 /quest-afk and /quest-complete runs), from
+  [moq-dev/moq#7697](https://github.com/moq-dev/moq/pull/7697)): the
+  exporter gives generated duration fields a zero default, so a bare C++
+  `moq::Subscription{}` or generated C `moq_subscription_default()` means a
+  max delay of 0, as every hand-written binding's does. Until then those
+  two leave both bounds unset, and their docs say to start from
+  `subscription_defaults()` (accepted docs-only on #7697). Options shown:
+  m0; m1; ✅ m2, in this quest.
 - Negative durations (2026-10-25, maintainer): the Dart negative-duration
   patch moq carries goes upstream into the fork's Dart generator, and the Go
   generator stops panicking on a negative `time.Duration` (the Go wrapper
@@ -116,7 +124,7 @@ none.
 
 ## Related
 
-- [UniFFI generator forks are current](/quest/m1/vendor-sync/uniffi.md) - keeps the forks this replaces synced with upstream until the switch; its fixes must reach rust2's fork
+- [UniFFI generator forks are current](/quest/m1/vendor-sync/uniffi.md) - keeps the forks this replaces synced with upstream until the switch; its fixes join the carried-over list above, since rust2's fork is maintenance-only since 2026-11-02
 - [Payload bytes](https://github.com/moq-dev/rust2/blob/main/quest/m1/ffi-bytes.md) - the first patch the fork carries
 - [Kotlin calls](https://github.com/moq-dev/rust2/blob/main/quest/m1/kt-ffi-calls.md) - a Kotlin generator patch the fork carries
 - [Foreign poll for hot reads](https://github.com/moq-dev/rust2/blob/main/quest/m1/ffi-poll-protocol.md) - a generated poll protocol the fork carries; dropping a future at cancel is optional here, since no moq quest waits on it
