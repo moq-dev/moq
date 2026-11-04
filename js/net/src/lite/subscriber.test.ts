@@ -1314,9 +1314,9 @@ test("a lite subscribe whose SUBSCRIBE write stalls past the deadline closes its
 // subscriber waits.
 test.each(
 	[Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07].flatMap((version) =>
-		[false, true].map((forced) => [version, forced] as const),
+		[false, true].map((forced) => ({ name: versionName(version), version, forced })),
 	),
-)("lite %s: a subscribe goes out with its track (forced yields: %s)", async (version, forced) => {
+)("$name: a subscribe goes out with its track (forced yields: $forced)", async ({ version, forced }) => {
 	const yielding = forced ? spyOn(Budget.prototype, "poll").mockImplementation(() => yieldNow()) : undefined;
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
