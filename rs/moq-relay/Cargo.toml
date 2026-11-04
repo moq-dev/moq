@@ -23,8 +23,8 @@ path = "src/main.rs"
 doc = false
 
 [features]
-# A programmatic relay fixture with generated TLS, ephemeral ports, and simulated tasks.
-test-support = ["kio/sim", "moq-tokio/sim"]
+# A programmatic relay fixture with generated TLS and ephemeral ports.
+test-support = []
 # The optional public STUN Binding listener (`--stun-bind`).
 stun = ["dep:stun-types"]
 default = ["cluster-lan", "quic", "websocket", "uds"]

@@ -14,7 +14,6 @@
 
 use std::time::Duration;
 
-use futures::FutureExt;
 use kio::clock::Instant;
 use tokio::sync::watch;
 
@@ -25,8 +24,6 @@ pub struct Trigger {
 	tx: watch::Sender<Option<Window>>,
 	drain_timeout: Duration,
 	activity: moq_net::server::Activity,
-	state: watch::Sender<State>,
-	runtime: Option<tokio::runtime::Handle>,
 }
 
 impl Trigger {
@@ -34,8 +31,6 @@ impl Trigger {
 	/// resolves and sessions begin sending GOAWAY, including any accepted later.
 	/// Calling it again keeps the first deadline.
 	pub fn start(&self) {
-		// Embedders may fire the trigger from outside the relay's runtime.
-		let _runtime = self.runtime.as_ref().map(tokio::runtime::Handle::enter);
 		let now = Instant::now();
 		let deadline = now + self.drain_timeout;
 		let first = self.tx.send_if_modified(|started| {
@@ -49,33 +44,8 @@ impl Trigger {
 			return;
 		}
 
-		// Observe admission independently of `drained`: even its first caller may
-		// arrive after every session has left. Poll once here so an empty relay
-		// closes admission at the trigger, without waiting to schedule the task.
-		let activity = self.activity.clone();
-		let mut closing = Box::pin(async move {
-			activity.close().await;
-			Instant::now().min(deadline)
-		});
-		if let Some(ended) = closing.as_mut().now_or_never() {
-			self.state.send_modify(|state| state.wait_ended = Some(ended));
-			return;
-		}
-		let state = self.state.clone();
-		let wait = async move {
-			let ended = tokio::select! {
-				ended = closing => ended,
-				() = kio::clock::sleep_until(deadline) => deadline,
-				() = state.closed() => return,
-			};
-			state.send_modify(|state| state.wait_ended = Some(ended));
-		};
-		#[cfg(feature = "test-support")]
-		if kio::clock::sim::is_running() {
-			drop(kio::clock::sim::spawn(wait));
-			return;
-		}
-		drop(tokio::spawn(wait));
+		// Admission records its own completion, even if nobody polls `drained`.
+		self.activity.drain();
 	}
 }
 
@@ -175,8 +145,6 @@ struct State {
 	forced: usize,
 	/// Sessions already closed before the deadline but still reporting at it.
 	ending: usize,
-	/// Admission closed, or the deadline passed.
-	wait_ended: Option<Instant>,
 	/// The most recent counted session finished reporting.
 	last_left: Option<Instant>,
 }
@@ -211,8 +179,6 @@ impl Observer {
 			tx,
 			drain_timeout,
 			activity: observer.activity.clone(),
-			state: observer.state.clone(),
-			runtime: tokio::runtime::Handle::try_current().ok(),
 		};
 		(trigger, observer)
 	}
@@ -348,6 +314,12 @@ impl Observer {
 	/// never resolves for a [`disabled`](Self::disabled) handle.
 	pub async fn drained(&self) -> Drained {
 		self.clone().started().await;
+		let window = self.rx.borrow().expect("started");
+		let wait_ended = tokio::select! {
+			biased;
+			closed = self.activity.close() => closed.min(window.deadline),
+			() = self.expired() => window.deadline,
+		};
 		// Either way, wait for the counted sessions: past the deadline they are still
 		// reporting their end, and before it one served without an admission still
 		// holds the drain. Sessions served after the deadline are not counted, so
@@ -355,15 +327,11 @@ impl Observer {
 		let mut state = self.state.subscribe();
 		// The sender lives in `self`, so this cannot close.
 		let state = *state
-			.wait_for(|state| state.wait_ended.is_some() && state.tally == Tally::default())
+			.wait_for(|state| state.tally == Tally::default())
 			.await
 			.expect("sender held");
 
-		let window = self.rx.borrow().expect("started");
-		let ended = state
-			.wait_ended
-			.expect("wait ended")
-			.max(state.last_left.unwrap_or(window.started));
+		let ended = wait_ended.max(state.last_left.unwrap_or(window.started));
 		let drained = Drained {
 			forced: state.forced,
 			ending: state.ending,
@@ -756,7 +724,7 @@ mod tests {
 		// must be recorded independently of any `drained` future.
 		let (trigger, mut shutdown) = Observer::new(Duration::from_secs(10));
 		let serving = shutdown.serve();
-		std::thread::scope(|scope| scope.spawn(|| trigger.start()).join().unwrap());
+		trigger.start();
 		kio::clock::sleep(Duration::from_secs(1)).await;
 		drop(serving);
 		tokio::task::yield_now().await;
@@ -773,6 +741,18 @@ mod tests {
 			}
 		);
 		assert_eq!(shutdown.drained().await, summary);
+
+		std::thread::spawn(|| {
+			let (trigger, shutdown) = Observer::new(Duration::from_secs(10));
+			let serving = shutdown.serve();
+			trigger.start();
+			drop(serving);
+			let summary = futures::executor::block_on(shutdown.drained());
+			assert_eq!(summary.forced, 0);
+			assert_eq!(summary.ending, 0);
+		})
+		.join()
+		.unwrap();
 	}
 
 	/// A drain whose admissions emptied before the deadline still waits for a session

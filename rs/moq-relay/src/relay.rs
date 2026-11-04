@@ -1013,9 +1013,9 @@ mod tests {
 		tokio::pin!(draining);
 		assert!(draining.as_mut().now_or_never().is_none());
 
-		// Arrives before the drain observes the count reach zero: it is counted.
-		drop(last);
+		// Arrives before the last connection leaves: it is counted.
 		let arrival = activity.enter().expect("admitted before the drain committed");
+		drop(last);
 		assert!(
 			draining.as_mut().now_or_never().is_none(),
 			"drain exited under an admitted arrival"
@@ -1023,7 +1023,7 @@ mod tests {
 
 		// Arrives just after the count reaches zero: refused at accept.
 		drop(arrival);
-		draining.await;
+		assert!(draining.as_mut().now_or_never().is_some());
 		assert!(
 			activity.enter().is_none(),
 			"admitted a connection after the drain committed to exit"

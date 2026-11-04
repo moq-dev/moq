@@ -1159,7 +1159,7 @@ async fn the_drain_waits_for_a_closed_session_to_report_its_end() {
 		let request = auth.request(moq_auth::Transport::Quic, "/room");
 		let lease = auth.admit(request.clone()).await.expect("admitted before draining");
 		let registration = registry.register(request);
-		let (client, server) = memory_sessions().await;
+		let (client, server, _driving) = memory_sessions().await;
 		clients.push(client);
 		supervised.push(tokio::spawn(moq_relay::supervise(
 			server,
@@ -1516,8 +1516,8 @@ async fn a_fixed_lease_still_expires() {
 
 /// A connected `(client, server)` session pair over the in-memory transport, so a
 /// test on Tokio's paused clock never waits on a socket: the clock only advances
-/// once every message in flight has landed.
-async fn memory_sessions() -> (moq_net::Session, moq_net::Session) {
+/// once every message in flight has landed. The handle can pause the server driver.
+async fn memory_sessions() -> (moq_net::Session, moq_net::Session, kio::Producer<bool>) {
 	let mut config = moq_net::transport::memory::Config::default();
 	config.protocol = Some(crate::memory::newest().alpn().to_string());
 	let (client, server) = moq_net::transport::memory::pair(config);
@@ -1531,15 +1531,29 @@ async fn memory_sessions() -> (moq_net::Session, moq_net::Session) {
 		tokio::spawn(moq_net::time::run(driver));
 		session
 	};
+	let driving = kio::Producer::new(true);
+	let gate = driving.consume();
 	let server = async {
 		let (session, driver) = moq_net::Server::new()
 			.accept(now, server)
 			.await
 			.expect("server handshake");
-		tokio::spawn(moq_net::time::run(driver));
+		tokio::spawn(async move {
+			let mut driver = std::pin::pin!(moq_net::time::run(driver));
+			kio::wait(|waiter| {
+				std::task::ready!(gate.poll(waiter, |running| match **running {
+					true => std::task::Poll::Ready(()),
+					false => std::task::Poll::Pending,
+				}))
+				.unwrap_or(());
+				waiter.poll_future(driver.as_mut())
+			})
+			.await
+		});
 		session
 	};
-	tokio::join!(client, server)
+	let (client, server) = tokio::join!(client, server);
+	(client, server, driving)
 }
 
 /// An outage keeps the session until `expires`, then closes it as expired and
@@ -1578,12 +1592,15 @@ async fn closes_at_expires(clock: &kio::clock::Installed, consumer: moq_auth::le
 	let (lease, ()) = tokio::join!(auth.admit(auth.request(moq_auth::Transport::Tcp, "/room")), async {
 		admissions.next().await.expect("an admission").grant(consumer);
 	});
-	let (client, server) = memory_sessions().await;
+	let (client, server, driving) = memory_sessions().await;
+	let observer = moq_relay::shutdown::Observer::disabled();
+	let registry = moq_relay::session::Registry::new();
+	let registration = registry.register(auth.request(moq_auth::Transport::Tcp, "/room"));
 	let supervised = tokio::spawn(moq_relay::supervise(
 		server,
 		lease.expect("admitted"),
-		moq_relay::shutdown::Observer::disabled().serve(),
-		None,
+		observer.serve(),
+		Some(registration),
 	));
 
 	clock.advance(EXPIRES - Duration::from_nanos(1));
@@ -1595,7 +1612,19 @@ async fn closes_at_expires(clock: &kio::clock::Installed, consumer: moq_auth::le
 	)]
 	let early = tokio::time::timeout(Duration::from_secs(1), client.closed()).await;
 	assert!(early.is_err(), "closed before expires");
+	*driving.write().unwrap_or_else(|_| panic!("driver gate closed")) = false;
 	clock.advance(Duration::from_nanos(1));
+	#[expect(
+		clippy::disallowed_methods,
+		reason = "the watchdog runs on paused tokio, beside the installed manual clock"
+	)]
+	let parked = tokio::time::timeout(Duration::from_secs(1), client.closed()).await;
+	assert!(parked.is_err(), "the paused driver closed the transport");
+	assert_eq!(observer.tally(), moq_relay::shutdown::Tally { open: 1, ending: 0 });
+	let views = registry.list(&Default::default());
+	assert_eq!(views.len(), 1, "registration left before its transport closed");
+	assert_eq!(views[0].closed, None);
+	*driving.write().unwrap_or_else(|_| panic!("driver gate closed")) = true;
 	#[expect(
 		clippy::disallowed_methods,
 		reason = "the watchdog runs on paused tokio, beside the installed manual clock"
@@ -1607,6 +1636,8 @@ async fn closes_at_expires(clock: &kio::clock::Installed, consumer: moq_auth::le
 		.await
 		.expect("supervisor")
 		.expect("a lease end is not a session error");
+	assert_eq!(observer.tally(), Default::default());
+	assert!(registry.list(&Default::default()).is_empty());
 }
 
 /// A relay whose config names no auth source is the embedder's to decide: `run`

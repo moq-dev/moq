@@ -383,7 +383,6 @@ pub async fn supervise(
 ) -> anyhow::Result<()> {
 	let mut lease = lease.authorizing(&session);
 	let mut shutdown = serving.shutdown.clone();
-	// Held until the `end` is reported, so a drain past its deadline still waits for it.
 	let reported = lease.reported();
 	let result = loop {
 		let nudged = async {
@@ -418,10 +417,13 @@ pub async fn supervise(
 			() = nudged => lease.revalidate(),
 		}
 	};
+	// Abort requests are executed by the driver, so observe the transport close first.
+	session.closed().await;
 	serving.closed();
 	if let Some(registration) = &registration {
 		registration.closed();
 	}
+	// Keep `serving` and the registration until the end report finishes.
 	reported.await;
 	result
 }

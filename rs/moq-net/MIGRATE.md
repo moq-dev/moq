@@ -4,6 +4,15 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Admission completion records its own time
+
+`server::Activity::drain()` begins closing admission once its active set empties.
+`Activity::close()` and the new poll-native `poll_close()` return that instant,
+even for a late observer. Replace matches against `()` with a discarded result
+or read the returned `kio::clock::Instant`. Once draining begins, the last `Active`
+drop closes admission synchronously, including when a close wait was cancelled.
+This is native listener bookkeeping; the protocol wire is unchanged.
+
 ### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
 
 `track::Info::default()` sets `max_age` to `Some(Duration::ZERO)` instead of `None`: a superseded group is stale as soon as its successor arrives, so readers get only the live edge; the newest group never goes stale.
