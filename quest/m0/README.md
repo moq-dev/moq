@@ -36,8 +36,8 @@ since cutting segments from first-frame pts waits on nothing in m1.
 - [Release resumes owed groups or proves it doesn't need to](/quest/m0/backport-resume-owed-groups.md) - after main's resume fix, reproduce its cases on `release`, then backport or delete
 - [CI cost and latency](/quest/m0/ci/README.md) - cloud CI runs only in a batched merge gate as one `just ci` pass per batch, expensive checks run nightly and gate `release`, caches move to R2, and runners are chosen last
 - [More tests under load](/quest/m0/test-flakes-2/README.md) - load-only and queue failures, one quest per flake, fixed at the cause, since each one fails a whole batch
+- [A waiter's record limit changes no behavior](/quest/m0/kio-waiter-records.md) - two moq-net tests stop failing when kio's waiters remember 16 lists, and the limit becomes a tuning knob worth 3.9% per delivered group
 - [Backport the relay and auth hardening to release](/quest/m0/backport-release-hardening.md) - `release`'s relay refuses dot-segment paths, serves its HTTP routes with main's response hardening, and withdraws advertisements a peer starves of send credit; its auth client refuses redirects
-- [Release's MKV importer bounds what it buffers](/quest/m0/backport-mkv-buffer.md) - on `release`, an MKV input that declares a huge element and trickles its bytes no longer grows the importer's memory without limit
 - [HLS export on a declared grid](/quest/m0/hls-media-grid.md) - the catalog's `hls` field and record tracks go away, and the export numbers segments on `media.join.interval` from media tracks
-- [Agents use quest's worktree hooks](/quest/m0/quest-worktree-hooks.md) - adopt `quest worktree hook` once it's shown to coexist with T3 Code's worktrees
+- [quest init keeps moq's nix-wrapped worktree hooks](/quest/m0/quest-worktree-hooks.md) - quest pin bumps keep the hooks that run moq's pinned `quest`
 - [HLS lists contributions](/quest/m0/hls-contributions.md) - an HLS master lists each catalog contribution's renditions, and a contribution's media is subscribed only while players fetch it

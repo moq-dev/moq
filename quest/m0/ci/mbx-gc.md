@@ -11,8 +11,9 @@ settings that keep it so live in `kixelated/dotfiles`.
 
 Decided 2026-11-03 (maintainer, /quest-plan of the follow-ups from
 [moq-dev/moq#7742](https://github.com/moq-dev/moq/pull/7742)): milestone m0,
-in the CI epic, beside [shared target](/quest/m0/ci/shared-target.md), which
-only works around the same GC for long interop runs.
+in the CI epic.
+[moq-dev/moq#7715](https://github.com/moq-dev/moq/pull/7715) only worked
+around the same GC for long interop runs.
 
 - Incident
   ([comment](https://github.com/moq-dev/moq/pull/7742#issuecomment-6605544835)):
@@ -43,5 +44,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Long test runs keep their built binaries](/quest/m0/ci/shared-target.md) - the interop-side workaround for the same GC
 - [The queue host keeps the queue's disk](/quest/m0/ci/queue-host-disk.md) - disk policy for the queue host, configured in kixelated/nixos

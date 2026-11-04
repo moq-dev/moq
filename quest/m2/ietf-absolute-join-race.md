@@ -31,4 +31,3 @@ Public API: none expected. Wire: none.
 ## Related
 
 - [A moq-transport group head fills its hole in place](/quest/m2/ietf-fill-refill.md) - the fill redesign that may remove the race
-- [A resume more than one group behind never hangs](/quest/m1/ietf-resume-behind.md) - the other open IETF join fix

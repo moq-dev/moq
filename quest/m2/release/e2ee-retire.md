@@ -23,5 +23,4 @@ mirroring [Retire libmoq](/quest/m2/release/libmoq-retire.md).
 
 ## Required
 
-- [Merge moq-sign and moq-e2ee into moq-crypto](/quest/m1/moq-crypto.md) - creates the stub
 - [Cut and publish](/quest/m2/release/cut.md) - publishes the stub as moq-e2ee's final release

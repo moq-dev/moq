@@ -29,8 +29,8 @@ nothing to do with route memory.
   - [moq-dev/moq#7533](https://github.com/moq-dev/moq/pull/7533) could not
     record base chat at 16 workers.
   - The [kio channel contention](/quest/m2/perf/kio-channel-contention/README.md)
-    and [log lock profile](/quest/m1/unbounded-groups/log-lock-profile.md)
-    notes also record refusals.
+    notes, and the log lock profile quest #7742 deleted, also record
+    refusals.
 - Check: the refusal is at `bench/profile.py:131`, with its test at
   `bench/profile.test.py:279`. Capture the raw records of a refused run and
   see whether they come from perf losing records, from records out of order

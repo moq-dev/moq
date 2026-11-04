@@ -10,8 +10,8 @@ evidence that `release` isn't exposed and is deleted.
 
 Decided 2026-11-03 (maintainer, /quest-plan of the follow-ups from
 [moq-dev/moq#7708](https://github.com/moq-dev/moq/pull/7708)): milestone m0,
-beside the other backports. It starts once
-[the resume fix on main](/quest/m1/ietf-resume-behind.md) merges.
+beside the other backports. It started once #7708, the resume fix on main
+that this ports, merged.
 
 - Exposure is unproven. `origin/release` (moq-net 0.3.19 at `acf91a00b9`)
   has no `live_floor`, `judge`, or `Misses`. The shared live floor that
@@ -33,7 +33,3 @@ beside the other backports. It starts once
   fix.
 
 Public API: none expected. Wire: none.
-
-## Required
-
-- [A resume more than one group behind never hangs](/quest/m1/ietf-resume-behind.md) - main's fix, which this ports

@@ -38,14 +38,9 @@ the two missing consumers get the warmup.
   Move it onto the new entry point if it fits. If not, record why here.
 - Test each consumer: a test that starts a track with a nonzero catalog
   warmup fails without that consumer's adoption.
-- Start after [subscription delay](/quest/m1/subscription-delay.md)
-  ([moq-dev/moq#7697](https://github.com/moq-dev/moq/pull/7697)). It
-  replaces the bindings' `max_delay` with `Delay { min, max }` and edits
-  `rs/moq-ffi/src/media.rs`.
+- Builds on [moq-dev/moq#7697](https://github.com/moq-dev/moq/pull/7697)
+  (merged), which replaced the bindings' `max_delay` with
+  `Delay { min, max }` and edited `rs/moq-ffi/src/media.rs`.
 
 Public API: moq-mux's container consumer setup changes (breaking). The
 bindings' subscribe surface is unchanged. Wire: none.
-
-## Required
-
-- [Subscriptions take a Delay](/quest/m1/subscription-delay.md) - lands the bindings' `Delay { min, max }`, which this builds on

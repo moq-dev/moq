@@ -320,7 +320,8 @@ fn select(codec: Codec, attempts: Vec<Attempt>, config: &Config) -> Result<Box<d
 	// Nothing was tried at all, so no candidate both matched and takes this
 	// codec. For a named request that is a name this build does not have: a
 	// typo, a feature that is off, or a backend that does not decode this
-	// codec. Naming what is here is most of the answer.
+	// codec. Naming what is here is most of the answer. Otherwise this build
+	// cannot decode the codec at all, which is known before opening anything.
 	if tried.is_empty() {
 		let available = available_names(codec);
 		return match &config.kind {
@@ -329,13 +330,15 @@ fn select(codec: Codec, attempts: Vec<Attempt>, config: &Config) -> Result<Box<d
 				codec,
 				available: available.join(", "),
 			}),
-			kind => Err(Error::NoDecoder(format!(
+			kind => Err(Error::UnsupportedCodec(format!(
 				"nothing compiled in for {} at {kind:?} (this build has: {})",
 				codec.label(),
 				available.join(", "),
 			))),
 		};
 	}
+	// Every candidate that decodes the codec failed to open: missing drivers, no
+	// device, or a library fault. Those are faults, not a property of the track.
 	Err(Error::NoDecoder(tried.join(", ")))
 }
 
@@ -456,7 +459,7 @@ mod tests {
 	fn disabled_software_backend_is_not_selected() {
 		let mut config = Config::new();
 		config.kind = Kind::Software;
-		assert!(matches!(open(Codec::H264, &config), Err(Error::NoDecoder(_))));
+		assert!(matches!(open(Codec::H264, &config), Err(Error::UnsupportedCodec(_))));
 
 		config.kind = Kind::Named("openh264".to_owned());
 		assert!(matches!(open(Codec::H264, &config), Err(Error::UnknownDecoder { .. })));

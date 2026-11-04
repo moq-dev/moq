@@ -13,9 +13,10 @@ Decided 2026-11-03 (maintainer, /quest-plan of the follow-ups from
 a child of the rind epic. The epic had no child for signing, and its final
 step (removing aws-lc-rs) can't land until this one does.
 
-- Today `rs/moq-sign/src/key.rs` uses `aws_lc_rs::signature::{ED25519,
-  Ed25519KeyPair, …}` and `aws_lc_rs::rand`. #7702 moves it into
-  `rs/moq-crypto`, whose `Cargo.toml` then holds both aws-lc-rs and rind.
+- Today `rs/moq-crypto/src/sign/key.rs`, moved from `rs/moq-sign` by #7702,
+  uses `aws_lc_rs::signature::{ED25519, Ed25519KeyPair, …}` and
+  `aws_lc_rs::rand`, and `rs/moq-crypto/Cargo.toml` holds both aws-lc-rs
+  and rind.
 - Follow [moq-dev/moq#7570](https://github.com/moq-dev/moq/pull/7570)
   (merged), whose `mesh::Signer` uses rind's `Ed25519KeyPair`. No binary
   links moq-crypto's signing yet, so under the epic's rule it can switch on
@@ -29,7 +30,3 @@ step (removing aws-lc-rs) can't land until this one does.
   other's crate layout.
 
 Public API: none expected. Wire: none.
-
-## Required
-
-- [Merge moq-sign and moq-e2ee into moq-crypto](/quest/m1/moq-crypto.md) - the crate this changes

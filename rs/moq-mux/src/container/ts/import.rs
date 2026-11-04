@@ -368,20 +368,31 @@ impl<E: catalog::Catalog> Import<E> {
 		self.sections.contains_key(&pid) || Pid::new(pid).is_ok_and(|pid| self.streams.contains_key(&pid))
 	}
 
-	/// The TR 101 290 intervals this importer times, and its clock, for another to take over.
-	pub(super) fn timing(&self) -> (&Health, Option<u64>) {
-		(&self.health, self.liveness.now())
+	/// The TR 101 290 intervals this importer times, for another to take over.
+	pub(super) fn timing(&self) -> &Health {
+		&self.health
 	}
 
-	/// Take over the TR 101 290 intervals `health` timed on `pid` at clock reading `now`, from a
+	/// Input bytes held for a later call, such as behind a suspected clock step.
+	#[cfg(test)]
+	pub(super) fn held(&self) -> usize {
+		self.demux.held()
+	}
+
+	/// The TR 101 290 intervals, for a caller to advance while no packet routes to this program.
+	pub(super) fn timing_mut(&mut self) -> &mut Health {
+		&mut self.health
+	}
+
+	/// Take over the TR 101 290 intervals `health` timed on `pid`, from a
 	/// program that read the same packets, to count the PID from here on. See
 	/// [`Health::hand_over`].
-	pub(super) fn take_over(&mut self, pid: u16, (health, now): (&Health, Option<u64>)) {
+	pub(super) fn take_over(&mut self, pid: u16, health: &Health) {
 		let cadenced = Pid::new(pid)
 			.ok()
 			.and_then(|pid| self.streams.get(&pid))
 			.is_some_and(Stream::cadenced);
-		health.hand_over(pid, &mut self.health, cadenced, now, self.liveness.now());
+		health.hand_over(pid, &mut self.health, cadenced);
 	}
 
 	/// A reservation on this program's timebase, so every stream shifts by its offset.
@@ -438,7 +449,11 @@ impl<E: catalog::Catalog> Import<E> {
 			};
 			match self.steps.judge(demux, &routes) {
 				super::step::Verdict::Route => {}
-				super::step::Verdict::Hold => break,
+				// Held input keeps its arrival, and is graded once routed.
+				super::step::Verdict::Hold => {
+					demux.drain();
+					return self.flush_batch();
+				}
 				super::step::Verdict::Restart(step) => {
 					let remainder = demux.remainder();
 					demux.drain();
@@ -449,6 +464,8 @@ impl<E: catalog::Catalog> Import<E> {
 			let Some(packet) = demux.next() else { break };
 			self.packet(&packet)?;
 		}
+		// Every packet this chunk completed is read: grade the input through its arrival.
+		self.health.flush();
 		demux.drain();
 		self.flush_batch()
 	}
@@ -520,7 +537,11 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 		// Every packet is graded, but only the media PIDs and the clock route on the
 		// verdict: PSI and section PIDs keep their reassemblers' own.
-		self.health.packet(pkt, continuation, self.liveness.now());
+		let at = super::health::At {
+			count: packet.count,
+			arrival: packet.arrival,
+		};
+		self.health.packet(pkt, continuation, at);
 		let continuation = Pid::new(pid)
 			.ok()
 			.filter(|pid| self.streams.contains_key(pid) || self.pcr_pid == Some(*pid))
@@ -569,9 +590,6 @@ impl<E: catalog::Catalog> Import<E> {
 				self.place_pcr(pcr, offset)?;
 				self.liveness.pcr(pcr);
 				self.si.pcr(pcr, packet.count);
-				if let Some(now) = self.liveness.now() {
-					self.health.tick(now);
-				}
 				if self.supports_mpegts {
 					let ready = self.mux_rate.ready();
 					if self.mux_rate.pcr(pcr, packet.count) {
@@ -1263,7 +1281,7 @@ impl<E: catalog::Catalog> Import<E> {
 		let is_video = stream.video();
 		let is_clock = matches!(stream, Stream::Clock);
 		if pes.pts.is_some() && stream.cadenced() {
-			self.health.pts(pid.as_u16(), self.liveness.now());
+			self.health.pts(pid.as_u16(), self.health.now());
 		}
 		// Resolve the wrap at PES start so every elementary stream and private section shares
 		// the program timeline, including streams discovered after a wrap.
@@ -1790,7 +1808,7 @@ impl<E: catalog::Catalog> Import<E> {
 			);
 		}
 		let first = self.identity.replace(identity).is_none();
-		self.health.pmt_pids(&[entry.pmt_pid.as_u16()], self.liveness.now());
+		self.health.pmt_pids(&[entry.pmt_pid.as_u16()], self.health.now());
 		let moved = self.pmt.as_ref().is_none_or(|(pid, _)| *pid != entry.pmt_pid);
 		if moved {
 			if let Some((from, _)) = &self.pmt {
