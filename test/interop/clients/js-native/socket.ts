@@ -81,6 +81,9 @@ try {
 } finally {
 	lines.close();
 	endpoint.close();
-	try { await connection.close(); }
-	finally { origin.close(); }
+	try {
+		await connection.close();
+	} finally {
+		origin.close();
+	}
 }
