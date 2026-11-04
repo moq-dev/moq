@@ -56,7 +56,7 @@ Trust this checkout's source over published API references, which may describe a
 The API is the most important thing to get right: a bad shape costs a breaking change in every language.
 
 - Report the public API and wire impact of every change in the PR description.
-- A breaking change marks its title with `!` and its Impact bullet says how to migrate. Feature PRs add migration notes under `## Unreleased` in `MIGRATE.md`; only the release cut writes version sections.
+- A breaking change marks its title with `!` and its Impact bullet says how to migrate. Feature PRs add migration notes under `## Unreleased` in the package's `MIGRATE.md`; only the release cut writes version sections.
 - Keep things private until a current or planned consumer needs them. Scrutinize every new export.
 - Never add `foo_with_x`, `foo_checked`, or a compatibility shim. Make the breaking change to `foo` instead.
 - Let the type system make misuse unrepresentable.
@@ -92,4 +92,6 @@ The `quest` binary and its skills come from the moq-dev/quest flake input; chang
 # Cross-Package Sync
 
 `moq-ffi` powers every SDK except Rust and JS. Keep all languages and wrappers at the same functionality.
+A Rust change with a JS counterpart updates both in the same PR: `moq-net` and `js/net`, `hang` and `js/hang`, `moq-auth` and `js/auth`.
 A wire-format change updates its matching draft in the same PR: framing, fields, enum values, and version negotiation.
+Wire, `moq-ffi`, or gateway changes also run `just test interop --all`; plain `interop` is Rust-only.

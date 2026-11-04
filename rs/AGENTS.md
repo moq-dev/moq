@@ -2,7 +2,7 @@ The `/rs` Cargo workspace.
 
 # Crates
 
-- A crate does one thing. Component crates are `moq-<component>`; binaries never carry a `-cli` suffix.
+- A crate does one thing. Component crates are `moq-<component>` (`hang` is the exception); binaries never carry a `-cli` suffix.
 - `kio` provides the async primitives everything polls through.
 - `moq-quic` (our quinn fork) is the only QUIC stack we develop; it also powers qmux and WebTransport. Don't add or deepen dependencies on web-transport, noq, or quinn.
 - `moq-cli` builds the `moq` binary and owns the CLI surface for the gateway crates.
@@ -20,7 +20,7 @@ A `Producer` writes and any number of `Consumer`s read, sharing state via `kio`.
 - A library build without `async` compiles no coroutines (`just rs coroutines`).
 - A `poll_*` that waits on several things in a fixed order is a `#[kio::machine]` with `wait!`. Hand-write it when a wait sits in a loop or branch, or it yields more than once.
 - Libraries use `kio`, not `tokio::spawn`, `select!`, `tokio::sync`, or `pin!` inside `kio::wait`. A channel carrying a single value is a smell.
-- Use `ready!(...)?` instead of matching `Poll::Pending`.
+- Use `ready!(...)`, adding `?` for `Result` polls, instead of matching `Poll::Pending`.
 
 # Conventions
 
