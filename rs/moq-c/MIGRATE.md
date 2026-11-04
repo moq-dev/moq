@@ -112,11 +112,16 @@ With deltas on, the track carries a refresh ratio of 8 and the producer restates
 Higher is first and 0 is the unset midpoint, so a zeroed `moq_track_info` now uses the default priority rather than the least urgent one.
 To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 
+### `moq_origin_follow` replaces `moq_origin_announced_broadcast`, and both resolutions take an instance ([#7193](https://github.com/moq-dev/moq/pull/7193), [#7489](https://github.com/moq-dev/moq/pull/7489))
+
+Rename `moq_origin_announced_broadcast` and `moq_origin_announced_broadcast_cancel` to `moq_origin_follow` and `moq_origin_follow_cancel`.
+`moq_origin_request` and `moq_origin_follow` take `instance, instance_len` after `path_len`: pass `NULL, 0` to accept whichever publisher instance serves the path, or an instance to refuse every other.
+`moq_origin_request` resolves one publisher instance: it retries as the routes covering the path change, and fails as unroutable only once discovery has synced with no covering route. `moq_origin_follow` hands out each instance that serves the path in turn.
+
 ### A client asks only about what it watches (#6165)
 
-On moq-lite, a client session asks its relay for announcements only under paths something watches, through `moq_origin_announced` or `moq_origin_announced_broadcast`, instead of under its whole scope at connect.
-`moq_origin_request` watches nothing, so on a client it fails with a negative code for a path nothing watches, even when the relay announces it.
-Resolve the path with `moq_origin_announced_broadcast`, or hold `moq_origin_announced` over its prefix while requesting.
+On moq-lite, a client session asks its relay for announcements only under paths something watches, through `moq_origin_announced`, `moq_origin_request`, or `moq_origin_follow`, instead of under its whole scope at connect.
+`moq_origin_request` owns the discovery of its path, so it finds a broadcast the relay serves with nothing else watching first; no announcement stream is needed beside it.
 moq-transport and moq-lite-03/04 sessions are unchanged.
 
 ### `MOQ_CONTAINER_FORMAT_FMP4` unwraps to Legacy (#6250)
@@ -205,7 +210,7 @@ if (consumer > 0) {
 }
 ```
 
-### `moq_origin_announced_broadcast` delivers every publisher instance (#5700)
+### `moq_origin_follow` delivers every publisher instance (#5700)
 
 Its callback gets a new broadcast handle each time another instance takes over the path or the broadcast returns, and its terminal `0` only on cancel.
 Free each handle with `moq_consume_close` once its successor arrives.

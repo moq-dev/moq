@@ -91,9 +91,11 @@ export interface Stats {
 
 /** Signals the encoder reads. */
 export type EncoderInput = {
-	// Whether to encode this rendition. Defaults to true. When false it stops encoding, ending the epoch,
-	// but stays in the catalog with `enabled: false` and its last config, and stays registered so a
-	// subscriber still gets an idle track.
+	// Whether to encode this rendition. Defaults to true. When false it stops taking capture, ending the
+	// epoch, but stays in the catalog with `enabled: false` and its last config, and stays registered so a
+	// subscriber still gets an idle track. Audio retained before the disable stays too: a subscriber
+	// still gets it encoded, and it expires on the broadcast's `maxAge`. The codec stays configured, so
+	// re-enabling resumes at once.
 	enabled: Getter<boolean>;
 
 	// The broadcast to register the rendition on. Undefined resolves the config but has nowhere to publish.
@@ -131,8 +133,9 @@ export type EncoderOutput = {
 	// The head of the capture graph, so callers can tap the raw capture. Volume is applied to the
 	// PCM rather than in the graph, so this is pre-gain. Undefined for a source that isn't a track.
 	root: Signal<AudioNode | undefined>;
-	// True while encoding: enabled with a captured format and a track, which also takes a
-	// subscriber to it or its HLS records unless the broadcast's `onDemand` is false.
+	// True while encoding capture: enabled with a captured format and a track, which also takes a
+	// subscriber to it or its HLS records unless the broadcast's `onDemand` is false. Retained audio
+	// encoded for a subscriber while disabled does not count.
 	active: Signal<boolean>;
 	// Cumulative output totals (frames, bytes) measured while serving, and the target bitrate.
 	stats: Signal<Stats>;
@@ -426,13 +429,13 @@ export class Encoder {
 		// #encode reads the live producer per frame rather than subscribing to it. Rebuilding on a
 		// swap would close the AudioEncoder, which discards every chunk the codec still holds, and
 		// would restart the framer mid-frame, so the output fell permanently behind its input.
+		// It outlives a disable too, so the audio retained before it stays reachable.
 		effect.run((effect) => {
-			const enabled = effect.get(this.in.enabled);
 			const capture = effect.get(this.in.capture);
 			const format = capture ? effect.get(capture.out.format) : undefined;
 			const fatal = effect.get(this.#out.error);
 			const resolved = effect.get(this.#config);
-			if (!enabled || !format || fatal || !resolved) return;
+			if (!format || fatal || !resolved) return;
 
 			// Raw history needs a finite bound, so an unlimited max age keeps the media default's worth.
 			const maxAge = effect.get(broadcast.in.maxAge) ?? Container.MAX_AGE;
@@ -470,8 +473,9 @@ export class Encoder {
 
 			const onDemand = effect.get(broadcast.in.onDemand) ?? true;
 			const demanded = !!track && wanted(effect, track, rendition.hls(track));
-			this.#encoding = enabled && !!format && !!track && !fatal && (!onDemand || demanded);
-			effect.set(this.#out.active, this.#encoding, false);
+			// Not gated on `enabled`: a disabled rendition takes no capture, but still encodes what it retained.
+			this.#encoding = !!format && !!track && !fatal && (!onDemand || demanded);
+			effect.set(this.#out.active, enabled && this.#encoding, false);
 			try {
 				if (this.#encoding) this.#pipeline?.drain();
 			} catch (error) {
@@ -510,9 +514,10 @@ export class Encoder {
 	// Derive the encoder config from the captured format and the codec. Re-runs whenever either changes, so a
 	// codec update (bitrate, frame duration) reconfigures without waiting for a channel-count change.
 	//
-	// Gated on `enabled` the same way the video encoder is: a disabled rendition stops resolving a
-	// config, and a sample source keeps its format while muted rather than tearing down. Re-enabling
-	// with the settings last probed reuses that probe, so the catalog flips back without waiting on one.
+	// Unlike the video encoder, a disabled rendition keeps resolving its config: its codec keeps
+	// serving the audio retained before the disable. A sample source keeps its format while muted
+	// rather than tearing down. A config probed once is reused, so the catalog flips back without
+	// waiting on a probe.
 	#runConfig(effect: Effect): void {
 		const groupDuration = effect.get(this.groupDuration);
 		if (!Number.isFinite(groupDuration) || groupDuration < 0)
@@ -521,7 +526,7 @@ export class Encoder {
 
 		const capture = effect.get(this.in.capture);
 		const captured = capture ? effect.get(capture.out.format) : undefined;
-		if (!effect.get(this.in.enabled) || !captured) {
+		if (!captured) {
 			this.#config.set(undefined);
 			return;
 		}
@@ -674,7 +679,7 @@ export class Encoder {
 				// anything arriving at a rate the codec can't carry (a 44.1kHz file as Opus) has to
 				// be converted first. A capture graph already runs at the right rate, so this is
 				// usually nothing.
-				const resampler =
+				const createResampler = () =>
 					format.sampleRate === config.sampleRate
 						? undefined
 						: new Resampler({
@@ -682,8 +687,8 @@ export class Encoder {
 								to: config.sampleRate,
 								channels: config.numberOfChannels,
 							});
-
-				const framer = createFramer(resolved, config.sampleRate);
+				let resampler = createResampler();
+				let framer = createFramer(resolved, config.sampleRate);
 
 				const encoder = new AudioEncoder({
 					output: (frame) => {
@@ -733,6 +738,13 @@ export class Encoder {
 
 				// Where the next frame starts if it continues the last one encoded.
 				let contiguous: Micro | undefined;
+
+				// Disabled: capture is dropped, while the retained audio stays reachable.
+				let paused = false;
+				// A disable left retained audio, so the timeline breaks after it rather than at once.
+				let breakPending = false;
+				// The codec is flushing before a break, so nothing new reaches it until the marker is down.
+				let flushing = false;
 
 				const backlog = new Backlog(retention, config.sampleRate);
 				const deadline = new Signal<Micro | undefined>(undefined);
@@ -789,42 +801,102 @@ export class Encoder {
 					) as Micro;
 					this.#next = contiguous;
 				};
+				// End the epoch where the submitted audio ends, once the codec has emitted all of it: a
+				// marker placed while chunks are still in flight would drop them as pre-gap.
+				const cutAfterFlush = () => {
+					if (flushing) return;
+					// Nothing reached the codec since it last started, so nothing is in flight.
+					if (contiguous === undefined) return this.#cut();
+					flushing = true;
+					encoder
+						.flush()
+						.then(() => {
+							if (aborted.aborted) return;
+							flushing = false;
+							this.#cut();
+							// The next frame starts a new epoch, so it starts the codec afresh too.
+							encoder.reset();
+							encoder.configure(encoderConfig);
+							contiguous = undefined;
+							if (this.#encoding) pipeline.drain();
+						})
+						.catch((error) => {
+							if (!aborted.aborted) this.#abort(error);
+						});
+				};
+
 				const pipeline: Pipeline = {
 					channelCount: config.numberOfChannels,
 					drain: () => {
+						if (flushing) return;
 						backlog.expire(clock());
 						// Expired history is a real gap, unlike a loss of demand: end the epoch where
 						// the encoded audio stops, so its last frame isn't stretched across the gap.
 						if (backlog.takeEvicted()) this.#cut();
-						for (let frame = backlog.shift(); frame; frame = backlog.shift()) {
+						for (;;) {
+							// A disable broke the timeline here; the rest follows once the marker is down.
+							if (backlog.takeCut()) {
+								cutAfterFlush();
+								// A cut with nothing in flight lands at once, so the rest can follow.
+								if (flushing) break;
+							}
+							const frame = backlog.shift();
+							if (!frame) break;
 							submit(frame);
 							this.#history = this.#next;
 						}
 						deadline.set(backlog.deadline);
+						// The audio retained before a disable is all encoded, so the break follows it, even
+						// when re-enabled since: resumed audio then waits behind the flush.
+						if (breakPending && backlog.empty) {
+							breakPending = false;
+							cutAfterFlush();
+						}
 					},
 					push: (captured: AudioFrame) => {
+						if (paused) return;
 						const input = resampler ? resampler.push(captured) : captured;
 						if (!input) return;
 						const frames = framer.push(input);
 						for (const [i, data] of frames.entries()) {
 							if (!this.#live) continue;
-							if (this.#encoding) submit(data);
-							else {
+							const cut = breakPending;
+							breakPending = false;
+							if (this.#encoding && !flushing && backlog.empty) {
+								// Nothing was submitted since the retained audio before the break expired.
+								if (cut) this.#cut();
+								submit(data);
+							} else {
 								const end = frames[i + 1]?.timestamp ?? framer.next;
-								backlog.push(data, end, clock());
+								backlog.push(data, end, clock(), cut);
 							}
 						}
 						deadline.set(backlog.deadline);
 					},
 				};
 
+				// A disable stops taking capture but keeps the codec and retained audio, so a subscriber
+				// still gets that history and re-enabling resumes without reconfiguring.
+				effect.run((toggle) => {
+					if (toggle.get(this.in.enabled)) {
+						paused = false;
+						return;
+					}
+					paused = true;
+					// The capture resumes on a later timeline, so drop the partial frame and filter state.
+					resampler = createResampler();
+					framer = createFramer(resolved, config.sampleRate);
+					if (backlog.empty) cutAfterFlush();
+					else breakPending = true;
+				});
+
 				// Publish it last: the read loop starts pushing the moment this is visible.
 				this.#pipeline = pipeline;
 				effect.cleanup(() => {
 					if (this.#pipeline !== pipeline) return;
 					this.#pipeline = undefined;
-					// Whatever stopped it (disable, a format or codec change, a fatal error), the
-					// timeline breaks here.
+					// Whatever stopped it (a format or codec change, a lost broadcast, a fatal
+					// error), the timeline breaks here.
 					this.#cut();
 				});
 			});

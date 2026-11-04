@@ -110,7 +110,7 @@ There is one owned `Path` type: a short path is stored inline and a long one sha
 - `Path::{to_owned, into_owned, borrow}` and the `Relative` equivalents are gone: drop the call, or `clone()` a `&Path` you need to keep.
 - `Path::new`, `Relative::new`, `Path::join`, and `Path::resolve` return `Result<_, path::Error>`, failing on a path longer than `Path::MAX_BYTES`. `Path::new` copies its argument; use `Path::from_static("room")` for a literal, which borrows it and panics if it is too long.
 - `From<&str>`, `From<&String>`, and `From<String>` for `Path` and `Relative` are `TryFrom`, with `path::Error` as the error.
-- `AsPath` is gone. Origin entry points such as `publish`, `create_broadcast`, `scope`, `mount`, and `routed` take `impl TryInto<Path, Error: Into<Error>>`, so `&str`, `String`, `Path`, and `&Path` still work and a too-long string fails with `Error::BoundsExceeded`. Other functions that took `impl AsPath`, such as `stats::Tier::new`, take `impl Into<Path>`: pass a `Path` or `&Path`.
+- `AsPath` is gone. Origin entry points such as `publish`, `create_broadcast`, `scope`, `mount`, and `request` take `impl TryInto<Path, Error: Into<Error>>`, so `&str`, `String`, `Path`, and `&Path` still work and a too-long string fails with `Error::BoundsExceeded`. Other functions that took `impl AsPath`, such as `stats::Tier::new`, take `impl Into<Path>`: pass a `Path` or `&Path`.
 - `origin::{Producer, Consumer}::absolute` and `announce::Consumer::absolute` return `Result<Path, Error>`.
 - `Path::{has_prefix, strip_prefix, join, relative}` take `&Path`: write `path.has_prefix(&Path::from_static("room"))`.
 - Decoding a path longer than `Path::MAX_BYTES` fails with `BoundsExceeded`, like one deeper than `Path::MAX_PARTS`.
@@ -295,9 +295,8 @@ On the wire, moq-lite carries `priority + 128` and moq-transport `127 - priority
 ### A client session asks only about what its readers watch (#6165)
 
 On moq-lite, a client session no longer asks its peer for announcements under its whole subscribe scope at connect.
-It asks only under the prefixes its subscribe origin's readers watch, with `announced()`, `follow`, `routed`, `routed_broadcast`, or `announced_broadcast`, and stops asking 2s after nothing at or beneath a prefix is watched.
-`request_broadcast` watches nothing, so on a client it fails with `Error::Unroutable` for a path no reader watches, even when the peer announces it.
-Resolve a path with `routed_broadcast` or `announced_broadcast`, or hold an `announced()` stream over its prefix while requesting, the way `routed` already did after connecting.
+It asks only under the prefixes its subscribe origin's readers watch, with `announced()`, `request`, or `follow`, and stops asking 2s after nothing at or beneath a prefix is watched.
+`request(path, instance)` watches its own path while it resolves, so it finds a broadcast the peer serves with nothing else watching first; no `announced()` stream is needed beside it.
 A broadcast resolved through a discovered route keeps its path watched until dropped.
 A server session, and a client fed into a `Producer::peer` or `Producer::upstream` handle, still asks for everything it may, so a relay discovers as before.
 Serving another session's request is not a watch, so a client that relays what it discovers to its own sessions should feed its client session `origin.upstream()` (or `peer()`) instead of a plain handle.
@@ -538,9 +537,22 @@ A publisher that continues its group sequences across restarts may name a stable
 Read `Route::instance` and `broadcast::Info::instance`; the epoch is never readable.
 A session of moq-lite 06 or older, or moq-transport, mints an instance starting with `~` for each announcement (`Instance::is_minted`).
 
-### `request` and `follow` take an instance
+### A path resolves with `request` or `follow` ([#6445](https://github.com/moq-dev/moq/pull/6445), [#7172](https://github.com/moq-dev/moq/pull/7172))
 
-Pass `None` to accept whichever instance wins the path, or an `Instance` to refuse every other one.
+| Before | After |
+|---|---|
+| `origin::Consumer::request_broadcast(path)` | `request(path, None)` |
+| `origin::Consumer::routed_broadcast(path)` | `request(path, None)` to resolve one instance, or `follow(path, None)?` to follow the path across instances |
+| `origin::Consumer::routed(path)`, then `request_broadcast(path)` | `follow(path, None)?.available().await` |
+| `origin::Consumer::routed(path)` to read the `Route` | `announced()` on a consumer `scope`d to the path with `Pattern::literal` |
+
+`request(path, instance)` resolves one publisher instance. It owns the discovery of its path and retries as the routes covering the path change, so it no longer fails at once when no route covers the path yet: it fails with `Error::Unroutable` only once discovery has synced with no covering route.
+Drop a `routed` wait or an `announced()` stream held only so a request could resolve.
+A selected handler's explicit refusal, including a dropped `Prepared`, is final; a request no longer waits for the routes to move after one.
+`follow(path, instance)` returns an `origin::Following`, whose `available()` yields the broadcast each instance serving the path in turn.
+`Requesting` is the owned task `request` returns; `Requesting::is_queued` is gone.
+
+Pass `None` to either to accept whichever instance wins the path, or an `Instance` to refuse every other one.
 A route updated to another instance refuses the requests its handler still holds with `Unroutable`.
 
 ### Demand is read through `demand()`

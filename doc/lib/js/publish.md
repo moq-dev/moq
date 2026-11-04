@@ -31,7 +31,8 @@ WebCodecs, writes the catalog, and publishes a hang broadcast.
 | `url`, `name` | Relay URL (with `?jwt=` if needed) and broadcast name. |
 | `versions` | Protocol versions to offer, most preferred first, comma-separated like `moq-transport-18,moq-lite-06`. Every stable version by default. |
 | `source` | `camera`, `screen`, or `file`. |
-| `muted`, `invisible` | Stop publishing audio or video. The microphone and camera stay open, so unmuting or unhiding is instant and the browser's capture indicators stay lit; clear `source` or remove the element to release them. `source` covers both devices, so releasing one while keeping the other takes the library: toggle `Source.Microphone` or `Source.Camera` `enabled`. |
+| `muted`, `invisible` | Stop publishing audio or video. By default the microphone and camera stay open, so unmuting or unhiding is instant and the browser's capture indicators stay lit. |
+| `capture` | What a muted or invisible track does with its device: `hold` (default) keeps it open, `release` closes it so its capture indicator goes dark, and resuming reopens it. A screen share or file stops once both tracks are off. Clearing `source` or removing the element releases everything either way. |
 | `preview` | What the nested element shows: the raw `source` (default), a decoded copy of the `encoded` stream to see what viewers get, or `none`. |
 | `backend` | How a `<canvas>` preview is drawn; see [@moq/video](/lib/js/video). `auto` (default), `webgpu`, or `2d`. |
 | `announce` | When to advertise: once the `source` is live (default), or `always`. Nobody can see or subscribe to the broadcast until it is announced. To keep it out of discovery, use a hidden name with a `.`-prefixed segment; it is still subscribable by name. |
@@ -79,7 +80,11 @@ history ahead of live audio when a subscriber arrives. Raw audio keeps up to
 stereo f32). With `maxAge: null`, which sets no publisher limit on the media, raw
 audio still keeps 30 seconds, since raw history needs a bound. The catalog and
 HLS record tracks keep `@moq/net`'s zero default, since a viewer needs only
-their newest group. Capture stays open.
+their newest group. Capture stays open. Disabling an audio encoder keeps what it retained: a
+subscriber still gets that history, and it expires on its own. Players skip a
+disabled rendition, so that history reaches subscribers that are already held
+on it or that subscribe directly. The codec stays
+configured across the disable, so re-enabling resumes at once.
 
 Pass `onDemand: false` to `Publish.Broadcast` to encode audio continuously too.
 `onDemand: true` also gates video, which then loses its unsubscribed past.

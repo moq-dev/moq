@@ -192,7 +192,7 @@ fn assert_protocol(err: &MoqError, scope: crate::error::MoqErrorScope, kind: cra
 }
 
 #[tokio::test]
-async fn detached_cancels_inner_on_drop() {
+async fn call_cancels_inner_on_drop() {
 	struct DropSignal(Option<tokio::sync::oneshot::Sender<()>>);
 
 	impl Drop for DropSignal {
@@ -203,7 +203,7 @@ async fn detached_cancels_inner_on_drop() {
 
 	let (started_tx, started_rx) = tokio::sync::oneshot::channel();
 	let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
-	let outer = tokio::spawn(crate::ffi::detached(async move {
+	let outer = tokio::spawn(crate::ffi::run(async move {
 		let _drop = DropSignal(Some(dropped_tx));
 		started_tx.send(()).unwrap();
 		std::future::pending::<Result<(), MoqError>>().await
@@ -211,13 +211,13 @@ async fn detached_cancels_inner_on_drop() {
 
 	kio::clock::timeout(TIMEOUT, started_rx)
 		.await
-		.expect("timed out waiting for detached task to start")
+		.expect("timed out waiting for call to start")
 		.unwrap();
 	outer.abort();
 	assert!(outer.await.unwrap_err().is_cancelled());
 	kio::clock::timeout(TIMEOUT, dropped_rx)
 		.await
-		.expect("timed out waiting for detached task to be dropped")
+		.expect("timed out waiting for call to be dropped")
 		.unwrap();
 }
 
@@ -8438,7 +8438,7 @@ async fn shutdown_delivers_the_finished_track() {
 		let closing = publisher.clone();
 		kio::clock::timeout(
 			TIMEOUT,
-			crate::ffi::detached(async move {
+			crate::ffi::run(async move {
 				let group = track.append_group()?;
 				group.write_frame(MoqFrame {
 					timestamp: Some(us(0)),
@@ -9214,6 +9214,32 @@ fn shutdown_waits_for_a_polled_call() {
 	shutdown.join().unwrap();
 	let parked = parked.join().unwrap();
 	assert!(matches!(parked, Err(MoqError::Cancelled)), "{parked:?}");
+}
+
+/// A cancelled foreign wait can remain allocated until the host frees it. It must neither
+/// consume another demand change nor prevent a second call from observing that change.
+#[tokio::test]
+async fn demand_cancelled_before_free_leaves_the_change() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("events".into(), None).unwrap();
+	let demand = track.demand().unwrap();
+	assert_eq!(demand.wanted_changed().await.unwrap(), None);
+	let mut abandoned = Box::pin(demand.wanted_changed());
+	assert!(
+		abandoned
+			.as_mut()
+			.poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+			.is_pending()
+	);
+	ffi_caught_up().await;
+	let consumer = track.consume(None).unwrap();
+	let wanted = kio::clock::timeout(TIMEOUT, demand.wanted_changed())
+		.await
+		.expect("the abandoned wait stole the change")
+		.unwrap();
+	assert!(wanted.is_some());
+	drop(abandoned);
+	drop(consumer);
 }
 
 /// Setup, rather than the first packet, decides whether a rendition is usable.

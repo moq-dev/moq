@@ -84,6 +84,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [Route health](/quest/m2/route-health/README.md) - epoch-only active/passive track recovery over metadata-only subscriptions
 - [Wrapper traits over moq-net](/quest/m2/net-wrap/README.md) - moq-net exports producer and consumer traits, and every writer and reader above it takes them, so a wrapper such as e2ee passes through unchanged
 - [E2EE](/quest/m2/e2ee/README.md) - TypeScript and Rust peers interoperate over encrypted broadcasts no relay can decrypt
+- [Content protection](/quest/m2/drm/README.md) - Common Encryption CMAF publishes unchanged, signalled in the hang `drm` section and MSF `contentProtections`, with license URLs from Rust, the CLI, and every binding
 - [iOS capture](/quest/m2/mobile-capture-ios.md) - Rust captures the camera and screen on iOS, setting the catalog rotation
 - [Android capture](/quest/m2/mobile-capture-android.md) - Rust captures through NDK/JNI on Android, reusing the existing codecs and setting the catalog rotation
 - [Latest readers use Range::live()](/quest/m2/readers-range-live.md) - after #6278, readers start at the live edge without waiting on `largest()`
@@ -188,8 +189,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [Dependency and alternatives audit](/quest/m2/audit-deps.md) - every dependency earns its weight, preferring fewer, and the rest are current, deduplicated, and the best maintained option
 - [Dead code and API surface audit](/quest/m2/audit-dead-code.md) - repeat the removal audit before the next major release
 - [Typecheck with bun check](/quest/m2/bun-check.md) - workspace packages typecheck through bun once nixpkgs ships bun 1.4.4
-- [Format YAML with Biome](/quest/m2/biome-yaml.md) - `just check` fails on unformatted YAML
-- [Format Markdown with Biome](/quest/m2/biome-markdown.md) - Biome formats every Markdown file and remark is gone, landed in a quiet window
+- [Adopt formatter defaults after evaluating Bun](/quest/m2/formatter-defaults.md) - every language uses its formatter's defaults, YAML and Markdown are formatted, and remark is gone in one coordinated migration
 - [Test coverage audit](/quest/m2/audit-test-coverage.md) - repeat the coverage audit against the m1 baselines after the next release ships
 - [Documentation audit](/quest/m2/audit-docs.md) - repeat the docs audit after the release ships, against the m1 baselines
 - [Test cost audit](/quest/m2/audit-test-cost.md) - the slowest, flakiest, and least valuable tests are deleted by default, or else fixed or planned, once the release ships
