@@ -24,7 +24,7 @@ Investigation 2026-11-04:
   victim fell through into shedding the live group's unread frames.
 - The [November 2](https://github.com/moq-dev/moq/actions/runs/41483654426/job/125408205493)
   and [November 3](https://github.com/moq-dev/moq/actions/runs/41656613559/job/125988511175)
-  binding jobs passed. The unchanged benchmark also passes locally at a
+  binding jobs passed. The unchanged Rust baselines also pass locally at a
   one-second budget on `701b7196a348ff0b9656d7db7a193673772eeb0c`.
 - The 64 KiB case writes 4 MiB per round, below its 64 MiB origin budget.
   A local synchronous probe completed 10,000 rounds of every frame size,
