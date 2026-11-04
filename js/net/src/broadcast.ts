@@ -81,7 +81,10 @@ function liveDatagrams(state: BroadcastState, name: string): datagram.Consumer |
 
 function createDatagrams(state: BroadcastState, name: string, info: Partial<datagram.Info>): datagram.Producer {
 	if (state.closed.peek() !== undefined) throw new Error("broadcast is closed");
-	const queued = state.datagramRequested.peek().find((request) => request.name === name);
+	// A request its readers closed waits for async cleanup; serve the name fresh instead.
+	const queued = state.datagramRequested
+		.peek()
+		.find((request) => request.name === name && request.closed.peek() === undefined);
 	if (queued) {
 		state.datagramRequested.mutate((requests) => requests.splice(requests.indexOf(queued), 1));
 		return queued.accept(info);

@@ -87,7 +87,7 @@ export class Consumer {
 		return this.generation.consume(this.#inner.track(name).subscribe(subscription), semantic);
 	}
 
-	/** Read the protected datagram track live from now under its semantic name. */
+	/** Read the protected datagram track under its semantic name, live from when that name resolves to its physical one. */
 	async datagrams(semantic: string): Promise<Datagram.Consumer> {
 		const name = await this.generation.name(semantic);
 		return this.generation.consumeDatagrams(this.#inner.datagrams(name), semantic);

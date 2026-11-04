@@ -128,6 +128,22 @@ test("abandoned datagram requests leave neither a queued request nor a name clai
 	broadcast.close();
 });
 
+test("creating a datagram track in the turn its queued request closes serves the name fresh", async () => {
+	const broadcast = new Broadcast.Producer();
+	const consumer = broadcast.consume();
+	void wireOf(consumer).requestedDatagrams();
+	const left = consumer.datagrams("test");
+	left.close();
+	const track = broadcast.createDatagrams("test");
+	const next = consumer.datagrams("test");
+	track.append(undefined, new Uint8Array([2]));
+	expect((await next.recv())?.payload).toEqual(new Uint8Array([2]));
+	track.finish();
+	next.close();
+	consumer.close();
+	broadcast.close();
+});
+
 test("closing one waiting datagram consumer releases its info wait while another still waits", async () => {
 	const track = new Datagram.Producer("waiting");
 	const first = track.consume();
