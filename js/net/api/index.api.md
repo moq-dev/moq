@@ -625,7 +625,7 @@ export namespace Track {
 	};
 	export class Consumer {
 		fetchGroup(sequence: bigint, options?: Track.FetchGroupOptions): Promise<Group.Consumer>;
-		info(): Promise<Track.Info>;
+		info(options?: Track.InfoOptions): Promise<Track.Info>;
 		readonly name: string;
 		subscribe(options?: Track.Subscription): Track.Subscriber;
 	}
@@ -677,6 +677,9 @@ export namespace Track {
 	}
 	export interface InfoInit extends Partial<Omit<Track.Info, "maxAge">> {
 		maxAge?: Milli | null;
+	}
+	export interface InfoOptions {
+		signal?: AbortSignal;
 	}
 	export type Order = "ascending" | "descending";
 	export class Ordered {
