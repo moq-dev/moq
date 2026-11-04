@@ -60,6 +60,7 @@ test:
     bun test sh/gh/ffi.test.ts sh/gh/cpp.test.ts sh/gh/publish.test.ts
     python3 sh/rs/package-rename.test.py
     python3 sh/dart/build.test.py
+    python3 sh/kt/gradle.test.py
     python3 sh/rs/select.test.py
     python3 sh/rs/config.test.py
     python3 sh/js/workspace.test.py

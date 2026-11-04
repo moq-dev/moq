@@ -189,12 +189,12 @@ case "$1" in
         MOQ_BENCH_DIR=${BENCH_RESULTS:-$(git rev-parse --show-toplevel)/target/bench/nightly/bindings}
         export MOQ_BENCH_DIR
         rm -rf "$MOQ_BENCH_DIR"
-        run just rs test -p moq-ffi --cargo-profile release -E 'test(bench::benchmark_ffi)' --run-ignored only
+        run just rs test -p moq-ffi --cargo-profile release -E 'test(bench::benchmark_ffi) | test(bench::benchmark_background)' --run-ignored only
         run just go bench -benchtime="${MOQ_BENCH_SECONDS}s"
         for runner in py kt cpp dart; do
             run just "$runner" bench
         done
-        for result in rust-ffi rust-net go python kotlin cpp dart; do
+        for result in rust-ffi rust-net rust-background go python kotlin cpp dart; do
             if [[ ! -s $MOQ_BENCH_DIR/$result.json ]]; then failed+=("no $MOQ_BENCH_DIR/$result.json"); fi
         done
         ;;

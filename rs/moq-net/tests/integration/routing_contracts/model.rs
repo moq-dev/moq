@@ -12,7 +12,7 @@
 //! order on each directed session and can be held to replay them late.
 //!
 //! Claims come in two forms. The forwarding fixtures use global claims (an
-//! identity serving a prefix, at a seed cost and optional epoch) known
+//! identity serving a prefix, at a seed cost and optional instance) known
 //! everywhere unless a fixture hides one from a node, which stands in for
 //! scoping, interest, or a claim that has not arrived yet. The handoff fixtures
 //! use announcements instead: an origin versions its own claims, and they travel
@@ -290,7 +290,7 @@ struct Pending {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Item {
 	pub seed: Metric,
-	pub epoch: Option<u32>,
+	pub instance: Option<u32>,
 	pub since: Rev,
 }
 
@@ -437,7 +437,7 @@ impl View {
 fn a_suffix_costs_the_same_however_its_interest_is_spelled() {
 	let item = Item {
 		seed: 0,
-		epoch: None,
+		instance: None,
 		since: 1,
 	};
 	let view = View {
@@ -592,7 +592,7 @@ pub struct Claim {
 	/// A trailing `/` claims the subtree; otherwise only the exact path.
 	pub prefix: &'static str,
 	pub seed: Metric,
-	pub epoch: Option<u32>,
+	pub instance: Option<u32>,
 }
 
 impl Claim {
@@ -621,7 +621,7 @@ pub enum Forward {
 struct Carried {
 	pinned: Option<Id>,
 	bound: Option<Metric>,
-	epoch: Option<u32>,
+	instance: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -636,8 +636,8 @@ pub enum Outcome {
 pub enum Aggregate {
 	/// Any subscription for the path, as today.
 	Path,
-	/// One serving the same explicit epoch.
-	Epoch,
+	/// One serving the same explicit instance.
+	Instance,
 	/// One following a route to the same identity.
 	Identity,
 	/// One whose total is within the request's bound.
@@ -654,7 +654,7 @@ struct Candidate {
 	draining: bool,
 	priority: i8,
 	prefix: usize,
-	epoch: Option<u32>,
+	instance: Option<u32>,
 	down_only: bool,
 }
 
@@ -670,7 +670,7 @@ enum Up {
 struct Front {
 	node: Node,
 	id: Id,
-	epoch: Option<u32>,
+	instance: Option<u32>,
 	total: Metric,
 	/// Whether the route it follows is down-only.
 	down_only: bool,
@@ -903,7 +903,7 @@ impl Net {
 		let claims = state.views.remove(&old).map(|view| view.items).unwrap_or_default();
 		self.originate(node, fnv("rotate", &[old]) & !QUALIFIED, 0);
 		for (claim, item) in claims {
-			self.change(node, claim, Some((item.seed, item.epoch)));
+			self.change(node, claim, Some((item.seed, item.instance)));
 		}
 		for peer in peers {
 			self.connect(node, peer);
@@ -934,8 +934,8 @@ impl Net {
 	}
 
 	/// The origin at `node` starts or updates a claim, advancing its revision.
-	pub fn announce(&mut self, node: Node, claim: &'static str, seed: Metric, epoch: Option<u32>) {
-		self.change(node, claim, Some((seed, epoch)));
+	pub fn announce(&mut self, node: Node, claim: &'static str, seed: Metric, instance: Option<u32>) {
+		self.change(node, claim, Some((seed, instance)));
 	}
 
 	/// The origin at `node` withdraws a claim, advancing its revision.
@@ -952,9 +952,9 @@ impl Net {
 			return self.change(node, claim, attrs);
 		}
 		view.floors.insert("", rev);
-		let item = attrs.map(|(seed, epoch)| Item {
+		let item = attrs.map(|(seed, instance)| Item {
 			seed,
-			epoch,
+			instance,
 			since: view.items.get(claim).map_or(rev, |item| item.since),
 		});
 		match item {
@@ -1041,12 +1041,12 @@ impl Net {
 		self.nodes[node].fd.remove(&id);
 	}
 
-	pub fn claim(&mut self, id: Id, prefix: &'static str, seed: Metric, epoch: Option<u32>) -> usize {
+	pub fn claim(&mut self, id: Id, prefix: &'static str, seed: Metric, instance: Option<u32>) -> usize {
 		self.claims.push(Claim {
 			id,
 			prefix,
 			seed,
-			epoch,
+			instance,
 		});
 		self.claims.len() - 1
 	}
@@ -2053,7 +2053,7 @@ impl Net {
 					draining: route.next.is_some_and(|next| self.draining.contains(&(node, next))),
 					priority: route.next.map_or(0, |next| self.side(node, next).priority),
 					prefix: claim.prefix.len(),
-					epoch: claim.epoch,
+					instance: claim.instance,
 					down_only: route.down_only,
 				});
 			}
@@ -2077,7 +2077,7 @@ impl Net {
 		};
 		(
 			Reverse(c.prefix),
-			Reverse(c.epoch),
+			Reverse(c.instance),
 			c.draining,
 			Reverse(c.priority),
 			c.total,
@@ -2099,7 +2099,7 @@ impl Net {
 				draining: false,
 				priority: 0,
 				prefix: 0,
-				epoch: carried.epoch,
+				instance: carried.instance,
 				down_only: route.down_only,
 			});
 		}
@@ -2135,7 +2135,7 @@ impl Net {
 			Carried {
 				pinned: (mode == Forward::Pinned).then_some(chosen.id),
 				bound: (mode == Forward::Bounded).then_some(chosen.advertised + chosen.seed),
-				epoch: chosen.epoch,
+				instance: chosen.instance,
 			}
 		} else {
 			carried
@@ -2190,7 +2190,7 @@ impl Net {
 				None => Front {
 					node,
 					id: 0,
-					epoch: None,
+					instance: None,
 					total: 0,
 					down_only: false,
 					up: Up::Stalled,
@@ -2198,7 +2198,7 @@ impl Net {
 				Some(chosen) => Front {
 					node,
 					id: chosen.id,
-					epoch: chosen.epoch,
+					instance: chosen.instance,
 					total: chosen.total,
 					down_only: chosen.down_only,
 					up: match chosen.next {
@@ -2226,7 +2226,7 @@ impl Net {
 						&& !(exports_only && front.down_only)
 						&& match aggregate {
 							Aggregate::Path => true,
-							Aggregate::Epoch => carried.epoch.is_some() && front.epoch == carried.epoch,
+							Aggregate::Instance => carried.instance.is_some() && front.instance == carried.instance,
 							Aggregate::Identity => carried.pinned == Some(front.id),
 							Aggregate::Bound => carried.bound.is_some_and(|bound| front.total <= bound),
 						}
