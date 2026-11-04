@@ -51,16 +51,21 @@ closes rather than alert on them.
     same way `Draining` decides `forced`, rather than from a snapshot taken
     when `expired()` wins: at the deadline a forced session's task may already
     have moved to ending, so a snapshot would race it.
-  - `elapsed`: from the trigger to the drain's end. The first `drained()` to
-    see the drain end records its end time in the shared state, so every call,
-    first or later, returns the same summary.
+  - `elapsed`: from the trigger to the drain's end, the instant its end
+    conditions became true, not the instant a `drained()` call noticed: the
+    later of the wait ending (admission closed, or the deadline passed) and the
+    last counted `Serving` drop. Stamp each where it happens (the drop records
+    its instant, and the admission close or deadline is recorded as it fires),
+    so every call, however late, returns the same summary. Test it with a first
+    `drained()` polled well after the last session left.
 
   Keep the existing log line, built from the same summary.
 - **Per session.** The registry `Entry` (`rs/moq-relay/src/session.rs`) gains
   a shared close-time cell that its `Registration` sets; `supervise` sets it
   through the registration at the same point it moves its `Serving` to ending.
   `Registry::list` copies it into a new `session::View` field, `closed:
-  Option<Wall>` (unix seconds in the `GET /sessions` JSON, null while open),
+  Option<Wall>` (unix seconds in the `GET /sessions` JSON, omitted while open, as
+  `View`'s `skip_serializing_none` does for its other optional fields),
   so the sessions list and an embedder tracking sessions by id can tell an
   open session from one finishing its end report, and when it closed.
 - Test on simulated time with real sessions through `supervise`, extending
