@@ -48,7 +48,7 @@ use windows::Win32::Media::MediaFoundation::{
 };
 use windows::core::{GUID, Interface};
 
-use super::{Backend, Codec, Config};
+use super::{Backend, Codec, Config, Stream};
 use crate::frame::d3d11::Texture;
 use crate::frame::{I420, Surface};
 use crate::mf::{ComGuard, create_d3d_device, mf_err, unpack_2x32};
@@ -102,7 +102,8 @@ pub(crate) struct MediaFoundation {
 impl MediaFoundation {
 	/// `config` is accepted for signature parity; the decoder MFT emits frames
 	/// at the stream's native size (callers scale the frames themselves).
-	pub(crate) fn open(codec: Codec, _config: &Config) -> Result<Box<dyn Backend>, Error> {
+	pub(crate) fn open(stream: &Stream, _config: &Config) -> Result<Box<dyn Backend>, Error> {
+		let codec = stream.codec;
 		let (input_subtype, label) = match codec {
 			Codec::H264 => (MFVideoFormat_H264, "H.264"),
 			Codec::H265 => (MFVideoFormat_HEVC, "H.265"),

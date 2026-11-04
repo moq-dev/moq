@@ -21,7 +21,7 @@ use vpx_sys::{
 	vpx_color_space, vpx_image_t, vpx_img_fmt,
 };
 
-use super::{Backend, Codec, Config};
+use super::{Backend, Codec, Config, Stream};
 use crate::color::Range;
 use crate::frame::{I420, Surface};
 use crate::{Color, Error, Frame, Size};
@@ -40,7 +40,8 @@ pub(crate) struct Vpx {
 }
 
 impl Vpx {
-	pub(crate) fn open(codec: Codec, config: &Config) -> Result<Box<dyn Backend>, Error> {
+	pub(crate) fn open(stream: &Stream, config: &Config) -> Result<Box<dyn Backend>, Error> {
+		let codec = stream.codec;
 		Ok(Box::new(Self::new(codec, config)?))
 	}
 

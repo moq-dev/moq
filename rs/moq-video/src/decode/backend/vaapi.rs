@@ -11,7 +11,9 @@
 //! missing render node, or a driver with no H.264 decode entrypoint makes
 //! `Decoder::new` return an error; under automatic selection
 //! [`backend::open`](super::open) then moves on to the next candidate, like the
-//! NVDEC backend. The render node is the one the encoder and the GPU resize
+//! NVDEC backend. When every render node's driver answers that it has no decode
+//! entrypoint for the profile the catalog declares, that is a refusal of the
+//! stream rather than a fault. The render node is the one the encoder and the GPU resize
 //! share, which `MOQ_VAAPI_DEVICE` can name; see `frame::vaapi::device`.
 //!
 //! Progressive 8-bit 4:2:0 only, which is everything a browser's `VideoEncoder`,
@@ -48,13 +50,14 @@
 //! `moq-vaapi` keeps the surface alongside the descriptor and reads it back
 //! through `vaDeriveImage` rather than trying to read a tiled buffer as rows.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use bytes::Bytes;
 use moq_net::Timestamp;
 use moq_vaapi::decode::{Config as VaapiConfig, Decoder, ExportedFrame};
+use moq_vaapi::{Display, DrmDeviceIterator, VAEntrypoint, VAProfile};
 
-use super::{Backend, Codec, Config};
+use super::{Backend, Codec, Config, Stream};
 use crate::frame::{I420, Surface, vaapi};
 use crate::{Error, Frame, Output};
 
@@ -77,9 +80,19 @@ impl Vaapi {
 	/// this handles H.264 only. `config` carries no hardware scaler request we can
 	/// honor: VA-API's scaler is a separate VPP pipeline, so callers scale the
 	/// frames themselves.
-	pub(crate) fn open(codec: Codec, config: &Config) -> Result<Box<dyn Backend>, Error> {
+	pub(crate) fn open(stream: &Stream, config: &Config) -> Result<Box<dyn Backend>, Error> {
+		let codec = stream.codec;
 		if codec != Codec::H264 {
 			return Err(Error::Codec(anyhow::anyhow!("VAAPI cannot decode {}", codec.label())));
+		}
+
+		if let Some(profile) = stream.h264_profile.and_then(va_profile)
+			&& offered(profile) == Some(false)
+		{
+			return Err(Error::UnsupportedCodec(format!(
+				"no VA-API driver here decodes H.264 profile_idc {}",
+				stream.h264_profile.unwrap_or_default()
+			)));
 		}
 
 		let vaapi = VaapiConfig {
@@ -192,6 +205,45 @@ impl Backend for Vaapi {
 	}
 }
 
+/// The VA profile an H.264 `profile_idc` decodes under, the mapping `moq-vaapi`
+/// opens its config with; `None` for a profile it has none for.
+fn va_profile(profile_idc: u8) -> Option<VAProfile::Type> {
+	match profile_idc {
+		66 => Some(VAProfile::VAProfileH264ConstrainedBaseline),
+		77 | 88 => Some(VAProfile::VAProfileH264Main),
+		100 | 110 | 122 | 244 => Some(VAProfile::VAProfileH264High),
+		_ => None,
+	}
+}
+
+/// Whether a render node the decoder could open offers VLD decode for
+/// `profile`.
+///
+/// `Some(false)` only when every node answered and none does. A node that can't
+/// be asked, such as one whose VA driver is missing, leaves the answer unknown,
+/// since a missing driver is a fault rather than the device's refusal.
+fn offered(profile: VAProfile::Type) -> Option<bool> {
+	let nodes: Vec<PathBuf> = match vaapi::device() {
+		Some(node) => vec![node.to_path_buf()],
+		None => DrmDeviceIterator::default().collect(),
+	};
+	if nodes.is_empty() {
+		return None;
+	}
+	for node in nodes {
+		let display = Display::open_drm_display(&node).ok()?;
+		if display.query_config_profiles().ok()?.contains(&profile)
+			&& display
+				.query_config_entrypoints(profile)
+				.ok()?
+				.contains(&VAEntrypoint::VAEntrypointVLD)
+		{
+			return Some(true);
+		}
+	}
+	Some(false)
+}
+
 /// Deinterleave each decoded picture's NV12 into the CPU I420 the rest of the
 /// crate speaks, keeping the timestamp the picture was coded with.
 fn convert(decoded: Vec<moq_vaapi::decode::Frame>) -> Result<Vec<Frame>, Error> {
@@ -254,7 +306,7 @@ mod tests {
 		if hw_available() {
 			return;
 		}
-		assert!(Vaapi::open(Codec::H264, &decode_config()).is_err());
+		assert!(Vaapi::open(&Codec::H264.into(), &decode_config()).is_err());
 	}
 
 	/// A static RGBA gradient that varies in both axes, so the chroma planes have
@@ -298,7 +350,7 @@ mod tests {
 			..EncodeConfig::new(w, h, crate::FrameRate::new(30, 1).unwrap())
 		})
 		.unwrap();
-		let mut decoder = Vaapi::open(Codec::H264, &decode_config()).expect("VAAPI H.264 decoder");
+		let mut decoder = Vaapi::open(&Codec::H264.into(), &decode_config()).expect("VAAPI H.264 decoder");
 
 		let mut decoded = Vec::new();
 		for i in 0..10u64 {
@@ -351,8 +403,8 @@ mod tests {
 			..EncodeConfig::new(w, h, crate::FrameRate::new(30, 1).unwrap())
 		})
 		.unwrap();
-		let mut exporting = Vaapi::open(Codec::H264, &gpu_decode_config()).expect("VAAPI H.264 decoder");
-		let mut downloading = Vaapi::open(Codec::H264, &decode_config()).expect("a second decoder");
+		let mut exporting = Vaapi::open(&Codec::H264.into(), &gpu_decode_config()).expect("VAAPI H.264 decoder");
+		let mut downloading = Vaapi::open(&Codec::H264.into(), &decode_config()).expect("a second decoder");
 
 		let mut exported = Vec::new();
 		let mut downloaded = Vec::new();
@@ -441,7 +493,7 @@ mod tests {
 			..EncodeConfig::new(w, h, crate::FrameRate::new(30, 1).unwrap())
 		})
 		.unwrap();
-		let mut decoder = Vaapi::open(Codec::H264, config).expect("VAAPI H.264 decoder");
+		let mut decoder = Vaapi::open(&Codec::H264.into(), config).expect("VAAPI H.264 decoder");
 
 		let mut streamed = Vec::new();
 		for i in 0..FRAMES {
