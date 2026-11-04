@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { type Browser, type CDPSession, chromium, type Page } from "playwright";
 import { install as countCalls, withoutGetStats, withoutWebTransport } from "./calls.ts";
+import { Consoles, type Identity } from "./consoles.ts";
 import { install, read } from "./counters.ts";
 import { check, digest, payload } from "./fixture.ts";
 import type { Cmaf, Phase } from "./page/cmaf.ts";
@@ -45,6 +46,7 @@ if (!values.relay || !values.dist || !values.out || !values.variants)
 const relay = values.relay;
 const dist = values.dist;
 const out = values.out;
+await using consoles = new Consoles(join(out, "consoles.jsonl"));
 const variants = values.variants.split(",");
 if (!variants.includes("current")) throw new Error("--variants must include current");
 // The change under test is current against base; every control is judged against current.
@@ -333,16 +335,22 @@ interface Opened {
 	close: () => Promise<void>;
 }
 
+// How a page is instrumented, kept out of the identity its console entries carry.
+interface Instrumentation {
+	counted?: boolean;
+	init?: (() => void)[];
+	on?: Chromium;
+}
+
 async function open(
-	variant: string,
-	kind: string,
-	counted = false,
-	init: (() => void)[] = [],
-	on: Chromium = main,
+	identity: Identity,
+	{ counted = false, init = [], on = main }: Instrumentation = {},
 ): Promise<Opened> {
+	const { variant, kind } = identity;
 	const context = await on.browser.newContext({ viewport: { width: 1280, height: 720 } });
 	const page = await context.newPage();
 	const errors: string[] = [];
+	consoles.attach(page, identity);
 	page.on("pageerror", (error) => errors.push(error.message));
 	if (counted) await page.addInitScript(install);
 	for (const script of init) await page.addInitScript(script);
@@ -464,8 +472,11 @@ async function transport(
 		full: pass === "counted",
 	};
 	const key = `transport ${shape.size}B x${shape.frames}`;
-	const publisher = await open(variant, "transport");
-	const consumer = await open(variant, "transport", pass === "counted");
+	const publisher = await open({ variant, kind: "transport", role: "publisher", key, round, pass });
+	const consumer = await open(
+		{ variant, kind: "transport", role: "consumer", key, round, pass },
+		{ counted: pass === "counted" },
+	);
 	try {
 		await bounded(
 			publisher.page.evaluate((config) => window.transport.publish(config), config),
@@ -552,7 +563,7 @@ function gcMetrics(gc: ReturnType<typeof collections>) {
 
 async function cmaf(variant: string, shape: Cmaf, round: number, pass: Pass) {
 	const key = `cmaf ${shape.kind}`;
-	const opened = await open(variant, "cmaf");
+	const opened = await open({ variant, kind: "cmaf", role: "decoder", key, round, pass });
 	try {
 		await opened.page.evaluate((shape) => window.cmaf.prepare(shape), shape);
 		const expected = shape.sizes.reduce((sum, size, frame) => {
@@ -647,7 +658,7 @@ async function racing(variant: string, shape: RacingShape, round: number) {
 	const key = racingKey(shape);
 	const marker = `rh${crypto.randomUUID().replaceAll("-", "")}`;
 	const config: Racing = { url: relay, marker, ...shape };
-	const opened = await open(variant, "racing");
+	const opened = await open({ variant, kind: "racing", role: "consumer", key, round, pass: "timed" });
 	try {
 		await opened.cdp.send("HeapProfiler.enable");
 		await opened.cdp.send("HeapProfiler.collectGarbage");
@@ -735,8 +746,8 @@ async function racing(variant: string, shape: RacingShape, round: number) {
 async function media(variant: string, round: number, pass: Pass) {
 	const config: Media = { url: relay, path: `media/${crypto.randomUUID()}`, ...MEDIA, probe: pass === "probed" };
 	const key = `media ${MEDIA.width}x${MEDIA.height}@${MEDIA.fps}`;
-	const publisher = await open(variant, "media");
-	const watcher = await open(variant, "media");
+	const publisher = await open({ variant, kind: "media", role: "publisher", key, round, pass });
+	const watcher = await open({ variant, kind: "media", role: "consumer", key, round, pass });
 	try {
 		await bounded(
 			publisher.page.evaluate((config) => window.media.publish(config), config),
@@ -860,7 +871,7 @@ async function sampling(variant: string, shape: SamplingShape, round: number, pa
 	if (shape.mode === "qmux") init.push(withoutWebTransport);
 	if (absent) init.push(withoutGetStats);
 	if (!exposed) throw new Error("the stats browser is not running");
-	const opened = await open(variant, "stats", false, init, exposed);
+	const opened = await open({ variant, kind: "stats", role: "sampler", key, round, pass }, { init, on: exposed });
 	try {
 		await bounded(
 			opened.page.evaluate((config) => window.stats.setup(config), config),
@@ -954,7 +965,10 @@ async function resume(variant: string, round: number) {
 	};
 	const key = `stats resume x${RESUME.cycles}`;
 	if (!exposed) throw new Error("the stats browser is not running");
-	const opened = await open(variant, "stats", false, [countCalls], exposed);
+	const opened = await open(
+		{ variant, kind: "stats", role: "sampler", key, round, pass: "timed" },
+		{ init: [countCalls], on: exposed },
+	);
 	try {
 		const waits = await bounded(
 			opened.page.evaluate((config) => window.stats.resume(config), config),

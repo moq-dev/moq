@@ -850,7 +850,7 @@ fn read(peer: &mut Peer, sent: &HashMap<(Side, StreamId), Sent>, id: StreamId, m
 		}
 	}
 
-	let _ = chunks.finalize();
+	chunks.finalize();
 }
 
 /// Odd streams are read through leases, since a plain read would skip what a lease holds.
@@ -867,7 +867,7 @@ fn lease(peer: &mut Peer, sent: &HashMap<(Side, StreamId), Sent>, id: StreamId, 
 	let Some((_, conn)) = &mut peer.conn else {
 		return;
 	};
-	let mut lease = match conn.recv_stream(id).lease(want).0 {
+	let mut lease = match conn.recv_stream(id).lease(want) {
 		Ok(lease) => lease,
 		Err(recv::Error::Evicted) => {
 			conn.recv_stream(id)
@@ -892,7 +892,7 @@ fn lease(peer: &mut Peer, sent: &HashMap<(Side, StreamId), Sent>, id: StreamId, 
 	}
 	*offset += n as u64;
 	lease.advance(n);
-	let _ = conn.recv_stream(id).release(lease);
+	conn.recv_stream(id).release(lease);
 }
 
 /// The byte a writer puts at `offset` of a stream, unique enough to catch misplaced data.

@@ -394,6 +394,16 @@ export function waitsForSubscriberFin(version: Version): boolean {
 	return hasTrackStream(version);
 }
 
+/**
+ * Whether the Subscribe Stream stays open past SUBSCRIBE_FINISH (SUBSCRIBE_END before lite-07)
+ * and past a covered bounded subscription, so a SUBSCRIBE_UPDATE can still reach the track's
+ * history. The subscriber FINs once it wants nothing more, and the publisher FINs in reply.
+ * Added in lite-07; before it the publisher FINs once the track ends.
+ */
+export function keepsSubscribeOpen(version: Version): boolean {
+	return hasRanges(version);
+}
+
 /** Whether the announce stream has ANNOUNCE_RESTART: another publisher instance replacing an
  * advertisement in place. Added in lite-07. Older versions send an ANNOUNCE_END then an
  * ANNOUNCE_START. */

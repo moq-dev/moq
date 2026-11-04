@@ -537,7 +537,8 @@ plan_pass() {
 }
 plan_cases
 
-TARGET_BASE=""    # cargo target dir (resolved in require_tools)
+TARGET_BASE="" # cargo target dir (resolved in require_tools)
+EXAMPLES="$HARNESS_RUN/examples"
 PY=""             # python interpreter with the workspace moq build (set in prepare)
 C_INTEROP=""      # compiled C client binary (set in prepare)
 GO_INTEROP=""     # compiled Go client binary (set in prepare)
@@ -588,28 +589,42 @@ require_tools() {
 # Build moq-relay + moq-cli from the workspace. The relay is the spine of the
 # test, so a failure here aborts rather than marking a single client broken.
 build_relay_cli() {
+    local flag=() build_examples=0
+    [[ "$PROFILE" == "release" ]] && flag=(--release)
     if [[ -n "$RELAY" && -n "$MOQ" ]]; then
         [[ -x "$RELAY" && -x "$MOQ" ]] || {
             echo "override binaries are not executable" >&2
             exit 1
         }
-        return
+    else
+        build_examples=1
+        echo "building moq-relay + moq-cli ($PROFILE)..."
+        # ${arr[@]+...} guard: bash 3.2 (macOS /bin/bash) errors on "${flag[@]}" for
+        # an empty (debug) array under `set -u`.
+        (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-relay -p moq-cli) || {
+            echo "error: failed to build moq-relay / moq-cli" >&2
+            exit 1
+        }
+        [[ -n "$RELAY" ]] || RELAY="$TARGET_BASE/$PROFILE/moq-relay"
+        # The `moq-cli` crate ships its binary as `moq` (a `[[bin]]` override).
+        [[ -n "$MOQ" ]] || MOQ="$TARGET_BASE/$PROFILE/moq"
     fi
-    local flag=()
-    [[ "$PROFILE" == "release" ]] && flag=(--release)
-    echo "building moq-relay + moq-cli ($PROFILE)..."
-    # ${arr[@]+...} guard: bash 3.2 (macOS /bin/bash) errors on "${flag[@]}" for
-    # an empty (debug) array under `set -u`.
-    (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-relay -p moq-cli) || {
-        echo "error: failed to build moq-relay / moq-cli" >&2
-        exit 1
-    }
-    if [[ "$MEDIA" -eq 0 ]]; then
-        (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-cli --example interop-tail --example interop-catalog --example interop-audio --example interop-hls --example interop-control --example interop-goaway --example interop-goaway-client --example interop-finish)
+    harness_stage bin/moq-relay "$RELAY"
+    harness_stage bin/moq "$MOQ"
+    RELAY="$HARNESS_RUN/bin/moq-relay"
+    MOQ="$HARNESS_RUN/bin/moq"
+    if [[ -n "${INTEROP_SUB_MOQ:-}" ]]; then
+        harness_stage bin/moq-sub "$INTEROP_SUB_MOQ"
+        INTEROP_SUB_MOQ="$HARNESS_RUN/bin/moq-sub"
     fi
-    [[ -n "$RELAY" ]] || RELAY="$TARGET_BASE/$PROFILE/moq-relay"
-    # The `moq-cli` crate ships its binary as `moq` (a `[[bin]]` override).
-    [[ -n "$MOQ" ]] || MOQ="$TARGET_BASE/$PROFILE/moq"
+    if [[ "$build_examples" -eq 1 && "$MEDIA" -eq 0 ]]; then
+        local example args=() examples=(interop-tail interop-catalog interop-audio interop-hls interop-control interop-goaway interop-goaway-client interop-finish)
+        for example in "${examples[@]}"; do args+=(--example "$example"); done
+        (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-cli "${args[@]}")
+        for example in "${examples[@]}"; do
+            harness_stage "examples/$example" "$TARGET_BASE/$PROFILE/examples/$example"
+        done
+    fi
 }
 
 # Build the workspace Python packages as wheels (maturin builds rs/moq-ffi, hatchling
@@ -776,6 +791,8 @@ prepare_c() {
         mark_broken c "moq-c artifacts missing ($header / $lib)"
         return
     }
+    harness_stage c/include/moq.h "$header"
+    harness_stage c/libmoq.a "$lib"
     # cargo can't inject libmoq.a's native deps into an external link, so read
     # them from the same list moq-c.pc and CMake use.
     local native_libs
@@ -792,7 +809,7 @@ prepare_c() {
         esac
     done <"$native_libs"
     C_INTEROP="$HARNESS_RUN/c-interop"
-    if ! "$cc" "$CLIENTS/c/subscribe.c" -I"$out_dir/include" -L"$TARGET_BASE/$PROFILE" -lmoq "${os_libs[@]}" -o "$C_INTEROP" >"$HARNESS_RUN/c-compile.log" 2>&1; then
+    if ! "$cc" "$CLIENTS/c/subscribe.c" -I"$HARNESS_RUN/c/include" "$HARNESS_RUN/c/libmoq.a" "${os_libs[@]}" -o "$C_INTEROP" >"$HARNESS_RUN/c-compile.log" 2>&1; then
         mark_broken c "cc compile failed"
         sed 's/^/        /' "$HARNESS_RUN/c-compile.log" >&2 || true
     fi
@@ -821,7 +838,10 @@ prepare_gst() {
         sed 's/^/        /' "$HARNESS_RUN/gst-build.log" >&2 || true
         return
     fi
-    GST_PLUGIN_DIR="$TARGET_BASE/$PROFILE"
+    local extension=so
+    [[ "$(uname -s)" != Darwin ]] || extension=dylib
+    harness_stage "gst/libgstmoq.$extension" "$TARGET_BASE/$PROFILE/libgstmoq.$extension"
+    GST_PLUGIN_DIR="$HARNESS_RUN/gst"
     # Use the packaging smoke check's isolated discovery and factory assertions.
     if ! "$WORKSPACE/rs/moq-gst/smoke.sh" "$GST_PLUGIN_DIR" >"$HARNESS_RUN/gst-inspect.log" 2>&1; then
         mark_broken gst "moqsrc not exposed (plugin failed to load against this GStreamer)"
@@ -1382,7 +1402,7 @@ PYCODE
             local n connect audio_pid="" audio_status=0
             rust_connect "$url"
             if [[ "$AUDIO" -eq 1 ]]; then
-                timeout -k 3 "$TIMEOUT" "$TARGET_BASE/$PROFILE/examples/interop-audio" \
+                timeout -k 3 "$TIMEOUT" "$EXAMPLES/interop-audio" \
                     "$url" "$broadcast" "$audio_out" "$AUDIO_MS" "$(cell_version rust)" &
                 audio_pid=$!
             fi
@@ -1612,7 +1632,7 @@ run_finish_client() {
     if [[ "$role" == publish ]]; then args+=(--finish-ack "$ack"); else args+=(--finish --frames 10); fi
     case "$lang/$role" in python/publish | go/publish | cpp/publish) args+=(--tone "$(publisher_tone "$lang")") ;; esac
     case "$lang" in
-        rust) timeout -k 3 "$limit" "$TARGET_BASE/$PROFILE/examples/interop-finish" "${args[@]}" ;;
+        rust) timeout -k 3 "$limit" "$EXAMPLES/interop-finish" "${args[@]}" ;;
         python) timeout -k 3 "$limit" "$PY" "$CLIENTS/python/interop.py" "${args[@]}" ;;
         go) timeout -k 3 "$limit" "$GO_INTEROP" "${args[@]}" ;;
         cpp) timeout -k 3 "$limit" "$CPP_INTEROP" "${args[@]}" ;;
@@ -1832,7 +1852,7 @@ run_tail_client() {
         extra=("$version")
     fi
     case "$lang" in
-        rust) timeout -k 3 "$limit" "$TARGET_BASE/$PROFILE/examples/interop-tail" "$role" "$url" "$broadcast" ${extra[@]+"${extra[@]}"} ;;
+        rust) timeout -k 3 "$limit" "$EXAMPLES/interop-tail" "$role" "$url" "$broadcast" ${extra[@]+"${extra[@]}"} ;;
         js-native-node) (cd "$CLIENTS/js-native" && timeout -k 3 "$limit" node --import tsx tail.ts "$role" "$url" "$broadcast" ${extra[@]+"${extra[@]}"}) ;;
         js-native-bun) (cd "$CLIENTS/js-native" && timeout -k 3 "$limit" bun tail.ts "$role" "$url" "$broadcast" ${extra[@]+"${extra[@]}"}) ;;
         *)
@@ -2253,12 +2273,12 @@ run_control_case() {
     local runtime="$1" kind="$2" version name="$2-$1" started=$SECONDS
     local cell=(case="$kind" publisher=rust subscriber="$runtime" log="$LOGS/$name.log")
     version=$(pinned_version)
-    local command=("$TARGET_BASE/$PROFILE/examples/interop-control" "$kind" "$version" "${runtime##*-}")
+    local command=("$EXAMPLES/interop-control" "$kind" "$version" "${runtime##*-}")
     case "$kind" in
         status) cell=(case="wire track status" publisher=rust subscriber="$runtime" log="$LOGS/$name.log") ;;
-        goaway) command=("$TARGET_BASE/$PROFILE/examples/interop-goaway" "$version" "${runtime##*-}") ;;
+        goaway) command=("$EXAMPLES/interop-goaway" "$version" "${runtime##*-}") ;;
         reverse-goaway)
-            command=("$TARGET_BASE/$PROFILE/examples/interop-goaway-client" "$version")
+            command=("$EXAMPLES/interop-goaway-client" "$version")
             cell=(case=goaway publisher="$runtime" subscriber=rust log="$LOGS/$name.log")
             ;;
     esac
@@ -2289,7 +2309,7 @@ relay_inflated() {
 run_catalog_publisher() {
     local fifo="$1"
     shift
-    timeout -k 3 $((TIMEOUT * 2)) "$TARGET_BASE/$PROFILE/examples/interop-catalog" "$@" <"$fifo" 9>&-
+    timeout -k 3 $((TIMEOUT * 2)) "$EXAMPLES/interop-catalog" "$@" <"$fifo" 9>&-
 }
 
 # shellcheck disable=SC2329  # invoked indirectly via harness_spawn
@@ -2365,7 +2385,7 @@ run_hls_publisher() {
     local fifo="$1" runtime="$2"
     shift 2
     case "$runtime" in
-        rust) timeout -k 3 $((TIMEOUT * 2)) "$TARGET_BASE/$PROFILE/examples/interop-hls" publish "$@" <"$fifo" 9>&- ;;
+        rust) timeout -k 3 $((TIMEOUT * 2)) "$EXAMPLES/interop-hls" publish "$@" <"$fifo" 9>&- ;;
         js-native-node) (cd "$CLIENTS/js-native" && timeout -k 3 $((TIMEOUT * 2)) node --import tsx hls.ts "$@" <"$fifo" 9>&-) ;;
         js-native-bun) (cd "$CLIENTS/js-native" && timeout -k 3 $((TIMEOUT * 2)) bun hls.ts "$@" <"$fifo" 9>&-) ;;
     esac
@@ -2389,7 +2409,7 @@ run_hls_records() {
     for publisher in rust "$runtime"; do
         harness_spawn "$name-$publisher-pub" "$LOGS/$name-$publisher-pub.log" run_hls_publisher "$fifo" "$publisher" "$(token_url --publish "$broadcast-$publisher/**")" "$broadcast-$publisher"
         pid="$HARNESS_PID"
-        harness_spawn "$name-$publisher-read" "$LOGS/$name-$publisher-read.log" timeout -k 3 "$TIMEOUT" "$TARGET_BASE/$PROFILE/examples/interop-hls" read "$(token_url --subscribe "$broadcast-$publisher/**")" "$broadcast-$publisher"
+        harness_spawn "$name-$publisher-read" "$LOGS/$name-$publisher-read.log" timeout -k 3 "$TIMEOUT" "$EXAMPLES/interop-hls" read "$(token_url --subscribe "$broadcast-$publisher/**")" "$broadcast-$publisher"
         harness_wait "$HARNESS_PID" || why="${why:-$publisher records unreadable}"
         printf 'clean end\n' >&9
         harness_wait "$pid" || true
