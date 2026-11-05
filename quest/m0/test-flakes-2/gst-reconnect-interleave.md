@@ -11,6 +11,23 @@ each failure below and shows the loaded run that reproduced it now passing.
 
 ## Plan
 
+Investigation 2026-11-04: the unchanged ignored test passed once alone, 50
+repetitions alongside `just check`, and 100 repetitions alongside
+`just check --all`, all through `quest gate` in the pinned Nix shell.
+The first accompanying check passed. Cargo build locks serialized parts
+of the full-workspace sweep, so these runs do not prove the race absent.
+No failure was reproduced and no source change is justified yet; keep the
+ignore until a failing schedule is captured.
+
+The historical `Unroutable` in
+[moq-dev/moq#7296](https://github.com/moq-dev/moq/pull/7296) came from
+`stop()` unwrapping the session result (line 3822 at merged commit
+`103e98e3624c193fc320e6513d0fb473a6cbe381`), not from
+`publication.announce()`. The failing session operation remains unknown.
+Media delivery still does not acknowledge catalog reconciliation, so a
+controlled schedule around relist reconciliation and route withdrawal
+is the next investigative lead, not a verified fix.
+
 Planned 2026-11-04 with the maintainer, from
 [moq-dev/moq#7888](https://github.com/moq-dev/moq/pull/7888)'s suggested
 follow-ups. No quest or open PR tracked it.
