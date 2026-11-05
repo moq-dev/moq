@@ -6086,20 +6086,28 @@ pub(super) fn assert_on_time(frames: &[Frame]) -> usize {
 	const WRAP: i128 = 1 << 33;
 	let ts: Vec<u8> = frames.iter().flat_map(|f| f.payload.iter().copied()).collect();
 	// PCRs unwrapped from the first, which a start a window before the timeline may wrap.
-	let mut pcrs: Vec<(usize, f64)> = Vec::new();
+	let mut pcrs: Vec<(usize, f64, bool)> = Vec::new();
 	for (at, base, _) in collect_pcrs(frames) {
+		let discontinuity = ts[at * 188 + 5] & 0x80 != 0;
 		let base = base as i128;
 		let value = match pcrs.last() {
-			Some(&(_, last)) => last + ((base - last as i128).rem_euclid(WRAP)) as f64,
+			Some(&(_, last, _)) => last + ((base - last as i128).rem_euclid(WRAP)) as f64,
 			None => base as f64,
 		};
-		pcrs.push((at, value));
+		pcrs.push((at, value, discontinuity));
 	}
-	let first = pcrs.first().map_or(0.0, |&(_, value)| value);
+	let first = pcrs.first().map_or(0.0, |&(_, value, _)| value);
 	let time = |at: usize| {
-		let k = pcrs.partition_point(|&(index, _)| index <= at).checked_sub(1)?;
-		let (&(a, ta), &(b, tb)) = (pcrs.get(k)?, pcrs.get(k + 1)?);
-		Some(ta + (tb - ta) * (at - a) as f64 / (b - a) as f64)
+		let k = pcrs.partition_point(|&(index, _, _)| index < at).checked_sub(1)?;
+		let (&(a, ta, _), &(b, tb, discontinuity)) = (pcrs.get(k)?, pcrs.get(k + 1)?);
+		// A flagged jump starts after the preceding slot's bytes finished. Spreading it
+		// over those bytes would make media delivered on the old clock look late.
+		let span = if discontinuity {
+			PCR_INTERVAL.as_secs_f64() * 90_000.0
+		} else {
+			tb - ta
+		};
+		Some(ta + span * (at - a) as f64 / (b - a) as f64)
 	};
 	// Each PES: its PID, DTS (else PTS) on the PCRs' unwrapped scale, and its last packet.
 	let mut units: Vec<(u16, f64, usize)> = Vec::new();
@@ -8451,70 +8459,138 @@ async fn jitter_published_after_the_tables_keeps_the_encoders_clock() {
 	assert_decodes_after_the_clock(&runner);
 }
 
-/// A group the consumer skips (here one that never arrives) leaves the timeline where it was,
-/// so the export keeps its clock: the program clock runs on with no break flagged, and a
-/// frame the wait made late would be dropped like any other.
+/// A delivery skip flags the next PCR without changing the program or its release clock.
+/// Short holes keep the grid continuous; long ones exceed the scheduler's backfill window.
 #[tokio::test(start_paused = true)]
-async fn a_skipped_group_keeps_the_clock() {
-	use crate::container::Container as _;
-
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let consumer = broadcast.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
-	let track = broadcast
-		.create_track("a.aac", hang::container::track_info(hang::catalog::PRIORITY.audio))
-		.unwrap();
-	{
-		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
-		cfg.description = Some(Bytes::from_static(&[0x11, 0x90]));
-		cfg.container = Container::Legacy;
-		catalog
-			.modify()
-			.unwrap()
-			.audio
-			.renditions
-			.insert("a.aac".to_string(), cfg);
-	}
-
-	let delay = Duration::from_millis(500);
-	let mut export = open_export(crate::source::announced(&consumer).await)
-		.await
-		.unwrap()
-		.with_delay(delay);
-	let start = kio::clock::now();
-	let mut out = Vec::new();
-	// 100 ms groups of five 20 ms frames, a minute in; group 20 never arrives.
-	for sequence in 0..60u64 {
-		kio::clock::sleep_until(start + Duration::from_millis(sequence * 100)).await;
-		if sequence != 20 {
-			let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
-			for k in 0..5u64 {
-				let frame = Frame {
-					timestamp: Timestamp::from_millis(60_000 + sequence * 100 + k * 20).unwrap(),
-					duration: None,
-					payload: Bytes::from_static(&[0x21, 0x10, 0x04, 0x60]),
-					keyframe: k == 0,
-				};
-				HangContainer::Legacy(crate::container::Kind::Audio)
-					.write(&mut group, &[frame])
-					.unwrap();
+async fn a_skipped_group_flags_the_clock() {
+	let cases = [Duration::ZERO, Duration::from_millis(500)]
+		.into_iter()
+		.flat_map(|delay| [None, Some(1_000_000)].map(|rate| (delay, rate)));
+	for (delay, rate) in cases {
+		for missing in [0, 1, 60u64] {
+			println!("delay {delay:?}, mux rate {rate:?}, missing {missing} groups per hole");
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let consumer = broadcast.consume();
+			let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+			let track = broadcast
+				.create_track("a.aac", hang::container::track_info(hang::catalog::PRIORITY.audio))
+				.unwrap();
+			{
+				let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+				cfg.description = Some(Bytes::from_static(&[0x11, 0x90]));
+				cfg.container = Container::Legacy;
+				catalog
+					.modify()
+					.unwrap()
+					.audio
+					.renditions
+					.insert("a.aac".to_string(), cfg);
 			}
-			group.finish().unwrap();
-		}
-		out.extend(poll_frames(&mut export));
-	}
-	track.finish().unwrap();
-	out.extend(drain_frames(&mut export).await);
 
-	assert_eq!(export.discontinuity(), 0, "a skipped group is not a new program clock");
-	assert_eq!(count_discontinuity(&out), 0, "no PCR break is flagged");
-	let ts: Vec<u8> = out.iter().flat_map(|f| f.payload.iter().copied()).collect();
-	let (_, audio) = collect_pes_pts(&ts);
+			let mut export = open_export(crate::source::announced(&consumer).await)
+				.await
+				.unwrap()
+				.with_delay(delay);
+			if let Some(rate) = rate {
+				export = export.with_mux_rate(rate);
+			}
+			let start = kio::clock::now();
+			let mut out = Vec::new();
+			// 100 ms groups of five 20 ms frames, a minute in, with two short or long holes.
+			for sequence in 0..80 + 2 * missing {
+				kio::clock::sleep_until(start + Duration::from_millis(sequence * 100)).await;
+				if !(20..20 + missing).contains(&sequence) && !(40 + missing..40 + 2 * missing).contains(&sequence) {
+					let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+					for k in 0..5u64 {
+						let frame = Frame {
+							timestamp: Timestamp::from_millis(60_000 + sequence * 100 + k * 20).unwrap(),
+							duration: None,
+							payload: Bytes::from_static(&[0x21, 0x10, 0x04, 0x60]),
+							keyframe: k == 0,
+						};
+						HangContainer::Legacy(crate::container::Kind::Audio)
+							.write(&mut group, &[frame])
+							.unwrap();
+					}
+					group.finish().unwrap();
+				}
+				out.extend(poll_frames(&mut export));
+			}
+			track.finish().unwrap();
+			out.extend(drain_frames(&mut export).await);
+
+			assert_eq!(export.discontinuity(), 0, "a skipped group is not a new program clock");
+			assert_skip_discontinuity(&out, 2 * usize::from(missing > 0));
+			let ts: Vec<u8> = out.iter().flat_map(|f| f.payload.iter().copied()).collect();
+			// Each flag lands right before the audio that resumes after its hole.
+			let resumes: Vec<u64> = [20 + missing, 40 + 2 * missing]
+				.into_iter()
+				.filter(|_| missing > 0)
+				.map(|sequence| (60_000 + sequence * 100) * 90)
+				.collect();
+			let mut reader = TsPacketReader::new(Cursor::new(&ts));
+			let (mut flagged, mut after) = (false, Vec::new());
+			while let Some(packet) = reader.read_ts_packet().unwrap() {
+				flagged |= packet
+					.adaptation_field
+					.is_some_and(|field| field.discontinuity_indicator);
+				if let Some(TsPayload::PesStart(pes)) = packet.payload
+					&& std::mem::take(&mut flagged)
+				{
+					after.extend(pes.header.pts.map(|pts| pts.as_u64()));
+				}
+			}
+			assert_eq!(after, resumes, "the first PES after each flag resumes its hole");
+			let (_, audio) = collect_pes_pts(&ts);
+			assert!(
+				audio.iter().any(|&pts| pts >= (60_000 + (70 + 2 * missing) * 100) * 90),
+				"the audio after the skip went out"
+			);
+			assert_on_time(&out);
+		}
+	}
+}
+
+/// A same-program skip changes only the next PCR's flag, including across a backfilled gap.
+fn assert_skip_discontinuity(frames: &[Frame], count: usize) {
+	assert_eq!(count_discontinuity(frames), count, "only one PCR per skip is flagged");
 	assert!(
-		audio.iter().any(|&pts| pts >= (60_000 + 5_000) * 90),
-		"the audio after the skip went out"
+		pats(frames).iter().all(|&(version, _)| version == 0),
+		"the PAT keeps its version"
 	);
-	assert_on_time(&out);
+	assert!(
+		pmts(frames).iter().all(|(version, _)| *version == 0),
+		"the PMT keeps its version"
+	);
+	let mut health = super::health::Health::default();
+	let mut continuity = super::health::Multiplex::default();
+	let ts: Vec<u8> = frames.iter().flat_map(|f| f.payload.iter().copied()).collect();
+	let mut reader = TsPacketReader::new(Cursor::new(&ts));
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		if let Some(TsPayload::Pmt(pmt)) = packet.payload {
+			health.pcr_pid(pmt.pcr_pid.map(|pid| pid.as_u16()));
+			break;
+		}
+	}
+	let start = kio::clock::Instant::now();
+	for (count, packet) in ts.as_chunks::<188>().0.iter().enumerate() {
+		if packet[3] & 0x20 != 0 && packet[4] > 0 && packet[5] & 0x80 != 0 {
+			assert_ne!(packet[5] & 0x10, 0, "a skip flags only a PCR packet");
+		}
+		let continuation = continuity.packet(packet);
+		health.packet(
+			packet,
+			continuation,
+			super::health::At {
+				count: count as u64 + 1,
+				arrival: start,
+			},
+		);
+	}
+	let mut stats = stats::Snapshot::default();
+	health.errors().report(&mut stats);
+	assert_eq!(stats.pcr_discontinuity_indicator_error, 0, "no unflagged PCR jump");
+	assert_eq!(stats.pcr_repetition_error, 0, "no unflagged gap after the flagged PCR");
 }
 
 /// Timestamps restarting within one broadcast are a publisher bug, since a name always
@@ -8758,8 +8834,8 @@ async fn moved_export(
 
 /// A rendition the catalog moves to another track, in its broadcast or a sibling one, goes on
 /// out of the PID the PMT announced, with that track's media and none of the one it left. The
-/// continuity counters run on, and the move onto the same clock is no break. Its parameter sets
-/// ride in-band, so the new track may carry another SPS.
+/// continuity counters run on, and only the PCR flags the media skipped by the move. Its
+/// parameter sets ride in-band, so the new track may carry another SPS.
 #[tokio::test(start_paused = true)]
 async fn a_moved_rendition_continues_on_its_pid() {
 	use crate::container::test_util::{Moving, marks};
@@ -8776,11 +8852,7 @@ async fn a_moved_rendition_continues_on_its_pid() {
 			"the new track's parameter sets go out in-band"
 		);
 		assert_eq!(continuity_errors(&frames), 0);
-		assert_eq!(
-			count_discontinuity(&frames),
-			0,
-			"a move onto the same clock is no break"
-		);
+		assert_skip_discontinuity(&frames, 1);
 		assert!(
 			pmts(&frames).iter().all(|(version, _)| *version == 0),
 			"the PMT stays as announced"
@@ -8970,8 +9042,8 @@ fn unflagged(frames: &[Frame]) -> Vec<u16> {
 }
 
 /// The same instance back after every route went carries on in the same export, under the
-/// program already announced: the PSI keeps its version, and nothing flags a break across a
-/// gap the clock spans. Both ways a broadcast ends, a clean finish and a drop, continue alike.
+/// program already announced: the PSI keeps its version, and only the PCR flags the gap.
+/// Both ways a broadcast ends, a clean finish and a drop, continue alike.
 async fn same_instance_returns(finish: bool) {
 	let origin = crate::source::produce_origin();
 	let instance = moq_net::Instance::random();
@@ -9009,6 +9081,7 @@ async fn same_instance_returns(finish: bool) {
 		.unwrap()
 		.available()
 		.await
+		.unwrap()
 		.unwrap();
 	let stream = crate::catalog::Consumer::new(&back, Default::default()).await.unwrap();
 	let mut export = export.follow(back, stream).unwrap();
@@ -9026,7 +9099,7 @@ async fn same_instance_returns(finish: bool) {
 	end.unwrap();
 
 	assert_eq!(pes_count(&frames), 20, "every frame of both spans went out");
-	assert_eq!(count_discontinuity(&frames), 0, "a gap the clock spans is no break");
+	assert_skip_discontinuity(&frames, 1);
 	assert_eq!(export.discontinuity(), 0);
 	assert!(
 		pats(&frames).iter().all(|&(version, _)| version == 0),
@@ -9091,6 +9164,7 @@ async fn a_return_keeps_catalog_and_group_history() {
 		.unwrap()
 		.available()
 		.await
+		.unwrap()
 		.unwrap();
 	assert_eq!(back.info().instance.as_ref(), Some(&instance));
 	assert!(!back.is_clone(&old), "the withdrawn front is replaced");
@@ -9110,7 +9184,7 @@ async fn a_return_keeps_catalog_and_group_history() {
 	frames.extend(rest);
 	end.expect("the publisher's final finish is clean");
 	assert_eq!(pes_count(&frames), 20, "each span goes out exactly once");
-	assert_eq!(count_discontinuity(&frames), 0);
+	assert_skip_discontinuity(&frames, 1);
 	assert_eq!(export.discontinuity(), 0);
 	assert!(pats(&frames).iter().all(|&(version, _)| version == 0));
 	assert!(pmts(&frames).iter().all(|(version, _)| *version == 0));
@@ -9375,6 +9449,7 @@ async fn export_stats_count_only_returned_output() {
 		.unwrap()
 		.available()
 		.await
+		.unwrap()
 		.unwrap();
 	let stream = crate::catalog::Consumer::new(&back, Default::default()).await.unwrap();
 	let mut export = export.follow(back, stream).unwrap();
@@ -10350,8 +10425,8 @@ async fn drain_follower(follower: &mut super::Follower) -> (Vec<Frame>, Option<c
 
 /// The route going and another of the same instance taking over after a gap that ended the
 /// export's request, with the follower unpolled across it, is its own instance returning: the
-/// export carries on through the new route under the program already announced, with no break
-/// flagged.
+/// export carries on through the new route under the program already announced, flagging
+/// only the next PCR after the skip.
 #[tokio::test(start_paused = true)]
 async fn a_follower_continues_through_a_same_instance_handoff_after_a_gap() {
 	let origin = crate::source::produce_origin();
@@ -10400,7 +10475,7 @@ async fn a_follower_continues_through_a_same_instance_handoff_after_a_gap() {
 	);
 
 	assert_eq!(pes_count(&frames), 20, "every frame of both routes went out");
-	assert_eq!(count_discontinuity(&frames), 0, "the same instance is no break");
+	assert_skip_discontinuity(&frames, 1);
 	assert_eq!(follower.export().discontinuity(), 0);
 	assert!(
 		pats(&frames).iter().all(|&(version, _)| version == 0),
@@ -11516,6 +11591,7 @@ async fn a_track_renamed_on_its_pid_across_returns_retires_the_one_before() {
 			.unwrap()
 			.available()
 			.await
+			.unwrap()
 			.unwrap();
 		let stream = crate::catalog::Consumer::new(&back, Default::default()).await.unwrap();
 		export = export.follow(back, stream).unwrap();
@@ -11582,6 +11658,7 @@ async fn a_track_renamed_on_its_pid_across_a_return_is_quiet_from_its_listing() 
 		.unwrap()
 		.available()
 		.await
+		.unwrap()
 		.unwrap();
 	let stream = crate::catalog::Consumer::new(&back, Default::default()).await.unwrap();
 	let mut export = export.follow(back, stream).unwrap();
@@ -11988,6 +12065,7 @@ async fn an_expired_follow_stops_healthy_input_but_drains_its_buffered_tail() {
 				.unwrap()
 				.available()
 				.await
+				.unwrap()
 				.unwrap();
 			let stream = crate::catalog::Consumer::new(&target, Default::default())
 				.await
@@ -12145,6 +12223,7 @@ async fn a_replacement_leaving_before_it_commits_keeps_the_old_program() {
 				.unwrap()
 				.available()
 				.await
+				.unwrap()
 				.unwrap();
 			let stream = crate::catalog::Consumer::new(&target, Default::default())
 				.await
@@ -12275,6 +12354,7 @@ async fn an_empty_finished_replacement_drains_the_old_program() {
 		.unwrap()
 		.available()
 		.await
+		.unwrap()
 		.unwrap();
 	let stream = crate::catalog::Consumer::new(&replacement, Default::default())
 		.await
@@ -12333,6 +12413,7 @@ async fn cold_same_instance_return(pending: bool) {
 			.unwrap()
 			.available()
 			.await
+			.unwrap()
 			.unwrap();
 		let stream = crate::catalog::Consumer::new(&target, Default::default())
 			.await
@@ -12363,6 +12444,7 @@ async fn cold_same_instance_return(pending: bool) {
 		.unwrap()
 		.available()
 		.await
+		.unwrap()
 		.unwrap();
 	let stream = crate::catalog::Consumer::new(&target, Default::default())
 		.await
