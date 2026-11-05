@@ -12,6 +12,7 @@ use std::sync::{Arc, Weak};
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::task::{Poll, ready};
 
+#[cfg(any(test, feature = "fuzz"))]
 use arrayvec::ArrayVec;
 use bytes::{Buf, Bytes, BytesMut};
 
@@ -320,9 +321,11 @@ impl From<Info> for Header {
 /// `max_age` to work through one batch calls
 /// [`group::Consumer::keep_alive`] between frames, or the rest of the group is
 /// expired out from under it.
+#[cfg(any(test, feature = "fuzz"))]
 #[derive(Debug, Default)]
-pub struct Buffer<const N: usize = 8>(ArrayVec<Frame, N>);
+pub(crate) struct Buffer<const N: usize = 8>(ArrayVec<Frame, N>);
 
+#[cfg(any(test, feature = "fuzz"))]
 impl<const N: usize> Buffer<N> {
 	/// An empty buffer with room for `N` frames.
 	pub fn new() -> Self {
@@ -1657,8 +1660,8 @@ impl Consumer {
 		let Some(expiry) = &self.expiry else {
 			return false;
 		};
-		let budget = self.recover.as_ref().and_then(|recover| recover.0.poll_budget(waiter));
-		if !expiry.policy.is_expired(budget, waiter) {
+		let recover = self.recover.as_ref().map(|recover| &recover.0);
+		if !expiry.policy.is_expired(recover, waiter) {
 			return false;
 		}
 
