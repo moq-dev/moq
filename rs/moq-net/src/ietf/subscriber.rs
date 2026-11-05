@@ -3116,12 +3116,13 @@ impl Subscriber {
 			}
 			None => {
 				let opening = self.session.clone();
+				let mut open = crate::transport::open::Open::default();
 				let stream = match kio::wait(|waiter| {
 					if gate.poll_denied(waiter).is_ready() {
 						return Poll::Ready(Err(Error::Unauthorized));
 					}
 					validity.check(waiter)?;
-					Stream::poll_open_request(&opening, self.version, waiter)
+					Stream::poll_open(&opening, &mut open, self.version, waiter)
 				})
 				.await
 				{
@@ -4268,12 +4269,13 @@ impl Subscriber {
 				// No ID is spent while opening a stream, so dropping a blocked open
 				// cannot leave a gap in the peer's sequential request IDs.
 				let opening = this.session.clone();
+				let mut open = crate::transport::open::Open::default();
 				let mut stream = kio::wait(|waiter| {
 					validity.check(waiter)?;
 					if let Poll::Ready(err) = track.poll_aborted(waiter) {
 						return Poll::Ready(Err(err));
 					}
-					Stream::poll_open(&opening, this.version, waiter)
+					Stream::poll_open(&opening, &mut open, this.version, waiter)
 				})
 				.await?;
 				stream = stream.with_stats(this.origin.stats());
@@ -4477,12 +4479,13 @@ impl Subscriber {
 		let dynamic = request.requests();
 		let validity = self.validity.start();
 		let opening = self.session.clone();
+		let mut open = crate::transport::open::Open::default();
 		let mut stream = match kio::wait(|waiter| {
 			if gate.poll_denied(waiter).is_ready() {
 				return Poll::Ready(Err(Error::Unauthorized));
 			}
 			validity.check(waiter)?;
-			Stream::poll_open_request(&opening, self.version, waiter)
+			Stream::poll_open(&opening, &mut open, self.version, waiter)
 		})
 		.await
 		{
@@ -5577,6 +5580,7 @@ impl Subscriber {
 		// The fill is already owned by waiting readers; credit backpressures it until
 		// their demand leaves instead of refusing accepted work.
 		let opening = self.session.clone();
+		let mut open = crate::transport::open::Open::default();
 		let mut stream = match kio::wait(|waiter| {
 			validity.check(waiter)?;
 			if let Poll::Ready(err) = fill.poll_aborted(waiter) {
@@ -5589,7 +5593,7 @@ impl Subscriber {
 			if let Poll::Ready(Err(err)) = timescale.poll(waiter) {
 				return Poll::Ready(Err(err));
 			}
-			Stream::poll_open(&opening, self.version, waiter)
+			Stream::poll_open(&opening, &mut open, self.version, waiter)
 		})
 		.await
 		{
@@ -6741,7 +6745,7 @@ mod tests {
 		let prefix = namespaces.pop().unwrap();
 
 		let (_live, live) = live();
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), Version::Draft18)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), Version::Draft18)
 			.await
 			.unwrap();
 		let mut run =
@@ -6777,7 +6781,7 @@ mod tests {
 			);
 
 			let (cancel, live) = live();
-			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 				.await
 				.unwrap();
 			let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(
@@ -6875,7 +6879,7 @@ mod tests {
 			.pop()
 			.expect("one prefix");
 		let (_live, live) = live();
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 		// Parks on the read after the scripted NAMESPACE is consumed.
@@ -6974,7 +6978,7 @@ mod tests {
 			.pop()
 			.expect("one prefix");
 		let (_live, live) = live();
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 		let mut run =
@@ -7039,7 +7043,7 @@ mod tests {
 			);
 
 			let (_live, live) = live();
-			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 				.await
 				.unwrap();
 			let res = subscriber
@@ -7136,7 +7140,7 @@ mod tests {
 			let (mut subscriber, consumer, snapshot) = counted_subscriber(VERSION, true, session.clone());
 			let mut cursor = consumer.announced();
 			let (_live, live) = live();
-			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 				.await
 				.unwrap();
 			let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(
@@ -7165,7 +7169,7 @@ mod tests {
 		let cursor = consumer.announced();
 		assert!(!cursor.is_synced());
 		let (_live, live) = live();
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 		let mut run =
@@ -7189,7 +7193,7 @@ mod tests {
 			}
 			let (mut subscriber, _consumer, snapshot) = counted_subscriber(VERSION, true, session.clone());
 			let (_live, live) = live();
-			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 				.await
 				.unwrap();
 			let res = subscriber
@@ -9104,7 +9108,7 @@ mod tests {
 		);
 
 		let (_live, live) = live();
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 		subscriber
@@ -9193,7 +9197,7 @@ mod tests {
 		);
 
 		let (_live, live) = live();
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 		let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(
@@ -9263,7 +9267,7 @@ mod tests {
 					tasks,
 					Default::default(),
 				);
-				let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+				let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 					.await
 					.unwrap();
 				let msg = ietf::PublishNamespace {
@@ -9331,7 +9335,7 @@ mod tests {
 		);
 
 		let path = crate::Path::from_static("room/host");
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 		let msg = ietf::PublishNamespace {
@@ -9728,7 +9732,7 @@ mod tests {
 		assert_eq!(id, 0, "the harness advertisement is the first");
 		assert!(routed_now(&consumer, "room/host").is_some(), "attached to start with");
 
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 		(subscriber, consumer, stream, driver, log)
@@ -9955,7 +9959,7 @@ mod tests {
 			.start_announce(path.clone(), advert, Admit::Token(Some(hold)))
 			.unwrap();
 
-		let mut stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), Version::Draft18)
+		let mut stream = Stream::open(&crate::driver::Transport::new(session.clone()), Version::Draft18)
 			.await
 			.unwrap();
 		let mut attached = Some(0);
@@ -10300,7 +10304,7 @@ mod tests {
 				Default::default(),
 			);
 
-			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 				.await
 				.unwrap();
 			let msg = ietf::Publish {
@@ -10515,7 +10519,7 @@ mod tests {
 	async fn a_publish_namespace_token_authorizes_an_uncovered_announce() {
 		const VERSION: Version = Version::Draft18;
 		let (mut subscriber, mut requests, _cred, consumer, session) = auth_announce_harness(VERSION, Vec::new());
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 
@@ -10557,7 +10561,7 @@ mod tests {
 			let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
 			let (mut subscriber, mut requests, _cred, consumer, session) =
 				auth_announce_harness_on(version, session.clone());
-			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 				.await
 				.unwrap();
 			let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
@@ -10634,7 +10638,7 @@ mod tests {
 	async fn a_refused_publish_namespace_token_is_not_announced() {
 		const VERSION: Version = Version::Draft18;
 		let (mut subscriber, mut requests, _cred, consumer, session) = auth_announce_harness(VERSION, Vec::new());
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 
@@ -10677,7 +10681,7 @@ mod tests {
 		let _cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
 		auth.granted(0, crate::auth::Grant::all());
 		let (mut subscriber, mut requests, consumer, session) = announce_harness_with(VERSION, auth);
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 
@@ -10731,7 +10735,7 @@ mod tests {
 		let auth = crate::auth::Link::new(false);
 		auth.handle().authorize(&limit("room"));
 		let (mut subscriber, mut requests, consumer, session) = announce_harness_with(VERSION, auth.clone());
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 		let consulted = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -10788,7 +10792,7 @@ mod tests {
 		let auth = crate::auth::Link::new(false);
 		auth.handle().authorize(&crate::auth::Grant::default());
 		let (mut subscriber, mut requests, consumer, session) = announce_harness_with(VERSION, auth.clone());
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 		let acceptor = async move {
@@ -10859,7 +10863,7 @@ mod tests {
 		// Serve the route, which the harness leaves undriven.
 		let (tasks, mut task_set) = crate::util::TaskSet::new();
 		subscriber.tasks = tasks;
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
@@ -10938,7 +10942,7 @@ mod tests {
 			let (mut subscriber, mut requests, _cred, consumer, session) =
 				auth_announce_harness(version, publish_namespace_update_with_token(version).await);
 			let rt = subscriber.runtime.clone();
-			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 				.await
 				.unwrap();
 
@@ -11015,7 +11019,7 @@ mod tests {
 		let (mut subscriber, mut requests, _cred, consumer, session) =
 			auth_announce_harness_on(VERSION, session.clone());
 		let rt = subscriber.runtime.clone();
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 
@@ -11078,7 +11082,7 @@ mod tests {
 				let (mut subscriber, mut requests, _cred, consumer, session) =
 					auth_announce_harness(version, Vec::new());
 				let rt = subscriber.runtime.clone();
-				let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+				let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 					.await
 					.unwrap();
 				let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
@@ -11156,7 +11160,7 @@ mod tests {
 		let (mut subscriber, mut requests, _cred, consumer, session) =
 			auth_announce_harness_on(VERSION, session.clone());
 		let rt = subscriber.runtime.clone();
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 
@@ -11197,7 +11201,7 @@ mod tests {
 			let (mut subscriber, mut requests, _cred, _consumer, session) =
 				auth_announce_harness(version, publish_namespace_update_with_token(version).await);
 			let rt = subscriber.runtime.clone();
-			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 				.await
 				.unwrap();
 
@@ -11280,7 +11284,7 @@ mod tests {
 		for version in [Version::Draft18, Version::Draft22] {
 			let (mut subscriber, mut requests, _cred, consumer, session) =
 				auth_announce_harness(version, publish_namespace_update_with_token(version).await);
-			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 				.await
 				.unwrap();
 			let run = std::pin::pin!(subscriber.run_publish_namespace_stream(
@@ -11316,7 +11320,7 @@ mod tests {
 		for version in [Version::Draft18, Version::Draft22] {
 			let (mut subscriber, _requests, _cred, consumer, session) = auth_announce_harness(version, Vec::new());
 			let probe = subscriber.clone();
-			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 				.await
 				.unwrap();
 			let run = std::pin::pin!(subscriber.run_publish_namespace_stream(
@@ -11347,7 +11351,7 @@ mod tests {
 			let (mut subscriber, _requests, _cred, consumer, session) = auth_announce_harness(version, Vec::new());
 			let auth = subscriber.auth.clone();
 			let probe = subscriber.clone();
-			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 				.await
 				.unwrap();
 			let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
@@ -11393,7 +11397,7 @@ mod tests {
 		let (mut subscriber, mut requests, _cred, consumer, session) =
 			auth_announce_harness(VERSION, publish_namespace_update_with_token_and_cluster(VERSION).await);
 		let rt = subscriber.runtime.clone();
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 
@@ -11480,7 +11484,7 @@ mod tests {
 		script.extend(publish_namespace_update_token_rid(VERSION, 0x07, Some(hop_path(&[7, 11])), None).await);
 		let (mut subscriber, mut requests, _cred, consumer, session) = auth_announce_harness(VERSION, script);
 		let rt = subscriber.runtime.clone();
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 
@@ -11563,7 +11567,7 @@ mod tests {
 		}
 		let (mut subscriber, mut requests, _cred, _consumer, session) = auth_announce_harness(VERSION, script);
 		let rt = subscriber.runtime.clone();
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 
@@ -11623,7 +11627,7 @@ mod tests {
 		}
 		let (mut subscriber, mut requests, _cred, _consumer, session) = auth_announce_harness(VERSION, script);
 		let rt = subscriber.runtime.clone();
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 
@@ -11668,7 +11672,7 @@ mod tests {
 		}
 		let (mut subscriber, mut requests, _cred, _consumer, session) = auth_announce_harness(VERSION, script);
 		let rt = subscriber.runtime.clone();
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 
@@ -11712,7 +11716,7 @@ mod tests {
 		}
 		let (mut subscriber, mut requests, _cred, _consumer, session) = auth_announce_harness(VERSION, script);
 		let rt = subscriber.runtime.clone();
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 
@@ -11763,7 +11767,7 @@ mod tests {
 		let (mut subscriber, mut requests, _cred, consumer, session) =
 			auth_announce_harness_on(VERSION, session.clone());
 		let rt = subscriber.runtime.clone();
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 
@@ -11881,7 +11885,7 @@ mod tests {
 		{
 			let (mut subscriber, mut requests, consumer, session) =
 				auth_announce_harness_no_ext(VERSION, Some(crate::auth::Grant::default()));
-			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 				.await
 				.unwrap();
 			let consulted = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -11930,7 +11934,7 @@ mod tests {
 		{
 			let (mut subscriber, mut requests, consumer, session) =
 				auth_announce_harness_no_ext(VERSION, Some(crate::auth::Grant::default()));
-			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 				.await
 				.unwrap();
 			let acceptor = async move {
@@ -11973,7 +11977,7 @@ mod tests {
 		]);
 		let (mut subscriber, mut requests, _cred, consumer, session) =
 			auth_announce_harness_on(VERSION, session.clone());
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 		let popped = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -12047,7 +12051,7 @@ mod tests {
 		let (mut subscriber, mut requests, _cred, _consumer, session) =
 			auth_announce_harness_on(VERSION, session.clone());
 		let control = subscriber.control.clone();
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 		let acceptor = async move {
@@ -12121,7 +12125,7 @@ mod tests {
 		]);
 		let (mut subscriber, mut requests, _cred, _consumer, session) =
 			auth_announce_harness_on(VERSION, session.clone());
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 		let acceptor = async move {
@@ -12178,7 +12182,7 @@ mod tests {
 		for (grant, admitted) in [(read_only, false), (write_only, true)] {
 			let (mut subscriber, mut requests, consumer, session) =
 				auth_announce_harness_no_ext(VERSION, Some(crate::auth::Grant::default()));
-			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 				.await
 				.unwrap();
 			let acceptor = async move {
@@ -12220,7 +12224,7 @@ mod tests {
 	async fn a_token_less_request_on_a_no_auth_session_is_unchanged() {
 		const VERSION: Version = Version::Draft18;
 		let (mut subscriber, _requests, consumer, session) = auth_announce_harness_no_ext(VERSION, None);
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 
@@ -13214,7 +13218,7 @@ mod stitch_tests {
 			.unwrap();
 			ietf::Subscribe::ID
 		};
-		let stream = Stream::open(&mut crate::driver::Transport::new(downstream.clone()), egress)
+		let stream = Stream::open(&crate::driver::Transport::new(downstream.clone()), egress)
 			.await
 			.unwrap();
 		publisher

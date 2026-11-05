@@ -412,9 +412,9 @@ impl Subscriber {
 			return Ok(());
 		}
 
-		let mut session = self.session.clone();
+		let session = self.session.clone();
 		let opened = {
-			let mut opening = std::pin::pin!(Stream::open_request(&mut session, self.version));
+			let mut opening = std::pin::pin!(Stream::open(&session, self.version));
 			kio::wait(|waiter| {
 				if live.poll_closed(waiter).is_ready() {
 					return Poll::Ready(None);
@@ -611,9 +611,9 @@ impl Subscriber {
 				})
 				.is_ready()
 		};
-		let mut session = self.session.clone();
+		let session = self.session.clone();
 		let opened = {
-			let mut opening = std::pin::pin!(Stream::open_request(&mut session, self.version));
+			let mut opening = std::pin::pin!(Stream::open(&session, self.version));
 			kio::wait(|waiter| {
 				if gone(waiter) {
 					return Poll::Ready(None);
@@ -1504,7 +1504,7 @@ mod tests {
 
 		/// Send `publish`, returning the answer.
 		async fn offer(&mut self, publish: ietf::Publish<'_>) -> (PeerStream, u64, ietf::Body) {
-			let mut stream = Stream::open(&mut crate::driver::Transport::new(self.peer.clone()), self.version)
+			let mut stream = Stream::open(&crate::driver::Transport::new(self.peer.clone()), self.version)
 				.await
 				.unwrap();
 			stream.writer.encode_message(&publish).await.unwrap();

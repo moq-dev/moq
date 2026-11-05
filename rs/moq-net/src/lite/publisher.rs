@@ -5433,7 +5433,9 @@ impl CoverageBench {
 		let version = Version::Lite07;
 		let (local, peer) = crate::transport::memory::pair(Default::default());
 		let session = Transport::new(local);
-		let Poll::Ready(Ok(stream)) = session.poll_open_uni(&kio::Waiter::noop(), SendOptions::default()) else {
+		let Poll::Ready(Ok(stream)) =
+			session.poll_open_uni(&mut Default::default(), &kio::Waiter::noop(), SendOptions::default())
+		else {
 			panic!("a memory stream opens at once");
 		};
 		let group = |group| Some(lite::Anchor::Absolute(track::Position::group(group)));
@@ -5525,6 +5527,8 @@ fn poll_given_up(group: &mut group::Consumer, waiter: &kio::Waiter) -> Option<Er
 struct GroupServe {
 	ctx: GroupContext,
 	rank: Rank,
+	/// Its place in line for the peer's stream credit while it waits to open.
+	open: crate::transport::open::Open,
 	group: group::Consumer,
 	sequence: u64,
 	frame_start: u64,
@@ -5585,6 +5589,7 @@ impl GroupServe {
 		Self {
 			ctx,
 			rank,
+			open: Default::default(),
 			group,
 			sequence,
 			frame_start,
@@ -5630,7 +5635,7 @@ impl GroupServe {
 				priority: handle.send_order().into(),
 			},
 		};
-		let stream = match ready!(session.poll_open_uni(waiter, options)) {
+		let stream = match ready!(session.poll_open_uni(&mut self.open, waiter, options)) {
 			Ok(stream) => stream,
 			Err(err) => {
 				self.settle_open(false);
@@ -8597,7 +8602,7 @@ mod tests {
 		let gate = kio::Producer::new(true);
 		let session = SinkSession::gated_bi(gate.consume());
 		let log = session.log.clone();
-		let mut stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), Version::Lite01)
+		let mut stream = Stream::open(&crate::driver::Transport::new(session.clone()), Version::Lite01)
 			.await
 			.unwrap();
 
@@ -8643,7 +8648,7 @@ mod tests {
 
 		let gate = kio::Producer::new(true);
 		let session = SinkSession::gated_bi(gate.consume());
-		let mut stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), Version::Lite02)
+		let mut stream = Stream::open(&crate::driver::Transport::new(session.clone()), Version::Lite02)
 			.await
 			.unwrap();
 		let consumer = origin.consume();
@@ -8672,7 +8677,7 @@ mod tests {
 		let gate = kio::Producer::new(true);
 		let session = SinkSession::gated_bi(gate.consume());
 		let log = session.log.clone();
-		let mut stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), Version::Lite01)
+		let mut stream = Stream::open(&crate::driver::Transport::new(session.clone()), Version::Lite01)
 			.await
 			.unwrap();
 		let consumer = origin.consume();
@@ -8708,7 +8713,7 @@ mod tests {
 		let gate = kio::Producer::new(true);
 		let session = SinkSession::gated_bi(gate.consume());
 		let log = session.log.clone();
-		let mut stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), Version::Lite01)
+		let mut stream = Stream::open(&crate::driver::Transport::new(session.clone()), Version::Lite01)
 			.await
 			.unwrap();
 		let consumer = origin.consume();
@@ -8808,11 +8813,11 @@ mod tests {
 		use crate::bandwidth::Rate;
 		let version = Version::Lite06;
 		let session = ScriptedSession::new(Vec::new());
-		let mut transport = crate::driver::Transport::new(session.clone());
-		let stream = Stream::open(&mut transport, version).await.unwrap();
+		let transport = crate::driver::Transport::new(session.clone());
+		let stream = Stream::open(&transport, version).await.unwrap();
 		let estimate = kio::Producer::default();
 		let old = probe_server(crate::driver::Transport::new(session), stream, version, &estimate);
-		let stream = Stream::open(&mut transport, version).await.unwrap();
+		let stream = Stream::open(&transport, version).await.unwrap();
 		let new = ProbeServe::new(old.shared.clone(), crate::time::sim(), stream);
 		let shared = old.shared.clone();
 		let target = shared.peer_target.consume();
@@ -8839,7 +8844,7 @@ mod tests {
 			// A complete two-byte body with an empty URI and one unread byte.
 			let session = ScriptedSession::new(vec![2, 0, 0]);
 			let log = session.log.clone();
-			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 				.await
 				.unwrap();
 			let estimate = kio::Producer::default();
@@ -8879,7 +8884,7 @@ mod tests {
 		for (version, kind) in cases {
 			let session = ScriptedSession::new(vec![kind]);
 			let log = session.log.clone();
-			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 				.await
 				.unwrap();
 			let estimate = kio::Producer::default();
@@ -8910,7 +8915,7 @@ mod tests {
 			let gate = kio::Producer::new(true);
 			let session = SinkSession::gated_bi(gate.consume()).with_stats(stats);
 			let log = session.log.clone();
-			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 				.await
 				.unwrap();
 			// The supervisor's construction-time snapshot.
@@ -9964,7 +9969,7 @@ mod tests {
 			let session = ScriptedSession::new(target.encode_bytes(version).unwrap().to_vec())
 				.with_stats(crate::lite::test_transport::SinkStats::default().with_send_rate(1_000_000));
 			let log = session.log.clone();
-			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 				.await
 				.unwrap();
 			let estimate = kio::Producer::default();
@@ -10003,7 +10008,7 @@ mod tests {
 		let script = target.encode_bytes(version).unwrap().repeat(TARGETS);
 		let session = ScriptedSession::new(script)
 			.with_stats(crate::lite::test_transport::SinkStats::default().with_send_rate(1_000_000));
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 			.await
 			.unwrap();
 		session.close(Close::Fin);
@@ -10046,7 +10051,7 @@ mod tests {
 			};
 			let session = ScriptedSession::new(request.encode_bytes(version).unwrap().to_vec());
 			let log = session.log.clone();
-			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 				.await
 				.unwrap();
 			let estimate = kio::Producer::default();
@@ -10098,10 +10103,10 @@ mod tests {
 		let request = request.encode_bytes(version).unwrap().to_vec();
 		let session = ScriptedSession::per_stream(vec![request.clone(), request]);
 		let log = session.log.clone();
-		let older = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+		let older = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 			.await
 			.unwrap();
-		let newer = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+		let newer = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 			.await
 			.unwrap();
 		let estimate = kio::Producer::default();
@@ -10158,7 +10163,7 @@ mod tests {
 			};
 			let session = ScriptedSession::new(request.encode_bytes(version).unwrap().to_vec());
 			let log = session.log.clone();
-			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 				.await
 				.unwrap();
 			let estimate = kio::Producer::default();
@@ -10206,7 +10211,7 @@ mod tests {
 				};
 				let session = ScriptedSession::new(msg.encode_bytes(version).unwrap().to_vec());
 				let log = session.log.clone();
-				let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+				let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 					.await
 					.unwrap();
 				let estimate = kio::Producer::default();
@@ -10230,7 +10235,7 @@ mod tests {
 				let session = ScriptedSession::new(Vec::new());
 				session.close(end);
 				let log = session.log.clone();
-				let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+				let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 					.await
 					.unwrap();
 				let estimate = kio::Producer::default();

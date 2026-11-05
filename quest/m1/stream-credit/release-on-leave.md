@@ -10,8 +10,9 @@ and on lite-07 with 4 slots.
 
 ## Plan
 
-Found 2026-11-04 by the [scheduler](/quest/m1/stream-credit/scheduler.md)'s
-relay test: on lite-07 with exactly 3 bidirectional slots, a second
+Found 2026-11-04 by the scheduler's relay test
+(`a_subscription_past_the_credit_is_served_once_credit_returns`, from
+[moq-dev/moq#7894](https://github.com/moq-dev/moq/pull/7894)): on lite-07 with exactly 3 bidirectional slots, a second
 subscription is never served after the first leaves, while 4 slots work and
 moq-transport-22 works with 3. The likely cause is a stream the departed
 subscription keeps open upstream (its request stream, or a companion such as
