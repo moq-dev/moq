@@ -4119,10 +4119,12 @@ mod tests {
 		}
 		let session = crate::lite::test_transport::ScriptedSession::eof(script);
 		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup).offer_ietf(true);
-		peer_setup.set(lite::Setup {
-			ietf: true,
-			..Default::default()
-		});
+		peer_setup
+			.set(lite::Setup {
+				ietf: true,
+				..Default::default()
+			})
+			.unwrap();
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -5401,7 +5403,7 @@ mod tests {
 	/// A subscriber on `version` over `session`, whose peer's SETUP was already read.
 	fn pipelining(session: crate::driver::Transport, version: Version) -> Subscriber {
 		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
-		peer_setup.set(lite::Setup::default());
+		peer_setup.set(lite::Setup::default()).unwrap();
 		Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session,
