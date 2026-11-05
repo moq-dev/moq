@@ -4,6 +4,14 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Peer` carries the certificate chain
+
+`Peer` gains `chain`: the SHA-256 of the leaf and of each certificate it provably
+descends from, nearest first. A struct literal sets it, usually to
+`vec![fingerprint.clone()]` for a lone leaf. An auth server reading requests from an
+older relay sees it empty and should read that as the leaf alone, as
+`serve::Policy` does.
+
 ### Lease async wrappers are opt-in
 
 The lease's `changed`, `closed`, and `revalidate_requested` wrappers and

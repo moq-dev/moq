@@ -834,6 +834,31 @@ impl moq_net::transport::poll::Session for Session {
 	fn stream_credit(&self, dir: moq_net::transport::Dir) -> Option<moq_net::transport::StreamCredit> {
 		Some(self.conn.stream_credit(dir))
 	}
+	/// The connection's exporter on raw QUIC; on WebTransport, this session's own.
+	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
+		match &self.web {
+			None => self.conn.export_keying_material(label, context),
+			Some(web) => self.conn.export_keying_material(
+				WEBTRANSPORT_EXPORTER,
+				&webtransport_exporter_context(web.session_id, label, context)?,
+			),
+		}
+	}
+}
+
+/// The TLS exporter label WebTransport derives each session's exporter under.
+const WEBTRANSPORT_EXPORTER: &[u8] = b"EXPORTER-WebTransport";
+
+/// The TLS exporter context for WebTransport session `id`'s exporter (draft-ietf-webtrans-http3
+/// section 4.8), or `None` when `label` or `context` exceeds 255 bytes.
+fn webtransport_exporter_context(id: u64, label: &[u8], context: &[u8]) -> Option<Vec<u8>> {
+	let mut exporter = Vec::with_capacity(10 + label.len() + context.len());
+	exporter.extend_from_slice(&id.to_be_bytes());
+	exporter.push(u8::try_from(label.len()).ok()?);
+	exporter.extend_from_slice(label);
+	exporter.push(u8::try_from(context.len()).ok()?);
+	exporter.extend_from_slice(context);
+	Some(exporter)
 }
 
 /// Close the session: in web mode with a `CloseWebTransportSession` capsule

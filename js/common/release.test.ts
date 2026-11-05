@@ -11,7 +11,7 @@ type Manifest = {
 };
 type Reply = { status?: number; output?: string; error?: string };
 
-// Run the real release entrypoint with isolated command substitutes: no registry
+// Run the real release entrypoint with isolated command and fetch substitutes: no registry
 // credentials, builds, or publishing escape the fixture.
 function run(options: {
 	manifest: Manifest;
@@ -21,6 +21,7 @@ function run(options: {
 	dryRun?: boolean;
 	jsr?: boolean;
 	published?: boolean;
+	jsrPublished?: boolean;
 	jsrToken?: string;
 	sibling?: { name: string; version: string; private?: boolean; scripts?: { release: string } };
 }) {
@@ -55,6 +56,18 @@ function run(options: {
 			writeFileSync(join(packageDir, "package.json"), JSON.stringify(manifest));
 		}
 		writeFileSync(join(cwd, "fixture.json"), JSON.stringify(options));
+		const preload = join(cwd, "fetch.ts");
+		writeFileSync(
+			preload,
+			`import { appendFileSync, readFileSync } from "node:fs";
+const options = JSON.parse(readFileSync("${cwd}/fixture.json", "utf8"));
+globalThis.fetch = async (url) => {
+ appendFileSync("${cwd}/calls.jsonl", JSON.stringify(["fetch", String(url)]) + "\\n");
+ if (String(url) !== "https://jsr.io/@moq/fixture/meta.json") process.exit(1);
+ return Response.json({ versions: options.jsrPublished ? { "1.0.0": {} } : {} });
+};
+`,
+		);
 		for (const tool of ["bun", "npm", "deno"]) {
 			writeFileSync(
 				join(bin, tool),
@@ -85,17 +98,20 @@ if ("${tool}" === "bun") {
 				{ mode: 0o755 },
 			);
 		}
-		const result = Bun.spawnSync([process.execPath, release, ...(options.dryRun ? ["--dry-run"] : [])], {
-			cwd: packageDir,
-			env: {
-				PATH: bin,
-				HOME: cwd,
-				DRY_RUN: String(options.dryRun ?? false),
-				...(options.jsrToken ? { JSR_TOKEN: options.jsrToken } : {}),
+		const result = Bun.spawnSync(
+			[process.execPath, "--preload", preload, release, ...(options.dryRun ? ["--dry-run"] : [])],
+			{
+				cwd: packageDir,
+				env: {
+					PATH: bin,
+					HOME: cwd,
+					DRY_RUN: String(options.dryRun ?? false),
+					...(options.jsrToken ? { JSR_TOKEN: options.jsrToken } : {}),
+				},
+				stdout: "pipe",
+				stderr: "pipe",
 			},
-			stdout: "pipe",
-			stderr: "pipe",
-		});
+		);
 		const calls = readFileSync(join(cwd, "calls.jsonl"), "utf8")
 			.trim()
 			.split("\n")
@@ -204,6 +220,7 @@ test("JSR dry-run checks its import map once and runs when dependencies are publ
 test("the JSR token reaches only deno publish", () => {
 	const result = run({ jsr: true, jsrToken: "jsr-secret", manifest: {} });
 	expect(result.code).toBe(0);
+	expect(result.calls).toContainEqual(["fetch", "https://jsr.io/@moq/fixture/meta.json"]);
 	expect(result.calls.at(-1)).toEqual([
 		"deno",
 		"publish",
@@ -216,6 +233,15 @@ test("the JSR token reaches only deno publish", () => {
 	]);
 	expect(result.calls.filter((c) => c.includes("jsr-secret"))).toHaveLength(1);
 	expect(result.leaks).toEqual([]);
+});
+
+test("an already-published version on both registries skips publishing", () => {
+	const result = run({ jsr: true, published: true, jsrPublished: true, manifest: {} });
+	expect(result.code).toBe(0);
+	expect(result.calls).toEqual([
+		["npm", "view", "@moq/fixture", "version"],
+		["fetch", "https://jsr.io/@moq/fixture/meta.json"],
+	]);
 });
 
 test("a local sibling cannot satisfy the registry check for a real publish", () => {
