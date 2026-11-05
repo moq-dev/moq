@@ -14,6 +14,14 @@ Object come from one range FETCH. A `Subscribe` with an unfiltered filter now om
 LOCATION\_FILTER, and a SUBSCRIBE without one still joins live. There is no API
 change.
 
+### WebSocket receive windows match Rust
+
+The fallback now grants 4 MiB per connection and 1 MiB per stream, up from
+1 MiB and 256 KiB. Set `websocket.receiveWindow` and
+`websocket.streamReceiveWindow` in connection options to tune these byte budgets
+or retain the old limits. Both accept positive safe integers, like
+`websocket.maxStreams`. `@moq/qmux`'s standalone defaults are unchanged.
+
 ### Datagrams use separate track types ([#7846](https://github.com/moq-dev/moq/pull/7846))
 
 Create a datagram track with `broadcast.createDatagrams(name, info)` and read it with

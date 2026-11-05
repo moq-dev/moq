@@ -25,7 +25,7 @@ class LocalGate(unittest.TestCase):
             "LOCAL_SUPERVISED",
             "GITHUB_ACTIONS",
             "NEXTEST_TEST_THREADS",
-            "MOQ_QUEST",
+            "DEV_SHELL_QUEST",
             "ALLOW_HOST_TOOLCHAIN",
             "BASH_ENV",
         ):
@@ -78,7 +78,7 @@ class LocalGate(unittest.TestCase):
                 f"sys.exit(subprocess.call([{BASH!r}, {str(LAUNCHER)!r}, "
                 'sys.executable, "-c", "print(\'inner\'); exit(11)"]))'
             )
-            result = self.run_command(script, PATH=directory, MOQ_QUEST=str(quest))
+            result = self.run_command(script, PATH=directory, DEV_SHELL_QUEST=str(quest))
             self.assertEqual(result.returncode, 11, result.stderr)
             self.assertEqual(result.stdout.splitlines(), ["admitted", "outer", "inner"])
 
@@ -101,7 +101,7 @@ class LocalGate(unittest.TestCase):
             result = subprocess.run(
                 [BASH, str(ROOT / "sh/quest.sh"), "review", "--base", "origin/main", "--responses", "a file.json"],
                 cwd=directory,
-                env=self.env(PATH=directory, MOQ_QUEST=str(quest)),
+                env=self.env(PATH=directory, DEV_SHELL_QUEST=str(quest)),
                 capture_output=True,
                 text=True,
             )
