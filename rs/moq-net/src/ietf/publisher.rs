@@ -1467,7 +1467,8 @@ impl Publisher {
 					// SUBSCRIBE does not identify the kind. Resolve both kinds and serve the
 					// first successful answer, preferring streams when both are ready.
 					let mut along = (self.session.max_datagram_size() > 0)
-						.then(|| broadcast.datagrams(msg.track_name.as_ref()).ok()).flatten();
+						.then(|| broadcast.datagrams(msg.track_name.as_ref()).ok())
+						.flatten();
 					if let Some(datagrams) = &mut along {
 						datagrams.set_priority(super::priority::from_wire(msg.subscriber_priority));
 					}
@@ -1485,29 +1486,46 @@ impl Publisher {
 								None => Err(Error::NotFound),
 							}
 						};
-						match futures::future::select(Box::pin(streams), Box::pin(datagrams)).await {
-							futures::future::Either::Left((Some(Err(err)), datagrams)) => {
-								// Either kind may be absent or refused. Only fail when neither answers.
-								drop(datagrams);
-								self.until_withdrawn(&mut stream, super::request_stream::fin_cancels(self.version), |waiter| {
-									match &along {
-										Some(datagrams) => datagrams.poll_info(waiter).map(|r| r.map(|_| None).map_err(|_| err.clone())),
-										None => Poll::Ready(Err(err.clone())),
-									}
-								}).await
-							}
+						let choice = futures::future::select(Box::pin(streams), Box::pin(datagrams)).await;
+						match choice {
 							futures::future::Either::Left((result, _)) => result.map(|r| r.map(Some)),
 							futures::future::Either::Right((Ok(()), _)) => Some(Ok(None)),
 							futures::future::Either::Right((Err(_), streams)) => streams.await.map(|r| r.map(Some)),
 						}
 					};
+					let selected = match selected {
+						Some(Err(err)) if along.is_some() => {
+							self.until_withdrawn(
+								&mut stream,
+								super::request_stream::fin_cancels(self.version),
+								|waiter| {
+									along
+										.as_ref()
+										.expect("checked above")
+										.poll_info(waiter)
+										.map(|r| r.map(|_| None).map_err(|_| err.clone()))
+								},
+							)
+							.await
+						}
+						other => other,
+					};
 					let (mut track_serve, edge) = match selected {
 						Some(Ok(Some(streams))) => streams,
 						Some(Ok(None)) => {
-							return self.serve_datagrams(
-								&mut stream, &msg, along.take().expect("datagram kind resolved"),
-								&mut request_finished, &mut goaways, &mut updates, &mut acked,
-							).await;
+							return self
+								.serve_datagrams(
+									&mut stream,
+									&msg,
+									along.take().expect("datagram kind resolved"),
+									DatagramRequest {
+										finished: &mut request_finished,
+										goaways: &mut goaways,
+										updates: &mut updates,
+										acked: &mut acked,
+									},
+								)
+								.await;
 						}
 						Some(Err(err)) => return refused(err, true),
 						None => return Ok(Subscribed::Withdrawn),
@@ -1963,11 +1981,14 @@ impl Publisher {
 		stream: &mut Stream<Transport, Version>,
 		msg: &ietf::Subscribe<'_>,
 		mut datagrams: crate::datagram::Consumer,
-		finished: &mut bool,
-		goaways: &mut super::request_stream::Messages,
-		updates: &mut SubscriptionUpdates,
-		acked: &mut Option<Arc<AtomicU64>>,
+		request: DatagramRequest<'_>,
 	) -> Result<Subscribed, Error> {
+		let DatagramRequest {
+			finished,
+			goaways,
+			updates,
+			acked,
+		} = request;
 		// Before any await, so a subscriber waiting on this priority is not stuck behind setup.
 		datagrams.set_priority(super::priority::from_wire(msg.subscriber_priority));
 		let info = match self
@@ -2044,8 +2065,10 @@ impl Publisher {
 					&self.session,
 					self.version,
 					msg.request_id.0,
-					order,
-					send_group.as_ref(),
+					SendOptions {
+						group: send_group.as_ref(),
+						priority: crate::priority::in_group(datagram.sequence, 0, order),
+					},
 					timescale,
 					publisher,
 					&datagram,
@@ -2099,8 +2122,7 @@ impl Publisher {
 							Some((Error::Unsupported, "REQUEST_UPDATE parameters not supported"))
 						}
 						None if update.authorization_token.is_some()
-							&& grant.is_none()
-							&& self.auth.token_decides(crate::auth::Direction::Publish) =>
+							&& grant.is_none() && self.auth.token_decides(crate::auth::Direction::Publish) =>
 						{
 							Some((Error::Unsupported, TOKEN_ON_SESSION_REQUEST))
 						}
@@ -5108,6 +5130,13 @@ struct TrackServe {
 	datagrams: Option<DatagramForward>,
 }
 
+struct DatagramRequest<'a> {
+	finished: &'a mut bool,
+	goaways: &'a mut super::request_stream::Messages,
+	updates: &'a mut SubscriptionUpdates,
+	acked: &'a mut Option<Arc<AtomicU64>>,
+}
+
 /// A datagram track forwarded on a subscription that also serves groups.
 struct DatagramForward {
 	consumer: crate::datagram::Consumer,
@@ -5557,8 +5586,10 @@ impl TrackServe {
 				&self.session,
 				self.version,
 				self.request_id.0,
-				self.ranking.order,
-				self.ranking.group.as_ref(),
+				SendOptions {
+					group: self.ranking.group.as_ref(),
+					priority: crate::priority::in_group(datagram.sequence, 0, self.ranking.order),
+				},
 				timescale,
 				publisher,
 				&datagram,
@@ -5572,8 +5603,7 @@ fn emit_datagram(
 	session: &Transport,
 	version: Version,
 	alias: u64,
-	order: Order,
-	group: Option<&GroupOf<Transport>>,
+	options: SendOptions<'_, GroupOf<Transport>>,
 	timescale: Option<Timescale>,
 	publisher: i8,
 	datagram: &crate::datagram::Datagram,
@@ -5584,14 +5614,11 @@ fn emit_datagram(
 			tracing::debug!(sequence = datagram.sequence, "dropping a datagram without a timestamp");
 			return;
 		};
-		if ietf::encode_object_time(
-			&mut Encoder::new(&mut properties, version.into()),
-			timestamp,
-			timescale,
-		)
-		.is_err()
-		{
-			tracing::debug!(sequence = datagram.sequence, "dropping a datagram whose timestamp does not encode");
+		if ietf::encode_object_time(&mut Encoder::new(&mut properties, version.into()), timestamp, timescale).is_err() {
+			tracing::debug!(
+				sequence = datagram.sequence,
+				"dropping a datagram whose timestamp does not encode"
+			);
 			return;
 		}
 	}
@@ -5605,7 +5632,10 @@ fn emit_datagram(
 		body: ietf::DatagramBody::Payload(datagram.payload.clone()),
 	};
 	let Ok(body) = body.encode_bytes(version) else {
-		tracing::debug!(sequence = datagram.sequence, "dropping a datagram this draft cannot encode");
+		tracing::debug!(
+			sequence = datagram.sequence,
+			"dropping a datagram this draft cannot encode"
+		);
 		return;
 	};
 	let max = session.max_datagram_size();
@@ -5618,11 +5648,6 @@ fn emit_datagram(
 		);
 		return;
 	}
-	// Ranked like a stream carrying the group from its start.
-	let options = SendOptions {
-		group,
-		priority: crate::priority::in_group(datagram.sequence, 0, order),
-	};
 	let _ = session.send_datagram(body, options);
 }
 

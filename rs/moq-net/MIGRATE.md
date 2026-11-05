@@ -6,11 +6,10 @@ How to update your code for each breaking change, newest first.
 
 ### moq-transport datagram tracks
 
-Datagram tracks now work over moq-transport using SUBSCRIBE and OBJECT_DATAGRAM.
+Datagram tracks now work over moq-transport using SUBSCRIBE and OBJECT\_DATAGRAM.
 The sequence is the group ID and the object ID is zero. Stream and datagram
 consumers keep only their requested kind; nonzero object IDs are dropped by
 datagram consumers. No application API or wire encoding changes are required.
-
 
 ### Admission completion records its own time
 

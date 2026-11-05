@@ -3143,9 +3143,7 @@ impl Subscriber {
 
 		let info = crate::datagram::Info {
 			timescale: ok.properties.timescale,
-			priority: super::priority::from_wire(
-				ok.properties.priority.unwrap_or(super::priority::DEFAULT_WIRE),
-			),
+			priority: super::priority::from_wire(ok.properties.priority.unwrap_or(super::priority::DEFAULT_WIRE)),
 		};
 		let Some(request) = self.take_pending_datagram(request_id) else {
 			self.remove_subscribe(request_id);
@@ -7945,7 +7943,10 @@ mod tests {
 		};
 
 		subscriber
-			.recv_datagram(encode(None, ietf::DatagramBody::Payload(bytes::Bytes::from_static(b"d"))))
+			.recv_datagram(encode(
+				None,
+				ietf::DatagramBody::Payload(bytes::Bytes::from_static(b"d")),
+			))
 			.unwrap();
 		match consumer.poll_recv(&kio::Waiter::noop()) {
 			Poll::Ready(Ok(Some(datagram))) => {

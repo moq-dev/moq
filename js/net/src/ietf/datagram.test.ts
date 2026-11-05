@@ -4,7 +4,7 @@ import { ProtocolViolation, SessionCode } from "../error.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as Origin } from "../origin.ts";
 import * as Path from "../path.ts";
-import { Stream, encodeVarint } from "../stream.ts";
+import { encodeVarint, Stream } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import { wireOf } from "../wire.ts";
 import { Connection } from "./connection.ts";

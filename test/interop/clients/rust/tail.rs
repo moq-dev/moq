@@ -114,7 +114,12 @@ async fn main() -> anyhow::Result<()> {
 				// check the payload alone. Stay open until each one is acknowledged.
 				let mut track = broadcast.create_datagrams("tail", moq_net::datagram::Info::default())?;
 				broadcast.announce(Default::default())?;
-				let session = client.clone().with_publisher(&origin).connect(url).established().await?;
+				let session = client
+					.clone()
+					.with_publisher(&origin)
+					.connect(url)
+					.established()
+					.await?;
 				let mut priority = track.priority();
 				while priority.is_none() {
 					priority = kio::wait(|waiter| track.poll_priority(waiter, priority)).await;
@@ -135,64 +140,64 @@ async fn main() -> anyhow::Result<()> {
 				session.close().await?;
 				eprintln!("tail acknowledged");
 			} else {
-			let mut track = broadcast.create_track(
-				"tail",
-				moq_net::track::Info::default()
-					.with_timescale(moq_net::Timescale::MILLI)
-					.with_compress(compress)
-					// `cached` and `late` read groups a newer one supersedes, which the default
-					// zero max age would leave stale.
-					.with_max_age(None),
-			)?;
-			broadcast.announce(Default::default())?;
-			if cached {
-				write(&mut track, mode)?;
-			}
-			let mut head = None;
-			if late {
-				let mut group = track.append_group()?;
-				for frame in frames(0, mode).into_iter().take(LATE_HEAD) {
-					group.write_frame(moq_net::Timestamp::ZERO, frame)?;
+				let mut track = broadcast.create_track(
+					"tail",
+					moq_net::track::Info::default()
+						.with_timescale(moq_net::Timescale::MILLI)
+						.with_compress(compress)
+						// `cached` and `late` read groups a newer one supersedes, which the default
+						// zero max age would leave stale.
+						.with_max_age(None),
+				)?;
+				broadcast.announce(Default::default())?;
+				if cached {
+					write(&mut track, mode)?;
 				}
-				head = Some(group);
-			}
-			let session = client
-				.clone()
-				.with_publisher(&origin)
-				.connect(url)
-				.established()
-				.await?;
-			if let Some(mut group) = head {
-				ensure!(
-					commands.next_line().await?.as_deref() == Some("late tail"),
-					"subscriber did not read the head"
-				);
-				for frame in frames(0, mode).into_iter().skip(LATE_HEAD) {
-					group.write_frame(moq_net::Timestamp::ZERO, frame)?;
-				}
-				group.finish()?;
-				for sequence in 1..LATE_GROUPS {
+				let mut head = None;
+				if late {
 					let mut group = track.append_group()?;
-					for frame in frames(sequence, mode) {
+					for frame in frames(0, mode).into_iter().take(LATE_HEAD) {
+						group.write_frame(moq_net::Timestamp::ZERO, frame)?;
+					}
+					head = Some(group);
+				}
+				let session = client
+					.clone()
+					.with_publisher(&origin)
+					.connect(url)
+					.established()
+					.await?;
+				if let Some(mut group) = head {
+					ensure!(
+						commands.next_line().await?.as_deref() == Some("late tail"),
+						"subscriber did not read the head"
+					);
+					for frame in frames(0, mode).into_iter().skip(LATE_HEAD) {
 						group.write_frame(moq_net::Timestamp::ZERO, frame)?;
 					}
 					group.finish()?;
+					for sequence in 1..LATE_GROUPS {
+						let mut group = track.append_group()?;
+						for frame in frames(sequence, mode) {
+							group.write_frame(moq_net::Timestamp::ZERO, frame)?;
+						}
+						group.finish()?;
+					}
+					track.finish()?;
+				} else if !cached {
+					let mut demand = track.demand();
+					while demand.wanted_changed().await?.is_none() {}
+					write(&mut track, mode)?;
 				}
-				track.finish()?;
-			} else if !cached {
-				let mut demand = track.demand();
-				while demand.wanted_changed().await?.is_none() {}
-				write(&mut track, mode)?;
-			}
-			// A finished track is not a drained transport. Keep the session alive
-			// until the harness confirms the subscriber checked every byte and EOF.
-			ensure!(
-				commands.next_line().await?.as_deref() == Some("clean end"),
-				"reader did not acknowledge a clean end"
-			);
-			broadcast.close();
-			session.close().await?;
-			eprintln!("tail acknowledged");
+				// A finished track is not a drained transport. Keep the session alive
+				// until the harness confirms the subscriber checked every byte and EOF.
+				ensure!(
+					commands.next_line().await?.as_deref() == Some("clean end"),
+					"reader did not acknowledge a clean end"
+				);
+				broadcast.close();
+				session.close().await?;
+				eprintln!("tail acknowledged");
 			}
 		}
 		"subscribe" => {

@@ -143,44 +143,44 @@ try {
 			broadcast.close();
 			console.error("tail acknowledged");
 		} else {
-		// `cached` and `late` read groups a newer one supersedes, which the default zero max age
-		// would leave stale.
-		const track = broadcast.createTrack("tail", { compress, maxAge: null, ...(status ? { priority: 2 } : {}) });
-		if (cached) write(track);
-		if (history) serveHistory(track);
-		let head: Moq.Group.Producer | undefined;
-		if (late) {
-			head = track.appendGroup();
-			for (const payload of frames(0).slice(0, LATE_HEAD)) head.writeFrame({ payload });
-		}
-		broadcastPublication.announce();
-		const lines = createInterface({ input: process.stdin });
-		const commands = lines[Symbol.asyncIterator]();
-		if (head) {
-			assert.equal((await commands.next()).value, "late tail", "subscriber did not read the head");
-			for (const payload of frames(0).slice(LATE_HEAD)) head.writeFrame({ payload });
-			head.finish();
-			for (let sequence = 1; sequence < LATE_GROUPS; sequence++) {
-				const group = track.appendGroup();
-				for (const payload of frames(sequence)) group.writeFrame({ payload });
-				group.finish();
+			// `cached` and `late` read groups a newer one supersedes, which the default zero max age
+			// would leave stale.
+			const track = broadcast.createTrack("tail", { compress, maxAge: null, ...(status ? { priority: 2 } : {}) });
+			if (cached) write(track);
+			if (history) serveHistory(track);
+			let head: Moq.Group.Producer | undefined;
+			if (late) {
+				head = track.appendGroup();
+				for (const payload of frames(0).slice(0, LATE_HEAD)) head.writeFrame({ payload });
 			}
-			track.finish();
-			track.close();
-		} else if (!status && !cached && !history) {
-			const demand = track.demand();
-			while (demand.wanted.peek() === undefined) await demand.wanted.changed();
-			write(track);
-			track.close();
-		}
-		try {
-			const ack = await commands.next();
-			assert.equal(ack.value, "clean end", "reader did not acknowledge a clean end");
-		} finally {
-			lines.close();
-		}
-		broadcast.close();
-		console.error("tail acknowledged");
+			broadcastPublication.announce();
+			const lines = createInterface({ input: process.stdin });
+			const commands = lines[Symbol.asyncIterator]();
+			if (head) {
+				assert.equal((await commands.next()).value, "late tail", "subscriber did not read the head");
+				for (const payload of frames(0).slice(LATE_HEAD)) head.writeFrame({ payload });
+				head.finish();
+				for (let sequence = 1; sequence < LATE_GROUPS; sequence++) {
+					const group = track.appendGroup();
+					for (const payload of frames(sequence)) group.writeFrame({ payload });
+					group.finish();
+				}
+				track.finish();
+				track.close();
+			} else if (!status && !cached && !history) {
+				const demand = track.demand();
+				while (demand.wanted.peek() === undefined) await demand.wanted.changed();
+				write(track);
+				track.close();
+			}
+			try {
+				const ack = await commands.next();
+				assert.equal(ack.value, "clean end", "reader did not acknowledge a clean end");
+			} finally {
+				lines.close();
+			}
+			broadcast.close();
+			console.error("tail acknowledged");
 		}
 	} else if (datagram) {
 		const request = origin.follow(Moq.Path.from(path));

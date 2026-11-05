@@ -4,9 +4,9 @@ import * as announce from "../announced.ts";
 import type { Grant } from "../auth.ts";
 import type { AuthSession } from "../auth_session.ts";
 import * as broadcast from "../broadcast.ts";
-import * as datagram from "../datagram.ts";
 import type { Drain } from "../connection/goaway.ts";
 import { BroadcastCache } from "../consume.ts";
+import type * as datagram from "../datagram.ts";
 import * as DatagramStream from "../datagram_stream.ts";
 import {
 	closeError,
@@ -28,7 +28,7 @@ import { finalSequence, hiddenBelow, hooks, maxDelayOf, scopeCaptures, scopeHead
 import type { Lister } from "../listing.ts";
 import * as Path from "../path.ts";
 import { receiveFrame, skipPayload } from "../payload.ts";
-import { Reader, type Cursor, type Stream } from "../stream.ts";
+import { type Cursor, Reader, type Stream } from "../stream.ts";
 import { Tail } from "../tail.ts";
 import { Timescale, type Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
@@ -926,7 +926,7 @@ export class Subscriber {
 			const revoked = new Promise<typeof revokedEnded>((resolve) => {
 				revoke = () => resolve(revokedEnded);
 			});
-			disposeGrant = this.#grant?.subscribe(() => {
+			const disposeGrant = this.#grant?.subscribe(() => {
 				if (this.#denied(broadcast)) revoke();
 			});
 			// The grant may have shrunk during setup, before this watcher existed.
@@ -2367,13 +2367,12 @@ export class Subscriber {
 
 			const unanswered = new Signal(0);
 			let sent = fromWire(subscriberPriority);
-			let disposeGrant: Dispose | undefined;
 			const stop = new AbortController();
 			let revoke!: () => void;
 			const revoked = new Promise<"revoked">((resolve) => {
 				revoke = () => resolve("revoked");
 			});
-			disposeGrant = this.#grant?.subscribe(() => {
+			const disposeGrant = this.#grant?.subscribe(() => {
 				if (this.#denied(broadcast)) revoke();
 			});
 			if (this.#denied(broadcast)) revoke();

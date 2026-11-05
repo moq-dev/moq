@@ -5,9 +5,9 @@ import { Gate } from "../auth_gate.ts";
 import type { AuthSession } from "../auth_session.ts";
 import { enforceGrant } from "../auth_session.ts";
 import type * as broadcast from "../broadcast.ts";
-import * as datagram from "../datagram.ts";
-import * as DatagramStream from "../datagram_stream.ts";
 import { Withdrawal } from "../connection/withdrawal.ts";
+import type * as datagram from "../datagram.ts";
+import * as DatagramStream from "../datagram_stream.ts";
 import {
 	controlTimeout,
 	error,
@@ -516,19 +516,21 @@ export class Publisher {
 		try {
 			// SUBSCRIBE has no kind bit. Resolve both kinds; an absent or refused kind
 			// does not prevent the other from answering.
-			const streams = track.info().then((info) => ({ kind: "stream" as const, info }));
-			const candidates = [streams];
+			const streamInfo = track.info().then((info) => ({ kind: "stream" as const, info }));
+			const datagramConsumer = datagrams;
 			const selected = await untilAborted(
-				datagrams
+				datagramConsumer
 					? Promise.any([
-						...candidates,
-						datagrams.info().then((info) => ({ kind: "datagram" as const, info })),
-					])
-					: streams,
+							streamInfo,
+							datagramConsumer
+								.info()
+								.then((info) => ({ kind: "datagram" as const, info, consumer: datagramConsumer })),
+						]).catch(() => streamInfo)
+					: streamInfo,
 				left.signal,
 			);
 			if (selected.kind === "datagram") {
-				await this.#serveDatagrams(msg, request, datagrams!, selected.info);
+				await this.#serveDatagrams(msg, request, selected.consumer, selected.info);
 				return;
 			}
 			const info = selected.info;
@@ -608,9 +610,7 @@ export class Publisher {
 			return waiting;
 		};
 		const opened = DatagramStream.datagramWriter(this.#quic);
-		const sender = opened?.open(
-			sendOrder({ priority: subscriberPriority, publisher, position: 2 ** 36 - 1 }),
-		);
+		const sender = opened?.open(sendOrder({ priority: subscriberPriority, publisher, position: 2 ** 36 - 1 }));
 		const max = DatagramStream.maxDatagramSize(this.#quic);
 		const sending = (async () => {
 			if (!sender) return;
@@ -1311,7 +1311,9 @@ export class Publisher {
 					continue;
 				}
 				if (body.byteLength > max) {
-					console.debug(`dropping datagram larger than the transport limit: size=${body.byteLength} max=${max}`);
+					console.debug(
+						`dropping datagram larger than the transport limit: size=${body.byteLength} max=${max}`,
+					);
 					continue;
 				}
 				await sender.writer.write(body);
