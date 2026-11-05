@@ -1203,6 +1203,10 @@ fn scoped_delivery_through_two_uplinks_reaches_one_key() {
 	// The local relay loses its direct uplink, and its own broadcast fails over through its sibling.
 	net.disconnect(l1, c1);
 	assert!(net.run());
+	assert!(net.starved(c1, own), "the detour is longer than the lost uplink");
+	// Its own set of sessions changed, so the origin advances its seqno.
+	net.bump(l1);
+	assert!(net.run());
 	assert_eq!(net.resolve(c1, "local/l1/x"), Some(own));
 	assert_eq!(
 		net.request(c1, "local/l1/x", Forward::Pinned),
@@ -1236,10 +1240,10 @@ fn scoped_delivery_through_two_uplinks_reaches_one_key() {
 	);
 
 	// A retracted identity leaves no alias behind.
-	assert_eq!(net.aliases(c1), 1);
+	assert_eq!(net.aliases(c1), 2, "the origin's and the local relay's own");
 	net.kill(origin);
 	assert!(net.run());
-	assert_eq!(net.aliases(c1), 0);
+	assert_eq!(net.aliases(c1), 1);
 }
 
 /// A local relay missing its `upstream` mark leaks CDN routes back to the CDN,

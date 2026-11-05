@@ -1019,7 +1019,9 @@ Binding 1 exports with the TLS exporter (Section 7.5 of [RFC8446]), and binding 
 The other bindings have no exporter, and an endpoint MUST NOT send the parameter on them.
 The exported material and the sender's side keep a proof from being replayed on another session or reflected back to its sender.
 
-Either endpoint MAY send it. A receiver MUST close the session with a PROTOCOL_VIOLATION if the value is not 96 bytes, or if it can export keying material and the signature does not verify. A relay MUST NOT forward it.
+Either endpoint MAY send it. A receiver MUST close the session with a PROTOCOL_VIOLATION if the value is not 96 bytes.
+A receiver that relies on the key MUST verify the signature first, closing the session with a PROTOCOL_VIOLATION if it does not verify; without an exporter on the session, it cannot rely on the key.
+A relay MUST NOT forward it.
 
 
 ## ANNOUNCE_REQUEST {#announce-request}
