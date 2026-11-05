@@ -49,7 +49,7 @@ Re-paired on the quiet test host `nixos2` (an i7-8700: relay on CPUs 0-3, genera
 | video, io\_uring | TZ2ODR | 99.2 \[97.4-102.2] | 110.8 \[108.6-112.9] | 1.12 | 1.1 |
 | video, tokio workers | 6xoc9u | 136.5 \[128.7-139.8] | 121.6 \[118.6-124.1] | 0.89 | 1.6 |
 
-Medians of the quiet cells in four rounds, min-max in brackets: every cell used delivered its workload's rate within 2% with no loss, at a one-minute load of at most 6. Two cells were dropped: the old endpoint's fourth chat round on io\_uring (load 8.5) and its second on the tokio workers (load 8.7, 3.9% short of the rate). Run 4U16wN's `main` and run ssZrgC's (142.3 \[141.6-143.1], three rounds) agree within 0.3k with run S0G1Z7's.
+Medians of the quiet cells in four rounds, min-max in brackets: every cell used delivered its workload's rate within 2% with no loss, at a one-minute load of at most 6. Two cells were dropped: the old endpoint's fourth chat round on io\_uring (load 8.5) and its second on the tokio workers (load 8.7, 3.9% short of the rate). Run ssZrgC's `main` (142.3 \[141.6-143.1], three rounds) agrees within 0.3k with run S0G1Z7's.
 
 The earlier pairing on the 24-core host, at load up to 40 for the video rows, read chat 1.26 on io\_uring and 1.31 on the tokio workers, and video 1.14 and 0.96. Only chat on the tokio workers moved by more than those runs' spread, and its earlier run reached load 23 on another host, so the change is not attributed. Chat on io\_uring remains the workload furthest above the old endpoint. By the nearest named function, chat's growth on `main` at [c68c931025](https://github.com/moq-dev/moq/commit/c68c931025), before the fast path, falls in the same places on io\_uring (run.qYPSii) and the tokio workers (run.IV47ua), in instructions per frame:
 

@@ -3480,7 +3480,7 @@
 			]
 		}
 	],
-	"fanout_method": "just bench-fanout: user instructions per delivered group on one pinned thread, a run of many cycles less a run of zero, at the listed subscriber counts; model = the track model alone, session = publisher, relay origin, and viewers over the in-memory transport; group = every subscriber drains one finished 512-frame group in 16-frame batches, as group_relay_frames/plain/512 does, per drained group",
+	"fanout_method": "just bench-fanout: user instructions per delivered group on one pinned thread, a run of many cycles less a run of zero, at the listed subscriber counts; model = the track model alone, session = publisher, relay origin, and viewers over the in-memory transport; group = every subscriber drains one finished 512-frame group in 16-frame batches, per drained group; the recorded group runs read whole frames as group_relay_frames/plain/512 did, while the scenario now reads objects through fuzz::ObjectBatch::<16> as group_relay_objects/plain/512 does, so its new counts do not compare with them",
 	"fanout_runs": [
 		{
 			"artifact": "hist",

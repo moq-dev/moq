@@ -1763,9 +1763,10 @@ impl Reader {
 		for run in covered {
 			self.drops.remove(run);
 		}
-		// The common case: nothing to report, and the serving copy's own poll above wakes
-		// this for the next run it gives up, so no copy needs judging.
-		if self.drops.is_empty() {
+		// The common case: nothing to report on one route, and the serving copy's own poll
+		// above wakes this for the next run it gives up. A replaced copy is still judged:
+		// dropping the last group handed out from it wakes nothing else that lets it go.
+		if self.drops.is_empty() && !self.copies.iter().any(|copy| copy.replaced) {
 			return Poll::Pending;
 		}
 		// Judged as the group path judges it, so a copy kept only for a group still read
@@ -4934,6 +4935,31 @@ mod test {
 			assert_eq!(read(&mut reading), Some(b"c".to_vec()));
 			assert_eq!(read(&mut reading), None);
 		}
+	}
+
+	/// A drop poll with nothing to report still lets go of a replaced copy once the last
+	/// group handed out from it is dropped: nothing wakes the parked group read for that.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_drop_poll_lets_go_a_replaced_copy_once_its_group_is_dropped() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		write(&a, 0);
+		let Poll::Ready(Ok(Some(held))) = sub.poll_recv_group(&kio::Waiter::noop()) else {
+			panic!("expected group 0");
+		};
+		let b = copy();
+		routes.serve(b.consume());
+		write(&b, 1);
+		assert_eq!(drain(&mut sub, false), [1]);
+		assert_eq!(copies(&routes), 2, "the held group keeps its copy");
+
+		drop(held);
+		assert!(sub.poll_drop(&kio::Waiter::noop()).is_pending());
+		assert_eq!(copies(&routes), 1, "the replaced copy was let go");
 	}
 
 	/// A group the new copy replays, already handed out, does not bound the replaced copy:
