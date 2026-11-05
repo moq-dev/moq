@@ -528,7 +528,12 @@ export class Publisher {
 						]).catch(() => streamInfo)
 					: streamInfo,
 				left.signal,
-			);
+			).catch(async (err) => {
+				if (left.signal.aborted) request.abort(cancel);
+				else await request.refuse("subscribe", this.#failed(err, false));
+				return undefined;
+			});
+			if (!selected) return;
 			if (selected.kind === "datagram") {
 				await this.#serveDatagrams(msg, request, selected.consumer, selected.info);
 				return;
