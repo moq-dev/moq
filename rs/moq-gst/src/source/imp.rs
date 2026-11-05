@@ -1036,23 +1036,12 @@ fn reconcile(
 	emptied: &Arc<tokio::sync::Notify>,
 	cancel: &watch::Receiver<bool>,
 ) {
-	// Share the players' selection rule: keep an already selected disabled rendition only
-	// while no enabled alternative of its kind exists. Pads alone also include idle renditions
-	// displaced by an alternative, so derive selection from the plans the readers follow.
-	let mut selected = moq_mux::select::Selected::default();
-	for follower in followers.values() {
-		for (kind, name) in follower.plan.borrow().renditions.keys() {
-			match kind {
-				TrackKind::Video => selected.video.insert(name.clone()),
-				TrackKind::Audio => selected.audio.insert(name.clone()),
-			};
-		}
-	}
+	// Read what the players select: every enabled rendition in a container this build knows.
 	let mut playable = catalog.clone();
 	moq_mux::select::Broadcast::default()
 		.video(Default::default())
 		.audio(Default::default())
-		.retain(&mut playable, &selected);
+		.retain(&mut playable);
 
 	// Build the desired shape for each rendition. This is deliberately cheap: caps come from the
 	// catalog config and the container is just the hang descriptor. The reader parses the wire
@@ -1100,7 +1089,7 @@ fn reconcile(
 		);
 	}
 
-	// A disabled rendition keeps its pad even when an enabled alternative displaced its reader,
+	// A disabled rendition stays listed: its reader stops, but its pad waits idle for a re-enable,
 	// since a pipeline links pads by name (`s.video_0 ! ...`).
 	let disabled: Vec<(Rendition, &dyn hang::catalog::Reference)> = catalog
 		.video
@@ -1148,7 +1137,7 @@ fn reconcile(
 		plans.entry(path).or_default().renditions.insert(rendition, shape);
 	}
 
-	// A broadcast no selected rendition reads any more stops its readers, apart from a delisted
+	// A broadcast no enabled rendition reads any more stops its readers, apart from a delisted
 	// one playing out its tail. Its follower stays reachable, with its finished records, while a
 	// disabled rendition still names it or a delisted one drains, so a re-enable or relist reaches
 	// it rather than a new follower. Once it plays nothing, the run lets it go.
@@ -1428,8 +1417,7 @@ impl Follower {
 					true
 				}
 				// A delisted rendition plays out the instance it reads, then leaves. One that never
-				// took its pad, was displaced by an enabled alternative, or now reads another
-				// broadcast stops now.
+				// took its pad, or that is disabled or now reads another broadcast, stops now.
 				None => {
 					entry.draining = !pads.is_listed(rendition)
 						&& entry
@@ -2543,10 +2531,10 @@ mod session_tests {
 		}
 	}
 
-	/// Selection follows the reader plans, independently by kind; idle pads do not keep a
-	/// displaced rendition selected. Reconcile against a plan receiver without starting readers.
+	/// A disabled rendition drops out of its reader's plan, each kind on its own, and an enable
+	/// brings it back. Reconcile against a plan receiver without starting readers.
 	#[test]
-	fn disabled_renditions_follow_the_player_selection_rule() {
+	fn disabled_renditions_leave_the_plan() {
 		let element = element();
 		let (origin, _driver) = moq_net::origin::Producer::new(Default::default());
 		let broadcast = moq_net::broadcast::Info::new().produce();
@@ -2595,23 +2583,11 @@ mod session_tests {
 		catalog.audio.renditions.insert("main".into(), audio);
 		check(&catalog, &[]);
 
-		let both = [(TrackKind::Video, "main"), (TrackKind::Audio, "main")];
 		catalog.video.renditions.get_mut("main").unwrap().enabled = true;
 		catalog.audio.renditions.get_mut("main").unwrap().enabled = true;
-		check(&catalog, &both);
-		catalog.video.renditions.get_mut("main").unwrap().enabled = false;
+		check(&catalog, &[(TrackKind::Video, "main"), (TrackKind::Audio, "main")]);
 		catalog.audio.renditions.get_mut("main").unwrap().enabled = false;
-		check(&catalog, &both);
-
-		catalog.video.renditions.insert("alternative".into(), video_rendition());
-		let alternative = [(TrackKind::Video, "alternative"), (TrackKind::Audio, "main")];
-		check(&catalog, &alternative);
-		catalog.video.renditions.get_mut("alternative").unwrap().enabled = false;
-		check(&catalog, &alternative);
-
-		catalog.video.renditions.remove("alternative");
-		catalog.audio.renditions.remove("main");
-		check(&catalog, &[]);
+		check(&catalog, &[(TrackKind::Video, "main")]);
 	}
 
 	fn video_rendition() -> VideoConfig {
@@ -4538,7 +4514,7 @@ mod session_tests {
 	}
 
 	/// A sibling track that finished stays finished for its instance only: a disable and an enable
-	/// replays nothing on that instance, and the next instance plays even before the enable.
+	/// replays nothing on that instance, and the next instance still plays.
 	#[test]
 	fn a_reenabled_sibling_rendition_plays_the_next_instance_after_a_finish() {
 		let _pad_ids = pad_ids();
@@ -4566,13 +4542,6 @@ mod session_tests {
 			guard.audio.renditions = BTreeMap::from([("audio".to_string(), audio_rendition())]);
 		}
 		await_pad(&element, "audio_");
-		let mut second = Publisher::sibling(&origin, Default::default());
-		assert_eq!(
-			recorder.written(&mut second, 2),
-			pad,
-			"the next instance moved to another pad"
-		);
-
 		{
 			let mut guard = room.catalog.modify().unwrap();
 			guard.video.renditions.get_mut("video").unwrap().enabled = true;
@@ -4589,8 +4558,12 @@ mod session_tests {
 		assert_eq!(pads(&element, "audio_").len(), 2, "the re-enable never landed");
 		let replayed = recorder.count(|seen| *seen == Seen::Buffer(pad.clone(), 1));
 
-		assert_eq!(recorder.written(&mut second, 3), pad);
-
+		let mut second = Publisher::sibling(&origin, Default::default());
+		assert_eq!(
+			recorder.written(&mut second, 2),
+			pad,
+			"the next instance moved to another pad"
+		);
 		stop(session);
 
 		// Only the next instance starts a stream: the finished one stays finished on its pad.
@@ -5069,10 +5042,10 @@ mod session_tests {
 		recorder.assert_one_pad_held();
 	}
 
-	/// With no enabled alternative, disabling holds the reader as well as its pad, so media that
-	/// beats the re-enable catalog update plays without a new subscription or stream.
+	/// Disabling a rendition stops its reader but holds its pad idle, without an EOS, so a pipeline
+	/// linked by name resumes on it once the rendition is enabled again.
 	#[test]
-	fn a_disabled_rendition_keeps_reading_on_the_same_pad() {
+	fn a_reenabled_rendition_resumes_on_the_same_pad() {
 		let _pad_ids = pad_ids();
 		let element = element();
 		let recorder = Recorder::attach(&element);
@@ -5095,12 +5068,6 @@ mod session_tests {
 		}
 		await_pad(&element, "audio_");
 
-		assert_eq!(
-			recorder.written(&mut publisher, 2),
-			pad,
-			"media before the re-enable did not reach the held reader"
-		);
-
 		publisher
 			.catalog
 			.modify()
@@ -5111,7 +5078,7 @@ mod session_tests {
 			.unwrap()
 			.enabled = true;
 		assert_eq!(
-			recorder.written(&mut publisher, 3),
+			recorder.written(&mut publisher, 2),
 			pad,
 			"the re-enabled rendition moved to another pad"
 		);
@@ -5119,8 +5086,8 @@ mod session_tests {
 
 		let seen = recorder.seen();
 		assert!(
-			!seen.contains(&Seen::Start(pad)),
-			"the disable restarted the stream: {seen:?}"
+			seen.contains(&Seen::Start(pad)),
+			"the disabled reader kept running: {seen:?}"
 		);
 		recorder.assert_one_pad_held();
 	}

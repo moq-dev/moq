@@ -5,6 +5,10 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Decoders refuse a disabled rendition ([#7942](https://github.com/moq-dev/moq/pull/7942))
+
+`MoqAudioConsumer::subscribe` and `MoqVideoConsumer::subscribe` fail with `MoqError::NotFound` when the rendition's `enabled` is false, instead of subscribing and waiting for a re-enable. Pick an enabled rendition from the latest catalog, and close a decoder whose rendition a newer catalog disables.
+
 ### Catalog renditions carry their warmup ([#7864](https://github.com/moq-dev/moq/pull/7864))
 
 `MoqVideo` and `MoqAudio` gain `warmup`, the catalog's decoder warmup, null when absent. `MoqMediaTrackConsumer::subscribe` reads it from the rendition: it starts that much further back than the subscription's min delay and asks the publisher for its max delay plus the warmup, while it still skips at the max delay alone. `MoqAudioConsumer::subscribe` and `MoqVideoConsumer::subscribe` now honor it too.

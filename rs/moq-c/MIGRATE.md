@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Consumers and decoders refuse a disabled rendition ([#7942](https://github.com/moq-dev/moq/pull/7942))
+
+`moq_consume_audio`, `moq_consume_video`, `moq_decode_audio`, and `moq_decode_video` return `MOQ_ERROR_NOT_FOUND` when the catalog snapshot marks the rendition disabled, instead of subscribing and waiting for a re-enable. Check `moq_consume_audio_enabled` or `moq_consume_video_enabled` on the latest snapshot first, and cancel a consumer whose rendition a newer snapshot disables.
+
 ### Separate datagram tracks
 
 Create a separate producer with `moq_publish_datagrams` and `moq_datagram_info`; replace `moq_publish_track_datagram` with `moq_publish_datagrams_append` on that handle, or `moq_publish_datagrams_insert` for an explicit sequence. `moq_consume_datagrams` now takes a subscriber priority before its callback and never subscribes to a stream track. Use `moq_publish_datagrams_demand` and `moq_datagram_demand_priority` for aggregate priority, and `moq_publish_datagrams_requests` / `moq_datagram_request_accept` for on-demand publishing. Finish or abort datagram producers separately. A zeroed datagram info is untimed, unlike the microsecond default of stream-track info. `moq_consume_datagrams` returns a negative code at once when the broadcast has neither the datagram track nor a datagram request handler, and a remote name without one ends its callback with a not-found error.

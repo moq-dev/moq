@@ -4,6 +4,17 @@ How to adopt new APIs and update for breaking changes, newest first.
 
 ## Unreleased
 
+### Selection never holds a disabled rendition ([#7942](https://github.com/moq-dev/moq/pull/7942))
+
+`select::Broadcast::retain` takes only the catalog, and `select::Selected` is gone: a rendition the catalog marks `enabled: false` is never selected, even one selected before, so `catalog::Select` drops it on the snapshot that disables it. Drop the second argument and any `Selected` you tracked.
+
+```rust
+// Before
+selection.retain(&mut catalog, &Selected::of(&previous));
+// After
+selection.retain(&mut catalog);
+```
+
 ### `container::Playout` replaces `with_warmup` ([#7864](https://github.com/moq-dev/moq/pull/7864))
 
 `container::Consumer::with_warmup` is gone. Build a `container::Playout::new(delay, warmup)` from the `Delay` and the catalog rendition's `warmup`, subscribe with `playout.subscription(subscription)`, which widens the max delay by the warmup, and build the consumer with `playout.consumer(track, format)`, which skips at the max delay alone. The order no longer matters, and a track subscribed without the widening is widened when the consumer is built.

@@ -2454,7 +2454,7 @@ mod tests {
 		fn best(catalog: &moq_mux::catalog::hang::Catalog, capabilities: &ClientCapabilities) -> Option<String> {
 			let select = play_selection(catalog, capabilities).unwrap();
 			let mut catalog = catalog.clone();
-			select.retain(&mut catalog, &Default::default());
+			select.retain(&mut catalog);
 			catalog.video.ranked().next().map(|(name, _)| name.clone())
 		}
 
@@ -2514,7 +2514,7 @@ mod tests {
 		let legacy = ClientCapabilities::default();
 		let select = play_selection(&catalog, &legacy).expect("aac is playable");
 		let mut kept = catalog.clone();
-		select.retain(&mut kept, &Default::default());
+		select.retain(&mut kept);
 		assert_eq!(
 			kept.audio.renditions.keys().map(String::as_str).collect::<Vec<_>>(),
 			["b"]
@@ -2548,7 +2548,7 @@ mod tests {
 		};
 		let select = play_selection(&ac3, &ClientCapabilities::new(0, FourCcSupport::default(), support)).unwrap();
 		let mut kept = ac3.clone();
-		select.retain(&mut kept, &Default::default());
+		select.retain(&mut kept);
 		assert_eq!(
 			kept.audio.renditions.keys().map(String::as_str).collect::<Vec<_>>(),
 			["a"]
