@@ -175,7 +175,6 @@ their end report, so an embedder's drain alert pages on real cuts.
 - [Catalog contributions become includes on the root's timeline](/quest/m1/catalog-include.md) - rename the unreleased `contributions` map before the cut and state that included broadcasts share the root's timeline
 - [Unbounded groups](/quest/m1/unbounded-groups/README.md) - groups and frames lose their size caps; a group keeps a 32 MB tail, and readers behind it replay through paced flights or refresh
 - [Session policy lives in moq-net](/quest/m1/session-policy/README.md) - accept and connect deadlines, admission, window widening and reconnect live once in moq-net; moq-tokio and moq-relay's io_uring path call them
-- [moq auth serve scopes each client certificate by its chain](/quest/m1/auth-cert-rules.md) - per-certificate and per-intermediate rules in a reloaded TOML config, keyed by the chain hashes the relay sends
 - [A replacement that fails before delivering never ends a live track](/quest/m1/route-swap-keeps-incumbent.md) - a route change whose replacement aborts before its first group leaves readers on the source that was serving
 - [Rename moq-rtc to moq-webrtc](/quest/m1/webrtc-rename.md) - one published `moq-webrtc` crate holds the gateway, the ICE driver, and the data-channel transport
 - [Vendor and trim the WebRTC stack](/quest/m1/webrtc-vendor.md) - str0m, dimpl, `is`, and sctp-proto live in moq-webrtc with unused code removed, so moq-rtc can take rind

@@ -345,7 +345,7 @@ async fn run() -> anyhow::Result<()> {
 		match stages.remove(0) {
 			Command::Auth(auth) => {
 				cli.reject("auth")?;
-				return auth.run().await;
+				return auth.run(&cli.settings).await;
 			}
 			Command::Completion(completion) => {
 				cli.reject("completion")?;

@@ -18,10 +18,17 @@ test("a connect request parses with every field", () => {
 		query: "jwt=abc",
 		role: "publisher",
 		implementation: "moq-net-js/0.4.2",
-		tls: { name: "edge0", fingerprint: "ab".repeat(32), expires: 4102444800, issuer: "CN=cluster" },
+		tls: {
+			name: "edge0",
+			fingerprint: "ab".repeat(32),
+			chain: ["ab".repeat(32), "cd".repeat(32)],
+			expires: 4102444800,
+			issuer: "CN=cluster",
+		},
 	});
 	expect(request.event).toBe("connect");
 	expect(request.tls?.name).toBe("edge0");
+	expect(request.tls?.chain?.[1]).toBe("cd".repeat(32));
 	expect(request.implementation).toBe("moq-net-js/0.4.2");
 });
 
