@@ -299,6 +299,8 @@ STDERR_PID=$!
 METADATA_MODE=$MODE
 if [[ $RELAY_ONLY == true ]]; then METADATA_MODE=--relay; fi
 python3 "$ROOT/bench/metadata.py" "$RUN" "$BASE" "$METADATA_MODE" "${RUNTIME_WORKERS:-}" "$ROUNDS"
+# Record external load before this session's builds and measurements add their own.
+if [[ -r /proc/loadavg ]]; then cat /proc/loadavg >"$RUN/loadavg-start.txt"; fi
 cp -R "$ROOT/bench/workloads" "$RUN/workloads"
 cp -R "$ROOT/bench" "$RUN/harness"
 
@@ -1308,9 +1310,6 @@ generate_certificate
 CARGO_TARGET_DIR=$CURRENT_TARGET cargo build --locked --release -p moq-relay -p moq-bench
 LOAD_BIN=$CURRENT_TARGET/release/moq-bench
 HOST_BIN=$CURRENT_TARGET/release/moq-bench-host
-
-# Record context once for the suite; individual cells include the preceding cell's load.
-if [[ -r /proc/loadavg ]]; then cat /proc/loadavg >"$RUN/loadavg-before-workloads.txt"; fi
 
 if [[ -n $BASE ]]; then
     printf '\nRelay workloads: paired base/current\n'
