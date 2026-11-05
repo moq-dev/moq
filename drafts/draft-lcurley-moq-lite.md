@@ -228,7 +228,6 @@ How the underlying connection is authenticated is out-of-scope for this draft.
 
 A lite-07 session needs credit for at least 4 concurrent bidirectional streams.
 AUTH and ANNOUNCE occupy two streams for the session lifetime, and establishing a subscription briefly holds TRACK alongside SUBSCRIBE, requiring two more.
-Three streams cannot establish the first subscription; this is a minimum setup budget, not a stream leak.
 
 ## Transports {#transports}
 moq-lite defines five transport bindings.
