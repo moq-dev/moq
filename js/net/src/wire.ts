@@ -9,6 +9,7 @@
  */
 import type { Dispose, GetPromise, Getter } from "@moq/signals";
 import type * as broadcast from "./broadcast.ts";
+import type * as datagram from "./datagram.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
 import type { Route } from "./hop.ts";
 import type * as Instance from "./instance.ts";
@@ -19,6 +20,10 @@ import type * as track from "./track.ts";
 
 /** The protocol-facing operations behind a broadcast handle. */
 export interface Broadcast {
+	datagrams(name: string): datagram.Consumer;
+	liveDatagrams(name: string): datagram.Consumer | undefined;
+	createDatagrams(name: string, info: Partial<datagram.Info>): datagram.Producer;
+	requestedDatagrams(): Promise<datagram.Request | undefined>;
 	subscribe(name: string, options?: track.Subscription): track.Subscriber;
 	/** The track's properties; `hold` keeps the track wanted until it aborts, the way a held TRACK stream does, and aborting it before the answer abandons the lookup. */
 	resolveTrackInfo(name: string, hold?: AbortSignal): Promise<track.Info>;

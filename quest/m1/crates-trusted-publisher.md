@@ -9,7 +9,7 @@ Delete this quest once every crate has one.
 
 ## Waiting
 
-- Maintainer: after the next release publishes kio-macros, moq-c,
+- Maintainer: after the next `main` to `release` cut publishes kio-macros, moq-c,
   moq-congestion, moq-crypto, moq-ice, moq-quic, and moq-rtsp by token, add
   their trusted publishers the same way. Settings pages need a crates.io
   login, so check with a `release-rs.yml` run that publishes through OIDC.
