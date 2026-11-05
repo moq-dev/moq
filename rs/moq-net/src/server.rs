@@ -198,6 +198,8 @@ impl Server {
 				token: None,
 				ietf: self.extensions.ietf && version.has_ietf(),
 				implementation: self.implementation(),
+				// Filled by `lite::start` from the attached origin handles.
+				route_key: None,
 			}
 		} else {
 			lite::Setup::default()
@@ -1105,7 +1107,6 @@ struct Answer {
 	/// The deadline's timer, armed once the reply first waits.
 	timer: Option<kio::clock::Sleep>,
 	unanswered: Unanswered,
-	stats: stats::Session,
 	/// When to give up on the peer taking the reply.
 	deadline: Option<Instant>,
 	/// The request being answered, emptied of what the start took.
@@ -1127,7 +1128,6 @@ impl Answer {
 			reply: None,
 			timer: None,
 			unanswered: Unanswered(Some((session, version, stats.clone()))),
-			stats,
 			deadline,
 			handshake,
 		}
@@ -1143,9 +1143,9 @@ impl Answer {
 			drop(std::mem::replace(&mut self.unanswered, Unanswered(None)));
 			return Poll::Ready(Err(Error::Timeout));
 		};
-		self.unanswered.0 = None;
-		if let Err(err) = &res {
-			self.stats.end(err);
+		match &res {
+			Ok(_) => self.unanswered.answered(),
+			Err(err) => self.unanswered.refuse(err),
 		}
 		Poll::Ready(res)
 	}
@@ -1196,6 +1196,20 @@ impl Answer {
 /// [`Error::Timeout`]: the reply waits only on the peer, so giving up on it means the peer
 /// took too long.
 struct Unanswered(Option<(Transport, Version, stats::Session)>);
+
+impl Unanswered {
+	fn answered(&mut self) {
+		self.0 = None;
+	}
+
+	/// Close the session with `err`'s wire code, so the peer learns why it was refused.
+	fn refuse(&mut self, err: &Error) {
+		if let Some((mut session, version, stats)) = self.0.take() {
+			close(&mut session, err, Some(version));
+			stats.end(err);
+		}
+	}
+}
 
 impl Drop for Unanswered {
 	fn drop(&mut self) {
@@ -1415,6 +1429,9 @@ mod tests {
 		fn poll_closed(&self, _waiter: &kio::Waiter) -> std::task::Poll<Self::Error> {
 			std::task::Poll::Pending
 		}
+		fn export_keying_material(&self, _label: &[u8], _context: &[u8]) -> Option<[u8; 32]> {
+			Some([9; 32])
+		}
 	}
 
 	#[derive(Clone, Default)]
@@ -1484,6 +1501,7 @@ mod tests {
 			token: None,
 			ietf: false,
 			implementation: None,
+			route_key: None,
 		}
 		.encode(&mut crate::coding::Encoder::new(&mut buf, v.into()), v)
 		.unwrap();
@@ -1872,6 +1890,37 @@ mod tests {
 		crate::transport::poll::Session::close(&session, SessionError::Cancel.to_code(), "closed");
 		let request = Server::new().accept_request(kio::clock::now(), session).await.unwrap();
 		assert_eq!(request.path(), "/closed");
+	}
+
+	/// A client whose route key proof fails is refused with PROTOCOL_VIOLATION, not left waiting.
+	#[kio::test]
+	async fn a_failed_route_key_proof_closes_with_its_code() {
+		let v = lite::Version::Lite07;
+		// Signed for another session's exported secret, so it fails against this one's.
+		let proof = crate::route::Transcript::new([1; 32]).prove(&crate::origin::RouteKey::generate(), true);
+		let mut setup = Vec::new();
+		lite::DataType::Setup
+			.encode(&mut crate::coding::Encoder::new(&mut setup, v.into()), v)
+			.unwrap();
+		lite::Setup {
+			route_key: Some(proof),
+			..Default::default()
+		}
+		.encode(&mut crate::coding::Encoder::new(&mut setup, v.into()), v)
+		.unwrap();
+
+		let session = FakeSession::new(ALPN_LITE_07_WIP, [setup]);
+		let transport = session.clone();
+		let request = Server::new()
+			.with_versions(Version::Lite(v).into())
+			.accept_request(kio::clock::now(), session)
+			.await
+			.unwrap();
+		assert!(matches!(request.ok().await, Err(Error::ProtocolViolation)));
+		assert_eq!(
+			transport.close_code(),
+			Some(Version::Lite(v).session_code(&SessionError::ProtocolViolation))
+		);
 	}
 
 	#[kio::test]

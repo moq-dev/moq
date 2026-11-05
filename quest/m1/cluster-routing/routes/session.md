@@ -123,15 +123,16 @@ epoch. The route layer's own origin-node identity, with its seqno and
 revision, stays separate ("keep administrative identity and broadcast epoch
 separate", in the epic).
 
-Decided 2026-11-04 (maintainer, /quest-unblock): a scoped peer's identities
-are keyed by a route key the peer proves, specified in
-[Scoped peers prove a route key](/quest/m1/cluster-routing/routes/proof.md).
-Every identity a scoped, proven peer sends, its own included, is qualified
+Decided 2026-11-05 (maintainer, /quest-plan): a scoped peer's identities
+are keyed by a route key the peer proves in its lite-07 SETUP: the session's
+`PeerSetup::route_key` once its SETUP arrives, and `None` for a peer that proved
+none. Relays set theirs with `--cluster-route-key`. Every identity a scoped, proven peer sends, its own included, is qualified
 under its proven key, so relays sharing a key file fail over as one. A peer that proves no
 key gets a per-session key. `Scope::qualify` still takes the key from the
 caller, so this quest does not wait on the proof. Options shown:
 
-- ✅ A route key the peer proves once per announce stream, before the lite-07 cut
+- ✅ A route key the peer proves once per session in SETUP, before the lite-07 cut
+  (2026-11-05, maintainer, /quest-plan; supersedes the per-announce proof option)
 - A route label carried in the grant (the earlier recommendation), with the
   proven key added after the cut
 - A per-session key now

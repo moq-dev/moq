@@ -4,6 +4,13 @@ How to adopt new APIs and update for breaking changes, newest first.
 
 ## Unreleased
 
+### Shared H.265 SPS parsing
+
+Use `codec::h265::Sps::parse` to read an SPS NAL unit through the same bounded
+walk as moq-mux before scuffle-h265 parses it. The `Sps` result exposes the
+checked picture size and any VUI `VideoSignal` without exposing scuffle-h265's
+types. moq-video clears the colour label when an SPS is refused. No wire change.
+
 ### The async API is opt-in
 
 Enable the `async` Cargo feature to keep awaiting moq-mux:

@@ -19,6 +19,7 @@ author:
 normative:
   moqt: I-D.ietf-moq-transport
   qmux: I-D.ietf-quic-qmux
+  webtrans-h3: I-D.ietf-webtrans-http3
   qmuxws:
     title: "QMux over WebSocket"
     target: https://datatracker.ietf.org/doc/draft-lcurley-qmux-websocket/
@@ -29,6 +30,8 @@ normative:
     date: false
   RFC3986:
   RFC6455:
+  RFC8032:
+  RFC8446:
   RFC8831:
   RFC9000:
   RFC9002:
@@ -477,6 +480,7 @@ Routing follows the Babel routing protocol [RFC8966], keyed by origin node: each
 An origin node names itself with a Node ID: a non-zero 64-bit value, fresh for each process restart and shared by every session of that process.
 An origin MUST NOT declare a Node ID with the most significant bit set.
 That bit marks a qualified Node ID: a relay files every Node ID a peer with a scoped publish grant sends (see [AUTH_OK](#auth-ok)), the peer's own included, under a qualified Node ID of its own derivation, collision-resistant at 64 bits, and translates it back when it forwards a request on that session.
+The derivation is keyed by the key the peer proved with the [Route Key Parameter](#route-key-parameter), so peers sharing one key are filed alike and fail over as one, or by a key unique to the session when the peer proved none.
 A relay MUST ignore a qualified Node ID received from such a peer, and claims under its qualified Node IDs outside that peer's grant.
 A Node ID is otherwise declared, not proven.
 
@@ -964,6 +968,8 @@ The following Setup Parameters are defined:
 |------|----------------|-------------|
 | 0x7  | Token          | Token (b)   |
 |------|----------------|-------------|
+| 0x8  | Route Key      | Proof (..)  |
+|------|----------------|-------------|
 
 ### Probe Parameter {#probe-parameter}
 The Probe Parameter advertises the sender's capability level when acting as a publisher on a [Probe Stream](#probe).
@@ -1030,6 +1036,30 @@ A client whose request URI already carries a credential SHOULD NOT also send a d
 The URI is fixed before the version is negotiated, so a client that may negotiate a version without this parameter carries the same credential in the query as well.
 
 Only the client sends it; a client that receives one MUST close the session with a PROTOCOL_VIOLATION. A relay MUST NOT forward it.
+
+### Route Key Parameter {#route-key-parameter}
+The Route Key Parameter proves that the sender holds an Ed25519 [RFC8032] key, bound to this session, so a receiver recognizes the sender, and endpoints sharing its key, across sessions.
+
+~~~
+Route Key Proof {
+  Public Key (256),
+  Signature (512),
+}
+~~~
+
+**Public Key**:
+The sender's Ed25519 public key.
+
+**Signature**:
+The key's Ed25519 signature over the ASCII bytes `moq-lite route key`, then one byte naming the sender's side of the session (0 for the client, 1 for the server), then 32 bytes of keying material exported from the session with the label `EXPORTER-moq-lite-route-key` and an empty context.
+
+Binding 1 exports with the TLS exporter (Section 7.5 of [RFC8446]), and binding 2 with the WebTransport session's exporter [webtrans-h3] (see [Transports](#transports)).
+An endpoint MUST NOT send the parameter on a session that provides no exporter.
+The exported material and the sender's side keep a proof from being replayed on another session or reflected back to its sender.
+
+Either endpoint MAY send it. A receiver MUST close the session with a PROTOCOL_VIOLATION if the value is not 96 bytes.
+A receiver that relies on the key MUST verify the signature first, closing the session with a PROTOCOL_VIOLATION if it does not verify; without an exporter on the session, it cannot rely on the key.
+A relay MUST NOT forward it.
 
 
 ## ANNOUNCE_REQUEST {#announce-request}
@@ -2095,6 +2125,7 @@ The `Message Length` describes the payload size on the wire.
 - Added the reliable ordered RTCDataChannel binding, with one Qmux Record per binary message and no datagrams.
 - Added the SETUP `Implementation` parameter (0x6): the sender's software as `name/version` product tokens.
 - Added the client-only Token Setup Parameter (0x7), carrying the connection credential in SETUP instead of only the request URI.
+- Added the Route Key Setup Parameter (0x8): an Ed25519 public key and its signature over keying material exported from the session.
 - Added Padding Stream (0x2), read and discarded incrementally by either endpoint.
 - A Report-level publisher reads and ignores PROBE targets instead of resetting the Probe Stream.
 - A GOAWAY recipient MAY keep opening requests on the current session until it has moved to a replacement session; previously it MUST NOT open new streams. The sender SHOULD keep answering them and MAY reset one with GOING_AWAY, which the recipient SHOULD retry on another route.
@@ -2355,7 +2386,7 @@ GOAWAY carries an optional New Session URI that asks the peer to reconnect elsew
 
 ## Routing Metadata and Privacy
 A Node ID (see [Routing](#routing)) is opaque and fresh for each restart: it tells a peer which claims share an origin, and a route's metric how far that origin is, but not the relays in between.
-A Node ID is declared, not proven, so a peer can forge another origin's Node ID or advertise a better route than it has. Qualifying the Node IDs of a peer with a scoped publish grant confines such a forgery to the claims inside that grant; an unscoped peer is trusted with every origin.
+A Node ID is declared, not proven, so a peer can forge another origin's Node ID or advertise a better route than it has. Qualifying the Node IDs of a peer with a scoped publish grant, under the key it proved in SETUP, confines such a forgery to the claims inside that grant; an unscoped peer is trusted with every origin.
 
 ## Resource Exhaustion
 A peer can open many streams (subscriptions, announcements, fetches), request large announce prefixes, or advertise broad claims. Implementations SHOULD bound the number of concurrent subscriptions, announce matches, routes, and cached groups; an endpoint whose peer goes past its bound on subscriptions or announcements SHOULD close the session with TOO_MANY_REQUESTS, and SHOULD rely on QUIC flow control and stream limits to backpressure a misbehaving peer (see [ANNOUNCE_REQUEST](#announce-request)). Expiration (see [Expiration](#expiration)) bounds how long stale groups consume memory and flow control. A broad claim invites a request for any covered path, each of which may start work: an advertiser SHOULD bound the work it starts, withdrawing its claim before it runs out, and every refusal is terminal, so a flood of requests costs the mesh one round trip each rather than a search (see [Resolution](#resolution)).
