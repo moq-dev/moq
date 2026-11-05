@@ -3426,7 +3426,10 @@ impl Clone for Carry {
 		Self {
 			recover: self.recover.clone(),
 			// A clone reads in parallel, so it boards for itself.
-			ride: self.ride.as_ref().map(|ride| Ride { boarding: None, ..*ride }),
+			ride: self.ride.as_ref().map(|ride| Ride {
+				boarding: None,
+				..*ride
+			}),
 		}
 	}
 }

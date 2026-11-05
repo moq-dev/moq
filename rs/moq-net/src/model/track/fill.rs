@@ -745,8 +745,13 @@ pub(super) fn poll_requested(
 	}) {
 		let id = guard.pop().expect("predicate guaranteed a fill");
 		let pending = guard.pending.get(&id).expect("popped fill is pending");
-		let (start, end, frame_end, time, flight) =
-			(pending.start, pending.end, pending.frame_end, pending.time, pending.flight);
+		let (start, end, frame_end, time, flight) = (
+			pending.start,
+			pending.end,
+			pending.frame_end,
+			pending.time,
+			pending.flight,
+		);
 		let (asks, result) = (pending.asks.clone(), pending.result.clone());
 		drop(guard);
 		// Built with the fills unlocked, so no other lock nests under theirs.
@@ -968,12 +973,14 @@ impl Fill {
 				}
 			}?;
 			// The live feed may have delivered it since: answered by the cache, not the source.
-			let cached = self
-				.inner
-				.state
-				.read()
-				.covering_range(sequence, self.inner.bounds(sequence))
-				.is_some();
+			// Never a flight's, which the cached copy shed.
+			let cached = !self.inner.flight
+				&& self
+					.inner
+					.state
+					.read()
+					.covering_range(sequence, self.inner.bounds(sequence))
+					.is_some();
 			if !cached {
 				return Some(sequence);
 			}

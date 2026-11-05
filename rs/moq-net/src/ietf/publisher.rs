@@ -389,6 +389,10 @@ async fn read_fetch(
 	}
 	let mut first = skip;
 	let mut frames = Vec::new();
+	// The answer is held whole until FETCH_OK promises it, so no more than one group copy's
+	// tail: a range the cache shed rides a flight, which would otherwise read on into
+	// memory up to Largest Object.
+	let mut held = 0u64;
 	// Reading an object past the range proves the range missed the group's end.
 	let mut overshot = false;
 	// A long cached group is read a slice per poll, so the session's other tasks still run.
@@ -412,6 +416,10 @@ async fn read_fetch(
 		}
 		if frames.is_empty() {
 			first = id;
+		}
+		held += frame.payload.len() as u64;
+		if held > group::MAX_CACHE_BYTES {
+			return Err(Error::GroupTooLarge);
 		}
 		frames.push(frame);
 		if until.is_some_and(|until| id.saturating_add(1) >= until) {

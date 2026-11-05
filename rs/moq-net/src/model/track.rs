@@ -3236,11 +3236,16 @@ impl Boarding {
 			end: None,
 		};
 		let sequence = self.sequence;
-		let answer = self.join.outcome().poll(waiter, |outcome| match outcome.refused(sequence) {
-			Some((err, _)) => Poll::Ready(Err(err.clone())),
-			None if outcome.is_accepted(sequence) => Poll::Ready(outcome.partial(sequence, frames).ok_or(Error::Cancel)),
-			None => Poll::Pending,
-		});
+		let answer = self
+			.join
+			.outcome()
+			.poll(waiter, |outcome| match outcome.refused(sequence) {
+				Some((err, _)) => Poll::Ready(Err(err.clone())),
+				None if outcome.is_accepted(sequence) => {
+					Poll::Ready(outcome.partial(sequence, frames).ok_or(Error::Cancel))
+				}
+				None => Poll::Pending,
+			});
 		Poll::Ready(match ready!(answer) {
 			Ok(Ok(copy)) => copy.try_consume().ok_or(Error::Cancel),
 			Ok(Err(err)) => Err(err),
@@ -23377,18 +23382,25 @@ mod test {
 			flight.write_frame(None, numbered(index)).unwrap();
 			assert_eq!(read_numbered(&mut late), Some(index));
 			index += 1;
-				assert!(index < FRAMES, "handed over before the flight caught up");
+			assert!(index < FRAMES, "handed over before the flight caught up");
 		}
 		// The live writer runs its whole window ahead of the live reader at once: the
 		// rider, as far behind that reader as it was admitted, keeps its frame.
 		let mut written = FRAMES;
-		while live.poll_ready(&kio::Waiter::noop(), &frame_info(&numbered(0))).is_ready() {
+		while live
+			.poll_ready(&kio::Waiter::noop(), &frame_info(&numbered(0)))
+			.is_ready()
+		{
 			live.write_frame(None, numbered(written)).unwrap();
 			written += 1;
 		}
 		assert!(written > FRAMES + 900, "a whole window: {written}");
 		while index < written {
-			assert_eq!(read_numbered(&mut late), Some(index), "frame {index} from the live copy");
+			assert_eq!(
+				read_numbered(&mut late),
+				Some(index),
+				"frame {index} from the live copy"
+			);
 			index += 1;
 		}
 		assert_eq!(read_numbered(&mut late), None, "at the live edge");
@@ -23473,7 +23485,9 @@ mod test {
 		for index in 0..2_500 {
 			let payload = numbered(index);
 			assert!(
-				flight.poll_ready(&kio::Waiter::noop(), &frame_info(&payload)).is_ready(),
+				flight
+					.poll_ready(&kio::Waiter::noop(), &frame_info(&payload))
+					.is_ready(),
 				"frame {index}: paced by the fast rider only"
 			);
 			flight.write_frame(None, payload).unwrap();

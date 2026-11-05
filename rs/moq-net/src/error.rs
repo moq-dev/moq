@@ -232,7 +232,8 @@ pub enum StreamError {
 	#[error("frame too large")]
 	FrameTooLarge,
 
-	/// A group could not make room for a write, even by shedding its front, and was aborted.
+	/// A group could not make room for a write, even by shedding its front, and was aborted,
+	/// or a request asked for more of one than the answer can hold.
 	#[error("group too large")]
 	GroupTooLarge,
 
