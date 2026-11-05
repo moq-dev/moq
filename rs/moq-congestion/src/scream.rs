@@ -593,6 +593,7 @@ mod tests {
                 mtu: MTU,
                 rtt: Duration::from_millis(333),
                 max_pacing_rate: None,
+                seed: 0,
             },
         )
     }

@@ -74,6 +74,7 @@ async fn read(version: Option<&str>, range: Range) -> Result<Vec<u64>, Error> {
 				.await
 				.expect("resolve timeout")
 				.expect("broadcast resolves")
+				.unwrap()
 		}
 	};
 

@@ -491,7 +491,8 @@ pub struct Resume<'a> {
 }
 
 impl Resume<'_> {
-	/// Resolve the replacement's mapping once all declared old media has drained.
+	/// The replacement's mapping, once all declared old media has drained.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_ready(&mut self, waiter: &kio::Waiter) -> Poll<Result<Mapping>> {
 		let _ = self.track.presentation.changed.poll(waiter, |_| Poll::Pending);
 		let now = kio::clock::now();
@@ -548,11 +549,6 @@ impl Resume<'_> {
 			pending.mapping = Some(mapping);
 		}
 		Poll::Ready(Ok(mapping))
-	}
-
-	/// Wait for the old media to drain and return the replacement's mapping.
-	pub async fn ready(mut self) -> Result<Mapping> {
-		kio::wait(|waiter| self.poll_ready(waiter)).await
 	}
 }
 

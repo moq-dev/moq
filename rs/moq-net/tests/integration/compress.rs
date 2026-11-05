@@ -101,7 +101,13 @@ async fn relay(published: Published, hops: [&str; 2], subscription: moq_net::tra
 	let downstream = connect_mock(options).await;
 
 	let consumer = origin.consume();
-	let remote = consumer.follow("bcast", None).unwrap().available().await.unwrap();
+	let remote = consumer
+		.follow("bcast", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap()
+		.unwrap();
 	let subscriber = remote.track("data").unwrap().subscribe(subscription).await.unwrap();
 	support::harness::subscribed(&track).await;
 
@@ -286,6 +292,7 @@ async fn ietf_fetch_keeps_the_stored_form() {
 				.unwrap()
 				.available()
 				.await
+				.unwrap()
 				.unwrap();
 			let consumer = remote.track("data").unwrap();
 			assert!(consumer.info().await.unwrap().compress, "{version}");

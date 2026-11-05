@@ -93,8 +93,11 @@ if (
 async function catalog(
 	bc: Moq.Broadcast.Consumer,
 ): Promise<{ video: [string, Catalog.VideoConfig]; audio: [string, Catalog.AudioConfig][] }> {
-	const track = bc.track("catalog.json").subscribe({ priority: Catalog.PRIORITY.catalog });
-	const catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track, schema: Catalog.RootSchema });
+	const catalog = new Json.Snapshot.Consumer<Catalog.Root>({
+		track: bc.track("catalog.json"),
+		schema: Catalog.RootSchema,
+		priority: Catalog.PRIORITY.catalog,
+	});
 	for (;;) {
 		const root = (await catalog.latest())?.value;
 		if (!root) throw new Error("catalog ended without a video and an audio track");

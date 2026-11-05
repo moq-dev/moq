@@ -257,7 +257,7 @@ impl sealed::Open for TcpStream {
 			local: Some(local),
 			pending: None,
 		};
-		shared.tasks.push(kio::Pending::new(pump));
+		shared.tasks.push(pump);
 		Self {
 			producer,
 			consumer,
@@ -697,31 +697,21 @@ impl Endpoint {
 		}))
 	}
 
-	/// Poll for the next `tcp` dial from a peer; fails with [`Error::Closed`] once the
+	/// The next `tcp` dial from a peer; fails with [`Error::Closed`] once the
 	/// endpoint closed, and with [`Error::Unsupported`] while no peer can reach it (see
 	/// [`Endpoint`]).
 	///
 	/// The first call starts accepting `tcp` dials. They queue until taken, or until their
 	/// dialer gives up, so keep accepting, and accept or reject each one.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_accept_tcp(&self, waiter: &kio::Waiter) -> Poll<Result<Incoming<TcpStream>, Error>> {
 		self.poll_accept(waiter)
 	}
 
-	/// Wait for the next `tcp` dial from a peer; see [`Self::poll_accept_tcp`].
-	#[cfg(feature = "async")]
-	pub async fn accept_tcp(&self) -> Result<Incoming<TcpStream>, Error> {
-		kio::wait(|waiter| self.poll_accept_tcp(waiter)).await
-	}
-
-	/// Poll for the next `track` dial from a peer; see [`Self::poll_accept_tcp`].
+	/// The next `track` dial from a peer; see [`Self::poll_accept_tcp`].
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_accept_track(&self, waiter: &kio::Waiter) -> Poll<Result<Incoming<TrackStream>, Error>> {
 		self.poll_accept(waiter)
-	}
-
-	/// Wait for the next `track` dial from a peer; see [`Self::poll_accept_tcp`].
-	#[cfg(feature = "async")]
-	pub async fn accept_track(&self) -> Result<Incoming<TrackStream>, Error> {
-		kio::wait(|waiter| self.poll_accept_track(waiter)).await
 	}
 
 	/// Close the endpoint; see [`Endpoint`].
@@ -842,7 +832,8 @@ impl Step {
 		loop {
 			match self {
 				Self::Resolving(following) => {
-					let broadcast = ready!(following.poll_available(waiter))?;
+					// Only the first call is made here, and it never reports the path offline.
+					let broadcast = ready!(following.poll_available(waiter))?.expect("the first call is never offline");
 					let subscribing = broadcast.track(track)?.subscribe(reliable()).into_inner();
 					*self = Self::Subscribing(subscribing);
 				}

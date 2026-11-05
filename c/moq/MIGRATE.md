@@ -24,6 +24,14 @@ Audio and video subscribe setup now reports `MOQ_ERROR_UNSUPPORTED_CONFIG` when 
 
 The hand-written crate never published as moq-c: a libmoq 0.6 user applies these entries before moving to the generated API.
 
+### Announcements are a listing ([#7678](https://github.com/moq-dev/moq/pull/7678))
+
+`moq_announce_kind` is `MOQ_ANNOUNCE_KIND_PRESENT` (0) or `MOQ_ANNOUNCE_KIND_ABSENT` (1), and `moq_announce_event` loses `predecessor` and `predecessor_len`, changing the C ABI.
+Another instance taking a path over keeps it present, and a route's cost changing is not reported.
+Map `_START` to `_PRESENT` and `_END` to `_ABSENT`, and drop `_UPDATE` handling. Where you requested the path again on `_RESTART` or `_TAKEOVER`, call `moq_origin_follow`, whose callback delivers a broadcast handle for each new instance.
+
+`moq_origin_follow` takes a `moq_follow_callback`, `(void *user_data, moq_follow_event event, int32_t code)`, instead of a `moq_status_callback`. `MOQ_FOLLOW_EVENT_ONLINE` carries each broadcast handle (where a positive code did), `MOQ_FOLLOW_EVENT_OFFLINE` reports the path going offline (or, for a follow pinned to an instance, another instance taking it over) with code `0`, and `MOQ_FOLLOW_EVENT_END` is the terminal callback, with `0` or a negative error that `moq_error()` explains (where a code `<= 0` was). Release `user_data` on `MOQ_FOLLOW_EVENT_END`.
+
 ### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
 
 A NULL or zeroed `moq_track_info` now advertises a zero max age, serving only the live edge, instead of no publisher limit. `max_age_present` is gone and `max_age_us` always applies; set the new `max_age_unlimited`, which ignores `max_age_us`, where you relied on `max_age_present` false meaning no limit. Zero-initialize the struct (`moq_track_info info = {0};`) or assign every member. In the generated API, an unset `moq_track_info.max_age` is likewise zero, and `max_age_unlimited` sets no limit.

@@ -17,15 +17,13 @@ const PACKET: u16 = 1200;
 fn measure(flight: usize, batch: usize, steady: bool) -> (Duration, usize) {
     let base = Instant::now();
     let region = Region::new(ALLOCATOR);
-    let config = Config {
-        probe_rng_seed: Some([7; 16]),
-        ..Default::default()
-    };
+    let config = Config::default();
     let init = Init {
         now: base,
         mtu: PACKET,
         rtt: Duration::from_millis(10),
         max_pacing_rate: None,
+        seed: 0,
     };
     let mut bbr = Bbr3::new(Arc::new(config), init);
     let bytes = u64::from(PACKET);
