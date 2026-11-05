@@ -537,6 +537,8 @@ export class Producer {
 		const reads = this.#mirrors?.get(mirror);
 		if (reads === undefined) return;
 		this.#mirrors?.delete(mirror);
+		// A consumer that outlives the group must not pin it, and its buffers, through this.
+		mirror.reads = undefined;
 		if (reads) this.#readers--;
 		this.#wanted.set(this.#readers > 0);
 	}
