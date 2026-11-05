@@ -38,11 +38,22 @@ it does not establish the cause. Keep this wait in the quest so the
 evidence-only [moq-dev/moq#7933](https://github.com/moq-dev/moq/pull/7933)
 can land without a speculative test or production change.
 
+[moq-dev/moq#7764](https://github.com/moq-dev/moq/pull/7764) also disables
+the test (`test.skip`, "load-sensitive fin.closed assertion; investigate drain
+scheduling before restoring") under the repo's disable-a-flaky-test policy, and
+says no follow-up quest was created; this quest is that follow-up. Once that
+skip lands, restoring the test is part of this quest: a skipped test cannot
+meet the Goal or Done condition, and failures can only be captured by
+re-enabling it (for example, with per-dial diagnostics) in a multi-file run.
+
 On the next captured failure, check the dial count and which client closed
-first. The fixture overwrites shared `fin.hold` on every dial and lets any
+first. In `closing the loop keeps the tokens until the session drains`, the
+fixture overwrites shared `fin.hold` on every dial and lets any
 client's close set shared `fin.closed`, but reads the track from `dials[0]`.
 An extra dial could therefore hold FINs on another client or report another
-client's close. This is an unverified hypothesis, not an established cause;
+client's close. The `teardown by …` fixture does not share this hazard: it
+sets `fin.hold` and `fin.closed` only on the first dial
+(`if (dials.length === 0)`). This is an unverified hypothesis, not an established cause;
 check it alongside setup-group completion before choosing a fix.
 
 Public API: none. Wire: none.
@@ -72,7 +83,8 @@ no reproduction on the unchanged claim based on `origin/main`.
 ## Waiting
 
 - moq-dev/moq: capture the next reload drain failure with logs before choosing
-  a fix. Check full-suite and merge-queue failure reports for the test names
+  a fix. If #7764's skip has landed, no full-suite failure can occur; restore
+  the test with per-dial diagnostics and reproduce under multi-file load instead. Check full-suite and merge-queue failure reports for the test names
   above; retain the full command, commit, and assertion/stack output in the
   report, plus any available session logs. The fixture currently emits no
   dial/close diagnostics; those logs are not required to resume investigation.
