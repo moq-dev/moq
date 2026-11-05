@@ -8,6 +8,11 @@
 //! while retaining the warm memo. Every iteration measures one tick and one update of its kind.
 //!
 //! Run with `cargo bench -p moq-json --bench table`.
+#![expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "host time measures benchmark throughput"
+)]
 
 use std::hint::black_box;
 use std::time::{Duration, Instant};
