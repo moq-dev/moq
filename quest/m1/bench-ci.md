@@ -11,23 +11,15 @@ runs on the hosted ARM runners, and a deliberately slowed bench fails the job.
 
 - Maintainer: dispatch the slowed-bench Nightly run below. Agents never
   dispatch Nightly; the 2026-11-04 authorization covered the two A/A runs only.
-- Maintainer: authorize one more A/A Nightly run for the moq-net
-  (`bench-rust`) and `bench-rust-relay` groups once
-  [moq-net's benches run to completion](/quest/m1/bench-test-mode.md) lands.
-  Neither group produced a `paired.json` in either 2026-11-04 run, because
-  their benches panic. Check: both groups' `paired.json` exist in that run.
+- moq-dev/moq: once A/A run
+  [41921320690](https://github.com/moq-dev/moq/actions/runs/41921320690)
+  finishes, dispatch the second A/A run under the same authorization
+  (`gh workflow run nightly.yml --ref main -f bench-base=<main's head>`; as of
+  2026-11-04 it is not dispatched yet), then read both runs' `paired.json` (the
+  `bench-rust*` artifacts). Find the second with `gh run list --repo
+  moq-dev/moq --workflow nightly.yml --event workflow_dispatch`.
 
 ## Plan
-
-A/A results, 2026-11-04 (/quest-unblock): runs
-[41921320690](https://github.com/moq-dev/moq/actions/runs/41921320690) and
-[41933525520](https://github.com/moq-dev/moq/actions/runs/41933525520) both
-produced `paired.json` for the shared, extra, and uring groups. The first was
-cancelled by Nightly's concurrency group after its bench artifacts uploaded.
-At a 10% threshold over 3 rounds, neither run confirmed a regression, and
-every case over 10% came back as noise. Single-pass crossings: shared 18 and
-26 of 716, extra 10 and 15 of 460, uring 1 and 1 of 41. |delta| p95 was
-3.7-8.3%, p99 10-23%. Tune the threshold for those groups from these.
 
 Decided 2026-11-04 (maintainer, /quest-unblock): ✅ authorize one-time agent
 dispatch of the two A/A Nightly runs on `main`, with `bench-base` set to each
