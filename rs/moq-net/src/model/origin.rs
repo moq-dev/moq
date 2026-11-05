@@ -2974,8 +2974,12 @@ impl RouteState {
 	/// The broadcast closed: retract the route for good and refuse a job's unanswered
 	/// request.
 	fn ended(&self) {
-		let request = self.control.lock().request.take();
+		// Retracted under the control lock, so an announce racing the close either lands
+		// first or finds the entries gone, never advertises after it.
+		let mut control = self.control.lock();
+		let request = control.request.take();
 		self.announcement.retract(false);
+		drop(control);
 		// Dropped outside every lock: refusing it wakes the requesters.
 		drop(request);
 	}
@@ -3316,8 +3320,10 @@ impl AnnounceProducer {
 			shared.sync_route(prefix, &claim);
 			shared.prune_withdrawn(prefix);
 		}
-		drop(shared);
+		// Under the table lock, as withdrawing and retracting clear it, so a racing one
+		// never leaves the guard held for entries no longer advertised.
 		self.guard.lock().get_or_insert_with(|| self.ingress.announce());
+		drop(shared);
 		for producer in released {
 			if let Ok(mut request) = producer.write() {
 				request.resolved.get_or_insert(Err(Error::Unroutable));
@@ -3363,8 +3369,8 @@ impl AnnounceProducer {
 	/// under the table lock, so an answer prepared for one, such as a hidden job route,
 	/// can no longer land once the route is withdrawn.
 	fn withdraw(&self) {
-		*self.guard.lock() = None;
 		let mut shared = self.shared.lock();
+		let guard = self.guard.lock().take();
 		let mut released = Vec::new();
 		for (prefix, id) in &self.entries {
 			let Some(entry) = shared.routes.entry_mut(prefix, *id) else {
@@ -3381,6 +3387,7 @@ impl AnnounceProducer {
 			shared.sync_route(prefix, &claim);
 		}
 		drop(shared);
+		drop(guard);
 		// Refused once the table lock is gone: the refusal wakes their fronts, which read
 		// the table.
 		for producer in released {
@@ -3392,15 +3399,23 @@ impl AnnounceProducer {
 
 	/// Retract the route now: remove its table entries and reject anything still
 	/// waiting on its queue. Idempotent, and what dropping the advertisement does.
+	///
+	/// A prefix route's server closes under the table lock, as its entries leave it, so an
+	/// answer admitted under that lock, such as a job route announcing, either lands first
+	/// or finds the request released.
 	fn retract(&self, withdrawn: bool) {
-		*self.guard.lock() = None;
 		let mut shared = self.shared.lock();
-		let mut servers = Vec::new();
+		let guard = self.guard.lock().take();
+		let mut released = Vec::new();
 		for (prefix, id) in &self.entries {
 			let Some(entry) = shared.routes.remove(prefix, *id) else {
 				continue;
 			};
-			servers.extend(entry.server.clone());
+			if let Some(server) = &entry.server {
+				let mut server = server.lock();
+				server.closed = true;
+				released.extend(server.requests.drain_all());
+			}
 			// A peer remains reachable while any of its sessions advertises this
 			// prefix. Remove this session's route before testing the remaining
 			// claims, under the same lock, so overlapping withdrawals cannot
@@ -3420,20 +3435,12 @@ impl AnnounceProducer {
 			shared.prune_withdrawn(&entry.prefix);
 		}
 		drop(shared);
-		// Reject anything still waiting on this route's server; a request already
-		// handed to the handler resolves through its own `Request`. Closing wakes
-		// the server's waiters, so it runs after the table unlocks; the entries
-		// already left it, so nothing new routes here meanwhile.
-		for server in servers {
-			let released = {
-				let mut server = server.lock();
-				server.closed = true;
-				server.requests.drain_all()
-			};
-			for producer in released {
-				if let Ok(mut request) = producer.write() {
-					request.resolved.get_or_insert(Err(Error::Unroutable));
-				}
+		drop(guard);
+		// Refused once the table lock is gone: the refusal wakes their fronts, which read
+		// the table.
+		for producer in released {
+			if let Ok(mut request) = producer.write() {
+				request.resolved.get_or_insert(Err(Error::Unroutable));
 			}
 		}
 	}

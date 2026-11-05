@@ -1095,6 +1095,18 @@ test("closing the origin ends a hidden or withdrawn prefix route's requests", as
 	for (const next of await Promise.all(pending)) expect(next.done).toBe(true);
 });
 
+test("a prefix route refuses to announce or re-price once its origin closed, like an exact one", () => {
+	const origin = new Producer();
+	const prefix = origin.routePrefix(Path.from("live"));
+	const exact = origin.route(Path.from("room"));
+	origin.close();
+	expect(prefix.announced).toBe(false);
+	expect(() => prefix.announce()).toThrow("origin is closed");
+	expect(() => prefix.setCost(1n)).toThrow("origin is closed");
+	expect(() => exact.announce()).toThrow();
+	expect(() => exact.setCost(1n)).toThrow();
+});
+
 test("a prefix route can start hidden, withdraw and come back while it keeps yielding requests", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();

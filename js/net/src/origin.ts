@@ -1589,20 +1589,22 @@ export class Producer implements Table {
 
 		let inserted = false;
 		let ended = false;
-		const insert = () => {
+		// Closing the origin drops the whole table without visiting each route, so a route
+		// still marked inserted learns of it here, matching an exact route's "origin is closed".
+		const open = () => {
 			if (ended) throw new Error("route is closed");
+			if (this.#state.routes.peek()) return;
+			inserted = false;
+			throw new Error("origin is closed");
+		};
+		const insert = () => {
+			open();
 			if (inserted) return;
-			let closed = false;
 			this.#state.routes.mutate((routes) => {
-				if (!routes) {
-					closed = true;
-					return;
-				}
-				const entries = routes.get(prefix);
+				const entries = routes?.get(prefix);
 				if (entries) entries.unshift(entry);
-				else routes.set(prefix, [entry]);
+				else routes?.set(prefix, [entry]);
 			});
-			if (closed) throw new Error("origin is closed");
 			inserted = true;
 			this.#state.rebuildOriginated();
 			this.#state.refreshPrefix(prefix);
@@ -1640,7 +1642,7 @@ export class Producer implements Table {
 		}
 
 		const update = (next: RouteInfo) => {
-			if (ended) throw new Error("route is closed");
+			open();
 			const previous = entry.route.peek().instance;
 			const restart = inserted && previous !== next.instance;
 			if (restart) this.#state.restart(entry);
@@ -1664,7 +1666,7 @@ export class Producer implements Table {
 			change: (changed) => update(RouteInfo.normalize({ ...entry.route.peek(), ...changed })),
 			requested: () => serveRequests(server, publisher),
 			close: release,
-			info: () => (inserted ? entry.route.peek() : undefined),
+			info: () => (inserted && this.#state.routes.peek() ? entry.route.peek() : undefined),
 			update: (next) => {
 				// A route naming no instance keeps the one it serves.
 				const named = RouteInfo.normalize(next);
