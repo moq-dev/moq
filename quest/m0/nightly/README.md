@@ -22,10 +22,8 @@ children for the causes nothing owned.
 
 This README's own work, after the children:
 
-- Nightly's multi-step jobs (Features first) keep going past a failed step
-  and fail at the end, so one break never hides the steps after it.
-- Confirm a scheduled run passes. Failures already owned elsewhere stay
-  there: the audio near-zero p95 row belongs to
+- Confirm a scheduled run on `main` passes; never dispatch Nightly. Failures
+  already owned elsewhere stay there: the audio near-zero p95 row belongs to
   [audio jitter target](/quest/m1/audio-jitter-target/README.md), the
   macOS `receive_credit` timeout has no owner since its quest was deleted in
   [moq-dev/moq#6732](https://github.com/moq-dev/moq/pull/6732), so plan one under
