@@ -200,7 +200,7 @@ where
 	emitted_epoch: u64,
 	pcr_discontinuity: bool,
 	/// The presentation interval of the last signalled delivery loss, shared across tracks.
-	lost: Option<(Timestamp, Timestamp)>,
+	lost: Option<(Option<Timestamp>, Timestamp)>,
 	/// Lays the muxed packets onto the PCR grid.
 	schedule: Schedule,
 	/// Read each track from the oldest group the delay still reaches, rather than the live
@@ -3521,16 +3521,21 @@ where
 		let track = self.program.tracks.get_mut(name).context("missing track")?;
 		let skipped = gap > track.gap;
 		track.gap = gap;
-		let after = track.last_timestamp.unwrap_or(frame.timestamp);
-		track.last_timestamp = Some(after.max(frame.timestamp));
+		// The track's missing interval runs from its furthest media muxed, or from the last
+		// reset when it has muxed none since, a start every such track shares (`None`).
+		let start = track.last_timestamp;
+		let end = frame.timestamp;
+		track.last_timestamp = Some(start.map_or(end, |start| start.max(end)));
 		let skipped = skipped && {
 			// Audio and video can resume the same outage in different release slots, and in
 			// either order. One flag covers their overlapping missing intervals, including a
 			// later read on another track that extends the interval already signalled.
 			// Presentation time shares the content's timeline across their different decode
 			// reserves.
-			let (start, end) = (after, frame.timestamp);
-			let shared = self.program.lost.filter(|&(first, last)| start < last && first < end);
+			let shared = (self.program.lost).filter(|&(first, last)| {
+				start.is_none_or(|start| start < last) && first.is_none_or(|first| first < end)
+			});
+			// `None` sorts first, so a merge keeps an unbounded start.
 			self.program.lost = Some(shared.map_or((start, end), |(first, last)| (first.min(start), last.max(end))));
 			shared.is_none()
 		};
