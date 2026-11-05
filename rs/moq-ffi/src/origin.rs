@@ -346,12 +346,12 @@ impl MoqOriginProducer {
 	/// [`MoqBroadcastProducer::close`] ends both.
 	pub fn route(&self, path: String, options: MoqRouteOptions) -> Result<Arc<MoqRoute>, MoqError> {
 		let _guard = crate::ffi::enter();
-		let options = options.try_into()?;
+		let (options, visible) = MoqRoute::exact_options(options)?;
 		self.inner.driver.check()?;
 		// Surfaces Error::Unauthorized (out of scope) via the MoqError::Protocol conversion.
 		let result = self.inner.route(path.as_str(), options);
 		self.inner.driver.check()?;
-		Ok(Arc::new(MoqRoute::exact(result?, self.inner.driver.clone())?))
+		Ok(Arc::new(MoqRoute::exact(result?, self.inner.driver.clone(), visible)?))
 	}
 
 	/// Create a route over `prefix` that yields the requests beneath it.
@@ -439,9 +439,25 @@ impl MoqOriginConsumer {
 // ---- MoqRoute ----
 
 impl MoqRoute {
-	/// Wrap an exact route, attaching the catalog track every FFI broadcast carries.
-	fn exact(route: moq_net::origin::Route, driver: Background) -> Result<Self, MoqError> {
+	/// An exact route's native options, always hidden so [`Self::exact`] attaches the catalog
+	/// track before anyone can find the route, and whether the caller asked it visible.
+	fn exact_options(options: MoqRouteOptions) -> Result<(moq_net::origin::RouteOptions, bool), MoqError> {
+		let visible = !options.hidden;
+		let options = MoqRouteOptions {
+			hidden: true,
+			..options
+		}
+		.try_into()?;
+		Ok((options, visible))
+	}
+
+	/// Wrap an exact route created hidden, attaching the catalog track every FFI broadcast
+	/// carries, then announce it when `visible`, so a reader that finds it finds the catalog.
+	fn exact(route: moq_net::origin::Route, driver: Background, visible: bool) -> Result<Self, MoqError> {
 		let broadcast = MoqBroadcastProducer::from_inner(route.broadcast().clone(), driver.clone())?;
+		if visible {
+			route.announce()?;
+		}
 		Ok(Self::new(route, Some(Arc::new(broadcast)), driver))
 	}
 
@@ -570,12 +586,12 @@ impl MoqBroadcastRequest {
 	/// route withdraws only this path.
 	pub fn route(&self, options: MoqRouteOptions) -> Result<Arc<MoqRoute>, MoqError> {
 		let _guard = crate::ffi::enter();
-		let options = options.try_into()?;
+		let (options, visible) = MoqRoute::exact_options(options)?;
 		self.driver.check()?;
 		let request = self.take()?;
 		let result = request.route(options);
 		self.driver.check()?;
-		Ok(Arc::new(MoqRoute::exact(result?, self.driver.clone())?))
+		Ok(Arc::new(MoqRoute::exact(result?, self.driver.clone(), visible)?))
 	}
 
 	/// Serve a held broadcast under the prefix route's instance without announcing an exact route.

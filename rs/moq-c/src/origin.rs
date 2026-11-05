@@ -132,14 +132,24 @@ impl AnnouncedRecord {
 
 impl State {
 	/// Store an exact route and the fill handle of the broadcast it owns, returning the route.
+	///
+	/// The route is created hidden, so its catalog track is attached before `visible` announces
+	/// it and a reader that finds it finds the catalog.
 	pub fn exact_route(
 		&mut self,
 		(route, driver): (moq_net::origin::Route, crate::ffi::Background),
+		visible: bool,
 	) -> Result<Id, Error> {
 		let broadcast = self.publish.create((route.broadcast().clone(), driver.clone()))?;
-		self.origin.route_insert(route, driver, broadcast).inspect_err(|_| {
-			self.publish.discard(broadcast);
-		})
+		let announced = match visible {
+			true => route.announce().map_err(Error::from),
+			false => Ok(()),
+		};
+		announced
+			.and_then(|()| self.origin.route_insert(route, driver, broadcast))
+			.inspect_err(|_| {
+				self.publish.discard(broadcast);
+			})
 	}
 }
 
@@ -570,7 +580,7 @@ mod supervision_tests {
 			})
 			.unwrap();
 		let retained = state.origin.route(origin, "retained", RouteOptions::hidden()).unwrap();
-		let route = state.exact_route(retained).unwrap();
+		let route = state.exact_route(retained, false).unwrap();
 		state.origin.close(origin).unwrap();
 		*trigger
 			.write()
@@ -583,7 +593,7 @@ mod supervision_tests {
 		));
 		let healthy = state.origin.create().unwrap();
 		let healthy = state.origin.route(healthy, "healthy", RouteOptions::hidden()).unwrap();
-		let route = state.exact_route(healthy).unwrap();
+		let route = state.exact_route(healthy, false).unwrap();
 		state.origin.route_with(route, |route| route.announce()).unwrap();
 	}
 }

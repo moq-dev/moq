@@ -974,14 +974,36 @@ pub struct moq_route_info {
 /// `options` may be NULL, or must point at a readable [moq_route_options] whose `instance`
 /// pointer is valid for `instance_len` bytes.
 unsafe fn parse_route_options(options: *const moq_route_options) -> Result<moq_net::origin::RouteOptions, Error> {
-	let Some(options) = (unsafe { options.as_ref() }) else {
-		return Ok(moq_net::origin::RouteOptions::default());
-	};
-	let mut out = match options.hidden {
+	let hidden = unsafe { options.as_ref() }.is_some_and(|options| options.hidden);
+	unsafe { route_options(options, hidden) }
+}
+
+/// [parse_route_options] for an exact route: created hidden so [State::exact_route] attaches
+/// the catalog track before anyone can find it, with whether the caller asked it visible.
+///
+/// # Safety
+/// As [parse_route_options].
+unsafe fn parse_exact_route_options(
+	options: *const moq_route_options,
+) -> Result<(moq_net::origin::RouteOptions, bool), Error> {
+	let visible = unsafe { options.as_ref() }.is_none_or(|options| !options.hidden);
+	Ok((unsafe { route_options(options, true)? }, visible))
+}
+
+/// # Safety
+/// As [parse_route_options].
+unsafe fn route_options(
+	options: *const moq_route_options,
+	hidden: bool,
+) -> Result<moq_net::origin::RouteOptions, Error> {
+	let mut out = match hidden {
 		true => moq_net::origin::RouteOptions::hidden(),
 		false => moq_net::origin::RouteOptions::default(),
-	}
-	.with_cost(options.cost);
+	};
+	let Some(options) = (unsafe { options.as_ref() }) else {
+		return Ok(out);
+	};
+	out = out.with_cost(options.cost);
 	if let Some(instance) = unsafe { parse_instance(options.instance, options.instance_len)? } {
 		out = out.with_instance(instance, options.epoch);
 	}
@@ -2037,10 +2059,10 @@ pub unsafe extern "C" fn moq_origin_route(
 	ffi::enter(move || {
 		let origin = ffi::parse_id(origin)?;
 		let path = unsafe { ffi::parse_str(path, path_len)? };
-		let options = unsafe { parse_route_options(options)? };
+		let (options, visible) = unsafe { parse_exact_route_options(options)? };
 		let mut state = State::lock();
 		let route = state.origin.route(origin, path, options)?;
-		state.exact_route(route)
+		state.exact_route(route, visible)
 	})
 }
 
@@ -2236,13 +2258,13 @@ pub extern "C" fn moq_broadcast_request_serve(request: u32, broadcast: u32) -> i
 pub unsafe extern "C" fn moq_broadcast_request_route(request: u32, options: *const moq_route_options) -> i32 {
 	ffi::enter(move || {
 		let request = ffi::parse_id(request)?;
-		let options = unsafe { parse_route_options(options)? };
+		let (options, visible) = unsafe { parse_exact_route_options(options)? };
 		let mut state = State::lock();
 		let (pending, driver) = state.origin.broadcast_request_take(request)?;
 		driver.check()?;
 		let result = pending.route(options);
 		driver.check()?;
-		state.exact_route((result?, driver))
+		state.exact_route((result?, driver), visible)
 	})
 }
 
