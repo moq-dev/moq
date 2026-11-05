@@ -4,6 +4,96 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Group batch operations and `poll_next_frame` are crate-private ([#7874](https://github.com/moq-dev/moq/pull/7874))
+
+Read a frame in chunks with the async `group::Consumer::next_frame`, or read whole frames with `poll_read_frame` from a poll loop.
+`group::Consumer::{read_frames, poll_read_frames, keep_alive}`, `frame::Buffer`, and `group::Producer::write_frames` are now crate-private. Replace batch reads with repeated `read_frame` or `poll_read_frame` calls, and batch writes with `write_frame`. Cache access is refreshed by those reads.
+
+### Readers at a shed frame ask a `track::Requests` handler for a flight ([#7944](https://github.com/moq-dev/moq/pull/7944))
+
+A reader that reaches a frame its group copy shed no longer gets `Error::Evicted` when the track has a live `track::Requests` handle: the handler receives a `Fill` of that one group from that frame (`Fill::start`), or from frame 0 on a compressed track, even though the group is still cached and live.
+Accept it as usual and write from that frame, waiting on `group::Producer::ready` so its readers pace it, and stop once `Fill::is_wanted` is false and the group's `demand()` has no reader: they left it for the live copy.
+A handler that cannot serve old frames refuses the fill (`Fill::refuse_groups` or dropping it), and the reader falls back to refresh or `Evicted` as before. A track without a handler is unchanged.
+
+### The `async` feature is opt-in ([#7607](https://github.com/moq-dev/moq/pull/7607))
+
+`async` is no longer a default feature. Enable it to keep the sessions (`Client`, `Server`, `Session`), `time::run`, the announcement `Stream` adapter, and every async wrapper such as `next_group`, `read_frame`, or `closed`:
+`moq-net = { version = "...", features = ["async"] }`.
+Each wrapper is now generated from its `poll_*` method, which stays available without the feature, and its docs live on that poll.
+`frame::Consumer::read_all`, `track::Demand::closed`, and `track::Ordered::finished` gain theirs as the new `poll_read_all`, `poll_closed`, and `poll_finished`.
+`moq-tokio`'s `net` feature enables it for you.
+`group::Producer::ready` now needs the feature too.
+
+### Admission completion records its own time
+
+`server::Activity::drain()` begins closing admission once its active set empties.
+`Activity::close()` and the new poll-native `poll_close()` return that instant,
+even for a late observer. Replace matches against `()` with a discarded result
+or read the returned `kio::clock::Instant`. Once draining begins, the last `Active`
+drop closes admission synchronously, including when a close wait was cancelled.
+This is native listener bookkeeping; the protocol wire is unchanged.
+
+### Announcements are a listing; `follow` reports the path going offline ([#7678](https://github.com/moq-dev/moq/pull/7678))
+
+`origin::Consumer::announced()` lists paths: `announce::Event` is `Present(Announce)` or `Absent(Announce)`.
+Another instance taking a path over keeps it present, and a route's cost or hops changing is not reported, so `Start`, `Update`, `End`, `Restart` and `Takeover` are gone.
+Map `Start` to `Present` and `End` to `Absent`, and drop `Update` arms.
+Where you requested the path again on `Restart`, hold `consumer.follow(path, None)` instead: each `available()` returns the next instance's broadcast.
+
+`Following::available()` returns `Result<Option<broadcast::Consumer>, Error>`: `None` reports the path going offline (or, when pinned, another instance taking it over), and the next `Some` is whatever serves it again.
+The first call never returns `None`. After a resolution failure, such as a handler refusing the path, the next `available()` waits for the serving route to change instead of asking the same handler again, so keep the follower rather than dropping it.
+
+```rust
+// Before
+match announced.next().await {
+    Some(announce::Event::Start(a) | announce::Event::Restart(a)) => play(consumer.request(&a.prefix, None).await?),
+    _ => {}
+}
+let broadcast = consumer.follow(path, None)?.available().await?;
+// After
+if let Some(announce::Event::Present(a)) = announced.next().await {
+    let mut following = consumer.follow(&a.prefix, None)?;
+    while let Some(broadcast) = following.available().await? {
+        play(broadcast);
+    }
+}
+let broadcast = consumer.follow(path, None)?.available().await?.expect("the first change is an instance");
+```
+
+Relays and stats that forward every route change call `consumer.routes()`, a hidden `origin::Routes` stream of `origin::RouteEvent`, which keeps the old five variants.
+
+### Opens wait their turn for stream credit ([#7894](https://github.com/moq-dev/moq/pull/7894))
+
+A request no longer fails with `Error::NoStreamCredit` when the peer grants no more streams: every stream a session opens waits for credit, and returning credit goes to the open whose stream the transport would send first. The variant is removed; drop any arm matching it.
+`transport::poll::Session::poll_open_request` is removed. A transport drops its implementation; `poll_open_bi` is the only bidirectional open.
+A transport that knows the peer's stream credit reports it from the new `poll::Session::stream_credit`, which defaults to `None`, as `transport::StreamCredit { available, blocked }` per `transport::Dir`. A wrapper around another transport forwards it.
+
+### `Following` waits out a refusal ([#7836](https://github.com/moq-dev/moq/pull/7836))
+
+After `Following::available` returns a handler's refusal, the next call no longer asks the refusing route again at once.
+It waits for the serving route to change: another instance, the path going and coming back, or the same instance over another route.
+A caller that retried in a loop now waits instead of spinning; one that gave up on the first error is unaffected.
+
+### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+`track::Info::default()` sets `max_age` to `Some(Duration::ZERO)` instead of `None`: a superseded group is stale as soon as its successor arrives, so readers get only the live edge; the newest group never goes stale.
+A track that relied on unlimited history requests it explicitly before it is created, with `with_max_age(None)`, or sets a window, such as `hang::container::MAX_AGE` for media.
+A relay or cache bounds what it keeps with its own pool, not the publisher's default.
+Readers asking for history still set a sufficient `Delay::max` and range.
+Received metadata is unchanged: a track that arrives without a max age keeps `None`, and the wire is unchanged.
+
+```rust
+// Before: no publisher limit
+track::Info::default();
+// After: the same, stated explicitly
+track::Info::default().with_max_age(None);
+```
+
+### A zero `Allocator::set_target` leaves the peer's PROBE target ([#7090](https://github.com/moq-dev/moq/pull/7090))
+
+A session with a sender now probes to the larger of its allocator's target and the PROBE target its peer sends, so `Allocator::set_target(Some(Rate::ZERO))` stops probing for this side's reservations only. A peer that advertises a target still raises the probe; a reservation's `Consumer::probed` stays `false`, since nothing probes for it.
+The new `Viewers::watch`, `Viewers::set_target`, and `Viewer::update` return `Result` and refuse ceilings summing above `Viewers::MAX_TARGET` with `Error::BoundsExceeded`.
+
 ### Datagrams are their own track kind ([#7752](https://github.com/moq-dev/moq/pull/7752))
 
 A stream track no longer carries datagrams. `track::Producer::{append_datagram, insert_datagram}` and `track::Subscriber/Ordered::{poll_recv_datagram, recv_datagram}` are removed; a datagram track is created and read through the broadcast, in a namespace apart from stream tracks, with its own sequence counter.

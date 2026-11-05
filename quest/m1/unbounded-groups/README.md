@@ -23,6 +23,25 @@ holds (a tail join).
 
 ## Plan
 
+Decided 2026-11-05 (maintainer, /quest-plan), on the open questions of
+[moq-dev/moq#7944](https://github.com/moq-dev/moq/pull/7944), which landed
+flights:
+
+- A compressed group's flight starts at frame 0, since every later frame
+  builds on the ones before it, and its riders skip ahead to their frame. The
+  prefix is transferred once per flight. Carrying the inflater's state from the
+  cached copy, and keeping refresh or `Evicted` for compressed groups, were
+  rejected.
+- Paced batch fills are [their own quest](/quest/m1/unbounded-groups/paced-batch-fills.md).
+- No cap on concurrent flights per group: memory is bounded by each flight's
+  tail and pool debt, and the cost of more flights is upstream transfer.
+  Revisit with relay evidence.
+- A moq-transport FETCH is answered from metadata: FETCH_OK follows once the
+  publisher learns the group's live edge, and its objects stream after it,
+  riding flights, with no whole-group buffer. A FETCH of a live group is
+  refused unless its range ends below the live edge, and a failure after
+  FETCH_OK resets the stream. FETCH stays single-group.
+
 Decided 2026-10-28 (maintainer, after an audit of the plan and
 [moq-dev/moq#6993](https://github.com/moq-dev/moq/pull/6993)):
 
@@ -32,14 +51,14 @@ Decided 2026-10-28 (maintainer, after an audit of the plan and
   shedding on pool debt alone let one live group grow without bound once the
   group caps went. The 32 MB counts a group copy's live tail (its
   `kio::log` run), and nothing is kept below it: no head, no refilled runs.
-- With [fastest-reader pacing](/quest/m1/unbounded-groups/fastest-reader.md),
+- With [fastest-reader pacing](https://github.com/moq-dev/moq/pull/7664),
   the 32 MB is one budget split between "ahead" (bytes the fastest reader has
   not read, bounded by pacing) and "behind" (bytes it has read, kept for
   slower readers). Shedding never passes the fastest reader, and the ahead
   window is at most 16 MB, so a reader within the behind half of the
   fastest one keeps up and a slower one falls off.
 - A reader at a shed frame, a late joiner or one that fell off, is served by
-  a [flight](/quest/m1/unbounded-groups/flights.md) when the publisher has a
+  a flight ([moq-dev/moq#7944](https://github.com/moq-dev/moq/pull/7944)) when the publisher has a
   refill handler: a separate copy with its own upstream fill and 32 MB tail,
   paced by its fastest rider. A reader joins a flight only within 16 MB of
   its fastest rider, and hands over to the copy ahead at the same frame once
@@ -76,7 +95,7 @@ superseded 2026-10-28 by flights.) When nothing serves a hole, the reader
 gets `Evicted` and a joiner falls back to `Info::refresh`. The live
 edge is paced by its fastest reader (decided 2026-10-25, superseding
 2026-10-24's "never paced by readers"; see
-[Fastest-reader pacing](/quest/m1/unbounded-groups/fastest-reader.md)), so a
+[Fastest-reader pacing](https://github.com/moq-dev/moq/pull/7664)), so a
 byte stream over MoQ loses nothing to a reader that keeps up. Groups are bounded by bytes, with each
 frame's slot charged to the pool and the 32 MB tail. Front eviction landed
 in [moq-dev/moq#6993](https://github.com/moq-dev/moq/pull/6993)
@@ -147,16 +166,17 @@ origin can regenerate data from disk or an archive.
 
 This epic owns the end-to-end test: a relay chain carries one live group well
 past the old caps. A late joiner gets its head through a flight and hands
-over to the live copy, and a live reader keeps the tail, over lite and
-moq-transport, with memory held near 32 MB per copy. It also carries a long
+over to the live copy, and a live reader keeps the tail, over lite, with
+memory held near 32 MB per copy; over moq-transport, the live group's replay
+is refused and a finished group's replays
+([moq-dev/moq#7944](https://github.com/moq-dev/moq/pull/7944)). It also carries a long
 compressed group through a small cache pool with a plain reader on a legacy
 wire, which [moq-dev/moq#6993](https://github.com/moq-dev/moq/pull/6993)
 covered only at the model layer (maintainer, 2026-10-30).
 
 ## Required
 
-- [Fastest-reader pacing](/quest/m1/unbounded-groups/fastest-reader.md) - every hop buffers at most a window past its fastest reader and pushes back through QUIC flow control
-- [Flights](/quest/m1/unbounded-groups/flights.md) - a reader at a shed frame replays through a separate paced copy that hands over to the copy ahead
+- [Paced batch fills](/quest/m1/unbounded-groups/paced-batch-fills.md) - fills that write a batch of groups stop evicting their own earlier groups before the reader takes them
 - [Byte holes](/quest/m1/unbounded-groups/byte-holes.md) - segments inside a frame shed like front frames and flights start at `(frame, byte)` on the current lite wip; the frame cap goes
 - [JS byte holes](/quest/m1/unbounded-groups/js-byte-holes.md) - `@moq/net` mirrors the byte-offset wire and continues a frame cut off mid-way
 - [Compressed frames have no size cap and inflate as a bounded stream](/quest/m1/unbounded-groups/compressed-stream.md) - A compressed frame of any size publishes and is received in Rust and `@moq/net`, like a plain one

@@ -6,7 +6,7 @@ use std::time::Duration;
 use kio::clock::Instant;
 use url::Url;
 
-use crate::lease::{self, Due, Reason};
+use crate::lease::{self, Due, DueTimers, Reason};
 use crate::{Bytes, Error, Event, Grant, Request};
 
 /// Every request is bounded so a hung server refuses rather than parks the session.
@@ -218,16 +218,14 @@ impl Context {
 		}
 	}
 
-	/// Resolve after this credential's end was reported, or its driver stopped.
-	pub(crate) async fn reported(&self) {
-		drop(
-			self.lifecycle()
-				.wait(|lifecycle| match lifecycle.reported {
-					true => std::task::Poll::Ready(()),
-					false => std::task::Poll::Pending,
-				})
-				.await,
-		);
+	/// Ready once this credential's end was reported, or its driver stopped.
+	pub(crate) fn poll_reported(&self, waiter: &kio::Waiter) -> std::task::Poll<()> {
+		self.lifecycle()
+			.poll(waiter, |lifecycle| match lifecycle.reported {
+				true => std::task::Poll::Ready(()),
+				false => std::task::Poll::Pending,
+			})
+			.map(drop)
 	}
 
 	/// Resolve with the connection's end reason, for an attached credential only.
@@ -435,6 +433,7 @@ impl<S: Post> Driver<S> {
 		// Keep an in-flight request alive while expiry or a push is observed.
 		let mut inflight: Option<Pin<Box<dyn Future<Output = crate::Result<Grant>> + Send>>> = None;
 		let mut pending = false;
+		let mut timers = DueTimers::default();
 
 		let ended = loop {
 			let reply = async {
@@ -448,7 +447,7 @@ impl<S: Post> Driver<S> {
 				ended = producer.closed() => break ended,
 				// An attached credential ends with its connection.
 				reason = self.context.connection_ended() => break producer.finish(reason, Bytes::default()),
-				due = producer.due() => match due {
+				due = kio::wait(|waiter| producer.poll_due(waiter, &mut timers)) => match due {
 					Due::Expired => break producer.finish(Reason::Expired, Bytes::default()),
 					Due::Revalidate if inflight.is_some() => pending = true,
 					Due::Revalidate => inflight = Some(self.post_revalidate()),

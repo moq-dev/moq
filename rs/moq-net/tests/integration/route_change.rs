@@ -22,12 +22,15 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use futures::{StreamExt, channel::mpsc};
-use moq_net::{Error, Hop, Timestamp, Version, announce, origin, track};
+use moq_net::{Error, Hop, Timestamp, Version, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
-/// A millisecond track: the frames written here carry timestamps.
+/// A millisecond track with no publisher max age: the frames written here carry timestamps,
+/// and superseded groups stay readable.
 pub(super) fn timed() -> moq_net::track::Info {
-	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	moq_net::track::Info::default()
+		.with_timescale(moq_net::Timescale::MILLI)
+		.with_max_age(None)
 }
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -129,7 +132,13 @@ impl Topology {
 		let a_to_r = link(version, &relay_a, &subscriber).await;
 
 		let consumer = subscriber.consume();
-		let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
+		let remote = consumer
+			.follow("live", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
 		let prefs =
 			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(60)));
 		let sub = remote.track("video").unwrap().subscribe(prefs).await.unwrap();
@@ -401,13 +410,18 @@ async fn route_dies_across_instances(version: &str, trigger: Trigger) {
 	let a_to_r = link(version, &relay_a, &relay).await;
 	let _r_to_d = link(version, &relay, &downstream).await;
 	let consumer = downstream.consume();
-	let mut announced = consumer.announced();
+	// Restart versus end and start is wire-level, which only the route stream shows.
+	let mut announced = consumer.routes();
 	match announced.next().await.expect("announced") {
-		announce::Event::Start(announce) => assert_eq!(announce.prefix.as_str(), "live"),
+		origin::RouteEvent::Start(announce) => assert_eq!(announce.prefix.as_str(), "live"),
 		other => panic!("{version}: expected the initial start, got {other:?}"),
 	}
 	let mut follow = consumer.follow("live", None).unwrap();
-	let first = follow.available().await.unwrap();
+	let first = follow
+		.available()
+		.await
+		.unwrap()
+		.expect("the first change is an instance");
 	let sub = first.track("video").unwrap().subscribe(None).await.unwrap();
 	let mut rx = read(sub);
 
@@ -438,7 +452,7 @@ async fn route_dies_across_instances(version: &str, trigger: Trigger) {
 	// while lite-07 carries ANNOUNCE_RESTART. An in-place update must fail here.
 	if version.alpn() == "moq-lite-07-wip" {
 		match announced.next().await.expect("announced") {
-			announce::Event::Restart(announce) => {
+			origin::RouteEvent::Restart(announce) => {
 				assert_eq!(announce.prefix.as_str(), "live");
 				assert_eq!(
 					announce.route.instance,
@@ -450,11 +464,11 @@ async fn route_dies_across_instances(version: &str, trigger: Trigger) {
 		}
 	} else {
 		match announced.next().await.expect("announced") {
-			announce::Event::End(announce) => assert_eq!(announce.prefix.as_str(), "live"),
+			origin::RouteEvent::End(announce) => assert_eq!(announce.prefix.as_str(), "live"),
 			other => panic!("{version} {trigger:?}: expected an end, got {other:?}"),
 		}
 		match announced.next().await.expect("announced") {
-			announce::Event::Start(announce) => assert_eq!(announce.prefix.as_str(), "live"),
+			origin::RouteEvent::Start(announce) => assert_eq!(announce.prefix.as_str(), "live"),
 			other => panic!("{version} {trigger:?}: expected a fresh start, got {other:?}"),
 		}
 	}
@@ -463,7 +477,17 @@ async fn route_dies_across_instances(version: &str, trigger: Trigger) {
 		matches!(rx.next().await, Some((_, Err(_)))),
 		"{version} {trigger:?}: the old subscription must fail"
 	);
-	let second = follow.available().await.expect("B serves a re-request");
+	// Older wires carry the switch as an end then a start, which the follower reports as the
+	// path going offline before B.
+	if version.alpn() != "moq-lite-07-wip" {
+		let ended = follow.available().await.expect("the follow stays open");
+		assert!(ended.is_none(), "{version} {trigger:?}: expected the end first");
+	}
+	let second = follow
+		.available()
+		.await
+		.expect("B serves a re-request")
+		.expect("B, not an end");
 	assert!(!second.is_clone(&first), "{version}: joined the replaced broadcast");
 	let sub = second.track("video").unwrap().subscribe(None).await.unwrap();
 	let mut rx = read(sub);
@@ -481,9 +505,9 @@ async fn better_route_restarts(version: &str) {
 	let mut rx = read(sub);
 	topology.standby().await;
 	let consumer = topology.subscriber.consume();
-	let mut announced = consumer.announced();
+	let mut announced = consumer.routes();
 	match announced.next().await.expect("announced") {
-		announce::Event::Start(announce) => assert_eq!(announce.prefix.as_str(), "live"),
+		origin::RouteEvent::Start(announce) => assert_eq!(announce.prefix.as_str(), "live"),
 		other => panic!("{version}: expected the route, got {other:?}"),
 	}
 
@@ -494,7 +518,7 @@ async fn better_route_restarts(version: &str) {
 
 	topology.trigger(Trigger::BetterRoute).await;
 	match announced.next().await.expect("announced") {
-		announce::Event::Restart(announce) => {
+		origin::RouteEvent::Restart(announce) => {
 			assert_eq!(announce.prefix.as_str(), "live");
 			assert_eq!(announce.route.hops.len(), 1, "{version}: the direct route");
 		}
@@ -659,7 +683,13 @@ async fn lagging_route_dies(version: Version) {
 	}
 	async fn subscribe(origin: &origin::Producer) -> track::Subscriber {
 		let consumer = origin.consume();
-		let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
+		let remote = consumer
+			.follow("live", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
 		let preferences =
 			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(60)));
 		remote.track("video").unwrap().subscribe(preferences).await.unwrap()
@@ -776,7 +806,13 @@ async fn undetected_outage(budget: Duration) -> BTreeMap<u64, Vec<String>> {
 	let m1_e = link(version, &m1, &e).await;
 
 	let consumer = e.consume();
-	let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
+	let remote = consumer
+		.follow("live", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap()
+		.unwrap();
 	let prefs = track::Subscription::default().with_delay(track::Delay::default().with_max(budget));
 	let mut rx = read(remote.track("video").unwrap().subscribe(prefs).await.unwrap());
 	let m2_e = priced_link(version, &m2, &e, Some(1_000)).await;
@@ -918,7 +954,7 @@ async fn redundant_pair_follows_the_next_instance(version: &str, loss: Loss) {
 	settle().await;
 
 	let mut follow = subscriber.consume().follow("live", None).unwrap();
-	let first = follow.available().await.unwrap();
+	let first = follow.available().await.unwrap().unwrap();
 	let prefs = track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(60)));
 	let mut rx = read(first.track("video").unwrap().subscribe(prefs.clone()).await.unwrap());
 	let write = |replicas: &mut Vec<Replica>, sequence: u64| {
@@ -955,7 +991,7 @@ async fn redundant_pair_follows_the_next_instance(version: &str, loss: Loss) {
 	drop(broadcast);
 	settle().await;
 
-	let second = follow.available().await.unwrap();
+	let second = follow.available().await.unwrap().unwrap();
 	assert!(
 		!second.is_clone(&first),
 		"{version} {loss:?}: handed out the old broadcast"
@@ -1031,7 +1067,13 @@ async fn replaced_behind_a_relay(version: &str) {
 	let _r_to_d = link(version, &relay, &downstream).await;
 
 	let consumer = downstream.consume();
-	let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
+	let remote = consumer
+		.follow("live", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap()
+		.unwrap();
 	let prefs = track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(60)));
 	let mut rx = read(remote.track("video").unwrap().subscribe(prefs).await.unwrap());
 
@@ -1128,7 +1170,13 @@ async fn compression_changes_behind_a_relay(compress: bool) {
 	let _r_to_d = link(version, &relay, &downstream).await;
 
 	let consumer = downstream.consume();
-	let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
+	let remote = consumer
+		.follow("live", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap()
+		.unwrap();
 	let prefs = track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(60)));
 	let mut rx = read(remote.track("video").unwrap().subscribe(prefs).await.unwrap());
 
@@ -1222,7 +1270,13 @@ async fn producer_replaced(version: &str) {
 	let _a_to_r = link(version, &relay, &subscriber).await;
 
 	let consumer = subscriber.consume();
-	let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
+	let remote = consumer
+		.follow("live", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap()
+		.unwrap();
 	let prefs = track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(60)));
 	let sub = remote.track("video").unwrap().subscribe(prefs).await.unwrap();
 	let mut rx = read(sub);

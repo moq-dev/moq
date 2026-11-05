@@ -55,7 +55,9 @@ impl Node {
 		let track = source
 			.create_track(
 				group_track(moq_net::Path::from_static("acme")),
-				moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+				moq_net::track::Info::default()
+					.with_max_age(None)
+					.with_timescale(moq_net::Timescale::MILLI),
 			)
 			.unwrap();
 		let config = moq_json::snapshot::Config::default().with_deltas(false);

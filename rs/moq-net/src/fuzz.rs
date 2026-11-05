@@ -82,6 +82,54 @@ pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, tr
 	(broadcast, track, group)
 }
 
+/// A private frame batch for the model's batch read and write benchmarks.
+#[derive(Default)]
+pub struct FrameBatch<const N: usize>(frame::Buffer<N>);
+
+impl<const N: usize> FrameBatch<N> {
+	/// An empty batch for the private frame benchmark.
+	pub fn new() -> Self {
+		Self(frame::Buffer::new())
+	}
+	/// Queue a whole frame for the batch write benchmark.
+	pub fn push(&mut self, frame: frame::Frame) -> Result<(), frame::Frame> {
+		self.0.push(frame)
+	}
+	/// Write the queued frames through the private batch writer.
+	pub fn write(&mut self, group: &mut group::Producer) -> crate::Result<()> {
+		group.write_frames(&mut self.0)
+	}
+	/// Read through the private whole-frame batch reader.
+	pub async fn read(&mut self, group: &mut group::Consumer) -> crate::Result<&mut [frame::Frame]> {
+		group.read_frames(&mut self.0).await
+	}
+}
+
+/// The relay's private object batch, including metadata, for delivery benchmarks.
+#[derive(Default)]
+pub struct ObjectBatch<const N: usize>(arrayvec::ArrayVec<frame::Object, N>);
+
+impl<const N: usize> ObjectBatch<N> {
+	/// An empty relay object batch.
+	pub fn new() -> Self {
+		Self(arrayvec::ArrayVec::new())
+	}
+	/// Fill the batch exactly as relay egress does, preserving all object fields.
+	pub fn poll_read(
+		&mut self,
+		waiter: &kio::Waiter,
+		group: &mut group::Consumer,
+	) -> std::task::Poll<crate::Result<usize>> {
+		group.poll_read_objects(waiter, &mut self.0)
+	}
+	/// Visit every object without discarding its relay metadata.
+	pub fn inspect(&self) {
+		for object in &self.0 {
+			std::hint::black_box(object);
+		}
+	}
+}
+
 /// Private canonical-owner fixture for size and final-storage cleanup benchmarks.
 pub struct CanonicalStorage(crate::model::group::StorageBench);
 
@@ -451,13 +499,18 @@ pub fn bump_publisher_bytes(
 	registry.bump_publisher_bytes(path, tier, n);
 }
 
-/// An allocator's probe target as its session follows it, for the bandwidth bench.
+/// A probe target as its session follows it, for the bandwidth bench.
 pub struct ProbeTarget(crate::bandwidth::Target);
 
 impl ProbeTarget {
 	/// Follow `allocator`'s target.
 	pub fn new(allocator: &crate::bandwidth::Allocator) -> Self {
 		Self(allocator.target())
+	}
+
+	/// Follow `viewers`' target, as the session sending it as PROBE does.
+	pub fn viewers(viewers: &crate::bandwidth::Viewers) -> Self {
+		Self(viewers.target())
 	}
 
 	/// The target in bits per second once it moved, without parking.
@@ -833,10 +886,11 @@ impl Default for Messages {
 				priority: 4,
 				max_delay: Duration::from_millis(500),
 				min_delay: None,
-				ranges: vec![lite::Range {
+				// Lite-06, the bench's version, restates the ranges.
+				ranges: lite::RangeEdit::Replace(vec![lite::Range {
 					start: Some(lite::Anchor::Absolute(crate::track::Position::group(1_000))),
 					end: Some(lite::Anchor::Absolute(crate::track::Position::group(2_001))),
-				}],
+				}]),
 			},
 			lite_start: lite::SubscribeResponse::Start(lite::SubscribeStart {
 				largest: None,
@@ -1854,7 +1908,7 @@ mod tests {
 		let tier = crate::stats::Tier::new(crate::Path::from_static("t"));
 		let session = registry.tier(tier.clone()).session(crate::Path::from_static("root"));
 		let _broadcast = origin.publish("room/1", crate::origin::Route::default()).unwrap();
-		let mut cursor = origin.consume().with_stats(session).announced();
+		let mut cursor = origin.consume().with_stats(session).routes();
 		while cursor.next().now_or_never().flatten().is_some() {}
 
 		bump_publisher_bytes(&registry, crate::Path::from_static("room/1"), &tier, 5);

@@ -135,7 +135,9 @@ pub async fn run(ctx: Connection) {
 		};
 		let track = match broadcast.create_track(
 			TRACK,
-			moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+			moq_net::track::Info::default()
+				.with_timescale(moq_net::Timescale::MILLI)
+				.with_max_age(None),
 		) {
 			Ok(track) => track,
 			Err(err) => {
@@ -315,7 +317,11 @@ async fn subscribe_named(
 	max_delay: Duration,
 	stats: Arc<Stats>,
 ) -> anyhow::Result<()> {
-	let broadcast = consume.follow(path.as_str(), None)?.available().await?;
+	let broadcast = consume
+		.follow(path.as_str(), None)?
+		.available()
+		.await?
+		.ok_or_else(|| anyhow::anyhow!("the first change is an instance"))?;
 	drain(broadcast, max_delay, &stats).await
 }
 
@@ -357,11 +363,9 @@ async fn subscribe(
 			update = announced.next() => {
 				let update = match update {
 					Some(
-						moq_net::announce::Event::Start(update)
-						| moq_net::announce::Event::Update(update)
-						| moq_net::announce::Event::Restart(update) | moq_net::announce::Event::Takeover { announce: update, .. },
+						moq_net::announce::Event::Present(update),
 					) => update,
-					Some(moq_net::announce::Event::End(_)) => continue,
+					Some(moq_net::announce::Event::Absent(_)) => continue,
 					None => break,
 				};
 				let path = update.prefix.to_string();
@@ -386,13 +390,8 @@ async fn subscribe(
 	// there is nothing to spread over.
 	while selected < want {
 		let update = match announced.next().await {
-			Some(
-				moq_net::announce::Event::Start(update)
-				| moq_net::announce::Event::Update(update)
-				| moq_net::announce::Event::Restart(update)
-				| moq_net::announce::Event::Takeover { announce: update, .. },
-			) => update,
-			Some(moq_net::announce::Event::End(_)) => continue,
+			Some(moq_net::announce::Event::Present(update)) => update,
+			Some(moq_net::announce::Event::Absent(_)) => continue,
 			None => break,
 		};
 		let path = update.prefix.to_string();
@@ -800,9 +799,12 @@ mod tests {
 		}
 	}
 
-	/// A millisecond track: the frames written here carry timestamps.
+	/// A millisecond track with no publisher max age, for tests that write timestamps and
+	/// rely on the subscription's own delay rather than the authored zero default.
 	fn timed() -> moq_net::track::Info {
-		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+		moq_net::track::Info::default()
+			.with_timescale(moq_net::Timescale::MILLI)
+			.with_max_age(None)
 	}
 
 	async fn wait_for(counter: &AtomicU64, value: u64) {

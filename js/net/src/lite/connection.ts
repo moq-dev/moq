@@ -1,6 +1,6 @@
 import { Milli, Nano } from "@moq/clock";
 import { Effect, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
-import type * as announce from "../announced.ts";
+import * as announce from "../announced.ts";
 import type * as Auth from "../auth.ts";
 import { AuthSession } from "../auth_session.ts";
 import type { Established } from "../connection/established.ts";
@@ -18,6 +18,7 @@ import { withTimeout } from "../util/timeout.ts";
 import { registerWire } from "../wire.ts";
 import { AnnounceRequest } from "./announce.ts";
 import { LiteAuthWire } from "./auth.ts";
+import { Datagrams } from "./datagram.ts";
 import { closeViolation } from "./error.ts";
 import { Fetch } from "./fetch.ts";
 import { Goaway } from "./goaway.ts";
@@ -33,6 +34,7 @@ import { Tracks as TracksMessage } from "./tracks.ts";
 import {
 	hasAuth,
 	hasDatagrams,
+	hasDatagramTracks,
 	hasGoaway,
 	hasPadding,
 	hasProbeRtt,
@@ -71,6 +73,8 @@ export interface ConnectionProps {
 	token?: Uint8Array;
 	/** The implementation our SETUP advertises (lite-05+). Defaults to {@link IMPLEMENTATION}; empty sends nothing. */
 	implementation?: string;
+	/** The PROBE target to send a peer that advertised `Increase`, in bits per second; zero sends none. */
+	probeTarget?: Getter<number>;
 }
 
 /**
@@ -136,6 +140,8 @@ export class Connection implements Established {
 	#token?: Uint8Array;
 	// What our SETUP advertises; see {@link ConnectionProps.implementation}.
 	#implementation: string;
+	// See {@link ConnectionProps.probeTarget}.
+	#probeTarget?: Getter<number>;
 	#peerImplementation = Promise.withResolvers<string | undefined>();
 
 	/** The implementation the peer advertised; see {@link Established.peerImplementation}. */
@@ -172,6 +178,7 @@ export class Connection implements Established {
 		client = true,
 		token,
 		implementation = IMPLEMENTATION,
+		probeTarget,
 	}: ConnectionProps) {
 		this.url = url;
 		// Older versions carry the credential in the URL instead.
@@ -229,6 +236,7 @@ export class Connection implements Established {
 		);
 		this.#client = client;
 		this.#implementation = implementation;
+		this.#probeTarget = probeTarget;
 		// Only the lite-05+ Setup Stream carries it.
 		if (!hasSetupStream(version)) this.#peerImplementation.resolve(undefined);
 		registerWire(this, {
@@ -295,7 +303,7 @@ export class Connection implements Established {
 
 		const probes = new Effect((effect) => {
 			if (!effect.get(this.#probe.wanted)) return;
-			effect.spawn(() => this.#subscriber.runProbe(effect.abort));
+			effect.spawn(() => this.#subscriber.runProbe(effect.abort, this.#probeTarget));
 		});
 
 		// Fail loud on a publication our grant never covers, once the peer has answered the
@@ -338,8 +346,14 @@ export class Connection implements Established {
 		}
 	}
 
+	/** The paths announced matching `scope`, each present or absent; see {@link Established.announced}. */
 	announced(scope?: Path.Pattern, options?: announce.Options): announce.Consumer {
-		return this.#subscriber.announced(scope, options);
+		return announce.list(this.#subscriber.routes(scope, options));
+	}
+
+	/** Every route change matching `scope`, for code that forwards routes. @internal */
+	routes(scope?: Path.Pattern, options?: announce.Options): announce.Routes {
+		return this.#subscriber.routes(scope, options);
 	}
 
 	async #runSession() {
@@ -416,6 +430,14 @@ export class Connection implements Established {
 				(async () => {
 					const msg = await Subscribe.decode(stream.reader, this.#version);
 					await this.#publisher.runSubscribe(msg, stream);
+				})(),
+			);
+		} else if (typ === StreamId.Datagrams) {
+			if (!hasDatagramTracks(this.#version)) throw new Error("DATAGRAMS is not supported on this version");
+			await this.#publisher.owe(
+				(async () => {
+					const msg = await Datagrams.decode(stream.reader, this.#version);
+					await this.#publisher.runDatagrams(msg, stream);
 				})(),
 			);
 		} else if (typ === StreamId.Fetch) {

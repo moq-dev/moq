@@ -276,12 +276,7 @@ pub(crate) struct Clocks(crate::catalog::hang::Consumer);
 impl Clocks {
 	/// Subscribe before importing, so the first snapshot is not missed.
 	pub(crate) async fn subscribe(consumer: &moq_net::broadcast::Consumer) -> Self {
-		let track = consumer
-			.track(hang::Catalog::DEFAULT_NAME)
-			.unwrap()
-			.subscribe(None)
-			.await
-			.unwrap();
+		let track = consumer.track(hang::Catalog::DEFAULT_NAME).unwrap();
 		Self(crate::catalog::hang::Consumer::new(track))
 	}
 
@@ -502,17 +497,6 @@ impl moq_net::transport::poll::Session for Gated {
 		options: moq_net::transport::poll::SendOptions<'_, moq_net::transport::poll::Ungrouped>,
 	) -> std::task::Poll<Result<moq_net::transport::poll::BiStreams<Self>, Self::Error>> {
 		self.inner.poll_open_bi(waiter, options)
-	}
-
-	fn poll_open_request(
-		&self,
-		waiter: &kio::Waiter,
-		options: moq_net::transport::poll::SendOptions<
-			'_,
-			<Self::SendStream as moq_net::transport::poll::SendStream>::Group,
-		>,
-	) -> std::task::Poll<Result<Option<moq_net::transport::poll::BiStreams<Self>>, Self::Error>> {
-		self.inner.poll_open_request(waiter, options)
 	}
 
 	fn send_group(&self, priority: i64) -> Option<moq_net::transport::poll::Ungrouped> {

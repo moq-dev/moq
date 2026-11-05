@@ -4,14 +4,19 @@ use std::fmt;
 use std::io::{self, Write};
 use std::sync::Arc;
 
-use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
+use rind::signature::Ed25519KeyPair;
 use zeroize::Zeroizing;
 
 use crate::sign::key::{KEY_LEN, PublicKey, ZBASE32, decode};
 use crate::sign::scope::SIGNATURE_LEN;
 
+/// The PKCS#8 v1 (RFC 8410) encoding of an Ed25519 key, up to its 32-byte seed. rind loads a seed
+/// alone only this way, and the key file stores the seed alone.
+const PKCS8_SEED_PREFIX: [u8; 16] = [
+	0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
+];
+
 struct Inner {
-	seed: Zeroizing<[u8; KEY_LEN]>,
 	pair: Ed25519KeyPair,
 	public: PublicKey,
 }
@@ -23,20 +28,24 @@ pub struct SecretKey(Arc<Inner>);
 impl SecretKey {
 	/// Generate a fresh key from the system's secure random source.
 	pub fn generate() -> Self {
-		let mut seed = Zeroizing::new([0u8; KEY_LEN]);
-		aws_lc_rs::rand::fill(seed.as_mut()).expect("system randomness");
-		Self::from_seed(seed)
+		Self::new(Ed25519KeyPair::generate().expect("system randomness"))
 	}
 
-	pub(crate) fn from_seed(seed: Zeroizing<[u8; KEY_LEN]>) -> Self {
-		let pair = Ed25519KeyPair::from_seed_unchecked(seed.as_ref()).expect("a 32-byte Ed25519 seed");
+	pub(crate) fn from_seed(seed: &[u8; KEY_LEN]) -> Self {
+		let mut der = Zeroizing::new([0u8; PKCS8_SEED_PREFIX.len() + KEY_LEN]);
+		der[..PKCS8_SEED_PREFIX.len()].copy_from_slice(&PKCS8_SEED_PREFIX);
+		der[PKCS8_SEED_PREFIX.len()..].copy_from_slice(seed);
+		Self::new(Ed25519KeyPair::from_pkcs8(der.as_ref()).expect("a PKCS#8 v1 Ed25519 key"))
+	}
+
+	fn new(pair: Ed25519KeyPair) -> Self {
 		let public = PublicKey::from_bytes(
 			pair.public_key()
 				.as_ref()
 				.try_into()
 				.expect("a 32-byte Ed25519 public key"),
 		);
-		Self(Arc::new(Inner { seed, pair, public }))
+		Self(Arc::new(Inner { pair, public }))
 	}
 
 	/// The public key, which is this endpoint's ID.
@@ -74,7 +83,7 @@ impl SecretKey {
 		};
 		// Sized up front, so appending the newline never leaves an unzeroized copy behind.
 		let mut text = Zeroizing::new(String::with_capacity(ZBASE32.encode_len(KEY_LEN) + 1));
-		ZBASE32.encode_append(key.0.seed.as_ref(), &mut text);
+		ZBASE32.encode_append(key.0.pair.to_seed().as_ref(), &mut text);
 		text.push('\n');
 		file.write_all(text.as_bytes())?;
 		file.sync_all()?;
@@ -96,13 +105,13 @@ impl SecretKey {
 		let mut text = Zeroizing::new(String::new());
 		io::Read::read_to_string(&mut &file, &mut text)?;
 		let encoded = text.strip_suffix('\n').unwrap_or(&text);
-		let seed = decode(encoded).map_err(|_| {
+		let seed = Zeroizing::new(decode(encoded).map_err(|_| {
 			io::Error::new(
 				io::ErrorKind::InvalidData,
 				format!("key file {} is not 52 z-base-32 characters", path.display()),
 			)
-		})?;
-		Ok(Self::from_seed(Zeroizing::new(seed)))
+		})?);
+		Ok(Self::from_seed(&seed))
 	}
 
 	/// Sign `message` with Ed25519.

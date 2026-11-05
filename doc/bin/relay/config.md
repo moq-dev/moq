@@ -328,7 +328,7 @@ Settings for outbound dials (cluster peers, auth API).
 [connect]
 timeout = "30s"                      # Dial plus handshake. "0" waits forever.
 tls.root = ["ca.pem"]                # Trust these CAs (replaces system roots unless system_roots = true).
-tls.cert = "relay.pem"               # Present a client certificate (mTLS to peers and the auth API).
+tls.cert = "relay.pem"               # Present a client certificate (mTLS to peers and the auth API). Reloaded on change.
 tls.key = "relay.key"
 goaway.redirect = "same-host"        # How far to trust a draining peer's redirect URI.
 goaway.handover = "10s"              # Cap on how long the drained upstream keeps serving.
@@ -349,17 +349,27 @@ replacement is up and it carries no subscription or fetch.
 [cache]
 capacity = "8GiB"                    # Target bytes of cached groups and buffered datagrams. "75%" of memory also works.
 headroom = "2GiB"                    # Or: keep this much system memory free and grow into the rest.
-duration = "30s"                     # Cap how long a non-latest group is kept, whatever the publisher asked.
+duration = "30s"                     # Reclaim groups idle this long, and cap every track's max age at it.
 ```
 
 `capacity` is a byte target, repaid as active publishers write. `duration`
 (30s by default) bounds memory by age, and sweeps on a timer, so a publisher
-that stalls but stays connected still has its idle groups reclaimed. The latest
+that stalls but stays connected still has its idle groups reclaimed. Set
+explicitly, it also caps how long a superseded group stays fresh, whatever max
+age the publisher declared; unset, each track keeps its own max age. The latest
 group of every track, and any group still being read, is kept past `capacity` but
 sheds its oldest frames instead. Whatever the capacity, a group holds at most its
-newest 32 MB. A reader of a track's newest group that reaches a shed frame asks
-for a new group on tracks that opt into refresh. Any other reader of a shed
-frame sees `Evicted`.
+newest 32 MB. A reader that reaches a shed frame, such as a late joiner of a long
+group, replays it through a flight: a separate copy fetched from the upstream hop
+from that frame, paced by its fastest reader and held to its own 32 MB. Readers
+within 16 MB of a flight's fastest reader share it, and a reader leaves its
+flight for the live copy once that copy holds its frame within 16 MB of the live
+reader, which stops the flight. Each hop serves a flight from its own flights in
+turn, up to the publisher, which replays only if it serves past groups. A
+moq-transport hop streams a FETCH's objects after answering it, so it replays a
+finished group, but it refuses a FETCH of a live group that reaches past what
+the group holds, so a live group's replay stops there. When nothing replays it, a reader of a track's newest group asks for a
+new group on tracks that opt into refresh, and any other reader sees `Evicted`.
 
 While a group has readers, the relay receives at most 16 MB of it past the
 fastest one, then stops reading its stream until that reader catches up, so
@@ -424,6 +434,12 @@ upgrades receive 503; plain HTTP is served until the public listener stops.
 Only moq-lite-04+ and moq-transport clients act on a GOAWAY; older ones are
 closed when the window ends. An embedder can take over the signals; see
 [Embed](/bin/relay/#embed).
+
+An embedder's drain alert can page on the `forced` count returned by
+[`Observer::drained`](https://docs.rs/moq-relay/latest/moq_relay/shutdown/struct.Observer.html#method.drained).
+Its `ending` count distinguishes sessions already closed before the deadline
+but still reporting their end. The live tally separates open sessions from
+that cleanup, and the summary's elapsed time stays the same for late observers.
 
 ## \[log]
 

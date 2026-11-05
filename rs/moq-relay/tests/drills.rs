@@ -33,9 +33,12 @@ use futures::FutureExt;
 use moq_relay::{Config, Relay};
 use moq_tokio::moq_net;
 
-/// A millisecond track: the frames written here carry timestamps.
+/// A millisecond track with no publisher max age: the frames written here carry timestamps,
+/// and superseded groups stay readable.
 fn timed() -> moq_net::track::Info {
-	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	moq_net::track::Info::default()
+		.with_timescale(moq_net::Timescale::MILLI)
+		.with_max_age(None)
 }
 
 /// Ceiling for anything a drill waits on. Every wait is bounded, so a broken
@@ -219,7 +222,7 @@ impl RelayHost {
 	/// Bind a relay running `config` and wait for it to be ready to accept.
 	async fn start(config: Config) -> Self {
 		// Process-global; every drill in this binary races to be first.
-		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		let _ = rind_rustls::default_provider().unwrap().install_default();
 
 		let runtime = tokio::runtime::Builder::new_multi_thread()
 			.worker_threads(2)
@@ -414,7 +417,8 @@ async fn subscribe(origin: &moq_net::origin::Consumer, path: &str) -> Reader {
 	let broadcast = kio::clock::timeout(TIMEOUT, origin.follow(path, None).unwrap().available())
 		.await
 		.expect("announcement timed out")
-		.expect("origin closed before announcing");
+		.expect("origin closed before announcing")
+		.unwrap();
 
 	let track = broadcast.track(TRACK).expect("track");
 	let groups = kio::clock::timeout(TIMEOUT, track.subscribe(None))
@@ -700,7 +704,7 @@ async fn interrupted_publisher_republishes_new_content(lane: Lane) {
 	.await
 	.expect("subscriber connect timed out")
 	.expect("subscriber connect failed");
-	let mut announced = subscribed.announced();
+	let mut announced = subscribed.routes();
 
 	let first = moq_tokio::origin::spawn();
 	let broadcast = first.create_broadcast("live").expect("create broadcast");
@@ -777,7 +781,7 @@ async fn interrupted_publisher_republishes_new_content(lane: Lane) {
 lanes!(interrupted_publisher_republishes_new_content);
 
 /// Wait for `path` to be announced (`want`) or unannounced (`!want`).
-async fn expect_announce(announced: &mut moq_net::announce::Consumer, path: &str, want: bool, who: &str) {
+async fn expect_announce(announced: &mut moq_net::origin::Routes, path: &str, want: bool, who: &str) {
 	loop {
 		let (update, active) = kio::clock::timeout(TIMEOUT, next_update(announced))
 			.await
@@ -1041,7 +1045,7 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 
 	let subscriber = moq_tokio::origin::spawn();
 	let subscribed = subscriber.consume();
-	let mut announced = subscribed.announced();
+	let mut announced = subscribed.routes();
 	let url = subscribe_path.url.clone();
 	let subscribe_session = kio::clock::timeout(
 		TIMEOUT,
@@ -1355,7 +1359,7 @@ async fn no_publisher_never_delivers(lane: Lane) {
 		Lane::Impaired => Duration::from_secs(2),
 	};
 
-	let mut announced = subscribed.announced();
+	let mut announced = subscribed.routes();
 	let mut following = subscribed.follow("live", None).unwrap();
 	let (update, resolved) = tokio::join!(
 		kio::clock::timeout(quiet, next_update(&mut announced)),
@@ -1375,13 +1379,13 @@ async fn no_publisher_never_delivers(lane: Lane) {
 lanes!(no_publisher_never_delivers);
 
 /// The next route and whether it is active.
-async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net::announce::Announce, bool)> {
 	match announced.next().await? {
-		moq_net::announce::Event::Start(route)
-		| moq_net::announce::Event::Update(route)
-		| moq_net::announce::Event::Restart(route)
-		| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
-		moq_net::announce::Event::End(route) => Some((route, false)),
+		moq_net::origin::RouteEvent::Start(route)
+		| moq_net::origin::RouteEvent::Update(route)
+		| moq_net::origin::RouteEvent::Restart(route)
+		| moq_net::origin::RouteEvent::Takeover { announce: route, .. } => Some((route, true)),
+		moq_net::origin::RouteEvent::End(route) => Some((route, false)),
 	}
 }
 
@@ -1448,6 +1452,7 @@ async fn subscriber_max_age_skips_bufferbloat(version: &str) {
 	write_group(&mut track, b"warmup");
 	let remote = kio::clock::timeout(TIMEOUT, consumed.follow("live", None).unwrap().available())
 		.await
+		.unwrap()
 		.unwrap()
 		.unwrap();
 	let mut groups = remote

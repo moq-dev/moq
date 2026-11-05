@@ -26,6 +26,30 @@ private func assertTimeOverflow<T>(
 }
 
 final class SmokeTests: XCTestCase {
+    func testDatagramOnlyRequestsHaveIndependentPriorityDemand() async throws {
+        let broadcast = try BroadcastProducer()
+        let stream = try broadcast.publishTrack(name: "events")
+        let requests = try broadcast.requests().datagrams()
+        let consumer = try broadcast.consume().datagrams(name: "events")
+        try consumer.setPriority(12)
+        let request = try await requests.requested()
+        XCTAssertEqual(try request.name(), "events")
+        XCTAssertEqual(try request.priority(), 12)
+        let producer = try request.accept()
+        XCTAssertEqual(try producer.priority(), 12)
+        XCTAssertNil(try stream.demand().wanted)
+        try producer.insert(Datagram(sequence: 7, timestamp: nil, payload: Data("seven".utf8)))
+        let datagram = try await consumer.recv()
+        XCTAssertEqual(datagram?.sequence, 7)
+        XCTAssertEqual(datagram?.payload, Data("seven".utf8))
+        consumer.cancel()
+        let priority = try await producer.priorityChanged(last: 12)
+        XCTAssertNil(priority)
+        try producer.finish()
+        requests.cancel()
+        try broadcast.close()
+    }
+
     func testDefaultSubscriptionSkipsSupersededGroupsAtOnce() {
         XCTAssertEqual(Subscription.default.delay.min, 0)
         XCTAssertEqual(Subscription.default.delay.max, 0)
@@ -63,7 +87,8 @@ final class SmokeTests: XCTestCase {
 
     func testAscendingSubscriptionReadsACachedBacklogOldestFirst() async throws {
         let broadcast = try BroadcastProducer()
-        let track = try broadcast.publishTrack(name: "backlog", info: TrackInfo(timescale: 1_000_000))
+        let info = TrackInfo(maxAgeUnlimited: true, timescale: 1_000_000)
+        let track = try broadcast.publishTrack(name: "backlog", info: info)
         for ms: UInt64 in 0..<3 {
             let group = try track.appendGroup()
             try group.writeFrame(Data("x".utf8), timestamp: micros(ms * 1_000))
@@ -109,6 +134,27 @@ final class SmokeTests: XCTestCase {
                     }(),
                 "expected shutdown/connect/url error, got: \(error)"
             )
+        }
+    }
+
+    /// A viewer on a session that has not connected reads no estimate.
+    func testViewerHoldsWithoutAnEstimate() async throws {
+        let client = try Client(bind: "127.0.0.1:0", tls: ClientTls(insecure: true), once: true)
+        defer { client.cancel() }
+        let session = try await client.connect(to: "https://127.0.0.1:1")
+        defer { session.cancel(code: 0) }
+
+        let viewers = session.viewers()
+        let viewer = try viewers.watch(maxBps: 1_000_000)
+        try viewer.update(maxBps: 2_000_000)
+        try viewers.setTarget(targetBps: 0)
+        try viewers.setTarget(targetBps: nil)
+        XCTAssertNil(viewer.rate())
+        // Past what a PROBE target carries: refused.
+        XCTAssertThrowsError(try viewers.watch(maxBps: 1 << 53)) { error in
+            guard case MoqError.OutOfRange = error else {
+                return XCTFail("expected OutOfRange, got \(error)")
+            }
         }
     }
 
@@ -206,13 +252,13 @@ final class SmokeTests: XCTestCase {
 
         try publication.announce()
         let announced = try consumer.announced(prefix: "")
-        guard case .start(let first) = try await nextRoute(announced) else {
+        guard case .present(let first) = try await nextRoute(announced) else {
             return XCTFail("expected an announcement")
         }
         XCTAssertEqual(first.prefix, "live")
 
         try publication.unannounce()
-        guard case .end(let retracted) = try await nextRoute(announced) else {
+        guard case .absent(let retracted) = try await nextRoute(announced) else {
             return XCTFail("expected a retraction")
         }
         XCTAssertEqual(retracted.prefix, "live")
@@ -222,7 +268,7 @@ final class SmokeTests: XCTestCase {
         } catch {}
 
         try publication.announce()
-        guard case .start = try await nextRoute(announced) else {
+        guard case .present = try await nextRoute(announced) else {
             return XCTFail("expected a reannouncement")
         }
         _ = try await consumer.request(path: "live")
@@ -275,35 +321,64 @@ final class SmokeTests: XCTestCase {
         let chat = try origin.createBroadcast(path: "room/alice/chat")
         try chat.announce()
 
-        guard case .start(let update) = try await nextRoute(announced) else {
+        guard case .present(let update) = try await nextRoute(announced) else {
             return XCTFail("expected an announcement")
         }
         XCTAssertEqual(update.prefix, "room/alice/chat")
         XCTAssertEqual(update.captures, ["alice"])
     }
 
-    func testAnnouncedInstanceRestarts() async throws {
+    func testNewInstanceRestartsFollowersButStaysListed() async throws {
         let origin = OriginProducer()
-        let announced = try origin.consume().announced(prefix: "")
+        let consumer = origin.consume()
+        let announced = try consumer.announced(prefix: "")
+        let following = try consumer.follow(path: "instance")
         let publication = try origin.createBroadcast(path: "instance")
 
         try publication.announce(route: AnnounceRoute())
-        guard case .start(let start) = try await nextRoute(announced) else {
+        guard case .present(let present) = try await nextRoute(announced) else {
             return XCTFail("expected an announcement")
         }
-        XCTAssertFalse(start.route.instance.isEmpty)
+        XCTAssertFalse(present.route.instance.isEmpty)
+        let first = try await following.available()
+        XCTAssertNotNil(first)
 
         try publication.announce(route: AnnounceRoute(instance: "camera", epoch: 1))
-        guard case .restart(let restart) = try await nextRoute(announced) else {
-            return XCTFail("expected a restart")
+        let takeover = try await following.available()
+        XCTAssertNotNil(takeover)
+
+        // The takeover was not listed, so the next event is the path going absent.
+        try publication.unannounce()
+        guard case .absent(let absent) = try await nextRoute(announced) else {
+            return XCTFail("expected the path to go absent")
         }
-        XCTAssertEqual(restart.route.instance, "camera")
+        XCTAssertEqual(absent.route.instance, "camera")
 
         XCTAssertThrowsError(try publication.announce(route: AnnounceRoute(instance: ""))) { error in
             guard case MoqError.InvalidInstance = error else {
                 return XCTFail("expected InvalidInstance, got \(error)")
             }
         }
+        following.cancel()
+    }
+
+    func testFollowerReportsOfflineAndTheNextBroadcast() async throws {
+        let origin = OriginProducer()
+        let following = try origin.consume().follow(path: "offline")
+        let publication = try origin.createBroadcast(path: "offline")
+
+        try publication.announce(route: AnnounceRoute())
+        let first = try await following.available()
+        XCTAssertNotNil(first)
+
+        try publication.unannounce()
+        let offline = try await following.available()
+        XCTAssertNil(offline)
+
+        try publication.announce(route: AnnounceRoute())
+        let returned = try await following.available()
+        XCTAssertNotNil(returned)
+        following.cancel()
     }
 
     func testDynamicServesARequestUnderAPrefix() async throws {
@@ -418,7 +493,7 @@ final class SmokeTests: XCTestCase {
             broadcast: broadcast,
             track: try broadcast.publishTrack(name: "status", info: TrackInfo(timescale: 1_000_000, compress: true)))
         let consumer = try Json.SnapshotConsumer<Status>(
-            track: try await broadcast.consume().subscribeTrack(name: "status"))
+            broadcast: try broadcast.consume(), name: "status")
 
         for viewers in 1...4 {
             try producer.update(Status(state: "live", viewers: viewers), timestamp: micros(UInt64(viewers) * 1000))
@@ -511,7 +586,7 @@ final class SmokeTests: XCTestCase {
         let consumer = try broadcast.consume()
 
         let snapshotConsumer = try Json.SnapshotConsumer<[String: Int]>(
-            track: try await consumer.subscribeTrack(name: "status"))
+            broadcast: consumer, name: "status")
         let streamConsumer = try Json.StreamConsumer<[String: Int]>(
             track: try await consumer.subscribeTrack(name: "events"))
         while try await snapshotDemand.wantedChanged() == nil {}
@@ -537,6 +612,17 @@ final class SmokeTests: XCTestCase {
         XCTAssertNil(frame.timestamp)
         XCTAssertNil(consumer.info().timescale)
         try track.finish()
+        try broadcast.close()
+    }
+
+    func testTrackInfoMaxAge() throws {
+        let broadcast = try BroadcastProducer()
+        let omitted = try broadcast.publishTrack(name: "omitted").consume().info()
+        XCTAssertEqual(omitted.maxAge, 0)
+        let info = TrackInfo(maxAgeUnlimited: true)
+        let unlimited = try broadcast.publishTrack(name: "unlimited", info: info).consume().info()
+        XCTAssertNil(unlimited.maxAge)
+        XCTAssertTrue(unlimited.maxAgeUnlimited)
         try broadcast.close()
     }
 

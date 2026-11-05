@@ -126,6 +126,17 @@ impl<'a> Streams<'a> {
 		Poll::Pending
 	}
 
+	/// How many more streams the peer lets this side open in `dir` before it raises its limit.
+	pub fn credit(&self, dir: Dir) -> u64 {
+		self.state.max[dir as usize].saturating_sub(self.state.next[dir as usize])
+	}
+
+	/// Whether an open in `dir` was refused since the peer last raised its limit, so this side
+	/// waits for its MAX_STREAMS, as the STREAMS_BLOCKED it sends says.
+	pub fn blocked(&self, dir: Dir) -> bool {
+		self.state.open_refused[dir as usize]
+	}
+
 	/// The number of streams that may have unacknowledged data.
 	pub fn send_streams(&self) -> usize {
 		self.state.send_streams

@@ -34,11 +34,6 @@ public final class TrackConsumer: AsyncSequence, Sendable {
         try await ffi.readFrame()
     }
 
-    /// The next best-effort datagram in arrival order. `nil` once the track ends.
-    public func recvDatagram() async throws -> Datagram? {
-        try await ffi.recvDatagram()
-    }
-
     /// The publisher-side properties learned during subscription.
     public func info() -> TrackInfo {
         ffi.info()
@@ -53,14 +48,6 @@ public final class TrackConsumer: AsyncSequence, Sendable {
     /// Cancel all current and future reads.
     public func cancel() {
         ffi.cancel()
-    }
-
-    /// Datagrams in arrival order. Datagram delivery requires a datagram-capable
-    /// transport and wire version; there is no stream fallback.
-    public var datagrams: AsyncThrowingStream<Datagram, Swift.Error> {
-        moqStream(cancel: { [ffi] in ffi.cancel() }) { [ffi] in
-            try await ffi.recvDatagram()
-        }
     }
 
     /// Groups in arrival order, including out-of-sequence deliveries. The default
@@ -181,21 +168,7 @@ public final class TrackProducer: Sendable {
         try ffi.writeFrame(frame: Frame(payload: payload, timestamp: timestamp))
     }
 
-    /// Send a best-effort datagram and return its sequence number.
-    ///
-    /// `timestamp` is the presentation timestamp, or untimed when nil. Payloads are
-    /// capped at 1200 bytes. There is no stream fallback.
-    public func appendDatagram(_ payload: Data, timestamp: Timestamp? = nil) throws -> UInt64 {
-        try ffi.appendDatagram(frame: Frame(payload: payload, timestamp: timestamp))
-    }
-
-    /// Send a best-effort datagram at an explicit sequence number, for a caller that
-    /// allocates its own. `appendDatagram` continues after the largest one.
-    public func insertDatagram(_ payload: Data, sequence: UInt64, timestamp: Timestamp? = nil) throws {
-        try ffi.insertDatagram(sequence: sequence, frame: Frame(payload: payload, timestamp: timestamp))
-    }
-
-    /// The newest group written, at its newest frame, or `nil` before any. Datagrams never move it.
+    /// The newest group written, at its newest frame, or `nil` before any.
     public func largest() throws -> Position? {
         try ffi.largest()
     }

@@ -149,12 +149,6 @@ func (t *TrackConsumer) ReadFrame(ctx context.Context) (*Frame, error) {
 	return bridge.Call(ctx, t.inner.Cancel, t.inner.ReadFrame)
 }
 
-// RecvDatagram returns the next best-effort datagram in arrival order, or
-// (nil, nil) when the track ends.
-func (t *TrackConsumer) RecvDatagram(ctx context.Context) (*Datagram, error) {
-	return bridge.Call(ctx, t.inner.Cancel, t.inner.RecvDatagram)
-}
-
 // Info returns the publisher-side track properties learned during subscription.
 func (t *TrackConsumer) Info() TrackInfo {
 	return trackInfoFromFFI(t.inner.Info())
@@ -179,11 +173,6 @@ func (t *TrackConsumer) Groups(ctx context.Context) iter.Seq2[*GroupConsumer, er
 // out-of-sequence deliveries.
 func (t *TrackConsumer) GroupsAsArrived(ctx context.Context) iter.Seq2[*GroupConsumer, error] {
 	return bridge.Seq(ctx, t.RecvGroup)
-}
-
-// Datagrams ranges over best-effort datagrams in arrival order.
-func (t *TrackConsumer) Datagrams(ctx context.Context) iter.Seq2[*Datagram, error] {
-	return bridge.Seq(ctx, t.RecvDatagram)
 }
 
 // Cancel stops the stream.

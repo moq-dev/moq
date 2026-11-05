@@ -70,9 +70,7 @@ export function hasTrackStream(version: Version): boolean {
 	}
 }
 
-/// Whether the session may deliver groups over unreliable QUIC datagrams (lite-05 §6.4).
-/// A datagram carries one single-frame group's `subscribe | sequence | timestamp | payload` and is
-/// routed over the existing subscription. Added in lite-05; older versions never send/accept them.
+/** Whether the session carries unreliable datagrams, from lite-05 onward. */
 export function hasDatagrams(version: Version): boolean {
 	// Explicitly list older versions so future versions default to having datagrams.
 	switch (version) {
@@ -84,6 +82,11 @@ export function hasDatagrams(version: Version): boolean {
 		default:
 			return true;
 	}
+}
+
+/** Whether datagram tracks have their own request and sequence space. */
+export function hasDatagramTracks(version: Version): boolean {
+	return hasPadding(version);
 }
 
 /** Whether the session supports the GOAWAY control stream (0x5) for graceful shutdown and migration. Added in lite-04. */
@@ -309,7 +312,7 @@ export function hasRanges(version: Version): boolean {
 }
 
 /** Whether FETCH carries the subscriber's optional max delay. Added in lite-07; an earlier
- * fetch is bounded by the publisher's retention alone. */
+ * fetch is bounded by the publisher's max age alone. */
 export function hasFetchMaxDelay(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-07+ behavior.
 	switch (version) {
@@ -368,6 +371,16 @@ export function resolvesStart(version: Version): boolean {
 	}
 }
 
+/**
+ * Whether a copy's fills stop at the start its publisher resolved from the budget. Lite-06
+ * resolves the start, but drops media time and sends FETCH without a max delay, so nothing
+ * judges a group below that start against a reader's budget: a widened budget reaches lower
+ * groups through the feed's re-offer instead. Mirrors the Rust `Version::fills_from_start`.
+ */
+export function fillsFromStart(version: Version): boolean {
+	return resolvesStart(version) && !hasMediaTime(version) && !hasFetchMaxDelay(version);
+}
+
 /** Whether ANNOUNCE_REQUEST carries the hidden opt-in. Added in lite-07. */
 export function hasHidden(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-07+ behavior.
@@ -387,7 +400,7 @@ export function hasHidden(version: Version): boolean {
 /**
  * Whether a served SUBSCRIBE completes only once the subscriber FINs or resets its half of the
  * Subscribe Stream. A subscriber FINs once its tail accounting settles, since a transport ACK
- * does not say the application read the tail. SUBSCRIBE_END says which groups are owed, so that
+ * does not say the application read the tail. SUBSCRIBE_FINISH says which groups are owed, so that
  * is prompt from lite-05; before it, only the subscriber's grace settles the tail.
  */
 export function waitsForSubscriberFin(version: Version): boolean {
@@ -591,7 +604,7 @@ export function hasDropCode(version: Version): boolean {
 }
 
 /**
- * Whether SUBSCRIBE_END carries the error the track ended with, so an errored end keeps its
+ * Whether SUBSCRIBE_FINISH carries the error the track ended with, so an errored end keeps its
  * history across a hop. Added in lite-07; earlier versions can only reset.
  */
 export function hasEndError(version: Version): boolean {

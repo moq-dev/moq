@@ -339,6 +339,11 @@ function subtract(gap: Run, run: Run): Run[] {
 	].filter((part) => part.start < part.end);
 }
 
+/** The still-wanted runs of a fill, in ascending order. @internal */
+export let wantedRuns: (fill: Fill) => Run[];
+/** Wait for a change to the groups or readers of a fill. @internal */
+export let fillChanged: (fill: Fill) => Promise<unknown>;
+
 // Constructs the public handles from within this module; assigned in their static blocks.
 let makeFill: (state: FillState, pending: Pending) => Fill;
 let makeRequests: (state: FillState) => Requests;
@@ -443,6 +448,8 @@ export class Fill {
 
 	static {
 		makeFill = (state, pending) => new Fill(state, pending);
+		wantedRuns = (fill) => fill.#pending.owed();
+		fillChanged = (fill) => Promise.resolve(fill.#pending.revision.changed());
 	}
 
 	/** The most urgent delivery priority among the readers waiting on it now. */
@@ -511,7 +518,7 @@ export class Fill {
 	/**
 	 * Insert group `sequence` into the track's cache, handing it to the readers waiting on it,
 	 * and return the producer to write its frames into. `info` commits the track's {@link Info}
-	 * if it has none yet. Throws a `RangeError` outside the fill, and an error if the group was
+	 * if it has none yet, as received metadata: an absent `maxAge` sets no publisher limit. Throws a `RangeError` outside the fill, and an error if the group was
 	 * already answered or cached, or the track is closed.
 	 */
 	accept(sequence: bigint, info?: Partial<Info>): GroupProducer {

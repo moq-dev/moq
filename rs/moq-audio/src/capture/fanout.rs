@@ -145,7 +145,8 @@ impl Consumer {
 		self.device.as_ref()
 	}
 
-	/// Read the next buffer, or the shared error when capture stops or fails.
+	/// The next buffer, or the shared error when capture stops or fails.
+	#[kio::wrapper]
 	pub fn poll_read(&mut self, waiter: &kio::Waiter) -> Poll<Result<Buffer, Error>> {
 		let result = ready!(self.state.poll(waiter, |state| {
 			if let Some(error) = &state.failure {
@@ -167,11 +168,6 @@ impl Consumer {
 			Ok(Err(error)) => Poll::Ready(Err(error)),
 			Err(_) => Poll::Ready(Err(Error::Capture("audio capture stopped".into()))),
 		}
-	}
-
-	/// Read the next buffer, or the shared error when capture stops or fails.
-	pub async fn read(&mut self) -> Result<Buffer, Error> {
-		kio::wait(|waiter| self.poll_read(waiter)).await
 	}
 }
 

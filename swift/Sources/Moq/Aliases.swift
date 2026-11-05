@@ -49,7 +49,7 @@ public typealias VideoCodec = MoqFFI.MoqVideoCodec
 /// Which encoder implementation to use: automatic, hardware, software, or one
 /// named backend.
 public typealias VideoEncoderKind = MoqFFI.MoqVideoEncoderKind
-/// A best-effort raw-track datagram as received: sequence, timestamp, and payload.
+/// A datagram payload with its own sequence and optional timestamp.
 public typealias Datagram = MoqFFI.MoqDatagram
 /// How a broadcast advertises its exact path: its static production `cost`,
 /// lower wins, an optional stable `instance` (`nil` keeps the one the broadcast
@@ -62,8 +62,9 @@ public typealias Route = MoqFFI.MoqRoute
 /// wildcard matched (`captures`, a required list, empty without wildcards), and the `route` serving it.
 /// Resolve a path with `OriginConsumer.request`.
 public typealias Announce = MoqFFI.MoqAnnounce
-/// What an `AnnounceConsumer` yields: `.start`, `.update`, `.end`, or
-/// `.restart` (request the path again), each carrying an `Announce`.
+/// What an `AnnounceConsumer` yields: `.present` or `.absent`, each carrying an
+/// `Announce`. Another publisher instance taking a path over keeps it present:
+/// hold a `Following` to see the broadcast change.
 public typealias AnnounceEvent = MoqFFI.MoqAnnounceEvent
 /// Per-subscription delivery preferences: priority, delay, the ranges of the track to
 /// deliver, and group ordering.
@@ -143,3 +144,6 @@ extension Subscription {
     /// `Subscription(...)` must name `delay`.
     public static var `default`: Subscription { moqSubscriptionDefaults() }
 }
+
+/// Publisher priority and optional timestamp scale fixed for a datagram track.
+public typealias DatagramInfo = MoqFFI.MoqDatagramInfo

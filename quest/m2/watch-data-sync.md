@@ -28,5 +28,4 @@ releases it.
 
 ## Required
 
-- [A/V clock](/quest/m1/av-clock.md) - the playhead the reader releases against
 - [Watch worker](/quest/m2/watch-worker.md) - moves `Sync` into a worker, where the reader registers

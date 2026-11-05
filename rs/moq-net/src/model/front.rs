@@ -567,7 +567,7 @@ impl Front {
 			// failover, re-splice from the serving source at the first missing group.
 			Err(err)
 				if delivered
-					&& super::resume::route_failed(&err)
+					&& super::resume::retryable(&err)
 					&& self.serving.is_some_and(|(_, candidate)| candidate.carried) =>
 			{
 				track.state = TrackState::Idle;
@@ -1142,6 +1142,8 @@ mod tests {
 				Error::from(crate::StreamError::MalformedTrack),
 				Error::App(7),
 				Error::NotFound,
+				Error::Unroutable,
+				Error::from(crate::StreamError::Unroutable),
 				Error::Unsupported,
 			] {
 				let mut front = serving(candidate, 100);

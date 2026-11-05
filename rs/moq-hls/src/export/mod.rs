@@ -32,6 +32,7 @@
 
 #[cfg(test)]
 mod archive_tests;
+mod contributions;
 mod driver;
 mod grid;
 pub mod master;
@@ -44,15 +45,18 @@ pub mod renditions;
 pub mod segments;
 
 use std::sync::{Arc, Mutex};
+use std::task::{Poll, ready};
 use std::time::Duration;
 
-use moq_mux::catalog::{self, CatalogFormat, Stream};
+use moq_mux::catalog::{self, Stream};
 use rand::RngExt;
 
 pub use driver::Driver;
 pub(crate) use playlist::render_media;
+#[cfg(feature = "server")]
+pub(crate) use rendition::Demand;
 pub use rendition::{Kind, Rendition};
-pub use route::{Resource, Route};
+pub use route::{Contribution, Resource, Route};
 
 /// Backoff bounds for the initial catalog subscription.
 ///
@@ -77,8 +81,8 @@ const CATALOG_RETRY_MAX: Duration = Duration::from_secs(5);
 pub struct Config {
 	/// Minimum duration of media listed in each rendition's playlist window. Older segments are
 	/// evicted once the remaining ones still cover this span. Past 256 segments they are evicted
-	/// however short they are. Keep it within the relay's group-cache retention, since segments
-	/// are fetched from there on request. It also caps segment `Cache-Control: max-age`.
+	/// however short they are. Keep it within the media's max age and the relay's group-cache
+	/// retention, since segments are fetched from there on request. It also caps segment `Cache-Control: max-age`.
 	///
 	/// A durable archive gets the same window: a live playlist stays bounded however much its store
 	/// retains.
@@ -99,19 +103,13 @@ impl Default for Config {
 /// last clone drops.
 #[derive(Clone)]
 pub struct Broadcaster {
-	#[cfg_attr(
-		not(feature = "server"),
-		allow(
-			dead_code,
-			reason = "read only by the serve path's `is_closed`/`closed` (server-gated); a recording consumer observes close through its `renditions()` cursor ending instead"
-		)
-	)]
 	broadcast: moq_net::broadcast::Consumer,
 	/// The stream served, which every URL the master playlist and manifest list starts with:
 	/// its instance, or an id minted for a broadcast that came through no route.
 	instance: Arc<str>,
 	/// The current rendition set, reconciled from the catalog by the watcher task.
 	renditions: renditions::Producer,
+	contributions: Option<contributions::Producer>,
 	/// Shared by every clone; its drop with the last one ends the catalog watcher.
 	_guard: Arc<Guard>,
 }
@@ -119,6 +117,7 @@ pub struct Broadcaster {
 /// What the last [`Broadcaster`] clone releases.
 struct Guard {
 	renditions: renditions::Producer,
+	contributions: Option<contributions::Producer>,
 	/// Ends the catalog watcher when dropped, or when [`replaced`](Broadcaster::replaced) takes it.
 	watcher: Mutex<Option<driver::Owner>>,
 }
@@ -130,22 +129,29 @@ impl Drop for Guard {
 		// media flowing, so its final segments are not truncated. Each rendition stops
 		// following its media once no recording cursor holds it.
 		self.renditions.clear();
+		if let Some(contributions) = &self.contributions {
+			contributions.clear();
+		}
 	}
 }
 
 impl Broadcaster {
-	/// Start tracking the renditions of `source`'s catalog broadcast, once the returned
+	/// Start tracking the own renditions of `source`'s catalog broadcast, once the returned
 	/// [`Driver`] runs.
 	///
 	/// Fails with [`Error::UnsupportedCpu`](crate::Error::UnsupportedCpu) on a CPU its
 	/// cryptography cannot run on.
 	pub fn new(source: moq_mux::Source, config: Config) -> crate::Result<(Self, Driver)> {
 		rind::cpu::check().map_err(crate::Error::unsupported_cpu)?;
-		Ok(Self::start(source, config))
+		Ok(Self::start(source, config, None))
 	}
 
 	/// [`new`](Self::new) for a caller that already checked the CPU.
-	pub(crate) fn start(source: moq_mux::Source, config: Config) -> (Self, Driver) {
+	pub(crate) fn start(
+		source: moq_mux::Source,
+		config: Config,
+		origin: Option<moq_net::origin::Consumer>,
+	) -> (Self, Driver) {
 		let broadcast = source.broadcast();
 		// An instance names the stream on every edge, so each serves it under the same URLs.
 		let instance = broadcast
@@ -154,18 +160,25 @@ impl Broadcaster {
 			.clone()
 			.unwrap_or_else(moq_net::Instance::random);
 		let (spawner, mut driver) = driver::Spawner::new();
+		let contributions = origin.map(|origin| contributions::Producer::new(origin, config.window, spawner.clone()));
 		let renditions = renditions::Producer::new(config.window, spawner);
 		// The watcher owns its own producer clone; dropping the `Broadcaster` ends it so the
 		// standing catalog subscription stops when nobody's serving from this broadcaster.
-		let watcher = driver.lead(watch_catalog(source, renditions.clone()));
+		let watcher = driver.lead(WatchCatalog::new(
+			source,
+			renditions.clone(),
+			Role::Root(contributions.clone().map(Box::new)),
+		));
 		let broadcaster = Self {
 			broadcast,
 			instance: Arc::from(instance.as_str()),
 			_guard: Arc::new(Guard {
 				renditions: renditions.clone(),
+				contributions: contributions.clone(),
 				watcher: Mutex::new(Some(watcher)),
 			}),
 			renditions,
+			contributions,
 		};
 		(broadcaster, driver)
 	}
@@ -209,14 +222,9 @@ impl Broadcaster {
 		self.broadcast.is_closed()
 	}
 
-	/// Resolve once the source broadcast closes, so a pool can evict a dead broadcaster.
-	pub async fn closed(&self) {
-		self.broadcast.closed().await;
-	}
-
-	/// [`closed`](Self::closed), polled: ready once the source broadcast closes.
-	#[cfg(feature = "server")]
-	pub(crate) fn poll_closed(&self, waiter: &kio::Waiter) -> std::task::Poll<()> {
+	/// Ready once the source broadcast closes, so a pool can evict a dead broadcaster.
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.broadcast.poll_closed(waiter)
 	}
 
@@ -236,19 +244,31 @@ impl Broadcaster {
 		self.renditions.subscribe()
 	}
 
-	/// Resolve once at least one rendition has a playable media playlist or a settled failure.
+	/// Ready once at least one rendition has a playable media playlist or a settled failure.
 	/// How long to wait is the caller's policy: wrap this in a timeout as needed.
-	pub async fn ready(&self) {
-		self.renditions.ready().await;
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_ready(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.renditions.poll_ready(waiter)
 	}
 
-	/// Resolve once the master playlist lists at least one rendition.
+	/// Ready once the master playlist lists at least one rendition.
 	#[cfg_attr(
 		not(feature = "server"),
 		allow(dead_code, reason = "only the `server` feature uses it")
 	)]
-	pub(crate) async fn advertised(&self) {
-		self.renditions.advertised().await;
+	#[cfg_attr(any(test, feature = "server"), kio::wrapper)]
+	pub(crate) fn poll_advertised(&self, waiter: &kio::Waiter) -> Poll<()> {
+		let own = self.renditions.poll_advertised(waiter);
+		let contribution = self
+			.contributions
+			.as_ref()
+			.is_some_and(|contributions| contributions.poll_advertised(waiter).is_ready());
+		// Contributions alone answer only while no own rendition could still be listed.
+		if own.is_ready() || (!self.renditions.listable() && contribution) {
+			Poll::Ready(())
+		} else {
+			Poll::Pending
+		}
 	}
 
 	/// Version every segment URL with `generation`, a label for the publisher run the
@@ -283,7 +303,11 @@ impl Broadcaster {
 	/// holding different tokens; a credential in `Config` would embed one viewer's in
 	/// another's playlist.
 	///
-	/// Lists only enabled renditions a player can start, i.e. ones listing at least one segment,
+	/// A broadcaster obtained from `Server` also lists contribution renditions from their
+	/// catalogs, starting their media only on request. `Broadcaster::new` exports the own
+	/// renditions only, so a recorder never demands contributions.
+	///
+	/// Lists only enabled own renditions a player can start, i.e. ones listing at least one segment,
 	/// so an early render may list audio alone, or nothing at all. A disabled rendition (catalog `enabled: false`) is left out until
 	/// it re-enables, while its media playlist keeps serving.
 	pub fn master_playlist(&self, query: Option<&str>) -> String {
@@ -315,7 +339,29 @@ impl Broadcaster {
 				}),
 			}
 		}
+		if let Some(contributions) = &self.contributions {
+			let (extra_video, extra_audio) = contributions.variants(&self.instance, query);
+			video.extend(extra_video);
+			audio.extend(extra_audio);
+		}
 		(video, audio)
+	}
+
+	/// The contribution rendition `at` names, once the catalog is read.
+	#[cfg(feature = "server")]
+	#[kio::wrapper]
+	pub(crate) fn poll_contribution(
+		&self,
+		waiter: &kio::Waiter,
+		at: &Contribution,
+		kind: Kind,
+		name: &str,
+	) -> Poll<crate::Result<Option<Arc<Rendition>>>> {
+		ready!(self.renditions.poll_catalogued(waiter));
+		match &self.contributions {
+			Some(contributions) => contributions.poll_rendition(waiter, at, kind, name),
+			None => Poll::Ready(Ok(None)),
+		}
 	}
 
 	/// Render the DASH manifest (MPD) from the current renditions' segments, or `None` while nothing is listable yet (every `SegmentTimeline`
@@ -420,8 +466,9 @@ impl Broadcaster {
 		not(feature = "server"),
 		allow(dead_code, reason = "only the `server` feature uses it")
 	)]
-	pub(crate) async fn video_init(&self) {
-		self.renditions.video_init().await;
+	#[cfg_attr(any(test, feature = "server"), kio::wrapper)]
+	pub(crate) fn poll_video_init(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.renditions.poll_video_init(waiter)
 	}
 
 	/// Resolve once the broadcast has something the DASH manifest lists (its first complete
@@ -434,7 +481,7 @@ impl Broadcaster {
 	)]
 	pub(crate) async fn represented(&self) {
 		if let Some(rendition) = self.renditions.snapshot().into_iter().next() {
-			rendition.represented().await;
+			kio::wait(|waiter| rendition.poll_represented(waiter)).await;
 		}
 	}
 
@@ -449,6 +496,9 @@ impl Broadcaster {
 		let watcher = self._guard.watcher.lock().unwrap().take();
 		drop(watcher);
 		self.renditions.cut();
+		if let Some(contributions) = &self.contributions {
+			contributions.clear();
+		}
 	}
 
 	/// Whether the current catalog contains no servable renditions (serve path).
@@ -461,47 +511,187 @@ impl Broadcaster {
 	}
 }
 
-async fn watch_catalog(source: moq_mux::Source, renditions: renditions::Producer) {
-	// The source's catalog broadcast, so the catalog, the media subscriptions, and the closed
-	// check below all refer to the one broadcast it was built from.
-	let broadcast = &source.broadcast();
-	let mut delay = CATALOG_RETRY_MIN;
-	let mut consumer = loop {
-		match catalog::Consumer::<()>::new(broadcast, CatalogFormat::Hang).await {
-			Ok(consumer) => break consumer,
-			Err(err) => {
-				tracing::warn!(%err, "failed to subscribe to broadcast catalog, retrying");
-				let wait = delay.mul_f64(0.5 + kio::clock::rng().random::<f64>() / 2.0);
-				delay = (delay * 2).min(CATALOG_RETRY_MAX);
-				tokio::select! {
-					_ = kio::clock::sleep(wait) => {}
-					_ = kio::wait(|waiter| broadcast.poll_closed(waiter)) => {
-						renditions.close();
-						return;
-					}
-				}
-			}
-		}
-	};
+/// What a catalog watcher reconciles besides its own rendition set.
+enum Role {
+	/// A root broadcast, following its catalog's contributions when an HTTP server serves it.
+	Root(Option<Box<contributions::Producer>>),
+	/// A contribution included in a root broadcast. Its renditions take the root catalog's
+	/// `media`, so they share the root's timeline and grid whatever the contribution declares.
+	Contribution(kio::Consumer<hang::catalog::Media>),
+}
 
-	let result = loop {
-		match kio::wait(|waiter| consumer.poll_next(waiter)).await {
-			Ok(Some(catalog)) => renditions.sync(&source, &catalog),
-			Ok(None) => break Ok(()),
-			Err(err) => {
+/// Follows a broadcast's catalog into its rendition set, as a driver task.
+struct WatchCatalog {
+	source: moq_mux::Source,
+	renditions: renditions::Producer,
+	role: Role,
+	/// The source's catalog broadcast, taken on the first poll, so the catalog, the media
+	/// subscriptions, and the closed check all refer to the one broadcast it was built from.
+	broadcast: Option<moq_net::broadcast::Consumer>,
+	/// The next retry's backoff, before jitter.
+	delay: Duration,
+	state: Watch,
+}
+
+#[allow(
+	clippy::large_enum_variant,
+	reason = "one per catalog watcher, and the reading variant is the working state"
+)]
+enum Watch {
+	Start,
+	/// Waiting for the catalog subscription, or the failure it started with. The consumer
+	/// subscribes itself; its track's info resolving rides on that subscription, so a refused
+	/// catalog fails here.
+	Subscribing(moq_mux::Result<(catalog::hang::Consumer<()>, moq_net::track::Resolving)>),
+	/// Waiting out a failed subscription's backoff, unless the broadcast closes first.
+	Backoff(kio::clock::Sleep),
+	Reading {
+		consumer: catalog::Consumer<()>,
+		/// A contribution's latest catalog, re-synced when the root's media changes.
+		latest: Option<catalog::hang::Catalog>,
+	},
+}
+
+impl WatchCatalog {
+	fn new(source: moq_mux::Source, renditions: renditions::Producer, role: Role) -> Self {
+		Self {
+			source,
+			renditions,
+			role,
+			broadcast: None,
+			delay: CATALOG_RETRY_MIN,
+			state: Watch::Start,
+		}
+	}
+
+	fn broadcast(&self) -> &moq_net::broadcast::Consumer {
+		self.broadcast.as_ref().expect("taken on the first poll")
+	}
+
+	/// Subscribe to the broadcast's hang catalog track.
+	fn subscribe(&self) -> Watch {
+		let track = self.broadcast().track(hang::Catalog::DEFAULT_NAME).map(|track| {
+			let info = track.info().into_inner();
+			(catalog::hang::Consumer::new(track), info)
+		});
+		Watch::Subscribing(track.map_err(Into::into))
+	}
+
+	/// The next catalog to sync, `Ok(None)` once the stream ends cleanly.
+	fn poll_catalog(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<catalog::hang::Catalog>>> {
+		let Watch::Reading { consumer, latest } = &mut self.state else {
+			unreachable!("reading the catalog");
+		};
+		if let Poll::Ready(next) = consumer.poll_next(waiter) {
+			return Poll::Ready(next.map_err(|err| {
 				tracing::warn!(%err, "broadcast catalog stream ended with error");
-				break Err(err.into());
+				err.into()
+			}));
+		}
+		if let (Role::Contribution(root), Some(catalog)) = (&self.role, &latest)
+			&& let Poll::Ready(Ok(())) = root.poll(waiter, |media| match **media != catalog.media {
+				true => Poll::Ready(()),
+				false => Poll::Pending,
+			}) {
+			return Poll::Ready(Ok(latest.take()));
+		}
+		Poll::Pending
+	}
+
+	/// Reconcile the renditions with `catalog`.
+	fn sync(&mut self, mut catalog: catalog::hang::Catalog) {
+		match &self.role {
+			Role::Root(Some(contributions)) => contributions.sync(&self.source, &catalog),
+			Role::Root(None) => {}
+			Role::Contribution(root) => catalog.media = *root.read(),
+		}
+		self.renditions.sync(&self.source, &catalog);
+		if let (Role::Contribution(_), Watch::Reading { latest, .. }) = (&self.role, &mut self.state) {
+			*latest = Some(catalog);
+		}
+	}
+
+	/// Record the catalog's end in the renditions.
+	fn finish(&self, result: crate::Result<()>) {
+		let failed = result.is_err();
+		self.renditions.finish(result);
+		// The root catalog lists the contributions: once it fails, stop following and advertising
+		// them too. A clean end freezes the final catalog, which keeps its entries, as the own
+		// renditions keep their final set.
+		if failed && let Role::Root(Some(contributions)) = &self.role {
+			contributions.clear();
+		}
+	}
+}
+
+impl kio::Task for WatchCatalog {
+	type Output = ();
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		loop {
+			match &mut self.state {
+				Watch::Start => {
+					self.broadcast = Some(self.source.broadcast());
+					self.state = self.subscribe();
+				}
+				Watch::Subscribing(subscribing) => {
+					let subscribed = match subscribing {
+						Ok((_, info)) => ready!(info.poll_ok(waiter)).map(drop).map_err(moq_mux::Error::from),
+						Err(err) => Err(err.clone()),
+					};
+					let watch = std::mem::replace(&mut self.state, Watch::Start);
+					self.state = match subscribed {
+						Ok(()) => {
+							let Watch::Subscribing(Ok((consumer, _))) = watch else {
+								unreachable!("subscribed above");
+							};
+							Watch::Reading {
+								consumer: consumer.into(),
+								latest: None,
+							}
+						}
+						Err(err) => {
+							tracing::warn!(%err, "failed to subscribe to broadcast catalog, retrying");
+							let wait = self.delay.mul_f64(0.5 + kio::clock::rng().random::<f64>() / 2.0);
+							self.delay = (self.delay * 2).min(CATALOG_RETRY_MAX);
+							Watch::Backoff(kio::clock::sleep(wait))
+						}
+					};
+				}
+				Watch::Backoff(sleep) => {
+					let broadcast = self.broadcast.as_ref().expect("taken on the first poll");
+					if broadcast.poll_closed(waiter).is_ready() {
+						self.renditions.close();
+						return Poll::Ready(());
+					}
+					ready!(waiter.poll_future(std::pin::Pin::new(sleep)));
+					self.state = self.subscribe();
+				}
+				Watch::Reading { .. } => match ready!(self.poll_catalog(waiter)) {
+					Ok(Some(catalog)) => self.sync(catalog),
+					Ok(None) => {
+						self.finish(Ok(()));
+						return Poll::Ready(());
+					}
+					Err(err) => {
+						self.finish(Err(err));
+						return Poll::Ready(());
+					}
+				},
 			}
 		}
-	};
-	renditions.finish(result);
+	}
 }
 
 #[cfg(test)]
 mod tests {
 	/// A millisecond track: the frames written here carry timestamps.
+	/// A millisecond track with no publisher max age, so a test's playlist window may span more
+	/// media than the default max age keeps fresh.
 	fn timed() -> moq_net::track::Info {
-		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+		moq_net::track::Info::default()
+			.with_timescale(moq_net::Timescale::MILLI)
+			.with_max_age(None)
 	}
 
 	/// Build an origin producer, spawning its driver on the ambient runtime.
@@ -2340,6 +2530,7 @@ mod tests {
 			.unwrap()
 			.available()
 			.await
+			.unwrap()
 			.unwrap();
 		let source = crate::resolved(consuming, "live").await;
 		let broadcaster = (!late).then(|| Broadcaster::spawned(source.clone(), Config::default()));
@@ -2589,7 +2780,7 @@ mod tests {
 		drop((catalog, media, broadcast));
 	}
 
-	/// A one-video-rendition catalog snapshot reconciled by hand, which is what `watch_catalog`
+	/// A one-video-rendition catalog snapshot reconciled by hand, which is what `WatchCatalog`
 	/// does with each snapshot: the rendition follows its media on its own.
 	fn export(
 		upstream: &moq_mux::Source,
@@ -2786,7 +2977,7 @@ mod tests {
 		let upstream = crate::resolved(&origin, "live").await;
 
 		// The publisher goes away and comes back before the catalog snapshot is reconciled. That
-		// gap is wide in practice: `watch_catalog` retries a not-yet-written catalog track with
+		// gap is wide in practice: `WatchCatalog` retries a not-yet-written catalog track with
 		// backoff, so seconds can pass between resolving the broadcast and syncing its first
 		// snapshot. The old broadcast ends first: a path still routed is one broadcast, so a
 		// publisher back before then would resume it instead.
@@ -3318,6 +3509,22 @@ mod tests {
 			self.group(sequence, pts_ms, 1);
 		}
 
+		/// Write group `sequence` at `pts_ms` with a single keyframe declaring a `width`x`height`
+		/// picture in band.
+		fn sized(&mut self, sequence: u64, pts_ms: u64, (width, height): (u16, u16)) {
+			let mut group = self.track.create_group(moq_net::group::Info { sequence }).unwrap();
+			let mut payload = KEYFRAME.to_vec();
+			payload[6..8].copy_from_slice(&width.to_le_bytes());
+			payload[8..10].copy_from_slice(&height.to_le_bytes());
+			hang::container::Frame {
+				timestamp: moq_net::Timestamp::from_micros(pts_ms * 1_000).unwrap(),
+				payload: payload.into(),
+			}
+			.write_to(&mut group)
+			.unwrap();
+			group.finish().unwrap();
+		}
+
 		/// Write group `sequence` at `2 * sequence` seconds: one GOP per grid line.
 		fn gop(&mut self, sequence: u64) {
 			self.at(sequence, sequence * INTERVAL.as_millis() as u64);
@@ -3349,7 +3556,7 @@ mod tests {
 		}
 	}
 
-	/// Renditions over hand-published media groups, reconciled the way `watch_catalog` does, on a
+	/// Renditions over hand-published media groups, reconciled the way `WatchCatalog` does, on a
 	/// two-second join interval.
 	struct Groups {
 		broadcast: moq_net::broadcast::Producer,
@@ -4133,6 +4340,71 @@ mod tests {
 		assert!(
 			new.segment(&id).await.unwrap().is_some(),
 			"the predecessor's part serves"
+		);
+	}
+
+	// The catalog and the media are separate tracks, so a resize's first group can reach the
+	// retiring instance before the catalog update declaring it. Its keyframe's size says it is the
+	// replacement's, so it is listed under the new init rather than muxed under the old.
+	#[tokio::test(start_paused = true)]
+	async fn a_resizes_first_group_ahead_of_the_catalog_is_the_replacements() {
+		let mut test = Groups::with(&["video0"], &[]);
+		let mut media = test.publish("video0");
+		for sequence in 0..3 {
+			media.gop(sequence);
+		}
+		test.listed("video0", 1).await;
+		let old = test.rendition("video0");
+		// Group 3 opens segment 3 at 640x480 before the catalog says so.
+		media.sized(3, 6_000, (640, 480));
+		kio::clock::sleep(Duration::from_millis(100)).await;
+		let config = test.catalog.video.renditions.get_mut("video0").unwrap();
+		config.coded_width = Some(640);
+		config.coded_height = Some(480);
+		test.sync();
+		let new = test.rendition("video0");
+		kio::clock::sleep(Duration::from_millis(100)).await;
+		media.sized(4, 8_000, (640, 480));
+		media.sized(5, 10_000, (640, 480));
+		let snapshot = test.listed("video0", 4).await;
+		assert_eq!(numbers(&snapshot), [0, 1, 2, 3, 4]);
+		let tags: Vec<_> = snapshot.segments.iter().map(|s| s.tag.as_str()).collect();
+		assert_eq!(tags, [old.tag(), old.tag(), old.tag(), new.tag(), new.tag()]);
+		let breaks: Vec<_> = snapshot.segments.iter().map(|s| s.discontinuity).collect();
+		assert_eq!(breaks, [false, false, false, true, false]);
+	}
+
+	// Mid-segment, the retiring instance lists its part of the segment, ending where the resize's
+	// first group starts, even though it read that group before the catalog update.
+	#[tokio::test(start_paused = true)]
+	async fn a_resize_ahead_of_the_catalog_mid_segment_ends_the_predecessors_part() {
+		let mut test = Groups::with(&["video0"], &[]);
+		let mut media = test.publish("video0");
+		// Four groups to a two-second slot: 0-3 are segment 0, and 4 and 5 open segment 1.
+		for sequence in 0..6 {
+			media.at(sequence, sequence * 500);
+		}
+		test.listed("video0", 0).await;
+		let old = test.rendition("video0");
+		media.sized(6, 3_000, (640, 480));
+		kio::clock::sleep(Duration::from_millis(100)).await;
+		let config = test.catalog.video.renditions.get_mut("video0").unwrap();
+		config.coded_width = Some(640);
+		config.coded_height = Some(480);
+		test.sync();
+		let new = test.rendition("video0");
+		for sequence in 7..13 {
+			media.sized(sequence, sequence * 500, (640, 480));
+		}
+		let snapshot = test.listed("video0", 2).await;
+		assert_eq!(numbers(&snapshot), [0, 1, 2]);
+		let tags: Vec<_> = snapshot.segments.iter().map(|s| s.tag.as_str()).collect();
+		assert_eq!(tags, [old.tag(), old.tag(), new.tag()]);
+		let durations: Vec<_> = snapshot.segments.iter().map(|s| s.duration.as_millis()).collect();
+		assert_eq!(
+			durations,
+			[2_000, 1_000, 2_000],
+			"the predecessor's part ends at group 6"
 		);
 	}
 

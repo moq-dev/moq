@@ -56,7 +56,8 @@ const trackShape = {
 
 	// Non-standard: how far this rendition trails the broadcast's earliest, in milliseconds.
 	// Mirrors hang `delay`. A player holds `delay + jitter` and does not subtract across renditions.
-	delay: z.optional(z.number()),
+	// A rendition cannot trail the earliest by a negative amount, so that is malformed.
+	delay: z.optional(z.number().check(z.nonnegative())),
 };
 
 /** Zod schema describing a single track entry in an MSF catalog. */
@@ -73,7 +74,23 @@ export const CatalogSchema = z.object({
 	// draft-lcurley-moq-mpegts. Mirrors `Catalog::ext` in `moq-msf`, which is typed;
 	// here it stays an untyped map, so members this build has never seen survive a
 	// decode/encode round trip unchanged.
-	ext: z.optional(z.record(z.string(), z.unknown())),
+	ext: z.optional(
+		z.pipe(
+			// A record parser drops `__proto__`; every own extension member is application data.
+			// Only plain objects qualify, as with a record: a `Map` or class instance has no
+			// own members to copy, so accepting one would silently empty the extension. A plain
+			// object's prototype is null or some realm's `Object.prototype`, recognized by shape
+			// rather than identity so an object parsed in another realm (an iframe, `vm`) passes.
+			z.custom<Record<string, unknown>>((value) => {
+				if (typeof value !== "object" || value === null) return false;
+				const proto = Object.getPrototypeOf(value);
+				return (
+					proto === null || (Object.getPrototypeOf(proto) === null && Object.hasOwn(proto, "isPrototypeOf"))
+				);
+			}),
+			z.transform((value) => Object.assign(Object.create(null), value) as Record<string, unknown>),
+		),
+	),
 });
 
 /** The MSF catalog: a snapshot of the available tracks. */
@@ -111,6 +128,9 @@ const WireCatalogSchema = z.object({
 
 /** Serialize a catalog to its JSON wire representation (draft-01). */
 export function encode(catalog: Catalog): Uint8Array {
+	// Refuse what `decode` would reject, so a publisher fails here instead of its subscribers.
+	CatalogSchema.parse(catalog);
+
 	// Hoist inline init payloads into a shared, deduplicated initDataList and
 	// reference each from its track via initRef (the draft-01 wire shape).
 	const initDataList: z.infer<typeof InitDataSchema>[] = [];

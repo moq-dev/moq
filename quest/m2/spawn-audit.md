@@ -2,14 +2,36 @@
 
 ## Goal
 
-Every async task spawn left in a library crate after
-[Libraries spawn nothing](/quest/m1/poll-first/no-spawn/README.md) is either converted
-to a `kio::Tasks` child its owner polls or listed with the reason it must stay.
+Every async task spawn left in a library crate is either converted to a
+`kio::Tasks` child its owner polls or listed with the reason it must stay.
 Blocking OS threads are out of scope.
 
 ## Plan
 
-Planned 2026-10-25 with the maintainer as the follow-up to no-spawn. As of
+Planned 2026-10-25 with the maintainer as the follow-up to no-spawn, the m1 epic
+that converted moq-ffi, moq-stats, and moq-relay's cluster and auth decider and
+moved the relay's in-memory tests onto kio's simulator. Its rule, decided with the
+maintainer on 2026-10-25 in place of an m2 runtime trait:
+
+- **Poll everywhere, no spawn.** A spawn trait keeps `'static` detached tasks
+  in the library, which poll-first rejects; `kio::Tasks` gives a library
+  structured children with no runtime, and time is `kio::clock`. Only the edges
+  spawn a root task: binaries and the bindings' runtime.
+- **No I/O seam.** I/O stays at moq-net's `transport::poll` traits and
+  moq-sock.
+- **Blocking work is out of scope.** OS threads for blocking capture, encode,
+  or file I/O are not async tasks and stay.
+
+Spawns no-spawn kept for this audit to convert or list: `Critical`'s web certificate reload
+(`rs/moq-relay/src/web.rs`), the io_uring handoff in
+`rs/moq-relay/src/connection.rs`, and moq-relay's web, shutdown, and uring
+spawns. Each UniFFI call's task on the bindings' runtime stays: that is the
+binding boundary. So does moq-ffi's wake dispatch (decided 2026-11-03,
+[moq-dev/moq#7720](https://github.com/moq-dev/moq/pull/7720)): a wake its root
+raises for a parked host call runs on the blocking pool, so a host continuation
+never runs inside the root.
+
+As of
 `main` today the spawning library crates include moq-tokio (connection,
 server, client), moq-relay (web, shutdown, uring), moq-mux's container
 consumer, moq-hls's server (its path follower and each
@@ -38,7 +60,3 @@ server entry above):
 
 Public API: constructors that spawned return a handle to poll instead; an Impact
 migration note per published crate. Wire: none.
-
-## Required
-
-- [Libraries spawn nothing](/quest/m1/poll-first/no-spawn/README.md) - the rule and the pattern this applies

@@ -16,11 +16,14 @@ import { max, min, saturatingSub, UNBOUNDED } from "./util/sequence.ts";
 /** A run of group sequences `[start, end)`; an open run ends at {@link UNBOUNDED}. */
 export type Run = { start: bigint; end: bigint };
 
-/** One range resolved to groups: from `start` up to the exclusive `end`, undefined while open. */
-export type Resolved = { start: bigint; end?: bigint };
+/**
+ * One range resolved to groups: from `start` up to the exclusive `end`, undefined while open.
+ * `floored` says whether the start names a group, rather than reaching back to the oldest one.
+ */
+export type Resolved = { start: bigint; end?: bigint; floored: boolean };
 
 /** Everything from the latest group onward. */
-export const LIVE: Range = Object.freeze({ start: Object.freeze({ relative: 0 }) });
+export const LIVE: Range = Object.freeze({ start: Object.freeze({ relative: 0n }) });
 
 /** Check one anchor's shape, naming `field` in the error. */
 function anchorOf(field: string, anchor: Anchor): Anchor {
@@ -28,10 +31,9 @@ function anchorOf(field: string, anchor: Anchor): Anchor {
 	const value = keys.length === 1 ? (anchor as Record<string, unknown>)[keys[0]] : undefined;
 	if (keys[0] === "time" && value instanceof Timestamp) return { time: value };
 	if (keys[0] === "absolute" && typeof value === "bigint" && value >= 0n) return { absolute: value };
-	if (keys[0] === "relative" && Number.isSafeInteger(value) && (value as number) >= 0)
-		return { relative: value as number };
+	if (keys[0] === "relative" && typeof value === "bigint" && value >= 0n) return { relative: value };
 	throw new TypeError(
-		`${field} must be {absolute}, a non-negative bigint, {relative}, a non-negative safe integer, or {time}, a Timestamp`,
+		`${field} must be {absolute}, a non-negative bigint, {relative}, a non-negative bigint, or {time}, a Timestamp`,
 	);
 }
 
@@ -53,7 +55,7 @@ function absolute(anchor: Anchor | undefined): bigint | undefined {
 }
 
 /** How many groups back a relative anchor counts, or undefined for any other anchor. */
-function relative(anchor: Anchor | undefined): number | undefined {
+function relative(anchor: Anchor | undefined): bigint | undefined {
 	return anchor?.relative;
 }
 
@@ -157,10 +159,10 @@ export function union(ranges: readonly Range[]): Range[] {
 		else runs.push({ ...span });
 	}
 	const tail = runs.at(-1)?.end === UNBOUNDED ? runs.at(-1)?.start : undefined;
-	let farthest: number | undefined;
+	let farthest: bigint | undefined;
 	for (const range of kept) {
 		const back = relative(range.start);
-		if (back !== undefined && range.end === undefined) farthest = Math.max(farthest ?? back, back);
+		if (back !== undefined && range.end === undefined) farthest = max(farthest ?? back, back);
 	}
 
 	const out: Range[] = runs.map((run) =>
@@ -221,7 +223,7 @@ export function rangesEnd(ranges: readonly Range[]): bigint | undefined {
 export function isWire(range: Range): boolean {
 	const back = relative(range.start);
 	return (
-		(back === undefined || back === 0) &&
+		(back === undefined || back === 0n) &&
 		time(range.start) === undefined &&
 		relative(range.end) === undefined &&
 		time(range.end) === undefined
@@ -460,8 +462,7 @@ class TimeEnd {
 		else this.limit = this.after;
 
 		// Settle once every sequence up to the first group starting past `pts` can no longer
-		// start inside it. A sequence that arrived only as a datagram never indexes where its
-		// group starts, so it counts as gone here.
+		// start inside it.
 		const after = this.after;
 		if (after === undefined) return undefined;
 		// Everything at or below `known` is in range, and `after` lies above it.
@@ -597,38 +598,6 @@ export class Window {
 		return run !== undefined && sequence >= run.start;
 	}
 
-	/**
-	 * Whether a datagram is in range, judged on its own and never through a time end's settling:
-	 * its `timestamp` against each range's times, and its `sequence` against the range's absolute
-	 * groups and the relative ones resolved so far.
-	 */
-	admitsDatagram(sequence: bigint, timestamp: Timestamp | undefined): boolean {
-		if (timestamp === undefined) {
-			return this.#pending || this.#spans.some((span) => sequence >= span.start && sequence < limitOf(span));
-		}
-		return this.ranges.some((range, index) => {
-			if (isEmpty(range)) return false;
-			// A relative anchor still waiting on a latest group bounds nothing yet.
-			const span = this.#spans.find((span) => span.index === index);
-			const { start, end } = range;
-			const started =
-				start?.time !== undefined
-					? !later(start.time, timestamp)
-					: start?.absolute !== undefined
-						? sequence >= start.absolute
-						: start === undefined || !span || sequence >= span.start;
-			const ended =
-				end === undefined
-					? true
-					: end.time !== undefined
-						? !later(timestamp, end.time)
-						: end.absolute !== undefined
-							? sequence < end.absolute
-							: !span || span.end === "open" || !("before" in span.end) || sequence < span.end.before;
-			return started && ended;
-		});
-	}
-
 	/** The lowest group in range at or above `from`, undefined when none is. `from` itself while a relative anchor waits. */
 	next(from: bigint): bigint | undefined {
 		if (this.#pending) return from;
@@ -678,15 +647,21 @@ export class Window {
 	}
 
 	/**
-	 * Each range resolved, in the order given: undefined for one that is empty or whose start
-	 * still waits. An unsettled time end is reported open, never at its cap.
+	 * Each range resolved, in the order given: undefined for one whose start still waits. One
+	 * empty as given, or that only resolves empty, ends at or below its start. An unsettled time
+	 * end is reported open, never at its cap. Mirrors the Rust `Window::resolved`.
 	 */
 	resolved(): (Resolved | undefined)[] {
-		const resolved: (Resolved | undefined)[] = this.ranges.map(() => undefined);
+		const resolved: (Resolved | undefined)[] = this.ranges.map((range) => {
+			if (!isEmpty(range)) return undefined;
+			const end = absolute(range.end) ?? 0n;
+			return { start: (range.start && absolute(range.start)) ?? end, end, floored: true };
+		});
 		for (const span of this.#spans) {
 			resolved[span.index] = {
 				start: span.start,
 				end: span.end !== "open" && "before" in span.end ? span.end.before : undefined,
+				floored: span.floored,
 			};
 		}
 		return resolved;
@@ -799,7 +774,7 @@ function startOf(
 	const back = relative(anchor);
 	if (back === undefined) return { group: 0n, floored: false };
 	if (latest === undefined) return undefined;
-	return { group: saturatingSub(latest, BigInt(back)), floored: true };
+	return { group: saturatingSub(latest, back), floored: true };
 }
 
 /**
@@ -816,5 +791,5 @@ function endOf(
 	const pts = time(anchor);
 	if (pts !== undefined) return { pts };
 	if (latest === undefined) return undefined;
-	return { before: saturatingSub(latest, BigInt(relative(anchor) ?? 0)) + 1n };
+	return { before: saturatingSub(latest, relative(anchor) ?? 0n) + 1n };
 }

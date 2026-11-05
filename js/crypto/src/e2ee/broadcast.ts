@@ -7,7 +7,8 @@
  *
  * @module
  */
-import type { Broadcast as NetBroadcast, Track as NetTrack } from "@moq/net";
+import type { Broadcast as NetBroadcast, Datagram as NetDatagram, Track as NetTrack } from "@moq/net";
+import type * as Datagram from "./datagram.ts";
 import type * as Epoch from "./epoch.ts";
 import type * as Generation from "./generation.ts";
 import type * as Track from "./track.ts";
@@ -42,9 +43,15 @@ export class Producer {
 	 * produced the name (even on another broadcast), or the net error if the broadcast already
 	 * holds it.
 	 */
-	async createTrack(semantic: string, info: Partial<NetTrack.Info> = {}): Promise<Track.Producer> {
+	async createTrack(semantic: string, info: NetTrack.InfoInit = {}): Promise<Track.Producer> {
 		const name = await this.generation.name(semantic);
 		return this.generation.produce(this.#inner.createTrack(name, info), semantic);
+	}
+
+	/** Create a protected datagram track in its own namespace and sequence space. */
+	async createDatagrams(semantic: string, info: Partial<NetDatagram.Info> = {}): Promise<Datagram.Producer> {
+		const name = await this.generation.name(semantic);
+		return this.generation.produceDatagrams(this.#inner.createDatagrams(name, info), semantic);
 	}
 
 	/** End the wrapped broadcast, as `@moq/net`'s `close` does. Idempotent. */
@@ -78,6 +85,12 @@ export class Consumer {
 	async subscribe(semantic: string, subscription?: NetTrack.Subscription): Promise<Track.Consumer> {
 		const name = await this.generation.name(semantic);
 		return this.generation.consume(this.#inner.track(name).subscribe(subscription), semantic);
+	}
+
+	/** Read the protected datagram track under its semantic name, live from when that name resolves to its physical one. */
+	async datagrams(semantic: string): Promise<Datagram.Consumer> {
+		const name = await this.generation.name(semantic);
+		return this.generation.consumeDatagrams(this.#inner.datagrams(name), semantic);
 	}
 
 	/** Release the wrapped broadcast handle, as `@moq/net`'s `close` does. Idempotent. */

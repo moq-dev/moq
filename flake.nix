@@ -32,7 +32,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:moq-dev/quest/36d0429cce0d540ad90f6c1a006a9ca1659b0696";
+      url = "github:moq-dev/quest/4be350816f2a5c1157f799773ee1594f199fd9a7";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };
@@ -679,6 +679,9 @@
               export PATH="$(dirname "$shim"):$PATH"
             fi
 
+            # Skills also invoke quest directly, so keep it ahead of host installs.
+            export PATH="${quest-cli}/bin:$PATH"
+
             # Each nested shell (direnv, then `nix develop`, then another
             # inside a gate) prepends this shell's ~160 store paths again,
             # about 10 KB. mbx copies PATH into two variables at ~3.6 times
@@ -692,6 +695,9 @@
             # What sh/dispatch.sh checks before a scoped `just check` or `just
             # fix`. IN_NIX_SHELL would also pass inside another project's shell.
             IN_MOQ_DEV_SHELL = "1";
+
+            # Local launchers need the exact build without evaluating the flake again.
+            MOQ_QUEST = "${quest-cli}/bin/quest";
 
             PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
             PLAYWRIGHT_VERSION = pkgs.playwright-driver.version;
@@ -713,6 +719,11 @@
           }
           // pkgs.lib.optionalAttrs (!pkgs.stdenv.hostPlatform.isDarwin) {
             ALSA_PLUGIN_DIR = "${alsaPlugins}/lib/alsa-lib";
+            # Firefox loads these at runtime; harness.ts exposes them only to its process.
+            PLAYWRIGHT_FIREFOX_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
+              pkgs.ffmpeg
+              pkgs.libpulseaudio
+            ];
           };
         };
 

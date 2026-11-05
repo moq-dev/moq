@@ -15,7 +15,10 @@
 //!
 //! A group has no size cap. Each copy holds at most its newest [`MAX_CACHE_BYTES`], less
 //! under the cache pool's memory pressure, and sheds whole frames from its front to stay
-//! there; reading a shed frame is [`Error::Evicted`].
+//! there. A reader that reaches a shed frame rides a flight when the track has a
+//! [`track::Requests`] handler: a separate copy from that frame, paced by its fastest
+//! reader, which it leaves for the copy ahead once that holds its frame within reach.
+//! Otherwise reading a shed frame is [`Error::Evicted`].
 //!
 //! The stream is closed with [Error] when all writers or readers are dropped.
 use super::flate;
@@ -43,9 +46,14 @@ use crate::{Error, IntoBytes, Result, StreamError, Timestamp};
 ///
 /// A group has no size cap: a write that takes the frames held past this sheds whole
 /// frames from the copy's front until it fits, and a compressed group's inflated copy
-/// sheds the same way. A reader that reaches a shed frame gets [`Error::Evicted`]. A
-/// larger declared frame size is [`Error::FrameTooLarge`] before allocating.
+/// sheds the same way. A reader that reaches a shed frame rides a flight, or gets
+/// [`Error::Evicted`] when nothing serves one (see the module docs). A larger declared
+/// frame size is [`Error::FrameTooLarge`] before allocating.
 pub const MAX_CACHE_BYTES: u64 = 32 * 1024 * 1024; // 32 MB
+
+/// How far behind a copy's fastest reader a reader may board it: half the live tail, less
+/// the most one shed frees at once, since the other half may be all ahead of that reader.
+pub(super) const ADMIT: u64 = super::pace::AHEAD - kio::log::Writer::<Entry>::SEGMENT_HEAP as u64;
 
 /// Heap one cached group costs beyond its frame payloads, excluding the track-side
 /// bookkeeping in [`track::CACHE_OVERHEAD`].
@@ -165,6 +173,13 @@ impl Clone for Entry {
 }
 
 impl Entry {
+	/// Where the frame sits on its copy's [`Pace`] scale: its payload, metadata, and slot,
+	/// as the live tail charges it, so a paced writer of tiny frames is bounded too.
+	fn cost(&self) -> u64 {
+		let metadata = self.fields.as_ref().map_or(0, |fields| fields.heap());
+		self.frame.payload.len() as u64 + metadata + size_of::<Entry>() as u64
+	}
+
 	/// A frame without object fields.
 	fn plain(frame: Cached, inflated: u64) -> Self {
 		Self {
@@ -391,18 +406,15 @@ impl Flate {
 	/// Compress a locally written frame, returning its stored slice.
 	fn deflate(&mut self, payload: &[u8]) -> Bytes {
 		let plain = &self.plain;
-		let encoder = self.encoder.get_or_insert_with(|| {
-			plain.bill.add(flate::ENCODER_HEAP);
-			flate::Encoder::new()
-		});
+		let encoder = self.encoder.get_or_insert_with(|| plain.bill.take_encoder());
 		encoder.frame(payload)
 	}
 
-	/// Drop the codec state once no frame follows at `fin`: the encoder, and the decoder if
-	/// its readers already inflated every frame.
+	/// Park the encoder once no frame follows at `fin`, and drop the decoder if its readers
+	/// already inflated every frame.
 	fn finish(&mut self, fin: Option<usize>) {
-		if self.encoder.take().is_some() {
-			self.plain.bill.sub(flate::ENCODER_HEAP);
+		if let Some(encoder) = self.encoder.take() {
+			self.plain.bill.park_encoder(encoder);
 		}
 		let Some(fin) = fin else {
 			return;
@@ -530,7 +542,7 @@ impl Plain {
 		for entry in state.frames.range(start..).take(end.saturating_sub(local)) {
 			prefetch.push(entry, false);
 		}
-		prefetch.len
+		prefetch.len()
 	}
 
 	/// Shed the oldest inflated frames past [`MAX_CACHE_BYTES`], keeping the newest, once
@@ -968,15 +980,9 @@ impl GroupState {
 	}
 
 	/// Append a completed frame, returning the slot growth it charged.
-	///
-	/// The frame's place on the pace scale costs its payload, metadata, and slot, as the
-	/// live tail does, so a paced writer of tiny frames is bounded too.
 	fn push(&mut self, mut entry: Entry) -> u64 {
 		let slots = self.reserve_frame();
-		let metadata = entry.fields.as_ref().map_or(0, |fields| fields.heap());
-		entry.end = self
-			.pace
-			.commit(entry.frame.payload.len() as u64 + metadata + size_of::<Entry>() as u64);
+		entry.end = self.pace.commit(entry.cost());
 		self.log.push(entry);
 		slots
 	}
@@ -1136,7 +1142,7 @@ impl GroupState {
 	/// Resolve the group's terminal state for a reader positioned at `index`.
 	///
 	/// A finished group is still aborted once its frames are released to free memory
-	/// (aged out of the track's max age window, or evicted by the cache pool). A reader
+	/// (idle past the cache pool's expiry window, or evicted under its byte target). A reader
 	/// that already consumed every frame is missing nothing, so it gets the clean end of
 	/// group; one that fell short sees the abort rather than a silently truncated stream.
 	fn poll_terminal(&self, index: usize) -> Poll<Result<()>> {
@@ -1419,6 +1425,18 @@ impl Detached {
 			alive: self.alive.clone(),
 		};
 		(!handle.is_settled()).then_some(handle)
+	}
+
+	/// The group, while anything still holds it and it is not aborted.
+	pub(super) fn held(&self) -> Option<Handle> {
+		let handle = Handle {
+			state: SendCell::new(self.state.upgrade()?),
+			info: self.info,
+			track: self.track.clone(),
+			cache: self.cache.clone(),
+			alive: self.alive.clone(),
+		};
+		(!handle.is_aborted()).then_some(handle)
 	}
 }
 
@@ -1779,7 +1797,8 @@ impl Producer {
 	/// The batch is validated before anything is written, so a rejected frame leaves
 	/// both the group and the buffer exactly as they were, ready to retry or redirect,
 	/// unless it fails the group: too large, or held differently by another copy.
-	pub fn write_frames<const N: usize>(&mut self, frames: &mut frame::Buffer<N>) -> Result<()> {
+	#[cfg(any(test, feature = "fuzz"))]
+	pub(crate) fn write_frames<const N: usize>(&mut self, frames: &mut frame::Buffer<N>) -> Result<()> {
 		for frame in frames.filled() {
 			self.handle.track.rescale(frame.timestamp)?;
 			if frame.payload.len() as u64 > MAX_CACHE_BYTES {
@@ -2206,13 +2225,7 @@ impl Producer {
 		err
 	}
 
-	/// Block until the group's outcome is final: `Ok` once finished, or the abort error,
-	/// including eviction.
-	#[cfg(feature = "async")]
-	pub async fn closed(&self) -> Result<()> {
-		kio::wait(|waiter| self.handle.poll_closed(waiter)).await
-	}
-	/// Poll until a reader holds the group and the next frame, described by `frame`, fits
+	/// Resolves once a reader holds the group and the next frame, described by `frame`, fits
 	/// within 16 MB past the end of the last frame its fastest reader took, so a local writer
 	/// runs no further ahead than the live tail keeps behind that reader.
 	///
@@ -2221,20 +2234,17 @@ impl Producer {
 	/// for a frame larger than the window, and one whose next frame was shed has fallen off
 	/// the group and is not waited on. Writing without waiting never fails: the group sheds
 	/// its front instead.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_ready(&self, waiter: &kio::Waiter, frame: &frame::Info) -> Poll<()> {
-		ready!(self.poll_paced(waiter, frame.size));
+		ready!(self.poll_paced(waiter, frame.size, super::pace::AHEAD));
 		// A closed group reports `Closed`, which is ready too.
 		self.handle.state.poll_wanted_changed(waiter, false).map(|_| ())
 	}
 
-	/// Wait until a reader holds the group and `frame` fits; see [`Self::poll_ready`].
-	pub async fn ready(&self, frame: &frame::Info) {
-		kio::wait(|waiter| self.poll_ready(waiter, frame)).await
-	}
-
 	/// Poll until the writer may take more from upstream, `partial` bytes into a frame
-	/// it has not committed: until it is at most [`super::pace::AHEAD`] past the end of the last
-	/// frame its fastest reader took.
+	/// it has not committed: until it is at most `window` bytes past the end of the last
+	/// frame its fastest reader took. Ingest passes its stream's receive credit (see
+	/// [`super::pace::window`]); a local writer passes [`super::pace::AHEAD`].
 	///
 	/// Ready at once while no reader holds the group, so a group nobody watches keeps
 	/// writing and sheds its front, and once it is closed, so the next write surfaces why.
@@ -2243,16 +2253,16 @@ impl Producer {
 	/// fallen off the group and is not waited on.
 	///
 	/// A session's ingest waits on this; a local writer waits on [`Self::poll_ready`].
-	pub(crate) fn poll_paced(&self, waiter: &kio::Waiter, partial: u64) -> Poll<()> {
+	pub(crate) fn poll_paced(&self, waiter: &kio::Waiter, partial: u64, window: u64) -> Poll<()> {
 		let pace = &self.handle.alive.pace;
-		if !pace.ahead(partial) {
+		if !pace.ahead(partial, window) {
 			return Poll::Ready(());
 		}
 		// Either wakes the writer: the last reader leaving, or the group closing.
 		if self.handle.poll_unwanted(waiter).is_ready() || self.handle.state.poll_closed(waiter).is_ready() {
 			return Poll::Ready(());
 		}
-		match pace.paced(pace.park(waiter), partial) {
+		match pace.paced(pace.park(waiter), partial, window) {
 			true => Poll::Pending,
 			false => Poll::Ready(()),
 		}
@@ -2289,8 +2299,9 @@ impl Producer {
 		self.handle.consume()
 	}
 
-	/// Poll until the group's outcome is final: `Ok` once finished, or the abort error,
+	/// Resolves once the group's outcome is final: `Ok` once finished, or the abort error,
 	/// including eviction.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
 		self.handle.poll_closed(waiter)
 	}
@@ -2302,6 +2313,43 @@ impl Producer {
 }
 
 impl Handle {
+	/// Whether `reader` may ride this copy at its frame: it holds the frame, no further
+	/// than [`ADMIT`] behind the end of the last frame its fastest reader took, so the
+	/// front shedding as the writer runs a whole window ahead still leaves it in place.
+	pub(super) fn admits(&self, reader: &Consumer) -> bool {
+		let index = reader.cursor.index;
+		let state = self.state.read();
+		// Frames adopted below the log sit off this copy's pace scale.
+		if state.abort.is_some() || (index as u64) < state.log.base() {
+			return false;
+		}
+		// A plain read of a compressed copy inflates its frame from every slice since the
+		// last one inflated, which must all still be held, from frame 0.
+		if let Some(plain) = state.plain(reader.cursor.raw)
+			&& (state.offset != 0
+				|| plain.len.load(Ordering::Acquire).min(index) < state.held()
+				|| plain.shed_past(index))
+		{
+			return false;
+		}
+		let start = match state.log.get(index as u64) {
+			Some(entry) => entry.end - entry.cost(),
+			None if index == state.committed() => state.pace.written(),
+			None => return false,
+		};
+		state.pace.read().saturating_sub(start) <= ADMIT
+	}
+
+	/// One past the last frame this copy committed: how far its writer got.
+	pub(super) fn committed(&self) -> usize {
+		self.state.read().committed()
+	}
+
+	/// Whether `reader` reads this copy.
+	pub(super) fn is_read_by(&self, reader: &Consumer) -> bool {
+		Arc::ptr_eq(&self.alive, &reader.cursor.alive)
+	}
+
 	/// Abort the group without taking ownership of its writer.
 	// Sessions cancel a group while its writer is in a frame.
 	pub(crate) fn abort(&self, err: Error) -> Result<()> {
@@ -2867,7 +2915,13 @@ impl Handle {
 	fn consumer(&self, state: kio::Consumer<GroupState>) -> Consumer {
 		Consumer {
 			info: self.info,
-			track: self.track.clone(),
+			delivery: Arc::new(Delivery {
+				timescale: self.track.timescale,
+				#[cfg(feature = "async")]
+				ietf: self.track.ietf(),
+				arrived: self.alive.arrived,
+				stale_counted: AtomicBool::new(false),
+			}),
 			cursor: Cursor {
 				state,
 				log: self.alive.log.clone(),
@@ -2886,11 +2940,9 @@ impl Handle {
 			expiry: None,
 			expired: false,
 			adopted: false,
-			stale_counted: Arc::default(),
-			recover: None,
+			carry: None,
 			idle: None,
 			parked: false,
-			arrived: self.alive.arrived,
 		}
 	}
 
@@ -2993,14 +3045,9 @@ impl Demand {
 		!self.state.is_closed() && self.state.wanted()
 	}
 
-	/// Return [`wanted`](Self::wanted) once it differs from what this handle last returned:
+	/// [`wanted`](Self::wanted) once it differs from what this handle last returned:
 	/// immediately on the first call, then on each change. Errors once the group is closed.
-	#[cfg(feature = "async")]
-	pub async fn wanted_changed(&mut self) -> Result<bool> {
-		kio::wait(|waiter| self.poll_wanted_changed(waiter)).await
-	}
-
-	/// Poll for [`wanted`](Self::wanted) to differ from what this handle last returned.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_wanted_changed(&mut self, waiter: &kio::Waiter) -> Poll<Result<bool>> {
 		loop {
 			if self.state.is_closed() {
@@ -3016,13 +3063,8 @@ impl Demand {
 		}
 	}
 
-	/// Wait until the group's outcome is final: `Ok` once finished, or the abort error.
-	#[cfg(feature = "async")]
-	pub async fn closed(&self) -> Result<()> {
-		kio::wait(|waiter| self.poll_closed(waiter)).await
-	}
-
-	/// Poll until the group's outcome is final: `Ok` once finished, or the abort error.
+	/// Resolves once the group's outcome is final: `Ok` once finished, or the abort error.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
 		settle(self.state.consume_weak().poll(waiter, |state| state.poll_outcome()))
 	}
@@ -3042,19 +3084,25 @@ impl Demand {
 /// pays nothing. Inline storage would triple the size of every [`Consumer`], which
 /// moves by value through each layer that hands out a group.
 ///
+/// The frame buffer's allocation also holds its cursor and optional metadata pointers,
+/// keeping an empty prefetch to one pointer without another allocation on the first fill.
 /// Slots hold the public [`frame::Frame`], with a segmented payload set aside in `chains`,
 /// so a whole read of a small frame moves it out of its slot as it did before segments.
 #[derive(Default)]
 struct Prefetch {
+	batch: Option<Box<Batch>>,
+}
+
+struct Batch {
 	// Initialized, not-yet-taken frames are `frames[pos..len]`; the rest are uninitialized.
 	// A slot whose frame is in `chains` holds an empty payload.
-	frames: Option<Box<[MaybeUninit<frame::Frame>; Self::CAP]>>,
+	frames: [MaybeUninit<frame::Frame>; Prefetch::CAP],
 	// Segmented payloads for `frames`, allocated by the first batch that carries one.
-	chains: Option<Box<[Option<frame::Chain>; Self::CAP]>>,
+	chains: Option<Box<[Option<frame::Chain>; Prefetch::CAP]>>,
 	// Relay metadata for `frames`, allocated by the first batch that carries any.
-	fields: Option<Box<[Option<Arc<super::object::Fields>>; Self::CAP]>>,
+	fields: Option<Box<[Option<Arc<super::object::Fields>>; Prefetch::CAP]>>,
 	// Inflated sizes for `frames`, filled only by a batch of a compressed group's stored slices.
-	inflated: Option<Box<[u64; Self::CAP]>>,
+	inflated: Option<Box<[u64; Prefetch::CAP]>>,
 	pos: usize,
 	len: usize,
 }
@@ -3064,7 +3112,8 @@ impl Prefetch {
 
 	/// The inflated size of the stored slice [`Self::pop`] just returned.
 	fn take_inflated(&self) -> Option<u64> {
-		self.inflated.as_ref()?.get(self.pos.checked_sub(1)?).copied()
+		let batch = self.batch.as_ref()?;
+		batch.inflated.as_ref()?.get(batch.pos.checked_sub(1)?).copied()
 	}
 
 	/// Take the next buffered frame whole, copying a segmented payload into one buffer.
@@ -3073,7 +3122,7 @@ impl Prefetch {
 	#[inline(always)]
 	fn pop(&mut self) -> Option<frame::Frame> {
 		let mut frame = self.take()?;
-		if self.chains.is_some() {
+		if self.batch.as_ref().is_some_and(|batch| batch.chains.is_some()) {
 			self.join_chain(&mut frame);
 		}
 		Some(frame)
@@ -3099,46 +3148,67 @@ impl Prefetch {
 
 	#[inline]
 	fn take(&mut self) -> Option<frame::Frame> {
-		if self.pos == self.len {
+		let batch = self.batch.as_mut()?;
+		if batch.pos == batch.len {
 			return None;
 		}
-		let frames = self.frames.as_mut()?;
 		// SAFETY: `pos < len`, so this slot was written by `fill` and not yet taken.
-		let frame = unsafe { frames[self.pos].assume_init_read() };
-		self.pos += 1;
+		let frame = unsafe { batch.frames[batch.pos].assume_init_read() };
+		batch.pos += 1;
 		Some(frame)
 	}
 
 	/// The segmented payload of the frame [`Self::take`] just returned.
 	#[inline]
 	fn take_chain(&mut self) -> Option<frame::Chain> {
-		self.chains.as_mut()?.get_mut(self.pos.checked_sub(1)?)?.take()
+		let batch = self.batch.as_mut()?;
+		batch.chains.as_mut()?.get_mut(batch.pos.checked_sub(1)?)?.take()
 	}
 
 	/// The relay metadata of the frame [`Self::pop`] just returned.
 	fn take_fields(&mut self) -> Option<Arc<super::object::Fields>> {
-		self.fields.as_mut()?.get_mut(self.pos.checked_sub(1)?)?.take()
+		let batch = self.batch.as_mut()?;
+		batch.fields.as_mut()?.get_mut(batch.pos.checked_sub(1)?)?.take()
 	}
 
 	/// Empty a drained batch (`pop` returned `None`) for a refill, which keeps inflated
 	/// sizes beside its frames when it reads a compressed group's stored slices.
 	fn reset(&mut self, inflated: bool) {
-		debug_assert_eq!(self.pos, self.len, "a refill of a non-empty batch would leak frames");
-		self.pos = 0;
-		self.len = 0;
+		let Some(batch) = &mut self.batch else {
+			return;
+		};
+		debug_assert_eq!(batch.pos, batch.len, "a refill of a non-empty batch would leak frames");
+		batch.pos = 0;
+		batch.len = 0;
 		if !inflated {
-			self.inflated = None;
+			batch.inflated = None;
 		}
+	}
+
+	fn len(&self) -> usize {
+		self.batch.as_ref().map_or(0, |batch| batch.len)
+	}
+
+	/// Whether every buffered frame was taken.
+	fn is_drained(&self) -> bool {
+		self.batch.as_ref().is_none_or(|batch| batch.pos == batch.len)
 	}
 
 	/// Buffer `entry` at the end of the batch, with its inflated size if `inflated`,
 	/// returning where it ends on the group's pace scale.
 	fn push(&mut self, entry: &Entry, inflated: bool) -> u64 {
-		let at = self.len;
-		let frames = self
-			.frames
-			.get_or_insert_with(|| Box::new([const { MaybeUninit::uninit() }; Self::CAP]));
-		let payload = match (&entry.frame.payload, &mut self.chains) {
+		let batch = self.batch.get_or_insert_with(|| {
+			Box::new(Batch {
+				frames: [const { MaybeUninit::uninit() }; Self::CAP],
+				chains: None,
+				fields: None,
+				inflated: None,
+				pos: 0,
+				len: 0,
+			})
+		});
+		let at = batch.len;
+		let payload = match (&entry.frame.payload, &mut batch.chains) {
 			(Payload::Whole(bytes), Some(slots)) => {
 				slots[at] = None;
 				bytes.clone()
@@ -3149,21 +3219,21 @@ impl Prefetch {
 				Bytes::new()
 			}
 		};
-		frames[at].write(frame::Frame {
+		batch.frames[at].write(frame::Frame {
 			timestamp: entry.frame.timestamp,
 			payload,
 			arrived: entry.frame.arrived,
 		});
 		// Plain frames never allocate the metadata table.
-		match (&entry.fields, &mut self.fields) {
+		match (&entry.fields, &mut batch.fields) {
 			(Some(fields), slots) => slots.get_or_insert_default()[at] = Some(fields.clone()),
 			(None, Some(slots)) => slots[at] = None,
 			(None, None) => {}
 		}
 		if inflated {
-			self.inflated.get_or_insert_default()[at] = entry.inflated;
+			batch.inflated.get_or_insert_default()[at] = entry.inflated;
 		}
-		self.len += 1;
+		batch.len += 1;
 		entry.end
 	}
 
@@ -3234,33 +3304,33 @@ impl Prefetch {
 			end = self.push(entry, compressed);
 		}
 		pace.took(end);
-		self.len
+		self.len()
 	}
 
 	/// Replace a filled batch's stored slices, from local frame `local`, with their inflated
 	/// frames. A frame that fails to inflate ends the batch, failing it if first.
 	fn inflate(&mut self, job: &Inflate, local: usize, meter: &stats::Meter) -> Result<()> {
 		job.run(meter);
-		let Some(frames) = &mut self.frames else {
+		let Some(batch) = &mut self.batch else {
 			return Ok(());
 		};
-		for i in self.pos..self.len {
+		for i in batch.pos..batch.len {
 			match job.get(local + i) {
 				Ok(payload) => {
 					// SAFETY: slots in `pos..len` are initialized (written by `fill`, not yet popped).
-					unsafe { frames[i].assume_init_mut() }.payload = payload;
-					if let Some(chains) = &mut self.chains {
+					unsafe { batch.frames[i].assume_init_mut() }.payload = payload;
+					if let Some(chains) = &mut batch.chains {
 						chains[i] = None;
 					}
 				}
 				Err(err) => {
-					for slot in &mut frames[i..self.len] {
+					for slot in &mut batch.frames[i..batch.len] {
 						// SAFETY: as above, and `len` drops below them right after.
 						unsafe { slot.assume_init_drop() };
 					}
-					self.len = i;
+					batch.len = i;
 					job.plain.trim();
-					return if i == self.pos { Err(err) } else { Ok(()) };
+					return if i == batch.pos { Err(err) } else { Ok(()) };
 				}
 			}
 		}
@@ -3273,30 +3343,27 @@ impl Prefetch {
 	/// Read once per fill to bump the egress payload counters for the whole batch.
 	fn buffered(&self) -> (u64, u64) {
 		let mut bytes = 0u64;
-		let Some(frames) = &self.frames else {
+		let Some(batch) = &self.batch else {
 			return (0, 0);
 		};
-		for slot in &frames[self.pos..self.len] {
+		for slot in &batch.frames[batch.pos..batch.len] {
 			// SAFETY: slots in `pos..len` are initialized (written by `fill`, not yet popped).
 			bytes += unsafe { slot.assume_init_ref() }.payload.len() as u64;
 		}
-		if let Some(chains) = &self.chains {
-			bytes += chains[self.pos..self.len]
+		if let Some(chains) = &batch.chains {
+			bytes += chains[batch.pos..batch.len]
 				.iter()
 				.flatten()
 				.map(|chain| chain.len() as u64)
 				.sum::<u64>();
 		}
-		((self.len - self.pos) as u64, bytes)
+		((batch.len - batch.pos) as u64, bytes)
 	}
 }
 
-impl Drop for Prefetch {
+impl Drop for Batch {
 	fn drop(&mut self) {
-		let Some(frames) = &mut self.frames else {
-			return;
-		};
-		for slot in &mut frames[self.pos..self.len] {
+		for slot in &mut self.frames[self.pos..self.len] {
 			// SAFETY: slots in `pos..len` are initialized and were never taken.
 			unsafe { slot.assume_init_drop() };
 		}
@@ -3310,9 +3377,8 @@ pub struct Consumer {
 	// Immutable stream state.
 	info: Info,
 
-	// The parent track's info, inherited from the producer. Its `timescale` lets the
-	// wire publisher emit per-frame timestamps at the right scale for a fetched group.
-	track: track::Info,
+	// Cold metadata shares the allocation that deduplicates expiry across clones.
+	delivery: Arc<Delivery>,
 
 	// Egress payload meter, set by a tagged track via [`Self::with_meter`]. Empty
 	// (no-op) for an untagged group. Also owns unread content discarded by expiry.
@@ -3325,20 +3391,73 @@ pub struct Consumer {
 	// A replacement copy was adopted and has not yet returned a frame that matches. Its
 	// ordinals match this group's only while its Object IDs do.
 	adopted: bool,
-	// Cloned cursors are parallel views of one handed-out delivery. Whichever
-	// observes expiry first records its unread tail; the others must not repeat it.
-	stale_counted: Arc<AtomicBool>,
-	// Handed out from a front's logical track: carries the read across route changes.
-	// Boxed: it is the rare case.
-	recover: Option<Box<super::resume::Recover>>,
+	// Carries the read across route changes and onto flights. Boxed: it is the rare case.
+	carry: Option<Box<Carry>>,
 	// The frame read that last parked, answered again without the read path until something
 	// it parked on fires, once a read parks twice in a row; see [`Self::poll_read_as`].
 	idle: Option<Box<Idle<()>>>,
 	// The last frame read parked with no gate set up yet.
 	parked: bool,
-	// When the group was created here. Kept across an adopted replacement copy, which the
-	// group arrived before.
+}
+
+// Poll layers repeatedly move this value; keep cold state shared or lazy.
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(size_of::<Consumer>() <= 184);
+
+/// What carries a read past the copy it reads; see [`Consumer::with_recover`] and
+/// [`track::board`].
+#[derive(Default)]
+struct Carry {
+	// Handed out from a front's logical track: carries the read across route changes.
+	recover: Option<super::resume::Recover>,
+	// Boarding or riding a flight, once the copy read shed the frame read next.
+	ride: Option<Ride>,
+}
+
+impl Clone for Carry {
+	fn clone(&self) -> Self {
+		Self {
+			recover: self.recover.clone(),
+			// A clone reads in parallel, so it boards for itself.
+			ride: self.ride.as_ref().map(|ride| Ride {
+				boarding: None,
+				..*ride
+			}),
+		}
+	}
+}
+
+/// A reader's flight: a separate copy of its group, from a frame the copy it read shed.
+struct Ride {
+	// The flight asked for, until its copy is accepted.
+	boarding: Option<track::Boarding>,
+	// Whether the copy read is a flight, which the reader hands over from.
+	aboard: bool,
+	// Frames still to read and drop before the reader's own: a compressed flight starts at
+	// frame 0, and its rider inflates its way to the frame it boarded at.
+	skip: usize,
+}
+
+impl Ride {
+	/// Reading the copy boarded, a flight when `flight`, with `skip` frames to drop first.
+	fn aboard(flight: bool, skip: usize) -> Self {
+		Self {
+			boarding: None,
+			aboard: flight,
+			skip,
+		}
+	}
+}
+
+/// Per-delivery state shared by a consumer's clones and its frame readers.
+/// Kept across replacement copies, so provenance and arrival remain the original's.
+pub(super) struct Delivery {
+	timescale: Option<Timescale>,
+	#[cfg(feature = "async")]
+	ietf: Option<crate::ietf::Version>,
 	arrived: crate::time::Instant,
+	// Whichever reader observes expiry first records its unread tail only once.
+	pub(super) stale_counted: AtomicBool,
 }
 
 /// Subscriber-specific policy for a group after it was handed out: when it expires, and
@@ -3352,8 +3471,9 @@ pub(super) trait Expiry: Send + Sync + std::panic::UnwindSafe + std::panic::RefU
 
 	/// Return whether the group is stale, registering `waiter` for anything that
 	/// could change the answer while the group remains live.
-	/// A logical reader supplies its current budget after the original copy is gone.
-	fn is_expired(&self, max_delay: Option<std::time::Duration>, waiter: &kio::Waiter) -> bool;
+	/// A logical reader's `recover` supplies its current budget after the original copy is
+	/// gone, asked only once a verdict needs it.
+	fn is_expired(&self, recover: Option<&super::resume::Recover>, waiter: &kio::Waiter) -> bool;
 
 	/// Keep the reader's budget and cap while following a replacement track's edge.
 	fn for_track(&self, track: &track::Consumer) -> Arc<dyn Expiry>;
@@ -3415,19 +3535,17 @@ impl Clone for Consumer {
 		Self {
 			cursor: self.cursor.clone(),
 			info: self.info,
-			track: self.track.clone(),
+			delivery: self.delivery.clone(),
 			// Inherit the meter without re-counting the group: the original already
 			// counted it when the track handed it out.
 			stats: self.stats.clone(),
 			expiry: self.expiry.clone(),
 			expired: self.expired,
 			adopted: self.adopted,
-			stale_counted: self.stale_counted.clone(),
-			recover: self.recover.clone(),
+			carry: self.carry.clone(),
 			// A clone reads in parallel, so it parks for itself.
 			idle: None,
 			parked: false,
-			arrived: self.arrived,
 		}
 	}
 }
@@ -3464,6 +3582,13 @@ impl Consumer {
 		self.cursor.raw = true;
 		self.cursor.prefetch = Prefetch::default();
 		self
+	}
+
+	/// Resolves once the group's outcome is final, wherever this cursor is: `Ok` once
+	/// finished, or the abort error.
+	#[cfg(feature = "async")]
+	pub(crate) fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
+		self.cursor.poll(waiter, |state| state.poll_outcome())
 	}
 
 	/// The index of the first frame the group holds (see [`Producer::start_at`]).
@@ -3536,7 +3661,7 @@ impl Consumer {
 	/// Carry this group across a front's route changes; see [`super::resume`].
 	pub(super) fn with_recover(mut self, recover: super::resume::Recover) -> Self {
 		Idle::disarm(&mut self.idle);
-		self.recover = Some(Box::new(recover));
+		self.carry.get_or_insert_default().recover = Some(recover);
 		self
 	}
 
@@ -3553,7 +3678,7 @@ impl Consumer {
 			if self.expired {
 				return res;
 			}
-			let Some(recover) = self.recover.as_mut() else {
+			let Some(recover) = self.carry.as_mut().and_then(|carry| carry.recover.as_mut()) else {
 				return res;
 			};
 			let failed = match &res {
@@ -3572,7 +3697,9 @@ impl Consumer {
 				}
 				// Read to its end: no route is needed for it any more.
 				Poll::Ready(Ok(None)) => {
-					self.recover = None;
+					if let Some(carry) = &mut self.carry {
+						carry.recover = None;
+					}
 					return res;
 				}
 				// Content that failed to inflate is the group's under its name, so no copy fixes it.
@@ -3669,14 +3796,15 @@ impl Consumer {
 	fn poll_expiry(&mut self, waiter: &kio::Waiter, held: bool) -> bool {
 		if !self.expired
 			&& (held || self.expiry_pending())
-			&& self.expiry.as_ref().is_some_and(|expiry| {
-				let budget = self.recover.as_ref().and_then(|recover| recover.poll_budget(waiter));
-				expiry.is_expired(budget, waiter)
-			}) {
+			&& self
+				.expiry
+				.as_ref()
+				.is_some_and(|expiry| expiry.is_expired(self.recover(), waiter))
+		{
 			self.expired = true;
 			// Another read, such as `poll_expired`, may judge a frame read parked before it.
 			Idle::disarm(&mut self.idle);
-			if !self.stale_counted.swap(true, Ordering::Relaxed) {
+			if !self.delivery.stale_counted.swap(true, Ordering::Relaxed) {
 				self.stats.stale(self.cursor.unread_content());
 			}
 		}
@@ -3689,7 +3817,7 @@ impl Consumer {
 	}
 
 	/// Mark the group as still being read, so a slow batch drain does not expire it.
-	pub fn keep_alive(&self) {
+	pub(crate) fn keep_alive(&self) {
 		self.cursor.state.read().charge.refresh();
 	}
 
@@ -3701,7 +3829,7 @@ impl Consumer {
 
 	/// The parent track's timescale, or `None` when it declared no timeline.
 	pub fn timescale(&self) -> Option<Timescale> {
-		self.track.timescale
+		self.delivery.timescale
 	}
 
 	/// When the group was created at this hop, before its first frame, on the ambient clock:
@@ -3711,14 +3839,14 @@ impl Consumer {
 	/// from when it landed, as [`frame::Frame::arrived`] does for each frame. A consumer
 	/// resumed onto a replacement copy keeps the original group's arrival.
 	pub fn arrived(&self) -> crate::time::Instant {
-		self.arrived
+		self.delivery.arrived
 	}
 
 	/// The draft the parent track's moq-transport publisher spoke, which serialized every
 	/// object's properties, or `None` for a moq-lite one.
 	#[cfg(feature = "async")]
 	pub(crate) fn ietf(&self) -> Option<crate::ietf::Version> {
-		self.track.ietf()
+		self.delivery.ietf
 	}
 
 	/// The index of the next frame this consumer will return.
@@ -3772,26 +3900,25 @@ impl Consumer {
 		state.fin.unwrap_or(state.next_index)
 	}
 
-	/// Return a consumer for the next frame for chunked reading.
+	/// The next frame, as a consumer for chunked reading.
+	///
+	/// Returns None if the group is finished and the index is out of range, or the cursor
+	/// passed the [`Self::with_range`] cap.
 	#[cfg(feature = "async")]
 	pub async fn next_frame(&mut self) -> Result<Option<frame::Consumer>> {
 		kio::wait(|waiter| self.poll_next_frame(waiter)).await
 	}
 
-	/// Poll for the next frame, without blocking.
-	///
-	/// Returns None if the group is finished and the index is out of range, or the cursor
-	/// passed the [`Self::with_range`] cap.
-	pub fn poll_next_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Consumer>>> {
-		let res = match self.recover.is_none() {
+	pub(crate) fn poll_next_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Consumer>>> {
+		let res = match self.recover().is_none() {
 			true => {
 				let res = self.poll_next_frame_once(waiter);
 				self.ended_on(res)
 			}
-			false => match (self.poll_resumed(waiter, Self::poll_next_frame_once), &self.recover) {
+			false => match (self.poll_resumed(waiter, Self::poll_next_frame_once), self.recover()) {
 				// A frame read from a copy that may fail too carries on the same way.
 				(Poll::Ready(Ok(Some(frame))), Some(recover)) => Poll::Ready(Ok(Some(
-					frame.with_recover((**recover).clone(), self.cursor.index as u64 - 1),
+					frame.with_recover(recover.clone(), self.cursor.index as u64 - 1),
 				))),
 				(res, _) => self.ended_on(res),
 			},
@@ -3830,6 +3957,10 @@ impl Consumer {
 	}
 
 	fn poll_next_frame_once(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Consumer>>> {
+		self.poll_flown(waiter, Self::poll_next_frame_copy)
+	}
+
+	fn poll_next_frame_copy(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Consumer>>> {
 		if self.expired {
 			return Poll::Ready(Err(Error::Old));
 		}
@@ -3837,7 +3968,7 @@ impl Consumer {
 		let expiry = self
 			.expiry
 			.as_ref()
-			.map(|policy| frame::Expiry::new(policy.clone(), stats.clone(), self.stale_counted.clone()));
+			.map(|policy| frame::Expiry::new(policy.clone(), stats.clone(), self.delivery.clone()));
 		let res = self.cursor.poll_next_frame(waiter, &stats, expiry);
 		self.poll_expired_if_blocked(waiter, res)
 	}
@@ -3867,41 +3998,35 @@ impl Consumer {
 		waiter: &kio::Waiter,
 		take: impl Fn(&mut Prefetch) -> Option<T> + Copy,
 	) -> Poll<Result<Option<T>>> {
+		// Most reads of a backlog: kept off the read path below, whose bookkeeping costs
+		// every frame drained more than the pop.
+		if let Some(frame) = self.take_prefetched(take) {
+			return Poll::Ready(Ok(Some(frame)));
+		}
 		if Idle::parked(&self.idle, (), waiter) {
 			return Poll::Pending;
 		}
-		let res = match self.idle.is_some() {
-			true => {
-				let mut idle = Idle::start(&mut self.idle, waiter);
-				let res = self.poll_read_frame_through(idle.waiter(), take);
-				idle.finish(&mut self.idle, (), res.is_pending());
-				res
-			}
-			false => {
-				let res = self.poll_read_frame_through(waiter, take);
-				let parked = res.is_pending();
+		let mut gate = self.idle.is_some().then(|| Idle::start(&mut self.idle, waiter));
+		let read = gate.as_mut().map_or(waiter, |gate| gate.waiter());
+		// Read once, carried across route changes when the group came from a front. One call
+		// site keeps the read inline: a second costs every frame drained a call frame.
+		let res = match self.recover().is_none() {
+			true => self.poll_read_frame_once(read, take),
+			false => self.poll_resumed(read, |this, waiter| this.poll_read_frame_once(waiter, take)),
+		};
+		let parked = res.is_pending();
+		match gate {
+			Some(gate) => gate.finish(&mut self.idle, (), parked),
+			None => {
 				if parked && self.parked {
 					// Parked twice in a row: the next read parks through a gate. Unarmed, since
 					// this read registered on the task's own waiter, not the gate's.
 					Idle::start(&mut self.idle, waiter).finish(&mut self.idle, (), false);
 				}
 				self.parked = parked;
-				res
 			}
-		};
-		self.ended_on(res)
-	}
-
-	/// Read the next frame, carried across route changes when the group came from a front.
-	fn poll_read_frame_through<T>(
-		&mut self,
-		waiter: &kio::Waiter,
-		take: impl Fn(&mut Prefetch) -> Option<T> + Copy,
-	) -> Poll<Result<Option<T>>> {
-		match self.recover.is_none() {
-			true => self.poll_read_frame_once(waiter, take),
-			false => self.poll_resumed(waiter, |this, waiter| this.poll_read_frame_once(waiter, take)),
 		}
+		self.ended_on(res)
 	}
 
 	/// Read the next frame with its relay metadata, for wire egress.
@@ -3921,6 +4046,142 @@ impl Consumer {
 		waiter: &kio::Waiter,
 		take: impl Fn(&mut Prefetch) -> Option<T> + Copy,
 	) -> Poll<Result<Option<T>>> {
+		self.poll_flown(waiter, |this, waiter| this.poll_read_frame_copy(waiter, take))
+	}
+
+	/// Read through `read` from the copy the cursor reads, carried onto a flight once that
+	/// copy shed the frame read next, and from a flight onto a copy further along once one
+	/// admits the reader (see [`track::board`]).
+	fn poll_flown<T>(
+		&mut self,
+		waiter: &kio::Waiter,
+		mut read: impl FnMut(&mut Self, &kio::Waiter) -> Poll<Result<Option<T>>>,
+	) -> Poll<Result<Option<T>>> {
+		let mut boarded = false;
+		loop {
+			if let Some(ride) = self.ride_mut() {
+				// Frames still to drop when the flight boarded, before the ones it starts below
+				// the reader.
+				let pending = ride.skip;
+				if let Some(boarding) = &mut ride.boarding {
+					let copy = match boarding.poll(waiter) {
+						Poll::Ready(Ok(copy)) => copy,
+						// Nothing serves the frame: the shed read stands.
+						Poll::Ready(Err(_)) => {
+							self.set_ride(None);
+							return Poll::Ready(Err(Error::Evicted));
+						}
+						// A read waiting on its flight is blocked like one at the edge, so the
+						// reader's budget still gives up on it.
+						Poll::Pending => return self.poll_expired_if_blocked(waiter, Poll::Pending),
+					};
+					let start = usize::try_from(boarding.frame()).unwrap_or(usize::MAX);
+					let start = start.min(self.cursor.index);
+					let skip = pending + (self.cursor.index - start);
+					self.adopt_copy(copy);
+					self.cursor.index = start;
+					self.set_ride(Some(Ride::aboard(true, skip)));
+				} else if ride.aboard
+					&& self.cursor.prefetch.is_drained()
+					&& let Some(track) = self.cursor.cache.track()
+					&& let Some((copy, flight)) = track::hand_over(&track, self)
+				{
+					let skip = self.ride_mut().map_or(0, |ride| ride.skip);
+					self.adopt_copy(copy);
+					self.set_ride((flight || skip > 0).then(|| Ride::aboard(flight, skip)));
+				}
+			}
+			let res = read(self, waiter);
+			if let Poll::Ready(Ok(Some(_))) = &res
+				&& let Some(ride) = self.ride_mut()
+				&& ride.skip > 0
+			{
+				ride.skip -= 1;
+				continue;
+			}
+			if !matches!(res, Poll::Ready(Err(_))) || !self.shed_next() {
+				return res;
+			}
+			// The copy just boarded shed the frame before the reader took it: pool debt
+			// outruns the reader, and boarding again now would fare no better.
+			if std::mem::replace(&mut boarded, true) {
+				return res;
+			}
+			let Some(track) = self.cursor.cache.track() else {
+				return res;
+			};
+			// A rider still skipping to its frame keeps what it has left to skip.
+			let skip = self.ride_mut().map_or(0, |ride| ride.skip);
+			match track::board(&track, self) {
+				None => return res,
+				Some(track::Board::Ride(copy, flight)) => {
+					self.adopt_copy(copy);
+					self.set_ride(Some(Ride::aboard(flight, skip)));
+				}
+				Some(track::Board::Wait(boarding)) => self.set_ride(Some(Ride {
+					boarding: Some(boarding),
+					aboard: true,
+					skip,
+				})),
+			}
+		}
+	}
+
+	fn recover(&self) -> Option<&super::resume::Recover> {
+		self.carry.as_ref()?.recover.as_ref()
+	}
+
+	fn ride_mut(&mut self) -> Option<&mut Ride> {
+		self.carry.as_mut()?.ride.as_mut()
+	}
+
+	fn set_ride(&mut self, ride: Option<Ride>) {
+		match (&mut self.carry, ride) {
+			(Some(carry), ride) => carry.ride = ride,
+			(None, Some(ride)) => {
+				self.carry = Some(Box::new(Carry {
+					recover: None,
+					ride: Some(ride),
+				}))
+			}
+			(None, None) => {}
+		}
+	}
+
+	/// Whether the copy read shed the frame read next, rather than failing or never holding
+	/// it. Ordinals stand for frames only on a dense group, so only one boards a flight. A
+	/// plain read of a compressed copy also loses a frame its inflated copy shed, which the
+	/// decoder, already past it, cannot inflate again.
+	fn shed_next(&self) -> bool {
+		let state = self.cursor.state.read();
+		let index = self.cursor.index;
+		if state.abort.is_some() || state.sparse() || index < state.offset {
+			return false;
+		}
+		index < state.held() || state.plain(self.cursor.raw).is_some_and(|plain| plain.shed_past(index))
+	}
+
+	/// Read the same frames from `copy` from here on, keeping this reader's place and cap.
+	fn adopt_copy(&mut self, copy: Consumer) {
+		let (index, end, raw) = (self.cursor.index, self.cursor.end, self.cursor.raw);
+		// Another read may move the cursor while a frame read is parked on the old copy.
+		Idle::disarm(&mut self.idle);
+		self.cursor = copy.cursor;
+		self.cursor.index = index;
+		self.cursor.end = end;
+		self.cursor.raw = raw;
+	}
+
+	/// One past the last frame the copy read committed.
+	pub(super) fn committed(&self) -> usize {
+		self.cursor.state.read().committed()
+	}
+
+	fn poll_read_frame_copy<T>(
+		&mut self,
+		waiter: &kio::Waiter,
+		take: impl Fn(&mut Prefetch) -> Option<T> + Copy,
+	) -> Poll<Result<Option<T>>> {
 		if self.expired {
 			return Poll::Ready(Err(Error::Old));
 		}
@@ -3931,18 +4192,24 @@ impl Consumer {
 	/// Read the next frame (timestamp and payload) all at once.
 	#[cfg(feature = "async")]
 	pub async fn read_frame(&mut self) -> Result<Option<frame::Frame>> {
-		// A prefetched frame is already buffered, so the drift budget (which only judges
-		// a read that would park) can never apply to it.
-		// Serve from the prefetched batch without building a future or allocating a waker.
-		if !self.expired
-			&& !self.cursor.capped()
-			&& let Some(frame) = self.cursor.prefetch.pop()
-		{
-			self.cursor.refresh_if_stale();
-			self.cursor.index += 1;
+		// Without building a future or allocating a waker.
+		if let Some(frame) = self.take_prefetched(Prefetch::pop) {
 			return Ok(Some(frame));
 		}
 		kio::wait(|waiter| self.poll_read_frame(waiter)).await
+	}
+
+	/// The next frame from the prefetched batch, through `take`. A read parks only with its
+	/// batch drained, so neither the drift budget, which judges only a read that would park,
+	/// nor the idle gate, nor a route applies: one adopted onto a new copy starts empty.
+	fn take_prefetched<T>(&mut self, take: impl Fn(&mut Prefetch) -> Option<T>) -> Option<T> {
+		if self.expired || self.cursor.capped() {
+			return None;
+		}
+		let frame = take(&mut self.cursor.prefetch)?;
+		self.cursor.refresh_if_stale();
+		self.cursor.index += 1;
+		Some(frame)
 	}
 
 	/// Fill `out` with every frame that is ready, up to its capacity, without blocking.
@@ -3950,7 +4217,8 @@ impl Consumer {
 	/// This is a short read: it returns as soon as anything is ready rather than
 	/// waiting for `out` to fill. A zero count means the group ended when the buffer
 	/// has non-zero capacity.
-	pub fn poll_read_frames<const N: usize>(
+	#[cfg(any(test, feature = "fuzz"))]
+	pub(crate) fn poll_read_frames<const N: usize>(
 		&mut self,
 		waiter: &kio::Waiter,
 		out: &mut frame::Buffer<N>,
@@ -3981,7 +4249,8 @@ impl Consumer {
 	/// Fill `out` with every frame that is ready, blocking until a frame arrives or
 	/// the group ends. Returns the current batch, empty only at the end of the group.
 	#[cfg(feature = "async")]
-	pub async fn read_frames<'a, const N: usize>(
+	#[cfg(any(test, feature = "fuzz"))]
+	pub(crate) async fn read_frames<'a, const N: usize>(
 		&mut self,
 		out: &'a mut frame::Buffer<N>,
 	) -> Result<&'a mut [frame::Frame]> {
@@ -3989,13 +4258,19 @@ impl Consumer {
 		Ok(out.filled_mut())
 	}
 
-	/// Poll until the group terminates, or this cursor reaches the end of its range, returning
-	/// its next frame index.
+	/// This cursor's next frame index once the group terminates, or this cursor reaches
+	/// the end of its range.
+	///
+	/// This answers for the cursor, not the group: a reader that drained every frame gets the
+	/// clean end even if the group was aborted afterwards to release its cache, while one that
+	/// stopped short gets that abort. A prior [`Self::skip_to`] contributes to the index even
+	/// though those frames were not read. Use [`Self::frame_count`] for the producer's total.
 	///
 	/// An error means the frames this cursor has yet to read are gone (evicted, cut, or
 	/// failed upstream) and no route will continue them.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<u64>> {
-		let res = match self.recover.is_none() {
+		let res = match self.recover().is_none() {
 			true => self.poll_finished_once(waiter),
 			false => self
 				.poll_resumed(waiter, |this, waiter| {
@@ -4027,18 +4302,6 @@ impl Consumer {
 			.poll(waiter, |state| state.poll_end(index, unread, raw))
 			.map(|res| res.map(|()| index as u64));
 		self.poll_expired_if_blocked(waiter, res)
-	}
-
-	/// Block until the group terminates, or this cursor reaches the end of its range, returning
-	/// its next frame index.
-	///
-	/// This answers for the cursor, not the group: a reader that drained every frame gets the
-	/// clean end even if the group was aborted afterwards to release its cache, while one that
-	/// stopped short gets that abort. A prior [`Self::skip_to`] contributes to the index even
-	/// though those frames were not read. Use [`Self::frame_count`] for the producer's total.
-	#[cfg(feature = "async")]
-	pub async fn finished(&mut self) -> Result<u64> {
-		kio::wait(|waiter| self.poll_finished(waiter)).await
 	}
 }
 
@@ -4247,7 +4510,7 @@ impl Cursor {
 			// resets the batch, so an empty one leaves `len == 0` and the terminal checks
 			// below resolve abort/fin/pending.
 			let job = prefetch.fill(state, index, budget, raw)?;
-			if prefetch.len > 0 {
+			if prefetch.len() > 0 {
 				// One stamp covers the whole batch: frames popped from the prefetch
 				// don't re-stamp until the next refill, which `CAP` bounds.
 				state.charge.refresh();
@@ -4290,7 +4553,7 @@ pub struct Fetch {
 
 	/// Maximum age behind the live edge this caller accepts.
 	///
-	/// `None` applies only the publisher's retention bound. An explicit value can
+	/// `None` applies only the publisher's max age. An explicit value can
 	/// tighten, but never relax, that bound.
 	pub max_delay: Option<std::time::Duration>,
 
@@ -5280,6 +5543,7 @@ mod test {
 
 	/// A frame count past the old 8192-frame cap is held whole while it fits the tail.
 	#[test]
+	#[cfg_attr(miri, ignore = "each write takes Miri ~30 ms, so 10,000 run past its SLOW mark")]
 	fn a_group_has_no_frame_cap() {
 		let mut producer = Info { sequence: 0 }.produce();
 		for _ in 0..10_000 {
@@ -5445,7 +5709,7 @@ mod test {
 	}
 
 	/// A finished group is still aborted once its frames are released to free memory (the
-	/// track's max age window, or the cache pool). A reader that already drained every frame
+	/// cache pool's expiry window or byte target). A reader that already drained every frame
 	/// is missing nothing, so it must see the clean end of group rather than the abort.
 	#[test]
 	#[cfg(feature = "async")]
@@ -6244,6 +6508,48 @@ mod test {
 		);
 	}
 
+	/// Every group starts cold even when a finished encoder is reused. Open groups
+	/// keep independent windows, and aborting one does not consume another's spare.
+	#[test]
+	#[cfg(feature = "async")]
+	fn reused_encoders_start_independent_group_streams() {
+		let pool = cache::Pool::unbounded();
+		let account = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let info = track::Info::default().with_compress(true);
+		let mut concurrent = Producer::new(0u64.into(), info.clone(), account.clone());
+		concurrent.write_frame(None, verbose(0)).unwrap();
+		for sequence in 1..5u64 {
+			let mut group = Producer::new(sequence.into(), info.clone(), account.clone());
+			let mut reference = flate::Encoder::new();
+			let frames = [verbose(0), Bytes::new(), verbose(sequence as usize)];
+			let slices: Vec<_> = frames.iter().map(|frame| reference.frame(frame)).collect();
+			for frame in &frames {
+				group.write_frame(None, frame.clone()).unwrap();
+			}
+			group.finish().unwrap();
+			group.finish().unwrap();
+			let mut raw = group.consume().compressed();
+			let mut decoder = flate::Decoder::new();
+			for (frame, expected) in frames.iter().zip(&slices) {
+				let Poll::Ready(Ok(Some(object))) = raw.poll_read_object(&kio::Waiter::noop()) else {
+					panic!("a stored slice is ready");
+				};
+				let slice = object.frame.payload.contiguous(0);
+				assert_eq!(slice, *expected, "reuse must emit a cold stream");
+				assert_eq!(decoder.frame(&slice, frame.len()).unwrap(), *frame);
+			}
+		}
+		concurrent.write_frame(None, verbose(1)).unwrap();
+		let mut reader = concurrent.consume();
+		assert_eq!(read_plain(&mut reader).unwrap().unwrap(), verbose(0));
+		assert_eq!(read_plain(&mut reader).unwrap().unwrap(), verbose(1));
+		concurrent.abort(Error::Cancel).unwrap();
+		drop(reader);
+		assert_eq!(pool.used(), flate::ENCODER_HEAP, "the spare survives a sibling's abort");
+		drop(account);
+		assert_eq!(pool.used(), 0);
+	}
+
 	/// A compressed group stores DEFLATE slices, hands plain readers the frames as written
 	/// from one shared inflated copy, and hands egress the slices with their sizes.
 	#[test]
@@ -6274,7 +6580,7 @@ mod test {
 		}
 		reference.finish().unwrap();
 		assert!(
-			stored + (plain as u64) / 2 < uncompressed.used(),
+			stored - flate::ENCODER_HEAP + (plain as u64) / 2 < uncompressed.used(),
 			"slices are stored: {stored} against {}",
 			uncompressed.used()
 		);
@@ -6501,8 +6807,8 @@ mod test {
 		assert_eq!(metered(), stored);
 	}
 
-	/// The codec state counts toward the pool while it lives: the encoder until the group
-	/// finishes, and a reader's decoder until the last frame inflates.
+	/// The codec state counts toward the pool while it lives: the encoder moves to its
+	/// track when the group finishes, and a decoder drops when the last frame inflates.
 	#[test]
 	#[cfg(feature = "async")]
 	fn codec_state_is_billed_while_held() {
@@ -6523,7 +6829,11 @@ mod test {
 		assert_eq!(group.handle.cache_size(), held, "an open group keeps both");
 
 		group.finish().unwrap();
-		assert_eq!(group.handle.cache_size(), stored + inflated, "finishing drops both");
+		assert_eq!(
+			group.handle.cache_size(),
+			stored + inflated,
+			"finishing releases both from the group"
+		);
 		assert_eq!(read_plain(&mut reader).unwrap().unwrap(), verbose(1));
 
 		// A finished group's decoder goes with the last frame it inflates.
@@ -6645,7 +6955,7 @@ mod test {
 	}
 
 	impl Expiry for Switch {
-		fn is_expired(&self, _: Option<std::time::Duration>, waiter: &kio::Waiter) -> bool {
+		fn is_expired(&self, _: Option<&crate::model::resume::Recover>, waiter: &kio::Waiter) -> bool {
 			waiter.register(&mut self.0.1.lock().unwrap());
 			self.0.0.load(Ordering::Relaxed)
 		}
@@ -6830,13 +7140,17 @@ mod test {
 		group.abort(Error::Evicted).unwrap();
 		assert_eq!(
 			pool.used(),
-			Flate::RELEASE_HEAP,
-			"the job still owns the new guard allocation"
+			Flate::RELEASE_HEAP + flate::ENCODER_HEAP,
+			"the job owns its guard, and the account owns its spare"
 		);
 		assert!(matches!(job.get(0), Err(Error::Evicted)));
 		drop(job);
-		assert_eq!(pool.used(), Flate::RELEASE_HEAP, "clones share one intrinsic charge");
+		assert_eq!(
+			pool.used(),
+			Flate::RELEASE_HEAP + flate::ENCODER_HEAP,
+			"clones share one intrinsic charge"
+		);
 		drop(retained);
-		assert_eq!(pool.used(), 0, "the final guard releases its own charge");
+		assert_eq!(pool.used(), 0, "the final guard also releases its account's spare");
 	}
 }

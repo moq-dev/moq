@@ -31,13 +31,11 @@ import kotlinx.coroutines.flow.collect
 // connect() wires up an internal origin and returns a live connection.
 Moq.connect("https://relay.example.com").use { moq ->
     moq.announced(AnnounceConfig(prefix = "demos/", filter = "*/camera")).updates().collect { event ->
-        // A restart is a new publisher run at the same path: request it again. A takeover
-        // continues what an earlier route served, like a start.
+        // The listing reports each path once while it stays present, even as its publisher
+        // restarts; `moq.follow(path)` hands out each new run, or null once it goes offline.
         val announce = when (event) {
-            is AnnounceEventStart -> event.announce
-            is AnnounceEventRestart -> event.announce
-            is AnnounceEventTakeover -> event.announce
-            else -> return@collect // Update or End
+            is AnnounceEventPresent -> event.announce
+            is AnnounceEventAbsent -> return@collect
         }
         // Prefix stays origin-relative; captures reports what * matched.
         println("got broadcast ${announce.prefix}")
@@ -62,7 +60,7 @@ The `dev.moq` package is intentionally thin: Kotlin has extension functions, so 
 - **Fetched media**: `dev.moq.media.GroupConsumer.fetch(...).frames()` streams the decoded frames of one retained group, then completes. `dev.moq.media.GroupConsumer(group, container)` decodes a raw group instead, such as one from `recvGroup()` for arrival-order reads.
 - **Timestamp conversions** (`Timestamp.kt`): media timestamps are exact `Timestamp(value, scale)` records. `Duration.toTimestamp()` builds one exactly at nanosecond scale, and `Timestamp.toDuration()` reads one back as a `kotlin.time.Duration`, rounded down to a whole nanosecond. Durations such as `stats.rtt` are already `java.time.Duration`.
 - **`logLevel(...)`**: configures native Rust tracing without importing the raw bindings package.
-- **Raw datagrams**: `TrackProducer.appendDatagram(Frame(payload, timestamp))` sends one best-effort frame and returns its sequence, and `insertDatagram(sequence, frame)` takes the caller's own; `TrackConsumer.recvDatagram()` and `datagrams()` receive them. Payloads are capped at 1200 bytes, require a datagram-capable transport plus lite-05 or newer moq-lite, and have no stream fallback.
+- **Datagram tracks**: create with `BroadcastProducer.createDatagrams(name, info)` and subscribe with `BroadcastConsumer.datagrams(name)`. The separate producer uses `append(timestamp, payload)` / `insert(Datagram)`, and its consumer uses `recv()` / the `datagrams()` flow. Aggregate demand is `priority()` / `priorityChanged(last)`; on-demand requests come from `BroadcastRequests.datagrams()`. Keep payloads below the path MTU; delivery needs a datagram-capable transport and lite-05 or newer, with no stream fallback.
 - **`MoqException.isShutdown`** (`Errors.kt`): true for the graceful `Cancelled`/`Closed` cases.
 
 ## Versioning

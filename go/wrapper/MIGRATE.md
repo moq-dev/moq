@@ -4,13 +4,64 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Following.Available` reports the path going offline
+
+After the first call, `Available` returns `(nil, nil)` once the followed path goes offline, or, for a `Follow` pinned to an instance, once another instance takes it over.
+The next call returns whatever serves the path next. The first call is never nil.
+Check for nil before using the broadcast, and drop what was read from the previous instance either way.
+
+### Announcements are a listing
+
+`AnnounceConsumer` yields only `AnnounceEventPresent`, when a route now covers a path that was absent, and `AnnounceEventAbsent`, when none does any more.
+Rename `AnnounceEventStart` to `AnnounceEventPresent` and `AnnounceEventEnd` to `AnnounceEventAbsent`.
+`AnnounceEventUpdate`, `AnnounceEventRestart`, and `AnnounceEventTakeover` with its `Predecessor` are gone: a route changing cost or hops, a restarted publisher, and a takeover all keep the path present and report nothing.
+Instead of requesting the path again on a restart, hold `Follow` and read each new publisher instance from `Available`, dropping what was read from the previous one.
+
+```go
+following, err := client.Follow(path, nil)
+if err != nil {
+	return err
+}
+defer following.Cancel()
+for {
+	broadcast, err := following.Available(ctx)
+	if err != nil {
+		return err
+	}
+	if broadcast == nil {
+		continue // offline until the next instance
+	}
+	play(broadcast)
+}
+```
+
+### Catalog renditions carry their warmup ([#7864](https://github.com/moq-dev/moq/pull/7864))
+
+`ffi.MoqVideo` and `ffi.MoqAudio` (`media.Video` and `media.Audio`) gain `Warmup`, the catalog's decoder warmup, nil when absent. `media.NewTrackConsumer` and the audio and video `Subscribe` read it from the rendition and start that much earlier; a negative one is refused with an error. Only unkeyed struct literals change.
+
+### Separate datagram tracks
+
+Replace stream-track `AppendDatagram` / `InsertDatagram` / `RecvDatagram` with `BroadcastProducer.CreateDatagrams(name, info)` and `BroadcastConsumer.Datagrams(name)`. `DatagramProducer.Append(timestamp, payload)` assigns a sequence and `Insert(Datagram)` preserves one. `DatagramConsumer.Recv(ctx)` and `All(ctx)` read its independent cursor. `DatagramInfo` carries priority and optional timescale. Watch `Priority()` / `PriorityChanged(ctx, last)` and serve on-demand tracks through `BroadcastRequests.Datagrams()` / `DatagramRequests.Requested(ctx)`.
+
+### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+`TrackInfo.MaxAge` is a `time.Duration` instead of a `*time.Duration`, like `Delay.Max`: the zero value, and a nil `*TrackInfo`, now advertise a zero max age, serving only the live edge, instead of no publisher limit. Assign the duration directly, and set the new `MaxAgeUnlimited`, which ignores `MaxAge`, where you relied on nil meaning no limit. A received track's `Info()` sets it when its publisher advertised no limit.
+
+### Snapshot consumers subscribe themselves at a zero delay ([#7736](https://github.com/moq-dev/moq/pull/7736))
+
+`json.NewSnapshotConsumer(broadcast, name, options)` takes the `*BroadcastConsumer`, the track name, and `SnapshotConsumerOptions` instead of a `*TrackConsumer`, and subscribes to the track itself at a zero `Delay.Max` and the options' `Priority`. Drop the `SubscribeTrack` call; a refused subscription now fails the first read. `Next` skips every group a newer one supersedes, and `Latest` no longer waits for a lower group the track still owes. Publish a stream track when every state must survive, or a window track for a bounded recent history.
+
+### Viewer targets are bounded ([#7090](https://github.com/moq-dev/moq/pull/7090))
+
+Viewer ceilings and PROBE target overrides are refused with the new `ErrOutOfRange` once they would sum above 2^53 - 1 bps, the most a PROBE target carries; nothing changes on a refusal. `Viewers.Watch` returns `(*Viewer, error)`, and `Viewers.SetTarget` and `Viewer.Update` return an `error`. Handle the new variant wherever you match the error exhaustively. Regenerate bindings and rebuild the matching native library together.
+
 ### `media.VideoInit.Lower` is a `media.Producer` ([#7699](https://github.com/moq-dev/moq/pull/7699))
 
 `Lower` is the `media.Producer` interface instead of `*media.TrackProducer`, so a `*media.TrackStreamProducer` fits too. Assigning a `*media.TrackProducer`, nil included, compiles unchanged; code that reads `Lower` back type-asserts it.
 
 ### Media setup refusals are typed
 
-Audio and video subscribe setup now reports `ErrUnsupportedConfig` when the decoder refuses a codec, layout, or description. Handle this variant to try another rendition instead of inspecting an audio/video error message or `Unsupported`. Decoder faults, such as a backend that fails to open, and later peer and decode failures keep their existing errors. Regenerate bindings and rebuild the matching native library together.
+Audio and video subscribe setup now reports `ErrUnsupportedConfig` when the decoder refuses a codec, layout, or description, or when every video decoder for the codec reports that this device cannot decode the stream. Handle this variant to try another rendition instead of inspecting an audio/video error message or `Unsupported`. Decoder faults, such as a missing driver or no device, and later peer and decode failures keep their existing errors. Regenerate bindings and rebuild the matching native library together.
 
 ### JSON writes take a broadcast-clock timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
 
@@ -179,7 +230,7 @@ Application calls are unchanged.
 ### JSON consumers return `*json.Timed` (#5677)
 
 `SnapshotConsumer.Next`, `StreamConsumer.Next`, and `All` return `*Timed{Value, Timestamp}` instead of the raw message; `Timestamp` is a `*time.Duration`, nil when untimed.
-A snapshot consumer's `Next` now yields every state in order; call `Latest(ctx)` for the newest.
+A snapshot consumer's `Next` now yields each state in order, skipping every group a newer one supersedes (see the zero-delay entry above); call `Latest(ctx)` for the newest.
 Timestamps are rounded down to a whole microsecond.
 
 ### Ranges filter reads (#5929)

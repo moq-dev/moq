@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use hang::moq_net::{self, Instance, Timestamp, announce, origin, track};
+use hang::moq_net::{self, Instance, Timestamp, origin, track};
 use moq_mux::catalog::Stream;
 
 const LITE_07: &str = "moq-lite-07-wip";
@@ -22,7 +22,7 @@ impl Drop for Relay {
 }
 
 async fn relay() -> Relay {
-	let _ = moq_tokio::crypto::install_default();
+	moq_tokio::crypto::install_default().unwrap();
 	let mut config = moq_relay::Config::default();
 	config.drain_timeout = Some(Duration::ZERO.into());
 	config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
@@ -74,10 +74,13 @@ fn publish(origin: &origin::Producer, instance: &Instance, tag: &str) -> Publish
 	let route = origin::Route::default().with_instance(instance.clone(), 0);
 	let broadcast = origin.publish("live/catalog.hang", route.clone()).unwrap();
 	let sibling = origin.publish("live/media", route).unwrap();
+	// Media's max age, so its superseded groups stay fetchable.
 	let media = sibling
 		.create_track(
 			"audio",
-			track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+			track::Info::default()
+				.with_timescale(moq_net::Timescale::MILLI)
+				.with_max_age(hang::container::MAX_AGE),
 		)
 		.unwrap();
 	write(&media, &format!("{tag}:0"));
@@ -99,15 +102,15 @@ fn publish(origin: &origin::Producer, instance: &Instance, tag: &str) -> Publish
 }
 
 /// Ignore same-instance metadata updates, but keep the actual replacement representation.
-async fn changed(follow: &mut announce::Consumer) -> bool {
+async fn changed(follow: &mut origin::Routes) -> bool {
 	loop {
 		match follow.next().await.unwrap() {
-			announce::Event::Restart(_) => return true,
-			announce::Event::End(_) => {
-				assert!(matches!(follow.next().await, Some(announce::Event::Start(_))));
+			origin::RouteEvent::Restart(_) => return true,
+			origin::RouteEvent::End(_) => {
+				assert!(matches!(follow.next().await, Some(origin::RouteEvent::Start(_))));
 				return false;
 			}
-			announce::Event::Update(_) => {}
+			origin::RouteEvent::Update(_) => {}
 			other => panic!("expected replacement, got {other:?}"),
 		}
 	}
@@ -129,7 +132,7 @@ async fn replacement(version: &str) {
 	let viewer = viewer_origin.consume();
 	let watch = |path| {
 		let path = moq_net::Patterns::from(moq_net::Pattern::literal(path).unwrap());
-		viewer.scope("", &path).unwrap().announced()
+		viewer.scope("", &path).unwrap().routes()
 	};
 	let mut catalog_follow = watch("live/catalog.hang");
 	let mut media_follow = watch("live/media");
@@ -140,8 +143,11 @@ async fn replacement(version: &str) {
 		.established()
 		.await
 		.unwrap();
-	assert!(matches!(catalog_follow.next().await, Some(announce::Event::Start(_))));
-	assert!(matches!(media_follow.next().await, Some(announce::Event::Start(_))));
+	assert!(matches!(
+		catalog_follow.next().await,
+		Some(origin::RouteEvent::Start(_))
+	));
+	assert!(matches!(media_follow.next().await, Some(origin::RouteEvent::Start(_))));
 
 	let held = viewer.request("live/catalog.hang", None).await.unwrap();
 	let old = moq_mux::Source::new(viewer.clone(), held);

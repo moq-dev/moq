@@ -70,8 +70,8 @@ pub struct Client<S = TcpStream> {
 	/// How long [`publish`](Self::publish)'s FLV muxer waits for a stalled group
 	/// before skipping.
 	max_delay: Duration,
-	/// Retention declared on the media tracks [`pull`](Self::pull) publishes, or `None`
-	/// for hang's own default.
+	/// Max age declared on the media tracks [`pull`](Self::pull) publishes, or `None` for
+	/// no publisher limit.
 	max_age: Option<Duration>,
 	/// Connection allocator each track [`pull`](Self::pull) ingests claims its peak-hold bitrate on.
 	bandwidth: moq_net::bandwidth::Allocator,
@@ -174,7 +174,7 @@ impl<S: Stream> Client<S> {
 			work,
 			app: app.to_string(),
 			max_delay: crate::DEFAULT_MAX_DELAY,
-			max_age: None,
+			max_age: Some(hang::container::MAX_AGE),
 			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
 			linger: moq_mux::Linger::DEFAULT,
 			metadata: Default::default(),
@@ -191,14 +191,14 @@ impl<S: Stream> Client<S> {
 		self
 	}
 
-	/// Set how long relays keep a non-latest group of the media tracks
-	/// [`pull`](Self::pull) publishes fetchable. `None` keeps hang's own default.
+	/// Set how long a superseded group of the media tracks [`pull`](Self::pull) publishes
+	/// stays fresh, or `None` for no publisher limit. Defaults to
+	/// [`MAX_AGE`](hang::container::MAX_AGE).
 	///
-	/// A retention budget, not a delivery one: it never makes a subscriber play further
+	/// A freshness bound, not a delivery one: it never makes a subscriber play further
 	/// behind live, it caps how far back a FETCH can still reach. The default suits a
 	/// segmented egress (HLS/DASH) reading the broadcast downstream, which may only
-	/// advertise segments that are still fetchable. Lower it when nothing reads history
-	/// and the memory matters.
+	/// advertise segments that are still fetchable. Lower it when nothing reads history.
 	///
 	/// The pull (ingest) direction only; [`publish`](Self::publish) reads a broadcast
 	/// someone else declared, and takes [`with_max_delay`](Self::with_max_delay) instead.
@@ -548,7 +548,7 @@ fn is_status_failure(code: &str) -> bool {
 /// handshake read can also carry the first RTMP chunks, so those `remaining_bytes`
 /// must be fed to the session or chunk parsing desyncs.
 async fn client_handshake<S: Stream>(stream: &mut S) -> anyhow::Result<Vec<u8>> {
-	let mut handshake = Handshake::new(PeerType::Client);
+	let mut handshake = Handshake::new(PeerType::Client)?;
 	let p0_p1 = handshake
 		.generate_outbound_p0_and_p1()
 		.map_err(|e| anyhow::anyhow!("rtmp handshake p0/p1: {e:?}"))?;
@@ -822,7 +822,13 @@ mod tests {
 			});
 
 			let consumer = downstream.consume();
-			let copy = consumer.follow("live/cam0", None).unwrap().available().await.unwrap();
+			let copy = consumer
+				.follow("live/cam0", None)
+				.unwrap()
+				.available()
+				.await
+				.unwrap()
+				.unwrap();
 			// The catalog goes out once the keyframe landed, so the copy holds media to linger with.
 			let mut listed = copy.track("catalog.json").unwrap().subscribe(None).await.unwrap();
 			assert!(listed.recv_group().await.unwrap().is_some());
@@ -938,7 +944,13 @@ mod tests {
 
 		// Read what reaches the remote back out as FLV.
 		let consumer = downstream.consume();
-		let copy = consumer.follow("live/cam0", None).unwrap().available().await.unwrap();
+		let copy = consumer
+			.follow("live/cam0", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
 		let source = moq_mux::Source::new(consumer, copy);
 		let catalog = source
 			.catalog::<()>(moq_mux::catalog::CatalogFormat::default())
@@ -955,12 +967,13 @@ mod tests {
 		until(OLD_IDR).await;
 
 		let instance = moq_net::Instance::random();
-		let mut instances = moq_mux::follow::Instances::new(&upstream.consume(), "live/cam0", Some(&instance)).unwrap();
+		let mut instances = upstream.consume().follow("live/cam0", instance.clone()).unwrap();
 		let (_new, _new_catalog) = publish(&upstream, &instance, NEW_IDR);
-		kio::clock::timeout(Duration::from_secs(5), instances.next())
+		kio::clock::timeout(Duration::from_secs(5), instances.available())
 			.await
 			.expect("the new publisher takes over")
-			.unwrap();
+			.unwrap()
+			.expect("the new publisher serves");
 
 		let mut delta = vec![0x27, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, OLD_DELTA.len() as u8];
 		delta.extend_from_slice(OLD_DELTA);
@@ -1037,6 +1050,7 @@ mod tests {
 			.unwrap()
 			.available()
 			.await
+			.unwrap()
 			.unwrap();
 
 		// It should carry a hang catalog track (proof the FLV demux produced real

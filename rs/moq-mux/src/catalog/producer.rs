@@ -354,10 +354,9 @@ pub struct Producer<E: CatalogExt = ()> {
 
 	/// Every media track's join interval, declared once as `media.join.interval`.
 	intervals: super::interval::Intervals,
-	/// Retention override for the media tracks minted under this catalog, or `None` to keep
-	/// hang's default. Fixed at construction, so every clone and every
-	/// [`Reserved`](super::Reserved) mints tracks under one policy. See
-	/// [`Config::with_max_age`].
+	/// The max age of the media tracks minted under this catalog, or `None` for no publisher
+	/// limit. Fixed at construction, so every clone and every [`Reserved`](super::Reserved)
+	/// mints tracks under one policy. See [`Config::with_max_age`].
 	max_age: Option<std::time::Duration>,
 	/// Connection allocator passthrough tracks claim their peak-hold bitrate on.
 	/// See [`Config::with_bandwidth`].
@@ -403,7 +402,7 @@ impl Default for Config<()> {
 	fn default() -> Self {
 		Self {
 			catalog: Catalog::default(),
-			max_age: None,
+			max_age: Some(hang::container::MAX_AGE),
 			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
 			clock: None,
 		}
@@ -439,17 +438,18 @@ impl<E: CatalogExt> Config<E> {
 		self
 	}
 
-	/// Override how long the media tracks minted under this catalog keep a non-latest group
-	/// fetchable, replacing hang's default. `None` keeps it.
+	/// Set how long a superseded group of the media tracks minted under this catalog stays
+	/// fresh, or `None` for no publisher limit. Defaults to
+	/// [`MAX_AGE`](hang::container::MAX_AGE).
 	///
 	/// That default suits a segmented egress (HLS/DASH), which may only advertise segments a
-	/// FETCH can still reach. Lower it when nothing reads history and the memory matters;
-	/// raise it for a deeper seek window. It is a RETENTION budget, not a delivery one, so it
-	/// never makes a subscriber play further behind live -- it caps what one may ask to wait
-	/// for, and a subscriber's own budget still defaults to zero.
+	/// FETCH can still reach. Lower it when nothing reads history; raise it for a deeper seek
+	/// window. It is a freshness bound, not a delivery one, so it never makes a subscriber play
+	/// further behind live -- it caps what one may ask to wait for, and a subscriber's own
+	/// budget still defaults to zero.
 	///
-	/// Applies to the media tracks the catalog mints. The catalog tracks keep moq-net's default:
-	/// they are read at the live edge, which is retained unconditionally.
+	/// Applies to the media tracks the catalog mints. The catalog tracks keep moq-net's zero
+	/// default: they are read at the live edge, which never goes stale.
 	pub fn with_max_age(mut self, max_age: impl Into<Option<std::time::Duration>>) -> Self {
 		self.max_age = max_age.into();
 		self
@@ -528,18 +528,14 @@ impl<E: CatalogExt> Producer<E> {
 		})
 	}
 
-	/// Track properties for a media track under this catalog: hang's media defaults, plus any
-	/// [`Config::with_max_age`] override.
+	/// Track properties for a media track under this catalog: hang's media defaults, with the
+	/// [`Config::with_max_age`] policy.
 	///
 	/// `priority` should come from [`PRIORITY`](hang::catalog::PRIORITY) for the kind of media
 	/// the track carries. Chain [`with_timescale`](moq_net::track::Info::with_timescale) for a
 	/// container that carries the source's own scale (CMAF and Matroska both do).
 	pub fn track_info(&self, priority: i8) -> moq_net::track::Info {
-		let info = hang::container::track_info(priority);
-		match self.max_age {
-			Some(max_age) => info.with_max_age(max_age),
-			None => info,
-		}
+		hang::container::track_info(priority).with_max_age(self.max_age)
 	}
 
 	/// Resolve a timestamp, synthesizing one from the broadcast's shared
@@ -1005,7 +1001,7 @@ impl<E: CatalogExt> Producer<E> {
 	/// configures the encoder and is not written into the catalog entry. With
 	/// [`deltas`](crate::json::Options::deltas), create `track` with a
 	/// [`refresh`](moq_net::track::Info::refresh) ratio and drive
-	/// [`Snapshot::refresh`](crate::json::Snapshot::refresh), so joiners get a fresh group.
+	/// [`Snapshot::poll_refresh`](crate::json::Snapshot::poll_refresh), so joiners get a fresh group.
 	///
 	/// Errors if the entry's section already carries that name, for example an entry seeded
 	/// through [`Config::with_catalog`] or one pointing at a sibling broadcast, if the entry
@@ -1047,7 +1043,7 @@ impl<E: CatalogExt> Producer<E> {
 
 	/// Create a consumer for this catalog, receiving updates as they're published.
 	pub fn consume(&self) -> Result<Consumer<E>, moq_net::Error> {
-		Ok(Consumer::new(self.outputs.hang.consume()))
+		Ok(Consumer::new(self.outputs.hang_track.consume()))
 	}
 
 	/// Abort every catalog track with `err`, preventing further edits.
@@ -1713,16 +1709,21 @@ mod test {
 	}
 
 	#[test]
-	fn media_tracks_inherit_the_catalogs_declared_retention() {
+	fn media_tracks_take_the_catalogs_max_age() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 
-		// Unset, a catalog mints hang's media defaults, sized so a segmented egress can serve a
-		// full playlist window. Raw tracks impose no publisher age limit.
+		// Unset, a catalog mints hang's media max age, sized so a segmented egress can serve a
+		// full playlist window.
 		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
 		assert_eq!(
 			catalog.track_info(hang::catalog::PRIORITY.video).max_age,
-			hang::container::track_info(hang::catalog::PRIORITY.video).max_age
+			Some(hang::container::MAX_AGE)
 		);
+
+		// `None` is an explicit unlimited, not a request for the default.
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = Producer::new(&mut broadcast, Config::default().with_max_age(None)).unwrap();
+		assert_eq!(catalog.track_info(hang::catalog::PRIORITY.video).max_age, None);
 
 		// An override reaches every media track this catalog mints, and does NOT disturb the
 		// timescale hang pins (or survive a retimescale for a source-scale container).
@@ -1755,7 +1756,7 @@ mod test {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
 
-		let track = catalog.outputs.hang.consume();
+		let track = catalog.outputs.hang_track.consume();
 		assert!(catalog.outputs.hang_track.info().compress, "catalog.json is compressed");
 		assert!(!catalog.outputs.msf_track.info().compress, "the MSF catalog is not");
 		let mut consumer = Consumer::new(track);
@@ -1781,7 +1782,7 @@ mod test {
 	fn mutate_composes_independent_owners() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
-		let mut plain = Consumer::new(catalog.outputs.hang.consume());
+		let mut plain = Consumer::new(catalog.outputs.hang_track.consume());
 
 		catalog
 			.mutate(|c| {
@@ -2634,7 +2635,7 @@ mod test {
 	fn reservation_gates_until_all_renditions_resolve() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
-		let mut consumer: Consumer = Consumer::new(catalog.outputs.hang.consume());
+		let mut consumer: Consumer = Consumer::new(catalog.outputs.hang_track.consume());
 		let waiter = kio::Waiter::noop();
 
 		let reserved = catalog.reserve();
@@ -2667,7 +2668,7 @@ mod test {
 	fn live_rendition_owns_its_name_without_gating_the_catalog() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
-		let mut consumer: Consumer = Consumer::new(catalog.outputs.hang.consume());
+		let mut consumer: Consumer = Consumer::new(catalog.outputs.hang_track.consume());
 		let waiter = kio::Waiter::noop();
 
 		let _unresolved = catalog.rendition::<VideoConfig>("video0").unwrap();
@@ -2691,7 +2692,7 @@ mod test {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let config = Config::default().with_catalog(Catalog::<Extra>::default());
 		let mut catalog = Producer::new(&mut broadcast, config).unwrap();
-		let mut consumer: Consumer<Extra> = Consumer::new(catalog.outputs.hang.consume());
+		let mut consumer: Consumer<Extra> = Consumer::new(catalog.outputs.hang_track.consume());
 		let waiter = kio::Waiter::noop();
 		let reserved = catalog.reserve();
 
@@ -2729,7 +2730,7 @@ mod test {
 	fn m2ts_counts_as_a_servable_track() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
-		let mut consumer: Consumer = Consumer::new(catalog.outputs.hang.consume());
+		let mut consumer: Consumer = Consumer::new(catalog.outputs.hang_track.consume());
 		let waiter = kio::Waiter::noop();
 
 		let reserved = catalog.reserve();
@@ -2751,7 +2752,7 @@ mod test {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let config = Config::default().with_catalog(Catalog::<Extra>::default());
 		let mut catalog = Producer::new(&mut broadcast, config).unwrap();
-		let mut consumer: Consumer<Extra> = Consumer::new(catalog.outputs.hang.consume());
+		let mut consumer: Consumer<Extra> = Consumer::new(catalog.outputs.hang_track.consume());
 		let waiter = kio::Waiter::noop();
 
 		let reserved = catalog.reserve();
@@ -2790,7 +2791,7 @@ mod test {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let config = Config::default().with_catalog(Catalog::<Extra>::default());
 		let mut catalog = Producer::new(&mut broadcast, config).unwrap();
-		let mut consumer: Consumer<Extra> = Consumer::new(catalog.outputs.hang.consume());
+		let mut consumer: Consumer<Extra> = Consumer::new(catalog.outputs.hang_track.consume());
 		let waiter = kio::Waiter::noop();
 
 		let net = broadcast
@@ -2829,7 +2830,7 @@ mod test {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let config = Config::default().with_catalog(Catalog::<Extra>::default());
 		let catalog = Producer::new(&mut broadcast, config).unwrap();
-		let mut consumer: Consumer<Extra> = Consumer::new(catalog.outputs.hang.consume());
+		let mut consumer: Consumer<Extra> = Consumer::new(catalog.outputs.hang_track.consume());
 		let waiter = kio::Waiter::noop();
 
 		let net = broadcast
@@ -2867,7 +2868,7 @@ mod test {
 	fn reservation_gate_opens_when_unresolved_reservation_is_dropped() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
-		let mut consumer: Consumer = Consumer::new(catalog.outputs.hang.consume());
+		let mut consumer: Consumer = Consumer::new(catalog.outputs.hang_track.consume());
 		let waiter = kio::Waiter::noop();
 
 		let reserved = catalog.reserve();
@@ -2895,7 +2896,7 @@ mod test {
 	fn staged_change_waits_for_a_held_reservation() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
-		let mut consumer: Consumer = Consumer::new(catalog.outputs.hang.consume());
+		let mut consumer: Consumer = Consumer::new(catalog.outputs.hang_track.consume());
 		let waiter = kio::Waiter::noop();
 
 		// A deferred importer grabs a reservation up front and holds it until it can resolve.
@@ -3241,7 +3242,7 @@ mod test {
 
 	/// The catalog a viewer joining now receives.
 	fn wire(catalog: &Producer) -> Catalog<()> {
-		let mut consumer: Consumer = Consumer::new(catalog.outputs.hang.consume());
+		let mut consumer: Consumer = Consumer::new(catalog.outputs.hang_track.consume());
 		match consumer.poll_next(&kio::Waiter::noop()) {
 			Poll::Ready(Ok(Some(catalog))) => catalog,
 			_ => panic!("a published catalog"),

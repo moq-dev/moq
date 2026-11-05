@@ -945,6 +945,8 @@ pub struct Connection {
 	bandwidth: moq_net::bandwidth::Allocator,
 	/// Persistent recv-bitrate estimate, fed by the loop from each live session.
 	recv_bandwidth: moq_net::bandwidth::Weak,
+	/// Divides `recv_bandwidth`, and every session the loop dials sends its viewers' target.
+	viewers: moq_net::bandwidth::Viewers,
 	/// The last status returned by [`status`](Self::status), for change detection.
 	/// Per-clone: a clone starts from its parent's cursor and diverges from there.
 	last_reported: Option<Status>,
@@ -989,7 +991,8 @@ impl Connection {
 		let send_bandwidth = send_bw.consume();
 		let recv_bandwidth = recv_bw.weak();
 		let bandwidth = moq_net::bandwidth::Allocator::new(send_bandwidth.clone());
-		let client = client.with_allocator(bandwidth.clone());
+		let viewers = moq_net::bandwidth::Viewers::new(recv_bandwidth.clone());
+		let client = client.with_allocator(bandwidth.clone()).with_viewers(viewers.clone());
 
 		let closed: CloseGuard = Default::default();
 		let task_closed = closed.clone();
@@ -1037,6 +1040,7 @@ impl Connection {
 			send_bandwidth,
 			recv_bandwidth,
 			bandwidth,
+			viewers,
 			last_reported: None,
 		}
 	}
@@ -1114,6 +1118,10 @@ impl Connection {
 	}
 
 	async fn run(shared: &Shared, client: Client, addrs: Addrs) -> crate::Result<()> {
+		#[cfg(feature = "quic")]
+		let mut client = client;
+		#[cfg(feature = "quic")]
+		let mut failed_dials = 0;
 		let backoff = client.backoff.clone();
 		let goaway = client.goaway.resolve();
 		let pacing = Pacing::new(&backoff);
@@ -1140,8 +1148,24 @@ impl Connection {
 
 			// What the last dial presented, so a refusal is judged against it.
 			let mut presented = None;
+			// Retry one transient failure on the same socket. Two failed walks are enough
+			// to try another flow. Only a retry window that allows a third walk gets here:
+			// a black-holed handshake outlasts the default window after the first walk.
+			#[cfg(feature = "quic")]
+			if failed_dials >= 2 {
+				match client.fresh_port() {
+					Ok(()) => failed_dials = 0,
+					// The old flow may have recovered, so dial it anyway. The count stays
+					// at the threshold, so the next walk retries the allocation.
+					Err(err) => tracing::warn!(%err, "no fresh UDP port; redialing from the old one"),
+				}
+			}
 			match Self::dial_any(shared, &client, &addrs, &mut draining, &mut presented).await {
 				Ok((addr, dialed)) => {
+					#[cfg(feature = "quic")]
+					{
+						failed_dials = 0;
+					}
 					let url = addr.url().clone();
 					tracing::info!(peer = %Endpoint(&url), transport = %dialed.transport, "connected");
 					shared.connected(&dialed.session, dialed.transport);
@@ -1348,6 +1372,18 @@ impl Connection {
 					{
 						return Err(err);
 					}
+					#[cfg(feature = "quic")]
+					if addrs
+						.as_slice()
+						.iter()
+						.any(|addr| matches!(addr.url().scheme(), "http" | "https" | "moqt" | "moql"))
+					{
+						// Explicit shutdown cannot recover by retrying or opening another socket.
+						if client.quic_closed() {
+							return Err(err);
+						}
+						failed_dials += 1;
+					}
 					shared.retrying(&err);
 					retry.last_error = Some(err);
 				}
@@ -1468,10 +1504,14 @@ impl Connection {
 		Ok(self)
 	}
 
-	/// Poll for the next connection status change since this handle last reported one.
+	/// The connection status, once it changes from what this handle last reported, or the error
+	/// once the loop has stopped (the give-up error, or a generic one when the handle is dropped).
 	///
-	/// `Ready(Ok(status))` on a change, `Ready(Err)` once the loop has stopped (the give-up error,
-	/// or a generic one when the handle is dropped), `Pending` otherwise.
+	/// The loop moves between `Connected`, `Disconnected`, and `Migrating` (a GOAWAY handover, where
+	/// the old session is still serving), so successive calls report changes rather than a fixed
+	/// alternation; a status that flips and flips back before the caller polls is reported once.
+	/// This tracks the *current* state, not every edge.
+	#[kio::wrapper]
 	pub fn poll_status(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Status>> {
 		let last = self.last_reported;
 		let status = match ready!(self.state.poll(waiter, |state| match state.status {
@@ -1484,17 +1524,6 @@ impl Connection {
 
 		self.last_reported = Some(status);
 		Poll::Ready(Ok(status))
-	}
-
-	/// Wait until the connection status changes from what this handle last reported.
-	///
-	/// Returns the current [`Status`]. The loop moves between `Connected`,
-	/// `Disconnected`, and `Migrating` (a GOAWAY handover, where the old session is
-	/// still serving), so successive calls report changes rather than a fixed
-	/// alternation; a status that flips and flips back before the caller polls is
-	/// reported once. This tracks the *current* state, not every edge.
-	pub async fn status(&mut self) -> crate::Result<Status> {
-		kio::wait(|waiter| self.poll_status(waiter)).await
 	}
 
 	/// Whether a session is currently connected.
@@ -1571,22 +1600,25 @@ impl Connection {
 		self.recv_bandwidth.consume()
 	}
 
-	/// Poll whether the connection loop has stopped.
+	/// Divides [`recv_bandwidth`](Self::recv_bandwidth) among the broadcasts watched over
+	/// this connection, mirroring [`moq_net::Session::viewers`].
 	///
-	/// `Ready(Err)` if it permanently gave up (reconnect timeout exceeded, an auth
-	/// rejection, or the session ending in one-shot mode), `Ready(Ok(()))` if stopped
-	/// by dropping the handle, `Pending` while it's still running.
+	/// Persistent like the estimate: every session the loop dials sends these viewers'
+	/// target, so they survive reconnects. Viewers report `None` while disconnected.
+	pub fn viewers(&self) -> moq_net::bandwidth::Viewers {
+		self.viewers.clone()
+	}
+
+	/// Resolves once the connection loop stops: an error if it permanently gave up (reconnect
+	/// timeout exceeded, an auth rejection, or the session ending in one-shot mode), `Ok(())` if
+	/// stopped by dropping the handle.
+	#[kio::wrapper]
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<crate::Result<()>> {
 		ready!(self.state.poll_closed(waiter));
 		Poll::Ready(match &self.state.read().error {
 			Some(err) => Err(err.clone()),
 			None => Ok(()),
 		})
-	}
-
-	/// Wait until the connection loop stops.
-	pub async fn closed(&self) -> crate::Result<()> {
-		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
 
 	/// The auth handle every session of this connection is built on: its tokens are
@@ -2591,7 +2623,7 @@ mod tests {
 	/// A client that trusts the self-signed [`live`] listener.
 	#[cfg(feature = "tcp")]
 	fn client() -> Client {
-		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		crate::crypto::install_default().unwrap();
 
 		let mut config = crate::connect::Config::default();
 		config.tls.insecure = Some(true);
@@ -3385,6 +3417,7 @@ mod tests {
 		let cam = kio::clock::timeout(WAIT, consumer.follow("cam", None).unwrap().available())
 			.await
 			.unwrap()
+			.unwrap()
 			.unwrap();
 		let mut sub = cam.track("video").unwrap().subscribe(None).await.unwrap();
 
@@ -3468,6 +3501,7 @@ mod tests {
 		kio::clock::timeout(WAIT, subscriber.consume().follow("late", None).unwrap().available())
 			.await
 			.expect("the drained session stopped serving")
+			.unwrap()
 			.unwrap();
 		assert!(
 			connection
@@ -3706,7 +3740,7 @@ mod tests {
 			.await
 			.expect("the broadcast never reached the server")
 			.expect("the server's origin closed");
-		assert!(matches!(arrived, moq_net::announce::Event::Start(update) if update.prefix.as_str() == "room"));
+		assert!(matches!(arrived, moq_net::announce::Event::Present(update) if update.prefix.as_str() == "room"));
 		assert!(
 			futures::FutureExt::now_or_never(dialed.session.closed()).is_none(),
 			"the session closed before the configured token was answered"

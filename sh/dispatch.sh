@@ -176,7 +176,7 @@ module moq_sh '^infra/moq-sh/' \
     tools='dash'
 # Quest documents form one graph, so any change validates the whole tree,
 # as does a bump of the flake-pinned validator.
-module quest '^(quest/|flake\.lock$)' \
+module quest '^(quest/|flake\.lock$|sh/quest\.sh$)' \
     tools='quest'
 # `obs check` compares the OBS pinned in buildspec.json, flake.nix, and
 # nixpkgs, and the last moves on a flake.lock bump alone.
@@ -330,14 +330,14 @@ step() {
         check:js) just js check-changed "$js_list" ;;
         check:workers) just js workers ;;
         check:moq_sh) just infra moq-sh test ;;
-        # The check keeps docs; the test phase enforces default-feature clippy
-        # without a second compile.
+        # The check keeps docs and the isolated default-media lint; the test
+        # phase enforces the other clippy checks in its existing build.
         check:rs) just rs lint-changed "$rs_list" ;;
         check:bench)
             python3 bench/compare.test.py
             bash sh/local.sh cargo check --locked --package moq-relay --package moq-bench --features moq-relay/io-uring
             ;;
-        check:quest) quest check ;;
+        check:quest) bash sh/quest.sh check ;;
         check:drill) just test drill-sensitivity --apply-only ;;
         check:obs_compile) just obs compile ;;
         check:flake)

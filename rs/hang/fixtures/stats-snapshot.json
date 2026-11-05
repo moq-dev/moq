@@ -14,6 +14,18 @@
 			"skipped": 4,
 			"bitrate": 6000000
 		},
-		"reset": {}
+		"reset": {},
+		"__proto__": {
+			"frames": 1,
+			"bytes": 100
+		},
+		"constructor": {
+			"frames": 2,
+			"bytes": 200
+		},
+		"toString": {
+			"frames": 3,
+			"bytes": 300
+		}
 	}
 }

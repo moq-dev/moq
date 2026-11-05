@@ -313,7 +313,7 @@ async fn drain(shutdown: Shutdown, signals: &mut Signals) {
 	tracing::info!(window = ?shutdown.observer.drain_timeout, "shutdown requested; draining sessions (signal again to exit immediately)");
 	tokio::select! {
 		() = signals.recv() => tracing::warn!("second shutdown signal; exiting immediately"),
-		() = shutdown.observer.drained() => {},
+		_ = shutdown.observer.drained() => {},
 	}
 }
 
@@ -329,9 +329,7 @@ fn main() -> anyhow::Result<()> {
 async fn run() -> anyhow::Result<()> {
 	// The transport, reqwest, axum-server, and object_store all read rustls's process default.
 	// A CPU rind cannot run on fails here, naming the feature it lacks.
-	rind_rustls::default_provider()?
-		.install_default()
-		.map_err(|_| anyhow::anyhow!("a rustls crypto provider is already installed"))?;
+	moq_tokio::crypto::install_default()?;
 
 	let mut cli = Invocation::parse().await;
 	cli.log.init()?;
@@ -347,7 +345,7 @@ async fn run() -> anyhow::Result<()> {
 		match stages.remove(0) {
 			Command::Auth(auth) => {
 				cli.reject("auth")?;
-				return auth.run().await;
+				return auth.run(&cli.settings).await;
 			}
 			Command::Completion(completion) => {
 				cli.reject("completion")?;
@@ -754,7 +752,7 @@ fn spawn_import(
 		reject_listener_cors(&rtc.cors, "import rtc")?;
 	}
 
-	let max_age = import.max_age.map(Into::into);
+	let max_age = Some(import.max_age.map_or(hang::container::MAX_AGE, Into::into));
 	let linger = import.linger.map_or(moq_mux::Linger::DEFAULT, Into::into);
 	// The MoQ side every gateway publishes into, minted per source since each takes it
 	// by value onto its own task.
@@ -830,8 +828,11 @@ fn spawn_import(
 				}
 			}
 			ImportSource::Archive(args) => {
-				// A replay serves the retention the recording was made with.
-				anyhow::ensure!(max_age.is_none(), "`--max-age` does not apply to `import archive`");
+				// A replay advertises no max age: the archive's retention bounds what it serves.
+				anyhow::ensure!(
+					import.max_age.is_none(),
+					"`--max-age` does not apply to `import archive`"
+				);
 				tasks.spawn(archive::import(origin.clone(), name, args, instance));
 			}
 			#[cfg(feature = "capture")]
@@ -962,7 +963,9 @@ async fn run_container(
 	// rendition's `broadcast` field references (e.g. "./source") through the same origin.
 	let mut follow = consumer.follow(name.as_str(), None)?;
 	let broadcast = tokio::select! {
-		broadcast = follow.available() => broadcast.with_context(|| format!("failed to resolve broadcast `{name}`"))?,
+		broadcast = follow.available() => broadcast
+			.with_context(|| format!("failed to resolve broadcast `{name}`"))?
+			.context("went offline before serving")?,
 		() = finish.cancelled() => return Ok(()),
 	};
 
@@ -1267,7 +1270,7 @@ mod tests {
 
 		impl Listening {
 			async fn new(timeout: &str) -> Self {
-				let _ = moq_tokio::crypto::install_default();
+				moq_tokio::crypto::install_default().unwrap();
 				let cli = Invocation::try_parse_from([
 					"moq",
 					"--listen-tcp-bind",
@@ -1385,6 +1388,7 @@ mod tests {
 						.unwrap()
 						.available()
 						.await
+						.unwrap()
 						.unwrap();
 					let mut track = broadcast
 						.track("status")
@@ -1496,6 +1500,7 @@ mod tests {
 			.available()
 			.await
 			.unwrap()
+			.unwrap()
 			.track("live")
 			.unwrap()
 			.subscribe(None)
@@ -1533,7 +1538,7 @@ mod tests {
 	/// drop without its close.
 	#[tokio::test]
 	async fn a_stream_bind_failure_starts_no_dial() {
-		let _ = moq_tokio::crypto::install_default();
+		moq_tokio::crypto::install_default().unwrap();
 		let occupied = std::net::TcpListener::bind("127.0.0.1:0").expect("occupy a port");
 		let addr = occupied.local_addr().expect("occupied address").to_string();
 		let invocation = Invocation::try_parse_from([
@@ -1645,7 +1650,7 @@ mod tests {
 	/// client TLS the way the relay does rather than refuse after validate.
 	#[tokio::test]
 	async fn cluster_api_url_http_attaches_client_tls() {
-		let _ = moq_tokio::crypto::install_default();
+		moq_tokio::crypto::install_default().unwrap();
 		let invocation =
 			Invocation::try_parse_from(["moq", "--cluster-api-url", "https://api.example/peers", "import", "ts"])
 				.expect("parse");
@@ -1670,7 +1675,7 @@ mod tests {
 	/// port with a WAN cluster peer starts instead of colliding with itself.
 	#[tokio::test]
 	async fn a_fixed_connect_bind_with_a_cluster_peer_starts() {
-		let _ = moq_tokio::crypto::install_default();
+		moq_tokio::crypto::install_default().unwrap();
 		// Borrow a free port from the OS, then hand it to `--connect-bind`.
 		let bind = std::net::UdpSocket::bind("127.0.0.1:0")
 			.expect("probe socket")

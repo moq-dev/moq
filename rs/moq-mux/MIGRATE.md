@@ -4,6 +4,69 @@ How to adopt new APIs and update for breaking changes, newest first.
 
 ## Unreleased
 
+### The async API is opt-in
+
+Enable the `async` Cargo feature to keep awaiting moq-mux:
+`moq-mux = { version = "...", features = ["async"] }`. This also applies with `default-features = false`.
+The feature is off by default, and every `poll_*` method stays available without it.
+It covers the `next`, `read`, `latest`, `refresh`, `ready`, `wait`, and `broadcast` methods beside each poll:
+the catalog consumers and `catalog::Stream::next`, the container `Consumer` and `GroupConsumer`,
+every exporter (`next`, and fMP4's `next_chunk`), `ts::Follower`, `ts::Release`, `follow::Instances`,
+`json::Consumer`, `json::Snapshot`, `rate::Follower`, `timeline::Resume`, `Binding`, and `Linger`.
+It also covers the async functions with no poll of their own: `catalog::Consumer::new`,
+`Source::{catalog, resolve, subscribe_track}`, `ts::Release::new`, and the JSON catalog entry's `subscribe`.
+`fmp4::Muxer::read` is async too; without the feature, drive `fmp4::Muxer::poll_read`, passing the same
+empty `Vec` to every poll of one group.
+
+`timeline::Resume::ready` borrows the resume instead of consuming it, and the hang catalog consumer's
+`next` no longer requires `Catalog<E>: Unpin`.
+moq-mux no longer enables `moq-json/async`: enable it yourself to await moq-json's readers directly.
+
+### `follow::Instances` folds into `Following` ([#7678](https://github.com/moq-dev/moq/pull/7678))
+
+`follow::Instances::new` is removed: call `origin.follow(path, instance)` and read `Following::available()`, which returns `Some(broadcast)` where `Event::Start` did and `None` where `Event::End` did.
+`Source::follow` still returns `follow::Instances`, for its one-shot hand-out of the catalog's own broadcast; its `next()` and `poll_next()` now return `Option<broadcast::Consumer>`, and `follow::Event` is gone.
+
+### `container::Playout` replaces `with_warmup` ([#7864](https://github.com/moq-dev/moq/pull/7864))
+
+`container::Consumer::with_warmup` is gone. Build a `container::Playout::new(delay, warmup)` from the `Delay` and the catalog rendition's `warmup`, subscribe with `playout.subscription(subscription)`, which widens the max delay by the warmup, and build the consumer with `playout.consumer(track, format)`, which skips at the max delay alone. The order no longer matters, and a track subscribed without the widening is widened when the consumer is built.
+
+```rust
+// Before
+let subscription = Subscription::default().with_delay(delay.with_max(delay.max.map(|max| max + warmup)));
+let track = broadcast.track(name)?.subscribe(subscription).await?;
+let consumer = Consumer::new(track, format).with_warmup(warmup).with_delay(delay);
+// After
+let playout = Playout::new(delay, warmup);
+let track = broadcast.track(name)?.subscribe(playout.subscription(Subscription::default())).await?;
+let consumer = playout.consumer(track, format);
+```
+
+A rendition without a warmup keeps `Consumer::new(track, format).with_delay(delay)`.
+
+### `catalog::Config::with_max_age(None)` is unlimited ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+`Config::with_max_age` no longer treats `None` as "keep hang's default": an unset `Config` mints media tracks with `hang::container::MAX_AGE` (30 s), as before, `None` sets no publisher limit, and a value is that value.
+Callers that passed an optional override straight through call `with_max_age` only when it is set.
+
+```rust
+// Before
+Config::default().with_max_age(override_or_none);
+// After
+let mut config = Config::default();
+if let Some(max_age) = override_or_none {
+	config = config.with_max_age(max_age);
+}
+```
+
+The catalog and HLS record tracks take moq-net's new zero default instead of no limit; their newest group restates them.
+
+### Snapshot consumers subscribe themselves at a zero delay ([#7736](https://github.com/moq-dev/moq/pull/7736))
+
+`catalog::hang::Consumer::new` and its `From` impl take the catalog track, a `moq_net::track::Consumer`, instead of a `track::Subscriber`; the consumer subscribes itself, as `hang::catalog::Consumer::new` does. Pass `broadcast.track(hang::Catalog::DEFAULT_NAME)?` rather than subscribing first.
+`json::Consumer::from_track` takes a `moq_net::track::Consumer` and is now `async`: a snapshot track's reader subscribes itself, and a stream track's subscription resolves before it returns.
+A refused catalog or snapshot subscription now surfaces from the first read.
+
 ### Shared playout timing
 
 Native players can use `timeline::Producer` and its read-only `Consumer` instead
@@ -28,8 +91,8 @@ HLS replaces a refused importer immediately; transient fetch failures still keep
 
 `container::Consumer::set_max_delay(Duration)` is `set_delay(Delay)`, and `with_delay(Delay)` is its builder.
 `moq_net::track::Delay { min, max }` defaults to zero for both: `max` (`None` for no limit) is the max delay that `set_max_delay` took. `set_delay` puts the whole delay on the subscription, and `Consumer::new` inherits it from there.
-`min` is the playout delay, and a consumer reads an unstated (`None`) one as zero. An unfloored consumer starts at the group covering the live edge less `min` plus any `with_warmup`, waiting for it when the newest group arrives first. Before the first read, a backlog that already landed starts at the first group whose first frame is within the max delay, plus the warmup, of the newest content, keeping the group covering the live edge less `min` and the warmup.
-Replace `consumer.set_max_delay(d)` with `consumer.set_delay(Delay::default().with_max(d))`, and set `min` to your playout delay. Call `with_warmup` before `with_delay`.
+`min` is the playout delay, and a consumer reads an unstated (`None`) one as zero. An unfloored consumer starts at the group covering the live edge less `min` plus any `Playout` warmup, waiting for it when the newest group arrives first. Before the first read, a backlog that already landed starts at the first group whose first frame is within the max delay, plus the warmup, of the newest content, keeping the group covering the live edge less `min` and the warmup.
+Replace `consumer.set_max_delay(d)` with `consumer.set_delay(Delay::default().with_max(d))`, and set `min` to your playout delay. A rendition with a catalog warmup builds its consumer with `container::Playout` instead.
 
 ### Compression moves to the track
 

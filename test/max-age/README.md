@@ -1,8 +1,8 @@
-# Publisher retention interop
+# Publisher max age interop
 
 `just test max-age` runs real WebSocket/QMux sessions through a Rust origin relay.
-Rust-to-Rust, Rust-to-JavaScript, and JavaScript-to-Rust check omitted, zero, and
-30-second publisher limits on lite-07, IETF draft 18, and IETF draft 22. The relay
+Rust-to-Rust, Rust-to-JavaScript, and JavaScript-to-Rust check unlimited (an explicit
+`None`/`null`, sent as an omitted wire value), zero, and 30-second publisher max ages on lite-07, IETF draft 18, and IETF draft 22. The relay
 has a one-second local cache ceiling; received metadata must remain unchanged.
 
 The JavaScript client uses Bun and the source checkout. Every listener binds an

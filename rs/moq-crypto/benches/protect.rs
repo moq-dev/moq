@@ -32,7 +32,7 @@ fn bench_protect(c: &mut Criterion) {
 	let mut group = c.benchmark_group("protect");
 	group.throughput(Throughput::Bytes(grouped.len() as u64));
 	group.bench_function("grouped_1k", |b| {
-		// Advancing timestamps plus a zero max age keep only the newest group cached.
+		// Advancing timestamps plus a zero max age leave only the newest group fresh.
 		let info = moq_net::track::Info::default()
 			.with_timescale(moq_net::Timescale::MILLI)
 			.with_max_age(Duration::ZERO);

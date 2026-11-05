@@ -65,6 +65,7 @@ impl Sim {
             mtu: MTU,
             rtt: Duration::from_millis(333),
             max_pacing_rate: None,
+            seed: 0,
         });
         Self {
             gcc,
@@ -377,6 +378,7 @@ fn probe_inflight_rounds_up_to_a_packet() {
         mtu: MTU,
         rtt: Duration::from_millis(100),
         max_pacing_rate: None,
+        seed: 0,
     });
     // 3000 bytes, two and a half packets
     gcc.prober
@@ -448,6 +450,7 @@ fn survives_hostile_receive_times() {
         mtu: MTU,
         rtt: Duration::from_millis(100),
         max_pacing_rate: None,
+        seed: 0,
     });
     let times = [
         Some(Duration::ZERO),
@@ -496,6 +499,7 @@ fn window_floor_tracks_mtu() {
         mtu: LARGE,
         rtt: Duration::from_millis(10),
         max_pacing_rate: Some(10_000),
+        seed: 0,
     });
     for _ in 0..200 {
         now += Duration::from_millis(10);

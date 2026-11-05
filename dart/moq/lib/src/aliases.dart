@@ -73,27 +73,18 @@ typedef AnnounceRoute = MoqAnnounceRoute;
 /// A route over a prefix: its origin-relative path, required wildcard captures (empty without wildcards), and route metadata.
 typedef Announce = MoqAnnounce;
 
-/// What an [AnnounceConsumer] yields: [AnnounceEventStart],
-/// [AnnounceEventUpdate], [AnnounceEventEnd], [AnnounceEventRestart], or
-/// [AnnounceEventTakeover].
+/// What an [AnnounceConsumer] yields: [AnnounceEventPresent] or
+/// [AnnounceEventAbsent].
+///
+/// Another publisher instance taking a path over keeps it present: hold a
+/// [Following] to see the broadcast change.
 typedef AnnounceEvent = MoqAnnounceEvent;
 
-/// A route now covers the prefix; the stream had none there.
-typedef AnnounceEventStart = StartMoqAnnounceEvent;
+/// A route now covers the path, which was absent.
+typedef AnnounceEventPresent = PresentMoqAnnounceEvent;
 
-/// The route covering the prefix changed hops or cost.
-typedef AnnounceEventUpdate = UpdateMoqAnnounceEvent;
-
-/// No route covers the prefix any more; carries its last route.
-typedef AnnounceEventEnd = EndMoqAnnounceEvent;
-
-/// Another publisher instance now serves the prefix: drop what was resolved
-/// under it and request afresh.
-typedef AnnounceEventRestart = RestartMoqAnnounceEvent;
-
-/// A route now covers the prefix and continues what the route at `predecessor`
-/// served beneath it: keep what was resolved through that one.
-typedef AnnounceEventTakeover = TakeoverMoqAnnounceEvent;
+/// No route covers the path any more; carries its last route.
+typedef AnnounceEventAbsent = AbsentMoqAnnounceEvent;
 
 /// The write side of a broadcast: publish tracks into it.
 typedef BroadcastProducer = MoqBroadcastProducer;
@@ -128,7 +119,7 @@ typedef GroupProducer = MoqGroupProducer;
 /// The read side of a single group: yields timestamped raw frames.
 typedef GroupConsumer = MoqGroupConsumer;
 
-/// A datagram-delivered frame, tagged with a per-track sequence number.
+/// A datagram payload with its own sequence and optional timestamp.
 typedef Datagram = MoqDatagram;
 
 /// A payload plus the timestamp it should be presented at.
@@ -198,6 +189,13 @@ typedef BandwidthConsumer = MoqBandwidthConsumer;
 /// One track's standing claim on an [Allocator].
 typedef Reservation = MoqReservation;
 
+/// Divides one connection's receive estimate among the broadcasts watched over it.
+typedef Viewers = MoqViewers;
+
+/// One watched broadcast's standing claim on [Viewers]; holding it requests
+/// PROBE, disposing it releases the claim.
+typedef Viewer = MoqViewer;
+
 /// Turns a [Reservation]'s grant into a sender's [RateTarget]; call `update` on every frame.
 typedef RateControl = MoqRateControl;
 
@@ -233,3 +231,18 @@ typedef ProtocolKind = MoqProtocolKind;
 
 /// A protocol failure: scope, verbatim wire code, kind, and a diagnostic message.
 typedef ProtocolException = MoqProtocolException;
+
+/// Writes live datagrams with an independent sequence counter and no cache.
+typedef DatagramProducer = MoqDatagramProducer;
+
+/// Reads a live datagram track in arrival order from its own cursor.
+typedef DatagramConsumer = MoqDatagramConsumer;
+
+/// A requested datagram track awaiting acceptance or rejection.
+typedef DatagramRequest = MoqDatagramRequest;
+
+/// Serves on-demand datagram tracks through their own request queue.
+typedef DatagramRequests = MoqDatagramRequests;
+
+/// Publisher priority and optional timestamp scale fixed for a datagram track.
+typedef DatagramInfo = MoqDatagramInfo;

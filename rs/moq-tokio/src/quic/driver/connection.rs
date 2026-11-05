@@ -258,7 +258,7 @@ impl Drop for ConnectionDriver {
 pub struct Connection(ConnectionRef);
 
 impl Connection {
-	/// Initiate a new outgoing unidirectional stream, scheduled by `options`.
+	/// Open a new outgoing unidirectional stream, scheduled by `options`.
 	///
 	/// Streams are cheap and instantaneous to open unless blocked by flow control. As a
 	/// consequence, the peer won't be notified that a stream has been opened until the stream is
@@ -266,11 +266,7 @@ impl Connection {
 	///
 	/// # Panics
 	/// - when `options.group` belongs to another connection
-	pub async fn open_uni(&self, options: send::Options<'_>) -> Result<send::Stream, Error> {
-		kio::wait(|waiter| self.poll_open_uni(waiter, options)).await
-	}
-
-	/// See [`Self::open_uni`].
+	#[kio::wrapper]
 	pub fn poll_open_uni(&self, waiter: &kio::Waiter, options: send::Options<'_>) -> Poll<Result<send::Stream, Error>> {
 		let (conn, id) = ready!(poll_open(waiter, &self.0, options, Dir::Uni))?;
 		Poll::Ready(Ok(send::Stream::new(conn, id)))
@@ -282,7 +278,7 @@ impl Connection {
 		send::Group::new(self.0.0.clone(), priority)
 	}
 
-	/// Initiate a new outgoing bidirectional stream, its sending half scheduled by `options`.
+	/// Open a new outgoing bidirectional stream, its sending half scheduled by `options`.
 	///
 	/// Streams are cheap and instantaneous to open unless blocked by flow control. As a
 	/// consequence, the peer won't be notified that a stream has been opened until the stream is
@@ -293,11 +289,7 @@ impl Connection {
 	///
 	/// # Panics
 	/// - when `options.group` belongs to another connection
-	pub async fn open_bi(&self, options: send::Options<'_>) -> Result<(send::Stream, recv::Stream), Error> {
-		kio::wait(|waiter| self.poll_open_bi(waiter, options)).await
-	}
-
-	/// See [`Self::open_bi`].
+	#[kio::wrapper]
 	pub fn poll_open_bi(
 		&self,
 		waiter: &kio::Waiter,
@@ -307,39 +299,18 @@ impl Connection {
 		Poll::Ready(Ok((send::Stream::new(conn.clone(), id), recv::Stream::new(conn, id))))
 	}
 
-	/// Open a request stream using only the credit already granted by the peer.
-	#[cfg(feature = "net")]
-	pub(crate) fn open_request(&self) -> Result<Option<(send::Stream, recv::Stream)>, Error> {
-		let mut state = self.0.state.lock();
-		if let Some(err) = state.error() {
-			return Err(err);
-		}
-		let Some(id) = state.inner.streams().open(Dir::Bi, Default::default()) else {
-			return Ok(None);
-		};
-		drop(state);
-		Ok(Some((
-			send::Stream::new(self.0.clone(), id),
-			recv::Stream::new(self.0.clone(), id),
-		)))
-	}
-
-	/// Accept the next incoming uni-directional stream
+	/// The next incoming unidirectional stream.
 	///
 	/// # Cancel safety
 	///
 	/// This method is cancellation safe. If this does not resolve, no streams were consumed.
-	pub async fn accept_uni(&self) -> Result<recv::Stream, Error> {
-		kio::wait(|waiter| self.poll_accept_uni(waiter)).await
-	}
-
-	/// See [`Self::accept_uni`].
+	#[kio::wrapper]
 	pub fn poll_accept_uni(&self, waiter: &kio::Waiter) -> Poll<Result<recv::Stream, Error>> {
 		let (conn, id) = ready!(poll_accept(waiter, &self.0, Dir::Uni))?;
 		Poll::Ready(Ok(recv::Stream::new(conn, id)))
 	}
 
-	/// Accept the next incoming bidirectional stream
+	/// The next incoming bidirectional stream.
 	///
 	/// **Important Note**: The `Connection` that calls [`open_bi()`] must write to its [`send::Stream`]
 	/// before the other `Connection` is able to `accept_bi()`. Calling [`open_bi()`] then
@@ -351,11 +322,7 @@ impl Connection {
 	/// # Cancel safety
 	///
 	/// This method is cancellation safe. If this does not resolve, no streams were consumed.
-	pub async fn accept_bi(&self) -> Result<(send::Stream, recv::Stream), Error> {
-		kio::wait(|waiter| self.poll_accept_bi(waiter)).await
-	}
-
-	/// See [`Self::accept_bi`].
+	#[kio::wrapper]
 	pub fn poll_accept_bi(&self, waiter: &kio::Waiter) -> Poll<Result<(send::Stream, recv::Stream), Error>> {
 		let (conn, id) = ready!(poll_accept(waiter, &self.0, Dir::Bi))?;
 		Poll::Ready(Ok((send::Stream::new(conn.clone(), id), recv::Stream::new(conn, id))))
@@ -366,7 +333,7 @@ impl Connection {
 	/// # Cancel safety
 	///
 	/// This method is cancellation safe. If this does not resolve, no datagrams were consumed.
-	pub fn read_datagram(&self) -> impl Future<Output = Result<Bytes, Error>> + '_ {
+	pub fn recv_datagram(&self) -> impl Future<Output = Result<Bytes, Error>> + '_ {
 		kio::wait(|waiter| self.poll_recv_datagram(waiter))
 	}
 
@@ -377,16 +344,12 @@ impl Connection {
 		Poll::Ready(datagram.map_err(|err| state.lost_as(err)))
 	}
 
-	/// Wait for the connection to be closed for any reason
+	/// The error the connection closed with, for any reason.
 	///
 	/// Despite the return type's name, closed connections are often not an error condition at the
 	/// application layer. Cases that might be routine include [`Error::LocallyClosed`]
 	/// and [`Error::ApplicationClosed`].
-	pub async fn closed(&self) -> Error {
-		kio::wait(|waiter| self.poll_closed(waiter)).await
-	}
-
-	/// Wait for the connection to close, returning why.
+	#[kio::wrapper]
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
 		let mut state = self.0.state.lock();
 		let err = ready!(state.inner.poll_closed(waiter));
@@ -490,7 +453,7 @@ impl Connection {
 
 	/// The peer's UDP address
 	///
-	/// If `ServerConfig::migration` is `true`, clients may change addresses at will, e.g. when
+	/// If [`moq_quic::server::Config::migration`] is `true`, clients may change addresses at will, e.g. when
 	/// switching to a cellular internet connection.
 	pub fn remote_address(&self) -> SocketAddr {
 		self.0.state.lock().inner.remote_address()
@@ -511,6 +474,18 @@ impl Connection {
 	pub(crate) fn receive_window(&self) -> moq_net::transport::ReceiveWindow {
 		let state = self.0.state.lock();
 		moq_net::transport::ReceiveWindow::new(state.inner.receive_window(), state.inner.stream_receive_window())
+	}
+
+	/// The peer's stream credit in `dir`, as this connection last heard it.
+	#[cfg(feature = "net")]
+	pub(crate) fn stream_credit(&self, dir: moq_net::transport::Dir) -> moq_net::transport::StreamCredit {
+		let dir = match dir {
+			moq_net::transport::Dir::Uni => Dir::Uni,
+			moq_net::transport::Dir::Bi => Dir::Bi,
+		};
+		let mut state = self.0.state.lock();
+		let streams = state.inner.streams();
+		moq_net::transport::StreamCredit::new(streams.credit(dir), streams.blocked(dir))
 	}
 
 	/// How many send streams the connection still holds state for

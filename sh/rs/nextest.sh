@@ -1,6 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# nextest has no environment binding for this flag. Explicit runner options
+# take precedence; arguments after `--` are test filters instead.
+if [[ -n "${NEXTEST_NO_FAIL_FAST:-}" ]]; then
+    case "${1:-} ${2:-} ${3:-}" in
+        'cargo nextest run' | 'cargo llvm-cov nextest')
+            no_fail_fast=1
+            for arg in "${@:4}"; do
+                case "$arg" in
+                    --) break ;;
+                    --fail-fast | --ff | --no-fail-fast | --nff | --max-fail | --max-fail=* | --no-run)
+                        no_fail_fast=
+                        break
+                        ;;
+                esac
+            done
+            if [[ -n "$no_fail_fast" ]]; then set -- "${@:1:3}" --no-fail-fast "${@:4}"; fi
+            ;;
+    esac
+fi
+
 # Rings share the user's locked-memory accounting across processes. Hosted CI
 # can raise its hard limit; local shells use the hard limit the host grants.
 if [[ "$(uname -s)" == Linux ]]; then

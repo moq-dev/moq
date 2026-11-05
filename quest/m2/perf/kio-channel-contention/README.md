@@ -470,4 +470,5 @@ Decided (maintainer, 2026-11-01, cluster spike):
 
 ## Required
 
+- [Plan relay-per-thread on a worker mesh that never re-announces](/quest/m2/perf/kio-channel-contention/relay-per-thread.md) - measure no-re-announce, weigh it against per-track replicas, and decide whether log adoption waits on it
 - [Log adoption](/quest/m2/perf/kio-channel-contention/log-adoption.md) - the rest of moq-net's log-shaped state moves onto the log where it measures as a win

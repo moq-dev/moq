@@ -350,6 +350,67 @@ class InventoryTest(unittest.TestCase):
         self.write("js/net/package.json", '{"scripts": {"manual-test": "bun test src"}}')
         self.assertIn("script js/net/src/codec.test.ts", self.orphans())
 
+    def test_bun_file_paths_are_exact_in_every_scripted_caller(self):
+        self.write(
+            "justfile",
+            JUSTFILE
+            + """
+    files := '''
+        test/compat.test.ts
+        test/view.test.tsx
+        ./test/exact.test.ts
+    '''
+
+    local:
+        cd test && bash ../sh/local.sh bun test {{ replace(files, "\\n", " ") }}
+""",
+        )
+        self.write("sh/local.sh", '"$@"\n')
+        self.write(
+            "sh/run.sh",
+            'bun test \\\n    "test/codec.test.ts" test/a.test.jsx test/b.test.cjs '
+            "./test/exact.test.ts # bun test commented.test.ts\n",
+        )
+        self.write("package.json", '{"scripts": {"test": "bun test test/codec.spec.ts test/codec.test.cts"}}')
+        workflow = self.root / ".github/workflows/ci.yml"
+        self.write(str(workflow.relative_to(self.root)), WORKFLOW + "          - run: bun test test/frame.test.ts\n")
+        _, errors = module.inventory(self.root)
+        self.assertEqual(
+            errors,
+            [
+                ".github/workflows/ci.yml (fuzz): bun test test/frame.test.ts is a substring filter;"
+                " prefix the file path with ./",
+                "justfile:17: bun test test/compat.test.ts is a substring filter; prefix the file path with ./",
+                "justfile:17: bun test test/view.test.tsx is a substring filter; prefix the file path with ./",
+                "package.json scripts.test: bun test test/codec.spec.ts is a substring filter;"
+                " prefix the file path with ./",
+                "package.json scripts.test: bun test test/codec.test.cts is a substring filter;"
+                " prefix the file path with ./",
+                "sh/run.sh: bun test test/a.test.jsx is a substring filter; prefix the file path with ./",
+                "sh/run.sh: bun test test/b.test.cjs is a substring filter; prefix the file path with ./",
+                "sh/run.sh: bun test test/codec.test.ts is a substring filter; prefix the file path with ./",
+            ],
+        )
+        self.write(
+            "sh/run.sh",
+            'bun test ./test/codec.test.ts /source/test/exact.test.ts src -t "codec.test.ts" --preload setup.ts\n'
+            "# bun test commented.test.ts\n",
+        )
+        self.assertFalse(any("sh/run.sh:" in error for error in module.inventory(self.root)[1]))
+
+    def test_bun_guard_reads_the_working_tree_after_unstaged_deletions(self):
+        files = {"sh/run.sh": "bun test ./codec.test.ts\n", "web/package.json": '{"scripts": {"test": "bun test"}}'}
+        for name, text in files.items():
+            self.write(name, text)
+        subprocess.run(["git", "add", *files], cwd=self.root, check=True)
+        for name, text in files.items():
+            with self.subTest(name=name):
+                (self.root / name).unlink()
+                try:
+                    self.orphans()
+                finally:
+                    self.write(name, text)
+
     def test_a_js_bench_entry_point_needs_a_caller(self):
         # Nightly's shape: a loop's literal names reach a recipe parameter through a helper's "$@".
         self.write(

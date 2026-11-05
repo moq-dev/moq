@@ -67,7 +67,9 @@ async fn fixture(
 	let mut track = broadcast
 		.create_track(
 			"video",
-			moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+			moq_net::track::Info::default()
+				.with_timescale(moq_net::Timescale::MILLI)
+				.with_max_age(None),
 		)
 		.unwrap();
 	broadcast.announce(Default::default()).unwrap();
@@ -95,7 +97,8 @@ async fn fixture(
 	let remote = kio::clock::timeout(TIMEOUT, client.consume().follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
-		.expect("broadcast resolves");
+		.expect("broadcast resolves")
+		.unwrap();
 	(remote, track, (sessions, broadcast, publisher, middle, client))
 }
 

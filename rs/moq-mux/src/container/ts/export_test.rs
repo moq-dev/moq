@@ -84,8 +84,8 @@ fn length_prefixed(nals: &[&[u8]]) -> Bytes {
 /// paused time) or the stream ends.
 /// A drift budget no test timeline comes close to, so the exporter reads every group.
 ///
-/// The media track's full retention window, so an exporter started after publishing
-/// can still read every retained group. These tests write a whole broadcast up front
+/// The media track's full max age, so an exporter started after publishing
+/// can still read every fresh group. These tests write a whole broadcast up front
 /// and only then export it, which the
 /// exporter's default [`Duration::ZERO`] collapses to the
 /// live edge: completeness has to be asked for, exactly as a real recorder does.
@@ -1392,8 +1392,8 @@ async fn trimmed_leading_pictures_keep_their_slots() {
 	assert_eq!(joined.iter().collect::<Vec<_>>(), shared);
 }
 
-/// A declared depth of zero decodes every frame at its presentation, and refuses a frame that
-/// reorders, rather than inferring a decode delay.
+/// A declared depth of zero decodes every frame at its presentation. A regression proves a
+/// timeline step and starts a new clock period instead of inferring a decode delay.
 #[tokio::test(start_paused = true)]
 async fn export_declared_zero_reorder_decodes_at_presentation() {
 	let (mut export, _keep) = export_declared(0, &[&[0, 40, 80, 120]]).await;
@@ -1406,15 +1406,12 @@ async fn export_declared_zero_reorder_decodes_at_presentation() {
 	assert_eq!(timing.len(), 4);
 	assert!(timing.iter().all(|(pts, dts)| pts == dts), "{timing:?}");
 
-	let (mut export, _keep) = export_declared(0, &[&[0, 80, 40, 120]]).await;
-	let err = loop {
-		match kio::clock::timeout(DRAIN, export.next()).await {
-			Ok(Ok(Some(_))) => {}
-			Ok(Ok(None)) | Err(_) => panic!("a frame reordered past the declared depth was exported"),
-			Ok(Err(err)) => break err,
-		}
-	};
-	assert!(err.to_string().contains("declared depth"), "{err}");
+	let (mut export, _keep) = export_declared(0, &[&[0, 80, 40, 120, 80, 160], &[200, 240]]).await;
+	let frames = drain_frames(&mut export).await;
+	let bytes: Vec<u8> = frames.iter().flat_map(|frame| frame.payload.iter().copied()).collect();
+	let timing = video_pes_timing(&bytes);
+	assert_eq!(timing, [0, 80, 40, 120, 80, 160, 200, 240].map(|ms| (ms * 90, ms * 90)));
+	assert_eq!(count_discontinuity(&frames), 2, "each step opens a clock period");
 }
 
 /// #2937: the PCR must be a uniform bounded-interval ramp, not a sample of the
@@ -3244,39 +3241,24 @@ fn make_long_section(table_id: u8, ext: u16, version: u8, number: u8, last: u8, 
 	s
 }
 
-/// Read an SI snapshot track from the start: every group, as its frames' payloads.
+/// The newest snapshot group of an SI track: its sequence, and its frames' payloads.
 ///
-/// Starting at group 0 only asks the publisher to send from there; the default
-/// [`Duration::ZERO`] budget then skips every group the live edge has
-/// already passed, which is all of them once the importer has finished. A budget
-/// wider than the test's wall-clock span (every cut lands within microseconds) is
-/// what actually delivers the history, so a count of groups counts cuts.
-async fn read_si_groups(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<Vec<Bytes>> {
-	let mut track = consumer
-		.track(name)
-		.unwrap()
-		.subscribe(
-			moq_net::track::Subscription::default()
-				.with_range(0..)
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(5))),
-		)
-		.await
-		.unwrap();
-	let mut groups = Vec::new();
-	while let Some(mut group) = track.recv_group().await.unwrap() {
-		let mut frames = Vec::new();
-		while let Some(frame) = kio::wait(|waiter| group.poll_read_frame(waiter)).await.unwrap() {
-			frames.push(frame.payload);
-		}
-		groups.push(frames);
+/// An SI track keeps the default zero max age: a superseded snapshot is stale at once, so only
+/// the newest is served. Its groups are appended from sequence 0, so the sequence counts the
+/// cuts before it, and a test checks an earlier revision's snapshot right after cutting it.
+async fn newest_si_group(consumer: &moq_net::broadcast::Consumer, name: &str) -> (u64, Vec<Bytes>) {
+	let mut track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
+	let mut group = track.recv_group().await.unwrap().expect("a snapshot group");
+	let mut frames = Vec::new();
+	while let Some(frame) = kio::wait(|waiter| group.poll_read_frame(waiter)).await.unwrap() {
+		frames.push(frame.payload);
 	}
-	groups
+	(group.sequence, frames)
 }
 
 /// The newest snapshot of an SI track, reduced to its sections.
 async fn read_si_sections(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<Bytes> {
-	let groups = read_si_groups(consumer, name).await;
-	let frames = groups.last().expect("at least one snapshot group");
+	let (_, frames) = newest_si_group(consumer, name).await;
 	frames
 		.iter()
 		.flat_map(crate::container::ts::si::split_sections)
@@ -3429,14 +3411,13 @@ async fn service_layer_survives_roundtrip() {
 		Some(Duration::from_secs(10)),
 		"the DVB NIT interval was filled in"
 	);
-	let nit_groups = read_si_groups(&consumer, &nit_entry.track).await;
+	let (nit_sequence, nit_frames) = newest_si_group(&consumer, &nit_entry.track).await;
 	assert_eq!(
-		nit_groups.len(),
-		1,
+		nit_sequence, 0,
 		"the repeated NIT committed once; a repetition cuts no group"
 	);
 	assert_eq!(
-		nit_groups[0],
+		nit_frames,
 		vec![Bytes::from(nit.clone())],
 		"the NIT snapshot is the section, byte-for-byte"
 	);
@@ -4574,21 +4555,23 @@ async fn torn_transition_is_never_published() {
 	let mut input = si_packet(0x0011, &sdt(5, 0, 0xaa));
 	input.extend_from_slice(&si_packet_cc(0x0011, &sdt(5, 1, 0xab), 1));
 	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
+	let si = rig.catalog.snapshot().ext.mpegts.si.clone();
+	let track = &si[&0x0011][&0x42].track;
+	// A superseded snapshot is stale at once, so each batch's newest is read before the next.
+	let mut snapshots = vec![newest_si_group(&rig.consumer, track).await];
 	// Version 6 arrives torn across two batches; the intermediate state (section 0
 	// at v6, section 1 still v5) must never hit the track.
 	rig.import
 		.decode(&BytesMut::from(&si_packet_cc(0x0011, &sdt(6, 0, 0xba), 2)[..]))
 		.unwrap();
+	snapshots.push(newest_si_group(&rig.consumer, track).await);
 	rig.import
 		.decode(&BytesMut::from(&si_packet_cc(0x0011, &sdt(6, 1, 0xbb), 3)[..]))
 		.unwrap();
 	rig.import.finish().unwrap();
+	snapshots.push(newest_si_group(&rig.consumer, track).await);
 
-	let si = rig.catalog.snapshot().ext.mpegts.si.clone();
-	let track = &si[&0x0011][&0x42].track;
-	let groups = read_si_groups(&rig.consumer, track).await;
-	assert!(!groups.is_empty(), "at least one snapshot group");
-	for (i, frames) in groups.iter().enumerate() {
+	for (sequence, frames) in &snapshots {
 		let versions: Vec<u8> = frames
 			.iter()
 			.flat_map(crate::container::ts::si::split_sections)
@@ -4596,7 +4579,7 @@ async fn torn_transition_is_never_published() {
 			.collect();
 		assert!(
 			versions.windows(2).all(|w| w[0] == w[1]),
-			"group {i} mixes versions: {versions:?}"
+			"group {sequence} mixes versions: {versions:?}"
 		);
 	}
 	assert_eq!(
@@ -4830,20 +4813,24 @@ async fn an_sdt_revision_dropping_the_service_retires_it() {
 			.map(|tables| tables[&0x42].track.clone())
 	};
 
+	// A superseded snapshot is stale at once, so each revision's is read before the next.
 	let track = revise(0, &[(1, b"One"), (2, b"Two")]).expect("the SDT is advertised");
+	let mut groups = vec![newest_si_group(&consumer, &track).await];
 	assert_eq!(revise(1, &[(2, b"Two")]), None, "the revision retired the SDT entry");
+	groups.push(newest_si_group(&consumer, &track).await);
 	assert_eq!(
 		revise(2, &[(1, b"One"), (2, b"Two")]),
 		Some(track.clone()),
 		"listed again, on the same track"
 	);
 	capture.finish(Timestamp::ZERO).unwrap();
+	groups.push(newest_si_group(&consumer, &track).await);
 
-	let groups = read_si_groups(&consumer, &track).await;
-	assert_eq!(groups.len(), 3, "one snapshot per revision");
-	assert_sdt_lists_only(&groups[0][0], 0, 1, b"One");
-	assert!(groups[1].is_empty(), "the retiring snapshot carries no SDT");
-	assert_sdt_lists_only(&groups[2][0], 2, 1, b"One");
+	let sequences: Vec<u64> = groups.iter().map(|(sequence, _)| *sequence).collect();
+	assert_eq!(sequences, [0, 1, 2], "one snapshot per revision");
+	assert_sdt_lists_only(&groups[0].1[0], 0, 1, b"One");
+	assert!(groups[1].1.is_empty(), "the retiring snapshot carries no SDT");
+	assert_sdt_lists_only(&groups[2].1[0], 2, 1, b"One");
 }
 
 /// A corrupted SDT actual is not rebuilt under a fresh, valid CRC: the section is
@@ -4877,6 +4864,8 @@ async fn a_corrupt_sdt_keeps_the_last_good_snapshot() {
 	};
 
 	let track = feed(sdt_actual(0, 0, 0, &[(1, b"One")])).expect("the SDT is advertised");
+	// A superseded snapshot is stale at once, so the first is read before the next revision.
+	let first = newest_si_group(&consumer, &track).await;
 	// One unflagged bit flip turns the service name "One" into "Nne" under the source CRC.
 	let mut corrupt = sdt_actual(1, 0, 0, &[(1, b"One")]);
 	let name = corrupt.len() - 4 - 3;
@@ -4884,11 +4873,11 @@ async fn a_corrupt_sdt_keeps_the_last_good_snapshot() {
 	assert_eq!(feed(corrupt), Some(track.clone()), "the corrupt revision kept the SDT");
 	assert_eq!(feed(sdt_actual(2, 0, 0, &[(1, b"Uno")])), Some(track.clone()));
 	capture.finish(Timestamp::ZERO).unwrap();
+	let last = newest_si_group(&consumer, &track).await;
 
-	let groups = read_si_groups(&consumer, &track).await;
-	assert_eq!(groups.len(), 2, "no snapshot for the corrupt revision");
-	assert_sdt_lists_only(&groups[0][0], 0, 1, b"One");
-	assert_sdt_lists_only(&groups[1][0], 2, 1, b"Uno");
+	assert_eq!((first.0, last.0), (0, 1), "no snapshot for the corrupt revision");
+	assert_sdt_lists_only(&first.1[0], 0, 1, b"One");
+	assert_sdt_lists_only(&last.1[0], 2, 1, b"Uno");
 }
 
 /// A multi-section SDT revision with the selected service's section corrupt does not
@@ -4922,6 +4911,8 @@ async fn a_partial_sdt_revision_keeps_the_last_good_snapshot() {
 
 	feed(sdt_actual(0, 0, 1, &[(1, b"One")]));
 	let track = feed(sdt_actual(0, 1, 1, &[(2, b"Two")])).expect("the SDT is advertised");
+	// A superseded snapshot is stale at once, so the first is read before the next revision.
+	let first = newest_si_group(&consumer, &track).await;
 	let mut corrupt = sdt_actual(1, 0, 1, &[(1, b"One")]);
 	let name = corrupt.len() - 4 - 3;
 	corrupt[name] ^= 0x01;
@@ -4934,11 +4925,11 @@ async fn a_partial_sdt_revision_keeps_the_last_good_snapshot() {
 	);
 	assert_eq!(feed(sdt_actual(1, 0, 1, &[(1, b"Uno")])), Some(track.clone()));
 	capture.finish(Timestamp::ZERO).unwrap();
+	let last = newest_si_group(&consumer, &track).await;
 
-	let groups = read_si_groups(&consumer, &track).await;
-	assert_eq!(groups.len(), 2, "no snapshot for the partial revision");
-	assert_sdt_lists_only(&groups[0][0], 0, 1, b"One");
-	assert_sdt_lists_only(&groups[1][0], 1, 1, b"Uno");
+	assert_eq!((first.0, last.0), (0, 1), "no snapshot for the partial revision");
+	assert_sdt_lists_only(&first.1[0], 0, 1, b"One");
+	assert_sdt_lists_only(&last.1[0], 1, 1, b"Uno");
 }
 
 /// A selection filters EIT schedule actual (0x50..=0x5F) by service, as it does
@@ -5103,8 +5094,8 @@ async fn tdt_round_trips_as_latest_value() {
 		vec![Bytes::from(tick(2))],
 		"the newest snapshot is the latest tick alone"
 	);
-	let groups = read_si_groups(&rig.consumer, &entry.track).await;
-	assert_eq!(groups.len(), 2, "one group per tick, no accumulation");
+	let (sequence, _) = newest_si_group(&rig.consumer, &entry.track).await;
+	assert_eq!(sequence, 1, "one group per tick, no accumulation");
 }
 
 /// Build a well-formed short-form section (syntax indicator clear): header + body,
@@ -5158,8 +5149,8 @@ async fn short_form_repetition_cuts_no_group() {
 	rig.import.finish().unwrap();
 
 	let si = rig.catalog.snapshot().ext.mpegts.si.clone();
-	let groups = read_si_groups(&rig.consumer, &si[&0x0014][&0x70].track).await;
-	assert_eq!(groups.len(), 1, "a repetition cut no further group");
+	let (sequence, _) = newest_si_group(&rig.consumer, &si[&0x0014][&0x70].track).await;
+	assert_eq!(sequence, 0, "a repetition cut no further group");
 }
 
 /// SI never gates output: an advertised entry whose track resolves but never
@@ -5623,6 +5614,8 @@ const JOIN: u64 = 75;
 /// arrive between the two drains, before their stamped media position: each leg sees the same
 /// snapshot at a different media position. The SDT's unchanged repeats and TDT/TOT revisions
 /// must still land on the same frames.
+/// The zero-delay exports request no superseded history; queued bursts need an explicit
+/// delay budget, as in `queued_clock_revisions_follow_the_exporters_freshness_budgets`.
 async fn export_twice(with_video: bool, late_clock: bool) -> (Vec<Frame>, Vec<Frame>) {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
@@ -6093,20 +6086,28 @@ pub(super) fn assert_on_time(frames: &[Frame]) -> usize {
 	const WRAP: i128 = 1 << 33;
 	let ts: Vec<u8> = frames.iter().flat_map(|f| f.payload.iter().copied()).collect();
 	// PCRs unwrapped from the first, which a start a window before the timeline may wrap.
-	let mut pcrs: Vec<(usize, f64)> = Vec::new();
+	let mut pcrs: Vec<(usize, f64, bool)> = Vec::new();
 	for (at, base, _) in collect_pcrs(frames) {
+		let discontinuity = ts[at * 188 + 5] & 0x80 != 0;
 		let base = base as i128;
 		let value = match pcrs.last() {
-			Some(&(_, last)) => last + ((base - last as i128).rem_euclid(WRAP)) as f64,
+			Some(&(_, last, _)) => last + ((base - last as i128).rem_euclid(WRAP)) as f64,
 			None => base as f64,
 		};
-		pcrs.push((at, value));
+		pcrs.push((at, value, discontinuity));
 	}
-	let first = pcrs.first().map_or(0.0, |&(_, value)| value);
+	let first = pcrs.first().map_or(0.0, |&(_, value, _)| value);
 	let time = |at: usize| {
-		let k = pcrs.partition_point(|&(index, _)| index <= at).checked_sub(1)?;
-		let (&(a, ta), &(b, tb)) = (pcrs.get(k)?, pcrs.get(k + 1)?);
-		Some(ta + (tb - ta) * (at - a) as f64 / (b - a) as f64)
+		let k = pcrs.partition_point(|&(index, _, _)| index < at).checked_sub(1)?;
+		let (&(a, ta, _), &(b, tb, discontinuity)) = (pcrs.get(k)?, pcrs.get(k + 1)?);
+		// A flagged jump starts after the preceding slot's bytes finished. Spreading it
+		// over those bytes would make media delivered on the old clock look late.
+		let span = if discontinuity {
+			PCR_INTERVAL.as_secs_f64() * 90_000.0
+		} else {
+			tb - ta
+		};
+		Some(ta + span * (at - a) as f64 / (b - a) as f64)
 	};
 	// Each PES: its PID, DTS (else PTS) on the PCRs' unwrapped scale, and its last packet.
 	let mut units: Vec<(u16, f64, usize)> = Vec::new();
@@ -6725,7 +6726,7 @@ struct SiCadenceRig {
 	_broadcast: moq_net::broadcast::Producer,
 }
 
-async fn si_cadence_rig(pid: u16, table_id: u8, interval: Duration) -> SiCadenceRig {
+async fn si_cadence_rig((pid, table_id): (u16, u8), interval: Duration, info: moq_net::track::Info) -> SiCadenceRig {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog = crate::catalog::Producer::new(
@@ -6735,7 +6736,7 @@ async fn si_cadence_rig(pid: u16, table_id: u8, interval: Duration) -> SiCadence
 	.unwrap();
 
 	let si_name = format!("{pid:#06x}-{table_id:#04x}.si");
-	let si_track = broadcast.create_track(si_name.as_str(), timed()).unwrap();
+	let si_track = broadcast.create_track(si_name.as_str(), info).unwrap();
 
 	let avcc = crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(PPS)]).unwrap();
 	let track = broadcast
@@ -6818,7 +6819,7 @@ impl SiCadenceRig {
 #[tokio::test(start_paused = true)]
 async fn si_revision_does_not_wait_for_the_interval() {
 	let tick = |mjd: u8| make_short_section(0x70, &[0xc0, mjd, 0x12, 0x34, 0x56]);
-	let mut rig = si_cadence_rig(0x0014, 0x70, Duration::from_secs(30)).await;
+	let mut rig = si_cadence_rig((0x0014, 0x70), Duration::from_secs(30), timed()).await;
 
 	rig.si_track.write_frame(Timestamp::ZERO, Bytes::from(tick(1))).unwrap();
 	assert_eq!(rig.media(0, 0x0014).await, 0, "the first frame stays buffered");
@@ -6844,7 +6845,7 @@ async fn si_revision_does_not_wait_for_the_interval() {
 async fn si_repeats_ride_the_media_grid() {
 	let sdt_v1 = make_long_section(0x42, 1, 0, 0, 0, &[0xaa; 8]);
 	let sdt_v2 = make_long_section(0x42, 1, 1, 0, 0, &[0xbb; 8]);
-	let mut rig = si_cadence_rig(0x0011, 0x42, Duration::from_secs(2)).await;
+	let mut rig = si_cadence_rig((0x0011, 0x42), Duration::from_secs(2), timed()).await;
 
 	// The lead emission lands wherever this exporter joined.
 	rig.si_track.write_frame(Timestamp::ZERO, Bytes::from(sdt_v1)).unwrap();
@@ -6882,7 +6883,7 @@ async fn si_repeats_ride_the_media_grid() {
 #[tokio::test(start_paused = true)]
 async fn si_clock_tables_do_not_repeat_unchanged() {
 	let tick = |mjd: u8| make_short_section(0x70, &[0xc0, mjd, 0x12, 0x34, 0x56]);
-	let mut rig = si_cadence_rig(0x0014, 0x70, Duration::from_secs(2)).await;
+	let mut rig = si_cadence_rig((0x0014, 0x70), Duration::from_secs(2), timed()).await;
 
 	rig.si_track.write_frame(Timestamp::ZERO, Bytes::from(tick(1))).unwrap();
 	assert_eq!(rig.media(0, 0x0014).await, 0, "the first frame stays buffered");
@@ -6909,7 +6910,7 @@ async fn si_clock_tables_do_not_repeat_unchanged() {
 async fn clock_revisions_wait_for_their_stamped_grid_slots() {
 	for table_id in [0x70, 0x73] {
 		let section = |value| make_short_section(table_id, &[value; 5]);
-		let mut rig = si_cadence_rig(0x0014, table_id, Duration::from_secs(30)).await;
+		let mut rig = si_cadence_rig((0x0014, table_id), Duration::from_secs(30), timed()).await;
 		rig.si_track
 			.write_frame(Timestamp::ZERO, Bytes::from(section(0)))
 			.unwrap();
@@ -6953,6 +6954,93 @@ async fn clock_revisions_wait_for_their_stamped_grid_slots() {
 	}
 }
 
+/// A whole burst arrives without polling between writes. The contract: every clock revision
+/// that stays within the export's delay and the publisher's max age reaches its stamped slot,
+/// and a superseded revision outside either bound may be skipped. With a budget longer than
+/// the burst, both subscriptions keep later revisions while holding the first. Controls below
+/// the burst's span pin which superseded revisions each bound skips today: neither an
+/// unlimited publisher nor a generous reader overrides the other, and the newest always lands.
+#[tokio::test(start_paused = true)]
+async fn queued_clock_revisions_follow_the_exporters_freshness_budgets() {
+	for table_id in [0x70, 0x73] {
+		for (max_age, delay, omitted) in [
+			(None, Duration::ZERO, 2),
+			(None, Duration::from_millis(500), 1),
+			(None, Duration::from_secs(6), 0),
+			(Some(Duration::from_secs(6)), Duration::from_secs(6), 0),
+			(Some(Duration::from_millis(500)), Duration::from_secs(6), 1),
+		] {
+			let section = |value| make_short_section(table_id, &[value; 5]);
+			let mut rig = si_cadence_rig(
+				(0x0014, table_id),
+				Duration::from_secs(30),
+				super::si::track_info(max_age),
+			)
+			.await;
+			rig.catalog
+				.modify()
+				.unwrap()
+				.video
+				.renditions
+				.values_mut()
+				.next()
+				.unwrap()
+				.reorder = Some(0);
+			rig.exporter = rig.exporter.with_delay(delay).with_replay();
+			rig.si_track.write_frame(Timestamp::ZERO, section(0)).unwrap();
+			let mut joining = open_ts(
+				crate::source::announced(&rig._broadcast.consume()).await,
+				crate::catalog::CatalogFormat::Hang,
+			)
+			.await
+			.unwrap()
+			.with_delay(delay)
+			.with_replay();
+			let (mut initial, mut initial_b) = tokio::join!(rig.media_frames(0), drain_frames(&mut joining));
+			let (a, b) = tokio::join!(rig.media_frames(1_000), drain_frames(&mut joining));
+			initial.extend(a);
+			initial_b.extend(b);
+			assert_eq!(count_pid(&initial, 0x0014), 1, "the running export acquired SI");
+			assert_eq!(count_pid(&initial_b, 0x0014), 1, "the joining export acquired SI");
+
+			for (millis, value) in [(2_501, 1), (3_500, 2), (4_501, 3)] {
+				rig.si_track
+					.write_frame(Timestamp::from_millis(millis).unwrap(), section(value))
+					.unwrap();
+			}
+			let (mut a, mut b) = (Vec::new(), Vec::new());
+			for millis in (1_040..=5_520).step_by(40) {
+				let (next_a, next_b) = tokio::join!(rig.media_frames(millis), drain_frames(&mut joining));
+				a.extend(next_a);
+				b.extend(next_b);
+			}
+			for (leg, frames) in [("running", a), ("joining", b)] {
+				let emitted: Vec<_> = frames
+					.iter()
+					.flat_map(|frame| {
+						// SI leads the PES it describes. Video's send-ahead can put that PES
+						// on an earlier PCR slice, so check its media slot from the wire's PTS.
+						let pts = video_pes_timing(&frame.payload).first().map(|(pts, _)| *pts);
+						ts_sections(&frame.payload, 0x0014)
+							.into_iter()
+							.map(move |section| (pts.expect("SI must lead a media PES"), section))
+					})
+					.collect();
+				let mut expected = vec![
+					(3 * 90_000, Bytes::from(section(1))),
+					(4 * 90_000, Bytes::from(section(2))),
+					(5 * 90_000, Bytes::from(section(3))),
+				];
+				expected.drain(..omitted);
+				assert_eq!(
+					emitted, expected,
+					"{leg}, table={table_id:#x}, delay={delay:?}, max_age={max_age:?}"
+				);
+			}
+		}
+	}
+}
+
 /// A reordered (B-frame) timestamp below the emission anchor earns no credit:
 /// `si_due` saturates elapsed time, so a revision arriving there is deferred, the
 /// anchor never moves backwards, and neither revisions nor repeats can fire early
@@ -6960,7 +7048,7 @@ async fn clock_revisions_wait_for_their_stamped_grid_slots() {
 #[tokio::test(start_paused = true)]
 async fn si_reordered_frames_earn_no_emission_credit() {
 	let section = |version: u8| make_long_section(0x42, 1, version, 0, 0, &[version; 8]);
-	let mut rig = si_cadence_rig(0x0011, 0x42, Duration::from_secs(10)).await;
+	let mut rig = si_cadence_rig((0x0011, 0x42), Duration::from_secs(10), timed()).await;
 
 	rig.si_track
 		.write_frame(Timestamp::ZERO, Bytes::from(section(0)))
@@ -7005,7 +7093,7 @@ async fn si_reordered_frames_earn_no_emission_credit() {
 async fn si_anchor_survives_a_zero_interval_reorder() {
 	let section = |version: u8| make_long_section(0x42, 1, version, 0, 0, &[version; 8]);
 	// Zero interval: the table rides every frame, whatever its timestamp.
-	let mut rig = si_cadence_rig(0x0011, 0x42, Duration::ZERO).await;
+	let mut rig = si_cadence_rig((0x0011, 0x42), Duration::ZERO, timed()).await;
 
 	rig.si_track
 		.write_frame(Timestamp::ZERO, Bytes::from(section(0)))
@@ -7060,7 +7148,7 @@ async fn si_rapid_revisions_are_rate_bounded() {
 				make_short_section(table_id, &[version; 5])
 			}
 		};
-		let mut rig = si_cadence_rig(pid, table_id, Duration::from_secs(30)).await;
+		let mut rig = si_cadence_rig((pid, table_id), Duration::from_secs(30), timed()).await;
 
 		let mut emitted = 0;
 		for i in 0..13u8 {
@@ -8371,70 +8459,138 @@ async fn jitter_published_after_the_tables_keeps_the_encoders_clock() {
 	assert_decodes_after_the_clock(&runner);
 }
 
-/// A group the consumer skips (here one that never arrives) leaves the timeline where it was,
-/// so the export keeps its clock: the program clock runs on with no break flagged, and a
-/// frame the wait made late would be dropped like any other.
+/// A delivery skip flags the next PCR without changing the program or its release clock.
+/// Short holes keep the grid continuous; long ones exceed the scheduler's backfill window.
 #[tokio::test(start_paused = true)]
-async fn a_skipped_group_keeps_the_clock() {
-	use crate::container::Container as _;
-
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let consumer = broadcast.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
-	let track = broadcast
-		.create_track("a.aac", hang::container::track_info(hang::catalog::PRIORITY.audio))
-		.unwrap();
-	{
-		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
-		cfg.description = Some(Bytes::from_static(&[0x11, 0x90]));
-		cfg.container = Container::Legacy;
-		catalog
-			.modify()
-			.unwrap()
-			.audio
-			.renditions
-			.insert("a.aac".to_string(), cfg);
-	}
-
-	let delay = Duration::from_millis(500);
-	let mut export = open_export(crate::source::announced(&consumer).await)
-		.await
-		.unwrap()
-		.with_delay(delay);
-	let start = kio::clock::now();
-	let mut out = Vec::new();
-	// 100 ms groups of five 20 ms frames, a minute in; group 20 never arrives.
-	for sequence in 0..60u64 {
-		kio::clock::sleep_until(start + Duration::from_millis(sequence * 100)).await;
-		if sequence != 20 {
-			let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
-			for k in 0..5u64 {
-				let frame = Frame {
-					timestamp: Timestamp::from_millis(60_000 + sequence * 100 + k * 20).unwrap(),
-					duration: None,
-					payload: Bytes::from_static(&[0x21, 0x10, 0x04, 0x60]),
-					keyframe: k == 0,
-				};
-				HangContainer::Legacy(crate::container::Kind::Audio)
-					.write(&mut group, &[frame])
-					.unwrap();
+async fn a_skipped_group_flags_the_clock() {
+	let cases = [Duration::ZERO, Duration::from_millis(500)]
+		.into_iter()
+		.flat_map(|delay| [None, Some(1_000_000)].map(|rate| (delay, rate)));
+	for (delay, rate) in cases {
+		for missing in [0, 1, 60u64] {
+			println!("delay {delay:?}, mux rate {rate:?}, missing {missing} groups per hole");
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let consumer = broadcast.consume();
+			let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+			let track = broadcast
+				.create_track("a.aac", hang::container::track_info(hang::catalog::PRIORITY.audio))
+				.unwrap();
+			{
+				let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+				cfg.description = Some(Bytes::from_static(&[0x11, 0x90]));
+				cfg.container = Container::Legacy;
+				catalog
+					.modify()
+					.unwrap()
+					.audio
+					.renditions
+					.insert("a.aac".to_string(), cfg);
 			}
-			group.finish().unwrap();
-		}
-		out.extend(poll_frames(&mut export));
-	}
-	track.finish().unwrap();
-	out.extend(drain_frames(&mut export).await);
 
-	assert_eq!(export.discontinuity(), 0, "a skipped group is not a new program clock");
-	assert_eq!(count_discontinuity(&out), 0, "no PCR break is flagged");
-	let ts: Vec<u8> = out.iter().flat_map(|f| f.payload.iter().copied()).collect();
-	let (_, audio) = collect_pes_pts(&ts);
+			let mut export = open_export(crate::source::announced(&consumer).await)
+				.await
+				.unwrap()
+				.with_delay(delay);
+			if let Some(rate) = rate {
+				export = export.with_mux_rate(rate);
+			}
+			let start = kio::clock::now();
+			let mut out = Vec::new();
+			// 100 ms groups of five 20 ms frames, a minute in, with two short or long holes.
+			for sequence in 0..80 + 2 * missing {
+				kio::clock::sleep_until(start + Duration::from_millis(sequence * 100)).await;
+				if !(20..20 + missing).contains(&sequence) && !(40 + missing..40 + 2 * missing).contains(&sequence) {
+					let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+					for k in 0..5u64 {
+						let frame = Frame {
+							timestamp: Timestamp::from_millis(60_000 + sequence * 100 + k * 20).unwrap(),
+							duration: None,
+							payload: Bytes::from_static(&[0x21, 0x10, 0x04, 0x60]),
+							keyframe: k == 0,
+						};
+						HangContainer::Legacy(crate::container::Kind::Audio)
+							.write(&mut group, &[frame])
+							.unwrap();
+					}
+					group.finish().unwrap();
+				}
+				out.extend(poll_frames(&mut export));
+			}
+			track.finish().unwrap();
+			out.extend(drain_frames(&mut export).await);
+
+			assert_eq!(export.discontinuity(), 0, "a skipped group is not a new program clock");
+			assert_skip_discontinuity(&out, 2 * usize::from(missing > 0));
+			let ts: Vec<u8> = out.iter().flat_map(|f| f.payload.iter().copied()).collect();
+			// Each flag lands right before the audio that resumes after its hole.
+			let resumes: Vec<u64> = [20 + missing, 40 + 2 * missing]
+				.into_iter()
+				.filter(|_| missing > 0)
+				.map(|sequence| (60_000 + sequence * 100) * 90)
+				.collect();
+			let mut reader = TsPacketReader::new(Cursor::new(&ts));
+			let (mut flagged, mut after) = (false, Vec::new());
+			while let Some(packet) = reader.read_ts_packet().unwrap() {
+				flagged |= packet
+					.adaptation_field
+					.is_some_and(|field| field.discontinuity_indicator);
+				if let Some(TsPayload::PesStart(pes)) = packet.payload
+					&& std::mem::take(&mut flagged)
+				{
+					after.extend(pes.header.pts.map(|pts| pts.as_u64()));
+				}
+			}
+			assert_eq!(after, resumes, "the first PES after each flag resumes its hole");
+			let (_, audio) = collect_pes_pts(&ts);
+			assert!(
+				audio.iter().any(|&pts| pts >= (60_000 + (70 + 2 * missing) * 100) * 90),
+				"the audio after the skip went out"
+			);
+			assert_on_time(&out);
+		}
+	}
+}
+
+/// A same-program skip changes only the next PCR's flag, including across a backfilled gap.
+fn assert_skip_discontinuity(frames: &[Frame], count: usize) {
+	assert_eq!(count_discontinuity(frames), count, "only one PCR per skip is flagged");
 	assert!(
-		audio.iter().any(|&pts| pts >= (60_000 + 5_000) * 90),
-		"the audio after the skip went out"
+		pats(frames).iter().all(|&(version, _)| version == 0),
+		"the PAT keeps its version"
 	);
-	assert_on_time(&out);
+	assert!(
+		pmts(frames).iter().all(|(version, _)| *version == 0),
+		"the PMT keeps its version"
+	);
+	let mut health = super::health::Health::default();
+	let mut continuity = super::health::Multiplex::default();
+	let ts: Vec<u8> = frames.iter().flat_map(|f| f.payload.iter().copied()).collect();
+	let mut reader = TsPacketReader::new(Cursor::new(&ts));
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		if let Some(TsPayload::Pmt(pmt)) = packet.payload {
+			health.pcr_pid(pmt.pcr_pid.map(|pid| pid.as_u16()));
+			break;
+		}
+	}
+	let start = kio::clock::Instant::now();
+	for (count, packet) in ts.as_chunks::<188>().0.iter().enumerate() {
+		if packet[3] & 0x20 != 0 && packet[4] > 0 && packet[5] & 0x80 != 0 {
+			assert_ne!(packet[5] & 0x10, 0, "a skip flags only a PCR packet");
+		}
+		let continuation = continuity.packet(packet);
+		health.packet(
+			packet,
+			continuation,
+			super::health::At {
+				count: count as u64 + 1,
+				arrival: start,
+			},
+		);
+	}
+	let mut stats = stats::Snapshot::default();
+	health.errors().report(&mut stats);
+	assert_eq!(stats.pcr_discontinuity_indicator_error, 0, "no unflagged PCR jump");
+	assert_eq!(stats.pcr_repetition_error, 0, "no unflagged gap after the flagged PCR");
 }
 
 /// Timestamps restarting within one broadcast are a publisher bug, since a name always
@@ -8678,8 +8834,8 @@ async fn moved_export(
 
 /// A rendition the catalog moves to another track, in its broadcast or a sibling one, goes on
 /// out of the PID the PMT announced, with that track's media and none of the one it left. The
-/// continuity counters run on, and the move onto the same clock is no break. Its parameter sets
-/// ride in-band, so the new track may carry another SPS.
+/// continuity counters run on, and only the PCR flags the media skipped by the move. Its
+/// parameter sets ride in-band, so the new track may carry another SPS.
 #[tokio::test(start_paused = true)]
 async fn a_moved_rendition_continues_on_its_pid() {
 	use crate::container::test_util::{Moving, marks};
@@ -8696,11 +8852,7 @@ async fn a_moved_rendition_continues_on_its_pid() {
 			"the new track's parameter sets go out in-band"
 		);
 		assert_eq!(continuity_errors(&frames), 0);
-		assert_eq!(
-			count_discontinuity(&frames),
-			0,
-			"a move onto the same clock is no break"
-		);
+		assert_skip_discontinuity(&frames, 1);
 		assert!(
 			pmts(&frames).iter().all(|(version, _)| *version == 0),
 			"the PMT stays as announced"
@@ -8890,8 +9042,8 @@ fn unflagged(frames: &[Frame]) -> Vec<u16> {
 }
 
 /// The same instance back after every route went carries on in the same export, under the
-/// program already announced: the PSI keeps its version, and nothing flags a break across a
-/// gap the clock spans. Both ways a broadcast ends, a clean finish and a drop, continue alike.
+/// program already announced: the PSI keeps its version, and only the PCR flags the gap.
+/// Both ways a broadcast ends, a clean finish and a drop, continue alike.
 async fn same_instance_returns(finish: bool) {
 	let origin = crate::source::produce_origin();
 	let instance = moq_net::Instance::random();
@@ -8929,6 +9081,7 @@ async fn same_instance_returns(finish: bool) {
 		.unwrap()
 		.available()
 		.await
+		.unwrap()
 		.unwrap();
 	let stream = crate::catalog::Consumer::new(&back, Default::default()).await.unwrap();
 	let mut export = export.follow(back, stream).unwrap();
@@ -8946,7 +9099,7 @@ async fn same_instance_returns(finish: bool) {
 	end.unwrap();
 
 	assert_eq!(pes_count(&frames), 20, "every frame of both spans went out");
-	assert_eq!(count_discontinuity(&frames), 0, "a gap the clock spans is no break");
+	assert_skip_discontinuity(&frames, 1);
 	assert_eq!(export.discontinuity(), 0);
 	assert!(
 		pats(&frames).iter().all(|&(version, _)| version == 0),
@@ -9011,6 +9164,7 @@ async fn a_return_keeps_catalog_and_group_history() {
 		.unwrap()
 		.available()
 		.await
+		.unwrap()
 		.unwrap();
 	assert_eq!(back.info().instance.as_ref(), Some(&instance));
 	assert!(!back.is_clone(&old), "the withdrawn front is replaced");
@@ -9030,7 +9184,7 @@ async fn a_return_keeps_catalog_and_group_history() {
 	frames.extend(rest);
 	end.expect("the publisher's final finish is clean");
 	assert_eq!(pes_count(&frames), 20, "each span goes out exactly once");
-	assert_eq!(count_discontinuity(&frames), 0);
+	assert_skip_discontinuity(&frames, 1);
 	assert_eq!(export.discontinuity(), 0);
 	assert!(pats(&frames).iter().all(|&(version, _)| version == 0));
 	assert!(pmts(&frames).iter().all(|(version, _)| *version == 0));
@@ -9295,6 +9449,7 @@ async fn export_stats_count_only_returned_output() {
 		.unwrap()
 		.available()
 		.await
+		.unwrap()
 		.unwrap();
 	let stream = crate::catalog::Consumer::new(&back, Default::default()).await.unwrap();
 	let mut export = export.follow(back, stream).unwrap();
@@ -10270,8 +10425,8 @@ async fn drain_follower(follower: &mut super::Follower) -> (Vec<Frame>, Option<c
 
 /// The route going and another of the same instance taking over after a gap that ended the
 /// export's request, with the follower unpolled across it, is its own instance returning: the
-/// export carries on through the new route under the program already announced, with no break
-/// flagged.
+/// export carries on through the new route under the program already announced, flagging
+/// only the next PCR after the skip.
 #[tokio::test(start_paused = true)]
 async fn a_follower_continues_through_a_same_instance_handoff_after_a_gap() {
 	let origin = crate::source::produce_origin();
@@ -10320,7 +10475,7 @@ async fn a_follower_continues_through_a_same_instance_handoff_after_a_gap() {
 	);
 
 	assert_eq!(pes_count(&frames), 20, "every frame of both routes went out");
-	assert_eq!(count_discontinuity(&frames), 0, "the same instance is no break");
+	assert_skip_discontinuity(&frames, 1);
 	assert_eq!(follower.export().discontinuity(), 0);
 	assert!(
 		pats(&frames).iter().all(|&(version, _)| version == 0),
@@ -11436,6 +11591,7 @@ async fn a_track_renamed_on_its_pid_across_returns_retires_the_one_before() {
 			.unwrap()
 			.available()
 			.await
+			.unwrap()
 			.unwrap();
 		let stream = crate::catalog::Consumer::new(&back, Default::default()).await.unwrap();
 		export = export.follow(back, stream).unwrap();
@@ -11502,6 +11658,7 @@ async fn a_track_renamed_on_its_pid_across_a_return_is_quiet_from_its_listing() 
 		.unwrap()
 		.available()
 		.await
+		.unwrap()
 		.unwrap();
 	let stream = crate::catalog::Consumer::new(&back, Default::default()).await.unwrap();
 	let mut export = export.follow(back, stream).unwrap();
@@ -11908,6 +12065,7 @@ async fn an_expired_follow_stops_healthy_input_but_drains_its_buffered_tail() {
 				.unwrap()
 				.available()
 				.await
+				.unwrap()
 				.unwrap();
 			let stream = crate::catalog::Consumer::new(&target, Default::default())
 				.await
@@ -12065,6 +12223,7 @@ async fn a_replacement_leaving_before_it_commits_keeps_the_old_program() {
 				.unwrap()
 				.available()
 				.await
+				.unwrap()
 				.unwrap();
 			let stream = crate::catalog::Consumer::new(&target, Default::default())
 				.await
@@ -12195,6 +12354,7 @@ async fn an_empty_finished_replacement_drains_the_old_program() {
 		.unwrap()
 		.available()
 		.await
+		.unwrap()
 		.unwrap();
 	let stream = crate::catalog::Consumer::new(&replacement, Default::default())
 		.await
@@ -12253,6 +12413,7 @@ async fn cold_same_instance_return(pending: bool) {
 			.unwrap()
 			.available()
 			.await
+			.unwrap()
 			.unwrap();
 		let stream = crate::catalog::Consumer::new(&target, Default::default())
 			.await
@@ -12283,6 +12444,7 @@ async fn cold_same_instance_return(pending: bool) {
 		.unwrap()
 		.available()
 		.await
+		.unwrap()
 		.unwrap();
 	let stream = crate::catalog::Consumer::new(&target, Default::default())
 		.await

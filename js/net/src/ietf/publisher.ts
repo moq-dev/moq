@@ -6,11 +6,9 @@ import type { AuthSession } from "../auth_session.ts";
 import { enforceGrant } from "../auth_session.ts";
 import type * as broadcast from "../broadcast.ts";
 import { Withdrawal } from "../connection/withdrawal.ts";
-import * as DatagramStream from "../datagram_stream.ts";
 import {
 	controlTimeout,
 	error,
-	NoStreamCredit,
 	NotFound,
 	ProtocolViolation,
 	reason,
@@ -31,6 +29,7 @@ import { type Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import type { Groups, Info, Range, Position as TrackPosition, Subscriber as TrackSubscriber } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
+import { toNumber } from "../util/bigint.ts";
 import { nextChange } from "../util/change.ts";
 import { Deadline, REQUEST_TIMEOUT_MS } from "../util/deadline.ts";
 import { GivenUp } from "../util/given_up.ts";
@@ -39,7 +38,6 @@ import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import * as Varint from "../varint.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
 import * as Cluster from "./cluster.ts";
-import { encodeDatagram } from "./datagram.ts";
 import { requestReason } from "./error.ts";
 import { type Fetch, FetchHeader, FetchOk, type FetchType } from "./fetch.ts";
 import * as Filter from "./filter.ts";
@@ -325,10 +323,6 @@ export class Publisher {
 	// Bumped on every change to #joins, which a waiting joining FETCH rechecks.
 	#joinsChanged = new Signal(0);
 
-	// The one writer for the outbound datagram stream, shared by every subscription since a
-	// second getWriter would throw. Undefined when the transport carries no datagrams, which
-	// turns them off: there is no stream fallback. Released in close().
-	#datagramWriter?: WritableStreamDefaultWriter<Uint8Array>;
 	#hidden: boolean;
 	// Whether a SUBSCRIBE_NAMESPACE's REQUEST_OK counts the NAMESPACEs that follow it (MoQ Active Count).
 	#activeCount: boolean;
@@ -414,19 +408,10 @@ export class Publisher {
 		this.#hidden = hidden;
 		this.#activeCount = activeCount;
 		this.#advert = Cluster.advertise(cluster);
-		this.#datagramWriter = DatagramStream.datagramWriter(quic);
 	}
 
-	/**
-	 * Release the datagram writer's lock so the transport can be torn down. The broadcasts
-	 * belong to the origin, which outlives this session.
-	 *
-	 * @internal
-	 */
-	close() {
-		this.#datagramWriter?.releaseLock();
-		this.#datagramWriter = undefined;
-	}
+	/** The origin owns broadcasts; transport teardown ends this publisher's served requests. @internal */
+	close(): void {}
 
 	/**
 	 * Handles an incoming SUBSCRIBE request on a bidi stream.
@@ -948,10 +933,6 @@ export class Publisher {
 				}
 			})();
 
-			// Datagrams count toward no stream, so PUBLISH_DONE never waits on them; closing
-			// the track below ends the loop.
-			void this.#runDatagrams({ requestId: msg.requestId, track, timescale, publisherPriority, range });
-
 			// Losing the grant ends the subscription, leaving the session alone.
 			let revoke!: () => void;
 			const revoked = new Promise<"revoked">((resolve) => {
@@ -1111,12 +1092,10 @@ export class Publisher {
 		// group mid-write, which abandons the stream. A group already given up never starts the write.
 		const givenUp = new GivenUp(group);
 		try {
-			// One stream per group is faster than a peer at its limit can retire them, so this
-			// is the one path that doesn't wait for a slot: the transport would serve the opens
-			// in the order we asked, not the subscription's order. Failing here drops the group
-			// and lets the next one compete for the next slot.
-			// Watch the group while the transport parks the open, and release that watch
-			// once the open settles. tryOpen owns resetting a slot that arrives too late.
+			// Opens wait for stream credit in send order, and the place ranks this one against
+			// the subscription's other groups while it waits.
+			// Watch the group while the open waits, and release that watch once it settles.
+			const place = ranking.reserve(group.sequence, slice.skip);
 			const opened = Promise.withResolvers<void>();
 			let failure: Error | undefined;
 			const abandoned = givenUp
@@ -1128,15 +1107,15 @@ export class Publisher {
 			try {
 				stream = await Writer.tryOpen(this.#quic, {
 					version: this.#session.version,
-					sendOrder: ranking.rank(group.sequence, slice.skip),
+					sendOrder: place.rank,
 					cancel: race([unsubscribed, abandoned, excluded.promise]),
-					waitUntilAvailable: false,
 				});
 			} finally {
 				opened.resolve();
+				place.release();
 			}
 			if (!stream) {
-				hooks.releaseGroupReader(group, failure ?? new Error("no stream slot"));
+				hooks.releaseGroupReader(group, failure ?? new Error("unsubscribed while waiting for a stream"));
 				return;
 			}
 			streams.opened += 1;
@@ -1146,7 +1125,7 @@ export class Publisher {
 			const header = new GroupMessage({
 				trackAlias: requestId,
 				groupId: group.sequence,
-				subGroupId: 0,
+				subGroupId: 0n,
 				publisherPriority,
 				flags: {
 					// The object properties carry the timestamp, so there is nothing to write
@@ -1274,51 +1253,6 @@ export class Publisher {
 		}
 	}
 
-	/**
-	 * Send a track's datagrams as OBJECT_DATAGRAMs, best-effort, like moq-lite.
-	 *
-	 * One that does not fit the transport's limit is dropped; there is no stream fallback. A
-	 * send failure stops the loop but never fails the subscription.
-	 */
-	async #runDatagrams(options: {
-		requestId: bigint;
-		track: TrackSubscriber;
-		/** The units datagrams are stamped in, if any; see {@link RunGroup.timescale}. */
-		timescale: Timescale | undefined;
-		publisherPriority: number;
-		range: ServeRange;
-	}) {
-		const writer = this.#datagramWriter;
-		if (!writer) return;
-		const { requestId, track, timescale, publisherPriority, range } = options;
-		const version = this.#session.version;
-
-		try {
-			for (;;) {
-				const datagram = await track.recvDatagram();
-				if (!datagram) return;
-				// A model datagram is object 0 of its group, subject to the reliable slice.
-				if (groupSlice(range, datagram.sequence).skip > 0) continue;
-
-				const body = await encodeDatagram(
-					datagram,
-					{ trackAlias: requestId, publisherPriority, timescale },
-					version,
-				);
-				const max = DatagramStream.maxDatagramSize(this.#quic);
-				if (body.byteLength > max) {
-					console.debug(`dropping oversize datagram: alias=${requestId} size=${body.byteLength} max=${max}`);
-					continue;
-				}
-
-				await writer.ready;
-				await writer.write(body);
-			}
-		} catch (err: unknown) {
-			console.debug(`datagram send stopped: alias=${requestId} error=${reason(error(err))}`);
-		}
-	}
-
 	/** Preserve the original terminal on a separate stream when its group already sent FIN. */
 	async #runEndOfTrack(options: {
 		requestId: bigint;
@@ -1337,7 +1271,7 @@ export class Publisher {
 			const header = new GroupMessage({
 				trackAlias: requestId,
 				groupId: final.group,
-				subGroupId: 0,
+				subGroupId: 0n,
 				publisherPriority,
 				flags: {
 					hasExtensions: false,
@@ -1376,7 +1310,7 @@ export class Publisher {
 
 			// A fill we cannot serve is reset right after its header, so it needs no rank.
 			const sequence = fill.kind === "group" ? fill.start.group : undefined;
-			const object = fill.kind === "group" ? Number(fill.start.object) : 0;
+			const object = fill.kind === "group" ? frameBound(fill.start.object) : 0;
 			stream = await Writer.tryOpen(this.#quic, {
 				cancel: unsubscribed,
 				version,
@@ -1879,7 +1813,7 @@ export class Publisher {
 	#refusal(err: RequestError): Answer {
 		return err.retryInterval === 0n
 			? "never"
-			: Instant.add(now(), Nano.fromMilli(Milli(Number(err.retryInterval))));
+			: Instant.add(now(), Nano.fromMilli(Milli(toNumber(err.retryInterval))));
 	}
 
 	/**
@@ -1909,7 +1843,7 @@ export class Publisher {
 			const deadline = new Deadline();
 			const answer = await deadline.wait(
 				(async (): Promise<Answer> => {
-					const opened = await RequestStream.open(this.#session, deadline, this.#quic);
+					const opened = await RequestStream.open(this.#session, deadline, { quic: this.#quic });
 					request = opened;
 					const version = this.#session.version;
 					const token = this.#auth?.carried(auth);
@@ -1953,9 +1887,7 @@ export class Publisher {
 			const e = err instanceof TimeoutError ? controlTimeout(err) : error(err);
 			console.warn(`announce failed: broadcast=${path} error=${reason(e)}`);
 			request?.abort(e);
-			return e instanceof NoStreamCredit || (e instanceof StreamError && e.code === StreamCode.ControlTimeout)
-				? "never"
-				: "dropped";
+			return e instanceof StreamError && e.code === StreamCode.ControlTimeout ? "never" : "dropped";
 		}
 	}
 
@@ -2232,7 +2164,8 @@ export class Publisher {
 
 	/**
 	 * Handles an incoming FETCH on a bidi stream: a range of the named track, or a joining
-	 * FETCH's head of its subscription's group, answered from the cache.
+	 * FETCH's head of its subscription's group. A named range missing from the cache asks
+	 * the producer's request handler; a joining head must already be cached.
 	 *
 	 * @internal
 	 */
@@ -2242,7 +2175,8 @@ export class Publisher {
 	}
 
 	async #runFetch(msg: Fetch, request: RequestStream) {
-		// FILL_TIMEOUT is accepted and ignored: a one-group read ends with the group.
+		// FILL_TIMEOUT does not truncate a group or time out its application fill. Both remain
+		// wanted until answered, refused, or cancelled by the requester or its grant.
 		const version = this.#session.version;
 		const type = msg.type;
 		const named = type.kind === "standalone" || type.kind === "filtered" ? type : undefined;
@@ -2341,8 +2275,8 @@ export class Publisher {
 	}
 
 	/**
-	 * Resolve a standalone or draft-22 FETCH to its group reader and end metadata,
-	 * or the refusal to answer with.
+	 * Resolve a standalone or draft-22 FETCH to its group reader and end metadata, filling
+	 * uncached history through the producer's request handler, or the refusal to answer with.
 	 *
 	 * A whole-group request waits for the group to finish, so a downstream cache never
 	 * mistakes a prefix for a complete group.
@@ -2386,9 +2320,8 @@ export class Publisher {
 
 		const broadcast = await this.#resolve(named.trackNamespace, signal);
 		const priority = fromWire(msg.subscriberPriority);
-		const cache = broadcast
-			.track(named.trackName)
-			.subscribe({ priority, delay: { max: Milli(Varint.MAX_U53), min: null } });
+		const track = broadcast.track(named.trackName);
+		const cache = track.subscribe({ priority, delay: { max: Milli(Varint.MAX_U53), min: null } });
 		let answer: FetchAnswer | undefined;
 		try {
 			const info = await untilAborted(cache.info(), signal);
@@ -2420,8 +2353,10 @@ export class Publisher {
 			}
 
 			const selected = range.start.group;
-			const group = hooks.cachedGroup(cache, selected);
-			if (!group) return { condition: "does_not_exist", reasonPhrase: `group ${range.start.group}` };
+			// A relayed track may hold the group even when its upstream cannot FETCH. Only a
+			// cache miss asks the producer's handler or fetches the group from its serving route.
+			const group =
+				hooks.cachedGroup(cache, selected) ?? (await track.fetchGroup(selected, { priority, signal }));
 			const slice = fetchSlice(range, selected);
 			// Wait for the selected headers or the group's end, through this reader's recovery
 			// and verdict. The reader holds only the normal tail, not a copied slice.
@@ -2541,7 +2476,7 @@ export class Publisher {
 		if (!group) return unavailable;
 		// The saved Largest Object proves this prefix's headers exist. Do not read their
 		// payloads ahead: eviction after FETCH_OK fails the stream, as for a live subgroup.
-		if (hooks.groupFate(group)() || hooks.groupIndex(group) !== 0 || group.frameCount < Number(end.object)) {
+		if (hooks.groupFate(group)() || hooks.groupIndex(group) !== 0 || group.frameCount < frameBound(end.object)) {
 			group.close();
 			return unavailable;
 		}
@@ -2550,7 +2485,7 @@ export class Publisher {
 			owned: false,
 			range: { start: { group: end.group, object: 0n }, end },
 			group,
-			slice: { skip: 0, until: Number(end.object) },
+			slice: { skip: 0, until: frameBound(end.object) },
 			// Where the subscription starts, never the end of the track.
 			ok: new FetchOk({ endOfTrack: false, endLocation: end, properties: join.properties }),
 			timescale: join.timescale,
@@ -2583,7 +2518,7 @@ export class Publisher {
 			});
 			stream = await Writer.tryOpen(this.#quic, { version, sendOrder: answer.sendOrder, cancel: stopped });
 			if (!stream) throw stop.reason ?? new Error("fetch stream failed to open");
-			ranking?.add(stream, range.start.group, safe(range.start.object));
+			ranking?.add(stream, range.start.group, frameBound(range.start.object));
 			await untilAborted(new FetchHeader({ requestId: msg.requestId }).encode(stream, version), stop);
 
 			const out = new FetchWriter({ stream, version, timescale, priority: publisherPriority });
@@ -2735,8 +2670,10 @@ interface FetchAnswer {
 	ranking?: Priority;
 }
 
-/** A wire object ID as a model frame index, saturating past what the model can name. */
-function safe(object: bigint): number {
+// A filter keeps its peer-chosen Object IDs as bigint. Its derived frame selection
+// bound can stop at the model's count ceiling: no object exists at or above it,
+// so clamping either a skip or an exclusive end selects exactly the same frames.
+function frameBound(object: bigint): number {
 	return object > BigInt(Number.MAX_SAFE_INTEGER) ? Number.MAX_SAFE_INTEGER : Number(object);
 }
 
@@ -2762,8 +2699,8 @@ function fetchStart(filter: Filter.Filter, largest: Location): Location {
 /** The slice of one group a {@link FetchRange} selects. */
 function fetchSlice(range: FetchRange, sequence: bigint): GroupSlice {
 	return {
-		skip: range.start.group === sequence ? safe(range.start.object) : 0,
-		until: range.end.group === sequence && range.end.object > 0n ? safe(range.end.object) : undefined,
+		skip: range.start.group === sequence ? frameBound(range.start.object) : 0,
+		until: range.end.group === sequence && range.end.object > 0n ? frameBound(range.end.object) : undefined,
 	};
 }
 
@@ -2987,9 +2924,11 @@ function filterRange(filter: Filter.Filter, edge: LiveEdge): ServeRange {
  */
 function groupSlice(range: ServeRange, sequence: bigint): GroupSlice {
 	return {
-		skip: range.start?.group === sequence ? Number(range.start.object) : 0,
+		skip: range.start?.group === sequence ? frameBound(range.start.object) : 0,
 		until:
-			range.end?.group === sequence && range.end.object !== undefined ? Number(range.end.object) + 1 : undefined,
+			range.end?.group === sequence && range.end.object !== undefined
+				? frameBound(range.end.object + 1n)
+				: undefined,
 	};
 }
 

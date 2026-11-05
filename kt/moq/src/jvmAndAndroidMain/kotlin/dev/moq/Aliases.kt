@@ -92,33 +92,20 @@ typealias Following = uniffi.moq.MoqFollowing
 typealias Announce = uniffi.moq.MoqAnnounce
 
 /**
- * What an [AnnounceConsumer] yields: [AnnounceEventStart], [AnnounceEventUpdate],
- * [AnnounceEventEnd], [AnnounceEventRestart], or [AnnounceEventTakeover].
+ * What an [AnnounceConsumer] yields: [AnnounceEventPresent] or [AnnounceEventAbsent].
+ *
+ * Another publisher instance taking a path over keeps it present: hold a [Following] to see the
+ * broadcast change.
  */
 typealias AnnounceEvent = uniffi.moq.MoqAnnounceEvent
 
 // Kotlin cannot reach a sealed class's subtypes through its typealias, so each
 // variant gets its own.
-/** A route now covers the prefix; the stream had none there. */
-typealias AnnounceEventStart = uniffi.moq.MoqAnnounceEvent.Start
+/** A route now covers the path, which was absent. */
+typealias AnnounceEventPresent = uniffi.moq.MoqAnnounceEvent.Present
 
-/** The route covering the prefix changed hops or cost. */
-typealias AnnounceEventUpdate = uniffi.moq.MoqAnnounceEvent.Update
-
-/** No route covers the prefix any more; carries its last route. */
-typealias AnnounceEventEnd = uniffi.moq.MoqAnnounceEvent.End
-
-/**
- * Another publisher instance now serves the prefix: drop what was resolved under it and request
- * afresh.
- */
-typealias AnnounceEventRestart = uniffi.moq.MoqAnnounceEvent.Restart
-
-/**
- * A route now covers the prefix and continues what the route at `predecessor` served beneath it:
- * keep what was resolved through that one.
- */
-typealias AnnounceEventTakeover = uniffi.moq.MoqAnnounceEvent.Takeover
+/** No route covers the path any more; carries its last route. */
+typealias AnnounceEventAbsent = uniffi.moq.MoqAnnounceEvent.Absent
 
 // Broadcast / track / group producers and consumers.
 /** The write side of a broadcast: publish tracks into it. */
@@ -159,7 +146,7 @@ typealias GroupProducer = uniffi.moq.MoqGroupProducer
 typealias GroupConsumer = uniffi.moq.MoqGroupConsumer
 
 // Data types.
-/** A datagram-delivered frame, tagged with a per-track sequence number. */
+/** A datagram payload with its own sequence and optional timestamp. */
 typealias Datagram = uniffi.moq.MoqDatagram
 
 /** A payload plus the timestamp it should be presented at. */
@@ -288,6 +275,15 @@ typealias BandwidthConsumer = uniffi.moq.MoqBandwidthConsumer
 /** One track's standing claim on an [Allocator]. */
 typealias Reservation = uniffi.moq.MoqReservation
 
+/** Divides one connection's receive estimate among the broadcasts watched over it. */
+typealias Viewers = uniffi.moq.MoqViewers
+
+/**
+ * One watched broadcast's standing claim on [Viewers]; holding it requests PROBE, closing it
+ * releases the claim.
+ */
+typealias Viewer = uniffi.moq.MoqViewer
+
 /** Turns a [Reservation]'s grant into a sender's [RateTarget]; call `update` on every frame. */
 typealias RateControl = uniffi.moq.MoqRateControl
 
@@ -332,3 +328,18 @@ typealias ProtocolError = uniffi.moq.MoqProtocolError
 // variants still need the full name (`uniffi.moq.MoqContainer.Loc`). Enums
 // (AudioFormat) are fine: entry access through the alias works. Objects
 // (AudioCodec) expose constructors through the alias (`AudioCodec.opus()`).
+
+/** Writes live datagrams with an independent sequence counter and no cache. */
+typealias DatagramProducer = uniffi.moq.MoqDatagramProducer
+
+/** Reads a live datagram track in arrival order from its own cursor. */
+typealias DatagramConsumer = uniffi.moq.MoqDatagramConsumer
+
+/** A requested datagram track awaiting acceptance or rejection. */
+typealias DatagramRequest = uniffi.moq.MoqDatagramRequest
+
+/** Serves on-demand datagram tracks through their own request queue. */
+typealias DatagramRequests = uniffi.moq.MoqDatagramRequests
+
+/** Publisher priority and optional timestamp scale fixed for a datagram track. */
+typealias DatagramInfo = uniffi.moq.MoqDatagramInfo

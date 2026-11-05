@@ -22,7 +22,7 @@ export { assets } from "./assets";
 export * as Audio from "./audio";
 export * from "./broadcast";
 export * from "./player";
-export * from "./sync";
+export { type Delay, Sync, type SyncInput, type SyncOutput } from "./sync";
 /** Caption and subtitle playback. */
 export * as Text from "./text";
 /** Video rendition selection, decoding, and rendering. */

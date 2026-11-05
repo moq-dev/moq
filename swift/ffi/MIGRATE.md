@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Separate datagram tracks
+
+Generated bindings now expose separate `MoqDatagramProducer`, `MoqDatagramConsumer`, `MoqDatagramInfo`, `MoqDatagramRequest`, and `MoqDatagramRequests` types. Create or subscribe through the broadcast's datagram methods, write with `append` / `insert`, and read with `recv`; stream-track datagram methods are removed. Demand is aggregate subscriber priority, and the broadcast request handler has a separate `datagrams` queue. Regenerate and rebuild native bindings together with your wrapper.
+
 ### Follow the core API migration guide
 
 These bindings are generated from moq-ffi. Apply every change in the

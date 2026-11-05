@@ -25,6 +25,13 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	producer
 }
 
+/// A millisecond track with no publisher max age, so ranges reach its superseded groups.
+fn timed() -> Info {
+	Info::default()
+		.with_timescale(moq_net::Timescale::MILLI)
+		.with_max_age(None)
+}
+
 fn write_group(track: &moq_net::track::Producer, sequence: u64) {
 	let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
 	group.write_frame(Timestamp::now(), &b"x"[..]).unwrap();
@@ -62,9 +69,7 @@ async fn subscribe(remote: &moq_net::broadcast::Consumer, subscription: Subscrip
 async fn ahead_then_live(version: Option<&str>, relay: bool) -> (Vec<u64>, Vec<u64>) {
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
-	let track = broadcast
-		.create_track("quiet", Info::default().with_timescale(moq_net::Timescale::MILLI))
-		.unwrap();
+	let track = broadcast.create_track("quiet", timed()).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 	for sequence in 0..=3 {
 		write_group(&track, sequence);
@@ -96,6 +101,7 @@ async fn ahead_then_live(version: Option<&str>, relay: bool) -> (Vec<u64>, Vec<u
 				.await
 				.expect("resolve timeout")
 				.expect("broadcast resolves")
+				.unwrap()
 		}
 	};
 
@@ -127,9 +133,7 @@ async fn sparse_ranges_reach_the_publisher_on_lite07() {
 	for version in LITE {
 		let publisher = produce_origin(1);
 		let broadcast = publisher.create_broadcast("bcast").unwrap();
-		let track = broadcast
-			.create_track("quiet", Info::default().with_timescale(moq_net::Timescale::MILLI))
-			.unwrap();
+		let track = broadcast.create_track("quiet", timed()).unwrap();
 		broadcast.announce(Default::default()).unwrap();
 
 		let subscriber = produce_origin(2);
@@ -141,7 +145,8 @@ async fn sparse_ranges_reach_the_publisher_on_lite07() {
 		let remote = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 			.await
 			.expect("resolve timeout")
-			.expect("broadcast resolves");
+			.expect("broadcast resolves")
+			.unwrap();
 
 		let subscription = Subscription::default()
 			.with_delay(Delay::default().with_max(Duration::from_secs(60)))
@@ -211,9 +216,7 @@ async fn range_fixture_version(version: &str, relay: bool) -> RangeFixture {
 async fn range_fixture_history(version: &str, relay: bool, history: u64) -> RangeFixture {
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("ranges").unwrap();
-	let track = broadcast
-		.create_track("quiet", Info::default().with_timescale(moq_net::Timescale::MILLI))
-		.unwrap();
+	let track = broadcast.create_track("quiet", timed()).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 	for sequence in 0..history {
 		let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
@@ -241,7 +244,13 @@ async fn range_fixture_history(version: &str, relay: bool, history: u64) -> Rang
 	options.client_subscribe = Some(subscriber.clone());
 	sessions.push(connect_mock(options).await);
 	let consumer = subscriber.consume();
-	let remote = consumer.follow("ranges", None).unwrap().available().await.unwrap();
+	let remote = consumer
+		.follow("ranges", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap()
+		.unwrap();
 	RangeFixture {
 		track,
 		remote,
@@ -746,9 +755,7 @@ async fn a_covered_bounded_subscription_stays_open() {
 	for version in LITE {
 		let publisher = produce_origin(1);
 		let broadcast = publisher.create_broadcast("bcast").unwrap();
-		let track = broadcast
-			.create_track("quiet", Info::default().with_timescale(moq_net::Timescale::MILLI))
-			.unwrap();
+		let track = broadcast.create_track("quiet", timed()).unwrap();
 		broadcast.announce(Default::default()).unwrap();
 		for sequence in [0, 1, 2, 4, 5] {
 			write_group(&track, sequence);
@@ -763,7 +770,8 @@ async fn a_covered_bounded_subscription_stays_open() {
 		let remote = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 			.await
 			.expect("resolve timeout")
-			.expect("broadcast resolves");
+			.expect("broadcast resolves")
+			.unwrap();
 
 		let bounded = |range: std::ops::Range<u64>| {
 			Subscription::default()

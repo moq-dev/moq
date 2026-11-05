@@ -29,10 +29,8 @@ import moq
 async def main():
     async with moq.connect("https://cdn.moq.dev/anon") as client:
         async for event in client.announced():
-            # A restart is a new publisher run at the same path: request it again. A
-            # takeover continues what an earlier route served, like a start.
-            if not isinstance(event, (moq.AnnounceEventStart, moq.AnnounceEventRestart, moq.AnnounceEventTakeover)):
-                continue  # AnnounceEventUpdate or AnnounceEventEnd
+            if not isinstance(event, moq.AnnounceEventPresent):
+                continue  # AnnounceEventAbsent
             # A route covers a prefix and carries no broadcast, so resolve the path.
             broadcast = await client.request(event.announce.prefix)
             catalog = await moq.media.catalog(broadcast)
@@ -163,6 +161,7 @@ client = moq.Client(
   - `.stats() → ConnectionStats`. Snapshot RTT, bandwidth estimates, and byte/packet counters.
   - `.state()` and `await .state_changed(after)`. Read one lifecycle snapshot and wait with its revision; first-dial failures and reconnects share the same session.
   - `.allocator() → Allocator`. Divide the send estimate between encoders and app-owned tracks.
+  - `.viewers() → Viewers`. Divide the receive estimate between watched broadcasts: `.watch(max_bps) → Viewer` claims up to a ceiling, `Viewer.rate()` reads its slice (`None` while there is no estimate), and dropping the viewer releases it. The summed ceilings are the PROBE target; `.set_target(bps)` overrides it (`0` sends none, `None` follows the viewers again).
   - `.grants() → GrantConsumer`. On `moq-lite-07-wip` and on moq-transport draft-18+ with the MoQ Auth extension, `.grant()` reads the peer's `Grant` and `async for grant in session.grants()` follows it.
   - `.tokens() → Tokens | None`. A client session's credentials: `.set([...])` replaces them without reconnecting and `await .answered()` raises the relay's refusal.
 
@@ -182,8 +181,6 @@ client = moq.Client(
   - `.finish()` ends at the live edge; the handle remains so `.abort(error_code)` can still run.
   - `.finish_at(final_sequence)` declares the first group that will never be produced while leaving lower groups writable.
   - `.abort(error_code)` terminates the track or group with an application error.
-  - `.append_datagram(payload, timestamp=None) -> sequence` (`TrackProducer`) sends a best-effort datagram. Payloads are capped at 1200 bytes and there is no stream fallback.
-  - `.insert_datagram(sequence, payload, timestamp=None)` (`TrackProducer`) sends one at the caller's own sequence.
   - `.largest() -> Position | None` (`TrackProducer`) reports the newest group written, at its newest frame. Datagrams are numbered apart from groups and never move it.
 
 ### Media
@@ -243,7 +240,6 @@ same either way. Opaque bytes go on a plain `TrackProducer`.
   - `await .recv_group() → GroupConsumer | None`. Arrival order, which may be out of sequence. Prefer it when latency matters more than order.
   - `.groups_as_arrived()`. Async iterator over `recv_group()`.
   - `.read_frame() -> Frame | None` returns the first frame of the next group. Empty groups are skipped; `None` is track EOF.
-  - `await .recv_datagram() -> Datagram | None` for best-effort raw track datagrams.
   - `.info() → TrackInfo`
   - `.update(subscription)`. Change delivery priority, staleness, or group range after subscribing.
 - **`GroupConsumer`**. Async iterator of raw `Frame`s.
@@ -264,8 +260,8 @@ Every handle whose cleanup is `cancel()` is an async context manager, so exiting
   - `await .requested_broadcast() → BroadcastRequest`. Call `.serve(consumer)` to answer with held content under the prefix route's continuous sequence space, `.prepare()` then fill its `.broadcast` and `.publish() → Publication` for an independently restarting job under a fresh instance, or `.reject(code)` to fail the requester.
   - Async iterator yielding `BroadcastRequest`
 - **`OriginConsumer`**. Discover broadcasts.
-  - `.announced(prefix, filter=None) → AnnounceConsumer` (async iterator of `AnnounceEvent`: `AnnounceEventStart`, `AnnounceEventUpdate`, `AnnounceEventEnd`, `AnnounceEventRestart`, or `AnnounceEventTakeover`, each carrying an `Announce` whose `.route.instance` names the stream; on a restart, request the path again; a takeover continues what the route at `.predecessor` served); `filter` is a pattern relative to the literal prefix, while each `Announce.prefix` stays origin-relative and `.captures` is a required list of wildcard matches, empty without wildcards
-  - `.follow(path, instance=None) → Following` (awaitable, waits until something serves the path, then each stream that takes over; an `instance` follows only that stream)
+  - `.announced(prefix, filter=None) → AnnounceConsumer` (async iterator of `AnnounceEvent`: `AnnounceEventPresent` or `AnnounceEventAbsent`, each carrying an `Announce` whose `.route.instance` names the stream; another instance taking a path over keeps it present, so `follow` the path to see that); `filter` is a pattern relative to the literal prefix, while each `Announce.prefix` stays origin-relative and `.captures` is a required list of wildcard matches, empty without wildcards
+  - `.follow(path, instance=None) → Following` (awaitable, waits until something serves the path, then returns each stream that takes over, or `None` once the path goes offline; an `instance` follows only that stream)
   - `.request(path, instance=None) → BroadcastConsumer` (awaitable; owns discovery and resolves one stream, or raises once synced without a route; an `instance` refuses any other stream)
 
 ### Types
@@ -294,3 +290,18 @@ Every handle whose cleanup is `cancel()` is an async context manager, so exiting
 
 - [`moq-ffi`](https://pypi.org/project/moq-ffi/). The raw UniFFI bindings this package wraps. Use it directly only if you need the unwrapped `Moq`-prefixed API.
 - [MoQ project](https://github.com/moq-dev/moq). Full monorepo with Rust server, TypeScript browser lib, and more.
+
+## Datagram tracks
+
+Create a separate live track with `broadcast.create_datagrams(name, info)` and subscribe
+with `broadcast.consume().datagrams(name)`. The `DatagramProducer` writes with
+`append(payload, timestamp=...)` or `insert(Datagram(...))`, and the `DatagramConsumer`
+reads with `await recv()` or async iteration. Demand is aggregate subscriber `priority()` /
+`await priority_changed(last)`; `broadcast.requests().datagrams()` handles on-demand tracks.
+Keep payloads below the path MTU. Delivery needs a datagram-capable transport and lite-05 or
+newer, without a stream fallback. Stream tracks of the same name are independent.
+
+On lite-05/06, a local datagram handler is asked for an on-demand name without waiting
+for the stream handler, and answers it unless a stream track of that name is published. A
+relayed broadcast asks its upstream for the datagram track only once the stream track is
+not found. lite-07 uses independent requests.

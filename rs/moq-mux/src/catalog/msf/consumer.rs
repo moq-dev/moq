@@ -34,7 +34,9 @@ impl<E: CatalogExt> Consumer<E> {
 		}
 	}
 
-	/// Poll for the next catalog update.
+	/// Get the next catalog update, converted to a [`Catalog<E>`](crate::catalog::hang::Catalog),
+	/// or `None` once the track ends with no further updates.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Catalog<E>>>> {
 		// Drain pending groups, keeping only the newest. Remember whether the track is done
 		// so we can distinguish "more groups may arrive" from "no more groups, ever".
@@ -71,15 +73,6 @@ impl<E: CatalogExt> Consumer<E> {
 		} else {
 			Poll::Pending
 		}
-	}
-
-	/// Get the next catalog update.
-	///
-	/// Waits for the next MSF catalog publication and returns it converted to a
-	/// [`Catalog<E>`](crate::catalog::hang::Catalog). Returns `None` when the track has ended
-	/// with no further updates.
-	pub async fn next(&mut self) -> Result<Option<Catalog<E>>> {
-		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 }
 
@@ -414,6 +407,7 @@ fn derive_from_codec_config(track: &moq_msf::Track, codec: &AudioCodec, init: by
 }
 
 fn cmaf_moov(track: &moq_msf::Track, init: &[u8]) -> Result<mp4_atom::Moov> {
+	crate::container::fmp4::metadata::check(init).map_err(|_| Error::MalformedInitSegment(track.name.clone()))?;
 	use mp4_atom::{Any, DecodeMaybe};
 
 	let mut cursor = std::io::Cursor::new(init);
@@ -485,6 +479,17 @@ fn derive_from_cmaf_moov(track: &moq_msf::Track, init: bytes::Bytes) -> Result<D
 
 #[cfg(test)]
 mod test {
+	#[test]
+	fn received_metadata_is_bounded() {
+		let track = moq_msf::Track::new("video", moq_msf::Packaging::Cmaf);
+		let mut bounded = true;
+		for (name, data) in crate::container::fmp4::metadata::tests::attacks(b"moov") {
+			bounded &=
+				crate::container::fmp4::metadata::tests::measure(name, || super::cmaf_moov(&track, &data).is_err());
+		}
+		assert!(bounded);
+	}
+
 	/// A later track with a name replaces the earlier one, even under another role, so the
 	/// name never lands as both a video and an audio rendition.
 	#[test]

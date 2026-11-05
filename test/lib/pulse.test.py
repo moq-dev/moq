@@ -5,6 +5,7 @@ import json
 import math
 import os
 import signal
+import string
 import subprocess
 import sys
 import tempfile
@@ -14,7 +15,12 @@ from contextlib import ExitStack
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parents[1]
+# Bytes a D-Bus address value may carry unescaped; the rest are %-encoded, including XML's `&` and `<`.
+DBUS_SAFE = frozenset((string.ascii_letters + string.digits + "-_/.\\*").encode())
+
+
+def dbus_unix_path(path):
+    return "unix:path=" + "".join(chr(b) if b in DBUS_SAFE else f"%{b:02x}" for b in os.fsencode(path))
 
 
 def play(tone):
@@ -52,7 +58,11 @@ def parallel(root):
             for name in ("one", "two")
         ]
         for child in runs:
-            assert child.stdout.readline() == b"ready\n", "private server exited before playback"
+            line = child.stdout.readline()
+            if line != b"ready\n":
+                # Surface why, such as a startup rejection or a failed pactl check, not only that it failed.
+                output, _ = child.communicate()
+                raise AssertionError("private server exited before playback:\n" + (line + output).decode())
         for child in runs:
             child.stdin.write(b"play\n")
             child.stdin.flush()
@@ -64,13 +74,12 @@ def parallel(root):
 @unittest.skipUnless(sys.platform == "linux", "private PulseAudio is Linux-only")
 class Pulse(unittest.TestCase):
     def test_parallel_playback(self):
-        scratch = ROOT / ".tmp"
-        scratch.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=scratch, prefix="pulse-") as directory:
+        # The system temp dir keeps both Unix sockets well inside sockaddr_un's 108 bytes, however deep the checkout.
+        with tempfile.TemporaryDirectory(prefix="pulse-") as directory:
             root = Path(directory)
             bus_config = root / "bus.conf"
             bus_config.write_text(
-                f"<busconfig><type>session</type><listen>unix:path={root}/b</listen><auth>EXTERNAL</auth>"
+                f"<busconfig><type>session</type><listen>{dbus_unix_path(root / 'b')}</listen><auth>EXTERNAL</auth>"
                 '<policy context="default"><allow own="*"/><allow send_destination="*"/>'
                 '<allow receive_sender="*"/></policy></busconfig>'
             )
@@ -97,7 +106,8 @@ class Pulse(unittest.TestCase):
             ) as session:
                 timed_out = False
                 try:
-                    session.communicate(timeout=30)
+                    # Each pulse.py may spend 30 s on startup alone; leave room for playback after it.
+                    session.communicate(timeout=60)
                 except subprocess.TimeoutExpired:
                     timed_out = True
                 finally:

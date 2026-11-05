@@ -12,6 +12,18 @@ case dials. `lsof`, included in the Nix shell, verifies
 ownership. A collision uses the existing startup attempts; exhausted attempts
 fail with the relay log before any load starts.
 
+Every session from `run.sh`, `browser/run.sh`, or `local.py` (so every root
+`just bench*` recipe) holds the host's benchmark lock, `/tmp/moq-bench.lock`,
+from the end of its argument checks until it exits, across all checkouts and
+agents. A second session waits, printing the holder's PID, start time,
+directory, and command; the file holds that record. `lock.sh COMMAND` holds it
+for any other measurement. The kernel releases it once the session and every
+process it started exit. It serializes benchmarks only: builds and tests from
+other agents still run, so pick a quiet host and check the load each run
+records. Bench a host as one Unix user: Linux's `fs.protected_regular` keeps a
+second user from opening a lock file the first one created, whatever its mode,
+and `lock.py` refuses a link in the lock file's place.
+
 ## Commands
 
 Run every Criterion target plus the local relay workloads:
@@ -64,9 +76,9 @@ nix develop --command env SESSION_ALLOCS=1 cargo bench --locked -p moq-net --fea
 
 Throughput counts delivered datagrams. Every one must arrive with its sequence
 and payload; the memory transport loses none at these cadences, so a drop fails
-instead of looking cheaper. `SESSION_ALLOCS=1` prints allocations, allocated
-bytes and, where Linux perf counters are readable, user instructions per
-delivered datagram or viewer-group. All three exclude the cache tick. Bytes sum
+instead of looking cheaper. `SESSION_ALLOCS=1` prints the group consumer size,
+allocations, allocated bytes and, where Linux perf counters are readable, user instructions per
+delivered datagram or viewer-group. The counts exclude the cache tick. Bytes sum
 requested allocation and reallocation sizes, including growth in place; they
 measure neither live memory nor bytes copied. A multiplexed instruction counter
 fails the run instead of reporting an undercount. Every task runs on the bench's
@@ -84,6 +96,29 @@ nix develop --command just rs test -p moq-tokio --release -E 'test(benchmark_dat
 It reports offered and lost datagrams, bottleneck queue drops, QUIC DATAGRAM frames
 that delivered no datagram, reordered arrivals and append-to-receive latency per viewer, and fails if the loopback
 viewer loses any. It runs nightly.
+
+Native transport allocation cost is measured through moq-net's real poll interface,
+including QUIC opens, writes, receive leases and FINs, on long-lived loopback connections:
+
+```bash
+nix develop --command cargo bench --locked -p moq-tokio --bench fanout -- native_transport
+nix develop --command env NATIVE_ALLOCS=1 cargo bench --locked -p moq-tokio --bench fanout -- native_transport
+```
+
+The allocation mode warms each shape, then counts allocations and requested allocation/reallocation
+bytes over 64 batches, per delivered stream. Setup and destruction are outside the counters;
+all QUIC tasks run on the benchmark's current-thread runtime. Payload size and streams per batch
+vary independently. Every delivered payload is compared byte for byte. The ordinary timing
+series runs nightly with `fanout`.
+
+The io\_uring `web_headers` target varies stalled partial headers independently of ready uni/bi
+streams. It then completes every fragmented header and checks its payload and FIN, so a busy
+peer cannot hide a parser or stream-credit failure behind fast ready streams. It runs in the
+nightly io\_uring leg:
+
+```bash
+nix develop --command cargo bench --locked -p moq-uring --bench web_headers
+```
 
 Measure 50 fps audio at per-packet, 100 and 200 ms grouping, plus 400 fps
 (2.5 ms packets) at per-packet and the 20 ms default. Frames are 200 bytes:
@@ -148,6 +183,27 @@ perf record -F 999 --call-graph fp -- target/profiling/examples/bench --transpor
 Both ends share one current-thread runtime, so its CPU covers sending and
 receiving alike. It is a local profiling tool rather than a nightly series: the
 `moq-net` session bench owns qmux's series.
+
+Measure qmux receive ownership at the relay client defaults (4 MiB connection,
+1 MiB stream, 4 MiB send):
+
+```bash
+nix develop --command cargo bench --locked --manifest-path rs/qmux/Cargo.toml --bench receive
+```
+
+`qmux_receive` sweeps TCP and WebSocket framing, every qmux version, 1/8/64
+sessions, and 1/8 streams per session. Both endpoints run on one thread over
+bounded in-memory byte pipes; this isolates framing and receive ownership from
+TLS, kernel sockets, and congestion. Each stream holds an unread 512 KiB lease,
+so eight together fill the connection window. The untimed output reports live
+requested heap bytes, including both endpoints, their tasks, the pipes, stream
+tables and receive backings, per session. The shared source payload and runtime
+are excluded. This measures retained allocations, not RSS; allocator counters
+also run during timing. Every timed round reads and checks all payload bytes,
+returns lease credit, and fills each stream again. Throughput counts delivered
+payload once. Nightly's supplemental Rust benchmark leg records the series and
+keeps the memory output with its raw results. The broader MoQ session transport
+and version sweep remains in [its quest](/quest/m2/bench-transport-sweep.md).
 
 Compare one multi-threaded Tokio runtime with the same number of independent
 Tokio/epoll and io\_uring workers:
@@ -305,8 +361,8 @@ The relay and generator keep these affinities for every revision. Instructions
 mode runs alone.
 
 Each base builds into its own target under `target/bench/revisions/<sha>`,
-from a detached worktree in `.tmp/` that the run removes when it exits, so a
-later run reuses that build. The revisions build side by side on every allowed
+from a detached worktree at `.tmp/bench-revisions/<sha>` that later runs keep
+using, so a later run reuses that build without a compiler cache. The revisions build side by side on every allowed
 CPU, since fat LTO links on one thread, `BENCH_BUILD_JOBS` (default 4) at a
 time: each link takes gigabytes, so lower it on a host with little memory.
 Every round measures each base and the
@@ -368,7 +424,8 @@ nix develop --command just bench-fanout "cdff3c8f95 21d6da9fc1"
 nix develop --command just bench-fanout "" "model" "1 512"
 ```
 
-Two scenarios run every subscriber count on one thread:
+Each scenario runs every subscriber count on one thread. `model` and `session`
+run by default:
 
 - `model`: one finished group a cycle through the track model, which every
   subscriber takes before parking again, as moq-net's `track_fanout_group`
@@ -379,6 +436,11 @@ Two scenarios run every subscriber count on one thread:
   runtime. It counts the publisher, relay, and viewer sessions together, but no
   QUIC: in-tree qmux, receive leases, and crypto only show in relay counts. A
   revision whose session API predates this harness reports it unsupported.
+- `group`, on request: every subscriber drains one finished 512-frame group in
+  object batches through the relay's private reader, as moq-net's
+  `group_relay_objects/plain/512/*` bench does, so that bench's cost is counted
+  without its wall-clock noise. Revisions before the hidden `ObjectBatch` helper
+  report unsupported; historical frame-batch counts remain in the bisect report.
 
 Each `bench/fanout/<scenario>` crate builds against each base's and the current
 tree's own crates and lock, `BENCH_BUILD_JOBS` at a time, into
@@ -858,7 +920,8 @@ nix develop --command just gh benchmark-report gate target/bench/nightly/rust-be
 
 Each run's evidence directory keeps both builds' estimates (`criterion` and
 `criterion-base`), the confirmation rounds under `confirm/`, and the run's
-`paired.json`.
+`paired.json`. The base build streams its diagnostics and retains them in
+`base-build.log`, including when it fails.
 
 ### CodSpeed
 
@@ -899,3 +962,11 @@ the module lanes `just check` runs at once, sweep `--jobs 1 3` over
 `bash sh/dispatch.sh check BASE`, which is then admitted once as a whole.
 Admission remains outside the suite's timeout clocks. Use separate checkouts to
 avoid measuring Cargo's artifact lock instead of competing work.
+
+`local.py` starts its workers without the benchmark lock's descriptor, which
+`quest gate` and Bun would close anyway, so only `local.py` itself holds the
+lock. Every exit of `local.py` stops its workers first. On Linux a SIGKILL or
+OOM kill does too, even inside a Quest scope: each worker watches `local.py`
+through a pidfd and stops once it exits. macOS has no pidfd, so there killing
+`local.py` with SIGKILL frees the lock while its workers keep measuring until
+their own gates exit, an accepted gap. Stop it with Ctrl-C or SIGTERM instead.

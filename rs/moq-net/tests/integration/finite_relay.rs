@@ -20,9 +20,12 @@ use moq_net::track::Subscription;
 use moq_net::{Hop, Timestamp, Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
-/// A millisecond track: the frames written here carry timestamps.
+/// A millisecond track with no publisher max age: the frames written here carry timestamps,
+/// and superseded groups stay readable.
 fn timed() -> moq_net::track::Info {
-	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	moq_net::track::Info::default()
+		.with_timescale(moq_net::Timescale::MILLI)
+		.with_max_age(None)
 }
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -80,7 +83,8 @@ async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::E
 	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
-		.expect("broadcast resolves");
+		.expect("broadcast resolves")
+		.unwrap();
 
 	let (mut heads, mut opened) = futures::channel::mpsc::unbounded();
 	let reader = kio::clock::sim::spawn(async move {

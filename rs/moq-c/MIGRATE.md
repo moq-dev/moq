@@ -4,13 +4,23 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Datagrams are a track of their own
+### Announcements are a listing ([#7678](https://github.com/moq-dev/moq/pull/7678))
 
-A raw track's datagrams travel on a separate datagram track of the same name, so the C ABI is unchanged but some results differ:
+`moq_announce_kind` is `MOQ_ANNOUNCE_KIND_PRESENT` (0) or `MOQ_ANNOUNCE_KIND_ABSENT` (1), and `moq_announce_event` loses `predecessor` and `predecessor_len`, changing the C ABI.
+Another instance taking a path over keeps it present, and a route's cost changing is not reported.
+Map `_START` to `_PRESENT` and `_END` to `_ABSENT`, and drop `_UPDATE` handling. Where you requested the path again on `_RESTART` or `_TAKEOVER`, call `moq_origin_follow`, whose callback delivers a broadcast handle for each new instance.
 
-- `moq_publish_track_datagram` numbers datagrams on their own, apart from groups, and `moq_datagram.sequence` is that number. Don't compare it with group sequences.
-- `moq_consume_datagrams` receives only the datagrams sent once its subscription is answered. Every raw track carries a datagram track, but a name with none, such as a media or JSON track, ends the callback with a not-found error.
-- moq-transport carries no datagrams.
+`moq_origin_follow` takes a `moq_follow_callback`, `(void *user_data, moq_follow_event event, int32_t code)`, instead of a `moq_status_callback`. `MOQ_FOLLOW_EVENT_ONLINE` carries each broadcast handle (where a positive code did), `MOQ_FOLLOW_EVENT_OFFLINE` reports the path going offline (or, for a follow pinned to an instance, another instance taking it over) with code `0`, and `MOQ_FOLLOW_EVENT_END` is the terminal callback, with `0` or a negative error that `moq_error()` explains (where a code `<= 0` was). Release `user_data` on `MOQ_FOLLOW_EVENT_END`.
+
+### Separate datagram tracks
+
+Create a separate producer with `moq_publish_datagrams` and `moq_datagram_info`; replace `moq_publish_track_datagram` with `moq_publish_datagrams_append` on that handle, or `moq_publish_datagrams_insert` for an explicit sequence. `moq_consume_datagrams` now takes a subscriber priority before its callback and never subscribes to a stream track. Use `moq_publish_datagrams_demand` and `moq_datagram_demand_priority` for aggregate priority, and `moq_publish_datagrams_requests` / `moq_datagram_request_accept` for on-demand publishing. Finish or abort datagram producers separately. A zeroed datagram info is untimed, unlike the microsecond default of stream-track info. `moq_consume_datagrams` returns a negative code at once when the broadcast has neither the datagram track nor a datagram request handler, and a remote name without one ends its callback with a not-found error.
+
+### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+A NULL or zeroed `moq_track_info` now advertises a zero max age, serving only the live edge, instead of no publisher limit.
+`max_age_present` is gone and `max_age_us` always applies: drop the assignment where you set it to true, and set the new `max_age_unlimited`, which ignores `max_age_us`, where you relied on it being false for no limit.
+Recompile against the new header, since an old binary's `max_age_present` byte now reads as `max_age_unlimited`, and zero-initialize the struct (`moq_track_info info = {0};`) or assign every member, since an indeterminate member is undefined behavior.
 
 ### JSON writes refuse a NULL timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
 

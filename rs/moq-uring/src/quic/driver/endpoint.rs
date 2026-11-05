@@ -88,7 +88,7 @@ impl Endpoint {
 	/// driver run there, and a socket adopted as a reuseport member steers
 	/// the ids this endpoint issues to itself. Refused once that worker has
 	/// been dropped, since nothing would ever drive the endpoint.
-	pub fn new(socket: udp::Socket, config: Config) -> Result<Self, Error> {
+	pub fn new(config: Config, socket: udp::Socket) -> Result<Self, Error> {
 		let owner = socket.owner();
 		let Some(handle) = owner.handle() else {
 			return Err(Error::Io(Shared::gone_error().to_string()));
@@ -149,11 +149,7 @@ impl Endpoint {
 	/// Fails immediately on an endpoint built without a
 	/// [`server`](Config::server) configuration, and with the socket's error
 	/// once the endpoint has died, its worker included.
-	pub async fn accept(&self) -> Result<Connection, Error> {
-		kio::wait(|waiter| self.poll_accept(waiter)).await
-	}
-
-	/// The next handshaken incoming connection, or the endpoint's terminal error.
+	#[kio::wrapper]
 	pub fn poll_accept(&self, waiter: &kio::Waiter) -> Poll<Result<Connection, Error>> {
 		if let Some(err) = self.inner.closed() {
 			return Poll::Ready(Err(err));

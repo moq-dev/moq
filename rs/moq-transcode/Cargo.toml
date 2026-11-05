@@ -35,7 +35,7 @@ v4l2 = ["moq-video/v4l2"]
 [dependencies]
 bytes = { workspace = true }
 hang = { workspace = true }
-kio = { workspace = true }
+kio = { workspace = true, features = ["async"] }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 moq-video = { workspace = true }
@@ -48,8 +48,8 @@ anyhow = { workspace = true }
 criterion = { package = "bench-harness", path = "../bench-harness" }
 # `join_all`, so the ladder bench feeds every rung at once like the rung tasks do.
 futures = { workspace = true }
-kio = { workspace = true, features = ["runtime", "sim"] }
-moq-tokio = { path = "../moq-tokio", default-features = false, features = ["quic", "aws-lc-rs", "websocket"] }
+kio = { workspace = true, features = ["manual", "runtime", "sim"] }
+moq-tokio = { path = "../moq-tokio", default-features = false, features = ["quic", "websocket"] }
 # The tests encode with OpenH264, the one encoder a GPU-less host has, so they
 # turn it on without making it a default of the library.
 moq-video = { path = "../moq-video", features = ["openh264"] }
