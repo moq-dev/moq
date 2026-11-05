@@ -111,8 +111,8 @@ impl Tail {
 	}
 
 	/// The runs of `groups` whose stream finished since the last update was sent.
-	pub fn finished(&self, groups: &Range<u64>) -> impl Iterator<Item = &Range<u64>> + '_ {
-		self.finished.overlapping(groups)
+	pub fn finished(&self, groups: Range<u64>) -> impl Iterator<Item = Range<u64>> + '_ {
+		self.finished.overlapping(groups).cloned()
 	}
 
 	/// Forget which streams finished, for an update being sent: a stale drop under an earlier

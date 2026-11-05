@@ -11033,8 +11033,8 @@ impl ServeLoop {
 							}
 							// A group whose stream finished under this update was served over
 							// the drop, so it won, even once the cache evicted it.
-							for finished in active.tail.read().finished(&groups) {
-								given.remove(finished.clone());
+							for finished in active.tail.read().finished(groups.clone()) {
+								given.remove(finished);
 							}
 							for given in given.iter() {
 								let recorded = self
