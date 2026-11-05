@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793839983227,
+  "lastUpdate": 1793866168141,
   "repoUrl": "https://github.com/moq-dev/moq",
   "entries": {
     "MoQ nightly costs": [
@@ -245481,6 +245481,9195 @@ window.BENCHMARK_DATA = {
           {
             "name": "bench-size/size/release/swift-ffi-package/moq-ffi-swift-ffi.tar.gz",
             "value": 95516,
+            "unit": "bytes"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Luke Curley",
+            "username": "kixelated",
+            "email": "kixelated@gmail.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "username": "web-flow",
+            "email": "noreply@github.com"
+          },
+          "id": "c1504569288b7569feec899a2a065b06c6aa8a70",
+          "message": "quest: close the parallel-frontend measurement; the queue keeps stable rustc (#7900)\n\nCo-authored-by: Claude Opus 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-11-05T05:30:06Z",
+          "url": "https://github.com/moq-dev/moq/commit/c1504569288b7569feec899a2a065b06c6aa8a70"
+        },
+        "date": 1793866167633,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "bench-rust-extra/rust/qmux/qmux_receive/pipe/qmux-00/1s/1streams",
+            "value": 139620.4443359375,
+            "range": "1.396e+05..1.396e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/qmux/qmux_receive/pipe/qmux-00/1s/8streams",
+            "value": 1127148.4296875,
+            "range": "1.118e+06..1.137e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/qmux/qmux_receive/pipe/qmux-00/64s/1streams",
+            "value": 9217289.6875,
+            "range": "9.152e+06..9.283e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/qmux/qmux_receive/pipe/qmux-00/64s/8streams",
+            "value": 78940667,
+            "range": "7.894e+07..7.894e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/qmux/qmux_receive/pipe/qmux-00/8s/1streams",
+            "value": 1197315.1015625,
+            "range": "1.187e+06..1.208e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/qmux/qmux_receive/pipe/qmux-00/8s/8streams",
+            "value": 9830204.6875,
+            "range": "9.732e+06..9.928e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/qmux/qmux_receive/pipe/qmux-01/1s/1streams",
+            "value": 138949.0556640625,
+            "range": "1.377e+05..1.402e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/qmux/qmux_receive/pipe/qmux-01/1s/8streams",
+            "value": 1149020.296875,
+            "range": "1.141e+06..1.157e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/qmux/qmux_receive/pipe/qmux-01/64s/1streams",
+            "value": 9763954.625,
+            "range": "9.727e+06..9.801e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/qmux/qmux_receive/pipe/qmux-01/64s/8streams",
+            "value": 77978653,
+            "range": "7.798e+07..7.798e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/qmux/qmux_receive/pipe/qmux-01/8s/1streams",
+            "value": 1160699.359375,
+            "range": "1.159e+06..1.163e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/qmux/qmux_receive/pipe/qmux-01/8s/8streams",
+            "value": 9783233.25,
+            "range": "9.692e+06..9.874e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/qmux/qmux_receive/pipe/qmux-02/1s/1streams",
+            "value": 181728.5390625,
+            "range": "1.807e+05..1.827e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/qmux/qmux_receive/pipe/qmux-02/1s/8streams",
+            "value": 1256411.8203125,
+            "range": "1.245e+06..1.268e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/qmux/qmux_receive/pipe/qmux-02/64s/1streams",
+            "value": 8874784,
+            "range": "8.857e+06..8.893e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/qmux/qmux_receive/pipe/qmux-02/64s/8streams",
+            "value": 75049098,
+            "range": "7.505e+07..7.505e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/qmux/qmux_receive/pipe/qmux-02/8s/1streams",
+            "value": 1228316.6328125,
+            "range": "1.224e+06..1.233e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/qmux/qmux_receive/pipe/qmux-02/8s/8streams",
+            "value": 8828367.0625,
+            "range": "8.777e+06..8.88e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/qmux/qmux_receive/ws/qmux-00/1s/1streams",
+            "value": 218661.0546875,
+            "range": "2.168e+05..2.205e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/qmux/qmux_receive/ws/qmux-00/1s/8streams",
+            "value": 1796933.296875,
+            "range": "1.791e+06..1.803e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/qmux/qmux_receive/ws/qmux-00/64s/1streams",
+            "value": 15236512,
+            "range": "1.516e+07..1.531e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/qmux/qmux_receive/ws/qmux-00/64s/8streams",
+            "value": 121374848,
+            "range": "1.214e+08..1.214e+08",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/qmux/qmux_receive/ws/qmux-00/8s/1streams",
+            "value": 1891041.21875,
+            "range": "1.875e+06..1.907e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/qmux/qmux_receive/ws/qmux-00/8s/8streams",
+            "value": 14964582.5,
+            "range": "1.493e+07..1.5e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/qmux/qmux_receive/ws/qmux-01/1s/1streams",
+            "value": 215964.59375,
+            "range": "2.149e+05..2.17e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/qmux/qmux_receive/ws/qmux-01/1s/8streams",
+            "value": 1732210.796875,
+            "range": "1.715e+06..1.749e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/qmux/qmux_receive/ws/qmux-01/64s/1streams",
+            "value": 14009899.875,
+            "range": "1.393e+07..1.409e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/qmux/qmux_receive/ws/qmux-01/64s/8streams",
+            "value": 113747620,
+            "range": "1.137e+08..1.137e+08",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/qmux/qmux_receive/ws/qmux-01/8s/1streams",
+            "value": 1853509.765625,
+            "range": "1.836e+06..1.871e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/qmux/qmux_receive/ws/qmux-01/8s/8streams",
+            "value": 14400440,
+            "range": "1.425e+07..1.455e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/qmux/qmux_receive/ws/qmux-02/1s/1streams",
+            "value": 204415.56640625,
+            "range": "2.036e+05..2.053e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/qmux/qmux_receive/ws/qmux-02/1s/8streams",
+            "value": 1786530.703125,
+            "range": "1.774e+06..1.799e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/qmux/qmux_receive/ws/qmux-02/64s/1streams",
+            "value": 14750384.875,
+            "range": "1.468e+07..1.482e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/qmux/qmux_receive/ws/qmux-02/64s/8streams",
+            "value": 114687921,
+            "range": "1.147e+08..1.147e+08",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/qmux/qmux_receive/ws/qmux-02/8s/1streams",
+            "value": 1821959.6875,
+            "range": "1.813e+06..1.831e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/qmux/qmux_receive/ws/qmux-02/8s/8streams",
+            "value": 14593581.125,
+            "range": "1.454e+07..1.465e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/producer/10 groups/1",
+            "value": 45053.783203125,
+            "range": "4.497e+04..4.514e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/producer/10 groups/10",
+            "value": 466187.7578125,
+            "range": "4.62e+05..4.703e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/producer/10 groups/100",
+            "value": 4865255.1875,
+            "range": "4.848e+06..4.883e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/producer/100 groups/1",
+            "value": 400986.3984375,
+            "range": "3.999e+05..4.02e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/producer/100 groups/10",
+            "value": 4077549.4375,
+            "range": "4.073e+06..4.082e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/producer/100 groups/100",
+            "value": 43000312,
+            "range": "4.283e+07..4.317e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/pcm_batches/opus/44100hz/2ch/batch_441/producers_1",
+            "value": 48680704,
+            "range": "4.868e+07..4.869e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/pcm_batches/opus/44100hz/2ch/batch_burst/producers_1",
+            "value": 48407241.5,
+            "range": "4.833e+07..4.849e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/pcm_batches/opus/48000hz/2ch/batch_480/producers_1",
+            "value": 33370281.5,
+            "range": "3.336e+07..3.338e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/pcm_batches/opus/48000hz/2ch/batch_burst/producers_1",
+            "value": 33383115.25,
+            "range": "3.336e+07..3.34e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/pcm_batches/pcm/44100hz/1ch/batch_441/producers_1",
+            "value": 8866505.0625,
+            "range": "8.843e+06..8.89e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/pcm_batches/pcm/44100hz/1ch/batch_burst/producers_1",
+            "value": 8765522.9375,
+            "range": "8.731e+06..8.8e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/pcm_batches/pcm/44100hz/2ch/batch_32/producers_1",
+            "value": 15042450,
+            "range": "1.496e+07..1.512e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/pcm_batches/pcm/44100hz/2ch/batch_44100/producers_1",
+            "value": 15271237.25,
+            "range": "1.525e+07..1.53e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/pcm_batches/pcm/44100hz/2ch/batch_4410/producers_1",
+            "value": 15082859.25,
+            "range": "1.503e+07..1.514e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/pcm_batches/pcm/44100hz/2ch/batch_441/producers_1",
+            "value": 15373078.375,
+            "range": "1.536e+07..1.539e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/pcm_batches/pcm/44100hz/2ch/batch_441/producers_8",
+            "value": 126890254.5,
+            "range": "1.267e+08..1.27e+08",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/pcm_batches/pcm/44100hz/2ch/batch_burst/producers_1",
+            "value": 15183534.375,
+            "range": "1.514e+07..1.522e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/pcm_batches/pcm/44100hz/2ch/batch_burst/producers_8",
+            "value": 120522889.75,
+            "range": "1.204e+08..1.206e+08",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/pcm_batches/pcm/44100hz/6ch/batch_441/producers_1",
+            "value": 30796361.125,
+            "range": "3.065e+07..3.095e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/pcm_batches/pcm/44100hz/6ch/batch_burst/producers_1",
+            "value": 31137634.875,
+            "range": "3.11e+07..3.118e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/pcm_batches/pcm/48000hz/1ch/batch_480/producers_1",
+            "value": 777003.4140625,
+            "range": "7.768e+05..7.772e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/pcm_batches/pcm/48000hz/1ch/batch_burst/producers_1",
+            "value": 753412.4609375,
+            "range": "7.522e+05..7.546e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/pcm_batches/pcm/48000hz/2ch/batch_32/producers_1",
+            "value": 1089872.3515625,
+            "range": "1.089e+06..1.091e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/pcm_batches/pcm/48000hz/2ch/batch_48000/producers_1",
+            "value": 952258.0625,
+            "range": "9.488e+05..9.557e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/pcm_batches/pcm/48000hz/2ch/batch_4800/producers_1",
+            "value": 942328.984375,
+            "range": "9.391e+05..9.456e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/pcm_batches/pcm/48000hz/2ch/batch_480/producers_1",
+            "value": 969316.078125,
+            "range": "9.657e+05..9.729e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/pcm_batches/pcm/48000hz/2ch/batch_480/producers_8",
+            "value": 7245989.1875,
+            "range": "7.233e+06..7.259e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/pcm_batches/pcm/48000hz/2ch/batch_burst/producers_1",
+            "value": 936519.0703125,
+            "range": "9.331e+05..9.4e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/pcm_batches/pcm/48000hz/2ch/batch_burst/producers_8",
+            "value": 7590317.75,
+            "range": "7.538e+06..7.642e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/pcm_batches/pcm/48000hz/6ch/batch_480/producers_1",
+            "value": 1723337.984375,
+            "range": "1.715e+06..1.731e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/pcm_batches/pcm/48000hz/6ch/batch_burst/producers_1",
+            "value": 1779641.734375,
+            "range": "1.772e+06..1.787e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/pcm_batches/pcm/96000hz/1ch/batch_960/producers_1",
+            "value": 7891964.75,
+            "range": "7.871e+06..7.913e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/pcm_batches/pcm/96000hz/1ch/batch_burst/producers_1",
+            "value": 7854350.625,
+            "range": "7.852e+06..7.856e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/pcm_batches/pcm/96000hz/2ch/batch_32/producers_1",
+            "value": 14671255.25,
+            "range": "1.465e+07..1.469e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/pcm_batches/pcm/96000hz/2ch/batch_96000/producers_1",
+            "value": 14473136.75,
+            "range": "1.445e+07..1.449e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/pcm_batches/pcm/96000hz/2ch/batch_9600/producers_1",
+            "value": 14250219.125,
+            "range": "1.423e+07..1.427e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/pcm_batches/pcm/96000hz/2ch/batch_960/producers_1",
+            "value": 14246279.5,
+            "range": "1.423e+07..1.426e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/pcm_batches/pcm/96000hz/2ch/batch_burst/producers_1",
+            "value": 14473838.125,
+            "range": "1.437e+07..1.457e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/pcm_batches/pcm/96000hz/6ch/batch_960/producers_1",
+            "value": 31244732.25,
+            "range": "3.107e+07..3.142e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/pcm_batches/pcm/96000hz/6ch/batch_burst/producers_1",
+            "value": 32322906,
+            "range": "3.226e+07..3.239e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/bus_minus/1",
+            "value": 4205.722351074219,
+            "range": "4203..4208",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/bus_minus/16",
+            "value": 59798.67724609375,
+            "range": "5.974e+04..5.985e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/bus_minus/4",
+            "value": 14315.4453125,
+            "range": "1.43e+04..1.433e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/bus_minus/64",
+            "value": 243041.59765625,
+            "range": "2.425e+05..2.436e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/bus_mixes/full/1",
+            "value": 38011.574462890625,
+            "range": "3.791e+04..3.812e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/bus_mixes/full/16",
+            "value": 83125.19580078125,
+            "range": "8.3e+04..8.325e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/bus_mixes/full/4",
+            "value": 46887.48388671875,
+            "range": "4.671e+04..4.707e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/bus_mixes/full/64",
+            "value": 234508.34375,
+            "range": "2.345e+05..2.346e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/bus_mixes/sparse/1",
+            "value": 36351.2744140625,
+            "range": "3.625e+04..3.646e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/bus_mixes/sparse/16",
+            "value": 55026.81298828125,
+            "range": "5.481e+04..5.525e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/bus_mixes/sparse/4",
+            "value": 39852.2158203125,
+            "range": "3.979e+04..3.992e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/bus_mixes/sparse/64",
+            "value": 119066.642578125,
+            "range": "1.187e+05..1.194e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/bus_sources/44100hz/1",
+            "value": 9416.539794921875,
+            "range": "9416..9418",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/bus_sources/44100hz/16",
+            "value": 140553.046875,
+            "range": "1.403e+05..1.409e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/bus_sources/44100hz/4",
+            "value": 35065.512939453125,
+            "range": "3.5e+04..3.513e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/bus_sources/44100hz/64",
+            "value": 579934.92578125,
+            "range": "5.79e+05..5.808e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/bus_sources/48000hz/1",
+            "value": 3073.142791748047,
+            "range": "3073..3074",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/bus_sources/48000hz/16",
+            "value": 38101.4716796875,
+            "range": "3.804e+04..3.816e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/bus_sources/48000hz/4",
+            "value": 9513.738098144531,
+            "range": "9512..9516",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/bus_sources/48000hz/64",
+            "value": 154381.3623046875,
+            "range": "1.543e+05..1.545e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/protect/datagram_opus160",
+            "value": 178.33401584625244,
+            "range": "178.2..178.4",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/protect/grouped_1k",
+            "value": 2397.3781127929688,
+            "range": "2376..2419",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/sign/roundtrip_1k",
+            "value": 54446.75146484375,
+            "range": "5.439e+04..5.451e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/sign/roundtrip_64k",
+            "value": 207138.650390625,
+            "range": "2.067e+05..2.076e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/sign/write_1k",
+            "value": 11516.615112304688,
+            "range": "1.151e+04..1.153e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/sign/write_64k",
+            "value": 114783.7041015625,
+            "range": "1.147e+05..1.148e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/hls/contributions/lookup/1c_16r",
+            "value": 1669.1917266845703,
+            "range": "1669..1670",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/hls/contributions/lookup/1c_1r",
+            "value": 1654.172592163086,
+            "range": "1654..1655",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/hls/contributions/lookup/1c_4r",
+            "value": 1655.5043182373047,
+            "range": "1655..1656",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/hls/contributions/lookup/64c_16r",
+            "value": 1669.6705322265625,
+            "range": "1670..1670",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/hls/contributions/lookup/64c_1r",
+            "value": 1656.5150909423828,
+            "range": "1656..1657",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/hls/contributions/lookup/64c_4r",
+            "value": 1658.0154876708984,
+            "range": "1658..1658",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/hls/contributions/lookup/8c_16r",
+            "value": 1672.1322784423828,
+            "range": "1672..1673",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/hls/contributions/lookup/8c_1r",
+            "value": 1665.7115173339844,
+            "range": "1664..1668",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/hls/contributions/lookup/8c_4r",
+            "value": 1662.4298095703125,
+            "range": "1662..1662",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/hls/contributions/master/1c_16r",
+            "value": 19214.407592773438,
+            "range": "1.915e+04..1.927e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/hls/contributions/master/1c_1r",
+            "value": 1374.018653869629,
+            "range": "1372..1376",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/hls/contributions/master/1c_4r",
+            "value": 4936.2593994140625,
+            "range": "4933..4940",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/hls/contributions/master/64c_16r",
+            "value": 1395099.78125,
+            "range": "1.388e+06..1.402e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/hls/contributions/master/64c_1r",
+            "value": 79665.05859375,
+            "range": "7.96e+04..7.973e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/hls/contributions/master/64c_4r",
+            "value": 355844.791015625,
+            "range": "3.558e+05..3.559e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/hls/contributions/master/8c_16r",
+            "value": 154776.0771484375,
+            "range": "1.547e+05..1.548e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/hls/contributions/master/8c_1r",
+            "value": 9974.602172851562,
+            "range": "9974..9975",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/hls/contributions/master/8c_4r",
+            "value": 38639.634765625,
+            "range": "3.863e+04..3.864e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/baseline/from_slice/big_static",
+            "value": 107122.859375,
+            "range": "1.071e+05..1.071e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/baseline/from_slice/telemetry",
+            "value": 7230.963684082031,
+            "range": "7227..7234",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/baseline/to_value/big_static",
+            "value": 67666.69775390625,
+            "range": "6.766e+04..6.768e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/baseline/to_value/telemetry",
+            "value": 4203.204437255859,
+            "range": "4202..4204",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/consumer/merge/big_static",
+            "value": 30684.01220703125,
+            "range": "3.068e+04..3.069e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/consumer/merge/telemetry",
+            "value": 6011.2227783203125,
+            "range": "6000..6022",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/consumer/snapshot/big_static",
+            "value": 109638.5703125,
+            "range": "1.096e+05..1.097e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/consumer/snapshot/telemetry",
+            "value": 7060.560852050781,
+            "range": "7051..7070",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/decode_patch/json_patch/big_static",
+            "value": 30939.4892578125,
+            "range": "3.087e+04..3.101e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/decode_patch/json_patch/telemetry",
+            "value": 3173.3377075195312,
+            "range": "3172..3175",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/decode_patch/merge_owned/big_static",
+            "value": 30978.20703125,
+            "range": "3.088e+04..3.108e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/decode_patch/merge_owned/telemetry",
+            "value": 3994.708740234375,
+            "range": "3971..4018",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/encode_patch/big_static",
+            "value": 32956.26416015625,
+            "range": "3.295e+04..3.296e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/encode_patch/telemetry",
+            "value": 7296.900695800781,
+            "range": "7295..7299",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/marshal/full/big_static",
+            "value": 11445.91259765625,
+            "range": "1.144e+04..1.145e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/marshal/full/telemetry",
+            "value": 1062.3425369262695,
+            "range": "1062..1063",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/marshal/patch/big_static",
+            "value": 70.27819919586182,
+            "range": "70.11..70.44",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/marshal/patch/telemetry",
+            "value": 513.660400390625,
+            "range": "513.5..513.8",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/producer/merge/big_static",
+            "value": 33190.201904296875,
+            "range": "3.319e+04..3.319e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/producer/merge/telemetry",
+            "value": 8303.580322265625,
+            "range": "8248..8359",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/producer/snapshot/big_static",
+            "value": 11407.559265136719,
+            "range": "1.141e+04..1.141e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/producer/snapshot/telemetry",
+            "value": 1081.0303802490234,
+            "range": "1081..1081",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/snapshot_budget/bounded/100",
+            "value": 4270.950469970703,
+            "range": "4266..4276",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/snapshot_budget/bounded/1000",
+            "value": 43296.64404296875,
+            "range": "4.294e+04..4.365e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/snapshot_budget/bounded/10000",
+            "value": 414182.39453125,
+            "range": "4.125e+05..4.158e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/snapshot_budget/unbounded/100",
+            "value": 158.1324110031128,
+            "range": "158.1..158.2",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/snapshot_budget/unbounded/1000",
+            "value": 158.6841335296631,
+            "range": "158.3..159.1",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/snapshot_budget/unbounded/10000",
+            "value": 158.87034606933594,
+            "range": "158.8..159",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/table/deltas/1%/100",
+            "value": 49260.119140625,
+            "range": "4.926e+04..4.926e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/table/deltas/1%/1000",
+            "value": 465676.078125,
+            "range": "4.651e+05..4.662e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/table/deltas/1%/10000",
+            "value": 4859563.1875,
+            "range": "4.839e+06..4.88e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/table/deltas/1%/20000",
+            "value": 71443869.75,
+            "range": "7.041e+07..7.248e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/table/deltas/10%/100",
+            "value": 58864.2529296875,
+            "range": "5.878e+04..5.895e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/table/deltas/10%/1000",
+            "value": 569936.9453125,
+            "range": "5.691e+05..5.707e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/table/deltas/10%/10000",
+            "value": 36378909.75,
+            "range": "3.586e+07..3.69e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/table/deltas/10%/20000",
+            "value": 73154039.75,
+            "range": "7.27e+07..7.361e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/table/deltas/100%/100",
+            "value": 146853.0224609375,
+            "range": "1.467e+05..1.47e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/table/deltas/100%/1000",
+            "value": 1540293.8125,
+            "range": "1.538e+06..1.542e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/table/deltas/100%/10000",
+            "value": 17112483.9375,
+            "range": "1.708e+07..1.715e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/table/deltas/100%/20000",
+            "value": 35643896.0625,
+            "range": "3.553e+07..3.575e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/table/snapshots/1%/100",
+            "value": 41235.720703125,
+            "range": "4.121e+04..4.126e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/table/snapshots/1%/1000",
+            "value": 418895.1953125,
+            "range": "4.186e+05..4.192e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/table/snapshots/1%/10000",
+            "value": 4400225,
+            "range": "4.394e+06..4.407e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/table/snapshots/1%/20000",
+            "value": 9076331.25,
+            "range": "9.026e+06..9.127e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/table/snapshots/10%/100",
+            "value": 41196.7626953125,
+            "range": "4.12e+04..4.12e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/table/snapshots/10%/1000",
+            "value": 418510.96875,
+            "range": "4.185e+05..4.185e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/table/snapshots/10%/10000",
+            "value": 4404289.125,
+            "range": "4.402e+06..4.407e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/table/snapshots/10%/20000",
+            "value": 9147996.4375,
+            "range": "9.141e+06..9.155e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/table/snapshots/100%/100",
+            "value": 41317.069091796875,
+            "range": "4.129e+04..4.134e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/table/snapshots/100%/1000",
+            "value": 423217.85546875,
+            "range": "4.229e+05..4.236e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/table/snapshots/100%/10000",
+            "value": 4492827.53125,
+            "range": "4.49e+06..4.496e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/table/snapshots/100%/20000",
+            "value": 9234891,
+            "range": "9.215e+06..9.255e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/decode_clock_drain/backward/4096B/1000",
+            "value": 39069.90380859375,
+            "range": "3.906e+04..3.908e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/decode_clock_drain/backward/4096B/10000",
+            "value": 481618.32421875,
+            "range": "4.814e+05..4.818e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/decode_clock_drain/backward/4096B/100000",
+            "value": 5653488.84375,
+            "range": "5.645e+06..5.662e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/decode_clock_drain/backward/64B/1000",
+            "value": 39099.00146484375,
+            "range": "3.909e+04..3.91e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/decode_clock_drain/backward/64B/10000",
+            "value": 463422.2265625,
+            "range": "4.632e+05..4.637e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/decode_clock_drain/backward/64B/100000",
+            "value": 5525362.59375,
+            "range": "5.517e+06..5.533e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/decode_clock_drain/flat/4096B/1000",
+            "value": 42339.43310546875,
+            "range": "4.234e+04..4.234e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/decode_clock_drain/flat/4096B/10000",
+            "value": 575088.18359375,
+            "range": "5.734e+05..5.767e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/decode_clock_drain/flat/4096B/100000",
+            "value": 5890380.4375,
+            "range": "5.89e+06..5.891e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/decode_clock_drain/flat/64B/1000",
+            "value": 42529.27099609375,
+            "range": "4.252e+04..4.254e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/decode_clock_drain/flat/64B/10000",
+            "value": 575598.953125,
+            "range": "5.741e+05..5.771e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/decode_clock_drain/flat/64B/100000",
+            "value": 5893729.8125,
+            "range": "5.889e+06..5.899e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/decode_clock_drain/pyramid/4096B/1000",
+            "value": 42913.13330078125,
+            "range": "4.29e+04..4.292e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/decode_clock_drain/pyramid/4096B/10000",
+            "value": 533549.5546875,
+            "range": "5.331e+05..5.34e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/decode_clock_drain/pyramid/4096B/100000",
+            "value": 5906866.0625,
+            "range": "5.906e+06..5.908e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/decode_clock_drain/pyramid/64B/1000",
+            "value": 43338.006103515625,
+            "range": "4.333e+04..4.334e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/decode_clock_drain/pyramid/64B/10000",
+            "value": 520097.03515625,
+            "range": "5.196e+05..5.206e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/decode_clock_drain/pyramid/64B/100000",
+            "value": 5903228.1875,
+            "range": "5.902e+06..5.904e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/decode_clock_read/backward/1000",
+            "value": 38393.55224609375,
+            "range": "3.838e+04..3.841e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/decode_clock_read/backward/10000",
+            "value": 461034.7421875,
+            "range": "4.609e+05..4.611e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/decode_clock_read/backward/100000",
+            "value": 4778705.65625,
+            "range": "4.778e+06..4.779e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/decode_clock_read/flat/1000",
+            "value": 41803.06494140625,
+            "range": "4.179e+04..4.181e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/decode_clock_read/flat/10000",
+            "value": 454707.703125,
+            "range": "4.547e+05..4.547e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/decode_clock_read/flat/100000",
+            "value": 4590001,
+            "range": "4.586e+06..4.594e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/decode_clock_read/pyramid/1000",
+            "value": 33114.53515625,
+            "range": "3.307e+04..3.316e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/decode_clock_read/pyramid/10000",
+            "value": 330307.220703125,
+            "range": "3.303e+05..3.303e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/decode_clock_read/pyramid/100000",
+            "value": 3301524.09375,
+            "range": "3.299e+06..3.304e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_acquisition/1/16",
+            "value": 1907.6940307617188,
+            "range": "1907..1909",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_acquisition/1/256",
+            "value": 12572.168334960938,
+            "range": "1.257e+04..1.257e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_acquisition/1/64",
+            "value": 4293.410308837891,
+            "range": "4290..4297",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_acquisition/16/16",
+            "value": 24799.27099609375,
+            "range": "2.479e+04..2.48e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_acquisition/16/256",
+            "value": 277605.384765625,
+            "range": "2.774e+05..2.778e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_acquisition/16/64",
+            "value": 78254.6552734375,
+            "range": "7.823e+04..7.828e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_acquisition/4/16",
+            "value": 5701.587371826172,
+            "range": "5702..5702",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_acquisition/4/256",
+            "value": 52562.72900390625,
+            "range": "5.255e+04..5.258e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_acquisition/4/64",
+            "value": 15595.057983398438,
+            "range": "1.559e+04..1.56e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_acquisition/64/16",
+            "value": 123979.0244140625,
+            "range": "1.237e+05..1.242e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_acquisition/64/256",
+            "value": 1450581.328125,
+            "range": "1.449e+06..1.452e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_acquisition/64/64",
+            "value": 404810.4921875,
+            "range": "4.036e+05..4.061e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_admission/1/1024",
+            "value": 6658.754943847656,
+            "range": "6655..6663",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_admission/1/256",
+            "value": 6661.592102050781,
+            "range": "6658..6665",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_admission/1/64",
+            "value": 6659.4669189453125,
+            "range": "6657..6662",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_admission/16/1024",
+            "value": 134893.3427734375,
+            "range": "1.349e+05..1.349e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_admission/16/256",
+            "value": 111886.044921875,
+            "range": "1.119e+05..1.119e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_admission/16/64",
+            "value": 111913.9287109375,
+            "range": "1.119e+05..1.12e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_admission/4/1024",
+            "value": 31399.53271484375,
+            "range": "3.139e+04..3.14e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_admission/4/256",
+            "value": 31374.11572265625,
+            "range": "3.137e+04..3.138e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_admission/4/64",
+            "value": 31334.16357421875,
+            "range": "3.128e+04..3.138e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_admission/64/1024",
+            "value": 495525.0859375,
+            "range": "4.953e+05..4.958e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_admission/64/256",
+            "value": 496277.14453125,
+            "range": "4.961e+05..4.965e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_admission/64/64",
+            "value": 494007.47265625,
+            "range": "4.94e+05..4.94e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_handoff/1/16",
+            "value": 4147.737854003906,
+            "range": "4141..4154",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_handoff/1/256",
+            "value": 26100.30419921875,
+            "range": "2.608e+04..2.612e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_handoff/1/64",
+            "value": 9015.161865234375,
+            "range": "9009..9021",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_handoff/16/16",
+            "value": 54218.99951171875,
+            "range": "5.421e+04..5.423e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_handoff/16/256",
+            "value": 591645.8203125,
+            "range": "5.913e+05..5.92e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_handoff/16/64",
+            "value": 167095.869140625,
+            "range": "1.668e+05..1.674e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_handoff/4/16",
+            "value": 12218.5048828125,
+            "range": "1.22e+04..1.223e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_handoff/4/256",
+            "value": 109821.5888671875,
+            "range": "1.098e+05..1.099e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_handoff/4/64",
+            "value": 33297.886962890625,
+            "range": "3.328e+04..3.331e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_handoff/64/16",
+            "value": 268573.6171875,
+            "range": "2.685e+05..2.686e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_handoff/64/256",
+            "value": 3109075.3125,
+            "range": "3.108e+06..3.11e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_handoff/64/64",
+            "value": 860540.328125,
+            "range": "8.598e+05..8.613e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_steering/1/10",
+            "value": 13290.68359375,
+            "range": "1.329e+04..1.329e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_steering/1/100",
+            "value": 141334.6826171875,
+            "range": "1.412e+05..1.414e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_steering/1/300",
+            "value": 521233.90234375,
+            "range": "5.211e+05..5.214e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_steering/16/10",
+            "value": 104912.16015625,
+            "range": "1.048e+05..1.05e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_steering/16/100",
+            "value": 1679868.21875,
+            "range": "1.679e+06..1.681e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_steering/16/300",
+            "value": 9097748.3125,
+            "range": "9.095e+06..9.1e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_steering/4/10",
+            "value": 28231.21875,
+            "range": "2.823e+04..2.824e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_steering/4/100",
+            "value": 430784.01171875,
+            "range": "4.307e+05..4.308e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_steering/4/300",
+            "value": 2288652.125,
+            "range": "2.289e+06..2.289e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_steering/64/10",
+            "value": 630025.69140625,
+            "range": "6.295e+05..6.305e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_steering/64/100",
+            "value": 8810956.8125,
+            "range": "8.81e+06..8.812e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/jitter_steering/64/300",
+            "value": 43821546.5,
+            "range": "4.37e+07..4.394e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/h264-split-pps/distinct/1",
+            "value": 483.80785369873047,
+            "range": "483.6..484",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/h264-split-pps/distinct/16",
+            "value": 2471.399932861328,
+            "range": "2471..2472",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/h264-split-pps/distinct/256",
+            "value": 35133.38623046875,
+            "range": "3.511e+04..3.515e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/h264-split-pps/distinct/4096",
+            "value": 622234.8046875,
+            "range": "6.222e+05..6.223e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/h264-split-pps/repeated/1",
+            "value": 499.4801254272461,
+            "range": "499.3..499.7",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/h264-split-pps/repeated/16",
+            "value": 2003.8290252685547,
+            "range": "2002..2006",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/h264-split-pps/repeated/256",
+            "value": 19991.79248046875,
+            "range": "1.998e+04..2e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/h264-split-pps/repeated/4096",
+            "value": 295241.078125,
+            "range": "2.949e+05..2.955e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/timeline_audio_update",
+            "value": 28.845051288604736,
+            "range": "28.84..28.85",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/timeline_present/1/1",
+            "value": 24.059855699539185,
+            "range": "24.03..24.09",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/timeline_present/1/3",
+            "value": 29.639219522476196,
+            "range": "29.62..29.65",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/timeline_present/1/30",
+            "value": 158.20235919952393,
+            "range": "158.2..158.2",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/timeline_present/64/1",
+            "value": 1525.1522064208984,
+            "range": "1525..1525",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/timeline_present/64/3",
+            "value": 1846.5000305175781,
+            "range": "1846..1847",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/timeline_present/64/30",
+            "value": 10077.485717773438,
+            "range": "1.007e+04..1.008e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/timeline_present/8/1",
+            "value": 192.91282081604004,
+            "range": "192.9..192.9",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/timeline_present/8/3",
+            "value": 233.4673557281494,
+            "range": "233.5..233.5",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/timeline_present/8/30",
+            "value": 1261.3752059936523,
+            "range": "1261..1262",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/ts_programs/1/1mbps",
+            "value": 400009.97265625,
+            "range": "3.98e+05..4.02e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/ts_programs/1/4mbps",
+            "value": 1234385.25,
+            "range": "1.23e+06..1.238e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/ts_programs/1+1000/1mbps",
+            "value": 8560929.9375,
+            "range": "8.51e+06..8.612e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/ts_programs/1+1000/4mbps",
+            "value": 9439203.375,
+            "range": "9.409e+06..9.47e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/ts_programs/1-null16/1mbps",
+            "value": 439390.04296875,
+            "range": "4.378e+05..4.41e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/ts_programs/1-null256/1mbps",
+            "value": 698286.0703125,
+            "range": "6.951e+05..7.015e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/ts_programs/1-stray16/1mbps",
+            "value": 455718.6171875,
+            "range": "4.546e+05..4.569e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/ts_programs/1-stray256/1mbps",
+            "value": 1060730.5,
+            "range": "1.056e+06..1.066e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/ts_programs/16/1mbps",
+            "value": 6452855.25,
+            "range": "6.423e+06..6.483e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/ts_programs/16/4mbps",
+            "value": 19948909.125,
+            "range": "1.993e+07..1.997e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/ts_programs/16+1000/1mbps",
+            "value": 16041856.875,
+            "range": "1.601e+07..1.608e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/ts_programs/16+1000/4mbps",
+            "value": 28789007.5,
+            "range": "2.873e+07..2.885e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/ts_programs/16-null16/1mbps",
+            "value": 6470849.8125,
+            "range": "6.445e+06..6.497e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/ts_programs/16-null256/1mbps",
+            "value": 6681605.375,
+            "range": "6.673e+06..6.69e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/ts_programs/16-stray16/1mbps",
+            "value": 6453934.875,
+            "range": "6.437e+06..6.471e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/ts_programs/16-stray256/1mbps",
+            "value": 7091872.9375,
+            "range": "7.066e+06..7.118e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/ts_programs/4/1mbps",
+            "value": 1534867.59375,
+            "range": "1.532e+06..1.538e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/ts_programs/4/4mbps",
+            "value": 4649544.34375,
+            "range": "4.599e+06..4.7e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/ts_programs/4+1000/1mbps",
+            "value": 10204124.1875,
+            "range": "1.019e+07..1.022e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/ts_programs/4+1000/4mbps",
+            "value": 13461188.125,
+            "range": "1.34e+07..1.352e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/ts_programs/4-null16/1mbps",
+            "value": 1558868.171875,
+            "range": "1.554e+06..1.563e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/ts_programs/4-null256/1mbps",
+            "value": 1800259.484375,
+            "range": "1.796e+06..1.805e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/ts_programs/4-stray16/1mbps",
+            "value": 1579258.671875,
+            "range": "1.568e+06..1.59e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/ts_programs/4-stray256/1mbps",
+            "value": 2191889.609375,
+            "range": "2.187e+06..2.197e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/ts_stalled/1/1packets",
+            "value": 784888.1875,
+            "range": "7.82e+05..7.878e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/ts_stalled/1/256packets",
+            "value": 320101.40234375,
+            "range": "3.194e+05..3.208e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/ts_stalled/1/7packets",
+            "value": 399281.6484375,
+            "range": "3.961e+05..4.025e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/ts_stalled/16/1packets",
+            "value": 12023385.3125,
+            "range": "1.199e+07..1.206e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/ts_stalled/16/256packets",
+            "value": 4897749.4375,
+            "range": "4.859e+06..4.937e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/ts_stalled/16/7packets",
+            "value": 6290113.1875,
+            "range": "6.256e+06..6.324e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/ts_stalled/4/1packets",
+            "value": 2946249.21875,
+            "range": "2.943e+06..2.95e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/ts_stalled/4/256packets",
+            "value": 1202004.84375,
+            "range": "1.199e+06..1.205e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/ts_stalled/4/7packets",
+            "value": 1546402.328125,
+            "range": "1.528e+06..1.565e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/ts_video/1048576/1024",
+            "value": 2860548.59375,
+            "range": "2.849e+06..2.872e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/ts_video/1048576/64",
+            "value": 10662252.75,
+            "range": "1.064e+07..1.068e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/ts_video/1048576/65000",
+            "value": 2296602.59375,
+            "range": "2.282e+06..2.311e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/ts_video/4096/1024",
+            "value": 84363.61669921875,
+            "range": "8.436e+04..8.437e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/ts_video/4096/64",
+            "value": 117155.23828125,
+            "range": "1.159e+05..1.185e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/ts_video/4096/65000",
+            "value": 81201.8359375,
+            "range": "8.071e+04..8.169e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/ts_video/65536/1024",
+            "value": 279288.68359375,
+            "range": "2.786e+05..2.799e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/ts_video/65536/64",
+            "value": 768603.625,
+            "range": "7.675e+05..7.697e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/ts_video/65536/65000",
+            "value": 223113.955078125,
+            "range": "2.227e+05..2.235e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/receive_bursts/cancel/streams_1/packets_1",
+            "value": 6592.6904296875,
+            "range": "6587..6599",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/receive_bursts/cancel/streams_1/packets_16",
+            "value": 10792.435546875,
+            "range": "1.079e+04..1.08e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/receive_bursts/cancel/streams_1/packets_256",
+            "value": 104622.3125,
+            "range": "1.045e+05..1.047e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/receive_bursts/cancel/streams_16/packets_1",
+            "value": 16561.25,
+            "range": "1.654e+04..1.659e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/receive_bursts/cancel/streams_16/packets_16",
+            "value": 124181.53125,
+            "range": "1.232e+05..1.252e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/receive_bursts/cancel/streams_16/packets_256",
+            "value": 1866385.5,
+            "range": "1.86e+06..1.873e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/receive_bursts/cancel/streams_256/packets_1",
+            "value": 235401.4375,
+            "range": "2.344e+05..2.364e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/receive_bursts/cancel/streams_256/packets_16",
+            "value": 2838125.5,
+            "range": "2.827e+06..2.849e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/receive_bursts/cancel/streams_256/packets_256",
+            "value": 54289096,
+            "range": "5.429e+07..5.429e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/receive_bursts/loss/streams_1/packets_1",
+            "value": 4075.39453125,
+            "range": "4075..4076",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/receive_bursts/loss/streams_1/packets_16",
+            "value": 12703.6796875,
+            "range": "1.269e+04..1.272e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/receive_bursts/loss/streams_1/packets_256",
+            "value": 111478.90625,
+            "range": "1.113e+05..1.116e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/receive_bursts/loss/streams_16/packets_1",
+            "value": 20434.94140625,
+            "range": "2.04e+04..2.047e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/receive_bursts/loss/streams_16/packets_16",
+            "value": 139312.625,
+            "range": "1.391e+05..1.395e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/receive_bursts/loss/streams_16/packets_256",
+            "value": 1997642,
+            "range": "1.997e+06..1.998e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/receive_bursts/loss/streams_256/packets_1",
+            "value": 396655.5625,
+            "range": "3.966e+05..3.968e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/receive_bursts/loss/streams_256/packets_16",
+            "value": 3711525,
+            "range": "3.697e+06..3.726e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/receive_bursts/loss/streams_256/packets_256",
+            "value": 58691512,
+            "range": "5.869e+07..5.869e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/receive_bursts/ordered/streams_1/packets_1",
+            "value": 4056.072265625,
+            "range": "4050..4062",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/receive_bursts/ordered/streams_1/packets_16",
+            "value": 7997.0595703125,
+            "range": "7994..8000",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/receive_bursts/ordered/streams_1/packets_256",
+            "value": 103537.140625,
+            "range": "1.035e+05..1.036e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/receive_bursts/ordered/streams_16/packets_1",
+            "value": 13313.90625,
+            "range": "1.33e+04..1.333e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/receive_bursts/ordered/streams_16/packets_16",
+            "value": 120379.34375,
+            "range": "1.201e+05..1.207e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/receive_bursts/ordered/streams_16/packets_256",
+            "value": 1893052.25,
+            "range": "1.891e+06..1.895e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/receive_bursts/ordered/streams_256/packets_1",
+            "value": 229973.9375,
+            "range": "2.292e+05..2.308e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/receive_bursts/ordered/streams_256/packets_16",
+            "value": 2833085,
+            "range": "2.826e+06..2.84e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/receive_bursts/ordered/streams_256/packets_256",
+            "value": 54922040,
+            "range": "5.492e+07..5.492e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/sent_packets/ack_only_receiver",
+            "value": 3192461.125,
+            "range": "3.187e+06..3.198e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/sent_packets/bulk_sender",
+            "value": 9981635,
+            "range": "9.969e+06..9.994e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/sent_packets/pto_probe_holes",
+            "value": 713975.15625,
+            "range": "7.14e+05..7.14e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/sent_packets/typical_connection",
+            "value": 11806632.5,
+            "range": "1.18e+07..1.181e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/sent_packets/unacked_non_eliciting_tail",
+            "value": 963995.6875,
+            "range": "9.64e+05..9.64e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/demux_route/pins_0/shards_1",
+            "value": 96.35948371887207,
+            "range": "96.29..96.43",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/demux_route/pins_0/shards_4",
+            "value": 96.80363655090332,
+            "range": "96.51..97.1",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/demux_route/pins_1/shards_1",
+            "value": 1914.2010650634766,
+            "range": "1912..1916",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/demux_route/pins_1/shards_4",
+            "value": 1920.8395690917969,
+            "range": "1914..1927",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/demux_route/pins_1024/shards_1",
+            "value": 1924.5981140136719,
+            "range": "1923..1926",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/demux_route/pins_1024/shards_4",
+            "value": 1967.0355834960938,
+            "range": "1946..1988",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/fanout/uni_1KiB/1",
+            "value": 17483.14178466797,
+            "range": "1.712e+04..1.785e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/fanout/uni_1KiB/1024",
+            "value": 5948178.125,
+            "range": "5.912e+06..5.985e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/fanout/uni_1KiB/16",
+            "value": 80696.470703125,
+            "range": "8.034e+04..8.105e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/fanout/uni_1KiB/256",
+            "value": 1317502.59375,
+            "range": "1.304e+06..1.331e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/native_transport/bytes-64/streams-1",
+            "value": 17658.435424804688,
+            "range": "1.745e+04..1.787e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/native_transport/bytes-64/streams-16",
+            "value": 44624.756103515625,
+            "range": "4.416e+04..4.509e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/native_transport/bytes-64/streams-256",
+            "value": 525073.3046875,
+            "range": "5.215e+05..5.287e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/native_transport/bytes-65536/streams-1",
+            "value": 157728.9580078125,
+            "range": "1.572e+05..1.583e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/native_transport/bytes-65536/streams-16",
+            "value": 2486528.671875,
+            "range": "2.479e+06..2.494e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/native_transport/bytes-65536/streams-256",
+            "value": 44628616,
+            "range": "4.385e+07..4.541e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/fanout/wall/caller/1",
+            "value": 5245683.421875,
+            "range": "5.133e+06..5.359e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/fanout/wall/caller/3",
+            "value": 7084078.5625,
+            "range": "7.042e+06..7.126e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/fanout/wall/encoder/1",
+            "value": 5206053.796875,
+            "range": "5.087e+06..5.325e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/fanout/wall/encoder/3",
+            "value": 5226077.046875,
+            "range": "5.104e+06..5.348e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/fanout/worker/caller/1",
+            "value": 3902307,
+            "range": "3.898e+06..3.906e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/fanout/worker/caller/3",
+            "value": 6627363.5,
+            "range": "6.605e+06..6.65e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/fanout/worker/encoder/1",
+            "value": 10660.75,
+            "range": "1.064e+04..1.068e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/fanout/worker/encoder/3",
+            "value": 25225.5,
+            "range": "2.479e+04..2.566e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/extra/flapping",
+            "value": 114579.0830078125,
+            "range": "1.144e+05..1.147e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/audio-capture/capture_fanout/sources_1/1",
+            "value": 76.30538511276245,
+            "range": "76.29..76.32",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/audio-capture/capture_fanout/sources_1/16",
+            "value": 494.17881774902344,
+            "range": "494..494.3",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/audio-capture/capture_fanout/sources_1/4",
+            "value": 159.38273906707764,
+            "range": "159.3..159.4",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/audio-capture/capture_fanout/sources_16/1",
+            "value": 1204.2656555175781,
+            "range": "1204..1204",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/audio-capture/capture_fanout/sources_16/16",
+            "value": 7878.4432373046875,
+            "range": "7876..7881",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/audio-capture/capture_fanout/sources_16/4",
+            "value": 2545.4986877441406,
+            "range": "2545..2546",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/audio-capture/capture_fanout/sources_4/1",
+            "value": 302.914644241333,
+            "range": "302.8..303",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/audio-capture/capture_fanout/sources_4/16",
+            "value": 1973.4115905761719,
+            "range": "1973..1974",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/audio-capture/capture_fanout/sources_4/4",
+            "value": 640.0540504455566,
+            "range": "639.3..640.8",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/audio-capture/capture_publish/sources_1/1",
+            "value": 47.587268352508545,
+            "range": "47.58..47.59",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/audio-capture/capture_publish/sources_1/16",
+            "value": 50.08918523788452,
+            "range": "50.08..50.1",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/audio-capture/capture_publish/sources_1/4",
+            "value": 49.02715444564819,
+            "range": "49.01..49.04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/audio-capture/capture_publish/sources_16/1",
+            "value": 739.5709342956543,
+            "range": "739.4..739.7",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/audio-capture/capture_publish/sources_16/16",
+            "value": 768.3177108764648,
+            "range": "768..768.6",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/audio-capture/capture_publish/sources_16/4",
+            "value": 746.599536895752,
+            "range": "746.6..746.6",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/audio-capture/capture_publish/sources_4/1",
+            "value": 186.1990270614624,
+            "range": "186.2..186.2",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/audio-capture/capture_publish/sources_4/16",
+            "value": 195.99703216552734,
+            "range": "195.8..196.2",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/audio-capture/capture_publish/sources_4/4",
+            "value": 189.19000244140625,
+            "range": "189.1..189.2",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/jwt/sign_ES256",
+            "value": 25822.822021484375,
+            "range": "2.582e+04..2.582e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/jwt/sign_EdDSA",
+            "value": 15936.318237304688,
+            "range": "1.593e+04..1.594e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/jwt/sign_HS256",
+            "value": 619.6581726074219,
+            "range": "619.6..619.7",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/jwt/sign_RS256",
+            "value": 687077.140625,
+            "range": "6.871e+05..6.871e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/jwt/verify_ES256",
+            "value": 52241.89111328125,
+            "range": "5.224e+04..5.224e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/jwt/verify_EdDSA",
+            "value": 41519.234619140625,
+            "range": "4.151e+04..4.153e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/jwt/verify_HS256",
+            "value": 2204.6212158203125,
+            "range": "2205..2205",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/jwt/verify_RS256",
+            "value": 21586.82421875,
+            "range": "2.158e+04..2.159e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/clients/16/dir16",
+            "value": 439234.5078125,
+            "range": "4.328e+05..4.457e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/clients/16/file",
+            "value": 422096.94140625,
+            "range": "4.145e+05..4.297e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/clients/16/rotate",
+            "value": 343246.732421875,
+            "range": "3.363e+05..3.502e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/clients/16/set16",
+            "value": 503025.46484375,
+            "range": "5.023e+05..5.038e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/clients/1/dir16",
+            "value": 107531.7490234375,
+            "range": "1.07e+05..1.08e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/clients/1/file",
+            "value": 108420.68359375,
+            "range": "1.083e+05..1.086e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/clients/1/set16",
+            "value": 126047.462890625,
+            "range": "1.255e+05..1.266e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/clients/64/dir16",
+            "value": 1381438.8828125,
+            "range": "1.371e+06..1.392e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/clients/64/file",
+            "value": 1383901.953125,
+            "range": "1.381e+06..1.387e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/clients/64/refuse",
+            "value": 705574.4765625,
+            "range": "6.91e+05..7.202e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/clients/64/set16",
+            "value": 1649019.953125,
+            "range": "1.623e+06..1.676e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/decide/ES256/dir",
+            "value": 83593.4150390625,
+            "range": "8.344e+04..8.374e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/decide/ES256/file",
+            "value": 81986.48828125,
+            "range": "8.163e+04..8.235e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/decide/ES256/set",
+            "value": 85449.1904296875,
+            "range": "8.438e+04..8.651e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/decide/ES384/dir",
+            "value": 219766.724609375,
+            "range": "2.192e+05..2.203e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/decide/ES384/file",
+            "value": 218668.673828125,
+            "range": "2.184e+05..2.189e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/decide/ES384/set",
+            "value": 217189.390625,
+            "range": "2.169e+05..2.175e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/decide/EdDSA/dir",
+            "value": 69420.2958984375,
+            "range": "6.914e+04..6.97e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/decide/EdDSA/file",
+            "value": 68729.59033203125,
+            "range": "6.868e+04..6.878e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/decide/EdDSA/set",
+            "value": 68936.5546875,
+            "range": "6.854e+04..6.933e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/decide/HS256/dir",
+            "value": 27682.92724609375,
+            "range": "2.72e+04..2.817e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/decide/HS256/file",
+            "value": 29393.662353515625,
+            "range": "2.916e+04..2.963e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/decide/HS256/set",
+            "value": 28039.16357421875,
+            "range": "2.785e+04..2.823e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/decide/HS384/dir",
+            "value": 27960.9287109375,
+            "range": "2.778e+04..2.814e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/decide/HS384/file",
+            "value": 28080.7744140625,
+            "range": "2.76e+04..2.857e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/decide/HS384/set",
+            "value": 29078.191162109375,
+            "range": "2.889e+04..2.926e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/decide/HS512/dir",
+            "value": 28972.240478515625,
+            "range": "2.882e+04..2.912e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/decide/HS512/file",
+            "value": 28208.108642578125,
+            "range": "2.784e+04..2.858e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/decide/HS512/set",
+            "value": 30444.946533203125,
+            "range": "2.986e+04..3.103e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/decide/PS256/dir",
+            "value": 52289.11865234375,
+            "range": "5.2e+04..5.258e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/decide/PS256/file",
+            "value": 50929.41943359375,
+            "range": "5.006e+04..5.18e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/decide/PS256/set",
+            "value": 50920.86767578125,
+            "range": "5.092e+04..5.092e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/decide/PS384/dir",
+            "value": 51361.6318359375,
+            "range": "5.121e+04..5.151e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/decide/PS384/file",
+            "value": 51527.64501953125,
+            "range": "5.142e+04..5.164e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/decide/PS384/set",
+            "value": 52920.5771484375,
+            "range": "5.268e+04..5.316e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/decide/PS512/dir",
+            "value": 50190.5517578125,
+            "range": "4.973e+04..5.065e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/decide/PS512/file",
+            "value": 51327.548828125,
+            "range": "5.095e+04..5.17e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/decide/PS512/set",
+            "value": 52190.662109375,
+            "range": "5.17e+04..5.268e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/decide/RS256/dir",
+            "value": 51493.87841796875,
+            "range": "5.148e+04..5.151e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/decide/RS256/file",
+            "value": 51360.7373046875,
+            "range": "5.132e+04..5.14e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/decide/RS256/set",
+            "value": 51565.66162109375,
+            "range": "5.135e+04..5.178e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/decide/RS384/dir",
+            "value": 50497.66259765625,
+            "range": "5.047e+04..5.052e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/decide/RS384/file",
+            "value": 50320.27001953125,
+            "range": "5.002e+04..5.062e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/decide/RS384/set",
+            "value": 52514.5673828125,
+            "range": "5.233e+04..5.27e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/decide/RS512/dir",
+            "value": 48675.271484375,
+            "range": "4.827e+04..4.908e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/decide/RS512/file",
+            "value": 49693.30078125,
+            "range": "4.898e+04..5.04e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/decide/RS512/set",
+            "value": 51187.16357421875,
+            "range": "5.1e+04..5.137e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/http/ES256",
+            "value": 166240.2724609375,
+            "range": "1.66e+05..1.665e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/http/HS256",
+            "value": 106488.9814453125,
+            "range": "1.044e+05..1.086e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/refuse/expired",
+            "value": 83073.58056640625,
+            "range": "8.119e+04..8.496e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/refuse/forged",
+            "value": 80697.62353515625,
+            "range": "8.061e+04..8.078e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/refuse/malformed",
+            "value": 345.4748706817627,
+            "range": "345.4..345.5",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/refuse/missing_kid",
+            "value": 847.5230560302734,
+            "range": "847.5..847.6",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/refuse/unknown_kid",
+            "value": 19135.013916015625,
+            "range": "1.908e+04..1.919e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/sessions/0",
+            "value": 28361.275146484375,
+            "range": "2.792e+04..2.88e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/sessions/1024",
+            "value": 52377.748046875,
+            "range": "5.236e+04..5.24e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/sessions/16384",
+            "value": 516981.91015625,
+            "range": "5.131e+05..5.209e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/set/16/first",
+            "value": 109540.9814453125,
+            "range": "1.09e+05..1.101e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/set/16/last",
+            "value": 112953.6533203125,
+            "range": "1.115e+05..1.144e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/set/16/missing",
+            "value": 43415.6982421875,
+            "range": "4.336e+04..4.347e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/set/1/first",
+            "value": 84249.6689453125,
+            "range": "8.306e+04..8.544e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/set/1/last",
+            "value": 83977.26953125,
+            "range": "8.379e+04..8.417e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/set/1/missing",
+            "value": 23907.00439453125,
+            "range": "2.38e+04..2.401e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/set/256/first",
+            "value": 404272.87890625,
+            "range": "4.031e+05..4.055e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/set/256/last",
+            "value": 424545.8671875,
+            "range": "4.208e+05..4.282e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/set/256/missing",
+            "value": 332901.826171875,
+            "range": "3.312e+05..3.346e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/ES256/import",
+            "value": 64.9332389831543,
+            "range": "64.93..64.94",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/ES256/parse_key",
+            "value": 856.0690994262695,
+            "range": "855.4..856.7",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/ES256/verify_cold",
+            "value": 54188.93017578125,
+            "range": "5.416e+04..5.421e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/ES256/verify_warm",
+            "value": 53415.53076171875,
+            "range": "5.34e+04..5.343e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/ES384/import",
+            "value": 64.82624864578247,
+            "range": "64.75..64.91",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/ES384/parse_key",
+            "value": 898.0301055908203,
+            "range": "897.7..898.3",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/ES384/verify_cold",
+            "value": 181820.169921875,
+            "range": "1.818e+05..1.819e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/ES384/verify_warm",
+            "value": 180129.9755859375,
+            "range": "1.801e+05..1.802e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/EdDSA/import",
+            "value": 89.40815019607544,
+            "range": "89.4..89.41",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/EdDSA/parse_key",
+            "value": 691.1410140991211,
+            "range": "690.9..691.3",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/EdDSA/verify_cold",
+            "value": 41913.917236328125,
+            "range": "4.188e+04..4.195e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/EdDSA/verify_warm",
+            "value": 41510.28173828125,
+            "range": "4.15e+04..4.152e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/HS256/import",
+            "value": 56.83906698226929,
+            "range": "56.84..56.84",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/HS256/parse_key",
+            "value": 605.7825698852539,
+            "range": "605.6..606",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/HS256/verify_cold",
+            "value": 2532.298858642578,
+            "range": "2532..2533",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/HS256/verify_warm",
+            "value": 2359.6936798095703,
+            "range": "2359..2360",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/HS384/import",
+            "value": 56.9451003074646,
+            "range": "56.94..56.95",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/HS384/parse_key",
+            "value": 638.2451667785645,
+            "range": "638..638.5",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/HS384/verify_cold",
+            "value": 2990.4540405273438,
+            "range": "2990..2991",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/HS384/verify_warm",
+            "value": 2798.1882934570312,
+            "range": "2798..2799",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/HS512/import",
+            "value": 57.00077295303345,
+            "range": "56.97..57.03",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/HS512/parse_key",
+            "value": 650.4889450073242,
+            "range": "650.2..650.7",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/HS512/verify_cold",
+            "value": 3045.1124114990234,
+            "range": "3044..3046",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/HS512/verify_warm",
+            "value": 2831.9287872314453,
+            "range": "2831..2833",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/PS256/import",
+            "value": 69.22383403778076,
+            "range": "69.19..69.26",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/PS256/parse_key",
+            "value": 1064.8606872558594,
+            "range": "1065..1065",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/PS256/verify_cold",
+            "value": 22513.949096679688,
+            "range": "2.251e+04..2.252e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/PS256/verify_warm",
+            "value": 22143.824096679688,
+            "range": "2.214e+04..2.215e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/PS384/import",
+            "value": 69.81061840057373,
+            "range": "69.79..69.83",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/PS384/parse_key",
+            "value": 1067.1927337646484,
+            "range": "1067..1068",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/PS384/verify_cold",
+            "value": 22960.70751953125,
+            "range": "2.295e+04..2.297e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/PS384/verify_warm",
+            "value": 22603.343627929688,
+            "range": "2.26e+04..2.261e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/PS512/import",
+            "value": 69.01483535766602,
+            "range": "69.01..69.02",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/PS512/parse_key",
+            "value": 1064.1059036254883,
+            "range": "1064..1064",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/PS512/verify_cold",
+            "value": 22776.59033203125,
+            "range": "2.277e+04..2.278e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/PS512/verify_warm",
+            "value": 22443.369750976562,
+            "range": "2.244e+04..2.245e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/RS256/import",
+            "value": 69.28441190719604,
+            "range": "69.24..69.33",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/RS256/parse_key",
+            "value": 1064.6639709472656,
+            "range": "1064..1066",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/RS256/verify_cold",
+            "value": 21994.20068359375,
+            "range": "2.198e+04..2.201e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/RS256/verify_warm",
+            "value": 21630.901000976562,
+            "range": "2.163e+04..2.163e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/RS384/import",
+            "value": 69.31325149536133,
+            "range": "69.25..69.38",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/RS384/parse_key",
+            "value": 1068.4057235717773,
+            "range": "1066..1071",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/RS384/verify_cold",
+            "value": 22194.215087890625,
+            "range": "2.219e+04..2.219e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/RS384/verify_warm",
+            "value": 21807.689819335938,
+            "range": "2.181e+04..2.181e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/RS512/import",
+            "value": 69.21885251998901,
+            "range": "69.16..69.28",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/RS512/parse_key",
+            "value": 1063.1535949707031,
+            "range": "1063..1063",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/RS512/verify_cold",
+            "value": 22205.601318359375,
+            "range": "2.22e+04..2.221e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/RS512/verify_warm",
+            "value": 21784.6875,
+            "range": "2.178e+04..2.179e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/header",
+            "value": 308.4336395263672,
+            "range": "308.4..308.5",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/lookup/1",
+            "value": 11.722022891044617,
+            "range": "11.72..11.73",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/lookup/16",
+            "value": 25.731496572494507,
+            "range": "25.71..25.75",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/lookup/256",
+            "value": 476.5852928161621,
+            "range": "476.4..476.8",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/parse_set/1",
+            "value": 870.4414291381836,
+            "range": "870.2..870.7",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/parse_set/16",
+            "value": 15679.169799804688,
+            "range": "1.563e+04..1.573e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/parse_set/256",
+            "value": 295789.076171875,
+            "range": "2.955e+05..2.961e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/read_std",
+            "value": 2393.9050903320312,
+            "range": "2393..2394",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-extra/rust/auth/verify/stage/read_tokio",
+            "value": 20231.674682617188,
+            "range": "2.006e+04..2.041e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/catalog_av1_codec/full",
+            "value": 107.96786975860596,
+            "range": "107.9..108.1",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/catalog_av1_codec/partial",
+            "value": 66.32982158660889,
+            "range": "66.31..66.35",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/catalog_av1_codec/short",
+            "value": 39.66601300239563,
+            "range": "39.64..39.69",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/catalog_estimate_fanout/hang/tracks_1/1",
+            "value": 702796.15625,
+            "range": "6.998e+05..7.058e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/catalog_estimate_fanout/hang/tracks_1/16",
+            "value": 1329089.8828125,
+            "range": "1.309e+06..1.349e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/catalog_estimate_fanout/hang/tracks_1/4",
+            "value": 861004.0078125,
+            "range": "8.565e+05..8.655e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/catalog_estimate_fanout/hang/tracks_16/1",
+            "value": 11154285.375,
+            "range": "1.109e+07..1.122e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/catalog_estimate_fanout/hang/tracks_16/16",
+            "value": 13735668.125,
+            "range": "1.373e+07..1.374e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/catalog_estimate_fanout/hang/tracks_16/4",
+            "value": 11700572.125,
+            "range": "1.169e+07..1.171e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/catalog_estimate_fanout/hang/tracks_4/1",
+            "value": 2623074.484375,
+            "range": "2.615e+06..2.631e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/catalog_estimate_fanout/hang/tracks_4/16",
+            "value": 3614819.0625,
+            "range": "3.602e+06..3.628e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/catalog_estimate_fanout/hang/tracks_4/4",
+            "value": 2841763.34375,
+            "range": "2.824e+06..2.86e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/catalog_estimate_fanout/msf_references/tracks_1/1",
+            "value": 670242.5234375,
+            "range": "6.686e+05..6.719e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/catalog_estimate_fanout/msf_references/tracks_1/16",
+            "value": 923079.5,
+            "range": "9.215e+05..9.246e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/catalog_estimate_fanout/msf_references/tracks_1/4",
+            "value": 718156.90625,
+            "range": "7.174e+05..7.189e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/catalog_estimate_fanout/msf_references/tracks_16/1",
+            "value": 11199259.1875,
+            "range": "1.12e+07..1.12e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/catalog_estimate_fanout/msf_references/tracks_16/16",
+            "value": 11601190.6875,
+            "range": "1.154e+07..1.166e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/catalog_estimate_fanout/msf_references/tracks_16/4",
+            "value": 11279747.25,
+            "range": "1.127e+07..1.129e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/catalog_estimate_fanout/msf_references/tracks_4/1",
+            "value": 2580799.9375,
+            "range": "2.571e+06..2.591e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/catalog_estimate_fanout/msf_references/tracks_4/16",
+            "value": 2889742.0625,
+            "range": "2.875e+06..2.905e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/catalog_estimate_fanout/msf_references/tracks_4/4",
+            "value": 2640039.046875,
+            "range": "2.634e+06..2.646e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/catalog_unresolved_teardown/1",
+            "value": 5730.0699462890625,
+            "range": "5707..5753",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/catalog_unresolved_teardown/1024",
+            "value": 2331914,
+            "range": "2.314e+06..2.35e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/catalog_unresolved_teardown/64",
+            "value": 128885.107421875,
+            "range": "1.284e+05..1.293e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/catalog_write_order/1",
+            "value": 61251.6513671875,
+            "range": "6.075e+04..6.176e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/catalog_write_order/16",
+            "value": 1197574.015625,
+            "range": "1.19e+06..1.205e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/catalog_write_order/64",
+            "value": 7012389.8125,
+            "range": "6.968e+06..7.057e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/annexb-export-bytes/1tracks-16frames/256",
+            "value": 152581.2578125,
+            "range": "1.519e+05..1.533e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/annexb-export-bytes/1tracks-16frames/4096",
+            "value": 154951.5390625,
+            "range": "1.531e+05..1.568e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/annexb-export-bytes/1tracks-1frames/256",
+            "value": 81619.54296875,
+            "range": "8.128e+04..8.196e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/annexb-export-bytes/1tracks-1frames/4096",
+            "value": 85406.376953125,
+            "range": "8.482e+04..8.599e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/annexb-export-bytes/1tracks-64frames/256",
+            "value": 364814.90625,
+            "range": "3.638e+05..3.658e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/annexb-export-bytes/1tracks-64frames/4096",
+            "value": 380726.3984375,
+            "range": "3.792e+05..3.822e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/annexb-export-frames/1tracks-16frames/256",
+            "value": 153068.015625,
+            "range": "1.529e+05..1.533e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/annexb-export-frames/1tracks-16frames/4096",
+            "value": 153436.75390625,
+            "range": "1.53e+05..1.539e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/annexb-export-frames/1tracks-1frames/256",
+            "value": 85089.142578125,
+            "range": "8.488e+04..8.53e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/annexb-export-frames/1tracks-1frames/4096",
+            "value": 83901.326171875,
+            "range": "8.341e+04..8.439e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/annexb-export-frames/1tracks-64frames/256",
+            "value": 369328.6484375,
+            "range": "3.67e+05..3.717e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/annexb-export-frames/1tracks-64frames/4096",
+            "value": 369058.296875,
+            "range": "3.67e+05..3.711e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/annexb-export-queued-groups/1/1",
+            "value": 82442.517578125,
+            "range": "8.167e+04..8.321e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/annexb-export-queued-groups/1/16",
+            "value": 94130.0078125,
+            "range": "9.314e+04..9.512e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/annexb-export-queued-groups/16/1",
+            "value": 162299.9140625,
+            "range": "1.615e+05..1.631e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/annexb-export-queued-groups/16/16",
+            "value": 347237.0078125,
+            "range": "3.47e+05..3.475e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/annexb-export-queued-groups/64/1",
+            "value": 374923.046875,
+            "range": "3.726e+05..3.772e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/annexb-export-queued-groups/64/16",
+            "value": 1077354.28125,
+            "range": "1.076e+06..1.078e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/annexb-import-bytes/1tracks-16frames/256",
+            "value": 89481.5869140625,
+            "range": "8.888e+04..9.008e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/annexb-import-bytes/1tracks-16frames/4096",
+            "value": 108220.6943359375,
+            "range": "1.072e+05..1.092e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/annexb-import-bytes/1tracks-1frames/256",
+            "value": 23121.05908203125,
+            "range": "2.299e+04..2.325e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/annexb-import-bytes/1tracks-1frames/4096",
+            "value": 25079.6982421875,
+            "range": "2.502e+04..2.514e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/annexb-import-bytes/1tracks-64frames/256",
+            "value": 302917.0390625,
+            "range": "3.015e+05..3.043e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/annexb-import-bytes/1tracks-64frames/4096",
+            "value": 363217.7421875,
+            "range": "3.621e+05..3.643e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/annexb-import-frames/1tracks-16frames/256",
+            "value": 91022.1552734375,
+            "range": "9.041e+04..9.163e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/annexb-import-frames/1tracks-16frames/4096",
+            "value": 105088.2783203125,
+            "range": "1.048e+05..1.054e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/annexb-import-frames/1tracks-1frames/256",
+            "value": 24911.03955078125,
+            "range": "2.486e+04..2.496e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/annexb-import-frames/1tracks-1frames/4096",
+            "value": 24376.4619140625,
+            "range": "2.42e+04..2.455e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/annexb-import-frames/1tracks-64frames/256",
+            "value": 297024.66015625,
+            "range": "2.969e+05..2.971e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/annexb-import-frames/1tracks-64frames/4096",
+            "value": 366313.203125,
+            "range": "3.654e+05..3.672e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-export-bytes/1tracks-16frames/256",
+            "value": 214323.73046875,
+            "range": "2.128e+05..2.158e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-export-bytes/1tracks-16frames/4096",
+            "value": 307379.06640625,
+            "range": "3.041e+05..3.106e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-export-bytes/1tracks-1frames/256",
+            "value": 117223.609375,
+            "range": "1.161e+05..1.183e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-export-bytes/1tracks-1frames/4096",
+            "value": 113585.47265625,
+            "range": "1.116e+05..1.156e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-export-bytes/1tracks-64frames/256",
+            "value": 549838.4140625,
+            "range": "5.493e+05..5.504e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-export-bytes/1tracks-64frames/4096",
+            "value": 890295.71875,
+            "range": "8.853e+05..8.953e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-export-bytes/4tracks-16frames/256",
+            "value": 627596.8828125,
+            "range": "6.245e+05..6.307e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-export-bytes/4tracks-16frames/4096",
+            "value": 994619.5390625,
+            "range": "9.885e+05..1.001e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-export-bytes/4tracks-1frames/256",
+            "value": 218730.26171875,
+            "range": "2.163e+05..2.212e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-export-bytes/4tracks-1frames/4096",
+            "value": 252029.95703125,
+            "range": "2.514e+05..2.527e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-export-bytes/4tracks-64frames/256",
+            "value": 1971598.09375,
+            "range": "1.962e+06..1.982e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-export-bytes/4tracks-64frames/4096",
+            "value": 3388322.03125,
+            "range": "3.388e+06..3.389e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-export-frames/1tracks-16frames/256",
+            "value": 212469.765625,
+            "range": "2.125e+05..2.125e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-export-frames/1tracks-16frames/4096",
+            "value": 310973.7109375,
+            "range": "3.09e+05..3.129e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-export-frames/1tracks-1frames/256",
+            "value": 116655.359375,
+            "range": "1.159e+05..1.174e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-export-frames/1tracks-1frames/4096",
+            "value": 118447.77734375,
+            "range": "1.178e+05..1.191e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-export-frames/1tracks-64frames/256",
+            "value": 536854.71875,
+            "range": "5.242e+05..5.495e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-export-frames/1tracks-64frames/4096",
+            "value": 894081.0078125,
+            "range": "8.92e+05..8.961e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-export-frames/4tracks-16frames/256",
+            "value": 638474.46875,
+            "range": "6.369e+05..6.401e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-export-frames/4tracks-16frames/4096",
+            "value": 1013155.25,
+            "range": "1.011e+06..1.015e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-export-frames/4tracks-1frames/256",
+            "value": 227417.5234375,
+            "range": "2.273e+05..2.275e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-export-frames/4tracks-1frames/4096",
+            "value": 253929.62890625,
+            "range": "2.531e+05..2.548e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-export-frames/4tracks-64frames/256",
+            "value": 2008201.34375,
+            "range": "2.003e+06..2.014e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-export-frames/4tracks-64frames/4096",
+            "value": 3413817.8125,
+            "range": "3.405e+06..3.422e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-import-bytes/1tracks-16frames/256",
+            "value": 207794.552734375,
+            "range": "2.069e+05..2.087e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-import-bytes/1tracks-16frames/4096",
+            "value": 219997.298828125,
+            "range": "2.2e+05..2.2e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-import-bytes/1tracks-1frames/256",
+            "value": 128441.5107421875,
+            "range": "1.278e+05..1.291e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-import-bytes/1tracks-1frames/4096",
+            "value": 128803.7099609375,
+            "range": "1.283e+05..1.293e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-import-bytes/1tracks-64frames/256",
+            "value": 530501.703125,
+            "range": "5.238e+05..5.372e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-import-bytes/1tracks-64frames/4096",
+            "value": 547287.62109375,
+            "range": "5.433e+05..5.513e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-import-bytes/4tracks-16frames/256",
+            "value": 545395.1796875,
+            "range": "5.441e+05..5.467e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-import-bytes/4tracks-16frames/4096",
+            "value": 584052.640625,
+            "range": "5.839e+05..5.842e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-import-bytes/4tracks-1frames/256",
+            "value": 251618.953125,
+            "range": "2.503e+05..2.53e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-import-bytes/4tracks-1frames/4096",
+            "value": 248528.9921875,
+            "range": "2.485e+05..2.486e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-import-bytes/4tracks-64frames/256",
+            "value": 2695041.90625,
+            "range": "2.682e+06..2.708e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-import-bytes/4tracks-64frames/4096",
+            "value": 2015132.171875,
+            "range": "2.002e+06..2.029e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-import-frames/1tracks-16frames/256",
+            "value": 205394.5,
+            "range": "2.044e+05..2.064e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-import-frames/1tracks-16frames/4096",
+            "value": 212306.89453125,
+            "range": "2.101e+05..2.145e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-import-frames/1tracks-1frames/256",
+            "value": 125690.34375,
+            "range": "1.248e+05..1.266e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-import-frames/1tracks-1frames/4096",
+            "value": 129654.357421875,
+            "range": "1.295e+05..1.298e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-import-frames/1tracks-64frames/256",
+            "value": 522168.5625,
+            "range": "5.209e+05..5.234e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-import-frames/1tracks-64frames/4096",
+            "value": 548551.43359375,
+            "range": "5.47e+05..5.501e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-import-frames/4tracks-16frames/256",
+            "value": 541959.11328125,
+            "range": "5.415e+05..5.424e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-import-frames/4tracks-16frames/4096",
+            "value": 577789.7890625,
+            "range": "5.772e+05..5.784e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-import-frames/4tracks-1frames/256",
+            "value": 250144.1171875,
+            "range": "2.487e+05..2.516e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-import-frames/4tracks-1frames/4096",
+            "value": 254169.7265625,
+            "range": "2.514e+05..2.57e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-import-frames/4tracks-64frames/256",
+            "value": 2643278.625,
+            "range": "2.593e+06..2.694e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-import-frames/4tracks-64frames/4096",
+            "value": 2027176.1875,
+            "range": "2.022e+06..2.033e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-import/1tracks/16runs-1bytes-1024chunk",
+            "value": 328929.73828125,
+            "range": "3.262e+05..3.317e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-import/1tracks/16runs-1bytes-10298chunk",
+            "value": 338350.1015625,
+            "range": "3.353e+05..3.414e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-import/1tracks/16runs-1bytes-1chunk",
+            "value": 640681.0703125,
+            "range": "6.391e+05..6.423e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-import/1tracks/16runs-4096bytes-1024chunk",
+            "value": 575476.61328125,
+            "range": "5.71e+05..5.799e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-import/1tracks/16runs-4096bytes-1058618chunk",
+            "value": 443424.30859375,
+            "range": "4.395e+05..4.474e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-import/1tracks/16runs-4096bytes-1chunk",
+            "value": 141354746.75,
+            "range": "1.412e+08..1.415e+08",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-import/1tracks/1runs-1bytes-1024chunk",
+            "value": 209146.63671875,
+            "range": "2.073e+05..2.11e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-import/1tracks/1runs-1bytes-1chunk",
+            "value": 279464.103515625,
+            "range": "2.749e+05..2.84e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-import/1tracks/1runs-1bytes-2378chunk",
+            "value": 213516.056640625,
+            "range": "2.127e+05..2.143e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-import/1tracks/1runs-4096bytes-1024chunk",
+            "value": 230902.322265625,
+            "range": "2.295e+05..2.323e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-import/1tracks/1runs-4096bytes-1chunk",
+            "value": 9137277.75,
+            "range": "9.122e+06..9.152e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-import/1tracks/1runs-4096bytes-67898chunk",
+            "value": 214874.701171875,
+            "range": "2.126e+05..2.172e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-import/4tracks/16runs-1bytes-1024chunk",
+            "value": 1116558.6640625,
+            "range": "1.116e+06..1.117e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-import/4tracks/16runs-1bytes-1chunk",
+            "value": 2252006.28125,
+            "range": "2.247e+06..2.257e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-import/4tracks/16runs-1bytes-39164chunk",
+            "value": 1118762.578125,
+            "range": "1.11e+06..1.128e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-import/4tracks/16runs-4096bytes-1024chunk",
+            "value": 2058225.5,
+            "range": "2.054e+06..2.062e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-import/4tracks/16runs-4096bytes-1chunk",
+            "value": 565542589,
+            "range": "5.655e+08..5.655e+08",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-import/4tracks/16runs-4096bytes-4232444chunk",
+            "value": 1440823.171875,
+            "range": "1.439e+06..1.443e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-import/4tracks/1runs-1bytes-1024chunk",
+            "value": 497041.30078125,
+            "range": "4.921e+05..5.02e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-import/4tracks/1runs-1bytes-1chunk",
+            "value": 739534.6953125,
+            "range": "7.309e+05..7.482e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-import/4tracks/1runs-1bytes-7484chunk",
+            "value": 508869.04296875,
+            "range": "5.058e+05..5.119e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-import/4tracks/1runs-4096bytes-1024chunk",
+            "value": 588796.296875,
+            "range": "5.867e+05..5.909e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-import/4tracks/1runs-4096bytes-1chunk",
+            "value": 36010705.75,
+            "range": "3.595e+07..3.607e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-import/4tracks/1runs-4096bytes-269564chunk",
+            "value": 544161.953125,
+            "range": "5.435e+05..5.448e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-unwrap/1tracks/16runs-1bytes-1024chunk",
+            "value": 475893.03515625,
+            "range": "4.727e+05..4.791e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-unwrap/1tracks/16runs-1bytes-10298chunk",
+            "value": 492154.4375,
+            "range": "4.895e+05..4.948e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-unwrap/1tracks/16runs-1bytes-1chunk",
+            "value": 786273.6953125,
+            "range": "7.848e+05..7.878e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-unwrap/1tracks/16runs-4096bytes-1024chunk",
+            "value": 766167.84375,
+            "range": "7.647e+05..7.676e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-unwrap/1tracks/16runs-4096bytes-1058618chunk",
+            "value": 618154.5234375,
+            "range": "6.102e+05..6.261e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-unwrap/1tracks/16runs-4096bytes-1chunk",
+            "value": 141554889.75,
+            "range": "1.415e+08..1.416e+08",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-unwrap/1tracks/1runs-1bytes-1024chunk",
+            "value": 151904.986328125,
+            "range": "1.511e+05..1.527e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-unwrap/1tracks/1runs-1bytes-1chunk",
+            "value": 221040.232421875,
+            "range": "2.207e+05..2.214e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-unwrap/1tracks/1runs-1bytes-2378chunk",
+            "value": 147199.080078125,
+            "range": "1.461e+05..1.483e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-unwrap/1tracks/1runs-4096bytes-1024chunk",
+            "value": 169179.826171875,
+            "range": "1.681e+05..1.703e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-unwrap/1tracks/1runs-4096bytes-1chunk",
+            "value": 9032418.4375,
+            "range": "9.019e+06..9.046e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-unwrap/1tracks/1runs-4096bytes-67898chunk",
+            "value": 159839.1328125,
+            "range": "1.592e+05..1.604e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-unwrap/4tracks/16runs-1bytes-1024chunk",
+            "value": 1835991.703125,
+            "range": "1.834e+06..1.838e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-unwrap/4tracks/16runs-1bytes-1chunk",
+            "value": 2964452.75,
+            "range": "2.952e+06..2.977e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-unwrap/4tracks/16runs-1bytes-39164chunk",
+            "value": 1808585.046875,
+            "range": "1.801e+06..1.816e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-unwrap/4tracks/16runs-4096bytes-1024chunk",
+            "value": 2867427.625,
+            "range": "2.842e+06..2.893e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-unwrap/4tracks/16runs-4096bytes-1chunk",
+            "value": 565243161,
+            "range": "5.652e+08..5.652e+08",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-unwrap/4tracks/16runs-4096bytes-4232444chunk",
+            "value": 2219459.84375,
+            "range": "2.218e+06..2.221e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-unwrap/4tracks/1runs-1bytes-1024chunk",
+            "value": 404712.5,
+            "range": "4.034e+05..4.06e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-unwrap/4tracks/1runs-1bytes-1chunk",
+            "value": 632217.65625,
+            "range": "6.294e+05..6.35e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-unwrap/4tracks/1runs-1bytes-7484chunk",
+            "value": 399813.4140625,
+            "range": "3.96e+05..4.037e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-unwrap/4tracks/1runs-4096bytes-1024chunk",
+            "value": 485234.23828125,
+            "range": "4.82e+05..4.884e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-unwrap/4tracks/1runs-4096bytes-1chunk",
+            "value": 35938370.5,
+            "range": "3.593e+07..3.595e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-interleaved-unwrap/4tracks/1runs-4096bytes-269564chunk",
+            "value": 442728.21875,
+            "range": "4.417e+05..4.438e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-receive/1/1",
+            "value": 802.9029235839844,
+            "range": "802.4..803.4",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-receive/1/4096",
+            "value": 8580.170166015625,
+            "range": "8579..8581",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-receive/1024/1",
+            "value": 76607.04248046875,
+            "range": "7.652e+04..7.669e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-receive/1024/4096",
+            "value": 7892082.875,
+            "range": "7.871e+06..7.913e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-receive/32/1",
+            "value": 2892.635284423828,
+            "range": "2892..2894",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-receive/32/4096",
+            "value": 243821.173828125,
+            "range": "2.436e+05..2.44e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-receive/init",
+            "value": 2996.254623413086,
+            "range": "2995..2997",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-unwrap-bytes/1tracks-16frames/256",
+            "value": 149994.001953125,
+            "range": "1.496e+05..1.504e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-unwrap-bytes/1tracks-16frames/4096",
+            "value": 157422.34765625,
+            "range": "1.569e+05..1.58e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-unwrap-bytes/1tracks-1frames/256",
+            "value": 69818.8251953125,
+            "range": "6.947e+04..7.017e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-unwrap-bytes/1tracks-1frames/4096",
+            "value": 72875.205078125,
+            "range": "7.213e+04..7.362e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-unwrap-bytes/1tracks-64frames/256",
+            "value": 433079.43359375,
+            "range": "4.292e+05..4.369e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-unwrap-bytes/1tracks-64frames/4096",
+            "value": 459800.33984375,
+            "range": "4.576e+05..4.62e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-unwrap-bytes/4tracks-16frames/256",
+            "value": 457503.3671875,
+            "range": "4.553e+05..4.597e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-unwrap-bytes/4tracks-16frames/4096",
+            "value": 488776.20703125,
+            "range": "4.879e+05..4.896e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-unwrap-bytes/4tracks-1frames/256",
+            "value": 136287.103515625,
+            "range": "1.348e+05..1.377e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-unwrap-bytes/4tracks-1frames/4096",
+            "value": 135906.533203125,
+            "range": "1.351e+05..1.367e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-unwrap-bytes/4tracks-64frames/256",
+            "value": 2402863.484375,
+            "range": "2.368e+06..2.438e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-unwrap-bytes/4tracks-64frames/4096",
+            "value": 1930089.7265625,
+            "range": "1.918e+06..1.942e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-unwrap-frames/1tracks-16frames/256",
+            "value": 147464.72265625,
+            "range": "1.474e+05..1.476e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-unwrap-frames/1tracks-16frames/4096",
+            "value": 156502.4375,
+            "range": "1.558e+05..1.572e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-unwrap-frames/1tracks-1frames/256",
+            "value": 70056.607421875,
+            "range": "6.989e+04..7.023e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-unwrap-frames/1tracks-1frames/4096",
+            "value": 73903.42578125,
+            "range": "7.368e+04..7.412e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-unwrap-frames/1tracks-64frames/256",
+            "value": 426631.17578125,
+            "range": "4.245e+05..4.287e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-unwrap-frames/1tracks-64frames/4096",
+            "value": 463558.9453125,
+            "range": "4.614e+05..4.657e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-unwrap-frames/4tracks-16frames/256",
+            "value": 439777.8671875,
+            "range": "4.384e+05..4.412e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-unwrap-frames/4tracks-16frames/4096",
+            "value": 484737.140625,
+            "range": "4.832e+05..4.862e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-unwrap-frames/4tracks-1frames/256",
+            "value": 136452.388671875,
+            "range": "1.35e+05..1.379e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-unwrap-frames/4tracks-1frames/4096",
+            "value": 135662.751953125,
+            "range": "1.356e+05..1.357e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-unwrap-frames/4tracks-64frames/256",
+            "value": 2554273.140625,
+            "range": "2.525e+06..2.583e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/cmaf-unwrap-frames/4tracks-64frames/4096",
+            "value": 1704075.890625,
+            "range": "1.693e+06..1.715e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/mkv-chunks/1",
+            "value": 253196.509765625,
+            "range": "2.521e+05..2.543e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/mkv-chunks/1813",
+            "value": 63691.85009765625,
+            "range": "6.328e+04..6.41e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/mkv-chunks/64",
+            "value": 68261.9013671875,
+            "range": "6.81e+04..6.842e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/mkv-chunks/7",
+            "value": 91945.5146484375,
+            "range": "9.157e+04..9.232e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/mkv-payloads/payload-1024/chunk-1500",
+            "value": 16261896.875,
+            "range": "1.614e+07..1.639e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/mkv-payloads/payload-1024/chunk-4223059",
+            "value": 15456365.125,
+            "range": "1.529e+07..1.562e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/mkv-payloads/payload-1024/chunk-65536",
+            "value": 15703398.875,
+            "range": "1.558e+07..1.582e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/mkv-payloads/payload-1048576/chunk-1500",
+            "value": 831679.7421875,
+            "range": "8.298e+05..8.336e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/mkv-payloads/payload-1048576/chunk-4194387",
+            "value": 227339.287109375,
+            "range": "2.256e+05..2.291e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/mkv-payloads/payload-1048576/chunk-65536",
+            "value": 291143.677734375,
+            "range": "2.883e+05..2.94e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/mkv-payloads/payload-65536/chunk-1500",
+            "value": 1025905.25,
+            "range": "1.021e+06..1.031e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/mkv-payloads/payload-65536/chunk-4194867",
+            "value": 503042.15234375,
+            "range": "4.97e+05..5.091e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/mkv-payloads/payload-65536/chunk-65536",
+            "value": 514433.35546875,
+            "range": "5.115e+05..5.173e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_si_pending_pcr/1/1",
+            "value": 2770.3740234375,
+            "range": "2717..2824",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_si_pending_pcr/1/16",
+            "value": 16798.3876953125,
+            "range": "1.68e+04..1.68e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_si_pending_pcr/1/64",
+            "value": 60148.0703125,
+            "range": "5.989e+04..6.041e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_si_pending_pcr/4096/1",
+            "value": 3849.8671875,
+            "range": "3767..3933",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_si_pending_pcr/4096/16",
+            "value": 21229.28125,
+            "range": "2.069e+04..2.177e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_si_pending_pcr/4096/64",
+            "value": 73513.34375,
+            "range": "7.349e+04..7.354e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_si_pending_pcr/64/1",
+            "value": 2753.32470703125,
+            "range": "2707..2799",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_si_pending_pcr/64/16",
+            "value": 18576.64013671875,
+            "range": "1.856e+04..1.859e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_si_pending_pcr/64/64",
+            "value": 67591.556640625,
+            "range": "6.713e+04..6.805e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_si_renewal_pcr/1/1",
+            "value": 9377.486083984375,
+            "range": "9302..9453",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_si_renewal_pcr/1/16",
+            "value": 21435.60302734375,
+            "range": "2.129e+04..2.158e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_si_renewal_pcr/1/64",
+            "value": 64030.8427734375,
+            "range": "6.342e+04..6.464e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_si_renewal_pcr/4096/1",
+            "value": 12523.828125,
+            "range": "1.239e+04..1.265e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_si_renewal_pcr/4096/16",
+            "value": 38198.875,
+            "range": "3.806e+04..3.834e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_si_renewal_pcr/4096/64",
+            "value": 127025.8125,
+            "range": "1.252e+05..1.289e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_si_renewal_pcr/64/1",
+            "value": 7626.91796875,
+            "range": "7488..7766",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_si_renewal_pcr/64/16",
+            "value": 31705.201171875,
+            "range": "3.16e+04..3.181e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_si_renewal_pcr/64/64",
+            "value": 110492.681640625,
+            "range": "1.104e+05..1.106e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_si_table_history_pcr/1/1",
+            "value": 2477.11328125,
+            "range": "2477..2478",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_si_table_history_pcr/1/16",
+            "value": 16234.6796875,
+            "range": "1.609e+04..1.638e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_si_table_history_pcr/1/64",
+            "value": 58361.89453125,
+            "range": "5.813e+04..5.86e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_si_table_history_pcr/1024/1",
+            "value": 2801.5859375,
+            "range": "2763..2840",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_si_table_history_pcr/1024/16",
+            "value": 18939.3828125,
+            "range": "1.882e+04..1.906e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_si_table_history_pcr/1024/64",
+            "value": 66467.90625,
+            "range": "6.623e+04..6.671e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_si_table_history_pcr/64/1",
+            "value": 2538.97265625,
+            "range": "2523..2555",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_si_table_history_pcr/64/16",
+            "value": 18617.51953125,
+            "range": "1.86e+04..1.864e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_si_table_history_pcr/64/64",
+            "value": 66851.5703125,
+            "range": "6.664e+04..6.706e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/container-export/flv/16x1",
+            "value": 626776.0546875,
+            "range": "6.216e+05..6.319e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/container-export/flv/16x16",
+            "value": 2645862.84375,
+            "range": "2.633e+06..2.658e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/container-export/flv/16x64",
+            "value": 8966509.1875,
+            "range": "8.941e+06..8.992e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/container-export/flv/1x1",
+            "value": 79582.171875,
+            "range": "7.924e+04..7.993e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/container-export/flv/1x16",
+            "value": 113196.537109375,
+            "range": "1.125e+05..1.139e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/container-export/flv/1x64",
+            "value": 186956.13671875,
+            "range": "1.856e+05..1.883e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/container-export/flv/4x1",
+            "value": 188183.5625,
+            "range": "1.874e+05..1.89e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/container-export/flv/4x16",
+            "value": 366894.046875,
+            "range": "3.659e+05..3.679e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/container-export/flv/4x64",
+            "value": 914640.7734375,
+            "range": "9.133e+05..9.16e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/container-export/mkv/16x1",
+            "value": 692033.140625,
+            "range": "6.88e+05..6.961e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/container-export/mkv/16x16",
+            "value": 2843542.15625,
+            "range": "2.839e+06..2.848e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/container-export/mkv/16x64",
+            "value": 9662903.1875,
+            "range": "9.646e+06..9.68e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/container-export/mkv/1x1",
+            "value": 96577.4453125,
+            "range": "9.613e+04..9.703e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/container-export/mkv/1x16",
+            "value": 134425.373046875,
+            "range": "1.327e+05..1.362e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/container-export/mkv/1x64",
+            "value": 204859.00390625,
+            "range": "2.041e+05..2.056e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/container-export/mkv/4x1",
+            "value": 206106.2578125,
+            "range": "2.046e+05..2.076e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/container-export/mkv/4x16",
+            "value": 400103.42578125,
+            "range": "3.98e+05..4.022e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/container-export/mkv/4x64",
+            "value": 974453.6796875,
+            "range": "9.711e+05..9.778e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/container-export/ts/16x1",
+            "value": 736427.9375,
+            "range": "7.346e+05..7.383e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/container-export/ts/16x16",
+            "value": 1725257.53125,
+            "range": "1.723e+06..1.728e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/container-export/ts/16x64",
+            "value": 4784530.0625,
+            "range": "4.78e+06..4.789e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/container-export/ts/1x1",
+            "value": 110450.419921875,
+            "range": "1.104e+05..1.105e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/container-export/ts/1x16",
+            "value": 171705.294921875,
+            "range": "1.7e+05..1.734e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/container-export/ts/1x64",
+            "value": 317784.6640625,
+            "range": "3.132e+05..3.224e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/container-export/ts/4x1",
+            "value": 224570.5078125,
+            "range": "2.238e+05..2.253e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/container-export/ts/4x16",
+            "value": 425058.125,
+            "range": "4.22e+05..4.281e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/container-export/ts/4x64",
+            "value": 1061922.0390625,
+            "range": "1.06e+06..1.064e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/container-export-idle/flv/1",
+            "value": 197.203125,
+            "range": "196..198.4",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/container-export-idle/flv/16",
+            "value": 2163.578125,
+            "range": "2160..2167",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/container-export-idle/flv/4",
+            "value": 548.728515625,
+            "range": "546.8..550.6",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/container-export-idle/mkv/1",
+            "value": 172.193359375,
+            "range": "170.6..173.8",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/container-export-idle/mkv/16",
+            "value": 1927.40625,
+            "range": "1896..1959",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/container-export-idle/mkv/4",
+            "value": 477.90625,
+            "range": "475.3..480.5",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/container-export-idle/ts/1",
+            "value": 257.328125,
+            "range": "253.4..261.2",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/container-export-idle/ts/16",
+            "value": 2218.203125,
+            "range": "2208..2228",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/container-export-idle/ts/4",
+            "value": 580.0166015625,
+            "range": "571.6..588.4",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/video-reorder/backward/1024x16384",
+            "value": 130934.3671875,
+            "range": "1.288e+05..1.331e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/video-reorder/backward/1024x256",
+            "value": 131287.265625,
+            "range": "1.299e+05..1.326e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/video-reorder/backward/256x16384",
+            "value": 128858,
+            "range": "1.276e+05..1.301e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/video-reorder/backward/256x256",
+            "value": 123892.99609375,
+            "range": "1.227e+05..1.251e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/video-reorder/backward/64x16384",
+            "value": 124384.294921875,
+            "range": "1.228e+05..1.259e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/video-reorder/backward/64x256",
+            "value": 113712.798828125,
+            "range": "1.126e+05..1.149e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/video-reorder/flat/1024x16384",
+            "value": 136424.265625,
+            "range": "1.357e+05..1.372e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/video-reorder/flat/1024x256",
+            "value": 126771.58984375,
+            "range": "1.25e+05..1.285e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/video-reorder/flat/256x16384",
+            "value": 124837.78515625,
+            "range": "1.248e+05..1.249e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/video-reorder/flat/256x256",
+            "value": 116573.650390625,
+            "range": "1.158e+05..1.174e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/video-reorder/flat/64x16384",
+            "value": 119573.3828125,
+            "range": "1.174e+05..1.218e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/video-reorder/flat/64x256",
+            "value": 114883.587890625,
+            "range": "1.14e+05..1.157e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/video-reorder/pyramid/1024x16384",
+            "value": 3482827.125,
+            "range": "3.462e+06..3.503e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/video-reorder/pyramid/1024x256",
+            "value": 1989829.921875,
+            "range": "1.986e+06..1.993e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/video-reorder/pyramid/256x16384",
+            "value": 950932.2421875,
+            "range": "9.458e+05..9.561e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/video-reorder/pyramid/256x256",
+            "value": 583509.515625,
+            "range": "5.825e+05..5.845e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/video-reorder/pyramid/64x16384",
+            "value": 318987.11328125,
+            "range": "3.154e+05..3.226e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/video-reorder/pyramid/64x256",
+            "value": 228145.68359375,
+            "range": "2.281e+05..2.282e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/video-reorder/ts/pyramid/1024x16384",
+            "value": 14171495.25,
+            "range": "1.412e+07..1.422e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/video-reorder/ts/pyramid/1024x256",
+            "value": 4885033.03125,
+            "range": "4.875e+06..4.895e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/video-reorder/ts/pyramid/256x16384",
+            "value": 3513567.8125,
+            "range": "3.501e+06..3.526e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/video-reorder/ts/pyramid/256x256",
+            "value": 1319661.6875,
+            "range": "1.315e+06..1.325e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/video-reorder/ts/pyramid/64x16384",
+            "value": 1008228.3046875,
+            "range": "1.001e+06..1.015e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/video-reorder/ts/pyramid/64x256",
+            "value": 424175.765625,
+            "range": "4.205e+05..4.279e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/video-reorder/ts/step-back/1024x16384",
+            "value": 13647631.625,
+            "range": "1.358e+07..1.372e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/video-reorder/ts/step-back/1024x256",
+            "value": 4861814.125,
+            "range": "4.858e+06..4.866e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/video-reorder/ts/step-back/256x16384",
+            "value": 3564071.84375,
+            "range": "3.551e+06..3.577e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/video-reorder/ts/step-back/256x256",
+            "value": 1338962.875,
+            "range": "1.331e+06..1.347e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/video-reorder/ts/step-back/64x16384",
+            "value": 1008612.2421875,
+            "range": "1.002e+06..1.015e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/video-reorder/ts/step-back/64x256",
+            "value": 430294.07421875,
+            "range": "4.289e+05..4.317e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_schedule/1/1",
+            "value": 92245.8037109375,
+            "range": "9.208e+04..9.241e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_schedule/1/16",
+            "value": 376834.373046875,
+            "range": "3.756e+05..3.78e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_schedule/1/64",
+            "value": 1361458.8828125,
+            "range": "1.361e+06..1.362e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_schedule/16/1",
+            "value": 128866.6435546875,
+            "range": "1.285e+05..1.292e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_schedule/16/16",
+            "value": 1094815.4140625,
+            "range": "1.092e+06..1.097e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_schedule/16/64",
+            "value": 6149824.59375,
+            "range": "6.148e+06..6.151e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_schedule/4/1",
+            "value": 99534.23046875,
+            "range": "9.936e+04..9.971e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_schedule/4/16",
+            "value": 511994.55078125,
+            "range": "5.111e+05..5.129e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_schedule/4/64",
+            "value": 2300608.953125,
+            "range": "2.299e+06..2.302e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_schedule/64/1",
+            "value": 261998.259765625,
+            "range": "2.598e+05..2.642e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_schedule/64/16",
+            "value": 3670506.1875,
+            "range": "3.668e+06..3.673e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_schedule/64/64",
+            "value": 23656401.75,
+            "range": "2.356e+07..2.375e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_schedule_tables/1/100",
+            "value": 424947.60546875,
+            "range": "4.248e+05..4.251e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_schedule_tables/1/1000",
+            "value": 972912.1796875,
+            "range": "9.697e+05..9.762e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_schedule_tables/1/4000",
+            "value": 6036486.21875,
+            "range": "6.031e+06..6.042e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_schedule_tables/16/100",
+            "value": 2577844.609375,
+            "range": "2.57e+06..2.586e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_schedule_tables/16/1000",
+            "value": 10100605.1875,
+            "range": "1.008e+07..1.012e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_schedule_tables/16/4000",
+            "value": 43642737.5,
+            "range": "4.296e+07..4.433e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_schedule_tables/4/100",
+            "value": 605440.73046875,
+            "range": "6.053e+05..6.056e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_schedule_tables/4/1000",
+            "value": 2721201.75,
+            "range": "2.714e+06..2.729e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/ts_schedule_tables/4/4000",
+            "value": 14379832.5,
+            "range": "1.436e+07..1.44e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/collect-chain/16384",
+            "value": 2030148.953125,
+            "range": "2.02e+06..2.04e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/collect-chain/4096",
+            "value": 304228.5234375,
+            "range": "3.04e+05..3.045e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/collect-chain/65535",
+            "value": 19754457,
+            "range": "1.972e+07..1.979e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/collect-literal/16",
+            "value": 3143.535858154297,
+            "range": "3142..3145",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/collect-literal/256",
+            "value": 74489.61328125,
+            "range": "7.446e+04..7.452e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/collect-literal/4096",
+            "value": 1320880.1875,
+            "range": "1.318e+06..1.324e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/collect-mask/16384",
+            "value": 5558347.96875,
+            "range": "5.554e+06..5.563e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/collect-mask/4096",
+            "value": 572447.90234375,
+            "range": "5.721e+05..5.728e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/collect-mask/65535",
+            "value": 95957186,
+            "range": "9.585e+07..9.606e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/collect-partial/16",
+            "value": 9116.927185058594,
+            "range": "9065..9169",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/collect-partial/256",
+            "value": 167459.8076171875,
+            "range": "1.674e+05..1.676e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/collect-partial/4096",
+            "value": 2804072.015625,
+            "range": "2.8e+06..2.808e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/collect-two-tier/16",
+            "value": 4165.563262939453,
+            "range": "4148..4183",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/collect-two-tier/256",
+            "value": 127838.1796875,
+            "range": "1.278e+05..1.279e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/collect-two-tier/4096",
+            "value": 2581765.390625,
+            "range": "2.574e+06..2.589e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/covers-chain/16384",
+            "value": 2007622.5625,
+            "range": "1.994e+06..2.021e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/covers-chain/4096",
+            "value": 299928.8046875,
+            "range": "2.999e+05..3e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/covers-chain/65535",
+            "value": 21021037.125,
+            "range": "2.086e+07..2.118e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/covers-literal/16x16",
+            "value": 1907.1003723144531,
+            "range": "1906..1908",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/covers-literal/4096x16",
+            "value": 538333.828125,
+            "range": "5.367e+05..5.4e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/covers-literal/4096x4096",
+            "value": 783781.21875,
+            "range": "7.811e+05..7.865e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/covers-mask/16384",
+            "value": 4850030.03125,
+            "range": "4.842e+06..4.858e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/covers-mask/4096",
+            "value": 430221.1484375,
+            "range": "4.301e+05..4.303e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/covers-mask/65535",
+            "value": 92151667,
+            "range": "9.209e+07..9.221e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/covers-partial/16x16",
+            "value": 6942.9195556640625,
+            "range": "6940..6946",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/covers-partial/4096x16",
+            "value": 1718394,
+            "range": "1.717e+06..1.72e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/covers-partial/4096x4096",
+            "value": 2205900.5,
+            "range": "2.202e+06..2.21e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/covers-subtree/16x16",
+            "value": 2094.737030029297,
+            "range": "2093..2096",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/covers-subtree/16x4096",
+            "value": 232224.138671875,
+            "range": "2.322e+05..2.323e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/covers-subtree/4096x16",
+            "value": 590807.13671875,
+            "range": "5.898e+05..5.918e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/covers-subtree/4096x4096",
+            "value": 915449.8671875,
+            "range": "9.151e+05..9.158e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/covers-two-tier/16x16",
+            "value": 2212.499008178711,
+            "range": "2210..2215",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/covers-two-tier/4096x16",
+            "value": 642410.33203125,
+            "range": "6.414e+05..6.434e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/covers-two-tier/4096x4096",
+            "value": 988536.7734375,
+            "range": "9.882e+05..9.888e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/extend-literal/16x16",
+            "value": 8520.825073242188,
+            "range": "8486..8556",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/extend-literal/16x4096",
+            "value": 1868989.53125,
+            "range": "1.866e+06..1.872e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/extend-literal/4096x16",
+            "value": 2009262.984375,
+            "range": "2.009e+06..2.01e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/extend-literal/4096x4096",
+            "value": 3971555.0625,
+            "range": "3.969e+06..3.974e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/extend-partial/16x16",
+            "value": 22400.249877929688,
+            "range": "2.24e+04..2.24e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/extend-partial/16x4096",
+            "value": 3036724.03125,
+            "range": "3.03e+06..3.043e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/extend-partial/4096x16",
+            "value": 3038842.90625,
+            "range": "3.034e+06..3.043e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/extend-partial/4096x4096",
+            "value": 6241619.59375,
+            "range": "6.232e+06..6.251e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/extend-two-tier/16x16",
+            "value": 10551.973571777344,
+            "range": "1.055e+04..1.055e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/extend-two-tier/16x4096",
+            "value": 2622890.96875,
+            "range": "2.621e+06..2.625e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/extend-two-tier/4096x16",
+            "value": 2642329.09375,
+            "range": "2.638e+06..2.647e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/extend-two-tier/4096x4096",
+            "value": 5417004.78125,
+            "range": "5.412e+06..5.422e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/intersect-literal/16x16",
+            "value": 5790.1416015625,
+            "range": "5783..5797",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/intersect-literal/16x4096",
+            "value": 596909.21484375,
+            "range": "5.912e+05..6.026e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/intersect-literal/4096x16",
+            "value": 1010165.6953125,
+            "range": "1.008e+06..1.013e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/intersect-literal/4096x4096",
+            "value": 1607664.640625,
+            "range": "1.607e+06..1.608e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/intersect-partial/16x16",
+            "value": 23280.236328125,
+            "range": "2.327e+04..2.329e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/intersect-partial/16x4096",
+            "value": 1903061.421875,
+            "range": "1.901e+06..1.905e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/intersect-partial/4096x16",
+            "value": 3656653.84375,
+            "range": "3.642e+06..3.671e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/intersect-partial/4096x4096",
+            "value": 5455848.4375,
+            "range": "5.43e+06..5.481e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/intersect-two-tier/16x16",
+            "value": 7092.005859375,
+            "range": "7092..7092",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/intersect-two-tier/16x4096",
+            "value": 783719.74609375,
+            "range": "7.833e+05..7.841e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/intersect-two-tier/4096x16",
+            "value": 1364393.9609375,
+            "range": "1.364e+06..1.365e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-algebra/intersect-two-tier/4096x4096",
+            "value": 2160900.921875,
+            "range": "2.157e+06..2.165e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-matching/last-match/16patterns-1segments",
+            "value": 147.75857543945312,
+            "range": "147.5..148",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-matching/last-match/16patterns-32segments",
+            "value": 384.08856201171875,
+            "range": "383.9..384.3",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-matching/last-match/16patterns-8segments",
+            "value": 219.42455291748047,
+            "range": "219.3..219.5",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-matching/last-match/1patterns-1segments",
+            "value": 11.5032679438591,
+            "range": "11.5..11.51",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-matching/last-match/1patterns-32segments",
+            "value": 222.39062118530273,
+            "range": "222.3..222.4",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-matching/last-match/1patterns-8segments",
+            "value": 56.253530502319336,
+            "range": "56.25..56.26",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-matching/last-match/256patterns-1segments",
+            "value": 2154.762649536133,
+            "range": "2153..2156",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-matching/last-match/256patterns-32segments",
+            "value": 2897.445770263672,
+            "range": "2881..2914",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-matching/last-match/256patterns-8segments",
+            "value": 2729.9595489501953,
+            "range": "2729..2731",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-matching/miss/16patterns-1segments",
+            "value": 95.86203956604004,
+            "range": "95.36..96.37",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-matching/miss/16patterns-32segments",
+            "value": 127.18709468841553,
+            "range": "127.1..127.3",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-matching/miss/16patterns-8segments",
+            "value": 126.71237850189209,
+            "range": "126.7..126.7",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-matching/miss/1patterns-1segments",
+            "value": 7.980544626712799,
+            "range": "7.978..7.983",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-matching/miss/1patterns-32segments",
+            "value": 9.79039317369461,
+            "range": "9.785..9.795",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-matching/miss/1patterns-8segments",
+            "value": 9.794085562229156,
+            "range": "9.791..9.797",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-matching/miss/256patterns-1segments",
+            "value": 1341.0517120361328,
+            "range": "1340..1342",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-matching/miss/256patterns-32segments",
+            "value": 1795.510757446289,
+            "range": "1795..1796",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/pattern-matching/miss/256patterns-8segments",
+            "value": 1795.9227294921875,
+            "range": "1794..1798",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/endpoint_route/connections_16/cids_2",
+            "value": 114452.203125,
+            "range": "1.138e+05..1.151e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/endpoint_route/connections_16/cids_5",
+            "value": 132684.609375,
+            "range": "1.323e+05..1.331e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/endpoint_route/connections_256/cids_2",
+            "value": 132072.703125,
+            "range": "1.317e+05..1.324e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/endpoint_route/connections_256/cids_5",
+            "value": 133418.90625,
+            "range": "1.322e+05..1.346e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/endpoint_route/connections_4096/cids_2",
+            "value": 180556,
+            "range": "1.76e+05..1.851e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/endpoint_route/connections_4096/cids_5",
+            "value": 351296,
+            "range": "3.513e+05..3.513e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_evict/streams/1024",
+            "value": 1103800.75,
+            "range": "1.093e+06..1.114e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_evict/streams/16",
+            "value": 15917.5546875,
+            "range": "1.581e+04..1.602e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_evict/streams/256",
+            "value": 265841.875,
+            "range": "2.639e+05..2.678e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_evict/streams/4096",
+            "value": 4762199,
+            "range": "4.754e+06..4.77e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_evict/streams/64",
+            "value": 63063.015625,
+            "range": "6.301e+04..6.312e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_evict_churn/streams/16",
+            "value": 1990.0625,
+            "range": "1988..1993",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_evict_churn/streams/2048",
+            "value": 2070.1298828125,
+            "range": "2062..2078",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_evict_churn/streams/256",
+            "value": 2030.8173828125,
+            "range": "2029..2033",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_lease/lease/streams_1/packets_16",
+            "value": 7840.181640625,
+            "range": "7822..7858",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_lease/lease/streams_1/packets_2",
+            "value": 2983.6953125,
+            "range": "2983..2984",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_lease/lease/streams_16/packets_16",
+            "value": 117687.8125,
+            "range": "1.172e+05..1.181e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_lease/lease/streams_16/packets_2",
+            "value": 23481.359375,
+            "range": "2.348e+04..2.348e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_lease/lease/streams_256/packets_16",
+            "value": 2051770.5,
+            "range": "2.05e+06..2.054e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_lease/lease/streams_256/packets_2",
+            "value": 388345.6875,
+            "range": "3.853e+05..3.913e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_lease/read/streams_1/packets_16",
+            "value": 7096.796875,
+            "range": "7065..7128",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_lease/read/streams_1/packets_2",
+            "value": 2626.3671875,
+            "range": "2626..2627",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_lease/read/streams_16/packets_16",
+            "value": 98507.5625,
+            "range": "9.844e+04..9.858e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_lease/read/streams_16/packets_2",
+            "value": 19059.19921875,
+            "range": "1.896e+04..1.916e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_lease/read/streams_256/packets_16",
+            "value": 1602526,
+            "range": "1.6e+06..1.605e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_lease/read/streams_256/packets_2",
+            "value": 300422.8125,
+            "range": "3e+05..3.008e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_loss/streams_1/packets_16",
+            "value": 12072.294921875,
+            "range": "1.207e+04..1.207e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_loss/streams_1/packets_2",
+            "value": 4105.921875,
+            "range": "4104..4108",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_loss/streams_16/packets_16",
+            "value": 111737,
+            "range": "1.104e+05..1.13e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_loss/streams_16/packets_2",
+            "value": 24172.984375,
+            "range": "2.41e+04..2.425e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_loss/streams_256/packets_16",
+            "value": 5067596,
+            "range": "5.062e+06..5.074e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_loss/streams_256/packets_2",
+            "value": 373907.75,
+            "range": "3.722e+05..3.756e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_reset/streams_1024/bytes_0",
+            "value": 1309793.0625,
+            "range": "1.308e+06..1.311e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_reset/streams_1024/bytes_16384",
+            "value": 16294476,
+            "range": "1.609e+07..1.65e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_reset/streams_16/bytes_0",
+            "value": 24283.009765625,
+            "range": "2.421e+04..2.436e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_reset/streams_16/bytes_16384",
+            "value": 222025.578125,
+            "range": "2.22e+05..2.221e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_reset/streams_256/bytes_0",
+            "value": 309686.59375,
+            "range": "3.079e+05..3.115e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_reset/streams_256/bytes_16384",
+            "value": 3679651.75,
+            "range": "3.679e+06..3.681e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_reset_debt/holders_16/resets_16",
+            "value": 4104.75,
+            "range": "4103..4106",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_reset_debt/holders_16/resets_256",
+            "value": 46868.78125,
+            "range": "4.652e+04..4.722e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_reset_debt/holders_2048/resets_16",
+            "value": 4154.873046875,
+            "range": "4149..4160",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_reset_debt/holders_2048/resets_256",
+            "value": 51198.6875,
+            "range": "5.119e+04..5.12e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_reset_debt/holders_256/resets_16",
+            "value": 4094.955078125,
+            "range": "4082..4108",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_reset_debt/holders_256/resets_256",
+            "value": 45389.125,
+            "range": "4.533e+04..4.545e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_stop/streams_1024/bytes_1100",
+            "value": 2843792.5,
+            "range": "2.839e+06..2.849e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_stop/streams_1024/bytes_16384",
+            "value": 16657059,
+            "range": "1.646e+07..1.685e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_stop/streams_16/bytes_1100",
+            "value": 50875.57421875,
+            "range": "5.075e+04..5.1e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_stop/streams_16/bytes_16384",
+            "value": 232334.796875,
+            "range": "2.32e+05..2.327e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_stop/streams_256/bytes_1100",
+            "value": 725368.21875,
+            "range": "7.248e+05..7.26e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/receive_stop/streams_256/bytes_16384",
+            "value": 3737886.25,
+            "range": "3.736e+06..3.74e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/connection_blocked/live_1/churn_16",
+            "value": 2163.126953125,
+            "range": "2147..2179",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/connection_blocked/live_1/churn_256",
+            "value": 27111.09765625,
+            "range": "2.709e+04..2.713e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/connection_blocked/live_1024/churn_16",
+            "value": 2492.6328125,
+            "range": "2452..2533",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/connection_blocked/live_1024/churn_256",
+            "value": 24478.609375,
+            "range": "2.427e+04..2.468e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/connection_blocked/live_64/churn_16",
+            "value": 2176.62890625,
+            "range": "2175..2179",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/connection_blocked/live_64/churn_256",
+            "value": 26187.97265625,
+            "range": "2.616e+04..2.622e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/group_churn/subs_16/churn_4",
+            "value": 21810.0263671875,
+            "range": "2.177e+04..2.185e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/group_churn/subs_256/churn_16",
+            "value": 305663.3125,
+            "range": "3.044e+05..3.07e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/group_churn/subs_4096/churn_16",
+            "value": 5126702,
+            "range": "5.062e+06..5.192e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/group_churn/subs_4096/churn_256",
+            "value": 5678133.75,
+            "range": "5.648e+06..5.708e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/schedule/datagram_push/groups_16_queued_1",
+            "value": 138.5269775390625,
+            "range": "138.5..138.6",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/schedule/datagram_push/groups_16_queued_16",
+            "value": 201.73609924316406,
+            "range": "201.7..201.8",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/schedule/datagram_push/groups_16_queued_256",
+            "value": 252.81924438476562,
+            "range": "252.6..253.1",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/schedule/datagram_push/groups_1_queued_1",
+            "value": 85.60669326782227,
+            "range": "85.58..85.63",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/schedule/datagram_push/groups_1_queued_16",
+            "value": 145.6491241455078,
+            "range": "145.6..145.7",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/schedule/datagram_push/groups_1_queued_256",
+            "value": 181.4810562133789,
+            "range": "181.4..181.5",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/schedule/datagram_push/groups_256_queued_1",
+            "value": 182.0460433959961,
+            "range": "182..182.1",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/schedule/datagram_push/groups_256_queued_16",
+            "value": 287.5933380126953,
+            "range": "287.3..287.8",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/schedule/datagram_push/groups_256_queued_256",
+            "value": 606.2886199951172,
+            "range": "588.7..623.9",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/schedule/group_priority/queued_16_changed_16_front",
+            "value": 364.164794921875,
+            "range": "363.9..364.5",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/schedule/group_priority/queued_16_changed_16_mixed",
+            "value": 365.126953125,
+            "range": "363.1..367.2",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/schedule/group_priority/queued_16_changed_16_tail",
+            "value": 365.8753662109375,
+            "range": "365.1..366.6",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/schedule/group_priority/queued_256_changed_16_front",
+            "value": 559.0302734375,
+            "range": "535.7..582.4",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/schedule/group_priority/queued_256_changed_16_mixed",
+            "value": 665.40576171875,
+            "range": "631.8..699",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/schedule/group_priority/queued_256_changed_16_tail",
+            "value": 503.361328125,
+            "range": "501..505.7",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/schedule/group_priority/queued_4096_changed_16_front",
+            "value": 2289.890625,
+            "range": "2005..2575",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/schedule/group_priority/queued_4096_changed_16_mixed",
+            "value": 2372.34375,
+            "range": "2226..2519",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/schedule/group_priority/queued_4096_changed_16_tail",
+            "value": 1955.1015625,
+            "range": "1931..1980",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/schedule/group_priority/queued_4096_changed_256_front",
+            "value": 6192.671875,
+            "range": "6178..6207",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/schedule/group_priority/queued_4096_changed_256_mixed",
+            "value": 12690.96875,
+            "range": "1.252e+04..1.286e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/schedule/group_priority/queued_4096_changed_256_tail",
+            "value": 5917.9296875,
+            "range": "5634..6202",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/schedule/group_retire/queued_16_changed_16_front",
+            "value": 1024.5521240234375,
+            "range": "1018..1031",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/schedule/group_retire/queued_16_changed_16_mixed",
+            "value": 1028.31103515625,
+            "range": "1025..1032",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/schedule/group_retire/queued_16_changed_16_tail",
+            "value": 1021.3109130859375,
+            "range": "1015..1027",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/schedule/group_retire/queued_256_changed_16_front",
+            "value": 1183.8193359375,
+            "range": "1160..1208",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/schedule/group_retire/queued_256_changed_16_mixed",
+            "value": 1419.64990234375,
+            "range": "1245..1595",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/schedule/group_retire/queued_256_changed_16_tail",
+            "value": 1135.294921875,
+            "range": "1110..1160",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/schedule/group_retire/queued_4096_changed_16_front",
+            "value": 3127.703125,
+            "range": "2738..3517",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/schedule/group_retire/queued_4096_changed_16_mixed",
+            "value": 3291.3046875,
+            "range": "3201..3381",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/schedule/group_retire/queued_4096_changed_16_tail",
+            "value": 2501.0234375,
+            "range": "2452..2550",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/schedule/group_retire/queued_4096_changed_256_front",
+            "value": 20554.453125,
+            "range": "2.016e+04..2.095e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/schedule/group_retire/queued_4096_changed_256_mixed",
+            "value": 33090.75,
+            "range": "3.293e+04..3.325e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/schedule/group_retire/queued_4096_changed_256_tail",
+            "value": 15914.5078125,
+            "range": "1.581e+04..1.602e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/schedule/pop/groups_16_queued_1",
+            "value": 33.316741943359375,
+            "range": "33.29..33.34",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/schedule/pop/groups_16_queued_16",
+            "value": 66.37604141235352,
+            "range": "66.35..66.41",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/schedule/pop/groups_16_queued_256",
+            "value": 72.69491577148438,
+            "range": "72.58..72.81",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/schedule/pop/groups_1_queued_1",
+            "value": 33.35552406311035,
+            "range": "33.35..33.36",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/schedule/pop/groups_1_queued_16",
+            "value": 62.97639083862305,
+            "range": "62.97..62.98",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/schedule/pop/groups_1_queued_256",
+            "value": 64.78398132324219,
+            "range": "64.59..64.98",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/schedule/pop/groups_256_queued_1",
+            "value": 36.579437255859375,
+            "range": "36.58..36.58",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/schedule/pop/groups_256_queued_16",
+            "value": 81.15304183959961,
+            "range": "81.06..81.24",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/schedule/pop/groups_256_queued_256",
+            "value": 199.7810821533203,
+            "range": "194.5..205",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/send_priority/streams_1/priorities_1",
+            "value": 8828.00146484375,
+            "range": "8811..8845",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/send_priority/streams_1024/priorities_1",
+            "value": 4675745.25,
+            "range": "4.662e+06..4.689e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/send_priority/streams_1024/priorities_64",
+            "value": 4703286.5,
+            "range": "4.694e+06..4.713e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/send_priority/streams_1024/priorities_8",
+            "value": 4654018.25,
+            "range": "4.646e+06..4.662e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/send_priority/streams_16/priorities_1",
+            "value": 65427.11328125,
+            "range": "6.533e+04..6.552e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/send_priority/streams_16/priorities_8",
+            "value": 63410.1171875,
+            "range": "6.328e+04..6.354e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/send_priority/streams_256/priorities_1",
+            "value": 1134090.75,
+            "range": "1.132e+06..1.136e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/send_priority/streams_256/priorities_64",
+            "value": 1141491.3125,
+            "range": "1.14e+06..1.143e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/send_priority/streams_256/priorities_8",
+            "value": 1158490.0625,
+            "range": "1.157e+06..1.16e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/send_probe/streams_1/probe_off",
+            "value": 50690.8984375,
+            "range": "5.066e+04..5.072e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/send_probe/streams_1/probe_on",
+            "value": 50767.9921875,
+            "range": "5.074e+04..5.08e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/send_probe/streams_16/probe_off",
+            "value": 864500.3125,
+            "range": "8.641e+05..8.649e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/send_probe/streams_16/probe_on",
+            "value": 861180.75,
+            "range": "8.584e+05..8.64e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/send_probe/streams_256/probe_off",
+            "value": 14642379,
+            "range": "1.429e+07..1.5e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/send_probe/streams_256/probe_on",
+            "value": 14421216,
+            "range": "1.409e+07..1.475e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/send_write_size/streams_1/bytes_1024",
+            "value": 53126.58203125,
+            "range": "5.307e+04..5.318e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/send_write_size/streams_1/bytes_16384",
+            "value": 50663.3984375,
+            "range": "5.066e+04..5.067e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/send_write_size/streams_1/bytes_64",
+            "value": 85663.83984375,
+            "range": "8.566e+04..8.567e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/send_write_size/streams_64/bytes_1024",
+            "value": 3565720.25,
+            "range": "3.56e+06..3.571e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/send_write_size/streams_64/bytes_16384",
+            "value": 3323963.75,
+            "range": "3.311e+06..3.337e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/send_write_size/streams_64/bytes_64",
+            "value": 6028507.5,
+            "range": "5.98e+06..6.077e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/send_write_size/window_16k/bytes_1024",
+            "value": 279831.875,
+            "range": "2.797e+05..2.8e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/send_write_size/window_16k/bytes_16384",
+            "value": 267969.625,
+            "range": "2.678e+05..2.681e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/send_write_size/window_16k/bytes_64",
+            "value": 434171.375,
+            "range": "4.333e+05..4.35e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/send_write_size/window_256k/bytes_1024",
+            "value": 198190.921875,
+            "range": "1.976e+05..1.988e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/send_write_size/window_256k/bytes_16384",
+            "value": 186342.515625,
+            "range": "1.861e+05..1.866e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/send_write_size/window_256k/bytes_64",
+            "value": 354394.34375,
+            "range": "3.543e+05..3.545e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/send_write_size/window_256k_holes/bytes_1024",
+            "value": 239153.75,
+            "range": "2.389e+05..2.394e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/send_write_size/window_256k_holes/bytes_16384",
+            "value": 228830.265625,
+            "range": "2.287e+05..2.289e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/send_write_size/window_256k_holes/bytes_64",
+            "value": 398799.6875,
+            "range": "3.984e+05..3.992e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/send_write_size/window_64k/bytes_1024",
+            "value": 212347.5,
+            "range": "2.12e+05..2.127e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/send_write_size/window_64k/bytes_16384",
+            "value": 200736.40625,
+            "range": "2.007e+05..2.008e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/send_write_size/window_64k/bytes_64",
+            "value": 359271,
+            "range": "3.59e+05..3.596e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/set_priority/queued/16",
+            "value": 1085.4953002929688,
+            "range": "1085..1086",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/set_priority/queued/256",
+            "value": 29363.568359375,
+            "range": "2.933e+04..2.94e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/set_priority/queued/4096",
+            "value": 887170.125,
+            "range": "8.833e+05..8.911e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/wire_ack/packets_2048/ranges_1",
+            "value": 92935.25,
+            "range": "9.261e+04..9.326e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/wire_ack/packets_2048/ranges_128",
+            "value": 142678.875,
+            "range": "1.417e+05..1.437e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/wire_ack/packets_2048/ranges_16",
+            "value": 116398.625,
+            "range": "1.152e+05..1.176e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/wire_ack/packets_256/ranges_1",
+            "value": 11451.34375,
+            "range": "1.144e+04..1.146e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/wire_ack/packets_256/ranges_128",
+            "value": 19667.5390625,
+            "range": "1.965e+04..1.968e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/wire_ack/packets_256/ranges_16",
+            "value": 14933.4140625,
+            "range": "1.493e+04..1.494e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/wire_decode/frames_1/packets_1024",
+            "value": 447793.5,
+            "range": "4.469e+05..4.487e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/wire_decode/frames_1/packets_64",
+            "value": 27123.4296875,
+            "range": "2.712e+04..2.713e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/wire_decode/frames_16/packets_1024",
+            "value": 1408429.75,
+            "range": "1.408e+06..1.409e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/wire_decode/frames_16/packets_64",
+            "value": 84542.5859375,
+            "range": "8.443e+04..8.465e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/wire_decode/padded/packets_1024",
+            "value": 926244.875,
+            "range": "9.262e+05..9.263e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/wire_decode/padded/packets_64",
+            "value": 56935.1953125,
+            "range": "5.657e+04..5.73e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/wire_encode/frames_1/packets_1024",
+            "value": 564497.1875,
+            "range": "5.632e+05..5.658e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/wire_encode/frames_1/packets_64",
+            "value": 27768.294921875,
+            "range": "2.775e+04..2.779e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/wire_encode/frames_16/packets_1024",
+            "value": 3786482,
+            "range": "3.772e+06..3.801e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/wire_encode/frames_16/packets_64",
+            "value": 195110.015625,
+            "range": "1.951e+05..1.951e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/relay_auth_queue/1/16",
+            "value": 105516.5888671875,
+            "range": "1.044e+05..1.066e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/relay_auth_queue/1/256",
+            "value": 105083.046875,
+            "range": "1.051e+05..1.051e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/relay_auth_queue/1/4096",
+            "value": 126642.626953125,
+            "range": "1.257e+05..1.276e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/relay_auth_queue/128/16",
+            "value": 2756272.265625,
+            "range": "2.749e+06..2.763e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/relay_auth_queue/128/256",
+            "value": 3090676.15625,
+            "range": "3.085e+06..3.096e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/relay_auth_queue/128/4096",
+            "value": 5321851.515625,
+            "range": "5.308e+06..5.336e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/relay_auth_queue/256/16",
+            "value": 6029482.71875,
+            "range": "5.997e+06..6.062e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/relay_auth_queue/256/256",
+            "value": 6578613.78125,
+            "range": "6.554e+06..6.603e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/relay_auth_queue/256/4096",
+            "value": 10663862.1875,
+            "range": "1.055e+07..1.078e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/relay_auth_refresh/1/1",
+            "value": 37929.24755859375,
+            "range": "3.747e+04..3.839e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/relay_auth_refresh/1/16",
+            "value": 80561.46875,
+            "range": "7.892e+04..8.22e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/relay_auth_refresh/1/64",
+            "value": 224353.939453125,
+            "range": "2.22e+05..2.267e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/relay_auth_refresh/16/1",
+            "value": 37810.969970703125,
+            "range": "3.778e+04..3.784e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/relay_auth_refresh/16/16",
+            "value": 79116.18798828125,
+            "range": "7.758e+04..8.065e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/relay_auth_refresh/16/64",
+            "value": 230761.662109375,
+            "range": "2.285e+05..2.33e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/relay_auth_refresh/64/1",
+            "value": 38136.66650390625,
+            "range": "3.787e+04..3.841e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/relay_auth_refresh/64/16",
+            "value": 80470.52197265625,
+            "range": "8.022e+04..8.072e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/relay_auth_refresh/64/64",
+            "value": 291825.685546875,
+            "range": "2.873e+05..2.964e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/relay_http_admission/connections=1/0",
+            "value": 42225.328125,
+            "range": "4.171e+04..4.274e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/relay_http_admission/connections=1/16",
+            "value": 40797.1474609375,
+            "range": "4.054e+04..4.105e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/relay_http_admission/connections=1/64",
+            "value": 45211.05908203125,
+            "range": "4.513e+04..4.53e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/relay_http_admission/connections=16/0",
+            "value": 45646.5341796875,
+            "range": "4.54e+04..4.589e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/relay_http_admission/connections=16/16",
+            "value": 42399.15966796875,
+            "range": "4.136e+04..4.344e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/relay_http_admission/connections=16/64",
+            "value": 44489.570556640625,
+            "range": "4.389e+04..4.509e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/relay_http_admission/connections=64/0",
+            "value": 46118.27734375,
+            "range": "4.521e+04..4.703e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/relay_http_admission/connections=64/16",
+            "value": 41630.612548828125,
+            "range": "4.157e+04..4.169e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/relay_http_admission/connections=64/64",
+            "value": 42215.92919921875,
+            "range": "4.184e+04..4.259e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/relay_http_auth_server/connections=1/0",
+            "value": 169647.76171875,
+            "range": "1.689e+05..1.704e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/relay_http_auth_server/connections=1/16",
+            "value": 170996.880859375,
+            "range": "1.693e+05..1.726e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/relay_http_auth_server/connections=1/4",
+            "value": 177626.076171875,
+            "range": "1.763e+05..1.789e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/relay_http_auth_server/connections=16/0",
+            "value": 175315.8759765625,
+            "range": "1.747e+05..1.76e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/relay_http_auth_server/connections=16/16",
+            "value": 155871.654296875,
+            "range": "1.537e+05..1.581e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/relay_http_auth_server/connections=16/4",
+            "value": 153643.712890625,
+            "range": "1.504e+05..1.569e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/relay_http_auth_server/connections=4/0",
+            "value": 161051.44921875,
+            "range": "1.584e+05..1.638e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/relay_http_auth_server/connections=4/16",
+            "value": 155029,
+            "range": "1.531e+05..1.57e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/relay_http_auth_server/connections=4/4",
+            "value": 159754.564453125,
+            "range": "1.583e+05..1.612e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/http_admission/handler/connections=16/pending=0",
+            "value": 38.5793240070343,
+            "range": "38.54..38.62",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/http_admission/handler/connections=16/pending=16",
+            "value": 40.48838829994202,
+            "range": "40.49..40.49",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/http_admission/handler/connections=16/pending=256",
+            "value": 38.794668436050415,
+            "range": "38.79..38.8",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/http_admission/handler/connections=1/pending=0",
+            "value": 38.54648160934448,
+            "range": "38.51..38.59",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/http_admission/handler/connections=1/pending=16",
+            "value": 38.592153787612915,
+            "range": "38.58..38.6",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/http_admission/handler/connections=1/pending=256",
+            "value": 38.575196504592896,
+            "range": "38.54..38.61",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/http_admission/handler/connections=256/pending=0",
+            "value": 38.74499845504761,
+            "range": "38.71..38.78",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/http_admission/handler/connections=256/pending=16",
+            "value": 38.81167721748352,
+            "range": "38.75..38.88",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/http_admission/handler/connections=256/pending=256",
+            "value": 38.908316135406494,
+            "range": "38.91..38.91",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/http_admission/plain/connections=16/pending=0",
+            "value": 72.3890118598938,
+            "range": "72.38..72.4",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/http_admission/plain/connections=16/pending=16",
+            "value": 71.69178247451782,
+            "range": "71.58..71.8",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/http_admission/plain/connections=16/pending=256",
+            "value": 71.17178964614868,
+            "range": "71.11..71.24",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/http_admission/plain/connections=1/pending=0",
+            "value": 72.87828350067139,
+            "range": "72.87..72.89",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/http_admission/plain/connections=1/pending=16",
+            "value": 72.86363983154297,
+            "range": "72.85..72.88",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/http_admission/plain/connections=1/pending=256",
+            "value": 72.62784624099731,
+            "range": "72.62..72.63",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/http_admission/plain/connections=256/pending=0",
+            "value": 71.44527769088745,
+            "range": "71.37..71.52",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/http_admission/plain/connections=256/pending=16",
+            "value": 72.25894546508789,
+            "range": "72.21..72.31",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/http_admission/plain/connections=256/pending=256",
+            "value": 71.65189123153687,
+            "range": "71.65..71.65",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/http_admission/upgrade/connections=16/pending=0",
+            "value": 108.06180667877197,
+            "range": "108..108.1",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/http_admission/upgrade/connections=16/pending=16",
+            "value": 106.99608039855957,
+            "range": "107..107",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/http_admission/upgrade/connections=16/pending=256",
+            "value": 106.69219875335693,
+            "range": "106.6..106.8",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/http_admission/upgrade/connections=1/pending=0",
+            "value": 107.17929553985596,
+            "range": "107..107.3",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/http_admission/upgrade/connections=1/pending=16",
+            "value": 107.00455570220947,
+            "range": "106.8..107.2",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/http_admission/upgrade/connections=1/pending=256",
+            "value": 107.62822437286377,
+            "range": "107.6..107.7",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/http_admission/upgrade/connections=256/pending=0",
+            "value": 106.95208358764648,
+            "range": "106.9..107",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/http_admission/upgrade/connections=256/pending=16",
+            "value": 107.30068588256836,
+            "range": "107.2..107.4",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/http_admission/upgrade/connections=256/pending=256",
+            "value": 107.06670761108398,
+            "range": "107..107.1",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/http_idle/connections=1/0",
+            "value": 454.93931579589844,
+            "range": "454.9..455",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/http_idle/connections=1/16",
+            "value": 331.69818115234375,
+            "range": "331.7..331.7",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/http_idle/connections=1/256",
+            "value": 332.449031829834,
+            "range": "332.4..332.5",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/http_idle/connections=16/0",
+            "value": 455.15859603881836,
+            "range": "454.9..455.5",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/http_idle/connections=16/16",
+            "value": 332.0435562133789,
+            "range": "332..332.1",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/http_idle/connections=16/256",
+            "value": 332.12022590637207,
+            "range": "331.9..332.3",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/http_idle/connections=256/0",
+            "value": 453.7467041015625,
+            "range": "453.7..453.8",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/http_idle/connections=256/16",
+            "value": 330.78719902038574,
+            "range": "330.7..330.8",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/http_idle/connections=256/256",
+            "value": 330.8921699523926,
+            "range": "330.6..331.2",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/http_idle_baseline",
+            "value": 197.79596328735352,
+            "range": "197.5..198.1",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/rtmp_amf0/nulls/1024",
+            "value": 4382.207824707031,
+            "range": "4333..4431",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/rtmp_amf0/nulls/1048576",
+            "value": 4303833.84375,
+            "range": "4.296e+06..4.312e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/rtmp_amf0/nulls/65536",
+            "value": 275054.09375,
+            "range": "2.733e+05..2.768e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/rtmp_amf0/properties/1024",
+            "value": 6262.006103515625,
+            "range": "6260..6264",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/rtmp_amf0/properties/1048576",
+            "value": 6401257.4375,
+            "range": "6.396e+06..6.406e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/rtmp_amf0/properties/65536",
+            "value": 400396.63671875,
+            "range": "4.004e+05..4.004e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/rtmp_chunks/ids_16/chunk_128/128",
+            "value": 221.11094284057617,
+            "range": "221.1..221.2",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/rtmp_chunks/ids_16/chunk_128/4096",
+            "value": 3549.7098693847656,
+            "range": "3549..3550",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/rtmp_chunks/ids_16/chunk_128/65536",
+            "value": 55097.6279296875,
+            "range": "5.51e+04..5.51e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/rtmp_chunks/ids_16/chunk_4096/128",
+            "value": 222.457670211792,
+            "range": "222.4..222.5",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/rtmp_chunks/ids_16/chunk_4096/4096",
+            "value": 377.93055534362793,
+            "range": "377.9..378",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/rtmp_chunks/ids_16/chunk_4096/65536",
+            "value": 4097.986267089844,
+            "range": "4097..4099",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/rtmp_chunks/ids_1/chunk_128/128",
+            "value": 218.9233856201172,
+            "range": "218.8..219",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/rtmp_chunks/ids_1/chunk_128/4096",
+            "value": 3527.3241271972656,
+            "range": "3526..3529",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/rtmp_chunks/ids_1/chunk_128/65536",
+            "value": 54584.529296875,
+            "range": "5.456e+04..5.461e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/rtmp_chunks/ids_1/chunk_4096/128",
+            "value": 217.32089042663574,
+            "range": "217.1..217.5",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/rtmp_chunks/ids_1/chunk_4096/4096",
+            "value": 350.96857261657715,
+            "range": "350.9..351",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/rtmp_chunks/ids_1/chunk_4096/65536",
+            "value": 4063.377471923828,
+            "range": "4062..4065",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/rtmp_chunks/ids_256/chunk_128/128",
+            "value": 219.76372528076172,
+            "range": "219.7..219.8",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/rtmp_chunks/ids_256/chunk_128/4096",
+            "value": 3525.681365966797,
+            "range": "3526..3526",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/rtmp_chunks/ids_256/chunk_128/65536",
+            "value": 54386.76904296875,
+            "range": "5.438e+04..5.439e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/rtmp_chunks/ids_256/chunk_4096/128",
+            "value": 219.29724884033203,
+            "range": "219.3..219.3",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/rtmp_chunks/ids_256/chunk_4096/4096",
+            "value": 379.83269119262695,
+            "range": "379.8..379.9",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/rtmp_chunks/ids_256/chunk_4096/65536",
+            "value": 4060.3157653808594,
+            "range": "4059..4062",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/rtmp_chunks/ids_64/chunk_128/128",
+            "value": 218.92021560668945,
+            "range": "218.8..219",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/rtmp_chunks/ids_64/chunk_128/4096",
+            "value": 3509.1405029296875,
+            "range": "3509..3510",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/rtmp_chunks/ids_64/chunk_128/65536",
+            "value": 55497.7236328125,
+            "range": "5.545e+04..5.554e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/rtmp_chunks/ids_64/chunk_4096/128",
+            "value": 219.43717765808105,
+            "range": "219.4..219.5",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/rtmp_chunks/ids_64/chunk_4096/4096",
+            "value": 380.24134826660156,
+            "range": "380.2..380.3",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/rtmp_chunks/ids_64/chunk_4096/65536",
+            "value": 4096.399932861328,
+            "range": "4096..4097",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/rtmp_connect_fourccs/array/16",
+            "value": 2279.9617309570312,
+            "range": "2265..2295",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/rtmp_connect_fourccs/array/256",
+            "value": 19652.226806640625,
+            "range": "1.946e+04..1.985e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/rtmp_connect_fourccs/array/4096",
+            "value": 292095.875,
+            "range": "2.919e+05..2.922e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/rtmp_connect_fourccs/info_map/16",
+            "value": 3578.8409729003906,
+            "range": "3548..3610",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/rtmp_connect_fourccs/info_map/256",
+            "value": 39208.8212890625,
+            "range": "3.916e+04..3.926e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/rtmp_connect_fourccs/info_map/4096",
+            "value": 617579.50390625,
+            "range": "6.171e+05..6.181e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/rtmp_connect_fourccs/object/16",
+            "value": 4046.263946533203,
+            "range": "4028..4065",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/rtmp_connect_fourccs/object/256",
+            "value": 49554.95947265625,
+            "range": "4.948e+04..4.963e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/rtmp_connect_fourccs/object/4096",
+            "value": 806436.890625,
+            "range": "8.062e+05..8.066e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/groups/10000p_1000g",
+            "value": 20246572,
+            "range": "2.023e+07..2.027e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/groups/10000p_100g",
+            "value": 14837698.75,
+            "range": "1.466e+07..1.502e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/groups/10000p_1g",
+            "value": 30148752.5,
+            "range": "3.012e+07..3.018e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/groups/1000p_1000g",
+            "value": 4728814.75,
+            "range": "4.718e+06..4.739e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/groups/1000p_100g",
+            "value": 1539600.15625,
+            "range": "1.533e+06..1.546e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/groups/1000p_1g",
+            "value": 2756418.5625,
+            "range": "2.753e+06..2.76e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/prefix/10000p_2d_0h",
+            "value": 29387918.5,
+            "range": "2.929e+07..2.948e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/prefix/10000p_2d_100h",
+            "value": 30567091.25,
+            "range": "3.055e+07..3.059e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/prefix/10000p_2d_10h",
+            "value": 30845859.75,
+            "range": "3.08e+07..3.089e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/prefix/10000p_8d_0h",
+            "value": 32638739,
+            "range": "3.251e+07..3.277e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/prefix/10000p_8d_100h",
+            "value": 35905466.5,
+            "range": "3.573e+07..3.608e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/prefix/10000p_8d_10h",
+            "value": 34041510,
+            "range": "3.382e+07..3.426e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/prefix/1000p_2d_0h",
+            "value": 2714667.84375,
+            "range": "2.711e+06..2.719e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/prefix/1000p_2d_100h",
+            "value": 3164888.875,
+            "range": "3.16e+06..3.17e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/prefix/1000p_2d_10h",
+            "value": 2808593.21875,
+            "range": "2.799e+06..2.818e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/prefix/1000p_8d_0h",
+            "value": 2863983.28125,
+            "range": "2.855e+06..2.873e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/prefix/1000p_8d_100h",
+            "value": 3630992,
+            "range": "3.627e+06..3.635e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/prefix/1000p_8d_10h",
+            "value": 3120474.46875,
+            "range": "3.112e+06..3.129e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/presence/10000l_0h",
+            "value": 8624206.25,
+            "range": "8.577e+06..8.672e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/presence/10000l_1000h",
+            "value": 10551019,
+            "range": "1.049e+07..1.062e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/presence/10000l_100h",
+            "value": 9025188.25,
+            "range": "8.999e+06..9.052e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/presence/100l_0h",
+            "value": 68003.1064453125,
+            "range": "6.793e+04..6.807e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/presence/100l_100h",
+            "value": 168230.8857421875,
+            "range": "1.677e+05..1.687e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/tick/10000p_1t_0pct",
+            "value": 10530136.75,
+            "range": "1.045e+07..1.061e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/tick/10000p_1t_100pct",
+            "value": 43159156,
+            "range": "4.313e+07..4.319e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/tick/10000p_1t_10pct",
+            "value": 29853605.75,
+            "range": "2.957e+07..3.013e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/tick/10000p_4t_0pct",
+            "value": 43324236,
+            "range": "4.323e+07..4.342e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/tick/10000p_4t_100pct",
+            "value": 176837817,
+            "range": "1.768e+08..1.768e+08",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/tick/10000p_4t_10pct",
+            "value": 116664668,
+            "range": "1.167e+08..1.167e+08",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/tick/1000p_1t_0pct",
+            "value": 881291.203125,
+            "range": "8.803e+05..8.823e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/tick/1000p_1t_100pct",
+            "value": 4025778.78125,
+            "range": "4.021e+06..4.031e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/tick/1000p_1t_10pct",
+            "value": 2719761.5625,
+            "range": "2.713e+06..2.727e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/tick/1000p_4t_0pct",
+            "value": 3507747.75,
+            "range": "3.478e+06..3.537e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/tick/1000p_4t_100pct",
+            "value": 17020897.5,
+            "range": "1.701e+07..1.703e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/tick/1000p_4t_10pct",
+            "value": 11184746.5,
+            "range": "1.115e+07..1.122e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/tick/100p_1t_0pct",
+            "value": 77853.4345703125,
+            "range": "7.785e+04..7.786e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/tick/100p_1t_100pct",
+            "value": 440459.1953125,
+            "range": "4.348e+05..4.461e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/tick/100p_1t_10pct",
+            "value": 284864.505859375,
+            "range": "2.819e+05..2.878e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/tick/100p_4t_0pct",
+            "value": 325139.017578125,
+            "range": "3.246e+05..3.257e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/tick/100p_4t_100pct",
+            "value": 1644406.890625,
+            "range": "1.639e+06..1.649e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/tick/100p_4t_10pct",
+            "value": 1125152.4296875,
+            "range": "1.121e+06..1.129e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/tick/50000p_1t_0pct",
+            "value": 66828392,
+            "range": "6.683e+07..6.683e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/tick/50000p_1t_100pct",
+            "value": 225322109,
+            "range": "2.253e+08..2.253e+08",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/stats/tick/50000p_1t_10pct",
+            "value": 156460244,
+            "range": "1.565e+08..1.565e+08",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/local_thread_check/checked",
+            "value": 9.05772489309311,
+            "range": "9.053..9.062",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/local_thread_check/direct",
+            "value": 0.29664165154099464,
+            "range": "0.2965..0.2968",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/worker_request_reply/connections-16/bytes-262144/passes-1",
+            "value": 32351342.25,
+            "range": "3.187e+07..3.283e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/worker_request_reply/connections-16/bytes-262144/passes-4",
+            "value": 33656939.75,
+            "range": "3.36e+07..3.371e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/worker_request_reply/connections-16/bytes-64/passes-1",
+            "value": 277068.73046875,
+            "range": "2.768e+05..2.773e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/worker_request_reply/connections-16/bytes-64/passes-4",
+            "value": 285030.884765625,
+            "range": "2.844e+05..2.857e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/worker_request_reply/connections-1/bytes-262144/passes-1",
+            "value": 522142.0546875,
+            "range": "5.186e+05..5.257e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/worker_request_reply/connections-1/bytes-262144/passes-4",
+            "value": 532680.77734375,
+            "range": "5.313e+05..5.341e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/worker_request_reply/connections-1/bytes-64/passes-1",
+            "value": 17881.123291015625,
+            "range": "1.767e+04..1.809e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/worker_request_reply/connections-1/bytes-64/passes-4",
+            "value": 17429.390625,
+            "range": "1.741e+04..1.745e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/worker_turns/sockets-1/1",
+            "value": 3925.3689575195312,
+            "range": "3921..3930",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/worker_turns/sockets-1/64",
+            "value": 180123.0966796875,
+            "range": "1.8e+05..1.803e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/worker_turns/sockets-1/8",
+            "value": 23118.308715820312,
+            "range": "2.311e+04..2.313e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/worker_turns/sockets-16/1",
+            "value": 49599.1484375,
+            "range": "4.953e+04..4.967e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/worker_turns/sockets-16/64",
+            "value": 3167675.046875,
+            "range": "3.162e+06..3.173e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/worker_turns/sockets-16/8",
+            "value": 382669.20703125,
+            "range": "3.805e+05..3.849e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/worker_turns/sockets-4/1",
+            "value": 12904.4833984375,
+            "range": "1.287e+04..1.294e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/worker_turns/sockets-4/64",
+            "value": 760390.06640625,
+            "range": "7.582e+05..7.626e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-shared/rust/shared/worker_turns/sockets-4/8",
+            "value": 90987.9384765625,
+            "range": "9.092e+04..9.106e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-uring/rust/uring-udp_tokio/udp_tokio_epoll/recvmmsg_gro-off_gso-off",
+            "value": 17542333.875,
+            "range": "1.754e+07..1.755e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-uring/rust/uring-udp_tokio/udp_tokio_epoll/recvmmsg_gro-off_gso-on",
+            "value": 7818577.125,
+            "range": "7.807e+06..7.831e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-uring/rust/uring-udp_tokio/udp_tokio_epoll/recvmmsg_gro-on_gso-off",
+            "value": 17342797.125,
+            "range": "1.732e+07..1.737e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-uring/rust/uring-udp_tokio/udp_tokio_epoll/recvmmsg_gro-on_gso-on",
+            "value": 1657127.359375,
+            "range": "1.657e+06..1.658e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-uring/rust/uring-udp_tokio/udp_tokio_epoll/recvmsg_gro-off_gso-off",
+            "value": 19630604.5,
+            "range": "1.961e+07..1.966e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-uring/rust/uring-udp_tokio/udp_tokio_epoll/recvmsg_gro-off_gso-on",
+            "value": 9979162.4375,
+            "range": "9.967e+06..9.991e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-uring/rust/uring-udp_tokio/udp_tokio_epoll/recvmsg_gro-on_gso-off",
+            "value": 19819439.125,
+            "range": "1.978e+07..1.986e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-uring/rust/uring-udp_tokio/udp_tokio_epoll/recvmsg_gro-on_gso-on",
+            "value": 1609377,
+            "range": "1.608e+06..1.61e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-uring/rust/uring-udp_uring/udp_io_uring/recvmsg-multishot_gro-off_gso-off",
+            "value": 17441106.75,
+            "range": "1.743e+07..1.745e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-uring/rust/uring-udp_uring/udp_io_uring/recvmsg-multishot_gro-off_gso-on",
+            "value": 7218966.625,
+            "range": "7.212e+06..7.226e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-uring/rust/uring-udp_uring/udp_io_uring/recvmsg-multishot_gro-on_gso-off",
+            "value": 17529799,
+            "range": "1.752e+07..1.754e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-uring/rust/uring-udp_uring/udp_io_uring/recvmsg-multishot_gro-on_gso-on",
+            "value": 1723501.8125,
+            "range": "1.721e+06..1.726e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-uring/rust/uring-echo_quic/echo_quic/udp/all-off",
+            "value": 10409535.25,
+            "range": "1.036e+07..1.046e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-uring/rust/uring-echo_quic/echo_quic/udp/all-on",
+            "value": 3176351.3125,
+            "range": "3.077e+06..3.276e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-uring/rust/uring-echo_quic/echo_quic/udp/no-gro",
+            "value": 5188087.5,
+            "range": "5.168e+06..5.208e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-uring/rust/uring-echo_quic/echo_quic/udp/no-gso",
+            "value": 5502375.75,
+            "range": "5.386e+06..5.618e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-uring/rust/uring-echo_quic/echo_quic/udp/oneshot",
+            "value": 3630997,
+            "range": "3.558e+06..3.704e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-uring/rust/uring-session_lite/session_lite/all-off",
+            "value": 14123010.4375,
+            "range": "1.41e+07..1.415e+07",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-uring/rust/uring-session_lite/session_lite/all-on",
+            "value": 2424057.953125,
+            "range": "2.393e+06..2.455e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-uring/rust/uring-session_lite/session_lite/no-gro",
+            "value": 4177359,
+            "range": "4.175e+06..4.18e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-uring/rust/uring-session_lite/session_lite/no-gso",
+            "value": 5972883.8125,
+            "range": "5.968e+06..5.978e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-uring/rust/uring-session_lite/session_lite/oneshot",
+            "value": 2879839.25,
+            "range": "2.866e+06..2.894e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-uring/rust/uring-unreachable_dials/unreachable_dials/handshakes-1/1",
+            "value": 41708.617919921875,
+            "range": "4.168e+04..4.173e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-uring/rust/uring-unreachable_dials/unreachable_dials/handshakes-1/64",
+            "value": 2979901.375,
+            "range": "2.975e+06..2.985e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-uring/rust/uring-unreachable_dials/unreachable_dials/handshakes-1/8",
+            "value": 346383.22265625,
+            "range": "3.459e+05..3.469e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-uring/rust/uring-unreachable_dials/unreachable_dials/handshakes-256/1",
+            "value": 42939.7763671875,
+            "range": "4.279e+04..4.309e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-uring/rust/uring-unreachable_dials/unreachable_dials/handshakes-256/64",
+            "value": 3003221.40625,
+            "range": "2.984e+06..3.022e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-uring/rust/uring-unreachable_dials/unreachable_dials/handshakes-256/8",
+            "value": 354970.46484375,
+            "range": "3.541e+05..3.558e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-uring/rust/uring-unreachable_dials/unreachable_dials/handshakes-4096/1",
+            "value": 43269.49267578125,
+            "range": "4.313e+04..4.341e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-uring/rust/uring-unreachable_dials/unreachable_dials/handshakes-4096/64",
+            "value": 2973870.9375,
+            "range": "2.967e+06..2.981e+06",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-uring/rust/uring-unreachable_dials/unreachable_dials/handshakes-4096/8",
+            "value": 366747.76953125,
+            "range": "3.664e+05..3.671e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-uring/rust/uring-timers/timers/rearm/1",
+            "value": 46.394694089889526,
+            "range": "46.38..46.4",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-uring/rust/uring-timers/timers/rearm/1024",
+            "value": 74.40563583374023,
+            "range": "74.39..74.42",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-uring/rust/uring-timers/timers/rearm/16384",
+            "value": 86.40459203720093,
+            "range": "86.4..86.41",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-uring/rust/uring-timers/timers/rearm/64",
+            "value": 57.350876331329346,
+            "range": "57.31..57.39",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-uring/rust/uring-web_headers/web_headers/pending-0/ready-1",
+            "value": 66146.6875,
+            "range": "5.709e+04..7.521e+04",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-uring/rust/uring-web_headers/web_headers/pending-0/ready-16",
+            "value": 222932.625,
+            "range": "2.217e+05..2.242e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-uring/rust/uring-web_headers/web_headers/pending-256/ready-1",
+            "value": 199174.8125,
+            "range": "1.505e+05..2.478e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-uring/rust/uring-web_headers/web_headers/pending-256/ready-16",
+            "value": 378902,
+            "range": "3.55e+05..4.028e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-uring/rust/uring-web_headers/web_headers/pending-64/ready-1",
+            "value": 105532.3125,
+            "range": "9.586e+04..1.152e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-rust-uring/rust/uring-web_headers/web_headers/pending-64/ready-16",
+            "value": 254923.875,
+            "range": "2.44e+05..2.659e+05",
+            "unit": "ns",
+            "extra": "Mean nanoseconds per iteration; c1504569288b7569feec899a2a065b06c6aa8a70"
+          },
+          {
+            "name": "bench-size/size/js/hang/brotli",
+            "value": 150051,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/js/hang/gzip",
+            "value": 174574,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/js/hang/raw",
+            "value": 562266,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/js/net/brotli",
+            "value": 129740,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/js/net/gzip",
+            "value": 150493,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/js/net/raw",
+            "value": 489739,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/js/publish/brotli",
+            "value": 164268,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/js/publish/gzip",
+            "value": 191214,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/js/publish/raw",
+            "value": 614499,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/js/watch-ui/brotli",
+            "value": 179640,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/js/watch-ui/cmaf/brotli",
+            "value": 2238,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/js/watch-ui/cmaf/gzip",
+            "value": 2459,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/js/watch-ui/cmaf/raw",
+            "value": 5713,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/js/watch-ui/gzip",
+            "value": 209560,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/js/watch-ui/raw",
+            "value": 686723,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/js/watch/brotli",
+            "value": 168775,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/js/watch/cmaf/brotli",
+            "value": 2238,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/js/watch/cmaf/gzip",
+            "value": 2459,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/js/watch/cmaf/raw",
+            "value": 5713,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/js/watch/gzip",
+            "value": 196914,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/js/watch/raw",
+            "value": 637430,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/native/aarch64-unknown-linux-gnu/libmoq_ffi-minimal.a",
+            "value": 50138882,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/native/aarch64-unknown-linux-gnu/libmoq_ffi-minimal.so",
+            "value": 23002360,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/release/go-lib-aarch64-apple-darwin/libmoq_ffi.a",
+            "value": 36707728,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/release/go-lib-aarch64-unknown-linux-gnu/libmoq_ffi.a",
+            "value": 57885942,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/release/go-lib-x86_64-pc-windows-msvc/moq_ffi.dll.lib",
+            "value": 359580,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/release/go-lib-x86_64-pc-windows-msvc/moq_ffi.lib",
+            "value": 67743002,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/release/go-lib-x86_64-unknown-linux-gnu/libmoq_ffi.a",
+            "value": 60459846,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/release/kotlin-package/moq-ffi-android.aar",
+            "value": 35320013,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/release/kotlin-package/moq-ffi-jvm.jar",
+            "value": 45264890,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/release/kotlin-package/moq-ffi.jar",
+            "value": 758,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/release/moq-c-aarch64-apple-darwin/moq-c-aarch64-apple-darwin.tar.gz",
+            "value": 11334287,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/release/moq-c-aarch64-unknown-linux-gnu/moq-c-aarch64-unknown-linux-gnu.tar.gz",
+            "value": 13296293,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/release/moq-c-generated-aarch64-apple-darwin/moq-c-aarch64-apple-darwin.tar.gz",
+            "value": 13428053,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/release/moq-c-generated-aarch64-unknown-linux-gnu/moq-c-aarch64-unknown-linux-gnu.tar.gz",
+            "value": 15161967,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/release/moq-c-generated-x86_64-pc-windows-msvc/moq-c-x86_64-pc-windows-msvc.zip",
+            "value": 20517558,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/release/moq-c-generated-x86_64-unknown-linux-gnu/moq-c-x86_64-unknown-linux-gnu.tar.gz",
+            "value": 15939791,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/release/moq-c-x86_64-pc-windows-msvc/moq-c-x86_64-pc-windows-msvc.zip",
+            "value": 16497149,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/release/moq-c-x86_64-unknown-linux-gnu/moq-c-x86_64-unknown-linux-gnu.tar.gz",
+            "value": 14103058,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/release/moq-cli-aarch64-apple-darwin/moq-cli-aarch64-apple-darwin.tar.gz",
+            "value": 17814689,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/release/moq-cli-aarch64-unknown-linux-gnu/moq-cli-aarch64-unknown-linux-gnu.tar.gz",
+            "value": 18748159,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/release/moq-cli-x86_64-pc-windows-msvc/moq-cli-x86_64-pc-windows-msvc.zip",
+            "value": 20272613,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/release/moq-cli-x86_64-unknown-linux-gnu/moq-cli-x86_64-unknown-linux-gnu.tar.gz",
+            "value": 20497404,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/release/moq-relay-aarch64-apple-darwin/moq-relay-aarch64-apple-darwin.tar.gz",
+            "value": 8942236,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/release/moq-relay-aarch64-unknown-linux-gnu/moq-relay-aarch64-unknown-linux-gnu.tar.gz",
+            "value": 9148829,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/release/moq-relay-x86_64-pc-windows-msvc/moq-relay-x86_64-pc-windows-msvc.zip",
+            "value": 10105921,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/release/moq-relay-x86_64-unknown-linux-gnu/moq-relay-x86_64-unknown-linux-gnu.tar.gz",
+            "value": 10166136,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/release/python-aarch64-apple-darwin/moq_ffi-py3-none-macosx_11_0_arm64.whl",
+            "value": 10475873,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/release/python-aarch64-unknown-linux-gnu/moq_ffi-py3-none-manylinux_2_28_aarch64.whl",
+            "value": 11506069,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/release/python-sdist/moq_ffi.tar.gz",
+            "value": 8629685,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/release/python-x86_64-pc-windows-msvc/moq_ffi-py3-none-win_amd64.whl",
+            "value": 11783063,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/release/python-x86_64-unknown-linux-gnu/moq_ffi-py3-none-manylinux_2_28_x86_64.whl",
+            "value": 12267287,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/release/swift-ffi-package/MoqFFI.xcframework.zip",
+            "value": 40240428,
+            "unit": "bytes"
+          },
+          {
+            "name": "bench-size/size/release/swift-ffi-package/moq-ffi-swift-ffi.tar.gz",
+            "value": 95894,
             "unit": "bytes"
           }
         ]
