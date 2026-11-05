@@ -2,7 +2,7 @@
 //!
 //! [`provider`] and [`install_default`] refuse a CPU that rind cannot run on with
 //! [`UnsupportedCpu`], naming the missing feature. This module re-exports
-//! `moq_crypto::provider`, so moq-quic, qmux, and moq-uring report the same type.
+//! `moq_crypto::cpu` and `moq_crypto::provider`, so moq-quic, qmux, and moq-uring report the same type.
 
 pub use moq_crypto::cpu::{UnsupportedCpu, check};
 pub use moq_crypto::provider::{Provider, install_default, provider};

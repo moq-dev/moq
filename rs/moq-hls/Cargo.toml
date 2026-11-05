@@ -51,7 +51,6 @@ moq-hls = { path = ".", default-features = false, features = ["async"] }
 moq-json = { path = "../moq-json" }
 moq-tokio = { path = "../moq-tokio", default-features = false, features = ["tcp", "quic"] }
 mp4-atom = { workspace = true }
-rind-rustls = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
