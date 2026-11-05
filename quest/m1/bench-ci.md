@@ -4,37 +4,16 @@
 
 The paired Rust Criterion comparison each Nightly runs (see
 [Paired comparison](/bench/README.md#paired-comparison)) fails only on real
-regressions in every paired group: A/A runs on the hosted ARM runners hold its
-threshold, confirmation budget, and round count for `rust-bench`
-and `rust-relay` too, and the rounds stop agreeing on slowdowns in code that
-did not change.
-
-## Waiting
-
-- moq-dev/moq: once [moq-dev/moq#7940](https://github.com/moq-dev/moq/pull/7940)
-  merges, an agent may dispatch exactly one A/A Nightly run on `main`, with
-  `bench-base` set to main's head, under the authorization recorded below.
-  Check: that run's `bench-rust` and `bench-rust-relay` artifacts each hold
-  `paired.json` at the artifact root (the gate's input), rather than only
-  partial `runs/run.*/paired.json` files.
+regressions in every paired group: `rust-bench` finishes its paired leg within
+its hour and A/A runs on the hosted ARM runners hold its threshold,
+confirmation budget, and round count, and separate builds of unchanged code
+stop measuring as a stable slowdown.
 
 ## Plan
 
-Decided 2026-11-05 (maintainer, /quest-plan): authorize exactly one agent
-dispatch of an A/A Nightly run on `main` once
-[moq-dev/moq#7940](https://github.com/moq-dev/moq/pull/7940) merges:
-`gh workflow run nightly.yml --ref main -f bench-base=<main's head>`.
-Check that `bench-rust` and `bench-rust-relay` each produce an artifact-root
-`paired.json`. A dispatch cancels any in-progress Nightly through its
-concurrency group; the 07:00 UTC scheduled run can also cancel the dispatch.
-Dispatch clear of that cron window so the benchmark legs can finish. Verify
-that the dispatched run's `head_sha` equals `bench-base` before treating it
-as A/A evidence; a concurrent merge can move `main` between reading and
-dispatching it.
-
-Calibrated 2026-11-05 for the shared, supplemental (`rust-extra`) and io_uring
-groups; `bench/README.md` records the numbers. Threshold 10%, 20
-confirmations, and 3 rounds stay as they were:
+Calibrated 2026-11-05 for the shared, supplemental (`rust-extra`), io_uring
+and `rust-relay` groups; `bench/README.md` records the numbers. Threshold 10%,
+20 confirmations, and 3 rounds stay as they were:
 
 - A/A runs [41921320690](https://github.com/moq-dev/moq/actions/runs/41921320690)
   and [41933525520](https://github.com/moq-dev/moq/actions/runs/41933525520)
@@ -43,31 +22,62 @@ confirmations, and 3 rounds stay as they were:
   way: shared 18 and 26 of 716, supplemental 10 and 15 of 460, io_uring 1 and
   1 of 41; at most 17 slower in one group, under the 20 confirmations. The
   largest median among round sets that all agreed on a slowdown was +5.6%.
+- A/A runs [42102235726](https://github.com/moq-dev/moq/actions/runs/42102235726)
+  (`main` at `62ae716265`) and
+  [42119312487](https://github.com/moq-dev/moq/actions/runs/42119312487)
+  (`83d0bc46ba`), dispatched after
+  [moq-dev/moq#7940](https://github.com/moq-dev/moq/pull/7940) merged, each
+  verified with `head_sha` equal to `bench-base`. Crossings: shared 20 and 19
+  of 728, supplemental 7 and 8 of 514 and 532, io_uring 3 and 2 of 41, relay
+  15 and 37 of 410; at most 17 slower in one group. Relay confirmed nothing in
+  either run and is calibrated. The second run confirmed nothing. The first
+  failed the shared gate on `wire_decode/padded/packets_64`: screen +10.3%,
+  rounds +11.9, +12.9, +12.1%, with `padded/packets_1024` at +7.1%. The same
+  case read +2.1% in the second run and +5.4, -0.8 and +6.2% in the three
+  earlier runs.
 - Slowed-bench run
   [41979277343](https://github.com/moq-dev/moq/actions/runs/41979277343)
   compared `main` at `c150456928` against a base that collects 192 of
   `pattern-algebra/collect-literal/256`'s 256 literals (branch
   `bench-ci/slowed-base`, deleted). The shared job failed at its gate with
   that case alone: screen +35.7%, rounds +34.6, +35.1, +35.2%. The
-  supplemental and io_uring groups passed.
+  supplemental and io_uring groups passed. Every group runs the same gate
+  step, so no other group needs its own slowed run.
 - In that run, the rounds rejected the three `stats/tick/*_10pct` cases the
   screen flagged, but each one's rounds agreed on a slowdown, at medians of
-  +9.3 to +9.7%, and every `100pct` case screened +6 to +9%, although `moq-stats` was source-identical on both sides.
-  The same cases sat within 6% either way in both A/A runs. A local build of
-  `producer_tick` at both commits, in separate trees and target directories,
-  gives byte-identical `.text`, `.rodata` and `.data.rel.ro`, so the measured
-  code is the same. That is the stable bias
-  [moq-dev/moq#7139](https://github.com/moq-dev/moq/pull/7139) found at +23%
-  and +46%, and it sits 0.3 points under the threshold. Find its source on the
-  ARM runner (for example, diff the two `producer_tick` builds there and rerun
-  the rounds against one binary in both slots), then fix it in `bench/run.sh`.
-  Lowering the threshold waits on that fix.
-- The shared, supplemental and io_uring legs took 19 to 44 minutes of their
-  hour across the three runs. Check `rust-bench` and `rust-relay` against
-  their hour too; a cold mbx cache roughly doubles build time. A timeout
-  leaves calibration incomplete, rather than demonstrating bias.
+  +9.3 to +9.7%, and every `100pct` case screened +6 to +9%, although
+  `moq-stats` was source-identical on both sides. The same cases sat within 6%
+  either way in both earlier A/A runs. A local build of `producer_tick` at both
+  commits, in separate trees and target directories, gives byte-identical
+  `.text`, `.rodata` and `.data.rel.ro`.
 
-Retain the earlier bias cases when reading the remaining groups' A/A results:
+Find the source of that bias, then fix it in `bench/run.sh`. It moves between
+runs rather than following the source: an A/A run builds the same commit on
+both sides, yet `wire_decode/padded/packets_64` agreed on +12% in one run and
+not the next. A paired round reruns the same two binaries, so rounds cannot
+filter it. Rerun the rounds against one binary in both slots on the ARM
+runner to tell build differences from run placement. Lowering the threshold
+waits on that fix.
+
+`rust-bench` is not calibrated: its leg hit its 60-minute timeout in both
+runs, before uploading an artifact. Building both sides took 16 to 18
+minutes. The screen and rounds then ran past 40 minutes, because confirmation
+rounds reran benches whose untimed work dominates their wall time. A round
+side meant to take about 3 seconds took 2 minutes for
+`interests/covered/1000w_1000s` and 8 for
+`publisher_covered_before_start/wake/8192`: each builds its fixture in the
+`bench_function` closure outside `b.iter`, and Criterion calls that closure
+once per sample. `track_evict_fanout/512r/8` took about a minute, because its
+untimed reads run inside every iteration. Make those benches pay their setup
+once per benchmark, and bound the rounds by time if the leg still does not
+fit. Its A/A run then needs a maintainer-authorized Nightly dispatch.
+
+A dispatch cancels any in-progress Nightly through its concurrency group, and
+the 07:00 UTC scheduled run can cancel a dispatch. Dispatch clear of that
+window, and verify that the run's `head_sha` equals `bench-base` before
+treating it as A/A evidence.
+
+Retain the earlier bias cases when reading `rust-bench`'s A/A results:
 [moq-dev/moq#7139](https://github.com/moq-dev/moq/pull/7139) found
 `moq-net/group_relay_frames/plain/*` (+23%) and
 `moq-net/origin/serve_idle/3000r` (+46%) agreed in every round despite equal
@@ -78,6 +88,13 @@ because a new bench group shifted LTO inlining.
 addresses. Include moq-quic's windowed `benches/streams.rs` cases too: an
 unchanged base varied 17 to 43% between back-to-back runs on a shared host
 ([moq-dev/moq#6950](https://github.com/moq-dev/moq/pull/6950)).
+
+Decided 2026-11-05 (agent, recorded in
+[moq-dev/moq#7928](https://github.com/moq-dev/moq/pull/7928)): the threshold
+stays at 10% despite the A/A false alarm at +12.1%. The 2026-10-23 decision
+already accepts false paired alarms while this quest tunes the gate. Raising
+the threshold would hide the bias this quest fixes, along with real
+regressions of 10 to 15%.
 
 Decided 2026-11-05 (agent, recorded in
 [moq-dev/moq#7928](https://github.com/moq-dev/moq/pull/7928)): `bench/run.sh`

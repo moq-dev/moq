@@ -890,8 +890,8 @@ the table requires no new renderer or data branch. A source's `paired.json`, as
 
 ### Paired comparison
 
-Each Nightly's Rust bench groups (`rust-bench`, `rust-shared`, `rust-extra` and
-`rust-uring`) also build the previous scheduled Nightly's commit beside their
+Each Nightly's Rust bench groups (`rust-bench`, `rust-shared`, `rust-relay`,
+`rust-extra` and `rust-uring`) also build the previous scheduled Nightly's commit beside their
 own, on the same runner, so night-to-night runner variance drops out. Each
 built target runs once per side in the trend's quick mode, alternating which
 side goes first; the current side is the trend point. A case more than 10%
@@ -903,15 +903,17 @@ Alert workflow posts the failed Nightly. A target the base cannot build or run
 fails the job too, rather than passing uncompared; a bench target the base does
 not have yet is only reported as new.
 
-Three runs on the hosted runner set these numbers. In two A/A runs of the
-`rust-shared`, `rust-extra` and `rust-uring` groups, 2 to 4% of cases crossed
-10% either way in the screen, at most 17 of them slower, and the rounds
-rejected every one; no round set that agreed on a slowdown had a median above
-6%. A third run, whose base cut one case's work by a quarter, failed with that
-case alone at +35%. Its rounds also agreed, at medians of +9.3 to +9.7%, on
-`stats/tick` cases whose source was identical on both sides, so 10% is a floor
-rather than a margin. The `rust-bench` and `rust-relay` groups are not
-calibrated yet.
+Runs on the hosted runner set these numbers. In four A/A runs of the
+`rust-shared`, `rust-extra` and `rust-uring` groups, and two of `rust-relay`,
+1 to 9% of cases crossed 10% either way in the screen, at most 17 of them
+slower in one group. The rounds rejected all but one:
+`wire_decode/padded/packets_64` at +12%, which read +2% in the next A/A run.
+A run whose base cut one case's work by a quarter failed with that case alone
+at +35%; its rounds also agreed, at medians of +9.3 to +9.7%, on `stats/tick`
+cases whose source was identical on both sides. Separate builds of the same
+source can measure up to 12% apart, so the threshold cannot go lower until
+that bias is fixed.
+`rust-bench` is not calibrated yet: its paired leg outlasts its hour.
 
 The table page shows tonight's comparison above the trend: confirmed
 regressions, targets not compared, cases faster in the screen, slowdowns the
