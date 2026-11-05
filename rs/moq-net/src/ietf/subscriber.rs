@@ -1158,7 +1158,8 @@ impl Subscriber {
 	pub fn with_auth(mut self, auth: crate::auth::Link) -> Self {
 		self.auth = auth;
 		let this = self.clone();
-		self.tasks.push(crate::util::future_task(async move { this.run_limit().await }));
+		self.tasks
+			.push(crate::util::future_task(async move { this.run_limit().await }));
 		self
 	}
 

@@ -2586,171 +2586,22 @@ impl Publisher {
 		}
 	}
 
-	/// Write one group's frames in the negotiated draft's FETCH object layout.
-	///
-	/// The first object carries its absolute Group and Object IDs plus the priority;
-	/// every later one inherits them and increments the Object ID, so only the
-	/// properties (the timestamp) and the payload go on the wire. A fetch object has no
-	/// status field.
+	/// Await [`FetchGroupWrite`].
 	async fn write_fetch_group(
 		stream: &mut Writer<Ranked<crate::transport::boxed::SendStream>, Version>,
-		mut group: group::Consumer,
+		group: group::Consumer,
 		sequence: u64,
 		slice: GroupSlice,
 		timescale: Option<Timescale>,
 		version: Version,
 		priority: u8,
 	) -> Result<(), Error> {
-		let GroupSlice { skip, until } = slice;
-		let mut index: u64 = 0;
-		let mut prior = None;
-
-		let mut buf = arrayvec::ArrayVec::<frame::Object, 8>::new();
-		if group.wire().is_some_and(|wire| !wire.fetchable) {
-			return Err(Error::Unsupported);
-		}
-		// A long cached group is written a slice per poll, so the session's other tasks still run.
-		let mut budget = kio::coop::Budget::new(32);
-		'serve: loop {
-			kio::wait(|waiter| budget.poll_yield(waiter)).await;
-			// The cap is the Largest Object snapshot: the group may keep growing, but
-			// everything past the snapshot belongs to the subscription, not the fill.
-			if until.is_some_and(|until| index >= until) {
-				break;
-			}
-
-			let step = {
-				let mut closed = std::pin::pin!(stream.closed());
-				kio::wait(|waiter| {
-					if waiter.poll_future(closed.as_mut()).is_ready() {
-						return Poll::Ready(Err(Error::Cancel));
-					}
-					match group.poll_read_objects(waiter, &mut buf) {
-						Poll::Pending => match group.poll_next_frame(waiter) {
-							Poll::Ready(Ok(Some(frame))) => Poll::Ready(Ok(FillStep::Partial(frame))),
-							Poll::Ready(Ok(None)) => Poll::Ready(Ok(FillStep::Done)),
-							Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
-							Poll::Pending => Poll::Pending,
-						},
-						Poll::Ready(Ok(0)) => Poll::Ready(Ok(FillStep::Done)),
-						Poll::Ready(Ok(_)) => Poll::Ready(Ok(FillStep::Batch)),
-						Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
-					}
-				})
-				.await
-			};
-
-			match step? {
-				FillStep::Batch => {
-					for frame in &buf {
-						if until.is_some_and(|until| index >= until) {
-							break 'serve;
-						}
-						let frame = frame.clone();
-						index = frame.fields.as_ref().map_or(index, |fields| fields.id);
-						if until.is_some_and(|until| index >= until) {
-							break 'serve;
-						}
-						if index >= skip {
-							Self::write_fetch_object(
-								stream,
-								FetchObjectInfo {
-									sequence,
-									object: index,
-									prior: fetch_prior(prior, index)?,
-									priority,
-									timestamp: frame.timestamp,
-									inflated: frame.inflated,
-									timescale,
-									version,
-									fields: frame.fields.as_deref(),
-									source: group.ietf(),
-								},
-							)
-							.await?;
-							Self::write_fetch_payload(stream, frame.frame.payload).await?;
-							prior = Some(index);
-						}
-						index += 1;
-						group.keep_alive();
-					}
-				}
-				FillStep::Partial(mut frame) => {
-					index = frame.fields.as_ref().map_or(index, |fields| fields.id);
-					if until.is_some_and(|until| index >= until) {
-						break;
-					}
-					if index < skip {
-						// A skipped frame still has to be drained to advance the cursor.
-						loop {
-							let chunk = {
-								let mut closed = std::pin::pin!(stream.closed());
-								kio::wait(|waiter| {
-									if waiter.poll_future(closed.as_mut()).is_ready() {
-										return Poll::Ready(Err(Error::Cancel));
-									}
-									frame.poll_read_chunk(waiter)
-								})
-								.await
-							};
-							if chunk?.is_none() {
-								break;
-							}
-						}
-						index += 1;
-						continue;
-					}
-
-					Self::write_fetch_object(
-						stream,
-						FetchObjectInfo {
-							sequence,
-							object: index,
-							prior: fetch_prior(prior, index)?,
-							priority,
-							timestamp: frame.timestamp,
-							inflated: frame.inflated,
-							timescale,
-							version,
-							fields: frame.fields.as_deref(),
-							source: group.ietf(),
-						},
-					)
-					.await?;
-					prior = Some(index);
-					index += 1;
-
-					stream.varint(frame.size).await?;
-					loop {
-						let chunk = {
-							let mut closed = std::pin::pin!(stream.closed());
-							kio::wait(|waiter| {
-								if waiter.poll_future(closed.as_mut()).is_ready() {
-									return Poll::Ready(Err(Error::Cancel));
-								}
-								frame.poll_read_chunk(waiter)
-							})
-							.await
-						};
-
-						match chunk? {
-							Some(mut chunk) => stream.write_all(&mut chunk).await?,
-							None => break,
-						}
-					}
-				}
-				FillStep::Done => break,
-			}
-		}
-
-		if until.is_some_and(|until| index < until) {
-			return Err(Error::NotFound);
-		}
-		Ok(())
+		let mut write = FetchGroupWrite::new(group, sequence, slice, timescale, version, priority)?;
+		kio::wait(|waiter| write.poll(waiter, stream)).await
 	}
 
-	/// Write one fetch object's header and timestamp properties in the negotiated layout.
-	async fn write_fetch_object(
+	/// Buffer one fetch object's header and timestamp properties in the negotiated layout.
+	fn buffer_fetch_object(
 		stream: &mut Writer<Ranked<crate::transport::boxed::SendStream>, Version>,
 		header: FetchObjectInfo<'_>,
 	) -> Result<(), Error> {
@@ -2808,55 +2659,7 @@ impl Publisher {
 			},
 		};
 
-		stream.encode(&header).await?;
-
-		Ok(())
-	}
-
-	/// Write one group's objects to a fetch stream, which carries no other group.
-	async fn write_fetched_group(
-		writer: &mut Writer<Ranked<crate::transport::boxed::SendStream>, Version>,
-		group: FetchedGroup,
-		version: Version,
-		timescale: Option<Timescale>,
-	) -> Result<(), Error> {
-		let source = group.info.ietf();
-		let priority = super::priority::to_wire(group.info.priority);
-		let mut prior = None;
-		let mut budget = kio::coop::Budget::new(32);
-		for (ordinal, frame) in (group.first..).zip(group.frames) {
-			kio::wait(|waiter| budget.poll_yield(waiter)).await;
-			let object = frame.fields.as_ref().map_or(ordinal, |fields| fields.id);
-			let position = fetch_prior(prior, object)?;
-			prior = Some(object);
-			Self::write_fetch_object(
-				writer,
-				FetchObjectInfo {
-					sequence: group.sequence,
-					object,
-					prior: position,
-					priority,
-					timestamp: frame.timestamp,
-					inflated: frame.inflated,
-					timescale,
-					version,
-					fields: frame.fields.as_deref(),
-					source,
-				},
-			)
-			.await?;
-			Self::write_fetch_payload(writer, frame.frame.payload).await?;
-		}
-		Ok(())
-	}
-
-	/// Write a whole fetch object's length and payload, after its header.
-	async fn write_fetch_payload(
-		stream: &mut Writer<Ranked<crate::transport::boxed::SendStream>, Version>,
-		payload: crate::frame::Payload,
-	) -> Result<(), Error> {
-		let mut write = FetchPayloadWrite::new(payload);
-		kio::wait(|waiter| write.poll(waiter, stream)).await
+		stream.buffer(&header)
 	}
 
 	/// Register a pending subscription until the returned guard drops.
@@ -3295,7 +3098,8 @@ impl Publisher {
 					request_id: msg.request_id,
 				})
 				.await?;
-			Self::write_fetched_group(&mut writer, group, self.version, timescale).await?;
+			let mut write = FetchedGroupWrite::new(group, self.version, timescale);
+			kio::wait(|waiter| write.poll(waiter, &mut writer)).await?;
 			settle(&mut writer).await?;
 			Ok::<(), Error>(())
 		};
@@ -5375,6 +5179,296 @@ impl<T: crate::transport::poll::SendStream> crate::transport::poll::SendStream f
 		let mut inner = self.inner.lock().unwrap();
 		inner.follow(waiter);
 		inner.stream.poll_closed(waiter)
+	}
+}
+
+/// Write one group's frames in the negotiated draft's FETCH object layout.
+///
+/// The first object carries its absolute Group and Object IDs plus the priority;
+/// every later one inherits them and increments the Object ID, so only the
+/// properties (the timestamp) and the payload go on the wire. A fetch object has no
+/// status field.
+struct FetchGroupWrite {
+	group: group::Consumer,
+	sequence: u64,
+	slice: GroupSlice,
+	timescale: Option<Timescale>,
+	version: Version,
+	priority: u8,
+	/// The Object ID of the frame being read or written.
+	index: u64,
+	/// The Object ID written last.
+	prior: Option<u64>,
+	buf: arrayvec::ArrayVec<frame::Object, 8>,
+	/// A long cached group is written a slice per poll, so the session's other tasks still run.
+	budget: kio::coop::Budget,
+	state: FetchGroupState,
+}
+
+enum FetchGroupState {
+	/// Yield to the budget before reading on.
+	Yield,
+	/// Read whole cached objects, or else the next frame as it arrives.
+	Read,
+	/// Write the batch in `buf` from `next`, one object's payload at a time.
+	Batch {
+		next: usize,
+		payload: Option<FetchPayloadWrite>,
+	},
+	/// Drain a frame before the slice, which still advances the cursor.
+	Skip(frame::Consumer),
+	/// Stream a frame whose header and size are buffered, chunk by chunk.
+	Partial {
+		frame: frame::Consumer,
+		chunk: Option<bytes::Bytes>,
+	},
+}
+
+impl FetchGroupWrite {
+	fn new(
+		group: group::Consumer,
+		sequence: u64,
+		slice: GroupSlice,
+		timescale: Option<Timescale>,
+		version: Version,
+		priority: u8,
+	) -> Result<Self, Error> {
+		if group.wire().is_some_and(|wire| !wire.fetchable) {
+			return Err(Error::Unsupported);
+		}
+		Ok(Self {
+			group,
+			sequence,
+			index: 0,
+			slice,
+			timescale,
+			version,
+			priority,
+			prior: None,
+			buf: arrayvec::ArrayVec::new(),
+			budget: kio::coop::Budget::new(32),
+			state: FetchGroupState::Yield,
+		})
+	}
+
+	/// The cap is the Largest Object snapshot: the group may keep growing, but everything
+	/// past the snapshot belongs to the subscription, not the fill.
+	fn capped(slice: GroupSlice, index: u64) -> bool {
+		slice.until.is_some_and(|until| index >= until)
+	}
+
+	/// The result once writing stops: a slice that ends before its cap lost objects.
+	fn finish(&self) -> Result<(), Error> {
+		match self.slice.until.is_some_and(|until| self.index < until) {
+			true => Err(Error::NotFound),
+			false => Ok(()),
+		}
+	}
+
+	fn object<'a>(&self, frame: &'a frame::Object) -> Result<FetchObjectInfo<'a>, Error> {
+		Ok(FetchObjectInfo {
+			sequence: self.sequence,
+			object: self.index,
+			prior: fetch_prior(self.prior, self.index)?,
+			priority: self.priority,
+			timestamp: frame.timestamp,
+			inflated: frame.inflated,
+			timescale: self.timescale,
+			version: self.version,
+			fields: frame.fields.as_deref(),
+			source: self.group.ietf(),
+		})
+	}
+
+	fn poll(
+		&mut self,
+		waiter: &kio::Waiter,
+		stream: &mut Writer<Ranked<crate::transport::boxed::SendStream>, Version>,
+	) -> Poll<Result<(), Error>> {
+		loop {
+			match &mut self.state {
+				FetchGroupState::Yield => {
+					ready!(self.budget.poll_yield(waiter));
+					if Self::capped(self.slice, self.index) {
+						return Poll::Ready(self.finish());
+					}
+					self.state = FetchGroupState::Read;
+				}
+				FetchGroupState::Read => {
+					if stream.poll_closed(waiter).is_ready() {
+						return Poll::Ready(Err(Error::Cancel));
+					}
+					let step = match self.group.poll_read_objects(waiter, &mut self.buf) {
+						Poll::Pending => match ready!(self.group.poll_next_frame(waiter))? {
+							Some(frame) => FillStep::Partial(frame),
+							None => FillStep::Done,
+						},
+						Poll::Ready(Ok(0)) => FillStep::Done,
+						Poll::Ready(Ok(_)) => FillStep::Batch,
+						Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+					};
+					match step {
+						FillStep::Batch => self.state = FetchGroupState::Batch { next: 0, payload: None },
+						FillStep::Partial(frame) => {
+							self.index = frame.fields.as_ref().map_or(self.index, |fields| fields.id);
+							if Self::capped(self.slice, self.index) {
+								return Poll::Ready(self.finish());
+							}
+							if self.index < self.slice.skip {
+								self.state = FetchGroupState::Skip(frame);
+								continue;
+							}
+							let header = FetchObjectInfo {
+								sequence: self.sequence,
+								object: self.index,
+								prior: fetch_prior(self.prior, self.index)?,
+								priority: self.priority,
+								timestamp: frame.timestamp,
+								inflated: frame.inflated,
+								timescale: self.timescale,
+								version: self.version,
+								fields: frame.fields.as_deref(),
+								source: self.group.ietf(),
+							};
+							Publisher::buffer_fetch_object(stream, header)?;
+							stream.buffer_varint(frame.size)?;
+							self.prior = Some(self.index);
+							self.index += 1;
+							self.state = FetchGroupState::Partial { frame, chunk: None };
+						}
+						FillStep::Done => return Poll::Ready(self.finish()),
+					}
+				}
+				FetchGroupState::Batch { next, payload } => {
+					if let Some(write) = payload {
+						ready!(write.poll(waiter, stream))?;
+						*payload = None;
+						self.index += 1;
+						self.group.keep_alive();
+						continue;
+					}
+					let Some(frame) = self.buf.get(*next) else {
+						self.state = FetchGroupState::Yield;
+						continue;
+					};
+					*next += 1;
+					if Self::capped(self.slice, self.index) {
+						return Poll::Ready(self.finish());
+					}
+					let frame = frame.clone();
+					self.index = frame.fields.as_ref().map_or(self.index, |fields| fields.id);
+					if Self::capped(self.slice, self.index) {
+						return Poll::Ready(self.finish());
+					}
+					if self.index < self.slice.skip {
+						self.index += 1;
+						self.group.keep_alive();
+						continue;
+					}
+					let header = self.object(&frame)?;
+					Publisher::buffer_fetch_object(stream, header)?;
+					self.prior = Some(self.index);
+					let FetchGroupState::Batch { payload, .. } = &mut self.state else {
+						unreachable!("writing a batch");
+					};
+					*payload = Some(FetchPayloadWrite::new(frame.frame.payload));
+				}
+				FetchGroupState::Skip(frame) => {
+					if stream.poll_closed(waiter).is_ready() {
+						return Poll::Ready(Err(Error::Cancel));
+					}
+					if ready!(frame.poll_read_chunk(waiter))?.is_none() {
+						self.index += 1;
+						self.state = FetchGroupState::Yield;
+					}
+				}
+				FetchGroupState::Partial { frame, chunk } => {
+					ready!(stream.poll_flush(waiter))?;
+					if let Some(bytes) = chunk {
+						ready!(stream.poll_write_all(waiter, bytes))?;
+						*chunk = None;
+					}
+					if stream.poll_closed(waiter).is_ready() {
+						return Poll::Ready(Err(Error::Cancel));
+					}
+					match ready!(frame.poll_read_chunk(waiter))? {
+						Some(bytes) => *chunk = Some(bytes),
+						None => self.state = FetchGroupState::Yield,
+					}
+				}
+			}
+		}
+	}
+}
+
+/// Write one group's objects to a fetch stream, which carries no other group.
+struct FetchedGroupWrite {
+	frames: std::vec::IntoIter<frame::Object>,
+	/// The Object ID of the next frame without its own.
+	ordinal: u64,
+	sequence: u64,
+	source: Option<Version>,
+	priority: u8,
+	version: Version,
+	timescale: Option<Timescale>,
+	prior: Option<u64>,
+	budget: kio::coop::Budget,
+	payload: Option<FetchPayloadWrite>,
+}
+
+impl FetchedGroupWrite {
+	fn new(group: FetchedGroup, version: Version, timescale: Option<Timescale>) -> Self {
+		Self {
+			source: group.info.ietf(),
+			priority: super::priority::to_wire(group.info.priority),
+			frames: group.frames.into_iter(),
+			ordinal: group.first,
+			sequence: group.sequence,
+			version,
+			timescale,
+			prior: None,
+			budget: kio::coop::Budget::new(32),
+			payload: None,
+		}
+	}
+
+	fn poll(
+		&mut self,
+		waiter: &kio::Waiter,
+		writer: &mut Writer<Ranked<crate::transport::boxed::SendStream>, Version>,
+	) -> Poll<Result<(), Error>> {
+		loop {
+			if let Some(write) = &mut self.payload {
+				ready!(write.poll(waiter, writer))?;
+				self.payload = None;
+			}
+			if self.frames.as_slice().is_empty() {
+				return Poll::Ready(Ok(()));
+			}
+			ready!(self.budget.poll_yield(waiter));
+			let frame = self.frames.next().expect("checked non-empty");
+			let ordinal = self.ordinal;
+			self.ordinal += 1;
+			let object = frame.fields.as_ref().map_or(ordinal, |fields| fields.id);
+			let position = fetch_prior(self.prior, object)?;
+			self.prior = Some(object);
+			Publisher::buffer_fetch_object(
+				writer,
+				FetchObjectInfo {
+					sequence: self.sequence,
+					object,
+					prior: position,
+					priority: self.priority,
+					timestamp: frame.timestamp,
+					inflated: frame.inflated,
+					timescale: self.timescale,
+					version: self.version,
+					fields: frame.fields.as_deref(),
+					source: self.source,
+				},
+			)?;
+			self.payload = Some(FetchPayloadWrite::new(frame.frame.payload));
+		}
 	}
 }
 
