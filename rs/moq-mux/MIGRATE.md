@@ -7,8 +7,9 @@ How to adopt new APIs and update for breaking changes, newest first.
 ### Shared H.265 SPS parsing
 
 Use `codec::h265::parse_full_sps` to read an SPS NAL unit through the same bounded
-walk as moq-mux before scuffle-h265 parses it. moq-video uses it for VUI colour
-labels, clearing the label when an SPS is refused. No wire format changes.
+walk as moq-mux before scuffle-h265 parses it. Its `Sps` result exposes the
+checked picture size and any VUI `VideoSignal` without exposing scuffle-h265's
+types. moq-video clears the colour label when an SPS is refused. No wire change.
 
 ### `container::Playout` replaces `with_warmup` ([#7864](https://github.com/moq-dev/moq/pull/7864))
 

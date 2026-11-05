@@ -15,14 +15,13 @@ mod sps;
 pub use export::*;
 pub use import::*;
 pub use split::*;
-pub use sps::parse_full as parse_full_sps;
+pub use sps::{Sps, VideoSignal, parse_full_sps};
 
 use bytes::{Buf, Bytes, BytesMut};
 
 use crate::codec::annexb::{InBandCodec, ParameterSets};
 use scuffle_h265::NALUnitType;
-use sps::Sps;
-pub(crate) use sps::id as sps_id;
+pub(crate) use sps::{id as sps_id, parse_full as parse_full_rbsp};
 
 /// Wrap one hvc1 (length-prefixed NALU) access unit as a single
 /// [`Frame`](crate::container::Frame), with the keyframe flag set when it
@@ -294,7 +293,7 @@ pub(crate) fn sps_size(nal: &[u8]) -> Option<(u32, u32)> {
 ///
 /// `None` when the SPS fails to parse.
 pub(crate) fn sps_reorder(nal: &[u8]) -> Option<crate::codec::video::Reorder> {
-	let sps = parse_full_sps(nal).ok()?;
+	let sps = parse_full_rbsp(nal).ok()?;
 	let highest = sps.sps_max_sub_layers_minus1 as usize;
 	let reorder = &sps.sub_layer_ordering_info.sps_max_num_reorder_pics;
 	let depth = *reorder.get(highest).or(reorder.last())?;
@@ -307,7 +306,7 @@ pub(crate) fn sps_reorder(nal: &[u8]) -> Option<crate::codec::video::Reorder> {
 /// The HRD an SPS NAL unit's VUI declares at its highest sub-layer, when it carries one: the
 /// NAL HRD's last schedule, or the VCL HRD's when that is all there is.
 pub(crate) fn sps_hrd(nal: &[u8]) -> Option<crate::codec::video::Hrd> {
-	let sps = parse_full_sps(nal).ok()?;
+	let sps = parse_full_rbsp(nal).ok()?;
 	let highest = sps.sps_max_sub_layers_minus1 as usize;
 	let hrd = sps
 		.vui_parameters

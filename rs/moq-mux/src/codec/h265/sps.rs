@@ -35,13 +35,41 @@ pub(crate) struct SpsHead {
 	pub height: u32,
 }
 
-/// A parsed SPS: its head, plus scuffle_h265's full parse (with the VUI) when it accepted the SPS.
-pub(crate) struct Sps {
-	pub head: SpsHead,
-	pub full: Option<scuffle_h265::SpsRbsp>,
+/// An SPS with its cropped picture size and any parsed VUI signal.
+pub struct Sps {
+	pub(crate) head: SpsHead,
+	pub(crate) full: Option<scuffle_h265::SpsRbsp>,
+}
+
+/// The colour code points and range signalled by an H.265 VUI.
+pub struct VideoSignal {
+	/// The colour primaries code point.
+	pub primaries: u8,
+	/// The transfer characteristics code point.
+	pub transfer: u8,
+	/// The matrix coefficients code point.
+	pub matrix: u8,
+	/// Whether the samples use the full numeric range.
+	pub full_range: bool,
 }
 
 impl Sps {
+	/// Return the picture size inside its conformance window.
+	pub fn size(&self) -> (u32, u32) {
+		(self.head.width, self.head.height)
+	}
+
+	/// Return the VUI's video signal when present.
+	pub fn video_signal(&self) -> Option<VideoSignal> {
+		let signal = &self.full.as_ref()?.vui_parameters.as_ref()?.video_signal_type;
+		Some(VideoSignal {
+			primaries: signal.colour_primaries,
+			transfer: signal.transfer_characteristics,
+			matrix: signal.matrix_coeffs,
+			full_range: signal.video_full_range_flag,
+		})
+	}
+
 	/// Parse an SPS NAL unit, keeping only its head when scuffle_h265 refuses a later value.
 	pub(crate) fn parse(nal: &[u8]) -> Result<Self> {
 		match parse_full(nal) {
@@ -257,9 +285,17 @@ fn skip_sub_layers(
 /// Parse an SPS NAL unit, refusing values that would overflow scuffle_h265.
 ///
 /// The input includes the NAL header and emulation-prevention bytes.
-pub fn parse_full(nal: &[u8]) -> std::io::Result<scuffle_h265::SpsRbsp> {
+pub(crate) fn parse_full(nal: &[u8]) -> std::io::Result<scuffle_h265::SpsRbsp> {
 	check(nal)?;
 	Ok(SpsNALUnit::parse(&mut &nal[..])?.rbsp)
+}
+
+/// Parse a complete SPS NAL unit after a bounded walk, including its header.
+pub fn parse_full_sps(nal: &[u8]) -> std::io::Result<Sps> {
+	let full = parse_full(nal)?;
+	let head = SpsHead::from_rbsp(&full)
+		.map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string()))?;
+	Ok(Sps { head, full: Some(full) })
 }
 
 /// Walk an SPS NAL unit as scuffle_h265 0.2.2 reads it, refusing the values its parser would
