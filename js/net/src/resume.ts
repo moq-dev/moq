@@ -402,6 +402,8 @@ class Reader implements ResumeSource {
 	#delivered = new Delivered();
 	/** Runs the serving copy gave up and the reader has yet to report; see {@link #tryDrop}. */
 	#drops: DropRun[] = [];
+	/** A copy that declared the track's end ran out cleanly at it, even if since let go. */
+	#settled = false;
 	/** Whether groups were ever asked for; until then the reader keeps no replaced copy. */
 	#groupsRead = false;
 	/** The groups handed out and still read, which other copies may back; see {@link #backs}. */
@@ -430,13 +432,15 @@ class Reader implements ResumeSource {
 		// concluded.
 		if (parent) {
 			this.#generation = parent.generation;
-			this.#add({
+			const copy: Copy = {
 				generation: parent.generation,
 				source: parent.source,
 				sub: parent.sub.fork(this.#wire({})),
 				replaced: false,
 				lease: 0,
-			});
+			};
+			this.#add(copy);
+			this.#joinIncumbent(copy);
 		}
 		// Subscribed to the serving copy at once, so groups it has now are the reader's even if
 		// the route changes before the first read, and to each copy after.
@@ -502,25 +506,33 @@ class Reader implements ResumeSource {
 			lease: 0,
 		};
 		this.#add(serving);
-		// Arriving before the new copy delivered, read the source it replaced too, as the readers
-		// before this one still do.
+		this.#joinIncumbent(serving);
+	}
+
+	/**
+	 * Arriving before the serving copy delivered, read the source it replaced too, as the readers
+	 * before this one still do.
+	 */
+	#joinIncumbent(serving: Copy): void {
+		const route = this.route;
 		const incumbent = route.incumbent;
-		if (!incumbent) return;
+		if (!incumbent || serving.source !== route.source) return;
 		if (hooks.latestSequence(serving.sub) !== undefined) {
-			route.delivered(source);
+			route.delivered(serving.source);
 			return;
 		}
 		if (this.#copies.some((copy) => copy.source.from.closed === incumbent.from.closed)) return;
+		const floor = serving.floor;
 		this.#add(
 			{
-				generation: route.generation - 1,
+				generation: serving.generation - 1,
 				source: incumbent,
 				sub: subscribe(incumbent.wire, route.name, this.#wire({ floor })),
 				floor,
 				replaced: true,
 				lease: 0,
 			},
-			this.#copies.length - 1,
+			this.#copies.indexOf(serving),
 		);
 	}
 
@@ -774,7 +786,10 @@ class Reader implements ResumeSource {
 				}
 				// Drained: the track ended as the copy did, which is not cleanly when its
 				// session went away short of the declared end.
-				if (recv.kind === "done") copy.done = copy.sub.closed.peek() ?? null;
+				if (recv.kind === "done") {
+					copy.done = copy.sub.closed.peek() ?? null;
+					if (copy.done === null && hooks.subscriberEnd(copy.sub)) this.#settled = true;
+				}
 				else if (recv.kind === "error") copy.done = recv.error;
 				break;
 			}
@@ -910,10 +925,20 @@ class Reader implements ResumeSource {
 		if (serving ? ended === null : this.#ended) return this.#conclude() ? { kind: "done" } : { kind: "idle" };
 		if (ended instanceof Error) {
 			// A copy it replaced finished the track and the reader owes nothing below that end:
-			// the track ended cleanly whoever serves it now. Mirrors the Rust front.
+			// the track ended cleanly whoever serves it now. Mirrors the Rust front. The failing
+			// copy's own end, or one whose copy failed short of it, never settled.
 			const end = this.#learnEnd();
 			const owed = max(this.#shell.cursor.peek().start, (this.#newest ?? -1n) + 1n);
-			if (end && !this.#declaredError && finalSequence(end) <= owed)
+			const settled =
+				this.#settled ||
+				this.#copies.some(
+					(copy) =>
+						copy !== serving &&
+						hooks.subscriberEnd(copy.sub) !== undefined &&
+						hooks.peekLargest(copy.sub).ended &&
+						!(copy.sub.closed.peek() instanceof Error),
+				);
+			if (end && settled && !this.#declaredError && finalSequence(end) <= owed)
 				return this.#conclude() ? { kind: "done" } : { kind: "idle" };
 			if (serving && this.#revert(serving, ended)) return { kind: "idle" };
 			// A refusal from a route that still serves is the track's answer.

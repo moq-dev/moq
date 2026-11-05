@@ -893,6 +893,46 @@ test("a reader joining after two undelivered replacements keeps the incumbent wh
 	close();
 });
 
+// A fork joins like any reader arriving before the replacement delivers.
+test("a fork made before the replacement delivers keeps the incumbent when the replacement aborts", async () => {
+	const { a, b, swap, active, close } = await setup();
+	const ta = copy(a);
+	const tb = copy(b);
+	const sub = active.track("seq").subscribe();
+	ta.write(0n);
+	expect(drain(sub)).toEqual([0n]);
+	await swap();
+	const fork = sub.fork();
+	await settle();
+	tb.producer.abort(new StreamError(StreamCode(64)));
+	await settle();
+	ta.write(1n);
+	await settle();
+	expect(drain(fork)).toContain(1n);
+	expect(fork.closed.peek()).toBeUndefined();
+
+	sub.close();
+	fork.close();
+	close();
+});
+
+// Only an end some other copy settled cleanly excuses the serving copy's failure.
+test("a serving copy that declares an end and then aborts short of it keeps the error", async () => {
+	const { a, active, close } = await setup();
+	const ta = copy(a);
+	const sub = active.track("seq").subscribe();
+	ta.write(0n, 1, false);
+	ta.producer.finishAt({ group: 1n, frame: 0 });
+	const group = await sub.recvGroup();
+	group?.close();
+	ta.producer.abort(new StreamError(StreamCode(64)));
+	await settle();
+	await expect(sub.recvGroup()).rejects.toThrow("64");
+
+	sub.close();
+	close();
+});
+
 // Mirrors `a_replacement_aborted_after_its_answer_keeps_the_incumbent` for a reader awaiting only the end.
 test("waiting for the end of a track whose replacement aborts before its first group follows the incumbent", async () => {
 	const { a, b, swap, active, close } = await setup();
