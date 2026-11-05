@@ -1797,7 +1797,8 @@ impl Producer {
 	/// The batch is validated before anything is written, so a rejected frame leaves
 	/// both the group and the buffer exactly as they were, ready to retry or redirect,
 	/// unless it fails the group: too large, or held differently by another copy.
-	pub fn write_frames<const N: usize>(&mut self, frames: &mut frame::Buffer<N>) -> Result<()> {
+	#[cfg(any(test, feature = "fuzz"))]
+	pub(crate) fn write_frames<const N: usize>(&mut self, frames: &mut frame::Buffer<N>) -> Result<()> {
 		for frame in frames.filled() {
 			self.handle.track.rescale(frame.timestamp)?;
 			if frame.payload.len() as u64 > MAX_CACHE_BYTES {
@@ -3470,8 +3471,9 @@ pub(super) trait Expiry: Send + Sync + std::panic::UnwindSafe + std::panic::RefU
 
 	/// Return whether the group is stale, registering `waiter` for anything that
 	/// could change the answer while the group remains live.
-	/// A logical reader supplies its current budget after the original copy is gone.
-	fn is_expired(&self, max_delay: Option<std::time::Duration>, waiter: &kio::Waiter) -> bool;
+	/// A logical reader's `recover` supplies its current budget after the original copy is
+	/// gone, asked only once a verdict needs it.
+	fn is_expired(&self, recover: Option<&super::resume::Recover>, waiter: &kio::Waiter) -> bool;
 
 	/// Keep the reader's budget and cap while following a replacement track's edge.
 	fn for_track(&self, track: &track::Consumer) -> Arc<dyn Expiry>;
@@ -3794,10 +3796,11 @@ impl Consumer {
 	fn poll_expiry(&mut self, waiter: &kio::Waiter, held: bool) -> bool {
 		if !self.expired
 			&& (held || self.expiry_pending())
-			&& self.expiry.as_ref().is_some_and(|expiry| {
-				let budget = self.recover().and_then(|recover| recover.poll_budget(waiter));
-				expiry.is_expired(budget, waiter)
-			}) {
+			&& self
+				.expiry
+				.as_ref()
+				.is_some_and(|expiry| expiry.is_expired(self.recover(), waiter))
+		{
 			self.expired = true;
 			// Another read, such as `poll_expired`, may judge a frame read parked before it.
 			Idle::disarm(&mut self.idle);
@@ -3814,7 +3817,7 @@ impl Consumer {
 	}
 
 	/// Mark the group as still being read, so a slow batch drain does not expire it.
-	pub fn keep_alive(&self) {
+	pub(crate) fn keep_alive(&self) {
 		self.cursor.state.read().charge.refresh();
 	}
 
@@ -3901,8 +3904,12 @@ impl Consumer {
 	///
 	/// Returns None if the group is finished and the index is out of range, or the cursor
 	/// passed the [`Self::with_range`] cap.
-	#[cfg_attr(feature = "async", kio::wrapper)]
-	pub fn poll_next_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Consumer>>> {
+	#[cfg(feature = "async")]
+	pub async fn next_frame(&mut self) -> Result<Option<frame::Consumer>> {
+		kio::wait(|waiter| self.poll_next_frame(waiter)).await
+	}
+
+	pub(crate) fn poll_next_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Consumer>>> {
 		let res = match self.recover().is_none() {
 			true => {
 				let res = self.poll_next_frame_once(waiter);
@@ -3991,41 +3998,35 @@ impl Consumer {
 		waiter: &kio::Waiter,
 		take: impl Fn(&mut Prefetch) -> Option<T> + Copy,
 	) -> Poll<Result<Option<T>>> {
+		// Most reads of a backlog: kept off the read path below, whose bookkeeping costs
+		// every frame drained more than the pop.
+		if let Some(frame) = self.take_prefetched(take) {
+			return Poll::Ready(Ok(Some(frame)));
+		}
 		if Idle::parked(&self.idle, (), waiter) {
 			return Poll::Pending;
 		}
-		let res = match self.idle.is_some() {
-			true => {
-				let mut idle = Idle::start(&mut self.idle, waiter);
-				let res = self.poll_read_frame_through(idle.waiter(), take);
-				idle.finish(&mut self.idle, (), res.is_pending());
-				res
-			}
-			false => {
-				let res = self.poll_read_frame_through(waiter, take);
-				let parked = res.is_pending();
+		let mut gate = self.idle.is_some().then(|| Idle::start(&mut self.idle, waiter));
+		let read = gate.as_mut().map_or(waiter, |gate| gate.waiter());
+		// Read once, carried across route changes when the group came from a front. One call
+		// site keeps the read inline: a second costs every frame drained a call frame.
+		let res = match self.recover().is_none() {
+			true => self.poll_read_frame_once(read, take),
+			false => self.poll_resumed(read, |this, waiter| this.poll_read_frame_once(waiter, take)),
+		};
+		let parked = res.is_pending();
+		match gate {
+			Some(gate) => gate.finish(&mut self.idle, (), parked),
+			None => {
 				if parked && self.parked {
 					// Parked twice in a row: the next read parks through a gate. Unarmed, since
 					// this read registered on the task's own waiter, not the gate's.
 					Idle::start(&mut self.idle, waiter).finish(&mut self.idle, (), false);
 				}
 				self.parked = parked;
-				res
 			}
-		};
-		self.ended_on(res)
-	}
-
-	/// Read the next frame, carried across route changes when the group came from a front.
-	fn poll_read_frame_through<T>(
-		&mut self,
-		waiter: &kio::Waiter,
-		take: impl Fn(&mut Prefetch) -> Option<T> + Copy,
-	) -> Poll<Result<Option<T>>> {
-		match self.recover().is_none() {
-			true => self.poll_read_frame_once(waiter, take),
-			false => self.poll_resumed(waiter, |this, waiter| this.poll_read_frame_once(waiter, take)),
 		}
+		self.ended_on(res)
 	}
 
 	/// Read the next frame with its relay metadata, for wire egress.
@@ -4191,18 +4192,24 @@ impl Consumer {
 	/// Read the next frame (timestamp and payload) all at once.
 	#[cfg(feature = "async")]
 	pub async fn read_frame(&mut self) -> Result<Option<frame::Frame>> {
-		// A prefetched frame is already buffered, so the drift budget (which only judges
-		// a read that would park) can never apply to it.
-		// Serve from the prefetched batch without building a future or allocating a waker.
-		if !self.expired
-			&& !self.cursor.capped()
-			&& let Some(frame) = self.cursor.prefetch.pop()
-		{
-			self.cursor.refresh_if_stale();
-			self.cursor.index += 1;
+		// Without building a future or allocating a waker.
+		if let Some(frame) = self.take_prefetched(Prefetch::pop) {
 			return Ok(Some(frame));
 		}
 		kio::wait(|waiter| self.poll_read_frame(waiter)).await
+	}
+
+	/// The next frame from the prefetched batch, through `take`. A read parks only with its
+	/// batch drained, so neither the drift budget, which judges only a read that would park,
+	/// nor the idle gate, nor a route applies: one adopted onto a new copy starts empty.
+	fn take_prefetched<T>(&mut self, take: impl Fn(&mut Prefetch) -> Option<T>) -> Option<T> {
+		if self.expired || self.cursor.capped() {
+			return None;
+		}
+		let frame = take(&mut self.cursor.prefetch)?;
+		self.cursor.refresh_if_stale();
+		self.cursor.index += 1;
+		Some(frame)
 	}
 
 	/// Fill `out` with every frame that is ready, up to its capacity, without blocking.
@@ -4210,7 +4217,8 @@ impl Consumer {
 	/// This is a short read: it returns as soon as anything is ready rather than
 	/// waiting for `out` to fill. A zero count means the group ended when the buffer
 	/// has non-zero capacity.
-	pub fn poll_read_frames<const N: usize>(
+	#[cfg(any(test, feature = "fuzz"))]
+	pub(crate) fn poll_read_frames<const N: usize>(
 		&mut self,
 		waiter: &kio::Waiter,
 		out: &mut frame::Buffer<N>,
@@ -4241,7 +4249,8 @@ impl Consumer {
 	/// Fill `out` with every frame that is ready, blocking until a frame arrives or
 	/// the group ends. Returns the current batch, empty only at the end of the group.
 	#[cfg(feature = "async")]
-	pub async fn read_frames<'a, const N: usize>(
+	#[cfg(any(test, feature = "fuzz"))]
+	pub(crate) async fn read_frames<'a, const N: usize>(
 		&mut self,
 		out: &'a mut frame::Buffer<N>,
 	) -> Result<&'a mut [frame::Frame]> {
@@ -6946,7 +6955,7 @@ mod test {
 	}
 
 	impl Expiry for Switch {
-		fn is_expired(&self, _: Option<std::time::Duration>, waiter: &kio::Waiter) -> bool {
+		fn is_expired(&self, _: Option<&crate::model::resume::Recover>, waiter: &kio::Waiter) -> bool {
 			waiter.register(&mut self.0.1.lock().unwrap());
 			self.0.0.load(Ordering::Relaxed)
 		}
