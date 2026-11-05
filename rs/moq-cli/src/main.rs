@@ -329,9 +329,7 @@ fn main() -> anyhow::Result<()> {
 async fn run() -> anyhow::Result<()> {
 	// The transport, reqwest, axum-server, and object_store all read rustls's process default.
 	// A CPU rind cannot run on fails here, naming the feature it lacks.
-	rind_rustls::default_provider()?
-		.install_default()
-		.map_err(|_| anyhow::anyhow!("a rustls crypto provider is already installed"))?;
+	moq_tokio::crypto::install_default()?;
 
 	let mut cli = Invocation::parse().await;
 	cli.log.init()?;

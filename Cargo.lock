@@ -4508,7 +4508,6 @@ dependencies = [
  "pollster",
  "reqwest",
  "rind-object-store",
- "rind-rustls",
  "rustls",
  "sd-notify",
  "serde",
