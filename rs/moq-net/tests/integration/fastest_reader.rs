@@ -297,7 +297,9 @@ async fn two_relays_bound_their_cache_and_resume_without_a_hole() {
 			pair.server_transport
 				.set_receive_window(Some(ReceiveWindow::new(4 * MB as u64, MB as u64)));
 		}
-		let broadcast = publisher.route("chain", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let broadcast = publisher
+			.route("chain", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let track = broadcast
 			.broadcast()
 			.create_track("data", track::Info::default().with_timescale(moq_net::Timescale::MILLI))

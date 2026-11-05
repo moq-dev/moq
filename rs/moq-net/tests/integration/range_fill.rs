@@ -42,7 +42,9 @@ impl Fixture {
 	/// A lite-07 publisher holding `groups` for good, and a copy whose cache expires them.
 	async fn new(groups: u64) -> Self {
 		let publisher = origin(1, Some(cache::Pool::unbounded()));
-		let broadcast = publisher.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let broadcast = publisher
+			.route("bcast", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let track = broadcast
 			.broadcast()
 			.create_track(

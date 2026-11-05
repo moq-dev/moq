@@ -291,7 +291,9 @@ struct ByHand {
 /// Dial bob by hand from carol in a `tcp` session.
 async fn dial_by_hand(fixture: &mut Fixture, bob: &Endpoint) -> ByHand {
 	let carol = fixture.client(LITE).await;
-	let endpoint = carol.route("room/.socket/carol", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let endpoint = carol
+		.route("room/.socket/carol", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	endpoint.announce().unwrap();
 	let mut requests = endpoint.broadcast().requests();
 	let name = "tcp/carol/bob/0123456789abcdef0123456789abcdef";
@@ -605,7 +607,9 @@ async fn an_accept_waits_for_its_dialer() {
 		"bob's accept ended before carol announced"
 	);
 
-	let endpoint = carol.route("room/.socket/carol", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let endpoint = carol
+		.route("room/.socket/carol", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let mut requests = endpoint.broadcast().requests();
 	endpoint.announce().unwrap();
 	let answer = async {
