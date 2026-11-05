@@ -480,10 +480,10 @@ A receiver adds the session's link cost (see [Cost Parameter](#cost-parameter)) 
 Each link adds at least 1, so a route's metric strictly increases away from its origin.
 A metric that reaches 2^64-1 makes the route unusable.
 
-A node keeps a feasibility distance per Node ID: the Seqno and metric of the last finite route it advertised.
+A node keeps a feasibility distance per Node ID: the highest Seqno of any finite route it advertised, and the lowest metric it advertised at that Seqno, as in [RFC8966] Section 3.5.1.
 A route is feasible when its Seqno is greater than the distance's, or equal with a lower metric.
 A node selects, per Node ID, among its feasible routes that are not held: a session that has not received a GOAWAY, then the highest local priority, then the lowest metric.
-It MUST NOT select an infeasible route, and never raises a distance to accept one.
+It MUST NOT select an infeasible route, and a distance only ever falls within a Seqno, so advertising a longer route never raises it.
 A node MAY mark a session upstream.
 A route is down-only when it arrived on an upstream session or with its Down Only bit set; a node sends a down-only route with the bit set, and never on an upstream session.
 
