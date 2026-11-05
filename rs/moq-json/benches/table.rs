@@ -8,16 +8,10 @@
 //! while retaining the warm memo. Every iteration measures one tick and one update of its kind.
 //!
 //! Run with `cargo bench -p moq-json --bench table`.
-#![expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "host time measures benchmark throughput"
-)]
-
+use std::cell::RefCell;
 use std::hint::black_box;
-use std::time::{Duration, Instant};
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use moq_json::snapshot::{Config, Encoder};
 use moq_net::stats::Traffic;
 use serde::Serialize;
@@ -96,27 +90,31 @@ fn table(c: &mut Criterion) {
 					// Populate the memo so every timed delta has the steady-state fast path.
 					assert!(encoder.update(&table).unwrap().is_none());
 				}
+				let state = RefCell::new((table, encoder));
 				group.throughput(Throughput::Elements(rows as u64));
 				group.bench_function(BenchmarkId::new(format!("{changed}%"), rows), |b| {
-					b.iter_custom(|iterations| {
-						let mut elapsed = Duration::ZERO;
-						for _ in 0..iterations {
+					b.iter_batched(
+						|| {
+							let mut state = state.borrow_mut();
+							let (_, encoder) = &mut *state;
 							if force_snapshot {
 								encoder.reset();
 							} else if config.deltas {
 								// Restating resets both caps without discarding the parsed baseline or memo.
 								encoder.snapshot().unwrap().expect("a seeded baseline").commit();
 							}
-							let start = Instant::now();
+						},
+						|()| {
+							let mut state = state.borrow_mut();
+							let (table, encoder) = &mut *state;
 							table.tick();
-							let frame = encoder.update(&table).unwrap().expect("a changed tick");
+							let frame = encoder.update(table).unwrap().expect("a changed tick");
 							assert_eq!(frame.keyframe, force_snapshot || !config.deltas);
 							black_box(&frame.payload);
 							frame.commit();
-							elapsed += start.elapsed();
-						}
-						elapsed
-					});
+						},
+						BatchSize::PerIteration,
+					);
 				});
 			}
 		}
