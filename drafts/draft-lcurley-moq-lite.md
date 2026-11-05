@@ -509,7 +509,7 @@ Neither proves that the origin withdrew its claims.
 A node whose routes to an origin node are all infeasible sends a ROUTE_REQUEST with its distance's Seqno plus 1 to the peer whose route it would select were it feasible.
 A node holding a selected route at least that new answers by advertising it, and the origin answers by raising its Seqno to at least the requested one; a request for 2^64-1 rotates the origin's Node ID.
 Any other node forwards the request to the peer whose route it would select, even the requester.
-Every node keeps one pending request per origin node, its own or forwarded, dropping duplicates, until it selects a route at least that new or has no route left, and sends it again whenever that peer changes.
+Every node keeps one pending request per origin node, its own or forwarded, at the highest Seqno requested, dropping requests no newer, until it selects a route at least that new or has no route left, and sends it again whenever its Seqno rises or that peer changes.
 
 The receiver of a ROUTE_END echoes it back on the same stream once it dropped the route.
 A node drops a feasibility distance once it neither selects nor advertises the route and every ROUTE_END it sent for it was echoed; a closed session counts as an echo.

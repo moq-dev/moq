@@ -1269,6 +1269,22 @@ pub fn pattern(data: &[u8]) -> bool {
 	true
 }
 
+/// Lite seeds whose envelope bytes the uniform sweep never forms, on the newest
+/// version: a typed empty TRACKS_SYNCED, an AUTH_OK reply, every route message
+/// (the sweep sets ROUTE_START's type byte but fills its size byte with the body
+/// pattern, so none decodes whole), the ROUTE_END echo, and ROUTE_REQUEST.
+const TYPED_LITE_SEEDS: &[(u8, &[u8])] = &[
+	(23, &[4, 0]),
+	(27, &[0, 3, 0, 0, 0]),
+	(5, &[6, 4, 1, 0, 1, 0]),
+	(5, &[7, 4, 0, 1, 2, 0]),
+	(5, &[8, 1, 0]),
+	(5, &[9, 2, 0, 1]),
+	(5, &[11, 1, 0]),
+	(33, &[8, 1, 0]),
+	(33, &[10, 2, 1, 0]),
+];
+
 /// The inputs the fuzzer starts from: every (version, type) pair the dispatch knows,
 /// bodied with byte patterns that decode as small valid fields.
 ///
@@ -1313,19 +1329,7 @@ pub fn seeds() -> Vec<Seed> {
 		}
 	}
 
-	// A typed empty TRACKS_SYNCED, AUTH_OK reply, the route messages past ROUTE_START
-	// (whose type bytes the sweep's lengths never reach), the ROUTE_END echo, and
-	// ROUTE_REQUEST need nonuniform envelope bytes.
-	for (kind, body) in [
-		(23, &[4, 0][..]),
-		(27, &[0, 3, 0, 0, 0][..]),
-		(5, &[7, 4, 0, 1, 2, 0][..]),
-		(5, &[8, 1, 0][..]),
-		(5, &[9, 2, 0, 1][..]),
-		(5, &[11, 1, 0][..]),
-		(33, &[8, 1, 0][..]),
-		(33, &[10, 2, 1, 0][..]),
-	] {
+	for &(kind, body) in TYPED_LITE_SEEDS {
 		let mut data = vec![(LITE_VERSIONS.len() - 1) as u8, kind];
 		data.extend_from_slice(body);
 		seeds.push(Seed {
@@ -1963,6 +1967,16 @@ mod tests {
 
 		let missing: Vec<_> = expected.difference(&decoded).collect();
 		assert!(missing.is_empty(), "no seed decodes for {missing:?}");
+	}
+
+	/// Each typed seed exists to reach one message, so each must decode whole.
+	#[test]
+	fn typed_lite_seeds_decode() {
+		for (kind, body) in TYPED_LITE_SEEDS {
+			let mut data = vec![(LITE_VERSIONS.len() - 1) as u8, *kind];
+			data.extend_from_slice(body);
+			assert!(lite_wire(&data), "kind {kind} body {body:?} does not decode");
+		}
 	}
 
 	/// The stream seeds are built from our own framing, one per version and protocol, so
