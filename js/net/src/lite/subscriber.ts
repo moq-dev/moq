@@ -2471,8 +2471,9 @@ export class Subscriber {
 	async #datagramsRouted(subscribe: bigint): Promise<void> {
 		await yieldNow();
 		for (;;) {
-			if (this.#receiveYield) {
-				await this.#receiveYield;
+			const receiveYield = this.#receiveYield;
+			if (receiveYield !== undefined) {
+				await receiveYield;
 				// The loop reads on in microtasks, until the queue empties or its next yield.
 				await yieldNow();
 			} else if (this.#isHeld(subscribe)) {
