@@ -1,5 +1,6 @@
 import { Micro, Milli, type Second } from "@moq/clock";
 import { Effect, type Getter, Signal } from "@moq/signals";
+import type { Playhead } from "../sync";
 import { ringHold, ringSamples } from "./latency";
 import type { Data, Init, Latency, Playing, Reset, State, Truncate } from "./render";
 
@@ -270,6 +271,12 @@ export class AudioBuffer {
 	/** How many times the ring has run dry mid-playback, cumulative. */
 	readonly underruns: Getter<number> = this.#underruns;
 
+	readonly #playhead = new Signal<Playhead | undefined>(undefined);
+	/** Where the output stands on the current timeline, undefined until the ring anchors and is released. */
+	readonly playhead: Getter<Playhead | undefined> = this.#playhead;
+
+	readonly #context: AudioContext;
+
 	// Backpressure runs off the playhead the worklet reports in its state messages.
 	#backpressure: Backpressure;
 	// Bumped per reset or park. A state message posted before the worklet saw it reports the ring
@@ -282,6 +289,8 @@ export class AudioBuffer {
 	constructor(
 		worklet: AudioWorkletNode,
 		props: {
+			/** The context the worklet renders in, which maps its output time to the local clock. */
+			context: AudioContext;
 			channels: number;
 			rate: number;
 			/** The target delay. The ring holds up to a fixed floor of it decoded; the rest stays encoded. */
@@ -294,6 +303,7 @@ export class AudioBuffer {
 	) {
 		const { channels, rate, buffered, playing } = props;
 		this.#playing = props.playing;
+		this.#context = props.context;
 		this.#worklet = worklet;
 		this.channels = channels;
 		this.rate = rate;
@@ -324,11 +334,32 @@ export class AudioBuffer {
 				this.#underruns.set(data.underruns);
 				if (data.epoch === this.#epoch) {
 					this.#backpressure.observe(data.anchored ? data.timestamp : undefined, data.stalled);
+					this.#observe(data);
 				}
 			}
 		});
 		// addEventListener on a MessagePort requires start() to begin delivery.
 		worklet.port.start();
+	}
+
+	// Map a state report to the playhead at the output. The worklet reports the context time its next
+	// sample renders at, and the context reports which context time is reaching the output at which
+	// local time, so the output latency is accounted for.
+	#observe(data: State): void {
+		if (!data.anchored || !data.playing) {
+			this.#playhead.set(undefined);
+			return;
+		}
+		const timestamp = Milli.fromMicro(data.timestamp);
+		if (data.stalled) {
+			this.#playhead.set({ rolling: false, timestamp });
+			return;
+		}
+		const output = this.#context.getOutputTimestamp();
+		// Nothing has reached the output yet, so there is no mapping to report.
+		if (!output.performanceTime || output.contextTime === undefined) return;
+		const behind = Milli.fromSecond((data.time - output.contextTime) as Second);
+		this.#playhead.set({ rolling: true, timestamp: Milli(timestamp - behind), wall: Milli(output.performanceTime) });
 	}
 
 	// The floor as the worklet takes it.
@@ -399,6 +430,7 @@ export class AudioBuffer {
 	/** Flush buffered samples and re-stall, ready to anchor the next utterance (buffered mode). */
 	reset(): void {
 		this.#epoch++;
+		this.#playhead.set(undefined);
 		const msg: Reset = {
 			type: "reset",
 			epoch: this.#epoch,

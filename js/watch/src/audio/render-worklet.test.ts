@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Micro, Milli } from "@moq/clock";
 import type { Message, State } from "./render";
 
@@ -36,6 +36,14 @@ try {
 		else Reflect.deleteProperty(globalThis, name);
 	}
 }
+
+// The worklet scope's context time, which each quantum starts at; held at zero.
+const clock = Object.getOwnPropertyDescriptor(globalThis, "currentTime");
+beforeEach(() => Object.defineProperty(globalThis, "currentTime", { configurable: true, value: 0 }));
+afterEach(() => {
+	if (clock) Object.defineProperty(globalThis, "currentTime", clock);
+	else Reflect.deleteProperty(globalThis, "currentTime");
+});
 
 function renderer() {
 	const render = new Render();
@@ -78,7 +86,16 @@ describe("render dispatch", () => {
 		send({ type: "data", timestamp: Micro(500_000), data: [new Float32Array(100).fill(2)] });
 		for (let i = 0; i < 3; i++) read(20);
 		expect(sent).toEqual([
-			{ type: "state", epoch: 7, timestamp: Micro(560_000), stalled: false, anchored: true, underruns: 0 },
+			{
+				type: "state",
+				epoch: 7,
+				timestamp: Micro(560_000),
+				time: 0.02,
+				stalled: false,
+				playing: true,
+				anchored: true,
+				underruns: 0,
+			},
 		]);
 	});
 
@@ -98,7 +115,16 @@ describe("render dispatch", () => {
 		expect(read(20)[19]).toBe(1);
 		read(20);
 		expect(sent).toEqual([
-			{ type: "state", epoch: 3, timestamp: Micro(60_000), stalled: false, anchored: true, underruns: 0 },
+			{
+				type: "state",
+				epoch: 3,
+				timestamp: Micro(60_000),
+				time: 0.02,
+				stalled: false,
+				playing: true,
+				anchored: true,
+				underruns: 0,
+			},
 		]);
 	});
 

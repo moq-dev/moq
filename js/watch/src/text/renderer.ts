@@ -5,7 +5,7 @@ import { Error as NetError } from "@moq/net";
 import { Derived, Effect, type Getter, getter, type Inputs, type Readonlys } from "@moq/signals";
 import type { VTTCue, VTTRegion } from "media-captions";
 import { subscribeMedia } from "../media";
-import type { Sync } from "../sync";
+import type { Sync, Track } from "../sync";
 import type { Source } from "./source";
 
 // Drop cues whose end is more than this far behind the playhead, to bound memory on a long stream.
@@ -227,6 +227,10 @@ export class Renderer {
 
 	#signals = new Effect();
 
+	// The captions' hold on the clock: the selected rendition's catalog delay, so cues from a
+	// rendition that trails the others still line up with them.
+	readonly #clock: Track;
+
 	// Whether the clock-skew warning has already fired for the current track, so a misconfigured
 	// publisher costs one line instead of one per cue.
 	#skewWarned = false;
@@ -238,6 +242,14 @@ export class Renderer {
 			container: getter(props?.container),
 			enabled: getter(props?.enabled ?? true),
 		};
+
+		const target = this.#signals.computed((effect) => {
+			if (!effect.get(this.in.enabled)) return undefined;
+			const delay = effect.get(this.source.out.config)?.delay;
+			return delay !== undefined ? Milli(delay) : undefined;
+		});
+		this.#clock = this.sync.track("text", { target });
+		this.#signals.cleanup(() => this.#clock.close());
 
 		this.#signals.run(this.#run.bind(this));
 	}

@@ -56,7 +56,8 @@ const trackShape = {
 
 	// Non-standard: how far this rendition trails the broadcast's earliest, in milliseconds.
 	// Mirrors hang `delay`. A player holds `delay + jitter` and does not subtract across renditions.
-	delay: z.optional(z.number()),
+	// A rendition cannot trail the earliest by a negative amount, so that is malformed.
+	delay: z.optional(z.number().check(z.nonnegative())),
 };
 
 /** Zod schema describing a single track entry in an MSF catalog. */

@@ -8,7 +8,7 @@ import { Effect, Signal } from "@moq/signals";
 import { ringSamples } from "../audio/latency";
 import { AudioRingBuffer } from "../audio/ring-buffer";
 import type { Broadcast } from "../broadcast";
-import { type Delay, Sync } from "../sync";
+import { type Delay, Sync, Track } from "../sync";
 import { Decoder, insertRecoveryPoint } from "./decoder";
 import { Source } from "./source";
 
@@ -380,9 +380,12 @@ async function guardedPlayback(
 		? mediaProducer.createTrack("video", { timescale: Moq.Time.Timescale.MILLI, maxAge: Container.MAX_AGE })
 		: undefined;
 	const decoder = new Decoder({ source, sync, enabled });
+	// Another track on the same clock, whose arrivals the tests drive by hand.
+	const audio = sync.track("audio", { target: new Signal<Milli | undefined>(undefined) });
 	await microtasks();
 	return {
 		decoder,
+		audio,
 		delay,
 		fail: (error: DOMException, index = -1) => errors.at(index)?.(error),
 		emit: (timestamp: number, index = -1) =>
@@ -644,7 +647,7 @@ for (const kind of ["legacy", "cmaf"] as const) {
 			expect(playback.outputs).toEqual(stage === "queued" ? [] : [picture]);
 			const before = playback.decoder.out.frame.peek();
 
-			playback.sync.received(Milli(skipTo), Milli(5000));
+			playback.audio.received(Milli(skipTo), Milli(5000));
 			playback.release();
 			await microtasks();
 			const due = playback.decoder.out.frame.peek();
@@ -680,7 +683,7 @@ for (const kind of ["legacy", "cmaf"] as const) {
 			expect(playback.outputs).toEqual([]);
 
 			// "instant" has no cap, so every newer frame skips the playhead without passing over anything.
-			playback.sync.received(Milli(10_000), Nano.toMilli(Nano(now())));
+			playback.audio.received(Milli(10_000), Nano.toMilli(Nano(now())));
 			playback.release();
 			await microtasks();
 
@@ -932,7 +935,7 @@ it("a shared audio clock reset cannot present a parked video frame", async () =>
 		await microtasks();
 		expect(playback.decoder.out.timestamp.peek()).toBe(Milli(0));
 		// The next utterance anchors the clock past the parked frame's deadline.
-		playback.sync.received(Milli(2000));
+		playback.audio.received(Milli(2000));
 		await microtasks();
 		expect(playback.decoder.out.timestamp.peek()).toBe(Milli(0));
 	} finally {
@@ -947,9 +950,9 @@ it("closing the track releases a parked video wait", async () => {
 	const reads: Read[] = [];
 	const playback = await guardedPlayback("legacy", reads);
 	const waits: Promise<boolean>[] = [];
-	const original = playback.sync.wait.bind(playback.sync);
-	const wait = spyOn(playback.sync, "wait").mockImplementation((timestamp, signal) => {
-		const waiting = original(timestamp, signal);
+	const original = Track.prototype.wait;
+	const wait = spyOn(Track.prototype, "wait").mockImplementation(function (this: Track, timestamp, signal) {
+		const waiting = original.call(this, timestamp, signal);
 		waits.push(waiting);
 		return waiting;
 	});
@@ -988,7 +991,7 @@ it("a reset drops a parked video frame even when the next anchor restores the re
 		expect(playback.submitted).toEqual([0, 100_000]);
 		// In one turn, so the reference never visibly changes and the parked sleep keeps its timer.
 		playback.sync.reset();
-		playback.sync.received(Milli(0));
+		playback.audio.received(Milli(0));
 		await microtasks();
 		// The parked sleep comes due; its frame belongs to the timeline the reset ended.
 		await clock.advance(1000);
@@ -1210,7 +1213,7 @@ for (const kind of ["legacy", "cmaf"] as const) {
 		const reads: Read[] = [];
 		const playback = await guardedPlayback(kind, reads, [], false, 1000);
 		const audio = new Signal<{ start: Milli; end: Milli } | null>(null);
-		const remove = playback.sync.register(new Signal(Milli(100)), audio);
+		const remove = playback.sync.track("text", { target: new Signal(Milli(100)), startup: audio });
 		const reset = spyOn(playback.sync, "reset");
 		try {
 			playback.enabled.set(false);
@@ -1238,7 +1241,7 @@ for (const kind of ["legacy", "cmaf"] as const) {
 			expect(playback.decoder.out.timestamp.peek()).toBe(Milli(940));
 			expect(reset).not.toHaveBeenCalled();
 		} finally {
-			remove();
+			remove.close();
 			reset.mockRestore();
 			playback.close();
 			await microtasks();
@@ -1258,7 +1261,7 @@ for (const kind of ["legacy", "cmaf"] as const) {
 			reads.push(sample(group * 2n, Number(group) * 40_000));
 		}
 		const playback = await guardedPlayback(kind, reads, [], false, 1000);
-		const remove = playback.sync.register(new Signal(Milli(100)), new Signal(null));
+		const remove = playback.sync.track("text", { target: new Signal(Milli(100)), startup: new Signal(null) });
 		try {
 			await microtasks();
 			await clock.advance(0);
@@ -1267,7 +1270,7 @@ for (const kind of ["legacy", "cmaf"] as const) {
 			expect(playback.submitted.at(-1)).toBe(1_120_000);
 			expect(playback.sync.playing.peek()).toBe(false);
 		} finally {
-			remove();
+			remove.close();
 			playback.close();
 			await microtasks();
 			clock.installed.close();
@@ -1278,7 +1281,7 @@ for (const kind of ["legacy", "cmaf"] as const) {
 it("bounds startup decoding while another track is missing and releases it on close", async () => {
 	const clock = manualAt(0);
 	const playback = await guardedPlayback("legacy", [], [], true, 1000);
-	const remove = playback.sync.register(new Signal(Milli(100)), new Signal(null));
+	const remove = playback.sync.track("text", { target: new Signal(Milli(100)), startup: new Signal(null) });
 	if (!playback.track) throw new Error("missing video track");
 	const group = playback.track.appendGroup();
 	try {
@@ -1291,7 +1294,7 @@ it("bounds startup decoding while another track is missing and releases it on cl
 		await microtasks();
 		expect(playback.pictures.every((frame) => frame.closed)).toBe(true);
 	} finally {
-		remove();
+		remove.close();
 		group.finish();
 		playback.close();
 		await microtasks();
@@ -1304,7 +1307,7 @@ it("resumes decoding the moment shared startup releases", async () => {
 	const clock = manualAt(0);
 	const playback = await guardedPlayback("legacy", [], [], true, 1000);
 	const audio = new Signal<{ start: Milli; end: Milli } | null>(null);
-	const remove = playback.sync.register(new Signal(Milli(100)), audio);
+	const remove = playback.sync.track("text", { target: new Signal(Milli(100)), startup: audio });
 	if (!playback.track) throw new Error("missing video track");
 	const group = playback.track.appendGroup();
 	try {
@@ -1317,7 +1320,7 @@ it("resumes decoding the moment shared startup releases", async () => {
 		await clock.advance(0);
 		expect(playback.submitted).toHaveLength(8);
 	} finally {
-		remove();
+		remove.close();
 		group.finish();
 		playback.close();
 		await microtasks();
@@ -1352,7 +1355,7 @@ it("continues filling when the shared floor rises while video waits on audio", a
 	const clock = manualAt(0);
 	const playback = await guardedPlayback("legacy", [], [], true, 1000);
 	const audio = new Signal<{ start: Milli; end: Milli } | null>(null);
-	const remove = playback.sync.register(new Signal(Milli(100)), audio);
+	const remove = playback.sync.track("text", { target: new Signal(Milli(100)), startup: audio });
 	if (!playback.track) throw new Error("missing video track");
 	const group = playback.track.appendGroup();
 	try {
@@ -1366,7 +1369,7 @@ it("continues filling when the shared floor rises while video waits on audio", a
 		await clock.advance(240);
 		expect(playback.decoder.out.frame.peek()?.timestamp).toBeGreaterThanOrEqual(200_000);
 	} finally {
-		remove();
+		remove.close();
 		group.finish();
 		playback.close();
 		await microtasks();
@@ -1397,7 +1400,7 @@ for (const kind of ["legacy", "cmaf"] as const) {
 		const clock = manualAt(0);
 		const playback = await guardedPlayback(kind, [sample(0n, 0), sample(0n, 100_000)], [0, 100_000], false, 1000);
 		const other = new Signal<{ start: Milli; end: Milli } | null>(null);
-		const remove = playback.sync.register(new Signal(Milli(100)), other);
+		const remove = playback.sync.track("text", { target: new Signal(Milli(100)), startup: other });
 		try {
 			playback.release();
 			await microtasks();
@@ -1419,7 +1422,7 @@ for (const kind of ["legacy", "cmaf"] as const) {
 			await microtasks();
 			expect(playback.pictures.filter((frame) => !frame.closed)).toEqual([]);
 		} finally {
-			remove();
+			remove.close();
 			playback.close();
 			await microtasks();
 			clock.installed.close();
@@ -1577,16 +1580,16 @@ describe("Decoder with a warmup rendition", () => {
 
 	it("moves the shared clock only from the min-delay decoder", async () => {
 		const run = await refresh();
-		const received = spyOn(run.playback.sync, "received");
-		const reset = spyOn(run.playback.sync, "reset");
+		const received = spyOn(Track.prototype, "received");
+		const reset = spyOn(Track.prototype, "reset");
 		try {
 			await run.push(MIN, at(10n, 1000, true), at(10n, 1033));
 			await run.push(MAX, at(9n, 700, true), at(9n, 733), at(10n, 1000, true), at(10n, 1033));
 			expect(received.mock.calls.map(([timestamp]) => timestamp)).toEqual([Milli(1000), Milli(1033)]);
 			expect(run.current()).toEqual([1033, MAX]);
 
-			// The publisher restarts its timeline. The min-delay decoder resets the clock and shows the
-			// new timeline; the max-delay picture still on the old one never wins.
+			// The publisher restarts its timeline. The min-delay decoder restarts video's timeline on the
+			// clock and shows the new one; the max-delay picture still on the old one never wins.
 			await run.push(MIN, marker(10n, 1_066_000), at(11n, 0, true));
 			expect(reset).toHaveBeenCalledTimes(1);
 			expect(run.current()).toEqual([0, MIN]);

@@ -49,7 +49,11 @@ export interface Latency {
 export interface State {
 	type: "state";
 	timestamp: Micro;
+	// The context time, in seconds, at which the sample at `timestamp` is rendered.
+	time: number;
 	stalled: boolean;
+	// Whether consumption is released; false holds the ring for buffered startup.
+	playing: boolean;
 	// Whether `timestamp` is on the current timeline: it reads 0 until a frame anchors the ring.
 	anchored: boolean;
 	// How many times the ring has run dry mid-playback, cumulative.

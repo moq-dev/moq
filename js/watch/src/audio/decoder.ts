@@ -20,7 +20,7 @@ import { base64ToBytes } from "../base64";
 import { arrivedAt, type Counter, type Key, type Received, Tally } from "../feedback";
 import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
 import { supportCacheKey } from "../support-probe";
-import type { Sync } from "../sync";
+import type { AudioTrack, Sync } from "../sync";
 import { AudioBuffer } from "./buffer";
 import {
 	type DecoderConfig,
@@ -127,6 +127,8 @@ export class Decoder {
 	readonly source: Source;
 	/** The clock that schedules playback. */
 	readonly sync: Sync;
+	// This track's hold on the clock, which its playhead drives while it plays.
+	readonly #track: AudioTrack;
 
 	readonly #out: DecoderOutput = {
 		error: new Signal<Error | undefined>(undefined),
@@ -232,7 +234,8 @@ export class Decoder {
 			const hold = Milli.fromMicro(ringHold(effect.get(this.sync.out.delay)));
 			return { start: span.start, end: Milli(span.end + Math.min(queued, hold)) };
 		});
-		this.#signals.cleanup(this.sync.register(playout, startup));
+		this.#track = this.sync.track("audio", { target: playout, startup });
+		this.#signals.cleanup(() => this.#track.close());
 		this.#identity = this.#signals.computed((effect) => {
 			const config = effect.get(this.source.out.config);
 			return config ? playbackIdentity(config) : undefined;
@@ -380,6 +383,7 @@ export class Decoder {
 			effect.cleanup(() => worklet.disconnect());
 
 			const ring = new AudioBuffer(worklet, {
+				context,
 				channels: channelCount,
 				rate: sampleRate,
 				delay: this.sync.out.delay.peek(),
@@ -398,6 +402,18 @@ export class Decoder {
 			effect.run((inner) => {
 				this.#out.stalled.set(inner.get(ring.stalled));
 			});
+			// Drive the clock while this rendition plays. Muted, disabled, or gone, it hands the clock
+			// back to the wall where it stands, instead of holding video on a ring that only drains.
+			effect.run((inner) => {
+				const config = inner.get(this.source.out.config);
+				const live =
+					inner.get(this.in.enabled) &&
+					!inner.get(this.sync.out.instant) &&
+					config !== undefined &&
+					config.enabled !== false;
+				this.#track.playhead(live ? inner.get(ring.playhead) : undefined);
+			});
+			effect.cleanup(() => this.#track.playhead(undefined));
 			// Each ring counts from zero, so add only what this one counted to the cumulative stats.
 			let counted = 0;
 			effect.run((inner) => {
@@ -614,7 +630,7 @@ export class Decoder {
 
 				// Classify ingress before decoder backpressure changes the delivery clock.
 				const timestamp = Milli.fromMicro(frame.timestamp as Micro);
-				const late = this.sync.received(timestamp, frame.arrival);
+				const late = this.#track.received(timestamp, frame.arrival);
 				this.#arrivals.write({ kind: "frame", timestamp, arrival: frame.arrival, late });
 
 				const duration = packetDuration(config.codec, frame);
@@ -700,7 +716,7 @@ export class Decoder {
 				const { frame } = next;
 
 				const timestamp = Milli.fromMicro(frame.timestamp);
-				const late = this.sync.received(timestamp, frame.arrival);
+				const late = this.#track.received(timestamp, frame.arrival);
 				this.#arrivals.write({ kind: "frame", timestamp, arrival: frame.arrival, late });
 
 				const duration = packetDuration(config.codec, frame);
@@ -837,6 +853,8 @@ export class Decoder {
 	#retire(): void {
 		this.#consumer = undefined;
 		this.#measured.set(undefined);
+		// Its arrivals stop holding the clock's reference.
+		this.#track.reset();
 	}
 
 	// The ring, once the worklet has loaded. Decoding waits for it, so the frames that arrive first
@@ -985,8 +1003,9 @@ export class Decoder {
 	#onRead(read: Container.Read): boolean {
 		if (!this.#terminal.update(read)) return false;
 		// A hole restarts codec prediction on the same timeline, keeping decoded PCM and parked video.
+		// A frame after a declared end starts another audio timeline, which leaves video's alone.
 		if (read.kind === "frame") {
-			this.sync.reset();
+			this.#track.reset();
 			this.reset();
 		}
 		return true;

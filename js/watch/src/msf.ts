@@ -49,10 +49,11 @@ function toContainer(track: Msf.Track): ContainerInfo | undefined {
 }
 
 // Hang stores delay as whole milliseconds rounded up, and zero means the rendition is not behind.
-// MSF writes a fractional millisecond, which u53 rejects.
+// MSF writes a fractional millisecond, which u53 rejects. A negative value goes to u53 unrounded, so
+// it is rejected like a negative jitter rather than read as absent.
 function delayMillis(value: number): ReturnType<typeof u53> | undefined {
-	if (value <= 0) return undefined;
-	return u53(Math.ceil(value));
+	if (value === 0) return undefined;
+	return u53(value < 0 ? value : Math.ceil(value));
 }
 
 // Hang stores jitter as whole milliseconds; round MSF's fractional value up. A negative value goes
