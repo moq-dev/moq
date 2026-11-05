@@ -4368,10 +4368,11 @@ impl SubscribeOnce {
 				// A group-0 start joins filterless with no fill for the Largest group's head,
 				// so a stream there that starts mid-group is a cut message: drop it, and the
 				// readers skip that group, rather than surface its tail as the whole group.
-				if self.live && self.start == Some(0) {
-					if let Some(largest) = largest.filter(|largest| largest.object > 0) {
-						held.headless_through = held.headless_through.max(Some(largest.group));
-					}
+				if self.live
+					&& self.start == Some(0)
+					&& let Some(largest) = largest.filter(|largest| largest.object > 0)
+				{
+					held.headless_through = held.headless_through.max(Some(largest.group));
 				}
 			}
 		}
