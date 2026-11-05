@@ -86,6 +86,7 @@ class JoinUnsupported extends Error {
 
 // A live subscription, as the track alias its data streams name resolves to.
 type Subscription = {
+	datagrams?: { producer: datagram.Producer; dispose: Dispose };
 	// The write side incoming group streams are routed into.
 	track: track.Producer;
 	// The group streams received, so the subscription can wait for the ones PUBLISH_DONE
@@ -166,6 +167,8 @@ function sees(filter: Filter, path: Path.Valid): boolean {
  * @internal
  */
 export class Subscriber {
+	#streamSources = new WeakMap<track.Request, broadcast.Consumer>();
+	#datagramRequests = new WeakMap<broadcast.Consumer, Map<string, datagram.Request>>();
 	#session: Session;
 
 	// The transport, so a request cut off by the session's close ends with the session's
@@ -717,6 +720,7 @@ export class Subscriber {
 			for (;;) {
 				const request = await wireOf(consumer).requested();
 				if (!request) break;
+				this.#streamSources.set(request, consumer);
 				void this.#runSubscribe(path, request, instance.validity?.signal);
 			}
 		})();
@@ -724,7 +728,7 @@ export class Subscriber {
 			for (;;) {
 				const request = await wireOf(consumer).requestedDatagrams();
 				if (!request) return;
-				void this.#runDatagram(path, request, instance.validity?.signal);
+				void this.#runDatagram(consumer, request, instance.validity?.signal);
 			}
 		})();
 		return this.#consumes.insert(path, instance, consumer);
@@ -1002,6 +1006,14 @@ export class Subscriber {
 			);
 		} finally {
 			joining.abort();
+			if (subscription.datagrams) {
+				const shared = subscription.datagrams;
+				shared.dispose();
+				const closed = hooks.trackReleased(producer).peek();
+				if (closed instanceof Error) shared.producer.abort(closed);
+				else if (hooks.trackFinished(producer)) shared.producer.finish();
+				else shared.producer.abort(new StreamError(StreamCode.Cancel));
+			}
 			if (known) hooks.cacheTrack(producer);
 			// A track end already settled the head; anything else leaves it for a later join.
 			subscription.join?.cancel(new Error("subscription ended"));
@@ -1369,6 +1381,7 @@ export class Subscriber {
 		if (done.statusCode !== PublishDoneStatus.TRACK_ENDED) {
 			throw new Error(`publish done: subscription ended reason=${done.reasonPhrase}`);
 		}
+		subscription.datagrams?.producer.finish();
 		// The track ended and every stream is accounted for, so no tail is coming: a head nothing
 		// claimed is its whole group. A draft-18 joining FETCH is not in the Stream Count; its
 		// head held the settle.
@@ -1660,6 +1673,12 @@ export class Subscriber {
 			start: ok.largest ? ok.largest.groupId : 0n,
 			requested: wireSpan(request.subscription.ranges ?? [{}]).start,
 		});
+		const source = this.#streamSources.get(request);
+		if (source)
+			subscription.datagrams = this.#bindDatagrams(source, producer, {
+				priority: fromWire(ok.properties.priority ?? DEFAULT_WIRE),
+				timescale: ok.properties.timescale,
+			});
 		staged?.commit();
 		state.fill?.(subscription);
 
@@ -2212,15 +2231,16 @@ export class Subscriber {
 			throw new ProtocolViolation(`undefined object status ${datagram.body.status}`);
 		}
 
-		const binding = this.#aliases.peek(datagram.trackAlias);
+		const alias = this.#aliases.peek(datagram.trackAlias);
+		const binding =
+			alias?.kind === "track"
+				? alias.subscription.datagrams && {
+						producer: alias.subscription.datagrams.producer,
+						timescale: alias.subscription.timescale,
+					}
+				: alias;
 		if (!binding) {
 			console.debug(`dropping a datagram for an unknown alias: alias=${datagram.trackAlias}`);
-			return;
-		}
-		if (binding.kind !== "datagram") {
-			console.debug(
-				`dropping a datagram on a stream track's subscription: alias=${datagram.trackAlias} group=${datagram.groupId}`,
-			);
 			return;
 		}
 
@@ -2269,193 +2289,60 @@ export class Subscriber {
 		}
 	}
 
-	/**
-	 * Subscribe to one datagram track: its own SUBSCRIBE, live from now, keeping only
-	 * OBJECT_DATAGRAM with object ID 0.
-	 */
-	async #runDatagram(broadcast: Path.Valid, request: datagram.Request, valid?: AbortSignal): Promise<void> {
-		const refused = unauthorized(broadcast);
-		try {
-			for (;;) {
-				const ready = await this.#auth?.ready(broadcast, "subscribe", {
-					signal: valid,
-					until: () => Promise.resolve(request.closed),
-				});
-				if (ready !== false) break;
-				if (request.priority.peek() !== undefined && request.closed.peek() === undefined) continue;
-				return;
-			}
-		} catch (err) {
-			request.reject(error(err));
-			return;
-		}
-		if (this.#denied(broadcast)) {
-			request.reject(refused);
-			return;
-		}
-		if (request.closed.peek() !== undefined) return;
-
-		let requestId: bigint | undefined;
-		try {
-			valid?.throwIfAborted();
-			requestId = await this.#session.nextRequestId(valid);
-		} catch (err) {
-			request.reject(error(err));
-			return;
-		}
-		if (requestId === undefined) {
-			request.reject(await this.#closedSession());
-			return;
-		}
-
-		const version = this.#session.version;
-		let stream: RequestStream | undefined;
-		let binding: DatagramBinding | undefined;
-		let alias: bigint | undefined;
-		try {
-			stream = await RequestStream.open(this.#session, new Deadline(), { quic: this.#quic, signal: valid });
-			const subscriberPriority = toWire(request.priority.peek() ?? 0);
-			await Message.write(
-				stream.writer,
-				Subscribe.id,
-				new Subscribe({
-					requestId,
-					trackNamespace: broadcast,
-					trackName: request.name,
-					subscriberPriority,
-					groupOrder: "descending",
-					filter: { kind: "nextObject" },
-					propertiesWanted: true,
-					forward: true,
-				}),
-				version,
-			);
-			console.debug(`datagram subscribe written: id=${requestId} broadcast=${broadcast} track=${request.name}`);
-
-			const response = await stream.next();
-			if (response === undefined) throw new Error("datagram subscription ended before its response");
-			if (response.type === RequestError.id) {
-				const err = await RequestError.decode(response.reader, version);
-				request.reject(new Error(requestReason(err.errorCode, err.reasonPhrase, "subscribe", version)));
-				stream.close();
-				return;
-			}
-			if (response.type !== SubscribeOk.id) {
-				throw new ProtocolViolation(
-					`unexpected message on a datagram subscription: 0x${response.type.toString(16)}`,
-				);
-			}
-			const ok = await SubscribeOk.decode(response.reader, version);
-			const producer = request.accept({
-				timescale: ok.properties.timescale,
-				priority: fromWire(ok.properties.priority ?? DEFAULT_WIRE),
-			});
-			binding = {
-				kind: "datagram",
-				producer,
-				timescale: ok.properties.timescale ?? undefined,
-				logged: false,
-			};
-			alias = ok.trackAlias;
-			try {
-				this.#aliases.set(alias, binding, { broadcast, name: request.name });
-			} catch (err) {
-				if (err instanceof DuplicateTrackAlias) this.#fail(SessionCode.ProtocolViolation, err.message);
-				throw err;
-			}
-			if (binding.timescale !== undefined) this.#timescales.set(alias, binding.timescale);
-
-			const unanswered = new Signal(0);
-			let sent = fromWire(subscriberPriority);
-			const stop = new AbortController();
-			let revoke!: () => void;
-			const revoked = new Promise<"revoked">((resolve) => {
-				revoke = () => resolve("revoked");
-			});
-			const disposeGrant = this.#grant?.subscribe(() => {
-				if (this.#denied(broadcast)) revoke();
-			});
-			if (this.#denied(broadcast)) revoke();
-
-			const idle = (async (): Promise<"idle" | "local"> => {
-				for (;;) {
-					if (stop.signal.aborted) return "idle";
-					const closed = producer.closed.peek();
-					if (closed !== undefined) return "local";
-					if (producer.priority.peek() === undefined && hooks.closeUnusedDatagrams(producer)) return "idle";
-					const next = producer.priority.peek();
-					if (next !== undefined && next !== sent && unanswered.peek() === 0) {
-						const updateId = await this.#session.nextRequestId(valid);
-						if (updateId === undefined) throw await this.#closedSession();
-						const parameters = new Parameters();
-						parameters.subscriberPriority = toWire(next);
-						unanswered.update((count) => count + 1);
-						try {
-							await Message.write(
-								stream.writer,
-								SubscribeUpdate.id,
-								new SubscribeUpdate({ requestId: updateId, parameters }),
-								version,
-							);
-						} catch (err) {
-							unanswered.update((count) => count - 1);
-							throw err;
-						}
-						sent = next;
-						continue;
-					}
-					await Signal.race(producer.priority, producer.closed);
-				}
-			})();
-
-			const ended = await race([
-				this.#readDatagramDone(stream, unanswered, broadcast).then(() => "done" as const),
-				revoked,
-				idle,
-			]);
-			stop.abort();
-			if (ended === "done") producer.finish();
-			else if (ended === "revoked") producer.abort(refused);
-			else if (!hooks.closeUnusedDatagrams(producer)) producer.abort(new StreamError(StreamCode.Cancel));
-			disposeGrant?.();
-			if (ended === "done") stream.close();
-			else stream.abort(new StreamError(StreamCode.Cancel));
-		} catch (err) {
-			const cause = await sessionCause(this.#quic, err);
-			if (cause instanceof ProtocolViolation) this.#fail(cause.code, cause.message);
-			if (binding) binding.producer.abort(cause);
-			else request.reject(cause);
-			stream?.abort(cause);
-		} finally {
-			if (alias !== undefined && binding && this.#aliases.retire(alias, binding)) this.#timescales.delete(alias);
-		}
+	/** Bind both kinds to the same upstream response, without adding stream demand for passive forwarding. */
+	#bindDatagrams(source: broadcast.Consumer, track: track.Producer, info: Partial<datagram.Info>) {
+		const pending = this.#datagramRequests.get(source);
+		const request = pending?.get(track.name);
+		pending?.delete(track.name);
+		const producer = request ? request.accept(info) : wireOf(source).createDatagrams(track.name, info);
+		let held: track.Subscriber | undefined;
+		const sync = () => {
+			const priority = producer.priority.peek();
+			if (priority === undefined) {
+				held?.close();
+				held = undefined;
+			} else if (held) held.update({ priority });
+			else held = hooks.parked(track.subscribe({ priority }));
+		};
+		const dispose = producer.priority.subscribe(sync);
+		sync();
+		return {
+			producer,
+			dispose: () => {
+				dispose();
+				held?.close();
+			},
+		};
 	}
 
-	/** Read a datagram subscription's request stream until PUBLISH_DONE. Answers clear `unanswered`. */
-	async #readDatagramDone(stream: RequestStream, unanswered: Signal<number>, broadcast: Path.Valid): Promise<void> {
-		const version = this.#session.version;
-		let framed: Framed | undefined;
-		for (;;) {
-			framed = await stream.next();
-			if (framed === undefined) throw new ProtocolViolation("datagram subscription ended without PUBLISH_DONE");
-			if (framed.type === PublishDone.id) break;
-			if ((framed.type === RequestOk.id || framed.type === RequestError.id) && unanswered.peek() > 0) {
-				if (framed.type === RequestOk.id) await RequestOk.decode(framed.reader, version);
-				else await RequestError.decode(framed.reader, version);
-				unanswered.update((count) => count - 1);
-				continue;
-			}
-			throw new ProtocolViolation(`unexpected message on a datagram subscription: 0x${framed.type.toString(16)}`);
+	/** Ask through the stream model's shared lookup, so either kind opens the same SUBSCRIBE. */
+	async #runDatagram(source: broadcast.Consumer, request: datagram.Request, valid?: AbortSignal): Promise<void> {
+		if (DatagramStream.maxDatagramSize(this.#quic) === 0) {
+			request.reject(new Error("transport does not support datagrams"));
+			return;
 		}
-		const done = await PublishDone.decode(framed.reader, version);
-		if (done.statusCode === PublishDoneStatus.UNAUTHORIZED) throw unauthorized(broadcast);
-		if (done.statusCode === PublishDoneStatus.MALFORMED_TRACK) {
-			throw new StreamError(StreamCode.MalformedTrack, {
-				message: `publish done: malformed track reason=${done.reasonPhrase}`,
-			});
+		let pending = this.#datagramRequests.get(source);
+		if (!pending) {
+			pending = new Map();
+			this.#datagramRequests.set(source, pending);
 		}
-		if (!publishDoneClean(done.statusCode, version)) {
-			throw new Error(`publish done: status=0x${done.statusCode.toString(16)} reason=${done.reasonPhrase}`);
+		pending.set(request.name, request);
+		const subscriber = wireOf(source).subscribe(request.name, { priority: request.priority.peek() ?? 0 });
+		try {
+			await untilAborted(
+				race([
+					subscriber.info(),
+					Promise.resolve(request.closed).then((): never => {
+						throw new StreamError(StreamCode.Cancel);
+					}),
+				]),
+				valid,
+			);
+		} catch (err) {
+			if (pending.get(request.name) === request) request.reject(error(err));
+		} finally {
+			subscriber.close();
+			if (pending.get(request.name) === request) pending.delete(request.name);
 		}
 	}
 }

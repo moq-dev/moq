@@ -8,19 +8,13 @@ keep the requested kind when a peer mixes datagrams and streams on one track.
 
 ## Plan
 
-Implementation checkpoint: [moq-dev/moq#7959](https://github.com/moq-dev/moq/pull/7959).
-Rust and JS adapters, direct delivery, interop lanes, and mixed-kind filtering are
-implemented. Full interop passed. The remaining blocker is upstream subscription
-sharing: a relay currently opens separate stream and datagram subscriptions for
-one IETF name. The extra subscription broadens the stream's demand and breaks
-ordering, range updates, and max-age aggregation. Share upstream interest between
-the model kinds without matching errors or adding IETF-only public model API,
-then rerun the complete net suite, CI, interop, and local review.
+Maintainer decision, 2026-11-05: “7959 should make one upstream IETF
+subscription like 05/06”. Share the upstream SUBSCRIBE for a name across local
+stream and datagram consumers, with independent requested-kind delivery and
+correct aggregate stream demand. Preserve full relay support and keep the
+sharing machinery private to the IETF adapter.
 
-The failing integration tests are `group_order::merged_subscribers_keep_their_own_order`,
-`subscribe_ranges::{draft18_updates_narrow_then_widen,draft22_cold_widening_finishes_the_largest_group,draft22_resolves_cached_time_ends,draft22_updates_both_bounds_across_cached_groups,unresolved_time_reader_never_changes_sibling_demand}`,
-and `subscriber_max_age::relay_forwards_the_most_tolerant_subscriber_max_age`.
-
+Implementation: [moq-dev/moq#7959](https://github.com/moq-dev/moq/pull/7959).
 
 Decided 2026-11-01 (maintainer), in the
 [epic](/quest/m1/datagram-tracks/README.md):

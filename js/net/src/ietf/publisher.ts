@@ -506,8 +506,11 @@ export class Publisher {
 		// subscription nothing here can carry.
 		const datagramOf = () => {
 			if (DatagramStream.maxDatagramSize(this.#quic) === 0) return;
-			const consumer = broadcast.datagrams(msg.trackName);
-			consumer.setPriority(fromWire(msg.subscriberPriority));
+			const local = wireOf(broadcast).localDatagrams;
+			const consumer = local
+				? broadcast.datagrams(msg.trackName)
+				: wireOf(broadcast).liveDatagrams(msg.trackName);
+			if (local) consumer?.setPriority(fromWire(msg.subscriberPriority));
 			return consumer;
 		};
 		let datagrams = datagramOf();
@@ -543,9 +546,18 @@ export class Publisher {
 				return;
 			}
 			const info = selected.info;
+			datagrams ??= datagramOf();
 			// Every subscription a resume makes counts toward the same PUBLISH_DONE.
 			const streams: StreamCount = { opened: 0 };
-			let paused = await this.#forward({ msg, request, track, info, streams, datagrams });
+			let paused = await this.#forward({
+				msg,
+				request,
+				track,
+				info,
+				streams,
+				datagrams,
+				datagramDemand: wireOf(broadcast).localDatagrams,
+			});
 			// A pause drops the subscription, and its demand with it; a resume subscribes again as
 			// a new SUBSCRIBE would, so nothing carries across but the request.
 			while (paused) {
@@ -569,7 +581,16 @@ export class Publisher {
 					request.close();
 					return;
 				}
-				paused = await this.#forward({ msg, request, track, info: resumed, streams, answer, datagrams });
+				paused = await this.#forward({
+					msg,
+					request,
+					track,
+					info: resumed,
+					streams,
+					answer,
+					datagrams,
+					datagramDemand: wireOf(broadcast).localDatagrams,
+				});
 			}
 		} finally {
 			track.close();
@@ -833,6 +854,7 @@ export class Publisher {
 		streams = { opened: 0 },
 		answer,
 		datagrams,
+		datagramDemand,
 	}: {
 		msg: Subscribe;
 		request: RequestStream;
@@ -844,10 +866,12 @@ export class Publisher {
 		answer?: { requestId: bigint };
 		/** A datagram track of the same name, forwarded as OBJECT_DATAGRAM beside the groups. */
 		datagrams?: datagram.Consumer;
+		datagramDemand: boolean;
 	}): Promise<Paused | undefined> {
 		const version = this.#session.version;
 		const name = msg.trackNamespace;
 		const priority = fromWire(msg.subscriberPriority);
+		const datagramPriority = new Signal(priority);
 		const order = msg.groupOrder;
 		let cache: TrackSubscriber | undefined;
 		let ranking: Priority | undefined;
@@ -959,6 +983,7 @@ export class Publisher {
 				? this.#sendDatagrams(datagrams, {
 						alias: msg.requestId,
 						timescale,
+						priority: datagramPriority,
 					}).catch((err: unknown) => {
 						console.debug(`stopping datagrams on this subscription: ${reason(err)}`);
 					})
@@ -1029,7 +1054,8 @@ export class Publisher {
 					if (params.subscriberPriority !== undefined) {
 						const priority = fromWire(params.subscriberPriority);
 						track.update({ ...track.subscription.peek(), priority });
-						datagrams?.setPriority(priority);
+						datagramPriority.set(priority);
+						if (datagramDemand) datagrams?.setPriority(priority);
 					}
 					const maxAge = params.maxAge;
 					if (maxAge !== undefined) {
@@ -1278,7 +1304,7 @@ export class Publisher {
 	 */
 	async #sendDatagrams(
 		datagrams: datagram.Consumer,
-		options: { alias: bigint; timescale?: Timescale },
+		options: { alias: bigint; timescale?: Timescale; priority: Signal<number> },
 	): Promise<void> {
 		let info: datagram.Info;
 		try {
@@ -1291,9 +1317,9 @@ export class Publisher {
 		if (!opened) return;
 		const publisher = info.priority;
 		const timescale = options.timescale;
-		const rank = () => sendOrder({ priority: datagrams.priority, publisher, position: 2 ** 36 - 1 });
+		const rank = () => sendOrder({ priority: options.priority.peek(), publisher, position: 2 ** 36 - 1 });
 		const sender = opened.open(rank());
-		const dispose = hooks.datagramPriority(datagrams).subscribe(() => sender.setPriority(rank()));
+		const dispose = options.priority.subscribe(() => sender.setPriority(rank()));
 		const version = this.#session.version;
 		const max = DatagramStream.maxDatagramSize(this.#quic);
 		try {

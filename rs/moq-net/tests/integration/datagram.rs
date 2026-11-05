@@ -532,7 +532,7 @@ async fn an_old_subscriber_keeps_a_stream_track_across_mixed_hops() {
 /// A datagram track can't be asked for over a version or transport without datagrams.
 #[kio::test]
 async fn a_datagram_track_needs_datagrams() {
-	for (version, transport) in [("moq-lite-03", true), ("moq-lite-04", true), ("moq-lite-07-wip", false)] {
+	for (version, transport) in [("moq-lite-03", true), ("moq-lite-04", true), ("moq-lite-07-wip", false), ("moq-transport-22", false)] {
 		let chain = Chain::new(&[version]).await;
 		if !transport {
 			// The second node subscribes through the session it accepted.
