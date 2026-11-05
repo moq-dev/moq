@@ -437,18 +437,6 @@ impl Subscriber {
 		Err(err)
 	}
 
-	/// Serve a PUBLISH: hold one answering our SUBSCRIBE_TRACKS paused as its track's entry,
-	/// refuse a redundant one, and decline one no listing asked for. See [`ServePublish`].
-	#[cfg(feature = "async")]
-	pub(super) async fn serve_publish(
-		&mut self,
-		stream: Stream<Transport, Version>,
-		msg: ietf::Publish<'static>,
-	) -> Result<(), Error> {
-		let mut serve = ServePublish::new(self.clone(), stream, msg);
-		kio::wait(|waiter| serve.poll(waiter)).await
-	}
-
 	/// What to do with a PUBLISH whose token, if it decides, granted it.
 	fn offer(
 		&self,
@@ -1534,7 +1522,8 @@ impl Watch {
 	}
 }
 
-/// [`Subscriber::serve_publish`]'s progress.
+/// Serve a PUBLISH: hold one answering our SUBSCRIBE_TRACKS paused as its track's entry,
+/// refuse a redundant one, and decline one no listing asked for.
 pub(super) struct ServePublish {
 	this: Subscriber,
 	state: ServePublishState,
@@ -2017,11 +2006,12 @@ mod tests {
 			let id = ours.reader.varint().await.unwrap();
 			assert_eq!(id, ietf::Publish::ID);
 			let body: ietf::Body = ours.reader.decode().await.unwrap();
-			let mut subscriber = self.subscriber.clone();
+			let subscriber = self.subscriber.clone();
 			let version = self.version;
 			kio::clock::sim::spawn(async move {
 				let msg = body.message::<ietf::Publish>(version).unwrap().into_owned();
-				let _ = subscriber.serve_publish(ours, msg).await;
+				let mut serve = ServePublish::new(subscriber, ours, msg);
+				let _ = kio::wait(|waiter| serve.poll(waiter)).await;
 			});
 			let (id, body) = read(&mut stream).await;
 			(stream, id, body)

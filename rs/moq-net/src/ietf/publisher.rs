@@ -2876,20 +2876,8 @@ impl Publisher {
 		}
 	}
 
-	/// Handle an incoming bidi stream dispatched by the session.
-	#[cfg(feature = "async")]
-	pub fn handle_stream(
-		&self,
-		id: u64,
-		body: ietf::Body,
-		stream: Stream<Transport, Version>,
-	) -> Result<BoxFuture<'static, ()>, Error> {
-		let task = self.dispatch(id, body, stream)?;
-		Ok(Box::pin(kio::wait(task)))
-	}
-
 	/// The task serving an incoming bidi stream dispatched by the session.
-	fn dispatch(
+	pub(super) fn handle_stream(
 		&self,
 		id: u64,
 		body: ietf::Body,
@@ -2954,11 +2942,14 @@ impl Publisher {
 				let gate = this.fetch_gate(&msg);
 				// Owned, since the task outlives the body it was read from.
 				let msg = msg.into_owned();
-				crate::util::future_task(async move {
-					let _serve = serve;
-					if let Err(err) = this.serve_fetch_stream(stream, msg, gate).await {
+				let mut task = FetchServe::new(this, stream, msg, gate);
+				let mut serve = serve;
+				Box::new(move |waiter: &kio::Waiter| {
+					if let Err(err) = ready!(task.poll(waiter)) {
 						tracing::debug!(%err, "fetch stream error");
 					}
+					drop(serve.take());
+					Poll::Ready(())
 				})
 			}
 			ietf::SubscribeNamespace::ID => {
@@ -2982,9 +2973,10 @@ impl Publisher {
 					msg.namespace.clone(),
 					crate::auth::Direction::Publish,
 				);
-				crate::util::future_task(async move {
-					let session = this.session.clone();
-					match this.serve_subscribe_namespace_stream(stream, msg, gate).await {
+				let session = this.session.clone();
+				let mut task = NamespaceServe::new(this, stream, msg, gate);
+				Box::new(move |waiter: &kio::Waiter| {
+					match ready!(task.poll(waiter)) {
 						// Such as a malformed answer to an advertisement this request solicited.
 						Err(err) if super::subscriber::is_protocol_violation(&err) => session.close(
 							super::error::to_session_code(&crate::SessionError::from(&err)),
@@ -2993,6 +2985,7 @@ impl Publisher {
 						Err(err) => tracing::debug!(%err, "subscribe_namespace stream error"),
 						Ok(()) => {}
 					}
+					Poll::Ready(())
 				})
 			}
 			ietf::SubscribeTracks::ID => {
@@ -3045,10 +3038,12 @@ impl Publisher {
 				);
 				// Owned, since the task outlives the body it was read from.
 				let msg = msg.into_owned();
-				crate::util::future_task(async move {
-					if let Err(err) = this.serve_track_status_stream(stream, msg, gate).await {
+				let mut task = TrackStatusServe::new(this, stream, msg, gate);
+				Box::new(move |waiter: &kio::Waiter| {
+					if let Err(err) = ready!(task.poll(waiter)) {
 						tracing::debug!(%err, "track_status stream error");
 					}
+					Poll::Ready(())
 				})
 			}
 			_ => {
@@ -9321,7 +9316,7 @@ mod serve_tests {
 				let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), version)
 					.await
 					.unwrap();
-				let task = h.publisher.handle_stream(id, ietf::Body(body.clone()), stream).unwrap();
+				let task = kio::wait(h.publisher.handle_stream(id, ietf::Body(body.clone()), stream).unwrap());
 				assert_eq!(h.publisher.owed.load(Ordering::Relaxed), 1, "count before polling");
 				drop(task);
 				assert_eq!(h.publisher.owed.load(Ordering::Relaxed), 0, "release a cancelled task");
@@ -9340,7 +9335,7 @@ mod serve_tests {
 					let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), version)
 						.await
 						.unwrap();
-					h.publisher.handle_stream(id, ietf::Body(body), stream).unwrap().await;
+					kio::wait(h.publisher.handle_stream(id, ietf::Body(body), stream).unwrap()).await;
 					assert_eq!(h.publisher.owed.load(Ordering::Relaxed), 0, "release a completed fetch");
 				}
 			}
@@ -11142,11 +11137,11 @@ mod serve_tests {
 				.unwrap();
 			let mark = h.log.trail().len();
 			let body = track_status("room", true, version);
-			let task = h
+			let task = kio::wait(h
 				.publisher
 				.clone()
 				.handle_stream(ietf::TrackStatus::ID, ietf::Body(bytes::Bytes::from(body)), stream)
-				.unwrap();
+				.unwrap());
 			kio::clock::timeout(std::time::Duration::from_secs(1), task)
 				.await
 				.unwrap_or_else(|_| panic!("{version}: never answered"));
@@ -11189,10 +11184,10 @@ mod serve_tests {
 					.unwrap();
 				let mark = h.log.writes.lock().unwrap().len();
 				let body = track_status("room", wanted, version);
-				h.publisher
+				kio::wait(h.publisher
 					.clone()
 					.handle_stream(ietf::TrackStatus::ID, ietf::Body(bytes::Bytes::from(body)), stream)
-					.unwrap()
+					.unwrap())
 					.await;
 				assert!(h.log.resets().is_empty(), "{version}: the answer was reset");
 				assert!(h.track.subscription().is_none(), "{version}: TRACK_STATUS subscribed");
@@ -11269,10 +11264,10 @@ mod serve_tests {
 			let mark = h.log.writes.lock().unwrap().len();
 			let body = track_status("live/cam", true, version);
 			let mut answer = std::pin::pin!(
-				h.publisher
+				kio::wait(h.publisher
 					.clone()
 					.handle_stream(ietf::TrackStatus::ID, ietf::Body(bytes::Bytes::from(body)), stream,)
-					.unwrap()
+					.unwrap())
 			);
 			assert!(futures::poll!(answer.as_mut()).is_pending(), "{version}");
 
@@ -11396,10 +11391,10 @@ mod serve_tests {
 			.await
 			.unwrap();
 		let mark = h.log.writes.lock().unwrap().len();
-		h.publisher
+		kio::wait(h.publisher
 			.clone()
 			.handle_stream(ietf::TrackStatus::ID, ietf::Body(bytes::Bytes::from(body)), stream)
-			.unwrap()
+			.unwrap())
 			.await;
 		refusal_code(&h.log.writes.lock().unwrap()[mark..], version)
 	}
@@ -11469,10 +11464,10 @@ mod serve_tests {
 			.await
 			.unwrap();
 		let mark = h.log.writes.lock().unwrap().len();
-		h.publisher
+		kio::wait(h.publisher
 			.clone()
 			.handle_stream(id, ietf::Body(bytes::Bytes::from(body)), stream)
-			.unwrap_or_else(|e| panic!("{version}: the request closed the session: {e}"))
+			.unwrap_or_else(|e| panic!("{version}: the request closed the session: {e}")))
 			.await;
 		assert!(h.log.resets().is_empty(), "{version}: refusal was reset");
 
@@ -11583,10 +11578,10 @@ mod serve_tests {
 			let mark = h.log.writes.lock().unwrap().len();
 			let body = track_status(path, true, version);
 			let mut serving = std::pin::pin!(
-				h.publisher
+				kio::wait(h.publisher
 					.clone()
 					.handle_stream(ietf::TrackStatus::ID, ietf::Body(body.into()), stream)
-					.unwrap()
+					.unwrap())
 			);
 			let done = futures::poll!(serving.as_mut());
 			assert!(
@@ -11704,7 +11699,7 @@ mod serve_tests {
 			.await
 			.unwrap();
 		let mark = h.log.writes.lock().unwrap().len();
-		let task = h
+		let task = kio::wait(h
 			.publisher
 			.clone()
 			.handle_stream(
@@ -11712,7 +11707,7 @@ mod serve_tests {
 				ietf::Body(bytes::Bytes::from(body)),
 				stream,
 			)
-			.unwrap_or_else(|e| panic!("{version}: the request closed the session: {e}"));
+			.unwrap_or_else(|e| panic!("{version}: the request closed the session: {e}")));
 		let mut task = std::pin::pin!(task);
 		let mut done = false;
 		for _ in 0..100 {
@@ -12621,10 +12616,10 @@ mod serve_tests {
 		subscribe(Filter::NextObject, None)
 			.encode_msg(&mut Encoder::new(&mut data, version.into()), version)
 			.unwrap();
-		let mut serving = h
+		let mut serving = kio::wait(h
 			.publisher
 			.handle_stream(ietf::Subscribe::ID, ietf::Body(bytes::Bytes::from(data)), stream)
-			.unwrap();
+			.unwrap());
 		let mut fetching = Box::pin(joining_fetch(&h, 0));
 		assert!(
 			futures::poll!(fetching.as_mut()).is_pending(),
@@ -12658,10 +12653,10 @@ mod serve_tests {
 		subscribe(Filter::NextObject, None)
 			.encode_msg(&mut Encoder::new(&mut data, version.into()), version)
 			.unwrap();
-		let mut serving = h
+		let mut serving = kio::wait(h
 			.publisher
 			.handle_stream(ietf::Subscribe::ID, ietf::Body(bytes::Bytes::from(data)), stream)
-			.unwrap();
+			.unwrap());
 		match futures::future::select(&mut fetching, &mut serving).await {
 			futures::future::Either::Left((response, _)) => {
 				response.unwrap();
@@ -12683,10 +12678,10 @@ mod serve_tests {
 			subscribe(Filter::NextObject, None)
 				.encode_msg(&mut Encoder::new(&mut data, version.into()), version)
 				.unwrap();
-			let serving = h
+			let serving = kio::wait(h
 				.publisher
 				.handle_stream(ietf::Subscribe::ID, ietf::Body(bytes::Bytes::from(data)), stream)
-				.unwrap();
+				.unwrap());
 			let mut fetching = Box::pin(joining_fetch(&h, 0));
 			assert!(futures::poll!(fetching.as_mut()).is_pending());
 			drop(serving);
@@ -13743,11 +13738,11 @@ mod serve_tests {
 				.await
 				.unwrap();
 			let mark = h.log.writes.lock().unwrap().len();
-			let serving = h
+			let serving = kio::wait(h
 				.publisher
 				.clone()
 				.handle_stream(ietf::Fetch::ID, ietf::Body(body.into()), stream)
-				.unwrap();
+				.unwrap());
 			let ((), issued) = futures::join!(serving, async {
 				requests.next().await.unwrap().accept(crate::auth::Grant::all())
 			});
@@ -13966,14 +13961,14 @@ mod serve_tests {
 			let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), version)
 				.await
 				.unwrap();
-			h.publisher
+			kio::wait(h.publisher
 				.clone()
 				.handle_stream(
 					ietf::TrackStatus::ID,
 					ietf::Body(track_status("room", true, version).into()),
 					stream,
 				)
-				.unwrap()
+				.unwrap())
 				.await;
 			let wire = h.log.writes.lock().unwrap().clone();
 			let mut buf = Decoder::new(&wire, version.into());

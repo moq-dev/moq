@@ -1236,11 +1236,11 @@ impl Bidi {
 			| ietf::SubscribeNamespace::ID
 			| ietf::SubscribeTracks::ID
 			| ietf::TrackStatus::ID => {
-				publisher.handle_stream(id, data, stream)?.await;
+				kio::wait(publisher.handle_stream(id, data, stream)?).await;
 			}
 			// Subscriber handles: Publish, PublishNamespace
 			ietf::Publish::ID | ietf::PublishNamespace::ID => {
-				subscriber.handle_stream(id, data, stream, peer, declared)?.await;
+				kio::wait(subscriber.handle_stream(id, data, stream, peer, declared)?).await;
 			}
 			auth::Auth::ID if let Some(serve) = serve => {
 				let mut data = data.decoder(version);

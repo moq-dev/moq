@@ -1,6 +1,5 @@
 use crate::driver::Transport;
 use crate::transport::poll::Session as _;
-use futures::FutureExt as _;
 use std::{
 	collections::{BTreeMap, HashMap, hash_map::Entry},
 	task::{Poll, ready},
@@ -1847,10 +1846,10 @@ impl Subscriber {
 		stream: Stream<Transport, Version>,
 		peer: cluster::Peer,
 		declared: Option<bool>,
-	) -> Result<BoxFuture<'static, ()>, Error> {
-		let mut this = self.clone();
+	) -> Result<crate::util::BoxTask, Error> {
+		let this = self.clone();
 		let mut data = body.decoder(this.version);
-		let task = match id {
+		let task: crate::util::BoxTask = match id {
 			ietf::Publish::ID => {
 				let msg = match ietf::Publish::decode_msg(&mut data, this.version) {
 					Err(err) if super::token::refuses_request(&err) => {
@@ -1868,12 +1867,13 @@ impl Subscriber {
 				tracing::debug!(message = ?msg, "received publish");
 				// Owned, since the task outlives the body it was read from.
 				let msg = msg.into_owned();
-				async move {
-					if let Err(err) = this.serve_publish(stream, msg).await {
+				let mut serve = tracks::ServePublish::new(this, stream, msg);
+				Box::new(move |waiter: &kio::Waiter| {
+					if let Err(err) = ready!(serve.poll(waiter)) {
 						tracing::debug!(%err, "publish stream error");
 					}
-				}
-				.boxed()
+					Poll::Ready(())
+				})
 			}
 			ietf::PublishNamespace::ID => {
 				// A negotiated session that omits HOP_PATH fails the decode here, which
@@ -1908,7 +1908,7 @@ impl Subscriber {
 				};
 				let session = this.session.clone();
 				let mut serve = ServePublishNamespace::new(this, stream, incoming);
-				Box::pin(kio::Pending::new(move |waiter: &kio::Waiter| {
+				Box::new(move |waiter: &kio::Waiter| {
 					if let Err(err) = ready!(serve.poll(waiter)) {
 						// An advertisement update is decoded here rather than in the
 						// dispatcher, so nothing else would surface a malformed one. The
@@ -1923,7 +1923,7 @@ impl Subscriber {
 						tracing::debug!(%err, "publish_namespace stream error");
 					}
 					Poll::Ready(())
-				}))
+				})
 			}
 			_ => {
 				tracing::warn!(id, "unexpected bidi stream type for subscriber");
@@ -1940,14 +1940,14 @@ impl Subscriber {
 		stream: Stream<Transport, Version>,
 		kind: request::Kind,
 		err: DecodeError,
-	) -> BoxFuture<'static, ()> {
+	) -> crate::util::BoxTask {
 		let mut reject = super::token::rejection(stream, kind, err, self.version);
-		Box::pin(kio::Pending::new(move |waiter: &kio::Waiter| {
+		Box::new(move |waiter: &kio::Waiter| {
 			if let Err(err) = ready!(reject.poll(waiter)) {
 				tracing::debug!(%err, "token refusal failed");
 			}
 			Poll::Ready(())
-		}))
+		})
 	}
 
 	/// What the peer declared about being solicited (MoQ Solicit).
@@ -14758,9 +14758,9 @@ mod stitch_tests {
 		let stream = Stream::open(&crate::driver::Transport::new(downstream.clone()), egress)
 			.await
 			.unwrap();
-		publisher
+		kio::wait(publisher
 			.handle_stream(id, ietf::Body(body.into()), stream)
-			.unwrap()
+			.unwrap())
 			.await;
 		let mut streams = std::collections::BTreeMap::<usize, Vec<u8>>::new();
 		for (id, event) in downstream.log.trail() {
