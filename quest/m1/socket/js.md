@@ -24,8 +24,8 @@ as unsupported. JS reads without fastest-reader pacing until
 [JS fastest-reader pacing](/quest/m2/js-fastest-reader.md), so a JS `tcp`
 reader that falls a group tail behind fails with an eviction error; say so in
 the docs. As in Rust, dials and accepts fail as unsupported while the
-endpoint's connection is moq-lite before 07, which never carries its hidden
-broadcast, instead of waiting forever; test it against a lite-06 connection.
+endpoint's origin has any moq-lite client session before 07, which never carries
+its hidden broadcasts, instead of waiting forever; test it against a lite-06 connection.
 Add the Rust/JS pairs to `just test interop`, and document the export in
 `doc/lib/js/net.md`.
 

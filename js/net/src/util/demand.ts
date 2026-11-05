@@ -27,7 +27,12 @@ export async function abandoned(demand: Demand): Promise<void> {
 export async function unrequested(request: Request): Promise<void> {
 	const wanted = hooks.requestWanted(request);
 	const released = hooks.demandReleased(request.demand());
-	while (wanted.peek() && released.peek() === undefined) await Signal.race(wanted, released);
+	while (!isUnrequested(request)) await Signal.race(wanted, released);
+}
+
+/** Whether neither a subscriber nor an info lookup wants the request, or its track closed. */
+export function isUnrequested(request: Request): boolean {
+	return !hooks.requestWanted(request).peek() || hooks.demandReleased(request.demand()).peek() !== undefined;
 }
 
 /** Whether no subscriber wants the track now, or it closed. */

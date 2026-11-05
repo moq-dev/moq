@@ -16,6 +16,8 @@ import type * as Origin from "./origin.ts";
 import * as Path from "./path.ts";
 import type * as Track from "./track.ts";
 import { untilAborted } from "./util/abort.ts";
+import { isUnrequested as abandoned } from "./util/demand.ts";
+import { fromBytes } from "./util/hex.ts";
 import { wireOf } from "./wire.ts";
 
 type Protocol = "tcp" | "track";
@@ -29,10 +31,6 @@ const cancelled = () => new StreamError(StreamCode.Cancel, { message: "socket op
 const ended = () => new StreamError(StreamCode.SessionClosed, { message: "socket endpoint closed" });
 // Unsupported has no registered stream code, as in Rust: it maps to Internal.
 const unreachable = () => new Error("socket endpoint is unreachable behind a moq-lite hop before 07");
-
-function abandoned(request: Track.Request): boolean {
-	return !hooks.requestWanted(request).peek() || hooks.demandReleased(request.demand()).peek() !== undefined;
-}
 
 function segment(id: string): void {
 	if (!id || id.includes("/") || id.includes("\\")) throw new TypeError("socket id must be one plain segment");
@@ -365,9 +363,7 @@ export class Endpoint {
 		const abort = new AbortController();
 		const signal = AbortSignal.any([this.#signal(options), abort.signal]);
 		signal.throwIfAborted();
-		const session = Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) =>
-			byte.toString(16).padStart(2, "0"),
-		).join("");
+		const session = fromBytes(crypto.getRandomValues(new Uint8Array(16)));
 		const name = `${protocol}/${this.id}/${peer}/${session}`;
 		const answer = hooks.reserveUnlistedTrack(this.#publication.broadcast, name);
 		let following: Origin.Following | undefined;
