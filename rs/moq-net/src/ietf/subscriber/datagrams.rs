@@ -48,18 +48,18 @@ impl kio::Task for Requested {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		let priority = {
 			let state = self.this.state.lock();
-			if let Some((_, request)) = state.datagram_requests.get(&self.key)
-				&& request.poll_unused(waiter).is_ready()
-				&& request.close_unused()
-			{
+			let Some((id, request)) = state.datagram_requests.get(&self.key) else {
+				return Poll::Ready(());
+			};
+			if !std::sync::Arc::ptr_eq(id, &self.id) {
+				return Poll::Ready(());
+			}
+			if request.poll_unused(waiter).is_ready() && request.close_unused() {
 				drop(state);
 				self.reject(Error::Cancel);
 				return Poll::Ready(());
 			}
-			state
-				.datagram_requests
-				.get(&self.key)
-				.and_then(|(_, request)| request.priority())
+			request.priority()
 		};
 		if let Some(priority) = priority
 			&& priority != self.priority
@@ -73,11 +73,13 @@ impl kio::Task for Requested {
 				return Poll::Ready(());
 			}
 		}
-		match ready!(self.subscribing.poll_ok(waiter)) {
-			Ok(_) => {}
-			Err(err) => self.reject(err),
+		if let Poll::Ready(Err(err)) = self.subscribing.poll_ok(waiter) {
+			self.reject(err);
+			return Poll::Ready(());
 		}
-		Poll::Ready(())
+		// A lingering track already knows its metadata. Only Shared accepting this request
+		// confirms that its new upstream subscription also owns the datagram half.
+		Poll::Pending
 	}
 }
 impl Drop for Requested {

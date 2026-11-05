@@ -7,7 +7,8 @@ How to update your code for each breaking change, newest first.
 ### moq-transport datagram tracks
 
 Datagram tracks now work over moq-transport using SUBSCRIBE and OBJECT\_DATAGRAM.
-The sequence is the group ID and the object ID is zero. Stream and datagram
+The sequence is the group ID and the object ID is zero. One upstream subscription
+serves both kinds of a name, including through relays. Stream and datagram
 consumers keep only their requested kind; nonzero object IDs are dropped by
 datagram consumers. No application API or wire encoding changes are required.
 
