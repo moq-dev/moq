@@ -1631,16 +1631,19 @@ test.each([
 	[Version.DRAFT_04, false],
 	[Version.DRAFT_05, false],
 	[Version.DRAFT_05, true],
-])("lite %s (received %s): a subscribe that beats its track resolving joins at its newest group", async (version, received) => {
-	const sub = await servedSubscription({ version, pending: true });
-	try {
-		await sub.accept([0n, 3n, 7n], received);
-		expect(await sub.servedHeader()).toBe(7n);
-		expect(await sub.servedSequence()).toBeUndefined();
-	} finally {
-		await sub.close();
-	}
-});
+])(
+	"lite %s (received %s): a subscribe that beats its track resolving joins at its newest group",
+	async (version, received) => {
+		const sub = await servedSubscription({ version, pending: true });
+		try {
+			await sub.accept([0n, 3n, 7n], received);
+			expect(await sub.servedHeader()).toBe(7n);
+			expect(await sub.servedSequence()).toBeUndefined();
+		} finally {
+			await sub.close();
+		}
+	},
+);
 
 // Lite-01/02 retain the arrival-only floor even when the answer contains history.
 test.each([Version.DRAFT_01, Version.DRAFT_02])(
