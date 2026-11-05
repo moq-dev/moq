@@ -111,7 +111,7 @@ fn fresh_group() -> Ctx {
 /// Write N small frames into a fresh group (producer-side per-frame cost).
 ///
 /// `single` is one `write_frame` per frame: a group lock plus a track-level eviction
-/// settle each. `batch32` fills a `frame::Buffer` and hands the whole thing to
+/// settle each. `batch32` fills a `moq_net::fuzz::FrameBatch` and hands the whole thing to
 /// `write_frames`, paying both once per batch.
 fn bench_write(c: &mut Criterion) {
 	let payload = Bytes::from(vec![0u8; PAYLOAD]);
@@ -120,17 +120,17 @@ fn bench_write(c: &mut Criterion) {
 		g.throughput(Throughput::Elements(n as u64));
 		g.bench_with_input(BenchmarkId::new("batch32", n), &n, |b, &n| {
 			b.iter_batched(
-				|| (fresh_group(), frame::Buffer::<32>::new()),
+				|| (fresh_group(), moq_net::fuzz::FrameBatch::<32>::new()),
 				|(mut ctx, mut buf)| {
 					for _ in 0..n {
 						let frame = frame::Frame::new(Timestamp::ZERO, payload.clone());
 						// A full buffer hands the frame back: flush, then take it.
 						if let Err(frame) = buf.push(frame) {
-							ctx.group.write_frames(&mut buf).unwrap();
+							buf.write(&mut ctx.group).unwrap();
 							buf.push(frame).unwrap();
 						}
 					}
-					ctx.group.write_frames(&mut buf).unwrap();
+					buf.write(&mut ctx.group).unwrap();
 					(ctx, buf)
 				},
 				BatchSize::SmallInput,
@@ -164,10 +164,10 @@ fn filled_group(n: usize, payload: &Bytes) -> (Ctx, group::Consumer) {
 	(ctx, consumer)
 }
 
-/// Drain a whole group through a reused `frame::Buffer<N>`.
-fn drain_batched<const N: usize>(consumer: &mut group::Consumer, buf: &mut frame::Buffer<N>) {
+/// Drain a whole group through a reused `moq_net::fuzz::FrameBatch<N>`.
+fn drain_batched<const N: usize>(consumer: &mut group::Consumer, buf: &mut moq_net::fuzz::FrameBatch<N>) {
 	loop {
-		let batch = consumer.read_frames(buf).now_or_never().unwrap().unwrap();
+		let batch = buf.read(consumer).now_or_never().unwrap().unwrap();
 		if batch.is_empty() {
 			break;
 		}
@@ -215,7 +215,7 @@ fn bench_read(c: &mut Criterion) {
 					b.iter_batched(
 						|| {
 							let (ctx, consumer) = filled_group(n, &payload);
-							(ctx, consumer, frame::Buffer::<$cap>::new())
+							(ctx, consumer, moq_net::fuzz::FrameBatch::<$cap>::new())
 						},
 						|(ctx, mut consumer, mut buf)| {
 							drain_batched(&mut consumer, &mut buf);
@@ -367,7 +367,7 @@ fn bench_roundtrip(c: &mut Criterion) {
 fn bench_relay_frames(c: &mut Criterion) {
 	#[cfg(feature = "fuzz")]
 	{
-		let mut g = c.benchmark_group("group_relay_frames");
+		let mut g = c.benchmark_group("group_relay_objects");
 		for frames in [4, 512, 8192] {
 			for subscribers in [1, 8, 64] {
 				for properties in [false, true] {
@@ -378,11 +378,18 @@ fn bench_relay_frames(c: &mut Criterion) {
 						b.iter_batched(
 							|| (0..subscribers).map(|_| context.2.consume()).collect::<Vec<_>>(),
 							|mut readers| {
-								// A capacity `group_read_frames` doesn't sweep: sharing its readers'
-								// instantiation moves them out of line and shifts that sweep.
-								let mut buffer = frame::Buffer::<16>::new();
+								let mut buffer = moq_net::fuzz::ObjectBatch::<16>::new();
+								let waiter = kio::Waiter::noop();
 								for reader in &mut readers {
-									drain_batched(reader, &mut buffer);
+									loop {
+										let Poll::Ready(count) = buffer.poll_read(&waiter, reader) else {
+											panic!("finished group blocked")
+										};
+										if count.unwrap() == 0 {
+											break;
+										}
+										buffer.inspect();
+									}
 								}
 								readers
 							},
@@ -837,14 +844,14 @@ fn streaming(b: &mut criterion::Bencher, chunk: &Bytes, arrivals: usize, threads
 					loop {
 						let reading = match frame {
 							Some(frame) => frame,
-							None => match group.poll_next_frame(&waiter) {
-								Poll::Ready(Ok(Some(next))) => frame.insert(next),
-								Poll::Ready(Ok(None)) => {
+							None => match group.next_frame().now_or_never() {
+								Some(Ok(Some(next))) => frame.insert(next),
+								Some(Ok(None)) => {
 									*group = next.lock().unwrap().clone();
 									continue;
 								}
-								Poll::Ready(Err(err)) => panic!("next frame failed: {err}"),
-								Poll::Pending => break,
+								Some(Err(err)) => panic!("next frame failed: {err}"),
+								None => break,
 							},
 						};
 						match reading.poll_read_chunk(&waiter) {

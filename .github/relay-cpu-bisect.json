@@ -3480,7 +3480,7 @@
 			]
 		}
 	],
-	"fanout_method": "just bench-fanout: user instructions per delivered group on one pinned thread, a run of many cycles less a run of zero, at the listed subscriber counts; model = the track model alone, session = publisher, relay origin, and viewers over the in-memory transport",
+	"fanout_method": "just bench-fanout: user instructions per delivered group on one pinned thread, a run of many cycles less a run of zero, at the listed subscriber counts; model = the track model alone, session = publisher, relay origin, and viewers over the in-memory transport; group = every subscriber drains one finished 512-frame group in 16-frame batches, per drained group; the recorded group runs read whole frames as group_relay_frames/plain/512 did, while the scenario now reads objects through fuzz::ObjectBatch::<16> as group_relay_objects/plain/512 does, so its new counts do not compare with them",
 	"fanout_runs": [
 		{
 			"artifact": "hist",
@@ -5111,6 +5111,809 @@
 					"per_group": 113142.93781887754
 				}
 			]
+		},
+		{
+			"artifact": "nixos2:run.4rAIYS",
+			"note": "moq-dev/moq#6995 and moq-dev/moq#7542 each against its parent, beside main at fa9c1bf2a7 (current), with callgrind",
+			"harness_revision": "fa9c1bf2a713e5cddf1ec9600a831662308f77a0",
+			"frame_pointers": false,
+			"counts": [
+				{
+					"label": "base-3f5939eb2ee3",
+					"revision": "3f5939eb2ee39f4ff9d52f6c061ff366110ced6a",
+					"scenario": "model",
+					"subscribers": 64,
+					"per_group": 11383.62037
+				},
+				{
+					"label": "base-3f5939eb2ee3",
+					"revision": "3f5939eb2ee39f4ff9d52f6c061ff366110ced6a",
+					"scenario": "model",
+					"subscribers": 512,
+					"per_group": 11183.88592810421
+				},
+				{
+					"label": "base-81fe8a6631cf",
+					"revision": "81fe8a6631cf4c3402ab7e04a1dbf3ccb61ba264",
+					"scenario": "model",
+					"subscribers": 64,
+					"per_group": 11946.947874
+				},
+				{
+					"label": "base-81fe8a6631cf",
+					"revision": "81fe8a6631cf4c3402ab7e04a1dbf3ccb61ba264",
+					"scenario": "model",
+					"subscribers": 512,
+					"per_group": 11741.044139225627
+				},
+				{
+					"label": "base-4eb9c23db5de",
+					"revision": "4eb9c23db5de2baa48ef838c357392fa6424fa2a",
+					"scenario": "model",
+					"subscribers": 64,
+					"per_group": 12130.777
+				},
+				{
+					"label": "base-4eb9c23db5de",
+					"revision": "4eb9c23db5de2baa48ef838c357392fa6424fa2a",
+					"scenario": "model",
+					"subscribers": 512,
+					"per_group": 11924.981775164726
+				},
+				{
+					"label": "base-f1034b7cc973",
+					"revision": "f1034b7cc973009bb33abfd06404be1a1dea0266",
+					"scenario": "model",
+					"subscribers": 64,
+					"per_group": 13030.641598
+				},
+				{
+					"label": "base-f1034b7cc973",
+					"revision": "f1034b7cc973009bb33abfd06404be1a1dea0266",
+					"scenario": "model",
+					"subscribers": 512,
+					"per_group": 12824.633319272965
+				},
+				{
+					"label": "current",
+					"revision": "fa9c1bf2a713e5cddf1ec9600a831662308f77a0",
+					"scenario": "model",
+					"subscribers": 64,
+					"per_group": 9842.698621
+				},
+				{
+					"label": "current",
+					"revision": "fa9c1bf2a713e5cddf1ec9600a831662308f77a0",
+					"scenario": "model",
+					"subscribers": 512,
+					"per_group": 9636.831055687053
+				},
+				{
+					"label": "base-3f5939eb2ee3",
+					"revision": "3f5939eb2ee39f4ff9d52f6c061ff366110ced6a",
+					"scenario": "session",
+					"subscribers": 64,
+					"per_group": 142667.32649552144
+				},
+				{
+					"label": "base-3f5939eb2ee3",
+					"revision": "3f5939eb2ee39f4ff9d52f6c061ff366110ced6a",
+					"scenario": "session",
+					"subscribers": 512,
+					"per_group": 140201.8951291454
+				},
+				{
+					"label": "base-81fe8a6631cf",
+					"revision": "81fe8a6631cf4c3402ab7e04a1dbf3ccb61ba264",
+					"scenario": "session",
+					"subscribers": 64,
+					"per_group": 146173.30892114525
+				},
+				{
+					"label": "base-81fe8a6631cf",
+					"revision": "81fe8a6631cf4c3402ab7e04a1dbf3ccb61ba264",
+					"scenario": "session",
+					"subscribers": 512,
+					"per_group": 143490.09075055804
+				},
+				{
+					"label": "base-4eb9c23db5de",
+					"revision": "4eb9c23db5de2baa48ef838c357392fa6424fa2a",
+					"scenario": "session",
+					"subscribers": 64,
+					"per_group": 118886.59577935061
+				},
+				{
+					"label": "base-4eb9c23db5de",
+					"revision": "4eb9c23db5de2baa48ef838c357392fa6424fa2a",
+					"scenario": "session",
+					"subscribers": 512,
+					"per_group": 116810.04079639669
+				},
+				{
+					"label": "base-f1034b7cc973",
+					"revision": "f1034b7cc973009bb33abfd06404be1a1dea0266",
+					"scenario": "session",
+					"subscribers": 64,
+					"per_group": 121965.10142754318
+				},
+				{
+					"label": "base-f1034b7cc973",
+					"revision": "f1034b7cc973009bb33abfd06404be1a1dea0266",
+					"scenario": "session",
+					"subscribers": 512,
+					"per_group": 119858.4774593431
+				},
+				{
+					"label": "current",
+					"revision": "fa9c1bf2a713e5cddf1ec9600a831662308f77a0",
+					"scenario": "session",
+					"subscribers": 64,
+					"per_group": 111825.13812579974
+				},
+				{
+					"label": "current",
+					"revision": "fa9c1bf2a713e5cddf1ec9600a831662308f77a0",
+					"scenario": "session",
+					"subscribers": 512,
+					"per_group": 110023.01396085777
+				}
+			],
+			"callgrind_session_512": {
+				"unit": "instructions per delivered group, from bench/fanout.py functions and compare",
+				"moq-dev/moq#6995 merge against parent, self": {
+					"TrackState::live": 2042.1,
+					"Chain<Flatten<..>> in live": 738.7,
+					"btree Range::next_back": 340.1,
+					"BTreeMap<u64, Slot>::range, removed": -1724.3,
+					"Cursor::probe": 1115.0,
+					"TrackState::drift_edge": -328.3,
+					"program total": 2974.5
+				},
+				"moq-dev/moq#7542 merge against parent": {
+					"runs::Layered::first inclusive": 2921.7,
+					"runs::Layered::last inclusive": 887.7,
+					"program total": 3042.7
+				},
+				"inclusive by revision": {
+					"TrackState::live": {
+						"81fe8a6631": 3782.1,
+						"f1034b7cc9": 2816.9,
+						"fa9c1bf2a7": 2839.6
+					},
+					"runs::Layered::first": {
+						"f1034b7cc9": 2921.7,
+						"fa9c1bf2a7": 1515.4
+					},
+					"runs::Layered::last": {
+						"f1034b7cc9": 887.7,
+						"fa9c1bf2a7": 601.7
+					},
+					"Cursor::probe": {
+						"81fe8a6631": 19258.3,
+						"f1034b7cc9": 16174.8,
+						"fa9c1bf2a7": 9399.6
+					}
+				},
+				"self by revision": {
+					"Cursor::probe": {
+						"81fe8a6631": 4343.2,
+						"f1034b7cc9": 3226.0,
+						"fa9c1bf2a7": 1842.4
+					}
+				},
+				"TrackState::live callers on fa9c1bf2a7": "drift_edge 18.2M and arrival 6.7M of 24.9M inclusive instructions over the run"
+			}
+		},
+		{
+			"artifact": "nixos2:run.m71Z8E",
+			"note": "this PR's live walk (92b877834f, counted as a working-tree patch on fa9c1bf2a7, so both labels record fa9c1bf2a7) against main at fa9c1bf2a7 (base)",
+			"harness_revision": "fa9c1bf2a713e5cddf1ec9600a831662308f77a0",
+			"frame_pointers": false,
+			"counts": [
+				{
+					"label": "base",
+					"revision": "fa9c1bf2a713e5cddf1ec9600a831662308f77a0",
+					"scenario": "model",
+					"subscribers": 64,
+					"per_group": 9842.699317
+				},
+				{
+					"label": "base",
+					"revision": "fa9c1bf2a713e5cddf1ec9600a831662308f77a0",
+					"scenario": "model",
+					"subscribers": 512,
+					"per_group": 9636.831806350754
+				},
+				{
+					"label": "current",
+					"revision": "fa9c1bf2a713e5cddf1ec9600a831662308f77a0",
+					"scenario": "model",
+					"subscribers": 64,
+					"per_group": 9572.745755
+				},
+				{
+					"label": "current",
+					"revision": "fa9c1bf2a713e5cddf1ec9600a831662308f77a0",
+					"scenario": "model",
+					"subscribers": 512,
+					"per_group": 9366.837443825167
+				},
+				{
+					"label": "base",
+					"revision": "fa9c1bf2a713e5cddf1ec9600a831662308f77a0",
+					"scenario": "session",
+					"subscribers": 64,
+					"per_group": 111823.2947856686
+				},
+				{
+					"label": "base",
+					"revision": "fa9c1bf2a713e5cddf1ec9600a831662308f77a0",
+					"scenario": "session",
+					"subscribers": 512,
+					"per_group": 110014.30896245217
+				},
+				{
+					"label": "current",
+					"revision": "fa9c1bf2a713e5cddf1ec9600a831662308f77a0",
+					"scenario": "session",
+					"subscribers": 64,
+					"per_group": 110923.76357565579
+				},
+				{
+					"label": "current",
+					"revision": "fa9c1bf2a713e5cddf1ec9600a831662308f77a0",
+					"scenario": "session",
+					"subscribers": 512,
+					"per_group": 109123.37050581952
+				}
+			]
+		},
+		{
+			"artifact": "desktop:run.N037x9",
+			"note": "the reader's budget asked only past the landing check (working tree) against this branch at 45351ac1d8 (base), with callgrind",
+			"harness_revision": "45351ac1d8025de6050557246b751f584e096a3a",
+			"frame_pointers": false,
+			"counts": [
+				{
+					"label": "base",
+					"revision": "45351ac1d8025de6050557246b751f584e096a3a",
+					"scenario": "session",
+					"subscribers": 1,
+					"per_group": 225948.00391
+				},
+				{
+					"label": "base",
+					"revision": "45351ac1d8025de6050557246b751f584e096a3a",
+					"scenario": "session",
+					"subscribers": 512,
+					"per_group": 110581.19509327169
+				},
+				{
+					"label": "current",
+					"revision": "45351ac1d8025de6050557246b751f584e096a3a",
+					"scenario": "session",
+					"subscribers": 1,
+					"per_group": 224883.27597
+				},
+				{
+					"label": "current",
+					"revision": "45351ac1d8025de6050557246b751f584e096a3a",
+					"scenario": "session",
+					"subscribers": 512,
+					"per_group": 109968.52706473214
+				}
+			],
+			"callgrind": {
+				"callgrind program total, session 512": {
+					"base": 105677.4,
+					"current": 105084.2
+				}
+			}
+		},
+		{
+			"artifact": "desktop:run.vS3CAR",
+			"note": "the lazy budget plus an empty drop report returning at once (working tree) against 45351ac1d8, with callgrind",
+			"harness_revision": "45351ac1d8025de6050557246b751f584e096a3a",
+			"frame_pointers": false,
+			"counts": [
+				{
+					"label": "base",
+					"revision": "45351ac1d8025de6050557246b751f584e096a3a",
+					"scenario": "session",
+					"subscribers": 512,
+					"per_group": 110582.39753069196
+				},
+				{
+					"label": "current",
+					"revision": "45351ac1d8025de6050557246b751f584e096a3a",
+					"scenario": "session",
+					"subscribers": 512,
+					"per_group": 108802.951430963
+				}
+			],
+			"callgrind": {
+				"callgrind program total, session 512": {
+					"base": 105676.3,
+					"current": 103945.7
+				}
+			}
+		},
+		{
+			"artifact": "desktop:run.yLeXzU",
+			"note": "group drain at the quest endpoints e7a5c10913 and f37d964dd3, and pacing (moq-dev/moq#7388, 7ad8d426e0) against its parent b51eb8cdec; current is c6753bd267 plus the group harness",
+			"harness_revision": "45351ac1d8025de6050557246b751f584e096a3a",
+			"frame_pointers": false,
+			"counts": [
+				{
+					"label": "base-e7a5c10913b0",
+					"revision": "e7a5c10913b02e21ef851a0250b594fe837d1425",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 149368.3935
+				},
+				{
+					"label": "base-e7a5c10913b0",
+					"revision": "e7a5c10913b02e21ef851a0250b594fe837d1425",
+					"scenario": "group",
+					"subscribers": 64,
+					"per_group": 149362.45849609375
+				},
+				{
+					"label": "base-b51eb8cdecc3",
+					"revision": "b51eb8cdecc33c858f6df8f3b2ccbcba88b9535e",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 149368.3935
+				},
+				{
+					"label": "base-b51eb8cdecc3",
+					"revision": "b51eb8cdecc33c858f6df8f3b2ccbcba88b9535e",
+					"scenario": "group",
+					"subscribers": 64,
+					"per_group": 149362.45947265625
+				},
+				{
+					"label": "base-7ad8d426e072",
+					"revision": "7ad8d426e072a4b1f03483204ec2c9ae8d3d3ffb",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 152375.13
+				},
+				{
+					"label": "base-7ad8d426e072",
+					"revision": "7ad8d426e072a4b1f03483204ec2c9ae8d3d3ffb",
+					"scenario": "group",
+					"subscribers": 64,
+					"per_group": 152369.22412109375
+				},
+				{
+					"label": "base-f37d964dd319",
+					"revision": "f37d964dd31987efe34b55375902de1380474235",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 172205.171
+				},
+				{
+					"label": "base-f37d964dd319",
+					"revision": "f37d964dd31987efe34b55375902de1380474235",
+					"scenario": "group",
+					"subscribers": 64,
+					"per_group": 172199.2099609375
+				},
+				{
+					"label": "current",
+					"revision": "c6753bd267f892c62ec1a2b8bff25ab559a68d8a",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 173221.225
+				},
+				{
+					"label": "current",
+					"revision": "c6753bd267f892c62ec1a2b8bff25ab559a68d8a",
+					"scenario": "group",
+					"subscribers": 64,
+					"per_group": 173215.2705078125
+				}
+			]
+		},
+		{
+			"artifact": "desktop:run.S9A3hY",
+			"note": "group drain after each candidate commit between pacing and f37d964dd3: the step is moq-dev/moq#7504 (25ff6e9754 against ad3ca7784a), then moq-dev/moq#7791 (8b46ba5b33)",
+			"harness_revision": "45351ac1d8025de6050557246b751f584e096a3a",
+			"frame_pointers": false,
+			"counts": [
+				{
+					"label": "base-2ec2f1d55e55",
+					"revision": "2ec2f1d55e5588f32374f5b004a7d6bd7efc9453",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 152375.3145
+				},
+				{
+					"label": "base-dde50c699f69",
+					"revision": "dde50c699f69507ced243754c2f700a6184d1576",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 152375.3475
+				},
+				{
+					"label": "base-24b04633a58c",
+					"revision": "24b04633a58cbff0144531efdb450cf227133e67",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 152375.134
+				},
+				{
+					"label": "base-f1034b7cc973",
+					"revision": "f1034b7cc973009bb33abfd06404be1a1dea0266",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 152375.1585
+				},
+				{
+					"label": "base-5ab878666c31",
+					"revision": "5ab878666c312fc2a497a31656630efeb02ca55f",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 152375.2045
+				},
+				{
+					"label": "base-ad3ca7784aa0",
+					"revision": "ad3ca7784aa00f7b8b93b8a8076304673c50e733",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 152375.2585
+				},
+				{
+					"label": "base-25ff6e97546f",
+					"revision": "25ff6e97546f59dcebde66f43b67ba55f590867c",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 171694.186
+				},
+				{
+					"label": "base-976fece17349",
+					"revision": "976fece17349666bb2ab6dad93109408ac272e8d",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 171694.1055
+				},
+				{
+					"label": "base-ee8e42a95b6c",
+					"revision": "ee8e42a95b6c2d880dc1fd0b846c47886330ecf7",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 171694.1265
+				},
+				{
+					"label": "base-8b46ba5b330f",
+					"revision": "8b46ba5b330f6bbc93aa415af6c27dbb935c4e6a",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 172205.6565
+				},
+				{
+					"label": "base-ffcb7cd97484",
+					"revision": "ffcb7cd9748422daa30e935ec464108b5a8ebb71",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 172205.268
+				},
+				{
+					"label": "current",
+					"revision": "c6753bd267f892c62ec1a2b8bff25ab559a68d8a",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 173221.276
+				}
+			]
+		},
+		{
+			"artifact": "desktop:run.R849HM",
+			"note": "group drain with callgrind across moq-dev/moq#7504",
+			"harness_revision": "45351ac1d8025de6050557246b751f584e096a3a",
+			"frame_pointers": false,
+			"counts": [
+				{
+					"label": "base-ad3ca7784aa0",
+					"revision": "ad3ca7784aa00f7b8b93b8a8076304673c50e733",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 152375.0475
+				},
+				{
+					"label": "base-25ff6e97546f",
+					"revision": "25ff6e97546f59dcebde66f43b67ba55f590867c",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 171694.049
+				},
+				{
+					"label": "current",
+					"revision": "c6753bd267f892c62ec1a2b8bff25ab559a68d8a",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 173221.221
+				}
+			],
+			"callgrind": {
+				"callgrind group 1, 25ff6e9754 against ad3ca7784a": {
+					"program total": 19319.0,
+					"poll_read_frame_through, new out-of-line layer, self": 10773.0,
+					"poll_read_frame self": 7182.0,
+					"Park::hold self": 1452.0
+				}
+			}
+		},
+		{
+			"artifact": "desktop:run.DV13e7",
+			"note": "one inline read call site plus the drain-only post-receive drop poll (working tree) against c6753bd267",
+			"harness_revision": "45351ac1d8025de6050557246b751f584e096a3a",
+			"frame_pointers": false,
+			"counts": [
+				{
+					"label": "base",
+					"revision": "c6753bd267f892c62ec1a2b8bff25ab559a68d8a",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 173221.169
+				},
+				{
+					"label": "base",
+					"revision": "c6753bd267f892c62ec1a2b8bff25ab559a68d8a",
+					"scenario": "group",
+					"subscribers": 512,
+					"per_group": 173215.162109375
+				},
+				{
+					"label": "current",
+					"revision": "c6753bd267f892c62ec1a2b8bff25ab559a68d8a",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 169115.225
+				},
+				{
+					"label": "current",
+					"revision": "c6753bd267f892c62ec1a2b8bff25ab559a68d8a",
+					"scenario": "group",
+					"subscribers": 512,
+					"per_group": 169109.18017578125
+				},
+				{
+					"label": "base",
+					"revision": "c6753bd267f892c62ec1a2b8bff25ab559a68d8a",
+					"scenario": "session",
+					"subscribers": 1,
+					"per_group": 222587.67073
+				},
+				{
+					"label": "base",
+					"revision": "c6753bd267f892c62ec1a2b8bff25ab559a68d8a",
+					"scenario": "session",
+					"subscribers": 512,
+					"per_group": 108824.46070830675
+				},
+				{
+					"label": "current",
+					"revision": "c6753bd267f892c62ec1a2b8bff25ab559a68d8a",
+					"scenario": "session",
+					"subscribers": 1,
+					"per_group": 218679.16904
+				},
+				{
+					"label": "current",
+					"revision": "c6753bd267f892c62ec1a2b8bff25ab559a68d8a",
+					"scenario": "session",
+					"subscribers": 512,
+					"per_group": 106832.64318598533
+				}
+			]
+		},
+		{
+			"artifact": "desktop:run.lr8Dpl",
+			"note": "the prefetch served first, with the changes above (working tree), against c6753bd267 and ad3ca7784a (before moq-dev/moq#7504)",
+			"harness_revision": "45351ac1d8025de6050557246b751f584e096a3a",
+			"frame_pointers": false,
+			"counts": [
+				{
+					"label": "base-c6753bd267f8",
+					"revision": "c6753bd267f892c62ec1a2b8bff25ab559a68d8a",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 173221.166
+				},
+				{
+					"label": "base-c6753bd267f8",
+					"revision": "c6753bd267f892c62ec1a2b8bff25ab559a68d8a",
+					"scenario": "group",
+					"subscribers": 512,
+					"per_group": 173215.119140625
+				},
+				{
+					"label": "base-ad3ca7784aa0",
+					"revision": "ad3ca7784aa00f7b8b93b8a8076304673c50e733",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 152375.051
+				},
+				{
+					"label": "base-ad3ca7784aa0",
+					"revision": "ad3ca7784aa00f7b8b93b8a8076304673c50e733",
+					"scenario": "group",
+					"subscribers": 512,
+					"per_group": 152369.01806640625
+				},
+				{
+					"label": "current",
+					"revision": "c6753bd267f892c62ec1a2b8bff25ab559a68d8a",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 135396.2205
+				},
+				{
+					"label": "current",
+					"revision": "c6753bd267f892c62ec1a2b8bff25ab559a68d8a",
+					"scenario": "group",
+					"subscribers": 512,
+					"per_group": 135390.17578125
+				},
+				{
+					"label": "base-c6753bd267f8",
+					"revision": "c6753bd267f892c62ec1a2b8bff25ab559a68d8a",
+					"scenario": "session",
+					"subscribers": 1,
+					"per_group": 222589.22774
+				},
+				{
+					"label": "base-c6753bd267f8",
+					"revision": "c6753bd267f892c62ec1a2b8bff25ab559a68d8a",
+					"scenario": "session",
+					"subscribers": 512,
+					"per_group": 108795.25971580038
+				},
+				{
+					"label": "base-ad3ca7784aa0",
+					"revision": "ad3ca7784aa00f7b8b93b8a8076304673c50e733",
+					"scenario": "session",
+					"subscribers": 1,
+					"per_group": 243706.45894
+				},
+				{
+					"label": "base-ad3ca7784aa0",
+					"revision": "ad3ca7784aa00f7b8b93b8a8076304673c50e733",
+					"scenario": "session",
+					"subscribers": 512,
+					"per_group": 120849.10758131377
+				},
+				{
+					"label": "current",
+					"revision": "c6753bd267f892c62ec1a2b8bff25ab559a68d8a",
+					"scenario": "session",
+					"subscribers": 1,
+					"per_group": 218664.50306
+				},
+				{
+					"label": "current",
+					"revision": "c6753bd267f892c62ec1a2b8bff25ab559a68d8a",
+					"scenario": "session",
+					"subscribers": 512,
+					"per_group": 106852.6315369898
+				}
+			]
+		},
+		{
+			"artifact": "desktop:run.1gKfjA",
+			"note": "this PR (f2d552cca7) against 45351ac1d8 and e7a5c10913, with callgrind",
+			"harness_revision": "f2d552cca7",
+			"frame_pointers": false,
+			"counts": [
+				{
+					"label": "base-45351ac1d802",
+					"revision": "45351ac1d8025de6050557246b751f584e096a3a",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 173231.1615
+				},
+				{
+					"label": "base-45351ac1d802",
+					"revision": "45351ac1d8025de6050557246b751f584e096a3a",
+					"scenario": "group",
+					"subscribers": 512,
+					"per_group": 173225.1162109375
+				},
+				{
+					"label": "base-e7a5c10913b0",
+					"revision": "e7a5c10913b02e21ef851a0250b594fe837d1425",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 149368.395
+				},
+				{
+					"label": "base-e7a5c10913b0",
+					"revision": "e7a5c10913b02e21ef851a0250b594fe837d1425",
+					"scenario": "group",
+					"subscribers": 512,
+					"per_group": 149362.369140625
+				},
+				{
+					"label": "current",
+					"revision": "f2d552cca7370cb9ba3fc636ed2d03f66c4d3559",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 135396.222
+				},
+				{
+					"label": "current",
+					"revision": "f2d552cca7370cb9ba3fc636ed2d03f66c4d3559",
+					"scenario": "group",
+					"subscribers": 512,
+					"per_group": 135390.17578125
+				},
+				{
+					"label": "base-45351ac1d802",
+					"revision": "45351ac1d8025de6050557246b751f584e096a3a",
+					"scenario": "session",
+					"subscribers": 1,
+					"per_group": 225948.01262
+				},
+				{
+					"label": "base-45351ac1d802",
+					"revision": "45351ac1d8025de6050557246b751f584e096a3a",
+					"scenario": "session",
+					"subscribers": 512,
+					"per_group": 110581.04552973533
+				},
+				{
+					"label": "base-e7a5c10913b0",
+					"revision": "e7a5c10913b02e21ef851a0250b594fe837d1425",
+					"scenario": "session",
+					"subscribers": 1,
+					"per_group": 233562.49815
+				},
+				{
+					"label": "base-e7a5c10913b0",
+					"revision": "e7a5c10913b02e21ef851a0250b594fe837d1425",
+					"scenario": "session",
+					"subscribers": 512,
+					"per_group": 115444.22222775829
+				},
+				{
+					"label": "current",
+					"revision": "f2d552cca7370cb9ba3fc636ed2d03f66c4d3559",
+					"scenario": "session",
+					"subscribers": 1,
+					"per_group": 218664.30033
+				},
+				{
+					"label": "current",
+					"revision": "f2d552cca7370cb9ba3fc636ed2d03f66c4d3559",
+					"scenario": "session",
+					"subscribers": 512,
+					"per_group": 106852.35546875
+				}
+			],
+			"callgrind": {
+				"callgrind program total": {
+					"session 512": {
+						"base 45351ac1d8": 105664.8,
+						"current": 101955.4
+					},
+					"session 1": {
+						"base 45351ac1d8": 224392.4,
+						"current": 217119.1
+					},
+					"group 1": {
+						"base 45351ac1d8": 173254.5,
+						"current": 135420.1
+					}
+				},
+				"current session 512 by caller": {
+					"Cursor::probe from the drop poll": 3467,
+					"Cursor::probe from the receive peek": 3460,
+					"group::Consumer::poll_expiry (a blocked read and an opening group)": 886
+				}
+			}
 		}
 	],
 	"quiet_host_runs": [
@@ -5235,9 +6038,1989 @@
 					}
 				}
 			}
+		},
+		{
+			"artifact": "nixos2:run.nPd1Nb",
+			"host": "nixos2 (i7-8700; no quest gate there, so each run started after 80 s at load under 2.5 with no other process above half a core)",
+			"relay_cpus": "0-3",
+			"generator_cpus": "4,5,10,11",
+			"generator_revision": "21d6da9fc1",
+			"instruction_period": 2000003,
+			"workload": "chat",
+			"runtime": "io-uring-workers",
+			"revisions": {
+				"base-cdff3c8f952b": "cdff3c8f95, the old endpoint",
+				"base-674624b74972": "674624b749, before moq-dev/moq#6231 (in-tree qmux)",
+				"base-72259ab3cc3d": "72259ab3cc, moq-dev/moq#6231 merged",
+				"base-43fc9251d71b": "43fc9251d7, before moq-dev/moq#5878 (receive leases)",
+				"base-756637200cb1": "756637200c, moq-dev/moq#5878 merged",
+				"current": "fa9c1bf2a7 (main)"
+			},
+			"note": "in-tree qmux and receive leases against their parents, with the old endpoint and main; superseded by run.S0G1Z7 and run.ssZrgC: another benchmark ran on the host from 10:32 to 10:41 PST (round 2) and other agents loaded it from 10:53 on (rounds 3-4)",
+			"summary": {
+				"base-cdff3c8f952b": {
+					"4": {
+						"cells": [
+							{
+								"cell": "relay/base-cdff3c8f952b/round-1/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 107293.44947647768,
+								"cycles_per_frame": 256614.11540890482,
+								"recv_fps": 19999.99641179648,
+								"groups_lost": 0,
+								"host_load_1m": 3.41
+							},
+							{
+								"cell": "relay/base-cdff3c8f952b/round-2/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 112020.88567258869,
+								"cycles_per_frame": 233427.64383328473,
+								"recv_fps": 20000.0,
+								"groups_lost": 0,
+								"host_load_1m": 2.03
+							},
+							{
+								"cell": "relay/base-cdff3c8f952b/round-3/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 104193.32625231904,
+								"cycles_per_frame": 349500.36762604164,
+								"recv_fps": 22070.137181124872,
+								"groups_lost": 10495,
+								"host_load_1m": 18.63
+							},
+							{
+								"cell": "relay/base-cdff3c8f952b/round-4/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 102647.33240158105,
+								"cycles_per_frame": 335409.25206338876,
+								"recv_fps": 23331.915662838535,
+								"groups_lost": 0,
+								"host_load_1m": 11.97
+							}
+						],
+						"instructions_per_frame": {
+							"median": 105743.38786439836,
+							"min": 102647.33240158105,
+							"max": 112020.88567258869
+						},
+						"cycles_per_frame": {
+							"median": 296011.6837361468,
+							"min": 233427.64383328473,
+							"max": 349500.36762604164
+						},
+						"recv_fps": {
+							"median": 21035.068590562434,
+							"min": 19999.99641179648,
+							"max": 23331.915662838535
+						},
+						"groups_lost": {
+							"median": 0.0,
+							"min": 0,
+							"max": 10495
+						},
+						"host_load_1m": {
+							"median": 7.69,
+							"min": 2.03,
+							"max": 18.63
+						}
+					}
+				},
+				"base-674624b74972": {
+					"4": {
+						"cells": [
+							{
+								"cell": "relay/base-674624b74972/round-1/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 116064.0182945456,
+								"cycles_per_frame": 284038.0372225478,
+								"recv_fps": 20000.0,
+								"groups_lost": 0,
+								"host_load_1m": 4.27
+							},
+							{
+								"cell": "relay/base-674624b74972/round-2/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 119225.8016337427,
+								"cycles_per_frame": 278378.5001455593,
+								"recv_fps": 20000.0,
+								"groups_lost": 0,
+								"host_load_1m": 2.91
+							},
+							{
+								"cell": "relay/base-674624b74972/round-3/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 108407.79553900972,
+								"cycles_per_frame": 390530.5129091481,
+								"recv_fps": 22679.533831544733,
+								"groups_lost": 3670,
+								"host_load_1m": 13.79
+							},
+							{
+								"cell": "relay/base-674624b74972/round-4/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 109920.84379254498,
+								"cycles_per_frame": 380286.23060173256,
+								"recv_fps": 20879.050875971,
+								"groups_lost": 0,
+								"host_load_1m": 12.59
+							}
+						],
+						"instructions_per_frame": {
+							"median": 112992.4310435453,
+							"min": 108407.79553900972,
+							"max": 119225.8016337427
+						},
+						"cycles_per_frame": {
+							"median": 332162.13391214015,
+							"min": 278378.5001455593,
+							"max": 390530.5129091481
+						},
+						"recv_fps": {
+							"median": 20439.5254379855,
+							"min": 20000.0,
+							"max": 22679.533831544733
+						},
+						"groups_lost": {
+							"median": 0.0,
+							"min": 0,
+							"max": 3670
+						},
+						"host_load_1m": {
+							"median": 8.43,
+							"min": 2.91,
+							"max": 13.79
+						}
+					}
+				},
+				"base-72259ab3cc3d": {
+					"4": {
+						"cells": [
+							{
+								"cell": "relay/base-72259ab3cc3d/round-1/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 117491.92032608019,
+								"cycles_per_frame": 267471.6747536516,
+								"recv_fps": 19996.000391367954,
+								"groups_lost": 0,
+								"host_load_1m": 3.15
+							},
+							{
+								"cell": "relay/base-72259ab3cc3d/round-2/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 118893.42468247692,
+								"cycles_per_frame": 305343.3812316238,
+								"recv_fps": 20001.037748663013,
+								"groups_lost": 0,
+								"host_load_1m": 3.22
+							},
+							{
+								"cell": "relay/base-72259ab3cc3d/round-3/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 120580.73424893965,
+								"cycles_per_frame": 261145.4873614282,
+								"recv_fps": 19998.4049150517,
+								"groups_lost": 0,
+								"host_load_1m": 2.14
+							},
+							{
+								"cell": "relay/base-72259ab3cc3d/round-4/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 97343.83487083412,
+								"cycles_per_frame": 307231.7547016757,
+								"recv_fps": 23739.94315358436,
+								"groups_lost": 34379,
+								"host_load_1m": 12.18
+							}
+						],
+						"instructions_per_frame": {
+							"median": 118192.67250427855,
+							"min": 97343.83487083412,
+							"max": 120580.73424893965
+						},
+						"cycles_per_frame": {
+							"median": 286407.5279926377,
+							"min": 261145.4873614282,
+							"max": 307231.7547016757
+						},
+						"recv_fps": {
+							"median": 19999.721331857356,
+							"min": 19996.000391367954,
+							"max": 23739.94315358436
+						},
+						"groups_lost": {
+							"median": 0.0,
+							"min": 0,
+							"max": 34379
+						},
+						"host_load_1m": {
+							"median": 3.185,
+							"min": 2.14,
+							"max": 12.18
+						}
+					}
+				},
+				"base-43fc9251d71b": {
+					"4": {
+						"cells": [
+							{
+								"cell": "relay/base-43fc9251d71b/round-1/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 125822.8702265522,
+								"cycles_per_frame": 271575.53130708146,
+								"recv_fps": 19997.580153327697,
+								"groups_lost": 0,
+								"host_load_1m": 2.37
+							},
+							{
+								"cell": "relay/base-43fc9251d71b/round-2/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 126226.75918792057,
+								"cycles_per_frame": 265659.0141503531,
+								"recv_fps": 20001.5564720836,
+								"groups_lost": 0,
+								"host_load_1m": 3.28
+							},
+							{
+								"cell": "relay/base-43fc9251d71b/round-3/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 132963.85918654423,
+								"cycles_per_frame": 298522.45293065876,
+								"recv_fps": 20003.999636556462,
+								"groups_lost": 0,
+								"host_load_1m": 1.69
+							},
+							{
+								"cell": "relay/base-43fc9251d71b/round-4/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 125943.03006772001,
+								"cycles_per_frame": 392626.6292770254,
+								"recv_fps": 20082.981629599166,
+								"groups_lost": 0,
+								"host_load_1m": 12.54
+							}
+						],
+						"instructions_per_frame": {
+							"median": 126084.8946278203,
+							"min": 125822.8702265522,
+							"max": 132963.85918654423
+						},
+						"cycles_per_frame": {
+							"median": 285048.99211887014,
+							"min": 265659.0141503531,
+							"max": 392626.6292770254
+						},
+						"recv_fps": {
+							"median": 20002.77805432003,
+							"min": 19997.580153327697,
+							"max": 20082.981629599166
+						},
+						"groups_lost": {
+							"median": 0.0,
+							"min": 0,
+							"max": 0
+						},
+						"host_load_1m": {
+							"median": 2.825,
+							"min": 1.69,
+							"max": 12.54
+						}
+					}
+				},
+				"base-756637200cb1": {
+					"4": {
+						"cells": [
+							{
+								"cell": "relay/base-756637200cb1/round-1/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 131695.32839197942,
+								"cycles_per_frame": 315275.38207840413,
+								"recv_fps": 20000.0,
+								"groups_lost": 0,
+								"host_load_1m": 2.45
+							},
+							{
+								"cell": "relay/base-756637200cb1/round-2/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 128990.19482318428,
+								"cycles_per_frame": 296849.98342244996,
+								"recv_fps": 20001.562462420403,
+								"groups_lost": 0,
+								"host_load_1m": 2.62
+							},
+							{
+								"cell": "relay/base-756637200cb1/round-3/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 129729.59919803806,
+								"cycles_per_frame": 355960.2182700421,
+								"recv_fps": 20000.0,
+								"groups_lost": 0,
+								"host_load_1m": 3.31
+							},
+							{
+								"cell": "relay/base-756637200cb1/round-4/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 103470.06997544979,
+								"cycles_per_frame": 368195.424479838,
+								"recv_fps": 20927.985147646843,
+								"groups_lost": 3519,
+								"host_load_1m": 15.46
+							}
+						],
+						"instructions_per_frame": {
+							"median": 129359.89701061117,
+							"min": 103470.06997544979,
+							"max": 131695.32839197942
+						},
+						"cycles_per_frame": {
+							"median": 335617.80017422314,
+							"min": 296849.98342244996,
+							"max": 368195.424479838
+						},
+						"recv_fps": {
+							"median": 20000.781231210203,
+							"min": 20000.0,
+							"max": 20927.985147646843
+						},
+						"groups_lost": {
+							"median": 0.0,
+							"min": 0,
+							"max": 3519
+						},
+						"host_load_1m": {
+							"median": 2.965,
+							"min": 2.45,
+							"max": 15.46
+						}
+					}
+				},
+				"current": {
+					"4": {
+						"cells": [
+							{
+								"cell": "relay/current/round-1/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 135638.3369038264,
+								"cycles_per_frame": 281050.02885593346,
+								"recv_fps": 20000.0,
+								"groups_lost": 0,
+								"host_load_1m": 3.22
+							},
+							{
+								"cell": "relay/current/round-2/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 138452.5155594443,
+								"cycles_per_frame": 402598.4455126273,
+								"recv_fps": 19900.352110393003,
+								"groups_lost": 0,
+								"host_load_1m": 8.88
+							},
+							{
+								"cell": "relay/current/round-3/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 139559.37530375927,
+								"cycles_per_frame": 433917.9115404439,
+								"recv_fps": 19044.24484081281,
+								"groups_lost": 0,
+								"host_load_1m": 5.25
+							},
+							{
+								"cell": "relay/current/round-4/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 136821.02481219388,
+								"cycles_per_frame": 411649.08287637756,
+								"recv_fps": 23207.15104141366,
+								"groups_lost": 0,
+								"host_load_1m": 11.45
+							}
+						],
+						"instructions_per_frame": {
+							"median": 137636.77018581907,
+							"min": 135638.3369038264,
+							"max": 139559.37530375927
+						},
+						"cycles_per_frame": {
+							"median": 407123.76419450244,
+							"min": 281050.02885593346,
+							"max": 433917.9115404439
+						},
+						"recv_fps": {
+							"median": 19950.1760551965,
+							"min": 19044.24484081281,
+							"max": 23207.15104141366
+						},
+						"groups_lost": {
+							"median": 0.0,
+							"min": 0,
+							"max": 0
+						},
+						"host_load_1m": {
+							"median": 7.065,
+							"min": 3.22,
+							"max": 11.45
+						}
+					}
+				}
+			}
+		},
+		{
+			"artifact": "nixos2:run.ssZrgC",
+			"host": "nixos2 (i7-8700; no quest gate there, so each run started after 80 s at load under 2.5 with no other process above half a core)",
+			"relay_cpus": "0-3",
+			"generator_cpus": "4,5,10,11",
+			"generator_revision": "21d6da9fc1",
+			"instruction_period": 2000003,
+			"workload": "chat",
+			"runtime": "io-uring-workers",
+			"revisions": {
+				"base-674624b74972": "674624b749, before moq-dev/moq#6231 (in-tree qmux)",
+				"base-72259ab3cc3d": "72259ab3cc, moq-dev/moq#6231 merged",
+				"base-43fc9251d71b": "43fc9251d7, before moq-dev/moq#5878 (receive leases)",
+				"base-756637200cb1": "756637200c, moq-dev/moq#5878 merged",
+				"current": "fa9c1bf2a7 (main)"
+			},
+			"note": "in-tree qmux and receive leases, each against its parent, three quiet rounds",
+			"summary": {
+				"base-674624b74972": {
+					"4": {
+						"cells": [
+							{
+								"cell": "relay/base-674624b74972/round-1/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 122951.71995644919,
+								"cycles_per_frame": 255971.83943255042,
+								"recv_fps": 20000.0,
+								"groups_lost": 0,
+								"host_load_1m": 3.22
+							},
+							{
+								"cell": "relay/base-674624b74972/round-2/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 120152.74519201617,
+								"cycles_per_frame": 247535.1134764069,
+								"recv_fps": 20000.90810255991,
+								"groups_lost": 0,
+								"host_load_1m": 1.65
+							},
+							{
+								"cell": "relay/base-674624b74972/round-3/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 121268.01209849074,
+								"cycles_per_frame": 252832.79017265842,
+								"recv_fps": 20000.004874391467,
+								"groups_lost": 0,
+								"host_load_1m": 1.98
+							}
+						],
+						"instructions_per_frame": {
+							"median": 121268.01209849074,
+							"min": 120152.74519201617,
+							"max": 122951.71995644919
+						},
+						"cycles_per_frame": {
+							"median": 252832.79017265842,
+							"min": 247535.1134764069,
+							"max": 255971.83943255042
+						},
+						"recv_fps": {
+							"median": 20000.004874391467,
+							"min": 20000.0,
+							"max": 20000.90810255991
+						},
+						"groups_lost": {
+							"median": 0,
+							"min": 0,
+							"max": 0
+						},
+						"host_load_1m": {
+							"median": 1.98,
+							"min": 1.65,
+							"max": 3.22
+						}
+					}
+				},
+				"base-72259ab3cc3d": {
+					"4": {
+						"cells": [
+							{
+								"cell": "relay/base-72259ab3cc3d/round-1/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 116487.73864539976,
+								"cycles_per_frame": 322745.19617305894,
+								"recv_fps": 20005.242525393518,
+								"groups_lost": 0,
+								"host_load_1m": 2.95
+							},
+							{
+								"cell": "relay/base-72259ab3cc3d/round-2/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 119442.7442376012,
+								"cycles_per_frame": 290409.16399039346,
+								"recv_fps": 20000.0,
+								"groups_lost": 0,
+								"host_load_1m": 2.8
+							},
+							{
+								"cell": "relay/base-72259ab3cc3d/round-3/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 122598.85023234437,
+								"cycles_per_frame": 247270.55289301067,
+								"recv_fps": 19937.584989648178,
+								"groups_lost": 0,
+								"host_load_1m": 2.13
+							}
+						],
+						"instructions_per_frame": {
+							"median": 119442.7442376012,
+							"min": 116487.73864539976,
+							"max": 122598.85023234437
+						},
+						"cycles_per_frame": {
+							"median": 290409.16399039346,
+							"min": 247270.55289301067,
+							"max": 322745.19617305894
+						},
+						"recv_fps": {
+							"median": 20000.0,
+							"min": 19937.584989648178,
+							"max": 20005.242525393518
+						},
+						"groups_lost": {
+							"median": 0,
+							"min": 0,
+							"max": 0
+						},
+						"host_load_1m": {
+							"median": 2.8,
+							"min": 2.13,
+							"max": 2.95
+						}
+					}
+				},
+				"base-43fc9251d71b": {
+					"4": {
+						"cells": [
+							{
+								"cell": "relay/base-43fc9251d71b/round-1/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 134383.72124410505,
+								"cycles_per_frame": 270687.509726875,
+								"recv_fps": 20000.787516353554,
+								"groups_lost": 0,
+								"host_load_1m": 2.26
+							},
+							{
+								"cell": "relay/base-43fc9251d71b/round-2/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 130907.65981918285,
+								"cycles_per_frame": 338466.9148330873,
+								"recv_fps": 20001.509273304517,
+								"groups_lost": 0,
+								"host_load_1m": 3.53
+							},
+							{
+								"cell": "relay/base-43fc9251d71b/round-3/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 134442.35488086086,
+								"cycles_per_frame": 261526.35964515782,
+								"recv_fps": 20000.004522207015,
+								"groups_lost": 0,
+								"host_load_1m": 1.97
+							}
+						],
+						"instructions_per_frame": {
+							"median": 134383.72124410505,
+							"min": 130907.65981918285,
+							"max": 134442.35488086086
+						},
+						"cycles_per_frame": {
+							"median": 270687.509726875,
+							"min": 261526.35964515782,
+							"max": 338466.9148330873
+						},
+						"recv_fps": {
+							"median": 20000.787516353554,
+							"min": 20000.004522207015,
+							"max": 20001.509273304517
+						},
+						"groups_lost": {
+							"median": 0,
+							"min": 0,
+							"max": 0
+						},
+						"host_load_1m": {
+							"median": 2.26,
+							"min": 1.97,
+							"max": 3.53
+						}
+					}
+				},
+				"base-756637200cb1": {
+					"4": {
+						"cells": [
+							{
+								"cell": "relay/base-756637200cb1/round-1/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 135052.80333709394,
+								"cycles_per_frame": 304416.9337026374,
+								"recv_fps": 20000.0,
+								"groups_lost": 0,
+								"host_load_1m": 2.58
+							},
+							{
+								"cell": "relay/base-756637200cb1/round-2/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 135159.83535621187,
+								"cycles_per_frame": 296107.5328275039,
+								"recv_fps": 19960.534692361925,
+								"groups_lost": 0,
+								"host_load_1m": 2.13
+							},
+							{
+								"cell": "relay/base-756637200cb1/round-3/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 136499.2375161751,
+								"cycles_per_frame": 274499.05530350225,
+								"recv_fps": 20000.0,
+								"groups_lost": 0,
+								"host_load_1m": 2.24
+							}
+						],
+						"instructions_per_frame": {
+							"median": 135159.83535621187,
+							"min": 135052.80333709394,
+							"max": 136499.2375161751
+						},
+						"cycles_per_frame": {
+							"median": 296107.5328275039,
+							"min": 274499.05530350225,
+							"max": 304416.9337026374
+						},
+						"recv_fps": {
+							"median": 20000.0,
+							"min": 19960.534692361925,
+							"max": 20000.0
+						},
+						"groups_lost": {
+							"median": 0,
+							"min": 0,
+							"max": 0
+						},
+						"host_load_1m": {
+							"median": 2.24,
+							"min": 2.13,
+							"max": 2.58
+						}
+					}
+				},
+				"current": {
+					"4": {
+						"cells": [
+							{
+								"cell": "relay/current/round-1/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 141565.8413293819,
+								"cycles_per_frame": 332402.78685216536,
+								"recv_fps": 19998.532326335226,
+								"groups_lost": 0,
+								"host_load_1m": 2.11
+							},
+							{
+								"cell": "relay/current/round-2/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 143133.34262850747,
+								"cycles_per_frame": 290122.6365970305,
+								"recv_fps": 20000.003363867825,
+								"groups_lost": 0,
+								"host_load_1m": 2.44
+							},
+							{
+								"cell": "relay/current/round-3/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 142331.72457972387,
+								"cycles_per_frame": 302572.7012703506,
+								"recv_fps": 20001.267371543225,
+								"groups_lost": 0,
+								"host_load_1m": 1.83
+							}
+						],
+						"instructions_per_frame": {
+							"median": 142331.72457972387,
+							"min": 141565.8413293819,
+							"max": 143133.34262850747
+						},
+						"cycles_per_frame": {
+							"median": 302572.7012703506,
+							"min": 290122.6365970305,
+							"max": 332402.78685216536
+						},
+						"recv_fps": {
+							"median": 20000.003363867825,
+							"min": 19998.532326335226,
+							"max": 20001.267371543225
+						},
+						"groups_lost": {
+							"median": 0,
+							"min": 0,
+							"max": 0
+						},
+						"host_load_1m": {
+							"median": 2.11,
+							"min": 1.83,
+							"max": 2.44
+						}
+					}
+				}
+			}
+		},
+		{
+			"artifact": "nixos2:run.YxLYgw",
+			"host": "nixos2 (i7-8700; no quest gate there, so each run started after 80 s at load under 2.5 with no other process above half a core)",
+			"relay_cpus": "0-3",
+			"generator_cpus": "4,5,10,11",
+			"generator_revision": "21d6da9fc1",
+			"instruction_period": 2000003,
+			"workload": "chat",
+			"runtime": "io-uring-workers",
+			"revisions": {
+				"base-72259ab3cc3d": "72259ab3cc, moq-dev/moq#6231 merged",
+				"base-d44813cb703b": "d44813cb70, before moq-dev/moq#6142 (signed priorities)",
+				"base-b4dfafac8879": "b4dfafac88, moq-dev/moq#6142 merged",
+				"base-1f5caa7026bc": "1f5caa7026, moq-dev/moq#6279 merged (GSO batch end)",
+				"base-28a8c9a7a665": "28a8c9a7a6, before moq-dev/moq#6111 (public ingest)",
+				"base-9f9149812ce3": "9f9149812c, moq-dev/moq#6111 merged",
+				"base-a9a85580a448": "a9a85580a4, moq-dev/moq#6108 merged (m0 simplification audit)",
+				"base-43fc9251d71b": "43fc9251d7, before moq-dev/moq#5878 (receive leases)",
+				"current": "fa9c1bf2a7 (main)"
+			},
+			"note": "every candidate between the qmux merge and the leases parent: the step is public ingest (moq-dev/moq#6111), in every round",
+			"attribution": {
+				"unit": "instructions per frame, base-28a8c9a7a665 against base-9f9149812ce3 in rounds 2 and 3, each function's share of the fixed-period stacks times the cell's count",
+				"inclusive": {
+					"kio Tasks<GroupServe>::poll (each viewer's group serving)": 5333,
+					"group::Consumer::poll_read_frame": 2645,
+					"group::Consumer::poll_next_frame (new)": 1931,
+					"poll_expired_if_blocked (new)": 1993,
+					"group::Consumer::poll_expired_while_pending": 1931,
+					"resume::Recover::poll_budget": 1158,
+					"expiry::Wakes::watch_landing": 892,
+					"track state lock poll in Cursor::poll_drop (new closure)": 2020,
+					"track state lock poll in poll_recv_with (new closure)": 1035,
+					"track state lock poll in poll_stale (new closure)": 756
+				},
+				"self": {
+					"unlock": 1264,
+					"lock": 763,
+					"record": 762,
+					"memmove": 516
+				}
+			},
+			"summary": {
+				"base-72259ab3cc3d": {
+					"4": {
+						"cells": [
+							{
+								"cell": "relay/base-72259ab3cc3d/round-1/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 116600.80403378875,
+								"cycles_per_frame": 296404.0251797434,
+								"recv_fps": 19996.917291659734,
+								"groups_lost": 0,
+								"host_load_1m": 7.36
+							},
+							{
+								"cell": "relay/base-72259ab3cc3d/round-2/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 120678.54920229728,
+								"cycles_per_frame": 259910.03051973105,
+								"recv_fps": 20001.739928956864,
+								"groups_lost": 0,
+								"host_load_1m": 12.25
+							},
+							{
+								"cell": "relay/base-72259ab3cc3d/round-3/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 119530.10853187667,
+								"cycles_per_frame": 274015.0971549953,
+								"recv_fps": 19997.146480161893,
+								"groups_lost": 0,
+								"host_load_1m": 3.26
+							}
+						],
+						"instructions_per_frame": {
+							"median": 119530.10853187667,
+							"min": 116600.80403378875,
+							"max": 120678.54920229728
+						},
+						"cycles_per_frame": {
+							"median": 274015.0971549953,
+							"min": 259910.03051973105,
+							"max": 296404.0251797434
+						},
+						"recv_fps": {
+							"median": 19997.146480161893,
+							"min": 19996.917291659734,
+							"max": 20001.739928956864
+						},
+						"groups_lost": {
+							"median": 0,
+							"min": 0,
+							"max": 0
+						},
+						"host_load_1m": {
+							"median": 7.36,
+							"min": 3.26,
+							"max": 12.25
+						}
+					}
+				},
+				"base-d44813cb703b": {
+					"4": {
+						"cells": [
+							{
+								"cell": "relay/base-d44813cb703b/round-1/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 118467.2804576051,
+								"cycles_per_frame": 303606.9456271673,
+								"recv_fps": 19799.4798960785,
+								"groups_lost": 0,
+								"host_load_1m": 4.71
+							},
+							{
+								"cell": "relay/base-d44813cb703b/round-2/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 116177.8865474754,
+								"cycles_per_frame": 335911.7712660491,
+								"recv_fps": 20003.159301608357,
+								"groups_lost": 0,
+								"host_load_1m": 7.59
+							},
+							{
+								"cell": "relay/base-d44813cb703b/round-3/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 122443.11178381351,
+								"cycles_per_frame": 259874.8655057333,
+								"recv_fps": 20000.0,
+								"groups_lost": 0,
+								"host_load_1m": 2.13
+							}
+						],
+						"instructions_per_frame": {
+							"median": 118467.2804576051,
+							"min": 116177.8865474754,
+							"max": 122443.11178381351
+						},
+						"cycles_per_frame": {
+							"median": 303606.9456271673,
+							"min": 259874.8655057333,
+							"max": 335911.7712660491
+						},
+						"recv_fps": {
+							"median": 20000.0,
+							"min": 19799.4798960785,
+							"max": 20003.159301608357
+						},
+						"groups_lost": {
+							"median": 0,
+							"min": 0,
+							"max": 0
+						},
+						"host_load_1m": {
+							"median": 4.71,
+							"min": 2.13,
+							"max": 7.59
+						}
+					}
+				},
+				"base-b4dfafac8879": {
+					"4": {
+						"cells": [
+							{
+								"cell": "relay/base-b4dfafac8879/round-1/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 117706.50888977521,
+								"cycles_per_frame": 295017.2280609578,
+								"recv_fps": 20000.39539981791,
+								"groups_lost": 0,
+								"host_load_1m": 4.58
+							},
+							{
+								"cell": "relay/base-b4dfafac8879/round-2/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 111386.88587200461,
+								"cycles_per_frame": 366468.7396328849,
+								"recv_fps": 23357.823035955247,
+								"groups_lost": 0,
+								"host_load_1m": 15.53
+							},
+							{
+								"cell": "relay/base-b4dfafac8879/round-3/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 121470.82141956154,
+								"cycles_per_frame": 262853.85043358454,
+								"recv_fps": 19998.819524420833,
+								"groups_lost": 0,
+								"host_load_1m": 4.47
+							}
+						],
+						"instructions_per_frame": {
+							"median": 117706.50888977521,
+							"min": 111386.88587200461,
+							"max": 121470.82141956154
+						},
+						"cycles_per_frame": {
+							"median": 295017.2280609578,
+							"min": 262853.85043358454,
+							"max": 366468.7396328849
+						},
+						"recv_fps": {
+							"median": 20000.39539981791,
+							"min": 19998.819524420833,
+							"max": 23357.823035955247
+						},
+						"groups_lost": {
+							"median": 0,
+							"min": 0,
+							"max": 0
+						},
+						"host_load_1m": {
+							"median": 4.58,
+							"min": 4.47,
+							"max": 15.53
+						}
+					}
+				},
+				"base-1f5caa7026bc": {
+					"4": {
+						"cells": [
+							{
+								"cell": "relay/base-1f5caa7026bc/round-1/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 122293.53437754198,
+								"cycles_per_frame": 259402.52604331865,
+								"recv_fps": 20002.39666995295,
+								"groups_lost": 0,
+								"host_load_1m": 2.73
+							},
+							{
+								"cell": "relay/base-1f5caa7026bc/round-2/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 114063.49945336058,
+								"cycles_per_frame": 373406.21364514437,
+								"recv_fps": 22082.540562045557,
+								"groups_lost": 0,
+								"host_load_1m": 11.77
+							},
+							{
+								"cell": "relay/base-1f5caa7026bc/round-3/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 118722.77636613933,
+								"cycles_per_frame": 282982.7753007605,
+								"recv_fps": 20003.99958246546,
+								"groups_lost": 0,
+								"host_load_1m": 2.7
+							}
+						],
+						"instructions_per_frame": {
+							"median": 118722.77636613933,
+							"min": 114063.49945336058,
+							"max": 122293.53437754198
+						},
+						"cycles_per_frame": {
+							"median": 282982.7753007605,
+							"min": 259402.52604331865,
+							"max": 373406.21364514437
+						},
+						"recv_fps": {
+							"median": 20003.99958246546,
+							"min": 20002.39666995295,
+							"max": 22082.540562045557
+						},
+						"groups_lost": {
+							"median": 0,
+							"min": 0,
+							"max": 0
+						},
+						"host_load_1m": {
+							"median": 2.73,
+							"min": 2.7,
+							"max": 11.77
+						}
+					}
+				},
+				"base-28a8c9a7a665": {
+					"4": {
+						"cells": [
+							{
+								"cell": "relay/base-28a8c9a7a665/round-1/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 118042.99865044883,
+								"cycles_per_frame": 290218.0634557764,
+								"recv_fps": 19998.43619764393,
+								"groups_lost": 0,
+								"host_load_1m": 4.28
+							},
+							{
+								"cell": "relay/base-28a8c9a7a665/round-2/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 118914.85978383935,
+								"cycles_per_frame": 248664.0862251522,
+								"recv_fps": 20115.45945858679,
+								"groups_lost": 0,
+								"host_load_1m": 4.08
+							},
+							{
+								"cell": "relay/base-28a8c9a7a665/round-3/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 120613.85590159732,
+								"cycles_per_frame": 261572.58603313737,
+								"recv_fps": 20000.002939257127,
+								"groups_lost": 0,
+								"host_load_1m": 2.17
+							}
+						],
+						"instructions_per_frame": {
+							"median": 118914.85978383935,
+							"min": 118042.99865044883,
+							"max": 120613.85590159732
+						},
+						"cycles_per_frame": {
+							"median": 261572.58603313737,
+							"min": 248664.0862251522,
+							"max": 290218.0634557764
+						},
+						"recv_fps": {
+							"median": 20000.002939257127,
+							"min": 19998.43619764393,
+							"max": 20115.45945858679
+						},
+						"groups_lost": {
+							"median": 0,
+							"min": 0,
+							"max": 0
+						},
+						"host_load_1m": {
+							"median": 4.08,
+							"min": 2.17,
+							"max": 4.28
+						}
+					}
+				},
+				"base-9f9149812ce3": {
+					"4": {
+						"cells": [
+							{
+								"cell": "relay/base-9f9149812ce3/round-1/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 128498.55222376293,
+								"cycles_per_frame": 347032.1749611143,
+								"recv_fps": 19997.450219863327,
+								"groups_lost": 0,
+								"host_load_1m": 8.69
+							},
+							{
+								"cell": "relay/base-9f9149812ce3/round-2/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 130880.4116913851,
+								"cycles_per_frame": 343204.40250901255,
+								"recv_fps": 20001.15175504808,
+								"groups_lost": 0,
+								"host_load_1m": 5.27
+							},
+							{
+								"cell": "relay/base-9f9149812ce3/round-3/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 127980.50962678353,
+								"cycles_per_frame": 302061.7214663097,
+								"recv_fps": 20000.0,
+								"groups_lost": 0,
+								"host_load_1m": 2.26
+							}
+						],
+						"instructions_per_frame": {
+							"median": 128498.55222376293,
+							"min": 127980.50962678353,
+							"max": 130880.4116913851
+						},
+						"cycles_per_frame": {
+							"median": 343204.40250901255,
+							"min": 302061.7214663097,
+							"max": 347032.1749611143
+						},
+						"recv_fps": {
+							"median": 20000.0,
+							"min": 19997.450219863327,
+							"max": 20001.15175504808
+						},
+						"groups_lost": {
+							"median": 0,
+							"min": 0,
+							"max": 0
+						},
+						"host_load_1m": {
+							"median": 5.27,
+							"min": 2.26,
+							"max": 8.69
+						}
+					}
+				},
+				"base-a9a85580a448": {
+					"4": {
+						"cells": [
+							{
+								"cell": "relay/base-a9a85580a448/round-1/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 129493.88201309738,
+								"cycles_per_frame": 334784.36443489586,
+								"recv_fps": 19997.46097568084,
+								"groups_lost": 0,
+								"host_load_1m": 3.25
+							},
+							{
+								"cell": "relay/base-a9a85580a448/round-2/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 129589.15040874497,
+								"cycles_per_frame": 338499.8624495248,
+								"recv_fps": 20000.0,
+								"groups_lost": 0,
+								"host_load_1m": 7.38
+							},
+							{
+								"cell": "relay/base-a9a85580a448/round-3/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 128382.13453681872,
+								"cycles_per_frame": 292622.98673249676,
+								"recv_fps": 20000.0,
+								"groups_lost": 0,
+								"host_load_1m": 3.5
+							}
+						],
+						"instructions_per_frame": {
+							"median": 129493.88201309738,
+							"min": 128382.13453681872,
+							"max": 129589.15040874497
+						},
+						"cycles_per_frame": {
+							"median": 334784.36443489586,
+							"min": 292622.98673249676,
+							"max": 338499.8624495248
+						},
+						"recv_fps": {
+							"median": 20000.0,
+							"min": 19997.46097568084,
+							"max": 20000.0
+						},
+						"groups_lost": {
+							"median": 0,
+							"min": 0,
+							"max": 0
+						},
+						"host_load_1m": {
+							"median": 3.5,
+							"min": 3.25,
+							"max": 7.38
+						}
+					}
+				},
+				"base-43fc9251d71b": {
+					"4": {
+						"cells": [
+							{
+								"cell": "relay/base-43fc9251d71b/round-1/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 126891.66269082314,
+								"cycles_per_frame": 347672.0702713368,
+								"recv_fps": 20014.962321356285,
+								"groups_lost": 0,
+								"host_load_1m": 12.02
+							},
+							{
+								"cell": "relay/base-43fc9251d71b/round-2/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 126354.89476991726,
+								"cycles_per_frame": 271712.8641892416,
+								"recv_fps": 20000.0,
+								"groups_lost": 0,
+								"host_load_1m": 4.18
+							},
+							{
+								"cell": "relay/base-43fc9251d71b/round-3/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 133754.46697983646,
+								"cycles_per_frame": 296675.9455818364,
+								"recv_fps": 20069.323844040424,
+								"groups_lost": 0,
+								"host_load_1m": 2.96
+							}
+						],
+						"instructions_per_frame": {
+							"median": 126891.66269082314,
+							"min": 126354.89476991726,
+							"max": 133754.46697983646
+						},
+						"cycles_per_frame": {
+							"median": 296675.9455818364,
+							"min": 271712.8641892416,
+							"max": 347672.0702713368
+						},
+						"recv_fps": {
+							"median": 20014.962321356285,
+							"min": 20000.0,
+							"max": 20069.323844040424
+						},
+						"groups_lost": {
+							"median": 0,
+							"min": 0,
+							"max": 0
+						},
+						"host_load_1m": {
+							"median": 4.18,
+							"min": 2.96,
+							"max": 12.02
+						}
+					}
+				},
+				"current": {
+					"4": {
+						"cells": [
+							{
+								"cell": "relay/current/round-1/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 139008.70201293853,
+								"cycles_per_frame": 304073.4396178103,
+								"recv_fps": 20000.0,
+								"groups_lost": 0,
+								"host_load_1m": 10.76
+							},
+							{
+								"cell": "relay/current/round-2/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 139155.4620059375,
+								"cycles_per_frame": 358026.6577482179,
+								"recv_fps": 19997.131949881437,
+								"groups_lost": 0,
+								"host_load_1m": 3.91
+							},
+							{
+								"cell": "relay/current/round-3/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 136824.79155837605,
+								"cycles_per_frame": 336991.56119588704,
+								"recv_fps": 19999.034719131432,
+								"groups_lost": 0,
+								"host_load_1m": 2.25
+							}
+						],
+						"instructions_per_frame": {
+							"median": 139008.70201293853,
+							"min": 136824.79155837605,
+							"max": 139155.4620059375
+						},
+						"cycles_per_frame": {
+							"median": 336991.56119588704,
+							"min": 304073.4396178103,
+							"max": 358026.6577482179
+						},
+						"recv_fps": {
+							"median": 19999.034719131432,
+							"min": 19997.131949881437,
+							"max": 20000.0
+						},
+						"groups_lost": {
+							"median": 0,
+							"min": 0,
+							"max": 0
+						},
+						"host_load_1m": {
+							"median": 3.91,
+							"min": 2.25,
+							"max": 10.76
+						}
+					}
+				}
+			}
+		},
+		{
+			"artifact": "nixos2:run.S0G1Z7",
+			"host": "nixos2 (i7-8700; no quest gate there, so each run started after 80 s at load under 2.5 with no other process above half a core)",
+			"relay_cpus": "0-3",
+			"generator_cpus": "4,5,10,11",
+			"generator_revision": "21d6da9fc1",
+			"instruction_period": 2000003,
+			"workload": "chat",
+			"runtime": "io-uring-workers",
+			"revisions": {
+				"base": "cdff3c8f95, the old endpoint",
+				"current": "fa9c1bf2a7 (main)"
+			},
+			"note": "main against the old endpoint",
+			"summary": {
+				"base": {
+					"4": {
+						"cells": [
+							{
+								"cell": "relay/base/round-1/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 110438.19032281345,
+								"cycles_per_frame": 238151.8534170224,
+								"recv_fps": 19998.415557527132,
+								"groups_lost": 0,
+								"host_load_1m": 2.25
+							},
+							{
+								"cell": "relay/base/round-2/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 111769.07599916575,
+								"cycles_per_frame": 229119.09989778293,
+								"recv_fps": 20305.118326832566,
+								"groups_lost": 0,
+								"host_load_1m": 2.27
+							},
+							{
+								"cell": "relay/base/round-3/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 113222.34247587262,
+								"cycles_per_frame": 231797.83643476115,
+								"recv_fps": 19798.970409424925,
+								"groups_lost": 0,
+								"host_load_1m": 2.06
+							},
+							{
+								"cell": "relay/base/round-4/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 109419.11777739269,
+								"cycles_per_frame": 256960.96516555574,
+								"recv_fps": 20003.99965745121,
+								"groups_lost": 0,
+								"host_load_1m": 8.53
+							}
+						],
+						"instructions_per_frame": {
+							"median": 111103.6331609896,
+							"min": 109419.11777739269,
+							"max": 113222.34247587262
+						},
+						"cycles_per_frame": {
+							"median": 234974.84492589178,
+							"min": 229119.09989778293,
+							"max": 256960.96516555574
+						},
+						"recv_fps": {
+							"median": 20001.207607489174,
+							"min": 19798.970409424925,
+							"max": 20305.118326832566
+						},
+						"groups_lost": {
+							"median": 0.0,
+							"min": 0,
+							"max": 0
+						},
+						"host_load_1m": {
+							"median": 2.26,
+							"min": 2.06,
+							"max": 8.53
+						}
+					}
+				},
+				"current": {
+					"4": {
+						"cells": [
+							{
+								"cell": "relay/current/round-1/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 142874.01496667342,
+								"cycles_per_frame": 297412.72879827407,
+								"recv_fps": 20001.385834326353,
+								"groups_lost": 0,
+								"host_load_1m": 2.41
+							},
+							{
+								"cell": "relay/current/round-2/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 142595.95452064698,
+								"cycles_per_frame": 294528.8243329015,
+								"recv_fps": 20001.289157928073,
+								"groups_lost": 0,
+								"host_load_1m": 2.32
+							},
+							{
+								"cell": "relay/current/round-3/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 142700.63409929347,
+								"cycles_per_frame": 283296.1793441754,
+								"recv_fps": 19996.000511653296,
+								"groups_lost": 0,
+								"host_load_1m": 1.81
+							},
+							{
+								"cell": "relay/current/round-4/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 140914.0745016863,
+								"cycles_per_frame": 346765.42809844256,
+								"recv_fps": 20001.378613786146,
+								"groups_lost": 0,
+								"host_load_1m": 2.62
+							}
+						],
+						"instructions_per_frame": {
+							"median": 142648.29430997022,
+							"min": 140914.0745016863,
+							"max": 142874.01496667342
+						},
+						"cycles_per_frame": {
+							"median": 295970.7765655878,
+							"min": 283296.1793441754,
+							"max": 346765.42809844256
+						},
+						"recv_fps": {
+							"median": 20001.333885857108,
+							"min": 19996.000511653296,
+							"max": 20001.385834326353
+						},
+						"groups_lost": {
+							"median": 0.0,
+							"min": 0,
+							"max": 0
+						},
+						"host_load_1m": {
+							"median": 2.365,
+							"min": 1.81,
+							"max": 2.62
+						}
+					}
+				}
+			}
+		},
+		{
+			"artifact": "nixos2:run.4U16wN",
+			"host": "nixos2 (i7-8700; no quest gate there, so each run started after 80 s at load under 2.5 with no other process above half a core)",
+			"relay_cpus": "0-3",
+			"generator_cpus": "4,5,10,11",
+			"generator_revision": "21d6da9fc1",
+			"instruction_period": 2000003,
+			"workload": "chat",
+			"runtime": "tokio-workers",
+			"revisions": {
+				"base": "cdff3c8f95, the old endpoint",
+				"current": "fa9c1bf2a7 (main)"
+			},
+			"note": "main against the old endpoint",
+			"summary": {
+				"base": {
+					"4": {
+						"cells": [
+							{
+								"cell": "relay/base/round-1/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 133810.68780368034,
+								"cycles_per_frame": 272289.31145911576,
+								"recv_fps": 20001.150776600938,
+								"groups_lost": 0,
+								"host_load_1m": 1.54
+							},
+							{
+								"cell": "relay/base/round-2/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 119722.746169692,
+								"cycles_per_frame": 395688.35060333286,
+								"recv_fps": 19227.27425200927,
+								"groups_lost": 0,
+								"host_load_1m": 8.69
+							},
+							{
+								"cell": "relay/base/round-3/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 131174.44382611386,
+								"cycles_per_frame": 402073.21234437416,
+								"recv_fps": 20000.0,
+								"groups_lost": 0,
+								"host_load_1m": 5.91
+							},
+							{
+								"cell": "relay/base/round-4/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 134112.6098387605,
+								"cycles_per_frame": 281832.69365063467,
+								"recv_fps": 19998.787357937494,
+								"groups_lost": 0,
+								"host_load_1m": 2.14
+							}
+						],
+						"instructions_per_frame": {
+							"median": 132492.5658148971,
+							"min": 119722.746169692,
+							"max": 134112.6098387605
+						},
+						"cycles_per_frame": {
+							"median": 338760.52212698373,
+							"min": 272289.31145911576,
+							"max": 402073.21234437416
+						},
+						"recv_fps": {
+							"median": 19999.393678968747,
+							"min": 19227.27425200927,
+							"max": 20001.150776600938
+						},
+						"groups_lost": {
+							"median": 0.0,
+							"min": 0,
+							"max": 0
+						},
+						"host_load_1m": {
+							"median": 4.025,
+							"min": 1.54,
+							"max": 8.69
+						}
+					}
+				},
+				"current": {
+					"4": {
+						"cells": [
+							{
+								"cell": "relay/current/round-1/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 144457.64693984922,
+								"cycles_per_frame": 472152.72277027817,
+								"recv_fps": 20003.25572264157,
+								"groups_lost": 0,
+								"host_load_1m": 5.69
+							},
+							{
+								"cell": "relay/current/round-2/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 147217.42481670858,
+								"cycles_per_frame": 407840.37111283914,
+								"recv_fps": 20000.0,
+								"groups_lost": 0,
+								"host_load_1m": 1.63
+							},
+							{
+								"cell": "relay/current/round-3/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 146580.8815739602,
+								"cycles_per_frame": 344608.2208468801,
+								"recv_fps": 20000.0,
+								"groups_lost": 0,
+								"host_load_1m": 4.09
+							},
+							{
+								"cell": "relay/current/round-4/instructions-4/chat/instructions/instructions.json",
+								"instructions_per_frame": 147538.51930820433,
+								"cycles_per_frame": 415631.59350481915,
+								"recv_fps": 20000.0,
+								"groups_lost": 0,
+								"host_load_1m": 2.97
+							}
+						],
+						"instructions_per_frame": {
+							"median": 146899.1531953344,
+							"min": 144457.64693984922,
+							"max": 147538.51930820433
+						},
+						"cycles_per_frame": {
+							"median": 411735.98230882915,
+							"min": 344608.2208468801,
+							"max": 472152.72277027817
+						},
+						"recv_fps": {
+							"median": 20000.0,
+							"min": 20000.0,
+							"max": 20003.25572264157
+						},
+						"groups_lost": {
+							"median": 0.0,
+							"min": 0,
+							"max": 0
+						},
+						"host_load_1m": {
+							"median": 3.5300000000000002,
+							"min": 1.63,
+							"max": 5.69
+						}
+					}
+				}
+			}
+		},
+		{
+			"artifact": "nixos2:run.kQW0En",
+			"host": "nixos2 (i7-8700; no quest gate there, so each run started after 80 s at load under 2.5 with no other process above half a core)",
+			"relay_cpus": "0-3",
+			"generator_cpus": "4,5,10,11",
+			"generator_revision": "21d6da9fc1",
+			"instruction_period": 2000003,
+			"workload": "video",
+			"runtime": "io-uring-workers",
+			"revisions": {
+				"base": "cdff3c8f95, the old endpoint",
+				"current": "fa9c1bf2a7 (main)"
+			},
+			"note": "main against the old endpoint; superseded by run.TZ2ODR, since load rose to 12 from round 3",
+			"summary": {
+				"base": {
+					"4": {
+						"cells": [
+							{
+								"cell": "relay/base/round-1/instructions-4/video/instructions/instructions.json",
+								"instructions_per_frame": 100959.7083146826,
+								"cycles_per_frame": 258488.1328036645,
+								"recv_fps": 959.9999999999998,
+								"groups_lost": 0,
+								"host_load_1m": 3.13
+							},
+							{
+								"cell": "relay/base/round-2/instructions-4/video/instructions/instructions.json",
+								"instructions_per_frame": 104398.56303404094,
+								"cycles_per_frame": 409492.47510648845,
+								"recv_fps": 960.0,
+								"groups_lost": 0,
+								"host_load_1m": 5.55
+							},
+							{
+								"cell": "relay/base/round-3/instructions-4/video/instructions/instructions.json",
+								"instructions_per_frame": 100008.31069186589,
+								"cycles_per_frame": 393307.08846508915,
+								"recv_fps": 960.0687760432135,
+								"groups_lost": 0,
+								"host_load_1m": 5.73
+							},
+							{
+								"cell": "relay/base/round-4/instructions-4/video/instructions/instructions.json",
+								"instructions_per_frame": 101293.57005249792,
+								"cycles_per_frame": 305725.30442575464,
+								"recv_fps": 960.0725854598239,
+								"groups_lost": 0,
+								"host_load_1m": 12.41
+							}
+						],
+						"instructions_per_frame": {
+							"median": 101126.63918359026,
+							"min": 100008.31069186589,
+							"max": 104398.56303404094
+						},
+						"cycles_per_frame": {
+							"median": 349516.1964454219,
+							"min": 258488.1328036645,
+							"max": 409492.47510648845
+						},
+						"recv_fps": {
+							"median": 960.0343880216067,
+							"min": 959.9999999999998,
+							"max": 960.0725854598239
+						},
+						"groups_lost": {
+							"median": 0.0,
+							"min": 0,
+							"max": 0
+						},
+						"host_load_1m": {
+							"median": 5.640000000000001,
+							"min": 3.13,
+							"max": 12.41
+						}
+					}
+				},
+				"current": {
+					"4": {
+						"cells": [
+							{
+								"cell": "relay/current/round-1/instructions-4/video/instructions/instructions.json",
+								"instructions_per_frame": 109050.8320884069,
+								"cycles_per_frame": 278462.7706222729,
+								"recv_fps": 959.9186614243695,
+								"groups_lost": 0,
+								"host_load_1m": 4.46
+							},
+							{
+								"cell": "relay/current/round-2/instructions-4/video/instructions/instructions.json",
+								"instructions_per_frame": 106514.81210849703,
+								"cycles_per_frame": 233454.70424598941,
+								"recv_fps": 959.9236715623178,
+								"groups_lost": 0,
+								"host_load_1m": 4.3
+							},
+							{
+								"cell": "relay/current/round-3/instructions-4/video/instructions/instructions.json",
+								"instructions_per_frame": 118047.2329899198,
+								"cycles_per_frame": 472909.05677116336,
+								"recv_fps": 959.9285481880923,
+								"groups_lost": 0,
+								"host_load_1m": 7.58
+							},
+							{
+								"cell": "relay/current/round-4/instructions-4/video/instructions/instructions.json",
+								"instructions_per_frame": 119511.52959884486,
+								"cycles_per_frame": 509520.2006930177,
+								"recv_fps": 959.8190288946225,
+								"groups_lost": 0,
+								"host_load_1m": 9.94
+							}
+						],
+						"instructions_per_frame": {
+							"median": 113549.03253916334,
+							"min": 106514.81210849703,
+							"max": 119511.52959884486
+						},
+						"cycles_per_frame": {
+							"median": 375685.91369671817,
+							"min": 233454.70424598941,
+							"max": 509520.2006930177
+						},
+						"recv_fps": {
+							"median": 959.9211664933437,
+							"min": 959.8190288946225,
+							"max": 959.9285481880923
+						},
+						"groups_lost": {
+							"median": 0.0,
+							"min": 0,
+							"max": 0
+						},
+						"host_load_1m": {
+							"median": 6.02,
+							"min": 4.3,
+							"max": 9.94
+						}
+					}
+				}
+			}
+		},
+		{
+			"artifact": "nixos2:run.TZ2ODR",
+			"host": "nixos2 (i7-8700; no quest gate there, so each run started after 80 s at load under 2.5 with no other process above half a core)",
+			"relay_cpus": "0-3",
+			"generator_cpus": "4,5,10,11",
+			"generator_revision": "21d6da9fc1",
+			"instruction_period": 2000003,
+			"workload": "video",
+			"runtime": "io-uring-workers",
+			"revisions": {
+				"base": "cdff3c8f95, the old endpoint",
+				"current": "fa9c1bf2a7 (main)"
+			},
+			"note": "main against the old endpoint",
+			"summary": {
+				"base": {
+					"4": {
+						"cells": [
+							{
+								"cell": "relay/base/round-1/instructions-4/video/instructions/instructions.json",
+								"instructions_per_frame": 102236.731368789,
+								"cycles_per_frame": 237388.07399811584,
+								"recv_fps": 960.0000000000002,
+								"groups_lost": 0,
+								"host_load_1m": 1.08
+							},
+							{
+								"cell": "relay/base/round-2/instructions-4/video/instructions/instructions.json",
+								"instructions_per_frame": 98381.7177726354,
+								"cycles_per_frame": 219165.26216945075,
+								"recv_fps": 960.0000000000002,
+								"groups_lost": 0,
+								"host_load_1m": 0.69
+							},
+							{
+								"cell": "relay/base/round-3/instructions-4/video/instructions/instructions.json",
+								"instructions_per_frame": 97403.11236380997,
+								"cycles_per_frame": 229461.95448024358,
+								"recv_fps": 960.0005559515195,
+								"groups_lost": 0,
+								"host_load_1m": 0.56
+							},
+							{
+								"cell": "relay/base/round-4/instructions-4/video/instructions/instructions.json",
+								"instructions_per_frame": 99946.03189495618,
+								"cycles_per_frame": 220657.50927024856,
+								"recv_fps": 959.9999999999998,
+								"groups_lost": 0,
+								"host_load_1m": 0.51
+							}
+						],
+						"instructions_per_frame": {
+							"median": 99163.8748337958,
+							"min": 97403.11236380997,
+							"max": 102236.731368789
+						},
+						"cycles_per_frame": {
+							"median": 225059.73187524607,
+							"min": 219165.26216945075,
+							"max": 237388.07399811584
+						},
+						"recv_fps": {
+							"median": 960.0000000000002,
+							"min": 959.9999999999998,
+							"max": 960.0005559515195
+						},
+						"groups_lost": {
+							"median": 0.0,
+							"min": 0,
+							"max": 0
+						},
+						"host_load_1m": {
+							"median": 0.625,
+							"min": 0.51,
+							"max": 1.08
+						}
+					}
+				},
+				"current": {
+					"4": {
+						"cells": [
+							{
+								"cell": "relay/current/round-1/instructions-4/video/instructions/instructions.json",
+								"instructions_per_frame": 112029.15147321289,
+								"cycles_per_frame": 245347.81080353385,
+								"recv_fps": 959.967891094116,
+								"groups_lost": 0,
+								"host_load_1m": 0.86
+							},
+							{
+								"cell": "relay/current/round-2/instructions-4/video/instructions/instructions.json",
+								"instructions_per_frame": 112939.94528628506,
+								"cycles_per_frame": 256436.37128312435,
+								"recv_fps": 960.0,
+								"groups_lost": 0,
+								"host_load_1m": 0.76
+							},
+							{
+								"cell": "relay/current/round-3/instructions-4/video/instructions/instructions.json",
+								"instructions_per_frame": 108643.29631033321,
+								"cycles_per_frame": 236899.23952598218,
+								"recv_fps": 960.0000000000002,
+								"groups_lost": 0,
+								"host_load_1m": 0.7
+							},
+							{
+								"cell": "relay/current/round-4/instructions-4/video/instructions/instructions.json",
+								"instructions_per_frame": 109540.95851889307,
+								"cycles_per_frame": 229321.15657694146,
+								"recv_fps": 959.9999999999998,
+								"groups_lost": 0,
+								"host_load_1m": 0.58
+							}
+						],
+						"instructions_per_frame": {
+							"median": 110785.05499605298,
+							"min": 108643.29631033321,
+							"max": 112939.94528628506
+						},
+						"cycles_per_frame": {
+							"median": 241123.52516475803,
+							"min": 229321.15657694146,
+							"max": 256436.37128312435
+						},
+						"recv_fps": {
+							"median": 959.9999999999999,
+							"min": 959.967891094116,
+							"max": 960.0000000000002
+						},
+						"groups_lost": {
+							"median": 0.0,
+							"min": 0,
+							"max": 0
+						},
+						"host_load_1m": {
+							"median": 0.73,
+							"min": 0.58,
+							"max": 0.86
+						}
+					}
+				}
+			}
+		},
+		{
+			"artifact": "nixos2:run.6xoc9u",
+			"host": "nixos2 (i7-8700; no quest gate there, so each run started after 80 s at load under 2.5 with no other process above half a core)",
+			"relay_cpus": "0-3",
+			"generator_cpus": "4,5,10,11",
+			"generator_revision": "21d6da9fc1",
+			"instruction_period": 2000003,
+			"workload": "video",
+			"runtime": "tokio-workers",
+			"revisions": {
+				"base": "cdff3c8f95, the old endpoint",
+				"current": "fa9c1bf2a7 (main)"
+			},
+			"note": "main against the old endpoint",
+			"summary": {
+				"base": {
+					"4": {
+						"cells": [
+							{
+								"cell": "relay/base/round-1/instructions-4/video/instructions/instructions.json",
+								"instructions_per_frame": 137396.5241378377,
+								"cycles_per_frame": 296358.83229715395,
+								"recv_fps": 959.9999999999998,
+								"groups_lost": 0,
+								"host_load_1m": 1.05
+							},
+							{
+								"cell": "relay/base/round-2/instructions-4/video/instructions/instructions.json",
+								"instructions_per_frame": 139800.1079917114,
+								"cycles_per_frame": 324778.4075747499,
+								"recv_fps": 960.0327677356548,
+								"groups_lost": 0,
+								"host_load_1m": 0.98
+							},
+							{
+								"cell": "relay/base/round-3/instructions-4/video/instructions/instructions.json",
+								"instructions_per_frame": 135610.50480158598,
+								"cycles_per_frame": 283721.6724235282,
+								"recv_fps": 959.8858989925936,
+								"groups_lost": 0,
+								"host_load_1m": 0.74
+							},
+							{
+								"cell": "relay/base/round-4/instructions-4/video/instructions/instructions.json",
+								"instructions_per_frame": 128660.72410306365,
+								"cycles_per_frame": 359705.8359279434,
+								"recv_fps": 960.0,
+								"groups_lost": 0,
+								"host_load_1m": 1.23
+							}
+						],
+						"instructions_per_frame": {
+							"median": 136503.51446971184,
+							"min": 128660.72410306365,
+							"max": 139800.1079917114
+						},
+						"cycles_per_frame": {
+							"median": 310568.6199359519,
+							"min": 283721.6724235282,
+							"max": 359705.8359279434
+						},
+						"recv_fps": {
+							"median": 959.9999999999999,
+							"min": 959.8858989925936,
+							"max": 960.0327677356548
+						},
+						"groups_lost": {
+							"median": 0.0,
+							"min": 0,
+							"max": 0
+						},
+						"host_load_1m": {
+							"median": 1.0150000000000001,
+							"min": 0.74,
+							"max": 1.23
+						}
+					}
+				},
+				"current": {
+					"4": {
+						"cells": [
+							{
+								"cell": "relay/current/round-1/instructions-4/video/instructions/instructions.json",
+								"instructions_per_frame": 121758.14733105317,
+								"cycles_per_frame": 283063.2078622138,
+								"recv_fps": 960.0,
+								"groups_lost": 0,
+								"host_load_1m": 0.85
+							},
+							{
+								"cell": "relay/current/round-2/instructions-4/video/instructions/instructions.json",
+								"instructions_per_frame": 118560.65847992722,
+								"cycles_per_frame": 269652.2327772885,
+								"recv_fps": 960.0000000000002,
+								"groups_lost": 0,
+								"host_load_1m": 1.23
+							},
+							{
+								"cell": "relay/current/round-3/instructions-4/video/instructions/instructions.json",
+								"instructions_per_frame": 121405.46336715626,
+								"cycles_per_frame": 281072.26724168874,
+								"recv_fps": 960.0,
+								"groups_lost": 0,
+								"host_load_1m": 1.53
+							},
+							{
+								"cell": "relay/current/round-4/instructions-4/video/instructions/instructions.json",
+								"instructions_per_frame": 124092.18159707768,
+								"cycles_per_frame": 298452.0986302454,
+								"recv_fps": 960.0,
+								"groups_lost": 0,
+								"host_load_1m": 1.59
+							}
+						],
+						"instructions_per_frame": {
+							"median": 121581.80534910472,
+							"min": 118560.65847992722,
+							"max": 124092.18159707768
+						},
+						"cycles_per_frame": {
+							"median": 282067.73755195126,
+							"min": 269652.2327772885,
+							"max": 298452.0986302454
+						},
+						"recv_fps": {
+							"median": 960.0,
+							"min": 960.0,
+							"max": 960.0000000000002
+						},
+						"groups_lost": {
+							"median": 0.0,
+							"min": 0,
+							"max": 0
+						},
+						"host_load_1m": {
+							"median": 1.38,
+							"min": 0.85,
+							"max": 1.59
+						}
+					}
+				}
+			}
 		}
 	],
 	"notes": [
 		"nixos2:run.cAVCAV (in-tree qmux and receive leases against their parents) was stopped after one round when other agents started fuzzing and compiling there; its round-1 cells (qmux 116k to 122k, leases 130k to 132k) are not conclusive and are not used."
-	]
+	],
+	"relay_object_batch": {
+		"artifact": "run.Qn1sqT",
+		"command": "just bench-fanout '' group '1 8 64'",
+		"metric": "user instructions per delivered 512-frame group, relay poll_read_objects, capacity 16",
+		"cells": [
+			{
+				"label": "current",
+				"revision": "531c52d90a72a73c38d88d63c4315bfa36143f65",
+				"scenario": "group",
+				"subscribers": 1,
+				"cycles": 2000,
+				"per_group": 144907.2155
+			},
+			{
+				"label": "current",
+				"revision": "531c52d90a72a73c38d88d63c4315bfa36143f65",
+				"scenario": "group",
+				"subscribers": 8,
+				"cycles": 250,
+				"per_group": 144901.0835
+			},
+			{
+				"label": "current",
+				"revision": "531c52d90a72a73c38d88d63c4315bfa36143f65",
+				"scenario": "group",
+				"subscribers": 64,
+				"cycles": 32,
+				"per_group": 144900.27734375
+			}
+		]
+	}
 }
