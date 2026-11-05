@@ -3312,6 +3312,16 @@ fn largest_ended(state: &TrackState, waiter: &kio::Waiter) -> Poll<()> {
 	}
 }
 
+/// Where a received copy of a group goes.
+pub(crate) enum Received {
+	/// A new group, for the copy to fill.
+	Group(group::Producer),
+	/// Another copy of the sequence that is still arriving: whether this one is needed
+	/// depends on how that one settles.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	Held(group::Handle),
+}
+
 /// A producer for a track, used to create new groups.
 #[derive(Clone)]
 pub struct Producer {
@@ -3408,16 +3418,22 @@ impl Producer {
 	/// live edge, or the successor that ages the group before it) only once its first frame
 	/// opens or it finishes.
 	pub fn create_group(&self, group: group::Info) -> Result<group::Producer> {
-		self.create_group_inner(group, None)
+		match self.create_group_inner(group, None)? {
+			Received::Group(group) => Ok(group),
+			Received::Held(_) => unreachable!("only a received copy waits on another"),
+		}
 	}
 
 	/// A received copy starts at its wire offset before any reader can see it.
+	///
+	/// A copy that already answers from `start` holds the sequence: a finished one refuses
+	/// this copy with [`Error::Duplicate`], and one still arriving is returned to wait on.
 	#[cfg(feature = "async")]
-	pub(crate) fn create_group_at(&self, group: group::Info, start: u64) -> Result<group::Producer> {
+	pub(crate) fn create_group_at(&self, group: group::Info, start: u64) -> Result<Received> {
 		self.create_group_inner(group, Some(start))
 	}
 
-	fn create_group_inner(&self, info: group::Info, received: Option<u64>) -> Result<group::Producer> {
+	fn create_group_inner(&self, info: group::Info, received: Option<u64>) -> Result<Received> {
 		let mut state = self.modify()?;
 		if state.sealed || state.final_sequence().is_some_and(|fin| info.sequence >= fin) {
 			return Err(Error::Closed);
@@ -3429,8 +3445,11 @@ impl Producer {
 		}
 		let start = received.unwrap_or(0);
 		let content = if received.is_some() {
-			if state.holding_group(info.sequence, start).is_some() {
-				return Err(Error::Duplicate);
+			if let Some(holding) = state.holding_group(info.sequence, start) {
+				return match holding.is_settled() {
+					true => Err(Error::Duplicate),
+					false => Ok(Received::Held(holding.clone())),
+				};
 			}
 			state.content_for_copy(info.sequence)?
 		} else {
@@ -3450,7 +3469,7 @@ impl Producer {
 		let deferred = state.deferred();
 		drop(state);
 		deferred.wake();
-		Ok(group)
+		Ok(Received::Group(group))
 	}
 
 	/// Create a new group with the next sequence number: one past this producer's own writes.
@@ -19587,9 +19606,9 @@ mod test {
 		let mut fetched = pending.await.unwrap();
 		subscriber.assert_no_group();
 
-		let mut live = producer
-			.create_group_at(0u64.into(), 0)
-			.expect("the feed takes the slot");
+		let Ok(Received::Group(mut live)) = producer.create_group_at(0u64.into(), 0) else {
+			panic!("the feed takes the slot");
+		};
 		live.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"snapshot"))
 			.unwrap();
 		let mut group = subscriber.assert_group();

@@ -199,8 +199,14 @@ struct Parked {
 	/// The headers still waiting on the accept, by ticket, in arrival order.
 	waiting: Vec<(u64, lite::Group)>,
 	/// What the accept opened for each, until its stream takes it.
-	opened: HashMap<u64, Result<Opened, Error>>,
+	opened: HashMap<u64, Result<Open, Error>>,
 	next: u64,
+}
+
+/// What a group stream's header opened in its subscription's copy.
+enum Open {
+	Group(Opened),
+	Duplicate(Duplicate),
 }
 
 /// A group stream's group, opened in its subscription's copy for the stream to fill.
@@ -208,6 +214,16 @@ struct Opened {
 	group: group::Producer,
 	track: track::Producer,
 	framing: lite::Framing,
+	reading: Reading,
+}
+
+/// A group stream duplicating a copy still arriving, such as a lite-07 re-offer that
+/// overtook the reset of the stream it replaces. It waits unread, which its stream credit
+/// bounds, and is discarded if that copy finishes or takes the group if it fails.
+struct Duplicate {
+	arriving: group::Handle,
+	track: track::Producer,
+	/// Counted already, and kept open while held, since the stream may still carry the group.
 	reading: Reading,
 }
 
@@ -223,7 +239,9 @@ impl Drop for TrackEntry {
 			Err(_) => return,
 		};
 		for opened in opened.into_values().flatten() {
-			let _ = opened.group.abort(Error::Cancel);
+			if let Open::Group(opened) = opened {
+				let _ = opened.group.abort(Error::Cancel);
+			}
 		}
 	}
 }
@@ -296,7 +314,7 @@ impl TrackEntry {
 	}
 
 	/// Take what the accept opened for the parked stream `ticket`.
-	fn unpark(&mut self, ticket: u64) -> Result<Opened, Error> {
+	fn unpark(&mut self, ticket: u64) -> Result<Open, Error> {
 		let Some(parked) = &self.parked else {
 			return Err(Error::Cancel);
 		};
@@ -327,7 +345,7 @@ impl TrackEntry {
 			}
 			Err(_) => return,
 		};
-		if let Some(Ok(opened)) = opened {
+		if let Some(Ok(Open::Group(opened))) = opened {
 			let _ = opened.group.abort(err.clone());
 		}
 		if done {
@@ -336,8 +354,8 @@ impl TrackEntry {
 	}
 
 	/// Open the group of a stream whose header is `hdr` in the copy.
-	fn open(&mut self, hdr: &lite::Group, version: Version, now: crate::time::Instant) -> Result<Opened, Error> {
-		let Some(Accepted { producer, framing }) = &mut self.copy else {
+	fn open(&mut self, hdr: &lite::Group, version: Version, now: crate::time::Instant) -> Result<Open, Error> {
+		let Some(Accepted { producer, .. }) = &mut self.copy else {
 			return Err(Error::Cancel);
 		};
 		let group_info = group::Info { sequence: hdr.sequence };
@@ -370,8 +388,38 @@ impl TrackEntry {
 				}
 			}
 		}
+		self.place(hdr, version, received, reading)
+	}
+
+	/// Open the group of a held stream again, once the copy it waited on failed.
+	fn reopen(&self, hdr: &lite::Group, version: Version, reading: Reading) -> Result<Open, Error> {
+		let Some(Accepted { producer, .. }) = &self.copy else {
+			return Err(Error::Cancel);
+		};
+		let received = producer.create_group_at(group::Info { sequence: hdr.sequence }, hdr.frame_start);
+		self.place(hdr, version, received, reading)
+	}
+
+	/// Give a stream what the cache answered for its header.
+	fn place(
+		&self,
+		hdr: &lite::Group,
+		version: Version,
+		received: Result<track::Received, Error>,
+		reading: Reading,
+	) -> Result<Open, Error> {
+		let Some(Accepted { producer, framing }) = &self.copy else {
+			return Err(Error::Cancel);
+		};
 		let group = match received {
-			Ok(group) => group,
+			Ok(track::Received::Group(group)) => group,
+			Ok(track::Received::Held(arriving)) => {
+				return Ok(Open::Duplicate(Duplicate {
+					arriving,
+					track: producer.clone(),
+					reading,
+				}));
+			}
 			// The group is at or past the end the publisher declared, which no
 			// later stream can repair. Before lite-05 only a local finish sets
 			// an end, and lite-05 specified an inclusive one, so its last
@@ -388,12 +436,12 @@ impl TrackEntry {
 			}
 			Err(err) => return Err(err),
 		};
-		Ok(Opened {
+		Ok(Open::Group(Opened {
 			group,
 			track: producer.clone(),
 			framing: *framing,
 			reading,
-		})
+		}))
 	}
 }
 
@@ -1358,7 +1406,8 @@ impl GroupRecv {
 			None => Poll::Ready(Ok(())),
 		});
 		self.park_wait = None;
-		let (ietf, hdr) = header;
+		let ietf: bool = header.0;
+		let hdr: lite::Group = header.1;
 		if let (Err(err), Some((_, ticket))) = (&accepted, &parked)
 			&& let Some(entry) = self.subscriber.subscribes.lock().get_mut(&hdr.subscribe)
 		{
@@ -1366,7 +1415,7 @@ impl GroupRecv {
 		}
 		accepted?;
 
-		let opened = {
+		let open = {
 			let mut subs = self.subscriber.subscribes.lock();
 			let entry = subs.get_mut(&hdr.subscribe).ok_or(Error::Cancel)?;
 			match &parked {
@@ -1374,15 +1423,45 @@ impl GroupRecv {
 				None => entry.open(&hdr, self.subscriber.version, self.subscriber.runtime.now()),
 			}
 		};
+		let mut open: Option<Open> = Some(open?);
+		// A duplicate of a copy still arriving waits, unread, for that copy to settle.
+		let opened: Opened = wait!(Hold => loop {
+			let duplicate = match open.take() {
+				Some(Open::Group(opened)) => break Poll::Ready(Ok(opened)),
+				Some(Open::Duplicate(duplicate)) => duplicate,
+				None => break Poll::Ready(Err(Error::Cancel)),
+			};
+			if let Poll::Ready(err) = self.reader.poll_reset(waiter) {
+				break Poll::Ready(Err(err));
+			}
+			if let Poll::Ready(err) = duplicate.track.poll_aborted(waiter) {
+				break Poll::Ready(Err(err));
+			}
+			match duplicate.arriving.poll_closed(waiter) {
+				Poll::Pending => {
+					*open = Some(Open::Duplicate(duplicate));
+					break Poll::Pending;
+				}
+				// The copy holds every frame, so this one only duplicates it.
+				Poll::Ready(Ok(())) => break Poll::Ready(Err(Error::Duplicate)),
+				Poll::Ready(Err(_)) => {
+					let subs = self.subscriber.subscribes.lock();
+					let Some(entry) = subs.get(&hdr.subscribe) else {
+						break Poll::Ready(Err(Error::Cancel));
+					};
+					match entry.reopen(hdr, self.subscriber.version, duplicate.reading) {
+						Ok(reopened) => *open = Some(reopened),
+						Err(err) => break Poll::Ready(Err(err)),
+					}
+				}
+			}
+		})?;
 		let Opened {
 			group,
 			track,
 			framing,
 			reading,
-		} = match opened {
-			Ok(opened) => opened,
-			Err(err) => return Poll::Ready(Err(err)),
-		};
+		} = opened;
 		let (priority, order) = track
 			.subscription()
 			.map_or((0, Default::default()), |sub| (sub.priority, sub.order));
@@ -4526,6 +4605,108 @@ mod tests {
 		assert!(settle.poll(&kio::Waiter::noop(), |tail| tail.streams() >= 1).is_ready());
 	}
 
+	/// A lite-07 re-offer can overtake the reset of the stream it replaces: its stream waits,
+	/// unread, until that copy settles. It is discarded once the copy finishes, and takes the
+	/// group once the copy fails.
+	#[kio::test]
+	async fn a_duplicate_of_an_arriving_copy_waits_for_it_to_settle() {
+		use crate::transport::poll::Session as _;
+
+		for first_fails in [false, true] {
+			let version = Version::Lite07;
+			let mut script = Vec::new();
+			let mut encoder = crate::coding::Encoder::new(&mut script, version.into());
+			lite::Group {
+				subscribe: 7,
+				sequence: 3,
+				frame_start: 0,
+			}
+			.encode(&mut encoder, version)
+			.unwrap();
+			encoder.varint(crate::coding::varint::zigzag(300)).unwrap();
+			encoder.bytes(b"again").unwrap();
+			let session = crate::lite::test_transport::ScriptedSession::eof(script);
+			let clock = crate::time::Deadlines::new(crate::time::Instant::now());
+			let subscriber = Subscriber::new(SubscriberConfig {
+				runtime: clock.clone(),
+				session: crate::driver::Transport::new(session.clone()),
+				origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				recv_bandwidth: None,
+				version,
+				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
+				peer_hop: None,
+				cost: None,
+				going_away: Default::default(),
+				auth: crate::auth::Link::new(false),
+			});
+
+			let track = track::Producer::new(
+				std::sync::Arc::new(crate::broadcast::Info::default()),
+				"video",
+				crate::track::Info::timed(),
+			);
+			let subscription = crate::track::Subscription::default()
+				.with_delay(crate::track::Delay::default().with_max(std::time::Duration::from_secs(10)))
+				.with_range(0..);
+			let mut reader = track.subscribe(subscription.clone());
+			// The original copy, still arriving: one frame in, no end yet.
+			let Ok(track::Received::Group(mut first)) = track.create_group_at(group::Info { sequence: 3 }, 0) else {
+				panic!("the first copy opens");
+			};
+			first
+				.write_frame(Timestamp::from_millis(300).unwrap(), &b"first"[..])
+				.unwrap();
+			let tail = kio::Producer::new(Tail::default());
+			subscriber.subscribes.lock().insert(
+				7,
+				TrackEntry::accepted(
+					track.clone(),
+					lite::Framing {
+						timescale: Some(Timescale::MILLI),
+						ietf: None,
+						compressed: false,
+					},
+					tail.clone(),
+				),
+			);
+
+			let (_, recv) = session.open_bi(Default::default()).await.unwrap();
+			let mut duplicate = GroupRecv::new(
+				subscriber,
+				Reader::new(crate::transport::boxed::RecvStream::new(recv), version),
+			);
+			let waiter = kio::Waiter::noop();
+			assert!(duplicate.poll_serve(&waiter).is_pending(), "first fails: {first_fails}");
+			assert_eq!(duplicate.state.name(), "Hold", "first fails: {first_fails}");
+			// Counted and holding the end open while it waits, since it may carry the group.
+			assert_eq!(tail.read().streams(), 1);
+
+			let mut original = reader.assert_group();
+			if !first_fails {
+				first.finish().unwrap();
+				let res = kio::wait(|waiter| duplicate.poll_serve(waiter)).await;
+				assert!(matches!(res, Err(Error::Duplicate)), "{res:?}");
+				let frame = original.read_frame().await.unwrap().unwrap();
+				assert_eq!(&frame.payload[..], b"first");
+				assert!(original.read_frame().await.unwrap().is_none());
+				continue;
+			}
+
+			// The reset lands: the held stream takes the group.
+			first.abort(Error::Cancel).unwrap();
+			let res = kio::wait(|waiter| duplicate.poll_serve(waiter)).await;
+			assert!(res.is_ok(), "{res:?}");
+			// A reader already handed the original sees it fail, since no sequence is handed
+			// out twice; one that had not reached it reads the re-offer.
+			assert!(original.read_frame().await.is_err());
+			let mut later = track.subscribe(subscription);
+			let mut group = later.assert_group();
+			assert_eq!(group.sequence, 3);
+			assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"again");
+			assert!(group.read_frame().await.unwrap().is_none());
+		}
+	}
+
 	/// A SUBSCRIBE_FINISH below a group already received contradicts that group. lite-05
 	/// specified an inclusive end, and `@moq/net` 0.1.3 to 0.1.9 sent one, so there it only
 	/// costs the early boundary; later drafts abort the track.
@@ -6073,7 +6254,9 @@ mod tests {
 			Err(_) => panic!("the entry holds the parked streams"),
 		};
 		assert_eq!(opened, [kept], "the withdrawn group is gone");
-		let Opened { mut group, .. } = entry.unpark(kept).expect("the kept group");
+		let Ok(Open::Group(Opened { mut group, .. })) = entry.unpark(kept) else {
+			panic!("the kept group");
+		};
 		group.finish().unwrap();
 		track.finish().unwrap();
 		// Only the kept group reaches the subscriber: the withdrawn one ended, so nothing

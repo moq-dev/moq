@@ -558,6 +558,8 @@ export const hooks: {
 	receiveTrack: (producer: Producer, starts?: FillStarts) => void;
 	/** Create a received group at its wire offset before publishing it to readers. Assigned by `track.ts`. */
 	receiveGroup: (producer: Producer, group: { sequence: bigint; start: number }) => GroupProducer;
+	/** How the copy of `sequence` still arriving ends, if one is, for a duplicate to wait on. Assigned by `track.ts`. */
+	arrivingGroup: (producer: Producer, sequence: bigint) => GetPromise<Error | null> | undefined;
 	/** The producer's largest reported location and its subsequent changes. */
 	producerLargest: (producer: Producer) => Getter<Position | undefined>;
 
@@ -1033,6 +1035,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	receiveGroup: () => {
+		throw new Error("track.ts not loaded");
+	},
+	arrivingGroup: () => {
 		throw new Error("track.ts not loaded");
 	},
 	groupOffset: () => {

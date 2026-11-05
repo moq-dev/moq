@@ -1456,6 +1456,79 @@ test("a group that beats its track info waits for it", async () => {
 	}
 });
 
+// A lite-07 re-offer can overtake the reset of the stream it replaces: it waits, unread, until that
+// copy ends. It is refused as a duplicate once the copy finishes, and takes the group once it fails.
+test.each([false, true])("a duplicate of an arriving copy waits for it to settle (first fails: %p)", async (fails) => {
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
+	try {
+		await opened(0);
+		await (await opened(1)).writing;
+		await answerTrackInfo(streams[0], version, 1000);
+
+		// The original copy, still arriving: one frame in, no end yet.
+		const chunks: Uint8Array[] = [];
+		const writer = new Writer(
+			new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
+			version,
+		);
+		await writer.u62(0n);
+		await writer.u53(1);
+		await writer.write(new Uint8Array([7]));
+		let first!: ReadableStreamDefaultController<Uint8Array>;
+		const arriving = new ReadableStream<Uint8Array>({
+			start: (controller) => {
+				first = controller;
+			},
+		});
+		const original = subscriber.runGroup(
+			new Group({ subscribe: 0n, sequence: 0n }),
+			new Reader(arriving, undefined, version),
+		);
+		for (const chunk of chunks) first.enqueue(chunk);
+		const group = await track.recvGroup();
+		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([7]));
+
+		const duplicate = await groupStream(0, version);
+		const stop = spyOn(duplicate, "stop");
+		let held = true;
+		const receiving = subscriber.runGroup(new Group({ subscribe: 0n, sequence: 0n }), duplicate).finally(() => {
+			held = false;
+		});
+		await drainReactions();
+		expect(held).toBe(true);
+		expect(stop).not.toHaveBeenCalled();
+
+		if (!fails) {
+			first.close();
+			await original;
+			await receiving;
+			expect(stop.mock.calls[0]?.[0]).toBeInstanceOf(Error);
+			expect(await group?.readFrame()).toBeUndefined();
+			return;
+		}
+
+		// The reset lands: the held stream takes the group.
+		first.error(new Error("peer reset"));
+		await original;
+		await receiving;
+		expect(await group?.closed).toBeInstanceOf(Error);
+		const later = subscriber.consume(Path.from("room")).track("video").subscribe();
+		try {
+			const again = await later.recvGroup();
+			expect(again?.sequence).toBe(0n);
+			expect((await again?.readFrame())?.payload).toEqual(new Uint8Array([0]));
+		} finally {
+			later.close();
+		}
+	} finally {
+		track.close();
+		subscriber.close();
+	}
+});
+
 // A TRACK reset while its SUBSCRIBE is live fails the subscription, so the origin can try another
 // route, and resets the SUBSCRIBE.
 test("a reset track rejects the subscription and resets its subscribe", async () => {

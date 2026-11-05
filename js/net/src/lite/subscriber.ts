@@ -2218,6 +2218,15 @@ export class Subscriber {
 				track.abort(violation);
 				throw violation;
 			}
+			// A duplicate of a copy still arriving, such as a lite-07 re-offer that overtook the reset
+			// of the stream it replaces, waits unread, which flow control bounds. Created once that copy
+			// ends, it is refused as a duplicate if the copy finished and takes the group if it failed.
+			// Its own reset ends the wait; a clean end leaves it on the copy alone.
+			for (let arriving = hooks.arrivingGroup(track, group.sequence); arriving !== undefined; ) {
+				const settled = arriving;
+				await race([settled, stream.closed.then(() => settled)]);
+				arriving = hooks.arrivingGroup(track, group.sequence);
+			}
 			producer = hooks.receiveGroup(track, { sequence: group.sequence, start: group.frameStart });
 
 			await readFrames(stream, producer, {

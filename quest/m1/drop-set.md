@@ -178,6 +178,21 @@ decision above and the PR's `## Waiting` item on out-of-order creation:
   finish-time inference for a local producer (a gap at finish is no more a
   declaration than one mid-stream).
 
+Decided 2026-11-05 (maintainer, /quest-complete): a duplicate Group Stream
+waits until the first copy settles. On lite-07 the OLD drop for an expired
+group, and the stream the next update re-offers for it, can both reach the
+subscriber before the original stream's reset, which used to refuse the
+re-offer as a duplicate and lose the group once the reset landed. The
+subscriber now holds a stream whose sequence another copy still arriving
+holds, unread, and discards it if that copy finishes or takes the group if it
+fails (Rust `GroupRecv`'s `Hold` wait over `track::Received::Held`, JS
+`runGroup` over `receiveGroup`'s `arriving`). The held stream keeps the
+lowest receive priority, so it holds at most its stream credit and is the
+first a full receive window evicts. A reader already handed the failed copy
+sees it fail, since no sequence is handed out twice; the cache, fills, and
+readers that had not reached it get the re-offer. Not chosen: letting the
+duplicate replace the copy still arriving; accepting the loss.
+
 Decided 2026-10-27 (maintainer): this runs after the range count cost work,
 which finished in [moq-dev/moq#7542](https://github.com/moq-dev/moq/pull/7542),
 and before [Rust groups by start](/quest/m1/time-addressing/model.md), which

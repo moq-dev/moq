@@ -1067,6 +1067,10 @@ export class Producer {
 			producer.#starts = starts;
 		};
 		hooks.receiveGroup = (producer, { sequence, start }) => producer.#createGroup(sequence, start);
+		hooks.arrivingGroup = (producer, sequence) => {
+			const closed = producer.#cached.get(sequence)?.group.closed;
+			return closed?.peek() === undefined ? closed : undefined;
+		};
 		hooks.writeDatagram = (producer, datagram, inflated) => producer.#insertDatagram(datagram, inflated);
 		sourceStart = (producer) => producer.#served && producer.#feedStart();
 		fillFloor = (producer, named) => producer.#fillFloor(named);
