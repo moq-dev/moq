@@ -17335,7 +17335,11 @@ mod joining_fetch_tests {
 			for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 				let run = JoinRun::start(version, Some(0), subscribe_ok(version, largest), fetch_ok(version)).await;
 				let state = run.subscriber.state.lock();
-				let held = state.subscribes.values().next().expect("the subscription is registered");
+				let held = state
+					.subscribes
+					.values()
+					.next()
+					.expect("the subscription is registered");
 				assert_eq!(held.headless_through, headless, "{version}: Largest object {object}");
 			}
 		}
