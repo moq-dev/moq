@@ -9661,7 +9661,7 @@ mod tests {
 						}
 						Answer::Cached => {
 							let mut staged = staged.take().unwrap();
-							write(&mut *staged, &[0, 3, 7]);
+							write(&mut staged, &[0, 3, 7]);
 							staged.commit()
 						}
 						Answer::Settling => {
@@ -9672,7 +9672,7 @@ mod tests {
 						}
 						Answer::Reported => {
 							let mut staged = staged.take().unwrap();
-							write(&mut *staged, &[3]);
+							write(&mut staged, &[3]);
 							staged.report_largest(track::Position::group(9));
 							staged.commit()
 						}
