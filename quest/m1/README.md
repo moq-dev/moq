@@ -173,7 +173,6 @@ their end report, so an embedder's drain alert pages on real cuts.
 - [Main is no slower than release](/quest/m1/release-perf/README.md) - every benchmark where main is slower than release is fixed or accepted with a reason, checked by a final paired run before the cut
 - [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - A/A and deliberately slowed Nightly runs set the paired comparison's threshold, so its regression alerts can be trusted
 - [moq-json's table/deltas bench measures the same work every iteration](/quest/m1/bench-json-deltas.md) - the `table/deltas/1%` cases stop flipping between snapshot and delta timings, so their trend history is usable
-- [moq-net's benches run to completion](/quest/m1/bench-test-mode.md) - the `origin`, `session` and `memory` benches stop panicking in test mode and Nightly's measured run, and the maintainer picks where CI catches the next break
 - [Publish moq-bench to crates.io](/quest/m1/bench-publish.md) - `cargo install moq-bench` installs one binary, with the host sampler as `moq-bench host`, first as 0.1.0
 - [Catalog contributions become includes on the root's timeline](/quest/m1/catalog-include.md) - rename the unreleased `contributions` map before the cut and state that included broadcasts share the root's timeline
 - [Unbounded groups](/quest/m1/unbounded-groups/README.md) - groups and frames lose their size caps; a group keeps a 32 MB tail, and readers behind it replay through paced flights or refresh

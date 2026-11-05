@@ -30,12 +30,15 @@ This README's own work, after the children:
   macOS `receive_credit` timeout has no owner since its quest was deleted in
   [moq-dev/moq#6732](https://github.com/moq-dev/moq/pull/6732), so plan one under
   [test flakes](/quest/m0/test-flakes-2/README.md) if it recurs, the paired bench
-  threshold to [bench CI](/quest/m1/bench-ci.md), and the moq-net bench
-  panics in "Rust bench targets" to
-  [moq-net's benches run to completion](/quest/m1/bench-test-mode.md).
+  threshold to [bench CI](/quest/m1/bench-ci.md). The moq-net benchmark
+  fixtures were repaired in [moq-dev/moq#7940](https://github.com/moq-dev/moq/pull/7940).
   The receive-windows benchmark's overcommitted cells, skipped since
   [moq-dev/moq#7838](https://github.com/moq-dev/moq/pull/7838), moved to
   [m1](/quest/m1/receive-windows-evicted.md) on 2026-11-04 (maintainer).
+
+Decided 2026-11-05 (maintainer, /quest-plan): catch the next moq-net bench
+break in Nightly's measured coverage only. Do not add a test-mode bench run
+to the PR gate; the full run costs about 17 minutes per PR.
 
 Public API: none. Wire: none.
 
