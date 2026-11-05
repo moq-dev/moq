@@ -816,9 +816,10 @@ impl Handshake {
 			Some(at) => kio::clock::timeout_at(at, reply).await.map_err(|_| Error::Timeout)?,
 			None => reply.await,
 		};
-		unanswered.answered();
-		if let Err(err) = &res {
-			stats.end(err);
+		match &res {
+			Ok(_) => unanswered.answered(),
+			// Starting can refuse what the peer sent, such as a route key proof that fails.
+			Err(err) => unanswered.refuse(err),
 		}
 		res
 	}
@@ -846,6 +847,14 @@ struct Unanswered(Option<(Transport, Version, stats::Session)>);
 impl Unanswered {
 	fn answered(mut self) {
 		self.0 = None;
+	}
+
+	/// Close the session with `err`'s wire code, so the peer learns why it was refused.
+	fn refuse(mut self, err: &Error) {
+		if let Some((mut session, version, stats)) = self.0.take() {
+			close(&mut session, err, Some(version));
+			stats.end(err);
+		}
 	}
 }
 
@@ -1039,6 +1048,9 @@ mod tests {
 		}
 		fn poll_closed(&self, _waiter: &kio::Waiter) -> std::task::Poll<Self::Error> {
 			std::task::Poll::Pending
+		}
+		fn export_keying_material(&self, _label: &[u8], _context: &[u8]) -> Option<[u8; 32]> {
+			Some([9; 32])
 		}
 	}
 
@@ -1477,6 +1489,37 @@ mod tests {
 		crate::transport::poll::Session::close(&session, SessionError::Cancel.to_code(), "closed");
 		let request = Server::new().accept_request(kio::clock::now(), session).await.unwrap();
 		assert_eq!(request.path(), "/closed");
+	}
+
+	/// A client whose route key proof fails is refused with PROTOCOL_VIOLATION, not left waiting.
+	#[kio::test]
+	async fn a_failed_route_key_proof_closes_with_its_code() {
+		let v = lite::Version::Lite07;
+		// Signed for another session's exported secret, so it fails against this one's.
+		let proof = crate::route::Transcript::new([1; 32]).prove(&crate::origin::RouteKey::generate(), true);
+		let mut setup = Vec::new();
+		lite::DataType::Setup
+			.encode(&mut crate::coding::Encoder::new(&mut setup, v.into()), v)
+			.unwrap();
+		lite::Setup {
+			route_key: Some(proof),
+			..Default::default()
+		}
+		.encode(&mut crate::coding::Encoder::new(&mut setup, v.into()), v)
+		.unwrap();
+
+		let session = FakeSession::new(ALPN_LITE_07_WIP, [setup]);
+		let transport = session.clone();
+		let request = Server::new()
+			.with_versions(Version::Lite(v).into())
+			.accept_request(kio::clock::now(), session)
+			.await
+			.unwrap();
+		assert!(matches!(request.ok().await, Err(Error::ProtocolViolation)));
+		assert_eq!(
+			transport.close_code(),
+			Some(Version::Lite(v).session_code(&SessionError::ProtocolViolation))
+		);
 	}
 
 	#[kio::test]
