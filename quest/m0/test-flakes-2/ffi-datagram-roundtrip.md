@@ -1,24 +1,28 @@
-# [S] moq-ffi's datagram tests don't hinge on one datagram
+# [S] Diagnose and re-enable the FFI datagram connection test
 
 ## Goal
 
 `datagrams_cross_a_default_connection` and its `requested_` sibling
-(`rs/moq-ffi/src/test.rs`) pass reliably under CI load, without depending on
-a single unreliable datagram arriving.
+(`rs/moq-ffi/src/test.rs`) pass reliably under CI load after the timeout
+cause is confirmed and fixed.
 
 ## Plan
 
 Decided 2026-11-05 (maintainer, follow-up from
 [moq-dev/moq#7914](https://github.com/moq-dev/moq/pull/7914)): ✅ m0.
 
+Decided 2026-11-05 (maintainer, /quest-plan): ✅ Keep only
+`datagrams_cross_a_default_connection` quarantined and land the quarantine in
+[moq-dev/moq#7954](https://github.com/moq-dev/moq/pull/7954). Re-diagnose under
+CI load after [moq-dev/moq#7951](https://github.com/moq-dev/moq/pull/7951)
+lands. Re-enabling now is rejected. Do not add repeated sending without
+evidence of ordinary loss.
+
 The test sends one datagram over a real connection and waits 10 s for it;
-it timed out in Check on #7914 while passing 30 of 30 runs on an idle host.
-Confirm the cause first. If it's loss, keep writing datagrams until the first
-arrives and assert on what arrives, rather than waiting longer. If it's the
-datagram answer race planned in
-[moq-dev/moq#7929](https://github.com/moq-dev/moq/pull/7929)
-(`quest/m1/datagram-tracks/answer-race.md`), say so here and wait on that
-quest instead.
+it timed out in Check on
+[moq-dev/moq#7914](https://github.com/moq-dev/moq/pull/7914) while passing
+30 of 30 runs on an idle host. Confirm the cause with send/route diagnostics
+before choosing the fix and re-enabling the test.
 
 Investigation 2026-11-05 on `main` at `419b799c75`:
 
@@ -40,11 +44,13 @@ Investigation 2026-11-05 on `main` at `419b799c75`:
 
 ## Waiting
 
-- moq-dev/moq: capture a failing run with send and route diagnostics to
-  distinguish transport loss from an unroutable datagram or another lifecycle
-  bug. Recommendation: rerun the ignored case under the CI workload after
-  [the answer-race fix](https://github.com/moq-dev/moq/pull/7951) lands,
-  retaining diagnostics if it fails. A passing stress run is not proof of
-  transport loss. Once the cause is confirmed, apply the corresponding Plan
-  above and re-enable the test. No workflow dispatch or host change is
-  authorized for this investigation.
+- moq-dev/moq: wait for
+  [moq-dev/moq#7951](https://github.com/moq-dev/moq/pull/7951) to merge, then
+  capture a failing run under CI load with send/route diagnostics. Check the
+  PR's merged state with `gh pr view 7951 --json state,mergedAt`; once merged,
+  rerun the ignored case under the CI workload with diagnostics at
+  `DatagramSend::send` and `Subscriber::route_datagram`, retaining a failing
+  trace. Use it to distinguish ordinary transport loss, a route miss, or
+  another lifecycle bug and choose the corresponding fix before re-enabling.
+  Passing stress runs alone do not clear this wait or establish transport loss.
+  No workflow dispatch or host change is authorized for this investigation.
