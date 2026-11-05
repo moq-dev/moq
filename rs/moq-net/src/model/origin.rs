@@ -4088,11 +4088,11 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 								Err(err) => return Some(Step::Info(name.clone(), asked.source, Err(err))),
 							}
 						}
-						// While another copy still serves, a matching replacement answers only once
-						// it delivers or ends: one failing first refuses, and that copy keeps
+						// While another copy may still deliver, a matching replacement answers only
+						// once it delivers or ends: one failing first refuses, and that copy keeps
 						// serving. Different metadata is refused at once.
 						if let Some(info) = &asked.info
-							&& (io.copy.is_none()
+							&& (io.copy.as_ref().is_none_or(|(_, copy, _)| copy.poll_complete(waiter).is_ready())
 								|| io.accepted.as_ref().is_some_and(|accepted| accepted.info() != info)
 								|| asked.copy.poll_grouped(waiter).is_ready()
 								|| asked.copy.poll_closed(waiter).is_ready())
