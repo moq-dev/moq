@@ -60,7 +60,7 @@ async fn transfer(offerer: &Offerer, answerer: &Answerer, payload: &[u8]) {
 	.expect("handshake timed out");
 
 	let read = async {
-		let Some(moq_net::announce::Event::Start(route)) = announced.next().await else {
+		let Some(moq_net::announce::Event::Present(route)) = announced.next().await else {
 			panic!("expected the broadcast to be announced");
 		};
 		assert_eq!(route.prefix.as_str(), "test");

@@ -20,4 +20,6 @@ The generator is the one the C++ package pins; see [cpp/moq](../../cpp/moq/READM
 
 The implementation is C++17 over the generated C++ bindings, compiled into `libmoq.a` (`moq.lib`) beside moq-ffi's staticlib, installed as `libmoq_c_ffi.a` (`moq_c_ffi.lib`) so moq-cpp's copy can share the prefix, so a C program needs no C++ compiler, but its link adds the C++ runtime, which the CMake package and `moq-c.pc` name. Both libraries use the release CRT (`/MD`) on MSVC in every configuration, so an MSVC consumer must too (`CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL`); its default Debug runtime (`/MDd`) fails to link with LNK2038.
 
+Start every subscription from `moq_subscription_defaults()` and change its fields: it holds moq-net's defaults, a zero `delay` that starts at the newest group and skips a superseded one at once. The bare record `moq_subscription_default()` returns does not, since the generated records carry no duration defaults: its unset `delay.max` sets no subscriber limit and its unset `delay.min` leaves the target latency unstated.
+
 This package and the C++ package, `moq-cpp`, each embed moq-ffi, so one program links one of them, never both, and they install to separate prefixes.

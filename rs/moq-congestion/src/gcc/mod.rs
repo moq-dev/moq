@@ -199,7 +199,8 @@ impl Gcc {
         });
         let window_time = TimeDelta::from_micros(init.rtt.as_micros().min(i64::MAX as u128) as i64)
             + TimeDelta::from_millis(experiments::CongestionWindowConfig::default().queue_size_ms);
-        let initial_window = ((starting_rate * window_time).bytes().max(0) as u64).max(MIN_WINDOW);
+        let initial_window =
+            ((starting_rate * window_time).bytes().max(0) as u64).max(minimum_window(init.mtu));
         let mut gcc = Self {
             cc,
             prober: BitrateProber::default(),
@@ -331,7 +332,7 @@ impl Gcc {
             .cc
             .congestion_window()
             .map_or(self.initial_window, |window| window.bytes().max(0) as u64);
-        window.max(MIN_WINDOW)
+        window.max(minimum_window(self.mtu))
     }
 
     /// The bytes in flight up to which the current probe cluster may be filled.
@@ -514,6 +515,12 @@ impl Controller for Gcc {
     fn clone_box(&self) -> Box<dyn Controller> {
         Box::new(self.clone())
     }
+}
+
+/// The smallest window on a path of `mtu`: `kMinCwnd` counts two 1500-byte packets, and a
+/// window short of one larger datagram would block every send.
+fn minimum_window(mtu: u16) -> u64 {
+    MIN_WINDOW.max(2 * u64::from(mtu))
 }
 
 fn timestamp(instant: Instant) -> Timestamp {

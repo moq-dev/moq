@@ -9,10 +9,23 @@ runs on the hosted ARM runners, and a deliberately slowed bench fails the job.
 
 ## Waiting
 
-- Maintainer: dispatch the Nightly runs on `main` below (A/A and slowed
-  bench); agents never dispatch Nightly. Check each run's `paired.json`.
+- Maintainer: dispatch the slowed-bench Nightly run below. Agents never
+  dispatch Nightly; the 2026-11-04 authorization covered the two A/A runs only.
+- moq-dev/moq: once A/A run
+  [41921320690](https://github.com/moq-dev/moq/actions/runs/41921320690)
+  finishes, dispatch the second A/A run under the same authorization
+  (`gh workflow run nightly.yml --ref main -f bench-base=<main's head>`; as of
+  2026-11-04 it is not dispatched yet), then read both runs' `paired.json` (the
+  `bench-rust*` artifacts). Find the second with `gh run list --repo
+  moq-dev/moq --workflow nightly.yml --event workflow_dispatch`.
 
 ## Plan
+
+Decided 2026-11-04 (maintainer, /quest-unblock): ✅ authorize one-time agent
+dispatch of the two A/A Nightly runs on `main`, with `bench-base` set to each
+run's own commit. Not chosen: the maintainer dispatching them, or skipping.
+Nightly's concurrency group cancels an in-progress run, so the second is
+dispatched only after the first finishes.
 
 - A/A: dispatch Nightly on `main` with `bench-base` set to the run's own
   commit, at least twice. Read each paired group's `paired.json` (the

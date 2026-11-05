@@ -221,17 +221,20 @@ final class Moq {
   Publication createBroadcast(String path) =>
       session.publish().createBroadcast(path: path);
 
-  /// Discover routes matching [options]; prefixes stay relative to the origin.
+  /// List the paths matching [options] as each becomes present or absent;
+  /// prefixes stay relative to the origin.
   ///
   /// Listen to `announced(...).updates()` for a [Stream] of [AnnounceEvent]
-  /// that releases the cursor when the subscription ends.
+  /// that releases the cursor when the subscription ends. A new publisher
+  /// instance keeps its path present, so use [follow] to see it.
   AnnounceConsumer announced({
     AnnounceOptions options = const AnnounceOptions(),
   }) => session.consume().announced(config: options._ffi);
 
   /// Follow the broadcast at exactly [path]: each `available()` resolves the
-  /// next instance serving it, such as a restarted publisher. Pass an
-  /// [instance] to follow only that stream.
+  /// next instance serving it, such as a restarted publisher, or null once the
+  /// path goes offline. Pass an [instance] to follow only that stream; another
+  /// one taking over also resolves null.
   Following follow(String path, {String? instance}) =>
       session.consume().follow(path: path, instance: instance);
 
@@ -246,6 +249,16 @@ final class Moq {
   /// a share for an app-owned encoder; dropping the [Reservation] hands
   /// the room back.
   Allocator allocator() => session.allocator();
+
+  /// The session's viewers, dividing the connection's receive estimate among
+  /// the broadcasts watched over it.
+  ///
+  /// Every call returns a handle to the same registry, and the session sends
+  /// what its viewers' ceilings add up to as its PROBE target. [Viewers.watch]
+  /// a broadcast with the ceiling of the largest rendition the player would
+  /// switch to, read its slice with [Viewer.rate], and dispose the [Viewer]
+  /// once the broadcast stops being watched.
+  Viewers viewers() => session.viewers();
 
   /// Follow the grant the peer gave this session.
   ///

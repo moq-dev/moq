@@ -11,9 +11,12 @@
 use moq_tokio::moq_net::{self, Hop};
 use std::time::Duration;
 
-/// A millisecond track: the frames written here carry timestamps.
+/// A millisecond track with no publisher max age: the frames written here carry timestamps,
+/// and superseded groups stay readable.
 fn timed() -> moq_net::track::Info {
-	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	moq_net::track::Info::default()
+		.with_timescale(moq_net::Timescale::MILLI)
+		.with_max_age(None)
 }
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -497,7 +500,9 @@ async fn lite05_fetch_during_subscribe(scheme: &str) {
 	let track = broadcast
 		.create_track(
 			"video",
-			moq_net::track::Info::default().with_timescale(Timescale::MICRO),
+			moq_net::track::Info::default()
+				.with_timescale(Timescale::MICRO)
+				.with_max_age(None),
 		)
 		.expect("failed to create track");
 
@@ -799,6 +804,22 @@ async fn broadcast_moq_transport_22_current_group_join() {
 
 	drop(connection);
 	server_handle.await.expect("server panicked").expect("server failed");
+}
+
+/// Wait for the next route change as `(announce, active)`, failing the test on a timeout or a
+/// closed origin.
+async fn next_route(routes: &mut moq_net::origin::Routes) -> (moq_net::announce::Announce, bool) {
+	let event = kio::clock::timeout(TIMEOUT, routes.next())
+		.await
+		.expect("announce timeout")
+		.expect("origin closed");
+	match event {
+		moq_net::origin::RouteEvent::End(announce) => (announce, false),
+		moq_net::origin::RouteEvent::Start(announce)
+		| moq_net::origin::RouteEvent::Update(announce)
+		| moq_net::origin::RouteEvent::Restart(announce)
+		| moq_net::origin::RouteEvent::Takeover { announce, .. } => (announce, true),
+	}
 }
 
 /// Wait for the next announce event, failing the test on a timeout or a closed origin.
@@ -1105,7 +1126,7 @@ async fn broadcast_route_migration() {
 	// active metadata updates (the standby's chain taking over).
 	while let Some(event) = announcements.try_next() {
 		assert!(
-			!matches!(event, moq_net::announce::Event::End(_)),
+			!matches!(event, moq_net::announce::Event::Absent(_)),
 			"failover must not retract the route"
 		);
 	}
@@ -1439,7 +1460,8 @@ async fn route_reannounce_test(version: Option<&str>) {
 	// ── subscriber (client) ─────────────────────────────────────────
 	let sub_origin = moq_tokio::origin::spawn();
 	let sub_consumer = sub_origin.consume();
-	let mut announcements = sub_consumer.announced();
+	// A hop change is a route update, which only the relay-level stream reports.
+	let mut announcements = sub_consumer.routes();
 
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
@@ -1453,7 +1475,7 @@ async fn route_reannounce_test(version: Option<&str>) {
 		.expect("connect timeout")
 		.expect("connect failed");
 
-	let (update, active) = next_announce(&mut announcements).await;
+	let (update, active) = next_route(&mut announcements).await;
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "expected announce");
 	let initial = update.route;
@@ -1480,7 +1502,7 @@ async fn route_reannounce_test(version: Option<&str>) {
 		.expect("update route");
 
 	// The subscriber sees the new chain as another active update for the prefix...
-	let (update, active) = next_announce(&mut announcements).await;
+	let (update, active) = next_route(&mut announcements).await;
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "a restart must not retract the route");
 	assert_ne!(initial.hops, update.route.hops, "route must change");
@@ -1594,7 +1616,7 @@ async fn broadcast_negotiate_client_all_server_transport_18() {
 	broadcast_test("moqt", None, Some("moq-transport-18")).await;
 }
 
-// ── Retention window (track::Info::max_age) ─────────────────────
+// ── Freshness bound (track::Info::max_age) ──────────────────────
 
 async fn max_age_test(version: &str, published: Option<Duration>) -> Option<Duration> {
 	let version: moq_net::Version = version.parse().expect("invalid version");
@@ -2067,30 +2089,33 @@ async fn broadcast_websocket_uses_newest_version() {
 
 	let expected_version: moq_net::Version = NEWEST_LITE.parse().expect("invalid version");
 
-	let server_handle = tokio::spawn(async move {
+	let accept = async {
 		let request = server.accept().await.expect("no incoming connection");
 		assert_eq!(request.transport(), moq_tokio::Transport::WebSocket);
-		let session = request.with_publisher(&pub_origin).ok().await?;
+		let session = request
+			.with_publisher(&pub_origin)
+			.ok()
+			.await
+			.expect("server accept failed");
 		assert_eq!(session.version(), expected_version, "server negotiated stale version");
-		let _broadcast = broadcast;
-		let _track = track;
-		let _ = session.closed().await;
-		Ok::<_, anyhow::Error>(())
-	});
+		session
+	};
 
 	let client = client.with_subscriber(sub_origin);
-	let (_client, cc) = kio::clock::timeout(TIMEOUT, connect_once(client, url))
-		.await
-		.expect("client connect timed out")
-		.expect("client connect failed");
+	let connect = async {
+		kio::clock::timeout(TIMEOUT, connect_once(client, url))
+			.await
+			.expect("client connect timed out")
+			.expect("client connect failed")
+	};
+	// The client can establish before the server reads SETUP. Keep it alive until
+	// both sides negotiate, or accept() can discard the closed peer and wait again.
+	let (session, (_client, cc)) = tokio::join!(accept, connect);
 
 	assert_eq!(cc.version(), Some(expected_version), "client negotiated stale version");
 
 	drop(cc);
-	server_handle
-		.await
-		.expect("server task panicked")
-		.expect("server task failed");
+	let _ = session.closed().await;
 }
 
 /// Regression guard: a Tokio runtime's session machine must run under the span
@@ -3298,8 +3323,8 @@ async fn goaway_timeout_force_close_moq_transport_22_quic() {
 /// left to redial, and dropping the connection closes the transport because it
 /// holds the last session clone.
 ///
-/// The client comes back because it owns the transport endpoint (iroh's dies with
-/// it), and the caller has to outlive the connection it just got.
+/// The client comes back because it owns the transport endpoint, and the caller
+/// has to outlive the connection it just got.
 async fn connect_once(
 	client: moq_tokio::Client,
 	url: url::Url,
@@ -3479,10 +3504,7 @@ async fn abort_carries_its_code_to_the_peer() {
 /// The next route and whether it is active.
 async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
 	match announced.next().await? {
-		moq_net::announce::Event::Start(route)
-		| moq_net::announce::Event::Update(route)
-		| moq_net::announce::Event::Restart(route)
-		| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
-		moq_net::announce::Event::End(route) => Some((route, false)),
+		moq_net::announce::Event::Present(route) => Some((route, true)),
+		moq_net::announce::Event::Absent(route) => Some((route, false)),
 	}
 }

@@ -30,7 +30,7 @@ for (const retained of [1, 64, 1024])
 			]);
 			try {
 				const announcements = destination.announced();
-				while ((await announcements.next())?.kind !== "start") {}
+				while ((await announcements.next())?.kind !== "present") {}
 				const request = destination.request(Path.from("room"));
 				while (!request.active.peek()) await request.active.changed();
 				const remote = request.active.peek();
@@ -72,7 +72,7 @@ for (const retained of [1, 64, 1024])
 					const start = performance.now();
 					const joins = Array.from({ length: joined }, () => consumers[0].subscribe());
 					const wanted = producers[0].demand().wanted;
-					while (wanted.peek() !== group.sequence + 1) await wanted.changed();
+					while (wanted.peek() !== group.sequence + 1n) await wanted.changed();
 					if (round > 0) samples.push((performance.now() - start) * 1000);
 					for (const join of joins) join.close();
 				}

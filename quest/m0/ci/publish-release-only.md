@@ -25,7 +25,7 @@ Environment and `CACHIX_AUTH_TOKEN` needs no new home. The alternatives were
 moving the token into `cache-write`, or deleting Cachix everywhere now with a
 `release` backport. `release` keeps its Cachix workflows until the next cut
 merges `main` into it, and
-[nix-cache-verify](/quest/m0/ci/nix-cache-verify.md) deletes the Cachix
+[Release tags substitute from nix.moq.dev](/quest/m2/release-nix-cache.md) deletes the Cachix
 cache and token once a release tag substitutes from `nix.moq.dev`.
 
 What remains is the maintainer's, in order:
@@ -37,6 +37,13 @@ What remains is the maintainer's, in order:
    still run on `main`.
 2. Then drop `main` from `publish`'s deployment policy, and remove
    `DISCORD_WEBHOOK` and `CACHIX_AUTH_TOKEN` from `publish`.
+
+Decided 2026-11-04 (maintainer, /quest-unblock): ✅ cut the combined patch
+release on `release` soon, once [moq-dev/moq#7596](https://github.com/moq-dev/moq/pull/7596)'s
+remaining ports and [moq-dev/moq#7680](https://github.com/moq-dev/moq/pull/7680)
+are ready, and merge `main` into `release` for the next minor line
+separately, later. Not chosen: one combined cut that merges `main` first, or
+neither this week.
 
 Public API: none. Wire: none.
 

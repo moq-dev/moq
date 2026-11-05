@@ -56,6 +56,11 @@ pub struct VideoInit {
 	pub label: Option<String>,
 	/// Catalog fields the stream cannot reveal itself.
 	pub hint: VideoHint,
+	/// The track's priority, which a [`bandwidth::Allocator`](moq_net::bandwidth::Allocator)
+	/// funds in order. A rendition published above a lower one of the same source sits one
+	/// below it, so the lower one is funded first. Defaults to
+	/// [`PRIORITY.video`](hang::catalog::PRIORITY).
+	pub priority: i8,
 }
 
 impl VideoInit {
@@ -66,6 +71,7 @@ impl VideoInit {
 			data: data.into(),
 			label: None,
 			hint: VideoHint::default(),
+			priority: hang::catalog::PRIORITY.video,
 		}
 	}
 }

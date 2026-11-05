@@ -31,7 +31,7 @@ function announced(origin: Origin.Producer): Set<string> {
 		for (;;) {
 			const entry = await listing.next();
 			if (!entry) break;
-			if (entry.kind === "end") paths.delete(entry.prefix);
+			if (entry.kind === "absent") paths.delete(entry.prefix);
 			else paths.add(entry.prefix);
 		}
 	})();
@@ -44,12 +44,14 @@ async function read(origin: Origin.Producer, path: string, clock: Manual): Promi
 	await flush();
 	const broadcast = request.active.peek();
 	if (!broadcast) throw new Error(`no feedback at ${path}`);
-	const track = broadcast.track(Schema.TRACK).subscribe();
-	const consumer = new Json.Snapshot.Consumer<Schema.Snapshot>({ track, schema: Schema.SnapshotSchema });
+	const consumer = new Json.Snapshot.Consumer<Schema.Snapshot>({
+		track: broadcast.track(Schema.TRACK),
+		schema: Schema.SnapshotSchema,
+	});
 	await flush();
 	await clock.advance(Nano.fromMilli(Milli(1000)));
 	const value = (await consumer.latest())?.value;
-	track.close();
+	consumer.close();
 	request.close();
 	return value;
 }
@@ -101,6 +103,35 @@ test("publishes feedback where the catalog solicits it and follows the solicitat
 		catalog.set({});
 		await flush();
 		expect([...paths]).toEqual([]);
+	} finally {
+		echo.close();
+		broadcast.close();
+		origin.close();
+		installed.close();
+	}
+});
+
+test("a rendition named __proto__ keeps its counters in the published report", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const origin = new Origin.Producer();
+	const catalog = new Signal<Catalog.Root | undefined>({ echo: { path: "viewers" } } as Catalog.Root);
+	const broadcast = watched(origin, "room/live.hang", catalog);
+	const echo = new Echo({
+		broadcast,
+		origin,
+		name: "alice",
+		sources: [
+			// JSON.parse keeps `__proto__` as an own key, as a decoder's report does.
+			source("room/live.hang", JSON.parse('{"__proto__":{"frames":1}}') as Record<string, Received>),
+			source("room/live.hang", { video: { frames: 2 } }),
+		],
+	});
+	try {
+		await flush();
+		const renditions = (await read(origin, "room/viewers/alice.echo", clock))?.renditions ?? {};
+		expect(Object.keys(renditions).sort()).toEqual(["__proto__", "video"]);
+		expect(Object.hasOwn(renditions, "__proto__")).toBe(true);
 	} finally {
 		echo.close();
 		broadcast.close();

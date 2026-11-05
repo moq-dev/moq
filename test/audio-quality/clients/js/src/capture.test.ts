@@ -19,8 +19,8 @@ const config = Catalog.AudioConfigSchema.parse({
 test("arrival capture stamps a later group before a stalled earlier group", async () => {
 	let now = 10;
 	const clock = spyOn(performance, "now").mockImplementation(() => now);
-	const early = new Group.Producer(0);
-	const late = new Group.Producer(1);
+	const early = new Group.Producer(0n);
+	const late = new Group.Producer(1n);
 	const captured: Arrival[] = [];
 	const read = async (group: Group.Consumer) => {
 		for await (const frame of arrivals(group, { decoder: new Legacy.Format("audio"), config }))
@@ -54,7 +54,7 @@ test("arrival capture stamps a later group before a stalled earlier group", asyn
 });
 
 test("arrival capture excludes duration markers", async () => {
-	const group = new Group.Producer(7);
+	const group = new Group.Producer(7n);
 	group.writeFrame({
 		timestamp: Time.Timestamp.fromMicros(100_000),
 		payload: Legacy.encodeFrame(new Uint8Array(), Micro(100_000)),
@@ -195,7 +195,7 @@ test("a reset group truncates its arrivals without failing capture", async () =>
 });
 
 test("arrival durations come from Opus packets despite missing or differently sized packets", async () => {
-	const group = new Group.Producer(0);
+	const group = new Group.Producer(0n);
 	for (const [timestamp, toc] of [
 		[0, 0x78],
 		[100_000, 0x00],
@@ -219,7 +219,7 @@ test("arrival durations come from Opus packets despite missing or differently si
 });
 
 test("arrival capture uses AAC's codec duration when the container leaves it implicit", async () => {
-	const group = new Group.Producer(0);
+	const group = new Group.Producer(0n);
 	group.writeFrame({
 		timestamp: Time.Timestamp.fromMicros(0),
 		payload: Legacy.encodeFrame(new Uint8Array([1]), Micro(0)),
@@ -234,7 +234,7 @@ test("arrival capture uses AAC's codec duration when the container leaves it imp
 });
 
 test("arrival capture refuses a packet with no usable duration", async () => {
-	const group = new Group.Producer(0);
+	const group = new Group.Producer(0n);
 	group.writeFrame({
 		timestamp: Time.Timestamp.fromMicros(0),
 		payload: Legacy.encodeFrame(new Uint8Array([0x7b]), Micro(0)),

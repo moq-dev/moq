@@ -148,7 +148,7 @@ export async function* arrivals(
 				if (duration === undefined || !Number.isFinite(duration) || duration <= 0) {
 					throw new Error(`no encoded frame duration for ${config.codec}`);
 				}
-				yield [at, Milli.fromMicro(frame.timestamp), group.sequence, duration];
+				yield [at, Milli.fromMicro(frame.timestamp), Number(group.sequence), duration];
 			}
 		}
 	} finally {

@@ -5,7 +5,7 @@ import { hooks } from "../internal.ts";
 import { Producer as Track } from "../track.ts";
 import { Decoder } from "./decoder.ts";
 import { Encoder } from "./encoder.ts";
-import { encodable, stored } from "./group.ts";
+import { encodable } from "./group.ts";
 
 const payload = new TextEncoder().encode("one shared compression window ".repeat(100));
 
@@ -42,7 +42,7 @@ test("synchronous writers store slices; plain readers share one charged inflated
 });
 
 test("received slices are forwarded byte-for-byte and exact declarations fail all plain readers", async () => {
-	const group = new Group(0);
+	const group = new Group(0n);
 	hooks.bindGroupCompression(group, true);
 	const slice = new Encoder().frame(payload);
 	hooks.writeGroupFrame(group, { payload: slice }, payload.length + 1);
@@ -56,7 +56,7 @@ test("received slices are forwarded byte-for-byte and exact declarations fail al
 });
 
 test("a slice that fails to decode fails its open group, which takes no more frames", async () => {
-	const group = new Group(0);
+	const group = new Group(0n);
 	hooks.bindGroupCompression(group, true);
 	const raw = group.consume();
 	const slice = new Encoder().frame(payload);
@@ -69,7 +69,7 @@ test("a slice that fails to decode fails its open group, which takes no more fra
 
 for (const readPlain of [false, true]) {
 	test(`compressed tails shed dictionary prefixes without retaining inflated history (plain=${readPlain})`, async () => {
-		const group = new Group(0);
+		const group = new Group(0n);
 		hooks.bindGroupCompression(group, true);
 		const raw = group.consume();
 		const plain = readPlain ? group.consume() : undefined;
@@ -93,7 +93,7 @@ for (const readPlain of [false, true]) {
 
 test("empty frames preserve the window", async () => {
 	const track = new Track("compressed").accept({ compress: true });
-	const group = track.createGroup(0);
+	const group = track.createGroup(0n);
 	group.writeFrame({ payload });
 	group.writeFrame({ payload: new Uint8Array() });
 	const reader = group.mirror();
@@ -131,37 +131,6 @@ test("a shared plain read cannot change a later synchronous write's admission", 
 	expect(() => group.writeFrame({ payload: new Uint8Array() })).not.toThrow();
 	group.finish();
 	expect((await reader.readFrame())?.payload.length).toBe(0);
-	track.finish();
-	track.close();
-});
-
-test("datagrams buffered before accept share one stored form, each reader its own plain", async () => {
-	const track = new Track("late-info");
-	const a = track.subscribe();
-	const b = track.subscribe();
-	track.appendDatagram(undefined, payload);
-	track.accept({ compress: true });
-	const first = await a.recvDatagram();
-	const second = await b.recvDatagram();
-	if (!first || !second) throw new Error("missing datagram");
-	expect(first).not.toBe(second);
-	expect(stored(first)).toBe(stored(second));
-	expect(stored(first)?.inflated).toBe(payload.length);
-	expect(first.payload).toEqual(payload);
-	expect(second.payload).toEqual(payload);
-	track.finish();
-	track.close();
-});
-
-test("a malformed compressed datagram is refused before reaching readers", () => {
-	const track = new Track("compressed").accept({ compress: true });
-	const reader = track.subscribe();
-	const payload = new Uint8Array(100);
-	const slice = new Encoder().frame(payload);
-	expect(() => hooks.writeDatagram(track, { sequence: 0, payload: slice }, payload.length + 1)).toThrow(
-		/declared size/,
-	);
-	expect(hooks.tryRecvDatagram(reader).kind).toBe("idle");
 	track.finish();
 	track.close();
 });

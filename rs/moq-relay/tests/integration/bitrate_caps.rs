@@ -146,13 +146,12 @@ async fn window_opens_once_admitted(mut relay: Relay, port: u16) {
 	connect.tls.insecure = Some(true);
 	let mut tls = connect.tls.build().expect("tls config");
 	tls.alpn_protocols = vec![b"moq-lite-06".to_vec()];
-	let crypto = driver::crypto::rustls::QuicClientConfig::try_from(tls).expect("quic crypto");
 	let endpoint =
 		driver::endpoint::Endpoint::new(Default::default(), std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
 			.expect("endpoint");
 	let conn = endpoint
 		.connect(
-			&driver::client::Config::new(std::sync::Arc::new(crypto)),
+			&driver::client::Config::new(std::sync::Arc::new(tls)),
 			([127, 0, 0, 1], port).into(),
 			"localhost",
 		)
@@ -212,7 +211,7 @@ async fn window_opens_once_admitted(mut relay: Relay, port: u16) {
 }
 
 async fn tokio_relay() -> (Relay, u16, tempfile::TempDir) {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let dir = tempfile::tempdir().expect("tempdir");
 	let relay = Relay::load(config(dir.path()))
 		.await
@@ -236,7 +235,7 @@ async fn tokio_window_opens_once_admitted() {
 
 #[cfg(all(target_os = "linux", feature = "_uring"))]
 async fn uring_relay() -> Option<(Relay, u16, tempfile::TempDir)> {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	match moq_uring::Worker::new(Default::default()) {
 		Ok(_) => {}
 		Err(moq_uring::Error::Unsupported(reason)) if std::env::var_os("CI_STRICT").is_none() => {

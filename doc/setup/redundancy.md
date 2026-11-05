@@ -57,10 +57,10 @@ again as a new broadcast. This is not a fixed primary/standby priority unless
 the routes' costs make it one, and a restarted publisher takes a fresh
 instance, so it may rank either way.
 
-The switch is announced as a `Restart`. Players that follow announcements
-request the path again and begin the replacement broadcast. Existing
+The path stays announced across the switch, and a follower hands out the
+replacement broadcast. Players that follow the path begin it. Existing
 subscriptions stay on the old instance while it remains available, unless the
-consumer chooses to follow the restart.
+consumer chooses to follow the switch.
 
 For MPEG-TS output, opt into following replacements:
 
@@ -119,7 +119,7 @@ When the serving route fails or another route with the same instance wins, the
 subscription resumes from the first frame it lacks. This needs an explicit
 matching instance across every hop (moq-lite 07 on every link), routes whose copies report identical track
 info (so the same protocol and draft on each), and a surviving route that can still serve
-those frames within the broadcast's retention. It preserves broadcast
+those frames within the track's max age. It preserves broadcast
 continuity, but a late recovery can still miss playback deadlines. Losing the
 only publisher cannot be repaired by adding routes to it.
 

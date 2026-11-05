@@ -4,14 +4,72 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Following.available()` returns null once the path goes offline
+
+`following.available()` returns `BroadcastConsumer?`.
+After the first call, it returns null once the followed path goes offline, or, for a `follow(path, instance)` pinned to an instance, once another instance takes it over; the next call returns whatever serves the path next. The first call never returns null.
+Drop what you read from the previous broadcast either way. A caller that only waits for the first broadcast can take it with `!!`.
+
+### Announcements are a listing
+
+`announced(config).updates()` emits `AnnounceEventPresent` when a path becomes present and `AnnounceEventAbsent` when it goes, each carrying an `Announce` as `announce`.
+`AnnounceEventStart` is `AnnounceEventPresent` and `AnnounceEventEnd` is `AnnounceEventAbsent`.
+`AnnounceEventUpdate`, `AnnounceEventRestart`, and `AnnounceEventTakeover` are gone: a path whose route or publisher instance changes stays present and is not reported again.
+Where you requested the path again on a restart, hold `follow(path)` instead; each `available()` returns the next instance's broadcast.
+
+```kotlin
+val following = moq.follow("live/camera")
+while (true) {
+    val broadcast = following.available() ?: continue // offline until the next instance
+    play(broadcast)
+}
+```
+
+### Catalog renditions carry their warmup ([#7864](https://github.com/moq-dev/moq/pull/7864))
+
+`Video` and `Audio` gain `warmup`, the catalog's decoder warmup; it defaults to `null` as the last field, so existing code keeps working. `TrackConsumer` and the audio and video consumers read it from the rendition and start that much earlier.
+
+### Separate datagram tracks
+
+Replace stream-track `appendDatagram` / `insertDatagram` / `recvDatagram` with `BroadcastProducer.createDatagrams(name, info)` and `BroadcastConsumer.datagrams(name)`. The separate `DatagramProducer` has `append(timestamp, payload)` and `insert(Datagram)`; `DatagramConsumer` has `recv()` and the `datagrams()` flow. Use `priority()` / `priorityChanged(last)` for aggregate demand, and `BroadcastRequests.datagrams()` / `DatagramRequests.requested()` for on-demand tracks. `DatagramInfo` has only publisher priority and optional timescale.
+
+### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+A null `TrackInfo.maxAge`, the default, and a null info now advertise a zero max age, serving only the live edge, instead of no publisher limit. Pass `maxAgeUnlimited = true`, which ignores `maxAge`, where you relied on null meaning no limit. A received track's `info()` sets it when its publisher advertised no limit.
+
+### Snapshot consumers subscribe themselves at a zero delay ([#7736](https://github.com/moq-dev/moq/pull/7736))
+
+`SnapshotConsumer(broadcast, name, priority)` takes the `BroadcastConsumer` and the track name instead of a `TrackConsumer`, and subscribes to the track itself at a zero `delay.max` and `priority` (default 0). Drop the `subscribeTrack` call; a refused subscription now throws from the first read. `values()` skips every group a newer one supersedes, and `latest()` no longer waits for a lower group the track still owes. Publish a stream track when every state must survive, or a window track for a bounded recent history.
+
+### Viewer targets are bounded ([#7090](https://github.com/moq-dev/moq/pull/7090))
+
+Viewer ceilings and PROBE target overrides are refused with the new `MoqException.OutOfRange` once they would sum above 2^53 - 1 bps, the most a PROBE target carries; nothing changes on a refusal. `Viewers.watch` and `setTarget` and `Viewer.update` throw it. Handle the new variant wherever you match the error exhaustively. Regenerate bindings and rebuild the matching native library together.
+
+### `VideoInit.lower` takes either producer kind ([#7699](https://github.com/moq-dev/moq/pull/7699))
+
+`VideoInit.lower` is a `dev.moq.media.Producer` (`uniffi.moq.MoqMediaProducer`) instead of a `TrackProducer`. Pass `MoqMediaProducer.Track(producer)`, or `MoqMediaProducer.Stream(producer)` for a byte-stream rendition.
+
+### Media setup refusals are typed
+
+Audio and video subscribe setup now reports `MoqException.UnsupportedConfig` when the decoder refuses a codec, layout, or description, or when every video decoder for the codec reports that this device cannot decode the stream. Handle this variant to try another rendition instead of inspecting an audio/video error message or `Unsupported`. Decoder faults, such as a missing driver or no device, and later peer and decode failures keep their existing errors. Regenerate bindings and rebuild the matching native library together.
+
+### JSON writes take a broadcast-clock timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
+
+`json.SnapshotProducer.update(value, timestamp)`, `json.StreamProducer.append(value, timestamp)`, and `json.WindowProducer.push(value, timestamp)` / `pop(count, timestamp)` require a `Timestamp` on the broadcast clock instead of defaulting to null, for both the typed and the `String` overloads. Read it with `media.CatalogProducer(broadcast).now()`. Their track needs a timescale, such as `TrackInfo(timescale = 1_000uL)`; one without is refused.
+
+### Subscriptions take a `Delay` ([#7697](https://github.com/moq-dev/moq/pull/7697))
+
+`Subscription.maxDelay` is `delay: Delay`: pass `delay = Delay(min = Duration.ZERO, max = maxDelay)`, where a null `max` sets no subscriber limit, or `copy` `Subscription.default()`.
+`dev.moq.media.Delay` moves to `dev.moq.Delay`, and its `min` is nullable: null leaves the target latency unstated, which a decoder plays as zero.
+
 ### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
 
 `Announce.captures` is `List<String>` instead of `List<String>?`. Remove null checks and pass `captures = emptyList()` when constructing an announcement for a filter without wildcards. Rebuild with the matching generated bindings and native library.
 
 ### Decoder outputs take a `Delay` ([#7311](https://github.com/moq-dev/moq/pull/7311))
 
-`audio.DecoderOutput` replaces `maxDelay` and the playout `delay: Duration?` with `delay: media.Delay?` and `estimate: Boolean = true`.
-`video.DecoderOutput.maxDelay` is `delay: media.Delay?`.
+`audio.DecoderOutput` replaces `maxDelay` and the playout `delay: Duration?` with `delay: Delay?` and `estimate: Boolean = true`.
+`video.DecoderOutput.maxDelay` is `delay: Delay?`.
 `Delay(min, max)`: `max` (null for no limit) is the old `maxDelay`, and `min` is the playout delay, where a cold join starts.
 A fixed audio playout delay `d` is `delay = Delay(min = d, max = ...)` with `estimate = false`.
 
@@ -19,7 +77,7 @@ A fixed audio playout delay `d` is `delay = Delay(min = d, max = ...)` with `est
 
 `dev.moq.flate` is removed: publish opaque bytes on a `TrackProducer`.
 `SnapshotConfig` and `WindowConfig` lose `compression`, and `StreamConfig` is removed. Publish the track with `TrackInfo(compress = true)` instead.
-`StreamProducer` drops its config argument, and `SnapshotConsumer`, `StreamConsumer`, and `WindowConsumer` take only the track.
+`StreamProducer` drops its config argument, and `StreamConsumer` and `WindowConsumer` take only the track. `SnapshotConsumer` takes the broadcast and track name; see the entry above.
 
 ### Paths with an empty segment are refused ([#6648](https://github.com/moq-dev/moq/pull/6648))
 
@@ -43,7 +101,6 @@ Their handles `OriginDynamic`, `BroadcastDynamic`, and `TrackDynamic` are `Origi
 The records carry durations as `java.time.Duration` fields instead of `*Us` microsecond integers, so the duration extension properties are gone: read `backoff.initial`, `stats.rtt`, `grant.expires`, `info.maxAge`, `fill.maxDelay()`, and `consumer.delay()` directly.
 Convert with `toKotlinDuration()` and `toJavaDuration()` where you want `kotlin.time.Duration`.
 `AudioEncoderOutput.frameDuration` is nullable: pass null where you passed `frameDurationUs = 0u` for the codec's own frame.
-`Subscription.maxDelay` has no default: start from `Subscription.default()`, or pass `java.time.Duration.ZERO`, for the old default. Null sets no subscriber limit.
 `TrackConsumer.info()` no longer throws.
 
 ### Connection state
@@ -100,11 +157,16 @@ Publish the track with a `refresh` ratio so a joiner gets the value restated in 
 `TrackInfo.priority` defaulted to 127 and now defaults to 0.
 To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 
+### `request` and `follow` name the two resolutions ([#7193](https://github.com/moq-dev/moq/pull/7193), [#7489](https://github.com/moq-dev/moq/pull/7489))
+
+On `OriginConsumer` and `Moq`, rename `requestBroadcast(path)` to `request(path)` and `announcedBroadcast(path)` to `follow(path)`; the `AnnouncedBroadcast` typealias is `Following`.
+Both take an optional `instance` to refuse every other publisher instance.
+`request` resolves one publisher instance: it retries as the routes covering the path change, and fails with an unroutable error only once discovery has synced with no covering route. `follow` hands out each instance that serves the path in turn.
+
 ### A client asks only about what it watches (#6165)
 
-On moq-lite, a client session asks its relay for announcements only under paths something watches, through `announced()` or `announcedBroadcast()`, instead of under its whole scope at connect.
-`requestBroadcast()` watches nothing, so on a client it fails with an unroutable error for a path nothing watches, even when the relay announces it.
-Resolve the path with `announcedBroadcast()`, or hold `announced()` over its prefix while requesting.
+On moq-lite, a client session asks its relay for announcements only under paths something watches, through `announced()`, `request()`, or `follow()`, instead of under its whole scope at connect.
+`request()` owns the discovery of its path, so it finds a broadcast the relay serves with nothing else watching first; no announcement stream is needed beside it.
 moq-transport and moq-lite-03/04 sessions are unchanged.
 
 ### `ContainerFormat.FMP4` unwraps to Legacy (#6250)
@@ -133,6 +195,7 @@ Publish a replacement under a new name, and expect a finished track's demand wat
 
 `OriginProducer.dynamic(prefix)` takes no route, and `OriginDynamic.update` is gone.
 Replace `request.accept(broadcast)` with `request.prepare()`, which returns a `BroadcastPrepared`: fill its `broadcast()`, then `publish()` announces it at the exact path under a fresh instance of its own and returns its producer.
+To answer with a broadcast you already hold, `request.serve(producer.consume())` serves it under the prefix route without announcing an exact route.
 
 ### Anchors can name a time (#6074)
 
@@ -149,7 +212,7 @@ Application calls are unchanged.
 ### JSON consumers emit timestamps (#5677)
 
 `values()` emits `json.Value` (`value`, plus `timestamp` as a `Duration?`) instead of a string, and `valuesAs<T>()` emits `Timed<T>(value, timestamp)`.
-A snapshot consumer's `next()` now yields every state in order; call `latest()` for the newest.
+A snapshot consumer's `next()` now yields each state in order, skipping every group a newer one supersedes (see the zero-delay entry above); call `latest()` for the newest.
 Timestamps are rounded down to a whole microsecond.
 
 ### Ranges filter reads (#5929)
@@ -184,7 +247,7 @@ The connection stats no longer carry a receive estimate.
 Hold the consumer `Session.recvBandwidth` returns to request PROBE, read it with `rate()` or wait with `rateChanged()`, and `cancel()` it to stop.
 Replace `stats().estimatedRecvRateBps` with `recvBandwidth()?.rate()`.
 
-### `AnnouncedBroadcast.available()` waits for the next publisher instance (#5700)
+### `Following.available()` waits for the next publisher instance (#5700)
 
 The first call returns the broadcast serving the path, as before.
 Each later call waits for the next instance to take over the path, instead of returning whatever serves it now.

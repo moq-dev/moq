@@ -19,7 +19,8 @@ const REFRESH = 8;
 
 /**
  * One compressed snapshot track, written only while someone subscribes, so an unobserved report
- * never leaves the process.
+ * never leaves the process. It takes `@moq/net`'s zero default max age: a joiner reads only the
+ * newest group, which starts with a full snapshot.
  */
 export class Writer<T> {
 	/** The report track. */

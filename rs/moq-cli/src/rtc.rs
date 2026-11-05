@@ -121,7 +121,8 @@ pub async fn connect_export(origin: moq_net::origin::Consumer, url: Url, name: S
 		.follow(name.as_str(), None)?
 		.available()
 		.await
-		.with_context(|| format!("failed to resolve broadcast `{name}`"))?;
+		.with_context(|| format!("failed to resolve broadcast `{name}`"))?
+		.context("went offline before serving")?;
 	let source = moq_mux::Source::new(origin, broadcast);
 
 	tracing::info!(url = %RedactedUrl::new(&url), %name, "WHIP client pushing");

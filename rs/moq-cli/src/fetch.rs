@@ -122,7 +122,8 @@ async fn fetch_from<C>(
 			.follow(path, None)?
 			.available()
 			.await
-			.with_context(|| format!("broadcast `{}` not found", crate::display_name(path)))?;
+			.with_context(|| format!("broadcast `{}` not found", crate::display_name(path)))?
+			.context("went offline before serving")?;
 		let track = broadcast.track(&args.track)?;
 		let mut group = moq_relay::fetch_group(&track, args.group)
 			.await
@@ -166,9 +167,12 @@ mod tests {
 	use super::*;
 	use crate::args::{Command, Invocation};
 
-	/// A millisecond track: the frames written here carry timestamps.
+	/// A millisecond track: the frames written here carry timestamps. It sets no publisher max
+	/// age, so a fetch still reaches its superseded groups.
 	fn timed() -> moq_net::track::Info {
-		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+		moq_net::track::Info::default()
+			.with_timescale(moq_net::Timescale::MILLI)
+			.with_max_age(None)
 	}
 
 	/// The frames of each finished group on the `data` track.
@@ -247,7 +251,7 @@ mod tests {
 	impl NetworkFixture {
 		/// Publish [`Fixture`]'s `demo` through a relay that also holds `.hidden`.
 		async fn new() -> Self {
-			let _ = moq_tokio::crypto::install_default();
+			moq_tokio::crypto::install_default().unwrap();
 			let fixture = moq_relay::test_relay().await.expect("test relay");
 			// A dot-prefixed broadcast on the relay itself, like its `.stats`, which
 			// announce listings hide unless asked for by name.
@@ -335,8 +339,6 @@ mod tests {
 	fn net() -> crate::Net {
 		crate::Net {
 			quic: Default::default(),
-			#[cfg(feature = "iroh")]
-			iroh: None,
 		}
 	}
 

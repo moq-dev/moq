@@ -1,0 +1,7 @@
+{
+	"version": "draft-01",
+	"tracks": [],
+	"__proto__": { "member": "prototype" },
+	"constructor": [1, 2, 3],
+	"toString": "extension"
+}

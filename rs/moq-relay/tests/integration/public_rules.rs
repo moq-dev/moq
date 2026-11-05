@@ -34,7 +34,7 @@ fn client() -> moq_tokio::Client {
 
 /// The relay's web stack with WebSocket and the HTTP routes, admitting through `auth`.
 async fn spawn_relay(auth: auth::Config) -> (u16, tokio::task::JoinHandle<()>) {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let auth = auth
 		.init("test", &moq_tokio::tls::Connect::default(), false)
 		.expect("auth init");
@@ -96,7 +96,7 @@ async fn publish(url: url::Url, name: &str) -> Box<dyn std::any::Any> {
 async fn first_broadcast(url: url::Url) -> String {
 	let origin = moq_tokio::origin::spawn();
 	let consumer = origin.consume();
-	let mut announcements = consumer.announced();
+	let mut announcements = consumer.routes();
 	let _session = kio::clock::timeout(
 		TIMEOUT,
 		client()
@@ -111,7 +111,7 @@ async fn first_broadcast(url: url::Url) -> String {
 
 	let update = kio::clock::timeout(TIMEOUT, async {
 		match announcements.next().await.expect("origin closed") {
-			moq_net::announce::Event::Start(update) => update,
+			moq_net::origin::RouteEvent::Start(update) => update,
 			other => panic!("expected announce, got {other:?}"),
 		}
 	})

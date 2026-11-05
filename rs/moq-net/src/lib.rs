@@ -6,12 +6,11 @@
 //! protocol (the default) or the full IETF `moq-transport` protocol.
 //!
 //! ## Features
-//! The default `async` feature enables async helpers, the announcement `Stream` adapter,
-//! `time::run`, and
-//! the Lite/IETF sessions (`Client`, `Server`, `Session`, and the session `Driver`).
-//! With `default-features = false`, use the model's `poll_*` methods and
-//! [`origin::Driver`] with explicit time. Origin serving stays available without
-//! a native runtime; no executor or clock is chosen by the model.
+//! The `async` feature, off by default, enables the generated async wrappers for the `poll_*`
+//! methods, the announcement `Stream` adapter, `time::run`, and the Lite/IETF sessions
+//! (`Client`, `Server`, `Session`, and the session `Driver`). Without it, use the model's
+//! `poll_*` methods and [`origin::Driver`] with explicit time. Origin serving stays available
+//! without a native runtime; no executor or clock is chosen by the model.
 //!
 //! ## API
 //! The API is built around Producer/Consumer pairs, with the hierarchy:
@@ -66,8 +65,8 @@
 //! [`origin::Producer::new`] also returns a producer and driver. Its driver runs
 //! route changes, serving, linger, teardown, and the origin's cache expiration.
 //! Standalone caches expose [`cache::Pool::poll`]. Frame read/write methods
-//! clear their expiration timestamp for the next cleanup pass. Datagrams use a bounded
-//! FIFO; model read/write APIs take no time argument, though a frame write stamps
+//! clear their expiration timestamp for the next cleanup pass. Datagram tracks keep a
+//! short buffer and no cache; model read/write APIs take no time argument, though a frame write stamps
 //! its arrival from the ambient clock ([`frame::Frame::arrived`]).
 //!
 //! Both drivers implement [`time::Driver`]. `moq-uring` drives thread-local
@@ -120,6 +119,7 @@ pub mod path;
 mod priority;
 #[cfg(feature = "async")]
 mod recv;
+mod route;
 #[cfg(feature = "async")]
 pub mod setup;
 #[cfg(not(feature = "async"))]

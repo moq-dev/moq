@@ -60,7 +60,7 @@ function watchCovered(
 			for (;;) {
 				const entry = await announced.next();
 				if (!entry) break;
-				if (entry.kind === "end") active.delete(entry.prefix);
+				if (entry.kind === "absent") active.delete(entry.prefix);
 				else active.add(entry.prefix);
 				covered.set([...active].some((prefix) => Path.hasPrefix(prefix, path)));
 			}
@@ -175,7 +175,12 @@ export class Broadcast {
 	// Requests are shared by callers; each owns its restart watch in the origin.
 	readonly #references = new Map<
 		Moq.Path.Valid,
-		{ origin: Moq.Origin.Reader; follow: boolean; request: Moq.Origin.Requesting; users: number }
+		{
+			origin: Moq.Origin.Reader;
+			follow: boolean;
+			request: Moq.Origin.Requesting | Moq.Origin.Following;
+			users: number;
+		}
 	>();
 
 	// The catalog as published, before renditions this consumer cannot use are dropped. Kept
@@ -306,7 +311,7 @@ export class Broadcast {
 		const name = effect.get(this.in.name);
 		const follow = effect.get(this.in.follow);
 
-		let request: Moq.Origin.Requesting;
+		let request: Moq.Origin.Requesting | Moq.Origin.Following;
 		try {
 			request = follow ? origin.follow(name) : origin.request(name);
 		} catch (err) {
@@ -378,20 +383,23 @@ export class Broadcast {
 
 		this.#out.status.set("loading");
 
-		const trackName = format === "hang" ? Catalog.TRACK : "catalog";
-		const track = broadcast.track(trackName).subscribe({
-			...Track.Subscription.default(),
-			priority: Catalog.PRIORITY.catalog,
-		});
-		effect.cleanup(() => track.close());
-
 		// The hang catalog is reconstructed from snapshots (and future deltas) via @moq/json, which reads
-		// it compressed or not; MSF stays on its own one-blob-per-group fetch.
+		// it compressed or not and subscribes itself; MSF stays on its own one-blob-per-group fetch.
 		let fetchNext: () => Promise<Catalog.Root | undefined>;
 		if (format === "hang") {
-			const consumer = new Json.Snapshot.Consumer<Catalog.Root>({ track, schema: Catalog.RootSchema });
+			const consumer = new Json.Snapshot.Consumer<Catalog.Root>({
+				track: broadcast.track(Catalog.TRACK),
+				schema: Catalog.RootSchema,
+				priority: Catalog.PRIORITY.catalog,
+			});
+			effect.cleanup(() => consumer.close());
 			fetchNext = async () => (await consumer.latest())?.value;
 		} else {
+			const track = broadcast.track("catalog").subscribe({
+				...Track.Subscription.default(),
+				priority: Catalog.PRIORITY.catalog,
+			});
+			effect.cleanup(() => track.close());
 			const ordered = track.ordered();
 			fetchNext = async () => {
 				const update = await Msf.fetch(ordered);

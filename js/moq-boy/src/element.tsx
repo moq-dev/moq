@@ -21,14 +21,14 @@ const DEFAULT_PREFIX = Moq.Path.from("boy");
 const cleanup = new FinalizationRegistry<Moq.Signals.Effect>((signals) => signals.close());
 
 /**
- * `<moq-boy>` web component — discovers and manages Game Boy streaming sessions,
+ * `<moq-boy>` web component - discovers and manages Game Boy streaming sessions,
  * and renders the interactive UI in a Shadow DOM.
  *
  * Attributes:
- *   - `url` — MoQ relay URL
- *   - `prefix` — Base path prefix (default: "boy"). Derives prefix-game and prefix-viewer.
- *   - `prefix-game` — Path prefix for game broadcasts (default: `{prefix}/game`)
- *   - `prefix-viewer` — Path prefix for viewer broadcasts (default: `{prefix}/viewer`)
+ *   - `url` - MoQ relay URL
+ *   - `prefix` - Base path prefix (default: "boy"). Derives prefix-game and prefix-viewer.
+ *   - `prefix-game` - Path prefix for game broadcasts (default: `{prefix}/game`)
+ *   - `prefix-viewer` - Path prefix for viewer broadcasts (default: `{prefix}/viewer`)
  */
 export default class MoqBoy extends HTMLElement {
 	/** The attributes the browser reports changes to. */
@@ -183,7 +183,7 @@ export default class MoqBoy extends HTMLElement {
 				if (!capture?.isLiteral) continue;
 
 				const id = capture.text;
-				if (entry.kind !== "end" && !this.#sessions.has(id)) {
+				if (entry.kind !== "absent" && !this.#sessions.has(id)) {
 					const config: GameConfig = {
 						sessionId: id,
 						connection: this.connection,
@@ -195,7 +195,7 @@ export default class MoqBoy extends HTMLElement {
 					const game = new Game(config);
 					this.#sessions.set(id, game);
 					this.games.set(new Map(this.#sessions));
-				} else if (entry.kind === "end") {
+				} else if (entry.kind === "absent") {
 					const game = this.#sessions.get(id);
 					if (game) {
 						game.close();

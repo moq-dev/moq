@@ -5,7 +5,7 @@ import { textFrame } from "./mock.ts";
 import * as Zod from "./zod.ts";
 
 test("read validates each frame and ends only at the end of the group", async () => {
-	const producer = new Producer(0);
+	const producer = new Producer(0n);
 	const consumer = producer.consume();
 	producer.writeFrame({ payload: new Uint8Array() });
 	// Falsy values are frames like any other, not the end of the stream.
@@ -22,7 +22,7 @@ test("read validates each frame and ends only at the end of the group", async ()
 });
 
 test("read rejects a frame the schema refuses", async () => {
-	const producer = new Producer(0);
+	const producer = new Producer(0n);
 	const consumer = producer.consume();
 	producer.writeFrame(textFrame('{"count":"three"}'));
 	producer.finish();

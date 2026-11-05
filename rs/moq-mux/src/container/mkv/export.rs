@@ -26,7 +26,7 @@ const TIMESTAMP_SCALE_NS: u64 = 1_000_000;
 /// re-encodes everything as EBML + Segment + Tracks + Cluster/SimpleBlock tags ready
 /// for any Matroska-aware consumer (ffplay, libwebm, browser MSE for WebM).
 ///
-/// Use [`next`](Self::next) to pull byte chunks. The first chunk is the file
+/// Use [`poll_next`](Self::poll_next) to pull byte chunks. The first chunk is the file
 /// header (EBML + unknown-size Segment + Info + Tracks); subsequent chunks are
 /// complete Cluster elements. By default a Cluster contains one GOP (rolled
 /// over on each video keyframe, or on i16 timestamp overflow);
@@ -374,12 +374,8 @@ impl<S: Stream> Export<S> {
 		self
 	}
 
-	/// Get the next byte chunk.
-	pub async fn next(&mut self) -> Result<Option<Bytes>> {
-		kio::wait(|waiter| self.poll_next(waiter)).await
-	}
-
-	/// Poll for the next MKV byte chunk, or `None` once the export ends.
+	/// Get the next MKV byte chunk, or `None` once the export ends.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
 		// 1. Drain catalog updates.
 		while let Some(catalog) = self.catalog.as_mut() {
@@ -433,7 +429,7 @@ impl<S: Stream> Export<S> {
 		}
 
 		// 6. End-of-stream: flush any open cluster when every subscribed track
-		// has finished. We don't require catalog EOS here — a long-lived
+		// has finished. We don't require catalog EOS here - a long-lived
 		// producer may keep the catalog open even after every active track has
 		// ended, and we'd rather flush the cluster than hold the last frames.
 		if !self.tracks.is_empty() && self.tracks.values().all(|t| t.finished) {
@@ -787,7 +783,7 @@ impl<S: Stream> Export<S> {
 			Some(cluster) => {
 				let overflow = !cluster.fits(frame_ticks);
 				// Roll on a video keyframe only once the cluster already has video
-				// frames in it — otherwise audio that arrived before the first
+				// frames in it - otherwise audio that arrived before the first
 				// keyframe would split into its own (un-renderable) cluster.
 				let gop_boundary = is_video && keyframe && cluster.has_video;
 				let too_long = self

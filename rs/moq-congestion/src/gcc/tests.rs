@@ -65,6 +65,7 @@ impl Sim {
             mtu: MTU,
             rtt: Duration::from_millis(333),
             max_pacing_rate: None,
+            seed: 0,
         });
         Self {
             gcc,
@@ -377,6 +378,7 @@ fn probe_inflight_rounds_up_to_a_packet() {
         mtu: MTU,
         rtt: Duration::from_millis(100),
         max_pacing_rate: None,
+        seed: 0,
     });
     // 3000 bytes, two and a half packets
     gcc.prober
@@ -448,6 +450,7 @@ fn survives_hostile_receive_times() {
         mtu: MTU,
         rtt: Duration::from_millis(100),
         max_pacing_rate: None,
+        seed: 0,
     });
     let times = [
         Some(Duration::ZERO),
@@ -483,4 +486,46 @@ fn survives_hostile_receive_times() {
         assert!(metrics.bandwidth_estimate.unwrap() >= 5_000 / 8);
         assert!(metrics.congestion_window >= MIN_WINDOW);
     }
+}
+
+/// A rate cap that shrinks GoogCC's window below two datagrams of a large MTU leaves the window
+/// at two datagrams, which `kMinCwnd`'s 1500-byte packets fall short of.
+#[test]
+fn window_floor_tracks_mtu() {
+    const LARGE: u16 = 16384;
+    let mut now = Instant::ZERO + Duration::from_secs(1000);
+    let mut gcc = Gcc::new(Init {
+        now,
+        mtu: LARGE,
+        rtt: Duration::from_millis(10),
+        max_pacing_rate: Some(10_000),
+        seed: 0,
+    });
+    for _ in 0..200 {
+        now += Duration::from_millis(10);
+        let packet = gcc.on_sent(Sent {
+            now,
+            bytes: MTU,
+            in_flight: MTU.into(),
+        });
+        let acked = [Acked {
+            sent: now,
+            bytes: MTU,
+            packet,
+            received: Some(now - Instant::ZERO),
+        }];
+        gcc.on_ack(Ack {
+            now,
+            packets: &acked,
+            in_flight: 0,
+            app_limited: false,
+            rtt: Duration::from_millis(10),
+        });
+    }
+    let shrunk = gcc.cc.congestion_window().expect("a window from feedback");
+    assert!(
+        (shrunk.bytes() as u64) < 2 * u64::from(LARGE),
+        "GoogCC's window {shrunk:?}"
+    );
+    assert!(gcc.window() >= 2 * u64::from(LARGE));
 }

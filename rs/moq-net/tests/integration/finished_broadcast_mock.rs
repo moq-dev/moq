@@ -7,7 +7,7 @@
 //! The track is complete before the broadcast ends, and the session stays open, so
 //! the subscription must conclude normally. moq-lite, ANNOUNCE_END: "Retraction does
 //! not disturb subscriptions already in flight, which conclude normally with
-//! SUBSCRIBE_END." Instead the track is aborted when the broadcast ends, and
+//! SUBSCRIBE_FINISH." Instead the track is aborted when the broadcast ends, and
 //! whatever the session had not sent yet is gone.
 //!
 //! Deterministic: time is paused, the runtime is single-threaded, and the publisher
@@ -53,7 +53,8 @@ async fn round(finish_broadcast: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>)
 	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
-		.expect("broadcast resolves");
+		.expect("broadcast resolves")
+		.unwrap();
 
 	// Resolved before the ending starts: a SUBSCRIBE sent alongside its TRACK reaches the
 	// publisher before the subscriber has the TRACK_INFO it accepts the track with.

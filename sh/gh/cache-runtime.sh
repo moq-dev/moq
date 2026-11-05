@@ -12,7 +12,7 @@ trap 'rm -rf "$roots"' EXIT
 # Publish Crane's existing dependency outputs first so later package builds
 # can substitute them. Their inputs include the patched kio sources.
 nix build .#moq-relay.cargoArtifacts .#moq.cargoArtifacts --out-link "$roots/deps" --print-build-logs
-just infra nix push nix-ci-moq-dev "$roots/deps" "$roots/deps-1"
+just infra nix push nix-ci-moq-dev "$roots"/deps*
 
 nix build .#moq-relay .#moq --out-link "$roots/runtime" --print-build-logs
-just infra nix push nix-ci-moq-dev "$roots/runtime" "$roots/runtime-1"
+just infra nix push nix-ci-moq-dev "$roots"/runtime*

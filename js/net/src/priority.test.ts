@@ -92,8 +92,8 @@ test("groups still draining are promoted after the subscription closes", () => {
 
 	const older = open();
 	const newer = open();
-	priority.add(older, 0, 0);
-	priority.add(newer, 1, 0);
+	priority.add(older, 0n, 0);
+	priority.add(newer, 1n, 0);
 	expect(streams[0].sendOrder).toBe(sendOrder({ priority: 7, position: 1 }));
 
 	// The serving loop is done, but both groups are still on the wire.
@@ -113,7 +113,7 @@ test("groups still draining are promoted after the subscription closes", () => {
 test("the subscription's order picks which group goes first", async () => {
 	const { priority, subscriber, open, streams, broadcast } = ranking({ priority: 7, order: "ascending" });
 
-	const writers = [5, 1, 10].map((sequence) => {
+	const writers = [5n, 1n, 10n].map((sequence) => {
 		const writer = open();
 		priority.add(writer, sequence, 0);
 		return writer;
@@ -139,9 +139,9 @@ test.each(["ascending", "descending"] as const)("a fill outranks its group's liv
 	const rest = open();
 	const fill = open();
 	const other = open();
-	priority.add(rest, 5, 2 ** 45);
-	priority.add(fill, 5, 0);
-	priority.add(other, order === "ascending" ? 4 : 6, Number.MAX_SAFE_INTEGER);
+	priority.add(rest, 5n, 2 ** 45);
+	priority.add(fill, 5n, 0);
+	priority.add(other, order === "ascending" ? 4n : 6n, Number.MAX_SAFE_INTEGER);
 	const [restOrder, fillOrder, otherOrder] = streams.map((stream) => {
 		if (stream.sendOrder === undefined) throw new Error("send order missing");
 		return stream.sendOrder;
@@ -161,15 +161,15 @@ test.each(["ascending", "descending"] as const)("a fill outranks its group's liv
 // past both. Covers duplicates, fills within one group, and removals in both orders.
 test.each(["ascending", "descending"] as const)("re-ranking matches rank for every stream in %s order", (order) => {
 	const { priority, open, streams, broadcast } = ranking({ priority: 7, order });
-	const starts: [number, number][] = [
-		[5, 0],
-		[3, 0],
-		[5, 0],
-		[5, 4],
-		[9, 0],
-		[3, 2],
-		[1, 0],
-		[9, 0],
+	const starts: [bigint, number][] = [
+		[5n, 0],
+		[3n, 0],
+		[5n, 0],
+		[5n, 4],
+		[9n, 0],
+		[3n, 2],
+		[1n, 0],
+		[9n, 0],
 	];
 	const writers = starts.map(([sequence, object]) => {
 		const writer = open();

@@ -169,12 +169,12 @@ pub struct MoqAudioDecoderOutput {
 	/// jitter buffer to hold ahead of the playhead, reported by
 	/// [`MoqAudioConsumer::delay`], and where a cold join starts; with
 	/// [`estimate`](Self::estimate) it floors the measured delay instead. A `min`
-	/// beyond the track's retention is refused. `max` is the congestion-control
-	/// knob [`MoqSubscription::max_delay`](crate::consumer::MoqSubscription::max_delay)
-	/// carries: a stalled group more than this far behind a newer one is skipped,
-	/// with no buffering added. `None` keeps the moq-mux default of zero for both.
+	/// beyond the track's max age is refused. `max` is the congestion-control
+	/// knob of [`MoqSubscription::delay`](crate::consumer::MoqSubscription::delay):
+	/// a stalled group more than this far behind a newer one is skipped, with no
+	/// buffering added. `None` keeps the moq-mux default of zero for both.
 	#[uniffi(default = None)]
-	pub delay: Option<crate::media::MoqDelay>,
+	pub delay: Option<crate::consumer::MoqDelay>,
 	/// Measure the playout delay from arrival timing, never below `delay.min`.
 	/// `false` holds exactly `delay.min`.
 	#[uniffi(default = true)]
@@ -382,7 +382,7 @@ impl TryFrom<MoqAudioFrame> for moq_audio::Frame {
 /// passed at publish time.
 ///
 /// Released before its finish, or still open when its broadcast closes, it ends its track with
-/// `Unroutable`, which readers take as the publisher leaving.
+/// `Unroutable`, which a moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqAudioProducer {
 	inner: std::sync::Mutex<Option<moq_audio::encode::Producer>>,
@@ -605,15 +605,17 @@ impl MoqAudioConsumer {
 }
 
 fn audio_config(catalog_audio: crate::media::MoqAudio) -> Result<hang::catalog::AudioConfig, MoqError> {
-	let codec = catalog_audio.codec.parse().map_err(|_| MoqError::Unsupported)?;
-	// What moq-audio's decoder opens. It rejects the rest itself, so this is only
-	// here to report an unusable rendition as a plain Unsupported rather than a
-	// wrapped codec error.
-	if !matches!(
-		&codec,
-		hang::catalog::AudioCodec::Opus | hang::catalog::AudioCodec::AAC(_) | hang::catalog::AudioCodec::Pcm
-	) {
-		return Err(MoqError::Unsupported);
+	let codec = catalog_audio
+		.codec
+		.parse::<hang::catalog::AudioCodec>()
+		.map_err(|err| MoqError::UnsupportedConfig {
+			reason: err.to_string(),
+		})?;
+
+	if matches!(codec, hang::catalog::AudioCodec::Unknown(_)) {
+		return Err(MoqError::UnsupportedConfig {
+			reason: format!("unknown audio codec: {codec}"),
+		});
 	}
 
 	let mut config = hang::catalog::AudioConfig::new(codec, catalog_audio.sample_rate, catalog_audio.channel_count);
@@ -623,6 +625,7 @@ fn audio_config(catalog_audio: crate::media::MoqAudio) -> Result<hang::catalog::
 	config.description = catalog_audio.description.map(Into::into);
 	config.container = catalog_audio.container.into();
 	config.jitter = catalog_audio.jitter;
+	config.warmup = catalog_audio.warmup;
 	Ok(config)
 }
 
@@ -631,7 +634,8 @@ impl MoqAudioConsumer {
 	/// Subscribe to an audio track. `catalog_audio_config` comes from
 	/// the catalog (see
 	/// [`MoqMediaCatalogConsumer::next`](crate::media::MoqMediaCatalogConsumer::next));
-	/// the codec is inferred from it. Only Opus, AAC-LC, and PCM are supported.
+	/// the codec is inferred from it. A codec, layout, or description the decoder cannot open
+	/// returns [`MoqError::UnsupportedConfig`], so a player can try another rendition.
 	///
 	/// A [disabled](crate::media::MoqAudio::enabled) rendition subscribes too, and decodes once its
 	/// publisher re-enables it: a muted speaker's listener stays subscribed, so the unmute plays
@@ -648,8 +652,8 @@ impl MoqAudioConsumer {
 		catalog_audio: crate::media::MoqAudio,
 		output: MoqAudioDecoderOutput,
 	) -> Result<Arc<MoqAudioConsumer>, MoqError> {
-		// Reject the codec before resolving: resolving reaches the origin, which can invoke a
-		// dynamic handler and open an upstream subscription we would immediately drop.
+		// Reject malformed or unknown codec names before resolving the broadcast reference.
+		// Decoder setup checks recognized codecs after resolution, without a second codec gate.
 		let reference = catalog_audio.broadcast.clone();
 		let instance = catalog_audio.instance.clone();
 		let cfg = audio_config(catalog_audio)?;
@@ -660,7 +664,13 @@ impl MoqAudioConsumer {
 		let mut config = moq_audio::decode::Options::default();
 		config.output.format = output.format.into();
 		config.output.sample_rate = output.sample_rate;
-		config.output.layout = output.channels.map(moq_audio::Layout::from_channels).transpose()?;
+		config.output.layout = output
+			.channels
+			.map(moq_audio::Layout::from_channels)
+			.transpose()
+			.map_err(|err| MoqError::UnsupportedConfig {
+				reason: err.to_string(),
+			})?;
 		config.delay = output.delay.map(Into::into).unwrap_or_default();
 		config.estimate = output.estimate;
 		config.start = match output.start.unwrap_or_default() {
@@ -704,7 +714,18 @@ mod tests {
 			enabled: true,
 			container: MoqContainer::Legacy,
 			jitter: None,
+			warmup: None,
 		}
+	}
+
+	/// The decoder starts the catalog warmup earlier, so it must survive the trip through the FFI
+	/// record.
+	#[test]
+	fn audio_config_keeps_the_warmup() {
+		let mut audio = catalog_audio("opus");
+		audio.warmup = Some(Duration::from_millis(80));
+		let config = audio_config(audio).unwrap();
+		assert_eq!(config.warmup, Some(Duration::from_millis(80)));
 	}
 
 	/// A consumer holds a disabled rendition it already plays, so one converts like any other.
@@ -734,10 +755,10 @@ mod tests {
 	}
 
 	#[test]
-	fn audio_config_rejects_a_codec_the_decoder_lacks() {
+	fn audio_config_preserves_a_codec_the_decoder_checks() {
 		// In the catalog, and decodable in a browser, but not by moq-audio.
-		let error = audio_config(catalog_audio("flac")).unwrap_err();
-		assert!(matches!(error, MoqError::Unsupported));
+		let config = audio_config(catalog_audio("flac")).unwrap();
+		assert!(matches!(config.codec, hang::catalog::AudioCodec::Flac));
 	}
 
 	/// The advertised jitter floors the estimated playout delay, so it must survive the trip
@@ -753,7 +774,7 @@ mod tests {
 	#[test]
 	fn audio_config_rejects_unknown_codec() {
 		let error = audio_config(catalog_audio("unknown")).unwrap_err();
-		assert!(matches!(error, MoqError::Unsupported));
+		assert!(matches!(error, MoqError::UnsupportedConfig { .. }));
 	}
 
 	#[tokio::test(start_paused = true)]

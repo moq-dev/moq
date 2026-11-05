@@ -1,7 +1,6 @@
 [package]
-publish = false
 name = "moq-e2ee"
-description = "End-to-end encryption for MoQ groups, datagrams, and track names."
+description = "Renamed to moq-crypto: end-to-end encryption for MoQ groups, datagrams, and track names"
 authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
@@ -10,30 +9,11 @@ version = "0.0.11"
 edition = "2024"
 rust-version.workspace = true
 
-keywords = ["quic", "http3", "webtransport", "encryption", "live"]
+keywords = ["quic", "webtransport", "encryption", "live"]
 categories = ["cryptography", "multimedia", "network-programming"]
 
-[dependencies]
-base64 = { workspace = true }
-bytes = { workspace = true }
-kio = { workspace = true }
-moq-net = { workspace = true }
-rind = { workspace = true }
-thiserror = { workspace = true }
-uuid = { workspace = true }
-zeroize = { workspace = true }
-
 [dev-dependencies]
-criterion = { package = "bench-harness", path = "../bench-harness" }
-hex = { workspace = true }
-kio = { workspace = true, features = ["runtime"] }
-serde_json = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 workspace-hack = { path = "../workspace-hack" }
-
-[[bench]]
-name = "protect"
-harness = false
 
 [lints]
 workspace = true

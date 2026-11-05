@@ -8,6 +8,7 @@ import { Milli } from "@moq/clock";
 import { ProtocolViolation } from "../error.ts";
 import { concat, type Reader } from "../stream.ts";
 import type { Order } from "../track.ts";
+import { toNumber } from "../util/bigint.ts";
 import * as Varint from "../varint.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
@@ -467,8 +468,8 @@ export function decodeFill(data: Uint8Array, version: IetfVersion): Fill {
 			if (fillTimeout !== undefined) throw new Error("duplicate FILL_TIMEOUT inside FILL_PARAMETERS");
 			let value: bigint;
 			[value, rest] = unvarint(rest);
-			// Saturated like a FETCH's, since no wait lasts that long anyway.
-			fillTimeout = Milli(value > BigInt(Number.MAX_SAFE_INTEGER) ? Number.MAX_SAFE_INTEGER : Number(value));
+			// The clock API holds exact numeric milliseconds.
+			fillTimeout = Milli(toNumber(value));
 			continue;
 		}
 

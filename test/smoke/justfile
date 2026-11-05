@@ -119,7 +119,7 @@ harness-check:
 # Install the browser clients and Chromium's system libraries.
 playwright-deps:
     cd clients/js && bun install
-    cd clients/js && bun test diagnostics.test.ts
+    cd clients/js && bun test ./diagnostics.test.ts
     cd clients/js && bunx playwright install-deps chromium
 
 # Compile-check and unit-test the local integrity client against the current

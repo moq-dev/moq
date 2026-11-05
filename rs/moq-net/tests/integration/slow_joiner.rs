@@ -32,7 +32,12 @@ async fn stalled_read(version: Version, budget: Duration) -> BTreeSet<u64> {
 	let viewer = origin(3);
 	let broadcast = publisher.create_broadcast("live").unwrap();
 	let source = broadcast
-		.create_track("audio", track::Info::default().with_timescale(Timescale::MILLI))
+		.create_track(
+			"audio",
+			track::Info::default()
+				.with_timescale(Timescale::MILLI)
+				.with_max_age(None),
+		)
 		.unwrap();
 	broadcast.announce(Default::default()).unwrap();
 

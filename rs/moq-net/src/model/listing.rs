@@ -491,20 +491,15 @@ pub struct Tracks {
 }
 
 impl Tracks {
-	/// Poll for the next event: `None` once the broadcast ended, or the error that ended
+	/// The next event: `None` once the broadcast ended, or the error that ended
 	/// the listing, such as an upstream refusing it.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<TracksEvent>, Error>> {
 		let mut queue = ready!(self.queue.poll(waiter, |queue| match queue.is_ready() {
 			true => Poll::Ready(()),
 			false => Poll::Pending,
 		}));
 		Poll::Ready(queue.next())
-	}
-
-	/// Wait for the next event; see [`Self::poll_next`].
-	#[cfg(feature = "async")]
-	pub async fn next(&mut self) -> Result<Option<TracksEvent>, Error> {
-		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 
 	/// The broadcast being listed.
@@ -731,6 +726,18 @@ mod tests {
 		let broadcast = Info::new().produce();
 		let mut tracks = broadcast.consume().tracks().unwrap();
 		assert_eq!(drain(&mut tracks), ["synced"]);
+		let _a = broadcast.create_track("a", None).unwrap();
+		assert_eq!(drain(&mut tracks), ["+a"]);
+	}
+
+	/// TRACK_INFO can't say a track is datagrams, so a listing never carries one.
+	#[test]
+	fn a_datagram_track_is_never_listed() {
+		let broadcast = Info::new().produce();
+		let _early = broadcast.create_datagrams("early", Default::default()).unwrap();
+		let mut tracks = broadcast.consume().tracks().unwrap();
+		assert_eq!(drain(&mut tracks), ["synced"]);
+		let _late = broadcast.create_datagrams("late", Default::default()).unwrap();
 		let _a = broadcast.create_track("a", None).unwrap();
 		assert_eq!(drain(&mut tracks), ["+a"]);
 	}
