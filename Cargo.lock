@@ -4582,6 +4582,7 @@ dependencies = [
  "moq-json",
  "moq-mux",
  "moq-net",
+ "moq-shaper",
  "moq-tokio",
  "moq-video",
  "pollster",
