@@ -885,6 +885,7 @@ impl Encoder {
 			Some((sink, _)) => sink,
 			None => {
 				let mut sink = rung.encode(color).await?;
+				rung.rendition.opened(sink.applied());
 				if std::mem::take(&mut self.pending_cut) {
 					sink.cut().await?;
 				}
@@ -972,7 +973,10 @@ mod tests {
 		let source_fills = source.create_track("video", None).unwrap().requests();
 
 		let output = moq_net::broadcast::Info::default().produce();
-		let timed = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
+		// A rung's media max age, as `serve` accepts it, so its history is still fresh to fill.
+		let timed = moq_net::track::Info::default()
+			.with_timescale(moq_net::Timescale::MILLI)
+			.with_max_age(hang::container::MAX_AGE);
 		let mut track = output.create_track("video/120p", timed).unwrap();
 		let fills = track.requests();
 		let ascending = |groups| {
@@ -1115,9 +1119,13 @@ mod tests {
 
 		let mut encoder = Encoder::default();
 		encoder.cut().await.unwrap();
+		assert_eq!(rung.rendition.applied(), None);
 		let mut encoded = encoder.encode(&rung, frame).await.unwrap();
 		encoded.extend(encoder.finish().await.unwrap());
 		assert!(encoded.first().expect("the frame").keyframe);
+		// The rendition reports the opened encoder's preset, the one the caller requested by default.
+		let applied = rung.rendition.applied().expect("the encoder opened");
+		assert_eq!(applied.preset, Some(moq_video::encode::Preset::LowLatency));
 	}
 
 	/// A fetched NVDEC group reaches the encoder at native size when

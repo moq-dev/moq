@@ -1796,7 +1796,7 @@ fn publish_track_invalid_broadcast() {
 	let info = moq_track_info {
 		priority: 1,
 		max_age_us: 0,
-		max_age_present: false,
+		max_age_unlimited: false,
 		timescale: 0,
 		timescale_present: false,
 		refresh: 0,
@@ -1831,7 +1831,7 @@ fn publish_track_with_info_rejects_invalid_timescale() {
 	let info = moq_track_info {
 		priority: 0,
 		max_age_us: 0,
-		max_age_present: false,
+		max_age_unlimited: false,
 		timescale: 0,
 		timescale_present: true,
 		refresh: 0,
@@ -1841,6 +1841,41 @@ fn publish_track_with_info_rejects_invalid_timescale() {
 
 	assert!(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), &info) } < 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
+}
+
+/// A zeroed struct serves only the live edge, and the unlimited flag wins over a stated age,
+/// like `moq_delay.max_unlimited`.
+#[test]
+fn track_info_max_age() {
+	let zeroed = || moq_track_info {
+		priority: 0,
+		max_age_us: 0,
+		max_age_unlimited: false,
+		timescale: 0,
+		timescale_present: false,
+		refresh: 0,
+		refresh_present: false,
+		compress: false,
+	};
+	let max_age = |info: moq_track_info| moq_net::track::Info::try_from(&info).unwrap().max_age;
+
+	assert_eq!(max_age(zeroed()), Some(Duration::ZERO));
+	let stated = moq_track_info {
+		max_age_us: 5_000_000,
+		..zeroed()
+	};
+	assert_eq!(max_age(stated), Some(Duration::from_secs(5)));
+	let unlimited = moq_track_info {
+		max_age_unlimited: true,
+		..zeroed()
+	};
+	assert_eq!(max_age(unlimited), None);
+	let both = moq_track_info {
+		max_age_us: 5_000_000,
+		max_age_unlimited: true,
+		..zeroed()
+	};
+	assert_eq!(max_age(both), None);
 }
 
 /// Raw frames, datagrams, and JSON values read back exactly the timestamp written: a 90 kHz
@@ -1873,6 +1908,17 @@ fn timestamps_round_trip_exactly() {
 				.into()
 		};
 		let track = create(name);
+		let datagram_track = id(unsafe {
+			moq_publish_datagrams(
+				broadcast,
+				name.as_ptr().cast(),
+				name.len(),
+				&moq_datagram_info {
+					priority: 0,
+					timescale: written.map(|_| 90_000).unwrap_or_default(),
+				},
+			)
+		});
 		let json_name = format!("{name}.json");
 		let json_track = create(&json_name);
 
@@ -1893,6 +1939,7 @@ fn timestamps_round_trip_exactly() {
 				consume,
 				name.as_ptr().cast(),
 				name.len(),
+				0,
 				Some(channel_callback),
 				datagrams.ptr,
 			)
@@ -1926,10 +1973,16 @@ fn timestamps_round_trip_exactly() {
 		assert_eq!(moq_consume_track_frame_free(frame_id), 0);
 
 		// The datagram consumer is live once its subscription is answered.
-		wait_datagram_reader(track);
+		wait_datagram_reader(datagram_track);
 		assert_eq!(
 			unsafe {
-				moq_publish_track_datagram(track, payload.as_ptr(), payload.len(), timestamp, std::ptr::null_mut())
+				moq_publish_datagrams_append(
+					datagram_track,
+					payload.as_ptr(),
+					payload.len(),
+					timestamp,
+					std::ptr::null_mut(),
+				)
 			},
 			0
 		);
@@ -2118,13 +2171,12 @@ fn raw_track_publish_consume() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// Wait until a raw track's datagram track has a reader, which a datagram consumer becomes
-/// once its subscription is answered.
+/// Wait until a datagram producer has a reader.
 fn wait_datagram_reader(track: u32) {
 	let datagrams = State::lock()
 		.publish
 		.datagram_producer(Id::try_from(track).unwrap())
-		.expect("a raw track");
+		.expect("a datagram track");
 	let reader = kio::wait(|waiter| match datagrams.poll_priority(waiter, None) {
 		std::task::Poll::Ready(Some(_)) => std::task::Poll::Ready(()),
 		_ => std::task::Poll::Pending,
@@ -2134,39 +2186,63 @@ fn wait_datagram_reader(track: u32) {
 		.expect("no datagram reader arrived");
 }
 
-/// A datagram reader subscribes to its track, as before datagrams had a track of their own:
-/// the publisher sees it as demand, and a dynamic publisher learns of the track from it.
+/// A datagram-only reader reaches its own handler and aggregate priority demand.
 #[test]
 fn a_datagram_reader_is_demand_and_requests_its_track() {
 	let origin = id(moq_origin_create());
 	let broadcast = publish_broadcast(origin, b"datagram-demand");
 	let request_cb = Callback::new();
-	let dynamic = id(unsafe { moq_publish_requests(broadcast, Some(channel_callback), request_cb.ptr) });
+	let dynamic = id(unsafe { moq_publish_datagrams_requests(broadcast, Some(channel_callback), request_cb.ptr) });
 	let consume = consume_local(broadcast);
 
 	// Nothing publishes the track yet: the reader's request reaches the handler.
 	let name = b"events";
+	let stream = id(unsafe { moq_publish_track(broadcast, name.as_ptr().cast(), name.len(), std::ptr::null()) });
+	let stream_demand = Callback::new();
+	let stream_watcher = id(unsafe { moq_publish_track_demand(stream, Some(channel_callback), stream_demand.ptr) });
+	assert_eq!(stream_demand.recv(), moq_demand::MOQ_DEMAND_UNWANTED as i32);
 	let dg_cb = Callback::new();
 	let consumer = id(unsafe {
 		moq_consume_datagrams(
 			consume,
 			name.as_ptr() as *const c_char,
 			name.len(),
+			0,
 			Some(channel_callback),
 			dg_cb.ptr,
 		)
 	});
 	let request = id(request_cb.recv());
-	let track = id(unsafe { moq_track_request_accept(request, std::ptr::null()) });
+	let track = id(unsafe {
+		moq_datagram_request_accept(
+			request,
+			&moq_datagram_info {
+				priority: 0,
+				timescale: 1_000_000,
+			},
+		)
+	});
 
 	let demand_cb = Callback::new();
-	let _watcher = id(unsafe { moq_publish_track_demand(track, Some(channel_callback), demand_cb.ptr) });
+	let watcher = id(unsafe { moq_publish_datagrams_demand(track, Some(channel_callback), demand_cb.ptr) });
 	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_WANTED as i32);
 
 	wait_datagram_reader(track);
+	assert_eq!(moq_consume_datagrams_set_priority(consumer, 12), 0);
+	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_WANTED as i32);
+	let mut present = false;
+	let mut priority = 0;
+	assert_eq!(
+		unsafe { moq_datagram_demand_priority(watcher, &mut present, &mut priority) },
+		0
+	);
+	assert!(present);
+	assert_eq!(priority, 12);
 	let payload = b"on demand";
 	assert_eq!(
-		unsafe { moq_publish_track_datagram(track, payload.as_ptr(), payload.len(), &micros(7), std::ptr::null_mut()) },
+		unsafe {
+			moq_publish_datagrams_append(track, payload.as_ptr(), payload.len(), &micros(7), std::ptr::null_mut())
+		},
 		0
 	);
 	let dg_id = id(dg_cb.recv());
@@ -2189,9 +2265,11 @@ fn a_datagram_reader_is_demand_and_requests_its_track() {
 	assert_eq!(dg_cb.recv_terminal(), 0);
 	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNWANTED as i32);
 
+	assert_eq!(moq_publish_demand_cancel(stream_watcher), 0);
+	assert_eq!(stream_demand.recv_terminal(), 0);
 	assert_eq!(moq_publish_requests_cancel(dynamic), 0);
 	assert_eq!(request_cb.recv_terminal(), 0);
-	assert_eq!(moq_publish_track_finish(track), 0);
+	assert_eq!(moq_publish_datagrams_finish(track), 0);
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(demand_cb.recv_terminal(), 0);
@@ -2215,6 +2293,7 @@ fn a_datagram_only_track_is_read() {
 			consume,
 			name.as_ptr() as *const c_char,
 			name.len(),
+			0,
 			Some(channel_callback),
 			dg_cb.ptr,
 		)
@@ -2255,11 +2334,14 @@ fn raw_track_datagram_publish_consume() {
 
 	let track_name = b"events";
 	let track = id(unsafe {
-		moq_publish_track(
+		moq_publish_datagrams(
 			broadcast,
 			track_name.as_ptr() as *const c_char,
 			track_name.len(),
-			std::ptr::null(),
+			&moq_datagram_info {
+				priority: 0,
+				timescale: 1_000_000,
+			},
 		)
 	});
 
@@ -2271,6 +2353,7 @@ fn raw_track_datagram_publish_consume() {
 			consume,
 			track_name.as_ptr() as *const c_char,
 			track_name.len(),
+			0,
 			Some(channel_callback),
 			dg_cb.ptr,
 		)
@@ -2280,7 +2363,9 @@ fn raw_track_datagram_publish_consume() {
 	let payload = b"hello datagram";
 	let mut sequence: u64 = u64::MAX;
 	assert_eq!(
-		unsafe { moq_publish_track_datagram(track, payload.as_ptr(), payload.len(), &micros(120_000), &mut sequence) },
+		unsafe {
+			moq_publish_datagrams_append(track, payload.as_ptr(), payload.len(), &micros(120_000), &mut sequence)
+		},
 		0
 	);
 
@@ -2303,7 +2388,7 @@ fn raw_track_datagram_publish_consume() {
 	// before the Callback (user_data) drops.
 	assert_eq!(dg_cb.recv_terminal(), 0, "clean close delivers terminal 0");
 	assert!(moq_consume_datagrams_cancel(consumer) < 0, "double-close should fail");
-	assert_eq!(moq_publish_track_finish(track), 0);
+	assert_eq!(moq_publish_datagrams_finish(track), 0);
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
@@ -2352,7 +2437,7 @@ fn raw_track_subscription_options_and_update() {
 	let info = moq_track_info {
 		priority: 3,
 		max_age_us: 1_000_000,
-		max_age_present: true,
+		max_age_unlimited: false,
 		timescale: 1_000_000,
 		timescale_present: true,
 		refresh: 0,
@@ -2487,7 +2572,7 @@ fn raw_track_time_anchor() {
 	let info = moq_track_info {
 		priority: 3,
 		max_age_us: 1_000_000,
-		max_age_present: true,
+		max_age_unlimited: false,
 		timescale: 1_000_000,
 		timescale_present: true,
 		refresh: 0,
@@ -3231,6 +3316,7 @@ const NAMED_CONSUMERS: [NamedConsumer; 5] = [
 				consume,
 				name.as_ptr() as *const c_char,
 				name.len(),
+				0,
 				Some(channel_callback),
 				user_data,
 			)
@@ -3301,18 +3387,35 @@ fn named_consumers_cancel_while_subscribing() {
 	// Unknown tracks become requests, which leave each subscribe pending until answered.
 	let request_cb = Callback::new();
 	let dynamic = id(unsafe { moq_publish_requests(broadcast, Some(channel_callback), request_cb.ptr) });
+	let datagram_cb = Callback::new();
+	let datagram_dynamic =
+		id(unsafe { moq_publish_datagrams_requests(broadcast, Some(channel_callback), datagram_cb.ptr) });
 	let consume = consume_local(broadcast);
 
 	for (name, consumer, cancel) in NAMED_CONSUMERS {
 		let cb = Callback::new();
 		let task = id(consumer(consume, name, cb.ptr));
-		let request = id(request_cb.recv());
+		let datagrams = name == b"datagrams";
+		let request = id(if datagrams {
+			datagram_cb.recv()
+		} else {
+			request_cb.recv()
+		});
 
 		assert_eq!(cancel(task), 0);
 		assert_eq!(cb.recv_terminal(), 0, "a cancelled subscribe ends cleanly");
-		assert_eq!(moq_track_request_free(request), 0);
+		assert_eq!(
+			if datagrams {
+				moq_datagram_request_free(request)
+			} else {
+				moq_track_request_free(request)
+			},
+			0
+		);
 	}
 
+	assert_eq!(moq_publish_requests_cancel(datagram_dynamic), 0);
+	assert_eq!(datagram_cb.recv_terminal(), 0);
 	assert_eq!(moq_publish_requests_cancel(dynamic), 0);
 	assert_eq!(request_cb.recv_terminal(), 0);
 	assert_eq!(moq_consume_close(consume), 0);
@@ -3431,7 +3534,7 @@ fn publish_finish_serves_finished_tracks_until_closed() {
 	let info = moq_track_info {
 		priority: 0,
 		max_age_us: 0,
-		max_age_present: false,
+		max_age_unlimited: false,
 		timescale: 0,
 		timescale_present: false,
 		refresh: 0,
@@ -4179,7 +4282,7 @@ fn track_demand_reports_the_wanted_group() {
 	let info = moq_track_info {
 		priority: 0,
 		max_age_us: 0,
-		max_age_present: false,
+		max_age_unlimited: false,
 		timescale: 0,
 		timescale_present: false,
 		refresh: 0,
@@ -4587,8 +4690,18 @@ fn a_group_request_nobody_reads_is_withdrawn() {
 	let origin = id(moq_origin_create());
 	let broadcast = publish_broadcast(origin, b"track-dynamic-narrowed");
 	let name = b"data";
-	let track =
-		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
+	// No publisher age limit, so the requested groups behind the live one stay fresh.
+	let info = moq_track_info {
+		priority: 0,
+		max_age_us: 0,
+		max_age_unlimited: true,
+		timescale: 0,
+		timescale_present: false,
+		refresh: 0,
+		refresh_present: false,
+		compress: false,
+	};
+	let track = id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), &info) });
 	let group_cb = Callback::new();
 	let dynamic = id(unsafe { moq_publish_track_requests(track, Some(channel_callback), group_cb.ptr) });
 

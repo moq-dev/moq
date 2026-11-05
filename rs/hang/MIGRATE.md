@@ -4,6 +4,17 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### The catalog track advertises a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+`Catalog::default_track_info` takes moq-net's new zero default, so the catalog track advertises the live edge only where it advertised no limit. A late joiner still reads the newest snapshot, which never goes stale.
+`container::track_info` still declares `container::MAX_AGE` (30 s) on media tracks.
+
+### Snapshot consumers subscribe themselves at a zero delay ([#7736](https://github.com/moq-dev/moq/pull/7736))
+
+`catalog::Consumer::new` takes the catalog track, a `moq_net::track::Consumer`, instead of a `track::Subscriber`, and subscribes to it itself at `Catalog::default_subscription()`'s priority and a zero `delay.max`, so `latest` never waits on a catalog group the track still owes.
+Pass `broadcast.track(Catalog::DEFAULT_NAME)?` rather than subscribing first; `Catalog::subscribe` is unchanged.
+A refused subscription now surfaces from the first read.
+
 ### Compression moves to the track
 
 `catalog::Compression`, the `compression` field on `JsonConfig` and `BinaryConfig`, `Catalog::COMPRESSED_NAME`, and `catalog::Consumer::compressed` are gone.

@@ -2,7 +2,7 @@
 
 use std::{
 	rc::Rc,
-	task::{Context, Poll, ready},
+	task::{Poll, ready},
 };
 
 use bytes::{BufMut, Bytes};
@@ -38,10 +38,10 @@ impl Stream {
 	}
 
 	/// Lease the stream's unreleased bytes. See [`recv::Stream::poll_lease`].
-	pub fn poll_lease(&mut self, cx: &mut Context<'_>, want: usize) -> Poll<Result<recv::Lease<'_>, Error>> {
+	pub fn poll_lease(&mut self, waiter: &kio::Waiter, want: usize) -> Poll<Result<recv::Lease<'_>, Error>> {
 		let close = &self.close;
 		match &mut self.inner {
-			Some(inner) => inner.poll_lease(cx, want).map_err(|e| map_error(close, e)),
+			Some(inner) => inner.poll_lease(waiter, want).map_err(|e| map_error(close, e)),
 			None => Poll::Ready(Err(Error::ClosedStream)),
 		}
 	}
@@ -49,12 +49,12 @@ impl Stream {
 	/// Poll until the peer resets the stream, the receiver evicts it, or the session closes,
 	/// without reading it; pending for good once every byte was read. See
 	/// [`recv::Stream::received_reset`].
-	pub fn poll_reset(&mut self, cx: &mut Context<'_>) -> Poll<Error> {
+	pub fn poll_reset(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
 		let close = &self.close;
 		let Some(inner) = &mut self.inner else {
 			return Poll::Ready(Error::ClosedStream);
 		};
-		match ready!(inner.poll_received_reset(cx)) {
+		match ready!(inner.poll_received_reset(waiter)) {
 			Ok(None) => Poll::Pending,
 			Ok(Some(code)) => Poll::Ready(map_error(close, recv::Error::Reset(code))),
 			Err(err) => Poll::Ready(map_error(close, err)),
@@ -93,7 +93,7 @@ impl Stream {
 		let Some(inner) = &mut self.inner else {
 			return Poll::Ready(Ok(()));
 		};
-		match ready!(inner.poll_closed(&waiter.context())) {
+		match ready!(inner.poll_closed(waiter)) {
 			Ok(None) => Poll::Ready(Ok(())),
 			Ok(Some(code)) => Poll::Ready(Err(map_error(close, recv::Error::Reset(code)))),
 			Err(err) => Poll::Ready(Err(map_error(close, err))),
@@ -104,7 +104,7 @@ impl Stream {
 	pub fn poll_read(&mut self, waiter: &kio::Waiter, mut buf: &mut [u8]) -> Poll<Result<Option<usize>, Error>> {
 		let close = self.close.clone();
 		self.inner()?
-			.poll_read(&waiter.context(), &mut buf)
+			.poll_read_buf(waiter, &mut buf)
 			.map_err(|err| map_error(&close, err))
 	}
 
@@ -162,8 +162,6 @@ impl Stream {
 	pub fn id(&self) -> crate::quic::stream::Id {
 		self.id
 	}
-
-	// We purposely don't expose the 0RTT because it's not valid with WebTransport
 }
 
 /// Decode the peer's reset code, and report a session error, or a reset for a session
@@ -188,7 +186,7 @@ impl moq_net::transport::poll::RecvStream for Stream {
 	type Error = Error;
 	type Lease<'a> = recv::Lease<'a>;
 	fn poll_lease(&mut self, waiter: &kio::Waiter, want: usize) -> Poll<Result<Self::Lease<'_>, Self::Error>> {
-		Self::poll_lease(self, &mut waiter.context(), want)
+		Self::poll_lease(self, waiter, want)
 	}
 	fn set_priority(&mut self, priority: i64) {
 		Self::set_priority(self, priority);
@@ -197,7 +195,7 @@ impl moq_net::transport::poll::RecvStream for Stream {
 		Self::stop_mut(self, code);
 	}
 	fn poll_reset(&mut self, waiter: &kio::Waiter) -> Poll<Self::Error> {
-		Self::poll_reset(self, &mut waiter.context())
+		Self::poll_reset(self, waiter)
 	}
 }
 impl moq_net::transport::poll::Lease for recv::Lease<'_> {

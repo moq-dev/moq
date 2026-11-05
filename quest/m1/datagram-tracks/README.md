@@ -77,6 +77,21 @@ Decided 2026-11-01 (maintainer, in `/quest-plan`):
   - Reason: lite-05/06 are the default connections, and moq-ffi/moq-c publish
     every raw track's datagrams beside it, so serving a name only one kind
     stopped their datagrams on the default path.
+- **Old-version lookup.** ✅ Decided 2026-11-04 (maintainer, for
+  [moq-dev/moq#7847](https://github.com/moq-dev/moq/pull/7847)): change
+  Rust's lite-05/06 on-demand lookup to discover datagrams without waiting
+  for a stream-handler answer, keeping the independent binding request API.
+  Not chosen: requiring stream handlers to reject missing names, with a
+  not-found rejection added to the bindings.
+  - A published stream track still serves the name, with its datagram track
+    beside it. Otherwise a local datagram track answers as soon as its
+    handler does. Of a name whose two kinds are both requested on demand,
+    the first answer serves it.
+  - A session's broadcast is asked for datagrams only once its stream track
+    is not found: an old session answers a datagram request by subscribing to
+    the stream track, which a fetch-only or query-only relay must not do.
+  - Reason: a stream handler need not answer a name it doesn't serve, and
+    the bindings' rejection carries only an application error.
 - **Version.** ✅ lite-07, before it is finalized.
   [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) requires this epic.
   lite-01..06 keep today's group datagrams.
@@ -107,7 +122,6 @@ datagram track on lite-07, direct and through a relay.
 
 - [JS datagram tracks](/quest/m1/datagram-tracks/js.md) - `@moq/net` datagram types and the lite-07 datagram request
 - [moq-transport datagram tracks](/quest/m1/datagram-tracks/ietf.md) - Rust and JS map a datagram track to SUBSCRIBE and OBJECT_DATAGRAM with object ID 0, keeping the requested kind
-- [Bindings datagram tracks](/quest/m1/datagram-tracks/bindings.md) - moq-ffi, moq-c, and every wrapper expose the separate datagram types
 
 ## Related
 

@@ -1,2 +1,2 @@
-# quinn's formatting (rustfmt defaults) rather than rs/.rustfmt.toml, so
+# quinn's formatting (rustfmt defaults) rather than the root .rustfmt.toml, so
 # controller fixes from quinn and noq port without whitespace conflicts.

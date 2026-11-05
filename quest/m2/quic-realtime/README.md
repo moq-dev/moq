@@ -56,7 +56,7 @@ spike assumed no consumer; teleoperation uplinks are one):
   `probe_inflight`, so moq-quic's native probing
   ([moq-dev/moq#6635](https://github.com/moq-dev/moq/pull/6635)) still
   raises its estimate, and the bake-off measures probing alongside queuing
-  delay. Reason: the [native rung disable](/quest/m1/simulcast-rung-disable.md)
+  delay. Reason: the native rung disable (`moq_mux::rate::Policy::lower`)
   only stops a rung on a session with a sender, so a `Realtime` that cannot
   probe would silently leave moq-cli, OBS, and FFI simulcast publishers with
   no rung disable or recovery. A candidate that cannot probe does not ship.
@@ -116,7 +116,7 @@ Remaining work once the candidates finish (this README's own job):
   estimate is its reference window over the RTT, not a delivery rate, so each
   keyframe burst grew it past the path: 241 kB/s on a 125 kB/s path in #7547,
   which let a rung with keyframes recover without a probe. The
-  [native rung disable](/quest/m1/simulcast-rung-disable.md) could re-enable
+  native rung disable could re-enable
   a rung the path can't carry on such an estimate, so the comparison reports
   each candidate's estimate against the path's capacity under the encoder
   model.

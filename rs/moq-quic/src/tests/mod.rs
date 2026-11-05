@@ -16,10 +16,7 @@ use assert_matches::assert_matches;
 use bytes::{Buf, Bytes, BytesMut};
 use hex_literal::hex;
 use rand::Rng;
-#[cfg(all(feature = "aws-lc-rs", not(feature = "ring")))]
-use rustls::crypto::aws_lc_rs::default_provider;
-#[cfg(feature = "ring")]
-use rustls::crypto::ring::default_provider;
+use rind_rustls::default_provider;
 use rustls::{
 	AlertDescription, RootCertStore,
 	pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
@@ -332,7 +329,10 @@ fn connect_before_the_finished_leaves(pair: &mut Pair, config: client::Config) -
 #[test]
 fn close_before_a_client_certificate_leaves_ends() {
 	let _guard = subscribe();
-	let provider = Arc::new(default_provider());
+	// Keep the server flight in the packet layout this close-packet sweep measures.
+	let mut provider = default_provider().unwrap();
+	provider.kx_groups = vec![rind_rustls::kx_group::X25519];
+	let provider = Arc::new(provider);
 	let mut roots = RootCertStore::empty();
 	roots.add(CERTIFIED_KEY.cert.der().clone()).unwrap();
 
@@ -342,7 +342,14 @@ fn close_before_a_client_certificate_leaves_ends() {
 		let mut names = vec!["localhost".to_string()];
 		names.extend((0..len / 50).map(|i| format!("{i:03}{}.test", "a".repeat(42))));
 		names.push(format!("{}.test", "b".repeat(len % 50 + 1)));
-		let identity = rcgen::generate_simple_self_signed(names).unwrap();
+		let identity = (|| -> std::result::Result<_, rcgen::Error> {
+			let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+			let mut params = rcgen::CertificateParams::new(names)?;
+			params.serial_number = Some(1u64.into());
+			let cert = params.self_signed(&signing_key)?;
+			Ok(rcgen::CertifiedKey { cert, signing_key })
+		})()
+		.unwrap();
 
 		let mut store = RootCertStore::empty();
 		store.add(identity.cert.der().clone()).unwrap();
@@ -356,7 +363,7 @@ fn close_before_a_client_certificate_leaves_ends() {
 			)
 			.with_single_cert(
 				vec![CERTIFIED_KEY.cert.der().clone()],
-				PrivatePkcs8KeyDer::from(CERTIFIED_KEY.signing_key.serialize_der()).into(),
+				PrivatePkcs8KeyDer::from(CERTIFIED_KEY.signing_key.to_pkcs8().secret_pkcs8_der().to_vec()).into(),
 			)
 			.unwrap();
 		let client = rustls::ClientConfig::builder_with_provider(provider.clone())
@@ -365,7 +372,7 @@ fn close_before_a_client_certificate_leaves_ends() {
 			.with_root_certificates(roots.clone())
 			.with_client_auth_cert(
 				vec![identity.cert.der().clone()],
-				PrivatePkcs8KeyDer::from(identity.signing_key.serialize_der()).into(),
+				PrivatePkcs8KeyDer::from(identity.signing_key.to_pkcs8().secret_pkcs8_der().to_vec()).into(),
 			)
 			.unwrap();
 		let mut client = client::Config::new(Arc::new(client));
@@ -1024,11 +1031,18 @@ fn reject_self_signed_server_cert() {
 	// Create a self-signed certificate with a different distinguished name than the default one,
 	// such that path building cannot confuse the default root the server is using and the one
 	// the client is trusting (in which case we'd get a different error).
-	let mut cert = rcgen::CertificateParams::new(["localhost".into()]).unwrap();
+	let mut cert = rcgen::CertificateParams::new(["localhost".into()])
+		.map(|mut params| {
+			params.serial_number = Some(1u64.into());
+			params
+		})
+		.unwrap();
 	let mut issuer = rcgen::DistinguishedName::new();
 	issuer.push(rcgen::DnType::OrganizationName, "Crazy Quinn's House of Certificates");
 	cert.distinguished_name = issuer;
-	let cert = cert.self_signed(&rcgen::KeyPair::generate().unwrap()).unwrap();
+	let cert = cert
+		.self_signed(&rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap())
+		.unwrap();
 	let client_ch = pair.begin_connect(client_config_with_certs(vec![cert.into()]));
 
 	pair.drive();
@@ -1047,10 +1061,10 @@ fn reject_missing_client_cert() {
 	// because it's convenient.
 	store.add(CERTIFIED_KEY.cert.der().clone()).unwrap();
 
-	let key = PrivatePkcs8KeyDer::from(CERTIFIED_KEY.signing_key.serialize_der());
+	let key = PrivatePkcs8KeyDer::from(CERTIFIED_KEY.signing_key.to_pkcs8().secret_pkcs8_der().to_vec());
 	let cert = CERTIFIED_KEY.cert.der().clone();
 
-	let provider = Arc::new(default_provider());
+	let provider = Arc::new(default_provider().unwrap());
 	let config = rustls::ServerConfig::builder_with_provider(provider.clone())
 		.with_protocol_versions(&[&rustls::version::TLS13])
 		.unwrap()
@@ -1561,19 +1575,44 @@ fn streams_blocked() {
 	let mut pair = Pair::new(Default::default(), server);
 	let (client_ch, server_ch) = pair.connect();
 
-	// Use up the only stream slot, then try to open another
+	assert_eq!(pair.client_streams(client_ch).credit(Dir::Uni), 1);
+	assert!(!pair.client_streams(client_ch).blocked(Dir::Uni));
+
+	// Use up the only stream slot: out of credit, but not blocked until an open is refused
 	let s = pair
 		.client_streams(client_ch)
 		.open(Dir::Uni, Default::default())
 		.expect("first uni stream");
+	assert_eq!(pair.client_streams(client_ch).credit(Dir::Uni), 0);
+	assert!(!pair.client_streams(client_ch).blocked(Dir::Uni));
 	assert_eq!(pair.client_streams(client_ch).open(Dir::Uni, Default::default()), None);
+	assert!(pair.client_streams(client_ch).blocked(Dir::Uni));
+	assert!(
+		!pair.client_streams(client_ch).blocked(Dir::Bi),
+		"each direction blocks alone"
+	);
 
 	// Send data so the STREAMS_BLOCKED piggybacks on an outgoing packet
 	pair.client_send(client_ch, s).write(&mut &b"hi"[..]).unwrap();
+	pair.client_send(client_ch, s).finish().unwrap();
 	pair.drive();
 
 	assert_eq!(pair.client_conn_mut(client_ch).stats().frame_tx.streams_blocked_uni, 1);
 	assert_eq!(pair.server_conn_mut(server_ch).stats().frame_rx.streams_blocked_uni, 1);
+	// Still blocked once STREAMS_BLOCKED is sent: only the peer's MAX_STREAMS clears it
+	assert!(pair.client_streams(client_ch).blocked(Dir::Uni));
+
+	// The server reads the stream to its end, which frees the slot for a MAX_STREAMS
+	assert_eq!(pair.server_streams(server_ch).accept(Dir::Uni), Some(s));
+	let mut recv = pair.server_recv(server_ch, s);
+	let mut chunks = recv.read().unwrap();
+	assert_matches!(chunks.next(usize::MAX), Ok(Some(_)));
+	assert_matches!(chunks.next(usize::MAX), Ok(None));
+	chunks.finalize();
+	pair.drive();
+
+	assert_eq!(pair.client_streams(client_ch).credit(Dir::Uni), 1);
+	assert!(!pair.client_streams(client_ch).blocked(Dir::Uni));
 }
 
 #[test]
@@ -4170,17 +4209,23 @@ fn server_can_send_3_inital_packets() {
 
 /// Generate a big fat certificate that can't fit inside the initial anti-amplification limit
 fn big_cert_and_key() -> (CertificateDer<'static>, PrivateKeyDer<'static>) {
-	let cert = rcgen::generate_simple_self_signed(
-		Some("localhost".into())
-			.into_iter()
-			.chain((0..1000).map(|x| format!("foo_{x}")))
-			.collect::<Vec<_>>(),
-	)
+	let cert = (|| -> std::result::Result<_, rcgen::Error> {
+		let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+		let mut params = rcgen::CertificateParams::new(
+			Some("localhost".into())
+				.into_iter()
+				.chain((0..1000).map(|x| format!("foo_{x}")))
+				.collect::<Vec<_>>(),
+		)?;
+		params.serial_number = Some(1u64.into());
+		let cert = params.self_signed(&signing_key)?;
+		Ok(rcgen::CertifiedKey { cert, signing_key })
+	})()
 	.unwrap();
 
 	(
 		cert.cert.into(),
-		PrivateKeyDer::Pkcs8(cert.signing_key.serialize_der().into()),
+		PrivateKeyDer::Pkcs8(cert.signing_key.to_pkcs8().secret_pkcs8_der().to_vec().into()),
 	)
 }
 
@@ -7180,6 +7225,7 @@ fn default_controller_supports_bandwidth_probing() {
 		mtu: INITIAL_MTU,
 		rtt: Duration::from_millis(333),
 		max_pacing_rate: None,
+		seed: 0,
 	});
 	assert!(controller.probes());
 	assert!(controller.metrics().pacing_rate.is_some());

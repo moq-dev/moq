@@ -90,7 +90,8 @@ async function shape(
 	const installed = clock.install();
 	const total = kind === "join" ? groups : groups + APPENDS;
 	const sequences = arrivals(total, order);
-	const track = new Track.Producer(kind).accept();
+	// No publisher limit: joins and appends replay superseded groups.
+	const track = new Track.Producer(kind).accept({ maxAge: null });
 	const readers: Track.Subscriber[] = [];
 	try {
 		if (kind === "append") for (let i = 0; i < subscribers; i++) readers.push(track.subscribe(SUBSCRIPTION));

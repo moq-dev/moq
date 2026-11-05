@@ -304,6 +304,14 @@ impl Producer {
 		self.close();
 	}
 
+	/// Whether no further segment will ever be listed: the media ended, the window failed,
+	/// or it was closed.
+	#[cfg(feature = "server")]
+	pub fn finished(&self) -> bool {
+		let state = self.state.read();
+		state.ended || state.failed.is_some() || state.is_closed()
+	}
+
 	/// Why the window failed, if it did.
 	pub fn failure(&self) -> Option<crate::Error> {
 		self.state.read().failed.clone()

@@ -14,8 +14,9 @@ pub enum Error {
 	NoEncoder(String),
 
 	/// Every decoder this build has for the requested codec and hardware preference
-	/// failed to open on this machine: missing drivers, no device, or a library
-	/// fault. A codec this build has no decoder for is [`UnsupportedCodec`](Self::UnsupportedCodec).
+	/// failed to open on this machine, at least one with a fault: missing drivers,
+	/// no device, or a library error. A codec this build has no decoder for, or a
+	/// stream every decoder's device refused, is [`UnsupportedCodec`](Self::UnsupportedCodec).
 	#[error("no usable video decoder found (tried: {0})")]
 	NoDecoder(String),
 
@@ -46,7 +47,7 @@ pub enum Error {
 	},
 
 	/// A track's codec, codec parameters, or description is not supported by the
-	/// native decoders this build has.
+	/// native decoders this build has, or by the devices they run on here.
 	#[error("unsupported codec for native decode: {0}")]
 	UnsupportedCodec(String),
 

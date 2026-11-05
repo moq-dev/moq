@@ -526,6 +526,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 	// Parse a held moov or moof body once its last byte has arrived.
 	fn end_metadata(&mut self, kind: mp4_atom::FourCC, body: Bytes, header_size: usize) -> Result<()> {
+		super::metadata::body(kind, &body)?;
 		if kind == Moov::KIND {
 			return self.init(Moov::decode_body(&mut body.as_ref())?);
 		}
@@ -533,12 +534,6 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			return Err(Error::DuplicateMoof.into());
 		}
 		let moof = Moof::decode_body(&mut body.as_ref())?;
-		// Planning resolves every sample, and a run without per-sample fields declares its count
-		// in four bytes, so the byte bound alone does not limit what planning would hold.
-		let samples: u64 = moof.traf.iter().map(sample::count).sum();
-		if samples > super::MAX_FRAGMENT_SAMPLES {
-			return Err(Error::TooManySamples(samples).into());
-		}
 		self.moof = Some(moof);
 		self.moof_span = header_size.checked_add(body.len()).ok_or(Error::InvalidDataOffset)?;
 		Ok(())
@@ -946,14 +941,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			unsupported => return Err(Error::UnsupportedCodec(Box::new(unsupported.clone())).into()),
 		};
 		// The codec config outranks the colr box a muxer added, which only fills its gaps.
-		// An entry may carry an ICC profile beside its code points; only the code points say anything.
-		let colr = colr
-			.iter()
-			.find(|colr| matches!(colr, mp4_atom::Colr::Nclx { .. } | mp4_atom::Colr::Nclc { .. }))
-			.map(super::colr_color)
-			.transpose()?
-			.flatten();
-		crate::codec::color::fill(&mut config.color, colr.as_ref(), "colr");
+		for entry in colr {
+			let color = super::colr_color(entry)?;
+			crate::codec::color::fill(&mut config.color, color.as_ref(), "colr");
+		}
 		(config.projection, config.stereo) = super::spatial(spatial)?;
 		if let Some(pasp) = pasp {
 			let width = config.coded_width.ok_or(Error::InvalidAspect("missing width"))?;

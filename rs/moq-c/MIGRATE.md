@@ -8,13 +8,15 @@ How to update your code for each breaking change, newest first.
 
 A catalog snapshot leaves out every protected video and audio rendition: one listing `drm` entries, or a CMAF one whose init holds an encrypted (`encv`/`enca`) sample entry. Its samples are encrypted and nothing here decrypts them, so `moq_consume_video_config`, `moq_consume_audio_config`, and the media readers no longer reach it, rather than handing out ciphertext that has lost its IVs. The C ABI is unchanged; renditions after a hidden one move down an index.
 
-### Datagrams are a track of their own
+### Separate datagram tracks
 
-A raw track's datagrams travel on a separate datagram track of the same name, so the C ABI is unchanged but some results differ:
+Create a separate producer with `moq_publish_datagrams` and `moq_datagram_info`; replace `moq_publish_track_datagram` with `moq_publish_datagrams_append` on that handle, or `moq_publish_datagrams_insert` for an explicit sequence. `moq_consume_datagrams` now takes a subscriber priority before its callback and never subscribes to a stream track. Use `moq_publish_datagrams_demand` and `moq_datagram_demand_priority` for aggregate priority, and `moq_publish_datagrams_requests` / `moq_datagram_request_accept` for on-demand publishing. Finish or abort datagram producers separately. A zeroed datagram info is untimed, unlike the microsecond default of stream-track info. `moq_consume_datagrams` returns a negative code at once when the broadcast has neither the datagram track nor a datagram request handler, and a remote name without one ends its callback with a not-found error.
 
-- `moq_publish_track_datagram` numbers datagrams on their own, apart from groups, and `moq_datagram.sequence` is that number. Don't compare it with group sequences.
-- `moq_consume_datagrams` receives only the datagrams sent once its subscription is answered. Every raw track carries a datagram track, but a name with none, such as a media or JSON track, ends the callback with a not-found error.
-- moq-transport carries no datagrams.
+### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+A NULL or zeroed `moq_track_info` now advertises a zero max age, serving only the live edge, instead of no publisher limit.
+`max_age_present` is gone and `max_age_us` always applies: drop the assignment where you set it to true, and set the new `max_age_unlimited`, which ignores `max_age_us`, where you relied on it being false for no limit.
+Recompile against the new header, since an old binary's `max_age_present` byte now reads as `max_age_unlimited`, and zero-initialize the struct (`moq_track_info info = {0};`) or assign every member, since an indeterminate member is undefined behavior.
 
 ### JSON writes refuse a NULL timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
 

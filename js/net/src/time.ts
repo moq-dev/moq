@@ -6,6 +6,7 @@
  * @module
  */
 import { now } from "@moq/clock";
+import { toNumber } from "./util/bigint.ts";
 
 /** Units per second for a {@link Timestamp}'s value, e.g. `1000` for milliseconds. */
 export type Timescale = number & { readonly _brand: "timescale" };
@@ -125,11 +126,7 @@ export class Timestamp {
 export function floorAt(timestamp: Timestamp, scale: Timescale): number {
 	if (timestamp.scale === scale) return Math.floor(timestamp.value);
 	const [mantissa, exponent] = binary(timestamp.value);
-	const result = Number((mantissa * BigInt(scale)) / (BigInt(timestamp.scale) << BigInt(-exponent)));
-	if (!Number.isSafeInteger(result)) {
-		throw new RangeError(`timestamp ${timestamp.value} at ${timestamp.scale} exceeds the safe range at ${scale}`);
-	}
-	return result;
+	return toNumber((mantissa * BigInt(scale)) / (BigInt(timestamp.scale) << BigInt(-exponent)));
 }
 
 // A finite, non-negative `value` exactly as `mantissa * 2^exponent`. Doubling is exact, so

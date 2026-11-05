@@ -117,7 +117,8 @@ async function handover(kind: "lite" | "ietf"): Promise<void> {
 		for (;;) {
 			const req = await wireOf(broadcast).requested();
 			if (!req) break;
-			const track = req.accept({ timescale: Timescale.MILLI });
+			// The draining session fetches the superseded group 0 below.
+			const track = req.accept({ timescale: Timescale.MILLI, maxAge: null });
 			if (req.name === "video" && armVideo) track.writeFrame(textFrame("one"));
 			if (req.name === "later") track.writeFrame(textFrame("from-draining"));
 			if (req.name === "audio") track.writeFrame(textFrame("from-replacement"));

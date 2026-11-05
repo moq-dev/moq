@@ -564,6 +564,7 @@ fn derive_from_codec_config(track: &moq_msf::Track, codec: &AudioCodec, init: by
 }
 
 fn cmaf_moov(track: &moq_msf::Track, init: &[u8]) -> Result<mp4_atom::Moov> {
+	crate::container::fmp4::metadata::check(init).map_err(|_| Error::MalformedInitSegment(track.name.clone()))?;
 	use mp4_atom::{Any, DecodeMaybe};
 
 	let mut cursor = std::io::Cursor::new(init);
@@ -748,6 +749,17 @@ mod test {
 			hang::catalog::drm::Scheme::Cbcs
 		);
 		assert!(catalog.video.renditions.is_empty());
+	}
+
+	#[test]
+	fn received_metadata_is_bounded() {
+		let track = moq_msf::Track::new("video", moq_msf::Packaging::Cmaf);
+		let mut bounded = true;
+		for (name, data) in crate::container::fmp4::metadata::tests::attacks(b"moov") {
+			bounded &=
+				crate::container::fmp4::metadata::tests::measure(name, || super::cmaf_moov(&track, &data).is_err());
+		}
+		assert!(bounded);
 	}
 
 	/// A later track with a name replaces the earlier one, even under another role, so the

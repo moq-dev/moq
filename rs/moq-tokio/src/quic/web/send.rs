@@ -83,12 +83,12 @@ impl Stream {
 	fn reset_mut(&mut self, code: u32) {
 		let code = self.close.encode_stream_code(code);
 		// The driver task can process a STOP_SENDING at any moment. The reset settles, under the
-		// connection lock, whether the peer's stop came first, and only a `stopped` future taken
+		// connection lock, whether the peer's stop came first, and only a `closed` future taken
 		// before the reset can still read that once the stream is consumed. The reset, or the
 		// lost connection that made it fail, settles it at once.
 		let stopped = match std::mem::replace(&mut self.state, State::Reset(Ok(None))) {
 			State::Open(stream) => {
-				let stopped = stream.stopped();
+				let stopped = stream.closed();
 				match self.header {
 					Some(header) => stream.reset_at(header, code),
 					None => stream.reset(code),
@@ -96,7 +96,7 @@ impl Stream {
 				stopped.now_or_never()
 			}
 			State::Finished(stream) => {
-				let stopped = stream.stopped();
+				let stopped = stream.closed();
 				match self.header {
 					Some(header) => stream.reset_at(header, code),
 					None => stream.reset(code),
@@ -108,7 +108,7 @@ impl Stream {
 				return;
 			}
 		};
-		let stopped = stopped.expect("a reset settles its stopped future");
+		let stopped = stopped.expect("a reset settles its close future");
 		self.state = State::Reset(stopped);
 	}
 
@@ -130,7 +130,7 @@ impl Stream {
 	}
 
 	/// Wait until all data was acknowledged, the peer stopped the stream, or the session closed.
-	pub async fn stopped(&self) -> Result<Option<u32>, Error> {
+	pub async fn closed(&self) -> Result<Option<u32>, Error> {
 		kio::wait(|w| self.poll_closed(w)).await
 	}
 
@@ -238,7 +238,7 @@ impl moq_net::transport::poll::SendStream for Stream {
 		self.poll_write_buf(waiter, &mut buf)
 	}
 	fn poll_write_buf<B: Buf>(&mut self, waiter: &kio::Waiter, buf: &mut B) -> Poll<Result<usize, Self::Error>> {
-		let result = self.open()?.poll_write_buf(&waiter.context(), buf);
+		let result = self.open()?.poll_write_buf(waiter, buf);
 		result.map_err(|e| self.map_error(e))
 	}
 	fn set_priority(&mut self, priority: i64) {
@@ -281,8 +281,8 @@ impl Finished {
 		self.stream.poll_closed(waiter)
 	}
 	/// Wait until the peer acknowledges or stops the stream, or the session closes.
-	pub async fn stopped(&self) -> Result<Option<u32>, Error> {
-		self.stream.stopped().await
+	pub async fn closed(&self) -> Result<Option<u32>, Error> {
+		self.stream.closed().await
 	}
 	/// Reset the stream while still delivering its WebTransport header.
 	pub fn reset(self, code: u32) {

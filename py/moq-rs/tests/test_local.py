@@ -118,18 +118,23 @@ async def test_fetch_of_a_dropped_group_is_not_found():
     await task
 
 
-async def test_insert_datagram_keeps_its_sequence_apart_from_groups():
+async def test_datagram_tracks_have_independent_sequences_and_priority():
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_track("events")
+    stream = broadcast.publish_track("events")
+    track = broadcast.create_datagrams("events")
     consumer = track.consume()
-
-    track.insert_datagram(7, b"seven")
-    datagram = await asyncio.wait_for(consumer.recv_datagram(), 5)
+    consumer.set_priority(7)
+    assert track.priority() == 7
+    assert stream.demand().wanted() is None
+    track.insert(moq.Datagram(sequence=7, payload=b"seven", timestamp=None))
+    datagram = await asyncio.wait_for(consumer.recv(), 5)
     assert datagram is not None
     assert (datagram.sequence, datagram.payload) == (7, b"seven")
-    assert track.append_datagram(b"next") == 8
+    assert track.append(b"next") == 8
     # Datagrams are numbered apart from groups, so they never move `largest`.
-    assert track.largest() is None
+    assert stream.largest() is None
+    consumer.cancel()
+    assert await track.priority_changed(7) is None
 
 
 async def test_broadcast_consumer_closed_resolves_on_close():
@@ -485,6 +490,23 @@ def test_track_info_keeps_native_default_priority():
     assert moq.TrackInfo(timescale=90_000)._ffi().priority == native
 
 
+def test_track_info_max_age():
+    """An omitted max age is zero, ``None`` sets no limit, and a received info republishes unchanged."""
+    broadcast = moq.BroadcastProducer()
+    cases = [
+        (None, timedelta(0)),
+        (moq.TrackInfo(), timedelta(0)),
+        (moq.TrackInfo(max_age=timedelta(seconds=2)), timedelta(seconds=2)),
+        (moq.TrackInfo(max_age=None), None),
+    ]
+    for i, (info, max_age) in enumerate(cases):
+        got = broadcast.publish_track(f"t{i}", info).consume().info()
+        assert got.max_age == max_age
+        again = broadcast.publish_track(f"again{i}", got).consume().info()
+        assert again.max_age == max_age
+    broadcast.close()
+
+
 def test_default_subscription_skips_superseded_groups_at_once():
     """A bare record carries moq-net's zero delay too; only an explicit None leaves a bound unset."""
     assert moq.Subscription.default() == moq.Subscription()
@@ -537,7 +559,7 @@ async def test_json_snapshot_roundtrip():
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("status", moq.TrackInfo(timescale=1_000_000, compress=True))
     producer = moq.json.SnapshotProducer(broadcast, track)
-    consumer = moq.json.SnapshotConsumer(await broadcast.consume().subscribe_track("status"))
+    consumer = moq.json.SnapshotConsumer(broadcast.consume(), "status")
 
     for viewers in range(1, 5):
         producer.update({"viewers": viewers}, moq.Timestamp(viewers, 1_000))
@@ -664,7 +686,7 @@ async def test_json_producers_report_demand():
     assert snapshot_demand.wanted() is None
 
     consumer = broadcast.consume()
-    snapshot_consumer = moq.json.SnapshotConsumer(await consumer.subscribe_track("status"))
+    snapshot_consumer = moq.json.SnapshotConsumer(consumer, "status")
     stream_consumer = moq.json.StreamConsumer(await consumer.subscribe_track("events"))
     await asyncio.wait_for(until_wanted(snapshot_demand), timeout=5.0)
     await asyncio.wait_for(until_wanted(stream_demand), timeout=5.0)
@@ -1028,7 +1050,7 @@ async def test_raw_publish_consume():
 async def test_raw_multiple_frames():
     origin = moq.OriginProducer()
     broadcast = create_announced(origin, "robot/io")
-    raw = broadcast.publish_track("commands")
+    raw = broadcast.publish_track("commands", moq.TrackInfo(max_age=None))
 
     consumer = origin.consume()
 
@@ -1059,7 +1081,7 @@ async def test_raw_multiple_frames():
 async def test_raw_producer_consume_direct():
     """Consume a raw track directly from the producer, no origin/broadcast plumbing."""
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_track("direct")
+    track = broadcast.publish_track("direct", moq.TrackInfo(max_age=None))
     consumer = track.consume(moq.Subscription(delay=moq.Delay(max=timedelta(seconds=1)), ranges=FROM_GROUP_0))
 
     track.write_frame(b"hello")
@@ -1078,7 +1100,7 @@ async def test_raw_producer_consume_direct():
 async def test_ascending_subscription_reads_a_cached_backlog_oldest_first():
     """An ascending subscription reaching back over a cached backlog reads it oldest first."""
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_track("backlog", moq.TrackInfo(timescale=1_000_000))
+    track = broadcast.publish_track("backlog", moq.TrackInfo(max_age=None, timescale=1_000_000))
     for ms in range(3):
         group = track.append_group()
         group.write_frame(b"x", moq.Timestamp(ms, 1_000))
@@ -1102,7 +1124,7 @@ async def test_ascending_subscription_reads_a_cached_backlog_oldest_first():
 async def test_time_anchor_starts_at_the_group_containing_it():
     """A time anchor takes a wrapper Timestamp and starts at the group containing that time."""
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_track("timed", moq.TrackInfo(timescale=1_000))
+    track = broadcast.publish_track("timed", moq.TrackInfo(max_age=None, timescale=1_000))
     for second in range(3):
         group = track.append_group()
         group.write_frame(b"x", moq.Timestamp(second, 1))
@@ -1157,7 +1179,7 @@ async def test_raw_group_sequence():
     """Consumer sees the same sequence numbers the producer assigned."""
     origin = moq.OriginProducer()
     broadcast = create_announced(origin, "track/seq")
-    raw = broadcast.publish_track("seq", moq.TrackInfo(timescale=1_000_000))
+    raw = broadcast.publish_track("seq", moq.TrackInfo(max_age=None, timescale=1_000_000))
 
     consumer = origin.consume()
 
@@ -1194,7 +1216,7 @@ async def test_default_iteration_is_sequence_order():
     """
     origin = moq.OriginProducer()
     broadcast = create_announced(origin, "track/ordering")
-    raw = broadcast.publish_track("ordering")
+    raw = broadcast.publish_track("ordering", moq.TrackInfo(max_age=None))
 
     subscription = moq.Subscription(delay=moq.Delay(max=timedelta(seconds=1)), ranges=FROM_GROUP_0)
     seq_consumer = raw.consume(subscription)
@@ -1344,7 +1366,7 @@ async def test_raw_multi_frame_group():
 async def test_read_frame_one_per_group():
     """read_frame() returns the first frame of each successive group."""
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_track("status")
+    track = broadcast.publish_track("status", moq.TrackInfo(max_age=None))
     consumer = track.consume(moq.Subscription(delay=moq.Delay(max=timedelta(seconds=1)), ranges=FROM_GROUP_0))
 
     track.write_frame(b"ready")
@@ -1388,7 +1410,7 @@ async def test_raw_read_frame_preserves_timestamp():
 async def test_read_frame_skips_remaining_frames_in_group():
     """read_frame() only returns the first frame of a multi-frame group."""
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_track("mixed")
+    track = broadcast.publish_track("mixed", moq.TrackInfo(max_age=None))
     consumer = track.consume(moq.Subscription(delay=moq.Delay(max=timedelta(seconds=1)), ranges=FROM_GROUP_0))
 
     group = track.append_group()
@@ -1783,7 +1805,7 @@ async def test_dynamic_and_json_handles_are_async_context_managers():
     await assert_cancelled(track_dynamic.requested_fill())
 
     snapshot = moq.json.SnapshotProducer(broadcast, broadcast.publish_track("state", moq.TrackInfo(timescale=1_000)))
-    async with moq.json.SnapshotConsumer(await broadcast.consume().subscribe_track("state")) as snapshot_consumer:
+    async with moq.json.SnapshotConsumer(broadcast.consume(), "state") as snapshot_consumer:
         pass
     await assert_cancelled(anext(snapshot_consumer))
 
@@ -1825,3 +1847,21 @@ def test_container_timebase_belongs_to_one_broadcast():
     with pytest.raises(moq.Error.Closed):
         moq.media.Timebase(owner)
     other.close()
+
+
+async def test_datagram_only_request_reaches_its_handler():
+    broadcast = moq.BroadcastProducer()
+    requests = broadcast.requests().datagrams()
+    consumer = broadcast.consume().datagrams("events")
+    request = await requests.requested()
+    assert request.name == "events"
+    track = request.accept()
+    assert (await consumer.info()).timescale is None
+    track.append(b"payload")
+    datagram = await consumer.recv()
+    assert datagram is not None
+    assert datagram.payload == b"payload"
+    track.finish()
+    assert await consumer.recv() is None
+    requests.cancel()
+    broadcast.close()

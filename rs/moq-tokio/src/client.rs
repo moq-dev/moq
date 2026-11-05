@@ -274,10 +274,24 @@ impl Client {
 		Connection::new(self.clone(), addrs.into())
 	}
 
+	#[cfg(feature = "quic")]
+	pub(crate) fn quic_closed(&self) -> bool {
+		self.quic.as_ref().is_some_and(|quic| quic.is_closed())
+	}
+
+	#[cfg(feature = "quic")]
+	pub(crate) fn fresh_port(&mut self) -> crate::Result<()> {
+		if let Some(quic) = &mut self.quic {
+			quic.fresh_port()?;
+		}
+		Ok(())
+	}
+
 	/// Close every QUIC connection this client dialed, once each peer has been sent the
 	/// close.
 	///
-	/// Clones share one endpoint, so this closes theirs too. Dropping the connections
+	/// Clones share ownership of their endpoints, so this closes theirs too, including
+	/// fresh sockets opened after failed dials. Dropping the connections
 	/// only queues the close, which nothing sends once the runtime stops: a process
 	/// that exits without this leaves each peer waiting out its idle timeout.
 	///

@@ -96,7 +96,7 @@ like any other broadcast; it does not look in object storage on a cache miss.
 
 Each track starts live at its newest stored sequence and serves older groups
 from storage when requested by group position. It advertises no max age, so the
-source's live retention cannot expire archived history. A growing recording is
+source's live max age cannot make archived history stale. A growing recording is
 periodically listed for new tracks and objects. Once `.end` appears, refreshing
 stops and tracks end as recorded; without it, including when a recorder stopped
 early, the archive stays live. Empty or unrecognized prefixes are refused.

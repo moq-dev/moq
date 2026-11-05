@@ -26,6 +26,30 @@ private func assertTimeOverflow<T>(
 }
 
 final class SmokeTests: XCTestCase {
+    func testDatagramOnlyRequestsHaveIndependentPriorityDemand() async throws {
+        let broadcast = try BroadcastProducer()
+        let stream = try broadcast.publishTrack(name: "events")
+        let requests = try broadcast.requests().datagrams()
+        let consumer = try broadcast.consume().datagrams(name: "events")
+        try consumer.setPriority(12)
+        let request = try await requests.requested()
+        XCTAssertEqual(try request.name(), "events")
+        XCTAssertEqual(try request.priority(), 12)
+        let producer = try request.accept()
+        XCTAssertEqual(try producer.priority(), 12)
+        XCTAssertNil(try stream.demand().wanted)
+        try producer.insert(Datagram(sequence: 7, timestamp: nil, payload: Data("seven".utf8)))
+        let datagram = try await consumer.recv()
+        XCTAssertEqual(datagram?.sequence, 7)
+        XCTAssertEqual(datagram?.payload, Data("seven".utf8))
+        consumer.cancel()
+        let priority = try await producer.priorityChanged(last: 12)
+        XCTAssertNil(priority)
+        try producer.finish()
+        requests.cancel()
+        try broadcast.close()
+    }
+
     func testDefaultSubscriptionSkipsSupersededGroupsAtOnce() {
         XCTAssertEqual(Subscription.default.delay.min, 0)
         XCTAssertEqual(Subscription.default.delay.max, 0)
@@ -63,7 +87,8 @@ final class SmokeTests: XCTestCase {
 
     func testAscendingSubscriptionReadsACachedBacklogOldestFirst() async throws {
         let broadcast = try BroadcastProducer()
-        let track = try broadcast.publishTrack(name: "backlog", info: TrackInfo(timescale: 1_000_000))
+        let info = TrackInfo(maxAgeUnlimited: true, timescale: 1_000_000)
+        let track = try broadcast.publishTrack(name: "backlog", info: info)
         for ms: UInt64 in 0..<3 {
             let group = try track.appendGroup()
             try group.writeFrame(Data("x".utf8), timestamp: micros(ms * 1_000))
@@ -439,7 +464,7 @@ final class SmokeTests: XCTestCase {
             broadcast: broadcast,
             track: try broadcast.publishTrack(name: "status", info: TrackInfo(timescale: 1_000_000, compress: true)))
         let consumer = try Json.SnapshotConsumer<Status>(
-            track: try await broadcast.consume().subscribeTrack(name: "status"))
+            broadcast: try broadcast.consume(), name: "status")
 
         for viewers in 1...4 {
             try producer.update(Status(state: "live", viewers: viewers), timestamp: micros(UInt64(viewers) * 1000))
@@ -532,7 +557,7 @@ final class SmokeTests: XCTestCase {
         let consumer = try broadcast.consume()
 
         let snapshotConsumer = try Json.SnapshotConsumer<[String: Int]>(
-            track: try await consumer.subscribeTrack(name: "status"))
+            broadcast: consumer, name: "status")
         let streamConsumer = try Json.StreamConsumer<[String: Int]>(
             track: try await consumer.subscribeTrack(name: "events"))
         while try await snapshotDemand.wantedChanged() == nil {}
@@ -558,6 +583,17 @@ final class SmokeTests: XCTestCase {
         XCTAssertNil(frame.timestamp)
         XCTAssertNil(consumer.info().timescale)
         try track.finish()
+        try broadcast.close()
+    }
+
+    func testTrackInfoMaxAge() throws {
+        let broadcast = try BroadcastProducer()
+        let omitted = try broadcast.publishTrack(name: "omitted").consume().info()
+        XCTAssertEqual(omitted.maxAge, 0)
+        let info = TrackInfo(maxAgeUnlimited: true)
+        let unlimited = try broadcast.publishTrack(name: "unlimited", info: info).consume().info()
+        XCTAssertNil(unlimited.maxAge)
+        XCTAssertTrue(unlimited.maxAgeUnlimited)
         try broadcast.close()
     }
 

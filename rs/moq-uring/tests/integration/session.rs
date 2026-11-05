@@ -209,8 +209,8 @@ fn two_lite_sessions_share_the_server_socket() {
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("server socket");
 	let endpoint = quic::Endpoint::new(
-		server_sock,
 		quic::endpoint::Config::default().with_server(server_config),
+		server_sock,
 	)
 	.expect("endpoint");
 	let server_addr = endpoint.local_addr();
@@ -379,8 +379,8 @@ fn required_client_auth_refuses_an_anonymous_client() {
 		.expect("client socket");
 
 	let endpoint = quic::Endpoint::new(
-		server_sock,
 		quic::endpoint::Config::default().with_server(server_config),
+		server_sock,
 	)
 	.expect("endpoint");
 	let server_addr = endpoint.local_addr();

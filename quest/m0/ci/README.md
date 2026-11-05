@@ -3,7 +3,7 @@
 ## Goal
 
 Pull requests are validated locally with `just ci` and get their cloud verdict
-from the [merge queue](/quest/m0/ci/land.md) without waiting behind the
+from the [merge queue](https://github.com/moq-dev/moq/blob/17a81d6c64/quest/m0/ci/land.md) without waiting behind the
 hosted runner limits, and every job spends its minutes on the work its diff
 selected rather than on setup, cold caches, or repeated builds. Concurrent local agents share
 expensive-command capacity, and retained tests earn their cost through useful
@@ -71,17 +71,40 @@ Decided 2026-10-26 (maintainer), from 414 queue merges over 2026-10-23 to
 (about 1 minute per merge), with a median of 18 entries ahead and 12.7% of
 runs failing. GitHub's merge queue cannot test several PRs in one run, so a
 batched gate replaces it: `quest land`, shared through moq-dev/quest, lands
-a tested chain of squash commits ([land](/quest/m0/ci/land.md)). Decided
+a tested chain of squash commits ([land](https://github.com/moq-dev/moq/blob/17a81d6c64/quest/m0/ci/land.md)). Decided
 2026-10-30 (maintainer): it runs as a daemon on the maintainer's host, not as
 a workflow on the self-hosted runner. This supersedes concurrent queue
 entries on a second runner. Batching gains most when failures are rare, so the
 [flake epic](/quest/m0/test-flakes-2/README.md) moved to m0 and
 `MIGRATE.md` Unreleased sections, a top source of conflicts, stop being
-written per PR.
+written per PR. The batched gate was superseded 2026-11-01, below.
+
+Decided 2026-11-01 (maintainer), reversing 2026-10-26: moq serializes
+through GitHub's merge queue again, one entry at a time on the self-hosted
+runner, and moq-dev/quest's queue watcher resolves dropped PRs' conflicts and
+re-enqueues them. Batching and pre-checks are dropped, and the host gate is
+frozen. The landing quest closed 2026-11-04 with busy hours merging a median
+11.0 PRs against the queue baseline's 6.0 (its
+[last version](https://github.com/moq-dev/moq/blob/17a81d6c64/quest/m0/ci/land.md)
+holds the cutover record); a second concurrent entry is a
+[measured trial](/quest/m0/ci/queue-concurrency.md).
 
 Decided 2026-10-23 (maintainer), to speed up the serial queue: structural
 changes first (concurrent entries, parallel modules, one test build), then a
 measured nightly-compiler experiment.
+
+Measured 2026-11-04, after the landing quest closed: the queue keeps stable
+rustc, without Cranelift (decided 2026-10-27) or the parallel frontend
+([moq-dev/moq#7900](https://github.com/moq-dev/moq/pull/7900)). On the
+queue's test build after a moq-net edit (jobs 8, 12 CPUs, 5 interleaved
+runs each), the pinned nightly's `--jobs-frontend=8` took 15% longer and
+21% more CPU than the same nightly without it, against a 6% A/A spread, and
+did not shorten the critical `moq-net` test unit. moq-dev/rust2's nightly
+benchmark agrees across 8 runs: clean builds 1-7% slower, a hub edit 2-6%
+faster, for 8-15% more CPU. The ceiling is small anyway: the queue's test
+build is 37% of its job time, and cargo runs fewer than 8 units for only
+27% of it. The pinned nightly also fails the gate today, since it deprecates
+`fetch_update` and the gate denies warnings.
 
 Decided 2026-10-15: local CPU admission, test-cost reductions, and setup
 reductions are all m0. `quest gate` owns generic command admission; repositories
@@ -152,17 +175,14 @@ The historical samples locate candidates; they are not controlled benchmarks.
 ## Required
 
 - [Read-only pull-request CI](/quest/m0/ci/read-only-secrets.md) - write secrets and publisher identities reach only protected branches and tags, never a pushed branch
-- [Land main through GitHub's merge queue](/quest/m0/ci/land.md) - one PR at a time on the self-hosted runner; the host's Codex fixer fixes and re-enqueues every dropped PR
 - [A cache error is a miss](/quest/m0/ci/nix-cache-5xx.md) - a transient `nix.moq.dev` 5xx no longer fails `just ci`
 - [Gate each diff in under five minutes](/quest/m0/ci/five-minutes.md) - `just check`, test phases included, finishes within a worker's 5-minute prompt cache, admission wait included
-- [Measure the parallel frontend](/quest/m0/ci/nightly-levers.md) - a pinned nightly's parallel frontend, adopted only if the numbers beat its risks; Cranelift is ruled out
 - [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - confirm the hosted Nightly jobs reuse the previous Nightly, then measure restore time and expiry
 - [Verify the Nix cache](/quest/m0/ci/nix-cache-verify.md) - confirm releases use `nix.moq.dev`, check its bucket sizes, and retire Cachix
-- [Unify dependency features](/quest/m0/ci/hakari.md) - align the FFI builds' features and record the hosted platform jobs' hits once the workspace-hack lands
+- [Record hosted cargo-hakari evidence](/quest/m0/ci/hakari.md) - compare scheduled macOS and Windows cache hits and estimated compiler work saved before and after the workspace-hack
 - [Drop main from the publish Environment](/quest/m0/ci/publish-release-only.md) - the maintainer narrows `publish` to `release` and release tags once no job naming it runs as `main`
 - [Binary release publishers run on their tag](/quest/m0/ci/release-tag-publishers.md) - brew, Go and Swift releases stop running through `workflow_run` on main
 - [The bench comparison builds moq-gst's catalog bench on its base](/quest/m0/ci/bench-base-build.md) - A paired bench comparison that selects `rust/gst/moq-gst/catalog` against `origin/main` builds the base side and reports a comparison, instead of marking it unavailable with "base build failed"
-- [The workspace-hack refuses trybuild edges and spares non-media builds](/quest/m0/ci/hakari-followups.md) - `hakari.py` refuses trybuild dev-dependency edges, and non-media Linux test builds stop needing libpipewire and libclang
-- [Local test runs honor NEXTEST_NO_FAIL_FAST](/quest/m0/ci/no-fail-fast.md) - `just check` and `sh/rs/nextest.sh` pass `--no-fail-fast` through, so one host failure doesn't hide the rest
+- [Measure the Linux cache effect of native media exclusions](/quest/m0/ci/hakari-followups.md) - scheduled Linux jobs measure cache reuse after unrelated tests stop compiling PipeWire and libclang
 - [A release merge opens no stale release PR](/quest/m0/ci/release-pr-after-release.md) - `just rs release` publishes before it proposes, so a merged release isn't re-proposed
-- [Dependabot leaves the workspace-hack to hakari](/quest/m0/ci/dependabot-workspace-hack.md) - cargo group PRs stop hand-editing `rs/workspace-hack/Cargo.toml`
+- [Build two queue entries at once if it helps](/quest/m0/ci/queue-concurrency.md) - a measured trial of `maximumEntriesToBuild: 2` against the serial lane's burst latency

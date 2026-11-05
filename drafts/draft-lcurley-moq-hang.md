@@ -253,7 +253,10 @@ Each key is a contribution ID.
 Each entry MUST contain a string `broadcast`, resolved against the catalog's broadcast as in {{field-broadcast}}, and MAY contain an `instance` as in {{field-instance}}.
 A consumer MUST reject a catalog with a malformed entry or a reference that escapes above the root.
 
-Listing an entry MUST NOT subscribe to the contribution: a consumer opens its catalog only when it selects the contribution or one of its renditions, so a contribution produced on demand starts only for a viewer that wants it.
+Listing an entry MUST NOT subscribe to the contribution: a consumer opens its catalog only when it selects the contribution or one of its renditions.
+An HLS master selects every contribution it lists, reading their catalogs to describe their renditions, but MUST NOT subscribe to their media until requested by a player.
+It segments a contribution's renditions on the listing catalog's `media` ({{media}}), whatever the contribution's own catalog declares.
+A publisher producing media on demand MUST answer its catalog without starting media production.
 A selected contribution resolves like a rendition's reference, under the same rules for `instance` and restarts ({{field-instance}}).
 A contribution produced on demand has no stream until it resolves, so a publisher omits its `instance` until then.
 
@@ -1163,6 +1166,7 @@ This document has no IANA actions.
 - Added an optional `instance` beside every rendition and data track `broadcast` reference ({{field-instance}}). A consumer reads each referenced path from the first broadcast it resolves for a catalog instance; a present `instance` fails a rendition that resolves another stream, and is best effort against an Instance a receiver minted.
 - Added the optional root `drm` map ({{drm}}) and the audio and video `drm` field: the DRM systems, scheme, and key protecting a Common Encryption `cmaf` rendition, mapping onto CMSF `contentProtections`. A dangling entry ID refuses the catalog.
 - Added the optional root `contributions` map ({{contributions}}): whole broadcasts named by a relative `broadcast` and an optional `instance`, opened only on selection, whose rendition IDs stay their own.
+- An HLS master selects the contributions it lists by reading their catalogs, without demanding media, and segments them on the listing catalog's `media`; an on-demand publisher answers its catalog without starting media production.
 - Added optional `stats` and `echo` catalog sections, publisher/viewer snapshots keyed by rendition ID, and the `.echo` feedback broadcast convention.
 - An Opus frame timestamp counts the OpusHead pre-skip: a consumer presents each decoded sample the pre-skip earlier than its frame timestamp places it.
 
