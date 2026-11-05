@@ -140,4 +140,4 @@ catalog linger (#5305).
 
 ## Related
 
-- [MSFTS mapping](/quest/m3/msfts-convergence.md) - document the exact equivalence and differences between the carriage modes
+- [MSFTS mapping](/quest/m5/msfts-convergence.md) - document the exact equivalence and differences between the carriage modes

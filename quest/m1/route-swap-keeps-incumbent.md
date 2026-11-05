@@ -8,7 +8,7 @@ group, readers keep receiving from the source that was serving before. The
 track ends only when no source is left to serve it.
 
 Not in scope: the producer-replacement redesign
-([Resume as producer replacement](/quest/m2/resume-redesign.md)), which
+([Resume as producer replacement](/quest/m4/resume-redesign.md)), which
 replaces this machinery later.
 
 ## Plan

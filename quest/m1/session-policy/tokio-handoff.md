@@ -8,7 +8,7 @@ handoffs for transports established elsewhere: `accept_with(transport, link)`
 on the listener and `connect_with(transport)` on the client, which run the
 moq-net accept or connect policy over an already-connected session and return
 the usual request or session. moq-tokio's own `webrtc` module goes through
-them, so the [WebRTC rename](/quest/m1/webrtc-rename.md) moves it into
+them, so the [WebRTC rename](/quest/m2/webrtc-rename.md) moves it into
 moq-webrtc without reaching into moq-tokio's internals.
 
 ## Plan
@@ -16,7 +16,7 @@ moq-webrtc without reaching into moq-tokio's internals.
 Part of [Session policy lives in moq-net](/quest/m1/session-policy/README.md);
 see it for the decisions and research. This is what
 [moq-dev/moq#7804](https://github.com/moq-dev/moq/pull/7804) and the
-[WebRTC rename](/quest/m1/webrtc-rename.md) wait on: the maintainer decided on
+[WebRTC rename](/quest/m2/webrtc-rename.md) wait on: the maintainer decided on
 2026-11-04 to move the policy first, so the handoff is a few lines over
 moq-net rather than a copy of the policy.
 

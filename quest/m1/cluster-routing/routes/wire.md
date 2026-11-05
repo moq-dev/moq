@@ -88,4 +88,4 @@ router with it is [session integration](/quest/m1/cluster-routing/routes/session
 ## Related
 
 - [Routes and announces](/quest/m1/cluster-routing/routes/README.md) - the contract the wire carries
-- [A job's exact route continues its claim's readers](/quest/m1/announce-takeover.md) - also edits lite-07's ANNOUNCE messages
+- [A job's exact route continues its claim's readers](/quest/m2/announce-takeover.md) - also edits lite-07's ANNOUNCE messages

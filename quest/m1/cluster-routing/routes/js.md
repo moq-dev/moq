@@ -7,7 +7,7 @@ ROUTE and ANNOUNCE_FLOOR, merges announcements by floor as the contract
 says, echoes every ROUTE_END, and pins each request to the identity it
 selected. Browsers stay non-transit: a tab advertises its own identity and
 publications only, with `proxy` off, until the
-[Rust-to-TypeScript](/quest/m2/rs2ts-js.md) port; P2P reuses this model
+[Rust-to-TypeScript](/quest/m5/rs2ts-js.md) port; P2P reuses this model
 rather than adding a browser forwarding engine.
 
 ## Plan

@@ -10,7 +10,7 @@ copies cannot revive a claim after its withdrawal is known.
 
 Reliability, federation, and P2P are independently shippable milestones of
 this architecture. Active/passive delivery health is a separate
-[route-health line](/quest/m2/route-health/README.md), shared by endpoints
+[route-health line](/quest/m5/route-health/README.md), shared by endpoints
 and relays, and applies only to broadcasts with epochs.
 
 ## Plan
@@ -79,7 +79,7 @@ Decided with the maintainer, 2026-10-13:
   sent routes learned from other connections. Relays default on;
   applications choose per P2P connection (on for redundancy, off for
   conference offload). Browser tabs stay off until the
-  [Rust-to-TypeScript](/quest/m2/rs2ts-js.md) port. Applications
+  [Rust-to-TypeScript](/quest/m5/rs2ts-js.md) port. Applications
   explicitly select P2P connections; discovery does not dial everyone.
 - Each CDN broadcast enters a local network once by configuration: local
   peers outrank a backup uplink, and origin aggregation joins the rest.
@@ -122,7 +122,7 @@ reduces origin count when every application publishes one broadcast.
 Non-goals: measured RTT/loss pricing by default, cache-dependent route prices,
 TURN, browser transit, full link-state topology, or cross-operator economic
 exchange rates. Basic federation does not wait for
-[routing cost domains](/quest/m3/routing-cost-domains.md).
+[routing cost domains](/quest/m5/routing-cost-domains.md).
 
 Each implementation updates the docs it makes stale. The separate
 [routing guide](/quest/m1/routing-guide.md) explains the combined design and
@@ -135,8 +135,8 @@ setup after the capabilities land.
 
 ## Related
 
-- [Route health](/quest/m2/route-health/README.md) - epoch-only active/passive delivery monitoring and automatic recovery
-- [P2P](/quest/m2/p2p/README.md) - application-selected peer sessions feed the shared routing model
+- [Route health](/quest/m5/route-health/README.md) - epoch-only active/passive delivery monitoring and automatic recovery
+- [P2P](/quest/m4/p2p/README.md) - application-selected peer sessions feed the shared routing model
 - [Routing guide](/quest/m1/routing-guide.md) - concept page and federation setup; P2P extends it in m2
-- [Route wakes](/quest/m2/route-wakes.md) - local work follows affected fronts rather than the whole covered table
-- [Link quality](/quest/m2/link-quality.md) - optional measured link cost, distinct from delivery-health failover
+- [Route wakes](/quest/m4/route-wakes.md) - local work follows affected fronts rather than the whole covered table
+- [Link quality](/quest/m5/link-quality.md) - optional measured link cost, distinct from delivery-health failover

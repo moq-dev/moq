@@ -78,7 +78,7 @@ JS and the bindings identical.
   the prefix route stays open and keeps answering later requests, each
   with its own job lifetime, and the origin keeps no history of ended
   paths. The existing predecessor handling stays until
-  [announce takeover](/quest/m1/announce-takeover.md) replaces it, and
+  [announce takeover](/quest/m2/announce-takeover.md) replaces it, and
   that quest owns continuing the claim's readers on the job's route.
   Rejected: inheriting the prefix route's instance by default and making
   the prefix terminal once a materialized job ends, which would change

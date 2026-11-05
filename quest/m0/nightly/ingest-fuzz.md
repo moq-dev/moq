@@ -17,7 +17,7 @@ a child of the Nightly epic.
   panicked at `rs/moq-net/src/fuzz/ingest.rs:298` with "the ingest stalled
   on a complete 13-byte stream". Its crash artifact is `crash-106ef498…`.
   The 2026-11-01 E0391 build failure noted in
-  [the CI audit](/quest/m2/audit-ci.md) no longer occurs.
+  [the CI audit](/quest/m3/audit-ci.md) no longer occurs.
 - Download the artifact before it expires, then replay it with
   `cargo fuzz run ingest <artifact>`. Decide whether the ingest really
   stalls on that input or the harness's stall check is wrong, and fix

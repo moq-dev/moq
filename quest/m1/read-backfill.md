@@ -27,7 +27,7 @@ delivers a group that arrives below the cursor as a late backfill; Rust
   after the live edge; a cursor set from the first arrival would lose valid
   startup media (`consumer.outoforder.test.ts` covers that order). The floor
   is instead the lowest group of the subscription's requested ranges
-  ([Subscribe ranges](/quest/m1/subscribe-ranges/README.md)): given for an
+  ([Subscribe ranges](/quest/m2/subscribe-ranges/README.md)): given for an
   absolute start, and for a relative start the start the publisher resolved
   for this request. Every sequence in range arrives or is named by
   SUBSCRIBE_DROP, so the read never waits on a group that won't come.
@@ -55,7 +55,7 @@ delivers a group that arrives below the cursor as a late backfill; Rust
 
 Decided 2026-10-27 (maintainer): this waits only on the resolved start in
 SUBSCRIBE_OK, now landed, and JS ranges, not the whole
-[Subscribe ranges](/quest/m1/subscribe-ranges/README.md) epic.
+[Subscribe ranges](/quest/m2/subscribe-ranges/README.md) epic.
 
 Public API: no type change; the ordered read changes in Rust and JS (the
 floor comes from reported bounds, and JS drops backfill). Wire: none.

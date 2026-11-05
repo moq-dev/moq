@@ -49,7 +49,7 @@ and published-FFI gates apply.
 Dart: pub.dev publishes `moq` only from a `moq-dart-v*` tag, and only
 `moq-dart-v0.1.0` exists. Pushing `moq-dart-v0.1.1` at `release`'s head
 publishes 0.1.1 and exercises the unproven path in
-[A Dart tag publishes unattended](/quest/m2/release/dart-publish.md). Decided
+[A Dart tag publishes unattended](/quest/m3/release/dart-publish.md). Decided
 2026-10-30 (maintainer): push it during the combined cut, not before.
 
 Decided 2026-11-04 (maintainer, /quest-unblock): ✅ cut the combined patch
@@ -63,4 +63,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [A Dart tag publishes unattended](/quest/m2/release/dart-publish.md) - proves the `moq-dart-v*` tag path this publish uses
+- [A Dart tag publishes unattended](/quest/m3/release/dart-publish.md) - proves the `moq-dart-v*` tag path this publish uses

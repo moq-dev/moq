@@ -11,7 +11,7 @@ archive before the cut.
 ## Plan
 
 Decided 2026-10-25 (maintainer): the hand-written crate ships at this cut and
-the [generated C line](/quest/m2/c/README.md) moves after it, waiting on the
+the [generated C line](/quest/m3/c/README.md) moves after it, waiting on the
 switch to rust2's UniFFI fork. The generated package (`c/moq`) builds in CI,
 but it publishes only after the cut. C users break
 twice (0.6 to 0.7, then to the generated 0.8); that is the accepted cost.

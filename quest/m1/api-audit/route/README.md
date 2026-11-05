@@ -18,7 +18,7 @@ mirror it.
 
 Non-goals: the route layer's wire messages and federation
 ([Routes and announces](/quest/m1/cluster-routing/routes/README.md)), lite-07
-takeover ([announce takeover](/quest/m1/announce-takeover.md)), and any
+takeover ([announce takeover](/quest/m2/announce-takeover.md)), and any
 moq-transport instance ([moq-transport carries no epoch](https://github.com/moq-dev/moq/pull/7239)).
 
 ## Plan
@@ -144,7 +144,7 @@ supersede the epoch-minting, pairing and run-uniqueness answers above:
   predecessor-ID plan.
   The predecessor design then landed on main in
   [moq-dev/moq#6994](https://github.com/moq-dev/moq/pull/6994). On
-  2026-10-31 the maintainer kept identity: [announce takeover](/quest/m1/announce-takeover.md)
+  2026-10-31 the maintainer kept identity: [announce takeover](/quest/m2/announce-takeover.md)
   now also removes that work, so only one continuity rule remains.
 
 Third round, 2026-11-01, answering
@@ -171,5 +171,5 @@ stale, including `doc/concept/identity.md`.
 
 ## Related
 
-- [A job's exact route continues its claim's readers](/quest/m1/announce-takeover.md) - a job's route inherits its claim's instance, so lite-07 readers keep the first subscribe
+- [A job's exact route continues its claim's readers](/quest/m2/announce-takeover.md) - a job's route inherits its claim's instance, so lite-07 readers keep the first subscribe
 - [Routes and announces](/quest/m1/cluster-routing/routes/README.md) - the wire route layer; instances take over its epochless deletion

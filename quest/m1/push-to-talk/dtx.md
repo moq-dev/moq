@@ -44,7 +44,7 @@ and the maintainer would rather fix DTX and avoid the catalog entirely.
   151 KB `-O2` build took 1.5 to 2.2x the native encode time) and native
   `usedtx` (Chrome drifts 7.3 s over 19 s,
   Safari ignores it; see [Chromium's Opus encoder stamps chunks from their
-  input](/quest/m2/chromium-opus-timestamps.md)).
+  input](/quest/m4/chromium-opus-timestamps.md)).
 - **Hold retires when this lands ✅**, not before, so push-to-talk keeps
   working on main meanwhile. Remove the players' default hold of a disabled
   rendition and restore the hang spec's "must not select" if nothing else

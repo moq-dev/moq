@@ -173,4 +173,4 @@ latency, Bluetooth included, is part of the lip sync.
 
 - [Capped budgets](/quest/m1/audio-jitter-target/capped-budgets.md) - re-measures the AAC browser budgets after the publisher change, no gate on this proof
 - [Native stretch](/quest/m1/audio-jitter-target/native-stretch.md) - the native time-stretch sharing one NetEq algorithm and its test vectors with this one
-- [Watch worker](/quest/m2/watch-worker.md) - moves the worklet this stretch changes
+- [Watch worker](/quest/m3/watch-worker.md) - moves the worklet this stretch changes

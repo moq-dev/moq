@@ -36,8 +36,8 @@ instead, so every crate drops C, not just the relay.
   and aws-lc-rs do, so their aarch64 builds keep running, and every area
   that runs in moq-cli or moq-relay switches only once that rind release
   ships. This keeps
-  [cli-packaging](/quest/m2/cli-packaging.md)'s Pi 4 V4L2 publishing and
-  [embedded video](/quest/m3/video-embedded.md) on those boards.
+  [cli-packaging](/quest/m3/cli-packaging.md)'s Pi 4 V4L2 publishing and
+  [embedded video](/quest/m5/video-embedded.md) on those boards.
 - x86_64 CPUs without AVX2, BMI2, ADX, or AES-NI get the same treatment
   (maintainer, 2026-11-01): rind picks slower paths for them at startup, and
   the same areas wait on that release too.

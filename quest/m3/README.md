@@ -1,88 +1,166 @@
-# m3: deferred
+# m3: later work, higher priority
 
 ## Goal
 
-Work that waits on something besides priority: either a first step outside
-this repository (hardware nobody on the team has, a partner or customer who
-asks for it, a hosting provider's offer, or an upstream release), or a
-speculative feature or study with no named consumer yet.
+Work that follows the next breaking release and has someone waiting on it:
+byte streams and the mesh libraries first, then release execution after the
+cut, quests a named consumer needs (including moq.pro), and bug fixes in
+shipped code. Breaking and additive work mix here; the cut after m2's sorts
+them by kind.
 
 ## Plan
 
-A quest gated on the outside world has a condition quest beside it, as the
-root [questline](/quest/README.md) describes. A speculative feature or study
-with no consumer needs no condition quest: it parks here rather than in m2
-until a consumer appears, and is deleted when it goes stale; git history keeps
-it. Decided in the 2026-10-05 audit: both kinds live here, and the m2 quests
-deferred for having no named consumer moved here. The 2026-10-08 audit folded
-m4's upstream waits in here and moved m2 work with no consumer.
+Decided 2026-11-05 (maintainer, milestone re-cut): the old m2 ("later work")
+split in half by priority into m3 and m4. A quest joined m3 when a named
+consumer or user-facing need waits on it, when it is release execution or a
+bug fix in shipped code, or when an m0 to m3 quest requires it. moq.pro's
+quests count as a consumer: what its m1 and m2 need joins m3, and what only
+its m3 needs joins m4. The recurring hygiene audits live here behind the
+cut, so the shift after the cut brings each into m1, as before.
+
+Decided 2026-10-13: a feature does not block the breaking release merely
+because it was in the next-wave backlog. Keep existing behavior correct in
+m2, and defer new capabilities without changing their intended outcome.
+Dependencies on m1 and m2 remain explicit. An implementation that discovers
+a new necessary API break brings that decision to the maintainer before
+proceeding.
+
+Decided 2026-11-03 (maintainer, Kixel's quest audit): [byte streams](/quest/m3/stream/README.md)
+and the [mesh libraries](/quest/m3/mesh/README.md) rank first here, ahead
+of [release execution](/quest/m3/release/README.md). Kixel's daemon builds on
+them from `main` through a git submodule, so it needs them merged, not
+released. They stay out of m1 and m2 so the cut does not wait on them; each
+starts as soon as its prerequisites (sockets, fastest-reader pacing, outbound
+federation) land.
 
 ## Required
 
-- [Mesh over ICE](/quest/m3/mesh-ice.md) - mesh nodes on different networks connect directly through the P2P line's ICE pairs, once a mesh user needs it
-- [Video validation hardware is on hand](/quest/m3/video-hardware-access.md) - the machines the validation runs on, including a Raspberry Pi 4/5 for embedded presenting
-- [Video hardware validation](/quest/m3/video-hardware.md) - run the encode, capture, and zero-copy paths that were never run on real machines, including PipeWire on KDE, the camera portal, and a Pi
-- [An Ada NVIDIA GPU is available](/quest/m3/ada-gpu.md) - the hardware AV1 NVENC is verified on
-- [NVENC AV1](/quest/m3/nvenc-av1.md) - AV1 encode through NVENC, once an Ada-generation GPU is available
-- [#2147](/quest/m3/2147-moq-video-10-bit-hevc-and-av1-support-in-the-nvidia-codec.md) - NVIDIA Main10 encode, once a 10-bit source exists in the pipeline
-- [NVDEC and NVENC share CUDA arrays](/quest/m3/nvenc-cuda-arrays.md) - SDK 13.1 application-owned CUDA arrays drop the per-frame device copy, on driver 610+
-- [Embedded video](/quest/m3/video-embedded.md) - verify a Pi 4/5 presents through the existing Vulkan and CPU paths, adding EGL import only if that fails
-- [Multi-plane PipeWire cameras](/quest/m3/pipewire-camera-planes.md) - I420 and NV12 cameras that deliver one memory block per plane capture
-- [Video codec coverage](/quest/m3/video-codec-coverage.md) - prioritize remaining native AV1 and portable decoder gaps once a consumer asks
-- [A physical-NIC peer for the zero-copy sweep](/quest/m3/zero-copy-peer.md) - the rig the zero-copy sweep runs on
-- [#3201: moq-uring: use SENDMSG_ZC for large UDP GSO trains](/quest/m3/3201-moq-uring-use-sendmsg-zc-for-large-udp-gso-trains.md) - complete the prerequisite issue first
-- [#3204](/quest/m3/3204-moq-uring-register-tx-pool-buffers-for-zero-copy-sends.md) - moq-uring: register TX-pool buffers for zero-copy sends
-- [Cluster dials on the ring](/quest/m3/uring-cluster-dial.md) - measure whether an io_uring relay's outbound cluster links belong on its workers
-- [#3202](/quest/m3/3202-moq-uring-use-fixed-file-slots-for-worker-udp-sockets.md) - moq-uring: fixed-file slots for worker UDP sockets, if its own benchmark measures a win
-- [L4S on the backbone](/quest/m3/quic-ecn.md) - an ECT(1) option in `moq-quic`, an `ecn` config knob, and a dualpi2 measurement, if the ECN measurement says marks survive
-- [Careful resume on reconnect](/quest/m3/quic-careful-resume.md) - a Rust redial starts at the previous connection's rate
-- [Cut-through](/quest/m3/cut-through/README.md) - a bufferbloat bench decides whether a relay should forward bytes behind a QUIC stream hole; the build is re-planned if it says go
-- [Byte streams in moq-ffi](/quest/m3/ffi-stream.md) - Swift and Kotlin dial and accept byte streams, for moq.pro's T3 Code mobile client
-- [E2EE in moq-ffi](/quest/m3/ffi-e2ee.md) - Swift and Kotlin publish and consume protected broadcasts, for the same client
-- [Unreal prototype](/quest/m3/unreal.md) - a UE5 module on the C++ package with exceptions disabled, rendering a subscribed broadcast to a texture
-- [vcpkg registry](/quest/m3/cpp-vcpkg.md) - a registry we own serves the prebuilt package to `vcpkg` manifests, once a consumer asks
-- [Conan remote](/quest/m3/cpp-conan.md) - a remote we own serves the same tarball to `conan install`
-- [Linux OBS GPU input](/quest/m3/obs-linux-gpu.md) - publish OBS compositor frames without CPU readback on a validated Linux graphics/encoder combination
-- [Routing cost domains](/quest/m3/routing-cost-domains.md) - design operator boundaries and policy without adding incomparable costs
-- [Request tokens beyond Rust](/quest/m3/request-token-surfaces.md) - a JS, moq-ffi, or moq-cli request-token API, built only for the surface a consumer names
-- [Token on FETCH](/quest/m3/auth-token-fetch.md) - our TRACK_STATUS and FETCH carry the request token, once a consumer asks
-- [moq-transport cluster peers](/quest/m3/ietf-cluster-peers.md) - the cluster draft carries the route layer, so moq-transport relays peer again, once a moq-transport relay operator asks
-- [The moq.pro mesh runs lite-07](/quest/m3/lite07-mesh.md) - the deployment that makes the exemption dead code
-- [Drop the hidden cluster exemption](/quest/m3/hidden-exemption.md) - relays stop forcing hidden broadcasts on cluster peers once every peer opts in on the wire
-- [Robot teleoperation primitive](/quest/m3/teleop-robot.md) - a `moq-robot` crate for video down and control up, once a robotics consumer appears
-- [Operator arbitration](/quest/m3/teleop-arbitration.md) - one operator holds control at a time
-- [MAVLink bridge](/quest/m3/teleop-mavlink.md) - a `moq-mavlink` gateway
-  replacing the VPN plus two unmanaged UDP flows, with QGroundControl and
-  friends unchanged
-- [SITL proof and browser ground station](/quest/m3/teleop-proof.md) - ArduPilot
-  SITL and a synthetic camera flown from a browser ground station, reproducible
-  in five minutes
-- [Ladder](/quest/m3/ladder/README.md) - a transcode ladder adapts to the uplink it publishes over, instead of encoding every live rung at its ceiling
-- [fMP4 emsg](/quest/m3/emsg.md) - settles the shared framing and missing-data semantics before this section adopts them
-- [ID3 catalog section](/quest/m3/id3.md) - timed ID3 as a first-class container-neutral catalog section
-- [FLV script tags](/quest/m3/flv-script.md) - onMetaData and AMF data messages survive RTMP and FLV import
-- [Half and quarter rate AC-3](/quest/m3/ac3-low-rate.md) - bsid 9 and 10 AC-3 parse through TS and FLV instead of being refused
-- [MSF feedback tracks](/quest/m3/msf-publish-tracks.md) - `--report` and `--echo` work under `--catalog-format msf` through `publishTracks`, once a consumer asks
-- [MSFTS convergence](/quest/m3/msfts-convergence.md) - the demultiplexed TS lane converges on MSFTS where they differ, once an MSFTS implementer engages
-- [#2279](/quest/m3/2279-hang-typed-scte-35-ad-cue-signaling-carried-opaquely.md) - hang: SCTE-35 cues arrive immediately on an independent metadata track, optionally associated with a rendition
-- [CEA-608/708](/quest/m3/captions-cea.md) - captions carried inside video SEI become a real text rendition at import
-- [WebXR playback](/quest/m3/watch-webxr.md) - `<moq-watch>` renders equirectangular and stereo renditions through WebXR layers on a headset
-- [Protected playback in the browser](/quest/m3/drm-playback.md) - `<moq-watch>` plays CENC renditions through MSE and EME, once a consumer asks
-- [Paced replay](/quest/m3/archive-paced-replay.md) - an archive consumer pushes stored groups to live subscribers on one shared clock, so any live player plays it
-- [Encoder feedback](/quest/m3/stats-encoder-feedback.md) - a Rust encoder
-  reads its viewers' feedback and adapts its bitrate
-- [Interop runner withdraws before disconnecting](/quest/m3/interop-runner-approval.md) - condition: a released moq-tokio and @moq/net carry close() withdrawals; then the runner's moq.dev clients switch to close()
-- [Safari ships the WebKit 319818 fix](/quest/m3/webkit-319818.md) - the Safari release the gate admits
-- [Safari WebTransport](/quest/m3/safari-webtransport.md) - WebKit browsers return to WebTransport once WebKit 319818 ships fixed
-- [moq-video in the browser](/quest/m3/video-web.md) - getUserMedia, getDisplayMedia, WebCodecs, and VideoFrame import into wgpu, for moq-dev/studio's web studio
-- [moq-audio in the browser](/quest/m3/audio-web.md) - AudioWorklet capture and playback and WebCodecs Opus and AAC, for the web studio's audio
-- [moq-audio filter chain](/quest/m3/audio-filters.md) - per-source suppression, gate, compressor, limiter, ducking, and plugins, which moq-dev/studio configures
-- [Mesh keys](/quest/m3/mesh-keys.md) - parked: encrypted and HMAC-authenticated mesh broadcasts through a wrapped `.keys` track
-- [rust2-ts reaches moq-net's model](/quest/m3/rs2ts-model-ready.md) - rust2's translator is ready to translate the model
-- [Keep moq-net's model in rust2-ts's subset](/quest/m3/rs2ts-model-subset.md) - safe twins for the model's internal `unsafe`, `dyn Expiry` as an enum, once rust2-ts reaches the model
-- [Wait for a stable bun lint](/quest/m3/bun-lint-release.md) - condition: `bun lint` ships in a stable Bun that nixpkgs carries
-- [Rust and JS end a lite-05 track the same way after an inclusive SUBSCRIBE_END](/quest/m3/lite05-subscribe-end.md) - after a legacy inclusive SUBSCRIBE_END, Rust and JS both end the track instead of Rust sending a FIN and JS only releasing
-- [Byte-at-a-time MKV input imports as fast as chunked input](/quest/m3/mkv-input-coalesce.md) - the MKV importer fed one byte at a time is no slower than before moq-dev/moq#7234
-- [A transcode ladder probes an unseen source shape without stalling its other rungs](/quest/m3/transcode-parallel-open.md) - a source changing to an unseen size opens the new encoders without stalling the ladder's other rungs
-- [rind-instant-acme is on crates.io](/quest/m3/rind-instant-acme.md) - waiting on instant-acme 0.9 and rind publishing its adapter
-- [Relay ACME on instant-acme](/quest/m3/relay-acme.md) - moq-relay's ACME returns on instant-acme and rind, once a user needs it
+- [Byte streams](/quest/m3/stream/README.md) - TCP connections ride MoQ losslessly through relays, proxied per hop rather than as IP packets
+- [Mesh libraries](/quest/m3/mesh/README.md) - an `Endpoint` reaches any enrolled node by endpoint ID over relays or a sparse direct overlay, with address hints and a `.status` track; the mesh binary and UI live in Kixel
+- [`@moq/net` broadcasts expose their requests](/quest/m3/net-broadcast-requests.md) - a JS broadcast serves tracks it never created, on demand, like Rust
+- [`@moq/crypto` loads a stored signing key](/quest/m3/crypto-key-load.md) - one device key proves mesh identity and signs broadcasts
+- [JS announced coalescing](/quest/m3/js-announced-coalesce.md) - `@moq/net`'s `Announced` keeps one pending event per path, like Rust
+- [An audio track's final flush joins its open group](/quest/m3/audio-flush-group.md) - a zero-`delay.max` subscriber gets the tail, not `Old`
+- [Release execution](/quest/m3/release/README.md) - publication, installed-artifact proof, cleanup, and downstream adoption after m1
+- [One policy for oversized container metadata](/quest/m3/import-metadata-policy.md) - fMP4 and MKV refuse or stream huge metadata by one documented rule
+- [Video quality](/quest/m3/video-quality/README.md) - a nightly VMAF harness grades every encoder backend and on-demand GoP pops against floors, and moq-boy's encode is fixed under it
+- [rust2's exporter is ready for moq](/quest/m3/rust2-exporter.md) - waiting on moq-dev/rust2's exporter to generate every language moq ships
+- [Switch to rust2's exporter](/quest/m3/ffi-exporter.md) - moq's bindings come from rust2-ffi, moq-ffi shrinks to its remainder, and moq's UniFFI generator code is deleted
+- [Generated C bindings](/quest/m3/c/README.md) - C generated from moq-ffi ships as `moq-c` 0.8.0 and replaces the hand-written crate
+- [A runtime-free QUIC driver](/quest/m3/quic-sansio-driver.md) - a caller's own loop moves UDP datagrams and polls moq sessions over moq-quic, for rust2's bindings
+- [QoS](/quest/m3/qos/README.md) - the relay's egress `lag` histogram and `dropped` counters on the stats totals and prefix tracks
+- [The DASH manifest keeps segments across a reconfigure](/quest/m3/dash-reconfigure.md) - a same-codec reconfigure keeps the old instance's segments listed in DASH, as HLS does
+- [Broadcast fairness](/quest/m3/broadcast-fairness.md) - broadcasts share a cluster link fairly, so one tenant's priority never starves another's
+- [Plan: watch worker](/quest/m3/plan-watch-worker.md) - prototype an invisible page worker against app-spawned workers, and land the jank harness that decides
+- [Watch worker](/quest/m3/watch-worker.md) - watch playback runs in a worker onto an OffscreenCanvas, so main-thread jank never stalls video or audio
+- [Vulkan Video encode on AMD](/quest/m3/vulkan-encode.md) - H.264 and H.265 from an external Vulkan image on RADV, hand-rolled on ash, proven on an RX 9070
+- [VA-API encodes an external Vulkan image](/quest/m3/vaapi-vulkan-import.md) - an explicit-sync DMA-BUF reaches Intel's encoder, proven on Arrow Lake
+- [C++ FFI reuse](/quest/m3/cpp-ffi-reuse.md) - C++ packages link the shared default-feature FFI build once it is proven compatible
+- [OBS native codecs](/quest/m3/obs-moq-video/README.md) - replace FFmpeg video and audio decoding with moq-video and moq-audio, deliver GPU frames, and use native audio/video encoders
+- [MoQ in obs-studio](/quest/m3/obs-studio/README.md) - a native MoQ output and service merged into obs-studio, once its maintainers agree; the plugin carries it until then
+- [AudioToolbox decode](/quest/m3/audio-decode-audiotoolbox.md) - macOS and iOS decode HE-AAC, multichannel AAC, and what else the framework offers
+- [GPU CI](/quest/m3/gpu-ci.md) - NVIDIA tests gate the merge queue on a self-hosted GPU runner VM, and `just rs nvidia` runs them locally instead of skipping
+- [Media stats](/quest/m3/stats/README.md) - publishers announce a stats track in the catalog, viewers answer a soliciting catalog through a per-catalog `.echo` broadcast, and one model turns both into a health verdict and a preflight report
+- [Wire stats](/quest/m3/wire-stats/README.md) - `Presence` counts each root's transport bytes on the wire, `wire_tx` and `wire_rx`, from QUIC, WebSocket, and embedder gateway sources
+- [Session outcome records](/quest/m3/session-outcome-records.md) - relay stats publish each refusal and abnormal session end as a record per label, bounded under a flood, beside the counters
+- [Audio renditions carry a language](/quest/m3/audio-lang.md) - audio renditions have an optional BCP-47 `lang`, and watch auto-picks within one language
+- [A refused follower asks a replacement handler](/quest/m3/follow-refused-retry.md) - a same-instance handler swap with identical route details re-asks a refused `Following`, while listeners still see no change
+- [Content protection](/quest/m3/drm/README.md) - Common Encryption CMAF publishes unchanged, signalled in the hang `drm` section and MSF `contentProtections`, with license URLs from Rust, the CLI, and every binding
+- [iOS capture](/quest/m3/mobile-capture-ios.md) - Rust captures the camera and screen on iOS, setting the catalog rotation
+- [Android capture](/quest/m3/mobile-capture-android.md) - Rust captures through NDK/JNI on Android, reusing the existing codecs and setting the catalog rotation
+- [Latest readers use Range::live()](/quest/m3/readers-range-live.md) - after #6278, readers start at the live edge without waiting on `largest()`
+- [PulseAudio capture periods](/quest/m3/pulseaudio-capture-period.md) - capture on cpal's PulseAudio host arrives in short periods, not the server's 2 s default fragment, proven on the null sink's monitor
+- [A JSON snapshot consumer resyncs after a bad frame](/quest/m3/json-snapshot-resync.md) - a decode failure drops the group with a typed error, so `@moq/room` and moq-boy resume at the next snapshot
+- [Go module proxy](/quest/m3/go-module-proxy.md) - `moq.dev/moq-ffi` ships from a static GOPROXY we host, so its staticlibs stop growing git history by ~61 MiB per release
+- [Go per-platform lib modules](/quest/m3/go-ffi-platform-modules.md) - a Go build downloads only the host's staticlib, and `go mod vendor` works
+- [Dart on iOS](/quest/m3/dart-ios.md) - prove the shipped iOS native asset actually loads on a device, which no CI can
+- [Mobile completion](/quest/m3/mobile-completion.md) - verify the Swift and Kotlin bindings over Rust-owned capture
+- [Migrated sessions close once their replacement synced](/quest/m3/goaway-migration-followups.md) - moq-tokio holds the early close for the replacement's announce sync, and the JS `Connection` closes early too
+- [moq-transport requests end through one lease](/quest/m3/ietf-request-lease.md) - every IETF request ends through one polled lease, and the two 18k-line files split by mechanism
+- [A moq-transport group head fills its hole in place](/quest/m3/ietf-fill-refill.md) - fills and joining FETCHes write into the tail's group, deleting the `Fill` handoff
+- [One port](/quest/m3/one-port/README.md) - one UDP port carries QUIC, SRT, and WebRTC media through an embedder hook, and one TCP port carries HTTP, RTMP, and RTMPS
+- [WebSocket caps](/quest/m3/rate-websocket.md) - paced reads and writes over bounded socket buffers hold WebSocket to the same caps
+- [moq-rtc pacing](/quest/m3/rtc-pacing.md) - a capped WHEP viewer never receives more than its cap plus burst, NACK resends included
+- [SRT rate handle](/quest/m3/srt-rate-handle.md) - a per-connection cap paces SRT pulls, retransmits included, and closes SRT publishers past it
+- [One port on the io_uring workers](/quest/m3/uring-demux.md) - `moq-uring`'s workers host the UDP demux, so a ring relay keeps WebRTC media and SRT on its QUIC port
+- [Synced data playback](/quest/m3/watch-data-sync.md) - js/watch releases JSON and binary payloads on the media playhead, and a slow data track holds media back
+- [WebCodecs audio priming](/quest/m3/webcodecs-priming.md) - `@moq/publish` measures each browser's `AudioEncoder` priming and corrects AAC timestamps and Opus pre-skip, so audio decodes at its capture timestamp
+- [poll_acked on moq-net's send stream](/quest/m3/quic-ack-hook.md) - the
+  backend-neutral hook on moq-net's own transport trait that awaits an
+  acknowledged stream offset, implemented by the moq-tokio and moq-uring adapters
+- [Relay io_uring packages](/quest/m3/relay-io-uring-package.md) - Linux relay packages ship io_uring once the ring is on par with tokio
+- [Direct3D11 render import](/quest/m3/render-d3d11.md) - Windows presents without downloading every frame to system memory
+- [Media Foundation encodes on the texture's adapter](/quest/m3/mf-encode-adapter.md) - Windows machines with two GPUs keep an exported texture on the GPU route into a hardware encoder
+- [Intra-refresh GOPs](/quest/m3/intra-refresh/README.md) - video with periodic intra refresh imports and plays back cleanly with one group per sweep and a catalog `warmup`
+- [#3115](/quest/m3/3115-moqsink-the-publication-has-no-generation-so-a-flush.md) - moqsink: a flushing restart after EOS opens a new publication generation
+- [Realtime uplink congestion control](/quest/m3/quic-realtime/README.md) - native publishers pick `Realtime`, a receive-ts delay-based controller that keeps the uplink queue near empty for teleoperation
+- [Windows capture parity](/quest/m3/capture-windows.md) - system and per-app audio and a settled app-capture policy
+- [Linux capture parity](/quest/m3/capture-linux.md) - Wayland window/system-audio capture, per-app audio, and explicit display-selection and app-capture limits
+- [Per-app audio on macOS](/quest/m3/capture-app-audio-macos.md) - one application's audio through ScreenCaptureKit
+- [cpal loads libasound at runtime](/quest/m3/cpal-alsa-runtime.md) - condition: a cpal release whose Linux build carries no load-time libasound requirement
+- [Audio capture without ALSA link](/quest/m3/capture-alsa-link.md) - moq-audio capture and playback build on Linux without linking libasound, and capture becomes a default feature
+- [Ship capture and playback](/quest/m3/cli-packaging.md) - a released moq binary can capture and play, which no distribution currently enables
+- [moq-relay in nixpkgs](/quest/m3/nixpkgs-relay.md) - `nix-shell -p moq-relay` installs the released relay from upstream nixpkgs, auto-updated from our tags
+- [moq-cli in nixpkgs](/quest/m3/nixpkgs-cli.md) - the released `moq` CLI with its full release feature set joins nixpkgs as `moq-cli`
+- [GPU capacity and health](/quest/m3/gpu-health.md) - moq-video reports each device's sessions, memory, utilization, and health on NVIDIA, AMD, and Intel alike
+- [A release carries multi-vendor GPU input](/quest/m3/gpu-release.md) - `release` carries the GPU surface validated on AMD and Intel; health follows separately
+- [The remaining library spawns](/quest/m3/spawn-audit.md) - every async spawn left in a library crate becomes a polled `kio::Tasks` child or is listed with why it stays
+- [DVR rewind](/quest/m3/archive-dvr.md) - follow-on capability after the release contract is stable
+- [Publisher timeliness at relay ingest](/quest/m3/qos-publisher-timeliness.md) - follow-on capability after the release contract is stable
+- [The relay refuses a cluster peer it cannot dial](/quest/m3/relay-undialable-peers.md) - moq-tokio reports the schemes it can dial, and the relay refuses an undialable peer at startup instead of retrying forever
+- [moq-transport finish interop](/quest/m3/ietf-finish.md) - the interop `finish` case runs on every even moq-transport draft instead of being skipped
+- [JS joining FETCH](/quest/m3/ietf-js-joining-fetch.md) - the JS publisher answers a joining FETCH that arrives after a quick finish, mirroring the Rust bound
+- [An Absolute join never races an older-history FETCH](/quest/m3/ietf-absolute-join-race.md) - reproduce #7680's suspected collision on main, then fix it or keep the test and delete
+- [A passing interop run stops publishers cleanly](/quest/m3/interop-shutdown-warnings.md) - no lingering publisher or unfinished-producer warning in a green interop run
+- [Dependency and alternatives audit](/quest/m3/audit-deps.md) - every dependency earns its weight, preferring fewer, and the rest are current, deduplicated, and the best maintained option
+- [Dead code and API surface audit](/quest/m3/audit-dead-code.md) - repeat the removal audit before the next major release
+- [Typecheck with bun check](/quest/m3/bun-check.md) - workspace packages typecheck through bun once nixpkgs ships bun 1.4.4
+- [Test coverage audit](/quest/m3/audit-test-coverage.md) - repeat the coverage audit against the m1 baselines after the next release ships
+- [Documentation audit](/quest/m3/audit-docs.md) - repeat the docs audit after the release ships, against the m1 baselines
+- [Test cost audit](/quest/m3/audit-test-cost.md) - the slowest, flakiest, and least valuable tests are deleted by default, or else fixed or planned, once the release ships
+- [Quest tree audit](/quest/m3/audit-quests.md) - repeat the whole-tree audit after the release ships, against the m1 baseline
+- [CI workflow audit](/quest/m3/audit-ci.md) - repeat the per-workflow and per-job review after the release ships, against the m1 baselines
+- [Performance audit](/quest/m3/audit-perf.md) - benchmarks that regressed since the m1 run are explained, fixed, or planned, and unbenched hot paths get coverage
+- [Simplification audit](/quest/m3/audit-simplify.md) - repeat the simplification audit, starting with the m1 leftovers, after the release ships
+- [Artifact size audit](/quest/m3/audit-size.md) - repeat the shipping, native, and browser attribution after the release ships
+- [Compile time audit](/quest/m3/audit-compile-time.md) - build-time hotspots are measured against the m1 baselines, starting with the transport share now that moq-net compiles once, and the worst are removed, made cheaper, or planned
+- [Lint override and deprecation audit](/quest/m3/audit-lints.md) - repeat the suppression and deprecation audit after the release ships, starting with clippy on the macOS and Windows targets
+- [Clean ALSA playback onset](/quest/m3/audio-alsa-onset.md) - no onset restarts or clicks over PulseAudio
+- [Interop audit](/quest/m3/audit-interop.md) - our interop runner entries match what we ship, and every red interop cell with a moq.dev side is fixed, reported, or noted as down or unsupported
+- [moq-hls exposes each rendition's bound source](/quest/m3/hls-rendition-source.md) - playlists and segments report the source path and instance they read, so a cache can key on the source
+- [The memory bench finishes at 1 MiB frames](/quest/m3/memory-bench-hang.md) - the allocation mode's park at `size=1048576` is root-caused and fixed
+- [Audio's Latest start reaches back](/quest/m3/audio-latest-reach-back.md) - moq_audio's start covers min plus warmup like other consumers
+- [moq-lite tails count drops](/quest/m3/lite-tail-drop-count.md) - SUBSCRIBE_DROP accounting replaces the session-tail grace from lite-05
+- [Audio track changes are gapless](/quest/m3/gapless-audio-switch.md) - no silence beyond a frame on audio format or rendition changes, enforced by media QA
+- [We own our WebRTC stack](/quest/m3/webrtc/README.md) - moq-rtc becomes moq-webrtc with moq-ice, the data-channel transport, and a vendored, trimmed str0m/dimpl/is/sctp-proto
+- [PUBLISH_DONE says why](/quest/m3/publish-done-codes.md) - GOING_AWAY, TOO_FAR_BEHIND, and EXPIRED round-trip as stream codes
+- [A revoked announce resets instead of FINning](/quest/m3/announce-revoke-reset.md) - a PUBLISH_NAMESPACE revoked after its OK resets with INTERNAL_ERROR, per draft-22 §6.4.2.3
+- [moq repair refuses a live recording](/quest/m3/mp4-repair-lock.md) - the recorder's advisory lock keeps `moq repair mp4` off a file still being written
+- [The error-queue reader decodes truncated control data](/quest/m3/errqueue-truncation.md) - `MSG_ERRQUEUE` keeps what fit on `MSG_CTRUNC`, like the receive paths
+- [The QUIC driver tells an MTU probe from an oversized send](/quest/m3/quic-emsgsize-classify.md) - a non-probe `EMSGSIZE` is logged and counted instead of dropped silently
+- [fMP4 decode times from the declared reorder depth](/quest/m3/fmp4-declared-clock.md) - `DeclaredClock` replaces the sub-GOP cadence cap, as in TS, FLV, and MKV
+- [An ended HLS playlist has no trailing gap](/quest/m3/hls-trailing-gap.md) - no zero-duration `EXT-X-GAP` before `EXT-X-ENDLIST`
+- [/fetch answers from the announce sync](/quest/m3/fetch-synced.md) - a missing broadcast gets a 404 once announcements are synced, not after 30 s
+- [An advertisement stuck on a zero-credit peer gives up](/quest/m3/advertise-credit-timeout.md) - A Rust moq-transport publisher whose PUBLISH_NAMESPACE or namespace update cannot leave because the peer grants no send credit gives up on it within a bounded time, as it already does on a silent answer: it resets the request and frees its state
+- [moq-sock's control buffer is sized for the send options too](/quest/m3/cmsg-len-send.md) - `cmsg::LEN` in moq-sock is derived from, or checked at compile time against, both the receive options and the send options
+- [A panic inside moq-tokio's connection internals fails callers instead of panicking them](/quest/m3/connection-panic-isolation.md) - after a moq-tokio QUIC connection driver panics, every client-side caller gets the connection's terminal error instead of panicking in its own task, and the certificate reload watcher and qmux driver tasks are supervised
+- [No large future in the FFI layers can overflow a runtime or foreign thread's stack](/quest/m3/ffi-future-size.md) - every future moq-c and moq-ffi spawn or block on is below a size bound that a lint enforces, so unoptimized builds stay inside the runtime thread stack
+- [An empty tail stream for a headless moq-transport group creates no group](/quest/m3/headless-empty-tail.md) - when a moq-transport subscription's fill for the Largest Group fails, an empty subgroup stream for that headless group is dropped instead of creating an empty group that reads as complete
+- [A recording stalled on an open group reports what it waits for](/quest/m3/hls-stalled-segment.md) - when a moq-hls recording waits on a listed segment whose group a still connected publisher never closes, the wait is visible
+- [A kept draft-18 join pins its head group](/quest/m3/ietf-join-pin-head.md) - on draft 18, a joining FETCH that our publisher keeps open after a quick finish is answered even if the publisher drops its `track::Producer` right after `finish()`
+- [The JS player keeps a track's start when decoding from its first packet](/quest/m3/js-warmup-trim.md) - `@moq/watch` trims an audio track's catalog `warmup` only on a mid-stream join, as moq-audio does
+- [A library recorder gets the takeover cut](/quest/m3/mux-source-cut.md) - A recorder built directly with `moq_hls::export::Broadcaster::new` ends a replaced instance's recording at what it listed when another publisher takes the broadcast over, exactly as one built through `Server::broadcaster` does
+- [The OBS source joins audio at the live edge](/quest/m3/obs-decode-latest.md) - the OBS MoQ source's audio decoder starts at the newest cached group instead of replaying the track's backlog, so a reconnect or rendition change plays live audio at once
+- [OBS simulcast layers reach moq-watch from a live OBS, including the dock's Go Live](/quest/m3/obs-multitrack-check.md) - A live OBS 32.2.2 run, recorded in the PR, shows the `WHIPSimulcastTotalLayers` profile setting attaching two or more scaled video encoders to `moq_output`, each published as its own rendition and watched in `<moq-watch>`, both through the obs-websocket recipe in `doc/bin/obs.md` and through the MoQ dock's Go Live, which honors the profile's layer count instead of creating a single encoder
+- [Opus export never writes a channel mapping it can't stand behind](/quest/m3/opus-surround-export.md) - exporting a catalog Opus rendition with 3 to 8 channels and no description writes a `dOps` with the Vorbis family 1 mapping table, as the TS importer assumes, instead of an invalid family 0 `dOps`
+- [Open-GOP MPEG-2 export trims leading B-pictures in zero-stuffed CBR streams](/quest/m3/pes-hold-open-gop.md) - A TS export starting or resuming inside an open GOP of MPEG-2 video drops the orphaned leading B-pictures even when their PES ends on zero stuffing, as CBR encoders emit, without ever trimming part of a reference picture whose start code straddles two PES packets
+- [A multi-program TS import survives a source switch](/quest/m3/ts-multi-program-restart.md) - `--program all` restarts each affected program on an unannounced source switch, as a single-program import does after moq-dev/moq#7780, instead of ending the whole import
+- [The lite publisher tells transport faults from cancels](/quest/m3/publish-cancel-classify.md) - `rs/moq-net`'s lite publisher no longer counts every `Error::Transport` as a clean cancel
+- [tls:// sessions report their negotiated ALPN](/quest/m3/tls-link-alpn.md) - A session accepted on a `tls://` listener reports the negotiated moq ALPN in `Link::alpn`, as raw QUIC, WebTransport, and WebSocket sessions already do, so admission and logs see the protocol on every transport
+- [PUBLISH token renewal is consistent across pause and forward, and the multi-token cost is profiled](/quest/m3/token-auth-followups.md) - on a moq-transport session, a REQUEST_UPDATE carrying an AUTHORIZATION TOKEN on a PUBLISH gets the same answer whether the PUBLISH is paused or forwarding
+- [An audio-only broadcast that can't play hides its play button](/quest/m3/audio-only-play.md) - center-play follows the audio-only rule, proven by a browser test
+- [moq-quic's long header type is one variant](/quest/m3/quic-long-type.md) - collapse LongType after the 0-RTT removal
+- [One predicate for the lite close wait](/quest/m3/subscriber-fin-fold.md) - fold waits_for_subscriber_fin into has_track_stream
+- [MKV imports ffmpeg's multichannel FLAC](/quest/m3/mkv-flac-channel-mask.md) - a channel-mask-only Vorbis comment is accepted, so default ffmpeg multichannel FLAC needs no remux
+- [The publish support panel lists only codecs publishing accepts](/quest/m3/publish-support-probe.md) - the settings panel runs the publisher's Annex B encoder probe
+- [TLS reload follows symlinked certificate files](/quest/m3/watch-symlink-targets.md) - in-place rewrites of symlink targets in other directories reload roots, served chains, and client certificates

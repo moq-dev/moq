@@ -24,7 +24,7 @@ fixtures still run only on the reference model in
 `rs/moq-net/tests/integration/routing_contracts/`. Nothing drives the router
 on the wire yet. The children below carry the rest, in order, and land in
 one release: lite-07 carries the route layer as a whole
-([lite-07 finalize](/quest/m1/lite07-finalize.md) waits on this epic). This
+([lite-07 finalize](/quest/m2/lite07-finalize.md) waits on this epic). This
 README holds the routing contract every child implements.
 
 Decided 2026-11-03 (maintainer, on
@@ -510,6 +510,6 @@ benchmarks.
 
 ## Related
 
-- [Route wakes](/quest/m2/route-wakes.md) - index work follows the settled source-selection model
-- [Route health](/quest/m2/route-health/README.md) - epoch-only progress observation and local delivery failover
-- [A route stream's interest is a set of prefixes](/quest/m2/route-interest-prefixes.md) - m2: one stream's interest covers several prefixes
+- [Route wakes](/quest/m4/route-wakes.md) - index work follows the settled source-selection model
+- [Route health](/quest/m5/route-health/README.md) - epoch-only progress observation and local delivery failover
+- [A route stream's interest is a set of prefixes](/quest/m5/route-interest-prefixes.md) - m2: one stream's interest covers several prefixes

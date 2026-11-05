@@ -54,7 +54,7 @@ Decided 2026-11-04 (maintainer, on the investigation PR):
 Relay archive acceptance stays open until native per-commit attribution for
 macOS, aarch64 Linux, and Windows MSVC is supplied, or the maintainer
 explicitly accepts the evidence limit. Keep the retained history intact.
-[Size audit](/quest/m2/audit-size.md) owns the release-time view.
+[Size audit](/quest/m3/audit-size.md) owns the release-time view.
 
 Public API: none. Wire: none.
 
@@ -76,4 +76,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Size audit](/quest/m2/audit-size.md) - pre-cut size investigation and the post-release refresh
+- [Size audit](/quest/m3/audit-size.md) - pre-cut size investigation and the post-release refresh

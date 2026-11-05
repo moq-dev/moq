@@ -37,4 +37,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [io_uring relay package](/quest/m2/relay-io-uring-package.md) - ships the path this unifies
+- [io_uring relay package](/quest/m3/relay-io-uring-package.md) - ships the path this unifies

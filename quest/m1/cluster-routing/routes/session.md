@@ -127,4 +127,4 @@ admission.
 ## Related
 
 - [Routes and announces](/quest/m1/cluster-routing/routes/README.md) - the contract
-- [Route wakes](/quest/m2/route-wakes.md) - index work follows the settled source-selection model
+- [Route wakes](/quest/m4/route-wakes.md) - index work follows the settled source-selection model
