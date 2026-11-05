@@ -1,7 +1,7 @@
 //! What the peer lets a session do.
 
 use crate::error::MoqError;
-use crate::ffi::Task;
+use crate::ffi::Polled;
 
 /// What the peer lets this side do, in this side's own paths.
 ///
@@ -40,14 +40,14 @@ pub struct MoqGrantConsumer {
 	/// The watch behind [`grant`](Self::grant), which reads without the lock.
 	peek: moq_net::auth::Watch,
 	/// The watch behind [`changed`](Self::changed), which tracks what it last returned.
-	changed: Task<moq_net::auth::Watch>,
+	changed: Polled<moq_net::auth::Watch>,
 }
 
 impl MoqGrantConsumer {
 	pub(crate) fn new(handle: &moq_net::auth::Handle) -> Self {
 		Self {
 			peek: handle.grant(),
-			changed: Task::new(handle.grant()),
+			changed: Polled::new(handle.grant()),
 		}
 	}
 }
@@ -68,7 +68,9 @@ impl MoqGrantConsumer {
 	/// session ended, or [`cancel`](Self::cancel). A reconnect is not an end.
 	pub async fn changed(&self) -> Result<Option<MoqGrant>, MoqError> {
 		self.changed
-			.run(|mut watch| async move { Ok(watch.changed().await?.map(Into::into)) })
+			.wait(|watch, waiter| {
+				std::task::Poll::Ready(Ok(std::task::ready!(watch.poll_changed(waiter))?.map(Into::into)))
+			})
 			.await
 	}
 

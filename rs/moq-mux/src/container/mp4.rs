@@ -36,7 +36,7 @@ const NON_SYNC: u32 = 0x0001_0000;
 
 /// Subscribe to a moq broadcast and record it as a crash-safe regular MP4.
 ///
-/// [`next`](Self::next) returns the bytes to append to the file, the same fMP4 an
+/// [`poll_next`](Self::poll_next) returns the bytes to append to the file, the same fMP4 an
 /// [`fmp4::Export`] writes plus the reserved box and track descriptions, so the file plays if
 /// the recording never finishes. [`finish`](Self::finish) then returns the trailing `moov` and
 /// the `mdat` header that make it a regular MP4. Writing those needs a file that can be
@@ -60,7 +60,7 @@ pub struct Export<S: Stream> {
 #[derive(Clone, Debug)]
 pub struct Finish {
 	/// Where [`moov`](Self::moov) is written, from the start of the file, which is cut there
-	/// first: the end of everything [`Export::next`] returned, or of a repaired file's last
+	/// first: the end of everything [`Export::poll_next`] returned, or of a repaired file's last
 	/// complete fragment.
 	pub moov_offset: u64,
 
@@ -101,11 +101,7 @@ impl<S: Stream> Export<S> {
 
 	/// The next bytes to append to the file, or `None` once the broadcast ends or the export
 	/// [stops](Self::stop).
-	pub async fn next(&mut self) -> Result<Option<Bytes>> {
-		kio::wait(|waiter| self.poll_next(waiter)).await
-	}
-
-	/// Poll-based variant of [`Self::next`].
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
 		let Some(chunk) = std::task::ready!(self.fmp4.poll_next_chunk(waiter)?) else {
 			return Poll::Ready(Ok(None));
@@ -118,7 +114,7 @@ impl<S: Stream> Export<S> {
 		Poll::Ready(Ok(Some(data)))
 	}
 
-	/// Stop recording before the broadcast ends. [`next`](Self::next) still returns the media
+	/// Stop recording before the broadcast ends. [`poll_next`](Self::poll_next) still returns the media
 	/// already read, the fragment each track was buffering included, then `None`.
 	pub fn stop(&mut self) {
 		self.fmp4.stop();
@@ -134,6 +130,7 @@ impl<S: Stream> Export<S> {
 
 	/// The file header: the init segment's `ftyp`, the reserved box, then its `moov`.
 	fn init(&mut self, init: &Bytes) -> Result<Bytes> {
+		fmp4::metadata::check(init)?;
 		let mut cursor = std::io::Cursor::new(init.as_ref());
 		mp4_atom::Ftyp::decode(&mut cursor)?;
 		let split = cursor.position() as usize;
@@ -158,6 +155,7 @@ impl<S: Stream> Export<S> {
 	/// Index a moof+mdat fragment where it will land, after a description of each track the
 	/// file has yet to describe as it is now, and wrapping a late track's in a `free` box.
 	fn fragment(&mut self, fragment: Bytes) -> Result<Bytes> {
+		fmp4::metadata::check(&fragment)?;
 		let index = self.index.as_mut().expect("the init segment comes first");
 		let moof = mp4_atom::Moof::decode(&mut std::io::Cursor::new(fragment.as_ref()))?;
 
@@ -741,6 +739,33 @@ fn sample_table(stsd: &mp4_atom::Stsd, track: &Track, timeline: &Timeline) -> mp
 
 #[cfg(test)]
 mod tests {
+	#[tokio::test]
+	async fn received_metadata_is_bounded() {
+		use crate::container::fmp4::metadata::tests::{attacks, measure};
+		use mp4_atom::Encode;
+		let live = Live::avc3();
+		let mut export = export(&live).await;
+		let mut bounded = true;
+		for (name, data) in attacks(b"moov") {
+			let mut init = Vec::new();
+			mp4_atom::Ftyp {
+				major_brand: b"isom".into(),
+				minor_version: 0,
+				compatible_brands: vec![],
+			}
+			.encode(&mut init)
+			.unwrap();
+			init.extend_from_slice(&data);
+			let init = bytes::Bytes::from(init);
+			bounded &= measure(name, || export.init(&init).is_err());
+		}
+		export.index = Some(super::Index::new(0, &mp4_atom::Moov::default()).unwrap());
+		for (name, data) in attacks(b"moof") {
+			bounded &= measure(name, || export.fragment(data.clone()).is_err());
+		}
+		assert!(bounded);
+	}
+
 	use std::time::Duration;
 
 	use mp4_atom::DecodeMaybe;

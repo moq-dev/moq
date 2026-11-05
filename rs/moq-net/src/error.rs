@@ -210,11 +210,6 @@ pub enum StreamError {
 	#[error("not found")]
 	NotFound,
 
-	/// A FETCH reached a datagram, which is never cached. Sent on moq-lite-07
-	/// and later; an earlier version sends [`NotFound`](Self::NotFound) instead.
-	#[error("not fetchable")]
-	NotFetchable,
-
 	/// The broadcast is neither announced nor served, so there is no route to it.
 	#[error("unroutable")]
 	Unroutable,
@@ -283,7 +278,6 @@ impl StreamError {
 			Self::WrongSize => 0x37,
 			Self::FrameTooLarge => 0x38,
 			Self::TimestampMismatch => 0x39,
-			Self::NotFetchable => 0x3a,
 			Self::Unauthorized => 0x3b,
 			Self::App(app) => *app as u32 + 64,
 			Self::Unknown(code) => *code,
@@ -316,7 +310,6 @@ impl StreamError {
 			0x37 => Self::WrongSize,
 			0x38 => Self::FrameTooLarge,
 			0x39 => Self::TimestampMismatch,
-			0x3a => Self::NotFetchable,
 			0x3b => Self::Unauthorized,
 			code @ 64.. => match u16::try_from(code - 64) {
 				Ok(app) => Self::App(app),
@@ -418,10 +411,6 @@ pub enum Error {
 	#[error("not found")]
 	NotFound,
 
-	/// A FETCH reached a datagram, which is never cached.
-	#[error("not fetchable")]
-	NotFetchable,
-
 	/// A joining FETCH named a request that is not an active subscription.
 	#[error("invalid joining request ID")]
 	InvalidJoiningRequestId,
@@ -510,7 +499,7 @@ pub enum Error {
 	/// (see [`cache::Pool`](crate::cache::Pool)), or by the transport when incomplete
 	/// messages spent its receive window. Also a read of a frame the group shed from its
 	/// front, past its live tail or under that debt. Unlike [`Self::Old`], the group was
-	/// still within the publisher's window; it can be re-fetched.
+	/// still fresh under the publisher's max age; it can be re-fetched.
 	#[error("evicted")]
 	Evicted,
 
@@ -557,10 +546,6 @@ pub enum Error {
 	/// The underlying connection reached its transport idle deadline.
 	#[error("transport idle timeout")]
 	IdleTimeout,
-
-	/// The transport refused a request because the peer granted no stream credit.
-	#[error("no stream credit")]
-	NoStreamCredit,
 }
 
 impl Error {
@@ -672,13 +657,12 @@ impl From<&Error> for SessionError {
 			// says an unrecognized code is an unspecified error. Send that instead.
 			Error::Remote(_) => Self::Internal,
 			// Our own transport failed: there is no code to say so.
-			Error::Transport(_) | Error::IdleTimeout | Error::NoStreamCredit => Self::Internal,
+			Error::Transport(_) | Error::IdleTimeout => Self::Internal,
 			// Stream-scoped conditions have no session code.
 			Error::Old
 			| Error::Evicted
 			| Error::Lagged
 			| Error::NotFound
-			| Error::NotFetchable
 			| Error::InvalidRange
 			| Error::InvalidJoiningRequestId
 			| Error::Unroutable
@@ -713,7 +697,6 @@ impl From<&Error> for StreamError {
 			Error::Evicted => Self::Evicted,
 			Error::Lagged => Self::TooFarBehind,
 			Error::NotFound => Self::NotFound,
-			Error::NotFetchable => Self::NotFetchable,
 			Error::Unroutable => Self::Unroutable,
 			Error::WrongSize => Self::WrongSize,
 			Error::FrameTooLarge => Self::FrameTooLarge,
@@ -739,7 +722,7 @@ impl From<&Error> for StreamError {
 			// Session-scoped: the peer learns the detail from the session close.
 			// A stream refused on its own is not a session failure, so it does not claim
 			// SESSION_CLOSED; there is no stream-scoped PROTOCOL_VIOLATION to send instead.
-			Error::UnexpectedStream | Error::NoStreamCredit => Self::Internal,
+			Error::UnexpectedStream => Self::Internal,
 			Error::Version
 			| Error::UnknownAlpn(_)
 			| Error::TooManyRequests
@@ -856,7 +839,6 @@ mod tests {
 			(StreamError::WrongSize, 0x37),
 			(StreamError::FrameTooLarge, 0x38),
 			(StreamError::TimestampMismatch, 0x39),
-			(StreamError::NotFetchable, 0x3a),
 			(StreamError::Unauthorized, 0x3b),
 			(StreamError::App(7), 0x40 + 7),
 		] {
@@ -893,12 +875,9 @@ mod tests {
 		let relayed = StreamError::from(&Error::from(StreamError::from_code(0x3)));
 		assert_eq!(relayed.to_code(), 0x3);
 
-		// A datagram reached by a FETCH keeps its own code rather than reading as a plain miss.
-		assert_eq!(StreamError::from(&Error::NotFetchable), StreamError::NotFetchable);
-
 		// Registered stream codes survive the hop unchanged.
 		for code in [
-			0x0, 0x1, 0x2, 0x4, 0x5, 0x12, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b,
+			0x0, 0x1, 0x2, 0x4, 0x5, 0x12, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3b,
 		] {
 			let relayed = StreamError::from(&Error::from(StreamError::from_code(code)));
 			assert_eq!(relayed.to_code(), code, "stream {code:#x} changed across a relay");

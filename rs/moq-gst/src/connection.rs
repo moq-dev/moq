@@ -40,7 +40,7 @@ pub(crate) fn properties() -> Vec<glib::ParamSpec> {
 			.build(),
 		glib::ParamSpecUInt64::builder("quic-keep-alive")
 			.nick("QUIC keep-alive")
-			.blurb("QUIC keep-alive interval in milliseconds, 0 or unset derives it from the idle timeout; iroh still pings at least every 5s")
+			.blurb("QUIC keep-alive interval in milliseconds, 0 or unset derives it from the idle timeout")
 			.default_value(0)
 			.mutable_ready()
 			.build(),

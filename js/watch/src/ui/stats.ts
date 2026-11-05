@@ -96,8 +96,8 @@ export function statsTab(parent: Effect, watch: MoqWatch): HTMLElement {
 		const vStats = watch.video.out.stats.peek();
 		const w = vConf?.codedWidth ?? vCat?.display?.width;
 		const h = vConf?.codedHeight ?? vCat?.display?.height;
-		vRes.textContent = w && h ? `${w}×${h}` : "—";
-		vCodec.textContent = vConf?.codec ?? "—";
+		vRes.textContent = w && h ? `${w}×${h}` : "-";
+		vCodec.textContent = vConf?.codec ?? "-";
 
 		let fps: number | undefined;
 		if (vStats && vPrev.frames > 0) {
@@ -109,32 +109,32 @@ export function statsTab(parent: Effect, watch: MoqWatch): HTMLElement {
 		vBitrateGraph.push(vBitrate);
 		vFpsGraph.push(fps);
 		if (vStats) vPrev = { frames: vStats.frameCount, bytes: vStats.bytesReceived, when: now };
-		vLate.textContent = vStats ? `${vStats.late}` : "—";
-		vStalls.textContent = vStats ? `${vStats.stalls} (${formatMillis(vStats.stalled)})` : "—";
+		vLate.textContent = vStats ? `${vStats.late}` : "-";
+		vStalls.textContent = vStats ? `${vStats.stalls} (${formatMillis(vStats.stalled)})` : "-";
 
 		// Audio.
 		const aConf = watch.audio.source.out.config.peek();
 		const aStats = watch.audio.out.stats.peek();
-		aCodec.textContent = aConf?.codec ?? "—";
-		aRate2.textContent = aConf?.sampleRate ? formatHz(aConf.sampleRate) : "—";
-		aChannels.textContent = aConf?.numberOfChannels ? `${aConf.numberOfChannels}` : "—";
+		aCodec.textContent = aConf?.codec ?? "-";
+		aRate2.textContent = aConf?.sampleRate ? formatHz(aConf.sampleRate) : "-";
+		aChannels.textContent = aConf?.numberOfChannels ? `${aConf.numberOfChannels}` : "-";
 		const aBitrate2 = aStats ? rate(aPrev, aStats.bytesReceived, now) : undefined;
-		aBitrate.textContent = aBitrate2 !== undefined ? formatBitrate(aBitrate2) : "—";
+		aBitrate.textContent = aBitrate2 !== undefined ? formatBitrate(aBitrate2) : "-";
 		if (aStats) aPrev = { bytes: aStats.bytesReceived, when: now };
 
 		// A non-zero count means the target is below what arrivals actually need.
 		const aUnder = aStats?.underruns ?? 0;
 		aUnderruns.textContent = watch.audio.out.stalled.peek() ? `${aUnder} (buffering)` : `${aUnder}`;
-		aLate.textContent = aStats ? `${aStats.late}` : "—";
+		aLate.textContent = aStats ? `${aStats.late}` : "-";
 
 		// Network. "Estimated max" is the congestion controller / PROBE estimate;
 		// "Actual" is the goodput we measure from the video + audio byte counters.
 		const probe = watch.connection.probe.peek();
 		const estimate = probe?.estimatedRecvRate;
-		nMax.textContent = estimate ? formatBitrate(estimate) : "—";
+		nMax.textContent = estimate ? formatBitrate(estimate) : "-";
 		const actual =
 			vBitrate !== undefined || aBitrate2 !== undefined ? (vBitrate ?? 0) + (aBitrate2 ?? 0) : undefined;
-		nActual.textContent = actual !== undefined ? formatBitrate(actual) : "—";
+		nActual.textContent = actual !== undefined ? formatBitrate(actual) : "-";
 		const rtt = probe?.rtt;
 		nRttGraph.push(rtt !== undefined && rtt > 0 ? rtt : undefined);
 	}, POLL);

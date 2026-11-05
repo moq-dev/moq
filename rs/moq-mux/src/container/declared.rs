@@ -64,10 +64,21 @@ impl<T> DeclaredClock<T> {
 		}
 	}
 
+	/// Restart the clock at the same declared depth.
+	pub(crate) fn restart(self) -> Self {
+		Self::new(self.depth)
+	}
+
 	/// How many frames are held.
 	#[cfg(test)]
 	pub(crate) fn len(&self) -> usize {
 		self.held.len()
+	}
+
+	/// Whether a frame presented at `pts` would follow more than the depth frames read before it
+	/// in presentation order, which [`Self::push`] refuses.
+	pub(crate) fn reorders_past(&self, pts: u64) -> bool {
+		self.highest.len() - self.highest.partition_point(|&prior| prior <= pts) > self.depth
 	}
 
 	/// Hold the group's next frame in decode order, presented at `pts`.
@@ -75,10 +86,10 @@ impl<T> DeclaredClock<T> {
 		if self.held.len() > self.depth {
 			return Err(ClockError::Undrained.into());
 		}
-		let at = self.highest.partition_point(|&prior| prior <= pts);
-		if self.highest.len() - at > self.depth {
+		if self.reorders_past(pts) {
 			return Err(ClockError::Reordered(self.depth).into());
 		}
+		let at = self.highest.partition_point(|&prior| prior <= pts);
 		self.highest.insert(at, pts);
 		if self.highest.len() > self.depth + 1 {
 			self.highest.remove(0);

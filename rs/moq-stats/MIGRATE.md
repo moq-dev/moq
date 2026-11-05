@@ -4,6 +4,27 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Async wrappers are opt-in
+
+Enable the `async` Cargo feature to keep awaiting the readers' `next` and `Publisher::run`:
+`moq-stats = { version = "...", features = ["async"] }`. This also applies with
+`default-features = false`. The feature is off by default; without it, drive `poll_next` and
+`Publisher::poll_run`.
+
+`Consumer::{totals, presence, prefix, group}` return their reader at once instead of awaiting
+the subscription handshake: drop the `.await`. The handshake finishes on the reader's first
+`next`, which fails with its error, such as `NotFound` for an unlisted group.
+The stats tracks and their JSON are unchanged.
+
+### Group counters have their own epoch type
+
+`GroupFrame::epoch` is `moq_stats::Epoch` instead of `moq_net::Instance`.
+Use `Epoch` for stored group epochs; parse their text with `str::parse` or
+`Epoch::try_from(String)`, and read it with `as_str` or `Display`.
+Epochs are opaque identities with equality and hashing, without a temporal order.
+Broadcast routes still use `moq_net::Instance`. Group JSON is unchanged:
+producers mint UUIDv7 strings, and readers accept any nonempty epoch string.
+
 ### `moq_net::Path` has no lifetime
 
 Functions that took `impl AsPath` take `impl Into<Path>`, so pass a `Path` rather than a string, and fields and returns that were `PathOwned` are `moq_net::Path`. See moq-net's migration for the rest.

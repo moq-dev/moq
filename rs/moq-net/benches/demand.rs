@@ -58,7 +58,11 @@ fn bench_edge(c: &mut Criterion) {
 		group.bench_function(id, |b| {
 			let producer = broadcast::Info::new().produce();
 			let _tracks: Vec<_> = (0..tracks)
-				.map(|i| producer.create_track(format!("t{i}"), None).unwrap())
+				.map(|i| {
+					producer
+						.create_track(format!("t{i}"), moq_net::track::Info::default().with_max_age(None))
+						.unwrap()
+				})
 				.collect();
 			let consumer = producer.consume();
 			let waiter = kio::Waiter::noop();
@@ -89,9 +93,19 @@ fn bench_churn(c: &mut Criterion) {
 			let producer = broadcast::Info::new().produce();
 			let _demands: Vec<_> = (0..handles).map(|_| producer.demand()).collect();
 			let _tracks: Vec<_> = (0..tracks)
-				.map(|i| producer.create_track(format!("t{i}"), None).unwrap())
+				.map(|i| {
+					producer
+						.create_track(format!("t{i}"), moq_net::track::Info::default().with_max_age(None))
+						.unwrap()
+				})
 				.collect();
-			b.iter(|| drop(producer.create_track("churn", None).unwrap()));
+			b.iter(|| {
+				drop(
+					producer
+						.create_track("churn", moq_net::track::Info::default().with_max_age(None))
+						.unwrap(),
+				)
+			});
 		});
 	}
 	group.finish();
@@ -103,7 +117,11 @@ fn bench_lookup(c: &mut Criterion) {
 		let id = BenchmarkId::from_parameter(format!("{tracks}t_{readers}r"));
 		let producer = broadcast::Info::new().produce();
 		let _tracks: Vec<_> = (0..tracks)
-			.map(|i| producer.create_track(format!("t{i}"), None).unwrap())
+			.map(|i| {
+				producer
+					.create_track(format!("t{i}"), moq_net::track::Info::default().with_max_age(None))
+					.unwrap()
+			})
 			.collect();
 		let consumer = producer.consume();
 		let _readers: Vec<_> = (0..readers)

@@ -1,4 +1,4 @@
-# [S] Nightly passes on main
+# Nightly passes on main
 
 ## Goal
 
@@ -20,43 +20,29 @@ Decided 2026-10-27 (maintainer), from the coverage audit's triage of run
 [40506938673](https://github.com/moq-dev/moq/actions/runs/40506938673): more
 children for the causes nothing owned.
 
-The Features recipe and its nested checks now run independent commands and
-report every failure before exiting nonzero. The shared runner announces each
-command so an error can be tied to its check. Audio quality's independent benchmarks
-and playback checks also continue after a failure, provided setup succeeded;
-cancellation still stops them. The benchmark groups already collect failures.
+This README's own work, after the children:
 
-Remaining work:
+- Confirm a scheduled run on `main` passes; never dispatch Nightly. Failures
+  already owned elsewhere stay there: the audio near-zero p95 row belongs to
+  [audio jitter target](/quest/m1/audio-jitter-target/README.md), the
+  macOS `receive_credit` timeout has no owner since its quest was deleted in
+  [moq-dev/moq#6732](https://github.com/moq-dev/moq/pull/6732), so plan one under
+  [test flakes](/quest/m0/test-flakes-2/README.md) if it recurs, the paired bench
+  threshold to [bench CI](/quest/m1/bench-ci.md). The moq-net benchmark
+  fixtures were repaired in [moq-dev/moq#7940](https://github.com/moq-dev/moq/pull/7940).
+  The receive-windows benchmark's overcommitted cells, skipped since
+  [moq-dev/moq#7838](https://github.com/moq-dev/moq/pull/7838), moved to
+  [m1](/quest/m1/receive-windows-evicted.md) on 2026-11-04 (maintainer).
 
-- Apply the same continuation to Platform's independent checks. The scheduled
-  run below failed its macOS Rust step and skipped Swift, OBS, and installer
-  checks. Coordinate with the active
-  [hakari work](/quest/m0/ci/hakari.md), which owns release/platform jobs; this
-  attempt leaves those files untouched to avoid conflicting edits.
-- Confirm a scheduled run passes after the fixes land. Use scheduled runs on
-  `main` only; do not dispatch Nightly. The latest inspected run,
-  [41483654426](https://github.com/moq-dev/moq/actions/runs/41483654426)
-  (2026-11-02, `dde50c699f69507ced243754c2f700a6184d1576`), failed and predates
-  this attempt. Features stopped at the coroutine check, hiding every check
-  after it. Its failure is not evidence against these continuation changes.
-- Triage the remaining failures against current source and ownership before
-  changing them. That run also failed Firefox media, the worklet matrix
-  (FFmpeg source download), Rust and JS audits, Miri (missing Rust sources),
-  ingest fuzzing, and shipping sizes. Its gate's close-drain failure belongs to
-  [tokio close-drain](/quest/m0/test-flakes-2/tokio-close-drain.md). The relay
-  session benchmark's `Evicted` failures stay with the active
-  [fastest-reader work](/quest/m1/unbounded-groups/fastest-reader.md).
-
-Failures already owned elsewhere stay there: the audio near-zero p95 row belongs
-to [audio jitter target](/quest/m1/audio-jitter-target/README.md), the macOS
-`receive_credit` timeout to [test flakes](/quest/m0/test-flakes-2/README.md), and
-the paired bench threshold to [bench CI](/quest/m1/bench-ci.md).
+Decided 2026-11-05 (maintainer, /quest-plan): catch the next moq-net bench
+break in Nightly's measured coverage only. Do not add a test-mode bench run
+to the PR gate; the full run costs about 17 minutes per PR.
 
 Public API: none. Wire: none.
 
-## Waiting
+## Required
 
-- moq-dev/moq: coordinate Platform continuation with the active hakari owner
-  before editing those jobs, then inspect a scheduled Nightly on `main` after
-  the fixes land. Completion needs a green scheduled run; run 41483654426 is
-  red and predates this attempt. Keep owned failures with the quests above.
+- [moq-net's ingest fuzz target finds no stall](/quest/m0/nightly/ingest-fuzz.md) - the 13-byte stream that stalls ingest is fixed at its cause and kept as a regression test
+- [Nightly's shipping-size check passes](/quest/m0/nightly/shipping-size.md) - js/net, js/watch, and moq-relay growth over 5% is traced to its commits, then shrunk or accepted
+- [Nightly's Miri job stays inside its time budget](/quest/m0/nightly/miri.md) - both Miri passes go green, with ARM timings inside the 60-minute job and 15-minute-per-test budgets
+- [Nightly's macOS platform job passes](/quest/m0/nightly/macos.md) - `moq-audio`'s tests compile on macOS again and the websocket version test's timeout is fixed if it recurs

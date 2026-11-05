@@ -753,100 +753,37 @@
 	"specificity": {
 		"$comment": "Each list is strictly descending; each pair in `equal` is one tier.",
 		"descending": [
-			[
-				"a/b/c",
-				"a/b",
-				"a/*.hang",
-				"a/*",
-				"a/**",
-				"*.hang",
-				"*",
-				"**"
-			],
-			[
-				"a/**",
-				"**/a"
-			],
-			[
-				"a/*/b",
-				"a/*/**",
-				"a/**"
-			],
-			[
-				"*/*",
-				"*/**",
-				"**"
-			],
-			[
-				"cam*.hang",
-				"*.hang",
-				"*"
-			],
-			[
-				"😀*",
-				"abc*"
-			],
-			[
-				"*😀",
-				"*abc"
-			],
-			[
-				"é*é",
-				"abc*"
-			]
+			["a/b/c", "a/b", "a/*.hang", "a/*", "a/**", "*.hang", "*", "**"],
+			["a/**", "**/a"],
+			["a/*/b", "a/*/**", "a/**"],
+			["*/*", "*/**", "**"],
+			["cam*.hang", "*.hang", "*"],
+			["😀*", "abc*"],
+			["*😀", "*abc"],
+			["é*é", "abc*"]
 		],
-		"equal": [
-			[
-				"*/a",
-				"*/b"
-			],
-			[
-				"*/a/**",
-				"*/**/a"
-			],
-			[
-				"*.hang",
-				"*.dash"
-			],
-			[
-				"😀*",
-				"abcd*"
-			],
-			[
-				"é*é",
-				"abcd*"
-			]
-		]
+		"equal": [["*/a", "*/b"], ["*/a/**", "*/**/a"], ["*.hang", "*.dash"], ["😀*", "abcd*"], ["é*é", "abcd*"]]
 	},
 	"rebase": [
 		{
 			"pattern": "**",
 			"root": "a",
-			"expect": [
-				"**"
-			]
+			"expect": ["**"]
 		},
 		{
 			"pattern": "**/a",
 			"root": "a",
-			"expect": [
-				"",
-				"**/a"
-			]
+			"expect": ["", "**/a"]
 		},
 		{
 			"pattern": "a/**",
 			"root": "a",
-			"expect": [
-				"**"
-			]
+			"expect": ["**"]
 		},
 		{
 			"pattern": "a/**",
 			"root": "a/b",
-			"expect": [
-				"**"
-			]
+			"expect": ["**"]
 		},
 		{
 			"pattern": "a/**",
@@ -856,16 +793,12 @@
 		{
 			"pattern": "a/b",
 			"root": "a",
-			"expect": [
-				"b"
-			]
+			"expect": ["b"]
 		},
 		{
 			"pattern": "a/b",
 			"root": "a/b",
-			"expect": [
-				""
-			]
+			"expect": [""]
 		},
 		{
 			"pattern": "a/b",
@@ -875,47 +808,32 @@
 		{
 			"pattern": "*/b",
 			"root": "a",
-			"expect": [
-				"b"
-			]
+			"expect": ["b"]
 		},
 		{
 			"pattern": "a/*/c",
 			"root": "a/x",
-			"expect": [
-				"c"
-			]
+			"expect": ["c"]
 		},
 		{
 			"pattern": "a/**/b/c",
 			"root": "a/b",
-			"expect": [
-				"**/b/c",
-				"c"
-			]
+			"expect": ["**/b/c", "c"]
 		},
 		{
 			"pattern": "a/**/b",
 			"root": "a/b/b",
-			"expect": [
-				"**/b",
-				""
-			]
+			"expect": ["**/b", ""]
 		},
 		{
 			"pattern": "**/b/c",
 			"root": "b",
-			"expect": [
-				"**/b/c",
-				"c"
-			]
+			"expect": ["**/b/c", "c"]
 		},
 		{
 			"pattern": "",
 			"root": "",
-			"expect": [
-				""
-			]
+			"expect": [""]
 		},
 		{
 			"pattern": "",
@@ -925,23 +843,17 @@
 		{
 			"pattern": "**",
 			"root": "",
-			"expect": [
-				"**"
-			]
+			"expect": ["**"]
 		},
 		{
 			"pattern": "**",
 			"root": "/a//b/",
-			"expect": [
-				"**"
-			]
+			"expect": ["**"]
 		},
 		{
 			"pattern": "*.hang/**",
 			"root": "cam.hang",
-			"expect": [
-				"**"
-			]
+			"expect": ["**"]
 		},
 		{
 			"pattern": "*.hang/**",
@@ -951,10 +863,7 @@
 		{
 			"pattern": "**/*.hang",
 			"root": "a.hang",
-			"expect": [
-				"",
-				"**/*.hang"
-			]
+			"expect": ["", "**/*.hang"]
 		}
 	],
 	"rooted": [
@@ -986,122 +895,59 @@
 	],
 	"union": [
 		{
-			"input": [
-				"a/b",
-				"a/c",
-				"a/*"
-			],
-			"reduced": [
-				"a/*"
-			]
+			"input": ["a/b", "a/c", "a/*"],
+			"reduced": ["a/*"]
 		},
 		{
-			"input": [
-				"a/**",
-				"a/b",
-				"**/c"
-			],
-			"reduced": [
-				"**/c",
-				"a/**"
-			]
+			"input": ["a/**", "a/b", "**/c"],
+			"reduced": ["**/c", "a/**"]
 		},
 		{
-			"input": [
-				"**",
-				"a",
-				"*/**"
-			],
-			"reduced": [
-				"**"
-			]
+			"input": ["**", "a", "*/**"],
+			"reduced": ["**"]
 		},
 		{
-			"input": [
-				"b",
-				"a"
-			],
-			"reduced": [
-				"a",
-				"b"
-			]
+			"input": ["b", "a"],
+			"reduced": ["a", "b"]
 		},
 		{
 			"input": [],
 			"reduced": []
 		},
 		{
-			"input": [
-				"*.hang",
-				"cam.hang",
-				"*"
-			],
-			"reduced": [
-				"*"
-			]
+			"input": ["*.hang", "cam.hang", "*"],
+			"reduced": ["*"]
 		},
 		{
-			"input": [
-				"*.hang",
-				"cam.hang"
-			],
-			"reduced": [
-				"*.hang"
-			]
+			"input": ["*.hang", "cam.hang"],
+			"reduced": ["*.hang"]
 		},
 		{
-			"input": [
-				"𐀀",
-				""
-			],
-			"reduced": [
-				"",
-				"𐀀"
-			]
+			"input": ["𐀀", ""],
+			"reduced": ["", "𐀀"]
 		},
 		{
-			"input": [
-				"*/**",
-				"**/*"
-			],
-			"reduced": [
-				"**/*"
-			]
+			"input": ["*/**", "**/*"],
+			"reduced": ["**/*"]
 		},
 		{
-			"input": [
-				"**/*",
-				"*/**"
-			],
-			"reduced": [
-				"**/*"
-			]
+			"input": ["**/*", "*/**"],
+			"reduced": ["**/*"]
 		}
 	],
 	"unionContains": [
 		{
-			"union": [
-				"a",
-				"a/*",
-				"a/*/**"
-			],
+			"union": ["a", "a/*", "a/*/**"],
 			"pattern": "a/**",
 			"expect": false
 		},
 		{
-			"union": [
-				"a",
-				"a/*",
-				"a/*/**"
-			],
+			"union": ["a", "a/*", "a/*/**"],
 			"pattern": "a/x/**",
 			"expect": true
 		},
 		{
-			"union": [
-				"**/c",
-				"a/**"
-			],
+			"union": ["**/c", "a/**"],
 			"pattern": "a/b",
 			"expect": true
 		},
@@ -1115,74 +961,52 @@
 		{
 			"a": "foo/*/chat",
 			"b": "foo/alice/chat/**",
-			"expect": [
-				"foo/alice/chat"
-			]
+			"expect": ["foo/alice/chat"]
 		},
 		{
 			"a": "foo/*/chat",
 			"b": "foo/**",
-			"expect": [
-				"foo/*/chat"
-			]
+			"expect": ["foo/*/chat"]
 		},
 		{
 			"a": "foo/**",
 			"b": "foo/alice/**",
-			"expect": [
-				"foo/alice/**"
-			]
+			"expect": ["foo/alice/**"]
 		},
 		{
 			"a": "a/*",
 			"b": "*/b",
-			"expect": [
-				"a/b"
-			]
+			"expect": ["a/b"]
 		},
 		{
 			"a": "a/**",
 			"b": "**/a",
-			"expect": [
-				"a",
-				"a/**/a"
-			]
+			"expect": ["a", "a/**/a"]
 		},
 		{
 			"a": "ab*",
 			"b": "*b",
-			"expect": [
-				"ab",
-				"ab*b"
-			]
+			"expect": ["ab", "ab*b"]
 		},
 		{
 			"a": "a*",
 			"b": "*b",
-			"expect": [
-				"a*b"
-			]
+			"expect": ["a*b"]
 		},
 		{
 			"a": "**",
 			"b": "a/**/b",
-			"expect": [
-				"a/**/b"
-			]
+			"expect": ["a/**/b"]
 		},
 		{
 			"a": "a/**/b",
 			"b": "**/c/b",
-			"expect": [
-				"a/**/c/b"
-			]
+			"expect": ["a/**/c/b"]
 		},
 		{
 			"a": "a/**/b",
 			"b": "a/c/**",
-			"expect": [
-				"a/c/**/b"
-			]
+			"expect": ["a/c/**/b"]
 		},
 		{
 			"a": "*",
@@ -1202,9 +1026,7 @@
 		{
 			"a": "",
 			"b": "**",
-			"expect": [
-				""
-			]
+			"expect": [""]
 		},
 		{
 			"a": "",
@@ -1216,60 +1038,42 @@
 		{
 			"scope": "foo/*/chat",
 			"matched": "foo/alice/chat",
-			"expect": [
-				"alice"
-			]
+			"expect": ["alice"]
 		},
 		{
 			"scope": "foo/**",
 			"matched": "foo/alice/chat",
-			"expect": [
-				"alice/chat"
-			]
+			"expect": ["alice/chat"]
 		},
 		{
 			"scope": "foo/**",
 			"matched": "foo",
-			"expect": [
-				""
-			]
+			"expect": [""]
 		},
 		{
 			"scope": "foo/**",
 			"matched": "foo/alice/**",
-			"expect": [
-				"alice/**"
-			]
+			"expect": ["alice/**"]
 		},
 		{
 			"scope": "foo/*/chat",
 			"matched": "foo/*/chat",
-			"expect": [
-				"*"
-			]
+			"expect": ["*"]
 		},
 		{
 			"scope": "*.hang",
 			"matched": "a.hang",
-			"expect": [
-				"a.hang"
-			]
+			"expect": ["a.hang"]
 		},
 		{
 			"scope": "**/*",
 			"matched": "a/**",
-			"expect": [
-				"**",
-				"*"
-			]
+			"expect": ["**", "*"]
 		},
 		{
 			"scope": "**/*/b",
 			"matched": "a/**/c/b",
-			"expect": [
-				"a/**",
-				"c"
-			]
+			"expect": ["a/**", "c"]
 		},
 		{
 			"scope": "a/b",

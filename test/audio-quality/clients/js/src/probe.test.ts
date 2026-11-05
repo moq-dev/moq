@@ -20,7 +20,7 @@ test("audio-only sampling holds probe demand until its final RTT sample", async 
 		player: {
 			in: { probe: network },
 			audio: {
-				out: { stalled: new Signal(false), context: empty, root: empty, timestamp: empty },
+				out: { stalled: new Signal(false), context: empty, root: empty, timestamp: empty, stats: empty },
 				source: { out: { config: empty } },
 			},
 			sync: { out: { delay: empty, jitter: empty } },

@@ -956,47 +956,6 @@ fn unsupported_audio_codec_is_refused() {
 	}
 }
 
-/// A rendition must never be advertised when its media producer could not be built.
-///
-/// Publishing the media producer is fallible (it mints the track's HLS record track, which can
-/// collide), so publishing the catalog entry first would leave consumers a rendition that is announced but has no producer behind it and is therefore
-/// never served.
-#[test]
-fn rendition_is_not_published_when_the_media_track_fails() {
-	let data = MkvBuilder::new()
-		.header("webm")
-		.segment_start()
-		.info(1_000_000)
-		.tracks(vec![track_entry_video_vp9(1, 640, 480)])
-		.segment_end()
-		.build();
-
-	// Control: the same fixture publishes exactly one rendition when nothing collides, so the
-	// assertion below cannot pass merely because the fixture stopped reaching track import.
-	let control = run(&data);
-	assert_eq!(control.video.renditions.len(), 1, "fixture must publish a rendition");
-	let name = control.video.renditions.keys().next().unwrap().clone();
-
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
-
-	// Squat the rendition's HLS record track, so enrolling it (and with it building its media
-	// producer) fails. The handle must stay alive: the broadcast tracks names weakly, so
-	// dropping it frees the name. Unique names are per broadcast, so the track is named as in
-	// the control.
-	let _squat = broadcast.create_track(hang::hls::default_name(&name), None).unwrap();
-
-	let mut mkv = crate::container::mkv::Import::new(broadcast, catalog.reserve());
-	let buf = bytes::BytesMut::from(&data[..]);
-	// A producer failure must reach the importer caller without advertising the rendition.
-	assert!(mkv.decode(&buf).is_err());
-
-	assert!(
-		catalog.snapshot().video.renditions.is_empty(),
-		"a rendition whose media producer failed must not be advertised"
-	);
-}
-
 /// What an MKV import published, and the wall-clock window its input arrived in.
 struct Imported {
 	published: std::collections::BTreeMap<String, Vec<u128>>,
@@ -1029,7 +988,7 @@ async fn import_chunked(data: &[u8], chunk: usize) -> Imported {
 	let snapshot = catalog.snapshot();
 	Imported {
 		published: crate::container::test_util::published(&consumer, &snapshot).await,
-		clock: snapshot.clock.expect("the catalog advertises a clock"),
+		clock: snapshot.media.clock.expect("the catalog advertises a clock"),
 		arrival: before..=after,
 		refused,
 	}
@@ -1140,7 +1099,7 @@ async fn first_catalog_carries_the_anchored_clock() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-	let provisional = catalog.snapshot().clock.expect("a clock");
+	let provisional = catalog.snapshot().media.clock.expect("a clock");
 	let mut clocks = crate::container::test_util::Clocks::subscribe(&consumer).await;
 	let mut mkv = crate::container::mkv::Import::new(broadcast, catalog.reserve());
 
@@ -1155,7 +1114,7 @@ async fn first_catalog_carries_the_anchored_clock() {
 	assert_eq!(clocks.drain(), vec![], "the Tracks element alone publishes nothing");
 
 	mkv.decode(cluster).unwrap();
-	let anchored = catalog.snapshot().clock.expect("a clock");
+	let anchored = catalog.snapshot().media.clock.expect("a clock");
 	assert_ne!(anchored, provisional, "the first block anchors the clock");
 	let published = clocks.drain();
 	assert!(!published.is_empty(), "the first block publishes the catalog");
@@ -2203,24 +2162,12 @@ fn repeated_reinit_keeps_flat_state() {
 		let snapshot = catalog.snapshot();
 		assert_eq!(snapshot.video.renditions.len(), 1, "{label}");
 		assert_eq!(snapshot.audio.renditions.len(), 1, "{label}");
-		assert_eq!(
-			catalog.hls_tracks(),
-			2,
-			"{label}: only the live generation keeps records"
-		);
-		// A finished generation's records are kept for a re-enrollment until its drop retires them.
 		if generation % 2 == 1 {
 			mkv.finish().unwrap();
-			assert_eq!(catalog.hls_tracks(), 2, "{label}");
 		}
 		drop(mkv);
 		let snapshot = catalog.snapshot();
 		assert!(snapshot.video.renditions.is_empty(), "{label}");
 		assert!(snapshot.audio.renditions.is_empty(), "{label}");
-		assert_eq!(
-			catalog.hls_tracks(),
-			0,
-			"{label}: a replaced generation retires its records"
-		);
 	}
 }

@@ -28,10 +28,10 @@
 //! The publisher rolls a group when a joiner wants a fresh one, exactly as
 //! [`snapshot`](crate::snapshot) does: on a track created with a
 //! [`refresh`](moq_net::track::Info::refresh) ratio, a subscriber joining once the open group's ops
-//! outweigh that ratio times its header asks for one, and [`Producer::refresh`] restates the window
-//! in it. Otherwise a group runs to the frame and byte caps. A [`Consumer`] never surfaces a roll:
-//! a header restating records a reader already has yields nothing, so however often the publisher
-//! rolls, the reader sees one continuous stream of [`Event`]s.
+//! outweigh that ratio times its header asks for one, and [`Producer::poll_refresh`] restates the
+//! window in it. Otherwise a group runs to the frame and byte caps. A [`Consumer`] never surfaces a
+//! roll: a header restating records a reader already has yields nothing, so however often the
+//! publisher rolls, the reader sees one continuous stream of [`Event`]s.
 //! [`ProducerConfig::checkpoint_records`] bounds the suffix repeated on each roll for a long-lived
 //! window.
 //!
@@ -965,9 +965,10 @@ mod test {
 
 	#[test]
 	fn cut_finishes_the_group_and_the_next_edit_restates() {
+		// The superseded first group is inspected too, so it must stay fresh.
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", moq_net::track::Info::default())
+			.create_track("test", moq_net::track::Info::default().with_max_age(None))
 			.unwrap();
 		let replay = moq_net::track::Subscription::default()
 			.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(30)));

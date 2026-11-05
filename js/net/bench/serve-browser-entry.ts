@@ -65,7 +65,7 @@ async function measure(protocol: string, groups: number, viewers: number) {
 							broadcast: Path.from("bench"),
 							track: "data",
 							priority: 0,
-							startGroup: 0,
+							startGroup: 0n,
 							maxDelay: Milli(60_000),
 						}),
 						stream,

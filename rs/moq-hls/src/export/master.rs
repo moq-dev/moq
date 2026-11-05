@@ -4,7 +4,8 @@
 //! recorder writing `<name>/media.m3u8`, say) reuses the grouping and attribute
 //! rules. [`Broadcaster::master_playlist`](super::Broadcaster::master_playlist)
 //! renders the live layout, relative to `/<broadcast>/master.m3u8`: each rendition under the
-//! publisher instance it lists (`@<instance>/<kind>/<rendition>/media.m3u8`).
+//! publisher instance it lists (`@<instance>/<kind>/<rendition>/media.m3u8`), with the instance
+//! and rendition name each percent-encoded as one segment.
 
 use std::collections::BTreeMap;
 use std::fmt::Write;
@@ -18,8 +19,8 @@ const AUDIO_GROUP: &str = "aud";
 
 /// RFC 3986 unreserved characters, which are safe in one URL path segment.
 ///
-/// The DASH manifest encodes rendition names with this same set, so a name stays one segment
-/// in both layouts.
+/// The HLS playlists and DASH manifest encode instances and rendition names with this set,
+/// so each stays one segment in both layouts.
 pub(crate) const PATH_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC.remove(b'-').remove(b'.').remove(b'_').remove(b'~');
 
 /// Whether a rendition name can be addressed as one URL path segment.
@@ -34,9 +35,31 @@ pub(crate) fn is_path_segment(name: &str) -> bool {
 /// the master, with an optional query (without the leading `?`) appended.
 pub(crate) fn rendition_uri(instance: &str, kind: Kind, name: &str, query: Option<&str>) -> String {
 	let mut uri = format!(
-		"@{instance}/{}/{}/media.m3u8",
+		"@{}/{}/{}/media.m3u8",
+		utf8_percent_encode(instance, PATH_SEGMENT),
 		kind.as_str(),
 		utf8_percent_encode(name, PATH_SEGMENT)
+	);
+	if let Some(query) = query {
+		let _ = write!(uri, "?{query}");
+	}
+	uri
+}
+
+pub(crate) fn contribution_uri(
+	parent: &str,
+	id: &str,
+	instance: &str,
+	rendition: &super::Rendition,
+	query: Option<&str>,
+) -> String {
+	let mut uri = format!(
+		"@{}/contribution/{}/{}/{}/@{}/media.m3u8",
+		utf8_percent_encode(parent, PATH_SEGMENT),
+		utf8_percent_encode(id, PATH_SEGMENT),
+		rendition.kind.as_str(),
+		utf8_percent_encode(&rendition.name, PATH_SEGMENT),
+		utf8_percent_encode(instance, PATH_SEGMENT)
 	);
 	if let Some(query) = query {
 		let _ = write!(uri, "?{query}");
@@ -161,9 +184,13 @@ pub fn render(video: &[VideoVariant], audio: &[AudioVariant]) -> String {
 
 	let audio_groups = group_audio(audio);
 	for group in &audio_groups {
+		let mut names = std::collections::BTreeSet::new();
 		for (index, variant) in group.variants.iter().enumerate() {
 			let default = if index == 0 { "YES" } else { "NO" };
-			let name = quoted_string(&variant.name);
+			let mut name = quoted_string(&variant.name);
+			while !names.insert(name.clone()) {
+				name.push('~');
+			}
 			let _ = writeln!(
 				out,
 				"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"{}\",NAME=\"{}\",DEFAULT={default},AUTOSELECT=YES,URI=\"{}\"",
@@ -289,6 +316,42 @@ mod tests {
 	}
 
 	#[test]
+	fn instances_round_trip_through_playlist_urls() {
+		use crate::export::{Resource, Route};
+
+		for (instance, encoded) in [
+			("a/b?%23#", "a%2Fb%3F%2523%23"),
+			("音声\"\n&", "%E9%9F%B3%E5%A3%B0%22%0A%26"),
+			("~0123_-.abc", "~0123_-.abc"),
+		] {
+			let uri = rendition_uri(instance, Kind::Video, "hd", Some("jwt=abc"));
+			assert_eq!(uri, format!("@{encoded}/video/hd/media.m3u8?jwt=abc"));
+			let mut variant = video("hd", None, None);
+			variant.uri = uri;
+			let playlist = render(&[variant], &[]);
+			let uri = playlist.lines().find(|line| !line.starts_with('#')).unwrap();
+			let url = url::Url::parse("https://example.com/live/master.m3u8")
+				.unwrap()
+				.join(uri)
+				.unwrap();
+			assert_eq!(url.query(), Some("jwt=abc"));
+			assert_eq!(url.fragment(), None);
+			assert_eq!(
+				Route::parse(url.path()).unwrap(),
+				Route {
+					broadcast: "live".into(),
+					contribution: None,
+					resource: Resource::Media {
+						instance: instance.into(),
+						kind: Kind::Video,
+						rendition: "hd".into(),
+					},
+				}
+			);
+		}
+	}
+
+	#[test]
 	fn names_and_uris_cannot_inject() {
 		let mut variant = audio("音声\"\nINJECT\u{7f}\u{85}\u{1f3b5}", 128_000, "opus");
 		variant.uri = "a\"\n#EXT-X-INJECT".into();
@@ -299,6 +362,26 @@ mod tests {
 		assert!(out.contains("URI=\"a%22%0A#EXT-X-INJECT\""));
 		assert!(!out.contains("\nINJECT"));
 		assert!(!out.contains("\n#EXT-X-INJECT"));
+	}
+
+	#[test]
+	fn audio_names_stay_unique_after_quoting_and_catalog_qualification() {
+		let out = render(
+			&[],
+			&[
+				audio("guest/main", 128_000, "opus"),
+				audio("guest/main", 128_000, "opus"),
+				audio("a\"", 128_000, "opus"),
+				audio("a%22", 128_000, "opus"),
+			],
+		);
+		let names: Vec<_> = out
+			.lines()
+			.filter(|line| line.starts_with("#EXT-X-MEDIA:"))
+			.map(|line| line.split("NAME=\"").nth(1).unwrap().split('"').next().unwrap())
+			.collect();
+		assert_eq!(names.len(), 4);
+		assert_eq!(names.iter().collect::<std::collections::BTreeSet<_>>().len(), 4);
 	}
 
 	#[test]

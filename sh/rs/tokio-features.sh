@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Compile moq-tokio by itself at the feature extremes and as a bare QUIC driver;
-# --all also isolates each crypto and transport permutation. The default-feature
+# --all also isolates each transport permutation. The default-feature
 # build is already in the ordinary gate, which can hide missing feature gates
 # through unification.
 set -euo pipefail
@@ -26,7 +26,7 @@ run cargo clippy --locked -p moq-tokio --all-features -- -D warnings
 
 # The QUIC driver is public API for applications without a MoQ session, so its
 # build must not reach moq-net, the MoQ backend's dependencies, or another QUIC stack.
-driver=(--no-default-features --features "driver,aws-lc-rs")
+driver=(--no-default-features --features "driver")
 targets=(--tests)
 if ((all)); then targets=(--all-targets); fi
 run cargo clippy --locked -p moq-tokio "${targets[@]}" "${driver[@]}" -- -D warnings
@@ -41,31 +41,13 @@ driver_dependencies() {
 run driver_dependencies
 # Every isolated permutation, which `just rs features` asks for.
 if ((all)); then
-    run cargo clippy --locked -p moq-tokio --no-default-features --features quic,aws-lc-rs -- -D warnings
-    run cargo clippy --locked -p moq-tokio --no-default-features --features quic,ring -- -D warnings
-
-    for feature in net aws-lc-rs ring tcp uds websocket webrtc; do
+    for feature in net quic tcp uds websocket webrtc; do
         run cargo clippy --locked -p moq-tokio --no-default-features --features "$feature" -- -D warnings
     done
 fi
 
-missing_provider() {
-    # shellcheck disable=SC2016 # the backticks are literal, as rustc prints them
-    want='a rustls QUIC backend requires a crypto provider: enable either the `aws-lc-rs` or `ring` feature'
-    if output=$(cargo check --locked -p moq-tokio --no-default-features --features quic 2>&1); then
-        echo "rs: moq-tokio with only quic should reject its missing crypto provider" >&2
-        return 1
-    fi
-    if ! grep -qF "$want" <<<"$output"; then
-        echo "rs: moq-tokio with only quic should fail on: $want" >&2
-        echo "$output" | grep -E '^error' >&2 || true
-        return 1
-    fi
-}
-run missing_provider
-
 # Crypto support alone must not make a transport-less server load a QUIC identity.
 run bash sh/rs/nextest.sh cargo nextest run --locked -p moq-tokio --lib \
-    --no-default-features --features tcp,aws-lc-rs \
+    --no-default-features --features tcp \
     -E 'test(no_quic_backend_needs_no_served_identity)'
 finish

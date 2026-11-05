@@ -18,9 +18,9 @@ use rand::{RngExt, SeedableRng};
 use rand_pcg::Pcg32;
 
 use super::*;
-use crate::congestion::{cubic, gcc};
+use crate::congestion::{bbr3, cubic, gcc};
 
-/// The media's bitrate, 2 Mbit/s, which the probe has to see past
+/// The media's usual bitrate, 2 Mbit/s, which the probe has to see past
 const MEDIA: u64 = 250_000;
 /// The rate the session wants, 4 Mbit/s
 const TARGET: u64 = 500_000;
@@ -58,13 +58,24 @@ enum Upload {
 	Bbr,
 }
 
-/// The bytes of frame `index` of a group whose keyframe is `keyframe` bytes
-fn frame_size(keyframe: u64, index: u64) -> u64 {
-	let group = MEDIA * GOP / FPS;
+/// The bytes of frame `index` of a group in `scenario`'s media trace
+fn frame_size(scenario: &Scenario, index: u64) -> u64 {
+	let group = scenario.media * GOP / FPS;
+	let keyframe = scenario.keyframe.max(group / GOP);
 	match index {
-		0 => keyframe.max(group / GOP),
-		_ => (group - keyframe.max(group / GOP)) / (GOP - 1),
+		0 => keyframe,
+		_ => (group - keyframe) / (GOP - 1),
 	}
+}
+
+/// The congestion controller the media's connection runs
+#[derive(Clone, Copy)]
+enum Congestion {
+	Bbr3,
+	/// BBR3 with the delay bound, reading the receive timestamps it asks for
+	DelayBound,
+	/// GCC, reading the receive timestamps it asks for
+	Gcc,
 }
 
 /// One run's network and workload
@@ -80,6 +91,8 @@ struct Scenario {
 	buffer: u32,
 	/// The probe target; zero for the baseline
 	target: u64,
+	/// The media's bitrate
+	media: u64,
 	/// Each group's first frame in bytes; at most the average frame for a constant bitrate
 	keyframe: u64,
 	duration: Duration,
@@ -93,8 +106,8 @@ struct Scenario {
 	ack_threshold: Option<u32>,
 	/// Bytes of bulk upload before the media starts, to learn the path's rate first
 	warmup: usize,
-	/// Whether the media runs GCC, reading the receive timestamps it asks for, rather than BBR3
-	gcc: bool,
+	/// The media's congestion controller
+	congestion: Congestion,
 }
 
 impl Default for Scenario {
@@ -105,6 +118,7 @@ impl Default for Scenario {
 			rates: vec![(Duration::ZERO, 375_000)],
 			buffer: 75_000,
 			target: TARGET,
+			media: MEDIA,
 			keyframe: 50_000,
 			duration: Duration::from_secs(30),
 			idle: None,
@@ -112,7 +126,7 @@ impl Default for Scenario {
 			receive_window: None,
 			ack_threshold: None,
 			warmup: 0,
-			gcc: false,
+			congestion: Congestion::Bbr3,
 		}
 	}
 }
@@ -270,9 +284,18 @@ fn run(scenario: &Scenario) -> Outcome {
 		};
 		transport.ack_frequency = Some(ack);
 	}
-	if scenario.gcc {
-		transport.congestion = Arc::new(gcc::Config::default());
-		transport.receive_timestamps = NonZeroU32::new(32);
+	match scenario.congestion {
+		Congestion::Bbr3 => {}
+		Congestion::DelayBound => {
+			let mut bbr = bbr3::Config::default();
+			bbr.delay_bound(true);
+			transport.congestion = Arc::new(bbr);
+			transport.receive_timestamps = NonZeroU32::new(32);
+		}
+		Congestion::Gcc => {
+			transport.congestion = Arc::new(gcc::Config::default());
+			transport.receive_timestamps = NonZeroU32::new(32);
+		}
 	}
 	let mut config = client_config();
 	config.transport = transport;
@@ -325,9 +348,9 @@ fn run(scenario: &Scenario) -> Outcome {
 			let at = frame_at(next_frame) - start;
 			let paused = scenario.idle.is_some_and(|(from, until)| at >= from && at < until);
 			if !paused {
-				write_frame(&mut pair, client_ch, &mut groups, scenario.keyframe, next_frame, now);
+				write_frame(&mut pair, client_ch, &mut groups, scenario, next_frame, now);
 				outcome.frames += 1;
-				outcome.unique += frame_size(scenario.keyframe, next_frame % GOP);
+				outcome.unique += frame_size(scenario, next_frame % GOP);
 			}
 			next_frame += 1;
 		}
@@ -345,7 +368,7 @@ fn run(scenario: &Scenario) -> Outcome {
 		receive(
 			&mut pair,
 			server_ch,
-			scenario.keyframe,
+			scenario,
 			&mut readings,
 			&groups,
 			now,
@@ -361,7 +384,7 @@ fn run(scenario: &Scenario) -> Outcome {
 				while let Ok(Some(chunk)) = chunks.next(usize::MAX) {
 					outcome.competitor += chunk.bytes.len() as u64;
 				}
-				let _ = chunks.finalize();
+				chunks.finalize();
 			}
 		}
 
@@ -417,7 +440,14 @@ fn run(scenario: &Scenario) -> Outcome {
 }
 
 /// Write frame `n` of the trace, opening its group's stream on a keyframe
-fn write_frame(pair: &mut Pair, ch: ConnectionHandle, groups: &mut Vec<Group>, keyframe: u64, n: u64, now: Instant) {
+fn write_frame(
+	pair: &mut Pair,
+	ch: ConnectionHandle,
+	groups: &mut Vec<Group>,
+	scenario: &Scenario,
+	n: u64,
+	now: Instant,
+) {
 	let index = n % GOP;
 	if index == 0 || groups.is_empty() {
 		if let Some(group) = groups.last_mut() {
@@ -445,7 +475,7 @@ fn write_frame(pair: &mut Pair, ch: ConnectionHandle, groups: &mut Vec<Group>, k
 	}
 	let group = groups.last_mut().unwrap();
 	if group.reset.is_none() {
-		let data = [(n % 251) as u8].repeat(frame_size(keyframe, index) as usize);
+		let data = [(n % 251) as u8].repeat(frame_size(scenario, index) as usize);
 		group.backlog.extend(data);
 		group.written.push(now);
 	}
@@ -493,7 +523,7 @@ fn expire(pair: &mut Pair, ch: ConnectionHandle, groups: &mut [Group], now: Inst
 fn receive(
 	pair: &mut Pair,
 	ch: ConnectionHandle,
-	keyframe: u64,
+	scenario: &Scenario,
 	readings: &mut HashMap<StreamId, Reading>,
 	groups: &[Group],
 	now: Instant,
@@ -526,13 +556,13 @@ fn receive(
 				}
 			}
 		}
-		let _ = chunks.finalize();
+		chunks.finalize();
 
 		// The sender opens each group's stream in order, after any it opened before the media
 		let frames = &groups[(id.index() - groups[0].id.index()) as usize].written;
-		let mut end: u64 = (0..reading.frame).map(|i| frame_size(keyframe, i)).sum();
+		let mut end: u64 = (0..reading.frame).map(|i| frame_size(scenario, i)).sum();
 		while (reading.frame as usize) < frames.len() {
-			end += frame_size(keyframe, reading.frame);
+			end += frame_size(scenario, reading.frame);
 			if reading.read < end {
 				break;
 			}
@@ -688,15 +718,19 @@ fn steps() -> Scenario {
 #[test]
 fn rises_to_target() {
 	let _guard = subscribe();
+	rises(&compare("rises", opening(), GATE), Duration::from_secs(5));
+}
+
+/// The same under the delay bound: its brake on queue growth leaves BBR3's probing to raise the
+/// estimate, so a rung stopped for want of it comes back
+#[test]
+fn rises_to_target_under_delay_bound() {
+	let _guard = subscribe();
 	let scenario = Scenario {
-		latency: Duration::from_millis(50),
-		buffer: 170_000,
-		keyframe: 0,
-		rates: vec![(Duration::ZERO, 375_000), (Duration::from_secs(5), 1_500_000)],
-		duration: Duration::from_secs(15),
-		..Scenario::default()
+		congestion: Congestion::DelayBound,
+		..opening()
 	};
-	rises(&compare("rises", scenario, GATE), Duration::from_secs(5));
+	rises(&compare("rises delay bound", scenario, GATE), Duration::from_secs(5));
 }
 
 /// The same under GCC, at the target and at twice it. GCC aims its probes at the target, at
@@ -712,14 +746,10 @@ fn rises_to_target_under_gcc() {
 	let opens = Duration::from_secs(5);
 	for target in [TARGET, 2 * TARGET] {
 		let scenario = Scenario {
-			latency: Duration::from_millis(50),
-			buffer: 170_000,
-			keyframe: 0,
-			rates: vec![(Duration::ZERO, 375_000), (opens, 1_500_000)],
 			duration: Duration::from_secs(20),
 			target,
-			gcc: true,
-			..Scenario::default()
+			congestion: Congestion::Gcc,
+			..opening()
 		};
 		let trials = compare(&format!("rises gcc {target}"), scenario, SEEDS);
 		for Trial {
@@ -739,6 +769,45 @@ fn rises_to_target_under_gcc() {
 		}
 		reaches(&trials, opens, target);
 	}
+}
+
+/// A constant bitrate over a 3 Mbit/s path with a 100ms round trip that opens up to 12 Mbit/s
+/// at 5s
+fn opening() -> Scenario {
+	Scenario {
+		latency: Duration::from_millis(50),
+		buffer: 170_000,
+		keyframe: 0,
+		rates: vec![(Duration::ZERO, 375_000), (Duration::from_secs(5), 1_500_000)],
+		duration: Duration::from_secs(15),
+		..Scenario::default()
+	}
+}
+
+/// The lowest rung of a simulcast ladder, 250 kbit/s, probes for the 1.25 Mbit/s its rungs
+/// reserve over a 2 Mbit/s path with a 40ms round trip, and reaches it. A frame fits in a packet
+/// and the probe's inflight in a few, so packet granularity and the peer's ACK delay are much of
+/// every round. Its resent bytes are not held to [`OVERHEAD`], set for a target twice the media:
+/// holding an estimate five times the media resends more per media byte.
+#[test]
+fn sparse_rises_to_target() {
+	let _guard = subscribe();
+	let scenario = Scenario {
+		media: 31_250,
+		target: 156_250,
+		keyframe: 0,
+		rates: vec![(Duration::ZERO, 250_000)],
+		buffer: 12_500,
+		duration: Duration::from_secs(10),
+		..Scenario::default()
+	};
+	let outcome = run(&scenario);
+	outcome.report("sparse");
+	let rise = outcome.rise(Duration::ZERO, scenario.target);
+	assert!(
+		rise.is_some_and(|rise| rise <= RISE),
+		"estimate reached the target after {rise:?}"
+	);
 }
 
 /// A path short of the target, behind a queue a second deep: each attempt that misses sits out
@@ -825,8 +894,8 @@ fn single_packet_writes() {
 	assert!(pair.client_conn_mut(client_ch).stats().path.sent_bandwidth_probes > 0);
 }
 
-/// A batch of probe packets stays within the inflight the controller allows a probe, counting the
-/// packet still being built
+/// A batch of probe packets stops at the inflight the controller allows a probe, crossing it by
+/// less than its last packet, counting the packet still being built
 #[test]
 fn batch_within_probe_inflight() {
 	let _guard = subscribe();
@@ -849,9 +918,10 @@ fn batch_within_probe_inflight() {
 		.probe_inflight
 		.expect("probing in Startup");
 	assert!(conn.stats().path.sent_bandwidth_probes > 1);
+	let mtu = u64::from(conn.path_mtu());
 	assert!(
-		conn.bytes_in_flight() <= inflight,
-		"{} bytes in flight past the probe's {inflight}",
+		conn.bytes_in_flight() < inflight + mtu,
+		"{} bytes in flight a packet past the probe's {inflight}",
 		conn.bytes_in_flight()
 	);
 }
@@ -1001,6 +1071,20 @@ fn paced_probe_fills_past_the_target() {
 fn steps_keyframes() {
 	let _guard = subscribe();
 	let trials = compare("steps keyframes", steps(), SEEDS);
+	rises(&trials, Duration::from_secs(20));
+	falls(&trials, Duration::from_secs(40), 375_000);
+}
+
+/// Under the delay bound, as the keyframed steps without it
+#[test]
+#[ignore = "nightly: just rs quic-sim"]
+fn steps_delay_bound() {
+	let _guard = subscribe();
+	let scenario = Scenario {
+		congestion: Congestion::DelayBound,
+		..steps()
+	};
+	let trials = compare("steps delay bound", scenario, SEEDS);
 	rises(&trials, Duration::from_secs(20));
 	falls(&trials, Duration::from_secs(40), 375_000);
 }

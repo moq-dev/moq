@@ -61,11 +61,10 @@ paths diverged.
 2. The upstream request is already the union of readers' resume points
    (`Producer::subscription`), so per-reader copy cursors are local overhead.
 3. Readers become plain cursors: delete `Inner::Resume`, `Reader`, `Copy`,
-   `Retain`, `Candidate`, per-reader datagram dedupe (dedupe once on insert),
-   and per-reader `learn_end`.
+   `Retain`, `Candidate`, and per-reader `learn_end`.
 4. `Recover` attaches to the slot, not a handed-out group: continuing a
    group whose copy failed is a
-   [flight](/quest/m1/unbounded-groups/flights.md) from the reader's frame on
+   [flight](https://github.com/moq-dev/moq/pull/7944) from the reader's frame on
    the new route, which hands over like any other flight.
 
 Hard constraint from the splice era: two caches sharing one group handle
@@ -80,9 +79,17 @@ measure the change.
 
 Public API: none. Wire: none.
 
+Decided 2026-11-05 (maintainer, follow-up from
+[moq-dev/moq#7736](https://github.com/moq-dev/moq/pull/7736)): ✅ fold this
+case into the redesign instead of patching code it deletes. In
+`js/net/src/resume.ts`, `#update` skips a copy whose upstream subscription
+closed, so a closed copy that still holds groups keeps picking under the
+reader's old `delay.max` after an update. It was found by review and not
+reproduced. The redesign's tests must cover a preference update after the
+serving copy's upstream closed, followed by a read.
+
 ## Required
 
-- [Flights](/quest/m1/unbounded-groups/flights.md) - the paced copy and handover `Recover` folds into
 - [Release cut](/quest/m2/release/cut.md) - wait for the release in flight to ship
 
 ## Related

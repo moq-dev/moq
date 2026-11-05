@@ -50,4 +50,3 @@ Public API: none expected. Wire: none.
 ## Related
 
 - [Ladder fetch](/quest/m3/ladder/fetch.md) - later makes fetch encode at the controller's target; keep the same fetch encoder ownership
-- [Transcode rungs](/quest/m2/transcode-rungs.md) - may merge the live and fetch writers this quest touches

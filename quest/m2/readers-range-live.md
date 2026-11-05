@@ -38,7 +38,3 @@ rather than a start. Each reader keeps its existing tests,
 plus one against a warm relay copy.
 
 Public API: none expected. Wire: none.
-
-## Required
-
-- [JS ranges](/quest/m1/subscribe-ranges/js.md) - `@moq/room` chat needs relative ranges in `@moq/net`

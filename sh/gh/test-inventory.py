@@ -1,4 +1,4 @@
-"""Fail when an opt-in test target has no CI caller.
+"""Fail when an opt-in test target has no CI caller or a Bun file filter is ambiguous.
 
 nextest, `bun test`, and pytest discover ordinary tests by themselves; these
 targets run only when something names them:
@@ -7,7 +7,9 @@ targets run only when something names them:
 - a cargo-fuzz target or a Cargo bench target, named by some reachable run;
 - a `just` recipe that runs tests, reachable from a workflow;
 - a standalone test script (`*.test.py`, `*.test.sh`, `*.browser.ts`, or a
-  `*.test.ts` outside a Bun package that runs `bun test`), reachable from one.
+  `*.test.ts` outside a Bun package that runs `bun test`), reachable from one;
+- a JS bench script under a `bench/` directory that no other source imports
+  or names, so it is an entry point rather than a module, reachable from one.
 
 Reachable means some workflow `run:` step leads to it through `just` recipes,
 their dependencies, and the scripts they name. The walk is static: a `just`
@@ -17,6 +19,9 @@ dispatch is followed explicitly. A call's literal arguments bind the recipe's
 parameters, and a script's top-level `case "$1"` runs only the branch its
 callers' first argument selects. A local-only target needs an entry in
 test-inventory.allow naming the quest that owns it.
+
+Scripted Bun test files need `./` or `/`: bare paths are substring filters
+that also run same-named tests in generated trees.
 
 `--root DIR` checks another tree, for the tests.
 """
@@ -37,6 +42,11 @@ import tomllib
 import yaml
 
 SCRIPT = re.compile(r"[\w.$/{}-]*[\w-]\.(?:sh|py|ts|mts|js|mjs)\b")
+JS = (".ts", ".mts", ".js", ".mjs")
+# Every extension Bun discovers as a test file (`*.test.{js,jsx,ts,tsx,mjs,cjs,mts,cts}`).
+BUN_TEST = (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts")
+# A relative module specifier in a static or dynamic import, or a re-export.
+IMPORT = re.compile(r"""\b(?:from|import)\s*\(?\s*["'](\.\.?/[^"']+)["']""")
 # Commands that run a test suite. Python sources spell them as argument lists,
 # so quotes and commas are dropped before matching.
 RUNNER = re.compile(
@@ -936,10 +946,11 @@ def recipe_line(root: Path, recipe: Recipe) -> str:
     return str(source.relative_to(root))
 
 
-def runs_tests(graph: Graph, recipe: Recipe, found: set[Path]) -> bool:
+def runs_tests(graph: Graph, recipe: Recipe, found: set[Path], benches: set[Path]) -> bool:
     """A recipe runs tests when its body runs a suite, or names a script no workflow reaches
-    that runs one, is a test script, or drives a browser. A wrapper around a reached script,
-    or a bare `bun test` in a directory a reached run already tests, adds no test of its own."""
+    that runs one, is a test script or a bench entry point, or drives a browser. A wrapper
+    around a reached script, or a bare `bun test` in a directory a reached run already tests,
+    adds no test of its own."""
     text = recipe.text
     if any(recipe.cwd.is_relative_to(directory) for directory in found):
         text = re.sub(r"(?m)^\s*bun test\s*$", "", text)
@@ -954,7 +965,7 @@ def runs_tests(graph: Graph, recipe: Recipe, found: set[Path]) -> bool:
                 continue
             seen.add(path)
             relative = str(path.relative_to(graph.root))
-            if is_test_script(relative) or drives_browser(path, relative):
+            if is_test_script(relative) or path in benches or drives_browser(path):
                 return True
             texts.append((path.read_text(errors="replace"), path))
     return False
@@ -964,11 +975,46 @@ def is_test_script(relative: str) -> bool:
     return bool(re.search(r"\.test\.(?:py|sh|ts|js|mjs)$|\.browser\.ts$", relative))
 
 
-def drives_browser(path: Path, relative: str) -> bool:
-    """A script that launches a browser is a check, unless it is a benchmark."""
-    if "/bench/" in f"/{relative}" or path.suffix not in (".ts", ".js", ".mjs"):
+def drives_browser(path: Path) -> bool:
+    """A script that launches a browser is a check."""
+    if path.suffix not in JS:
         return False
     return re.search(r"""from ["']playwright["']""", path.read_text(errors="replace")) is not None
+
+
+def bench_entries(root: Path, graph: Graph) -> set[Path]:
+    """The JS bench scripts no other source imports or names: the ones something runs.
+    A module, or a page a bench bundles, is named by its importer; a test importing the
+    script it tests does not make that script a module."""
+    sources = [
+        path
+        for path in tracked(root, *(f"*{suffix}" for suffix in JS))
+        if not is_test_script(str(path.relative_to(root)))
+    ]
+    named = set()
+    for source in sources:
+        # Block comments go first, since a doc comment may name the script that loads this one;
+        # then line comments, so a commented-out import does not make its target a module.
+        text = re.sub(r"(?s)(?:^|(?<=\s))/\*.*?\*/", "", source.read_text(errors="replace"))
+        text = re.sub(r"(?m)(?:^|\s)//.*$", "", text)
+        named.update(path for path in graph.scripts(text, source.parent, source) if path != source.resolve())
+        for specifier in IMPORT.findall(text):
+            base = (source.parent / specifier).resolve()
+            named.update(
+                path
+                for path in (
+                    base,
+                    *(base.with_name(base.name + suffix) for suffix in JS),
+                    *(base.with_suffix(suffix) for suffix in JS),
+                    *(base / f"index{suffix}" for suffix in JS),
+                )
+                if path.is_file()
+            )
+    return {
+        path.resolve()
+        for path in sources
+        if "/bench/" in f"/{path.relative_to(root)}" and not path.name.endswith(".d.ts") and path.resolve() not in named
+    }
 
 
 def discovered(root: Path, graph: Graph) -> set[Path]:
@@ -992,6 +1038,34 @@ def discovered(root: Path, graph: Graph) -> set[Path]:
     return found
 
 
+def bun_test_paths(root: Path, recipes: list[Recipe]) -> list[str]:
+    """Reject bare Bun test-file filters in recipes, shell scripts, workflows, and npm scripts."""
+    texts = [(recipe.text, recipe_line(root, recipe)) for recipe in recipes]
+    texts += [(text, where) for text, where, _ in workflow_steps(root)]
+    texts += [(path.read_text(), str(path.relative_to(root))) for path in tracked(root, "*.sh") if path.is_file()]
+    for manifest in (path for path in tracked(root, "package.json", "*/package.json") if path.is_file()):
+        texts += [
+            (script, f"{manifest.relative_to(root)} scripts.{name}")
+            for name, script in json.loads(manifest.read_text()).get("scripts", {}).items()
+        ]
+    errors = set()
+    for text, where in texts:
+        for words in commands(text):
+            for index in range(len(words) - 1):
+                if words[index : index + 2] != ["bun", "test"]:
+                    continue
+                value = False
+                for word in words[index + 2 :]:
+                    if value:
+                        value = False
+                        continue
+                    if word in ("-t", "--test-name-pattern", "--preload", "--reporter-outfile", "--coverage-dir"):
+                        value = True
+                    elif word.endswith(BUN_TEST) and literal(word) and not word.startswith(("./", "/", "-")):
+                        errors.add(f"{where}: bun test {word} is a substring filter; prefix the file path with ./")
+    return sorted(errors)
+
+
 def inventory(root: Path) -> tuple[list[tuple[str, str]], list[str]]:
     """Every orphaned target as (key, where), and errors in the inputs."""
     justfiles = load_recipes(root)
@@ -1003,7 +1077,8 @@ def inventory(root: Path) -> tuple[list[tuple[str, str]], list[str]]:
         manifests[package.directory.resolve()] = package.name
 
     orphans: list[tuple[str, str]] = []
-    errors: list[str] = []
+    recipes = {recipe.path: recipe for module in justfiles.values() for recipe in module.recipes.values()}
+    errors = bun_test_paths(root, list(recipes.values()))
     selections = []
     for run in graph.runs:
         if any(
@@ -1058,11 +1133,11 @@ def inventory(root: Path) -> tuple[list[tuple[str, str]], list[str]]:
                     orphans.append((f"bench {target.package}::{target.name}", where))
 
     found = discovered(root, graph)
+    benches = bench_entries(root, graph)
 
     # Recipes that run tests.
-    recipes = {recipe.path: recipe for module in justfiles.values() for recipe in module.recipes.values()}
     for _, recipe in sorted(recipes.items()):
-        if recipe.path not in graph.reached and runs_tests(graph, recipe, found):
+        if recipe.path not in graph.reached and runs_tests(graph, recipe, found, benches):
             orphans.append((f"recipe {recipe.path}", recipe_line(root, recipe)))
 
     # Standalone test scripts.
@@ -1075,6 +1150,12 @@ def inventory(root: Path) -> tuple[list[tuple[str, str]], list[str]]:
         ):
             continue
         if not graph.reaches(path.resolve()):
+            orphans.append((f"script {relative}", relative))
+
+    # Bench entry points.
+    for path in sorted(benches):
+        if not graph.reaches(path):
+            relative = str(path.relative_to(root))
             orphans.append((f"script {relative}", relative))
     return orphans, errors
 
@@ -1127,8 +1208,8 @@ def main(argv: list[str]) -> int:
             errors.append(f"{where}: {key} is not an orphan; drop the entry")
     if errors:
         print(
-            "Every opt-in test target needs a CI caller, or an entry in sh/gh/test-inventory.allow"
-            " naming the quest that owns it:",
+            "Test inventory failed (opt-in targets need a CI caller or a quest in sh/gh/test-inventory.allow;"
+            " Bun test files need exact paths):",
             file=sys.stderr,
         )
         for error in errors:

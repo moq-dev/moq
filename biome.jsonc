@@ -16,7 +16,7 @@
 	},
 	"files": {
 		// The project scanner (enabled by noImportCycles) tries to parse every file it
-		// indexes. Exclude two kinds it can't handle:
+		// indexes. Exclude binary assets and generated fixtures:
 		//   - MPEG transport-stream fixtures whose `.ts` extension collides with TypeScript.
 		//   - SVG assets, which Biome routes to its HTML parser and rejects.
 		//   - The audio jitter corpus, which is generated and byte-compared by its own test,
@@ -26,6 +26,7 @@
 		"includes": [
 			"**",
 			"!rs/moq-mux/src/container/ts/test_data",
+			"!rs/moq-audio/src/decode/test_data/*.ts",
 			"!**/*.svg",
 			"!doc/concept/audio-jitter/*.json",
 			"!test/audio-quality/traces/*.json"

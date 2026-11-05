@@ -49,31 +49,77 @@ type Frame = ffi.MoqFrame
 // (nil from an untimed track), and payload.
 type Datagram = ffi.MoqDatagram
 
-// Subscription holds subscriber-side delivery preferences: priority, the max delay
-// a non-latest group may fall behind before it is skipped (zero skips at once, nil
-// sets no subscriber limit and leaves the publisher's max age alone to bound it, and
-// it caps every range), the ranges of the track to deliver (nil for everything
-// MaxDelay still allows, while an empty non-nil slice asks for nothing), and the order
-// the publisher sends pending groups in (nil for newest first).
+// DatagramInfo fixes a datagram track's publisher priority and optional timestamp scale.
+type DatagramInfo = ffi.MoqDatagramInfo
+
+// Delay is how far behind the live edge a subscriber or decoder plays: where it starts, and
+// how late it may fall. The zero Delay is moq-net's default, a stated zero for both, which
+// starts at the newest group and skips a superseded group at once.
+type Delay struct {
+	// Min is the target latency: the playout or jitter-buffer delay held behind the live edge,
+	// and where a cold join starts. A Min past Max starts at Max, since the publisher serves
+	// nothing older. moq-lite-07 sends it upstream.
+	Min time.Duration
+	// MinUnstated leaves Min unstated, ignoring it. A decoder plays it as zero, while the
+	// subscription keeps it unstated, so it never pulls the aggregate across subscribers to zero.
+	MinUnstated bool
+	// Max is how far a non-latest group may fall behind the live edge before it is skipped. Zero
+	// skips immediately; a larger value tolerates that much reordering. It caps every range,
+	// and bounds lateness only, never the start.
+	Max time.Duration
+	// MaxUnlimited ignores Max and sets no subscriber limit, leaving the publisher's max age
+	// alone to bound it.
+	MaxUnlimited bool
+}
+
+func (d Delay) ffi() (ffi.MoqDelay, error) {
+	var out ffi.MoqDelay
+	if !d.MinUnstated {
+		out.Min = &d.Min
+	}
+	if !d.MaxUnlimited {
+		out.Max = &d.Max
+	}
+	if err := bridge.NonNegative(out.Min, "min delay"); err != nil {
+		return out, err
+	}
+	return out, bridge.NonNegative(out.Max, "max delay")
+}
+
+func delayFromFFI(d ffi.MoqDelay) Delay {
+	out := Delay{MinUnstated: d.Min == nil, MaxUnlimited: d.Max == nil}
+	if d.Min != nil {
+		out.Min = *d.Min
+	}
+	if d.Max != nil {
+		out.Max = *d.Max
+	}
+	return out
+}
+
+// Subscription holds subscriber-side delivery preferences: priority, the Delay (where a cold
+// join starts and how late a non-latest group may fall before it is skipped), the ranges of
+// the track to deliver (nil for everything Delay.Max still allows, while an empty non-nil
+// slice asks for nothing), and the order the publisher sends pending groups in (nil for
+// newest first).
 //
-// Start from DefaultSubscription for moq-net's defaults; the zero Subscription sets no
-// max delay.
+// The zero Subscription is moq-net's defaults, the same as DefaultSubscription.
 type Subscription struct {
 	Priority int8
-	MaxDelay *time.Duration
+	Delay    Delay
 	Ranges   []Range
 	Order    *Order
 }
 
-// DefaultSubscription returns moq-net's defaults, whose zero MaxDelay skips a superseded
-// group at once. A nil *Subscription means the same; change a field of this one instead.
+// DefaultSubscription returns moq-net's defaults, whose zero Delay starts at the newest group
+// and skips a superseded group at once. A nil *Subscription means the same.
 func DefaultSubscription() Subscription {
 	d := ffi.MoqSubscriptionDefaults()
 	var ranges []Range
 	if d.Ranges != nil {
 		ranges = *d.Ranges
 	}
-	return Subscription{Priority: d.Priority, MaxDelay: d.MaxDelay, Ranges: ranges, Order: d.Order}
+	return Subscription{Priority: d.Priority, Delay: delayFromFFI(d.Delay), Ranges: ranges, Order: d.Order}
 }
 
 func (s Subscription) ffi() (ffi.MoqSubscription, error) {
@@ -81,12 +127,13 @@ func (s Subscription) ffi() (ffi.MoqSubscription, error) {
 	if s.Ranges != nil {
 		ranges = &s.Ranges
 	}
+	delay, err := s.Delay.ffi()
 	return ffi.MoqSubscription{
 		Priority: s.Priority,
-		MaxDelay: s.MaxDelay,
+		Delay:    delay,
 		Ranges:   ranges,
 		Order:    s.Order,
-	}, bridge.NonNegative(s.MaxDelay, "max delay")
+	}, err
 }
 
 func subscriptionFFI(s *Subscription) (*ffi.MoqSubscription, error) {
@@ -98,41 +145,54 @@ func subscriptionFFI(s *Subscription) (*ffi.MoqSubscription, error) {
 }
 
 // TrackInfo holds publisher-side track properties: priority, how long a
-// non-latest group is cached (nil for no limit), how many times its first frame
-// a group's later bytes may grow before a joining subscriber asks for a new group
-// (nil never asks), and the timescale in ticks per second (nil means untimed on
-// both publish and receive). Priority is higher first; the zero Priority is the
-// midpoint a nil TrackInfo uses. Compress DEFLATEs each group on the wire to peers
-// that support it; readers always see the original frames.
+// superseded group stays fresh, how many times its first frame a group's later
+// bytes may grow before a joining subscriber asks for a new group (nil never
+// asks), and the timescale in ticks per second (nil means untimed on both publish
+// and receive). Priority is higher first; the zero Priority is the midpoint a nil
+// TrackInfo uses. Compress DEFLATEs each group on the wire to peers that support
+// it; readers always see the original frames.
 type TrackInfo struct {
-	Priority  int8
-	MaxAge    *time.Duration
-	Refresh   *uint32
-	Timescale *uint64
-	Compress  bool
+	Priority int8
+	// MaxAge is how long a superseded group stays fresh. Zero, the default, serves
+	// only the live edge.
+	MaxAge time.Duration
+	// MaxAgeUnlimited ignores MaxAge and sets no publisher limit, leaving only the
+	// cache to bound how long a superseded group is served.
+	MaxAgeUnlimited bool
+	Refresh         *uint32
+	Timescale       *uint64
+	Compress        bool
 }
 
 func trackInfoFFI(info *TrackInfo) (*ffi.MoqTrackInfo, error) {
 	if info == nil {
 		return nil, nil
 	}
-	return &ffi.MoqTrackInfo{
-		Priority:  info.Priority,
-		MaxAge:    info.MaxAge,
-		Refresh:   info.Refresh,
-		Timescale: info.Timescale,
-		Compress:  info.Compress,
-	}, bridge.NonNegative(info.MaxAge, "max age")
+	out := &ffi.MoqTrackInfo{
+		Priority:        info.Priority,
+		MaxAgeUnlimited: info.MaxAgeUnlimited,
+		Refresh:         info.Refresh,
+		Timescale:       info.Timescale,
+		Compress:        info.Compress,
+	}
+	if !info.MaxAgeUnlimited {
+		out.MaxAge = &info.MaxAge
+	}
+	return out, bridge.NonNegative(out.MaxAge, "max age")
 }
 
 func trackInfoFromFFI(info ffi.MoqTrackInfo) TrackInfo {
-	return TrackInfo{
-		Priority:  info.Priority,
-		MaxAge:    info.MaxAge,
-		Refresh:   info.Refresh,
-		Timescale: info.Timescale,
-		Compress:  info.Compress,
+	out := TrackInfo{
+		Priority:        info.Priority,
+		MaxAgeUnlimited: info.MaxAgeUnlimited,
+		Refresh:         info.Refresh,
+		Timescale:       info.Timescale,
+		Compress:        info.Compress,
 	}
+	if info.MaxAge != nil && !info.MaxAgeUnlimited {
+		out.MaxAge = *info.MaxAge
+	}
+	return out
 }
 
 // ConnectionStats holds transport metrics for a session (RTT, bandwidth, byte

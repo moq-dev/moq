@@ -1,7 +1,7 @@
 //! AMF0 codec vendored from rml_amf0 0.3.0 (MIT, Matthew Shapiro).
 //! See ../LICENSE. Container nesting is limited to 64 levels when decoding.
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fuzz"))]
 pub(crate) mod allocation;
 
 mod deserialization;

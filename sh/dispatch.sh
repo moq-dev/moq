@@ -129,14 +129,17 @@ module cpp '^(\.cargo/config\.toml$|cpp/moq/|cpp/justfile$|sh/cpp/|sh/clang-form
 # the libobs headers it compiles against.
 module obs_compile '^(\.cargo/config\.toml$|cpp/obs/|cpp/moq/|sh/obs/|rs/moq-ffi/|rs/moq-c/native-libs/|flake\.nix$)' \
     tools='cargo cmake pkg-config uniffi-bindgen-cpp' compiles=check lane=cpp
-# The JS tests also read Rust's shared JSON vectors; sh/js/workspace.py
-# fails a check that reads a cross-tree input this pattern misses.
-# demo/pub is a Worker outside the Bun workspace, listed so Biome lints it.
-# Root Nix inputs own the browser version every npm Playwright pin matches.
 # The bun lane exists because `bun install` relinks the root workspace's
 # packages even when nothing changed, so a concurrent install or import of
-# them fails.
-module js '^(js/|bench/browser/|doc/|drafts/|demo/(boy|pub|web|carla/web)/|test/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$|flake\.(nix|lock)$)' \
+# them fails. Biome checks the whole repository. It registers before js so
+# that fix runs it first, since Biome can fix sources that the package build
+# rejects, such as a type-only export.
+module biome '' \
+    tools='bun' lane=bun fix
+# The JS tests also read Rust's shared JSON vectors; sh/js/workspace.py
+# fails a check that reads a cross-tree input this pattern misses.
+# Root Nix inputs own the browser version every npm Playwright pin matches.
+module js '^(js/|bench/browser/|doc/|drafts/|demo/(boy|web|carla/web)/|test/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$|flake\.(nix|lock)$)' \
     tools='bun python3' lane=bun fix
 module kt '^(\.cargo/config\.toml$|kt/|sh/kt/|rs/moq-ffi/|rs/uniffi-bindgen/|doc/lib/kt/|doc/lib/samples\.sh$)' \
     tools='cargo gradle java ktfmt' compiles=check fix
@@ -173,7 +176,7 @@ module moq_sh '^infra/moq-sh/' \
     tools='dash'
 # Quest documents form one graph, so any change validates the whole tree,
 # as does a bump of the flake-pinned validator.
-module quest '^(quest/|flake\.lock$)' \
+module quest '^(quest/|flake\.lock$|sh/quest\.sh$)' \
     tools='quest'
 # `obs check` compares the OBS pinned in buildspec.json, flake.nix, and
 # nixpkgs, and the last moves on a flake.lock bump alone.
@@ -189,6 +192,7 @@ module python '(\.pyi?|(^|/)pyproject\.toml)$' \
 module shell '' \
     tools='shellcheck shfmt' fix
 module large_files ''
+module text ''
 module toml '' \
     tools='taplo' fix
 module nix '' \
@@ -326,14 +330,14 @@ step() {
         check:js) just js check-changed "$js_list" ;;
         check:workers) just js workers ;;
         check:moq_sh) just infra moq-sh test ;;
-        # The check keeps docs; the test phase enforces default-feature clippy
-        # without a second compile.
+        # The check keeps docs and the isolated default-media lint; the test
+        # phase enforces the other clippy checks in its existing build.
         check:rs) just rs lint-changed "$rs_list" ;;
         check:bench)
             python3 bench/compare.test.py
             bash sh/local.sh cargo check --locked --package moq-relay --package moq-bench --features moq-relay/io-uring
             ;;
-        check:quest) quest check ;;
+        check:quest) bash sh/quest.sh check ;;
         check:drill) just test drill-sensitivity --apply-only ;;
         check:obs_compile) just obs compile ;;
         check:flake)
@@ -366,11 +370,13 @@ step() {
             }
             ;;
         check:ts_paths) python3 sh/gh/ts-paths.py ;;
+        check:biome) just biome ;;
         check:markdown)
             bun install --frozen-lockfile
             sh/markdown.sh check
             ;;
         check:large_files) sh/large-files.sh "$large_base" ;;
+        check:text) sh/text.sh ;;
         check:python)
             files '*.py' '*.pyi' | xargs -0 ruff check --force-exclude
             files '*.py' '*.pyi' | xargs -0 ruff format --check --force-exclude
@@ -383,7 +389,8 @@ step() {
         test:py) just py test ;;
         test:gh) just gh test ;;
         fix:rs) just rs fix-changed "$rs_list" ;;
-        fix:js) just js fix "$js_list" ;;
+        fix:js) just js fix-changed "$js_list" ;;
+        fix:biome) just biome-fix ;;
         fix:markdown)
             bun install
             sh/markdown.sh fix

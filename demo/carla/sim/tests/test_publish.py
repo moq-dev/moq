@@ -165,23 +165,40 @@ def test_status_omits_only_the_collision_a_truck_has_not_had() -> None:
 def test_a_closed_status_track_fails_the_session() -> None:
     """Status republishes on a timer, so a swallowed failure would spin forever."""
 
-    def closed(_payload: object) -> None:
+    def closed(_payload: object, _timestamp: object) -> None:
         raise moq.Error("track closed")
 
     publisher = publish.StatusPublisher.__new__(publish.StatusPublisher)
+    publisher._catalog = SimpleNamespace(now=lambda: SimpleNamespace(value=0, scale=1_000))
     publisher._producer = SimpleNamespace(update=closed)
 
     with pytest.raises(moq.Error):
         publisher.publish({})
 
 
-class Announcements:
-    """A scripted announcement stream. `send` returns once the watcher has
-    handled the event and come back for the next one."""
+class Scripted:
+    """A scripted async source. `send` returns once the reader has handled the
+    item and come back for the next one."""
 
     def __init__(self) -> None:
-        self._events: asyncio.Queue = asyncio.Queue()
+        self._items: asyncio.Queue = asyncio.Queue()
         self._idle = asyncio.Event()
+
+    async def next(self):
+        if self._items.empty():
+            self._idle.set()
+        item = await self._items.get()
+        self._idle.clear()
+        return item
+
+    async def send(self, item) -> None:
+        self._idle.clear()
+        self._items.put_nowait(item)
+        await self._idle.wait()
+
+
+class Announcements(Scripted):
+    """The scripted listing of driver paths."""
 
     async def __aenter__(self):
         return self
@@ -193,43 +210,66 @@ class Announcements:
         return self
 
     async def __anext__(self):
-        if self._events.empty():
-            self._idle.set()
-        event = await self._events.get()
-        self._idle.clear()
-        return event
+        return await self.next()
 
-    async def send(self, kind: type, path: str, instance: str) -> None:
-        self._idle.clear()
-        self._events.put_nowait(kind(SimpleNamespace(prefix=path, route=SimpleNamespace(instance=instance))))
-        await self._idle.wait()
+    async def present(self, path: str) -> None:
+        await self.send(moq.AnnounceEventPresent(SimpleNamespace(prefix=path)))
+
+    async def absent(self, path: str) -> None:
+        await self.send(moq.AnnounceEventAbsent(SimpleNamespace(prefix=path)))
 
 
-class Drivers:
-    """A relay holding driver broadcasts: each request serves one drive command
-    numbered by how many requests came before it, then stays open."""
+class Following(Scripted):
+    """A scripted follow of one path: each `run` hands out another instance, `offline` a `None`,
+    and `refuse` an error."""
 
-    def __init__(self) -> None:
-        self.announcements = Announcements()
-        self.requested: list[tuple[str, str | None]] = []
+    async def __aenter__(self):
+        return self
 
-    def announced(self, prefix: str, *, filter: str):
-        assert (prefix, filter) == ("viewer/carla/truck1", "*")
-        return self.announcements
+    async def __aexit__(self, *_exc) -> None:
+        pass
 
-    async def request(self, path: str, *, instance: str | None = None):
-        self.requested.append((path, instance))
-        sequence = len(self.requested)
+    async def available(self):
+        item = await self.next()
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+    async def refuse(self) -> None:
+        """Fail the next `available()`, as a handler refusing the path does."""
+        await self.send(moq.Error("refused"))
+
+    async def run(self, sequence: int) -> None:
+        """Hand out an instance that serves one drive command numbered `sequence`, then stays open."""
 
         async def control():
             yield {"type": "drive", "sequence": sequence, "throttle": 0.5}
             await asyncio.Event().wait()
 
-        async def subscribe_track(name: str):
-            assert name == "control"
-            return control()
+        await self.send(SimpleNamespace(tracks={"control": control()}))
 
-        return SimpleNamespace(subscribe_track=subscribe_track)
+    async def offline(self) -> None:
+        await self.send(None)
+
+
+class Drivers:
+    """A relay holding driver broadcasts."""
+
+    def __init__(self) -> None:
+        self.announcements = Announcements()
+        self.followed: list[str] = []
+        self._followings: dict[str, Following] = {}
+
+    def announced(self, prefix: str, *, filter: str):
+        assert (prefix, filter) == ("viewer/carla/truck1", "*")
+        return self.announcements
+
+    def following(self, path: str) -> Following:
+        return self._followings.setdefault(path, Following())
+
+    def follow(self, path: str) -> Following:
+        self.followed.append(path)
+        return self.following(path)
 
 
 async def watching(scenario) -> None:
@@ -251,63 +291,82 @@ async def next_command(commands: asyncio.Queue, gate: Drive):
     return command
 
 
-def test_a_driver_run_keeps_the_lease_across_route_updates() -> None:
-    """An update is the same run re-priced: no second subscription, no release."""
+DRIVER = "viewer/carla/truck1/abc"
 
+
+def test_a_driver_whose_broadcast_goes_absent_loses_the_lease() -> None:
     async def scenario(relay: Drivers, commands: asyncio.Queue, gate: Drive) -> None:
-        await relay.announcements.send(moq.AnnounceEventStart, "viewer/carla/truck1/abc", "run-1")
+        await relay.announcements.present(DRIVER)
+        await relay.following(DRIVER).run(1)
         command = await next_command(commands, gate)
-        assert (command.kind, command.driver_id, command.instance) == ("drive", "abc", "run-1")
+        assert (command.kind, command.driver_id) == ("drive", "abc")
         assert gate.driver == "abc"
 
-        await relay.announcements.send(moq.AnnounceEventUpdate, "viewer/carla/truck1/abc", "run-1")
-        assert commands.empty()
-        assert gate.driver == "abc"
-        assert relay.requested == [("viewer/carla/truck1/abc", "run-1")]
-
-    asyncio.run(watching(scenario))
-
-
-def test_a_driver_whose_broadcast_ends_loses_the_lease() -> None:
-    async def scenario(relay: Drivers, commands: asyncio.Queue, gate: Drive) -> None:
-        await relay.announcements.send(moq.AnnounceEventStart, "viewer/carla/truck1/abc", "run-1")
-        await next_command(commands, gate)
-        assert gate.driver == "abc"
-
-        await relay.announcements.send(moq.AnnounceEventEnd, "viewer/carla/truck1/abc", "run-1")
+        await relay.announcements.absent(DRIVER)
         left = await next_command(commands, gate)
-        assert (left.kind, left.instance) == ("driver_left", "run-1")
+        assert (left.kind, left.instance) == ("driver_left", command.instance)
         assert gate.driver is None
 
     asyncio.run(watching(scenario))
 
 
-@pytest.mark.parametrize("kind", ["restart", "update"])
-def test_a_driver_that_restarts_under_a_new_instance_is_a_new_driver(kind: str) -> None:
-    """The old run's lease ends with it, even though the path and id are the same.
+def test_a_driver_whose_run_goes_offline_loses_the_lease_until_it_returns() -> None:
+    async def scenario(relay: Drivers, commands: asyncio.Queue, gate: Drive) -> None:
+        await relay.announcements.present(DRIVER)
+        await relay.following(DRIVER).run(1)
+        first = await next_command(commands, gate)
 
-    A new instance is a restart whether the relay says so or reports it as an update.
-    """
-    event = moq.AnnounceEventRestart if kind == "restart" else moq.AnnounceEventUpdate
+        await relay.following(DRIVER).offline()
+        left = await next_command(commands, gate)
+        assert (left.kind, left.instance) == ("driver_left", first.instance)
+        assert gate.driver is None
+
+        await relay.following(DRIVER).run(2)
+        second = await next_command(commands, gate)
+        assert second.kind == "drive" and second.instance != first.instance
+        assert gate.driver == "abc"
+
+    asyncio.run(watching(scenario))
+
+
+def test_a_refused_driver_is_still_followed() -> None:
+    """A refusal leaves the follow waiting, so the driver's next run still takes the lease."""
 
     async def scenario(relay: Drivers, commands: asyncio.Queue, gate: Drive) -> None:
-        await relay.announcements.send(moq.AnnounceEventStart, "viewer/carla/truck1/abc", "run-1")
-        await next_command(commands, gate)
+        await relay.announcements.present(DRIVER)
+        await relay.following(DRIVER).refuse()
+        await relay.following(DRIVER).run(1)
+        command = await next_command(commands, gate)
+        assert (command.kind, command.driver_id) == ("drive", "abc")
+        assert relay.followed == [DRIVER]
 
-        await relay.announcements.send(event, "viewer/carla/truck1/abc", "run-2")
+    asyncio.run(watching(scenario))
+
+
+def test_a_driver_that_restarts_under_a_new_instance_is_a_new_driver() -> None:
+    """The old run's lease ends with it, even though the path and id are the same."""
+
+    async def scenario(relay: Drivers, commands: asyncio.Queue, gate: Drive) -> None:
+        await relay.announcements.present(DRIVER)
+        await relay.following(DRIVER).run(1)
+        first = await next_command(commands, gate)
+
+        await relay.following(DRIVER).run(2)
         received = [await next_command(commands, gate) for _ in range(2)]
-        assert {(command.kind, command.instance) for command in received} == {
-            ("driver_left", "run-1"),
-            ("drive", "run-2"),
+        assert {(command.kind, command.instance == first.instance) for command in received} == {
+            ("driver_left", True),
+            ("drive", False),
         }
-        assert relay.requested == [("viewer/carla/truck1/abc", "run-1"), ("viewer/carla/truck1/abc", "run-2")]
+        # The path stays present across the restart, so one follow sees both runs.
+        assert relay.followed == [DRIVER]
 
         # Whichever order those two arrived in, the new run holds the lease
         # by its next command, and the old run can no longer release it.
-        assert not gate.holds(Command(kind="drive", driver_id="abc", instance="run-1"))
-        gate.apply(Command(kind="drive", driver_id="abc", instance="run-2", sequence=3, state=DriveState()))
-        assert gate.holds(Command(kind="drive", driver_id="abc", instance="run-2"))
-        assert not gate.apply(Command(kind="driver_left", driver_id="abc", instance="run-1"))
+        second = next(command.instance for command in received if command.kind == "drive")
+        assert not gate.holds(Command(kind="drive", driver_id="abc", instance=first.instance))
+        gate.apply(Command(kind="drive", driver_id="abc", instance=second, sequence=3, state=DriveState()))
+        assert gate.holds(Command(kind="drive", driver_id="abc", instance=second))
+        assert not gate.apply(Command(kind="driver_left", driver_id="abc", instance=first.instance))
         assert gate.driver == "abc"
 
     asyncio.run(watching(scenario))
@@ -315,9 +374,9 @@ def test_a_driver_that_restarts_under_a_new_instance_is_a_new_driver(kind: str) 
 
 def test_only_direct_children_of_the_prefix_are_drivers() -> None:
     async def scenario(relay: Drivers, commands: asyncio.Queue, gate: Drive) -> None:
-        await relay.announcements.send(moq.AnnounceEventStart, "viewer/carla", None)
-        await relay.announcements.send(moq.AnnounceEventStart, "viewer/carla/truck1/abc/deeper", None)
-        await relay.announcements.send(moq.AnnounceEventStart, "viewer/carla/truck10", None)
-        assert relay.requested == []
+        await relay.announcements.present("viewer/carla")
+        await relay.announcements.present("viewer/carla/truck1/abc/deeper")
+        await relay.announcements.present("viewer/carla/truck10")
+        assert relay.followed == []
 
     asyncio.run(watching(scenario))

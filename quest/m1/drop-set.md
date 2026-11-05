@@ -258,6 +258,10 @@ Test on mock time through a relay:
   2026-10-28).
 
 Mirror each case in `js/net`.
+In `js/net`, a group a sink buffers keeps its source wanted only while
+`Subscriber.#reading` says its reader will still read it
+([moq-dev/moq#7948](https://github.com/moq-dev/moq/pull/7948)), so a change to
+how a cursor judges a missing or stale group keeps that verdict in step.
 
 Public API: none. Wire: lite-07 SUBSCRIBE_DROP (unpublished) gains `Max Age`
 and the widening and ordering rules above; published versions are
@@ -302,6 +306,15 @@ Found 2026-10-28 by [moq-dev/moq#7149](https://github.com/moq-dev/moq/pull/7149)
 a cancelled fetch below a track's end still holds the end open until the cache
 expiry scan removes it, so how fast a subscription ends depends on expiry
 timing. Settle it here, where cancelled and expired runs get a reason.
+
+### Untimed fills below a resolved start
+
+Noted 2026-10-31 from [moq-dev/moq#7235](https://github.com/moq-dev/moq/pull/7235),
+which made everything below a resolved SUBSCRIBE_START fillable from upstream:
+a lite-07 copy with no media time asks a fill below the start even for a reader
+whose budget the publisher already exceeded, and that fill ends empty. If the
+extra FETCH shows up in relay traffic, bound it here, where a run below the
+start can carry the budget it was resolved under.
 
 ## Related
 

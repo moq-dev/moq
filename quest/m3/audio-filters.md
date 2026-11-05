@@ -16,7 +16,7 @@ chain lands here with its own tests and benchmark; the studio's panel and
 scene-file shape follow a pin bump there.
 
 Decided 2026-11-02 (maintainer): the chain runs on the capture producer
-side of [one capture, many consumers](/quest/m1/audio-capture-fanout.md), so
+before `capture::Producer` fans out to its consumers, so
 the bus and a source's own track both carry filtered audio; gain and mute
 stay after the split, in the bus `Strip`, so the chain has no gain stage of
 its own; a compressor's makeup gain covers level fixes.

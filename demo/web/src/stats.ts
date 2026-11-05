@@ -6,7 +6,7 @@
  * auto-discover all of those nodes (announcements under `.stats/node`), so this
  * works for a single relay and for a cluster alike, then aggregate each node and
  * let you drill into one. A restarted relay announces a new instance at the same
- * path, which arrives as an end then a start, so its history starts over.
+ * path, which each node's follower hands out afresh, so its history starts over.
  *
  * Per node we read `group.json`, the whole node's group at the relay's default
  * `depth = 0`: `{ epoch, tiers: { <tier>: { paths, labels } } }`, a JSON snapshot
@@ -64,8 +64,8 @@ interface Snapshot {
 	bytes?: number;
 	frames?: number;
 	groups?: number;
-	// Single-frame groups carried over unreliable QUIC datagrams: a subset of `groups`,
-	// with their payload already in `frames` / `bytes`.
+	// Datagrams of datagram tracks: they belong to no group, so they count in neither
+	// `groups` nor `frames`, while their payload is in `bytes`.
 	datagrams?: number;
 }
 type BroadcastFrame = Record<string, Snapshot>;
@@ -161,13 +161,7 @@ discovery.run((effect) => {
 			const node = Net.Path.stripPrefix(prefix, path);
 			if (!node) continue;
 
-			// The same node re-priced or failed over: its counters carry on.
-			if (entry.kind === "update") continue;
-			if (entry.kind === "start" && subs.has(node)) continue;
-
-			// An end, or a restart: another instance at the path counts from zero, so neither
-			// series may splice across it.
-			if (entry.kind !== "start") {
+			if (entry.kind === "absent") {
 				subs.get(node)?.close();
 				subs.delete(node);
 				nodeStats.mutate((s) => {
@@ -175,8 +169,9 @@ discovery.run((effect) => {
 				});
 				history.delete(node);
 				clusterMembership = "";
+				continue;
 			}
-			if (entry.kind === "end") continue;
+			if (subs.has(node)) continue;
 
 			const ne = new Signals.Effect();
 			subs.set(node, ne);
@@ -186,31 +181,36 @@ discovery.run((effect) => {
 });
 
 function subscribeNode(effect: Signals.Effect, origin: Net.Origin.Reader, path: Net.Path.Valid, node: string) {
-	nodeStats.mutate((s) => {
-		s[node] = {
-			egress: {},
-			ingress: {},
-			sessions: {},
-		};
-	});
+	// Follow the node across instances: a restarted one counts from zero, so its series starts
+	// afresh rather than splicing onto the old one's.
+	const following = origin.follow(path);
+	effect.cleanup(() => following.close());
+	effect.run((instance) => {
+		const consumer = instance.get(following.active);
+		nodeStats.mutate((s) => {
+			s[node] = {
+				egress: {},
+				ingress: {},
+				sessions: {},
+			};
+		});
+		history.delete(node);
+		// The aggregate spans every node, so a restarted node's counters must not splice into
+		// its history either.
+		clusterMembership = "";
+		if (!consumer) return;
 
-	// The path was just announced, so the request resolves from the table immediately.
-	const request = origin.request(path);
-	effect.cleanup(() => request.close());
-	const consumer = request.active.peek();
-	if (!consumer) return;
-
-	const track = consumer.track("group.json").subscribe();
-	effect.cleanup(() => track.close());
-	const group = new Json.Snapshot.Consumer<GroupFrame>({ track });
-	effect.spawn(async () => {
-		for (;;) {
-			const state = await effect.race(group.latest());
-			if (state === undefined) break;
-			nodeStats.mutate((s) => {
-				if (s[node]) s[node] = nodeStatsOf(state.value ?? {});
-			});
-		}
+		const group = new Json.Snapshot.Consumer<GroupFrame>({ track: consumer.track("group.json") });
+		instance.cleanup(() => group.close());
+		instance.spawn(async () => {
+			for (;;) {
+				const state = await instance.race(group.latest());
+				if (state === undefined) break;
+				nodeStats.mutate((s) => {
+					if (s[node]) s[node] = nodeStatsOf(state.value ?? {});
+				});
+			}
+		});
 	});
 }
 
@@ -264,7 +264,7 @@ interface Sample {
 	ingress: number; // cumulative ingress bytes
 	announce: number; // cumulative announce-control bytes (both directions)
 	fetches: number; // cumulative group fetches requested
-	datagrams: number; // cumulative single-frame groups sent as QUIC datagrams
+	datagrams: number; // cumulative datagrams of datagram tracks, apart from groups
 	broadcasters: number;
 	viewers: number;
 	tracks: number;

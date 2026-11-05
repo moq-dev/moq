@@ -20,7 +20,7 @@ timeline publishers already publish into an encrypted
 broadcast under semantic names with no change here. This quest keeps only
 what the traits do not cover. Every track these publishers serve is declared
 in advance, so it never needed the undeclared-name handler (maintainer,
-2026-10-19), which `moq_e2ee::broadcast::Producer::requests` now provides.
+2026-10-19), which `moq_crypto::e2ee::broadcast::Producer::requests` now provides.
 
 - Catalog naming: derive the protected catalog name from its well-known
   logical role, then put media roles, codecs, quality, timelines, and
@@ -33,13 +33,13 @@ in advance, so it never needed the undeclared-name handler (maintainer,
 - Cover every current Rust importer and capture path so a convenience API
   cannot emit a plaintext semantic catalog.
 - A re-created track resumes (decided 2026-10-25, maintainer, replacing the
-  2026-10-17 refusal): moq-e2ee never releases a name's claim, and a track
+  2026-10-17 refusal): moq-crypto never releases a name's claim, and a track
   created again under a claimed name continues above its high-water marks,
-  so nonces never repeat. moq-e2ee's `create_track` already does this.
+  so nonces never repeat. moq-crypto's `create_track` already does this.
 
 Public API: none. Wire: none.
 
 ## Required
 
-- [moq-e2ee implements the traits](/quest/m2/net-wrap/e2ee.md) - the encrypted broadcast moq-mux publishes into
+- [moq-crypto's e2ee implements the traits](/quest/m2/net-wrap/e2ee.md) - the encrypted broadcast moq-mux publishes into
 - [moq-mux takes the traits](/quest/m2/net-wrap/mux.md) - the mux and capture publishers this relies on to stay unchanged

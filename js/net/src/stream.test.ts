@@ -15,9 +15,10 @@ import {
 import { Version } from "./ietf/version.ts";
 import { Version as Lite } from "./lite/version.ts";
 import { createMockTransportPair } from "./mock.ts";
-import { type Cursor, Reader, Readers, Stream, type StreamVersion, Writer } from "./stream.ts";
+import { acceptBudget, type Cursor, Reader, Readers, Stream, type StreamVersion, Writer } from "./stream.ts";
 import { TimeoutError } from "./util/timeout.ts";
 import { U64 } from "./util/u64.ts";
+import { Budget } from "./util/yield.ts";
 
 // The generic tests below read and write QUIC varints on the moq-lite stream code registry.
 const QUIC = Lite.DRAFT_06;
@@ -625,148 +626,173 @@ test("Writer reset still reads a bare number as Internal", async () => {
 	expect((reason as { streamErrorCode?: number }).streamErrorCode).toBe(StreamCode.Internal);
 });
 
-// Deadlines for the stalled fixtures below: one they always blow through, and one they
-// never reach because the slot frees first. Neither is a delay any test waits out.
-const EXPIRES_MS = 10;
-const OUTLASTS_TEST_MS = 1000;
-
-// Builds a transport whose uni opens complete only once `freeSlot` is called, standing in
-// for a peer that has granted no stream credit. `aborted` settles when the stream it
-// eventually hands over is reset, so a test can await that rather than guess at a delay.
-function stalledTransport() {
-	let freeSlot!: () => void;
-	const slot = new Promise<void>((resolve) => {
-		freeSlot = resolve;
-	});
-
-	let abort!: (reason: unknown) => void;
-	const aborted = new Promise<unknown>((resolve) => {
-		abort = resolve;
-	});
-
-	const stream = new WritableStream<Uint8Array>({ abort });
-
+// A transport standing in for a peer that has granted no stream credit: each create waits
+// until `grant` admits it, in the order they were made, as a browser's do.
+function creditTransport() {
+	const pending: (() => void)[] = [];
+	const created: number[] = [];
+	const streams: { sendOrder?: number }[] = [];
+	const create =
+		<T extends object>(stream: () => T) =>
+		async (options?: { sendOrder?: number }) => {
+			created.push(options?.sendOrder ?? 0);
+			await new Promise<void>((resolve) => pending.push(resolve));
+			const made = stream();
+			streams.push("writable" in made ? (made.writable as object) : made);
+			return made;
+		};
 	const quic = {
-		createUnidirectionalStream: async () => {
-			await slot;
-			return stream;
-		},
+		createUnidirectionalStream: create(() => new WritableStream<Uint8Array>()),
+		createBidirectionalStream: create(() => ({
+			readable: new ReadableStream<Uint8Array>(),
+			writable: new WritableStream<Uint8Array>(),
+		})),
 	} as unknown as WebTransport;
-
-	return { quic, freeSlot, aborted };
-}
-
-// The bidirectional counterpart, whose `discarded` settles when a stream handed over after
-// the deadline is thrown away.
-function stalledBidiTransport() {
-	let freeSlot!: () => void;
-	const slot = new Promise<void>((resolve) => {
-		freeSlot = resolve;
-	});
-
-	let discard!: (reason: unknown) => void;
-	const discarded = new Promise<unknown>((resolve) => {
-		discard = resolve;
-	});
-
-	const stream = {
-		readable: new ReadableStream<Uint8Array>({ cancel: discard }),
-		writable: new WritableStream<Uint8Array>({ abort: discard }),
+	const grant = async (streams = 1) => {
+		for (let i = 0; i < streams; i++) pending.shift()?.();
+		await yieldNow();
 	};
-
-	const quic = {
-		createBidirectionalStream: async () => {
-			await slot;
-			return stream;
-		},
-	} as unknown as WebTransport;
-
-	return { quic, freeSlot, discarded };
+	return { quic, grant, created, streams };
 }
 
-// Bidi opens have no group to drop, so they fail the way they did before
-// waitUntilAvailable rather than parking for as long as the peer withholds credit.
-test("open gives up on a peer that never frees a bidi slot", async () => {
-	const { quic, freeSlot, discarded } = stalledBidiTransport();
+// Record the index of each open as it resolves.
+function track(opens: Promise<unknown>[]): number[] {
+	const order: number[] = [];
+	opens.forEach((open, i) => void open.then(() => order.push(i)));
+	return order;
+}
 
-	await expect(Stream.open(quic, { timeout: EXPIRES_MS, version: QUIC })).rejects.toThrow(/timed out/);
+test("opens past the peer's credit get streams by send order as it returns", async () => {
+	const { quic, grant } = creditTransport();
+	const opens = [1, 3, 2, 3].map((sendOrder) => Writer.open(quic, { sendOrder, version: QUIC }));
+	const order = track(opens);
+	for (let i = 0; i < opens.length; i++) await grant();
+	await Promise.all(opens);
+	// Equal send orders keep their arrival order.
+	expect(order).toEqual([1, 3, 2, 0]);
+});
 
-	freeSlot();
-	await discarded;
+test("the stream handed to another open takes that open's send order", async () => {
+	const { quic, grant, streams } = creditTransport();
+	const low = Writer.open(quic, { sendOrder: 1, version: QUIC });
+	const high = Writer.open(quic, { sendOrder: 9, version: QUIC });
+	// Admits the first create, which the low open made.
+	await grant();
+	await high;
+	expect(streams[0].sendOrder).toBe(9);
+	await grant();
+	await low;
+	expect(streams[1].sendOrder).toBe(1);
+});
+
+test("a waiting open's rank is read again when a stream is handed out", async () => {
+	const { quic, grant } = creditTransport();
+	let rank = 1;
+	const moving = Writer.tryOpen(quic, { sendOrder: () => rank, cancel: new Promise(() => {}), version: QUIC });
+	const fixed = Writer.open(quic, { sendOrder: 5, version: QUIC });
+	const order = track([moving, fixed]);
+	rank = 10;
+	await grant();
+	expect(await moving).toBeInstanceOf(Writer);
+	expect(order).toEqual([0]);
+	await grant();
+	await fixed;
+	expect(order).toEqual([0, 1]);
 });
 
 test("open waits for a bidi slot rather than failing on a busy session", async () => {
-	const { quic, freeSlot } = stalledBidiTransport();
+	const { quic, grant } = creditTransport();
 
-	const opening = Stream.open(quic, { timeout: OUTLASTS_TEST_MS, version: QUIC });
-	expect(await Promise.race([opening.then(() => "opened"), Promise.resolve("waiting")])).toBe("waiting");
+	const opening = Stream.open(quic, { version: QUIC });
+	expect(await Promise.race([opening.then(() => "opened"), yieldNow().then(() => "waiting")])).toBe("waiting");
 
-	freeSlot();
+	await grant();
 	expect(await opening).toBeInstanceOf(Stream);
 });
 
 // A cancel that already settled has to win even when a slot is free, or a group whose
 // subscriber is long gone still goes out.
 test("tryOpen gives up on a cancel that settled before the open", async () => {
-	const { quic, freeSlot, aborted } = stalledTransport();
-	freeSlot();
-
+	const { quic, grant, created } = creditTransport();
 	expect(await Writer.tryOpen(quic, { cancel: Promise.resolve(), version: QUIC })).toBeUndefined();
-	await aborted;
+	expect(created).toHaveLength(0);
+
+	// Nor does it take a stream kept for the next open.
+	const cancelled = Promise.withResolvers<void>();
+	const gaveUp = Writer.tryOpen(quic, { cancel: cancelled.promise, version: QUIC });
+	cancelled.resolve();
+	expect(await gaveUp).toBeUndefined();
+	await grant();
+	expect(await Writer.tryOpen(quic, { cancel: Promise.resolve(), version: QUIC })).toBeUndefined();
+	expect(await Writer.open(quic, { version: QUIC })).toBeInstanceOf(Writer);
+	expect(created).toHaveLength(1);
 });
 
-test("tryOpen gives up when cancelled, resetting a stream that opens afterwards", async () => {
-	const { quic, freeSlot, aborted } = stalledTransport();
+// Groups that expire while the peer withholds credit leave their creates to the next open,
+// so churn never queues more creates than opens wait.
+test("cancelled opens never queue more creates than opens wait", async () => {
+	const { quic, grant, created } = creditTransport();
+	for (let i = 0; i < 100; i++) {
+		const cancelled = Promise.withResolvers<void>();
+		const opening = Writer.tryOpen(quic, { cancel: cancelled.promise, version: QUIC });
+		cancelled.resolve();
+		expect(await opening).toBeUndefined();
+	}
+	expect(created).toHaveLength(1);
+	const open = Writer.open(quic, { version: QUIC });
+	await grant();
+	expect(await open).toBeInstanceOf(Writer);
+	expect(created).toHaveLength(1);
+});
 
-	let cancel!: () => void;
-	const cancelled = new Promise<void>((resolve) => {
-		cancel = resolve;
-	});
+test("tryOpen gives up when cancelled, handing a stream that opens afterwards to the next open", async () => {
+	const { quic, grant, created } = creditTransport();
+	const cancelled = Promise.withResolvers<void>();
 
-	const opening = Writer.tryOpen(quic, { cancel: cancelled, version: QUIC });
-	cancel();
+	const opening = Writer.tryOpen(quic, { cancel: cancelled.promise, version: QUIC });
+	const next = Writer.open(quic, { version: QUIC });
+	cancelled.resolve();
 	expect(await opening).toBeUndefined();
 
-	freeSlot();
-	await aborted;
+	await grant();
+	expect(await next).toBeInstanceOf(Writer);
+	expect(created).toHaveLength(2);
 });
 
-test("tryOpen rethrows a rejected cancel, resetting a stream that opens afterwards", async () => {
-	const { quic, freeSlot, aborted } = stalledTransport();
+// A request abandoned while the peer withholds credit leaves the line, so the credit that
+// returns serves a live request instead of one that resets its stream at once.
+test("cancelled bidi opens leave the line to the next open", async () => {
+	const { quic, grant, created } = creditTransport();
+	for (let i = 0; i < 3; i++) {
+		const cancelled = new AbortController();
+		const opening = Stream.tryOpen(quic, { signal: cancelled.signal, version: QUIC });
+		cancelled.abort();
+		expect(await opening).toBeUndefined();
+	}
+	// One already aborted never joins the line.
+	expect(await Stream.tryOpen(quic, { signal: AbortSignal.abort(), version: QUIC })).toBeUndefined();
+	const live = Stream.open(quic, { version: QUIC });
+	await grant();
+	expect(await live).toBeInstanceOf(Stream);
+	expect(created).toHaveLength(1);
+});
 
-	let fail!: (err: Error) => void;
-	const cancelled = new Promise<void>((_, reject) => {
-		fail = reject;
-	});
+test("tryOpen rethrows a rejected cancel", async () => {
+	const { quic } = creditTransport();
+	const cancelled = Promise.withResolvers<void>();
 
-	const opening = Writer.tryOpen(quic, { cancel: cancelled, version: QUIC });
-	fail(new Error("stop sending"));
+	const opening = Writer.tryOpen(quic, { cancel: cancelled.promise, version: QUIC });
+	cancelled.reject(new Error("stop sending"));
 	await expect(opening).rejects.toThrow("stop sending");
-
-	freeSlot();
-	await aborted;
 });
 
-// Without a deadline a peer that withholds stream credit while keeping the subscription
-// open queues work forever, since waitUntilAvailable never rejects.
-test("tryOpen gives up when the peer never frees a slot", async () => {
-	const { quic, freeSlot, aborted } = stalledTransport();
-
-	expect(
-		await Writer.tryOpen(quic, { cancel: new Promise(() => {}), timeout: EXPIRES_MS, version: QUIC }),
-	).toBeUndefined();
-
-	freeSlot();
-	await aborted;
-});
-
-test("tryOpen returns the stream when a slot is available", async () => {
-	const { quic, freeSlot } = stalledTransport();
-
-	const opening = Writer.tryOpen(quic, { cancel: new Promise(() => {}), timeout: OUTLASTS_TEST_MS, version: QUIC });
-	freeSlot();
-
-	expect(await opening).toBeInstanceOf(Writer);
+test("a failed create fails an open rather than leaving it waiting", async () => {
+	const quic = {
+		createUnidirectionalStream: async () => {
+			throw new Error("session closed");
+		},
+	} as unknown as WebTransport;
+	await expect(Writer.open(quic, { version: QUIC })).rejects.toThrow("session closed");
 });
 
 // A subscription hands the same `cancel` to every group it opens, so each open must not leave a
@@ -784,7 +810,7 @@ test("tryOpen shares one reaction on a cancel reused across opens", async () => 
 	expect(reactions).toHaveBeenCalledTimes(1);
 });
 
-test("open waits for a stream slot instead of rejecting once the peer's limit is full", async () => {
+test("opens ask the transport to wait for a stream slot at their send order", async () => {
 	const options: unknown[] = [];
 	const quic = {
 		createBidirectionalStream: async (opts?: unknown) => {
@@ -799,14 +825,8 @@ test("open waits for a stream slot instead of rejecting once the peer's limit is
 
 	await Stream.open(quic, { sendOrder: 7, version: QUIC });
 	await Writer.open(quic, { version: QUIC });
-	// The one path that opens faster than a peer can retire streams opts out.
-	await Writer.open(quic, { waitUntilAvailable: false, version: QUIC });
 
-	expect(options).toEqual([
-		{ sendOrder: 7, waitUntilAvailable: true },
-		{ sendOrder: undefined, waitUntilAvailable: true },
-		{ sendOrder: undefined, waitUntilAvailable: false },
-	]);
+	expect(options).toEqual([{ sendOrder: 7, waitUntilAvailable: true }, { waitUntilAvailable: true }]);
 });
 
 // A moq-transport code has to be one the negotiated draft assigns the same meaning to, so
@@ -993,10 +1013,8 @@ test("Reader u53 decodes every size in both formats, one byte per chunk", async 
 // A peer keeping streams ready must not hold the host for as long as they keep arriving:
 // each accept resolves in a microtask, so only a yield lets a sibling task run in between.
 // The CPU slice is stubbed to pass on every check, so the yield does not depend on load.
-// The stub only moves forward, since the budget's slice start outlives each test.
 // biome-ignore lint/style/noRestrictedGlobals: stubs the host CPU clock the budget reads.
 const host = performance;
-let fakeNow = host.now();
 for (const kind of ["uni", "bidi"] as const) {
 	test(`a flood of ${kind} streams yields to the host's other tasks`, async () => {
 		const STREAMS = 1024;
@@ -1006,7 +1024,11 @@ for (const kind of ["uni", "bidi"] as const) {
 			else await client.createBidirectionalStream();
 		}
 
+		let fakeNow = 0;
 		const clock = spyOn(host, "now").mockImplementation(() => (fakeNow += 5));
+		// The shared budget outlives Bun's file reruns, so isolate it with the stubbed CPU clock.
+		const budget = new Budget();
+		const poll = spyOn(acceptBudget, "poll").mockImplementation(() => budget.poll());
 		try {
 			const readers = kind === "uni" ? new Readers(server, QUIC) : undefined;
 			let accepted = 0;
@@ -1021,6 +1043,7 @@ for (const kind of ["uni", "bidi"] as const) {
 			expect(sibling).toBeDefined();
 			expect(sibling).toBeLessThan(STREAMS);
 		} finally {
+			poll.mockRestore();
 			clock.mockRestore();
 		}
 	});

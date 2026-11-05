@@ -13,7 +13,7 @@ use std::{collections::HashMap, time::Duration};
 
 use futures::channel::mpsc;
 
-use moq_net::{Hop, Version, announce, cache, origin};
+use moq_net::{Hop, Version, cache, origin};
 use support::harness::{MockConnectOptions, MockPair, connect_mock, peer, peer_with_latency};
 
 fn produce_origin(hop: u64) -> origin::Producer {
@@ -32,7 +32,7 @@ fn produce(hop: u64, hold: Duration) -> origin::Producer {
 	producer
 }
 
-/// The kind of an [`announce::Event`] for a prefix.
+/// The kind of an [`origin::RouteEvent`] for a prefix.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
 	Start,
@@ -55,16 +55,16 @@ fn drain(watched: &mut mpsc::UnboundedReceiver<(String, Kind)>) -> HashMap<Strin
 /// Watch `announced` from its own task, the way a session's announce writer does:
 /// it runs when woken, between the relays' own tasks, rather than only once the
 /// test task is polled again, which would coalesce every intermediate update.
-fn watch(mut announced: announce::Consumer) -> mpsc::UnboundedReceiver<(String, Kind)> {
+fn watch(mut announced: origin::Routes) -> mpsc::UnboundedReceiver<(String, Kind)> {
 	let (tx, rx) = mpsc::unbounded();
 	kio::clock::sim::spawn(async move {
 		while let Some(event) = announced.next().await {
 			let (kind, announce) = match event {
-				announce::Event::Start(announce) => (Kind::Start, announce),
-				announce::Event::Update(announce) => (Kind::Update, announce),
-				announce::Event::Restart(announce) => (Kind::Restart, announce),
-				announce::Event::Takeover { announce, .. } => (Kind::Takeover, announce),
-				announce::Event::End(announce) => (Kind::End, announce),
+				origin::RouteEvent::Start(announce) => (Kind::Start, announce),
+				origin::RouteEvent::Update(announce) => (Kind::Update, announce),
+				origin::RouteEvent::Restart(announce) => (Kind::Restart, announce),
+				origin::RouteEvent::Takeover { announce, .. } => (Kind::Takeover, announce),
+				origin::RouteEvent::End(announce) => (Kind::End, announce),
 			};
 			if tx.unbounded_send((announce.prefix.to_string(), kind)).is_err() {
 				break;
@@ -89,7 +89,7 @@ impl Mesh {
 		for &(a, b) in edges {
 			pairs.push(peer(version, &nodes[a], &nodes[b]).await);
 		}
-		let watched = watch(nodes.last().unwrap().consume().announced());
+		let watched = watch(nodes.last().unwrap().consume().routes());
 		Self {
 			nodes,
 			_pairs: pairs,
@@ -223,7 +223,7 @@ async fn partial_mesh_withdraw_retracts_once() {
 	for (&(a, b), &ms) in PRODUCTION.iter().zip(PRODUCTION_LATENCY_MS) {
 		pairs.push(peer_with_latency(version, &nodes[a], &nodes[b], Duration::from_millis(ms)).await);
 	}
-	let mut watched: Vec<_> = nodes.iter().map(|node| watch(node.consume().announced())).collect();
+	let mut watched: Vec<_> = nodes.iter().map(|node| watch(node.consume().routes())).collect();
 
 	for publisher in [5, 13, 22, 26, 32] {
 		let broadcast = nodes[publisher].create_broadcast(format!("room/{publisher}")).unwrap();
@@ -278,7 +278,7 @@ async fn retracted_relay_ignores_a_stale_path() {
 	for &((a, b), latency) in STALE_PATHS {
 		pairs.push(peer_with_latency(version, &nodes[a], &nodes[b], latency).await);
 	}
-	let mut watched: Vec<_> = nodes.iter().map(|node| watch(node.consume().announced())).collect();
+	let mut watched: Vec<_> = nodes.iter().map(|node| watch(node.consume().routes())).collect();
 
 	let broadcast = nodes[7].create_broadcast("room/7").unwrap();
 	broadcast.announce(Default::default()).unwrap();
@@ -351,8 +351,8 @@ impl Cluster {
 		let mut cluster = Self {
 			_pairs: pairs,
 			publisher: publishing,
-			client: watch(watching.consume().announced()),
-			relays: relays.iter().map(|relay| watch(relay.consume().announced())).collect(),
+			client: watch(watching.consume().routes()),
+			relays: relays.iter().map(|relay| watch(relay.consume().routes())).collect(),
 		};
 		// Let every session's announce interest land before anything is published.
 		kio::clock::sim::idle().await;
@@ -441,9 +441,67 @@ async fn cross_node_close_without_hold_reannounces() {
 	assert_eq!(client, [Kind::End, Kind::Start, Kind::End]);
 }
 
+/// Relay 3 hears a broadcast published on relay 0 first over the longer, faster
+/// path through relays 2 and 4 (3 hops, 30 ms), then 280 ms later over the
+/// shorter, slower one through relay 1 (2 hops, 310 ms).
+#[rustfmt::skip]
+const LATE_BETTER_PATH: &[Link] = &[
+	((0, 1), ms(10)), ((1, 3), ms(300)), ((0, 2), ms(10)), ((2, 4), ms(10)), ((4, 3), ms(10)),
+];
+
+/// The relays mesh on `mesh` while a publishing client on relay 0 and a watching
+/// client on relay 3 speak `client`. Publishes a broadcast, then closes it, and
+/// returns what the watching client saw for each.
+async fn late_better_path(mesh: &str, client: &str) -> (Vec<Kind>, Vec<Kind>) {
+	let mesh: Version = mesh.parse().unwrap();
+	let client: Version = client.parse().unwrap();
+	let relays: Vec<_> = (1..=5).map(produce_origin).collect();
+	let mut pairs = Vec::new();
+	for &((a, b), latency) in LATE_BETTER_PATH {
+		pairs.push(peer_with_latency(mesh, &relays[a], &relays[b], latency).await);
+	}
+	let publishing = produce(1000, Duration::ZERO);
+	let mut options = MockConnectOptions::new(client);
+	options.client_publish = Some(publishing.consume());
+	options.server_subscribe = Some(relays[0].clone());
+	pairs.push(connect_mock(options).await);
+	let watching = produce(1001, Duration::ZERO);
+	let mut options = MockConnectOptions::new(client);
+	options.server_publish = Some(relays[3].consume());
+	options.client_subscribe = Some(watching.clone());
+	pairs.push(connect_mock(options).await);
+	let mut watcher = watch(watching.consume().routes());
+	kio::clock::sim::idle().await;
+	assert!(drain(&mut watcher).is_empty());
+
+	let broadcast = publishing.create_broadcast("room/a").unwrap();
+	broadcast.announce(Default::default()).unwrap();
+	kio::clock::sim::idle().await;
+	let published = drain(&mut watcher).remove("room/a").unwrap();
+	drop(broadcast);
+	kio::clock::sim::idle().await;
+	let closed = drain(&mut watcher).remove("room/a").unwrap();
+	(published, closed)
+}
+
+/// A relay that first hears a broadcast over a longer path moves to the shorter
+/// one when it arrives, and a client watching it sees a live broadcast only
+/// update. Lite-07 relays carry the instance the publisher's relay minted for
+/// its lite-06 or lite-07 publisher, so the move keeps the instance, and a
+/// lite-06 watcher gets the update in place rather than a retraction and a new
+/// announcement.
+#[kio::test]
+async fn late_better_path_updates_in_place() {
+	for client in ["moq-lite-06", "moq-lite-07-wip"] {
+		let (published, closed) = late_better_path("moq-lite-07-wip", client).await;
+		assert_eq!(published, [Kind::Start, Kind::Update], "{client}");
+		assert_eq!(closed, [Kind::End], "{client}");
+	}
+}
+
 // Residual counterexamples on `main`, with the hold and the retraction
 // quarantine. Each pins what the cluster does today, so a change either way
-// fails here. Routes and announces (quest/m1/cluster-routing/routes.md) must
+// fails here. Routes and announces (quest/m1/cluster-routing/routes/README.md) must
 // bring each to a single retraction everywhere.
 
 /// A ring of six relays with links under 150 ms. Relay 3 hears the withdrawal
@@ -496,6 +554,16 @@ async fn residual_mesh_revives() {
 		]
 	);
 	assert_capped_withdrawal(EDGES, 4, 8).await;
+}
+
+/// On a lite-06 mesh each relay mints its own instance for what a neighbor
+/// announces, so the move to the late, shorter path is another instance: the
+/// watching client sees the live broadcast retracted and announced again.
+#[kio::test]
+async fn residual_late_better_path_restarts_on_lite06() {
+	let (published, closed) = late_better_path("moq-lite-06", "moq-lite-06").await;
+	assert_eq!(published, [Kind::Start, Kind::End, Kind::Start]);
+	assert_eq!(closed, [Kind::End]);
 }
 
 async fn assert_capped_withdrawal(edges: &[Link], publisher: usize, watcher: usize) {
@@ -641,8 +709,8 @@ async fn hop_limit_bounds_receive_and_send() {
 		let sink = produce_origin(3);
 		let _upstream = peer(version, &source, &relay).await;
 		let _downstream = peer(version, &relay, &sink).await;
-		let mut received = watch(relay.consume().announced());
-		let mut sent = watch(sink.consume().announced());
+		let mut received = watch(relay.consume().routes());
+		let mut sent = watch(sink.consume().routes());
 		kio::clock::sim::idle().await;
 		let route = |count: u64| {
 			origin::Route::default().with_hops(
@@ -706,7 +774,7 @@ async fn hop_limit_falls_back_to_a_forwardable_route() {
 		let _near = peer(version, &near, &relay).await;
 		let _far = peer(version, &far, &relay).await;
 		let _downstream = peer(version, &relay, &sink).await;
-		let mut sent = watch(sink.consume().announced());
+		let mut sent = watch(sink.consume().routes());
 		kio::clock::sim::idle().await;
 
 		let route = |first: u64, count: u64, cost: u64| {

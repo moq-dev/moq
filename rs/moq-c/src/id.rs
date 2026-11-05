@@ -148,6 +148,7 @@ mod tests {
 	fn benchmark_handles() {
 		use std::hint::black_box;
 
+		println!("live,wrap,ns_per_iteration");
 		for live in [0, 64, 4096] {
 			for wrap in [false, true] {
 				let next = AtomicU32::new(live + 1);
@@ -166,8 +167,8 @@ mod tests {
 					let id = slab.insert_next(black_box(42), &next).unwrap();
 					black_box(slab.remove(id).unwrap());
 				}
-				eprintln!(
-					"handles live={live} wrap={wrap}: {:.0} ns/iteration",
+				println!(
+					"{live},{wrap},{:.0}",
 					start.elapsed().as_nanos() as f64 / f64::from(iterations)
 				);
 			}

@@ -281,12 +281,78 @@ in every round. The re-pair above, on a quieter host, is what remains.
 Decided 2026-11-01 (maintainer), in
 [moq-dev/moq#7493](https://github.com/moq-dev/moq/pull/7493): ✅ the new
 `session_fanout_threads` Criterion case joins the release pairing through a
-bench-only backport to `release`, which carries it once that PR lands. Bench-only
+bench-only backport to `release`, merged in
+[moq-dev/moq#7698](https://github.com/moq-dev/moq/pull/7698). Bench-only
 backports are allowed from now on.
 
-## Required
+Decided 2026-11-03 (maintainer), in
+[moq-dev/moq#7605](https://github.com/moq-dev/moq/pull/7605): these flat
+per-group costs of the relay's chat fan-out are accepted as the features they
+pay for. Each is instructions per delivered group at 512 subscribers through
+the track model, counted by `just bench-fanout` against the merge's parent:
 
-- [Relay CPU per frame since #5926](/quest/m1/release-perf/relay-cpu-bisect.md) - the 18-56% rise in relay instructions per delivered frame is bisected, attributed, and its avoidable cost fixed
+- Per-reader ranges and time anchors
+  ([moq-dev/moq#5929](https://github.com/moq-dev/moq/pull/5929)): +902 when
+  it landed. moq-dev/moq#7605 took back 351 of the window reads it and
+  [moq-dev/moq#7542](https://github.com/moq-dev/moq/pull/7542) left on every
+  peek; what remains reads each reader's window and drift edge.
+- A subscriber reads only its ranges' frames
+  ([moq-dev/moq#6129](https://github.com/moq-dev/moq/pull/6129)): +183.
+- Public ingest ([moq-dev/moq#6111](https://github.com/moq-dev/moq/pull/6111)):
+  +200.
+- Compressed tracks ([moq-dev/moq#5928](https://github.com/moq-dev/moq/pull/5928)):
+  +33.
+- Closing the relay demand gaps
+  ([moq-dev/moq#7052](https://github.com/moq-dev/moq/pull/7052)): +365.
+- Bounded reads end through routes
+  ([moq-dev/moq#7625](https://github.com/moq-dev/moq/pull/7625)): +275, and
+  +450 per group through the in-process session.
+
+The first four were counted with frame pointers forced and the last two
+without, so compare each only with its own parent. None grows with
+subscribers.
+
+Re-measured on `main` with the probe fast path, as that decision asked, and
+accepted under it (see the
+[report](/.github/relay-cpu-bisect.md#the-ranged-reads-session-cost-on-main)),
+per delivered group at 512 subscribers through the in-process session:
+
+- Filling linearly in range count and span
+  ([moq-dev/moq#6995](https://github.com/moq-dev/moq/pull/6995)): +3,288
+  when it landed, mostly the live index's walk, which the drift edge reads on
+  every poll. The fast path never reached it; walking it through one branch
+  took back 891 (session) and 270 (model). What remains looks up the live
+  groups apart from fetched backfill, which keeps backfill out of every
+  search for live content.
+- Layered windows
+  ([moq-dev/moq#7542](https://github.com/moq-dev/moq/pull/7542)): +3,049
+  when it landed, the window queries `runs::Layered::first` and `last`. They
+  cost 2,117 on `main`, about 40 queries per delivery at about 50
+  instructions each: per-reader windows answered by search, not a walk.
+
+In-tree qmux ([moq-dev/moq#6231](https://github.com/moq-dev/moq/pull/6231))
+and receive leases ([moq-dev/moq#5878](https://github.com/moq-dev/moq/pull/5878))
+add no measurable relay cost on chat over io\_uring, each against its parent
+on the quiet test host, so neither needs accepting.
+
+Public ingest ([moq-dev/moq#6111](https://github.com/moq-dev/moq/pull/6111))
+cost the relay +10.5k per frame on chat over io\_uring, far above the model's
++200, because each viewer's read now reaches a group before its first frame.
+Decided 2026-11-05 (maintainer): cut what a live read pays for nothing.
+[moq-dev/moq#7874](https://github.com/moq-dev/moq/pull/7874) took 3,729 per
+delivered group off the in-process session at 512 subscribers (110,581 to
+106,852, -3.4%): a blocked read asks the reader's budget only once a group
+landed above it, and the forward-drop poll skips judging copies with nothing
+to report and re-probing right after a receive. What remains of each viewer's
+live read is accepted, per delivered group through the session (see the
+[report](/.github/relay-cpu-bisect.md#public-ingests-per-viewer-read-on-main)):
+
+- The forward-drop poll's probe, about 3.5k over three polls a group, and the
+  receive's, about 3.5k over three: each wake of the track side checks for
+  groups the reader missed before taking or parking.
+- The expiry checks of a read blocked before its group's first frame and of a
+  group waiting for stream credit, 0.9k: each parks on the next landing so a
+  stalled group expires.
 
 ## Related
 

@@ -15,6 +15,8 @@ use super::{
 
 pub(crate) struct SessionStart {
 	pub recv_bandwidth: Option<bandwidth::Weak>,
+	/// The peer's PROBE target, which the session's sender probes up to.
+	pub peer_target: kio::Consumer<bandwidth::Rate>,
 	/// The estimate PROBE reports, published by the session's supervisor.
 	pub estimate: kio::Producer<crate::session::Estimate>,
 	/// The session's protocol machine over the boxed transport.
@@ -29,7 +31,7 @@ pub(crate) struct SessionStart {
 	pub peer_implementation: crate::setup::PeerImplementation,
 }
 
-/// Server: read the peer's single SETUP message off its Setup Stream before starting
+/// Server: reads the peer's single SETUP message off its Setup Stream before starting
 /// the session, so the caller can inspect the advertised path (and gate on it) before
 /// serving. lite-05+ only.
 ///
@@ -38,17 +40,7 @@ pub(crate) struct SessionStart {
 ///
 /// Pass the result to [`start`] as its `peer_setup` so capability gating resolves
 /// without re-reading SETUP, and every held stream is handed back to the driver.
-pub async fn accept_setup(session: &mut Transport, version: Version) -> Result<AcceptedSetup, Error> {
-	let mut accept = SetupAccept {
-		version,
-		pending: Vec::new(),
-		early: Vec::new(),
-		setup: None,
-	};
-	kio::wait(|waiter| accept.poll(session, waiter)).await
-}
-
-struct SetupAccept {
+pub struct SetupAccept {
 	version: Version,
 	pending: Vec<Reader<crate::transport::boxed::RecvStream, Version>>,
 	early: Vec<Reader<crate::transport::boxed::RecvStream, Version>>,
@@ -56,7 +48,18 @@ struct SetupAccept {
 }
 
 impl SetupAccept {
-	fn poll(&mut self, session: &mut Transport, waiter: &kio::Waiter) -> Poll<Result<AcceptedSetup, Error>> {
+	/// Start waiting for a `version` peer's SETUP.
+	pub fn new(version: Version) -> Self {
+		Self {
+			version,
+			pending: Vec::new(),
+			early: Vec::new(),
+			setup: None,
+		}
+	}
+
+	/// The peer's SETUP, with the streams held until it arrived.
+	pub fn poll(&mut self, session: &Transport, waiter: &kio::Waiter) -> Poll<Result<AcceptedSetup, Error>> {
 		let Self {
 			version,
 			pending,
@@ -140,6 +143,13 @@ impl SetupAccept {
 	}
 }
 
+/// [`SetupAccept`] as a future, for tests.
+#[cfg(test)]
+pub(crate) async fn accept_setup(session: &Transport, version: Version) -> Result<AcceptedSetup, Error> {
+	let mut accept = SetupAccept::new(version);
+	kio::wait(|waiter| accept.poll(session, waiter)).await
+}
+
 /// The peer's pre-read SETUP and the streams held until it arrived.
 pub struct AcceptedSetup {
 	/// The SETUP decoded before origin binding.
@@ -192,7 +202,7 @@ pub struct Config {
 	pub our_setup: Setup,
 
 	/// The peer's SETUP, when it was already read before [`start`] (e.g. a server that
-	/// gated on the client's path via [`accept_setup`]). Seeds the peer-setup slot so
+	/// gated on the client's path via [`SetupAccept`]). Seeds the peer-setup slot so
 	/// the Setup Stream isn't expected again. `None` reads it from the wire as usual.
 	pub peer_setup: Option<AcceptedSetup>,
 
@@ -202,6 +212,8 @@ pub struct Config {
 	pub auth: crate::auth::Link,
 	/// What the peer may make this session hold.
 	pub limits: crate::session::Limits,
+	/// The viewers whose sum the session sends as its PROBE target.
+	pub viewers: bandwidth::Viewers,
 }
 
 /// Start a lite session.
@@ -222,6 +234,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		peer_setup,
 		auth,
 		limits,
+		viewers,
 	} = config;
 
 	let recv_bw = bandwidth::Producer::new();
@@ -270,6 +283,11 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 			.with_stats(stats.clone())
 	});
 	let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty(Hop::random()).with_stats(stats.clone()));
+	// Before lite-07 the peer can't ask for hidden routes, so a client publishes none of
+	// them unless its publish half opted in, and a socket endpoint behind it is
+	// unreachable. A server leaves it to the client, whose origin holds that endpoint.
+	let withholding =
+		(client && !version.has_hidden() && !publish.includes_hidden()).then(|| publish.hidden_withheld().hold());
 	let subscriptions = crate::session::Slots::default().with_stats(publish.stats(), crate::stats::Cap::Subscriptions);
 	let announces =
 		crate::session::Slots::new(limits.announces).with_stats(subscribe.stats(), crate::stats::Cap::Announces);
@@ -334,6 +352,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		client,
 		subscriptions,
 	});
+	let peer_target = publisher.peer_target();
 	let mut subscriber = Subscriber::new(SubscriberConfig {
 		runtime: runtime.clone(),
 		session: session.clone(),
@@ -350,6 +369,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		auth: auth.clone(),
 	});
 	subscriber.announces = announces;
+	subscriber.viewers = viewers;
 
 	// SendSetup only logs a failure, so refuse a SETUP that cannot encode (one past the
 	// size bound, such as a long implementation or path) here rather than leave the peer waiting.
@@ -382,10 +402,12 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		publisher,
 		subscriber: SubscriberDriver::new(subscriber, early, client),
 		session,
+		withholding,
 	};
 
 	Ok(SessionStart {
 		recv_bandwidth: recv_bw_consumer,
+		peer_target,
 		estimate,
 		driver,
 		goaway: goaway_handle,
@@ -415,6 +437,9 @@ pub(crate) struct Driver {
 	/// For the terminal close: the machine's last act reports the outcome to
 	/// the peer through the transport.
 	session: Transport,
+	/// Counts this session against the publish origin while it withholds that origin's
+	/// hidden routes from the peer.
+	withholding: Option<origin::HiddenWithholding>,
 }
 
 impl Driver {
@@ -444,6 +469,7 @@ impl Driver {
 				}
 			}
 			self.ending = Some(res);
+			self.withholding = None;
 		}
 		// Closing the transport first bounds every read, including when a control
 		// stream ended the protocol while the connection itself was still live.
@@ -544,6 +570,7 @@ impl Present {
 				handle: self.handle.clone(),
 				violation: self.violation.clone(),
 				id,
+				open: Default::default(),
 				state: PresentState::Open { token, answered: false },
 			});
 		}
@@ -566,6 +593,8 @@ struct PresentToken {
 	handle: crate::auth::Link,
 	violation: kio::Shared<Option<Error>>,
 	id: u64,
+	/// Its place in line for the peer's stream credit while a request stream opens.
+	open: crate::transport::open::Open,
 	state: PresentState,
 }
 
@@ -649,10 +678,11 @@ impl PresentToken {
 					}
 					let token = token.clone();
 					let answered = *answered;
-					let mut stream = match ready!(Stream::poll_open_request(&self.session, self.version, waiter)) {
-						Ok(stream) => stream,
-						Err(err) => return Poll::Ready(err),
-					};
+					let mut stream =
+						match ready!(Stream::poll_open(&self.session, &mut self.open, self.version, waiter)) {
+							Ok(stream) => stream,
+							Err(err) => return Poll::Ready(err),
+						};
 					stream = stream.with_stats(&self.stats);
 					let res = stream
 						.writer
@@ -761,6 +791,7 @@ struct SendSetup {
 	version: Version,
 	session: Transport,
 	setup: Box<Setup>,
+	open: crate::transport::open::Open,
 	state: SendSetupState,
 }
 
@@ -772,6 +803,7 @@ impl SendSetup {
 			version,
 			session,
 			setup: Box::new(setup),
+			open: Default::default(),
 			state: SendSetupState::Start,
 		}
 	}
@@ -786,7 +818,7 @@ impl SendSetup {
 
 	fn poll_send(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		// Waiting for stream credit on our own session handle.
-		let stream = wait!(Open => self.session.poll_open_uni(waiter, Default::default()))
+		let stream = wait!(Open => self.session.poll_open_uni(&mut self.open, waiter, Default::default()))
 			.map_err(crate::lite::error::from_transport)?;
 		let mut writer: Writer<crate::transport::boxed::SendStream, Version> =
 			Writer::new(stream, self.version).with_stats(&self.stats);
@@ -809,6 +841,7 @@ struct SendGoaway {
 	/// Opening a stream and watching the session close each need their own handle.
 	closed: Transport,
 	session: Transport,
+	open: crate::transport::open::Open,
 	state: SendGoawayState,
 }
 
@@ -826,6 +859,7 @@ impl SendGoaway {
 			goaway,
 			closed: session.clone(),
 			session,
+			open: Default::default(),
 			state: SendGoawayState::Start,
 		}
 	}
@@ -843,7 +877,7 @@ impl SendGoaway {
 		if !self.version.has_goaway() {
 			return Poll::Ready(());
 		}
-		let mut stream: Stream<Transport, Version> = match wait!(Open => Stream::poll_open(&self.session, self.version, waiter))
+		let mut stream: Stream<Transport, Version> = match wait!(Open => Stream::poll_open(&self.session, &mut self.open, self.version, waiter))
 		{
 			Ok(stream) => stream,
 			Err(err) => {
@@ -944,6 +978,7 @@ mod tests {
 			stats: Default::default(),
 			client: true,
 			limits: Default::default(),
+			viewers: Default::default(),
 			session: crate::driver::Transport::new(transport.clone()),
 			setup_stream: None,
 			publish: None,
@@ -989,6 +1024,7 @@ mod tests {
 			stats: Default::default(),
 			client: true,
 			limits: Default::default(),
+			viewers: Default::default(),
 			session: crate::driver::Transport::new(transport),
 			setup_stream: None,
 			publish: None,
@@ -1069,6 +1105,7 @@ mod tests {
 				stats: Default::default(),
 				client: false,
 				limits: Default::default(),
+				viewers: Default::default(),
 				session: crate::driver::Transport::new(transport.clone()),
 				setup_stream: None,
 				publish: None,
@@ -1156,6 +1193,7 @@ mod tests {
 			stats: Default::default(),
 			client: true,
 			limits: Default::default(),
+			viewers: Default::default(),
 			session: crate::driver::Transport::new(transport.clone()),
 			setup_stream: None,
 			publish: None,
@@ -1190,7 +1228,7 @@ mod tests {
 			.unwrap();
 		let session =
 			crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_unis(vec![Vec::new(), setup]);
-		let accepted = accept_setup(&mut crate::driver::Transport::new(session.clone()), version)
+		let accepted = accept_setup(&crate::driver::Transport::new(session.clone()), version)
 			.await
 			.unwrap();
 		assert_eq!(accepted.early.len(), 1);
@@ -1202,7 +1240,7 @@ mod tests {
 		let session =
 			crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_unis(vec![vec![1], vec![1]]);
 		assert!(matches!(
-			accept_setup(&mut crate::driver::Transport::new(session.clone()), Version::Lite05).now_or_never(),
+			accept_setup(&crate::driver::Transport::new(session.clone()), Version::Lite05).now_or_never(),
 			Some(Err(Error::ProtocolViolation))
 		));
 	}
@@ -1237,6 +1275,7 @@ mod tests {
 					client: false,
 					auth: crate::auth::Link::new(version.has_auth()),
 					limits: Default::default(),
+					viewers: Default::default(),
 				})
 				.unwrap();
 				let _ = started.driver.poll(&kio::Waiter::noop());
@@ -1292,6 +1331,7 @@ mod tests {
 					client: false,
 					auth: crate::auth::Link::new(version.has_auth()),
 					limits: Default::default(),
+					viewers: Default::default(),
 				})
 				.unwrap();
 				let _ = started.driver.poll(&kio::Waiter::noop());
@@ -1325,6 +1365,7 @@ mod tests {
 			peer_setup,
 			auth: crate::auth::Link::new(version.has_auth()),
 			limits: Default::default(),
+			viewers: Default::default(),
 		})
 		.unwrap()
 	}
@@ -1353,7 +1394,7 @@ mod tests {
 	async fn unknown_client_role_remains_bidirectional() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			let transport = ScriptedSession::new(Vec::new()).with_incoming_unis(vec![vec![1, 4, 1, 3, 1, 3]]);
-			let setup = accept_setup(&mut crate::driver::Transport::new(transport.clone()), version)
+			let setup = accept_setup(&crate::driver::Transport::new(transport.clone()), version)
 				.await
 				.unwrap();
 			assert_eq!(setup.setup.role, None);
@@ -1410,8 +1451,7 @@ mod tests {
 		}
 	}
 
-	// GOAWAY is not a request: refusing it without credit would leave the peer
-	// unaware that we are draining.
+	// Refusing GOAWAY without credit would leave the peer unaware that we are draining.
 	#[kio::test]
 	async fn goaway_waits_for_stream_credit() {
 		let transport = ScriptedSession::new(Vec::new()).without_credit();
@@ -1422,7 +1462,8 @@ mod tests {
 		assert_eq!(log.bi_opens(), 0, "GOAWAY waits for stream credit");
 		transport.grant_credit();
 		let _ = server.driver.poll(&kio::Waiter::noop());
-		assert_eq!(log.bi_opens(), 1, "GOAWAY stream was not opened");
+		// The GOAWAY and the announce interest that waited beside it.
+		assert_eq!(log.bi_opens(), 2, "GOAWAY stream was not opened");
 		assert!(log.closes().is_empty());
 	}
 

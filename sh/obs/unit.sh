@@ -35,9 +35,9 @@ ffmpeg=$(pkg-config --cflags libavcodec libavutil libswscale)
 # The output and source tests run against the real moq-ffi, over a server in
 # the same process. The bindings compile here, with the tests' flags.
 moq_prefix=$("$here/moq.sh")
-export PKG_CONFIG_PATH="$moq_prefix/lib/pkgconfig"
-moq_sources=$(pkg-config --variable=sources moq-cpp)
-moq_libs=$(pkg-config --libs moq-cpp)
+moq_pc="$moq_prefix/lib/pkgconfig/moq-cpp.pc"
+moq_sources=$(pkg-config --variable=sources "$moq_pc")
+moq_libs=$(pkg-config --libs "$moq_pc")
 
 flags=(-std=c++17 -g -O0 -pthread -Werror)
 if [ "$mode" = "tsan" ]; then

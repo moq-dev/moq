@@ -13,7 +13,8 @@ export async function run(): Promise<void> {
 	const offsets = [0, 80, 40];
 	try {
 		// The same reordered-PTS verdict runs here in Chromium before timing any work.
-		const check = new Track.Producer("reordered").accept({ timescale: Time.Timescale.MILLI });
+		// No publisher limit, so the reader's own 80 ms budget alone judges the reordered tail.
+		const check = new Track.Producer("reordered").accept({ timescale: Time.Timescale.MILLI, maxAge: null });
 		const reader = check.subscribe({ delay: { max: Milli(80) } });
 		try {
 			for (const timestamps of [[0], [100], [150, 200, 160]]) {
@@ -21,7 +22,7 @@ export async function run(): Promise<void> {
 				for (const ms of timestamps) group.writeFrame({ payload, timestamp: Time.Timestamp.fromMillis(ms) });
 				group.finish();
 			}
-			if ((await reader.recvGroup())?.sequence !== 1) throw new Error("B-frame tail rewound the drift edge");
+			if ((await reader.recvGroup())?.sequence !== 1n) throw new Error("B-frame tail rewound the drift edge");
 		} finally {
 			reader.close();
 			check.finish();
@@ -39,7 +40,10 @@ export async function run(): Promise<void> {
 									? Time.Timestamp.fromMicros(ms * 1000)
 									: Time.Timestamp.fromMillis(ms);
 						const tracks = Array.from({ length: publishers }, (_, i) =>
-							new Track.Producer(`p${i}`).accept(mode !== 0 ? { timescale: Time.Timescale.MILLI } : {}),
+							// No publisher limit: the retained history is what the readers drift over.
+							new Track.Producer(`p${i}`).accept(
+								mode !== 0 ? { timescale: Time.Timescale.MILLI, maxAge: null } : { maxAge: null },
+							),
 						);
 						const sources: Group.Producer[] = [];
 						const consumers: Group.Consumer[] = [];
@@ -70,7 +74,7 @@ export async function run(): Promise<void> {
 								for (let sequence = 0; sequence < retained; sequence++)
 									for (const reader of ordered) {
 										const group = await reader.nextGroup();
-										if (group?.sequence !== sequence) throw new Error("history missing");
+										if (group?.sequence !== BigInt(sequence)) throw new Error("history missing");
 										await group.readFrame();
 									}
 								sources.push(track.appendGroup());
@@ -81,7 +85,7 @@ export async function run(): Promise<void> {
 								}
 								// A frameless candidate beyond one owed group keeps the ordered
 								// cursor parked while frames advance its presentation edge.
-								track.createGroup(retained + 2);
+								track.createGroup(BigInt(retained + 2));
 								waiting.push(...ordered);
 							}
 							let start = 0;
