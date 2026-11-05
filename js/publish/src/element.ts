@@ -392,8 +392,13 @@ export default class MoqPublish extends HTMLElement {
 				return;
 			}
 
+			// Keep the pre-metadata placeholder out of the UI's retained aspect ratio.
+			const resize = () => {
+				preview.style.display = preview.videoWidth > 0 ? "block" : "none";
+			};
+			effect.event(preview, "loadedmetadata", resize);
+			effect.event(preview, "resize", resize);
 			preview.srcObject = new MediaStream([Video.normalizeSource(source).track]);
-			preview.style.display = "block";
 
 			effect.cleanup(() => {
 				preview.srcObject = null;
