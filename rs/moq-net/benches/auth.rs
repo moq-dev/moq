@@ -300,14 +300,14 @@ fn waiting(c: &mut Criterion) {
 									}));
 								}
 								let tokens: Vec<_> = presenting.await.into_iter().map(Result::unwrap).collect();
-								let mut announced = receive.consume().announced();
+								let mut announced = receive.consume().routes();
 								let mut seen = std::collections::HashSet::new();
 								while seen.len() < paths {
 									match announced.next().await.unwrap() {
-										moq_net::announce::Event::Start(update)
-										| moq_net::announce::Event::Update(update)
-										| moq_net::announce::Event::Restart(update)
-										| moq_net::announce::Event::Takeover { announce: update, .. }
+										moq_net::origin::RouteEvent::Start(update)
+										| moq_net::origin::RouteEvent::Update(update)
+										| moq_net::origin::RouteEvent::Restart(update)
+										| moq_net::origin::RouteEvent::Takeover { announce: update, .. }
 											if update.prefix.as_str().starts_with(&prefix) =>
 										{
 											seen.insert(update.prefix);
@@ -351,7 +351,7 @@ fn shared_requests(c: &mut Criterion) {
 					let (origin, driver) = origin::Producer::new(config);
 					harness::spawn(driver);
 					let (client, _server, mut pending, receive) = runtime.block_on(publisher(&origin));
-					let mut announced = receive.consume().announced();
+					let mut announced = receive.consume().routes();
 					let auths = runtime.block_on(async {
 						let mut auths = Vec::new();
 						for token in 0..tokens {
@@ -383,8 +383,8 @@ fn shared_requests(c: &mut Criterion) {
 							}
 							let mut seen = std::collections::HashSet::new();
 							while seen.len() < tokens * requests {
-								if let moq_net::announce::Event::Start(update)
-								| moq_net::announce::Event::Restart(update) = announced.next().await.unwrap()
+								if let moq_net::origin::RouteEvent::Start(update)
+								| moq_net::origin::RouteEvent::Restart(update) = announced.next().await.unwrap()
 									&& update.prefix.as_str().starts_with(&prefix)
 								{
 									seen.insert(update.prefix);

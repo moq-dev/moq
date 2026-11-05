@@ -44,6 +44,7 @@ async fn resolve(origin: &moq_net::origin::Producer) -> moq_net::broadcast::Cons
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves")
+		.unwrap()
 }
 
 async fn relayed(version: &str) -> Relayed {

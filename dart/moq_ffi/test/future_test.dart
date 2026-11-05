@@ -142,7 +142,7 @@ void main() {
         options: MoqRouteOptions(),
       );
       try {
-        expect(await next, isA<StartMoqAnnounceEvent>());
+        expect(await next, isA<PresentMoqAnnounceEvent>());
       } finally {
         route.broadcast().close();
         route.dispose();

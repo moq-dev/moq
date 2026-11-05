@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### `Following::available()` reports the path going offline ([#7678](https://github.com/moq-dev/moq/pull/7678))
+
+`moq::Following::available()` resolves to a null `std::shared_ptr<moq::BroadcastConsumer>` once the path goes offline (or, for a follow pinned to an instance, once another instance takes it over), then the next broadcast when something serves the path again. The first call is never null. Check for null before using a later result, and treat it like the previous instance ending.
+
 ### Publishing goes through one `moq::Route` handle
 
 `OriginProducer::create_broadcast(path)` is `route(path, options)`, and `requests(prefix)` is `route_prefix(prefix, options)`; `{}` options are the default. Each returns a `std::shared_ptr<moq::Route>`, which replaces `moq::Publication`, `moq::OriginRequests`, and `moq::BroadcastPrepared`:

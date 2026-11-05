@@ -28,7 +28,3 @@ The independent JSON window caller timestamp gap is implemented in
 
 Public API: moq-c gains pre-encoded rung disable, lower-rendition ordering,
 and reservation rate control. Wire: none.
-
-## Required
-
-- [OBS rung disable](/quest/m1/simulcast-rung-disable.md) - land the shared importer and FFI prerequisites in [moq-dev/moq#7029](https://github.com/moq-dev/moq/pull/7029) before adding their C ABI counterparts

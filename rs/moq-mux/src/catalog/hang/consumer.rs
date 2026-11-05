@@ -20,19 +20,22 @@ pub struct Consumer<E: CatalogExt = ()> {
 }
 
 impl<E: CatalogExt> Consumer<E> {
-	/// Create a new catalog consumer from a `catalog.json` track subscriber, compressed or not.
-	pub fn new(track: moq_net::track::Subscriber) -> Self {
+	/// Create a new catalog consumer reading a `catalog.json` track, compressed or not.
+	///
+	/// Subscribes to the track itself; see [`hang::catalog::Consumer::new`].
+	pub fn new(track: moq_net::track::Consumer) -> Self {
 		Self {
 			inner: hang::catalog::Consumer::new(track),
 		}
 	}
 
-	/// Poll for the next catalog update.
+	/// Get the next catalog update, or `None` once the track ends.
 	///
 	/// Fails with [`Error::EscapingBroadcast`](crate::Error::EscapingBroadcast) if any rendition's
 	/// `broadcast` reference or echo prefix walks above the root, rejecting the whole catalog
 	/// (see [`hang::catalog::Consumer::poll_next`]). A transport failure is
 	/// [`Error::Moq`](crate::Error::Moq).
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Catalog<E>>>> {
 		self.inner.poll_next(waiter).map_err(|err| match err {
 			// Lifted to this crate's variants, which `Source` reports for the same faults.
@@ -41,21 +44,10 @@ impl<E: CatalogExt> Consumer<E> {
 			err => crate::Error::Hang(err),
 		})
 	}
-
-	/// Get the next catalog update.
-	///
-	/// This method waits for the next catalog publication and returns the
-	/// catalog data. If there are no more updates, `None` is returned.
-	pub async fn next(&mut self) -> Result<Option<Catalog<E>>>
-	where
-		Catalog<E>: Unpin,
-	{
-		kio::wait(|waiter| self.poll_next(waiter)).await
-	}
 }
 
-impl<E: CatalogExt> From<moq_net::track::Subscriber> for Consumer<E> {
-	fn from(inner: moq_net::track::Subscriber) -> Self {
+impl<E: CatalogExt> From<moq_net::track::Consumer> for Consumer<E> {
+	fn from(inner: moq_net::track::Consumer) -> Self {
 		Self::new(inner)
 	}
 }
@@ -120,7 +112,7 @@ mod test {
 			.broadcast()
 			.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
 			.expect("catalog track should create");
-		let mut consumer = Consumer::new(track.subscribe(None));
+		let mut consumer = Consumer::new(track.consume());
 		let mut group = track.append_group().expect("catalog group should append");
 
 		let payload = serde_json::to_string(&published).expect("catalog should serialize");
@@ -172,14 +164,11 @@ mod test {
 
 		let resolved = requesting.await;
 		let (_dynamic, _route, track) = handler.await.expect("handler task");
-		let subscriber = resolved
+		let catalog_track = resolved
 			.expect("the handler served it")
 			.track(hang::Catalog::DEFAULT_NAME)
-			.expect("catalog track should resolve")
-			.subscribe(None)
-			.await
-			.expect("catalog track should subscribe");
-		let mut consumer = Consumer::new(subscriber);
+			.expect("catalog track should resolve");
+		let mut consumer = Consumer::new(catalog_track);
 
 		let mut group = track.append_group().expect("catalog group should append");
 		let payload = serde_json::to_string(&published).expect("catalog should serialize");
@@ -359,7 +348,7 @@ mod test {
 	#[test]
 	fn waits_for_pending_catalog_group_payload() {
 		let track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
-		let mut consumer = Consumer::new(track.subscribe(None));
+		let mut consumer = Consumer::new(track.consume());
 		let mut group = track.append_group().expect("catalog group should append");
 
 		let waiter = kio::Waiter::noop();
@@ -377,7 +366,7 @@ mod test {
 	#[test]
 	fn a_newer_version_is_a_typed_refusal() {
 		let track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
-		let mut consumer: Consumer = Consumer::new(track.subscribe(None));
+		let mut consumer: Consumer = Consumer::new(track.consume());
 		let mut group = track.append_group().expect("catalog group should append");
 		group
 			.write_frame(moq_net::Timestamp::ZERO, r#"{"version":5}"#)
@@ -393,7 +382,7 @@ mod test {
 	#[test]
 	fn waits_for_pending_catalog_group_payload_after_track_finish() {
 		let track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
-		let mut consumer = Consumer::new(track.subscribe(None));
+		let mut consumer = Consumer::new(track.consume());
 		let mut group = track.append_group().expect("catalog group should append");
 
 		track.finish().expect("catalog track should finish");
@@ -413,7 +402,7 @@ mod test {
 	#[test]
 	fn returns_latest_complete_catalog_group() {
 		let track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
-		let mut consumer = Consumer::new(track.subscribe(None));
+		let mut consumer = Consumer::new(track.consume());
 		let waiter = kio::Waiter::noop();
 
 		let (_old, old_payload) = catalog_payload("old");
@@ -439,7 +428,7 @@ mod test {
 	#[test]
 	fn waits_for_newer_pending_group_instead_of_returning_older_ready_group() {
 		let track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
-		let mut consumer = Consumer::new(track.subscribe(None));
+		let mut consumer = Consumer::new(track.consume());
 		let waiter = kio::Waiter::noop();
 
 		let (_old, old_payload) = catalog_payload("old");
@@ -466,7 +455,7 @@ mod test {
 	#[test]
 	fn retained_pending_group_is_superseded_by_newer_group() {
 		let track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
-		let mut consumer = Consumer::new(track.subscribe(None));
+		let mut consumer = Consumer::new(track.consume());
 		let waiter = kio::Waiter::noop();
 
 		let (_old, old_payload) = catalog_payload("old");
@@ -498,7 +487,7 @@ mod test {
 	#[test]
 	fn a_lost_track_is_a_transport_error() {
 		let track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
-		let mut consumer: Consumer = Consumer::new(track.subscribe(None));
+		let mut consumer: Consumer = Consumer::new(track.consume());
 		track.abort(moq_net::Error::Cancel).expect("catalog track should abort");
 
 		assert!(matches!(
@@ -510,7 +499,7 @@ mod test {
 	#[test]
 	fn returns_none_when_empty_track_finishes() {
 		let track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
-		let mut consumer: Consumer = Consumer::new(track.subscribe(None));
+		let mut consumer: Consumer = Consumer::new(track.consume());
 		let waiter = kio::Waiter::noop();
 
 		track.finish().expect("catalog track should finish");

@@ -38,7 +38,7 @@
 
 export * as Broadcast from "./broadcast.ts";
 export { Credential } from "./credential.ts";
-/** Decrypted datagrams and the events a protected datagram read yields. */
+/** Protected datagram track producers, consumers, and read events. */
 export * as Datagram from "./datagram.ts";
 export type { Name } from "./derive.ts";
 /** Generation epochs: the UUIDv7 text a publisher instance announces as its route's instance. */
@@ -49,5 +49,5 @@ export type * as Generation from "./generation.ts";
 /** Grouped-frame producer and consumer for one group identity. */
 export * as Group from "./group.ts";
 export { MAX_DATAGRAM_PLAINTEXT, MAX_GROUPED_PLAINTEXT, SECRET_LEN } from "./limits.ts";
-/** Grouped-frame and datagram writers and readers for one physical track. */
+/** Grouped-frame writers and readers for one physical track. */
 export * as Track from "./track.ts";

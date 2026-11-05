@@ -190,7 +190,7 @@ fn announce_info(announced: u32) -> moq_announce_event {
 		prefix_len: 0,
 		captures: std::ptr::null(),
 		captures_len: 0,
-		kind: moq_announce_kind::MOQ_ANNOUNCE_KIND_START,
+		kind: moq_announce_kind::MOQ_ANNOUNCE_KIND_PRESENT,
 		route: moq_route_info {
 			hops: std::ptr::null(),
 			hops_len: 0,
@@ -200,8 +200,6 @@ fn announce_info(announced: u32) -> moq_announce_event {
 				len: 0,
 			},
 		},
-		predecessor: std::ptr::null(),
-		predecessor_len: 0,
 	};
 	assert_eq!(unsafe { moq_origin_announced_info(announced, &mut info) }, 0);
 	info
@@ -235,6 +233,34 @@ extern "C" fn channel_callback(user_data: *mut c_void, code: i32) {
 	// Terminal delivery lets the receiver free user_data and its channel while send still runs.
 	let tx = unsafe { &*(user_data as *const mpsc::Sender<i32>) }.clone();
 	let _ = tx.send(code);
+}
+
+/// What [follow_channel_callback] forwards for `MOQ_FOLLOW_EVENT_OFFLINE`, so follow tests read
+/// one channel of codes: a handle, this, or a terminal code. Test-only: the ABI reports
+/// offline as its own event.
+const FOLLOW_OFFLINE: i32 = i32::MAX;
+
+/// The code a follow event forwards as, checking that each event carries what it promises.
+fn follow_code(event: moq_follow_event, code: i32) -> i32 {
+	match event {
+		moq_follow_event::MOQ_FOLLOW_EVENT_ONLINE => {
+			assert!(code > 0, "online carries a handle, got {code}");
+			code
+		}
+		moq_follow_event::MOQ_FOLLOW_EVENT_OFFLINE => {
+			assert_eq!(code, 0, "offline carries no code");
+			FOLLOW_OFFLINE
+		}
+		moq_follow_event::MOQ_FOLLOW_EVENT_END => {
+			assert!(code <= 0, "end carries a terminal code, got {code}");
+			code
+		}
+	}
+}
+
+/// [channel_callback] for [moq_origin_follow], forwarding through [follow_code].
+extern "C" fn follow_channel_callback(user_data: *mut c_void, event: moq_follow_event, code: i32) {
+	channel_callback(user_data, follow_code(event, code));
 }
 
 /// FFI callback for tests that only inspect the registrar's immediate return code.
@@ -3578,7 +3604,7 @@ fn announced_free_lifecycle() {
 
 	// The first callback is the announcement for our broadcast.
 	let (announced, mut info) = ann_cb.recv_route();
-	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_START);
+	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_PRESENT);
 	let got = unsafe { std::slice::from_raw_parts(info.prefix.cast::<u8>(), info.prefix_len) };
 	assert_eq!(got, path, "announced prefix should match");
 
@@ -3728,7 +3754,7 @@ fn local_announce() {
 	let broadcast = publish_broadcast(origin, path);
 
 	let (announced_id, info) = cb.recv_route();
-	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_START);
+	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_PRESENT);
 
 	let announced_prefix =
 		unsafe { std::str::from_utf8(std::slice::from_raw_parts(info.prefix.cast::<u8>(), info.prefix_len)).unwrap() };
@@ -3830,7 +3856,7 @@ fn announced_deactivation() {
 	let instance = instance_of(route);
 
 	let (announced_id, info) = cb.recv_route();
-	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_START);
+	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_PRESENT);
 	assert_eq!(route_instance(&info.route).as_ref(), Some(&instance));
 	assert_eq!(moq_origin_announced_free(announced_id), 0);
 
@@ -3839,14 +3865,14 @@ fn announced_deactivation() {
 	assert_eq!(moq_route_withdraw(route), 0);
 
 	let (deactivated_id, info) = cb.recv_route();
-	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_END);
+	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_ABSENT);
 	assert_eq!(moq_origin_announced_free(deactivated_id), 0);
 	assert!(request_once(origin, path) < 0, "a withdrawn broadcast is unroutable");
 
 	// Announcing again continues the same stream.
 	assert_eq!(moq_route_announce(route), 0);
 	let (reannounced_id, info) = cb.recv_route();
-	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_START);
+	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_PRESENT);
 	assert_eq!(route_instance(&info.route), Some(instance));
 	assert_eq!(moq_origin_announced_free(reannounced_id), 0);
 	let _ = request_broadcast(origin, path);
@@ -3913,7 +3939,7 @@ fn a_hidden_route_is_unroutable_until_announced() {
 	assert_eq!(moq_route_announce(route), 0);
 	let _ = request_broadcast(origin, path);
 	let (announced_id, info) = cb.recv_route();
-	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_START);
+	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_PRESENT);
 	assert_eq!(moq_origin_announced_free(announced_id), 0);
 
 	assert_eq!(moq_origin_announced_cancel(announced_task), 0);
@@ -3936,19 +3962,25 @@ fn route_options_carry_cost_and_instance_without_hops() {
 	assert_eq!(instance_of(route), instance);
 
 	let (announced, info) = cb.recv_route();
-	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_START);
+	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_PRESENT);
 	assert_eq!(info.route.hops_len, 0, "a local route claims no hops");
 	assert_eq!(info.route.cost, 7);
 	assert_eq!(route_instance(&info.route).as_ref(), Some(&instance));
 	assert_eq!(moq_origin_announced_free(announced), 0);
 
-	// Re-pricing changes the route in place, under the same instance.
+	// Re-pricing changes the route in place: the listing never reports it, but a fresh
+	// listing reads the new price under the same instance.
 	assert_eq!(moq_route_set_cost(route, 3), 0);
-	let (announced, info) = cb.recv_route();
-	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_UPDATE);
+	let repriced_cb = Callback::new();
+	let repriced_task =
+		id(unsafe { moq_origin_announced(origin, std::ptr::null(), Some(channel_callback), repriced_cb.ptr) });
+	let (announced, info) = repriced_cb.recv_route();
+	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_PRESENT);
 	assert_eq!(info.route.cost, 3);
 	assert_eq!(route_instance(&info.route).as_ref(), Some(&instance));
 	assert_eq!(moq_origin_announced_free(announced), 0);
+	assert_eq!(moq_origin_announced_cancel(repriced_task), 0);
+	assert_eq!(repriced_cb.recv_announce_terminal(), 0);
 
 	// Zeroed options are the default: visible at once, cost 0, under a freshly minted instance.
 	let zeroed = route_options(0, "", false);
@@ -3969,30 +4001,47 @@ fn route_options_carry_cost_and_instance_without_hops() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// Another route at a path is another stream: subscribers see a restart rather than a stalled
-/// broadcast.
+/// Another route at a path is another stream: the path stays listed, and a follower is
+/// handed the new route's broadcast.
 #[test]
 fn a_new_route_at_a_path_restarts() {
 	let origin = id(moq_origin_create());
 	let cb = Callback::new();
 	let announced_task = id(unsafe { moq_origin_announced(origin, std::ptr::null(), Some(channel_callback), cb.ptr) });
+	let follow_cb = Callback::new();
+	let path = b"restarted";
+	let follow = id(unsafe {
+		moq_origin_follow(
+			origin,
+			path.as_ptr() as *const c_char,
+			path.len(),
+			std::ptr::null(),
+			0,
+			Some(follow_channel_callback),
+			follow_cb.ptr,
+		)
+	});
 
 	let first = fresh_instance();
 	let (first_route, first_broadcast) = create_route(origin, b"restarted", Some(&route_options(0, &first, false)));
 	let (announced, info) = cb.recv_route();
-	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_START);
+	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_PRESENT);
 	assert_eq!(route_instance(&info.route), Some(first));
 	assert_eq!(moq_origin_announced_free(announced), 0);
+	let old = id(follow_cb.recv());
 
 	let second = fresh_instance();
 	let (second_route, second_broadcast) = create_route(origin, b"restarted", Some(&route_options(0, &second, false)));
-	let (announced, info) = cb.recv_route();
-	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_RESTART);
-	assert_eq!(route_instance(&info.route), Some(second));
-	assert_eq!(moq_origin_announced_free(announced), 0);
+	let new = id(follow_cb.recv());
+	assert_ne!(old, new);
 
+	assert_eq!(moq_origin_follow_cancel(follow), 0);
+	assert_eq!(follow_cb.recv_terminal(), 0);
+	assert_eq!(moq_consume_close(old), 0);
+	assert_eq!(moq_consume_close(new), 0);
+	// The path stayed present throughout: the cancel's terminal is the next callback.
 	assert_eq!(moq_origin_announced_cancel(announced_task), 0);
-	assert_eq!(cb.recv_announce_terminal(), 0);
+	assert_eq!(cb.recv(), 0, "a restart is not listed");
 	assert_eq!(moq_route_free(first_route), 0);
 	assert_eq!(moq_route_free(second_route), 0);
 	assert_eq!(moq_publish_close(first_broadcast), 0);
@@ -4954,7 +5003,7 @@ fn follow_local() {
 			path.len(),
 			std::ptr::null(),
 			0,
-			Some(channel_callback),
+			Some(follow_channel_callback),
 			cb.ptr,
 		)
 	});
@@ -5117,7 +5166,7 @@ fn follow_close_cancels() {
 			path.len(),
 			std::ptr::null(),
 			0,
-			Some(channel_callback),
+			Some(follow_channel_callback),
 			cb.ptr,
 		)
 	});
@@ -5154,7 +5203,7 @@ fn follow_delivers_a_restart() {
 			path.len(),
 			std::ptr::null(),
 			0,
-			Some(channel_callback),
+			Some(follow_channel_callback),
 			cb.ptr,
 		)
 	});
@@ -5198,7 +5247,7 @@ fn follow_delivers_a_takeover_once(dynamic_at: &str) {
 			path.len(),
 			std::ptr::null(),
 			0,
-			Some(channel_callback),
+			Some(follow_channel_callback),
 			cb.ptr,
 		)
 	});
@@ -5231,7 +5280,7 @@ fn follow_delivers_a_held_takeover_once() {
 	follow_delivers_a_takeover_once("live");
 }
 
-/// `moq_origin_request` and `moq_origin_follow` share one signature.
+/// The signature of `moq_origin_request`.
 type Resolve = unsafe extern "C" fn(
 	u32,
 	*const c_char,
@@ -5288,11 +5337,25 @@ fn an_instance_pins_request_and_follow() {
 	// follower delivers it while it still serves, and nothing for the winner.
 	let second = publish_run(origin, "live");
 	let cb = Callback::new();
-	let task = id(resolve_pinned(moq_origin_follow, origin, &instance, &cb));
+	let path = b"live";
+	let task = id(unsafe {
+		moq_origin_follow(
+			origin,
+			path.as_ptr() as *const c_char,
+			path.len(),
+			instance.as_ptr() as *const c_char,
+			instance.len(),
+			Some(follow_channel_callback),
+			cb.ptr,
+		)
+	});
 	let delivered = id(cb.recv());
-	let tx = unsafe { &*(cb.ptr as *const mpsc::Sender<i32>) }.clone();
-	crate::ffi::RUNTIME.spawn(async move { tx.send(i32::MAX).unwrap() });
-	assert_eq!(cb.recv(), i32::MAX, "the follower delivered another instance");
+	assert!(
+		cb.rx
+			.recv_timeout(moq_net::origin::Config::default().update_hold * 2)
+			.is_err(),
+		"the follower delivered another instance"
+	);
 	assert_eq!(moq_consume_close(delivered), 0);
 	assert_eq!(moq_origin_follow_cancel(task), 0);
 	assert_eq!(cb.recv_terminal(), 0, "cancel delivers terminal 0");
@@ -5321,7 +5384,7 @@ fn follow(origin: u32, path: &[u8], cb: &Callback) -> u32 {
 			path.len(),
 			std::ptr::null(),
 			0,
-			Some(channel_callback),
+			Some(follow_channel_callback),
 			cb.ptr,
 		)
 	})
@@ -5332,6 +5395,11 @@ fn follow(origin: u32, path: &[u8], cb: &Callback) -> u32 {
 struct Gate {
 	tx: mpsc::Sender<i32>,
 	hold: std::sync::Mutex<Option<mpsc::Receiver<()>>>,
+}
+
+/// [gated_callback] for [moq_origin_follow], forwarding through [follow_code].
+extern "C" fn gated_follow_callback(user_data: *mut c_void, event: moq_follow_event, code: i32) {
+	gated_callback(user_data, follow_code(event, code));
 }
 
 extern "C" fn gated_callback(user_data: *mut c_void, code: i32) {
@@ -5365,7 +5433,7 @@ fn follow_delivers_the_instance_again_after_an_end() {
 			path.len(),
 			std::ptr::null(),
 			0,
-			Some(gated_callback),
+			Some(gated_follow_callback),
 			&*gate as *const Gate as *mut c_void,
 		)
 	});
@@ -5383,6 +5451,7 @@ fn follow_delivers_the_instance_again_after_an_end() {
 		run.announce().unwrap();
 	}
 	release.send(()).unwrap();
+	assert_eq!(recv(), FOLLOW_OFFLINE, "the gap is reported before the return");
 	let again = id(recv());
 
 	assert_eq!(moq_consume_close(first), 0);
@@ -7663,7 +7732,7 @@ fn announce_route_hops_cross_a_relay_session() {
 	let task = id(unsafe { moq_origin_announced(sink, std::ptr::null(), Some(channel_callback), announced_cb.ptr) });
 	let (route, broadcast) = create_route(source, b"relayed", Some(&route_options(7, "", false)));
 	let (announced, info) = announced_cb.recv_route();
-	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_START);
+	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_PRESENT);
 	assert_eq!(
 		borrowed_string(info.prefix, info.prefix_len).as_deref(),
 		Some("relayed")
@@ -7763,7 +7832,7 @@ fn server_accepts_a_session() {
 			path.len(),
 			std::ptr::null(),
 			0,
-			Some(channel_callback),
+			Some(follow_channel_callback),
 			announced_cb.ptr,
 		)
 	});

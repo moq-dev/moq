@@ -126,11 +126,7 @@ impl Transcoder {
 
 		// The source catalog drives everything; wait for a snapshot with a usable
 		// video rendition (the first may precede the source publishing its video).
-		let track = source
-			.track(hang::Catalog::DEFAULT_NAME)?
-			.subscribe(hang::Catalog::default_subscription())
-			.await?;
-		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(track);
+		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(source.track(hang::Catalog::DEFAULT_NAME)?);
 		let mut decoders = catalog::Decoders::new(config.feed_decoder());
 		let (source_name, source_config, snapshot) = loop {
 			let Some(snapshot) = catalogs.next().await? else {
@@ -745,7 +741,6 @@ mod tests {
 				Err(err) => panic!("catalog track: {err}"),
 			}
 		};
-		let track = track.subscribe(None).await.unwrap();
 		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(track);
 		// The catalog track exists from the start but may open empty; the rung
 		// appears once the transcoder has read the source catalog.
@@ -852,7 +847,7 @@ mod tests {
 				Err(err) => panic!("catalog track: {err}"),
 			}
 		};
-		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(catalog.subscribe(None).await.unwrap());
+		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(catalog);
 		await_catalog(&mut catalogs, |snapshot| {
 			snapshot.video.renditions.contains_key("video/120p")
 		})
@@ -974,7 +969,7 @@ mod tests {
 				Err(err) => panic!("catalog track: {err}"),
 			}
 		};
-		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(track.subscribe(None).await.unwrap());
+		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(track);
 
 		let derived = await_catalog(&mut catalogs, |snapshot| {
 			snapshot.video.renditions.contains_key("video/120p")
@@ -1052,7 +1047,7 @@ mod tests {
 				Err(err) => panic!("catalog track: {err}"),
 			}
 		};
-		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(track.subscribe(None).await.unwrap());
+		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(track);
 
 		let derived = await_catalog(&mut catalogs, |snapshot| {
 			snapshot.video.renditions.contains_key("video/360p")
@@ -1153,7 +1148,7 @@ mod tests {
 				Err(err) => panic!("catalog track: {err}"),
 			}
 		};
-		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(catalog.subscribe(None).await.unwrap());
+		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(catalog);
 		await_catalog(&mut catalogs, |snapshot| {
 			snapshot.video.renditions.contains_key("video/120p")
 		})
@@ -1220,7 +1215,7 @@ mod tests {
 				Err(err) => panic!("catalog track: {err}"),
 			}
 		};
-		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(catalog.subscribe(None).await.unwrap());
+		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(catalog);
 		await_catalog(&mut catalogs, |snapshot| {
 			snapshot.video.renditions.contains_key("video/120p")
 		})
@@ -1292,7 +1287,7 @@ mod tests {
 				Err(err) => panic!("catalog track: {err}"),
 			}
 		};
-		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(catalog.subscribe(None).await.unwrap());
+		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(catalog);
 		await_catalog(&mut catalogs, |snapshot| {
 			snapshot.video.renditions.contains_key("video/120p")
 		})
@@ -1377,7 +1372,7 @@ mod tests {
 				Err(err) => panic!("catalog track: {err}"),
 			}
 		};
-		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(catalog.subscribe(None).await.unwrap());
+		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(catalog);
 		await_catalog(&mut catalogs, |snapshot| {
 			snapshot.video.renditions.contains_key("video/120p")
 		})
@@ -1488,7 +1483,7 @@ mod tests {
 				Err(err) => panic!("catalog track: {err}"),
 			}
 		};
-		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(catalog.subscribe(None).await.unwrap());
+		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(catalog);
 		await_catalog(&mut catalogs, |snapshot| {
 			snapshot.video.renditions.contains_key("video/120p")
 		})
@@ -1582,7 +1577,7 @@ mod tests {
 					Err(err) => panic!("catalog track: {err}"),
 				}
 			};
-			let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(catalog.subscribe(None).await.unwrap());
+			let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(catalog);
 			await_catalog(&mut catalogs, |snapshot| {
 				snapshot.video.renditions.contains_key("video/120p")
 			})
@@ -1668,7 +1663,7 @@ mod tests {
 					Err(err) => panic!("catalog track: {err}"),
 				}
 			};
-			let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(track.subscribe(None).await.unwrap());
+			let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(track);
 			await_catalog(&mut catalogs, |snapshot| {
 				snapshot.video.renditions.contains_key("video/120p")
 			})
@@ -1718,7 +1713,7 @@ mod tests {
 				Err(err) => panic!("catalog track: {err}"),
 			}
 		};
-		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(track.subscribe(None).await.unwrap());
+		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(track);
 		await_catalog(&mut catalogs, |snapshot| {
 			snapshot.video.renditions.contains_key("video/120p")
 		})
@@ -1837,7 +1832,7 @@ mod tests {
 				Err(err) => panic!("catalog track: {err}"),
 			}
 		};
-		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(track.subscribe(None).await.unwrap());
+		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(track);
 		let derived = await_catalog(&mut catalogs, |snapshot| !snapshot.video.renditions.is_empty()).await;
 
 		// Sized against the 640x360 H.264 rendition: no room for 720p, and 120p is
@@ -1911,7 +1906,7 @@ mod tests {
 				Err(err) => panic!("catalog track: {err}"),
 			}
 		};
-		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(track.subscribe(None).await.unwrap());
+		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(track);
 		catalogs.next().await.unwrap().unwrap();
 
 		// Drop the source: the catalog track ends and the broadcast closes, so

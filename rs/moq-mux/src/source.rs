@@ -191,11 +191,13 @@ impl Source {
 	/// The stream rejects a catalog carrying a `broadcast` reference that walks above the root
 	/// (see [`Error::EscapingBroadcast`](crate::Error::EscapingBroadcast)), so every snapshot a
 	/// consumer sees is one whose references all name a broadcast it may reach.
+	#[cfg(feature = "async")]
 	pub async fn catalog<E: crate::catalog::hang::CatalogExt>(
 		&self,
 		format: crate::catalog::CatalogFormat,
 	) -> crate::Result<crate::catalog::Consumer<E>> {
-		crate::catalog::Consumer::new(&self.broadcast(), format).await
+		let mut subscribing = crate::catalog::Subscribing::new(&self.broadcast(), format);
+		kio::wait(|waiter| subscribing.poll_ok(waiter)).await
 	}
 
 	/// The catalog broadcast, as a binding.
@@ -310,12 +312,14 @@ impl Source {
 	/// A reference that escapes above the origin root is
 	/// [`Error::EscapingBroadcast`](crate::Error::EscapingBroadcast): the rendition names
 	/// no broadcast, so there is nothing to resolve.
+	#[cfg(feature = "async")]
 	pub async fn resolve(
 		&self,
 		rel: Option<&moq_net::path::Relative>,
 		instance: Option<&moq_net::Instance>,
 	) -> crate::Result<moq_net::broadcast::Consumer> {
-		self.bind(rel, instance)?.broadcast().await
+		let binding = self.bind(rel, instance)?;
+		kio::wait(|waiter| binding.poll_broadcast(waiter)).await
 	}
 
 	/// Start one broadcast request now and retain its result for repeated reads.
@@ -354,14 +358,29 @@ impl Source {
 	/// This is the async counterpart to the poll-driven container exporters: consumers
 	/// that wrap a raw [`moq_net::track::Subscriber`] themselves (e.g. the WebRTC egress)
 	/// use it to honor cross-broadcast renditions without reimplementing the path math.
+	#[cfg(feature = "async")]
 	pub async fn subscribe_track(
 		&self,
 		rel: Option<&moq_net::path::Relative>,
 		instance: Option<&moq_net::Instance>,
 		name: &str,
 	) -> crate::Result<moq_net::track::Subscriber> {
-		let broadcast = self.bind(rel, instance)?.broadcast().await?;
-		Ok(broadcast.track(name)?.subscribe(None).await?)
+		let mut subscribe = self.subscribe(rel, instance, name)?;
+		kio::wait(|waiter| subscribe.poll(waiter)).await
+	}
+
+	/// Start [`subscribe_track`](Self::subscribe_track) for a caller that polls.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn subscribe(
+		&self,
+		rel: Option<&moq_net::path::Relative>,
+		instance: Option<&moq_net::Instance>,
+		name: &str,
+	) -> crate::Result<Subscribe> {
+		Ok(Subscribe::Binding {
+			binding: self.bind(rel, instance)?,
+			name: name.to_string(),
+		})
 	}
 
 	/// Follow the broadcast a rendition's reference names across its announcements.
@@ -389,7 +408,7 @@ impl Source {
 				check_instance(instance, &broadcast)?;
 				crate::follow::Instances::fixed(broadcast)
 			}
-			false => crate::follow::Instances::new(&self.origin, &path, instance)?,
+			false => crate::follow::Instances::following(self.origin.follow(&path, None)?, instance.cloned()),
 		})
 	}
 }
@@ -461,9 +480,10 @@ impl Binding {
 		self.sibling
 	}
 
-	/// Poll for the bound broadcast without blocking.
+	/// The bound broadcast, once the origin answers.
 	///
-	/// Concurrent polls and cancelled waits retain the same request and result.
+	/// Concurrent reads and cancelled waits retain the same request and result.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_broadcast(&self, waiter: &kio::Waiter) -> Poll<crate::Result<moq_net::broadcast::Consumer>> {
 		let broadcast = match &self.bound {
 			Bound::Ready(broadcast) => broadcast.clone(),
@@ -487,12 +507,56 @@ impl Binding {
 		};
 		Poll::Ready(check_instance(self.instance.as_ref(), &broadcast).map(|()| broadcast))
 	}
+}
 
-	/// The bound broadcast, awaiting the origin's answer when it hasn't arrived yet.
-	///
-	/// Concurrent reads and cancelled waits retain the same request and result.
-	pub async fn broadcast(&self) -> crate::Result<moq_net::broadcast::Consumer> {
-		kio::wait(|waiter| self.poll_broadcast(waiter)).await
+/// A track subscription waiting for its broadcast, then for SUBSCRIBE_OK.
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+pub(crate) enum Subscribe {
+	Binding {
+		binding: Binding,
+		name: String,
+	},
+	// The broadcast and track handles stay live until the subscription answers.
+	Subscribing {
+		_broadcast: moq_net::broadcast::Consumer,
+		_track: moq_net::track::Consumer,
+		subscribing: moq_net::track::Subscribing,
+	},
+	Done,
+}
+
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+impl Subscribe {
+	/// The track subscriber, once its broadcast resolves and the subscription is confirmed.
+	pub(crate) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<moq_net::track::Subscriber>> {
+		if let Self::Binding { binding, name } = self {
+			let broadcast = ready!(binding.poll_broadcast(waiter));
+			let subscribing = broadcast.and_then(|broadcast| {
+				let track = broadcast.track(name)?;
+				let subscribing = track.subscribe(None).into_inner();
+				Ok((broadcast, track, subscribing))
+			});
+			// The binding drops as soon as it answers, so its request ends with it.
+			match subscribing {
+				Ok((broadcast, track, subscribing)) => {
+					*self = Self::Subscribing {
+						_broadcast: broadcast,
+						_track: track,
+						subscribing,
+					}
+				}
+				Err(err) => {
+					*self = Self::Done;
+					return Poll::Ready(Err(err));
+				}
+			}
+		}
+		let Self::Subscribing { subscribing, .. } = self else {
+			panic!("polled a finished track subscription");
+		};
+		let result = ready!(subscribing.poll_ok(waiter)).map_err(Into::into);
+		*self = Self::Done;
+		Poll::Ready(result)
 	}
 }
 
@@ -506,7 +570,14 @@ fn poll_first(
 	waiter: &kio::Waiter,
 ) -> Poll<Result<moq_net::broadcast::Consumer, moq_net::Error>> {
 	let result = match following {
-		Ok(following) => ready!(following.poll_available(waiter)),
+		// The first change is always an instance: an end follows only one handed out.
+		Ok(following) => loop {
+			match ready!(following.poll_available(waiter)) {
+				Ok(Some(broadcast)) => break Ok(broadcast),
+				Ok(None) => continue,
+				Err(err) => break Err(err),
+			}
+		},
 		Err(err) => Err(err.clone()),
 	};
 	if let Err(err) = &result {
@@ -710,6 +781,7 @@ mod tests {
 		let catalog = kio::clock::timeout(timeout, consumer.follow("a/pub", None).unwrap().available())
 			.await
 			.expect("the catalog resolves")
+			.unwrap()
 			.unwrap();
 		let source = Source::new(consumer, catalog);
 		let sibling = kio::clock::timeout(timeout, source.resolve(Some(&Relative::new("./source").unwrap()), None))

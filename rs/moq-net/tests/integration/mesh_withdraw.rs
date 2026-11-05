@@ -48,7 +48,7 @@ impl Mesh {
 		for &(a, b) in edges {
 			pairs.push(peer(version, &nodes[a], &nodes[b]).await);
 		}
-		let watched = watch(nodes.last().unwrap().consume().announced());
+		let watched = watch(nodes.last().unwrap().consume().routes());
 		Self {
 			nodes,
 			_pairs: pairs,
@@ -182,7 +182,7 @@ async fn partial_mesh_withdraw_retracts_once() {
 	for (&(a, b), &ms) in PRODUCTION.iter().zip(PRODUCTION_LATENCY_MS) {
 		pairs.push(peer_with_latency(version, &nodes[a], &nodes[b], Duration::from_millis(ms)).await);
 	}
-	let mut watched: Vec<_> = nodes.iter().map(|node| watch(node.consume().announced())).collect();
+	let mut watched: Vec<_> = nodes.iter().map(|node| watch(node.consume().routes())).collect();
 
 	for publisher in [5, 13, 22, 26, 32] {
 		let broadcast = nodes[publisher]
@@ -239,7 +239,7 @@ async fn retracted_relay_ignores_a_stale_path() {
 	for &((a, b), latency) in STALE_PATHS {
 		pairs.push(peer_with_latency(version, &nodes[a], &nodes[b], latency).await);
 	}
-	let mut watched: Vec<_> = nodes.iter().map(|node| watch(node.consume().announced())).collect();
+	let mut watched: Vec<_> = nodes.iter().map(|node| watch(node.consume().routes())).collect();
 
 	let broadcast = nodes[7]
 		.route("room/7", moq_net::origin::RouteOptions::hidden())
@@ -314,8 +314,8 @@ impl Cluster {
 		let mut cluster = Self {
 			_pairs: pairs,
 			publisher: publishing,
-			client: watch(watching.consume().announced()),
-			relays: relays.iter().map(|relay| watch(relay.consume().announced())).collect(),
+			client: watch(watching.consume().routes()),
+			relays: relays.iter().map(|relay| watch(relay.consume().routes())).collect(),
 		};
 		// Let every session's announce interest land before anything is published.
 		kio::clock::sim::idle().await;
@@ -436,7 +436,7 @@ async fn late_better_path(mesh: &str, client: &str) -> (Vec<Kind>, Vec<Kind>) {
 	options.server_publish = Some(relays[3].consume());
 	options.client_subscribe = Some(watching.clone());
 	pairs.push(connect_mock(options).await);
-	let mut watcher = watch(watching.consume().announced());
+	let mut watcher = watch(watching.consume().routes());
 	kio::clock::sim::idle().await;
 	assert!(drain(&mut watcher).is_empty());
 

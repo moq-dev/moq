@@ -78,6 +78,7 @@ async fn closed_requests_are_granted_back() {
 		)
 		.await
 		.expect("announce timeout")
+		.unwrap()
 		.unwrap();
 
 		for round in 0..ROUNDS {
@@ -128,6 +129,7 @@ async fn flow_control_bounds_the_subscriptions_a_peer_holds() {
 		let remote = kio::clock::timeout(TIMEOUT, client.consume().follow("bcast", None).unwrap().available())
 			.await
 			.expect("announce timeout")
+			.unwrap()
 			.unwrap();
 		let subscribing: Vec<_> = (0..TRACKS)
 			.map(|i| {

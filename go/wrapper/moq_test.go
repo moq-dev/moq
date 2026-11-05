@@ -1610,7 +1610,7 @@ func TestBroadcastIsReachableOnlyWhileAnnounced(t *testing.T) {
 		t.Fatal(err)
 	}
 	event := nextRoute(t, ctx, announced)
-	if retracted, ok := event.(moq.AnnounceEventEnd); !ok || retracted.Announce.Prefix != "live" {
+	if retracted, ok := event.(moq.AnnounceEventAbsent); !ok || retracted.Announce.Prefix != "live" {
 		t.Fatalf("withdraw: event=%+v", event)
 	}
 	if _, err := consumer.Request(ctx, "live", nil); err == nil {
@@ -1708,43 +1708,116 @@ func TestAnnouncedExactFilterCapturesEmpty(t *testing.T) {
 	}
 }
 
-// A route mints its own instance and keeps it across re-pricing; another route
-// is another stream and restarts announce consumers.
-func TestAnnouncedInstanceRestarts(t *testing.T) {
+// A route mints its own instance and keeps it across re-pricing. Another route
+// keeps the path present in the listing and reaches only followers.
+func TestNewRouteReachesFollowers(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 
 	origin := newOrigin(t)
-	announced, err := origin.Consume().Announced(moq.AnnounceOptions{})
+	consumer := origin.Consume()
+	announced, err := consumer.Announced(moq.AnnounceOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer announced.Cancel()
+	following, err := consumer.Follow("instance", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer following.Cancel()
 
 	route, _ := newRoute(t, origin, "instance", moq.RouteOptions{})
 	minted := nextAnnounced(t, ctx, announced).Route.Instance
 	if minted == "" || minted != route.Instance() {
-		t.Fatalf("start instance = %q, want the minted %q", minted, route.Instance())
+		t.Fatalf("present instance = %q, want the minted %q", minted, route.Instance())
+	}
+	if _, err := following.Available(ctx); err != nil {
+		t.Fatal(err)
 	}
 
 	if err := route.SetCost(1); err != nil {
 		t.Fatal(err)
 	}
-	update, ok := nextRoute(t, ctx, announced).(moq.AnnounceEventUpdate)
-	if !ok || update.Announce.Route.Instance != minted {
-		t.Fatalf("update = %+v, want instance %s", update, minted)
+	stable := "cam"
+	second, _ := newRoute(t, origin, "instance", moq.RouteOptions{Instance: &stable, Epoch: 1})
+	if _, err := following.Available(ctx); err != nil {
+		t.Fatalf("follow after the instance change: %v", err)
 	}
 
-	stable := "cam"
-	newRoute(t, origin, "instance", moq.RouteOptions{Instance: &stable, Epoch: 1})
-	restart, ok := nextRoute(t, ctx, announced).(moq.AnnounceEventRestart)
-	if !ok || restart.Announce.Route.Instance != stable {
-		t.Fatalf("restart = %+v, want instance %s", restart, stable)
+	// The listing's next event is the absence, so neither the re-price nor the new
+	// route reached it.
+	if err := route.Withdraw(); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.Withdraw(); err != nil {
+		t.Fatal(err)
+	}
+	event := nextRoute(t, ctx, announced)
+	if absent, ok := event.(moq.AnnounceEventAbsent); !ok || absent.Announce.Route.Instance != stable {
+		t.Fatalf("event = %+v, want absent with instance %s", event, stable)
 	}
 
 	empty := ""
 	if _, err := origin.Route("refused", moq.RouteOptions{Instance: &empty}); !errors.Is(err, moq.ErrInvalidInstance) {
 		t.Fatalf("Route(empty instance) = %v, want ErrInvalidInstance", err)
+	}
+}
+
+// A follower reports the path going offline as nil, then the next broadcast once it returns.
+func TestFollowReportsOffline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	origin := newOrigin(t)
+	following, err := origin.Consume().Follow("offline", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer following.Cancel()
+
+	route, _ := newRoute(t, origin, "offline", moq.RouteOptions{})
+	if broadcast, err := following.Available(ctx); err != nil || broadcast == nil {
+		t.Fatalf("first Available = %v, %v; want a broadcast", broadcast, err)
+	}
+
+	if err := route.Withdraw(); err != nil {
+		t.Fatal(err)
+	}
+	if broadcast, err := following.Available(ctx); err != nil || broadcast != nil {
+		t.Fatalf("Available after withdraw = %v, %v; want nil", broadcast, err)
+	}
+
+	if err := route.Announce(); err != nil {
+		t.Fatal(err)
+	}
+	if broadcast, err := following.Available(ctx); err != nil || broadcast == nil {
+		t.Fatalf("Available after re-announce = %v, %v; want a broadcast", broadcast, err)
+	}
+}
+
+// A follower pinned to an instance reports another instance taking over as nil.
+func TestPinnedFollowReportsTakeoverOffline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	origin := newOrigin(t)
+	pinned := "cam"
+	following, err := origin.Consume().Follow("pinned", &pinned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer following.Cancel()
+
+	newRoute(t, origin, "pinned", moq.RouteOptions{Instance: &pinned})
+	if broadcast, err := following.Available(ctx); err != nil || broadcast == nil {
+		t.Fatalf("first Available = %v, %v; want a broadcast", broadcast, err)
+	}
+
+	other := "other"
+	newRoute(t, origin, "pinned", moq.RouteOptions{Instance: &other, Epoch: 1})
+	if broadcast, err := following.Available(ctx); err != nil || broadcast != nil {
+		t.Fatalf("Available after takeover = %v, %v; want nil", broadcast, err)
 	}
 }
 
@@ -1762,12 +1835,12 @@ func nextRoute(t *testing.T, ctx context.Context, announced *moq.AnnounceConsume
 	return event
 }
 
-// nextAnnounced returns the next newly announced route.
+// nextAnnounced returns the route of the next path to become present.
 func nextAnnounced(t *testing.T, ctx context.Context, announced *moq.AnnounceConsumer) moq.Announce {
 	t.Helper()
 
 	event := nextRoute(t, ctx, announced)
-	announcedEvent, ok := event.(moq.AnnounceEventStart)
+	announcedEvent, ok := event.(moq.AnnounceEventPresent)
 	if !ok {
 		t.Fatalf("expected an announcement, got %+v", event)
 	}

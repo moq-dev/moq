@@ -84,8 +84,10 @@ The route keeps the broadcast announced: `moq_route_free()` retracts it, and
 `moq_publish_close()` ends both. A route carries only a cost and the stream's instance;
 relays add the hops. Each route mints a fresh instance (`moq_route_instance()`) and keeps it
 across `moq_route_withdraw()` and `moq_route_announce()`, so a restarted publisher, being a
-new route, is a new stream viewers restart onto (`MOQ_ANNOUNCE_KIND_RESTART`) instead of a
-stalled broadcast. Set `instance` only for a publisher that continues its group sequences
+new route, is a new stream that `moq_origin_follow` hands viewers instead of a stalled
+broadcast; the path stays `MOQ_ANNOUNCE_KIND_PRESENT` throughout. The follow callback
+reports each instance as `MOQ_FOLLOW_EVENT_ONLINE` with its handle,
+`MOQ_FOLLOW_EVENT_OFFLINE` when the path goes offline, and one `MOQ_FOLLOW_EVENT_END`. Set `instance` only for a publisher that continues its group sequences
 across restarts, and raise `epoch` on each: readers stitch every route of one instance
 together, so restarting the sequences under an old instance splices unrelated groups into
 their tracks. To serve paths on demand, `moq_origin_route_prefix()` delivers each request to

@@ -43,6 +43,7 @@ async fn largest_quic_sequence_reaches_the_subscriber() {
 				.unwrap()
 				.available()
 				.await
+				.unwrap()
 				.unwrap();
 			let mut sub = remote.track("data").unwrap().subscribe(None).await.unwrap();
 			for sequence in [5, 1 << 32, (1 << 53) - 1, (1 << 53) + 1, (1 << 62) - 1] {
@@ -115,12 +116,19 @@ async fn wide_sequence_fails_only_its_subscription() {
 		.unwrap()
 		.available()
 		.await
+		.unwrap()
 		.unwrap();
 	let mut sub = cached.track("wide").unwrap().subscribe(None).await.unwrap();
 	assert_eq!(sub.recv_group().await.unwrap().unwrap().sequence, WIDE);
 
 	let consumer = client.consume();
-	let remote = consumer.follow("bench", None).unwrap().available().await.unwrap();
+	let remote = consumer
+		.follow("bench", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap()
+		.unwrap();
 
 	let result = kio::clock::timeout(Duration::from_secs(5), async {
 		let mut sub = remote.track("wide").unwrap().subscribe(None).await?;
@@ -171,7 +179,13 @@ async fn a_later_wide_group_fails_only_that_subscription() {
 	let _downstream = connect_mock(options).await;
 
 	let consumer = client.consume();
-	let remote = consumer.follow("bench", None).unwrap().available().await.unwrap();
+	let remote = consumer
+		.follow("bench", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap()
+		.unwrap();
 
 	let mut sub = remote.track("wide").unwrap().subscribe(None).await.unwrap();
 	let mut group = sub.recv_group().await.unwrap().unwrap();

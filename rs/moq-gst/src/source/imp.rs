@@ -842,9 +842,7 @@ impl Session {
 		path: &str,
 		lost: impl Future<Output = anyhow::Error>,
 	) -> Result<()> {
-		use moq_mux::follow::{Event, Instances};
-
-		let mut follow = Instances::new(origin, path, None)?;
+		let mut follow = origin.follow(path, None)?;
 		let mut shutdown = self.shutdown.clone();
 		let mut runs = tokio::task::JoinSet::new();
 		// Cancels the latest run.
@@ -856,16 +854,16 @@ impl Session {
 			let broadcast = tokio::select! {
 				_ = shutdown.changed() => break Ok(()),
 				err = &mut lost => break Err(err),
-				event = follow.next() => match event {
-					Ok(Event::Start(broadcast)) => {
+				event = follow.available() => match event {
+					Ok(Some(broadcast)) => {
 						tracing::info!(%path, instance = ?broadcast.info().instance, "online");
 						Some(broadcast)
 					}
-					Ok(Event::End) => {
+					Ok(None) => {
 						tracing::info!(%path, "offline, holding pads until it returns");
 						None
 					}
-					Err(moq_mux::Error::Moq(moq_net::Error::Closed)) => break Ok(()),
+					Err(moq_net::Error::Closed) => break Ok(()),
 					Err(err) => break Err(anyhow::Error::from(err).context("broadcast refused")),
 				},
 				joined = runs.join_next(), if !runs.is_empty() => match joined.expect("guarded by is_empty") {
@@ -914,20 +912,10 @@ impl Session {
 	/// with the session, except those of renditions the catalog retired.
 	async fn follow_catalog(&self, source: moq_mux::Source, cancel: &mut watch::Receiver<bool>) -> Result<()> {
 		let broadcast = source.broadcast();
-		let catalog_track = broadcast.track(hang::catalog::Catalog::DEFAULT_NAME)?;
-		// A publisher that never answers would otherwise hold the run until it is cancelled.
-		let catalog_track = tokio::select! {
-			track = catalog_track.subscribe(hang::catalog::Catalog::default_subscription()) => match track {
-				Ok(track) => track,
-				Err(err) if source_lost(&err) => {
-					tracing::warn!(%err, "catalog unavailable, holding pads");
-					return Ok(());
-				}
-				Err(err) => return Err(anyhow::Error::from(err).context("catalog refused")),
-			},
-			_ = cancel.changed() => return Ok(()),
-		};
-		let mut catalog_consumer = moq_mux::catalog::hang::Consumer::new(catalog_track);
+		// The consumer subscribes itself: a refused or lost subscription surfaces from its first read
+		// below, and a publisher that never answers holds the run only until it is cancelled.
+		let mut catalog_consumer =
+			moq_mux::catalog::hang::Consumer::new(broadcast.track(hang::catalog::Catalog::DEFAULT_NAME)?);
 
 		// Follow the catalog for the whole run and reconcile against every update, rather than
 		// building the renditions once from the first frame. This covers reactive publishers (the
@@ -1332,7 +1320,7 @@ impl Follower {
 		// The catalog's own broadcast is ready at once, so its renditions play even when the
 		// catalog closed before this follower ran.
 		match instances.poll_next(&moq_net::kio::Waiter::noop()) {
-			std::task::Poll::Ready(Ok(moq_mux::follow::Event::Start(instance))) => self.start(instance),
+			std::task::Poll::Ready(Ok(Some(instance))) => self.start(instance),
 			std::task::Poll::Ready(Err(err)) => {
 				gst::warning!(CAT, "lost {}: {err:?}", self.path);
 				return;
@@ -1392,11 +1380,11 @@ impl Follower {
 					}
 				}
 				event = instances.next(), if following => match event {
-					Ok(moq_mux::follow::Event::Start(instance)) => {
+					Ok(Some(instance)) => {
 						gst::info!(CAT, "{} is online, starting its renditions", self.path);
 						self.start(instance);
 					}
-					Ok(moq_mux::follow::Event::End) => {
+					Ok(None) => {
 						gst::info!(CAT, "{} is offline, holding its pads", self.path);
 						self.offline();
 					}
@@ -4107,7 +4095,7 @@ mod session_tests {
 	}
 
 	/// Block until the path's announcements report an event `wanted` accepts.
-	fn await_event(follow: &mut moq_net::announce::Consumer, wanted: impl Fn(&moq_net::announce::Event) -> bool) {
+	fn await_event(follow: &mut moq_net::origin::Routes, wanted: impl Fn(&moq_net::origin::RouteEvent) -> bool) {
 		let next = async {
 			while let Some(event) = follow.next().await {
 				if wanted(&event) {
@@ -4131,15 +4119,17 @@ mod session_tests {
 	}
 
 	/// The announcements of the routes covering `path` on `origin`.
-	fn watch(origin: &moq_net::origin::Producer, path: &str) -> moq_net::announce::Consumer {
+	fn watch(origin: &moq_net::origin::Producer, path: &str) -> moq_net::origin::Routes {
 		let path = moq_net::Patterns::from(moq_net::Pattern::literal(path).unwrap());
-		origin.consume().scope("", &path).unwrap().announced()
+		origin.consume().scope("", &path).unwrap().routes()
 	}
 
 	/// Follow `room` on `origin` past its start.
-	fn announced(origin: &moq_net::origin::Producer) -> moq_net::announce::Consumer {
+	fn announced(origin: &moq_net::origin::Producer) -> moq_net::origin::Routes {
 		let mut follow = watch(origin, "room");
-		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
+		await_event(&mut follow, |event| {
+			matches!(event, moq_net::origin::RouteEvent::Start(_))
+		});
 		follow
 	}
 
@@ -4265,9 +4255,13 @@ mod session_tests {
 		let mut first = Publisher::sibling(&origin, Default::default());
 		let pad = recorder.written(&mut first, 1);
 		let mut follow = watch(&origin, "cam");
-		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
+		await_event(&mut follow, |event| {
+			matches!(event, moq_net::origin::RouteEvent::Start(_))
+		});
 		drop(first);
-		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::End(_)));
+		await_event(&mut follow, |event| {
+			matches!(event, moq_net::origin::RouteEvent::End(_))
+		});
 
 		let mut second = Publisher::sibling(&origin, Default::default());
 		assert_eq!(recorder.written(&mut second, 2), pad, "the return moved to another pad");
@@ -4322,9 +4316,13 @@ mod session_tests {
 		assert_eq!(recorder.written(&mut first, 2), pad);
 
 		let mut follow = watch(&origin, "cam");
-		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
+		await_event(&mut follow, |event| {
+			matches!(event, moq_net::origin::RouteEvent::Start(_))
+		});
 		drop(first);
-		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::End(_)));
+		await_event(&mut follow, |event| {
+			matches!(event, moq_net::origin::RouteEvent::End(_))
+		});
 		let mut second = Publisher::sibling(&origin, Default::default());
 		assert_eq!(recorder.written(&mut second, 3), pad, "the return moved to another pad");
 		assert_eq!(
@@ -4417,11 +4415,17 @@ mod session_tests {
 		let pad = recorder.written(&mut first, 1);
 		first.video.finish().unwrap();
 		await_finished(&first);
-		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
+		await_event(&mut follow, |event| {
+			matches!(event, moq_net::origin::RouteEvent::Start(_))
+		});
 		first.route.as_ref().unwrap().withdraw();
-		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::End(_)));
+		await_event(&mut follow, |event| {
+			matches!(event, moq_net::origin::RouteEvent::End(_))
+		});
 		first.route.as_ref().unwrap().announce().unwrap();
-		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
+		await_event(&mut follow, |event| {
+			matches!(event, moq_net::origin::RouteEvent::Start(_))
+		});
 
 		let mut second = Publisher::sibling(&origin, Default::default());
 		assert_eq!(
@@ -4496,9 +4500,13 @@ mod session_tests {
 		let pad = recorder.written(&mut first, 1);
 		room.catalog.finish().unwrap();
 		let mut follow = watch(&origin, "cam");
-		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
+		await_event(&mut follow, |event| {
+			matches!(event, moq_net::origin::RouteEvent::Start(_))
+		});
 		drop(first);
-		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::End(_)));
+		await_event(&mut follow, |event| {
+			matches!(event, moq_net::origin::RouteEvent::End(_))
+		});
 
 		let mut second = Publisher::sibling(&origin, Default::default());
 		assert_eq!(recorder.written(&mut second, 2), pad, "the return moved to another pad");
@@ -4773,14 +4781,16 @@ mod session_tests {
 		let unpinned = recorder.written(&mut second, 2);
 		let pad = played.into_iter().find(|pad| *pad != unpinned).unwrap();
 		let mut follow = watch(&origin, "cam");
-		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
+		await_event(&mut follow, |event| {
+			matches!(event, moq_net::origin::RouteEvent::Start(_))
+		});
 		drop(second);
 		await_event(&mut follow, |event| {
 			matches!(
 				event,
-				moq_net::announce::Event::Restart(_)
-					| moq_net::announce::Event::Takeover { .. }
-					| moq_net::announce::Event::Start(_)
+				moq_net::origin::RouteEvent::Restart(_)
+					| moq_net::origin::RouteEvent::Takeover { .. }
+					| moq_net::origin::RouteEvent::Start(_)
 			)
 		});
 
@@ -4825,9 +4835,13 @@ mod session_tests {
 		let mut first = Publisher::sibling(&origin, Default::default());
 		let pad = recorder.written(&mut first, 1);
 		let mut follow = watch(&origin, "cam");
-		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
+		await_event(&mut follow, |event| {
+			matches!(event, moq_net::origin::RouteEvent::Start(_))
+		});
 		drop(first);
-		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::End(_)));
+		await_event(&mut follow, |event| {
+			matches!(event, moq_net::origin::RouteEvent::End(_))
+		});
 
 		room.catalog.modify().unwrap().video.renditions.clear();
 		for _ in 0..200 {
@@ -4842,7 +4856,9 @@ mod session_tests {
 		);
 
 		let mut second = Publisher::sibling(&origin, Default::default());
-		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
+		await_event(&mut follow, |event| {
+			matches!(event, moq_net::origin::RouteEvent::Start(_))
+		});
 		for _ in 0..10 {
 			second.write(2);
 			block(Duration::from_millis(50));
@@ -4867,9 +4883,13 @@ mod session_tests {
 		let mut first = Publisher::sibling(&origin, Default::default());
 		let pad = recorder.written(&mut first, 1);
 		let mut follow = watch(&origin, "cam");
-		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
+		await_event(&mut follow, |event| {
+			matches!(event, moq_net::origin::RouteEvent::Start(_))
+		});
 		drop(first);
-		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::End(_)));
+		await_event(&mut follow, |event| {
+			matches!(event, moq_net::origin::RouteEvent::End(_))
+		});
 
 		let listed = room.catalog.modify().unwrap().video.renditions.clone();
 		room.catalog.modify().unwrap().video.renditions.clear();
@@ -4943,16 +4963,18 @@ mod session_tests {
 		// The reference lets the old instance go once another wins its path, and only then
 		// does the new one leave, so the return is a resume rather than a missed restart.
 		let mut follow = watch(&origin, "cam");
-		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
+		await_event(&mut follow, |event| {
+			matches!(event, moq_net::origin::RouteEvent::Start(_))
+		});
 		let mut new = Publisher::sibling(&origin, Default::default());
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::announce::Event::Restart(_))
+			matches!(event, moq_net::origin::RouteEvent::Restart(_))
 		});
 		await_demand(&old, false);
 		new.write(2);
 		drop(new);
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::announce::Event::Restart(_))
+			matches!(event, moq_net::origin::RouteEvent::Restart(_))
 		});
 
 		await_demand(&old, true);
@@ -5052,7 +5074,7 @@ mod session_tests {
 
 		publisher.route.as_ref().unwrap().set_cost(5).unwrap();
 		await_event(&mut announced, |event| {
-			matches!(event, moq_net::announce::Event::Update(_))
+			matches!(event, moq_net::origin::RouteEvent::Update(_))
 		});
 		recorder.written(&mut publisher, 2);
 		stop(session);
@@ -5167,7 +5189,7 @@ mod session_tests {
 		old.catalog.finish().unwrap();
 		drop(old);
 		await_event(&mut announced, |event| {
-			matches!(event, moq_net::announce::Event::End(_))
+			matches!(event, moq_net::origin::RouteEvent::End(_))
 		});
 
 		let mut new = Publisher::new(&origin, Default::default(), video_rendition());
@@ -5197,7 +5219,7 @@ mod session_tests {
 
 		old.route.as_ref().unwrap().withdraw();
 		await_event(&mut announced, |event| {
-			matches!(event, moq_net::announce::Event::End(_))
+			matches!(event, moq_net::origin::RouteEvent::End(_))
 		});
 		drop(old);
 
@@ -5250,7 +5272,7 @@ mod session_tests {
 			let route = next.route.as_ref().unwrap();
 			route.withdraw();
 			await_event(&mut announced, |event| {
-				matches!(event, moq_net::announce::Event::End(_))
+				matches!(event, moq_net::origin::RouteEvent::End(_))
 			});
 			route.announce().unwrap();
 			assert_eq!(
@@ -5278,8 +5300,12 @@ mod session_tests {
 			.expect("the refusal held the session")
 			.unwrap()
 			.expect_err("the refusal did not fail the session");
+		// The catalog consumer subscribes itself, so the refusal surfaces from its first read.
 		assert!(
-			matches!(err.downcast_ref::<moq_net::Error>(), Some(moq_net::Error::NotFound)),
+			matches!(
+				err.downcast_ref::<moq_mux::Error>(),
+				Some(moq_mux::Error::Moq(moq_net::Error::NotFound))
+			),
 			"{err:?}"
 		);
 	}
@@ -5725,7 +5751,7 @@ mod session_tests {
 		let mut announced = announced(&relay.origin);
 		session.abort(moq_net::Error::App(1));
 		await_event(&mut announced, |event| {
-			matches!(event, moq_net::announce::Event::End(_))
+			matches!(event, moq_net::origin::RouteEvent::End(_))
 		});
 
 		let mut new = Publisher::new(&relay.origin, Default::default(), video_rendition());

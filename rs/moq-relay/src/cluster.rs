@@ -2531,7 +2531,7 @@ mod tests {
 					false => cluster.scope(lease, &request),
 				}
 				.expect("admitted");
-				let mut announced = admitted.subscriber.expect("subscribe grant").announced();
+				let mut announced = admitted.subscriber.expect("subscribe grant").routes();
 				let mut seen = Vec::new();
 				while let Some(route) = try_next_announced(&mut announced) {
 					seen.push(route.prefix.to_string());
@@ -2549,20 +2549,20 @@ mod tests {
 
 	/// The next route and whether it is active.
 	#[cfg(feature = "cluster-lan")]
-	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+	async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net::announce::Announce, bool)> {
 		match announced.next().await? {
-			moq_net::announce::Event::Start(route)
-			| moq_net::announce::Event::Update(route)
-			| moq_net::announce::Event::Restart(route)
-			| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
-			moq_net::announce::Event::End(route) => Some((route, false)),
+			moq_net::origin::RouteEvent::Start(route)
+			| moq_net::origin::RouteEvent::Update(route)
+			| moq_net::origin::RouteEvent::Restart(route)
+			| moq_net::origin::RouteEvent::Takeover { announce: route, .. } => Some((route, true)),
+			moq_net::origin::RouteEvent::End(route) => Some((route, false)),
 		}
 	}
 
 	/// The next announcement without blocking.
-	fn try_next_announced(announced: &mut moq_net::announce::Consumer) -> Option<moq_net::announce::Announce> {
+	fn try_next_announced(announced: &mut moq_net::origin::Routes) -> Option<moq_net::announce::Announce> {
 		match announced.try_next()? {
-			moq_net::announce::Event::Start(route) => Some(route),
+			moq_net::origin::RouteEvent::Start(route) => Some(route),
 			other => panic!("expected an announcement: got {other:?}"),
 		}
 	}
@@ -2658,7 +2658,15 @@ mod tests {
 		let (cluster, driver) = Cluster::new(with_stats()).unwrap();
 		let consumer = cluster.origin.consume();
 		let path = Path::from_static(".stats/node");
-		let announced = async { consumer.follow(&path, None).unwrap().available().await.unwrap() };
+		let announced = async {
+			consumer
+				.follow(&path, None)
+				.unwrap()
+				.available()
+				.await
+				.unwrap()
+				.unwrap()
+		};
 		let futures::future::Either::Right((broadcast, driver)) =
 			futures::future::select(Box::pin(driver.run()), Box::pin(announced)).await
 		else {
@@ -2697,7 +2705,8 @@ mod tests {
 		)
 		.await
 		.expect("stats broadcast announced within 5s")
-		.expect("stats broadcast resolves");
+		.expect("stats broadcast resolves")
+		.unwrap();
 		assert!(broadcast.info().instance.is_some(), "stats announce under an instance");
 
 		// Several publish intervals (1s each by default) later, the task is still
@@ -3389,7 +3398,8 @@ mod tests {
 		)
 		.await
 		.expect("stats announced")
-		.expect("stats present");
+		.expect("stats present")
+		.unwrap();
 	}
 
 	/// The reserved `cluster.id` 0 is rejected, since it cannot be excluded for loop
@@ -3883,7 +3893,7 @@ mod tests {
 		};
 		let _dial = fingerprint.dial_lan_target(&target).expect("dial");
 
-		let mut announced = fingerprint.origin.consume().announced();
+		let mut announced = fingerprint.origin.consume().routes();
 		let (update, _) = kio::clock::timeout(TIMEOUT, next_update(&mut announced))
 			.await
 			.expect("timed out waiting for from-node")
@@ -3896,7 +3906,7 @@ mod tests {
 			.origin
 			.route("from-fingerprint", moq_net::origin::RouteOptions::default())
 			.expect("create");
-		let mut announced = node.origin.consume().announced();
+		let mut announced = node.origin.consume().routes();
 		loop {
 			let (update, _) = kio::clock::timeout(TIMEOUT, next_update(&mut announced))
 				.await
@@ -3910,7 +3920,7 @@ mod tests {
 		}
 
 		// Each relay's local view holds only what it ingested itself.
-		let mut local = node.origin.consume().local().announced();
+		let mut local = node.origin.consume().local().routes();
 		let update = try_next_announced(&mut local).expect("from-node is local");
 		assert_eq!(update.prefix.as_str(), "from-node");
 		assert_eq!(update.route.source(), origin::Source::Local);
@@ -4209,7 +4219,7 @@ mod tests {
 			.await
 			.expect("dialer task");
 
-		let mut announced = node.origin.consume().announced();
+		let mut announced = node.origin.consume().routes();
 		loop {
 			let (update, active) = kio::clock::timeout(TIMEOUT, next_update(&mut announced))
 				.await
@@ -4257,14 +4267,14 @@ mod tests {
 			.expect("peer")
 			.route("forwarded", Default::default());
 
-		let mut announced = cluster.origin.consume().announced();
+		let mut announced = cluster.origin.consume().routes();
 		let forwarded = try_next_announced(&mut announced).expect("forwarded");
 		assert_eq!(forwarded.prefix.as_str(), "forwarded");
 		assert!(matches!(forwarded.route.source(), origin::Source::Peer(_)));
 		let ingest = try_next_announced(&mut announced).expect("ingest");
 		assert_eq!(ingest.route.source(), origin::Source::Local);
 
-		let mut local = cluster.origin.consume().local().announced();
+		let mut local = cluster.origin.consume().local().routes();
 		assert_eq!(
 			try_next_announced(&mut local).expect("ingest").prefix.as_str(),
 			"ingest"
@@ -4299,14 +4309,14 @@ mod tests {
 			.expect("core")
 			.route("core", Default::default());
 
-		let mut everyone = cluster.subscriber(&client).expect("client").consume().announced();
+		let mut everyone = cluster.subscriber(&client).expect("client").consume().routes();
 		let mut prefixes = std::iter::from_fn(|| try_next_announced(&mut everyone))
 			.map(|announce| announce.prefix.to_string())
 			.collect::<Vec<_>>();
 		prefixes.sort();
 		assert_eq!(prefixes, ["core", "ingest", "mesh"]);
 
-		let mut toward_core = cluster.subscriber(&core).expect("core").consume().announced();
+		let mut toward_core = cluster.subscriber(&core).expect("core").consume().routes();
 		let mut prefixes = std::iter::from_fn(|| try_next_announced(&mut toward_core))
 			.map(|announce| announce.prefix.to_string())
 			.collect::<Vec<_>>();

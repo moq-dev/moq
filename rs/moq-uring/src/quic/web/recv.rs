@@ -82,12 +82,8 @@ impl Stream {
 		self.stop_mut(code);
 	}
 
-	/// Wait until the stream ends after its bytes are read, the peer resets it, or the session closes.
-	pub async fn closed(&mut self) -> Result<(), Error> {
-		kio::wait(|waiter| self.poll_closed(waiter)).await
-	}
-
-	/// Poll until the stream ends after its bytes are read, the peer resets it, or the session closes.
+	/// Resolves once the stream ends after its bytes are read, the peer resets it, or the session closes.
+	#[kio::wrapper]
 	pub fn poll_closed(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let close = &self.close;
 		let Some(inner) = &mut self.inner else {

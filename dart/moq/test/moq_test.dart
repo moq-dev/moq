@@ -279,7 +279,7 @@ void main() {
     viewer.dispose();
 
     final announcement = client.announced().updates().firstWhere(
-      (event) => event is AnnounceEventStart,
+      (event) => event is AnnounceEventPresent,
     );
     final route = relay.route(
       path: 'live',
@@ -291,7 +291,7 @@ void main() {
     );
     route.announce();
     final announced =
-        (await announcement.timeout(timeout) as AnnounceEventStart).announce;
+        (await announcement.timeout(timeout) as AnnounceEventPresent).announce;
     expect(announced.prefix, 'live');
 
     final requested = await client.request(announced.prefix).timeout(timeout);
@@ -371,14 +371,14 @@ void main() {
     final serverSession = await accepted;
 
     final announcement = client.announced().updates().firstWhere(
-      (event) => event is AnnounceEventStart,
+      (event) => event is AnnounceEventPresent,
     );
     final route = server.route('live', options: RouteOptions(hidden: true));
     final broadcast = route.broadcast();
     final track = broadcast.publishTrack(name: 'events', info: null);
     route.announce();
     final announced =
-        (await announcement.timeout(timeout) as AnnounceEventStart).announce;
+        (await announcement.timeout(timeout) as AnnounceEventPresent).announce;
     expect(announced.prefix, 'live');
 
     await client.close();
@@ -545,14 +545,14 @@ void main() {
     route.announce();
     final announced = consumer.announced(config: MoqAnnounceConfig());
     final first = await nextRoute(announced);
-    expect(first, isA<AnnounceEventStart>());
-    expect((first as AnnounceEventStart).announce.prefix, 'live');
+    expect(first, isA<AnnounceEventPresent>());
+    expect((first as AnnounceEventPresent).announce.prefix, 'live');
     expect(first.announce.route.instance, route.instanceId());
 
     route.withdraw();
     final retracted = await nextRoute(announced);
-    expect(retracted, isA<AnnounceEventEnd>());
-    expect((retracted as AnnounceEventEnd).announce.prefix, 'live');
+    expect(retracted, isA<AnnounceEventAbsent>());
+    expect((retracted as AnnounceEventAbsent).announce.prefix, 'live');
     await expectLater(
       consumer.request(path: 'live').timeout(timeout),
       throwsA(anything),
@@ -560,7 +560,7 @@ void main() {
 
     // Announcing again continues the same stream.
     route.announce();
-    final again = await nextRoute(announced) as AnnounceEventStart;
+    final again = await nextRoute(announced) as AnnounceEventPresent;
     expect(again.announce.route.instance, route.instanceId());
     await consumer.request(path: 'live').timeout(timeout);
 
@@ -570,7 +570,7 @@ void main() {
     await consumer.request(path: 'live').timeout(timeout);
     final kept = route.broadcast();
     route.cancel();
-    expect(await nextRoute(announced), isA<AnnounceEventEnd>());
+    expect(await nextRoute(announced), isA<AnnounceEventAbsent>());
     expect(() => route.announce(), throwsA(isA<CancelledMoqException>()));
     kept.publishTrack(name: 'after', info: null);
     kept.close();
@@ -583,9 +583,9 @@ void main() {
     final origin = MoqOriginProducer(config: MoqOriginConfig());
     final announced = origin.consume().announced(config: MoqAnnounceConfig());
     final route = origin.route(path: 'live', options: RouteOptions());
-    expect(await nextRoute(announced), isA<AnnounceEventStart>());
+    expect(await nextRoute(announced), isA<AnnounceEventPresent>());
     route.broadcast().close();
-    expect(await nextRoute(announced), isA<AnnounceEventEnd>());
+    expect(await nextRoute(announced), isA<AnnounceEventAbsent>());
     expect(() => route.announce(), throwsA(isA<ClosedMoqException>()));
     route.dispose();
     announced.cancel();
@@ -607,37 +607,62 @@ void main() {
     replacement.dispose();
   });
 
+  test('a new route restarts followers but stays listed', () async {
+    final origin = MoqOriginProducer(config: MoqOriginConfig());
+    final consumer = origin.consume();
+    final announced = consumer.announced(config: MoqAnnounceConfig());
+    final following = consumer.follow(path: 'instance');
+    final first = origin.route(path: 'instance', options: RouteOptions());
+
+    final present = await nextRoute(announced) as AnnounceEventPresent;
+    expect(present.announce.route.instance, first.instanceId());
+    (await following.available().timeout(timeout))!.dispose();
+
+    final second = origin.route(
+      path: 'instance',
+      options: RouteOptions(instance: 'camera', epoch: 1),
+    );
+    expect(second.instanceId(), 'camera');
+    (await following.available().timeout(timeout))!.dispose();
+
+    // The takeover was not listed, so the next event is the path going absent.
+    first.withdraw();
+    second.withdraw();
+    final absent = await nextRoute(announced) as AnnounceEventAbsent;
+    expect(absent.announce.route.instance, 'camera');
+
+    expect(
+      () => origin.route(path: 'refused', options: RouteOptions(instance: '')),
+      throwsA(isA<InvalidInstanceMoqException>()),
+    );
+    first.cancel();
+    second.cancel();
+    first.dispose();
+    second.dispose();
+    following.cancel();
+    following.dispose();
+    announced.cancel();
+    announced.dispose();
+  });
+
   test(
-    'a new route under another instance restarts announce consumers',
+    'a follower reports the path going offline and the next broadcast',
     () async {
       final origin = MoqOriginProducer(config: MoqOriginConfig());
-      final announced = origin.consume().announced(config: MoqAnnounceConfig());
-      final first = origin.route(path: 'instance', options: RouteOptions());
+      final following = origin.consume().follow(path: 'offline');
+      final route = origin.route(path: 'offline', options: RouteOptions());
+      (await following.available().timeout(timeout))!.dispose();
 
-      final start = await nextRoute(announced) as AnnounceEventStart;
-      expect(start.announce.route.instance, first.instanceId());
+      route.withdraw();
+      expect(await following.available().timeout(timeout), isNull);
 
-      final second = origin.route(
-        path: 'instance',
-        options: RouteOptions(instance: 'camera', epoch: 1),
-      );
-      expect(second.instanceId(), 'camera');
-      final restart = await nextRoute(announced) as AnnounceEventRestart;
-      expect(restart.announce.route.instance, 'camera');
+      route.announce();
+      (await following.available().timeout(timeout))!.dispose();
 
-      expect(
-        () => origin.route(
-          path: 'refused',
-          options: RouteOptions(instance: ''),
-        ),
-        throwsA(isA<InvalidInstanceMoqException>()),
-      );
-      first.cancel();
-      second.cancel();
-      first.dispose();
-      second.dispose();
-      announced.cancel();
-      announced.dispose();
+      route.cancel();
+      route.dispose();
+      following.cancel();
+      following.dispose();
     },
   );
 
@@ -651,7 +676,7 @@ void main() {
       options: RouteOptions(),
     );
 
-    final update = await nextRoute(announced) as AnnounceEventStart;
+    final update = await nextRoute(announced) as AnnounceEventPresent;
     expect(update.announce.prefix, 'room/alice/chat');
     expect(update.announce.captures, ['alice']);
     route.dispose();
@@ -691,11 +716,10 @@ void main() {
       ),
       config: moq_json.SnapshotConfig(),
     );
-    final track = await broadcast
-        .consume()
-        .subscribeTrack(name: 'status', subscription: null)
-        .timeout(timeout);
-    final consumer = moq_json.SnapshotConsumer(track: track);
+    final consumer = moq_json.SnapshotConsumer(
+      broadcast: broadcast.consume(),
+      name: 'status',
+    );
 
     for (var n = 1; n <= 4; n++) {
       producer.update(

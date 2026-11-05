@@ -77,11 +77,8 @@ mod tests {
 	/// The next route and whether it is active.
 	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
 		match announced.next().await? {
-			moq_net::announce::Event::Start(route)
-			| moq_net::announce::Event::Update(route)
-			| moq_net::announce::Event::Restart(route)
-			| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
-			moq_net::announce::Event::End(route) => Some((route, false)),
+			moq_net::announce::Event::Present(route) => Some((route, true)),
+			moq_net::announce::Event::Absent(route) => Some((route, false)),
 		}
 	}
 
@@ -110,10 +107,7 @@ mod tests {
 	async fn opus_output(broadcast: &moq_net::broadcast::Consumer) -> Track {
 		let catalog_track = broadcast
 			.track(hang::Catalog::DEFAULT_NAME)
-			.expect("output catalog track")
-			.subscribe(hang::Catalog::default_subscription())
-			.await
-			.expect("subscribe to output catalog");
+			.expect("output catalog track");
 		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(catalog_track);
 		let catalog = kio::clock::timeout(TIMEOUT, catalogs.next())
 			.await
@@ -171,14 +165,14 @@ mod tests {
 	/// Publish a replacement instance of `source`, returning once the origin serves it.
 	async fn take_over(origin: &moq_net::origin::Producer) -> Opus {
 		let instance = moq_net::Instance::random();
-		let mut instances = moq_mux::follow::Instances::new(&origin.consume(), "source", Some(&instance)).unwrap();
+		let mut instances = origin.consume().follow("source", instance.clone()).unwrap();
 		let (route, mut new, catalog) = publish_opus(origin, instance);
 		push(&mut *new, 20_000, NEW_PACKET);
-		let started = kio::clock::timeout(TIMEOUT, instances.next())
+		let started = kio::clock::timeout(TIMEOUT, instances.available())
 			.await
 			.expect("the replacement never took over")
 			.unwrap();
-		assert!(matches!(started, moq_mux::follow::Event::Start(_)));
+		assert!(started.is_some());
 		(route, new, catalog)
 	}
 
@@ -292,7 +286,13 @@ mod tests {
 		let source = moq_mux::Source::new(source, broadcast);
 		let pushed = tokio::spawn(async move { client.publish(url, source).await });
 		let ingested = ingest_origin.consume();
-		let ingested = ingested.follow("ingested", None).unwrap().available().await.unwrap();
+		let ingested = ingested
+			.follow("ingested", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
 		let mut played = opus_output(&ingested).await;
 		assert_eq!(next_payload(&mut played).await, OPUS_PACKET);
 

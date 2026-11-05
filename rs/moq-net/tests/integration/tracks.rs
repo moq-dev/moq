@@ -57,6 +57,7 @@ async fn resolve(origin: &moq_net::origin::Producer) -> moq_net::broadcast::Cons
 		.await
 		.expect("announce timeout")
 		.expect("routed")
+		.unwrap()
 }
 
 /// A session syncs at once, then lists the peer's tracks and their changes until the

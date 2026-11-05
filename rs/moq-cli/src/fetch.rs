@@ -122,7 +122,8 @@ async fn fetch_from<C>(
 			.follow(path, None)?
 			.available()
 			.await
-			.with_context(|| format!("broadcast `{}` not found", crate::display_name(path)))?;
+			.with_context(|| format!("broadcast `{}` not found", crate::display_name(path)))?
+			.context("went offline before serving")?;
 		let track = broadcast.track(&args.track)?;
 		let mut group = moq_relay::fetch_group(&track, args.group)
 			.await

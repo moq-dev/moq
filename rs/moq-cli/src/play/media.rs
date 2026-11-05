@@ -8,7 +8,6 @@ use std::time::Duration;
 use anyhow::Context;
 use hang::moq_net;
 use moq_mux::catalog::{self, Stream};
-use moq_mux::follow::{Event as FollowEvent, Instances};
 // The ambient clock, which follows tokio's paused clock when a test drives the
 // playout clock itself.
 use kio::clock::Instant;
@@ -69,12 +68,11 @@ impl<O: Output> Media<O> {
 		output.send(event);
 	}
 
-	/// Follow the path's announcements for as long as the origin lasts: a start
-	/// plays the broadcast, a restart drops it for the instance that replaced it,
-	/// and an end lets what is playing finish while waiting for the next start. An
-	/// update is the same instance, which its subscriptions already ride out.
+	/// Follow the path for as long as the origin lasts: each instance that comes
+	/// online replaces what is playing, and going offline lets what is playing
+	/// finish while waiting for the next one.
 	async fn play(mut self) -> anyhow::Result<()> {
-		let mut follow = Instances::new(&self.origin, &self.broadcast, None)?;
+		let mut follow = self.origin.follow(&self.broadcast, None)?;
 		// The device belongs to the player, so replacing a broadcast never waits
 		// for it to close and reopen. Each sink adapts its own rate and layout.
 		let device = tokio::sync::OnceCell::new();
@@ -82,14 +80,14 @@ impl<O: Output> Media<O> {
 
 		loop {
 			tokio::select! {
-				event = follow.next() => {
+				event = follow.available() => {
 					let broadcast = match event {
-						Ok(FollowEvent::Start(broadcast)) => broadcast,
-						Ok(FollowEvent::End) => {
+						Ok(Some(broadcast)) => broadcast,
+						Ok(None) => {
 							tracing::info!(broadcast = %self.broadcast, "offline, waiting for it to return");
 							continue;
 						}
-						Err(moq_mux::Error::Moq(moq_net::Error::Closed)) => return Ok(()),
+						Err(moq_net::Error::Closed) => return Ok(()),
 						Err(err) => return Err(err).context("failed to follow the broadcast"),
 					};
 					tracing::info!(

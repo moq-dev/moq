@@ -70,6 +70,10 @@ pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: Exp
 	let hidden = prefix.split('/').any(|segment| segment.starts_with('.'));
 	let prefix = moq_net::Path::new(&prefix)?;
 	let mut announced = origin.clone().with_hidden(hidden).announced();
+	// A follower per listed path, reporting each instance that serves it, stopped with the export.
+	let mut following = tokio::task::JoinSet::new();
+	let mut followers: HashMap<moq_net::Path, tokio::task::AbortHandle> = HashMap::new();
+	let (served, mut instances) = tokio::sync::mpsc::unbounded_channel::<Instance>();
 	let mut recordings = tokio::task::JoinSet::new();
 	let mut running = Running::default();
 	let claims = Claims::default();
@@ -80,16 +84,33 @@ pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: Exp
 	loop {
 		let instance = tokio::select! {
 			event = announced.next() => {
-				let announce = match event.context("announcements ended")? {
-					// Another instance, or the same one announced again.
-					moq_net::announce::Event::Start(announce) | moq_net::announce::Event::Restart(announce) | moq_net::announce::Event::Takeover { announce, .. } => announce,
-					_ => continue,
-				};
-				if !announce.prefix.has_prefix(&prefix) {
-					continue;
+				match event.context("announcements ended")? {
+					moq_net::announce::Event::Present(announce) if announce.prefix.has_prefix(&prefix) => {
+						let path = announce.prefix;
+						let follower = following.spawn(follow(origin.clone(), path.clone(), served.clone()));
+						if let Some(old) = followers.insert(path, follower) {
+							old.abort();
+						}
+					}
+					moq_net::announce::Event::Absent(announce) => {
+						if let Some(follower) = followers.remove(&announce.prefix) {
+							follower.abort();
+						}
+					}
+					moq_net::announce::Event::Present(_) => {}
 				}
-				let instance = announce.route.instance().clone();
-				let instance: Instance = (announce.prefix, instance);
+				continue;
+			}
+			Some(followed) = following.join_next() => {
+				match followed {
+					Ok(result) => result?,
+					// Aborted once its path went absent.
+					Err(err) if err.is_cancelled() => {}
+					Err(err) => return Err(err).context("follower panicked"),
+				}
+				continue;
+			}
+			Some(instance) = instances.recv() => {
 				if !running.start(&instance) {
 					continue;
 				}
@@ -110,6 +131,33 @@ pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: Exp
 		// whichever one serves by the time its task runs.
 		let request = origin.request(&instance.0, Some(instance.1.clone()));
 		recordings.spawn(record(request, instance, store, config.clone(), claims.clone()));
+	}
+}
+
+/// Report each instance serving `path` as it comes online or takes over. An instance comes
+/// again after the path went offline, since a return is announced anew.
+///
+/// Fails when the path cannot be followed or a handler refuses it, as a recording would.
+async fn follow(
+	origin: moq_net::origin::Consumer,
+	path: moq_net::Path,
+	served: tokio::sync::mpsc::UnboundedSender<Instance>,
+) -> anyhow::Result<()> {
+	let unavailable = || format!("broadcast `{path}` is unavailable");
+	let mut following = origin.follow(&path, None).with_context(unavailable)?;
+	loop {
+		let change = match following.available().await {
+			Ok(change) => change,
+			// The origin closed, which ends the export through its announcements.
+			Err(moq_net::Error::Closed) => return Ok(()),
+			Err(err) => return Err(err).with_context(unavailable),
+		};
+		let Some(instance) = change.and_then(|broadcast| broadcast.info().instance.clone()) else {
+			continue;
+		};
+		if served.send((path.clone(), instance)).is_err() {
+			return Ok(());
+		}
 	}
 }
 
@@ -403,6 +451,34 @@ mod tests {
 		assert!(!files.iter().any(|file| file.starts_with("other")), "{files:?}");
 	}
 
+	/// A handler refusing a listed path fails the export, as a refused recording did.
+	#[tokio::test]
+	async fn a_refused_path_fails_the_export() {
+		let dir = tempfile::tempdir().unwrap();
+		let args = ExportArgs {
+			store: Url::from_directory_path(dir.path()).unwrap(),
+			retention: None,
+			retention_grace: None,
+		};
+		let origin = moq_tokio::origin::spawn();
+		let claim = origin
+			.route_prefix("live/a", moq_net::origin::RouteOptions::default())
+			.unwrap();
+		let recording = tokio::spawn(export(origin.consume(), "live".into(), args));
+
+		let request = kio::clock::timeout(Duration::from_secs(10), claim.requested())
+			.await
+			.expect("the export follows the listed path")
+			.unwrap();
+		request.reject(moq_net::Error::NotFound);
+		let result = kio::clock::timeout(Duration::from_secs(10), recording)
+			.await
+			.expect("the export ends")
+			.unwrap();
+		let err = result.expect_err("a refused path fails the export");
+		assert!(err.to_string().contains("live/a"), "{err:#}");
+	}
+
 	/// `import archive` republishes a recording `export archive` wrote under the given name and
 	/// instance, serving its stored groups.
 	#[tokio::test]
@@ -447,7 +523,7 @@ mod tests {
 		let mut announced = origin.consume().announced();
 		kio::clock::timeout(Duration::from_secs(10), async {
 			loop {
-				if let Some(moq_net::announce::Event::Start(announce)) = announced.next().await {
+				if let Some(moq_net::announce::Event::Present(announce)) = announced.next().await {
 					assert_eq!(announce.prefix.as_str(), "replay");
 					assert_eq!(announce.route.instance(), &instance);
 					break;

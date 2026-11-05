@@ -41,7 +41,8 @@ async fn an_empty_group_arrives_empty() {
 		let remote = kio::clock::timeout(TIMEOUT, consumer.follow("room", None).unwrap().available())
 			.await
 			.expect("resolve timeout")
-			.expect("broadcast resolves");
+			.expect("broadcast resolves")
+			.unwrap();
 		let mut sub = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(None))
 			.await
 			.expect("subscribe timeout")

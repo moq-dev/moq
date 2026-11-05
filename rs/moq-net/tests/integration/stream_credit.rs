@@ -50,6 +50,7 @@ async fn one_stream_credit_serves_every_backlogged_group() {
 			.unwrap()
 			.available()
 			.await
+			.unwrap()
 			.unwrap();
 		let prefs =
 			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(30)));
@@ -115,6 +116,7 @@ async fn a_subscription_past_the_credit_is_served_once_credit_returns() {
 			.unwrap()
 			.available()
 			.await
+			.unwrap()
 			.unwrap();
 		let prefs =
 			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(30)));

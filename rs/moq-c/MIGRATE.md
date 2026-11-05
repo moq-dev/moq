@@ -4,6 +4,14 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Announcements are a listing ([#7678](https://github.com/moq-dev/moq/pull/7678))
+
+`moq_announce_kind` is `MOQ_ANNOUNCE_KIND_PRESENT` (0) or `MOQ_ANNOUNCE_KIND_ABSENT` (1), and `moq_announce_event` loses `predecessor` and `predecessor_len`, changing the C ABI.
+Another instance taking a path over keeps it present, and a route's cost changing is not reported.
+Map `_START` to `_PRESENT` and `_END` to `_ABSENT`, and drop `_UPDATE` handling. Where you requested the path again on `_RESTART` or `_TAKEOVER`, call `moq_origin_follow`, whose callback delivers a broadcast handle for each new instance.
+
+`moq_origin_follow` takes a `moq_follow_callback`, `(void *user_data, moq_follow_event event, int32_t code)`, instead of a `moq_status_callback`. `MOQ_FOLLOW_EVENT_ONLINE` carries each broadcast handle (where a positive code did), `MOQ_FOLLOW_EVENT_OFFLINE` reports the path going offline (or, for a follow pinned to an instance, another instance taking it over) with code `0`, and `MOQ_FOLLOW_EVENT_END` is the terminal callback, with `0` or a negative error that `moq_error()` explains (where a code `<= 0` was). Release `user_data` on `MOQ_FOLLOW_EVENT_END`.
+
 ### Publishing goes through one route handle
 
 A route handle replaces the publication, the prepared answer, and the request handler:

@@ -167,7 +167,6 @@ stale, including `doc/concept/identity.md`.
 
 ## Required
 
-- [Listing and follow](/quest/m1/api-audit/route/events.md) - apps read a path listing plus `follow`/`request`, and route metadata moves to a relay-level stream
 - [Transit facts stay read-only](/quest/m1/api-audit/route/facts.md) - `Hop`, `Hops` and `HopLimit` leave the public API, and JS `RouteInfo` hides epoch and auth
 
 ## Related

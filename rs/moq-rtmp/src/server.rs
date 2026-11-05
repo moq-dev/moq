@@ -837,7 +837,7 @@ impl<S: Stream> Play<S> {
 				}
 			}
 		};
-		let Ok(broadcast) = broadcast else {
+		let Ok(Some(broadcast)) = broadcast else {
 			tracing::debug!(peer = %self.peer, %path, "play broadcast unavailable");
 			return self.reject("stream not found").await;
 		};
@@ -1894,7 +1894,13 @@ mod tests {
 		let (mut client, server) = tokio::io::duplex(64 * 1024);
 		let accept = tokio::spawn(accept_publish(server, origin.clone(), Duration::ZERO));
 		let catalog = async {
-			let broadcast = consumer.follow("live/cam0", None).unwrap().available().await.unwrap();
+			let broadcast = consumer
+				.follow("live/cam0", None)
+				.unwrap()
+				.available()
+				.await
+				.unwrap()
+				.unwrap();
 			let track = broadcast.track(hang::Catalog::DEFAULT_NAME).unwrap();
 			track.subscribe(None).await.unwrap()
 		};
@@ -2204,7 +2210,13 @@ mod tests {
 		publisher.push(flv::TAG_VIDEO, 0, &vseq).unwrap();
 
 		let consumer = origin.consume();
-		let broadcast = consumer.follow("live/cam0", None).unwrap().available().await.unwrap();
+		let broadcast = consumer
+			.follow("live/cam0", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
 		let info = broadcast.track("0.flv-v").unwrap().info().await.unwrap();
 		assert_eq!(info.max_age, Some(Duration::from_secs(3)));
 	}
@@ -2341,12 +2353,13 @@ mod tests {
 		assert_eq!(next().await.1[..2], [0x17, 0x01]);
 
 		let instance = moq_net::Instance::random();
-		let mut instances = moq_mux::follow::Instances::new(&consumer, "live/cam0", Some(&instance)).unwrap();
+		let mut instances = consumer.follow("live/cam0", instance.clone()).unwrap();
 		let (_new_route, _new, _new_catalog) = publish_avc(&origin, instance, &[0x65, 0x99, 0x99, 0x99, 0x99]);
-		kio::clock::timeout(Duration::from_secs(5), instances.next())
+		kio::clock::timeout(Duration::from_secs(5), instances.available())
 			.await
 			.expect("the new publisher takes over")
-			.unwrap();
+			.unwrap()
+			.expect("the new publisher serves");
 
 		let mut delta = vec![0x27, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, OLD_DELTA.len() as u8];
 		delta.extend_from_slice(OLD_DELTA);
@@ -2803,7 +2816,13 @@ mod tests {
 		let stale_client = tokio::spawn(async move {
 			run_client(TcpStream::connect(addr).await.unwrap(), ClientMode::Publish).await;
 		});
-		let stale = consumer.follow("live/cam0", None).unwrap().available().await.unwrap();
+		let stale = consumer
+			.follow("live/cam0", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
 		let mut catalog = stale
 			.track(hang::Catalog::DEFAULT_NAME)
 			.unwrap()
@@ -2811,12 +2830,12 @@ mod tests {
 			.await
 			.unwrap();
 
-		let mut announced = consumer.announced();
+		let mut announced = consumer.routes();
 		let fresh_client = tokio::spawn(async move {
 			run_client(TcpStream::connect(addr).await.unwrap(), ClientMode::Publish).await;
 		});
 		kio::clock::timeout(Duration::from_secs(5), async {
-			while !matches!(announced.next().await, Some(moq_net::announce::Event::Restart(_))) {}
+			while !matches!(announced.next().await, Some(moq_net::origin::RouteEvent::Restart(_))) {}
 		})
 		.await
 		.expect("the reconnect restarts the broadcast");

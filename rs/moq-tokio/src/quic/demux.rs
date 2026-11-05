@@ -147,8 +147,9 @@ pub struct WebRtc {
 }
 
 impl WebRtc {
-	/// Poll for the next datagram; `None` once every [`Demux`] clone is gone and
-	/// every listening socket it split is released.
+	/// The next datagram, or `None` once every [`Demux`] clone is gone and every listening socket
+	/// it split is released.
+	#[kio::wrapper]
 	pub fn poll_recv(&self, waiter: &kio::Waiter) -> Poll<Option<Datagram>> {
 		if let Poll::Ready(mut queue) = self.shared.queue.poll(waiter, |queue| match queue.is_empty() {
 			true => Poll::Pending,
@@ -163,13 +164,7 @@ impl WebRtc {
 		}
 	}
 
-	/// Receive the next datagram; `None` once the listener and every [`Demux`]
-	/// clone are gone; see [`Self::poll_recv`].
-	pub async fn recv(&self) -> Option<Datagram> {
-		kio::wait(|waiter| self.poll_recv(waiter)).await
-	}
-
-	/// Poll to send `transmit` from the shared port, with GSO and ECN as it asks.
+	/// Send `transmit` from the shared port, with GSO and ECN as it asks.
 	///
 	/// Its `src_ip` is kept as given. On a wildcard bind with several local
 	/// addresses, set it to the [`Datagram::local`] being answered; `None` lets the
@@ -178,6 +173,7 @@ impl WebRtc {
 	/// A datagram sent once the listener has released its socket is lost, as UDP
 	/// allows. Errors are those of the endpoint's own sends: an unreachable destination
 	/// comes back, as [`AsyncUdpSocket::try_send`] describes, and anything else is logged.
+	#[kio::wrapper]
 	pub fn poll_send(&self, waiter: &kio::Waiter, transmit: &Transmit<'_>) -> Poll<io::Result<()>> {
 		// Any member of a reuseport group answers from the same port.
 		let sockets = self.sockets.lock().unwrap();
@@ -193,11 +189,6 @@ impl WebRtc {
 			..*transmit
 		};
 		socket.slot.poll_send(&transmit, &mut waiter.context())
-	}
-
-	/// Send `transmit` from the shared port; see [`Self::poll_send`].
-	pub async fn send(&self, transmit: &Transmit<'_>) -> io::Result<()> {
-		kio::wait(|waiter| self.poll_send(waiter, transmit)).await
 	}
 
 	/// Route every datagram from `remote` to this feed, whatever its first byte,

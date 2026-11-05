@@ -103,7 +103,8 @@ impl Viewer {
 		let broadcast = kio::clock::timeout(TIMEOUT, consumer.follow("room", None).unwrap().available())
 			.await
 			.expect("resolve timeout")
-			.expect("broadcast resolves");
+			.expect("broadcast resolves")
+			.unwrap();
 		let datagrams = broadcast.datagrams("audio").expect("datagram track");
 		// Answered once the publisher's session reads the track, so what it sends next arrives.
 		kio::clock::timeout(TIMEOUT, datagrams.info())

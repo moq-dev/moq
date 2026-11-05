@@ -18,34 +18,49 @@ const url = new URL("https://localhost:4443/test");
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
-/** A negotiated wire: the protocol to offer, an explicit version where no ALPN names one, and whether it carries datagrams. */
+/** A negotiated wire: the protocol to offer, an explicit version where no ALPN names one. */
 interface Wire {
 	name: string;
 	protocol: string;
 	version?: number;
-	datagrams: boolean;
+	datagrams?: boolean;
 }
 
 const WIRES: Wire[] = [
-	{ name: "lite-01", protocol: "", version: Lite.Version.DRAFT_01, datagrams: false },
-	{ name: "lite-02", protocol: "", version: Lite.Version.DRAFT_02, datagrams: false },
-	{ name: "lite-03", protocol: Lite.ALPN_03, datagrams: false },
-	{ name: "lite-04", protocol: Lite.ALPN_04, datagrams: false },
+	{ name: "lite-01", protocol: "", version: Lite.Version.DRAFT_01 },
+	{ name: "lite-02", protocol: "", version: Lite.Version.DRAFT_02 },
+	{ name: "lite-03", protocol: Lite.ALPN_03 },
+	{ name: "lite-04", protocol: Lite.ALPN_04 },
 	{ name: "lite-05", protocol: Lite.ALPN_05, datagrams: true },
 	{ name: "lite-06", protocol: Lite.ALPN_06, datagrams: true },
 	{ name: "lite-07-wip", protocol: Lite.ALPN_07_WIP, datagrams: true },
-	{ name: "ietf-18", protocol: Ietf.ALPN.DRAFT_18, datagrams: true },
-	{ name: "ietf-20", protocol: Ietf.ALPN.DRAFT_20, datagrams: true },
-	{ name: "ietf-22", protocol: Ietf.ALPN.DRAFT_22, datagrams: true },
+	{ name: "ietf-18", protocol: Ietf.ALPN.DRAFT_18 },
+	{ name: "ietf-20", protocol: Ietf.ALPN.DRAFT_20 },
+	{ name: "ietf-22", protocol: Ietf.ALPN.DRAFT_22 },
 ];
 
 /**
- * Copy `input`'s video track into a broadcast this node produced, keeping every group's and
- * datagram's ID, as a relay does. A JS origin refuses to serve a broadcast a session delivered.
+ * Copy `input`'s video track into a broadcast this node produced, keeping every group's
+ * ID, as a relay does. A JS origin refuses to serve a broadcast a session delivered.
  */
-async function forward(input: BroadcastConsumer): Promise<BroadcastProducer> {
+async function forward(input: BroadcastConsumer, carriesDatagrams: boolean): Promise<BroadcastProducer> {
 	const subscription = input.track("video").subscribe({ delay: { max: null } });
 	const copy = new BroadcastProducer();
+	if (carriesDatagrams) {
+		const reader = input.datagrams("video");
+		const writer = copy.createDatagrams("video", await reader.info());
+		void (async () => {
+			try {
+				for (let datagram = await reader.recv(); datagram; datagram = await reader.recv())
+					writer.insert(datagram);
+				writer.finish();
+			} catch (err) {
+				writer.abort(err instanceof Error ? err : new Error(String(err)));
+			} finally {
+				reader.close();
+			}
+		})();
+	}
 	const video = copy.createTrack("video", await subscription.info());
 	void (async () => {
 		for (let group = await subscription.recvGroup(); group; group = await subscription.recvGroup()) {
@@ -54,11 +69,6 @@ async function forward(input: BroadcastConsumer): Promise<BroadcastProducer> {
 			out.finish();
 		}
 	})().catch((err: unknown) => video.abort(err instanceof Error ? err : new Error(String(err))));
-	void (async () => {
-		for (let datagram = await subscription.recvDatagram(); datagram; datagram = await subscription.recvDatagram()) {
-			video.insertDatagram(datagram.sequence, datagram.timestamp, datagram.payload);
-		}
-	})().catch(() => {});
 	return copy;
 }
 
@@ -77,6 +87,7 @@ for (const wire of WIRES) {
 
 		const path = Path.from("big");
 		const publication = source.route(path);
+		const datagrams = wire.datagrams ? publication.broadcast.createDatagrams("video") : undefined;
 		const track = publication.broadcast.createTrack("video");
 
 		const dynamic = relay.routePrefix(path);
@@ -85,14 +96,14 @@ for (const wire of WIRES) {
 			for await (const request of dynamic.requested()) {
 				const input = wireOf(ingest).consume(request.path);
 				inputs.push(input);
-				request.serve(await forward(input));
+				request.serve(await forward(input, wire.datagrams ?? false));
 			}
 		})();
 
 		const remote = wireOf(viewer).consume(path);
 		const reader = remote.track("video").subscribe({ delay: { max: null } });
 		// Publish once the viewer's subscription reached the publisher through the relay, so
-		// every group and datagram rides it live rather than racing it.
+		// every group rides it live rather than racing it.
 		const demand = track.demand();
 		while (demand.wanted.peek() === undefined) await demand.wanted.changed();
 
@@ -110,11 +121,15 @@ for (const wire of WIRES) {
 			received?.close();
 		}
 
-		if (wire.datagrams) {
-			track.insertDatagram(PAST_SAFE + 1n, undefined, enc.encode("datagram"));
-			const datagram = await reader.recvDatagram();
-			expect(datagram?.sequence).toBe(PAST_SAFE + 1n);
-			expect(dec.decode(datagram?.payload)).toBe("datagram");
+		if (datagrams) {
+			const unreliable = remote.datagrams("video");
+			await unreliable.info();
+			datagrams.insert({ sequence: PAST_SAFE + 1n, payload: enc.encode("datagram") });
+			const received = await unreliable.recv();
+			expect(received?.sequence).toBe(PAST_SAFE + 1n);
+			expect(dec.decode(received?.payload)).toBe("datagram");
+			unreliable.close();
+			datagrams.finish();
 		}
 
 		reader.close();
@@ -132,7 +147,6 @@ test("a group sequence that is not a non-negative bigint is refused where a call
 	// A plain JS caller can still pass a number, which would otherwise mix with bigints later.
 	expect(() => track.createGroup(1 as unknown as bigint)).toThrow(TypeError);
 	expect(() => track.createGroup(-1n)).toThrow(RangeError);
-	expect(() => track.insertDatagram(1 as unknown as bigint, undefined, new Uint8Array(1))).toThrow(TypeError);
 	expect(track.createGroup(MAX_QUIC).sequence).toBe(MAX_QUIC);
 	const consumer = new BroadcastProducer().consume().track("video");
 	await expect(consumer.fetchGroup(1 as unknown as bigint)).rejects.toThrow(TypeError);

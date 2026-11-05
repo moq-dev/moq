@@ -78,7 +78,8 @@ async fn relay(
 	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
-		.expect("broadcast resolves");
+		.expect("broadcast resolves")
+		.unwrap();
 
 	let subscription = Subscription::default()
 		.with_delay(Delay::default().with_max(BUDGET))
@@ -201,7 +202,8 @@ async fn fetch_only(version: &str) -> Vec<Result<Option<moq_net::Timestamp>, moq
 	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
-		.expect("broadcast resolves");
+		.expect("broadcast resolves")
+		.unwrap();
 
 	let mut got = Vec::new();
 	for sequence in [1, 0] {

@@ -55,7 +55,7 @@ pub(crate) enum Item {
 /// `Consumer` wraps a [`moq_net::track::Subscriber`] and a [`Container`]
 /// format implementation, typically
 /// [`catalog::hang::Container`](crate::catalog::hang::Container). Yields
-/// decoded frames via [`read`](Self::read).
+/// decoded frames via [`poll_read`](Self::poll_read).
 ///
 /// ## Ordering & age skipping
 ///
@@ -98,7 +98,7 @@ pub(crate) enum Item {
 ///
 /// ## Gaps and ends
 ///
-/// [`read`](Self::read) yields [`Read::Gap`] wherever media after an item already read
+/// [`poll_read`](Self::poll_read) yields [`Read::Gap`] wherever media after an item already read
 /// will never arrive: a latency skip, an evicted current group, or a sequence hole whose
 /// boundary is not contiguous within 1 ms. Whatever is lost before the first item is no
 /// gap, since nothing was read before it. A marker group (no decodable frames: one empty
@@ -420,8 +420,18 @@ impl<F: Container> Consumer<F> {
 	///
 	/// Returns `None` when the track has ended, and after an error. See [`Read`] for the items between frames;
 	/// an undeclared forward timestamp jump is not a gap, since nothing says media is missing.
-	pub async fn read(&mut self) -> Result<Option<Read>, F::Error> {
-		kio::wait(|waiter| self.poll_read(waiter)).await
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_read(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Read>, F::Error>> {
+		loop {
+			let read = match ready!(self.poll_item(waiter))? {
+				Some(Item::Frame { group, frame, .. }) => Read::Frame { group, frame },
+				Some(Item::Gap { timestamp, duration }) => Read::Gap { timestamp, duration },
+				Some(Item::End { group, end }) => Read::End { group, end },
+				Some(Item::FrameEnd(_) | Item::GroupEnd | Item::Cut { .. }) => continue,
+				None => return Poll::Ready(Ok(None)),
+			};
+			return Poll::Ready(Ok(Some(read)));
+		}
 	}
 
 	/// The next frame, passing over gaps and ends.
@@ -433,23 +443,6 @@ impl<F: Container> Consumer<F> {
 				Some(Read::Gap { .. } | Read::End { .. }) => continue,
 				None => return Ok(None),
 			}
-		}
-	}
-
-	/// Poll-based implementation of the read loop.
-	///
-	/// Uses a single waiter that gets registered on all relevant kio channels,
-	/// avoiding the need for `tokio::select!` or `FuturesUnordered`.
-	pub fn poll_read(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Read>, F::Error>> {
-		loop {
-			let read = match ready!(self.poll_item(waiter))? {
-				Some(Item::Frame { group, frame, .. }) => Read::Frame { group, frame },
-				Some(Item::Gap { timestamp, duration }) => Read::Gap { timestamp, duration },
-				Some(Item::End { group, end }) => Read::End { group, end },
-				Some(Item::FrameEnd(_) | Item::GroupEnd | Item::Cut { .. }) => continue,
-				None => return Poll::Ready(Ok(None)),
-			};
-			return Poll::Ready(Ok(Some(read)));
 		}
 	}
 

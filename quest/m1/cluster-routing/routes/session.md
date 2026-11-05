@@ -121,7 +121,6 @@ admission.
 ## Required
 
 - [lite-07 route wire](/quest/m1/cluster-routing/routes/wire.md) - the messages this drives
-- [Listing and follow](/quest/m1/api-audit/route/events.md) - the announcement events this feeds ([moq-dev/moq#7678](https://github.com/moq-dev/moq/pull/7678))
 
 ## Related
 

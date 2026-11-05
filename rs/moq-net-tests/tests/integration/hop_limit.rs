@@ -48,8 +48,8 @@ async fn hop_limit_bounds_receive_and_send() {
 		let sink = produce_origin(3);
 		let _upstream = peer(version, &source, &relay).await;
 		let _downstream = peer(version, &relay, &sink).await;
-		let mut received = watch(relay.consume().announced());
-		let mut sent = watch(sink.consume().announced());
+		let mut received = watch(relay.consume().routes());
+		let mut sent = watch(sink.consume().routes());
 		kio::clock::sim::idle().await;
 		let route = |count: u64| {
 			moq_net::fuzz::route_info(
@@ -115,7 +115,7 @@ async fn hop_limit_falls_back_to_a_forwardable_route() {
 		let _near = peer(version, &near, &relay).await;
 		let _far = peer(version, &far, &relay).await;
 		let _downstream = peer(version, &relay, &sink).await;
-		let mut sent = watch(sink.consume().announced());
+		let mut sent = watch(sink.consume().routes());
 		kio::clock::sim::idle().await;
 
 		let route = |first: u64, count: u64, cost: u64| {

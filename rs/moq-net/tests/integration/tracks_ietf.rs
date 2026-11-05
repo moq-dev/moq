@@ -62,6 +62,7 @@ async fn resolve(origin: &moq_net::origin::Producer, path: &str) -> moq_net::bro
 		.await
 		.expect("announce timeout")
 		.expect("routed")
+		.unwrap()
 }
 
 /// How many request streams of `kind` the client has opened.

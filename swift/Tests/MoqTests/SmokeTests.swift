@@ -254,14 +254,14 @@ final class SmokeTests: XCTestCase {
 
         try route.announce()
         let announced = try consumer.announced(prefix: "")
-        guard case .start(let first) = try await nextRoute(announced) else {
+        guard case .present(let first) = try await nextRoute(announced) else {
             return XCTFail("expected an announcement")
         }
         XCTAssertEqual(first.prefix, "live")
         XCTAssertEqual(first.route.instance, route.instance)
 
         try route.withdraw()
-        guard case .end(let retracted) = try await nextRoute(announced) else {
+        guard case .absent(let retracted) = try await nextRoute(announced) else {
             return XCTFail("expected a retraction")
         }
         XCTAssertEqual(retracted.prefix, "live")
@@ -272,7 +272,7 @@ final class SmokeTests: XCTestCase {
 
         // Announcing again continues the same stream.
         try route.announce()
-        guard case .start(let again) = try await nextRoute(announced) else {
+        guard case .present(let again) = try await nextRoute(announced) else {
             return XCTFail("expected a reannouncement")
         }
         XCTAssertEqual(again.route.instance, route.instance)
@@ -334,7 +334,7 @@ final class SmokeTests: XCTestCase {
         let announced = try origin.consume().announced(prefix: "room", filter: "*/chat")
         let chat = try origin.route(path: "room/alice/chat")
 
-        guard case .start(let update) = try await nextRoute(announced) else {
+        guard case .present(let update) = try await nextRoute(announced) else {
             return XCTFail("expected an announcement")
         }
         XCTAssertEqual(update.prefix, "room/alice/chat")
@@ -342,21 +342,31 @@ final class SmokeTests: XCTestCase {
         chat.cancel()
     }
 
-    func testAnnouncedInstanceRestarts() async throws {
+    func testNewInstanceRestartsFollowersButStaysListed() async throws {
         let origin = OriginProducer()
-        let announced = try origin.consume().announced(prefix: "")
+        let consumer = origin.consume()
+        let announced = try consumer.announced(prefix: "")
+        let following = try consumer.follow(path: "instance")
         let first = try origin.route(path: "instance")
-        guard case .start(let start) = try await nextRoute(announced) else {
+        guard case .present(let present) = try await nextRoute(announced) else {
             return XCTFail("expected an announcement")
         }
-        XCTAssertFalse(start.route.instance.isEmpty)
-        XCTAssertEqual(start.route.instance, first.instance)
+        XCTAssertFalse(present.route.instance.isEmpty)
+        XCTAssertEqual(present.route.instance, first.instance)
+        let firstBroadcast = try await following.available()
+        XCTAssertNotNil(firstBroadcast)
 
         let second = try origin.route(path: "instance", instance: "camera", epoch: 1)
-        guard case .restart(let restart) = try await nextRoute(announced) else {
-            return XCTFail("expected a restart")
+        let takeover = try await following.available()
+        XCTAssertNotNil(takeover)
+
+        // The takeover was not listed, so the next event is the path going absent.
+        try first.withdraw()
+        try second.withdraw()
+        guard case .absent(let absent) = try await nextRoute(announced) else {
+            return XCTFail("expected the path to go absent")
         }
-        XCTAssertEqual(restart.route.instance, "camera")
+        XCTAssertEqual(absent.route.instance, "camera")
 
         XCTAssertThrowsError(try origin.route(path: "refused", instance: "")) { error in
             guard case MoqError.InvalidInstance = error else {
@@ -365,6 +375,26 @@ final class SmokeTests: XCTestCase {
         }
         first.cancel()
         second.cancel()
+        following.cancel()
+    }
+
+    func testFollowerReportsOfflineAndTheNextBroadcast() async throws {
+        let origin = OriginProducer()
+        let following = try origin.consume().follow(path: "offline")
+        let route = try origin.route(path: "offline")
+
+        let first = try await following.available()
+        XCTAssertNotNil(first)
+
+        try route.withdraw()
+        let offline = try await following.available()
+        XCTAssertNil(offline)
+
+        try route.announce()
+        let returned = try await following.available()
+        XCTAssertNotNil(returned)
+        route.cancel()
+        following.cancel()
     }
 
     func testDynamicServesARequestUnderAPrefix() async throws {
@@ -483,7 +513,7 @@ final class SmokeTests: XCTestCase {
             broadcast: broadcast,
             track: try broadcast.publishTrack(name: "status", info: TrackInfo(timescale: 1_000_000, compress: true)))
         let consumer = try Json.SnapshotConsumer<Status>(
-            track: try await broadcast.consume().subscribeTrack(name: "status"))
+            broadcast: try broadcast.consume(), name: "status")
 
         for viewers in 1...4 {
             try producer.update(Status(state: "live", viewers: viewers), timestamp: micros(UInt64(viewers) * 1000))
@@ -576,7 +606,7 @@ final class SmokeTests: XCTestCase {
         let consumer = try broadcast.consume()
 
         let snapshotConsumer = try Json.SnapshotConsumer<[String: Int]>(
-            track: try await consumer.subscribeTrack(name: "status"))
+            broadcast: consumer, name: "status")
         let streamConsumer = try Json.StreamConsumer<[String: Int]>(
             track: try await consumer.subscribeTrack(name: "events"))
         while try await snapshotDemand.wantedChanged() == nil {}

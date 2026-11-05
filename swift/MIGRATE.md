@@ -4,6 +4,27 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Following.available()` returns nil once the path goes offline
+
+`try await following.available()` returns `BroadcastConsumer?`.
+After the first call, it returns nil once the followed path goes offline, or, for a `follow(path:instance:)` pinned to an instance, once another instance takes it over; the next call returns whatever serves the path next. The first call never returns nil.
+Drop what you read from the previous broadcast either way. A caller that only waits for the first broadcast can take it with `!`.
+
+### Announcements are a listing
+
+`AnnounceConsumer` yields `.present` when a path becomes present and `.absent` when it goes, each carrying an `Announce`.
+`.start` is `.present` and `.end` is `.absent`.
+`.update`, `.restart`, and `.takeover` are gone: a path whose route or publisher instance changes stays present and is not reported again.
+Where you requested the path again on a restart, hold `follow(path:)` instead; each `available()` returns the next instance's broadcast.
+
+```swift
+let following = try session.consume.follow(path: "live/camera")
+while true {
+    guard let broadcast = try await following.available() else { continue } // offline until the next instance
+    play(broadcast)
+}
+```
+
 ### Publishing goes through one `Route`
 
 `OriginProducer.createBroadcast(path:)` is `route(path:hidden:cost:instance:epoch:)`, and `requests(prefix:)` is `routePrefix(prefix:hidden:cost:instance:epoch:)`. Both return a `Route`, which replaces `Publication`, `OriginRequests`, and `BroadcastPrepared`:
@@ -31,6 +52,10 @@ Replace stream-track `appendDatagram` / `insertDatagram` / `recvDatagram` with `
 ### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
 
 A `nil` `TrackInfo.maxAge`, the default, and a `nil` info now advertise a zero max age, serving only the live edge, instead of no publisher limit. Pass `maxAgeUnlimited: true`, which ignores `maxAge`, where you relied on `nil` meaning no limit. A received track's `info()` sets it when its publisher advertised no limit.
+
+### Snapshot consumers subscribe themselves at a zero delay ([#7736](https://github.com/moq-dev/moq/pull/7736))
+
+`Json.SnapshotConsumer(broadcast:name:priority:)` takes the `BroadcastConsumer` and the track name instead of `track:`, and subscribes to the track itself at a zero `delay.max` and `priority` (default 0). Drop the `subscribeTrack` call; a refused subscription now throws from the first read. Iteration skips every group a newer one supersedes, and `latest()` no longer waits for a lower group the track still owes. Publish a stream track when every state must survive, or a window track for a bounded recent history.
 
 ### Viewer targets are bounded ([#7090](https://github.com/moq-dev/moq/pull/7090))
 
@@ -195,7 +220,7 @@ Application calls are unchanged.
 ### JSON consumers yield `Json.Timed` (#5677)
 
 `Json.SnapshotConsumer` and `Json.StreamConsumer` yield `Json.Timed<Value>` (`value`, `timestampUs`) instead of the bare value; `timestampUs` is `nil` when untimed.
-A snapshot consumer's `next()` now yields every state in order; call `latest()` for the newest.
+A snapshot consumer's `next()` now yields each state in order, skipping every group a newer one supersedes (see the zero-delay entry above); call `latest()` for the newest.
 Timestamps are rounded down to a whole microsecond.
 
 ### Ranges filter reads (#5929)

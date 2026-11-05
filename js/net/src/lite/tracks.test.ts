@@ -502,7 +502,7 @@ test("an instance-pinned front lists its serving route's tracks", async () => {
 	broadcastRoute.announce();
 
 	const reader = clientOrigin.consume();
-	const announced = reader.announced();
+	const announced = reader.routes();
 	expect(await announced.next()).toMatchObject({ prefix: Path.from("room"), kind: "start" });
 	const request = reader.request(Path.from("room"));
 	await settle();

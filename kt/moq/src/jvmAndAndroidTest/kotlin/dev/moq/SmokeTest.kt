@@ -560,7 +560,7 @@ class SmokeTest {
             val config = SnapshotConfig(deltas = true)
             val track = broadcast.publishTrack("status", TrackInfo(timescale = 1_000_000uL))
             SnapshotProducer(broadcast, track, config).use { producer ->
-                val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
+                val consumer = SnapshotConsumer(broadcast.consume(), "status")
                 for (n in 1..4) producer.update(
                     Status(state = "live$n"),
                     timestamp = n.milliseconds.toTimestamp(),
@@ -630,7 +630,7 @@ class SmokeTest {
                 assertEquals("status", demand.name())
                 assertEquals(null, demand.wanted())
 
-                val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
+                val consumer = SnapshotConsumer(broadcast.consume(), "status")
                 while (demand.wantedChanged() == null) {}
                 consumer.cancel()
                 while (demand.wantedChanged() != null) {}
@@ -648,7 +648,7 @@ class SmokeTest {
                 val demand: TrackDemand = producer.demand()
                 producer.update(Status(state = "live"), Timestamp(1uL, 1_000uL))
 
-                val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
+                val consumer = SnapshotConsumer(broadcast.consume(), "status")
                 while (demand.wantedChanged() == null) {}
                 // `first` cancels the collection, which must release the subscription without an
                 // explicit cancel.
@@ -670,7 +670,7 @@ class SmokeTest {
             SnapshotProducer(broadcast, track, config).use { producer ->
                 producer.update("""{"state":"raw"}""", Timestamp(1uL, 1_000uL))
 
-                val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
+                val consumer = SnapshotConsumer(broadcast.consume(), "status")
                 assertEquals(
                     Timed(Status(state = "raw"), Timestamp(1uL, 1_000uL)),
                     consumer.valuesAs<Status>().first(),
@@ -780,18 +780,18 @@ class SmokeTest {
 
                 route.announce()
                 val announced = consumer.announced(AnnounceConfig())
-                val first = assertIs<AnnounceEventStart>(announced.nextRoute())
+                val first = assertIs<AnnounceEventPresent>(announced.nextRoute())
                 assertEquals("live", first.announce.prefix)
                 assertEquals(route.instance(), first.announce.route.instance)
 
                 route.withdraw()
-                val retracted = assertIs<AnnounceEventEnd>(announced.nextRoute())
+                val retracted = assertIs<AnnounceEventAbsent>(announced.nextRoute())
                 assertEquals("live", retracted.announce.prefix)
                 assertFailsWith<MoqException> { consumer.request("live") }
 
                 // Announcing again continues the same stream.
                 route.announce()
-                val again = assertIs<AnnounceEventStart>(announced.nextRoute())
+                val again = assertIs<AnnounceEventPresent>(announced.nextRoute())
                 assertEquals(route.instance(), again.announce.route.instance)
                 consumer.request("live")
             }
@@ -805,7 +805,7 @@ class SmokeTest {
             val announced = consumer.announced(AnnounceConfig())
             val route = origin.route("live", RouteOptions())
             route.broadcast().use { broadcast ->
-                assertIs<AnnounceEventStart>(announced.nextRoute())
+                assertIs<AnnounceEventPresent>(announced.nextRoute())
                 consumer.request("live")
 
                 route.close()
@@ -823,9 +823,9 @@ class SmokeTest {
             val consumer = origin.consume()
             val announced = consumer.announced(AnnounceConfig())
             origin.route("live", RouteOptions()).use { route ->
-                assertIs<AnnounceEventStart>(announced.nextRoute())
+                assertIs<AnnounceEventPresent>(announced.nextRoute())
                 route.broadcast().use { it.end() }
-                assertIs<AnnounceEventEnd>(announced.nextRoute())
+                assertIs<AnnounceEventAbsent>(announced.nextRoute())
                 assertFailsWith<MoqException> { consumer.request("live") }
                 assertFailsWith<MoqException.Closed> { route.announce() }
             }
@@ -850,23 +850,49 @@ class SmokeTest {
     }
 
     @Test
-    fun `a new instance restarts announce consumers`() = runTest {
+    fun `a new instance restarts followers but stays listed`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
-            val announced = origin.consume().announced(AnnounceConfig())
+            val consumer = origin.consume()
+            val announced = consumer.announced(AnnounceConfig())
+            val following = consumer.follow("instance", null)
             origin.route("instance", RouteOptions()).use { first ->
-                val start = assertIs<AnnounceEventStart>(announced.nextRoute())
-                assertTrue(start.announce.route.instance.isNotEmpty())
-                assertEquals(first.instance(), start.announce.route.instance)
+                val present = assertIs<AnnounceEventPresent>(announced.nextRoute())
+                assertTrue(present.announce.route.instance.isNotEmpty())
+                assertEquals(first.instance(), present.announce.route.instance)
+                assertNotNull(following.available()).close()
 
-                origin.route("instance", RouteOptions(instance = "camera", epoch = 1uL)).use {
-                    val restart = assertIs<AnnounceEventRestart>(announced.nextRoute())
-                    assertEquals("camera", restart.announce.route.instance)
+                origin.route("instance", RouteOptions(instance = "camera", epoch = 1uL)).use { second ->
+                    assertNotNull(following.available()).close()
+
+                    // The takeover was not listed, so the next event is the path going absent.
+                    first.withdraw()
+                    second.withdraw()
+                    val absent = assertIs<AnnounceEventAbsent>(announced.nextRoute())
+                    assertEquals("camera", absent.announce.route.instance)
                 }
 
                 assertFailsWith<MoqException.InvalidInstance> {
                     origin.route("refused", RouteOptions(instance = ""))
                 }
             }
+            following.cancel()
+        }
+    }
+
+    @Test
+    fun `a follower reports the path going offline and the next broadcast`() = runTest {
+        OriginProducer(OriginConfig()).use { origin ->
+            val following = origin.consume().follow("offline", null)
+            origin.route("offline", RouteOptions()).use { route ->
+                assertNotNull(following.available()).close()
+
+                route.withdraw()
+                assertNull(following.available())
+
+                route.announce()
+                assertNotNull(following.available()).close()
+            }
+            following.cancel()
         }
     }
 
@@ -876,7 +902,7 @@ class SmokeTest {
             val announced =
                 origin.consume().announced(AnnounceConfig(prefix = "room", filter = "*/chat"))
             origin.route("room/alice/chat", RouteOptions()).use {
-                val update = assertIs<AnnounceEventStart>(announced.nextRoute())
+                val update = assertIs<AnnounceEventPresent>(announced.nextRoute())
                 assertEquals("room/alice/chat", update.announce.prefix)
                 assertEquals(listOf("alice"), update.announce.captures)
             }

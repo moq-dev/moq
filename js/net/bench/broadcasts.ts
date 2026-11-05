@@ -46,7 +46,7 @@ for (const scope of [
 			let notifications = 0;
 			const streams = Array.from({ length: observerCount }, (_, index) =>
 				scope === "full-name" || scope === "overlap-only"
-					? origin.consume().announced(Path.Pattern.parse("**/*.chat"))
+					? origin.consume().routes(Path.Pattern.parse("**/*.chat"))
 					: (scope === "producer-scopes"
 							? origin.scope(
 									Path.empty(),
@@ -58,7 +58,7 @@ for (const scope of [
 										new Path.Patterns([Path.Pattern.parse(`**/tag-${index}`)]),
 									)
 								: origin
-						).announced(
+						).routes(
 							scope === "distinct-scopes" ? Path.Pattern.parse(`room/**/tag-${index}`) : undefined,
 							// These scopes only overlap `room/<index>`, so they measure the covering view.
 							{ covering: scope !== "unscoped" },

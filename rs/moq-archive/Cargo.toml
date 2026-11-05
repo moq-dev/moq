@@ -16,7 +16,7 @@ categories = ["multimedia", "filesystem"]
 bytes = { workspace = true }
 futures = { workspace = true }
 kio = { workspace = true, features = ["runtime"] }
-moq-net = { workspace = true }
+moq-net = { workspace = true, features = ["async"] }
 object_store = { workspace = true }
 percent-encoding = { workspace = true }
 quick_cache = "0.7"

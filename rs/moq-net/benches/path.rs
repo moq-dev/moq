@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures::FutureExt;
 use moq_net::{
-	Hop, Hops, Path, Pattern, Patterns, announce,
+	Hop, Hops, Path, Pattern, Patterns,
 	fuzz::{Announced, Messages, decode_announces, decode_namespaces, encode_announces, encode_namespaces},
 	kio, origin,
 };
@@ -181,7 +181,7 @@ fn fanout() {
 					.unwrap()
 			})
 			.collect();
-		let mut cursors: Vec<announce::Consumer> = (0..100).map(|_| consumer.announced()).collect();
+		let mut cursors: Vec<origin::Routes> = (0..100).map(|_| consumer.routes()).collect();
 		for cursor in &mut cursors {
 			while cursor.next().now_or_never().flatten().is_some() {}
 		}

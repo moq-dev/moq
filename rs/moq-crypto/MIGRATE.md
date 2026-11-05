@@ -4,6 +4,14 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Async wrappers are opt-in
+
+Enable the `async` Cargo feature to keep awaiting `read_frame`, `recv_group`, `recv`,
+`requested_track`, `requested`, and `closed`:
+`moq-crypto = { version = "...", features = ["async"] }`. This also applies with
+`default-features = false`. The feature is off by default; the matching `poll_*` methods stay
+available without it. Signatures, ciphertext, and track names are unchanged.
+
 ### Datagrams are their own track kind ([#7752](https://github.com/moq-dev/moq/pull/7752))
 
 `e2ee::track::Producer::{append_datagram, insert_datagram}` and `e2ee::track::Consumer::{poll_recv_datagram, recv_datagram}` are removed. Create a datagram track with `e2ee::broadcast::Producer::create_datagrams(name, info)` and read it with `e2ee::broadcast::Consumer::datagrams(name)`, which return `datagram::Producer` (`append`, `insert`) and `datagram::Consumer` (`recv`, yielding the same `datagram::Event`). Its sequence is its own, not the stream track's group counter, and its key domain stays separate.
