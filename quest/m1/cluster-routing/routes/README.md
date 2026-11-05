@@ -512,6 +512,7 @@ benchmarks.
 
 ## Waiting
 
+- Maintainer: a floor replaces the whole certified-region list, but that list can exceed the 65,535-byte message limit (for example, sixteen 4,096-byte regions). Options: make a floor batch span messages with an atomic completion marker, or constrain certification to a representable projection. Recommend multipart atomic floors rather than an arbitrary region cap; the continuation wire shape needs a decision before implementation.
 - Maintainer: two original claims (`live` and `live/a`) clamp to the same prefix for interest `live/a/x`, violating the one-claim-per-route/prefix rule and losing the key needed by cross-stream floors. Options: carry the original claim prefix (including ancestors of the interest), or define a projection and reconciliation rule that selects one covering claim. Recommend preserving original claim identity, with a grant-safe ancestor encoding; this changes the wire shape and needs your choice.
 - Maintainer: a Hidden=0 floor currently certifies absence for hidden claims delivered on a Hidden=1 stream. Options: make certification depend on each stream's requested filter, or isolate differently filtered views entirely. Recommend using the existing request filter to restrict negative evidence, without another field on the wire. Confirm this certification rule alongside the claim identity decision.
 

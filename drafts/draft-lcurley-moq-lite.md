@@ -1178,7 +1178,7 @@ ROUTE_REQUEST Message {
 Set to 0xA to indicate a ROUTE_REQUEST message.
 
 **Node ID**:
-The origin node, as the publisher named it on this stream.
+The origin node, as the publisher names it on this session.
 0 is a PROTOCOL_VIOLATION.
 
 **Seqno**:
