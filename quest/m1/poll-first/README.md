@@ -78,30 +78,27 @@ moq-mux, moq-hls, moq-room, moq-stats, moq-crypto, and moq-auth each keep theirs
 behind a default-off `async` feature that binaries, tests, tokio glue, and the
 bindings enable. `just rs coroutines` proves each poll-only build compiles no
 coroutines. Runtime glue (moq-tokio, moq-uring) and bindings generate theirs
-unconditionally. The origin front driver and the server handshake are hand-written
-polls.
+unconditionally.
 
 Decided 2026-11-05 (maintainer, /quest-unblock): convert every remaining
-multi-await `async fn` body listed below in
+multi-await `async fn` body in
 [moq-dev/moq#7607](https://github.com/moq-dev/moq/pull/7607) before it lands,
-rather than landing it as is and splitting them into child quests.
+rather than landing it as is and splitting them into child quests. That PR does:
+moq-net's sessions (the IETF publisher, subscriber, session driver, and auth,
+`Client::connect`, the server handshake), its model readers, the siblings' gated
+constructors, and moq-hls's export drivers are poll machines. Outside the HTTP
+edges (moq-auth's client, server, and mesh; moq-hls's import and HTTP server), no
+library `async fn` awaits more than once.
 
-What remains is the logic still written as `async fn` bodies, all behind the
-`async` features. Each becomes a `poll_*` (hand-written when a wait sits in a loop
-or branch, `#[kio::machine]` when straight-line) with a generated wrapper, or moves
-out of the library to the edges:
+What remains:
 
-- **moq-net's sessions:** about 113 bodies in `ietf` (publisher, subscriber,
-  session, auth), plus `client::Client::connect`, `Session::close`,
-  `coding::Stream::open`, `Writer::encode`, `auth::Gate::guard` and `until`,
-  `util::TaskSet::drive`, and `time::run`.
-- **moq-net's model:** `frame::Consumer::read_all`, `group::Consumer::read_frame`
-  and `read_frames`, `track::Demand::closed`.
-- **Siblings' gated constructors and readers:** moq-mux `catalog::Consumer::new`,
-  `ts::Release::new`, `Source::{catalog, resolve, subscribe_track}`,
-  `fmp4::Muxer::read`, `Linger::wait`; hang `Catalog::subscribe`; moq-room
-  `chat::Subscriber::subscribe`; moq-auth `lease::Consumer::reported`; moq-hls's
-  import and export drivers.
+- **moq-hls's import driver** (`import.rs`) still awaits reqwest requests,
+  `tokio::fs`, and sleeps between HTTP retries, and its axum routes are async
+  handlers. Whether the import driver stays async as HTTP edge glue or becomes a
+  poll machine over boxed reqwest futures is open in
+  [moq-dev/moq#7607](https://github.com/moq-dev/moq/pull/7607).
 - **Wrappers the generator cannot take** stay hand-written: a name that differs
   from its poll (moq-tokio `state_changed`, `presence_changed`; moq-uring `read`,
-  `write`; moq-net `track::Ordered::finished`), a by-value receiver, or a free fn.
+  `write`), a by-value receiver, a free fn, or a private poll (moq-net
+  `Server::close`, `Session::{close, closed, peer_implementation}`, the auth
+  handles' `closed`).
