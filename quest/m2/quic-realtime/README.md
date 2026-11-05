@@ -131,6 +131,21 @@ Remaining work once the candidates finish (this README's own job):
   turns them on instead, so only `Realtime` sessions pay the ACK bytes.
 - Wire the winner's moq-shaper run into the nightly so a regression in
   queuing delay shows up.
+- SCReAMv2's frame latency under main's corrected pacer: recover it, through
+  the draft's media-queue terms (section 4.4) or headroom for keyframe
+  pacing ([moq-dev/moq#7547](https://github.com/moq-dev/moq/pull/7547)'s
+  rerun on [moq-dev/moq#7606](https://github.com/moq-dev/moq/pull/7606)).
+- Only if BBR3's delay bound wins the bake-off: cut ProbeBW_UP's short
+  transient queues, and explain why utilization after a drop fell to 80%
+  on `cellular-step` and `cellular-deep` where BBR3 gets 98%
+  ([moq-dev/moq#7544](https://github.com/moq-dev/moq/pull/7544)).
+
+Decided 2026-11-03 (maintainer, follow-up planning after the 2026-11-03 /quest-afk and /quest-complete runs): both items above join this README's remaining work. Options
+shown:
+
+- m0
+- m1
+- ✅ m2, in this epic
 
 The winner's target rate already reaches moq-cli and moq-ffi encoders
 through `bandwidth_estimate` → `estimated_send_rate` → `set_bitrate`.

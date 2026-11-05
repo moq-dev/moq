@@ -177,7 +177,7 @@ export class Truck {
 		this.#canvas.set(canvas);
 	}
 
-	/** Prepare a bumpless handoff from the latest vehicle feedback. */
+	/** Take over with measured steering and gear, zero throttle, and full brake. */
 	beginTakeover(): boolean {
 		const status = this.status.peek();
 		if (this.estopped.peek() || !status) return false;

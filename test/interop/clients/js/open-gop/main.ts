@@ -61,7 +61,8 @@ window.runRecovery = async (packets) => {
 	const origin = new Moq.Origin.Producer();
 	const name = Moq.Path.from("open-gop");
 	const route = origin.route(name);
-	const track = route.broadcast.createTrack("video", { timescale: Moq.Time.Timescale.MICRO });
+	// Every group is written before the decoder reads from the first, so none may go stale.
+	const track = route.broadcast.createTrack("video", { timescale: Moq.Time.Timescale.MICRO, maxAge: null });
 	let group: Moq.Group.Producer | undefined;
 	for (const packet of packets) {
 		if (group?.sequence !== BigInt(packet.group)) {

@@ -81,7 +81,9 @@ async fn an_errored_end_keeps_its_history_across_a_hop() {
 		let broadcast = publisher
 			.route("bcast", moq_net::origin::RouteOptions::hidden())
 			.unwrap();
-		let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
+		let info = moq_net::track::Info::default()
+			.with_timescale(moq_net::Timescale::MILLI)
+			.with_max_age(None);
 		let mut track = broadcast.broadcast().create_track("video", info).unwrap();
 		broadcast.announce().unwrap();
 		for _ in 0..GROUPS {

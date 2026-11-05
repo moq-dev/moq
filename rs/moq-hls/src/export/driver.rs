@@ -14,10 +14,11 @@ use std::task::Poll;
 /// Dropping it early stops all of that work.
 #[must_use = "the broadcaster does nothing until its driver runs"]
 pub struct Driver {
-	/// The catalog watcher, polled before the other tasks in every pass: a reconfigure must
-	/// retire its rendition before that rendition's watcher reads groups published after it.
-	lead: Option<Job>,
-	inbox: kio::Queue<Job>,
+	/// The catalog watchers, the broadcast's and each contribution's, polled before the other
+	/// tasks in every pass: a reconfigure must retire its rendition before that rendition's
+	/// watcher reads groups published after it.
+	leads: kio::Tasks<Job>,
+	inbox: kio::Queue<(Lane, Job)>,
 	tasks: kio::Tasks<Job>,
 	/// The inbox closed: every owner that could start a task has dropped.
 	closed: bool,
@@ -26,29 +27,26 @@ pub struct Driver {
 impl Driver {
 	/// Advance every task, ready once nothing is left to run.
 	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		if let Some(lead) = &mut self.lead
-			&& kio::Task::poll(lead, waiter).is_ready()
-		{
-			self.lead = None;
-		}
 		while !self.closed {
 			match self.inbox.poll_pop(waiter) {
-				Poll::Ready(Ok(job)) => self.tasks.push(job),
+				Poll::Ready(Ok((Lane::Lead, job))) => self.leads.push(job),
+				Poll::Ready(Ok((Lane::Other, job))) => self.tasks.push(job),
 				Poll::Ready(Err(kio::Closed)) => self.closed = true,
 				Poll::Pending => break,
 			}
 		}
+		let leads = self.leads.poll(waiter);
 		match self.tasks.poll(waiter) {
-			Poll::Ready(()) if self.closed && self.lead.is_none() => Poll::Ready(()),
+			Poll::Ready(()) if self.closed && leads.is_ready() => Poll::Ready(()),
 			_ => Poll::Pending,
 		}
 	}
 
-	/// Run `task` ahead of every other task (see [`lead`](Self::lead)), until it finishes or the
-	/// returned [`Owner`] drops.
+	/// Run `task` ahead of every other task (see [`leads`](Self::leads)), until it finishes or
+	/// the returned [`Owner`] drops.
 	pub(crate) fn lead(&mut self, task: impl Future<Output = ()> + Send + 'static) -> Owner {
 		let (job, owner) = Job::new(task);
-		self.lead = Some(job);
+		self.leads.push(job);
 		owner
 	}
 
@@ -73,7 +71,13 @@ pub(crate) struct Spawner {
 	inbox: Arc<Inbox>,
 }
 
-struct Inbox(kio::Queue<Job>);
+/// Whether a task runs among the driver's leads or after them.
+enum Lane {
+	Lead,
+	Other,
+}
+
+struct Inbox(kio::Queue<(Lane, Job)>);
 
 impl Drop for Inbox {
 	fn drop(&mut self) {
@@ -86,7 +90,7 @@ impl Spawner {
 	pub fn new() -> (Self, Driver) {
 		let inbox = kio::Queue::new();
 		let driver = Driver {
-			lead: None,
+			leads: kio::Tasks::new(),
 			inbox: inbox.clone(),
 			tasks: kio::Tasks::new(),
 			closed: false,
@@ -101,9 +105,19 @@ impl Spawner {
 
 	/// Run `task` on the driver until it finishes or the returned [`Owner`] drops.
 	pub fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) -> Owner {
+		self.start(Lane::Other, task)
+	}
+
+	/// [`spawn`](Self::spawn) `task` among the driver's leads, polled before every other task,
+	/// as a catalog watcher must be.
+	pub fn lead(&self, task: impl Future<Output = ()> + Send + 'static) -> Owner {
+		self.start(Lane::Lead, task)
+	}
+
+	fn start(&self, lane: Lane, task: impl Future<Output = ()> + Send + 'static) -> Owner {
 		let (job, owner) = Job::new(task);
 		// Refused once the driver is gone, which drops the task unrun.
-		let _ = self.inbox.0.try_push(job);
+		let _ = self.inbox.0.try_push((lane, job));
 		owner
 	}
 }
@@ -142,6 +156,25 @@ impl kio::Task for Job {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// A lead a spawner starts, such as a contribution's catalog watcher, runs before the tasks
+	/// started ahead of it.
+	#[test]
+	fn spawned_leads_run_first() {
+		let (spawner, mut driver) = Spawner::new();
+		let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+		let record = |name: &'static str| {
+			let order = order.clone();
+			async move {
+				order.lock().unwrap().push(name);
+				std::future::pending::<()>().await;
+			}
+		};
+		let _other = spawner.spawn(record("other"));
+		let _lead = spawner.lead(record("lead"));
+		assert!(driver.poll(&kio::Waiter::noop()).is_pending());
+		assert_eq!(*order.lock().unwrap(), ["lead", "other"]);
+	}
 
 	// The driver finishes once every spawner and task is gone, and an owner's drop ends its task
 	// without waiting for the task to finish on its own.

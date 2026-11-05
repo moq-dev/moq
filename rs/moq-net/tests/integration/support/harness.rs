@@ -92,6 +92,8 @@ pub struct MockConnectOptions {
 	pub cost: Option<u64>,
 	/// What both transports report as their connection statistics.
 	pub stats: MockStats,
+	/// Whether both transports have a sender that probes up to a target.
+	pub probe: bool,
 	/// The context the server records under.
 	pub server_stats: moq_net::stats::Session,
 	/// Count server driver polls into this counter when supplied.
@@ -125,6 +127,7 @@ impl MockConnectOptions {
 			server_extensions: Default::default(),
 			cost: None,
 			stats: MockStats::default(),
+			probe: false,
 			server_stats: Default::default(),
 			server_polls: None,
 			client_discovers_all: true,
@@ -165,6 +168,8 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 	client_transport.set_latency(opts.latency);
 	client_transport.set_stats(opts.stats);
 	server_transport.set_stats(opts.stats);
+	client_transport.set_probe(opts.probe);
+	server_transport.set_probe(opts.probe);
 	let transports = (client_transport.clone(), server_transport.clone());
 
 	let mut client = Client::new()

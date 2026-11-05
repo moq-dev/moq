@@ -30,7 +30,7 @@ test("a widened maxDelay re-offers what the publisher skipped below the start", 
 	const origin = new OriginProducer();
 	const publication = origin.route(Path.from("room"));
 	const broadcast = publication.broadcast;
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	// One group per second, so a budget picks how far back a reader reaches.
 	for (let sequence = 0; sequence < 10; sequence++) {
 		const group = producer.appendGroup();

@@ -49,7 +49,7 @@ public typealias VideoCodec = MoqFFI.MoqVideoCodec
 /// Which encoder implementation to use: automatic, hardware, software, or one
 /// named backend.
 public typealias VideoEncoderKind = MoqFFI.MoqVideoEncoderKind
-/// A best-effort raw-track datagram as received: sequence, timestamp, and payload.
+/// A datagram payload with its own sequence and optional timestamp.
 public typealias Datagram = MoqFFI.MoqDatagram
 /// The read-only facts on a received route: the `instance` of the stream it serves,
 /// relay hop ids (oldest first), and its static production and link cost, lower wins.
@@ -139,3 +139,6 @@ extension Subscription {
     /// `Subscription(...)` must name `delay`.
     public static var `default`: Subscription { moqSubscriptionDefaults() }
 }
+
+/// Publisher priority and optional timestamp scale fixed for a datagram track.
+public typealias DatagramInfo = MoqFFI.MoqDatagramInfo

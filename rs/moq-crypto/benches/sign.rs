@@ -10,7 +10,7 @@ use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use moq_crypto::sign::{SecretKey, broadcast};
 
 fn produce(key: &SecretKey) -> (moq_crypto::sign::track::Producer, moq_net::broadcast::Producer) {
-	// A zero max age keeps only the newest group cached.
+	// A zero max age leaves only the newest group fresh.
 	let info = moq_net::track::Info::default().with_max_age(Duration::ZERO);
 	let inner = moq_net::broadcast::Info::new().produce();
 	let path = moq_net::Path::new("bench").unwrap();

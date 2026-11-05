@@ -25,6 +25,13 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	producer
 }
 
+/// A millisecond track with no publisher max age, so ranges reach its superseded groups.
+fn timed() -> Info {
+	Info::default()
+		.with_timescale(moq_net::Timescale::MILLI)
+		.with_max_age(None)
+}
+
 fn write_group(track: &moq_net::track::Producer, sequence: u64) {
 	let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
 	group.write_frame(Timestamp::now(), &b"x"[..]).unwrap();
@@ -64,10 +71,7 @@ async fn ahead_then_live(version: Option<&str>, relay: bool) -> (Vec<u64>, Vec<u
 	let broadcast = publisher
 		.route("bcast", moq_net::origin::RouteOptions::hidden())
 		.unwrap();
-	let track = broadcast
-		.broadcast()
-		.create_track("quiet", Info::default().with_timescale(moq_net::Timescale::MILLI))
-		.unwrap();
+	let track = broadcast.broadcast().create_track("quiet", timed()).unwrap();
 	broadcast.announce().unwrap();
 	for sequence in 0..=3 {
 		write_group(&track, sequence);
@@ -132,10 +136,7 @@ async fn sparse_ranges_reach_the_publisher_on_lite07() {
 		let broadcast = publisher
 			.route("bcast", moq_net::origin::RouteOptions::hidden())
 			.unwrap();
-		let track = broadcast
-			.broadcast()
-			.create_track("quiet", Info::default().with_timescale(moq_net::Timescale::MILLI))
-			.unwrap();
+		let track = broadcast.broadcast().create_track("quiet", timed()).unwrap();
 		broadcast.announce().unwrap();
 
 		let subscriber = produce_origin(2);
@@ -219,10 +220,7 @@ async fn range_fixture_history(version: &str, relay: bool, history: u64) -> Rang
 	let broadcast = publisher
 		.route("ranges", moq_net::origin::RouteOptions::hidden())
 		.unwrap();
-	let track = broadcast
-		.broadcast()
-		.create_track("quiet", Info::default().with_timescale(moq_net::Timescale::MILLI))
-		.unwrap();
+	let track = broadcast.broadcast().create_track("quiet", timed()).unwrap();
 	broadcast.announce().unwrap();
 	for sequence in 0..history {
 		let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
@@ -757,10 +755,7 @@ async fn a_covered_bounded_subscription_stays_open() {
 		let broadcast = publisher
 			.route("bcast", moq_net::origin::RouteOptions::hidden())
 			.unwrap();
-		let track = broadcast
-			.broadcast()
-			.create_track("quiet", Info::default().with_timescale(moq_net::Timescale::MILLI))
-			.unwrap();
+		let track = broadcast.broadcast().create_track("quiet", timed()).unwrap();
 		broadcast.announce().unwrap();
 		for sequence in [0, 1, 2, 4, 5] {
 			write_group(&track, sequence);

@@ -16,7 +16,7 @@ pub(crate) fn enter() -> Option<tokio::runtime::EnterGuard<'static>> {
 }
 
 /// Where detached tasks run, captured once so tasks spawned later land beside the first.
-#[cfg(any(feature = "driver", feature = "net"))]
+#[cfg(feature = "driver")]
 #[derive(Debug, Clone)]
 pub(crate) enum Spawner {
 	/// The caller's tokio runtime, else the fallback.
@@ -26,7 +26,7 @@ pub(crate) enum Spawner {
 	Sim,
 }
 
-#[cfg(any(feature = "driver", feature = "net"))]
+#[cfg(feature = "driver")]
 impl Spawner {
 	/// The `kio::clock` simulator when called inside one, else the caller's runtime or the fallback.
 	pub(crate) fn current() -> Self {
@@ -52,7 +52,7 @@ impl Spawner {
 }
 
 /// Run `future` in the background with nobody to join it, where [`Spawner::current`] picks.
-#[cfg(feature = "net")]
+#[cfg(feature = "quic")]
 pub(crate) fn detach<F>(future: F)
 where
 	F: Future + Send + 'static,

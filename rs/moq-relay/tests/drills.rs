@@ -33,9 +33,12 @@ use futures::FutureExt;
 use moq_relay::{Config, Relay};
 use moq_tokio::moq_net;
 
-/// A millisecond track: the frames written here carry timestamps.
+/// A millisecond track with no publisher max age: the frames written here carry timestamps,
+/// and superseded groups stay readable.
 fn timed() -> moq_net::track::Info {
-	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	moq_net::track::Info::default()
+		.with_timescale(moq_net::Timescale::MILLI)
+		.with_max_age(None)
 }
 
 /// Ceiling for anything a drill waits on. Every wait is bounded, so a broken
@@ -219,7 +222,7 @@ impl RelayHost {
 	/// Bind a relay running `config` and wait for it to be ready to accept.
 	async fn start(config: Config) -> Self {
 		// Process-global; every drill in this binary races to be first.
-		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		let _ = rind_rustls::default_provider().unwrap().install_default();
 
 		let runtime = tokio::runtime::Builder::new_multi_thread()
 			.worker_threads(2)

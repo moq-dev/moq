@@ -70,7 +70,9 @@ async fn fixture(
 		.broadcast()
 		.create_track(
 			"video",
-			moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+			moq_net::track::Info::default()
+				.with_timescale(moq_net::Timescale::MILLI)
+				.with_max_age(None),
 		)
 		.unwrap();
 	broadcast.announce().unwrap();

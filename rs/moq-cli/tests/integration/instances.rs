@@ -22,7 +22,7 @@ impl Drop for Relay {
 }
 
 async fn relay() -> Relay {
-	let _ = moq_tokio::crypto::install_default();
+	moq_tokio::crypto::install_default().unwrap();
 	let mut config = moq_relay::Config::default();
 	config.drain_timeout = Some(Duration::ZERO.into());
 	config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
@@ -74,11 +74,14 @@ fn publish(origin: &origin::Producer, instance: &Instance, tag: &str) -> Publish
 	let options = || origin::RouteOptions::default().with_instance(instance.clone(), 0);
 	let broadcast = origin.route("live/catalog.hang", options()).unwrap();
 	let sibling = origin.route("live/media", options()).unwrap();
+	// Media's max age, so its superseded groups stay fetchable.
 	let media = sibling
 		.broadcast()
 		.create_track(
 			"audio",
-			track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+			track::Info::default()
+				.with_timescale(moq_net::Timescale::MILLI)
+				.with_max_age(hang::container::MAX_AGE),
 		)
 		.unwrap();
 	write(&media, &format!("{tag}:0"));

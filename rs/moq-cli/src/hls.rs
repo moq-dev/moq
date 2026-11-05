@@ -50,8 +50,8 @@ pub struct ExportArgs {
 	pub tls: Tls,
 
 	/// Minimum media listed in each rendition's playlist window, at most 256 segments.
-	/// Keep it within the relay's group-cache retention, since segments are fetched from
-	/// there on request.
+	/// Keep it within the media's max age and the relay's group-cache retention, since
+	/// segments are fetched from there on request.
 	#[usage(long, default = "16s")]
 	pub window: moq_tokio::cli::Duration,
 

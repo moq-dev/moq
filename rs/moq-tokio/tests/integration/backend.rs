@@ -229,8 +229,13 @@ async fn connect_test(config: ConnectTest<'_>) {
 fn write_self_signed(dir: &std::path::Path, stem: &str, name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
 	use std::io::Write;
 
-	let key = rcgen::KeyPair::generate().expect("key");
-	let params = rcgen::CertificateParams::new(vec![name.to_string()]).expect("params");
+	let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("key");
+	let params = rcgen::CertificateParams::new(vec![name.to_string()])
+		.map(|mut params| {
+			params.serial_number = Some(1u64.into());
+			params
+		})
+		.expect("params");
 	let cert = params.self_signed(&key).expect("cert");
 
 	let write = |name: String, contents: String| {
@@ -242,7 +247,10 @@ fn write_self_signed(dir: &std::path::Path, stem: &str, name: &str) -> (std::pat
 
 	(
 		write(format!("{stem}.pem"), cert.pem()),
-		write(format!("{stem}.key"), key.serialize_pem()),
+		write(
+			format!("{stem}.key"),
+			pem::encode(&pem::Pem::new("PRIVATE KEY", key.to_pkcs8().secret_pkcs8_der())),
+		),
 	)
 }
 
@@ -383,16 +391,20 @@ async fn reload_test() {
 /// five paths so the caller can wire them into the TLS configs.
 #[cfg(feature = "quic")]
 fn generate_mtls_certs() -> (tempfile::TempDir, MtlsPaths) {
-	use rcgen::{
-		BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose,
-	};
+	use rcgen::{BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyUsagePurpose};
+	use rind_rcgen::KeyPair;
 	use std::io::Write;
 
 	let dir = tempfile::tempdir().expect("failed to create tempdir");
 
 	// Self-signed CA that signs both the server and client leaf certs.
-	let ca_key = KeyPair::generate().expect("ca key");
-	let mut ca_params = CertificateParams::new(Vec::new()).expect("ca params");
+	let ca_key = KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("ca key");
+	let mut ca_params = CertificateParams::new(Vec::new())
+		.map(|mut params| {
+			params.serial_number = Some(1u64.into());
+			params
+		})
+		.expect("ca params");
 	ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
 	ca_params.distinguished_name.push(DnType::CommonName, "moq test CA");
 	ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
@@ -400,15 +412,25 @@ fn generate_mtls_certs() -> (tempfile::TempDir, MtlsPaths) {
 	let issuer = Issuer::from_params(&ca_params, &ca_key);
 
 	// Server leaf with a localhost SAN so the client can verify the name.
-	let server_key = KeyPair::generate().expect("server key");
-	let mut server_params = CertificateParams::new(vec!["localhost".to_string()]).expect("server params");
+	let server_key = KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("server key");
+	let mut server_params = CertificateParams::new(vec!["localhost".to_string()])
+		.map(|mut params| {
+			params.serial_number = Some(1u64.into());
+			params
+		})
+		.expect("server params");
 	server_params.distinguished_name.push(DnType::CommonName, "localhost");
 	server_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
 	let server_cert = server_params.signed_by(&server_key, &issuer).expect("server cert");
 
 	// Client leaf presented during the handshake for mTLS.
-	let client_key = KeyPair::generate().expect("client key");
-	let mut client_params = CertificateParams::new(vec!["client.example".to_string()]).expect("client params");
+	let client_key = KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("client key");
+	let mut client_params = CertificateParams::new(vec!["client.example".to_string()])
+		.map(|mut params| {
+			params.serial_number = Some(1u64.into());
+			params
+		})
+		.expect("client params");
 	client_params
 		.distinguished_name
 		.push(DnType::CommonName, "client.example");
@@ -425,9 +447,15 @@ fn generate_mtls_certs() -> (tempfile::TempDir, MtlsPaths) {
 	let paths = MtlsPaths {
 		ca: write("ca.pem", ca_cert.pem()),
 		server_cert: write("server.pem", server_cert.pem()),
-		server_key: write("server.key", server_key.serialize_pem()),
+		server_key: write(
+			"server.key",
+			pem::encode(&pem::Pem::new("PRIVATE KEY", server_key.to_pkcs8().secret_pkcs8_der())),
+		),
 		client_cert: write("client.pem", client_cert.pem()),
-		client_key: write("client.key", client_key.serialize_pem()),
+		client_key: write(
+			"client.key",
+			pem::encode(&pem::Pem::new("PRIVATE KEY", client_key.to_pkcs8().secret_pkcs8_der())),
+		),
 	};
 
 	(dir, paths)

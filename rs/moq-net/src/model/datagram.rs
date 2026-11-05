@@ -26,6 +26,10 @@
 //!   name's datagram track before, or with, its stream track.
 //! - The wire never says a name has no datagram track, so a datagram reader of a name with
 //!   only a stream track receives nothing until that track ends.
+//! - The wire never says which kind a subscription asks for, so a publisher serves it from
+//!   the stream track when one is published, and otherwise from whichever kind answers
+//!   first: a local datagram track answers without waiting for a stream request handler,
+//!   which need not answer a name it doesn't serve.
 
 use std::{
 	collections::VecDeque,

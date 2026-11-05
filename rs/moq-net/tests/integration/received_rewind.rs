@@ -58,7 +58,7 @@ async fn relay(
 		.unwrap();
 	let track = broadcast
 		.broadcast()
-		.create_track("data", Info::default().with_timescale(timescale))
+		.create_track("data", Info::default().with_timescale(timescale).with_max_age(None))
 		.unwrap();
 	broadcast.announce().unwrap();
 
@@ -182,7 +182,10 @@ async fn fetch_only(version: &str) -> Vec<Result<Option<moq_net::Timestamp>, moq
 	let broadcast = publisher
 		.route("bcast", moq_net::origin::RouteOptions::hidden())
 		.unwrap();
-	let track = broadcast.broadcast().create_track("data", Info::default()).unwrap();
+	let track = broadcast
+		.broadcast()
+		.create_track("data", Info::default().with_max_age(None))
+		.unwrap();
 	broadcast.announce().unwrap();
 	write_group(&track, 0);
 	write_group(&track, 1);

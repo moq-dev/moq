@@ -7,6 +7,16 @@ if [[ "${GITHUB_ACTIONS:-}" != true && "${LOCAL_SUPERVISED:-}" != 1 ]]; then
     exec bash "$(dirname "$0")/../../sh/local.sh" bash "$0" "$@"
 fi
 
+fetch_only=0
+case "${1:-}" in
+    "") ;;
+    --fetch) fetch_only=1 ;;
+    *)
+        echo "usage: run.sh [--fetch]" >&2
+        exit 2
+        ;;
+esac
+
 CONFORMANCE_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 WORKSPACE=$(cd "$CONFORMANCE_DIR/../.." && pwd)
 # shellcheck source-path=SCRIPTDIR source=../lib/harness.sh
@@ -20,7 +30,8 @@ relay="$WORKSPACE/${CARGO_TARGET_DIR:-target}/debug/moq-relay"
 # Cargo accepts an absolute target directory too.
 [[ "${CARGO_TARGET_DIR:-}" != /* ]] || relay="$CARGO_TARGET_DIR/debug/moq-relay"
 
-harness_begin ietf-conformance "$(harness_env HARNESS_RESULTS)just test ietf-conformance"
+bun install --frozen-lockfile
+harness_begin ietf-conformance "$(harness_env HARNESS_RESULTS)just test ietf-conformance$(harness_argv "$@")"
 python3 "$CONFORMANCE_DIR/prepare.py" "$package/share/moxygen/conformance_test.sh" "$HARNESS_RUN/conformance.sh"
 # LibreSSL in the dev shell has no system-wide openssl.cnf.
 cat >"$HARNESS_RUN/openssl.cnf" <<'EOF'
@@ -112,10 +123,34 @@ run_suite() {
     fi
 }
 
+# Fetch directly from Moxygen: first-party publishers intentionally serve one group only.
+run_js_ranges() {
+    local runtime status
+    for runtime in node bun; do
+        status=0
+        local command=(bun)
+        [[ "$runtime" != node ]] || command=(node --import tsx)
+        harness_spawn "fetch-$runtime" "$HARNESS_RUN/fetch-$runtime.log" \
+            timeout -k 3 30 "${command[@]}" "$WORKSPACE/test/interop/clients/js-native/ranges.ts" \
+            "https://127.0.0.1:$publisher_port/test" "$HARNESS_RUN/cert.pem"
+        harness_wait "$HARNESS_PID" || status=$?
+        cat "$HARNESS_RUN/fetch-$runtime.log"
+        local cell=(suite=ietf-conformance case="JS FETCH ranges" version=moq-transport-18 transport=quic publisher=moxygen subscriber="js-native-$runtime" log="$HARNESS_RUN/fetch-$runtime.log")
+        if ((status == 0)) && publisher_healthy; then
+            harness_result pass "${cell[@]}"
+        else
+            harness_result fail "${cell[@]}"
+            failed=1
+        fi
+    done
+}
+
 # Moxygen's MoQVersions.h uses moqt-20-meta-02 for draft 20; use shared moqt-18.
 failed=0
 version=18
-for topology in single cluster; do
+topologies=(single cluster)
+((fetch_only == 0)) || topologies=(single)
+for topology in "${topologies[@]}"; do
     label="$topology-$version"
     start_relay "$label-origin" "$version"
     ingress="$HARNESS_PORT"
@@ -137,9 +172,10 @@ for topology in single cluster; do
     namespace_ready
     # A direct-origin control distinguishes suite/pin failures from relay behavior.
     if [[ "$topology" == single ]]; then
-        run_suite "reference-$version" "https://127.0.0.1:$publisher_port/test"
+        run_js_ranges
+        ((fetch_only == 1)) || run_suite "reference-$version" "https://127.0.0.1:$publisher_port/test"
     fi
-    run_suite "$label" "https://127.0.0.1:$egress/"
+    ((fetch_only == 1)) || run_suite "$label" "https://127.0.0.1:$egress/"
     harness_reap "$publisher_pid"
     [[ -z "$egress_pid" ]] || harness_reap "$egress_pid"
     harness_reap "$ingress_pid"

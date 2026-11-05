@@ -20,13 +20,29 @@ Hold the `Route` for as long as the broadcast should stay announced: releasing o
 
 `Route`, the received facts in `Announce.route`, is renamed `RouteInfo`; its fields are unchanged.
 
+### Catalog renditions carry their warmup ([#7864](https://github.com/moq-dev/moq/pull/7864))
+
+`Media.Video` and `Media.Audio` gain `warmup`, the catalog's decoder warmup; it defaults to `nil`, so existing initializers still compile. `Media.TrackConsumer` and the audio and video consumers read it from the rendition and start that much earlier.
+
+### Separate datagram tracks
+
+Replace stream-track `appendDatagram` / `insertDatagram` / `recvDatagram` with `BroadcastProducer.createDatagrams(name:info:)` and `BroadcastConsumer.datagrams(name:)`. `DatagramProducer.append(_:timestamp:)` assigns a sequence; `insert(_:)` takes a `Datagram`. `DatagramConsumer.recv()` and `AsyncSequence` read its independent cursor. Use `priority()` / `priorityChanged(last:)` for demand, and `BroadcastRequests.datagrams()` / `DatagramRequests.requested()` for on-demand tracks. `DatagramInfo` has priority and optional timescale, without stream ranges or cache settings.
+
+### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+A `nil` `TrackInfo.maxAge`, the default, and a `nil` info now advertise a zero max age, serving only the live edge, instead of no publisher limit. Pass `maxAgeUnlimited: true`, which ignores `maxAge`, where you relied on `nil` meaning no limit. A received track's `info()` sets it when its publisher advertised no limit.
+
+### Viewer targets are bounded ([#7090](https://github.com/moq-dev/moq/pull/7090))
+
+Viewer ceilings and PROBE target overrides are refused with the new `MoqError.OutOfRange` once they would sum above 2^53 - 1 bps, the most a PROBE target carries; nothing changes on a refusal. `Viewers.watch(maxBps:)` and `setTarget(targetBps:)` and `Viewer.update(maxBps:)` throw it, so call them with `try`. Handle the new variant wherever you match the error exhaustively. Regenerate bindings and rebuild the matching native library together.
+
 ### `lower` is a `Media.Producer` ([#7699](https://github.com/moq-dev/moq/pull/7699))
 
 `Media.TrackProducer.video` and `Media.TrackStreamProducer.video` take `lower: Media.Producer?` instead of `TrackProducer?`. Pass `lower: .track(producer)`, or `.stream(producer)` for a byte-stream rendition.
 
 ### Media setup refusals are typed
 
-Audio and video subscribe setup now reports `UnsupportedConfig` when the decoder refuses a codec, layout, or description. Handle this variant to try another rendition instead of inspecting an audio/video error message or `Unsupported`. Decoder faults, such as a backend that fails to open, and later peer and decode failures keep their existing errors. Regenerate bindings and rebuild the matching native library together.
+Audio and video subscribe setup now reports `UnsupportedConfig` when the decoder refuses a codec, layout, or description, or when every video decoder for the codec reports that this device cannot decode the stream. Handle this variant to try another rendition instead of inspecting an audio/video error message or `Unsupported`. Decoder faults, such as a missing driver or no device, and later peer and decode failures keep their existing errors. Regenerate bindings and rebuild the matching native library together.
 
 ### JSON writes take a broadcast-clock timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
 

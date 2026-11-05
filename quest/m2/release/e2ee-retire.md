@@ -15,10 +15,13 @@ mirroring [Retire libmoq](/quest/m2/release/libmoq-retire.md).
 - #7702 leaves `rs/moq-e2ee` as a code-free stub, and
   [the cut](/quest/m2/release/cut.md) publishes it at a version above
   crates.io's 0.0.20. Check with `curl -s
-  https://crates.io/api/v1/crates/moq-e2ee` that the stub's version is the
-  newest.
+  https://crates.io/api/v1/crates/moq-e2ee | jq -r .crate.max_version` that
+  the stub's version is the newest.
 - Then delete `rs/moq-e2ee` and its workspace member, so release-plz never
   publishes it again, and grep for any remaining `moq-e2ee` or `moq_e2ee`.
+  Keep the draft and profile names (`draft-lcurley-moq-e2ee`, "moq-e2ee
+  epoch"), which name the format, not the crate. (Folded in from
+  moq-dev/moq#7748's duplicate "Retire the moq-e2ee stub", 2026-11-04.)
 - moq-sign was never published, so it needs no stub.
 
 ## Required

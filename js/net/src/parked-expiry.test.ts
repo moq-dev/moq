@@ -32,7 +32,8 @@ for (const protocol of protocols) {
 			const origin = new Origin();
 			const broadcastRoute = origin.route(Path.from("parked"));
 			const broadcast = broadcastRoute.broadcast;
-			const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+			// No publisher limit, so the cache eviction rather than a stale verdict ends a long budget.
+			const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 			const write = (sequence: bigint) => {
 				const group = track.createGroup(sequence);
 				group.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(0) });
@@ -62,9 +63,7 @@ for (const protocol of protocols) {
 			let ended = false;
 			const trying = spyOn(Writer, "tryOpen").mockImplementationOnce(async (...args) => {
 				try {
-					// Isolate eviction from the independent ten-second open fallback.
-					const [quic, options] = args;
-					return await tryOpen(quic, { ...options, timeout: mode === "is evicted" ? null : options.timeout });
+					return await tryOpen(...args);
 				} finally {
 					ended = true;
 				}
@@ -125,12 +124,12 @@ for (const protocol of protocols) {
 						break;
 					}
 				}
-				// The transport cannot cancel createUnidirectionalStream. A late slot is reset,
-				// never used to transmit the obsolete group's header or frames.
+				// The transport cannot cancel createUnidirectionalStream. A late slot is kept for
+				// the next open, never used to transmit the obsolete group's header or frames.
 				slot.resolve();
 				await clock.advance(Nano.zero);
 				expect(writes).toBe(0);
-				expect(resets).toBe(1);
+				expect(resets).toBe(0);
 			} finally {
 				slot.resolve();
 				close();

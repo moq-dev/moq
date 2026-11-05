@@ -401,9 +401,16 @@ pub enum MoqError {
 		version: u64,
 	},
 	/// The rendition's codec, layout, or description was refused during setup; another rendition may work.
-	/// Decoder faults keep [`MoqError::Audio`] or [`MoqError::Video`].
+	/// Decoder faults keep `MoqError::Audio` or `MoqError::Video`.
 	#[error("unsupported configuration: {reason}")]
 	UnsupportedConfig {
+		/// A diagnostic message describing the refusal.
+		reason: String,
+	},
+	/// A number was outside the range the call accepts, such as viewer ceilings summing
+	/// above what a PROBE target carries.
+	#[error("out of range: {reason}")]
+	OutOfRange {
 		/// A diagnostic message describing the refusal.
 		reason: String,
 	},

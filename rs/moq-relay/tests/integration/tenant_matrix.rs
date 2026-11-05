@@ -128,7 +128,7 @@ struct Running {
 /// A relay admitting through [`Tenants`], serving QUIC from one io_uring worker
 /// when `io_uring`, else from the shared Tokio listener.
 async fn start(io_uring: bool) -> Running {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let tenants = Tenants::new();
 	let dir = tempfile::tempdir().expect("tempdir");
 	let mut config = config(dir.path(), false);

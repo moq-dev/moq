@@ -461,13 +461,18 @@ pub fn bump_publisher_bytes(
 	registry.bump_publisher_bytes(path, tier, n);
 }
 
-/// An allocator's probe target as its session follows it, for the bandwidth bench.
+/// A probe target as its session follows it, for the bandwidth bench.
 pub struct ProbeTarget(crate::bandwidth::Target);
 
 impl ProbeTarget {
 	/// Follow `allocator`'s target.
 	pub fn new(allocator: &crate::bandwidth::Allocator) -> Self {
 		Self(allocator.target())
+	}
+
+	/// Follow `viewers`' target, as the session sending it as PROBE does.
+	pub fn viewers(viewers: &crate::bandwidth::Viewers) -> Self {
+		Self(viewers.target())
 	}
 
 	/// The target in bits per second once it moved, without parking.
@@ -843,10 +848,11 @@ impl Default for Messages {
 				priority: 4,
 				max_delay: Duration::from_millis(500),
 				min_delay: None,
-				ranges: vec![lite::Range {
+				// Lite-06, the bench's version, restates the ranges.
+				ranges: lite::RangeEdit::Replace(vec![lite::Range {
 					start: Some(lite::Anchor::Absolute(crate::track::Position::group(1_000))),
 					end: Some(lite::Anchor::Absolute(crate::track::Position::group(2_001))),
-				}],
+				}]),
 			},
 			lite_start: lite::SubscribeResponse::Start(lite::SubscribeStart {
 				largest: None,

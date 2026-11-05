@@ -35,6 +35,19 @@ reviewing the selected cases, rebasing the profile patch, and rerunning the full
 matrix. The build recipe adds the client's missing Folly ManualExecutor link
 dependency and patches dependency script interpreters for Nix.
 
+## Native JS FETCH ranges
+
+The same run also has Node and Bun read multi-group past ranges directly from the pinned
+Moxygen publisher on draft 18. A separate live connection advances the publisher beyond
+the requested groups, so the FETCH connection shares none of its cache. Both readers check
+the group sequences, every object and its payload, overlapping ranges, missing groups, and
+bounded EOF. First-party publishers serve only one group per FETCH and are covered by the
+interop tail matrix instead.
+
+Run only this lane with `just test ietf-conformance --fetch`. It also runs in the full
+nightly conformance recipe. The fixture pins draft 18 at SETUP because this Moxygen revision's
+HTTP/3 listener predates WebTransport subprotocol negotiation.
+
 ## Conformance profile
 
 The client runs under a relay conformance profile, applied by

@@ -31,14 +31,19 @@ const WIDE: Duration = Duration::from_millis(6500);
 /// start at the live edge, below which a reader fills only the floor its ranges name.
 const VERSIONS: &[&str] = &["moq-lite-06", "moq-lite-07-wip"];
 
-/// The wire for the tests on one version: only lite-07 FETCHes below the start, so only it
-/// can pull a group twice.
+/// The wire for the tests on one version: only lite-07 fills below the start, so only it can
+/// pull a group twice.
 const VERSION: &str = "moq-lite-07-wip";
 
 fn origin(hop: u64) -> origin::Producer {
 	let (origin, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
 	spawn(driver);
 	origin
+}
+
+/// A millisecond track with no publisher max age, so only a reader's budget skips its groups.
+fn timed() -> Info {
+	Info::default().with_timescale(Timescale::MILLI).with_max_age(None)
 }
 
 /// A publisher holding every group, a relay, and a viewer behind it.
@@ -76,10 +81,7 @@ impl Chain {
 		let broadcast = publisher
 			.route("live", moq_net::origin::RouteOptions::hidden())
 			.unwrap();
-		let source = broadcast
-			.broadcast()
-			.create_track("video", Info::default().with_timescale(Timescale::MILLI))
-			.unwrap();
+		let source = broadcast.broadcast().create_track("video", timed()).unwrap();
 		broadcast.announce().unwrap();
 		Self {
 			source,
@@ -159,8 +161,9 @@ async fn a_fresh_reader_fills_nothing_below_its_start() {
 }
 
 /// Tighten while no start is selectable, then ask for a budget between the old and
-/// selected ones. Hold the publisher's driver so only an actual fill request, rather
-/// than its live re-offer, can prove the copy left the history below its start fillable.
+/// selected ones: the copy leaves the history below its start fillable rather than giving
+/// it up. Lite-07 asks for it as a range on the subscription the publisher's re-offer
+/// serves too, so only the groups the reader gets tell the two apart from a give-up.
 #[kio::test]
 async fn a_tightened_start_leaves_history_fillable_by_an_intermediate_reader() {
 	for relay in [false, true] {
@@ -180,7 +183,6 @@ async fn a_tightened_start_leaves_history_fillable_by_an_intermediate_reader() {
 		assert_eq!(received(&mut first).await, (6..GROUPS).collect());
 
 		*chain.source_gate.write().ok().unwrap() = false;
-		let before = chain.fetches();
 		let mut intermediate = chain.subscribe(Duration::from_millis(4500)).await;
 		// Drive the reader's miss walk too, with the upstream deliberately parked.
 		let reading = kio::clock::sim::spawn(async move {
@@ -190,13 +192,12 @@ async fn a_tightened_start_leaves_history_fillable_by_an_intermediate_reader() {
 			}
 			got
 		});
-		let upstream = &chain.links[0].client_transport;
-		kio::clock::timeout(TIMEOUT, upstream.bidi_count(3, before + 1))
+		*chain.source_gate.write().ok().unwrap() = true;
+		let got = kio::clock::timeout(TIMEOUT, reading)
 			.await
 			.expect("the history below the start is fillable");
-		*chain.source_gate.write().ok().unwrap() = true;
-		// This reader can also receive the feed's re-offer once the source resumes.
-		assert_eq!(reading.await.unwrap(), (4..GROUPS).collect(), "relay={relay}");
+		assert_eq!(got.unwrap(), (4..GROUPS).collect(), "relay={relay}");
+		assert_eq!(chain.fetches(), 0, "relay={relay}: the history rides the subscription");
 	}
 }
 
@@ -305,10 +306,7 @@ async fn wider_newcomers_after_the_first_pull_nothing_upstream() {
 	let broadcast = publisher
 		.route("live", moq_net::origin::RouteOptions::hidden())
 		.unwrap();
-	let source = broadcast
-		.broadcast()
-		.create_track("video", Info::default().with_timescale(Timescale::MILLI))
-		.unwrap();
+	let source = broadcast.broadcast().create_track("video", timed()).unwrap();
 	for sequence in 0..GROUPS {
 		let mut group = source.create_group(moq_net::group::Info { sequence }).unwrap();
 		group

@@ -26,7 +26,10 @@ async fn a_group_cut_by_an_idle_cancel_is_refetched_whole() {
 		.unwrap();
 	let track = broadcast
 		.broadcast()
-		.create_track("audio", moq_net::track::Info::default().with_timescale(None))
+		.create_track(
+			"audio",
+			moq_net::track::Info::default().with_timescale(None).with_max_age(None),
+		)
 		.unwrap();
 	broadcast.announce().unwrap();
 

@@ -688,7 +688,8 @@ mod supervision_tests {
 		*trigger
 			.write()
 			.unwrap_or_else(|_| unreachable!("test keeps its panic trigger open")) = true;
-		assert!(matches!(failed.next().await, Err(MoqError::Task { .. })));
+		let result = failed.next().await;
+		assert!(matches!(result, Err(MoqError::Task { .. })), "{result:?}");
 
 		let healthy = MoqOriginProducer::new(Default::default());
 		let _route = healthy.route("healthy".into(), Default::default()).unwrap();

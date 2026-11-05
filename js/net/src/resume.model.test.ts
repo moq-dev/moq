@@ -455,7 +455,7 @@ class Model {
 		});
 		const serving = wireOf(this.origin).receive(PATH, route);
 		const broadcast = new BroadcastProducer();
-		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 		void (async () => {
 			for await (const request of serving.requested()) {
 				request.serve(Upstream.of(broadcast, (sequence, local) => this.fill(instance, slot, sequence, local)));
@@ -1013,6 +1013,39 @@ test("regressions", async () => {
 				{ kind: "bounds", reader: 0, range: undefined },
 				{ kind: "write", instance: 0, slot: 0, group: 1, frames: 1 },
 				{ kind: "down", instance: 0, slot: 0 },
+			],
+			finish: false,
+		},
+		// A read right after a fully read range is replaced by none follows live, not the old range's end.
+		{
+			ops: [
+				{ kind: "up", instance: 1, slot: 1 },
+				{ kind: "join", reader: 0, spec: spec(false, "hour", [0, 1], false) },
+				{ kind: "write", instance: 1, slot: 1, group: undefined, frames: 1 },
+				{ kind: "ranges", reader: 0, range: undefined },
+			],
+			finish: false,
+		},
+		// A read right after the ranges narrow hands out no buffered group they left out.
+		{
+			ops: [
+				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "join", reader: 1, spec: spec(false, "hour", [0, 1], false) },
+				{ kind: "write", instance: 0, slot: 1, group: 1, frames: 1 },
+				{ kind: "write", instance: 0, slot: 1, group: 0, frames: 1 },
+				{ kind: "down", instance: 0, slot: 1 },
+				{ kind: "ranges", reader: 1, range: [1, 2] },
+			],
+			finish: false,
+		},
+		// A read right after the ranges widen below a group the copy passed waits for it.
+		{
+			ops: [
+				{ kind: "up", instance: 1, slot: 0 },
+				{ kind: "join", reader: 0, spec: spec(true, "hour", undefined, false) },
+				{ kind: "ranges", reader: 0, range: [1, 2] },
+				{ kind: "write", instance: 1, slot: 0, group: 0, frames: 1 },
+				{ kind: "ranges", reader: 0, range: [0, 1] },
 			],
 			finish: false,
 		},

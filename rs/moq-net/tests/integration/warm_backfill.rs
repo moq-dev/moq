@@ -70,7 +70,10 @@ async fn a_newcomer_on_a_warm_relay_gets_the_backfill() {
 			.unwrap();
 		let source = broadcast
 			.broadcast()
-			.create_track("video", Info::default().with_timescale(Timescale::MILLI))
+			.create_track(
+				"video",
+				Info::default().with_timescale(Timescale::MILLI).with_max_age(None),
+			)
 			.unwrap();
 		for sequence in 0..GROUPS {
 			let mut group = source.create_group(moq_net::group::Info { sequence }).unwrap();

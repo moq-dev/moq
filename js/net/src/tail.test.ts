@@ -28,7 +28,7 @@ async function session(protocol: string) {
 	]);
 	const broadcastRoute = origin.route(Path.from("test"));
 	const broadcast = broadcastRoute.broadcast;
-	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	const remote = wireOf(client).consume(Path.from("test"));
 	const reader = remote
 		.track("video")
@@ -56,7 +56,7 @@ async function readAll(reader: Ordered): Promise<string[]> {
 	}
 }
 
-// moq-lite carries the end in SUBSCRIBE_END as soon as it is declared, so a subscriber
+// moq-lite carries the end in SUBSCRIBE_FINISH as soon as it is declared, so a subscriber
 // learns it while the last group is still to come.
 test.each([Lite.ALPN_05, Lite.ALPN_06])(
 	"%s: an end declared ahead of the live edge reaches the subscriber",
