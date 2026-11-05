@@ -1216,6 +1216,41 @@ test.each([Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22])(
 	},
 );
 
+// SUBSCRIBE_UPDATE carries no range here, so a finite end would hold the upstream copy short
+// once another reader widens the track's demand.
+test("a bounded subscription asks upstream from its start without an end", async () => {
+	const version = Version.DRAFT_22;
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
+	const subscriber = new Subscriber({ session: new NativeSession(pair.server, version, true) });
+	const consumer = subscriber
+		.consume(Path.from("room"))
+		.track("video")
+		.subscribe({
+			...track.Subscription.default(),
+			ranges: [{ start: { absolute: 4n }, end: { absolute: 10n } }],
+			order: "ascending",
+			delay: { max: null },
+		});
+	// The range reaches past the live edge TRACK_STATUS names, so it subscribes.
+	const status = await nextStream(pair.client, version);
+	if (!status) throw new Error("missing TRACK_STATUS stream");
+	expect(await status.reader.u53()).toBe(TrackStatusRequest.id);
+	await TrackStatusRequest.decode(status.reader, version);
+	await status.writer.u53(TrackStatusOk.id);
+	await new TrackStatusOk({ largest: { groupId: 5n, objectId: 0n } }).encode(status.writer, version);
+	const peer = await nextStream(pair.client, version);
+	if (!peer) throw new Error("missing SUBSCRIBE stream");
+	try {
+		expect(await peer.reader.u53()).toBe(Subscribe.id);
+		const { filter } = await Subscribe.decode(peer.reader, version);
+		expect(filter).toEqual({ kind: "absolute", startGroup: 4n, startObject: 0n, endGroup: undefined });
+	} finally {
+		peer.close();
+		status.close();
+		consumer.close();
+	}
+});
+
 /**
  * A group is the unit an application resyncs on, so one served from partway through is
  * unusable: the objects on the stream do not decode without the head the filter excluded,

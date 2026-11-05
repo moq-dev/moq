@@ -29,13 +29,10 @@ test.each([OLD, FIELDS, NEW])("an absolute session start includes its first obje
 	const join = joinFilter(version, 0n);
 	expect(join.fill).toBeUndefined();
 	// An explicit {0, 0}, never the absent filter that joins live.
-	expect(join.filter).toEqual({ kind: "absolute", startGroup: 0n, startObject: 0n, endGroup: undefined });
+	expect(join.filter).toEqual({ kind: "absolute", startGroup: 0n, startObject: 0n });
 	expect([...Filter.encode(join.filter, version)]).toEqual(
 		version === OLD ? [0x03, 0x00, 0x00] : version === FIELDS ? [] : [0x02, 0x00, 0x00],
 	);
-	const bounded = joinFilter(version, 4n, 10n);
-	expect(bounded.fill).toBeUndefined();
-	expect(bounded.filter).toEqual({ kind: "absolute", startGroup: 4n, startObject: 0n, endGroup: 9n });
 });
 
 async function subscribeBytes(filter: Filter.Filter, version: typeof OLD | typeof FIELDS | typeof NEW) {

@@ -53,21 +53,12 @@ function decodeGroupOrder(value: number): Order {
  * subscriber sends a Relative Joining FETCH once SUBSCRIBE_OK names Largest. Spelling the
  * filter keeps a peer from reading an absent one its own way.
  */
-export function joinFilter(
-	version: IetfVersion,
-	start?: bigint,
-	end?: bigint,
-): { filter: Filter.Filter; fill?: Filter.Fill } {
-	// Even {0, 0} is spelled absolute: an absent filter is a live join, not history.
+export function joinFilter(version: IetfVersion, start?: bigint): { filter: Filter.Filter; fill?: Filter.Fill } {
+	// Even {0, 0} is spelled absolute: an absent filter is a live join, not history. It stays
+	// open-ended, since REQUEST_UPDATE carries no range here: a finite end would hold the
+	// subscription short when another reader later widens the track's demand.
 	if (start !== undefined) {
-		return {
-			filter: {
-				kind: "absolute",
-				startGroup: start,
-				startObject: 0n,
-				endGroup: end === undefined ? undefined : end - 1n,
-			},
-		};
+		return { filter: { kind: "absolute", startGroup: start, startObject: 0n } };
 	}
 	const filter: Filter.Filter = { kind: "nextObject" };
 	if (!Filter.isDraft20(version)) return { filter };

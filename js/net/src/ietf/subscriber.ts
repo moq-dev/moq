@@ -1548,7 +1548,7 @@ export class Subscriber {
 			groupOrder: request.subscription.order,
 			// A known start is absolute; a live join recovers its head through a fetch stream
 			// (see {@link Join}). Fixed for the subscription's life.
-			...joinFilter(version, bounds.start, bounds.end),
+			...joinFilter(version, bounds.start),
 		});
 		if (msg.fill) {
 			// The fill names this request and can overtake SUBSCRIBE_OK, so it waits on it here.
