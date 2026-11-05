@@ -809,7 +809,7 @@ class SmokeTest {
                 consumer.request("live")
 
                 route.close()
-                assertIs<AnnounceEventEnd>(announced.nextRoute())
+                assertIs<AnnounceEventAbsent>(announced.nextRoute())
                 assertFailsWith<MoqException> { consumer.request("live") }
                 broadcast.publishTrack("events", null)
                 broadcast.end()

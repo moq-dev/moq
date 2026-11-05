@@ -4432,7 +4432,9 @@ impl kio::Task for FrontServe {
 								pending.first = Some(instance.clone());
 								pending.resolved = Some(Ok(instance));
 								pending.via = Some((route, asked));
-								if let Some(best) = table.best_route(&self.path, self.horizon, &HashSet::new(), |_| true) {
+								if let Some(best) =
+									table.best_route(&self.path, self.horizon, &HashSet::new(), |_| true)
+								{
 									PendingFront::continue_with(&mut pending, best);
 								}
 							}
