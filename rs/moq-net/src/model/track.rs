@@ -6772,8 +6772,9 @@ impl Cursor {
 		}
 	}
 
+	/// The next run given up, judging the live edge first only when `probe`.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	fn poll_drop(&mut self, taken: &Delivered, waiter: &kio::Waiter) -> Poll<(ops::Range<u64>, StreamError)> {
+	fn poll_drop(&mut self, taken: &Delivered, probe: bool, waiter: &kio::Waiter) -> Poll<(ops::Range<u64>, StreamError)> {
 		self.sync();
 		if self.drops.is_none() {
 			let mut drops = Box::new(DropCursor::new(&self.state.read()));
@@ -6784,7 +6785,8 @@ impl Cursor {
 			}
 			self.drops = Some(drops);
 		}
-		if self.filter.refused.is_none()
+		if probe
+			&& self.filter.refused.is_none()
 			&& let Poll::Ready(Ok(drift)) = self.poll_drift(&self.servable, waiter)
 		{
 			// From where the reader reads next: an ordered one asks nothing below what it took.
@@ -8655,9 +8657,22 @@ impl Subscriber {
 	/// forwards drops keeps none.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn poll_drop(&mut self, waiter: &kio::Waiter) -> Poll<(ops::Range<u64>, StreamError)> {
+		self.poll_drop_probing(true, waiter)
+	}
+
+	/// [`Self::poll_drop`] without judging the live edge again: only the runs a read since
+	/// the last judgement gave up, such as a receive that probed after a drop poll found
+	/// nothing. That judgement parked `waiter` on everything that could change it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn poll_queued_drop(&mut self, waiter: &kio::Waiter) -> Poll<(ops::Range<u64>, StreamError)> {
+		self.poll_drop_probing(false, waiter)
+	}
+
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	fn poll_drop_probing(&mut self, probe: bool, waiter: &kio::Waiter) -> Poll<(ops::Range<u64>, StreamError)> {
 		match &mut self.inner {
-			Inner::Plain(cursor) => cursor.poll_drop(&self.delivered, waiter),
-			Inner::Resume(resume, _) => resume.poll_drop(&self.delivered, waiter),
+			Inner::Plain(cursor) => cursor.poll_drop(&self.delivered, probe, waiter),
+			Inner::Resume(resume, _) => resume.poll_drop(&self.delivered, probe, waiter),
 		}
 	}
 

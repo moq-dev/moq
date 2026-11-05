@@ -3900,41 +3900,35 @@ impl Consumer {
 		waiter: &kio::Waiter,
 		take: impl Fn(&mut Prefetch) -> Option<T> + Copy,
 	) -> Poll<Result<Option<T>>> {
+		// Most reads of a backlog: kept off the read path below, whose bookkeeping costs
+		// every frame drained more than the pop.
+		if let Some(frame) = self.take_prefetched(take) {
+			return Poll::Ready(Ok(Some(frame)));
+		}
 		if Idle::parked(&self.idle, (), waiter) {
 			return Poll::Pending;
 		}
-		let res = match self.idle.is_some() {
-			true => {
-				let mut idle = Idle::start(&mut self.idle, waiter);
-				let res = self.poll_read_frame_through(idle.waiter(), take);
-				idle.finish(&mut self.idle, (), res.is_pending());
-				res
-			}
-			false => {
-				let res = self.poll_read_frame_through(waiter, take);
-				let parked = res.is_pending();
+		let mut gate = self.idle.is_some().then(|| Idle::start(&mut self.idle, waiter));
+		let read = gate.as_mut().map_or(waiter, |gate| gate.waiter());
+		// Read once, carried across route changes when the group came from a front. One call
+		// site keeps the read inline: a second costs every frame drained a call frame.
+		let res = match self.recover.is_none() {
+			true => self.poll_read_frame_once(read, take),
+			false => self.poll_resumed(read, |this, waiter| this.poll_read_frame_once(waiter, take)),
+		};
+		let parked = res.is_pending();
+		match gate {
+			Some(gate) => gate.finish(&mut self.idle, (), parked),
+			None => {
 				if parked && self.parked {
 					// Parked twice in a row: the next read parks through a gate. Unarmed, since
 					// this read registered on the task's own waiter, not the gate's.
 					Idle::start(&mut self.idle, waiter).finish(&mut self.idle, (), false);
 				}
 				self.parked = parked;
-				res
 			}
-		};
-		self.ended_on(res)
-	}
-
-	/// Read the next frame, carried across route changes when the group came from a front.
-	fn poll_read_frame_through<T>(
-		&mut self,
-		waiter: &kio::Waiter,
-		take: impl Fn(&mut Prefetch) -> Option<T> + Copy,
-	) -> Poll<Result<Option<T>>> {
-		match self.recover.is_none() {
-			true => self.poll_read_frame_once(waiter, take),
-			false => self.poll_resumed(waiter, |this, waiter| this.poll_read_frame_once(waiter, take)),
 		}
+		self.ended_on(res)
 	}
 
 	/// Read the next frame with its relay metadata, for wire egress.
@@ -3964,18 +3958,24 @@ impl Consumer {
 	/// Read the next frame (timestamp and payload) all at once.
 	#[cfg(feature = "async")]
 	pub async fn read_frame(&mut self) -> Result<Option<frame::Frame>> {
-		// A prefetched frame is already buffered, so the drift budget (which only judges
-		// a read that would park) can never apply to it.
-		// Serve from the prefetched batch without building a future or allocating a waker.
-		if !self.expired
-			&& !self.cursor.capped()
-			&& let Some(frame) = self.cursor.prefetch.pop()
-		{
-			self.cursor.refresh_if_stale();
-			self.cursor.index += 1;
+		// Without building a future or allocating a waker.
+		if let Some(frame) = self.take_prefetched(Prefetch::pop) {
 			return Ok(Some(frame));
 		}
 		kio::wait(|waiter| self.poll_read_frame(waiter)).await
+	}
+
+	/// The next frame from the prefetched batch, through `take`. A read parks only with its
+	/// batch drained, so neither the drift budget, which judges only a read that would park,
+	/// nor the idle gate, nor a route applies: one adopted onto a new copy starts empty.
+	fn take_prefetched<T>(&mut self, take: impl Fn(&mut Prefetch) -> Option<T>) -> Option<T> {
+		if self.expired || self.cursor.capped() {
+			return None;
+		}
+		let frame = take(&mut self.cursor.prefetch)?;
+		self.cursor.refresh_if_stale();
+		self.cursor.index += 1;
+		Some(frame)
 	}
 
 	/// Fill `out` with every frame that is ready, up to its capacity, without blocking.

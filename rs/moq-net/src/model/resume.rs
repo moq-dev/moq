@@ -902,9 +902,10 @@ impl Subscriber {
 	pub(super) fn poll_drop(
 		&mut self,
 		delivered: &Delivered,
+		probe: bool,
 		waiter: &kio::Waiter,
 	) -> Poll<(std::ops::Range<u64>, StreamError)> {
-		self.reader().poll_drop(delivered, waiter)
+		self.reader().poll_drop(delivered, probe, waiter)
 	}
 
 	/// Assign the local read floor and exclusive cap; see [`track::Subscriber::with_range`].
@@ -1731,10 +1732,20 @@ impl Reader {
 	/// through its [`Recover`]. A copy it replaced may still deliver what is under its bound,
 	/// so a run there waits until that copy no longer feeds.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	fn poll_drop(&mut self, delivered: &Delivered, waiter: &kio::Waiter) -> Poll<(std::ops::Range<u64>, StreamError)> {
+	fn poll_drop(
+		&mut self,
+		delivered: &Delivered,
+		probe: bool,
+		waiter: &kio::Waiter,
+	) -> Poll<(std::ops::Range<u64>, StreamError)> {
 		let mut given_up = Vec::new();
 		if let Poll::Ready(Some(sub)) = self.poll_serving(waiter) {
-			while let Poll::Ready(run) = sub.poll_drop(waiter) {
+			loop {
+				let polled = match probe {
+					true => sub.poll_drop(waiter),
+					false => sub.poll_queued_drop(waiter),
+				};
+				let Poll::Ready(run) = polled else { break };
 				given_up.push(run);
 			}
 		}
