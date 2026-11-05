@@ -99,7 +99,7 @@ async function measure(t: Arrival[], budget: (target: Milli) => Milli): Promise<
 			clock.jump(Nano(Nano.fromMilli(Milli(arrival)) - clock.now()));
 			for (; next < t.length && t[next].arrival === arrival; next++) {
 				const media = Micro.fromMilli(t[next].media as Milli);
-				const group = track.createGroup(next);
+				const group = track.createGroup(BigInt(next));
 				group.writeFrame({ payload: encode(media), timestamp: Time.Timestamp.fromMicros(media) });
 				group.finish();
 			}

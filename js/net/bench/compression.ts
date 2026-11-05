@@ -21,7 +21,7 @@ async function datagrams(count: number, queued: number): Promise<[number, number
 	const slow = tracks.map((track) => track.subscribe());
 	const fast = tracks.map((track) => track.subscribe());
 	const started = performance.now();
-	for (let sequence = 0; sequence < queued; sequence++) {
+	for (let sequence = 0n; sequence < BigInt(queued); sequence++) {
 		for (const [index, track] of tracks.entries()) {
 			// Its own copy, as each received datagram carries its own wire bytes.
 			hooks.writeDatagram(track, { sequence, payload: slice.slice() }, zeros.length);

@@ -157,7 +157,7 @@ struct Inner<T> {
 impl<T> Inner<T> {
 	fn pop(&mut self, count: Timed<u64>) -> Result<()> {
 		self.ensure_open()?;
-		let at = self.track.on_track(count.at)?;
+		let at = self.track.rescale(count.at)?;
 		let Inner { track, encoder, .. } = self;
 
 		let Some(frame) = encoder.pop(count.value)? else {
@@ -225,7 +225,7 @@ impl<T> Inner<T> {
 impl<T: Serialize> Inner<T> {
 	fn push(&mut self, value: Timed<&T>) -> Result<()> {
 		self.ensure_open()?;
-		let at = self.track.on_track(value.at)?;
+		let at = self.track.rescale(value.at)?;
 		let Inner { track, encoder, .. } = self;
 
 		let frame = encoder.push(value.value)?;
@@ -255,11 +255,11 @@ impl Track {
 	/// An edit checks this before encoding. Found by `write_frame` instead, the mismatch would
 	/// come after a header published its group, leaving an empty newest group behind, and the
 	/// dropped frame would reset the encoder, rolling a group for an edit that changed nothing.
-	fn on_track(&self, timestamp: Option<moq_net::Timestamp>) -> Result<Option<moq_net::Timestamp>> {
-		Ok(moq_net::group::on_track(timestamp, self.inner.info().timescale)?)
+	fn rescale(&self, timestamp: Option<moq_net::Timestamp>) -> Result<Option<moq_net::Timestamp>> {
+		Ok(self.inner.info().rescale(timestamp)?)
 	}
 
-	/// Write one encoded frame at a timestamp already [on the track](Self::on_track), rolling a
+	/// Write one encoded frame at a timestamp already [rescaled](Self::rescale) to the track, rolling a
 	/// group when it is a header.
 	fn write(&mut self, timestamp: Option<moq_net::Timestamp>, encoded: &Encoded) -> Result<()> {
 		match encoded.keyframe {

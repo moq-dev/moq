@@ -16,7 +16,9 @@ use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
 fn timed() -> moq_net::track::Info {
-	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	moq_net::track::Info::default()
+		.with_timescale(moq_net::Timescale::MILLI)
+		.with_max_age(None)
 }
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(60);
@@ -196,7 +198,7 @@ impl Worker {
 				let output = broadcast::Info::new().produce();
 				let track = output.create_track("video", timed()).unwrap();
 				write(&track, &format!("{hop}"));
-				moq_net::fuzz::accept(request, &output);
+				request.serve(&output);
 				served.borrow_mut().push((output, track));
 			}
 		}));
@@ -318,7 +320,7 @@ impl Claim {
 			while let Ok(request) = handler.requested_broadcast().await {
 				let output = broadcast::Info::new().produce();
 				let track = output.create_track("video", timed()).unwrap();
-				moq_net::fuzz::accept(request, &output);
+				request.serve(&output);
 				served.borrow_mut().push((output, track));
 			}
 		}));

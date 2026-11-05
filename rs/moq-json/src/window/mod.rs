@@ -965,9 +965,10 @@ mod test {
 
 	#[test]
 	fn cut_finishes_the_group_and_the_next_edit_restates() {
+		// The superseded first group is inspected too, so it must stay fresh.
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", moq_net::track::Info::default())
+			.create_track("test", moq_net::track::Info::default().with_max_age(None))
 			.unwrap();
 		let replay = moq_net::track::Subscription::default()
 			.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(30)));

@@ -102,11 +102,12 @@ async function consume(config: Transport): Promise<Delivery> {
 	for (let received = 0; received < groups; received++) {
 		const group = await subscriber.recvGroup();
 		if (!group) throw new Error(`track ended after ${received} of ${groups} groups`);
-		if (group.sequence >= groups || seen.has(group.sequence)) throw new Error(`unexpected group ${group.sequence}`);
-		seen.add(group.sequence);
+		const sequence = Number(group.sequence);
+		if (sequence >= groups || seen.has(sequence)) throw new Error(`unexpected group ${group.sequence}`);
+		seen.add(sequence);
 		readers.push(
 			(async () => {
-				const first = group.sequence * config.group;
+				const first = sequence * config.group;
 				const last = Math.min(first + config.group, config.frames);
 				try {
 					for (let frame = first; frame < last; frame++) {

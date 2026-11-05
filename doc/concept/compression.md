@@ -43,7 +43,7 @@ ends list `moq-lite-07-wip`. Sessions on the default versions, and relay links
 among them, carry the inflated frames. Only Rust offers the moq-transport
 extension, so a JavaScript or third-party moq-transport peer reads the
 inflated copy. A received track's `compress` flag says which form arrived. A
-datagram compresses alone, with a fresh window.
+datagram track is never compressed.
 
 ## Cost on the relay
 

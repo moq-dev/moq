@@ -49,10 +49,10 @@ for (const downstream of [ALPN_06, ALPN_07_WIP]) {
 			group.finish();
 			const received = await reader.recvGroup();
 			if (!received) throw new Error("missing group");
-			expect(received.sequence).toBe(0);
+			expect(received.sequence).toBe(0n);
 			for (const payload of payloads) expect((await received.readFrame())?.payload).toEqual(payload);
 			expect(await received.readFrame()).toBeUndefined();
-			const fetched = await remote.fetchGroup(0);
+			const fetched = await remote.fetchGroup(0n);
 			for (const payload of payloads) expect((await fetched.readFrame())?.payload).toEqual(payload);
 			expect(await fetched.readFrame()).toBeUndefined();
 			// Each datagram has a cold window; no lost or reordered predecessor is needed.

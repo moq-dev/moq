@@ -96,7 +96,7 @@ test("a subscriber arriving at announce time sees every rendition in its first c
 	const net = env.broadcast.net.peek();
 	if (!net) throw new Error("expected a network producer once connected");
 	const group = await net.track(Broadcast.CATALOG_TRACK).subscribe().ordered().nextGroup();
-	expect(group?.sequence).toBe(0);
+	expect(group?.sequence).toBe(0n);
 	const catalog = (await group?.readJson()) as Catalog.Root;
 	expect(Object.keys(catalog.video?.renditions ?? {})).toEqual(["video"]);
 	expect(Object.keys(catalog.audio?.renditions ?? {})).toEqual(["audio"]);
@@ -183,7 +183,7 @@ test("capture gaps keep the broadcast instance and its track sequences", async (
 		await settle();
 		const track = env.audio.rendition.track.peek();
 		if (!track) throw new Error("expected the demanded audio track");
-		expect(track.appendGroup().sequence).toBe(0);
+		expect(track.appendGroup().sequence).toBe(0n);
 
 		// Both devices may be absent during a swap or retry, even though both remain selected.
 		env.video.source.set(undefined);
@@ -199,7 +199,7 @@ test("capture gaps keep the broadcast instance and its track sequences", async (
 		await start(env);
 		expect(env.broadcast.net.peek()).toBe(net);
 		expect(env.audio.rendition.track.peek()).toBe(track);
-		expect(track.appendGroup().sequence).toBe(1);
+		expect(track.appendGroup().sequence).toBe(1n);
 
 		// A different device format uses the broadcast's existing fresh-track mechanism.
 		env.audio.rendition.config.set({ ...audioConfig, sampleRate: Catalog.u53(44100) });

@@ -29,6 +29,7 @@ mod data;
 mod entry;
 mod estimate;
 mod format;
+pub(crate) mod interval;
 mod producer;
 mod select;
 mod stream;

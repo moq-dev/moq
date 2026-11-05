@@ -71,12 +71,14 @@ use super::hang::{Catalog, CatalogExt};
 /// #     broadcast: &mut moq_net::broadcast::Producer,
 /// #     catalog: &moq_mux::catalog::Producer<Ext>,
 /// # ) -> moq_mux::Result<()> {
-/// let info = moq_net::track::Info::default().with_compress(true);
+/// let info = moq_net::track::Info::default()
+///     .with_timescale(moq_net::Timescale::MILLI)
+///     .with_compress(true);
 /// let track = broadcast.create_track("telemetry", info)?;
 /// // The producer fixes the mode, so the one passed here is only a placeholder.
 /// let entry = Mavlink { config: JsonConfig::new(Mode::Stream), sysid: 1 };
 /// let mut telemetry = catalog.json_stream::<serde_json::Value>(track, entry)?;
-/// telemetry.append(&serde_json::json!({ "heartbeat": 1 }))?;
+/// telemetry.append(&serde_json::json!({ "heartbeat": 1 }), catalog.clock().now())?;
 /// # Ok(())
 /// # }
 /// ```
@@ -384,6 +386,23 @@ fn quantize(published: Option<Duration>, measured: Option<Duration>, period: Dur
 	}
 }
 
+/// Write `config` under `name`, refusing it before any change if it redefines the rendition's
+/// identity or won't serialize, so the reserved snapshot never retains a bad edit.
+///
+/// The entry is checked in a catalog holding only it and the extension: the media and data sections
+/// serialize each entry on its own, and the rest was checked when it was written, so cloning or
+/// serializing them would make declaring N renditions cost N². The extension is kept whole because
+/// its serializer may depend on its combined entries.
+fn write<E: CatalogExt, C: RenditionConfig<E>>(catalog: &mut Catalog<E>, name: &str, config: C) -> crate::Result<()> {
+	let mut alone = Catalog::default();
+	alone.ext = catalog.ext.clone();
+	config.clone().insert(&mut alone, name);
+	check_identity(catalog, &alone, name)?;
+	serde_json::to_writer(std::io::sink(), &alone).map_err(moq_json::Error::from)?;
+	config.insert(catalog, name);
+	Ok(())
+}
+
 /// Refuse an edit that redefines rendition `name`'s track identity in place: a publisher whose
 /// decoder identity changed publishes under a new name instead.
 fn check_identity<E: CatalogExt>(previous: &Catalog<E>, next: &Catalog<E>, name: &str) -> crate::Result<()> {
@@ -413,7 +432,7 @@ fn check_identity<E: CatalogExt>(previous: &Catalog<E>, next: &Catalog<E>, name:
 /// timestamps by. Clones share that timebase.
 pub struct Reserved<E: CatalogExt = ()> {
 	timebase: super::Timebase<E>,
-	hls_hint: Option<std::time::Duration>,
+	interval: Option<std::time::Duration>,
 }
 
 impl<E: CatalogExt> Reserved<E> {
@@ -421,18 +440,19 @@ impl<E: CatalogExt> Reserved<E> {
 		timebase.catalog.add_reserver();
 		Self {
 			timebase,
-			hls_hint: None,
+			interval: None,
 		}
 	}
 
-	/// Declare the track's regular group duration, which fixes its HLS segment duration up front
-	/// unless [`Config::with_hls`](super::Config::with_hls) disabled HLS records.
-	pub fn with_hls_hint(mut self, duration: impl Into<Option<std::time::Duration>>) -> Self {
-		self.hls_hint = duration.into();
+	/// Declare the track's longest group (its GOP), which the catalog's `media.join.interval`
+	/// promises. Without one, a video or audio track measures it over its first second or group,
+	/// whichever is longer, before the interval is declared.
+	pub fn with_interval(mut self, interval: impl Into<Option<std::time::Duration>>) -> Self {
+		self.interval = interval.into();
 		self
 	}
 
-	/// Track properties for a media track under this catalog, carrying any retention it declares.
+	/// Track properties for a media track under this catalog, carrying any max age it declares.
 	/// See [`Producer::track_info`](super::Producer::track_info).
 	pub fn track_info(&self, priority: i8) -> moq_net::track::Info {
 		self.timebase.catalog.track_info(priority)
@@ -505,7 +525,7 @@ impl<E: CatalogExt> Reserved<E> {
 		let rendition = self.init(track.name())?;
 		self.timebase
 			.catalog
-			.media(track, container, rendition, config.into(), self.hls_hint)
+			.media(track, container, rendition, config.into(), self.interval)
 	}
 
 	/// Resolve a timestamp on the broadcast's shared clock (see [`Producer::timestamp`]).
@@ -532,7 +552,7 @@ impl<E: CatalogExt> Reserved<E> {
 
 impl<E: CatalogExt> Clone for Reserved<E> {
 	fn clone(&self) -> Self {
-		Self::new(self.timebase.clone()).with_hls_hint(self.hls_hint)
+		Self::new(self.timebase.clone()).with_interval(self.interval)
 	}
 }
 
@@ -583,21 +603,16 @@ pub(crate) type AudioTrack<E = ()> = Rendition<E, hang::catalog::AudioConfig>;
 /// A single text (caption/subtitle) track's catalog rendition. See [`Rendition`].
 impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 	/// The successor of this rendition's track, under a newly minted name, for a decoder identity
-	/// change. `hls_hint` carries the segment duration the old track declared.
+	/// change. `interval` carries the longest group the old track declared or measured.
 	pub(crate) fn fresh(
 		&self,
 		container: super::hang::Container,
 		info: moq_net::track::Info,
-		hls_hint: Option<std::time::Duration>,
+		interval: Option<std::time::Duration>,
 	) -> crate::Result<crate::container::Producer<super::hang::Container, C>> {
 		let track = self.catalog.fresh_track(&self.name, info)?;
 		let rendition = self.catalog.rendition(track.name())?;
-		self.catalog.media(track, container, rendition, None, hls_hint)
-	}
-
-	/// Finish and forget the HLS records of `track`, a predecessor this rendition replaced.
-	pub(crate) fn retire(&self, track: &str) -> crate::Result<()> {
-		self.catalog.retire(track)
+		self.catalog.media(track, container, rendition, None, interval)
 	}
 
 	fn new(reserved: Reserved<E>, name: String) -> crate::Result<Self> {
@@ -669,13 +684,8 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		config.set_estimate(resolved.clone());
 		{
 			let mut guard = self.catalog.modify()?;
-			let mut next = (*guard).clone();
-			config.insert(&mut next, &self.name);
-			check_identity(&guard, &next, &self.name)?;
-			// Serialization must succeed before the reserved snapshot retains the edit.
-			serde_json::to_writer(std::io::sink(), &next).map_err(moq_json::Error::from)?;
+			write(&mut guard, &self.name, config)?;
 			self.present = true;
-			*guard = next;
 			guard.list::<C>(&self.name);
 			if C::detects() {
 				guard.hint::<C>(&self.name, supplied.clone());
@@ -719,7 +729,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 	/// Calling this before [`set`](Self::set) is not wasted: the measurement is remembered and seeds
 	/// the config once it lands.
 	pub(crate) fn estimate(&mut self, reading: impl Into<super::Reading>) -> crate::Result<()> {
-		let super::Reading { estimate, period } = reading.into();
+		let super::Reading { estimate, period, .. } = reading.into();
 		if !C::detects() {
 			return Ok(());
 		}
@@ -816,11 +826,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		}
 		Self::check_decrease(&self.config()?.estimate(), &config.estimate())?;
 		let mut guard = self.catalog.modify()?;
-		let mut next = (*guard).clone();
-		config.insert(&mut next, &self.name);
-		check_identity(&guard, &next, &self.name)?;
-		serde_json::to_writer(std::io::sink(), &next).map_err(moq_json::Error::from)?;
-		*guard = next;
+		write(&mut guard, &self.name, config)?;
 		Ok(guard)
 	}
 }
@@ -1059,6 +1065,25 @@ mod tests {
 				);
 			}
 		}
+	}
+
+	/// A supplied zero delay is a statement, not a gap: measurement never replaces it, and the
+	/// catalog omits it on the wire, hang and MSF alike.
+	#[test]
+	fn a_supplied_zero_delay_is_never_measured() {
+		let (_broadcast, catalog, mut rendition) = video_track();
+		let mut supplied = config(None, None);
+		supplied.delay = Some(Duration::ZERO);
+		rendition.set(supplied).unwrap();
+		rendition
+			.estimate(Estimate::default().with_delay(Duration::from_millis(200)))
+			.unwrap();
+		assert_eq!(catalog.snapshot().video.renditions["v"].delay, Some(Duration::ZERO));
+
+		let json = catalog.snapshot().to_json().unwrap();
+		assert!(!json.contains("delay"), "{json}");
+		let rendered = super::super::producer::to_msf(&catalog.snapshot(), &moq_net::Path::default());
+		assert!(rendered.tracks.iter().all(|track| track.delay.is_none()));
 	}
 
 	#[test]
@@ -1415,41 +1440,6 @@ mod tests {
 		);
 	}
 
-	/// Each rendition gets its own HLS records, advertised in its own entry, and only when enabled.
-	#[test]
-	fn renditions_get_their_own_hls_records() {
-		for enabled in [false, true] {
-			let mut broadcast = moq_net::broadcast::Info::new().produce();
-			let catalog_config = super::super::Config::default().with_hls(enabled.then(crate::hls::Config::default));
-			let mut catalog = super::super::Producer::new(&mut broadcast, catalog_config).unwrap();
-
-			let hint = Some(std::time::Duration::from_secs(4));
-			let video0 = catalog.enroll("video0", hint).unwrap();
-			let video1 = catalog.enroll("video1", hint).unwrap();
-			assert_eq!(video0.is_some(), enabled);
-			assert_eq!(video1.is_some(), enabled);
-			{
-				let mut guard = catalog.modify().unwrap();
-				guard.video.insert("video0", config(None, None)).unwrap();
-				guard.video.insert("video1", config(None, None)).unwrap();
-			}
-
-			let snapshot = catalog.snapshot();
-			let hls = |name: &str| snapshot.video.renditions[name].hls.clone();
-			match enabled {
-				true => {
-					let four = std::time::Duration::from_secs(4);
-					assert_eq!(hls("video0"), Some(hang::catalog::Hls::new("video0.hls", four)));
-					assert_eq!(hls("video1"), Some(hang::catalog::Hls::new("video1.hls", four)));
-				}
-				false => {
-					assert_eq!(hls("video0"), None);
-					assert_eq!(hls("video1"), None);
-				}
-			}
-		}
-	}
-
 	mod custom {
 		use std::collections::BTreeMap;
 
@@ -1465,6 +1455,17 @@ mod tests {
 			exploding: BTreeMap<String, Exploding>,
 			#[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
 			stubborn: BTreeMap<String, Stubborn>,
+			#[serde(default, skip_serializing_if = "BTreeMap::is_empty", serialize_with = "at_most_one")]
+			solo: BTreeMap<String, Solo>,
+		}
+
+		/// Serialize a section that refuses to hold more than one entry, so whether it serializes
+		/// depends on every entry, not just the one being written.
+		fn at_most_one<S: serde::Serializer>(solo: &BTreeMap<String, Solo>, serializer: S) -> Result<S::Ok, S::Error> {
+			if solo.len() > 1 {
+				return Err(serde::ser::Error::custom("only one solo entry"));
+			}
+			solo.serialize(serializer)
 		}
 
 		impl CatalogExt for TelemetryExt {}
@@ -1619,6 +1620,42 @@ mod tests {
 			reserved
 				.init::<Exploding>("gps")
 				.expect("a stranded entry would refuse this forever");
+		}
+
+		/// A config whose section serializes only while it holds a single entry.
+		#[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq)]
+		struct Solo;
+
+		impl RenditionConfig<TelemetryExt> for Solo {
+			fn insert(self, catalog: &mut Catalog<TelemetryExt>, name: &str) {
+				catalog.ext.solo.insert(name.to_string(), self);
+			}
+			fn get_mut<'a>(catalog: &'a mut Catalog<TelemetryExt>, name: &str) -> Option<&'a mut Self> {
+				catalog.ext.solo.get_mut(name)
+			}
+			fn remove(catalog: &mut Catalog<TelemetryExt>, name: &str) {
+				catalog.ext.solo.remove(name);
+			}
+		}
+
+		/// An entry that serializes alone but not beside the extension's other entries is refused
+		/// before the catalog retains it.
+		#[test]
+		fn an_entry_that_breaks_the_extension_is_refused() {
+			let (_broadcast, catalog) = produce();
+			let reserved = catalog.reserve();
+			let mut first = reserved.init::<Solo>("a").unwrap();
+			let mut second = reserved.init::<Solo>("b").unwrap();
+
+			first.set(Solo).unwrap();
+			assert!(
+				matches!(second.set(Solo), Err(crate::Error::Json(_))),
+				"the second entry makes the extension unserializable"
+			);
+
+			let snapshot = catalog.snapshot();
+			assert_eq!(snapshot.ext.solo.keys().collect::<Vec<_>>(), ["a"]);
+			serde_json::to_string(&snapshot).expect("the refused edit left the catalog serializable");
 		}
 
 		/// A custom kind gets the same detection and drop-removal as video/audio.

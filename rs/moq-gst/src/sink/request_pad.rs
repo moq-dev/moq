@@ -9,6 +9,7 @@ use gst::subclass::prelude::*;
 use hang::moq_net;
 
 use super::MediaContainer;
+use super::listed::Listed;
 use super::pad::Pad;
 use super::session::{CAT, CompletionHandle, RUNTIME};
 
@@ -249,20 +250,37 @@ impl PadLifecycle {
 		}
 	}
 
-	/// Commit the track and start exposing its demand and optional bandwidth reservation.
+	/// Commit the track, exposing its demand and optional bandwidth reservation once viewers can find
+	/// it (see [`Pad::demand`]).
 	pub(super) fn activate(
 		&mut self,
 		track: String,
 		allocator: moq_net::bandwidth::Allocator,
 		pad: &MoqSinkPad,
+		listed: &Listed,
 	) -> Notifications {
 		let mut changes = self.commit(track);
 		// CAPS renegotiation replaces the media producer. Retire the old producer's demand and
 		// reservation before binding the replacement, while resume paths use `restore_bandwidth`
-		// directly because their retained producer still owns the same demand.
-		self.bandwidth = None;
-		changes.demand = self.restore_bandwidth(allocator, pad).is_some();
+		// directly because their retained producer still owns the same demand. A replacement waits for
+		// a catalog listing its new name, so the retirement alone can change the property.
+		changes.demand = self.bandwidth.take().is_some();
+		changes.demand |= self.restore_bandwidth(allocator, pad, listed).is_some();
 		changes
+	}
+
+	/// Start reporting demand for a live pad whose track a newly published catalog lists.
+	pub(super) fn expose_listed(
+		&mut self,
+		allocator: moq_net::bandwidth::Allocator,
+		pad: &MoqSinkPad,
+		listed: &Listed,
+	) -> Option<Notifications> {
+		// An ended pad reports nothing until it resumes; a failed one has no track left.
+		if self.ended || self.releasing {
+			return None;
+		}
+		self.restore_bandwidth(allocator, pad, listed)
 	}
 
 	/// Stop reporting demand and release this pad's share while its retained media producer winds down.
@@ -279,11 +297,12 @@ impl PadLifecycle {
 		&mut self,
 		allocator: moq_net::bandwidth::Allocator,
 		pad: &MoqSinkPad,
+		listed: &Listed,
 	) -> Option<Notifications> {
 		if self.bandwidth.is_some() {
 			return None;
 		}
-		let demand = self.media.demand()?;
+		let demand = self.media.demand(listed)?;
 		let ceiling = self.bandwidth_ceiling();
 		let bandwidth = self.bandwidth.insert(Bandwidth::new(demand, allocator, ceiling));
 		bandwidth.watch(pad.downgrade());
@@ -401,9 +420,11 @@ impl ObjectImpl for MoqSinkPadImp {
 				glib::ParamSpecBoxed::builder::<gst::Structure>("track-demand")
 					.nick("Track demand")
 					.blurb(
-						"Current subscriber demand and optional bandwidth grant. Null before the track \
-						 is active; otherwise a moq-track-demand structure with wanted, optional group, \
-						 and, when bandwidth-ceiling is nonzero, probed and optional grant-bps fields",
+						"Current subscriber demand and optional bandwidth grant. Null until viewers can \
+						 find the track: a media or text track once a published catalog lists it, opaque \
+						 data once it negotiates. Null again after EOS or a failure. Otherwise a \
+						 moq-track-demand structure with wanted, optional group, and, when \
+						 bandwidth-ceiling is nonzero, probed and optional grant-bps fields",
 					)
 					.read_only()
 					.build(),

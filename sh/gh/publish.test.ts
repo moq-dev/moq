@@ -14,6 +14,7 @@ type Job = {
 	needs?: string[];
 	environment?: string | { name?: string };
 	with?: Record<string, string | boolean>;
+	steps?: { id?: string; if?: string }[];
 };
 type Workflow = { on: Record<string, unknown>; jobs: Record<string, Job> };
 
@@ -72,4 +73,17 @@ test("release dispatches name a release ref", async () => {
 		"gh workflow run moq-sh.yml --ref release",
 		'gh workflow run release-winget.yml --ref "$TAG"',
 	]);
+});
+
+test("Python release retries share the release ref and FFI gates with pushes", async () => {
+	const workflow = await read("release-py");
+	expect(Object.keys(workflow.on)).toContain("workflow_dispatch");
+	const build = workflow.jobs.build;
+	expect(build.if?.replace(/\s+/g, " ")).toContain(
+		"(github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/release'",
+	);
+	for (const id of ["ffi-gate", "ffi-pypi"]) {
+		const step = build.steps?.find((step) => step.id === id);
+		expect(step?.if).toContain("github.event_name != 'workflow_run'");
+	}
 });

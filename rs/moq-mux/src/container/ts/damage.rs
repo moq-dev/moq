@@ -89,7 +89,7 @@ mod tests {
 	)]
 	async fn benchmark_damage_pid_fanout() {
 		let error = anyhow::anyhow!("broken PES");
-		eprintln!("pids,damaged_units,ns_per_unit");
+		println!("pids,damaged_units,ns_per_unit");
 		for pids in [1_u16, 64, 8192] {
 			for units in [1, 16, 128] {
 				let mut log = Log::default();
@@ -108,7 +108,7 @@ mod tests {
 					}
 				}
 				let nanos = start.elapsed().as_nanos() as f64 / (10_000 * units) as f64;
-				eprintln!("{pids},{units},{nanos:.1}");
+				println!("{pids},{units},{nanos:.1}");
 			}
 		}
 	}

@@ -19,7 +19,7 @@ npm add @moq/boy
 
 ## Web Components
 
-### `<moq-boy>` — Game Grid
+### `<moq-boy>` - Game Grid
 
 Shows a grid of all active Game Boy sessions. Click a game to expand and play.
 

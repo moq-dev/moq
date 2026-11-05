@@ -88,7 +88,8 @@ pub(crate) fn description(catalog: &hang::catalog::AudioConfig, profile: u8) -> 
 		}
 	};
 
-	let parsed = moq_mux::codec::aac::Config::parse(&mut description.as_ref()).map_err(moq_mux::Error::from)?;
+	let parsed = moq_mux::codec::aac::Config::parse(&mut description.as_ref())
+		.map_err(|err| Error::Unsupported(format!("invalid AAC description: {err}")))?;
 	validate(&parsed)?;
 
 	// HE-AAC has two spellings. `validate` catches the one that leads with SBR or

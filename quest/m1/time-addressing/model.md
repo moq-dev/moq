@@ -54,7 +54,7 @@ a producer would need per-track memory of its last number.
 - **What it waits on** (decided 2026-10-27, maintainer; Fetch as a range
   finished in [moq-dev/moq#7625](https://github.com/moq-dev/moq/pull/7625)): only the
   subscribe-ranges children that put sequence ranges into the model and the
-  wire, [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) and
+  wire, Lite-07 ranges ([moq-dev/moq#7872](https://github.com/moq-dev/moq/pull/7872)) and
   [Delete the old start bookkeeping](/quest/m1/subscribe-ranges/start-bookkeeping.md),
   not the whole epic. [Drop set](/quest/m1/drop-set.md) lands first too: its
   runs keyed by group sequence convert mechanically to starts.
@@ -76,7 +76,7 @@ it:
 - Resume across route flips (`resume.rs`), mid-group `Position` and
   `frame_start`, priority order within a subscription, `Demand::wanted`, and
   refresh.
-- The datagram namespace, which shares the group space.
+- Not datagrams: they become their own track kind with their own sequence ([Datagram tracks](/quest/m1/datagram-tracks/README.md)).
 - The legacy codecs: lite GROUP, SUBSCRIBE and SUBSCRIBE_UPDATE bounds,
   SUBSCRIBE_START and its largest, SUBSCRIBE_END, SUBSCRIBE_DROP, FETCH, and
   every IETF Location, Filter, FETCH, Largest, and NEW_GROUP_REQUEST.
@@ -157,13 +157,12 @@ resume model (`rs/moq-net/src/model/resume_model.rs`,
 The PR's Impact section says how to migrate.
 
 Public API: breaking. `group::Info`, `create_group`, `append_group`,
-`Position`, `Range` ends, `fetch_group`, `Subscriber::floor`, datagrams, and
-group consumers address by start timestamp, every producer write takes a
-required timestamp, and untimed tracks become scale-less.
+`Position`, `Range` ends, `fetch_group`, `Subscriber::floor`, and group consumers
+address by start timestamp, every producer write takes a required
+timestamp, and untimed tracks become scale-less.
 Wire: no format change; legacy and lite-07-wip group IDs become start ticks.
 
 ## Required
 
-- [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - the range ends and drops this rework moves onto times
 - [Delete the old start bookkeeping](/quest/m1/subscribe-ranges/start-bookkeeping.md) - the lite cursor state lives in the model before the cut rekeys it
 - [Drop set](/quest/m1/drop-set.md) - its dropped and expired runs convert mechanically from sequences to starts

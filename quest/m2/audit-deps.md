@@ -73,10 +73,9 @@ current.
 
 Open after the 2026-11-01 removal run:
 
-- The lock still carries vt100 0.17 and web-transport-iroh 0.8.3.
-  Re-check their costs and the Iroh backend's consumer before upgrading;
-  [moq-dev/moq#7345](https://github.com/moq-dev/moq/pull/7345) proposes dropping
-  that backend. Dependency upgrades alone were not this off-cycle run's goal.
+- The lock still carries vt100 0.17 (moq-cli dev-dependency). Re-check its
+  cost before upgrading; dependency upgrades alone were not this off-cycle
+  run's goal.
 - `test/smoke/flake.lock` lands through the Smoke toolchain update workflow,
   which bumps the npm `playwright` pin with it; confirm the coupled PRs land.
 - http-cache-reqwest stays on its 1.0 prerelease (alpha.9) until 1.0 ships.
@@ -92,13 +91,24 @@ Advisories waiting on upstream:
   It only reaches the generator-only uniffi fork and never ships.
 - The root Bun audit uses version-scoped overrides for chokidar 3 to 4
   (removing braces), postcss-selector-parser 6 to 7.1.7, and Vite 5 to 6.4.5
-  (also removing vulnerable esbuild). Remove each override when its parent,
-  remark-cli/unified-args, `@tailwindcss/typography`, or VitePress, declares
-  a safe dependency range. The Worker and other standalone lockfiles audit
-  clean; the root lockfile does not (see the glob and minimatch advisories
-  below).
-- paste (RUSTSEC-2024-0436) remains through tikv-jemalloc-ctl and iroh's
-  netlink-packet-core 0.8. tikv-jemallocator's unreleased main drops it.
+  (also removing vulnerable esbuild). It also overrides glob to 14.0.3 or
+  newer (GHSA-3g3m-2fjr-6pw4) and minimatch to 11.0.3 or newer
+  (GHSA-g3hv-75wg-m249). Remove each override when its parent declares a safe
+  dependency range: remark-cli/unified-args/unified-engine still requires
+  glob 10; TypeDoc and vitepress-plugin-llms still require minimatch 10;
+  `@npmcli/map-workspaces` also requires glob 10 and minimatch 9, and
+  `@npmcli/package-json` requires glob 10.
+  `@tailwindcss/typography` and VitePress own the other parser/bundler ranges.
+  All seven tracked Bun lockfiles audit clean after the 2026-11-03 repair.
+- proc-macro-error2 (RUSTSEC-2026-0173) is unmaintained, not a reported
+  vulnerability. moq-auth, moq-crypto, moq-hls and moq-cli reach it through
+  rind's libcrux stack, then libcrux-intrinsics 0.0.9's
+  `cfg(hax)` dependency on core-models 0.0.7, which still requires hax-lib
+  0.3.7 and its build-time hax-lib-macros. Those are the latest stable
+  libcrux-intrinsics/core-models releases as of 2026-11-03. The advisory is
+  ignored in deny.toml; remove that ignore when core-models migrates to
+  hax-lib 0.4 or newer, whose macros no longer require proc-macro-error2.
+- paste (RUSTSEC-2024-0436) remains through tikv-jemalloc-ctl. tikv-jemallocator's unreleased main drops it.
 
 ### Baselines (2026-11-01 removal run)
 
@@ -119,13 +129,13 @@ system-deps 7 beside GStreamer's 9. moq-vaapi still holds bindgen 0.70,
 libloading 0.8 and thiserror 1; mp4-atom also holds thiserror 1. Do not treat
 all 117 extras as locally removable without checking those consumers.
 
-Bun's same-major duplicates can persist until a parent re-resolves. For a
-transitive-only security bump, edit the lock entry's version, integrity and
-`dependencies` object to match the new release's published manifest, then
-verify with `bun install --frozen-lockfile`, preserving unaffected
-resolutions. If the new release adds dependencies the lock lacks, use a
-version-scoped root override, as above, instead of a hand edit. Re-check the current package-manager capabilities before
-attempting broader deduplication.
+Bun's same-major duplicates can persist until a parent re-resolves.
+`bun update glob minimatch --lockfile-only --ignore-scripts` with Bun 1.4.2
+reapplied the existing overrides on 2026-11-03, removing the vulnerable
+nested resolutions without changing unrelated package versions. Prefer a
+targeted update for a transitive security bump, then verify with
+`bun install --frozen-lockfile` and `just js audit`. Re-check the current
+package-manager capabilities before attempting broader deduplication.
 
 Removed inline, with no dependency upgrades:
 
@@ -164,11 +174,11 @@ compile-fail fixtures and feature-gated source, not permission to delete
 coverage. Test deletion and optimization belong to
 [the concurrent test audit](https://github.com/moq-dev/moq/pull/7600).
 
-The root Bun audit still reports the pre-existing glob cancellation and
-minimatch amplification advisories through nested tool dependencies, despite
-the root overrides. The frozen before and after locks reproduce both;
-re-check override coverage in the next scheduled run. Do not call that audit
-clean. Full `just ci` is limited here by mbx E2BIG on workspace `cargo doc`
+The 2026-11-03 Nightly audit repair re-resolved glob 10.5.0 to 14.0.3 and
+both minimatch 9.0.9 paths to the shared 11.0.4 resolution under the existing
+root overrides. The root and standalone Bun audits now pass. Rust's audit
+also passes with the advisory-specific policy above. The 2026-11-01
+removal run's full `just ci` was limited by mbx E2BIG on workspace `cargo doc`
 ([moq-dev/moq#7594](https://github.com/moq-dev/moq/pull/7594)) and the runner
 image's denied user namespace. Neither was bypassed for validation.
 

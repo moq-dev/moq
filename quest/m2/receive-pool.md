@@ -47,13 +47,22 @@ Open, for the implementer to bring to the maintainer:
   all.
 
 Idea for later (maintainer, 2026-10-30, from the
-[fastest-reader pacing](/quest/m1/unbounded-groups/fastest-reader.md) iteration
+[fastest-reader pacing](https://github.com/moq-dev/moq/pull/7664) iteration
 in [moq-dev/moq#7388](https://github.com/moq-dev/moq/pull/7388)): instead of
 moq-quic granting `MAX_STREAM_DATA` automatically as a stream is read, the
 application could pause a stream, or grant it an explicit
-`allow(fastest + 16 MB)`, so flow control never grants credit past the pacing
-window. Paused streams would then hold no credit beyond that window, replacing
+`allow(fastest + window)`, so flow control never grants credit past the pacing
+window (the stream receive window, capped at 16 MB). Paused streams would then hold no credit beyond that window, replacing
 moq-net's per-session cap on paused credit.
+
+Until then, the pool must keep that cap honest (noted 2026-10-31 from
+[moq-dev/moq#7388](https://github.com/moq-dev/moq/pull/7388), moved here when
+[moq-dev/moq#7624](https://github.com/moq-dev/moq/pull/7624) finished the qmux
+receive lease): each paused stream reserves its window from a budget of about
+half the connection window when it pauses (`Shared::reserve` in
+`rs/moq-net/src/transport/boxed.rs`), and nothing re-checks it. No caller
+shrinks a live receive window today; if the pool's fair share can shrink
+one, re-balance the paused reservations when it does.
 
 Lessons from other stacks: QUICHE frees 8 KiB blocks as they are consumed, msquic
 never advertises credit it could not back, and quinn and lsquic both let a slice

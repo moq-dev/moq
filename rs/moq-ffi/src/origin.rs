@@ -459,7 +459,7 @@ impl MoqOriginConsumer {
 impl MoqOriginRequests {
 	/// Wait for the next broadcast requested through this handle's prefix.
 	///
-	/// Returns a [`MoqBroadcastRequest`]: accept it with a broadcast producer or reject
+	/// Returns a [`MoqBroadcastRequest`]: serve a held broadcast, prepare a new one, or reject
 	/// it with an application error code. The requesting consumer stays pending until then.
 	pub async fn requested_broadcast(&self) -> Result<Arc<MoqBroadcastRequest>, MoqError> {
 		// A call after cancel finds the route retracted, rather than racing the cancel.
@@ -528,6 +528,19 @@ impl MoqBroadcastRequest {
 			broadcast,
 			driver: self.driver.clone(),
 		}))
+	}
+
+	/// Serve a held broadcast under the prefix route's instance without announcing an exact route.
+	///
+	/// Every answer at this path must continue the same sequences and bytes. Start a new
+	/// prefix route for different content, or prepare and publish a job with its own instance.
+	pub fn serve(&self, broadcast: &Arc<MoqBroadcastConsumer>) -> Result<(), MoqError> {
+		let _guard = crate::ffi::enter();
+		self.driver.check()?;
+		broadcast.driver.check()?;
+		self.take()?.serve(&broadcast.inner);
+		self.driver.check()?;
+		Ok(())
 	}
 
 	/// Reject the request with an application error code.
@@ -647,6 +660,24 @@ mod supervision_tests {
 	use super::*;
 
 	#[tokio::test]
+	async fn serving_held_content_consumes_only_the_request() {
+		let origin = MoqOriginProducer::new(Default::default());
+		let requests = origin.requests("room".into()).unwrap();
+		let source = origin.create_broadcast("source".into()).unwrap().broadcast();
+		let held = source.consume().unwrap();
+		let consumer = origin.consume();
+		let (resolved, ()) = tokio::join!(consumer.request("room/camera".into(), None), async {
+			let request = requests.requested_broadcast().await.unwrap();
+			request.serve(&held).unwrap();
+			assert!(matches!(request.serve(&held), Err(MoqError::Closed)));
+		});
+		assert!(resolved.is_ok());
+		assert!(!held.inner.is_closed(), "serving leaves the caller's consumer usable");
+		requests.cancel();
+		source.close().unwrap();
+	}
+
+	#[tokio::test]
 	async fn a_panicked_origin_task_reaches_the_host_while_another_origin_keeps_working() {
 		let (inner, driver, trigger) = crate::ffi::panicking_origin();
 		let failed = MoqOriginProducer::from_inner(Origin { inner, driver });
@@ -654,7 +685,8 @@ mod supervision_tests {
 		*trigger
 			.write()
 			.unwrap_or_else(|_| unreachable!("test keeps its panic trigger open")) = true;
-		assert!(matches!(failed.next().await, Err(MoqError::Task { .. })));
+		let result = failed.next().await;
+		assert!(matches!(result, Err(MoqError::Task { .. })), "{result:?}");
 
 		let healthy = MoqOriginProducer::new(Default::default());
 		let publication = healthy.create_broadcast("healthy".into()).unwrap();

@@ -209,6 +209,8 @@ impl<'a> Message<'a> for PublishDone<'a> {
 
 #[derive(Debug)]
 pub struct Publish<'a> {
+	/// The credential authorizing this request alone.
+	pub authorization_token: Option<super::token::RequestToken>,
 	pub request_id: RequestId,
 	pub track_namespace: Path,
 	pub track_name: Cow<'a, str>,
@@ -231,6 +233,7 @@ impl Publish<'_> {
 	pub fn into_owned(self) -> Publish<'static> {
 		Publish {
 			request_id: self.request_id,
+			authorization_token: self.authorization_token,
 			track_namespace: self.track_namespace,
 			track_name: Cow::Owned(self.track_name.into_owned()),
 			track_alias: self.track_alias,
@@ -258,6 +261,7 @@ impl<'a> Message<'a> for Publish<'a> {
 		// property instead.
 		let draft20 = Filter::is_draft20(version);
 		encode_params!(w, version,
+			0x03 => self.authorization_token.clone(),
 			0x09 => self.largest_location,
 			0x10 => self.forward,
 			0x20 => self.subscriber_priority.filter(|_| draft20),
@@ -297,9 +301,10 @@ impl<'a> Message<'a> for Publish<'a> {
 		);
 		let properties = Properties::decode(r, version)?;
 		// Last, so a malformed field closes the session before a token refusal.
-		super::token::single(authorization_token)?;
+		let authorization_token = super::token::single(authorization_token)?;
 
 		Ok(Self {
+			authorization_token,
 			request_id,
 			track_namespace,
 			track_name,
@@ -545,6 +550,7 @@ mod tests {
 	#[test]
 	fn test_publish_v18_round_trip() {
 		let msg = Publish {
+			authorization_token: None,
 			request_id: RequestId(1),
 			track_namespace: Path::from_static("test/ns"),
 			track_name: "video".into(),
@@ -575,6 +581,7 @@ mod tests {
 	fn publish_priority_property_bytes_on_every_draft() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let mut msg = Publish {
+				authorization_token: None,
 				request_id: RequestId(1),
 				track_namespace: Path::from_static("ns"),
 				track_name: "video".into(),
@@ -607,6 +614,7 @@ mod tests {
 	#[test]
 	fn test_publish_v18_group_order_is_a_property() {
 		let msg = Publish {
+			authorization_token: None,
 			request_id: RequestId(1),
 			track_namespace: Path::from_static("ns"),
 			track_name: "video".into(),

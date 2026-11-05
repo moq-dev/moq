@@ -387,6 +387,7 @@ impl<'a> Decode<'a, Version> for Update {
 /// The namespace-only parameters of a REQUEST_UPDATE.
 #[derive(Debug)]
 pub(crate) struct NamespaceUpdate {
+	pub(super) authorization_token: Option<super::token::RequestToken>,
 	pub(super) request_id: super::RequestId,
 	pub(super) prefix: Option<crate::Path>,
 	pub(super) refused: Option<Error>,
@@ -421,10 +422,15 @@ impl<'a> Decode<'a, Version> for NamespaceUpdate {
 			if !data.is_empty() {
 				return Err(DecodeError::InvalidValue);
 			}
+			let (authorization_token, refused) = match super::token::single(token) {
+				Ok(token) => (token, None),
+				Err(err) => (None, Some(err.into())),
+			};
 			Ok(Self {
 				request_id,
 				prefix: prefix.map(|p| p.0),
-				refused: super::token::single(token).err().map(Into::into),
+				authorization_token,
+				refused,
 			})
 		};
 		let update = decode().map_err(DecodeError::complete)?;
@@ -445,7 +451,7 @@ mod tests {
 			// GOAWAY, REQUEST_OK, then another GOAWAY on the same stream.
 			let script = vec![0x10, 0, 2, 0, 0, 0x07, 0, 0, 0x10, 0, 2, 0, 0];
 			let session = ScriptedSession::eof(script);
-			let mut stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+			let mut stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 				.await
 				.unwrap();
 			let mut messages = Messages::new(crate::driver::Transport::new(session.clone()), true);
@@ -468,7 +474,7 @@ mod tests {
 		let stats = registry.tier(Tier::default()).session(crate::Path::from_static(""));
 		let version = Version::Draft22;
 		let session = ScriptedSession::new(vec![0x10, 0, 2, 0, 0, 0x07, 0, 0]);
-		let mut stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+		let mut stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 			.await
 			.unwrap()
 			.with_stats(&stats);
@@ -487,7 +493,7 @@ mod tests {
 		use crate::lite::test_transport::ScriptedSession;
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let session = ScriptedSession::new(vec![0x10, 0, 2, 0, 0]);
-			let mut stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+			let mut stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 				.await
 				.unwrap();
 			let mut messages = Messages::new(crate::driver::Transport::new(session.clone()), false);

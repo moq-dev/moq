@@ -9,6 +9,11 @@ description: The MoQ relay server
 groups, merges duplicate subscriptions, and never parses the media, so one
 relay serves video, audio, and data alike.
 
+Its transport and HTTP cryptography uses [rind](https://github.com/moq-dev/rind):
+every x86\_64 CPU, aarch64 with NEON (including Raspberry Pi 4, CM4, and
+Zero 2 W without crypto extensions), and armv7 are supported. An unsupported
+CPU fails startup with an error naming the missing feature.
+
 ## Features
 
 - **QUIC, WebTransport, and WebSocket** listeners, so browsers and native clients connect to one process.
@@ -17,7 +22,7 @@ relay serves video, audio, and data alike.
 - **A group cache** with byte and age budgets, so late joiners and the HLS gateway can fetch recent history.
 - **HTTP endpoints** to list broadcasts, fetch groups, probe health, and scrape Prometheus metrics. See [HTTP](/bin/relay/http).
 - **Live stats** published as MoQ tracks per node and per tenant, split by billing tier.
-- **Plaintext TCP and Unix-socket listeners** for trusted local workers, and experimental [iroh](/concept/transport#iroh-peer-to-peer-experimental) peer-to-peer in source builds with the `iroh` feature.
+- **Plaintext TCP and Unix-socket listeners** for trusted local workers.
 - **Hot reload** of certificates and trust roots.
 
 ## Run
@@ -77,16 +82,17 @@ relay.with_web(web).run().await?;
 
 - `Relay::load` binds every socket, so a taken port fails there, and the
   accessors report the bound addresses, including ports assigned for `:0`.
-- `run` consumes the relay, so clone the handles your tasks need first.
+- `run` consumes the relay, so clone the handles your tasks need first. Stats
+  publishing starts when `run` drives the cluster; an application building a
+  `Cluster` itself sets stats in `cluster::Options` and must keep polling the
+  returned driver while serving.
 - Build on `web().routes()`: `with_web` replaces the router, so `Router::new()`
   drops the built-in routes.
 - A route reads the connection's peer address with axum's
   `ConnectInfo<SocketAddr>` extractor. It is the accepted socket, never a
   forwarding header, so behind a proxy it is the proxy.
 - `run` drains on SIGTERM or SIGINT from the moment it serves. Before that they
-  keep their default action, and still do after a startup error. With ACME, they
-  are caught from the first issuance on instead, which they end, so a container
-  can be stopped while it waits for a certificate. To own the signals, for
+  keep their default action, and still do after a startup error. To own the signals, for
   example to leave DNS before draining, call `with_signals(false)` and fire
   `shutdown_trigger()` yourself. The drain reaches only MoQ sessions, so stop any extra listener
   (RTMP, SRT, ...) on your own deadline.

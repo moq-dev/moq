@@ -9,7 +9,7 @@ How to update your code for each breaking change, newest first.
 Property and built-in UI changes now reflect into attributes. Invalid rendering/catalog modes, URLs, numbers, durations, and version lists throw instead of selecting defaults; remove an attribute to use its default.
 Catch those property setter errors. A browser reports malformed markup through its normal `error` event, and the element suspends media until those invalid attributes are corrected or removed. A valid property assignment also corrects that attribute. An empty, duplicate, or unsupported `versions` list now throws from the setter instead of failing on `el.connection.error`; check a list up front with `Net.Connection.checkVersions`.
 `broadcast`, `video`, `audio`, `renderer`, and `sync` are TypeScript `readonly` fields. Configure the existing components through their inputs and `controls` instead of replacing them; use a headless `Player` for a different pipeline.
-`announced=false` reflects as `announced="false"`; `captions` and `catalog-format` now reflect too.
+`follow=false` reflects as `follow="false"`; `captions` and `catalog-format` now reflect too.
 
 ### Muting preserves the selected volume
 
@@ -44,7 +44,7 @@ Read `Sync.out.delay` instead of `Sync.out.jitter`, and the element's `sync.out.
 Stop passing `probe` to `new Sync(...)`; it was never read.
 `Sync.now()` returns `Milli | undefined`.
 `received`, `wait`, and `register` are internal to the built-in decoders, and `epoch` and `skipped` are gone: `wait` now resolves `true` to present the frame or `false` to drop it.
-`<moq-watch>` no longer observes `reload`, `latency`, `latency-min`, or `jitter`, nor has the `latency`, `latencyMin`, `latencyMax`, or `reload` properties; use `announced`, `delay`, and `buffer` (see 0.5 -> 0.6).
+`<moq-watch>` no longer observes `reload`, `latency`, `latency-min`, or `jitter`, nor has the `latency`, `latencyMin`, `latencyMax`, or `reload` properties; use `follow`, `delay`, and `buffer` (see 0.5 -> 0.6, where `follow` is still `announced`).
 
 ### `Video.Source.out.error` is an `Error`
 
@@ -98,10 +98,12 @@ Rename `Sync.out.maxAge` to `Sync.out.maxDelay`.
 A rendition the catalog marks `enabled: false` is skipped, even when named.
 With no video rendition selectable, the picture clears to black.
 
-### `announced` off stays on one publisher
+### `announced` is `follow`, and off stays on one publisher ([#7189](https://github.com/moq-dev/moq/pull/7189))
 
-With `announced` off, the player no longer moves to a later publisher at the same path.
-Turn `announced` on to follow restarts.
+Rename `announced` to `follow` on `new Watch.Broadcast({...})`, `new Watch.Player({...})`, `broadcast.in`, `player.in`, and `<moq-watch>` (`<moq-watch follow="false">`, `el.follow = false`); its default is unchanged.
+Passing `announced` throws, and an `announced` attribute suspends the element until it is removed.
+With `follow` off, the player no longer moves to a later publisher at the same path.
+Turn `follow` on to follow restarts.
 
 ## 0.5 -> 0.6
 

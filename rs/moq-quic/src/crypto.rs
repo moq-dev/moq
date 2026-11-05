@@ -1,6 +1,6 @@
 //! What a connection's TLS handshake negotiated.
 //!
-//! The handshake runs on rustls with ring or aws-lc-rs. The traits here are crate-private:
+//! The handshake runs on rustls with rind. The traits here are crate-private:
 //! rustls is their one real implementation, and the plaintext one behind the `fuzz` feature
 //! serves the fuzz target and the benchmarks.
 
@@ -14,14 +14,12 @@ use crate::{
 	transport_parameters::TransportParameters,
 };
 
-/// Cryptography interface based on *ring*
-#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
-mod ring_like;
+/// Reset and token cryptography from rind.
+mod rind;
 /// TLS interface based on rustls
-#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 pub(crate) mod rustls;
 
-/// What the handshake negotiated, available once the connection emits `HandshakeDataReady`.
+/// What the handshake negotiated, available once the connection's `poll_handshake_data` is ready.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct HandshakeData {
@@ -45,7 +43,7 @@ pub(crate) trait Session: Send + Sync + 'static {
 
 	/// Get data negotiated during the handshake, if available
 	///
-	/// Returns `None` until the connection emits `HandshakeDataReady`.
+	/// Returns `None` until the connection's `poll_handshake_data` is ready.
 	fn handshake_data(&self) -> Option<HandshakeData>;
 
 	/// The certificate chain the peer presented, end entity first, if any

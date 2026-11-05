@@ -30,7 +30,7 @@ exporter reads one, without knowing.
 - No behavior change with the defaults. Keep the `containers` Criterion
   bench flat before and after.
 - Test an import and export round trip (fMP4 and TS) through the moq-net
-  pass-through test wrapper, plus one through moq-e2ee's wrappers once
+  pass-through test wrapper, plus one through moq-crypto's wrappers once
   [they implement the traits](/quest/m2/net-wrap/e2ee.md).
 
 Public API: generic type parameters with moq-net defaults across moq-mux.

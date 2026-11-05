@@ -523,6 +523,10 @@ pub extern "C" fn moq_encode_audio_finish(producer: u32) -> i32 {
 /// model. TODO: a future API will pick the right rendition
 /// automatically (ABR).
 ///
+/// A rendition's codec, layout, or description refused during setup reports
+/// [`MOQ_ERROR_UNSUPPORTED_CONFIG`](crate::MOQ_ERROR_UNSUPPORTED_CONFIG) on the terminal callback.
+/// An unsupported output channel count returns that code directly, without a callback.
+///
 /// Returns a non-zero handle on success or a negative error code.
 ///
 /// `on_read` is called with a positive read id per decoded frame, gap, or encoder
@@ -561,7 +565,8 @@ pub unsafe extern "C" fn moq_decode_audio(
 		config.output.sample_rate = zeroable(raw.sample_rate);
 		config.output.layout = zeroable(raw.channels)
 			.map(moq_audio::Layout::from_channels)
-			.transpose()?;
+			.transpose()
+			.map_err(|err| Error::UnsupportedConfig(err.to_string()))?;
 		config.delay = raw.delay.into();
 
 		let on_read = unsafe { OnStatus::new(user_data, on_read)? };

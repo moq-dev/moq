@@ -13,7 +13,7 @@ use crate::{Config, Driver, Error, Session, Version, alpn};
 /// The `tokio-tungstenite` version this crate is built against.
 ///
 /// [`Client::with_connector`] and [`Upgraded`] take `tokio-tungstenite` types
-/// directly, so use this re-export rather than a separately pinned dependency —
+/// directly, so use this re-export rather than a separately pinned dependency -
 /// a different minor version is a distinct crate to the compiler and fails to
 /// typecheck against these APIs.
 pub use tokio_tungstenite;
@@ -52,7 +52,7 @@ fn capped(
 ///
 /// WebSocket has no built-in idle timeout: when the peer's host crashes
 /// or its network drops without sending a TCP FIN, the local socket
-/// stays "open" until OS-level TCP keep_alive eventually probes — typically
+/// stays "open" until OS-level TCP keep_alive eventually probes - typically
 /// hours. Set this to send periodic Pings and close the session if no
 /// frame arrives within `timeout`.
 #[derive(Debug, Clone, Copy)]
@@ -299,7 +299,36 @@ impl Client {
 		// `true` disables Nagle: records are already batched, see `Server::accept`.
 		#[cfg(feature = "wss")]
 		let (ws_stream, response) = {
-			tokio_tungstenite::connect_async_tls_with_config(request, Some(ws_config), true, self.connector.clone())
+			let connector = match (
+				&self.connector,
+				request
+					.uri()
+					.scheme_str()
+					.is_some_and(|scheme| scheme.eq_ignore_ascii_case("wss")),
+			) {
+				(Some(connector), _) => Some(connector.clone()),
+				(None, true) => {
+					let provider = moq_crypto::provider::provider()?;
+					let native = rustls_native_certs::load_native_certs();
+					if native.certs.is_empty() {
+						return Err(std::io::Error::new(
+							std::io::ErrorKind::NotFound,
+							format!("no native root CA certificates found: {:?}", native.errors),
+						)
+						.into());
+					}
+					let mut roots = rustls::RootCertStore::empty();
+					roots.add_parsable_certificates(native.certs);
+					let config = rustls::ClientConfig::builder_with_provider(provider)
+						.with_safe_default_protocol_versions()
+						.map_err(std::io::Error::other)?
+						.with_root_certificates(roots)
+						.with_no_client_auth();
+					Some(tokio_tungstenite::Connector::Rustls(std::sync::Arc::new(config)))
+				}
+				(None, false) => None,
+			};
+			tokio_tungstenite::connect_async_tls_with_config(request, Some(ws_config), true, connector)
 				.await
 				.map_err(Error::from)?
 		};

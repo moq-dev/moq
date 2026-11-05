@@ -10,9 +10,12 @@ use hang::catalog::{AudioCodec, VideoCodec};
 
 use super::{Export, Import};
 
-/// A millisecond track: the frames written here carry timestamps.
+/// A millisecond media track: the frames written here carry timestamps. It declares media's
+/// max age, so an exporter started after publishing still reads the superseded groups.
 fn timed() -> moq_net::track::Info {
-	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	moq_net::track::Info::default()
+		.with_timescale(moq_net::Timescale::MILLI)
+		.with_max_age(hang::container::MAX_AGE)
 }
 
 /// Open an FLV export on the hang catalog of `source`.
@@ -26,8 +29,8 @@ async fn open_export(source: crate::Source) -> Export<crate::catalog::Consumer> 
 
 /// A drift budget no test timeline comes close to, so the exporter reads every group.
 ///
-/// The media track's full retention window, so an exporter started after publishing
-/// can still read every retained group. These tests write or import a whole broadcast
+/// The media track's full max age, so an exporter started after publishing
+/// can still read every fresh group. These tests write or import a whole broadcast
 /// and only then export it, which the
 /// exporter's default [`Duration::ZERO`] collapses to the
 /// live edge: completeness has to be asked for, exactly as a real recorder does.

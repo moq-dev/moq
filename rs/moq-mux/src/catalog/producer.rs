@@ -36,7 +36,7 @@ struct State<E: CatalogExt> {
 	/// cause: [`Producer::finish`], [`Producer::abort`], or a failed drop-time publish.
 	closed: Option<crate::Error>,
 
-	/// The broadcast's shared clock, advertised at the catalog root. Every importer on this
+	/// The broadcast's shared clock, advertised as the catalog's `media.clock`. Every importer on this
 	/// catalog reads it (the same timeline), so timestamps they synthesize when a caller has none
 	/// land on one timeline and audio/video stay in sync.
 	clock: crate::Clock,
@@ -215,7 +215,7 @@ impl Declared {
 	}
 }
 
-/// The producer's `clock` re-based on a root `clock` of `advertised`, or `None` when that is the
+/// The producer's `clock` re-based on a `media.clock` of `advertised`, or `None` when that is the
 /// mapping it already has. A changed mapping is adopted while nothing has `anchored` the clock and
 /// refused once something has. Clearing it is always refused.
 fn adopt(
@@ -226,7 +226,7 @@ fn adopt(
 	if advertised == clock.wall() {
 		return Ok(None);
 	}
-	let refuse = |why: &str| crate::Error::UnmappableTimestamp(format!("root clock {advertised:?} {why}"));
+	let refuse = |why: &str| crate::Error::UnmappableTimestamp(format!("media clock {advertised:?} {why}"));
 	let wall = crate::Clock::exact(advertised.ok_or_else(|| refuse("clears the producer's clock"))?)?;
 	// The same mapping in other units needs no host time, which may be unset or behind PTS zero.
 	if Some(wall) == clock.wall() {
@@ -275,13 +275,11 @@ struct Reservations {
 	reserved: bool,
 }
 
-/// The catalog tracks and the HLS record tracks advertised in them.
+/// The catalog tracks.
 struct Outputs<E: CatalogExt> {
 	hang: moq_json::snapshot::Producer<Catalog<E>>,
 	hang_track: moq_net::track::Producer,
 	msf_track: moq_net::track::Producer,
-	/// The broadcast's HLS record tracks, unless [`Config::with_hls`] disabled them.
-	hls: Option<crate::hls::Tracks>,
 	/// Keeps the broadcast open while the catalog is, so a publisher may hand its own handle to a
 	/// media producer and drop it.
 	broadcast: moq_net::broadcast::Producer,
@@ -293,48 +291,15 @@ impl<E: CatalogExt> Clone for Outputs<E> {
 			hang: self.hang.clone(),
 			hang_track: self.hang_track.clone(),
 			msf_track: self.msf_track.clone(),
-			hls: self.hls.clone(),
 			broadcast: self.broadcast.clone(),
 		}
 	}
 }
 
 impl<E: CatalogExt> Outputs<E> {
-	/// The catalog as published: each local rendition with HLS records gets its `hls` field.
-	///
-	/// Filled in here rather than stored, so an owner that rewrites its rendition's config can't
-	/// drop the field, and a track whose duration is not yet declared simply lacks it.
-	fn advertise<'a>(&self, catalog: &'a Catalog<E>) -> std::borrow::Cow<'a, Catalog<E>> {
-		let Some(hls) = &self.hls else {
-			return std::borrow::Cow::Borrowed(catalog);
-		};
-		let mut catalog = catalog.clone();
-		let video = catalog
-			.video
-			.renditions
-			.iter_mut()
-			.map(|(id, config)| (id, &mut config.hls));
-		let audio = catalog
-			.audio
-			.renditions
-			.iter_mut()
-			.map(|(id, config)| (id, &mut config.hls));
-		// An enrolled rendition is keyed by its track's name, which its reservation holds, so only
-		// that entry gets the records; any other entry, such as a reference to a same-named track of
-		// another broadcast, keeps its own field.
-		for (id, field) in video.chain(audio) {
-			if let Some(advertised) = hls.hls(id) {
-				*field = Some(advertised);
-			}
-		}
-		std::borrow::Cow::Owned(catalog)
-	}
-
 	/// Emit the catalog to hang and MSF, stamped now on `clock`. Neither writes a catalog identical
 	/// to its last.
 	fn emit(&mut self, catalog: &Catalog<E>, msf: &mut Msf<E>, clock: &crate::Clock) -> crate::Result<()> {
-		let catalog = self.advertise(catalog);
-		let catalog = catalog.as_ref();
 		// Every consumer refuses a catalog that fails this, so refuse it before it reaches one.
 		catalog.check_renditions()?;
 		// The media timeline, so the catalog in effect at a media timestamp is the one stamped at or
@@ -387,12 +352,11 @@ pub struct Producer<E: CatalogExt = ()> {
 
 	current: Arc<Mutex<State<E>>>,
 
-	/// How each media track's HLS segments are cut, unless disabled. See [`Config::with_hls`].
-	hls: Option<crate::hls::Config>,
-	/// Retention override for the media tracks minted under this catalog, or `None` to keep
-	/// hang's default. Fixed at construction, so every clone and every
-	/// [`Reserved`](super::Reserved) mints tracks under one policy. See
-	/// [`Config::with_max_age`].
+	/// Every media track's join interval, declared once as `media.join.interval`.
+	intervals: super::interval::Intervals,
+	/// The max age of the media tracks minted under this catalog, or `None` for no publisher
+	/// limit. Fixed at construction, so every clone and every [`Reserved`](super::Reserved)
+	/// mints tracks under one policy. See [`Config::with_max_age`].
 	max_age: Option<std::time::Duration>,
 	/// Connection allocator passthrough tracks claim their peak-hold bitrate on.
 	/// See [`Config::with_bandwidth`].
@@ -410,7 +374,7 @@ impl<E: CatalogExt> Clone for Producer<E> {
 		Self {
 			outputs: self.outputs.clone(),
 			current: self.current.clone(),
-			hls: self.hls.clone(),
+			intervals: self.intervals.clone(),
 			max_age: self.max_age,
 			bandwidth: self.bandwidth.clone(),
 			order: self.order.clone(),
@@ -432,17 +396,15 @@ pub struct Config<E: CatalogExt = ()> {
 	max_age: Option<std::time::Duration>,
 	bandwidth: moq_net::bandwidth::Allocator,
 	clock: Option<crate::Clock>,
-	hls: Option<crate::hls::Config>,
 }
 
 impl Default for Config<()> {
 	fn default() -> Self {
 		Self {
 			catalog: Catalog::default(),
-			max_age: None,
+			max_age: Some(hang::container::MAX_AGE),
 			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
 			clock: None,
-			hls: Some(crate::hls::Config::default()),
 		}
 	}
 }
@@ -450,7 +412,7 @@ impl Default for Config<()> {
 impl<E: CatalogExt> Config<E> {
 	/// Start from an extended catalog rather than the media-only one, e.g. the untyped
 	/// [`Extra`] for the by-name / FFI path. Set application sections through
-	/// [`Producer::modify`](Producer::modify) afterwards. A root `clock` in it is adopted, not
+	/// [`Producer::modify`](Producer::modify) afterwards. A `media.clock` in it is adopted, not
 	/// replaced (see [`Producer::new`]).
 	pub fn with_catalog<F: CatalogExt>(self, catalog: Catalog<F>) -> Config<F> {
 		Config {
@@ -458,36 +420,36 @@ impl<E: CatalogExt> Config<E> {
 			max_age: self.max_age,
 			bandwidth: self.bandwidth,
 			clock: self.clock,
-			hls: self.hls,
 		}
 	}
 
 	/// Publish with this broadcast clock instead of a fresh one.
 	///
-	/// The clock's wall mapping is advertised at the catalog root and fixed from the start, so
+	/// The clock's wall mapping is advertised as the catalog's `media.clock` and fixed from the start, so
 	/// every container importer (fMP4, MPEG-TS, FLV, MKV) shifts its stream's timestamps onto it,
 	/// its first frame landing at the clock's reading on arrival. Without this, the catalog starts
 	/// a fresh clock, and the first importer to receive a frame before anything fixes the clock
 	/// places it there instead, keeping its own timestamps verbatim (see [`Timebase`](super::Timebase)).
 	///
-	/// The root `clock` is this clock: a derivative that only learns its input's mapping later
+	/// The `media.clock` is this clock: a derivative that only learns its input's mapping later
 	/// writes it through [`Producer::modify`] instead, before anything fixes the clock.
 	pub fn with_clock(mut self, clock: crate::Clock) -> Self {
 		self.clock = Some(clock);
 		self
 	}
 
-	/// Override how long the media tracks minted under this catalog keep a non-latest group
-	/// fetchable, replacing hang's default. `None` keeps it.
+	/// Set how long a superseded group of the media tracks minted under this catalog stays
+	/// fresh, or `None` for no publisher limit. Defaults to
+	/// [`MAX_AGE`](hang::container::MAX_AGE).
 	///
 	/// That default suits a segmented egress (HLS/DASH), which may only advertise segments a
-	/// FETCH can still reach. Lower it when nothing reads history and the memory matters;
-	/// raise it for a deeper seek window. It is a RETENTION budget, not a delivery one, so it
-	/// never makes a subscriber play further behind live -- it caps what one may ask to wait
-	/// for, and a subscriber's own budget still defaults to zero.
+	/// FETCH can still reach. Lower it when nothing reads history; raise it for a deeper seek
+	/// window. It is a freshness bound, not a delivery one, so it never makes a subscriber play
+	/// further behind live -- it caps what one may ask to wait for, and a subscriber's own
+	/// budget still defaults to zero.
 	///
-	/// Applies to the media tracks the catalog mints. The catalog and HLS record tracks keep
-	/// moq-net's default: both are read at the live edge, which is retained unconditionally.
+	/// Applies to the media tracks the catalog mints. The catalog tracks keep moq-net's zero
+	/// default: they are read at the live edge, which never goes stale.
 	pub fn with_max_age(mut self, max_age: impl Into<Option<std::time::Duration>>) -> Self {
 		self.max_age = max_age.into();
 		self
@@ -504,34 +466,27 @@ impl<E: CatalogExt> Config<E> {
 		self.bandwidth = bandwidth;
 		self
 	}
-
-	/// Publish HLS segment records for each video and audio rendition, cut by `hls`; `None` publishes
-	/// none. On by default, cut by [`hls::Config::default`](crate::hls::Config::default).
-	pub fn with_hls(mut self, hls: impl Into<Option<crate::hls::Config>>) -> Self {
-		self.hls = hls.into();
-		self
-	}
 }
 
 impl<E: CatalogExt> Producer<E> {
 	/// Create a new catalog producer from a full [`Config`].
 	///
-	/// A root `clock` seeded through [`Config::with_catalog`] is adopted under the same rules as
+	/// A `media.clock` seeded through [`Config::with_catalog`] is adopted under the same rules as
 	/// [`modify`](Self::modify): the producer runs on it, unless [`Config::with_clock`] fixed a
 	/// different mapping, which is refused.
 	pub fn new(broadcast: &mut moq_net::broadcast::Producer, config: Config<E>) -> crate::Result<Self> {
-		// The broadcast clock is advertised at the catalog root from the first snapshot,
-		// whether or not HLS records are enabled. A host with an unset wall clock advertises none.
+		// The broadcast clock is advertised as `media.clock` from the first snapshot. A host with an
+		// unset wall clock advertises none.
 		// Resolved before any track exists, so a refused seed leaves the broadcast untouched.
 		let anchored = config.clock.is_some();
 		let mut catalog = config.catalog;
 		// An unseeded catalog runs on the configured clock, or a fresh one.
 		let clock = config.clock.unwrap_or_default();
-		let clock = match catalog.clock {
+		let clock = match catalog.media.clock {
 			None => clock,
 			seeded => adopt(&clock, anchored, seeded)?.unwrap_or(clock),
 		};
-		catalog.clock = clock.wall();
+		catalog.media.clock = clock.wall();
 
 		// Compressed, as `default_track_info` sets: catalog JSON is small and repetitive.
 		let hang_track = broadcast.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())?;
@@ -546,17 +501,11 @@ impl<E: CatalogExt> Producer<E> {
 		let json_config = moq_json::snapshot::Config::default().with_deltas(false);
 		let hang = moq_json::snapshot::Producer::new(hang_track.clone(), json_config);
 
-		let hls = config
-			.hls
-			.as_ref()
-			.map(|_| crate::hls::Tracks::new(broadcast, clock.clone()));
-
 		Ok(Self {
 			outputs: Outputs {
 				hang,
 				hang_track,
 				msf_track,
-				hls,
 				broadcast: broadcast.clone(),
 			},
 			current: Arc::new(Mutex::new(State {
@@ -571,7 +520,7 @@ impl<E: CatalogExt> Producer<E> {
 				revisions: Default::default(),
 				msf: Msf::default(),
 			})),
-			hls: config.hls,
+			intervals: Default::default(),
 			max_age: config.max_age,
 			bandwidth: config.bandwidth,
 			order: Default::default(),
@@ -579,18 +528,14 @@ impl<E: CatalogExt> Producer<E> {
 		})
 	}
 
-	/// Track properties for a media track under this catalog: hang's media defaults, plus any
-	/// [`Config::with_max_age`] override.
+	/// Track properties for a media track under this catalog: hang's media defaults, with the
+	/// [`Config::with_max_age`] policy.
 	///
 	/// `priority` should come from [`PRIORITY`](hang::catalog::PRIORITY) for the kind of media
 	/// the track carries. Chain [`with_timescale`](moq_net::track::Info::with_timescale) for a
 	/// container that carries the source's own scale (CMAF and Matroska both do).
 	pub fn track_info(&self, priority: i8) -> moq_net::track::Info {
-		let info = hang::container::track_info(priority);
-		match self.max_age {
-			Some(max_age) => info.with_max_age(max_age),
-			None => info,
-		}
+		hang::container::track_info(priority).with_max_age(self.max_age)
 	}
 
 	/// Resolve a timestamp, synthesizing one from the broadcast's shared
@@ -633,7 +578,7 @@ impl<E: CatalogExt> Producer<E> {
 	/// The in-memory catalog is already mutated, so a panic while the guard is held still
 	/// publishes: skipping would leave `snapshot` ahead of the wire with no dirty flag to catch up.
 	///
-	/// The root `clock` is the producer's [`clock`](Self::clock). Writing a different one re-bases
+	/// The `media.clock` is the producer's [`clock`](Self::clock). Writing a different one re-bases
 	/// the clock on it until something fixes the clock ([`Config::with_clock`], taking
 	/// [`clock`](Self::clock), an importer's first frame, or the first publish), so a derivative
 	/// adopts its input's mapping. After that a changed `clock` is refused, as is clearing it at any
@@ -655,12 +600,11 @@ impl<E: CatalogExt> Producer<E> {
 
 	/// Get a snapshot of the current catalog.
 	pub fn snapshot(&self) -> Catalog<E> {
-		let state = take(&self.current);
-		self.outputs.advertise(&state.catalog).into_owned()
+		take(&self.current).catalog.clone()
 	}
 
 	/// The broadcast's shared clock: the timeline producers stamp against and the wall mapping
-	/// advertised at the catalog root.
+	/// advertised as the catalog's `media.clock`.
 	///
 	/// Clones share the timeline, so handing them to concurrent producers keeps every track on
 	/// one clock. Taking the clock fixes it: an importer whose first frame arrives later shifts its
@@ -725,8 +669,8 @@ impl<E: CatalogExt> Producer<E> {
 			match wall {
 				// A placement can precede every track. It stages no publish, so the catalog first
 				// goes out listing them rather than carrying a clock alone.
-				Some(_) => guard.state.catalog.clock = advertised,
-				None => guard.clock = advertised,
+				Some(_) => guard.state.catalog.media.clock = advertised,
+				None => guard.media.clock = advertised,
 			}
 			super::Offset::default()
 		};
@@ -932,33 +876,31 @@ impl<E: CatalogExt> Producer<E> {
 		}
 	}
 
-	/// Build the media [`container::Producer`](crate::container::Producer) for `track`,
-	/// enrolling a video or audio track for HLS records unless [`Config::with_hls`] disabled them.
+	/// Build the media [`container::Producer`](crate::container::Producer) for `track`, joining a
+	/// video or audio track to the broadcast's join interval with `interval`, its known longest group,
+	/// or measuring it without one.
 	pub(super) fn media<C, R>(
 		&self,
 		track: moq_net::track::Producer,
 		container: C,
 		rendition: super::Rendition<E, R>,
 		config: Option<R>,
-		hls_hint: Option<std::time::Duration>,
+		interval: Option<std::time::Duration>,
 	) -> crate::Result<crate::container::Producer<C, R>>
 	where
 		C: crate::container::Container,
 		R: super::RenditionConfig<E>,
 		crate::Error: From<C::Error>,
 	{
-		// Only video and audio renditions advertise records, and a sparse role (text) enrolled
-		// first would pace them, holding their segments open between its groups.
+		// Only video and audio promise the interval: a sparse role (text) groups only as often as it
+		// has something to say.
 		let role = std::any::TypeId::of::<R>();
-		let recorded = role == std::any::TypeId::of::<hang::catalog::VideoConfig>()
-			|| role == std::any::TypeId::of::<hang::catalog::AudioConfig>();
-		let recorder = match recorded {
-			true => self.enroll(track.name(), hls_hint)?,
-			false => None,
-		};
+		let member = (role == std::any::TypeId::of::<hang::catalog::VideoConfig>()
+			|| role == std::any::TypeId::of::<hang::catalog::AudioConfig>())
+		.then(|| self.join(interval));
 		let sent = self.sent(rendition.name());
 		let mut producer = crate::container::Producer::with_rendition(track, container, rendition)
-			.with_recorder(recorder)
+			.with_member(member)
 			.with_bandwidth(self.bandwidth.clone())
 			.with_sent(sent);
 		if let Some(config) = config {
@@ -1010,78 +952,47 @@ impl<E: CatalogExt> Producer<E> {
 		self.bandwidth.clone()
 	}
 
-	/// Enroll `track` for HLS records unless [`Config::with_hls`] disabled them, advertising them in its
-	/// rendition's `hls` field once the nominal duration is known.
+	/// Join a video or audio track to the broadcast's join interval with `interval`, its known
+	/// longest group, or `None` to measure it. Once every member present has one, the largest is
+	/// declared as `media.join.interval`, unless the catalog already carries one.
 	///
 	/// The video and audio track constructors call this for you. fMP4 passthrough calls it directly
 	/// because it writes groups by hand instead of using a [`container::Producer`](crate::container::Producer).
-	pub(crate) fn enroll(
-		&self,
-		track: &str,
-		hint: Option<std::time::Duration>,
-	) -> crate::Result<Option<crate::hls::Recorder>> {
-		if let Some(err) = &take(&self.current).closed {
-			return Err(err.clone());
-		}
-		let (Some(tracks), Some(config)) = (&self.outputs.hls, &self.hls) else {
-			return Ok(None);
-		};
-		let mut config = config.clone();
-		if hint.is_some() {
-			config = config.with_duration_hint(hint);
-		}
-		let mut recorder = tracks.track(track, config)?;
-		if tracks.hls(track).is_some() {
-			// Hinted: the entry the track belongs to advertises it when it commits.
-			return Ok(Some(recorder));
-		}
-
-		// Unhinted: the first segment declares the duration, which republishes the catalog.
-		let current = self.current.clone();
-		let mut outputs = self.outputs.clone();
-		recorder.on_declare(move |_| {
-			let mut state = take(&current);
-			// Before the initial publish, that publish advertises it whenever its gate opens.
-			if state.closed.is_some() || !state.reservations.published {
-				return;
-			}
-			let state = &mut *state;
-			if let Err(err) = outputs.emit(&state.catalog, &mut state.msf, &state.clock) {
-				tracing::error!(%err, "failed to publish an HLS declaration, aborting catalog tracks");
-				outputs.abort(&err);
-				state.closed = Some(err);
-			}
-		});
-		Ok(Some(recorder))
+	pub(crate) fn join(&self, interval: Option<std::time::Duration>) -> super::interval::Member {
+		let catalog = self.clone();
+		self.intervals.join(
+			interval,
+			Box::new(move |interval| {
+				let mut catalog = catalog.clone();
+				let Ok(mut guard) = catalog.modify() else {
+					return;
+				};
+				// The publisher's own declaration, seeded or written through `modify`, stands.
+				if guard.media.join.is_some() {
+					return;
+				}
+				guard.media.join = hang::catalog::Join::new(interval);
+				if let Err(err) = guard.commit() {
+					tracing::error!(%err, "failed to publish the join interval");
+				}
+			}),
+		)
 	}
 
-	/// How many HLS record tracks are held, live or kept for a re-enrollment.
+	/// The join interval declared from the media tracks, once every one had its own.
 	#[cfg(test)]
-	pub(crate) fn hls_tracks(&self) -> usize {
-		self.outputs.hls.as_ref().map_or(0, |tracks| tracks.len())
-	}
-
-	/// Finish and forget the HLS records of a dropped `track` whose name is never published again.
-	pub fn retire(&self, track: &str) -> crate::Result<()> {
-		match &self.outputs.hls {
-			Some(tracks) => tracks.retire(track),
-			None => Ok(()),
-		}
-	}
-
-	/// [`retire`](Self::retire) `track` from a teardown that cannot return the error.
-	pub(crate) fn retire_dropped(&self, track: &str) {
-		if let Err(err) = self.retire(track) {
-			tracing::warn!(%err, track, "failed to retire a dropped track's HLS records");
-		}
+	pub(crate) fn declared_interval(&self) -> Option<std::time::Duration> {
+		self.intervals.declared()
 	}
 
 	/// Publish `track` as a latest-value JSON track, advertising it in the catalog.
 	///
 	/// The caller creates the track on the broadcast, as it does for a media track; this writes its
 	/// catalog entry and removes the entry when the returned handle drops. The catalog key is
-	/// [`track.name()`](moq_net::track::Producer::name) verbatim. Create `track` with
-	/// [`compress`](moq_net::track::Info::compress) set: JSON is small and repetitive.
+	/// [`track.name()`](moq_net::track::Producer::name) verbatim. Create `track` with a
+	/// [`timescale`](moq_net::track::Info::timescale), since every write is stamped on the
+	/// broadcast clock, and with [`compress`](moq_net::track::Info::compress) set: JSON is small and
+	/// repetitive.
 	///
 	/// `config` is a [`json::Config`](crate::json::Config) for the `json` section, or an
 	/// application's own entry embedding a [`JsonConfig`](hang::catalog::JsonConfig) (see
@@ -1093,8 +1004,9 @@ impl<E: CatalogExt> Producer<E> {
 	/// [`Snapshot::refresh`](crate::json::Snapshot::refresh), so joiners get a fresh group.
 	///
 	/// Errors if the entry's section already carries that name, for example an entry seeded
-	/// through [`Config::with_catalog`] or one pointing at a sibling broadcast, or if the entry
-	/// references another broadcast.
+	/// through [`Config::with_catalog`] or one pointing at a sibling broadcast, if the entry
+	/// references another broadcast, or with [`moq_net::Error::TimestampMismatch`] if `track` has no
+	/// timescale.
 	pub fn json_snapshot<T: serde::Serialize>(
 		&self,
 		track: moq_net::track::Producer,
@@ -1145,21 +1057,12 @@ impl<E: CatalogExt> Producer<E> {
 			state.closed = Some(reason.clone());
 		}
 		self.outputs.abort(&reason);
-		// The records fail too, rather than reading as a complete recording.
-		if let Some(hls) = &self.outputs.hls {
-			hls.abort(&err);
-		}
 	}
 
 	/// Finish publishing to this catalog.
 	///
 	/// An estimate rise still held by the once-a-second limit is not published: media has ended.
 	pub fn finish(&mut self) -> crate::Result<()> {
-		// A track that ends before its first segment closes declares its duration now, while the
-		// catalog can still advertise it.
-		if let Some(hls) = &self.outputs.hls {
-			hls.flush();
-		}
 		{
 			let mut state = take(&self.current);
 			if let Some(err) = &state.closed {
@@ -1169,9 +1072,6 @@ impl<E: CatalogExt> Producer<E> {
 		}
 		self.outputs.hang.finish()?;
 		self.outputs.msf_track.finish()?;
-		if let Some(hls) = &self.outputs.hls {
-			hls.finish();
-		}
 		Ok(())
 	}
 }
@@ -1205,9 +1105,6 @@ impl<E: CatalogExt> Guard<'_, E> {
 
 	/// Move the producer onto `clock`, a re-basing of the one it has, before anything fixed it.
 	fn retime(&mut self, clock: crate::Clock) {
-		if let Some(hls) = &self.outputs.hls {
-			hls.retime(&clock);
-		}
 		self.state.clock = clock;
 	}
 
@@ -1218,12 +1115,12 @@ impl<E: CatalogExt> Guard<'_, E> {
 		}
 		self.updated = false;
 
-		// The root `clock` is the producer's clock: never advertise one it disagrees with.
-		let adopted = adopt(&self.state.clock, self.state.anchored, self.state.catalog.clock);
+		// The `media.clock` is the producer's clock: never advertise one it disagrees with.
+		let adopted = adopt(&self.state.clock, self.state.anchored, self.state.catalog.media.clock);
 		if let Ok(Some(clock)) = &adopted {
 			self.retime(clock.clone());
 		}
-		self.state.catalog.clock = self.state.clock.wall();
+		self.state.catalog.media.clock = self.state.clock.wall();
 		adopted?;
 
 		{
@@ -1328,8 +1225,8 @@ impl<E: CatalogExt> DerefMut for Guard<'_, E> {
 impl Guard<'_, Extra> {
 	/// Set (or replace) a top-level application catalog section, republished on drop.
 	///
-	/// Errors if `name` is a HANG root (`video`, `audio`, `text`, `archive`, `clock`, `json`,
-	/// `binary`, or retired `timeline`) or an MSF root (`version`, `generatedAt`, `isComplete`,
+	/// Errors if `name` is a HANG root (`video`, `audio`, `media`, `text`, `archive`, `clock`,
+	/// `json`, `binary`, or retired `timeline`) or an MSF root (`version`, `generatedAt`, `isComplete`,
 	/// `tracks`, or `initDataList`).
 	pub fn set_section(&mut self, name: impl Into<String>, value: serde_json::Value) -> crate::Result<()> {
 		self.state.catalog.ext.set(name, value)?;
@@ -1472,7 +1369,7 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 		track.max_grp_sap_starting_type = sap_type;
 		track.max_obj_sap_starting_type = sap_type;
 		track.jitter = config.jitter;
-		track.delay = config.delay;
+		track.delay = config.delay.filter(|delay| !delay.is_zero());
 		tracks.push(track);
 	}
 
@@ -1505,7 +1402,7 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 		track.max_grp_sap_starting_type = Some(1);
 		track.max_obj_sap_starting_type = Some(1);
 		track.jitter = config.jitter;
-		track.delay = config.delay;
+		track.delay = config.delay.filter(|delay| !delay.is_zero());
 		tracks.push(track);
 	}
 
@@ -1526,7 +1423,7 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 		}
 		track.render_group = Some(1);
 		track.jitter = config.jitter;
-		track.delay = config.delay;
+		track.delay = config.delay.filter(|delay| !delay.is_zero());
 		tracks.push(track);
 	}
 
@@ -1623,35 +1520,6 @@ mod test {
 		copy.abort(moq_net::Error::Cancel);
 	}
 
-	/// An aborted catalog fails its HLS records with the cause, so an edge never ends the playlist
-	/// as a complete recording.
-	#[tokio::test(start_paused = true)]
-	async fn abort_fails_the_hls_records() {
-		let mut broadcast = moq_net::broadcast::Info::default().produce();
-		let catalog = Producer::<()>::new(&mut broadcast, Config::default()).unwrap();
-		let _recorder = catalog
-			.enroll("video0", Some(std::time::Duration::from_secs(4)))
-			.unwrap();
-		let mut reader = broadcast
-			.consume()
-			.track("video0.hls")
-			.unwrap()
-			.subscribe(None)
-			.await
-			.unwrap();
-		catalog.abort(moq_net::Error::Unauthorized);
-		loop {
-			match reader.recv_group().await {
-				Ok(Some(_)) => continue,
-				Ok(None) => panic!("the records ended as complete"),
-				Err(err) => {
-					assert!(matches!(err, moq_net::Error::Unauthorized), "{err:?}");
-					break;
-				}
-			}
-		}
-	}
-
 	#[tokio::test(start_paused = true)]
 	async fn abort_does_not_replace_a_finished_catalog() {
 		let mut broadcast = moq_net::broadcast::Info::default().produce();
@@ -1673,21 +1541,19 @@ mod test {
 		));
 	}
 
-	/// The catalog, its MSF twin, and the HLS records all rank above media. They're the
-	/// index a player reads before any media is useful, and they're small enough that
-	/// sitting above media can't starve it. Regression: the MSF and record tracks
-	/// were minted with no `Info` at all, so one broadcast advertised its hang catalog
-	/// at 100 and the same catalog in MSF at 0.
+	/// The catalog and its MSF twin both rank above media. They're the index a player reads
+	/// before any media is useful, and they're small enough that sitting above media can't starve
+	/// it. Regression: the MSF track was minted with no `Info` at all, so one broadcast advertised
+	/// its hang catalog at 100 and the same catalog in MSF at 0.
 	#[tokio::test]
 	async fn non_media_tracks_rank_above_media() {
 		use hang::catalog::PRIORITY;
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
-		let _recorder = catalog.enroll("video", None).unwrap();
+		let _catalog = Producer::<()>::new(&mut broadcast, Config::default()).unwrap();
 
 		let consumer = broadcast.consume();
-		for name in [hang::Catalog::DEFAULT_NAME, moq_msf::DEFAULT_NAME, "video.hls"] {
+		for name in [hang::Catalog::DEFAULT_NAME, moq_msf::DEFAULT_NAME] {
 			let track = consumer.track(name).expect("track");
 			let info = track.info().await.expect("info");
 			assert_eq!(info.priority, PRIORITY.catalog, "{name} should rank with the catalog");
@@ -1843,16 +1709,21 @@ mod test {
 	}
 
 	#[test]
-	fn media_tracks_inherit_the_catalogs_declared_retention() {
+	fn media_tracks_take_the_catalogs_max_age() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 
-		// Unset, a catalog mints hang's media defaults, sized so a segmented egress can serve a
-		// full playlist window. Raw tracks impose no publisher age limit.
+		// Unset, a catalog mints hang's media max age, sized so a segmented egress can serve a
+		// full playlist window.
 		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
 		assert_eq!(
 			catalog.track_info(hang::catalog::PRIORITY.video).max_age,
-			hang::container::track_info(hang::catalog::PRIORITY.video).max_age
+			Some(hang::container::MAX_AGE)
 		);
+
+		// `None` is an explicit unlimited, not a request for the default.
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = Producer::new(&mut broadcast, Config::default().with_max_age(None)).unwrap();
+		assert_eq!(catalog.track_info(hang::catalog::PRIORITY.video).max_age, None);
 
 		// An override reaches every media track this catalog mints, and does NOT disturb the
 		// timescale hang pins (or survive a retimescale for a source-scale container).
@@ -1959,10 +1830,6 @@ mod test {
 
 		assert!(matches!(
 			catalog.modify(),
-			Err(crate::Error::Moq(moq_net::Error::Closed))
-		));
-		assert!(matches!(
-			catalog.enroll("audio0", None),
 			Err(crate::Error::Moq(moq_net::Error::Closed))
 		));
 	}
@@ -2100,151 +1967,85 @@ mod test {
 		video
 	}
 
+	/// A hinted track declares its hint, not what it measured, once a window has closed.
 	#[test]
-	fn hls_reports_a_track_collision() {
+	fn a_hint_declares_the_join_interval() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
-
-		// Something else already took the name the record track wants.
-		let _taken = broadcast.create_track("video0.hls", None).unwrap();
-		assert!(catalog.enroll("video0", None).is_err());
-	}
-
-	#[test]
-	fn nothing_publishes_hls_when_disabled() {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = Producer::new(&mut broadcast, Config::default().with_hls(None)).unwrap();
-		assert!(
-			catalog
-				.enroll("audio0", Some(std::time::Duration::from_secs(4)))
-				.unwrap()
-				.is_none()
+		let net = broadcast
+			.create_track("video0", catalog.track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let mut video = catalog
+			.reserve()
+			.with_interval(std::time::Duration::from_secs(4))
+			.video(
+				net,
+				crate::catalog::hang::Container::Legacy(crate::container::Kind::Video),
+				VideoConfig::new(hang::catalog::VideoCodec::VP8),
+			)
+			.unwrap();
+		for start in [0, 1_000, 2_000] {
+			assert_eq!(catalog.snapshot().media.join, None, "nothing has measured a window yet");
+			video
+				.write(crate::container::Frame {
+					timestamp: moq_net::Timestamp::from_millis(start).unwrap(),
+					duration: None,
+					payload: Bytes::from_static(b"keyframe"),
+					keyframe: true,
+				})
+				.unwrap();
+		}
+		assert_eq!(
+			catalog.snapshot().media.interval(),
+			Some(std::time::Duration::from_secs(4))
 		);
-
-		let _video = video0(&mut broadcast, &catalog, &[0, 4_000, 8_000]);
-		assert_eq!(catalog.snapshot().video.renditions["video0"].hls, None);
-		// The name stays free for the application.
-		assert!(broadcast.create_track("video0.hls", None).is_ok());
 	}
 
+	/// Without a hint, the interval is measured over a second or a group, whichever is longer,
+	/// then declared and never changed.
 	#[tokio::test]
-	async fn an_estimated_duration_is_advertised_after_its_first_segment() {
+	async fn an_unhinted_track_declares_its_measured_interval() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
-		let mut consumer = catalog.consume().unwrap();
+		let mut video = video0(&mut broadcast, &catalog, &[0, 2_000]);
+		assert_eq!(catalog.snapshot().media.join, None, "still measuring");
 
-		let mut video = video0(&mut broadcast, &catalog, &[0]);
-		let initial = consumer.next().await.unwrap().unwrap();
-		assert_eq!(initial.video.renditions["video0"].hls, None, "nothing declared it yet");
-
-		video
-			.write(crate::container::Frame {
-				timestamp: moq_net::Timestamp::from_millis(4_000).unwrap(),
-				duration: None,
-				payload: Bytes::from_static(b"keyframe"),
-				keyframe: true,
-			})
-			.unwrap();
-		let declared = consumer.next().await.unwrap().unwrap();
+		for start in [4_000, 9_000, 10_000] {
+			video
+				.write(crate::container::Frame {
+					timestamp: moq_net::Timestamp::from_millis(start).unwrap(),
+					duration: None,
+					payload: Bytes::from_static(b"keyframe"),
+					keyframe: true,
+				})
+				.unwrap();
+		}
+		// The second group closed the window at two seconds; the five-second group after it overruns.
 		assert_eq!(
-			declared.video.renditions["video0"].hls,
-			Some(hang::catalog::Hls::new("video0.hls", std::time::Duration::from_secs(4)))
+			catalog.snapshot().media.interval(),
+			Some(std::time::Duration::from_secs(2))
 		);
+		assert_eq!(catalog.declared_interval(), Some(std::time::Duration::from_secs(2)));
 	}
 
+	/// A track that finishes before its first window closes declares what it saw, so a short
+	/// publication is still HLS-renderable.
 	#[test]
-	fn a_track_finished_before_its_first_segment_is_advertised() {
+	fn a_short_track_declares_its_interval_when_it_finishes() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
-		let mut video = video0(&mut broadcast, &catalog, &[0]);
-
+		let mut video = video0(&mut broadcast, &catalog, &[0, 500]);
+		assert_eq!(catalog.snapshot().media.join, None, "still measuring");
 		video.finish().unwrap();
-		let hls = catalog.snapshot().video.renditions["video0"].hls.clone();
-		assert_eq!(hls.unwrap().duration, crate::hls::DEFAULT_DURATION);
-	}
-
-	#[test]
-	fn a_track_hint_overrides_the_configured_one() {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let config = Config::default()
-			.with_hls(crate::hls::Config::default().with_duration_hint(std::time::Duration::from_secs(6)));
-		let catalog = Producer::new(&mut broadcast, config).unwrap();
-		let _video = catalog.enroll("video0", None).unwrap();
-		let _audio = catalog
-			.enroll("audio0", Some(std::time::Duration::from_secs(5)))
-			.unwrap();
-
-		let tracks = catalog.outputs.hls.as_ref().unwrap();
 		assert_eq!(
-			tracks.hls("video0").unwrap().duration,
-			std::time::Duration::from_secs(6)
-		);
-		assert_eq!(
-			tracks.hls("audio0").unwrap().duration,
-			std::time::Duration::from_secs(5)
+			catalog.snapshot().media.interval(),
+			Some(std::time::Duration::from_millis(500))
 		);
 	}
 
+	/// A text track groups only when it has something to say, so it never holds the interval back.
 	#[test]
-	fn only_the_enrolled_rendition_gets_its_records() {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = Producer::<()>::new(&mut broadcast, Config::default()).unwrap();
-		let _video = catalog
-			.enroll("video", Some(std::time::Duration::from_secs(2)))
-			.unwrap();
-
-		// Same-named tracks of another broadcast, one carrying that broadcast's own records.
-		let source = hang::catalog::Hls::new("video.hls", std::time::Duration::from_secs(6));
-		let local = VideoConfig::new(hang::catalog::VideoCodec::VP8);
-		let mut sibling = local.clone();
-		sibling.broadcast = Some(moq_net::path::Relative::new("./other").unwrap());
-		sibling.track = Some("video".into());
-		sibling.hls = Some(source.clone());
-		let mut unrecorded = sibling.clone();
-		unrecorded.hls = None;
-		let mut input = Catalog::<()>::default();
-		input.video.renditions.insert("video".into(), local);
-		input.video.renditions.insert("sibling".into(), sibling);
-		input.video.renditions.insert("unrecorded".into(), unrecorded);
-
-		let advertised = catalog.outputs.advertise(&input);
-		let renditions = &advertised.video.renditions;
-		let records = catalog.outputs.hls.as_ref().unwrap().hls("video");
-		assert!(records.is_some());
-		assert_eq!(renditions["video"].hls, records);
-		assert_eq!(renditions["sibling"].hls, Some(source));
-		assert_eq!(renditions["unrecorded"].hls, None);
-	}
-
-	/// A retired track's record track ends for the readers already on it and is forgotten, while
-	/// one still recording is refused.
-	#[test]
-	fn retiring_a_track_ends_its_records() {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
-		let recorder = catalog
-			.enroll("video0", Some(std::time::Duration::from_secs(4)))
-			.unwrap();
-		let waiter = kio::Waiter::noop();
-		let mut subscribing = broadcast
-			.consume()
-			.track("video0.hls")
-			.unwrap()
-			.subscribe(None)
-			.into_inner();
-		let std::task::Poll::Ready(Ok(mut reader)) = kio::Task::poll(&mut subscribing, &waiter) else {
-			panic!("the record track is live");
-		};
-		assert!(catalog.retire("video0").is_err(), "its recorder is still alive");
-
-		drop(recorder);
-		catalog.retire("video0").unwrap();
-		assert_eq!(catalog.hls_tracks(), 0);
-		assert!(matches!(reader.poll_finished(&waiter), std::task::Poll::Ready(Ok(_))));
-	}
-
-	#[test]
-	fn a_text_track_neither_records_nor_paces() {
+	fn a_text_track_does_not_join_the_interval() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
 		let net = broadcast
@@ -2257,43 +2058,34 @@ mod test {
 				hang::catalog::TextConfig::new(hang::catalog::TextFormat::Vtt),
 			)
 			.unwrap();
-		assert_eq!(catalog.hls_tracks(), 0);
+		let _video = video0(&mut broadcast, &catalog, &[0, 2_000, 4_000]);
+		assert_eq!(
+			catalog.snapshot().media.interval(),
+			Some(std::time::Duration::from_secs(2))
+		);
+	}
 
-		// The video enrolled after it paces its own segments.
-		let _video = video0(&mut broadcast, &catalog, &[0, 4_000, 8_000]);
-		assert_eq!(catalog.hls_tracks(), 1);
-		let snapshot = catalog.snapshot();
-		assert!(snapshot.video.renditions["video0"].hls.is_some());
+	/// A publisher that declares `media.join` itself keeps it.
+	#[test]
+	fn a_seeded_interval_stands() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut seeded = Catalog::<()>::default();
+		seeded.media.join = hang::catalog::Join::new(std::time::Duration::from_secs(6));
+		let catalog = Producer::new(&mut broadcast, Config::default().with_catalog(seeded)).unwrap();
+		let _video = video0(&mut broadcast, &catalog, &[0, 2_000, 4_000]);
+		assert_eq!(
+			catalog.snapshot().media.interval(),
+			Some(std::time::Duration::from_secs(6))
+		);
 	}
 
 	#[test]
-	fn an_undeclared_enrollment_releases_the_broadcast() {
+	fn clock_is_advertised_under_media() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
-		let recorder = catalog.enroll("video0", None).unwrap();
-		let waiter = kio::Waiter::noop();
-		let mut subscribing = broadcast
-			.consume()
-			.track("video0.hls")
-			.unwrap()
-			.subscribe(None)
-			.into_inner();
-		let std::task::Poll::Ready(Ok(mut reader)) = kio::Task::poll(&mut subscribing, &waiter) else {
-			panic!("the record track is live");
-		};
-
-		// Dropped before any frame, so it never declared a duration.
-		drop((recorder, catalog, broadcast));
-		assert!(matches!(reader.poll_finished(&waiter), std::task::Poll::Ready(_)));
-	}
-
-	#[test]
-	fn clock_is_advertised_without_hls() {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = Producer::new(&mut broadcast, Config::default().with_hls(None)).unwrap();
+		let catalog = Producer::<()>::new(&mut broadcast, Config::default()).unwrap();
 
 		let snapshot = catalog.snapshot();
-		assert_eq!(snapshot.clock, catalog.clock().wall());
+		assert_eq!(snapshot.media.clock, catalog.clock().wall());
 	}
 
 	#[test]
@@ -2320,7 +2112,7 @@ mod test {
 		];
 		let mut broadcasts = [front, rear];
 		for (catalog, broadcast) in catalogs.iter().zip(&mut broadcasts) {
-			assert_eq!(catalog.snapshot().clock, clock.wall());
+			assert_eq!(catalog.snapshot().media.clock, clock.wall());
 			let timestamp = catalog.clock().capture(captured).unwrap();
 			let track = broadcast
 				.create_track("video", catalog.track_info(hang::catalog::PRIORITY.video))
@@ -2350,13 +2142,16 @@ mod test {
 			};
 			let timestamp = frame.timestamp.expect("captured frame is timed");
 			assert_eq!(catalog.clock().wall_clock(timestamp).unwrap(), wall);
-			assert_eq!(catalog.snapshot().clock.unwrap().wall_clock(timestamp).unwrap(), wall);
+			assert_eq!(
+				catalog.snapshot().media.clock.unwrap().wall_clock(timestamp).unwrap(),
+				wall
+			);
 		}
 	}
 
 	/// A broadcast built under one clock and written from others, a paused runtime a minute behind
 	/// it and a plain thread on the host's, stamps every track on the clock it was built under, so
-	/// none of them goes back: media, both catalogs, and the HLS records.
+	/// none of them goes back: media and both catalogs.
 	#[test]
 	fn a_broadcast_written_from_two_clock_contexts_never_rewinds() {
 		use hang::catalog::{JsonConfig, Mode};
@@ -2381,12 +2176,7 @@ mod test {
 			let video = video0(&mut broadcast, &catalog, &[]);
 			let consumer = broadcast.consume();
 			let mut readers = Vec::new();
-			for name in [
-				hang::Catalog::DEFAULT_NAME,
-				moq_msf::DEFAULT_NAME,
-				"video0",
-				"video0.hls",
-			] {
+			for name in [hang::Catalog::DEFAULT_NAME, moq_msf::DEFAULT_NAME, "video0"] {
 				let all =
 					moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(None));
 				let track = consumer.track(name).unwrap().subscribe(all).await.unwrap();
@@ -2395,7 +2185,7 @@ mod test {
 			(catalog, video, readers)
 		});
 
-		// One keyframe group, so one HLS segment, and one catalog change, so one hang catalog group.
+		// One keyframe group, and one catalog change, so one hang catalog group.
 		let write = |catalog: &mut Producer, video: &mut crate::container::Producer<_, VideoConfig>, n: u64| {
 			let timestamp = catalog.timestamp(None).unwrap();
 			video
@@ -2474,7 +2264,7 @@ mod test {
 		let catalog = Producer::new(&mut broadcast, config).unwrap();
 
 		let advertised = Some(moq_net::Timestamp::from_micros(60_000_000).unwrap());
-		assert_eq!(catalog.snapshot().clock.map(|clock| clock.wall), advertised);
+		assert_eq!(catalog.snapshot().media.clock.map(|clock| clock.wall), advertised);
 
 		// The stream starts an hour in; the clock reads five seconds.
 		let first = moq_net::Timestamp::from_micros(3_600_000_000).unwrap();
@@ -2483,7 +2273,7 @@ mod test {
 			lateness(&catalog.clock(), shifted) < Duration::from_secs(1),
 			"{shifted:?}"
 		);
-		assert_eq!(catalog.snapshot().clock.map(|clock| clock.wall), advertised);
+		assert_eq!(catalog.snapshot().media.clock.map(|clock| clock.wall), advertised);
 	}
 
 	/// The first timebase to anchor on a clock nothing fixed places it, keeping its timestamps
@@ -2503,7 +2293,7 @@ mod test {
 			"the first timebase stays verbatim"
 		);
 		let clock = catalog.clock();
-		assert_eq!(catalog.snapshot().clock, clock.wall(), "the anchor is advertised");
+		assert_eq!(catalog.snapshot().media.clock, clock.wall(), "the anchor is advertised");
 		let actual = clock.wall_clock(first).unwrap();
 		let now = kio::clock::wall();
 		let drift = actual.max(now).saturating_duration_since(actual.min(now));
@@ -2557,13 +2347,13 @@ mod test {
 					.insert("audio0".to_string(), AudioConfig::new(AudioCodec::Opus, 48_000, 2));
 			})
 			.unwrap();
-		let published = catalog.snapshot().clock;
+		let published = catalog.snapshot().media.clock;
 
 		let shifted = catalog
 			.timebase()
 			.shift(moq_net::Timestamp::from_micros(0).unwrap())
 			.unwrap();
-		assert_eq!(catalog.snapshot().clock, published);
+		assert_eq!(catalog.snapshot().media.clock, published);
 		assert!(
 			shifted.as_micros() >= 10_000_000,
 			"{shifted:?} lands at the clock's reading"
@@ -2628,10 +2418,10 @@ mod test {
 			.unwrap();
 		assert_eq!(sent(&catalog), Some(0));
 		assert_eq!(catalog.clock().reading(wall).unwrap(), 0);
-		assert_eq!(wire(&catalog).clock, catalog.clock().wall());
+		assert_eq!(wire(&catalog).media.clock, catalog.clock().wall());
 	}
 
-	/// Fake this thread's host now a day past the moq epoch, returning a root `clock` an hour
+	/// Fake this thread's host now a day past the moq epoch, returning a `media.clock` an hour
 	/// before it in `scale` units.
 	fn an_hour_ago(scale: moq_net::Timescale) -> hang::catalog::Clock {
 		use std::time::Duration;
@@ -2651,9 +2441,9 @@ mod test {
 		let input = an_hour_ago(moq_net::Timescale::MICRO);
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
-		catalog.mutate(|c| c.clock = Some(input)).unwrap();
+		catalog.mutate(|c| c.media.clock = Some(input)).unwrap();
 
-		assert_eq!(catalog.snapshot().clock, Some(input), "advertised unchanged");
+		assert_eq!(catalog.snapshot().media.clock, Some(input), "advertised unchanged");
 		let clock = catalog.clock();
 		assert_eq!(clock.wall(), Some(input));
 		assert_eq!(
@@ -2671,11 +2461,11 @@ mod test {
 		);
 
 		// Re-applying the same mapping once fixed changes nothing.
-		catalog.mutate(|c| c.clock = Some(input)).unwrap();
+		catalog.mutate(|c| c.media.clock = Some(input)).unwrap();
 		assert_eq!(catalog.clock(), clock);
 	}
 
-	/// A root `clock` seeded through `with_catalog` is adopted like one written through `modify()`,
+	/// A `media.clock` seeded through `with_catalog` is adopted like one written through `modify()`,
 	/// never replaced by a fresh clock; one that disagrees with `with_clock` is refused.
 	#[test]
 	fn a_seeded_root_clock_is_adopted() {
@@ -2683,10 +2473,10 @@ mod test {
 
 		let input = an_hour_ago(moq_net::Timescale::MICRO);
 		let mut seed = Catalog::<()>::default();
-		seed.clock = Some(input);
+		seed.media.clock = Some(input);
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = Producer::new(&mut broadcast, Config::default().with_catalog(seed.clone())).unwrap();
-		assert_eq!(catalog.snapshot().clock, Some(input));
+		assert_eq!(catalog.snapshot().media.clock, Some(input));
 		assert_eq!(catalog.clock().wall(), Some(input));
 
 		// The same mapping from `with_clock` agrees in any units, without reading the host's wall
@@ -2695,14 +2485,14 @@ mod test {
 			+ Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS)
 			+ Duration::from_micros(input.wall.as_micros() as u64);
 		let fixed = crate::Clock::at(kio::clock::now(), zero).unwrap();
-		seed.clock = Some(an_hour_ago(moq_net::Timescale::MILLI));
+		seed.media.clock = Some(an_hour_ago(moq_net::Timescale::MILLI));
 		crate::clock::fake_host_wall(kio::clock::Wall::UNIX_EPOCH + Duration::from_secs(86_400));
 		let config = Config::default().with_catalog(seed.clone()).with_clock(fixed.clone());
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut catalog = Producer::new(&mut broadcast, config).unwrap();
 		assert_eq!(catalog.clock(), fixed);
-		catalog.mutate(|c| c.clock = seed.clock).unwrap();
-		assert_eq!(catalog.snapshot().clock, Some(input));
+		catalog.mutate(|c| c.media.clock = seed.media.clock).unwrap();
+		assert_eq!(catalog.snapshot().media.clock, Some(input));
 
 		// A different one is refused before any catalog track exists.
 		let other = crate::Clock::at(kio::clock::now(), zero + Duration::from_secs(1)).unwrap();
@@ -2724,13 +2514,13 @@ mod test {
 		let micro = an_hour_ago(moq_net::Timescale::MICRO);
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
-		catalog.mutate(|c| c.clock = Some(input)).unwrap();
-		assert_eq!(catalog.snapshot().clock, Some(micro));
+		catalog.mutate(|c| c.media.clock = Some(input)).unwrap();
+		assert_eq!(catalog.snapshot().media.clock, Some(micro));
 		assert_eq!(catalog.clock().wall(), Some(micro));
 
 		// The millisecond spelling of the fixed mapping is no change.
-		catalog.mutate(|c| c.clock = Some(input)).unwrap();
-		assert_eq!(catalog.snapshot().clock, Some(micro));
+		catalog.mutate(|c| c.media.clock = Some(input)).unwrap();
+		assert_eq!(catalog.snapshot().media.clock, Some(micro));
 	}
 
 	/// A root `clock` the producer cannot run on is refused, and the catalog keeps advertising the
@@ -2741,9 +2531,9 @@ mod test {
 		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
 		let own = catalog.current_clock().wall();
 		let refused = |catalog: &mut Producer, clock: Option<hang::catalog::Clock>| {
-			let err = catalog.mutate(|c| c.clock = clock).unwrap_err();
+			let err = catalog.mutate(|c| c.media.clock = clock).unwrap_err();
 			assert!(matches!(err, crate::Error::UnmappableTimestamp(_)), "{err}");
-			assert_eq!(catalog.snapshot().clock, own);
+			assert_eq!(catalog.snapshot().media.clock, own);
 		};
 
 		// One 90 kHz tick is no whole microsecond.
@@ -2778,7 +2568,7 @@ mod test {
 		crate::clock::fake_host_wall(kio::clock::Wall::UNIX_EPOCH + Duration::from_secs(86_400));
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
-		assert_eq!(catalog.snapshot().clock, None);
+		assert_eq!(catalog.snapshot().media.clock, None);
 
 		let wall = kio::clock::Wall::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS);
 		let pts = moq_net::Timestamp::from_micros(1_000_000).unwrap();
@@ -2810,7 +2600,7 @@ mod test {
 
 		let snapshot = catalog.snapshot();
 		assert!(snapshot.video.renditions.contains_key("video0"));
-		assert_eq!(snapshot.clock, None, "publishing never invents a wall");
+		assert_eq!(snapshot.media.clock, None, "publishing never invents a wall");
 		let waiter = kio::Waiter::noop();
 		let Poll::Ready(Ok(Some(mut group))) = subscriber.poll_recv_group(&waiter) else {
 			panic!("the frame's group is published");
@@ -3463,6 +3253,52 @@ mod test {
 		wire(catalog).video.renditions[name].jitter
 	}
 
+	/// Two renditions with two B-frames plus audio, written in lockstep in decode order, one frame
+	/// each per 20 ms and a group per frame, each reading handed to its rendition after every write.
+	/// The tracks in `late` start measuring at the third frame, as after a late join or a
+	/// discontinuity; the audio may be `offset` behind. Returns each delay on the wire.
+	async fn lockstep_on_the_wire(late: &[usize], offset: u64) -> Vec<Option<std::time::Duration>> {
+		let names = ["hevc", "avc", "audio"];
+		let (_broadcast, catalog, mut renditions) = estimating(&names);
+		let order = super::super::estimate::Order::default();
+		let mut estimators: Vec<_> = (0..3)
+			.map(|_| super::super::Estimator::with_order(order.clone()))
+			.collect();
+		let decode_order = [0u64, 60, 20, 40].into_iter().chain((1..50u64).flat_map(|gop| {
+			let base = gop * 60;
+			[base + 60, base + 20, base + 40]
+		}));
+		for (tick, pts) in decode_order.enumerate() {
+			let audio = (tick as u64 * 20).saturating_sub(offset);
+			for (i, pts) in [pts, pts, audio].into_iter().enumerate() {
+				if tick < 2 && late.contains(&i) {
+					continue;
+				}
+				estimators[i].write(moq_net::Timestamp::from_micros(pts * 1_000).unwrap(), 1_000);
+				estimators[i].cut(None);
+				renditions[i].estimate(estimators[i].reading()).unwrap();
+			}
+			tokio::time::advance(std::time::Duration::from_millis(20)).await;
+		}
+		names
+			.iter()
+			.map(|name| wire(&catalog).video.renditions[*name].delay)
+			.collect()
+	}
+
+	/// A track that starts measuring on a B-frame, or on audio trailing one, never publishes the
+	/// reorder as `delay`, which the catalog could then never lower. A constant offset still does.
+	///
+	/// Regression, from [moq-dev/moq#7689](https://github.com/moq-dev/moq/pull/7689): the least
+	/// trail over everything written so far started at the reorder, went out, and stuck.
+	#[tokio::test(start_paused = true)]
+	async fn a_late_start_publishes_no_reorder_delay() {
+		assert_eq!(lockstep_on_the_wire(&[], 0).await, [None, None, None]);
+		assert_eq!(lockstep_on_the_wire(&[0, 2], 0).await, [None, None, None]);
+		let ms = std::time::Duration::from_millis;
+		assert_eq!(lockstep_on_the_wire(&[0, 2], 200).await, [None, None, Some(ms(200))]);
+	}
+
 	/// A rising estimate publishes at once, then coalesces until an observation after the window,
 	/// which carries the latest value. Regression: every rise republished the catalog.
 	#[tokio::test(start_paused = true)]
@@ -3607,6 +3443,7 @@ mod test {
 		super::super::Reading {
 			estimate: super::super::Estimate::default().with_delay(std::time::Duration::from_millis(ms)),
 			period: Some(std::time::Duration::from_millis(10)),
+			interval: None,
 		}
 	}
 

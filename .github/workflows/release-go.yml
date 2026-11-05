@@ -8,7 +8,7 @@ name: Release Go
 #     (registry is the gate, like release-plz / the PyPI check in release.sh).
 #
 # Triggers:
-#   * push to release     — a wrapper API or VERSION change. The ffi require is
+#   * push to release     - a wrapper API or VERSION change. The ffi require is
 #                           pinned to the current crate version, whose mirror tag
 #                           already exists in steady state. If it's missing (a
 #                           release is mid-flight) or rs/moq-ffi changed since

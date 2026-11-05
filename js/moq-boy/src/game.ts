@@ -10,6 +10,7 @@ import { Nano, Second } from "@moq/clock";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import * as Watch from "@moq/watch";
+import { z } from "zod/mini";
 import type { GameStatus } from "./schemas.ts";
 import { GameStatusSchema } from "./schemas.ts";
 
@@ -282,7 +283,10 @@ export class Game {
 				try {
 					status = (await consumer.latest())?.value;
 				} catch (err) {
-					console.warn("Invalid status JSON:", err);
+					// The value was decoded and only failed the schema, so the next frame still applies.
+					// Anything else, such as a track closed with an error, throws on every call: end the loop.
+					if (!(err instanceof z.core.$ZodError)) throw err;
+					console.warn("Invalid status:", err);
 					continue;
 				}
 				if (!status) break;
