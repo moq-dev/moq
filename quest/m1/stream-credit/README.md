@@ -39,4 +39,6 @@ receiving every group, and nothing hanging.
 
 ## Required
 
+- [An abandoned subscription setup releases its streams](/quest/m1/stream-credit/release-on-leave.md) - release TRACK and pending SUBSCRIBE when demand leaves during setup
+
 - [A higher-priority group makes room](/quest/m1/stream-credit/make-room.md) - it takes over a lower-priority stream, or one is reset, without over-cancelling
