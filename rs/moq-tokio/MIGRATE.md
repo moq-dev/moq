@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### The dial-side client certificate reloads from disk
+
+With the `watch` feature, `tls::Connect`'s `cert` and `key` files are watched like its roots: a rewritten pair is presented on the next handshake, and the last valid pair is kept while the files are missing, malformed, or mismatched.
+Session resumption is then disabled for a config with a client certificate from disk, so a new certificate takes effect on every subsequent handshake.
+`tls::Error::ClientAuth` is removed: a key that doesn't match its certificate is `tls::Error::KeyMismatch`, as on the listen side, and a key the crypto provider can't load is the new `tls::Error::LoadKey` on both sides.
+
 ### Request opens are ordinary bidirectional opens ([#7894](https://github.com/moq-dev/moq/pull/7894))
 
 `quic::web::Session::poll_open_request` is removed. Call `poll_open_bi`, which waits for the peer's stream credit.

@@ -1,12 +1,15 @@
 import { Signal } from "@moq/signals";
-import type { Options } from "./announced";
+import type { Options, Routes } from "./announced";
 import type { Route } from "./hop";
-import type { Table } from "./origin";
 import type * as Path from "./path";
 
 /** A closeable announcement snapshot for tests and benchmarks. @internal */
-export async function announcedView(origin: Pick<Table, "announced">, scope?: Path.Pattern, options?: Options) {
-	const stream = origin.announced(scope, options);
+export async function announcedView(
+	origin: { routes(scope?: Path.Pattern, options?: Options): Routes },
+	scope?: Path.Pattern,
+	options?: Options,
+) {
+	const stream = origin.routes(scope, options);
 	const value = new Signal<ReadonlyMap<Path.Valid, Route>>(new Map());
 	const done = (async () => {
 		for await (const event of stream)

@@ -328,7 +328,7 @@ Settings for outbound dials (cluster peers, auth API).
 [connect]
 timeout = "30s"                      # Dial plus handshake. "0" waits forever.
 tls.root = ["ca.pem"]                # Trust these CAs (replaces system roots unless system_roots = true).
-tls.cert = "relay.pem"               # Present a client certificate (mTLS to peers and the auth API).
+tls.cert = "relay.pem"               # Present a client certificate (mTLS to peers and the auth API). Reloaded on change.
 tls.key = "relay.key"
 goaway.redirect = "same-host"        # How far to trust a draining peer's redirect URI.
 goaway.handover = "10s"              # Cap on how long the drained upstream keeps serving.
@@ -426,6 +426,12 @@ upgrades receive 503; plain HTTP is served until the public listener stops.
 Only moq-lite-04+ and moq-transport clients act on a GOAWAY; older ones are
 closed when the window ends. An embedder can take over the signals; see
 [Embed](/bin/relay/#embed).
+
+An embedder's drain alert can page on the `forced` count returned by
+[`Observer::drained`](https://docs.rs/moq-relay/latest/moq_relay/shutdown/struct.Observer.html#method.drained).
+Its `ending` count distinguishes sessions already closed before the deadline
+but still reporting their end. The live tally separates open sessions from
+that cleanup, and the summary's elapsed time stays the same for late observers.
 
 ## \[log]
 
