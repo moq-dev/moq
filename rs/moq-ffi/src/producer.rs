@@ -931,9 +931,9 @@ impl MoqGroupProducer {
 	/// Wait until a frame of `size` bytes fits, so a writer runs no further ahead of its
 	/// fastest reader than the group's window.
 	///
-	/// Await this before each [`write_frame`](Self::write_frame) for backpressure: a slow
-	/// reader slows the writer instead of the group shedding frames the reader has not taken,
-	/// which fails that reader with `Evicted`. Writing without waiting never fails; the group
+	/// Await this before each [`write_frame`](Self::write_frame) for backpressure: that reader
+	/// paces the writer instead of the group shedding frames it has not taken, which fails it
+	/// with `Evicted`; slower readers are not waited on. Writing without waiting never fails; the group
 	/// sheds its front instead. Resolves once a reader holds the group and the frame fits, at
 	/// once while a reader has taken every frame, and once the group is closed, so the next
 	/// write reports why. Fails with `Closed` after [`abort`](Self::abort).

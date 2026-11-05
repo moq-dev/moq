@@ -53,9 +53,10 @@ class GroupProducer:
     async def ready(self, size: int) -> None:
         """Wait until a frame of ``size`` bytes fits a window ahead of the fastest reader.
 
-        Await it before each :meth:`write_frame` so a slow reader slows the writer,
-        as TCP backpressure does, instead of the group shedding frames the reader
-        has not taken, which fails that reader with ``moq.Error.Evicted``. It also
+        Await it before each :meth:`write_frame` so that reader paces the writer,
+        as TCP backpressure does, instead of the group shedding frames it has not
+        taken, which fails it with ``moq.Error.Evicted``; slower readers are not
+        waited on. It also
         waits until a reader holds the group, and resolves once the group is closed
         so the next write raises why. Raises ``moq.Error.Closed`` after :meth:`abort`.
         """

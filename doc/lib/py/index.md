@@ -166,7 +166,8 @@ import asyncio, moq
 
 async def socket_client():
     origin = moq.OriginProducer()
-    async with moq.Client("https://cdn.moq.dev/anon", publish=origin, consume=origin):
+    versions = ["moq-lite-07-wip"]
+    async with moq.Client("https://cdn.moq.dev/anon", versions=versions, publish=origin, consume=origin):
         async with moq.socket.Endpoint(origin, "room", "client") as endpoint:
             stream = await endpoint.dial_tcp("server")
             stream.producer.write_frame(b"command")
@@ -176,6 +177,10 @@ async def socket_client():
 
 asyncio.run(socket_client())
 ```
+
+Sockets need lite-07 or moq-transport on every hop, so the example opts into
+`moq-lite-07-wip`. No client offers it by default while its wire format is a
+work in progress, and the relay must accept it too.
 
 A server awaits `endpoint.accept_tcp()`, then calls `await incoming.accept()`
 or `incoming.reject()`. Accepting verifies that the claimed peer really dialed.
@@ -189,4 +194,4 @@ ascending consumer. Omitted `info` keeps messages without a publisher age limit;
 update the consumer's subscription to change delivery. The protocols have
 separate accept queues. Cancelling a dial or acceptance resets that dial;
 closing the endpoint resets all its sessions. See [Sockets](/concept/socket)
-for routing, authorization, and the lite-07 or moq-transport hop requirement.
+for routing and authorization.

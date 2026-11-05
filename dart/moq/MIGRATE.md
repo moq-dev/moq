@@ -8,7 +8,7 @@ How to update your code for each breaking change, newest first.
 
 package:moq/socket.dart now exposes TCP group halves and reliably subscribed track halves beside origin. Regenerate bindings and rebuild the matching native library together. Existing callers need no migration. Socket endpoints require lite-07 or moq-transport on every hop; there is no wire change.
 
-`GroupProducer.ready(size)` is a new `Future` that completes once a frame of `size` bytes fits a window ahead of the fastest reader. Await it before each `writeFrame` so a slow reader slows the writer instead of being evicted; a TCP socket stream's producer needs it to behave like TCP. Existing writers are unchanged.
+`GroupProducer.ready(size)` is a new `Future` that completes once a frame of `size` bytes fits a window ahead of the fastest reader. Await it before each `writeFrame` so the writer waits for its fastest reader instead of evicting it, though not for slower readers; a TCP socket stream's producer needs it to behave like TCP. Existing writers are unchanged.
 
 ### Catalog renditions carry their warmup ([#7864](https://github.com/moq-dev/moq/pull/7864))
 
