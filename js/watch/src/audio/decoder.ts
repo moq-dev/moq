@@ -607,7 +607,7 @@ export class Decoder {
 					// The track ending, or a gap or end, cuts a held head short.
 					if (!(await play(order.flush()))) return;
 					if (!next) break;
-					if (this.#onRead(next)) {
+					if (this.#terminal.update(next)) {
 						this.#reprime(decoder, decoderConfig, order);
 					}
 					if (next.kind === "gap") this.#arrivals.write(gap(next));
@@ -694,7 +694,7 @@ export class Decoder {
 					// The track ending, or a gap or end, cuts a held head short.
 					if (!(await play(order.flush()))) return;
 					if (!next) break;
-					if (this.#onRead(next)) {
+					if (this.#terminal.update(next)) {
 						this.#reprime(decoder, decoderConfig, order);
 					}
 					if (next.kind === "gap") this.#arrivals.write(gap(next));
@@ -719,6 +719,10 @@ export class Decoder {
 	// Decode released frames, resetting the decoder before the first frame of a new codec epoch and
 	// only then dropping one that is out of order. The terminal sees them in decode order, so it
 	// anchors on the oldest. Reports whether to keep going.
+	//
+	// A new epoch (a gap, or a later group after a declared end) restarts the codec, never the
+	// timeline: publishers keep timestamps moving forward across a declared end, so the PCM decoded
+	// before it still plays and the shared clock stays anchored.
 	async #play(
 		effect: Effect,
 		decoder: AudioDecoder,
@@ -727,7 +731,7 @@ export class Decoder {
 		reads: FrameRead[],
 	): Promise<boolean> {
 		for (const read of reads) {
-			if (this.#onRead(read)) {
+			if (this.#terminal.update(read)) {
 				this.#reprime(decoder, config, order);
 			}
 			if (!order.admit(read)) continue;
@@ -983,19 +987,6 @@ export class Decoder {
 		this.#decodeBuffered.set([]);
 		this.#queued.set(undefined);
 		this.#ring.peek()?.reset();
-	}
-
-	// Apply an ordered container read before handling it, reporting whether a codec epoch ended:
-	// a gap, or a later group after a declared end.
-	#onRead(read: Container.Read): boolean {
-		if (!this.#terminal.update(read)) return false;
-		// A hole restarts codec prediction on the same timeline, keeping decoded PCM and parked video.
-		// A frame after a declared end starts another audio timeline, which leaves video's alone.
-		if (read.kind === "frame") {
-			this.#track.reset();
-			this.reset();
-		}
-		return true;
 	}
 
 	/**

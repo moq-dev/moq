@@ -554,28 +554,33 @@ for (const cmaf of [false, true]) {
 		});
 	}
 
-	// A fresh encoder after a declared end may restart its timeline below the old one, and the decoder
-	// resets for it before anything is judged out of order. Only audio's timeline restarts.
-	it(`decodes a ${cmaf ? "CMAF" : "legacy"} fresh encoder below the timeline it replaced`, async () => {
-		const playback = await play(Milli(100), false, cmaf);
+	// Publishers keep timestamps moving forward across a declared end, so a later group restarts the
+	// codec on the same timeline: the audio decoded before the end still plays and the clock holds.
+	it(`keeps ${cmaf ? "CMAF" : "legacy"} PCM and the clock across a declared end`, async () => {
+		const playback = await play(Milli(500), false, cmaf);
 		const reset = spyOn(playback.sync, "reset");
-		const video = playback.sync.track({ target: new Signal<Milli | undefined>(undefined) });
+		const prime = spyOn(AudioDecoder.prototype, "reset");
 		try {
-			frameTimestamp = 480_000;
-			playback.push({ ...frame(), group: 0n });
-			await microtasks();
-			video.received(Milli(500));
-			const parked = video.wait(Milli(10_000));
-			playback.push({ kind: "end", group: 0n, end: Micro(520_000) });
-			frameTimestamp = 0;
+			await playback.play(7);
+			const ring = playback.rings().at(-1);
+			if (!ring) throw new Error("missing audio ring");
+			const held = ring.length;
+			expect(held).toBe(7 * 960);
+
+			playback.push({ kind: "end", group: 0n, end: Micro(frameTimestamp + 20_000) });
+			// The fresh encoder resumes 40 ms past the end, as a capture gap leaves it.
+			frameTimestamp += 40_000;
 			playback.push({ ...frame(), group: 1n });
 			await microtasks();
-			expect(playback.inserted()).toEqual([500_000, 20_000]);
+
+			expect(prime).toHaveBeenCalledTimes(1);
 			expect(reset).not.toHaveBeenCalled();
-			expect(Bun.peek.status(parked)).toBe("pending");
+			expect(playback.resets()).toBe(0);
+			expect(playback.rings()).toEqual([ring]);
+			// The gap stays silent between what was buffered and the resumed frame.
+			expect(ring.length).toBe(held + 3 * 960);
+			expect(playback.inserted().at(-1)).toBe(frameTimestamp);
 		} finally {
-			reset.mockRestore();
-			video.close();
 			playback.close();
 			await microtasks();
 		}
