@@ -13663,7 +13663,10 @@ mod tests {
 			.await
 			.expect("the front asked the newcomer")
 			.expect("request");
-		request.accept(crate::track::Info::timed()).abort(Error::App(7)).unwrap();
+		request
+			.accept(crate::track::Info::timed())
+			.abort(Error::App(7))
+			.unwrap();
 		for _ in 0..10 {
 			kio::clock::sim::yield_now().await;
 		}
