@@ -10,6 +10,18 @@ to the identity it selected. A lite-06 peer is translated at the relay. A
 peer can make the router hold only bounded state. The configuration
 changes the contract decided ship with it.
 
+lite-07's live wire switches to the route layer that
+`drafts/draft-lcurley-moq-lite.md` specifies, in Rust: ANNOUNCE_START, ANNOUNCE_UPDATE, ANNOUNCE_RESTART, and
+ANNOUNCE_TAKEOVER name a Route ID and carry the Announce Cost in place of
+the Hop ID list (`HopsRef`, `Hop Base`/`Hop Keep`, and `cluster.max_hops`
+go from lite-07); ANNOUNCE_OK loses its Hop ID and SETUP its Hop parameter;
+TRACK, TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS carry the Node ID; a Cost
+parameter of 0 is refused; the subscriber sends ROUTE_REQUEST and echoes
+ROUTE_END. The new messages' codecs already exist (`AnnounceBroadcast`'s
+route variants and `AnnounceReply`); until this lands the subscriber
+refuses route messages. A hop-less ANNOUNCE cannot run before the router
+drives sessions, which is why the switch lands here.
+
 ## Plan
 
 - Scope route state to interested origins, not the CDN's whole node table.
@@ -76,7 +88,7 @@ Update/Restart split as the only takeover rule. Once each origin is its own
 ANNOUNCE and the first hop pins the request to its identity, the first hop's
 route is the instance, so the per-hop renewal has nothing left to protect.
 An epochless change of serving route stays a Restart, including the
-same-origin next-hop change in the [wire sketch](/quest/m1/cluster-routing/routes/wire.md), and the routing
+same-origin next-hop change with no epoch (test it), and the routing
 contract's epochless fixtures keep passing. Minting an epoch for every route
 instead was tried and rejected
 ([moq-dev/moq#6948](https://github.com/moq-dev/moq/pull/6948)): each relay
@@ -120,7 +132,6 @@ admission.
 
 ## Required
 
-- [lite-07 route wire](/quest/m1/cluster-routing/routes/wire.md) - the messages this drives
 - [One Route handle](/quest/m1/api-audit/route/handle.md) - the origin's route surface this rewrites
 - [Listing and follow](/quest/m1/api-audit/route/events.md) - the announcement events this feeds ([moq-dev/moq#7678](https://github.com/moq-dev/moq/pull/7678))
 

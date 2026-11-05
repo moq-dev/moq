@@ -1,6 +1,13 @@
+use std::collections::BTreeMap;
+
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
-use crate::{Hop, Hops, Instance, Path, coding::*, origin::Cost};
+use crate::{
+	Hop, Hops, Instance, Path,
+	coding::*,
+	origin::Cost,
+	route::{self, Advert, Reach},
+};
 
 use super::{
 	Message, Version,
@@ -18,6 +25,12 @@ const ANNOUNCE_RESTART: u64 = 3;
 const SYNCED: u64 = 4;
 // lite-07: a new advertisement continues what a live one served beneath its prefix.
 const ANNOUNCE_TAKEOVER: u64 = 5;
+// lite-07: the route layer. ROUTE_END also travels back as the echo.
+const ROUTE_START: u64 = 6;
+const ROUTE_UPDATE: u64 = 7;
+const ROUTE_END: u64 = 8;
+const ANNOUNCE_FLOOR: u64 = 9;
+const ROUTE_REQUEST: u64 = 10;
 
 /// Whether the negotiated version can update a live advertisement's metadata. On lite-05 an
 /// update travels as a duplicate ANNOUNCE (a second `active` for an already-announced path); on
@@ -95,6 +108,108 @@ pub enum AnnounceBroadcast {
 	Skipped,
 	/// The initial set has been delivered (lite-07+).
 	Synced,
+	/// ROUTE_START (lite-07+): the sender has a route to the origin node `node`, and
+	/// assigns it the next Route ID.
+	RouteStart { node: route::Id, advert: Advert },
+	/// ROUTE_UPDATE (lite-07+): the route with this id changed, or is held.
+	RouteUpdate { id: u64, reach: Reach },
+	/// ROUTE_END (lite-07+): the sender let go of the route with this id, and of every
+	/// advertisement under it. The receiver echoes it back.
+	RouteEnd { id: u64 },
+	/// ANNOUNCE_FLOOR (lite-07+): closes the batch of advertisements under the route
+	/// with this id, listing every region the sender certifies for it: a suffix of the
+	/// requested prefix and the origin revision as of which it is complete.
+	Floor { id: u64, regions: BTreeMap<Path, route::Rev> },
+}
+
+/// Refuse what no node advertises: node 0, and the last varint as a seqno or metric,
+/// which mean nothing and held.
+fn valid_start(node: route::Id, advert: &Advert) -> bool {
+	node != 0 && advert.seqno != route::MAX && advert.metric != route::MAX
+}
+
+fn encode_advert(w: &mut Encoder<'_>, advert: &Advert) -> Result<(), EncodeError> {
+	w.varint(advert.seqno)?;
+	w.varint(advert.metric)?;
+	w.bool(advert.down_only);
+	Ok(())
+}
+
+/// Encode a ROUTE_UPDATE body after its id. A held route carries a zero seqno and bit.
+fn encode_reach(w: &mut Encoder<'_>, reach: &Reach) -> Result<(), EncodeError> {
+	match reach {
+		Reach::Finite(advert) if advert.seqno == route::MAX || advert.metric == route::MAX => {
+			Err(EncodeError::InvalidState)
+		}
+		Reach::Finite(advert) => encode_advert(w, advert),
+		Reach::Held => encode_advert(
+			w,
+			&Advert {
+				seqno: 0,
+				metric: route::MAX,
+				down_only: false,
+			},
+		),
+	}
+}
+
+fn decode_advert(r: &mut Decoder<'_>) -> Result<Advert, DecodeError> {
+	Ok(Advert {
+		seqno: r.varint()?,
+		metric: r.varint()?,
+		down_only: r.bool()?,
+	})
+}
+
+fn decode_reach(r: &mut Decoder<'_>) -> Result<Reach, DecodeError> {
+	let advert = decode_advert(r)?;
+	if advert.metric != route::MAX {
+		if advert.seqno == route::MAX {
+			return Err(DecodeError::InvalidValue);
+		}
+		return Ok(Reach::Finite(advert));
+	}
+	if advert.seqno != 0 || advert.down_only {
+		return Err(DecodeError::InvalidValue);
+	}
+	Ok(Reach::Held)
+}
+
+fn encode_floor(
+	w: &mut Encoder<'_>,
+	version: Version,
+	id: u64,
+	regions: &BTreeMap<Path, route::Rev>,
+) -> Result<(), EncodeError> {
+	w.varint(id)?;
+	w.varint(regions.len() as u64)?;
+	for (region, rev) in regions {
+		if *rev == route::MAX {
+			return Err(EncodeError::InvalidState);
+		}
+		region.encode(w, version)?;
+		w.varint(*rev)?;
+	}
+	Ok(())
+}
+
+fn decode_floor(r: &mut Decoder<'_>, version: Version) -> Result<AnnounceBroadcast, DecodeError> {
+	let id = r.varint()?;
+	let count = r.varint()?;
+	// Each region takes at least a length byte and a revision byte, so the body bounds
+	// the count before anything is read.
+	if count > (r.remaining() / 2) as u64 {
+		return Err(DecodeError::Short);
+	}
+	let mut regions = BTreeMap::new();
+	for _ in 0..count {
+		let region = Path::decode(r, version)?;
+		let rev = r.varint()?;
+		if rev == route::MAX || regions.insert(region, rev).is_some() {
+			return Err(DecodeError::InvalidValue);
+		}
+	}
+	Ok(AnnounceBroadcast::Floor { id, regions })
 }
 
 /// A path suffix as it travels: the first `keep` segments of a base announcement's
@@ -244,6 +359,13 @@ impl Encode<Version> for AnnounceBroadcast {
 				Self::Takeover { .. } if version.has_announce_takeover() => ANNOUNCE_TAKEOVER,
 				// Older versions send a start instead.
 				Self::Takeover { .. } => return Err(EncodeError::Version),
+				Self::RouteStart { .. } if version.has_routes() => ROUTE_START,
+				Self::RouteUpdate { .. } if version.has_routes() => ROUTE_UPDATE,
+				Self::RouteEnd { .. } if version.has_routes() => ROUTE_END,
+				Self::Floor { .. } if version.has_routes() => ANNOUNCE_FLOOR,
+				Self::RouteStart { .. } | Self::RouteUpdate { .. } | Self::RouteEnd { .. } | Self::Floor { .. } => {
+					return Err(EncodeError::Version);
+				}
 				// The pre-lite-06 path-form retraction has no place on lite-06.
 				Self::Ended { .. } => return Err(EncodeError::Version),
 				// Decode-only: an unknown type is never sent.
@@ -298,6 +420,19 @@ impl Encode<Version> for AnnounceBroadcast {
 					cost.encode(w, version)?;
 				}
 				Self::Synced => {}
+				Self::RouteStart { node, advert } => {
+					if !valid_start(*node, advert) {
+						return Err(EncodeError::InvalidState);
+					}
+					w.varint(*node)?;
+					encode_advert(w, advert)?;
+				}
+				Self::RouteUpdate { id, reach } => {
+					w.varint(*id)?;
+					encode_reach(w, reach)?;
+				}
+				Self::RouteEnd { id } => w.varint(*id)?,
+				Self::Floor { id, regions } => encode_floor(w, version, *id, regions)?,
 				Self::Ended { .. } | Self::Skipped => unreachable!("refused above"),
 			}
 			if w.since(&prefix) > MAX_MESSAGE_SIZE {
@@ -332,7 +467,11 @@ impl Encode<Version> for AnnounceBroadcast {
 			| Self::Restart { .. }
 			| Self::Takeover { .. }
 			| Self::Skipped
-			| Self::Synced => {
+			| Self::Synced
+			| Self::RouteStart { .. }
+			| Self::RouteUpdate { .. }
+			| Self::RouteEnd { .. }
+			| Self::Floor { .. } => {
 				return Err(EncodeError::Version);
 			}
 		}
@@ -396,6 +535,20 @@ impl<'a> Decode<'a, Version> for AnnounceBroadcast {
 							cost: Cost::decode(&mut body, version)?,
 						}
 					}
+					ROUTE_START if version.has_routes() => {
+						let node = body.varint()?;
+						let advert = decode_advert(&mut body)?;
+						if !valid_start(node, &advert) {
+							return Err(DecodeError::InvalidValue);
+						}
+						Self::RouteStart { node, advert }
+					}
+					ROUTE_UPDATE if version.has_routes() => Self::RouteUpdate {
+						id: body.varint()?,
+						reach: decode_reach(&mut body)?,
+					},
+					ROUTE_END if version.has_routes() => Self::RouteEnd { id: body.varint()? },
+					ANNOUNCE_FLOOR if version.has_routes() => decode_floor(&mut body, version)?,
 					// Unknown types are skipped by length so an earlier Lite06 build
 					// negotiating the same ALPN does not kill the announce stream.
 					_ => {
@@ -526,6 +679,71 @@ impl<'a> Message<'a> for AnnounceRequest {
 		}
 
 		Ok(())
+	}
+}
+
+/// A message the subscriber sends on the Announce Stream after its ANNOUNCE_REQUEST
+/// (lite-07+), toward the publisher that sent the routes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AnnounceReply {
+	/// ROUTE_REQUEST: asks for a route to `node`, as the publisher named it, at least
+	/// as new as `seqno`.
+	RouteRequest { node: route::Id, seqno: route::Seqno },
+	/// The echo of the ROUTE_END that retired this Route ID, sent once the subscriber
+	/// dropped the route.
+	RouteEnd { id: u64 },
+}
+
+impl Encode<Version> for AnnounceReply {
+	fn encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
+		w.control = Some(crate::stats::Message::Announce);
+		if !version.has_routes() {
+			return Err(EncodeError::Version);
+		}
+		w.varint(match self {
+			Self::RouteRequest { .. } => ROUTE_REQUEST,
+			Self::RouteEnd { .. } => ROUTE_END,
+		})?;
+		let prefix = w.prefix_varint();
+		match self {
+			Self::RouteRequest { node: 0, .. } => return Err(EncodeError::InvalidState),
+			Self::RouteRequest { node, seqno } => {
+				w.varint(*node)?;
+				w.varint(*seqno)?;
+			}
+			Self::RouteEnd { id } => w.varint(*id)?,
+		}
+		w.fill(prefix)
+	}
+}
+
+impl<'a> Decode<'a, Version> for AnnounceReply {
+	fn decode(buf: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
+		buf.control = Some(crate::stats::Message::Announce);
+		if !version.has_routes() {
+			return Err(DecodeError::Version);
+		}
+		let typ = buf.varint()?;
+		let size = decode_size(buf, MAX_MESSAGE_SIZE)?;
+		let mut body = buf.sub(size)?;
+		let msg = (|| {
+			Ok(match typ {
+				ROUTE_REQUEST => match body.varint()? {
+					0 => return Err(DecodeError::InvalidValue),
+					node => Self::RouteRequest {
+						node,
+						seqno: body.varint()?,
+					},
+				},
+				ROUTE_END => Self::RouteEnd { id: body.varint()? },
+				typ => return Err(DecodeError::InvalidMessage(typ)),
+			})
+		})()
+		.map_err(DecodeError::complete)?;
+		if !body.is_empty() {
+			return Err(DecodeError::Long);
+		}
+		Ok(msg)
 	}
 }
 
@@ -1278,5 +1496,247 @@ mod tests {
 			assert_eq!(Cost::decode(&mut input, Version::Lite06).unwrap(), Cost::new(12));
 			assert!(input.is_empty());
 		}
+	}
+
+	fn advert(seqno: u64, metric: u64, down_only: bool) -> Advert {
+		Advert {
+			seqno,
+			metric,
+			down_only,
+		}
+	}
+
+	/// Encode a typed lite-07 announce message from its raw body, bypassing the encoder's checks.
+	fn forge(typ: u64, body: impl FnOnce(&mut Encoder<'_>)) -> Vec<u8> {
+		let version = Version::Lite07;
+		let mut inner = Vec::new();
+		body(&mut Encoder::new(&mut inner, version.into()));
+		let mut buf = Vec::new();
+		let mut w = Encoder::new(&mut buf, version.into());
+		w.varint(typ).unwrap();
+		w.varint(inner.len() as u64).unwrap();
+		buf.extend_from_slice(&inner);
+		buf
+	}
+
+	fn decode_broadcast(buf: &[u8], version: Version) -> Result<AnnounceBroadcast, DecodeError> {
+		let mut slice = buf;
+		crate::coding::decode_buf(&mut slice, version, |r, v| AnnounceBroadcast::decode(r, v))
+	}
+
+	fn decode_reply(buf: &[u8], version: Version) -> Result<AnnounceReply, DecodeError> {
+		let mut slice = buf;
+		crate::coding::decode_buf(&mut slice, version, |r, v| AnnounceReply::decode(r, v))
+	}
+
+	#[test]
+	fn route_messages_round_trip_on_lite07() {
+		let regions = |list: &[(&'static str, u64)]| {
+			list.iter()
+				.map(|(path, rev)| (Path::from_static(path), *rev))
+				.collect::<BTreeMap<_, _>>()
+		};
+		for msg in [
+			AnnounceBroadcast::RouteStart {
+				node: 0x7a3f,
+				advert: advert(41, 12, false),
+			},
+			AnnounceBroadcast::RouteStart {
+				node: route::QUALIFIED | 9,
+				advert: advert(route::MAX - 1, route::MAX - 1, true),
+			},
+			AnnounceBroadcast::RouteUpdate {
+				id: 0,
+				reach: Reach::Finite(advert(42, 15, true)),
+			},
+			AnnounceBroadcast::RouteUpdate { id: 3, reach: Reach::Held },
+			AnnounceBroadcast::RouteEnd { id: 0 },
+			AnnounceBroadcast::Floor {
+				id: 0,
+				regions: regions(&[]),
+			},
+			AnnounceBroadcast::Floor {
+				id: 1,
+				regions: regions(&[("live/a", 3), ("live/b", 5), ("", 0)]),
+			},
+		] {
+			assert_eq!(broadcast_round_trip(&msg, Version::Lite07), msg);
+		}
+	}
+
+	/// The common floor certifies the whole interest: one byte over (Route ID, revision).
+	#[test]
+	fn a_whole_interest_floor_is_one_byte_over_its_revision() {
+		let mut buf = Vec::new();
+		AnnounceBroadcast::Floor {
+			id: 0,
+			regions: [(Path::from_static(""), 7)].into(),
+		}
+		.encode(&mut Encoder::new(&mut buf, Version::Lite07.into()), Version::Lite07)
+		.unwrap();
+		assert_eq!(buf, vec![9, 4, 0, 1, 0, 7]);
+	}
+
+	#[test]
+	fn route_messages_need_lite07() {
+		for msg in [
+			AnnounceBroadcast::RouteStart {
+				node: 1,
+				advert: advert(0, 1, false),
+			},
+			AnnounceBroadcast::RouteUpdate { id: 0, reach: Reach::Held },
+			AnnounceBroadcast::RouteEnd { id: 0 },
+			AnnounceBroadcast::Floor {
+				id: 0,
+				regions: BTreeMap::new(),
+			},
+		] {
+			for version in [Version::Lite05, Version::Lite06] {
+				let mut buf = Vec::new();
+				let res = msg.encode(&mut Encoder::new(&mut buf, version.into()), version);
+				assert!(matches!(res, Err(EncodeError::Version)), "{msg:?} on {version:?}");
+			}
+		}
+		// A lite-06 receiver skips the type like any other it does not know.
+		let wire = forge(ROUTE_END, |w| w.varint(0u64).unwrap());
+		assert_eq!(decode_broadcast(&wire, Version::Lite06).unwrap(), AnnounceBroadcast::Skipped);
+
+		for reply in [
+			AnnounceReply::RouteRequest { node: 1, seqno: 0 },
+			AnnounceReply::RouteEnd { id: 0 },
+		] {
+			let mut buf = Vec::new();
+			let res = reply.encode(&mut Encoder::new(&mut buf, Version::Lite06.into()), Version::Lite06);
+			assert!(matches!(res, Err(EncodeError::Version)));
+		}
+		assert!(matches!(decode_reply(&wire, Version::Lite06), Err(DecodeError::Version)));
+	}
+
+	/// What no node advertises is refused on both ends: node 0, the last varint as a
+	/// seqno or a starting metric, and a held route carrying a seqno or the bit.
+	#[test]
+	fn route_messages_refuse_what_no_node_advertises() {
+		let refused = [
+			AnnounceBroadcast::RouteStart {
+				node: 0,
+				advert: advert(0, 1, false),
+			},
+			AnnounceBroadcast::RouteStart {
+				node: 1,
+				advert: advert(route::MAX, 1, false),
+			},
+			AnnounceBroadcast::RouteStart {
+				node: 1,
+				advert: advert(0, route::MAX, false),
+			},
+			AnnounceBroadcast::RouteUpdate {
+				id: 0,
+				reach: Reach::Finite(advert(route::MAX, 1, false)),
+			},
+			AnnounceBroadcast::RouteUpdate {
+				id: 0,
+				reach: Reach::Finite(advert(0, route::MAX, false)),
+			},
+			AnnounceBroadcast::Floor {
+				id: 0,
+				regions: [(Path::from_static(""), route::MAX)].into(),
+			},
+		];
+		for msg in refused {
+			let mut buf = Vec::new();
+			let res = msg.encode(&mut Encoder::new(&mut buf, Version::Lite07.into()), Version::Lite07);
+			assert!(matches!(res, Err(EncodeError::InvalidState)), "{msg:?}");
+		}
+
+		let advert = |node: u64, seqno: u64, metric: u64, down_only: u8| {
+			move |w: &mut Encoder<'_>| {
+				w.varint(node).unwrap();
+				w.varint(seqno).unwrap();
+				w.varint(metric).unwrap();
+				w.u8(down_only);
+			}
+		};
+		let malformed = [
+			forge(ROUTE_START, advert(0, 0, 1, 0)),
+			forge(ROUTE_START, advert(1, route::MAX, 1, 0)),
+			forge(ROUTE_START, advert(1, 0, route::MAX, 0)),
+			forge(ROUTE_START, advert(1, 0, 1, 2)),
+			// ROUTE_UPDATE's leading field is the Route ID, so 0 is a valid id here.
+			forge(ROUTE_UPDATE, advert(0, route::MAX, 1, 0)),
+			forge(ROUTE_UPDATE, advert(0, 1, route::MAX, 0)),
+			forge(ROUTE_UPDATE, advert(0, 0, route::MAX, 1)),
+			forge(ANNOUNCE_FLOOR, |w| {
+				w.varint(0u64).unwrap();
+				w.varint(2u64).unwrap();
+				for _ in 0..2 {
+					Path::from_static("live").encode(w, Version::Lite07).unwrap();
+					w.varint(1u64).unwrap();
+				}
+			}),
+			forge(ANNOUNCE_FLOOR, |w| {
+				w.varint(0u64).unwrap();
+				w.varint(1u64).unwrap();
+				Path::from_static("").encode(w, Version::Lite07).unwrap();
+				w.varint(route::MAX).unwrap();
+			}),
+			// A count the body cannot hold fails before any region is read.
+			forge(ANNOUNCE_FLOOR, |w| {
+				w.varint(0u64).unwrap();
+				w.varint(u32::MAX.into()).unwrap();
+			}),
+			// Trailing bytes after a complete body.
+			forge(ROUTE_END, |w| {
+				w.varint(0u64).unwrap();
+				w.u8(0);
+			}),
+		];
+		for wire in malformed {
+			assert!(decode_broadcast(&wire, Version::Lite07).is_err(), "{wire:?}");
+		}
+	}
+
+	#[test]
+	fn announce_reply_round_trips_on_lite07() {
+		for reply in [
+			AnnounceReply::RouteRequest {
+				node: 0x7a3f,
+				seqno: 42,
+			},
+			// A request may name the last seqno: only a rotation answers it.
+			AnnounceReply::RouteRequest {
+				node: route::QUALIFIED | 1,
+				seqno: route::MAX,
+			},
+			AnnounceReply::RouteEnd { id: 0 },
+		] {
+			let mut buf = Vec::new();
+			reply
+				.encode(&mut Encoder::new(&mut buf, Version::Lite07.into()), Version::Lite07)
+				.unwrap();
+			assert_eq!(decode_reply(&buf, Version::Lite07).unwrap(), reply);
+		}
+	}
+
+	#[test]
+	fn announce_reply_refuses_node_zero_and_unknown_types() {
+		let mut buf = Vec::new();
+		let res = AnnounceReply::RouteRequest { node: 0, seqno: 1 }
+			.encode(&mut Encoder::new(&mut buf, Version::Lite07.into()), Version::Lite07);
+		assert!(matches!(res, Err(EncodeError::InvalidState)));
+
+		let zero = forge(ROUTE_REQUEST, |w| {
+			w.varint(0u64).unwrap();
+			w.varint(1u64).unwrap();
+		});
+		assert!(matches!(
+			decode_reply(&zero, Version::Lite07),
+			Err(DecodeError::InvalidValue)
+		));
+		// Only routes travel back: an announcement type is not a reply.
+		let start = forge(ROUTE_START, |w| w.varint(1u64).unwrap());
+		assert!(matches!(
+			decode_reply(&start, Version::Lite07),
+			Err(DecodeError::InvalidMessage(ROUTE_START))
+		));
 	}
 }

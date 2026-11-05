@@ -137,7 +137,7 @@ const LITE_VERSIONS: &[lite::Version] = &[
 const IETF_VERSIONS: &[ietf::Version] = &[ietf::Version::Draft18, ietf::Version::Draft20, ietf::Version::Draft22];
 
 /// How many types [`lite_wire`] dispatches over.
-const LITE_KINDS: u8 = 33;
+const LITE_KINDS: u8 = 34;
 
 /// How many types [`ietf_wire`] dispatches over.
 const IETF_KINDS: u8 = 27;
@@ -305,6 +305,7 @@ pub fn lite_wire(data: &[u8]) -> bool {
 		30 => roundtrip::<lite::Datagrams<'_>, _>(rest, &mut Vec::new(), version),
 		31 => roundtrip::<lite::DatagramsUpdate, _>(rest, &mut Vec::new(), version),
 		32 => roundtrip::<lite::DatagramsInfo, _>(rest, &mut Vec::new(), version),
+		33 => roundtrip::<lite::AnnounceReply, _>(rest, &mut Vec::new(), version),
 		_ => unreachable!("kind is taken modulo LITE_KINDS"),
 	}
 }

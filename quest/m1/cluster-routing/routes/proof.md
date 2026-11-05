@@ -70,5 +70,4 @@ change in lite-07 and its draft.
 ## Related
 
 - [Route session integration](/quest/m1/cluster-routing/routes/session.md) - files identities under the key this proves
-- [lite-07 route wire](/quest/m1/cluster-routing/routes/wire.md) - the announce messages this extends
 - [P2P](/quest/m2/p2p/README.md) - its roster id is already planned as a public key

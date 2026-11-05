@@ -51,7 +51,10 @@ contract below. The routing contract's remaining model fixtures live in
 port each topology to the implementation as acceptance, then delete the model.
 The handoff contract below, decided 2026-10-16, settles claim freshness:
 
-The wire sketch is in [wire](/quest/m1/cluster-routing/routes/wire.md); the bullets below are the contract it carries.
+The lite-07 wire is specified in `drafts/draft-lcurley-moq-lite.md` (Announce,
+Floors, and Routing), and `rs/moq-net/src/lite/announce.rs` encodes and decodes
+its new messages ([moq-dev/moq#7764](https://github.com/moq-dev/moq/pull/7764));
+the bullets below are the contract it carries.
 
 - The announce cost is the origin's per-prefix seed (`transcode/**` at 10 and
   `transcode/foobar` at 1 from one node, decided 2026-10-01) and nobody
@@ -498,7 +501,6 @@ benchmarks.
 
 ## Required
 
-- [lite-07 route wire](/quest/m1/cluster-routing/routes/wire.md) - lite-07 and the draft carry ROUTE, ANNOUNCE_FLOOR, ROUTE_REQUEST, and path-less ANNOUNCE
 - [Route session integration](/quest/m1/cluster-routing/routes/session.md) - one router per origin node drives the origin and every lite-07 announce stream
 - [Scoped peers prove a route key](/quest/m1/cluster-routing/routes/proof.md) - a peer proves a route key once per announce stream, and its forwarded identities are qualified by it
 - [Announcement availability](/quest/m1/cluster-routing/routes/availability.md) - announcements report availability, and a let-go is offline rather than END, in Rust and JS

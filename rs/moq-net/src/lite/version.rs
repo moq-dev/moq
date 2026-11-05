@@ -337,6 +337,16 @@ impl Version {
 		)
 	}
 
+	/// Whether the announce stream carries the route layer: ROUTE_START, ROUTE_UPDATE,
+	/// ROUTE_END, and ANNOUNCE_FLOOR toward the subscriber, and ROUTE_REQUEST and the
+	/// ROUTE_END echo back. Added in lite-07.
+	pub(crate) fn has_routes(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
 	/// Whether the announce stream has ANNOUNCE_TAKEOVER: a new advertisement that
 	/// continues what a live one served beneath its prefix. Added in lite-07. Older
 	/// versions send an ANNOUNCE_START, which the receiver treats as another instance.

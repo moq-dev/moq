@@ -21,7 +21,6 @@ the cheapest one; fix it with the route-selection rework here.
 
 ## Required
 
-- [lite-07 route wire](/quest/m1/cluster-routing/routes/wire.md) - the messages
 - [Announcement availability](/quest/m1/cluster-routing/routes/availability.md) - the API this feeds
 
 ## Related
