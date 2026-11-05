@@ -15,20 +15,38 @@ Planned 2026-11-05 (maintainer, /quest-plan of the follow-ups from the
 [moq-dev/moq#7653](https://github.com/moq-dev/moq/pull/7653), which saw the
 timeout. Milestone: ✅ m0.
 
-Since 2026-11-04 the job fails before any test runs
-([run 41979277343](https://github.com/moq-dev/moq/actions/runs/41979277343),
-`just rs macos-test`): the test `an_empty_gap_buffer_marks_the_next_samples`
-(`rs/moq-audio/src/capture.rs:859`) hands `tokio::spawn` a
-`capture::Producer::run()` future that is not `Send` on macOS, because
-`Producer` holds the ScreenCaptureKit `SCStream` across an await. It came with
-[moq-dev/moq#7706](https://github.com/moq-dev/moq/pull/7706). Decide from the
-type whether `Producer` should be `Send` (fix the field) or the test should
-drive it without spawning; don't paper over it in the test if real callers
-spawn it too. Check why the PR gate didn't catch a macOS-only test build
-error, and close that gap if it is cheap.
+The capture gap-buffer test now drives `Producer::run()` and its reader in
+one task. `Producer::run` documents the macOS local-task requirement, and the
+CLI uses a `LocalSet` for capture (`rs/moq-cli/src/main.rs`). ScreenCaptureKit's
+handles stay non-Send; there is no new unsafe guarantee.
 
-Then read the job's next run for the websocket timeout. Reproduce it on macOS
-before fixing; if it never recurs across a week of scheduled runs, record that
-and finish.
+The Linux-only PR gate cannot detect this macOS-only type error. Platform's
+existing `cargo check --all-targets` catches it, but runs nightly and on release
+PRs, with manual Platform dispatch available for platform changes. Adding a
+native macOS runner to every main PR is not a cheap check. Independent Nightly
+error reporting remains owned by
+[moq-dev/moq#7667](https://github.com/moq-dev/moq/pull/7667).
+
+The recorded websocket timeout in
+[November 2's scheduled job](https://github.com/moq-dev/moq/actions/runs/41483654426/job/125408628726)
+was already reproduced and fixed by
+[moq-dev/moq#7829](https://github.com/moq-dev/moq/pull/7829), merged November 4.
+The client could close before server admission finished; that PR joins both
+negotiation results before dropping it, and reports 100/100 native macOS passes.
+Do not duplicate that fix or infer a new failure from the old log.
+
+The [November 5 scheduled job](https://github.com/moq-dev/moq/actions/runs/42050683248/job/127326015410)
+still stops at the capture test's non-Send compile error, before any tests run.
+After the capture fix lands, inspect the next scheduled macOS job. Reproduce
+any recurring websocket timeout on macOS before changing it; if none recurs
+across a week of scheduled runs, record that evidence and finish.
 
 Public API: none. Wire: none.
+
+## Waiting
+
+- moq-dev/moq: after the capture fix lands, verify a green scheduled macOS job
+  on main and inspect the websocket test's results across a week of scheduled
+  runs. Recommendation: land the reviewed capture fix, then retain this quest
+  until the scheduled evidence is available. A branch dispatch can check the
+  fix but cannot establish the required scheduled-main history.

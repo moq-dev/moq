@@ -856,10 +856,13 @@ mod tests {
 		samples.try_push(Ok(Samples::plain(Vec::new(), true))).unwrap();
 		samples.try_push(Ok(Samples::plain(vec![0.25; 960], false))).unwrap();
 		samples.try_push(Ok(Samples::plain(vec![0.5; 960], false))).unwrap();
-		let run = tokio::spawn(producer.run());
-		assert!(reader.read().await.unwrap().gap);
-		assert!(!reader.read().await.unwrap().gap);
-		run.abort();
+		tokio::select! {
+			result = producer.run() => panic!("capture stopped: {result:?}"),
+			_ = async {
+				assert!(reader.read().await.unwrap().gap);
+				assert!(!reader.read().await.unwrap().gap);
+			} => {},
+		}
 	}
 
 	fn reader() -> (buffer::Writer, kio::Producer<Option<cpal::Error>>, MicrophoneReader) {
