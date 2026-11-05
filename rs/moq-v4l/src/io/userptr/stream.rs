@@ -183,6 +183,7 @@ impl<'a> CaptureStream<'a> for Stream {
 			)?;
 		}
 		self.arena_index = v4l2_buf.index as usize;
+		self.held = true;
 
 		self.buf_meta[self.arena_index] = Metadata {
 			bytesused: v4l2_buf.bytesused,
@@ -197,6 +198,8 @@ impl<'a> CaptureStream<'a> for Stream {
 
 	fn next(&'a mut self) -> io::Result<(&'a Self::Item, &'a Metadata)> {
 		if !self.active {
+			// STREAMOFF handed every buffer back, so none is held over.
+			self.held = false;
 			// Enqueue all buffers once on stream start
 			for index in 0..self.arena.bufs.len() {
 				self.queue(index)?;
@@ -211,7 +214,6 @@ impl<'a> CaptureStream<'a> for Stream {
 		}
 
 		self.arena_index = self.dequeue()?;
-		self.held = true;
 
 		// The index used to access the buffer elements is given to us by v4l2, so we assume it
 		// will always be valid.

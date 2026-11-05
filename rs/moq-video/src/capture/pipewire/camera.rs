@@ -49,6 +49,7 @@ pub(in crate::capture) async fn cameras(v4l2: &[Camera]) -> Result<Vec<Camera>, 
 	} else {
 		None
 	};
+	let v4l2 = v4l2.to_vec();
 	let nodes = crate::capture::blocking(move || {
 		pw::init();
 		let mainloop = pw::main_loop::MainLoopRc::new(None).map_err(|e| err("pipewire main loop", e))?;
@@ -64,41 +65,52 @@ pub(in crate::capture) async fn cameras(v4l2: &[Camera]) -> Result<Vec<Camera>, 
 			Err(error) => return Err(err("pipewire connect", error)),
 		};
 		let registry = core.get_registry_rc().map_err(|e| err("pipewire registry", e))?;
-		let nodes = scan(&mainloop, &core, &registry)?;
+		let nodes = unlisted(scan(&mainloop, &core, &registry)?, &v4l2);
 		// Hide a node with no format we convert, as the V4L2 listing does: an IR
 		// camera that offers only GREY would list an id `open` refuses. A node
 		// whose formats cannot be read stays, since `open` reports why.
+		let formats = match formats_each(&mainloop, &core, &registry, &nodes) {
+			Ok(formats) => formats,
+			Err(error) => {
+				tracing::debug!(%error, "could not list PipeWire camera formats");
+				return Ok(nodes);
+			}
+		};
 		Ok(nodes
 			.into_iter()
-			.filter(|node| match formats(&mainloop, &core, &registry, node) {
+			.zip(formats)
+			.filter_map(|(node, formats)| match formats {
 				Ok(formats) if formats.is_empty() => {
 					tracing::debug!(node = %node.name, "PipeWire camera offers no format we convert");
-					false
+					None
 				}
-				Ok(_) => true,
+				Ok(_) => Some(node),
 				Err(error) => {
 					tracing::debug!(node = %node.name, %error, "could not list PipeWire camera formats");
-					true
+					Some(node)
 				}
 			})
 			.collect())
 	})
 	.await?;
 
-	Ok(camera_list(nodes, v4l2))
+	Ok(nodes
+		.into_iter()
+		.map(|node| Camera {
+			id: format!("{PIPEWIRE}:{}", node.name),
+			name: node.description,
+		})
+		.collect())
 }
 
-fn camera_list(nodes: Vec<Node>, v4l2: &[Camera]) -> Vec<Camera> {
+/// Drop the nodes the V4L2 listing already enumerated.
+fn unlisted(nodes: Vec<Node>, v4l2: &[Camera]) -> Vec<Node> {
 	nodes
 		.into_iter()
 		.filter(|node| {
 			!v4l2
 				.iter()
 				.any(|camera| node.v4l2_path.as_deref() == Some(camera.id.as_str()))
-		})
-		.map(|node| Camera {
-			id: format!("{PIPEWIRE}:{}", node.name),
-			name: node.description,
 		})
 		.collect()
 }
@@ -553,35 +565,92 @@ fn formats(
 	registry: &pw::registry::RegistryRc,
 	node: &Node,
 ) -> Result<Vec<Format>, Error> {
-	let proxy: pw::node::Node = registry
-		.bind(&pw::registry::GlobalObject {
-			id: node.id,
-			permissions: pw::permissions::PermissionFlags::empty(),
-			type_: pw::types::ObjectType::Node,
-			version: 0,
-			props: None::<&spa::utils::dict::DictRef>,
-		})
-		.map_err(|e| err("pipewire node", e))?;
-	let formats = Rc::new(RefCell::new(Vec::new()));
-	let _listener = proxy
-		.add_listener_local()
-		.param({
-			let formats = formats.clone();
-			move |_, id, _, _, param| {
-				if id != spa::param::ParamType::EnumFormat {
-					return;
+	let mut formats = formats_each(mainloop, core, registry, std::slice::from_ref(node))?;
+	formats.pop().expect("one result per node")
+}
+
+/// List the formats each of `nodes` offers that this backend converts, in one
+/// roundtrip so a stuck daemon costs one [`QUERY_TIMEOUT`] however many nodes
+/// there are.
+///
+/// The outer error is the daemon failing to answer. A node that answers with an
+/// error, or with only formats that cannot be read, gets an error of its own.
+fn formats_each(
+	mainloop: &pw::main_loop::MainLoopRc,
+	core: &pw::core::CoreRc,
+	registry: &pw::registry::RegistryRc,
+	nodes: &[Node],
+) -> Result<Vec<Result<Vec<Format>, Error>>, Error> {
+	#[derive(Default)]
+	struct Query {
+		formats: Vec<Format>,
+		failure: Option<String>,
+	}
+	let mut queries = Vec::with_capacity(nodes.len());
+	for node in nodes {
+		let proxy: pw::node::Node = registry
+			.bind(&pw::registry::GlobalObject {
+				id: node.id,
+				permissions: pw::permissions::PermissionFlags::empty(),
+				type_: pw::types::ObjectType::Node,
+				version: 0,
+				props: None::<&spa::utils::dict::DictRef>,
+			})
+			.map_err(|e| err("pipewire node", e))?;
+		let query = Rc::new(RefCell::new(Query {
+			formats: Vec::new(),
+			failure: None,
+		}));
+		let params = proxy
+			.add_listener_local()
+			.param({
+				let query = query.clone();
+				move |_, id, _, _, param| {
+					if id != spa::param::ParamType::EnumFormat {
+						return;
+					}
+					let Some(param) = param else { return };
+					let mut query = query.borrow_mut();
+					match spa::pod::deserialize::PodDeserializer::deserialize_any_from(param.as_bytes()) {
+						Ok((_, value)) => query.formats.extend(parse_format(&value)),
+						Err(e) => {
+							tracing::debug!(error = ?e, "unreadable PipeWire EnumFormat");
+							query
+								.failure
+								.get_or_insert_with(|| format!("unreadable EnumFormat: {e:?}"));
+						}
+					}
 				}
-				let Some(param) = param else { return };
-				match spa::pod::deserialize::PodDeserializer::deserialize_any_from(param.as_bytes()) {
-					Ok((_, value)) => formats.borrow_mut().extend(parse_format(&value)),
-					Err(e) => tracing::debug!(error = ?e, "unreadable PipeWire EnumFormat"),
+			})
+			.register();
+		// A node error (the device gone, or busy) arrives on the proxy, not the core.
+		let errors = pw::proxy::ProxyT::upcast_ref(&proxy)
+			.add_listener_local()
+			.error({
+				let query = query.clone();
+				move |_, _, message| {
+					query.borrow_mut().failure.get_or_insert_with(|| message.to_string());
 				}
+			})
+			.register();
+		proxy.enum_params(0, Some(spa::param::ParamType::EnumFormat), 0, u32::MAX);
+		queries.push((node, query, proxy, params, errors));
+	}
+	roundtrip(mainloop, core)?;
+	Ok(queries
+		.into_iter()
+		.map(|(node, query, ..)| {
+			let Query { formats, failure } = query.take();
+			match failure {
+				// Formats that were read still describe the node.
+				Some(failure) if formats.is_empty() => Err(Error::Codec(anyhow::anyhow!(
+					"PipeWire camera {} formats: {failure}",
+					node.name
+				))),
+				_ => Ok(formats),
 			}
 		})
-		.register();
-	proxy.enum_params(0, Some(spa::param::ParamType::EnumFormat), 0, u32::MAX);
-	roundtrip(mainloop, core)?;
-	Ok(formats.take())
+		.collect())
 }
 
 /// Read one `EnumFormat` or `Format` pod into the formats it offers that this
@@ -776,20 +845,20 @@ mod tests {
 			id: "/dev/video0".into(),
 			name: webcam.description.clone(),
 		}];
-		assert!(camera_list(vec![webcam.clone()], &v4l2).is_empty());
-		assert_eq!(camera_list(vec![webcam.clone()], &[]).len(), 1);
+		assert!(unlisted(vec![webcam.clone()], &v4l2).is_empty());
+		assert_eq!(unlisted(vec![webcam.clone()], &[]).len(), 1);
 		// An identical label on another device must not hide it.
 		props.pop();
 		props.push(("api.v4l2.path", "/dev/video2"));
-		assert_eq!(camera_list(vec![node(&props).unwrap()], &v4l2).len(), 1);
+		assert_eq!(unlisted(vec![node(&props).unwrap()], &v4l2).len(), 1);
 		// Missing paths and non-V4L2 backends are not proof of duplication.
 		props.pop();
-		assert_eq!(camera_list(vec![node(&props).unwrap()], &v4l2).len(), 1);
+		assert_eq!(unlisted(vec![node(&props).unwrap()], &v4l2).len(), 1);
 		props.pop();
 		props.extend([("device.api", "libcamera"), ("api.v4l2.path", "/dev/video0")]);
-		assert_eq!(camera_list(vec![node(&props).unwrap()], &v4l2).len(), 1);
+		assert_eq!(unlisted(vec![node(&props).unwrap()], &v4l2).len(), 1);
 		props.remove(props.len() - 2);
-		assert_eq!(camera_list(vec![node(&props).unwrap()], &v4l2).len(), 1);
+		assert_eq!(unlisted(vec![node(&props).unwrap()], &v4l2).len(), 1);
 		// Listing never removes nodes from explicit or priority-based resolution.
 		assert_eq!(
 			resolve(std::slice::from_ref(&webcam), Some(&webcam.name)).unwrap(),

@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- `CaptureStream::next` on the mmap and userptr streams can be called again after it returns `ErrorKind::TimedOut`. It used to queue a buffer the driver already held, which failed with EINVAL.
+- `CaptureStream::next` on the mmap and userptr streams can be called again after it returns `ErrorKind::TimedOut`, including on the first read after a restart. It used to queue a buffer the driver already held, which failed with EINVAL.
 
 ## [0.0.1](https://github.com/moq-dev/moq/releases/tag/moq-v4l-v0.0.1) - 2026-09-23
 
