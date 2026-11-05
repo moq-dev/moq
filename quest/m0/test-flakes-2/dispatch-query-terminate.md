@@ -32,8 +32,10 @@ Investigation 2026-11-05:
   still had one older-shell hang in 100 runs. It is insufficient; no dispatcher
   change is retained, and the test stays skipped pending a verified fix.
 - A scratch launch barrier can hold the parent before registering a Rust lane.
-  The job-table candidate passed that forced window, but this does not explain
-  the residual older-shell hang or prove the original report's cause.
+  The original PID-map cancellation hung for the existing 60-second test
+  deadline in that forced window; job-table cancellation passed in 0.072 s.
+  This isolates a launch race, but does not explain the residual older-shell
+  hang or prove the original missing-report failure's cause.
 - A gated full `just ci origin/main` with the temporary candidate completed:
   every lane except flake and CARLA passed, including the unskipped tooling
   test. Flake failed on `/proc/self/uid_map` permission; CARLA's
