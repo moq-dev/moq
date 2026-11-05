@@ -1,4 +1,4 @@
-# [M] The IETF22 viewer follows a fallback without dropping or stalling
+# [M] The browser viewer follows a fallback without dropping or stalling
 
 ## Goal
 
@@ -10,35 +10,88 @@ enough evidence to reproduce it deterministically.
 
 ## Waiting
 
-- moq-dev/moq: either failure recurs with enough evidence to isolate a
-  deterministic cause. Advance it by running `just test media --media-cases
-  replacement --media-engines chromium` with
-  `RUST_LOG=moq_net=debug,moq_relay=debug`, and read any failure here with its
-  relay and browser logs. Record host load during playback; clean runs do not
-  clear this wait, even when the host is busy.
+- Maintainer: whether this PR grows into the transport fix the Plan describes,
+  or the replay becomes its own quest that this one requires. Recommended: fix
+  it here, since this quest exists for the failure and the repository lands
+  the whole fix in one PR. An agent did not pick because the cause is pinned to
+  the JS publisher and Rust relay leg, not yet to one side, and either fix
+  changes `js/net` or `rs/moq-net` serving semantics for every subscriber.
+- moq-dev/moq: the session drop recurs with relay debug logs and the viewer's
+  close reason. It has not recurred since
+  [moq-dev/moq#6548](https://github.com/moq-dev/moq/pull/6548)'s IETF22 fixes;
+  clean runs do not clear this wait.
 
 ## Plan
 
-Neither failure has a known cause or a reproduction yet, so no production or
-test change is justified until one recurs.
+**Cause of the audio stall: a resubscription replays the publisher's retained
+history ahead of the live edge.** Seen in a passing local run on 2026-11-05
+(Firefox player, `RUST_LOG=moq_net=debug,moq_relay=debug`, load average 21 to
+29). When the replacement took over, the relay's upstream audio subscription to
+the older JS publisher went idle (20:26:09.71) with its copy at group 95. On the
+fallback 8.4 s later, the viewer subscribed with `max_delay: 130ms`, no start
+group, and descending order. The relay served it group 95 from the stale copy,
+then about 450 groups (96 to 543, about 9 s of 20 ms Opus groups) that the
+publisher burst upstream, before settling on the live edge at one group per
+20 ms. The burst took 564 ms to drain, and the player received and skipped every
+group (`skipping missing/slow groups` 191 to 542) before audio resumed. The
+fallback graded at 933 ms against the 1039 ms bound. moq-lite-06 replayed the
+same way (104 to 535, drained in 184 ms), and so did each first join, about
+1.5 s (4 to 81). The replay happens every time; only its drain time varies with
+load, and CI's drain outlasts the bound.
 
-Recurrence, added 2026-11-03 (maintainer, /quest-plan of the follow-ups from
-[moq-dev/moq#7667](https://github.com/moq-dev/moq/pull/7667)): Nightly's
-Firefox media job failed `live incumbent fallback plays` on two consecutive
-nights with the audio-stall symptom (`audioStalled:true, audioTimestamp:0`
-after the fallback), on `old-moq-lite-07-wip`:
-[2026-11-02](https://github.com/moq-dev/moq/actions/runs/41483654426/job/125408204778)
-and
-[2026-11-03](https://github.com/moq-dev/moq/actions/runs/41656613559/job/125988510133).
-[moq-dev/moq#7716](https://github.com/moq-dev/moq/pull/7716) found it
-separate from the Firefox tone problem. Scheduled Interop runs hit the same
-stall in Chromium, also on `old-moq-lite-07-wip`:
+A Rust publisher behind the same relay does not replay: a probe of
+`rejoin_skips_a_cache_kept_by_another_handle`
+(`rs/moq-net/tests/integration/rejoin.rs`) with a 130 ms max delay and 400 groups
+20 ms apart delivered 8 groups before the edge on lite-05, 06, and 07-wip, and 1
+on moq-transport-18 and 22. So the defect is on the leg between the JS lite
+publisher (`js/net/src/lite/publisher.ts`) and the Rust relay. Either the
+publisher serves retained groups the relay's request does not ask for, or the
+relay forwards them although the publisher's answer carries the largest
+position (`publisher.ts:1550`). Next: reproduce with a JS publisher behind a Rust
+relay, assert a rejoin starts within the subscriber's max delay of the edge, then
+fix the side that is wrong. [moq-dev/moq#7737](https://github.com/moq-dev/moq/pull/7737)
+fixed the lite-03/04 floor for an unresolved copy; this is the lite-06+ path.
+
+**Audio stall in CI, 2026-11-02 to 2026-11-05.** It failed `live incumbent
+fallback plays` seven times: Nightly's Firefox player
+[41483654426](https://github.com/moq-dev/moq/actions/runs/41483654426/job/125408204778),
+[41656613559](https://github.com/moq-dev/moq/actions/runs/41656613559/job/125988510133),
+and [42050683248](https://github.com/moq-dev/moq/actions/runs/42050683248/job/127325638704),
+and scheduled Chromium Interop
 [41495461904](https://github.com/moq-dev/moq/actions/runs/41495461904),
-[41668668824](https://github.com/moq-dev/moq/actions/runs/41668668824), and
-[41863118968](https://github.com/moq-dev/moq/actions/runs/41863118968). Read those jobs' artifacts first. If
-they isolate the cause, the Waiting item clears. If they don't, rerun the
-Waiting section's command with `--media-engines firefox` and the same
-`RUST_LOG` filter.
+[41668668824](https://github.com/moq-dev/moq/actions/runs/41668668824),
+[41863118968](https://github.com/moq-dev/moq/actions/runs/41863118968), and
+[42062226837](https://github.com/moq-dev/moq/actions/runs/42062226837).
+[moq-dev/moq#7716](https://github.com/moq-dev/moq/pull/7716) found it separate
+from the Firefox tone problem. Every one failed on `moq-lite-07-wip`, but the
+case runs that version first and stops at its first failure, so the protocol is
+confounded with order, and nothing yet ties the stall to any version.
+
+The four failure samples read (both 2026-11-05 runs, 41668668824, and
+41863118968) agree on everything but the playhead. The session stayed up, the
+broadcast was live on the older instance, and video kept painting. The
+AudioContext was `running`, the player was not paused, and the sync delay was
+50 ms. The viewer closed its audio subscription and opened one on the
+older run within the same announce, and its container consumer kept reading and
+skipping that run's groups (`skipping missing/slow groups` through sequence 549
+in Firefox and 602 in Chromium) until the bound. Audio stayed `audioStalled`
+with zero RMS. The stalled `audioTimestamp` differed:
+
+- **0** in both 2026-11-05 runs: the instance change reset the ring
+  (`#runDecoder` in `js/watch/src/audio/decoder.ts`), and no PCM reached the
+  worklet afterwards, since its first write anchors the playhead.
+- **11584.7 ms**, on the older run's timeline, in 41668668824: PCM landed and
+  anchored, then the ring stalled.
+- **4179.0 ms**, on the newest run's timeline, in 41863118968: the worklet
+  either never saw the reset or stopped reporting. This matches the original
+  report of a stall "at the newest run's last timestamp".
+
+These fit the replay: when the bound expired, each viewer was still receiving
+and skipping the older run's backlog, so its ring had not refilled, and the
+differing playheads show only how far each had got. The CI artifacts could not
+show this on their own: scheduled runs keep the relay at info (45 or 46 lines of
+`relay.log`), and the harness traces only pages that call `startTrace`, which
+the replacement player does not.
 
 Two failures were seen while landing
 [moq-dev/moq#6548](https://github.com/moq-dev/moq/pull/6548), on a host at

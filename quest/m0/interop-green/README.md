@@ -32,7 +32,7 @@ the fallback audio stall, which hit on
 `moq-lite-07-wip` in
 [41495461904](https://github.com/moq-dev/moq/actions/runs/41495461904) and
 [41668668824](https://github.com/moq-dev/moq/actions/runs/41668668824); see
-[the IETF22 fallback quest](/quest/m0/test-flakes-2/ietf22-fallback.md).
+[the fallback playback quest](/quest/m0/test-flakes-2/ietf22-fallback.md).
 
 Video passed its scheduled
 [run 41497602703](https://github.com/moq-dev/moq/actions/runs/41497602703).
