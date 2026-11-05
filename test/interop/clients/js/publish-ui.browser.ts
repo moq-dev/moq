@@ -432,6 +432,102 @@ test.each(["hold", "release"] as const)(
 	30_000,
 );
 
+test.each(["hold", "release"] as const)(
+	"a ready video preserves page display choices across media resizes with capture=%s",
+	async (capture) => {
+		const server = await createServer({
+			configFile: false,
+			root: `${import.meta.dir}/publish-ui`,
+			plugins: [worklet()],
+			server: { host: "127.0.0.1", port: 0 },
+		});
+		await server.listen();
+		const browser = await launch(["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"]);
+		try {
+			const page = await browser.newPage();
+			await page.goto(server.resolvedUrls?.local[0] ?? "");
+			await page.getByRole("button", { name: "Settings", exact: true }).waitFor();
+			const fixture = await page.evaluateHandle((capture) => {
+				const publish = document.querySelector<MoqPublish>("moq-publish");
+				if (!publish) throw new Error("missing publisher");
+				const canvas = document.createElement("canvas");
+				canvas.width = 1280;
+				canvas.height = 720;
+				const context = canvas.getContext("2d");
+				if (!context) throw new Error("missing canvas context");
+				const draw = () => context.fillRect(0, 0, canvas.width, canvas.height);
+				draw();
+				const timer = setInterval(draw, 33);
+				const original = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+				navigator.mediaDevices.getUserMedia = async (constraints) =>
+					constraints?.video ? canvas.captureStream(30) : original(constraints);
+				const preview = document.createElement("video");
+				preview.autoplay = true;
+				preview.muted = true;
+				publish.append(preview);
+				publish.capture = capture;
+				publish.muted = true;
+				publish.backend = "2d";
+				publish.invisible = false;
+				publish.source = "camera";
+				return { publish, preview, canvas, draw, timer };
+			}, capture);
+			const shown = () =>
+				page.waitForFunction(
+					({ preview, canvas }) =>
+						preview.videoWidth === canvas.width && getComputedStyle(preview).display === "block",
+					fixture,
+				);
+			await shown();
+			// Check a second binding too: readiness belongs to each binding, not the element.
+			for (const display of ["none", "inline-block"]) {
+				await fixture.evaluate(async ({ preview }) => preview.play());
+				const result = await fixture.evaluate(async ({ preview, canvas, draw }, display) => {
+					const stream = preview.srcObject as MediaStream;
+					const track = stream.getVideoTracks()[0];
+					preview.style.display = display;
+					const width = canvas.width === 1280 ? 640 : 1280;
+					const resized = new Promise<boolean>((resolve) => {
+						const listener = (event: Event) => {
+							if (preview.videoWidth !== width) return;
+							preview.removeEventListener("resize", listener);
+							resolve(event.isTrusted);
+						};
+						preview.addEventListener("resize", listener);
+					});
+					canvas.width = width;
+					canvas.height = width === 640 ? 480 : 720;
+					draw();
+					const trusted = await resized;
+					return {
+						display: getComputedStyle(preview).display,
+						sameStream: preview.srcObject === stream,
+						sameTrack: (preview.srcObject as MediaStream).getVideoTracks()[0] === track,
+						trusted,
+					};
+				}, display);
+				expect(result).toEqual({ display, sameStream: true, sameTrack: true, trusted: true });
+				await fixture.evaluate(({ publish }) => {
+					publish.preview = "none";
+				});
+				await page.waitForFunction(({ preview }) => preview.srcObject === null, fixture);
+				await fixture.evaluate(({ publish }) => {
+					publish.preview = "source";
+				});
+				await shown();
+			}
+			await fixture.evaluate(({ publish, timer }) => {
+				publish.remove();
+				clearInterval(timer);
+			});
+		} finally {
+			await browser.close();
+			await server.close();
+		}
+	},
+	30_000,
+);
+
 test("canvas previews wait for dimensions and paint fresh frames under a strict style policy", async () => {
 	const server = await createServer({
 		configFile: false,
