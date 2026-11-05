@@ -128,7 +128,19 @@ impl Tokens {
 		state.hold();
 	}
 
-	/// Poll for the peer's answer to the tokens set last; see [`answered`](Self::answered).
+	/// The peer's first verdict on the tokens the last [`set`](Self::set) newly presented,
+	/// or on the initial tokens before any set: `Ok` once each is granted, in band or as the
+	/// connection credential a later dial carried.
+	///
+	/// A token the set kept, the connection credential included, counts only once the peer
+	/// refuses it. Nothing is re-checked after the answer: a later revocation, or a new
+	/// session that refuses a token an earlier one granted, does not change it.
+	///
+	/// # Errors
+	///
+	/// The peer's refusal of a token as [`Error::Session`], [`Error::Unsupported`] when the
+	/// session cannot carry an in-band token, or the connection's end, such as a refused dial.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_answered(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
 		let answer = |state: &State| {
 			state
@@ -145,23 +157,6 @@ impl Tokens {
 		};
 		state.record();
 		Poll::Ready(answer(&state).expect("checked answered"))
-	}
-
-	/// Wait for the peer's first verdict on the tokens the last [`set`](Self::set) newly
-	/// presented, or on the initial tokens before any set: `Ok` once each is granted, in band
-	/// or as the connection credential a later dial carried.
-	///
-	/// A token the set kept, the connection credential included, counts only once the peer
-	/// refuses it. Nothing is re-checked after the answer: a later revocation, or a new
-	/// session that refuses a token an earlier one granted, does not change it.
-	///
-	/// # Errors
-	///
-	/// The peer's refusal of a token as [`Error::Session`], [`Error::Unsupported`] when the
-	/// session cannot carry an in-band token, or the connection's end, such as a refused dial.
-	#[cfg(feature = "async")]
-	pub async fn answered(&self) -> Result<()> {
-		kio::wait(|waiter| self.poll_answered(waiter)).await
 	}
 
 	/// Decide what a dial to `url` offering `versions` presents, and hold every other token in

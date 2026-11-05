@@ -4,6 +4,14 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### The `async` feature is opt-in ([#7607](https://github.com/moq-dev/moq/pull/7607))
+
+`async` is no longer a default feature. Enable it to keep the sessions (`Client`, `Server`, `Session`), `time::run`, the announcement `Stream` adapter, and every async wrapper such as `next_group`, `read_frame`, or `closed`:
+`moq-net = { version = "...", features = ["async"] }`.
+Each wrapper is now generated from its `poll_*` method, which stays available without the feature, and its docs live on that poll.
+`moq-tokio`'s `net` feature enables it for you.
+`group::Producer::ready` now needs the feature too.
+
 ### Opens wait their turn for stream credit ([#7894](https://github.com/moq-dev/moq/pull/7894))
 
 A request no longer fails with `Error::NoStreamCredit` when the peer grants no more streams: every stream a session opens waits for credit, and returning credit goes to the open whose stream the transport would send first. The variant is removed; drop any arm matching it.

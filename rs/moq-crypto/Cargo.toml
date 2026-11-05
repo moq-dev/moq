@@ -28,6 +28,8 @@ e2ee = ["dep:base64", "dep:bytes", "dep:kio", "dep:moq-net", "dep:rind", "dep:uu
 provider = ["dep:rind", "dep:rind-rustls", "dep:rustls"]
 # `sign::PublicKey` serializes as its canonical z-base-32 text.
 serde = ["dep:serde"]
+# Generated async wrappers for the `sign` and `e2ee` poll methods. Enable where you `.await` them.
+async = ["kio?/async"]
 
 [dependencies]
 base64 = { workspace = true, optional = true }
@@ -47,6 +49,9 @@ zeroize = { workspace = true, optional = true }
 criterion = { package = "bench-harness", path = "../bench-harness" }
 hex = { workspace = true }
 kio = { workspace = true, features = ["runtime"] }
+# Compile the generated wrappers used by the tests and benches, keeping the features they pick.
+moq-crypto = { path = ".", default-features = false, features = ["async"] }
+moq-net = { path = "../moq-net", features = ["async"] }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "test-util", "time"] }

@@ -276,29 +276,21 @@ impl Producer {
 		self.finish(reason, Bytes::default()).0
 	}
 
-	/// Poll for the lease ending, from either side: why it ended, and the totals
-	/// the session reported. A producer-side revoke, or a drop, reports zero bytes.
+	/// The lease's end, from either side: why it ended, and the totals the session reported.
+	/// A producer-side revoke, or a drop, reports zero bytes.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<(Reason, Bytes)> {
 		let state = std::task::ready!(self.state.poll(waiter, |state| ready_if(state.closed.is_some())));
 		Poll::Ready(state.closed.clone().expect("waited for a close"))
 	}
 
-	/// Wait for the lease to end, from either side.
-	pub async fn closed(&self) -> (Reason, Bytes) {
-		kio::wait(|waiter| self.poll_closed(waiter)).await
-	}
-
-	/// Poll until at least one re-check has been asked since the last observation.
+	/// Resolves once at least one re-check has been asked since the last observation.
 	/// A burst of asks resolves once.
-	pub fn poll_revalidate(&self, waiter: &kio::Waiter) -> Poll<()> {
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_revalidate_requested(&self, waiter: &kio::Waiter) -> Poll<()> {
 		let mut state = std::task::ready!(self.state.poll(waiter, |state| ready_if(state.revalidate > 0)));
 		state.revalidate = 0;
 		Poll::Ready(())
-	}
-
-	/// Wait until a re-check has been asked since the last observation.
-	pub async fn revalidate_requested(&self) {
-		kio::wait(|waiter| self.poll_revalidate(waiter)).await
 	}
 
 	pub(crate) fn finish(&self, reason: Reason, bytes: Bytes) -> (Reason, Bytes) {
@@ -367,7 +359,8 @@ impl Consumer {
 		self.hold.state.read().grant.clone()
 	}
 
-	/// Poll for the next update: the new grant, or the reason the lease ended.
+	/// The next update: the new grant, or the reason the lease ended.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_changed(&mut self, waiter: &kio::Waiter) -> Poll<Result<Grant, Reason>> {
 		let seen = self.seen;
 		let state = std::task::ready!(
@@ -382,20 +375,11 @@ impl Consumer {
 		Poll::Ready(Ok(state.grant.clone()))
 	}
 
-	/// Wait for the next update: the new grant, or the reason the lease ended.
-	pub async fn changed(&mut self) -> Result<Grant, Reason> {
-		kio::wait(|waiter| self.poll_changed(waiter)).await
-	}
-
-	/// Poll for the lease ending.
+	/// The reason the lease ended, once it does.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Reason> {
 		let state = std::task::ready!(self.hold.state.poll(waiter, |state| ready_if(state.closed.is_some())));
 		Poll::Ready(state.closed.as_ref().expect("waited for a close").0.clone())
-	}
-
-	/// Wait for the lease to end.
-	pub async fn closed(&self) -> Reason {
-		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
 
 	/// Ask the producer to re-check now. A no-op on a [`fixed`](Self::fixed)
@@ -408,6 +392,7 @@ impl Consumer {
 	/// `end` POST returns or fails, so its request timeout bounds the wait, and as soon
 	/// as the lease ends when nobody needs telling. Take it before [`close`](Self::close)
 	/// to learn when that close was reported.
+	#[cfg(feature = "async")]
 	pub fn reported(&self) -> impl Future<Output = ()> + Send + 'static {
 		let state = self.hold.state.clone();
 		#[cfg(feature = "client")]

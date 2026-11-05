@@ -122,7 +122,9 @@ impl Background {
 			.unwrap_or(Ok(()))
 	}
 
-	fn poll_finished(&self, waiter: &kio::Waiter) -> std::task::Poll<Result<(), Error>> {
+	/// The background operation's result, once it finishes.
+	#[kio::wrapper]
+	pub fn poll_finished(&self, waiter: &kio::Waiter) -> std::task::Poll<Result<(), Error>> {
 		let Some(result) = &self.result else {
 			return std::task::Poll::Ready(Ok(()));
 		};
@@ -133,11 +135,6 @@ impl Background {
 			Ok(result) => std::task::Poll::Ready(result),
 			Err(_) => std::task::Poll::Ready(Err(Error::Panic)),
 		}
-	}
-
-	/// Wait until the background operation finishes and return its result.
-	pub async fn finished(&self) -> Result<(), Error> {
-		kio::wait(|waiter| self.poll_finished(waiter)).await
 	}
 
 	/// Fail an operation when its owned background task fails.
