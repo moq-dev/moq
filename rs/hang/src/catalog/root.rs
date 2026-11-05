@@ -344,6 +344,7 @@ impl<E: DeserializeOwned + Default> FromStr for Catalog<E> {
 
 impl<E: DeserializeOwned + Default> Catalog<E> {
 	/// Subscribe to catalog updates on a broadcast.
+	#[cfg(feature = "async")]
 	pub async fn subscribe(broadcast: &moq_net::broadcast::Consumer) -> Result<super::Consumer<E>> {
 		Ok(super::Consumer::new(broadcast.track(Catalog::DEFAULT_NAME)?))
 	}

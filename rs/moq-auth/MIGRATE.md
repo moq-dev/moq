@@ -12,6 +12,16 @@ descends from, nearest first. A struct literal sets it, usually to
 older relay sees it empty and should read that as the leaf alone, as
 `serve::Policy` does.
 
+### Lease async wrappers are opt-in
+
+The lease's `changed`, `closed`, and `revalidate_requested` wrappers and
+`lease::Consumer::reported` need the `async` Cargo feature, which `client` (a default) and
+`serve` enable. A dependency with `default-features = false` that awaits them adds it:
+`moq-auth = { version = "...", default-features = false, features = ["async"] }`. Without it,
+drive the `poll_*` methods.
+`lease::Producer::poll_revalidate` is `poll_revalidate_requested`, after the wrapper it backs.
+The JSON contract and tokens are unchanged.
+
 ### Mesh endpoints use the signing public key
 
 Replace `moq_auth::mesh::EndpointId` with `moq_crypto::sign::PublicKey` and
