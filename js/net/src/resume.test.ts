@@ -784,6 +784,80 @@ test("a replacement that answers and then aborts before its first group leaves t
 	close();
 });
 
+// Mirrors the Rust front: an incumbent that finished cleanly ends the track whoever serves it.
+test("a replacement that aborts before its first group after the incumbent finished ends the track cleanly", async () => {
+	const { a, b, swap, active, close } = await setup();
+	const ta = copy(a);
+	const tb = copy(b);
+	const sub = active.track("seq").subscribe();
+	ta.write(0n);
+	expect(drain(sub)).toEqual([0n]);
+
+	await swap();
+	ta.write(1n);
+	ta.producer.finish();
+	tb.producer.abort(new StreamError(StreamCode(64)));
+	await settle();
+	const groups: bigint[] = [];
+	for (let group = await sub.recvGroup(); group; group = await sub.recvGroup()) {
+		groups.push(group.sequence);
+		group.close();
+	}
+	expect(groups).toEqual([1n]);
+
+	sub.close();
+	close();
+});
+
+// Mirrors `a_replacement_aborted_after_its_answer_keeps_the_incumbent` for a reader awaiting only the end.
+test("waiting for the end of a track whose replacement aborts before its first group follows the incumbent", async () => {
+	const { a, b, swap, active, close } = await setup();
+	const ta = copy(a);
+	const tb = copy(b);
+	const sub = active.track("seq").subscribe();
+	ta.write(0n);
+	expect(drain(sub)).toEqual([0n]);
+
+	await swap();
+	const finished = sub.finished();
+	finished.catch(() => {});
+	tb.producer.abort(new StreamError(StreamCode(64)));
+	await settle();
+	ta.producer.finish();
+	await expect(finished).resolves.toEqual({ group: 1n, frame: 0 });
+
+	sub.close();
+	close();
+});
+
+// The Rust front judges the replacement by its copy, whatever each reader's window took from it:
+// one that held a group delivered, so its later abort is the track's verdict for every reader.
+test("a replacement that delivered is not undone by a reader whose window skipped its groups", async () => {
+	const { a, b, swap, active, close } = await setup();
+	const ta = copy(a);
+	const tb = copy(b);
+	const first = active.track("seq").subscribe();
+	const later = active.track("seq").subscribe({ ranges: [{ start: { absolute: 3n } }] });
+	ta.write(0n);
+	expect(drain(first)).toEqual([0n]);
+	expect(drain(later)).toEqual([]);
+
+	await swap();
+	tb.write(1n);
+	await settle();
+	expect(drain(first)).toEqual([1n]);
+	tb.producer.abort(new StreamError(StreamCode(64)));
+	await settle();
+	expect(() => drain(later)).toThrow("64");
+	ta.write(2n);
+	await settle();
+	expect(() => drain(first)).toThrow("64");
+
+	first.close();
+	later.close();
+	close();
+});
+
 test("a replacement that aborts before its first group after the front concludes leaves the incumbent serving", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();

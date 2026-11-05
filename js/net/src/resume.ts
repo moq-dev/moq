@@ -862,23 +862,12 @@ class Reader implements ResumeSource {
 		// serve it next. Once the track ended, a copy let go held nothing more.
 		if (serving ? ended === null : this.#ended) return this.#conclude() ? { kind: "done" } : { kind: "idle" };
 		if (ended instanceof Error) {
-			// A replacement that failed before delivering never ends the track while a copy it
-			// replaced still feeds it: that copy serves again, and the failure is the replacement
-			// refusing the track unless its route is going away. Mirrors the Rust front.
-			const incumbent =
-				serving && !serving.delivered
-					? this.#copies.findLast(
-							(copy) =>
-								copy.replaced &&
-								copy.source !== serving.source &&
-								copy.done === undefined &&
-								copy.sub.closed.peek() === undefined,
-						)
-					: undefined;
-			if (serving && incumbent && route.revert(serving.source, incumbent.source)) {
-				if (!closing(ended)) route.refuse(ended);
-				return { kind: "idle" };
-			}
+			// A copy it replaced finished the track and the reader reached that end: the track
+			// ended cleanly whoever serves it now. Mirrors the Rust front.
+			const end = this.#learnEnd();
+			if (end && !this.#declaredError && finalSequence(end) <= (this.#newest ?? -1n) + 1n)
+				return this.#conclude() ? { kind: "done" } : { kind: "idle" };
+			if (serving && this.#revert(serving, ended)) return { kind: "idle" };
 			// A refusal from a route that still serves is the track's answer.
 			if (!routeFailed(ended)) return this.#fail(ended);
 			if (route.refusal) return this.#fail(route.refusal);
@@ -903,6 +892,26 @@ class Reader implements ResumeSource {
 			if (ended instanceof Error) return this.#fail(ended);
 		}
 		return { kind: "idle" };
+	}
+
+	/**
+	 * A replacement that failed before its copy held a group never ends the track while a copy it
+	 * replaced still feeds it: that copy serves again, and the failure is the replacement refusing
+	 * the track unless its route is going away. Judged by the copy, whatever this reader's window
+	 * took from it, as the Rust front does.
+	 */
+	#revert(serving: Copy, failed: Error): boolean {
+		if (hooks.latestSequence(serving.sub) !== undefined) return false;
+		const incumbent = this.#copies.findLast(
+			(copy) =>
+				copy.replaced &&
+				copy.source !== serving.source &&
+				copy.done === undefined &&
+				copy.sub.closed.peek() === undefined,
+		);
+		if (!incumbent || !this.route.revert(serving.source, incumbent.source)) return false;
+		if (!closing(failed)) this.route.refuse(failed);
+		return true;
 	}
 
 	#fail(error: Error): Recv & { kind: "error" } {
@@ -1246,7 +1255,8 @@ class Reader implements ResumeSource {
 			const failed = serving?.sub.closed.peek();
 			// A copy that failed is only the end of the track if no front replaces it, and a
 			// refused replacement leaves the refusal as the answer.
-			if (failed instanceof Error) {
+			if (serving && failed instanceof Error) {
+				if (this.#revert(serving, failed)) continue;
 				if (!routeFailed(failed)) throw failed;
 				if (this.route.refusal) throw this.route.refusal;
 				if (this.route.concluded) throw failed;

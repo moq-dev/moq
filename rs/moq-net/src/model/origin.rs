@@ -3387,25 +3387,30 @@ struct InFlight {
 
 /// Keep the query's subscription on a copy following the readers' demand, and let it go
 /// with the last reader. Left behind, its first preferences would mask a later, lower
-/// aggregate from the copy's source: a shorter budget, or a demoted priority.
+/// aggregate from the copy's source: a shorter budget, or a demoted priority. With `copy`,
+/// a reader arriving subscribes it too.
 fn follow_demand(
 	held: &mut Option<kio::Pending<track::Subscribing>>,
+	copy: Option<&track::Consumer>,
 	accepted: Option<&mut track::Producer>,
 	weak: &track::TrackWeak,
 	routes: &super::resume::Producer,
 	waiter: &kio::Waiter,
 ) {
-	let Some(hold) = held.as_mut() else {
+	if held.is_none() && copy.is_none() {
 		return;
-	};
+	}
 	if let Some(accepted) = accepted {
 		while let Poll::Ready(Ok(_)) = accepted.poll_subscription_changed(waiter) {}
 	}
-	match weak.subscription() {
-		Some((subscription, subscribers)) => {
+	match (weak.subscription(), held.as_mut()) {
+		(Some((subscription, subscribers)), Some(hold)) => {
 			let _ = hold.update(routes.subscription(subscription, subscribers));
 		}
-		None => *held = None,
+		(Some((subscription, subscribers)), None) => {
+			*held = copy.map(|copy| copy.subscribe(routes.subscription(subscription, subscribers)));
+		}
+		(None, _) => *held = None,
 	}
 }
 
@@ -3511,7 +3516,7 @@ impl kio::Task for FrontServeRun {
 					Poll::Pending => {}
 				}
 			}
-			follow_demand(&mut io.held, io.accepted.as_mut(), &io.weak, &io.routes, waiter);
+			follow_demand(&mut io.held, None, io.accepted.as_mut(), &io.weak, &io.routes, waiter);
 			match io.weak.poll_unwanted(waiter) {
 				Poll::Pending => in_flight.push(io),
 				Poll::Ready(_) => io.release(),
@@ -3848,7 +3853,14 @@ impl FrontServe {
 					// An awaited copy follows the readers, or it may never send the group
 					// they now want.
 					if asked.info.is_some() {
-						follow_demand(&mut asked.sub, io.accepted.as_mut(), &io.weak, &io.routes, waiter);
+						follow_demand(
+							&mut asked.sub,
+							Some(&asked.copy),
+							io.accepted.as_mut(),
+							&io.weak,
+							&io.routes,
+							waiter,
+						);
 					}
 					// While another copy may still deliver, a matching replacement answers only
 					// once it delivers or ends: one failing first refuses, and that copy keeps
@@ -3860,12 +3872,12 @@ impl FrontServe {
 							.is_none_or(|(_, copy, _)| copy.poll_complete(waiter).is_ready())
 							|| io.accepted.as_ref().is_some_and(|accepted| accepted.info() != info)
 							|| asked.copy.poll_grouped(waiter).is_ready()
-							|| asked.copy.poll_closed(waiter).is_ready())
+							|| asked.copy.poll_complete(waiter).is_ready())
 					{
 						return Some(FrontStep::Info(name.clone(), asked.source, Ok(info.clone())));
 					}
 				}
-				follow_demand(&mut io.held, io.accepted.as_mut(), &io.weak, &io.routes, waiter);
+				follow_demand(&mut io.held, None, io.accepted.as_mut(), &io.weak, &io.routes, waiter);
 				// Settled once the copy closes: a group still open below a declared end is
 				// owed until then, and a session closing first means it never came.
 				if let Some((source, copy, _)) = &io.copy
@@ -13866,6 +13878,40 @@ mod tests {
 		assert!(matches!(next_group(&mut subscription).await, Ok(None)));
 	}
 
+	/// The incumbent delivers its last group and finishes, and only then does the newcomer
+	/// abort before its first group: the incumbent's clean end is the track's.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_replacement_aborted_after_the_incumbent_finished_ends_the_track_cleanly() {
+		let (producer, _server, _upstream, old, mut subscription) = remote_front().await;
+
+		let newcomer = producer.create_broadcast("room/alice").unwrap();
+		let mut handler = newcomer.requests();
+		newcomer
+			.announce(Route::default().with_instance(instance(), 0))
+			.unwrap();
+		let request = kio::clock::timeout(Duration::from_secs(1), handler.requested_track())
+			.await
+			.expect("the front asked the newcomer")
+			.expect("request");
+		let replacement = request.accept(crate::track::Info::timed());
+		for _ in 0..10 {
+			kio::clock::sim::yield_now().await;
+		}
+		let mut group = old.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"last".as_ref()).unwrap();
+		group.finish().unwrap();
+		old.finish().unwrap();
+		replacement.abort(Error::App(7)).unwrap();
+
+		let mut group = next_group(&mut subscription)
+			.await
+			.expect("the incumbent's last group")
+			.expect("track open");
+		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"last");
+		assert!(matches!(next_group(&mut subscription).await, Ok(None)));
+	}
+
 	/// While the front waits for the newcomer's first group, a reader changing its
 	/// preferences reaches the newcomer's copy, which may otherwise never send that group.
 	#[kio::test]
@@ -13897,6 +13943,83 @@ mod tests {
 			kio::clock::sim::yield_now().await;
 		}
 		assert_eq!(replacement.subscription().map(|wanted| wanted.priority), Some(9));
+	}
+
+	/// Before the incumbent delivered anything, the newcomer answers "video" with matching
+	/// metadata and then finishes without a group: a deliberate end of the broadcast's
+	/// track, so the track ends rather than the front waiting on a group that never comes.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_replacement_finished_without_a_group_ends_the_track() {
+		let producer = origin(1).produce();
+		let server = producer
+			.requests_route(
+				"room",
+				Route::default().with_instance(instance(), 0).with_hops(hops(&[10])),
+				None,
+			)
+			.unwrap();
+		let pending = producer.consume().request("room/alice", None);
+		let upstream = broadcast::Info::new().produce();
+		let _old = upstream.create_track("video", crate::track::Info::timed()).unwrap();
+		queued(&server).await.serve(&upstream);
+		let resolved = pending.await.expect("resolves");
+		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
+
+		let newcomer = producer.create_broadcast("room/alice").unwrap();
+		let mut handler = newcomer.requests();
+		newcomer
+			.announce(Route::default().with_instance(instance(), 0))
+			.unwrap();
+		let request = kio::clock::timeout(Duration::from_secs(1), handler.requested_track())
+			.await
+			.expect("the front asked the newcomer")
+			.expect("request");
+		let replacement = request.accept(crate::track::Info::timed());
+		for _ in 0..10 {
+			kio::clock::sim::yield_now().await;
+		}
+		replacement.finish().unwrap();
+
+		assert!(matches!(next_group(&mut subscription).await, Ok(None)));
+		drop(replacement);
+	}
+
+	/// The newcomer is asked while only an info lookup wants "video", so its copy has no
+	/// subscription. A live reader joining while the front waits on its first group
+	/// subscribes it, or that group may never come.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn an_awaited_replacement_asked_without_readers_subscribes_when_one_joins() {
+		let (producer, _server, _upstream, _old, subscription) = remote_front().await;
+		let resolved = producer.consume().request("room/alice", None).await.unwrap();
+		let video = resolved.track("video").unwrap();
+		let _info = video.info();
+		drop(subscription);
+		for _ in 0..10 {
+			kio::clock::sim::yield_now().await;
+		}
+
+		let newcomer = producer.create_broadcast("room/alice").unwrap();
+		let mut handler = newcomer.requests();
+		newcomer
+			.announce(Route::default().with_instance(instance(), 0))
+			.unwrap();
+		let request = kio::clock::timeout(Duration::from_secs(1), handler.requested_track())
+			.await
+			.expect("the front asked the newcomer")
+			.expect("request");
+		let replacement = request.accept(crate::track::Info::timed());
+		for _ in 0..10 {
+			kio::clock::sim::yield_now().await;
+		}
+		assert!(replacement.subscription().is_none(), "nobody reads the track yet");
+
+		let _again = video.subscribe(None).await.unwrap();
+		for _ in 0..10 {
+			kio::clock::sim::yield_now().await;
+		}
+		assert!(replacement.subscription().is_some(), "the awaited copy never got the reader's demand");
 	}
 
 	/// The newcomer refuses "video", so the track drains the incumbent. The reader leaves
