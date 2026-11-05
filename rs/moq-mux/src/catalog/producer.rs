@@ -1001,7 +1001,7 @@ impl<E: CatalogExt> Producer<E> {
 	/// configures the encoder and is not written into the catalog entry. With
 	/// [`deltas`](crate::json::Options::deltas), create `track` with a
 	/// [`refresh`](moq_net::track::Info::refresh) ratio and drive
-	/// [`Snapshot::refresh`](crate::json::Snapshot::refresh), so joiners get a fresh group.
+	/// [`Snapshot::poll_refresh`](crate::json::Snapshot::poll_refresh), so joiners get a fresh group.
 	///
 	/// Errors if the entry's section already carries that name, for example an entry seeded
 	/// through [`Config::with_catalog`] or one pointing at a sibling broadcast, if the entry

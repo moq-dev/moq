@@ -4,6 +4,18 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### The gateways need the `async` feature
+
+The `import` and `export` modules compile only with the new `async` Cargo feature, which the default
+`server` feature enables. With `default-features = false`, enable it to keep them:
+`moq-hls = { version = "...", default-features = false, features = ["async"] }`.
+Nothing else changes for a build with `server`.
+
+The export waits have polls for a caller that drives them itself: `Broadcaster::poll_closed`
+and `poll_ready`, `Rendition::poll_playable`, and `poll_next` on the `renditions::Consumer` and
+`segments::Consumer` cursors. A `segments::Consumer::next` dropped mid-fetch leaves that fetch to the
+next call, which resumes it rather than starting over.
+
 ### HTTP HLS lists contributions without starting their media
 
 `Server` follows the root catalog's contributions and lists their renditions from their

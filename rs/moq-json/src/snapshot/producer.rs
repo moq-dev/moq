@@ -30,7 +30,7 @@ fn take<T>(inner: &Mutex<Inner<T>>) -> MutexGuard<'_, Inner<T>> {
 /// encoder emits a snapshot. When something else already owns the track, use the [`Encoder`]
 /// directly.
 ///
-/// A group runs until a joiner wants a fresh one, which [`refresh`](Self::refresh) answers, or until
+/// A group runs until a joiner wants a fresh one, which [`poll_refresh`](Self::poll_refresh) answers, or until
 /// it reaches the encoder's caps. Set the track's [`refresh`](moq_net::track::Info::refresh) ratio
 /// when creating it, or joins never ask.
 ///
@@ -97,11 +97,7 @@ impl<T: Serialize> Producer<T> {
 	///
 	/// The producer has no runtime of its own, so the owner drives this: loop on it, or select on it
 	/// beside the updates. Errors once the track is closed.
-	pub async fn refresh(&self) -> Result<()> {
-		kio::wait(|waiter| self.poll_refresh(waiter)).await
-	}
-
-	/// Poll for [`refresh`](Self::refresh), for an owner driving the producer synchronously.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_refresh(&self, waiter: &kio::Waiter) -> std::task::Poll<Result<()>> {
 		take(&self.inner).poll_refresh(waiter)
 	}
@@ -192,7 +188,7 @@ impl<T: Serialize> Producer<T> {
 
 	/// Finish the open group, so the deltas already written stop being provisional.
 	///
-	/// No replacement group opens until the next [`update`](Self::update) or [`refresh`](Self::refresh), which emits a full
+	/// No replacement group opens until the next [`update`](Self::update) or [`poll_refresh`](Self::poll_refresh), which emits a full
 	/// snapshot as its first frame even when the value is unchanged. A consumer joining at that group
 	/// therefore reads the whole value without the deltas that preceded it.
 	///

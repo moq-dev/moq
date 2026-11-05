@@ -126,7 +126,7 @@ kio = { workspace = true, features = ["runtime"] }
 # libvpx bindings for the `vpx` feature. The library itself comes from the build
 # host; see the feature above.
 libvpx-native-sys = { version = "5.0.17", optional = true }
-moq-mux = { workspace = true }
+moq-mux = { workspace = true, features = ["async"] }
 moq-net = { workspace = true }
 # Vendored, statically linked software H.264 fallback (no system dependency).
 # Hardware encoders are preferred, but an `openh264` build falls back when
