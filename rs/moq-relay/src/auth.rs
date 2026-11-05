@@ -1752,6 +1752,36 @@ mod tests {
 		}
 	}
 
+	/// A certificate whose lineage could not be traced is refused before any decider
+	/// sees it as a bare leaf, which would hide the intermediate a server scopes by.
+	#[tokio::test]
+	async fn an_untraced_certificate_chain_is_refused() {
+		let auth = config(None, &["anon/**"])
+			.init("relay-1", &moq_tokio::tls::Connect::default(), false)
+			.unwrap();
+		let mut request = auth.request(moq_auth::Transport::Quic, "/anon/room");
+		request.tls = Some(moq_auth::Peer {
+			name: "edge0".into(),
+			fingerprint: "ab".repeat(32),
+			chain: Vec::new(),
+			expires: None,
+			issuer: "CN=cluster".into(),
+		});
+		assert!(matches!(auth.admit(request).await, Err(Error::Request(_))));
+	}
+
+	/// The relay reports the chain the leaf provably descends from, leaf first.
+	#[test]
+	fn a_peer_reports_its_lineage() {
+		let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+		let cert = rcgen::CertificateParams::new(vec!["edge0.invalid".to_string()])
+			.unwrap()
+			.self_signed(&key)
+			.unwrap();
+		let peer = peer(&moq_tokio::tls::PeerIdentity::from_chain(vec![cert.into()])).unwrap();
+		assert_eq!(peer.chain, vec![peer.fingerprint.clone()]);
+	}
+
 	/// 0.14 read `anon` as a prefix and a pattern reads it as one broadcast, so a
 	/// wildcard-free public pattern refuses to start rather than pick silently.
 	#[test]

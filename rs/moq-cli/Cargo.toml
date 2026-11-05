@@ -123,7 +123,7 @@ moq-rtmp = { workspace = true }
 moq-rtsp = { workspace = true }
 moq-srt = { workspace = true }
 # Raw qmux listeners are part of the CLI surface. `uds` compiles only on Unix.
-moq-tokio = { workspace = true, default-features = false, features = ["tcp", "uds"] }
+moq-tokio = { workspace = true, default-features = false, features = ["tcp", "uds", "watch"] }
 moq-transcode = { workspace = true, optional = true }
 moq-video = { workspace = true, optional = true }
 object_store = { workspace = true, features = ["fs"] }
@@ -138,11 +138,12 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 terminal_size = "0.4.4"
 tokio = { workspace = true, features = ["full"] }
+toml = { workspace = true }
 # Tells a recording to finish its file on the first shutdown signal.
 tokio-util = { workspace = true }
 tower-http = { workspace = true }
 tracing = { workspace = true }
-url = { workspace = true }
+url = { workspace = true, features = ["serde"] }
 usage-rs = { workspace = true, features = ["completions", "config"] }
 winit = { version = "0.30.13", optional = true }
 
