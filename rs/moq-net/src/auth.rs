@@ -1431,17 +1431,19 @@ impl Credential {
 	/// handle's end. A session ending is not one: the next session presents it again.
 	#[cfg(feature = "async")]
 	pub async fn closed(&self) -> Error {
+		kio::wait(|waiter| self.poll_closed(waiter)).await
+	}
+
+	/// See [`Self::closed`].
+	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
 		let selector = self.presented.selector();
-		kio::wait(|waiter| {
-			let state = ready_or!(self.presented.state.poll(waiter, |state| {
-				match selector.ended(state) {
-					Some(_) => Poll::Ready(()),
-					None => Poll::Pending,
-				}
-			}));
-			Poll::Ready(selector.ended(&state).unwrap_or(Error::Cancel))
-		})
-		.await
+		let state = ready_or!(self.presented.state.poll(waiter, |state| {
+			match selector.ended(state) {
+				Some(_) => Poll::Ready(()),
+				None => Poll::Pending,
+			}
+		}));
+		Poll::Ready(selector.ended(&state).unwrap_or(Error::Cancel))
 	}
 
 	/// Poll for the first verdict on a handle's token: a grant on any session, or the
@@ -1554,11 +1556,14 @@ impl Watch {
 		self.selector.current(&self.state.read()).cloned()
 	}
 
-	/// Poll for the grant to differ from the last one this watch returned (or saw
-	/// at creation).
+	/// The grant once it differs from the last one this watch returned (or saw at
+	/// creation).
 	///
-	/// `Err` once nothing will change it again: the handle ended, or for a
-	/// token's watch, the token ended for good.
+	/// # Errors
+	///
+	/// Once nothing will change it again: the handle ended, or for a token's watch, the
+	/// token ended for good.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_changed(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Grant>>> {
 		let last = &self.last;
 		let selector = self.selector;
@@ -1575,16 +1580,6 @@ impl Watch {
 		}
 		Poll::Ready(Err(selector.ended(&state).unwrap_or(Error::Cancel)))
 	}
-
-	/// Wait for the grant to change, returning the new one.
-	///
-	/// # Errors
-	///
-	/// See [`poll_changed`](Self::poll_changed).
-	#[cfg(feature = "async")]
-	pub async fn changed(&mut self) -> Result<Option<Grant>> {
-		kio::wait(|waiter| self.poll_changed(waiter)).await
-	}
 }
 
 /// The tokens the peer presents, for an application that answers them itself.
@@ -1595,15 +1590,10 @@ pub struct Requests {
 }
 
 impl Requests {
-	/// Poll for the next token, or `None` once the handle ends.
+	/// The next token the peer presents, or `None` once the handle ends.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<Request>> {
 		self.queue.poll_next(waiter)
-	}
-
-	/// Wait for the next token the peer presents, or `None` once the handle ends.
-	#[cfg(feature = "async")]
-	pub async fn next(&mut self) -> Option<Request> {
-		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 }
 
@@ -1844,7 +1834,7 @@ impl Request {
 	/// close the session.
 	#[cfg(feature = "async")]
 	pub async fn closed(&self) -> Error {
-		closed(self.issue()).await
+		kio::wait(|waiter| poll_closed(self.issue(), waiter)).await
 	}
 
 	/// Grant the token. The grant holds until the returned [`Issued`] is revoked
@@ -2241,18 +2231,6 @@ impl RequestGrant {
 		latch(&held.ended, ended.clone());
 		Poll::Ready(ended)
 	}
-
-	/// Run `body`, everything a request does once admitted, until it finishes or `grant`
-	/// (when its token admitted it) ends. See [`until`].
-	pub(crate) fn guard<F: std::future::Future + Send>(
-		grant: Option<&Self>,
-		body: F,
-	) -> impl std::future::Future<Output = std::result::Result<F::Output, Refusal>> + Send {
-		crate::util::sendable(until(body, move |waiter| match grant {
-			Some(grant) => grant.poll_ended(waiter),
-			None => Poll::Pending,
-		}))
-	}
 }
 
 /// Record `refusal` as why a request grant ended, unless an earlier end already is.
@@ -2262,29 +2240,6 @@ fn latch(ended: &kio::Producer<Option<Refusal>>, refusal: Refusal) {
 	{
 		*ended = Some(refusal);
 	}
-}
-
-/// Run `body` until it finishes, or until `ended` resolves first, which drops `body` wherever
-/// it waits.
-///
-/// An admitted request runs everything it does under this, its setup included, so authority
-/// ending at any await ends the request there, rather than only where a loop remembers to
-/// check. `ended` is polled first, so a request never acts on authority that already ended.
-/// A dropped `body` releases what it holds; anything it was writing stays buffered whole in
-/// the stream's [`Writer`](crate::coding::Writer) as long as each message is buffered before
-/// its first await, so the caller can still end the request on the wire.
-pub(crate) async fn until<F: std::future::Future>(
-	body: F,
-	mut ended: impl FnMut(&kio::Waiter) -> Poll<Refusal>,
-) -> std::result::Result<F::Output, Refusal> {
-	let mut body = std::pin::pin!(body);
-	kio::wait(|waiter| {
-		if let Poll::Ready(refusal) = ended(waiter) {
-			return Poll::Ready(Err(refusal));
-		}
-		waiter.poll_future(body.as_mut()).map(Ok)
-	})
-	.await
 }
 
 /// Whether `grant` covers a `kind` request at `path` and has not already expired: admitting
@@ -2324,7 +2279,7 @@ impl Issued {
 	/// to end ([`Error::Cancel`]), or its stream or the session to end.
 	#[cfg(feature = "async")]
 	pub async fn closed(&self) -> Error {
-		closed(&self.issue).await
+		kio::wait(|waiter| poll_closed(&self.issue, waiter)).await
 	}
 }
 
@@ -2334,19 +2289,16 @@ impl Drop for Issued {
 	}
 }
 
-#[cfg(feature = "async")]
-async fn closed(issue: &kio::Shared<Issue>) -> Error {
-	kio::wait(|waiter| {
-		let issue = ready_or!(issue.poll(waiter, |issue| {
-			if issue.peer.is_some() {
-				Poll::Ready(())
-			} else {
-				Poll::Pending
-			}
-		}));
-		Poll::Ready(issue.peer.clone().expect("checked above"))
-	})
-	.await
+/// Resolve with why the peer ended the token behind `issue`.
+fn poll_closed(issue: &kio::Shared<Issue>, waiter: &kio::Waiter) -> Poll<Error> {
+	let issue = ready_or!(issue.poll(waiter, |issue| {
+		if issue.peer.is_some() {
+			Poll::Ready(())
+		} else {
+			Poll::Pending
+		}
+	}));
+	Poll::Ready(issue.peer.clone().expect("checked above"))
 }
 
 /// Which way media flows, from this side's view.
@@ -2593,22 +2545,14 @@ impl Gate {
 		Poll::Ready(())
 	}
 
-	/// Resolve one operation under this gate without dropping the handler's refusal path.
-	#[cfg(feature = "async")]
-	pub(crate) async fn guard<T>(&mut self, operation: impl std::future::Future<Output = Result<T>>) -> Result<T> {
-		let mut operation = std::pin::pin!(operation);
-		kio::wait(|waiter| {
-			std::task::ready!(self.poll_ready(waiter));
-			// Ahead of the gate it also closes, so a lapsed token is refused as expired.
-			if let Poll::Ready(refusal) = self.poll_token_ended(waiter) {
-				return Poll::Ready(Err(refusal.error));
-			}
-			if self.poll_denied(waiter).is_ready() {
-				return Poll::Ready(Err(Error::Unauthorized));
-			}
-			waiter.poll_future(operation.as_mut())
-		})
-		.await
+	/// Resolve with why an admitted request must stop: its token's refusal once it ended, or
+	/// [`Error::Unauthorized`] once the session no longer allows the path.
+	pub(crate) fn poll_refused(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
+		// Ahead of the gate it also closes, so a lapsed token is refused as expired.
+		if let Poll::Ready(refusal) = self.poll_token_ended(waiter) {
+			return Poll::Ready(refusal.error);
+		}
+		self.poll_denied(waiter).map(|()| Error::Unauthorized)
 	}
 
 	/// Resolve once the session no longer allows the path. A union that is still

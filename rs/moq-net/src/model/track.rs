@@ -386,6 +386,10 @@ pub(crate) struct TrackState {
 	// past `detached_kept`, the count its last prune left.
 	detached: Vec<group::Detached>,
 	detached_kept: usize,
+	// The flights of each group: copies of their own, from a frame a cached copy shed, for
+	// the readers riding them; see [`Self::board`]. Held weakly, so the last rider leaving
+	// frees one, and pruned as they are looked up.
+	flights: BTreeMap<u64, Vec<group::Detached>>,
 
 	// Publisher-produced groups in arrival order as (sequence, stamp), walked by
 	// subscriptions; an entry only resolves while its stamp matches the slot's.
@@ -2454,6 +2458,17 @@ impl TrackState {
 				paid = paid.saturating_add(freed);
 			}
 		}
+		// Then the flights, which readers ride for the same reason, cached group or not.
+		for flight in self.flights.values().flatten() {
+			if self.debt == 0 || paid >= cap {
+				break;
+			}
+			if let Some(group) = flight.held() {
+				let freed = group.shed(self.debt, cap - paid.min(cap));
+				self.debt -= freed.min(self.debt);
+				paid = paid.saturating_add(freed);
+			}
+		}
 		paid
 	}
 
@@ -3092,6 +3107,161 @@ impl TrackState {
 		}
 		self.evict_expired();
 		Ok(group)
+	}
+}
+
+impl TrackState {
+	/// Store a flight a [`Fill`] answered: a copy of group `sequence` of its own, from the
+	/// frame its riders start at, which the cache never serves in place of its cached copy.
+	pub(super) fn insert_flight(
+		&mut self,
+		sequence: u64,
+		frames: group::Bounds,
+		info: Option<Info>,
+	) -> Result<group::Producer> {
+		if let Some(err) = &self.abort {
+			return Err(err.clone());
+		}
+		if self.info.is_none() {
+			self.install(info.unwrap_or_else(|| Info::default().with_max_age(None)));
+		}
+		let info = self.info.clone().unwrap();
+		let mut group = group::Producer::new(group::Info { sequence }, info.clone(), self.cache.clone());
+		// A compressed flight inflates from frame 0 with a decoder of its own, so it keeps
+		// its own content rather than the cached copy's, whose inflated copy is further on.
+		if !info.compress {
+			if let Some(content) = self.content_for_copy(sequence)? {
+				group.handle().share_content(content);
+			}
+			group.handle().register_content(&self.contents);
+		}
+		group.bound(frames)?;
+		self.cap(&group.handle())?;
+		self.charge_debt();
+		self.detach(&group.handle());
+		// Forget every flight gone since, so only flights still held are kept.
+		self.flights.retain(|_, flights| {
+			flights.retain(|flight| flight.held().is_some());
+			!flights.is_empty()
+		});
+		self.flights.entry(sequence).or_default().push(group.handle().detach());
+		Ok(group)
+	}
+
+	/// The copy of its group `reader` rides at its frame, furthest along of those that admit
+	/// it (see [`group::Handle::admits`]), and whether it is a flight rather than a cached
+	/// copy. When `ahead`, only one further along than the copy it reads, which it hands
+	/// over from.
+	pub(super) fn ride(&self, reader: &group::Consumer, ahead: bool) -> Option<(group::Handle, bool)> {
+		let sequence = reader.sequence;
+		let cached = self
+			.lookup
+			.get(&sequence)
+			.into_iter()
+			.flat_map(Slot::copies)
+			.map(|copy| (copy.clone(), false));
+		let flights = self
+			.flights
+			.get(&sequence)
+			.into_iter()
+			.flatten()
+			.filter_map(|flight| Some((flight.held()?, true)));
+		let past = ahead.then(|| reader.committed());
+		cached
+			.chain(flights)
+			.filter(|(copy, _)| !ahead || !copy.is_read_by(reader))
+			.map(|(copy, flight)| (copy.committed(), copy, flight))
+			.filter(|(committed, copy, _)| past.is_none_or(|past| *committed > past) && copy.admits(reader))
+			.max_by_key(|(committed, ..)| *committed)
+			.map(|(_, copy, flight)| (copy, flight))
+	}
+}
+
+/// Where a reader at a frame its copy shed goes: see [`board`].
+pub(super) enum Board {
+	/// Ride this copy, a flight or a cached copy, which holds the frame.
+	Ride(group::Consumer, bool),
+	/// Wait for a flight the track's handlers were asked for.
+	Wait(Boarding),
+}
+
+/// Board `reader`'s group at its frame, which the copy it read shed: ride a copy that
+/// admits it, else ask the track's [`Requests`] handlers for a flight from that frame.
+/// `None` when no handler can serve one.
+///
+/// A compressed group's flight starts at frame 0, since a later frame builds on the ones
+/// before it, and its riders skip to their frame.
+pub(super) fn board(track: &kio::Producer<TrackState>, reader: &group::Consumer) -> Option<Board> {
+	let state = track.read();
+	let compress = state.info.as_ref()?.compress;
+	if let Some((copy, flight)) = state.ride(reader, false)
+		&& let Some(copy) = copy.try_consume()
+	{
+		return Some(Board::Ride(copy, flight));
+	}
+	let fills = state.fills.clone();
+	drop(state);
+	let asking = fill::Asking {
+		priority: 0,
+		max_delay: None,
+		order: Order::Ascending,
+	};
+	let (sequence, frame) = (reader.sequence, if compress { 0 } else { reader.index() });
+	let join = fills.lock().fly(&fills, sequence, frame, asking)?;
+	Some(Board::Wait(Boarding {
+		join: Box::new(join),
+		sequence,
+		frame,
+	}))
+}
+
+/// The copy `reader`, riding a flight, hands over to: one further along that admits it,
+/// and whether that is a flight. See [`TrackState::ride`].
+pub(super) fn hand_over(
+	track: &kio::Producer<TrackState>,
+	reader: &group::Consumer,
+) -> Option<(group::Consumer, bool)> {
+	let (copy, flight) = track.read().ride(reader, true)?;
+	Some((copy.try_consume()?, flight))
+}
+
+/// A reader waiting on the flight it asked for.
+pub(super) struct Boarding {
+	// Boxed: a reader holds one only while boarding.
+	join: Box<fill::Join>,
+	sequence: u64,
+	frame: u64,
+}
+
+impl Boarding {
+	/// The frame the flight starts at.
+	pub(super) fn frame(&self) -> u64 {
+		self.frame
+	}
+
+	/// Poll for a reader of the flight, or why none came: the handlers refused it, or went
+	/// away without answering.
+	pub(super) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<group::Consumer>> {
+		let frames = group::Bounds {
+			start: self.frame,
+			end: None,
+		};
+		let sequence = self.sequence;
+		let answer = self
+			.join
+			.outcome()
+			.poll(waiter, |outcome| match outcome.refused(sequence) {
+				Some((err, _)) => Poll::Ready(Err(err.clone())),
+				None if outcome.is_accepted(sequence) => {
+					Poll::Ready(outcome.partial(sequence, frames).ok_or(Error::Cancel))
+				}
+				None => Poll::Pending,
+			});
+		Poll::Ready(match ready!(answer) {
+			Ok(Ok(copy)) => copy.try_consume().ok_or(Error::Cancel),
+			Ok(Err(err)) => Err(err),
+			Err(_closed) => Err(Error::NotFound),
+		})
 	}
 }
 
@@ -3778,17 +3948,10 @@ impl Producer {
 		Ok(())
 	}
 
-	/// Block until the track's outcome is final: `Ok` once its declared end is reached (its
-	/// error, if declared with one), or the abort error, or [`Error::Dropped`] once every
+	/// Resolves once the track's outcome is final: `Ok` once its declared end is reached
+	/// (its error, if declared with one), or the abort error, or [`Error::Dropped`] once every
 	/// producer left without either.
-	#[cfg(feature = "async")]
-	pub async fn closed(&self) -> Result<()> {
-		kio::wait(|waiter| self.poll_closed(waiter)).await
-	}
-
-	/// Poll until the track's outcome is final: `Ok` once its declared end is reached (its
-	/// error, if declared with one), or the abort error, or [`Error::Dropped`] once every
-	/// producer left without either.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
 		TrackState::settle(self.state.poll_ref(waiter, |state| state.poll_outcome(waiter)))
 	}
@@ -3910,16 +4073,6 @@ impl Producer {
 		}
 	}
 
-	/// Block until the aggregate subscription changes, then return the new value.
-	///
-	/// Yields the most demanding request across all live subscribers, or `None`
-	/// once the last one drops. Used by relays to forward downstream demand
-	/// upstream (e.g. SUBSCRIBE_UPDATE).
-	#[cfg(feature = "async")]
-	pub async fn subscription_changed(&mut self) -> Result<Option<Subscription>> {
-		kio::wait(|waiter| self.poll_subscription_changed(waiter)).await
-	}
-
 	/// A non-blocking snapshot of the current aggregate subscription, or `None`
 	/// when there are no live subscribers. Unlike [`Self::subscription`], this
 	/// doesn't wait for a change or advance the change cursor.
@@ -3935,9 +4088,11 @@ impl Producer {
 		snapshot_subscription(&subs, bound)
 	}
 
-	/// Poll for a changed subscription: the
-	/// aggregate subscription whenever it changes, or `None` once nobody is subscribed.
-	/// Errors once the track is aborted.
+	/// The aggregate subscription once it changes: the most demanding request across all
+	/// live subscribers, or `None` once the last one drops. Errors once the track is aborted.
+	///
+	/// Used by relays to forward downstream demand upstream (e.g. SUBSCRIBE_UPDATE).
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_subscription_changed(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Subscription>>> {
 		// Surface an abort as the stream ending. `poll_closed` parks on the closed
 		// waiters, so per-group churn on the track state never wakes this poll.
@@ -3990,6 +4145,11 @@ impl Producer {
 /// from upstream. While at least one is alive a reader's miss queues a [`Fill`] for it
 /// to serve; with none, the miss is named dropped, and a cache-miss
 /// [`Consumer::fetch_group`] on an accepted track fails fast with [`Error::NotFound`].
+///
+/// A live handle also lets a reader at a frame a group copy shed replay it: a [`Fill`] of
+/// that one group from that frame asks for a flight, a copy of its own paced by the readers
+/// riding it, which they leave for the copy ahead once it holds their frame within reach.
+/// Serve it like any group, and stop once nobody reads it: see [`Fill::is_wanted`].
 pub struct Requests {
 	name: Arc<str>,
 	// Kept to insert served groups into the cache and observe track abort.
@@ -4018,34 +4178,24 @@ impl Requests {
 		&self.name
 	}
 
-	/// Block until readers miss a run of groups, returning a [`Fill`] to serve via
-	/// [`Fill::accept`] and [`Fill::drop_groups`].
+	/// The next run of groups readers miss, as a [`Fill`] to serve via [`Fill::accept`]
+	/// and [`Fill::drop_groups`].
 	///
 	/// A relay fetches the run upstream; an origin already has its groups cached, so
 	/// nothing reaches here. Errors once the track is aborted.
-	#[cfg(feature = "async")]
-	pub async fn requested_fill(&self) -> Result<Fill> {
-		kio::wait(|waiter| self.poll_requested_fill(waiter)).await
-	}
-
-	/// Poll for a fill to serve.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_requested_fill(&self, waiter: &kio::Waiter) -> Poll<Result<Fill>> {
 		fill::poll_requested(&self.state, &self.fills, waiter)
 	}
 
 	/// The next fill, which a test expects to name a single group.
 	#[cfg(test)]
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub(crate) fn poll_requested_fill_group(&self, waiter: &kio::Waiter) -> Poll<Result<GroupFill>> {
 		self.poll_requested_fill(waiter).map_ok(|fill| {
 			assert_eq!(fill.end() - fill.start().group, 1, "a one-group fill");
 			fill.group(fill.start().group)
 		})
-	}
-
-	/// [`Self::poll_requested_fill_group`], awaited.
-	#[cfg(all(test, feature = "async"))]
-	pub(crate) async fn requested_fill_group(&self) -> Result<GroupFill> {
-		kio::wait(|waiter| self.poll_requested_fill_group(waiter)).await
 	}
 
 	/// Watch subscriber demand without keeping the track alive.
@@ -4431,23 +4581,18 @@ impl Demand {
 		Some(wanted)
 	}
 
-	/// Return [`wanted`](Self::wanted) once it differs from what this handle last returned:
-	/// immediately on the first call, then on each change. Errors once the track is closed
-	/// or aborted.
-	///
-	/// So `while let Some(n) = demand.wanted_changed().await?` runs while anyone wants the
-	/// track, and `while demand.wanted_changed().await?.is_none()` waits for someone to.
-	#[cfg(feature = "async")]
-	pub async fn wanted_changed(&mut self) -> Result<Option<u64>> {
-		kio::wait(|waiter| self.poll_wanted_changed(waiter)).await
-	}
-
 	/// The demand aggregate.
 	fn subscriptions(&self) -> kio::Lock<Subscriptions> {
 		self.state.read().subscriptions.clone()
 	}
 
-	/// Poll for [`wanted`](Self::wanted) to differ from what this handle last returned.
+	/// [`wanted`](Self::wanted) once it differs from what this handle last returned:
+	/// immediately on the first call, then on each change. Errors once the track is closed
+	/// or aborted.
+	///
+	/// So `while let Some(n) = demand.wanted_changed().await?` runs while anyone wants the
+	/// track, and `while demand.wanted_changed().await?.is_none()` waits for someone to.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_wanted_changed(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<u64>>> {
 		let active = match self.poll_state(waiter) {
 			DemandState::Closed => return Poll::Ready(Err(self.abort_reason())),
@@ -4463,17 +4608,14 @@ impl Demand {
 		Poll::Ready(Ok(next))
 	}
 
-	/// Block until the track's outcome is final; see [`Producer::closed`].
-	#[cfg(feature = "async")]
-	pub async fn closed(&self) -> Result<()> {
-		kio::wait(|waiter| {
-			TrackState::settle(
-				self.state
-					.consume_weak()
-					.poll(waiter, |state| state.poll_outcome(waiter)),
-			)
-		})
-		.await
+	/// Resolves once the track's outcome is final; see [`Producer::poll_closed`].
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
+		TrackState::settle(
+			self.state
+				.consume_weak()
+				.poll(waiter, |state| state.poll_outcome(waiter)),
+		)
 	}
 
 	/// The publisher's tie-break priority, as set in [`Info::priority`].
@@ -5240,7 +5382,9 @@ impl Consumer {
 		})
 	}
 
-	/// Poll for the track's largest location: the current one, then each newer one, and `None` once the track ends.
+	/// The track's largest location, its newest group at the newest frame (0 while empty):
+	/// the current one, then each newer one, and `None` once the track ends.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_largest(&mut self, waiter: &kio::Waiter) -> Poll<Option<Position>> {
 		let mut seen = self.largest;
 		let next = self.poll_largest_after(&mut seen, Bounds::default(), waiter);
@@ -5277,12 +5421,6 @@ impl Consumer {
 				),
 			}
 		})
-	}
-
-	/// The track's largest location, its newest group at the newest frame (0 while empty): the current one, then each newer one, and `None` once the track ends.
-	#[cfg(feature = "async")]
-	pub async fn largest(&mut self) -> Option<Position> {
-		kio::wait(|waiter| self.poll_largest(waiter)).await
 	}
 
 	pub(crate) fn latest_sequence(&self) -> Option<u64> {
@@ -8140,7 +8278,7 @@ impl Subscriber {
 		}
 	}
 
-	/// Poll for the next group in arrival order, without blocking.
+	/// The next group in arrival order.
 	///
 	/// Returns each group it delivers exactly once, in the order it landed on the wire,
 	/// which may be out of sequence due to network reordering or loss. Use
@@ -8157,7 +8295,7 @@ impl Subscriber {
 	/// Groups are semi-reliable, and the [`Delay::max`] budget is the other
 	/// thing (alongside eviction and a moving start) that decides which of them arrive:
 	/// one that has drifted further behind the live edge than the budget tolerates is
-	/// skipped rather than handed over, so a single poll walks off a whole backlog. The
+	/// skipped rather than handed over, so a single read walks off a whole backlog. The
 	/// default is [`Duration::ZERO`], which takes the live
 	/// edge and writes the rest off; raise it to read history. [`Self::with_range`] and
 	/// [`Subscription::ranges`] are filters, not exemptions: backfill needs a budget that
@@ -8187,10 +8325,9 @@ impl Subscriber {
 	/// they cover there. One missing the frames asked for reads [`Error::Lagged`] rather
 	/// than starting short.
 	///
-	/// Returns `Poll::Ready(Ok(Some(group)))` when a group is available,
-	/// `Poll::Ready(Ok(None))` when the track is finished or the ranges are read,
-	/// `Poll::Ready(Err(e))` when the track has been aborted, or
-	/// `Poll::Pending` when no group is available yet.
+	/// Returns `Ok(Some(group))` when a group is available, `Ok(None)` when the track is
+	/// finished or the ranges are read, or the error when the track has been aborted.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_recv_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
 		self.poll_group(false, waiter)
 	}
@@ -8443,19 +8580,6 @@ impl Subscriber {
 				}) || owed())
 	}
 
-	/// Receive the next group in arrival order.
-	///
-	/// Every group sequence is returned at most once, in the order it landed on the wire, which may
-	/// be out of sequence due to network reordering or loss. Use [`Self::ordered`] if you
-	/// only want groups whose sequence number is higher than any previously returned.
-	/// See [`Self::poll_recv_group`] for how [`Self::with_range`] applies.
-	/// Once a bounded range returns `Ok(None)`, later reads return it immediately too;
-	/// widening the ranges with [`Self::update`] resumes reading the newly covered groups.
-	#[cfg(feature = "async")]
-	pub async fn recv_group(&mut self) -> Result<Option<group::Consumer>> {
-		kio::wait(|waiter| self.poll_recv_group(waiter)).await
-	}
-
 	/// The sequence cursor behind [`Ordered`], which owns the only public door to it.
 	pub(super) fn poll_next_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
 		self.poll_group(true, waiter)
@@ -8686,25 +8810,20 @@ impl Subscriber {
 		}
 	}
 
-	/// Poll for the track's declared exclusive end, without blocking.
+	/// The track's declared exclusive end position, or the cause on an abort. See
+	/// [`Producer::finish_at`] for what the position means.
+	///
+	/// Resolves as soon as the end is known, which may be ahead of the live edge
+	/// when the producer finished via [`Producer::finish_at`]. This reports the declared
+	/// end, not that every group has arrived. A local session close without a declared
+	/// end returns [`Error::Closed`]. Read [`Self::poll_recv_group`] (or
+	/// [`Ordered::poll_next_group`]) until it yields `None` to observe the track fully drained.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<Position>> {
 		match &mut self.inner {
 			Inner::Plain(cursor) => cursor.poll_finished(waiter),
 			Inner::Resume(resume, _) => resume.poll_finished(waiter),
 		}
-	}
-
-	/// Block until the track declares its end, returning the exclusive end position, or the
-	/// cause on an abort. See [`Producer::finish_at`] for what the position means.
-	///
-	/// Resolves as soon as the end is known, which may be ahead of the live edge
-	/// when the producer finished via [`Producer::finish_at`]. This reports the declared
-	/// end, not that every group has arrived. A local session close without a declared
-	/// end returns [`Error::Closed`]. Drive [`Self::recv_group`] (or
-	/// [`Ordered::next_group`]) until it yields `None` to observe the track fully drained.
-	#[cfg(feature = "async")]
-	pub async fn finished(&mut self) -> Result<Position> {
-		kio::wait(|waiter| self.poll_finished(waiter)).await
 	}
 
 	/// Limit subsequent reads to these group sequences, returning `self` for chaining.
@@ -8806,6 +8925,7 @@ impl Subscriber {
 	/// the cache does not stand in for it, so a cap moved below the largest stays pending.
 	/// Moving the bounds wakes a parked poll, which reports the largest once it is within
 	/// them and newer than the last report.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_largest(&mut self, waiter: &kio::Waiter) -> Poll<Option<Position>> {
 		if self.largest.ended {
 			return Poll::Ready(None);
@@ -8840,12 +8960,6 @@ impl Subscriber {
 			}
 			Inner::Resume(resume, _) => resume.poll_largest(seen, bounds, waiter),
 		}
-	}
-
-	/// The largest location within [`Self::with_range`]; see [`Self::poll_largest`].
-	#[cfg(feature = "async")]
-	pub async fn largest(&mut self) -> Option<Position> {
-		kio::wait(|waiter| self.poll_largest(waiter)).await
 	}
 
 	/// The track's largest location known now, ignoring [`Self::with_range`], without waiting
@@ -8946,8 +9060,7 @@ impl Ordered {
 		self.inner.broadcast()
 	}
 
-	/// Poll for the next group with a higher sequence number than any previously
-	/// returned, without blocking.
+	/// The next group with a higher sequence number than any previously returned.
 	///
 	/// Honors the group range set by [`Self::with_range`]:
 	/// a group past the cap stays in the producer's cache and becomes eligible again if
@@ -8956,22 +9069,12 @@ impl Ordered {
 	/// Later reads return `Ok(None)` immediately too; widening the ranges with
 	/// [`Self::update`] resumes reading above the last sequence returned.
 	///
-	/// Returns `Poll::Ready(Ok(Some(group)))` when a group is available,
-	/// `Poll::Ready(Ok(None))` when the track is finished (including an abort after its
-	/// declared end settled, see [`Producer::abort`]) or the ranges are read,
-	/// `Poll::Ready(Err(e))` when the track has been aborted short of its end, or
-	/// `Poll::Pending` when no group is available yet.
+	/// Returns `Ok(Some(group))` when a group is available, `Ok(None)` when the track is
+	/// finished (including an abort after its declared end settled, see [`Producer::abort`])
+	/// or the ranges are read, or the error when the track has been aborted short of its end.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
 		self.inner.poll_next_group(waiter)
-	}
-
-	/// Return the next group with a higher sequence number than any previously returned.
-	///
-	/// Once a bounded range returns `Ok(None)`, later reads return it immediately too;
-	/// widening the ranges with [`Self::update`] resumes reading above the last sequence returned.
-	#[cfg(feature = "async")]
-	pub async fn next_group(&mut self) -> Result<Option<group::Consumer>> {
-		kio::wait(|waiter| self.poll_next_group(waiter)).await
 	}
 
 	/// Limit subsequent reads to these group sequences, returning `self` for chaining.
@@ -9006,24 +9109,19 @@ impl Ordered {
 		self.inner.update(subscription)
 	}
 
-	/// Block until the track declares its end, returning the exclusive end position.
+	/// The exclusive end position, once the track declares its end.
 	///
-	/// See [`Subscriber::finished`]: this reports the declared end, not that every group
+	/// See [`Subscriber::poll_finished`]: this reports the declared end, not that every group
 	/// has arrived.
-	#[cfg(feature = "async")]
-	pub async fn finished(&mut self) -> Result<Position> {
-		kio::wait(|waiter| self.inner.poll_finished(waiter)).await
-	}
-
-	/// Poll for the largest location within [`Self::with_range`]; see [`Subscriber::poll_largest`].
-	pub fn poll_largest(&mut self, waiter: &kio::Waiter) -> Poll<Option<Position>> {
-		self.inner.poll_largest(waiter)
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<Position>> {
+		self.inner.poll_finished(waiter)
 	}
 
 	/// The largest location within [`Self::with_range`]; see [`Subscriber::poll_largest`].
-	#[cfg(feature = "async")]
-	pub async fn largest(&mut self) -> Option<Position> {
-		kio::wait(|waiter| self.poll_largest(waiter)).await
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_largest(&mut self, waiter: &kio::Waiter) -> Poll<Option<Position>> {
+		self.inner.poll_largest(waiter)
 	}
 
 	/// Whether `other` reads the same underlying track state.
@@ -9324,14 +9422,9 @@ impl Request {
 		snapshot_subscription(&subs, bound)
 	}
 
-	/// Block until the aggregate [`subscription`](Self::subscription) changes,
-	/// yielding `None` once nobody is waiting.
-	#[cfg(feature = "async")]
-	pub async fn subscription_changed(&mut self) -> Option<Subscription> {
-		kio::wait(|waiter| self.poll_subscription_changed(waiter)).await
-	}
-
-	/// Poll for a changed subscription.
+	/// The aggregate [`subscription`](Self::subscription) once it changes, or `None` once
+	/// nobody is waiting.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_subscription_changed(&mut self, waiter: &kio::Waiter) -> Poll<Option<Subscription>> {
 		let state = self.state.read();
 		let (subs, bound) = (state.subscriptions.clone(), state.demand_bound());
@@ -23199,6 +23292,324 @@ mod test {
 
 		let _joined = producer.subscribe(None);
 		assert_eq!(producer.demand().wanted(), Some(1), "a join asks for the same group");
+	}
+
+	/// The frame a read takes right now, as its number in [`numbered`].
+	fn read_numbered(reader: &mut group::Consumer) -> Option<u32> {
+		let frame = reader.read_frame().now_or_never()?;
+		let frame = frame.expect("read failed").expect("the group ended");
+		Some(u32::from_le_bytes(frame.payload[..4].try_into().unwrap()))
+	}
+
+	/// A late joiner of a live group that shed its front boards a flight from frame 0,
+	/// served by the track's handler, reads it as the handler writes it, and hands over to
+	/// the live copy once that copy holds its frame within reach of the live reader. The
+	/// flight is then unwanted, so its handler stops.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_late_joiner_rides_a_flight_and_hands_over() {
+		let producer = track_producer("test", Info::default());
+		let requests = producer.requests();
+		let mut live = producer.append_group().unwrap();
+		let mut reader = live.consume();
+		let mut late = live.consume();
+		// 48 MiB, half again the live tail.
+		const FRAMES: u32 = 3_000;
+		for index in 0..FRAMES {
+			live.write_frame(None, numbered(index)).unwrap();
+			assert_eq!(read_numbered(&mut reader), Some(index));
+		}
+
+		// Frame 0 was shed: the late reader asks the handler for a flight from it.
+		assert_eq!(read_numbered(&mut late), None);
+		let fill = match requests.poll_requested_fill(&kio::Waiter::noop()) {
+			Poll::Ready(fill) => fill.unwrap(),
+			Poll::Pending => panic!("a flight is asked"),
+		};
+		assert_eq!(fill.start(), Position { group: 0, frame: 0 });
+		let mut flight = fill.accept(0, None).unwrap();
+		assert_eq!(read_numbered(&mut late), None, "aboard, waiting on the handler");
+		let unwanted = |flight: &group::Producer| flight.handle().poll_unwanted(&kio::Waiter::noop()).is_ready();
+		assert!(!unwanted(&flight), "ridden");
+
+		// The handler writes as the rider reads, until the rider leaves for the live copy.
+		let mut index = 0;
+		while !unwanted(&flight) {
+			flight.write_frame(None, numbered(index)).unwrap();
+			assert_eq!(read_numbered(&mut late), Some(index));
+			index += 1;
+			assert!(index < FRAMES, "handed over before the flight caught up");
+		}
+		// The live writer runs its whole window ahead of the live reader at once: the
+		// rider, as far behind that reader as it was admitted, keeps its frame.
+		let mut written = FRAMES;
+		while live
+			.poll_ready(&kio::Waiter::noop(), &frame_info(&numbered(0)))
+			.is_ready()
+		{
+			live.write_frame(None, numbered(written)).unwrap();
+			written += 1;
+		}
+		assert!(written > FRAMES + 900, "a whole window: {written}");
+		while index < written {
+			assert_eq!(
+				read_numbered(&mut late),
+				Some(index),
+				"frame {index} from the live copy"
+			);
+			index += 1;
+		}
+		assert_eq!(read_numbered(&mut late), None, "at the live edge");
+	}
+
+	/// A plain reader of a compressed group that fell off boards a flight from frame 0,
+	/// since every later frame builds on the ones before it, and skips the frames before its
+	/// own as the handler writes them. It then hands over to the live copy.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_compressed_flight_starts_at_frame_0_and_its_rider_skips_ahead() {
+		let producer = track_producer("test", Info::default().with_compress(true));
+		let requests = producer.requests();
+		let mut live = producer.append_group().unwrap();
+		let mut reader = live.consume();
+		let mut behind = live.consume();
+		const FRAMES: u32 = 3_000;
+		for index in 0..FRAMES {
+			live.write_frame(None, numbered(index)).unwrap();
+			assert_eq!(read_numbered(&mut reader), Some(index));
+			if index < 10 {
+				assert_eq!(read_numbered(&mut behind), Some(index));
+			}
+		}
+
+		// The live reader's inflated copy shed frame 10, which the decoder is past.
+		assert_eq!(read_numbered(&mut behind), None);
+		let fill = asked(&requests).expect("a flight");
+		assert_eq!(fill.start(), Position { group: 0, frame: 0 }, "from frame 0");
+		let mut flight = fill.accept(0, None).unwrap();
+		let unwanted = |flight: &group::Producer| flight.handle().poll_unwanted(&kio::Waiter::noop()).is_ready();
+		for index in 0..10 {
+			flight.write_frame(None, numbered(index)).unwrap();
+			assert_eq!(read_numbered(&mut behind), None, "frame {index} is skipped");
+		}
+		let mut index = 10;
+		while !unwanted(&flight) {
+			flight.write_frame(None, numbered(index)).unwrap();
+			assert_eq!(read_numbered(&mut behind), Some(index));
+			index += 1;
+			assert!(index < FRAMES, "handed over before the flight caught up");
+		}
+		while index < FRAMES {
+			assert_eq!(
+				read_numbered(&mut behind),
+				Some(index),
+				"frame {index} from the live copy"
+			);
+			index += 1;
+		}
+		assert_eq!(read_numbered(&mut behind), None, "at the live edge");
+	}
+
+	/// The size of `payload` as a frame, for [`group::Producer::poll_ready`].
+	fn frame_info(payload: &bytes::Bytes) -> frame::Info {
+		frame::Info {
+			size: payload.len() as u64,
+			timestamp: None,
+		}
+	}
+
+	/// A live group of `frames` numbered frames past its tail, read along by a live reader,
+	/// on a track with a handler.
+	fn shed_live_group(frames: u32) -> (Producer, Requests, group::Producer, group::Consumer) {
+		let producer = track_producer("test", Info::default());
+		let requests = producer.requests();
+		let mut live = producer.append_group().unwrap();
+		let mut reader = live.consume();
+		for index in 0..frames {
+			live.write_frame(None, numbered(index)).unwrap();
+			assert_eq!(read_numbered(&mut reader), Some(index));
+		}
+		(producer, requests, live, reader)
+	}
+
+	/// The next fill asked of `requests`, if any.
+	fn asked(requests: &Requests) -> Option<Fill> {
+		match requests.poll_requested_fill(&kio::Waiter::noop()) {
+			Poll::Ready(fill) => Some(fill.unwrap()),
+			Poll::Pending => None,
+		}
+	}
+
+	/// Joiners at the same shed frame share one flight; one joining later boards it while
+	/// its frame is within reach of the flight's fastest rider, and asks a flight of its
+	/// own once it is not.
+	#[test]
+	#[cfg(feature = "async")]
+	fn joiners_within_reach_share_one_flight() {
+		let (_producer, requests, live, _reader) = shed_live_group(3_000);
+		let (mut first, mut second) = (live.consume(), live.consume());
+		assert_eq!(read_numbered(&mut first), None);
+		assert_eq!(read_numbered(&mut second), None);
+		let fill = asked(&requests).expect("a flight");
+		assert!(asked(&requests).is_none(), "the second joiner shares it");
+		let mut flight = fill.accept(0, None).unwrap();
+		// 8 MiB in, half the reach.
+		for index in 0..500 {
+			flight.write_frame(None, numbered(index)).unwrap();
+			assert_eq!(read_numbered(&mut first), Some(index));
+		}
+		let mut near = live.consume();
+		assert_eq!(read_numbered(&mut near), Some(0), "boards the flight at once");
+		assert_eq!(read_numbered(&mut second), Some(0));
+		assert!(asked(&requests).is_none(), "one upstream fill");
+		// 17 MiB in, past the reach.
+		for index in 500..1_100 {
+			flight.write_frame(None, numbered(index)).unwrap();
+			assert_eq!(read_numbered(&mut first), Some(index));
+		}
+		let mut far = live.consume();
+		assert_eq!(read_numbered(&mut far), None, "too far behind the flight's rider");
+		let own = asked(&requests).expect("a flight of its own");
+		assert_eq!(own.start(), Position { group: 0, frame: 0 });
+	}
+
+	/// A flight sheds its front under pool debt like the copy it replays, so a pool far
+	/// smaller than one tail holds a live group and its flight near the pool.
+	#[test]
+	#[cfg(feature = "async")]
+	fn pool_debt_sheds_a_flight() {
+		const POOL: u64 = 4 * 1024 * 1024;
+		let pool = cache::Pool::new(cache::Config::default().with_capacity(POOL));
+		let producer = Producer::new(
+			Arc::new(broadcast::Info {
+				pool: pool.clone(),
+				..Default::default()
+			}),
+			"test",
+			Info::default(),
+		);
+		let requests = producer.requests();
+		let mut live = producer.append_group().unwrap();
+		let mut late = live.consume();
+		for index in 0..1_000 {
+			live.write_frame(None, numbered(index)).unwrap();
+		}
+		assert_eq!(read_numbered(&mut late), None);
+		let mut flight = asked(&requests).expect("a flight").accept(0, None).unwrap();
+		assert_eq!(read_numbered(&mut late), None);
+		for index in 0..1_000 {
+			flight.write_frame(None, numbered(index)).unwrap();
+			assert_eq!(read_numbered(&mut late), Some(index));
+			assert!(pool.used() < 2 * POOL, "frame {index}: {} bytes held", pool.used());
+		}
+	}
+
+	/// A reader waiting on the flight it asked for still goes stale: its budget gives up on
+	/// the group once a newer one supersedes it, though the handler never answered.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_reader_boarding_a_flight_goes_stale() {
+		let producer = track_producer("test", Info::timed());
+		let requests = producer.requests();
+		let mut sub = producer.subscribe(None);
+		let mut live = producer.append_group().unwrap();
+		for index in 0..3_000u32 {
+			let at = Timestamp::from_millis(index.into()).unwrap();
+			live.write_frame(at, numbered(index)).unwrap();
+		}
+		let mut late = sub.recv_group().now_or_never().unwrap().unwrap().expect("group 0");
+		assert!(late.read_frame().now_or_never().is_none(), "boarding");
+		let _flight = asked(&requests).expect("a flight, never answered");
+		let mut newer = producer.append_group().unwrap();
+		newer
+			.write_frame(Timestamp::from_millis(100_000).unwrap(), numbered(0))
+			.unwrap();
+		assert!(matches!(late.read_frame().now_or_never(), Some(Err(Error::Old))));
+	}
+
+	/// Pool debt sheds a flight even once the cached copy of its group was evicted whole.
+	#[test]
+	#[cfg(feature = "async")]
+	fn pool_debt_sheds_a_flight_without_its_cached_group() {
+		const POOL: u64 = 4 * 1024 * 1024;
+		let pool = cache::Pool::new(cache::Config::default().with_capacity(POOL));
+		let producer = Producer::new(
+			Arc::new(broadcast::Info {
+				pool: pool.clone(),
+				..Default::default()
+			}),
+			"test",
+			Info::default(),
+		);
+		let requests = producer.requests();
+		let mut old = producer.append_group().unwrap();
+		let mut late = old.consume();
+		for index in 0..1_000 {
+			old.write_frame(None, numbered(index)).unwrap();
+		}
+		assert_eq!(read_numbered(&mut late), None);
+		let mut flight = asked(&requests).expect("a flight").accept(0, None).unwrap();
+		assert_eq!(read_numbered(&mut late), None);
+		// A newer group leaves group 0 cold, and its cached copy goes whole.
+		let mut newer = producer.append_group().unwrap();
+		for index in 0..1_000 {
+			newer.write_frame(None, numbered(index)).unwrap();
+		}
+		assert!(!producer.state.read().lookup.contains_key(&0), "group 0 evicted");
+		for index in 0..1_000 {
+			flight.write_frame(None, numbered(index)).unwrap();
+			assert!(pool.used() < 2 * POOL, "frame {index}: {} bytes held", pool.used());
+		}
+	}
+
+	/// A handler that refuses a flight leaves the reader where a track without one does: a
+	/// track that opts into refresh asks for a new group, and the read is `Evicted`.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_refused_flight_falls_back_to_refresh() {
+		let producer = track_producer("test", Info::default().with_refresh(1_000_000));
+		let requests = producer.requests();
+		// Joined before the group grew, so the join asks for nothing.
+		let _subscriber = producer.subscribe(None);
+		let mut live = producer.append_group().unwrap();
+		let mut late = live.consume();
+		for index in 0..3_000 {
+			live.write_frame(None, numbered(index)).unwrap();
+		}
+		assert_eq!(read_numbered(&mut late), None, "asks a flight");
+		assert_eq!(producer.demand().wanted(), Some(0), "nothing refreshed yet");
+		asked(&requests).expect("a flight").refuse_groups(0..1, Error::NotFound);
+		assert!(matches!(late.read_frame().now_or_never().unwrap(), Err(Error::Evicted)));
+		assert_eq!(producer.demand().wanted(), Some(1), "the reader asked for a new group");
+	}
+
+	/// A rider that falls off its flight's tail never holds the flight's writer back, and
+	/// boards a flight of its own from the frame it fell off at.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_slow_rider_falls_off_and_flies_on_its_own() {
+		let (_producer, requests, live, _reader) = shed_live_group(3_000);
+		let (mut fast, mut slow) = (live.consume(), live.consume());
+		assert_eq!(read_numbered(&mut fast), None);
+		assert_eq!(read_numbered(&mut slow), None);
+		let mut flight = asked(&requests).unwrap().accept(0, None).unwrap();
+		assert_eq!(read_numbered(&mut fast), None);
+		assert_eq!(read_numbered(&mut slow), None);
+		assert_eq!(read_numbered(&mut slow), None);
+		for index in 0..2_500 {
+			let payload = numbered(index);
+			assert!(
+				flight
+					.poll_ready(&kio::Waiter::noop(), &frame_info(&payload))
+					.is_ready(),
+				"frame {index}: paced by the fast rider only"
+			);
+			flight.write_frame(None, payload).unwrap();
+			assert_eq!(read_numbered(&mut fast), Some(index));
+		}
+		assert_eq!(read_numbered(&mut slow), None, "fell off");
+		let own = asked(&requests).expect("a flight of its own");
+		assert_eq!(own.start(), Position { group: 0, frame: 0 });
 	}
 
 	/// What a read returns right now: `Some(Some(sequence))` for a group, `Some(None)` for

@@ -20,11 +20,23 @@
 //!
 //! Its cryptography is [rind](https://docs.rs/rind), so every constructor that first needs it
 //! refuses a CPU missing a feature rind requires with [`Error::UnsupportedCpu`].
+//!
+//! The gateway drives its HTTP fetches and background watchers as async code, so [`import`] and
+//! [`export`] need the `async` feature. The default `server` feature enables it.
 
 #![warn(missing_docs)]
+#![cfg_attr(
+	not(feature = "async"),
+	allow(
+		rustdoc::broken_intra_doc_links,
+		reason = "the docs link the gateways, which a poll-only build leaves out"
+	)
+)]
 
 mod error;
+#[cfg(feature = "async")]
 pub mod export;
+#[cfg(feature = "async")]
 pub mod import;
 #[cfg(feature = "server")]
 pub mod server;

@@ -784,6 +784,33 @@ test("a replacement that answers and then aborts before its first group leaves t
 	close();
 });
 
+test("a replacement that aborts before its first group after the front concludes leaves the incumbent serving", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	ta.write(0n);
+	expect(drain(sub)).toEqual([0n]);
+
+	front.serve(b.consume());
+	await settle();
+	// No front is left to replace the replacement, but the incumbent still feeds the track.
+	front.conclude();
+	tb.producer.abort(new StreamError(StreamCode(64)));
+	await settle();
+	expect(sub.closed.peek()).toBeUndefined();
+
+	ta.write(1n);
+	await settle();
+	expect(drain(sub)).toEqual([1n]);
+	ta.producer.finish();
+	expect(await sub.recvGroup()).toBeUndefined();
+	sub.close();
+});
+
 test("waiting for the end of a track whose replacement was refused ends with the refusal", async () => {
 	const { a, b, swap, active, close } = await setup();
 	const old = a.createTrack("seq", { priority: 1 });

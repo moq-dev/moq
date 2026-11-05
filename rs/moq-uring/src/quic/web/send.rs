@@ -105,7 +105,9 @@ impl Stream {
 		}
 	}
 
-	/// Poll until all data was acknowledged, the peer stopped the stream, or the session closed.
+	/// Resolves once all data was acknowledged, the peer stopped the stream (with its code), or the
+	/// session closed.
+	#[kio::wrapper]
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<Option<u32>, Error>> {
 		let result = match &self.state {
 			State::Open(stream) => stream.poll_closed(waiter),
@@ -120,11 +122,6 @@ impl Stream {
 			},
 			Err(err) => Err(self.map_error(err)),
 		})
-	}
-
-	/// Wait until all data was acknowledged, the peer stopped the stream, or the session closed.
-	pub async fn closed(&self) -> Result<Option<u32>, Error> {
-		kio::wait(|w| self.poll_closed(w)).await
 	}
 
 	/// Finish sending, retaining a handle to acknowledgements and peer cancellation.
@@ -262,13 +259,10 @@ pub struct Finished {
 	park: kio::Park,
 }
 impl Finished {
-	/// Poll until the peer acknowledges or stops the stream, or the session closes.
+	/// Resolves once the peer acknowledges or stops the stream (with its code), or the session closes.
+	#[kio::wrapper]
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<Option<u32>, Error>> {
 		self.stream.poll_closed(waiter)
-	}
-	/// Wait until the peer acknowledges or stops the stream, or the session closes.
-	pub async fn closed(&self) -> Result<Option<u32>, Error> {
-		self.stream.closed().await
 	}
 	/// Reset the stream while still delivering its WebTransport header.
 	pub fn reset(self, code: u32) {

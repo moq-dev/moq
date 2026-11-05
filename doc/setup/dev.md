@@ -51,6 +51,14 @@ module as skipped; `just ci` still requires the full flake check.
 contains the module selection, with package selection delegated to the
 language runners.
 
+Repository gates and quest checks use the dev shell’s quest executable through
+`sh/quest.sh`, reporting its path. Enter this checkout’s dev shell to use its pin. Use
+`bash sh/quest.sh review --base origin/main` for a local review with that build,
+or `bash sh/quest.sh gate COMMAND [ARGS...]` to admit a standalone build.
+Outside the dev shell, explicit host toolchains (`ALLOW_HOST_TOOLCHAIN=1`, or Windows without Nix)
+report the selected quest executable and version alongside the repository pin;
+their build identity is unverified.
+
 | What you changed or need to measure | Start here |
 | --- | --- |
 | Ordinary source changes | `just check`; [Rust instructions](https://github.com/moq-dev/moq/blob/main/rs/AGENTS.md) and [TypeScript instructions](https://github.com/moq-dev/moq/blob/main/js/AGENTS.md) describe focused test commands and conventions |

@@ -185,6 +185,7 @@ pub enum Error {
 
 impl Error {
 	/// Carries rind's message rather than its type, so rind stays out of this crate's API.
+	#[cfg(feature = "async")]
 	pub(crate) fn unsupported_cpu(err: rind::cpu::MissingFeature) -> Self {
 		Self::UnsupportedCpu(err.to_string())
 	}
@@ -207,6 +208,7 @@ impl Error {
 	/// another attempt: request timeout, rate limit, and the gateway/overload statuses. Every other
 	/// status, `404` and `403` included, is settled, as is a playlist that had already ended when
 	/// the import joined it. A failure with no answer at all is left to the backoff budget.
+	#[cfg(feature = "async")]
 	pub(crate) fn settled(&self) -> bool {
 		match self {
 			Self::PlaylistEnded => true,
@@ -221,6 +223,7 @@ impl Error {
 ///
 /// Every variant naming a resource stores it through here rather than redacting at display, so
 /// its `Debug` print is as safe as its `Display`.
+#[cfg(feature = "async")]
 pub(crate) fn redact(url: &url::Url) -> url::Url {
 	let mut url = url.clone();
 	// Fails only for a URL that cannot carry userinfo at all, such as `file:`.

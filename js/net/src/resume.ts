@@ -230,15 +230,18 @@ class Route {
 
 	/**
 	 * Serve `to` again in place of `from`, a replacement whose copy failed before delivering, even
-	 * past a refusal: `to` served before it.
+	 * past a refusal or a conclusion: `to` served before it, and concluding only stops a future
+	 * source taking over. Returns whether `to` serves again.
 	 */
-	revert(from: Source, to: Source): void {
-		if (this.concluded || this.source !== from) return;
+	revert(from: Source, to: Source): boolean {
+		// A concluded route serves nothing new, but the failed replacement was still its last.
+		if (this.source !== from && !(this.concluded && this.source === undefined)) return false;
 		this.generation++;
 		this.source = to;
 		this.served = to;
 		this.#bump();
 		for (const reader of [...this.readers]) reader.sync();
+		return true;
 	}
 
 	/** Between routes: readers wait for the next one, keeping what they have. */
@@ -872,9 +875,8 @@ class Reader implements ResumeSource {
 								copy.sub.closed.peek() === undefined,
 						)
 					: undefined;
-			if (serving && incumbent) {
+			if (serving && incumbent && route.revert(serving.source, incumbent.source)) {
 				if (!closing(ended)) route.refuse(ended);
-				route.revert(serving.source, incumbent.source);
 				return { kind: "idle" };
 			}
 			// A refusal from a route that still serves is the track's answer.
