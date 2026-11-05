@@ -470,6 +470,8 @@ struct PadHandle {
 	task: tokio::task::JoinHandle<()>,
 	/// A [`Command::Retire`] is queued, so a further delisting needs none.
 	retiring: bool,
+	/// Ends the pad at once, cutting short the play on it: the rendition was disabled.
+	disable: watch::Sender<bool>,
 }
 
 /// A [`PadActor`]'s queue of commands. Unlike a channel, a reader's cancelled turn leaves it as
@@ -527,10 +529,6 @@ enum Command {
 	/// The catalog stopped listing the rendition: end the pad with EOS, unless it is listed again
 	/// by the time the commands before are done.
 	Retire,
-	/// The rendition was disabled: end the pad with EOS once the commands before are done, even if
-	/// it is enabled again by then. The session already let the pad go, so a re-enable takes a new
-	/// one.
-	End,
 	/// The session ended: remove the pad, after an EOS if `eos`.
 	Release { eos: bool },
 	/// Answer once the commands before are done.
@@ -540,7 +538,8 @@ enum Command {
 
 impl Pads {
 	/// Play `play` on the rendition's pad, created if the session has none, once the plays sent
-	/// before it are done. [`Exit::Unlisted`] if the latest catalog does not list the rendition.
+	/// before it are done. [`Exit::Unlisted`] if the latest catalog does not list the rendition, or
+	/// the pad ends before or while it plays.
 	async fn play(&self, element: &glib::WeakRef<super::MoqSrc>, rendition: &Rendition, play: Play) -> Exit {
 		let turn = match self.queue(element, rendition, &play.cancel) {
 			Ok(turn) => turn,
@@ -553,7 +552,7 @@ impl Pads {
 			handoff = turn => match handoff {
 				Ok(handoff) => handoff,
 				// The actor ended the pad first.
-				Err(_) => return Exit::Done,
+				Err(_) => return Exit::Unlisted,
 			},
 		};
 		let (done, exit) = oneshot::channel();
@@ -603,13 +602,15 @@ impl Pads {
 			pad,
 			added: false,
 		};
-		let task = RUNTIME.spawn(STREAMING.scope(element.clone(), actor.run(commands.clone())));
+		let (disable, disabled) = watch::channel(false);
+		let task = RUNTIME.spawn(STREAMING.scope(element.clone(), actor.run(commands.clone(), disabled)));
 		table.pads.insert(
 			rendition.clone(),
 			PadHandle {
 				commands,
 				task,
 				retiring: false,
+				disable,
 			},
 		);
 		Ok(called)
@@ -623,8 +624,8 @@ impl Pads {
 	/// List what the latest catalog names, retiring each pad it no longer lists. Its actor ends it
 	/// with EOS once the plays before are done, unless the rendition is listed again by then, so a
 	/// delisted rendition still playing out its track keeps its tail. A `disabled` rendition's pad
-	/// leaves the session now and ends regardless, so a re-enable that arrives while a push on it
-	/// is still blocked takes a new pad instead of resuming the old one.
+	/// leaves the session now and its actor ends it as soon as a push on it returns, even when its
+	/// reader missed the disable or a re-enable follows, so a re-enable always takes a new pad.
 	/// Nothing once `cancel` fired, since a later run lists the pads then.
 	fn list(&self, listed: HashSet<Rendition>, disabled: &HashSet<Rendition>, cancel: &watch::Receiver<bool>) {
 		let mut table = self.0.lock().unwrap();
@@ -633,7 +634,7 @@ impl Pads {
 		}
 		for rendition in disabled {
 			if let Some(handle) = table.pads.remove(rendition) {
-				handle.commands.send(Command::End);
+				handle.disable.send_replace(true);
 				table.ending.push(handle.task);
 			}
 		}
@@ -687,8 +688,20 @@ struct PadActor {
 }
 
 impl PadActor {
-	async fn run(mut self, commands: Arc<Inbox>) {
-		while let Some(command) = commands.recv().await {
+	/// Take `commands` until the pad ends, or at once once `disabled`. A disable cuts short the
+	/// play on the pad, which reports [`Exit::Unlisted`] so its follower starts it again on a new
+	/// pad if the rendition is enabled again, and drops the turns queued behind it.
+	async fn run(mut self, commands: Arc<Inbox>, mut disabled: watch::Receiver<bool>) {
+		loop {
+			// A closed sender is a released or dropped pad, which the commands end.
+			let command = tokio::select! {
+				biased;
+				Ok(_) = disabled.wait_for(|disabled| *disabled) => return self.ended(),
+				command = commands.recv() => command,
+			};
+			let Some(command) = command else {
+				return;
+			};
 			match command {
 				Command::Play(turn) => {
 					let (handoff, handed) = oneshot::channel();
@@ -699,13 +712,16 @@ impl PadActor {
 					let Ok((play, done)) = handed.await else {
 						continue;
 					};
-					let exit = self.play(*play).await;
+					let exit = tokio::select! {
+						biased;
+						Ok(_) = disabled.wait_for(|disabled| *disabled) => Exit::Unlisted,
+						exit = self.play(*play) => exit,
+					};
 					let _ = done.send(exit);
 				}
-				// A turn queued behind the retirement drops here, which its reader takes as done.
+				// A turn queued behind the retirement drops here, which its reader takes as unlisted.
 				Command::Retire if self.retired() => return self.ended(),
 				Command::Retire => {}
-				Command::End => return self.ended(),
 				Command::Release { eos } => return self.end(eos),
 				#[cfg(test)]
 				Command::Settled(settled) => {
@@ -1577,7 +1593,8 @@ impl Follower {
 		} else if let Exit::Unlisted = exit
 			&& self.playback.session.pads.is_listed(&rendition)
 		{
-			// Delisted and listed again while it went to claim its pad, which the plan coalesced.
+			// Its pad went while the rendition was delisted or disabled and listed again, which the
+			// plan coalesced.
 			self.play();
 		}
 	}
@@ -1597,7 +1614,8 @@ fn serves(instance: &moq_net::broadcast::Consumer, id: Option<&moq_net::Instance
 enum Exit {
 	/// It is done with the instance.
 	Done,
-	/// The catalog did not list the rendition when it went to claim its pad.
+	/// It lost its pad: the catalog did not list the rendition when it went to claim one, or the
+	/// pad ended first or under it. Its follower starts it again if the rendition is listed.
 	Unlisted,
 }
 
@@ -3885,6 +3903,77 @@ mod session_tests {
 			.block_on(async { kio::clock::timeout(Duration::from_secs(10), super::RUNTIME.spawn(reader.run())).await })
 			.expect("a push on a pad added after the flush blocked")
 			.unwrap();
+	}
+
+	/// A disable ends the pad even when its reader never hears of it, as when the follower takes
+	/// the disable and a re-enable as one plan. The reader reports its pad lost, so its follower
+	/// starts it again on a new pad.
+	#[test]
+	fn a_disable_its_reader_missed_cuts_its_play() {
+		let _pad_ids = pad_ids();
+		let element = element();
+		let recorder = Recorder::attach(&element);
+		let mut publisher = Publisher::new(&origin(), Default::default(), video_rendition());
+
+		let rendition = (TrackKind::Video, "video".to_string());
+		let (cancelling, cancel) = watch::channel(false);
+		let (_shutdown, shutdown) = watch::channel(false);
+		let (_stop, stop) = watch::channel(false);
+		let pads = Pads::default();
+		pads.list(HashSet::from([rendition.clone()]), &HashSet::new(), &cancel);
+		let instance = publisher.broadcast.consume();
+		let reader = super::Reader {
+			playback: super::Playback {
+				session: Session {
+					max_delay: DEFAULT_MAX_DELAY,
+					element: element.downgrade(),
+					pads: pads.clone(),
+					shutdown,
+				},
+				broadcast: instance.clone(),
+				timeline: Arc::default(),
+				stop,
+			},
+			rendition: rendition.clone(),
+			shape: super::Shape {
+				caps: gst::Caps::new_empty_simple("video/x-h264"),
+				container: Container::Legacy,
+				track: "video".into(),
+				broadcast: None,
+				instance: None,
+				warmup: Duration::ZERO,
+			},
+			instance,
+			serial: 1,
+			timeline: Arc::default(),
+			finished: super::Finished::default(),
+			live: Arc::default(),
+			cancel,
+		};
+		let run = super::RUNTIME.spawn(reader.run());
+		let pad = recorder.written(&mut publisher, 1);
+
+		pads.list(
+			HashSet::new(),
+			&HashSet::from([rendition.clone()]),
+			&cancelling.subscribe(),
+		);
+		pads.list(
+			HashSet::from([rendition.clone()]),
+			&HashSet::new(),
+			&cancelling.subscribe(),
+		);
+		let exit = super::RUNTIME
+			.block_on(async { kio::clock::timeout(Duration::from_secs(10), run).await })
+			.expect("the disable never cut the play")
+			.unwrap();
+		assert!(
+			matches!(exit, super::Exit::Unlisted),
+			"the reader took its pad's end as done"
+		);
+		recorder.wait("the disabled pad never ended", |seen| {
+			seen.contains(&Seen::Eos(pad.clone())).then_some(())
+		});
 	}
 
 	/// A bus sync or pad handler can stop the element from inside a reader's push. Waiting for the
