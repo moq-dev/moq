@@ -538,6 +538,21 @@ describe("re-buffer", () => {
 // A publisher that stops sending, such as a push-to-talk mute, declares where its audio ends. Running
 // dry there is the silence it announced, not an underrun, through the refill of the next utterance.
 describe("declared end", () => {
+	it("is declared silence before any audio, and the next utterance anchors", () => {
+		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 40 as Milli });
+		buffer.end(Micro(5_000_000));
+		expect(buffer.silent).toBe(true);
+		expect(read(buffer, 20, 1)[0].length).toBe(0);
+		expect(buffer.underruns).toBe(0);
+
+		buffer.next();
+		expect(buffer.silent).toBe(true);
+		write(buffer, 6000 as Milli, 40, { channels: 1 });
+		expect(read(buffer, 20, 1)[0].length).toBe(20);
+		expect(buffer.silent).toBe(false);
+		expect(Milli.fromMicro(buffer.timestamp)).toBe(6020 as Milli);
+	});
+
 	it("clears declared silence on a timeline reset", () => {
 		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 40 as Milli });
 		write(buffer, 0 as Milli, 40, { channels: 1 });

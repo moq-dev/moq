@@ -271,7 +271,7 @@ export class AudioBuffer {
 	readonly underruns: Getter<number> = this.#underruns;
 
 	readonly #silent = new Signal<boolean>(false);
-	/** Whether playback ran out at a declared end and nothing has played since. */
+	/** Whether playback is at a declared end, reached or announced before any audio, and nothing has played since. */
 	readonly silent: Getter<boolean> = this.#silent;
 
 	// Backpressure runs off the playhead the worklet reports in its state messages.

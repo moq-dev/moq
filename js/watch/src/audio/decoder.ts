@@ -386,6 +386,10 @@ export class Decoder {
 				playing: this.sync.playing,
 			});
 			effect.cleanup(() => ring.close());
+			// An end read before the ring existed, such as a cold join during a mute, still declares
+			// the silence.
+			const end = this.#terminal.end;
+			if (end !== undefined) ring.end((end - this.#terminal.delay) as Micro);
 			effect.set(this.#ring, ring);
 
 			// Mirror ring state (timestamp/stalled) onto our public signals.

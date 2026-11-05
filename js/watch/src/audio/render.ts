@@ -62,7 +62,7 @@ export interface State {
 	anchored: boolean;
 	// How many times the ring has run dry mid-playback, cumulative.
 	underruns: number;
-	// Whether playback ran out at a declared end and nothing has played since.
+	// Whether playback is at a declared end, reached or announced before any audio, and nothing has played since.
 	silent: boolean;
 	// The epoch of the last reset or park the worklet applied.
 	epoch: number;

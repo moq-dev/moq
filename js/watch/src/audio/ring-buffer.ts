@@ -85,7 +85,7 @@ export class AudioRingBuffer {
 		return this.#underruns;
 	}
 
-	/** Whether playback ran out at a declared end and nothing has played since. */
+	/** Whether playback is at a declared end, reached or announced before any audio, and nothing has played since. */
 	get silent(): boolean {
 		return this.#silent;
 	}
@@ -268,8 +268,9 @@ export class AudioRingBuffer {
 	 */
 	end(timestamp: Micro): void {
 		this.#end = Math.round(Second.fromMicro(timestamp) * this.rate);
-		// The end can arrive after the playhead already ran out at it.
-		if (this.#anchored && this.#stalled && this.length <= 0 && this.#ended()) this.#silent = true;
+		// The end can arrive after the playhead already ran out at it, or before any audio, as for a
+		// listener that joins during a mute.
+		if (!this.#anchored || (this.#stalled && this.length <= 0 && this.#ended())) this.#silent = true;
 	}
 
 	// Forget the declared silences the playhead has passed.

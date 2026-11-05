@@ -927,6 +927,32 @@ describe("Decoder across a rendition's absence", () => {
 		}
 	});
 
+	it("declares the silence of an end read before the worklet loads", async () => {
+		let load = () => {};
+		moduleLoaded = new Promise((resolve) => {
+			load = resolve;
+		});
+
+		const playback = await play(Milli(100));
+		try {
+			// A cold join during a mute: the first read is the marker.
+			playback.push({ kind: "end", group: 0n, end: Micro(frameTimestamp) });
+			await microtasks();
+			load();
+			await microtasks();
+
+			// No audio was written, so the ring is the latest worklet rather than one with inserts.
+			const ring = worklets.at(-1);
+			if (!ring) throw new Error("no worklet was built");
+			expect(drain(ring)).toBe(0);
+			await microtasks();
+			expect(ring.ring?.silent).toBe(true);
+			expect(playback.stalled()).toBe(false);
+		} finally {
+			playback.close();
+		}
+	});
+
 	it("decodes the frames that arrive before the worklet loads", async () => {
 		let load = () => {};
 		moduleLoaded = new Promise((resolve) => {
