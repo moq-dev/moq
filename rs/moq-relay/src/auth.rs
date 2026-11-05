@@ -985,7 +985,9 @@ impl Auth {
 			return Err(Error::Request(format!("path {:?} has a dot segment", request.path)));
 		}
 		if request.tls.as_ref().is_some_and(|peer| peer.chain.is_empty()) {
-			return Err(Error::Request("the client certificate chain is too complex to trace".into()));
+			return Err(Error::Request(
+				"the client certificate chain is too complex to trace".into(),
+			));
 		}
 		// Build the token from the grant the admission checked: re-reading it could
 		// pick up an update that skipped the check.

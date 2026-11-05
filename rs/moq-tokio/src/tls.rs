@@ -2986,7 +2986,9 @@ mod tests {
 
 	/// A CA certificate and the issuer it signs with. rcgen gives every certificate the
 	/// same subject, so each CA here names itself as any leaf's issuer.
-	fn lineage_ca(parent: Option<&rcgen::Issuer<'_, rind_rcgen::KeyPair>>) -> (CertificateDer<'static>, rcgen::Issuer<'static, rind_rcgen::KeyPair>) {
+	fn lineage_ca(
+		parent: Option<&rcgen::Issuer<'_, rind_rcgen::KeyPair>>,
+	) -> (CertificateDer<'static>, rcgen::Issuer<'static, rind_rcgen::KeyPair>) {
 		let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
 		let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
 		params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
@@ -3004,7 +3006,10 @@ mod tests {
 	}
 
 	fn hashes(certs: &[&CertificateDer<'static>]) -> Vec<String> {
-		certs.iter().map(|cert| hex::encode(crypto::sha256(cert.as_ref()))).collect()
+		certs
+			.iter()
+			.map(|cert| hex::encode(crypto::sha256(cert.as_ref())))
+			.collect()
 	}
 
 	/// Lineage lists the leaf and each presented certificate it descends from, nearest
@@ -3039,8 +3044,14 @@ mod tests {
 		let mut chain = vec![leaf];
 		chain.extend((0..128).map(|_| lineage_ca(None).0));
 		chain.push(intermediate);
-		assert!(matches!(PeerIdentity::from_chain(chain).lineage(), Err(Error::Lineage(_))));
-		assert!(matches!(PeerIdentity::from_chain(Vec::new()).lineage(), Err(Error::Empty)));
+		assert!(matches!(
+			PeerIdentity::from_chain(chain).lineage(),
+			Err(Error::Lineage(_))
+		));
+		assert!(matches!(
+			PeerIdentity::from_chain(Vec::new()).lineage(),
+			Err(Error::Empty)
+		));
 	}
 
 	/// A malformed fingerprint is rejected on the way in rather than stored as

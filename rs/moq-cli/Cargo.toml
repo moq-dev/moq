@@ -138,9 +138,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 terminal_size = "0.4.4"
 tokio = { workspace = true, features = ["full"] }
-toml = { workspace = true }
 # Tells a recording to finish its file on the first shutdown signal.
 tokio-util = { workspace = true }
+toml = { workspace = true }
 tower-http = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true, features = ["serde"] }

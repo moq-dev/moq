@@ -840,7 +840,10 @@ mod tests {
 
 	/// A certificate session whose leaf is `leaf`, issued under each of `ancestors` in turn.
 	fn with_chain(mut request: Request, leaf: &str, ancestors: &[&str]) -> Request {
-		let chain: Vec<String> = std::iter::once(leaf).chain(ancestors.iter().copied()).map(fingerprint).collect();
+		let chain: Vec<String> = std::iter::once(leaf)
+			.chain(ancestors.iter().copied())
+			.map(fingerprint)
+			.collect();
 		request.tls = Some(Peer {
 			name: "affiliate".into(),
 			fingerprint: chain[0].clone(),
@@ -1368,7 +1371,10 @@ mod tests {
 		};
 		let server = Server::new(provisioned.clone()).unwrap();
 		let mut session = with_chain(request("/"), "alice", &["ca"]);
-		assert_eq!(server.answer(&session).await.unwrap().unwrap().publish, patterns(&["**"]));
+		assert_eq!(
+			server.answer(&session).await.unwrap().unwrap().publish,
+			patterns(&["**"])
+		);
 
 		session.event = Event::Revalidate;
 		server
@@ -1407,7 +1413,13 @@ mod tests {
 		let text = "AB".repeat(32);
 		let parsed: Fingerprint = text.parse().unwrap();
 		assert_eq!(parsed.to_string(), "ab".repeat(32));
-		for bad in ["ab".repeat(31), "ab".repeat(33), "zz".repeat(32), "é".repeat(32), "+1".repeat(32)] {
+		for bad in [
+			"ab".repeat(31),
+			"ab".repeat(33),
+			"zz".repeat(32),
+			"é".repeat(32),
+			"+1".repeat(32),
+		] {
 			assert!(bad.parse::<Fingerprint>().is_err(), "{bad}");
 		}
 	}

@@ -469,7 +469,12 @@ struct MtlsRules {
 	subscribe: Vec<Pattern>,
 
 	/// The role verified certificates have on cluster links: peer or upstream.
-	#[usage(name = "mtls-link", long = "mtls-link", choices("peer", "upstream"), setting = "mtls.link")]
+	#[usage(
+		name = "mtls-link",
+		long = "mtls-link",
+		choices("peer", "upstream"),
+		setting = "mtls.link"
+	)]
 	#[serde(skip_serializing_if = "Option::is_none")]
 	link: Option<moq_auth::serve::Link>,
 
@@ -508,7 +513,12 @@ struct MeshServe {
 	url: Option<url::Url>,
 
 	/// Where to answer devices at `--mesh-url`, usually behind a TLS-terminating proxy.
-	#[usage(name = "mesh-listen", long = "mesh-listen", default = "127.0.0.1:4441", setting = "mesh.listen")]
+	#[usage(
+		name = "mesh-listen",
+		long = "mesh-listen",
+		default = "127.0.0.1:4441",
+		setting = "mesh.listen"
+	)]
 	listen: SocketAddr,
 
 	/// The private key that signs mesh tokens; the relays verify it like any other.
@@ -527,7 +537,12 @@ struct MeshServe {
 	state: Option<PathBuf>,
 
 	/// How long a mesh token lasts; devices refresh it two thirds of the way through.
-	#[usage(name = "mesh-token-ttl", long = "mesh-token-ttl", default = "1h", setting = "mesh.token_ttl")]
+	#[usage(
+		name = "mesh-token-ttl",
+		long = "mesh-token-ttl",
+		default = "1h",
+		setting = "mesh.token_ttl"
+	)]
 	token_ttl: moq_tokio::cli::Duration,
 }
 
@@ -545,7 +560,10 @@ impl Default for MeshServe {
 }
 
 /// Every setting `moq auth serve` merges from its file, declared for the merge's registry.
-#[allow(dead_code, reason = "declares the settings for the usage registry; nothing reads the fields")]
+#[allow(
+	dead_code,
+	reason = "declares the settings for the usage registry; nothing reads the fields"
+)]
 #[derive(usage_rs::Config)]
 struct ServeSettings {
 	#[usage(cli("--listen"))]
@@ -574,7 +592,10 @@ struct ServeSettings {
 	mesh: MeshSettings,
 }
 
-#[allow(dead_code, reason = "declares the settings for the usage registry; nothing reads the fields")]
+#[allow(
+	dead_code,
+	reason = "declares the settings for the usage registry; nothing reads the fields"
+)]
 #[derive(usage_rs::Config)]
 #[usage(prefix = "public")]
 struct PublicSettings {
@@ -584,7 +605,10 @@ struct PublicSettings {
 	subscribe: Option<Vec<String>>,
 }
 
-#[allow(dead_code, reason = "declares the settings for the usage registry; nothing reads the fields")]
+#[allow(
+	dead_code,
+	reason = "declares the settings for the usage registry; nothing reads the fields"
+)]
 #[derive(usage_rs::Config)]
 #[usage(prefix = "mtls")]
 struct MtlsSettings {
@@ -596,7 +620,10 @@ struct MtlsSettings {
 	link: Option<String>,
 }
 
-#[allow(dead_code, reason = "declares the settings for the usage registry; nothing reads the fields")]
+#[allow(
+	dead_code,
+	reason = "declares the settings for the usage registry; nothing reads the fields"
+)]
 #[derive(usage_rs::Config)]
 #[usage(prefix = "limit")]
 struct LimitSettings {
@@ -606,7 +633,10 @@ struct LimitSettings {
 	remote: Option<u64>,
 }
 
-#[allow(dead_code, reason = "declares the settings for the usage registry; nothing reads the fields")]
+#[allow(
+	dead_code,
+	reason = "declares the settings for the usage registry; nothing reads the fields"
+)]
 #[derive(usage_rs::Config)]
 #[usage(prefix = "mesh")]
 struct MeshSettings {
@@ -688,8 +718,7 @@ impl Serve {
 			anyhow::bail!("--mtls-peer and --mtls-upstream are removed; use --mtls-link peer or --mtls-link upstream");
 		}
 		let mtls = &self.mtls;
-		if mtls.link.is_some() && mtls.publish.is_empty() && mtls.subscribe.is_empty() && mtls.certificates.is_empty()
-		{
+		if mtls.link.is_some() && mtls.publish.is_empty() && mtls.subscribe.is_empty() && mtls.certificates.is_empty() {
 			anyhow::bail!("--mtls-link needs --mtls-publish or --mtls-subscribe, or every certificate is refused");
 		}
 		// The parser refuses two key sources on the command line; a file can add another.
@@ -701,7 +730,10 @@ impl Serve {
 		// 0.14 read `anon` as the prefix `anon/`, and a pattern reads it as exactly the
 		// broadcast `anon`, so either silent reading would mislead someone upgrading.
 		let mut flags = vec![
-			("--public-publish".to_string(), self.public.publish.iter().collect::<Vec<_>>()),
+			(
+				"--public-publish".to_string(),
+				self.public.publish.iter().collect::<Vec<_>>(),
+			),
 			("--public-subscribe".to_string(), self.public.subscribe.iter().collect()),
 			("--mtls-publish".to_string(), mtls.publish.iter().collect()),
 			("--mtls-subscribe".to_string(), mtls.subscribe.iter().collect()),
@@ -1156,7 +1188,9 @@ mod tests {
 
 	#[test]
 	fn mesh_flags_need_a_mesh_url_and_key() {
-		let err = merged(&["moq", "auth", "serve", "--mesh-relay", "https://relay.example"]).err().unwrap();
+		let err = merged(&["moq", "auth", "serve", "--mesh-relay", "https://relay.example"])
+			.err()
+			.unwrap();
 		assert!(err.to_string().contains("--mesh-relay needs --mesh-url"), "{err}");
 
 		let flags = serve(&["moq", "auth", "serve", "--mesh-url", "https://mesh.example"]);
@@ -1355,7 +1389,8 @@ mod tests {
 
 	#[test]
 	fn the_settings_registry_matches_the_flags() {
-		let drift = ServeSettings::SETTINGS_REGISTRY.drift(<Serve as usage_rs::argv::spec::CommandArgs>::SETTINGS_BINDINGS);
+		let drift =
+			ServeSettings::SETTINGS_REGISTRY.drift(<Serve as usage_rs::argv::spec::CommandArgs>::SETTINGS_BINDINGS);
 		assert!(drift.is_empty(), "{drift:#?}");
 	}
 
@@ -1445,13 +1480,20 @@ relay = ["https://relay.example"]
 			assert!(err.contains(needs), "{body}: {err}");
 		}
 
-		std::fs::write(&file, format!("key_set = \"/keys.jwks\"\n[mtls.certificates.{leaf}]\npublish = [\"alice\"]")).unwrap();
+		std::fs::write(
+			&file,
+			format!("key_set = \"/keys.jwks\"\n[mtls.certificates.{leaf}]\npublish = [\"alice\"]"),
+		)
+		.unwrap();
 		let (serve, _) = merged(&["moq", "auth", "serve", path, "--key", "/key.jwk"]).unwrap();
 		let err = serve.policy().unwrap_err().to_string();
 		assert!(err.contains("conflict"), "{err}");
 		let (serve, _) = merged(&["moq", "auth", "serve", path]).unwrap();
 		let err = serve.policy().unwrap_err().to_string();
-		assert!(err.contains(&format!("mtls.certificates.{leaf}.publish `alice`")), "{err}");
+		assert!(
+			err.contains(&format!("mtls.certificates.{leaf}.publish `alice`")),
+			"{err}"
+		);
 	}
 
 	/// A file edit narrows or revokes at the next re-check, and an edit that does not
@@ -1477,7 +1519,10 @@ relay = ["https://relay.example"]
 			issuer: "CN=affiliates".into(),
 		});
 		let publish = |grant: Option<moq_auth::Grant>| grant.unwrap().publish;
-		assert_eq!(publish(server.answer(&session).await.unwrap()), ["**".parse().unwrap()].into_iter().collect());
+		assert_eq!(
+			publish(server.answer(&session).await.unwrap()),
+			["**".parse().unwrap()].into_iter().collect()
+		);
 
 		session.event = moq_auth::Event::Revalidate;
 		write(&format!("[mtls.certificates.{leaf}]\npublish = [\"alice/**\"]"));

@@ -332,7 +332,8 @@ no wildcard, such as `anon`, refuses to start; write `anon/**` for the subtree.
 bad chain fails there. What the certificate admits is the server's decision:
 the relay reports it in the request and enforces the grant it gets back.
 `moq auth serve` grants a certificate only what `--mtls-publish` and
-`--mtls-subscribe` name, nothing by default. Public rules ignore certificates,
+`--mtls-subscribe` name, nothing by default, unless a rule in its config file
+scopes that certificate (below). Public rules ignore certificates,
 so `--auth-public` with a client CA refuses to start. Only the QUIC listener
 and a `tls://` TCP listener (`listen.tcp.tls`) verify client certificates, so a
 relay with neither refuses `listen.tls.root` too.
@@ -356,6 +357,45 @@ root = ["/etc/moq/peer-ca.pem"]
 [connect.tls]
 cert = "/etc/moq/relay.pem"    # presented on outbound dials and to an https:// auth server
 key = "/etc/moq/relay.key"
+```
+
+The request's `tls.chain` lists the SHA-256 of the leaf and of each certificate
+the leaf provably descends from, nearest first. Only a certificate whose key
+signed a link up from the leaf is listed, so a client cannot claim an
+intermediate by sending it, and the relay refuses a chain too tangled to trace
+rather than report the leaf alone. A root appears only when the client sends
+it, so scope by the leaf or an intermediate.
+
+`moq auth serve` takes an optional TOML file holding every flag under its
+dotted key; a flag given on the command line wins. Only the file holds
+per-certificate rules, keyed by any hash in `tls.chain`. The rule naming the
+certificate nearest the leaf applies: it can set `publish`, `subscribe`, `link`
+(`peer`, `upstream`, or `none`), `tier`, `publish_rate`, and `subscribe_rate`,
+and each field it omits takes the server-wide value. Its patterns replace the
+shared ones, so a rule with empty lists revokes. A certificate no rule names
+gets `--mtls-*`. The server watches the file: an edit takes effect at each
+session's next re-check, and one that fails to load keeps the last valid
+config and logs an error. Listener and mesh settings apply on restart.
+
+```toml
+# moq auth serve /etc/moq/auth.toml
+revalidate = "1m"
+expires = "1d"
+
+[mtls]
+publish = ["**"]
+subscribe = ["**"]
+link = "peer"                  # cluster CA: every other certificate is a relay
+
+[mtls.certificates.3f2a...]    # an affiliate's intermediate CA: everything it issued
+publish = ["affiliate-a/**"]
+subscribe = ["affiliate-a/**"]
+link = "none"
+tier = "affiliate-a"
+
+[mtls.certificates.9c41...]    # one revoked leaf under it
+publish = []
+subscribe = []
 ```
 
 ## Auth server
@@ -382,7 +422,7 @@ evaluated or refused: nothing is ignored, and no two are combined.
 | --- | --- | --- |
 | nothing | the public rules | `--public-*`, or refused |
 | a JWT | refused | verified, or refused |
-| a certificate | never requested: a client CA refuses to start | `--mtls-*`, or refused |
+| a certificate | never requested: a client CA refuses to start | its rule, else `--mtls-*`, or refused |
 | a JWT and a certificate | never requested | refused |
 
 A JWT is verified against `--key FILE`, `--key-dir DIR`, or `--key-set FILE`
