@@ -3431,30 +3431,6 @@ mod test {
         );
     }
 
-    /// A.7: Never exiting STARTUP when application-limited with no loss.
-    ///
-    /// The negative counterpart to A.1 (plateau exit) and A.2 (loss exit): with
-    /// neither signal present, STARTUP must persist. STARTUP leaves for DRAIN only
-    /// via `check_startup_done`, which requires `full_bw_reached`
-    /// (`self.state == Startup && self.full_bw_reached` -> `enter_drain`), plus the
-    /// high-loss escape in `check_startup_high_loss`. When every round is
-    /// app-limited, `check_full_bw_reached` bails on the `is_app_limited` guard, so
-    /// `full_bw_now`/`full_bw_reached` are never set; with zero loss the high-loss
-    /// escape never fires either. Both STARTUP -> DRAIN triggers are closed.
-    ///
-    /// The scheduled min-RTT refresh does not interrupt it either: the transport
-    /// reports the flow application-limited and its constant RTT sits at
-    /// BBR.min_rtt, so every due ProbeRTT is skipped (see `update_min_rtt`).
-    ///
-    /// Same infinite-buffer simulator as A.1/A.2, but the app is limited to a
-    /// small fixed window (`APP_WINDOW`, well below cwnd) from the first packet so
-    /// every sample is app-limited, and no packet is ever dropped.
-    ///
-    /// Runs long enough (`ROUNDS_TO_OBSERVE`, several `probe_rtt_interval`s) to
-    /// cover multiple due ProbeRTTs, and asserts that: the flow only ever occupies
-    /// STARTUP, every observed sample was application-limited,
-    /// `full_bw_reached`/`full_bw_now` were never set, and `full_bw_count` never
-    /// reached `MAX_FULL_BW_COUNT`.
     /// Startup leaves on high loss when one recovery episode spans the whole loss round. The ACK
     /// that ends the round acknowledges the first packet sent after the round's first loss,
     /// which also ends that recovery, so the exit must judge the round by the recovery it spent.
@@ -3519,6 +3495,30 @@ mod test {
         assert_eq!(bbr.state, BbrState::Drain);
     }
 
+    /// A.7: Never exiting STARTUP when application-limited with no loss.
+    ///
+    /// The negative counterpart to A.1 (plateau exit) and A.2 (loss exit): with
+    /// neither signal present, STARTUP must persist. STARTUP leaves for DRAIN only
+    /// via `check_startup_done`, which requires `full_bw_reached`
+    /// (`self.state == Startup && self.full_bw_reached` -> `enter_drain`), plus the
+    /// high-loss escape in `check_startup_high_loss`. When every round is
+    /// app-limited, `check_full_bw_reached` bails on the `is_app_limited` guard, so
+    /// `full_bw_now`/`full_bw_reached` are never set; with zero loss the high-loss
+    /// escape never fires either. Both STARTUP -> DRAIN triggers are closed.
+    ///
+    /// The scheduled min-RTT refresh does not interrupt it either: the transport
+    /// reports the flow application-limited and its constant RTT sits at
+    /// BBR.min_rtt, so every due ProbeRTT is skipped (see `update_min_rtt`).
+    ///
+    /// Same infinite-buffer simulator as A.1/A.2, but the app is limited to a
+    /// small fixed window (`APP_WINDOW`, well below cwnd) from the first packet so
+    /// every sample is app-limited, and no packet is ever dropped.
+    ///
+    /// Runs long enough (`ROUNDS_TO_OBSERVE`, several `probe_rtt_interval`s) to
+    /// cover multiple due ProbeRTTs, and asserts that: the flow only ever occupies
+    /// STARTUP, every observed sample was application-limited,
+    /// `full_bw_reached`/`full_bw_now` were never set, and `full_bw_count` never
+    /// reached `MAX_FULL_BW_COUNT`.
     #[test]
     fn startup_never_exits_when_app_limited_without_loss() {
         /// packet size in bytes
