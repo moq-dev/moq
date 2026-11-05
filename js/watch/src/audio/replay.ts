@@ -150,7 +150,8 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 			delay: config.delay !== undefined ? Milli(config.delay) : undefined,
 		}),
 	);
-	signals.cleanup(sync.register(playout));
+	const audio = sync.track({ target: playout });
+	signals.cleanup(() => audio.close());
 	await settle();
 
 	let delay = sync.out.delay.peek();
@@ -190,7 +191,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 			const { timestamp, arrival } = next.frame;
 			read.set(timestamp);
 			const media = Milli.fromMicro(timestamp);
-			const late = sync.received(media, arrival);
+			const late = audio.received(media, arrival);
 			arrivals.push({ kind: "frame", timestamp: media, arrival, late });
 			const entry = recorded.get(timestamp);
 			if (!entry) throw new Error(`the consumer delivered an unrecorded frame at ${timestamp} us`);

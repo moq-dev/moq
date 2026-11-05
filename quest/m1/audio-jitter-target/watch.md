@@ -150,6 +150,16 @@ path, so the 20 ms default stays.
 Decided 2026-10-15: keep this proof in m1 with the existing playback and
 A/V clock work.
 
+Decided 2026-11-05 (maintainer, /quest-plan): steady-state lip sync comes
+from this stretch converging the ring's playhead on `Sync.now()`, the shared
+clock on local time anchored at the earliest arrival. The clock never follows
+audio: one slow track must not hold the others, so audio and video stay in sync
+in the steady state and drift apart only while a track is congested.
+[moq-dev/moq#7941](https://github.com/moq-dev/moq/pull/7941) dropped an
+audio-driven clock for this. Recommendation: measure the gap against the sample
+reaching the output, through `AudioContext.getOutputTimestamp()`, so output
+latency, Bluetooth included, is part of the lip sync.
+
 ## Waiting
 
 - Maintainer: Safari with 40 ms or more of added RTT, the baseline row the
@@ -158,10 +168,6 @@ A/V clock work.
   `sudo dnctl`/`pfctl`, then play `cdn.moq.dev/anon` in Safari with the stats
   panel open for two minutes, and record its audio Underruns after 30 s and the
   latency tab's auto delay.
-
-## Required
-
-- [A/V clock](/quest/m1/av-clock.md) - the clock the stretch converges toward
 
 ## Related
 
