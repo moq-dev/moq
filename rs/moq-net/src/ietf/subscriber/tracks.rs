@@ -1597,7 +1597,8 @@ enum ServePublishState {
 }
 
 impl ServePublish {
-	fn new(this: Subscriber, stream: Stream<Transport, Version>, msg: ietf::Publish<'static>) -> Self {
+	/// Start serving `msg`, the PUBLISH that opened `stream`.
+	pub(super) fn new(this: Subscriber, stream: Stream<Transport, Version>, msg: ietf::Publish<'static>) -> Self {
 		let state = match msg
 			.authorization_token
 			.clone()

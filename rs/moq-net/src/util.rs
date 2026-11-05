@@ -177,8 +177,7 @@ impl TaskSet {
 	/// Queue a task for polling by this set.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn push(&mut self, mut task: impl kio::Task<Output = ()> + Send + 'static) {
-		self.active
-			.push(Box::new(move |waiter: &kio::Waiter| task.poll(waiter)));
+		self.active.push(Box::new(move |waiter: &kio::Waiter| task.poll(waiter)));
 	}
 
 	/// Adopt every queued submission into the active set, then poll the children.
