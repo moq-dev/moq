@@ -35,6 +35,8 @@ class Ffi(unittest.TestCase):
             GITHUB_REPOSITORY="moq-dev/moq",
             TEST_ROOT=str(self.root),
         )
+        # The native case asserts that only a cross build sets this linker.
+        self.env.pop("CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER", None)
 
     def tool(self, name, body):
         path = self.bin / name
