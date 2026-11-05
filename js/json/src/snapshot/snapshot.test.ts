@@ -192,7 +192,7 @@ test("next reads a held group out before a newer snapshot group", async () => {
 // budget whatever another reader of the track asks for: a reader that falls behind jumps to the
 // newest group.
 test("next skips every superseded group, whatever budget another reader asks for", async () => {
-	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI });
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, maxAge: null });
 	const producer = new Producer<Value>({ track, deltas: false });
 	for (let n = 1; n <= 3; n++) producer.update({ value: { n }, at: Time.Timestamp.fromMillis(n * 1_000) });
 	producer.finish();
@@ -403,7 +403,7 @@ test("a joiner over the ratio gets a fresh snapshot", async () => {
 		[8, [4]],
 		[1, [4, 1]],
 	] as const) {
-		const track = new Track.Producer("test").accept({ refresh });
+		const track = new Track.Producer("test").accept({ refresh, maxAge: null });
 		const producer = new Producer<Value>({ track });
 		fill(producer);
 
@@ -419,7 +419,7 @@ test("a joiner over the ratio gets a fresh snapshot", async () => {
 });
 
 test("a refresh reuses the newest timestamp", async () => {
-	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, refresh: 1 });
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, refresh: 1, maxAge: null });
 	const producer = new Producer<Value>({ track });
 	for (let n = 0; n <= 3; n++) producer.update({ value: { n }, at: Time.Timestamp.fromMillis(n * 10) });
 
@@ -440,7 +440,7 @@ test("a refresh reuses the newest timestamp", async () => {
 });
 
 test("a refresh after an older update starts at the newest timestamp", async () => {
-	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, refresh: 1 });
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, refresh: 1, maxAge: null });
 	const producer = new Producer<Value>({ track });
 	// Deltas may carry timestamps older than their group's first frame.
 	for (const [n, ms] of [30, 10, 20, 15].entries())
@@ -469,7 +469,7 @@ test("a refresh after an older update starts at the newest timestamp", async () 
 // update rides as a delta against it. (Mirrors the Rust
 // `a_refresh_after_a_rejected_update_restates_the_last_written_value`.)
 test("a refresh after a rejected update restates the last written value", async () => {
-	const track = new Track.Producer("test").accept({ refresh: 1 });
+	const track = new Track.Producer("test").accept({ refresh: 1, maxAge: null });
 	const producer = new Producer<Value>({ track });
 	fill(producer);
 
@@ -501,7 +501,7 @@ test("no ratio never refreshes", async () => {
 });
 
 test("a compressed refresh opens a fresh group", async () => {
-	const track = new Track.Producer("test").accept({ refresh: 0, compress: true });
+	const track = new Track.Producer("test").accept({ refresh: 0, compress: true, maxAge: null });
 	const producer = new Producer<Value>({ track });
 	producer.update({ value: { a: 1, b: 1 } });
 	producer.update({ value: { a: 1, b: 2 } });

@@ -36,6 +36,9 @@ pub(super) trait Sink: Send + Sync + 'static {
 	/// Queue samples behind what is already buffered.
 	fn write(&mut self, samples: &[u8]) -> anyhow::Result<moq_audio::playback::Write>;
 
+	/// Update the callback's playout target without replacing the sink.
+	fn set_latency(&mut self, latency: Duration) -> anyhow::Result<()>;
+
 	/// How much audio is queued ahead of the speaker.
 	fn buffered(&self) -> Duration;
 
@@ -52,6 +55,10 @@ impl Speaker for moq_audio::playback::Engine {
 }
 
 impl Sink for moq_audio::playback::Sink {
+	fn set_latency(&mut self, latency: Duration) -> anyhow::Result<()> {
+		Ok(moq_audio::playback::Sink::set_latency(self, latency)?)
+	}
+
 	fn write(&mut self, samples: &[u8]) -> anyhow::Result<moq_audio::playback::Write> {
 		Ok(moq_audio::playback::Sink::write(self, samples)?)
 	}

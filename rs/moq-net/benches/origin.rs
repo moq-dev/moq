@@ -56,7 +56,9 @@ use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
 fn timed() -> track::Info {
-	track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	track::Info::default()
+		.with_max_age(None)
+		.with_timescale(moq_net::Timescale::MILLI)
 }
 
 /// `(publishers, subscribers)` shapes for the fan-out benchmarks.
@@ -1404,7 +1406,11 @@ fn bench_parked(c: &mut Criterion) {
 				runtime.spawn(moq_net::time::run(driver));
 				let broadcast = producer.publish("room/live", origin::Route::default()).unwrap();
 				let sources: Vec<_> = (0..tracks)
-					.map(|i| broadcast.create_track(format!("{i}"), None).unwrap())
+					.map(|i| {
+						broadcast
+							.create_track(format!("{i}"), moq_net::track::Info::default().with_max_age(None))
+							.unwrap()
+					})
 					.collect();
 				let _writers: Vec<_> = sources.iter().map(|source| source.append_group().unwrap()).collect();
 				let (subscriptions, mut groups) = runtime.block_on(async {

@@ -95,7 +95,7 @@ pub struct Capture {
 	/// Encode only while subscribed, retaining raw audio up to the track's `max_age`.
 	///
 	/// On by default. Capture stays open, and a subscriber encodes the retained past before
-	/// continuing live. Tracks without `max_age` keep 30 seconds, matching hang's media retention.
+	/// continuing live. Tracks with an unlimited `max_age` keep 30 seconds, the default media max age.
 	/// Set false to encode continuously instead.
 	pub on_demand: bool,
 }

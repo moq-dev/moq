@@ -9,6 +9,11 @@ description: The MoQ relay server
 groups, merges duplicate subscriptions, and never parses the media, so one
 relay serves video, audio, and data alike.
 
+Its transport and HTTP cryptography uses [rind](https://github.com/moq-dev/rind):
+every x86\_64 CPU, aarch64 with NEON (including Raspberry Pi 4, CM4, and
+Zero 2 W without crypto extensions), and armv7 are supported. An unsupported
+CPU fails startup with an error naming the missing feature.
+
 ## Features
 
 - **QUIC, WebTransport, and WebSocket** listeners, so browsers and native clients connect to one process.

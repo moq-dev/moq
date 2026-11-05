@@ -1,10 +1,14 @@
 //! Fastest-reader pacing: how far a group's writer reads ahead of its furthest reader.
 //!
 //! Readers report the frames they take; a paced writer (a session's ingest) stops reading
-//! its upstream stream while it is more than [`AHEAD`] past the end of the last frame the
+//! its upstream stream while it is more than its window past the end of the last frame the
 //! fastest reader took, so stream flow control pushes back to the publisher. Only the
 //! fastest reader counts: a slower one is never waited on, and falls off the group's
 //! front as the live tail sheds.
+//!
+//! Ingest's window is the stream receive credit its transport grants, capped at [`AHEAD`]
+//! (see [`window`]), so a hop holds about what its upstream peer can have in flight on
+//! that stream. A local writer, which has no transport, uses [`AHEAD`] itself.
 //!
 //! Progress is in bytes on one scale per group copy: each frame entering the copy's log
 //! ends where the frames before it, payload and slot, add up to. A frame larger than the
@@ -18,10 +22,19 @@ use std::sync::{
 use std::task::Waker;
 
 use super::group::MAX_CACHE_BYTES;
+use crate::transport::ReceiveWindow;
 
-/// How far a paced writer runs ahead of its group's fastest reader: half the live tail,
-/// so the other half stays behind the fastest reader for slower ones.
-pub(super) const AHEAD: u64 = MAX_CACHE_BYTES / 2;
+/// The furthest a paced writer runs ahead of its group's fastest reader: half the live
+/// tail, so the other half stays behind the fastest reader for slower ones.
+pub(crate) const AHEAD: u64 = MAX_CACHE_BYTES / 2;
+
+/// How far ingest reading a stream runs ahead of its group's fastest reader: the credit one
+/// stream may hold under `receive`, the windows its transport grants, capped at [`AHEAD`].
+///
+/// A transport that reports no window never pauses a stream, so its window is moot.
+pub(crate) fn window(receive: Option<ReceiveWindow>) -> u64 {
+	receive.map_or(AHEAD, |receive| receive.stream.min(receive.connection).min(AHEAD))
+}
 
 /// One group copy's reader progress, shared by its writer and every cursor.
 #[derive(Default)]
@@ -88,19 +101,19 @@ impl Pace {
 		self.written.load(Ordering::Acquire)
 	}
 
-	/// Whether a writer `partial` bytes into an uncommitted frame is more than [`AHEAD`]
-	/// past the fastest reader, given it read up to `read`.
+	/// Whether a writer `partial` bytes into an uncommitted frame is more than `window`
+	/// bytes past the fastest reader, given it read up to `read`.
 	///
 	/// Never while that reader took every committed frame, since it is waiting on the
 	/// writer, nor once the frames it has yet to take were shed, since it fell off.
-	pub fn paced(&self, read: u64, partial: u64) -> bool {
+	pub fn paced(&self, read: u64, partial: u64, window: u64) -> bool {
 		let written = self.written();
-		read < written && read >= self.front.load(Ordering::SeqCst) && written.saturating_add(partial) - read > AHEAD
+		read < written && read >= self.front.load(Ordering::SeqCst) && written.saturating_add(partial) - read > window
 	}
 
 	/// Whether the writer is paced, as [`Self::paced`] judges it now.
-	pub fn ahead(&self, partial: u64) -> bool {
-		self.paced(self.read.load(Ordering::SeqCst), partial)
+	pub fn ahead(&self, partial: u64, window: u64) -> bool {
+		self.paced(self.read.load(Ordering::SeqCst), partial, window)
 	}
 
 	/// Register `waiter` for the next read or shed, returning how far readers got, read
@@ -181,16 +194,44 @@ mod tests {
 		let mut group = written(15);
 		let mut fast = group.consume();
 		let _slow = group.consume();
-		assert_eq!(group.poll_paced(&waiter, 0), Poll::Ready(()), "within the window");
+		assert_eq!(
+			group.poll_paced(&waiter, 0, AHEAD),
+			Poll::Ready(()),
+			"within the window"
+		);
 
 		group.write_frame(None, Bytes::from(vec![0u8; MB])).unwrap();
-		assert_eq!(group.poll_paced(&waiter, 0), Poll::Pending, "past the window");
+		assert_eq!(group.poll_paced(&waiter, 0, AHEAD), Poll::Pending, "past the window");
 		assert!(!flag.woken());
 
 		// A batch read takes several frames at once, which the writer counts as read.
 		read(&mut fast);
 		assert!(flag.woken(), "the fastest reader's read wakes the writer");
-		assert_eq!(group.poll_paced(&waiter, 0), Poll::Ready(()));
+		assert_eq!(group.poll_paced(&waiter, 0, AHEAD), Poll::Ready(()));
+	}
+
+	/// Ingest paces at its stream's receive credit, so a writer stops once that much is
+	/// past its fastest reader rather than half the live tail.
+	#[test]
+	fn a_smaller_window_paces_sooner() {
+		let (_flag, waiter) = flag();
+		let group = written(3);
+		let _reader = group.consume();
+		let credit = window(Some(ReceiveWindow::new(4 * MB as u64, MB as u64)));
+		assert_eq!(credit, MB as u64);
+		assert_eq!(group.poll_paced(&waiter, 0, AHEAD), Poll::Ready(()), "within the cap");
+		assert_eq!(group.poll_paced(&waiter, 0, credit), Poll::Pending, "past the credit");
+	}
+
+	/// The window is a stream's credit, no more than the connection's and never past the
+	/// ahead half of the live tail, which keeps the behind half for slower readers.
+	#[test]
+	fn the_window_is_the_stream_credit_capped() {
+		let mb = MB as u64;
+		assert_eq!(window(None), AHEAD, "a transport without windows never pauses");
+		assert_eq!(window(Some(ReceiveWindow::new(4 * mb, mb))), mb);
+		assert_eq!(window(Some(ReceiveWindow::new(mb / 2, mb))), mb / 2);
+		assert_eq!(window(Some(ReceiveWindow::new(u64::MAX, 64 * mb))), AHEAD);
 	}
 
 	/// A one-byte frame whose properties hold `metadata` bytes.
@@ -231,9 +272,9 @@ mod tests {
 			group = frame.finish().unwrap();
 		}
 		let group = crate::recv::Group::new(group);
-		assert_eq!(group.poll_admit(&waiter, &fielded(15, 0)), Poll::Ready(()));
+		assert_eq!(group.poll_admit(&waiter, &fielded(15, 0), AHEAD), Poll::Ready(()));
 		assert_eq!(
-			group.poll_admit(&waiter, &fielded(15, 2 * MB)),
+			group.poll_admit(&waiter, &fielded(15, 2 * MB), AHEAD),
 			Poll::Pending,
 			"its metadata would pass the window"
 		);
@@ -251,9 +292,9 @@ mod tests {
 				timestamp: None,
 			})
 			.unwrap();
-		assert_eq!(frame.poll_ready(&waiter), Poll::Ready(()));
+		assert_eq!(frame.poll_ready(&waiter, AHEAD), Poll::Ready(()));
 		frame.write(Bytes::from(vec![0u8; MB])).unwrap();
-		assert_eq!(frame.poll_ready(&waiter), Poll::Pending);
+		assert_eq!(frame.poll_ready(&waiter, AHEAD), Poll::Pending);
 	}
 
 	/// A frame is admitted only once its declared size fits the window, since admitting
@@ -263,11 +304,11 @@ mod tests {
 		let (flag, waiter) = flag();
 		let group = written(15);
 		let mut reader = group.consume();
-		assert_eq!(group.poll_paced(&waiter, 20 * MB as u64), Poll::Pending);
+		assert_eq!(group.poll_paced(&waiter, 20 * MB as u64, AHEAD), Poll::Pending);
 		while reader.poll_read_frame(&kio::Waiter::noop()).is_ready() {}
 		assert!(flag.woken());
 		assert_eq!(
-			group.poll_paced(&waiter, 20 * MB as u64),
+			group.poll_paced(&waiter, 20 * MB as u64, AHEAD),
 			Poll::Ready(()),
 			"the reader took everything, so the frame sheds nothing it wants"
 		);
@@ -279,17 +320,17 @@ mod tests {
 	fn a_group_without_readers_never_waits() {
 		let (flag, waiter) = flag();
 		let group = written(16);
-		assert_eq!(group.poll_paced(&waiter, 0), Poll::Ready(()));
+		assert_eq!(group.poll_paced(&waiter, 0, AHEAD), Poll::Ready(()));
 
 		let reader = group.consume();
 		assert_eq!(
-			group.poll_paced(&waiter, 0),
+			group.poll_paced(&waiter, 0, AHEAD),
 			Poll::Pending,
 			"a reader that took nothing"
 		);
 		drop(reader);
 		assert!(flag.woken(), "the last reader leaving wakes the writer");
-		assert_eq!(group.poll_paced(&waiter, 0), Poll::Ready(()));
+		assert_eq!(group.poll_paced(&waiter, 0, AHEAD), Poll::Ready(()));
 	}
 
 	/// A local writer waits for a reader before it writes, then for room in the window, and
@@ -373,7 +414,7 @@ mod tests {
 			})
 			.unwrap();
 		frame.write(Bytes::from(vec![0u8; 18 * MB])).unwrap();
-		assert_eq!(frame.poll_ready(&waiter), Poll::Ready(()));
+		assert_eq!(frame.poll_ready(&waiter, AHEAD), Poll::Ready(()));
 	}
 
 	/// A reader whose next frame the tail shed fell off the group, so the writer stops
@@ -387,7 +428,7 @@ mod tests {
 		for _ in 0..40 {
 			group.write_frame(None, Bytes::from(vec![0u8; MB])).unwrap();
 		}
-		assert_eq!(group.poll_paced(&waiter, 0), Poll::Ready(()));
+		assert_eq!(group.poll_paced(&waiter, 0, AHEAD), Poll::Ready(()));
 	}
 
 	/// A reader that skipped past what the writer has written is waiting on it, so it
@@ -403,7 +444,7 @@ mod tests {
 		}
 		// Each commit wakes the parked reader, which polls again and reports the edge.
 		assert!(reader.poll_read_frame(&kio::Waiter::noop()).is_pending());
-		assert_eq!(group.poll_paced(&waiter, 0), Poll::Ready(()));
+		assert_eq!(group.poll_paced(&waiter, 0, AHEAD), Poll::Ready(()));
 	}
 
 	/// Shedding past the fastest reader under cache pressure wakes a parked writer: that
@@ -413,10 +454,10 @@ mod tests {
 		let (flag, waiter) = flag();
 		let group = written(17);
 		let _reader = group.consume();
-		assert_eq!(group.poll_paced(&waiter, 0), Poll::Pending);
+		assert_eq!(group.poll_paced(&waiter, 0, AHEAD), Poll::Pending);
 		group.handle().shed(u64::MAX, u64::MAX);
 		assert!(flag.woken());
-		assert_eq!(group.poll_paced(&waiter, 0), Poll::Ready(()));
+		assert_eq!(group.poll_paced(&waiter, 0, AHEAD), Poll::Ready(()));
 	}
 
 	/// An abort wakes a parked writer, so its next write surfaces why.
@@ -425,9 +466,9 @@ mod tests {
 		let (flag, waiter) = flag();
 		let group = written(17);
 		let _reader = group.consume();
-		assert_eq!(group.poll_paced(&waiter, 0), Poll::Pending);
+		assert_eq!(group.poll_paced(&waiter, 0, AHEAD), Poll::Pending);
 		group.handle().abort(Error::Cancel).unwrap();
 		assert!(flag.woken());
-		assert_eq!(group.poll_paced(&waiter, 0), Poll::Ready(()));
+		assert_eq!(group.poll_paced(&waiter, 0, AHEAD), Poll::Ready(()));
 	}
 }

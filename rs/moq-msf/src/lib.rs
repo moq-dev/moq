@@ -1297,4 +1297,17 @@ mod test {
 		assert_eq!(value["mpegts"]["program"]["pmtPid"], serde_json::json!(100));
 		assert_eq!(value["somethingElse"], serde_json::json!([1, 2, 3]));
 	}
+
+	#[test]
+	fn shared_extension_names_roundtrip() {
+		type Extra = serde_json::Map<String, serde_json::Value>;
+		let raw = include_str!("../fixtures/catalog-names.json");
+		let mut expected: Extra = serde_json::from_str(raw).unwrap();
+		expected.remove("version");
+		expected.remove("tracks");
+		let catalog = Catalog::<Extra>::from_str(raw).unwrap();
+		assert_eq!(catalog.ext, expected);
+		let wire: serde_json::Value = serde_json::from_str(&catalog.to_json().unwrap()).unwrap();
+		assert_eq!(wire, serde_json::from_str::<serde_json::Value>(raw).unwrap());
+	}
 }

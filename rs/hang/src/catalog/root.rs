@@ -251,8 +251,8 @@ impl Catalog<()> {
 	/// [`create_track`](moq_net::broadcast::Producer::create_track) at
 	/// [`DEFAULT_NAME`](Self::DEFAULT_NAME).
 	///
-	/// Keeps the bare `moq_net` retention rather than the media one: the catalog is
-	/// snapshot mode, so the useful value is the live edge, which is always kept.
+	/// Keeps moq-net's default zero max age rather than the media one: the catalog is
+	/// snapshot mode, so a join reads the newest snapshot, which never goes stale.
 	/// Timed in milliseconds, so snapshots share the broadcast clock with media, and
 	/// [`compress`](moq_net::track::Info::compress)ed, since catalog JSON is small and repetitive.
 	pub fn default_track_info() -> moq_net::track::Info {

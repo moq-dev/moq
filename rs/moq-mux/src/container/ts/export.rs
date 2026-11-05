@@ -1288,10 +1288,11 @@ struct SiTrack {
 	dirty: bool,
 	/// Media timestamp of the last emission ([`Export::mux`]).
 	last_emit: Option<Timestamp>,
-	/// The same budget the media sources use. SI carries table snapshots at a low
-	/// rate, so the real-time default would take only the newest group and drop
-	/// the revisions between: an SI track needs the export's replay window as much
-	/// as the media it describes.
+	/// The same budget the media sources use, asked of the SI track's publisher, and
+	/// capped by that publisher's max age. A snapshot table needs only its newest group,
+	/// which never goes stale. A clock table (TDT/TOT) needs every revision to stay on
+	/// the subscription until media reaches its stamped slot ([`Self::advance`]), so the
+	/// TS importer's SI tracks declare their catalog's media max age ([`super::si::track_info`]).
 	max_age: Duration,
 }
 

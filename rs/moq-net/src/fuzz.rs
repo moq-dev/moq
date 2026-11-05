@@ -838,10 +838,11 @@ impl Default for Messages {
 				priority: 4,
 				max_delay: Duration::from_millis(500),
 				min_delay: None,
-				ranges: vec![lite::Range {
+				// Lite-06, the bench's version, restates the ranges.
+				ranges: lite::RangeEdit::Replace(vec![lite::Range {
 					start: Some(lite::Anchor::Absolute(crate::track::Position::group(1_000))),
 					end: Some(lite::Anchor::Absolute(crate::track::Position::group(2_001))),
-				}],
+				}]),
 			},
 			lite_start: lite::SubscribeResponse::Start(lite::SubscribeStart {
 				largest: None,

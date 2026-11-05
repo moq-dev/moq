@@ -20,17 +20,17 @@ const abs = (start: bigint, end?: bigint): Range =>
 test("union merges absolute spans and drops what an open range covers", () => {
 	expect(union([abs(4n, 6n), abs(0n, 2n), abs(2n, 3n), abs(5n, 9n)])).toEqual([abs(0n, 3n), abs(4n, 9n)]);
 	// The open absolute span drops a relative-ended range starting inside it.
-	expect(union([abs(3n), { start: { absolute: 5n }, end: { relative: 0 } }])).toEqual([abs(3n)]);
+	expect(union([abs(3n), { start: { absolute: 5n }, end: { relative: 0n } }])).toEqual([abs(3n)]);
 	// The farthest open relative range drops relative ranges starting no farther back.
 	expect(
 		union([
-			{ start: { relative: 2 } },
-			{ start: { relative: 5 } },
-			{ start: { relative: 1 }, end: { relative: 0 } },
+			{ start: { relative: 2n } },
+			{ start: { relative: 5n } },
+			{ start: { relative: 1n }, end: { relative: 0n } },
 		]),
-	).toEqual([{ start: { relative: 5 } }]);
+	).toEqual([{ start: { relative: 5n } }]);
 	// A relative range above the live edge never hides an absolute one, nor the reverse.
-	expect(union([abs(10n), { start: { relative: 0 } }])).toEqual([abs(10n), { start: { relative: 0 } }]);
+	expect(union([abs(10n), { start: { relative: 0n } }])).toEqual([abs(10n), { start: { relative: 0n } }]);
 	// The oldest start covers everything, and empty ranges vanish.
 	expect(union([abs(2n, 4n), {}])).toEqual([{}]);
 	expect(union([abs(4n, 4n), { end: { absolute: 0n } }])).toEqual([]);
@@ -38,7 +38,7 @@ test("union merges absolute spans and drops what an open range covers", () => {
 
 test("a window reads only its ranges, counting relative anchors back from the latest group", () => {
 	const window = new Window(
-		[abs(2n, 4n), { start: { relative: 1 } }, { start: { absolute: 0n }, end: { relative: 8 } }],
+		[abs(2n, 4n), { start: { relative: 1n } }, { start: { absolute: 0n }, end: { relative: 8n } }],
 		10n,
 	);
 	expect([0n, 1n, 2n, 3n, 4n, 8n, 9n, 10n, 11n].map((sequence) => window.contains(sequence))).toEqual([
@@ -60,15 +60,19 @@ test("a window reads only its ranges, counting relative anchors back from the la
 		{ start: 1n, end: 4n },
 		{ start: 9n, end: 12n },
 	]);
-	expect(window.resolved()).toEqual([{ start: 2n, end: 4n }, { start: 9n }, { start: 0n, end: 3n }]);
+	expect(window.resolved()).toEqual([
+		{ start: 2n, end: 4n, floored: true },
+		{ start: 9n, floored: true },
+		{ start: 0n, end: 3n, floored: true },
+	]);
 });
 
 test("a relative anchor clamps to group 0 and waits for a first group", () => {
-	expect(new Window([{ start: { relative: 50 }, end: { relative: 40 } }], 10n).runs()).toEqual([
+	expect(new Window([{ start: { relative: 50n }, end: { relative: 40n } }], 10n).runs()).toEqual([
 		{ start: 0n, end: 1n },
 	]);
 
-	const window = new Window([{ start: { relative: 0 } }], undefined);
+	const window = new Window([{ start: { relative: 0n } }], undefined);
 	expect(window.pending).toBe(true);
 	expect(window.contains(3n)).toBe(true);
 	expect(window.floor()).toBeUndefined();
@@ -89,29 +93,29 @@ test("a bounded window ends past its last group, and nothing in range ends at 0"
 
 test("a wire without ranges carries one span covering them all", () => {
 	expect(wireSpan([abs(4n, 6n), abs(2n, 3n)])).toEqual({ start: 2n, end: 6n });
-	expect(wireSpan([{ start: { relative: 0 } }])).toEqual({ start: undefined, end: undefined });
+	expect(wireSpan([{ start: { relative: 0n } }])).toEqual({ start: undefined, end: undefined });
 	// No single start covers both an absolute and a relative one.
-	expect(wireSpan([abs(9n), { start: { relative: 0 } }])).toEqual({ start: 0n, end: undefined });
+	expect(wireSpan([abs(9n), { start: { relative: 0n } }])).toEqual({ start: 0n, end: undefined });
 	// A relative end goes out open, since the copy resolves it against what it receives.
-	expect(wireRanges([{ start: { relative: 3 }, end: { relative: 1 } }, abs(5n, 5n)])).toEqual([
-		{ start: { relative: 3 } },
+	expect(wireRanges([{ start: { relative: 3n }, end: { relative: 1n } }, abs(5n, 5n)])).toEqual([
+		{ start: { relative: 3n } },
 	]);
 });
 
 test("clamping raises starts to the floor and caps ends without widening", () => {
-	const ranges: Range[] = [abs(1n, 9n), {}, { start: { relative: 2 }, end: { relative: 0 } }];
-	expect(clamped(ranges, 4n, 6n, [undefined, undefined, { start: 8n, end: 11n }])).toEqual([
+	const ranges: Range[] = [abs(1n, 9n), {}, { start: { relative: 2n }, end: { relative: 0n } }];
+	expect(clamped(ranges, 4n, 6n, [undefined, undefined, { start: 8n, end: 11n, floored: true }])).toEqual([
 		abs(4n, 6n),
 		abs(4n, 6n),
 		abs(8n, 6n),
 	]);
 	// A relative start not resolved keeps its anchor for the caller to floor.
-	expect(clamped([{ start: { relative: 2 } }], 4n, undefined, [])).toEqual([{ start: { relative: 2 } }]);
+	expect(clamped([{ start: { relative: 2n } }], 4n, undefined, [])).toEqual([{ start: { relative: 2n } }]);
 });
 
 test("ranges are checked rather than served widened", () => {
 	expect(() => rangesOf([{ start: { absolute: -1n } }])).toThrow(TypeError);
-	expect(() => rangesOf([{ start: { absolute: 1n, relative: 2 } as never }])).toThrow(TypeError);
+	expect(() => rangesOf([{ start: { absolute: 1n, relative: 2n } as never }])).toThrow(TypeError);
 	expect(() => rangesOf([{ end: { time: 5 } as never }])).toThrow(TypeError);
 	expect(joinsLive([{}])).toBe(true);
 	expect(joinsLive([abs(3n)])).toBe(false);
@@ -179,13 +183,13 @@ test("a time start is the group containing it, and an end stops past it once a l
 	let window = new Window([{ start: time(3500), end: time(4500) }], 6n, groups);
 	expect(covered(window, 8)).toEqual([3n, 4n]);
 	expect(window.settled).toBe(true);
-	expect(window.resolved()).toEqual([{ start: 3n, end: 5n }]);
+	expect(window.resolved()).toEqual([{ start: 3n, end: 5n, floored: true }]);
 
 	// Group 6 may yet start at 5000 too: read on speculation, the end left open.
 	window = new Window([{ start: time(3500), end: time(5000) }], 6n, groups);
 	expect(window.settled).toBe(false);
 	expect(covered(window, 9)).toEqual([3n, 4n, 5n, 6n]);
-	expect(window.resolved()).toEqual([{ start: 3n, end: undefined }]);
+	expect(window.resolved()).toEqual([{ start: 3n, end: undefined, floored: true }]);
 	expect(window.end()).toBeUndefined();
 
 	// Before every start held: reach back to the oldest.
@@ -209,7 +213,7 @@ test("a time start is the group containing it, and an end stops past it once a l
 test("a waiting time start keeps the relative end it was asked with", () => {
 	for (const latest of [undefined, 9n]) {
 		const groups = new Groups();
-		const window = new Window([{ start: time(2500), end: { relative: 0 } }], latest, groups);
+		const window = new Window([{ start: time(2500), end: { relative: 0n } }], latest, groups);
 		expect(window.pending).toBe(latest === undefined);
 		for (let sequence = 2n; sequence <= 9n; sequence++) groups.held.set(sequence, "pending");
 		window.settle(9n, groups);
@@ -219,7 +223,7 @@ test("a waiting time start keeps the relative end it was asked with", () => {
 
 		groups.held.set(2n, started(2000));
 		expect(window.settle(10n, groups)).toBe(true);
-		expect(window.resolved()).toEqual([{ start: 2n, end: 10n }]);
+		expect(window.resolved()).toEqual([{ start: 2n, end: 10n, floored: true }]);
 	}
 });
 
@@ -328,7 +332,7 @@ test("a datagram is judged by its own timestamp, one range at a time", () => {
 	]);
 	groups.gones.push({ start: 1n, end: 2n });
 	const settled = new Window([{ start: time(0), end: time(5000) }], undefined, groups);
-	expect(settled.resolved()).toEqual([{ start: 0n, end: 2n }]);
+	expect(settled.resolved()).toEqual([{ start: 0n, end: 2n, floored: true }]);
 	expect(settled.admitsDatagram(1n, Timestamp.fromMillis(4000))).toBe(true);
 	expect(settled.admitsDatagram(1n, Timestamp.fromMillis(7000))).toBe(false);
 
@@ -351,12 +355,12 @@ test("a time anchor needs moq-lite-07, is resolved by the copy, and clamps to it
 	expect(joinsLive([{ start: time(1) }])).toBe(false);
 	// A time can't be placed against the others without the hop's groups.
 	expect(union([{ start: time(5) }, {}])).toEqual([{}]);
-	expect(union([{ start: time(5) }, { start: { relative: 2 } }])).toEqual([
-		{ start: { relative: 2 } },
+	expect(union([{ start: time(5) }, { start: { relative: 2n } }])).toEqual([
+		{ start: { relative: 2n } },
 		{ start: time(5) },
 	]);
 	// Resolved anchors become their groups; an unresolved time end stays so the cap applies apart.
-	expect(clamped([{ start: time(1), end: time(5) }], 2n, 9n, [{ start: 3n, end: 7n }])).toEqual([
+	expect(clamped([{ start: time(1), end: time(5) }], 2n, 9n, [{ start: 3n, end: 7n, floored: true }])).toEqual([
 		{ start: { absolute: 3n }, end: { absolute: 7n } },
 	]);
 	expect(clamped([{ start: time(1), end: time(5) }], 2n, 9n, [])).toEqual([{ start: time(1), end: time(5) }]);

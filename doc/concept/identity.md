@@ -232,13 +232,14 @@ Within one stream, recovery is about which groups are still worth having.
   after a route change within its instance, continues from the first frame it
   lacks. A fetch asks for one group by sequence, which a relay fills upstream
   when its cache misses. Both are bound to the instance they resolved.
-- **Publisher max age bounds retention; reader max delay bounds interest.** A
+- **Publisher max age bounds freshness; reader max delay bounds interest.** A
   track's `max_age` (`maxAge` in JavaScript, `--max-age` on `moq import`) is the
-  longest any hop keeps a non-latest group for late joiners, fetches, and
-  recovery; a relay may evict sooner. A reader's `delay.max` is how long a non-latest group
-  stays worth delivering to that reader. It can tighten retention, never relax
-  it. Both age a group from its successor's arrival and never expire the newest
-  group. Not every wire carries a reader's max delay on every request; see
+  longest a non-latest group stays fresh at any hop for late joiners, fetches,
+  and recovery; a relay may cap it lower, and its cache may reclaim the bytes
+  sooner. A reader's `delay.max` is how long a non-latest group
+  stays worth delivering to that reader. It can tighten the publisher's bound,
+  never relax it. Both age a group from its successor's arrival and never make
+  the newest group stale. Not every wire carries a reader's max delay on every request; see
   [subscriptions](/concept/moq-lite#subscriptions).
 - **Arrivals are unordered.** Each group is its own stream, so a lower group
   can land after a higher one, and is still delivered if the reader's range and

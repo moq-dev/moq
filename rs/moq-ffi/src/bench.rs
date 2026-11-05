@@ -248,6 +248,7 @@ async fn rust_ffi() {
 		let timed = MoqTrackInfo {
 			priority: 0,
 			max_age: None,
+			max_age_unlimited: false,
 			refresh: None,
 			timescale: Some(1_000_000),
 			compress: false,

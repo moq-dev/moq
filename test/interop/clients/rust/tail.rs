@@ -110,7 +110,10 @@ async fn main() -> anyhow::Result<()> {
 				"tail",
 				moq_net::track::Info::default()
 					.with_timescale(moq_net::Timescale::MILLI)
-					.with_compress(compress),
+					.with_compress(compress)
+					// `cached` and `late` read groups a newer one supersedes, which the default
+					// zero max age would leave stale.
+					.with_max_age(None),
 			)?;
 			broadcast.announce(Default::default())?;
 			if cached {

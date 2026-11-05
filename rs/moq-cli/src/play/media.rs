@@ -34,13 +34,9 @@ enum Crossing {
 /// network jitter, and one with no depth at all can never be read from.
 const AUDIO_BUFFER_MIN: Duration = Duration::from_millis(50);
 
-/// How far the speaker may hold more than its target, ahead of a write, before
-/// the write skips back onto it.
-///
-/// The level moves by a device period each time the speaker pulls, so a margin
-/// under that would skip on ordinary cadence. Anything over it is latency nobody
-/// asked for, since a live stream arrives as fast as it plays and never drains
-/// the excess on its own.
+/// NetEq's delay adjustment granularity. The callback handles ordinary
+/// differences by stretching; the write path re-anchors only at four times
+/// the target plus this granularity.
 const AUDIO_SLACK: Duration = Duration::from_millis(20);
 
 /// Maximum sample frames per silence write, independent of the catalog rate.
@@ -563,7 +559,7 @@ async fn play_audio<O: Output>(
 	// and the sink is where it lives: a sample handed over now sounds that much
 	// later. That estimate times each packet when `read` hands it over, so this
 	// receiver never waits on the speaker between reads. Live playback lets
-	// `fit` hold the sink on the target; declared ends queue their replacements
+	// the callback stretch toward the target; declared ends queue their replacements
 	// until the old sink drains. The window
 	// schedules video against where the speaker actually is, which keeps the two
 	// together whatever the target does.
@@ -579,13 +575,11 @@ async fn play_audio<O: Output>(
 	input.format = moq_audio::Format::F32;
 	input.sample_rate = sample_rate;
 	input.layout = layout;
-	// The floor the sink opens on and pads an underflow back to, and what sizes
-	// its ring, so a fixed delay has to be it or the ring could not hold it. An
-	// estimated target moves, so it gets the floor, and `fit` steers the sink
-	// onto the target on every write.
+	// The floor the sink opens on, and what sizes its ring, so a fixed delay
+	// must fit from setup. An estimated target moves: update the callback's
+	// target on each write and let it stretch received PCM to converge.
 	input.latency = latency;
 	let mut sink = speaker.sink(input.clone())?;
-	let mut dry = true;
 
 	// One sample across every channel, the unit a write has to stay aligned to.
 	let stride = channels as usize * size_of::<f32>();
@@ -602,12 +596,10 @@ async fn play_audio<O: Output>(
 
 	let mut timeline = AudioTimeline::default();
 
-	// How far ahead of its due time a frame is written: the playout target less
-	// the frame itself, never under the sink's floor.
-	let lead = |delay: Duration, frame: &moq_audio::Frame| {
-		let duration = Duration::from_secs_f64((frame.data.len() / stride) as f64 / sample_rate as f64);
-		latency.max(delay.min(max_delay).max(AUDIO_BUFFER_MIN).saturating_sub(duration))
-	};
+	// A replacement's opening cushion and its timeline plan must agree. The
+	// callback now owns target convergence, rather than write-time padding
+	// subtracting the incoming frame before it reaches the sink.
+	let lead = |delay: Duration| latency.max(delay.min(max_delay).max(AUDIO_BUFFER_MIN));
 
 	// Tracks whether the last read failed, so a stream the decoder can't read at
 	// all logs once rather than once per packet.
@@ -670,7 +662,7 @@ async fn play_audio<O: Output>(
 					}
 					match crossed {
 						Some(transition) => {
-							role.plan(transition, frame.timestamp, Some(lead(delay, frame)));
+							role.plan(transition, frame.timestamp, Some(lead(delay)));
 							Some(Crossing::Resume(transition))
 						}
 						None if lost => Some(Crossing::Loss),
@@ -705,6 +697,9 @@ async fn play_audio<O: Output>(
 				}
 				arrived.notified().await;
 			};
+			// A replacement sink must open with the current cushion, not the
+			// old floor and a target update after its initial silence was fixed.
+			input.latency = lead(delay);
 			let frame = match event {
 				Ok(Some(moq_audio::decode::Read::Frame(frame))) => {
 					playing = true;
@@ -718,7 +713,7 @@ async fn play_audio<O: Output>(
 						Some(Crossing::Resume(transition)) => {
 							// A declared boundary preserves the old sink, unlike an undeclared hole.
 							drain(sink).await;
-							let first = lead(delay, &frame);
+							let first = lead(delay);
 							let mapping = role.resume(transition, frame.timestamp, Some(first)).ready().await?;
 							role.apply(transition, mapping);
 							let at = presentation
@@ -738,7 +733,6 @@ async fn play_audio<O: Output>(
 							sequential = true;
 							timeline = AudioTimeline::default();
 							sink = speaker.sink(input.clone())?;
-							dry = true;
 						}
 						None => {}
 					}
@@ -785,16 +779,13 @@ async fn play_audio<O: Output>(
 				drop(sink);
 				presentation.audio_restarted();
 				sink = speaker.sink(input.clone())?;
-				dry = true;
 			}
 
 			// Resumed media was received while the old tail played. Keep its
 			// spacing instead of fitting that queued burst as if it arrived live.
 			// The lead follows the current target so jitter can still deepen the sink.
 			if sequential {
-				let at = presentation
-					.due(mapped)
-					.and_then(|at| at.checked_sub(lead(delay, &frame)));
+				let at = presentation.due(mapped).and_then(|at| at.checked_sub(lead(delay)));
 				if let Some(at) = at {
 					kio::clock::sleep_until(at).await;
 				}
@@ -806,20 +797,22 @@ async fn play_audio<O: Output>(
 			// re-anchors, taking the video with it. So the hole goes in as silence ahead
 			// of the frame, and the pair is fitted to the target as one write.
 			let buffered = samples(sink.buffered());
-			dry |= buffered == 0;
 			// Capped at the age budget: audio older than it is skipped rather than held,
 			// so a deeper target could never fill. The advertised floor needs the cap,
 			// being a number the publisher declared about itself, unbounded. The budget
 			// is also what the sink's ring was sized to hold.
-			let held = delay.min(max_delay).max(AUDIO_BUFFER_MIN);
+			let held = input.latency;
 			let target = samples(held);
-			let fit = fit(dry, buffered, target, slack, timing.silence, length as u64);
-			dry = false;
+			sink.set_latency(held)?;
+			// Leave normal convergence to the callback. Only an excess at NetEq's
+			// fast threshold (four times target + granularity) is an emergency
+			// re-anchor; a 20 ms trim would compete with every pitch correction.
+			let fit = fit(buffered, target, slack, timing.silence, length as u64);
 
 			// The packet pays for the channel count; the catalog cannot allocate
 			// a duration's worth of silence before any samples arrive.
 			silence.resize(length.min(AUDIO_SILENCE) * stride, 0);
-			let mut quiet = fit.pad + timing.silence.saturating_sub(fit.skip);
+			let mut quiet = fit.silence;
 			while quiet > 0 && !silence.is_empty() {
 				let frames = quiet.min((silence.len() / stride) as u64) as usize;
 				let written = sink.write(&silence[..frames * stride])?;
@@ -830,7 +823,7 @@ async fn play_audio<O: Output>(
 				}
 				quiet -= frames as u64;
 			}
-			let skip = fit.skip.saturating_sub(timing.silence) as usize * stride;
+			let skip = fit.skip as usize * stride;
 			let _ = sink.write(&frame.data[skip.min(frame.data.len())..])?;
 
 			// Anchor the playout clock on where the speaker has actually reached, which
@@ -935,7 +928,7 @@ mod tests {
 			changed: Default::default(),
 			speaker: recorder.clone(),
 			presentation: Presentation::new(delay),
-			latency: delay,
+			latency: AUDIO_BUFFER_MIN,
 			output: recorder.clone(),
 		};
 		let task = tokio::spawn(async move {
@@ -951,6 +944,7 @@ mod tests {
 		producer.write(packet(0, 0.5)).unwrap();
 		producer.finish().unwrap();
 		task.await.unwrap();
+		assert_eq!(recorder.latencies(), vec![AUDIO_BUFFER_MIN, delay]);
 		let played = recorder.played();
 		let old: Vec<_> = played.iter().filter(|part| part.sample == 0.25).collect();
 		let new: Vec<_> = played.iter().filter(|part| part.sample == 0.5).collect();
