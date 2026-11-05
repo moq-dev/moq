@@ -176,9 +176,7 @@ moq-vaapi = "0.1.1"
 # that argument, so moq-ffi and moq-c opt NVIDIA and VAAPI back in (OpenH264
 # through their own `openh264` feature, which release builds enable).
 moq-video = { version = "0.1.10", path = "rs/moq-video", default-features = false }
-# 0.17.0, not 0.17.1: the [patch.crates-io] fork below carries every 0.17.1 fix
-# but still says 0.17.0. Restore 0.17.1 (or the release with #268) with it.
-mp4-atom = "0.17.0"
+mp4-atom = "0.17.1"
 nix = { version = "0.31.3", features = ["net", "socket", "uio"] }
 num_enum = "0.7"
 objc2 = "0.6.4"
@@ -253,7 +251,7 @@ zeroize = { version = "1", features = ["derive"] }
 # version (#3551).
 kio = { path = "rs/kio" }
 # Common Encryption boxes (kixelated/mp4-atom#268), until a release ships them.
-mp4-atom = { git = "https://github.com/michaelstuurman/mp4-atom", rev = "7ff54efdf298288c7fe55bd2744b21ebee431304" }
+mp4-atom = { git = "https://github.com/michaelstuurman/mp4-atom", rev = "10490e39383294ea11e3d5827517ef1eb9d950a8" }
 
 [profile.dev]
 # Full DWARF is what makes a debug build enormous: the debug `libmoq_ffi.a`

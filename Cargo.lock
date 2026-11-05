@@ -5346,8 +5346,8 @@ dependencies = [
 
 [[package]]
 name = "mp4-atom"
-version = "0.17.0"
-source = "git+https://github.com/michaelstuurman/mp4-atom?rev=7ff54efdf298288c7fe55bd2744b21ebee431304#7ff54efdf298288c7fe55bd2744b21ebee431304"
+version = "0.17.1"
+source = "git+https://github.com/michaelstuurman/mp4-atom?rev=10490e39383294ea11e3d5827517ef1eb9d950a8#10490e39383294ea11e3d5827517ef1eb9d950a8"
 dependencies = [
  "bytes",
  "derive_more 2.1.1",
