@@ -179,6 +179,7 @@ their end report, so an embedder's drain alert pages on real cuts.
 - [Poll-first async](/quest/m1/poll-first/README.md) - library crates compile no coroutines by default: async wrappers are generated from `poll_*` and gated behind an `async` feature
 - [Ordered reads can skip owed holes, and snapshot latest() does](/quest/m1/ordered-owed-holes.md) - moq-net's `Ordered` gains a read that skips past an owed hole to the newest buffered group, while keeping the reader's bounds
 - [The relay reports native sessions it force-closes at the drain deadline](/quest/m1/relay-drain-cuts.md) - the drain's public outcome and live tally separate sessions cut while open from sessions only finishing their end report, so an embedder's drain alert pages on real cuts
+- [moq auth serve scopes each client certificate by its chain](/quest/m1/auth-cert-rules.md) - per-certificate and per-intermediate rules in a reloaded TOML config, keyed by the chain hashes the relay sends
 - [A Rust relay never replays from group 0 to a lite-03/04 subscriber](/quest/m1/relay-inflight-replay.md) - A Rust relay or publisher serving a lite-03 or lite-04 SUBSCRIBE from a track copy that is still resolving starts at the newest group once the copy resolves
 - [Rename moq-rtc to moq-webrtc](/quest/m1/webrtc-rename.md) - one published `moq-webrtc` crate holds the gateway, the ICE driver, and the data-channel transport
 - [Vendor and trim the WebRTC stack](/quest/m1/webrtc-vendor.md) - str0m, dimpl, `is`, and sctp-proto live in moq-webrtc with unused code removed, so moq-rtc can take rind
