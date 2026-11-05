@@ -1265,8 +1265,9 @@ pub fn seeds() -> Vec<Seed> {
 		}
 	}
 
-	// A typed empty TRACKS_SYNCED and AUTH_OK reply need nonuniform envelope bytes.
-	for (kind, body) in [(23, &[4, 0][..]), (27, &[0, 3, 0, 0, 0][..])] {
+	// A typed empty TRACKS_SYNCED, AUTH_OK reply, and ROUTE_END echo need nonuniform
+	// envelope bytes.
+	for (kind, body) in [(23, &[4, 0][..]), (27, &[0, 3, 0, 0, 0][..]), (33, &[8, 1, 0][..])] {
 		let mut data = vec![(LITE_VERSIONS.len() - 1) as u8, kind];
 		data.extend_from_slice(body);
 		seeds.push(Seed {

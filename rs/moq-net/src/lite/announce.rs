@@ -30,6 +30,10 @@ const ROUTE_START: u64 = 6;
 const ROUTE_UPDATE: u64 = 7;
 const ROUTE_END: u64 = 8;
 const ANNOUNCE_FLOOR: u64 = 9;
+#[cfg_attr(
+	not(any(test, feature = "fuzz")),
+	allow(dead_code, reason = "the lite-07 session does not drive the route layer yet")
+)]
 const ROUTE_REQUEST: u64 = 10;
 
 /// Whether the negotiated version can update a live advertisement's metadata. On lite-05 an
@@ -119,7 +123,10 @@ pub enum AnnounceBroadcast {
 	/// ANNOUNCE_FLOOR (lite-07+): closes the batch of advertisements under the route
 	/// with this id, listing every region the sender certifies for it: a suffix of the
 	/// requested prefix and the origin revision as of which it is complete.
-	Floor { id: u64, regions: BTreeMap<Path, route::Rev> },
+	Floor {
+		id: u64,
+		regions: BTreeMap<Path, route::Rev>,
+	},
 }
 
 /// Refuse what no node advertises: node 0, and the last varint as a seqno or metric,
@@ -684,6 +691,10 @@ impl<'a> Message<'a> for AnnounceRequest {
 
 /// A message the subscriber sends on the Announce Stream after its ANNOUNCE_REQUEST
 /// (lite-07+), toward the publisher that sent the routes.
+#[cfg_attr(
+	not(any(test, feature = "fuzz")),
+	allow(dead_code, reason = "the lite-07 session does not drive the route layer yet")
+)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AnnounceReply {
 	/// ROUTE_REQUEST: asks for a route to `node`, as the publisher named it, at least
@@ -1549,7 +1560,10 @@ mod tests {
 				id: 0,
 				reach: Reach::Finite(advert(42, 15, true)),
 			},
-			AnnounceBroadcast::RouteUpdate { id: 3, reach: Reach::Held },
+			AnnounceBroadcast::RouteUpdate {
+				id: 3,
+				reach: Reach::Held,
+			},
 			AnnounceBroadcast::RouteEnd { id: 0 },
 			AnnounceBroadcast::Floor {
 				id: 0,
@@ -1584,7 +1598,10 @@ mod tests {
 				node: 1,
 				advert: advert(0, 1, false),
 			},
-			AnnounceBroadcast::RouteUpdate { id: 0, reach: Reach::Held },
+			AnnounceBroadcast::RouteUpdate {
+				id: 0,
+				reach: Reach::Held,
+			},
 			AnnounceBroadcast::RouteEnd { id: 0 },
 			AnnounceBroadcast::Floor {
 				id: 0,
@@ -1599,7 +1616,10 @@ mod tests {
 		}
 		// A lite-06 receiver skips the type like any other it does not know.
 		let wire = forge(ROUTE_END, |w| w.varint(0u64).unwrap());
-		assert_eq!(decode_broadcast(&wire, Version::Lite06).unwrap(), AnnounceBroadcast::Skipped);
+		assert_eq!(
+			decode_broadcast(&wire, Version::Lite06).unwrap(),
+			AnnounceBroadcast::Skipped
+		);
 
 		for reply in [
 			AnnounceReply::RouteRequest { node: 1, seqno: 0 },
@@ -1609,7 +1629,10 @@ mod tests {
 			let res = reply.encode(&mut Encoder::new(&mut buf, Version::Lite06.into()), Version::Lite06);
 			assert!(matches!(res, Err(EncodeError::Version)));
 		}
-		assert!(matches!(decode_reply(&wire, Version::Lite06), Err(DecodeError::Version)));
+		assert!(matches!(
+			decode_reply(&wire, Version::Lite06),
+			Err(DecodeError::Version)
+		));
 	}
 
 	/// What no node advertises is refused on both ends: node 0, the last varint as a
