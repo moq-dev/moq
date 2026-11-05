@@ -18,8 +18,6 @@ Transport cryptography comes from [rind](https://github.com/moq-dev/rind).
 It supports every x86\_64 CPU, aarch64 with NEON (including Raspberry Pi 4,
 CM4, and Zero 2 W without crypto extensions), and armv7. Setup reports a
 missing required CPU feature before starting transport cryptography.
-`aws-lc-rs` and `ring` are no longer `moq-tokio` or `moq-quic` features;
-remove them from dependency declarations.
 
 ## Crates
 
