@@ -30,7 +30,7 @@ Decided 2026-10-25 with the maintainer (mesh planning interview):
   Group finish is a FIN (half-close); a group abort with a code is a reset.
   The implementer measures and records a frame-size cap.
 - Lossless delivery comes from
-  [fastest-reader pacing](/quest/m1/unbounded-groups/fastest-reader.md), not
+  [fastest-reader pacing](https://github.com/moq-dev/moq/pull/7664), not
   from refill: a stream registers no fill handler, because most TCP traffic is
   not worth retaining for replay. A reader that falls behind the window ends
   `Evicted`, surfaced as a reset.
@@ -58,7 +58,6 @@ the window.
 
 ## Required
 
-- [Fastest-reader pacing](/quest/m1/unbounded-groups/fastest-reader.md) - relays push back instead of evicting a reader that keeps up
 - [Rust byte streams](/quest/m2/stream/rust.md) - a duplex `AsyncRead`/`AsyncWrite` stream, a listener and a dialer, and `moq` CLI forwarding
 - [JS byte streams](/quest/m2/stream/js.md) - the same surface in `@moq/net`
 - [Stream benchmark](/quest/m2/stream/bench.md) - throughput and latency against raw TCP through a relay chain, with and without loss
