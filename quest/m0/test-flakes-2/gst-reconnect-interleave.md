@@ -84,9 +84,6 @@ in a fast run. Find each from the code under test before changing the test.
   moqsrc bug, fixed in moqsrc
   ([moq-dev/moq#7368](https://github.com/moq-dev/moq/pull/7368) made the
   actor own the pad).
-- Find which call returned `Unroutable` in the historical run, and whether
-  `publication.announce` or a follow can meet an unroutable path in the
-  window after `unannounce`.
 
 After the capture below, identify the failing session operation and use
 the recorded conditions to reproduce and fix each failure at its cause.
