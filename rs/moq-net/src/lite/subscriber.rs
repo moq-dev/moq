@@ -6058,7 +6058,7 @@ mod tests {
 		assert!(wire.is_empty(), "a second SUBSCRIBE trailed the first");
 	}
 
-	/// A narrower limit landing while the SUBSCRIBE is still opening resets it with
+	/// A narrower limit landing while SUBSCRIBE is still opening resets it with
 	/// UNAUTHORIZED, like a live one, and releases its id.
 	#[kio::test]
 	async fn a_narrower_limit_resets_a_subscribe_still_opening() {
@@ -6094,6 +6094,7 @@ mod tests {
 		let broadcast = crate::broadcast::Info::new().produce();
 		let request = broadcast.reserve_track("audio").unwrap();
 		let mut serving = ServeLoop::new(&serve, request, Default::default());
+		let _reader = serving.serving.subscribe(None);
 		let wire = Wire {
 			subscription: Subscription::default(),
 			demand: Some(Subscription::default()),
@@ -6120,6 +6121,91 @@ mod tests {
 		assert_eq!(session.log.resets(), vec![unauthorized]);
 		assert!(subscribes.lock().is_empty(), "the id outlived its subscription");
 		drop(gate);
+	}
+
+	/// Losing demand releases setup even when credit, writes, or the answer never arrive.
+	#[kio::test]
+	async fn an_abandoned_setup_releases_its_track_and_registration() {
+		for stage in ["credit", "write", "answer"] {
+			let gate = kio::Producer::new(stage != "write");
+			let opening = kio::Producer::new(true);
+			let session = SinkSession::gated_bi(gate.consume()).with_open_bi_gate(opening.consume());
+
+			let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let subscriber = Subscriber::new(SubscriberConfig {
+				runtime: crate::time::sim(),
+				session: crate::driver::Transport::new(session.clone()),
+				origin,
+				recv_bandwidth: None,
+				version: Version::Lite07,
+				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
+				peer_hop: None,
+				cost: None,
+				going_away: Default::default(),
+				auth: crate::auth::Link::new(false),
+			});
+			let subscribes = subscriber.subscribes.clone();
+			let serve = TrackServe {
+				validity: Default::default(),
+				route: None,
+				source: None,
+				subscriber,
+				path: Path::from_static("room/host"),
+				instance: None,
+				name: "audio".to_string(),
+			};
+
+			let broadcast = crate::broadcast::Info::new().produce();
+			let request = broadcast.reserve_track("audio").unwrap();
+			let mut serving = ServeLoop::new(&serve, request, Default::default());
+			let reader = serving.serving.subscribe(None);
+			let held = Stream::open(&serve.subscriber.session, Version::Lite07).await.unwrap();
+			serving.held = Some(HeldTrack(held));
+			if stage == "credit" {
+				*opening.write().ok().expect("gate live") = false;
+			}
+			let wire = Wire {
+				subscription: Subscription::default(),
+				demand: Some(Subscription::default()),
+				demand_ranges: vec![lite::Range::OLDEST],
+				ranges: vec![lite::Range::OLDEST],
+			};
+			let establish = serve.prepare_establish(&mut serving.serving, wire, &Default::default());
+			serving.mode = ServeMode::Establish(establish);
+			let gate_run = serve.gate();
+			let mut running = TrackServeRun {
+				serve,
+				state: TrackRunState::Serve(serving),
+				gate: gate_run,
+				datagrams: None,
+			};
+
+			assert!(kio::Task::poll(&mut running, &kio::Waiter::noop()).is_pending());
+			assert_eq!(session.log.bi_opens(), if stage == "credit" { 1 } else { 2 });
+			assert!(!subscribes.lock().is_empty());
+			assert!(
+				!session
+					.log
+					.trail()
+					.iter()
+					.any(|(_, sent)| matches!(sent, crate::lite::test_transport::Sent::Finish))
+			);
+
+			drop(reader);
+			let _ = kio::Task::poll(&mut running, &kio::Waiter::noop());
+
+			assert!(
+				session
+					.log
+					.trail()
+					.iter()
+					.any(|(id, sent)| *id == 0 && matches!(sent, crate::lite::test_transport::Sent::Finish)),
+				"TRACK hold released"
+			);
+			assert!(session.log.closes().is_empty(), "session stays live");
+			assert!(subscribes.lock().is_empty(), "the id outlived its subscription");
+			drop(gate);
+		}
 	}
 
 	/// Everything a `handle_subscription` test needs to stay alive for the call.
@@ -9596,6 +9682,10 @@ impl kio::Task for TrackServeRun {
 						datagrams.end(Err(Error::Cancel));
 					}
 
+					if let ServeMode::Establish(establish) = serve_loop.mode {
+						establish.abort(&Error::Cancel);
+					}
+
 					if let Sub::Active(mut active) = serve_loop.sub {
 						self.serve.subscriber.remove_subscribe(active.id);
 						if active.stream.writer.finish().is_ok()
@@ -10428,6 +10518,14 @@ impl ServeLoop {
 		loop {
 			match &mut self.mode {
 				ServeMode::Establish(est) => {
+					// Credit or flow control may never return. Observe lost demand before
+					// waiting, retaining the TRACK bridge only while somebody needs it.
+					if self.fetches.is_empty()
+						&& self.range_fills.is_empty()
+						&& crate::util::poll_unwanted(&mut self.demand, waiter).is_ready()
+					{
+						return Poll::Ready(ServeEnd::Idle);
+					}
 					let res = ready!(est.poll(waiter));
 					let id = est.id;
 					self.mode = ServeMode::Select;
