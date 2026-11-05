@@ -27,8 +27,9 @@ export async function proveRouteKey(transport: WebTransport, client: boolean): P
 	if (typeof exporter !== "function") return undefined;
 	const secret = new Uint8Array(await exporter.call(transport, EXPORTER_LABEL, new Uint8Array(), SECRET_SIZE));
 	// Select page capability once: unavailable Ed25519 leaves sessions unproven.
-	pageKey ??= (crypto.subtle.generateKey({ name: "Ed25519" }, false, ["sign", "verify"]) as Promise<CryptoKeyPair>)
-		.catch(() => undefined);
+	pageKey ??= (
+		crypto.subtle.generateKey({ name: "Ed25519" }, false, ["sign", "verify"]) as Promise<CryptoKeyPair>
+	).catch(() => undefined);
 	const key = await pageKey;
 	return key ? sign(key, secret, client) : undefined;
 }

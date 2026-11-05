@@ -1,4 +1,4 @@
-import { expect, spyOn, test } from "bun:test";
+import { expect, test } from "bun:test";
 import { proveRouteKey, sign } from "./route_key.ts";
 
 // PKCS#8 v1 (RFC 8410) prefix of an Ed25519 key, up to its 32-byte seed.
@@ -66,20 +66,23 @@ test("a transport with an exporter proves one key per page", async () => {
 	expect(labels).toEqual(["EXPORTER-moq-lite-route-key", "EXPORTER-moq-lite-route-key"]);
 });
 
-
-test("unavailable Ed25519 leaves this page unproven across sessions", async () => {
-	// A separate module instance has its own page capability cache.
-	const moduleUrl = new URL("./route_key.ts?unavailable", import.meta.url).href;
-	const { proveRouteKey: prove } = await import(moduleUrl);
-	const generate = spyOn(crypto.subtle, "generateKey").mockRejectedValue(new Error("unavailable"));
-	try {
-		const transport = {
-			exportKeyingMaterial: async () => SECRET,
-		} as unknown as WebTransport;
-		expect(await prove(transport, true)).toBeUndefined();
-		expect(await prove(transport, true)).toBeUndefined();
-		expect(generate).toHaveBeenCalledTimes(1);
-	} finally {
-		generate.mockRestore();
-	}
+test("unavailable Ed25519 leaves this page unproven across sessions", () => {
+	// A child has its own page capability cache, independent of the successful proof tests.
+	const moduleUrl = new URL("./route_key.ts", import.meta.url).href;
+	const child = Bun.spawnSync([
+		process.execPath,
+		"-e",
+		`
+		import { strict as assert } from "node:assert";
+		import { proveRouteKey } from ${JSON.stringify(moduleUrl)};
+		let calls = 0;
+		crypto.subtle.generateKey = async () => { calls++; throw new Error("unavailable"); };
+		const transport = { exportKeyingMaterial: async () => new Uint8Array(32) };
+		assert.equal(await proveRouteKey(transport, true), undefined);
+		assert.equal(await proveRouteKey(transport, true), undefined);
+		assert.equal(calls, 1);
+		`,
+	]);
+	expect(child.stderr.toString()).toBe("");
+	expect(child.exitCode).toBe(0);
 });
