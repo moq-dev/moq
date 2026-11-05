@@ -180,13 +180,17 @@ impl Messages {
 		self.goaways.poll_next(reader, waiter).map_err(|err| self.failed(err))
 	}
 
-	pub async fn message<R: crate::transport::poll::RecvStream>(
+	/// The next complete frame, where the request stream ending first breaks the protocol.
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_message<R: crate::transport::poll::RecvStream>(
 		&mut self,
 		reader: &mut crate::coding::Reader<R, Version>,
-	) -> Result<Framed, Error> {
-		self.next(reader)
-			.await?
-			.ok_or_else(|| self.failed(Error::ProtocolViolation))
+		waiter: &kio::Waiter,
+	) -> Poll<Result<Framed, Error>> {
+		match ready!(self.poll_next(reader, waiter))? {
+			Some(framed) => Poll::Ready(Ok(framed)),
+			None => Poll::Ready(Err(self.failed(Error::ProtocolViolation))),
+		}
 	}
 
 	pub fn poll_end<R: crate::transport::poll::RecvStream>(
@@ -202,12 +206,88 @@ impl Messages {
 }
 
 /// Refuse a request with its complete REQUEST_ERROR, then finish the response.
-pub(super) async fn reject(
-	mut stream: Stream<Transport, Version>,
-	error: super::RequestError<'_>,
-) -> Result<(), Error> {
-	stream.writer.buffer_message(super::RequestError::ID, &error)?;
-	deliver(&mut stream.writer).await
+#[cfg(feature = "async")]
+pub(super) async fn reject(stream: Stream<Transport, Version>, error: super::RequestError<'_>) -> Result<(), Error> {
+	let mut reject = Reject::new(stream, error);
+	kio::wait(|waiter| reject.poll(waiter)).await
+}
+
+/// End a request stream with the refusal buffered on it: [`Deliver`] owning the stream.
+pub(super) struct Reject {
+	stream: Stream<Transport, Version>,
+	/// Why the refusal could not be buffered, which the first poll reports.
+	failed: Option<Error>,
+	deliver: Deliver,
+}
+
+impl Reject {
+	/// Refuse a request with its complete REQUEST_ERROR.
+	pub(super) fn new(mut stream: Stream<Transport, Version>, error: super::RequestError<'_>) -> Self {
+		let buffered = stream.writer.buffer_message(super::RequestError::ID, &error);
+		Self::buffered(stream, buffered)
+	}
+
+	/// Deliver the refusal `buffered` put on `stream`, or fail with why it could not.
+	pub(super) fn buffered(stream: Stream<Transport, Version>, buffered: Result<(), Error>) -> Self {
+		Self {
+			stream,
+			failed: buffered.err(),
+			deliver: Deliver::new(),
+		}
+	}
+
+	/// Ready once the refusal is delivered; see [`Deliver`].
+	pub(super) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		if let Some(err) = self.failed.take() {
+			return Poll::Ready(Err(err));
+		}
+		self.deliver.poll(waiter, &mut self.stream.writer)
+	}
+}
+
+/// Abandon a request we sent: STOP_SENDING, then our FIN and its acknowledgement.
+///
+/// There is no message for it, only the stream itself: a FIN is explicitly not a
+/// cancellation (draft-22 section 6.4.2.2), so section 6.4.2.3's pair applies, an endpoint
+/// that has already FINed its sending direction cancels with STOP_SENDING on the receiving
+/// one. Finishing alone would leave the writer's Drop free to RESET_STREAM, discarding what
+/// was already written, so the writer is closed instead; a request the peer's send window
+/// held back resets.
+pub(super) struct Cancel {
+	/// Held until the close settles, as the request stream it belongs to.
+	_reader: crate::coding::Reader<crate::transport::boxed::RecvStream, Version>,
+	closing: Option<crate::coding::Closing<crate::transport::boxed::SendStream, Version>>,
+}
+
+impl Cancel {
+	pub(super) fn new(stream: Stream<Transport, Version>) -> Self {
+		let Stream { writer, mut reader } = stream;
+		// STOP_SENDING needs no acknowledgement, so it goes first and the wait covers only
+		// what we still have to deliver.
+		reader.abort(&Error::Cancel);
+		let closing = match writer.closing() {
+			Ok(closing) => Some(closing),
+			Err(err) => {
+				tracing::debug!(%err, "failed to close the subscribe stream");
+				None
+			}
+		};
+		Self {
+			_reader: reader,
+			closing,
+		}
+	}
+
+	/// Ready once the peer acknowledges our FIN, or the stream dies.
+	pub(super) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		if let Some(closing) = &mut self.closing {
+			if let Err(err) = ready!(closing.poll(waiter)) {
+				tracing::debug!(%err, "failed to close the subscribe stream");
+			}
+			self.closing = None;
+		}
+		Poll::Ready(())
+	}
 }
 
 /// Deliver the last message buffered on a response: flush it, then finish the stream and
@@ -243,6 +323,7 @@ impl Deliver {
 }
 
 /// Await [`Deliver`].
+#[cfg(feature = "async")]
 pub(super) async fn deliver(writer: &mut Writer<crate::transport::boxed::SendStream, Version>) -> Result<(), Error> {
 	let mut deliver = Deliver::new();
 	kio::wait(|waiter| deliver.poll(waiter, writer)).await
@@ -266,7 +347,9 @@ pub(super) fn buffer_error<W: crate::transport::poll::SendStream>(
 	)
 }
 
-/// Write the REQUEST_ERROR refusing a `kind` request with `err`.
+/// Write the REQUEST_ERROR refusing a `kind` request with `err`: [`buffer_error`], then
+/// [`Writer::poll_flush`].
+#[cfg(feature = "async")]
 pub(super) async fn write_error<W: crate::transport::poll::SendStream>(
 	writer: &mut Writer<W, Version>,
 	kind: super::error::request::Kind,
