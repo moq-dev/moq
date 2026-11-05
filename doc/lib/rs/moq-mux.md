@@ -61,5 +61,9 @@ only when they share that clock.
 cargo add moq-mux
 ```
 
+The `poll_*` methods work by default. Enable the `async` Cargo feature to await
+the exporters' `next()`, a container's `read()`, and the async constructors such
+as `catalog::Consumer::new` and `Source::catalog` instead.
+
 API: [docs.rs/moq-mux](https://docs.rs/moq-mux). The commands that exercise it
 are [`moq-cli`](/bin/cli).

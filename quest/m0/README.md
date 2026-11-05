@@ -35,3 +35,4 @@ edge, which embeds moq-relay; it moved there on 2026-09-28.
 - [Backport the relay and auth hardening to release](/quest/m0/backport-release-hardening.md) - `release`'s relay refuses dot-segment paths, serves its HTTP routes with main's response hardening, and withdraws advertisements a peer starves of send credit; its auth client refuses redirects
 - [Agent build output can't fill the desktop's disk](/quest/m0/agent-disk-budget.md) - finished agent checkouts reclaim their mbx targets automatically, so parallel agent builds stop filling the root disk
 - [@moq/net's WebSocket receive windows match Rust](/quest/m0/qmux-receive-windows.md) - WebSocket JS throughput stops being capped below Rust's
+- [A CRLF checkout installs and builds](/quest/m0/crlf-checkout.md) - Windows and WSL clones get LF files, so `just install` builds `@moq/libav` from the cache

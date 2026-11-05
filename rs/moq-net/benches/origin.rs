@@ -564,6 +564,7 @@ fn bench_reprice_duplicate(c: &mut Criterion) {
 							)
 							.unwrap()
 							.with_hidden(true)
+							.covering()
 							.routes()
 					})
 					.collect();

@@ -27,6 +27,12 @@ The [release execution](/quest/m2/release/README.md) starts after m1 is ready.
 It publishes artifacts before downstream adoption and rollout can complete.
 Critical fixes continue to reach the existing release through backports.
 
+Test flakes join m0 without asking (decided 2026-11-05, maintainer): a test
+that fails intermittently in CI, Nightly, or the merge queue becomes a child
+of m0's [test flakes](/quest/m0/test-flakes-2/README.md) epic. Skills that plan
+follow-ups plan a reported flake there without asking whether or where; the
+planning PR's review is the check.
+
 ## Required
 
 - [m0: immediate priorities](/quest/m0/README.md) - urgent correctness fixes and maintenance of the current release

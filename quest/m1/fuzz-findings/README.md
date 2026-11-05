@@ -20,6 +20,13 @@ input committed before the fix would fail the merge gate. Every known finding
 is now fixed: run every target nightly for a few sessions; a new finding
 becomes a child here.
 
+Decided 2026-11-05 (maintainer, /quest-plan): keep this epic as an `[S]` watcher after
+[moq-dev/moq#7690](https://github.com/moq-dev/moq/pull/7690) removed its last
+child, since Fuzz (annexb), (fmp4), (ts), and (ingest) were still red on
+2026-11-05. An agent triages each red target into a child quest (an
+intermittent failure joins m0's test flakes instead), and the epic is deleted
+once every target runs green. Not chosen: deleting it now.
+
 For the crates outside the `kixelated` and `moq-dev` orgs, moq-mux fixes
 the bug on its own side and the bug is reported upstream (decided
 2026-10-30, maintainer): [austinleroy/webm-iterable#11](https://github.com/austinleroy/webm-iterable/issues/11),

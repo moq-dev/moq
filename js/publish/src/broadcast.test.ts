@@ -275,6 +275,31 @@ test("hands the producer to the rendition without a subscriber and clears it whe
 	broadcast.close();
 });
 
+// The audio encoder ends its epoch whenever its track changes, so another rendition's rename must
+// not take the track away even for a microtask.
+test("renaming one rendition leaves the others' producers in place", async () => {
+	const broadcast = new Broadcast({ enabled: true, origin: new Origin.Producer(), name: Path.from("test.hang") });
+	const video = broadcast.video("video");
+	video.config.set(videoConfig);
+	const audio = broadcast.audio("audio");
+	audio.config.set(audioConfig);
+	await settle();
+
+	const track = audio.track.peek();
+	expect(track).toBeDefined();
+	const seen: unknown[] = [];
+	const dispose = audio.track.subscribe((value) => seen.push(value));
+
+	video.config.set({ ...videoConfig, codec: "vp8" });
+	await settle();
+	expect(video.track.peek()?.name).toBe("video/1");
+	expect(seen).toEqual([]);
+	expect(audio.track.peek()).toBe(track);
+
+	dispose();
+	broadcast.close();
+});
+
 test("on demand hands the producer to the rendition only while a subscriber is attached", async () => {
 	const broadcast = new Broadcast({
 		enabled: true,

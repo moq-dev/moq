@@ -21,9 +21,9 @@ pub trait Driver {
 
 /// Run a driver to completion on the ambient runtime, sleeping until each deadline.
 #[cfg(feature = "async")]
-pub async fn run<D: Driver>(driver: D) -> Error {
+pub fn run<D: Driver>(driver: D) -> impl Future<Output = Error> {
 	let mut driver = Box::new(driver);
-	kio::clock::drive(move |now, waiter| driver.poll(now, waiter)).await
+	kio::clock::drive(move |now, waiter| driver.poll(now, waiter))
 }
 
 /// A deadline queue attached to the deterministic test clock.

@@ -73,33 +73,19 @@ impl<T: DeserializeOwned> Consumer<T> {
 	}
 
 	/// Get the next state and its exact frame timestamp, or `None` once the track ends.
-	pub async fn next(&mut self) -> Result<Option<moq_net::Timed<T>>>
-	where
-		T: Unpin,
-	{
-		kio::wait(|waiter| self.poll_next(waiter)).await
-	}
-
-	/// Poll for each state in order, skipping every group a newer one has superseded.
 	///
-	/// Finish the current group's buffered frames before taking the next. Lost groups
-	/// resynchronize from a later snapshot.
+	/// Skips every group a newer one has superseded. Finish the current group's buffered frames
+	/// before taking the next. Lost groups resynchronize from a later snapshot.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<moq_net::Timed<T>>>> {
 		self.poll_read(waiter, false)
 	}
 
-	/// Skip to the newest buffered state and its timestamp, or wait for a new one.
-	pub async fn latest(&mut self) -> Result<Option<moq_net::Timed<T>>>
-	where
-		T: Unpin,
-	{
-		kio::wait(|waiter| self.poll_latest(waiter)).await
-	}
-
-	/// Poll for the newest state, discarding superseded groups and intermediate yields.
+	/// Get the newest state and its timestamp, discarding superseded groups and intermediate yields.
 	///
 	/// Frames inside the newest group are still decoded in order. What this skips is gone;
 	/// a subsequent `next` resumes after it. An untimed frame keeps `at: None`.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_latest(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<moq_net::Timed<T>>>> {
 		self.poll_read(waiter, true)
 	}
