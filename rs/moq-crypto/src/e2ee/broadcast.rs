@@ -124,11 +124,12 @@ impl Requests {
 		self.inner.info()
 	}
 
-	/// Poll for the next consumer-requested track, without blocking.
+	/// The next track a consumer requests, as a [`track::Request`] to serve.
 	///
 	/// # Errors
 	///
 	/// [`moq_net::Error::Closed`] once the broadcast has ended.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_requested_track(&mut self, waiter: &kio::Waiter) -> Poll<Result<track::Request>> {
 		loop {
 			let request = ready!(self.inner.poll_requested_track(waiter))?;
@@ -140,15 +141,6 @@ impl Requests {
 				Err(_) => request.reject(moq_net::Error::NotFound),
 			}
 		}
-	}
-
-	/// Block until a consumer requests a track, returning a [`track::Request`] to serve.
-	///
-	/// # Errors
-	///
-	/// Same as [`Self::poll_requested_track`].
-	pub async fn requested_track(&mut self) -> Result<track::Request> {
-		kio::wait(|waiter| self.poll_requested_track(waiter)).await
 	}
 
 	/// Create a handler for requests to datagram tracks nobody created, named by their semantic
@@ -178,12 +170,8 @@ impl Requests {
 		})
 	}
 
-	/// Block until the broadcast ends.
-	pub async fn closed(&self) {
-		kio::wait(|waiter| self.poll_closed(waiter)).await
-	}
-
-	/// Poll until the broadcast ends.
+	/// Resolves once the broadcast ends.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.inner.poll_closed(waiter)
 	}
@@ -215,11 +203,12 @@ pub struct DatagramRequests {
 }
 
 impl DatagramRequests {
-	/// Poll for the next datagram track a subscriber asks for, to accept or reject.
+	/// The next datagram track a subscriber asks for, as a [`datagram::Request`] to accept or reject.
 	///
 	/// # Errors
 	///
 	/// [`moq_net::Error::Closed`] once the broadcast has ended.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_requested(&mut self, waiter: &kio::Waiter) -> Poll<Result<datagram::Request>> {
 		loop {
 			let request = ready!(self.inner.poll_requested(waiter))?;
@@ -231,15 +220,6 @@ impl DatagramRequests {
 				Err(_) => request.reject(moq_net::Error::NotFound),
 			}
 		}
-	}
-
-	/// Block until a subscriber asks for a datagram track, returning a [`datagram::Request`] to serve.
-	///
-	/// # Errors
-	///
-	/// Same as [`Self::poll_requested`].
-	pub async fn requested(&mut self) -> Result<datagram::Request> {
-		kio::wait(|waiter| self.poll_requested(waiter)).await
 	}
 }
 

@@ -4,13 +4,12 @@ use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use std::task::Poll;
+use std::task::{Poll, ready};
 
 use kio::clock::Instant;
 use moq_net::stats::{Presence, Registry, Report, Tier, Traffic, TrafficEntry};
 use moq_net::{Path, broadcast, kio, origin, track};
 use serde::Serialize;
-use tracing::Instrument as _;
 
 use crate::{
 	Epoch, Prefix, Totals, Usage, parse_prefix_track, parse_presence_track, prefix_track, presence_track, totals_track,
@@ -180,7 +179,7 @@ impl Producer {
 				registry: Registry::disabled(),
 				_keepalive: None,
 			};
-			return (producer, Publisher(None));
+			return (producer, Publisher(Run::Done));
 		};
 
 		// The prefix is a literal path, so its subtree claim cannot fail.
@@ -196,7 +195,11 @@ impl Producer {
 			linger,
 			interval,
 		};
-		let publisher = Publisher(Some((task, Arc::downgrade(&keepalive), tracing::Span::current())));
+		let publisher = Publisher(Run::Idle(
+			Box::new(task),
+			Arc::downgrade(&keepalive),
+			tracing::Span::current(),
+		));
 		let producer = Self {
 			registry,
 			_keepalive: Some(keepalive),
@@ -214,13 +217,93 @@ impl Producer {
 
 /// The publish task of one [`Producer`], returned by [`Producer::new`].
 #[must_use = "nothing is published until the publisher runs"]
-pub struct Publisher(Option<(Task, Weak<Keepalive>, tracing::Span)>);
+pub struct Publisher(Run);
+
+/// Where a [`Publisher`] is in its run.
+enum Run {
+	/// Not polled yet: announces on the first poll.
+	Idle(Box<Task>, Weak<Keepalive>, tracing::Span),
+	Running(Box<Running>),
+	Done,
+}
+
+/// A running publisher's drain and the interval it drains on.
+struct Running {
+	drain: Drain,
+	ticker: kio::clock::Interval,
+	weak: Weak<Keepalive>,
+	span: tracing::Span,
+}
 
 impl Publisher {
 	/// Publish until the last [`Producer`] clone drops; at once for a no-op producer.
-	pub async fn run(self) {
-		if let Some((task, weak, span)) = self.0 {
-			task.run(weak).instrument(span).await;
+	///
+	/// The broadcast is announced on the first poll and ends when this resolves or
+	/// the publisher drops.
+	pub fn poll_run(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		if let Run::Idle(..) = self.0 {
+			let Run::Idle(task, weak, span) = std::mem::replace(&mut self.0, Run::Done) else {
+				unreachable!("matched above");
+			};
+			if let Some(running) = Running::start(*task, weak, span) {
+				self.0 = Run::Running(Box::new(running));
+			}
+		}
+		let Run::Running(running) = &mut self.0 else {
+			return Poll::Ready(());
+		};
+		if running.poll_run(waiter).is_pending() {
+			return Poll::Pending;
+		}
+		// Dropping the drain ends the broadcast, as dropping the publisher does.
+		self.0 = Run::Done;
+		Poll::Ready(())
+	}
+
+	/// Publish until the last [`Producer`] clone drops; at once for a no-op producer.
+	/// See [`Self::poll_run`].
+	#[cfg(feature = "async")]
+	pub async fn run(mut self) {
+		kio::wait(|waiter| self.poll_run(waiter)).await
+	}
+}
+
+impl Running {
+	/// Announce the stats broadcast, unless every [`Producer`] clone is already
+	/// gone or the origin refused it.
+	fn start(task: Task, weak: Weak<Keepalive>, span: tracing::Span) -> Option<Self> {
+		// A publisher first run after its last producer dropped announces nothing,
+		// so it cannot replace a newer producer's broadcast on the same path.
+		if weak.strong_count() == 0 {
+			return None;
+		}
+		let (drain, ticker) = span.in_scope(|| {
+			let interval = task.interval;
+			let drain = Drain::new(task)?;
+			let mut ticker = kio::clock::interval(interval);
+			ticker.set_missed_tick_behavior(kio::clock::MissedTickBehavior::Delay);
+			Some((drain, ticker))
+		})?;
+		Some(Self {
+			drain,
+			ticker,
+			weak,
+			span,
+		})
+	}
+
+	/// Write a frame per drain, until every [`Producer`] clone is dropped.
+	fn poll_run(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		let _entered = self.span.enter();
+		loop {
+			// Scheduled instants are at least an interval apart, even after a late tick,
+			// so each drain gets an interval of its own to open its groups in.
+			let scheduled = ready!(self.ticker.poll_tick(&mut waiter.context()));
+			if self.weak.upgrade().is_none() {
+				return Poll::Ready(());
+			}
+			self.drain.collect();
+			self.drain.publish(scheduled);
 		}
 	}
 }
@@ -234,39 +317,6 @@ struct Task {
 	depth: usize,
 	linger: Duration,
 	interval: Duration,
-}
-
-impl Task {
-	/// Publishes the stats broadcast and writes a frame per drain. Runs until
-	/// every [`Producer`] clone is dropped (`weak.upgrade()` returns `None`).
-	async fn run(self, weak: Weak<Keepalive>) {
-		// A publisher first run after its last producer dropped announces nothing,
-		// so it cannot replace a newer producer's broadcast on the same path.
-		if weak.strong_count() == 0 {
-			return;
-		}
-		let interval = self.interval;
-		let Some(mut drain) = Drain::new(self) else {
-			return;
-		};
-
-		let mut ticker = kio::clock::interval(interval);
-		ticker.set_missed_tick_behavior(kio::clock::MissedTickBehavior::Delay);
-
-		loop {
-			// Scheduled instants are at least an interval apart, even after a late tick,
-			// so each drain gets an interval of its own to open its groups in.
-			let scheduled = ticker.tick().await;
-
-			// Dropping the drain ends the broadcast, as cancelling this future does.
-			if weak.upgrade().is_none() {
-				return;
-			}
-
-			drain.collect();
-			drain.publish(scheduled);
-		}
-	}
 }
 
 /// The publish task's state, kept across drains so a steady-state drain
@@ -3010,9 +3060,7 @@ mod tests {
 		drop(acme);
 		let lingering = start + Duration::from_secs(9);
 		let stats = crate::Consumer::new(broadcast.clone(), Default::default());
-		let mut acme = pumping_at(&mut drain, lingering, stats.group(moq_net::Path::from_static("acme")))
-			.await
-			.unwrap();
+		let mut acme = stats.group(moq_net::Path::from_static("acme")).unwrap();
 		let mut frame = pumping_at(&mut drain, lingering, acme.next()).await.unwrap().unwrap();
 		while !frame.tiers[""].labels.is_empty() {
 			frame = pumping_at(&mut drain, lingering, acme.next()).await.unwrap().unwrap();
@@ -3026,9 +3074,7 @@ mod tests {
 			("acme".into(), false)
 		);
 		assert!(pumping_at(&mut drain, lingered, acme.next()).await.unwrap().is_none());
-		let mut beta_reader = pumping_at(&mut drain, lingered, stats.group(moq_net::Path::from_static("beta")))
-			.await
-			.unwrap();
+		let mut beta_reader = stats.group(moq_net::Path::from_static("beta")).unwrap();
 		let frame = pumping_at(&mut drain, lingered, beta_reader.next())
 			.await
 			.unwrap()
@@ -3068,7 +3114,7 @@ mod tests {
 			.tier(Tier::default())
 			.session(moq_net::Path::from_static("acme/live"));
 		drive_tick().await;
-		let mut reader = stats.group(moq_net::Path::from_static("acme")).await.expect("listed");
+		let mut reader = stats.group(moq_net::Path::from_static("acme")).expect("listed");
 		let first = reader.next().await.unwrap().unwrap();
 		assert_eq!(first.tiers[""].sessions.sessions_started, 1);
 		let old_sequence = sequence(&broadcast).await;
@@ -3089,7 +3135,6 @@ mod tests {
 		drive_tick().await;
 		let second = stats
 			.group(moq_net::Path::from_static("acme"))
-			.await
 			.expect("listed again")
 			.next()
 			.await
@@ -3139,12 +3184,8 @@ mod tests {
 		let _big = registry
 			.tier(Tier::default())
 			.session(moq_net::Path::from_static("big"));
-		let mut acme = pumping(&mut drain, stats.group(moq_net::Path::from_static("acme")))
-			.await
-			.unwrap();
-		let mut big = pumping(&mut drain, stats.group(moq_net::Path::from_static("big")))
-			.await
-			.unwrap();
+		let mut acme = stats.group(moq_net::Path::from_static("acme")).unwrap();
+		let mut big = stats.group(moq_net::Path::from_static("big")).unwrap();
 		assert!(pumping(&mut drain, acme.next()).await.unwrap().is_some());
 		assert!(pumping(&mut drain, big.next()).await.unwrap().is_some());
 
@@ -3187,7 +3228,6 @@ mod tests {
 
 		let frame = stats
 			.group(moq_net::Path::from_static("acme"))
-			.await
 			.unwrap()
 			.next()
 			.await
@@ -3201,7 +3241,6 @@ mod tests {
 
 		let frame = stats
 			.group(moq_net::Path::from_static("beta"))
-			.await
 			.unwrap()
 			.next()
 			.await
@@ -3212,7 +3251,6 @@ mod tests {
 
 		let frame = stats
 			.group(moq_net::Path::from_static("feed"))
-			.await
 			.unwrap()
 			.next()
 			.await

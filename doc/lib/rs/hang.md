@@ -20,6 +20,9 @@ carries a timestamp with each payload.
 cargo add hang
 ```
 
+The `poll_*` methods work by default. Enable the `async` Cargo feature to await
+`Catalog::subscribe` and the catalog consumer's `next()` instead.
+
 hang is the format, not the pipeline. [`moq-mux`](/lib/rs/moq-mux) produces the
 catalog for you and decodes any container in group order
 (`moq_mux::container::Consumer`). Its `Delay { min, max }` says how far behind
