@@ -4743,6 +4743,11 @@ impl Subscriber {
 				let _ = track.abort(Error::ProtocolViolation);
 				return Err(Error::ProtocolViolation);
 			}
+			Err(Error::MalformedTrack) => {
+				tracing::warn!(group = group.group_id, "malformed track");
+				let _ = track.abort(Error::MalformedTrack);
+				return Err(Error::MalformedTrack);
+			}
 			Err(err) => return Err(err),
 			Ok(opened) => opened,
 		};
@@ -5018,6 +5023,15 @@ impl Subscriber {
 			}
 		};
 		if let Some(first) = first.filter(|first| first.end_of_track) {
+			// Only the stream's end may follow the track's end: an object past it makes the
+			// track malformed.
+			match header.flags.has_extensions {
+				true => stream.decode::<PeekFirst<true>>().await.map(drop)?,
+				false => stream.decode::<PeekFirst<false>>().await.map(drop)?,
+			}
+			if kio::wait(|waiter| stream.poll_has_more(waiter)).await? {
+				return Err(Error::MalformedTrack);
+			}
 			return Ok(Opened::EndOfTrack {
 				object: first.id,
 				properties: first.has_properties,
@@ -5165,7 +5179,8 @@ enum IngestPhase {
 	Admit { header: frame::Header },
 	/// Streaming the object payload.
 	Payload { frame: frame::Producer },
-	/// An explicit end-of-group or end-of-track status arrived.
+	/// An explicit end-of-group or end-of-track status arrived, so only the stream end may
+	/// follow.
 	Finished(Ended),
 }
 
@@ -6343,8 +6358,8 @@ impl GroupIngest {
 		})
 	}
 
-	/// `Ready(Ok(_))` once the stream FINs on an object boundary, or an explicit
-	/// end-of-group or end-of-track status arrives. The caller finishes or aborts the
+	/// `Ready(Ok(_))` once the stream FINs on an object boundary, or right after an
+	/// explicit end-of-group or end-of-track status. The caller finishes or aborts the
 	/// group; an object cut short mid-payload was already aborted here with the reason.
 	pub(crate) fn poll<R: crate::transport::poll::RecvStream + crate::coding::Pause>(
 		&mut self,
@@ -6464,6 +6479,10 @@ impl GroupIngest {
 					}
 				}
 				IngestPhase::Finished(ended) => {
+					// An object past the group's final one makes the track malformed.
+					if ready!(reader.poll_has_more(waiter))? {
+						return Poll::Ready(Err(Error::MalformedTrack));
+					}
 					let ended = std::mem::replace(ended, Ended::Group);
 					return Poll::Ready(Ok(ended));
 				}
@@ -14087,6 +14106,34 @@ mod stitch_tests {
 			h.track.closed().now_or_never(),
 			Some(Err(Error::MalformedTrack))
 		));
+	}
+
+	/// Only the stream's end may follow an END_OF_GROUP or END_OF_TRACK status: an object
+	/// past the final one makes the track malformed, rather than ending it or its group clean.
+	#[kio::test]
+	async fn an_object_after_an_end_status_ends_the_track() {
+		use futures::FutureExt;
+
+		let header = tail_stream(SEQUENCE, 0, &[]).len();
+		let object = &tail_stream(SEQUENCE, 0, &[b"past"])[header..];
+		for (payloads, status) in [
+			(&[&b"last"[..]][..], END_OF_GROUP),
+			(&[&b"last"[..]][..], END_OF_TRACK),
+			// A standalone END_OF_TRACK, which opens no group.
+			(&[][..], END_OF_TRACK),
+		] {
+			let mut bytes = end_marker(tail_stream(SEQUENCE, 0, payloads), status);
+			bytes.extend_from_slice(object);
+
+			let h = Harness::new(Fill::Done, vec![bytes]);
+			let mut stream = h.stream().await;
+			let res = h.subscriber.clone().recv_group(&mut stream).await;
+			assert!(matches!(res, Err(Error::MalformedTrack)), "{status}: {res:?}");
+			assert!(
+				matches!(h.track.closed().now_or_never(), Some(Err(Error::MalformedTrack))),
+				"{status}"
+			);
+		}
 	}
 
 	/// END_OF_TRACK after a group's last object ends the track right after that group.
