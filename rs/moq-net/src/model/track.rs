@@ -23377,14 +23377,111 @@ mod test {
 			flight.write_frame(None, numbered(index)).unwrap();
 			assert_eq!(read_numbered(&mut late), Some(index));
 			index += 1;
-			assert!(index < FRAMES, "handed over before the flight caught up");
+				assert!(index < FRAMES, "handed over before the flight caught up");
 		}
-		// Read on from the live copy, to its newest frame.
-		while index < FRAMES {
+		// The live writer runs its whole window ahead of the live reader at once: the
+		// rider, as far behind that reader as it was admitted, keeps its frame.
+		let mut written = FRAMES;
+		while live.poll_ready(&kio::Waiter::noop(), &frame_info(&numbered(0))).is_ready() {
+			live.write_frame(None, numbered(written)).unwrap();
+			written += 1;
+		}
+		assert!(written > FRAMES + 900, "a whole window: {written}");
+		while index < written {
 			assert_eq!(read_numbered(&mut late), Some(index), "frame {index} from the live copy");
 			index += 1;
 		}
 		assert_eq!(read_numbered(&mut late), None, "at the live edge");
+	}
+
+	/// The size of `payload` as a frame, for [`group::Producer::poll_ready`].
+	fn frame_info(payload: &bytes::Bytes) -> frame::Info {
+		frame::Info {
+			size: payload.len() as u64,
+			timestamp: None,
+		}
+	}
+
+	/// A live group of `frames` numbered frames past its tail, read along by a live reader,
+	/// on a track with a handler.
+	fn shed_live_group(frames: u32) -> (Producer, Requests, group::Producer, group::Consumer) {
+		let producer = track_producer("test", Info::default());
+		let requests = producer.requests();
+		let mut live = producer.append_group().unwrap();
+		let mut reader = live.consume();
+		for index in 0..frames {
+			live.write_frame(None, numbered(index)).unwrap();
+			assert_eq!(read_numbered(&mut reader), Some(index));
+		}
+		(producer, requests, live, reader)
+	}
+
+	/// The next fill asked of `requests`, if any.
+	fn asked(requests: &Requests) -> Option<Fill> {
+		match requests.poll_requested_fill(&kio::Waiter::noop()) {
+			Poll::Ready(fill) => Some(fill.unwrap()),
+			Poll::Pending => None,
+		}
+	}
+
+	/// Joiners at the same shed frame share one flight; one joining later boards it while
+	/// its frame is within reach of the flight's fastest rider, and asks a flight of its
+	/// own once it is not.
+	#[test]
+	#[cfg(feature = "async")]
+	fn joiners_within_reach_share_one_flight() {
+		let (_producer, requests, live, _reader) = shed_live_group(3_000);
+		let (mut first, mut second) = (live.consume(), live.consume());
+		assert_eq!(read_numbered(&mut first), None);
+		assert_eq!(read_numbered(&mut second), None);
+		let fill = asked(&requests).expect("a flight");
+		assert!(asked(&requests).is_none(), "the second joiner shares it");
+		let mut flight = fill.accept(0, None).unwrap();
+		// 8 MiB in, half the reach.
+		for index in 0..500 {
+			flight.write_frame(None, numbered(index)).unwrap();
+			assert_eq!(read_numbered(&mut first), Some(index));
+		}
+		let mut near = live.consume();
+		assert_eq!(read_numbered(&mut near), Some(0), "boards the flight at once");
+		assert_eq!(read_numbered(&mut second), Some(0));
+		assert!(asked(&requests).is_none(), "one upstream fill");
+		// 17 MiB in, past the reach.
+		for index in 500..1_100 {
+			flight.write_frame(None, numbered(index)).unwrap();
+			assert_eq!(read_numbered(&mut first), Some(index));
+		}
+		let mut far = live.consume();
+		assert_eq!(read_numbered(&mut far), None, "too far behind the flight's rider");
+		let own = asked(&requests).expect("a flight of its own");
+		assert_eq!(own.start(), Position { group: 0, frame: 0 });
+	}
+
+	/// A rider that falls off its flight's tail never holds the flight's writer back, and
+	/// boards a flight of its own from the frame it fell off at.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_slow_rider_falls_off_and_flies_on_its_own() {
+		let (_producer, requests, live, _reader) = shed_live_group(3_000);
+		let (mut fast, mut slow) = (live.consume(), live.consume());
+		assert_eq!(read_numbered(&mut fast), None);
+		assert_eq!(read_numbered(&mut slow), None);
+		let mut flight = asked(&requests).unwrap().accept(0, None).unwrap();
+		assert_eq!(read_numbered(&mut fast), None);
+		assert_eq!(read_numbered(&mut slow), None);
+		assert_eq!(read_numbered(&mut slow), None);
+		for index in 0..2_500 {
+			let payload = numbered(index);
+			assert!(
+				flight.poll_ready(&kio::Waiter::noop(), &frame_info(&payload)).is_ready(),
+				"frame {index}: paced by the fast rider only"
+			);
+			flight.write_frame(None, payload).unwrap();
+			assert_eq!(read_numbered(&mut fast), Some(index));
+		}
+		assert_eq!(read_numbered(&mut slow), None, "fell off");
+		let own = asked(&requests).expect("a flight of its own");
+		assert_eq!(own.start(), Position { group: 0, frame: 0 });
 	}
 
 	/// What a read returns right now: `Some(Some(sequence))` for a group, `Some(None)` for

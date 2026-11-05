@@ -3435,20 +3435,16 @@ impl Clone for Carry {
 struct Ride {
 	// The flight asked for, until its copy is accepted.
 	boarding: Option<track::Boarding>,
-	// The frame the copy read now was boarded at: one that sheds it before the reader took
-	// it could not keep the reader, so the reader stops boarding.
-	boarded: Option<usize>,
 	// Whether the copy read is a flight, which the reader hands over from.
 	aboard: bool,
 }
 
 impl Ride {
-	/// Riding a flight boarded at frame `index`.
-	fn aboard(index: usize) -> Self {
+	/// Reading the copy boarded, a flight when `flight`.
+	fn aboard(flight: bool) -> Self {
 		Self {
 			boarding: None,
-			boarded: Some(index),
-			aboard: true,
+			aboard: flight,
 		}
 	}
 }
@@ -4059,6 +4055,7 @@ impl Consumer {
 		waiter: &kio::Waiter,
 		mut read: impl FnMut(&mut Self, &kio::Waiter) -> Poll<Result<Option<T>>>,
 	) -> Poll<Result<Option<T>>> {
+		let mut boarded = false;
 		loop {
 			if let Some(ride) = self.ride_mut() {
 				if let Some(boarding) = &mut ride.boarding {
@@ -4069,28 +4066,23 @@ impl Consumer {
 						return Poll::Ready(Err(Error::Evicted));
 					};
 					self.adopt_copy(copy);
-					self.set_ride(Some(Ride::aboard(self.cursor.index)));
+					self.set_ride(Some(Ride::aboard(true)));
 				} else if ride.aboard
 					&& self.cursor.prefetch.is_drained()
 					&& let Some(track) = self.cursor.cache.track()
 					&& let Some((copy, flight)) = track::hand_over(&track, self, self.cursor.index)
 				{
 					self.adopt_copy(copy);
-					self.set_ride(flight.then(|| Ride::aboard(self.cursor.index)));
+					self.set_ride(flight.then(|| Ride::aboard(true)));
 				}
 			}
 			let res = read(self, waiter);
 			if !matches!(res, Poll::Ready(Err(_))) || !self.shed_next() {
 				return res;
 			}
-			// The copy boarded at this frame shed it before the reader took it: pool debt
-			// outruns the reader, and another flight would fare no better.
-			if self
-				.carry
-				.as_ref()
-				.and_then(|carry| carry.ride.as_ref())
-				.is_some_and(|ride| ride.boarded == Some(self.cursor.index))
-			{
+			// The copy just boarded shed the frame before the reader took it: pool debt
+			// outruns the reader, and boarding again now would fare no better.
+			if std::mem::replace(&mut boarded, true) {
 				return res;
 			}
 			let Some(track) = self.cursor.cache.track() else {
@@ -4100,14 +4092,10 @@ impl Consumer {
 				None => return res,
 				Some(track::Board::Ride(copy, flight)) => {
 					self.adopt_copy(copy);
-					self.set_ride(Some(Ride {
-						aboard: flight,
-						..Ride::aboard(self.cursor.index)
-					}));
+					self.set_ride(Some(Ride::aboard(flight)));
 				}
 				Some(track::Board::Wait(boarding)) => self.set_ride(Some(Ride {
 					boarding: Some(boarding),
-					boarded: None,
 					aboard: true,
 				})),
 			}
