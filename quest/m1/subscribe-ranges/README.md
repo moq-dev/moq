@@ -36,8 +36,9 @@ relay bounds a sparse FETCH only if the model can request ranges:
   publisher delivers what it has and fills the rest as upstream answers.
 - **Model.** `Subscription` gains `ranges` beside its `order`, mirroring the wire;
   `request_groups` as a separate API was rejected. A publisher's
-  `track::Requests` receives a `track::Fill` per run of misses (landed), and
-  `fetch_group` becomes a one-range subscription or is removed. This breaks published moq-net APIs.
+  `track::Requests` receives a `track::Fill` per run of misses (landed).
+  Single-group FETCH stays (2026-11-03), so `fetch_group` stays too. This
+  breaks published moq-net APIs.
 - **moq-transport.** Some deployments use non-contiguous group numbers, so a
   relay never probes upstream one group at a time. Upstream, each run of
   locally missing groups becomes one standalone range FETCH, capped below the
@@ -48,9 +49,12 @@ relay bounds a sparse FETCH only if the model can request ranges:
   (maintainer, 2026-10-28,
   [moq-dev/moq#7204](https://github.com/moq-dev/moq/pull/7204)), until
   [hole markers](/quest/m2/ietf-hole-marker.md) let a cache that knows every
-  group answer a range. A FETCH of the open largest group reads it whole
-  (maintainer, 2026-10-25): the cache cannot know an open group's real
-  Largest Object.
+  group answer a range. A FETCH of the track's newest live group is refused
+  unless its range ends below that group's live edge
+  ([moq-dev/moq#7944](https://github.com/moq-dev/moq/pull/7944),
+  `poll_settle` in `rs/moq-net/src/ietf/publisher.rs`), replacing the
+  2026-10-25 rule that it reads the open group whole; an older group still
+  arriving is waited on until it finishes or its edge passes the range.
 - **Relative ends** (maintainer, 2026-10-11, superseding the 10-07 `Live`
   flag and closing #5085). Each range end is `Absolute(group)` or
   `Relative(n)`, naming the group n before the latest; either end may be

@@ -40,18 +40,22 @@ for 97 tests, with `model::group::test::a_group_has_no_frame_cap` (10,000
 writes at about 30 ms each under Miri) past SLOW; #7895 ignores that test under
 Miri, since it still runs natively in the merge gate.
 
-Remaining: read the next scheduled run's log and record the job duration, both
-pass durations, the slowest test, and headroom against both budgets. If the job
-nears 60 minutes, split the strict and epoch passes into separate matrix
-entries rather than raising the timeout, and keep nextest's 15-minute per-test
-cap. A test past SLOW gets a smaller Miri workload.
+The first scheduled run after #7895 merged,
+[run 42050683248](https://github.com/moq-dev/moq/actions/runs/42050683248)
+on 2026-11-05, passed `Tests (rs miri)` with both passes:
+
+- Job 31 min 26 s, inside the 60-minute timeout.
+- Strict pass: 228 tests in 688 s. Slowest
+  `model::frame::tests::a_delivery_attaching_mid_write_publishes_one_payload`
+  192 s, then kio's `task::tests::concurrent_wakes_are_never_lost` 183 s.
+- Epoch pass: 97 tests in 832 s, one SLOW:
+  `model::group::test::debt_sheds_the_front_but_not_the_newest_frame` 335.8 s,
+  past the 300 s SLOW mark and inside the 900 s cap.
+
+Remaining: shrink `debt_sheds_the_front_but_not_the_newest_frame`'s Miri
+workload so it finishes under SLOW, as #7895 did for the strict pass's
+slowest tests. If the job nears 60 minutes, split the strict and epoch passes
+into separate matrix entries rather than raising the timeout, and keep
+nextest's 15-minute per-test cap.
 
 Public API: none. Wire: none.
-
-## Waiting
-
-- moq-dev/moq: After [moq-dev/moq#7895](https://github.com/moq-dev/moq/pull/7895)
-  lands, the next scheduled Nightly on `main` must pass `Tests (rs miri)` on
-  `ubuntu-24.04-arm` with both passes. Read its log
-  (`gh run view <run> --repo moq-dev/moq --log`) and record the timings above;
-  local runs do not clear this wait.

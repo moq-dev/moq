@@ -157,8 +157,11 @@ the bullets below are the contract it carries.
   claim no longer decides transit trust. Legitimate scoped delivery survives
   losing one of two uplinks under one key
   (`scoped_delivery_through_two_uplinks_reaches_one_key`).
-- Open: how a scoped peer's routing identities are keyed, owned by
-  [session integration](/quest/m1/cluster-routing/routes/session.md). The router takes the key from the caller (`Scope::qualify`).
+- Decided 2026-11-04 (maintainer): a scoped peer's routing identities are
+  keyed by the route key the peer proves, from a shared key file
+  ([session integration](/quest/m1/cluster-routing/routes/session.md),
+  [Scoped peers prove a route key](/quest/m1/cluster-routing/routes/proof.md)).
+  The router takes the key from the caller (`Scope::qualify`).
 - Decided 2026-10-14: qualified keys carry a marker every relay recognizes,
   and a scoped connection forwarding an already qualified identity has that
   route refused, with no wire change. Otherwise a key sent down through a

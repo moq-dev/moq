@@ -53,9 +53,10 @@ audit skips them:
   InvalidRange, Remote, UnsupportedExtension}`, the `DecodeError` auth-token
   variants) and the session error codes the lite draft registers with
   moq-transport's meaning. Errors are fine; only dead ones go.
-- `setup::Extensions::{auth, solicit, epoch}` and the relay's
+- `setup::Extensions::{auth, solicit}` and the relay's
   `[listen|connect.extensions]` TOML, as interop knobs documented as
-  affecting moq-transport only.
+  affecting moq-transport only. `epoch` went with moq-transport's epochs in
+  [moq-dev/moq#7239](https://github.com/moq-dev/moq/pull/7239).
 
 Rejected in planning:
 
