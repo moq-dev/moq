@@ -94,7 +94,9 @@ impl Proof {
 
 impl fmt::Debug for Proof {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.debug_struct("Proof").field("key", &Hex(&self.key)).finish_non_exhaustive()
+		f.debug_struct("Proof")
+			.field("key", &Hex(&self.key))
+			.finish_non_exhaustive()
 	}
 }
 
@@ -126,7 +128,8 @@ impl Transcript {
 
 	/// Whether `proof` shows its key held by the side of this session `client` names.
 	pub fn verify(&self, proof: &Proof, client: bool) -> bool {
-		PublicKey::new(&ED25519, &proof.key).is_ok_and(|key| key.verify(&self.message(client), &proof.signature).is_ok())
+		PublicKey::new(&ED25519, &proof.key)
+			.is_ok_and(|key| key.verify(&self.message(client), &proof.signature).is_ok())
 	}
 }
 
@@ -161,10 +164,16 @@ mod tests {
 		let proof = transcript.prove(&RouteKey::generate(), true);
 		assert!(transcript.verify(&proof, true));
 		assert!(!transcript.verify(&proof, false), "reflected to its sender");
-		assert!(!Transcript::new([3; 32]).verify(&proof, true), "replayed on another session");
+		assert!(
+			!Transcript::new([3; 32]).verify(&proof, true),
+			"replayed on another session"
+		);
 
 		let other = RouteKey::generate().public();
-		assert!(!transcript.verify(&Proof { key: other, ..proof }, true), "claimed for another key");
+		assert!(
+			!transcript.verify(&Proof { key: other, ..proof }, true),
+			"claimed for another key"
+		);
 	}
 
 	#[test]

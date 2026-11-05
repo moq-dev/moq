@@ -1196,7 +1196,10 @@ fn scoped_delivery_through_two_uplinks_reaches_one_key() {
 	assert_eq!(net.route(c1, key).and_then(|route| route.next), Some(l1));
 	assert_eq!(net.route(c2, key).and_then(|route| route.next), Some(l2));
 	let own = qualified(LOCAL.subject, 20);
-	assert!(net.route(c1, 20).is_none(), "the local relay's own identity is qualified");
+	assert!(
+		net.route(c1, 20).is_none(),
+		"the local relay's own identity is qualified"
+	);
 	assert_eq!(net.route(c1, own).and_then(|route| route.next), Some(l1));
 	assert_eq!(net.resolve(c2, "local/l1/x"), Some(own));
 

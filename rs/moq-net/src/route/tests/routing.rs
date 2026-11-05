@@ -630,7 +630,11 @@ fn scoped_delivery_through_two_uplinks_reaches_one_key() {
 
 	sim.disconnect(l1, c1);
 	assert!(sim.run());
-	assert_eq!(next(&sim, c1, qualified(LOCAL.subject, 20)), Some(c2), "the local relay's own fails over");
+	assert_eq!(
+		next(&sim, c1, qualified(LOCAL.subject, 20)),
+		Some(c2),
+		"the local relay's own fails over"
+	);
 	sim.connect(l1, c1);
 	assert!(sim.run());
 

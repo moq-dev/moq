@@ -1379,8 +1379,16 @@ mod tests {
 			let (client, server) = sessions(framed, client, server).await;
 			let exported = client.export_keying_material(b"label", b"context");
 			assert!(exported.is_some(), "framed: {framed}");
-			assert_eq!(server.export_keying_material(b"label", b"context"), exported, "framed: {framed}");
-			assert_ne!(client.export_keying_material(b"label", b""), exported, "framed: {framed}");
+			assert_eq!(
+				server.export_keying_material(b"label", b"context"),
+				exported,
+				"framed: {framed}"
+			);
+			assert_ne!(
+				client.export_keying_material(b"label", b""),
+				exported,
+				"framed: {framed}"
+			);
 			assert_eq!(
 				client.conn.export_keying_material(b"label", b"context") == exported,
 				!framed,

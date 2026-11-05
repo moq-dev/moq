@@ -726,7 +726,9 @@ mod tests {
 		let mut short = vec![0x01, 0x08, 0x5f];
 		short.extend([0; 95]);
 		let mut framed = Vec::new();
-		Encoder::new(&mut framed, Version::Lite07.into()).varint(short.len() as u64).unwrap();
+		Encoder::new(&mut framed, Version::Lite07.into())
+			.varint(short.len() as u64)
+			.unwrap();
 		framed.extend(short);
 		assert!(Setup::decode_slice(&framed, Version::Lite07).is_err());
 	}
@@ -747,7 +749,10 @@ mod tests {
 		assert_eq!(peer.route_key(), proven(true).route_key.map(|proof| proof.key));
 
 		// A server's own proof reflected back as the client's.
-		assert!(matches!(server().set(proven(false)), Err(crate::Error::ProtocolViolation)));
+		assert!(matches!(
+			server().set(proven(false)),
+			Err(crate::Error::ProtocolViolation)
+		));
 
 		// A transport that cannot export leaves the peer unproven, whatever it sends.
 		let unbound = PeerSetup::new(false, crate::transport::Address::Setup);
