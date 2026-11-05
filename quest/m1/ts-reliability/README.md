@@ -128,3 +128,7 @@ catalog linger (#5305).
 ## Related
 
 - [MSFTS mapping](/quest/m3/msfts-convergence.md) - document the exact equivalence and differences between the carriage modes
+
+## Required
+
+- [PCR jump flag](/quest/m1/ts-reliability/pcr-jump-flag.md) - finish interop validation for actual clock-jump flags
