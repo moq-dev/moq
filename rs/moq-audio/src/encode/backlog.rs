@@ -68,6 +68,7 @@ impl Backlog {
 		Duration::from(end).saturating_add(self.retention) <= Duration::from(now)
 	}
 
+	#[cfg(any(feature = "capture", test))]
 	pub fn deadline(&self) -> Option<Duration> {
 		Some(Duration::from(self.frames.front()?.end).saturating_add(self.retention))
 	}
