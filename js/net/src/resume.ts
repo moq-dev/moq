@@ -204,9 +204,9 @@ class Route {
 	/** The front refused the replacement: the track ends with this once the serving copy runs out. */
 	refusal?: Error;
 	/**
-	 * The source `source` replaced, held until a copy of `source` delivers: a reader arriving
-	 * meanwhile reads it too, as the readers before it do, so a replacement failing first leaves
-	 * it serving. The Rust front only swaps once the replacement delivers.
+	 * The source serving before the replacements that have yet to deliver, held until a copy of
+	 * `source` delivers: a reader arriving meanwhile reads it too, as the readers before it do, so
+	 * a replacement failing first leaves it serving. The Rust front only swaps once one delivers.
 	 */
 	incumbent?: Source;
 	/** Bumped on every change above, waking parked reads. */
@@ -228,7 +228,8 @@ class Route {
 		// A refusal ends the track: no later source continues it, compatible or not.
 		if (this.concluded || this.refusal || this.source === source) return;
 		this.generation++;
-		this.#hold(this.source);
+		// An undelivered source hands over the incumbent it held, not itself.
+		if (!this.incumbent) this.#hold(this.source);
 		this.source = source;
 		this.served = source;
 		this.#bump();

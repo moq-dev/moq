@@ -863,6 +863,36 @@ test("a reader joining before the replacement delivers keeps the incumbent when 
 	close();
 });
 
+// The incumbent is the source that last delivered, however many replacements answered since.
+test("a reader joining after two undelivered replacements keeps the incumbent when both abort", async () => {
+	const { origin, a, b, swap, active, close } = await setup();
+	const c = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	const tc = copy(c);
+	const first = active.track("seq").subscribe();
+	ta.write(0n);
+	expect(drain(first)).toEqual([0n]);
+	await swap();
+	const disposeC = serve(origin, c, 0n);
+	await settle();
+	await settle();
+	const joiner = active.track("seq").subscribe();
+	await settle();
+	tb.producer.abort(new StreamError(StreamCode(64)));
+	tc.producer.abort(new StreamError(StreamCode(64)));
+	await settle();
+	ta.write(1n);
+	await settle();
+	expect(drain(joiner)).toContain(1n);
+	expect(joiner.closed.peek()).toBeUndefined();
+
+	first.close();
+	joiner.close();
+	disposeC();
+	close();
+});
+
 // Mirrors `a_replacement_aborted_after_its_answer_keeps_the_incumbent` for a reader awaiting only the end.
 test("waiting for the end of a track whose replacement aborts before its first group follows the incumbent", async () => {
 	const { a, b, swap, active, close } = await setup();
