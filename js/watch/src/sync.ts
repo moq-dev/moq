@@ -181,8 +181,20 @@ export class Clock {
 			if (earliest?.anchor === undefined || other.anchor < earliest.anchor) earliest = other;
 		}
 		this.owner = earliest;
-		if (earliest) this.out.reference.set(earliest.anchor);
-		else this.unanchor();
+		if (earliest?.anchor === undefined) {
+			this.unanchor();
+			return;
+		}
+		const current = this.out.reference.peek();
+		const reference = earliest.anchor;
+		this.out.reference.set(reference);
+
+		// The floor marked frames a skip on the departed track's reference passed over. Moving back
+		// to the survivor's puts its frames ahead of the playhead again; moving forward is a skip.
+		this.floor = undefined;
+		if (current !== undefined && reference < current && this.in.delay.peek() !== "instant") {
+			this.floor = wall() - reference - this.out.delay.peek();
+		}
 	}
 
 	// Clear the reference so the next frame anchors a new timeline. Every parked frame belongs to
@@ -399,7 +411,13 @@ export class Sync {
 		clock.started = true;
 		clock.owner = earliest.part;
 		// Anchor at the retained opening, not at its arrival: startup may have waited on another track.
-		clock.out.reference.set(wall() - first - delay);
+		// Each track's own anchor moves with it, so handing the reference to another track later keeps
+		// the playhead where startup put it.
+		const anchored = wall() - first - delay;
+		for (const part of clock.parts.peek()) {
+			if (part.anchor !== undefined) part.anchor += anchored - reference;
+		}
+		clock.out.reference.set(anchored);
 		clock.playing.set(true);
 	}
 

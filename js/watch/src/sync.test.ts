@@ -505,6 +505,46 @@ describe("tracks", () => {
 		sync.close();
 	});
 
+	it("forgets a departed track's skip once the reference moves back to the survivor's", async () => {
+		const sync = new Sync({ delay: Milli(100) });
+		const audio = sync.track({ target: target() });
+		const video = sync.track({ target: target() });
+		await flush();
+		// Audio's burst skips the playhead to 1900; video's own arrivals put it at 900.
+		video.received(Milli(1000), Milli(5000));
+		audio.received(Milli(2000), Milli(5000));
+		expect(video.presentable(Milli(1100))).toBe(false);
+
+		audio.reset();
+		expect(sync.now()).toBe(Milli(900));
+		const waiting = video.wait(Milli(1100));
+		await clock.advance(Nano.fromMilli(Milli(200)));
+		expect(await waiting).toBe(true);
+		sync.close();
+	});
+
+	it("keeps the playhead where buffered startup put it when the owner leaves", async () => {
+		const sync = new Sync({ delay: Milli(100), buffer: Milli(1000) });
+		const audioSpan = new Signal<{ start: Milli; end: Milli } | null>(null);
+		const videoSpan = new Signal<{ start: Milli; end: Milli } | null>(null);
+		const audio = sync.track({ target: target(), startup: audioSpan });
+		const video = sync.track({ target: target(), startup: videoSpan });
+		await flush();
+		audio.received(Milli(500), Milli(5000));
+		video.received(Milli(500), Milli(5000));
+
+		// Startup releases a second later, anchoring at the retained opening rather than its arrival.
+		await clock.advance(Nano.fromMilli(Milli(1000)));
+		audioSpan.set({ start: Milli(500), end: Milli(700) });
+		videoSpan.set({ start: Milli(500), end: Milli(700) });
+		await flush();
+		expect(sync.now()).toBe(Milli(500));
+
+		audio.reset();
+		expect(sync.now()).toBe(Milli(500));
+		sync.close();
+	});
+
 	it("drops every track's parked frames at a reset", async () => {
 		const sync = new Sync({ delay: Milli(100) });
 		const audio = sync.track({ target: target() });
