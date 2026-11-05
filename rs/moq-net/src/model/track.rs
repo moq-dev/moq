@@ -8912,13 +8912,13 @@ impl Ordered {
 		self.inner.update(subscription)
 	}
 
-	/// Block until the track declares its end, returning the exclusive end position.
+	/// The exclusive end position, once the track declares its end.
 	///
-	/// See [`Subscriber::finished`]: this reports the declared end, not that every group
+	/// See [`Subscriber::poll_finished`]: this reports the declared end, not that every group
 	/// has arrived.
-	#[cfg(feature = "async")]
-	pub async fn finished(&mut self) -> Result<Position> {
-		kio::wait(|waiter| self.inner.poll_finished(waiter)).await
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<Position>> {
+		self.inner.poll_finished(waiter)
 	}
 
 	/// The largest location within [`Self::with_range`]; see [`Subscriber::poll_largest`].

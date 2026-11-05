@@ -9,7 +9,7 @@ How to update your code for each breaking change, newest first.
 `async` is no longer a default feature. Enable it to keep the sessions (`Client`, `Server`, `Session`), `time::run`, the announcement `Stream` adapter, and every async wrapper such as `next_group`, `read_frame`, or `closed`:
 `moq-net = { version = "...", features = ["async"] }`.
 Each wrapper is now generated from its `poll_*` method, which stays available without the feature, and its docs live on that poll.
-`frame::Consumer::read_all` and `track::Demand::closed` gain theirs as the new `poll_read_all` and `poll_closed`.
+`frame::Consumer::read_all`, `track::Demand::closed`, and `track::Ordered::finished` gain theirs as the new `poll_read_all`, `poll_closed`, and `poll_finished`.
 `moq-tokio`'s `net` feature enables it for you.
 `group::Producer::ready` now needs the feature too.
 
