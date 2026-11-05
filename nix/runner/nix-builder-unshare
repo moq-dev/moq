@@ -1,0 +1,13 @@
+# Nix image builds run the store copy of util-linux unshare
+# (`unshare --map-root-user fakeroot systemd-repart`). Ubuntu denies the
+# uid map unless that binary has a userns profile. /usr/bin/unshare stays denied.
+abi <abi/5.0>,
+include <tunables/global>
+
+profile nix-builder-unshare /nix/store/*util-linux*/bin/unshare flags=(unconfined) {
+  userns,
+  @{exec_path} mr,
+
+  # Site-specific additions and overrides. See local/README for details.
+  include if exists <local/nix-builder-unshare>
+}
