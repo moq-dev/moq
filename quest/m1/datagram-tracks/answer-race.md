@@ -24,9 +24,7 @@ Decided 2026-11-05 (maintainer, /quest-import of
   answer is acknowledged (about one RTT of datagrams lost per subscription
   instead), or accepting the loss with only a log.
 - ✅ **One quest for Rust and JS.** The JS part builds on the paths
-  [JS datagram tracks](/quest/m1/datagram-tracks/js.md) introduces
-  ([moq-dev/moq#7846](https://github.com/moq-dev/moq/pull/7846)), so it
-  waits for that quest.
+  [JS datagram tracks](https://github.com/moq-dev/moq/pull/7846) introduces.
 - ✅ m1, in the Datagram tracks epic.
 
 Verified on `main` at 246916845a, from the issue's report:
@@ -53,10 +51,6 @@ Tests: per version, a datagram written in the same packet as its answer
 arrives, and an unroutable one bumps the counter. The integration tests in
 `rs/moq-net/tests/integration/datagram.rs` all wait for `consumer.info()`
 before appending, so add a case that doesn't.
-
-## Required
-
-- [JS datagram tracks](/quest/m1/datagram-tracks/js.md) - the JS paths this fix builds on
 
 ## Closes
 

@@ -4122,17 +4122,17 @@ impl Publisher {
 	///
 	/// A route announced and retracted within the snapshot is left out, and a repeat
 	/// keeps its latest metadata, so each path appears once.
-	fn snapshot(announced: &mut crate::announce::Consumer) -> Vec<crate::announce::Announce> {
+	fn snapshot(announced: &mut crate::origin::Routes) -> Vec<crate::announce::Announce> {
 		let mut initial = std::collections::BTreeMap::new();
 		while let Some(event) = announced.try_next() {
 			match event {
-				crate::announce::Event::Start(update)
-				| crate::announce::Event::Update(update)
-				| crate::announce::Event::Restart(update)
-				| crate::announce::Event::Takeover { announce: update, .. } => {
+				crate::origin::RouteEvent::Start(update)
+				| crate::origin::RouteEvent::Update(update)
+				| crate::origin::RouteEvent::Restart(update)
+				| crate::origin::RouteEvent::Takeover { announce: update, .. } => {
 					initial.insert(update.prefix.clone(), update);
 				}
-				crate::announce::Event::End(update) => {
+				crate::origin::RouteEvent::End(update) => {
 					initial.remove(&update.prefix);
 				}
 			}
@@ -4160,7 +4160,7 @@ impl Publisher {
 		&self,
 		ns: &mut Namespaces,
 		prefix: &mut crate::Path,
-		announced: &mut crate::announce::Consumer,
+		announced: &mut crate::origin::Routes,
 		next: Option<crate::Path>,
 	) -> Result<bool, Error> {
 		let moved = match next.filter(|next| next != prefix) {
@@ -4185,7 +4185,7 @@ impl Publisher {
 					.origin
 					.scope(&*prefix, &scope)
 					.unwrap_or_else(|_| self.origin.empty());
-				*announced = self.advertising(origin, &ns.peer).discovery(ns.hidden).announced();
+				*announced = self.advertising(origin, &ns.peer).discovery(ns.hidden).routes();
 				true
 			}
 			None => false,
@@ -5610,7 +5610,7 @@ enum NamespaceWork {
 /// Forward origin (un)announces to the peer until the loop ends, leaving a token still being
 /// verified in the [`Namespaces`] it runs over: [`NamespaceLoop`]'s body.
 struct ForwardNamespaces {
-	announced: crate::announce::Consumer,
+	announced: crate::origin::Routes,
 	prefix: crate::Path,
 	/// The routes counted before the loop started, applied ahead of any change.
 	initial: Vec<crate::announce::Announce>,
@@ -5659,7 +5659,7 @@ enum ForwardState {
 impl ForwardNamespaces {
 	fn new(
 		publisher: &Publisher,
-		announced: crate::announce::Consumer,
+		announced: crate::origin::Routes,
 		prefix: crate::Path,
 		initial: Vec<crate::announce::Announce>,
 	) -> Self {
@@ -5879,14 +5879,16 @@ impl ForwardNamespaces {
 		}
 		if let Poll::Ready(next) = self.announced.poll_next(waiter) {
 			return Poll::Ready(NamespaceEvent::Update(next.map(|event| match event {
-				crate::announce::Event::Start(update) | crate::announce::Event::Update(update) => (update, true, false),
-				crate::announce::Event::Restart(update) => (update, true, true),
+				crate::origin::RouteEvent::Start(update) | crate::origin::RouteEvent::Update(update) => {
+					(update, true, false)
+				}
+				crate::origin::RouteEvent::Restart(update) => (update, true, true),
 				// moq-transport has no takeover: another instance, in place or not.
-				crate::announce::Event::Takeover { announce, predecessor } => {
+				crate::origin::RouteEvent::Takeover { announce, predecessor } => {
 					let restart = predecessor == announce.prefix;
 					(announce, true, restart)
 				}
-				crate::announce::Event::End(update) => (update, false, false),
+				crate::origin::RouteEvent::End(update) => (update, false, false),
 			})));
 		}
 		if self.retry.poll(waiter).is_ready() {
@@ -6058,7 +6060,7 @@ struct NamespaceLoop {
 impl NamespaceLoop {
 	fn new(
 		publisher: &Publisher,
-		announced: crate::announce::Consumer,
+		announced: crate::origin::Routes,
 		prefix: crate::Path,
 		ns: Namespaces,
 		initial: Vec<crate::announce::Announce>,
@@ -6133,13 +6135,7 @@ impl PublishNamespaces {
 				.discovery(!hidden || self.publisher.origin.includes_hidden());
 
 			let ns = Namespaces::new(peer, Target::Requests);
-			let run = NamespaceLoop::new(
-				&self.publisher,
-				origin.announced(),
-				crate::Path::empty(),
-				ns,
-				Vec::new(),
-			);
+			let run = NamespaceLoop::new(&self.publisher, origin.routes(), crate::Path::empty(), ns, Vec::new());
 			self.run = Some(run);
 		}
 		self.run.as_mut().expect("started").poll(waiter, &self.publisher)
@@ -6174,13 +6170,13 @@ enum NamespaceServeState {
 	Count {
 		peer: cluster::Peer,
 		hidden: bool,
-		announced: crate::announce::Consumer,
+		announced: crate::origin::Routes,
 	},
 	/// The acknowledgement, sent only while the token is live, even behind stream credit.
 	Ok {
 		peer: cluster::Peer,
 		hidden: bool,
-		announced: crate::announce::Consumer,
+		announced: crate::origin::Routes,
 		initial: Vec<crate::announce::Announce>,
 		/// Taken once buffered.
 		ok: Option<ietf::RequestOk>,
@@ -6209,7 +6205,7 @@ impl NamespaceServe {
 
 	/// MoQ Active Count: take what is advertised now, so the OK can say how many NAMESPACE
 	/// messages carry it. They go out first, ahead of any change.
-	fn count(&mut self, peer: cluster::Peer, hidden: bool, mut announced: crate::announce::Consumer) {
+	fn count(&mut self, peer: cluster::Peer, hidden: bool, mut announced: crate::origin::Routes) {
 		let gate = self.gate.as_ref().expect("held until the loop starts");
 		let (permit, _) = self.publisher.permit_now(Some(gate));
 		let initial = Publisher::snapshot(&mut announced);
@@ -6304,7 +6300,7 @@ impl NamespaceServe {
 
 					// A NAMESPACE is discovery, not a route, so a peer that also hears the
 					// unsolicited PUBLISH_NAMESPACE still gets the match here.
-					let announced = origin.announced();
+					let announced = origin.routes();
 
 					match declared.active_count {
 						true if declared.auth => {
@@ -17507,7 +17503,7 @@ mod tests {
 		let peer = cluster::Peer::default();
 
 		// The cursor is what filters: an excluded consumer never sees the echoed route.
-		let mut announced = consumer.excluding(assigned).announced();
+		let mut announced = consumer.excluding(assigned).routes();
 		let local = announced.assert_next_active("from/us");
 		announced.assert_next_wait();
 
@@ -17547,7 +17543,7 @@ mod tests {
 			hop: Some(r1),
 			cost: None,
 		};
-		let mut announced = consumer.excluding(publisher.exclude(&peer)).announced();
+		let mut announced = consumer.excluding(publisher.exclude(&peer)).routes();
 		announced.assert_next_wait();
 
 		let forwarded = cluster::Advert::forward(&hops, 0, crate::Hop::new(1).unwrap()).unwrap();
@@ -17619,7 +17615,7 @@ mod tests {
 			hop: Some(crate::Hop::UNKNOWN),
 			cost: None,
 		};
-		let mut announced = consumer.excluding(publisher.exclude(&peer)).announced();
+		let mut announced = consumer.excluding(publisher.exclude(&peer)).routes();
 		announced.assert_next_wait();
 	}
 

@@ -87,7 +87,8 @@ fn main() {
 				.unwrap()
 				.available()
 				.await
-				.expect("broadcast resolves");
+				.expect("broadcast resolves")
+				.expect("the room is online");
 			let subscriber = remote.track("chat").unwrap().subscribe(None).await.expect("subscribe");
 			audience.push((sessions, local, subscriber));
 		}

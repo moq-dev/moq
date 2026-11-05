@@ -71,7 +71,6 @@ use std::task::Poll;
 use std::time::Duration;
 
 use axum::Router;
-use moq_mux::follow;
 
 use crate::export::{Broadcaster, Config};
 
@@ -230,7 +229,10 @@ impl Server {
 			return Some(followed.clone());
 		}
 
-		let instances = follow::Instances::new(&self.inner.origin, name, None)
+		let instances = self
+			.inner
+			.origin
+			.follow(name, None)
 			.map_err(|err| tracing::warn!(%err, %name, "failed to follow broadcast"))
 			.ok()?;
 		// A request answers once the origin has synced with the relay, so a path with no route
@@ -298,24 +300,27 @@ struct Follow {
 	inner: Weak<Inner>,
 	name: String,
 	followed: Weak<Followed>,
-	instances: follow::Instances,
+	instances: moq_net::origin::Following,
 	served: Option<moq_net::broadcast::Consumer>,
 }
 
 impl Follow {
 	/// The next instance event, or `None` once `followed` is gone.
-	fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<moq_mux::Result<follow::Event>>> {
+	fn poll_next(
+		&mut self,
+		waiter: &kio::Waiter,
+	) -> Poll<Option<Result<Option<moq_net::broadcast::Consumer>, moq_net::Error>>> {
 		let Some(followed) = self.followed.upgrade() else {
 			return Poll::Ready(None);
 		};
 		followed.forget_closed(waiter);
-		if let Poll::Ready(next) = self.instances.poll_next(waiter) {
+		if let Poll::Ready(next) = self.instances.poll_available(waiter) {
 			return Poll::Ready(Some(next));
 		}
 		// The follower folds away an instance that started and ended before its first poll,
 		// so the served instance closing before it is handed out means nothing serves the path.
 		match &self.served {
-			Some(served) => served.poll_closed(waiter).map(|()| Some(Ok(follow::Event::End))),
+			Some(served) => served.poll_closed(waiter).map(|()| Some(Ok(None))),
 			None => Poll::Pending,
 		}
 	}
@@ -327,12 +332,12 @@ impl Follow {
 				return Poll::Ready(());
 			};
 			match next {
-				Some(Ok(follow::Event::Start(broadcast))) => {
+				Some(Ok(Some(broadcast))) => {
 					if !self.served.take().is_some_and(|served| served.is_clone(&broadcast)) {
 						followed.start(inner.serve(broadcast));
 					}
 				}
-				Some(Ok(follow::Event::End)) => break (inner, followed),
+				Some(Ok(None)) => break (inner, followed),
 				Some(Err(err)) => {
 					tracing::warn!(%err, name = %self.name, "stopped following broadcast");
 					break (inner, followed);

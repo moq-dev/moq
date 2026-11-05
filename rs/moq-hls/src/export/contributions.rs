@@ -244,7 +244,7 @@ impl kio::Task for FollowInstances {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		loop {
 			let next = match ready!(self.instances.poll_next(waiter)) {
-				Ok(follow::Event::Start(broadcast)) => {
+				Ok(Some(broadcast)) => {
 					let id = broadcast
 						.info()
 						.instance
@@ -264,7 +264,7 @@ impl kio::Task for FollowInstances {
 						_owner: owner,
 					}))
 				}
-				Ok(follow::Event::End) => Current::Offline,
+				Ok(None) => Current::Offline,
 				// An authorization refusal is final: the contribution stays out and its URLs answer 403.
 				Err(err @ moq_mux::Error::Moq(moq_net::Error::Unauthorized)) => {
 					tracing::debug!(%err, "contribution refused");

@@ -830,7 +830,8 @@ impl Step {
 		loop {
 			match self {
 				Self::Resolving(following) => {
-					let broadcast = ready!(following.poll_available(waiter))?;
+					// Only the first call is made here, and it never reports the path offline.
+					let broadcast = ready!(following.poll_available(waiter))?.expect("the first call is never offline");
 					let subscribing = broadcast.track(track)?.subscribe(reliable()).into_inner();
 					*self = Self::Subscribing(subscribing);
 				}
