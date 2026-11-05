@@ -105,7 +105,7 @@ windows-test:
     set -euo pipefail
     source sh/checks.sh
     run just rs test --manifest-path rs/moq-auth/Cargo.toml
-    run just rs test -p hang -p moq-tokio -p moq-sock -p moq-relay
+    run just rs test -p kio -p hang -p moq-tokio -p moq-sock -p moq-relay
     run just rs test -p moq-video --no-default-features --features render -E 'test(/^render::export::/)'
     finish
 
@@ -152,7 +152,7 @@ macos-test:
     set -euo pipefail
     source sh/checks.sh
     run just rs test --manifest-path rs/moq-auth/Cargo.toml
-    run just rs test -p hang -p moq-tokio -p moq-sock
+    run just rs test -p kio -p hang -p moq-tokio -p moq-sock
     run just rs test -p moq-sock --features fast-apple-datapath
     run just rs test -p moq-video --no-default-features -E 'test(encode::backend::videotoolbox::tests)'
     run just rs test -p moq-video --no-default-features --features render -E 'test(/^render::export::/)'

@@ -144,6 +144,13 @@ refuses local and self-hosted runners, and unloads the profile on exit,
 including build failure. `just gh runner-vm` does not change host policy;
 its build host must already support rootless user namespaces.
 
+Ubuntu denies that map when `kernel.apparmor_restrict_unprivileged_userns` is
+set, unless the binary has a profile. `just gh runner-userns` installs
+`nix/runner/nix-builder-unshare` into `/etc/apparmor.d/` and loads it. The
+profile allows user namespaces only for `/nix/store/*util-linux*/bin/unshare`,
+so a nixpkgs bump still matches, and `/usr/bin/unshare` stays denied. AppArmor
+stays enabled. Run it again only after the host profile is removed.
+
 `just gh runner-vm` builds a guest image and runs NixOS integration tests for
 startup without carrier, public egress for multiple guests, private-network and
 sibling-guest isolation including spoofed established replies, compatible host NAT

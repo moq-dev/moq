@@ -4517,6 +4517,7 @@ dependencies = [
  "test-env",
  "tokio",
  "tokio-util",
+ "toml 1.1.8+spec-1.1.0",
  "tower-http 0.7.1",
  "tracing",
  "url",
@@ -4707,6 +4708,7 @@ dependencies = [
 name = "moq-msf"
 version = "0.5.1"
 dependencies = [
+ "bench-harness",
  "serde",
  "serde_json",
  "serde_with",
@@ -4789,6 +4791,7 @@ dependencies = [
  "proptest",
  "rand 0.10.3",
  "rangemap",
+ "rind",
  "serde",
  "serde_json",
  "slab",
@@ -4797,6 +4800,7 @@ dependencies = [
  "tracing",
  "url",
  "workspace-hack",
+ "zeroize",
 ]
 
 [[package]]
@@ -4914,6 +4918,7 @@ dependencies = [
  "libc",
  "moq-auth 0.2.1",
  "moq-congestion",
+ "moq-crypto",
  "moq-net",
  "moq-quic",
  "moq-shaper",
