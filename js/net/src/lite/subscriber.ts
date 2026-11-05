@@ -97,7 +97,8 @@ import {
 const listingBudget = new Budget();
 const datagramBudget = new Budget();
 // The datagrams held for unanswered subscriptions at once, as many as a Rust pass holds: past it,
-// the receive queue waits for them to route.
+// one is dropped and counted rather than stalling the receive queue, which would hold up other
+// tracks' datagrams behind their ends.
 const HELD_DATAGRAMS = 32;
 
 // Request streams refuse exhausted peer credit, with one deadline covering create and answer.
@@ -933,7 +934,7 @@ export class Subscriber {
 			// arrive alongside, so the datagrams already received route first.
 			const ended = opened.reader.done().then(async (done) => {
 				if (!done) throw new ProtocolViolation("data after DATAGRAMS_INFO");
-				await yieldNow();
+				await this.#datagramsRouted(id);
 				receiving.finish();
 			});
 			void ended.catch(() => {});
@@ -1389,6 +1390,8 @@ export class Subscriber {
 			entry.held?.close();
 			entry.datagramDemand?.();
 			if (entry.datagrams) {
+				// The stream track's end is its datagrams' end: those received with it route first.
+				if (entry.end !== undefined) await this.#datagramsRouted(id);
 				const closed = hooks.trackReleased(producer).peek();
 				if (closed instanceof Error) entry.datagrams.producer.abort(closed);
 				else if (entry.end !== undefined) entry.datagrams.producer.finish();
@@ -2439,13 +2442,21 @@ export class Subscriber {
 		if (!this.#isHeld(unrouted) && this.#datagrams.has(unrouted))
 			unrouted = await this.#deliverDatagram(payload, true);
 		if (unrouted === undefined) return;
-		if (this.#isHeld(unrouted) || this.#unanswered.has(unrouted) || this.#pending.has(unrouted)) {
+		const awaiting = this.#isHeld(unrouted) || this.#unanswered.has(unrouted) || this.#pending.has(unrouted);
+		if (awaiting && this.#held.length < HELD_DATAGRAMS) {
 			this.#held.push({ subscribe: unrouted, payload });
 			this.#heldRouted ??= this.#routeHeld();
-			if (this.#held.length >= HELD_DATAGRAMS) await this.#heldRouted;
 			return;
 		}
 		this.#dropUnrouted(unrouted);
+	}
+
+	// Wait for the datagrams received for `subscribe` so far to route: those the transport already
+	// delivered, a host task, and those held for its answer.
+	async #datagramsRouted(subscribe: bigint): Promise<void> {
+		await yieldNow();
+		// A held datagram keeps its routing pass running.
+		while (this.#isHeld(subscribe)) await this.#heldRouted;
 	}
 
 	// Whether a datagram for `subscribe` is held, which later ones wait behind to keep its order.

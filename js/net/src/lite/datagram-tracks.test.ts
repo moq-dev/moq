@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { yieldNow } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import { accept, connect } from "../connection/index.ts";
 import { createMockTransportPair, type MockTransport } from "../mock.ts";
@@ -301,7 +302,11 @@ function lagAnswers(transport: MockTransport, lag: number): void {
 			return chain;
 		};
 		return new WritableStream<Uint8Array>({
-			write: (chunk) => void later(() => writer.write(chunk)),
+			// Copied: the write resolves now, after which the stream may reuse its buffer.
+			write: (chunk) => {
+				const copy = chunk.slice();
+				void later(() => writer.write(copy));
+			},
 			close: () => later(() => writer.close()),
 			abort: (reason) => writer.abort(reason),
 		});
@@ -319,11 +324,17 @@ function lagAnswers(transport: MockTransport, lag: number): void {
 }
 
 // A publisher that writes as soon as a subscription reaches it sends the datagram right behind
-// its answer, which may reach the subscriber first. The subscriber decodes the answer before it
-// routes the datagram.
+// its answer, which may reach the subscriber first, with the track's end too when it finishes at
+// once. The subscriber decodes the answer before it routes the datagram, and routes the datagram
+// before it ends the track.
 for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
-	for (const lag of [0, 100]) {
-		test(`${alpn}: a datagram sent right behind its answer arrives (answer ${lag} microtasks late)`, async () => {
+	for (const [lag, finish] of [
+		[0, false],
+		[100, false],
+		[0, true],
+		[100, true],
+	] as const) {
+		test(`${alpn}: a datagram sent right behind its answer arrives (answer ${lag} microtasks late${finish ? ", then the end" : ""})`, async () => {
 			const source = new Origin();
 			const publication = source.createBroadcast(path);
 			const datagrams = publication.broadcast.createDatagrams("audio");
@@ -341,9 +352,12 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 			try {
 				while (datagrams.priority.peek() !== 5) await datagrams.priority.changed();
 				datagrams.append(undefined, Uint8Array.of(1));
+				if (finish) datagrams.finish();
 				await reader.info();
-				datagrams.append(undefined, Uint8Array.of(2));
+				if (!finish) datagrams.append(undefined, Uint8Array.of(2));
 				expect((await reader.recv())?.payload).toEqual(Uint8Array.of(1));
+				if (finish) expect(await reader.recv()).toBeUndefined();
+				else expect((await reader.recv())?.payload).toEqual(Uint8Array.of(2));
 				expect((await client.stats()).datagramsUnrouted).toBe(0);
 			} finally {
 				reader.close();
@@ -404,7 +418,11 @@ function holdNextAnswer(transport: MockTransport): { arm(): void; release(): voi
 			return chain;
 		};
 		return new WritableStream<Uint8Array>({
-			write: (chunk) => void later(() => writer.write(chunk)),
+			// Copied: the write resolves now, after which the stream may reuse its buffer.
+			write: (chunk) => {
+				const copy = chunk.slice();
+				void later(() => writer.write(copy));
+			},
 			close: () => void later(() => writer.close()),
 			abort: (reason) => writer.abort(reason),
 		});
@@ -434,8 +452,8 @@ function holdNextAnswer(transport: MockTransport): { arm(): void; release(): voi
 	};
 }
 
-// Datagrams held for a track still awaiting its answer don't hold up an answered track's last
-// datagram, which its end, arriving with it, would otherwise drop.
+// Datagrams held for a track still awaiting its answer, more than are held at once, don't hold
+// up an answered track's last datagram, which its end, arriving with it, would otherwise drop.
 test("lite-07: an unanswered track's datagrams don't delay another track's last", async () => {
 	const source = new Origin();
 	const publication = source.createBroadcast(path);
@@ -473,15 +491,18 @@ test("lite-07: an unanswered track's datagrams don't delay another track's last"
 		const request = await requested;
 		if (!request) throw new Error("the request never reached the handler");
 		const a = request.accept({});
-		for (let i = 0; i < 3; i++) a.append(undefined, Uint8Array.of(i));
+		for (let i = 0; i < 40; i++) a.append(undefined, Uint8Array.of(i));
 		// "a"'s datagrams reach the subscriber ahead of "b"'s.
-		while (sends.peek() < 3) await sends.changed();
+		while (sends.peek() < 40) await sends.changed();
 		b.append(undefined, Uint8Array.of(9));
 		b.finish();
 		expect((await readerB.recv())?.payload).toEqual(Uint8Array.of(9));
 		expect(await readerB.recv()).toBeUndefined();
-		// "a" stayed unanswered past the host task its datagrams waited, so they were dropped.
-		expect((await client.stats()).datagramsUnrouted).toBe(3);
+		// Those past the cap were dropped at once, without stalling "b".
+		expect((await client.stats()).datagramsUnrouted).toBeGreaterThanOrEqual(8);
+		// "a" stays unanswered past the host task its held datagrams wait, so they drop too.
+		while (((await client.stats()).datagramsUnrouted ?? 0) < 40) await yieldNow();
+		expect((await client.stats()).datagramsUnrouted).toBe(40);
 		hold.release();
 		await readerA.info();
 	} finally {

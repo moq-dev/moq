@@ -563,30 +563,42 @@ async fn moq_transport_has_no_datagram_tracks() {
 }
 
 /// A publisher that answers a datagram request and writes at once sends the datagram right
-/// behind its answer, so both reach the subscriber in one receive pass. The subscriber
-/// decodes the answer before it routes the datagram, which then reaches the consumer.
+/// behind its answer, so both reach the subscriber in one receive pass, with the track's end
+/// too when it finishes at once. The subscriber decodes the answer before it routes the
+/// datagram, and routes the datagram before it ends the track.
 #[kio::test]
 async fn a_datagram_sent_right_behind_its_answer_arrives() {
 	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
-		let chain = Chain::new(&[version]).await;
-		let requests = chain.publication.requests();
-		let mut handler = requests.datagrams();
-		let mut consumer = chain.remote().await.datagrams(TRACK).unwrap();
-		let request = kio::clock::timeout(TIMEOUT, handler.requested())
-			.await
-			.unwrap_or_else(|_| panic!("{version}: the request never reached the handler"))
-			.unwrap();
-		let mut producer = request.accept(timed());
-		assert_eq!(producer.append(millis(1), &b"first"[..]).unwrap(), 0, "{version}");
-		let datagram = kio::clock::timeout(TIMEOUT, consumer.recv())
-			.await
-			.unwrap_or_else(|_| panic!("{version}: the datagram never arrived"))
-			.unwrap()
-			.expect("a datagram");
-		assert_eq!(datagram.sequence, 0, "{version}");
-		assert_eq!(&datagram.payload[..], b"first", "{version}");
-		// The second node subscribes through the session it accepted.
-		assert_eq!(chain.pairs[0].server.stats().datagrams_unrouted, Some(0), "{version}");
+		for finish in [false, true] {
+			let chain = Chain::new(&[version]).await;
+			let requests = chain.publication.requests();
+			let mut handler = requests.datagrams();
+			let mut consumer = chain.remote().await.datagrams(TRACK).unwrap();
+			let request = kio::clock::timeout(TIMEOUT, handler.requested())
+				.await
+				.unwrap_or_else(|_| panic!("{version}: the request never reached the handler"))
+				.unwrap();
+			let mut producer = request.accept(timed());
+			assert_eq!(producer.append(millis(1), &b"first"[..]).unwrap(), 0, "{version}");
+			if finish {
+				producer.finish();
+			}
+			let datagram = recv(&mut consumer)
+				.await
+				.unwrap_or_else(|err| panic!("{version} finish={finish}: {err:?}"))
+				.unwrap_or_else(|| panic!("{version} finish={finish}: the datagram was dropped"));
+			assert_eq!(datagram.sequence, 0, "{version}");
+			assert_eq!(&datagram.payload[..], b"first", "{version}");
+			if finish {
+				assert!(recv(&mut consumer).await.unwrap().is_none(), "{version}");
+			}
+			// The second node subscribes through the session it accepted.
+			assert_eq!(
+				chain.pairs[0].server.stats().datagrams_unrouted,
+				Some(0),
+				"{version} finish={finish}"
+			);
+		}
 	}
 }
 

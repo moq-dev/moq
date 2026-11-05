@@ -80,6 +80,9 @@ pub(super) struct Subscriber {
 	/// Lite-05/06: the datagram tracks taking the datagrams of their name's stream track
 	/// subscription, by broadcast and name. One SUBSCRIBE carries both kinds there.
 	legacy_datagrams: Lock<HashMap<(Path, String), DatagramEntry>>,
+	/// The datagram tracks ended, and on lite-05/06 the subscriptions carrying them, while the
+	/// driver routes the datagrams received with their end; see [`Self::end_datagrams`].
+	datagram_ends: Lock<DatagramEnds>,
 	/// Datagrams received for a subscription with no datagram track, which
 	/// [`crate::session::Stats::datagrams_unrouted`] reports.
 	pub(super) datagrams_unrouted: Arc<atomic::AtomicU64>,
@@ -152,6 +155,18 @@ struct DatagramEntry {
 	producer: datagram::Producer,
 	/// The units of every datagram Timestamp on the wire, or `None` when they carry none.
 	timescale: Option<Timescale>,
+}
+
+/// What the sources ended in one driver poll, applied once its datagrams routed.
+#[derive(Default)]
+struct DatagramEnds {
+	/// Lite-07: the datagram tracks the publisher finished, by Subscribe ID.
+	tracks: Vec<(u64, datagram::Producer)>,
+	/// Lite-05/06: the datagram tracks whose stream track finished, by broadcast and name.
+	shared: Vec<((Path, String), datagram::Producer)>,
+	/// Lite-05/06: the subscriptions removed, by Subscribe ID, with the broadcast and name
+	/// whose datagram track takes their datagrams.
+	subscribes: Vec<(u64, (Path, String))>,
 }
 
 struct TrackEntry {
@@ -417,6 +432,7 @@ impl Subscriber {
 			subscribes: Default::default(),
 			datagrams: Default::default(),
 			legacy_datagrams: Default::default(),
+			datagram_ends: Default::default(),
 			datagrams_unrouted: Default::default(),
 			ended: Default::default(),
 			next_id: Default::default(),
@@ -854,7 +870,29 @@ impl Subscriber {
 
 	/// Remove a subscription, releasing the session's handle on its producer.
 	fn remove_subscribe(&self, id: u64) {
-		self.subscribes.lock().remove(&id);
+		let removed = self.subscribes.lock().remove(&id);
+		if let Some(legacy) = removed.and_then(|mut entry| entry.legacy.take()) {
+			self.datagram_ends.lock().subscribes.push((id, legacy));
+		}
+	}
+
+	/// Apply the datagram ends the sources read, once the driver routed the datagrams received
+	/// with them. A publisher sends a track's last datagram right before its end, and a fresh
+	/// track's answer, first datagram and end can all share a receive pass.
+	fn end_datagrams(&self) {
+		let ends = std::mem::take(&mut *self.datagram_ends.lock());
+		for (id, producer) in ends.tracks {
+			self.datagrams.lock().remove(&id);
+			producer.finish();
+		}
+		for (key, producer) in ends.shared {
+			let mut shared = self.legacy_datagrams.lock();
+			if shared.get(&key).is_some_and(|entry| entry.producer.is_clone(&producer)) {
+				shared.remove(&key);
+			}
+			drop(shared);
+			producer.finish();
+		}
 	}
 
 	/// Decode one datagram body and hand it to the datagram track it was sent for, or return
@@ -898,7 +936,13 @@ impl Subscriber {
 		if let Some(entry) = self.datagrams.lock().get(&id) {
 			return Some((entry.producer.clone(), entry.timescale));
 		}
-		let key = self.subscribes.lock().get(&id)?.legacy.clone()?;
+		let key = match self.subscribes.lock().get(&id) {
+			Some(entry) => entry.legacy.clone()?,
+			None => {
+				let ends = self.datagram_ends.lock();
+				ends.subscribes.iter().find(|(ended, _)| *ended == id)?.1.clone()
+			}
+		};
 		let legacy = self.legacy_datagrams.lock();
 		let entry = legacy.get(&key)?;
 		Some((entry.producer.clone(), entry.timescale))
@@ -1013,6 +1057,7 @@ impl SubscriberDriver {
 		let parked = self.subscriber.park_waits.load(atomic::Ordering::Relaxed);
 		if closed && parked > 0 && self.uni.children.len() == parked {
 			let _ = self.sources.poll(waiter);
+			self.subscriber.end_datagrams();
 			return Poll::Pending;
 		}
 		// Once every remaining stream waits on a SETUP that never arrived, none of
@@ -1026,6 +1071,7 @@ impl SubscriberDriver {
 		// Lite03/04 that FIN is the only end: read it, so the track finishes rather than
 		// aborts. Each source reads its streams once, then retires on the closed session.
 		let _ = self.sources.poll(waiter);
+		self.subscriber.end_datagrams();
 		Poll::Ready(())
 	}
 
@@ -1079,8 +1125,8 @@ impl SubscriberDriver {
 		// Datagrams go around the sources, which decode the answers that register their
 		// routes and the ends that remove them. A publisher sends a track's first datagram
 		// right behind its answer and its last right before its end, often in the same
-		// packet. So the datagrams of known tracks go first, ahead of any end, and those with
-		// no known track wait for the sources' answers.
+		// packet. So the datagrams of known tracks go first, those with no known track wait
+		// for the sources' answers, and the ends the sources read apply after both.
 		if let Poll::Ready(Err(err)) = self.poll_datagrams(waiter, true) {
 			return Poll::Ready(Err(err));
 		}
@@ -1092,7 +1138,9 @@ impl SubscriberDriver {
 		}
 		let _ = self.sources.poll(waiter);
 
-		if let Poll::Ready(Err(err)) = self.poll_datagrams(waiter, false) {
+		let routed = self.poll_datagrams(waiter, false);
+		self.subscriber.end_datagrams();
+		if let Poll::Ready(Err(err)) = routed {
 			return Poll::Ready(Err(err));
 		}
 
@@ -1787,7 +1835,16 @@ impl DatagramRecv {
 		let mut budget = kio::coop::Budget::new(32);
 		loop {
 			ready!(budget.poll_yield(waiter));
-			let payload = ready!(self.recv.poll_recv_datagram(waiter)).map_err(crate::lite::error::from_transport)?;
+			let payload = match ready!(self.recv.poll_recv_datagram(waiter)) {
+				Ok(payload) => payload,
+				Err(err) => {
+					// The session ends without the sources' answers: what is held finds no track.
+					for payload in std::mem::take(&mut self.held) {
+						self.route(payload, false);
+					}
+					return Poll::Ready(Err(crate::lite::error::from_transport(err)));
+				}
+			};
 			self.route(payload, hold);
 		}
 	}
@@ -2662,6 +2719,14 @@ impl DatagramServe {
 		}
 	}
 
+	/// Yield to the driver once the route is registered, so it routes the datagrams it held
+	/// for this answer before the next pass may read the track's end, which removes the route.
+	/// The answer, the first datagram and the end can share a receive pass.
+	fn poll_routed(waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		waiter.waker().wake_by_ref();
+		Poll::Pending
+	}
+
 	fn name(&self) -> &str {
 		match &self.state {
 			DatagramState::Open { request }
@@ -2744,6 +2809,7 @@ impl DatagramServe {
 						stream,
 						priority,
 					};
+					return Self::poll_routed(waiter);
 				}
 				DatagramState::Subscribe { subscribing, .. } => {
 					let subscriber = ready!(subscribing.poll_ok(waiter))?;
@@ -2767,6 +2833,7 @@ impl DatagramServe {
 						subscriber: Box::new(subscriber),
 						priority,
 					};
+					return Self::poll_routed(waiter);
 				}
 				DatagramState::Live {
 					producer,
@@ -2781,15 +2848,18 @@ impl DatagramServe {
 						None => None,
 					};
 					if let Some(end) = ended {
-						self.subscriber.datagrams.lock().remove(&self.id);
 						let DatagramState::Live {
 							producer, mut stream, ..
 						} = std::mem::replace(&mut self.state, DatagramState::Done)
 						else {
 							unreachable!()
 						};
-						end.inspect_err(|err| producer.clone().abort(err.clone()))?;
-						producer.finish();
+						if let Err(err) = end {
+							self.subscriber.datagrams.lock().remove(&self.id);
+							producer.abort(err.clone());
+							return Poll::Ready(Err(err));
+						}
+						self.subscriber.datagram_ends.lock().tracks.push((self.id, producer));
 						if stream.writer.finish().is_ok() && version.waits_for_subscriber_fin() {
 							self.state = DatagramState::Finish { writer: stream.writer };
 							continue;
@@ -2826,8 +2896,8 @@ impl DatagramServe {
 						else {
 							unreachable!()
 						};
-						self.unregister_shared(&producer);
-						producer.finish();
+						let key = (self.path.clone(), producer.name().to_string());
+						self.subscriber.datagram_ends.lock().shared.push((key, producer));
 						return Poll::Ready(Ok(()));
 					}
 					match producer.poll_priority(waiter, Some(*priority)) {
@@ -2873,9 +2943,10 @@ impl DatagramServe {
 		}
 	}
 
-	/// End the track and the request with `err`, unless it already ended.
+	/// End the track and the request with `err`, unless it already ended. An ended track's
+	/// route goes with its end instead, once the datagrams received with it routed: see
+	/// [`Subscriber::end_datagrams`].
 	fn abort(&mut self, err: Error) {
-		self.subscriber.datagrams.lock().remove(&self.id);
 		match std::mem::replace(&mut self.state, DatagramState::Done) {
 			DatagramState::Open { request } | DatagramState::Subscribe { request, .. } => request.reject(err),
 			DatagramState::Info { request, stream, .. } => {
@@ -2883,6 +2954,7 @@ impl DatagramServe {
 				request.reject(err);
 			}
 			DatagramState::Live { producer, stream, .. } => {
+				self.subscriber.datagrams.lock().remove(&self.id);
 				stream.writer.abort(&err);
 				producer.abort(err);
 			}
