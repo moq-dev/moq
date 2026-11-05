@@ -31,7 +31,7 @@ moq-audio = { workspace = true, features = ["aac"] }
 moq-json = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
-moq-tokio = { workspace = true, features = ["quic", "aws-lc-rs", "websocket", "tcp", "uds"] }
+moq-tokio = { workspace = true, features = ["quic", "websocket", "tcp", "uds"] }
 # Select the NVIDIA and VAAPI hardware codecs explicitly because workspace
 # defaults are off. The hardware backends dlopen their driver; `vaapi` also runs
 # bindgen, so Linux builds need libclang. The software fallback is `openh264`.

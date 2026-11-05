@@ -2044,6 +2044,25 @@ describe("Session integration (scripted peer)", () => {
 
 	// Chrome rejects an over-limit create rather than queueing it, and @moq/net
 	// passes waitUntilAvailable: false where it relies on that.
+	test("streamCredit counts down per direction and reports a waiting create as blocked", async () => {
+		const { session, peer } = connect();
+		await session.ready;
+		peer.send({ type: "transport_parameters", params: peerParams({ initialMaxStreamsUni: 1n }) });
+
+		await session.createUnidirectionalStream();
+		expect(session.streamCredit("uni")).toEqual({ available: 0n, blocked: false });
+		const waiting = session.createUnidirectionalStream();
+		await flushMicrotasks();
+		expect(session.streamCredit("uni")).toEqual({ available: 0n, blocked: true });
+		expect(session.streamCredit("bi")).toEqual({ available: 100n, blocked: false });
+
+		// The peer's MAX_STREAMS unblocks, and the waiting create takes the slot it grants.
+		peer.send({ type: "max_streams_uni", max: 2n });
+		await waiting;
+		expect(session.streamCredit("uni")).toEqual({ available: 0n, blocked: false });
+		session.close();
+	});
+
 	describe("waitUntilAvailable: false refuses instead of waiting", () => {
 		const refused = (err: unknown) => {
 			expect(err).toBeInstanceOf(DOMException);

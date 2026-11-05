@@ -2504,13 +2504,6 @@ mod tests {
 				moq_net::transport::poll::Buffered::new(ScriptedRecv { data: None }),
 			)))
 		}
-		fn poll_open_request(
-			&self,
-			waiter: &kio::Waiter,
-			options: moq_net::transport::poll::SendOptions<'_, moq_net::transport::poll::Ungrouped>,
-		) -> std::task::Poll<Result<Option<moq_net::transport::poll::BiStreams<Self>>, ScriptedError>> {
-			self.poll_open_bi(waiter, options).map_ok(Some)
-		}
 		fn send_group(&self, _: i64) -> Option<moq_net::transport::poll::Ungrouped> {
 			None
 		}
@@ -3052,7 +3045,15 @@ mod tests {
 	async fn client_auth_without_a_tls_listener_is_rejected() {
 		let dir = tempfile::tempdir().unwrap();
 		let ca = dir.path().join("ca.pem");
-		let cert = rcgen::generate_simple_self_signed(["ca".to_string()]).unwrap().cert;
+		let cert = (|| -> std::result::Result<_, rcgen::Error> {
+			let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+			let mut params = rcgen::CertificateParams::new(["ca".to_string()])?;
+			params.serial_number = Some(1u64.into());
+			let cert = params.self_signed(&signing_key)?;
+			Ok(rcgen::CertifiedKey { cert, signing_key })
+		})()
+		.unwrap()
+		.cert;
 		std::fs::write(&ca, cert.pem()).unwrap();
 
 		type Set = Box<dyn Fn(&mut crate::listen::Config)>;

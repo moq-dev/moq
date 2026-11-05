@@ -1133,7 +1133,7 @@ mod tests {
 		};
 		let decode = |output| {
 			backend::open(
-				Codec::H264,
+				&Codec::H264.into(),
 				&crate::decode::Config {
 					// By name rather than by literal: a `Named` that matches
 					// nothing fails to open, which reads here as absent hardware
@@ -1290,7 +1290,7 @@ mod tests {
 		};
 		let decode = |output| {
 			backend::open(
-				Codec::H264,
+				&Codec::H264.into(),
 				&crate::decode::Config {
 					kind: crate::decode::Kind::Named(vaapi::NAME.into()),
 					output,

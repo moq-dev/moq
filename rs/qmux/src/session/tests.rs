@@ -376,72 +376,25 @@ async fn the_peer_limits_concurrent_streams() {
 	let mut server = config(Version::QMux02);
 	server.limits.max_streams = std::num::NonZeroU64::new(1);
 	let (client, server) = pair(config(Version::QMux02), server).await;
+	let credit = |dir| client.stream_credit(dir).unwrap();
+	assert_eq!(credit(net::Dir::Uni), net::StreamCredit::new(1, false));
 
 	let mut first = client.open_uni(SendOptions::default()).await.unwrap();
+	assert_eq!(credit(net::Dir::Uni), net::StreamCredit::new(0, false));
 	let mut opening = std::pin::pin!(client.open_uni(SendOptions::default()));
 	assert!(
 		futures_poll_once(&mut opening).await.is_none(),
 		"no credit for a second stream"
 	);
+	assert_eq!(credit(net::Dir::Uni), net::StreamCredit::new(0, true));
+	assert_eq!(credit(net::Dir::Bi), net::StreamCredit::new(1, false), "per direction");
 
 	first.finish().unwrap();
 	let mut recv = server.accept_uni().await.unwrap();
 	read_all(&mut recv).await.unwrap();
 	drop(recv);
 	opening.await.expect("credit returned once the first stream is done");
-}
-
-#[tokio::test(start_paused = true)]
-async fn request_credit_is_refused_without_parking_an_open() {
-	let mut server_config = config(Version::QMux02);
-	server_config.limits.max_streams = std::num::NonZeroU64::new(1);
-	let (client, server) = pair(config(Version::QMux02), server_config).await;
-	let waiter = &kio::Waiter::noop();
-	let Poll::Ready(Ok(Some((mut send, mut recv)))) = client.poll_open_request(waiter, Default::default()) else {
-		panic!("initial request has credit");
-	};
-	assert!(matches!(
-		client.poll_open_request(waiter, Default::default()),
-		Poll::Ready(Ok(None))
-	));
-	assert!(matches!(
-		client.poll_open_request(waiter, Default::default()),
-		Poll::Ready(Ok(None))
-	));
-	send.finish().unwrap();
-	let (mut peer_send, mut peer_recv) = server.accept_bi().await.unwrap();
-	peer_send.finish().unwrap();
-	read_all(&mut peer_recv).await.unwrap();
-	read_all(&mut recv).await.unwrap();
-	drop((send, recv, peer_send, peer_recv));
-	client
-		.open_bi(Default::default())
-		.await
-		.expect("only one fresh open consumes returned credit");
-	assert!(matches!(
-		client.poll_open_request(waiter, Default::default()),
-		Poll::Ready(Ok(None))
-	));
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_request_before_the_handshake_waits_for_credit() {
-	let (client, server) = tokio::io::duplex(PIPE);
-	// Started like a WebSocket client, without waiting for the server's parameters.
-	let client = spawn(Session::new(Stream::new(client), Side::Client, config(Version::QMux02)).unwrap());
-	let mut opening = std::pin::pin!(kio::wait(|waiter| client.poll_open_request(waiter, Default::default())));
-	assert!(
-		futures_poll_once(&mut opening).await.is_none(),
-		"no credit is known before the handshake"
-	);
-
-	let _server = spawn(
-		Session::accept(Stream::new(server), config(Version::QMux02))
-			.await
-			.unwrap(),
-	);
-	let opened = opening.await.expect("request after the handshake");
-	assert!(opened.is_some(), "the server's initial credit admits the request");
+	assert!(!credit(net::Dir::Uni).blocked, "the peer's MAX_STREAMS unblocks");
 }
 
 /// Poll `future` once, after letting every other task run.

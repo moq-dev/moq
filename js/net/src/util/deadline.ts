@@ -1,20 +1,11 @@
-import { type Milli, Nano } from "@moq/clock";
-import { controlTimeout, error, NoStreamCredit } from "../error.ts";
-import type { OpenOptions, Stream } from "../stream.ts";
-import { TimeoutError, withTimeout } from "./timeout.ts";
+import { type Milli, Nano, sleep } from "@moq/clock";
+import { race } from "@moq/signals";
+import { controlTimeout, error } from "../error.ts";
+import type { Stream } from "../stream.ts";
+import { TimeoutError } from "./timeout.ts";
 
-/** Request opens defer their deadline to the create-to-answer budget. @internal */
-export const requestOptions = { timeout: null, waitUntilAvailable: false } satisfies Partial<OpenOptions>;
-/** Milliseconds a discovery or advertisement request allows from its create to its first answer. @internal */
+/** Milliseconds an advertisement may go unanswered while none of its streams waits to open. @internal */
 export const REQUEST_TIMEOUT_MS = 10_000;
-
-// A closed session fails its creates with a session-sourced WebTransportError, or with an
-// InvalidStateError once it has closed. Those report the session's failure, not missing credit.
-function sessionFailure(err: unknown): boolean {
-	if (typeof err !== "object" || err === null) return false;
-	const { source, name } = err as { source?: unknown; name?: unknown };
-	return source === "session" || name === "InvalidStateError";
-}
 
 /** What a deadline failure resets: a stream, or whatever owns one. @internal */
 export interface Abortable {
@@ -22,20 +13,36 @@ export interface Abortable {
 }
 
 /**
- * A request's setup: owns every stream it creates, fails a create without credit at once, and
- * fails the answer once `budget` passes, if given. A track request takes no budget, since the
- * publisher's application may hold its answer: demand, cancellation, and the session end it,
- * as in Rust. @internal
+ * Owns a request's setup streams and optionally bounds its answer. Track requests take no
+ * budget: their publisher may hold the answer until demand, cancellation, or the session
+ * ends it. A budget runs only while none of the request's streams waits to open. @internal
  */
 export class Deadline {
 	/** Creates still waiting on credit: a fetch opens its TRACK stream alongside. */
 	#opening = 0;
+	/** Settles whenever an open starts or ends, restarting the budget. */
+	#changed!: Promise<void>;
+	#notify!: () => void;
 	#owners: Abortable[] = [];
 	#failure?: Error;
+
 	#budget?: Milli;
 
 	constructor(budget?: Milli) {
 		this.#budget = budget;
+		this.#rearm();
+	}
+
+	#rearm() {
+		this.#changed = new Promise((resolve) => {
+			this.#notify = resolve;
+		});
+	}
+
+	#change(delta: number) {
+		this.#opening += delta;
+		this.#notify();
+		this.#rearm();
 	}
 
 	/**
@@ -48,15 +55,12 @@ export class Deadline {
 		opening: Stream | Promise<Stream>,
 		own: (stream: Stream) => Abortable = (stream) => stream,
 	): Promise<Abortable> {
-		this.#opening++;
+		this.#change(1);
 		let stream: Stream;
 		try {
 			stream = await opening;
-		} catch (cause) {
-			if (sessionFailure(cause)) throw cause;
-			throw new NoStreamCredit({ cause });
 		} finally {
-			this.#opening--;
+			this.#change(-1);
 		}
 		const owner = own(stream);
 		if (this.#failure) {
@@ -74,25 +78,49 @@ export class Deadline {
 		await write();
 	}
 
-	/** Wait for the first answer, within the budget if there is one. */
+	/** Wait for the first answer, within the budget if one was given. */
 	async wait<T>(answer: Promise<T>): Promise<T> {
-		const budget = this.#budget;
+		if (this.#budget === undefined) return answer;
+		const done = new AbortController();
 		try {
-			if (budget === undefined) return await answer;
-			return await withTimeout(answer, Nano.fromMilli(budget), `request timed out after ${budget}ms`);
+			return (await race([answer, this.#expire(done.signal)])) as T;
 		} catch (cause) {
-			const failure =
-				cause instanceof TimeoutError
-					? this.#opening > 0
-						? new NoStreamCredit({ cause })
-						: controlTimeout(cause)
-					: error(cause);
+			const failure = cause instanceof TimeoutError ? controlTimeout(cause) : error(cause);
 			this.#failure = failure;
 			// Other failures keep the caller's cancellation ordering.
-			if (cause instanceof TimeoutError || cause instanceof NoStreamCredit) {
+			if (cause instanceof TimeoutError) {
 				for (const owner of this.#owners) owner.abort(failure);
 			}
 			throw failure;
+		} finally {
+			done.abort();
+		}
+	}
+
+	/** Reject once the request goes the whole budget with none of its streams waiting to open. */
+	async #expire(done: AbortSignal): Promise<never> {
+		const budget = Nano.fromMilli(this.#budget!);
+		const answered = new Promise<void>((resolve) =>
+			done.addEventListener("abort", () => resolve(), { once: true }),
+		);
+		for (;;) {
+			const changed = this.#changed;
+			const restart = new AbortController();
+			const timer =
+				this.#opening > 0
+					? new Promise<void>(() => {})
+					: sleep(budget, { signal: AbortSignal.any([restart.signal, done]) }).catch(() => undefined);
+			const why = await race([
+				timer.then(() => "expired" as const),
+				changed.then(() => "changed" as const),
+				answered,
+			]);
+			restart.abort();
+			// Answered: the waiting is over, and nothing is left to reject.
+			if (why === undefined) return new Promise<never>(() => {});
+			if (why === "expired" && !done.aborted) {
+				throw new TimeoutError(`request timed out after ${this.#budget}ms`);
+			}
 		}
 	}
 }

@@ -5,7 +5,7 @@
 //! keep a prefix reliable, [`recv::Stream::poll_lease`] to hold receive credit until a message is
 //! complete, and [`connection::Connection::set_limits`] to change flow control on a live connection.
 //!
-//! It needs no MoQ session: enable the `driver` feature (with `aws-lc-rs` or `ring`) and
+//! It needs no MoQ session: enable the `driver` feature and
 //! `default-features = false` to build it without moq-net. The entry point is the
 //! [`endpoint::Endpoint`], built from an [`endpoint::Config`] and a UDP socket it owns;
 //! [`endpoint::Endpoint::connect`] dials with a [`client::Config`].

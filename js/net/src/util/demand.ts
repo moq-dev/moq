@@ -1,5 +1,4 @@
-import { type Dispose, Signal } from "@moq/signals";
-import { StreamCode, StreamError } from "../error.ts";
+import { Signal } from "@moq/signals";
 import { hooks } from "../internal.ts";
 import type { Demand, Request } from "../track.ts";
 
@@ -34,25 +33,4 @@ export async function unrequested(request: Request): Promise<void> {
 /** Whether no subscriber wants the track now, or it closed. */
 export function isAbandoned(demand: Demand): boolean {
 	return hooks.demandReleased(demand).peek() !== undefined || demand.wanted.peek() === undefined;
-}
-
-/**
- * Abort with a cancel once nobody wants the track, watching until stopped, so a request setup
- * the publisher never answers ends with its last subscriber. `setup` aborts at the same moment,
- * before a stream that opens meanwhile can send on it.
- */
-export function whileWanted(demand: Demand, setup: AbortController): { signal: AbortSignal; stop: Dispose } {
-	const left = new AbortController();
-	let unwatch: Dispose | undefined;
-	const watch = () => {
-		if (!isAbandoned(demand)) {
-			unwatch = Signal.race(demand.wanted, hooks.demandReleased(demand)).changed(watch);
-			return;
-		}
-		const cancel = new StreamError(StreamCode.Cancel, { message: "cancel" });
-		left.abort(cancel);
-		setup.abort(cancel);
-	};
-	watch();
-	return { signal: left.signal, stop: () => unwatch?.() };
 }

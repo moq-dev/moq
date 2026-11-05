@@ -24,7 +24,7 @@ import { GRACE } from "../ledger.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
-import type { Producer, Subscriber as TrackSubscriber } from "../track.ts";
+import type { Producer } from "../track.ts";
 import { SEGMENT_BYTES } from "../util/limits.ts";
 import { Budget } from "../util/yield.ts";
 import * as Varint from "../varint.ts";
@@ -37,8 +37,7 @@ import { StreamId } from "./stream.ts";
 import {
 	encodeSubscribeResponse,
 	Subscribe,
-	SubscribeDrop,
-	SubscribeEnd,
+	SubscribeFinish,
 	SubscribeOk,
 	type SubscribeResponse,
 	SubscribeStart,
@@ -1173,7 +1172,8 @@ function expectCut(err: unknown, cause: Error | undefined) {
 }
 
 // Lite has no FETCH_OK, so a publisher that never answers holds each setup stage until the
-// subscriber closes. The stream that stage opened is reset, even one opening after the close.
+// subscriber closes. The stream that stage opened is reset; one still waiting to open leaves
+// the line, so the stream admitted for it later goes unused to the next open.
 test.each([
 	["the TRACK_INFO", "track", undefined],
 	["the FETCH", "fetch", undefined],
@@ -1210,33 +1210,36 @@ test.each([
 
 	const stuck = streams[stage === "track" ? 0 : 1];
 	stuck.release();
+	if (stage === "open") {
+		await drainReactions();
+		expect(stuck.written).toEqual([]);
+		return;
+	}
 	await stuck.aborted;
 });
 
 // An unanswered setup waits as long as it is wanted. Once its last subscriber leaves it is over: its
-// TRACK stream is reset, even one still waiting for a slot, along with the SUBSCRIBE sent beside it,
+// TRACK stream is reset along with the SUBSCRIBE sent beside it,
 // and the subscription is not registered again.
 test.each([
-	["lite-05 subscribe waiting on the TRACK_INFO", Version.DRAFT_05, false],
-	["lite-06 subscribe waiting on the TRACK_INFO", Version.DRAFT_06, false],
-	["lite-07 subscribe waiting on the TRACK_INFO", Version.DRAFT_07, false],
-	["lite-05 subscribe waiting on a stream slot for the TRACK", Version.DRAFT_05, true],
-] as const)("a %s abandoned before its answer leaves nothing behind", async (_, version, parked) => {
+	["lite-05 subscribe waiting on the TRACK_INFO", Version.DRAFT_05],
+	["lite-06 subscribe waiting on the TRACK_INFO", Version.DRAFT_06],
+	["lite-07 subscribe waiting on the TRACK_INFO", Version.DRAFT_07],
+] as const)("a %s abandoned before its answer leaves nothing behind", async (_, version) => {
 	const clock = new Manual();
 	const installed = clock.install();
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
-	const { quic, streams, opened } = fakeSession(parked ? [0] : []);
+	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
 	try {
 		const track = subscriber.consume(Path.from("room")).track("video").subscribe();
 		await opened(0);
-		if (!parked) await streams[0].reading;
+		await streams[0].reading;
 
 		await clock.advance(Nano.fromMilli(Milli(3_600_000)));
 		expect(track.closed.peek()).toBeUndefined();
 		track.close();
 
-		if (parked) streams[0].release();
 		await streams[0].aborted;
 		await streams[1].aborted;
 		expect(streams.length).toBe(2);
@@ -1258,8 +1261,9 @@ test.each([
 	}
 });
 
-// The SUBSCRIBE stream can open after the setup ended too; it is reset without carrying a SUBSCRIBE.
-test("a lite subscribe abandoned waiting on a stream slot for the SUBSCRIBE sends nothing on it", async () => {
+// Waiting for a stream slot is waiting its turn: the SUBSCRIBE goes out once credit returns,
+// however long that takes.
+test("a lite subscribe waiting on a stream slot for the SUBSCRIBE outlasts the deadline", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
@@ -1272,11 +1276,12 @@ test("a lite subscribe abandoned waiting on a stream slot for the SUBSCRIBE send
 		await answerTrackInfo(streams[0]);
 		await opened(1);
 
-		track.close();
+		await clock.advance(Nano.fromMilli(Milli(3_600_000)));
+		expect(track.closed.peek()).toBeUndefined();
 
 		streams[1].release();
-		await streams[1].aborted;
-		expect(streams[1].written).toEqual([]);
+		await streams[1].reading;
+		expect(streams[1].written).not.toEqual([]);
 	} finally {
 		subscriber.close();
 		warn.mockRestore();
@@ -1284,7 +1289,63 @@ test("a lite subscribe abandoned waiting on a stream slot for the SUBSCRIBE send
 	}
 });
 
-// A SUBSCRIBE write blocked on flow control may never let the setup settle, so abandoning it
+// A SUBSCRIBE given up while it waits for a stream slot leaves the line: the stream admitted
+// for it goes unused to the next open, rather than being reset.
+test("a lite SUBSCRIBE open given up leaves its stream to the next open", async () => {
+	const { quic, streams, opened } = fakeSession([1]);
+	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
+	const warn = spyOn(console, "warn").mockImplementation(() => {});
+	try {
+		// Closing the broadcast retires the setup while its SUBSCRIBE waits for a stream.
+		const room = subscriber.consume(Path.from("room"));
+		room.track("video").subscribe();
+		await opened(0);
+		await streams[0].reading;
+		await answerTrackInfo(streams[0]);
+		await opened(1);
+		room.close();
+		await drainReactions();
+		streams[1].release();
+		await drainReactions();
+		expect(streams[1].written).toEqual([]);
+
+		const other = subscriber.consume(Path.from("other"));
+		other.track("video").subscribe();
+		await streams[1].writing;
+		other.close();
+	} finally {
+		subscriber.close();
+		warn.mockRestore();
+	}
+});
+
+// The last reader leaving gives the setup up while its TRACK stream still waits for a slot, so
+// the stream admitted for it goes unused to the next open.
+test("a lite subscribe whose readers leave while it waits for a stream gives up the wait", async () => {
+	const { quic, streams, opened } = fakeSession([0]);
+	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
+	const warn = spyOn(console, "warn").mockImplementation(() => {});
+	const room = subscriber.consume(Path.from("room"));
+	try {
+		const video = room.track("video").subscribe();
+		await opened(0);
+		video.close();
+		await drainReactions();
+		streams[0].release();
+		await drainReactions();
+		expect(streams[0].written).toEqual([]);
+
+		const audio = room.track("audio").subscribe();
+		await streams[0].writing;
+		audio.close();
+	} finally {
+		room.close();
+		subscriber.close();
+		warn.mockRestore();
+	}
+});
+
+// A SUBSCRIBE write blocked on flow control may never let the setup settle, so abandonment
 // lets go of the held TRACK stream without waiting for it.
 test("a lite subscribe abandoned while its SUBSCRIBE write stalls closes its TRACK stream", async () => {
 	const clock = new Manual();
@@ -1892,7 +1953,7 @@ test.each([
 			await respond(
 				subscribe,
 				version,
-				[{ start: new SubscribeStart([0n]) }, { end: new SubscribeEnd(0n) }],
+				[{ start: new SubscribeStart([0n]) }, { finish: new SubscribeFinish(0n) }],
 				true,
 			);
 			expect(await track.closed).toBeNull();
@@ -2003,7 +2064,16 @@ test.each(["track", "fetch", "open"] as const)(
 		retired.abort(cause);
 		expect(await first).toBe(cause);
 		expect(await second).toBe(cause);
-		if (stage === "open") streams[1].release();
+		if (stage === "open") {
+			// The FETCH open left the line: the next open takes its stream rather than resetting it.
+			streams[1].release();
+			await drainReactions();
+			const next = subscriber.fetchGroup(path, "video", 1n).catch((err: unknown) => err);
+			await streams[1].writing;
+			subscriber.close();
+			await next;
+			return;
+		}
 		const active = streams[stage === "track" ? 0 : 1];
 		expect(await active.aborted).toBeDefined();
 		subscriber.close();
@@ -2190,7 +2260,7 @@ test.each([Version.DRAFT_05, Version.DRAFT_06])(
 	},
 );
 
-test("a cancelled queued PROBE open sends no request and releases its slot", async () => {
+test("a cancelled queued PROBE open sends no request and leaves its slot to the next open", async () => {
 	const { quic, streams, opened } = fakeSession([0]);
 	const signal = new Signal<ProbeStats>({});
 	const subscriber = new Subscriber(quic, Version.DRAFT_03, HopSchema.parse(1n), signal);
@@ -2201,8 +2271,16 @@ test("a cancelled queued PROBE open sends no request and releases its slot", asy
 	await probing;
 	expect(streams[0].written).toEqual([]);
 	streams[0].release();
-	await streams[0].finished;
+	await drainReactions();
 	expect(streams[0].written).toEqual([]);
+
+	// The next open takes the stream the cancelled one left, rather than another create.
+	const again = new AbortController();
+	const reprobing = subscriber.runProbe(again.signal);
+	await streams[0].writing;
+	expect(streams).toHaveLength(1);
+	again.abort();
+	await reprobing;
 	subscriber.close();
 });
 
@@ -2219,7 +2297,7 @@ function drainReactions(): Promise<void> {
 	});
 }
 
-test("a local unsubscribe owes no SUBSCRIBE_END", async () => {
+test("a local unsubscribe owes no SUBSCRIBE_FINISH", async () => {
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, Version.DRAFT_07, HopSchema.parse(1n));
 	const responseTask = Promise.withResolvers<void>();
@@ -2468,7 +2546,7 @@ test("a lite-07 rewind is refused", async () => {
 	}
 });
 
-test("a publisher FIN without SUBSCRIBE_END still violates an open subscription", async () => {
+test("a publisher FIN without SUBSCRIBE_FINISH still violates an open subscription", async () => {
 	const { quic, streams, opened, closes } = fakeSession();
 	const subscriber = new Subscriber(quic, Version.DRAFT_07, HopSchema.parse(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
@@ -2479,7 +2557,7 @@ test("a publisher FIN without SUBSCRIBE_END still violates an open subscription"
 		await (await opened(1)).reading;
 		streams[1].inbound.close();
 		expect(await track.closed).toBeInstanceOf(ProtocolViolation);
-		expect((track.closed.peek() as Error).message).toBe("subscribe stream ended without SUBSCRIBE_END");
+		expect((track.closed.peek() as Error).message).toBe("subscribe stream ended without SUBSCRIBE_FINISH");
 		await drainReactions();
 		expect(closes.map((info) => info?.closeCode)).toEqual([SessionCode.ProtocolViolation]);
 	} finally {
@@ -2535,98 +2613,6 @@ test("an empty START remains resolved when its range widens", async () => {
 	}
 });
 
-// A lite-07 publisher FINs a bounded subscription without SUBSCRIBE_END once it covered the range,
-// which is no protocol violation. Covering a range is not ending the track, so the copy stays for
-// its readers, as the Rust copy does: they park, and widening the range asks again on the same
-// track. Decided 2026-10-31 (maintainer).
-test("a lite-07 publisher FIN keeps a covered bounded subscription's copy", async () => {
-	const version = Version.DRAFT_07;
-	const { quic, streams, opened, closes } = fakeSession();
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
-	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast.track("video").subscribe({ ranges: [{ start: { absolute: 0n }, end: { absolute: 2n } }] });
-	try {
-		await opened(0);
-		await answerTrackInfo(streams[0], version);
-		const stream = await opened(1);
-		await stream.reading;
-		const chunks: Uint8Array[] = [];
-		const writer = new Writer(
-			new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
-			version,
-		);
-		await encodeSubscribeResponse(writer, { start: new SubscribeStart([0n]) }, version);
-		await encodeSubscribeResponse(
-			writer,
-			{ drop: new SubscribeDrop({ start: 0n, end: 1n, error: StreamCode.NotFound }) },
-			version,
-		);
-		for (const chunk of chunks) stream.inbound.enqueue(chunk);
-		stream.inbound.close();
-		await drainReactions();
-		expect(track.closed.peek()).toBeUndefined();
-		expect(streams).toHaveLength(2);
-
-		track.update({ ranges: [{ start: { absolute: 0n }, end: { absolute: 3n } }] });
-		const reopened = await opened(2);
-		await reopened.reading;
-		const reader = new Reader(undefined, new Uint8Array(Buffer.concat(reopened.written)), version);
-		expect(await reader.u53()).toBe(StreamId.Subscribe);
-		const msg = await Subscribe.decode(reader, version);
-		expect(msg.ranges).toEqual([{ start: { absolute: 0n }, end: { absolute: 3n } }]);
-		expect(track.closed.peek()).toBeUndefined();
-		expect(closes).toEqual([]);
-	} finally {
-		track.close();
-		broadcast.close();
-		subscriber.close();
-	}
-});
-
-// A widening reopens a covered copy, and its readers leaving while the publisher never takes the
-// new SUBSCRIBE gives the setup up: its stream is reset and the copy released, not held forever.
-test("a reopened lite-07 subscription ends once its readers leave", async () => {
-	const version = Version.DRAFT_07;
-	const { quic, streams, opened } = fakeSession([], [2]);
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
-	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast.track("video").subscribe({ ranges: [{ start: { absolute: 0n }, end: { absolute: 2n } }] });
-	let next: TrackSubscriber | undefined;
-	try {
-		await opened(0);
-		await answerTrackInfo(streams[0], version);
-		const stream = await opened(1);
-		await stream.reading;
-		const chunks: Uint8Array[] = [];
-		const writer = new Writer(
-			new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
-			version,
-		);
-		await encodeSubscribeResponse(writer, { start: new SubscribeStart([0n]) }, version);
-		await encodeSubscribeResponse(
-			writer,
-			{ drop: new SubscribeDrop({ start: 0n, end: 1n, error: StreamCode.NotFound }) },
-			version,
-		);
-		for (const chunk of chunks) stream.inbound.enqueue(chunk);
-		stream.inbound.close();
-		await drainReactions();
-
-		track.update({ ranges: [{ start: { absolute: 0n }, end: { absolute: 3n } }] });
-		await (await opened(2)).writing;
-		track.close();
-		await drainReactions();
-		// A reader arriving now asks afresh, rather than join a copy held by the stalled setup.
-		next = broadcast.track("video").subscribe();
-		await opened(3);
-	} finally {
-		next?.close();
-		track.close();
-		broadcast.close();
-		subscriber.close();
-	}
-});
-
 // Before lite-05 the publisher FINs the subscribe stream only once the track is over, so that FIN
 // finishes the track once the tail settles, rather than releasing it for another route.
 test.each(
@@ -2665,12 +2651,12 @@ test.each(
 
 // A session that dies once the publisher ended the track, but before the tail settled, cuts it
 // off: the track ends with the session's error unless the declared end settled first. That end
-// is SUBSCRIBE_END on lite-05+, and the FIN before it.
+// is SUBSCRIBE_FINISH on lite-05+, and the FIN before it.
 test.each([
 	["lite-03 ends clean with its last group finished", Version.DRAFT_03, true],
 	["lite-03 aborts with its last group still open", Version.DRAFT_03, false],
 	["lite-05 ends clean with its last group finished", Version.DRAFT_05, true],
-	["lite-05 aborts with its last group still owed", Version.DRAFT_05, false],
+	["lite-05 aborts with its last group still owed", Version.DRAFT_05],
 ] as const)("a session death before the tail settles: %s", async (_, version, settled) => {
 	const installed = new Manual().install();
 	const { quic, opened } = fakeSession();
@@ -2688,7 +2674,7 @@ test.each([
 		await subscribe.reading;
 		const responses: SubscribeResponse[] = legacy
 			? [{ ok: new SubscribeOk({}) }]
-			: [{ start: new SubscribeStart([0n]) }, { end: new SubscribeEnd(1n) }];
+			: [{ start: new SubscribeStart([0n]) }, { finish: new SubscribeFinish(1n) }];
 		await respond(subscribe, version, responses, true);
 		if (settled) {
 			const group = new ReadableStream<Uint8Array>({
@@ -2710,74 +2696,6 @@ test.each([
 
 		subscriber.close(died);
 		expect(await track.closed).toBe(settled ? null : died);
-	} finally {
-		track.close();
-		broadcast.close();
-		subscriber.close();
-		installed.close();
-	}
-});
-
-// The FIN may answer the bounded range before the publisher read an update that widened it, so
-// the copy asks again for the demand rather than end clean short of it or fail its readers.
-test.each([
-	["an open widening after SUBSCRIBE_START", { start: { absolute: 0n } }, true, false],
-	["a bounded widening without SUBSCRIBE_START", { start: { absolute: 0n }, end: { absolute: 5n } }, false, false],
-	["a widening the publisher stopped reading", { start: { absolute: 0n }, end: { absolute: 5n } }, false, true],
-] as const)("a lite-07 FIN short of %s subscribes again on the same track", async (_, range, start, stopped) => {
-	const clock = new Manual();
-	const installed = clock.install();
-	const version = Version.DRAFT_07;
-	const { quic, streams, opened, closes } = fakeSession();
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
-	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast
-		.track("video")
-		.subscribe({ delay: { max: Milli.zero }, ranges: [{ start: { absolute: 0n }, end: { absolute: 1n } }] });
-	try {
-		await opened(0);
-		await answerTrackInfo(streams[0], version);
-		const stream = await opened(1);
-		await stream.reading;
-		const refused = stopped
-			? stream.stop(
-					Object.assign(new Error("The stream was aborted by the remote server"), {
-						source: "stream",
-						streamErrorCode: StreamCode.Cancel,
-					}),
-				)
-			: undefined;
-		track.update({ delay: { max: Milli.zero }, ranges: [range] });
-		await refused;
-		await drainReactions();
-
-		const chunks: Uint8Array[] = [];
-		const writer = new Writer(
-			new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
-			version,
-		);
-		if (start) {
-			await encodeSubscribeResponse(writer, { start: new SubscribeStart([0n]) }, version);
-			await encodeSubscribeResponse(
-				writer,
-				{ drop: new SubscribeDrop({ start: 0n, end: 0n, error: StreamCode.NotFound }) },
-				version,
-			);
-		}
-		for (const chunk of chunks) stream.inbound.enqueue(chunk);
-		stream.inbound.close();
-		await drainReactions();
-
-		await clock.advance(Nano.fromMilli(GRACE));
-		const reopened = await opened(2);
-		await reopened.reading;
-		const reader = new Reader(undefined, new Uint8Array(Buffer.concat(reopened.written)), version);
-		expect(await reader.u53()).toBe(StreamId.Subscribe);
-		const msg = await Subscribe.decode(reader, version);
-		expect(msg.id).toBe(1n);
-		expect(msg.ranges).toEqual([range]);
-		expect(track.closed.peek()).toBeUndefined();
-		expect(closes).toEqual([]);
 	} finally {
 		track.close();
 		broadcast.close();
@@ -2820,7 +2738,7 @@ test.each([
 				new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
 				version,
 			);
-			await encodeSubscribeResponse(writer, { end: new SubscribeEnd(0n) }, version);
+			await encodeSubscribeResponse(writer, { finish: new SubscribeFinish(0n) }, version);
 			for (const chunk of chunks) stream.inbound.enqueue(chunk);
 			stream.inbound.close();
 			expect(await track.closed).toBeNull();
@@ -2869,7 +2787,7 @@ test("an unknown subscribe response type closes the session", async () => {
 		await answerTrackInfo(streams[0], Version.DRAFT_07);
 		await (await opened(1)).reading;
 		// An unassigned response type is a session protocol violation.
-		streams[1].inbound.enqueue(new Uint8Array([3, 0]));
+		streams[1].inbound.enqueue(new Uint8Array([5, 0]));
 		expect(await track.closed).toBeInstanceOf(ProtocolViolation);
 		await drainReactions();
 		expect(closes.map((info) => info?.closeCode)).toEqual([SessionCode.ProtocolViolation]);
@@ -3027,8 +2945,12 @@ test.each(["answer", "credit"] as const)("FETCH waiting for %s ends with its cal
 		// Credit granted once the caller has left can't send the FETCH.
 		await clock.advance(Nano.zero);
 		if (stage === "credit") streams[1].release();
-		await streams[1].aborted;
-		if (stage === "credit") expect(streams[1].written).toEqual([]);
+		if (stage === "credit") {
+			await drainReactions();
+			expect(streams[1].written).toEqual([]);
+		} else {
+			await streams[1].aborted;
+		}
 	} finally {
 		subscriber.close();
 		installed.close();

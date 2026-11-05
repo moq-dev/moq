@@ -71,7 +71,6 @@ pub struct Log {
 	/// How long the trail and the stops were at the first session close.
 	closed_at: Arc<Mutex<Option<(usize, usize)>>>,
 	bi_opens: Arc<AtomicUsize>,
-	pub request_attempts: Arc<AtomicUsize>,
 	priorities: Arc<Mutex<Vec<i64>>>,
 	/// Hands each send group its id.
 	group_ids: Arc<AtomicUsize>,
@@ -538,17 +537,6 @@ impl poll::Session for DeadStreamSession {
 		)))
 	}
 
-	fn poll_open_request(
-		&self,
-		waiter: &kio::Waiter,
-		options: crate::transport::poll::SendOptions<
-			'_,
-			<Self::SendStream as crate::transport::poll::SendStream>::Group,
-		>,
-	) -> std::task::Poll<Result<Option<crate::transport::poll::BiStreams<Self>>, Self::Error>> {
-		self.poll_open_bi(waiter, options).map_ok(Some)
-	}
-
 	fn poll_open_uni(
 		&self,
 		_waiter: &kio::Waiter,
@@ -777,17 +765,6 @@ impl poll::Session for SinkSession {
 		let mut send = SinkSend::gated(self.log.clone(), gate).opened(options);
 		send.prefix = self.bi_prefix;
 		Poll::Ready(Ok((send, PendingRecv)))
-	}
-
-	fn poll_open_request(
-		&self,
-		waiter: &kio::Waiter,
-		options: crate::transport::poll::SendOptions<
-			'_,
-			<Self::SendStream as crate::transport::poll::SendStream>::Group,
-		>,
-	) -> std::task::Poll<Result<Option<crate::transport::poll::BiStreams<Self>>, Self::Error>> {
-		self.poll_open_bi(waiter, options).map_ok(Some)
 	}
 
 	fn poll_open_uni(
@@ -1227,21 +1204,6 @@ impl poll::Session for ScriptedSession {
 				log: self.log.clone(),
 			}),
 		)))
-	}
-
-	fn poll_open_request(
-		&self,
-		waiter: &kio::Waiter,
-		options: crate::transport::poll::SendOptions<
-			'_,
-			<Self::SendStream as crate::transport::poll::SendStream>::Group,
-		>,
-	) -> std::task::Poll<Result<Option<crate::transport::poll::BiStreams<Self>>, Self::Error>> {
-		self.log.request_attempts.fetch_add(1, Ordering::Relaxed);
-		if !*self.credit.read() {
-			return Poll::Ready(Ok(None));
-		}
-		self.poll_open_bi(waiter, options).map_ok(Some)
 	}
 
 	fn poll_open_uni(

@@ -95,6 +95,11 @@ impl Meter {
 		self.published
 	}
 
+	/// Whether a PCR has started measurement on this import's clock.
+	pub fn started(&self) -> bool {
+		self.last.is_some()
+	}
+
 	/// Whether a PCR measurement window has completed on the current clock.
 	pub fn ready(&self) -> bool {
 		self.ready

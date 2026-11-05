@@ -14,7 +14,8 @@ Docker; see [Install](/setup/install).
 Its cryptography comes from [rind](https://github.com/moq-dev/rind), which
 runs on any x86\_64 CPU and on any aarch64 CPU with NEON, including a Raspberry
 Pi 4, CM4, or Zero 2 W on a 64-bit OS. On a CPU missing a feature rind needs,
-`moq` exits at startup naming it.
+`moq` exits at startup naming it. The Rust library also supports armv7;
+prebuilt CLI artifacts for 32-bit boards are not yet available.
 
 ## What it does
 
@@ -95,15 +96,19 @@ restarted encoder or a looping file wrapping to the top, ends the import with
 an error; run it again to publish anew. `import ts` and `import srt` republish
 instead when an MPEG-TS clock steps onto another timeline: the PCR and every
 stream stepping back, flagged or not, or more than 10 s forward without a
-`discontinuity_indicator`. The broadcast finishes there, and the rest of the
+`discontinuity_indicator`, and when a PAT names another `transport_stream_id`
+or program number. The broadcast finishes there, and the rest of the
 input publishes as a new stream under a new
 [instance](/concept/moq-lite#publisher-instances), on the same SRT connection, which
-`export ts --stitch --follow` carries on into. The new stream keeps the mux
+`export ts --stitch --follow` carries on into. The new stream carries nothing
+over from the old one's PAT and PMT: it waits for the source to repeat them and
+for its next keyframe, so a switch whose tables went out just before its clock
+stepped announces up to one GOP later. The new stream keeps the mux
 rate the old one measured, so its catalog goes out with its first media rather
 than after a fresh two-second measurement. An unflagged step usually means
 redundant encoders behind a changeover switch: time-lock their clocks, or have
 the switch set `discontinuity_indicator`. `--program all` and `--passthrough`
-still end at a rewind. A flagged MPEG-TS discontinuity that
+still end at a rewind, and `--program all` at a changed identity. A flagged MPEG-TS discontinuity that
 jumps forward continues the broadcast and is declared on the exported clock.
 MPEG-TS timestamps follow their source history across the 33-bit wrap
 (every 26.5 hours), including files imported faster than real time and flagged

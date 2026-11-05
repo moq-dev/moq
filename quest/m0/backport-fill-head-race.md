@@ -27,8 +27,11 @@ that arrives, and a remaining miss still FETCHes. Older history does not wait.
 
 Local review also exposed a pending miss no longer being polled during the
 PUBLISH_DONE grace. The backport adds that poll and a paused-time reproduction.
-Main's corresponding grace also omits it. Land that main-side correction before
-the backport, following the main-first backport rule.
+[moq-dev/moq#7903](https://github.com/moq-dev/moq/pull/7903) lands the same
+correction on main first, following the main-first backport rule. Its other
+change, driving a lingering copy's fetches while a resumed SUBSCRIBE is set up,
+has no `release` counterpart: release creates its fetch set after SUBSCRIBE_OK
+and never lingers.
 
 After the backport lands, use the existing patch-release process. Package
 version bumps, tags, and publication are separate from this implementation
@@ -37,5 +40,4 @@ remove this quest and its links.
 
 ## Waiting
 
-- moq-dev/moq: land the PUBLISH_DONE grace correction on main before [moq-dev/moq#7680](https://github.com/moq-dev/moq/pull/7680) lands; the backport contains the release-side poll and a paused-time reproduction.
-- Maintainer: review and merge [moq-dev/moq#7680](https://github.com/moq-dev/moq/pull/7680) after the release checks pass, then publish the `moq-net` patch through the normal release process; verify its source contains the joined-head wait.
+- Maintainer: review and merge [moq-dev/moq#7680](https://github.com/moq-dev/moq/pull/7680) after the release checks pass, then publish the `moq-net` patch through the normal release process; verify its source contains the joined-head wait. Agents never merge into `release`, bump versions, tag, or publish, so these steps stay manual.

@@ -9,22 +9,21 @@ import { Subscriber as LiteSubscriber } from "./lite/subscriber.ts";
 import { Version as Lite } from "./lite/version.ts";
 import * as Path from "./path.ts";
 
-// Zero stream credit can be rejected immediately or queued by a transport that ignores
-// waitUntilAvailable. Once a slot returns, observe both resets and any unwanted bytes.
-function limited(mode: "refuse" | "queue" | "open") {
+// A transport whose creates wait for stream credit until `release`, or open at once.
+function limited(mode: "queue" | "open") {
 	const slot = Promise.withResolvers<void>();
 	const created = Promise.withResolvers<void>();
 	const aborted = Promise.withResolvers<unknown>();
-	const cancelled = Promise.withResolvers<unknown>();
+	const writing = Promise.withResolvers<void>();
 	const written: Uint8Array[] = [];
 	const options: unknown[] = [];
-	// Each open gets its own stream; the first abort and cancel among them resolve.
 	const stream = () => ({
-		readable: new ReadableStream<Uint8Array>({ cancel: cancelled.resolve }),
+		readable: new ReadableStream<Uint8Array>(),
 		writable: new WritableStream<Uint8Array>({
 			abort: aborted.resolve,
 			write: (bytes) => {
 				written.push(new Uint8Array(bytes));
+				writing.resolve();
 			},
 		}),
 	});
@@ -33,7 +32,6 @@ function limited(mode: "refuse" | "queue" | "open") {
 		createBidirectionalStream: (opts: unknown) => {
 			options.push(opts);
 			created.resolve();
-			if (mode === "refuse") return Promise.reject(new DOMException("stream limit reached", "NetworkError"));
 			return mode === "open" ? Promise.resolve(stream()) : slot.promise.then(stream);
 		},
 	} as unknown as WebTransport;
@@ -41,7 +39,7 @@ function limited(mode: "refuse" | "queue" | "open") {
 		quic,
 		created: created.promise,
 		aborted: aborted.promise,
-		cancelled: cancelled.promise,
+		writing: writing.promise,
 		written,
 		options,
 		release: () => slot.resolve(),
@@ -50,10 +48,10 @@ function limited(mode: "refuse" | "queue" | "open") {
 
 const HOUR = Nano.fromMilli(Milli(3_600_000));
 
-// A track request fails at once without stream credit. Otherwise the publisher's application may
-// hold its answer, so it waits until its caller leaves, as in Rust, and resets what it opened.
+// A publisher may hold its answer, so a request waits until its caller leaves, as in Rust.
+// Cancellation resets opened streams and gives up queued opens without spending their credit.
 for (const protocol of ["lite", "ietf"] as const) {
-	for (const mode of ["refuse", "queue", "open"] as const) {
+	for (const mode of ["queue", "open"] as const) {
 		test(`${protocol}: ${mode} subscribe waits until its subscriber leaves`, async () => {
 			const clock = new Manual();
 			const installed = clock.install();
@@ -67,21 +65,20 @@ for (const protocol of ["lite", "ietf"] as const) {
 			try {
 				await transport.created;
 				await clock.advance(Nano.zero);
-				if (mode === "refuse") {
-					expect((await track.closed)?.name).toBe("NoStreamCredit");
-					return;
-				}
 				await clock.advance(HOUR);
 				expect(track.closed.peek()).toBeUndefined();
 				track.close();
-				if (mode === "queue") transport.release();
-				await transport.aborted;
-				await transport.cancelled;
-				if (mode === "queue") expect(transport.written).toEqual([]);
+				if (mode === "queue") {
+					transport.release();
+					await clock.advance(Nano.zero);
+					expect(transport.written).toEqual([]);
+				} else {
+					await transport.aborted;
+				}
 				// A lite subscription opens its SUBSCRIBE alongside its TRACK.
 				const opened = protocol === "lite" ? 2 : 1;
 				expect(transport.options).toEqual(
-					Array.from({ length: opened }, () => ({ sendOrder: undefined, waitUntilAvailable: false })),
+					Array.from({ length: opened }, () => ({ waitUntilAvailable: true })),
 				);
 			} finally {
 				track.close();
@@ -129,7 +126,7 @@ for (const protocol of ["lite", "ietf"] as const) {
 }
 
 for (const operation of ["info", "fetch"] as const) {
-	for (const mode of ["refuse", "queue", "open"] as const) {
+	for (const mode of ["queue", "open"] as const) {
 		test(`lite standalone ${operation}: ${mode} waits until its caller leaves`, async () => {
 			const clock = new Manual();
 			const installed = clock.install();
@@ -147,11 +144,6 @@ for (const operation of ["info", "fetch"] as const) {
 			try {
 				await transport.created;
 				await clock.advance(Nano.zero);
-				if (mode === "refuse") {
-					await request;
-					expect((failure as Error).name).toBe("NoStreamCredit");
-					return;
-				}
 				await clock.advance(HOUR);
 				expect(failure).toBeUndefined();
 				const left = new Error("left");
@@ -160,13 +152,17 @@ for (const operation of ["info", "fetch"] as const) {
 				expect(failure).toBe(left);
 				// Credit granted once the caller has left can't send the request.
 				await clock.advance(Nano.zero);
-				if (mode === "queue") transport.release();
-				await transport.aborted;
-				if (mode === "queue") expect(transport.written).toEqual([]);
+				if (mode === "queue") {
+					transport.release();
+					await clock.advance(Nano.zero);
+					expect(transport.written).toEqual([]);
+				} else {
+					await transport.aborted;
+				}
 				// A fetch opens its FETCH stream alongside the TRACK stream.
 				const opened = transport.options as { sendOrder?: number; waitUntilAvailable: boolean }[];
 				expect(opened).toHaveLength(operation === "info" ? 1 : 2);
-				for (const open of opened) expect(open.waitUntilAvailable).toBe(false);
+				for (const open of opened) expect(open.waitUntilAvailable).toBe(true);
 			} finally {
 				subscriber.close();
 				installed.close();
@@ -176,8 +172,8 @@ for (const operation of ["info", "fetch"] as const) {
 }
 
 for (const protocol of ["lite", "ietf"] as const) {
-	for (const mode of ["refuse", "queue", "open"] as const) {
-		test(`${protocol} discovery: ${mode} bounds only the create`, async () => {
+	for (const mode of ["queue", "open"] as const) {
+		test(`${protocol} discovery: ${mode} waits for credit and has no deadline`, async () => {
 			const clock = new Manual();
 			const installed = clock.install();
 			const transport = limited(mode);
@@ -190,17 +186,14 @@ for (const protocol of ["lite", "ietf"] as const) {
 				await transport.created;
 				await clock.advance(Nano.zero);
 				await clock.advance(Nano.fromMilli(Milli(30_000)));
-				if (mode === "open") expect(announced.closed.peek()).toBeUndefined();
-				else {
-					expect((await announced.closed)?.name).toBe("NoStreamCredit");
-					if (mode === "queue") {
-						transport.release();
-						await transport.aborted;
-						await transport.cancelled;
-						expect(transport.written).toEqual([]);
-					}
+				expect(announced.closed.peek()).toBeUndefined();
+				if (mode === "queue") {
+					expect(transport.written).toEqual([]);
+					transport.release();
+					await clock.advance(Nano.zero);
+					expect(transport.written).not.toEqual([]);
 				}
-				expect(transport.options).toEqual([{ sendOrder: undefined, waitUntilAvailable: false }]);
+				expect(transport.options).toEqual([{ waitUntilAvailable: true }]);
 			} finally {
 				announced.close();
 				if (subscriber instanceof LiteSubscriber) subscriber.close();
@@ -212,6 +205,8 @@ for (const protocol of ["lite", "ietf"] as const) {
 
 for (const protocol of ["lite", "ietf"] as const) {
 	test(`${protocol}: credit granted as the subscriber leaves cannot send a late request`, async () => {
+		const clock = new Manual();
+		const installed = clock.install();
 		const transport = limited("queue");
 		const subscriber =
 			protocol === "lite"
@@ -223,12 +218,16 @@ for (const protocol of ["lite", "ietf"] as const) {
 			await transport.created;
 			track.close();
 			transport.release();
-			await transport.aborted;
+			await clock.advance(Nano.zero);
 			expect(transport.written).toEqual([]);
+			const next = broadcast.track("next").subscribe();
+			await transport.writing;
+			next.close();
 		} finally {
 			track.close();
 			broadcast.close();
 			if (subscriber instanceof LiteSubscriber) subscriber.close();
+			installed.close();
 		}
 	});
 }

@@ -37,7 +37,8 @@ stalls and drafts 20/22 lose the earlier track groups on the uncorrected base.
 The generic IETF adapter correction belongs to
 [moq-dev/moq#7883](https://github.com/moq-dev/moq/pull/7883), together with the
 Rust socket's matching start correction, and stays out of this JS socket diff.
-After it lands, merge main and rerun the controlled cases, `just ci`,
+The branch is reconciled with main's lite-07 Range IDs and cancellable stream-credit
+scheduler. After the adapter correction lands, merge main and rerun the controlled cases, `just ci`,
 `just test interop --all`, and local cross-vendor review on the resulting head;
 then remove this quest and mark the JS PR ready.
 
@@ -54,10 +55,12 @@ Decisions:
 - ✅ 2026-11-04 (maintainer): JS request-setup budgets use general lifecycle
   bounds, like Rust. Every on-request track request (subscribe, track info,
   fetch, fill) waits for its answer until demand ends, the caller cancels, stream
-  credit fails fast, or the session closes; no fixed application-answer budget
+  credit waits in the session queue, or the session closes; no fixed application-answer budget
   and no `.socket/<id>` namespace exemption. Not chosen: transport-only phase
-  budgets. Announcement discovery and namespace advertisements are not track
-  requests and keep their ten-second bound; `track.Consumer.info()` takes an
+  budgets. Main's later stream-credit scheduler replaces fail-fast credit with
+  cancellable queued opens; cancellation returns unused credit to the next open.
+  Discovery stays wanted for its lifetime and namespace advertisements retain
+  their answer budget. `track.Consumer.info()` takes an
   optional `signal`, its counterpart of dropping Rust's pending `info()`.
 - ✅ 2026-11-04 (maintainer): [moq-dev/moq#7883](https://github.com/moq-dev/moq/pull/7883)'s
   generic adapter default preserves filterless live joins. Not chosen:
