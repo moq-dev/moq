@@ -6193,6 +6193,17 @@ mod tests {
 					.any(|(_, sent)| matches!(sent, crate::lite::test_transport::Sent::Finish))
 			);
 
+			// A canceled fetch must retire even while establishment is blocked.
+			let (_track, fetching, fill) = feed_fetch(50);
+			let TrackRunState::Serve(serving) = &mut running.state else {
+				unreachable!()
+			};
+			serving.fetches.push(FillServeRun::new(
+				running.serve.clone(),
+				fill,
+				FetchInfo::Known(Default::default()),
+			));
+			drop(fetching);
 			drop(reader);
 			let _ = kio::Task::poll(&mut running, &kio::Waiter::noop());
 
@@ -6206,6 +6217,12 @@ mod tests {
 			);
 			assert!(session.log.closes().is_empty(), "session stays live");
 			assert!(subscribes.lock().is_empty(), "the id outlived its subscription");
+			let TrackRunState::Serve(serving) = &running.state else {
+				panic!("copy should linger")
+			};
+			assert!(matches!(serving.mode, ServeMode::Select));
+			assert!(serving.linger.deadline().is_some());
+			assert!(serving.fetches.is_empty());
 			drop(gate);
 		}
 	}
@@ -10520,15 +10537,30 @@ impl ServeLoop {
 		loop {
 			match &mut self.mode {
 				ServeMode::Establish(est) => {
+					let _ = self.fetches.poll(waiter);
+					self.feed_fetches
+						.poll(&self.sub, serve.subscriber.runtime.now(), waiter);
+					let read = crate::util::poll_unwanted(&mut self.demand, waiter).is_pending();
+					if let Err(err) = self
+						.range_fills
+						.poll(serve, &self.serving, Some(&est.tail), read, waiter)
+					{
+						return Poll::Ready(ServeEnd::GiveBack(err));
+					}
 					// Before TRACK existed, SUBSCRIBE itself obtained the metadata that
 					// attaches downstream readers. Its initial lack of demand is expected.
 					// With TRACK, credit or flow control must not retain an abandoned setup.
 					if serve.subscriber.version.has_track_stream()
 						&& self.fetches.is_empty()
 						&& self.range_fills.is_empty()
-						&& crate::util::poll_unwanted(&mut self.demand, waiter).is_ready()
+						&& !read
 					{
-						return Poll::Ready(ServeEnd::Idle);
+						let ServeMode::Establish(est) = std::mem::replace(&mut self.mode, ServeMode::Select) else {
+							unreachable!()
+						};
+						est.abort(&Error::Cancel);
+						self.held = None;
+						continue;
 					}
 					let res = ready!(est.poll(waiter));
 					let id = est.id;

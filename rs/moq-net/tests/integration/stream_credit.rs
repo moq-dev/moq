@@ -138,12 +138,10 @@ async fn a_subscription_past_the_credit_is_served_once_credit_returns() {
 	}
 }
 
-/// A relay's upstream session out of request credit waits for it rather than refusing: a
-/// subscription past the publisher's credit is served once an earlier one leaves.
+/// Abandoning setup returns credit without ending earlier publishers or their route.
 #[kio::test]
 async fn an_abandoned_setup_returns_credit_with_the_publisher_still_live() {
 	// lite-07 needs 4: session-long AUTH and ANNOUNCE plus TRACK held until SUBSCRIBE answers.
-	// Three is below the setup minimum; the second subscription waits for the first's credit.
 	for (version, credit) in [("moq-lite-07-wip", 4)] {
 		let version: Version = version.parse().unwrap();
 		let publisher = origin(1);
@@ -198,8 +196,19 @@ async fn an_abandoned_setup_returns_credit_with_the_publisher_still_live() {
 			.unwrap()
 			.unwrap();
 		assert_eq!(group.sequence, 0, "{version}");
-		// Both earlier publishers and their route survive abandonment.
-		first.append_group().unwrap().finish().unwrap();
-		second.append_group().unwrap().finish().unwrap();
+		drop(group);
+		drop(subscriber);
+		let mut resumed = remote.track("second").unwrap().subscribe(None).await.unwrap();
+		let mut group = second.append_group().unwrap();
+		group.write_frame(Timestamp::ZERO, b"still live".as_slice()).unwrap();
+		group.finish().unwrap();
+		let group = kio::clock::timeout(Duration::from_secs(5), resumed.recv_group())
+			.await
+			.unwrap()
+			.unwrap()
+			.unwrap();
+		assert_eq!(group.sequence, 0);
+		// Keep the first publisher alive through the resumed wire request too.
+		drop(first);
 	}
 }
