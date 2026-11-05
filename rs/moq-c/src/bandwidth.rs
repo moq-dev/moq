@@ -13,6 +13,7 @@ pub(crate) struct Bandwidth {
 	reservations: NonZeroSlab<Arc<moq_net::bandwidth::Reservation>>,
 	consumers: NonZeroSlab<Arc<Consumer>>,
 	viewers: NonZeroSlab<moq_net::bandwidth::Viewers>,
+	controls: NonZeroSlab<moq_mux::rate::Control>,
 	viewer: NonZeroSlab<moq_net::bandwidth::Viewer>,
 }
 
@@ -479,4 +480,127 @@ mod consumer_tests {
 		assert_eq!(receiver.recv().await, Some(Error::Panic.code()));
 		State::lock().bandwidth.consumers.remove(id);
 	}
+}
+
+/// Reserve up to `max_bps` for a pre-encoded media track, returning a reservation handle.
+/// Close it with `moq_reservation_close`; it does not own the media handle.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_allocator_reserve_media(allocator: u32, media: u32, max_bps: u64) -> i32 {
+	ffi::enter(move || {
+		let mut state = State::lock();
+		let demand = state.publish.media_demand(ffi::parse_id(media)?)?;
+		state.bandwidth.reserve(ffi::parse_id(allocator)?, &demand, max_bps)
+	})
+}
+
+/// How a rate control maps a reservation grant onto a sender's bitrate.
+#[repr(C)]
+pub struct moq_rate_policy {
+	/// Maximum bitrate the sender produces, in bits per second.
+	pub max_bps: u64,
+	/// Next lower rendition's maximum bitrate, when `has_lower` is true.
+	pub lower_bps: u64,
+	/// Whether this sender has a lower rendition; the lowest never disables.
+	pub has_lower: bool,
+}
+
+/// What the sender should produce until its rate control changes again.
+#[repr(C)]
+pub struct moq_rate_target {
+	/// Whether to produce frames and advertise the rendition as enabled.
+	pub enabled: bool,
+	/// Bitrate to produce in bits per second, or 0 when disabled.
+	pub bitrate_bps: u64,
+}
+
+impl From<moq_mux::rate::Target> for moq_rate_target {
+	fn from(target: moq_mux::rate::Target) -> Self {
+		match target {
+			moq_mux::rate::Target::Enabled(rate) => Self {
+				enabled: true,
+				bitrate_bps: rate.as_bps(),
+			},
+			moq_mux::rate::Target::Disabled => Self {
+				enabled: false,
+				bitrate_bps: 0,
+			},
+		}
+	}
+}
+
+/// Create a rate control starting at the policy's maximum bitrate.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_rate_control_create(policy: moq_rate_policy) -> i32 {
+	ffi::enter(move || {
+		let mut native = moq_mux::rate::Policy::new(moq_net::bandwidth::Rate::from_bps(policy.max_bps));
+		native.lower = policy
+			.has_lower
+			.then(|| moq_net::bandwidth::Rate::from_bps(policy.lower_bps));
+		State::lock()
+			.bandwidth
+			.controls
+			.insert(moq_mux::rate::Control::new(native))
+	})
+}
+
+/// Read the current sender target, returning zero or a negative error.
+///
+/// # Safety
+/// - `target` must point to writable storage for one target.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_rate_control_target(control: u32, target: *mut moq_rate_target) -> i32 {
+	ffi::enter(move || {
+		let target = unsafe { target.as_mut() }.ok_or(Error::InvalidPointer)?;
+		*target = State::lock()
+			.bandwidth
+			.controls
+			.get(ffi::parse_id(control)?)
+			.ok_or(Error::NotFound)?
+			.target()
+			.into();
+		Ok(())
+	})
+}
+
+/// Feed a reservation's grant on every frame, returning 1 for a changed target, 0 to hold, or a negative error.
+///
+/// Drops apply immediately; raises ramp and small moves are ignored. No estimate holds the
+/// target. Disabling requires a probing session so the grant can recover. Apply a changed
+/// target to your encoder and `moq_publish_media_set_enabled`; the control owns neither.
+///
+/// # Safety
+/// - `target` must point to writable storage, written only when the return value is 1.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_rate_control_update(control: u32, reservation: u32, target: *mut moq_rate_target) -> i32 {
+	ffi::enter(move || {
+		let target = unsafe { target.as_mut() }.ok_or(Error::InvalidPointer)?;
+		let mut state = State::lock();
+		let reservation = state.bandwidth.reservation(ffi::parse_id(reservation)?)?;
+		let grant = reservation.consume();
+		let control = state
+			.bandwidth
+			.controls
+			.get_mut(ffi::parse_id(control)?)
+			.ok_or(Error::NotFound)?;
+		control.set_probed(grant.probed());
+		if let Some(next) = control.update(grant.peek(), kio::clock::now()) {
+			*target = next.into();
+			Ok(1i32)
+		} else {
+			Ok(0i32)
+		}
+	})
+}
+
+/// Release a rate control without closing its reservation or media.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_rate_control_close(control: u32) -> i32 {
+	ffi::enter(move || {
+		State::lock()
+			.bandwidth
+			.controls
+			.remove(ffi::parse_id(control)?)
+			.ok_or(Error::NotFound)?;
+		Ok(())
+	})
 }
