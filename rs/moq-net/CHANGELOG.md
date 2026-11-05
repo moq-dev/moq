@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.20](https://github.com/moq-dev/moq/compare/moq-net-v0.3.19...moq-net-v0.3.20) - 2026-11-03
+
+### Other
+
+- *(net)* backport session_fanout_threads to release
+- Merge remote-tracking branch 'origin/release' into iter/log-secrets-release
+- Merge remote-tracking branch 'origin/release' into iter/log-secrets-release
+
 ## [0.3.19](https://github.com/moq-dev/moq/compare/moq-net-v0.3.18...moq-net-v0.3.19) - 2026-11-03
 
 ### Other

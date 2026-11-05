@@ -26,6 +26,10 @@ The announcement listing names each announced route by the prefix it covers;
 by convention a publisher announces each broadcast's exact path, so the list
 reads as broadcast names.
 
+Both `/fetch` and `/announced` return private, non-cacheable responses.
+`/fetch` serves binary data, so save it to a file or parse it as the track's
+format.
+
 A relay configured with more than one certificate has no single fingerprint to
 publish, and this endpoint answers for the first. The others are reachable over
 `https://`, which selects a certificate by SNI at the handshake.
@@ -44,6 +48,12 @@ production.
 [internal]
 listen = "127.0.0.1:9101"
 ```
+
+The listener is unauthenticated and must stay on loopback or a trusted private
+network. Requests carrying an `Origin` header are refused. Ops tools must use
+the listener's literal IP and port, or `localhost` on loopback; other hostnames
+are refused to prevent DNS rebinding. A proxy must preserve that authority
+rather than forward the caller's `Host`.
 
 ### GET /metrics
 

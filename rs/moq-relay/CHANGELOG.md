@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.12](https://github.com/moq-dev/moq/compare/moq-relay-v0.17.11...moq-relay-v0.17.12) - 2026-11-03
+
+### Other
+
+- Merge remote-tracking branch 'origin/release' into iter/log-secrets-release
+- Merge remote-tracking branch 'origin/release' into iter/log-secrets-release
+
 ## [0.17.11](https://github.com/moq-dev/moq/compare/moq-relay-v0.17.10...moq-relay-v0.17.11) - 2026-11-03
 
 ### Fixed
