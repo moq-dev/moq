@@ -1552,8 +1552,12 @@ mod read_tests {
 
 	/// A catalog rendition's warmup survives conversion, widens the raw subscription past the
 	/// caller's max delay, keeping the min delay as asked, and starts the reader that much further
-	/// back: with newest-first delivery it waits for a group covering the min delay plus the warmup.
-	#[tokio::test(start_paused = true)]
+	/// back.
+	///
+	/// Reads no clock: the reader polls on the FFI runtime, whose clock is not a paused test
+	/// runtime's, so a wait for the reach would measure real time. moq-mux's start-reach tests
+	/// cover that wait on one clock.
+	#[tokio::test]
 	async fn raw_media_catalog_warmup_reaches_the_subscription() {
 		use crate::consumer::{MoqDelay, MoqSubscription, moq_subscription_defaults};
 
@@ -1620,15 +1624,10 @@ mod read_tests {
 					.unwrap();
 				group.finish().unwrap();
 			};
-			// Newest first: group 4 covers the min delay alone, but not the warmup too.
+			// Newest first, all before the first read. Group 4 covers the min delay alone, so
+			// without the warmup the start would skip group 3; only the warmup's reach keeps it.
 			write(5, 5_000_000);
 			write(4, 4_700_000);
-			assert!(
-				kio::clock::timeout(Duration::from_millis(50), reader.next())
-					.await
-					.is_err(),
-				"video={video}: the start waits for a group covering the warmup"
-			);
 			write(3, 4_400_000);
 			track.finish().unwrap();
 			let mut micros = Vec::new();
