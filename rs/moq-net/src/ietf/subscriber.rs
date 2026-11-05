@@ -1138,6 +1138,12 @@ enum Asked {
 	Datagram(crate::datagram::Request),
 }
 
+#[derive(Debug)]
+struct AliasFailure {
+	error: Error,
+	session: bool,
+}
+
 impl Subscriber {
 	#[expect(
 		clippy::too_many_arguments,
@@ -1351,16 +1357,20 @@ impl Subscriber {
 	/// all LargestObject, so they are indistinguishable and we cannot: that costs the one
 	/// subscription ([`Error::Unsupported`]). The same alias naming a *different* track is
 	/// the collision section 11.1 makes fatal ([`Error::Duplicate`]).
-	fn register_alias(&self, request_id: RequestId, alias: u64) -> Result<(), Error> {
+	fn register_alias(&self, request_id: RequestId, alias: u64) -> Result<(), AliasFailure> {
 		let mut state = self.state.lock();
 		if !state.subscribes.contains_key(&request_id) {
-			return Err(Error::NotFound);
+			return Err(AliasFailure {
+				error: Error::NotFound,
+				session: false,
+			});
 		}
 
 		if let Err(err) = insert_track_alias(&state.aliases, alias, request_id) {
-			return Err(match self.alias_names_same_track(&state, alias, request_id) {
-				true => Error::Unsupported,
-				false => err,
+			let same_track = self.alias_names_same_track(&state, alias, request_id);
+			return Err(AliasFailure {
+				error: if same_track { Error::Unsupported } else { err },
+				session: !same_track,
 			});
 		}
 
@@ -3160,8 +3170,8 @@ impl Subscriber {
 			held.datagram = Some(producer.clone());
 			held.timescale = info.timescale;
 		}
-		if let Err(err) = self.register_alias(request_id, ok.track_alias) {
-			if matches!(err, Error::Duplicate) {
+		if let Err(AliasFailure { error: err, session }) = self.register_alias(request_id, ok.track_alias) {
+			if session {
 				tracing::warn!(track_alias = %ok.track_alias, "publisher reused a live track alias for another track");
 				self.session.close(
 					super::error::to_session_code(&SessionError::from(&err)),
@@ -3953,8 +3963,8 @@ impl Subscriber {
 		// A resumed subscription stays bound to the alias it was held with.
 		if held.is_some() {
 			self.rebind_alias(request_id, Alias::Active(request_id));
-		} else if let Err(err) = self.register_alias(request_id, alias) {
-			if matches!(err, Error::Duplicate) {
+		} else if let Err(AliasFailure { error: err, session }) = self.register_alias(request_id, alias) {
+			if session {
 				tracing::warn!(track_alias = %alias, "publisher reused a live track alias for another track");
 				self.session.close(
 					super::error::to_session_code(&SessionError::from(&err)),
@@ -7854,7 +7864,10 @@ mod tests {
 		subscriber.register_alias(RequestId(11), 7).unwrap();
 
 		assert!(
-			matches!(subscriber.register_alias(RequestId(13), 7), Err(Error::Unsupported)),
+			matches!(
+				subscriber.register_alias(RequestId(13), 7),
+				Err(AliasFailure { session: false, .. })
+			),
 			"a shared alias must not be reported as the fatal collision",
 		);
 	}
@@ -8000,7 +8013,7 @@ mod tests {
 
 		assert!(matches!(
 			subscriber.register_alias(RequestId(13), 7),
-			Err(Error::Duplicate)
+			Err(AliasFailure { session: true, .. })
 		));
 	}
 
@@ -8014,7 +8027,7 @@ mod tests {
 
 		assert!(matches!(
 			subscriber.register_alias(RequestId(13), 7),
-			Err(Error::Duplicate)
+			Err(AliasFailure { session: true, .. })
 		));
 	}
 

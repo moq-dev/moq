@@ -733,14 +733,14 @@ impl Subscriber {
 	/// Bind the alias a held subscription's PUBLISH or SUBSCRIBE_OK chose, paused, closing
 	/// the session if it names another track.
 	fn bind_alias(&self, request_id: RequestId, alias: u64) -> Result<(), Error> {
-		let err = match self.register_alias(request_id, alias) {
+		let AliasFailure { error: err, session } = match self.register_alias(request_id, alias) {
 			Ok(()) => {
 				self.rebind_alias(request_id, Alias::Paused(request_id));
 				return Ok(());
 			}
 			Err(err) => err,
 		};
-		if matches!(err, Error::Duplicate) {
+		if session {
 			tracing::warn!(track_alias = %alias, "publisher reused a live track alias for another track");
 			self.session.clone().close(
 				super::super::error::to_session_code(&SessionError::from(&err)),
