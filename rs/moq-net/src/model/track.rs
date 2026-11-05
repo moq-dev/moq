@@ -4433,17 +4433,14 @@ impl Demand {
 		Poll::Ready(Ok(next))
 	}
 
-	/// Block until the track's outcome is final; see [`Producer::closed`].
-	#[cfg(feature = "async")]
-	pub async fn closed(&self) -> Result<()> {
-		kio::wait(|waiter| {
-			TrackState::settle(
-				self.state
-					.consume_weak()
-					.poll(waiter, |state| state.poll_outcome(waiter)),
-			)
-		})
-		.await
+	/// Resolves once the track's outcome is final; see [`Producer::poll_closed`].
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
+		TrackState::settle(
+			self.state
+				.consume_weak()
+				.poll(waiter, |state| state.poll_outcome(waiter)),
+		)
 	}
 
 	/// The publisher's tie-break priority, as set in [`Info::priority`].

@@ -43,15 +43,20 @@ impl Activity {
 
 	/// Wait until every admitted connection has left, then refuse new ones.
 	pub async fn close(&self) {
+		kio::wait(|waiter| self.poll_close(waiter)).await
+	}
+
+	/// See [`Self::close`].
+	fn poll_close(&self, waiter: &kio::Waiter) -> Poll<()> {
 		loop {
-			if self.state.wanted_changed(true).await.is_err() {
-				return;
+			if ready!(self.state.poll_wanted_changed(waiter, true)).is_err() {
+				return Poll::Ready(());
 			}
 			match self.state.write_unwanted() {
-				kio::Unwanted::Idle(state) => return state.close(),
+				kio::Unwanted::Idle(state) => return Poll::Ready(state.close()),
 				// Admitted between the wake and the commit: wait for it too.
 				kio::Unwanted::Wanted => continue,
-				kio::Unwanted::Closed => return,
+				kio::Unwanted::Closed => return Poll::Ready(()),
 			}
 		}
 	}
@@ -282,12 +287,21 @@ impl Server {
 	/// Convenience wrapper over [`accept_request`](Self::accept_request) that
 	/// completes the handshake immediately. Use `accept_request` when you need to
 	/// inspect the client's advertised path before deciding what to serve.
-	pub async fn accept(
+	pub fn accept(
 		&self,
 		now: Instant,
 		session: impl crate::transport::poll::Boxable,
-	) -> Result<(Session, crate::Driver), Error> {
-		self.accept_request(now, session).await?.ok().await
+	) -> impl Future<Output = Result<(Session, crate::Driver), Error>> {
+		// Box before any protocol code runs, so it is compiled once rather than per transport.
+		let mut accept = Accept::new(Deadlines::new(now), Transport::new(session));
+		let mut answer = None;
+		kio::wait(move |waiter| {
+			let answer = match &mut answer {
+				Some(answer) => answer,
+				None => answer.insert(Answer::new(ready!(accept.poll(self, waiter))?)),
+			};
+			answer.poll(waiter)
+		})
 	}
 
 	/// Begin the MoQ handshake, pausing once the client's request path is known so
@@ -1047,50 +1061,9 @@ impl Handshake {
 	/// Accept the session, returning the [`Session`] and its [`Driver`](crate::Driver).
 	///
 	/// Poll or spawn the returned driver to run the session.
-	pub async fn ok(mut self) -> Result<(Session, crate::Driver), Error> {
-		let peer_hop = Some(self.assigned_hop);
-		let auth = self.auth.clone();
-		let RequestInner {
-			server,
-			runtime,
-			deadline,
-			handshake,
-		} = self.inner.take().expect("request already responded");
-
-		let stats = server.stats.clone();
-		let (session, version) = handshake.transport();
-		let unanswered = Unanswered(Some((session, version, stats.clone())));
-		let reply = async move {
-			match handshake {
-				PausedHandshake::LiteBare { session, version } => {
-					server.start_lite(runtime, session, version, None, peer_hop, auth)
-				}
-				PausedHandshake::LiteSetup {
-					session,
-					version,
-					client_setup,
-				} => {
-					server.stats.control(stats::Message::Session, client_setup.size, true);
-					server.start_lite(runtime, session, version, Some(client_setup), peer_hop, auth)
-				}
-				PausedHandshake::Ietf(paused) => paused.ok(server, runtime, peer_hop, auth),
-				PausedHandshake::Negotiated(paused) => {
-					// Boxed so the bidi SETUP write of these old versions doesn't size every caller's future.
-					let mut reply = Box::new(paused.reply(server, runtime, peer_hop, auth)?);
-					kio::wait(|waiter| reply.poll(waiter)).await
-				}
-			}
-		};
-		let res = match deadline {
-			// The guard refuses the session on the way out.
-			Some(at) => kio::clock::timeout_at(at, reply).await.map_err(|_| Error::Timeout)?,
-			None => reply.await,
-		};
-		unanswered.answered();
-		if let Err(err) = &res {
-			stats.end(err);
-		}
-		res
+	pub async fn ok(self) -> Result<(Session, crate::Driver), Error> {
+		let mut answer = Answer::new(self);
+		kio::wait(|waiter| answer.poll(waiter)).await
 	}
 
 	/// Reject the session, closing the transport with `err`'s wire code.
@@ -1108,16 +1081,133 @@ impl RequestInner {
 	}
 }
 
+/// [`Handshake::ok`] as a poll: starts the session, once a negotiated client has taken the
+/// server SETUP. Dropped before it resolves, it refuses the session as the deadline does.
+// Fields drop in order: the reply before the guard refuses, and the handshake last.
+struct Answer {
+	step: AnswerStep,
+	/// The deadline's timer, armed once the reply first waits.
+	timer: Option<kio::clock::Sleep>,
+	unanswered: Unanswered,
+	stats: stats::Session,
+	/// When to give up on the peer taking the reply.
+	deadline: Option<Instant>,
+	/// Answered: what the request decided, without the parts the steps took.
+	handshake: Handshake,
+}
+
+enum AnswerStep {
+	/// Not polled yet: the paused handshake picks how the session starts.
+	Start {
+		server: Server,
+		runtime: Deadlines,
+		paused: PausedHandshake,
+	},
+	/// Sending a negotiated client's server SETUP. Boxed so the bidi SETUP write of these old
+	/// versions doesn't size every caller's handshake.
+	Negotiated(Box<NegotiatedReply>),
+	/// Resolved.
+	Done,
+}
+
+impl Answer {
+	fn new(mut handshake: Handshake) -> Self {
+		let RequestInner {
+			server,
+			runtime,
+			deadline,
+			handshake: paused,
+		} = handshake.inner.take().expect("request already responded");
+		let stats = server.stats.clone();
+		let (session, version) = paused.transport();
+		Self {
+			step: AnswerStep::Start {
+				server,
+				runtime,
+				paused,
+			},
+			timer: None,
+			unanswered: Unanswered(Some((session, version, stats.clone()))),
+			stats,
+			deadline,
+			handshake,
+		}
+	}
+
+	/// The started session, or why it failed.
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(Session, crate::Driver), Error>> {
+		let res = ready!(self.poll_reply(waiter));
+		// Release the reply before the guard closes over a deadline.
+		self.step = AnswerStep::Done;
+		self.timer = None;
+		let Some(res) = res else {
+			drop(std::mem::replace(&mut self.unanswered, Unanswered(None)));
+			return Poll::Ready(Err(Error::Timeout));
+		};
+		self.unanswered.0 = None;
+		if let Err(err) = &res {
+			self.stats.end(err);
+		}
+		Poll::Ready(res)
+	}
+
+	/// The reply's outcome, or `None` once the deadline passed first.
+	fn poll_reply(&mut self, waiter: &kio::Waiter) -> Poll<Option<Result<(Session, crate::Driver), Error>>> {
+		let reply = match &mut self.step {
+			AnswerStep::Start { .. } => {
+				let AnswerStep::Start {
+					server,
+					runtime,
+					paused,
+				} = std::mem::replace(&mut self.step, AnswerStep::Done)
+				else {
+					unreachable!("matched above");
+				};
+				let peer_hop = Some(self.handshake.assigned_hop);
+				let auth = self.handshake.auth.clone();
+				let started = match paused {
+					PausedHandshake::LiteBare { session, version } => {
+						server.start_lite(runtime, session, version, None, peer_hop, auth)
+					}
+					PausedHandshake::LiteSetup {
+						session,
+						version,
+						client_setup,
+					} => {
+						server.stats.control(stats::Message::Session, client_setup.size, true);
+						server.start_lite(runtime, session, version, Some(client_setup), peer_hop, auth)
+					}
+					PausedHandshake::Ietf(paused) => paused.ok(server, runtime, peer_hop, auth),
+					PausedHandshake::Negotiated(paused) => match paused.reply(server, runtime, peer_hop, auth) {
+						Ok(reply) => {
+							self.step = AnswerStep::Negotiated(Box::new(reply));
+							return self.poll_reply(waiter);
+						}
+						Err(err) => Err(err),
+					},
+				};
+				return Poll::Ready(Some(started));
+			}
+			AnswerStep::Negotiated(reply) => reply,
+			AnswerStep::Done => panic!("answer polled after it resolved"),
+		};
+		// The reply is polled first, so one that is ready wins even past the deadline.
+		if let Poll::Ready(res) = reply.poll(waiter) {
+			return Poll::Ready(Some(res));
+		}
+		let Some(at) = self.deadline else {
+			return Poll::Pending;
+		};
+		let timer = self.timer.get_or_insert_with(|| kio::clock::sleep_until(at));
+		ready!(waiter.poll_future(std::pin::Pin::new(timer)));
+		Poll::Ready(None)
+	}
+}
+
 /// A SETUP reply the peer has not taken yet. Dropped unanswered, it refuses the session with
 /// [`Error::Timeout`]: the reply waits only on the peer, so giving up on it means the peer
 /// took too long.
 struct Unanswered(Option<(Transport, Version, stats::Session)>);
-
-impl Unanswered {
-	fn answered(mut self) {
-		self.0 = None;
-	}
-}
 
 impl Drop for Unanswered {
 	fn drop(&mut self) {
