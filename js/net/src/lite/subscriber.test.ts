@@ -1172,7 +1172,8 @@ function expectCut(err: unknown, cause: Error | undefined) {
 }
 
 // Lite has no FETCH_OK, so a publisher that never answers holds each setup stage until the
-// subscriber closes. The stream that stage opened is reset, even one opening after the close.
+// subscriber closes. The stream that stage opened is reset; one still waiting to open leaves
+// the line, so the stream admitted for it later goes unused to the next open.
 test.each([
 	["the TRACK_INFO", "track", undefined],
 	["the FETCH", "fetch", undefined],
@@ -1209,31 +1210,34 @@ test.each([
 
 	const stuck = streams[stage === "track" ? 0 : 1];
 	stuck.release();
+	if (stage === "open") {
+		await drainReactions();
+		expect(stuck.written).toEqual([]);
+		return;
+	}
 	await stuck.aborted;
 });
 
-// A setup that outlived its deadline is over: its TRACK stream is reset, even one still waiting for a
-// slot, along with the SUBSCRIBE sent beside it, and the subscription is not registered again.
+// A setup that outlived its deadline is over: its TRACK stream is reset, along with the SUBSCRIBE
+// sent beside it, and the subscription is not registered again.
 test.each([
-	["lite-05 subscribe waiting on the TRACK_INFO", Version.DRAFT_05, false],
-	["lite-06 subscribe waiting on the TRACK_INFO", Version.DRAFT_06, false],
-	["lite-07 subscribe waiting on the TRACK_INFO", Version.DRAFT_07, false],
-	["lite-05 subscribe waiting on a stream slot for the TRACK", Version.DRAFT_05, true],
-] as const)("a %s that times out leaves nothing behind", async (_, version, parked) => {
+	["lite-05 subscribe waiting on the TRACK_INFO", Version.DRAFT_05],
+	["lite-06 subscribe waiting on the TRACK_INFO", Version.DRAFT_06],
+	["lite-07 subscribe waiting on the TRACK_INFO", Version.DRAFT_07],
+] as const)("a %s that times out leaves nothing behind", async (_, version) => {
 	const clock = new Manual();
 	const installed = clock.install();
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
-	const { quic, streams, opened } = fakeSession(parked ? [0] : []);
+	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
 	try {
 		const track = subscriber.consume(Path.from("room")).track("video").subscribe();
 		await opened(0);
-		if (!parked) await streams[0].reading;
+		await streams[0].reading;
 
 		await clock.advance(Nano.fromMilli(Milli(SUBSCRIBE_SETUP_TIMEOUT_MS)));
 		await track.closed;
 
-		if (parked) streams[0].release();
 		await streams[0].aborted;
 		await streams[1].aborted;
 		expect(streams.length).toBe(2);
@@ -1255,8 +1259,9 @@ test.each([
 	}
 });
 
-// The SUBSCRIBE stream can open after the deadline too; it is reset without carrying a SUBSCRIBE.
-test("a lite subscribe that times out waiting on a stream slot for the SUBSCRIBE sends nothing on it", async () => {
+// Waiting for a stream slot is waiting its turn: the SUBSCRIBE goes out once credit returns,
+// however long that takes.
+test("a lite subscribe waiting on a stream slot for the SUBSCRIBE outlasts the deadline", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
@@ -1272,16 +1277,72 @@ test("a lite subscribe that times out waiting on a stream slot for the SUBSCRIBE
 		await answerTrackInfo(streams[0]);
 		await opened(1);
 
-		await clock.advance(Nano.fromMilli(Milli(SUBSCRIBE_SETUP_TIMEOUT_MS / 2)));
-		await track.closed;
+		await clock.advance(Nano.fromMilli(Milli(3 * SUBSCRIBE_SETUP_TIMEOUT_MS)));
+		expect(track.closed.peek()).toBeUndefined();
 
 		streams[1].release();
-		await streams[1].aborted;
-		expect(streams[1].written).toEqual([]);
+		await streams[1].reading;
+		expect(streams[1].written).not.toEqual([]);
 	} finally {
 		subscriber.close();
 		warn.mockRestore();
 		installed.close();
+	}
+});
+
+// A SUBSCRIBE given up while it waits for a stream slot leaves the line: the stream admitted
+// for it goes unused to the next open, rather than being reset.
+test("a lite SUBSCRIBE open given up leaves its stream to the next open", async () => {
+	const { quic, streams, opened } = fakeSession([1]);
+	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
+	const warn = spyOn(console, "warn").mockImplementation(() => {});
+	try {
+		// Closing the broadcast retires the setup while its SUBSCRIBE waits for a stream.
+		const room = subscriber.consume(Path.from("room"));
+		room.track("video").subscribe();
+		await opened(0);
+		await streams[0].reading;
+		await answerTrackInfo(streams[0]);
+		await opened(1);
+		room.close();
+		await drainReactions();
+		streams[1].release();
+		await drainReactions();
+		expect(streams[1].written).toEqual([]);
+
+		const other = subscriber.consume(Path.from("other"));
+		other.track("video").subscribe();
+		await streams[1].writing;
+		other.close();
+	} finally {
+		subscriber.close();
+		warn.mockRestore();
+	}
+});
+
+// The last reader leaving gives the setup up while its TRACK stream still waits for a slot, so
+// the stream admitted for it goes unused to the next open.
+test("a lite subscribe whose readers leave while it waits for a stream gives up the wait", async () => {
+	const { quic, streams, opened } = fakeSession([0]);
+	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
+	const warn = spyOn(console, "warn").mockImplementation(() => {});
+	const room = subscriber.consume(Path.from("room"));
+	try {
+		const video = room.track("video").subscribe();
+		await opened(0);
+		video.close();
+		await drainReactions();
+		streams[0].release();
+		await drainReactions();
+		expect(streams[0].written).toEqual([]);
+
+		const audio = room.track("audio").subscribe();
+		await streams[0].writing;
+		audio.close();
+	} finally {
+		room.close();
+		subscriber.close();
+		warn.mockRestore();
 	}
 });
 
@@ -2003,7 +2064,16 @@ test.each(["track", "fetch", "open"] as const)(
 		retired.abort(cause);
 		expect(await first).toBe(cause);
 		expect(await second).toBe(cause);
-		if (stage === "open") streams[1].release();
+		if (stage === "open") {
+			// The FETCH open left the line: the next open takes its stream rather than resetting it.
+			streams[1].release();
+			await drainReactions();
+			const next = subscriber.fetchGroup(path, "video", 1n).catch((err: unknown) => err);
+			await streams[1].writing;
+			subscriber.close();
+			await next;
+			return;
+		}
 		const active = streams[stage === "track" ? 0 : 1];
 		expect(await active.aborted).toBeDefined();
 		subscriber.close();
@@ -2190,7 +2260,7 @@ test.each([Version.DRAFT_05, Version.DRAFT_06])(
 	},
 );
 
-test("a cancelled queued PROBE open sends no request and releases its slot", async () => {
+test("a cancelled queued PROBE open sends no request and leaves its slot to the next open", async () => {
 	const { quic, streams, opened } = fakeSession([0]);
 	const signal = new Signal<ProbeStats>({});
 	const subscriber = new Subscriber(quic, Version.DRAFT_03, HopSchema.parse(1n), signal);
@@ -2201,8 +2271,16 @@ test("a cancelled queued PROBE open sends no request and releases its slot", asy
 	await probing;
 	expect(streams[0].written).toEqual([]);
 	streams[0].release();
-	await streams[0].finished;
+	await drainReactions();
 	expect(streams[0].written).toEqual([]);
+
+	// The next open takes the stream the cancelled one left, rather than another create.
+	const again = new AbortController();
+	const reprobing = subscriber.runProbe(again.signal);
+	await streams[0].writing;
+	expect(streams).toHaveLength(1);
+	again.abort();
+	await reprobing;
 	subscriber.close();
 });
 
@@ -2839,6 +2917,8 @@ test("announce init is the initial set", async () => {
 	subscriber.close();
 });
 
+// The FETCH shares the TRACK's deadline, which only runs while neither stream waits to open:
+// waiting for credit is waiting its turn, so only an unanswered request fails.
 test.each(["answer", "credit"] as const)("FETCH shares the TRACK deadline while waiting for %s", async (stage) => {
 	const clock = new Manual();
 	const installed = clock.install();
@@ -2854,18 +2934,19 @@ test.each(["answer", "credit"] as const)("FETCH shares the TRACK deadline while 
 		await clock.advance(Nano.fromMilli(Milli(5_000)));
 		await answerTrackInfo(streams[0], Version.DRAFT_07);
 		await opened(1);
-		if (stage === "answer") await streams[1].reading;
-		await clock.advance(Nano.fromMilli(Milli(4_999)));
+		if (stage === "credit") {
+			await clock.advance(Nano.fromMilli(Milli(30_000)));
+			expect(failure).toBeUndefined();
+			streams[1].release();
+		}
+		await streams[1].reading;
+		// Opened alongside the TRACK, the FETCH shares its budget; one that waited for credit
+		// gets a whole budget from its open.
+		await clock.advance(Nano.fromMilli(Milli(stage === "credit" ? 9_999 : 4_999)));
 		expect(failure).toBeUndefined();
 		await clock.advance(Nano.fromMilli(Milli(1)));
 		await fetch;
-		if (stage === "answer") expect((failure as StreamError).code).toBe(StreamCode.ControlTimeout);
-		else {
-			expect((failure as Error).name).toBe("NoStreamCredit");
-			streams[1].release();
-			await streams[1].aborted;
-			expect(streams[1].written).toEqual([]);
-		}
+		expect((failure as StreamError).code).toBe(StreamCode.ControlTimeout);
 	} finally {
 		subscriber.close();
 		installed.close();

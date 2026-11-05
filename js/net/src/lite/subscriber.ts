@@ -32,7 +32,7 @@ import * as Time from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { closeUnwanted } from "../util/announce.ts";
-import { Deadline, REQUEST_TIMEOUT_MS, requestOptions } from "../util/deadline.ts";
+import { Deadline, REQUEST_TIMEOUT_MS } from "../util/deadline.ts";
 import { abandoned, isAbandoned, unwanted } from "../util/demand.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
 import { min, UNBOUNDED } from "../util/sequence.ts";
@@ -367,17 +367,18 @@ export class Subscriber {
 		// to reset the stream, not just close our side of it.
 		let stream: Stream;
 		try {
-			const deadline = new Deadline();
-			stream = await deadline.wait(
-				deadline.open(Stream.open(this.#quic, { version: this.version, ...requestOptions })),
-			);
+			// The consumer leaving gives up the wait for a slot, so the next open takes it.
+			const left = new AbortController();
+			void race([announced.closed]).then(() => left.abort());
+			const opened = await Stream.tryOpen(this.#quic, { version: this.version, signal: left.signal });
+			// Handed a stream as the consumer left: give the slot back unused.
+			if (!opened || announced.closed.peek() !== undefined) {
+				opened?.close();
+				return;
+			}
+			stream = opened;
 		} catch (err: unknown) {
 			announced.close(error(err));
-			return;
-		}
-		// The consumer left while the open waited for a slot: give the slot back unused.
-		if (announced.closed.peek() !== undefined) {
-			stream.close();
 			return;
 		}
 
@@ -886,15 +887,10 @@ export class Subscriber {
 		});
 		let stream: Stream | undefined;
 		try {
-			const opening = Stream.open(this.#quic, { version: this.version, ...requestOptions });
 			const cut = valid ? AbortSignal.any([stop, valid]) : stop;
-			void opening.then(
-				(late) => {
-					if (cut.aborted) late.abort(error(cut.reason));
-				},
-				() => {},
-			);
-			stream = await untilAborted(opening, cut);
+			stream = await Stream.tryOpen(this.#quic, { version: this.version, signal: cut });
+			// Gave up, perhaps handed a stream as it did: the catch below hands back any stream.
+			if (!stream || cut.aborted) throw cut.reason;
 			await stream.writer.u53(StreamId.Tracks);
 			await new TracksMessage(broadcast, consumed.instance).encode(stream.writer, this.version);
 			let synced = false;
@@ -1025,15 +1021,34 @@ export class Subscriber {
 		const deadline = new Deadline();
 		const setup = this.#openSubscribe(state, msg, ranges, request, id, deadline);
 
+		// The readers leaving gives the setup up, even while its streams wait for credit. An
+		// info-only lookup attaches no reader, so only demand that arrived and left counts.
+		const left = new AbortController();
+		const demand = request.demand();
+		let arrived = false;
+		let unwatch: Dispose | undefined;
+		const watch = () => {
+			if (demand.wanted.peek() !== undefined) arrived = true;
+			if (hooks.demandReleased(demand).peek() !== undefined || (arrived && demand.wanted.peek() === undefined)) {
+				left.abort(
+					new StreamError(StreamCode.Cancel, { message: "subscribe abandoned before it was accepted" }),
+				);
+			} else {
+				unwatch = Signal.race(demand.wanted, hooks.demandReleased(demand)).changed(watch);
+			}
+		};
+		watch();
+
 		let opened: { stream: Stream; entry: SubscribeEntry };
 		try {
-			opened = await deadline.wait(untilAborted(setup, valid));
+			opened = await deadline.wait(untilAborted(untilAborted(setup, valid), left.signal));
 			console.debug(`subscribe ok: id=${id} broadcast=${broadcast} track=${request.name}`);
 		} catch (err) {
 			closeViolation(this.#quic, err);
 			// The setup outlived its deadline waiting for the first response: a control
-			// timeout, not content that arrived late. A revocation says so instead.
-			const e = state.revoked ?? (await sessionCause(this.#quic, err));
+			// timeout, not content that arrived late. A revocation or the readers leaving says
+			// so instead.
+			const e = state.revoked ?? (left.signal.aborted ? left.signal.reason : await sessionCause(this.#quic, err));
 			state.cancel.abort(e);
 			valid?.removeEventListener("abort", retire);
 			request.reject(e);
@@ -1050,6 +1065,8 @@ export class Subscriber {
 			leave();
 			setup.then(leave, leave);
 			return;
+		} finally {
+			unwatch?.();
 		}
 		valid?.removeEventListener("abort", retire);
 
@@ -1329,11 +1346,17 @@ export class Subscriber {
 
 	// Open the subscribe stream and write the SUBSCRIBE on it.
 	async #sendSubscribe(state: SubscribeSetup, msg: Subscribe, deadline: Deadline): Promise<Stream> {
-		const stream = await deadline.open(Stream.open(this.#quic, { version: this.version, ...requestOptions }));
+		// Giving up leaves the line, so the next open takes the stream this one was waiting for.
+		const signal = state.cancel.signal;
+		const opening = Stream.tryOpen(this.#quic, { version: this.version, signal }).then((opened) => {
+			if (!opened) throw signal.reason;
+			return opened;
+		});
+		const stream = await deadline.open(opening);
 		state.stream = stream;
-		// The deadline passed while the open waited: the late-setup handler resets the stream, so
-		// don't send a SUBSCRIBE on it first.
-		state.cancel.signal.throwIfAborted();
+		// Setup was given up as the open handed over its stream: the late-setup handler resets
+		// the stream, so don't send a SUBSCRIBE on it first.
+		signal.throwIfAborted();
 		await stream.writer.u53(StreamId.Subscribe);
 		await msg.encode(stream.writer, this.version);
 		return stream;
@@ -1372,17 +1395,12 @@ export class Subscriber {
 	): Promise<T> {
 		const closed = signal ? AbortSignal.any([this.#closed.signal, signal]) : this.#closed.signal;
 		closed.throwIfAborted();
-		const opening = deadline.open(Stream.open(this.#quic, { ...options, ...requestOptions }));
-		let stream: Stream;
-		try {
-			stream = await untilAborted(opening, closed);
-		} catch (err) {
-			void opening.then(
-				(late) => late.abort(error(err)),
-				() => {},
-			);
-			throw err;
-		}
+		// Giving up leaves the line, so the next open takes the stream this one was waiting for.
+		const opening = Stream.tryOpen(this.#quic, { ...options, signal: closed }).then((opened) => {
+			if (!opened) throw closed.reason;
+			return opened;
+		});
+		const stream = await deadline.open(opening);
 		const abort = () => stream.abort(error(closed.reason));
 		closed.addEventListener("abort", abort);
 		try {
@@ -2242,11 +2260,11 @@ export class Subscriber {
 				increase = level >= ProbeLevel.Increase;
 			}
 			if (this.#goingAway() || abort.aborted) return;
-			const opening = Stream.open(this.#quic, { version: this.version });
-			const stream = await scope.race(opening);
-			if (!stream) {
-				// A queued transport open cannot be cancelled; give its slot back unused.
-				void opening.then((stream) => stream.close()).catch(() => {});
+			const stream = await Stream.tryOpen(this.#quic, { version: this.version, signal: abort });
+			if (!stream) return;
+			if (abort.aborted) {
+				// Handed a stream as it gave up: give the slot back unused.
+				stream.close();
 				return;
 			}
 			scope.cleanup(() => stream.close());

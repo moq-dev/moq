@@ -107,6 +107,13 @@ export function routeFailed(err: Error): boolean {
 	return err instanceof SessionError || sessionClosed(err);
 }
 
+// Whether `err` says the route is going away rather than that it gave up on the copy: its
+// answer is no verdict, and the next route is asked. Mirrors the Rust front's `closing`.
+function closing(err: Error): boolean {
+	if (err instanceof StreamError) return err.code === StreamCode.GoingAway || err.code === StreamCode.SessionClosed;
+	return err instanceof SessionError || sessionClosed(err);
+}
+
 // A source losing its route to the content: only another route continues it, since asking the
 // same one again could only replace the withdrawal's cause with a refusal. Mirrors the Rust
 // `unroutable`.
@@ -232,6 +239,14 @@ class Route {
 		this.#bump();
 	}
 
+	/** Subscribe every reader afresh to the source that still serves, once its copy failed. */
+	resubscribe(): void {
+		if (!this.source) return;
+		this.generation++;
+		this.#bump();
+		for (const reader of [...this.readers]) reader.sync();
+	}
+
 	/** End the track once the serving copy runs out, rather than replacing it. */
 	refuse(err: Error): void {
 		this.refusal ??= err;
@@ -281,6 +296,8 @@ interface Copy {
 	since?: Instant;
 	/** Groups still read that came from this copy, which keep a replaced copy subscribed. */
 	lease: number;
+	/** It handed out a group or datagram, so a failure is its route failing mid-serve rather than refusing. */
+	delivered?: boolean;
 }
 
 /**
@@ -424,7 +441,10 @@ class Reader implements ResumeSource {
 		// Cloned handles share closed, so a returning route reuses its subscription and
 		// leases rather than replaying its cache and retaining another copy per flap. The newest
 		// is the route's own copy, not a backfill of it.
-		const index = this.#copies.findLastIndex((copy) => copy.source.from.closed === source.from.closed);
+		// A copy that failed is never reused: the route subscribes afresh after one.
+		const index = this.#copies.findLastIndex(
+			(copy) => copy.source.from.closed === source.from.closed && !(copy.sub.closed.peek() instanceof Error),
+		);
 		if (index !== -1) {
 			const [copy] = this.#copies.splice(index, 1);
 			source.retain();
@@ -648,6 +668,7 @@ class Reader implements ResumeSource {
 	 * Nor does a backfill of the serving route.
 	 */
 	#observe(copy: Copy, sequence: bigint): void {
+		copy.delivered = true;
 		if (copy.replaced || copy.generation !== this.#generation) return;
 		const bound = max(this.#newest ?? -1n, sequence - 1n);
 		for (const replaced of this.#copies) {
@@ -858,6 +879,7 @@ class Reader implements ResumeSource {
 					}
 					this.#datagram = sequence;
 					this.#newestDatagram = max(this.#newestDatagram ?? 0n, sequence);
+					copy.delivered = true;
 					return recv;
 				}
 				if (recv.kind === "done") copy.datagramsDone = copy.sub.closed.peek() ?? null;
@@ -887,6 +909,18 @@ class Reader implements ResumeSource {
 			// A refusal from a route that still serves is the track's answer.
 			if (!routeFailed(ended)) return this.#fail(ended);
 			if (route.refusal) return this.#fail(route.refusal);
+			// The route that failed it still serves and is not going away, so no move replaces
+			// the copy. As in the Rust front, one that delivered nothing is the route refusing
+			// the track, and one that did is subscribed afresh, unless its source lost the route:
+			// asking it again could only replace the withdrawal's cause with a refusal.
+			if (serving && route.source === serving.source && !closing(ended)) {
+				if (!serving.delivered) {
+					route.refuse(ended);
+					return this.#fail(ended);
+				}
+				if (unroutable(ended)) return this.#fail(ended);
+				route.resubscribe();
+			}
 		}
 		// Refused before any copy fed it: nothing will.
 		if (!last && route.refusal) return this.#fail(route.refusal);
