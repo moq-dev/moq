@@ -8,7 +8,7 @@ use serde::de::DeserializeOwned;
 use super::Catalog;
 use crate::Result;
 
-/// Reads typed catalog roots from an already subscribed catalog track.
+/// Reads typed catalog roots from a catalog track, subscribing to it at catalog priority.
 pub struct Consumer<E = ()> {
 	// Decoded in two steps, so a catalog needing a newer reader fails with a typed error.
 	inner: moq_json::snapshot::Consumer<serde_json::Value>,
@@ -17,11 +17,16 @@ pub struct Consumer<E = ()> {
 }
 
 impl<E: DeserializeOwned + Default> Consumer<E> {
-	/// Wrap a catalog track subscription, compressed or not.
-	pub fn new(track: moq_net::track::Subscriber) -> Self {
+	/// Read a catalog track, compressed or not.
+	///
+	/// Subscribes to it at [`Catalog::default_subscription`]'s priority, reading only the newest
+	/// catalog; see [`moq_json::snapshot::Consumer::new`].
+	pub fn new(track: moq_net::track::Consumer) -> Self {
+		let mut config = moq_json::snapshot::consumer::Config::default();
+		config.priority = Catalog::default_subscription().priority;
 		Self {
 			base: track.broadcast().path.clone(),
-			inner: moq_json::snapshot::Consumer::new(track, Default::default()),
+			inner: moq_json::snapshot::Consumer::new(track, config),
 			_ext: std::marker::PhantomData,
 		}
 	}

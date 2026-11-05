@@ -196,7 +196,7 @@ impl Source {
 		&self,
 		format: crate::catalog::CatalogFormat,
 	) -> crate::Result<crate::catalog::Consumer<E>> {
-		let subscribing = crate::catalog::Subscribing::new(&self.broadcast(), format);
+		let mut subscribing = crate::catalog::Subscribing::new(&self.broadcast(), format);
 		kio::wait(|waiter| subscribing.poll_ok(waiter)).await
 	}
 

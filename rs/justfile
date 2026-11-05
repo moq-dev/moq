@@ -384,6 +384,10 @@ quic-sim:
     # Each realtime congestion controller against BBR3 over sim replicas of the cellular presets: queueing delay, throughput, reaction to the drop, and share beside CUBIC.
     bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-quic --lib --run-ignored only --no-capture -E 'test(/^tests::realtime::/)'
 
+# Prove the FFI simulcast publisher disables and resumes over a shaped BBR3 uplink.
+rung-disable:
+    just rs test -p moq-ffi --lib --run-ignored only --no-capture -E 'test(/^test::rung::/)'
+
 # Prove downstream futures are Send at the default recursion limit on the
 # flake's pinned nightly. Nightly runs it; the land gate does not.
 send-depth:

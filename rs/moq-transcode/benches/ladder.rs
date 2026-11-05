@@ -223,7 +223,7 @@ fn flapping(c: &mut Criterion) {
 				Err(err) => panic!("catalog track: {err}"),
 			}
 		};
-		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(track.subscribe(None).await.unwrap());
+		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(track);
 		let current = loop {
 			let snapshot = catalogs.next().await.unwrap().unwrap();
 			if !snapshot.video.renditions.is_empty() {

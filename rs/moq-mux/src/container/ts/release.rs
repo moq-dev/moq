@@ -51,7 +51,7 @@ impl Release {
 				anyhow::anyhow!("the MSF catalog has no `m2ts` passthrough track; read the hang catalog").into(),
 			);
 		}
-		let subscribing = crate::catalog::Subscribing::new(&source.broadcast(), catalog_format);
+		let mut subscribing = crate::catalog::Subscribing::new(&source.broadcast(), catalog_format);
 		let catalog = kio::wait(|waiter| subscribing.poll_ok(waiter)).await?;
 		let mut release = Self {
 			source,

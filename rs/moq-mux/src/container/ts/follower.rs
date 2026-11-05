@@ -228,7 +228,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 					return Poll::Pending;
 				}
 				State::Resuming {
-					subscription,
+					mut subscription,
 					end,
 					deadline,
 				} => {

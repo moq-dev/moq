@@ -78,6 +78,8 @@
 //! # }
 //! ```
 
+use std::task::{Poll, ready};
+
 use moq_net::Timed;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -350,36 +352,31 @@ pub struct Consumer<T> {
 
 /// Which moq-json consumer is doing the reading. Private: the caller sees one `Consumer`.
 enum Inner<T> {
-	Snapshot(moq_json::snapshot::Consumer<T>),
-	Stream(moq_json::stream::Consumer<T>),
+	// Boxed: the two readers differ in size by hundreds of bytes.
+	Snapshot(Box<moq_json::snapshot::Consumer<T>>),
+	Stream(Box<moq_json::stream::Consumer<T>>),
 }
 
 impl<T: DeserializeOwned> Consumer<T> {
-	/// Read an already-subscribed track as its catalog entry declares.
+	/// Subscribe to a track and read it as its catalog entry declares.
 	///
-	/// The escape hatch for a caller that resolved the subscription itself. Prefer
+	/// The escape hatch for a caller that resolved the track itself. Prefer
 	/// [`Entry::subscribe`](crate::catalog::Entry::subscribe), which resolves the track (including a
 	/// cross-broadcast [`broadcast`](JsonConfig::broadcast) reference) from the catalog for you.
+	/// A snapshot reader subscribes itself (see [`moq_json::snapshot::Consumer::new`]); a stream
+	/// waits for its subscription here.
 	///
 	/// Errors if the entry declares a mode this build doesn't implement, which is a track a consumer
 	/// must skip rather than guess at.
-	pub fn from_track(track: moq_net::track::Subscriber, config: &JsonConfig) -> crate::Result<Self> {
-		let inner = match &config.mode {
-			Mode::Snapshot => Inner::Snapshot(moq_json::snapshot::Consumer::new(track, Default::default())),
-			Mode::Stream => Inner::Stream(moq_json::stream::Consumer::new(track, Default::default())),
-			other => return Err(crate::Error::UnsupportedMode(other.to_string())),
-		};
-
-		Ok(Self {
-			inner,
-			mode: config.mode.clone(),
-		})
+	#[cfg(feature = "async")]
+	pub async fn from_track(track: moq_net::track::Consumer, config: &JsonConfig) -> crate::Result<Self> {
+		let mut opening = Opening::new(track, config)?;
+		kio::wait(|waiter| opening.poll(waiter)).await
 	}
 
 	/// The mode the publisher chose.
 	///
-	/// [`Mode::Snapshot`] is lossy: groups may be skipped once superseded beyond the subscription
-	/// drift budget. [`Mode::Stream`] preserves every record a reader keeps up with; one that falls
+	/// [`Mode::Snapshot`] is lossy: a group is skipped once a newer one supersedes it. [`Mode::Stream`] preserves every record a reader keeps up with; one that falls
 	/// behind a group's retained tail sees `Evicted`. Check this when the application can only
 	/// work with one of them.
 	pub fn mode(&self) -> &Mode {
@@ -420,13 +417,84 @@ impl crate::catalog::Entry<'_, JsonConfig> {
 	/// Errors if the entry declares a mode this build doesn't implement.
 	#[cfg(feature = "async")]
 	pub async fn subscribe<T: DeserializeOwned>(&self, source: &crate::Source) -> crate::Result<Consumer<T>> {
-		let mut subscribe = source.subscribe(
-			self.config().broadcast.as_ref(),
-			self.config().instance.as_ref(),
-			self.config().track(self.name()),
-		)?;
-		let track = kio::wait(|waiter| subscribe.poll(waiter)).await?;
-		Consumer::from_track(track, self.config())
+		let binding = source.bind(self.config().broadcast.as_ref(), self.config().instance.as_ref())?;
+		let mut subscribe = EntrySubscribe::Binding {
+			binding,
+			name: self.config().track(self.name()).to_string(),
+			config: self.config().clone(),
+		};
+		kio::wait(|waiter| subscribe.poll(waiter)).await
+	}
+}
+
+/// A [`Consumer`] waiting for its subscription: a stream's here, a snapshot's on its first read.
+struct Opening<T> {
+	mode: Mode,
+	state: OpeningState<T>,
+}
+
+enum OpeningState<T> {
+	Snapshot(Option<Box<moq_json::snapshot::Consumer<T>>>),
+	Stream(Box<moq_net::track::Subscribing>),
+}
+
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+impl<T: DeserializeOwned> Opening<T> {
+	/// Errors if the entry declares a mode this build doesn't implement.
+	fn new(track: moq_net::track::Consumer, config: &JsonConfig) -> crate::Result<Self> {
+		let state = match &config.mode {
+			Mode::Snapshot => OpeningState::Snapshot(Some(Box::new(moq_json::snapshot::Consumer::new(
+				track,
+				Default::default(),
+			)))),
+			Mode::Stream => OpeningState::Stream(Box::new(track.subscribe(None).into_inner())),
+			other => return Err(crate::Error::UnsupportedMode(other.to_string())),
+		};
+		Ok(Self {
+			mode: config.mode.clone(),
+			state,
+		})
+	}
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Consumer<T>>> {
+		let inner = match &mut self.state {
+			OpeningState::Snapshot(consumer) => Inner::Snapshot(consumer.take().expect("resolves once")),
+			OpeningState::Stream(subscribing) => {
+				let track = ready!(subscribing.poll_ok(waiter))?;
+				Inner::Stream(Box::new(moq_json::stream::Consumer::new(track, Default::default())))
+			}
+		};
+		Poll::Ready(Ok(Consumer {
+			inner,
+			mode: self.mode.clone(),
+		}))
+	}
+}
+
+/// [`Entry::subscribe`](crate::catalog::Entry::subscribe): the entry's broadcast, then its track.
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+#[expect(clippy::large_enum_variant, reason = "a machine's enum is its storage")]
+enum EntrySubscribe<T> {
+	Binding {
+		binding: crate::Binding,
+		name: String,
+		config: JsonConfig,
+	},
+	Opening(Opening<T>),
+}
+
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+impl<T: DeserializeOwned> EntrySubscribe<T> {
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Consumer<T>>> {
+		if let Self::Binding { binding, name, config } = self {
+			let broadcast = ready!(binding.poll_broadcast(waiter))?;
+			// The binding drops as soon as it answers, so its request ends with it.
+			*self = Self::Opening(Opening::new(broadcast.track(name)?, config)?);
+		}
+		let Self::Opening(opening) = self else {
+			unreachable!("bound above");
+		};
+		opening.poll(waiter)
 	}
 }
 
@@ -434,6 +502,7 @@ impl crate::catalog::Entry<'_, JsonConfig> {
 mod test {
 	use std::task::Poll;
 
+	use futures::FutureExt;
 	use serde_json::{Value, json};
 
 	use super::*;
@@ -467,6 +536,13 @@ mod test {
 	/// Drain every value a consumer currently has, without blocking.
 	///
 	/// One loop whichever mode the publisher chose, which is the point of the single `Consumer`.
+	/// [`Consumer::from_track`] on an in-process track, whose subscription resolves at once.
+	fn read(track: moq_net::track::Consumer, config: &JsonConfig) -> crate::Result<Consumer<Value>> {
+		Consumer::from_track(track, config)
+			.now_or_never()
+			.expect("in-process subscription")
+	}
+
 	fn drain(mut consumer: Consumer<Value>) -> Vec<Value> {
 		let waiter = kio::Waiter::noop();
 		let mut out = Vec::new();
@@ -487,17 +563,16 @@ mod test {
 			.json_stream::<Value>(track(&mut broadcast, "chat"), Config::default())
 			.unwrap();
 
-		let track = chat.consume();
+		// The catalog is the only thing the reader is told; the mode comes from it.
+		let entry = entry(&catalog, "chat");
+		let track = broadcast.consume().track("chat").unwrap();
+		let consumer = read(track, &entry).unwrap();
 		let expected: Vec<Value> = (0..3).map(|n| json!({ "n": n })).collect();
 		for value in &expected {
 			chat.append(value, catalog.clock().now()).unwrap();
 		}
-		// `finish` retires the entry, so read both off the live track first.
-		let entry = entry(&catalog, "chat");
 		chat.finish().unwrap();
 
-		// The catalog is the only thing the reader is told; the mode comes from it.
-		let consumer = Consumer::from_track(track, &entry).unwrap();
 		assert_eq!(consumer.mode(), &Mode::Stream);
 		assert_eq!(drain(consumer), expected);
 	}
@@ -509,14 +584,14 @@ mod test {
 			.json_snapshot::<Value>(track(&mut broadcast, "status"), Config::default(), Options::default())
 			.unwrap();
 
-		let track = status.consume();
+		let entry = entry(&catalog, "status");
+		let track = broadcast.consume().track("status").unwrap();
+		let consumer = read(track, &entry).unwrap();
 		status.update(&json!({ "live": false }), catalog.clock().now()).unwrap();
 		status.update(&json!({ "live": true }), catalog.clock().now()).unwrap();
-		let entry = entry(&catalog, "status");
 		status.finish().unwrap();
 
-		// A late reader only sees the newest value, which is the point of snapshot mode.
-		let consumer = Consumer::from_track(track, &entry).unwrap();
+		// The reader only sees the newest value, which is the point of snapshot mode.
 		assert_eq!(consumer.mode(), &Mode::Snapshot);
 		assert_eq!(drain(consumer), vec![json!({ "live": true })]);
 	}
@@ -839,7 +914,8 @@ mod test {
 		let mut chat = catalog
 			.json_stream::<Value>(track(&mut broadcast, "chat"), Config::default())
 			.unwrap();
-		let track = chat.consume();
+		let entry = entry(&catalog, "chat");
+		let consumer = read(broadcast.consume().track("chat").unwrap(), &entry).unwrap();
 
 		let oversized = Value::String("x".repeat(moq_net::group::MAX_CACHE_BYTES as usize));
 		assert!(matches!(
@@ -849,12 +925,8 @@ mod test {
 		assert!(catalog.snapshot().json.tracks.contains_key("chat"));
 
 		chat.append(&json!({ "n": 1 }), catalog.clock().now()).unwrap();
-		let entry = entry(&catalog, "chat");
 		chat.finish().unwrap();
-		assert_eq!(
-			drain(Consumer::from_track(track, &entry).unwrap()),
-			vec![json!({ "n": 1 })]
-		);
+		assert_eq!(drain(consumer), vec![json!({ "n": 1 })]);
 	}
 
 	/// Every write is stamped, so a track without a timescale, which refuses a timestamp, is refused
@@ -888,7 +960,7 @@ mod test {
 
 		let config = JsonConfig::new(Mode::Unknown("windowed".to_string()));
 		assert!(matches!(
-			Consumer::<Value>::from_track(track.subscribe(None), &config),
+			read(track.consume(), &config),
 			Err(crate::Error::UnsupportedMode(_))
 		));
 	}

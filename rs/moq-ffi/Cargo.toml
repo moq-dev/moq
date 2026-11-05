@@ -68,6 +68,7 @@ uniffi = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
+moq-shaper = { path = "../moq-shaper" }
 # The video tests encode with OpenH264, the one encoder a GPU-less host has, so
 # they turn it on without the `openh264` feature.
 moq-video = { path = "../moq-video", features = ["openh264"] }

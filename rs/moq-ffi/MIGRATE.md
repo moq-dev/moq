@@ -19,6 +19,10 @@ The field defaults to null, so only code that builds these records exhaustively,
 A null `MoqTrackInfo.max_age`, and a null `MoqTrackInfo`, now advertise a zero max age, serving only the live edge, instead of no publisher limit. Set the new `max_age_unlimited`, which ignores `max_age`, where you relied on null meaning no limit.
 A received track's `info()` sets `max_age_unlimited` when its publisher advertised no limit, so the record republishes unchanged.
 
+### Snapshot consumers subscribe themselves at a zero delay ([#7736](https://github.com/moq-dev/moq/pull/7736))
+
+`MoqJsonSnapshotConsumer::new(broadcast, name, priority)` takes a `MoqBroadcastConsumer`, the track name, and the subscription's priority (default 0) instead of a `MoqTrackConsumer`, and subscribes to the track itself at a zero `delay.max`. Drop the `subscribe_track` call; a refused subscription now fails the first read. `next()` skips every group a newer one supersedes, and `latest()` no longer waits for a lower group the track still owes.
+
 ### Viewer targets are bounded ([#7090](https://github.com/moq-dev/moq/pull/7090))
 
 Viewer ceilings and PROBE target overrides are refused with the new `MoqError::OutOfRange` once they would sum above 2^53 - 1 bps, the most a PROBE target carries; nothing changes on a refusal. `MoqViewers::watch` and `set_target` and `MoqViewer::update` return a `Result`. Handle the new variant wherever you match the error exhaustively. Regenerate bindings and rebuild the matching native library together.

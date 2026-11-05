@@ -539,8 +539,10 @@ struct WatchCatalog {
 )]
 enum Watch {
 	Start,
-	/// Waiting for the catalog subscription, or the failure it started with.
-	Subscribing(moq_mux::Result<moq_net::track::Subscribing>),
+	/// Waiting for the catalog subscription, or the failure it started with. The consumer
+	/// subscribes itself; its track's info resolving rides on that subscription, so a refused
+	/// catalog fails here.
+	Subscribing(moq_mux::Result<(catalog::hang::Consumer<()>, moq_net::track::Resolving)>),
 	/// Waiting out a failed subscription's backoff, unless the broadcast closes first.
 	Backoff(kio::clock::Sleep),
 	Reading {
@@ -568,10 +570,10 @@ impl WatchCatalog {
 
 	/// Subscribe to the broadcast's hang catalog track.
 	fn subscribe(&self) -> Watch {
-		let track = self
-			.broadcast()
-			.track(hang::Catalog::DEFAULT_NAME)
-			.map(|track| track.subscribe(hang::Catalog::default_subscription()).into_inner());
+		let track = self.broadcast().track(hang::Catalog::DEFAULT_NAME).map(|track| {
+			let info = track.info().into_inner();
+			(catalog::hang::Consumer::new(track), info)
+		});
 		Watch::Subscribing(track.map_err(Into::into))
 	}
 
@@ -634,14 +636,20 @@ impl kio::Task for WatchCatalog {
 				}
 				Watch::Subscribing(subscribing) => {
 					let subscribed = match subscribing {
-						Ok(subscribing) => ready!(subscribing.poll_ok(waiter)).map_err(moq_mux::Error::from),
+						Ok((_, info)) => ready!(info.poll_ok(waiter)).map(drop).map_err(moq_mux::Error::from),
 						Err(err) => Err(err.clone()),
 					};
+					let watch = std::mem::replace(&mut self.state, Watch::Start);
 					self.state = match subscribed {
-						Ok(track) => Watch::Reading {
-							consumer: catalog::hang::Consumer::new(track).into(),
-							latest: None,
-						},
+						Ok(()) => {
+							let Watch::Subscribing(Ok((consumer, _))) = watch else {
+								unreachable!("subscribed above");
+							};
+							Watch::Reading {
+								consumer: consumer.into(),
+								latest: None,
+							}
+						}
 						Err(err) => {
 							tracing::warn!(%err, "failed to subscribe to broadcast catalog, retrying");
 							let wait = self.delay.mul_f64(0.5 + kio::clock::rng().random::<f64>() / 2.0);

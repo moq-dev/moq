@@ -67,6 +67,7 @@ impl Rendition {
 		Self(Arc::new(Meter {
 			rung: rung.clone(),
 			counts: kio::Lock::new(Counts::default()),
+			applied: kio::Lock::new(None),
 		}))
 	}
 
@@ -115,6 +116,20 @@ impl Rendition {
 		self.0.counts.lock().bytes
 	}
 
+	/// The latency and compression controls this rendition's encoder applied,
+	/// or `None` before one has opened.
+	///
+	/// The most recent open's report: every pipeline opens the same
+	/// configuration, so a reopen only changes it if the backend does.
+	pub fn applied(&self) -> Option<moq_video::encode::Applied> {
+		self.0.applied.lock().clone()
+	}
+
+	/// Record what a newly opened encoder applied.
+	pub(crate) fn opened(&self, applied: moq_video::encode::Applied) {
+		*self.0.applied.lock() = Some(applied);
+	}
+
 	/// Bank encoded output. Called on the writing path, off the cursor's lock.
 	fn produced(&self, frames: u64, bytes: u64) {
 		let mut counts = self.0.counts.lock();
@@ -135,6 +150,7 @@ impl std::fmt::Debug for Rendition {
 struct Meter {
 	rung: Resolved,
 	counts: kio::Lock<Counts>,
+	applied: kio::Lock<Option<moq_video::encode::Applied>>,
 }
 
 /// Everything a caller bills against, behind one lock the cursors never touch.

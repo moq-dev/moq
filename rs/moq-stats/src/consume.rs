@@ -2,7 +2,7 @@
 
 use std::task::{Poll, ready};
 
-use moq_net::{Path, broadcast, track::Subscribing};
+use moq_net::{Path, broadcast};
 use serde::de::DeserializeOwned;
 
 use crate::{
@@ -76,28 +76,22 @@ impl Consumer {
 		})
 	}
 
-	fn subscribe<T>(&self, name: &str) -> Result<Reader<T>> {
-		let subscribing = self.broadcast.track(name)?.subscribe(None).into_inner();
-		Ok(Reader::Subscribing(subscribing))
+	fn subscribe<T: DeserializeOwned>(&self, name: &str) -> Result<Reader<T>> {
+		// The reader subscribes itself, so a refused subscription fails its first read.
+		let track = self.broadcast.track(name)?;
+		Ok(Reader(Box::new(moq_json::snapshot::Consumer::new(
+			track,
+			Default::default(),
+		))))
 	}
 }
 
-/// A snapshot reader that finishes its subscription handshake on its first read.
-enum Reader<T> {
-	Subscribing(Subscribing),
-	Reading(Box<moq_json::snapshot::Consumer<T>>),
-}
+/// A snapshot reader yielding only the latest value.
+struct Reader<T>(Box<moq_json::snapshot::Consumer<T>>);
 
 impl<T: DeserializeOwned> Reader<T> {
 	fn poll_latest(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<T>>> {
-		if let Self::Subscribing(subscribing) = self {
-			let track = ready!(subscribing.poll_ok(waiter))?;
-			*self = Self::Reading(Box::new(moq_json::snapshot::Consumer::new(track, Default::default())));
-		}
-		let Self::Reading(consumer) = self else {
-			unreachable!("subscribed above");
-		};
-		Poll::Ready(Ok(ready!(consumer.poll_latest(waiter))?.map(|value| value.value)))
+		Poll::Ready(Ok(ready!(self.0.poll_latest(waiter))?.map(|value| value.value)))
 	}
 }
 

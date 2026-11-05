@@ -50,45 +50,55 @@ impl<E: CatalogExt> Consumer<E> {
 	/// Subscribe to the catalog track advertised by `format`.
 	#[cfg(feature = "async")]
 	pub async fn new(broadcast: &moq_net::broadcast::Consumer, format: CatalogFormat) -> Result<Self, crate::Error> {
-		let subscribing = Subscribing::new(broadcast, format);
+		let mut subscribing = Subscribing::new(broadcast, format);
 		kio::wait(|waiter| subscribing.poll_ok(waiter)).await
 	}
 }
 
 /// A catalog subscription awaiting its track: [`Consumer::new`] for a caller that polls.
 pub(crate) struct Subscribing<E: CatalogExt> {
-	format: CatalogFormat,
-	track: Result<moq_net::track::Subscribing, crate::Error>,
-	_ext: std::marker::PhantomData<E>,
+	pending: Pending<E>,
+}
+
+enum Pending<E: CatalogExt> {
+	/// The hang consumer subscribes itself; its track's info resolving rides on that
+	/// subscription, so a refused catalog fails here as it does for MSF.
+	Hang {
+		consumer: Option<Box<super::hang::Consumer<E>>>,
+		info: moq_net::track::Resolving,
+	},
+	Msf(moq_net::track::Subscribing),
+	Failed(crate::Error),
 }
 
 impl<E: CatalogExt> Subscribing<E> {
 	/// Subscribe to the catalog track advertised by `format`.
 	pub(crate) fn new(broadcast: &moq_net::broadcast::Consumer, format: CatalogFormat) -> Self {
-		let track = match format {
-			CatalogFormat::Hang => broadcast
-				.track(hang::Catalog::DEFAULT_NAME)
-				.map(|track| track.subscribe(hang::Catalog::default_subscription())),
-			CatalogFormat::Msf => broadcast
-				.track(moq_msf::DEFAULT_NAME)
-				.map(|track| track.subscribe(None)),
+		let pending = match format {
+			CatalogFormat::Hang => match broadcast.track(hang::Catalog::DEFAULT_NAME) {
+				Ok(track) => Pending::Hang {
+					consumer: Some(Box::new(super::hang::Consumer::new(track.clone()))),
+					info: track.info().into_inner(),
+				},
+				Err(err) => Pending::Failed(err.into()),
+			},
+			CatalogFormat::Msf => match broadcast.track(moq_msf::DEFAULT_NAME) {
+				Ok(track) => Pending::Msf(track.subscribe(None).into_inner()),
+				Err(err) => Pending::Failed(err.into()),
+			},
 		};
-		Self {
-			format,
-			track: track.map(kio::Pending::into_inner).map_err(Into::into),
-			_ext: std::marker::PhantomData,
-		}
+		Self { pending }
 	}
 
 	/// The catalog consumer, once the track subscription is confirmed.
-	pub(crate) fn poll_ok(&self, waiter: &kio::Waiter) -> Poll<Result<Consumer<E>, crate::Error>> {
-		let track = match &self.track {
-			Ok(track) => ready!(track.poll_ok(waiter))?,
-			Err(err) => return Poll::Ready(Err(err.clone())),
-		};
-		let inner = match self.format {
-			CatalogFormat::Hang => State::Hang(super::hang::Consumer::new(track)),
-			CatalogFormat::Msf => State::Msf(super::msf::Consumer::new(track)),
+	pub(crate) fn poll_ok(&mut self, waiter: &kio::Waiter) -> Poll<Result<Consumer<E>, crate::Error>> {
+		let inner = match &mut self.pending {
+			Pending::Hang { consumer, info } => {
+				ready!(info.poll_ok(waiter))?;
+				State::Hang(*consumer.take().expect("resolves once"))
+			}
+			Pending::Msf(subscribing) => State::Msf(super::msf::Consumer::new(ready!(subscribing.poll_ok(waiter))?)),
+			Pending::Failed(err) => return Poll::Ready(Err(err.clone())),
 		};
 		Poll::Ready(Ok(Consumer { inner }))
 	}
