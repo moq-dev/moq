@@ -2656,7 +2656,7 @@ test.each([
 	["lite-03 ends clean with its last group finished", Version.DRAFT_03, true],
 	["lite-03 aborts with its last group still open", Version.DRAFT_03, false],
 	["lite-05 ends clean with its last group finished", Version.DRAFT_05, true],
-	["lite-05 aborts with its last group still owed", Version.DRAFT_05],
+	["lite-05 aborts with its last group still owed", Version.DRAFT_05, false],
 ] as const)("a session death before the tail settles: %s", async (_, version, settled) => {
 	const installed = new Manual().install();
 	const { quic, opened } = fakeSession();

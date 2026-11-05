@@ -54,8 +54,8 @@ Decisions:
 
 - ✅ 2026-11-04 (maintainer): JS request-setup budgets use general lifecycle
   bounds, like Rust. Every on-request track request (subscribe, track info,
-  fetch, fill) waits for its answer until demand ends, the caller cancels, stream
-  credit waits in the session queue, or the session closes; no fixed application-answer budget
+  fetch, fill) waits for its answer until demand ends, the caller cancels, or the
+  session closes; no fixed application-answer budget
   and no `.socket/<id>` namespace exemption. Not chosen: transport-only phase
   budgets. Main's later stream-credit scheduler replaces fail-fast credit with
   cancellable queued opens; cancellation returns unused credit to the next open.
