@@ -33,7 +33,7 @@ import type { Timescale } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { closeUnwanted } from "../util/announce.ts";
-import { Deadline, requestOptions } from "../util/deadline.ts";
+import { Deadline } from "../util/deadline.ts";
 import { abandoned as demandAbandoned, isAbandoned, unwanted } from "../util/demand.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
 import { min } from "../util/sequence.ts";
@@ -103,11 +103,12 @@ type SubscribeSetupState = {
 	registeredAlias?: bigint;
 	requests?: Requests;
 	/**
-	 * Whether the caller has given up. Setup checks this once the stream exists so a request
-	 * opened after the timeout still unwinds: nothing else settles setup if the peer has
-	 * gone quiet, and the cleanup that fired first saw no stream to tear down.
+	 * Aborts once the caller has given up. An open still waiting leaves the line, and setup
+	 * checks it once the stream exists so a request opened after the timeout still unwinds:
+	 * nothing else settles setup if the peer has gone quiet, and the cleanup that fired first
+	 * saw no stream to tear down.
 	 */
-	cancelled?: boolean;
+	cancel: AbortController;
 	/**
 	 * Whether the publisher answered with an error. It has torn the request down already, so
 	 * there is nothing left to cancel and ours ends cleanly.
@@ -522,7 +523,7 @@ export class Subscriber {
 
 		try {
 			const deadline = new Deadline();
-			const request = await deadline.wait(RequestStream.open(this.#session, deadline, this.#quic));
+			const request = await deadline.wait(RequestStream.open(this.#session, deadline, { quic: this.#quic }));
 
 			const run = async () => {
 				const msg = new SubscribeNamespace({ namespace: prefix, requestId, hidden });
@@ -788,7 +789,7 @@ export class Subscriber {
 		// Open the stream and wait for SUBSCRIBE_OK under a timeout. State
 		// flows back via `state` so the timeout path can clean up the stream
 		// and any registration if setup eventually finishes.
-		const state: SubscribeSetupState = {};
+		const state: SubscribeSetupState = { cancel: new AbortController() };
 		const deadline = new Deadline();
 		const setup = this.#openSubscribe(state, broadcast, request, requestId, deadline, known?.producer);
 
@@ -840,7 +841,7 @@ export class Subscriber {
 			// the first pass. The request ends once: a deadline failure already reset it through
 			// the same stream, so a second end here does nothing.
 			const cleanup = () => {
-				state.cancelled = true;
+				state.cancel.abort(e);
 
 				// A fill stream waiting on SUBSCRIBE_OK gets nothing, and a head already started goes.
 				state.fill?.(undefined);
@@ -1018,7 +1019,7 @@ export class Subscriber {
 			const setup = async () => {
 				const id = await this.#session.nextRequestId(signal);
 				if (id === undefined) throw await this.#closedSession();
-				stream = await RequestStream.open(this.#session, deadline, this.#quic);
+				stream = await RequestStream.open(this.#session, deadline, { quic: this.#quic, signal });
 				if (signal.aborted) {
 					stream.abort(signal.reason);
 					signal.throwIfAborted();
@@ -1182,7 +1183,7 @@ export class Subscriber {
 			active.throwIfAborted();
 			if (id === undefined) throw await this.#closedSession();
 			this.#ranges.set(id, accepted.promise);
-			stream = new RequestStream(await this.#session.openBi(requestOptions), this.#session, this.#quic);
+			stream = new RequestStream(await this.#session.openBi({ signal: active }), this.#session, this.#quic);
 			if (active.aborted) {
 				stream.abort(active.reason);
 				active.throwIfAborted();
@@ -1451,11 +1452,11 @@ export class Subscriber {
 			this.#fetches.set(fetchId, Promise.resolve(subscription));
 			subscription.fetchIds.push(fetchId);
 
-			request = new RequestStream(
-				await untilAborted(Promise.resolve(this.#session.openBi(requestOptions)), signal),
-				this.#session,
-				this.#quic,
-			);
+			request = new RequestStream(await this.#session.openBi({ signal }), this.#session, this.#quic);
+			if (signal.aborted) {
+				request.abort(signal.reason);
+				signal.throwIfAborted();
+			}
 			const msg = new Fetch({
 				requestId: fetchId,
 				type: { kind: "relativeJoining", subscription: subscribeId, offset: 0n },
@@ -1528,12 +1529,12 @@ export class Subscriber {
 	}> {
 		const version = this.#session.version;
 
-		state.stream = await RequestStream.open(this.#session, deadline, this.#quic);
+		const cancelled = state.cancel.signal;
+		state.stream = await RequestStream.open(this.#session, deadline, { quic: this.#quic, signal: cancelled });
 
-		// The timeout can fire while the open is still in flight, in which case cleanup ran
-		// with nothing to release. Bail now that the stream is recorded, so settling this
-		// promise hands it back to be torn down.
-		if (state.cancelled) throw new Error("subscribe cancelled before it was sent");
+		// Cleanup can run as the open hands over its stream, with nothing to release. Bail now
+		// that the stream is recorded, so settling this promise hands it back to be torn down.
+		if (cancelled.aborted) throw new Error("subscribe cancelled before it was sent");
 
 		const msg = new Subscribe({
 			requestId,
@@ -1559,7 +1560,7 @@ export class Subscriber {
 
 		// The caller may have given up while that write was in flight, resetting the request
 		// under it.
-		if (state.cancelled) throw new Error("subscribe cancelled while it was being sent");
+		if (cancelled.aborted) throw new Error("subscribe cancelled while it was being sent");
 		console.debug(`subscribe written: id=${requestId} broadcast=${broadcast} track=${request.name}`);
 
 		const response = await state.stream.next();
@@ -1580,7 +1581,7 @@ export class Subscriber {
 		}
 
 		const ok = await SubscribeOk.decode(response.reader, version);
-		if (state.cancelled) throw new Error("subscribe cancelled before acceptance");
+		if (cancelled.aborted) throw new Error("subscribe cancelled before acceptance");
 		const maxCacheDuration = ok.properties.maxCacheDuration;
 		if (maxCacheDuration !== undefined && maxCacheDuration > BigInt(Number.MAX_SAFE_INTEGER)) {
 			throw new RangeError("max cache duration exceeds safe milliseconds");

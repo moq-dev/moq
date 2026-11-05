@@ -106,6 +106,7 @@ hang = { version = "0.21.11", path = "rs/hang" }
 hashbrown = { version = "0.17.1", default-features = false }
 hashlink = "0.12.2"
 hex = "0.4"
+http-body = "1.0.1"
 humantime = "2.3"
 humantime-serde = "1.1.1"
 hyper = "1.11"
@@ -175,7 +176,7 @@ moq-vaapi = "0.1.0"
 # that argument, so moq-ffi and moq-c opt NVIDIA and VAAPI back in (OpenH264
 # through their own `openh264` feature, which release builds enable).
 moq-video = { version = "0.1.10", path = "rs/moq-video", default-features = false }
-mp4-atom = "0.17.0"
+mp4-atom = "0.17.1"
 nix = { version = "0.31.3", features = ["net", "socket", "uio"] }
 num_enum = "0.7"
 objc2 = "0.6.4"

@@ -4626,9 +4626,11 @@ version = "0.5.11"
 dependencies = [
  "async-trait",
  "axum",
+ "bench-harness",
  "bytes",
  "futures",
  "hang",
+ "http-body",
  "humantime",
  "kio",
  "m3u8-rs",
@@ -5342,9 +5344,9 @@ dependencies = [
 
 [[package]]
 name = "mp4-atom"
-version = "0.17.0"
+version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "718b5227fa90c52ed2e72d4d553560130d9e128acb6217d9fe0ea57312ee7063"
+checksum = "327faeb7d11fc3735194fdaeaa82af72167801bf39dd3d6b2684c8fc5cd7fc19"
 dependencies = [
  "bytes",
  "derive_more 2.1.1",
@@ -7010,6 +7012,7 @@ name = "qmux"
 version = "0.7.0"
 dependencies = [
  "anyhow",
+ "bench-harness",
  "bytes",
  "futures",
  "kio",

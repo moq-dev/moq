@@ -885,6 +885,55 @@ test("a route that goes for good ends the track as its last copy does", async ()
 	close();
 });
 
+// A relay refuses a subscription it cannot serve with a bare Internal, which is also how a
+// route fails to deliver. While that route still serves, no move will replace the copy, so
+// the read has to end with the refusal rather than wait for one.
+test("a route that refuses the track while still serving ends the read with its cause", async () => {
+	const { a, active, close } = await setup();
+	const ta = copy(a);
+	const sub = active.track("seq").subscribe();
+	const read = sub.recvGroup().catch((e: unknown) => e);
+	ta.producer.abort(new StreamError(StreamCode.Internal));
+	expect(await isPending(read)).toBe(false);
+	const err = await read;
+	expect(err).toBeInstanceOf(StreamError);
+	expect((err as StreamError).code).toBe(StreamCode.Internal);
+
+	close();
+});
+
+test("a copy that fails mid-serve on a route still serving is subscribed afresh", async () => {
+	const { a, active, close } = await setup();
+	const ta = copy(a);
+	const sub = active.track("seq").subscribe();
+	ta.write(0n);
+	expect(drain(sub)).toEqual([0n]);
+
+	ta.producer.abort(new StreamError(StreamCode.Internal));
+	const again = copy(a);
+	again.write(1n);
+	const group = await sub.recvGroup();
+	expect(group?.sequence).toBe(1n);
+
+	sub.close();
+	close();
+});
+
+// Mirrors `a_copy_verdict_aborts_without_querying_again` in rs/moq-net/src/model/front.rs.
+test("a copy that loses its route mid-serve on a route still serving ends the read", async () => {
+	const { a, active, close } = await setup();
+	const ta = copy(a);
+	const sub = active.track("seq").subscribe();
+	ta.write(0n);
+	expect(drain(sub)).toEqual([0n]);
+
+	ta.producer.abort(new StreamError(StreamCode.Unroutable));
+	await expect(sub.recvGroup()).rejects.toMatchObject({ code: StreamCode.Unroutable });
+
+	sub.close();
+	close();
+});
+
 test("between routes a reader keeps reading the copy it has", async () => {
 	const { origin, a, b, active, request, disposeA, close } = await setup();
 	const ta = copy(a);

@@ -2435,9 +2435,6 @@ test("a closed track still delivers a group parked above the cap once the cap is
 	expect(await track.nextGroup()).toBeUndefined();
 });
 
-// The final boundary counts datagrams: they share the group sequence namespace, and a
-// Rust peer feeds SUBSCRIBE_END into finish_at, so a boundary that ignored a trailing
-
 // 0 is the only encoding for "nothing produced"; an abort declares no boundary at all.
 test("end is group 0 for an empty track and undefined after an abort", async () => {
 	const empty = new TrackProducer("test");

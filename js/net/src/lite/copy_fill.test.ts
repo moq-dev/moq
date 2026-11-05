@@ -195,7 +195,9 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 			const first = peer.remote.track("video").subscribe(history);
 			for (let sequence = 0n; sequence < 4n; sequence++)
 				write(peer.track.createGroup(sequence), sequence, "live");
-			expect([...(await take(first, 4)).keys()]).toEqual([0n, 1n, 2n, 3n]);
+			// Before lite-07 a subscription carries no order and is served newest first, so only
+			// the set of groups is fixed.
+			expect(sorted(await take(first, 4)).map(([sequence]) => sequence)).toEqual([0n, 1n, 2n, 3n]);
 
 			// Both caches age out what nobody touched, a prune slice past the window; only the
 			// live edge stays.

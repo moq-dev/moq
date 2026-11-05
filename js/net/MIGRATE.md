@@ -27,6 +27,11 @@ Create a datagram track before or with its same-name stream track on those versi
 Lite-01..04 and transports without datagrams refuse datagram requests. moq-transport
 currently refuses them while its separate datagram-track adapter is implemented.
 
+### Opens wait their turn for stream credit ([#7894](https://github.com/moq-dev/moq/pull/7894))
+
+`NoStreamCredit` is removed: a request no longer fails when the peer grants no more streams. Every open waits for credit, and returning credit goes to the open with the highest `sendOrder`. A request's 10s deadline runs only while none of its streams waits to open.
+`OpenOptions.timeout` and `OpenOptions.waitUntilAvailable` are removed; drop them. `Writer.tryOpen` still gives up on `cancel`, and its `sendOrder` may be a function, read again while the open waits.
+
 ### Relative group anchors are `bigint`
 
 A `Track.Anchor.relative` count now uses `bigint`, like an absolute group sequence.
