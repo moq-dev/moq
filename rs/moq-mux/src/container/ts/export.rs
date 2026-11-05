@@ -101,7 +101,7 @@ fn sanitize_mux_rate(rate: u64) -> Option<u64> {
 
 /// Subscribe to a broadcast and produce an MPEG-TS byte stream.
 ///
-/// Use [`next`](Self::next) to pull one [`Frame`] per PCR grid slot: its `payload`
+/// Use [`poll_next`](Self::poll_next) to pull one [`Frame`] per PCR grid slot: its `payload`
 /// is the TS packets belonging to that slot, stamped at the slot's boundary. The
 /// leading PAT/PMT rides on the first frame (so it inherits a real timestamp), and
 /// is re-emitted at video keyframes and periodically for mid-stream tune-in. SI and
@@ -1698,11 +1698,7 @@ where
 	/// re-emitted at video keyframes and periodically for mid-stream tune-in.
 	/// Returns `None` when the broadcast ends. `duration` is always `None`: the
 	/// muxer has no use for it.
-	pub async fn next(&mut self) -> crate::Result<Option<Frame>> {
-		kio::wait(|waiter| self.poll_next(waiter)).await
-	}
-
-	/// Poll for the next MPEG-TS packet frame, or `None` once the export ends.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Frame>>> {
 		if self.pending.is_some() {
 			self.stop_old(waiter)?;

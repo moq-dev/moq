@@ -9,6 +9,7 @@ use crate::{
 	util::{BoxFuture, TaskSet, err_only},
 };
 use futures::FutureExt as _;
+use std::task::{Poll, ready};
 
 use super::{
 	Control, Message, Publisher, Subscriber, Version, active_count, auth, cluster, hidden, max_age, peer,
@@ -82,7 +83,7 @@ pub struct Config {
 	pub token: Option<crate::setup::Token>,
 
 	/// The peer's SETUP stream, when it was already read before [`start`] (a server
-	/// that gated on the client's path via [`accept_setup`]). It becomes the
+	/// that gated on the client's path via [`SetupAccept`]). It becomes the
 	/// GOAWAY channel; `None` lets the uni loop read the SETUP itself.
 	pub peer_setup_stream: Option<Reader<crate::transport::boxed::RecvStream, crate::Version>>,
 
@@ -507,53 +508,105 @@ fn self_origin(publish: Option<&origin::Consumer>, subscribe: Option<&origin::Pr
 		.unwrap_or_else(Hop::random)
 }
 
-/// Server: read the peer's SETUP off its uni stream before starting the
-/// session, returning that stream plus what it declared.
+/// Server: reads the peer's SETUP off its uni stream before starting the
+/// session, resolving to that stream plus what it declared.
 ///
-/// Blocks on the peer's Setup Stream. Any other uni stream racing ahead of it (padding,
+/// Waits for the peer's Setup Stream. Any other uni stream racing ahead of it (padding,
 /// or group data for a subscription the peer already holds) is held in
 /// [`PeerSetup::early`] for the session to classify. Pass the returned reader to
 /// [`start`] as its `peer_setup_stream` so GOAWAY monitoring continues without
 /// re-reading it.
-pub async fn accept_setup(session: &mut Transport, version: Version) -> Result<PeerSetup, Error> {
-	let outer_version = crate::Version::Ietf(version);
-	let mut early = Vec::new();
-
+pub struct SetupAccept {
+	version: Version,
 	// Each stream racing ahead of SETUP is held, so a peer opening them at once must not
 	// hold the task for its whole MAX_STREAMS credit.
-	let mut budget = kio::coop::Budget::new(32);
-	loop {
-		kio::wait(|waiter| budget.poll_yield(waiter)).await;
-		let recv = session.accept_uni().await.map_err(Error::from_transport)?;
-		let mut reader: Reader<crate::transport::boxed::RecvStream, crate::Version> = Reader::new(recv, outer_version);
+	budget: kio::coop::Budget,
+	early: Vec<Reader<crate::transport::boxed::RecvStream, crate::Version>>,
+	step: SetupStep,
+}
 
-		let kind = match reader.varint_peek().await {
-			Ok(kind) => kind,
-			Err(err) if died_before_header(&err) => {
-				tracing::debug!(%err, "dropping uni stream that died before its type");
-				continue;
-			}
-			Err(err) => return Err(err),
-		};
-		if kind != setup::SETUP {
-			early.push(reader);
-			continue;
+/// Where [`SetupAccept`] waits. Streams are taken one at a time: the next is accepted only
+/// once the last one's type has arrived.
+enum SetupStep {
+	/// Spending a pass of the budget before accepting another stream.
+	Yield,
+	/// Waiting for the peer's next uni stream.
+	Accept,
+	/// Waiting for this stream's type.
+	Peek(Reader<crate::transport::boxed::RecvStream, crate::Version>),
+	/// Waiting for the whole SETUP on its stream.
+	Decode(Reader<crate::transport::boxed::RecvStream, crate::Version>),
+}
+
+impl SetupAccept {
+	/// Start waiting for a `version` peer's SETUP.
+	pub fn new(version: Version) -> Self {
+		Self {
+			version,
+			budget: kio::coop::Budget::new(32),
+			early: Vec::new(),
+			step: SetupStep::Yield,
 		}
-
-		reader.set_priority(crate::priority::RECV_CONTROL);
-		let (setup, size) = reader.decode_sized::<setup::Setup>().await?;
-		let options = decode_peer_setup(&setup.parameters, version, false)?;
-		if session.address() == crate::transport::Address::Uri && options.path.is_some() {
-			return Err(Error::ProtocolViolation);
-		}
-
-		return Ok(PeerSetup {
-			stream: reader,
-			size,
-			options,
-			early,
-		});
 	}
+
+	/// The peer's SETUP, with the streams that raced ahead of it.
+	pub fn poll(&mut self, session: &Transport, waiter: &kio::Waiter) -> Poll<Result<PeerSetup, Error>> {
+		loop {
+			match &mut self.step {
+				SetupStep::Yield => {
+					ready!(self.budget.poll_yield(waiter));
+					self.step = SetupStep::Accept;
+				}
+				SetupStep::Accept => {
+					let recv = ready!(session.poll_accept_uni(waiter)).map_err(Error::from_transport)?;
+					self.step = SetupStep::Peek(Reader::new(recv, crate::Version::Ietf(self.version)));
+				}
+				SetupStep::Peek(reader) => {
+					let kind = match ready!(reader.poll_varint_peek(waiter)) {
+						Ok(kind) => kind,
+						Err(err) if died_before_header(&err) => {
+							tracing::debug!(%err, "dropping uni stream that died before its type");
+							self.step = SetupStep::Yield;
+							continue;
+						}
+						Err(err) => return Poll::Ready(Err(err)),
+					};
+					let SetupStep::Peek(mut reader) = std::mem::replace(&mut self.step, SetupStep::Yield) else {
+						unreachable!("matched above");
+					};
+					if kind != setup::SETUP {
+						self.early.push(reader);
+						continue;
+					}
+					reader.set_priority(crate::priority::RECV_CONTROL);
+					self.step = SetupStep::Decode(reader);
+				}
+				SetupStep::Decode(reader) => {
+					let (setup, size) = ready!(reader.poll_decode_sized::<setup::Setup>(waiter))?;
+					let options = decode_peer_setup(&setup.parameters, self.version, false)?;
+					if session.address() == crate::transport::Address::Uri && options.path.is_some() {
+						return Poll::Ready(Err(Error::ProtocolViolation));
+					}
+					let SetupStep::Decode(stream) = std::mem::replace(&mut self.step, SetupStep::Yield) else {
+						unreachable!("matched above");
+					};
+					return Poll::Ready(Ok(PeerSetup {
+						stream,
+						size,
+						options,
+						early: std::mem::take(&mut self.early),
+					}));
+				}
+			}
+		}
+	}
+}
+
+/// [`SetupAccept`] as a future, for tests.
+#[cfg(test)]
+pub(crate) async fn accept_setup(session: &Transport, version: Version) -> Result<PeerSetup, Error> {
+	let mut accept = SetupAccept::new(version);
+	kio::wait(|waiter| accept.poll(session, waiter)).await
 }
 
 /// What a peer's SETUP parameters say, parsed by [`decode_peer_setup`] for every caller.
@@ -834,11 +887,11 @@ impl Unis {
 			};
 			let uni = self.uni.clone();
 			let fatal = self.fatal.clone();
-			self.tasks.push(async move {
+			self.tasks.push(crate::util::future_task(async move {
 				if let Err(err) = uni.serve(reader).await {
 					fatal.lock().get_or_insert(err);
 				}
-			});
+			}));
 		}
 	}
 
@@ -1108,11 +1161,11 @@ async fn run_dispatch(
 		// header here could block later streams whose unread data holds flow control.
 		let bidi = bidi.clone();
 		let fatal = fatal.clone();
-		tasks.push(async move {
+		tasks.push(crate::util::future_task(async move {
 			if let Err(err) = bidi.serve(stream).await {
 				fatal.lock().get_or_insert(err);
 			}
-		});
+		}));
 	};
 
 	// `tasks` still holds the AUTH serve tasks, so the session's error lands on the
@@ -3011,7 +3064,7 @@ mod tests {
 			subgroup_header(VERSION, 7, 0).await,
 			setup,
 		]);
-		let accepted = accept_setup(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let accepted = accept_setup(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.expect("accept the SETUP");
 		assert_eq!(accepted.early.len(), 2, "both early streams are held");
