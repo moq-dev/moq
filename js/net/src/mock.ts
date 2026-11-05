@@ -132,7 +132,11 @@ export class MockTransport implements WebTransport {
 	 * re-rank), so a test can assert how the wire layer prioritized it. The mock always
 	 * delivers in creation order, so nothing else observes it.
 	 */
-	readonly sendStreams: { uni: SendStream[]; bidi: SendStream[] } = { uni: [], bidi: [] };
+	readonly sendStreams: { uni: SendStream[]; bidi: SendStream[]; datagrams: SendStream[] } = {
+		uni: [],
+		bidi: [],
+		datagrams: [],
+	};
 
 	#closeResolve!: (info: WebTransportCloseInfo) => void;
 	#bidiController!: ReadableStreamDefaultController<WebTransportBidirectionalStream>;
@@ -185,20 +189,21 @@ export class MockTransport implements WebTransport {
 						},
 					})
 				: undefined;
-			const writable = new WritableStream<Uint8Array>({
-				write: (chunk) => {
-					const peer = this.#peer;
-					if (!peer) return;
-					const controller = peer.#datagramController;
-					if (!controller) return;
-					try {
-						// Copy so the caller's scratch buffer reuse can't corrupt queued data.
-						controller.enqueue(new Uint8Array(chunk));
-					} catch {
-						// Peer closed; drop (datagrams are best-effort).
-					}
-				},
-			});
+			const writable = () =>
+				new WritableStream<Uint8Array>({
+					write: (chunk) => {
+						const peer = this.#peer;
+						if (!peer) return;
+						const controller = peer.#datagramController;
+						if (!controller) return;
+						try {
+							// Copy so the caller's scratch buffer reuse can't corrupt queued data.
+							controller.enqueue(new Uint8Array(chunk));
+						} catch {
+							// Peer closed; drop (datagrams are best-effort).
+						}
+					},
+				});
 			const datagrams: {
 				readable?: ReadableStream<Uint8Array>;
 				writable?: WritableStream<Uint8Array>;
@@ -207,7 +212,7 @@ export class MockTransport implements WebTransport {
 				outgoingHighWaterMark: number;
 				incomingMaxAge: null;
 				outgoingMaxAge: null;
-				createWritable?: () => WritableStream<Uint8Array>;
+				createWritable?: (options?: WebTransportSendStreamOptions) => SendStream;
 			} = {
 				readable,
 				incomingHighWaterMark: 0,
@@ -217,9 +222,10 @@ export class MockTransport implements WebTransport {
 				maxDatagramSize: 1200,
 			};
 			if (datagramWritable === "writable") {
-				datagrams.writable = writable;
+				datagrams.writable = writable();
 			} else if (datagramWritable === "createWritable") {
-				datagrams.createWritable = () => writable;
+				datagrams.createWritable = (options) =>
+					this.#sendStream(writable(), this.sendStreams.datagrams, options);
 			}
 			this.datagrams = datagrams as WebTransportDatagramDuplexStream;
 		} else {

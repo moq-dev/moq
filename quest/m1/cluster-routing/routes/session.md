@@ -104,7 +104,8 @@ under its proven key, so relays sharing a key file fail over as one. A peer that
 key gets a per-session key. `Scope::qualify` still takes the key from the
 caller, so this quest does not wait on the proof. Options shown:
 
-- ✅ A route key the peer proves once per announce stream, before the lite-07 cut
+- ✅ A route key the peer proves once per session in SETUP, before the lite-07 cut
+  (superseded 2026-11-05, maintainer, /quest-plan)
 - A route label carried in the grant (the earlier recommendation), with the
   proven key added after the cut
 - A per-session key now
@@ -122,7 +123,6 @@ admission.
 
 - [lite-07 route wire](/quest/m1/cluster-routing/routes/wire.md) - the messages this drives
 - [One Route handle](/quest/m1/api-audit/route/handle.md) - the origin's route surface this rewrites
-- [Listing and follow](/quest/m1/api-audit/route/events.md) - the announcement events this feeds ([moq-dev/moq#7678](https://github.com/moq-dev/moq/pull/7678))
 
 ## Related
 

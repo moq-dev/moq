@@ -500,6 +500,8 @@ benchmarks.
 
 ## Required
 
+- [Scoped peers prove a route key](/quest/m1/cluster-routing/routes/proof.md) - records the session proof decision and implementation
+
 - [lite-07 route wire](/quest/m1/cluster-routing/routes/wire.md) - lite-07 and the draft carry ROUTE, ANNOUNCE_FLOOR, ROUTE_REQUEST, and path-less ANNOUNCE
 - [Route session integration](/quest/m1/cluster-routing/routes/session.md) - one router per origin node drives the origin and every lite-07 announce stream
 - [Announcement availability](/quest/m1/cluster-routing/routes/availability.md) - announcements report availability, and a let-go is offline rather than END, in Rust and JS

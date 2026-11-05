@@ -16,7 +16,7 @@ const SECRET_SIZE = 32;
 /** The keying material export a WebTransport may offer; only some browsers ship it. */
 type Exporter = (label: BufferSource, context: BufferSource, outputLength: number) => Promise<ArrayBuffer | Uint8Array>;
 
-let pageKey: Promise<CryptoKeyPair> | undefined;
+let pageKey: Promise<CryptoKeyPair | undefined> | undefined;
 
 /**
  * The proof to send in SETUP for `transport`, or `undefined` when it cannot export keying
@@ -26,8 +26,11 @@ export async function proveRouteKey(transport: WebTransport, client: boolean): P
 	const exporter = (transport as { exportKeyingMaterial?: Exporter }).exportKeyingMaterial;
 	if (typeof exporter !== "function") return undefined;
 	const secret = new Uint8Array(await exporter.call(transport, EXPORTER_LABEL, new Uint8Array(), SECRET_SIZE));
-	pageKey ??= crypto.subtle.generateKey({ name: "Ed25519" }, false, ["sign", "verify"]) as Promise<CryptoKeyPair>;
-	return sign(await pageKey, secret, client);
+	// Select page capability once: unavailable Ed25519 leaves sessions unproven.
+	pageKey ??= (crypto.subtle.generateKey({ name: "Ed25519" }, false, ["sign", "verify"]) as Promise<CryptoKeyPair>)
+		.catch(() => undefined);
+	const key = await pageKey;
+	return key ? sign(key, secret, client) : undefined;
 }
 
 /** Sign the proof for `secret`, the session's exported keying material. Exported for tests. */

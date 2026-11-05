@@ -1016,7 +1016,7 @@ The sender's Ed25519 public key.
 The key's Ed25519 signature over the ASCII bytes `moq-lite route key`, then one byte naming the sender's side of the session (0 for the client, 1 for the server), then 32 bytes of keying material exported from the session with the label `EXPORTER-moq-lite-route-key` and an empty context.
 
 Binding 1 exports with the TLS exporter (Section 7.5 of [RFC8446]), and binding 2 with the WebTransport session's exporter [webtrans-h3] (see [Transports](#transports)).
-The other bindings have no exporter, and an endpoint MUST NOT send the parameter on them.
+An endpoint MUST NOT send the parameter on a session that provides no exporter.
 The exported material and the sender's side keep a proof from being replayed on another session or reflected back to its sender.
 
 Either endpoint MAY send it. A receiver MUST close the session with a PROTOCOL_VIOLATION if the value is not 96 bytes.

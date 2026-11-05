@@ -320,6 +320,7 @@ impl Connection {
 			client_hello: None,
 		});
 		let mut rng = StdRng::from_seed(rng_seed);
+		let path = PathData::new(remote, allow_mtud, None, 0, now, rng.random(), &config);
 		let mut this = Self {
 			grease_quic_bit,
 			qlog: config.qlog_sink(),
@@ -332,7 +333,7 @@ impl Connection {
 				now,
 				if pref_addr_cid.is_some() { 2 } else { 1 },
 			),
-			path: PathData::new(remote, allow_mtud, None, 0, now, &config),
+			path,
 			path_counter: 0,
 			allow_mtud,
 			local_ip,
@@ -705,7 +706,7 @@ impl Connection {
 			let bandwidth_probe =
 				space_id == SpaceId::Data
 					&& can_send.is_empty()
-					&& !close && match self.bandwidth_probe_ready(now, segment_size as u64 + untracked_bytes) {
+					&& !close && match self.bandwidth_probe_ready(now, untracked_bytes, segment_size as u64) {
 					bandwidth_probe::Ready::Idle => false,
 					bandwidth_probe::Ready::Blocked(until) => {
 						if let Some(until) = until {
@@ -1663,7 +1664,7 @@ impl Connection {
 	/// configuration in the [`transport::Config`].
 	#[cfg(test)]
 	pub(crate) fn path_changed(&mut self, now: Instant) {
-		self.path.reset(now, &self.config);
+		self.path.reset(now, self.rng.random(), &self.config);
 		self.path.congestion.on_probe_target(self.bandwidth_probe.target());
 		// The rebuilt controller never sees state the old one gave packets still in flight.
 		for space in SpaceId::iter() {
@@ -3419,6 +3420,7 @@ impl Connection {
 				Some(peer_max_udp_payload_size),
 				self.path_counter,
 				now,
+				self.rng.random(),
 				&self.config,
 			)
 		};

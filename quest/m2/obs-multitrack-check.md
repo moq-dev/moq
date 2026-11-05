@@ -34,7 +34,3 @@ OBS, so the manual run never happened.
   each rendition advertises its own bitrate in the catalog.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [Simulcast rung disable](/quest/m1/simulcast-rung-disable.md) - the shaped-uplink proof of the rung disable [moq-dev/moq#7029](https://github.com/moq-dev/moq/pull/7029) added, which turns these layers off as the grant falls

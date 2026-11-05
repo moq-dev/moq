@@ -122,11 +122,12 @@ impl Consumer {
 		self.sequence
 	}
 
-	/// Read the next verified frame, without blocking.
+	/// The next verified frame, or `None` once the group finished.
 	///
 	/// # Errors
 	///
 	/// [`Error::Signature`] once a frame has failed to verify, or a net error from the group.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Frame>>> {
 		let Some(inner) = self.inner.as_mut() else {
 			return Poll::Ready(Err(Error::Signature));
@@ -150,15 +151,6 @@ impl Consumer {
 				Poll::Ready(Err(err))
 			}
 		}
-	}
-
-	/// Read the next verified frame.
-	///
-	/// # Errors
-	///
-	/// Same as [`Self::poll_read_frame`].
-	pub async fn read_frame(&mut self) -> Result<Option<Frame>> {
-		kio::wait(|waiter| self.poll_read_frame(waiter)).await
 	}
 }
 

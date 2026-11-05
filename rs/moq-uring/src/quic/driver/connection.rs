@@ -266,11 +266,6 @@ impl Connection {
 		self.shared.close_code(error_code.into_inner(), reason);
 	}
 
-	/// Wait for the connection to close, returning why.
-	pub async fn closed(&self) -> Error {
-		kio::wait(|waiter| self.poll_closed(waiter)).await
-	}
-
 	/// The connection's statistics.
 	pub fn stats(&self) -> moq_quic::connection::Stats {
 		self.shared.conn.borrow().stats()
@@ -478,13 +473,15 @@ pub(crate) async fn establish(shared: Shared, deadline: Option<Instant>) -> Resu
 
 impl Connection {
 	/// Accept the next unidirectional stream the peer opens.
-	pub async fn accept_uni(&self) -> Result<recv::Stream, Error> {
-		kio::wait(|waiter| self.poll_accept_uni(waiter)).await
+	#[kio::wrapper]
+	pub fn poll_accept_uni(&self, waiter: &kio::Waiter) -> Poll<Result<recv::Stream, Error>> {
+		accept_uni(&self.shared, waiter)
 	}
 
 	/// Accept the next bidirectional stream the peer opens.
-	pub async fn accept_bi(&self) -> Result<(send::Stream, recv::Stream), Error> {
-		kio::wait(|waiter| self.poll_accept_bi(waiter)).await
+	#[kio::wrapper]
+	pub fn poll_accept_bi(&self, waiter: &kio::Waiter) -> Poll<Result<(send::Stream, recv::Stream), Error>> {
+		accept_bi(&self.shared, waiter)
 	}
 
 	/// Open a unidirectional stream scheduled by `options`, once the peer's stream credit
@@ -492,8 +489,9 @@ impl Connection {
 	///
 	/// # Panics
 	/// - when `options.group` belongs to another connection
-	pub async fn open_uni(&self, options: send::Options<'_>) -> Result<send::Stream, Error> {
-		kio::wait(|waiter| self.poll_open_uni(waiter, options)).await
+	#[kio::wrapper]
+	pub fn poll_open_uni(&self, waiter: &kio::Waiter, options: send::Options<'_>) -> Poll<Result<send::Stream, Error>> {
+		open(&self.shared, Dir::Uni, options, waiter).map_ok(|(send, _)| send)
 	}
 
 	/// Open a bidirectional stream scheduled by `options`, once the peer's stream credit
@@ -501,31 +499,7 @@ impl Connection {
 	///
 	/// # Panics
 	/// - when `options.group` belongs to another connection
-	pub async fn open_bi(&self, options: send::Options<'_>) -> Result<(send::Stream, recv::Stream), Error> {
-		kio::wait(|waiter| self.poll_open_bi(waiter, options)).await
-	}
-
-	/// Receive the next datagram.
-	pub async fn recv_datagram(&self) -> Result<Bytes, Error> {
-		kio::wait(|waiter| self.poll_recv_datagram(waiter)).await
-	}
-
-	/// [`Self::accept_uni`], as a poll.
-	pub fn poll_accept_uni(&self, waiter: &kio::Waiter) -> Poll<Result<recv::Stream, Error>> {
-		accept_uni(&self.shared, waiter)
-	}
-
-	/// [`Self::accept_bi`], as a poll.
-	pub fn poll_accept_bi(&self, waiter: &kio::Waiter) -> Poll<Result<(send::Stream, recv::Stream), Error>> {
-		accept_bi(&self.shared, waiter)
-	}
-
-	/// [`Self::open_uni`], as a poll.
-	pub fn poll_open_uni(&self, waiter: &kio::Waiter, options: send::Options<'_>) -> Poll<Result<send::Stream, Error>> {
-		open(&self.shared, Dir::Uni, options, waiter).map_ok(|(send, _)| send)
-	}
-
-	/// [`Self::open_bi`], as a poll.
+	#[kio::wrapper]
 	pub fn poll_open_bi(
 		&self,
 		waiter: &kio::Waiter,
@@ -534,12 +508,14 @@ impl Connection {
 		open(&self.shared, Dir::Bi, options, waiter).map_ok(|(send, recv)| (send, recv.expect("bidirectional")))
 	}
 
-	/// [`Self::recv_datagram`], as a poll.
+	/// Receive the next datagram.
+	#[kio::wrapper]
 	pub fn poll_recv_datagram(&self, waiter: &kio::Waiter) -> Poll<Result<Bytes, Error>> {
 		recv_datagram(&self.shared, waiter)
 	}
 
-	/// [`Self::closed`], as a poll.
+	/// Why the connection closed, once it has.
+	#[kio::wrapper]
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
 		poll_closed(&self.shared, waiter)
 	}

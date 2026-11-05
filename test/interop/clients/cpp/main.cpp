@@ -350,6 +350,7 @@ int subscribe(
         : deadline;
     auto announced = ok(session->consume()->follow(path, std::nullopt), "follow");
     auto consumer = until(announced->available(), read_deadline, "available");
+    if (!consumer) fail("first available() reported offline");
 
     // The catalog is a live track. A lazy publisher (e.g. the browser, which only encodes on
     // demand) may announce a rendition in a later update rather than the first snapshot, so
@@ -399,13 +400,14 @@ int subscribe(
         if (frames != expected_frames) fail("wrong finished media frame count");
         while (until(catalogs->next(), read_deadline, "catalog EOF")) {}
         for (;;) {
-            auto event = until(routes->next(), read_deadline, "announcement END");
+            auto event = until(routes->next(), read_deadline, "announcement absent");
             if (!event) fail("origin ended before broadcast withdrawal");
-            const auto *end = std::get_if<moq::AnnounceEvent::kEnd>(&event->get_variant());
+            const auto *end = std::get_if<moq::AnnounceEvent::kAbsent>(&event->get_variant());
             if (end && end->announce.prefix == path) break;
         }
         auto watch = ok(session->consume()->follow(path + ".health", std::nullopt), "health watch");
         auto health = until(watch->available(), read_deadline, "health available");
+        if (!health) fail("first health available() reported offline");
         auto track = until(health->subscribe_track("live", std::nullopt), read_deadline, "health subscribe");
         auto group = until(track->next_group(), read_deadline, "health group");
         if (!group) fail("missing health group");

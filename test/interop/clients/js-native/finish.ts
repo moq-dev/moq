@@ -56,7 +56,7 @@ export async function readFinish(
 			for (;;) {
 				const event = await routes.next();
 				if (!event) throw new Error("origin ended before broadcast withdrawal");
-				if (event.kind === "end" && event.prefix === path) break;
+				if (event.kind === "absent" && event.prefix === path) break;
 			}
 			let health = healthRequest.active.peek();
 			while (!health) {
