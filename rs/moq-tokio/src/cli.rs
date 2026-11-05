@@ -117,10 +117,11 @@ pub fn answer(
 /// `parsed` is the struct Usage filled from argv+env+defaults. File keys that
 /// neither the command line nor the environment set replace those defaults.
 ///
-/// The merge is a TOML round-trip, so a `#[serde(skip)]` field comes back as its
-/// default. The released CLI spellings live on such fields: collect
-/// [`Deprecated`] from `parsed` before calling this, and from
-/// the result for the file's own released keys.
+/// With a file, the merge is a TOML round-trip, so a `#[serde(skip)]` field comes
+/// back as its default; without one, `parsed` is returned unchanged. The released
+/// CLI spellings live on such fields: collect [`Deprecated`] from `parsed` before
+/// calling this, and from the result for the file's own released keys
+/// ([`Deprecated::extend`] drops the repeats when no file was given).
 pub struct Merge<'a> {
 	/// The settings declared by the root CLI.
 	pub registry: Registry,
