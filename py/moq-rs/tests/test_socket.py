@@ -216,7 +216,6 @@ async def test_dropping_the_endpoint_resets_a_live_session():
     b.close()
 
 
-
 async def test_tcp_ready_paces_a_writer_behind_a_slow_reader():
     a, b = endpoints()
     client, server = await tcp(a, b)
