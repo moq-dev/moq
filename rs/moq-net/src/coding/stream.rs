@@ -79,13 +79,13 @@ impl<S: crate::transport::poll::Session, V: StreamCodes> Stream<S, V> {
 		Poll::Ready(Ok(Self::build(send, recv, version)))
 	}
 
-	/// Accept a new stream with the given version.
-	pub async fn accept(session: &mut S, version: V) -> Result<Self, Error>
+	/// [`Self::poll_accept`] as a future, for tests.
+	#[cfg(test)]
+	pub(crate) async fn accept(session: &mut S, version: V) -> Result<Self, Error>
 	where
 		V: Clone,
 	{
-		let (send, recv) = session.accept_bi().await.map_err(|err| version.transport_error(err))?;
-		Ok(Self::build(send, recv, version))
+		kio::wait(|waiter| Self::poll_accept(session, version.clone(), waiter)).await
 	}
 
 	fn build(send: S::SendStream, recv: S::RecvStream, version: V) -> Self
