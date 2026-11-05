@@ -47,6 +47,17 @@ tracks after their producers had gone. Logs: `.tmp/trace-capture.log`,
 remaining stalls to catalog acknowledgement or startup loss without further
 evidence.
 
+Local review found that the acknowledgement track also needed to live as long
+as its publisher, and that startup source loss needed a diagnostic matching
+read loss. Both were fixed in `66be24934e`. A fresh copied-executable capture
+on that head, with the same GStreamer diagnostics and internally generated
+`just check --all` load, failed on execution 741 in 10.04 s:
+`7 never reached a pad` after tags 5 and 6. There were no reader warnings or
+session errors. The audio lifecycle noise was not the cause of this stall.
+Use `.tmp/retained-capture.log` and `.tmp/retained-check.log` for this cleaner
+reproduction. The recorded earlier failures remain in their aggregate capture
+logs; the per-invocation `.tmp/trace-last.log` is overwritten by later captures.
+
 
 Investigation in [moq-dev/moq#7932](https://github.com/moq-dev/moq/pull/7932),
 2026-11-04: the unchanged ignored test passed once alone, 50
