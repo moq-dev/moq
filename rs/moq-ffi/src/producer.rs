@@ -872,15 +872,16 @@ impl MoqTrackProducer {
 #[derive(uniffi::Object)]
 pub struct MoqGroupProducer {
 	sequence: u64,
-	inner: std::sync::Mutex<Option<moq_net::group::Producer>>,
-	/// Shares the group's one writer wakeup among every concurrent [`ready`](Self::ready) call.
-	ready: kio::Bridge<()>,
+	/// The group keeps one writer waker, so every [`ready`](Self::ready) call polls it with the
+	/// bridge's, which wakes them all. Every other call locks it through the bridge too, so a
+	/// wake it causes reaches a foreign continuation only after the lock is released.
+	inner: kio::Bridge<Option<moq_net::group::Producer>>,
 }
 
 impl Drop for MoqGroupProducer {
 	fn drop(&mut self) {
 		let _guard = crate::ffi::enter();
-		if let Some(group) = self.inner.get_mut().unwrap().take()
+		if let Some(group) = self.inner.get_mut().take()
 			&& group.poll_closed(&kio::Waiter::noop()).is_pending()
 		{
 			let _ = group.abort(moq_net::Error::Unroutable);
@@ -893,8 +894,7 @@ impl MoqGroupProducer {
 	pub(crate) fn from_inner(group: moq_net::group::Producer) -> Self {
 		Self {
 			sequence: group.sequence,
-			inner: std::sync::Mutex::new(Some(group)),
-			ready: kio::Bridge::new(()),
+			inner: kio::Bridge::new(Some(group)),
 		}
 	}
 }
@@ -909,7 +909,7 @@ impl MoqGroupProducer {
 	/// Create a consumer that reads frames from this group.
 	pub fn consume(&self) -> Result<Arc<MoqGroupConsumer>, MoqError> {
 		let _guard = crate::ffi::enter();
-		let guard = self.inner.lock().unwrap();
+		let guard = self.inner.lock();
 		let group = guard.as_ref().ok_or(MoqError::Closed)?;
 		Ok(Arc::new(MoqGroupConsumer::new(group.consume(), Background::default())))
 	}
@@ -922,7 +922,7 @@ impl MoqGroupProducer {
 	pub fn write_frame(&self, frame: MoqFrame) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let timestamp = frame.timestamp.map(TryInto::try_into).transpose()?;
-		let mut guard = self.inner.lock().unwrap();
+		let mut guard = self.inner.lock();
 		let group = guard.as_mut().ok_or(MoqError::Closed)?;
 		group.write_frame(timestamp, frame.payload)?;
 		Ok(())
@@ -939,16 +939,11 @@ impl MoqGroupProducer {
 	/// write reports why. Fails with `Closed` after [`abort`](Self::abort).
 	pub async fn ready(&self, size: u64) -> Result<(), MoqError> {
 		let frame = moq_net::frame::Info { size, timestamp: None };
-		// The group keeps one writer waker, so every call polls it with the bridge's, which
-		// wakes them all; a call's own waker would replace another's and strand it.
 		let mut park = kio::Park::default();
 		crate::ffi::run(kio::wait(|waiter| {
-			self.ready.poll(waiter, |_, cx| {
-				let guard = self.inner.lock().unwrap();
-				match guard.as_ref() {
-					Some(group) => group.poll_ready(park.hold(cx), &frame).map(Ok),
-					None => Poll::Ready(Err(MoqError::Closed)),
-				}
+			self.inner.poll(waiter, |group, cx| match group {
+				Some(group) => group.poll_ready(park.hold(cx), &frame).map(Ok),
+				None => Poll::Ready(Err(MoqError::Closed)),
 			})
 		}))
 		.await
@@ -959,7 +954,7 @@ impl MoqGroupProducer {
 	/// The handle remains so a later [`abort`](Self::abort) can still run.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
-		let mut guard = self.inner.lock().unwrap();
+		let mut guard = self.inner.lock();
 		let group = guard.as_mut().ok_or(MoqError::Closed)?;
 		group.finish()?;
 		Ok(())
@@ -968,8 +963,7 @@ impl MoqGroupProducer {
 	/// Abort this group with an application error code.
 	pub fn abort(&self, error_code: u16) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
-		let mut guard = self.inner.lock().unwrap();
-		let group = guard.take().ok_or(MoqError::Closed)?;
+		let group = self.inner.lock().take().ok_or(MoqError::Closed)?;
 		group.abort(moq_net::Error::App(error_code))?;
 		Ok(())
 	}
@@ -979,7 +973,7 @@ impl MoqGroupProducer {
 impl MoqGroupProducer {
 	/// Wait until a consumer wants this group.
 	pub(crate) async fn wanted(&self) -> Result<(), MoqError> {
-		let mut demand = self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?.demand();
+		let mut demand = self.inner.lock().as_ref().ok_or(MoqError::Closed)?.demand();
 		while !demand.wanted_changed().await? {}
 		Ok(())
 	}

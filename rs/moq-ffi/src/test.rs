@@ -9549,3 +9549,57 @@ async fn a_waiting_ready_ends_on_abort() {
 		.unwrap();
 	assert!(matches!(result, Err(MoqError::Closed)), "{result:?}");
 }
+
+/// UniFFI's waker runs the foreign continuation on the waking thread, and a binding may poll
+/// the woken call right there. A group call that wakes a parked `ready` must release the group
+/// first, or that inline poll deadlocks on it.
+#[tokio::test]
+async fn group_calls_wake_ready_after_unlocking() {
+	type Ready = std::pin::Pin<Box<dyn Future<Output = Result<(), MoqError>> + Send>>;
+
+	/// Polls its call inline on every wake, as an unconfined coroutine would.
+	struct Inline {
+		ready: std::sync::Mutex<Ready>,
+		result: std::sync::Mutex<Option<Result<(), MoqError>>>,
+	}
+	impl Inline {
+		fn park(group: &Arc<MoqGroupProducer>) -> Arc<Self> {
+			let group = group.clone();
+			let inline = Arc::new(Self {
+				ready: std::sync::Mutex::new(Box::pin(async move { group.ready(1).await })),
+				result: Default::default(),
+			});
+			inline.poll();
+			assert!(inline.result.lock().unwrap().is_none(), "no reader holds the group yet");
+			inline
+		}
+		fn poll(self: &Arc<Self>) {
+			// The call wakes itself while it ends; that wake has nothing left to poll.
+			let Ok(mut ready) = self.ready.try_lock() else { return };
+			let waker = std::task::Waker::from(self.clone());
+			if let std::task::Poll::Ready(result) = ready.as_mut().poll(&mut std::task::Context::from_waker(&waker)) {
+				*self.result.lock().unwrap() = Some(result);
+			}
+		}
+	}
+	impl std::task::Wake for Inline {
+		fn wake(self: Arc<Self>) {
+			self.poll();
+		}
+	}
+
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("tcp".into(), None).unwrap();
+
+	let group = track.append_group().unwrap();
+	let parked = Inline::park(&group);
+	let _reader = group.consume().unwrap();
+	let result = parked.result.lock().unwrap().take();
+	assert!(matches!(result, Some(Ok(()))), "{result:?}");
+
+	let group = track.append_group().unwrap();
+	let parked = Inline::park(&group);
+	group.abort(1).unwrap();
+	let result = parked.result.lock().unwrap().take();
+	assert!(matches!(result, Some(Err(MoqError::Closed))), "{result:?}");
+}
