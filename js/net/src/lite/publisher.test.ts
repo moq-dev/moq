@@ -796,13 +796,13 @@ async function servedSubscription(
 		serving,
 		parked: gate.parked,
 		release: gate.release,
-		// Resolve a pending track with the publisher's request for it, answering with `held`,
-		// as a copy a wire subscription feeds when `received`.
-		async accept(held: bigint[] = [], received = false) {
+		// Resolve a pending track with the publisher's request for it, answering with `held`
+		// and, when `reported`, an upstream's report of a newer largest group.
+		async accept(held: bigint[] = [], reported?: bigint) {
 			const pulled = await request;
 			if (!pulled) throw new Error("the publisher never requested the track");
 			const staged = hooks.stageRequest(pulled, info);
-			if (received) hooks.receiveTrack(staged.producer);
+			if (reported !== undefined) hooks.reportedGroup(staged.producer, reported);
 			for (const sequence of held) {
 				const group = staged.producer.createGroup(sequence);
 				for (const frame of frames) group.writeFrame(textFrame(frame, Timestamp.fromMillis(Number(sequence))));
@@ -1472,75 +1472,26 @@ test("lite draft-05: an update dropping the floor re-pins to the latest group", 
 });
 
 // A SUBSCRIBE can beat its track resolving, as one a relay serves from a copy still fetching
-// upstream. What a lite-03/04 copy holds then is not the live edge, so the join waits 50 ms
-// past the answer and starts at the newest group known by then: older ones, cached or
-// arriving after, are history.
-// Routed, the join reads the front's serving copy, which the wire feeds.
+// upstream. Groups the track holds once it does are older than the join, so an absent Group
+// Start is still the latest group known then, including one the upstream reported.
 test.each([
-	[Version.DRAFT_03, false],
-	[Version.DRAFT_04, false],
-	[Version.DRAFT_04, true],
+	[Version.DRAFT_03, undefined],
+	[Version.DRAFT_04, undefined],
+	[Version.DRAFT_04, 9n],
+	[Version.DRAFT_05, undefined],
 ])(
-	"lite %s (routed %s): a subscribe that beats a copy resolving starts at the newest group once settled",
-	async (version, routed) => {
-		const clock = new Manual();
-		const installed = clock.install();
-		const sub = await servedSubscription({ version, pending: true, routed });
-		try {
-			await sub.accept([0n, 3n], true);
-			await clock.advance(Nano.zero);
-			// The SUBSCRIBE_OK names no start, so it never waits on the settle.
-			expect("ok" in (await decodeSubscribeResponse(sub.client.reader, version))).toBe(true);
-			sub.serve(5n);
-			await clock.advance(Nano.fromMilli(Milli(50)));
-			sub.serve(4n);
-			sub.serve(9n);
-			// Headers only: frames before lite-05 carry no timestamp for `servedGroup` to read.
-			expect(await sub.servedHeader()).toBe(5n);
-			expect(await sub.servedHeader()).toBe(9n);
-		} finally {
-			await sub.close();
-			installed.close();
-		}
-	},
-);
-
-// Nothing known by the settle leaves no history to skip: every group that follows is served.
-test.each([Version.DRAFT_03, Version.DRAFT_04])(
-	"lite %s: a subscribe that beats an empty copy resolving serves every later group",
-	async (version) => {
-		const clock = new Manual();
-		const installed = clock.install();
+	"lite %s (reported %s): a subscribe that beats its track resolving joins at its newest group",
+	async (version, reported) => {
 		const sub = await servedSubscription({ version, pending: true });
 		try {
-			await sub.accept([], true);
-			await clock.advance(Nano.zero);
-			await clock.advance(Nano.fromMilli(Milli(50)));
-			sub.serve(0n);
-			sub.serve(1n);
-			expect(await sub.servedHeader()).toBe(0n);
-			expect(await sub.servedHeader()).toBe(1n);
-		} finally {
-			await sub.close();
-			installed.close();
-		}
-	},
-);
-
-// A local track's answer is its own newest group, as is a lite-05 copy's, whose first-frame
-// latency allows no wait: the join starts there at once.
-test.each([
-	[Version.DRAFT_03, false],
-	[Version.DRAFT_04, false],
-	[Version.DRAFT_05, false],
-	[Version.DRAFT_05, true],
-])(
-	"lite %s (received %s): a subscribe that beats its track resolving joins at its newest group",
-	async (version, received) => {
-		const sub = await servedSubscription({ version, pending: true });
-		try {
-			await sub.accept([0n, 3n, 7n], received);
-			expect(await sub.servedHeader()).toBe(7n);
+			await sub.accept([0n, 3n, 7n], reported);
+			if (reported !== undefined) {
+				// The SUBSCRIBE_OK follows the floor, so these arrive after the join took it.
+				expect("ok" in (await decodeSubscribeResponse(sub.client.reader, version))).toBe(true);
+				sub.serve(8n);
+				sub.serve(9n);
+			}
+			expect(await sub.servedHeader()).toBe(reported ?? 7n);
 			expect(await sub.servedSequence()).toBeUndefined();
 		} finally {
 			await sub.close();

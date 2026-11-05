@@ -357,8 +357,6 @@ export interface ResumeSource {
 	forgetPastBudget(delivered: Delivered): void;
 	/** The newest sequence any copy has seen. */
 	latest(): bigint | undefined;
-	/** Whether a wire subscription feeds the serving copy. */
-	received(): boolean;
 	/** The serving copy's declared start, raised to its cursor floor, or `"pending"` until resolved. */
 	start(): bigint | "pending" | undefined;
 	/** The logical track's declared exclusive end, as the first copy to know it declared it. */
@@ -543,11 +541,6 @@ export const hooks: {
 	tailGrace: (producer: Producer) => Milli;
 	/** Snapshot the latest group sequence for wire positioning; assigned by `track.ts`. */
 	latestSequence: (subscriber: Subscriber) => bigint | undefined;
-	/**
-	 * Whether a wire subscription feeds the subscriber's track, or a front's serving copy;
-	 * assigned by `track.ts`.
-	 */
-	received: (subscriber: Subscriber) => boolean;
 	/**
 	 * The source's declared start, raised to the subscriber's cursor floor, or `"pending"` while
 	 * the upstream START that resolves it has yet to arrive; assigned by `track.ts`.
@@ -832,9 +825,6 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	latestSequence: () => {
-		throw new Error("track.ts not loaded");
-	},
-	received: () => {
 		throw new Error("track.ts not loaded");
 	},
 	sourceStart: () => {

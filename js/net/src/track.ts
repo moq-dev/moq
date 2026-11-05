@@ -787,8 +787,6 @@ let owedRuns: (producer: Producer, start: bigint, end: bigint) => Iterable<Run &
 let owedGroup: (producer: Producer, start: bigint, end: bigint) => { sequence: bigint; folds?: number } | undefined;
 let fillEdge: (producer: Producer) => bigint | undefined;
 let sourceStart: (producer: Producer) => bigint | "pending" | undefined;
-// Whether a wire subscription feeds the producer; assigned in its static block.
-let fed: (producer: Producer) => boolean;
 // The lowest group a reader naming `named` asks a fill for; see `Producer.#fillFloor`.
 let fillFloor: (producer: Producer, named: bigint | undefined) => bigint | undefined;
 // The producer's checked group starts, sorted by sequence; assigned in its static block.
@@ -996,7 +994,6 @@ export class Producer {
 			!producer.#subscribed && producer.#state.info.peek()?.ietf !== undefined
 				? producer.#state.largest.peek()?.group
 				: undefined;
-		fed = (producer) => producer.#subscribed;
 		hooks.receiveTrack = (producer, starts = {}) => {
 			producer.#subscribed = true;
 			producer.#starts = starts;
@@ -2849,11 +2846,6 @@ export class Subscriber {
 		};
 		hooks.latestSequence = (subscriber) =>
 			subscriber.#resume ? subscriber.#resume.latest() : subscriber.#state.latest;
-		hooks.received = (subscriber) => {
-			if (subscriber.#resume) return subscriber.#resume.received();
-			const producer = subscriber.#state.producer;
-			return producer !== undefined && fed(producer);
-		};
 		hooks.bufferedLargest = (subscriber) => subscriber.#bufferedLargest();
 		hooks.objectLargest = (subscriber) => {
 			if (subscriber.#resume) return subscriber.#resume.objectLargest();

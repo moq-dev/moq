@@ -1094,11 +1094,6 @@ class Reader implements ResumeSource {
 		if (newest) hooks.forgetPastBudget(newest.sub, delivered);
 	}
 
-	received(): boolean {
-		const serving = this.#serving();
-		return serving !== undefined && hooks.received(serving.sub);
-	}
-
 	latest(): bigint | undefined {
 		let latest: bigint | undefined;
 		for (const copy of this.#copies) {

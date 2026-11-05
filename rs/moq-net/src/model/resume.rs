@@ -929,14 +929,6 @@ impl Subscriber {
 		self.reader().latest()
 	}
 
-	/// Whether the copy serving, or parked, was received from a remote publisher.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(super) fn is_received(&self) -> bool {
-		let reader = self.reader();
-		let copy = reader.route.serving().or_else(|| reader.route.parked());
-		copy.is_some_and(|copy| copy.is_received())
-	}
-
 	/// Poll for a largest location within `bounds` newer than `seen`; see [`Consumer::poll_largest`].
 	pub(super) fn poll_largest(
 		&mut self,
@@ -2527,24 +2519,6 @@ mod test {
 		track::Request::new(Arc::new(broadcast::Info::default()), "video")
 			.routes(routes.consume())
 			.accept(crate::track::Info::timed())
-	}
-
-	/// A front's reader is fed remotely when its serving copy is, or its parked one.
-	#[test]
-	fn a_front_reader_is_received_through_its_copy() {
-		let routes = Producer::new();
-		let logical = logical(&routes);
-		let reader = subscribe(&logical, Duration::from_secs(1));
-		assert!(!reader.is_received(), "no copy serves yet");
-		let local = copy();
-		routes.serve(local.consume());
-		assert!(!reader.is_received(), "a local copy");
-		let remote = copy();
-		remote.received();
-		routes.serve(remote.consume());
-		assert!(reader.is_received(), "a received copy");
-		routes.park();
-		assert!(reader.is_received(), "a parked received copy");
 	}
 
 	fn subscribe(logical: &track::Producer, max_delay: Duration) -> track::Subscriber {

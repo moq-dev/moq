@@ -5255,16 +5255,6 @@ impl Consumer {
 		self.with_state(|state| state?.read().max_sequence)
 	}
 
-	/// Whether a remote publisher feeds this track: a copy received from one, or a front's
-	/// track it serves through one.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn is_received(&self) -> bool {
-		if let Some(serving) = self.serving() {
-			return serving.is_received();
-		}
-		self.with_state(|state| state.is_some_and(|state| state.read().received))
-	}
-
 	/// The first group the declared end excludes whole, or `None` while the track is open ended.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn final_sequence(&self) -> Option<u64> {
@@ -8787,16 +8777,6 @@ impl Subscriber {
 				Poll::Ready(largest) => largest,
 				Poll::Pending => None,
 			},
-		}
-	}
-
-	/// Whether a remote publisher feeds this track: a copy received from one, or a front's
-	/// logical track served through one.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn is_received(&self) -> bool {
-		match &self.inner {
-			Inner::Plain(cursor) => cursor.state.read().received,
-			Inner::Resume(resume, _) => resume.is_received(),
 		}
 	}
 
