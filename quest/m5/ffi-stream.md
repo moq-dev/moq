@@ -12,7 +12,7 @@ and writes the stream in-process.
 
 Decided 2026-10-28 with the maintainer (moq.pro T3 planning interview): the
 named consumer is moq.pro's
-[T3 Code over MoQ](https://github.com/moq-dev/moq.pro/blob/main/quest/m5/t3/README.md)
+[T3 Code over MoQ](https://github.com/moq-dev/moq.pro/blob/main/quest/m3/t3/README.md)
 line, whose React Native app reaches its host through a native module over
 these bindings instead of the WebSocket fallback, so a lossy mobile link keeps
 QUIC's per-stream recovery.

@@ -4,7 +4,7 @@
 
 `rind-instant-acme` is on crates.io, built on a published instant-acme 0.9.
 It holds once moq-dev/rind's
-[Publish rind-instant-acme](https://github.com/moq-dev/rind/blob/main/quest/m5/instant-acme-publish.md)
+[Publish rind-instant-acme](https://github.com/moq-dev/rind/blob/main/quest/m3/instant-acme-publish.md)
 quest is deleted and `cargo search rind-instant-acme` shows it. This quest
 only waits; delete it once that holds.
 

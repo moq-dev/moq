@@ -12,7 +12,7 @@ and typed authentication failures as Rust and JS.
 Decided 2026-10-28 with the maintainer (moq.pro T3 planning interview): this
 is the quest the [encrypted consumer](/quest/m5/e2ee/consumer.md) defers FFI
 to, adding both halves. The named consumer is moq.pro's
-[T3 Code over MoQ](https://github.com/moq-dev/moq.pro/blob/main/quest/m5/t3/README.md)
+[T3 Code over MoQ](https://github.com/moq-dev/moq.pro/blob/main/quest/m3/t3/README.md)
 mobile app, which receives its credential in a pairing link.
 
 Wrap `moq-crypto`'s producer and consumer entry points without new crypto in

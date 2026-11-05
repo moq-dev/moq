@@ -15,7 +15,7 @@ field: absent, never zero.
 ## Plan
 
 Starting point: the branch `quest/m2/qos/lag-histogram` on
-[t0ms's fork](https://github.com/t0ms/moq/tree/quest/m3/qos/lag-histogram),
+[t0ms's fork](https://github.com/t0ms/moq/tree/quest/m2/qos/lag-histogram),
 head `9ed8b831f93f39565333a92d5dd4a5f24d2c3fc5`, from
 [moq-dev/moq#6791](https://github.com/moq-dev/moq/pull/6791) (closed
 unmerged 2026-10-26). It ports the #4133 sampler onto `main` with
