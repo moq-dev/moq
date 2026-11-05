@@ -533,10 +533,10 @@ pub struct Retained {
 
 #[derive(Default)]
 struct State {
-	/// The identity this node's sessions prove, if it originates one.
+	/// This node's own identity, if it originates one.
 	proven: Option<Id>,
-	/// Identities this node serves itself, with their seqnos: its proven one,
-	/// plus any it forges.
+	/// Identities this node serves itself, with their seqnos: its own, plus any
+	/// it forges.
 	origins: BTreeMap<Id, Seqno>,
 	/// Whether this node advertises identities it does not serve.
 	transit: bool,
@@ -686,9 +686,6 @@ pub struct Net {
 	/// Every `(subject, scope)` a configured link grants.
 	grants: BTreeSet<(&'static str, &'static str)>,
 	up: BTreeSet<(Node, Node)>,
-	/// `(node, peer)`: the identity `node` proved on its session to `peer`. A
-	/// session proves one key, once.
-	proved: BTreeMap<(Node, Node), Id>,
 	/// `(at, peer)`: `peer` sent `at` a GOAWAY on their current session.
 	draining: BTreeSet<(Node, Node)>,
 	queues: BTreeMap<(Node, Node), VecDeque<Msg>>,
@@ -717,7 +714,6 @@ impl Net {
 			links: vec![vec![None; nodes]; nodes],
 			grants: BTreeSet::new(),
 			up: BTreeSet::new(),
-			proved: BTreeMap::new(),
 			draining: BTreeSet::new(),
 			queues: BTreeMap::new(),
 			acks: BTreeMap::new(),
@@ -773,11 +769,6 @@ impl Net {
 	pub fn connect(&mut self, a: Node, b: Node) {
 		assert!(self.links[a][b].is_some(), "unknown link {a}-{b}");
 		self.up.insert(Self::pair(a, b));
-		for (x, y) in [(a, b), (b, a)] {
-			if let Some(id) = self.nodes[x].proven {
-				self.proved.insert((x, y), id);
-			}
-		}
 		self.advertise(a);
 		self.advertise(b);
 	}
@@ -792,7 +783,6 @@ impl Net {
 		for (x, y) in [(a, b), (b, a)] {
 			self.queues.remove(&(x, y));
 			self.acks.remove(&(x, y));
-			self.proved.remove(&(x, y));
 			self.held.remove(&(x, y));
 			self.draining.remove(&(y, x));
 			let state = &mut self.nodes[y];
@@ -848,14 +838,9 @@ impl Net {
 		(0..self.nodes.len()).filter(move |&peer| self.links[node][peer].is_some() && self.connected(node, peer))
 	}
 
-	/// `node` starts originating `id` at seqno `seqno`, proving it on every session.
+	/// `node` starts originating `id` at seqno `seqno`.
 	pub fn originate(&mut self, node: Node, id: Id, seqno: Seqno) {
 		assert_eq!(id & QUALIFIED, 0, "a key-derived identity is never qualified");
-		let peers: Vec<Node> = self.peers(node).collect();
-		for peer in peers {
-			let proved = *self.proved.entry((node, peer)).or_insert(id);
-			assert_eq!(proved, id, "node {node}'s session to {peer} already proved another key");
-		}
 		let state = &mut self.nodes[node];
 		state.proven = Some(id);
 		state.origins.insert(id, seqno);
@@ -869,7 +854,7 @@ impl Net {
 		self.advertise(node);
 	}
 
-	/// `node` advertises `id` as if forwarding it, without proving it.
+	/// `node` advertises `id` as if forwarding it.
 	pub fn forge(&mut self, node: Node, id: Id, seqno: Seqno) {
 		self.nodes[node].origins.insert(id, seqno);
 		self.advertise(node);
@@ -889,9 +874,8 @@ impl Net {
 
 	/// The origin at `node` retires its identity for a fresh one and announces
 	/// its claims again there: what it does instead of advancing a seqno or a
-	/// revision to [`VARINT_MAX`]. A session proves one key once, so every
-	/// session closes and reopens to prove the new one, and every node lets the
-	/// old identity go.
+	/// revision to [`VARINT_MAX`]. Every session closes and reopens, so every
+	/// node lets the old identity go.
 	fn rotate(&mut self, node: Node) {
 		let peers: Vec<Node> = self.peers(node).collect();
 		for &peer in &peers {
@@ -917,7 +901,7 @@ impl Net {
 		self.nodes[node].views.get_mut(&id).unwrap().floors.insert("", rev);
 	}
 
-	/// The identity `node` proves.
+	/// The identity `node` originates.
 	pub fn proven(&self, node: Node) -> Id {
 		self.nodes[node].proven.expect("not an origin")
 	}
@@ -1185,9 +1169,12 @@ impl Net {
 	}
 
 	/// The key `at` files `id` under when `from` names it, or `None` when refused.
+	///
+	/// Under a scoped grant every identity is qualified, the sender's own included, by
+	/// the grant's subject, which stands in for the route key the sender proved.
 	fn key(&self, at: Node, from: Node, id: Id) -> Option<Id> {
 		match self.side(at, from).grant {
-			Some(grant) if self.proved.get(&(from, at)) != Some(&id) => {
+			Some(grant) => {
 				if id & QUALIFIED != 0 && !self.cfg.requalify {
 					return None;
 				}

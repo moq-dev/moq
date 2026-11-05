@@ -69,6 +69,7 @@ hyper = { workspace = true, optional = true }
 hyper-util = { workspace = true, features = ["server-auto"] }
 kio = { workspace = true, features = ["runtime", "serde"] }
 moq-auth = { workspace = true, features = ["async", "client"] }
+moq-crypto = { workspace = true, features = ["sign"] }
 moq-net = { workspace = true }
 # The flow-control limits both QUIC runtimes take, for widening a peer's connection.
 moq-quic = { workspace = true }

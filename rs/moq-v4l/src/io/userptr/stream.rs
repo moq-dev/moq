@@ -22,6 +22,9 @@ pub struct Stream {
 	timeout: Option<i32>,
 
 	active: bool,
+	/// Whether userspace holds the buffer at `arena_index`, so the next frame
+	/// queues it back first. A dequeue that timed out holds none.
+	held: bool,
 }
 
 impl Stream {
@@ -62,6 +65,7 @@ impl Stream {
 			buf_meta,
 			active: false,
 			timeout: None,
+			held: false,
 		})
 	}
 
@@ -179,6 +183,7 @@ impl<'a> CaptureStream<'a> for Stream {
 			)?;
 		}
 		self.arena_index = v4l2_buf.index as usize;
+		self.held = true;
 
 		self.buf_meta[self.arena_index] = Metadata {
 			bytesused: v4l2_buf.bytesused,
@@ -193,14 +198,19 @@ impl<'a> CaptureStream<'a> for Stream {
 
 	fn next(&'a mut self) -> io::Result<(&'a Self::Item, &'a Metadata)> {
 		if !self.active {
+			// STREAMOFF handed every buffer back, so none is held over.
+			self.held = false;
 			// Enqueue all buffers once on stream start
 			for index in 0..self.arena.bufs.len() {
 				self.queue(index)?;
 			}
 
 			self.start()?;
-		} else {
+		} else if self.held {
+			// After a timed-out dequeue the driver already holds every buffer, and
+			// queueing one twice fails with EINVAL.
 			self.queue(self.arena_index)?;
+			self.held = false;
 		}
 
 		self.arena_index = self.dequeue()?;
