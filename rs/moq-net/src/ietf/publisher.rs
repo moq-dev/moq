@@ -1369,6 +1369,7 @@ impl SubscribeRequest {
 /// An admitted SUBSCRIBE's serve, which ends however its authority does: dropping it
 /// releases everything it holds upstream.
 struct Serving {
+	resuming: bool,
 	datagrams: Option<crate::datagram::Consumer>,
 	stream_error: Option<Error>,
 	/// The filter the SUBSCRIBE asked for, which every saved join boundary follows.
@@ -1413,11 +1414,6 @@ enum ServingStep {
 	Pausing,
 	/// Paused, answering updates until one resumes it.
 	Paused(WaitResume),
-	/// Subscribing again for the update resuming it.
-	Resume {
-		track: track::Consumer,
-		subscribe: SubscribeTrack,
-	},
 	/// Flushing the error that fails the resuming update.
 	ResumeFailed(Error),
 	/// Flushing the REQUEST_OK answering the resuming update.
@@ -1437,6 +1433,7 @@ impl Serving {
 	fn new(publisher: &Publisher, msg: &ietf::Subscribe<'_>) -> Self {
 		let fin_cancels = super::request_stream::fin_cancels(publisher.version);
 		Self {
+			resuming: false,
 			datagrams: None,
 			stream_error: None,
 			filter: msg.filter,
@@ -1513,10 +1510,13 @@ impl Serving {
 						Poll::Pending => None,
 					};
 					let broadcast = self.broadcast.as_ref().expect("resolved");
+					let datagram_only =
+						broadcast.has_local_datagrams() && !broadcast.publishes_track(&request.msg.track_name);
+					if !datagram_only && self.stream_error.is_some() {
+						self.datagrams = None;
+					}
 					if selected.is_none()
-						&& broadcast.has_local_datagrams()
-						&& !broadcast.publishes_track(&request.msg.track_name)
-						&& let Some(datagrams) = &self.datagrams
+						&& datagram_only && let Some(datagrams) = &self.datagrams
 					{
 						match datagrams.poll_info(waiter) {
 							Poll::Ready(Ok(info)) => {
@@ -1548,6 +1548,10 @@ impl Serving {
 						if self.datagrams.is_none()
 							&& let Some(err) = &self.stream_error
 						{
+							if self.resuming {
+								self.step = Self::resume_failed(request, err.clone())?;
+								continue;
+							}
 							return Poll::Ready(Ok(refused(err.clone(), request.msg.rendezvous, true)));
 						}
 						return Poll::Pending;
@@ -1564,8 +1568,16 @@ impl Serving {
 							broadcast.has_local_datagrams(),
 						);
 					}
-					self.track = Some(serve);
-					self.step = ServingStep::Properties { cache, edge };
+					if self.resuming {
+						serve.opened = request.acked.clone().expect("acked before serving");
+						Publisher::buffer_request_ok(&mut stream.writer, edge.largest)?;
+						request.save_join(self.filter, edge.largest, &cache, &serve.ranking);
+						self.track = Some(serve);
+						self.step = ServingStep::Resumed(cache);
+					} else {
+						self.track = Some(serve);
+						self.step = ServingStep::Properties { cache, edge };
+					}
 				}
 				ServingStep::Properties { edge, .. } => {
 					let flate = ready!(request.publisher.peer_setup.poll_get(waiter)).flate;
@@ -1670,44 +1682,24 @@ impl Serving {
 						return Poll::Ready(Ok(Subscribed::Served(served, request.opened())));
 					}
 					let broadcast = self.broadcast.as_ref().expect("resolved before serving");
-					self.step = match broadcast.track(&request.msg.track_name) {
-						Ok(track) => ServingStep::Resume {
-							track,
-							subscribe: SubscribeTrack::new(),
-						},
-						Err(err) => Self::resume_failed(request, err)?,
-					};
-				}
-				ServingStep::Resume { track, subscribe } => {
-					let subscribed =
-						ready!(subscribe.poll(waiter, &request.publisher, stream, track, &request.msg, &request.lapse));
-					let ServingStep::Resume { track, .. } = std::mem::replace(&mut self.step, ServingStep::Done) else {
-						unreachable!("matched above");
-					};
-					self.step = match subscribed {
-						// Withdrawn mid-setup, it ends as it would have while paused.
-						None => {
-							return Poll::Ready(Ok(Subscribed::Served(Served::Track(Ok(())), request.opened())));
-						}
-						// The resuming update is owed an answer, so it fails.
-						Some(Err(err)) => Self::resume_failed(request, err)?,
-						Some(Ok((mut serve, edge))) => {
-							serve.opened = request.acked.clone().expect("acked before serving");
-							if let Some(broadcast) = &self.broadcast
-								&& let Some(datagrams) = broadcast.datagrams_live(&request.msg.track_name)
-							{
-								serve = serve.with_datagrams(
-									datagrams,
-									request.msg.properties_wanted,
-									broadcast.has_local_datagrams(),
-								);
+					self.resuming = true;
+					self.stream_error = None;
+					let local = broadcast.has_local_datagrams();
+					self.datagrams = (request.publisher.session.max_datagram_size() > 0)
+						.then(|| {
+							if local {
+								broadcast.datagrams(&request.msg.track_name).ok()
+							} else {
+								broadcast.datagrams_live(&request.msg.track_name)
 							}
-							request.save_join(self.filter, edge.largest, &track, &serve.ranking);
-							let stream = request.stream.as_mut().expect("open until PUBLISH_DONE");
-							Publisher::buffer_request_ok(&mut stream.writer, edge.largest)?;
-							self.track = Some(serve);
-							ServingStep::Resumed(track)
-						}
+						})
+						.flatten();
+					if local && let Some(datagrams) = &mut self.datagrams {
+						datagrams.set_priority(super::priority::from_wire(request.msg.subscriber_priority));
+					}
+					self.step = ServingStep::Subscribe {
+						track: broadcast.track(&request.msg.track_name),
+						subscribe: SubscribeTrack::new(),
 					};
 				}
 				ServingStep::ResumeFailed(_) => {
@@ -9992,6 +9984,59 @@ mod serve_tests {
 				group.write_frame(timestamp(), b"after".as_slice()).unwrap();
 				serve_until(serve.as_mut(), "the object after", || sent(b"after") == 1).await;
 				assert_eq!(sent(b"paused"), 0, "{version}: served what it missed");
+			}
+		}
+	}
+
+	/// A datagram-only name resumes through the same kind selection as its first request.
+	#[kio::test]
+	async fn a_datagram_only_subscription_releases_demand_on_pause_and_resumes() {
+		for version in [Version::Draft18, Version::Draft22] {
+			for start_paused in [false, true] {
+				let h = serve_session(
+					version,
+					crate::track::Info::timed(),
+					crate::origin::Route::default(),
+					ScriptedSession::new(Vec::new()).with_datagrams(1200),
+				);
+				let mut datagrams = h
+					._broadcast
+					.create_datagrams("audio", crate::datagram::Info::default())
+					.unwrap();
+				let request = h.session.clone();
+				let stream = Stream::open(&crate::driver::Transport::new(request.clone()), version)
+					.await
+					.unwrap();
+				let mut msg = subscribe(Filter::NextObject, None);
+				msg.track_name = "audio".into();
+				msg.forward = !start_paused;
+				let mut serve = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, msg));
+				serve_until(serve.as_mut(), "SUBSCRIBE_OK", || !h.log.trail().is_empty()).await;
+				if !start_paused {
+					datagrams.append(None, &b"before"[..]).unwrap();
+					serve_until(serve.as_mut(), "the datagram", || {
+						h.log.datagrams.lock().unwrap().len() == 1
+					})
+					.await;
+					request.push(&forward_update(version, 2, false));
+				}
+				serve_until(serve.as_mut(), "demand released", || datagrams.priority().is_none()).await;
+				let sent = h.log.datagrams.lock().unwrap().len();
+				datagrams.append(None, &b"paused"[..]).unwrap();
+				request.push(&forward_update(version, 4, true));
+				serve_until(serve.as_mut(), "resumed demand", || datagrams.priority().is_some()).await;
+				datagrams.append(None, &b"after"[..]).unwrap();
+				serve_until(serve.as_mut(), "the resumed datagram", || {
+					h.log.datagrams.lock().unwrap().len() == sent + 1
+				})
+				.await;
+				datagrams.finish();
+				kio::clock::timeout(std::time::Duration::from_secs(10), serve)
+					.await
+					.expect("datagram end")
+					.unwrap();
+				let wire = Wire::read(&h.log, version);
+				assert_eq!(wire.publish_done, Some((ietf::PublishDoneStatus::TrackEnded.code(), 0)));
 			}
 		}
 	}

@@ -25,6 +25,7 @@ import type { Producer as TrackProducer } from "../track.ts";
 import { unwanted } from "../util/demand.ts";
 import { wireOf } from "../wire.ts";
 import type * as Cluster from "./cluster.ts";
+import { ObjectDatagram } from "./datagram.ts";
 import { toRequestCode } from "./error.ts";
 import { Fetch, FetchHeader } from "./fetch.ts";
 import * as Filter from "./filter.ts";
@@ -3578,6 +3579,55 @@ test("a SUBSCRIBE pauses without demand and resumes as a new subscriber", async 
 			client.close();
 			track.finish();
 			track.close();
+			fx.close();
+		}
+	}
+});
+
+test("a datagram-only SUBSCRIBE releases demand on pause and resumes", async () => {
+	for (const startPaused of [false, true]) {
+		const fx = fixture(V22);
+		const datagrams = fx.broadcast.createDatagrams("audio", {});
+		const received = fx.pair.client.datagrams.readable.getReader();
+		const { client } = await runSubscribe(
+			fx,
+			new Subscribe({
+				requestId: 0n,
+				trackNamespace: Path.from("test"),
+				trackName: "audio",
+				subscriberPriority: 128,
+				forward: !startPaused,
+			}),
+		);
+		const forward = async (id: bigint, on: boolean) => {
+			const parameters = new Parameters();
+			parameters.forward = on;
+			await client.writer.u53(SubscribeUpdate.id);
+			await new SubscribeUpdate({ requestId: id, parameters }).encode(client.writer, V22);
+			expect(await client.reader.u53()).toBe(RequestOk.id);
+			await RequestOk.decode(client.reader, V22);
+		};
+		try {
+			if (!startPaused) {
+				datagrams.append(undefined, Uint8Array.of(1));
+				expect((await received.read()).done).toBe(false);
+				await forward(2n, false);
+			}
+			while (datagrams.priority.peek() !== undefined) await datagrams.priority.changed();
+			datagrams.append(undefined, Uint8Array.of(2));
+			await forward(4n, true);
+			datagrams.append(undefined, Uint8Array.of(3));
+			const next = await received.read();
+			if (!next.value) throw new Error("no resumed datagram");
+			const decoded = await ObjectDatagram.decode(next.value, V22);
+			expect(decoded.body).toEqual({ payload: Uint8Array.of(3) });
+			datagrams.finish();
+			expect(await client.reader.u53()).toBe(PublishDone.id);
+			expect((await PublishDone.decode(client.reader, V22)).streamCount).toBe(0n);
+		} finally {
+			received.releaseLock();
+			client.close();
+			datagrams.finish();
 			fx.close();
 		}
 	}

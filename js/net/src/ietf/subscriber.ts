@@ -1,5 +1,5 @@
 import { Milli } from "@moq/clock";
-import { type Dispose, type GetPromise, type Getter, race, Signal } from "@moq/signals";
+import { type Dispose, type GetPromise, type Getter, Once, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import type { Grant } from "../auth.ts";
 import type { AuthSession } from "../auth_session.ts";
@@ -158,7 +158,10 @@ function sees(filter: Filter, path: Path.Valid): boolean {
  */
 export class Subscriber {
 	#streamSources = new WeakMap<track.Request, broadcast.Consumer>();
-	#datagramRequests = new WeakMap<broadcast.Consumer, Map<string, datagram.Request>>();
+	#datagramRequests = new WeakMap<
+		broadcast.Consumer,
+		Map<string, { request: datagram.Request; accepted: Once<true> }>
+	>();
 	#session: Session;
 
 	// The transport, so a request cut off by the session's close ends with the session's
@@ -2232,10 +2235,15 @@ export class Subscriber {
 
 		let timestamp: Timestamp | undefined;
 		if (datagram.properties) {
-			const decoded = await new Reader(undefined, datagram.properties, this.#session.version).decode((cursor) =>
-				decodeObjectTime(cursor, binding.timescale ?? Timescale.SECOND),
-			);
-			if (binding.timescale !== undefined) timestamp = decoded;
+			try {
+				const decoded = await new Reader(undefined, datagram.properties, this.#session.version).decode(
+					(cursor) => decodeObjectTime(cursor, binding.timescale ?? Timescale.SECOND),
+				);
+				if (binding.timescale !== undefined) timestamp = decoded;
+			} catch (err) {
+				console.debug(`dropping a datagram with unreadable object properties: ${reason(err)}`);
+				return;
+			}
 		}
 		if (binding.timescale !== undefined && timestamp === undefined) {
 			console.debug(
@@ -2257,9 +2265,17 @@ export class Subscriber {
 	/** Bind both kinds to the same upstream response, without adding stream demand for passive forwarding. */
 	#bindDatagrams(source: broadcast.Consumer, track: track.Producer, info: Partial<datagram.Info>) {
 		const pending = this.#datagramRequests.get(source);
-		const request = pending?.get(track.name);
+		const entry = pending?.get(track.name);
+		let producer: datagram.Producer;
+		try {
+			producer = entry ? entry.request.accept(info) : wireOf(source).createDatagrams(track.name, info);
+		} catch (err) {
+			entry?.request.reject(error(err));
+			console.debug(`serving the stream track without datagrams: ${reason(err)}`);
+			return;
+		}
 		pending?.delete(track.name);
-		const producer = request ? request.accept(info) : wireOf(source).createDatagrams(track.name, info);
+		entry?.accepted.set(true);
 		let held: track.Subscriber | undefined;
 		const sync = () => {
 			const priority = producer.priority.peek();
@@ -2291,7 +2307,8 @@ export class Subscriber {
 			pending = new Map();
 			this.#datagramRequests.set(source, pending);
 		}
-		pending.set(request.name, request);
+		const entry = { request, accepted: new Once<true>() };
+		pending.set(request.name, entry);
 		const subscriber = wireOf(source).subscribe(request.name, { priority: request.priority.peek() ?? 0 });
 		const dispose = request.priority.subscribe((priority) => {
 			if (priority !== undefined) subscriber.update({ priority });
@@ -2299,7 +2316,8 @@ export class Subscriber {
 		try {
 			await untilAborted(
 				race([
-					subscriber.info(),
+					// Cached stream metadata alone does not accept a returning datagram request.
+					Promise.all([subscriber.info(), entry.accepted]),
 					Promise.resolve(request.closed).then((): never => {
 						throw new StreamError(StreamCode.Cancel);
 					}),
@@ -2307,11 +2325,11 @@ export class Subscriber {
 				valid,
 			);
 		} catch (err) {
-			if (pending.get(request.name) === request) request.reject(error(err));
+			if (pending.get(request.name) === entry) request.reject(error(err));
 		} finally {
 			dispose();
 			subscriber.close();
-			if (pending.get(request.name) === request) pending.delete(request.name);
+			if (pending.get(request.name) === entry) pending.delete(request.name);
 		}
 	}
 }

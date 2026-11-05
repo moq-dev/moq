@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { accept, connect } from "../connection/index.ts";
 import { ProtocolViolation, SessionCode } from "../error.ts";
 import { createMockTransportPair } from "../mock.ts";
@@ -144,6 +144,14 @@ test("a datagram track round-trips over moq-transport", async () => {
 		while (datagrams.priority.peek() !== 1) await datagrams.priority.changed();
 		expect(info.priority).toBe(3);
 		expect(info.timescale).toBe(Timescale.MILLI);
+		// A peer's unreadable properties lose one best-effort payload, not the session.
+		const encode = ObjectDatagram.prototype.encode;
+		const corrupt = spyOn(ObjectDatagram.prototype, "encode").mockImplementation(function (this: ObjectDatagram, version) {
+			corrupt.mockRestore();
+			return encode.call(new ObjectDatagram({ ...this, properties: Uint8Array.of(0x10) }), version);
+		});
+		datagrams.insert({ sequence: 3n, timestamp: Timestamp.fromMillis(8), payload: Uint8Array.of(0) });
+
 		datagrams.insert({ sequence: 4n, timestamp: Timestamp.fromMillis(9), payload: new Uint8Array([7]) });
 		const received = await reader.recv();
 		expect(received?.sequence).toBe(4n);

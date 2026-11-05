@@ -29,7 +29,14 @@ import { sendPayload } from "../payload.ts";
 import { Priority, sendOrder } from "../priority.ts";
 import { type Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
-import type { Groups, Info, Range, Position as TrackPosition, Subscriber as TrackSubscriber } from "../track.ts";
+import {
+	type Groups,
+	type Info,
+	type Range,
+	type Position as TrackPosition,
+	Producer as TrackProducer,
+	type Subscriber as TrackSubscriber,
+} from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { toNumber } from "../util/bigint.ts";
 import { nextChange } from "../util/change.ts";
@@ -516,36 +523,35 @@ export class Publisher {
 		let datagrams = datagramOf();
 		let track = subscribe(broadcast);
 
-		try {
-			// SUBSCRIBE has no kind bit. Resolve both kinds; an absent or refused kind
-			// does not prevent the other from answering.
+		let datagramTrack: TrackProducer | undefined;
+		const resolve = async () => {
+			// A relay learns both halves from the same stream response. Only local
+			// application handlers can answer either kind independently.
 			const streamInfo = track.info().then((info) => ({ kind: "stream" as const, info }));
-			const datagramConsumer = datagrams;
+			const consumer = datagrams;
 			const selected = await untilAborted(
-				datagramConsumer && wireOf(broadcast).localDatagrams
+				consumer && wireOf(broadcast).localDatagrams
 					? Promise.any([
 							streamInfo,
-							datagramConsumer
-								.info()
-								.then((info) => ({ kind: "datagram" as const, info, consumer: datagramConsumer })),
+							consumer.info().then((info) => ({ kind: "datagram" as const, info })),
 						]).catch(() => streamInfo)
-					: streamInfo.catch(async (err) => {
-							if (!datagramConsumer) throw err;
-							const info = await datagramConsumer.info();
-							return { kind: "datagram" as const, info, consumer: datagramConsumer };
-						}),
+					: streamInfo,
 				left.signal,
-			).catch(async (err) => {
+			);
+			if (selected.kind === "datagram") {
+				track.close();
+				datagramTrack = new TrackProducer(msg.trackName).accept(selected.info);
+				track = hooks.parked(datagramTrack.subscribe({ priority: fromWire(msg.subscriberPriority) }));
+			}
+			return selected.info;
+		};
+		try {
+			const info = await resolve().catch(async (err) => {
 				if (left.signal.aborted) request.abort(cancel);
-				else await request.refuse("subscribe", this.#failed(err, false));
+				else await request.refuse("subscribe", this.#failed(err, rendezvous, true));
 				return undefined;
 			});
-			if (!selected) return;
-			if (selected.kind === "datagram") {
-				await this.#serveDatagrams(msg, request, selected.consumer, selected.info);
-				return;
-			}
-			const info = selected.info;
+			if (!info) return;
 			datagrams ??= datagramOf();
 			// Every subscription a resume makes counts toward the same PUBLISH_DONE.
 			const streams: StreamCount = { opened: 0 };
@@ -557,11 +563,14 @@ export class Publisher {
 				streams,
 				datagrams,
 				datagramDemand: wireOf(broadcast).localDatagrams,
+				datagramTrack,
 			});
 			// A pause drops the subscription, and its demand with it; a resume subscribes again as
 			// a new SUBSCRIBE would, so nothing carries across but the request.
 			while (paused) {
 				track.close();
+				datagramTrack?.abort(cancel);
+				datagramTrack = undefined;
 				datagrams?.close();
 				datagrams = undefined;
 				if (paused.answer) await Message.write(request.writer, RequestOk.id, new RequestOk(), version);
@@ -571,7 +580,7 @@ export class Publisher {
 				datagrams = datagramOf();
 				let resumed: Info;
 				try {
-					resumed = await untilAborted(track.info(), left.signal);
+					resumed = await resolve();
 					// A resume answers with the live edge, which only a granted subscriber learns.
 					if (!this.#gate.allows(name)) throw unauthorized(name);
 				} catch (err) {
@@ -590,169 +599,14 @@ export class Publisher {
 					answer,
 					datagrams,
 					datagramDemand: wireOf(broadcast).localDatagrams,
+					datagramTrack,
 				});
 			}
 		} finally {
 			track.close();
+			datagramTrack?.abort(cancel);
 			datagrams?.close();
 		}
-	}
-
-	/**
-	 * Serve a datagram track on its own SUBSCRIBE: OBJECT_DATAGRAM at object ID 0, then
-	 * PUBLISH_DONE. No END_OF_TRACK object, and no group streams.
-	 */
-	async #serveDatagrams(
-		msg: Subscribe,
-		request: RequestStream,
-		datagrams: datagram.Consumer,
-		info: datagram.Info,
-	): Promise<void> {
-		const version = this.#session.version;
-		const name = msg.trackNamespace;
-		const timescale = msg.propertiesWanted ? (info.timescale ?? undefined) : undefined;
-		const publisher = info.priority;
-		await Message.write(
-			request.writer,
-			SubscribeOk.id,
-			new SubscribeOk({
-				trackAlias: msg.requestId,
-				properties: msg.propertiesWanted
-					? { timescale, priority: toWire(publisher), groupOrder: Properties.DESCENDING }
-					: {},
-			}),
-			version,
-		);
-		console.debug(`publish ok: broadcast=${name} track=${msg.trackName} datagram`);
-
-		let forward = msg.forward;
-		let stopped = false;
-		let subscriberPriority = fromWire(msg.subscriberPriority);
-		let waiting: Promise<void> | undefined;
-		let wake = () => {};
-		const parked = () => {
-			waiting ??= new Promise<void>((resolve) => {
-				wake = () => {
-					waiting = undefined;
-					resolve();
-				};
-			});
-			return waiting;
-		};
-		const opened = DatagramStream.datagramWriter(this.#quic);
-		const sender = opened?.open(sendOrder({ priority: subscriberPriority, publisher, position: 2 ** 36 - 1 }));
-		const max = DatagramStream.maxDatagramSize(this.#quic);
-		const sending = (async () => {
-			if (!sender) return;
-			try {
-				for (;;) {
-					const datagram = await datagrams.recv();
-					if (!datagram || stopped) return;
-					// A pause holds the datagram already read. Closing the consumer or an update
-					// that resumes both wake this wait, so the subscription can still end.
-					while (!forward && !stopped) await parked();
-					if (stopped || !forward) return;
-					if (timescale !== undefined && datagram.timestamp === undefined) {
-						console.debug(`dropping a datagram without a timestamp: sequence=${datagram.sequence}`);
-						continue;
-					}
-					let body: Uint8Array;
-					try {
-						body = await encodeDatagram(
-							datagram,
-							{ trackAlias: msg.requestId, publisherPriority: toWire(publisher), timescale },
-							version,
-						);
-					} catch (err) {
-						console.debug(`dropping a datagram this draft cannot encode: ${reason(err)}`);
-						continue;
-					}
-					if (body.byteLength > max) {
-						console.debug(
-							`dropping datagram larger than the transport limit: size=${body.byteLength} max=${max}`,
-						);
-						continue;
-					}
-					await sender.writer.write(body);
-				}
-			} finally {
-				await sender.close();
-				opened?.close();
-			}
-		})();
-
-		let revoke!: () => void;
-		const revoked = new Promise<"revoked">((resolve) => {
-			revoke = () => resolve("revoked");
-		});
-		const watch = this.#gate.watch(name, revoke);
-		if (watch.revoked()) revoke();
-		const updates = (async () => {
-			for (;;) {
-				const framed = await request.next();
-				if (framed === undefined) {
-					await request.ended;
-					return;
-				}
-				const { params } = await this.#decodeUpdate(request, framed);
-				if (params.subscriberPriority !== undefined) {
-					subscriberPriority = fromWire(params.subscriberPriority);
-					datagrams.setPriority(subscriberPriority);
-					sender?.setPriority(sendOrder({ priority: subscriberPriority, publisher, position: 2 ** 36 - 1 }));
-				}
-				if (params.forward !== undefined) {
-					forward = params.forward;
-					if (forward) wake();
-				}
-				await Message.write(request.writer, RequestOk.id, new RequestOk(), version);
-			}
-		})();
-
-		let unauthorizedEnd = false;
-		let failed: Error | undefined;
-		const served = Symbol("served");
-		try {
-			const end = await race([sending.then(() => served), updates, revoked]);
-			unauthorizedEnd = end === "revoked";
-		} catch (err) {
-			failed = error(err);
-			if (failed instanceof ProtocolViolation) throw failed;
-		} finally {
-			watch.dispose();
-			stopped = true;
-			wake();
-			datagrams.close();
-			await sending.catch(() => {});
-		}
-
-		const updateFailed = failed instanceof UpdateFailed;
-		try {
-			await Message.write(
-				request.writer,
-				PublishDone.id,
-				new PublishDone({
-					statusCode: unauthorizedEnd
-						? PublishDoneStatus.UNAUTHORIZED
-						: updateFailed
-							? PublishDoneStatus.UPDATE_FAILED
-							: failed
-								? PublishDoneStatus.INTERNAL_ERROR
-								: PublishDoneStatus.TRACK_ENDED,
-					streamCount: 0n,
-					reasonPhrase: unauthorizedEnd
-						? "not granted"
-						: updateFailed
-							? "update failed"
-							: failed
-								? "internal error"
-								: "track ended",
-				}),
-				version,
-			);
-		} catch {
-			// The peer may already have closed its half.
-		}
-		request.close();
 	}
 
 	/**
@@ -855,6 +709,7 @@ export class Publisher {
 		answer,
 		datagrams,
 		datagramDemand,
+		datagramTrack,
 	}: {
 		msg: Subscribe;
 		request: RequestStream;
@@ -867,6 +722,8 @@ export class Publisher {
 		/** A datagram track of the same name, forwarded as OBJECT_DATAGRAM beside the groups. */
 		datagrams?: datagram.Consumer;
 		datagramDemand: boolean;
+		/** Metadata-only track whose lifetime follows the datagram sender. */
+		datagramTrack?: TrackProducer;
 	}): Promise<Paused | undefined> {
 		const version = this.#session.version;
 		const name = msg.trackNamespace;
@@ -984,9 +841,13 @@ export class Publisher {
 						alias: msg.requestId,
 						timescale,
 						priority: datagramPriority,
-					}).catch((err: unknown) => {
-						console.debug(`stopping datagrams on this subscription: ${reason(err)}`);
-					})
+					}).then(
+						() => datagramTrack?.finish(),
+						(err: unknown) => {
+							if (datagramTrack) datagramTrack.abort(error(err));
+							else console.debug(`stopping datagrams on this subscription: ${reason(err)}`);
+						},
+					)
 				: Promise.resolve();
 
 			// Cancels groups still queued for a stream slot. Only the subscriber leaving counts:
@@ -1217,7 +1078,7 @@ export class Publisher {
 			// PUBLISH_DONE has no end location: an END_OF_TRACK object is what tells the
 			// subscriber where the track ended.
 			const final = hooks.subscriberEnd(track);
-			if (ended && !publishError && final !== undefined && !streams.terminalSent) {
+			if (!datagramTrack && ended && !publishError && final !== undefined && !streams.terminalSent) {
 				await this.#runEndOfTrack({
 					requestId: msg.requestId,
 					final,
@@ -2838,11 +2699,11 @@ export class Publisher {
 	}
 
 	/** What a request that failed to resolve is refused with. */
-	#failed(err: unknown, wait = false): Refusal {
+	#failed(err: unknown, wait = false, resolved = false): Refusal {
 		const e = error(err);
 		const condition =
 			e instanceof StreamError && (e.code === StreamCode.NotFound || e.code === StreamCode.Unroutable)
-				? wait
+				? wait && (!resolved || e.code === StreamCode.Unroutable)
 					? "timeout"
 					: "does_not_exist"
 				: "internal";

@@ -5769,7 +5769,13 @@ impl Subscriber {
 		let timestamp = match &datagram.properties {
 			Some(raw) => {
 				let bytes = bytes::Bytes::copy_from_slice(raw);
-				super::object::read(&bytes, self.version, timescale)?.timestamp
+				match super::object::read(&bytes, self.version, timescale) {
+					Ok(object) => object.timestamp,
+					Err(err) => {
+						tracing::debug!(%err, "dropping a datagram with unreadable object properties");
+						return Ok(());
+					}
+				}
 			}
 			None => None,
 		};
@@ -8989,6 +8995,20 @@ mod tests {
 			.encode_bytes(Version::Draft18)
 			.unwrap()
 		};
+
+		let unreadable = ietf::ObjectDatagram {
+			track_alias: 7,
+			group_id: 3,
+			object_id: None,
+			publisher_priority: None,
+			end_of_group: false,
+			properties: Some(vec![0x10]),
+			body: ietf::DatagramBody::Payload(bytes::Bytes::from_static(b"bad")),
+		}
+		.encode_bytes(Version::Draft18)
+		.unwrap();
+		subscriber.recv_datagram(unreadable).unwrap();
+		assert!(consumer.poll_recv(&kio::Waiter::noop()).is_pending());
 
 		subscriber
 			.recv_datagram(encode(
