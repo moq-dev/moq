@@ -155,19 +155,26 @@ type SnapshotConsumer struct {
 	inner *ffi.MoqJsonSnapshotConsumer
 }
 
-// NewSnapshotConsumer reads track as a lossy latest-value JSON track. It takes over
-// track, whose handle is closed afterward, and fails if track has already read a group.
-func NewSnapshotConsumer(track *moq.TrackConsumer) (*SnapshotConsumer, error) {
-	inner, err := ffi.NewMoqJsonSnapshotConsumer(bridge.TrackConsumer(track))
+// SnapshotConsumerOptions configures a snapshot consumer's subscription.
+type SnapshotConsumerOptions struct {
+	// Priority is the subscription's delivery priority, higher first, as
+	// moq.Subscription.Priority.
+	Priority int8
+}
+
+// NewSnapshotConsumer subscribes to the track named name on broadcast and reads it as a
+// lossy latest-value JSON track. The consumer owns its subscription, at a zero Delay.Max
+// and the options' priority; a read waits for it to resolve and fails if it cannot.
+func NewSnapshotConsumer(broadcast *moq.BroadcastConsumer, name string, options SnapshotConsumerOptions) (*SnapshotConsumer, error) {
+	inner, err := ffi.NewMoqJsonSnapshotConsumer(bridge.BroadcastConsumer(broadcast), name, options.Priority)
 	if err != nil {
 		return nil, err
 	}
 	return &SnapshotConsumer{inner: inner}, nil
 }
 
-// Next returns the next state in order, or nil when the track ends. Groups older
-// than the subscription's Delay.Max are skipped, so a playhead reader sets that
-// budget to its distance behind live.
+// Next returns the next state in order, or nil when the track ends. It skips
+// every group a newer one supersedes.
 func (c *SnapshotConsumer) Next(ctx context.Context) (*Timed, error) {
 	value, err := bridge.Call(ctx, c.inner.Cancel, c.inner.Next)
 	return timed(value), err

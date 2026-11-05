@@ -328,10 +328,10 @@ describe("Truck safety controls", () => {
 			timestamps: [],
 		});
 		const front = new Json.Snapshot.Consumer<Record<string, unknown>>({
-			track: safety.broadcast.track("control").subscribe(),
+			track: safety.broadcast.track("control"),
 		});
 		const rear = new Json.Snapshot.Consumer<Record<string, unknown>>({
-			track: safety.broadcast.track("control").subscribe(),
+			track: safety.broadcast.track("control"),
 		});
 
 		try {

@@ -7225,6 +7225,7 @@ fn default_controller_supports_bandwidth_probing() {
 		mtu: INITIAL_MTU,
 		rtt: Duration::from_millis(333),
 		max_pacing_rate: None,
+		seed: 0,
 	});
 	assert!(controller.probes());
 	assert!(controller.metrics().pacing_rate.is_some());

@@ -37,6 +37,10 @@ Replace stream-track `appendDatagram` / `insertDatagram` / `recvDatagram` with `
 
 A null `TrackInfo.maxAge`, the default, and a null info now advertise a zero max age, serving only the live edge, instead of no publisher limit. Pass `maxAgeUnlimited = true`, which ignores `maxAge`, where you relied on null meaning no limit. A received track's `info()` sets it when its publisher advertised no limit.
 
+### Snapshot consumers subscribe themselves at a zero delay ([#7736](https://github.com/moq-dev/moq/pull/7736))
+
+`SnapshotConsumer(broadcast, name, priority)` takes the `BroadcastConsumer` and the track name instead of a `TrackConsumer`, and subscribes to the track itself at a zero `delay.max` and `priority` (default 0). Drop the `subscribeTrack` call; a refused subscription now throws from the first read. `values()` skips every group a newer one supersedes, and `latest()` no longer waits for a lower group the track still owes. Publish a stream track when every state must survive, or a window track for a bounded recent history.
+
 ### Viewer targets are bounded ([#7090](https://github.com/moq-dev/moq/pull/7090))
 
 Viewer ceilings and PROBE target overrides are refused with the new `MoqException.OutOfRange` once they would sum above 2^53 - 1 bps, the most a PROBE target carries; nothing changes on a refusal. `Viewers.watch` and `setTarget` and `Viewer.update` throw it. Handle the new variant wherever you match the error exhaustively. Regenerate bindings and rebuild the matching native library together.
@@ -73,7 +77,7 @@ A fixed audio playout delay `d` is `delay = Delay(min = d, max = ...)` with `est
 
 `dev.moq.flate` is removed: publish opaque bytes on a `TrackProducer`.
 `SnapshotConfig` and `WindowConfig` lose `compression`, and `StreamConfig` is removed. Publish the track with `TrackInfo(compress = true)` instead.
-`StreamProducer` drops its config argument, and `SnapshotConsumer`, `StreamConsumer`, and `WindowConsumer` take only the track.
+`StreamProducer` drops its config argument, and `StreamConsumer` and `WindowConsumer` take only the track. `SnapshotConsumer` takes the broadcast and track name; see the entry above.
 
 ### Paths with an empty segment are refused ([#6648](https://github.com/moq-dev/moq/pull/6648))
 
@@ -208,7 +212,7 @@ Application calls are unchanged.
 ### JSON consumers emit timestamps (#5677)
 
 `values()` emits `json.Value` (`value`, plus `timestamp` as a `Duration?`) instead of a string, and `valuesAs<T>()` emits `Timed<T>(value, timestamp)`.
-A snapshot consumer's `next()` now yields every state in order; call `latest()` for the newest.
+A snapshot consumer's `next()` now yields each state in order, skipping every group a newer one supersedes (see the zero-delay entry above); call `latest()` for the newest.
 Timestamps are rounded down to a whole microsecond.
 
 ### Ranges filter reads (#5929)

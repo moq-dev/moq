@@ -38,6 +38,10 @@ Use `BroadcastProducer.createDatagrams(name: ..., info: ...)` and `BroadcastCons
 
 A null `TrackInfo.maxAge`, the default, and a null info now advertise a zero max age, serving only the live edge, instead of no publisher limit. Pass `maxAgeUnlimited: true`, which ignores `maxAge`, where you relied on null meaning no limit. A received track's `info()` sets it when its publisher advertised no limit.
 
+### Snapshot consumers subscribe themselves at a zero delay ([#7736](https://github.com/moq-dev/moq/pull/7736))
+
+`SnapshotConsumer(broadcast: ..., name: ..., priority: ...)` takes the `BroadcastConsumer` and the track name instead of `track:`, and subscribes to the track itself at a zero `delay.max` and `priority` (default 0). Drop the `subscribeTrack` call; a refused subscription now throws from the first read. `next()` skips every group a newer one supersedes, and `latest()` no longer waits for a lower group the track still owes. Publish a stream track when every state must survive, or a window track for a bounded recent history.
+
 ### Viewer targets are bounded ([#7090](https://github.com/moq-dev/moq/pull/7090))
 
 Viewer ceilings and PROBE target overrides are refused with the new `OutOfRangeMoqException` once they would sum above 2^53 - 1 bps, the most a PROBE target carries; nothing changes on a refusal. `Viewers.watch` and `setTarget` and `Viewer.update` throw it. Handle the new variant wherever you match the error exhaustively. Regenerate bindings and rebuild the matching native library together.
@@ -78,7 +82,7 @@ A fixed audio playout delay `d` is `delay: Delay(min: d, max: ...)` with `estima
 
 `package:moq/flate.dart` is removed: publish opaque bytes on a `TrackProducer`.
 `SnapshotConfig` and `WindowConfig` lose `compression`, and `StreamConfig` is removed. Publish the track with `MoqTrackInfo(compress: true)` instead.
-`StreamProducer` drops its `config`, and `SnapshotConsumer`, `StreamConsumer`, and `WindowConsumer` take only the track.
+`StreamProducer` drops its `config`, and `StreamConsumer` and `WindowConsumer` take only the track. `SnapshotConsumer` takes the broadcast and track name; see the entry above.
 
 ### Paths with an empty segment are refused ([#6648](https://github.com/moq-dev/moq/pull/6648))
 
