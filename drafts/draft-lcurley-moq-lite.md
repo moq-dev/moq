@@ -227,6 +227,9 @@ See [Transports](#transports) for the bindings.
 
 How the underlying connection is authenticated is out-of-scope for this draft.
 
+A subscriber that holds an Auth Stream and an Announce Stream needs credit for at least 4 concurrent bidirectional streams to establish a subscription.
+AUTH and ANNOUNCE occupy two streams for the session lifetime, and TRACK is briefly held alongside SUBSCRIBE, requiring two more.
+
 ## Transports {#transports}
 moq-lite defines five transport bindings.
 All five carry the same control and data streams defined elsewhere in this document; they differ only in how QUIC streams are multiplexed onto the underlying connection.

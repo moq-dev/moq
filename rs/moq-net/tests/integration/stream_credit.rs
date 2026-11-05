@@ -81,8 +81,8 @@ async fn one_stream_credit_serves_every_backlogged_group() {
 /// subscription past the publisher's credit is served once an earlier one leaves.
 #[kio::test]
 async fn a_subscription_past_the_credit_is_served_once_credit_returns() {
-	// Room for the bidirectional streams the session holds before the second subscription:
-	// the second then waits for one of the first's.
+	// lite-07 needs 4: session-long AUTH and ANNOUNCE plus TRACK held until SUBSCRIBE answers.
+	// Three is below the setup minimum; the second subscription waits for the first's credit.
 	for (version, credit) in [("moq-lite-07-wip", 4), ("moq-transport-22", 3)] {
 		let version: Version = version.parse().unwrap();
 		let publisher = origin(1);
