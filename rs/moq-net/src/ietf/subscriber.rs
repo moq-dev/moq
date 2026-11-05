@@ -2194,12 +2194,15 @@ struct LiveAnnounce {
 	step: LiveStep,
 }
 
+#[expect(clippy::large_enum_variant, reason = "a machine's enum is its storage")]
 enum LiveStep {
 	/// Attaching the route and answering.
 	Attach,
 	/// Flushing the answer.
 	Ack,
 	Updates(PublishNamespaceUpdates),
+	/// Over, either way.
+	Ended,
 }
 
 impl ServePublishNamespace {
@@ -2272,6 +2275,8 @@ impl ServePublishNamespace {
 						Poll::Ready(refusal) => Err(refusal),
 						Poll::Pending => Ok(ready!(live.poll(&mut self.this, stream, waiter))),
 					};
+					// Whatever the body held goes with it, before the route does.
+					live.step = LiveStep::Ended;
 
 					// The route goes before anything waits on the peer, so a peer that stops reading
 					// cannot keep it routed. A stream that detached mid-flight (a reflected update) has
@@ -2481,6 +2486,7 @@ impl LiveAnnounce {
 				LiveStep::Updates(updates) => {
 					return updates.poll(waiter, this, stream, &self.path, &mut self.attached);
 				}
+				LiveStep::Ended => panic!("LiveAnnounce polled after it ended"),
 			}
 		}
 	}

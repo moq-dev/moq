@@ -167,6 +167,7 @@ struct Exchange {
 	state: ExchangeState,
 }
 
+#[expect(clippy::large_enum_variant, reason = "a machine's enum is its storage")]
 enum ExchangeState {
 	/// Waiting out the requests it overlaps, then for stream credit.
 	Opening {
