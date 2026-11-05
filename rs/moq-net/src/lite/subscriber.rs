@@ -80,6 +80,9 @@ pub(super) struct Subscriber {
 	/// Lite-05/06: the datagram tracks taking the datagrams of their name's stream track
 	/// subscription, by broadcast and name. One SUBSCRIBE carries both kinds there.
 	legacy_datagrams: Lock<HashMap<(Path, String), DatagramEntry>>,
+	/// Datagrams received for a subscription with no datagram track, which
+	/// [`crate::session::Stats::datagrams_unrouted`] reports.
+	pub(super) datagrams_unrouted: Arc<atomic::AtomicU64>,
 	/// Why this session ended, once it has. A track still waiting on TRACK_INFO has no
 	/// copy in [`Self::subscribes`], so dropping its request reads this instead of
 	/// becoming [`Error::Dropped`].
@@ -414,6 +417,7 @@ impl Subscriber {
 			subscribes: Default::default(),
 			datagrams: Default::default(),
 			legacy_datagrams: Default::default(),
+			datagrams_unrouted: Default::default(),
 			ended: Default::default(),
 			next_id: Default::default(),
 			version: config.version,
@@ -856,9 +860,10 @@ impl Subscriber {
 	/// Decode one datagram body and hand it to the datagram track it was sent for.
 	///
 	/// A datagram track's subscription takes its datagrams. On lite-05/06 a stream track's
-	/// subscription carries its name's datagrams too, which go to that name's datagram track
-	/// while one reads them, and are dropped otherwise, as are an unknown subscription's or
-	/// one not yet answered.
+	/// subscription carries its name's datagrams too, which go to that name's datagram track.
+	/// One for a subscription with no datagram track, unknown or not yet answered, is dropped
+	/// and counted: the driver decodes answers first, so a datagram sharing a receive pass
+	/// with its answer finds the track.
 	fn route_datagram(&self, payload: bytes::Bytes) -> Result<(), Error> {
 		if payload.len() > lite::Datagram::MAX_SIZE {
 			return Ok(());
@@ -872,6 +877,8 @@ impl Subscriber {
 			return Ok(());
 		};
 		let Some((mut producer, timescale)) = target else {
+			self.datagrams_unrouted.fetch_add(1, atomic::Ordering::Relaxed);
+			tracing::debug!(subscribe = dg.subscribe, "dropping datagram for a subscription with no datagram track");
 			return Ok(());
 		};
 		let timestamp = dg
@@ -1069,13 +1076,6 @@ impl SubscriberDriver {
 				Poll::Pending => {}
 			}
 		}
-		if let Some(datagrams) = &mut self.datagrams {
-			match datagrams.poll(waiter) {
-				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-				Poll::Ready(Ok(())) => self.datagrams = None,
-				Poll::Pending => {}
-			}
-		}
 
 		// Sources minted by the announce half; their completion never ends the
 		// session (the origin delivers the unannounce itself).
@@ -1083,6 +1083,17 @@ impl SubscriberDriver {
 			self.sources.push(SourceServe::new(self.subscriber.clone(), minted));
 		}
 		let _ = self.sources.poll(waiter);
+
+		// After the sources, which decode the answers that register datagram routes: a
+		// publisher sends a track's first datagram right behind its answer, often in the
+		// same packet, and a datagram routed first would find no route.
+		if let Some(datagrams) = &mut self.datagrams {
+			match datagrams.poll(waiter) {
+				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+				Poll::Ready(Ok(())) => self.datagrams = None,
+				Poll::Pending => {}
+			}
+		}
 
 		Poll::Pending
 	}
@@ -5191,11 +5202,16 @@ mod tests {
 			subscriber.route_datagram(boundary).unwrap();
 			assert!(matches!(recv(), Poll::Ready(Ok(Some(datagram))) if datagram.sequence == 3));
 
-			// An unknown subscription's datagram goes nowhere.
+			// Neither padding nor an oversized body names a subscription.
+			let unrouted = || subscriber.datagrams_unrouted.load(atomic::Ordering::Relaxed);
+			assert_eq!(unrouted(), 0, "{version}");
+
+			// An unknown subscription's datagram goes nowhere, and is counted.
 			let mut other = payload(4, 1).to_vec();
 			other[usize::from(version.has_padding())] = 2;
 			subscriber.route_datagram(other.into()).unwrap();
 			assert!(recv().is_pending());
+			assert_eq!(unrouted(), 1, "{version}");
 		}
 	}
 

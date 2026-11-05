@@ -281,3 +281,36 @@ test("lite-06: a request cancelled behind the shared datagram writer sends nothi
 		source.close();
 	}
 });
+
+// A publisher that writes as soon as a subscription reaches it sends the datagram right behind
+// its answer. The subscriber decodes the answer before it routes the datagram.
+for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
+	test(`${alpn}: a datagram sent right behind its answer arrives`, async () => {
+		const source = new Origin();
+		const publication = source.createBroadcast(path);
+		const datagrams = publication.broadcast.createDatagrams("audio");
+		publication.announce();
+		const pair = createMockTransportPair(alpn);
+		const [client, server] = await Promise.all([
+			connect({ url, transport: pair.client }),
+			accept({ url, transport: pair.server, publish: source.consume() }),
+		]);
+		const remote = wireOf(client).consume(path);
+		const reader = remote.datagrams("audio");
+		// Only the subscription carries this priority: a lite-06 TRACK lookup asks for none.
+		reader.setPriority(5);
+		try {
+			while (datagrams.priority.peek() !== 5) await datagrams.priority.changed();
+			datagrams.append(undefined, Uint8Array.of(1));
+			await reader.info();
+			datagrams.append(undefined, Uint8Array.of(2));
+			expect((await reader.recv())?.payload).toEqual(Uint8Array.of(1));
+		} finally {
+			reader.close();
+			remote.close();
+			client.abort();
+			server.abort();
+			source.close();
+		}
+	});
+}

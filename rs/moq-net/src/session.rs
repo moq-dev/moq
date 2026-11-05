@@ -1,6 +1,13 @@
 //! A MoQ session handle and a snapshot of its connection statistics.
 
-use std::{sync::Arc, task::Poll, time::Duration};
+use std::{
+	sync::{
+		Arc,
+		atomic::{AtomicU64, Ordering},
+	},
+	task::Poll,
+	time::Duration,
+};
 
 use crate::transport::poll::Session as _;
 use crate::transport::{Error as _, Metrics as _};
@@ -109,6 +116,10 @@ pub struct Stats {
 	/// Total receive streams evicted because incomplete messages exhausted the receive window.
 	/// A count above zero means the receive window is too small for what the peer sends.
 	pub streams_evicted: Option<u64>,
+
+	/// Total datagrams received for a subscription with no datagram track: one this session
+	/// doesn't know, has ended, or whose answer it hasn't received. `None` on moq-transport.
+	pub datagrams_unrouted: Option<u64>,
 }
 
 /// The congestion controller's view of the connection, as PROBE reports it.
@@ -176,6 +187,8 @@ pub struct Session {
 	credential: Option<auth::Credential>,
 	/// The subscriptions and fetches the protocol tasks carry.
 	work: Work,
+	/// What [`Stats::datagrams_unrouted`] reads.
+	datagrams_unrouted: Option<Arc<AtomicU64>>,
 }
 
 impl Session {
@@ -259,8 +272,8 @@ impl Session {
 	///
 	/// Cheap and non-blocking: this reads the latest sample the session's
 	/// driver took, and schedules a refresh, so periodic polling observes
-	/// fresh counters (100ms cadence). See [`Stats`] for which
-	/// metrics each backend reports.
+	/// fresh counters (100ms cadence), and reads the session's own counters
+	/// live. See [`Stats`] for which metrics each backend reports.
 	pub fn stats(&self) -> Stats {
 		let mut state = self.stats.lock();
 		// A read is demand: wake the sampler, but only mutate (and so wake)
@@ -268,7 +281,10 @@ impl Session {
 		if !state.demanded {
 			state.demanded = true;
 		}
-		state.sample
+		Stats {
+			datagrams_unrouted: self.datagrams_unrouted.as_ref().map(|count| count.load(Ordering::Relaxed)),
+			..state.sample
+		}
 	}
 
 	/// Close the transport with an explicit error, instead of waiting for the last
@@ -433,6 +449,9 @@ pub(super) struct Handles {
 	pub peer_target: Option<kio::Consumer<bandwidth::Rate>>,
 	/// What the peer's SETUP advertised as its implementation.
 	pub peer_implementation: crate::setup::PeerImplementation,
+	/// The driver's count of datagrams it routed to no datagram track, for a protocol that
+	/// routes them (moq-lite).
+	pub datagrams_unrouted: Option<Arc<AtomicU64>>,
 }
 
 impl Session {
@@ -454,6 +473,7 @@ impl Session {
 			viewers,
 			peer_target,
 			peer_implementation,
+			datagrams_unrouted,
 		} = handles;
 		let goaway = Arc::new(goaway);
 		auth.drain_with(goaway.clone());
@@ -527,6 +547,7 @@ impl Session {
 			auth: auth.handle().clone(),
 			credential,
 			work,
+			datagrams_unrouted,
 		};
 		let driver = crate::Driver::new(
 			runtime.clone(),
@@ -927,6 +948,8 @@ fn snapshot<S: crate::transport::poll::Session>(session: &S) -> Stats {
 		packets_received: metrics.packets_received(),
 		packets_lost: metrics.packets_lost(),
 		streams_evicted: metrics.streams_evicted(),
+		// Counted by the protocol, not the transport: filled in by `Session::stats`.
+		datagrams_unrouted: None,
 	}
 }
 
