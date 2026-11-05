@@ -212,11 +212,8 @@ async fn split_horizon(version: &str, [publisher_hop, subscriber_hop]: [Hop; 2])
 	kio::clock::sleep(SETTLE).await;
 
 	let from_announcer = traffic(&to_publisher.registry, stats::Role::Publisher);
-	// IETF SUBSCRIBE carries no kind bit, so the relay asks for both the stream
-	// and datagram tracks. Both requests must reach the announcing edge.
-	let expected = if version.is_lite() { 1 } else { 2 };
 	assert_eq!(
-		from_announcer.subscriptions_started, expected,
+		from_announcer.subscriptions_started, 1,
 		"the subscribe was not routed to the edge that announced it"
 	);
 	let back_to_subscriber = traffic(&to_subscriber.registry, stats::Role::Publisher);
