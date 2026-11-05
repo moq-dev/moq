@@ -130,11 +130,14 @@ export class Clock {
 	audio?: Part;
 	driving = false;
 
-	// Where a re-stall stopped the audio. Stalled, the clock runs on until the output reaches it, which
-	// output latency delays, and holds there. Once the ring refills, the output first plays that
-	// latency's worth of silence, so the clock holds until the reported playhead passes it again,
-	// rather than stepping back.
-	readonly paused = new Signal<{ timestamp: Milli; stalled: boolean } | undefined>(undefined);
+	// Where a re-stall stopped the ring, and the output's progress when it did. The output keeps
+	// playing what the ring already read until it reaches `timestamp`, which output latency delays,
+	// so the clock follows `from` until then, refilled or not. Past it, the clock holds while the ring
+	// is stalled, and after a refill until the reported playhead passes it, since the output first
+	// plays the silence the stall left behind rather than stepping back.
+	readonly paused = new Signal<
+		{ timestamp: Milli; from: { playhead: number; wall: number }; stalled: boolean } | undefined
+	>(undefined);
 
 	constructor(props?: Inputs<SyncInput>) {
 		this.in = {
@@ -207,8 +210,9 @@ export class Clock {
 			this.owner = undefined;
 			this.out.reference.set(playhead.wall - playhead.timestamp - this.out.delay.peek());
 			const paused = this.paused.peek();
-			if (paused && this.rolling() >= paused.timestamp) this.paused.set(undefined);
-			else if (paused) this.paused.set({ timestamp: paused.timestamp, stalled: false });
+			if (!paused) return;
+			if (this.playhead() >= paused.timestamp && this.rolling() >= paused.timestamp) this.paused.set(undefined);
+			else this.paused.set({ ...paused, stalled: false });
 			return;
 		}
 		if (this.audio !== part || !this.driving) return;
@@ -216,7 +220,11 @@ export class Clock {
 		// audio it accompanies. Buffered playback drains between bursts by design, so its ring
 		// stalling means the audio ended, not that it is late.
 		if (playhead && !this.out.buffered.peek()) {
-			this.paused.set({ timestamp: playhead.timestamp, stalled: true });
+			this.paused.set({
+				timestamp: playhead.timestamp,
+				from: { playhead: this.playhead(), wall: wall() },
+				stalled: true,
+			});
 			return;
 		}
 		this.release();
@@ -232,7 +240,9 @@ export class Clock {
 		const rolling = this.rolling();
 		const paused = this.paused.peek();
 		if (!paused) return rolling;
-		return paused.stalled ? Math.min(rolling, paused.timestamp) : Math.max(rolling, paused.timestamp);
+		const before = paused.from.playhead + wall() - paused.from.wall;
+		if (before < paused.timestamp) return before;
+		return paused.stalled ? paused.timestamp : Math.max(rolling, paused.timestamp);
 	}
 
 	// Hand the clock back to the wall at the last audio-derived value, so video does not jump. The
@@ -325,17 +335,16 @@ export class Clock {
 				continue;
 			}
 
-			// A stalled audio ring holds the playhead where it stopped until it plays again, and a
-			// refilled one holds it there until its output passes it.
+			// A stalled audio ring holds the playhead where it stopped until it plays again.
 			const paused = this.paused.peek();
 			if (paused?.stalled && timestamp > paused.timestamp) {
 				await this.sleep(part, undefined, signal);
 				continue;
 			}
-			if (paused && !paused.stalled && timestamp <= paused.timestamp) return true;
 
-			// NOTE: This function runs in parallel for each frame.
-			const sleep = reference + timestamp - wall() + this.out.delay.peek();
+			// NOTE: This function runs in parallel for each frame. The playhead moves at most as fast
+			// as the local clock, so sleeping the difference never overshoots; a hold re-checks.
+			const sleep = timestamp - this.playhead();
 
 			// Skip the timer for small sleeps; the host's timer resolution (~4ms) would overshoot.
 			if (sleep < 5) return true;

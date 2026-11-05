@@ -161,7 +161,8 @@ export class Decoder {
 	#terminal = new Terminal();
 
 	// The subscription declared its end or finished, so a drained ring is the end of the audio, not a
-	// stall the clock should wait out. A later frame clears it.
+	// stall the clock should wait out. The terminal packets after the end belong to the same timeline;
+	// only a frame starting another one clears it.
 	#ended = new Signal(false);
 
 	// The container consumer's arrival estimate, unset while nothing is subscribed.
@@ -637,7 +638,6 @@ export class Decoder {
 
 				// Classify ingress before decoder backpressure changes the delivery clock.
 				const timestamp = Milli.fromMicro(frame.timestamp as Micro);
-				this.#ended.set(false);
 				const late = this.#track.received(timestamp, frame.arrival);
 				this.#arrivals.write({ kind: "frame", timestamp, arrival: frame.arrival, late });
 
@@ -726,7 +726,6 @@ export class Decoder {
 				const { frame } = next;
 
 				const timestamp = Milli.fromMicro(frame.timestamp);
-				this.#ended.set(false);
 				const late = this.#track.received(timestamp, frame.arrival);
 				this.#arrivals.write({ kind: "frame", timestamp, arrival: frame.arrival, late });
 
@@ -1016,6 +1015,7 @@ export class Decoder {
 		// A hole restarts codec prediction on the same timeline, keeping decoded PCM and parked video.
 		// A frame after a declared end starts another audio timeline, which leaves video's alone.
 		if (read.kind === "frame") {
+			this.#ended.set(false);
 			this.#track.reset();
 			this.reset();
 		}

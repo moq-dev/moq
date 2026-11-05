@@ -535,6 +535,21 @@ describe("audio clock", () => {
 		sync.close();
 	});
 
+	it("follows the output through a refill that lands before it reaches the stop", async () => {
+		const sync = new Sync({ delay: Milli(100) });
+		const audio = sync.track("audio", { target: target() });
+		await flush();
+		audio.playhead({ rolling: true, timestamp: Milli(1000), wall: local() });
+		audio.playhead({ rolling: false, timestamp: Milli(1030) });
+		await clock.advance(Nano.fromMilli(Milli(5)));
+		// Refilled within one quantum: no silence reaches the output, and the clock never jumps.
+		audio.playhead({ rolling: true, timestamp: Milli(1005), wall: local() });
+		expect(sync.now()).toBe(Milli(1005));
+		await clock.advance(Nano.fromMilli(Milli(40)));
+		expect(sync.now()).toBe(Milli(1045));
+		sync.close();
+	});
+
 	it("forgets the wall clock's skips once audio takes over", async () => {
 		const sync = new Sync({ delay: Milli(100) });
 		const audio = sync.track("audio", { target: target() });

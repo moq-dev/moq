@@ -1352,6 +1352,8 @@ it("hands the clock back once the track declares its end, so video does not wait
 		await microtasks();
 
 		playback.push({ kind: "end", group: 0n, end: Micro(frameTimestamp + 20_000) });
+		// The stopped encoder's last packet follows its end in the same group: still the old timeline.
+		playback.push(frame());
 		await microtasks();
 		while (ring.read(quantum()) > 0);
 		await microtasks();
