@@ -115,9 +115,8 @@ fn frame_bytes(config: snapshot::Config, ticks: u64) -> usize {
 /// exact input value after delta application (not just the final one).
 fn verify(producer_config: snapshot::Config, compress: bool, ticks: u64) {
 	let track = track(compress);
-	let consumer = track.subscribe(None);
+	let mut consumer = Consumer::<Value>::new(track.consume(), Default::default());
 	let mut producer = Producer::<Value>::new(track, producer_config);
-	let mut consumer = Consumer::<Value>::new(consumer, Default::default());
 	let waiter = kio::Waiter::noop();
 
 	for tick in 0..ticks {
@@ -149,7 +148,7 @@ fn verify(producer_config: snapshot::Config, compress: bool, ticks: u64) {
 /// is far below `ticks`, since stale intermediate reconstructions are applied internally but skipped.
 fn verify_late_joiner(producer_config: snapshot::Config, compress: bool, ticks: u64) -> usize {
 	let track = track(compress);
-	let consumer = track.subscribe(None);
+	let mut consumer = Consumer::<Value>::new(track.consume(), Default::default());
 	let mut producer = Producer::<Value>::new(track, producer_config);
 	for tick in 0..ticks {
 		producer
@@ -158,7 +157,6 @@ fn verify_late_joiner(producer_config: snapshot::Config, compress: bool, ticks: 
 	}
 	producer.finish().unwrap();
 
-	let mut consumer = Consumer::<Value>::new(consumer, Default::default());
 	let waiter = kio::Waiter::noop();
 	let mut last = None;
 	let mut yielded = 0;

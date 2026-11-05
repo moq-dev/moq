@@ -38,6 +38,12 @@ if let Some(max_age) = override_or_none {
 
 The catalog and HLS record tracks take moq-net's new zero default instead of no limit; their newest group restates them.
 
+### Snapshot consumers subscribe themselves at a zero delay ([#7736](https://github.com/moq-dev/moq/pull/7736))
+
+`catalog::hang::Consumer::new` and its `From` impl take the catalog track, a `moq_net::track::Consumer`, instead of a `track::Subscriber`; the consumer subscribes itself, as `hang::catalog::Consumer::new` does. Pass `broadcast.track(hang::Catalog::DEFAULT_NAME)?` rather than subscribing first.
+`json::Consumer::from_track` takes a `moq_net::track::Consumer` and is now `async`: a snapshot track's reader subscribes itself, and a stream track's subscription resolves before it returns.
+A refused catalog or snapshot subscription now surfaces from the first read.
+
 ### Shared playout timing
 
 Native players can use `timeline::Producer` and its read-only `Consumer` instead

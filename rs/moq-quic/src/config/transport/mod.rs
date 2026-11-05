@@ -1,7 +1,5 @@
 //! Parameters governing the core QUIC state machine, the same for either role
 
-#[cfg(test)]
-use rand::RngExt;
 use std::{
 	fmt,
 	num::{NonZeroU32, NonZeroU64},
@@ -310,16 +308,7 @@ impl Default for Config {
 			ack_frequency: None,
 			receive_timestamps: None,
 
-			congestion: Arc::new({
-				let config = congestion::bbr3::Config::default();
-				#[cfg(test)]
-				let config = {
-					let mut config = config;
-					config.probe_rng_seed(crate::entropy::rng().random());
-					config
-				};
-				config
-			}),
+			congestion: Arc::new(congestion::bbr3::Config::default()),
 			max_outgoing_bytes_per_second: None,
 
 			datagram: datagram::Config {
