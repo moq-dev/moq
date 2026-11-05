@@ -91,7 +91,12 @@ impl Relay {
 	async fn fetch(&mut self, sequence: u64) -> anyhow::Result<String> {
 		self.command("dial", "dialed").await?;
 		let viewer = self.viewers.recv().await.context("no downstream session")?;
-		let remote = viewer.consume().follow("history", None)?.available().await?.context("offline")?;
+		let remote = viewer
+			.consume()
+			.follow("history", None)?
+			.available()
+			.await?
+			.context("offline")?;
 		let mut group = remote.track("video")?.fetch_group(sequence, None).await?;
 		let frame = group.read_frame().await?.context("empty group")?;
 		Ok(String::from_utf8(frame.payload.to_vec())?)
@@ -101,7 +106,12 @@ impl Relay {
 	async fn subscribe(&mut self, subscription: Subscription) -> anyhow::Result<moq_net::track::Subscriber> {
 		self.command("dial", "dialed").await?;
 		let viewer = self.viewers.recv().await.context("no downstream session")?;
-		let remote = viewer.consume().follow("history", None)?.available().await?.context("offline")?;
+		let remote = viewer
+			.consume()
+			.follow("history", None)?
+			.available()
+			.await?
+			.context("offline")?;
 		Ok(remote.track("video")?.subscribe(subscription).await?)
 	}
 }

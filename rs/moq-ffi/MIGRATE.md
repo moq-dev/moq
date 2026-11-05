@@ -11,6 +11,7 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 Map `Start` to `Present` and `End` to `Absent`, and drop `Update` handling. Where you requested the path again on `Restart`, hold `MoqOriginConsumer::follow(path)` and await `available()` for each new instance.
 
 `MoqFollowing::available()` returns `Option<Arc<MoqBroadcastConsumer>>`: `None` once the path goes offline (or, for a follow pinned to an `instance`, once another instance takes it over), then the next broadcast when something serves the path again. The first call never returns `None`. Handle `None` as offline: drop what you read from the last broadcast and call `available()` again.
+
 ### Catalog renditions carry their warmup ([#7864](https://github.com/moq-dev/moq/pull/7864))
 
 `MoqVideo` and `MoqAudio` gain `warmup`, the catalog's decoder warmup, null when absent. `MoqMediaTrackConsumer::subscribe` reads it from the rendition: it starts that much further back than the subscription's min delay and asks the publisher for its max delay plus the warmup, while it still skips at the max delay alone. `MoqAudioConsumer::subscribe` and `MoqVideoConsumer::subscribe` now honor it too.

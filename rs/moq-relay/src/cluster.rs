@@ -2650,7 +2650,15 @@ mod tests {
 		let (cluster, driver) = Cluster::new(with_stats()).unwrap();
 		let consumer = cluster.origin.consume();
 		let path = Path::from_static(".stats/node");
-		let announced = async { consumer.follow(&path, None).unwrap().available().await.unwrap().unwrap() };
+		let announced = async {
+			consumer
+				.follow(&path, None)
+				.unwrap()
+				.available()
+				.await
+				.unwrap()
+				.unwrap()
+		};
 		let futures::future::Either::Right((broadcast, driver)) =
 			futures::future::select(Box::pin(driver.run()), Box::pin(announced)).await
 		else {

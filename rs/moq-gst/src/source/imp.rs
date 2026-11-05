@@ -4304,9 +4304,13 @@ mod session_tests {
 		assert_eq!(recorder.written(&mut first, 2), pad);
 
 		let mut follow = watch(&origin, "cam");
-		await_event(&mut follow, |event| matches!(event, moq_net::origin::RouteEvent::Start(_)));
+		await_event(&mut follow, |event| {
+			matches!(event, moq_net::origin::RouteEvent::Start(_))
+		});
 		drop(first);
-		await_event(&mut follow, |event| matches!(event, moq_net::origin::RouteEvent::End(_)));
+		await_event(&mut follow, |event| {
+			matches!(event, moq_net::origin::RouteEvent::End(_))
+		});
 		let mut second = Publisher::sibling(&origin, Default::default());
 		assert_eq!(recorder.written(&mut second, 3), pad, "the return moved to another pad");
 		assert_eq!(

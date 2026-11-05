@@ -15,6 +15,7 @@ Another publisher instance taking a path over keeps it present and is not listed
 `await following.available()` (or `await following`) returns `BroadcastConsumer | None`.
 Later calls return `None` when the path goes offline, or, when following an `instance`, when another instance takes it over, then the next broadcast once something serves the path again; the first call never returns `None`.
 Stop reading the previous broadcast on `None` and call `available()` again. A caller that only awaits the first broadcast can assert it is not `None`.
+
 ### Catalog renditions carry their warmup ([#7864](https://github.com/moq-dev/moq/pull/7864))
 
 `Video` and `Audio` gain `warmup`, the catalog's decoder warmup; it defaults to `None` as the last field, so existing code keeps working. `TrackConsumer` and the audio and video consumers read it from the rendition and start that much earlier.

@@ -34,6 +34,7 @@ for {
 	play(broadcast)
 }
 ```
+
 ### Catalog renditions carry their warmup ([#7864](https://github.com/moq-dev/moq/pull/7864))
 
 `ffi.MoqVideo` and `ffi.MoqAudio` (`media.Video` and `media.Audio`) gain `Warmup`, the catalog's decoder warmup, nil when absent. `media.NewTrackConsumer` and the audio and video `Subscribe` read it from the rendition and start that much earlier; a negative one is refused with an error. Only unkeyed struct literals change.

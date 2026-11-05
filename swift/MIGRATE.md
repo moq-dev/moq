@@ -24,6 +24,7 @@ while true {
     play(broadcast)
 }
 ```
+
 ### Catalog renditions carry their warmup ([#7864](https://github.com/moq-dev/moq/pull/7864))
 
 `Media.Video` and `Media.Audio` gain `warmup`, the catalog's decoder warmup; it defaults to `nil`, so existing initializers still compile. `Media.TrackConsumer` and the audio and video consumers read it from the rendition and start that much earlier.

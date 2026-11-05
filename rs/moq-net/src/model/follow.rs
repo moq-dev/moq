@@ -790,37 +790,10 @@ mod tests {
 		);
 	}
 
-	/// A refusal after the instance handed out closed is not asked again on every call: the
-	/// closed instance's handover is settled until the serving route changes.
+	/// A refusal is reported once, and the follower then waits for the serving route to change
+	/// rather than asking the refusing handler again.
 	#[kio::test]
-	async fn announced_waits_after_refusing_a_closed_instances_successor() {
-		let origin = Hop::new(1).unwrap().produce();
-		let claim = origin.requests_route("", route(&Instance::random()), None).unwrap();
-		let exact = origin.publish("live", route(&Instance::random())).unwrap();
-		let mut announced = origin.consume().follow("live", None).unwrap();
-		let _first = available(&mut announced).await;
-		drop(exact);
-		let (result, ()) = futures::join!(
-			kio::clock::timeout(Duration::from_secs(1), announced.available()),
-			async {
-				requested(&claim).await.reject(Error::Unroutable);
-			}
-		);
-		assert!(matches!(
-			result.expect("the refusal must answer"),
-			Err(Error::Unroutable)
-		));
-		let ((), again) = futures::join!(
-			none(&mut announced),
-			kio::clock::timeout(Duration::from_secs(1), claim.requested_broadcast())
-		);
-		assert!(again.is_err(), "the refusing route was asked again");
-	}
-
-	/// A refusal is reported once, and the follower then waits for another instance rather than
-	/// asking the refusing handler again.
-	#[kio::test]
-	async fn announced_waits_for_another_instance_after_a_refusal() {
+	async fn announced_waits_for_a_route_change_after_a_refusal() {
 		let origin = Hop::new(1).unwrap().produce();
 		let claim = origin.requests("live").unwrap();
 		let mut announced = origin.consume().follow("live", None).unwrap();
@@ -839,8 +812,8 @@ mod tests {
 	}
 
 	/// A refusal by the route that took over from a closed broadcast is not retried when that
-	/// broadcast's movement is seen: the follower waits for another instance, and still reports
-	/// the end of what it handed out once the path goes offline.
+	/// broadcast's movement is seen: the follower waits for the serving route to change, and
+	/// still reports the end of what it handed out once the path goes offline.
 	#[kio::test]
 	async fn announced_does_not_retry_a_refusal_after_a_takeover() {
 		let origin = Hop::new(1).unwrap().produce();

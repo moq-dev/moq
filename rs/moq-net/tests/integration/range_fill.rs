@@ -63,7 +63,14 @@ impl Fixture {
 		options.server_publish = Some(publisher.consume());
 		options.client_subscribe = Some(copy.clone());
 		let pair = connect_mock(options).await;
-		let remote = copy.consume().follow("bcast", None).unwrap().available().await.unwrap().unwrap();
+		let remote = copy
+			.consume()
+			.follow("bcast", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
 		Self {
 			track,
 			remote,

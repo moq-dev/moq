@@ -113,7 +113,7 @@ impl Room {
 	}
 
 	/// The next broadcast a participant's follower hands out. A refusal, such as a handler
-	/// refusing the path, yields nothing: the follower waits for another instance to serve it,
+	/// refusing the path, yields nothing: the follower waits for the serving route to change,
 	/// and the participant's end comes from the listing.
 	fn poll_participants(&mut self, waiter: &kio::Waiter) -> Poll<Event> {
 		let mut index = 0;
