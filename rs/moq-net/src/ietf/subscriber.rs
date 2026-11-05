@@ -4368,9 +4368,10 @@ impl SubscribeOnce {
 				// A group-0 start joins filterless with no fill for the Largest group's head,
 				// so a stream there that starts mid-group is a cut message: drop it, and the
 				// readers skip that group, rather than surface its tail as the whole group.
+				// Largest's object is inclusive, so even object 0 may already be gone.
 				if self.live
 					&& self.start == Some(0)
-					&& let Some(largest) = largest.filter(|largest| largest.object > 0)
+					&& let Some(largest) = largest
 				{
 					held.headless_through = held.headless_through.max(Some(largest.group));
 				}
@@ -6102,6 +6103,8 @@ impl OpenGroup {
 						if start != 0 && !header.flags.first_object && (self.headless || fill.read().headless(sequence))
 						{
 							tracing::warn!(sequence, start, "no fill to stitch a mid-group stream onto");
+							// Never arriving whole, the group is dropped so readers stop owing it.
+							track.drop_groups(sequence..sequence + 1, crate::StreamError::NotFound);
 							return Poll::Ready(Err(Error::Unsupported));
 						}
 						return Poll::Ready(Ok(Opened::Group(create(track)?, start)));
@@ -6144,6 +6147,7 @@ impl OpenGroup {
 						(Some(start), Some((producer, _))) => Ok(Opened::Group(producer, start)),
 						(Some(start), None) => {
 							tracing::warn!(sequence, start, "no fill to stitch a mid-group stream onto");
+							track.drop_groups(sequence..sequence + 1, crate::StreamError::NotFound);
 							Err(Error::Unsupported)
 						}
 						(None, Some((producer, next))) => Ok(Opened::Group(producer, next)),
@@ -14203,7 +14207,7 @@ mod stitch_tests {
 	/// The subscription's own subgroup stream, starting at `start` because a strict
 	/// publisher delivers nothing before it: that head is the fill's job. Each object
 	/// carries the Timestamp of its Object ID.
-	fn tail_stream(sequence: u64, start: u64, payloads: &[&[u8]]) -> Vec<u8> {
+	pub(super) fn tail_stream(sequence: u64, start: u64, payloads: &[&[u8]]) -> Vec<u8> {
 		let mut buf = Vec::new();
 		ietf::GroupHeader {
 			track_alias: ALIAS,
@@ -15867,6 +15871,50 @@ mod stitch_tests {
 		assert_eq!(frames.len(), 1);
 	}
 
+	/// A refused headless group is reported dropped, so a reader in sequence order, as a
+	/// `track` socket session reads, moves on to the next group rather than wait on it.
+	#[kio::test]
+	async fn a_refused_headless_group_does_not_stall_an_ordered_reader() {
+		let h = Harness::new(
+			Fill::Done,
+			vec![
+				tail_stream(SEQUENCE, 2, &[b"tail-2"]),
+				tail_stream(SEQUENCE + 1, 0, &[b"next-0"]),
+			],
+		);
+		// Subscribed before the answer, as the socket does.
+		let mut ordered = h
+			.track
+			.subscribe(Some(
+				track::Subscription::default()
+					.with_order(crate::track::Order::Ascending)
+					.with_delay(track::Delay::default().with_max(None)),
+			))
+			.with_range(0..)
+			.ordered();
+		h.track.received();
+		h.track.anchored_cached();
+		h.track.clone().start_at(SEQUENCE).unwrap();
+		h.subscriber
+			.state
+			.lock()
+			.subscribes
+			.get_mut(&REQUEST)
+			.unwrap()
+			.headless_through = Some(SEQUENCE);
+
+		h.dispatch_refused().await;
+
+		let mut next = h.stream().await;
+		h.subscriber.clone().recv_group(&mut next).await.expect("next group");
+		let group = match ordered.poll_next_group(&kio::Waiter::noop()) {
+			Poll::Ready(Ok(Some(group))) => group,
+			Poll::Ready(other) => panic!("no next group: {:?}", other.map(|group| group.map(|g| g.sequence))),
+			Poll::Pending => panic!("the ordered reader still waits on the refused group"),
+		};
+		assert_eq!(group.sequence, SEQUENCE + 1);
+	}
+
 	/// Widening updates replaced fills that failed to head this group and the next, and the
 	/// current fill has settled. A mid-group tail at or below the last failed group is still
 	/// headless, so it is dropped, while a whole group there stands alone.
@@ -17405,10 +17453,11 @@ mod joining_fetch_tests {
 	/// already partway through the Largest group, that group's mid-group stream is a cut
 	/// message. It is marked headless, so the stream is dropped and readers skip the group
 	/// (`a_headless_tail_after_its_fill_was_replaced_is_dropped`), rather than reading its
-	/// tail as a whole group. A Largest at object 0 leaves the group whole.
+	/// tail as a whole group. Largest's object is inclusive, so a Largest at object 0 marks
+	/// the group too.
 	#[kio::test]
 	async fn a_zero_start_drops_the_largest_groups_cut_tail() {
-		for (object, headless) in [(2, Some(4)), (0, None)] {
+		for (object, headless) in [(2, Some(4)), (0, Some(4))] {
 			let largest = Some(ietf::Location { group: 4, object });
 			for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 				let run = JoinRun::start(version, Some(0), subscribe_ok(version, largest), fetch_ok(version)).await;
@@ -17421,6 +17470,46 @@ mod joining_fetch_tests {
 				assert_eq!(held.headless_through, headless, "{version}: Largest object {object}");
 			}
 		}
+	}
+
+	/// A Largest at object 0 already sent that object, so the Largest group's stream starting
+	/// at object 1 without FIRST_OBJECT is a cut tail: it is refused and readers get the next
+	/// group instead.
+	#[kio::test]
+	async fn a_zero_start_drops_a_tail_cut_after_object_0() {
+		let version = Version::Draft22;
+		let largest = Some(ietf::Location { group: 4, object: 0 });
+		let session = ScriptedSession::per_stream(vec![
+			subscribe_ok(version, largest),
+			super::stitch_tests::tail_stream(4, 1, &[b"tail-1"]),
+			super::stitch_tests::tail_stream(5, 0, &[b"next-0"]),
+		]);
+		let run = JoinRun::subscribe(version, Some(0), session.clone(), Control::new(false)).await;
+		let track = {
+			let state = run.subscriber.state.lock();
+			let held = state.subscribes.values().next().expect("the subscription is registered");
+			held.producer.clone().expect("SUBSCRIBE_OK bound the track")
+		};
+		let mut consumer = track.subscribe(None);
+
+		let mut streams = Vec::new();
+		for _ in 0..2 {
+			let (_, recv) = session.open_bi(Default::default()).await.unwrap();
+			streams.push(Reader::new(crate::transport::boxed::RecvStream::new(recv), version));
+		}
+		let [tail, next] = &mut streams[..] else { unreachable!() };
+		// Accepted, the tail's stream would park unended, so it must be refused at once.
+		let refused = run.subscriber.clone().recv_group(tail).now_or_never();
+		assert!(matches!(refused, Some(Err(Error::Unsupported))), "{refused:?}");
+
+		// The next group's stream never ends, so read it while it is still ingesting.
+		let mut ingesting = run.subscriber.clone();
+		let ingest = ingesting.recv_group(next);
+		let group = futures::select_biased! {
+			group = consumer.recv_group().fuse() => group.expect("track aborted").expect("track finished"),
+			res = ingest.fuse() => panic!("the next group's stream ended: {res:?}"),
+		};
+		assert_eq!(group.sequence, 5, "the cut group was skipped");
 	}
 
 	/// A publisher that serves no FETCH refuses the joining FETCH. That costs the head of

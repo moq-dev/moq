@@ -1858,6 +1858,14 @@ export class Subscriber {
 			}
 			return producer;
 		};
+		// A group that will never arrive whole is dropped, so readers stop owing it.
+		const dropHeadless = () =>
+			hooks.dropTrackGroups(
+				track,
+				group.groupId,
+				group.groupId + 1n,
+				new StreamError(StreamCode.NotFound, { message: "the group's head was lost" }),
+			);
 		// After an END_OF_GROUP or END_OF_TRACK status only the stream's end may follow: an
 		// object past the group's final one makes the track malformed.
 		const last = async () => {
@@ -1921,6 +1929,7 @@ export class Subscriber {
 							console.debug(
 								`dropping a group with no head: alias=${group.trackAlias} group=${group.groupId} start=${start}`,
 							);
+							dropHeadless();
 							stream.stop(new Error("no head to stitch a mid-group stream onto"));
 							return;
 						}
@@ -1934,6 +1943,7 @@ export class Subscriber {
 						console.debug(
 							`dropping a group with no head: alias=${group.trackAlias} group=${group.groupId}`,
 						);
+						dropHeadless();
 						stream.stop(new Error("a group must start at object 0"));
 						return;
 					}

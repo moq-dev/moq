@@ -58,14 +58,14 @@ async function nextStream(
 }
 
 /** A subscriber with one track, and the SUBSCRIBE it sent, still unanswered. */
-async function subscribed(version: IetfVersion = VERSION) {
+async function subscribed(version: IetfVersion = VERSION, subscription: Partial<track.Subscription> = {}) {
 	const pair = createMockTransportPair(ALPNS[version]);
 	const session = new NativeSession(pair.server, version, true);
 	const subscriber = new Subscriber({ session });
 	const consumer = subscriber
 		.consume(Path.from("room"))
 		.track("video")
-		.subscribe({ ...track.Subscription.default(), ranges: [{ start: { relative: 0n } }] });
+		.subscribe({ ...track.Subscription.default(), ranges: [{ start: { relative: 0n } }], ...subscription });
 	onTestFinished(() => {
 		consumer.close();
 		session.close();
@@ -86,8 +86,11 @@ async function subscribed(version: IetfVersion = VERSION) {
  * A draft-18 subscriber with one track answered with Largest `largest`, and the joining
  * FETCH it sent in response, still unanswered.
  */
-async function join(largest: MessageLocation | null = { groupId: GROUP, objectId: 1n }) {
-	const subscription = await subscribed();
+async function join(
+	largest: MessageLocation | null = { groupId: GROUP, objectId: 1n },
+	options: Partial<track.Subscription> = {},
+) {
+	const subscription = await subscribed(VERSION, options);
 	await subscription.answer(largest);
 
 	const fetching = await nextStream(subscription.client);
@@ -263,6 +266,17 @@ for (const outcome of ["a refused joining FETCH", "an empty joining FETCH"] as c
 		expect(await frames(group)).toEqual(["n0"]);
 	});
 }
+
+test("a reader in sequence order with no delay budget skips a group whose head was refused", async () => {
+	const { subscriber, consumer, fetching } = await join(undefined, { order: "ascending", delay: { max: null } });
+	await refuse(fetching);
+
+	await subscriber.handleGroup(...liveStream(GROUP, 2, ["t2"]));
+	await subscriber.handleGroup(...liveStream(GROUP + 1n, 0, ["n0"]));
+
+	const group = await timeout(Nano.fromMilli(Milli(1000)), consumer.ordered().nextGroup());
+	expect(group?.sequence).toBe(GROUP + 1n);
+});
 
 test("a tail parked on a refused joining FETCH is dropped", async () => {
 	const { subscriber, consumer, fetching } = await join();
