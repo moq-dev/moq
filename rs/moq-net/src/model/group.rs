@@ -3562,11 +3562,13 @@ impl Consumer {
 			if self.expired {
 				return res;
 			}
+			let index = self.cursor.index;
 			let Some(recover) = self.recover.as_mut() else {
 				return res;
 			};
 			let failed = match &res {
 				Poll::Ready(Ok(Some(_))) => {
+					recover.resumed();
 					// The old copy was dense through this frame, so the replacement must be too.
 					// The refusal stays: a batch that already holds frames swallows one error.
 					if self.adopted {
@@ -3585,42 +3587,31 @@ impl Consumer {
 					return res;
 				}
 				// Content that failed to inflate is the group's under its name, so no copy fixes it.
-				Poll::Ready(Err(_)) if !self.cursor.raw && self.cursor.state.read().malformed() => return res,
+				Poll::Ready(Err(err)) if !self.cursor.raw && self.cursor.state.read().malformed() => {
+					recover.failed(index, err);
+					return res;
+				}
 				Poll::Ready(Err(err)) => Some(err.clone()),
 				Poll::Pending => None,
 			};
 			if !recover.wants(failed.as_ref(), waiter) {
+				if let Some(err) = &failed {
+					recover.failed(index, err);
+				}
 				return res;
 			}
-			// An ordinal FETCH would request different content after an Object ID gap.
-			if self.cursor.state.read().sparse() {
-				return Poll::Ready(Err(Error::Unsupported));
-			}
-			let replacement = match recover.poll(self.cursor.index as u64, failed.as_ref(), waiter) {
-				Poll::Ready(Ok(group)) => group,
-				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+			recover.recovering(index, failed.as_ref());
+			let replacement = match self.replacement(failed, waiter) {
+				Poll::Ready(Ok(replacement)) => replacement,
+				Poll::Ready(Err(err)) => {
+					if let Some(recover) = self.recover.as_mut() {
+						recover.failed(index, &err);
+					}
+					return Poll::Ready(Err(err));
+				}
 				Poll::Pending => return Poll::Pending,
 			};
-			// A plain read inflates from frame 0, which a replacement starting later lacks
-			// when the failed route's head was not lent to it.
-			if !self.cursor.raw
-				&& replacement.group.first_frame() > 0
-				&& replacement.group.cursor.state.read().flate.is_some()
-			{
-				return Poll::Ready(Err(failed.unwrap_or(Error::Lagged)));
-			}
-			// A copy that shed the frame read next can't continue it, and recovering onto it
-			// again would only fail the same way. One that starts past it lags only itself.
-			if let Err(err) = replacement
-				.group
-				.cursor
-				.state
-				.read()
-				.check_read(self.cursor.index, self.cursor.raw)
-				&& !matches!(err, Error::Lagged)
-			{
-				return Poll::Ready(Err(failed.unwrap_or(err)));
-			}
+			let recover = self.recover.as_mut().expect("a replacement comes from recovery");
 			// Same frames by index, so only the channel changes; read progress and the
 			// cap stay this cursor's.
 			let (index, end, raw) = (self.cursor.index, self.cursor.end, self.cursor.raw);
@@ -3635,6 +3626,41 @@ impl Consumer {
 			self.cursor.raw = raw;
 			self.adopted = true;
 		}
+	}
+
+	/// The serving route's copy to continue this group from once its copy `failed`, or
+	/// stalled while a newer route serves, or the error that ends the read instead.
+	fn replacement(&mut self, failed: Option<Error>, waiter: &kio::Waiter) -> Poll<Result<super::resume::Replacement>> {
+		// An ordinal FETCH would request different content after an Object ID gap.
+		if self.cursor.state.read().sparse() {
+			return Poll::Ready(Err(Error::Unsupported));
+		}
+		let recover = self
+			.recover
+			.as_mut()
+			.expect("only a recovering group needs a replacement");
+		let replacement = ready!(recover.poll(self.cursor.index as u64, failed.as_ref(), waiter))?;
+		// A plain read inflates from frame 0, which a replacement starting later lacks
+		// when the failed route's head was not lent to it.
+		if !self.cursor.raw
+			&& replacement.group.first_frame() > 0
+			&& replacement.group.cursor.state.read().flate.is_some()
+		{
+			return Poll::Ready(Err(failed.unwrap_or(Error::Lagged)));
+		}
+		// A copy that shed the frame read next can't continue it, and recovering onto it
+		// again would only fail the same way. One that starts past it lags only itself.
+		if let Err(err) = replacement
+			.group
+			.cursor
+			.state
+			.read()
+			.check_read(self.cursor.index, self.cursor.raw)
+			&& !matches!(err, Error::Lagged)
+		{
+			return Poll::Ready(Err(failed.unwrap_or(err)));
+		}
+		Poll::Ready(Ok(replacement))
 	}
 
 	/// Whether the subscription this group was handed out under has given up on it, waking
