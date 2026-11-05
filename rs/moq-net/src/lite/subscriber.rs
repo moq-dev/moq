@@ -10538,8 +10538,6 @@ impl ServeLoop {
 			match &mut self.mode {
 				ServeMode::Establish(est) => {
 					let _ = self.fetches.poll(waiter);
-					self.feed_fetches
-						.poll(&self.sub, serve.subscriber.runtime.now(), waiter);
 					let read = crate::util::poll_unwanted(&mut self.demand, waiter).is_pending();
 					if let Err(err) = self
 						.range_fills
