@@ -14,7 +14,7 @@ The incoming half, a token admitting TRACK_STATUS and FETCH, landed with
 [moq-dev/moq#7211](https://github.com/moq-dev/moq/pull/7211), which honors a
 token on any request type. This quest keeps only the outgoing half.
 
-Decided 2026-10-20 (maintainer): stays in m3 with the other request-token
+Decided 2026-10-20 (maintainer): stays in m5 with the other request-token
 surfaces until a consumer asks. Outgoing tokens wait for `add()` with
 automatic naming, so this lands with or after that. A joining FETCH keeps
 following its subscription's authorization and carries no token of its own.

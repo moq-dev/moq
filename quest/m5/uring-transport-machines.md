@@ -13,7 +13,8 @@ single bound.
 #5821 serves moq-transport on the ring by wrapping its transport in
 `moq_uring::transport::Local` (renamed from `Pinned`), which checks the
 thread on every call because the ietf path requires `Boxable`. Decided with
-#5821 (maintainer): ship `Local` public now. Kept in m2 (decided 2026-10-17).
+#5821 (maintainer): ship `Local` public now. Kept in later work (decided 2026-10-17; m5
+since the 2026-11-05 re-cut).
 
 Decided 2026-10-22 (maintainer): rescoped from converting moq-transport to
 named state machines to measuring the check after

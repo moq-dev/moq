@@ -13,7 +13,7 @@ and keep their existing Restart behavior.
 
 Decided with the maintainer, 2026-10-13:
 
-- Ranked in m2, after clustering stability, federation, and P2P. Health
+- Ranked in m2 (m5 since the 2026-11-05 re-cut), after clustering stability, federation, and P2P. Health
   design had to reproduce a stall that transport failure and ordinary
   reconnect do not recover, or the line would be abandoned. It did
   ([moq-dev/moq#7096](https://github.com/moq-dev/moq/pull/7096)):

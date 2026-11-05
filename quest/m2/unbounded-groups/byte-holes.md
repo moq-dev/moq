@@ -18,7 +18,7 @@ whichever wip is current when they land, and its Required list is not a
 closed freeze set. If lite-07 is cut first, the offset goes on the next wip
 and lite-07 peers start flights only at frame boundaries, like older lite
 versions. Decided 2026-10-28 (maintainer): shed frames are served again only
-by flights, so this waits on Flights and stays in m1.
+by flights, so this waits on Flights and stays in m2 with its epic.
 
 - Segments are `frame::SEGMENT` (1 MiB) long, so segment `i` always holds
   bytes from `i * SEGMENT`, and a completed chain is `frame::Payload::Chain`.

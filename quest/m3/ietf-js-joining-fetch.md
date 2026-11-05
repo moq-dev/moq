@@ -12,7 +12,7 @@ SUBSCRIBE_OK.
 
 Decided 2026-10-25 (maintainer): honoring Largest Object and serving the
 head moved into JavaScript FETCH in m1, which landed; only this part stays
-in m2. A FETCH that resolves before PUBLISH_DONE already finishes its head.
+in later work (m3). A FETCH that resolves before PUBLISH_DONE already finishes its head.
 
 In the tail test the track is finished before SUBSCRIBE_OK goes out, so
 PUBLISH_DONE follows at once and the FETCH arrives to no subscription. Keep a

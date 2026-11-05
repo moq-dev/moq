@@ -8,7 +8,8 @@ including bundle size, CPU, and first-frame latency.
 
 ## Plan
 
-Decided 2026-10-12: this broader media report remains in m2. It supplements
+Decided 2026-10-12: this broader media report remains in m2 (m5 since the
+2026-11-05 re-cut). It supplements
 the focused browser comparison required before each backend adoption; it
 cannot replace or postpone that decision evidence. Measure whichever backend
 is deployed and name the exact revisions and build inputs.

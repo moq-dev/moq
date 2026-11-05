@@ -66,7 +66,7 @@ delivered frame by about 5%; video's 1.5% drop was within noise. The remaining
 
 Decided 2026-10-14: kio channel contention ranks first. Its 215% lock wait on
 the default tokio runtime is the largest measured cost, and the lock-wait
-recipe it needs has shipped. It stays in m2, since m1 defers general
+recipe it needs has shipped. It stays in later work (m4), since the release defers general
 optimization.
 
 Decided 2026-10-22: the WebSocket and TCP stream transports join this line

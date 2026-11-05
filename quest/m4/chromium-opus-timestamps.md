@@ -27,7 +27,7 @@ and closed by the maintainer for that reason.
 
 Decided 2026-11-04 (maintainer): file the Chromium bug
 ([chromium#581458361](https://issues.chromium.org/issues/581458361), Blink>Media>WebCodecs,
-submitted by the maintainer) and no spec issue; track it here in m2, since
+submitted by the maintainer) and no spec issue; track it here in m4, since
 push-to-talk works around it by gating silence before the encoder and stamping
 chunks from its own inputs, so nothing depends on this.
 

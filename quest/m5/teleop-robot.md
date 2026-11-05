@@ -8,7 +8,7 @@ the gate for the rest of the questline.
 
 ## Plan
 
-Decided 2026-10-08: parked in m3. No teleoperation consumer needs the crate
+Decided 2026-10-08: parked in m5. No teleoperation consumer needs the crate
 yet; telemetry beside video needs [data sync](/quest/m3/watch-data-sync.md),
 not this primitive.
 

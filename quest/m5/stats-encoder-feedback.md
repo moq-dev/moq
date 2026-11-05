@@ -10,7 +10,7 @@ it already follows. Keyframe requests stay out.
 
 ## Plan
 
-Deferred in the 2026-09-30 audit and moved to m3 in the 2026-10-05 audit: no named consumer; the media stats it
+Deferred in the 2026-09-30 audit and moved to the deferred milestone (now m5) in the 2026-10-05 audit: no named consumer; the media stats it
 reads land first in m3.
 
 Decided 2026-10-08: parked, and the transcode leg is out. The

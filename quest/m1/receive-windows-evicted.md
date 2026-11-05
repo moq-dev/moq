@@ -8,7 +8,7 @@ overcommitted cells again, and Nightly's `Rust benchmark tests` job
 (`gh nightly rust-test`) still passes. Those cells are 256 streams,
 4 MiB frames, and 4 MiB frames with a following stream window. Until
 then, the benchmark skips them and prints each one with
-`quest/m1/group-drops.md` as the reason.
+`quest/m2/group-drops.md` as the reason.
 
 Every cell keeps the workload it offers. A cell whose incomplete units
 fit the connection window fails on any eviction. A cell that
@@ -37,7 +37,7 @@ Overload policy, decided 2026-11-04 (maintainer):
 
 Silent loss, decided 2026-11-04 (maintainer):
 
-- ✅ Fix it at the source in `quest/m1/group-drops.md`, planned in
+- ✅ Fix it at the source in `quest/m2/group-drops.md`, planned in
   [moq-dev/moq#7890](https://github.com/moq-dev/moq/pull/7890). There,
   the wire always names an abandoned group, and `track::Subscriber`'s
   drop signal becomes public.
