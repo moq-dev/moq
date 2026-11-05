@@ -4088,6 +4088,11 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 								Err(err) => return Some(Step::Info(name.clone(), asked.source, Err(err))),
 							}
 						}
+						// An awaited copy follows the readers, or it may never send the group
+						// they now want.
+						if asked.info.is_some() {
+							follow_demand(&mut asked.sub, io.accepted.as_mut(), &io.weak, &io.routes, waiter);
+						}
 						// While another copy may still deliver, a matching replacement answers only
 						// once it delivers or ends: one failing first refuses, and that copy keeps
 						// serving. Different metadata is refused at once.
@@ -13756,6 +13761,39 @@ mod tests {
 		// The incumbent's clean end is the track's, not the newcomer's error.
 		old.finish().unwrap();
 		assert!(matches!(next_group(&mut subscription).await, Ok(None)));
+	}
+
+	/// While the front waits for the newcomer's first group, a reader changing its
+	/// preferences reaches the newcomer's copy, which may otherwise never send that group.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn an_awaited_replacement_follows_the_readers_demand() {
+		let (producer, _server, _upstream, _old, mut subscription) = remote_front().await;
+
+		let newcomer = producer.create_broadcast("room/alice").unwrap();
+		let mut handler = newcomer.requests();
+		newcomer
+			.announce(Route::default().with_instance(instance(), 0))
+			.unwrap();
+		let request = kio::clock::timeout(Duration::from_secs(1), handler.requested_track())
+			.await
+			.expect("the front asked the newcomer")
+			.expect("request");
+		let replacement = request.accept(crate::track::Info::timed());
+		for _ in 0..10 {
+			kio::clock::sim::yield_now().await;
+		}
+		assert_eq!(replacement.subscription().map(|wanted| wanted.priority), Some(0));
+
+		let preferences = crate::track::Subscription {
+			priority: 9,
+			..subscription.subscription()
+		};
+		subscription.update(preferences).unwrap();
+		for _ in 0..10 {
+			kio::clock::sim::yield_now().await;
+		}
+		assert_eq!(replacement.subscription().map(|wanted| wanted.priority), Some(9));
 	}
 
 	/// The newcomer refuses "video", so the track drains the incumbent. The reader leaves
