@@ -67,6 +67,10 @@ export const PeerSchema = z.object({
 	name: z.string(),
 	/** SHA-256 of the leaf certificate, hex. */
 	fingerprint: z.string(),
+	/** SHA-256 of the leaf, then of each certificate the leaf provably descends from,
+	 * nearest first, hex, ending at the root the relay's listener verified it against.
+	 * Absent from a relay that predates it: read that as the leaf alone. */
+	chain: z.optional(z.array(z.string())),
 	/** The certificate's notAfter, as unix seconds. */
 	expires: z.optional(z.int()),
 	/** The issuer's distinguished name. */

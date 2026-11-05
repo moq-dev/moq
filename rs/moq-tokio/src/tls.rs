@@ -170,6 +170,12 @@ pub enum Error {
 	#[error("failed to generate a self-signed certificate: {0}")]
 	Rcgen(String),
 
+	/// A client certificate chain held more candidate paths than certificate path
+	/// building allows, so its lineage could not be traced in full.
+	#[cfg(feature = "_certs")]
+	#[error("the client certificate chain is too complex to trace: {0}")]
+	Lineage(String),
+
 	/// This CPU lacks a feature that rind, MoQ's cryptography, requires.
 	#[error(transparent)]
 	UnsupportedCpu(#[from] crypto::UnsupportedCpu),
@@ -1461,13 +1467,14 @@ impl Listen {
 		let provider = crypto::provider()?;
 		let certs = Arc::new(ServeCerts::new(provider.clone()));
 		certs.load_certs(self)?;
-		let verifier = self.client_auth(provider)?;
+		let ClientAuth { verifier, roots } = self.client_auth(provider)?;
 		#[cfg(feature = "watch")]
 		let reload = Reload::spawn(certs.clone(), self.clone())?;
 		Ok(Serve(Arc::new(Serving {
 			certs,
 			resolver: None,
 			verifier,
+			roots,
 			#[cfg(feature = "watch")]
 			_reload: reload,
 		})))
@@ -1564,65 +1571,75 @@ impl Listen {
 	}
 
 	/// The client-certificate policy for this listener, or `None` to ask for no
-	/// certificate at all.
+	/// certificate at all, with the roots it verifies against.
 	///
 	/// The one place the TLS listeners agree on what mTLS means here, so a new
 	/// mode lands once rather than in each of them: pinned [`peers`](Self::peers),
 	/// else optional CA-rooted [`root`](Self::root), else nothing.
 	#[cfg(feature = "_certs")]
-	pub(crate) fn client_auth(
-		&self,
-		provider: crypto::Provider,
-	) -> Result<Option<Arc<dyn rustls::server::danger::ClientCertVerifier>>> {
+	pub(crate) fn client_auth(&self, provider: crypto::Provider) -> Result<ClientAuth> {
 		if let Some(peers) = &self.peers {
 			// Pinning replaces the chain rather than adding to it, so a caller that
 			// configured both would silently lose whichever we didn't install.
 			if !self.root.is_empty() {
 				return Err(Error::PeersWithRoots);
 			}
-			return Ok(Some(Arc::new(PeerVerifier::new(provider, peers.clone()))));
+			return Ok(ClientAuth {
+				verifier: Some(Arc::new(PeerVerifier::new(provider, peers.clone()))),
+				roots: ClientRoots::default(),
+			});
 		}
 
 		match self.root.is_empty() {
-			true => Ok(None),
-			false => Ok(Some(self.client_verifier(provider)?)),
+			true => Ok(ClientAuth::default()),
+			false => self.client_verifier(provider),
 		}
 	}
 
 	/// Build the optional-client-auth verifier, reloading configured roots in place.
 	#[cfg(feature = "_certs")]
-	pub(crate) fn client_verifier(
-		&self,
-		provider: crypto::Provider,
-	) -> Result<Arc<dyn rustls::server::danger::ClientCertVerifier>> {
+	fn client_verifier(&self, provider: crypto::Provider) -> Result<ClientAuth> {
 		self.refuse_deprecated()?;
-		let initial = Self::build_client_verifier(&self.root, &provider)?;
+		let roots = ClientRoots::default();
+		let initial = Self::build_client_verifier(&self.root, &provider, &roots)?;
 
 		#[cfg(feature = "watch")]
-		{
+		let verifier = {
 			let paths = self.root.clone();
 			let reload_paths = paths.clone();
 			let reload_provider = provider.clone();
+			let reload_roots = roots.clone();
 			let verifier = ReloadingClientVerifier::new(&paths, initial, move || {
-				Self::build_client_verifier(&reload_paths, &reload_provider)
+				Self::build_client_verifier(&reload_paths, &reload_provider, &reload_roots)
 			})?;
-			Ok(Arc::new(verifier))
-		}
-
+			Arc::new(verifier)
+		};
 		#[cfg(not(feature = "watch"))]
-		Ok(initial)
+		let verifier = initial;
+
+		Ok(ClientAuth {
+			verifier: Some(verifier),
+			roots,
+		})
 	}
 
+	/// Build a verifier from the root files, adding them to `roots` once it builds.
 	#[cfg(feature = "_certs")]
 	fn build_client_verifier(
 		paths: &[PathBuf],
 		provider: &crypto::Provider,
+		roots: &ClientRoots,
 	) -> Result<Arc<dyn rustls::server::danger::ClientCertVerifier>> {
-		let roots = root_store(&read_roots(paths)?)?;
-		rustls::server::WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider.clone())
-			.allow_unauthenticated()
-			.build()
-			.map_err(Error::ClientVerifier)
+		let certs = read_roots(paths)?;
+		let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
+			Arc::new(root_store(&certs)?),
+			provider.clone(),
+		)
+		.allow_unauthenticated()
+		.build()
+		.map_err(Error::ClientVerifier)?;
+		roots.extend(certs);
+		Ok(verifier)
 	}
 
 	/// Build a [`rustls::ServerConfig`] for a plain-TLS (non-QUIC) server, e.g. an
@@ -1649,7 +1666,7 @@ impl Listen {
 		let builder =
 			rustls::ServerConfig::builder_with_provider(provider.clone()).with_safe_default_protocol_versions()?;
 
-		let mut tls = match self.client_auth(provider)? {
+		let mut tls = match self.client_auth(provider)?.verifier {
 			Some(verifier) => builder.with_client_cert_verifier(verifier).with_cert_resolver(certs),
 			None => builder.with_no_client_auth().with_cert_resolver(certs),
 		};
@@ -1675,8 +1692,44 @@ struct Serving {
 	certs: Arc<ServeCerts>,
 	resolver: Option<Arc<dyn rustls::server::ResolvesServerCert>>,
 	verifier: Option<Arc<dyn rustls::server::danger::ClientCertVerifier>>,
+	roots: ClientRoots,
 	#[cfg(feature = "watch")]
 	_reload: Reload,
+}
+
+/// A listener's client-certificate verifier and the roots behind it.
+#[cfg(feature = "_certs")]
+#[derive(Default)]
+pub(crate) struct ClientAuth {
+	pub(crate) verifier: Option<Arc<dyn rustls::server::danger::ClientCertVerifier>>,
+	roots: ClientRoots,
+}
+
+/// Every CA root a listener's client verifier has loaded, shared with its reloads.
+///
+/// A rotation adds roots but never drops one. An identity is built after its
+/// handshake, sometimes a peer-paced round trip later, so a root rotated out in
+/// between must still be here for the lineage to reach the root the handshake
+/// verified against. Listing an old root is never wrong: lineage names a root only
+/// when the leaf provably descends from it. The set grows only with the
+/// operator's own root files.
+#[cfg(feature = "_certs")]
+#[derive(Clone, Debug, Default)]
+struct ClientRoots(Arc<RwLock<Arc<[CertificateDer<'static>]>>>);
+
+#[cfg(feature = "_certs")]
+impl ClientRoots {
+	fn current(&self) -> Arc<[CertificateDer<'static>]> {
+		self.0.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+	}
+
+	fn extend(&self, roots: Vec<CertificateDer<'static>>) {
+		let mut current = self.0.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+		let fresh: Vec<_> = roots.into_iter().filter(|root| !current.contains(root)).collect();
+		if !fresh.is_empty() {
+			*current = current.iter().cloned().chain(fresh).collect();
+		}
+	}
 }
 
 #[cfg(feature = "_certs")]
@@ -1707,13 +1760,14 @@ impl Serve {
 		}
 		let provider = crypto::provider()?;
 		let certs = Arc::new(ServeCerts::new(provider.clone()));
-		let verifier = policy.client_auth(provider)?;
+		let ClientAuth { verifier, roots } = policy.client_auth(provider)?;
 		#[cfg(feature = "watch")]
 		let reload = Reload::spawn(certs.clone(), policy.clone())?;
 		Ok(Self(Arc::new(Serving {
 			certs,
 			resolver: Some(resolver),
 			verifier,
+			roots,
 			#[cfg(feature = "watch")]
 			_reload: reload,
 		})))
@@ -1743,6 +1797,20 @@ impl Serve {
 		Ok(Arc::new(config))
 	}
 
+	/// The identity of a client whose certificate chain, leaf first, this listener's
+	/// handshake accepted.
+	///
+	/// It carries every root the listener has trusted, so [`PeerIdentity::lineage`]
+	/// ends at the one the chain verified against even when the client did not send
+	/// it, and even when that root has since rotated out.
+	/// Only pass a chain TLS accepted: nothing here re-verifies it.
+	pub fn peer(&self, chain: Vec<CertificateDer<'static>>) -> PeerIdentity {
+		PeerIdentity {
+			chain,
+			roots: self.0.roots.current(),
+		}
+	}
+
 	#[cfg(feature = "_transport")]
 	pub(crate) fn client_auth(&self) -> bool {
 		self.0.verifier.is_some()
@@ -1752,25 +1820,24 @@ impl Serve {
 /// A peer's validated client-certificate chain from the mTLS handshake.
 ///
 /// Returned by MoQ's `server::Request::peer_identity` when the peer presented a
-/// certificate that chained to a configured [`Listen::root`]. Owns the chain
-/// (leaf first) so callers can inspect it, e.g. [`expiry`](Self::expiry).
+/// certificate that chained to a configured [`Listen::root`], and built for a
+/// listener outside this crate by [`Serve::peer`]. Owns the chain (leaf first) so
+/// callers can inspect it, e.g. [`expiry`](Self::expiry).
 #[derive(Debug, Clone)]
 pub struct PeerIdentity {
 	chain: Vec<CertificateDer<'static>>,
+	/// Every root the accepting listener had trusted when it built this.
+	roots: Arc<[CertificateDer<'static>]>,
 }
 
 impl PeerIdentity {
-	/// Wrap a certificate chain a QUIC backend already validated, leaf first.
-	///
-	/// For a listener living outside this crate (the io_uring workers, say)
-	/// that ran its own mTLS handshake and wants the relay's authenticated-peer
-	/// path. Only pass a chain TLS accepted: nothing here re-verifies it.
-	///
-	/// Takes [`rustls::pki_types::CertificateDer`], already part of this
-	/// crate's public API via [`chain`](Self::chain), so a major `rustls` bump
-	/// is a breaking change for callers of this too.
-	pub fn from_chain(chain: Vec<CertificateDer<'static>>) -> Self {
-		Self { chain }
+	/// A chain with no listener roots behind it.
+	#[cfg(test)]
+	pub(crate) fn from_chain(chain: Vec<CertificateDer<'static>>) -> Self {
+		Self {
+			chain,
+			roots: Arc::new([]),
+		}
 	}
 
 	/// The validated certificate chain, leaf first.
@@ -1811,6 +1878,87 @@ impl PeerIdentity {
 				.map(str::to_string)
 		};
 		san.or_else(cn).or_else(|| self.fingerprint())
+	}
+
+	/// The leaf's SHA-256 fingerprint, then each certificate the leaf provably descends
+	/// from, nearest first, all hex encoded: presented intermediates and roots, and the
+	/// listener root the chain verified against, whether or not the client sent it.
+	///
+	/// A client sends whatever certificates it likes after its leaf, including public
+	/// intermediates it was never issued under, so only one whose key signed a link of
+	/// a path up from the leaf is listed. Each presented certificate and listener root
+	/// stands in as a trust anchor and every path to one is followed, so a client
+	/// cannot hide an ancestor by ordering or padding its chain.
+	///
+	/// Fails when the chain is empty or exhausts path building's fixed budget of
+	/// signature checks, which a chain a CA issued never comes near.
+	#[cfg(feature = "_certs")]
+	pub fn lineage(&self) -> Result<Vec<String>> {
+		use std::cell::RefCell;
+
+		/// Lineage is about issuance, not purpose, so any EKU passes.
+		struct AnyUsage;
+		impl webpki::ExtendedKeyUsageValidator for AnyUsage {
+			fn validate(&self, _: webpki::KeyPurposeIdIter<'_, '_>) -> std::result::Result<(), webpki::Error> {
+				Ok(())
+			}
+		}
+
+		let (leaf, presented) = self.chain.split_first().ok_or(Error::Empty)?;
+		let fingerprint = |der: &[u8]| hex::encode(crypto::sha256(der));
+		let provider = crypto::provider()?;
+		let leaf_cert = webpki::EndEntityCert::try_from(leaf).map_err(|err| Error::Lineage(err.to_string()))?;
+		let candidates: Vec<&CertificateDer<'static>> = presented.iter().chain(self.roots.iter()).collect();
+		// A certificate that is not even a valid anchor cannot be one's issuer.
+		let (indexes, anchors): (Vec<usize>, Vec<_>) = candidates
+			.iter()
+			.enumerate()
+			.filter_map(|(index, der)| webpki::anchor_from_trusted_cert(der).ok().map(|anchor| (index, anchor)))
+			.unzip();
+
+		// Each certificate's distance from the leaf over every path found.
+		let depths: RefCell<Vec<(String, usize)>> = RefCell::new(vec![(fingerprint(leaf), 0)]);
+		let record = |path: &webpki::VerifiedPath<'_>| {
+			let mut depths = depths.borrow_mut();
+			let mut add = |hash: String, depth: usize| match depths.iter_mut().find(|(seen, _)| *seen == hash) {
+				Some((_, seen)) => *seen = (*seen).min(depth),
+				None => depths.push((hash, depth)),
+			};
+			let mut depth = 0;
+			for cert in path.intermediate_certificates() {
+				depth += 1;
+				add(fingerprint(cert.der().as_ref()), depth);
+			}
+			if let Some(slot) = anchors.iter().position(|anchor| std::ptr::eq(anchor, path.anchor())) {
+				add(fingerprint(candidates[indexes[slot]]), depth + 1);
+			}
+			// Refused, so path building keeps looking for the next path.
+			Err(webpki::Error::UnknownIssuer)
+		};
+		let result = leaf_cert.verify_for_usage(
+			provider.signature_verification_algorithms.all,
+			&anchors,
+			presented,
+			UnixTime::now(),
+			AnyUsage,
+			None,
+			Some(&record),
+		);
+		// Only exhausting the budget stops the search early; any other error means
+		// every candidate path was tried.
+		if let Err(
+			err @ (webpki::Error::MaximumSignatureChecksExceeded
+			| webpki::Error::MaximumPathBuildCallsExceeded
+			| webpki::Error::MaximumNameConstraintComparisonsExceeded),
+		) = result
+		{
+			return Err(Error::Lineage(err.to_string()));
+		}
+
+		let mut depths = depths.into_inner();
+		// Stable, so certificates at one depth keep the order they were found in.
+		depths.sort_by_key(|(_, depth)| *depth);
+		Ok(depths.into_iter().map(|(hash, _)| hash).collect())
 	}
 
 	/// The leaf certificate's issuer, as a distinguished name.
@@ -2448,7 +2596,7 @@ mod tests {
 				.unwrap();
 			params.not_after = ::time::OffsetDateTime::from_unix_timestamp(seconds).unwrap();
 			let cert = params.self_signed(&key).unwrap().into();
-			let peer = PeerIdentity { chain: vec![cert] };
+			let peer = PeerIdentity::from_chain(vec![cert]);
 			assert_eq!(peer.expiry(), Some(expected));
 		}
 	}
@@ -2652,7 +2800,13 @@ mod tests {
 	#[test]
 	fn client_auth_is_off_until_configured() {
 		let provider = crypto::provider().unwrap();
-		assert!(Listen::default().client_auth(provider.clone()).unwrap().is_none());
+		assert!(
+			Listen::default()
+				.client_auth(provider.clone())
+				.unwrap()
+				.verifier
+				.is_none()
+		);
 
 		let pinned = Listen {
 			peers: Some(Peers::new()),
@@ -2661,6 +2815,7 @@ mod tests {
 		let verifier = pinned
 			.client_auth(provider)
 			.unwrap()
+			.verifier
 			.expect("pinning wants a certificate");
 		// Unlike the CA-rooted verifier, an anonymous client is no longer welcome:
 		// the point of this mode is knowing who connected.
@@ -2893,8 +3048,151 @@ mod tests {
 	fn peer_identity_reports_the_published_fingerprint() {
 		let identity = Identity::generate(["mesh.invalid"]).unwrap();
 		let chain = vec![identity.certified().leaf().clone()];
-		let peer = PeerIdentity { chain };
+		let peer = PeerIdentity::from_chain(chain);
 		assert_eq!(peer.fingerprint().as_deref(), Some(identity.fingerprint()));
+	}
+
+	/// A CA certificate and the issuer it signs with. rcgen gives every certificate the
+	/// same subject, so each CA here names itself as any leaf's issuer.
+	fn lineage_ca(
+		parent: Option<&rcgen::Issuer<'_, rind_rcgen::KeyPair>>,
+	) -> (CertificateDer<'static>, rcgen::Issuer<'static, rind_rcgen::KeyPair>) {
+		let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+		let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+		params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+		let cert = match parent {
+			Some(parent) => params.signed_by(&key, parent).unwrap(),
+			None => params.self_signed(&key).unwrap(),
+		};
+		(cert.into(), rcgen::Issuer::new(params, key))
+	}
+
+	fn lineage_leaf(issuer: &rcgen::Issuer<'_, rind_rcgen::KeyPair>) -> CertificateDer<'static> {
+		let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+		let params = rcgen::CertificateParams::new(vec!["client.invalid".to_string()]).unwrap();
+		params.signed_by(&key, issuer).unwrap().into()
+	}
+
+	fn hashes(certs: &[&CertificateDer<'static>]) -> Vec<String> {
+		certs
+			.iter()
+			.map(|cert| hex::encode(crypto::sha256(cert.as_ref())))
+			.collect()
+	}
+
+	/// Lineage lists the leaf and each presented certificate it descends from, nearest
+	/// first, whatever order the client sent them in.
+	#[test]
+	fn lineage_follows_signatures_not_presentation() {
+		let (root, root_issuer) = lineage_ca(None);
+		let (intermediate, intermediate_issuer) = lineage_ca(Some(&root_issuer));
+		let (stranger, _) = lineage_ca(None);
+		let leaf = lineage_leaf(&intermediate_issuer);
+
+		let lineage = |chain: &[&CertificateDer<'static>]| {
+			PeerIdentity::from_chain(chain.iter().map(|cert| (*cert).clone()).collect())
+				.lineage()
+				.unwrap()
+		};
+		assert_eq!(lineage(&[&leaf]), hashes(&[&leaf]));
+		assert_eq!(lineage(&[&leaf, &intermediate]), hashes(&[&leaf, &intermediate]));
+		assert_eq!(
+			lineage(&[&leaf, &root, &stranger, &intermediate]),
+			hashes(&[&leaf, &intermediate, &root]),
+			"a public CA the leaf was not issued under is never listed, nor is order trusted"
+		);
+	}
+
+	/// Lineage ends at the listener root the chain verified against, whether or not the
+	/// client sent it, and never lists a listener root the leaf was not issued under.
+	#[test]
+	fn lineage_ends_at_the_listener_root() {
+		let (root, root_issuer) = lineage_ca(None);
+		let (intermediate, intermediate_issuer) = lineage_ca(Some(&root_issuer));
+		let (stranger, _) = lineage_ca(None);
+		let leaf = lineage_leaf(&intermediate_issuer);
+
+		let lineage = |chain: &[&CertificateDer<'static>]| {
+			PeerIdentity {
+				chain: chain.iter().map(|cert| (*cert).clone()).collect(),
+				roots: Arc::from([stranger.clone(), root.clone()]),
+			}
+			.lineage()
+			.unwrap()
+		};
+		let full = hashes(&[&leaf, &intermediate, &root]);
+		assert_eq!(lineage(&[&leaf, &intermediate]), full);
+		assert_eq!(
+			lineage(&[&leaf, &intermediate, &root]),
+			full,
+			"a sent root is listed once"
+		);
+	}
+
+	/// [`Serve::peer`] carries the roots the listener verifies client certificates against.
+	#[test]
+	fn a_listener_peer_traces_to_its_root() {
+		let (root, root_issuer) = lineage_ca(None);
+		let (intermediate, intermediate_issuer) = lineage_ca(Some(&root_issuer));
+		let leaf = lineage_leaf(&intermediate_issuer);
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("root.pem");
+		std::fs::write(&path, pem::encode(&pem::Pem::new("CERTIFICATE", root.to_vec()))).unwrap();
+
+		let listen = Listen {
+			generate: vec!["localhost".into()],
+			root: vec![path],
+			..Default::default()
+		};
+		let serve = listen.load().unwrap();
+		let peer = serve.peer(vec![leaf.clone(), intermediate.clone()]);
+		assert_eq!(peer.lineage().unwrap(), hashes(&[&leaf, &intermediate, &root]));
+	}
+
+	/// A root rotated out stays reachable, so an identity built after the rotation
+	/// still ends at the root its handshake verified against.
+	#[test]
+	fn client_roots_keep_a_rotated_out_root() {
+		let (old, old_issuer) = lineage_ca(None);
+		let (new, _) = lineage_ca(None);
+		let leaf = lineage_leaf(&old_issuer);
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("root.pem");
+		let provider = crypto::provider().unwrap();
+		let roots = ClientRoots::default();
+		let load = |root: &CertificateDer<'static>| {
+			std::fs::write(&path, pem::encode(&pem::Pem::new("CERTIFICATE", root.to_vec()))).unwrap();
+			Listen::build_client_verifier(std::slice::from_ref(&path), &provider, &roots).unwrap();
+		};
+
+		load(&old);
+		load(&new);
+		load(&new);
+		assert_eq!(roots.current().len(), 2, "a reloaded root is held once");
+		let peer = PeerIdentity {
+			chain: vec![leaf.clone()],
+			roots: roots.current(),
+		};
+		assert_eq!(peer.lineage().unwrap(), hashes(&[&leaf, &old]));
+	}
+
+	/// Padding the chain until path building gives up is an error, never a lineage
+	/// missing the ancestor the padding hid.
+	#[test]
+	fn lineage_refuses_a_chain_too_complex_to_trace() {
+		let (intermediate, issuer) = lineage_ca(None);
+		let leaf = lineage_leaf(&issuer);
+		let mut chain = vec![leaf];
+		chain.extend((0..128).map(|_| lineage_ca(None).0));
+		chain.push(intermediate);
+		assert!(matches!(
+			PeerIdentity::from_chain(chain).lineage(),
+			Err(Error::Lineage(_))
+		));
+		assert!(matches!(
+			PeerIdentity::from_chain(Vec::new()).lineage(),
+			Err(Error::Empty)
+		));
 	}
 
 	/// A malformed fingerprint is rejected on the way in rather than stored as
@@ -3245,7 +3543,7 @@ mod tests {
 		let control_client = Arc::new(build_client(client_cert.clone(), client_key.clone_key()));
 		let reloadable_client = Arc::new(build_client(client_cert, client_key));
 
-		let verifier = Listen::build_client_verifier(&paths, &provider).unwrap();
+		let verifier = Listen::build_client_verifier(&paths, &provider, &ClientRoots::default()).unwrap();
 		let control = rustls::ServerConfig::builder_with_provider(provider.clone())
 			.with_safe_default_protocol_versions()
 			.unwrap()
@@ -3253,12 +3551,12 @@ mod tests {
 			.with_single_cert(vec![server_cert.clone()], server_key.clone_key())
 			.unwrap();
 
-		let initial = Listen::build_client_verifier(&paths, &provider).unwrap();
+		let initial = Listen::build_client_verifier(&paths, &provider, &ClientRoots::default()).unwrap();
 		let reload_paths = paths.clone();
 		let reload_provider = provider.clone();
 		let verifier = Arc::new(
 			ReloadingClientVerifier::new(&paths, initial, move || {
-				Listen::build_client_verifier(&reload_paths, &reload_provider)
+				Listen::build_client_verifier(&reload_paths, &reload_provider, &ClientRoots::default())
 			})
 			.unwrap(),
 		);
@@ -3322,11 +3620,11 @@ mod tests {
 		})
 		.unwrap();
 
-		let initial = Listen::build_client_verifier(&paths, &provider).unwrap();
+		let initial = Listen::build_client_verifier(&paths, &provider, &ClientRoots::default()).unwrap();
 		let reload_paths = paths.clone();
 		let reload_provider = provider.clone();
 		let client_verifier = ReloadingClientVerifier::new(&paths, initial, move || {
-			Listen::build_client_verifier(&reload_paths, &reload_provider)
+			Listen::build_client_verifier(&reload_paths, &reload_provider, &ClientRoots::default())
 		})
 		.unwrap();
 

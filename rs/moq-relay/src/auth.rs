@@ -971,6 +971,9 @@ impl Auth {
 	/// URL transport resolves those away, but an in-band SETUP Path arrives verbatim,
 	/// and `/tenant-a/../tenant-b` would reach the decider spelled under `tenant-a`.
 	///
+	/// A client certificate whose chain the relay could not trace is refused too, before
+	/// the decider could scope it as a bare leaf.
+	///
 	/// A grant that caps a bitrate is refused: nothing here holds the session to it.
 	pub async fn admit(&self, request: Request) -> Result<Lease, Error> {
 		self.admit_paced(request, None).await
@@ -980,6 +983,11 @@ impl Auth {
 	pub(crate) async fn admit_paced(&self, request: Request, pacer: Option<Pacer>) -> Result<Lease, Error> {
 		if navigates(&request.path) {
 			return Err(Error::Request(format!("path {:?} has a dot segment", request.path)));
+		}
+		if request.tls.as_ref().is_some_and(|peer| peer.chain.is_empty()) {
+			return Err(Error::Request(
+				"the client certificate chain is too complex to trace".into(),
+			));
 		}
 		// Build the token from the grant the admission checked: re-reading it could
 		// pick up an update that skipped the check.
@@ -1305,11 +1313,20 @@ pub(crate) fn role(role: moq_net::setup::Role) -> Option<moq_auth::Role> {
 }
 
 /// The certificate facts for a verified peer, or `None` when the chain does not parse.
+///
+/// A chain too complex to trace reports an empty [`chain`](moq_auth::Peer::chain), which
+/// [`Auth::admit`] refuses: reporting the leaf alone would let padding hide the
+/// intermediate a server scopes by.
 pub(crate) fn peer(identity: &moq_tokio::tls::PeerIdentity) -> Option<moq_auth::Peer> {
 	let fingerprint = identity.fingerprint()?;
+	let chain = identity
+		.lineage()
+		.inspect_err(|err| tracing::debug!(%err, %fingerprint, "client certificate lineage"))
+		.unwrap_or_default();
 	Some(moq_auth::Peer {
 		name: identity.name().unwrap_or_else(|| fingerprint.clone()),
 		fingerprint,
+		chain,
 		expires: identity.expiry(),
 		issuer: identity.issuer().unwrap_or_default(),
 	})
@@ -1725,6 +1742,7 @@ mod tests {
 		certificate.tls = Some(moq_auth::Peer {
 			name: "edge0".into(),
 			fingerprint: "ab".repeat(32),
+			chain: vec!["ab".repeat(32)],
 			expires: None,
 			issuer: "CN=cluster".into(),
 		});
@@ -1734,6 +1752,52 @@ mod tests {
 			assert_eq!(lease.token().subscribe, patterns(&["**"]));
 			assert_eq!(lease.token().tier, Tier::default());
 		}
+	}
+
+	/// A certificate whose lineage could not be traced is refused before any decider
+	/// sees it as a bare leaf, which would hide the intermediate a server scopes by.
+	#[tokio::test]
+	async fn an_untraced_certificate_chain_is_refused() {
+		let auth = config(None, &["anon/**"])
+			.init("relay-1", &moq_tokio::tls::Connect::default(), false)
+			.unwrap();
+		let mut request = auth.request(moq_auth::Transport::Quic, "/anon/room");
+		request.tls = Some(moq_auth::Peer {
+			name: "edge0".into(),
+			fingerprint: "ab".repeat(32),
+			chain: Vec::new(),
+			expires: None,
+			issuer: "CN=cluster".into(),
+		});
+		assert!(matches!(auth.admit(request).await, Err(Error::Request(_))));
+	}
+
+	/// The relay reports the chain the leaf provably descends from, leaf first, ending
+	/// at the listener root it verified against even when the client sent only its leaf.
+	#[test]
+	fn a_peer_reports_its_lineage_to_the_listener_root() {
+		let root_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+		let mut root_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+		root_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+		let root = root_params.self_signed(&root_key).unwrap();
+		let issuer = rcgen::Issuer::new(root_params, root_key);
+		let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+		let leaf = rcgen::CertificateParams::new(vec!["edge0.invalid".to_string()])
+			.unwrap()
+			.signed_by(&key, &issuer)
+			.unwrap();
+
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("root.pem");
+		std::fs::write(&path, root.pem()).unwrap();
+		let mut listen = moq_tokio::tls::Listen::default();
+		listen.generate = vec!["localhost".into()];
+		listen.root = vec![path];
+		let serve = listen.load().unwrap();
+
+		let peer = peer(&serve.peer(vec![leaf.into()])).unwrap();
+		let root = serve.peer(vec![root.into()]).fingerprint().unwrap();
+		assert_eq!(peer.chain, vec![peer.fingerprint.clone(), root]);
 	}
 
 	/// 0.14 read `anon` as a prefix and a pattern reads it as one broadcast, so a

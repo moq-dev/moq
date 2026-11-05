@@ -79,7 +79,7 @@ class SelectionTest(unittest.TestCase):
             env = dispatch_env(
                 PATH=f"{tools}:{os.environ['PATH']}",
                 ALLOW_HOST_TOOLCHAIN="1",
-                MOQ_QUEST=str(tools / "quest"),
+                DEV_SHELL_QUEST=str(tools / "quest"),
                 SELECT_CALLS=str(calls),
             )
         for script in ("markdown.sh", "shell.sh", "large-files.sh", "text.sh"):

@@ -117,6 +117,10 @@ impl<S: poll::Session> poll::Session for Local<S> {
 	fn stream_credit(&self, dir: moq::Dir) -> Option<moq::StreamCredit> {
 		self.0.stream_credit(dir)
 	}
+
+	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
+		self.0.export_keying_material(label, context)
+	}
 }
 
 impl<T: poll::SendStream> poll::SendStream for Local<T> {
