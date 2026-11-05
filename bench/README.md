@@ -361,8 +361,8 @@ The relay and generator keep these affinities for every revision. Instructions
 mode runs alone.
 
 Each base builds into its own target under `target/bench/revisions/<sha>`,
-from a detached worktree in `.tmp/` that the run removes when it exits, so a
-later run reuses that build. The revisions build side by side on every allowed
+from a detached worktree at `.tmp/bench-revisions/<sha>` that later runs keep
+using, so a later run reuses that build without a compiler cache. The revisions build side by side on every allowed
 CPU, since fat LTO links on one thread, `BENCH_BUILD_JOBS` (default 4) at a
 time: each link takes gigabytes, so lower it on a host with little memory.
 Every round measures each base and the
@@ -424,7 +424,8 @@ nix develop --command just bench-fanout "cdff3c8f95 21d6da9fc1"
 nix develop --command just bench-fanout "" "model" "1 512"
 ```
 
-Two scenarios run every subscriber count on one thread:
+Each scenario runs every subscriber count on one thread. `model` and `session`
+run by default:
 
 - `model`: one finished group a cycle through the track model, which every
   subscriber takes before parking again, as moq-net's `track_fanout_group`
@@ -435,6 +436,11 @@ Two scenarios run every subscriber count on one thread:
   runtime. It counts the publisher, relay, and viewer sessions together, but no
   QUIC: in-tree qmux, receive leases, and crypto only show in relay counts. A
   revision whose session API predates this harness reports it unsupported.
+- `group`, on request: every subscriber drains one finished 512-frame group in
+  object batches through the relay's private reader, as moq-net's
+  `group_relay_objects/plain/512/*` bench does, so that bench's cost is counted
+  without its wall-clock noise. Revisions before the hidden `ObjectBatch` helper
+  report unsupported; historical frame-batch counts remain in the bisect report.
 
 Each `bench/fanout/<scenario>` crate builds against each base's and the current
 tree's own crates and lock, `BENCH_BUILD_JOBS` at a time, into
@@ -923,7 +929,8 @@ nix develop --command just gh benchmark-report gate target/bench/nightly/rust-be
 
 Each run's evidence directory keeps both builds' estimates (`criterion` and
 `criterion-base`), the confirmation rounds under `confirm/`, and the run's
-`paired.json`.
+`paired.json`. The base build streams its diagnostics and retains them in
+`base-build.log`, including when it fails.
 
 Each revision builds in its own Cargo target directory (`base` and `current`
 under `CARGO_TARGET_DIR`, default `target/bench`). For an A/B comparison, use

@@ -47,5 +47,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [A CRLF checkout installs and builds](/quest/m0/crlf-checkout.md) - the Nix half of [#7957](https://github.com/moq-dev/moq/issues/7957); this quest is its Nix-less half
 - [Dart publication](/quest/m2/release/dart-publish.md) - the same trusted-publishing check for pub.dev

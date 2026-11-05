@@ -597,6 +597,13 @@ impl Subscriber {
 				)?;
 			}
 			lite::AnnounceBroadcast::Skipped | lite::AnnounceBroadcast::Synced => {}
+			// Nothing drives the route layer on this stream yet, so a peer relying on it
+			// cannot be served.
+			lite::AnnounceBroadcast::RouteStart { .. }
+			| lite::AnnounceBroadcast::RouteUpdate { .. }
+			| lite::AnnounceBroadcast::RouteHold { .. }
+			| lite::AnnounceBroadcast::RouteEnd { .. }
+			| lite::AnnounceBroadcast::Floor { .. } => return Err(Error::ProtocolViolation),
 		}
 		Ok(())
 	}
@@ -3965,7 +3972,7 @@ mod tests {
 						.unwrap();
 					assert_eq!(accepted.early.len(), 2);
 					assert!(log.stops().is_empty());
-					peer_setup.set(accepted.setup);
+					peer_setup.set(accepted.setup).unwrap();
 					accepted.early
 				} else {
 					Vec::new()
@@ -4119,10 +4126,12 @@ mod tests {
 		}
 		let session = crate::lite::test_transport::ScriptedSession::eof(script);
 		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup).offer_ietf(true);
-		peer_setup.set(lite::Setup {
-			ietf: true,
-			..Default::default()
-		});
+		peer_setup
+			.set(lite::Setup {
+				ietf: true,
+				..Default::default()
+			})
+			.unwrap();
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -5401,7 +5410,7 @@ mod tests {
 	/// A subscriber on `version` over `session`, whose peer's SETUP was already read.
 	fn pipelining(session: crate::driver::Transport, version: Version) -> Subscriber {
 		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
-		peer_setup.set(lite::Setup::default());
+		peer_setup.set(lite::Setup::default()).unwrap();
 		Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session,

@@ -210,9 +210,9 @@ impl Config {
 				path: std::path::Path::new(path),
 				value,
 			});
-		// The released CLI spellings live on hidden fields the merge's TOML round-trip
-		// drops, so they are collected from the parse and reported with the file's
-		// own released keys in one message.
+		// The released CLI spellings live on hidden fields that a file merge's TOML
+		// round-trip drops, so they are collected from the parse and reported with
+		// the file's own released keys in one message.
 		let mut deprecated = config.deprecated();
 		let (mut config, resolved) = moq_tokio::cli::Merge {
 			registry: Settings::SETTINGS_REGISTRY,

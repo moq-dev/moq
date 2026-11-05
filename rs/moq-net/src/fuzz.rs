@@ -82,6 +82,54 @@ pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, tr
 	(broadcast, track, group)
 }
 
+/// A private frame batch for the model's batch read and write benchmarks.
+#[derive(Default)]
+pub struct FrameBatch<const N: usize>(frame::Buffer<N>);
+
+impl<const N: usize> FrameBatch<N> {
+	/// An empty batch for the private frame benchmark.
+	pub fn new() -> Self {
+		Self(frame::Buffer::new())
+	}
+	/// Queue a whole frame for the batch write benchmark.
+	pub fn push(&mut self, frame: frame::Frame) -> Result<(), frame::Frame> {
+		self.0.push(frame)
+	}
+	/// Write the queued frames through the private batch writer.
+	pub fn write(&mut self, group: &mut group::Producer) -> crate::Result<()> {
+		group.write_frames(&mut self.0)
+	}
+	/// Read through the private whole-frame batch reader.
+	pub async fn read(&mut self, group: &mut group::Consumer) -> crate::Result<&mut [frame::Frame]> {
+		group.read_frames(&mut self.0).await
+	}
+}
+
+/// The relay's private object batch, including metadata, for delivery benchmarks.
+#[derive(Default)]
+pub struct ObjectBatch<const N: usize>(arrayvec::ArrayVec<frame::Object, N>);
+
+impl<const N: usize> ObjectBatch<N> {
+	/// An empty relay object batch.
+	pub fn new() -> Self {
+		Self(arrayvec::ArrayVec::new())
+	}
+	/// Fill the batch exactly as relay egress does, preserving all object fields.
+	pub fn poll_read(
+		&mut self,
+		waiter: &kio::Waiter,
+		group: &mut group::Consumer,
+	) -> std::task::Poll<crate::Result<usize>> {
+		group.poll_read_objects(waiter, &mut self.0)
+	}
+	/// Visit every object without discarding its relay metadata.
+	pub fn inspect(&self) {
+		for object in &self.0 {
+			std::hint::black_box(object);
+		}
+	}
+}
+
 /// Private canonical-owner fixture for size and final-storage cleanup benchmarks.
 pub struct CanonicalStorage(crate::model::group::StorageBench);
 
@@ -137,7 +185,7 @@ const LITE_VERSIONS: &[lite::Version] = &[
 const IETF_VERSIONS: &[ietf::Version] = &[ietf::Version::Draft18, ietf::Version::Draft20, ietf::Version::Draft22];
 
 /// How many types [`lite_wire`] dispatches over.
-const LITE_KINDS: u8 = 33;
+const LITE_KINDS: u8 = 34;
 
 /// How many types [`ietf_wire`] dispatches over.
 const IETF_KINDS: u8 = 27;
@@ -305,6 +353,7 @@ pub fn lite_wire(data: &[u8]) -> bool {
 		30 => roundtrip::<lite::Datagrams<'_>, _>(rest, &mut Vec::new(), version),
 		31 => roundtrip::<lite::DatagramsUpdate, _>(rest, &mut Vec::new(), version),
 		32 => roundtrip::<lite::DatagramsInfo, _>(rest, &mut Vec::new(), version),
+		33 => roundtrip::<lite::AnnounceReply, _>(rest, &mut Vec::new(), version),
 		_ => unreachable!("kind is taken modulo LITE_KINDS"),
 	}
 }
@@ -1220,6 +1269,22 @@ pub fn pattern(data: &[u8]) -> bool {
 	true
 }
 
+/// Lite seeds whose envelope bytes the uniform sweep never forms, on the newest
+/// version: a typed empty TRACKS_SYNCED, an AUTH_OK reply, every route message
+/// (the sweep sets ROUTE_START's type byte but fills its size byte with the body
+/// pattern, so none decodes whole), the ROUTE_END echo, and ROUTE_REQUEST.
+const TYPED_LITE_SEEDS: &[(u8, &[u8])] = &[
+	(23, &[4, 0]),
+	(27, &[0, 3, 0, 0, 0]),
+	(5, &[6, 4, 1, 0, 1, 0]),
+	(5, &[7, 4, 0, 1, 2, 0]),
+	(5, &[8, 1, 0]),
+	(5, &[9, 2, 0, 1]),
+	(5, &[11, 1, 0]),
+	(33, &[8, 1, 0]),
+	(33, &[10, 2, 1, 0]),
+];
+
 /// The inputs the fuzzer starts from: every (version, type) pair the dispatch knows,
 /// bodied with byte patterns that decode as small valid fields.
 ///
@@ -1264,8 +1329,7 @@ pub fn seeds() -> Vec<Seed> {
 		}
 	}
 
-	// A typed empty TRACKS_SYNCED and AUTH_OK reply need nonuniform envelope bytes.
-	for (kind, body) in [(23, &[4, 0][..]), (27, &[0, 3, 0, 0, 0][..])] {
+	for &(kind, body) in TYPED_LITE_SEEDS {
 		let mut data = vec![(LITE_VERSIONS.len() - 1) as u8, kind];
 		data.extend_from_slice(body);
 		seeds.push(Seed {
@@ -1903,6 +1967,16 @@ mod tests {
 
 		let missing: Vec<_> = expected.difference(&decoded).collect();
 		assert!(missing.is_empty(), "no seed decodes for {missing:?}");
+	}
+
+	/// Each typed seed exists to reach one message, so each must decode whole.
+	#[test]
+	fn typed_lite_seeds_decode() {
+		for (kind, body) in TYPED_LITE_SEEDS {
+			let mut data = vec![(LITE_VERSIONS.len() - 1) as u8, *kind];
+			data.extend_from_slice(body);
+			assert!(lite_wire(&data), "kind {kind} body {body:?} does not decode");
+		}
 	}
 
 	/// The stream seeds are built from our own framing, one per version and protocol, so

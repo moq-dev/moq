@@ -105,8 +105,8 @@ export namespace Audio {
 export class Broadcast {
 	constructor(props?: Signals.Inputs<BroadcastInput>);
 	close(): void;
-	contribution(effect: Signals.Effect, id: string): Broadcast;
 	readonly in: Signals.Readonlys<BroadcastInput>;
+	include(effect: Signals.Effect, id: string): Broadcast;
 	readonly out: Signals.Readonlys<BroadcastOutput>;
 }
 

@@ -62,7 +62,7 @@
 //! ```
 
 #[cfg(test)]
-mod contributions_tests;
+mod include_tests;
 mod routes;
 
 use std::collections::HashMap;

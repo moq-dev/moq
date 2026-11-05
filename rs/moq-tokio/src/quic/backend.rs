@@ -624,7 +624,8 @@ pub(crate) struct Server {
 	/// The configured receive window, opened once a session is admitted: until then a
 	/// connection holds [`moq_net::transport::SETUP_RECEIVE_WINDOW`].
 	pub window: Option<std::num::NonZeroU64>,
-	tls: crate::tls::Serve,
+	/// Builds each accepted client's identity against the listener's current roots.
+	pub(crate) tls: crate::tls::Serve,
 	/// Reloads the QUIC-LB peers for as long as the server runs.
 	_peers: Option<notify::RecommendedWatcher>,
 }
@@ -822,6 +823,7 @@ impl Closer {
 pub(crate) async fn accept(
 	conn: driver::endpoint::Incoming,
 	alpns: Vec<&'static str>,
+	tls: crate::tls::Serve,
 ) -> Result<crate::server::Accepted<web::Session>> {
 	let mut conn = conn.accept()?;
 
@@ -855,10 +857,7 @@ pub(crate) async fn accept(
 				.await
 				.map_err(|err| Error::RecvRequest(crate::error::message(err)))?;
 			let url = Some(request.url.clone());
-			let identity = request
-				.connection()
-				.peer_identity()
-				.map(crate::tls::PeerIdentity::from_chain);
+			let identity = request.connection().peer_identity().map(|chain| tls.peer(chain));
 			// The authority the client put in its CONNECT URL.
 			let authority = request.url.host_str().filter(|h| !h.is_empty()).map(str::to_owned);
 
@@ -885,7 +884,7 @@ pub(crate) async fn accept(
 		// this also covers versions omitted from `moq_net::ALPNS` but enabled
 		// in this server's configuration.
 		alpn if alpns.contains(&alpn) => {
-			let identity = conn.peer_identity().map(crate::tls::PeerIdentity::from_chain);
+			let identity = conn.peer_identity().map(|chain| tls.peer(chain));
 			// Raw QUIC carries no request URL; the path rides the SETUP. The TLS SNI is the
 			// only authority the client can offer here, and it is optional.
 			let authority = (!host.is_empty()).then_some(host);
@@ -1085,7 +1084,7 @@ mod tests {
 		let dial = client.connect(&tls, url.into(), &versions);
 		let accept = async {
 			let incoming = server.accept().await.expect("incoming connection");
-			super::accept(incoming, versions.alpns()).await
+			super::accept(incoming, versions.alpns(), server.tls.clone()).await
 		};
 		let webrtc = async {
 			let mut received = Vec::new();
@@ -1162,7 +1161,7 @@ mod tests {
 		let dial = client.connect(&tls, url.into(), &versions);
 		let accept = async {
 			let incoming = server.accept().await.expect("incoming connection");
-			super::accept(incoming, versions.alpns()).await
+			super::accept(incoming, versions.alpns(), server.tls.clone()).await
 		};
 		let result = kio::clock::timeout(Duration::from_secs(5), async { tokio::try_join!(dial, accept) })
 			.await
