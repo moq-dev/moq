@@ -383,10 +383,10 @@ them. The cost is over-buffering by the smallest subscribed `delay` when the
 broadcast's earliest rendition is not subscribed.
 
 The playout is recomputed when a rendition is subscribed, unsubscribed, or its
-catalog entry rises, so dropping a slow rendition lowers latency. The shared
-reference itself only ever moves earlier, so once the earliest subscribed track
-leaves, the clock stays anchored to it until playback re-anchors; that errs on
-the safe side.
+catalog entry rises, so dropping a slow rendition lowers latency. Each track's
+own arrivals only ever move its part of the shared reference earlier. A track
+that leaves, or whose timeline restarts, releases its part: the earliest
+remaining track's anchor takes over, or the next frame re-anchors.
 
 A track that replaces another in the same slot and on the same broadcast path,
 such as the new name a codec change publishes under, continues the outgoing

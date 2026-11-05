@@ -31,7 +31,7 @@ pub(crate) struct SessionStart {
 	pub peer_implementation: crate::setup::PeerImplementation,
 }
 
-/// Server: read the peer's single SETUP message off its Setup Stream before starting
+/// Server: reads the peer's single SETUP message off its Setup Stream before starting
 /// the session, so the caller can inspect the advertised path (and gate on it) before
 /// serving. lite-05+ only.
 ///
@@ -40,17 +40,7 @@ pub(crate) struct SessionStart {
 ///
 /// Pass the result to [`start`] as its `peer_setup` so capability gating resolves
 /// without re-reading SETUP, and every held stream is handed back to the driver.
-pub async fn accept_setup(session: &mut Transport, version: Version) -> Result<AcceptedSetup, Error> {
-	let mut accept = SetupAccept {
-		version,
-		pending: Vec::new(),
-		early: Vec::new(),
-		setup: None,
-	};
-	kio::wait(|waiter| accept.poll(session, waiter)).await
-}
-
-struct SetupAccept {
+pub struct SetupAccept {
 	version: Version,
 	pending: Vec<Reader<crate::transport::boxed::RecvStream, Version>>,
 	early: Vec<Reader<crate::transport::boxed::RecvStream, Version>>,
@@ -58,7 +48,18 @@ struct SetupAccept {
 }
 
 impl SetupAccept {
-	fn poll(&mut self, session: &mut Transport, waiter: &kio::Waiter) -> Poll<Result<AcceptedSetup, Error>> {
+	/// Start waiting for a `version` peer's SETUP.
+	pub fn new(version: Version) -> Self {
+		Self {
+			version,
+			pending: Vec::new(),
+			early: Vec::new(),
+			setup: None,
+		}
+	}
+
+	/// The peer's SETUP, with the streams held until it arrived.
+	pub fn poll(&mut self, session: &Transport, waiter: &kio::Waiter) -> Poll<Result<AcceptedSetup, Error>> {
 		let Self {
 			version,
 			pending,
@@ -142,6 +143,13 @@ impl SetupAccept {
 	}
 }
 
+/// [`SetupAccept`] as a future, for tests.
+#[cfg(test)]
+pub(crate) async fn accept_setup(session: &Transport, version: Version) -> Result<AcceptedSetup, Error> {
+	let mut accept = SetupAccept::new(version);
+	kio::wait(|waiter| accept.poll(session, waiter)).await
+}
+
 /// The peer's pre-read SETUP and the streams held until it arrived.
 pub struct AcceptedSetup {
 	/// The SETUP decoded before origin binding.
@@ -194,7 +202,7 @@ pub struct Config {
 	pub our_setup: Setup,
 
 	/// The peer's SETUP, when it was already read before [`start`] (e.g. a server that
-	/// gated on the client's path via [`accept_setup`]). Seeds the peer-setup slot so
+	/// gated on the client's path via [`SetupAccept`]). Seeds the peer-setup slot so
 	/// the Setup Stream isn't expected again. `None` reads it from the wire as usual.
 	pub peer_setup: Option<AcceptedSetup>,
 
@@ -255,6 +263,22 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 			.filter(|hop| hop.id() != 0);
 	}
 
+	// Prove our origin's route key, bound to this session, so a peer that scopes us files
+	// our routes under it. A transport without an exporter cannot bind a proof, so neither
+	// side proves anything there.
+	let transcript = version
+		.has_route_key()
+		.then(|| session.export_keying_material(crate::route::EXPORTER_LABEL, &[]))
+		.flatten()
+		.map(crate::route::Transcript::new);
+	let route_key = publish
+		.as_ref()
+		.and_then(|origin| origin.route_key())
+		.or_else(|| subscribe.as_ref().and_then(|origin| origin.route_key()));
+	if let (Some(transcript), Some(key)) = (&transcript, route_key) {
+		our_setup.route_key = Some(transcript.prove(&key, client));
+	}
+
 	// What the peer's connection credential earns by default: publishing what our
 	// subscribe half accepts, and subscribing to what our publish half serves. A
 	// missing half grants nothing.
@@ -295,6 +319,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 	// Setup stream isn't expected on the wire again.
 	let peer_implementation = crate::setup::PeerImplementation::default();
 	let mut peer_setup_slot = PeerSetup::new(client, session.address())
+		.with_transcript(transcript)
 		.offer_ietf(our_setup.ietf)
 		.with_implementation(peer_implementation.clone());
 	// Without AUTH, the server checks a client's credential before its SETUP, which the
@@ -307,7 +332,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		peer_implementation.set(None);
 	}
 	let early = if let Some(accepted) = peer_setup {
-		peer_setup_slot.set(accepted.setup);
+		peer_setup_slot.set(accepted.setup)?;
 		accepted.early
 	} else {
 		Vec::new()
@@ -1220,7 +1245,7 @@ mod tests {
 			.unwrap();
 		let session =
 			crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_unis(vec![Vec::new(), setup]);
-		let accepted = accept_setup(&mut crate::driver::Transport::new(session.clone()), version)
+		let accepted = accept_setup(&crate::driver::Transport::new(session.clone()), version)
 			.await
 			.unwrap();
 		assert_eq!(accepted.early.len(), 1);
@@ -1232,7 +1257,7 @@ mod tests {
 		let session =
 			crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_unis(vec![vec![1], vec![1]]);
 		assert!(matches!(
-			accept_setup(&mut crate::driver::Transport::new(session.clone()), Version::Lite05).now_or_never(),
+			accept_setup(&crate::driver::Transport::new(session.clone()), Version::Lite05).now_or_never(),
 			Some(Err(Error::ProtocolViolation))
 		));
 	}
@@ -1386,7 +1411,7 @@ mod tests {
 	async fn unknown_client_role_remains_bidirectional() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			let transport = ScriptedSession::new(Vec::new()).with_incoming_unis(vec![vec![1, 4, 1, 3, 1, 3]]);
-			let setup = accept_setup(&mut crate::driver::Transport::new(transport.clone()), version)
+			let setup = accept_setup(&crate::driver::Transport::new(transport.clone()), version)
 				.await
 				.unwrap();
 			assert_eq!(setup.setup.role, None);

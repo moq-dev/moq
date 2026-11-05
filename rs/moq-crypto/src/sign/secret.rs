@@ -125,6 +125,15 @@ impl SecretKey {
 	}
 }
 
+impl From<&SecretKey> for moq_net::origin::RouteKey {
+	/// The same key, for an origin to prove to its peers.
+	fn from(key: &SecretKey) -> Self {
+		let seed = key.0.pair.to_seed();
+		let seed: Zeroizing<[u8; KEY_LEN]> = Zeroizing::new(seed.as_ref().try_into().expect("a 32-byte Ed25519 seed"));
+		Self::from_seed(&seed)
+	}
+}
+
 impl fmt::Debug for SecretKey {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct("SecretKey")

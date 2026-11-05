@@ -19,6 +19,7 @@ author:
 normative:
   moqt: I-D.ietf-moq-transport
   qmux: I-D.ietf-quic-qmux
+  webtrans-h3: I-D.ietf-webtrans-http3
   qmuxws:
     title: "QMux over WebSocket"
     target: https://datatracker.ietf.org/doc/draft-lcurley-qmux-websocket/
@@ -29,6 +30,8 @@ normative:
     date: false
   RFC3986:
   RFC6455:
+  RFC8032:
+  RFC8446:
   RFC8831:
   RFC9000:
   RFC9002:
@@ -225,6 +228,9 @@ moq-lite runs on top of any transport that provides ordered, multiplexed, bidire
 See [Transports](#transports) for the bindings.
 
 How the underlying connection is authenticated is out-of-scope for this draft.
+
+A subscriber that holds an Auth Stream and an Announce Stream needs credit for at least 4 concurrent bidirectional streams to establish a subscription.
+AUTH and ANNOUNCE occupy two streams for the session lifetime, and TRACK is briefly held alongside SUBSCRIBE, requiring two more.
 
 ## Transports {#transports}
 moq-lite defines five transport bindings.
@@ -919,6 +925,8 @@ The following Setup Parameters are defined:
 |------|----------------|-------------|
 | 0x7  | Token          | Token (b)   |
 |------|----------------|-------------|
+| 0x8  | Route Key      | Proof (..)  |
+|------|----------------|-------------|
 
 ### Probe Parameter {#probe-parameter}
 The Probe Parameter advertises the sender's capability level when acting as a publisher on a [Probe Stream](#probe).
@@ -993,6 +1001,30 @@ A client whose request URI already carries a credential SHOULD NOT also send a d
 The URI is fixed before the version is negotiated, so a client that may negotiate a version without this parameter carries the same credential in the query as well.
 
 Only the client sends it; a client that receives one MUST close the session with a PROTOCOL_VIOLATION. A relay MUST NOT forward it.
+
+### Route Key Parameter {#route-key-parameter}
+The Route Key Parameter proves that the sender holds an Ed25519 [RFC8032] key, bound to this session, so a receiver recognizes the sender, and endpoints sharing its key, across sessions.
+
+~~~
+Route Key Proof {
+  Public Key (256),
+  Signature (512),
+}
+~~~
+
+**Public Key**:
+The sender's Ed25519 public key.
+
+**Signature**:
+The key's Ed25519 signature over the ASCII bytes `moq-lite route key`, then one byte naming the sender's side of the session (0 for the client, 1 for the server), then 32 bytes of keying material exported from the session with the label `EXPORTER-moq-lite-route-key` and an empty context.
+
+Binding 1 exports with the TLS exporter (Section 7.5 of [RFC8446]), and binding 2 with the WebTransport session's exporter [webtrans-h3] (see [Transports](#transports)).
+An endpoint MUST NOT send the parameter on a session that provides no exporter.
+The exported material and the sender's side keep a proof from being replayed on another session or reflected back to its sender.
+
+Either endpoint MAY send it. A receiver MUST close the session with a PROTOCOL_VIOLATION if the value is not 96 bytes.
+A receiver that relies on the key MUST verify the signature first, closing the session with a PROTOCOL_VIOLATION if it does not verify; without an exporter on the session, it cannot rely on the key.
+A relay MUST NOT forward it.
 
 
 ## ANNOUNCE_REQUEST {#announce-request}
@@ -1933,6 +1965,7 @@ The `Message Length` describes the payload size on the wire.
 - Added the reliable ordered RTCDataChannel binding, with one Qmux Record per binary message and no datagrams.
 - Added the SETUP `Implementation` parameter (0x6): the sender's software as `name/version` product tokens.
 - Added the client-only Token Setup Parameter (0x7), carrying the connection credential in SETUP instead of only the request URI.
+- Added the Route Key Setup Parameter (0x8): an Ed25519 public key and its signature over keying material exported from the session.
 - Added Padding Stream (0x2), read and discarded incrementally by either endpoint.
 - A Report-level publisher reads and ignores PROBE targets instead of resetting the Probe Stream.
 - A GOAWAY recipient MAY keep opening requests on the current session until it has moved to a replacement session; previously it MUST NOT open new streams. The sender SHOULD keep answering them and MAY reset one with GOING_AWAY, which the recipient SHOULD retry on another route.

@@ -85,6 +85,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [Shared group serving and ingest](/quest/m2/shared-serve.md) - Rust's moq-lite and moq-transport sessions serve and ingest groups through one poll machine each, with only wire encoding per protocol
 - [Shared group serving and ingest in JS](/quest/m2/shared-serve-js.md) - the same split in js/net, following the Rust seam
 - [Paired bench BASE](/quest/m2/bench-base-paired.md) - `just bench <base>` uses the nightly's paired comparison and the old one is deleted
+- [Audio renditions carry a language](/quest/m2/audio-lang.md) - audio renditions have an optional BCP-47 `lang`, and watch auto-picks within one language
 - [Receive pool](/quest/m2/receive-pool.md) - one byte budget per worker covers every connection's receive credit and the cache, billing each frame once
 - [Front parking](/quest/m2/origin-front-parks.md) - an unroutable request waits on a front instead of re-asking on every route-table move
 - [A refused follower asks a replacement handler](/quest/m2/follow-refused-retry.md) - a same-instance handler swap with identical route details re-asks a refused `Following`, while listeners still see no change
@@ -180,6 +181,8 @@ lite-07; bitrate enforcement is not part of this release.
 - [Audio capture without ALSA link](/quest/m2/capture-alsa-link.md) - moq-audio capture and playback build on Linux without linking libasound, and capture becomes a default feature
 - [The moq CLI can publish a changing catalog](/quest/m2/cli-catalog-updates.md) - catalog updates mid-stream, so recovery replays need no hand-built clients
 - [Ship capture and playback](/quest/m2/cli-packaging.md) - a released moq binary can capture and play, which no distribution currently enables
+- [moq-relay in nixpkgs](/quest/m2/nixpkgs-relay.md) - `nix-shell -p moq-relay` installs the released relay from upstream nixpkgs, auto-updated from our tags
+- [moq-cli in nixpkgs](/quest/m2/nixpkgs-cli.md) - the released `moq` CLI with its full release feature set joins nixpkgs as `moq-cli`
 - [Egress profile](/quest/m2/quic-egress-profile.md) - measure relay send-path syscalls, pacing bursts, and allocations before optimizing any of them
 - [VAAPI encode and decode](/quest/m2/video-vaapi.md) - H.265 encode and decode, pre-generated bindings, and pooled resize surfaces, including the moq-dev/vaapi release that carries them
 - [GPU capacity and health](/quest/m2/gpu-health.md) - moq-video reports each device's sessions, memory, utilization, and health on NVIDIA, AMD, and Intel alike
@@ -275,8 +278,6 @@ lite-07; bitrate enforcement is not part of this release.
 - [Open-GOP MPEG-2 export trims leading B-pictures in zero-stuffed CBR streams](/quest/m2/pes-hold-open-gop.md) - A TS export starting or resuming inside an open GOP of MPEG-2 video drops the orphaned leading B-pictures even when their PES ends on zero stuffing, as CBR encoders emit, without ever trimming part of a reference picture whose start code straddles two PES packets
 - [A multi-program TS import survives a source switch](/quest/m2/ts-multi-program-restart.md) - `--program all` restarts each affected program on an unannounced source switch, as a single-program import does after moq-dev/moq#7780, instead of ending the whole import
 - [The lite publisher tells transport faults from cancels](/quest/m2/publish-cancel-classify.md) - `rs/moq-net`'s lite publisher no longer counts every `Error::Transport` as a clean cancel
-- [moq-publish hides previews that show nothing](/quest/m2/publish-empty-previews.md) - `<moq-publish>` hides a preview that renders nothing
-- [A loading video preview takes no space](/quest/m2/publish-video-loading.md) - a `<video>` preview stays hidden until it reports its media size, so the empty publish player never keeps the 300x150 placeholder ratio
 - [moq-quic's sim pair fails a test that sends an oversized packet](/quest/m2/quic-sim-mtu.md) - A moq-quic test whose endpoint sends a datagram larger than the simulated path MTU fails, instead of the `Pair` silently dropping it
 - [A stalled reader within budget gets no Old resets through a relay](/quest/m2/relay-capped-credit-test.md) - A test proves that a subscriber which stalls before its first read, behind a relay over a transport with capped stream credit, receives no `Old` stream resets for groups still within its max-delay budget, and reads them in order once it resumes
 - [In-memory transports refuse a request without stream credit](/quest/m2/sim-credit-open.md) - moq-net's in-memory test transports model the peer's bidirectional stream credit, and `poll_open_request` returns `Ok(None)`

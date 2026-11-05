@@ -1,4 +1,4 @@
-# [M] TS fidelity and recovery
+# TS fidelity and recovery
 
 ## Goal
 
@@ -125,13 +125,19 @@ two outages); state stays bounded by the track count, and the extra flag
 lands where loss happened. Not chosen: keeping every loss until all tracks
 pass it (unbounded while a track stalls); collapsing losses older than the
 release point minus the delay (more code, and assumes muxing in release
-order).
+order). Reversed the same day: the planned
+[PCR jump flag](/quest/m1/ts-reliability/pcr-jump-flag.md) removes the
+per-track loss tracking.
 
 PMT fragmentation (#5220), initial mux-rate measurement (#5287), and
 decoder-time admission (#5306) have landed, as have PSI runs (#5606) and
 catalog linger (#5305).
 
+## Required
+
+- [A CBR import's muxRate can't stick low](/quest/m1/ts-reliability/mux-rate-raise.md) - a stable window above the published rate raises it, and an export's deadline miss names the rate it needed
+- [The TS export flags a PCR only where its clock jumps](/quest/m1/ts-reliability/pcr-jump-flag.md) - a padded skip goes out unflagged; a schedule that skips slots flags the jump
+
 ## Related
 
 - [MSFTS mapping](/quest/m3/msfts-convergence.md) - document the exact equivalence and differences between the carriage modes
-

@@ -3,7 +3,8 @@
 ## Goal
 
 A moq-transport fill (draft 22) or joining FETCH (draft 18) serves a group's
-missing head as a [flight](/quest/m1/unbounded-groups/flights.md): a separate
+missing head as a flight
+([moq-dev/moq#7944](https://github.com/moq-dev/moq/pull/7944)): a separate
 copy whose readers hand over to the subscription's tail copy at the first
 object the tail holds, instead of the 7-state `Fill` claim, park, and install
 handoff between two producers.
@@ -30,7 +31,7 @@ Search by those names if the lines have moved again.
 
 Decided 2026-10-28 (maintainer): nothing is written into a group copy below
 its live log, so the head no longer fills the tail's group in place. Once
-[Flights](/quest/m1/unbounded-groups/flights.md) lands, the head is a flight
+[Flights](https://github.com/moq-dev/moq/pull/7944) lands, the head is a flight
 from object 0 that hands over to the tail copy, which also keeps a tail
 whose head never arrives, as the headless group quest decided. Joining at the next group instead was considered and
 rejected: it costs a GOP of startup and drops objects already received.
@@ -39,5 +40,4 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [Flights](/quest/m1/unbounded-groups/flights.md) - separate paced copies and the handover between them
 - [moq-transport requests end through one lease](/quest/m2/ietf-request-lease.md) - restructures the same files first

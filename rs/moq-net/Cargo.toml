@@ -12,9 +12,14 @@ rust-version.workspace = true
 keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
+[package.metadata.docs.rs]
+features = ["async"]
+
 [features]
-default = ["async"]
-# Runtime-backed helpers and Lite/IETF sessions; explicit-time model drivers stay available.
+default = []
+# The Lite/IETF sessions, runtime-backed helpers, and the generated async wrappers for the
+# poll methods. Off by default: enable it where you connect, accept, or `.await`. The poll
+# methods and explicit-time model drivers stay available without it.
 async = ["dep:futures", "kio/async", "kio/runtime"]
 
 # Exposes the wire codecs to the `fuzz/` harness and the announce, codec, path, varint, frame, and canonical storage benches,
@@ -37,11 +42,14 @@ moq-pattern = { workspace = true, features = ["serde"] }
 num_enum = { workspace = true }
 rand = { workspace = true }
 rangemap = { workspace = true }
+# Ed25519 for route key proofs, and HKDF for the in-memory transport's exporter.
+rind = { workspace = true }
 serde = { workspace = true }
 slab = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 criterion = { package = "bench-harness", path = "../bench-harness" }
@@ -138,7 +146,7 @@ required-features = ["fuzz"]
 [[bench]]
 name = "group"
 harness = false
-required-features = ["async"]
+required-features = ["fuzz"]
 
 [[bench]]
 name = "track"

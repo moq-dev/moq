@@ -20,7 +20,7 @@ import { base64ToBytes } from "../base64";
 import { arrivedAt, type Counter, type Key, type Received, Tally } from "../feedback";
 import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
 import { supportCacheKey } from "../support-probe";
-import type { Sync } from "../sync";
+import type { Sync, Track } from "../sync";
 import { AudioBuffer } from "./buffer";
 import {
 	type DecoderConfig,
@@ -127,6 +127,8 @@ export class Decoder {
 	readonly source: Source;
 	/** The clock that schedules playback. */
 	readonly sync: Sync;
+	// Audio's hold on the clock: its target, startup span, and arrivals.
+	readonly #track: Track;
 
 	readonly #out: DecoderOutput = {
 		error: new Signal<Error | undefined>(undefined),
@@ -232,7 +234,8 @@ export class Decoder {
 			const hold = Milli.fromMicro(ringHold(effect.get(this.sync.out.delay)));
 			return { start: span.start, end: Milli(span.end + Math.min(queued, hold)) };
 		});
-		this.#signals.cleanup(this.sync.register(playout, startup));
+		this.#track = this.sync.track({ target: playout, startup });
+		this.#signals.cleanup(() => this.#track.close());
 		this.#identity = this.#signals.computed((effect) => {
 			const config = effect.get(this.source.out.config);
 			return config ? playbackIdentity(config) : undefined;
@@ -604,7 +607,7 @@ export class Decoder {
 					// The track ending, or a gap or end, cuts a held head short.
 					if (!(await play(order.flush()))) return;
 					if (!next) break;
-					if (this.#onRead(next)) {
+					if (this.#terminal.update(next)) {
 						this.#reprime(decoder, decoderConfig, order);
 					}
 					if (next.kind === "gap") this.#arrivals.write(gap(next));
@@ -614,7 +617,7 @@ export class Decoder {
 
 				// Classify ingress before decoder backpressure changes the delivery clock.
 				const timestamp = Milli.fromMicro(frame.timestamp as Micro);
-				const late = this.sync.received(timestamp, frame.arrival);
+				const late = this.#track.received(timestamp, frame.arrival);
 				this.#arrivals.write({ kind: "frame", timestamp, arrival: frame.arrival, late });
 
 				const duration = packetDuration(config.codec, frame);
@@ -691,7 +694,7 @@ export class Decoder {
 					// The track ending, or a gap or end, cuts a held head short.
 					if (!(await play(order.flush()))) return;
 					if (!next) break;
-					if (this.#onRead(next)) {
+					if (this.#terminal.update(next)) {
 						this.#reprime(decoder, decoderConfig, order);
 					}
 					if (next.kind === "gap") this.#arrivals.write(gap(next));
@@ -700,7 +703,7 @@ export class Decoder {
 				const { frame } = next;
 
 				const timestamp = Milli.fromMicro(frame.timestamp);
-				const late = this.sync.received(timestamp, frame.arrival);
+				const late = this.#track.received(timestamp, frame.arrival);
 				this.#arrivals.write({ kind: "frame", timestamp, arrival: frame.arrival, late });
 
 				const duration = packetDuration(config.codec, frame);
@@ -716,6 +719,10 @@ export class Decoder {
 	// Decode released frames, resetting the decoder before the first frame of a new codec epoch and
 	// only then dropping one that is out of order. The terminal sees them in decode order, so it
 	// anchors on the oldest. Reports whether to keep going.
+	//
+	// A new epoch (a gap, or a later group after a declared end) restarts the codec, never the
+	// timeline: publishers keep timestamps moving forward across a declared end, so the PCM decoded
+	// before it still plays and the shared clock stays anchored.
 	async #play(
 		effect: Effect,
 		decoder: AudioDecoder,
@@ -724,7 +731,7 @@ export class Decoder {
 		reads: FrameRead[],
 	): Promise<boolean> {
 		for (const read of reads) {
-			if (this.#onRead(read)) {
+			if (this.#terminal.update(read)) {
 				this.#reprime(decoder, config, order);
 			}
 			if (!order.admit(read)) continue;
@@ -837,6 +844,8 @@ export class Decoder {
 	#retire(): void {
 		this.#consumer = undefined;
 		this.#measured.set(undefined);
+		// Its arrivals stop holding the clock's reference.
+		this.#track.reset();
 	}
 
 	// The ring, once the worklet has loaded. Decoding waits for it, so the frames that arrive first
@@ -978,18 +987,6 @@ export class Decoder {
 		this.#decodeBuffered.set([]);
 		this.#queued.set(undefined);
 		this.#ring.peek()?.reset();
-	}
-
-	// Apply an ordered container read before handling it, reporting whether a codec epoch ended:
-	// a gap, or a later group after a declared end.
-	#onRead(read: Container.Read): boolean {
-		if (!this.#terminal.update(read)) return false;
-		// A hole restarts codec prediction on the same timeline, keeping decoded PCM and parked video.
-		if (read.kind === "frame") {
-			this.sync.reset();
-			this.reset();
-		}
-		return true;
 	}
 
 	/**

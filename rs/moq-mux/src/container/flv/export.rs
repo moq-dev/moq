@@ -128,7 +128,7 @@ impl Flavor {
 
 /// Produce an FLV byte stream from a broadcast, following a catalog stream.
 ///
-/// Use [`next`](Self::next) to pull byte chunks. The first chunk is the FLV file
+/// Use [`poll_next`](Self::poll_next) to pull byte chunks. The first chunk is the FLV file
 /// header followed by the AVC/AAC sequence headers; each subsequent chunk is the
 /// tag for one media frame. Returns `None` when the broadcast ends. Narrow the
 /// renditions first with [`Stream::select`](crate::catalog::Stream::select).
@@ -380,12 +380,8 @@ impl<S: Stream> Export<S> {
 		self
 	}
 
-	/// Get the next byte chunk.
-	pub async fn next(&mut self) -> anyhow::Result<Option<Bytes>> {
-		kio::wait(|waiter| self.poll_next(waiter)).await
-	}
-
-	/// Poll for the next byte chunk.
+	/// Get the next FLV byte chunk, or `None` once the export ends.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<anyhow::Result<Option<Bytes>>> {
 		// 1. Drain catalog updates to discover the track layout.
 		while let Some(catalog) = self.catalog.as_mut() {

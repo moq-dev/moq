@@ -31,3 +31,23 @@ maintainer's actions (ruleset 2420853); the quest names the setting and
 reports the numbers. The host runner must handle two builds at once without
 the shared mbx cache or `quest gate` admission erasing the gain, so record
 host load during the trial.
+
+The trial started early (decided 2026-11-05, maintainer, /quest-plan): the
+second queue runner `nixos-moq-ci2` landed in
+[kixelated/nixos#24](https://github.com/kixelated/nixos/pull/24), and ruleset
+2420853 went to `max_entries_to_build: 2` at 2026-11-05T15:49:30Z.
+
+It ran out of disk the same day, so the maintainer ended it early
+(decided 2026-11-05, maintainer, /quest-complete; ruleset back to 1 at
+2026-11-05T18:02:15Z, scheduled revert cancelled). At 17:12Z
+`nixos-moq-ci2` failed a merge-group build with `No space left on device`
+under `/var/cache/github-runner-work/moq/moq`
+([job](https://github.com/moq-dev/moq/actions/runs/42072368255/job/127403437474)),
+dropping [moq-dev/moq#7716](https://github.com/moq-dev/moq/pull/7716). Every
+CI runner on `nixos` shares one XFS project quota (project 42000, 667 GiB
+hard; 578 GiB used afterwards), and each moq queue runner keeps its own
+Cargo targets and mbx caches inside it (`modules/ci-runners.nix`: MBX target
+25 GiB, GC 50-80 GiB). Before a retry, size the per-runner caches or the
+quota in kixelated/nixos for two concurrent moq builds, and show the quota's
+headroom with both runners warm. The 15:49Z-18:02Z window is too short and
+too disturbed to compare.
