@@ -102,3 +102,5 @@ Public API: none. Wire: none.
 - [dispatch-query's terminate test survives load](/quest/m0/test-flakes-2/dispatch-query-terminate.md) - `test_terminating_the_run_stops_the_running_phase` passes reliably under host load, re-enabled once fixed
 - [release.test.ts never reaches the network](/quest/m0/test-flakes-2/release-test-offline.md) - the JSR release test fakes its registry lookup and passes offline
 - [moq-ffi's datagram tests don't hinge on one datagram](/quest/m0/test-flakes-2/ffi-datagram-roundtrip.md) - the default-connection datagram tests pass under CI load
+- [Test PulseAudio servers stay off the desktop's D-Bus](/quest/m0/test-flakes-2/pulse-dbus.md) - concurrent media runs on one desktop never collide on `org.PulseAudio1`
+- [The open-GOP browser fixture fails loudly](/quest/m0/test-flakes-2/open-gop-fixture.md) - its broadcast stub matches current stats dependencies and an effect exception fails the test
