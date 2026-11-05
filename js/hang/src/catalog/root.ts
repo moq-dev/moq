@@ -51,7 +51,7 @@ const VersionSchema = z.number().check(
  * `join` interval. `json` and `binary` list application data tracks that aren't media. A section is omitted
  * when it holds no tracks. `stats` names the publisher's media snapshot track, `echo`
  * solicits viewer feedback under a relative broadcast prefix, and `include` lists whole
- * broadcasts without opening them.
+ * broadcasts without opening them; each shares this catalog's PTS timeline and root settings.
  *
  * This is a *loose* object: unknown root sections pass through validation untouched, so an
  * application can add its own sections (e.g. `scte35`) without modifying hang. A base consumer

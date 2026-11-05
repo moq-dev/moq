@@ -87,7 +87,9 @@ pub struct Catalog<E = ()> {
 
 	/// Whole broadcasts listed for explicit, lazy selection, keyed by include ID.
 	///
-	/// Listing one subscribes to nothing; see [`Include`](crate::catalog::Include).
+	/// Each shares this catalog's PTS timeline and root settings, including `media.clock` and
+	/// `media.join.interval`; its own settings are ignored. Listing one subscribes to nothing;
+	/// see [`Include`](crate::catalog::Include).
 	/// Omitted from the wire when empty. A malformed entry refuses the catalog.
 	pub include: std::collections::BTreeMap<String, crate::catalog::Include>,
 

@@ -4,6 +4,9 @@ import { InstanceSchema, RelativeBroadcastSchema } from "./path";
 /**
  * A whole broadcast whose own catalog describes its renditions, listed without opening it.
  *
+ * It shares the listing catalog's PTS timeline and root settings, including `media.clock` and
+ * `media.join.interval`; its own catalog's settings are ignored.
+ *
  * Listing one subscribes to nothing: a consumer opens the include's catalog only when it
  * selects it, including an HLS master listing its renditions. An on-demand publisher answers
  * the catalog without starting media. Its rendition IDs belong to that broadcast, never the
