@@ -527,6 +527,10 @@ enum Command {
 	/// The catalog stopped listing the rendition: end the pad with EOS, unless it is listed again
 	/// by the time the commands before are done.
 	Retire,
+	/// The rendition was disabled: end the pad with EOS once the commands before are done, even if
+	/// it is enabled again by then. The session already let the pad go, so a re-enable takes a new
+	/// one.
+	End,
 	/// The session ended: remove the pad, after an EOS if `eos`.
 	Release { eos: bool },
 	/// Answer once the commands before are done.
@@ -618,12 +622,20 @@ impl Pads {
 
 	/// List what the latest catalog names, retiring each pad it no longer lists. Its actor ends it
 	/// with EOS once the plays before are done, unless the rendition is listed again by then, so a
-	/// delisted rendition still playing out its track keeps its tail.
+	/// delisted rendition still playing out its track keeps its tail. A `disabled` rendition's pad
+	/// leaves the session now and ends regardless, so a re-enable that arrives while a push on it
+	/// is still blocked takes a new pad instead of resuming the old one.
 	/// Nothing once `cancel` fired, since a later run lists the pads then.
-	fn list(&self, listed: HashSet<Rendition>, cancel: &watch::Receiver<bool>) {
+	fn list(&self, listed: HashSet<Rendition>, disabled: &HashSet<Rendition>, cancel: &watch::Receiver<bool>) {
 		let mut table = self.0.lock().unwrap();
 		if *cancel.borrow() {
 			return;
+		}
+		for rendition in disabled {
+			if let Some(handle) = table.pads.remove(rendition) {
+				handle.commands.send(Command::End);
+				table.ending.push(handle.task);
+			}
 		}
 		// A pad is made listed, and an actor finding it listed again keeps it, so only a delisting
 		// retires one. A retirement already queued judges the listing when its turn comes.
@@ -690,18 +702,10 @@ impl PadActor {
 					let exit = self.play(*play).await;
 					let _ = done.send(exit);
 				}
-				Command::Retire => {
-					if self.retired() {
-						// A turn queued behind the retirement drops here, which its reader takes as
-						// done.
-						self.end(true);
-						if let Some(pads) = self.pads.upgrade() {
-							let id = tokio::task::id();
-							pads.lock().unwrap().ending.retain(|task| task.id() != id);
-						}
-						return;
-					}
-				}
+				// A turn queued behind the retirement drops here, which its reader takes as done.
+				Command::Retire if self.retired() => return self.ended(),
+				Command::Retire => {}
+				Command::End => return self.ended(),
 				Command::Release { eos } => return self.end(eos),
 				#[cfg(test)]
 				Command::Settled(settled) => {
@@ -770,6 +774,15 @@ impl PadActor {
 		let handle = pads.remove(&self.rendition).expect("checked above");
 		ending.push(handle.task);
 		true
+	}
+
+	/// End a pad the session already let go, and leave [`PadTable::ending`].
+	fn ended(&self) {
+		self.end(true);
+		if let Some(pads) = self.pads.upgrade() {
+			let id = tokio::task::id();
+			pads.lock().unwrap().ending.retain(|task| task.id() != id);
+		}
 	}
 
 	fn end(&self, eos: bool) {
@@ -1109,7 +1122,7 @@ fn reconcile(
 			)
 			.collect(),
 	);
-	playback.session.pads.list(listed, cancel);
+	playback.session.pads.list(listed, &disabled, cancel);
 
 	let mut plans: HashMap<moq_net::Path, Plan> = HashMap::new();
 	for (rendition, shape) in desired {
@@ -3838,7 +3851,7 @@ mod session_tests {
 		let (_shutdown, shutdown) = watch::channel(true);
 		let (_stop, stop) = watch::channel(false);
 		let pads = Pads::default();
-		pads.list(HashSet::from([rendition.clone()]), &cancel);
+		pads.list(HashSet::from([rendition.clone()]), &HashSet::new(), &cancel);
 		let instance = publisher.broadcast.consume();
 		let reader = super::Reader {
 			playback: super::Playback {
@@ -5052,6 +5065,75 @@ mod session_tests {
 		assert!(
 			!seen.contains(&Seen::Start(pad)),
 			"the ended pad started again: {seen:?}"
+		);
+	}
+
+	/// A disable ends the pad even when the rendition is re-enabled while a push on it is still
+	/// blocked downstream, so its actor takes both catalog updates only once the push returns.
+	#[test]
+	fn a_disable_ends_the_pad_while_its_push_is_blocked() {
+		let _pad_ids = pad_ids();
+		let element = element();
+		let recorder = Recorder::attach(&element);
+		let origin = origin();
+
+		let mut publisher = Publisher::new(&origin, Default::default(), video_rendition());
+		let (shutdown, stopping) = watch::channel(false);
+		let session = Session::new(element.downgrade(), stopping, DEFAULT_MAX_DELAY);
+		let pads = session.pads.clone();
+		let consumer = origin.consume();
+		let task =
+			super::RUNTIME.spawn(async move { session.follow_path(&consumer, "room", std::future::pending()).await });
+		let pad = recorder.written(&mut publisher, 1);
+
+		let blocking = element.static_pad(&pad).unwrap();
+		let (blocked, reached) = std::sync::mpsc::channel();
+		let probe = blocking
+			.add_probe(gst::PadProbeType::BLOCK | gst::PadProbeType::BUFFER, move |_, _| {
+				let _ = blocked.send(());
+				gst::PadProbeReturn::Ok
+			})
+			.unwrap();
+		publisher.write(2);
+		reached
+			.recv_timeout(Duration::from_secs(10))
+			.expect("the frame never reached the pad");
+
+		let rendition = (TrackKind::Video, "video".to_string());
+		for enabled in [false, true] {
+			publisher
+				.catalog
+				.modify()
+				.unwrap()
+				.video
+				.renditions
+				.get_mut("video")
+				.unwrap()
+				.enabled = enabled;
+			for _ in 0..200 {
+				if pads.is_listed(&rendition) == enabled {
+					break;
+				}
+				block(Duration::from_millis(50));
+			}
+			assert_eq!(pads.is_listed(&rendition), enabled, "the catalog update never applied");
+		}
+		blocking.remove_probe(probe);
+
+		recorder.wait("the disabled pad never ended", |seen| {
+			seen.contains(&Seen::Eos(pad.clone())).then_some(())
+		});
+		assert_ne!(
+			recorder.written(&mut publisher, 3),
+			pad,
+			"the re-enable reused the disabled pad"
+		);
+		stop((shutdown, task));
+
+		let seen = recorder.seen();
+		assert!(
+			!seen.contains(&Seen::Start(pad)),
+			"the disabled pad started again: {seen:?}"
 		);
 	}
 
