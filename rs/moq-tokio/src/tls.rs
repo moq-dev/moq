@@ -170,6 +170,12 @@ pub enum Error {
 	#[error("failed to generate a self-signed certificate: {0}")]
 	Rcgen(String),
 
+	/// A client certificate chain held more candidate paths than certificate path
+	/// building allows, so its lineage could not be traced in full.
+	#[cfg(feature = "_certs")]
+	#[error("the client certificate chain is too complex to trace: {0}")]
+	Lineage(String),
+
 	/// This CPU lacks a feature that rind, MoQ's cryptography, requires.
 	#[error(transparent)]
 	UnsupportedCpu(#[from] crypto::UnsupportedCpu),
@@ -1813,6 +1819,87 @@ impl PeerIdentity {
 		san.or_else(cn).or_else(|| self.fingerprint())
 	}
 
+	/// The leaf's SHA-256 fingerprint, then each presented certificate the leaf provably
+	/// descends from, nearest first, all hex encoded.
+	///
+	/// A client sends whatever certificates it likes after its leaf, including public
+	/// intermediates it was never issued under, so only one whose key signed a link of
+	/// a path up from the leaf is listed. Each presented certificate stands in as a
+	/// trust anchor and every path to one is followed, so a client cannot hide an
+	/// ancestor by ordering or padding its chain. A root the client did not send is
+	/// absent: the handshake trusted it from the listener's roots, which this chain
+	/// does not carry.
+	///
+	/// Fails when the chain is empty or exhausts path building's fixed budget of
+	/// signature checks, which a chain a CA issued never comes near.
+	#[cfg(feature = "_certs")]
+	pub fn lineage(&self) -> Result<Vec<String>> {
+		use std::cell::RefCell;
+
+		/// Lineage is about issuance, not purpose, so any EKU passes.
+		struct AnyUsage;
+		impl webpki::ExtendedKeyUsageValidator for AnyUsage {
+			fn validate(&self, _: webpki::KeyPurposeIdIter<'_, '_>) -> std::result::Result<(), webpki::Error> {
+				Ok(())
+			}
+		}
+
+		let (leaf, presented) = self.chain.split_first().ok_or(Error::Empty)?;
+		let fingerprint = |der: &[u8]| hex::encode(crypto::sha256(der));
+		let provider = crypto::provider()?;
+		let leaf_cert = webpki::EndEntityCert::try_from(leaf).map_err(|err| Error::Lineage(err.to_string()))?;
+		// A presented certificate that is not even a valid anchor cannot be one's issuer.
+		let (indexes, anchors): (Vec<usize>, Vec<_>) = presented
+			.iter()
+			.enumerate()
+			.filter_map(|(index, der)| webpki::anchor_from_trusted_cert(der).ok().map(|anchor| (index, anchor)))
+			.unzip();
+
+		// Each certificate's distance from the leaf over every path found.
+		let depths: RefCell<Vec<(String, usize)>> = RefCell::new(vec![(fingerprint(leaf), 0)]);
+		let record = |path: &webpki::VerifiedPath<'_>| {
+			let mut depths = depths.borrow_mut();
+			let mut add = |hash: String, depth: usize| match depths.iter_mut().find(|(seen, _)| *seen == hash) {
+				Some((_, seen)) => *seen = (*seen).min(depth),
+				None => depths.push((hash, depth)),
+			};
+			let mut depth = 0;
+			for cert in path.intermediate_certificates() {
+				depth += 1;
+				add(fingerprint(cert.der().as_ref()), depth);
+			}
+			if let Some(slot) = anchors.iter().position(|anchor| std::ptr::eq(anchor, path.anchor())) {
+				add(fingerprint(&presented[indexes[slot]]), depth + 1);
+			}
+			// Refused, so path building keeps looking for the next path.
+			Err(webpki::Error::UnknownIssuer)
+		};
+		let result = leaf_cert.verify_for_usage(
+			provider.signature_verification_algorithms.all,
+			&anchors,
+			presented,
+			UnixTime::now(),
+			AnyUsage,
+			None,
+			Some(&record),
+		);
+		// Only exhausting the budget stops the search early; any other error means
+		// every candidate path was tried.
+		if let Err(
+			err @ (webpki::Error::MaximumSignatureChecksExceeded
+			| webpki::Error::MaximumPathBuildCallsExceeded
+			| webpki::Error::MaximumNameConstraintComparisonsExceeded),
+		) = result
+		{
+			return Err(Error::Lineage(err.to_string()));
+		}
+
+		let mut depths = depths.into_inner();
+		// Stable, so certificates at one depth keep the order they were found in.
+		depths.sort_by_key(|(_, depth)| *depth);
+		Ok(depths.into_iter().map(|(hash, _)| hash).collect())
+	}
+
 	/// The leaf certificate's issuer, as a distinguished name.
 	pub fn issuer(&self) -> Option<String> {
 		let leaf = self.chain.first()?;
@@ -2895,6 +2982,65 @@ mod tests {
 		let chain = vec![identity.certified().leaf().clone()];
 		let peer = PeerIdentity { chain };
 		assert_eq!(peer.fingerprint().as_deref(), Some(identity.fingerprint()));
+	}
+
+	/// A CA certificate and the issuer it signs with. rcgen gives every certificate the
+	/// same subject, so each CA here names itself as any leaf's issuer.
+	fn lineage_ca(parent: Option<&rcgen::Issuer<'_, rind_rcgen::KeyPair>>) -> (CertificateDer<'static>, rcgen::Issuer<'static, rind_rcgen::KeyPair>) {
+		let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+		let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+		params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+		let cert = match parent {
+			Some(parent) => params.signed_by(&key, parent).unwrap(),
+			None => params.self_signed(&key).unwrap(),
+		};
+		(cert.into(), rcgen::Issuer::new(params, key))
+	}
+
+	fn lineage_leaf(issuer: &rcgen::Issuer<'_, rind_rcgen::KeyPair>) -> CertificateDer<'static> {
+		let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+		let params = rcgen::CertificateParams::new(vec!["client.invalid".to_string()]).unwrap();
+		params.signed_by(&key, issuer).unwrap().into()
+	}
+
+	fn hashes(certs: &[&CertificateDer<'static>]) -> Vec<String> {
+		certs.iter().map(|cert| hex::encode(crypto::sha256(cert.as_ref()))).collect()
+	}
+
+	/// Lineage lists the leaf and each presented certificate it descends from, nearest
+	/// first, whatever order the client sent them in.
+	#[test]
+	fn lineage_follows_signatures_not_presentation() {
+		let (root, root_issuer) = lineage_ca(None);
+		let (intermediate, intermediate_issuer) = lineage_ca(Some(&root_issuer));
+		let (stranger, _) = lineage_ca(None);
+		let leaf = lineage_leaf(&intermediate_issuer);
+
+		let lineage = |chain: &[&CertificateDer<'static>]| {
+			PeerIdentity::from_chain(chain.iter().map(|cert| (*cert).clone()).collect())
+				.lineage()
+				.unwrap()
+		};
+		assert_eq!(lineage(&[&leaf]), hashes(&[&leaf]));
+		assert_eq!(lineage(&[&leaf, &intermediate]), hashes(&[&leaf, &intermediate]));
+		assert_eq!(
+			lineage(&[&leaf, &root, &stranger, &intermediate]),
+			hashes(&[&leaf, &intermediate, &root]),
+			"a public CA the leaf was not issued under is never listed, nor is order trusted"
+		);
+	}
+
+	/// Padding the chain until path building gives up is an error, never a lineage
+	/// missing the ancestor the padding hid.
+	#[test]
+	fn lineage_refuses_a_chain_too_complex_to_trace() {
+		let (intermediate, issuer) = lineage_ca(None);
+		let leaf = lineage_leaf(&issuer);
+		let mut chain = vec![leaf];
+		chain.extend((0..128).map(|_| lineage_ca(None).0));
+		chain.push(intermediate);
+		assert!(matches!(PeerIdentity::from_chain(chain).lineage(), Err(Error::Lineage(_))));
+		assert!(matches!(PeerIdentity::from_chain(Vec::new()).lineage(), Err(Error::Empty)));
 	}
 
 	/// A malformed fingerprint is rejected on the way in rather than stored as

@@ -1,14 +1,14 @@
 //! The reference auth server: the policy a relay used to hold, answering the contract.
 //!
 //! [`Policy`] decides a [`Request`] the way `--auth-key`, `--auth-key-dir`, and
-//! `--auth-public` did on the relay, plus an explicit grant for mTLS peers and live
-//! session caps. Its anonymous and mTLS rules are rooted at `/`, like a token with an
+//! `--auth-public` did on the relay, plus an explicit grant for mTLS peers, rules
+//! scoping particular certificates, and live session caps. Its anonymous and mTLS rules are rooted at `/`, like a token with an
 //! empty root, and authorized at the dialed path the same way. [`Server`] serves it
 //! on a TCP or unix listener as `POST /`. `moq auth serve` is the CLI; the relay's
 //! tests run against it in process.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -21,7 +21,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use kio::clock::Instant;
 
-use crate::{Event, Grant, Key, KeyId, KeySet, Permissions, Request, Token};
+use crate::{Event, Grant, Key, KeyId, KeySet, Patterns, Permissions, Rate, Request, Token};
 
 /// Where the signing keys a `jwt` is verified against come from. Read per request,
 /// so a rotated file takes effect without a restart.
@@ -83,6 +83,106 @@ impl std::fmt::Display for Link {
 	}
 }
 
+impl serde::Serialize for Link {
+	fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		serializer.collect_str(self)
+	}
+}
+
+impl<'de> serde::Deserialize<'de> for Link {
+	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		let text = <Cow<'de, str>>::deserialize(deserializer)?;
+		text.parse().map_err(serde::de::Error::custom)
+	}
+}
+
+/// The SHA-256 of a DER certificate, written as 64 hex digits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Fingerprint([u8; 32]);
+
+impl std::str::FromStr for Fingerprint {
+	type Err = &'static str;
+	fn from_str(text: &str) -> Result<Self, Self::Err> {
+		const INVALID: &str = "expected a SHA-256 fingerprint: 64 hex digits";
+		// Checked first: `from_str_radix` would also take a leading `+`.
+		if text.len() != 64 || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+			return Err(INVALID);
+		}
+		let mut bytes = [0; 32];
+		for (byte, pair) in bytes.iter_mut().zip(text.as_bytes().chunks_exact(2)) {
+			let pair = std::str::from_utf8(pair).map_err(|_| INVALID)?;
+			*byte = u8::from_str_radix(pair, 16).map_err(|_| INVALID)?;
+		}
+		Ok(Self(bytes))
+	}
+}
+
+impl std::fmt::Display for Fingerprint {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		self.0.iter().try_for_each(|byte| write!(f, "{byte:02x}"))
+	}
+}
+
+impl serde::Serialize for Fingerprint {
+	fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		serializer.collect_str(self)
+	}
+}
+
+impl<'de> serde::Deserialize<'de> for Fingerprint {
+	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		let text = <Cow<'de, str>>::deserialize(deserializer)?;
+		text.parse().map_err(serde::de::Error::custom)
+	}
+}
+
+/// A rule's cluster-link role: one of [`Link`], or `none` to grant no link where the
+/// server-wide role would.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RuleLink {
+	/// No cluster-link role.
+	None,
+	/// [`Link::Peer`].
+	Peer,
+	/// [`Link::Upstream`].
+	Upstream,
+}
+
+impl From<RuleLink> for Option<Link> {
+	fn from(link: RuleLink) -> Self {
+		match link {
+			RuleLink::None => None,
+			RuleLink::Peer => Some(Link::Peer),
+			RuleLink::Upstream => Some(Link::Upstream),
+		}
+	}
+}
+
+/// What sessions presenting one certificate, or any certificate issued under it, are
+/// granted in place of the server-wide mTLS grant. Each field left `None` inherits
+/// the server-wide value; patterns that are set replace the shared ones, never add to them.
+///
+/// `#[non_exhaustive]`, so start from [`Rule::default`] and set the fields.
+#[serde_with::skip_serializing_none]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct Rule {
+	/// Patterns it may publish, rooted at `/`.
+	pub publish: Option<Patterns>,
+	/// Patterns it may subscribe to, rooted at `/`.
+	pub subscribe: Option<Patterns>,
+	/// Its cluster-link role.
+	pub link: Option<RuleLink>,
+	/// The tier stamped on its grants.
+	pub tier: Option<String>,
+	/// The bitrate cap on what it publishes.
+	pub publish_rate: Option<Rate>,
+	/// The bitrate cap on what it subscribes to.
+	pub subscribe_rate: Option<Rate>,
+}
+
 /// The decisions the server answers with, evaluated in order and stopping at the
 /// first that applies: a JWT, then a verified certificate, then the anonymous rules.
 /// A malformed or expired token is a refusal, never a fall through.
@@ -112,6 +212,10 @@ pub struct Policy {
 	pub mtls: Permissions,
 	/// The cluster-link role granted only to sessions presenting a verified certificate.
 	pub mtls_link: Option<Link>,
+	/// Rules for particular certificates, keyed by the fingerprint of a certificate in a
+	/// session's [`chain`](crate::Peer::chain). The rule naming the certificate nearest
+	/// the leaf applies; a certificate no rule names gets [`mtls`](Self::mtls).
+	pub certificates: BTreeMap<Fingerprint, Rule>,
 
 	/// The tier stamped on every grant.
 	pub tier: Option<String>,
@@ -162,9 +266,12 @@ pub enum Denial {
 		/// The verified token's root, absent without a token.
 		root: Option<String>,
 	},
-	/// A client certificate was presented, but the policy grants nothing to certificates.
-	#[error("a certificate was presented but nothing is granted to certificates")]
+	/// A client certificate was presented, but the policy grants it nothing.
+	#[error("a certificate was presented but nothing is granted to it")]
 	NoMtlsGrant,
+	/// The certificate chain the relay reported holds something other than fingerprints.
+	#[error("the certificate chain is not a list of SHA-256 fingerprints")]
+	MalformedChain,
 	/// Neither a token nor a certificate was presented, and anonymous access is not granted.
 	#[error("anonymous access is not granted")]
 	NoPublicGrant,
@@ -233,7 +340,9 @@ impl Policy {
 		if jwt.is_some() && request.tls.is_some() {
 			return Err(Denial::TokenAndCertificate);
 		}
-		let (permissions, rates, expires, certificate, root) = if let Some(jwt) = jwt {
+		let mut tier = self.tier.clone();
+		let mut link = None;
+		let (permissions, rates, expires, root) = if let Some(jwt) = jwt {
 			let claims = self.verify(&jwt).await?;
 			let permissions = claims.authorize(&request.path).map_err(|err| match err {
 				crate::Error::RootMismatch(path) => Denial::RootMismatch {
@@ -247,23 +356,25 @@ impl Policy {
 				other => Denial::InvalidToken(other.to_string()),
 			})?;
 			let rates = (claims.publish_rate, claims.subscribe_rate);
-			(permissions, rates, claims.expires, false, Some(claims.root))
+			(permissions, rates, claims.expires, Some(claims.root))
 		} else if let Some(peer) = &request.tls {
-			if self.mtls.is_empty() {
+			let rule = self.rule(peer)?.cloned().unwrap_or_default();
+			let rules = Permissions::new(
+				rule.publish.unwrap_or_else(|| self.mtls.publish.clone()),
+				rule.subscribe.unwrap_or_else(|| self.mtls.subscribe.clone()),
+			);
+			if rules.is_empty() {
 				return Err(Denial::NoMtlsGrant);
 			}
-			(
-				authorize(&self.mtls, &request.path)?,
-				(None, None),
-				peer.expires,
-				true,
-				None,
-			)
+			tier = rule.tier.or(tier);
+			link = rule.link.map_or(self.mtls_link, Into::into);
+			let rates = (rule.publish_rate, rule.subscribe_rate);
+			(authorize(&rules, &request.path)?, rates, peer.expires, None)
 		} else {
 			if self.public.is_empty() {
 				return Err(Denial::NoPublicGrant);
 			}
-			(authorize(&self.public, &request.path)?, (None, None), None, false, None)
+			(authorize(&self.public, &request.path)?, (None, None), None, None)
 		};
 
 		let mut grant = Grant::new(permissions.publish, permissions.subscribe);
@@ -274,10 +385,29 @@ impl Policy {
 			(None, None) => None,
 		};
 		grant.revalidate = self.revalidate;
-		grant.tier = self.tier.clone();
-		grant.peer = certificate && self.mtls_link.is_some();
-		grant.upstream = certificate && self.mtls_link == Some(Link::Upstream);
+		grant.tier = tier;
+		grant.peer = link.is_some();
+		grant.upstream = link == Some(Link::Upstream);
 		Ok((grant, root))
+	}
+
+	/// The rule naming the certificate nearest the leaf, if any. A relay that predates
+	/// [`chain`](crate::Peer::chain) reports none, which reads as the leaf alone.
+	fn rule(&self, peer: &crate::Peer) -> Result<Option<&Rule>, Denial> {
+		if self.certificates.is_empty() {
+			return Ok(None);
+		}
+		let chain = match peer.chain.is_empty() {
+			true => std::slice::from_ref(&peer.fingerprint),
+			false => peer.chain.as_slice(),
+		};
+		for hash in chain {
+			let fingerprint = hash.parse::<Fingerprint>().map_err(|_| Denial::MalformedChain)?;
+			if let Some(rule) = self.certificates.get(&fingerprint) {
+				return Ok(Some(rule));
+			}
+		}
+		Ok(None)
 	}
 
 	async fn verify(&self, jwt: &str) -> Result<crate::Claims, Denial> {
@@ -471,7 +601,7 @@ fn hash(token: &str) -> u64 {
 /// The policy behind `POST /`, with the session table the limits need.
 #[derive(Clone)]
 pub struct Server {
-	policy: Arc<Policy>,
+	policy: Arc<std::sync::RwLock<Arc<Policy>>>,
 	sessions: Arc<Mutex<Sessions>>,
 	mesh: Option<crate::mesh::Coordinator>,
 }
@@ -481,7 +611,32 @@ impl Server {
 	/// a bound, bounds grants past the clock's range, caps sessions without the
 	/// re-check that ages out a dead relay's, or stamps an invalid tier.
 	pub fn new(policy: Policy) -> crate::Result<Self> {
-		if let Some(tier) = &policy.tier {
+		Ok(Self {
+			policy: Arc::new(std::sync::RwLock::new(Arc::new(Self::validate(policy)?))),
+			sessions: Default::default(),
+			mesh: None,
+		})
+	}
+
+	/// Answer with `policy` from now on, refusing it as [`new`](Self::new) would and
+	/// keeping the current one then. Live sessions take it at their next re-check, and
+	/// the session table carries over.
+	pub fn update(&self, policy: Policy) -> crate::Result<()> {
+		let policy = Arc::new(Self::validate(policy)?);
+		*self.policy.write().unwrap_or_else(std::sync::PoisonError::into_inner) = policy;
+		Ok(())
+	}
+
+	fn policy(&self) -> Arc<Policy> {
+		self.policy
+			.read()
+			.unwrap_or_else(std::sync::PoisonError::into_inner)
+			.clone()
+	}
+
+	fn validate(policy: Policy) -> crate::Result<Policy> {
+		let tiers = policy.certificates.values().filter_map(|rule| rule.tier.as_ref());
+		for tier in policy.tier.iter().chain(tiers) {
 			crate::tier::validate(tier)?;
 		}
 		if policy.revalidate.is_some() && policy.expires.is_none() {
@@ -497,11 +652,7 @@ impl Server {
 		if limited && policy.revalidate.is_none() {
 			return Err(crate::Error::LimitsWithoutRevalidate);
 		}
-		Ok(Self {
-			policy: Arc::new(policy),
-			sessions: Default::default(),
-			mesh: None,
-		})
+		Ok(policy)
 	}
 
 	/// Also answer the mesh owner's API under `/mesh` with `coordinator`. Like `POST /`,
@@ -512,10 +663,10 @@ impl Server {
 	}
 
 	/// The cadence the session table ages out by, or `None` when no limit needs a table.
-	fn cadence(&self) -> Option<Duration> {
-		let limits = self.policy.limits;
+	fn cadence(policy: &Policy) -> Option<Duration> {
+		let limits = policy.limits;
 		(limits.token.is_some() || limits.remote.is_some())
-			.then_some(self.policy.revalidate)
+			.then_some(policy.revalidate)
 			.flatten()
 	}
 
@@ -524,19 +675,20 @@ impl Server {
 		if matches!(request.event, Event::Attach) && request.auth.is_none() {
 			return Err(Denial::MalformedToken("an attachment needs an auth id".into()));
 		}
+		let policy = self.policy();
 		match request.event {
 			Event::Connect | Event::Attach => {
-				let (grant, root) = self.policy.decide_root(request).await?;
-				if let Some(cadence) = self.cadence() {
+				let (grant, root) = policy.decide_root(request).await?;
+				if let Some(cadence) = Self::cadence(&policy) {
 					let mut sessions = self.sessions.lock().unwrap();
 					sessions.sweep(cadence);
-					sessions.connect(request, self.policy.limits, root)?;
+					sessions.connect(request, policy.limits, root)?;
 				}
 				Ok(Some(grant))
 			}
 			Event::Revalidate => {
-				let grant = self.policy.decide(request).await?;
-				if let Some(cadence) = self.cadence() {
+				let grant = policy.decide(request).await?;
+				if let Some(cadence) = Self::cadence(&policy) {
 					let mut sessions = self.sessions.lock().unwrap();
 					sessions.sweep(cadence);
 					sessions.revalidate(request);
@@ -580,7 +732,7 @@ async fn handle(State(server): State<Server>, Json(request): Json<Request>) -> R
 		// which rule refused without the server saying anything to the client.
 		Err(denial) => {
 			tracing::debug!(id = ?request.id, path = ?request.path, ?denial, "refused");
-			(StatusCode::FORBIDDEN, Json(denial.body(server.policy.tier.clone()))).into_response()
+			(StatusCode::FORBIDDEN, Json(denial.body(server.policy().tier.clone()))).into_response()
 		}
 	}
 }
@@ -679,10 +831,45 @@ mod tests {
 		request.tls = Some(Peer {
 			name: "edge0".into(),
 			fingerprint: "ab".repeat(32),
+			chain: vec!["ab".repeat(32)],
 			expires,
 			issuer: "CN=cluster".into(),
 		});
 		request
+	}
+
+	/// A certificate session whose leaf is `leaf`, issued under each of `ancestors` in turn.
+	fn with_chain(mut request: Request, leaf: &str, ancestors: &[&str]) -> Request {
+		let chain: Vec<String> = std::iter::once(leaf).chain(ancestors.iter().copied()).map(fingerprint).collect();
+		request.tls = Some(Peer {
+			name: "affiliate".into(),
+			fingerprint: chain[0].clone(),
+			chain,
+			expires: None,
+			issuer: "CN=affiliates".into(),
+		});
+		request
+	}
+
+	/// A distinct fingerprint per name of up to 32 bytes: its bytes in hex, zero padded.
+	fn fingerprint(name: &str) -> String {
+		let hex: String = name.bytes().map(|byte| format!("{byte:02x}")).collect();
+		format!("{hex:0<64}")
+	}
+
+	fn rule(publish: &[&str], subscribe: &[&str]) -> Rule {
+		Rule {
+			publish: Some(patterns(publish)),
+			subscribe: Some(patterns(subscribe)),
+			..Default::default()
+		}
+	}
+
+	fn certificates(rules: impl IntoIterator<Item = (&'static str, Rule)>) -> BTreeMap<Fingerprint, Rule> {
+		rules
+			.into_iter()
+			.map(|(name, rule)| (fingerprint(name).parse().unwrap(), rule))
+			.collect()
 	}
 
 	/// A key on disk under its kid, the way `--key-dir` reads it.
@@ -1085,6 +1272,144 @@ mod tests {
 
 		// The certificate does not stand in for a public grant.
 		assert_eq!(policy.decide(&request("/")).await.unwrap_err(), Denial::NoPublicGrant);
+	}
+
+	/// A rule scopes a leaf, or every leaf under an intermediate; the one nearest the
+	/// leaf wins, and a certificate no rule names falls back to the shared grant.
+	#[tokio::test]
+	async fn certificate_rules_scope_by_the_nearest_named_certificate() {
+		let policy = Policy {
+			mtls: rules(&["shared/**"], &[]),
+			mtls_link: Some(Link::Peer),
+			tier: Some("base".into()),
+			certificates: certificates([
+				(
+					"affiliate-ca",
+					Rule {
+						tier: Some("affiliate".into()),
+						link: Some(RuleLink::None),
+						publish_rate: Some(Rate::from_bps(1_000_000).unwrap()),
+						..rule(&["affiliate/**"], &["affiliate/**"])
+					},
+				),
+				(
+					"vip",
+					Rule {
+						subscribe: Some(patterns(&["**"])),
+						..Default::default()
+					},
+				),
+			]),
+			..Default::default()
+		};
+
+		// An intermediate rule covers a leaf issued under it, replacing the shared patterns.
+		let grant = policy
+			.decide(&with_chain(request("/"), "alice", &["affiliate-ca", "root"]))
+			.await
+			.unwrap();
+		assert_eq!(grant.publish, patterns(&["affiliate/**"]));
+		assert_eq!(grant.subscribe, patterns(&["affiliate/**"]));
+		assert_eq!(grant.tier.as_deref(), Some("affiliate"));
+		assert_eq!(grant.publish_rate, Rate::from_bps(1_000_000).ok());
+		assert!(!grant.peer, "the rule drops the shared link role");
+
+		// A leaf rule beats its intermediate's, and what it omits inherits the server-wide
+		// values, not the intermediate rule's.
+		let grant = policy
+			.decide(&with_chain(request("/"), "vip", &["affiliate-ca", "root"]))
+			.await
+			.unwrap();
+		assert_eq!(grant.publish, patterns(&["shared/**"]));
+		assert_eq!(grant.subscribe, patterns(&["**"]));
+		assert_eq!(grant.tier.as_deref(), Some("base"));
+		assert_eq!(grant.publish_rate, None);
+		assert!(grant.peer);
+
+		// No rule names the chain: the shared grant.
+		let grant = policy
+			.decide(&with_chain(request("/"), "bob", &["other-ca"]))
+			.await
+			.unwrap();
+		assert_eq!(grant.publish, patterns(&["shared/**"]));
+		assert!(grant.subscribe.is_empty());
+
+		// A relay that predates the chain reports only the leaf, which a leaf rule matches.
+		let mut legacy = with_chain(request("/"), "vip", &[]);
+		legacy.tls.as_mut().unwrap().chain.clear();
+		let grant = policy.decide(&legacy).await.unwrap();
+		assert_eq!(grant.subscribe, patterns(&["**"]));
+
+		// A rule that grants nothing refuses, even where the shared grant would admit.
+		let revoked = Policy {
+			certificates: certificates([("affiliate-ca", rule(&[], &[]))]),
+			..policy.clone()
+		};
+		assert_eq!(
+			revoked
+				.decide(&with_chain(request("/"), "alice", &["affiliate-ca"]))
+				.await
+				.unwrap_err(),
+			Denial::NoMtlsGrant
+		);
+
+		let mut malformed = with_chain(request("/"), "alice", &[]);
+		malformed.tls.as_mut().unwrap().chain.push("not hex".into());
+		assert_eq!(policy.decide(&malformed).await.unwrap_err(), Denial::MalformedChain);
+	}
+
+	/// An update narrows or revokes a live session at its next re-check, and one the
+	/// server would refuse leaves the current policy answering.
+	#[tokio::test]
+	async fn an_update_applies_at_the_next_recheck_and_a_bad_one_is_refused() {
+		let provisioned = Policy {
+			certificates: certificates([("alice", rule(&["**"], &["**"]))]),
+			..Default::default()
+		};
+		let server = Server::new(provisioned.clone()).unwrap();
+		let mut session = with_chain(request("/"), "alice", &["ca"]);
+		assert_eq!(server.answer(&session).await.unwrap().unwrap().publish, patterns(&["**"]));
+
+		session.event = Event::Revalidate;
+		server
+			.update(Policy {
+				certificates: certificates([("alice", rule(&["alice/**"], &[]))]),
+				..Default::default()
+			})
+			.unwrap();
+		assert_eq!(
+			server.answer(&session).await.unwrap().unwrap().publish,
+			patterns(&["alice/**"])
+		);
+
+		let invalid = Policy {
+			certificates: certificates([(
+				"alice",
+				Rule {
+					tier: Some("not a tier!".into()),
+					..rule(&["**"], &["**"])
+				},
+			)]),
+			..Default::default()
+		};
+		assert!(server.update(invalid).is_err());
+		assert_eq!(
+			server.answer(&session).await.unwrap().unwrap().publish,
+			patterns(&["alice/**"])
+		);
+
+		server.update(Policy::default()).unwrap();
+		assert_eq!(server.answer(&session).await.unwrap_err(), Denial::NoMtlsGrant);
+	}
+
+	#[test]
+	fn fingerprints_are_64_hex_digits() {
+		let text = "AB".repeat(32);
+		let parsed: Fingerprint = text.parse().unwrap();
+		assert_eq!(parsed.to_string(), "ab".repeat(32));
+		for bad in ["ab".repeat(31), "ab".repeat(33), "zz".repeat(32), "é".repeat(32), "+1".repeat(32)] {
+			assert!(bad.parse::<Fingerprint>().is_err(), "{bad}");
+		}
 	}
 
 	/// The link role marks only a certificate's grant, never an anonymous session or JWT.

@@ -246,6 +246,14 @@ pub struct Peer {
 	pub name: String,
 	/// SHA-256 of the leaf certificate, hex.
 	pub fingerprint: String,
+	/// SHA-256 of the leaf, then of each certificate the leaf provably descends from,
+	/// nearest first, hex. A certificate only lands here when its key signed a link up
+	/// from the leaf, so a client cannot claim an intermediate by sending it; a root
+	/// appears only when the client presented it.
+	///
+	/// Empty from a relay that predates it: read that as the leaf alone.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub chain: Vec<String>,
 	/// The certificate's notAfter.
 	#[serde_as(as = "Option<kio::clock::serde::UnixSeconds>")]
 	pub expires: Option<Wall>,
@@ -278,6 +286,7 @@ mod tests {
 		request.tls = Some(Peer {
 			name: "edge0".into(),
 			fingerprint: "ab".repeat(32),
+			chain: vec!["ab".repeat(32), "cd".repeat(32)],
 			expires: Some(Wall::UNIX_EPOCH + Duration::from_secs(4_102_444_800)),
 			issuer: "CN=cluster".into(),
 		});
@@ -321,6 +330,7 @@ mod tests {
 		assert_eq!(json["role"], "publisher");
 		assert_eq!(json["remote"], "203.0.113.9:4433");
 		assert_eq!(json["tls"]["expires"], 4_102_444_800_i64);
+		assert_eq!(json["tls"]["chain"][1], "cd".repeat(32));
 		assert!(json.get("reason").is_none());
 		assert_eq!(serde_json::from_value::<Request>(json).unwrap(), request);
 	}

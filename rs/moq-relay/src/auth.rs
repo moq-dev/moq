@@ -971,6 +971,9 @@ impl Auth {
 	/// URL transport resolves those away, but an in-band SETUP Path arrives verbatim,
 	/// and `/tenant-a/../tenant-b` would reach the decider spelled under `tenant-a`.
 	///
+	/// A client certificate whose chain the relay could not trace is refused too, before
+	/// the decider could scope it as a bare leaf.
+	///
 	/// A grant that caps a bitrate is refused: nothing here holds the session to it.
 	pub async fn admit(&self, request: Request) -> Result<Lease, Error> {
 		self.admit_paced(request, None).await
@@ -980,6 +983,9 @@ impl Auth {
 	pub(crate) async fn admit_paced(&self, request: Request, pacer: Option<Pacer>) -> Result<Lease, Error> {
 		if navigates(&request.path) {
 			return Err(Error::Request(format!("path {:?} has a dot segment", request.path)));
+		}
+		if request.tls.as_ref().is_some_and(|peer| peer.chain.is_empty()) {
+			return Err(Error::Request("the client certificate chain is too complex to trace".into()));
 		}
 		// Build the token from the grant the admission checked: re-reading it could
 		// pick up an update that skipped the check.
@@ -1305,11 +1311,20 @@ pub(crate) fn role(role: moq_net::setup::Role) -> Option<moq_auth::Role> {
 }
 
 /// The certificate facts for a verified peer, or `None` when the chain does not parse.
+///
+/// A chain too complex to trace reports an empty [`chain`](moq_auth::Peer::chain), which
+/// [`Auth::admit`] refuses: reporting the leaf alone would let padding hide the
+/// intermediate a server scopes by.
 pub(crate) fn peer(identity: &moq_tokio::tls::PeerIdentity) -> Option<moq_auth::Peer> {
 	let fingerprint = identity.fingerprint()?;
+	let chain = identity
+		.lineage()
+		.inspect_err(|err| tracing::debug!(%err, %fingerprint, "client certificate lineage"))
+		.unwrap_or_default();
 	Some(moq_auth::Peer {
 		name: identity.name().unwrap_or_else(|| fingerprint.clone()),
 		fingerprint,
+		chain,
 		expires: identity.expiry(),
 		issuer: identity.issuer().unwrap_or_default(),
 	})
@@ -1725,6 +1740,7 @@ mod tests {
 		certificate.tls = Some(moq_auth::Peer {
 			name: "edge0".into(),
 			fingerprint: "ab".repeat(32),
+			chain: vec!["ab".repeat(32)],
 			expires: None,
 			issuer: "CN=cluster".into(),
 		});
