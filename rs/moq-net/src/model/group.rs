@@ -4059,6 +4059,9 @@ impl Consumer {
 		let mut boarded = false;
 		loop {
 			if let Some(ride) = self.ride_mut() {
+				// Frames still to drop when the flight boarded, before the ones it starts below
+				// the reader.
+				let pending = ride.skip;
 				if let Some(boarding) = &mut ride.boarding {
 					let copy = match boarding.poll(waiter) {
 						Poll::Ready(Ok(copy)) => copy,
@@ -4073,7 +4076,7 @@ impl Consumer {
 					};
 					let start = usize::try_from(boarding.frame()).unwrap_or(usize::MAX);
 					let start = start.min(self.cursor.index);
-					let skip = self.cursor.index - start;
+					let skip = pending + (self.cursor.index - start);
 					self.adopt_copy(copy);
 					self.cursor.index = start;
 					self.set_ride(Some(Ride::aboard(true, skip)));
@@ -4106,16 +4109,18 @@ impl Consumer {
 			let Some(track) = self.cursor.cache.track() else {
 				return res;
 			};
+			// A rider still skipping to its frame keeps what it has left to skip.
+			let skip = self.ride_mut().map_or(0, |ride| ride.skip);
 			match track::board(&track, self) {
 				None => return res,
 				Some(track::Board::Ride(copy, flight)) => {
 					self.adopt_copy(copy);
-					self.set_ride(Some(Ride::aboard(flight, 0)));
+					self.set_ride(Some(Ride::aboard(flight, skip)));
 				}
 				Some(track::Board::Wait(boarding)) => self.set_ride(Some(Ride {
 					boarding: Some(boarding),
 					aboard: true,
-					skip: 0,
+					skip,
 				})),
 			}
 		}

@@ -141,6 +141,56 @@ async fn moq_transport_replays_a_finished_group() {
 	chain("moq-transport-22", Replay::Finished).await;
 }
 
+/// A moq-transport relay holding none of a finished group, far past its ingest window,
+/// answers a FETCH of it once its own copy finishes arriving, which nothing reads until
+/// FETCH_OK, then streams it, riding a flight for the front its copy shed.
+#[kio::test]
+async fn moq_transport_relays_a_cold_finished_group() {
+	let version = "moq-transport-22";
+	let version_parsed: Version = version.parse().unwrap();
+	let pools: [cache::Pool; 3] = Default::default();
+	let publisher = origin(1, &pools[0]);
+	let upper = origin(2, &pools[1]);
+	let lower = origin(3, &pools[2]);
+
+	let broadcast = publisher.create_broadcast("live").unwrap();
+	let track = broadcast.create_track("data", track::Info::default()).unwrap();
+	broadcast.announce(Default::default()).unwrap();
+	let (written, ended) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+	serve(track.requests(), written, ended, true);
+	let mut group = track.append_group().unwrap();
+	for index in 0..FRAMES {
+		group.write_frame(None, numbered(index)).unwrap();
+	}
+	group.finish().unwrap();
+
+	let mut options = MockConnectOptions::new(version_parsed);
+	options.server_publish = Some(publisher.consume());
+	options.client_subscribe = Some(upper.clone());
+	let _upper_link = connect_mock(options).await;
+	let mut options = MockConnectOptions::new(version_parsed);
+	options.server_publish = Some(upper.consume());
+	options.client_subscribe = Some(lower.clone());
+	let _lower_link = connect_mock(options).await;
+
+	let remote = kio::clock::timeout(TIMEOUT, lower.consume().follow("live", None).unwrap().available())
+		.await
+		.expect("resolve timeout")
+		.expect("broadcast resolves")
+		.expect("an instance");
+	let mut fetched = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().fetch_group(0, None))
+		.await
+		.expect("fetch timeout")
+		.expect("fetch");
+	for index in 0..FRAMES {
+		assert_eq!(next(&mut fetched, version, index).await, index, "{version}: fetched");
+	}
+	assert!(
+		next_end(&mut fetched, version).await,
+		"{version}: the fetch ends with the group"
+	);
+}
+
 /// What a late joiner of group 0 finds at the bottom of the chain.
 #[derive(Clone, Copy, PartialEq)]
 enum Replay {

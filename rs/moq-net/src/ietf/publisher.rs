@@ -215,7 +215,13 @@ impl PrepareFetch {
 			self.ahead.take(),
 		);
 		let found: (track::Info, group::Consumer) = wait!(Find => find.poll(waiter, track)).map_err(with_reason)?;
-		let end = wait!(Settle => poll_settle(waiter, track, range, &found.1, self.joined))?;
+		// Parked past every frame, so the group's paced ingest runs on while this waits for
+		// its end rather than stalling on a reader that takes nothing.
+		let mut past: group::Consumer = found.1.clone().with_range(u64::MAX..);
+		let end = wait!(Settle => {
+			let _ = past.poll_next_frame(waiter);
+			poll_settle(waiter, track, range, &found.1, self.joined)
+		})?;
 		let (info, group) = found;
 		Poll::Ready(Ok(PreparedFetch {
 			range,
