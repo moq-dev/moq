@@ -404,84 +404,6 @@ pub extern "C" fn moq_bandwidth_consumer_close(consumer: u32) -> i32 {
 	})
 }
 
-#[cfg(test)]
-mod consumer_tests {
-	use super::*;
-	use crate::ffi::ReturnCode;
-
-	extern "C" fn changed(user_data: *mut std::ffi::c_void, code: i32) {
-		let sender = unsafe { Box::from_raw(user_data as *mut tokio::sync::mpsc::UnboundedSender<i32>) };
-		sender.send(code).unwrap();
-	}
-
-	#[tokio::test]
-	async fn consumer_close_releases_demand_and_completes_pending_callback() {
-		tokio::time::pause();
-		let producer = moq_net::bandwidth::Producer::new();
-		let id = State::lock()
-			.bandwidth
-			.consumers
-			.insert(Arc::new(Consumer {
-				inner: std::sync::Mutex::new(Some(producer.consume())),
-				changed: Default::default(),
-			}))
-			.unwrap();
-		let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-		let user_data = || Box::into_raw(Box::new(sender.clone())) as *mut std::ffi::c_void;
-		assert!(producer.demand().wanted());
-		assert_eq!(
-			unsafe { moq_bandwidth_consumer_changed(id.into(), user_data(), Some(changed)) },
-			0
-		);
-		producer.set(Some(moq_net::bandwidth::Rate::from_bps(321))).unwrap();
-		assert_eq!(receiver.recv().await, Some(1));
-		let (mut bps, mut present) = (0, false);
-		assert_eq!(
-			unsafe { moq_bandwidth_consumer_peek(id.into(), &mut bps, &mut present) },
-			0
-		);
-		assert!(present);
-		assert_eq!(bps, 321);
-		assert_eq!(
-			unsafe { moq_bandwidth_consumer_changed(id.into(), user_data(), Some(changed)) },
-			0
-		);
-		assert_eq!(moq_bandwidth_consumer_close(id.into()), 0);
-		assert!(
-			!producer.demand().wanted(),
-			"closing releases demand before the callback runs"
-		);
-		assert!(receiver.recv().await.unwrap() < 0);
-	}
-
-	#[tokio::test]
-	async fn changed_cleanup_panic_still_delivers_callback() {
-		let producer = moq_net::bandwidth::Producer::new();
-		let consumer = Arc::new(Consumer {
-			inner: std::sync::Mutex::new(Some(producer.consume())),
-			changed: Default::default(),
-		});
-		let id = State::lock().bandwidth.consumers.insert(consumer.clone()).unwrap();
-		let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-		let user_data = Box::into_raw(Box::new(sender)) as *mut std::ffi::c_void;
-		assert_eq!(
-			unsafe { moq_bandwidth_consumer_changed(id.into(), user_data, Some(changed)) },
-			0
-		);
-		// Poison the slot the wait clears once it completes.
-		let poisoner = consumer.clone();
-		std::thread::spawn(move || {
-			let _pending = poisoner.changed.lock().unwrap();
-			panic!("poison the pending wait");
-		})
-		.join()
-		.unwrap_err();
-		producer.set(Some(moq_net::bandwidth::Rate::from_bps(321))).unwrap();
-		assert_eq!(receiver.recv().await, Some(Error::Panic.code()));
-		State::lock().bandwidth.consumers.remove(id);
-	}
-}
-
 /// Reserve up to `max_bps` for a pre-encoded media track, returning a reservation handle.
 /// Close it with `moq_reservation_close`; it does not own the media handle.
 #[unsafe(no_mangle)]
@@ -603,4 +525,82 @@ pub extern "C" fn moq_rate_control_close(control: u32) -> i32 {
 			.ok_or(Error::NotFound)?;
 		Ok(())
 	})
+}
+
+#[cfg(test)]
+mod consumer_tests {
+	use super::*;
+	use crate::ffi::ReturnCode;
+
+	extern "C" fn changed(user_data: *mut std::ffi::c_void, code: i32) {
+		let sender = unsafe { Box::from_raw(user_data as *mut tokio::sync::mpsc::UnboundedSender<i32>) };
+		sender.send(code).unwrap();
+	}
+
+	#[tokio::test]
+	async fn consumer_close_releases_demand_and_completes_pending_callback() {
+		tokio::time::pause();
+		let producer = moq_net::bandwidth::Producer::new();
+		let id = State::lock()
+			.bandwidth
+			.consumers
+			.insert(Arc::new(Consumer {
+				inner: std::sync::Mutex::new(Some(producer.consume())),
+				changed: Default::default(),
+			}))
+			.unwrap();
+		let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+		let user_data = || Box::into_raw(Box::new(sender.clone())) as *mut std::ffi::c_void;
+		assert!(producer.demand().wanted());
+		assert_eq!(
+			unsafe { moq_bandwidth_consumer_changed(id.into(), user_data(), Some(changed)) },
+			0
+		);
+		producer.set(Some(moq_net::bandwidth::Rate::from_bps(321))).unwrap();
+		assert_eq!(receiver.recv().await, Some(1));
+		let (mut bps, mut present) = (0, false);
+		assert_eq!(
+			unsafe { moq_bandwidth_consumer_peek(id.into(), &mut bps, &mut present) },
+			0
+		);
+		assert!(present);
+		assert_eq!(bps, 321);
+		assert_eq!(
+			unsafe { moq_bandwidth_consumer_changed(id.into(), user_data(), Some(changed)) },
+			0
+		);
+		assert_eq!(moq_bandwidth_consumer_close(id.into()), 0);
+		assert!(
+			!producer.demand().wanted(),
+			"closing releases demand before the callback runs"
+		);
+		assert!(receiver.recv().await.unwrap() < 0);
+	}
+
+	#[tokio::test]
+	async fn changed_cleanup_panic_still_delivers_callback() {
+		let producer = moq_net::bandwidth::Producer::new();
+		let consumer = Arc::new(Consumer {
+			inner: std::sync::Mutex::new(Some(producer.consume())),
+			changed: Default::default(),
+		});
+		let id = State::lock().bandwidth.consumers.insert(consumer.clone()).unwrap();
+		let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+		let user_data = Box::into_raw(Box::new(sender)) as *mut std::ffi::c_void;
+		assert_eq!(
+			unsafe { moq_bandwidth_consumer_changed(id.into(), user_data, Some(changed)) },
+			0
+		);
+		// Poison the slot the wait clears once it completes.
+		let poisoner = consumer.clone();
+		std::thread::spawn(move || {
+			let _pending = poisoner.changed.lock().unwrap();
+			panic!("poison the pending wait");
+		})
+		.join()
+		.unwrap_err();
+		producer.set(Some(moq_net::bandwidth::Rate::from_bps(321))).unwrap();
+		assert_eq!(receiver.recv().await, Some(Error::Panic.code()));
+		State::lock().bandwidth.consumers.remove(id);
+	}
 }
