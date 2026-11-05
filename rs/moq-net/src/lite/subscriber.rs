@@ -9478,7 +9478,11 @@ impl SharedDatagrams {
 			return;
 		};
 		let Err(err) = end else {
-			self.subscriber.datagram_ends.lock().shared.push((self.key.clone(), producer));
+			self.subscriber
+				.datagram_ends
+				.lock()
+				.shared
+				.push((self.key.clone(), producer));
 			return;
 		};
 		let mut shared = self.subscriber.legacy_datagrams.lock();
