@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { authorize } from "./claims.ts";
-import { GrantSchema, RequestSchema } from "./contract.ts";
+import { encodeGrant, GrantSchema, RequestSchema } from "./contract.ts";
 import { Key } from "./key.ts";
 import { KeySet } from "./set.ts";
 
@@ -302,6 +302,6 @@ describe("Rust-serialized contract", () => {
 			peer: true,
 			upstream: true,
 		});
-		expect(JSON.stringify(grant)).toBe(RUST_GRANT);
+		expect(JSON.stringify(encodeGrant(grant))).toBe(RUST_GRANT);
 	});
 });

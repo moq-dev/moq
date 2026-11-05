@@ -225,7 +225,7 @@ impl Config {
 		deprecated.extend(config.deprecated());
 		anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
 		config.origins = Some(resolved);
-		// `Stats::report` feeds this into `moq_clock::interval`, which panics on a
+		// `Stats::report` feeds this into `kio::clock::interval`, which panics on a
 		// zero period. Reject it up front with a clear message.
 		anyhow::ensure!(!config.report().is_zero(), "--report must be greater than 0s");
 		if let Some(fanout) = &config.fanout {
@@ -427,9 +427,8 @@ fps = "24:60"
 url = "https://example.com"
 tls.insecure = true
 "#;
-		let dir = std::env::temp_dir().join("moq-bench-config-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("bench.toml");
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("bench.toml");
 		std::fs::write(&path, toml).unwrap();
 
 		// No CLI flag: TOML values survive the re-parse.
@@ -469,9 +468,8 @@ output = "stats.jsonl"
 [client]
 url = "https://example.com"
 "#;
-		let dir = std::env::temp_dir().join("moq-bench-output-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("bench.toml");
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("bench.toml");
 		std::fs::write(&path, toml).unwrap();
 
 		let args = vec![
@@ -485,7 +483,7 @@ url = "https://example.com"
 
 	#[test]
 	fn zero_report_is_rejected() {
-		// A zero report interval would panic `moq_clock::interval`; reject it early.
+		// A zero report interval would panic `kio::clock::interval`; reject it early.
 		let err = Config::parse_and_merge(["moq-bench", "--report", "0s"]).unwrap_err();
 		assert!(err.to_string().contains("report"), "unexpected error: {err}");
 	}
@@ -570,9 +568,8 @@ url = "https://example.com"
 		if !test_env::Env::default().set("MOQ_BENCH_NAME", "from-env").isolate() {
 			return;
 		}
-		let dir = std::env::temp_dir().join("moq-bench-provenance");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("bench.toml");
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("bench.toml");
 		std::fs::write(&path, "name = \"from-file\"\nconnections = 100\n").unwrap();
 
 		let config = Config::parse_and_merge([
@@ -600,9 +597,8 @@ url = "https://example.com"
 	/// Provenance has to follow that alias, or `source("connect.url")` looks unset.
 	#[test]
 	fn file_client_table_records_connect_provenance() {
-		let dir = std::env::temp_dir().join("moq-bench-client-provenance");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("bench.toml");
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("bench.toml");
 		std::fs::write(&path, "[client]\nurl = \"https://from-file.example\"\n").unwrap();
 
 		let config = Config::parse_and_merge([

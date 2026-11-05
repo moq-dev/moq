@@ -2,15 +2,16 @@
 
 ## Goal
 
-Condition: a released moq-tokio and `@moq/net` carry the session `close()`
-that withdraws this session's announcements before disconnecting. Then the
-moq.dev clients in englishm/moq-interop-runner (`builds/moq-dev-rs`,
-`builds/moq-dev-js`) bump to that release and end each publishing session
-with `close()` instead of aborting.
+The moq.dev clients in englishm/moq-interop-runner (`builds/moq-dev-rs`,
+`builds/moq-dev-js`) end each publishing session with a `close()` that
+withdraws its announcements, instead of aborting. Delete this quest once they
+use that release's `close()`.
 
-Check: read the moq-tokio and `@moq/net` changelogs for a release with the
-withdrawing `close()`. Delete this quest once the runner's moq.dev clients use that release's
-`close()`.
+## Waiting
+
+- moq-dev/moq: a released moq-tokio and `@moq/net` carry the session `close()`
+  that withdraws this session's announcements before disconnecting. Check the
+  moq-tokio and `@moq/net` changelogs for such a release.
 
 ## Plan
 

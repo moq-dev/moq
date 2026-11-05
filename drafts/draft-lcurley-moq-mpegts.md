@@ -159,6 +159,7 @@ type Program = {
 
 `transportStreamId`, `programNumber` (the DVB service id), and `pmtPid` come from the PAT.
 They are the only service-layer fields this document parses; everything else about the program stays inside the opaque `si` tables.
+A PAT that moves the PMT to another PID changes `pmtPid` in place.
 
 A publisher MUST include `program` when the broadcast came from a transport stream, and omit it otherwise.
 A publisher MUST NOT change `transportStreamId` or `programNumber` in place: the carried `si` describes that service, so a source whose PAT names another ends the broadcast.
@@ -373,7 +374,7 @@ A consumer rebuilding a transport stream:
 - MUST place each track on its recorded `pid`, and MUST assign an unused PID to a track with none.
 - MUST put the PMT on `program.pmtPid` and build the PAT and PMT from `program`. When it carries a NIT (the `si` entry for `table_id` 0x40 on PID 0x0010), the PAT MUST also list program 0 with that `network_PID`, so a receiver can find it.
 - MUST choose a PCR PID and emit PCRs on it at the program clock's repetition interval. With no media stream it MUST use an unused PID with adaptation-only PCR packets and no PMT elementary-stream entry. It MUST NOT refuse a program for lacking video.
-- MUST follow the catalog as it changes: when a track joins or leaves `tracks` or `programDescriptors` changes, it MUST emit a PMT at the next `version_number` (modulo 32) before any packet of a stream it adds, and MUST NOT emit a stream's packets after a PMT that no longer lists it. Each version it emits MUST differ from the one before, and no older version may follow a newer one. The PCR PID MUST NOT move until the stream it rides ends.
+- MUST follow the catalog as it changes: when a track joins or leaves `tracks` or `programDescriptors` changes, it MUST emit a PMT at the next `version_number` (modulo 32) before any packet of a stream it adds, and MUST NOT emit a stream's packets after a PMT that no longer lists it. Each version it emits MUST differ from the one before, and no older version may follow a newer one. The PCR PID MUST NOT move until the stream it rides ends. When `program.pmtPid` changes, it MUST emit a PAT at the next `version_number` naming the new PID, and MUST NOT emit the PMT on the new PID before that PAT or on the old one after it.
 - MUST re-emit each track's `descriptors` as its ES-level descriptors, and `programDescriptors` as the PMT's `program_info`.
 - MUST re-emit each `si` entry's sections byte-for-byte on that entry's PID, reading them from its track ({{si-track}}), at least as often as its `interval` when declared.
 - MUST packetize each `verbatim` frame as one section on its track's PID.
@@ -462,6 +463,7 @@ A broadcast demultiplexed from a DVB transport stream: video and audio described
 - An `m2ts` track unwraps PCRs from its history, clamps extrapolated object times at a forward discontinuity, and cuts a fallback group after one second. `randomAccess` covers every published group; `muxRate` follows the measured source rate.
 - A `tracks` entry is never changed in place: a stream the PMT revises continues under a new name, and one it drops leaves the section. `programDescriptors` follows the PMT; `program`'s `transportStreamId` and `programNumber` do not change.
 - A consumer rebuilding a stream follows the catalog's revisions at the next PMT `version_number`, and carries a stream only while a PMT lists it.
+- `pmtPid` follows a PAT that moves the PMT, and a consumer rebuilding a stream moves the PMT behind a PAT at the next `version_number`.
 
 ## draft-lcurley-moq-mpegts-00
 {:numbered="false"}

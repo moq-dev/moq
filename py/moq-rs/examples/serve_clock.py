@@ -13,7 +13,7 @@ Run a subscriber against it with TLS verification disabled, e.g.:
 
 import argparse
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import moq
 
@@ -31,13 +31,13 @@ async def run(bind: str, broadcast_name: str, track_name: str, host: str) -> Non
         try:
             while True:
                 now = datetime.now(timezone.utc).replace(microsecond=0)
-                timestamp = timedelta(seconds=int(now.timestamp()))
+                timestamp = moq.Timestamp(int(now.timestamp()), 1)
                 group = track.append_group()
                 group.write_frame(now.strftime("%Y-%m-%d %H:%M:").encode(), timestamp)
 
                 current_minute = now.minute
                 while now.minute == current_minute:
-                    timestamp = timedelta(seconds=int(now.timestamp()))
+                    timestamp = moq.Timestamp(int(now.timestamp()), 1)
                     group.write_frame(now.strftime("%S").encode(), timestamp)
                     await asyncio.sleep(1 - datetime.now(timezone.utc).microsecond / 1_000_000)
                     now = datetime.now(timezone.utc).replace(microsecond=0)

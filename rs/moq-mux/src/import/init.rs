@@ -22,6 +22,9 @@ pub struct AudioInit {
 	/// [`Legacy`](hang::catalog::Container::Legacy) unless selected. A video rendition carries the
 	/// same knob on its [`VideoInit::hint`].
 	pub container: hang::catalog::Container,
+	/// The maximum bitrate in bits per second, for an encoder that knows it. Supplied, it replaces
+	/// any value the init bytes give and is never estimated.
+	pub bitrate: Option<u64>,
 }
 
 impl AudioInit {
@@ -32,6 +35,7 @@ impl AudioInit {
 			data: data.into(),
 			label: None,
 			container: hang::catalog::Container::default(),
+			bitrate: None,
 		}
 	}
 }
@@ -52,6 +56,11 @@ pub struct VideoInit {
 	pub label: Option<String>,
 	/// Catalog fields the stream cannot reveal itself.
 	pub hint: VideoHint,
+	/// The track's priority, which a [`bandwidth::Allocator`](moq_net::bandwidth::Allocator)
+	/// funds in order. A rendition published above a lower one of the same source sits one
+	/// below it, so the lower one is funded first. Defaults to
+	/// [`PRIORITY.video`](hang::catalog::PRIORITY).
+	pub priority: i8,
 }
 
 impl VideoInit {
@@ -62,6 +71,7 @@ impl VideoInit {
 			data: data.into(),
 			label: None,
 			hint: VideoHint::default(),
+			priority: hang::catalog::PRIORITY.video,
 		}
 	}
 }

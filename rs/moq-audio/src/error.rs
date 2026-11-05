@@ -5,10 +5,16 @@
 #[derive(Clone, Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+	/// An audio consumer's decoder or output setup was refused before subscribing to its track.
+	#[error("audio decoder setup refused: {0}")]
+	UnsupportedConfig(String),
+
 	/// The requested configuration is outside what the codec or device supports,
 	/// e.g. a sample rate, channel count, or frame duration Opus can't encode, or a
 	/// capture format the microphone can't deliver. The
 	/// caller asked for something impossible; picking different settings fixes it.
+	/// This also covers a playout delay beyond the subscribed track's retention;
+	/// consumer decoder setup is tagged as [`Self::UnsupportedConfig`] instead.
 	#[error("unsupported audio configuration: {0}")]
 	Unsupported(String),
 
@@ -36,18 +42,24 @@ pub enum Error {
 	#[error("audio resource already in use: {0}")]
 	Busy(String),
 
+	/// The codec library failed for a reason the configuration does not explain,
+	/// such as an allocation or internal error. Other settings are no more likely
+	/// to work; the codec itself is at fault.
+	#[error("audio codec: {0}")]
+	Codec(String),
+
 	/// A packet could not be decoded: truncated, corrupt, or using a codec
 	/// feature this build doesn't implement. The stream itself may be fine, so a
 	/// consumer can log this one and read the next packet.
 	#[error("audio decode: {0}")]
 	Decode(String),
 
-	/// The input buffer was not aligned to the codec's frame size.
-	#[error("input buffer length {got} bytes does not match expected {expected}")]
+	/// The input buffer was not aligned to its sample or frame size.
+	#[error("input buffer length {got} does not match expected {expected}")]
 	Misaligned {
-		/// The buffer length received, in bytes.
+		/// The buffer length received, in the units the error's origin documents.
 		got: usize,
-		/// The buffer length required, in bytes.
+		/// The buffer length the call accepts, in the units the error's origin documents.
 		expected: usize,
 	},
 

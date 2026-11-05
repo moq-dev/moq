@@ -6,4 +6,4 @@ import 'package:moq/moq.dart';
 Moq get moq => throw UnimplementedError();
 Uint8List get bytes => throw UnimplementedError();
 Uint8List get rgba => throw UnimplementedError();
-int get pts => throw UnimplementedError();
+Timestamp get pts => throw UnimplementedError();

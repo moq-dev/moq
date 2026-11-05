@@ -34,7 +34,7 @@ struct Ended {
 /// task sent it, including one ending the session from inside a single request.
 #[derive(Default)]
 pub(crate) struct Closing {
-	/// The handles closed it by dropping or draining, so received streams are not drained.
+	/// The handles closed it by dropping or draining: a clean close, whatever the protocol reports.
 	local: std::sync::atomic::AtomicBool,
 	/// The first close this side sent: its code, and the error behind it when the closer had one.
 	sent: std::sync::Mutex<Option<(u32, Option<Error>)>>,
@@ -169,9 +169,13 @@ pub struct Session {
 	/// unused: [`bandwidth`](Self::bandwidth) mints one per call, so holding the
 	/// session doesn't keep the sampler running.
 	bandwidth: bandwidth::Allocator,
+	/// The registry whose viewers this session sends its peer as the PROBE target.
+	viewers: bandwidth::Viewers,
 	goaway: Arc<goaway::Handle>,
 	auth: auth::Handle,
 	credential: Option<auth::Credential>,
+	/// The subscriptions and fetches the protocol tasks carry.
+	work: Work,
 }
 
 impl Session {
@@ -236,6 +240,21 @@ impl Session {
 		self.recv_bandwidth.as_ref().map(bandwidth::Weak::consume)
 	}
 
+	/// Divides [`recv_bandwidth`](Self::recv_bandwidth) among the broadcasts watched over this session.
+	///
+	/// The session sends what the viewers add up to as its PROBE target, so a peer that
+	/// advertised `Increase` probes the connection up to it. Holding a viewer requests
+	/// PROBE. Clones share one registry: a
+	/// [`Client::with_viewers`](crate::Client::with_viewers) registry's when the session
+	/// was dialed with one, so their claims outlive a reconnect, like
+	/// [`allocator`](Self::allocator)'s. Viewers taken here read this session's
+	/// estimate, and report `None` once it ends or when the version has no PROBE; take
+	/// them from the reconnecting handle (`moq_tokio::Connection::viewers`) to read
+	/// each new session's.
+	pub fn viewers(&self) -> bandwidth::Viewers {
+		self.viewers.with_estimate(self.recv_bandwidth.clone())
+	}
+
 	/// Returns a snapshot of the current connection statistics.
 	///
 	/// Cheap and non-blocking: this reads the latest sample the session's
@@ -270,9 +289,9 @@ impl Session {
 	///
 	/// Waits until every stream still serving the peer (a subscription whose track
 	/// finished, a fetch, a track info reply) has written its data and FIN and the
-	/// transport acknowledged them, then closes the transport. Explicit lite-07-wip
-	/// also waits for the subscriber to receive a subscription's tail. Older Lite
-	/// versions, including the default lite-06, and IETF wait only for transport ACKs. Returns
+	/// transport acknowledged them, then closes the transport. Lite-05 and newer, including
+	/// the default lite-06, also wait for the subscriber to receive a subscription's tail.
+	/// Older Lite versions and IETF wait only for transport ACKs. Returns
 	/// [`Error::Timeout`] if that takes longer than one second, closing anyway, or
 	/// the session's terminal error if it ended some other way first. A track that
 	/// is still live never finishes, so finish or abort tracks before closing.
@@ -361,6 +380,22 @@ impl Session {
 		self.goaway.consumer()
 	}
 
+	/// Poll until the session carries no subscription or fetch, in either direction.
+	///
+	/// Ready at once while it carries none. A track request still being set up, waiting
+	/// on authorization or the track's info, counts too. Announcements and the other
+	/// control streams don't, so a session can be idle while it still serves discovery.
+	pub fn poll_idle(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.work.poll_idle(waiter)
+	}
+
+	/// Wait until the session carries no subscription or fetch, in either direction.
+	///
+	/// See [`poll_idle`](Self::poll_idle).
+	pub async fn idle(&self) {
+		kio::wait(|waiter| self.poll_idle(waiter)).await
+	}
+
 	/// The tokens this side presented and the grant they earned, plus the tokens
 	/// the peer presents. See [`auth`].
 	///
@@ -392,6 +427,10 @@ pub(super) struct Handles {
 	pub estimate: Option<kio::Producer<Estimate>>,
 	/// The reservations the session probes for.
 	pub bandwidth: bandwidth::Allocator,
+	/// The viewers whose sum the session sends as its PROBE target.
+	pub viewers: bandwidth::Viewers,
+	/// The peer's PROBE target, for a protocol that carries one (moq-lite PROBE).
+	pub peer_target: Option<kio::Consumer<bandwidth::Rate>>,
 	/// What the peer's SETUP advertised as its implementation.
 	pub peer_implementation: crate::setup::PeerImplementation,
 }
@@ -412,6 +451,8 @@ impl Session {
 			estimate,
 			stats: context,
 			bandwidth,
+			viewers,
+			peer_target,
 			peer_implementation,
 		} = handles;
 		let goaway = Arc::new(goaway);
@@ -436,7 +477,12 @@ impl Session {
 		};
 
 		// Without a sender there is nothing to hand the target to, so don't follow it.
-		let probe = session.probe().map(|probe| (probe, bandwidth.target()));
+		let probe = session.probe().map(|sender| Probing {
+			sender,
+			local: bandwidth.target(),
+			peer: peer_target,
+			targets: (bandwidth::Rate::ZERO, bandwidth::Rate::ZERO),
+		});
 
 		let close = kio::Producer::new(None);
 		let closed = kio::Producer::new(None);
@@ -445,6 +491,7 @@ impl Session {
 			sample,
 			demanded: false,
 		});
+		let work = session.work().clone();
 
 		let supervisor = Supervisor {
 			goaway: Some(goaway.deadline(&runtime)),
@@ -475,9 +522,11 @@ impl Session {
 			send_bandwidth,
 			recv_bandwidth,
 			bandwidth,
+			viewers,
 			goaway,
 			auth: auth.handle().clone(),
 			credential,
+			work,
 		};
 		let driver = crate::Driver::new(
 			runtime.clone(),
@@ -520,8 +569,8 @@ pub(crate) struct Supervisor {
 	send_bandwidth: Option<bandwidth::Producer>,
 	/// Published on change while a consumer exists; see [`Self::poll_sampler`].
 	estimate: Option<kio::Producer<Estimate>>,
-	/// The transport's sender and the target it is handed, when it has one.
-	probe: Option<(crate::transport::Probe, bandwidth::Target)>,
+	/// The transport's sender and the targets it probes up to, when it has one.
+	probe: Option<Probing>,
 	/// When the last sample was taken.
 	sampled: Option<crate::time::Instant>,
 	mode: SamplerMode,
@@ -531,6 +580,52 @@ pub(crate) struct Supervisor {
 	/// This session's side of its auth handle, closed before the end is published so a
 	/// replacement session built on the same handle never finds this one still active.
 	auth: auth::Link,
+}
+
+/// A transport's sender and the two targets it probes up to, whichever is larger.
+///
+/// The directions never mix: these are both rates this side sends at, its own
+/// reservations' and what the peer asks to receive. What this side wants to receive
+/// goes to the peer instead, as its PROBE target.
+struct Probing {
+	sender: crate::transport::Probe,
+	/// This side's reservations.
+	local: bandwidth::Target,
+	/// The peer's PROBE target, when the protocol carries one. `None` once it is gone.
+	peer: Option<kio::Consumer<bandwidth::Rate>>,
+	/// The last local and peer targets read.
+	targets: (bandwidth::Rate, bandwidth::Rate),
+}
+
+impl Probing {
+	fn poll(&mut self, waiter: &kio::Waiter) {
+		while let Poll::Ready(local) = self.local.poll_changed(waiter) {
+			self.targets.0 = local;
+		}
+		// Loop until pending, so the waiter stays armed for the next change.
+		while let Some(peer) = &self.peer {
+			let last = self.targets.1;
+			let polled = peer.poll(waiter, |rate| match **rate != last {
+				true => Poll::Ready(**rate),
+				false => Poll::Pending,
+			});
+			match polled.map(|res| res.ok()) {
+				Poll::Ready(Some(rate)) => self.targets.1 = rate,
+				// The protocol stopped reading the peer; nothing it asked for still holds.
+				Poll::Ready(None) => {
+					self.targets.1 = bandwidth::Rate::ZERO;
+					self.peer = None;
+				}
+				Poll::Pending => break,
+			}
+		}
+		// The peer's target is untrusted, but only sets how high to probe: each probe
+		// scales the current estimate and stays under congestion control.
+		let target = self.targets.0.max(self.targets.1);
+		if self.sender.target() != target {
+			self.sender.set_target(target);
+		}
+	}
 }
 
 /// A [`Session::close`] waiting for the protocol to deliver what it queued.
@@ -659,10 +754,8 @@ impl Supervisor {
 
 		self.poll_sampler(waiter);
 
-		if let Some((probe, target)) = &mut self.probe {
-			while let Poll::Ready(target) = target.poll_changed(waiter) {
-				probe.set_target(target);
-			}
+		if let Some(probe) = &mut self.probe {
+			probe.poll(waiter);
 		}
 
 		Poll::Pending
@@ -755,7 +848,7 @@ impl Supervisor {
 		// before the protocol, so the estimate a consumer reads is at most one
 		// interval old.
 		let Some(estimate) = &self.estimate else { return };
-		if estimate.poll_used(waiter).is_pending() {
+		if estimate.poll_wanted_changed(waiter, false).is_pending() {
 			return;
 		}
 		let now = self.runtime.now();
@@ -776,8 +869,8 @@ impl Supervisor {
 				SamplerMode::Idle => {
 					// Demand is a bandwidth consumer appearing or a stats read.
 					let mut demanded = match &self.send_bandwidth {
-						Some(producer) => match producer.poll_used(waiter) {
-							Poll::Ready(Ok(())) => true,
+						Some(producer) => match producer.poll_wanted_changed(waiter, false) {
+							Poll::Ready(Ok(_)) => true,
 							Poll::Ready(Err(_)) => {
 								self.send_bandwidth = None;
 								false
@@ -803,8 +896,11 @@ impl Supervisor {
 						return;
 					}
 					// The interval elapsed: pause unless someone still cares.
-					let used = self.send_bandwidth.as_ref().is_some_and(bandwidth::Producer::is_used);
-					if !used && !self.stats.read().demanded {
+					let wanted = self
+						.send_bandwidth
+						.as_ref()
+						.is_some_and(|producer| producer.demand().wanted());
+					if !wanted && !self.stats.read().demanded {
 						self.mode = SamplerMode::Idle;
 						continue;
 					}
@@ -881,6 +977,37 @@ pub(crate) struct Withdrawing(Withdrawal);
 impl Drop for Withdrawing {
 	fn drop(&mut self) {
 		self.0.0.lock().active -= 1;
+	}
+}
+
+/// The subscriptions and fetches a session carries in either direction, which
+/// [`Session::idle`] waits to reach zero.
+#[derive(Clone, Default)]
+pub(crate) struct Work(kio::Shared<usize>);
+
+impl Work {
+	/// Count one subscription or fetch until the returned guard drops.
+	pub(crate) fn start(&self) -> Working {
+		*self.0.lock() += 1;
+		Working(self.clone())
+	}
+
+	fn poll_idle(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.0
+			.poll(
+				waiter,
+				|count| if **count == 0 { Poll::Ready(()) } else { Poll::Pending },
+			)
+			.map(|_| ())
+	}
+}
+
+/// One subscription or fetch counted in [`Work`], released on drop.
+pub(crate) struct Working(Work);
+
+impl Drop for Working {
+	fn drop(&mut self) {
+		*self.0.0.lock() -= 1;
 	}
 }
 

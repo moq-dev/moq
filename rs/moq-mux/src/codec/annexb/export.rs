@@ -181,7 +181,7 @@ mod tests {
 	use bytes::Bytes;
 
 	async fn next<S: Stream>(export: &mut Export<S>) -> Bytes {
-		tokio::time::timeout(std::time::Duration::from_millis(1), export.next())
+		kio::clock::timeout(std::time::Duration::from_millis(1), export.next())
 			.await
 			.expect("a frame is ready")
 			.unwrap()
@@ -241,13 +241,13 @@ mod tests {
 		moving.point("b", None, SPS);
 		moving.b.write(marked_frame(0, 0xb1)).unwrap();
 		assert!(
-			tokio::time::timeout(std::time::Duration::from_millis(1), export.next())
+			kio::clock::timeout(std::time::Duration::from_millis(1), export.next())
 				.await
 				.is_err()
 		);
 		moving.b.write(marked_frame(30, 0xb2)).unwrap();
 		assert!(matches!(
-			tokio::time::timeout(std::time::Duration::from_millis(1), export.next())
+			kio::clock::timeout(std::time::Duration::from_millis(1), export.next())
 				.await
 				.unwrap(),
 			Err(crate::Error::RenditionRewound { .. })

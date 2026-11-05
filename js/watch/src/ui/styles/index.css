@@ -1,6 +1,7 @@
 @import "./base.css";
 @import "./player.css";
 @import "./controls.css";
+@import "@moq/ui/stats.css";
 @import "./panel.css";
 @import "./buffer-control.css";
 @import "./buffering-indicator.css";

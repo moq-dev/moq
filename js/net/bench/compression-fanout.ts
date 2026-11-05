@@ -54,3 +54,57 @@ export function fanout() {
 
 	return rows;
 }
+
+/** Sweep live group tails across publishers, readers, frame sizes, and compression. */
+export function tails() {
+	const rows: {
+		publishers: number;
+		readers: number;
+		frame_bytes: number;
+		compressed: number;
+		ns_per_frame: number;
+		size_bytes: number;
+	}[] = [];
+	for (const publishers of [1, 4]) {
+		for (const readers of [1, 4]) {
+			for (const frame_bytes of [256, 1024 * 1024]) {
+				for (const compress of [false, true]) {
+					const frames = frame_bytes === 256 ? 9000 : 96;
+					const payload = new Uint8Array(frame_bytes).fill(42);
+					const tracks = Array.from({ length: publishers }, () => new Track("tail").accept({ compress }));
+					const groups = tracks.map((track) => track.appendGroup());
+					const consumers = groups.map((group) => Array.from({ length: readers }, () => group.consume()));
+					const started = performance.now();
+					for (let index = 0; index < frames; index++) {
+						for (const [publisher, group] of groups.entries()) {
+							group.writeFrame({ payload });
+							for (const consumer of consumers[publisher]) {
+								const frame = consumer.tryReadFrameSequence();
+								if (
+									frame?.sequence !== index ||
+									frame.payload.length !== frame_bytes ||
+									frame.payload[0] !== 42
+								)
+									throw new Error("tail reader lost a frame");
+							}
+						}
+					}
+					const ns_per_frame = ((performance.now() - started) * 1e6) / (publishers * frames);
+					const size_bytes = groups.reduce((sum, group) => sum + hooks.groupCacheBytes(group), 0);
+					if (size_bytes > publishers * 32 * 1024 * 1024) throw new Error("group retained its shed front");
+					rows.push({
+						publishers,
+						readers,
+						frame_bytes,
+						compressed: Number(compress),
+						ns_per_frame,
+						size_bytes,
+					});
+					for (const track of tracks) track.finish();
+					for (const track of tracks) track.close();
+				}
+			}
+		}
+	}
+	return rows;
+}

@@ -35,6 +35,19 @@ reviewing the selected cases, rebasing the profile patch, and rerunning the full
 matrix. The build recipe adds the client's missing Folly ManualExecutor link
 dependency and patches dependency script interpreters for Nix.
 
+## Native JS FETCH ranges
+
+The same run also has Node and Bun read multi-group past ranges directly from the pinned
+Moxygen publisher on draft 18. A separate live connection advances the publisher beyond
+the requested groups, so the FETCH connection shares none of its cache. Both readers check
+the group sequences, every object and its payload, overlapping ranges, missing groups, and
+bounded EOF. First-party publishers serve only one group per FETCH and are covered by the
+interop tail matrix instead.
+
+Run only this lane with `just test ietf-conformance --fetch`. It also runs in the full
+nightly conformance recipe. The fixture pins draft 18 at SETUP because this Moxygen revision's
+HTTP/3 listener predates WebTransport subprotocol negotiation.
+
 ## Conformance profile
 
 The client runs under a relay conformance profile, applied by
@@ -52,26 +65,23 @@ The profile therefore accepts:
 
 Every other check is upstream's: forwarded object IDs, properties, payloads,
 END\_OF\_GROUP status objects and header bits, and FIRST\_OBJECT. Any other
-priority, a second END\_OF\_TRACK, or one anywhere else still fails.
+priority, a second END\_OF\_TRACK, or one anywhere else still fails. So does
+an END\_OF\_GROUP status past the last group, which the profile adds because
+upstream logs that marker's other mismatches without failing the verdict.
 
-Measured over three consecutive runs, after six earlier runs of the
-direct-origin and one-relay cells:
+Measured on the current pin:
 
 | Draft | Direct origin | One relay | Two relays |
 | --- | --- | --- | --- |
 | 18 | 29 pass | 29 pass | 29 pass |
 
-## Local Moxygen patches
-
 A cluster's edge asks the origin about a track with TRACK\_STATUS before
-subscribing.
-[`nix/moxygen-track-status.patch`](../../nix/moxygen-track-status.patch) makes
-the pinned MoQTestPublisher answer it with what its SUBSCRIBE\_OK carries,
-instead of NOT\_SUPPORTED, and stops Moxygen writing a GROUP\_ORDER parameter
-in TRACK\_STATUS\_OK, which draft 18 forbids there. Drop it at the next pin
-bump once
+subscribing. The pinned MoQTestPublisher answers it with what its
+SUBSCRIBE\_OK carries, without a GROUP\_ORDER parameter in TRACK\_STATUS\_OK,
+using the upstream implementation from
 [facebookexperimental/moxygen#264](https://github.com/facebookexperimental/moxygen/pull/264)
-is in the pinned revision.
+instead of a local patch. The build supplies CMake's dependency revisions from
+our source pins because the upstream export omits Meta's revision files.
 
 ## Known verifier flake
 

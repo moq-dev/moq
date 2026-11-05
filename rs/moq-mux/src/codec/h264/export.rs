@@ -270,7 +270,7 @@ mod tests {
 	}
 	/// The next chunk, required to be ready without another frame arriving.
 	async fn next<S: Stream>(export: &mut Export<S>) -> Bytes {
-		tokio::time::timeout(std::time::Duration::from_millis(1), export.next())
+		kio::clock::timeout(std::time::Duration::from_millis(1), export.next())
 			.await
 			.expect("a frame is ready")
 			.unwrap()
@@ -313,7 +313,7 @@ mod tests {
 
 		set_enabled(&mut live, true);
 		assert!(
-			tokio::time::timeout(std::time::Duration::from_millis(1), export.next())
+			kio::clock::timeout(std::time::Duration::from_millis(1), export.next())
 				.await
 				.is_err(),
 			"the stale group the primary stopped on is not replayed"

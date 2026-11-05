@@ -16,9 +16,8 @@ updates. Write it against the design [the model](/quest/m1/time-addressing/model
 and [lite-07](/quest/m1/time-addressing/lite07.md) quests record, including
 that a released relay fills a hole with one FETCH per ID, so a mixed-version
 deployment upgrades its relays together. Link it from
-`doc/concept/moq-lite.md` and from the
-[Identity and recovery guide](/quest/m1/identity-guide.md), which covers
-epochs and restarts.
+`doc/concept/moq-lite.md` and from the identity and recovery guide
+(`doc/concept/identity.md`), which covers epochs and restarts.
 
 ## Required
 

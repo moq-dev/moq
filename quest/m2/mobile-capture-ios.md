@@ -16,8 +16,12 @@ capture wiring plus the lifecycle iOS imposes and macOS does not.
 That lifecycle is the work. Camera and screen access are permission-gated and
 revocable, an app is suspended and resumed on foreground changes, and
 ReplayKit's broadcast extension runs in a separate process with a hard memory
-cap. Capture has to open on demand, survive being interrupted, and release the
-device when it stops, rather than assuming a session it opened stays valid.
+cap. Capture has to open when enabled, survive being interrupted, and release
+the device when disabled, rather than assuming a session it opened stays valid.
+Like the desktop backends it captures and encodes while enabled whatever the
+subscriber demand, so a late subscriber can fetch the recent past, and
+`encode::Capture::on_demand` stays the opt-in that opens it only while someone
+watches.
 
 Reuse the `capture::Source` shape the other platforms use rather than growing
 an iOS-specific entry point, so device enumeration and selection behave the

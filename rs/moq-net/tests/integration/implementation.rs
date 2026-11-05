@@ -34,7 +34,7 @@ async fn exchange(version: Version, client: Option<&str>, server: Option<&str>) 
 	)
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn each_side_reads_the_others_implementation() {
 	for (name, carried) in VERSIONS {
 		let version: Version = name.parse().unwrap();
@@ -53,7 +53,7 @@ async fn each_side_reads_the_others_implementation() {
 }
 
 /// Unconfigured, each side names this crate; configured empty, it advertises nothing.
-#[moq_clock::test]
+#[kio::test]
 async fn the_default_names_the_crate_and_empty_omits_it() {
 	for name in ["moq-lite-07-wip", "moq-transport-22"] {
 		let version: Version = name.parse().unwrap();
@@ -64,7 +64,7 @@ async fn the_default_names_the_crate_and_empty_omits_it() {
 }
 
 /// A SETUP too large to encode fails the dial instead of leaving the peer waiting for it.
-#[moq_clock::test]
+#[kio::test]
 async fn an_oversized_implementation_fails_the_dial() {
 	let version: Version = "moq-lite-06".parse().unwrap();
 	let mut transport = moq_net::transport::memory::Config::default();
@@ -80,7 +80,7 @@ async fn an_oversized_implementation_fails_the_dial() {
 
 /// A session that ends before the peer's SETUP resolves `None`, even while the caller still
 /// holds the finished driver.
-#[moq_clock::test]
+#[kio::test]
 async fn the_wait_ends_with_the_session() {
 	let version: Version = "moq-lite-06".parse().unwrap();
 	let mut transport = moq_net::transport::memory::Config::default();
@@ -95,11 +95,11 @@ async fn the_wait_ends_with_the_session() {
 	session.abort(moq_net::Error::Cancel);
 
 	// The driver outlives its result, as one kept in a struct or a join handle would.
-	drop(moq_clock::sim::spawn(moq_clock::drive(move |now, waiter| {
+	drop(kio::clock::sim::spawn(kio::clock::drive(move |now, waiter| {
 		Ok::<_, std::convert::Infallible>(driver.poll(now, waiter).unwrap_or(None))
 	})));
 
-	let seen = moq_clock::timeout(std::time::Duration::from_secs(5), session.peer_implementation())
+	let seen = kio::clock::timeout(std::time::Duration::from_secs(5), session.peer_implementation())
 		.await
 		.expect("the wait ends with the session");
 	assert_eq!(seen, None);

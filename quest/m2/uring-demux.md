@@ -23,10 +23,11 @@ STUN responder class either. An ICE Binding request is WebRTC traffic and
 follows that class.
 
 Each worker's endpoint receives a batch and feeds every segment straight to
-the QUIC endpoint. The classifier and flow table from the
-[UDP demux](/quest/m2/p2p/udp-demux.md), split there into a
-runtime-agnostic piece, run first on each segment; only QUIC continues into
-the endpoint. The worker is thread-per-core and `!Send`, while the consumers
+the QUIC endpoint. The classifier, pin table, per-source `Queue`, and
+`Counters` in `moq_sock::demux` run first on each segment, as the tokio
+listener's socket does inline in its receive; only QUIC continues into the
+endpoint. Until this lands, `moq_relay::Relay::webrtc` refuses an io_uring
+relay. The worker is thread-per-core and `!Send`, while the consumers
 of the other classes (`moq-rtc`, `moq-srt`) run on
 tokio, so non-QUIC datagrams cross to them on a `Send` channel, and their
 replies come back through a remote-send path into the owning worker's ring,
@@ -49,7 +50,6 @@ off on the ring, from shard steering.
 
 ## Required
 
-- [UDP demux](/quest/m2/p2p/udp-demux.md) - the classifier and flow table this runs on the ring
 - [WebRTC on the shared socket](/quest/m2/one-port/rtc-feed.md) - the fed RTC socket and transmit contract the ring integrates
 - [SRT on the shared socket](/quest/m2/one-port/srt-demux.md) - the SRT state machines fed through the shared demux
 

@@ -33,7 +33,7 @@ fn err(message: impl std::fmt::Display) -> Error {
 
 /// Alias one DMA-BUF allocation as the sampled Vulkan textures of a frame.
 pub(super) fn import(device: &wgpu::Device, buffer: &DmaBuf) -> Result<Source, Error> {
-	if !supports(device) {
+	if !supports(device.features()) {
 		return Err(err(
 			"the wgpu device cannot import DMA-BUFs: open it on Vulkan with Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF, or decode or capture with render::output(&device)",
 		));
@@ -75,12 +75,10 @@ pub(super) fn import(device: &wgpu::Device, buffer: &DmaBuf) -> Result<Source, E
 	Ok(source)
 }
 
-/// Whether [`import`] runs on `device` at all.
-pub(super) fn supports(device: &wgpu::Device) -> bool {
+/// Whether [`import`] runs on a device opened with `features` at all.
+pub(super) fn supports(features: wgpu::Features) -> bool {
 	// The feature is only offered on Vulkan, so it also proves the backend.
-	device
-		.features()
-		.contains(wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF)
+	features.contains(wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF)
 }
 
 /// Whether [`import`] takes a buffer of `format`.

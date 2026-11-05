@@ -21,10 +21,9 @@ behind the `mediacodec` feature and the encode seam.
 - Multichannel is device-dependent; probe the encoder's capabilities at open
   and refuse a layout it does not list.
 - Round-trip regression through the MediaCodec decoder; runtime proof on a
-  device or emulator.
+  device or emulator through `just rs android-test`, as in the decode quest.
 
 ## Required
 
-- [MediaCodec on an emulator](/quest/m2/android-mediacodec-ci.md) - the emulator lane this runtime proof runs in
 - [MediaCodec decode](/quest/m2/audio-decode-mediacodec.md) - the round-trip regression decodes through it
 - [AudioToolbox encode](/quest/m2/audio-encode-audiotoolbox.md) - owns the shared flush and zero-or-more packet encoder contract

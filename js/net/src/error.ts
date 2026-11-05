@@ -242,10 +242,10 @@ export class FrameTooLarge extends Stream {
 }
 
 /**
- * A write grew the group past its cache budget, so the group is aborted.
+ * A peer could not retain a group and aborted it.
  *
- * Raised locally by a frame write, and decoded from a moq-lite peer's `GROUP_TOO_LARGE`
- * reset. Mirrors the Rust `Error::GroupTooLarge`.
+ * Decoded from a moq-lite peer's `GROUP_TOO_LARGE` reset. Local groups shed their front
+ * instead of aborting when their retained tail exceeds its budget.
  *
  * @public
  */
@@ -403,18 +403,6 @@ function localStreamCode(err: unknown): StreamCode {
 	const source = typeof err === "object" && err !== null ? (err as { source?: unknown }).source : undefined;
 	if (source === "session") return StreamCode.Unroutable;
 	return StreamCode.Internal;
-}
-
-/**
- * The transport refused a request stream or failed to grant stream credit before its deadline.
- *
- * This local failure is terminal and has no wire code. The request is not retried.
- */
-export class NoStreamCredit extends Error {
-	constructor(options?: ErrorOptions) {
-		super("no stream credit", options);
-		this.name = "NoStreamCredit";
-	}
 }
 
 /**

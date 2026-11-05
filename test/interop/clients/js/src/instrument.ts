@@ -108,3 +108,57 @@ if (RealWorker) {
 		}
 	};
 }
+
+// ── the speakers ────────────────────────────────────────────────────────────
+
+// One analyser per context, fed by everything connected to that context's destination: what the
+// speakers would play. The player's volume and mute live in a private GainNode between its graph
+// root and the destination, so only a tap at the destination itself can see them.
+const speakers = new WeakMap<BaseAudioContext, AnalyserNode>();
+
+/** Samples per speaker reading: the same ~43ms window the probe's tone analyser reads. */
+const SPEAKER_WINDOW = 2048;
+
+/** An analyser carrying the sum of everything connected to `context.destination`, or undefined before anything was. */
+export function speaker(context: BaseAudioContext): AnalyserNode | undefined {
+	return speakers.get(context);
+}
+
+const RealNode = globalThis.AudioNode;
+if (RealNode) {
+	// Untyped, since both are overloaded on AudioNode and AudioParam targets.
+	type Untyped = (this: AudioNode, ...args: unknown[]) => unknown;
+	const connect = RealNode.prototype.connect as Untyped;
+	const disconnect = RealNode.prototype.disconnect as Untyped;
+
+	const tap = (context: BaseAudioContext) => {
+		let analyser = speakers.get(context);
+		if (!analyser) {
+			analyser = new AnalyserNode(context, { fftSize: SPEAKER_WINDOW, smoothingTimeConstant: 0 });
+			speakers.set(context, analyser);
+		}
+		return analyser;
+	};
+
+	// Mirror each connection to a destination onto the tap. A full disconnect() drops the mirror
+	// with every other output; only a disconnect aimed at the destination needs mirroring back.
+	RealNode.prototype.connect = function (this: AudioNode, ...args: unknown[]) {
+		const result = connect.apply(this, args);
+		if (args[0] instanceof AudioDestinationNode) connect.call(this, tap(this.context), args[1] ?? 0);
+		return result;
+	} as typeof RealNode.prototype.connect;
+
+	RealNode.prototype.disconnect = function (this: AudioNode, ...args: unknown[]) {
+		disconnect.apply(this, args);
+		if (args[0] instanceof AudioDestinationNode) {
+			const analyser = speakers.get(this.context);
+			if (analyser) {
+				try {
+					disconnect.call(this, analyser);
+				} catch {
+					// Never mirrored, so there is nothing to drop.
+				}
+			}
+		}
+	} as typeof RealNode.prototype.disconnect;
+}

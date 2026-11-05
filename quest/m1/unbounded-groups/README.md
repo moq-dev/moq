@@ -32,7 +32,7 @@ Decided 2026-10-28 (maintainer, after an audit of the plan and
   shedding on pool debt alone let one live group grow without bound once the
   group caps went. The 32 MB counts a group copy's live tail (its
   `kio::log` run), and nothing is kept below it: no head, no refilled runs.
-- With [fastest-reader pacing](/quest/m1/unbounded-groups/fastest-reader.md),
+- With [fastest-reader pacing](https://github.com/moq-dev/moq/pull/7664),
   the 32 MB is one budget split between "ahead" (bytes the fastest reader has
   not read, bounded by pacing) and "behind" (bytes it has read, kept for
   slower readers). Shedding never passes the fastest reader, and the ahead
@@ -76,10 +76,11 @@ superseded 2026-10-28 by flights.) When nothing serves a hole, the reader
 gets `Evicted` and a joiner falls back to `Info::refresh`. The live
 edge is paced by its fastest reader (decided 2026-10-25, superseding
 2026-10-24's "never paced by readers"; see
-[Fastest-reader pacing](/quest/m1/unbounded-groups/fastest-reader.md)), so a
+[Fastest-reader pacing](https://github.com/moq-dev/moq/pull/7664)), so a
 byte stream over MoQ loses nothing to a reader that keeps up. Groups are bounded by bytes, with each
-frame's slot charged to the pool. Details are in
-[Front eviction](/quest/m1/unbounded-groups/front-eviction.md).
+frame's slot charged to the pool and the 32 MB tail. Front eviction landed
+in [moq-dev/moq#6993](https://github.com/moq-dev/moq/pull/6993)
+(`GroupState::trim` and `shed` in `rs/moq-net/src/model/group.rs`).
 
 Decided 2026-10-16 (maintainer interview):
 
@@ -113,6 +114,12 @@ Decided 2026-10-16 (maintainer interview):
   advancing the base (`rs/kio/src/log.rs`). A ring buffer was rejected: an
   uncapped group has no size to give it. Numbers are in #6782 and the
   [kio contention epic](/quest/m2/perf/kio-channel-contention/README.md).
+  Accepted 2026-11-03 (maintainer), from the lock profiles in
+  [moq-dev/moq#7742](https://github.com/moq-dev/moq/pull/7742): no
+  lock-contention regression attributable to #6782. The pre-epoch run on
+  `nixos2` shows the same `GroupState` wait stack (709 µs) as the epoch run on
+  `desktop` (599 µs). The figures come from different hosts and are not
+  comparable; no quiet same-host repeat was completed.
 - Readers pin nothing: reads refresh recency as today. Within a group,
   victims go front to back.
 - Whole cold groups are still evicted first. A group loses part of itself
@@ -141,14 +148,14 @@ origin can regenerate data from disk or an archive.
 This epic owns the end-to-end test: a relay chain carries one live group well
 past the old caps. A late joiner gets its head through a flight and hands
 over to the live copy, and a live reader keeps the tail, over lite and
-moq-transport, with memory held near 32 MB per copy.
+moq-transport, with memory held near 32 MB per copy. It also carries a long
+compressed group through a small cache pool with a plain reader on a legacy
+wire, which [moq-dev/moq#6993](https://github.com/moq-dev/moq/pull/6993)
+covered only at the model layer (maintainer, 2026-10-30).
 
 ## Required
 
-- [Front eviction](/quest/m1/unbounded-groups/front-eviction.md) - groups shed whole frames from their front past a 32 MB tail or under pool debt; the group caps go
-- [Fastest-reader pacing](/quest/m1/unbounded-groups/fastest-reader.md) - every hop buffers at most a window past its fastest reader and pushes back through QUIC flow control
 - [Flights](/quest/m1/unbounded-groups/flights.md) - a reader at a shed frame replays through a separate paced copy that hands over to the copy ahead
 - [Byte holes](/quest/m1/unbounded-groups/byte-holes.md) - segments inside a frame shed like front frames and flights start at `(frame, byte)` on the current lite wip; the frame cap goes
-- [JS unbounded groups](/quest/m1/unbounded-groups/js.md) - `@moq/net` drops its caps and matches front eviction
-- [JS byte holes](/quest/m1/unbounded-groups/js-byte-holes.md) - `@moq/net` reads a huge frame as chunks and mirrors the byte-offset wire
-- [Log lock profile](/quest/m1/unbounded-groups/log-lock-profile.md) - a lock profile on a perf host confirms the epoch-based `kio::log` cut `GroupState` contention
+- [JS byte holes](/quest/m1/unbounded-groups/js-byte-holes.md) - `@moq/net` mirrors the byte-offset wire and continues a frame cut off mid-way
+- [Compressed frames have no size cap and inflate as a bounded stream](/quest/m1/unbounded-groups/compressed-stream.md) - A compressed frame of any size publishes and is received in Rust and `@moq/net`, like a plain one

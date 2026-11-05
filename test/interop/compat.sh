@@ -70,7 +70,9 @@ release_binary moq-cli moq
 release_binary moq-relay moq-relay
 cargo build --locked -p moq-cli -p moq-relay
 TARGET=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys;print(json.load(sys.stdin)["target_directory"])')
-CURRENT="$TARGET/debug/moq"
+harness_stage current/moq "$TARGET/debug/moq"
+harness_stage current/moq-relay "$TARGET/debug/moq-relay"
+CURRENT="$HARNESS_RUN/current/moq"
 RELEASED="$HARNESS_RUN/released/bin/moq"
 "$CURRENT" --help >"$HARNESS_RUN/current-help"
 "$RELEASED" --help >"$HARNESS_RUN/released-help"
@@ -130,13 +132,14 @@ hang = $dependency
 bytes = "1"
 TOML
     cargo build --manifest-path "$HARNESS_RUN/hang-$source/Cargo.toml" --target-dir "$TARGET/compat-hang-$source"
-    "$TARGET/compat-hang-$source/debug/compat-container" encode "$HARNESS_RUN/$source.catalog" "$HARNESS_RUN/$source.frame"
+    harness_stage "hang-$source/compat-container" "$TARGET/compat-hang-$source/debug/compat-container"
+    "$HARNESS_RUN/hang-$source/compat-container" encode "$HARNESS_RUN/$source.catalog" "$HARNESS_RUN/$source.frame"
 done
 bun "$DIR/compat/client.ts" encode "$HARNESS_RUN/js-current.catalog" "$HARNESS_RUN/js-current.frame"
 bun "$HARNESS_RUN/js/client.ts" encode "$HARNESS_RUN/js-released.catalog" "$HARNESS_RUN/js-released.frame"
 for source in current released js-current js-released; do
     for consumer in current released; do
-        "$TARGET/compat-hang-$consumer/debug/compat-container" decode "$HARNESS_RUN/$source.catalog" "$HARNESS_RUN/$source.frame"
+        "$HARNESS_RUN/hang-$consumer/compat-container" decode "$HARNESS_RUN/$source.catalog" "$HARNESS_RUN/$source.frame"
     done
     bun "$DIR/compat/client.ts" decode "$HARNESS_RUN/$source.catalog" "$HARNESS_RUN/$source.frame"
     bun "$HARNESS_RUN/js/client.ts" decode "$HARNESS_RUN/$source.catalog" "$HARNESS_RUN/$source.frame"
@@ -193,12 +196,19 @@ fetch() {
         bash "$DIR/interop.sh" --publishers rust --subscribers rust
 }
 
+# The released CLI's fMP4 import restamps media on its arrival clock, so its tone
+# does not start at timestamp zero and its decodes cannot be held to the tone's
+# phase (see phase_checked in interop.sh). Its readers' phase is still checked.
+live_publisher() {
+    [[ "$1" == "$RELEASED" ]] && echo 1 || echo 0
+}
+
 # Same-source cells keep exercising the compat reader while version-pairing
 # exceptions skip cross-source media. A control always uses its own binary,
 # relay, and package set, and can never be covered by a planned break.
 while read -r source version <&3; do
     case "$source" in
-        current) relay="$TARGET/debug/moq-relay" pub="$CURRENT" js="$DIR/compat" ;;
+        current) relay="$HARNESS_RUN/current/moq-relay" pub="$CURRENT" js="$DIR/compat" ;;
         released) relay="$HARNESS_RUN/released/bin/moq-relay" pub="$RELEASED" js="$HARNESS_RUN/js" ;;
         *)
             echo "unknown media control source: $source" >&2
@@ -206,7 +216,7 @@ while read -r source version <&3; do
             ;;
     esac
     cell media-control "$version" "$source" "$source" env RELAY_BIN="$relay" CLI_BIN="$pub" INTEROP_SUB_MOQ="$pub" INTEROP_VERSION="$version" \
-        INTEROP_COMPAT_CLIENT="$js" INTEROP_DECODE=1 bash "$DIR/interop.sh" --subscribers rust,js-native-node
+        INTEROP_COMPAT_CLIENT="$js" INTEROP_DECODE=1 INTEROP_PUB_LIVE="$(live_publisher "$pub")" bash "$DIR/interop.sh" --subscribers rust,js-native-node
 done 3<"$HARNESS_RUN/controls"
 
 # Existing media drivers: current publisher -> released clients and the reverse,
@@ -226,15 +236,15 @@ while read -r version <&3; do
     released_relay="$HARNESS_RUN/released/bin/moq-relay"
     # Each moq-net library states whether the draft has FETCH, so a FETCH cell that
     # fails is a failure, never a skip. Dropping a released capability fails too.
-    current_fetch=$("$TARGET/compat-hang-current/debug/compat-container" fetch-supported "$version")
-    released_fetch=$("$TARGET/compat-hang-released/debug/compat-container" fetch-supported "$version")
+    current_fetch=$("$HARNESS_RUN/hang-current/compat-container" fetch-supported "$version")
+    released_fetch=$("$HARNESS_RUN/hang-released/compat-container" fetch-supported "$version")
     cell fetch-capability "$version" both both fetch_kept "$released_fetch" "$current_fetch"
     if [[ "$released_fetch" != true || "$current_fetch" != true ]]; then
         echo "SKIP $version fetch and js-publish: no FETCH on this draft in both libraries"
         skipped=$((skipped + 8))
     fi
     for relay_source in current released; do
-        if [[ "$relay_source" == current ]]; then relay="$TARGET/debug/moq-relay"; else relay="$released_relay"; fi
+        if [[ "$relay_source" == current ]]; then relay="$HARNESS_RUN/current/moq-relay"; else relay="$released_relay"; fi
         for source in current released; do
             # Each side's compat client, with its version-pinning transport beside it.
             if [[ "$source" == current ]]; then
@@ -245,7 +255,7 @@ while read -r version <&3; do
             # One cell per reader, so a planned break in one reader's release keeps the other running.
             for reader in rust js-native-node; do
                 cell "media-$reader" "$version" "$relay_source" "$source" env RELAY_BIN="$relay" CLI_BIN="$pub" INTEROP_SUB_MOQ="$sub" INTEROP_VERSION="$version" \
-                    INTEROP_COMPAT_CLIENT="$other_js" INTEROP_DECODE=1 bash "$DIR/interop.sh" --subscribers "$reader"
+                    INTEROP_COMPAT_CLIENT="$other_js" INTEROP_DECODE=1 INTEROP_PUB_LIVE="$(live_publisher "$pub")" bash "$DIR/interop.sh" --subscribers "$reader"
             done
             [[ "$released_fetch" == true && "$current_fetch" == true ]] || continue
             # Drive JS publication from actual subscriber demand: the publisher's own JS
@@ -261,13 +271,13 @@ while read -r version <&3; do
     done
 done 3<"$HARNESS_RUN/shared"
 echo "session cells: $ran ran, $skipped skipped"
+if ((${#failed[@]})); then
+    printf 'FAIL %s\n' "${failed[@]}" >&2
+    exit 1
+fi
 if [[ -n "$remeasure" ]]; then
     bun "$DIR/compat/resolve.ts" remeasure "$DIR/compat/planned-breaks.json" "$HARNESS_RUN/current-help" "$HARNESS_RUN/released-help" "$HARNESS_RUN/versions.json" "$HARNESS_RUN/measured"
     bun x biome format --write "$DIR/compat/planned-breaks.json"
     echo "rewrote compat/planned-breaks.json: review the diff and refresh each reason"
-fi
-if ((${#failed[@]})); then
-    printf 'FAIL %s\n' "${failed[@]}" >&2
-    exit 1
 fi
 echo "wire compatibility: token, session, catalog, and container lanes passed"

@@ -24,7 +24,7 @@ fn produce_origin(hop: u64) -> origin::Producer {
 	producer
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn an_empty_group_arrives_empty() {
 	for version in VERSIONS {
 		let publisher = produce_origin(1);
@@ -36,24 +36,24 @@ async fn an_empty_group_arrives_empty() {
 		broadcast.announce(Default::default()).unwrap();
 
 		let consumer = subscriber.consume();
-		let remote = moq_clock::timeout(TIMEOUT, consumer.follow("room", None).unwrap().available())
+		let remote = kio::clock::timeout(TIMEOUT, consumer.follow("room", None).unwrap().available())
 			.await
 			.expect("resolve timeout")
 			.expect("broadcast resolves");
-		let mut sub = moq_clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(None))
+		let mut sub = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(None))
 			.await
 			.expect("subscribe timeout")
 			.expect("subscribe");
 		subscribed(&track).await;
 
 		track.append_group().unwrap().finish().unwrap();
-		let mut empty = moq_clock::timeout(TIMEOUT, sub.recv_group())
+		let mut empty = kio::clock::timeout(TIMEOUT, sub.recv_group())
 			.await
 			.unwrap_or_else(|_| panic!("{version}: the empty group was dropped"))
 			.unwrap()
 			.expect("a group");
 		assert_eq!(empty.sequence, 0, "{version}");
-		let frame = moq_clock::timeout(TIMEOUT, empty.read_frame())
+		let frame = kio::clock::timeout(TIMEOUT, empty.read_frame())
 			.await
 			.expect("frame timeout")
 			.unwrap();
@@ -62,7 +62,7 @@ async fn an_empty_group_arrives_empty() {
 		let mut group = track.append_group().unwrap();
 		group.write_frame(Timestamp::ZERO, &b"ok"[..]).unwrap();
 		group.finish().unwrap();
-		let mut next = moq_clock::timeout(TIMEOUT, sub.recv_group())
+		let mut next = kio::clock::timeout(TIMEOUT, sub.recv_group())
 			.await
 			.expect("group timeout")
 			.unwrap()

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
+import { yieldNow } from "@moq/clock";
 import { Effect } from "@moq/signals";
 import { unlock } from "./gesture";
 
@@ -20,7 +21,7 @@ class MockContext extends EventTarget {
 }
 
 // Drain microtasks so scheduled effect (re)runs settle.
-const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+const flush = () => yieldNow();
 
 let originalDocument: typeof globalThis.document;
 

@@ -2,7 +2,7 @@ import { Milli } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import { Error as NetError } from "@moq/net";
-import { Effect, type Getter, getter, type Inputs, type Readonlys } from "@moq/signals";
+import { Derived, Effect, type Getter, getter, type Inputs, type Readonlys } from "@moq/signals";
 import type { VTTCue, VTTRegion } from "media-captions";
 import { subscribeMedia } from "../media";
 import type { Sync } from "../sync";
@@ -254,7 +254,7 @@ export class Renderer {
 		const [_enabled, container, track, config, broadcast] = values;
 
 		// Honor a per-rendition `broadcast` override: subscribe on the resolved source broadcast.
-		const active = broadcast.relativeBroadcast(effect, config.broadcast, config.epoch);
+		const active = broadcast.relativeBroadcast(effect, config.broadcast, config.instance);
 		if (!active) return;
 
 		// A new track gets its own chance to complain about its clock.
@@ -301,7 +301,7 @@ export class Renderer {
 				broadcast: active,
 				track: Catalog.track(track, config),
 				priority: Catalog.PRIORITY.text,
-				maxDelay: this.sync.out.maxDelay,
+				delay: new Derived([this.sync.out.delay, this.sync.out.maxDelay], (min, max) => ({ min, max })),
 			});
 			if (!sub) return;
 			const store: CueStore = { cues: [], clears: [] };

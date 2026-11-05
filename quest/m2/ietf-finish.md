@@ -17,8 +17,8 @@ Observed on 2026-10-22 with `just test interop --finish --all --versions ietf`
 - Draft 18: late readers see the finished catalog end empty, a short
   tail, or a refused joining FETCH (`publish done: internal error`). This is
   the pre-draft-22 join after a finish, which
-  [join after a quick finish](/quest/m2/ietf-join-after-finish.md) fixes; rerun
-  these drafts once it lands.
+  [moq-dev/moq#7306](https://github.com/moq-dev/moq/pull/7306) fixes for Rust publishers; rerun
+  these drafts.
 - Draft 22: several readers time out after the withdrawal (C and C++
   on the health broadcast), JS readers see `publish done: internal error`, and
   native JS refuses a "malformed request stream message" from the relay.
@@ -29,7 +29,3 @@ every reader's acknowledgement, so judge each cell from its reader's log.
 
 Public API: none. Wire: none expected; any fix that changes framing updates
 its draft.
-
-## Required
-
-- [Join after a quick finish](/quest/m2/ietf-join-after-finish.md) - the pre-draft-22 half of this, without which draft 18 cannot pass

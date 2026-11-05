@@ -4,17 +4,17 @@
 //! same peer re-announces every route while the first one is still open, as a GOAWAY
 //! drain does.
 //!
-//! Without an epoch the re-announced routes are new instances, so announce consumers
-//! get a `Restart`. A handle resolved before the replacement keeps serving new requests
-//! until that `Restart` is deliverable, so its holder can follow the `Restart` instead
-//! of failing `Unroutable`. With an epoch the replacement continues the instance: no
-//! `Restart`, and the old handle keeps working.
+//! lite-07 carries the publisher's instance, so the replacement continues the stream: no
+//! `Restart`, and the old handle keeps working. Older wires carry none, so the receiving
+//! session mints one per announcement and the re-announced routes are new streams:
+//! announce consumers get a `Restart` at once, and the old handle refuses new requests
+//! from then on, so its holder follows the `Restart` instead.
 
 use crate::support;
 
 use std::time::Duration;
 
-use moq_net::{Epoch, Error, Hop, Timestamp, Version, announce, broadcast, origin, track};
+use moq_net::{Error, Hop, Instance, Timestamp, Version, announce, broadcast, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -40,7 +40,7 @@ async fn link(version: Version, from: &origin::Producer, to: &origin::Producer) 
 
 /// The next announce event, failing on a hang.
 async fn next_event(announced: &mut announce::Consumer) -> announce::Event {
-	moq_clock::timeout(Duration::from_secs(10), announced.next())
+	kio::clock::timeout(Duration::from_secs(10), announced.next())
 		.await
 		.expect("announce hung")
 		.expect("announce ended")
@@ -55,7 +55,7 @@ fn write(track: &track::Producer, tag: &str) {
 
 /// The next frame a subscription delivers, as text.
 async fn read(subscription: &mut track::Subscriber) -> String {
-	let mut group = moq_clock::timeout(Duration::from_secs(10), subscription.recv_group())
+	let mut group = kio::clock::timeout(Duration::from_secs(10), subscription.recv_group())
 		.await
 		.expect("subscription hung")
 		.unwrap()
@@ -65,24 +65,25 @@ async fn read(subscription: &mut track::Subscriber) -> String {
 }
 
 async fn subscribe(broadcast: &broadcast::Consumer, name: &str) -> Result<track::Subscriber, Error> {
-	moq_clock::timeout(Duration::from_secs(10), broadcast.track(name)?.subscribe(None))
+	kio::clock::timeout(Duration::from_secs(10), broadcast.track(name)?.subscribe(None))
 		.await
 		.expect("subscribe hung")
 }
 
-/// Shorter than the default update hold, so the replacement's `Restart` is still held.
+/// Shorter than the default update hold.
 const WITHIN_HOLD: Duration = Duration::from_millis(10);
 
 /// Longer than the default update hold.
 const PAST_HOLD: Duration = Duration::from_millis(500);
 
-async fn replace(version: &str, epoch: Option<Epoch>) {
+async fn replace(version: &str, instance: Option<Instance>) {
+	let carries = version == "moq-lite-07-wip";
 	let version: Version = version.parse().unwrap();
 	let publisher = produce_origin(1);
 	let viewer = produce_origin(3);
 
 	let mut route = origin::Route::default();
-	route.epoch = epoch.clone();
+	route.instance = instance.clone();
 	let cam = publisher.publish("cam", route).unwrap();
 	let video = cam.create_track("video", timed()).unwrap();
 	let audio = cam.create_track("audio", timed()).unwrap();
@@ -91,7 +92,14 @@ async fn replace(version: &str, epoch: Option<Epoch>) {
 	let _first = link(version, &publisher, &viewer).await;
 	let mut announced = viewer.consume().announced();
 	match next_event(&mut announced).await {
-		announce::Event::Start(announce) => assert_eq!(announce.prefix.as_str(), "cam"),
+		announce::Event::Start(announce) => {
+			assert_eq!(announce.prefix.as_str(), "cam");
+			let carried = announce.route.instance.as_ref().expect("every route has an instance");
+			assert_eq!(carried.is_minted(), !carries, "{version}: minted {carried}");
+			if carries && let Some(instance) = &instance {
+				assert_eq!(carried, instance, "{version}: carried instance");
+			}
+		}
 		other => panic!("{version}: expected the broadcast, got {other:?}"),
 	}
 
@@ -103,38 +111,36 @@ async fn replace(version: &str, epoch: Option<Epoch>) {
 	// The replacement: the same peer re-announces everything over a second session,
 	// while the first one is still open.
 	let _second = link(version, &publisher, &viewer).await;
-	moq_clock::sleep(WITHIN_HOLD).await;
+	kio::clock::sleep(WITHIN_HOLD).await;
 
-	// A request through the old handle right after the replacement is still served.
-	let mut late = subscribe(&old, "audio")
-		.await
-		.unwrap_or_else(|err| panic!("{version}: the old handle refused a request before any restart: {err}"));
-	write(&audio, "audio:0");
-	assert_eq!(read(&mut late).await, "audio:0", "{version}");
-
-	if epoch.is_some() {
-		// The epoch continues across the replacement: nothing to restart, and the old
+	if carries {
+		// The instance continues across the replacement: nothing to restart, and the old
 		// handle keeps serving.
-		if let Ok(event) = moq_clock::timeout(PAST_HOLD, announced.next()).await {
-			panic!("{version}: an epoch route restarted on replacement: {event:?}");
+		if let Ok(event) = kio::clock::timeout(PAST_HOLD, announced.next()).await {
+			panic!("{version}: the stream restarted on replacement: {event:?}");
 		}
 		let mut later = subscribe(&old, "meta").await.unwrap();
 		write(&meta, "meta:0");
 		assert_eq!(read(&mut later).await, "meta:0", "{version}");
+		let mut late = subscribe(&old, "audio").await.unwrap();
+		write(&audio, "audio:0");
+		assert_eq!(read(&mut late).await, "audio:0", "{version}");
 		return;
 	}
 
-	// Without an epoch the replacement is a restart: once the hold releases it, the old
-	// handle refuses new requests, and the restart is already there to follow.
-	moq_clock::sleep(PAST_HOLD).await;
+	// A minted instance makes the replacement a restart, delivered at once, and the old
+	// handle refuses new requests from then on.
+	match announced.try_next() {
+		Some(announce::Event::Restart(announce)) => assert_eq!(announce.prefix.as_str(), "cam"),
+		other => panic!("{version}: expected the restart, got {other:?}"),
+	}
 	let Err(err) = subscribe(&old, "meta").await else {
 		panic!("{version}: a retired handle served a request");
 	};
 	assert!(matches!(err, Error::Unroutable), "{version}: {err}");
-	match announced.try_next() {
-		Some(announce::Event::Restart(announce)) => assert_eq!(announce.prefix.as_str(), "cam"),
-		other => panic!("{version}: retired before the restart was deliverable, got {other:?}"),
-	}
+	// The subscription already on it keeps flowing.
+	write(&video, "video:1");
+	assert_eq!(read(&mut sticky).await, "video:1", "{version}");
 
 	// Following the restart resolves the path afresh, and the new handle serves.
 	let fresh = viewer.consume().request("cam", None).await.unwrap();
@@ -144,59 +150,40 @@ async fn replace(version: &str, epoch: Option<Epoch>) {
 	assert_eq!(read(&mut followed).await, "meta:0", "{version}");
 }
 
-/// The epoch a replaced route carries on both sessions.
-fn epoch() -> Epoch {
-	"01900000-0000-7000-8000-000000000001".parse().unwrap()
-}
-
-#[moq_clock::test]
-async fn epochless_lite06() {
-	moq_clock::timeout(TEST_TIMEOUT, replace("moq-lite-06", None))
+#[kio::test]
+async fn minted_lite06() {
+	kio::clock::timeout(TEST_TIMEOUT, replace("moq-lite-06", None))
 		.await
 		.expect("timed out");
 }
 
-#[moq_clock::test]
-async fn epochless_lite07() {
-	moq_clock::timeout(TEST_TIMEOUT, replace("moq-lite-07-wip", None))
-		.await
-		.expect("timed out");
+/// lite-07 carries the instance the publication minted, or the stable one it names.
+#[kio::test]
+async fn carried_lite07() {
+	for instance in [None, Some("cam".parse().unwrap())] {
+		kio::clock::timeout(TEST_TIMEOUT, replace("moq-lite-07-wip", instance))
+			.await
+			.expect("timed out");
+	}
 }
 
-/// Only lite-07 carries the epoch.
-#[moq_clock::test]
-async fn epoch_lite07() {
-	moq_clock::timeout(TEST_TIMEOUT, replace("moq-lite-07-wip", Some(epoch())))
-		.await
-		.expect("timed out");
-}
-
-/// moq-transport carries the epoch with the MoQ Epoch extension.
-#[moq_clock::test]
-async fn epoch_ietf() {
+/// moq-transport carries no instance, even a stable one, so a replacement restarts as it
+/// does over older lite.
+#[kio::test]
+async fn minted_ietf() {
 	for version in ["moq-transport-18", "moq-transport-22"] {
-		moq_clock::timeout(TEST_TIMEOUT, replace(version, Some(epoch())))
+		kio::clock::timeout(TEST_TIMEOUT, replace(version, Some("cam".parse().unwrap())))
 			.await
 			.expect("timed out");
 	}
 }
 
-/// Without one, a moq-transport replacement restarts as it does over lite.
-#[moq_clock::test]
-async fn epochless_ietf() {
-	for version in ["moq-transport-22"] {
-		moq_clock::timeout(TEST_TIMEOUT, replace(version, None))
-			.await
-			.expect("timed out");
-	}
-}
-
-/// A route change alone is never fatal, but a dead route is: once an epochless replacement
-/// is announced, a subscription on the old instance keeps going while the old publisher
-/// serves it, and its session closing ends that subscription with an error, never cleanly.
-/// The viewer reads either straight from the publisher or through a relay, and the old
-/// session closes after `wait`: inside the update hold, before the `Restart` is delivered,
-/// or past it.
+/// A route change alone is never fatal. Once a replacement is announced, a subscription on
+/// the old route keeps going while the old publisher serves it. Its session closing then
+/// ends the subscription with an error, never cleanly, where the wire minted the routes
+/// apart; lite-07 carries one instance on both, so the subscription resumes on the
+/// replacement instead. The viewer reads either straight from the publisher or through a
+/// relay, and the old session closes after `wait`: inside the update hold, or past it.
 async fn route_death(version: &str, relayed: bool, wait: Duration) {
 	let version: Version = version.parse().unwrap();
 	let publisher = produce_origin(1);
@@ -221,7 +208,7 @@ async fn route_death(version: &str, relayed: bool, wait: Duration) {
 	assert_eq!(read(&mut sticky).await, "video:0", "{version}");
 
 	let _replacement = link(version, &publisher, upstream).await;
-	moq_clock::sleep(wait).await;
+	kio::clock::sleep(wait).await;
 	write(&video, "video:1");
 	assert_eq!(
 		read(&mut sticky).await,
@@ -230,7 +217,16 @@ async fn route_death(version: &str, relayed: bool, wait: Duration) {
 	);
 
 	let _ = old_session.server.close().await;
-	let end = moq_clock::timeout(Duration::from_secs(10), async {
+	if version.to_string() == "moq-lite-07-wip" {
+		write(&video, "video:2");
+		assert_eq!(
+			read(&mut sticky).await,
+			"video:2",
+			"{version} (relayed: {relayed}): the instance did not resume on the replacement"
+		);
+		return;
+	}
+	let end = kio::clock::timeout(Duration::from_secs(10), async {
 		loop {
 			match sticky.recv_group().await {
 				Ok(Some(_)) => continue,
@@ -247,22 +243,22 @@ async fn route_death(version: &str, relayed: bool, wait: Duration) {
 	);
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn route_death_within_hold_errors() {
 	for version in ["moq-lite-06", "moq-lite-07-wip"] {
 		for relayed in [false, true] {
-			moq_clock::timeout(TEST_TIMEOUT, route_death(version, relayed, WITHIN_HOLD))
+			kio::clock::timeout(TEST_TIMEOUT, route_death(version, relayed, WITHIN_HOLD))
 				.await
 				.expect("timed out");
 		}
 	}
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn route_death_past_hold_errors() {
 	for version in ["moq-lite-06", "moq-lite-07-wip"] {
 		for relayed in [false, true] {
-			moq_clock::timeout(TEST_TIMEOUT, route_death(version, relayed, PAST_HOLD))
+			kio::clock::timeout(TEST_TIMEOUT, route_death(version, relayed, PAST_HOLD))
 				.await
 				.expect("timed out");
 		}
@@ -291,7 +287,7 @@ async fn restart_while_the_old_session_lingers(version: &str, old_hop: u64, new_
 	let new_cam = new.publish("cam", origin::Route::default()).unwrap();
 	let new_video = new_cam.create_track("video", timed()).unwrap();
 	let _new_session = link(version, &new, &viewer).await;
-	moq_clock::sleep(PAST_HOLD).await;
+	kio::clock::sleep(PAST_HOLD).await;
 
 	let cam = viewer.consume().request("cam", None).await.unwrap();
 	let mut video = subscribe(&cam, "video")
@@ -301,11 +297,11 @@ async fn restart_while_the_old_session_lingers(version: &str, old_hop: u64, new_
 	assert_eq!(read(&mut video).await, "new:0", "{version} ({old_hop} -> {new_hop})");
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn restart_while_the_old_session_lingers_wins() {
 	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {
 		for (old_hop, new_hop) in [(1, 4), (4, 1)] {
-			moq_clock::timeout(
+			kio::clock::timeout(
 				TEST_TIMEOUT,
 				restart_while_the_old_session_lingers(version, old_hop, new_hop),
 			)

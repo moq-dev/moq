@@ -8,6 +8,7 @@
 //! spelling of both an omitted floor and group 0; the draft says that 0 is group 0.
 
 use crate::support;
+use moq_net::track::Delay;
 
 use std::time::Duration;
 
@@ -56,7 +57,7 @@ fn write_group(track: &moq_net::track::Producer, sequence: u64) {
 async fn read_all(sub: &mut moq_net::track::Subscriber) -> Vec<(u64, usize)> {
 	let mut got = Vec::new();
 	loop {
-		let next = moq_clock::timeout(TIMEOUT, sub.recv_group())
+		let next = kio::clock::timeout(TIMEOUT, sub.recv_group())
 			.await
 			.expect("recv_group timed out");
 		let Some(mut group) = next.expect("recv_group") else {
@@ -64,7 +65,7 @@ async fn read_all(sub: &mut moq_net::track::Subscriber) -> Vec<(u64, usize)> {
 		};
 		let mut frames = 0;
 		loop {
-			let frame = moq_clock::timeout(TIMEOUT, group.read_frame())
+			let frame = kio::clock::timeout(TIMEOUT, group.read_frame())
 				.await
 				.expect("read_frame timed out")
 				.expect("read_frame");
@@ -114,15 +115,15 @@ async fn session(version: &str, relay: bool, start: Option<u64>) -> Vec<(u64, us
 	let pair = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
-	let remote = moq_clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
+	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
 
 	let subscription = Subscription::default()
-		.with_max_delay(BUDGET)
+		.with_delay(Delay::default().with_max(BUDGET))
 		.with_ranges([floored(start)]);
-	let reader = moq_clock::sim::spawn(async move {
+	let reader = kio::clock::sim::spawn(async move {
 		let mut sub = remote
 			.track("late")
 			.unwrap()
@@ -132,19 +133,19 @@ async fn session(version: &str, relay: bool, start: Option<u64>) -> Vec<(u64, us
 		read_all(&mut sub).await
 	});
 
-	moq_clock::timeout(TIMEOUT, crate::support::wanted(track.demand()))
+	kio::clock::timeout(TIMEOUT, crate::support::wanted(track.demand()))
 		.await
 		.expect("no subscriber appeared")
 		.unwrap();
 	// Idle time lets the subscription settle, and again lets SUBSCRIBE_START land,
 	// before the lower group is created.
-	moq_clock::sleep(Duration::from_millis(10)).await;
+	kio::clock::sleep(Duration::from_millis(10)).await;
 	write_group(&track, 1);
-	moq_clock::sleep(Duration::from_millis(10)).await;
+	kio::clock::sleep(Duration::from_millis(10)).await;
 	write_group(&track, 0);
 	track.finish().unwrap();
 
-	let got = moq_clock::timeout(TIMEOUT * 3, reader)
+	let got = kio::clock::timeout(TIMEOUT * 3, reader)
 		.await
 		.expect("reader hung")
 		.expect("reader panicked");
@@ -164,16 +165,16 @@ async fn in_process(start: Option<u64>) -> Vec<(u64, usize)> {
 		)
 		.unwrap();
 	let subscription = Subscription::default()
-		.with_max_delay(BUDGET)
+		.with_delay(Delay::default().with_max(BUDGET))
 		.with_ranges([floored(start)]);
 	let mut sub = track.subscribe(subscription);
-	let reader = moq_clock::sim::spawn(async move { read_all(&mut sub).await });
-	moq_clock::sleep(Duration::from_millis(10)).await;
+	let reader = kio::clock::sim::spawn(async move { read_all(&mut sub).await });
+	kio::clock::sleep(Duration::from_millis(10)).await;
 	write_group(&track, 1);
-	moq_clock::sleep(Duration::from_millis(10)).await;
+	kio::clock::sleep(Duration::from_millis(10)).await;
 	write_group(&track, 0);
 	track.finish().unwrap();
-	let got = moq_clock::timeout(TIMEOUT * 3, reader)
+	let got = kio::clock::timeout(TIMEOUT * 3, reader)
 		.await
 		.expect("reader hung")
 		.expect("reader panicked");
@@ -181,7 +182,7 @@ async fn in_process(start: Option<u64>) -> Vec<(u64, usize)> {
 	got
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn an_explicit_floor_receives_a_group_created_below_the_first_served_group() {
 	let want = vec![(1, 4), (0, 4)];
 	let mut failures = Vec::new();
@@ -231,7 +232,7 @@ async fn merged(version: &str) -> (Vec<(u64, usize)>, Vec<(u64, usize)>) {
 	let pair = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
-	let remote = moq_clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
+	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
@@ -239,23 +240,25 @@ async fn merged(version: &str) -> (Vec<(u64, usize)>, Vec<(u64, usize)>) {
 	let subscribe = |range: Range| {
 		let track = remote.track("late").unwrap();
 		async move {
-			let subscription = Subscription::default().with_max_delay(BUDGET).with_ranges([range]);
-			moq_clock::timeout(TIMEOUT, track.subscribe(subscription))
+			let subscription = Subscription::default()
+				.with_delay(Delay::default().with_max(BUDGET))
+				.with_ranges([range]);
+			kio::clock::timeout(TIMEOUT, track.subscribe(subscription))
 				.await
 				.expect("subscribe timeout")
 				.expect("subscribe")
 		}
 	};
 	let mut live = subscribe(Range::live()).await;
-	moq_clock::timeout(TIMEOUT, crate::support::wanted(track.demand()))
+	kio::clock::timeout(TIMEOUT, crate::support::wanted(track.demand()))
 		.await
 		.expect("no subscriber appeared")
 		.unwrap();
-	moq_clock::sleep(Duration::from_millis(10)).await;
+	kio::clock::sleep(Duration::from_millis(10)).await;
 	write_group(&track, 1);
 
 	// The live reader is on group 1 before the other joins.
-	let first = moq_clock::timeout(TIMEOUT, live.recv_group())
+	let first = kio::clock::timeout(TIMEOUT, live.recv_group())
 		.await
 		.expect("recv_group timed out")
 		.expect("recv_group")
@@ -264,7 +267,7 @@ async fn merged(version: &str) -> (Vec<(u64, usize)>, Vec<(u64, usize)>) {
 	let mut oldest = subscribe(floored(Some(0))).await;
 
 	// Idle time lets the merged demand reach the publisher before the lower group exists.
-	moq_clock::sleep(Duration::from_millis(10)).await;
+	kio::clock::sleep(Duration::from_millis(10)).await;
 	write_group(&track, 0);
 	track.finish().unwrap();
 
@@ -280,7 +283,7 @@ async fn merged(version: &str) -> (Vec<(u64, usize)>, Vec<(u64, usize)>) {
 /// A wire with one span cannot carry both starts, and lite-05 reads an absent start as
 /// the latest group, so the relay must spell group 0 for a fresh group 0 to reach the
 /// reader that asked for it. The live reader joined above it and never sees it.
-#[moq_clock::test]
+#[kio::test]
 async fn a_merged_subscription_keeps_an_absolute_floor() {
 	let mut failures = Vec::new();
 	for version in LITE {
@@ -295,7 +298,7 @@ async fn a_merged_subscription_keeps_an_absolute_floor() {
 /// Pre-06, an omitted floor joins at the first served group. Group 0, created after
 /// group 1 was served, is below that join. Lite-06 cannot spell this separately from
 /// a floor of group 0; that case is the explicit-floor test.
-#[moq_clock::test]
+#[kio::test]
 async fn an_unfloored_lite05_join_drops_a_group_created_below_the_first_served_group() {
 	let want = vec![(1, 4)];
 	let mut failures = Vec::new();

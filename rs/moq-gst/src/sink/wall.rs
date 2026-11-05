@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 #[derive(Clone, Copy)]
 pub(super) struct Sample {
 	pub running: Option<gst::ClockTime>,
-	pub wall: moq_clock::Wall,
+	pub wall: kio::clock::Wall,
 }
 
 /// Places running-time zero on the wall clock once per run, holding the first catalog until then.
@@ -54,7 +54,7 @@ impl Wall {
 	}
 }
 
-fn wall_zero(buffer: &gst::BufferRef, pts: Duration, sample: Sample) -> Result<moq_clock::Wall> {
+fn wall_zero(buffer: &gst::BufferRef, pts: Duration, sample: Sample) -> Result<kio::clock::Wall> {
 	for meta in buffer.iter_meta::<gst::ReferenceTimestampMeta>() {
 		let Some(reference) = meta.reference().structure(0) else {
 			continue;
@@ -68,7 +68,7 @@ fn wall_zero(buffer: &gst::BufferRef, pts: Duration, sample: Sample) -> Result<m
 			// PTP and device clocks need an explicit UTC relation; their names do not provide one.
 			_ => continue,
 		};
-		return moq_clock::Wall::UNIX_EPOCH
+		return kio::clock::Wall::UNIX_EPOCH
 			.checked_add(unix)
 			.and_then(|wall| wall.checked_sub(pts))
 			.context("reference timestamp cannot place running-time zero");
@@ -93,7 +93,7 @@ mod tests {
 	#[test]
 	fn delayed_buffers_and_unknown_domains_use_the_pipeline_clock() {
 		gst::init().unwrap();
-		let now = moq_clock::Wall::UNIX_EPOCH + Duration::from_secs(1_735_689_620);
+		let now = kio::clock::Wall::UNIX_EPOCH + Duration::from_secs(1_735_689_620);
 		let mut buffer = gst::Buffer::new();
 		gst::ReferenceTimestampMeta::add(
 			buffer.get_mut().unwrap(),
@@ -145,11 +145,11 @@ mod tests {
 					Duration::from_secs(3),
 					Sample {
 						running: None,
-						wall: moq_clock::Wall::UNIX_EPOCH
+						wall: kio::clock::Wall::UNIX_EPOCH
 					}
 				)
 				.unwrap(),
-				moq_clock::Wall::UNIX_EPOCH + Duration::from_secs(1_735_689_600)
+				kio::clock::Wall::UNIX_EPOCH + Duration::from_secs(1_735_689_600)
 			);
 		}
 	}

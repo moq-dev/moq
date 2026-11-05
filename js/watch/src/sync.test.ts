@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { type Installed, Manual, Milli, Nano, now } from "@moq/clock";
+import { type Installed, Manual, Milli, Nano, now, yieldNow } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import { type Delay, Sync } from "./sync";
 
 // Effects in @moq/signals flush on a microtask, so let pending updates drain before asserting.
-const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+const flush = () => yieldNow();
 
 describe("delay and buffer", () => {
 	it("holds no lookahead by default", async () => {

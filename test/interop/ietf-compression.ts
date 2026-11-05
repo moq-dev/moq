@@ -72,7 +72,6 @@ try {
 			console.log(JSON.stringify(frames));
 			group.close();
 		} finally {
-			subscriber.close();
 			track.close();
 		}
 	}

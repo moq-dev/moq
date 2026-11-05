@@ -64,7 +64,7 @@ for (const groups of [2, 16, 128]) {
 						const id = BigInt((round + 1) * 2);
 						const parameters = new Parameters();
 						parameters.fillParameters = Filter.encodeFill(
-							{ filter: { kind: "unfiltered" }, groupOrder: "ascending", rangeFilters: false },
+							{ filter: { kind: "relative", groups: 1n }, groupOrder: "ascending", rangeFilters: false },
 							version,
 						);
 						await client.writer.u53(SubscribeUpdate.id);
@@ -77,7 +77,7 @@ for (const groups of [2, 16, 128]) {
 						if ((await reader.u53()) !== FetchHeader.type) throw new Error("wrong fill stream");
 						if ((await FetchHeader.decode(reader, version)).requestId !== id)
 							throw new Error("wrong fill ID");
-						if ((await reader.readAll()).byteLength < groups) throw new Error("short fill");
+						if ((await reader.readAll()).byteLength === 0) throw new Error("short fill");
 					}),
 				);
 				if (round > 1) samples.push((performance.now() - start) * 1000);

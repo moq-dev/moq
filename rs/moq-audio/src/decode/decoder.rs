@@ -52,7 +52,8 @@ impl Decoder {
 	/// `description` declares, refusing a malformed head; without a description
 	/// it takes the catalog's channel count and applies neither. PCM uses the
 	/// catalog fields directly and requires an absent `description`. AAC reads
-	/// its AudioSpecificConfig, synthesizing one from the catalog when absent.
+	/// its AudioSpecificConfig; without one, legacy and LOC packets carry ADTS headers,
+	/// while demuxed CMAF samples remain raw.
 	pub fn new(catalog: &hang::catalog::AudioConfig, config: &Config) -> Result<Self, Error> {
 		let backend = backend::open(catalog, config)?;
 		let delay = backend.delay();
@@ -198,13 +199,69 @@ pub(crate) mod tests {
 
 	#[cfg(feature = "aac")]
 	#[test]
-	fn aac_synthesizes_a_missing_description() {
-		// An MSF catalog carries the shape in its own fields instead.
+	fn aac_without_a_description_refuses_raw_packets() {
 		let mut catalog = aac_catalog();
 		catalog.description = None;
 
 		let mut decoder = Decoder::new(&catalog, &Config::default()).unwrap();
 		assert_eq!(decoder.sample_rate(), 44_100);
+		assert!(matches!(decoder.decode(AAC_FRAMES[0]), Err(Error::Decode(_))));
+	}
+
+	#[cfg(feature = "aac")]
+	#[test]
+	fn aac_without_a_description_decodes_adts() {
+		let mut catalog = aac_catalog();
+		catalog.description = None;
+		for crc in [false, true] {
+			let mut adts = Decoder::new(&catalog, &Config::default()).unwrap();
+			let mut raw = Decoder::new(&aac_catalog(), &Config::default()).unwrap();
+			for frame in AAC_FRAMES {
+				let len = frame.len() + if crc { 9 } else { 7 };
+				let mut packet = vec![
+					0xff,
+					if crc { 0xf0 } else { 0xf1 },
+					0x50,
+					0x40 | (len >> 11) as u8,
+					(len >> 3) as u8,
+					((len & 7) << 5) as u8 | 0x1f,
+					0xfc,
+				];
+				if crc {
+					packet.extend_from_slice(&[0, 0]);
+				}
+				packet.extend_from_slice(frame);
+				let got = adts.decode(&packet).unwrap().samples;
+				let expected = raw.decode(frame).unwrap().samples;
+				assert!(got == expected, "ADTS framing changed decoded PCM");
+				for altered in [2, 3, 6] {
+					let mut invalid = packet.clone();
+					invalid[altered] ^= if altered == 2 {
+						4
+					} else if altered == 3 {
+						0xc0
+					} else {
+						1
+					};
+					assert!(matches!(adts.decode(&invalid), Err(Error::Decode(_))));
+				}
+				assert!(matches!(
+					adts.decode(&packet[..packet.len() - 1]),
+					Err(Error::Decode(_))
+				));
+			}
+		}
+	}
+
+	#[cfg(feature = "aac")]
+	#[test]
+	fn cmaf_aac_samples_remain_raw_without_a_catalog_description() {
+		let mut catalog = aac_catalog();
+		catalog.description = None;
+		catalog.container = hang::catalog::Container::Cmaf {
+			init: bytes::Bytes::new(),
+		};
+		let mut decoder = Decoder::new(&catalog, &Config::default()).unwrap();
 		assert_eq!(decoder.decode(AAC_FRAMES[0]).unwrap().samples.len(), 1024);
 	}
 

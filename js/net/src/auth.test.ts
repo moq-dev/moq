@@ -1,5 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
+import { Manual, Milli, Nano, sleep, yieldNow } from "@moq/clock";
 import type { Getter } from "@moq/signals";
 import { Duplicate, type Grant, Handle, type Issued, type Request, type Requests, Unsupported } from "./auth.ts";
 import { accept as acceptSession, connect as connectSession, type Established } from "./connection/index.ts";
@@ -391,7 +391,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 		void transport.closed.then(() => {
 			closed = true;
 		});
-		await new Promise((resolve) => setTimeout(resolve, 10));
+		await sleep(Nano.fromMilli(Milli(10)));
 		expect(closed).toBe(false);
 
 		announced.close();
@@ -649,7 +649,9 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 		expect(track.closed.peek()).toBeUndefined();
 
 		client.abort();
-		expect(await track.closed).toBeNull();
+		const closed = await track.closed;
+		expect(closed).toBeInstanceOf(SessionError);
+		expect((closed as SessionError).code).toBe(SessionCode.Cancel);
 		server.abort();
 	});
 
@@ -1039,7 +1041,7 @@ test("a fetch abandoned while its token waits never reaches the wire", async () 
 		const fetched = wireOf(client)
 			.consume(Path.from("room/x"))
 			.track("video")
-			.fetchGroup(0, { signal: abort.signal });
+			.fetchGroup(0n, { signal: abort.signal });
 		await yieldNow();
 		abort.abort(new Error("left"));
 		await expect(fetched).rejects.toThrow();
@@ -1119,12 +1121,12 @@ test.each(Array.from({ length: 17 }, (_, gap) => gap))(
 			if (!unanswered) throw new Error("missing token");
 			const track = wireOf(client).consume(Path.from("room/x")).track("video");
 			const abort = new AbortController();
-			const first = track.fetchGroup(0, { signal: abort.signal });
+			const first = track.fetchGroup(0n, { signal: abort.signal });
 			await yieldNow();
 			// The last caller leaves and another coalesces before the wait observes it.
 			abort.abort(new Error("left"));
 			for (let i = 0; i < gap; i++) await Promise.resolve();
-			const second = track.fetchGroup(0);
+			const second = track.fetchGroup(0n);
 			await expect(first).rejects.toThrow();
 			const issued = unanswered.accept(grant([], ["room"]));
 			await adding;

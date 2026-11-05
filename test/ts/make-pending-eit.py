@@ -9,7 +9,7 @@ that separates a correct implementation from one that stores whatever it last pa
 
 `tsp -P eitinject` cannot produce it: it re-derives present/following from the event
 list and stamps its own version, ignoring `version` and `current` in the input XML. So
-this patches the generated stream instead — bumping the version and clearing
+this patches the generated stream instead - bumping the version and clearing
 `current_next_indicator` over a trailing window, then recomputing the section CRC so
 the result is a legal stream and a rejection downstream means the guard fired rather
 than the section being malformed.

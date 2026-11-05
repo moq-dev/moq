@@ -9,8 +9,16 @@ use super::Version;
 /// triples; duplicate ids are rejected on decode.
 ///
 /// The encoding keeps the order the parameters were set or decoded in.
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Clone)]
 pub struct Parameters(Vec<(u64, Vec<u8>)>);
+
+impl std::fmt::Debug for Parameters {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_map()
+			.entries(self.0.iter().map(|(kind, value)| (kind, value.len())))
+			.finish()
+	}
+}
 
 impl Parameters {
 	/// Set a parameter to a raw byte value, replacing any existing entry.

@@ -1,11 +1,11 @@
 import { Nano, Second } from "@moq/clock";
-import { type Getter, Once, race, Signal } from "@moq/signals";
+import { type GetPromise, type Getter, Once, race, Signal } from "@moq/signals";
 import type * as announce from "../announced.ts";
 import type * as Auth from "../auth.ts";
 import { AuthSession } from "../auth_session.ts";
 import type { Established } from "../connection/established.ts";
 import type { Drain } from "../connection/goaway.ts";
-import { type Probe, type Stats, transportStats } from "../connection/stats.ts";
+import { detect, type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
 import { error, fromClose, ProtocolViolation, SessionCode, StreamCode, StreamError, sessionClosed } from "../error.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
@@ -44,7 +44,7 @@ function handed(task: Promise<void>): Promise<void> {
 /**
  * Represents a connection to a MoQ server using moq-transport protocol.
  *
- * @public
+ * @internal
  */
 export class Connection implements Established {
 	#closing?: Promise<void>;
@@ -92,9 +92,6 @@ export class Connection implements Established {
 	// The Hop IDs this session declared; see {@link Cluster}.
 	#cluster?: Cluster.Hops;
 
-	// Whether both SETUPs offered MoQ Epoch, so advertisements and requests may carry EPOCH.
-	#epoch: boolean;
-
 	// The peer's GOAWAY, read off its SETUP stream.
 	#goaway = new Once<Drain>();
 
@@ -130,7 +127,6 @@ export class Connection implements Established {
 		cluster,
 		auth = false,
 		handle,
-		epoch = false,
 		early = [],
 		extensions,
 		peerImplementation,
@@ -163,8 +159,6 @@ export class Connection implements Established {
 		auth?: boolean;
 		/** The auth handle to build the session on, or undefined for one of its own. */
 		handle?: Auth.Handle;
-		/** Whether MoQ Epoch is negotiated: offered by both SETUPs. */
-		epoch?: boolean;
 		/** Uni streams that arrived before the peer's SETUP, type unread. */
 		early?: Reader[];
 		/** What our own SETUP offered; every extension when omitted. */
@@ -175,6 +169,7 @@ export class Connection implements Established {
 		this.url = url;
 		this.version = versionName(version);
 		this.transport = transportOf(quic);
+		detect(this, quic);
 		this.#quic = quic;
 		this.#client = client;
 		this.peerImplementation = Promise.resolve(peerImplementation);
@@ -214,7 +209,6 @@ export class Connection implements Established {
 			hidden,
 			activeCount,
 			cluster,
-			epoch,
 			grant: this.#auth.scope,
 			auth: this.#auth,
 			ready: this.#auth.setupAnswered(),
@@ -222,13 +216,11 @@ export class Connection implements Established {
 		this.#solicit = solicit;
 		this.#declaredSolicit = extensions?.solicit ?? true;
 		this.#cluster = cluster;
-		this.#epoch = epoch;
 		this.#subscriber = new Subscriber({
 			maxAge,
 			session: this.#session,
 			quic,
 			cluster,
-			epoch,
 			hidden,
 			activeCount,
 			goaway: this.#goaway,
@@ -237,7 +229,6 @@ export class Connection implements Established {
 		});
 		registerWire(this, {
 			consume: (path) => this.#subscriber.consume(path),
-			goaway: this.#goaway,
 			// The drafts refuse overlapping SUBSCRIBE_NAMESPACEs (PREFIX_OVERLAP). A peer that
 			// declared MoQ Solicit is ours and holds both; any other may enforce it.
 			exclusive: solicit === undefined,
@@ -265,7 +256,6 @@ export class Connection implements Established {
 	/** End the session immediately without waiting for delivery. */
 	abort(): void {
 		if (this.#closed) return;
-		this.#subscriber.close();
 		this.#close();
 	}
 
@@ -391,7 +381,6 @@ export class Connection implements Established {
 			case BigInt(PublishNamespace.id): {
 				const decoded = PublishNamespace.decode(stream.reader, this.#session.version, {
 					cluster: Cluster.negotiated(this.#cluster),
-					epoch: this.#epoch,
 				});
 				const msg = await this.#request(stream, "publish_namespace", decoded);
 				if (!msg) break;
@@ -527,8 +516,11 @@ export class Connection implements Established {
 			return;
 		}
 
-		// We never FETCH, so a fetch response answers nothing of ours.
-		if (type === BigInt(FetchHeader.type)) throw new Error("unexpected fetch stream");
+		// The head of a join, answering our draft-18 joining FETCH or draft-22 fill.
+		if (type === BigInt(FetchHeader.type)) {
+			await this.#subscriber.handleFetch(stream);
+			return;
+		}
 
 		// Anything else is unknown, and a second SETUP is a violation too.
 		throw new ProtocolViolation(`unknown uni stream type: 0x${type.toString(16)}`);
@@ -594,6 +586,11 @@ export class Connection implements Established {
 			throw new ProtocolViolation(`unexpected message on setup stream: 0x${typeId.toString(16)}`);
 		}
 		return GoAway.decode(controlStream.reader, version);
+	}
+
+	/** Settles with the peer's GOAWAY; see {@link Established.draining}. */
+	get draining(): GetPromise<Drain> {
+		return this.#goaway;
 	}
 
 	/** Resolves when the session closes, decoding the peer's close code; see {@link Established.closed}. */

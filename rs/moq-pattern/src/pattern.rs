@@ -458,27 +458,17 @@ impl Pattern {
 	///
 	/// The path is normalized like a broadcast path: slashes are trimmed and collapsed.
 	pub fn matches(&self, path: &str) -> bool {
-		let parts: Vec<&str> = split_path(path).collect();
-		match self.globstar {
-			None => {
-				parts.len() == self.segments.len()
-					&& self
-						.segments
-						.iter()
-						.zip(&parts)
-						.all(|(segment, part)| segment.matches(part))
-			}
-			Some(_) => {
-				let (head, tail) = self.split();
-				parts.len() >= head.len() + tail.len()
-					&& head.iter().zip(&parts).all(|(segment, part)| segment.matches(part))
-					&& tail
-						.iter()
-						.rev()
-						.zip(parts.iter().rev())
-						.all(|(segment, part)| segment.matches(part))
-			}
-		}
+		// One pass from both ends, never collected: announcement filtering asks this per
+		// route per reader.
+		let mut parts = split_path(path);
+		let (head, tail) = self.split();
+		head.iter()
+			.all(|segment| parts.next().is_some_and(|part| segment.matches(part)))
+			&& tail
+				.iter()
+				.rev()
+				.all(|segment| parts.next_back().is_some_and(|part| segment.matches(part)))
+			&& (self.globstar.is_some() || parts.next().is_none())
 	}
 
 	/// Whether every path `other` matches, this pattern matches too.
@@ -801,7 +791,7 @@ impl Pattern {
 
 /// The non-empty segments of a path: leading, trailing, and doubled slashes are dropped,
 /// matching how a broadcast path is normalized.
-fn split_path(path: &str) -> impl Iterator<Item = &str> {
+fn split_path(path: &str) -> impl DoubleEndedIterator<Item = &str> {
 	path.split('/').filter(|part| !part.is_empty())
 }
 

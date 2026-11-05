@@ -12,7 +12,7 @@ fn origin(hop: u64) -> origin::Producer {
 /// The JSON owner answers demand across a publisher link, a cluster peer, and a reader link.
 /// Existing readers keep their deltas; the late reader receives the cached group, then a new
 /// complete snapshot.
-#[moq_clock::test]
+#[kio::test]
 async fn json_snapshot_refresh_crosses_a_two_relay_cluster() {
 	use moq_json::snapshot;
 	use moq_net::{Timed, Timescale, Timestamp};
@@ -75,8 +75,7 @@ async fn json_snapshot_refresh_crosses_a_two_relay_cluster() {
 				json!({ "n": n })
 			);
 			if n == 1 || n == 2 * u64::from(ratio) {
-				let mut join =
-					snapshot::Consumer::<Value>::new(remote.subscribe(None).await.unwrap(), Default::default());
+				let mut join = snapshot::Consumer::<Value>::new(remote.clone(), Default::default());
 				let received = join.latest().await.unwrap().unwrap();
 				assert_eq!((received.value, received.at), (value(n), Some(at(n))));
 				assert!(producer.poll_refresh(&kio::Waiter::noop()).is_pending());
@@ -95,7 +94,7 @@ async fn json_snapshot_refresh_crosses_a_two_relay_cluster() {
 		original.read_frame().await.unwrap().unwrap();
 		assert!(delta_bytes > ratio as usize * snapshot_bytes);
 		// Simulated time passing cannot roll a group, even with deltas over the ratio.
-		moq_clock::sleep(Duration::from_secs(60)).await;
+		kio::clock::sleep(Duration::from_secs(60)).await;
 		assert!(producer.poll_refresh(&kio::Waiter::noop()).is_pending());
 		assert_eq!(track.demand().wanted(), Some(0));
 
@@ -103,7 +102,7 @@ async fn json_snapshot_refresh_crosses_a_two_relay_cluster() {
 		// Poll the new reader while the owner drives refresh: a front does not join its
 		// serving copy until read. Refresh is a request, not a hold, so the cached group
 		// arrives first, whole, and the fresh one follows.
-		let (mut cached, mut fresh) = moq_clock::timeout(Duration::from_secs(1), async {
+		let (mut cached, mut fresh) = kio::clock::timeout(Duration::from_secs(1), async {
 			let (refreshed, groups) = futures::join!(producer.refresh(), async {
 				let cached = late.recv_group().await.unwrap().unwrap();
 				(cached, late.recv_group().await.unwrap().unwrap())
@@ -138,7 +137,7 @@ async fn json_snapshot_refresh_crosses_a_two_relay_cluster() {
 			serde_json::from_slice::<Value>(&delta.payload).unwrap(),
 			json!({ "n": n + 1 })
 		);
-		let mut current = snapshot::Consumer::<Value>::new(remote.subscribe(None).await.unwrap(), Default::default());
+		let mut current = snapshot::Consumer::<Value>::new(remote.clone(), Default::default());
 		let received = current.latest().await.unwrap().unwrap();
 		assert_eq!((received.value, received.at), (value(n + 1), Some(at(n + 1))));
 		assert!(producer.poll_refresh(&kio::Waiter::noop()).is_pending());
@@ -147,7 +146,7 @@ async fn json_snapshot_refresh_crosses_a_two_relay_cluster() {
 	}
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn ratio_joins_cross_two_relays() {
 	for name in ["moq-lite-06", "moq-lite-07-wip"] {
 		let version: Version = name.parse().unwrap();
@@ -190,14 +189,14 @@ async fn ratio_joins_cross_two_relays() {
 		}
 		if name == "moq-lite-07-wip" {
 			let mut demand = producer.demand();
-			moq_clock::timeout(Duration::from_secs(1), async {
+			kio::clock::timeout(Duration::from_secs(1), async {
 				while demand.wanted_changed().await.unwrap() != Some(1) {}
 			})
 			.await
 			.unwrap();
 		} else {
 			// Drain runnable protocol tasks on simulated time, without a wall-clock sleep.
-			moq_clock::sleep(Duration::from_millis(1)).await;
+			kio::clock::sleep(Duration::from_millis(1)).await;
 			assert_eq!(producer.demand().wanted(), Some(0));
 		}
 		drop((joins, under, received, baseline, group, links));

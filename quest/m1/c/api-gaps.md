@@ -1,44 +1,30 @@
-# [S] moq-c closes its small API gaps
+# [S] moq-c disables pre-encoded simulcast rungs
 
 ## Goal
 
-moq-c reports a malformed epoch the same way everywhere, lets a C consumer see
-that audio is disabled as it can for video, and has a test of the hops on a
-route received through a relay.
+moq-c can disable a simulcast rung on pre-encoded media, with its lower
+rendition's priority and a rate control driven by the reservation.
 
 ## Plan
 
-Found 2026-10-28 by [moq-dev/moq#7151](https://github.com/moq-dev/moq/pull/7151)
-and [moq-dev/moq#7156](https://github.com/moq-dev/moq/pull/7156).
+- Add C ABI support for disabling simulcast rungs on pre-encoded media on
+  [moq-dev/moq#7029](https://github.com/moq-dev/moq/pull/7029)'s shared
+  importer support. It merged as
+  [61cb70456d](https://github.com/moq-dev/moq/commit/61cb70456dd0d70909bc2a1c18916331e90b51ea),
+  so this work is unblocked: main has `moq_mux::import::Track::set_enabled`,
+  `import::VideoInit.priority`, the AV1/VP8/VP9 importer setters, and the
+  moq-ffi `MoqRateControl`, `MoqVideoInit.lower`, and media producer
+  `set_enabled` interfaces.
+- Expose media `set_enabled`, lower-rendition ordering, and
+  a rate control over the C reservation. Inspect the final shared interfaces
+  first. Decided 2026-10-30 (maintainer, /quest-plan of the 2026-10-30
+  /quest-complete follow-ups): the C epic's rule (every m1 binding feature
+  missing from `moq.h` lands before the cut) overrides that PR's decision 4,
+  which parked it until a C consumer asked: ✅ add to m1 C gaps / exempt it.
 
-Decided 2026-10-28 (maintainer): one PR for all three. moq-c already breaks
-at this cut (0.6 to 0.7), so the error-code change rides that break.
-Use `MOQ_ERROR_INVALID_CONFIG` for malformed epochs in both
-`moq_broadcast_request_prepare` and `moq_publication_announce`, add the audio
-enabled query, and test received relay hops.
+Update the generated `moq.h`, `rs/moq-c/README.md` and `doc/lib/c` as needed.
+The independent JSON window caller timestamp gap is implemented in
+[moq-dev/moq#7614](https://github.com/moq-dev/moq/pull/7614).
 
-Implementation is checkpointed in [moq-dev/moq#7246](https://github.com/moq-dev/moq/pull/7246):
-`moq_consume_audio_enabled` mirrors the video query, epoch validation uses the
-settled error code, and tests cover snapshot enablement, a consumer opened
-from a disabled snapshot resuming, and ordered hops over two C sessions.
-The README and C guide are updated; a C audio fixture calls the new query.
-The PR Impact records the error-code migration and new query.
-
-Remaining work is validation before marking ready and deleting this quest:
-run the moq-c tests, compile and run the C fixtures against the generated
-`moq.h` and `libmoq.a`, and pass the local CI gate. Resolve any relevant
-failures and review findings.
-
-Reproduced 2026-10-29: a malformed request epoch returned -15 instead of -40,
-and compiling the C fixture against the original header failed because the
-audio query was undeclared. Formatting, quest validation, and the gate's
-other static checks passed. `just ci` failed before Rust validation because
-mbx could not launch Cargo (`Argument list too long`); the CI tooling test
-failed through the same wrapper. Merely prepending pinned Cargo still hit
-mbx because `BASH_ENV` reinjected it in child shells. Omitting that hook
-verified the pinned Cargo path, but its validation run remained waiting at
-`quest gate` for host capacity and was stopped with exit 143 before tests
-started. No successful run of the new tests or C fixture is claimed.
-
-Public API: moq-c gains an audio enabled query and changes one error code.
-Wire: none.
+Public API: moq-c gains pre-encoded rung disable, lower-rendition ordering,
+and reservation rate control. Wire: none.

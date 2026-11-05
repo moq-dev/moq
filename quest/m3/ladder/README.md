@@ -20,7 +20,7 @@ publisher-side ladder.
 
 The catalog and player half is the rendition `enabled` flag, which replaced the `stalled`
 state shipped in [moq#2865](https://github.com/moq-dev/moq/pull/2865):
-`enabled: false` means no frames are coming and a viewer must not select the
+`enabled: false` means no frames are coming and a viewer should not select the
 rendition. Routing, decoder, and presentation identities are split so a
 metadata-only change cannot rebuild WebCodecs.
 

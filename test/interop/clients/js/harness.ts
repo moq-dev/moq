@@ -12,14 +12,16 @@ import {
 	type Browser,
 	type BrowserContext,
 	type BrowserContextOptions,
-	type CDPSession,
 	chromium,
 	firefox,
 	type Page,
 	webkit,
 } from "playwright";
 import {
+	CAPTURE_EVENT,
+	type CaptureState,
 	CONTROL,
+	FIXTURE_EVENT,
 	type FixtureState,
 	type InteropControl,
 	type Resources,
@@ -52,6 +54,8 @@ export function check(ok: boolean, assertion: string, detail: () => string): voi
 export type BrowserErrors = {
 	page: string[];
 	console: string[];
+	/** Console warnings, which fail nothing but can show which path the page took. */
+	warnings: string[];
 };
 
 /** Keep the UI contract in one place so player markup changes fail clearly. */
@@ -60,7 +64,6 @@ export const SELECTORS = {
 	ui: "moq-watch-ui",
 	pauseControl: 'button.control[aria-label="Pause"]',
 	centerPlay: "button.center-play",
-	fixture: "#fixture",
 } as const;
 
 /** Activate the player's pause button without depending on pointer hit testing. */
@@ -132,9 +135,20 @@ export function launch(args: string[] = [], engine: Engine = "chromium"): Promis
 	return webkit.launch({ headless: true, handleSIGTERM: false, env });
 }
 
-// The latest sample each player page logged. Cleared on navigation so a reload cannot read the
-// previous document's state.
-const samples = new WeakMap<Page, Sample>();
+// The console lines that carry a page's state instead of a log message. Pages report rather than
+// being read, since Playwright's page reads grant user activation and would unlock Web Audio before
+// the deliberate click the gesture checks make.
+const REPORTS = [SAMPLE_EVENT, FIXTURE_EVENT, CAPTURE_EVENT];
+
+// The latest report of each kind every page logged, unparsed. Cleared on navigation so a reload
+// cannot read the previous document's state.
+const reports = new WeakMap<Page, Map<string, string>>();
+
+/** The page's latest report with `prefix`, or undefined when it has reported none (or `null`). */
+function report<T>(page: Page, prefix: string): T | undefined {
+	const latest = reports.get(page)?.get(prefix);
+	return latest === undefined ? undefined : ((JSON.parse(latest) as T | null) ?? undefined);
+}
 
 /** Contexts tracing this process, saved by {@link finishTraces} when the run fails. */
 const traces: Array<{ context: BrowserContext; name: string }> = [];
@@ -180,17 +194,22 @@ export async function open(
 	options?: BrowserContextOptions,
 ): Promise<[Page, BrowserErrors]> {
 	const page = await browser.newPage(options);
-	const errors: BrowserErrors = { page: [], console: [] };
+	const errors: BrowserErrors = { page: [], console: [], warnings: [] };
+	const latest = new Map<string, string>();
+	reports.set(page, latest);
 	page.on("framenavigated", (frame) => {
-		if (frame === page.mainFrame()) samples.delete(page);
+		if (frame === page.mainFrame()) latest.clear();
 	});
 	page.on("console", (message) => {
-		if (message.text().startsWith(SAMPLE_EVENT)) {
-			samples.set(page, JSON.parse(message.text().slice(SAMPLE_EVENT.length)) as Sample);
+		const text = message.text();
+		const prefix = REPORTS.find((prefix) => text.startsWith(prefix));
+		if (prefix) {
+			latest.set(prefix, text.slice(prefix.length));
 			return;
 		}
-		console.error(`[${label}] ${message.text()}`);
-		if (message.type() === "error") errors.console.push(message.text());
+		console.error(`[${label}] ${text}`);
+		if (message.type() === "error") errors.console.push(text);
+		if (message.type() === "warning") errors.warnings.push(text);
 	});
 	page.on("pageerror", (error) => {
 		console.error(`[${label} error] ${error.message}`);
@@ -216,32 +235,11 @@ export function throwPageErrors(errors: BrowserErrors): void {
 	if (messages.length > 0) throw new Error(messages.join("\n"));
 }
 
-// Playwright's page.evaluate and locator reads grant user activation. A state probe
-// before the deliberate click would therefore unlock Web Audio and invalidate the gesture test.
-const sessions = new WeakMap<Page, CDPSession>();
-
-/** Inspect a Chromium page without granting user activation to the document. Players log samples instead. */
-export async function inspect<A, T>(page: Page, fn: (arg: A) => T, arg: A): Promise<Awaited<T>> {
-	let session = sessions.get(page);
-	if (!session) {
-		session = await page.context().newCDPSession(page);
-		sessions.set(page, session);
-	}
-	const result = await session.send("Runtime.evaluate", {
-		expression: `(${fn.toString()})(${JSON.stringify(arg) ?? "undefined"})`,
-		returnByValue: true,
-		awaitPromise: true,
-		userGesture: false,
-	});
-	if (result.exceptionDetails) throw new Error(result.exceptionDetails.text);
-	return result.result.value as Awaited<T>;
-}
-
 /** Wait until the player element exists and has published its first sample. */
 export async function waitForWatch(page: Page): Promise<void> {
 	const deadline = Date.now() + 30_000;
 	while (Date.now() < deadline) {
-		if (samples.has(page)) return;
+		if (report(page, SAMPLE_EVENT)) return;
 		await sleep(POLL_INTERVAL_MS);
 	}
 	throw new Error("the player did not publish its first sample");
@@ -249,20 +247,23 @@ export async function waitForWatch(page: Page): Promise<void> {
 
 /** Read the latest player sample. Throws until the page has sampled at least once. */
 export async function readPlayerState(page: Page): Promise<Sample> {
-	const sample = samples.get(page);
+	const sample = report<Sample>(page, SAMPLE_EVENT);
 	if (!sample) throw new Error("the player has not published a sample");
 	return sample;
 }
 
 /** Read what the fixture publisher says about itself. Throws until it has published anything. */
 export async function readFixtureState(page: Page): Promise<FixtureState> {
-	const state = await inspect(
-		page,
-		(selector) => document.querySelector<HTMLElement>(selector)?.dataset.interopFixture,
-		SELECTORS.fixture,
-	);
+	const state = report<FixtureState>(page, FIXTURE_EVENT);
 	if (!state) throw new Error("the fixture publisher has not published its state");
-	return JSON.parse(state) as FixtureState;
+	return state;
+}
+
+/** Read the capture publisher's source state. Throws until it has published any. */
+export async function readCaptureState(page: Page): Promise<CaptureState> {
+	const state = report<CaptureState>(page, CAPTURE_EVENT);
+	if (!state) throw new Error("the publisher has not published its capture state");
+	return state;
 }
 
 /** Invoke one of the page's {@link InteropControl} commands. */

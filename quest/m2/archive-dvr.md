@@ -9,7 +9,7 @@ young enough, and otherwise by an archive broadcast that a host serves through
 
 ## Plan
 
-Retargeted 2026-10-17 with the [archive line](/quest/m1/archive/README.md):
+Retargeted 2026-10-17 with the [archive design](/doc/concept/archives.md):
 seeking uses time ranges, not timelines, and archives are found by the host,
 not through a catalog pointer. The 09-29 decisions that a recording is the
 broadcast at the source path, reached by falling through a live
@@ -31,4 +31,3 @@ over missing groups, and return to live.
 ## Required
 
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - the `Time(pts)` range a seek sends
-- [Archive time ranges](/quest/m2/archive-time-ranges.md) - the archive consumer resolves time ranges from its keys

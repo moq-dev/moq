@@ -27,7 +27,7 @@ axum = { workspace = true, optional = true }
 bytes = { workspace = true }
 hang = { workspace = true }
 # Drives each str0m connection over its UDP socket.
-moq-clock = { workspace = true }
+kio = { workspace = true, features = ["runtime"] }
 moq-ice = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
@@ -49,6 +49,7 @@ aws-lc-rs = { workspace = true }
 moq-tokio = { workspace = true, features = ["net", "tcp"] }
 tokio = { workspace = true, features = ["test-util"] }
 tracing-test = { workspace = true }
+workspace-hack = { path = "../workspace-hack" }
 
 [lints]
 workspace = true

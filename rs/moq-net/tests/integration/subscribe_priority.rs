@@ -27,7 +27,7 @@ fn produce_origin(hop: u64) -> origin::Producer {
 /// Wait until the subscription `track` serves asks for `want`.
 async fn priority(track: &moq_net::track::Producer, want: i8) -> Result<(), String> {
 	let mut track = track.clone();
-	let reached = moq_clock::timeout(TIMEOUT, async {
+	let reached = kio::clock::timeout(TIMEOUT, async {
 		while track
 			.subscription()
 			.is_none_or(|subscription| subscription.priority != want)
@@ -65,14 +65,14 @@ async fn follows(version: Version, relay: bool) -> Result<(), String> {
 	}
 
 	let consumer = subscriber.consume();
-	let remote = moq_clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
+	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
 	let subscribe = |priority: i8| {
 		let track = remote.track("video").unwrap();
 		async move {
-			moq_clock::timeout(
+			kio::clock::timeout(
 				TIMEOUT,
 				track.subscribe(Subscription::default().with_priority(priority)),
 			)
@@ -95,7 +95,7 @@ async fn follows(version: Version, relay: bool) -> Result<(), String> {
 	Ok(())
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn upstream_priority_follows_the_subscribers() {
 	let mut failures = Vec::new();
 	for version in VERSIONS {

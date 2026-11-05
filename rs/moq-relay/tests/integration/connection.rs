@@ -1,5 +1,5 @@
 //! A relay [`Connection`](moq_relay::Connection) over the in-memory transport: admission,
-//! the cluster origin, and stats, with no socket and on Tokio's paused clock.
+//! the cluster origin, and stats, with no socket and on kio's simulator.
 
 use std::time::Duration;
 
@@ -7,18 +7,18 @@ use moq_net::stats;
 
 use crate::memory::{self, connect, newest};
 
-/// Long enough that only a hang reaches it; paused time skips straight there.
+/// Long enough that only a hang reaches it; simulated time skips straight there.
 const TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The relay preserves every legal QUIC-varint sequence, including values beyond
 /// JavaScript's exact number range, on each flavour used by the browser bindings.
-#[tokio::test(start_paused = true)]
+#[kio::test]
 async fn largest_quic_sequence_reaches_the_subscriber() {
 	for alpn in ["moq-lite-02", "moq-lite-06", "moq-transport-22"] {
 		let version = alpn.parse().unwrap();
 		let auth = memory::public(&["**"], &[], &[]);
 		let cluster = memory::cluster();
-		let publisher = moq_tokio::origin::spawn();
+		let publisher = memory::origin();
 		let broadcast = publisher.create_broadcast("ladder").unwrap();
 		let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MICRO);
 		let track = broadcast.create_track("data", info).unwrap();
@@ -31,7 +31,7 @@ async fn largest_quic_sequence_reaches_the_subscriber() {
 		)
 		.await
 		.unwrap();
-		let subscriber = moq_tokio::origin::spawn();
+		let subscriber = memory::origin();
 		let _subscriber = connect(
 			moq_net::Client::new().with_subscriber(subscriber.clone()),
 			version,
@@ -54,7 +54,7 @@ async fn largest_quic_sequence_reaches_the_subscriber() {
 			let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
 			group.write_frame(timestamp, b"ladder".as_ref()).unwrap();
 			group.finish().unwrap();
-			let mut got = tokio::time::timeout(TIMEOUT, sub.recv_group())
+			let mut got = kio::clock::timeout(TIMEOUT, sub.recv_group())
 				.await
 				.unwrap_or_else(|_| panic!("{alpn} sequence={sequence} hung"))
 				.unwrap()
@@ -62,8 +62,8 @@ async fn largest_quic_sequence_reaches_the_subscriber() {
 			assert_eq!(got.sequence, sequence, "{alpn}");
 			let frame = got.read_frame().await.unwrap().unwrap();
 			assert_eq!(frame.payload, b"ladder".as_ref());
-			// Lite-02 carries no timestamps, and a lite-06 subscriber drops them.
-			let timed = alpn == "moq-transport-22";
+			// Lite-02 carries no timestamps.
+			let timed = alpn != "moq-lite-02";
 			assert_eq!(frame.timestamp, timed.then_some(timestamp), "{alpn}");
 		}
 	}
@@ -77,7 +77,7 @@ fn publish(
 	moq_net::origin::Publication,
 	moq_net::track::Producer,
 ) {
-	let origin = moq_tokio::origin::spawn();
+	let origin = memory::origin();
 	let broadcast = origin.create_broadcast(name).expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce");
 	let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
@@ -93,14 +93,15 @@ fn publish(
 /// The next active route's prefix.
 async fn next_active(announced: &mut moq_net::announce::Consumer) -> String {
 	loop {
-		match tokio::time::timeout(TIMEOUT, announced.next())
+		match kio::clock::timeout(TIMEOUT, announced.next())
 			.await
 			.expect("announcement timeout")
 			.expect("origin closed")
 		{
 			moq_net::announce::Event::Start(route)
 			| moq_net::announce::Event::Update(route)
-			| moq_net::announce::Event::Restart(route) => return route.prefix.to_string(),
+			| moq_net::announce::Event::Restart(route)
+			| moq_net::announce::Event::Takeover { announce: route, .. } => return route.prefix.to_string(),
 			moq_net::announce::Event::End(_) => {}
 		}
 	}
@@ -110,7 +111,7 @@ async fn next_active(announced: &mut moq_net::announce::Consumer) -> String {
 /// was answered first.
 async fn assert_refused(result: Result<moq_net::Session, moq_net::Error>) {
 	let err = match result {
-		Ok(session) => tokio::time::timeout(TIMEOUT, session.closed())
+		Ok(session) => kio::clock::timeout(TIMEOUT, session.closed())
 			.await
 			.expect("the relay must close a refused session, not leave it open"),
 		Err(err) => err,
@@ -121,7 +122,7 @@ async fn assert_refused(result: Result<moq_net::Session, moq_net::Error>) {
 /// A publisher whose grant covers only subscribing is refused during the handshake,
 /// instead of accepted to stream into a dropped session forever. Its SETUP's role
 /// says it publishes.
-#[tokio::test(start_paused = true)]
+#[kio::test]
 async fn subscribe_only_public_rejects_publisher_role() {
 	let auth = memory::public(&[], &[], &["**"]);
 	let (origin, _broadcast, _track) = publish("cam");
@@ -130,30 +131,30 @@ async fn subscribe_only_public_rejects_publisher_role() {
 }
 
 /// The same grant keeps a subscriber: the role gate refuses only the mismatched direction.
-#[tokio::test(start_paused = true)]
+#[kio::test]
 async fn subscribe_only_public_accepts_subscriber_role() {
 	let auth = memory::public(&[], &[], &["**"]);
-	let client = moq_net::Client::new().with_subscriber(moq_tokio::origin::spawn());
+	let client = moq_net::Client::new().with_subscriber(memory::origin());
 	let session = connect(client, newest(), &memory::cluster(), &auth)
 		.await
 		.expect("subscriber connects");
 	assert!(
-		tokio::time::timeout(TIMEOUT, session.closed()).await.is_err(),
+		kio::clock::timeout(TIMEOUT, session.closed()).await.is_err(),
 		"subscribe-only relay should keep a subscriber session open"
 	);
 }
 
 /// The mirror: a subscriber whose grant covers only publishing is refused.
-#[tokio::test(start_paused = true)]
+#[kio::test]
 async fn publish_only_public_rejects_subscriber_role() {
 	let auth = memory::public(&[], &["**"], &[]);
-	let client = moq_net::Client::new().with_subscriber(moq_tokio::origin::spawn());
+	let client = moq_net::Client::new().with_subscriber(memory::origin());
 	assert_refused(connect(client, newest(), &memory::cluster(), &auth).await).await;
 }
 
 /// Two publish-only clients share one relay, and a subscriber sees both broadcasts:
 /// neither tears the other down.
-#[tokio::test(start_paused = true)]
+#[kio::test]
 async fn two_publish_only_clients_coexist() {
 	let auth = memory::public(&["**"], &[], &[]);
 	let cluster = memory::cluster();
@@ -177,7 +178,7 @@ async fn two_publish_only_clients_coexist() {
 	.await
 	.expect("beta connects");
 
-	let origin = moq_tokio::origin::spawn();
+	let origin = memory::origin();
 	let mut announced = origin.consume().announced();
 	let _subscriber = connect(
 		moq_net::Client::new().with_subscriber(origin),
@@ -196,10 +197,10 @@ async fn two_publish_only_clients_coexist() {
 /// The decider is asked about the path, query, and role the SETUP carried, and the
 /// grant it answers is rooted at that path: a publisher's broadcast reaches a root
 /// subscriber under it, frames and all.
-#[tokio::test(start_paused = true)]
+#[kio::test]
 async fn the_setup_path_reaches_the_decider_and_roots_the_grant() {
 	let (auth, mut admissions) = moq_relay::auth::Auth::embedded("test");
-	let decider = tokio::spawn(async move {
+	let decider = kio::clock::sim::spawn(async move {
 		let mut seen = Vec::new();
 		while let Some(admission) = admissions.next().await {
 			seen.push(admission.request.clone());
@@ -221,7 +222,7 @@ async fn the_setup_path_reaches_the_decider_and_roots_the_grant() {
 		.await
 		.expect("publisher connects");
 
-	let origin = moq_tokio::origin::spawn();
+	let origin = memory::origin();
 	let consumer = origin.consume();
 	let mut announced = consumer.announced();
 	let _subscriber = connect(
@@ -244,7 +245,7 @@ async fn the_setup_path_reaches_the_decider_and_roots_the_grant() {
 		.subscribe(None)
 		.await
 		.expect("subscribe");
-	let mut group = tokio::time::timeout(TIMEOUT, track.recv_group())
+	let mut group = kio::clock::timeout(TIMEOUT, track.recv_group())
 		.await
 		.expect("group timeout")
 		.expect("recv group")
@@ -266,12 +267,12 @@ async fn the_setup_path_reaches_the_decider_and_roots_the_grant() {
 
 /// The relay's stats count an admitted session while it is open and a refused one
 /// by its reason, under the default tier.
-#[tokio::test(start_paused = true)]
+#[kio::test]
 async fn stats_count_admitted_and_refused_sessions() {
-	let cluster = memory::cluster();
-	let publisher = moq_stats::Producer::new(moq_stats::produce::Config::new().with_origin(cluster.origin.clone()));
-	let registry = publisher.registry().clone();
-	let cluster = cluster.with_stats(publisher);
+	let mut config = moq_relay::stats::Config::default();
+	config.enabled = true;
+	let cluster = memory::spawn_cluster(moq_relay::cluster::Options::default().with_stats(config));
+	let registry = cluster.stats.clone();
 	let presence = || {
 		registry
 			.snapshot()
@@ -282,13 +283,13 @@ async fn stats_count_admitted_and_refused_sessions() {
 	};
 	let auth = memory::public(&[], &[], &["**"]);
 
-	let client = moq_net::Client::new().with_subscriber(moq_tokio::origin::spawn());
+	let client = moq_net::Client::new().with_subscriber(memory::origin());
 	let session = connect(client, newest(), &cluster, &auth)
 		.await
 		.expect("subscriber connects");
-	tokio::time::timeout(TIMEOUT, async {
+	kio::clock::timeout(TIMEOUT, async {
 		while presence().active() != 1 {
-			tokio::task::yield_now().await;
+			kio::clock::sleep(Duration::from_millis(1)).await;
 		}
 	})
 	.await
@@ -300,9 +301,9 @@ async fn stats_count_admitted_and_refused_sessions() {
 	assert_eq!(presence().sessions_refused.forbidden, 1);
 
 	drop(session);
-	tokio::time::timeout(TIMEOUT, async {
+	kio::clock::timeout(TIMEOUT, async {
 		while presence().active() != 0 {
-			tokio::task::yield_now().await;
+			kio::clock::sleep(Duration::from_millis(1)).await;
 		}
 	})
 	.await

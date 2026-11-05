@@ -122,7 +122,7 @@ mod timestamps {
 				.unwrap();
 			let mut subscriber = track.subscribe(None);
 			let mut subscription = subscriber.subscription();
-			subscription.max_delay = None;
+			subscription.delay.max = None;
 			subscriber.update(subscription).unwrap();
 			let config = crate::stream::Config::default();
 			let mut producer = crate::stream::Producer::new(track, config.clone());

@@ -71,15 +71,17 @@ impl Consumer {
 	/// Fails with [`NotFound`](moq_net::Error::NotFound) unless the group is
 	/// listed.
 	pub async fn group(&self, group: impl Into<Path>) -> Result<GroupConsumer> {
-		let track = self.broadcast.track(&group_track(group))?.subscribe(None).await?;
 		Ok(GroupConsumer {
-			inner: moq_json::snapshot::Consumer::new(track, Default::default()),
+			inner: self.subscribe(&group_track(group)).await?,
 		})
 	}
 
 	async fn subscribe<T: serde::de::DeserializeOwned>(&self, name: &str) -> Result<moq_json::snapshot::Consumer<T>> {
-		let track = self.broadcast.track(name)?.subscribe(None).await?;
-		Ok(moq_json::snapshot::Consumer::new(track, Default::default()))
+		let track = self.broadcast.track(name)?;
+		// The reader subscribes itself; resolving the info rides on that subscription.
+		let reader = moq_json::snapshot::Consumer::new(track.clone(), Default::default());
+		track.info().await?;
+		Ok(reader)
 	}
 }
 
@@ -164,7 +166,8 @@ mod tests {
 		match announced.next().await? {
 			moq_net::announce::Event::Start(route)
 			| moq_net::announce::Event::Update(route)
-			| moq_net::announce::Event::Restart(route) => Some((route, true)),
+			| moq_net::announce::Event::Restart(route)
+			| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
 			moq_net::announce::Event::End(route) => Some((route, false)),
 		}
 	}
@@ -179,11 +182,11 @@ mod tests {
 
 	fn test_producer() -> (Producer, origin::Producer) {
 		let origin = produce_origin();
-		let producer = Producer::new(
+		let producer = crate::produce::spawned(Producer::new(
 			produce::Config::new()
 				.with_origin(origin.clone())
 				.with_node(Path::from_static("sjc")),
-		);
+		));
 		(producer, origin)
 	}
 

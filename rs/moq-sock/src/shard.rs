@@ -671,7 +671,6 @@ mod tests {
 	/// socket would be unrelated to the connection ID.
 	#[test]
 	#[cfg(target_os = "linux")]
-	#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 	fn a_connection_id_reaches_its_own_member() {
 		const COUNT: u16 = 4;
 
@@ -716,6 +715,10 @@ mod tests {
 
 				// The send is local and the filter is synchronous, but the receive
 				// still has to be given a moment to land.
+				#[expect(
+					clippy::disallowed_methods,
+					reason = "a sync test with no runtime waits on a real kernel socket"
+				)]
 				std::thread::sleep(std::time::Duration::from_millis(50));
 				assert_eq!(
 					receiver(&sockets),

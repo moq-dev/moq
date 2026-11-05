@@ -1,8 +1,10 @@
 pub mod bandwidth;
 pub mod broadcast;
 pub mod cache;
+pub mod datagram;
 pub mod frame;
 pub mod group;
+pub mod socket;
 pub mod track;
 
 // The origin + announce subsystem shares one implementation (a route table).
@@ -19,36 +21,41 @@ mod front;
 mod aborts;
 mod bytes;
 mod clock;
-pub(crate) mod datagram;
 mod delivered;
 mod expiry;
+// The early exit a read nothing woke takes.
+mod idle;
 mod skipped;
+// How far a group's writer reads ahead of its fastest reader.
+pub(crate) mod pace;
 // The DEFLATE codec behind compressed tracks.
 mod flate;
 pub(crate) mod object;
 mod request_queue;
 mod resume;
+// Resume checked against a model of one logical track.
+#[cfg(all(test, feature = "async"))]
+mod resume_model;
 mod subscription;
 mod time;
 mod timed;
 mod weak_cache;
 
-#[cfg(test)]
-mod test_tracing;
-
 use request_queue::RequestQueue;
 use weak_cache::{WeakCache, WeakEntry};
 
 pub use bytes::*;
-// Datagram stays flat at the crate root (a small track-adjacent wire type),
-// not under a role module.
-pub use datagram::*;
+// The payload type stays flat at the crate root beside `Timestamp`.
+pub use datagram::Datagram;
 pub use time::*;
 pub use timed::Timed;
 
 /// Publishing broadcasts, announcing routes, and consuming both through an origin.
 pub mod origin {
 	pub use super::follow::Following;
+	pub(crate) use super::origin_impl::HiddenWithheld;
+	#[cfg(feature = "async")]
+	pub(crate) use super::origin_impl::HiddenWithholding;
 	#[cfg(feature = "async")]
 	// private: capability gap
 	pub(crate) use super::origin_impl::Lookup;

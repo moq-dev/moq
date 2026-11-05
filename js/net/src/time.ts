@@ -6,6 +6,7 @@
  * @module
  */
 import { now } from "@moq/clock";
+import { toNumber } from "./util/bigint.ts";
 
 /** Units per second for a {@link Timestamp}'s value, e.g. `1000` for milliseconds. */
 export type Timescale = number & { readonly _brand: "timescale" };
@@ -49,8 +50,8 @@ function assertTimestampValue(value: number): void {
  * own scale, so a track can pick its units and conversions can't silently mix them up.
  *
  * The value must be finite and in `[0, Number.MAX_SAFE_INTEGER]`. Fractions are allowed
- * ({@link Timestamp.now}, scale conversion). Encoding rounds to the nearest integer at the
- * track timescale. Integer timestamps are exact through `2^53 - 1` units; this package
+ * ({@link Timestamp.now}, scale conversion). Encoding rounds down to an integer at the
+ * track timescale, as the Rust `Timestamp::convert` does. Integer timestamps are exact through `2^53 - 1` units; this package
  * does not use BigInt for timestamps. {@link Timestamp.as} also refuses a converted
  * value that leaves that range, so a legal source timestamp cannot become an unencodable
  * wire timestamp after a scale change.
@@ -110,6 +111,22 @@ export class Timestamp {
 		const e = Math.min(ea, eb);
 		return (ma * BigInt(other.scale)) << BigInt(ea - e) < (mb * BigInt(this.scale)) << BigInt(eb - e);
 	}
+}
+
+/**
+ * `timestamp`'s value at `scale`, rounded down exactly, as Rust's integer `Timestamp::convert`.
+ *
+ * A double is a dyadic rational, so the conversion runs in BigInt with no rounding before the
+ * floor: an aligned value keeps it (4611686021000000 ns is 4611686021 ms, where `as` gives
+ * 4611686020.999999), and one instant gives one result whatever scale it came from. Throws a
+ * `RangeError` past the safe integer range.
+ *
+ * @internal
+ */
+export function floorAt(timestamp: Timestamp, scale: Timescale): number {
+	if (timestamp.scale === scale) return Math.floor(timestamp.value);
+	const [mantissa, exponent] = binary(timestamp.value);
+	return toNumber((mantissa * BigInt(scale)) / (BigInt(timestamp.scale) << BigInt(-exponent)));
 }
 
 // A finite, non-negative `value` exactly as `mantissa * 2^exponent`. Doubling is exact, so

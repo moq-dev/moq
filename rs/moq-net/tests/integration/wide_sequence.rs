@@ -11,7 +11,7 @@ use support::harness::{MockConnectOptions, connect_mock};
 
 /// Published QUIC-varint sequences keep all their bits on the live feed, directly
 /// and through a forwarding origin, even beyond JavaScript's exact number range.
-#[moq_clock::test]
+#[kio::test]
 async fn largest_quic_sequence_reaches_the_subscriber() {
 	for alpn in ["moq-lite-02", "moq-lite-06", "moq-transport-18"] {
 		for relayed in [false, true] {
@@ -49,7 +49,7 @@ async fn largest_quic_sequence_reaches_the_subscriber() {
 				let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
 				group.write_frame(timestamp, b"ladder".as_ref()).unwrap();
 				group.finish().unwrap();
-				let mut got = moq_clock::timeout(Duration::from_secs(5), sub.recv_group())
+				let mut got = kio::clock::timeout(Duration::from_secs(5), sub.recv_group())
 					.await
 					.unwrap_or_else(|_| panic!("{alpn} relayed={relayed} sequence={sequence} hung"))
 					.unwrap()
@@ -57,8 +57,8 @@ async fn largest_quic_sequence_reaches_the_subscriber() {
 				assert_eq!(got.sequence, sequence, "{alpn} relayed={relayed}");
 				let frame = got.read_frame().await.unwrap().unwrap();
 				assert_eq!(frame.payload, b"ladder".as_ref());
-				// Lite-02 carries no timestamps, and a lite-06 subscriber drops them.
-				let timed = alpn == "moq-transport-18";
+				// Lite-02 carries no timestamps.
+				let timed = alpn != "moq-lite-02";
 				assert_eq!(frame.timestamp, timed.then_some(timestamp), "{alpn} relayed={relayed}");
 			}
 		}
@@ -78,7 +78,7 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 
 /// The relay accepts the wide sequence from lite-07, refuses that subscription to the
 /// lite-06 reader that cannot encode it, and keeps the session serving other tracks.
-#[moq_clock::test]
+#[kio::test]
 async fn wide_sequence_fails_only_its_subscription() {
 	const WIDE: u64 = 1 << 62;
 
@@ -118,7 +118,7 @@ async fn wide_sequence_fails_only_its_subscription() {
 	let consumer = client.consume();
 	let remote = consumer.follow("bench", None).unwrap().available().await.unwrap();
 
-	let result = moq_clock::timeout(Duration::from_secs(5), async {
+	let result = kio::clock::timeout(Duration::from_secs(5), async {
 		let mut sub = remote.track("wide").unwrap().subscribe(None).await?;
 		sub.recv_group().await.map(|group| group.map(|group| group.sequence))
 	})
@@ -138,7 +138,7 @@ async fn wide_sequence_fails_only_its_subscription() {
 
 /// A subscription that starts inside the QUIC range and later receives a group of
 /// `1 << 62` fails only that subscription. The session and the other track continue.
-#[moq_clock::test]
+#[kio::test]
 async fn a_later_wide_group_fails_only_that_subscription() {
 	const WIDE: u64 = 1 << 62;
 
@@ -175,7 +175,7 @@ async fn a_later_wide_group_fails_only_that_subscription() {
 	let mut group = wide.create_group(moq_net::group::Info { sequence: WIDE }).unwrap();
 	group.write_frame(Timestamp::ZERO, b"wide".as_ref()).unwrap();
 
-	let result = moq_clock::timeout(Duration::from_secs(5), sub.recv_group())
+	let result = kio::clock::timeout(Duration::from_secs(5), sub.recv_group())
 		.await
 		.expect("the wide group hung the subscription instead of failing it");
 	match result {

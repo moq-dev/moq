@@ -13,10 +13,6 @@ pub(super) fn unprotect_header(
 	spaces: &[PacketSpace; 3],
 	stateless_reset_token: Option<ResetToken>,
 ) -> Option<UnprotectHeaderResult> {
-	if partial_decode.is_0rtt() {
-		trace!("discarding early data");
-		return None;
-	}
 	let header_crypto = if let Some(space) = partial_decode.space() {
 		if let Some(crypto) = &spaces[space].crypto {
 			Some(&*crypto.header.remote)

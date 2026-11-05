@@ -19,7 +19,7 @@ The contract is [draft-lcurley-moq-e2ee](/drafts/draft-lcurley-moq-e2ee.md), pro
 
 ### Epoch and identity
 
-- Every publisher instance mints an epoch, a UUIDv7 in lowercase text, and publishes at `<opaque>` with the epoch on its route, where `<opaque>` derives from the credential and the semantic broadcast name without the epoch. The epoch is an input to every HKDF derivation, so a restart, takeover, or explicit group sequence cannot repeat a nonce under a key: nothing is persisted across instances and no generation counter is redistributed. The epoch is the shared [`Epoch`](/doc/concept/moq-lite.md#publisher-epochs) primitive. Subscribers resolve `<opaque>` and take the epoch from its route, where the newest wins; on a wire without route epochs the application supplies it.
+- Every publisher instance mints an epoch, a UUIDv7 in lowercase text, and publishes at `<opaque>` with the epoch on its route, where `<opaque>` derives from the credential and the semantic broadcast name without the epoch. The epoch is an input to every HKDF derivation, so a restart, takeover, or explicit group sequence cannot repeat a nonce under a key: nothing is persisted across instances and no generation counter is redistributed. The epoch is `moq_crypto::e2ee::Epoch`, announced as the route's [instance](/doc/concept/moq-lite.md#publisher-instances). Subscribers resolve `<opaque>` and take the epoch from its route's instance; on a wire that carries no instance the session mints one, so the application supplies the epoch.
 - An encrypting publisher refuses a shared or explicit epoch (maintainer, 2026-10-08). Two producers handed one epoch would derive the same keys and repeat every nonce. Both cores produce only under an epoch they minted themselves; consuming still binds a discovered one. Rejected: a per-instance salt. State the rule in the draft's epoch section.
 - The epoch is untrusted and unauthenticated. A wrong epoch fails authentication and a withheld one denies service; neither can make a nonce repeat, because only the publisher instance chooses what it encrypts under. This is the same trust a cache needs to serve the right instance. First-party plaintext publishers already mint the same route epoch.
 - Nothing in the path says the bytes are encrypted. The format after decryption (`meeting.hang`) is inside the opaque name; a plaintext player, exporter, or matcher that opens a protected broadcast finds no catalog it can read and fails with its usual typed refusal, the same as for any format it does not support.
@@ -57,17 +57,26 @@ Rejected:
 
 The broadcast wrappers merged in [#5876](https://github.com/moq-dev/moq/pull/5876) with `reserve_track`, which still serves declared names; [rust-publish](/quest/m2/e2ee/rust-publish.md) needs nothing more (maintainer, 2026-10-19).
 
-Before `@moq/e2ee` is first published, add its entrypoints to the API
+Noted 2026-10-31 from [moq-dev/moq#7307](https://github.com/moq-dev/moq/pull/7307):
+
+- The draft's epoch rule (`drafts/draft-lcurley-moq-e2ee.md:136`, clones of a
+  producing generation share permanent track claims so reopening a physical
+  track cannot reset its nonce counters) leaves its resume rule implicit.
+  State explicitly in that section how a reopened or resumed track continues
+  from those claims.
+- moq-net's `Lister` has only `poll_wanted`/`poll_unwanted`
+  (`rs/moq-net/src/model/listing.rs:601` on be39188000), no async forms, so
+  neither the e2ee wrapper nor the trait mirror has them. Add them to the
+  wrapper once moq-net does.
+
+Before `@moq/crypto` is first published, add its entrypoints to the API
 Extractor declaration checks, which analyze only published packages since
 [moq-dev/moq#6794](https://github.com/moq-dev/moq/pull/6794).
 
 ## Required
 
-- [Undeclared track names](/quest/m2/e2ee/undeclared-names.md) - an encrypted
-  broadcast's `requests()` serves names nobody created or reserved, under
-  semantic names, in Rust
 - [JS undeclared track names](/quest/m2/e2ee/js-undeclared-names.md) -
-  `@moq/net` exposes a broadcast request handler and `@moq/e2ee` serves
+  `@moq/net` exposes a broadcast request handler and `@moq/crypto` serves
   undeclared names through it
 - [Rust protected publisher seams](/quest/m2/e2ee/rust-publish.md) - Rust
   publishers emit encrypted catalogs and no plaintext semantic catalog in
@@ -82,7 +91,6 @@ Extractor declaration checks, which analyze only published packages since
 - [Cross-language encrypted proof](/quest/m2/e2ee/interop.md) - browser
   TypeScript and native Rust exchange encrypted media both ways, with relays
   forwarding and metering blind
-- [Cloned publisher processes](/quest/m2/e2ee/cloned-process.md) - the draft and docs say a cloned process mints its own generation, and a CryptoKey caller owns the 32-byte rule
 
 ## Closes
 
@@ -90,5 +98,4 @@ Extractor declaration checks, which analyze only published packages since
 
 ## Related
 
-- [archive](/quest/m1/archive/README.md) - protected broadcasts are deliberately outside recording and replay formats
 - [Wrapper traits over moq-net](/quest/m2/net-wrap/README.md) - the traits the e2ee wrappers implement, so every writer and reader takes an encrypted broadcast

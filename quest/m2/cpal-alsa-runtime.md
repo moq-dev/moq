@@ -2,22 +2,24 @@
 
 ## Goal
 
-Condition: a cpal release on crates.io whose Linux build no longer makes
-libasound a load-time requirement, either by loading it at runtime (dlopen)
-or by putting the ALSA host behind a feature that the PulseAudio host can
-replace.
+A cpal release on crates.io whose Linux build no longer makes libasound a
+load-time requirement, either by loading it at runtime (dlopen) or by putting
+the ALSA host behind a feature that the PulseAudio host can replace. Once the
+release is out, delete this quest.
 
-Check: build a capture and playback `moq-cli` against that release (with
-runtime loading, `--features capture`; with an optional host, cpal's ALSA
-host off and `pulseaudio` on) and confirm `readelf -d` lists no
-`libasound.so.2` under `NEEDED`. A clean `readelf` is not enough on its own:
-the binary must also start, list devices, and play on a host without
-libasound, as [capture-alsa-link](/quest/m2/capture-alsa-link.md) verifies.
+## Waiting
 
-Advance it by proposing the change upstream (RustAudio/cpal, and
-diwic/alsa-sys if the loading lives there). Posting there needs maintainer
-approval, which is pending: on 2026-10-06 the maintainer chose not to post
-yet. Once the release is out, delete this quest.
+- RustAudio/cpal: ships that release, as asked in
+  [RustAudio/cpal#1421](https://github.com/RustAudio/cpal/issues/1421) (or
+  diwic/alsa-sys, if the loading lives there). Check: build a capture and
+  playback `moq-cli` against that release (with runtime loading,
+  `--features capture`; with an optional host, cpal's ALSA host off and
+  `pulseaudio` on) and confirm `readelf -d` lists no `libasound.so.2` under
+  `NEEDED`. A clean `readelf` is not enough on its own: the binary must also
+  start, list devices, and play on a host without libasound, as
+  [capture-alsa-link](/quest/m2/capture-alsa-link.md) verifies.
+
+## Plan
 
 Decided 2026-10-08: the capture chain (this quest,
 [capture-alsa-link](/quest/m2/capture-alsa-link.md), and
@@ -25,7 +27,7 @@ Decided 2026-10-08: the capture chain (this quest,
 until cpal ships runtime ALSA loading. Nothing is posted upstream and no fork
 is taken meanwhile.
 
-## Plan
+Filed 2026-11-02 (maintainer-approved, /quest-unblock): [RustAudio/cpal#1421](https://github.com/RustAudio/cpal/issues/1421), recommending runtime loading first (most naturally in alsa-sys) and an optional ALSA host second. Related, not duplicates: RustAudio/cpal#1404 (FreeBSD-only `alsa` feature), cpal#929, and diwic/alsa-sys#10 (static linking).
 
 State as of 2026-10-05: cpal 0.18.2 (pinned here) and cpal master (0.19.0)
 both depend on `alsa` unconditionally on Linux and the BSDs. `alsa` 0.12.1

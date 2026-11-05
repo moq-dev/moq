@@ -34,6 +34,9 @@ pub struct Audio {
 	/// A map of track name to rendition configuration.
 	/// This is not an array so it will work with JSON Merge Patch.
 	/// We use a BTreeMap so keys are sorted alphabetically for *some* deterministic behavior.
+	///
+	/// A malformed rendition refuses the whole catalog when decoding.
+	#[serde(deserialize_with = "crate::catalog::deserialize_renditions")]
 	pub renditions: BTreeMap<String, AudioConfig>,
 }
 
@@ -113,15 +116,16 @@ pub struct AudioConfig {
 	#[serde(default)]
 	pub track: Option<String>,
 
-	/// The publisher instance the reference names, when the catalog knows it. Absent names
-	/// whichever instance the reader resolves first, as in every catalog before this field.
+	/// The instance of the stream the reference names, when the catalog knows it. Absent names
+	/// whichever stream the reader resolves first, as in every catalog before this field.
 	///
-	/// A reader on an epoch-aware route refuses another instance rather than fall back to it;
-	/// on an epochless route it is best effort, since the route cannot prove the instance.
-	/// Without [`broadcast`](Self::broadcast), it names the catalog's own instance.
+	/// A reader refuses a broadcast of another instance rather than fall back to it. A route
+	/// over a wire that carries no instance has one its session minted, which proves nothing,
+	/// so there it is best effort. Without [`broadcast`](Self::broadcast), it names the
+	/// catalog's own stream.
 	#[serde(default)]
 	#[serde_as(as = "Option<serde_with::DisplayFromStr>")]
-	pub epoch: Option<moq_net::Epoch>,
+	pub instance: Option<moq_net::Instance>,
 
 	/// Human-readable rendition name for track pickers.
 	#[serde(default)]
@@ -132,10 +136,10 @@ pub struct AudioConfig {
 	#[serde_as(as = "DisplayFromStr")]
 	pub codec: AudioCodec,
 
-	/// The sample rate of the audio in Hz.
+	/// The sample rate of the audio in Hz, never zero.
 	pub sample_rate: u32,
 
-	/// The number of channels in the audio.
+	/// The number of channels in the audio, never zero.
 	#[serde(rename = "numberOfChannels")]
 	pub channel_count: u32,
 
@@ -146,12 +150,14 @@ pub struct AudioConfig {
 	#[serde_as(as = "Option<DisplayFromStr>")]
 	pub layout: Option<AudioLayout>,
 
-	/// The maximum bitrate of the audio track in bits per second.
+	/// The maximum bitrate of the audio track in bits per second, at most 2^53 - 1.
 	#[serde(default)]
+	#[serde_as(as = "Option<crate::snapshot::Number>")]
 	pub bitrate: Option<u64>,
 
 	/// Whether this rendition may be selected. When false, no frames are coming and a consumer
-	/// must not select it. Only written when false.
+	/// should not select it, though one may keep it selected while no enabled alternative exists.
+	/// Only written when false.
 	#[serde(
 		default = "crate::catalog::enabled_default",
 		skip_serializing_if = "crate::catalog::enabled_skip"
@@ -191,21 +197,26 @@ pub struct AudioConfig {
 	#[serde(default)]
 	pub warmup: Option<std::time::Duration>,
 
-	/// How far this rendition's frames reach the transport behind the broadcast's earliest
-	/// rendition, measured at the publisher from each rendition's minimum flush lateness.
-	/// Absent on the earliest rendition and on any rendition the publisher did not measure.
+	/// How far this rendition's frames reach the transport behind the broadcast's other
+	/// renditions: a constant offset, either supplied by the publisher or measured as the least
+	/// its frames trailed the others' over a window of a second of media, keeping the largest
+	/// window. Lateness only some frames have, such as B-frame reorder, is left out, since a
+	/// consumer measures it. Absent on a rendition that trails nothing, and on any rendition the
+	/// publisher neither supplied nor measured.
+	///
+	/// A consumer adds a frame duration on top, so a publisher that knows its frames trail by no
+	/// more than their own duration, such as an encoder configured not to reorder or queue, states
+	/// `Some(Duration::ZERO)`. It is never measured, and is omitted on the
+	/// wire like an absent value, which means the same to a consumer. `None` leaves it to
+	/// measurement.
 	///
 	/// A consumer holds `delay + jitter` for this rendition and MUST NOT subtract one rendition's
-	/// `delay` from another's: each is a lifetime maximum, so two need not share an origin. It only
-	/// ever grows over the life of a stream, and is serialized like [`jitter`](Self::jitter).
+	/// `delay` from another's: each is taken against whichever rendition was ahead, so two need not
+	/// share an origin. It only ever grows over the life of a stream, and is serialized like
+	/// [`jitter`](Self::jitter).
 	#[serde_as(as = "MillisCeil")]
-	#[serde(default)]
+	#[serde(default, skip_serializing_if = "crate::catalog::millis::no_delay")]
 	pub delay: Option<std::time::Duration>,
-	/// This rendition's HLS segment records, when the publisher opted in. Without it the rendition
-	/// is not HLS-renderable. An undecodable value is absent, so it can never reject the media.
-	#[serde(default)]
-	#[serde_as(as = "serde_with::DefaultOnError<_>")]
-	pub hls: Option<crate::catalog::Hls>,
 }
 
 impl AudioConfig {
@@ -219,7 +230,7 @@ impl AudioConfig {
 		Self {
 			broadcast: None,
 			track: None,
-			epoch: None,
+			instance: None,
 			label: None,
 			codec: codec.into(),
 			sample_rate,
@@ -232,7 +243,6 @@ impl AudioConfig {
 			jitter: None,
 			warmup: None,
 			delay: None,
-			hls: None,
 		}
 	}
 
@@ -249,6 +259,21 @@ impl AudioConfig {
 			&& self.container == other.container
 			&& self.sample_rate == other.sample_rate
 			&& self.channel_count == other.channel_count
+	}
+}
+
+impl crate::catalog::Rendition for AudioConfig {
+	fn check(&self) -> crate::Result<()> {
+		if self.sample_rate == 0 {
+			return Err(crate::Error::Zero("sampleRate"));
+		}
+		if self.channel_count == 0 {
+			return Err(crate::Error::Zero("numberOfChannels"));
+		}
+		if let Some(layout) = &self.layout {
+			layout.check(self.channel_count)?;
+		}
+		Ok(())
 	}
 }
 

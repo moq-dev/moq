@@ -2,7 +2,7 @@
  *
  * Buffers incoming STREAM data and hands it to the application's
  * `ReadableStream` *on demand* (pull-driven). `onConsume` fires only when bytes
- * are actually delivered to the reader — never on mere receipt — so flow-control
+ * are actually delivered to the reader - never on mere receipt - so flow-control
  * credit (MAX_STREAM_DATA) tracks the application's read rate. Combined with the
  * sender claiming credit before sending, this bounds how far the peer can run
  * ahead of a slow reader: it can buffer at most one receive window of undelivered
@@ -59,7 +59,7 @@ export class RecvStream {
 					const chunk = this.#queue.shift() as Uint8Array;
 					this.#delivered += BigInt(chunk.byteLength);
 					controller.enqueue(chunk);
-					// Credit must track *delivery*, not receipt — do NOT move onConsume
+					// Credit must track *delivery*, not receipt - do NOT move onConsume
 					// into push(). With a zero high-water mark, pull only runs for an
 					// application read, so even the first chunk cannot be prefetched into
 					// an unaccepted stream's hidden ReadableStream queue.

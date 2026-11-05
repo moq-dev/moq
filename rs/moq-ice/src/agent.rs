@@ -4,7 +4,7 @@ use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::time::Duration;
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, IceConnectionState, Input, Output, Rtc};
 use stun_types::attribute::XorMappedAddress;
@@ -44,8 +44,9 @@ pub enum Error {
 	#[error("peer connection closed")]
 	Closed,
 
-	/// ICE never connected before the establishment deadline.
-	#[error("ICE did not connect before the establishment deadline")]
+	/// ICE never connected before the establishment deadline, or before the DTLS
+	/// handshake gave up waiting for it.
+	#[error("ICE did not connect in time")]
 	Timeout,
 
 	/// str0m failed (SDP, DTLS, SCTP, or ICE state).
@@ -250,7 +251,7 @@ impl Agent {
 						self.receive(&data, src);
 						continue;
 					}
-					_ = moq_clock::sleep_until(deadline) => {}
+					_ = kio::clock::sleep_until(deadline) => {}
 				}
 			}
 
@@ -276,6 +277,11 @@ impl Agent {
 		while self.failed.is_none() {
 			let output = match self.rtc.poll_output() {
 				Ok(output) => output,
+				// Before ICE connects no DTLS record can reach the peer, so a DTLS failure
+				// is its handshake giving up on retransmitting into the void. Its flights
+				// (~31s, randomly jittered) race the establishment deadline, so report
+				// either as ICE never connecting.
+				Err(str0m::RtcError::Dtls(_)) if !self.connected => return self.fail(Error::Timeout),
 				Err(err) => return self.fail(Error::rtc(err)),
 			};
 			match output {
@@ -534,6 +540,41 @@ mod tests {
 		assert!(matches!(agent.next().await, Ok(Event::Gathered)));
 		let gathered = agent.gathered.unwrap();
 		assert_eq!(agent.establish(), Some(gathered + ESTABLISH_TIMEOUT));
+	}
+
+	/// A peer that answers but never sends: DTLS gives up on its handshake before ICE
+	/// connects, which reports as ICE never connecting rather than a DTLS failure.
+	#[tokio::test(start_paused = true)]
+	async fn a_handshake_giving_up_before_ice_connects_is_a_timeout() {
+		let mut offerer = Rtc::builder().build(Instant::now().into_std());
+		let mut api = offerer.sdp_api();
+		api.add_channel("test".into());
+		let (offer, pending) = api.apply().unwrap();
+		let answer = Rtc::builder()
+			.build(Instant::now().into_std())
+			.sdp_api()
+			.accept_offer(offer)
+			.unwrap();
+		offerer.sdp_api().accept_answer(pending, answer).unwrap();
+
+		let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+		let local = socket.local_addr().unwrap();
+		let socket = Socket::new(socket.clone(), vec![local], crate::reader(socket)).unwrap();
+		// A STUN server that never answers holds the deadline past the handshake's
+		// retransmissions, so DTLS deterministically gives up first.
+		let stun = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+		let mut agent = Agent::new(offerer, socket)
+			.unwrap()
+			.with_stun(&[stun.local_addr().unwrap()]);
+
+		let err = loop {
+			match agent.next().await {
+				Ok(_) => continue,
+				Err(err) => break err,
+			}
+		};
+		assert!(matches!(err, Error::Timeout), "{err:?}");
+		assert_eq!(agent.establish(), None, "the deadline had yet to start");
 	}
 
 	#[test]

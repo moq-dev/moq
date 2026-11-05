@@ -362,6 +362,7 @@ impl<T> Inner<T> {
 
 impl<T: Serialize> Inner<T> {
 	fn update(&mut self, payload: Timed<&T>) -> Result<Option<usize>> {
+		let timestamp = self.track.rescale(payload.at)?;
 		// Split the borrow so `frame` can hold the encoder while `track` is written through.
 		let Inner { track, encoder, .. } = self;
 
@@ -373,7 +374,6 @@ impl<T: Serialize> Inner<T> {
 		// resynchronizes with a fresh snapshot. Most failures kill the track outright, but a rejected
 		// frame (too large) doesn't, and a delta against a snapshot no consumer ever saw is unreadable.
 		// The value stays the last one written, so a refresh restates that rather than the rejection.
-		let timestamp = payload.at;
 		track.write(timestamp, &frame)?;
 		let size = frame.payload.len();
 		frame.commit();
@@ -430,7 +430,18 @@ impl Track {
 		Ok(())
 	}
 
-	/// Write one encoded frame at `timestamp`, rolling a group when it's a snapshot.
+	/// `timestamp` at the track's timescale, or [`moq_net::Error::TimestampMismatch`] when it is
+	/// missing on a timed track, present on an untimed one, or beyond what the scale can hold.
+	///
+	/// An update checks this before encoding. Found by `write_frame` instead, the mismatch would
+	/// come after a snapshot published its group, leaving an empty newest group in place of the
+	/// last value, and the dropped frame would reset the encoder, rolling a group for nothing.
+	fn rescale(&self, timestamp: Option<moq_net::Timestamp>) -> Result<Option<moq_net::Timestamp>> {
+		Ok(self.inner.info().rescale(timestamp)?)
+	}
+
+	/// Write one encoded frame at a timestamp already [rescaled](Self::rescale) to the track, rolling a
+	/// group when it's a snapshot.
 	fn write(&mut self, timestamp: Option<moq_net::Timestamp>, encoded: &Encoded) -> Result<()> {
 		// Check before touching a group. `write_snapshot` closes the previous group and publishes a
 		// new one before the frame is written, so discovering the limit inside `write_frame` would
@@ -438,10 +449,6 @@ impl Track {
 		// value would be lost even though this update reported an error.
 		if encoded.payload.len() as u64 > moq_net::group::MAX_CACHE_BYTES {
 			return Err(moq_net::Error::FrameTooLarge.into());
-		}
-		// The same goes for a timestamp that doesn't match the track.
-		if timestamp.is_some() != self.inner.info().timescale.is_some() {
-			return Err(moq_net::Error::TimestampMismatch.into());
 		}
 
 		match encoded.keyframe {

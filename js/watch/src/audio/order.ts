@@ -12,13 +12,13 @@
  * also released once it spans the subscription's max delay, since nothing older is served. After
  * that, and throughout when not holding, a frame older than one already decoded is not admitted.
  */
-export class Order<T extends { group: number; frame: { timestamp: number } }> {
+export class Order<T extends { group: bigint; frame: { timestamp: number } }> {
 	// The current bounds in microseconds, while the head is still arriving.
 	#hold: (() => { floor: number; maxDelay: number }) | undefined;
 	// The head, in arrival order.
 	#held: T[] = [];
 	// The group the head started with, and its own first frame.
-	#first?: { group: number; timestamp: number };
+	#first?: { group: bigint; timestamp: number };
 	// The oldest and newest held timestamps.
 	#span?: { oldest: number; newest: number };
 	// The newest frame admitted since the decoder was last reset.

@@ -4,9 +4,81 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Congestion controllers take their seed from the connection
+
+`congestion::Init` gains `seed: u64`; add it where you build an `Init` by hand (a `Factory` implementation is unaffected).
+moq-quic draws it from the connection's rng, so `endpoint::Config::rng_seed` now replays BBR3's probe phases too.
+`bbr3::Config::probe_rng_seed` and moq-congestion's `testing` feature are removed; set `rng_seed` instead.
+
+### Transport cryptography uses rind
+
+Remove the `ring`, `aws-lc-rs`, and `rustls-aws-lc-rs` Cargo features. rind is always enabled.
+Build caller-supplied rustls configurations on `moq_crypto::provider::provider()?` (enable moq-crypto's `provider` feature) or `moq_tokio::crypto::provider()?`.
+
+A CPU missing a feature rind needs is reported as `moq_crypto::provider::UnsupportedCpu`, which names the feature:
+
+- Endpoint initialization returns `ConfigError::UnsupportedCpu`.
+- `client::Config::with_root_certificates` now returns `rustls::Error` instead of `VerifierBuilderError`. Both the CPU refusal and a verifier builder failure arrive in `rustls::Error::Other`; downcast its inner error to `UnsupportedCpu` or `rustls::client::VerifierBuilderError`.
+- `server::Config::with_single_cert` keeps its `rustls::Error` and reports the CPU refusal the same way, where it used to panic.
+
+Call `moq_crypto::provider::check()` before calling rind's primitives directly.
+
+QUIC packet protection, Retry integrity, reset tokens, and address-validation tokens keep their wire formats and derivation labels.
+
+### Receive operations wake transmission themselves ([#7707](https://github.com/moq-dev/moq/pull/7707))
+
+`ShouldTransmit` is removed. `recv::Stream::lease` returns `Result<Lease, Error>` and
+`poll_lease` returns `Poll<Result<Lease, Error>>`; remove the transmit hint from tuple
+destructuring. `restore`, `release`, and `Chunks::finalize` return `()`; call them
+directly. Each operation wakes the connection's transmit waiter when needed.
+
+### Waits replace stream and connection events
+
+Every wait is a `poll_*` taking the caller's `&kio::Waiter`, which moq-quic registers and wakes itself, so a driver keeps no waiter tables.
+`StreamEvent` is gone, and so are the `Event` variants a handle waited on; `Event` keeps only `PathUpdated`, and `mux::Event` and `mux::Connection::poll` are gone.
+
+| Before | After |
+| --- | --- |
+| `Event::HandshakeDataReady` | `Connection::poll_handshake_data` |
+| `Event::Connected` | `Connection::poll_connected` |
+| `Event::HandshakeConfirmed` | `Connection::poll_handshake_confirmed` |
+| `Event::ConnectionLost { reason }` | `Connection::poll_closed`, or `Connection::error` |
+| `Event::DatagramReceived` | `Datagrams::poll_recv` |
+| `StreamEvent::Opened { dir }` | `Streams::poll_accept` |
+| `StreamEvent::Available { dir }` | `Streams::poll_open` |
+| `StreamEvent::Readable { id }` | `recv::Chunks::poll_next`, `recv::Stream::poll_lease`, or `recv::Stream::poll_received_reset` |
+| `StreamEvent::Writable { id }` | `send::Stream::poll_write` |
+| `StreamEvent::Finished { id }`, `StreamEvent::Stopped { id, .. }` | `send::Stream::poll_end` |
+| `StreamEvent::Acked { id, .. }` | `send::Stream::poll_acked` |
+
+`poll_transmit` is the driver's wait, so a handle no longer kicks its driver after a call.
+`Connection::poll_transmit(now, max_datagrams, buf) -> Option<Transmit>` becomes `poll_transmit(waiter, now, max_datagrams, buf) -> Poll<Transmit>`, and `mux::Connection::poll_transmit(now) -> Option<Bytes>` becomes `poll_transmit(waiter, now) -> Poll<Bytes>`.
+With nothing to send it registers `waiter`, which the next call that queues something wakes; keep waiting on `poll_timeout` for pacing and loss recovery.
+
+A wake only schedules: moq-quic wakes under whatever lock guards the connection, so the woken task polls again under it.
+Stream waits fail with `send::Error::ConnectionLost` or `recv::Error::ConnectionLost` once the connection is lost, after accepted streams, readable bytes, and received datagrams drain.
+
+### Crypto is sealed to rustls ([#7028](https://github.com/moq-dev/moq/pull/7028))
+
+Build configs with `client::Config::new(Arc::new(rustls_client))` and `server::Config::new(Arc::new(rustls_server))`; both are infallible.
+`crypto::rustls::QuicClientConfig`, `QuicServerConfig`, their `TryFrom` and `with_initial`, and `NoInitialCipherSuite` are gone, as are the public `client::Config::crypto` and `server::Config::crypto` fields.
+A custom crypto implementation is no longer supported: the `crypto` traits, `Keys`, and `KeyPair` are crate-private.
+Replace `conn.crypto_session().handshake_data()` and its downcast to `crypto::rustls::HandshakeData` with `conn.handshake_data()`, which returns `Option<crypto::HandshakeData>`.
+Its `protocol` field is now `alpn`, and `protocol_version` and `cipher_suite` are dropped.
+Replace `crypto_session().peer_identity()` and its downcast with `conn.peer_identity()`, which returns `Option<Vec<CertificateDer<'static>>>`.
+`Connection::export_keying_material` and `transport_parameters` are no longer public.
+A rustls config without TLS 1.3 or the AES-128-GCM-SHA256 suite now fails each connection: the client's connect returns `ConnectError::Tls`, and the server closes the connection or drops its Initial.
+`ConnectError` no longer implements `Eq`.
+rustls is a required dependency; rind supplies transport cryptography.
+
+### An evicted stream fails `received_reset` ([#7624](https://github.com/moq-dev/moq/pull/7624))
+
+`recv::Stream::received_reset` returns `Err(Error::Evicted)` for a stream evicted to free a stuck receive window, until the application stops it, rather than `Err(Error::Closed)`.
+Treat it as a failed read and stop the stream: a reader that watches for a reset instead of reading would otherwise leave its leased bytes holding further eviction off.
+
 ### Early data is removed
 
-Wait for `Event::Connected` before opening streams or sending application data.
+Wait for `Connection::poll_connected` before opening streams or sending application data.
 `Connection::has_0rtt`, `accepted_0rtt`, and the `crypto::Session::early_crypto` and `early_data_accepted` hooks are gone.
 Custom crypto sessions no longer implement those hooks.
 Rustls configs disable early data, including caller-supplied configs, while session tickets still resume 1-RTT handshakes.
@@ -24,7 +96,7 @@ Nothing public decodes a `VarInt` or the other former `Codec` types (`StreamId`,
 
 Packet parsers and headers, `HashedConnectionIdGenerator` (with `set_lifetime`), `BloomTokenLog`, `TokenMemoryCache`, token policy traits (`TokenLog`, `TokenStore`, and `TokenReuseError`), `NoneTokenLog`, `NoneTokenStore`, `ClientConfig::token_store`, and `ValidationTokenConfig::log` are internal.
 Use `Endpoint` to parse incoming datagrams, `RandomConnectionIdGenerator` or a consumer's `ConnectionIdGenerator`, and the default token policy.
-`TimeSource`, `StdSystemTime`, and `ServerConfig::time_source` are gone; address validation uses `moq_clock::wall()`, including an installed simulated clock.
+`TimeSource`, `StdSystemTime`, and `ServerConfig::time_source` are gone; address validation uses `kio::clock::wall()`, including an installed simulated clock.
 Unused `Connection::local_ip`, `min_rtt`, `has_pending_retransmits`, `ping`, `force_key_update`, `path_changed`, and `max_concurrent_streams` accessors are no longer public.
 `Endpoint::set_server_config`, `incoming_buffer_bytes`, and `Incoming::orig_dst_cid` are also internal or removed; configure the endpoint at construction.
 To rotate TLS certificates on a running endpoint, give the `ServerConfig`'s rustls config a `ResolvesServerCert` that returns the current certificate, as moq-tokio's `tls::Serve` does.
@@ -82,4 +154,4 @@ targets run through the hidden `fuzz` module behind the `fuzz` feature; see
 ### `congestion::NewReno` removed
 
 `congestion::NewReno` and `congestion::NewRenoConfig` are gone.
-Use `Bbr3Config` (the default) or `CubicConfig` instead.
+Use `bbr3::Config` (the default) or `cubic::Config` instead.

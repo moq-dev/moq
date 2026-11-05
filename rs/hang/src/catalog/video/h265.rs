@@ -104,14 +104,17 @@ impl FromStr for H265 {
 		};
 
 		let profile = parts.next().ok_or(Error::InvalidCodec)?;
-		let profile_space = match profile.as_bytes().first().ok_or(Error::InvalidCodec)? {
-			b'A'..=b'Z' => 1 + profile.as_bytes()[0] - b'A',
-			_ => 0,
+		let (profile_space, profile_idc) = match profile.as_bytes().first().ok_or(Error::InvalidCodec)? {
+			// general_profile_space is two bits, and 0 has no letter.
+			space @ b'A'..=b'C' => (1 + space - b'A', &profile[1..]),
+			_ => (0, profile),
 		};
-		let profile_idc = (if profile_space > 0 { &profile[1..] } else { profile }).parse::<u8>()?;
+		let profile_idc = crate::catalog::codec_number(profile_idc, 10)?;
 
 		let compatibility = parts.next().ok_or(Error::InvalidCodec)?;
-		let profile_compatibility_flags = u32::from_str_radix(compatibility, 16)?.reverse_bits().to_be_bytes();
+		let profile_compatibility_flags = crate::catalog::codec_number::<u32>(compatibility, 16)?
+			.reverse_bits()
+			.to_be_bytes();
 
 		let level = parts.next().ok_or(Error::InvalidCodec)?;
 
@@ -121,22 +124,20 @@ impl FromStr for H265 {
 			_ => return Err(Error::InvalidCodec),
 		};
 
-		let level_idc = level[1..].parse::<u8>()?;
+		let level_idc = crate::catalog::codec_number(&level[1..], 10)?;
+
+		let mut constraints: Vec<&str> = parts.collect();
+		// Tolerate one empty trailing field (a dangling '.') emitted by older encoders/muxers.
+		if constraints.last() == Some(&"") {
+			constraints.pop();
+		}
+		if constraints.len() > 6 {
+			return Err(Error::InvalidCodec);
+		}
 
 		let mut constraint_flags = [0u8; 6];
-
-		let parts = parts.enumerate();
-		for (i, constraint) in parts {
-			// Tolerate an empty trailing field (a dangling '.') emitted by older
-			// encoders/muxers so we still parse their streams once this is fixed.
-			if constraint.is_empty() {
-				continue;
-			}
-			if i >= 6 {
-				return Err(Error::InvalidCodec);
-			}
-
-			constraint_flags[i] = u8::from_str_radix(constraint, 16)?;
+		for (flags, constraint) in constraint_flags.iter_mut().zip(constraints) {
+			*flags = crate::catalog::codec_number(constraint, 16)?;
 		}
 
 		Ok(Self {

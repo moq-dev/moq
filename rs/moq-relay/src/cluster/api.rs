@@ -8,7 +8,7 @@ use std::path::PathBuf;
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Config {
-	/// Fetch the list of peers to dial from an HTTP(S) URL or a local file,
+	/// Fetch peers from HTTPS, loopback HTTP, or a local file, refusing redirects,
 	/// reloading at runtime without a restart. The source returns a JSON array
 	/// of peers: bare URL strings and/or objects with `url`, `cost`, `egress`,
 	/// `token`, and `upstream`, exactly as `--cluster-connect` accepts, e.g.

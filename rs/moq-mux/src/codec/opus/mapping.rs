@@ -59,7 +59,9 @@ impl Mapping {
 
 	/// Check `config` into a mapping with one output channel per table entry.
 	///
-	/// Refuses family 0, a channel count the family does not allow, and a table
+	/// Refuses family 0, a channel count the family does not allow (family 2
+	/// allows only the 4, 9, 16, ... channels of first order ambisonics and up,
+	/// without RFC 8486's non-diegetic stereo pair), and a table
 	/// that names no streams, more coupled streams than streams, or a channel
 	/// past the decoded ones.
 	pub fn new(config: Config<'_>) -> Result<Self> {
@@ -75,6 +77,13 @@ impl Mapping {
 			_ => 255,
 		};
 		if table.is_empty() || table.len() > max_channels {
+			return Err(Error::UnsupportedChannelCount(table.len() as u32));
+		}
+		// RFC 8486 §3.1 gives family 2 (1 + n)² ambisonic channels for n in 0..=14, plus 0 or 2
+		// non-diegetic stereo ones. The catalog's ambisonic layout carries neither zeroth order nor
+		// the stereo pair, so only first order and up without the pair is accepted.
+		let order = (table.len() as u32).isqrt();
+		if family == 2 && (order < 2 || order * order != table.len() as u32) {
 			return Err(Error::UnsupportedChannelCount(table.len() as u32));
 		}
 
@@ -169,6 +178,16 @@ mod tests {
 		assert!(matches!(new(0, 1, 1, &[0, 1]), Err(Error::UnsupportedMappingFamily(0))));
 		assert!(matches!(new(1, 1, 0, &[]), Err(Error::UnsupportedChannelCount(0))));
 		assert!(matches!(new(1, 9, 0, &[0; 9]), Err(Error::UnsupportedChannelCount(9))));
+		assert_eq!(new(2, 4, 0, &[0, 1, 2, 3]).unwrap().family(), 2);
+		assert_eq!(new(2, 9, 0, &[0, 1, 2, 3, 4, 5, 6, 7, 8]).unwrap().family(), 2);
+		// Zeroth order, first order with RFC 8486's non-diegetic stereo pair, and counts it forbids.
+		for channels in [1u8, 3, 6, 11, 2, 5, 8, 10] {
+			let table: Vec<u8> = (0..channels).collect();
+			assert!(
+				matches!(new(2, channels, 0, &table), Err(Error::UnsupportedChannelCount(c)) if c == channels as u32),
+				"{channels} channels"
+			);
+		}
 		for (streams, coupled, table) in [(0, 0, &[0][..]), (1, 2, &[0]), (1, 1, &[2]), (200, 100, &[0])] {
 			assert!(
 				matches!(new(1, streams, coupled, table), Err(Error::InvalidMappingTable)),

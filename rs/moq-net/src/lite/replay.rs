@@ -10,9 +10,10 @@ pub(super) fn initial(events: impl IntoIterator<Item = announce::Event>) -> Vec<
 	let mut positions = HashMap::new();
 	for event in events {
 		let (update, active) = match event {
-			announce::Event::Start(update) | announce::Event::Update(update) | announce::Event::Restart(update) => {
-				(update, true)
-			}
+			announce::Event::Start(update)
+			| announce::Event::Update(update)
+			| announce::Event::Restart(update)
+			| announce::Event::Takeover { announce: update, .. } => (update, true),
 			announce::Event::End(update) => (update, false),
 		};
 		if let Some(index) = positions.remove(&update.prefix) {

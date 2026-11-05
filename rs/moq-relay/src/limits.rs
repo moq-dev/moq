@@ -96,7 +96,7 @@ pub struct Quic {
 	#[usage(
 		long = "limits-peer-quic-receive-window",
 		env = "MOQ_LIMITS_PEER_QUIC_RECEIVE_WINDOW",
-		default = "671088640",
+		default = "16777216",
 		setting = "limits.peer.quic.receive_window"
 	)]
 	pub receive_window: std::num::NonZeroU64,
@@ -104,7 +104,7 @@ pub struct Quic {
 	#[usage(
 		long = "limits-peer-quic-send-window",
 		env = "MOQ_LIMITS_PEER_QUIC_SEND_WINDOW",
-		default = "671088640",
+		default = "16777216",
 		setting = "limits.peer.quic.send_window"
 	)]
 	pub send_window: std::num::NonZeroU64,
@@ -112,9 +112,10 @@ pub struct Quic {
 
 impl Default for Quic {
 	fn default() -> Self {
-		// Well above the `[quic]` defaults, which are sized for one viewer rather
-		// than a link carrying a whole cluster's traffic.
-		let window = std::num::NonZeroU64::new(640 << 20).expect("non-zero");
+		// Above the `[quic]` defaults, which are sized for one viewer rather than a link
+		// carrying a whole cluster's traffic: about 450 Mbps at a 250 ms RTT, and a paused
+		// stream budget of half of it for the groups slow readers hold back.
+		let window = std::num::NonZeroU64::new(16 << 20).expect("non-zero");
 		Self {
 			max_streams: std::num::NonZeroU64::new(10 * moq_tokio::quic::DEFAULT_MAX_STREAMS).expect("non-zero"),
 			receive_window: window,

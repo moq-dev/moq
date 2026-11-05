@@ -27,6 +27,7 @@ criterion = { package = "bench-harness", path = "../bench-harness" }
 futures = { workspace = true }
 json-patch = "4"
 proptest = { workspace = true, features = ["handle-panics"] }
+workspace-hack = { path = "../workspace-hack" }
 
 [[bench]]
 name = "codec"

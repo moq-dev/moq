@@ -12,6 +12,27 @@ test("from refuses empty segments", () => {
 	expect(Path.from("foo/bar")).toBe("foo/bar" as Path.Valid);
 });
 
+test("from refuses a backslash that escapes neither a backslash nor a slash", () => {
+	for (const raw of ["\\", "a\\", "\\a", "a\\b", "a\\\\\\b", "a\\.b/c"]) {
+		expect(() => Path.from(raw)).toThrow("escapes neither");
+		expect(() => Path.normalizeRelative(raw)).toThrow("escapes neither");
+	}
+	// An escape takes exactly the byte after it, so runs of backslashes pair up.
+	for (const raw of ["\\\\", "a\\/b", "\\/a", "a\\\\/b", "a\\\\\\/b"]) {
+		expect(Path.from(raw)).toBe(raw as Path.Valid);
+	}
+	// A component ending in half an escape is refused even though the join would complete it.
+	expect(() => Path.from("a\\", "b")).toThrow("escapes neither");
+});
+
+test("resolve refuses a stranded escape", () => {
+	// Segments split at an escaped `/` too, so popping past one strands its `\`.
+	const base = Path.from("a\\/b/c");
+	expect(() => Path.resolve(base, asRel(".."))).toThrow("escapes neither");
+	expect(Path.tryResolve(base, asRel(".."))).toBeUndefined();
+	expect(Path.resolve(base, asRel("d"))).toBe(Path.from("a\\/b/d"));
+});
+
 test("from treats the empty path as the root", () => {
 	expect(Path.from("")).toBe(Path.empty());
 	expect(Path.from()).toBe(Path.empty());
@@ -231,12 +252,19 @@ test("tryResolve distinguishes the root from an escape", () => {
 test("normalizeRelative preserves an all-dot reference", () => {
 	expect(Path.normalizeRelative("")).toBe(asRel(""));
 	expect(Path.normalizeRelative(".")).toBe(asRel("."));
-	expect(Path.normalizeRelative("././")).toBe(asRel("."));
+	expect(Path.normalizeRelative("./.")).toBe(asRel("."));
 	expect(Path.normalizeRelative("./foo")).toBe(asRel("foo"));
-	expect(Path.normalizeRelative("foo//bar")).toBe(asRel("foo/bar"));
 	expect(Path.normalizeRelative("foo/./bar")).toBe(asRel("foo/bar"));
-	expect(Path.normalizeRelative("/foo/")).toBe(asRel("foo"));
 	expect(Path.normalizeRelative("../foo")).toBe(asRel("../foo"));
+	// Dropping a `.` cannot strand the `\` of an escaped `/` before it.
+	expect(() => Path.normalizeRelative("a\\/.")).toThrow("escapes neither");
+	expect(Path.normalizeRelative("a\\\\/.")).toBe(asRel("a\\\\"));
+});
+
+test("normalizeRelative refuses empty segments", () => {
+	for (const raw of ["/", "/foo", "foo/", "./", "foo//bar", "./foo/", "../"]) {
+		expect(() => Path.normalizeRelative(raw)).toThrow("empty segment");
+	}
 });
 
 test("parts splits a path into its components", () => {

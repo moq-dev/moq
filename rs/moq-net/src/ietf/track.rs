@@ -19,14 +19,14 @@ use super::Version;
 /// REQUEST_OK.
 #[derive(Clone, Debug)]
 pub struct TrackStatus<'a> {
+	/// The credential authorizing this request alone.
+	pub authorization_token: Option<super::token::RequestToken>,
 	pub request_id: RequestId,
 	pub track_namespace: Path,
 	pub track_name: Cow<'a, str>,
 	/// Whether the requester wants Track Properties on the answer (INCLUDE_PROPERTIES,
 	/// draft-22).
 	pub properties_wanted: bool,
-	/// The publisher instance the requester expects (MoQ Epoch).
-	pub epoch: Option<crate::Epoch>,
 }
 
 impl TrackStatus<'_> {
@@ -34,10 +34,10 @@ impl TrackStatus<'_> {
 	pub fn into_owned(self) -> TrackStatus<'static> {
 		TrackStatus {
 			request_id: self.request_id,
+			authorization_token: self.authorization_token,
 			track_namespace: self.track_namespace,
 			track_name: Cow::Owned(self.track_name.into_owned()),
 			properties_wanted: self.properties_wanted,
-			epoch: self.epoch,
 		}
 	}
 }
@@ -51,11 +51,10 @@ impl<'a> Message<'a> for TrackStatus<'a> {
 
 		// Only the opt-out is worth bytes, and an older peer would read the
 		// parameter as unknown, which is a protocol violation.
-		let include_properties = (!self.properties_wanted && Filter::is_draft22(version)).then_some(false);
-		let epoch = self.epoch.clone();
+		let include_properties = (!self.properties_wanted && Filter::is_draft20(version)).then_some(false);
 		encode_params!(w, version,
+			0x03 => self.authorization_token.clone(),
 			0x35 => include_properties,
-			super::epoch::EPOCH_PARAM => epoch,
 		);
 		Ok(())
 	}
@@ -67,10 +66,10 @@ impl<'a> Message<'a> for TrackStatus<'a> {
 		let subscribe = Subscribe::decode_msg(r, version)?;
 		Ok(Self {
 			request_id: subscribe.request_id,
+			authorization_token: subscribe.authorization_token,
 			track_namespace: subscribe.track_namespace,
 			track_name: subscribe.track_name,
 			properties_wanted: subscribe.properties_wanted,
-			epoch: subscribe.epoch,
 		})
 	}
 }
@@ -162,11 +161,11 @@ mod tests {
 	#[test]
 	fn test_track_status_v18_round_trip() {
 		let msg = TrackStatus {
+			authorization_token: None,
 			request_id: RequestId(1),
 			track_namespace: Path::from_static("test/ns"),
 			track_name: "video".into(),
 			properties_wanted: true,
-			epoch: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft18);
@@ -177,7 +176,7 @@ mod tests {
 		assert_eq!(decoded.track_name, "video");
 	}
 
-	const ALL: [Version; 2] = [Version::Draft18, Version::Draft22];
+	const ALL: [Version; 3] = [Version::Draft18, Version::Draft20, Version::Draft22];
 
 	/// INCLUDE_PROPERTIES only exists from draft-22, so the opt-out is dropped before it,
 	/// and the default (1) is never written.
@@ -186,16 +185,16 @@ mod tests {
 		for version in ALL {
 			for wanted in [true, false] {
 				let msg = TrackStatus {
+					authorization_token: None,
 					request_id: RequestId(1),
 					track_namespace: Path::from_static("ns"),
 					track_name: "video".into(),
 					properties_wanted: wanted,
-					epoch: None,
 				};
 				let wire = encode_message(&msg, version);
 
 				let decoded: TrackStatus = decode_message(&wire, version).unwrap_or_else(|e| panic!("{version}: {e}"));
-				let expected = wanted || !Filter::is_draft22(version);
+				let expected = wanted || !Filter::is_draft20(version);
 				assert_eq!(decoded.properties_wanted, expected, "{version} wanted={wanted}");
 			}
 		}

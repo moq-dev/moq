@@ -13,6 +13,7 @@ import { Derived, Effect, Signal } from "@moq/signals";
 import type * as Audio from "./audio";
 import { type Broadcast, CATALOG_FORMATS, type CatalogFormat } from "./broadcast";
 import { formatDuration, parseDuration } from "./duration";
+import { checkName, Echo } from "./echo";
 import { Player } from "./player";
 import type { Delay, Sync } from "./sync";
 import type * as Text from "./text";
@@ -65,6 +66,7 @@ const OBSERVED = [
 	"buffer",
 	"catalog-format",
 	"captions",
+	"echo",
 ] as const;
 
 // Parse visibility, with the default only when the attribute is absent.
@@ -101,6 +103,16 @@ function parseBuffer(value: string | null): Milli {
 	const parsed = parseDuration(value);
 	if (parsed !== undefined) return parsed;
 	throw invalidAttribute("buffer", value, 'a duration like "30s"');
+}
+
+// Parse the `echo` attribute: the viewer's feedback name, one visible path segment, or undefined when absent.
+function parseEcho(value: string | null): string | undefined {
+	if (value === null) return undefined;
+	try {
+		return checkName(value);
+	} catch {
+		throw invalidAttribute("echo", value, "one path segment not starting with `.`, any `\\` doubled");
+	}
 }
 
 /** Parse the element's catalog-format attribute, refusing unknown formats. */
@@ -195,6 +207,7 @@ export default class MoqWatch extends HTMLElement {
 	#follow = new Signal(true);
 	#catalogFormat = new Signal<CatalogFormat | undefined>(undefined);
 	#catalog = new Signal<Catalog.Root | undefined>(undefined);
+	#echo = new Signal<string | undefined>(undefined);
 
 	// The canvas element to render into.
 	#canvas = new Signal<HTMLCanvasElement | undefined>(undefined);
@@ -255,6 +268,17 @@ export default class MoqWatch extends HTMLElement {
 			text: { ...this.controls.text, container: this.#captionsOverlay },
 		});
 		this.signals.cleanup(() => this.player.close());
+
+		// Owned here rather than by the player, which only reads its origin: feedback publishes into it.
+		const echo = new Echo({
+			broadcast: this.player.broadcast,
+			origin: this.connection.origin,
+			enabled: this.#enabled,
+			name: this.#echo,
+			probe: this.connection.probe,
+			sources: [this.player.video, this.player.audio],
+		});
+		this.signals.cleanup(() => echo.close());
 		this.broadcast = this.player.broadcast;
 		this.video = this.player.video;
 		this.audio = this.player.audio;
@@ -311,6 +335,7 @@ export default class MoqWatch extends HTMLElement {
 		this.signals.run((effect) => this.#reflect(effect, "follow", effect.get(this.#follow) ? "" : "false"));
 		this.signals.run((effect) => this.#reflect(effect, "catalog-format", effect.get(this.#catalogFormat)));
 		this.signals.run((effect) => this.#reflect(effect, "captions", effect.get(this.controls.text.target)));
+		this.signals.run((effect) => this.#reflect(effect, "echo", effect.get(this.#echo)));
 		this.signals.run((effect) => {
 			const delay = effect.get(this.controls.delay);
 			this.#reflect(effect, "delay", typeof delay === "number" ? formatDuration(delay) : delay);
@@ -394,6 +419,7 @@ export default class MoqWatch extends HTMLElement {
 			else if (name === "buffer") this.buffer = parseBuffer(newValue);
 			else if (name === "catalog-format") this.catalogFormat = parseCatalogFormat(newValue);
 			else if (name === "captions") this.captions = newValue || undefined;
+			else if (name === "echo") this.echo = parseEcho(newValue);
 			else {
 				const exhaustive: never = name;
 				throw new Error(`Invalid attribute: ${exhaustive}`);
@@ -601,6 +627,23 @@ export default class MoqWatch extends HTMLElement {
 	set captions(value: string | undefined) {
 		this.controls.text.target.set(value || undefined);
 		this.#accept("captions");
+	}
+
+	/**
+	 * The viewer's feedback name, mirrored by the `echo` attribute; undefined (the default) publishes
+	 * no feedback. Once the watched catalog solicits feedback with an `echo` section, the element
+	 * publishes `<name>.echo` under its path, reporting what each rendition received and played.
+	 * Each element publishes its own: a second element on one connection that resolves the same
+	 * feedback path publishes nothing and warns until the first one leaves, so give each its own
+	 * name. One visible path segment: a `/` or a leading `.` is refused.
+	 */
+	get echo(): string | undefined {
+		return this.#echo.peek();
+	}
+
+	set echo(value: string | undefined) {
+		this.#echo.set(parseEcho(value ?? null));
+		this.#accept("echo");
 	}
 }
 

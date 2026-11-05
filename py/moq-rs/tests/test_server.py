@@ -74,7 +74,7 @@ async def test_server_client_roundtrip():
                 async for announcement in routes(client.announced()):
                     assert announcement.prefix == "hello"
 
-                    broadcast_consumer = await client.request_broadcast(announcement.prefix)
+                    broadcast_consumer = await client.request(announcement.prefix)
                     catalog = await moq.media.catalog(broadcast_consumer)
                     track_name, audio = next(iter(catalog.audio.items()))
                     assert audio.codec == "opus"
@@ -82,12 +82,12 @@ async def test_server_client_roundtrip():
                     media_consumer = await moq.media.TrackConsumer.subscribe(broadcast_consumer, track_name, audio)
 
                     payload = b"hello over the wire"
-                    media.write_frame(payload, timedelta(microseconds=1_000_000))
+                    media.write_frame(payload, moq.Timestamp(1_000_000, 1_000_000))
 
                     async for frame in media_consumer:
                         assert isinstance(frame, moq.media.MediaFrame)
                         assert frame.payload == payload
-                        assert frame.timestamp // timedelta(microseconds=1) == 1_000_000
+                        assert frame.timestamp == moq.Timestamp(1_000_000, 1_000_000)
                         break
 
                     break
@@ -209,6 +209,36 @@ async def test_session_state_names_a_failing_first_dial():
                 state = await asyncio.wait_for(session.state_changed(state.revision), timeout=10)
                 assert isinstance(state.failure, moq.Error.Connect)
                 assert state.connects == 0
+            session.cancel(0)
+
+
+async def test_viewer_holds_without_an_estimate():
+    """A viewer on a session that has not connected reads no estimate."""
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as silent:
+        silent.bind(("127.0.0.1", 0))
+        host, port = silent.getsockname()
+        client = moq.Client(
+            f"https://{host}:{port}",
+            tls=moq.ClientTls(insecure=True),
+            bind="127.0.0.1:0",
+            websocket=moq.WebSocketConfig(enabled=False),
+        )
+        async with client:
+            session = client.session
+            assert session is not None
+            viewers = session.viewers()
+            viewer = viewers.watch(1_000_000)
+            viewer.update(2_000_000)
+            viewers.set_target(0)
+            viewers.set_target(None)
+            assert viewer.rate() is None
+            # Past what a PROBE target carries: refused.
+            with pytest.raises(moq.Error.OutOfRange):
+                viewers.watch(2**53)
+            with pytest.raises(moq.Error.OutOfRange):
+                viewers.set_target(2**53)
             session.cancel(0)
 
 
@@ -535,7 +565,7 @@ async def test_client_context_keeps_the_body_error():
                     async for announcement in routes(consume.announced()):
                         assert announcement.prefix == "live"
                         break
-                    consumer = await asyncio.wait_for(consume.request_broadcast("live"), timeout=5.0)
+                    consumer = await asyncio.wait_for(consume.request("live"), timeout=5.0)
                     reader = await asyncio.wait_for(consumer.subscribe_track("data"), timeout=5.0)
                     reading.append(asyncio.create_task(drain(reader)))
                     demand = track.demand()

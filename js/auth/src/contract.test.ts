@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { GrantSchema, RefusalSchema, RequestSchema, TokenSchema } from "./contract.ts";
+import { encodeGrant, GrantSchema, RefusalSchema, RequestSchema, TokenSchema } from "./contract.ts";
 
 // The fixtures below are what the Rust `moq_auth::Request` and `Grant` serialize to,
 // so a server written against these schemas reads what a relay sends.
@@ -52,6 +52,23 @@ test("an end request carries its facts beside the rest", () => {
 	});
 	if (invalid.event !== "end") throw new Error("expected an end");
 	expect(invalid.reason).toBe("invalid");
+});
+
+test("an attachment has its own identity through its end", () => {
+	const base = { id: "connection", node: "relay", transport: "quic", path: "/room" };
+	expect(() => RequestSchema.parse({ ...base, event: "attach" })).toThrow();
+	const attach = RequestSchema.parse({ ...base, event: "attach", auth: "credential" });
+	const end = RequestSchema.parse({
+		...base,
+		event: "end",
+		auth: "credential",
+		reason: "dropped",
+		duration: 1,
+		bytes: { sent: 0, received: 0 },
+	});
+	expect(attach.auth).toBe("credential");
+	expect(end.auth).toBe(attach.auth);
+	expect(end.id).toBe(attach.id);
 });
 
 test("a SETUP token parses as the Rust vector", () => {
@@ -123,6 +140,14 @@ test("a grant round trips and is validated", () => {
 	expect(() => GrantSchema.parse({ publish: ["**"], expires: 4102444800.5 })).toThrow();
 	expect(() => GrantSchema.parse({ publish: ["a/**/b/**"] })).toThrow();
 	expect(() => GrantSchema.parse({ publish: ["**"], label: "project/*" })).toThrow(/invalid path/);
+});
+
+test("a capped grant answers with its cap nested in the role", () => {
+	const grant = GrantSchema.parse({ publish: { path: ["alice/**"], rate: 8_000_000 }, subscribe: ["**"] });
+	expect(grant).toMatchObject({ publish: ["alice/**"], publish_rate: 8_000_000, subscribe: ["**"] });
+	expect(encodeGrant(grant)).toEqual({ publish: { path: ["alice/**"], rate: 8_000_000 }, subscribe: ["**"] });
+	// A cap alone names nothing.
+	expect(() => encodeGrant({ publish_rate: 8000 })).toThrow(/name something/);
 });
 
 test("a tier a metrics label would escape is refused", () => {

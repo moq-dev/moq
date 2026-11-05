@@ -25,7 +25,10 @@
 
 use std::{
 	collections::VecDeque,
-	sync::Arc,
+	sync::{
+		Arc,
+		atomic::{AtomicBool, Ordering},
+	},
 	task::{Poll, ready},
 };
 
@@ -192,18 +195,29 @@ impl Conn {
 /// done.
 type Credit = Arc<Opened>;
 
+/// The streams one side has open toward its peer in one direction.
+#[derive(Default)]
+struct Open {
+	count: usize,
+	/// Whether an open pended since a stream last returned its credit. Atomic, so a pending
+	/// open's read-only check sets it without waking itself.
+	blocked: AtomicBool,
+}
+
 /// Counted in an open-stream total until dropped.
-struct Opened(kio::Shared<usize>);
+struct Opened(kio::Shared<Open>);
 
 impl Drop for Opened {
 	fn drop(&mut self) {
-		*self.0.lock() -= 1;
+		let mut open = self.0.lock();
+		open.count -= 1;
+		*open.blocked.get_mut() = false;
 	}
 }
 
 /// Take one stream credit of `max` from `open`, pending until the peer is done with one.
 fn poll_credit(
-	open: &kio::Shared<usize>,
+	open: &kio::Shared<Open>,
 	max: Option<usize>,
 	close: &Close,
 	waiter: &kio::Waiter,
@@ -213,24 +227,39 @@ fn poll_credit(
 	};
 	// Check the close first, so a credit granted before it is still taken below.
 	let closed = poll_close(close, waiter);
-	let Poll::Ready(mut count) = open.poll(waiter, |open| match **open < max {
-		true => Poll::Ready(()),
-		false => Poll::Pending,
+	let Poll::Ready(mut taken) = open.poll(waiter, |open| {
+		if open.count < max {
+			return Poll::Ready(());
+		}
+		open.blocked.store(true, Ordering::Relaxed);
+		Poll::Pending
 	}) else {
 		return closed.map(Err);
 	};
-	*count += 1;
+	taken.count += 1;
 	Poll::Ready(Ok(Some(Arc::new(Opened(open.clone())))))
+}
+
+/// What is left of `max` streams beyond those in `open`, unbounded without a `max`.
+fn stream_credit(open: &kio::Shared<Open>, max: Option<usize>) -> super::StreamCredit {
+	let Some(max) = max else {
+		return super::StreamCredit::new(u64::MAX, false);
+	};
+	let open = open.read();
+	super::StreamCredit::new(
+		max.saturating_sub(open.count) as u64,
+		open.blocked.load(Ordering::Relaxed),
+	)
 }
 
 /// Streams and datagrams one side has yet to accept.
 struct Incoming {
 	uni: kio::Queue<RecvStream>,
 	/// The uni streams toward this side still open, against [`Config::max_concurrent_uni_streams`].
-	uni_open: kio::Shared<usize>,
+	uni_open: kio::Shared<Open>,
 	bi: kio::Queue<(SendStream, RecvStream)>,
 	/// The bidi streams toward this side still open, against [`Config::max_concurrent_bi_streams`].
-	bi_open: kio::Shared<usize>,
+	bi_open: kio::Shared<Open>,
 	datagrams: kio::Queue<Bytes>,
 }
 
@@ -357,14 +386,6 @@ impl poll::Session for Session {
 		Poll::Ready(opened.map(|()| (send, recv)))
 	}
 
-	fn poll_open_request(
-		&self,
-		waiter: &kio::Waiter,
-		options: poll::SendOptions<'_, poll::Ungrouped>,
-	) -> Poll<Result<Option<poll::BiStreams<Self>>, Error>> {
-		self.poll_open_bi(waiter, options).map_ok(Some)
-	}
-
 	fn send_group(&self, _: i64) -> Option<poll::Ungrouped> {
 		None
 	}
@@ -404,6 +425,23 @@ impl poll::Session for Session {
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
 		poll_close(&self.side.conn.close, waiter)
 	}
+
+	/// Streams share no connection window, and one holds at most its buffer.
+	fn receive_window(&self) -> Option<super::ReceiveWindow> {
+		Some(super::ReceiveWindow::new(
+			u64::MAX,
+			self.conn().config.stream_buffer as u64,
+		))
+	}
+
+	fn stream_credit(&self, dir: super::Dir) -> Option<super::StreamCredit> {
+		let outgoing = self.side.outgoing();
+		let config = &self.conn().config;
+		Some(match dir {
+			super::Dir::Uni => stream_credit(&outgoing.uni_open, config.max_concurrent_uni_streams),
+			super::Dir::Bi => stream_credit(&outgoing.bi_open, config.max_concurrent_bi_streams),
+		})
+	}
 }
 
 /// One direction of a stream: the messages its writer queued for its reader.
@@ -427,6 +465,14 @@ enum End {
 }
 
 impl Channel {
+	/// Whether a read would return now: a queued message or the end.
+	fn readable(&self) -> Poll<()> {
+		match !self.messages.is_empty() || self.end.is_some() {
+			true => Poll::Ready(()),
+			false => Poll::Pending,
+		}
+	}
+
 	/// Close with a reset or stop code and drop what is queued. An earlier end stands,
 	/// unless it was a finish the reader has not fully read.
 	fn abort(&mut self, end: End) {
@@ -477,17 +523,20 @@ impl poll::SendStream for SendStream {
 			return Poll::Ready(Ok(0));
 		}
 
-		if let Poll::Ready(err) = poll_close(&self.close, waiter) {
+		// Peek at the close rather than register on it: only a write that parks waits for it.
+		if let Some(err) = closed(&self.close) {
 			return Poll::Ready(Err(err));
 		}
 
 		let buffer = self.buffer;
-		let mut channel = ready!(self.channel.poll(waiter, |channel| {
+		let Poll::Ready(mut channel) = self.channel.poll(waiter, |channel| {
 			match channel.end.is_some() || channel.messages.is_empty() || channel.queued < buffer {
 				true => Poll::Ready(()),
 				false => Poll::Pending,
 			}
-		}));
+		}) else {
+			return poll_close(&self.close, waiter).map(Err);
+		};
 		if let Some(End::Stop(code)) = channel.end {
 			return Poll::Ready(Err(Error::Stopped(code)));
 		}
@@ -591,16 +640,17 @@ impl poll::Chunks for Chunks {
 			return Poll::Ready(Ok(Some(Bytes::new())));
 		}
 
-		// Check the close first, so a message queued before it is still read below.
-		let closed = poll_close(&self.close, waiter);
-		let Poll::Ready(mut channel) = self.channel.poll(waiter, |channel| {
-			match !channel.messages.is_empty() || channel.end.is_some() {
-				true => Poll::Ready(()),
-				false => Poll::Pending,
+		// Only a read that parks registers on the close, so a ready read costs one lock.
+		let mut channel = match self.channel.poll(waiter, |channel| channel.readable()) {
+			Poll::Ready(channel) => channel,
+			Poll::Pending => {
+				let err = ready!(poll_close(&self.close, waiter));
+				// Queued messages drain first, so look again: one may have landed before the close.
+				match self.channel.poll(waiter, |channel| channel.readable()) {
+					Poll::Ready(channel) => channel,
+					Poll::Pending => return Poll::Ready(Err(err)),
+				}
 			}
-		}) else {
-			// Queued messages drain first; only an idle stream fails with the close.
-			return closed.map(Err);
 		};
 
 		let Some(front) = channel.messages.front_mut() else {
@@ -635,6 +685,23 @@ impl poll::Chunks for Chunks {
 		drop(channel);
 		self.release();
 	}
+
+	fn poll_reset(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
+		if self.stopped {
+			return Poll::Ready(Error::Closed);
+		}
+		if let Poll::Ready(err) = poll_close(&self.close, waiter) {
+			return Poll::Ready(err);
+		}
+		let channel = ready!(self.channel.poll(waiter, |channel| match channel.end {
+			Some(End::Reset(_)) => Poll::Ready(()),
+			_ => Poll::Pending,
+		}));
+		let Some(End::Reset(code)) = channel.end else {
+			unreachable!("checked above")
+		};
+		Poll::Ready(Error::Reset(code))
+	}
 }
 
 impl Drop for Chunks {
@@ -651,6 +718,7 @@ mod tests {
 		task::{Wake, Waker},
 	};
 
+	use super::super::{Dir, StreamCredit};
 	use super::*;
 	use poll::{RecvStream as _, SendStream as _, Session as _};
 
@@ -777,13 +845,19 @@ mod tests {
 			..Default::default()
 		});
 		let open = |a: &Session, waiter: &kio::Waiter| a.poll_open_uni(waiter, Default::default());
+		let credit = |a: &Session| a.stream_credit(Dir::Uni).unwrap();
+		assert_eq!(credit(&a), StreamCredit::new(2, false));
 
 		// Streams the peer has not accepted yet hold credit too.
 		let mut finished = ready(open(&a, &noop())).unwrap();
 		let _reset = ready(open(&a, &noop())).unwrap();
+		assert_eq!(credit(&a), StreamCredit::new(0, false), "none refused yet");
 		let count = Arc::new(Count::default());
 		let waiter = kio::Waiter::new(Waker::from(count.clone()));
 		assert!(open(&a, &waiter).is_pending());
+		assert_eq!(count.0.load(Ordering::Relaxed), 0, "being blocked wakes nobody");
+		assert_eq!(credit(&a), StreamCredit::new(0, true));
+		assert!(!credit(&b).blocked, "each side blocks alone");
 
 		// Credit is per direction.
 		let _back = ready(open(&b, &noop())).unwrap();
@@ -796,6 +870,7 @@ mod tests {
 		assert!(open(&a, &waiter).is_pending(), "an unread FIN keeps the credit");
 		assert_eq!(ready(read(&mut recv, usize::MAX)).unwrap(), None);
 		assert!(count.0.load(Ordering::Relaxed) > 0);
+		assert_eq!(credit(&a), StreamCredit::new(1, false), "returned credit unblocks");
 		let _third = ready(open(&a, &noop())).unwrap();
 		assert!(open(&a, &noop()).is_pending());
 
@@ -966,6 +1041,49 @@ mod tests {
 		drop(late);
 		ready(b.poll_accept_uni(&noop())).unwrap();
 		assert!(closed(ready(b.poll_accept_uni(&noop())).err().unwrap()));
+	}
+
+	/// Only a parked read or write waits on the close: one that returns at once leaves no
+	/// registration behind, as every frame of a session pays for one.
+	#[test]
+	fn only_parked_streams_wait_on_the_close() {
+		let (a, b) = pair(buffer(0));
+		let (mut send, mut recv) = uni(&a, &b);
+		let counted = || {
+			let count = Arc::new(Count::default());
+			(kio::Waiter::new(Waker::from(count.clone())), count)
+		};
+
+		let (ready_write, ready_write_count) = counted();
+		assert_eq!(
+			ready(send.poll_write_buf(&ready_write, &mut Bytes::from_static(b"one"))).unwrap(),
+			3
+		);
+		let (ready_read, ready_read_count) = counted();
+		let chunk = ready(poll::Chunks::poll_read_chunk(recv.get_mut(), &ready_read, usize::MAX));
+		assert_eq!(chunk.unwrap().unwrap(), "one");
+
+		// The channel is empty, so the read parks; refill it so the write parks too.
+		let (parked_read, parked_read_count) = counted();
+		assert!(poll::Chunks::poll_read_chunk(recv.get_mut(), &parked_read, usize::MAX).is_pending());
+		let (mut other, _other_recv) = uni(&a, &b);
+		ready(write(&mut other, &Bytes::from_static(b"two"))).unwrap();
+		let (parked_write, parked_write_count) = counted();
+		assert!(
+			other
+				.poll_write_buf(&parked_write, &mut Bytes::from_static(b"x"))
+				.is_pending()
+		);
+
+		a.close(4, "bye");
+		assert_eq!(ready_write_count.0.load(Ordering::Relaxed), 0);
+		assert_eq!(ready_read_count.0.load(Ordering::Relaxed), 0);
+		assert!(parked_read_count.0.load(Ordering::Relaxed) > 0);
+		assert!(parked_write_count.0.load(Ordering::Relaxed) > 0);
+
+		let closed = |err: Error| matches!(err, Error::Session { code: 4, .. });
+		assert!(closed(ready(read(&mut recv, usize::MAX)).unwrap_err()));
+		assert!(closed(ready(write(&mut other, &Bytes::from_static(b"x"))).unwrap_err()));
 	}
 
 	#[test]

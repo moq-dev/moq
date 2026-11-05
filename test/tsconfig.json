@@ -5,5 +5,5 @@
 		"noEmit": true
 	},
 	"include": ["**/*", "../js/common/worklet.d.ts"],
-	"exclude": ["**/node_modules", "**/dist", "**/target", "wasm/uniffi", "smoke"]
+	"exclude": ["**/node_modules", "**/dist", "**/target", "smoke"]
 }

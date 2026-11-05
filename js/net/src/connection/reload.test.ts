@@ -1,7 +1,8 @@
 import { expect, spyOn, test } from "bun:test";
-import { Instant, Manual, Milli, Nano, yieldNow } from "@moq/clock";
+import { Instant, Manual, Milli, Nano, now, sleep, yieldNow } from "@moq/clock";
 import { Effect, Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
+import { Viewers } from "../bandwidth.ts";
 import type { Producer as BroadcastProducer } from "../broadcast.ts";
 import { ConnectTimeout, SessionCode, SessionError, StreamCode, toTransport } from "../error.ts";
 import { Route } from "../hop.ts";
@@ -31,7 +32,7 @@ function publish(origin: OriginProducer, path: Path.Valid) {
 }
 
 async function settle() {
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await yieldNow();
 }
 
 test("equivalent URL instances do not restart a pending connection", async () => {
@@ -85,6 +86,14 @@ test("ReloadProps excludes transport", () => {
 	// @ts-expect-error transport is not part of ReloadProps
 	const props: ReloadProps = withTransport;
 	expect(props.enabled).toBeUndefined();
+});
+
+test("ReloadProps excludes viewers", () => {
+	const withViewers = { viewers: new Viewers() };
+	// @ts-expect-error a reload owns its viewers registry
+	const props: ReloadProps = withViewers;
+	expect(props.enabled).toBeUndefined();
+	withViewers.viewers.close();
 });
 
 test("closing mid-connect aborts the pending attempt", async () => {
@@ -187,7 +196,7 @@ test("an explicitly undefined delay field falls back to its default", async () =
 	});
 	try {
 		await waitUntil(() => dials > 0);
-		await new Promise((resolve) => setTimeout(resolve, 100));
+		await sleep(Nano.fromMilli(Milli(100)));
 		// The default initial delay is 1000ms, so the first retry is still pending.
 		expect(dials).toBe(1);
 	} finally {
@@ -198,7 +207,8 @@ test("an explicitly undefined delay field falls back to its default", async () =
 
 // Polls until `pred` holds, so a regression fails the test instead of hanging it.
 async function waitUntil(pred: () => boolean): Promise<void> {
-	for (let i = 0; i < 500; i++) {
+	const deadline = Instant.add(now(), Nano.fromMilli(Milli(1000)));
+	while (now() <= deadline) {
 		if (pred()) return;
 		await settle();
 	}

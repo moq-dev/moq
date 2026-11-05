@@ -1,0 +1,5 @@
+error: this statement runs once, so it cannot return `Poll::Pending`: wait with `let x: T = wait!(Step => poll)?;`
+  --> tests/ui/hidden_yield.rs:18:22
+   |
+18 |         let c = std::task::ready!(self.values.poll_pop(waiter))?;
+   |                            ^^^^^

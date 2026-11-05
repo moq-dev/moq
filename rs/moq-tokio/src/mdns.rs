@@ -30,10 +30,9 @@ use std::fmt;
 use std::net::{IpAddr, SocketAddr, SocketAddrV6};
 use std::str::FromStr;
 
-use hmac::{KeyInit, Mac};
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
+use rind::hmac;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use subtle::ConstantTimeEq;
 use url::Url;
 
 use crate::secret::Secret;
@@ -73,6 +72,8 @@ pub struct Error(ErrorKind);
 
 #[derive(Debug, thiserror::Error)]
 enum ErrorKind {
+	#[error(transparent)]
+	UnsupportedCpu(#[from] crate::crypto::UnsupportedCpu),
 	#[error(transparent)]
 	Mdns(#[from] mdns_sd::Error),
 
@@ -191,7 +192,8 @@ struct Identity<'a> {
 /// An HMAC-SHA256 proof of knowing `secret`, bound to one listener's
 /// [`Identity`], plus a `context` separating the advertise and dial roles.
 fn proof(secret: &Secret, context: &str, id: &Identity<'_>) -> String {
-	let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
+	let key = hmac::Key::new(&hmac::HMAC_SHA256, secret.as_bytes());
+	let mut mac = hmac::Context::with_key(&key);
 	let port = id.port.to_string();
 	for field in [
 		context,
@@ -205,13 +207,13 @@ fn proof(secret: &Secret, context: &str, id: &Identity<'_>) -> String {
 		mac.update(field.as_bytes());
 		mac.update(&[0]);
 	}
-	hex::encode(mac.finalize().into_bytes())
+	hex::encode(mac.sign().as_ref())
 }
 
 /// Constant-time equality, for comparing a credential against the expected one
 /// without leaking it byte-by-byte through timing.
 pub fn ct_eq(a: &str, b: &str) -> bool {
-	a.len() == b.len() && bool::from(a.as_bytes().ct_eq(b.as_bytes()))
+	rind::constant_time::verify(a.as_bytes(), b.as_bytes()).is_ok()
 }
 
 /// One peer's advertisement: the fields it published, plus the record they
@@ -336,6 +338,7 @@ impl Config {
 	/// returning, so a caller can treat success as "the mesh is live" and gate
 	/// process readiness on it. Errors if no interface works within 5 seconds.
 	pub async fn advertise(self) -> Result<Discovery> {
+		crate::crypto::check().map_err(|err| Error(err.into()))?;
 		crate::runtime::scope(Discovery::new(self)).await
 	}
 }
@@ -712,12 +715,12 @@ fn addr_url(addr: SocketAddr) -> Option<Url> {
 /// refusing to start over one of those would be wrong; an error only decides the
 /// outcome if *nothing* announces.
 async fn announced(monitor: &mdns_sd::Receiver<mdns_sd::DaemonEvent>) -> Result<()> {
-	let deadline = moq_clock::now() + ANNOUNCE_TIMEOUT;
+	let deadline = kio::clock::now() + ANNOUNCE_TIMEOUT;
 	// Kept so a total failure reports why rather than just "timed out".
 	let mut failure = None;
 
 	loop {
-		let event = match moq_clock::timeout_at(deadline, monitor.recv_async()).await {
+		let event = match kio::clock::timeout_at(deadline, monitor.recv_async()).await {
 			Ok(Ok(event)) => event,
 			// The daemon died, or nothing announced in time. Either way the mesh is
 			// not live, which is exactly what the caller is gating on.
@@ -771,7 +774,6 @@ fn instance_id(fullname: &str) -> Option<&str> {
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 
@@ -1186,7 +1188,7 @@ mod tests {
 				}
 			}
 		};
-		tokio::time::timeout(std::time::Duration::from_secs(30), wait)
+		kio::clock::timeout(std::time::Duration::from_secs(30), wait)
 			.await
 			.unwrap_or_else(|_| panic!("timed out discovering {fingerprint}"))
 	}
@@ -1252,7 +1254,7 @@ mod tests {
 	async fn stopped(monitor: mdns_sd::Receiver<mdns_sd::DaemonEvent>) {
 		// Monitor senders belong to the worker, not the command handle. Their
 		// closure proves the worker released them rather than just accepting Exit.
-		tokio::time::timeout(std::time::Duration::from_secs(5), async {
+		kio::clock::timeout(std::time::Duration::from_secs(5), async {
 			while monitor.recv_async().await.is_ok() {}
 		})
 		.await
@@ -1374,7 +1376,7 @@ mod tests {
 			"exactly one side of the pair dials"
 		);
 
-		let leaked = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+		let leaked = kio::clock::timeout(std::time::Duration::from_secs(2), async {
 			loop {
 				match foreign.recv().await {
 					Some(Event::Found(peer))

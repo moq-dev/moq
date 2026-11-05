@@ -60,14 +60,21 @@ impl ProbeLevel {
 	/// Both metrics are sampled rather than declared, so this only works for a
 	/// transport whose figures exist by the time the session starts. QUIC and TCP
 	/// both qualify: their RTT comes from the handshake, which has already happened.
+	///
+	/// [`Increase`](Self::Increase) additionally needs a sender, a transport
+	/// [`Probe`](crate::transport::Probe), since the session probes to the peer's
+	/// target through it. Without one a peer's target could never be honored.
 	#[cfg(feature = "async")]
 	pub fn detect(session: &crate::driver::Transport) -> Self {
 		use crate::transport::Metrics as _;
 		use crate::transport::poll::Session as _;
 		let metrics = session.metrics();
-		match metrics.estimated_send_rate().is_some() || metrics.rtt().is_some() {
-			true => Self::Report,
-			false => Self::None,
+		if metrics.estimated_send_rate().is_none() && metrics.rtt().is_none() {
+			return Self::None;
+		}
+		match session.probe().is_some() {
+			true => Self::Increase,
+			false => Self::Report,
 		}
 	}
 
@@ -163,7 +170,7 @@ impl std::fmt::Display for Role {
 /// lite-05+ only. The two endpoints' SETUP messages are independent: neither side
 /// blocks on the peer's before opening other streams, but a stream whose encoding
 /// depends on a negotiated capability (e.g. PROBE) must wait for it.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct Setup {
 	/// The probe capability this endpoint supports. [`ProbeLevel::None`] when absent.
 	pub probe: ProbeLevel,
@@ -200,6 +207,25 @@ pub struct Setup {
 	/// The sender's implementation, as space-separated `name/version` product tokens
 	/// (`moq-net-rs/0.3.10`). Opaque; `None` omits the parameter.
 	pub implementation: Option<String>,
+}
+
+impl std::fmt::Debug for Setup {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Setup")
+			.field("probe", &self.probe)
+			// Native transports carry the JWT in this request target.
+			.field(
+				"path",
+				&self.path.as_deref().map(|path| path.split('?').next().unwrap()),
+			)
+			.field("role", &self.role)
+			.field("cost", &self.cost)
+			.field("hop", &self.hop)
+			.field("token", &self.token)
+			.field("ietf", &self.ietf)
+			.field("implementation", &self.implementation)
+			.finish()
+	}
 }
 
 impl<'a> Message<'a> for Setup {
@@ -536,18 +562,18 @@ mod tests {
 		);
 	}
 
-	/// Probing to a local target never reaches the wire, so a sender alone promises the
-	/// peer nothing more than a report.
+	/// A sender probes to the peer's target as well as its own, so it promises the peer
+	/// `Increase`. Without one, `detect_reports_with_either_metric` stays at `Report`.
 	#[test]
 	#[cfg(feature = "async")]
-	fn a_sender_still_reports() {
+	fn a_sender_advertises_increase() {
 		use crate::lite::test_transport::{SinkSession, SinkStats};
 
 		let stats = SinkStats::default().with_send_rate(1_000_000);
 		let session = SinkSession::new(Default::default()).with_stats(stats).with_probe();
 		assert_eq!(
 			ProbeLevel::detect(&crate::driver::Transport::new(session.clone())),
-			ProbeLevel::Report
+			ProbeLevel::Increase
 		);
 	}
 

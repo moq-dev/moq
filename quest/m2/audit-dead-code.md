@@ -55,8 +55,7 @@ Start by comparing the live tree against these baselines:
 - Knip 6.42.0 with explicit entries for Bun tests, `*.browser.ts`, benches,
   examples, worklets, TSX, every `test/*` client, the repo-root scripts, and
   `ignore` for `rs/**/test_data` reports only real findings plus root
-  devDependencies used as CLIs, `tsx`/`wrangler` run by scripts, and the
-  `@ubjs` runtimes the wasm baseline bundles at run time. Preserve the
+  devDependencies used as CLIs and `tsx`/`wrangler` run by scripts. Preserve the
   TypeScript DOM override and `rolldown` wherever a Vite config loads
   `js/common/vite-plugin-worklet.ts`. `doc/concept/audio-jitter/reference.ts`
   exports constants only it uses; it was skipped because an open PR rewrote

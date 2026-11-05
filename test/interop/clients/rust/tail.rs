@@ -40,7 +40,7 @@ fn frames(sequence: u64, mode: Option<&str>) -> Vec<Vec<u8>> {
 /// Publish every group, cutting group 1 for `drop`.
 fn write(track: &mut moq_net::track::Producer, mode: Option<&str>) -> anyhow::Result<()> {
 	// Declare the end before the final group's payload is even available.
-	track.finish_at(moq_net::track::Position::group(GROUPS))?;
+	track.finish_at(moq_net::track::Position::group(GROUPS), None)?;
 	for sequence in 0..GROUPS {
 		let mut group = track.append_group()?;
 		if mode == Some("drop") && sequence == 1 {
@@ -76,14 +76,14 @@ async fn main() -> anyhow::Result<()> {
 	let args: Vec<_> = std::env::args().collect();
 	ensure!(
 		(4..=6).contains(&args.len()),
-		"usage: interop-tail publish|subscribe URL BROADCAST [VERSION [drop|join|cached|compress|datagram|status|late]]"
+		"usage: interop-tail publish|subscribe URL BROADCAST [VERSION [drop|join|cached|compress|status|late]]"
 	);
 	let url: url::Url = args[2].parse()?;
 	let mode = args.get(5).map(String::as_str);
 	ensure!(
 		matches!(
 			mode,
-			None | Some("drop" | "join" | "cached" | "compress" | "datagram" | "status" | "late")
+			None | Some("drop" | "join" | "cached" | "compress" | "status" | "late")
 		),
 		"unknown mode: {mode:?}"
 	);
@@ -91,7 +91,6 @@ async fn main() -> anyhow::Result<()> {
 	let join = matches!(mode, Some("join" | "status"));
 	let cached = mode == Some("cached");
 	let compress = mode == Some("compress");
-	let datagram = mode == Some("datagram");
 	let status = mode == Some("status");
 	let late = mode == Some("late");
 	let mut commands = tokio::io::BufReader::new(tokio::io::stdin()).lines();
@@ -110,8 +109,11 @@ async fn main() -> anyhow::Result<()> {
 			let mut track = broadcast.create_track(
 				"tail",
 				moq_net::track::Info::default()
-					.with_timescale((!datagram).then_some(moq_net::Timescale::MILLI))
-					.with_compress(compress),
+					.with_timescale(moq_net::Timescale::MILLI)
+					.with_compress(compress)
+					// `cached` and `late` read groups a newer one supersedes, which the default
+					// zero max age would leave stale.
+					.with_max_age(None),
 			)?;
 			broadcast.announce(Default::default())?;
 			if cached {
@@ -151,19 +153,7 @@ async fn main() -> anyhow::Result<()> {
 			} else if !cached {
 				let mut demand = track.demand();
 				while demand.wanted_changed().await?.is_none() {}
-				if datagram {
-					// Keep the track open until the harness acknowledges: a reliable end
-					// must not overtake best-effort datagrams on their independent channel.
-					for sequence in 0..GROUPS {
-						ensure!(
-							commands.next_line().await?.as_deref() == Some(&format!("datagram {sequence}")),
-							"missing datagram command"
-						);
-						track.append_datagram(None, vec![sequence as u8; 900])?;
-					}
-				} else {
-					write(&mut track, mode)?;
-				}
+				write(&mut track, mode)?;
 			}
 			// A finished track is not a drained transport. Keep the session alive
 			// until the harness confirms the subscriber checked every byte and EOF.
@@ -171,9 +161,6 @@ async fn main() -> anyhow::Result<()> {
 				commands.next_line().await?.as_deref() == Some("clean end"),
 				"reader did not acknowledge a clean end"
 			);
-			if datagram {
-				track.finish()?;
-			}
 			broadcast.close();
 			session.close().await?;
 			eprintln!("tail acknowledged");
@@ -202,7 +189,8 @@ async fn main() -> anyhow::Result<()> {
 			if late {
 				// No range: join the latest group as a player does, group 0, whose head predates
 				// the subscription.
-				let options = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(5));
+				let options = moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(5)));
 				let mut track = remote.subscribe(Some(options)).await?;
 				for sequence in 0..LATE_GROUPS {
 					let mut group = track.recv_group().await?.context("missing group")?;
@@ -224,27 +212,9 @@ async fn main() -> anyhow::Result<()> {
 				return Ok(());
 			}
 			let options = moq_net::track::Subscription::default()
-				.with_max_delay(Duration::from_secs(if drop { 60 } else { 5 }))
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(if drop { 60 } else { 5 })))
 				.with_range(0..);
 			let mut track = remote.subscribe(Some(options)).await?;
-			if datagram {
-				println!("datagram ready");
-				for sequence in 0..GROUPS {
-					let frame = track.recv_datagram().await?.context("missing datagram")?;
-					ensure!(frame.sequence == sequence, "wrong datagram sequence");
-					ensure!(frame.payload.len() == 900, "truncated datagram");
-					ensure!(
-						frame.payload.iter().all(|byte| *byte == sequence as u8),
-						"corrupt datagram"
-					);
-					ensure!(frame.timestamp.is_none(), "unexpected IETF timestamp");
-					println!("datagram {sequence}");
-				}
-				eprintln!("datagram clean groups=0,1,2,3 bytes=3600");
-				session.close().await?;
-				client.close().await;
-				return Ok(());
-			}
 			if compress {
 				ensure!(
 					track.info().compress == args.get(4).is_some_and(|version| version == "moq-lite-07-wip"),

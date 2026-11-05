@@ -44,6 +44,9 @@ use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::task::Poll;
+use std::time::Duration;
+
+use kio::clock::Wall;
 
 use io_uring::{cqueue, opcode, types};
 
@@ -59,19 +62,20 @@ const fn cmsg_space(len: usize) -> usize {
 }
 
 /// Space for the control messages of one receive or send: the segment size
-/// (`UDP_GRO`, or a send's u16 `UDP_SEGMENT`), then the family's packet info
-/// and ECN mark. A v4-mapped datagram on a v6 socket carries `IPV6_PKTINFO`
-/// with `IP_TOS`, which the IPv6 set already covers.
+/// (`UDP_GRO`, or a send's u16 `UDP_SEGMENT`), the kernel's receive
+/// timestamp, then the family's packet info and ECN mark. A v4-mapped datagram
+/// on a v6 socket carries `IPV6_PKTINFO` with `IP_TOS`, which the IPv6 set
+/// already covers.
 const CONTROL_LEN: usize = {
 	let int = std::mem::size_of::<libc::c_int>();
 	let v4 = cmsg_space(std::mem::size_of::<libc::in_pktinfo>()) + cmsg_space(int);
 	let v6 = cmsg_space(std::mem::size_of::<libc::in6_pktinfo>()) + cmsg_space(int);
-	cmsg_space(int) + if v4 > v6 { v4 } else { v6 }
+	cmsg_space(int) + cmsg_space(std::mem::size_of::<libc::timespec>()) + if v4 > v6 { v4 } else { v6 }
 };
-// Linux on 64-bit: the IPv6 set needs 88 bytes and the IPv4 one 80, and an
+// Linux on 64-bit: the IPv6 set needs 120 bytes and the IPv4 one 112, and an
 // undersized buffer would truncate every receive into a drop.
 #[cfg(target_pointer_width = "64")]
-const _: () = assert!(CONTROL_LEN == 88);
+const _: () = assert!(CONTROL_LEN == 120);
 /// Space reserved for the source address of each received datagram.
 const NAME_LEN: usize = std::mem::size_of::<libc::sockaddr_storage>();
 /// Fixed per-completion overhead of the multishot recvmsg layout.
@@ -168,6 +172,7 @@ struct Queued {
 	dst_ip: Option<IpAddr>,
 	stride: usize,
 	ecn: Option<Ecn>,
+	timestamp: Option<Wall>,
 }
 
 /// The ECN codepoint carried in the IP header's TOS or traffic class byte.
@@ -271,10 +276,12 @@ fn should_grow(rx: &Rx, multishot: bool) -> bool {
 ///
 /// Only the `RxBuf` structs move; [`Packet`] and the provided ring both point
 /// at the `Box<[u8]>` allocations, which stay put.
-fn grow_rx(rx: &mut Rx, config: &Config) -> bool {
+fn grow_rx(rx: &mut Rx, config: &Config, metrics: &Counters) -> bool {
 	let Some(target) = grown(rx.bufs.len(), config.rx_buffers_max) else {
 		return false;
 	};
+	let added = usize::from(target) - rx.bufs.len();
+	metrics.rx_pool_bytes.add((added * config.rx_buffer_len) as u64);
 	while rx.bufs.len() < usize::from(target) {
 		let bid = rx.bufs.len() as u16;
 		rx.bufs.push(RxBuf {
@@ -301,10 +308,12 @@ fn grow_rx(rx: &mut Rx, config: &Config) -> bool {
 ///
 /// The payload allocations are stable across the `Vec` growth, which is what
 /// lets an in-flight send keep a raw pointer into one.
-fn grow_tx(tx: &mut Tx, config: &Config) -> bool {
+fn grow_tx(tx: &mut Tx, config: &Config, metrics: &Counters) -> bool {
 	let Some(target) = grown(tx.bufs.len(), config.tx_buffers_max) else {
 		return false;
 	};
+	let added = usize::from(target) - tx.bufs.len();
+	metrics.tx_pool_bytes.add((added * config.tx_buffer_len) as u64);
 	while tx.bufs.len() < usize::from(target) {
 		tx.free.push(tx.bufs.len() as u16);
 		tx.bufs.push(TxSlot::new(config.tx_buffer_len));
@@ -314,6 +323,8 @@ fn grow_tx(tx: &mut Tx, config: &Config) -> bool {
 
 /// The registered provided-buffer ring: kernel-shared memory we own.
 struct BufRing {
+	/// The buffer group id the ring is registered under.
+	bgid: u16,
 	ptr: NonNull<types::BufRingEntry>,
 	layout: Layout,
 	mask: u16,
@@ -321,13 +332,14 @@ struct BufRing {
 }
 
 impl BufRing {
-	fn new(entries: u16) -> Self {
+	fn new(entries: u16, bgid: u16) -> Self {
 		let layout = Layout::from_size_align(entries as usize * std::mem::size_of::<types::BufRingEntry>(), 4096)
 			.expect("buffer ring layout");
 		// SAFETY: layout is non-zero.
 		let ptr = unsafe { alloc_zeroed(layout) };
 		let ptr = NonNull::new(ptr.cast::<types::BufRingEntry>()).unwrap_or_else(|| handle_alloc_error(layout));
 		Self {
+			bgid,
 			ptr,
 			layout,
 			mask: entries - 1,
@@ -461,8 +473,7 @@ pub(crate) struct SockShared {
 	/// datagrams go out alone: the route or driver cannot segment.
 	gso: Cell<bool>,
 	/// When a lost send was last logged, so a flood of them logs once per interval.
-	lost_logged: Cell<Option<moq_clock::Instant>>,
-	bgid: u16,
+	lost_logged: Cell<Option<kio::clock::Instant>>,
 	closed: Cell<bool>,
 	rx: RefCell<Rx>,
 	tx: RefCell<Tx>,
@@ -478,7 +489,11 @@ impl SockShared {
 	/// A packet released its buffer slice.
 	fn release_rx(self: &Rc<Self>, bid: u16) {
 		let mut rx = self.rx.borrow_mut();
-		rx.bufs[bid as usize].outstanding -= 1;
+		let buf = &mut rx.bufs[bid as usize];
+		buf.outstanding -= 1;
+		if buf.outstanding == 0 {
+			self.metrics.rx_pool_in_use_bytes.sub(self.config.rx_buffer_len as u64);
+		}
 		if !recycle_if_idle(&mut rx, bid) {
 			return;
 		}
@@ -497,6 +512,7 @@ impl SockShared {
 		debug_assert_eq!(slot.in_flight, 0);
 		slot.data = data;
 		tx.free.push(id);
+		self.metrics.tx_pool_in_use_bytes.sub(self.config.tx_buffer_len as u64);
 		tx.stalled = false;
 		tx.waiters.wake();
 	}
@@ -512,6 +528,7 @@ impl SockShared {
 		slot.in_flight -= 1;
 		if slot.in_flight == 0 {
 			tx.free.push(id);
+			self.metrics.tx_pool_in_use_bytes.sub(self.config.tx_buffer_len as u64);
 			tx.stalled = false;
 			tx.waiters.wake();
 		}
@@ -553,7 +570,7 @@ impl SockShared {
 			tracing::debug!(%err, to = %op.to, "send lost");
 			return;
 		}
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		if self
 			.lost_logged
 			.get()
@@ -568,13 +585,32 @@ impl SockShared {
 
 impl Drop for SockShared {
 	fn drop(&mut self) {
+		// Take this socket's pools back out of the worker's gauges. Packets
+		// and send leases own an `Rc` of us, so the only buffers still lent
+		// out are those of packets queued unread.
+		let rx = self.rx.get_mut();
+		let rx_len = self.config.rx_buffer_len as u64;
+		let rx_in_use = rx.bufs.iter().filter(|buf| buf.outstanding > 0).count() as u64;
+		self.metrics.rx_pool_bytes.sub(rx.bufs.len() as u64 * rx_len);
+		self.metrics.rx_pool_in_use_bytes.sub(rx_in_use * rx_len);
+		let tx = self.tx.get_mut();
+		debug_assert_eq!(tx.free.len(), tx.bufs.len(), "a send lease outlived its socket");
+		self.metrics
+			.tx_pool_bytes
+			.sub(tx.bufs.len() as u64 * self.config.tx_buffer_len as u64);
+
 		// Every op referencing our buffers has completed (ops own an `Rc` of
-		// us), so the kernel is done; give the buffer group id back.
-		if self.rx.borrow().ring.is_some()
+		// us), so the kernel is done; give the buffer group id back once it
+		// has let go of the ring.
+		if let Some(ring) = &self.rx.get_mut().ring
 			&& let Some(shared) = self.owner.upgrade()
 		{
-			let ring = shared.ring.borrow_mut();
-			let _ = ring.submitter().unregister_buf_ring(self.bgid);
+			let unregistered = shared.ring.borrow().submitter().unregister_buf_ring(ring.bgid);
+			match unregistered {
+				Ok(()) => shared.bgids.borrow_mut().give(ring.bgid),
+				// Still registered, so the id stays out of circulation.
+				Err(err) => tracing::warn!(%err, bgid = ring.bgid, "failed to unregister a buffer ring"),
+			}
 		}
 	}
 }
@@ -638,6 +674,11 @@ impl Socket {
 			set_option(&io, libc::IPPROTO_IP, libc::IP_PKTINFO)?;
 		}
 		set_option(&io, libc::IPPROTO_IP, libc::IP_RECVTOS)?;
+		// Stamp each receive on the kernel's clock, for a QUIC peer that asks when its packets
+		// arrived. Best effort, as moq-sock's: without it, receives carry no stamp.
+		if let Err(err) = set_option(&io, libc::SOL_SOCKET, libc::SO_TIMESTAMPNS) {
+			tracing::debug!(%err, "receive timestamps unavailable");
+		}
 		// Send at the interface MTU and never fragment, as moq-sock does, so a forged ICMP
 		// fragmentation-needed cannot shrink a path below a GSO train and turn its sends into
 		// EMSGSIZE or a worker-wide GSO fallback. The v4 option covers v4-mapped peers on a v6
@@ -668,24 +709,28 @@ impl Socket {
 			});
 		}
 
-		let bgid = shared.next_bgid.get();
-		shared
-			.next_bgid
-			.set(bgid.checked_add(1).expect("buffer group ids exhausted"));
-
 		let ring = if config.multishot {
-			let mut ring = BufRing::new(rx_cap);
-			{
-				let io_ring = shared.ring.borrow_mut();
-				// SAFETY: the ring allocation lives in `SockShared`, which the
-				// armed receive's `Op` keeps alive until its terminal CQE, and
-				// is unregistered before it drops.
-				unsafe {
-					io_ring
-						.submitter()
-						.register_buf_ring_with_flags(ring.ptr.as_ptr() as u64, rx_cap, bgid, 0)
-						.map_err(Error::ring)?;
-				}
+			let bgid = shared.bgids.borrow_mut().take().ok_or_else(|| {
+				io::Error::new(
+					io::ErrorKind::OutOfMemory,
+					"every buffer group id on this worker names a live socket",
+				)
+			})?;
+			let mut ring = BufRing::new(rx_cap, bgid);
+			// SAFETY: the ring allocation lives in `SockShared`, which the
+			// armed receive's `Op` keeps alive until its terminal CQE, and is
+			// unregistered before it drops.
+			let registered = unsafe {
+				shared
+					.ring
+					.borrow()
+					.submitter()
+					.register_buf_ring_with_flags(ring.ptr.as_ptr() as u64, rx_cap, bgid, 0)
+			};
+			if let Err(err) = registered {
+				// Nothing was registered, so the id is free again.
+				shared.bgids.borrow_mut().give(bgid);
+				return Err(Error::ring(err));
 			}
 			for (bid, buf) in bufs.iter_mut().enumerate() {
 				let addr = buf.data.as_mut_ptr();
@@ -711,6 +756,15 @@ impl Socket {
 			error: None,
 		};
 
+		// The socket's drop subtracts its pools, whichever way it ends.
+		shared
+			.metrics
+			.rx_pool_bytes
+			.add(u64::from(rx_count) * config.rx_buffer_len as u64);
+		shared
+			.metrics
+			.tx_pool_bytes
+			.add(u64::from(tx_count) * config.tx_buffer_len as u64);
 		let sock = Rc::new(SockShared {
 			io,
 			owner: Owner::new(shared),
@@ -719,7 +773,6 @@ impl Socket {
 			gso: Cell::new(config.gso),
 			lost_logged: Cell::new(None),
 			config,
-			bgid,
 			closed: Cell::new(false),
 			rx: RefCell::new(Rx {
 				bufs,
@@ -778,6 +831,7 @@ impl Socket {
 				from: queued.from,
 				dst_ip: queued.dst_ip,
 				ecn: queued.ecn,
+				timestamp: queued.timestamp,
 			}));
 		}
 		if let Some(code) = rx.error {
@@ -826,14 +880,15 @@ impl Socket {
 		if tx.free.is_empty() {
 			// Starved: every buffer is in flight, so the socket needs a deeper
 			// send window than it has. Grow rather than serialize behind it.
-			grow_tx(&mut tx, &self.shared.config);
+			grow_tx(&mut tx, &self.shared.config, &self.shared.metrics);
 		}
 		if let Some(id) = tx.free.pop() {
+			let cap = self.shared.config.tx_buffer_len;
+			self.shared.metrics.tx_pool_in_use_bytes.add(cap as u64);
 			let mut data = std::mem::take(&mut tx.bufs[id as usize].data);
 			data.clear();
 			// A checkout is a `Vec` its holder may have shrunk or regrown before
 			// dropping it; every checkout holds exactly one pool-sized train.
-			let cap = self.shared.config.tx_buffer_len;
 			if data.capacity() != cap {
 				data = Vec::with_capacity(cap);
 			}
@@ -865,8 +920,12 @@ impl Drop for Socket {
 		if let (Some(key), Some(shared)) = (rx.armed, self.shared.owner.upgrade()) {
 			drop(rx);
 			// Fire-and-forget: the cancel's own CQE is consumed by the worker,
-			// and the receive's terminal CQE releases the socket state.
-			let _ = shared.cancel(key);
+			// and the receive's terminal CQE releases the socket state. Failing
+			// to stage it means the ring itself is broken, which only the
+			// worker can report.
+			if let Err(err) = shared.cancel(key) {
+				shared.fail(err);
+			}
 		}
 	}
 }
@@ -892,6 +951,7 @@ pub struct Packet {
 	from: SocketAddr,
 	dst_ip: Option<IpAddr>,
 	ecn: Option<Ecn>,
+	timestamp: Option<Wall>,
 }
 
 impl Packet {
@@ -909,6 +969,12 @@ impl Packet {
 	/// datagrams that share one.
 	pub fn ecn(&self) -> Option<Ecn> {
 		self.ecn
+	}
+
+	/// When the kernel received the datagrams, on the wall clock, if it stamped them. One stamp
+	/// covers a GRO coalesce.
+	pub fn timestamp(&self) -> Option<Wall> {
+		self.timestamp
 	}
 
 	/// The datagram size GRO coalesced with; the final datagram may be short.
@@ -938,6 +1004,7 @@ impl std::fmt::Debug for Packet {
 			.field("len", &self.len)
 			.field("stride", &self.stride)
 			.field("ecn", &self.ecn)
+			.field("timestamp", &self.timestamp)
 			.finish()
 	}
 }
@@ -990,15 +1057,16 @@ impl TxBuf {
 			_ => return Err(Shared::gone_error()),
 		};
 
-		// A GSO train is one `sendmsg` the kernel caps at 64 segments. Without
+		// A GSO train is one `sendmsg`, so one header, that the kernel caps at
+		// 64 segments; a rejected train's resend sizes the rest itself. Without
 		// GSO every segment is its own `sendmsg`, so the ring is the limit
 		// instead: staging more than the submission queue holds makes `push`
 		// submit inline and go round again without reaping a single
 		// completion, which starves the worker and overflows the queue.
 		let segments = len.div_ceil(segment);
-		let limit = match self.sock.gso.get() {
-			true => MAX_GSO_SEGMENTS,
-			false => shared.ring.borrow().params().sq_entries() as usize,
+		let (limit, staged) = match self.sock.gso.get() {
+			true => (MAX_GSO_SEGMENTS, 1),
+			false => (shared.ring.borrow().params().sq_entries() as usize, segments),
 		};
 		if segments > limit {
 			return Err(io::Error::new(
@@ -1015,8 +1083,8 @@ impl TxBuf {
 			// The slot keeps the payload while the kernel reads it. Moving the
 			// `Vec` leaves its heap allocation where it is.
 			slot.data = std::mem::take(&mut self.data);
-			if slot.headers.len() < segments {
-				slot.headers.resize_with(segments, SendHdr::zeroed);
+			if slot.headers.len() < staged {
+				slot.headers.resize_with(staged, SendHdr::zeroed);
 			}
 			// SAFETY: the slot is checked out, so it cannot be sent from again
 			// (and its payload and headers cannot change) until every send
@@ -1306,7 +1374,7 @@ pub(crate) fn arm_recv(shared: &Rc<Shared>, sock: &Rc<SockShared>) {
 	// released and dropping every datagram until then.
 	if should_grow(&rx, sock.config.multishot) {
 		rx.starved = false;
-		grow_rx(&mut rx, &sock.config);
+		grow_rx(&mut rx, &sock.config, &sock.metrics);
 	}
 
 	let entry = if sock.config.multishot {
@@ -1322,7 +1390,8 @@ pub(crate) fn arm_recv(shared: &Rc<Shared>, sock: &Rc<SockShared>) {
 			one: None,
 		});
 		rx.armed = Some(key);
-		opcode::RecvMsgMulti::new(types::Fd(sock.io.as_raw_fd()), &*rx.hdr, sock.bgid)
+		let bgid = rx.ring.as_ref().expect("a multishot socket has a buffer ring").bgid;
+		opcode::RecvMsgMulti::new(types::Fd(sock.io.as_raw_fd()), &*rx.hdr, bgid)
 			.build()
 			.user_data(key)
 	} else {
@@ -1434,7 +1503,11 @@ pub(crate) fn on_recv(
 				.rx_datagrams
 				.add(queued.len.div_ceil(queued.stride.max(1)) as u64);
 			let mut rx = sock.rx.borrow_mut();
-			rx.bufs[queued.bid as usize].outstanding += 1;
+			let buf = &mut rx.bufs[queued.bid as usize];
+			if buf.outstanding == 0 {
+				sock.metrics.rx_pool_in_use_bytes.add(sock.config.rx_buffer_len as u64);
+			}
+			buf.outstanding += 1;
 			rx.queue.push_back(queued);
 			rx.waiters.wake();
 		}
@@ -1498,6 +1571,7 @@ fn on_recv_multi(sock: &Rc<SockShared>, cqe: Cqe) -> Result<(u16, Option<Queued>
 			dst_ip: meta.dst_ip,
 			stride: meta.stride.unwrap_or(payload.len()),
 			ecn: meta.ecn,
+			timestamp: meta.timestamp,
 		}),
 	))
 }
@@ -1538,6 +1612,7 @@ fn on_recv_oneshot(one: OneshotRecv, cqe: Cqe) -> Result<(u16, Option<Queued>), 
 			dst_ip: meta.dst_ip,
 			stride: meta.stride.unwrap_or(len),
 			ecn: meta.ecn,
+			timestamp: meta.timestamp,
 		}),
 	))
 }
@@ -1663,6 +1738,8 @@ struct RecvMeta {
 	ecn: Option<Ecn>,
 	/// The local address from `IP_PKTINFO` or `IPV6_PKTINFO`.
 	dst_ip: Option<IpAddr>,
+	/// The kernel's receive time from `SCM_TIMESTAMPNS`.
+	timestamp: Option<Wall>,
 }
 
 impl RecvMeta {
@@ -1704,6 +1781,12 @@ impl RecvMeta {
 				}
 				(libc::IPPROTO_IPV6, libc::IPV6_PKTINFO) => {
 					meta.dst_ip = read::<libc::in6_pktinfo>(data).map(|info| IpAddr::from(info.ipi6_addr.s6_addr));
+				}
+				(libc::SOL_SOCKET, libc::SCM_TIMESTAMPNS) => {
+					meta.timestamp = read::<libc::timespec>(data).and_then(|ts| {
+						let since = Duration::new(u64::try_from(ts.tv_sec).ok()?, u32::try_from(ts.tv_nsec).ok()?);
+						Wall::UNIX_EPOCH.checked_add(since)
+					});
 				}
 				_ => {}
 			}
@@ -1883,10 +1966,16 @@ mod tests {
 			ipi6_ifindex: 1,
 		};
 		let ect0 = Ecn::Ect0 as u8;
+		let stamp = libc::timespec {
+			tv_sec: 1_700_000_000,
+			tv_nsec: 123_456_789,
+		};
+		let stamped = || cmsg(libc::SOL_SOCKET, libc::SCM_TIMESTAMPNS, stamp);
 		let cases: [(Vec<Vec<u8>>, IpAddr); 3] = [
 			(
 				vec![
 					gro(1200),
+					stamped(),
 					cmsg(libc::IPPROTO_IP, libc::IP_PKTINFO, in_pktinfo),
 					cmsg(libc::IPPROTO_IP, libc::IP_TOS, ect0),
 				],
@@ -1895,6 +1984,7 @@ mod tests {
 			(
 				vec![
 					gro(1200),
+					stamped(),
 					cmsg(libc::IPPROTO_IPV6, libc::IPV6_PKTINFO, in6_pktinfo(v6)),
 					cmsg(libc::IPPROTO_IPV6, libc::IPV6_TCLASS, libc::c_int::from(ect0)),
 				],
@@ -1903,6 +1993,7 @@ mod tests {
 			(
 				vec![
 					gro(1200),
+					stamped(),
 					cmsg(libc::IPPROTO_IPV6, libc::IPV6_PKTINFO, in6_pktinfo(v4.to_ipv6_mapped())),
 					cmsg(libc::IPPROTO_IP, libc::IP_TOS, ect0),
 				],
@@ -1916,6 +2007,10 @@ mod tests {
 			assert_eq!(meta.stride, Some(1200));
 			assert_eq!(meta.ecn, Some(Ecn::Ect0));
 			assert_eq!(meta.dst_ip, Some(dst_ip));
+			assert_eq!(
+				meta.timestamp,
+				Some(Wall::UNIX_EPOCH + Duration::new(1_700_000_000, 123_456_789))
+			);
 		}
 	}
 
@@ -1972,7 +2067,7 @@ mod tests {
 		Rx {
 			bufs: Vec::new(),
 			// Never registered, so this one is ours alone to publish into.
-			ring: Some(BufRing::new(64)),
+			ring: Some(BufRing::new(64, 0)),
 			// SAFETY: all-zero is valid for `msghdr`, and nothing reads it here.
 			hdr: Box::new(unsafe { std::mem::zeroed() }),
 			queue: VecDeque::new(),
@@ -1992,7 +2087,7 @@ mod tests {
 	fn a_recycled_buffer_does_not_mask_a_recorded_starvation() {
 		let config = Config::default();
 		let mut rx = empty_rx();
-		grow_rx(&mut rx, &config);
+		grow_rx(&mut rx, &config, &Counters::default());
 		assert!(!should_grow(&rx, true), "a buffer is in the ring");
 
 		rx.starved = true;
@@ -2009,14 +2104,119 @@ mod tests {
 			..Default::default()
 		};
 		let mut rx = empty_rx();
+		let metrics = std::sync::Arc::new(Counters::default());
 
 		for expected in [1u16, 2, 4, 8, 16, 32, 40] {
-			assert!(grow_rx(&mut rx, &config), "growth stopped short of {expected}");
+			assert!(
+				grow_rx(&mut rx, &config, &metrics),
+				"growth stopped short of {expected}"
+			);
 			assert_eq!(rx.bufs.len(), usize::from(expected));
 			// Every buffer reaches the kernel exactly once.
 			assert_eq!(rx.ring.as_ref().expect("ring").tail, expected);
 		}
-		assert!(!grow_rx(&mut rx, &config), "grew past the ceiling");
+		assert!(!grow_rx(&mut rx, &config, &metrics), "grew past the ceiling");
+		assert_eq!(
+			crate::metrics::Metrics::from_counters(metrics).snapshot().rx_pool_bytes,
+			40 * config.rx_buffer_len as u64,
+			"the gauge holds every buffer once"
+		);
+	}
+
+	/// The pool gauges sum every live socket on the worker: each adds its
+	/// starting pools and its growth, counts the buffers it lends out, and
+	/// takes all of it back when it drops, unread packets included.
+	#[test]
+	fn pool_gauges_sum_live_sockets() {
+		let mut worker = match crate::Worker::new(crate::Config::default()) {
+			Ok(worker) => worker,
+			Err(Error::Unsupported(reason)) if std::env::var_os("CI_STRICT").is_none() => {
+				eprintln!("skipping io_uring socket test: {reason}");
+				return;
+			}
+			Err(err) => panic!("worker setup failed: {err}"),
+		};
+		let handle = worker.handle();
+		let config = Config::default();
+		let rx_len = config.rx_buffer_len as u64;
+		let tx_len = config.tx_buffer_len as u64;
+		let bind = || UdpSocket::bind("127.0.0.1:0").expect("bind");
+		let a = handle.udp(bind(), config.clone()).expect("socket a");
+		let b = handle.udp(bind(), config.clone()).expect("socket b");
+		let peer = UdpSocket::bind("127.0.0.1:0").expect("peer");
+		let snapshot = || handle.metrics().snapshot();
+
+		let start = snapshot();
+		assert_eq!(start.rx_pool_bytes, 2 * u64::from(INITIAL_RX_BUFFERS) * rx_len);
+		assert_eq!(start.tx_pool_bytes, 2 * u64::from(INITIAL_TX_BUFFERS) * tx_len);
+		assert_eq!((start.rx_pool_in_use_bytes, start.tx_pool_in_use_bytes), (0, 0));
+
+		worker
+			.block_on(async {
+				// Wait for a gauge to reach `want`, while the worker reaps completions.
+				let handle = &handle;
+				let settle = |read: fn(&crate::metrics::Snapshot) -> u64, want: u64| async move {
+					for _ in 0..1000 {
+						if read(&handle.metrics().snapshot()) == want {
+							return;
+						}
+						crate::Timer::after(handle, std::time::Duration::from_millis(1))
+							.wait()
+							.await;
+					}
+					panic!(
+						"gauge stuck at {} instead of {want}",
+						read(&handle.metrics().snapshot())
+					);
+				};
+
+				// One more send buffer than `a` starts with doubles its pool.
+				let mut held = Vec::new();
+				for _ in 0..=INITIAL_TX_BUFFERS {
+					held.push(a.acquire().await.expect("send buffer"));
+				}
+				let grown = snapshot();
+				assert_eq!(grown.tx_pool_bytes, 3 * u64::from(INITIAL_TX_BUFFERS) * tx_len);
+				assert_eq!(grown.tx_pool_in_use_bytes, held.len() as u64 * tx_len);
+				// Sent or dropped unsent, a buffer stops counting once it is back.
+				let mut sent = held.pop().expect("held");
+				sent.extend_from_slice(b"sent");
+				sent.send(Transmit::new(peer.local_addr().expect("peer addr"), 4))
+					.expect("staged");
+				drop(held);
+				settle(|snap| snap.tx_pool_in_use_bytes, 0).await;
+
+				// A packet holds its buffer until dropped.
+				peer.send_to(b"held", b.local_addr().expect("addr")).expect("send");
+				let packet = b.recv().await.expect("packet");
+				assert_eq!(snapshot().rx_pool_in_use_bytes, rx_len);
+				drop(packet);
+				assert_eq!(snapshot().rx_pool_in_use_bytes, 0);
+
+				// Dropping `a` takes back its grown pools and nothing of `b`'s.
+				let gone = a.downgrade();
+				drop(a);
+				settle(|snap| snap.tx_pool_bytes, u64::from(INITIAL_TX_BUFFERS) * tx_len).await;
+				assert!(gone.upgrade().is_none());
+				assert_eq!(snapshot().rx_pool_bytes, u64::from(INITIAL_RX_BUFFERS) * rx_len);
+
+				// Including a buffer whose packet was queued but never read.
+				peer.send_to(b"unread", b.local_addr().expect("addr")).expect("send");
+				settle(|snap| snap.rx_pool_in_use_bytes, rx_len).await;
+				drop(b);
+				settle(|snap| snap.rx_pool_bytes, 0).await;
+			})
+			.expect("worker");
+		let end = snapshot();
+		assert_eq!(
+			(
+				end.rx_pool_bytes,
+				end.rx_pool_in_use_bytes,
+				end.tx_pool_bytes,
+				end.tx_pool_in_use_bytes
+			),
+			(0, 0, 0, 0)
+		);
 	}
 
 	/// Every errno is either loss, a destination, the socket, or teardown, and only the errors
@@ -2240,5 +2440,180 @@ mod tests {
 			.expect("worker");
 		assert_eq!(err.kind(), io::ErrorKind::NetworkUnreachable, "{err}");
 		assert!(sock.shared.rx.borrow().unreachable.is_none(), "nothing queued");
+	}
+
+	/// A worker, or `None` (outside strict CI) on a kernel that cannot run one.
+	fn worker() -> Option<crate::Worker> {
+		match crate::Worker::new(crate::Config::default()) {
+			Ok(worker) => Some(worker),
+			Err(Error::Unsupported(reason)) if std::env::var_os("CI_STRICT").is_none() => {
+				eprintln!("skipping io_uring socket test: {reason}");
+				None
+			}
+			Err(err) => panic!("worker setup failed: {err}"),
+		}
+	}
+
+	fn bind() -> UdpSocket {
+		UdpSocket::bind("127.0.0.1:0").expect("bind")
+	}
+
+	fn oneshot() -> Config {
+		Config {
+			multishot: false,
+			..Default::default()
+		}
+	}
+
+	/// The worker's shared core, reached through a socket that takes no
+	/// buffer group id.
+	fn core(handle: &crate::Handle) -> (Socket, Rc<Shared>) {
+		let sock = handle.udp(bind(), oneshot()).expect("oneshot socket");
+		let shared = sock.owner().upgrade().expect("worker");
+		(sock, shared)
+	}
+
+	/// Drive `worker` until every kernel operation has let go of `sock`.
+	fn release(worker: &mut crate::Worker, sock: std::rc::Weak<SockShared>) {
+		worker
+			.block_on(std::future::poll_fn(|cx| {
+				if sock.upgrade().is_none() {
+					return Poll::Ready(());
+				}
+				cx.waker().wake_by_ref();
+				Poll::Pending
+			}))
+			.expect("worker");
+	}
+
+	/// Fill the submission queue, so the next push has to enter the ring.
+	fn fill(shared: &Shared) {
+		while !shared.ring.borrow_mut().submission().is_full() {
+			let key = shared.insert(Op::Cancel);
+			shared
+				.push(&opcode::Nop::new().build().user_data(key))
+				.expect("stage NOP");
+		}
+	}
+
+	/// Only multishot sockets register a buffer ring, so only they take an id.
+	#[test]
+	fn a_oneshot_socket_takes_no_buffer_group_id() {
+		let Some(worker) = worker() else { return };
+		let (_sock, shared) = core(&worker.handle());
+		let _more = worker.handle().udp(bind(), oneshot()).expect("oneshot socket");
+		assert_eq!(shared.bgids.borrow().next, 0);
+	}
+
+	/// Churn past the id space reuses the id the kernel released, and a socket
+	/// beyond every live id fails to open instead of panicking.
+	#[test]
+	fn socket_churn_reuses_buffer_group_ids() {
+		let Some(mut worker) = worker() else { return };
+		let handle = worker.handle();
+		let (_core, shared) = core(&handle);
+		// Every id below the last names a live ring.
+		shared.bgids.borrow_mut().next = u32::from(u16::MAX);
+
+		for _ in 0..3 {
+			let sock = handle.udp(bind(), Config::default()).expect("multishot socket");
+			assert!(
+				shared.bgids.borrow().free.is_empty(),
+				"{:?}",
+				shared.bgids.borrow().free
+			);
+			let err = handle.udp(bind(), Config::default()).expect_err("every id is live");
+			assert!(err.to_string().contains("buffer group id"), "{err}");
+
+			let weak = sock.downgrade();
+			drop(sock);
+			release(&mut worker, weak);
+			assert_eq!(shared.bgids.borrow().free, [u16::MAX]);
+			assert_eq!(shared.bgids.borrow().next, u32::from(u16::MAX) + 1);
+		}
+	}
+
+	/// A registration the kernel refuses hands its id straight back.
+	#[test]
+	fn a_failed_registration_returns_its_buffer_group_id() {
+		let Some(worker) = worker() else { return };
+		let handle = worker.handle();
+		let (_core, shared) = core(&handle);
+
+		// Hold id 0 outside the pool, so the socket's registration collides.
+		let held = BufRing::new(1, 0);
+		// SAFETY: `held` outlives its registration, which ends below.
+		unsafe {
+			shared
+				.ring
+				.borrow()
+				.submitter()
+				.register_buf_ring_with_flags(held.ptr.as_ptr() as u64, 1, 0, 0)
+				.expect("register");
+		}
+		let err = handle.udp(bind(), Config::default()).expect_err("id 0 is taken");
+		assert!(
+			matches!(&err, Error::Io(err) if err.raw_os_error() == Some(libc::EEXIST)),
+			"{err}"
+		);
+		assert_eq!(shared.bgids.borrow().free, [0]);
+
+		shared
+			.ring
+			.borrow()
+			.submitter()
+			.unregister_buf_ring(0)
+			.expect("unregister");
+		drop(held);
+		let _sock = handle.udp(bind(), Config::default()).expect("id 0 is free");
+		assert!(shared.bgids.borrow().free.is_empty());
+		assert_eq!(shared.bgids.borrow().next, 1);
+	}
+
+	/// A dropped socket that cannot stage its cancel fails the worker's next
+	/// turn, rather than leaving the receive armed in silence.
+	#[test]
+	fn a_failed_cancel_fails_the_next_turn() {
+		let Some(mut worker) = worker() else { return };
+		let handle = worker.handle();
+		let (_core, shared) = core(&handle);
+		let sock = handle.udp(bind(), Config::default()).expect("multishot socket");
+		let weak = sock.downgrade();
+
+		fill(&shared);
+		shared.enter_faults.borrow_mut().push_back(libc::EBADF);
+		drop(sock);
+		assert!(weak.upgrade().is_some(), "the receive is still armed");
+
+		// Even a future that is ready on its first poll cannot return past it.
+		let err = worker
+			.block_on(std::future::ready(()))
+			.expect_err("the cancel failure surfaces");
+		assert!(
+			matches!(&err, Error::Io(err) if err.raw_os_error() == Some(libc::EBADF)),
+			"{err}"
+		);
+		// Reported once, like any other ring failure.
+		assert!(shared.failed.take().is_none());
+
+		// Teardown still cancels the receive.
+		drop(worker);
+		assert!(weak.upgrade().is_none(), "teardown leaked the receive");
+	}
+
+	/// An enter interrupted by a signal is retried, not surfaced.
+	#[test]
+	fn an_interrupted_enter_is_retried() {
+		let Some(worker) = worker() else { return };
+		let (_core, shared) = core(&worker.handle());
+		fill(&shared);
+		shared.enter_faults.borrow_mut().push_back(libc::EINTR);
+
+		let key = shared.insert(Op::Cancel);
+		shared
+			.push(&opcode::Nop::new().build().user_data(key))
+			.expect("an interrupted enter retries");
+		assert!(shared.enter_faults.borrow().is_empty());
+		assert_eq!(shared.ring.borrow_mut().submission().len(), 1);
 	}
 }

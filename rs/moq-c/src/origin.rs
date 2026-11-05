@@ -73,13 +73,15 @@ impl Producer {
 /// One announce event and the C string views borrowed from it.
 struct AnnouncedRecord {
 	prefix: String,
-	captures: Option<Vec<String>>,
+	/// Owns the strings `capture_views` borrows; never read directly.
+	_captures: Vec<String>,
 	capture_views: Vec<moq_string>,
 	kind: moq_announce_kind,
 	hops: Vec<u64>,
 	cost: u64,
-	/// Empty when the route carries no epoch.
-	epoch: String,
+	/// The route's instance.
+	instance: String,
+	predecessor: String,
 }
 
 // The raw pointers only borrow immutable String allocations owned by this record.
@@ -89,21 +91,24 @@ unsafe impl Send for AnnouncedRecord {}
 impl AnnouncedRecord {
 	fn new(event: moq_net::announce::Event) -> Self {
 		use moq_net::announce::Event;
-		let (update, kind) = match event {
-			Event::Start(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_START),
-			Event::Update(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_UPDATE),
-			Event::End(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_END),
-			Event::Restart(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_RESTART),
+		let (update, kind, predecessor) = match event {
+			Event::Start(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_START, String::new()),
+			Event::Update(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_UPDATE, String::new()),
+			Event::End(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_END, String::new()),
+			Event::Restart(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_RESTART, String::new()),
+			Event::Takeover { announce, predecessor } => (
+				announce,
+				moq_announce_kind::MOQ_ANNOUNCE_KIND_TAKEOVER,
+				predecessor.to_string(),
+			),
 		};
-		let captures = update.captures.map(|captures| {
-			captures
-				.into_iter()
-				.map(|capture| capture.to_string())
-				.collect::<Vec<_>>()
-		});
+		let captures: Vec<_> = update
+			.captures
+			.expect("bindings only list full announcement matches")
+			.into_iter()
+			.map(|capture| capture.to_string())
+			.collect();
 		let capture_views = captures
-			.as_deref()
-			.unwrap_or_default()
 			.iter()
 			.map(|capture| moq_string {
 				data: capture.as_ptr().cast(),
@@ -113,12 +118,17 @@ impl AnnouncedRecord {
 
 		Self {
 			prefix: update.prefix.to_string(),
-			captures,
+			_captures: captures,
 			capture_views,
 			kind,
 			hops: update.route.hops.iter().map(|hop| hop.id()).collect(),
 			cost: update.route.cost.value(),
-			epoch: update.route.epoch.map(|epoch| epoch.to_string()).unwrap_or_default(),
+			instance: update
+				.route
+				.instance
+				.map(|instance| instance.to_string())
+				.unwrap_or_default(),
+			predecessor,
 		}
 	}
 }
@@ -197,17 +207,18 @@ impl Origin {
 			prefix_len: announced.prefix.len(),
 			captures: announced.capture_views.as_ptr(),
 			captures_len: announced.capture_views.len(),
-			has_captures: announced.captures.is_some(),
 			kind: announced.kind,
 			route: moq_route {
 				hops: announced.hops.as_ptr(),
 				hops_len: announced.hops.len(),
 				cost: announced.cost,
-				epoch: moq_string {
-					data: announced.epoch.as_ptr().cast::<c_char>(),
-					len: announced.epoch.len(),
+				instance: moq_string {
+					data: announced.instance.as_ptr().cast::<c_char>(),
+					len: announced.instance.len(),
 				},
 			},
+			predecessor: announced.predecessor.as_ptr().cast::<c_char>(),
+			predecessor_len: announced.predecessor.len(),
 		};
 		Ok(())
 	}
@@ -232,8 +243,14 @@ impl Origin {
 	///
 	/// The callback fires a broadcast handle (> 0) for each instance serving the path, until a
 	/// single terminal code (`0` on close, negative on error). Returns a task handle for
-	/// cancellation via [`Self::consume_announced_close`].
-	pub fn consume_announced(&mut self, origin: Id, path: String, on_broadcast: OnStatus) -> Result<Id, Error> {
+	/// cancellation via [`Self::resolve_close`].
+	pub fn follow(
+		&mut self,
+		origin: Id,
+		path: String,
+		instance: Option<moq_net::Instance>,
+		on_broadcast: OnStatus,
+	) -> Result<Id, Error> {
 		let origin = self.active.get(origin).ok_or(Error::OriginNotFound)?;
 		origin.driver.check()?;
 		let driver = origin.driver.clone();
@@ -243,20 +260,21 @@ impl Origin {
 			|state| &mut state.origin.consume_task,
 			|close| async move {
 				driver
-					.watch(Self::run_consume_announced(on_broadcast, consumer, path, close))
+					.watch(Self::run_follow(on_broadcast, consumer, path, instance, close))
 					.await
 			},
 		)
 	}
 
-	async fn run_consume_announced(
+	async fn run_follow(
 		callback: OnStatus,
 		consumer: Consumer,
 		path: String,
+		instance: Option<moq_net::Instance>,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
 		// An unreachable path and a closed origin both mean no broadcast can ever arrive here.
-		let mut announced = match consumer.follow(path.as_str(), None) {
+		let mut announced = match consumer.follow(path.as_str(), instance) {
 			Ok(announced) => announced,
 			Err(moq_net::Error::Unauthorized) => return Err(Error::BroadcastNotFound),
 			Err(err) => return Err(err.into()),
@@ -287,12 +305,17 @@ impl Origin {
 
 	/// Request the broadcast at `path`, delivering its handle once it can be served.
 	///
-	/// Unlike [`Self::consume`] (announced-only, fails fast) and [`Self::consume_announced`]
-	/// (waits indefinitely for a future announcement), this resolves against any route
-	/// announced now: the callback fires the broadcast
-	/// handle (> 0) once served, then a terminal `0`; or a single terminal code (`0` on close,
-	/// negative on error) if it can't be served. Returns a task handle for cancellation.
-	pub fn request(&mut self, origin: Id, path: String, on_broadcast: OnStatus) -> Result<Id, Error> {
+	/// Unlike [`Self::follow`] (waits indefinitely, delivering each publisher instance), this
+	/// resolves one instance: the callback fires the broadcast handle (> 0) once served, then a
+	/// terminal `0`; or a single terminal code (`0` on close, negative on error) if it can't be
+	/// served. Returns a task handle for cancellation.
+	pub fn request(
+		&mut self,
+		origin: Id,
+		path: String,
+		instance: Option<moq_net::Instance>,
+		on_broadcast: OnStatus,
+	) -> Result<Id, Error> {
 		let origin = self.active.get(origin).ok_or(Error::OriginNotFound)?;
 		origin.driver.check()?;
 		let driver = origin.driver.clone();
@@ -302,7 +325,7 @@ impl Origin {
 			|state| &mut state.origin.consume_task,
 			|close| async move {
 				driver
-					.watch(Self::run_request(on_broadcast, consumer, path, close))
+					.watch(Self::run_request(on_broadcast, consumer, path, instance, close))
 					.await
 			},
 		)
@@ -312,10 +335,11 @@ impl Origin {
 		callback: OnStatus,
 		consumer: Consumer,
 		path: String,
+		instance: Option<moq_net::Instance>,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
 		// Resolves to an error when no announced route can serve the path.
-		let pending = consumer.request(path.as_str(), None);
+		let pending = consumer.request(path.as_str(), instance);
 
 		// `biased` so a pending close always wins over a ready broadcast.
 		let broadcast = tokio::select! {
@@ -330,7 +354,7 @@ impl Origin {
 		Ok(())
 	}
 
-	pub fn consume_announced_close(&mut self, task: Id) -> Result<(), Error> {
+	pub fn resolve_close(&mut self, task: Id) -> Result<(), Error> {
 		self.consume_task.close(task, Error::NotFound)
 	}
 

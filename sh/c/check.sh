@@ -25,6 +25,12 @@ fi
 
 cd "$(dirname "${BASH_SOURCE[0]}")/../../c"
 
+# A source build checks formatting first; the release jobs that pass an input
+# check a build of sources already gated.
+if [[ -z "$archive" && -z "$ffi_dir" ]]; then
+    bash ../sh/clang-format.sh --check c
+fi
+
 # Single-config generators build Debug. Visual Studio ignores CMAKE_BUILD_TYPE and builds the
 # package with --config Release, since the Rust staticlib links the release CRT (/MD) either way.
 build=moq/build
@@ -108,9 +114,8 @@ if [[ "$(uname -s)" == MINGW* || "$(uname -s)" == MSYS* ]]; then
 fi
 
 if command -v pkg-config >/dev/null 2>&1; then
-    export PKG_CONFIG_PATH="$prefix/$libdir/pkgconfig"
     # Assigned first: set -e ignores a failing substitution inside a command's arguments.
-    flags=$(pkg-config --cflags --libs moq-c)
+    flags=$(pkg-config --cflags --libs "$prefix/$libdir/pkgconfig/moq-c.pc")
     mkdir -p "$build/pkg-config"
     # shellcheck disable=SC2086 # flags is a flag list.
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -pedantic-errors -o "$build/pkg-config/probe" moq/test/probe.c $flags

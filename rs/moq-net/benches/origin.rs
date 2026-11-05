@@ -29,12 +29,17 @@
 //! Readers draining a swapped track are swept over their count, the groups every
 //! route delivered, and the routes each reader still holds a copy of.
 //!
+//! A claim's answer taking over the claim is swept over the paths the claim already
+//! answered and the cursors watching it, and a takeover in place over the fronts
+//! resolved through what it takes over.
+//!
 //! Peer claims land through the hidden `fuzz` module, as a session lands them.
 //!
 //! Run with `cargo bench -p moq-net --features fuzz --bench origin`.
 
 #![expect(
 	clippy::disallowed_methods,
+	clippy::disallowed_types,
 	reason = "custom timings measure the real time the work took, not the ambient clock"
 )]
 
@@ -46,12 +51,14 @@ use std::time::Duration;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use futures::FutureExt;
-use moq_net::{Epoch, Hop, Hops, Pattern, Patterns, Timestamp, announce, auth, broadcast, kio, origin, track};
+use moq_net::{Hop, Hops, Instance, Pattern, Patterns, Timestamp, announce, auth, broadcast, kio, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
 fn timed() -> track::Info {
-	track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	track::Info::default()
+		.with_max_age(None)
+		.with_timescale(moq_net::Timescale::MILLI)
 }
 
 /// `(publishers, subscribers)` shapes for the fan-out benchmarks.
@@ -115,6 +122,46 @@ fn bench_announce(c: &mut Criterion) {
 				}
 			});
 		});
+	}
+	group.finish();
+}
+
+/// Matched and overlap-only route churn, swept over table size and watching cursors,
+/// for listing cursors and covering ones.
+fn bench_announce_covering(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/announce_covering");
+	for routes in [10, 1_000] {
+		for readers in [1, 100] {
+			for covering in [false, true] {
+				group.bench_function(format!("{routes}routes_{readers}readers_covering{covering}"), |b| {
+					let (producer, _driver) = origin::Producer::new(origin::Config::default());
+					let _routes: Vec<_> = (0..routes)
+						.map(|i| producer.requests(format!("room/{i}/mic.hang")).unwrap())
+						.collect();
+					let consumer = producer
+						.consume()
+						.scope("", &Patterns::from("**/*.chat".parse::<Pattern>().unwrap()))
+						.unwrap();
+					let consumer = if covering { consumer.covering() } else { consumer };
+					let mut cursors: Vec<_> = (0..readers).map(|_| consumer.announced()).collect();
+					for cursor in &mut cursors {
+						while cursor.next().now_or_never().flatten().is_some() {}
+					}
+					b.iter(|| {
+						for (name, delivered) in [("room/live.chat", true), ("room/mic.hang", covering)] {
+							let route = producer.requests(name).unwrap();
+							for cursor in &mut cursors {
+								assert_eq!(cursor.next().now_or_never().flatten().is_some(), delivered);
+							}
+							drop(route);
+							for cursor in &mut cursors {
+								assert_eq!(cursor.next().now_or_never().flatten().is_some(), delivered);
+							}
+						}
+					});
+				});
+			}
+		}
 	}
 	group.finish();
 }
@@ -204,14 +251,16 @@ fn bench_withdraw(c: &mut Criterion) {
 fn bench_withdraw_wave(c: &mut Criterion) {
 	let mut group = c.benchmark_group("origin/withdraw_wave");
 	group.sample_size(10);
-	let epoch: Epoch = "01900000-0000-7000-8000-000000000001".parse().unwrap();
-	// One epoch, so the winner moving between the peers is an update, which is held.
+	let instance: Instance = "01900000-0000-7000-8000-000000000001".parse().unwrap();
+	// One instance, so the winner moving between the peers is an update, which is held.
 	let route = |chain: &[u64]| {
 		let mut hops = Hops::new();
 		for &hop in chain {
 			hops.push(Hop::new(hop).unwrap()).unwrap();
 		}
-		origin::Route::default().with_epoch(epoch.clone()).with_hops(hops)
+		origin::Route::default()
+			.with_instance(instance.clone(), 0)
+			.with_hops(hops)
 	};
 	for broadcasts in [1_000, 10_000] {
 		for subscribers in [1, 20, 100] {
@@ -525,7 +574,7 @@ fn bench_reprice_duplicate(c: &mut Criterion) {
 					for cost in [incumbent_cost - 1, incumbent_cost + 1] {
 						moq_net::fuzz::update_route(&route, peer_route(challenger, cost)).unwrap();
 						for cursor in &mut cursors {
-							// The winner switches between epochless routes, which is another instance.
+							// The winner switches between unnamed routes, which is another instance.
 							let event = cursor.next().now_or_never().flatten().expect("winner changed");
 							let moq_net::announce::Event::Restart(update) = event else {
 								panic!("expected a restart: got {event:?}");
@@ -579,6 +628,64 @@ fn bench_announce_fronts(c: &mut Criterion) {
 				driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
 			});
 		});
+	}
+	group.finish();
+}
+
+/// Answer the claim's request for `path`, dropping any other it queued.
+fn answer(claim: &origin::Requests, path: &str) -> origin::Publication {
+	loop {
+		let request = claim
+			.requested_broadcast()
+			.now_or_never()
+			.expect("the request reached the claim")
+			.unwrap();
+		if request.path().as_str() == path {
+			return request.prepare().unwrap().publish().unwrap();
+		}
+	}
+}
+
+/// A claim's answer delivered to every cursor as a takeover of the claim, then retracted.
+/// Swept over the paths the claim already answered and the cursors watching it, so a
+/// continuity check that walks the table rather than the claim's prefix shows up as a
+/// slope.
+fn bench_takeover(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/takeover");
+	for (publishers, subscribers) in SHAPES {
+		group.bench_function(
+			BenchmarkId::from_parameter(format!("{publishers}p_{subscribers}s")),
+			|b| {
+				let (producer, mut driver) = origin::Producer::new(origin::Config::default());
+				let consumer = producer.consume();
+				let claim = producer.requests("room").unwrap();
+				let waiter = kio::Waiter::noop();
+				let mut ask = |path: &str| {
+					let request = consumer.request(path, None);
+					driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
+					(request, answer(&claim, path))
+				};
+				let _answered: Vec<_> = (0..publishers).map(|i| ask(&format!("room/{i}"))).collect();
+				let mut cursors: Vec<_> = (0..subscribers).map(|_| consumer.announced()).collect();
+				for cursor in &mut cursors {
+					while cursor.next().now_or_never().flatten().is_some() {}
+				}
+				let mut n = 0;
+				b.iter(|| {
+					n += 1;
+					let (request, output) = ask(&format!("room/incoming{n}"));
+					for cursor in &mut cursors {
+						let event = cursor.next().now_or_never().flatten();
+						assert!(matches!(event, Some(announce::Event::Takeover { .. })), "{event:?}");
+					}
+					drop(request);
+					drop(output);
+					for cursor in &mut cursors {
+						cursor.next().now_or_never().flatten().expect("retract delivered");
+					}
+				});
+			},
+		);
 	}
 	group.finish();
 }
@@ -773,7 +880,7 @@ fn pool(members: usize, paths: usize, cursors: usize) -> Pool {
 	for member in &members {
 		while let Poll::Ready(request) = member.poll_requested_broadcast(&waiter) {
 			let broadcast = broadcast::Info::new().produce();
-			moq_net::fuzz::accept(request.unwrap(), &broadcast);
+			request.unwrap().serve(&broadcast);
 			producers.push(broadcast);
 		}
 	}
@@ -801,7 +908,7 @@ fn pool_route(hop: u64) -> origin::Route {
 	peer_route(hop, 3)
 }
 
-/// Re-requesting an epoch's stale fronts, swept over the cache around them and the
+/// Re-requesting fronts an instance change left stale, swept over the cache around them and the
 /// number restarted. Setup, route updates, and teardown stay outside the measurement.
 fn bench_restart_fronts(c: &mut Criterion) {
 	let mut group = c.benchmark_group("origin/restart_fronts");
@@ -812,8 +919,11 @@ fn bench_restart_fronts(c: &mut Criterion) {
 				b.iter_batched_ref(
 					|| {
 						let pool = pool(1, fronts, 0);
-						moq_net::fuzz::update_route(&pool._members[0], pool_route(POOL_HOP).with_epoch(Epoch::mint()))
-							.unwrap();
+						moq_net::fuzz::update_route(
+							&pool._members[0],
+							pool_route(POOL_HOP).with_instance(Instance::random(), 0),
+						)
+						.unwrap();
 						let paths: Vec<_> = (0..restarting).map(|i| format!("pool/job-{i}")).collect();
 						(pool, paths)
 					},
@@ -826,6 +936,43 @@ fn bench_restart_fronts(c: &mut Criterion) {
 					},
 					BatchSize::PerIteration,
 				);
+			});
+		}
+	}
+	group.finish();
+}
+
+/// A pool member taken over in place and retired, under `fronts` fronts resolved
+/// through it, against the same member restarting without a takeover. Each change
+/// pokes every front beneath the prefix, and the takeover carries each one's verdict
+/// forward under the table lock, so the takeover's cost over the restart is that pass.
+/// The fronts' tasks never run: this is the install alone.
+fn bench_takeover_fronts(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/takeover_fronts");
+	for fronts in [100, 1_000, 10_000] {
+		for takeover in [false, true] {
+			let kind = if takeover { "takeover" } else { "restart" };
+			group.bench_function(format!("{fronts}f_{kind}"), |b| {
+				let mut pool = pool(1, fronts, 0);
+				let mut last = pool._members.pop().expect("one member");
+				let mut hop = POOL_HOP + 1;
+				b.iter(|| {
+					hop += 1;
+					let next = match takeover {
+						true => moq_net::fuzz::takeover_route(
+							&pool.producer,
+							moq_net::Path::from_static("pool"),
+							pool_route(hop),
+							&last,
+						),
+						false => moq_net::fuzz::requests_route(
+							&pool.producer,
+							moq_net::Path::from_static("pool"),
+							pool_route(hop),
+						),
+					};
+					drop(std::mem::replace(&mut last, next.unwrap()));
+				});
 			});
 		}
 	}
@@ -1259,7 +1406,11 @@ fn bench_parked(c: &mut Criterion) {
 				runtime.spawn(moq_net::time::run(driver));
 				let broadcast = producer.publish("room/live", origin::Route::default()).unwrap();
 				let sources: Vec<_> = (0..tracks)
-					.map(|i| broadcast.create_track(format!("{i}"), None).unwrap())
+					.map(|i| {
+						broadcast
+							.create_track(format!("{i}"), moq_net::track::Info::default().with_max_age(None))
+							.unwrap()
+					})
 					.collect();
 				let _writers: Vec<_> = sources.iter().map(|source| source.append_group().unwrap()).collect();
 				let (subscriptions, mut groups) = runtime.block_on(async {
@@ -1326,9 +1477,9 @@ impl Generation {
 	}
 
 	/// Route the front to this generation without waiting.
-	fn route(&self, epoch: &Epoch) {
+	fn route(&self, instance: &Instance) {
 		self.broadcast
-			.announce(origin::Route::default().with_epoch(epoch.clone()))
+			.announce(origin::Route::default().with_instance(instance.clone(), 0))
 			.unwrap();
 	}
 
@@ -1338,10 +1489,10 @@ impl Generation {
 	/// copy, before its splice. That bounds the splice only on a current-thread
 	/// runtime, where every local query is ready within the front poll that
 	/// splices it.
-	async fn announce(&self, epoch: &Epoch) {
-		self.route(epoch);
+	async fn announce(&self, instance: &Instance) {
+		self.route(instance);
 		for track in &self.tracks {
-			moq_clock::timeout(COPY_WAIT, support::wanted(track.demand()))
+			kio::clock::timeout(COPY_WAIT, support::wanted(track.demand()))
 				.await
 				.expect("route swap did not splice")
 				.expect("replacement track closed");
@@ -1351,7 +1502,7 @@ impl Generation {
 
 /// A front serving [`COPY_PATH`], with `copies` route copies on each of its tracks.
 struct CopyWalk {
-	epoch: Epoch,
+	instance: Instance,
 	_producer: origin::Producer,
 	_subscribers: Vec<track::Subscriber>,
 	generations: Vec<Generation>,
@@ -1368,17 +1519,17 @@ async fn copy_walk(tracks: usize, copies: usize) -> CopyWalk {
 	assert!(copies >= 1, "a front holds at least the serving copy");
 	let (producer, driver) = origin::Producer::new(origin::Config::default());
 	tokio::spawn(moq_net::time::run(driver));
-	let epoch = Epoch::mint();
+	let instance = Instance::random();
 	let first = Generation::build(&producer, tracks);
-	first.route(&epoch);
-	let resolved = moq_clock::timeout(COPY_WAIT, producer.consume().request(COPY_PATH, None))
+	first.route(&instance);
+	let resolved = kio::clock::timeout(COPY_WAIT, producer.consume().request(COPY_PATH, None))
 		.await
 		.expect("front did not resolve")
 		.expect("front refused");
 	let mut subscribers = Vec::with_capacity(tracks);
 	for i in 0..tracks {
 		let track = resolved.track(&format!("{i}")).unwrap();
-		let subscriber = moq_clock::timeout(COPY_WAIT, track.subscribe(None))
+		let subscriber = kio::clock::timeout(COPY_WAIT, track.subscribe(None))
 			.await
 			.expect("track did not splice")
 			.expect("subscribe failed");
@@ -1388,12 +1539,12 @@ async fn copy_walk(tracks: usize, copies: usize) -> CopyWalk {
 	generations.push(first);
 	for _ in 1..copies {
 		let generation = Generation::build(&producer, tracks);
-		generation.announce(&epoch).await;
+		generation.announce(&instance).await;
 		generations.push(generation);
 	}
 	CopyWalk {
 		next: Some(Generation::build(&producer, tracks)),
-		epoch,
+		instance,
 		_producer: producer,
 		_subscribers: subscribers,
 		generations,
@@ -1401,13 +1552,13 @@ async fn copy_walk(tracks: usize, copies: usize) -> CopyWalk {
 }
 
 impl CopyWalk {
-	/// Swap in the prebuilt newer route at the same epoch.
+	/// Swap in the prebuilt newer route at the same instance.
 	///
 	/// A local track's info is already known, so the front subscribes, walks
 	/// every track, and each reader walks its copies in one driver turn.
 	async fn swap(&mut self) {
 		let generation = self.next.take().expect("one swap per setup");
-		generation.announce(&self.epoch).await;
+		generation.announce(&self.instance).await;
 		self.generations.push(generation);
 	}
 }
@@ -1513,7 +1664,7 @@ async fn resume_overlap(shape: ResumeShape, ordered: bool) -> ResumeOverlap {
 	} = shape;
 	let (producer, driver) = origin::Producer::new(origin::Config::default());
 	tokio::spawn(moq_net::time::run(driver));
-	let epoch = Epoch::mint();
+	let instance = Instance::random();
 	let generation = |order: &mut dyn Iterator<Item = usize>| {
 		let broadcast = producer.create_broadcast(COPY_PATH).unwrap();
 		let track = broadcast.create_track("0", timed()).unwrap();
@@ -1527,21 +1678,22 @@ async fn resume_overlap(shape: ResumeShape, ordered: bool) -> ResumeOverlap {
 			group.finish().unwrap();
 		}
 		broadcast
-			.announce(origin::Route::default().with_epoch(epoch.clone()))
+			.announce(origin::Route::default().with_instance(instance.clone(), 0))
 			.unwrap();
 		(broadcast, track)
 	};
 	let mut generations = vec![generation(&mut (0..retained))];
-	let resolved = moq_clock::timeout(COPY_WAIT, producer.consume().request(COPY_PATH, None))
+	let resolved = kio::clock::timeout(COPY_WAIT, producer.consume().request(COPY_PATH, None))
 		.await
 		.expect("front did not resolve")
 		.expect("front refused");
 	let track = resolved.track("0").unwrap();
 	// A budget covering every group, so none is written off as late.
-	let subscription = track::Subscription::default().with_max_delay(Duration::from_secs(3600));
+	let subscription =
+		track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(3600)));
 	let mut subscribers = Vec::with_capacity(readers);
 	for _ in 0..readers {
-		let subscriber = moq_clock::timeout(COPY_WAIT, track.subscribe(subscription.clone()))
+		let subscriber = kio::clock::timeout(COPY_WAIT, track.subscribe(subscription.clone()))
 			.await
 			.expect("track did not splice")
 			.expect("subscribe failed");
@@ -1559,7 +1711,7 @@ async fn resume_overlap(shape: ResumeShape, ordered: bool) -> ResumeOverlap {
 			generation(&mut (0..retained).rev())
 		});
 		let (_, latest) = generations.last().unwrap();
-		moq_clock::timeout(COPY_WAIT, support::wanted(latest.demand()))
+		kio::clock::timeout(COPY_WAIT, support::wanted(latest.demand()))
 			.await
 			.expect("route swap did not splice")
 			.expect("replacement track closed");
@@ -1635,6 +1787,7 @@ fn bench_resume_overlap(c: &mut Criterion) {
 criterion_group!(
 	benches,
 	bench_announce,
+	bench_announce_covering,
 	bench_pending_churn,
 	bench_withdraw,
 	bench_withdraw_wave,
@@ -1644,12 +1797,14 @@ criterion_group!(
 	bench_announce_duplicate,
 	bench_reprice_duplicate,
 	bench_announce_fronts,
+	bench_takeover,
 	bench_serve_idle,
 	bench_subscribe,
 	bench_request,
 	bench_retire,
 	bench_restart_fronts,
 	bench_pool_churn,
+	bench_takeover_fronts,
 	bench_pool_cursors,
 	bench_handoff,
 	bench_narrow_delivery,
