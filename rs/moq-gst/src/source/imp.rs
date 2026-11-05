@@ -915,7 +915,10 @@ impl Session {
 		// loss at subscription the same as loss during reading, so an obsolete run cannot fail
 		// the session that is already following its replacement.
 		let track = broadcast.track(hang::catalog::Catalog::DEFAULT_NAME);
-		if track.as_ref().is_err_and(source_lost) {
+		if let Err(err) = &track
+			&& source_lost(err)
+		{
+			tracing::warn!(%err, "catalog lost before subscribing, holding pads");
 			return Ok(());
 		}
 		let mut catalog_consumer = moq_mux::catalog::hang::Consumer::new(track.context("subscribe to catalog")?);
@@ -5244,9 +5247,9 @@ mod session_tests {
 		});
 		let origin = origin();
 
-		let mut current = Publisher::new(&origin, Default::default(), video_rendition());
+		let mut current = (Publisher::new(&origin, Default::default(), video_rendition()), None);
 		let session = follow(&element, &origin);
-		let pad = recorder.written(&mut current, 1);
+		let pad = recorder.written(&mut current.0, 1);
 		for round in 0..4u8 {
 			let tag = 2 + round * 3;
 			let route = moq_net::origin::Route::default();
@@ -5262,7 +5265,7 @@ mod session_tests {
 			// in the relist snapshot does: its pad appears only after the video is listed again.
 			// Give each round its own rendition so an earlier round's kept pad cannot acknowledge it.
 			let name = format!("relisted-{round}");
-			let _audio = next
+			let audio = next
 				.broadcast
 				.create_track(
 					name.as_str(),
@@ -5297,7 +5300,7 @@ mod session_tests {
 				pad,
 				"round {round}: the reconnect moved pads"
 			);
-			current = next;
+			current = (next, Some(audio));
 		}
 		stop(session);
 		recorder.assert_one_pad_held();
