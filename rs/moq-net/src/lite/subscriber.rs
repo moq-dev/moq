@@ -5185,14 +5185,40 @@ mod tests {
 				update,
 			})
 		};
-		let arrive = |serving: &mut ServeLoop, sequence| {
-			let mut group = serving.serving.create_group(crate::group::Info { sequence }).unwrap();
-			let reading = Reading::open(&tail, Some(sequence), now());
-			group
-				.write_frame(crate::Timestamp::from_millis(1).unwrap(), &b"x"[..])
-				.unwrap();
-			group.finish().unwrap();
-			reading.finish();
+		serve.subscriber.subscribes.lock().insert(
+			0,
+			TrackEntry::accepted(
+				serving.serving.clone(),
+				lite::Framing {
+					timescale: Some(Timescale::MILLI),
+					ietf: None,
+					compressed: false,
+				},
+				tail.clone(),
+			),
+		);
+		// A group stream that arrives whole, through the path that records it, then is evicted.
+		let arrive = async |serving: &mut ServeLoop, sequence| {
+			use crate::transport::poll::Session as _;
+
+			let mut script = Vec::new();
+			let mut encoder = crate::coding::Encoder::new(&mut script, version.into());
+			lite::Group {
+				subscribe: 0,
+				sequence,
+				frame_start: 0,
+			}
+			.encode(&mut encoder, version)
+			.unwrap();
+			encoder.varint(crate::coding::varint::zigzag(1)).unwrap();
+			encoder.bytes(b"x").unwrap();
+			let session = crate::lite::test_transport::ScriptedSession::eof(script);
+			let (_, recv) = session.open_bi(Default::default()).await.unwrap();
+			let mut group = GroupRecv::new(
+				serve.subscriber.clone(),
+				Reader::new(crate::transport::boxed::RecvStream::new(recv), version),
+			);
+			kio::wait(|waiter| group.poll_serve(waiter)).await.unwrap();
 			serving.serving.evict(sequence);
 		};
 		let update = |serving: &mut ServeLoop| {
@@ -5204,13 +5230,13 @@ mod tests {
 		};
 		let covers = |groups: std::ops::Range<u64>| tail.read().covers(groups);
 
-		arrive(&mut serving, 1);
+		arrive(&mut serving, 1).await;
 		serving.apply_response(&serve, old(1, 0)).unwrap();
 		update(&mut serving);
 		assert!(covers(1..2), "the evicted group that arrived stays accounted for");
 
 		// Finished under the first update, then judged stale under the second.
-		arrive(&mut serving, 2);
+		arrive(&mut serving, 2).await;
 		update(&mut serving);
 		serving.apply_response(&serve, old(2, 2)).unwrap();
 		update(&mut serving);

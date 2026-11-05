@@ -2749,8 +2749,6 @@ test("a finished group wins over a late stale drop once evicted on lite-07", asy
 		track: Producer;
 		tail: {
 			covers(start: bigint, end: bigint): boolean;
-			open(sequence: bigint): () => void;
-			finish(sequence: bigint): void;
 		};
 	};
 	let entry: Entry | undefined;
@@ -2782,14 +2780,12 @@ test("a finished group wins over a late stale drop once evicted on lite-07", asy
 		const old = (sequence: bigint, update: bigint): SubscribeResponse => ({
 			drop: new SubscribeDrop({ start: sequence, end: sequence, error: StreamCode.Old, update }),
 		});
-		// A group stream that arrives whole.
-		const arrive = (sequence: bigint) => {
-			if (!entry) throw new Error("no subscription");
-			const read = entry.tail.open(sequence);
-			hooks.receiveGroup(entry.track, { sequence, start: 0 }).finish();
-			entry.tail.finish(sequence);
-			read();
-		};
+		// A group stream that arrives whole, through the path that records it.
+		const arrive = (sequence: bigint) =>
+			subscriber.runGroup(
+				new Group({ subscribe: 0n, sequence }),
+				new Reader(new ReadableStream({ start: (controller) => controller.close() }), undefined, version),
+			);
 		// Everything below the live edge ages out of the cache.
 		const evict = () => clock.advance(Nano.fromMilli(Milli(2 * CACHE_EXPIRY)));
 		let priority = 0;
@@ -2799,8 +2795,8 @@ test("a finished group wins over a late stale drop once evicted on lite-07", asy
 		};
 
 		await send({ start: new SubscribeStart([0n]) });
-		arrive(1n);
-		arrive(10n);
+		await arrive(1n);
+		await arrive(10n);
 		await evict();
 		await send(old(1n, 0n));
 		await update();
@@ -2808,7 +2804,7 @@ test("a finished group wins over a late stale drop once evicted on lite-07", asy
 		expect(entry.tail.covers(1n, 2n)).toBe(true);
 
 		// Finished under the first update, then judged stale under the second.
-		arrive(2n);
+		await arrive(2n);
 		await update();
 		await evict();
 		await send(old(2n, 2n));
