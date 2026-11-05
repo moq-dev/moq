@@ -623,3 +623,44 @@ async fn a_datagram_sent_right_before_its_end_arrives() {
 		assert_eq!(chain.pairs[0].server.stats().datagrams_unrouted, Some(0), "{version}");
 	}
 }
+
+/// Lite-05/06: a stream track's subscription carries its name's datagrams, and a publisher
+/// answering the track, writing a datagram and finishing at once sends all three in one
+/// receive pass. The subscriber routes the datagram to the name's datagram track before the
+/// stream track's end removes it.
+#[kio::test]
+async fn a_stream_tracks_datagram_sent_between_its_answer_and_end_arrives() {
+	for version in ["moq-lite-05", "moq-lite-06"] {
+		let chain = Chain::new(&[version]).await;
+		let mut requests = chain.publication.requests();
+		let mut handler = requests.datagrams();
+		let remote = chain.remote().await;
+		let mut subscribing = kio::clock::sim::spawn(async move { remote.track(TRACK).unwrap().subscribe(None).await });
+		let stream = kio::clock::timeout(TIMEOUT, requests.requested_track())
+			.await
+			.unwrap_or_else(|_| panic!("{version}: the stream lookup never reached the publisher"))
+			.unwrap();
+		let datagrams = kio::clock::timeout(TIMEOUT, handler.requested())
+			.await
+			.unwrap_or_else(|_| panic!("{version}: the datagram handler was never asked"))
+			.unwrap();
+		let track = stream.accept(moq_net::track::Info::default().with_timescale(Timescale::MILLI));
+		let mut producer = datagrams.accept(timed());
+		producer.append(millis(1), &b"only"[..]).unwrap();
+		producer.finish();
+		track.finish().unwrap();
+		let mut subscriber = (&mut subscribing)
+			.await
+			.expect("subscribe panicked")
+			.unwrap_or_else(|err| panic!("{version}: {err:?}"));
+		assert!(
+			kio::clock::timeout(TIMEOUT, subscriber.recv_group())
+				.await
+				.expect("end timeout")
+				.unwrap()
+				.is_none(),
+			"{version}"
+		);
+		assert_eq!(chain.pairs[0].server.stats().datagrams_unrouted, Some(0), "{version}");
+	}
+}

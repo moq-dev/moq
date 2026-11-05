@@ -9471,9 +9471,14 @@ impl SharedDatagrams {
 }
 
 impl SharedDatagrams {
-	/// Stop routing to the track and end it with `end`.
+	/// Stop routing to the track and end it with `end`. A clean end waits for the datagrams
+	/// received with it, see [`Subscriber::end_datagrams`].
 	fn end(&mut self, end: Result<(), Error>) {
 		let Some(producer) = self.producer.take() else {
+			return;
+		};
+		let Err(err) = end else {
+			self.subscriber.datagram_ends.lock().shared.push((self.key.clone(), producer));
 			return;
 		};
 		let mut shared = self.subscriber.legacy_datagrams.lock();
@@ -9484,10 +9489,7 @@ impl SharedDatagrams {
 			shared.remove(&self.key);
 		}
 		drop(shared);
-		match end {
-			Ok(()) => producer.finish(),
-			Err(err) => producer.abort(err),
-		}
+		producer.abort(err);
 	}
 }
 
