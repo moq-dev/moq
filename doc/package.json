@@ -13,12 +13,12 @@
 	},
 	"devDependencies": {
 		"@types/bun": "^1.4.4",
-		"@types/node": "^26.6.4",
+		"@types/node": "^26.6.6",
 		"moq-doc-api": "workspace:*",
 		"typescript": "7.0.2",
 		"vitepress": "^1.6.4",
 		"vitepress-plugin-llms": "^1.14.0",
-		"wrangler": "^4.154.0",
+		"wrangler": "^4.155.0",
 		"yaml": "^2.9.1"
 	}
 }

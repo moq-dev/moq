@@ -1,7 +1,6 @@
 import { Micro, Milli, type Second } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
-import type * as Hls from "@moq/hang/hls";
 import type * as Moq from "@moq/net";
 import {
 	type Computed,
@@ -14,7 +13,7 @@ import {
 	Signal,
 } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
-import { hlsHint, watched } from "../internal";
+import { watched } from "../internal";
 import { Estimator, type Order } from "../order";
 import { Slot } from "../publication";
 import type { RenditionStats } from "../rendition";
@@ -65,9 +64,10 @@ export interface Config {
 
 	/**
 	 * The longest interval between keyframes. A joining subscriber forces one sooner once the
-	 * group's deltas outweigh the track's refresh ratio. Each track's catalog `hls` duration,
-	 * declared when the track is created, bounds its GOPs: a live change past it, including to
-	 * infinite, is capped there until a new track declares again. (default: 2000 milliseconds)
+	 * group's deltas outweigh the track's refresh ratio. The broadcast declares the longest
+	 * interval as its catalog's `media.join.interval` when media is first listed, which then bounds
+	 * every GOP: a live change past it, including to infinite, is capped there until a new network
+	 * broadcast declares again. (default: 2000 milliseconds)
 	 */
 	keyframeInterval?: Milli;
 
@@ -354,10 +354,11 @@ export class Encoder {
 		effect.proxy(this.#slot, rendition.slot);
 		effect.cleanup(() => this.#slot.set(undefined));
 
-		// The longest GOP fixes each new track's HLS segment duration, as moq-video's encoders hint theirs.
-		const hint = (config: Config | undefined) => hlsHint(config?.keyframeInterval ?? DEFAULT_KEYFRAME_INTERVAL);
-		rendition.hlsHint.set(hint(this.config.peek()));
-		effect.subscribe(this.config, (config) => rendition.hlsHint.set(hint(config)));
+		// The longest GOP, which the broadcast declares as the catalog's join interval.
+		effect.run((effect) => {
+			const interval = effect.get(this.config)?.keyframeInterval ?? DEFAULT_KEYFRAME_INTERVAL;
+			rendition.joinInterval.set(interval);
+		});
 
 		// Publish the resolved catalog config; undefined (until one resolves) leaves it out of the catalog.
 		effect.proxy(rendition.config, this.out.catalog);
@@ -371,7 +372,7 @@ export class Encoder {
 			effect.set(this.#out.active, enabled && !!track && !error, false);
 			if (!enabled || !track || error) return;
 
-			this.#encode(track, rendition.hls(track), broadcast.order, effect);
+			this.#encode(track, broadcast.order, broadcast.join, effect);
 		});
 
 		// Reserve against the connection while a subscriber is attached. Wait for a ceiling so we
@@ -407,11 +408,11 @@ export class Encoder {
 	}
 
 	// Encode captured frames into the track producer, reconfiguring when the resolved config changes.
-	#encode(track: Moq.Track.Producer, hls: Hls.Recorder | undefined, order: Order, effect: Effect): void {
+	#encode(track: Moq.Track.Producer, order: Order, join: Getter<Milli | undefined>, effect: Effect): void {
 		const capture = effect.get(this.in.capture);
 		if (!capture) return;
 
-		const producer = new Container.Legacy.Producer(track, new Container.Legacy.Format("video"), hls);
+		const producer = new Container.Legacy.Producer(track, new Container.Legacy.Format("video"));
 		const demand = track.demand();
 
 		let lastKeyframe: Micro | undefined;
@@ -536,10 +537,10 @@ export class Encoder {
 							}
 							lastEncoded = frame.timestamp as Micro;
 
-							// The catalog's declared duration is the track's longest GOP, fixed when the track
-							// was created, so a live raise past it stops there.
+							// The catalog's declared join interval is the longest GOP, fixed for the network
+							// broadcast, so a live raise past it stops there.
 							const requested = config?.keyframeInterval ?? DEFAULT_KEYFRAME_INTERVAL;
-							const declared = hls?.hls.peek()?.duration;
+							const declared = join.peek();
 							const interval = declared === undefined ? requested : Milli(Math.min(requested, declared));
 
 							// Force a keyframe if this is the first frame (no group yet), the GOP elapsed, the
@@ -881,6 +882,8 @@ export class Encoder {
 				bitrate: ceiling(codec, dimensions, target),
 				latencyMode: "realtime",
 				hardwareAcceleration,
+				// Annex B keeps the parameter sets in band, so the catalog carries no description and a
+				// keyframe can change the size. The probe refuses an encoder that ignores this.
 				avc: codec.startsWith("avc1") ? { format: "annexb" } : undefined,
 				// @ts-expect-error TypeScript's DOM lib lacks the HEVC codec registration's `hevc` config.
 				hevc: codec.startsWith("hev1") ? { format: "annexb" } : undefined,
@@ -889,9 +892,9 @@ export class Encoder {
 			const { supported } = await VideoEncoder.isConfigSupported(config);
 			if (!supported) continue;
 
-			const reported = await reportedCodec(config);
-			if (reported !== undefined) return { config, reported };
-			console.warn(`moq-publish: skipping ${codec}: its encoder reorders frames despite realtime latency`);
+			const probed = await probeEncoder(config);
+			if ("reported" in probed) return { config, reported: probed.reported };
+			console.warn(`moq-publish: skipping ${codec}: ${probed.refused}`);
 		}
 
 		throw new Error("no supported codec");
@@ -1004,17 +1007,29 @@ const PROBE_FRAMES = 4;
 // claim the first keyframe would contradict. It closes before the config resolves, so it never
 // overlaps the first real encoder; only a re-probe while serving briefly holds two sessions.
 //
-// Returns undefined when the encoder reorders its output. The catalog declares none, but Firefox's
-// software H.264 still emits B-frames for High and Main under realtime latency.
-async function reportedCodec(config: VideoEncoderConfig): Promise<string | undefined> {
+// Refuses an encoder whose output the track can't carry, so the caller moves on to the next codec:
+// - Output that reorders. The catalog declares none, but Firefox's software H.264 still emits
+//   B-frames for High and Main under realtime latency.
+// - H.264 or HEVC that isn't Annex B. Safari 26 accepts `hevc: { format: "annexb" }` but emits
+//   length-prefixed NAL units with an hvcC description, which no subscriber can decode. A
+//   description means length-prefixed output (per the AVC and HEVC WebCodecs registrations), which
+//   also catches a four-byte length that happens to read as a start code, such as `00 00 01 2c`.
+async function probeEncoder(config: VideoEncoderConfig): Promise<{ reported: string } | { refused: string }> {
 	let reported: string | undefined;
 	let reordered = false;
 	let last: number | undefined;
+	let first: Uint8Array | undefined;
+	let described = false;
 	const encoder = new VideoEncoder({
 		output: (chunk, metadata) => {
 			reported ??= metadata?.decoderConfig?.codec;
 			if (last !== undefined && chunk.timestamp <= last) reordered = true;
 			last = chunk.timestamp;
+			if (metadata?.decoderConfig?.description) described = true;
+			if (!first) {
+				first = new Uint8Array(chunk.byteLength);
+				chunk.copyTo(first);
+			}
 		},
 		// flush() rejects with the same error.
 		error: () => {},
@@ -1046,7 +1061,22 @@ async function reportedCodec(config: VideoEncoderConfig): Promise<string | undef
 	}
 
 	if (!reported) throw new Error(`${config.codec} encoder reported no codec string`);
-	return reordered ? undefined : reported;
+	if (reordered) return { refused: "its encoder reorders frames despite realtime latency" };
+	if (requestsAnnexB(config.codec) && (described || !(first && startsWithStartCode(first)))) {
+		return { refused: "its encoder ignored the requested Annex B format" };
+	}
+	return { reported };
+}
+
+// The codecs the probe configures for Annex B output.
+function requestsAnnexB(codec: string): boolean {
+	return codec.startsWith("avc1") || codec.startsWith("hev1");
+}
+
+// Whether `data` opens with an Annex B start code: 00 00 01, with an optional leading zero byte.
+function startsWithStartCode(data: Uint8Array): boolean {
+	if (data[0] !== 0 || data[1] !== 0) return false;
+	return data[2] === 1 || (data[2] === 0 && data[3] === 1);
 }
 
 // Scale the bitrate for more efficient codecs, relative to H.264.

@@ -319,14 +319,17 @@ impl Reader {
 			err => err,
 		})?;
 
+		// The max-delay decoder tolerates its warmup as lateness, so its delay already holds the
+		// warmup on both bounds: neither lane passes the catalog warmup to the playout, which would
+		// count it twice, on the subscription and in the start's reach.
+		let playout = moq_mux::container::Playout::new(delay, std::time::Duration::ZERO);
 		let track = broadcast.track(hang::catalog::Reference::track(catalog, name))?;
 		let mut subscriber = track
 			.subscribe(
-				moq_net::track::Subscription::default()
-					.with_priority(hang::catalog::PRIORITY.video)
-					// The whole delay from the first request, as the container keeps it, so the
-					// publisher never sees a stated zero min before the container's update.
-					.with_delay(delay),
+				// The whole delay from the first request, as the container keeps it, so the
+				// publisher never sees a stated zero min before the container's update.
+				playout
+					.subscription(moq_net::track::Subscription::default().with_priority(hang::catalog::PRIORITY.video)),
 			)
 			.await?;
 		// A decoder often opens on a track that is already cached: a replacement
@@ -360,8 +363,8 @@ impl Reader {
 		// On a cold network join the live edge's stream often lands first. The container starts
 		// at the group covering the live edge less the min delay, waiting for it, so the
 		// max-delay decoder, whose min delay includes the warmup, still gets the group its warmup
-		// needs. That decoder tolerates the warmup as lateness too, so it passes no further warmup.
-		let track = moq_mux::container::Consumer::new(track, container).with_delay(delay);
+		// needs.
+		let track = playout.consumer(track, container);
 
 		Ok(Self {
 			decoder,
@@ -486,7 +489,7 @@ mod tests {
 		let rendition = config.probe().await.unwrap();
 		let reserved = source_catalog
 			.reserve()
-			.with_hls_hint(config.gop.duration(config.framerate));
+			.with_interval(config.gop.duration(config.framerate));
 		let mut producer = EncodeProducer::new(source_broadcast, reserved, rendition).unwrap();
 		let mut encoder = Encoder::new(&config).unwrap();
 		let rgba = vec![0x80u8; 320 * 240 * 4];
@@ -1496,6 +1499,31 @@ mod tests {
 			err.to_string().contains("out of decoder sessions"),
 			"unexpected error: {err}"
 		);
+	}
+
+	/// A device that cannot decode the stream refuses the rendition, so a caller
+	/// can pick another one, the same as for a codec this build lacks.
+	#[tokio::test]
+	async fn a_device_refusal_is_an_unsupported_config() {
+		let (broadcast, _track) = live_track();
+		let result = Consumer::new(
+			&broadcast.consume(),
+			&warmup_catalog(None),
+			"video",
+			Options {
+				decoder: Config {
+					kind: Kind::Named(probe::REFUSING_NAME.into()),
+					..Config::new()
+				},
+				..Options::new()
+			},
+		)
+		.await;
+		match result {
+			Err(Error::UnsupportedConfig(reason)) => assert!(reason.contains("cannot decode"), "{reason}"),
+			Err(other) => panic!("expected UnsupportedConfig, got {other:?}"),
+			Ok(_) => panic!("the consumer opened a decoder its device refused"),
+		}
 	}
 
 	/// A max-delay decode error reaches the caller, like a min-delay one.

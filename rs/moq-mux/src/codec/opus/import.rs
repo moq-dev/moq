@@ -12,8 +12,8 @@ use crate::container::Frame;
 /// frame of each group a keyframe (the rest extend it): frames accumulate into the current group
 /// until the caller [`cut`](Self::cut)s or [`seek`](Self::seek)s. The
 /// [`import::Track`](crate::import::Track) facade passes that through, so boundaries are the
-/// caller's either way: cut per packet for one group (one QUIC stream) forwarded immediately, or at
-/// a segment cadence to align with video. Opus' packet loss concealment handles drops.
+/// caller's either way: cut per packet for one group (one QUIC stream) forwarded immediately, or
+/// less often to batch frames into fewer groups. Opus' packet loss concealment handles drops.
 pub struct Import {
 	track: crate::container::Producer<crate::catalog::hang::Container, hang::catalog::AudioConfig>,
 }

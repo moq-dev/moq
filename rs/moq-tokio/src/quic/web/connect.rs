@@ -18,25 +18,33 @@ impl std::fmt::Debug for Request<'_> {
 
 #[derive(Error, Debug, Clone)]
 #[non_exhaustive]
+/// An error exchanging HTTP/3 CONNECT headers.
 pub enum ConnectError {
+	/// The HTTP/3 handshake failed at this step.
 	#[error("quic stream was closed early")]
 	UnexpectedEnd,
 
+	/// The HTTP/3 handshake failed at this step.
 	#[error("protocol error: {0}")]
 	ProtoError(#[from] web_transport_proto::ConnectError),
 
+	/// The QUIC connection failed.
 	#[error("connection error")]
 	ConnectionError(#[from] crate::quic::driver::connection::Error),
 
+	/// The QUIC receive stream failed.
 	#[error("read error")]
 	ReadError(#[from] crate::quic::driver::recv::Error),
 
+	/// The QUIC send stream failed.
 	#[error("write error")]
 	WriteError(#[from] crate::quic::driver::send::Error),
 
+	/// The HTTP/3 handshake failed at this step.
 	#[error("http error status: {0}")]
 	ErrorStatus(http::StatusCode),
 
+	/// The HTTP/3 handshake failed at this step.
 	#[error("server returned protocol not in request: {0}")]
 	ProtocolMismatch(String),
 }

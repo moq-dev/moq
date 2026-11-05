@@ -60,7 +60,7 @@ async fn disconnect(at: At) {
 		matches!(
 			err,
 			moq_hls::Error::CatalogFailed { .. }
-				| moq_hls::Error::RecordsFailed { .. }
+				| moq_hls::Error::MediaFailed { .. }
 				| moq_hls::Error::SegmentUnavailable { .. }
 		),
 		"{at:?}: a disconnect ended the recording with {err:?}"
@@ -83,7 +83,7 @@ async fn disconnect(at: At) {
 	assert!(
 		matches!(
 			refused,
-			moq_hls::Error::CatalogFailed { .. } | moq_hls::Error::RecordsFailed { .. }
+			moq_hls::Error::CatalogFailed { .. } | moq_hls::Error::MediaFailed { .. }
 		),
 		"{at:?}: {refused:?}"
 	);

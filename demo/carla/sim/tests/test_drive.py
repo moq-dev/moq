@@ -1,5 +1,9 @@
 """The control safety gate's contract."""
 
+from dataclasses import replace
+
+import pytest
+
 from moq_carla_sim.drive import Command, Drive, DriveState, Gear
 
 
@@ -25,7 +29,10 @@ def test_first_driver_keeps_control() -> None:
     assert state.apply(drive("first", 1, 0.5))
     assert not state.apply(drive("second", 2, 1.0))
     assert state.driver == "first"
-    assert state.state.throttle == 0.5
+    assert state.state.throttle == 0.0
+    assert state.state.brake == 1.0
+    assert state.apply(drive("first", 2, 0.6))
+    assert state.state.throttle == 0.6
 
 
 def test_the_lease_belongs_to_one_run_of_a_driver() -> None:
@@ -38,6 +45,7 @@ def test_the_lease_belongs_to_one_run_of_a_driver() -> None:
     second = Command(
         kind="drive", driver_id="abc", instance="run-2", sequence=1, state=DriveState(throttle=1.0, brake=0.0)
     )
+    assert state.apply(Command(kind="drive", driver_id="abc", instance="run-1"))
     assert state.apply(first)
     assert not state.apply(second)
     assert state.state.throttle == 0.5
@@ -132,11 +140,12 @@ def test_estop_from_holder_refreshes_the_acknowledgement_sequence() -> None:
 
 def test_axes_are_clamped_into_range() -> None:
     state = Drive()
+    assert state.apply(Command(kind="drive", driver_id="driver", sequence=1))
     assert state.apply(
         Command(
             kind="drive",
             driver_id="driver",
-            sequence=1,
+            sequence=2,
             state=DriveState(steering=-4.0, throttle=9.0, brake=-1.0, gear=Gear.FORWARD),
         )
     )
@@ -149,53 +158,56 @@ def test_axes_are_clamped_into_range() -> None:
     assert accepted.gear is Gear.NEUTRAL
 
 
-def test_unclaimed_gate_can_synchronize_with_vehicle_feedback() -> None:
+@pytest.mark.parametrize("gear", list(Gear))
+def test_every_new_lease_resets_pedals_without_changing_steering_or_gear(gear: Gear) -> None:
     state = Drive()
-    measured = DriveState(steering=-0.4, throttle=0.6, brake=0.2, gear=Gear.REVERSE)
+    command = Command(
+        kind="drive",
+        driver_id="driver",
+        sequence=1,
+        state=DriveState(steering=0.3, throttle=1.0, brake=0.0, gear=gear),
+    )
+    assert state.apply(command)
+    assert state.state == DriveState(steering=0.3, throttle=0.0, brake=1.0, gear=gear)
 
-    assert state.synchronize(measured)
-    assert state.state == measured
-    assert state.apply(Command(kind="drive", driver_id="driver", sequence=1, state=measured))
-    assert state.state == measured
+    # Heartbeats and steering-only input must not restore inherited throttle.
+    assert state.apply(command)
+    assert state.state == DriveState(steering=0.3, throttle=0.0, brake=1.0, gear=gear)
+    assert state.apply(replace(command, state=DriveState(steering=-0.4, throttle=1.0, brake=0.0, gear=gear)))
+    assert state.state == DriveState(steering=-0.4, throttle=0.0, brake=1.0, gear=gear)
 
-    assert not state.synchronize(DriveState.stopped())
-    assert state.state == measured
+    pedal_input = DriveState(steering=-0.4, throttle=0.5, brake=0.0, gear=gear)
+    assert state.apply(replace(command, state=pedal_input))
+    assert state.state == pedal_input
+    assert state.apply(command)
+    assert state.state == command.state
+
+    assert state.apply(Command(kind="watchdog_expired"))
+    assert state.apply(command)
+    assert state.state == DriveState(steering=0.3, throttle=0.0, brake=1.0, gear=gear)
+
+    assert state.apply(command)
+    assert state.state == DriveState(steering=0.3, throttle=0.0, brake=1.0, gear=gear)
 
 
-def test_new_lease_can_initialize_a_zero_pedal_forward_takeover() -> None:
+def test_takeover_brake_allows_a_forward_claim_without_autonomous_feedback() -> None:
     state = Drive()
     assert state.apply(
-        Command(
-            kind="drive",
-            driver_id="driver",
-            sequence=1,
-            state=DriveState(throttle=0.0, brake=0.0, gear=Gear.FORWARD),
-        )
+        Command(kind="drive", driver_id="driver", state=DriveState(throttle=0.85, brake=0.0, gear=Gear.FORWARD))
     )
-    assert state.state == DriveState(throttle=0.0, brake=0.0, gear=Gear.FORWARD)
-
-    # Once the lease exists, zero pedals cannot bypass the normal shift gate.
-    assert state.apply(
-        Command(
-            kind="drive",
-            driver_id="driver",
-            sequence=2,
-            state=DriveState(throttle=0.0, brake=0.0, gear=Gear.REVERSE),
-        )
-    )
-    assert state.state.gear is Gear.FORWARD
+    assert state.state == DriveState(gear=Gear.FORWARD)
 
 
 def test_gear_change_requires_brake_and_released_throttle() -> None:
     state = Drive()
 
-    # Establish the lease without invoking CARLA's one-time forward takeover sync.
+    # Establish the lease before testing ordinary gear changes.
     assert state.apply(
         Command(
             kind="drive",
             driver_id="driver",
             sequence=1,
-            state=DriveState(throttle=0.0, brake=0.0, gear=Gear.NEUTRAL),
+            state=DriveState.stopped(),
         )
     )
 

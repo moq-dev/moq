@@ -49,7 +49,7 @@ fn old_peers_keep_hidden_paths() {
 /// The relay dials a peer pinned to `version`. The peer's announce request cannot
 /// carry the opt-in below lite-07, yet it discovers the relay's hidden broadcast.
 async fn old_peer_keeps_hidden_paths(version: moq_net::Version) {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	kio::clock::timeout(TEST_TIMEOUT, async {
 		let (port, mut server) = listen_tcp(version).await;

@@ -27,6 +27,8 @@ Decided 2026-11-03 (maintainer, on [moq-dev/moq#7605](https://github.com/moq-dev
 
 `Cursor::probe` is the relay's check for groups a reader has missed. Each time a subscriber asks for its next group, the probe looks at what arrived on the track since its last look and decides whether any group the reader still wants has left the cache without the live feed delivering it (evicted, skipped, or from before the feed started), and asks upstream to fill those. A live reader that takes each group as it arrives never has such a gap, yet it paid for the whole check on every group: locking the subscription and the track's shared state, cloning the track's fills, walking the arrival ledger, checking each new group for holes, and running the ask-and-answer loop. On top of that, each time the cache aged out an old group, the eviction landed with every reader, all of which had already taken it, and forced each one to re-run the full check.
 
+Added 2026-11-04 (maintainer) from [fastest-reader pacing](https://github.com/moq-dev/moq/pull/7664)'s comparison on a loaded host: `main` at `f37d964` reads `group_relay_frames` about 15% slower than `e7a5c10`. Pacing ([moq-dev/moq#7388](https://github.com/moq-dev/moq/pull/7388)) explains about 4% of that, and [its own quest](/quest/m1/release-perf/pacing-report.md) trims it; attribute the remaining ~10% here, on a quiet host.
+
 Follow-up planning on 2026-11-03 (maintainer) added a load-independent mode to the driver: `just bench-fanout` counts the chat fan-out per delivered group on one pinned thread, through the model alone and through a relay over the in-memory transport, for any list of revisions. [The report](/.github/relay-cpu-bisect.md) attributes each step with it, and the fixes so far take `main`'s model path from 13,300 to 10,126 instructions per group (-23.9%) and the in-process session from 120,948 to 113,133 (-6.5%), at 512 subscribers.
 
 Decided 2026-11-03 (maintainer, on [moq-dev/moq#7605](https://github.com/moq-dev/moq/pull/7605)), after the attribution:
@@ -39,7 +41,7 @@ Decided 2026-11-03 (maintainer, on [moq-dev/moq#7605](https://github.com/moq-dev
    - ✅ A correctness follow-up at m0, completed in [moq-dev/moq#7789](https://github.com/moq-dev/moq/pull/7789): the metadata/abort and test teardown races are fixed, and waiters remember 16 lists.
    - Leave the limit at 8.
 3. `group::Consumer` moves:
-   - ✅ A follow-up in this epic: [a read moves a small group consumer](/quest/m1/release-perf/group-consumer-size.md).
+   - ✅ A follow-up in this epic, implemented in [moq-dev/moq#7791](https://github.com/moq-dev/moq/pull/7791).
    - Leave it.
 
 Remaining:
@@ -54,7 +56,6 @@ Public API: none expected. Wire: none.
 
 ## Related
 
-- [A read moves a small group consumer](/quest/m1/release-perf/group-consumer-size.md) - found here; the session's largest remaining self cost
 
 - [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - the nightly series that should have caught this growth
 - [Performance audit](/quest/m2/audit-perf.md) - counts instructions when bisecting, for the same reason

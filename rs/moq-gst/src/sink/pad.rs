@@ -98,21 +98,8 @@ impl Names {
 #[must_use]
 pub(super) struct Closed {
 	track: Option<Sink>,
-	/// The catalog `track` published in.
-	catalog: Option<moq_mux::catalog::Producer>,
-}
-
-impl Closed {
-	/// Drop the track and retire its HLS records, for a pad that finished mid-run: [`Names`] never
-	/// publishes its name again, so caps churn doesn't accumulate records.
-	fn retire(self) -> Result<()> {
-		let (Some(track), Some(catalog)) = (self.track, self.catalog) else {
-			return Ok(());
-		};
-		let name = track.name();
-		drop(track);
-		Ok(catalog.retire(&name)?)
-	}
+	/// The catalog `track` published in, kept open until the owner drops.
+	_catalog: Option<moq_mux::catalog::Producer>,
 }
 
 /// An audio or video pad, published through a codec importer.
@@ -484,7 +471,7 @@ impl Pad {
 			let request = broadcast
 				.reserve_track(name.clone())
 				.with_context(|| format!("cannot reserve track {name}"))?;
-			// Raw data keeps a short explicit window for subscribers that buffer its samples.
+			// Raw data declares a short explicit max age for subscribers that buffer its samples.
 			let info = moq_net::track::Info::default()
 				.with_timescale(moq_net::Timescale::MICRO)
 				.with_max_age(std::time::Duration::from_secs(5));
@@ -946,14 +933,12 @@ impl Pad {
 
 	/// Consumes the producer so a second call is a no-op (`Track::finish()` is not idempotent). Returns
 	/// whether a producer was finalized. The importer accepts its track up front (in `Track::new`), so
-	/// `finish()` is safe even when no frame was ever decoded. Unlike a run's end, it also retires the
-	/// track's HLS records.
+	/// `finish()` is safe even when no frame was ever decoded. Unlike a run's end, it drops the
+	/// rendition owner at once.
 	pub fn finalize(&mut self) -> Result<bool> {
 		let (closed, result) = self.finish();
-		let retired = closed.retire();
-		let finished = result?;
-		retired?;
-		Ok(finished)
+		drop(closed);
+		result
 	}
 
 	/// Finish once, retaining rendition owners so closing a run cannot publish their removal.
@@ -961,7 +946,7 @@ impl Pad {
 		self.reserved.take();
 		let mut closed = Closed {
 			track: self.track.take(),
-			catalog: self.catalog.take(),
+			_catalog: self.catalog.take(),
 		};
 		let Some(track) = closed.track.as_mut() else {
 			return (closed, Ok(false));
@@ -1496,32 +1481,6 @@ mod tests {
 		);
 		assert_eq!(subscriber.recv_group().await.unwrap().expect("a group").sequence, 0);
 		assert!(subscriber.recv_group().await.unwrap().is_none(), "the old track ended");
-	}
-
-	/// The old name never returns after a renegotiation, so its HLS records end with it instead of
-	/// accumulating with each caps change.
-	#[tokio::test(start_paused = true)]
-	async fn renegotiation_retires_the_old_records() {
-		gst::init().unwrap();
-		let (broadcast, catalog) = producers();
-		let mut pad = Pad::new();
-		pad.observe_caps(&broadcast, &catalog, producer_options(&h264_caps(), Some("camera")));
-		pad.observe_segment(time_segment());
-		let pushed = pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO), None, None);
-		assert_eq!(pushed, Ok(PushOutcome::Published));
-		let mut records = broadcast
-			.consume()
-			.track(&hang::hls::default_name("camera"))
-			.unwrap()
-			.subscribe(None)
-			.await
-			.unwrap();
-
-		let vp8 = gst::Caps::builder("video/x-vp8").build();
-		pad.observe_caps(&broadcast, &catalog, producer_options(&vp8, Some("camera")));
-		let drained = async { while records.recv_group().await.unwrap().is_some() {} };
-		let ended = kio::clock::timeout(Duration::from_secs(1), drained).await;
-		assert!(ended.is_ok(), "the old track's records end");
 	}
 
 	/// A run never publishes a name it ended again, whoever asks for it next: each replacement mints
@@ -2100,10 +2059,10 @@ mod tests {
 		assert!(frame.is_some());
 	}
 
-	// The opaque track declares microseconds so the PTS maps 1:1, and keeps moq-net's retention: the
-	// media helper raises it to 30s for a segmented egress reading history, which a data track never is.
+	// The opaque track declares microseconds so the PTS maps 1:1, and a short explicit max age: the
+	// media helper uses 30s for a segmented egress reading history, which a data track never is.
 	#[tokio::test]
-	async fn an_opaque_track_declares_micros_and_a_retention_window() {
+	async fn an_opaque_track_declares_micros_and_a_short_max_age() {
 		gst::init().unwrap();
 		let (broadcast, catalog) = producers();
 		let mut pad = Pad::new();
@@ -2124,7 +2083,7 @@ mod tests {
 		assert_eq!(
 			subscriber.info().max_age,
 			Some(std::time::Duration::from_secs(5)),
-			"an opaque track declares a short retention window"
+			"an opaque track declares a short max age"
 		);
 	}
 

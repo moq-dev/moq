@@ -9,6 +9,9 @@ typedef TrackProducer = MoqMediaTrackProducer;
 /// The write side of a media track fed a raw byte stream, with frame boundaries inferred.
 typedef TrackStreamProducer = MoqMediaTrackStreamProducer;
 
+/// A single-track producer of either kind, such as a video rendition's `lower`.
+typedef Producer = MoqMediaProducer;
+
 /// The write side of a container, which publishes each track it describes.
 typedef ContainerProducer = MoqMediaContainerProducer;
 

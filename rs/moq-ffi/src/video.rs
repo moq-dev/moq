@@ -818,7 +818,7 @@ impl MoqVideoProducer {
 			};
 			Ok(moq_video::encode::Producer::with_track(
 				track,
-				state.catalog.reserve().with_hls_hint(gop),
+				state.catalog.reserve().with_interval(gop),
 				rendition,
 			)?)
 		})?;
@@ -1260,6 +1260,7 @@ fn video_config(catalog_video: crate::media::MoqVideo) -> Result<hang::catalog::
 	config.preference = catalog_video.preference;
 	config.framerate = catalog_video.framerate;
 	config.container = catalog_video.container.into();
+	config.warmup = catalog_video.warmup;
 	Ok(config)
 }
 
@@ -1284,8 +1285,8 @@ impl MoqVideoConsumer {
 	///
 	/// `catalog_video` comes from the catalog (see
 	/// [`MoqMediaCatalogConsumer::next`](crate::media::MoqMediaCatalogConsumer::next)); the codec is read
-	/// from it. A codec or description no native backend can open returns
-	/// [`MoqError::UnsupportedConfig`] before decoding starts. Also fails with [`MoqError::Unsupported`] when
+	/// from it. A codec or description this build cannot decode, or a stream every decoder's device
+	/// refuses, returns [`MoqError::UnsupportedConfig`] before decoding starts. Also fails with [`MoqError::Unsupported`] when
 	/// [`surface`](MoqVideoDecoderOutput::surface) is set on a platform with no surface to expose.
 	///
 	/// A [disabled](crate::media::MoqVideo::enabled) rendition subscribes too, and decodes once its
@@ -1354,7 +1355,20 @@ mod decode_tests {
 			enabled: true,
 			framerate: Some(30.0),
 			container: MoqContainer::Legacy,
+			warmup: None,
 		}
+	}
+
+	/// The max-delay decoder opens only for a catalog warmup, so it must survive the trip through
+	/// the FFI record.
+	#[test]
+	fn video_config_keeps_the_warmup() {
+		let mut video = catalog_video("vp8");
+		video.warmup = Some(std::time::Duration::from_millis(500));
+		assert_eq!(
+			video_config(video).unwrap().warmup,
+			Some(std::time::Duration::from_millis(500))
+		);
 	}
 
 	/// A consumer holds a disabled rendition it already plays, so one converts like any other.

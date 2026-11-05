@@ -19,6 +19,31 @@ Future<AnnounceEvent> nextRoute(AnnounceConsumer announced) async {
 }
 
 void main() {
+  test('datagram-only requests have independent priority demand', () async {
+    final broadcast = BroadcastProducer();
+    final stream = broadcast.publishTrack(name: 'events', info: null);
+    final requests = broadcast.requests().datagrams();
+    final consumer = broadcast.consume().datagrams(name: 'events');
+    consumer.setPriority(priority: 12);
+    final request = await requests.requested().timeout(timeout);
+    expect(request.name(), 'events');
+    expect(request.priority(), 12);
+    final producer = request.accept(info: null);
+    expect(producer.priority(), 12);
+    expect(stream.demand().wanted(), isNull);
+    producer.insert(
+      datagram: Datagram(sequence: 7, payload: utf8.encode('seven')),
+    );
+    final datagram = await consumer.recv().timeout(timeout);
+    expect(datagram?.sequence, 7);
+    expect(datagram?.payload, utf8.encode('seven'));
+    consumer.cancel();
+    expect(await producer.priorityChanged(last: 12).timeout(timeout), isNull);
+    producer.finish();
+    requests.cancel();
+    broadcast.close();
+  });
+
   test('container timebase belongs to one broadcast', () {
     final owner = BroadcastProducer();
     final other = BroadcastProducer();
@@ -67,6 +92,22 @@ void main() {
     broadcast.close();
   });
 
+  test('an omitted max age is zero and the unlimited flag sets none', () {
+    final broadcast = BroadcastProducer();
+    final omitted = broadcast
+        .publishTrack(name: 'omitted', info: null)
+        .consume(subscription: null)
+        .info();
+    expect(omitted.maxAge, Duration.zero);
+    final unlimited = broadcast
+        .publishTrack(name: 'unlimited', info: TrackInfo(maxAgeUnlimited: true))
+        .consume(subscription: null)
+        .info();
+    expect(unlimited.maxAge, isNull);
+    expect(unlimited.maxAgeUnlimited, isTrue);
+    broadcast.close();
+  });
+
   test('a default subscription skips superseded groups at once', () {
     for (final subscription in [defaultSubscription(), Subscription()]) {
       expect(subscription.delay.min, Duration.zero);
@@ -97,7 +138,7 @@ void main() {
       final broadcast = BroadcastProducer();
       final track = broadcast.publishTrack(
         name: 'backlog',
-        info: TrackInfo(timescale: 1000000),
+        info: TrackInfo(maxAgeUnlimited: true, timescale: 1000000),
       );
       for (var ms = 0; ms < 3; ms++) {
         final group = track.appendGroup();
@@ -220,6 +261,22 @@ void main() {
     ).timeout(timeout);
     final serverSession = await accepted;
     expect(client.allocator(), isA<MoqAllocator>());
+
+    final viewers = client.viewers();
+    expect(viewers, isA<Viewers>());
+    final viewer = viewers.watch(maxBps: 4000000);
+    expect(viewer, isA<Viewer>());
+    // A slice never exceeds its ceiling, whether or not QUIC has an estimate yet.
+    viewer.update(maxBps: 1000000);
+    expect(viewer.rate() ?? 0, lessThanOrEqualTo(1000000));
+    viewers.setTarget(targetBps: 0);
+    viewers.setTarget(targetBps: null);
+    // Past what a PROBE target carries: refused.
+    expect(
+      () => viewers.watch(maxBps: 1 << 53),
+      throwsA(isA<OutOfRangeMoqException>()),
+    );
+    viewer.dispose();
 
     final announcement = client.announced().updates().firstWhere(
       (event) => event is AnnounceEventStart,

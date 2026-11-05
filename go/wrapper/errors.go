@@ -91,6 +91,8 @@ var (
 	ErrLog = ffi.ErrMoqErrorLog
 	// ErrConfig is returned when Dial or Listen is given a value the native side cannot use.
 	ErrConfig = ffi.ErrMoqErrorConfig
+	// ErrOutOfRange is returned when a number is outside the range the call accepts, such as viewer ceilings summing above 2^53 - 1.
+	ErrOutOfRange = ffi.ErrMoqErrorOutOfRange
 )
 
 // IsShutdown reports whether err is the expected result of a graceful shutdown
