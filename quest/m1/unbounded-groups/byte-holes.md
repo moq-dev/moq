@@ -20,6 +20,14 @@ and lite-07 peers start flights only at frame boundaries, like older lite
 versions. Decided 2026-10-28 (maintainer): shed frames are served again only
 by flights, so this waits on Flights and stays in m1.
 
+Decided 2026-11-05 (maintainer, /quest-audit): ✅ the byte offset rides
+FETCH's frame start plus the group header, not a SUBSCRIBE range end.
+SUBSCRIBE ranges are whole groups since 2026-11-03
+([Lite-07 FETCH is single-group only](/quest/m1/subscribe-ranges/lite07-fetch.md),
+[moq-dev/moq#7675](https://github.com/moq-dev/moq/pull/7675)), and flights
+ride lite FETCH since [moq-dev/moq#7944](https://github.com/moq-dev/moq/pull/7944).
+This waits for that quest.
+
 - Segments are `frame::SEGMENT` (1 MiB) long, so segment `i` always holds
   bytes from `i * SEGMENT`, and a completed chain is `frame::Payload::Chain`.
   Only a frame past one segment written in pieces chains. One written whole
@@ -28,8 +36,8 @@ by flights, so this waits on Flights and stays in m1.
   segment slices, whose memory frees only once every slice drops, or copied
   into segments.
 
-- `Position` gains a byte offset within the frame. A lite range end can
-  carry it, and so can a group stream header, beside `frame_start`. A
+- `Position` gains a byte offset within the frame. A lite FETCH carries it
+  beside its `frame_start`, and so does a group stream header. A
   stream that starts mid-frame still states the frame's full size. Older
   lite versions and moq-transport start flights only at frame or object
   boundaries. A reader inside a shed object refreshes or is `Evicted` there.
@@ -58,4 +66,9 @@ by flights, so this waits on Flights and stays in m1.
 
 Public API: `Position` gains a byte field, frames gain a chunked read, and
 `MAX_CACHE_BYTES` stops capping a frame.
-Wire: a byte offset on the current lite wip's range ends and group header.
+Wire: a byte offset on the current lite wip's FETCH frame start and group
+header.
+
+## Required
+
+- [Lite-07 FETCH is single-group only](/quest/m1/subscribe-ranges/lite07-fetch.md) - SUBSCRIBE ranges become whole groups, so the offset goes on FETCH

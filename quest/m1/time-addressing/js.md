@@ -17,12 +17,18 @@ so they are carried past 2^53 (decided 2026-11-03, maintainer).
 
 The spike found no sparse-ID breakage in direct `@moq/net` sessions over
 lite-06 and lite-07; its relay fills follow Rust's once JavaScript received
-copies fill, which JS ranges ([moq-dev/moq#7696](https://github.com/moq-dev/moq/pull/7696))
-left as a follow-up. Decided 2026-10-27
-(maintainer): this requires JS ranges, so the ranges it rekeys exist first.
+copies fill. JS ranges
+([moq-dev/moq#7696](https://github.com/moq-dev/moq/pull/7696)), which the
+2026-10-27 decision required first, merged.
+
+Decided 2026-11-05 (maintainer, /quest-audit): ✅ this waits for
+[Lite-07 FETCH is single-group only](/quest/m1/subscribe-ranges/lite07-fetch.md),
+which moves JS multi-group fills (`js/net/src/lite/subscriber.ts`
+`#runFills`) onto the subscription this rekeys.
 
 Public API: breaking, mirroring Rust's. Wire: as the lite-07 quest.
 
 ## Required
 
 - [Lite-07 by start](/quest/m1/time-addressing/lite07.md) - the wire this speaks
+- [Lite-07 FETCH is single-group only](/quest/m1/subscribe-ranges/lite07-fetch.md) - moves the JS fills this rekeys onto the subscription
