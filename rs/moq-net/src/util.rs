@@ -1,6 +1,8 @@
 //! Future boxing and the driver-owned task set.
 
-use std::{collections::VecDeque, future::Future, pin::Pin, task::Poll};
+use std::{collections::VecDeque, task::Poll};
+#[cfg(feature = "async")]
+use std::{future::Future, pin::Pin};
 
 mod cell;
 mod idle;
@@ -20,13 +22,16 @@ pub(crate) fn sendable<F: Future + Send>(future: F) -> impl Future<Output = F::O
 }
 
 /// A boxed `Send` future, the same type as `futures::future::BoxFuture`.
+#[cfg(feature = "async")]
 pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// A boxed [`kio::Tasks`] task: hand-rolled machines and adapted futures alike.
 pub(crate) type BoxTask = Box<dyn FnMut(&kio::Waiter) -> Poll<()> + Send>;
 
-/// Adapt a boxed future into a [`kio::Tasks`] task.
-fn future_task(mut task: BoxFuture<'static, ()>) -> BoxTask {
+/// Adapt a future into a [`kio::Tasks`] task, for a caller not yet written as a poll.
+#[cfg(feature = "async")]
+pub(crate) fn future_task(task: impl Future<Output = ()> + Send + 'static) -> BoxTask {
+	let mut task: BoxFuture<'static, ()> = Box::pin(task);
 	Box::new(move |waiter| waiter.poll_future(task.as_mut()))
 }
 
@@ -71,15 +76,17 @@ struct Submissions {
 }
 
 impl Tasks {
-	/// Queue a future for polling by the associated [`TaskSet`].
+	/// Queue a task for polling by the associated [`TaskSet`].
 	///
 	/// A task submitted after the set is gone is dropped: the driver has torn down,
 	/// so the task would have been cancelled anyway.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub fn push(&self, task: impl Future<Output = ()> + Send + 'static) {
+	pub fn push(&self, mut task: impl kio::Task<Output = ()> + Send + 'static) {
 		let mut state = self.state.lock();
 		if !state.closed {
-			state.queued.push_back(future_task(Box::pin(task)));
+			state
+				.queued
+				.push_back(Box::new(move |waiter: &kio::Waiter| task.poll(waiter)));
 		}
 	}
 }
@@ -167,10 +174,10 @@ impl TaskSet {
 		}
 	}
 
-	/// Queue a future for polling by this set.
+	/// Queue a task for polling by this set.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub fn push(&mut self, task: impl Future<Output = ()> + Send + 'static) {
-		self.active.push(future_task(Box::pin(task)));
+	pub fn push(&mut self, mut task: impl kio::Task<Output = ()> + Send + 'static) {
+		self.active.push(Box::new(move |waiter: &kio::Waiter| task.poll(waiter)));
 	}
 
 	/// Adopt every queued submission into the active set, then poll the children.
@@ -282,13 +289,15 @@ mod tests {
 
 		let nested_tasks = tasks.clone();
 		let outer_completed = completed.clone();
-		tasks.push(async move {
+		tasks.push(move |_: &kio::Waiter| {
 			outer_completed.fetch_add(1, Ordering::SeqCst);
 
 			let inner_completed = outer_completed.clone();
-			nested_tasks.push(async move {
+			nested_tasks.push(move |_: &kio::Waiter| {
 				inner_completed.fetch_add(1, Ordering::SeqCst);
+				Poll::Ready(())
 			});
+			Poll::Ready(())
 		});
 		drop(tasks);
 
@@ -302,8 +311,9 @@ mod tests {
 		let completed = Arc::new(AtomicUsize::new(0));
 
 		let child_completed = completed.clone();
-		tasks.push(async move {
+		tasks.push(move |_: &kio::Waiter| {
 			child_completed.fetch_add(1, Ordering::SeqCst);
+			Poll::Ready(())
 		});
 
 		// The driven poll only resolves after the child ran, proving drive()

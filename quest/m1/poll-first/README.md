@@ -81,6 +81,11 @@ coroutines. Runtime glue (moq-tokio, moq-uring) and bindings generate theirs
 unconditionally. The origin front driver and the server handshake are hand-written
 polls.
 
+Decided 2026-11-05 (maintainer, /quest-unblock): convert every remaining
+multi-await `async fn` body listed below in
+[moq-dev/moq#7607](https://github.com/moq-dev/moq/pull/7607) before it lands,
+rather than landing it as is and splitting them into child quests.
+
 What remains is the logic still written as `async fn` bodies, all behind the
 `async` features. Each becomes a `poll_*` (hand-written when a wait sits in a loop
 or branch, `#[kio::machine]` when straight-line) with a generated wrapper, or moves

@@ -2075,7 +2075,7 @@ impl Publisher {
 								renewal_largest = fill.largest;
 							}
 							let publisher = self.clone();
-							fills.push(async move {
+							fills.push(crate::util::future_task(async move {
 								publisher
 									.run_fill(
 										fill.fill,
@@ -2086,7 +2086,7 @@ impl Publisher {
 										fill.request_id,
 									)
 									.await;
-							});
+							}));
 							fills_done = false;
 						}
 						Ok(None) => {}

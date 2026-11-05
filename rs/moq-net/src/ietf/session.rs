@@ -887,11 +887,11 @@ impl Unis {
 			};
 			let uni = self.uni.clone();
 			let fatal = self.fatal.clone();
-			self.tasks.push(async move {
+			self.tasks.push(crate::util::future_task(async move {
 				if let Err(err) = uni.serve(reader).await {
 					fatal.lock().get_or_insert(err);
 				}
-			});
+			}));
 		}
 	}
 
@@ -1161,11 +1161,11 @@ async fn run_dispatch(
 		// header here could block later streams whose unread data holds flow control.
 		let bidi = bidi.clone();
 		let fatal = fatal.clone();
-		tasks.push(async move {
+		tasks.push(crate::util::future_task(async move {
 			if let Err(err) = bidi.serve(stream).await {
 				fatal.lock().get_or_insert(err);
 			}
-		});
+		}));
 	};
 
 	// `tasks` still holds the AUTH serve tasks, so the session's error lands on the

@@ -248,7 +248,7 @@ pub(super) async fn run_present(
 			id,
 		};
 		let violation = violation.clone();
-		tasks.push(async move {
+		tasks.push(crate::util::future_task(async move {
 			let mut token = Ok(token);
 			let mut answered = false;
 			loop {
@@ -288,7 +288,7 @@ pub(super) async fn run_present(
 				present.handle.ended(present.id, err);
 				return;
 			}
-		});
+		}));
 	}
 	std::future::pending().await
 }
