@@ -176,13 +176,6 @@ impl Link {
 			_sessions: sessions,
 			_origins: (publisher, subscriber),
 		};
-		// Size from a complete batch, including group and frame bookkeeping.
-		link.tick();
-		link.round().await;
-		for pool in &link.pools {
-			// Dating, the expiry boundary, a demoted live edge, and the incoming batch.
-			pool.resize(pool.used() * 4);
-		}
 		// Warm every stream so the timed rounds skip first-group setup.
 		for _ in 0..4 {
 			link.tick();

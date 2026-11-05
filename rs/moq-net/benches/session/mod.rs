@@ -34,7 +34,8 @@
 //! one datagram per track per round across publisher and viewer axes, then larger payloads
 //! and cadences, on the lite versions (moq-transport carries no datagram tracks). Throughput
 //! counts delivered datagrams, each checked for its sequence and payload, so a lost one fails.
-//! Delivery history expires between rounds, outside timing, while byte budgets stay enabled.
+//! Delivery uses expiry-only pools: history expires between rounds outside timing,
+//! so byte pressure cannot shed unread frames during a batch.
 //! `SESSION_EXPIRY_ONLY=1` advances the cache clock by a second instead of the 30s
 //! expiry window, retaining 30 rounds for profiling. It reports groups written and
 //! charged cache bytes every 10s during long runs.
@@ -124,7 +125,7 @@ const DASH_VERSIONS: [&str; 2] = ["moq-lite-06", "moq-transport-22"];
 /// A stats frame: a small JSON snapshot.
 const DASH_FRAME: usize = 128;
 
-/// Initial byte budgets. Delivery rooms also expire read history between rounds.
+/// Initial budgets for join and churn fixtures. Delivery rooms use expiry-only pools.
 const RELAY_CACHE: u64 = 16 * 1024 * 1024;
 const CLIENT_CACHE: u64 = 1024 * 1024;
 
@@ -164,7 +165,7 @@ struct Shape {
 	compress: bool,
 	/// Read each group via a fresh FETCH rather than a live subscription.
 	fetch: bool,
-	/// Expire delivery history between rounds before applying byte pressure.
+	/// Expire delivery history between rounds instead of applying byte pressure.
 	expiry: bool,
 	/// Deliver each round as `burst` datagrams of `frame` bytes per watched broadcast's
 	/// datagram track instead of groups.
@@ -519,7 +520,7 @@ pub(crate) trait Backend {
 	type Relay: Clone;
 	const PREFIX: &'static str;
 
-	fn relay(id: u64, capacity: u64, expiry: bool) -> (Self::Relay, cache::Pool);
+	fn relay(id: u64, capacity: Option<u64>) -> (Self::Relay, cache::Pool);
 	fn origin(relay: &Self::Relay) -> &origin::Producer;
 	async fn connect(options: MockConnectOptions, relay: &Self::Relay, hidden: bool) -> Pair;
 }
@@ -531,8 +532,8 @@ impl Backend for Model {
 	type Relay = origin::Producer;
 	const PREFIX: &'static str = "";
 
-	fn relay(id: u64, capacity: u64, expiry: bool) -> (Self::Relay, cache::Pool) {
-		make_origin(id, capacity, expiry)
+	fn relay(id: u64, capacity: Option<u64>) -> (Self::Relay, cache::Pool) {
+		make_origin(id, capacity)
 	}
 
 	fn origin(relay: &Self::Relay) -> &origin::Producer {
@@ -568,14 +569,14 @@ impl Drop for Pair {
 	}
 }
 
-fn make_origin(id: u64, capacity: u64, expiry: bool) -> (origin::Producer, cache::Pool) {
+fn make_origin(id: u64, capacity: Option<u64>) -> (origin::Producer, cache::Pool) {
 	let mut config = origin::Config::new(Hop::new(id).unwrap());
 	let profiling = std::env::var_os("SESSION_EXPIRY_ONLY").is_some();
-	let pool = cache::Pool::new(
-		cache::Config::default()
-			.with_capacity((!profiling).then_some(capacity))
-			.with_expiry((expiry || profiling).then_some(cache::DEFAULT_EXPIRY)),
-	);
+	let pool = cache::Pool::new(if capacity.is_none() || profiling {
+		cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY)
+	} else {
+		cache::Config::default().with_capacity(capacity)
+	});
 	config.pool = pool.clone();
 	let (producer, driver) = origin::Producer::new(config);
 	harness::spawn(driver);
@@ -625,7 +626,7 @@ impl<B: Backend> Cluster<B> {
 
 		for _ in 0..shape.relays {
 			this.next_hop += 1;
-			let (relay, pool) = B::relay(this.next_hop, RELAY_CACHE, shape.expiry);
+			let (relay, pool) = B::relay(this.next_hop, (!shape.expiry).then_some(RELAY_CACHE));
 			this.relays.push(relay);
 			this.pools.push(pool);
 		}
@@ -683,7 +684,7 @@ impl<B: Backend> Cluster<B> {
 
 	fn origin(&mut self, capacity: u64) -> (origin::Producer, cache::Pool) {
 		self.next_hop += 1;
-		make_origin(self.next_hop, capacity, self.expiry)
+		make_origin(self.next_hop, (!self.expiry).then_some(capacity))
 	}
 
 	/// Connect a viewer session to `relay`.
@@ -882,12 +883,6 @@ impl<B: Backend> Room<B> {
 		room.writing.resize_with(room.watched.len(), || None);
 		room.reading.resize_with(shape.viewers * shape.watch, || None);
 
-		// Size the byte budgets from a full batch, including bookkeeping. Expiry
-		// between rounds reclaims read history before it competes with unread data.
-		let capacities: Vec<_> = room.pools().map(cache::Pool::capacity).collect();
-		for pool in room.pools() {
-			pool.resize(None);
-		}
 		let blocked_before: usize = room
 			.viewers
 			.iter()
@@ -900,12 +895,6 @@ impl<B: Backend> Room<B> {
 		for _ in 0..shape.group_frames / shape.frames() {
 			room.tick();
 			room.round().await;
-		}
-		for (pool, capacity) in room.pools().zip(capacities) {
-			// Expiry dates activity after demotion and reclaims strictly past its
-			// window. Allow the dating batch, the window boundary, the demoted
-			// live edge, and the incoming batch, including their bookkeeping.
-			pool.resize(capacity.map(|capacity| capacity.max(pool.used() * 4)));
 		}
 		// Exercise turnover as well as the empty cache, including Criterion's one-pass
 		// nightly smoke mode.
