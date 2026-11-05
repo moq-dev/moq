@@ -97,6 +97,10 @@ name = "containers"
 harness = false
 
 [[bench]]
+name = "timeline"
+harness = false
+
+[[bench]]
 name = "ts_video"
 harness = false
 

@@ -49,8 +49,7 @@ use crate::quic::driver::{VarInt, connection::ConnectionRef, stream};
 #[derive(Debug)]
 pub struct Stream {
 	reader: Reader,
-	/// Holds the waiter of a read polled from a [`Context`], by
-	/// [`AsyncRead`](tokio::io::AsyncRead) or [`Self::poll_lease`], across polls
+	/// Holds the waiter of an [`AsyncRead`](tokio::io::AsyncRead) read across polls
 	park: kio::Park,
 }
 
@@ -87,6 +86,16 @@ impl Stream {
 	/// This operation is cancel-safe.
 	pub async fn read(&mut self, buf: &mut impl BufMut) -> Result<Option<usize>, Error> {
 		kio::wait(|waiter| self.reader.poll_read_buf(waiter, buf)).await
+	}
+
+	/// Poll a read without retaining the destination buffer.
+	#[cfg(feature = "quic")]
+	pub(crate) fn poll_read_buf(
+		&mut self,
+		waiter: &kio::Waiter,
+		buf: &mut impl BufMut,
+	) -> Poll<Result<Option<usize>, Error>> {
+		self.reader.poll_read_buf(waiter, buf)
 	}
 
 	/// Fill `buf` with data from the stream
@@ -164,8 +173,7 @@ impl Stream {
 	/// is out.
 	///
 	/// Do not mix with the plain reads on one stream, which skip the leased bytes.
-	pub fn poll_lease(&mut self, cx: &mut Context<'_>, want: usize) -> Poll<Result<Lease<'_>, Error>> {
-		let waiter = self.park.hold(cx);
+	pub fn poll_lease(&mut self, waiter: &kio::Waiter, want: usize) -> Poll<Result<Lease<'_>, Error>> {
 		let inner = ready!(self.reader.poll_take(waiter, want))?;
 		Poll::Ready(Ok(Lease {
 			reader: &mut self.reader,
@@ -202,7 +210,7 @@ impl Stream {
 	///
 	/// Yields `Some` with the reset error code when the stream is reset by the peer. Yields `None`
 	/// when the stream was [`finish()`](crate::quic::driver::send::Stream::finish)ed by the peer
-	/// and all data has been received, after which it is no longer meaningful for the stream to
+	/// and all data has been read, after which it is no longer meaningful for the stream to
 	/// be reset. Fails with [`Error::Evicted`] once the stream was evicted to free a stuck receive
 	/// window, until it is stopped.
 	///
@@ -213,9 +221,30 @@ impl Stream {
 
 	/// Poll form of [`Self::received_reset`]. It takes no bytes, so a lease in progress is
 	/// left as it was.
-	pub(crate) fn poll_received_reset(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<VarInt>, Error>> {
-		let waiter = self.park.hold(cx);
+	#[cfg(feature = "quic")]
+	pub(crate) fn poll_received_reset(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<VarInt>, Error>> {
 		self.reader.poll_received_reset(waiter)
+	}
+	/// Observe FIN without consuming application bytes, including an empty stream's end.
+	#[cfg(feature = "quic")]
+	pub(crate) fn poll_closed(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<VarInt>, Error>> {
+		// A read that met the reset marks every byte read, so only the cached code still says how it ended.
+		if let Some(code) = self.reader.reset {
+			return Poll::Ready(Ok(Some(code)));
+		}
+		let read = self
+			.reader
+			.poll_read_generic(waiter, |chunks, waiter| match chunks.poll_next(waiter, 0) {
+				Poll::Ready(Ok(Some(_))) => ReadStatus::Readable(()),
+				Poll::Ready(res) => (None, res.err()).into(),
+				Poll::Pending => ReadStatus::Failed(None, moq_quic::recv::Error::Blocked),
+			});
+		match ready!(read) {
+			Ok(Some(())) => self.reader.poll_received_reset(waiter),
+			Ok(None) => Poll::Ready(Ok(None)),
+			Err(Error::Reset(code)) => Poll::Ready(Ok(Some(code))),
+			Err(err) => Poll::Ready(Err(err)),
+		}
 	}
 }
 
@@ -229,7 +258,7 @@ impl Reader {
 		}
 		let mut conn = self.conn.state.lock();
 		// moq-quic wakes the driver for any credit the lease returned.
-		let (result, _) = conn.inner.recv_stream(self.id).poll_lease(waiter, want);
+		let result = conn.inner.recv_stream(self.id).poll_lease(waiter, want);
 		let err = match ready!(result) {
 			Ok(lease) => return Poll::Ready(Ok(lease)),
 			Err(err) => err,
@@ -296,7 +325,7 @@ impl Reader {
 					Ok(mut chunks) => {
 						let status = read_fn(&mut chunks, waiter);
 						// moq-quic wakes the driver for the credit the read returned.
-						let _ = chunks.finalize();
+						chunks.finalize();
 						status
 					}
 					Err(err) => ReadStatus::Failed(None, err),
@@ -424,7 +453,7 @@ impl Lease<'_> {
 	pub fn release(mut self) {
 		let lease = self.inner.take().expect("only taken to hand it back");
 		let mut conn = self.reader.conn.state.lock();
-		let _ = conn.inner.recv_stream(self.reader.id).release(lease);
+		conn.inner.recv_stream(self.reader.id).release(lease);
 	}
 }
 
@@ -452,7 +481,7 @@ impl Drop for Lease<'_> {
 		if let Some(lease) = self.inner.take()
 			&& let Some(mut conn) = self.reader.conn.state.lock_for_drop()
 		{
-			let _ = conn.inner.recv_stream(self.reader.id).restore(lease);
+			conn.inner.recv_stream(self.reader.id).restore(lease);
 		}
 	}
 }

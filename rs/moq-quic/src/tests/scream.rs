@@ -261,7 +261,7 @@ fn run(scenario: &Scenario) -> Outcome {
 				*received += chunk.bytes.len() as u64;
 				read += chunk.bytes.len() as u64;
 			}
-			let _ = chunks.finalize();
+			chunks.finalize();
 			let frames = &groups[(id.index() - groups[0].id.index()) as usize].frames;
 			while let Some(&(written, end)) = frames.get(*completed)
 				&& end <= *received

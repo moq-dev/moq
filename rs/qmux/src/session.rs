@@ -322,28 +322,6 @@ impl poll::Session for Session {
 		})
 	}
 
-	fn poll_open_request(
-		&self,
-		waiter: &kio::Waiter,
-		options: poll::SendOptions<'_, SendGroup>,
-	) -> Poll<Result<Option<poll::BiStreams<Self>>, Error>> {
-		let mut state = self.inner.lock();
-		if state.conn.is_closed() {
-			return Poll::Ready(Err(state.lost()));
-		}
-		// A session started on an out-of-band protocol (a WebSocket subprotocol) runs before
-		// the peer's transport parameters arrive. Until then its credit is unknown, not spent.
-		ready!(state.conn.poll_connected(waiter)).map_err(|_| state.lost())?;
-		let id = state.conn.streams().open(Dir::Bi, to_quic(options));
-		drop(state);
-		Poll::Ready(Ok(id.map(|id| {
-			(
-				SendStream::new(self.inner.clone(), id),
-				RecvStream::new(self.inner.clone(), id),
-			)
-		})))
-	}
-
 	fn send_group(&self, priority: i64) -> Option<SendGroup> {
 		Some(Session::send_group(self, priority))
 	}
@@ -413,6 +391,16 @@ impl poll::Session for Session {
 			state.conn.receive_window(),
 			state.conn.stream_receive_window(),
 		))
+	}
+
+	fn stream_credit(&self, dir: net::Dir) -> Option<net::StreamCredit> {
+		let dir = match dir {
+			net::Dir::Uni => Dir::Uni,
+			net::Dir::Bi => Dir::Bi,
+		};
+		let mut state = self.inner.lock();
+		let streams = state.conn.streams();
+		Some(net::StreamCredit::new(streams.credit(dir), streams.blocked(dir)))
 	}
 }
 
@@ -642,7 +630,7 @@ impl RecvStream {
 		let mut state = self.inner.lock();
 		// moq-quic wakes the driver for any credit the lease frees, and the reader of any stream
 		// it evicts.
-		let (result, _) = state.conn.recv_stream(self.id).poll_lease(waiter, want);
+		let result = state.conn.recv_stream(self.id).poll_lease(waiter, want);
 		match ready!(result) {
 			Ok(lease) => Poll::Ready(Ok(lease)),
 			Err(recv::Error::Reset(code)) => {
@@ -785,7 +773,7 @@ impl poll::Lease for RecvLease<'_> {
 		let lease = self.lease.take().expect("only taken to hand it back");
 		let mut state = self.stream.inner.lock();
 		// moq-quic wakes the driver for the credit this returns.
-		let _ = state.conn.recv_stream(self.stream.id).release(lease);
+		state.conn.recv_stream(self.stream.id).release(lease);
 	}
 }
 
@@ -796,7 +784,7 @@ impl Drop for RecvLease<'_> {
 		};
 		let mut state = self.stream.inner.lock();
 		// moq-quic wakes the driver if the window was stuck on this lease.
-		let _ = state.conn.recv_stream(self.stream.id).restore(lease);
+		state.conn.recv_stream(self.stream.id).restore(lease);
 	}
 }
 

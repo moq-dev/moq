@@ -850,7 +850,7 @@ void MoQOutput::VideoInit(obs_encoder_t *encoder)
 		if (below == video_tracks.end())
 			return;
 		if (below->second.producer) {
-			config.lower = below->second.producer;
+			config.lower = moq::MediaProducer(moq::MediaProducer::kTrack{below->second.producer});
 			lower_bps = (uint64_t)lower_kbps * 1000ULL;
 		}
 	}

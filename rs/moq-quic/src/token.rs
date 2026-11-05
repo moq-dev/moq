@@ -397,20 +397,17 @@ impl fmt::Display for ResetToken {
 	}
 }
 
-#[cfg(all(test, any(feature = "aws-lc-rs", feature = "ring")))]
+#[cfg(test)]
 mod test {
 	use super::*;
-	#[cfg(all(feature = "aws-lc-rs", not(feature = "ring")))]
-	use aws_lc_rs::hkdf;
-	#[cfg(feature = "ring")]
-	use ring::hkdf;
+	use rind::hkdf;
 
 	fn token_round_trip(payload: TokenPayload) -> TokenPayload {
 		let rng = &mut rand::rng();
 		let token = Token::new(payload, rng);
 		let mut master_key = [0; 64];
 		rng.fill_bytes(&mut master_key);
-		let prk = hkdf::Salt::new(hkdf::HKDF_SHA256, &[]).extract(&master_key);
+		let prk = hkdf::Salt::new(&hkdf::HKDF_SHA256, &[]).extract(&master_key);
 		let encoded = token.encode(&prk);
 		let decoded = Token::decode(&prk, &encoded).expect("token didn't decrypt / decode");
 		assert_eq!(token.nonce, decoded.nonce);
@@ -494,7 +491,7 @@ mod test {
 		let mut master_key = [0; 64];
 		rng.fill_bytes(&mut master_key);
 
-		let prk = hkdf::Salt::new(hkdf::HKDF_SHA256, &[]).extract(&master_key);
+		let prk = hkdf::Salt::new(&hkdf::HKDF_SHA256, &[]).extract(&master_key);
 
 		let mut invalid_token = Vec::new();
 

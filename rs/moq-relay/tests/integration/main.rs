@@ -11,6 +11,7 @@ mod auth_lifetime;
 mod bitrate_caps;
 mod cluster_close;
 mod cluster_drain;
+mod cluster_fresh_port;
 mod cluster_idle;
 mod cluster_unknown;
 #[cfg(feature = "test-support")]
@@ -33,6 +34,8 @@ mod runtime_workers;
 mod session_revalidate;
 mod shutdown_signal;
 mod smoke;
+#[cfg(feature = "test-support")]
+mod socket_auth;
 mod stack;
 mod tenant_matrix;
 mod upstream_links;

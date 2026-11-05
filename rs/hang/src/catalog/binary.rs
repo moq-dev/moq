@@ -118,7 +118,7 @@ pub struct BinaryConfig {
 	/// [`VideoConfig::delay`](crate::catalog::VideoConfig::delay). Only measured for payloads that
 	/// carry a capture time.
 	#[serde_as(as = "MillisCeil")]
-	#[serde(default)]
+	#[serde(default, skip_serializing_if = "crate::catalog::millis::no_delay")]
 	pub delay: Option<std::time::Duration>,
 
 	/// Fields this build doesn't recognize, kept so the entry round-trips.

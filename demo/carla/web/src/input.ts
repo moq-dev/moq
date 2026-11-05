@@ -14,9 +14,9 @@ import type { DriveState } from "./schemas.ts";
 /** The truck's safe resting state. */
 export const REST: DriveState = { steering: 0, throttle: 0, brake: 1, gear: "neutral" };
 
-/** Initial manual handoff: preserve live feedback, or coast when none exists. */
+/** Initial manual handoff: keep steering and gear, release throttle, and brake. */
 export function takeoverState(measured: DriveState | undefined): DriveState {
-	return measured ? { ...measured } : { steering: 0, throttle: 0, brake: 0, gear: "forward" };
+	return { steering: measured?.steering ?? 0, gear: measured?.gear ?? "forward", throttle: 0, brake: 1 };
 }
 
 /** Slew rates in normalized units per second. Heavy responses, with fast safety actions. */

@@ -31,7 +31,7 @@ pub struct Split {
 	/// NAL here until the next start code arrives or [`flush`](Self::flush) drains it.
 	tail: BytesMut,
 	current: Avc3Frame,
-	/// Retained SPS NALs from the latest keyframe that carried them, re-injected
+	/// Retained SPS NALs from the init or latest keyframe that carried them, re-injected
 	/// on bare keyframes. Replaced (not accumulated) when a keyframe presents a
 	/// different set, so a mid-stream reinit drops the superseded ones.
 	sps: ParameterSets,
@@ -88,6 +88,36 @@ impl Split {
 		}
 	}
 
+	/// Consume a complete init buffer as the stream's leading bytes, and retain its parameter sets.
+	///
+	/// The init's sets replace the retained ones, so a reset before the first keyframe still
+	/// re-injects them. Header NALs still waiting for a picture belong to the configuration this
+	/// init replaces, so they are dropped. A picture the init carries stays open, so it completes
+	/// with the caller's next timestamp rather than a generated one.
+	pub(crate) fn initialize(&mut self, data: &[u8]) -> Result<Vec<crate::container::Frame>> {
+		let pts = self.pts(None)?;
+		// The init's leading start code ends any NAL still in flight.
+		self.end_tail(pts)?;
+		if !self.current.contains_slice {
+			self.current = Avc3Frame::default();
+		}
+		let mut frames = self.decode(data, pts)?;
+		// The init is complete, so its final NAL ends with it.
+		self.end_tail(pts)?;
+		frames.append(&mut self.pending);
+		InBandCodec::H264.adopt_init(data, &mut [&mut self.sps, &mut self.pps])?;
+		Ok(frames)
+	}
+
+	/// Decode the buffered final NAL, which the caller says is complete, without closing its access unit.
+	fn end_tail(&mut self, pts: moq_net::Timestamp) -> Result<()> {
+		if let Some(nal) = NalIterator::new(&mut self.tail).flush()? {
+			self.decode_nal(nal, pts)?;
+		}
+		self.tail.clear();
+		Ok(())
+	}
+
 	/// Decode a buffer where frame boundaries are unknown, returning the access
 	/// units it can complete. The leading start code of the *next* access unit is
 	/// what signals the previous one is complete, so the final NAL of the in-flight
@@ -118,10 +148,7 @@ impl Split {
 	/// (or at end of stream) so the final NAL isn't left buffered.
 	pub fn flush(&mut self, pts: impl Into<Option<moq_net::Timestamp>>) -> Result<Vec<crate::container::Frame>> {
 		let pts = self.pts(pts.into())?;
-		if let Some(nal) = NalIterator::new(&mut self.tail).flush()? {
-			self.decode_nal(nal, pts)?;
-		}
-		self.tail.clear();
+		self.end_tail(pts)?;
 		self.maybe_start_frame(pts)?;
 		Ok(std::mem::take(&mut self.pending))
 	}
@@ -238,10 +265,7 @@ impl Split {
 
 	/// Drop any in-flight access unit, and any frame completed but not yet returned.
 	///
-	/// Pre-reset NALs would otherwise leak into a later frame with the wrong
-	/// timestamp, and a frame queued before a failed [`decode`](Self::decode) would
-	/// surface on the next call. The parameter-set cache is kept so subsequent
-	/// keyframes stay self-contained.
+	/// The retained parameter sets, including those supplied by the init, survive.
 	pub fn reset(&mut self) {
 		self.current = Avc3Frame::default();
 		self.tail.clear();
@@ -413,6 +437,111 @@ mod tests {
 		let tail = split.flush(ts()).unwrap();
 		assert_eq!(tail.len(), 1);
 		assert!(!tail[0].keyframe);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn reset_keeps_headers_but_discards_pictures_and_queued_frames() {
+		let sps: &[u8] = &[0x67, 0x42, 0xc0, 0x1f, 0xde];
+		let pps: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
+		let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21];
+		let delta: &[u8] = &[0x61, 0xe0, 0x12, 0x34];
+		let aud: &[u8] = &[0x09, 0x10];
+		let mut split = Split::new();
+		assert!(split.initialize(&annexb(&[sps, pps])).unwrap().is_empty());
+		// The last NAL may instead be an incomplete slice: it must not survive.
+		assert!(split.decode(&annexb(&[&[0x61]]), ts()).unwrap().is_empty());
+		split.reset();
+		let next = moq_net::Timestamp::from_micros(1_000).unwrap();
+		let frames = decode_one(&mut split, &mut annexb(&[idr]), next);
+		assert_eq!(frames.len(), 1);
+		assert_eq!(frames[0].payload, annexb(&[sps, pps, idr]));
+		assert_eq!(frames[0].timestamp, next);
+
+		// After the first picture, even a slice-less prefix belongs to the discarded AU.
+		assert!(decode_one(&mut split, &mut annexb(&[sps, pps, aud]), ts()).is_empty());
+		split.reset();
+		let frames = decode_one(&mut split, &mut annexb(&[idr]), next);
+		assert_eq!(frames.len(), 1);
+		assert_eq!(frames[0].payload, annexb(&[sps, pps, idr]));
+
+		// The delta queues the preceding IDR, then an invalid NAL fails decode.
+		assert!(split.decode(&annexb(&[idr, delta, &[0x80], aud]), ts()).is_err());
+		split.reset();
+		let frames = decode_one(&mut split, &mut annexb(&[idr]), next);
+		assert_eq!(frames.len(), 1, "neither the queued IDR nor the partial delta survives");
+		assert_eq!(frames[0].payload, annexb(&[sps, pps, idr]));
+		assert!(frames[0].keyframe);
+		assert_eq!(frames[0].timestamp, next);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn reset_discards_damaged_prefix_before_first_picture() {
+		let sps: &[u8] = &[0x67, 0x42, 0xc0, 0x1f, 0xde];
+		let pps: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
+		let aud: &[u8] = &[0x09, 0x10];
+		let delta: &[u8] = &[0x61, 0xe0, 0x12, 0x34];
+		let mut split = Split::new();
+		assert!(
+			split
+				.decode(&annexb(&[aud, sps, pps, RECOVERY_SEI, &[0x80], aud]), ts())
+				.is_err()
+		);
+		split.reset();
+		let frames = decode_one(&mut split, &mut annexb(&[aud, delta]), ts());
+		assert_eq!(frames.len(), 1);
+		assert!(
+			!frames[0].keyframe,
+			"a damaged recovery point cannot mark the next picture"
+		);
+		assert_eq!(frames[0].payload, annexb(&[aud, delta]));
+	}
+
+	/// A picture inside the init completes with the caller's next timestamp rather than a
+	/// generated one, and a later init replaces the retained sets rather than adding to them.
+	#[tokio::test(start_paused = true)]
+	async fn initialize_keeps_framing_and_replaces_retained_sets() {
+		let sps: &[u8] = &[0x67, 0x42, 0xc0, 0x1f, 0xde];
+		let pps0: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
+		let pps1: &[u8] = &[0x68, 0x4e, 0x3c, 0x80];
+		let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21];
+		let next = moq_net::Timestamp::from_micros(5_000).unwrap();
+
+		let mut split = Split::new();
+		assert!(split.initialize(&annexb(&[sps, pps0, idr])).unwrap().is_empty());
+		let frames = decode_one(&mut split, &mut annexb(&[idr]), next);
+		assert_eq!(frames.len(), 2);
+		assert_eq!(frames[0].payload, annexb(&[sps, pps0, idr]));
+		assert_eq!(frames[0].timestamp, next);
+
+		// Without a reset, the open unit drops the superseded init's headers too.
+		let mut split = Split::new();
+		assert!(split.initialize(&annexb(&[sps, pps0, pps1])).unwrap().is_empty());
+		assert!(split.initialize(&annexb(&[sps, pps0])).unwrap().is_empty());
+		let frames = decode_one(&mut split, &mut annexb(&[idr]), next);
+		assert_eq!(frames.len(), 1);
+		assert_eq!(
+			frames[0].payload,
+			annexb(&[sps, pps0, idr]),
+			"the superseded PPS is not sent"
+		);
+		let frames = decode_one(&mut split, &mut annexb(&[idr]), next);
+		assert_eq!(
+			frames[0].payload,
+			annexb(&[sps, pps0, idr]),
+			"the superseded PPS is not retained"
+		);
+
+		let mut split = Split::new();
+		assert!(split.initialize(&annexb(&[sps, pps0, pps1])).unwrap().is_empty());
+		assert!(split.initialize(&annexb(&[sps, pps0])).unwrap().is_empty());
+		split.reset();
+		let frames = decode_one(&mut split, &mut annexb(&[idr]), next);
+		assert_eq!(frames.len(), 1);
+		assert_eq!(
+			frames[0].payload,
+			annexb(&[sps, pps0, idr]),
+			"the superseded PPS is dropped"
+		);
 	}
 
 	/// A source that defines two PPS once, then sends a bare IDR (no inline

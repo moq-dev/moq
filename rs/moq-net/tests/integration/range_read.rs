@@ -67,7 +67,9 @@ async fn fixture(
 	let mut track = broadcast
 		.create_track(
 			"video",
-			moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+			moq_net::track::Info::default()
+				.with_timescale(moq_net::Timescale::MILLI)
+				.with_max_age(None),
 		)
 		.unwrap();
 	broadcast.announce(Default::default()).unwrap();
@@ -155,6 +157,47 @@ async fn a_range_across_the_live_edge_reads_up_to_its_end() {
 		for relay in [false, true] {
 			if kio::clock::sim::spawn(straddling(version, relay)).await.is_err() {
 				failures.push((version, relay));
+			}
+		}
+	}
+	assert!(failures.is_empty(), "failed: {failures:?}");
+}
+
+async fn back_to_back(version: Version, relay: bool, groups: &[u64], hold: bool) {
+	let (remote, _track, _held) = fixture(version, relay).await;
+	let track = remote.track("video").unwrap();
+	let mut readers = Vec::new();
+	for &group in groups {
+		let mut sub = track.subscribe(one_range(group..group + 1)).await.unwrap();
+		assert_eq!(
+			read(&mut sub).await,
+			[group],
+			"{version} relay={relay} groups={groups:?} hold={hold}"
+		);
+		if hold {
+			readers.push(sub);
+		}
+	}
+}
+
+/// One-range reads of one track through one session complete back to back, ascending or
+/// descending, whether each earlier reader is still held or gone. On lite-07 the second
+/// read widens the open subscription with an update, which the publisher reads, since a
+/// covered subscription stays open.
+#[kio::test]
+async fn one_range_reads_back_to_back_each_complete() {
+	let mut failures = Vec::new();
+	for version in support::every_version() {
+		for relay in [false, true] {
+			for groups in [&[1, 2][..], &[2, 1, 0][..]] {
+				for hold in [false, true] {
+					if kio::clock::sim::spawn(back_to_back(version, relay, groups, hold))
+						.await
+						.is_err()
+					{
+						failures.push((version, relay, groups, hold));
+					}
+				}
 			}
 		}
 	}

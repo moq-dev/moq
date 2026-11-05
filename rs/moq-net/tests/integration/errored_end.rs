@@ -79,7 +79,9 @@ async fn an_errored_end_keeps_its_history_across_a_hop() {
 		let version: Version = name.parse().unwrap();
 		let publisher = produce_origin(1);
 		let broadcast = publisher.create_broadcast("bcast").unwrap();
-		let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
+		let info = moq_net::track::Info::default()
+			.with_timescale(moq_net::Timescale::MILLI)
+			.with_max_age(None);
 		let mut track = broadcast.create_track("video", info).unwrap();
 		broadcast.announce(Default::default()).unwrap();
 		for _ in 0..GROUPS {
@@ -131,7 +133,7 @@ async fn an_errored_end_keeps_its_history_across_a_hop() {
 				false => assert!(err.is_some(), "{label} {what}: ended cleanly"),
 			}
 		}
-		// Lite-07 ends the subscription after SUBSCRIBE_END rather than resetting it.
+		// Lite-07 ends the subscription after SUBSCRIBE_FINISH rather than resetting it.
 		let reset = session.server_transport.resets().contains(&(64 + 7));
 		assert_eq!(
 			reset,

@@ -109,6 +109,35 @@ test("publishes feedback where the catalog solicits it and follows the solicitat
 	}
 });
 
+test("a rendition named __proto__ keeps its counters in the published report", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const origin = new Origin.Producer();
+	const catalog = new Signal<Catalog.Root | undefined>({ echo: { path: "viewers" } } as Catalog.Root);
+	const broadcast = watched(origin, "room/live.hang", catalog);
+	const echo = new Echo({
+		broadcast,
+		origin,
+		name: "alice",
+		sources: [
+			// JSON.parse keeps `__proto__` as an own key, as a decoder's report does.
+			source("room/live.hang", JSON.parse('{"__proto__":{"frames":1}}') as Record<string, Received>),
+			source("room/live.hang", { video: { frames: 2 } }),
+		],
+	});
+	try {
+		await flush();
+		const renditions = (await read(origin, "room/viewers/alice.echo", clock))?.renditions ?? {};
+		expect(Object.keys(renditions).sort()).toEqual(["__proto__", "video"]);
+		expect(Object.hasOwn(renditions, "__proto__")).toBe(true);
+	} finally {
+		echo.close();
+		broadcast.close();
+		origin.close();
+		installed.close();
+	}
+});
+
 test("a second reporter at a feedback path in use publishes nothing until the holder leaves", async () => {
 	const clock = new Manual();
 	const installed = clock.install();

@@ -117,7 +117,7 @@ did not move.
   (`moq-mux/src/container/ts/schedule.rs`) scan and sort every queued unit
   per PCR slot.
 - e2ee expands the AES-GCM key on every frame (`aead` in
-  `moq-e2ee/src/protect.rs`), about a quarter of `protect`; release does too.
+  `moq-crypto/src/e2ee/protect.rs`), about a quarter of `protect`; release does too.
 
 ### Method: attribute with instruction counts, not wall time
 

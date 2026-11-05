@@ -89,7 +89,8 @@ revisions on the same host and worker count, and profiles with
 - [kio waiter costs](/quest/m2/perf/kio-waiter-costs.md) - long-lived waiters stop being rebuilt every poll, IETF fetch keeps one close watch per stream, and a short `kio::log` costs less
 - [Shard by default](/quest/m2/perf/shard-default.md) - a saturating shard sweep decides whether an unset `runtime.workers` runs one worker per core on Linux
 - [Mesh session cost](/quest/m2/perf/mesh-session-cost.md) - moq-net's per-session announce, route sync, and scope work drops, swept over sessions and announces
-- [Cluster route memory](/quest/m2/perf/cluster-route-memory.md) - a full-mesh cluster's ~3.7 KB per route per broadcast shrinks, the in-memory hop is profiled, and `bench-profile lock` tolerates lost records
+- [Cluster route memory](/quest/m2/perf/cluster-route-memory.md) - a full-mesh cluster's ~3.7 KB per route per broadcast shrinks, and the in-memory hop is profiled
+- [Lock profiles find why switch records stop alternating](/quest/m2/perf/profile-lock-switches.md) - refusals stay strict and get a root cause, and lost records are sized and counted
 - [Small hot-path waste](/quest/m2/perf/hot-path-waste.md) - one track-name copy per lite subscription, no full-history `#drift` walk, and one header buffer per JS object
 - [Track-state reads skip when nothing changed](/quest/m2/perf/cursor-version-skip.md) - `Cursor::sync`, `probe` and `GroupExpiry` skip unchanged reads, then group reads move onto a Watch
 - [An idle TS export with a delay costs what one without does](/quest/m2/perf/ts-idle-jitter.md) - the jitter scan and memcmp stop leading the idle poll

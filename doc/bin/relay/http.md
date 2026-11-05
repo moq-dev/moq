@@ -132,10 +132,18 @@ curl -X POST 'http://127.0.0.1:9101/sessions/revalidate?id=00ff'
 
 ### GET /nodes
 
-The peers this relay dialed and holds a session with: each node's URL, without
-its query, and the connections to it, with the same `conn` id the logs use.
+Every outbound peer this relay is configured to dial, including those still
+connecting or retrying, so an entry with no `connections` is a peer that is down.
+`node` is the peer's identity without credentials: its URL, or the mDNS instance
+of a LAN peer that advertised no node URL.
+Each live connection carries the `conn` ID its log lines use and its transport
+(`quic`, `webtransport`, `websocket`, ...).
+`last_connected_seconds_ago` is the time since a session to the peer last
+connected, kept across disconnects, failed attempts, and a redial for a new
+cost or token. It is null until the first successful connect, and the peer and
+its history go away once it is removed from the peer list.
 Peers that dialed this relay are not listed, since they declare no URL.
 
 ```json
-{ "nodes": [{ "node": "https://us-east.example.com/", "connections": [{ "id": 3 }] }] }
+{ "nodes": [{ "node": "https://us-east.example.com/", "connections": [{ "id": 3, "transport": "webtransport" }], "last_connected_seconds_ago": 12.5 }] }
 ```

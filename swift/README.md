@@ -78,12 +78,18 @@ Every consumer conforms to `AsyncSequence`, so `for try await x in consumer` wor
 
 Incoming server `Request` values expose the query-free `path` before acceptance. It is consistent across transports and is empty for the root or missing path. The encoded `query` may contain credentials.
 
-Raw tracks also expose best-effort datagrams: `TrackProducer.appendDatagram(_:timestamp:)`
-returns the assigned sequence number (`insertDatagram(_:sequence:timestamp:)` takes the
-caller's own), `TrackConsumer.recvDatagram()` receives one datagram,
-and `TrackConsumer.datagrams` streams them in arrival order. Payloads are capped at 1200 bytes.
-Datagrams require a datagram-capable transport and lite-05 or newer moq-lite, or moq-transport;
-pre-lite-05, WebSocket, and TCP paths do not deliver them, and there is no stream fallback.
+Create a separate live track with `BroadcastProducer.createDatagrams(name:info:)` and
+subscribe with `BroadcastConsumer.datagrams(name:)`. `DatagramProducer.append(_:timestamp:)`
+assigns a sequence, `insert(_:)` preserves one, and `DatagramConsumer.recv()` or its
+`AsyncSequence` reads in arrival order. Demand is aggregate subscriber `priority()` /
+`priorityChanged(last:)`; `BroadcastRequests.datagrams()` handles on-demand tracks.
+Keep payloads below the path MTU. Delivery needs a datagram-capable transport and lite-05
+or newer, with no stream fallback. A stream track of the same name is independent.
+
+On lite-05/06, a local datagram handler is asked for an on-demand name without waiting
+for the stream handler, and answers it unless a stream track of that name is published. A
+relayed broadcast asks its upstream for the datagram track only once the stream track is
+not found. lite-07 uses independent requests.
 
 JSON tracks live under the `Json` namespace, mirroring the `moq-json` crate, and carry your own
 `Codable` types with the framing handled for you. Each type wraps a track: a producer takes over a
@@ -93,7 +99,9 @@ JSON tracks live under the `Json` namespace, mirroring the `moq-json` crate, and
 (lossless append-log, every record preserved in order), or `Json.WindowProducer`/`Json.WindowConsumer`
 (a sliding window of records a reader can join at any point, not advertised in the catalog). Values encode/decode at the boundary with
 `JSONEncoder`/`JSONDecoder`; the consumer is an `AsyncSequence` of the decoded type. Publish the
-track with `TrackInfo(compress: true)`; consumers read it the same either way.
+track with `TrackInfo(compress: true)`; consumers read it the same either way. Every JSON write
+(snapshot update, stream append, window push or pop) takes a timestamp on the broadcast clock (`Media.CatalogProducer.now()`), so the
+track needs a timescale.
 
 ## Local development
 

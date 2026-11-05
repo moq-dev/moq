@@ -334,7 +334,7 @@ impl Peer {
 					Err(error) => panic!("reading stream {index}: {error}"),
 				}
 			}
-			let _ = chunks.finalize();
+			chunks.finalize();
 
 			let burst = receiving.read - before;
 			prop_assert!(

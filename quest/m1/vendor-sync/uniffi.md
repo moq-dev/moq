@@ -21,7 +21,8 @@ Recurring child of the [vendor sync](/quest/m1/vendor-sync/README.md), which
 says how each run works and recurs. Decided 2026-10-30 (maintainer): covered
 only until [the switch to rust2's exporter](/quest/m2/ffi-exporter.md) lands. After that,
 rust2 owns the generators, and the next run drops this child. Until then, a fix
-landed here goes upstream into rust2's fork too, or rust2's import loses it.
+landed here joins the exporter quest's carried-over list, so the exporter's
+generators get it too; rust2's fork is maintenance-only since 2026-11-02.
 
 A port means a commit on the fork and a pin bump in moq (`flake.nix` and the
 places its "five places" comments name), with regenerated bindings diffed and

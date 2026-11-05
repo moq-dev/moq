@@ -117,10 +117,18 @@ fn select(catalog: &AudioConfig, candidates: Vec<&Candidate>) -> Result<Box<dyn 
 		}
 	}
 
-	// One refusal is the whole answer, so keep its variant: a malformed
-	// description stays a container error rather than becoming a string.
+	// One refusal is the whole answer, so keep its variant. Among several, a fault
+	// outranks the refusals: folding it into `Unsupported` would report a codec
+	// failure as a configuration another rendition could avoid.
 	if refused.len() == 1 {
 		let (_, err) = refused.remove(0);
+		return Err(err);
+	}
+	if let Some(fault) = refused
+		.iter()
+		.position(|(_, err)| !matches!(err, Error::Unsupported(_)))
+	{
+		let (_, err) = refused.swap_remove(fault);
 		return Err(err);
 	}
 	if !refused.is_empty() {
@@ -231,5 +239,18 @@ mod tests {
 			message.contains("refusing: ") && message.contains("also-refusing: "),
 			"{message}"
 		);
+	}
+
+	/// A backend fault is not a refusal of the track, so it is never folded into one.
+	#[test]
+	fn a_fault_outranks_refusals() {
+		const FAULTY: Candidate = Candidate {
+			name: "faulty",
+			supports: |codec| matches!(codec, AudioCodec::Opus),
+			open: |_| Err(Error::Codec("allocation failed".into())),
+		};
+
+		let err = pick(Kind::Auto, &[REFUSING], &[FAULTY]).unwrap_err();
+		assert!(matches!(err, Error::Codec(_)), "{err:?}");
 	}
 }

@@ -116,7 +116,7 @@ async function read(front: Front, tracks: string[], access: Access, payloads: We
 			continue;
 		}
 		const subscriber = access === "subscribe" ? track.subscribe({ delay: { max: MAX_DELAY } }) : undefined;
-		const group = subscriber ? await subscriber.recvGroup() : await track.fetchGroup(0);
+		const group = subscriber ? await subscriber.recvGroup() : await track.fetchGroup(0n);
 		const frame = await group?.readFrame();
 		group?.close();
 		subscriber?.close();

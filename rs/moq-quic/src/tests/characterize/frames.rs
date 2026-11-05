@@ -129,7 +129,7 @@ fn zero_rtt_packets_are_dropped() {
 		let mut chunks = recv.read().unwrap();
 		assert_eq!(chunks.next(usize::MAX).unwrap().unwrap().bytes, DATA);
 		assert!(chunks.next(usize::MAX).unwrap().is_none());
-		let _ = chunks.finalize();
+		chunks.finalize();
 	}
 }
 

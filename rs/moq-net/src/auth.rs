@@ -106,7 +106,7 @@ impl Grant {
 	}
 
 	/// The paths any of `grants` allows, lapsing at the earliest expiry, which is when
-	/// the union next shrinks. Reduced once, so it costs about the grants' total size.
+	/// the union next shrinks. Reduced once over all of them, not pairwise.
 	fn union<'a>(grants: impl IntoIterator<Item = &'a Self>) -> Self {
 		let mut publish = Vec::new();
 		let mut subscribe = Vec::new();
@@ -2599,6 +2599,10 @@ impl Gate {
 		let mut operation = std::pin::pin!(operation);
 		kio::wait(|waiter| {
 			std::task::ready!(self.poll_ready(waiter));
+			// Ahead of the gate it also closes, so a lapsed token is refused as expired.
+			if let Poll::Ready(refusal) = self.poll_token_ended(waiter) {
+				return Poll::Ready(Err(refusal.error));
+			}
 			if self.poll_denied(waiter).is_ready() {
 				return Poll::Ready(Err(Error::Unauthorized));
 			}

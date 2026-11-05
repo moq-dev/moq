@@ -6,7 +6,7 @@
 //! view complete as of a revision for the region they cover. Receivers merge
 //! every neighbor's view claim by claim, keeping whichever knowledge is newer,
 //! and keep showing an origin's claims while any route to it is usable or
-//! recovering. See `quest/m1/cluster-routing/routes.md`.
+//! recovering. See `quest/m1/cluster-routing/routes/README.md`.
 
 use std::collections::BTreeSet;
 
@@ -688,7 +688,7 @@ fn only_a_wildcard_claim_overlaps_an_interest_below_it() {
 	net.check().unwrap();
 }
 
-/// Two origins hold the same wildcard capability for one epoch, and a client
+/// Two origins hold the same wildcard capability for one instance, and a client
 /// watches a region below it. Withdrawing one origin's wildcard ends only that
 /// origin's claim. The client's floor for `live/a/` certifies the wildcard above
 /// it, so a lagging relay's older copy of the withdrawn wildcard is refused

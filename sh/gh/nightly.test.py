@@ -123,7 +123,7 @@ class NightlyTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertEqual(calls[-1], "just dart bench")
         self.assertIn("failed: just py bench", result.stderr)
-        for runner in ("rust-ffi", "rust-net", "go", "python", "kotlin", "cpp", "dart"):
+        for runner in ("rust-ffi", "rust-net", "rust-background", "go", "python", "kotlin", "cpp", "dart"):
             self.assertIn(f"/{runner}.json", result.stderr)
 
     def test_bench_targets_share_one_invocation(self):
@@ -208,10 +208,12 @@ class NightlyTest(unittest.TestCase):
             r"^for benchmark in (.+); do\n\s+bun micro\.ts ", (ROOT / "bench/browser/run.sh").read_text(), re.M
         )
         self.assertIsNotNone(smoke)
+        # Each smoke name runs the entry micro.ts's table names for it.
+        micro = (ROOT / "bench/browser/micro.ts").read_text()
+        fixtures = dict(re.findall(r'^\t"?([\w-]+)"?: \{ entry: "([^"]+)"', micro, re.M))
         for name in smoke[1].split():
-            fixtures = list((ROOT / "js").glob(f"*/bench/{name}.ts"))
-            self.assertEqual(len(fixtures), 1, f"browser smoke bench {name}")
-            entries |= set(fixtures)
+            self.assertIn(name, fixtures, f"browser smoke bench {name}")
+            entries.add(ROOT / fixtures[name])
         # Bundled helpers only run through the entry that names them.
         helpers = {
             path for entry in entries for path in entry.parent.glob("*.ts") if f"/{path.name}" in entry.read_text()

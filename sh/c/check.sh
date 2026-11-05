@@ -114,9 +114,8 @@ if [[ "$(uname -s)" == MINGW* || "$(uname -s)" == MSYS* ]]; then
 fi
 
 if command -v pkg-config >/dev/null 2>&1; then
-    export PKG_CONFIG_PATH="$prefix/$libdir/pkgconfig"
     # Assigned first: set -e ignores a failing substitution inside a command's arguments.
-    flags=$(pkg-config --cflags --libs moq-c)
+    flags=$(pkg-config --cflags --libs "$prefix/$libdir/pkgconfig/moq-c.pc")
     mkdir -p "$build/pkg-config"
     # shellcheck disable=SC2086 # flags is a flag list.
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -pedantic-errors -o "$build/pkg-config/probe" moq/test/probe.c $flags

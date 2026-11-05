@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano, sleep, yieldNow } from "@moq/clock";
+import Qmux, { selectSubprotocol, type WebSocketLike } from "@moq/qmux";
 import { ConnectTimeout, SessionCode, SessionError } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";
 import { ClientSetup, ServerSetup } from "../lite/compat.ts";
@@ -644,6 +645,100 @@ test("the WebSocket fallback offers the same versions", async () => {
 	const asked = await websocketOffer({ versions: ["moq-lite-07-wip", "moq-lite-06"] });
 	expect(asked[0]?.endsWith(ALPN_07_WIP)).toBe(true);
 	expect(asked.some((protocol) => protocol.endsWith(ALPN_05))).toBe(false);
+});
+
+// How many streams the WebSocket fallback lets a server open in each direction: a qmux
+// server accepts the dial and opens streams until the client's limit refuses one.
+async function websocketStreamLimits(props: Omit<ConnectProps, "url">): Promise<{ bidi: number; uni: number }> {
+	const original = globalThis.WebTransport;
+	// No WebTransport, so the WebSocket attempt goes at once.
+	globalThis.WebTransport = undefined as unknown as typeof WebTransport;
+	const accepted = Promise.withResolvers<Qmux>();
+	// Bun's server socket, shaped as the `WebSocketLike` that `Qmux.accept` adopts.
+	let adopted: WebSocketLike | undefined;
+	const server = Bun.serve<{ protocol: string }>({
+		port: 0,
+		fetch(request, server) {
+			const protocol = selectSubprotocol(request.headers.get("sec-websocket-protocol"), {
+				protocols: [ALPN_06],
+				versions: { [ALPN_06]: null },
+			});
+			if (!protocol) return new Response("no protocol", { status: 400 });
+			const headers = { "sec-websocket-protocol": protocol };
+			if (server.upgrade(request, { headers, data: { protocol } })) return;
+			return new Response("no upgrade", { status: 400 });
+		},
+		websocket: {
+			open(socket) {
+				socket.binaryType = "arraybuffer";
+				adopted = {
+					binaryType: "arraybuffer",
+					get bufferedAmount() {
+						return socket.getBufferedAmount();
+					},
+					get readyState() {
+						return socket.readyState;
+					},
+					protocol: "",
+					extensions: "",
+					send: (data) => void socket.send(data as Uint8Array),
+					close: (code, reason) => socket.close(code, reason),
+					onopen: null,
+					onmessage: null,
+					onerror: null,
+					onclose: null,
+				};
+				accepted.resolve(Qmux.accept(adopted, { protocol: socket.data.protocol }));
+			},
+			message(_socket, data) {
+				adopted?.onmessage?.({ data });
+			},
+			close(_socket, code, reason) {
+				adopted?.onclose?.({ code, reason });
+			},
+		},
+	});
+	const controller = new AbortController();
+	try {
+		// SETUP goes unanswered, so the attempt stays open until aborted.
+		const attempt = connect(new URL(`http://127.0.0.1:${server.port}/`), {
+			signal: controller.signal,
+			versions: ["moq-lite-06"],
+			...props,
+		}).catch(() => undefined);
+		const session = await accepted.promise;
+		const count = async (open: () => Promise<unknown>) => {
+			let opened = 0;
+			try {
+				for (; ; opened++) await open();
+			} catch {
+				return opened;
+			}
+		};
+		const now = { waitUntilAvailable: false };
+		const limits = {
+			bidi: await count(() => session.createBidirectionalStream(now)),
+			uni: await count(() => session.createUnidirectionalStream(now)),
+		};
+		controller.abort();
+		await attempt;
+		session.close();
+		return limits;
+	} finally {
+		globalThis.WebTransport = original;
+		server.stop(true);
+	}
+}
+
+test("the WebSocket fallback grants the server websocket.maxStreams in each direction", async () => {
+	expect(await websocketStreamLimits({})).toEqual({ bidi: 10_000, uni: 10_000 });
+	expect(await websocketStreamLimits({ websocket: { maxStreams: 3 } })).toEqual({ bidi: 3, uni: 3 });
+});
+
+test("websocket.maxStreams must be a positive integer", async () => {
+	for (const maxStreams of [0, -1, 1.5, Number.NaN]) {
+		await expect(connect(url, { websocket: { maxStreams } })).rejects.toThrow(RangeError);
+	}
 });
 
 // A WebTransport whose handshake nothing ever answers, as a dial to a dead target is.

@@ -79,7 +79,7 @@ runs:
     # Task manifests must fit the remote reader's bound; 1.28 caps new
     # manifests below it. Already oversized remote manifests age out under
     # the bucket lifecycle, so they may still miss until they expire.
-    - uses: jdx/mr-boxington-action@47ce49b32025d93a7a2f4570815afaa2b7092240 # v1.7.2
+    - uses: jdx/mr-boxington-action@88acf2bb50552c7c508cbac13e5f8c576b95b1de # v1.7.3
       id: mbx
       with:
         version: 1.28.0

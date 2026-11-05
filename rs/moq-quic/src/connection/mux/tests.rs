@@ -77,7 +77,7 @@ fn read_all(conn: &mut Connection, id: StreamId) -> (Vec<u8>, bool) {
 			Err(err) => panic!("read failed: {err}"),
 		}
 	}
-	let _ = chunks.finalize();
+	chunks.finalize();
 	(data, fin)
 }
 
@@ -444,7 +444,7 @@ fn reset_stream_at_delivers_the_prefix() {
 			Err(err) => break err,
 		}
 	};
-	let _ = chunks.finalize();
+	chunks.finalize();
 	assert!(data.starts_with(b"header"), "{data:?} {err:?}");
 	assert_eq!(err, recv::Error::Reset(VarInt::from_u32(9)));
 }
