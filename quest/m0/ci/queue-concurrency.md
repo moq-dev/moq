@@ -42,14 +42,36 @@ Concurrency-1 baseline, 08:00Z to 08:00Z (midnight Pacific):
 | Build minutes, median / p90 | 4.3 / 9.5 | 4.0 / 8.8 |
 | Host CPU busy in cargo phases, median / p90 | 65% / 85% (94 builds) | 51% / 75% (81 builds) |
 
-Building two needs two runners. Only `nixos-moq-ci` carries the `moq-queue`
-label, so at `maximumEntriesToBuild: 2` alone the second group's job waits for
-it and nothing overlaps. A second runner in the same container would split one
-CPU and memory budget between both builds; a second container gets its own
-budget and shares mbx's action cache the way the host's runners already do.
-The host already runs at about half its CPU during a single queue build, and
-building two means a failure in the first entry rebuilds the second, so the
-trial reads failures, cancelled builds and build minutes alongside the gain.
+Building two needs two runners. Only `nixos-moq-ci` carried the `moq-queue`
+label, so at `maximumEntriesToBuild: 2` alone the second group's job would wait
+for it and nothing would overlap. The host already runs at about half its CPU
+during a single queue build, and building two means a failure in the first
+entry rebuilds the second, so the trial reads failures, cancelled builds and
+build minutes alongside the gain.
+
+Decided 2026-11-05 (maintainer, /quest-unblock): the CI host's configuration
+is a repository an agent may push to, and the host is reachable as
+`ssh nixos`, so an agent applies the runner change itself.
+
+Decided 2026-11-05 (maintainer, /quest-unblock): ✅ copy the existing setup.
+The second runner, `nixos-moq-ci2`, is a copy of `nixos-moq-ci`'s container
+entry with its own home, work directory, registration token, UID range and
+subnet. Like every runner it shares mbx's artifact store and the CI slice's
+memory cap. It went live on 2026-11-05 at 08:40Z with the queue idle, and both
+runners came back online. At concurrency 1 GitHub hands each Queue job to
+whichever runner is idle, so the new runner warms its build directory before
+the trial.
+
+Decided 2026-11-05 (maintainer, /quest-unblock): ✅ apply only when the merge
+queue is idle: no entries and no `merge_group` build running. This covers both
+the host switch and the ruleset trial.
+
+Decided 2026-11-05 (maintainer, /quest-unblock): ✅ the agent sets
+`maximumEntriesToBuild` to 2 in ruleset 2420853 for one weekday, 08:00Z to
+08:00Z, once the new runner has warmed its build directory, and reverts it to 1
+when the window ends. A window that cannot start within the agent's run is
+recorded under Waiting with its start, end and revert, and the ruleset stays
+at 1.
 
 Rerun after the trial window, with the baseline days for comparison:
 
@@ -69,16 +91,20 @@ then. If 2 wins, `queue.yml`'s comments that a group is one PR at concurrency
 
 ## Waiting
 
-- Maintainer: register a second runner labeled `moq-queue` on the CI host, in
-  its own container (recommended) or the existing one. The host configuration
-  is private and deploys with a host rebuild, so an agent can draft it but not
-  apply it. Check: `gh api repos/moq-dev/moq/actions/runners` lists two online
-  `moq-queue` runners.
-- Maintainer: set `maximumEntriesToBuild` to 2 in
-  [ruleset 2420853](https://github.com/moq-dev/moq/rules/2420853) for one
-  weekday from 08:00Z to 08:00Z once the second runner has warmed its build
-  directory, such as 2026-11-05 08:00Z to 2026-11-06 08:00Z, then rerun the
-  measurement above and keep the winner. Ruleset changes are the
-  maintainer's. Check: `gh api repos/moq-dev/moq/rulesets/2420853 --jq
-  '.rules[] | select(.type == "merge_queue") | .parameters.max_entries_to_build'`
-  prints 2.
+- moq-dev/moq: run the trial in
+  [ruleset 2420853](https://github.com/moq-dev/moq/rules/2420853) from
+  2026-11-06 08:00Z to 2026-11-07 08:00Z. At the start, check that
+  `nixos-moq-ci2` has run Queue jobs (the `runner_name` of recent
+  `merge_group` runs' jobs), wait until the queue has no entries and no
+  `merge_group` build running, then set the `merge_queue` rule's
+  `max_entries_to_build` to 2. At 2026-11-07 08:00Z set it back to 1, rerun
+  the measurement above and keep the winner. Check: `gh api
+  repos/moq-dev/moq/rulesets/2420853 --jq '.rules[] | select(.type ==
+  "merge_queue") | .parameters.max_entries_to_build'` prints 2 inside the
+  window and 1 outside it. If the start slips past the morning, move the whole
+  window to the next weekday; never leave 2 without its revert time recorded
+  here.
+- Maintainer: keep `sh/gh/queue-stats.py` on `main`, or delete it once the
+  comparison is recorded. Recommendation: delete it. Its only planned consumer
+  is this trial's rerun from this branch, and a permanent tool would also need
+  a test.
