@@ -53,7 +53,10 @@ impl Activity {
 				return Poll::Ready(());
 			}
 			match self.state.write_unwanted() {
-				kio::Unwanted::Idle(state) => return Poll::Ready(state.close()),
+				kio::Unwanted::Idle(state) => {
+					state.close();
+					return Poll::Ready(());
+				}
 				// Admitted between the wake and the commit: wait for it too.
 				kio::Unwanted::Wanted => continue,
 				kio::Unwanted::Closed => return Poll::Ready(()),
@@ -1085,29 +1088,19 @@ impl RequestInner {
 /// server SETUP. Dropped before it resolves, it refuses the session as the deadline does.
 // Fields drop in order: the reply before the guard refuses, and the handshake last.
 struct Answer {
-	step: AnswerStep,
+	/// What starts the session, taken by the first poll.
+	start: Option<(Server, Deadlines, PausedHandshake)>,
+	/// A negotiated client's server SETUP on its way out. Boxed so the bidi SETUP write of
+	/// these old versions doesn't size every caller's handshake.
+	reply: Option<Box<NegotiatedReply>>,
 	/// The deadline's timer, armed once the reply first waits.
 	timer: Option<kio::clock::Sleep>,
 	unanswered: Unanswered,
 	stats: stats::Session,
 	/// When to give up on the peer taking the reply.
 	deadline: Option<Instant>,
-	/// Answered: what the request decided, without the parts the steps took.
+	/// The request being answered, emptied of what the start took.
 	handshake: Handshake,
-}
-
-enum AnswerStep {
-	/// Not polled yet: the paused handshake picks how the session starts.
-	Start {
-		server: Server,
-		runtime: Deadlines,
-		paused: PausedHandshake,
-	},
-	/// Sending a negotiated client's server SETUP. Boxed so the bidi SETUP write of these old
-	/// versions doesn't size every caller's handshake.
-	Negotiated(Box<NegotiatedReply>),
-	/// Resolved.
-	Done,
 }
 
 impl Answer {
@@ -1121,11 +1114,8 @@ impl Answer {
 		let stats = server.stats.clone();
 		let (session, version) = paused.transport();
 		Self {
-			step: AnswerStep::Start {
-				server,
-				runtime,
-				paused,
-			},
+			start: Some((server, runtime, paused)),
+			reply: None,
 			timer: None,
 			unanswered: Unanswered(Some((session, version, stats.clone()))),
 			stats,
@@ -1138,7 +1128,7 @@ impl Answer {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(Session, crate::Driver), Error>> {
 		let res = ready!(self.poll_reply(waiter));
 		// Release the reply before the guard closes over a deadline.
-		self.step = AnswerStep::Done;
+		self.reply = None;
 		self.timer = None;
 		let Some(res) = res else {
 			drop(std::mem::replace(&mut self.unanswered, Unanswered(None)));
@@ -1153,44 +1143,33 @@ impl Answer {
 
 	/// The reply's outcome, or `None` once the deadline passed first.
 	fn poll_reply(&mut self, waiter: &kio::Waiter) -> Poll<Option<Result<(Session, crate::Driver), Error>>> {
-		let reply = match &mut self.step {
-			AnswerStep::Start { .. } => {
-				let AnswerStep::Start {
-					server,
-					runtime,
-					paused,
-				} = std::mem::replace(&mut self.step, AnswerStep::Done)
-				else {
-					unreachable!("matched above");
-				};
-				let peer_hop = Some(self.handshake.assigned_hop);
-				let auth = self.handshake.auth.clone();
-				let started = match paused {
-					PausedHandshake::LiteBare { session, version } => {
-						server.start_lite(runtime, session, version, None, peer_hop, auth)
+		if let Some((server, runtime, paused)) = self.start.take() {
+			let peer_hop = Some(self.handshake.assigned_hop);
+			let auth = self.handshake.auth.clone();
+			let started = match paused {
+				PausedHandshake::LiteBare { session, version } => {
+					server.start_lite(runtime, session, version, None, peer_hop, auth)
+				}
+				PausedHandshake::LiteSetup {
+					session,
+					version,
+					client_setup,
+				} => {
+					server.stats.control(stats::Message::Session, client_setup.size, true);
+					server.start_lite(runtime, session, version, Some(client_setup), peer_hop, auth)
+				}
+				PausedHandshake::Ietf(paused) => paused.ok(server, runtime, peer_hop, auth),
+				PausedHandshake::Negotiated(paused) => match paused.reply(server, runtime, peer_hop, auth) {
+					Ok(reply) => {
+						self.reply = Some(Box::new(reply));
+						return self.poll_reply(waiter);
 					}
-					PausedHandshake::LiteSetup {
-						session,
-						version,
-						client_setup,
-					} => {
-						server.stats.control(stats::Message::Session, client_setup.size, true);
-						server.start_lite(runtime, session, version, Some(client_setup), peer_hop, auth)
-					}
-					PausedHandshake::Ietf(paused) => paused.ok(server, runtime, peer_hop, auth),
-					PausedHandshake::Negotiated(paused) => match paused.reply(server, runtime, peer_hop, auth) {
-						Ok(reply) => {
-							self.step = AnswerStep::Negotiated(Box::new(reply));
-							return self.poll_reply(waiter);
-						}
-						Err(err) => Err(err),
-					},
-				};
-				return Poll::Ready(Some(started));
-			}
-			AnswerStep::Negotiated(reply) => reply,
-			AnswerStep::Done => panic!("answer polled after it resolved"),
-		};
+					Err(err) => Err(err),
+				},
+			};
+			return Poll::Ready(Some(started));
+		}
+		let reply = self.reply.as_mut().expect("answer polled after it resolved");
 		// The reply is polled first, so one that is ready wins even past the deadline.
 		if let Poll::Ready(res) = reply.poll(waiter) {
 			return Poll::Ready(Some(res));
