@@ -157,7 +157,7 @@ def criterion_baseline(directory, discovery, benchmark):
 
 
 # A paired case beyond this change is flagged, and fails the nightly only when its rounds agree.
-# Loose until A/A runs on the hosted runner measure its noise floor.
+# Rounds on unchanged code have agreed at up to +9.7% on the hosted runner, so lower is unsafe.
 THRESHOLD_PCT = 10
 # Each alternating round costs seconds per case, so a noisy night confirms only its worst slowdowns.
 CONFIRMATIONS = 20

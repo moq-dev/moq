@@ -171,7 +171,7 @@ their end report, so an embedder's drain alert pages on real cuts.
 - [crates.io trusts the workflow](/quest/m1/crates-trusted-publisher.md) - maintainer action: every published crate gets a trusted publisher for `release-rs.yml`
 - [Rust releases publish through OIDC](/quest/m1/release-rs-oidc.md) - release-plz publishes with trusted publishing and `CARGO_REGISTRY_TOKEN` is revoked
 - [Main is no slower than release](/quest/m1/release-perf/README.md) - every benchmark where main is slower than release is fixed or accepted with a reason, checked by a final paired run before the cut
-- [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - A/A and deliberately slowed Nightly runs set the paired comparison's threshold, so its regression alerts can be trusted
+- [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - the moq-net and relay groups get A/A runs and the bias that makes rounds agree on unchanged code is removed, so every paired regression alert can be trusted
 - [moq-net's benches run to completion](/quest/m1/bench-test-mode.md) - the `origin`, `session` and `memory` benches stop panicking in test mode and Nightly's measured run, and the maintainer picks where CI catches the next break
 - [Catalog contributions become includes on the root's timeline](/quest/m1/catalog-include.md) - rename the unreleased `contributions` map before the cut and state that included broadcasts share the root's timeline
 - [Unbounded groups](/quest/m1/unbounded-groups/README.md) - groups and frames lose their size caps; a group keeps a 32 MB tail, and readers behind it replay through paced flights or refresh
