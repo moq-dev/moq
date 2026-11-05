@@ -301,7 +301,11 @@ export class Demand {
 		makeDemand = (sequence, wanted, state) => new Demand(sequence, wanted, state);
 	}
 
-	/** Whether any mirror reader is attached. */
+	/**
+	 * Whether a reader will still read the group: a mirror handed out or fetched, or one a track
+	 * buffers for a reader that has yet to reach it. Mirrors the Rust fill's held runs plus its
+	 * group consumers.
+	 */
 	get wanted(): Getter<boolean> {
 		return this.#wanted;
 	}
@@ -327,7 +331,7 @@ export class Producer {
 	// How many open mirrors a reader will still read.
 	#readers = 0;
 
-	// Whether any mirror reader is attached (see {@link Demand.wanted}). Fetch coalescing watches it to
+	// Whether a reader will still read it (see {@link Demand.wanted}). Fetch coalescing watches it to
 	// cancel an abandoned download; a group can stay open indefinitely (a catalog or JSON stream),
 	// so this is what stops a reader-less fetch instead of the stream ending on its own.
 	#wanted = new Signal<boolean>(false);
@@ -495,7 +499,8 @@ export class Producer {
 			return makeConsumer(dst);
 		}
 
-		const mirrors = (this.#mirrors ??= new Map());
+		this.#mirrors ??= new Map();
+		const mirrors = this.#mirrors;
 		mirrors.set(dst, true);
 		this.#readers++;
 		this.#wanted.set(true);

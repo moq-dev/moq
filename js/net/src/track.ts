@@ -2408,6 +2408,8 @@ export class Subscriber {
 	}
 
 	#guard(group: GroupConsumer): GroupConsumer {
+		// Handed out, it is read, whatever this reader judged it while buffered.
+		hooks.groupReads(group, true);
 		const held: Superseded = {};
 		hooks.onShedRead(group, () => {
 			if (this.#state.latest === group.sequence && this.#state.producer) hooks.joinProducer(this.#state.producer);
