@@ -2223,13 +2223,14 @@ impl Producer {
 
 	/// This origin's construction config.
 	pub fn config(&self) -> Config {
+		let shared = self.shared.lock();
 		Config {
 			hop: self.hop,
 			max_hops: self.max_hops,
 			pool: self.pool.clone(),
 			cache_duration: self.cache_duration,
-			update_hold: self.shared.lock().update_hold,
-			route_key: self.route_key(),
+			update_hold: shared.update_hold,
+			route_key: shared.route_key.clone(),
 		}
 	}
 
