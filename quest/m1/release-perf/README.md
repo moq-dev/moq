@@ -13,6 +13,16 @@ in every round. The sparse rows are accepted (2026-10-30). The browser frame pat
 needs no repeat; the [performance audit](/quest/m2/audit-perf.md) now pairs
 every later cut with `release`.
 
+## Waiting
+
+- moq-dev/moq: land [moq-dev/moq#7979](https://github.com/moq-dev/moq/pull/7979)
+  so the Nix shell no longer exports `MOQ_QUEST`. Both paired relay builds
+  passed on 2026-11-05, but the current load generator refused that variable
+  before the first workload produced samples. Resume the seven-round QUIC
+  comparison with `BENCH_RUNTIME_ROUNDS=7 just bench-relay origin/release quic`
+  through `quest gate` after the fix lands; do not unset the variable or weaken
+  the binary's environment validation. No performance conclusion is available.
+
 ## Plan
 
 Decided 2026-10-21, when planning from a paired comparison of `release`
