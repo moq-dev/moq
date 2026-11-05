@@ -35,20 +35,20 @@ async function unwanted(track: Track.Producer): Promise<void> {
 
 const video = (codec: string) => ({ codec, container: { kind: "legacy" as const } });
 
-it("opens a listed contribution only on selection, keeping its rendition IDs its own", async () => {
+it("opens a listed include only on selection, keeping its rendition IDs its own", async () => {
 	const origin = new Origin.Producer();
 	const parent = publish(origin, "room/main.hang");
-	const contribution = publish(origin, "room/extra.hang");
-	const contributionCatalog = contribution.createTrack(Catalog.TRACK);
-	const catalog = new Json.Snapshot.Producer<Catalog.Root>({ track: contributionCatalog, deltas: false });
+	const include = publish(origin, "room/extra.hang");
+	const includeCatalog = include.createTrack(Catalog.TRACK);
+	const catalog = new Json.Snapshot.Producer<Catalog.Root>({ track: includeCatalog, deltas: false });
 	parent.createTrack("video").writeFrame({ payload: new TextEncoder().encode("source frames") });
-	const contributionVideo = contribution.createTrack("video");
-	contributionVideo.writeFrame({ payload: new TextEncoder().encode("contribution frames") });
+	const includeVideo = include.createTrack("video");
+	includeVideo.writeFrame({ payload: new TextEncoder().encode("include frames") });
 
-	// The contribution and a source rendition share the ID "video".
+	// The include and a source rendition share the ID "video".
 	const root = Catalog.RootSchema.parse({
 		video: { renditions: { video: video("avc1.42001f") } },
-		contributions: { video: { broadcast: "./extra.hang" } },
+		include: { video: { broadcast: "./extra.hang" } },
 	});
 	const source = new Broadcast({
 		origin,
@@ -59,14 +59,14 @@ it("opens a listed contribution only on selection, keeping its rendition IDs its
 	const selection = new Effect();
 	try {
 		await settle();
-		expect(source.out.catalog.peek()?.contributions).toEqual(root.contributions);
+		expect(source.out.catalog.peek()?.include).toEqual(root.include);
 		// Listing the entry does not subscribe to its catalog.
-		expect(contributionCatalog.demand().wanted.peek()).toBeUndefined();
+		expect(includeCatalog.demand().wanted.peek()).toBeUndefined();
 
-		const child = source.contribution(selection, "video");
+		const child = source.include(selection, "video");
 		catalog.update({ value: { video: { renditions: { video: video("vp8") } } } });
 		await settle();
-		expect(contributionCatalog.demand().wanted.peek()).toBeDefined();
+		expect(includeCatalog.demand().wanted.peek()).toBeDefined();
 		expect(child.out.catalog.peek()?.video?.renditions.video?.codec).toBe("vp8");
 		expect(source.out.catalog.peek()?.video?.renditions.video?.codec).toBe("avc1.42001f");
 
@@ -81,7 +81,7 @@ it("opens a listed contribution only on selection, keeping its rendition IDs its
 			.ordered();
 		const original = source.relativeBroadcast(selection, undefined)?.track("video").subscribe().ordered();
 		try {
-			expect(await frames?.readString()).toBe("contribution frames");
+			expect(await frames?.readString()).toBe("include frames");
 			expect(await original?.readString()).toBe("source frames");
 		} finally {
 			frames?.close();
@@ -89,11 +89,11 @@ it("opens a listed contribution only on selection, keeping its rendition IDs its
 		}
 
 		// An unlisted ID leaves the child disabled.
-		expect(source.contribution(selection, "unknown").in.enabled.peek()).toBe(false);
+		expect(source.include(selection, "unknown").in.enabled.peek()).toBe(false);
 
 		selection.close();
-		await unwanted(contributionCatalog);
-		await unwanted(contributionVideo);
+		await unwanted(includeCatalog);
+		await unwanted(includeVideo);
 	} finally {
 		selection.close();
 		source.close();
@@ -101,7 +101,7 @@ it("opens a listed contribution only on selection, keeping its rendition IDs its
 	}
 });
 
-it("reads an unavailable contribution as offline without touching the parent", async () => {
+it("reads an unavailable include as offline without touching the parent", async () => {
 	const origin = new Origin.Producer();
 	publish(origin, "room/main.hang");
 	const claim = origin.requests(Path.from("room/absent.hang"));
@@ -112,19 +112,19 @@ it("reads an unavailable contribution as offline without touching the parent", a
 		catalogFormat: "manual",
 		catalog: Catalog.RootSchema.parse({
 			video: { renditions: { hd: video("avc1.42001f") } },
-			contributions: { missing: { broadcast: "./absent.hang" } },
+			include: { missing: { broadcast: "./absent.hang" } },
 		}),
 		follow: false,
 	});
 	const selection = new Effect();
 	try {
 		await settle();
-		const missing = source.contribution(selection, "missing");
+		const missing = source.include(selection, "missing");
 		const { value: request } = await requests.next();
 		expect(request?.path).toBe(Path.from("room/absent.hang"));
-		request?.reject(new Error("contribution unavailable"));
+		request?.reject(new Error("include unavailable"));
 		await settle();
-		// Like a rendition's reference, an unavailable contribution is offline, not an error.
+		// Like a rendition's reference, an unavailable include is offline, not an error.
 		expect(missing.out.active.peek()).toBeUndefined();
 		expect(missing.out.error.peek()).toBeUndefined();
 		expect(missing.out.status.peek()).toBe("offline");
@@ -138,7 +138,7 @@ it("reads an unavailable contribution as offline without touching the parent", a
 	}
 });
 
-it("reports a contribution outside the origin's scope as an error, leaving the parent live", async () => {
+it("reports an include outside the origin's scope as an error, leaving the parent live", async () => {
 	const origin = new Origin.Producer();
 	const scoped = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("room/*")]));
 	publish(scoped, "room/main.hang");
@@ -146,12 +146,12 @@ it("reports a contribution outside the origin's scope as an error, leaving the p
 		origin: scoped,
 		name: Path.from("room/main.hang"),
 		catalogFormat: "manual",
-		catalog: Catalog.RootSchema.parse({ contributions: { outside: { broadcast: "../other/extra.hang" } } }),
+		catalog: Catalog.RootSchema.parse({ include: { outside: { broadcast: "../other/extra.hang" } } }),
 		follow: false,
 	});
 	const owner = new Effect();
 	try {
-		const child = parent.contribution(owner, "outside");
+		const child = parent.include(owner, "outside");
 		await settle();
 		expect(child.out.active.peek()).toBeUndefined();
 		expect(child.out.error.peek()?.message).toContain("outside the origin scope");
@@ -163,12 +163,12 @@ it("reports a contribution outside the origin's scope as an error, leaving the p
 	}
 });
 
-it("tracks the contribution entry without reopening it on unrelated catalog updates", async () => {
+it("tracks the include entry without reopening it on unrelated catalog updates", async () => {
 	const origin = new Origin.Producer();
 	publish(origin, "room/main.hang");
 	const firstCatalog = publish(origin, "room/first.hang").createTrack(Catalog.TRACK);
 	publish(origin, "room/second.hang");
-	const catalog = new Signal(Catalog.RootSchema.parse({ contributions: { extra: { broadcast: "./first.hang" } } }));
+	const catalog = new Signal(Catalog.RootSchema.parse({ include: { extra: { broadcast: "./first.hang" } } }));
 	const parent = new Broadcast({
 		origin,
 		name: Path.from("room/main.hang"),
@@ -178,7 +178,7 @@ it("tracks the contribution entry without reopening it on unrelated catalog upda
 	});
 	const owner = new Effect();
 	try {
-		const child = parent.contribution(owner, "extra");
+		const child = parent.include(owner, "extra");
 		await settle();
 		const active = child.out.active.peek();
 		expect(active?.path).toBe(Path.from("room/first.hang"));
@@ -193,7 +193,7 @@ it("tracks the contribution entry without reopening it on unrelated catalog upda
 		);
 		catalog.set(
 			Catalog.RootSchema.parse({
-				contributions: { extra: { broadcast: "./first.hang" }, other: { broadcast: "./other.hang" } },
+				include: { extra: { broadcast: "./first.hang" }, other: { broadcast: "./other.hang" } },
 				metadata: "changed",
 			}),
 		);
@@ -202,7 +202,7 @@ it("tracks the contribution entry without reopening it on unrelated catalog upda
 		expect(withdrawals).toBe(0);
 
 		// A changed path is a different reference, so the child follows it.
-		catalog.set(Catalog.RootSchema.parse({ contributions: { extra: { broadcast: "./second.hang" } } }));
+		catalog.set(Catalog.RootSchema.parse({ include: { extra: { broadcast: "./second.hang" } } }));
 		await settle();
 		expect(child.out.active.peek()?.path).toBe(Path.from("room/second.hang"));
 
@@ -228,7 +228,7 @@ it("follows a restarted contributor only for an entry that names no instance", a
 		name: Path.from("room/main.hang"),
 		catalogFormat: "manual",
 		catalog: Catalog.RootSchema.parse({
-			contributions: {
+			include: {
 				following: { broadcast: "./extra.hang" },
 				pinned: { broadcast: "./extra.hang", instance: oldInstance },
 			},
@@ -236,8 +236,8 @@ it("follows a restarted contributor only for an entry that names no instance", a
 	});
 	const owner = new Effect();
 	try {
-		const following = parent.contribution(owner, "following");
-		const pinned = parent.contribution(owner, "pinned");
+		const following = parent.include(owner, "following");
+		const pinned = parent.include(owner, "pinned");
 		await settle();
 		expect(following.out.active.peek()?.instance).toBe(oldInstance);
 		expect(pinned.out.active.peek()?.instance).toBe(oldInstance);
@@ -258,7 +258,7 @@ it("follows a restarted contributor only for an entry that names no instance", a
 	}
 });
 
-it("pins the first instance of a contribution when not following announcements", async () => {
+it("pins the first instance of an include when not following announcements", async () => {
 	const origin = new Origin.Producer();
 	publish(origin, "room/main.hang");
 	const first = publish(origin, "room/extra.hang", Instance.random());
@@ -266,12 +266,12 @@ it("pins the first instance of a contribution when not following announcements",
 		origin,
 		name: Path.from("room/main.hang"),
 		catalogFormat: "manual",
-		catalog: Catalog.RootSchema.parse({ contributions: { extra: { broadcast: "./extra.hang" } } }),
+		catalog: Catalog.RootSchema.parse({ include: { extra: { broadcast: "./extra.hang" } } }),
 		follow: false,
 	});
 	const owner = new Effect();
 	try {
-		const child = parent.contribution(owner, "extra");
+		const child = parent.include(owner, "extra");
 		await settle();
 		const pinned = child.out.active.peek();
 		expect(pinned?.path).toBe(Path.from("room/extra.hang"));
@@ -290,7 +290,7 @@ it("pins the first instance of a contribution when not following announcements",
 	}
 });
 
-it("never reads a contribution of another instance, but reads a minted one", async () => {
+it("never reads an include of another instance, but reads a minted one", async () => {
 	const origin = new Origin.Producer();
 	publish(origin, "room/main.hang");
 	const served = Instance.random();
@@ -299,14 +299,14 @@ it("never reads a contribution of another instance, but reads a minted one", asy
 	// A route over a wire that carries no instance has one its session minted.
 	publish(origin, "room/plain.hang", Instance.minted());
 	const named = Instance.random();
-	const contributions = (instance: Instance.Valid) =>
+	const include = (instance: Instance.Valid) =>
 		Catalog.RootSchema.parse({
-			contributions: {
+			include: {
 				proven: { broadcast: "./proven.hang", instance },
 				plain: { broadcast: "./plain.hang", instance: named },
 			},
 		});
-	const catalog = new Signal(contributions(named));
+	const catalog = new Signal(include(named));
 	const parent = new Broadcast({
 		origin,
 		name: Path.from("room/main.hang"),
@@ -316,8 +316,8 @@ it("never reads a contribution of another instance, but reads a minted one", asy
 	});
 	const owner = new Effect();
 	try {
-		const refused = parent.contribution(owner, "proven");
-		const accepted = parent.contribution(owner, "plain");
+		const refused = parent.include(owner, "proven");
+		const accepted = parent.include(owner, "plain");
 		await quietly(settle);
 		expect(refused.out.active.peek()).toBeUndefined();
 		expect(refused.out.error.peek()).toBeUndefined();
@@ -327,7 +327,7 @@ it("never reads a contribution of another instance, but reads a minted one", asy
 		expect(accepted.out.active.peek()?.path).toBe(Path.from("room/plain.hang"));
 
 		// A catalog update naming the served instance admits the stream the request already holds.
-		catalog.set(contributions(served));
+		catalog.set(include(served));
 		await settle();
 		expect(refused.out.active.peek()?.instance).toBe(served);
 	} finally {
@@ -344,7 +344,7 @@ it("shares the parent's resolution, so a new instance checks the held handle", a
 	const extraCatalog = publish(origin, "room/extra.hang", served).createTrack(Catalog.TRACK);
 	const entries = (instance?: Instance.Valid) =>
 		Catalog.RootSchema.parse({
-			contributions: {
+			include: {
 				sibling: { broadcast: "./extra.hang", instance },
 				self: { broadcast: "./main.hang", instance },
 				empty: { broadcast: "", instance },
@@ -360,15 +360,15 @@ it("shares the parent's resolution, so a new instance checks the held handle", a
 	});
 	const owner = new Effect();
 	try {
-		const sibling = parent.contribution(owner, "sibling");
-		const self = parent.contribution(owner, "self");
+		const sibling = parent.include(owner, "sibling");
+		const self = parent.include(owner, "self");
 		await settle();
 		const held = sibling.out.active.peek();
 		expect(held?.instance).toBe(served);
 		// A self-reference is the parent's own handle, not a request of its own. An empty one is
 		// too, and is named like the parent, so its own references resolve against the same base.
 		expect(self.out.active.peek()).toBe(parent.out.active.peek());
-		const empty = parent.contribution(owner, "empty");
+		const empty = parent.include(owner, "empty");
 		await settle();
 		expect(empty.in.name.peek()).toBe(Path.from("room/main.hang"));
 		expect(empty.in.enabled.peek()).toBe(true);
