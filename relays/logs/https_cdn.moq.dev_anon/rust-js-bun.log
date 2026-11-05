@@ -2,20 +2,19 @@ https://cdn.moq.dev/anon connected via WebTransport
 https://cdn.moq.dev/anon negotiated ALPN: moq-lite-06
 announced: prefix=
 connected version=moq-lite-06
-announced: broadcast=alluno/comms/4defd109-b88c-4900-8c00-e409f1cb7e6e/b767c775-2ef2-492f-b8b6-d0827cce48d3/~b7fvh7my4bk0 active=true
+announced: broadcast=alluno/comms/4defd109-b88c-4900-8c00-e409f1cb7e6e/f83d734e-a180-4294-ad90-be4d09c3f5d5/~y733u84ncmiq active=true
 announced: broadcast=alluno/host/4defd109-b88c-4900-8c00-e409f1cb7e6e active=true
-announced: broadcast=iori-dev active=true
+announced: broadcast=blume-town-sp-node active=true
 announced: broadcast=lcb-6840218-7405.hang active=true
-announced: broadcast=sightline/tidal-kite-73/satanclaus-70c0/camera.hang active=true
+announced: broadcast=smoke-rust-5020-7739.hang active=true
+subscribe start: id=0 broadcast=smoke-rust-5020-7739.hang track=catalog.json
 announce: prefix=
-announced: broadcast=smoke-rust-4959-8078.hang active=true
-subscribe start: id=0 broadcast=smoke-rust-4959-8078.hang track=catalog.json
-subscribe ok: id=0 broadcast=smoke-rust-4959-8078.hang track=catalog.json
-subscribe start: id=1 broadcast=smoke-rust-4959-8078.hang track=0.avc3
-subscribe ok: id=1 broadcast=smoke-rust-4959-8078.hang track=0.avc3
-received 7230 bytes from smoke-rust-4959-8078.hang
-subscribe close: id=0 broadcast=smoke-rust-4959-8078.hang track=catalog.json
-subscribe close: id=1 broadcast=smoke-rust-4959-8078.hang track=0.avc3
+subscribe ok: id=0 broadcast=smoke-rust-5020-7739.hang track=catalog.json
+subscribe start: id=1 broadcast=smoke-rust-5020-7739.hang track=0.avc3
+subscribe ok: id=1 broadcast=smoke-rust-5020-7739.hang track=0.avc3
+received 6721 bytes from smoke-rust-5020-7739.hang
+subscribe close: id=0 broadcast=smoke-rust-5020-7739.hang track=catalog.json
+subscribe close: id=1 broadcast=smoke-rust-5020-7739.hang track=0.avc3
 broadcast discovery failed; broadcasts resolve on request only. WebTransportError {
   source: "session",
   streamErrorCode: null,
