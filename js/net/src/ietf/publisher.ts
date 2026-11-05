@@ -511,6 +511,7 @@ export class Publisher {
 				? broadcast.datagrams(msg.trackName)
 				: wireOf(broadcast).liveDatagrams(msg.trackName);
 			if (local) consumer?.setPriority(fromWire(msg.subscriberPriority));
+			else if (consumer) hooks.passiveDatagrams(consumer);
 			return consumer;
 		};
 		let datagrams = datagramOf();

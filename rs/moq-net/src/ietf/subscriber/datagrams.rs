@@ -6,12 +6,27 @@ use crate::datagram;
 pub(super) struct Requested {
 	this: Subscriber,
 	key: tracks::TrackKey,
+	id: std::sync::Arc<()>,
 	subscribing: track::Subscribing,
+	priority: i8,
 }
 
 impl Requested {
-	pub(super) fn new(this: Subscriber, key: tracks::TrackKey, track: track::Consumer, priority: i8) -> Self {
+	pub(super) fn new(
+		this: Subscriber,
+		key: tracks::TrackKey,
+		track: track::Consumer,
+		request: datagram::Request,
+	) -> Self {
+		let priority = request.priority().unwrap_or(0);
+		let id = std::sync::Arc::new(());
+		this.state
+			.lock()
+			.datagram_requests
+			.insert(key.clone(), (id.clone(), request));
 		Self {
+			id,
+			priority,
 			this,
 			key,
 			subscribing: track
@@ -20,22 +35,41 @@ impl Requested {
 		}
 	}
 	fn reject(&self, err: Error) {
-		if let Some(request) = self.this.state.lock().datagram_requests.remove(&self.key) {
-			request.reject(err);
+		let mut state = self.this.state.lock();
+		if let Entry::Occupied(entry) = state.datagram_requests.entry(self.key.clone())
+			&& std::sync::Arc::ptr_eq(&entry.get().0, &self.id)
+		{
+			entry.remove().1.reject(err);
 		}
 	}
 }
 impl kio::Task for Requested {
 	type Output = ();
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		{
+		let priority = {
 			let state = self.this.state.lock();
-			if let Some(request) = state.datagram_requests.get(&self.key)
+			if let Some((_, request)) = state.datagram_requests.get(&self.key)
 				&& request.poll_unused(waiter).is_ready()
 				&& request.close_unused()
 			{
 				drop(state);
 				self.reject(Error::Cancel);
+				return Poll::Ready(());
+			}
+			state
+				.datagram_requests
+				.get(&self.key)
+				.and_then(|(_, request)| request.priority())
+		};
+		if let Some(priority) = priority
+			&& priority != self.priority
+		{
+			self.priority = priority;
+			if let Err(err) = self
+				.subscribing
+				.update(track::Subscription::default().with_priority(priority))
+			{
+				self.reject(err);
 				return Poll::Ready(());
 			}
 		}
@@ -71,7 +105,7 @@ impl Shared {
 			.with_priority(track.info().priority);
 		let pending = this.state.lock().datagram_requests.remove(&key);
 		let producer = match pending {
-			Some(request) => request.accept(info),
+			Some((_, request)) => request.accept(info),
 			None => source.create_datagrams(key.1, info).ok()?,
 		};
 		Some(Self {

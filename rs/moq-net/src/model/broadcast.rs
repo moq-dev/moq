@@ -1156,7 +1156,7 @@ impl Consumer {
 			drop(state);
 			return Some(source.datagrams_live(name)?.with_stats(self.stats.clone()));
 		}
-		state.datagrams.get(name)?.try_consume(self.stats.clone())
+		state.datagrams.get(name)?.observe(self.stats.clone())
 	}
 
 	/// Whether datagram lookups reach a local producer or handler, rather than a session that

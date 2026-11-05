@@ -158,3 +158,68 @@ test("a datagram track round-trips over moq-transport", async () => {
 		source.close();
 	}
 });
+
+// Either model kind can arrive first; the relay must retain one upstream request and
+// route each payload only to readers of its kind, even after one reader leaves.
+test("a relay shares one IETF subscription across stream and datagram readers", async () => {
+	for (const datagramFirst of [false, true]) {
+		const source = new Origin();
+		const relay = new Origin();
+		const path = Path.from("shared");
+		const publication = source.createBroadcast(path);
+		const track = publication.broadcast.createTrack("audio", { timescale: Timescale.MILLI });
+		const datagrams = publication.broadcast.createDatagrams("audio", { timescale: Timescale.MICRO });
+		publication.announce();
+		const upstream = createMockTransportPair(ALPN.DRAFT_18);
+		const url = new URL("https://localhost/shared");
+		const peers = await Promise.all([
+			connect({ url, transport: upstream.client }),
+			accept({ url, transport: upstream.server, publish: source.consume() }),
+		]);
+		const original = wireOf(peers[0]).consume(path);
+		const requests = relay.requestsRoute(path);
+		const cursor = requests.requested();
+		const routing = (async () => {
+			for await (const request of cursor) request.serve(original);
+		})();
+		const downstream = createMockTransportPair(ALPN.DRAFT_22);
+		const viewers = await Promise.all([
+			connect({ url, transport: downstream.client }),
+			accept({ url, transport: downstream.server, publish: relay.consume() }),
+		]);
+		const remote = wireOf(viewers[0]).consume(path);
+		const stream = datagramFirst ? undefined : remote.track("audio").subscribe();
+		if (stream) await stream.info();
+		const streamCount = stream && upstream.client.sendStreams.bidi.length;
+		const reader = remote.datagrams("audio");
+		await reader.info();
+		const before = streamCount ?? upstream.client.sendStreams.bidi.length;
+		const subscriber = stream ?? remote.track("audio").subscribe();
+		await subscriber.info();
+		expect(upstream.client.sendStreams.bidi.length).toBe(before);
+		try {
+			datagrams.insert({ sequence: 4n, timestamp: Timestamp.fromMillis(9), payload: Uint8Array.of(7) });
+			const group = track.appendGroup();
+			group.writeFrame({ timestamp: Timestamp.fromMillis(10), payload: Uint8Array.of(8) });
+			group.finish();
+			const received = await reader.recv();
+			expect(received?.payload).toEqual(Uint8Array.of(7));
+			expect(received?.timestamp?.asMillis()).toBe(9);
+			const receivedGroup = await subscriber.recvGroup();
+			expect((await receivedGroup?.readFrame())?.payload).toEqual(Uint8Array.of(8));
+			receivedGroup?.close();
+			subscriber.close();
+			datagrams.insert({ sequence: 5n, timestamp: Timestamp.fromMillis(11), payload: Uint8Array.of(9) });
+			expect((await reader.recv())?.payload).toEqual(Uint8Array.of(9));
+		} finally {
+			subscriber.close();
+			reader.close();
+			for (const peer of viewers) await peer.close();
+			requests.close();
+			await routing;
+			for (const peer of peers) await peer.close();
+			relay.close();
+			source.close();
+		}
+	}
+});

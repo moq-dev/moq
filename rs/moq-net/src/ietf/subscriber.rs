@@ -192,7 +192,7 @@ fn retire_track_alias(aliases: &TrackAliases, alias: u64, request_id: RequestId)
 
 #[derive(Default)]
 struct State {
-	datagram_requests: HashMap<tracks::TrackKey, crate::datagram::Request>,
+	datagram_requests: HashMap<tracks::TrackKey, (std::sync::Arc<()>, crate::datagram::Request)>,
 	// Each active subscription
 	subscribes: HashMap<RequestId, TrackState>,
 
@@ -224,7 +224,7 @@ impl State {
 	/// Active receive tasks abort their own groups. Abort any head waiting for its
 	/// tail here, along with the track. Ordinary unsubscribe removes its entry.
 	fn abort(&mut self, err: &Error) {
-		for (_, request) in self.datagram_requests.drain() {
+		for (_, (_, request)) in self.datagram_requests.drain() {
 			request.reject(err.clone());
 		}
 		for (_, mut track) in self.subscribes.drain() {
@@ -420,9 +420,6 @@ impl Fill {
 
 	/// [`Self::cancel`], with `err` as the reason the head was cut short.
 	fn abort(&mut self, err: Error) {
-		for (_, request) in self.datagram_requests.drain() {
-			request.reject(err.clone());
-		}
 		match std::mem::replace(self, Fill::Done) {
 			Fill::Ready { producer, .. } => {
 				let _ = producer.abort(err);
@@ -3300,15 +3297,16 @@ impl RunBroadcast {
 			.poll_listing(&self.path, &self.lister, &mut self.listening, waiter);
 		loop {
 			while let Poll::Ready(Ok(request)) = self.datagrams.poll_requested(waiter) {
-				if self.this.session.max_datagram_size() == 0 { request.reject(Error::Unsupported); continue; }
+				if self.this.session.max_datagram_size() == 0 {
+					request.reject(Error::Unsupported);
+					continue;
+				}
 				let key = (self.path.clone(), request.name().to_owned());
 				let consumer = self.source.consume();
 				match consumer.track(request.name()) {
 					Ok(track) => {
-						let priority = request.priority().unwrap_or(0);
-						self.this.state.lock().datagram_requests.insert(key.clone(), request);
 						self.subscribes
-							.push(Requested::new(self.this.clone(), key, track, priority));
+							.push(Requested::new(self.this.clone(), key, track, request));
 					}
 					Err(err) => request.reject(err),
 				}
@@ -4392,7 +4390,9 @@ impl SubscribeOnce {
 			true => track.start_at(largest.map_or(0, |largest| largest.group)),
 			false => track.start_at(self.start),
 		};
-		if this.session.max_datagram_size() > 0 && let Some(source) = &self.source {
+		if this.session.max_datagram_size() > 0
+			&& let Some(source) = &self.source
+		{
 			self.shared = Shared::new(this, source, self.key.clone(), &track);
 		}
 		if let Some(staged) = staged {
@@ -5769,14 +5769,7 @@ impl Subscriber {
 		let timestamp = match &datagram.properties {
 			Some(raw) => {
 				let bytes = bytes::Bytes::copy_from_slice(raw);
-				match super::object::read(&bytes, self.version, timescale) {
-					Ok(decoded) => decoded.timestamp,
-					Err(err) if is_protocol_violation(&err) => return Err(err),
-					Err(err) => {
-						tracing::debug!(%err, "dropping a datagram whose properties do not decode");
-						return Ok(());
-					}
-				}
+				super::object::read(&bytes, self.version, timescale)?.timestamp
 			}
 			None => None,
 		};

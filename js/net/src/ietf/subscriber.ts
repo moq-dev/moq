@@ -103,18 +103,8 @@ type Subscription = {
 	fetchIds: bigint[];
 };
 
-/** A stream subscription's alias binding. The object identity is what retirement matches. */
-type TrackBinding = { kind: "track"; subscription: Subscription };
-
-/** A datagram subscription's alias binding. Group streams on it are dropped, not written. */
-type DatagramBinding = {
-	kind: "datagram";
-	producer: datagram.Producer;
-	timescale?: Timescale;
-	logged: boolean;
-};
-
-type Binding = TrackBinding | DatagramBinding;
+/** Both model kinds share this alias; group and datagram receive paths route to their own producer. */
+type Binding = { kind: "track"; subscription: Subscription };
 
 // Out-parameter for #openSubscribe: lets the caller observe partial progress
 // (stream opened, trackAlias registered) so it can clean up on timeout even
@@ -1886,18 +1876,6 @@ export class Subscriber {
 			return;
 		}
 
-		// A datagram subscription keeps only OBJECT_DATAGRAM. A group on it is logged once
-		// and stopped; the session stays up.
-		if (binding.kind === "datagram") {
-			if (!binding.logged) {
-				binding.logged = true;
-				console.debug(
-					`dropping a group stream on a datagram track's subscription: alias=${group.trackAlias} group=${group.groupId}`,
-				);
-			}
-			stream.stop(new Error("dropping a group stream on a datagram track's subscription"));
-			return;
-		}
 		const subscription = binding.subscription;
 
 		const { track, tail } = subscription;
@@ -2221,9 +2199,8 @@ export class Subscriber {
 	 * Route one OBJECT_DATAGRAM.
 	 *
 	 * An undefined Object Status is a protocol violation on every subscription kind.
-	 * A defined status is not a payload and does not end the track. A datagram subscription
-	 * keeps object ID 0. Anything else is dropped, including every datagram on a stream
-	 * subscription.
+	 * A defined status is not a payload and does not end the track. Only object ID 0
+	 * reaches the datagram model; the stream model never receives datagrams.
 	 */
 	async #recvDatagram(data: Uint8Array): Promise<void> {
 		const datagram = await ObjectDatagram.decode(data, this.#session.version);
@@ -2232,13 +2209,10 @@ export class Subscriber {
 		}
 
 		const alias = this.#aliases.peek(datagram.trackAlias);
-		const binding =
-			alias?.kind === "track"
-				? alias.subscription.datagrams && {
-						producer: alias.subscription.datagrams.producer,
-						timescale: alias.subscription.timescale,
-					}
-				: alias;
+		const binding = alias?.subscription.datagrams && {
+			producer: alias.subscription.datagrams.producer,
+			timescale: alias.subscription.timescale,
+		};
 		if (!binding) {
 			console.debug(`dropping a datagram for an unknown alias: alias=${datagram.trackAlias}`);
 			return;
@@ -2258,19 +2232,10 @@ export class Subscriber {
 
 		let timestamp: Timestamp | undefined;
 		if (datagram.properties) {
-			try {
-				// Walk the block either way: a malformed property is a protocol violation on an
-				// untimed track too. Only a track that declared a timescale keeps the timestamp.
-				const decoded = await new Reader(undefined, datagram.properties, this.#session.version).decode(
-					(cursor) => decodeObjectTime(cursor, binding.timescale ?? Timescale.SECOND),
-				);
-				if (binding.timescale !== undefined) timestamp = decoded;
-			} catch (err) {
-				const cause = error(err);
-				if (cause instanceof ProtocolViolation) throw cause;
-				console.debug(`dropping a datagram whose properties do not decode: ${reason(cause)}`);
-				return;
-			}
+			const decoded = await new Reader(undefined, datagram.properties, this.#session.version).decode((cursor) =>
+				decodeObjectTime(cursor, binding.timescale ?? Timescale.SECOND),
+			);
+			if (binding.timescale !== undefined) timestamp = decoded;
 		}
 		if (binding.timescale !== undefined && timestamp === undefined) {
 			console.debug(
@@ -2317,7 +2282,7 @@ export class Subscriber {
 
 	/** Ask through the stream model's shared lookup, so either kind opens the same SUBSCRIBE. */
 	async #runDatagram(source: broadcast.Consumer, request: datagram.Request, valid?: AbortSignal): Promise<void> {
-		if (DatagramStream.maxDatagramSize(this.#quic) === 0) {
+		if (!this.#quic || DatagramStream.maxDatagramSize(this.#quic) === 0) {
 			request.reject(new Error("transport does not support datagrams"));
 			return;
 		}
@@ -2328,6 +2293,9 @@ export class Subscriber {
 		}
 		pending.set(request.name, request);
 		const subscriber = wireOf(source).subscribe(request.name, { priority: request.priority.peek() ?? 0 });
+		const dispose = request.priority.subscribe((priority) => {
+			if (priority !== undefined) subscriber.update({ priority });
+		});
 		try {
 			await untilAborted(
 				race([
@@ -2341,6 +2309,7 @@ export class Subscriber {
 		} catch (err) {
 			if (pending.get(request.name) === request) request.reject(error(err));
 		} finally {
+			dispose();
 			subscriber.close();
 			if (pending.get(request.name) === request) pending.delete(request.name);
 		}
