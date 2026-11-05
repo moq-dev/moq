@@ -1887,12 +1887,14 @@ where
 
 				match end {
 					End::Fetch(request) => {
-						let fetch = self.clone().run_group_fetch(
-							broadcast_path.to_owned(),
-							track_name.clone(),
-							request,
-							timescale,
-						);
+						let subscriber = self.clone();
+						let broadcast = broadcast_path.to_owned();
+						let name = track_name.clone();
+						let fetch = async move {
+							if let Some(request) = subscriber.wait_group_head(request_id, request).await {
+								subscriber.run_group_fetch(broadcast, name, request, timescale).await;
+							}
+						};
 						group_fetches.push(fetch);
 					}
 					End::Unused => match track.abort_unused(Error::Cancel) {
@@ -1927,6 +1929,7 @@ where
 										{
 											fetch_done = true;
 										}
+										let _ = group_fetches.poll(waiter);
 										poll_settled(&mut settle, waiter, &fill, count)
 									})
 									.await;
@@ -2613,7 +2616,7 @@ where
 	///
 	/// Waiting is what keeps the two streams from interleaving into one producer. It ends
 	/// with the subscription, so a publisher that promises a fill and never delivers one
-	/// costs this stream and nothing else. Meanwhile this stream stops holding the
+	/// costs this group and nothing else. Meanwhile this stream stops holding the
 	/// subscription's end open: the fill's own stream holds it if its header arrived, and
 	/// the grace gives up on it if not.
 	async fn claim_fill(
@@ -2998,6 +3001,40 @@ where
 		}
 		frame.finish()?;
 		Ok(true)
+	}
+
+	/// Wait for the subscription's own joined head before FETCHing that group again.
+	/// Racing the head can cache the group first and refuse the live tail that ends it.
+	/// Older history still fetches immediately; a settled fill leaves any remaining miss
+	/// to a FETCH, while the cache answers a head that landed.
+	async fn wait_group_head(&self, subscribe_id: RequestId, mut request: group::Request) -> Option<group::Request> {
+		let needed = kio::wait(|waiter| {
+			if request.poll_resolved(waiter).is_ready() || request.poll_unused(waiter).is_ready() {
+				return Poll::Ready(false);
+			}
+
+			let state = self.state.lock();
+			let Some(held) = state.subscribes.get(&subscribe_id) else {
+				return Poll::Ready(true);
+			};
+			if held.largest.is_none_or(|largest| largest.group != request.sequence()) {
+				return Poll::Ready(true);
+			}
+			// Register under the same lock as the read, so the head settling cannot miss
+			// waking this request.
+			match held.fill.poll_ref(waiter, |fill| match **fill {
+				Fill::Requested | Fill::Serving(_) | Fill::Active => Poll::Pending,
+				Fill::Ready { .. } | Fill::Done => Poll::Ready(()),
+			}) {
+				Poll::Pending => Poll::Pending,
+				Poll::Ready(_) => Poll::Ready(true),
+			}
+		})
+		.await;
+		if !needed || request.poll_resolved(&kio::Waiter::noop()).is_ready() {
+			return None;
+		}
+		Some(request)
 	}
 
 	/// Fetch a group from the publisher to fill a cache miss, with a standalone (or
@@ -7713,7 +7750,10 @@ mod joining_fetch_tests {
 
 	impl JoinRun {
 		async fn start(version: Version, start: Option<track::Position>, ok: Vec<u8>, fetch: Vec<u8>) -> Self {
-			let session = ScriptedSession::per_stream(vec![ok, fetch]);
+			Self::subscribe(version, start, ScriptedSession::per_stream(vec![ok, fetch])).await
+		}
+
+		async fn subscribe(version: Version, start: Option<track::Position>, session: ScriptedSession) -> Self {
 			let (tasks, _task_set) = crate::util::TaskSet::new();
 			let subscriber = Subscriber::new(
 				crate::time::Clock::tokio(),
@@ -7851,6 +7891,203 @@ mod joining_fetch_tests {
 				"{version}: the subscription continues live"
 			);
 		}
+	}
+
+	/// A reader missing the head of the group the subscription joined waits for the
+	/// subscription's own fill, which is bringing that head. A cache-miss FETCH racing it
+	/// could cache the group first, refusing the tail that ends it for live readers. Only a
+	/// fill that settled without the head leaves the miss to a FETCH.
+	#[tokio::test(start_paused = true)]
+	async fn a_miss_waits_for_the_subscriptions_own_fill() {
+		let version = Version::Draft22;
+		let largest = Some(ietf::Location { group: 4, object: 1 });
+		let run = JoinRun::start(version, None, subscribe_ok(version, largest), fetch_ok(version)).await;
+		let fetches = || {
+			decode_messages(&run.session.log, version)
+				.iter()
+				.filter(|(id, _)| *id == ietf::Fetch::ID)
+				.count()
+		};
+		assert!(run.fill_outstanding(), "the subscription asked for a fill");
+
+		let mut fetch = Box::pin(run._hold.1.fetch_group(4, None));
+		assert!(futures::poll!(fetch.as_mut()).is_pending());
+		settle().await;
+		assert_eq!(fetches(), 0, "the miss waits for the subscription's fill");
+
+		// The fill fails, so the head is the miss's to fetch after all.
+		let fill = run
+			.subscriber
+			.state
+			.lock()
+			.subscribes
+			.values()
+			.next()
+			.unwrap()
+			.fill
+			.clone();
+		*fill.write().ok().unwrap() = Fill::Done;
+		settle().await;
+		assert_eq!(fetches(), 1, "a settled fill leaves the miss to a FETCH");
+	}
+
+	/// The head landing ends the wait, and the cache answers the miss: no FETCH duplicates
+	/// the group the fill wrote.
+	#[tokio::test(start_paused = true)]
+	async fn a_miss_is_answered_by_the_head_its_fill_lands() {
+		let version = Version::Draft22;
+		let largest = Some(ietf::Location { group: 4, object: 1 });
+		let run = JoinRun::start(version, None, subscribe_ok(version, largest), fetch_ok(version)).await;
+		let fetches = || {
+			decode_messages(&run.session.log, version)
+				.iter()
+				.filter(|(id, _)| *id == ietf::Fetch::ID)
+				.count()
+		};
+
+		let mut fetch = Box::pin(run._hold.1.fetch_group(4, None));
+		assert!(futures::poll!(fetch.as_mut()).is_pending());
+		settle().await;
+		assert_eq!(fetches(), 0, "the miss waits for the subscription's fill");
+
+		// The fill writes the head, as `run_fill` does.
+		let (mut track, fill) = {
+			let state = run.subscriber.state.lock();
+			let held = state.subscribes.values().next().unwrap();
+			(held.producer.clone().unwrap(), held.fill.clone())
+		};
+		let mut head = None;
+		open_fill_group(&mut track, &mut head, 4).unwrap();
+		let (sequence, next, producer) = head.unwrap();
+		*fill.write().ok().unwrap() = Fill::Ready {
+			sequence,
+			next,
+			producer: producer.into_inner(),
+		};
+		settle().await;
+		assert_eq!(fetches(), 0, "the cache answers the miss");
+		let Poll::Ready(Ok(group)) = futures::poll!(fetch.as_mut()) else {
+			panic!("the miss must resolve from the cache");
+		};
+		assert_eq!(group.sequence, 4);
+	}
+
+	/// Only the joined group waits for the subscription's fill. A head that never arrives
+	/// leaves its fill outstanding for as long as the subscription lasts, which must not hold
+	/// back older groups it brings nothing for.
+	#[tokio::test(start_paused = true)]
+	async fn a_miss_for_older_history_skips_the_fill_wait() {
+		let version = Version::Draft22;
+		let largest = Some(ietf::Location { group: 4, object: 1 });
+		let run = JoinRun::start(version, None, subscribe_ok(version, largest), fetch_ok(version)).await;
+		let fetches = || {
+			decode_messages(&run.session.log, version)
+				.iter()
+				.filter(|(id, _)| *id == ietf::Fetch::ID)
+				.count()
+		};
+		assert!(run.fill_outstanding(), "the subscription asked for a fill");
+
+		let mut fetch = Box::pin(run._hold.1.fetch_group(3, None));
+		assert!(futures::poll!(fetch.as_mut()).is_pending());
+		settle().await;
+		assert_eq!(fetches(), 1, "group 3 is fetched without waiting for group 4's head");
+	}
+
+	/// A failed head still permits a cache-miss FETCH while PUBLISH_DONE waits for its
+	/// reordered data streams, rather than leaving that request unpolled until teardown.
+	#[tokio::test(start_paused = true)]
+	async fn a_settled_head_wait_fetches_during_publish_done_grace() {
+		let version = Version::Draft22;
+		let largest = Some(ietf::Location { group: 4, object: 1 });
+		let run = JoinRun::subscribe(version, None, ScriptedSession::new(subscribe_ok(version, largest))).await;
+		let fetches = || {
+			decode_messages(&run.session.log, version)
+				.iter()
+				.filter(|(id, _)| *id == ietf::Fetch::ID)
+				.count()
+		};
+		let _fetch = run._hold.1.fetch_group(4, None);
+		settle().await;
+		assert_eq!(fetches(), 0, "the miss waits for the subscription's fill");
+		let fill = run
+			.subscriber
+			.state
+			.lock()
+			.subscribes
+			.values()
+			.next()
+			.unwrap()
+			.fill
+			.clone();
+
+		run.session.push(&message_bytes(
+			ietf::PublishDone::ID,
+			&ietf::PublishDone {
+				request_id: None,
+				status_code: ietf::PublishDoneStatus::TrackEnded.code(version),
+				stream_count: 0,
+				reason_phrase: "done".into(),
+			},
+			version,
+		));
+		// The scripted reader needs an explicit wake after push. Starting the head
+		// wakes its parked miss, so the driver reads PUBLISH_DONE and enters the grace.
+		*fill.write().ok().unwrap() = Fill::Active;
+		settle().await;
+		assert!(!run.serving.is_finished());
+
+		*fill.write().ok().unwrap() = Fill::Done;
+		settle().await;
+		assert_eq!(fetches(), 1, "a settled head permits a FETCH during the grace");
+	}
+
+	/// Withdrawing the last reader releases a pending head wait without a FETCH.
+	#[tokio::test(start_paused = true)]
+	async fn a_head_wait_ends_when_its_reader_leaves() {
+		let version = Version::Draft22;
+		let largest = Some(ietf::Location { group: 4, object: 1 });
+		let run = JoinRun::start(version, None, subscribe_ok(version, largest), fetch_ok(version)).await;
+		let (id, track) = {
+			let state = run.subscriber.state.lock();
+			let (id, held) = state.subscribes.iter().next().unwrap();
+			(*id, held.producer.clone().unwrap())
+		};
+		let dynamic = track.dynamic();
+		let fetch = run._hold.1.fetch_group(4, None);
+		let request = dynamic.requested_group().await.unwrap();
+		let mut waiting = Box::pin(run.subscriber.wait_group_head(id, request));
+		assert!(futures::poll!(waiting.as_mut()).is_pending());
+
+		drop(fetch);
+		assert!(matches!(futures::poll!(waiting.as_mut()), Poll::Ready(None)));
+		assert!(dynamic.poll_requested_group(&kio::Waiter::noop()).is_pending());
+		assert!(run.fill_outstanding(), "cancelling a miss does not cancel the join");
+	}
+
+	/// Aborting the track releases a pending head wait with the track's error.
+	#[tokio::test(start_paused = true)]
+	async fn a_head_wait_ends_when_its_track_aborts() {
+		let version = Version::Draft22;
+		let largest = Some(ietf::Location { group: 4, object: 1 });
+		let run = JoinRun::start(version, None, subscribe_ok(version, largest), fetch_ok(version)).await;
+		let (id, track) = {
+			let state = run.subscriber.state.lock();
+			let (id, held) = state.subscribes.iter().next().unwrap();
+			(*id, held.producer.clone().unwrap())
+		};
+		let dynamic = track.dynamic();
+		let mut fetch = Box::pin(run._hold.1.fetch_group(4, None));
+		let request = dynamic.requested_group().await.unwrap();
+		let mut waiting = Box::pin(run.subscriber.wait_group_head(id, request));
+		assert!(futures::poll!(waiting.as_mut()).is_pending());
+
+		track.abort(Error::Cancel).unwrap();
+		assert!(matches!(futures::poll!(waiting.as_mut()), Poll::Ready(None)));
+		assert!(matches!(
+			futures::poll!(fetch.as_mut()),
+			Poll::Ready(Err(Error::Cancel))
+		));
 	}
 
 	/// A frame-level start is refused before SUBSCRIBE is written, rather than rounded down.

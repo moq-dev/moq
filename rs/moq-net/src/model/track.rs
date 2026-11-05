@@ -3210,6 +3210,18 @@ impl group::Request {
 		}
 	}
 
+	/// Ready once the cache or a terminal track state answers this request.
+	pub(crate) fn poll_resolved(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		let _ = ready!(self.state.poll_ref(waiter, |state| {
+			state.poll_fetch_cached(self.sequence, self.frame_start)
+		}));
+		// Readers check the track before the result channel, including on its close.
+		// They already have an answer, so retire the attempt without rejecting them.
+		self.done = true;
+		self.remove();
+		Poll::Ready(())
+	}
+
 	/// Poll for the request becoming unused (every waiting [`Consumer::fetch_group`]
 	/// dropped), so a handler can stop serving and drop the request.
 	///
