@@ -598,6 +598,23 @@ describe("declared end", () => {
 		expect(buffer.underruns).toBe(1);
 	});
 
+	// The declared silence between them must not count toward the live band and push the unplayed
+	// tail out; once the tail has played, the band catches up by skipping the silence instead.
+	it("keeps the end's tail when the next utterance starts after a gap", () => {
+		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 40 as Milli });
+		write(buffer, 0 as Milli, 40, { channels: 1, value: 1 });
+		expect(read(buffer, 20, 1)[0].length).toBe(20);
+		buffer.end(Micro(40_000));
+		buffer.next();
+
+		write(buffer, 100 as Milli, 20, { channels: 1, value: 2 });
+		expect([...read(buffer, 20, 1)[0]]).toEqual(Array(20).fill(1));
+
+		write(buffer, 120 as Milli, 20, { channels: 1, value: 2 });
+		expect([...read(buffer, 40, 1)[0]]).toEqual(Array(40).fill(2));
+		expect(buffer.underruns).toBe(0);
+	});
+
 	it("re-anchors the next utterance once the end's audio has played out", () => {
 		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 20 as Milli });
 		write(buffer, 0 as Milli, 20, { channels: 1 });

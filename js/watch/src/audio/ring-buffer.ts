@@ -15,6 +15,9 @@ export class AudioRingBuffer {
 
 	// Where the publisher declared its audio ends, as a sample index, until the next reset.
 	#end?: number;
+	// That end once the next utterance follows it while its audio still plays. The silence between
+	// them is declared, so it must not count toward the live band and push the unplayed tail out.
+	#tail?: number;
 	// Whether the playhead ran out at a declared end and nothing has played since: intentional
 	// silence, which is no underrun and survives the reset that re-anchors the next utterance.
 	#silent = false;
@@ -162,9 +165,12 @@ export class AudioRingBuffer {
 		// consuming, so only the hard capacity applies; the band would throw away the very audio the
 		// refill is accumulating. Buffered mode plays through everything, so it is capacity-bound too.
 		const playing = !this.#stalled && !this.#buffered;
-		const limit = playing ? Math.min(this.#latencySamples + this.#chunk, this.capacity) : this.capacity;
+		// Until the tail before a declared silence has played, only the capacity bounds the ring; the
+		// band then catches up by skipping the silence.
+		const band = playing && (this.#tail === undefined || this.#readIndex >= this.#tail);
+		const limit = band ? Math.min(this.#latencySamples + this.#chunk, this.capacity) : this.capacity;
 		if (end - this.#readIndex > limit) {
-			this.#readIndex = end - (playing ? Math.min(this.#latencySamples, this.capacity) : this.capacity);
+			this.#readIndex = end - (band ? Math.min(this.#latencySamples, this.capacity) : this.capacity);
 		}
 
 		// Fill gaps with zeros if there's a discontinuity
@@ -245,8 +251,12 @@ export class AudioRingBuffer {
 	 * into the next utterance on the same timeline, dropping nothing.
 	 */
 	next(): void {
-		if (!this.#anchored || this.length <= 0) this.reset();
-		else this.#end = undefined;
+		if (!this.#anchored || this.length <= 0) {
+			this.reset();
+			return;
+		}
+		this.#tail = this.#end;
+		this.#end = undefined;
 	}
 
 	// Flush all buffered samples and re-stall, ready to anchor the next utterance.
@@ -257,6 +267,7 @@ export class AudioRingBuffer {
 		this.#parked = false;
 		this.#anchored = false;
 		this.#end = undefined;
+		this.#tail = undefined;
 	}
 
 	read(output: Float32Array[]): number {
