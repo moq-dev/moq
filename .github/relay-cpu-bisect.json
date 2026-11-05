@@ -7991,5 +7991,36 @@
 	],
 	"notes": [
 		"nixos2:run.cAVCAV (in-tree qmux and receive leases against their parents) was stopped after one round when other agents started fuzzing and compiling there; its round-1 cells (qmux 116k to 122k, leases 130k to 132k) are not conclusive and are not used."
-	]
+	],
+	"relay_object_batch": {
+		"artifact": "run.Qn1sqT",
+		"command": "just bench-fanout '' group '1 8 64'",
+		"metric": "user instructions per delivered 512-frame group, relay poll_read_objects, capacity 16",
+		"cells": [
+			{
+				"label": "current",
+				"revision": "531c52d90a72a73c38d88d63c4315bfa36143f65",
+				"scenario": "group",
+				"subscribers": 1,
+				"cycles": 2000,
+				"per_group": 144907.2155
+			},
+			{
+				"label": "current",
+				"revision": "531c52d90a72a73c38d88d63c4315bfa36143f65",
+				"scenario": "group",
+				"subscribers": 8,
+				"cycles": 250,
+				"per_group": 144901.0835
+			},
+			{
+				"label": "current",
+				"revision": "531c52d90a72a73c38d88d63c4315bfa36143f65",
+				"scenario": "group",
+				"subscribers": 64,
+				"cycles": 32,
+				"per_group": 144900.27734375
+			}
+		]
+	}
 }

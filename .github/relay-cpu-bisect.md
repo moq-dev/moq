@@ -200,6 +200,8 @@ The +15.3% matches the wall-clock report. Nine other candidates between pacing a
 
 The counts above used the whole-frame batch reader before the maintainer made it private. `group_relay_frames` and the `group` scenario now use the relay's `poll_read_objects` through the hidden `fuzz::ObjectBatch` helper, retaining object metadata. These historical counts do not measure that revised harness. Pacing's isolated 2.0% cost was accepted and its dedicated quest removed.
 
+The revised object-batch harness at [531c52d90a](https://github.com/moq-dev/moq/commit/531c52d90a72a73c38d88d63c4315bfa36143f65) measures 144,907, 144,901, and 144,900 instructions per drained group at 1, 8, and 64 subscribers (`just bench-fanout "" group "1 8 64"`, run Qn1sqT). This is the new harness's baseline, with no historical comparison.
+
 ## Validation
 
 Every count, delivery estimate, loss figure, and host load cited here is in [the evidence](relay-cpu-bisect.json), keyed by run artifact. Raw captures (`perf.data`, folded stacks, reports) stay in the measuring checkout's ignored `.tmp/bench/`; the per-function figures for public ingest are recorded with run YxLYgw.
