@@ -335,7 +335,10 @@ impl Consumer {
 					let first = !std::mem::replace(&mut self.started, true);
 					// A later group after a declared end comes from a fresh encoder; the end's
 					// own group carries the stopped encoder's final packets, trimmed below.
+					// Those packets end the speech before the silence, so only this frame
+					// tells the estimator the silence it measures across was declared.
 					if self.end.is_some() && group != self.end_group {
+						self.target.end();
 						self.restart()?;
 					}
 					// Nothing precedes group 0, and a group delivers from its frame 0 or not at
@@ -2224,7 +2227,16 @@ mod tests {
 
 		let payload: Bytes = vec![0u8; samples * size_of::<f32>()].into();
 		let mut series = Vec::with_capacity(case.arrival.len());
-		for (&arrival, &media) in case.arrival.iter().zip(&case.media) {
+		for (index, (&arrival, &media)) in case.arrival.iter().zip(&case.media).enumerate() {
+			// The marker goes out as the utterance stops, so it is read during the silence
+			// rather than alongside what resumes it.
+			if case.ends.contains(&index) {
+				producer.discontinuity().unwrap();
+				match consumer.read().await.unwrap() {
+					Some(Read::End { .. }) => {}
+					other => panic!("packet {index} is preceded by {other:?}, not its end"),
+				}
+			}
 			CLOCK.set(Some(origin + duration(arrival)));
 			producer
 				.write(moq_mux::container::Frame {
@@ -2250,7 +2262,8 @@ mod tests {
 	/// container hands a packet over, media from its timestamp, and the frame term
 	/// from what the codec decoded. `reorder` and `backlog` are left to the
 	/// estimator's own test, since the container refuses a timestamp that runs
-	/// backwards.
+	/// backwards. `silence` publishes a discontinuity marker ahead of each frame its
+	/// `ends` lists, so the consumer has to find the declared end on its own.
 	#[tokio::test]
 	async fn the_decode_path_conforms_to_the_corpus() {
 		for name in [
@@ -2260,6 +2273,7 @@ mod tests {
 			"flush",
 			"idle",
 			"paced",
+			"silence",
 			"spike",
 			"tunein",
 		] {
