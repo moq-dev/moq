@@ -80,7 +80,6 @@ mirror, if a caller outside moq-net needs it; otherwise none. Wire: none.
 ## Required
 
 - [Drop set](/quest/m1/drop-set.md) - its per-cursor runs and their reasons are what this bounds; its PR, [moq-dev/moq#7670](https://github.com/moq-dev/moq/pull/7670), rewrites the same recording paths
-- [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - its PR, [moq-dev/moq#7872](https://github.com/moq-dev/moq/pull/7872), makes the start skip and recovery non-permanent, the rule this generalizes
 
 ## Related
 
