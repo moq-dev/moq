@@ -221,8 +221,10 @@ mod subscription {
 			.produce()
 			.create_track("data", moq_net::track::Info::default())
 			.unwrap();
-		let mut config = Config::default();
-		config.priority = 5;
+		let config = Config {
+			priority: 5,
+			..Default::default()
+		};
 		let _consumer = Consumer::<serde_json::Value>::new(track.consume(), config);
 		let subscription = track.subscription().expect("the consumer subscribed");
 		assert_eq!(subscription.priority, 5);

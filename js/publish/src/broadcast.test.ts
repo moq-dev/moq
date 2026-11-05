@@ -117,19 +117,18 @@ test("shared Rust stats names survive the publisher's report builder", async () 
 		await settle();
 		const net = broadcast.net.peek();
 		if (!net) throw new Error("expected a network producer");
-		const subscriber = net.track(Broadcast.STATS_TRACK).subscribe();
+		const consumer = new Json.Snapshot.Consumer<Stats.Snapshot>({
+			track: net.track(Broadcast.STATS_TRACK),
+			schema: Stats.SnapshotSchema,
+		});
 		try {
-			const consumer = new Json.Snapshot.Consumer<Stats.Snapshot>({
-				track: subscriber,
-				schema: Stats.SnapshotSchema,
-			});
 			await settle();
 			await clock.advance(Nano.fromMilli(Milli(1000)));
 			const reported = (await consumer.latest())?.value.renditions ?? {};
 			expect(Object.keys(reported).sort()).toEqual(Object.keys(fixture.renditions ?? {}).sort());
 			expect(reported).toEqual(fixture.renditions ?? {});
 		} finally {
-			subscriber.close();
+			consumer.close();
 		}
 	} finally {
 		broadcast.close();
