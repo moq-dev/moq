@@ -68,6 +68,16 @@ drives sessions, which is why the switch lands here.
 - A batch carries changes against the last batch on its stream. Restricting
   a view to an interest is still linear in that origin's claims per change;
   make it incremental here.
+- Decided 2026-11-05 (maintainer, /quest-plan, the epic's Plan items 10 to
+  12): each stream's floor is a whole-interest marker. Project the router's
+  per-region view onto it, certifying nothing unless the view knows the
+  route's claims across the stream's interest at one revision; present per
+  route only the most specific claim covering the interest, moved rather
+  than ended when it is withdrawn; and certify absence only for what the
+  stream's `Hidden` filter shows. Rerun the handoff sweeps through that
+  projection: a scope a relay lost now goes offline downstream only on
+  ROUTE_END, the accepted cost, so update the scoped fixtures' expectations
+  to it, while no sweep may revive a known withdrawal or report a false END.
 - Bound what a peer makes the router hold (routes, claims, views per
   session) by design, as the session caps announcements today.
 - Public API: the route-change surface on `broadcast::Route` and its

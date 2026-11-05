@@ -17,11 +17,14 @@ claim whose withdrawal is already known.
 2. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **The request field is `Node ID (i)`, with 0 meaning "the publisher selects".** It is added to every request that resolves a path: TRACK, TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS. Node ID 0 is reserved everywhere.
 3. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **ROUTE_REQUEST names a Node ID, not a Route ID.** A request can then never race a ROUTE_END into a protocol violation.
 4. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **A held ROUTE_UPDATE carries a seqno and down-only bit of 0.** Any other value is refused, rather than letting the fields carry no meaning.
-5. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **Floor regions have no order, and a repeated region is a violation.** A sorted order would need Rust's `Path` ordering reproduced exactly in JS. Decoding into a map rejects duplicates at the same cost.
+5. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **Floor regions have no order, and a repeated region is a violation.** A sorted order would need Rust's `Path` ordering reproduced exactly in JS. Decoding into a map rejects duplicates at the same cost. Superseded the same day by item 10, which removes regions.
 6. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **The Hop setup parameter and ANNOUNCE_OK's Hop ID are dropped from lite-07.** Their only roles were path-vector exclusion and the implicit trailing hop. ANNOUNCE_OK reserves no body for a route-key proof: [moq-dev/moq#7937](https://github.com/moq-dev/moq/pull/7937), accepted the same day, proves the route key once per session in SETUP. The live hop-based codec still switches in session integration, as choice 1 requires.
 7. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **An echo naming a Route ID that was never ended, or was already echoed, is a violation at the publisher.** The publisher can check this from its live and unacknowledged ids alone, with no growing state.
 8. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **ANNOUNCE_TAKEOVER keeps its shape, with a Route ID in place of hops, and its predecessor must be under the same route.** [quest/m1/announce-takeover.md](https://github.com/moq-dev/moq/blob/main/quest/m1/announce-takeover.md) deletes the message, so this keeps the change minimal.
 9. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **Unknown announce types stay skipped by length on lite-06+**, as before. An unknown reply type is refused.
+10. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **ANNOUNCE_FLOOR is a marker, not a region list:** `{Route ID, Revision}`. It closes a batch and certifies the stream's claims for that route across the whole requested prefix as the origin's at that Revision. A publisher that cannot vouch for the whole requested prefix at one Revision still closes the batch, with a Revision of 2^64-1 that certifies nothing: the one Revision no origin advertises, as the infinite Metric marks a held route, so the common floor carries no flag and no offset. Regions, the replacing list, and the 65,535-byte overflow go away. Accepted cost: a relay with partial knowledge of an origin certifies nothing for that route, so a receiver lets its stale claims go only on ROUTE_END. Rejected: one region per message; a multipart atomic list.
+11. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **Clamped claims collapse to the best one.** When several of a route's claims cover a request's prefix (`live` at cost 10 and `live/a` at cost 1, request `live/a/x`), the publisher presents only the most specific, and when it is withdrawn moves the presented claim to the next covering one with ANNOUNCE_UPDATE or ANNOUNCE_RESTART instead of ending it. No wire change; one live claim per prefix per route holds, and a receiver merges claims at the prefix each stream presents them. Rejected: carrying each claim's ancestor depth.
+12. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **A floor certifies only what its own request shows.** A stream whose request did not set `Hidden` certifies nothing about hidden claims. No new wire field. Rejected: isolating differently filtered views.
 
 
 The route layer's core landed in
@@ -50,7 +53,10 @@ Settled by the core, for review:
   interest overlaps it (`a_claim_above_an_interest_overlaps_it`).
 - Letting go of a region keeps the proof's rule: keep every still-certified
   region, or rebuild them all if a lost floor is newer than a kept one, a
-  collection whose replay is bounded like any other.
+  collection whose replay is bounded like any other. The core and the proof
+  keep per-region floors internally; the wire carries only item 10's
+  whole-interest marker, which [session integration](/quest/m1/cluster-routing/routes/session.md)
+  projects the view onto.
 - A rotated identity ends the old one with ROUTE_END on every stream rather
   than closing sessions, since the own identity is no longer proven per
   session.
@@ -258,11 +264,13 @@ loss never reports an END:
   seqno leaves room for the successor a request names
   (`exhausted_counters_rotate_the_identity`).
   A session sends an origin's announcements in batches, each closed by its
-  floors: per region, the revision as of which the stream's announcements
-  for that route within the region are complete. A bare identity's region is
-  the stream's interest. A qualified key certifies only within the
-  grant scopes it arrived through, and one key can arrive through grants
-  whose pattern unions differ, so its view carries one floor per scope.
+  floor: the revision at which the stream's announcements for that route,
+  across the whole interest, are the origin's, or nothing when the sender
+  does not know them across the interest at one revision (Plan item 10). A
+  qualified key is known only within the grant scopes it arrived through,
+  and one key can arrive through grants whose pattern unions differ, so the
+  view inside a node carries one floor per scope, and a stream whose
+  interest is wider than those scopes certifies nothing.
 - A receiver keeps each session's last view, to apply the next batch, and
   merges every session's view into its own claim by claim: whichever view
   covers the claim with the newer floor decides. A floor certifies only the
@@ -448,7 +456,8 @@ Decided with the maintainer 2026-10-16, from the handoff proof:
    which grows with publisher churn times uptime on every relay that saw an
    identity, about 16 bytes each, until a restart; and Babel's source GC
    timer, which assumes stale echoes are gone by then rather than proving it.
-7. Scope coverage under one key: ✅ per-region floors. ANNOUNCE_FLOOR
+7. Scope coverage under one key: ✅ per-region floors (superseded on the
+   wire 2026-11-05 by Plan item 10; the core keeps regions internally). ANNOUNCE_FLOOR
    names the region it certifies, a suffix of the stream's interest prefix
    (the scope met with the interest), each node tracks which regions each
    feasible neighbour's last view certifies, and a region none certifies
@@ -461,7 +470,8 @@ Decided with the maintainer 2026-10-16, from the handoff proof:
    implementation, which leaves the proof's freshness claim false for scoped
    delivery.
 
-8. Region-set framing: ✅ one ANNOUNCE_FLOOR per batch lists every region
+8. Region-set framing (superseded 2026-11-05 by Plan item 10, a
+   whole-interest marker): ✅ one ANNOUNCE_FLOOR per batch lists every region
    the sender certifies for the route: (Route ID, count, then a region suffix
    and revision per region). The list replaces the last, so a sender stops
    certifying a region it lost by leaving it out, and a count of zero answers
@@ -509,12 +519,6 @@ benchmarks.
   upstream nodes but still linked to the mesh, path vector routes its
   subscriptions through the radio mesh and the split refuses, and after a
   partition each island reaches the other through its uplink.
-
-## Waiting
-
-- Maintainer: a floor replaces the whole certified-region list, but that list can exceed the 65,535-byte message limit (for example, sixteen 4,096-byte regions). Options: make a floor batch span messages with an atomic completion marker, or constrain certification to a representable projection. Recommend multipart atomic floors rather than an arbitrary region cap; the continuation wire shape needs a decision before implementation.
-- Maintainer: two original claims (`live` and `live/a`) clamp to the same prefix for interest `live/a/x`, violating the one-claim-per-route/prefix rule and losing the key needed by cross-stream floors. Options: carry the original claim prefix (including ancestors of the interest), or define a projection and reconciliation rule that selects one covering claim. Recommend preserving original claim identity, with a grant-safe ancestor encoding; this changes the wire shape and needs your choice.
-- Maintainer: a Hidden=0 floor currently certifies absence for hidden claims delivered on a Hidden=1 stream. Options: make certification depend on each stream's requested filter, or isolate differently filtered views entirely. Recommend using the existing request filter to restrict negative evidence, without another field on the wire. Confirm this certification rule alongside the claim identity decision.
 
 ## Required
 

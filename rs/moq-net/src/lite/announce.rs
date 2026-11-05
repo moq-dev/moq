@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use crate::{
@@ -121,12 +119,9 @@ pub enum AnnounceBroadcast {
 	/// advertisement under it. The receiver echoes it back.
 	RouteEnd { id: u64 },
 	/// ANNOUNCE_FLOOR (lite-07+): closes the batch of advertisements under the route
-	/// with this id, listing every region the sender certifies for it: a suffix of the
-	/// requested prefix and the origin revision as of which it is complete.
-	Floor {
-		id: u64,
-		regions: BTreeMap<Path, route::Rev>,
-	},
+	/// with this id, certifying them across the whole requested prefix at the origin's
+	/// revision, or certifying nothing (`None`, the last varint on the wire).
+	Floor { id: u64, revision: Option<route::Rev> },
 }
 
 /// Refuse what no node advertises: node 0, and the last varint as a seqno or metric,
@@ -182,41 +177,21 @@ fn decode_reach(r: &mut Decoder<'_>) -> Result<Reach, DecodeError> {
 	Ok(Reach::Held)
 }
 
-fn encode_floor(
-	w: &mut Encoder<'_>,
-	version: Version,
-	id: u64,
-	regions: &BTreeMap<Path, route::Rev>,
-) -> Result<(), EncodeError> {
+/// Encode an ANNOUNCE_FLOOR body. No origin advertises the last revision, so it
+/// stands for a floor that certifies nothing.
+fn encode_floor(w: &mut Encoder<'_>, id: u64, revision: Option<route::Rev>) -> Result<(), EncodeError> {
 	w.varint(id)?;
-	w.varint(regions.len() as u64)?;
-	for (region, rev) in regions {
-		if *rev == route::MAX {
-			return Err(EncodeError::InvalidState);
-		}
-		region.encode(w, version)?;
-		w.varint(*rev)?;
+	match revision {
+		Some(route::MAX) => Err(EncodeError::InvalidState),
+		Some(rev) => w.varint(rev),
+		None => w.varint(route::MAX),
 	}
-	Ok(())
 }
 
-fn decode_floor(r: &mut Decoder<'_>, version: Version) -> Result<AnnounceBroadcast, DecodeError> {
+fn decode_floor(r: &mut Decoder<'_>) -> Result<AnnounceBroadcast, DecodeError> {
 	let id = r.varint()?;
-	let count = r.varint()?;
-	// Each region takes at least a length byte and a revision byte, so the body bounds
-	// the count before anything is read.
-	if count > (r.remaining() / 2) as u64 {
-		return Err(DecodeError::Short);
-	}
-	let mut regions = BTreeMap::new();
-	for _ in 0..count {
-		let region = Path::decode(r, version)?;
-		let rev = r.varint()?;
-		if rev == route::MAX || regions.insert(region, rev).is_some() {
-			return Err(DecodeError::InvalidValue);
-		}
-	}
-	Ok(AnnounceBroadcast::Floor { id, regions })
+	let revision = Some(r.varint()?).filter(|&rev| rev != route::MAX);
+	Ok(AnnounceBroadcast::Floor { id, revision })
 }
 
 /// A path suffix as it travels: the first `keep` segments of a base announcement's
@@ -439,7 +414,7 @@ impl Encode<Version> for AnnounceBroadcast {
 					encode_reach(w, reach)?;
 				}
 				Self::RouteEnd { id } => w.varint(*id)?,
-				Self::Floor { id, regions } => encode_floor(w, version, *id, regions)?,
+				Self::Floor { id, revision } => encode_floor(w, *id, *revision)?,
 				Self::Ended { .. } | Self::Skipped => unreachable!("refused above"),
 			}
 			if w.since(&prefix) > MAX_MESSAGE_SIZE {
@@ -555,7 +530,7 @@ impl<'a> Decode<'a, Version> for AnnounceBroadcast {
 						reach: decode_reach(&mut body)?,
 					},
 					ROUTE_END if version.has_routes() => Self::RouteEnd { id: body.varint()? },
-					ANNOUNCE_FLOOR if version.has_routes() => decode_floor(&mut body, version)?,
+					ANNOUNCE_FLOOR if version.has_routes() => decode_floor(&mut body)?,
 					// Unknown types are skipped by length so an earlier Lite06 build
 					// negotiating the same ALPN does not kill the announce stream.
 					_ => {
@@ -1542,11 +1517,6 @@ mod tests {
 
 	#[test]
 	fn route_messages_round_trip_on_lite07() {
-		let regions = |list: &[(&'static str, u64)]| {
-			list.iter()
-				.map(|(path, rev)| (Path::from_static(path), *rev))
-				.collect::<BTreeMap<_, _>>()
-		};
 		for msg in [
 			AnnounceBroadcast::RouteStart {
 				node: 0x7a3f,
@@ -1567,28 +1537,31 @@ mod tests {
 			AnnounceBroadcast::RouteEnd { id: 0 },
 			AnnounceBroadcast::Floor {
 				id: 0,
-				regions: regions(&[]),
+				revision: Some(0),
 			},
 			AnnounceBroadcast::Floor {
 				id: 1,
-				regions: regions(&[("live/a", 3), ("live/b", 5), ("", 0)]),
+				revision: Some(route::MAX - 1),
 			},
+			AnnounceBroadcast::Floor { id: 2, revision: None },
 		] {
 			assert_eq!(broadcast_round_trip(&msg, Version::Lite07), msg);
 		}
 	}
 
-	/// The common floor certifies the whole interest: one byte over (Route ID, revision).
+	/// A floor is a marker: the Route ID and one revision, the last varint when it
+	/// certifies nothing.
 	#[test]
-	fn a_whole_interest_floor_is_one_byte_over_its_revision() {
-		let mut buf = Vec::new();
-		AnnounceBroadcast::Floor {
-			id: 0,
-			regions: [(Path::from_static(""), 7)].into(),
-		}
-		.encode(&mut Encoder::new(&mut buf, Version::Lite07.into()), Version::Lite07)
-		.unwrap();
-		assert_eq!(buf, vec![9, 4, 0, 1, 0, 7]);
+	fn a_floor_is_its_route_and_revision() {
+		let encode = |revision| {
+			let mut buf = Vec::new();
+			AnnounceBroadcast::Floor { id: 0, revision }
+				.encode(&mut Encoder::new(&mut buf, Version::Lite07.into()), Version::Lite07)
+				.unwrap();
+			buf
+		};
+		assert_eq!(encode(Some(7)), vec![9, 2, 0, 7]);
+		assert_eq!(encode(None), [&[9, 10, 0][..], &[0xff; 9]].concat());
 	}
 
 	#[test]
@@ -1603,10 +1576,7 @@ mod tests {
 				reach: Reach::Held,
 			},
 			AnnounceBroadcast::RouteEnd { id: 0 },
-			AnnounceBroadcast::Floor {
-				id: 0,
-				regions: BTreeMap::new(),
-			},
+			AnnounceBroadcast::Floor { id: 0, revision: None },
 		] {
 			for version in [Version::Lite05, Version::Lite06] {
 				let mut buf = Vec::new();
@@ -1660,9 +1630,10 @@ mod tests {
 				id: 0,
 				reach: Reach::Finite(advert(0, route::MAX, false)),
 			},
+			// The last revision is the floor that certifies nothing, never a revision.
 			AnnounceBroadcast::Floor {
 				id: 0,
-				regions: [(Path::from_static(""), route::MAX)].into(),
+				revision: Some(route::MAX),
 			},
 		];
 		for msg in refused {
@@ -1688,24 +1659,12 @@ mod tests {
 			forge(ROUTE_UPDATE, advert(0, route::MAX, 1, 0)),
 			forge(ROUTE_UPDATE, advert(0, 1, route::MAX, 0)),
 			forge(ROUTE_UPDATE, advert(0, 0, route::MAX, 1)),
-			forge(ANNOUNCE_FLOOR, |w| {
-				w.varint(0u64).unwrap();
-				w.varint(2u64).unwrap();
-				for _ in 0..2 {
-					Path::from_static("live").encode(w, Version::Lite07).unwrap();
-					w.varint(1u64).unwrap();
-				}
-			}),
+			// A floor without its revision, and one with trailing bytes.
+			forge(ANNOUNCE_FLOOR, |w| w.varint(0u64).unwrap()),
 			forge(ANNOUNCE_FLOOR, |w| {
 				w.varint(0u64).unwrap();
 				w.varint(1u64).unwrap();
-				Path::from_static("").encode(w, Version::Lite07).unwrap();
-				w.varint(route::MAX).unwrap();
-			}),
-			// A count the body cannot hold fails before any region is read.
-			forge(ANNOUNCE_FLOOR, |w| {
-				w.varint(0u64).unwrap();
-				w.varint(u32::MAX.into()).unwrap();
+				w.u8(0);
 			}),
 			// Trailing bytes after a complete body.
 			forge(ROUTE_END, |w| {

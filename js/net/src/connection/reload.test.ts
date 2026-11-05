@@ -945,8 +945,7 @@ test("a retired GOAWAY predecessor still closes by its handover cap", async () =
 
 // A publication only a token's grant covers keeps that grant while the session drains, so
 // closing the loop ends the tokens after the drain rather than cutting the final group.
-// Disabled: load-sensitive fin.closed assertion; investigate drain scheduling before restoring.
-test.skip("closing the loop keeps the tokens until the session drains", async () => {
+test("closing the loop keeps the tokens until the session drains", async () => {
 	const original = globalThis.WebTransport;
 	const clock = new Manual();
 	const installed = clock.install();

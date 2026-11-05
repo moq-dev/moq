@@ -430,7 +430,8 @@ When the stream is closed, the subscriber MUST assume that every route and claim
 
 A broadcast path has at most 32 segments and at most 4,096 bytes; a receiver MUST close the session with a PROTOCOL_VIOLATION on a longer one, including one resolved by [Compression](#announce-compression).
 A claim covers a path when its prefix is a leading run of the path's segments; matching is per path segment, so a prefix never matches half a segment, and equality is byte-by-byte within each segment.
-A publisher answering a request stream presents each of its claims clamped to the intersection with the requested prefix: a claim above the request's prefix appears as the request prefix itself (an empty suffix), which is exactly the covered set the subscriber may see.
+A publisher answering a request stream presents, per route, each claim inside the requested prefix and only the most specific claim at or above it, at the requested prefix itself (an empty suffix), which is exactly the covered set the subscriber may see.
+When that most specific covering claim changes, such as when it is withdrawn and a broader one still covers the request, the publisher moves the presented claim to the new one with an ANNOUNCE_UPDATE or ANNOUNCE_RESTART, and ends it only when no claim of the route covers the requested prefix.
 There MAY be multiple Announce Streams, potentially containing overlapping prefixes, that get their own ANNOUNCE_OK and messages.
 
 #### Floors {#floors}
@@ -438,15 +439,15 @@ Each origin node numbers the changes to its own claims with a Revision, starting
 A stream carries a route's claims in batches: the ANNOUNCE messages under the route since its last ANNOUNCE_FLOOR, closed by the next one.
 The publisher sends a ROUTE_START before any claim under it, and SYNCED only once every route it sent has a floor.
 
-The floor lists every region the publisher certifies for the route: a suffix of the requested prefix, and the Revision as of which the stream's claims for the route within that region are complete.
-Each list replaces the previous one, so a region left out is no longer certified.
-A floor certifies the claims overlapping its region: those inside it, and those above it.
-A publisher that certifies anything for a route sends a floor for it on every stream, one with no regions when the request meets none of its regions.
+A floor names a Revision and certifies that the stream's claims for the route, across the whole requested prefix, are the origin's claims at that Revision as the request presents them (see [Announce](#announce)).
+It certifies only what its own request shows: a stream whose ANNOUNCE_REQUEST did not set `Hidden` certifies nothing about hidden claims.
+A publisher that does not know the route's claims across the whole requested prefix at one Revision, such as a relay that knows them only beneath part of it, still closes each batch, with a floor that certifies nothing.
 
 The subscriber applies a batch whole, once its floor arrives.
-A receiver that hears one origin's claims on several streams merges them claim by claim: whichever stream's floor certifying the claim carries the higher Revision decides whether it exists.
+A receiver that hears one origin's claims on several streams merges them claim by claim, each at the prefix its stream presents it: of the streams whose floor certifies the claim, the one with the highest Revision decides whether it exists, and a claim no floor certifies exists while some stream carries it.
 An older floor never revives a claim whose withdrawal a newer one delivered.
-While a receiver has a usable route to the origin and every peer whose last finite route to it is feasible here has answered the current request, it lets go of a region none of those peers certifies: its claims go offline, which is not an ANNOUNCE_END.
+A floor that certifies nothing proves no claim absent: the stream's claims stay until its ANNOUNCE_END or ROUTE_END.
+While a receiver has a usable route to the origin and every peer whose last finite route to it is feasible here has answered the current request, it lets go of a claim none of those peers certifies or carries: it goes offline, which is not an ANNOUNCE_END.
 
 #### Compression {#announce-compression}
 An ANNOUNCE_START or ANNOUNCE_TAKEOVER MAY copy the head of its path from a live claim on the same stream, its base.
@@ -1350,19 +1351,13 @@ A relay forwards one only when the subscriber was last sent that predecessor, an
 
 
 ## ANNOUNCE_FLOOR {#announce-floor}
-A publisher sends an ANNOUNCE_FLOOR message to close a batch of a route's claims, listing every region it certifies for the route (see [Floors](#floors)).
+A publisher sends an ANNOUNCE_FLOOR message to close a batch of a route's claims (see [Floors](#floors)).
 
 ~~~
 ANNOUNCE_FLOOR Message {
   Type (i) = 0x9
   Message Length (i)
   Route ID (i),
-  Region Count (i),
-  Region (..) ...,
-}
-
-Region {
-  Region Suffix (s),
   Revision (i),
 }
 ~~~
@@ -1373,16 +1368,8 @@ Set to 0x9 to indicate an ANNOUNCE_FLOOR message.
 **Route ID**:
 The ordinal implicitly assigned by a prior ROUTE_START on this stream.
 
-**Region Count**:
-The number of regions that follow, 0 when the publisher certifies nothing within the requested prefix.
-
-**Region Suffix**:
-The region, combined with the requested prefix like a Claim Prefix Suffix; empty for the whole requested prefix.
-Regions are in no particular order, and a repeated one is a PROTOCOL_VIOLATION.
-
 **Revision**:
-The origin's Revision as of which the stream's claims for the route within the region are complete.
-2^64-1 is a PROTOCOL_VIOLATION.
+The origin's Revision at which the floor certifies the stream's claims for the route, or 2^64-1, which no origin advertises (see [Routing](#routing)), when it certifies nothing.
 
 
 ## SUBSCRIBE
@@ -2124,7 +2111,8 @@ The `Message Length` describes the payload size on the wire.
 - Split routing into two layers on the Announce Stream. ROUTE_START (0x6), ROUTE_UPDATE (0x7), and ROUTE_END (0x8) advertise how the publisher reaches an origin node, named by a Node ID, with a seqno, an additive metric, and a down-only bit, and loops are prevented by Babel's feasibility condition. Every ANNOUNCE_START and ANNOUNCE_TAKEOVER names its route's Route ID in place of the Hop ID list, so a link change sends one ROUTE_UPDATE per origin rather than an update per claim. Removed the Hop ID list, ANNOUNCE_OK's Hop ID, and the SETUP Hop parameter (0x5).
 - A ROUTE_UPDATE with a Metric of 2^64-1 holds a route while it recovers; ROUTE_END lets it go. Neither withdraws the origin's claims, and the subscriber echoes every ROUTE_END back.
 - Added ROUTE_REQUEST (0xA), sent by the subscriber on the Announce Stream to ask for a route with a newer seqno when every route it has is infeasible.
-- Added ANNOUNCE_FLOOR (0x9), closing each batch of a route's claims with the regions it certifies and the origin Revision each is complete as of, so a stale copy never revives a claim whose withdrawal a newer one delivered.
+- Added ANNOUNCE_FLOOR (0x9), closing each batch of a route's claims with the origin Revision at which the stream's claims across the requested prefix are certified, or 2^64-1 to certify nothing, so a stale copy never revives a claim whose withdrawal a newer one delivered. A floor certifies only the claims its own request shows.
+- A route presents only its most specific claim covering the requested prefix, moved to the next covering claim when it is withdrawn rather than ended.
 - Added `Node ID` to TRACK, TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS: the origin node the first hop selected, followed by every later hop.
 - Replaced Warm and Cold Route Cost with the origin's Announce Cost, unchanged in transit. ANNOUNCE_UPDATE carries only the Announce Cost.
 - The Cost parameter must be at least 1.
@@ -2350,7 +2338,7 @@ A Node ID (see [Routing](#routing)) is opaque and fresh for each restart: it tel
 A Node ID is declared, not proven, so a peer can forge another origin's Node ID or advertise a better route than it has. Qualifying the Node IDs of a peer with a scoped publish grant confines such a forgery to the claims inside that grant; an unscoped peer is trusted with every origin.
 
 ## Resource Exhaustion
-A peer can open many streams (subscriptions, announcements, fetches), request large announce prefixes, or advertise broad claims. Implementations SHOULD bound the number of concurrent subscriptions, announce matches, routes, floor regions, and cached groups; an endpoint whose peer goes past its bound on subscriptions or announcements SHOULD close the session with TOO_MANY_REQUESTS, and SHOULD rely on QUIC flow control and stream limits to backpressure a misbehaving peer (see [ANNOUNCE_REQUEST](#announce-request)). Expiration (see [Expiration](#expiration)) bounds how long stale groups consume memory and flow control. A broad claim invites a request for any covered path, each of which may start work: an advertiser SHOULD bound the work it starts, withdrawing its claim before it runs out, and every refusal is terminal, so a flood of requests costs the mesh one round trip each rather than a search (see [Resolution](#resolution)).
+A peer can open many streams (subscriptions, announcements, fetches), request large announce prefixes, or advertise broad claims. Implementations SHOULD bound the number of concurrent subscriptions, announce matches, routes, and cached groups; an endpoint whose peer goes past its bound on subscriptions or announcements SHOULD close the session with TOO_MANY_REQUESTS, and SHOULD rely on QUIC flow control and stream limits to backpressure a misbehaving peer (see [ANNOUNCE_REQUEST](#announce-request)). Expiration (see [Expiration](#expiration)) bounds how long stale groups consume memory and flow control. A broad claim invites a request for any covered path, each of which may start work: an advertiser SHOULD bound the work it starts, withdrawing its claim before it runs out, and every refusal is terminal, so a flood of requests costs the mesh one round trip each rather than a search (see [Resolution](#resolution)).
 
 ## Datagram Injection
 Datagrams are routed to a subscription solely by Subscribe ID and carry no per-group authentication beyond that of the QUIC connection. On an unmodified QUIC/WebTransport connection this is sufficient, since datagrams are protected by the transport. A subscriber MUST silently drop any datagram with an unknown Subscribe ID (see [Datagrams](#datagrams)).
