@@ -354,6 +354,24 @@ impl Consumer {
 		}
 	}
 
+	/// Ready once the serving copy holds a group. Stays pending once the front settled on a
+	/// last copy without one.
+	pub(super) fn poll_grouped(&self, waiter: &kio::Waiter) -> Poll<()> {
+		loop {
+			let (generation, copy) = {
+				let route = self.state.read();
+				(route.generation, route.copy.clone())
+			};
+			if copy.is_some_and(|copy| copy.poll_grouped(waiter).is_ready()) {
+				return Poll::Ready(());
+			}
+			if self.end().is_some() {
+				return Poll::Pending;
+			}
+			ready!(self.poll_changed(generation, waiter));
+		}
+	}
+
 	/// Subscribe to the logical track with the reader's own preferences.
 	pub(super) fn subscribe(&self, subscription: track::Preferences) -> Subscriber {
 		let mirrored = subscription.read().clone();

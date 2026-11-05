@@ -3898,6 +3898,8 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 						// Drop the copy so its source goes idle at once. A returning
 						// reader gets a fresh one, so nothing cached can be stale.
 						io.routes.park();
+						io.query = None;
+						io.staged = None;
 						io.copy = None;
 						io.held = None;
 					}
@@ -4077,10 +4079,26 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 				let waker = Waker::from(io.ready.clone());
 				let waiter = io.park.hold(&Context::from_waker(&waker));
 				let step = (|| {
-					if let Some(asked) = &mut io.query
-						&& let Poll::Ready(result) = asked.query.poll(waiter)
-					{
-						return Some(Step::Info(name.clone(), asked.source, result));
+					if let Some(asked) = &mut io.query {
+						if asked.info.is_none()
+							&& let Poll::Ready(result) = asked.query.poll(waiter)
+						{
+							match result {
+								Ok(info) => asked.info = Some(info),
+								Err(err) => return Some(Step::Info(name.clone(), asked.source, Err(err))),
+							}
+						}
+						// While another copy still serves, a matching replacement answers only once
+						// it delivers or ends: one failing first refuses, and that copy keeps
+						// serving. Different metadata is refused at once.
+						if let Some(info) = &asked.info
+							&& (io.copy.is_none()
+								|| io.accepted.as_ref().is_some_and(|accepted| accepted.info() != info)
+								|| asked.copy.poll_grouped(waiter).is_ready()
+								|| asked.copy.poll_closed(waiter).is_ready())
+						{
+							return Some(Step::Info(name.clone(), asked.source, Ok(info.clone())));
+						}
 					}
 					follow_demand(&mut io.held, io.accepted.as_mut(), &io.weak, &io.routes, waiter);
 					// Settled once the copy closes: a group still open below a declared end is
@@ -13679,6 +13697,46 @@ mod tests {
 			.accept(crate::track::Info::timed())
 			.abort(Error::App(7))
 			.unwrap();
+		for _ in 0..10 {
+			kio::clock::sim::yield_now().await;
+		}
+
+		let mut group = old.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"still".as_ref()).unwrap();
+		group.finish().unwrap();
+		let mut group = next_group(&mut subscription)
+			.await
+			.expect("the incumbent keeps serving")
+			.expect("track open");
+		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"still");
+
+		// The incumbent's clean end is the track's, not the newcomer's error.
+		old.finish().unwrap();
+		assert!(matches!(next_group(&mut subscription).await, Ok(None)));
+	}
+
+	/// The newcomer answers "video" with matching metadata, the front reads that answer,
+	/// and only then does the newcomer abort, before its first group: still a refusal, so
+	/// the incumbent keeps serving.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_replacement_aborted_after_its_answer_keeps_the_incumbent() {
+		let (producer, _server, _upstream, old, mut subscription) = remote_front().await;
+
+		let newcomer = producer.create_broadcast("room/alice").unwrap();
+		let mut handler = newcomer.requests();
+		newcomer
+			.announce(Route::default().with_instance(instance(), 0))
+			.unwrap();
+		let request = kio::clock::timeout(Duration::from_secs(1), handler.requested_track())
+			.await
+			.expect("the front asked the newcomer")
+			.expect("request");
+		let replacement = request.accept(crate::track::Info::timed());
+		for _ in 0..10 {
+			kio::clock::sim::yield_now().await;
+		}
+		replacement.abort(Error::App(7)).unwrap();
 		for _ in 0..10 {
 			kio::clock::sim::yield_now().await;
 		}

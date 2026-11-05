@@ -228,6 +228,19 @@ class Route {
 		for (const reader of [...this.readers]) reader.sync();
 	}
 
+	/**
+	 * Serve `to` again in place of `from`, a replacement whose copy failed before delivering, even
+	 * past a refusal: `to` served before it.
+	 */
+	revert(from: Source, to: Source): void {
+		if (this.concluded || this.source !== from) return;
+		this.generation++;
+		this.source = to;
+		this.served = to;
+		this.#bump();
+		for (const reader of [...this.readers]) reader.sync();
+	}
+
 	/** Between routes: readers wait for the next one, keeping what they have. */
 	park(): void {
 		if (!this.source) return;
@@ -846,6 +859,24 @@ class Reader implements ResumeSource {
 		// serve it next. Once the track ended, a copy let go held nothing more.
 		if (serving ? ended === null : this.#ended) return this.#conclude() ? { kind: "done" } : { kind: "idle" };
 		if (ended instanceof Error) {
+			// A replacement that failed before delivering never ends the track while a copy it
+			// replaced still feeds it: that copy serves again, and the failure is the replacement
+			// refusing the track unless its route is going away. Mirrors the Rust front.
+			const incumbent =
+				serving && !serving.delivered
+					? this.#copies.findLast(
+							(copy) =>
+								copy.replaced &&
+								copy.source !== serving.source &&
+								copy.done === undefined &&
+								copy.sub.closed.peek() === undefined,
+						)
+					: undefined;
+			if (serving && incumbent) {
+				if (!closing(ended)) route.refuse(ended);
+				route.revert(serving.source, incumbent.source);
+				return { kind: "idle" };
+			}
 			// A refusal from a route that still serves is the track's answer.
 			if (!routeFailed(ended)) return this.#fail(ended);
 			if (route.refusal) return this.#fail(route.refusal);

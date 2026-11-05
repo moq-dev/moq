@@ -758,6 +758,32 @@ test("a replacement differing only in unchecked takes over", async () => {
 	close();
 });
 
+// Mirrors `a_replacement_aborted_after_its_answer_keeps_the_incumbent` in rs/moq-net/src/model/origin.rs.
+test("a replacement that answers and then aborts before its first group leaves the incumbent serving", async () => {
+	const { a, b, swap, active, close } = await setup();
+	const ta = copy(a);
+	const tb = copy(b);
+	const sub = active.track("seq").subscribe();
+	ta.write(0n);
+	expect(drain(sub)).toEqual([0n]);
+
+	await swap();
+	tb.producer.abort(new StreamError(StreamCode(64)));
+	await settle();
+	expect(sub.closed.peek()).toBeUndefined();
+
+	ta.write(1n);
+	await settle();
+	expect(drain(sub)).toEqual([1n]);
+
+	// The incumbent's clean end is the track's, not the replacement's error.
+	ta.producer.finish();
+	expect(await sub.recvGroup()).toBeUndefined();
+
+	sub.close();
+	close();
+});
+
 test("waiting for the end of a track whose replacement was refused ends with the refusal", async () => {
 	const { a, b, swap, active, close } = await setup();
 	const old = a.createTrack("seq", { priority: 1 });

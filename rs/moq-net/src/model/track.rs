@@ -5292,6 +5292,28 @@ impl Consumer {
 		self.with_state(|state| state?.read().max_sequence)
 	}
 
+	/// Ready once [`Self::latest_sequence`] is `Some`: the track holds a group. Stays pending
+	/// on a track that closed without one.
+	pub(super) fn poll_grouped(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.with_state(|state| {
+			let Some(state) = state else {
+				return Poll::Pending;
+			};
+			let routes = state.read().routes.clone();
+			if let Some(routes) = routes {
+				return routes.poll_grouped(waiter);
+			}
+			match state.poll(waiter, |state| match state.max_sequence {
+				Some(_) => Poll::Ready(()),
+				None => Poll::Pending,
+			}) {
+				Poll::Ready(Ok(())) => Poll::Ready(()),
+				Poll::Ready(Err(closed)) if closed.max_sequence.is_some() => Poll::Ready(()),
+				_ => Poll::Pending,
+			}
+		})
+	}
+
 	/// The first group the declared end excludes whole, or `None` while the track is open ended.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn final_sequence(&self) -> Option<u64> {
