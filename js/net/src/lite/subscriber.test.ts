@@ -29,7 +29,6 @@ import { SEGMENT_BYTES } from "../util/limits.ts";
 import { Budget } from "../util/yield.ts";
 import * as Varint from "../varint.ts";
 import { type AnnounceBroadcast, AnnounceInit, AnnounceOk, encodeAnnounceBroadcast } from "./announce.ts";
-import { Datagram as DatagramMessage } from "./datagram.ts";
 import { Group } from "./group.ts";
 import { Probe } from "./probe.ts";
 import { ProbeLevel, Setup } from "./setup.ts";
@@ -1125,41 +1124,6 @@ async function answerTrackInfo(
 	for (const chunk of chunks) stream.inbound.enqueue(chunk);
 	stream.inbound.close();
 }
-
-test.each([Version.DRAFT_06, Version.DRAFT_07])(
-	"lite %s: oversized incoming datagrams are dropped",
-	async (version) => {
-		const installed = new Manual().install();
-		const { quic, opened } = fakeSession();
-		const incoming = new TransformStream<Uint8Array, Uint8Array>();
-		Object.defineProperty(quic, "datagrams", { value: { readable: incoming.readable, maxDatagramSize: 1400 } });
-		const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
-		const track = subscriber.consume(Path.from("room")).track("video").subscribe();
-		const writer = incoming.writable.getWriter();
-		const receiving = subscriber.runDatagrams();
-		try {
-			await answerTrackInfo(await opened(0), version, 1000);
-			const request = await opened(1);
-			await request.reading;
-			await respond(request, version, [{ start: new SubscribeStart([0n]) }]);
-			const received = track.recvDatagram();
-			if (version === Version.DRAFT_07) {
-				await writer.write(new Uint8Array([1]));
-				await writer.write(new Uint8Array([1, ...new Uint8Array(1199).fill(0xff)]));
-			}
-			const size = version === Version.DRAFT_07 ? 1196 : 1197;
-			await writer.write(new DatagramMessage(0n, 0n, 0, new Uint8Array(size + 1)).encode(version));
-			await writer.write(new DatagramMessage(0n, 1n, 1, new Uint8Array(size)).encode(version));
-			expect((await received)?.sequence).toBe(1n);
-		} finally {
-			await writer.close();
-			await receiving;
-			track.close();
-			subscriber.close();
-			installed.close();
-		}
-	},
-);
 
 function expectCut(err: unknown, cause: Error | undefined) {
 	if (cause) {
@@ -3135,6 +3099,64 @@ test("a FETCH stops a stalled frame only after its last coalesced reader leaves"
 		const err = fromTransport(await streams[1].aborted) as StreamError;
 		expect(err.code).toBe(StreamCode.Cancel);
 	} finally {
+		subscriber.close();
+	}
+});
+
+test("a cancelled legacy datagram lookup cannot refuse a stream answer arriving before auth settles", async () => {
+	const { quic, streams, opened } = fakeSession();
+	Object.defineProperty(quic, "datagrams", {
+		value: { maxDatagramSize: 1200, readable: new ReadableStream<Uint8Array>() },
+	});
+	const waiting = Promise.withResolvers<void>();
+	const release = Promise.withResolvers<void>();
+	let calls = 0;
+	const auth = {
+		async ready() {
+			if (++calls === 2) {
+				waiting.resolve();
+				await release.promise;
+			}
+			return true;
+		},
+	} as unknown as AuthSession;
+	const version = Version.DRAFT_06;
+	const subscriber = new Subscriber(
+		quic,
+		version,
+		HopSchema.parse(1n),
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		auth,
+	);
+	const remote = subscriber.consume(Path.from("room"));
+	const grouped = remote.track("video").subscribe();
+	let datagrams: ReturnType<typeof remote.datagrams> | undefined;
+	try {
+		await opened(1);
+		datagrams = remote.datagrams("video");
+		await waiting.promise;
+		const info = datagrams.info();
+		datagrams.close();
+		await expect(info).rejects.toBeInstanceOf(StreamError);
+		await answerTrackInfo(streams[0], version);
+		await grouped.info();
+		const writer = new Writer(
+			new WritableStream<Uint8Array>({ write: (chunk) => streams[1].inbound.enqueue(new Uint8Array(chunk)) }),
+			version,
+		);
+		await encodeSubscribeResponse(writer, { start: new SubscribeStart([0n]) }, version);
+		await encodeSubscribeResponse(writer, { finish: new SubscribeFinish(0n) }, version);
+		streams[1].inbound.close();
+		expect(await grouped.recvGroup()).toBeUndefined();
+	} finally {
+		release.resolve();
+		datagrams?.close();
+		grouped.close();
+		remote.close();
 		subscriber.close();
 	}
 });

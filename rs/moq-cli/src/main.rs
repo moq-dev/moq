@@ -313,7 +313,7 @@ async fn drain(shutdown: Shutdown, signals: &mut Signals) {
 	tracing::info!(window = ?shutdown.observer.drain_timeout, "shutdown requested; draining sessions (signal again to exit immediately)");
 	tokio::select! {
 		() = signals.recv() => tracing::warn!("second shutdown signal; exiting immediately"),
-		() = shutdown.observer.drained() => {},
+		_ = shutdown.observer.drained() => {},
 	}
 }
 
