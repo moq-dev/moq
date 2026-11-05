@@ -139,7 +139,7 @@ wall-clock bisect blames the wrong commit. Count instructions instead:
   step; workspace sources show as `${workspace}`, so read them by name.
 - A wall-time hold at equal instructions may be page faults: compare
   `/usr/bin/time -f %R`, then pin glibc with `GLIBC_TUNABLES` (see
-  [the m1 release run](/quest/m1/release-perf/README.md)) before blaming code.
+  [the m1 release run](/.github/release-perf.md)) before blaming code.
 - A bench that is not CPU-bound is not attributable this way:
   `relay_auth_refresh` runs real loopback sockets and moved +27-60% on CI with
   +0.4% instructions.

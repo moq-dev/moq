@@ -74,7 +74,3 @@ Rejected in planning:
 ## Required
 
 - [Routes are the origin API](/quest/m1/api-audit/route/README.md) - apps announce exact or prefix routes through one `Route` handle that owns its broadcast and carries an `instance`, prefix routes can serve a held broadcast, and readers get a listing plus `follow`
-
-## Related
-
-- [Main is no slower than release](/quest/m1/release-perf/README.md) - the other release-readiness check

@@ -1,23 +1,67 @@
-# [S] Main is no slower than release
+# Release performance comparison
 
-## Goal
+## Final relay pairing (2026-11-05)
 
-Before the next release cut, every benchmark where `main` is slower than
-`release` is either fixed or accepted with a recorded reason. Accidental cost
-is fixed. Cost that pays for a feature `main` deliberately added is accepted,
-and the reason is written here.
+The remaining fanout check passes: main uses less relay CPU in all seven
+alternating pairs, with a median change of -17.6% (MAD 3.6 percentage points,
+range -27.5% to -13.1%). The high-CPU mode from October did not recur.
+The earlier intentional feature costs below remain accepted; no behavior was
+changed to obtain this result, and nothing was backported to release.
 
-This epic's own work: once its children have landed, re-pair the relay
-`fanout` workload against `release` and confirm main's relay CPU is no higher
-in every round. The sparse rows are accepted (2026-10-30). The browser frame path
-needs no repeat; the [performance audit](/quest/m2/audit-perf.md) now pairs
-every later cut with `release`.
+[Machine-readable evidence](release-perf.json) retains metadata, workload
+configurations, execution order, all 42 cell summaries, and the comparator's
+three reports. The source was [56d7989c78](https://github.com/moq-dev/moq/commit/56d7989c78a107e0cb72487c43006495005c27a3),
+paired against release [dc3478a863](https://github.com/moq-dev/moq/commit/dc3478a863d8aab42afaae8d40c3b84794ae4a4b).
+Raw logs, process samples and the harness snapshot remain in the measuring
+checkout's `.tmp/bench/run.87XzvK`.
 
-## Plan
+The established harness ran on `desktop`, pinned to its eight performance
+CPUs (0-7), under the host benchmark lock and `quest gate`. Both sides used
+the release profile, default features and the same current generator and
+sampler. The host was shared, not idle: `/proc/loadavg` at entry was
+`10.84 10.75 12.09`; readings during the workload were `6.39 9.49 11.44` and
+`4.89 7.63 10.41`. These snapshots describe context, not every sampling window.
+The sign holds throughout the run despite that changing load.
+
+Reproduce in a fresh project shell (the clean environment avoids inheriting
+obsolete variables from a session opened before the shell fix):
+
+```bash
+nix develop --ignore-environment --keep HOME --keep USER --keep XDG_RUNTIME_DIR \
+  --command quest gate bash -c \
+  'BENCH_ARTIFACTS="$PWD/.tmp/bench" BENCH_RUNTIME_ROUNDS=7 just bench-relay origin/release quic'
+```
+
+The first attempts failed before measurements because `MOQ_QUEST` reached
+the load generator. [moq-dev/moq#7979](https://github.com/moq-dev/moq/pull/7979)
+fixed the shell; the successful run uses that fix without changing the
+binary's environment validation.
+
+| Round | Release CPU (cores) | Main CPU (cores) | Change |
+|---|---|---|---|
+| 1 | 0.04789 | 0.03989 | -16.7% |
+| 2 | 0.04595 | 0.03992 | -13.1% |
+| 3 | 0.04595 | 0.03329 | -27.5% |
+| 4 | 0.04197 | 0.03326 | -20.7% |
+| 5 | 0.04592 | 0.03785 | -17.6% |
+| 6 | 0.04608 | 0.03603 | -21.8% |
+| 7 | 0.04407 | 0.03790 | -14.0% |
+
+Both sides delivered about 640 frames/s: paired throughput deltas ranged
+from -0.042% to +0.020%. Lifetime p99 latency differed by -0.28% to +1.21%.
+Lifetime loss varied in both directions; the evidence retains every value,
+and no loss improvement is claimed. CPU and throughput use the harness's
+aligned final five-second windows; latency and loss are lifetime statistics.
+Video and chat controls also used less relay CPU in every pair (median
+-26.8% and -27.6%). Video delivery varied, so this is not a normalized video
+efficiency claim. The browser and sparse rows were already settled and were
+not repeated.
+
+## Accepted decisions and earlier measurements
 
 Decided 2026-10-21, when planning from a paired comparison of `release`
 (`0c56e5b4e`, which included the bench backport
-[#6103](https://github.com/moq-dev/moq/pull/6103)) against `main`
+[moq-dev/moq#6103](https://github.com/moq-dev/moq/pull/6103)) against `main`
 (`8b0d9952f`). The run used 811 paired Criterion cases, three alternating
 confirmation rounds for the largest moves, JS on bun, and the relay load
 harness. It ran on a shared 8-core host, so a small wall-time change may be
@@ -33,18 +77,18 @@ noise.
 - The IETF `/fetch` rows of `session_delivery_group_cost` are accepted and
   dropped from release pairing. They measure different work on each branch:
   release's bare track handle opened a live SUBSCRIBE, while main sends a real
-  FETCH per viewer ([#5820](https://github.com/moq-dev/moq/pull/5820) made
-  handles lazy, and [#4974](https://github.com/moq-dev/moq/pull/4974) added
+  FETCH per viewer ([moq-dev/moq#5820](https://github.com/moq-dev/moq/pull/5820) made
+  handles lazy, and [moq-dev/moq#4974](https://github.com/moq-dev/moq/pull/4974) added
   fetch-only demand). The lite `/fetch` cost was real: a relay sent one
   upstream FETCH per group, but revived the parked logical track for every
-  viewer's FETCH. [#6286](https://github.com/moq-dev/moq/pull/6286) serves a
+  viewer's FETCH. [moq-dev/moq#6286](https://github.com/moq-dev/moq/pull/6286) serves a
   whole cached group from the parked copy instead, cutting 12 to 19% of the
   instructions per viewer where viewers share a group. The rest of the gap to
   a viewer that holds a query is accepted: each viewer's own fetch of a group
   it lacks revives its logical track, so the open group keeps its route and
   fails over mid-read, and its copy releases the route's demand once idle.
 - `stats/session-report` is accepted at O(live sessions), after a cheap fix.
-  Per-label payload bytes ([#5731](https://github.com/moq-dev/moq/pull/5731))
+  Per-label payload bytes ([moq-dev/moq#5731](https://github.com/moq-dev/moq/pull/5731))
   match payload billing per label, such as per signing key. After removing
   redundant row locking and live-session CAS, three alternating measurements
   give 52.2 us for 10,000 sessions without wires and 388.4 us with one real
@@ -53,15 +97,15 @@ noise.
   This remaining per-session and per-connection sampling is accepted. Deleting
   per-label bytes was rejected.
 - `track_gc/idle` is accepted at about 20 ns, flat across track counts, after
-  [#6291](https://github.com/moq-dev/moq/pull/6291) skipped the clock read
+  [moq-dev/moq#6291](https://github.com/moq-dev/moq/pull/6291) skipped the clock read
   with no wall deadline and reused the bench's waiter (36.7 ns before). The
   remaining ~8 ns over release's 11.6 ns is the lock and driver registration
   that the wall-clock aging from
-  [#5548](https://github.com/moq-dev/moq/pull/5548) needs. An earliest-deadline
+  [moq-dev/moq#5548](https://github.com/moq-dev/moq/pull/5548) needs. An earliest-deadline
   atomic cannot prove a replacement driver is registered, and a lock-free
   notification primitive is not worth ~8 ns.
 - `track_gap_flush` is accepted at O(log gaps + retired entries) per shared
-  successor, after [#6287](https://github.com/moq-dev/moq/pull/6287) indexed
+  successor, after [moq-dev/moq#6287](https://github.com/moq-dev/moq/pull/6287) indexed
   the gap ledger and retired a shared verdict's gaps with one split. Each
   retired entry must be freed exactly once, so the batch is already amortized
   optimal; a representation that hides that reclamation would widen scope for
@@ -79,19 +123,19 @@ noise.
   accidental part (a second track upgrade per first frame, a 128-bit division
   per buffered datagram on join, and draining empty waiter lists on every
   write). What remains pays for features: the arrival stamp each frame reads
-  from the clock ([#6249](https://github.com/moq-dev/moq/pull/6249)), largest
-  notifications ([#5725](https://github.com/moq-dev/moq/pull/5725)), the
+  from the clock ([moq-dev/moq#6249](https://github.com/moq-dev/moq/pull/6249)), largest
+  notifications ([moq-dev/moq#5725](https://github.com/moq-dev/moq/pull/5725)), the
   rewind check and starts index each first frame fills
-  ([#5803](https://github.com/moq-dev/moq/pull/5803),
-  [#6074](https://github.com/moq-dev/moq/pull/6074)), indexed expiry wakes,
+  ([moq-dev/moq#5803](https://github.com/moq-dev/moq/pull/5803),
+  [moq-dev/moq#6074](https://github.com/moq-dev/moq/pull/6074)), indexed expiry wakes,
   the bounded wall-clock expiry scan per append, and a subscriber's ranges and
-  datagram max delay ([#5195](https://github.com/moq-dev/moq/pull/5195)).
+  datagram max delay ([moq-dev/moq#5195](https://github.com/moq-dev/moq/pull/5195)).
   None of it grows with the sweeps. `track_stamp_groups/sparse` stays highest
   at 4.4x, because release's first frame skipped nearly all of that work.
 - Session delivery is accepted at 1.28x to 1.77x in instructions. It is the
   per-group and per-frame cost above on every hop, measured through the
   flow-controlled mock transport
-  ([#5530](https://github.com/moq-dev/moq/pull/5530)) that release's harness
+  ([moq-dev/moq#5530](https://github.com/moq-dev/moq/pull/5530)) that release's harness
   lacked.
 
 ### Release as a baseline
@@ -148,8 +192,8 @@ later rounds swung both ways.
 
 JS `net/bench/frames.ts` on bun had lite rows at 1.2 to 1.3x and IETF rows at
 1.3 to 2.2x. Fixed in Chromium:
-[#6296](https://github.com/moq-dev/moq/pull/6296) removed a retained-history
-scan, and [#6479](https://github.com/moq-dev/moq/pull/6479) stopped
+[moq-dev/moq#6296](https://github.com/moq-dev/moq/pull/6296) removed a retained-history
+scan, and [moq-dev/moq#6479](https://github.com/moq-dev/moq/pull/6479) stopped
 releasing a finished stream's reader lock, which built a `TypeError` per
 group stream. Every row then sits within the A/A spread of release.
 The group write/read microbench stays 3 to 12% above release against an
@@ -183,8 +227,8 @@ Accepted, flat per operation:
   Both branches expand the AES-GCM key on every frame, about a quarter of
   `protect`, which the [performance audit](/quest/m2/audit-perf.md) owns.
 - gst `moqsink/eos` is +12% instructions per event, from
-  [#5512](https://github.com/moq-dev/moq/pull/5512) and the gstreamer-rs 0.25
-  bump in [#6169](https://github.com/moq-dev/moq/pull/6169).
+  [moq-dev/moq#5512](https://github.com/moq-dev/moq/pull/5512) and the gstreamer-rs 0.25
+  bump in [moq-dev/moq#6169](https://github.com/moq-dev/moq/pull/6169).
 - `group_write_frames` (1.67x) and `track_stamp_groups/sparse` (1.48x, down
   from 4.4x) are the per-frame and per-group costs accepted above, as are the
   session join, burst, and delivery families (1.2x to 1.76x).
