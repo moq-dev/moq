@@ -23,12 +23,16 @@ Decided 2026-11-05 (maintainer):
 - ✅ One quest for fMP4 and TS: both carry ISO 639-2 codes and share the
   mapping. Not chosen: a quest per container.
 - ✅ Map with the `isolang` crate (both the /B and /T codes to 639-1, else
-  keep the three-letter code). An fMP4 `elng` box, already BCP-47, wins over
-  `mdhd`. Not chosen: a hand-written table (data to keep correct), or
+  keep the three-letter code). `isolang` knows only 639-3 (= /T for these
+  codes), so the ~20 /B codes (`fre`, `ger`, `dut`, `chi`, ...) normalize to
+  /T through a small alias table first; an unmapped code never publishes a
+  /B form. An fMP4 `elng` box, already BCP-47, wins over `mdhd`; mp4-atom
+  0.17 does not decode `elng`, so this quest adds it to `Mdia` upstream. Not chosen: a hand-written table (data to keep correct), or
   publishing codes raw and matching 639-2 in every player.
 
-Public API: none. Wire: `lang` values change from `eng` to `en` for fMP4
-text.
+Public API: none. Wire: fMP4 text `lang` changes from `eng` to `en` and
+from `und` to unset; fMP4 audio and TS audio and text `lang` become set
+where they were unset.
 
 ## Required
 

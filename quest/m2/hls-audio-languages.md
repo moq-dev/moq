@@ -21,10 +21,17 @@ its own playlist, and write the language on export. Ingest then fetches
 every language's segments, which is the cost of carrying them. Not chosen:
 keeping single-audio import and only tagging the chosen entry.
 
-`LANGUAGE` is already BCP-47 per RFC 8216, so it passes through. Entries
-without a `URI` (audio muxed into the variant) stay as today.
+`LANGUAGE` is already BCP-47 per RFC 8216, so it passes through. An entry
+without a `URI` describes audio muxed into the variant: that muxed audio
+stays one rendition (`select_muxed()`), now tagged with the entry's
+`LANGUAGE` and `NAME`. A group mixing URI-less and URI-backed entries keeps
+the muxed audio and adds each URI-backed entry beside it, so the
+`self.audio` gate picks `select_video_only()` only when the group has no
+URI-less entry.
 
-Public API: none. Wire: none beyond more audio renditions in the catalog.
+Public API: none (the audio `label` field already exists). Wire: more
+audio renditions in the catalog, and audio `lang` and `label` now set from
+`LANGUAGE` and `NAME`.
 
 ## Required
 
