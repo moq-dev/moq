@@ -333,13 +333,29 @@ per delivered group at 512 subscribers through the in-process session:
 In-tree qmux ([moq-dev/moq#6231](https://github.com/moq-dev/moq/pull/6231))
 and receive leases ([moq-dev/moq#5878](https://github.com/moq-dev/moq/pull/5878))
 add no measurable relay cost on chat over io\_uring, each against its parent
-on the quiet test host, so neither needs accepting. Public ingest's relay cost
-is larger than the model counted and waits on a decision in the
-[bisect](/quest/m1/release-perf/relay-cpu-bisect.md).
+on the quiet test host, so neither needs accepting.
+
+Public ingest ([moq-dev/moq#6111](https://github.com/moq-dev/moq/pull/6111))
+cost the relay +10.5k per frame on chat over io\_uring, far above the model's
++200, because each viewer's read now reaches a group before its first frame.
+Decided 2026-11-05 (maintainer): cut what a live read pays for nothing.
+[moq-dev/moq#7874](https://github.com/moq-dev/moq/pull/7874) took 3,729 per
+delivered group off the in-process session at 512 subscribers (110,581 to
+106,852, -3.4%): a blocked read asks the reader's budget only once a group
+landed above it, and the forward-drop poll skips judging copies with nothing
+to report and re-probing right after a receive. What remains of each viewer's
+live read is accepted, per delivered group through the session (see the
+[report](/.github/relay-cpu-bisect.md#public-ingests-per-viewer-read-on-main)):
+
+- The forward-drop poll's probe, about 3.5k over three polls a group, and the
+  receive's, about 3.5k over three: each wake of the track side checks for
+  groups the reader missed before taking or parking.
+- The expiry checks of a read blocked before its group's first frame and of a
+  group waiting for stream credit, 0.9k: each parks on the next landing so a
+  stalled group expires.
 
 ## Required
 
-- [Relay CPU per frame since #5926](/quest/m1/release-perf/relay-cpu-bisect.md) - the 18-56% rise in relay instructions per delivered frame is bisected, attributed, and its avoidable cost fixed
 - [Pacing's per-frame report](/quest/m1/release-perf/pacing-report.md) - relay fan-out reads with pacing are within noise of the pre-pacing parent
 
 ## Related

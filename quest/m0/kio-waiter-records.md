@@ -31,5 +31,4 @@ Public API: none expected. Wire: none.
 
 ## Related
 
-- [Relay CPU per frame since #5926](/quest/m1/release-perf/relay-cpu-bisect.md) - found this, measuring the waiter's registration cost
 - [Task sets release memory after a burst](/quest/m2/performance-survey/task-capacity.md) - a task slot's `Park` holds a whole `Waiter`, which 16 records grow

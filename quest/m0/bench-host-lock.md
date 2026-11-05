@@ -48,7 +48,3 @@ Either way:
 - Nightly's hosted runners run one job per machine, so they need no change.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [Find and fix the relay's per-frame CPU growth since #5926](/quest/m1/release-perf/relay-cpu-bisect.md) - the bisect that overlapped

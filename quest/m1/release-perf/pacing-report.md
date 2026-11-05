@@ -17,6 +17,14 @@ pacing, against its parent `b51eb8c` is 4.6-8.1% slower on
 `group_relay_frames` in all 12 cases with 512+ frames (64-byte payloads, the
 worst case for a per-frame cost); 4-frame groups and `group_read_frames` are
 unchanged. The likely cause is the per-read progress report #7388 added to
-the batch read path; profile it first (`just bench-profile instructions`, as
-[the relay CPU bisect](/quest/m1/release-perf/relay-cpu-bisect.md) does),
-then report progress per batch or only when the pacing window can change.
+the batch read path; profile it first, then report progress per batch or
+only when the pacing window can change.
+
+Counted 2026-11-05 in [moq-dev/moq#7874](https://github.com/moq-dev/moq/pull/7874)
+with `just bench-fanout <revisions> group`, which drains a 512-frame group as
+`group_relay_frames/plain/512` does: pacing adds 3,007 instructions per drained
+group (149,368 to 152,375, +2.0%). Most of the loaded host's 15% from
+`e7a5c10` to `f37d964` was [moq-dev/moq#7504](https://github.com/moq-dev/moq/pull/7504)'s
+idle gate on every frame read (+12.7%), which that PR took back with more: the
+drain is now 135,396, 9.4% below pacing's parent, pacing included (see the
+[report](/.github/relay-cpu-bisect.md#group_relay_frames-since-e7a5c10)).

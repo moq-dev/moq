@@ -160,7 +160,43 @@ Neither costs measurably: each change is inside its own rounds' spread. The rise
 
 Public ingest added +10.5k per frame here, against +200 per group through the model, because the model scenario never reads a frame. It stopped withholding groups: every group joins arrival order when created, so each viewer's read reaches a group before its first frame and blocks on it. By function (rounds 2 and 3), the rise is each viewer's group serving (`GroupServe`, +5.3k inclusive: `group::Consumer::poll_read_frame` and the new `poll_next_frame`, with the expiry checks a blocked read runs, `poll_expired_if_blocked`, `poll_expired_while_pending`, `Recover::poll_budget`, and `watch_landing`), new track-state lock polls in the forward-drop, receive, and staleness paths (+3.8k), and the lock and unlock leaves (+2.0k self).
 
-On `main`, the in-process session's group read (`group::Consumer::poll_read_objects`) costs 4.5k per delivered group (run 4rAIYS), of which `GroupExpiry::is_expired` is 1.6k, `Consumer::poll_expiry` 1.4k, and `Recover::poll_budget` 1.0k. `poll_expiry` asks the budget before `is_expired`, which answers false without it while nothing landed above the group, but the budget's poll also syncs the reader's mirrored preferences, so skipping it is not a change that can be made without proving that sync redundant.
+## Public ingest's per-viewer read on `main`
+
+Decided 2026-11-05 (maintainer): keep cutting public ingest's relay cost. The in-process session reads every frame, so it reaches the read path public ingest opened. Counted at 512 subscribers per delivered group, each change against the commit before it:
+
+| Change | Session | Change |
+| --- | ---: | ---: |
+| This branch at [45351ac1d8](https://github.com/moq-dev/moq/commit/45351ac1d8) (`main` at [246916845a](https://github.com/moq-dev/moq/commit/246916845a)) | 110,581 | |
+| A blocked read asks the reader's budget only once a group landed above it | 109,968 | -613 |
+| A reader's drop poll with nothing to report returns at once | 108,803 | -1,166 |
+| A drop poll right after a receive only collects what the receive queued, and the frame read inlines again | 106,833 | -1,992 |
+| A prefetched frame is read before the idle gate | 106,853 | 0 |
+| All of them (run 1gKfjA; callgrind 105,665 to 101,955) | 106,852 | -3,729 (-3.4%) |
+
+Each change is counted against the row above in its own run (N037x9, vS3CAR, DV13e7, lr8Dpl), and the total in one run. A chat group has one frame, so the prefetch change shows only in the `group` drain below.
+
+- **The budget.** A read that blocks before its group's first frame judges the group's expiry. `Consumer::poll_expiry` asked the logical reader's budget (`Recover::poll_budget`: the reader's lock and a sync of its mirrored preferences) before `is_expired`, which answers false without the budget until a group lands above. The sync is redundant there: a preference update mirrors into every copy at once (`Mirror::sync`), a route change syncs every reader (`serve_from`), and the landing that makes the budget matter wakes the read through `watch_landing`, which then asks the budget. `is_expired` now takes the `Recover` and asks only past that check.
+- **The forward drop.** The relay's track side polls the reader for runs to report (`TrackRun::poll_forward_drop`) on each track wake, and again after a receive that parked, to collect a stale skip the receive's probe queued without a wake. Each poll judged every copy (`Reader::let_go`) with nothing to report, and the second probed the live edge again (`Cursor::poll_drift` and `probe`) right after the receive had, with the same waiter. The reader now returns once nothing is queued, and the second poll only collects. Drop probes fall from 5 to 3 per delivered group.
+
+What remains of each viewer's live read is accepted in the [release-perf epic](../quest/m1/release-perf/README.md): about 3.5k per delivered group in the drop poll's probe and 3.5k in the receive's (three each, one wake of each kind), and 0.9k in the expiry checks of a read that blocks before its first frame and of a group waiting for stream credit, which park on the next landing.
+
+## `group_relay_frames` since `e7a5c10`
+
+[Fastest-reader pacing](https://github.com/moq-dev/moq/pull/7664)'s comparison found `group_relay_frames` about 15% slower at [f37d964dd3](https://github.com/moq-dev/moq/commit/f37d964dd3) than at [e7a5c10913](https://github.com/moq-dev/moq/commit/e7a5c10913) on a loaded host. The `group` fan-out scenario counts the same drain (every subscriber reads a finished 512-frame group in 16-frame batches), per drained group (runs yLeXzU, S9A3hY, R849HM):
+
+| Revision | Instructions | Change |
+| --- | ---: | ---: |
+| [e7a5c10913](https://github.com/moq-dev/moq/commit/e7a5c10913) | 149,368 | |
+| [b51eb8cdec](https://github.com/moq-dev/moq/commit/b51eb8cdec), before pacing | 149,368 | |
+| [7ad8d426e0](https://github.com/moq-dev/moq/commit/7ad8d426e0), pacing, [moq-dev/moq#7388](https://github.com/moq-dev/moq/pull/7388) | 152,375 | +3,007 (+2.0%) |
+| [ad3ca7784a](https://github.com/moq-dev/moq/commit/ad3ca7784a), before idle frame reads | 152,375 | |
+| [25ff6e9754](https://github.com/moq-dev/moq/commit/25ff6e9754), idle frame reads, [moq-dev/moq#7504](https://github.com/moq-dev/moq/pull/7504) | 171,694 | +19,319 (+12.7%) |
+| [8b46ba5b33](https://github.com/moq-dev/moq/commit/8b46ba5b33), smaller group consumers, [moq-dev/moq#7791](https://github.com/moq-dev/moq/pull/7791) | 172,205 | +511 |
+| [f37d964dd3](https://github.com/moq-dev/moq/commit/f37d964dd3) | 172,205 | |
+| This branch at [45351ac1d8](https://github.com/moq-dev/moq/commit/45351ac1d8) | 173,231 | +1,026 |
+| This PR (run 1gKfjA) | 135,396 | -37,835 (-21.8%) |
+
+The +15.3% matches the wall-clock report. Nine other candidates between pacing and `f37d964dd3` count the same as their predecessor. [moq-dev/moq#7504](https://github.com/moq-dev/moq/pull/7504) put an idle gate in front of every frame read and split the read into a second out-of-line layer called from two branches, so each frame paid a call frame and the gate's bookkeeping, about 38 instructions on top of about 297. A frame already in the reader's prefetched batch now returns before the gate, the drift budget, or a route, none of which can apply to it (a read parks only with its batch drained, and a copy adopted mid-group starts empty); what remains below has one call site. The drain is now 9.4% below `e7a5c10913`, pacing included.
 
 ## Validation
 

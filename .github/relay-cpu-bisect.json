@@ -3480,7 +3480,7 @@
 			]
 		}
 	],
-	"fanout_method": "just bench-fanout: user instructions per delivered group on one pinned thread, a run of many cycles less a run of zero, at the listed subscriber counts; model = the track model alone, session = publisher, relay origin, and viewers over the in-memory transport",
+	"fanout_method": "just bench-fanout: user instructions per delivered group on one pinned thread, a run of many cycles less a run of zero, at the listed subscriber counts; model = the track model alone, session = publisher, relay origin, and viewers over the in-memory transport; group = every subscriber drains one finished 512-frame group in 16-frame batches, as group_relay_frames/plain/512 does, per drained group",
 	"fanout_runs": [
 		{
 			"artifact": "hist",
@@ -5368,6 +5368,552 @@
 					"per_group": 109123.37050581952
 				}
 			]
+		},
+		{
+			"artifact": "desktop:run.N037x9",
+			"note": "the reader's budget asked only past the landing check (working tree) against this branch at 45351ac1d8 (base), with callgrind",
+			"harness_revision": "45351ac1d8025de6050557246b751f584e096a3a",
+			"frame_pointers": false,
+			"counts": [
+				{
+					"label": "base",
+					"revision": "45351ac1d8025de6050557246b751f584e096a3a",
+					"scenario": "session",
+					"subscribers": 1,
+					"per_group": 225948.00391
+				},
+				{
+					"label": "base",
+					"revision": "45351ac1d8025de6050557246b751f584e096a3a",
+					"scenario": "session",
+					"subscribers": 512,
+					"per_group": 110581.19509327169
+				},
+				{
+					"label": "current",
+					"revision": "45351ac1d8025de6050557246b751f584e096a3a",
+					"scenario": "session",
+					"subscribers": 1,
+					"per_group": 224883.27597
+				},
+				{
+					"label": "current",
+					"revision": "45351ac1d8025de6050557246b751f584e096a3a",
+					"scenario": "session",
+					"subscribers": 512,
+					"per_group": 109968.52706473214
+				}
+			],
+			"callgrind": {
+				"callgrind program total, session 512": {
+					"base": 105677.4,
+					"current": 105084.2
+				}
+			}
+		},
+		{
+			"artifact": "desktop:run.vS3CAR",
+			"note": "the lazy budget plus an empty drop report returning at once (working tree) against 45351ac1d8, with callgrind",
+			"harness_revision": "45351ac1d8025de6050557246b751f584e096a3a",
+			"frame_pointers": false,
+			"counts": [
+				{
+					"label": "base",
+					"revision": "45351ac1d8025de6050557246b751f584e096a3a",
+					"scenario": "session",
+					"subscribers": 512,
+					"per_group": 110582.39753069196
+				},
+				{
+					"label": "current",
+					"revision": "45351ac1d8025de6050557246b751f584e096a3a",
+					"scenario": "session",
+					"subscribers": 512,
+					"per_group": 108802.951430963
+				}
+			],
+			"callgrind": {
+				"callgrind program total, session 512": {
+					"base": 105676.3,
+					"current": 103945.7
+				}
+			}
+		},
+		{
+			"artifact": "desktop:run.yLeXzU",
+			"note": "group drain at the quest endpoints e7a5c10913 and f37d964dd3, and pacing (moq-dev/moq#7388, 7ad8d426e0) against its parent b51eb8cdec; current is c6753bd267 plus the group harness",
+			"harness_revision": "45351ac1d8025de6050557246b751f584e096a3a",
+			"frame_pointers": false,
+			"counts": [
+				{
+					"label": "base-e7a5c10913b0",
+					"revision": "e7a5c10913b02e21ef851a0250b594fe837d1425",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 149368.3935
+				},
+				{
+					"label": "base-e7a5c10913b0",
+					"revision": "e7a5c10913b02e21ef851a0250b594fe837d1425",
+					"scenario": "group",
+					"subscribers": 64,
+					"per_group": 149362.45849609375
+				},
+				{
+					"label": "base-b51eb8cdecc3",
+					"revision": "b51eb8cdecc33c858f6df8f3b2ccbcba88b9535e",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 149368.3935
+				},
+				{
+					"label": "base-b51eb8cdecc3",
+					"revision": "b51eb8cdecc33c858f6df8f3b2ccbcba88b9535e",
+					"scenario": "group",
+					"subscribers": 64,
+					"per_group": 149362.45947265625
+				},
+				{
+					"label": "base-7ad8d426e072",
+					"revision": "7ad8d426e072a4b1f03483204ec2c9ae8d3d3ffb",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 152375.13
+				},
+				{
+					"label": "base-7ad8d426e072",
+					"revision": "7ad8d426e072a4b1f03483204ec2c9ae8d3d3ffb",
+					"scenario": "group",
+					"subscribers": 64,
+					"per_group": 152369.22412109375
+				},
+				{
+					"label": "base-f37d964dd319",
+					"revision": "f37d964dd31987efe34b55375902de1380474235",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 172205.171
+				},
+				{
+					"label": "base-f37d964dd319",
+					"revision": "f37d964dd31987efe34b55375902de1380474235",
+					"scenario": "group",
+					"subscribers": 64,
+					"per_group": 172199.2099609375
+				},
+				{
+					"label": "current",
+					"revision": "c6753bd267f892c62ec1a2b8bff25ab559a68d8a",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 173221.225
+				},
+				{
+					"label": "current",
+					"revision": "c6753bd267f892c62ec1a2b8bff25ab559a68d8a",
+					"scenario": "group",
+					"subscribers": 64,
+					"per_group": 173215.2705078125
+				}
+			]
+		},
+		{
+			"artifact": "desktop:run.S9A3hY",
+			"note": "group drain after each candidate commit between pacing and f37d964dd3: the step is moq-dev/moq#7504 (25ff6e9754 against ad3ca7784a), then moq-dev/moq#7791 (8b46ba5b33)",
+			"harness_revision": "45351ac1d8025de6050557246b751f584e096a3a",
+			"frame_pointers": false,
+			"counts": [
+				{
+					"label": "base-2ec2f1d55e55",
+					"revision": "2ec2f1d55e5588f32374f5b004a7d6bd7efc9453",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 152375.3145
+				},
+				{
+					"label": "base-dde50c699f69",
+					"revision": "dde50c699f69507ced243754c2f700a6184d1576",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 152375.3475
+				},
+				{
+					"label": "base-24b04633a58c",
+					"revision": "24b04633a58cbff0144531efdb450cf227133e67",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 152375.134
+				},
+				{
+					"label": "base-f1034b7cc973",
+					"revision": "f1034b7cc973009bb33abfd06404be1a1dea0266",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 152375.1585
+				},
+				{
+					"label": "base-5ab878666c31",
+					"revision": "5ab878666c312fc2a497a31656630efeb02ca55f",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 152375.2045
+				},
+				{
+					"label": "base-ad3ca7784aa0",
+					"revision": "ad3ca7784aa00f7b8b93b8a8076304673c50e733",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 152375.2585
+				},
+				{
+					"label": "base-25ff6e97546f",
+					"revision": "25ff6e97546f59dcebde66f43b67ba55f590867c",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 171694.186
+				},
+				{
+					"label": "base-976fece17349",
+					"revision": "976fece17349666bb2ab6dad93109408ac272e8d",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 171694.1055
+				},
+				{
+					"label": "base-ee8e42a95b6c",
+					"revision": "ee8e42a95b6c2d880dc1fd0b846c47886330ecf7",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 171694.1265
+				},
+				{
+					"label": "base-8b46ba5b330f",
+					"revision": "8b46ba5b330f6bbc93aa415af6c27dbb935c4e6a",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 172205.6565
+				},
+				{
+					"label": "base-ffcb7cd97484",
+					"revision": "ffcb7cd9748422daa30e935ec464108b5a8ebb71",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 172205.268
+				},
+				{
+					"label": "current",
+					"revision": "c6753bd267f892c62ec1a2b8bff25ab559a68d8a",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 173221.276
+				}
+			]
+		},
+		{
+			"artifact": "desktop:run.R849HM",
+			"note": "group drain with callgrind across moq-dev/moq#7504",
+			"harness_revision": "45351ac1d8025de6050557246b751f584e096a3a",
+			"frame_pointers": false,
+			"counts": [
+				{
+					"label": "base-ad3ca7784aa0",
+					"revision": "ad3ca7784aa00f7b8b93b8a8076304673c50e733",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 152375.0475
+				},
+				{
+					"label": "base-25ff6e97546f",
+					"revision": "25ff6e97546f59dcebde66f43b67ba55f590867c",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 171694.049
+				},
+				{
+					"label": "current",
+					"revision": "c6753bd267f892c62ec1a2b8bff25ab559a68d8a",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 173221.221
+				}
+			],
+			"callgrind": {
+				"callgrind group 1, 25ff6e9754 against ad3ca7784a": {
+					"program total": 19319.0,
+					"poll_read_frame_through, new out-of-line layer, self": 10773.0,
+					"poll_read_frame self": 7182.0,
+					"Park::hold self": 1452.0
+				}
+			}
+		},
+		{
+			"artifact": "desktop:run.DV13e7",
+			"note": "one inline read call site plus the drain-only post-receive drop poll (working tree) against c6753bd267",
+			"harness_revision": "45351ac1d8025de6050557246b751f584e096a3a",
+			"frame_pointers": false,
+			"counts": [
+				{
+					"label": "base",
+					"revision": "c6753bd267f892c62ec1a2b8bff25ab559a68d8a",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 173221.169
+				},
+				{
+					"label": "base",
+					"revision": "c6753bd267f892c62ec1a2b8bff25ab559a68d8a",
+					"scenario": "group",
+					"subscribers": 512,
+					"per_group": 173215.162109375
+				},
+				{
+					"label": "current",
+					"revision": "c6753bd267f892c62ec1a2b8bff25ab559a68d8a",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 169115.225
+				},
+				{
+					"label": "current",
+					"revision": "c6753bd267f892c62ec1a2b8bff25ab559a68d8a",
+					"scenario": "group",
+					"subscribers": 512,
+					"per_group": 169109.18017578125
+				},
+				{
+					"label": "base",
+					"revision": "c6753bd267f892c62ec1a2b8bff25ab559a68d8a",
+					"scenario": "session",
+					"subscribers": 1,
+					"per_group": 222587.67073
+				},
+				{
+					"label": "base",
+					"revision": "c6753bd267f892c62ec1a2b8bff25ab559a68d8a",
+					"scenario": "session",
+					"subscribers": 512,
+					"per_group": 108824.46070830675
+				},
+				{
+					"label": "current",
+					"revision": "c6753bd267f892c62ec1a2b8bff25ab559a68d8a",
+					"scenario": "session",
+					"subscribers": 1,
+					"per_group": 218679.16904
+				},
+				{
+					"label": "current",
+					"revision": "c6753bd267f892c62ec1a2b8bff25ab559a68d8a",
+					"scenario": "session",
+					"subscribers": 512,
+					"per_group": 106832.64318598533
+				}
+			]
+		},
+		{
+			"artifact": "desktop:run.lr8Dpl",
+			"note": "the prefetch served first, with the changes above (working tree), against c6753bd267 and ad3ca7784a (before moq-dev/moq#7504)",
+			"harness_revision": "45351ac1d8025de6050557246b751f584e096a3a",
+			"frame_pointers": false,
+			"counts": [
+				{
+					"label": "base-c6753bd267f8",
+					"revision": "c6753bd267f892c62ec1a2b8bff25ab559a68d8a",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 173221.166
+				},
+				{
+					"label": "base-c6753bd267f8",
+					"revision": "c6753bd267f892c62ec1a2b8bff25ab559a68d8a",
+					"scenario": "group",
+					"subscribers": 512,
+					"per_group": 173215.119140625
+				},
+				{
+					"label": "base-ad3ca7784aa0",
+					"revision": "ad3ca7784aa00f7b8b93b8a8076304673c50e733",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 152375.051
+				},
+				{
+					"label": "base-ad3ca7784aa0",
+					"revision": "ad3ca7784aa00f7b8b93b8a8076304673c50e733",
+					"scenario": "group",
+					"subscribers": 512,
+					"per_group": 152369.01806640625
+				},
+				{
+					"label": "current",
+					"revision": "c6753bd267f892c62ec1a2b8bff25ab559a68d8a",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 135396.2205
+				},
+				{
+					"label": "current",
+					"revision": "c6753bd267f892c62ec1a2b8bff25ab559a68d8a",
+					"scenario": "group",
+					"subscribers": 512,
+					"per_group": 135390.17578125
+				},
+				{
+					"label": "base-c6753bd267f8",
+					"revision": "c6753bd267f892c62ec1a2b8bff25ab559a68d8a",
+					"scenario": "session",
+					"subscribers": 1,
+					"per_group": 222589.22774
+				},
+				{
+					"label": "base-c6753bd267f8",
+					"revision": "c6753bd267f892c62ec1a2b8bff25ab559a68d8a",
+					"scenario": "session",
+					"subscribers": 512,
+					"per_group": 108795.25971580038
+				},
+				{
+					"label": "base-ad3ca7784aa0",
+					"revision": "ad3ca7784aa00f7b8b93b8a8076304673c50e733",
+					"scenario": "session",
+					"subscribers": 1,
+					"per_group": 243706.45894
+				},
+				{
+					"label": "base-ad3ca7784aa0",
+					"revision": "ad3ca7784aa00f7b8b93b8a8076304673c50e733",
+					"scenario": "session",
+					"subscribers": 512,
+					"per_group": 120849.10758131377
+				},
+				{
+					"label": "current",
+					"revision": "c6753bd267f892c62ec1a2b8bff25ab559a68d8a",
+					"scenario": "session",
+					"subscribers": 1,
+					"per_group": 218664.50306
+				},
+				{
+					"label": "current",
+					"revision": "c6753bd267f892c62ec1a2b8bff25ab559a68d8a",
+					"scenario": "session",
+					"subscribers": 512,
+					"per_group": 106852.6315369898
+				}
+			]
+		},
+		{
+			"artifact": "desktop:run.1gKfjA",
+			"note": "this PR (f2d552cca7) against 45351ac1d8 and e7a5c10913, with callgrind",
+			"harness_revision": "f2d552cca7",
+			"frame_pointers": false,
+			"counts": [
+				{
+					"label": "base-45351ac1d802",
+					"revision": "45351ac1d8025de6050557246b751f584e096a3a",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 173231.1615
+				},
+				{
+					"label": "base-45351ac1d802",
+					"revision": "45351ac1d8025de6050557246b751f584e096a3a",
+					"scenario": "group",
+					"subscribers": 512,
+					"per_group": 173225.1162109375
+				},
+				{
+					"label": "base-e7a5c10913b0",
+					"revision": "e7a5c10913b02e21ef851a0250b594fe837d1425",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 149368.395
+				},
+				{
+					"label": "base-e7a5c10913b0",
+					"revision": "e7a5c10913b02e21ef851a0250b594fe837d1425",
+					"scenario": "group",
+					"subscribers": 512,
+					"per_group": 149362.369140625
+				},
+				{
+					"label": "current",
+					"revision": "f2d552cca7370cb9ba3fc636ed2d03f66c4d3559",
+					"scenario": "group",
+					"subscribers": 1,
+					"per_group": 135396.222
+				},
+				{
+					"label": "current",
+					"revision": "f2d552cca7370cb9ba3fc636ed2d03f66c4d3559",
+					"scenario": "group",
+					"subscribers": 512,
+					"per_group": 135390.17578125
+				},
+				{
+					"label": "base-45351ac1d802",
+					"revision": "45351ac1d8025de6050557246b751f584e096a3a",
+					"scenario": "session",
+					"subscribers": 1,
+					"per_group": 225948.01262
+				},
+				{
+					"label": "base-45351ac1d802",
+					"revision": "45351ac1d8025de6050557246b751f584e096a3a",
+					"scenario": "session",
+					"subscribers": 512,
+					"per_group": 110581.04552973533
+				},
+				{
+					"label": "base-e7a5c10913b0",
+					"revision": "e7a5c10913b02e21ef851a0250b594fe837d1425",
+					"scenario": "session",
+					"subscribers": 1,
+					"per_group": 233562.49815
+				},
+				{
+					"label": "base-e7a5c10913b0",
+					"revision": "e7a5c10913b02e21ef851a0250b594fe837d1425",
+					"scenario": "session",
+					"subscribers": 512,
+					"per_group": 115444.22222775829
+				},
+				{
+					"label": "current",
+					"revision": "f2d552cca7370cb9ba3fc636ed2d03f66c4d3559",
+					"scenario": "session",
+					"subscribers": 1,
+					"per_group": 218664.30033
+				},
+				{
+					"label": "current",
+					"revision": "f2d552cca7370cb9ba3fc636ed2d03f66c4d3559",
+					"scenario": "session",
+					"subscribers": 512,
+					"per_group": 106852.35546875
+				}
+			],
+			"callgrind": {
+				"callgrind program total": {
+					"session 512": {
+						"base 45351ac1d8": 105664.8,
+						"current": 101955.4
+					},
+					"session 1": {
+						"base 45351ac1d8": 224392.4,
+						"current": 217119.1
+					},
+					"group 1": {
+						"base 45351ac1d8": 173254.5,
+						"current": 135420.1
+					}
+				},
+				"current session 512 by caller": {
+					"Cursor::probe from the drop poll": 3467,
+					"Cursor::probe from the receive peek": 3460,
+					"group::Consumer::poll_expiry (a blocked read and an opening group)": 886
+				}
+			}
 		}
 	],
 	"quiet_host_runs": [
