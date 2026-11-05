@@ -52,13 +52,15 @@ pub(super) struct PathData {
 	generation: u64,
 }
 
-/// Builds the configured congestion controller for a path starting now at `mtu`.
-fn build_congestion(now: Instant, mtu: u16, config: &transport::Config) -> Box<dyn congestion::Controller> {
+/// Builds the configured congestion controller for a path starting now at `mtu`, randomized
+/// from `seed`.
+fn build_congestion(now: Instant, mtu: u16, seed: u64, config: &transport::Config) -> Box<dyn congestion::Controller> {
 	config.congestion.clone().build(congestion::Init {
 		now,
 		mtu,
 		rtt: config.initial_rtt,
 		max_pacing_rate: config.max_outgoing_bytes_per_second,
+		seed,
 	})
 }
 
@@ -69,6 +71,7 @@ impl PathData {
 		peer_max_udp_payload_size: Option<u16>,
 		generation: u64,
 		now: Instant,
+		seed: u64,
 		config: &transport::Config,
 	) -> Self {
 		let mut mtud = config.mtu.as_ref().filter(|_| allow_mtud).map_or_else(
@@ -85,7 +88,7 @@ impl PathData {
 			rtt: RttEstimator::new(config.initial_rtt),
 			sending_ecn: true,
 			// Sized for the MTU discovery starts at, which a known peer limit may have lowered
-			congestion: build_congestion(now, mtud.current_mtu(), config),
+			congestion: build_congestion(now, mtud.current_mtu(), seed, config),
 			challenge: None,
 			challenge_pending: false,
 			validated: false,
@@ -126,10 +129,10 @@ impl PathData {
 	///
 	/// This is useful when it is known the underlying path has changed.
 	#[cfg(test)]
-	pub(super) fn reset(&mut self, now: Instant, config: &transport::Config) {
+	pub(super) fn reset(&mut self, now: Instant, seed: u64, config: &transport::Config) {
 		self.rtt = RttEstimator::new(config.initial_rtt);
 		self.mtud.reset(config.get_initial_mtu(), config.min_mtu);
-		self.congestion = build_congestion(now, self.mtud.current_mtu(), config);
+		self.congestion = build_congestion(now, self.mtud.current_mtu(), seed, config);
 	}
 
 	/// Indicates whether we're a server that hasn't validated the peer's address and hasn't

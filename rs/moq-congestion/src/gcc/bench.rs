@@ -16,6 +16,7 @@ fn measure(flight: usize, batch: usize, steady: bool) -> Duration {
         mtu: PACKET,
         rtt: Duration::from_millis(10),
         max_pacing_rate: None,
+        seed: 0,
     });
     let bytes = u64::from(PACKET);
     let mut sent = Vec::with_capacity(2 * flight);
