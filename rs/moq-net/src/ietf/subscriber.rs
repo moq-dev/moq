@@ -17487,7 +17487,11 @@ mod joining_fetch_tests {
 		let run = JoinRun::subscribe(version, Some(0), session.clone(), Control::new(false)).await;
 		let track = {
 			let state = run.subscriber.state.lock();
-			let held = state.subscribes.values().next().expect("the subscription is registered");
+			let held = state
+				.subscribes
+				.values()
+				.next()
+				.expect("the subscription is registered");
 			held.producer.clone().expect("SUBSCRIBE_OK bound the track")
 		};
 		let mut consumer = track.subscribe(None);
