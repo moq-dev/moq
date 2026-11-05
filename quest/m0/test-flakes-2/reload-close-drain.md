@@ -34,7 +34,8 @@ Public API: none. Wire: none.
 2026-11-04: no reproduction on the unchanged claim based on `origin/main`.
 
 - `quest gate bun test --cwd js/net --rerun-each 20 --only-failures`
-  ran all 20 reload-file rounds without a drain-case failure. The package
+  finished with 58,645 passes, 40 skips, and 95 failures across 121 files
+  (476.88 seconds). All 20 reload-file rounds passed. The package
   batch also exposes unrelated rerun failures in the benchmark import test
   and connection fallback tests; it is not a clean package validation.
 - A four-file batch (`connection/reload`, `connection/pool`, `connection/close`,
