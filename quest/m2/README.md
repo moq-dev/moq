@@ -35,6 +35,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [JS announced coalescing](/quest/m2/js-announced-coalesce.md) - `@moq/net`'s `Announced` keeps one pending event per path, like Rust
 - [An audio track's final flush joins its open group](/quest/m2/audio-flush-group.md) - a zero-`delay.max` subscriber gets the tail, not `Old`
 - [Release execution](/quest/m2/release/README.md) - publication, installed-artifact proof, cleanup, and downstream adoption after m1
+- [Release tags substitute from nix.moq.dev](/quest/m2/release-nix-cache.md) - the first tag after the cut substitutes on a clean machine, bucket sizes hold, and Cachix is retired
 - [Release pull requests read the R2 Rust cache](/quest/m2/mbx-r2-release-cache.md) - a release PR's `Check the cache` step reports effective read-only once the cut brings the cache to `release`
 - [Binary release publishers run on their tag](/quest/m2/release-tag-publishers.md) - brew, Go and Swift releases stop running through `workflow_run` on main, once the cut brings the workflows to `release`
 - [One policy for oversized container metadata](/quest/m2/import-metadata-policy.md) - fMP4 and MKV refuse or stream huge metadata by one documented rule

@@ -134,9 +134,8 @@ IDENTITY is now the instance.
 
 - Reword "takeover" as an event or operation, in terms of instance
   continuity, in [moq-bench pins the instances it measures](/quest/m2/bench-epoch-pin.md)
-  (Goal and Plan), [the HLS server follows each path once](/quest/m2/hls-follow-once.md)
-  (Goal and Tests), and [lite-07 route wire](/quest/m1/cluster-routing/routes/wire.md)
-  (the wire sketch, "the separately proven Takeover operation").
+  (Goal and Plan) and [the HLS server follows each path once](/quest/m2/hls-follow-once.md)
+  (Goal and Tests).
 - Rewrite the EPOCH references in `drafts/draft-lcurley-moq-cluster.md` and
   `drafts/draft-lcurley-moq-epoch.md` in terms of the instance.
 - Add a regression test where a publisher restart's new announcement

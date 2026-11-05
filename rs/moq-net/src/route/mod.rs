@@ -48,9 +48,9 @@ pub(crate) type Seqno = u64;
 /// An origin's claim revision, advancing on every change to its own claims.
 pub(crate) type Rev = u64;
 
-/// The largest lite-07 varint. As a metric it means held; no origin ever
-/// advertises it as a seqno or revision, rotating its identity instead, so every
-/// advertised seqno leaves room for the successor a request names.
+/// The largest lite-07 varint. No origin ever advertises it as a seqno or revision,
+/// rotating its identity instead, so every advertised seqno leaves room for the
+/// successor a request names, and every revision for ANNOUNCE_FLOOR's offset.
 pub(crate) const MAX: u64 = u64::MAX;
 
 /// A neighbor key, bounded so per-identity state can be read as one range.
@@ -131,15 +131,15 @@ pub(crate) struct Advert {
 pub(crate) enum Reach {
 	/// A usable route.
 	Finite(Advert),
-	/// An infinite metric: unusable, but the sender still holds the identity's
-	/// announcements while it recovers. Only follows a finite route.
+	/// Unusable, but the sender still holds the identity's announcements while it
+	/// recovers. Only follows a finite route.
 	Held,
 }
 
 /// A message for one neighbor.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Out<N, A> {
-	/// ROUTE_START or ROUTE_UPDATE, or ROUTE_END for `None`.
+	/// ROUTE_START or ROUTE_UPDATE, ROUTE_HOLD for a held reach, or ROUTE_END for `None`.
 	Route { to: N, id: Id, reach: Option<Reach> },
 	/// A batch of announcement changes for `id`, closed by its floor list, which
 	/// replaces the last one sent for that route.
@@ -1349,8 +1349,8 @@ impl<N: Key, A: Clone + Eq> Router<N, A> {
 	}
 }
 
-/// `metric` plus a strictly positive link `cost`, or `None` when it reaches the
-/// infinite metric: overflow is unreachable, never saturated.
+/// `metric` plus a strictly positive link `cost`, or `None` when it overflows: an
+/// overflowed route is unreachable, never saturated.
 fn add(metric: Metric, cost: Metric) -> Option<Metric> {
-	metric.checked_add(cost).filter(|&metric| metric < MAX)
+	metric.checked_add(cost)
 }

@@ -138,4 +138,4 @@ feature unification, so changed compiler inputs remain a separate cause.
 
 ## Related
 
-- [Verify the Nix cache](/quest/m0/ci/nix-cache-verify.md) - the same R2 and Environment bootstrap for Nix
+- [Verify the Nix runtime cache](/quest/m0/ci/nix-cache-verify.md) - the same R2 and Environment bootstrap for Nix

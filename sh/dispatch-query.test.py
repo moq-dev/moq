@@ -661,7 +661,6 @@ esac
             ("flake.nix", True),
             ("flake.lock", True),
             ("nix/runner/hog.py", True),
-            ("nix/runner/migrate.sh", True),
             ("infra/example.nix", True),
             ("quest/m1/example.md", False),
         ):

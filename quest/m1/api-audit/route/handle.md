@@ -43,7 +43,7 @@ Non-goals: the instance model ([Instance and epoch](https://github.com/moq-dev/m
 announce events (a path listing plus `follow` since
 [moq-dev/moq#7678](https://github.com/moq-dev/moq/pull/7678)),
 the read side, which instance owns, and the route layer's wire metric
-([lite-07 route wire](/quest/m1/cluster-routing/routes/wire.md)).
+(`drafts/draft-lcurley-moq-lite.md`).
 
 ## Plan
 
