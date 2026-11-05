@@ -523,6 +523,23 @@ describe("tracks", () => {
 		sync.close();
 	});
 
+	it("keeps the survivor's own skip when the reference moves back to it", async () => {
+		const sync = new Sync({ delay: Milli(100) });
+		const audio = sync.track({ target: target() });
+		const video = sync.track({ target: target() });
+		await flush();
+		// Video skips its own playhead from 900 to 1400, then audio's burst skips it to 2900.
+		video.received(Milli(1000), Milli(5000));
+		video.received(Milli(1500), Milli(5000));
+		audio.received(Milli(3000), Milli(5000));
+
+		audio.reset();
+		expect(sync.now()).toBe(Milli(1400));
+		expect(video.presentable(Milli(1300))).toBe(false);
+		expect(video.presentable(Milli(1450))).toBe(true);
+		sync.close();
+	});
+
 	it("keeps the playhead where buffered startup put it when the owner leaves", async () => {
 		const sync = new Sync({ delay: Milli(100), buffer: Milli(1000) });
 		const audioSpan = new Signal<{ start: Milli; end: Milli } | null>(null);

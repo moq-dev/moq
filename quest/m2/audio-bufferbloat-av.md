@@ -4,16 +4,15 @@
 
 A nightly test sends audio and video together through a bufferbloated link
 and proves audio holds up better than video: audio stays within its underrun
-and skip budgets while video may freeze or skip, and every video frame that
-renders is in sync with audio. Today no test publishes both through the
-shaper, and the audio-quality profiles leave rate limits off.
+and skip budgets while video may freeze, skip, or lag audio. Today no test
+publishes both through the shaper, and the audio-quality profiles leave rate
+limits off.
 
 ## Plan
 
 Decided in planning (2026-10-20):
 
-- Behavior asserted is today's design: continuity plus sync. Audio is sent
-  first (players subscribe to audio at a higher priority than video) and its
+- Behavior asserted is audio continuity. Audio is sent first (players subscribe to audio at a higher priority than video) and its
   ring plays through a video stall. In `"auto"` delay the shared target is
   the deepest track's, so late video raises audio latency too; that is expected, not a failure. Making
   audio latency independent of video would be a player change, not this
@@ -21,10 +20,11 @@ Decided in planning (2026-10-20):
 - Extend `test/audio-quality` rather than routing media QA through the
   shaper: add rows whose publisher sends the media QA pattern (frame counter
   plus stepped tone), and reuse the tap worklet, budgets, captures, and
-  replays. Add media QA's sync probe to grade rendered frames against the
-  same sync bound `just test media` holds the browser to. Video freezes and
-  skips are reported, not gated: the point is that audio does not pay for
-  them.
+  replays. Add media QA's sync probe to report each rendered frame's gap to
+  audio. Video freezes, skips, and lag are reported, not gated: the point is
+  that audio does not pay for them. Since 2026-11-05 the shared clock never
+  follows audio, so congested video lags it by design, and steady-state lip
+  sync belongs to [the Watch stretch](/quest/m1/audio-jitter-target/watch.md).
 - Folded in: the native `pulse` rows become enforced. They report only
   because an intermittent two-second device stall voids about one AAC native
   row in seven (see `test/audio-quality/README.md`). Reproduce and fix that

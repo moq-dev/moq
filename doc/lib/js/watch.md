@@ -50,9 +50,12 @@ The overlay adds play/pause, volume, fullscreen, a quality selector, a
 buffering indicator, and a stats panel.
 
 Audio, video, and captions play from one clock on local time, anchored at the
-earliest arrival, so a congested track falls behind on its own instead of
-stalling the others. A discontinuity restarts only its own track's timeline,
-and a track that stops arriving releases its hold on the clock.
+earliest arrival (with `buffer`, at the earliest retained frame once startup
+fills). A congested track falls behind on its own instead of stalling the
+others; in `auto` delay, its rising playout target still raises the delay
+every track plays at. A discontinuity restarts only its own track's timeline,
+and a track that is disabled, deselected, or fails releases its hold on the
+clock.
 
 `el.audio.out.error` and `el.video.out.error` report a fatal decode error.
 The failing track closes its subscription and stops decoding. Select another

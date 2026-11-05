@@ -785,14 +785,18 @@ for (const kind of ["legacy", "cmaf"] as const) {
 
 it("releases a failed video subscription and recovers only on a new source", async () => {
 	const close = spyOn(Moq.Track.Subscriber.prototype, "close");
+	const reset = spyOn(Track.prototype, "reset");
 	const playback = await guardedPlayback("legacy", []);
 	try {
 		const before = close.mock.calls.length;
+		const resets = reset.mock.calls.length;
 		const failure = new DOMException("invalid encoded video", "EncodingError");
 		playback.fail(failure);
 		await microtasks();
 		expect(playback.decoder.out.error.peek()).toBe(failure);
 		expect(close.mock.calls.length).toBeGreaterThan(before);
+		// Video's arrivals stop holding the shared clock.
+		expect(reset.mock.calls.length).toBeGreaterThan(resets);
 		playback.enabled.set(false);
 		await microtasks();
 		playback.enabled.set(true);
@@ -804,6 +808,7 @@ it("releases a failed video subscription and recovers only on a new source", asy
 	} finally {
 		playback.close();
 		close.mockRestore();
+		reset.mockRestore();
 	}
 });
 

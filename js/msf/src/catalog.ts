@@ -128,6 +128,9 @@ const WireCatalogSchema = z.object({
 
 /** Serialize a catalog to its JSON wire representation (draft-01). */
 export function encode(catalog: Catalog): Uint8Array {
+	// Refuse what `decode` would reject, so a publisher fails here instead of its subscribers.
+	CatalogSchema.parse(catalog);
+
 	// Hoist inline init payloads into a shared, deduplicated initDataList and
 	// reference each from its track via initRef (the draft-01 wire shape).
 	const initDataList: z.infer<typeof InitDataSchema>[] = [];

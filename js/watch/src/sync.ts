@@ -80,6 +80,8 @@ export type Part = {
 	epoch: Signal<number>;
 	// The reference this track's own arrivals hold on its current timeline.
 	anchor?: number;
+	// The furthest playhead this track's own skips jumped to, restored when it takes the reference.
+	floor?: number;
 };
 
 const wall = (): Milli => Nano.toMilli(Nano(now()));
@@ -164,6 +166,7 @@ export class Clock {
 		if (this.in.delay.peek() !== "instant") {
 			const floor = wall() - reference - delay;
 			if (this.floor === undefined || floor > this.floor) this.floor = floor;
+			if (part.floor === undefined || floor > part.floor) part.floor = floor;
 		}
 		return late;
 	}
@@ -172,6 +175,7 @@ export class Clock {
 	end(part: Part): void {
 		part.epoch.update((epoch) => epoch + 1);
 		part.anchor = undefined;
+		part.floor = undefined;
 		if (this.owner !== part) return;
 
 		// The earliest remaining track holds the reference, else the next frame anchors a new one.
@@ -190,8 +194,9 @@ export class Clock {
 		this.out.reference.set(reference);
 
 		// The floor marked frames a skip on the departed track's reference passed over. Moving back
-		// to the survivor's puts its frames ahead of the playhead again; moving forward is a skip.
-		this.floor = undefined;
+		// to the survivor's puts its frames ahead of the playhead again, except those its own skips
+		// passed over; moving forward is a skip.
+		this.floor = earliest.floor;
 		if (current !== undefined && reference < current && this.in.delay.peek() !== "instant") {
 			this.floor = wall() - reference - this.out.delay.peek();
 		}
@@ -209,7 +214,10 @@ export class Clock {
 	}
 
 	reset(): void {
-		for (const part of this.parts.peek()) part.anchor = undefined;
+		for (const part of this.parts.peek()) {
+			part.anchor = undefined;
+			part.floor = undefined;
+		}
 		this.unanchor();
 	}
 
@@ -411,8 +419,8 @@ export class Sync {
 		clock.started = true;
 		clock.owner = earliest.part;
 		// Anchor at the retained opening, not at its arrival: startup may have waited on another track.
-		// Each track's own anchor moves with it, so handing the reference to another track later keeps
-		// the playhead where startup put it.
+		// Every track's own anchor moves by the same offset, keeping the gaps between tracks that
+		// playing would have held, so a later handoff moves the playhead only by that gap.
 		const anchored = wall() - first - delay;
 		for (const part of clock.parts.peek()) {
 			if (part.anchor !== undefined) part.anchor += anchored - reference;

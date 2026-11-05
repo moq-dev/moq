@@ -244,7 +244,8 @@ export class Renderer {
 		};
 
 		const target = this.#signals.computed((effect) => {
-			if (!effect.get(this.in.enabled)) return undefined;
+			// Captions with nowhere to render hold nothing.
+			if (!effect.get(this.in.enabled) || !effect.get(this.in.container)) return undefined;
 			const delay = effect.get(this.source.out.config)?.delay;
 			return delay !== undefined ? Milli(delay) : undefined;
 		});

@@ -323,6 +323,8 @@ export class Decoder {
 			pending.close();
 			pending = undefined;
 			this.#pending.set(undefined);
+			// With no active rendition left, nothing holds video's timeline.
+			if (!this.#active.peek()) this.#clock.reset();
 		});
 		effect.set(this.#pending, { track, catalog: broadcast.out.catalog });
 
@@ -371,6 +373,8 @@ export class Decoder {
 			if (!error) return;
 			this.#recordError(active, error);
 			this.#active.set(undefined);
+			// A pending replacement carries video's timeline on; its parked frames must stay.
+			if (!this.#pending.peek()) this.#clock.reset();
 			this.#clearCurrentFrame();
 		});
 

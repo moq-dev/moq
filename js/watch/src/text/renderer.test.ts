@@ -293,7 +293,7 @@ describe("sanitizeCue", () => {
 });
 
 describe("Renderer", () => {
-	test("holds the selected rendition's catalog delay in the shared clock while enabled", async () => {
+	test("holds the selected rendition's catalog delay in the shared clock while it can render", async () => {
 		const config = new Signal<Catalog.TextConfig | undefined>({ delay: 300 } as Catalog.TextConfig);
 		const source = {
 			in: { broadcast: new Signal(undefined) },
@@ -301,7 +301,9 @@ describe("Renderer", () => {
 		} as unknown as Source;
 		const enabled = new Signal(true);
 		const sync = new Sync();
-		const renderer = new Renderer({ source, sync, enabled });
+		// Never touched: with no track selected, nothing subscribes or renders.
+		const container = new Signal<HTMLElement | undefined>({} as HTMLElement);
+		const renderer = new Renderer({ source, sync, enabled, container });
 		try {
 			await yieldNow();
 			expect(sync.out.delay.peek()).toBe(Milli(300));
@@ -311,6 +313,12 @@ describe("Renderer", () => {
 			await yieldNow();
 			expect(sync.out.delay.peek()).toBe(Milli.zero);
 			enabled.set(true);
+			container.set(undefined);
+			await yieldNow();
+			expect(sync.out.delay.peek()).toBe(Milli.zero);
+			container.set({} as HTMLElement);
+			await yieldNow();
+			expect(sync.out.delay.peek()).toBe(Milli(300));
 			config.set(undefined);
 			await yieldNow();
 			expect(sync.out.delay.peek()).toBe(Milli.zero);

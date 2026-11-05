@@ -245,6 +245,11 @@ test("rejects a negative delay", () => {
 		tracks: [{ name: "video0", packaging: "loc", isLive: true, role: "video", codec: "avc1.640028", delay: -1 }],
 	});
 	expect(() => decode(raw)).toThrow();
+	expect(() =>
+		encode({
+			tracks: [{ name: "video0", packaging: "loc", isLive: true, role: "video", codec: "avc1.640028", delay: -1 }],
+		}),
+	).toThrow();
 });
 
 test("carries extension root members through decode and encode", () => {
