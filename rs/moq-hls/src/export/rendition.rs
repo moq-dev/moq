@@ -406,7 +406,7 @@ pub struct Rendition {
 	/// Follows the media track's groups into [`live`](Self::live); ends when the rendition drops.
 	watcher: Mutex<Watcher>,
 	/// Set once the catalog drops or replaces the rendition (see [`retire`](Self::retire)).
-	retiring: tokio::sync::watch::Sender<bool>,
+	retiring: kio::Producer<bool>,
 	/// Which segments this instance lists.
 	claim: Mutex<Claim>,
 	/// The retired instance this one replaced under the same playlist URI, whose segments its playlist
@@ -684,7 +684,7 @@ impl Rendition {
 			live: Arc::new(segments::Producer::new(0)),
 			fanout,
 			watcher: Mutex::default(),
-			retiring: tokio::sync::watch::Sender::new(false),
+			retiring: kio::Producer::new(false),
 			claim: Mutex::default(),
 			previous: Mutex::new(None),
 			media: Arc::new(media),
@@ -727,7 +727,7 @@ impl Rendition {
 			live: Arc::new(segments::Producer::new(0)),
 			fanout,
 			watcher: Mutex::default(),
-			retiring: tokio::sync::watch::Sender::new(false),
+			retiring: kio::Producer::new(false),
 			claim: Mutex::default(),
 			previous: Mutex::new(None),
 			media: Arc::new(media),
@@ -739,10 +739,7 @@ impl Rendition {
 
 	/// Start following this rendition's media track onto the grid.
 	pub(crate) fn watch(self: &Arc<Self>) {
-		let watcher = self.fanout.spawn(future_task(watch_media(
-			Arc::downgrade(self),
-			self.retiring.subscribe(),
-		)));
+		let watcher = self.fanout.spawn(WatchMedia::new(self));
 		self.watcher.lock().expect("watcher lock poisoned").media = Some(watcher);
 	}
 
@@ -760,10 +757,7 @@ impl Rendition {
 		watcher.idle.take();
 		watcher.requests += 1;
 		if watcher.media.is_none() && !watcher.stopped {
-			watcher.media = Some(self.fanout.spawn(future_task(watch_media(
-				Arc::downgrade(self),
-				self.retiring.subscribe(),
-			))));
+			watcher.media = Some(self.fanout.spawn(WatchMedia::new(self)));
 		}
 		Demand(Some(self.clone()))
 	}
@@ -821,7 +815,10 @@ impl Rendition {
 			}
 			(claim.next, claim.pending)
 		};
-		self.retiring.send_replace(true);
+		*self
+			.retiring
+			.write()
+			.unwrap_or_else(|_| unreachable!("the rendition holds its producer")) = true;
 		// Once retired, one that neither lists nor waits to list a segment never will, so the
 		// replacement keeps only what this one was keeping: churn can't stack empty instances.
 		let lists = pending || !self.live.window().segments.is_empty();
@@ -1987,267 +1984,431 @@ fn broken(segments: &[u64], inherited: usize) -> usize {
 		.unwrap_or(0)
 }
 
-/// Resolve once `rendition` is retired with no segment left waiting to list, or is gone.
+/// Ready once `rendition` is retired with no segment left waiting to list, or is gone.
 ///
-/// The claim is read on every change, so a retire that leaves nothing pending wakes it.
-async fn retired(retiring: &mut tokio::sync::watch::Receiver<bool>, rendition: &Weak<Rendition>) {
-	let done = |retiring: &bool| {
-		*retiring
-			&& rendition
-				.upgrade()
-				.is_none_or(|rendition| !rendition.claim.lock().expect("claim lock poisoned").pending)
+/// The claim is read on every poll, so a retire that leaves nothing pending wakes it.
+fn poll_retired(retiring: &kio::Consumer<bool>, rendition: &Weak<Rendition>, waiter: &kio::Waiter) -> Poll<()> {
+	// Upgraded outside the channel's lock, so the last strong reference never drops under it.
+	let Some(rendition) = rendition.upgrade() else {
+		return Poll::Ready(());
 	};
-	// A dropped sender means the rendition is gone, which ends the watch all the same.
-	let _ = retiring.wait_for(done).await;
+	let done = |retiring: &bool| *retiring && !rendition.claim.lock().expect("claim lock poisoned").pending;
+	// A closed channel means the rendition is gone, which ends the watch all the same.
+	retiring
+		.poll(waiter, |retiring| match done(retiring) {
+			true => Poll::Ready(()),
+			false => Poll::Pending,
+		})
+		.map(|_| ())
 }
 
-/// Follow a rendition's media track into its window, numbering its groups on the grid, until the
+/// Follows a rendition's media track into its window, numbering its groups on the grid, until the
 /// track ends or fails.
 ///
 /// A segment is listed once a later one starts, which bounds its groups and its `EXTINF`, or once
 /// the track ends. A watcher joining mid-segment can't know the groups before its first, so it
 /// lists nothing before the first segment it sees start (see [`grid::Grid::starts`]): another edge
 /// lists that segment whole, and the same URL must name the same bytes everywhere.
-async fn watch_media(rendition: Weak<Rendition>, mut retiring: tokio::sync::watch::Receiver<bool>) {
-	let Some((track, interval, segment, container, mut probe)) = rendition.upgrade().map(|r| {
-		(
-			r.track().to_string(),
-			r.interval,
-			r.segment,
-			r.container.clone(),
-			r.muxer().ok(),
-		)
-	}) else {
-		return;
-	};
-	let result: Result<()> = async {
-		// A replacement lists nothing until its predecessor has listed all it will, so their
-		// segments never interleave and its own start a new discontinuity: they decode under
-		// another init. It then starts where the predecessor finally stopped, and on the same
-		// track past the last group the predecessor read, which another config may have muxed.
-		let previous = rendition.upgrade().and_then(|rendition| rendition.previous());
-		let mut broken = previous.is_some();
-		let mut after: Option<u64> = None;
-		if let Some(previous) = previous {
-			tokio::select! {
-				_ = kio::wait(|waiter| previous.live.poll_closed(waiter)) => {}
-				_ = retired(&mut retiring, &rendition) => return Ok(()),
-			}
-			let (next, boundary) = {
-				let claim = previous.claim.lock().expect("claim lock poisoned");
-				(claim.next, claim.boundary)
-			};
-			// Another track, or the same name in another broadcast, numbers its groups afresh.
-			let continues = rendition
-				.upgrade()
-				.is_some_and(|rendition| rendition.continues(&previous));
-			after = boundary.filter(|_| continues);
-			if let Some(rendition) = rendition.upgrade() {
-				let mut claim = rendition.claim.lock().expect("claim lock poisoned");
-				claim.start = claim.start.max(next);
-				claim.next = claim.next.max(next);
-			}
-		}
-		let (media, binding) = match rendition.upgrade() {
-			Some(rendition) => (rendition.media.clone(), rendition.authorize()?),
-			None => return Ok(()),
-		};
-		let subscribe = async {
-			let Some((_, track)) = kio::wait(|waiter| media.poll_track_or_refusal(&binding, waiter)).await? else {
-				return Ok(None);
-			};
-			let subscription = moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(FEED_MAX_DELAY));
-			Result::Ok(Some(track.subscribe(subscription).await?.ordered()))
-		};
-		let mut groups = tokio::select! {
-			groups = subscribe => match groups? {
-				Some(groups) => groups,
-				// The bound broadcast never serves the track: nothing to list.
-				None => return Ok(()),
-			},
-			_ = retired(&mut retiring, &rendition) => return Ok(()),
-		};
-
-		let mut grid = grid::Grid::new(segment, segments::MAX_SEGMENTS);
-		// The newest group, its first pts, and what its first frame reached, read again for its
-		// content's end if the track ends after it, and the gap from the group before it.
-		let mut latest: Option<(moq_net::group::Consumer, moq_net::Timestamp, Reach)> = None;
-		let mut spacing: Option<std::time::Duration> = None;
-		// Nothing is listed before the first segment this watcher saw start.
-		let mut whole = false;
-		loop {
-			let next = tokio::select! {
-				next = groups.next_group() => next?,
-				_ = retired(&mut retiring, &rendition) => return Ok(()),
-			};
-			let ended = next.is_none();
-			// The group read and, unless it is a marker, its first pts.
-			let mut read: Option<(u64, Option<moq_net::Timestamp>)> = None;
-			// The picture size the group's keyframe declares.
-			let mut size = None;
-			let slots = match next {
-				Some(mut group) => {
-					// A group's place is its first frame's pts: the transport's stamp, or the
-					// container's own where the session carries none.
-					let first = tokio::select! {
-						first = group.read_frame() => first?,
-						_ = retired(&mut retiring, &rendition) => return Ok(()),
-					};
-					let Some(first) = first.and_then(|frame| first_frame(&container, frame, probe.as_mut())) else {
-						tracing::warn!(%track, group = group.sequence, "skipping a group without a timed first frame");
-						continue;
-					};
-					match first {
-						// A discontinuity marker carries no media: the content before it ends there,
-						// and the grid numbers what resumes by its own timestamps, as every edge does.
-						First::Marker(at) => {
-							read = Some((group.sequence, None));
-							latest = None;
-							grid.stop(at)
-						}
-						First::Media(pts, reach, declared) => {
-							read = Some((group.sequence, Some(pts)));
-							size = declared;
-							if let Some((_, previous, _)) = &latest {
-								spacing = pts.checked_sub(*previous).ok().map(Duration::from).or(spacing);
-							}
-							latest = Some((group, pts, reach));
-							grid.group(read.expect("set above").0, pts)
-						}
-					}
-				}
-				None => {
-					let (reach, end) = match latest.take() {
-						Some((group, _, reach)) => content_end(group, &container, reach, spacing, interval).await?,
-						None => (None, None),
-					};
-					grid.finish(reach, end)
-				}
-			};
-			let Some(rendition) = rendition.upgrade() else {
-				return Ok(());
-			};
-			// Held while listing, so a retire sees exactly what this instance lists.
-			let mut claim = rendition.claim.lock().expect("claim lock poisoned");
-			// Retired, a group past the last it had read is the replacement's: this instance lists
-			// the segments and gaps before the first holding one, and its own part of that one, then
-			// stops there.
-			let boundary = claim.boundary;
-			let theirs = |groups: &std::ops::Range<u64>| boundary.is_none_or(|boundary| groups.end > boundary + 1);
-			if claim.retired
-				&& let Some((sequence, Some(pts))) = read
-				&& theirs(&(sequence..sequence + 1))
-			{
-				claim.theirs_at = claim.theirs_at.or(Some(pts));
-			}
-			let theirs_at = claim.theirs_at;
-			for slot in slots {
-				let Some(segment) = slot.segment() else {
-					tracing::warn!(%track, "media timestamps went back; resetting the playlist window");
-					rendition.live.clear();
-					broken = true;
-					whole = false;
-					continue;
-				};
-				if segment < claim.start {
-					continue;
-				}
-				let (slot, last) = match slot {
-					grid::Slot::Media {
-						segment,
-						groups,
-						pts,
-						start,
-						..
-					} if claim.retired && theirs(&groups) => match (boundary, theirs_at) {
-						// The replacement can't list this segment's number again, so this instance
-						// lists the groups it had read, ending where the replacement's media starts.
-						(Some(boundary), Some(at)) if groups.start <= boundary => {
-							let slot = grid::Slot::Media {
-								segment,
-								groups: groups.start..boundary + 1,
-								pts,
-								start,
-								end: at,
-								content: Some(at),
-							};
-							(slot, true)
-						}
-						_ => return Ok(()),
-					},
-					slot => (slot, false),
-				};
-				if !whole {
-					// The first segment listed holds only this instance's groups, and starts whole.
-					let own = match &slot {
-						grid::Slot::Media { groups, .. } => after.is_none_or(|after| groups.start > after),
-						_ => false,
-					};
-					if !own || !grid.starts(&slot) {
-						if last {
-							return Ok(());
-						}
-						continue;
-					}
-					whole = true;
-				}
-				claim.next = segment + 1;
-				rendition.push(row(&rendition, slot, broken));
-				broken = false;
-				if last {
-					return Ok(());
-				}
-			}
-			if claim.retired
-				&& grid
-					.open_groups()
-					.is_some_and(|groups| theirs(&(groups.start..groups.start + 1)))
-			{
-				return Ok(());
-			}
-			if let Some((sequence, _)) = read {
-				claim.seen = Some(sequence);
-			}
-			if let (Some((group, Some(pts))), Some(size)) = (read, size)
-				&& claim.size != Some(size)
-			{
-				claim.size = Some(size);
-				claim.resized = Some(Resize { group, pts, size });
-			}
-			claim.unplaced = grid.unplaced().map(|first| (first, grid.open()));
-			if !claim.retired
-				&& let Some(open) = grid.open()
-			{
-				claim.next = claim.next.max(open + 1);
-			}
-			claim.pending = grid.waiting();
-			if ended {
-				return Ok(());
-			}
-		}
-	}
-	.await;
-	let Some(rendition) = rendition.upgrade() else {
-		return;
-	};
-	match result {
-		Ok(()) => rendition.end(),
-		// A bound sibling that ended takes its track down with it: that ends the rendition, whose
-		// retained rows drain, rather than failing it.
-		Err(_) if !rendition.media.admits(&rendition.live) => rendition.end(),
-		// Never retried (the origin already rides out transient source failures), and not
-		// papered over with gaps: the rendition's playlist answers the error.
-		Err(err) => {
-			tracing::error!(%track, %err, "media track failed; failing the rendition's playlist");
-			rendition.fail(crate::Error::MediaFailed {
-				track,
-				source: Box::new(err),
-			});
-		}
-	}
-	rendition.close();
+struct WatchMedia {
+	rendition: Weak<Rendition>,
+	retiring: kio::Consumer<bool>,
+	/// Taken from the rendition on the first poll.
+	follow: Option<Follow>,
+	/// The rendition's media and the binding it is read through, held while the watch runs.
+	held: Option<(Arc<Media>, Arc<moq_mux::Binding>)>,
+	groups: Option<moq_net::track::Ordered>,
+	step: Step,
 }
+
+/// Where a [`WatchMedia`] is.
+#[allow(
+	clippy::large_enum_variant,
+	reason = "one per watched rendition, and the subscribing variant is short-lived"
+)]
+enum Step {
+	Start,
+	/// Waiting for the predecessor to list all it will.
+	Previous(Arc<Rendition>),
+	Bind,
+	/// Waiting for the bound broadcast to serve the track.
+	Track,
+	Subscribing {
+		_track: moq_net::track::Consumer,
+		subscribing: moq_net::track::Subscribing,
+	},
+	/// Waiting for the next group.
+	Next,
+	/// Reading a group's first frame, which places it.
+	First(moq_net::group::Consumer),
+	/// Reading the last group to its end once the track ended, for where its content ends.
+	End(moq_net::group::Consumer, Option<Reach>),
+}
+
+/// A group read, and its first pts unless it is a marker.
+type Read = (u64, Option<moq_net::Timestamp>);
+
+/// What a [`WatchMedia`] numbers its groups with, and how far it got.
+struct Follow {
+	track: String,
+	interval: Duration,
+	container: Arc<moq_mux::catalog::hang::Container>,
+	/// Reads each group's picture size.
+	probe: Option<Muxer>,
+	/// The next segment listed starts a new discontinuity.
+	broken: bool,
+	/// The last group a predecessor on the same track read: only later ones are this instance's.
+	after: Option<u64>,
+	grid: grid::Grid,
+	/// The newest group, its first pts, and what its first frame reached, read again for its
+	/// content's end if the track ends after it, and the gap from the group before it.
+	latest: Option<(moq_net::group::Consumer, moq_net::Timestamp, Reach)>,
+	spacing: Option<Duration>,
+	/// Nothing is listed before the first segment this watcher saw start.
+	whole: bool,
+}
+
+impl Follow {
+	fn new(rendition: &Rendition) -> Self {
+		Self {
+			track: rendition.track().to_string(),
+			interval: rendition.interval,
+			container: rendition.container.clone(),
+			probe: rendition.muxer().ok(),
+			broken: false,
+			after: None,
+			grid: grid::Grid::new(rendition.segment, segments::MAX_SEGMENTS),
+			latest: None,
+			spacing: None,
+			whole: false,
+		}
+	}
+
+	/// Place a group by its first frame and list what that places; `Some` once the watch is done.
+	fn first(
+		&mut self,
+		rendition: &Weak<Rendition>,
+		group: moq_net::group::Consumer,
+		first: Option<moq_net::frame::Frame>,
+	) -> Option<Result<()>> {
+		// A group's place is its first frame's pts: the transport's stamp, or the container's own
+		// where the session carries none.
+		let Some(first) = first.and_then(|frame| first_frame(&self.container, frame, self.probe.as_mut())) else {
+			tracing::warn!(track = %self.track, group = group.sequence, "skipping a group without a timed first frame");
+			return None;
+		};
+		let (slots, read, size) = match first {
+			// A discontinuity marker carries no media: the content before it ends there, and the
+			// grid numbers what resumes by its own timestamps, as every edge does.
+			First::Marker(at) => {
+				self.latest = None;
+				(self.grid.stop(at), (group.sequence, None), None)
+			}
+			First::Media(pts, reach, declared) => {
+				let sequence = group.sequence;
+				if let Some((_, previous, _)) = &self.latest {
+					self.spacing = pts.checked_sub(*previous).ok().map(Duration::from).or(self.spacing);
+				}
+				self.latest = Some((group, pts, reach));
+				(self.grid.group(sequence, pts), (sequence, Some(pts)), declared)
+			}
+		};
+		self.list(rendition, slots, Some(read), size, false)
+	}
+
+	/// List what `slots` place, after reading the group `read` whose keyframe declares `size`;
+	/// `Some` once the watch is done.
+	fn list(
+		&mut self,
+		rendition: &Weak<Rendition>,
+		slots: Vec<grid::Slot>,
+		read: Option<Read>,
+		size: Option<(u32, u32)>,
+		ended: bool,
+	) -> Option<Result<()>> {
+		let Self {
+			track,
+			grid,
+			broken,
+			whole,
+			after,
+			..
+		} = self;
+		let after = *after;
+		let Some(rendition) = rendition.upgrade() else {
+			return Some(Ok(()));
+		};
+		// Held while listing, so a retire sees exactly what this instance lists.
+		let mut claim = rendition.claim.lock().expect("claim lock poisoned");
+		// Retired, a group past the last it had read is the replacement's: this instance lists
+		// the segments and gaps before the first holding one, and its own part of that one, then
+		// stops there.
+		let boundary = claim.boundary;
+		let theirs = |groups: &std::ops::Range<u64>| boundary.is_none_or(|boundary| groups.end > boundary + 1);
+		if claim.retired
+			&& let Some((sequence, Some(pts))) = read
+			&& theirs(&(sequence..sequence + 1))
+		{
+			claim.theirs_at = claim.theirs_at.or(Some(pts));
+		}
+		let theirs_at = claim.theirs_at;
+		for slot in slots {
+			let Some(segment) = slot.segment() else {
+				tracing::warn!(%track, "media timestamps went back; resetting the playlist window");
+				rendition.live.clear();
+				*broken = true;
+				*whole = false;
+				continue;
+			};
+			if segment < claim.start {
+				continue;
+			}
+			let (slot, last) = match slot {
+				grid::Slot::Media {
+					segment,
+					groups,
+					pts,
+					start,
+					..
+				} if claim.retired && theirs(&groups) => match (boundary, theirs_at) {
+					// The replacement can't list this segment's number again, so this instance
+					// lists the groups it had read, ending where the replacement's media starts.
+					(Some(boundary), Some(at)) if groups.start <= boundary => {
+						let slot = grid::Slot::Media {
+							segment,
+							groups: groups.start..boundary + 1,
+							pts,
+							start,
+							end: at,
+							content: Some(at),
+						};
+						(slot, true)
+					}
+					_ => return Some(Ok(())),
+				},
+				slot => (slot, false),
+			};
+			if !*whole {
+				// The first segment listed holds only this instance's groups, and starts whole.
+				let own = match &slot {
+					grid::Slot::Media { groups, .. } => after.is_none_or(|after| groups.start > after),
+					_ => false,
+				};
+				if !own || !grid.starts(&slot) {
+					if last {
+						return Some(Ok(()));
+					}
+					continue;
+				}
+				*whole = true;
+			}
+			claim.next = segment + 1;
+			rendition.push(row(&rendition, slot, *broken));
+			*broken = false;
+			if last {
+				return Some(Ok(()));
+			}
+		}
+		if claim.retired
+			&& grid
+				.open_groups()
+				.is_some_and(|groups| theirs(&(groups.start..groups.start + 1)))
+		{
+			return Some(Ok(()));
+		}
+		if let Some((sequence, _)) = read {
+			claim.seen = Some(sequence);
+		}
+		if let (Some((group, Some(pts))), Some(size)) = (read, size)
+			&& claim.size != Some(size)
+		{
+			claim.size = Some(size);
+			claim.resized = Some(Resize { group, pts, size });
+		}
+		claim.unplaced = grid.unplaced().map(|first| (first, grid.open()));
+		if !claim.retired
+			&& let Some(open) = grid.open()
+		{
+			claim.next = claim.next.max(open + 1);
+		}
+		claim.pending = grid.waiting();
+		if ended {
+			return Some(Ok(()));
+		}
+		None
+	}
+}
+
+impl WatchMedia {
+	fn new(rendition: &Arc<Rendition>) -> Self {
+		Self {
+			rendition: Arc::downgrade(rendition),
+			retiring: rendition.retiring.consume(),
+			follow: None,
+			held: None,
+			groups: None,
+			step: Step::Start,
+		}
+	}
+
+	fn poll_watch(&mut self, waiter: &kio::Waiter) -> Poll<Result<()>> {
+		let follow = self.follow.as_mut().expect("taken on the first poll");
+		loop {
+			let retired = || poll_retired(&self.retiring, &self.rendition, waiter).is_ready();
+			match &mut self.step {
+				Step::Start => {
+					// A replacement lists nothing until its predecessor has listed all it will, so
+					// their segments never interleave and its own start a new discontinuity: they
+					// decode under another init. It then starts where the predecessor finally stopped,
+					// and on the same track past the last group the predecessor read, which another
+					// config may have muxed.
+					let previous = self.rendition.upgrade().and_then(|rendition| rendition.previous());
+					follow.broken = previous.is_some();
+					self.step = match previous {
+						Some(previous) => Step::Previous(previous),
+						None => Step::Bind,
+					};
+				}
+				Step::Previous(previous) => {
+					if retired() {
+						return Poll::Ready(Ok(()));
+					}
+					ready!(previous.live.poll_closed(waiter));
+					let (next, boundary) = {
+						let claim = previous.claim.lock().expect("claim lock poisoned");
+						(claim.next, claim.boundary)
+					};
+					// Another track, or the same name in another broadcast, numbers its groups afresh.
+					let continues = self
+						.rendition
+						.upgrade()
+						.is_some_and(|rendition| rendition.continues(previous));
+					follow.after = boundary.filter(|_| continues);
+					if let Some(rendition) = self.rendition.upgrade() {
+						let mut claim = rendition.claim.lock().expect("claim lock poisoned");
+						claim.start = claim.start.max(next);
+						claim.next = claim.next.max(next);
+					}
+					self.step = Step::Bind;
+				}
+				Step::Bind => {
+					let Some(rendition) = self.rendition.upgrade() else {
+						return Poll::Ready(Ok(()));
+					};
+					self.held = Some((rendition.media.clone(), rendition.authorize()?));
+					self.step = Step::Track;
+				}
+				Step::Track => {
+					if retired() {
+						return Poll::Ready(Ok(()));
+					}
+					let (media, binding) = self.held.as_ref().expect("bound above");
+					// The bound broadcast never serves the track: nothing to list.
+					let Some((_, track)) = ready!(media.poll_track_or_refusal(binding, waiter))? else {
+						return Poll::Ready(Ok(()));
+					};
+					let subscription = moq_net::track::Subscription::default()
+						.with_delay(moq_net::track::Delay::default().with_max(FEED_MAX_DELAY));
+					let subscribing = track.subscribe(subscription).into_inner();
+					self.step = Step::Subscribing {
+						_track: track,
+						subscribing,
+					};
+				}
+				Step::Subscribing { subscribing, .. } => {
+					if retired() {
+						return Poll::Ready(Ok(()));
+					}
+					let subscriber = ready!(subscribing.poll_ok(waiter))?;
+					self.groups = Some(subscriber.ordered());
+					self.step = Step::Next;
+				}
+				Step::Next => {
+					if retired() {
+						return Poll::Ready(Ok(()));
+					}
+					let groups = self.groups.as_mut().expect("subscribed above");
+					match ready!(groups.poll_next_group(waiter))? {
+						Some(group) => self.step = Step::First(group),
+						None => match follow.latest.take() {
+							Some((group, _, reach)) => self.step = Step::End(group, Some(reach)),
+							None => {
+								let slots = follow.grid.finish(None, None);
+								let done = follow.list(&self.rendition, slots, None, None, true);
+								return Poll::Ready(done.expect("an ended track ends the watch"));
+							}
+						},
+					}
+				}
+				Step::First(group) => {
+					if retired() {
+						return Poll::Ready(Ok(()));
+					}
+					let first = ready!(group.poll_read_frame(waiter))?;
+					let Step::First(group) = std::mem::replace(&mut self.step, Step::Next) else {
+						unreachable!("reading the first frame");
+					};
+					if let Some(done) = follow.first(&self.rendition, group, first) {
+						return Poll::Ready(done);
+					}
+				}
+				Step::End(group, reach) => {
+					// Read once the track has ended so every frame is in. Fails when the group does:
+					// its last segment would otherwise be listed complete but truncated.
+					let reach_mut = reach.as_mut().expect("read to its end once");
+					while let Some(frame) = ready!(group.poll_read_frame(waiter))? {
+						// The container says what a frame holds: a marker's payload is empty only once decoded.
+						if let Ok(decoded) = moq_mux::container::Container::decode(&*follow.container, frame) {
+							reach_mut.add(decoded);
+						}
+					}
+					let (reach, end) = reach
+						.take()
+						.expect("read to its end once")
+						.finish(follow.spacing, follow.interval);
+					let slots = follow.grid.finish(reach, end);
+					let done = follow.list(&self.rendition, slots, None, None, true);
+					return Poll::Ready(done.expect("an ended track ends the watch"));
+				}
+			}
+		}
+	}
+}
+
+impl kio::Task for WatchMedia {
+	type Output = ();
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		if self.follow.is_none() {
+			let Some(follow) = self.rendition.upgrade().map(|rendition| Follow::new(&rendition)) else {
+				return Poll::Ready(());
+			};
+			self.follow = Some(follow);
+		}
+		let result = ready!(self.poll_watch(waiter));
+		let Some(rendition) = self.rendition.upgrade() else {
+			return Poll::Ready(());
+		};
+		let track = self.follow.take().expect("taken on the first poll").track;
+		match result {
+			Ok(()) => rendition.end(),
+			// A bound sibling that ended takes its track down with it: that ends the rendition,
+			// whose retained rows drain, rather than failing it.
+			Err(_) if !rendition.media.admits(&rendition.live) => rendition.end(),
+			// Never retried (the origin already rides out transient source failures), and not
+			// papered over with gaps: the rendition's playlist answers the error.
+			Err(err) => {
+				tracing::error!(%track, %err, "media track failed; failing the rendition's playlist");
+				rendition.fail(crate::Error::MediaFailed {
+					track,
+					source: Box::new(err),
+				});
+			}
+		}
+		rendition.close();
+		Poll::Ready(())
+	}
+}
+
 /// What a group's frames reach: the timestamps of its samples, where one ends explicitly, and a
 /// discontinuity marker, read as they are decoded.
 #[derive(Default)]
@@ -2338,27 +2499,6 @@ fn first_frame(
 	let mut reach = Reach::default();
 	reach.add(decoded);
 	Some(First::Media(pts, reach, size))
-}
-
-/// What a group's content reaches, read once the track has ended so every frame is in, starting
-/// from what its first frame reached (see [`Reach::finish`]).
-///
-/// Fails when the group does: its last segment would otherwise be listed complete but truncated.
-async fn content_end(
-	mut group: moq_net::group::Consumer,
-	container: &moq_mux::catalog::hang::Container,
-	mut reach: Reach,
-	spacing: Option<std::time::Duration>,
-	interval: std::time::Duration,
-) -> Result<(Option<moq_net::Timestamp>, Option<moq_net::Timestamp>)> {
-	use moq_mux::container::Container as _;
-	while let Some(frame) = group.read_frame().await? {
-		// The container says what a frame holds: a marker's payload is empty only once decoded.
-		if let Ok(decoded) = container.decode(frame) {
-			reach.add(decoded);
-		}
-	}
-	Ok(reach.finish(spacing, interval))
 }
 
 /// The row listing `slot`, starting a new discontinuity when `broken`.
@@ -2522,11 +2662,6 @@ impl GroupRead {
 			}
 		})
 	}
-}
-
-fn future_task(task: impl Future<Output = ()> + Send + 'static) -> impl kio::Task<Output = ()> + Send + 'static {
-	let mut task = Box::pin(task);
-	move |waiter: &kio::Waiter| waiter.poll_future(task.as_mut())
 }
 
 /// True if a FETCH failure means the segment can never be served: a 404, not a 500.
