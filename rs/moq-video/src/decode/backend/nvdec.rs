@@ -37,7 +37,7 @@ use moq_nvenc::sys::nvcuvid::{
 	CUVIDEOFORMAT, CUVIDPARSERDISPINFO, CUVIDPARSERPARAMS, CUVIDSOURCEDATAPACKET, CUvideopacketflags, CUvideoparser,
 };
 
-use super::{Backend, Codec};
+use super::{Backend, Codec, Stream};
 use crate::frame::{Surface, cuda};
 use crate::{Error, Frame};
 
@@ -68,7 +68,7 @@ struct State {
 	ready: Vec<CUVIDPARSERDISPINFO>,
 	/// First error hit inside a callback; callbacks can only return an int, so
 	/// the error is surfaced by `decode` after the parse call.
-	error: Option<String>,
+	error: Option<Error>,
 }
 
 /// An open cuvid decoder plus the output geometry it was created for.
@@ -101,7 +101,8 @@ impl Drop for Decoder {
 }
 
 impl Nvdec {
-	pub(crate) fn open(codec: Codec, config: &super::Config) -> Result<Box<dyn Backend>, Error> {
+	pub(crate) fn open(stream: &Stream, config: &super::Config) -> Result<Box<dyn Backend>, Error> {
+		let codec = stream.codec;
 		// cudarc panics when libcuda is missing, so probe it and turn a missing
 		// driver into a recoverable error; the cuvid table already loads fallibly.
 		if !driver_libs_present() {
@@ -121,6 +122,16 @@ impl Nvdec {
 		// `CudaContext::new` retains the device's primary context, the same one
 		// the NVENC backend uses, so frames pass between them without a copy.
 		let ctx = CudaContext::new(0).map_err(|e| codec_err(format!("CUDA init: {e:?}")))?;
+		ctx.bind_to_thread()
+			.map_err(|e| codec_err(format!("CUDA bind: {e:?}")))?;
+		// The decoder itself waits for the first sequence header, so ask now
+		// whether the GPU decodes the codec at all, at the one format this backend
+		// outputs and the size the description's SPS pins.
+		let coded = match stream.size {
+			Some(size) => Coded::AtLeast(size.width, size.height),
+			None => Coded::Unknown,
+		};
+		check_caps(api, cuda_codec, coded)?;
 
 		let mut state = Box::new(State {
 			api,
@@ -178,7 +189,7 @@ impl Nvdec {
 		let result = unsafe { (self.state.api.parse_video_data)(self.parser, packet) };
 		if let Some(error) = self.state.error.take() {
 			self.state.ready.clear();
-			return Err(codec_err(error));
+			return Err(error);
 		}
 		if result != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
 			self.state.ready.clear();
@@ -244,41 +255,24 @@ impl Drop for Nvdec {
 impl State {
 	/// Sequence callback body: (re)create the decoder for the reported format.
 	/// Returns the decode-surface count the parser should allocate for.
-	fn on_sequence(&mut self, format: &CUVIDEOFORMAT) -> Result<c_int, String> {
+	fn on_sequence(&mut self, format: &CUVIDEOFORMAT) -> Result<c_int, Error> {
 		if format.chroma_format != cudaVideoChromaFormat::cudaVideoChromaFormat_420 {
-			return Err(format!("unsupported chroma format {:?}", format.chroma_format));
+			return Err(Error::UnsupportedCodec(format!(
+				"{NAME} decodes 4:2:0 only, not {:?}",
+				format.chroma_format
+			)));
 		}
 		if format.bit_depth_luma_minus8 != 0 || format.bit_depth_chroma_minus8 != 0 {
-			return Err(format!(
-				"unsupported bit depth {} (only 8-bit is supported)",
+			return Err(Error::UnsupportedCodec(format!(
+				"{NAME} decodes 8-bit only, not {}-bit",
 				format.bit_depth_luma_minus8 + 8
-			));
+			)));
 		}
-
-		let mut caps = CUVIDDECODECAPS {
-			eCodecType: format.codec,
-			eChromaFormat: format.chroma_format,
-			nBitDepthMinus8: 0,
-			..Default::default()
-		};
-		// SAFETY: caps is fully initialized and the CUDA context is current (the
-		// callback runs inside `decode`, which binds it).
-		let result = unsafe { (self.api.get_decoder_caps)(&mut caps) };
-		if result != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
-			return Err(format!("cuvidGetDecoderCaps: {result:?}"));
-		}
-		if caps.bIsSupported == 0 {
-			return Err(format!("this GPU cannot decode {:?}", format.codec));
-		}
-		if caps.nOutputFormatMask & (1 << cudaVideoSurfaceFormat::cudaVideoSurfaceFormat_NV12 as u16) == 0 {
-			return Err("this GPU cannot output NV12".into());
-		}
-		if format.coded_width > caps.nMaxWidth || format.coded_height > caps.nMaxHeight {
-			return Err(format!(
-				"{}x{} exceeds this GPU's {}x{} decode limit",
-				format.coded_width, format.coded_height, caps.nMaxWidth, caps.nMaxHeight
-			));
-		}
+		check_caps(
+			self.api,
+			format.codec,
+			Coded::Exact(format.coded_width, format.coded_height),
+		)?;
 
 		// Output size: the requested resize, or the display area (the coded size
 		// minus cropping). Rounded down to even for NV12.
@@ -343,7 +337,7 @@ impl State {
 		// SAFETY: info is fully initialized and the CUDA context is current.
 		let result = unsafe { (self.api.create_decoder)(&mut handle, &mut info) };
 		if result != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
-			return Err(format!("cuvidCreateDecoder: {result:?}"));
+			return Err(codec_err(format!("cuvidCreateDecoder: {result:?}")));
 		}
 
 		tracing::debug!(
@@ -420,6 +414,63 @@ impl State {
 	}
 }
 
+/// What [`check_caps`] knows of the coded size.
+enum Coded {
+	/// Nothing yet: no size pinned before the first sequence header.
+	Unknown,
+	/// At least this size: the catalog's, which may be cropped below the
+	/// macroblock-aligned coded size, so only a maximum it exceeds is certain.
+	AtLeast(u32, u32),
+	/// A sequence header's macroblock-aligned coded size.
+	Exact(u32, u32),
+}
+
+/// Ask the GPU whether it decodes `codec` as 8-bit 4:2:0 into NV12, the one
+/// format this backend handles, at the `coded` size as far as it is known.
+///
+/// A no is [`Error::UnsupportedCodec`]: the device answered, and no retry here
+/// changes its answer. The CUDA context must be current.
+fn check_caps(api: &cuvid::Api, codec: cudaVideoCodec, coded: Coded) -> Result<(), Error> {
+	let mut caps = CUVIDDECODECAPS {
+		eCodecType: codec,
+		eChromaFormat: cudaVideoChromaFormat::cudaVideoChromaFormat_420,
+		nBitDepthMinus8: 0,
+		..Default::default()
+	};
+	// SAFETY: caps is fully initialized and the caller made the context current.
+	let result = unsafe { (api.get_decoder_caps)(&mut caps) };
+	if result != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
+		return Err(codec_err(format!("cuvidGetDecoderCaps: {result:?}")));
+	}
+	if caps.bIsSupported == 0 {
+		return Err(Error::UnsupportedCodec(format!("this GPU cannot decode {codec:?}")));
+	}
+	if caps.nOutputFormatMask & (1 << cudaVideoSurfaceFormat::cudaVideoSurfaceFormat_NV12 as u16) == 0 {
+		return Err(Error::UnsupportedCodec(format!(
+			"this GPU cannot output {codec:?} as NV12"
+		)));
+	}
+	let (width, height, exact) = match coded {
+		Coded::Unknown => return Ok(()),
+		Coded::AtLeast(width, height) => (width, height, false),
+		Coded::Exact(width, height) => (width, height, true),
+	};
+	// cuviddec.h's limit: CodedWidth*CodedHeight/256 <= nMaxMBCount. A cropped
+	// size only undercounts, so a refusal on it still holds.
+	let macroblocks = u64::from(width) * u64::from(height) / 256;
+	let too_large = width > caps.nMaxWidth || height > caps.nMaxHeight || macroblocks > u64::from(caps.nMaxMBCount);
+	// The coded size can exceed a cropped one, so only an exact size is
+	// certainly below the minimum.
+	let too_small = exact && (width < u32::from(caps.nMinWidth) || height < u32::from(caps.nMinHeight));
+	if too_large || too_small {
+		return Err(Error::UnsupportedCodec(format!(
+			"{width}x{height} is outside this GPU's {codec:?} decode range ({}x{} to {}x{}, {} macroblocks)",
+			caps.nMinWidth, caps.nMinHeight, caps.nMaxWidth, caps.nMaxHeight, caps.nMaxMBCount
+		)));
+	}
+	Ok(())
+}
+
 /// Sequence callback: a new (or repeated) sequence header. Returns the number of
 /// decode surfaces the parser should assume, or 0 on failure.
 unsafe extern "C" fn sequence_callback(user: *mut c_void, format: *mut CUVIDEOFORMAT) -> c_int {
@@ -444,13 +495,15 @@ unsafe extern "C" fn decode_callback(user: *mut c_void, pic: *mut CUVIDPICPARAMS
 	let Some(decoder) = &state.decoder else {
 		state
 			.error
-			.get_or_insert("decode callback fired before a decoder exists".into());
+			.get_or_insert_with(|| codec_err("decode callback fired before a decoder exists".into()));
 		return 0;
 	};
 	// SAFETY: the decoder handle is valid and `pic` comes straight from cuvid.
 	let result = unsafe { (state.api.decode_picture)(decoder.handle, pic) };
 	if result != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
-		state.error.get_or_insert(format!("cuvidDecodePicture: {result:?}"));
+		state
+			.error
+			.get_or_insert_with(|| codec_err(format!("cuvidDecodePicture: {result:?}")));
 		return 0;
 	}
 	1
@@ -502,7 +555,35 @@ mod tests {
 		if hw_available() {
 			return;
 		}
-		assert!(Nvdec::open(Codec::H264, &decode_config(None)).is_err());
+		assert!(Nvdec::open(&Codec::H264.into(), &decode_config(None)).is_err());
+	}
+
+	/// A GPU that can't decode a stream says so, which is the stream's refusal
+	/// rather than a fault: a size past every NVDEC's range, and each codec this
+	/// backend takes either opening or being refused (AV1 before Ampere).
+	#[test]
+	fn the_gpu_refuses_what_it_cannot_decode() {
+		if !hw_available() {
+			return;
+		}
+
+		let oversized = Stream {
+			size: Some(crate::Size::new(16384, 16384)),
+			..Codec::H264.into()
+		};
+		match Nvdec::open(&oversized, &decode_config(None)) {
+			Err(Error::UnsupportedCodec(reason)) => assert!(reason.contains("decode range"), "{reason}"),
+			Err(other) => panic!("expected a refusal, got {other:?}"),
+			Ok(_) => panic!("opened a 16384x16384 H.264 decoder"),
+		}
+
+		for codec in [Codec::H264, Codec::H265, Codec::Av1] {
+			match Nvdec::open(&codec.into(), &decode_config(None)) {
+				Ok(_) => {}
+				Err(Error::UnsupportedCodec(reason)) => assert!(reason.contains("cannot decode"), "{reason}"),
+				Err(other) => panic!("{codec:?} faulted on a working driver: {other:?}"),
+			}
+		}
 	}
 
 	fn decode_config(scale_hint: Option<crate::Size>) -> DecodeConfig {
@@ -581,7 +662,7 @@ mod tests {
 			..EncodeConfig::new(w, h, crate::FrameRate::new(30, 1).unwrap())
 		})
 		.unwrap();
-		let decoder = Nvdec::open(Codec::H264, &decode_config(None)).expect("NVDEC H.264 decoder");
+		let decoder = Nvdec::open(&Codec::H264.into(), &decode_config(None)).expect("NVDEC H.264 decoder");
 
 		let expected = I420::from_rgba(&gradient_rgba(w, h), w * 4, crate::Size::new(w, h)).unwrap();
 		let decoded = round_trip(encoder, decoder, w, h);
@@ -610,8 +691,8 @@ mod tests {
 			..EncodeConfig::new(w, h, crate::FrameRate::new(30, 1).unwrap())
 		})
 		.unwrap();
-		let decoder =
-			Nvdec::open(Codec::H264, &decode_config(Some(crate::Size::new(160, 120)))).expect("NVDEC H.264 decoder");
+		let decoder = Nvdec::open(&Codec::H264.into(), &decode_config(Some(crate::Size::new(160, 120))))
+			.expect("NVDEC H.264 decoder");
 
 		// Nearest-neighbor reference downscale of the expected picture.
 		let full = I420::from_rgba(&gradient_rgba(w, h), w * 4, crate::Size::new(w, h)).unwrap();
@@ -646,7 +727,7 @@ mod tests {
 			// Driver present but NVENC unusable (e.g. GPU busy); don't fail.
 			return;
 		};
-		let decoder = Nvdec::open(Codec::H265, &decode_config(None)).expect("NVDEC H.265 decoder");
+		let decoder = Nvdec::open(&Codec::H265.into(), &decode_config(None)).expect("NVDEC H.265 decoder");
 
 		let expected = I420::from_rgba(&gradient_rgba(w, h), w * 4, crate::Size::new(w, h)).unwrap();
 		let decoded = round_trip(encoder, decoder, w, h);
@@ -676,7 +757,7 @@ mod tests {
 		.unwrap();
 		// Decode at half size so the hardware scaler is in the loop too.
 		let decoder =
-			Nvdec::open(Codec::H264, &decode_config(Some(crate::Size::new(160, 120)))).expect("NVDEC decoder");
+			Nvdec::open(&Codec::H264.into(), &decode_config(Some(crate::Size::new(160, 120)))).expect("NVDEC decoder");
 
 		let mut nvenc = Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Named("nvenc".into()),
@@ -728,7 +809,7 @@ mod tests {
 			y
 		};
 		let mut check = crate::decode::backend::open(
-			crate::decode::backend::Codec::H264,
+			&crate::decode::backend::Codec::H264.into(),
 			&DecodeConfig {
 				kind: DecodeKind::Software,
 				..DecodeConfig::new()

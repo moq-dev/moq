@@ -2,6 +2,9 @@
 # one: `<kind> <name> <quest>`. sh/gh/test-inventory.py prints the name of any
 # orphan missing here, and fails on an entry that has a caller.
 
+# Flaky under load; the quest makes it reliable, then removes its `#[ignore]`.
+ignore moq-gst::source::imp::session_tests::restarts_under_reconnects_interleave_on_one_pad /quest/m0/test-flakes-2/gst-reconnect-interleave.md
+
 # Need a GPU, a desktop, or a device that no CI runner has.
 ignore moq-carla-bridge::gpu_video_reaches_the_worker /quest/m2/carla-bridge.md
 recipe carla::bridge-gpu /quest/m2/carla-bridge.md
