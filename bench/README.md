@@ -438,7 +438,7 @@ run by default:
   revision whose session API predates this harness reports it unsupported.
 - `group`, on request: every subscriber drains one finished 512-frame group in
   object batches through the relay's private reader, as moq-net's
-  `group_relay_frames/plain/512/*` bench does, so that bench's cost is counted
+  `group_relay_objects/plain/512/*` bench does, so that bench's cost is counted
   without its wall-clock noise. Revisions before the hidden `ObjectBatch` helper
   report unsupported; historical frame-batch counts remain in the bisect report.
 

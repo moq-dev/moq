@@ -362,7 +362,7 @@ fn bench_roundtrip(c: &mut Criterion) {
 fn bench_relay_frames(c: &mut Criterion) {
 	#[cfg(feature = "fuzz")]
 	{
-		let mut g = c.benchmark_group("group_relay_frames");
+		let mut g = c.benchmark_group("group_relay_objects");
 		for frames in [4, 512, 8192] {
 			for subscribers in [1, 8, 64] {
 				for properties in [false, true] {

@@ -1,5 +1,5 @@
 //! A relay's frame fan-out: every subscriber drains one finished 512-frame group in batches,
-//! as moq-net's `group_relay_frames/plain/512/*` bench does.
+//! as moq-net's `group_relay_objects/plain/512/*` bench does.
 //! Usage: `fanout-group SUBSCRIBERS CYCLES`. The work is deterministic, so its retired
 //! instructions, less a run of zero cycles, are the per-group cost whatever the host does.
 use std::task::Poll;
