@@ -11,6 +11,11 @@ How to update your code for each breaking change, newest first.
 Each wrapper is now generated from its `poll_*` method, which stays available without the feature, and its docs live on that poll.
 `moq-tokio`'s `net` feature enables it for you.
 `group::Producer::ready` now needs the feature too.
+### `Following` waits out a refusal ([#7836](https://github.com/moq-dev/moq/pull/7836))
+
+After `Following::available` returns a handler's refusal, the next call no longer asks the refusing route again at once.
+It waits for the serving route to change: another instance, the path going and coming back, or the same instance over another route.
+A caller that retried in a loop now waits instead of spinning; one that gave up on the first error is unaffected.
 
 ### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
 

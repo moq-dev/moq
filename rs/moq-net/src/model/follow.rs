@@ -218,6 +218,9 @@ pub struct Following {
 	/// A change resolved to the broadcast handed out last while it was still open, so it counts
 	/// as delivered only until that broadcast closes.
 	absorbed: bool,
+	/// The last resolution was refused: any change to the serving route, even the same
+	/// instance over another route, is worth asking again.
+	refused: bool,
 }
 
 impl Following {
@@ -232,6 +235,7 @@ impl Following {
 			last: None,
 			moved: None,
 			absorbed: false,
+			refused: false,
 		}
 	}
 
@@ -239,7 +243,9 @@ impl Following {
 	/// [`Consumer::follow`](crate::origin::Consumer::follow).
 	///
 	/// Returns [`Error::Closed`] once the origin closes, and any other resolution failure
-	/// as-is. An abandoned wait keeps its progress for the next call.
+	/// as-is. A later call then waits for the serving route to change, even to another route of
+	/// the same instance, instead of asking the refusing route again. An abandoned wait keeps its
+	/// progress for the next call.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_available(&mut self, waiter: &kio::Waiter) -> Poll<Result<broadcast::Consumer, Error>> {
 		loop {
@@ -254,8 +260,9 @@ impl Following {
 			// routes may have gone, and another instance's, beneath the same announcement,
 			// taken the path over. It also ends once the caller lets go of it, so only its
 			// instance no longer serving the path makes whatever serves it now next, unless a
-			// change it absorbed is owed.
+			// change it absorbed is owed. After a refusal, only a route change asks again.
 			if !self.unseen
+				&& !self.refused
 				&& self.follow.serving().is_some()
 				&& let Some(last) = self.last.as_ref().map(broadcast::WeakConsumer::consume)
 				&& last.poll_closed(waiter).is_ready()
@@ -286,8 +293,11 @@ impl Following {
 				.get_or_insert_with(|| self.consumer.routing(self.path.clone(), self.instance.clone()));
 			let resolved = ready!(kio::Task::poll(resolving, waiter));
 			self.resolving = None;
-			let broadcast = resolved?;
+			// Handed out or refused, this announcement is settled: after a refusal, the next
+			// call waits for the serving route to change rather than asking it again.
 			self.unseen = false;
+			self.refused = resolved.is_err();
+			let broadcast = resolved?;
 
 			// Resolving can run ahead of the follower: a takeover resolves at once while the
 			// origin holds its restart, and that restart then names the instance handed out.
@@ -335,6 +345,8 @@ impl Following {
 				self.moved = None;
 				self.absorbed = false;
 			}
+			// After a refusal, another route may answer what the last one refused.
+			AnnounceEvent::Update(_) | AnnounceEvent::Takeover { .. } if self.refused => self.unseen = true,
 			// The same instance over another route, which its subscriptions ride out, or one
 			// continuing what was handed out.
 			AnnounceEvent::Update(_) | AnnounceEvent::Takeover { .. } => return false,
@@ -657,6 +669,70 @@ mod tests {
 			result.expect("the selected refusal must answer"),
 			Err(Error::Unroutable)
 		));
+		// The refusing route is not asked again, and the next announcement is handed out.
+		let ((), again) = futures::join!(
+			none(&mut announced),
+			kio::clock::timeout(Duration::from_secs(1), claim.requested_broadcast())
+		);
+		assert!(again.is_err(), "the refusing route was asked again");
+		drop(claim);
+		let instance = Instance::random();
+		let _published = origin.publish("live", route(&instance)).unwrap();
+		assert_eq!(
+			available(&mut announced).await.info().instance.as_ref(),
+			Some(&instance)
+		);
+	}
+
+	/// A refusal is asked again once the same instance serves the path over another route.
+	#[kio::test]
+	async fn announced_retries_a_refusal_on_another_route_of_the_instance() {
+		let origin = Hop::new(1).unwrap().produce();
+		let instance = Instance::random();
+		let claim = origin.requests_route("", route(&instance), None).unwrap();
+		let mut announced = origin.consume().follow("live", None).unwrap();
+		let (result, ()) = futures::join!(
+			kio::clock::timeout(Duration::from_secs(1), announced.available()),
+			async {
+				requested(&claim).await.reject(Error::Unroutable);
+			}
+		);
+		assert!(matches!(
+			result.expect("the refusal must answer"),
+			Err(Error::Unroutable)
+		));
+		let _exact = origin.publish("live", route(&instance)).unwrap();
+		assert_eq!(
+			available(&mut announced).await.info().instance.as_ref(),
+			Some(&instance)
+		);
+	}
+
+	/// A refusal after the instance handed out closed is not asked again on every call: the
+	/// closed instance's handover is settled until the serving route changes.
+	#[kio::test]
+	async fn announced_waits_after_refusing_a_closed_instances_successor() {
+		let origin = Hop::new(1).unwrap().produce();
+		let claim = origin.requests_route("", route(&Instance::random()), None).unwrap();
+		let exact = origin.publish("live", route(&Instance::random())).unwrap();
+		let mut announced = origin.consume().follow("live", None).unwrap();
+		let _first = available(&mut announced).await;
+		drop(exact);
+		let (result, ()) = futures::join!(
+			kio::clock::timeout(Duration::from_secs(1), announced.available()),
+			async {
+				requested(&claim).await.reject(Error::Unroutable);
+			}
+		);
+		assert!(matches!(
+			result.expect("the refusal must answer"),
+			Err(Error::Unroutable)
+		));
+		let ((), again) = futures::join!(
+			none(&mut announced),
+			kio::clock::timeout(Duration::from_secs(1), claim.requested_broadcast())
+		);
+		assert!(again.is_err(), "the refusing route was asked again");
 	}
 
 	/// A path no pattern can spell is refused rather than followed through the whole scope,

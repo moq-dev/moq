@@ -247,10 +247,16 @@ fn transport(seed: u64) -> driver::transport::Config {
 /// A self-signed certificate for `localhost`, and the configs that serve and trust it with
 /// `version`'s ALPN
 fn tls(version: Version) -> (driver::server::Config, driver::client::Config) {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-	let rcgen::CertifiedKey { cert, signing_key } =
-		rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-	let key = rustls::pki_types::PrivateKeyDer::Pkcs8(signing_key.serialize_der().into());
+	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let rcgen::CertifiedKey { cert, signing_key } = (|| -> std::result::Result<_, rcgen::Error> {
+		let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+		let mut params = rcgen::CertificateParams::new(vec!["localhost".into()])?;
+		params.serial_number = Some(1u64.into());
+		let cert = params.self_signed(&signing_key)?;
+		Ok(rcgen::CertifiedKey { cert, signing_key })
+	})()
+	.unwrap();
+	let key = rustls::pki_types::PrivateKeyDer::Pkcs8(signing_key.to_pkcs8().secret_pkcs8_der().to_vec().into());
 	let alpn = vec![version.alpn().as_bytes().to_vec()];
 
 	let mut server = rustls::ServerConfig::builder()

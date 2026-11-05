@@ -41,7 +41,7 @@ anyhow = { workspace = true }
 # Compile the async API used by the tests.
 hang = { path = ".", features = ["async"] }
 moq-mux = { path = "../moq-mux", features = ["async"] }
-moq-tokio = { path = "../moq-tokio", default-features = false, features = ["quic", "aws-lc-rs", "websocket"] }
+moq-tokio = { path = "../moq-tokio", default-features = false, features = ["quic", "websocket"] }
 tokio = { workspace = true, features = ["macros", "fs"] }
 tracing = { workspace = true }
 url = { workspace = true }

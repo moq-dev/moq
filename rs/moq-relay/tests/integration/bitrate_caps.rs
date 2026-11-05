@@ -211,7 +211,7 @@ async fn window_opens_once_admitted(mut relay: Relay, port: u16) {
 }
 
 async fn tokio_relay() -> (Relay, u16, tempfile::TempDir) {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let dir = tempfile::tempdir().expect("tempdir");
 	let relay = Relay::load(config(dir.path()))
 		.await
@@ -235,7 +235,7 @@ async fn tokio_window_opens_once_admitted() {
 
 #[cfg(all(target_os = "linux", feature = "_uring"))]
 async fn uring_relay() -> Option<(Relay, u16, tempfile::TempDir)> {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	match moq_uring::Worker::new(Default::default()) {
 		Ok(_) => {}
 		Err(moq_uring::Error::Unsupported(reason)) if std::env::var_os("CI_STRICT").is_none() => {

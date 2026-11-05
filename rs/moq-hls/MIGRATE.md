@@ -10,6 +10,18 @@ The `import` and `export` modules compile only with the new `async` Cargo featur
 `server` feature enables. With `default-features = false`, enable it to keep them:
 `moq-hls = { version = "...", default-features = false, features = ["async"] }`.
 Nothing else changes for a build with `server`.
+### HTTP HLS lists contributions without starting their media
+
+`Server` follows the root catalog's contributions and lists their renditions from their
+catalogs, on the root catalog's join interval and clock. Contribution media starts
+only when requested and stops once responses finish and it idles for the longer of three
+target durations and the playlist window plus one target duration.
+Their URLs include both instances:
+`@{instance}/contribution/{id}/{kind}/{rendition}/@{contribution-instance}/...`.
+`Route::contribution` identifies that contribution; `Resource::instance` still names the
+parent broadcast's instance. Embedders using `Server::respond` need no routing change.
+DASH, `Broadcaster::new`, and the recorder cursor continue serving the broadcast's own
+renditions only.
 
 ### `Broadcaster::new` returns a cloneable handle and its `Driver`
 
