@@ -56,7 +56,6 @@ enum Kind {
 /// group has been [`read`](Self::read) to resolve the missing fields from a keyframe.
 pub struct Muxer {
 	kind: Kind,
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	container: HangContainer,
 	transform: Option<VideoTransform>,
 	/// Resolved codec config record: the catalog `description`, or synthesized by the
@@ -185,10 +184,9 @@ impl Muxer {
 		kio::wait(|waiter| self.poll_read(waiter, group, &mut out)).await
 	}
 
-	/// [`read`](Self::read) for a caller that polls, collecting the group's frames in `out`
-	/// until it ends. `out` starts empty and is kept across the polls of one read.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	fn poll_read(
+	/// [`read`](Self::read), polled: ready with the group's frames once it ends. Pass the same
+	/// empty `out` to every poll of one group, which holds the frames decoded so far.
+	pub fn poll_read(
 		&mut self,
 		waiter: &kio::Waiter,
 		group: &mut moq_net::group::Consumer,
@@ -267,7 +265,6 @@ impl Muxer {
 		codec_dimensions(&config.codec, description.as_deref(), payload)
 	}
 
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn resolve_video_dimensions(&mut self, payload: &[u8]) -> crate::Result<()> {
 		let Kind::Video(config) = &mut self.kind else {
 			return Ok(());

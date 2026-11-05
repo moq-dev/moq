@@ -4,7 +4,7 @@
 use kio::clock::Wall;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
-use std::task::Poll;
+use std::task::{Poll, ready};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -217,20 +217,21 @@ impl Media {
 	/// never looks the path up ad hoc: a same-path republish installs a new broadcast whose
 	/// group numbering restarts, and those bytes must not be served under rows produced for
 	/// the publisher it replaced.
-	async fn track(
+	fn poll_track_or_refusal(
 		&self,
 		binding: &moq_mux::Binding,
-	) -> Result<Option<(moq_net::broadcast::Consumer, moq_net::track::Consumer)>> {
-		let track = kio::wait(|waiter| self.poll_track(binding, waiter)).await;
+		waiter: &kio::Waiter,
+	) -> Poll<Result<Option<(moq_net::broadcast::Consumer, moq_net::track::Consumer)>>> {
+		let track = ready!(self.poll_track(binding, waiter));
 		// The bind can be refused while this read waits. Preserve that exact instance's
 		// authorization error; other failed or disconnected references stay missing.
 		if track.is_none()
 			&& let Poll::Ready(Err(err @ moq_mux::Error::Moq(moq_net::Error::Unauthorized))) =
 				binding.poll_broadcast(&kio::Waiter::noop())
 		{
-			return Err(err.into());
+			return Poll::Ready(Err(err.into()));
 		}
-		Ok(track)
+		Poll::Ready(Ok(track))
 	}
 
 	fn poll_track(
@@ -421,9 +422,9 @@ pub struct Rendition {
 	/// generation drops the init, since a restarted inline-codec publisher may carry new
 	/// parameter sets under the same catalog. Shared state so a render can wait for the init.
 	run: kio::Producer<Run>,
-	/// Serializes init builds, so concurrent first requests fetch the keyframe group once. Shared
-	/// so a background build (see [`start_init`](Self::start_init)) holds it for its whole run.
-	building: Arc<tokio::sync::Mutex<()>>,
+	/// Serializes init builds, so concurrent first requests fetch the keyframe group once. A
+	/// background build (see [`start_init`](Self::start_init)) holds it for its whole run.
+	building: Building,
 	/// The background init build; ends when the rendition drops.
 	build: Mutex<Option<Owner>>,
 }
@@ -435,6 +436,45 @@ struct Watcher {
 	#[cfg(feature = "server")]
 	requests: usize,
 	stopped: bool,
+}
+
+/// Admits one init build at a time; the others wait for it.
+#[derive(Clone, Default)]
+struct Building(kio::Shared<bool>);
+
+/// A held [`Building`], released on drop.
+struct Built(kio::Shared<bool>);
+
+impl Building {
+	/// Hold it now, unless a build already does.
+	fn try_hold(&self) -> Option<Built> {
+		let mut held = self.0.lock();
+		if *held {
+			return None;
+		}
+		*held = true;
+		Some(Built(self.0.clone()))
+	}
+
+	/// Hold it once no build does.
+	fn poll_hold(&self, waiter: &kio::Waiter) -> Poll<Built> {
+		let mut held = ready!(self.0.poll(waiter, |held| match **held {
+			true => Poll::Pending,
+			false => Poll::Ready(()),
+		}));
+		*held = true;
+		Poll::Ready(Built(self.0.clone()))
+	}
+
+	fn is_held(&self) -> bool {
+		*self.0.read()
+	}
+}
+
+impl Drop for Built {
+	fn drop(&mut self) {
+		*self.0.lock() = false;
+	}
 }
 
 /// Keeps lazy media demanded for the whole response, including its first encode.
@@ -649,7 +689,7 @@ impl Rendition {
 			previous: Mutex::new(None),
 			media: Arc::new(media),
 			run: kio::Producer::default(),
-			building: Arc::new(tokio::sync::Mutex::new(())),
+			building: Building::default(),
 			build: Mutex::new(None),
 		})
 	}
@@ -692,7 +732,7 @@ impl Rendition {
 			previous: Mutex::new(None),
 			media: Arc::new(media),
 			run: kio::Producer::default(),
-			building: Arc::new(tokio::sync::Mutex::new(())),
+			building: Building::default(),
 			build: Mutex::new(None),
 		})
 	}
@@ -1123,35 +1163,8 @@ impl Rendition {
 	///
 	/// A failed rendition or catalog fails it as in [`media_playlist`](Self::media_playlist).
 	pub async fn playlist(&self, query: Option<&str>) -> Result<Option<String>> {
-		// A denied reference is refused before anything else, so no other error masks it.
-		self.authorize()?;
-		kio::wait(|waiter| self.poll_playable(waiter)).await;
-		// A failed media track may never supply the keyframe an inline init waits for.
-		self.check()?;
-		// Build the inits the listed segments map. An inline-codec init needs a keyframe group
-		// fetched first. Building it caches, so the player's follow-up GET of the init is free.
-		let own = self.live.window().segments;
-		let mut inherited = self.inherited(&own);
-		inherited.dedup_by(|(a, _), (b, _)| Arc::ptr_eq(a, b));
-		for (rendition, _) in &inherited {
-			if rendition.load_init().await?.is_none() {
-				return Ok(None);
-			}
-		}
-		// This instance's own init is mapped only once it lists a segment (see `media_playlist`).
-		let mapped = !own.is_empty() || inherited.is_empty();
-		if mapped && self.load_init().await?.is_none() {
-			return Ok(None);
-		}
-		let rendered = self.media_playlist(query)?;
-		if rendered.is_some() || mapped {
-			return Ok(rendered);
-		}
-		// It listed its first segment meanwhile.
-		if self.load_init().await?.is_none() {
-			return Ok(None);
-		}
-		self.media_playlist(query)
+		let mut playlist = Playlist::Start;
+		kio::wait(|waiter| playlist.poll(self, waiter, query)).await
 	}
 
 	/// Snapshot the media playlist from the current window.
@@ -1359,7 +1372,7 @@ impl Rendition {
 
 	/// Fetch and transmux the segment of the track tagged `tag` at `at`: its number, or
 	/// its start in milliseconds (DASH `$Time$`).
-	async fn segment_at(&self, tag: &str, at: segments::At) -> Result<Option<Bytes>> {
+	fn fetch_at(&self, tag: &str, at: segments::At) -> Result<Option<Fetch>> {
 		self.authorize()?;
 		let sequence = match at {
 			segments::At::Sequence(sequence) => sequence,
@@ -1368,7 +1381,7 @@ impl Rendition {
 				None => return Ok(None),
 			},
 		};
-		self.numbered(tag, sequence).await
+		self.fetch_numbered(tag, sequence)
 	}
 
 	/// The wall-clock time of a media timestamp, when the catalog advertises its broadcast
@@ -1431,13 +1444,16 @@ impl Rendition {
 				return Ok(Some(init.bytes.clone()));
 			}
 		}
-		let init = self.load_init().await?;
+		let mut load = LoadInit::default();
+		let init = kio::wait(|waiter| load.poll(self, waiter)).await?;
 		Ok(init.filter(|init| init.hash == hash).map(|init| init.bytes.clone()))
 	}
 
 	/// The current CMAF init segment, whatever its hash, built on first request and cached.
-	pub(crate) async fn latest_init(&self) -> Result<Option<Bytes>> {
-		Ok(self.load_init().await?.map(|init| init.bytes.clone()))
+	/// `load` holds the progress across polls, starting from [`LoadInit::default`].
+	pub(crate) fn poll_latest_init(&self, waiter: &kio::Waiter, load: &mut LoadInit) -> Poll<Result<Option<Bytes>>> {
+		let init = ready!(load.poll(self, waiter))?;
+		Poll::Ready(Ok(init.map(|init| init.bytes.clone())))
 	}
 
 	/// `run`'s init if it is already built, or can be without media: an out-of-band codec
@@ -1476,7 +1492,7 @@ impl Rendition {
 			return;
 		}
 		// Taken before spawning, so renders never queue tasks behind a build stuck on an open group.
-		let Ok(building) = self.building.clone().try_lock_owned() else {
+		let Some(building) = self.building.try_hold() else {
 			return;
 		};
 		let read = match self.muxer().map(|muxer| self.init_read(muxer)) {
@@ -1487,67 +1503,28 @@ impl Rendition {
 				return;
 			}
 		};
-		let media = self.media.clone();
-		let rendition = Arc::downgrade(self);
-		let name = self.name.clone();
-		let build = self.fanout.spawn(future_task(async move {
-			let _building = building;
-			match read.read(&media, &binding).await {
-				Ok(Some(bytes)) => {
-					if let Some(rendition) = rendition.upgrade() {
-						rendition.cache_init(run.epoch, bytes);
-					}
-				}
-				Ok(None) => {}
-				Err(err) => tracing::warn!(rendition = %name, %err, "failed to build init segment"),
-			}
-		}));
+		let build = self.fanout.spawn(InitBuild {
+			_building: building,
+			read,
+			media: self.media.clone(),
+			binding,
+			rendition: Arc::downgrade(self),
+			name: self.name.clone(),
+			epoch: run.epoch,
+		});
 		*self.build.lock().expect("build lock poisoned") = Some(build);
 	}
 
 	/// Whether the init is missing while a build of it is running, so a later render may list
 	/// this rendition.
 	pub(crate) fn init_pending(&self) -> bool {
-		self.run().init.is_none() && self.building.try_lock().is_err()
-	}
-
-	async fn load_init(&self) -> Result<Option<Arc<Init>>> {
-		let binding = self.authorize()?;
-		// A transmuxed segment can cache the init while another bootstrap holds `building`,
-		// blocked on an unfinished group.
-		if let Some(init) = self.run().init {
-			return Ok(Some(init));
-		}
-		let _building = self.building.lock().await;
-		self.bootstrap(&binding).await
-	}
-
-	/// Build and cache the init, holding `building`.
-	async fn bootstrap(&self, binding: &moq_mux::Binding) -> Result<Option<Arc<Init>>> {
-		let run = self.run();
-		if let Some(init) = run.init {
-			return Ok(Some(init));
-		}
-
-		// An out-of-band codec builds its init straight from the catalog; an inline one returns
-		// `None` until a keyframe group is read.
-		let muxer = self.muxer()?;
-		if let Some(bytes) = muxer.init()? {
-			return Ok(Some(self.cache_init(run.epoch, bytes)));
-		}
-		let Some(read) = self.init_read(muxer) else {
-			return Ok(None);
-		};
-		let Some(bytes) = read.read(&self.media, binding).await? else {
-			return Ok(None);
-		};
-		Ok(Some(self.cache_init(run.epoch, bytes)))
+		self.run().init.is_none() && self.building.is_held()
 	}
 
 	/// The listed groups an inline-codec init is read from, or `None` while none is listed.
 	fn init_read(&self, muxer: Muxer) -> Option<InitRead> {
 		let groups = self.live.init_groups();
-		(!groups.is_empty()).then_some(InitRead { muxer, groups })
+		(!groups.is_empty()).then(|| InitRead::new(muxer, groups))
 	}
 
 	/// Fetch and transmux the segment a [`Resource::Segment`](super::Resource::Segment) URL names.
@@ -1565,111 +1542,425 @@ impl Rendition {
 	pub async fn segment(&self, id: &segments::Id) -> Result<Option<Bytes>> {
 		// A predecessor's segments still listed are muxed under its config. A config that returns
 		// gets its tag back, but the instances' segment numbers never overlap.
-		if let Some(rendition) = self
+		let owner = self
 			.lineage()
 			.into_iter()
-			.find(|rendition| *rendition.tag == *id.tag && rendition.live.holds(&id.tag, id.at))
-		{
-			return rendition.own_segment(id).await;
-		}
-		self.own_segment(id).await
-	}
-
-	/// Fetch and transmux the segment `id` names among this instance's own rows; see
-	/// [`segment`](Self::segment).
-	async fn own_segment(&self, id: &segments::Id) -> Result<Option<Bytes>> {
-		self.authorize()?;
-		let current = || self.generation().as_deref() == id.generation.as_deref();
-		if !current() {
+			.find(|rendition| *rendition.tag == *id.tag && rendition.live.holds(&id.tag, id.at));
+		let owner = owner.as_deref().unwrap_or(self);
+		let Some(mut fetch) = owner.fetch_own(id)? else {
 			return Ok(None);
-		}
-		let segment = self.segment_at(&id.tag, id.at).await?;
+		};
+		let segment = kio::wait(|waiter| fetch.poll(owner, waiter)).await?;
 		// A generation change while fetching may have swapped the rows under the lookup.
-		Ok(segment.filter(|_| current()))
+		Ok(segment.filter(|_| owner.generation().as_deref() == id.generation.as_deref()))
 	}
 
-	/// Fetch and transmux the segment numbered `segment` on the track tagged `tag`,
-	/// whatever the run; see [`segment`](Self::segment).
-	pub(crate) async fn numbered(&self, tag: &str, segment: u64) -> Result<Option<Bytes>> {
+	/// The fetch of the segment `id` names among this instance's own rows; see
+	/// [`segment`](Self::segment).
+	fn fetch_own(&self, id: &segments::Id) -> Result<Option<Fetch>> {
 		self.authorize()?;
-		let Some(row) = self.live.row(tag, segment) else {
+		if self.generation().as_deref() != id.generation.as_deref() {
 			return Ok(None);
-		};
-		self.fetch(&row).await
+		}
+		self.fetch_at(&id.tag, id.at)
 	}
 
-	/// Fetch and transmux `row`'s groups on this rendition; see [`segment`](Self::segment).
-	pub(crate) async fn fetch(&self, row: &segments::Row) -> Result<Option<Bytes>> {
-		let binding = self.authorize()?;
-		// Read the run before resolving the row (see `restart`), so an init decoded from its
-		// groups is never cached for a run that started while they were being fetched.
-		let run = self.run();
-		if row.stop {
-			return Ok(None);
+	/// The fetch of the segment numbered `segment` on the track tagged `tag`, whatever the run;
+	/// see [`segment`](Self::segment).
+	fn fetch_numbered(&self, tag: &str, segment: u64) -> Result<Option<Fetch>> {
+		self.authorize()?;
+		Ok(self.live.row(tag, segment).map(Fetch::new))
+	}
+}
+
+/// Fetches and transmuxes a row's groups on a rendition; see [`Rendition::segment`].
+pub(crate) struct Fetch {
+	row: segments::Row,
+	state: Fetching,
+}
+
+#[allow(
+	clippy::large_enum_variant,
+	reason = "one per segment request, and the reading variant is the working state"
+)]
+enum Fetching {
+	Start,
+	Track {
+		binding: Arc<moq_mux::Binding>,
+		epoch: u64,
+	},
+	Groups {
+		_binding: Arc<moq_mux::Binding>,
+		epoch: u64,
+		broadcast: moq_net::broadcast::Consumer,
+		track: moq_net::track::Consumer,
+		muxer: Muxer,
+		/// Every group's frames, accumulated into ONE fragment, so duration inference sees each
+		/// frame's true successor. A per-group fragment would mis-time the trailing sample of
+		/// every group (its real successor lives in the next group), audible on audio segments
+		/// that span many groups.
+		frames: Vec<moq_mux::container::Frame>,
+		/// The group being read, and the ones after it.
+		groups: std::ops::Range<u64>,
+		group: Option<GroupRead>,
+	},
+	Done,
+}
+
+impl Fetch {
+	pub(crate) fn new(row: segments::Row) -> Self {
+		Self {
+			row,
+			state: Fetching::Start,
 		}
-		let groups = row.groups.clone();
+	}
 
-		// A segment must be served whole. If its group span exceeds the safety cap (a publisher
-		// grouping far finer than its interval), 404 rather than silently truncating it to a
-		// segment shorter than its advertised duration. The live window lists such a segment as a
-		// gap instead, so only a row from elsewhere reaches this.
-		if groups.end.saturating_sub(groups.start) > self.max_groups() {
-			tracing::warn!(
-				?groups,
-				"segment spans more groups than one request fetches; refusing to truncate"
-			);
-			return Ok(None);
-		}
+	/// The row fetched.
+	pub(crate) fn row(&self) -> &segments::Row {
+		&self.row
+	}
 
-		let Some((broadcast, track)) = self.media.track(&binding).await? else {
-			return Ok(None);
-		};
+	/// The row's CMAF fragment, or `None` when it is a stop or its media is gone.
+	pub(crate) fn poll(&mut self, rendition: &Rendition, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
+		let result = ready!(self.poll_state(rendition, waiter));
+		self.state = Fetching::Done;
+		Poll::Ready(result)
+	}
 
-		let mut muxer = self.muxer()?;
-		// Accumulate every group's frames into ONE fragment, so duration inference sees each
-		// frame's true successor. A per-group fragment would mis-time the trailing sample of every
-		// group (its real successor lives in the next group), audible on audio segments that span
-		// many groups.
-		let mut frames = Vec::new();
-		for sequence in groups {
-			let miss = match fetch(&track, sequence, &broadcast).await? {
-				Ok(mut group) => match read_group(&mut muxer, &mut group, &broadcast).await? {
-					Ok(mut group_frames) => {
-						frames.append(&mut group_frames);
-						continue;
+	fn poll_state(&mut self, rendition: &Rendition, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
+		let row = &self.row;
+		loop {
+			match &mut self.state {
+				Fetching::Start => {
+					let binding = rendition.authorize()?;
+					// Read the run before resolving the row (see `restart`), so an init decoded from
+					// its groups is never cached for a run that started while they were being fetched.
+					let epoch = rendition.run().epoch;
+					if row.stop {
+						return Poll::Ready(Ok(None));
 					}
-					Err(err) => err,
-				},
-				Err(err) => err,
-			};
-			tracing::warn!(
-				segment = row.segment,
-				group = sequence,
-				err = %miss,
-				"abandoning an advertised segment: a group is unavailable"
-			);
-			return Ok(None);
+					// A segment must be served whole. If its group span exceeds the safety cap (a
+					// publisher grouping far finer than its interval), 404 rather than silently
+					// truncating it to a segment shorter than its advertised duration. The live window
+					// lists such a segment as a gap instead, so only a row from elsewhere reaches this.
+					if row.groups.end.saturating_sub(row.groups.start) > rendition.max_groups() {
+						tracing::warn!(
+							groups = ?row.groups,
+							"segment spans more groups than one request fetches; refusing to truncate"
+						);
+						return Poll::Ready(Ok(None));
+					}
+					self.state = Fetching::Track { binding, epoch };
+				}
+				Fetching::Track { binding, epoch } => {
+					let Some((broadcast, track)) = ready!(rendition.media.poll_track_or_refusal(binding, waiter))?
+					else {
+						return Poll::Ready(Ok(None));
+					};
+					self.state = Fetching::Groups {
+						_binding: binding.clone(),
+						epoch: *epoch,
+						broadcast,
+						track,
+						muxer: rendition.muxer()?,
+						frames: Vec::new(),
+						groups: row.groups.clone(),
+						group: None,
+					};
+				}
+				Fetching::Groups {
+					broadcast,
+					track,
+					muxer,
+					frames,
+					groups,
+					group,
+					..
+				} => {
+					let read = match group {
+						Some(read) => read,
+						None => match groups.next() {
+							Some(sequence) => group.insert(GroupRead::new(track, sequence)),
+							None => break,
+						},
+					};
+					let sequence = read.sequence;
+					let miss = match ready!(read.poll(waiter, muxer, broadcast))? {
+						Ok(mut read) => {
+							frames.append(&mut read);
+							*group = None;
+							continue;
+						}
+						Err(miss) => miss,
+					};
+					tracing::warn!(
+						segment = row.segment,
+						group = sequence,
+						err = %miss,
+						"abandoning an advertised segment: a group is unavailable"
+					);
+					return Poll::Ready(Ok(None));
+				}
+				Fetching::Done => panic!("polled a finished segment fetch"),
+			}
 		}
+		let Fetching::Groups {
+			epoch, muxer, frames, ..
+		} = &mut self.state
+		else {
+			unreachable!("read every group above");
+		};
 		if frames.is_empty() {
-			return Ok(None);
+			return Poll::Ready(Ok(None));
 		}
 		// The last presented sample has no successor to time it, so the fragment ends where the
 		// next group starts, unless its codec or a duration marker times it.
 		let end = row
 			.content
 			.and_then(|content| moq_net::Timestamp::from_micros(content.as_micros() as u64).ok());
-		let fragment = muxer.fragment(row.segment as u32, &frames, end)?;
+		let fragment = muxer.fragment(row.segment as u32, frames, end)?;
 		// Inline codec metadata was already decoded from these completed groups.
 		// Reuse it instead of fetching a newer, possibly unfinished group.
 		if let Some(bytes) = muxer.init()? {
-			self.cache_init(run.epoch, bytes);
+			rendition.cache_init(*epoch, bytes);
 		}
-		Ok(Some(fragment))
+		Poll::Ready(Ok(Some(fragment)))
+	}
+}
+
+/// Loads the current run's init, building and caching it from media if needed.
+#[derive(Default)]
+pub(crate) struct LoadInit(Loading);
+
+#[derive(Default)]
+#[allow(
+	clippy::large_enum_variant,
+	reason = "one per init load, and the reading variant is the working state"
+)]
+enum Loading {
+	#[default]
+	Start,
+	/// Waiting for any other build to finish.
+	Holding(Arc<moq_mux::Binding>),
+	/// Reading media for the init, holding the build.
+	Reading {
+		binding: Arc<moq_mux::Binding>,
+		_building: Built,
+		epoch: u64,
+		read: InitRead,
+	},
+	Done,
+}
+
+impl LoadInit {
+	fn poll(&mut self, rendition: &Rendition, waiter: &kio::Waiter) -> Poll<Result<Option<Arc<Init>>>> {
+		let result = ready!(self.0.poll(rendition, waiter));
+		// Releases the build as the load returns.
+		self.0 = Loading::Done;
+		Poll::Ready(result)
+	}
+}
+
+impl Loading {
+	fn poll(&mut self, rendition: &Rendition, waiter: &kio::Waiter) -> Poll<Result<Option<Arc<Init>>>> {
+		loop {
+			match self {
+				Self::Start => {
+					let binding = rendition.authorize()?;
+					// A transmuxed segment can cache the init while another bootstrap holds
+					// `building`, blocked on an unfinished group.
+					if let Some(init) = rendition.run().init {
+						return Poll::Ready(Ok(Some(init)));
+					}
+					*self = Self::Holding(binding);
+				}
+				Self::Holding(binding) => {
+					let building = ready!(rendition.building.poll_hold(waiter));
+					let run = rendition.run();
+					if let Some(init) = run.init {
+						return Poll::Ready(Ok(Some(init)));
+					}
+					// An out-of-band codec builds its init straight from the catalog; an inline one
+					// returns `None` until a keyframe group is read.
+					let muxer = rendition.muxer()?;
+					if let Some(bytes) = muxer.init()? {
+						return Poll::Ready(Ok(Some(rendition.cache_init(run.epoch, bytes))));
+					}
+					let Some(read) = rendition.init_read(muxer) else {
+						return Poll::Ready(Ok(None));
+					};
+					*self = Self::Reading {
+						binding: binding.clone(),
+						_building: building,
+						epoch: run.epoch,
+						read,
+					};
+				}
+				Self::Reading {
+					binding, epoch, read, ..
+				} => {
+					let Some(bytes) = ready!(read.poll(waiter, &rendition.media, binding))? else {
+						return Poll::Ready(Ok(None));
+					};
+					return Poll::Ready(Ok(Some(rendition.cache_init(*epoch, bytes))));
+				}
+				Self::Done => panic!("polled a finished init load"),
+			}
+		}
+	}
+}
+
+/// Renders a media playlist once it is servable; see [`Rendition::playlist`].
+enum Playlist {
+	Start,
+	Playable,
+	/// Building the init of each inherited instance in turn, then this instance's own.
+	Inits {
+		inherited: Vec<Arc<Rendition>>,
+		/// This instance's own init is mapped only once it lists a segment (see `media_playlist`).
+		mapped: bool,
+		load: LoadInit,
+	},
+	/// Building this instance's own init, which it mapped since the render was checked.
+	Again(LoadInit),
+	Done,
+}
+
+impl Playlist {
+	fn poll(
+		&mut self,
+		rendition: &Rendition,
+		waiter: &kio::Waiter,
+		query: Option<&str>,
+	) -> Poll<Result<Option<String>>> {
+		let result = ready!(self.poll_state(rendition, waiter, query));
+		*self = Self::Done;
+		Poll::Ready(result)
+	}
+
+	fn poll_state(
+		&mut self,
+		rendition: &Rendition,
+		waiter: &kio::Waiter,
+		query: Option<&str>,
+	) -> Poll<Result<Option<String>>> {
+		loop {
+			match self {
+				Self::Start => {
+					// A denied reference is refused before anything else, so no other error masks it.
+					rendition.authorize()?;
+					*self = Self::Playable;
+				}
+				Self::Playable => {
+					ready!(rendition.poll_playable(waiter));
+					// A failed media track may never supply the keyframe an inline init waits for.
+					rendition.check()?;
+					// Build the inits the listed segments map. An inline-codec init needs a keyframe
+					// group fetched first. Building it caches, so the player's follow-up GET of the
+					// init is free.
+					let own = rendition.live.window().segments;
+					let mut inherited = rendition.inherited(&own);
+					inherited.dedup_by(|(a, _), (b, _)| Arc::ptr_eq(a, b));
+					let mapped = !own.is_empty() || inherited.is_empty();
+					// Loaded in reverse, popping the oldest first.
+					let inherited = inherited.into_iter().rev().map(|(rendition, _)| rendition).collect();
+					*self = Self::Inits {
+						inherited,
+						mapped,
+						load: LoadInit::default(),
+					};
+				}
+				Self::Inits {
+					inherited,
+					mapped,
+					load,
+				} => {
+					let loading = match inherited.last() {
+						Some(previous) => &**previous,
+						None if *mapped => rendition,
+						None => {
+							let rendered = rendition.media_playlist(query)?;
+							if rendered.is_some() {
+								return Poll::Ready(Ok(rendered));
+							}
+							// It listed its first segment meanwhile.
+							*self = Self::Again(LoadInit::default());
+							continue;
+						}
+					};
+					if ready!(load.poll(loading, waiter))?.is_none() {
+						return Poll::Ready(Ok(None));
+					}
+					*load = LoadInit::default();
+					if inherited.pop().is_none() {
+						// This instance's own init, which it maps.
+						return Poll::Ready(rendition.media_playlist(query));
+					}
+				}
+				Self::Again(load) => {
+					if ready!(load.poll(rendition, waiter))?.is_none() {
+						return Poll::Ready(Ok(None));
+					}
+					return Poll::Ready(rendition.media_playlist(query));
+				}
+				Self::Done => panic!("polled a finished playlist render"),
+			}
+		}
+	}
+}
+
+/// Builds an init in the background, holding the build until it ends; see
+/// [`Rendition::start_init`].
+struct InitBuild {
+	_building: Built,
+	read: InitRead,
+	media: Arc<Media>,
+	binding: Arc<moq_mux::Binding>,
+	rendition: Weak<Rendition>,
+	name: String,
+	epoch: u64,
+}
+
+impl kio::Task for InitBuild {
+	type Output = ();
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		match ready!(self.read.poll(waiter, &self.media, &self.binding)) {
+			Ok(Some(bytes)) => {
+				if let Some(rendition) = self.rendition.upgrade() {
+					rendition.cache_init(self.epoch, bytes);
+				}
+			}
+			Ok(None) => {}
+			Err(err) => tracing::warn!(rendition = %self.name, %err, "failed to build init segment"),
+		}
+		Poll::Ready(())
 	}
 }
 
 #[cfg(test)]
 impl Rendition {
+	/// The current CMAF init segment, whatever its hash, built on first request and cached.
+	pub(crate) async fn latest_init(&self) -> Result<Option<Bytes>> {
+		let mut load = LoadInit::default();
+		kio::wait(|waiter| self.poll_latest_init(waiter, &mut load)).await
+	}
+
+	/// Fetch and transmux the segment numbered `segment` on the track tagged `tag`, whatever the
+	/// run.
+	pub(crate) async fn numbered(&self, tag: &str, segment: u64) -> Result<Option<Bytes>> {
+		let Some(mut fetch) = self.fetch_numbered(tag, segment)? else {
+			return Ok(None);
+		};
+		kio::wait(|waiter| fetch.poll(self, waiter)).await
+	}
+
+	/// Fetch and transmux `row`'s groups.
+	pub(crate) async fn fetch(&self, row: &segments::Row) -> Result<Option<Bytes>> {
+		let mut fetch = Fetch::new(row.clone());
+		kio::wait(|waiter| fetch.poll(self, waiter)).await
+	}
+
 	/// Fetch the listed segment numbered `segment`.
 	pub(crate) async fn listed_segment(&self, segment: u64) -> Result<Option<Bytes>> {
 		self.numbered(&self.tag.clone(), segment).await
@@ -1677,7 +1968,10 @@ impl Rendition {
 
 	/// Fetch the listed segment starting at `time` milliseconds.
 	pub(crate) async fn listed_segment_at(&self, time: u64) -> Result<Option<Bytes>> {
-		self.segment_at(&self.tag.clone(), segments::At::Pts(time)).await
+		let Some(mut fetch) = self.fetch_at(&self.tag.clone(), segments::At::Pts(time))? else {
+			return Ok(None);
+		};
+		kio::wait(|waiter| fetch.poll(self, waiter)).await
 	}
 }
 
@@ -1759,7 +2053,7 @@ async fn watch_media(rendition: Weak<Rendition>, mut retiring: tokio::sync::watc
 			None => return Ok(()),
 		};
 		let subscribe = async {
-			let Some((_, track)) = media.track(&binding).await? else {
+			let Some((_, track)) = kio::wait(|waiter| media.poll_track_or_refusal(&binding, waiter)).await? else {
 				return Ok(None);
 			};
 			let subscription = moq_net::track::Subscription::default()
@@ -2130,68 +2424,109 @@ struct InitRead {
 	muxer: Muxer,
 	/// Groups to try in order (see [`segments::Producer::init_groups`]): a complete group first,
 	/// since reading an open one waits for the publisher to finish it.
-	groups: Vec<u64>,
+	groups: std::vec::IntoIter<u64>,
+	track: Option<(moq_net::broadcast::Consumer, moq_net::track::Consumer)>,
+	/// The group being read.
+	group: Option<GroupRead>,
 }
 
 impl InitRead {
+	fn new(muxer: Muxer, groups: Vec<u64>) -> Self {
+		Self {
+			muxer,
+			groups: groups.into_iter(),
+			track: None,
+			group: None,
+		}
+	}
+
 	/// Read the groups until one yields the init.
-	async fn read(mut self, media: &Media, binding: &moq_mux::Binding) -> Result<Option<Bytes>> {
-		let Some((broadcast, track)) = media.track(binding).await? else {
-			return Ok(None);
+	fn poll(&mut self, waiter: &kio::Waiter, media: &Media, binding: &moq_mux::Binding) -> Poll<Result<Option<Bytes>>> {
+		let (broadcast, track) = match &self.track {
+			Some(track) => track,
+			None => match ready!(media.poll_track_or_refusal(binding, waiter))? {
+				Some(track) => self.track.insert(track),
+				None => return Poll::Ready(Ok(None)),
+			},
 		};
-		for sequence in self.groups {
-			// A group gone from the cache, before or mid-read, leaves the next candidate to try.
-			let Ok(mut group) = fetch(&track, sequence, &broadcast).await? else {
-				continue;
+		loop {
+			let read = match &mut self.group {
+				Some(read) => read,
+				None => match self.groups.next() {
+					Some(sequence) => self.group.insert(GroupRead::new(track, sequence)),
+					None => return Poll::Ready(Ok(None)),
+				},
 			};
-			if read_group(&mut self.muxer, &mut group, &broadcast).await?.is_err() {
+			let read = ready!(read.poll(waiter, &mut self.muxer, broadcast))?;
+			self.group = None;
+			// A group gone from the cache, before or mid-read, leaves the next candidate to try.
+			if read.is_err() {
 				continue;
 			}
 			if let Some(bytes) = self.muxer.init()? {
-				return Ok(Some(bytes));
+				return Poll::Ready(Ok(Some(bytes)));
 			}
 		}
-		Ok(None)
+	}
+}
+
+/// Fetches one group, then reads its frames through a muxer.
+struct GroupRead {
+	sequence: u64,
+	state: GroupReading,
+}
+
+enum GroupReading {
+	Fetching(moq_net::track::Fetching),
+	Reading(moq_net::group::Consumer, Vec<moq_mux::container::Frame>),
+}
+
+impl GroupRead {
+	fn new(track: &moq_net::track::Consumer, sequence: u64) -> Self {
+		Self {
+			sequence,
+			state: GroupReading::Fetching(track.fetch_group(sequence, None).into_inner()),
+		}
+	}
+
+	/// The group's frames, or the error saying it is no longer (or not yet) servable rather than a
+	/// bare `None`: a caller abandoning a segment can only explain itself with it.
+	///
+	/// A mid-read cache eviction (the group aged out of the relay while we were reading it) is
+	/// such a miss too. Without this the eviction would surface as a 500; it's really the same
+	/// "group gone" 404 as a fetch-time miss.
+	fn poll(
+		&mut self,
+		waiter: &kio::Waiter,
+		muxer: &mut Muxer,
+		broadcast: &moq_net::broadcast::Consumer,
+	) -> Poll<Result<std::result::Result<Vec<moq_mux::container::Frame>, moq_net::Error>>> {
+		if let GroupReading::Fetching(fetching) = &mut self.state {
+			match ready!(kio::Task::poll(fetching, waiter)) {
+				Ok(group) => self.state = GroupReading::Reading(group, Vec::new()),
+				Err(err) if is_unservable(&err, broadcast) => return Poll::Ready(Ok(Err(err))),
+				Err(err) => return Poll::Ready(Err(err.into())),
+			}
+		}
+		let GroupReading::Reading(group, frames) = &mut self.state else {
+			unreachable!("fetched above");
+		};
+		Poll::Ready(match ready!(muxer.poll_read(waiter, group, frames)) {
+			Ok(frames) => Ok(Ok(frames)),
+			Err(err) => {
+				let miss = net_errors(&err).find(|err| is_unservable(err, broadcast)).cloned();
+				match miss {
+					Some(miss) => Ok(Err(miss)),
+					None => Err(err.into()),
+				}
+			}
+		})
 	}
 }
 
 fn future_task(task: impl Future<Output = ()> + Send + 'static) -> impl kio::Task<Output = ()> + Send + 'static {
 	let mut task = Box::pin(task);
 	move |waiter: &kio::Waiter| waiter.poll_future(task.as_mut())
-}
-
-/// Fetch one group, mapping "no longer (or not yet) servable" to the error that says so
-/// rather than a bare `None`: a caller abandoning a segment can only explain itself with it.
-async fn fetch(
-	track: &moq_net::track::Consumer,
-	sequence: u64,
-	broadcast: &moq_net::broadcast::Consumer,
-) -> Result<std::result::Result<moq_net::group::Consumer, moq_net::Error>> {
-	match track.fetch_group(sequence, None).await {
-		Ok(group) => Ok(Ok(group)),
-		Err(err) if is_unservable(&err, broadcast) => Ok(Err(err)),
-		Err(err) => Err(err.into()),
-	}
-}
-
-/// Read a fetched group's frames, mapping a mid-read cache eviction (the group aged out of the
-/// relay while we were reading it) to `None` rather than an error. Without this the eviction would
-/// surface as a 500; it's really the same "group gone" 404 as a fetch-time miss.
-async fn read_group(
-	muxer: &mut Muxer,
-	group: &mut moq_net::group::Consumer,
-	broadcast: &moq_net::broadcast::Consumer,
-) -> Result<std::result::Result<Vec<moq_mux::container::Frame>, moq_net::Error>> {
-	match muxer.read(group).await {
-		Ok(frames) => Ok(Ok(frames)),
-		Err(err) => {
-			let miss = net_errors(&err).find(|err| is_unservable(err, broadcast)).cloned();
-			match miss {
-				Some(miss) => Ok(Err(miss)),
-				None => Err(err.into()),
-			}
-		}
-	}
 }
 
 /// True if a FETCH failure means the segment can never be served: a 404, not a 500.
