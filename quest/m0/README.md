@@ -25,7 +25,6 @@ edge, which embeds moq-relay; it moved there on 2026-09-28.
 
 - [Nightly passes on main](/quest/m0/nightly/README.md) - the scheduled Nightly passes end to end, so red means a new break
 - [Interop and Video pass on main](/quest/m0/interop-green/README.md) - the scheduled Interop and Video workflows pass, so red means a new break
-- [moq-video shares moq-mux's bounded H.265 SPS walk](/quest/m0/video-sps-walk.md) - a hostile publisher's H.265 SPS can't panic a subscriber's decoder
 - [Publish the release line's drain() wrappers](/quest/m0/ffi-shutdown-backport.md) - Python `moq-rs` 0.5.2 and Dart `moq` 0.1.1 reach PyPI and pub.dev from `release`
 - [Backport audio groupDuration](/quest/m0/backport-audio-group-duration.md) - `@moq/publish` 0.5.4 on `release` can pack several Opus frames per group, making Cloudflare's relay drop audio less often
 - [Backport the SETUP-path and iroh-key fixes](/quest/m0/backport-security-fixes.md) - `release` refuses a conflicting SETUP Path and keeps persisted iroh keys private, in one patch release
@@ -34,4 +33,3 @@ edge, which embeds moq-relay; it moved there on 2026-09-28.
 - [More tests under load](/quest/m0/test-flakes-2/README.md) - load-only and queue failures, one quest per flake, fixed at the cause, since each one fails a whole batch
 - [Backport the relay and auth hardening to release](/quest/m0/backport-release-hardening.md) - `release`'s relay refuses dot-segment paths, serves its HTTP routes with main's response hardening, and withdraws advertisements a peer starves of send credit; its auth client refuses redirects
 - [Agent build output can't fill the desktop's disk](/quest/m0/agent-disk-budget.md) - finished agent checkouts reclaim their mbx targets automatically, so parallel agent builds stop filling the root disk
-- [A CRLF checkout installs and builds](/quest/m0/crlf-checkout.md) - Windows and WSL clones get LF files, so `just install` builds `@moq/libav` from the cache

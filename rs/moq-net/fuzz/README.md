@@ -58,10 +58,11 @@ Beyond "does not panic":
 - `Path::relative` inverts `Path::resolve`, and never produces a reference that walks
   above the root.
 - A group stream ingests to the same frames and the same ending whether it arrives whole,
-  a byte at a time, or in chunks the input picks, and never stalls once complete. Every
-  frame matches its track's timeline, Object IDs only rise, and the frames hold no more
-  bytes than the stream carried. On a clean end, where no block length is hidden, every
-  byte is a frame, a header field, or a property block.
+  a byte at a time, or in chunks the input picks, and never stalls once complete while a
+  reader takes each frame as it lands. Every frame matches its track's timeline, Object
+  IDs only rise, and the frames hold no more bytes than the stream carried. On a clean
+  end, where no block length is hidden, every byte is a frame, a header field, or a
+  property block.
 - A request-stream message is its type, a two-byte length, and exactly that body; at
   most one GOAWAY migrates it. Its body decodes as each message its type names exactly
   when the control stream's length-prefixed reading accepts it, as the same message, and

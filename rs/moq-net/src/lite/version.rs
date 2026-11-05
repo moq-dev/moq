@@ -327,6 +327,14 @@ impl Version {
 		)
 	}
 
+	/// Whether SETUP may carry a route key proof. Added in lite-07.
+	pub(crate) fn has_route_key(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
 	/// Whether the announce stream has ANNOUNCE_RESTART: another publisher instance
 	/// replacing an advertisement in place. Added in lite-07. Older versions send an
 	/// ANNOUNCE_END then an ANNOUNCE_START.

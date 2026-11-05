@@ -175,7 +175,6 @@ The historical samples locate candidates; they are not controlled benchmarks.
 ## Required
 
 - [Read-only pull-request CI](/quest/m0/ci/read-only-secrets.md) - write secrets and publisher identities reach only protected branches and tags, never a pushed branch
-- [A cache error is a miss](/quest/m0/ci/nix-cache-5xx.md) - a transient `nix.moq.dev` 5xx no longer fails `just ci`
 - [Gate each diff in under five minutes](/quest/m0/ci/five-minutes.md) - `just check`, test phases included, finishes within a worker's 5-minute prompt cache, admission wait included
 - [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - confirm the hosted Nightly jobs reuse the previous Nightly, then measure restore time and expiry
 - [Verify the Nix cache](/quest/m0/ci/nix-cache-verify.md) - confirm releases use `nix.moq.dev`, check its bucket sizes, and retire Cachix
@@ -186,4 +185,3 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [A release merge opens no stale release PR](/quest/m0/ci/release-pr-after-release.md) - `just rs release` publishes before it proposes, so a merged release isn't re-proposed
 - [Build two queue entries at once if it helps](/quest/m0/ci/queue-concurrency.md) - a measured trial of `maximumEntriesToBuild: 2` against the serial lane's burst latency
 - [macOS CI runs kio's tests](/quest/m0/ci/macos-kio.md) - `just rs macos-test` includes kio
-- [The desktop host's Nix builders may map user namespaces](/quest/m0/ci/nix-builder-userns.md) - agents' local `just ci` builds the runner image instead of failing `check flake`

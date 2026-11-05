@@ -16,8 +16,9 @@ import subprocess
 from pathlib import Path
 
 # Group deliveries per measurement: subscribers times cycles, so every subscriber count
-# runs about as long. The session harness costs about ten times the model's per group.
-UNITS = {"model": 1_000_000, "session": 100_000}
+# runs about as long. The session harness costs about ten times the model's per group, and
+# the group harness's 512-frame groups about five hundred times.
+UNITS = {"model": 1_000_000, "session": 100_000, "group": 2_000}
 
 
 def cycles(scenario, subscribers):

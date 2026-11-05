@@ -36,6 +36,8 @@ pub(crate) enum Classified {
 #[derive(Clone)]
 pub(crate) struct Tls {
 	pub(crate) http: RustlsConfig,
+	/// The policy behind `http`, which builds each client's identity against its roots.
+	pub(crate) serve: moq_tokio::tls::Serve,
 	pub(crate) qmux: Option<moq_tokio::tcp::TlsAcceptor>,
 }
 
