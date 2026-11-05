@@ -2583,24 +2583,6 @@ impl Gate {
 		Poll::Ready(())
 	}
 
-	/// Resolve one operation under this gate without dropping the handler's refusal path.
-	#[cfg(feature = "async")]
-	pub(crate) async fn guard<T>(&mut self, operation: impl std::future::Future<Output = Result<T>>) -> Result<T> {
-		let mut operation = std::pin::pin!(operation);
-		kio::wait(|waiter| {
-			std::task::ready!(self.poll_ready(waiter));
-			// Ahead of the gate it also closes, so a lapsed token is refused as expired.
-			if let Poll::Ready(refusal) = self.poll_token_ended(waiter) {
-				return Poll::Ready(Err(refusal.error));
-			}
-			if self.poll_denied(waiter).is_ready() {
-				return Poll::Ready(Err(Error::Unauthorized));
-			}
-			waiter.poll_future(operation.as_mut())
-		})
-		.await
-	}
-
 	/// Resolve once the session no longer allows the path. A union that is still
 	/// `None` (no answer yet, or a version without AUTH) and a session never limited
 	/// allow everything.
