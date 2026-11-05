@@ -59,7 +59,7 @@ Recommended design, to settle in this quest:
   relay (for example, cluster links forwarding narrow interest under
   `.socket`), and how markers cross cluster links.
 - **Where the marker rides.** Its own announce-stream message, or a flag on
-  the [route layer](/quest/m1/cluster-routing/routes/README.md)'s messages if
+  the [route layer](/quest/m2/cluster-routing/routes/README.md)'s messages if
   that layer has landed. Choose whichever leaves the draft simpler.
 - **Not chosen:** routing the dial once the probe finds the endpoint. The
   peer can't tell that its relay probes, so it keeps failing its own dials
@@ -95,4 +95,4 @@ Wire: a new per-path marker on the current moq-lite wip.
 ## Related
 
 - [Sockets](/quest/m1/socket/README.md) - the dial and accept this reports on, and #7888's first-hop check
-- [Routes and announces](/quest/m1/cluster-routing/routes/README.md) - the route layer a marker may ride, and how interest crosses cluster links
+- [Routes and announces](/quest/m2/cluster-routing/routes/README.md) - the route layer a marker may ride, and how interest crosses cluster links

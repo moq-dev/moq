@@ -14,7 +14,7 @@ Decided 2026-10-01: the wire carries one additive metric and each node
 computes its own link costs.
 
 Decided 2026-10-08: m2, and Related rather than Required for the
-[cluster routing line](/quest/m1/cluster-routing/README.md): static costs are
+[cluster routing line](/quest/m2/cluster-routing/README.md): static costs are
 the default and measured cost is opt-in, so the line ships without it.
 
 - Derive the cost from what QUIC already measures (smoothed RTT, loss); an
@@ -37,4 +37,4 @@ Wire: none.
 
 ## Required
 
-- [Routes and announces](/quest/m1/cluster-routing/routes/README.md) - a cost change costs one ROUTE per origin there, instead of a re-announce per broadcast
+- [Routes and announces](/quest/m2/cluster-routing/routes/README.md) - a cost change costs one ROUTE per origin there, instead of a re-announce per broadcast

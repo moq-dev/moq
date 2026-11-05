@@ -19,12 +19,12 @@ ends them. Bindings mirror Rust.
 - Build on [Listing and follow](https://github.com/moq-dev/moq/pull/7678)'s
   listing and its offline report rather than adding event kinds beside it.
 - JS gets the API shape here, fed by what `js/net` knows today; the
-  [js/net route layer](/quest/m1/cluster-routing/routes/js.md) feeds it from the wire.
+  [js/net route layer](/quest/m2/cluster-routing/routes/js.md) feeds it from the wire.
 
 ## Required
 
-- [Route session integration](/quest/m1/cluster-routing/routes/session.md) - the router whose held and let-go states this reports
+- [Route session integration](/quest/m2/cluster-routing/routes/session.md) - the router whose held and let-go states this reports
 
 ## Related
 
-- [Routes and announces](/quest/m1/cluster-routing/routes/README.md) - the handoff contract's held and let-go states
+- [Routes and announces](/quest/m2/cluster-routing/routes/README.md) - the handoff contract's held and let-go states

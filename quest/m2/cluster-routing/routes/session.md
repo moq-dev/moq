@@ -10,6 +10,18 @@ to the identity it selected. A lite-06 peer is translated at the relay. A
 peer can make the router hold only bounded state. The configuration
 changes the contract decided ship with it.
 
+lite-07's live wire switches to the route layer that
+`drafts/draft-lcurley-moq-lite.md` specifies, in Rust: ANNOUNCE_START, ANNOUNCE_UPDATE, ANNOUNCE_RESTART, and
+ANNOUNCE_TAKEOVER name a Route ID and carry the Announce Cost in place of
+the Hop ID list (`HopsRef`, `Hop Base`/`Hop Keep`, and `cluster.max_hops`
+go from lite-07); ANNOUNCE_OK loses its Hop ID and SETUP its Hop parameter;
+TRACK, TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS carry the Node ID; a Cost
+parameter of 0 is refused; the subscriber sends ROUTE_REQUEST and echoes
+ROUTE_END. The new messages' codecs already exist (`AnnounceBroadcast`'s
+route variants and `AnnounceReply`); until this lands the subscriber
+refuses route messages. A hop-less ANNOUNCE cannot run before the router
+drives sessions, which is why the switch lands here.
+
 ## Plan
 
 - Scope route state to interested origins, not the CDN's whole node table.
@@ -56,6 +68,21 @@ changes the contract decided ship with it.
 - A batch carries changes against the last batch on its stream. Restricting
   a view to an interest is still linear in that origin's claims per change;
   make it incremental here.
+- Decided 2026-11-05 (maintainer, /quest-plan, the epic's Plan items 10 to
+  12): each stream's floor is a whole-interest marker. Project the router's
+  per-region view onto it, certifying nothing unless the view knows the
+  route's claims across the stream's interest at one revision; present per
+  route only the most specific claim covering the interest, moved rather
+  than ended when it is withdrawn; and certify absence only for what the
+  stream's `Hidden` filter shows. Rerun the handoff sweeps through that
+  projection: a scope a relay lost now goes offline downstream only on
+  ROUTE_END, the accepted cost, so update the scoped fixtures' expectations
+  to it, while no sweep may revive a known withdrawal or report a false END.
+  Also cover a fresh claim that arrives only on an uncertified stream while
+  an older certified floor on another stream proves it absent
+  ([review](https://github.com/moq-dev/moq/pull/7764#discussion_r4485081975)):
+  the merge rule hides it until the certifying peer refreshes or lets go,
+  and the test pins that bound.
 - Bound what a peer makes the router hold (routes, claims, views per
   session) by design, as the session caps announcements today.
 - Public API: the route-change surface on `broadcast::Route` and its
@@ -76,7 +103,7 @@ Update/Restart split as the only takeover rule. Once each origin is its own
 ANNOUNCE and the first hop pins the request to its identity, the first hop's
 route is the instance, so the per-hop renewal has nothing left to protect.
 An epochless change of serving route stays a Restart, including the
-same-origin next-hop change in the [wire sketch](/quest/m1/cluster-routing/routes/wire.md), and the routing
+same-origin next-hop change with no epoch (test it), and the routing
 contract's epochless fixtures keep passing. Minting an epoch for every route
 instead was tried and rejected
 ([moq-dev/moq#6948](https://github.com/moq-dev/moq/pull/6948)): each relay
@@ -121,10 +148,9 @@ admission.
 
 ## Required
 
-- [lite-07 route wire](/quest/m1/cluster-routing/routes/wire.md) - the messages this drives
 - [One Route handle](/quest/m1/api-audit/route/handle.md) - the origin's route surface this rewrites
 
 ## Related
 
-- [Routes and announces](/quest/m1/cluster-routing/routes/README.md) - the contract
+- [Routes and announces](/quest/m2/cluster-routing/routes/README.md) - the contract
 - [Route wakes](/quest/m4/route-wakes.md) - index work follows the settled source-selection model

@@ -27,7 +27,7 @@ and the fallback path.
   unset by default; the ring alone decides when it is unset. Over the cap,
   drop the longest fingers first. Small meshes come out close to full mesh on
   their own.
-- Forwarding and route choice are [cluster routing](/quest/m1/cluster-routing/README.md)'s:
+- Forwarding and route choice are [cluster routing](/quest/m2/cluster-routing/README.md)'s:
   overlay links join relay nodes as LAN-cost links, and relay
   uplinks stay `upstream` links costed above them. Nothing routes outside the
   shared priority/cost rules.

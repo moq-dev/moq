@@ -46,7 +46,7 @@ Decided 2026-10-25 with the maintainer (planning interview), still in force:
   tracks. No ICE, STUN, or hole punching; the [P2P](/quest/m4/p2p/README.md)
   line is separate.
 - An endpoint ID is a persistent Ed25519 device key, iroh-style. It is not
-  the [routing identity](/quest/m1/cluster-routing/routes/README.md), which each
+  the [routing identity](/quest/m2/cluster-routing/routes/README.md), which each
   process declares fresh.
 - Addressing is announcement: each node publishes under `mesh/<id>/...`, and
   reaching an ID is subscribing there. There is no separate directory.
@@ -66,7 +66,7 @@ Decided 2026-10-25 with the maintainer (planning interview), still in force:
   proving its key. A hosted coordinator may put its own sign-in in front of
   minting that key.
 - The API is iroh-shaped (not wire-compatible with iroh).
-- It builds on [outbound federation](/quest/m1/cluster-routing/federation.md):
+- It builds on [outbound federation](/quest/m2/cluster-routing/federation.md):
   a node's local relay dials its relays as `upstream` links and ranks LAN
   peers above them.
 
@@ -91,7 +91,7 @@ the third, and survives a relay restart.
 
 ## Required
 
-- [Outbound federation](/quest/m1/cluster-routing/federation.md) - a local relay dials its relays and prefers LAN peers
+- [Outbound federation](/quest/m2/cluster-routing/federation.md) - a local relay dials its relays and prefers LAN peers
 - [Byte streams](/quest/m3/stream/README.md) - lossless TCP-level streams over MoQ
 - [Endpoint API](/quest/m3/mesh/endpoint.md) - an iroh-shaped `Endpoint` that connects to an endpoint ID and service and accepts byte streams
 - [Mesh relay node](/quest/m3/mesh/node.md) - a relay node enrolls into a mesh, dials its relays, and admits only enrolled LAN peers

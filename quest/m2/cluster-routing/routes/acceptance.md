@@ -28,8 +28,8 @@ replace are retired.
   go out to a stream whose interest meets none of the origin's claims:
   - a transit node forwarding requests for paths outside its own interest;
   - a node holding or forwarding a seqno request for that identity;
-  - a sender whose certified regions miss the interest, which must still
-    answer with an empty floor list
+  - a sender that cannot certify the interest, which must still close the
+    batch with a floor that certifies nothing
     (`a_disjoint_interest_is_answered_with_nothing`).
 
 The counterexamples from #4349 (closed; this epic still owns the fix) are the `residual_*` tests in
@@ -84,9 +84,9 @@ regressions. Bound pending requests and freshness state under same-clock churn.
 
 ## Required
 
-- [Route session integration](/quest/m1/cluster-routing/routes/session.md) - the implementation under test
-- [js/net route layer](/quest/m1/cluster-routing/routes/js.md) - the JS side of the interop checks
+- [Route session integration](/quest/m2/cluster-routing/routes/session.md) - the implementation under test
+- [js/net route layer](/quest/m2/cluster-routing/routes/js.md) - the JS side of the interop checks
 
 ## Related
 
-- [Routes and announces](/quest/m1/cluster-routing/routes/README.md) - the contract and its fixtures
+- [Routes and announces](/quest/m2/cluster-routing/routes/README.md) - the contract and its fixtures

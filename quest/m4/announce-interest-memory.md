@@ -36,4 +36,4 @@ Public API: none. Wire: none.
 ## Related
 
 - [Announced snapshots](/quest/m5/performance-survey/announced-snapshots.md) - the HTTP listing's copy of the same table
-- [Cluster routing](/quest/m1/cluster-routing/README.md) - reshapes the route table this walks
+- [Cluster routing](/quest/m2/cluster-routing/README.md) - reshapes the route table this walks

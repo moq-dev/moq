@@ -31,4 +31,4 @@ a LAN peer without an enrollment, and survive a relay restart. Update
 
 ## Required
 
-- [Outbound federation](/quest/m1/cluster-routing/federation.md) - upstream links and LAN preference
+- [Outbound federation](/quest/m2/cluster-routing/federation.md) - upstream links and LAN preference

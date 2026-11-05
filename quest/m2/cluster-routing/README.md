@@ -57,7 +57,7 @@ Decided with the maintainer, 2026-10-13:
   2026-10-14; own identities included 2026-10-26, since they are no longer
   proven.) The issuer-qualified subject key was dropped 2026-11-02
   (maintainer); since 2026-11-04 a scoped peer's identities are keyed by the
-  route key it proves ([Route session integration](/quest/m1/cluster-routing/routes/session.md)).
+  route key it proves ([Route session integration](/quest/m2/cluster-routing/routes/session.md)).
 - Matching explicit epochs authorize resume. Epochless changes retain
   Restart and fresh resolution; neither node identity nor a healthy
   alternate grants permission to splice content.
@@ -90,7 +90,7 @@ Decided with the maintainer, 2026-10-13:
 
 The handoff proof showed a complete neighbor snapshot does not prove its
 claims are current; receivers merge origin-versioned views by floor instead.
-The routing contract is recorded in [Routes and announces](/quest/m1/cluster-routing/routes/README.md)
+The routing contract is recorded in [Routes and announces](/quest/m2/cluster-routing/routes/README.md)
 with deterministic counterexamples: path-only subscriptions that reselect
 origins at every hop loop and deadlock, so forwarded requests name their
 identity; feasibility makes transit priorities depend on arrival order;
@@ -113,7 +113,7 @@ The 300 ms update hold alone is no longer the baseline. Keep regression
 coverage for announcement churn, idle work, active continuity, and retained
 state separately; fewer control bytes does not prove cheaper runtime work.
 
-The earlier simulator estimates remain in [Routes and announces](/quest/m1/cluster-routing/routes/README.md).
+The earlier simulator estimates remain in [Routes and announces](/quest/m2/cluster-routing/routes/README.md).
 They do not prove the handoff correct; its fixtures do. Preserve public synthetic
 fixtures and controlled-time regressions, including residual stale revival,
 not only results from deployment tooling. Do not claim per-origin aggregation
@@ -130,8 +130,8 @@ setup after the capabilities land.
 
 ## Required
 
-- [Routes and announces](/quest/m1/cluster-routing/routes/README.md) - implement the proven route layer with Rust/JS parity and tiered-cluster acceptance
-- [Outbound federation](/quest/m1/cluster-routing/federation.md) - an outbound-only local relay exchanges authorized broadcasts with the CDN and survives partition/healing
+- [Routes and announces](/quest/m2/cluster-routing/routes/README.md) - implement the proven route layer with Rust/JS parity and tiered-cluster acceptance
+- [Outbound federation](/quest/m2/cluster-routing/federation.md) - an outbound-only local relay exchanges authorized broadcasts with the CDN and survives partition/healing
 
 ## Related
 

@@ -4,7 +4,7 @@
 
 Settle how independently operated MoQ networks exchange reachability without
 adding incomparable costs, at the boundaries between operators on the one node id space
-[Cluster routing](/quest/m1/cluster-routing/README.md) routes over. Cost inside
+[Cluster routing](/quest/m2/cluster-routing/README.md) routes over. Cost inside
 one operator's network is cluster-routing's. This includes whether a boundary
 may fold a large customer cluster's nodes into one advertised node, and how
 that keeps loop safety. Produce a
@@ -16,7 +16,7 @@ performance failover is authorized by this work.
 ## Plan
 
 Decided 2026-10-13: basic outbound local-cluster federation is required and
-belongs to [Outbound federation](/quest/m1/cluster-routing/federation.md),
+belongs to [Outbound federation](/quest/m2/cluster-routing/federation.md),
 not this quest. Identity, namespace admission, local connection priorities,
 and export policy are settled with cluster routing. This quest stays parked
 for economic cost translation and origin aggregation until those have a
@@ -75,7 +75,7 @@ quests. Open wire/API choices belong to this design exercise.
 
 ## Required
 
-- [Cluster routing](/quest/m1/cluster-routing/README.md) - the route layer this designs policy on
+- [Cluster routing](/quest/m2/cluster-routing/README.md) - the route layer this designs policy on
 
 ## Related
 

@@ -164,7 +164,7 @@ their end report, so an embedder's drain alert pages on real cuts.
 ## Required
 
 - [Address groups by timestamp](/quest/m2/time-addressing/README.md) - group start timestamps replace sequence numbers in the moq-net API and lite-07 wire, while old subscribers, old publishers, and published JS clients keep working
-- [Cluster routing](/quest/m1/cluster-routing/README.md) - prove shared routing contracts, implement per-origin routes, and connect outbound local clusters (held in m1 by an open claim)
+- [Cluster routing](/quest/m2/cluster-routing/README.md) - prove shared routing contracts, implement per-origin routes, and connect outbound local clusters
 - [A job's exact route continues its claim's readers](/quest/m2/announce-takeover.md) - a job's route inherits its claim's instance, replacing the ANNOUNCE_TAKEOVER predecessor design
 - [Subscribe ranges](/quest/m2/subscribe-ranges/README.md) - a lite-07 SUBSCRIBE asks for past and live ranges with absolute or relative ends, in either order, and replaces FETCH; merged ranges never starve a subscriber; relays fill misses by range, including over moq-transport
 - [Drop set](/quest/m1/drop-set.md) - each cursor judges missing groups against its own budget, so a narrow reader drops promptly and a widening re-offers groups already reported dropped on lite-07 (held in m1 by an open claim)

@@ -7,7 +7,7 @@ every identity a scoped, proven peer sends, its own included, under
 H(domain, proven key, id). Relays sharing a key file fail over as one;
 unscoped peers stay bare and unproven scoped peers get a per-session key.
 Proof production and verification are implemented by this PR; filing belongs
-to [Route session integration](/quest/m1/cluster-routing/routes/session.md).
+to [Route session integration](/quest/m2/cluster-routing/routes/session.md).
 
 ## Plan
 
@@ -46,5 +46,4 @@ signature. No ANNOUNCE_OK proof body is needed by this draft or implementation;
 
 ## Related
 
-- [Route session integration](/quest/m1/cluster-routing/routes/session.md) - files identities under the proven key
-- [lite-07 route wire](/quest/m1/cluster-routing/routes/wire.md) - coordinates announce messages
+- [Route session integration](/quest/m2/cluster-routing/routes/session.md) - files identities under the proven key

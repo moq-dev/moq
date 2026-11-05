@@ -120,6 +120,6 @@ Add a route-health section to the routing concept page.
 
 ## Related
 
-- [Cluster routing](/quest/m1/cluster-routing/README.md) - reachability and advertisement freshness, distinct from delivery health
+- [Cluster routing](/quest/m2/cluster-routing/README.md) - reachability and advertisement freshness, distinct from delivery health
 - [Link quality](/quest/m5/link-quality.md) - optional metric repricing, not this local delivery-health decision
 - [Routing guide](/quest/m1/routing-guide.md) - priorities, health, and epoch-only continuity explained together

@@ -25,8 +25,7 @@ because a downstream iGPU transcode trial needs it now.
 Held here by open claims: a quest's branch is its path, so a claimed quest
 cannot move until its PR merges, and an epic moves with its children. These
 breaking epics and quests stay in m1 for now and are listed in m2's
-`Required`, so the cut still waits on them: api-audit, cluster-routing,
-datagram-tracks, drop-set, push-to-talk, rind, session-policy, and
+`Required`, so the cut still waits on them: api-audit, datagram-tracks, drop-set, push-to-talk, rind, session-policy, and
 stream-credit. The [re-cut follow-up](/quest/m2/recut-held.md)
 moves what remains of them once their claims merge. release-perf, held for
 the same reason, gates the cut through the
@@ -35,7 +34,6 @@ the same reason, gates the cut through the
 ## Required
 
 - [Media fuzz findings](/quest/m1/fuzz-findings/README.md) - the nightly media fuzz targets run clean: mp4-atom, MKV block, TS step, SPS overflow, and catalog encoder bugs they found are fixed
-- [Cluster routing](/quest/m1/cluster-routing/README.md) - prove shared routing contracts, implement per-origin routes, and connect outbound local clusters
 - [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation setup
 - [Drop set](/quest/m1/drop-set.md) - each cursor judges missing groups against its own budget, so a narrow reader drops promptly and a widening re-offers groups already reported dropped on lite-07
 - [A reader on a failed copy continues on the held re-offer](/quest/m1/copy-recover.md) - a live reader keeps a group whose copy fails by continuing on the same track's re-offer at the same frame

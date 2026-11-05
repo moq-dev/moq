@@ -48,7 +48,7 @@ cut. Other redesign evidence went into the quests that already own the
 mechanism:
 [subscribe ranges](/quest/m2/subscribe-ranges/README.md),
 [drop set](/quest/m1/drop-set.md),
-[per-origin routes](/quest/m1/cluster-routing/routes/README.md),
+[per-origin routes](/quest/m2/cluster-routing/routes/README.md),
 drafts 14-17 removal (since landed), and
 [buffered playback](/quest/m1/buffered-ascending.md). The audit recommends
 leaving JS-only redesigns of `js/net` to [rs2ts](/quest/m5/rs2ts-js.md).
