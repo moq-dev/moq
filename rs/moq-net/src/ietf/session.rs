@@ -1362,7 +1362,7 @@ impl EnforceGrant {
 	fn poll(&mut self, waiter: &kio::Waiter) -> std::task::Poll<Result<(), Error>> {
 		let origin: origin::Consumer = wait!(Origin => self.publisher.poll_serving_origin(waiter));
 		// Checking what we publish is not a local reader asking to discover anything.
-		let mut announced: crate::announce::Consumer = origin.clone().serving().announced();
+		let mut announced: crate::origin::Routes = origin.clone().serving().routes();
 		let mut check: crate::auth::Enforce = crate::auth::Enforce::default();
 		let path = wait!(Check => check.poll(&self.auth, announced, waiter));
 		let Some(path) = path else {
@@ -1406,7 +1406,7 @@ mod tests {
 	async fn announce_interest_waits_for_credit() {
 		for version in [Version::Draft18] {
 			let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-			let _interest = origin.consume().announced();
+			let _interest = origin.consume().routes();
 			let scripted = crate::lite::test_transport::ScriptedSession::new(Vec::new()).without_credit();
 			let log = scripted.log.clone();
 			let session = crate::driver::Transport::new(scripted.clone());
@@ -1804,7 +1804,7 @@ mod tests {
 
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		// A client asks only about what is watched.
-		let _watch = origin.consume().announced();
+		let _watch = origin.consume().routes();
 		let session = crate::lite::test_transport::ScriptedSession::new(namespace_without_hop_path(VERSION).await);
 		let log = session.log.clone();
 
@@ -1868,7 +1868,7 @@ mod tests {
 		let scoped = origin
 			.scope("rootns", &scope)
 			.expect("scope the origin to two prefixes");
-		let _watch = scoped.consume().announced();
+		let _watch = scoped.consume().routes();
 
 		let gate = kio::Producer::new(true);
 		let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
@@ -1932,12 +1932,12 @@ mod tests {
 	}
 
 	/// Watch everything under `prefix`.
-	fn watch(origin: &crate::origin::Producer, prefix: &str) -> crate::announce::Consumer {
+	fn watch(origin: &crate::origin::Producer, prefix: &str) -> crate::origin::Routes {
 		origin
 			.consume()
 			.scope(prefix, &crate::Patterns::from(crate::Pattern::all()))
 			.unwrap()
-			.announced()
+			.routes()
 	}
 
 	/// Start a client feeding `subscribe` against a peer that answers nothing and declared

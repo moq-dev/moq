@@ -183,7 +183,7 @@ export default class MoqBoy extends HTMLElement {
 				if (!capture?.isLiteral) continue;
 
 				const id = capture.text;
-				if (entry.kind !== "end" && !this.#sessions.has(id)) {
+				if (entry.kind !== "absent" && !this.#sessions.has(id)) {
 					const config: GameConfig = {
 						sessionId: id,
 						connection: this.connection,
@@ -195,7 +195,7 @@ export default class MoqBoy extends HTMLElement {
 					const game = new Game(config);
 					this.#sessions.set(id, game);
 					this.games.set(new Map(this.#sessions));
-				} else if (entry.kind === "end") {
+				} else if (entry.kind === "absent") {
 					const game = this.#sessions.get(id);
 					if (game) {
 						game.close();

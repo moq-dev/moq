@@ -31,7 +31,7 @@ for (const protocol of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18]) {
 			connect({ url, transport: pair.client, consume }),
 			accept({ url, transport: pair.server, publish: publish.consume() }),
 		]);
-		const announced = destination.announced(undefined, { hidden: true });
+		const announced = destination.routes(undefined, { hidden: true });
 		try {
 			const received: string[] = [];
 			for (let index = 0; index < 3; index++) {

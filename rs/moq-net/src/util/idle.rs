@@ -172,7 +172,7 @@ mod test {
 	fn a_waiter_parked_past_its_records_is_retired() {
 		let task = kio::Waiter::noop();
 		let mut slot: Option<Box<Idle>> = None;
-		for (lists, retired) in [(1, false), (9, true)] {
+		for (lists, retired) in [(1, false), (17, true)] {
 			let mut idle = Idle::start(&mut slot, &task);
 			let mut parked: Vec<_> = (0..lists).map(|_| kio::WaiterList::new()).collect();
 			let waiter = idle.waiter();

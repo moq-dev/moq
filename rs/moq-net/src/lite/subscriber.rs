@@ -5253,7 +5253,7 @@ mod tests {
 	async fn announce_interest_waits_for_credit() {
 		for version in [Version::Lite04, Version::Lite07] {
 			let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-			let _interest = origin.consume().announced();
+			let _interest = origin.consume().routes();
 			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new()).without_credit();
 			let log = session.log.clone();
 			let subscriber = Subscriber::new(SubscriberConfig {
@@ -7251,13 +7251,13 @@ mod tests {
 		assert!(accepted);
 
 		// The route is announced synchronously: hop 0 on the wire, assigned id local.
-		let mut cursor = consumer.announced();
+		let mut cursor = consumer.routes();
 		let route = cursor.expect_next_active("room/host").await;
 		let hops: Vec<_> = route.hops.iter().copied().collect();
 		assert_eq!(hops, vec![crate::Hop::UNKNOWN]);
 		assert!(route.is_anonymous());
 
-		let mut hidden = consumer.excluding(assigned).announced();
+		let mut hidden = consumer.excluding(assigned).routes();
 		hidden.assert_next_wait();
 	}
 
@@ -7297,7 +7297,7 @@ mod tests {
 				.unwrap()
 		);
 
-		let mut cursor = consumer.announced();
+		let mut cursor = consumer.routes();
 		let route = cursor.expect_next_active("room/host").await;
 		let hops: Vec<_> = route.hops.iter().copied().collect();
 		assert_eq!(hops, vec![crate::Hop::UNKNOWN, crate::Hop::UNKNOWN]);
@@ -7324,7 +7324,7 @@ mod tests {
 			)
 			.unwrap();
 
-		let mut cursor = consumer.announced();
+		let mut cursor = consumer.routes();
 		kio::clock::sim::yield_now().await;
 		let route = cursor.expect_next_active("room/host").await;
 		let hops: Vec<_> = route.hops.iter().copied().collect();
@@ -7432,7 +7432,7 @@ mod tests {
 			)
 			.unwrap();
 
-		let mut cursor = consumer.announced();
+		let mut cursor = consumer.routes();
 		kio::clock::sim::yield_now().await;
 		cursor.expect_next_active("room/host").await;
 
@@ -7472,7 +7472,7 @@ mod tests {
 				&mut announced,
 			)
 			.unwrap();
-		let mut cursor = consumer.announced();
+		let mut cursor = consumer.routes();
 		cursor.expect_next_active("room/host").await;
 
 		auth.handle().authorize(&crate::auth::Grant {
@@ -7533,7 +7533,7 @@ mod tests {
 				&mut announced,
 			)
 			.unwrap();
-		let mut cursor = consumer.announced();
+		let mut cursor = consumer.routes();
 		cursor.expect_next_active("room/host").await;
 
 		// The stream ends without retracting anything: the map dies with it and the
@@ -7608,7 +7608,7 @@ mod tests {
 			Path::from_static(""),
 			subscriber.origin.snapshot(""),
 		);
-		let mut cursor = consumer.announced();
+		let mut cursor = consumer.routes();
 
 		let mut run = std::pin::pin!(kio::wait(|waiter| prefix.poll(waiter)));
 		assert!(futures::poll!(run.as_mut()).is_pending());
@@ -7697,7 +7697,7 @@ mod tests {
 		}
 		script.extend(announce_script(VERSION, &[&announce_start(VERSION, "a")]));
 		let (mut prefix, consumer) = root_prefix(VERSION, crate::lite::test_transport::ScriptedSession::new(script));
-		let mut cursor = consumer.announced();
+		let mut cursor = consumer.routes();
 
 		let mut polls = 0;
 		kio::wait(|waiter| {
@@ -7726,7 +7726,7 @@ mod tests {
 			],
 		);
 		let (mut prefix, consumer) = root_prefix(VERSION, crate::lite::test_transport::ScriptedSession::new(script));
-		let mut cursor = consumer.announced();
+		let mut cursor = consumer.routes();
 		assert!(!cursor.is_synced(), "held from the request on");
 
 		let mut run = std::pin::pin!(kio::wait(|waiter| prefix.poll(waiter)));
@@ -7737,7 +7737,7 @@ mod tests {
 		cursor.assert_next_active("b");
 		assert!(cursor.is_synced());
 		// A consumer created after the boundary syncs on its replay.
-		let mut late = consumer.announced();
+		let mut late = consumer.routes();
 		late.assert_next_active("a");
 		late.assert_next_active("b");
 		assert!(late.is_synced());
@@ -7749,7 +7749,7 @@ mod tests {
 		const VERSION: Version = Version::Lite06;
 		let script = announce_script(VERSION, &[&announce_ok(VERSION, 2), &announce_start(VERSION, "a")]);
 		let (mut prefix, consumer) = root_prefix(VERSION, crate::lite::test_transport::ScriptedSession::new(script));
-		let mut cursor = consumer.announced();
+		let mut cursor = consumer.routes();
 		let mut run = std::pin::pin!(kio::wait(|waiter| prefix.poll(waiter)));
 		assert!(futures::poll!(run.as_mut()).is_pending());
 
@@ -7764,7 +7764,7 @@ mod tests {
 		let synced = |w: &mut crate::coding::Encoder<'_>| lite::AnnounceBroadcast::Synced.encode(w, VERSION).unwrap();
 		let script = announce_script(VERSION, &[&announce_ok(VERSION, 0), &synced]);
 		let (mut prefix, consumer) = root_prefix(VERSION, crate::lite::test_transport::ScriptedSession::new(script));
-		let cursor = consumer.announced();
+		let cursor = consumer.routes();
 		let mut run = std::pin::pin!(kio::wait(|waiter| prefix.poll(waiter)));
 		assert!(futures::poll!(run.as_mut()).is_pending());
 		assert!(cursor.is_synced());
@@ -7801,7 +7801,7 @@ mod tests {
 			let session = crate::lite::test_transport::ScriptedSession::new(script);
 			let log = session.log.clone();
 			let (mut prefix, consumer) = root_prefix(version, session.clone());
-			let mut cursor = consumer.announced();
+			let mut cursor = consumer.routes();
 			assert!(prefix.poll(&kio::Waiter::noop()).is_pending());
 			assert!(log.closes().is_empty());
 			session.push(&[last]);
@@ -7854,7 +7854,7 @@ mod tests {
 		const VERSION: Version = Version::Lite04;
 		let (mut prefix, consumer) =
 			root_prefix(VERSION, crate::lite::test_transport::ScriptedSession::new(Vec::new()));
-		let cursor = consumer.announced();
+		let cursor = consumer.routes();
 		assert!(!cursor.is_synced());
 		let mut run = std::pin::pin!(kio::wait(|waiter| prefix.poll(waiter)));
 		assert!(futures::poll!(run.as_mut()).is_pending());
@@ -7876,7 +7876,7 @@ mod tests {
 			VERSION,
 			crate::lite::test_transport::ScriptedSession::new(announce_script(VERSION, &[&init])),
 		);
-		let mut cursor = consumer.announced();
+		let mut cursor = consumer.routes();
 		let mut run = std::pin::pin!(kio::wait(|waiter| prefix.poll(waiter)));
 		assert!(futures::poll!(run.as_mut()).is_pending());
 		assert!(!cursor.is_synced());

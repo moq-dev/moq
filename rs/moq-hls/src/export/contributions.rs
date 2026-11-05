@@ -246,7 +246,7 @@ async fn follow_instances(mut instances: follow::Instances, current: kio::Produc
 	loop {
 		let next = instances.next().await;
 		let next = match next {
-			Ok(follow::Event::Start(broadcast)) => {
+			Ok(Some(broadcast)) => {
 				let id = broadcast
 					.info()
 					.instance
@@ -266,7 +266,7 @@ async fn follow_instances(mut instances: follow::Instances, current: kio::Produc
 					_owner: owner,
 				}))
 			}
-			Ok(follow::Event::End) => Current::Offline,
+			Ok(None) => Current::Offline,
 			// An authorization refusal is final: the contribution stays out and its URLs answer 403.
 			Err(err @ moq_mux::Error::Moq(moq_net::Error::Unauthorized)) => {
 				tracing::debug!(%err, "contribution refused");
