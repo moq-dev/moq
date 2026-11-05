@@ -11,7 +11,7 @@ Cachix is retired.
 Decided 2026-11-05 (maintainer, /quest-audit,
 [moq-dev/moq#7975](https://github.com/moq-dev/moq/pull/7975)): ✅ split from
 [Verify the Nix runtime cache](/quest/m0/ci/nix-cache-verify.md) and moved to
-m2 behind [the cut](/quest/m3/release/cut.md), which brings `main`'s
+m2 (m3 since the 2026-11-05 milestone re-cut) behind [the cut](/quest/m3/release/cut.md), which brings `main`'s
 `release-nix.yml` to `release` when it merges `main` into it. Not chosen:
 moving the whole verification quest; merging `main` into `release` now,
 which reverses the 2026-11-04 decision.
