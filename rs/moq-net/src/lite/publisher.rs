@@ -9545,10 +9545,10 @@ mod tests {
 			] {
 				for start in [None, Some(0)] {
 					let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-					let broadcast = origin.create_broadcast("room").unwrap();
-					let mut dynamic = broadcast.requests();
-					broadcast.announce(Default::default()).unwrap();
-					let copy = broadcast.consume().track("video").unwrap();
+					let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
+					let mut dynamic = broadcast.broadcast().requests();
+					broadcast.announce().unwrap();
+					let copy = broadcast.broadcast().consume().track("video").unwrap();
 					let held = copy.info().into_inner();
 					assert!(held.poll_ok(&kio::Waiter::noop()).is_pending());
 					let request = dynamic.requested_track().await.unwrap();
@@ -9594,7 +9594,8 @@ mod tests {
 						ranges: vec![lite::Range::span(start, 0, None, None)],
 					};
 					let mut serve =
-						SubscribeServe::start(&publisher.shared, msg, "video", broadcast.consume()).unwrap();
+						SubscribeServe::start(&publisher.shared, msg, "video", broadcast.broadcast().consume())
+							.unwrap();
 					let mut writer = Writer::new(
 						crate::transport::boxed::SendStream::new(SinkSend::new(Log::default())),
 						version,

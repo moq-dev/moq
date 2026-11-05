@@ -369,9 +369,11 @@ async fn a_legacy_viewer_beating_a_relay_copy_joins_at_the_live_edge() {
 		options.client_subscribe = Some(relay.clone());
 		let upstream = connect_mock(options).await;
 		let _downstream = peer(legacy.parse().unwrap(), &relay, &viewer).await;
-		let broadcast = publisher.create_broadcast("live").unwrap();
-		let source = broadcast.create_track("video", timed()).unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = publisher
+			.route("live", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let source = broadcast.broadcast().create_track("video", timed()).unwrap();
+		broadcast.announce().unwrap();
 		for sequence in 0..GROUPS {
 			let mut group = source.create_group(moq_net::group::Info { sequence }).unwrap();
 			group

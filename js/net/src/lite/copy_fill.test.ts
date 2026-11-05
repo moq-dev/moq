@@ -237,8 +237,7 @@ test("copy fill: a filled group stops downloading once every reader left or pass
 		connectSession({ url, transport: pair.client }),
 		acceptSession({ transport: pair.server, url, publish: origin.consume() }),
 	]);
-	const publication = origin.createBroadcast(Path.from("room"));
-	publication.announce();
+	const publication = origin.route(Path.from("room"));
 	const track = publication.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	write(track.createGroup(1n), 1n, "live");
 	// The archive answers group 0 with one frame and keeps it open.
