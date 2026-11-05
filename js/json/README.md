@@ -32,8 +32,9 @@ import { Time } from "@moq/net";
 const producer = new Snapshot.Producer({ track });
 producer.update({ value: { hello: "world" }, at: Time.Timestamp.now() });
 
-// Consume: each state in order, with the timestamp of the frame that produced it.
-const consumer = new Snapshot.Consumer({ track: track.subscribe() });
+// Consume: each state in order, with the timestamp of the frame that produced it. The consumer
+// subscribes to the track itself; pass `broadcast.track(name)` for a remote one.
+const consumer = new Snapshot.Consumer({ track });
 for await (const { value, at } of consumer) {
 	console.log(value, at);
 }

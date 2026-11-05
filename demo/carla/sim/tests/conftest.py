@@ -17,19 +17,11 @@ class AnnounceEvent:
         self.announce = announce
 
 
-class AnnounceEventStart(AnnounceEvent):
+class AnnounceEventPresent(AnnounceEvent):
     pass
 
 
-class AnnounceEventUpdate(AnnounceEvent):
-    pass
-
-
-class AnnounceEventEnd(AnnounceEvent):
-    pass
-
-
-class AnnounceEventRestart(AnnounceEvent):
+class AnnounceEventAbsent(AnnounceEvent):
     pass
 
 
@@ -48,10 +40,11 @@ class SnapshotProducer:
 
 
 class SnapshotConsumer:
-    """Wraps parsed fake values in timed records, like the runtime consumer."""
+    """Reads the named fake track of a broadcast, wrapping its parsed values in timed records,
+    like the runtime consumer."""
 
-    def __init__(self, track: object) -> None:
-        self._track = track
+    def __init__(self, broadcast: object, name: str, *, priority: int = 0) -> None:
+        self._track = broadcast.tracks[name]
 
     async def __aiter__(self):
         async for value in self._track:
@@ -60,10 +53,10 @@ class SnapshotConsumer:
 
 moq = ModuleType("moq")
 moq.Error = MoqError
-moq.AnnounceEventStart = AnnounceEventStart
-moq.AnnounceEventUpdate = AnnounceEventUpdate
-moq.AnnounceEventEnd = AnnounceEventEnd
-moq.AnnounceEventRestart = AnnounceEventRestart
+# The stub has no shutdown errors: every `MoqError` it raises is a failure.
+moq.is_shutdown = lambda err: False
+moq.AnnounceEventPresent = AnnounceEventPresent
+moq.AnnounceEventAbsent = AnnounceEventAbsent
 moq.Timestamp = lambda value, scale: SimpleNamespace(value=value, scale=scale)
 moq.TrackInfo = lambda **kwargs: SimpleNamespace(**kwargs)
 

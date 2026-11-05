@@ -9,7 +9,7 @@ lower renditions keep their share instead of every rung degrading together.
 
 ## Plan
 
-Split from [native rung disable](/quest/m1/simulcast-rung-disable.md) by the
+Split from the native rung disable by the
 maintainer on 2026-10-20: the native publishers moved to m1 on native
 probing, while a browser can only probe with
 [padding](/quest/m2/probe/padding.md), which stays in m2.
@@ -34,7 +34,6 @@ Public API: whatever knob `@moq/publish` exposes for the rule. Wire: none.
 
 ## Required
 
-- [Native rung disable](/quest/m1/simulcast-rung-disable.md) - the shared rule and constants this mirrors
 - [Padding probes](/quest/m2/probe/padding.md) - the browser's sender, which raises the estimate so a disabled rung can resume
 
 ## Related

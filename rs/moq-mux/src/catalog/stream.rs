@@ -30,6 +30,7 @@ pub trait Stream: Send + 'static {
 	fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Catalog<Self::Ext>>>>;
 
 	/// Wait for the next snapshot.
+	#[cfg(feature = "async")]
 	fn next(&mut self) -> impl std::future::Future<Output = crate::Result<Option<Catalog<Self::Ext>>>> + Send
 	where
 		Self: Sized,

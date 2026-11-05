@@ -48,14 +48,7 @@ impl<T: DeserializeOwned> Consumer<T> {
 	}
 
 	/// Get the next record and its exact frame timestamp, or `None` once the track ends.
-	pub async fn next(&mut self) -> Result<Option<moq_net::Timed<T>>>
-	where
-		T: Unpin,
-	{
-		kio::wait(|waiter| self.poll_next(waiter)).await
-	}
-
-	/// Poll for the next record, without blocking.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<moq_net::Timed<T>>>> {
 		loop {
 			if self.rolled {

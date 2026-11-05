@@ -1207,6 +1207,7 @@ mod tests {
 			mtu: 1200,
 			rtt: std::time::Duration::from_millis(333),
 			max_pacing_rate: None,
+			seed: 0,
 		};
 
 		let loss = congestion_factory(CongestionControl::Loss).build(init);

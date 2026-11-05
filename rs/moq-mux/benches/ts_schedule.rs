@@ -37,8 +37,14 @@ fn hold_heap() {
 }
 
 fn admission(c: &mut Criterion) {
+	for skipped in [false, true] {
+		admission_case(c, skipped);
+	}
+}
+
+fn admission_case(c: &mut Criterion, skipped: bool) {
 	hold_heap();
-	let mut group = c.benchmark_group("ts_schedule");
+	let mut group = c.benchmark_group(if skipped { "ts_schedule_skip" } else { "ts_schedule" });
 	group.measurement_time(Duration::from_secs(1));
 	group.warm_up_time(Duration::from_millis(200));
 	group.sample_size(10);
@@ -63,7 +69,11 @@ fn admission(c: &mut Criterion) {
 					}
 					for frame in 0..frames {
 						for pid in 1..=pids {
-							let at = (999 + frame * 40) * 1_000_000;
+							let gap = if skipped && frame >= frames / 2 { 4_000 } else { 0 };
+							if skipped && frame == frames / 2 {
+								schedule.skip();
+							}
+							let at = (999 + gap + frame * 40) * 1_000_000;
 							schedule
 								.push_frames(
 									pid,

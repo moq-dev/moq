@@ -18,7 +18,7 @@ command -v dart >/dev/null 2>&1 || {
     exit 1
 }
 
-# Build with the environment dart/moq_ffi/hook/build.dart gets, so the hook's
+# Debug builds use the environment dart/moq_ffi/hook/build.dart gets, so the hook's
 # own Cargo run during `dart test` finds this build fresh. Dart filters a hook's
 # environment, and build scripts such as aws-lc-sys's rerun when a variable they
 # track (CC, PKG_CONFIG, ...) changes, rebuilding everything above them. This
@@ -37,24 +37,31 @@ shopt -u nocasematch
 host=$(rustc -vV | sed -n 's/^host: //p')
 # Checkouts use a dev build; benchmark and release staging opt into release.
 profile=${MOQ_FFI_PROFILE:-debug}
-# The shared default build (.cargo/config.toml). The debug one adds the hook's test
-# hooks, which is safe only because `--target` gives it a directory no default build
-# writes; the release build is benchmarked, so it leaves out the counting allocator.
+# Keep the test hooks out of the shared cdylib without changing Cargo's host
+# compilation mode. Release benchmarks use the shared default build.
 case "$profile" in
-    debug) profile_args=(--features testing) ;;
-    release) profile_args=(--release) ;;
+    debug) build=(env -i "${hook_env[@]}" cargo build-ffi --features testing --target-dir "$WORKSPACE_DIR/target/dart") ;;
+    release) build=(cargo build-ffi --release) ;;
     *)
         echo "error: unsupported MOQ_FFI_PROFILE: $profile" >&2
         exit 1
         ;;
 esac
-(cd "$WORKSPACE_DIR" && env -i "${hook_env[@]}" cargo build-ffi "${profile_args[@]}" --target "$host")
+messages=$(cd "$WORKSPACE_DIR" && "${build[@]}" --message-format=json-render-diagnostics)
 
+if [[ "$profile" == debug ]]; then
+    target_dir=$(cd "$WORKSPACE_DIR" && env -i "${hook_env[@]}" \
+        CARGO_TARGET_DIR="$WORKSPACE_DIR/target/dart" cargo metadata --format-version 1 --no-deps | jq -er .target_directory)
+else
+    target_dir=$(cd "$WORKSPACE_DIR" && cargo metadata --format-version 1 --no-deps | jq -er .target_directory)
+fi
 case "$host" in
-    *-apple-*) library="$WORKSPACE_DIR/target/$host/$profile/libmoq_ffi.dylib" ;;
-    *-windows-*) library="$WORKSPACE_DIR/target/$host/$profile/moq_ffi.dll" ;;
-    *) library="$WORKSPACE_DIR/target/$host/$profile/libmoq_ffi.so" ;;
+    *-apple-*) name=libmoq_ffi.dylib ;;
+    *-windows-*) name=moq_ffi.dll ;;
+    *) name=libmoq_ffi.so ;;
 esac
+library=$(jq -ers --arg root "$target_dir" --arg target "$host" --arg host "$host" \
+    --arg profile "$profile" --arg library "$name" -f "$WORKSPACE_DIR/sh/rs/ffi-artifact.jq" <<<"$messages")
 
 mkdir -p "$OUTPUT_DIR"
 rm -f "$OUTPUT_DIR/moq.dart" "$OUTPUT_DIR/uniffi_runtime.dart"

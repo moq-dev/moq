@@ -35,7 +35,9 @@ impl<E: CatalogExt> Consumer<E> {
 		}
 	}
 
-	/// Poll for the next catalog update.
+	/// Get the next catalog update, converted to a [`Catalog<E>`](crate::catalog::hang::Catalog),
+	/// or `None` once the track ends with no further updates.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Catalog<E>>>> {
 		// Drain pending groups, keeping only the newest. Remember whether the track is done
 		// so we can distinguish "more groups may arrive" from "no more groups, ever".
@@ -72,15 +74,6 @@ impl<E: CatalogExt> Consumer<E> {
 		} else {
 			Poll::Pending
 		}
-	}
-
-	/// Get the next catalog update.
-	///
-	/// Waits for the next MSF catalog publication and returns it converted to a
-	/// [`Catalog<E>`](crate::catalog::hang::Catalog). Returns `None` when the track has ended
-	/// with no further updates.
-	pub async fn next(&mut self) -> Result<Option<Catalog<E>>> {
-		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 }
 
