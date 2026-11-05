@@ -104,7 +104,7 @@ type Subscription = {
 };
 
 /** Both model kinds share this alias; group and datagram receive paths route to their own producer. */
-type Binding = { kind: "track"; subscription: Subscription };
+type Binding = Subscription;
 
 // Out-parameter for #openSubscribe: lets the caller observe partial progress
 // (stream opened, trackAlias registered) so it can clean up on timeout even
@@ -1635,7 +1635,7 @@ export class Subscriber {
 		if (!known) state.requests = producer.requests();
 		const tail = new Tail();
 		const subscription: Subscription = { track: producer, tail, timescale: ok.properties.timescale, fetchIds: [] };
-		const binding: Binding = { kind: "track", subscription };
+		const binding = subscription;
 		state.binding = binding;
 		// The subscription starts after Largest, so the joining FETCH or the fill brings its
 		// group's head. With no Largest the track is empty and every group whole. A draft-22 fill
@@ -1876,7 +1876,7 @@ export class Subscriber {
 			return;
 		}
 
-		const subscription = binding.subscription;
+		const subscription = binding;
 
 		const { track, tail } = subscription;
 		// Every data stream counts toward PUBLISH_DONE's Stream Count, even one dropped below.
@@ -2209,9 +2209,9 @@ export class Subscriber {
 		}
 
 		const alias = this.#aliases.peek(datagram.trackAlias);
-		const binding = alias?.subscription.datagrams && {
-			producer: alias.subscription.datagrams.producer,
-			timescale: alias.subscription.timescale,
+		const binding = alias?.datagrams && {
+			producer: alias.datagrams.producer,
+			timescale: alias.timescale,
 		};
 		if (!binding) {
 			console.debug(`dropping a datagram for an unknown alias: alias=${datagram.trackAlias}`);

@@ -188,9 +188,12 @@ test("closing one waiting datagram consumer releases its info wait while another
 
 test("passive forwarding drains a finished track without adding demand", async () => {
 	const producer = new Datagram.Producer("audio").accept({});
-	const observer = producer.consume();
-	hooks.passiveDatagrams(observer);
+	const changes: (number | undefined)[] = [];
+	const dispose = producer.priority.subscribe((value) => changes.push(value));
+	const observer = hooks.observeDatagrams(producer);
 	const copy = observer.clone();
+	expect(changes).toEqual([]);
+	dispose();
 	expect(producer.priority.peek()).toBeUndefined();
 	const reader = producer.consume();
 	reader.setPriority(-7);

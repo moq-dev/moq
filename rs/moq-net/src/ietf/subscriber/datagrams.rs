@@ -116,14 +116,14 @@ impl Shared {
 		})
 	}
 	pub(super) fn poll(&mut self, waiter: &kio::Waiter) {
-		if let Poll::Ready(priority) = self.producer.poll_priority(waiter, self.priority) {
+		while let Poll::Ready(priority) = self.producer.poll_priority(waiter, self.priority) {
 			self.priority = priority;
 			match priority {
 				None => self.held = None,
 				Some(priority) => match &mut self.held {
 					Some(held) => {
 						if let Err(err) = held.update(held.subscription().with_priority(priority)) {
-							self.producer.abort(err);
+							self.producer.clone().abort(err);
 						}
 					}
 					None => {
@@ -140,8 +140,8 @@ impl Shared {
 	pub(super) fn end(&mut self, end: Result<(), Error>) {
 		self.held = None;
 		match end {
-			Ok(()) => self.producer.finish(),
-			Err(err) => self.producer.abort(err),
+			Ok(()) => self.producer.clone().finish(),
+			Err(err) => self.producer.clone().abort(err),
 		}
 	}
 }

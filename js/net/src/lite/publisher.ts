@@ -1082,7 +1082,6 @@ export class Publisher {
 				legacy = wireOf(front).liveDatagrams(msg.track);
 				if (legacy) {
 					if (wireOf(front).localDatagrams) legacy.setPriority(msg.priority);
-					else hooks.passiveDatagrams(legacy);
 					datagrams = this.#runDatagrams(legacy, { sub: msg.id, stamp, priority: legacyPriority })
 						.then(() => {})
 						.catch((err) => console.debug(`datagram send stopped: ${reason(err)}`));

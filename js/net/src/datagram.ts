@@ -102,6 +102,7 @@ export class Producer {
 	}
 
 	static {
+		hooks.observeDatagrams = (producer) => consume(producer.name, producer.#state, undefined, null);
 		hooks.closeUnusedDatagrams = (producer) => {
 			if (producer.#state.consumers.size > 0) return false;
 			producer.abort(new StreamError(StreamCode.Cancel));
@@ -245,12 +246,6 @@ export class Consumer {
 		consume = (name, state, cursor, priority) => new Consumer(name, state, cursor, priority);
 		hooks.datagramPriority = (consumer) => consumer.#priority;
 		hooks.datagramClosed = (consumer) => consumer.#closed;
-		hooks.passiveDatagrams = (consumer) => {
-			if (consumer.#state.consumers.has(consumer)) {
-				consumer.#state.consumers.set(consumer, undefined);
-				consumer.#state.updatePriority();
-			}
-		};
 	}
 
 	/** The track's publisher properties, once accepted. */

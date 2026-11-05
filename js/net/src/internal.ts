@@ -448,7 +448,7 @@ export const hooks: {
 	/** Follow this consumer's subscriber priority for transport scheduling. */
 	datagramPriority: (consumer: datagram.Consumer) => Getter<number>;
 	/** Forward data carried by an existing stream without contributing another subscription's demand. */
-	passiveDatagrams: (consumer: datagram.Consumer) => void;
+	observeDatagrams: (producer: datagram.Producer) => datagram.Consumer;
 	/** Settles once this consumer is closed, the end of whatever request it serves. */
 	datagramClosed: (consumer: datagram.Consumer) => GetPromise<Error | null>;
 	/**
@@ -748,7 +748,7 @@ export const hooks: {
 	closeUnusedDatagrams: () => {
 		throw new Error("datagram module not loaded");
 	},
-	passiveDatagrams: () => {
+	observeDatagrams: () => {
 		throw new Error("datagram module not loaded");
 	},
 	datagramPriority: () => {

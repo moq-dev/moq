@@ -1144,7 +1144,8 @@ impl Consumer {
 	}
 
 	/// Join the datagram track `name` if one is published or already asked for, asking no
-	/// handler for it otherwise.
+	/// handler for it otherwise. The reader adds no demand until `set_priority` is called:
+	/// an existing stream subscription already carries this forwarding work.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn datagrams_live(&self, name: &str) -> Option<datagram::Consumer> {
 		let state = self.state.lock();

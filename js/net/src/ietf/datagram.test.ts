@@ -191,7 +191,7 @@ test("a relay shares one IETF subscription across stream and datagram readers", 
 		const stream = datagramFirst ? undefined : remote.track("audio").subscribe();
 		if (stream) await stream.info();
 		const streamCount = stream && upstream.client.sendStreams.bidi.length;
-		const reader = remote.datagrams("audio");
+		let reader = remote.datagrams("audio");
 		await reader.info();
 		const before = streamCount ?? upstream.client.sendStreams.bidi.length;
 		const subscriber = stream ?? remote.track("audio").subscribe();
@@ -211,6 +211,12 @@ test("a relay shares one IETF subscription across stream and datagram readers", 
 			subscriber.close();
 			datagrams.insert({ sequence: 5n, timestamp: Timestamp.fromMillis(11), payload: Uint8Array.of(9) });
 			expect((await reader.recv())?.payload).toEqual(Uint8Array.of(9));
+			reader.close();
+			while (track.subscription.peek() !== undefined) await track.subscription.changed();
+			reader = remote.datagrams("audio");
+			await reader.info();
+			datagrams.insert({ sequence: 6n, timestamp: Timestamp.fromMillis(12), payload: Uint8Array.of(10) });
+			expect((await reader.recv())?.payload).toEqual(Uint8Array.of(10));
 		} finally {
 			subscriber.close();
 			reader.close();

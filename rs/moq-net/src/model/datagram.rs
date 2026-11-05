@@ -140,7 +140,7 @@ struct State {
 	end: Option<Result<()>>,
 	// Live producer-side handles: producers and an unanswered request.
 	producers: usize,
-	// Each live consumer's subscriber priority.
+	// Each live consumer's priority, or None for passive forwarding over an existing stream.
 	priorities: slab::Slab<Option<i8>>,
 }
 
@@ -211,6 +211,7 @@ impl Weak {
 	pub(super) fn try_consume(&self, stats: stats::Scope) -> Option<Consumer> {
 		Consumer::join(self.name.clone(), &self.state, stats, Some(DEFAULT_PRIORITY))
 	}
+
 	/// Observe a live track without adding demand; its stream subscription already holds that.
 	pub(super) fn observe(&self, stats: stats::Scope) -> Option<Consumer> {
 		Consumer::join(self.name.clone(), &self.state, stats, None)

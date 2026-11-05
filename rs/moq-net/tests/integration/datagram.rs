@@ -549,3 +549,29 @@ async fn a_datagram_track_needs_datagrams() {
 		assert!(matches!(err, Error::Unsupported), "{version}: {err:?}");
 	}
 }
+
+/// Keeping the broadcast handle across an idle subscription must not leave its datagram
+/// readers attached to the old shared producer or accept stale stream metadata as an answer.
+#[kio::test]
+async fn ietf_datagram_readers_rejoin_a_lingering_broadcast() {
+	let chain = Chain::new(&["moq-transport-18", "moq-transport-22"]).await;
+	let mut producer = chain.publication.create_datagrams(TRACK, timed()).unwrap();
+	let remote = chain.remote().await;
+	for priority in [2, 3] {
+		let mut consumer = remote.datagrams(TRACK).unwrap();
+		consumer.set_priority(priority);
+		kio::clock::timeout(TIMEOUT, datagram_priority(&producer, Some(priority)))
+			.await
+			.expect("the rejoined request never reached the publisher");
+		kio::clock::timeout(TIMEOUT, consumer.info())
+			.await
+			.expect("metadata timeout")
+			.unwrap();
+		producer.append(millis(priority as u64), &b"live"[..]).unwrap();
+		assert_eq!(recv(&mut consumer).await.unwrap().unwrap().payload.as_ref(), b"live");
+		drop(consumer);
+		kio::clock::timeout(TIMEOUT, datagram_priority(&producer, None))
+			.await
+			.expect("the shared subscription stayed wanted");
+	}
+}

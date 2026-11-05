@@ -3301,7 +3301,7 @@ impl RunBroadcast {
 					request.reject(Error::Unsupported);
 					continue;
 				}
-				let key = (self.path.clone(), request.name().to_owned());
+				let key = (self.path.clone(), request.name().into());
 				let consumer = self.source.consume();
 				match consumer.track(request.name()) {
 					Ok(track) => {
@@ -5711,7 +5711,7 @@ impl Subscriber {
 		kio::wait(|waiter| recv.poll(waiter, self, stream)).await
 	}
 
-	/// Drop an OBJECT_DATAGRAM: a subscription is a stream track's, which takes no datagrams.
+	/// Route OBJECT_DATAGRAM to the shared subscription's datagram model half.
 	///
 	/// A malformed datagram is still a protocol error.
 	pub fn recv_datagram(&self, payload: bytes::Bytes) -> Result<(), Error> {
@@ -8963,7 +8963,7 @@ mod tests {
 		{
 			let mut state = subscriber.state.lock();
 			let track = state.subscribes.get_mut(&RequestId(11)).unwrap();
-			// This subscription asked for datagrams, not the stream track.
+			// Only the datagram model half is present in this receive fixture.
 			track.producer = None;
 			track.datagram = Some(producer);
 			track.timescale = Some(Timescale::MILLI);
