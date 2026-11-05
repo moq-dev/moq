@@ -4,6 +4,15 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Admission completion records its own time
+
+`server::Activity::drain()` begins closing admission once its active set empties.
+`Activity::close()` and the new poll-native `poll_close()` return that instant,
+even for a late observer. Replace matches against `()` with a discarded result
+or read the returned `kio::clock::Instant`. Once draining begins, the last `Active`
+drop closes admission synchronously, including when a close wait was cancelled.
+This is native listener bookkeeping; the protocol wire is unchanged.
+
 ### Announcements are a listing; `follow` reports the path going offline ([#7678](https://github.com/moq-dev/moq/pull/7678))
 
 `origin::Consumer::announced()` lists paths: `announce::Event` is `Present(Announce)` or `Absent(Announce)`.

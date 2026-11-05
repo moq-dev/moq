@@ -463,7 +463,7 @@ async fn serve_metrics(State(state): State<InternalState>) -> Response {
 	{
 		scrape.demux = state.demux;
 	}
-	scrape.draining = state.shutdown.map(|shutdown| shutdown.tally().draining);
+	scrape.draining = state.shutdown.map(|shutdown| shutdown.draining_count());
 	scrape.refusals = state.refusals.map(|refusals| refusals.snapshot());
 	(
 		[(

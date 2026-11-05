@@ -15,43 +15,47 @@ use crate::{
 };
 
 /// Tracks admitted connections until their handshake or session ends.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Activity {
-	state: kio::Producer<()>,
-	// Admission goes through the weak handle: its open check shares the lock
-	// `close` commits under, so a connection is either counted or refused.
-	admit: kio::ProducerWeak<()>,
+	state: std::sync::Arc<kio::Producer<ActivityState>>,
 }
 
-impl Default for Activity {
-	fn default() -> Self {
-		let state = kio::Producer::default();
-		let admit = state.weak();
-		Self { state, admit }
-	}
+#[derive(Debug, Default)]
+struct ActivityState {
+	active: usize,
+	draining: bool,
+	closed: Option<Instant>,
 }
 
 impl Activity {
 	/// Hold the server active until the returned guard is dropped, or `None` once closed.
 	pub fn enter(&self) -> Option<Active> {
+		let mut state = self.state.write().ok()?;
+		state.active += 1;
 		Some(Active {
-			_guard: self.admit.try_consume()?,
+			state: std::sync::Arc::downgrade(&self.state),
 		})
 	}
 
-	/// Wait until every admitted connection has left, then refuse new ones.
-	pub async fn close(&self) {
-		loop {
-			if self.state.wanted_changed(true).await.is_err() {
-				return;
-			}
-			match self.state.write_unwanted() {
-				kio::Unwanted::Idle(state) => return state.close(),
-				// Admitted between the wake and the commit: wait for it too.
-				kio::Unwanted::Wanted => continue,
-				kio::Unwanted::Closed => return,
-			}
+	/// Refuse new admissions as soon as every active connection has left.
+	pub fn drain(&self) {
+		let Ok(mut state) = self.state.write() else { return };
+		if state.draining {
+			return;
 		}
+		state.draining = true;
+		if state.active == 0 {
+			state.closed = Some(kio::clock::now());
+			state.close();
+		}
+	}
+
+	/// Resolve with the instant admission closed after every active connection left.
+	#[kio::wrapper]
+	pub fn poll_close(&self, waiter: &kio::Waiter) -> std::task::Poll<Instant> {
+		self.drain();
+		std::task::ready!(self.state.poll_closed(waiter));
+		std::task::Poll::Ready(self.state.read().closed.expect("admission closed"))
 	}
 }
 
@@ -59,7 +63,20 @@ impl Activity {
 #[derive(Debug)]
 #[must_use]
 pub struct Active {
-	_guard: kio::Consumer<()>,
+	// A connection observes its source without keeping it open.
+	state: std::sync::Weak<kio::Producer<ActivityState>>,
+}
+
+impl Drop for Active {
+	fn drop(&mut self) {
+		let Some(source) = self.state.upgrade() else { return };
+		let Ok(mut state) = source.write() else { return };
+		state.active -= 1;
+		if state.draining && state.active == 0 {
+			state.closed = Some(kio::clock::now());
+			state.close();
+		}
+	}
 }
 
 /// A MoQ server session builder.
@@ -899,6 +916,33 @@ mod tests {
 
 	use crate::ALPN_LITE_05;
 	use bytes::Bytes;
+
+	#[kio::test]
+	async fn admission_closes_at_its_last_drop() {
+		use futures::FutureExt;
+		use std::time::Duration;
+
+		let activity = Activity::default();
+		let first = activity.enter().unwrap();
+		activity.drain();
+		let last = activity.enter().expect("admission stays open while active");
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		drop(first);
+		assert!(activity.close().now_or_never().is_none());
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		let ended = kio::clock::now();
+		drop(last);
+		assert!(activity.enter().is_none(), "last drop did not close admission");
+		kio::clock::sleep(Duration::from_secs(100)).await;
+		assert_eq!(activity.close().await, ended, "the observer changed the close time");
+
+		let activity = Activity::default();
+		let active = activity.enter().unwrap();
+		let source = activity.state.weak();
+		drop(activity);
+		assert!(source.is_closed(), "an active connection kept its source open");
+		drop(active);
+	}
 
 	fn occurrences(log: &crate::lite::test_transport::Log, needle: &[u8]) -> usize {
 		let writes = log.writes.lock().unwrap();
