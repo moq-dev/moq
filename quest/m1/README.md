@@ -25,11 +25,11 @@ because a downstream iGPU transcode trial needs it now.
 Held here by open claims: a quest's branch is its path, so a claimed quest
 cannot move until its PR merges, and an epic moves with its children. These
 breaking epics and quests stay in m1 for now and are listed in m2's
-`Required`, so the cut still waits on them: api-audit, catalog-include,
-cluster-routing, datagram-tracks, drop-set, push-to-talk, rind,
-session-policy, and stream-credit. The [re-cut follow-up](/quest/m2/recut-held.md)
-moves what remains of them once their claims merge. moq-c parity and
-release-perf, held for the same reason, gate the cut through the
+`Required`, so the cut still waits on them: api-audit, cluster-routing,
+datagram-tracks, drop-set, push-to-talk, rind, session-policy, and
+stream-credit. The [re-cut follow-up](/quest/m2/recut-held.md)
+moves what remains of them once their claims merge. release-perf, held for
+the same reason, gates the cut through the
 [cut gate](/quest/m2/cut-gate/README.md).
 
 ## Required
@@ -37,7 +37,6 @@ release-perf, held for the same reason, gate the cut through the
 - [Media fuzz findings](/quest/m1/fuzz-findings/README.md) - the nightly media fuzz targets run clean: mp4-atom, MKV block, TS step, SPS overflow, and catalog encoder bugs they found are fixed
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - prove shared routing contracts, implement per-origin routes, and connect outbound local clusters
 - [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation setup
-- [moq-c at parity](/quest/m1/c/README.md) - the hand-written `moq-c` ships at the cut with every m1 binding feature moq-ffi gains
 - [Drop set](/quest/m1/drop-set.md) - each cursor judges missing groups against its own budget, so a narrow reader drops promptly and a widening re-offers groups already reported dropped on lite-07
 - [A reader on a failed copy continues on the held re-offer](/quest/m1/copy-recover.md) - a live reader keeps a group whose copy fails by continuing on the same track's re-offer at the same frame
 - [Group errors are cached by kind](/quest/m1/group-error-cache.md) - permanent group errors bind every reader, retryable ones are kept only for a bounded time, and a live SUBSCRIBE_DROP or FETCH answered `Old` no longer caches it for good
@@ -60,7 +59,6 @@ release-perf, held for the same reason, gate the cut through the
 - [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - A/A and deliberately slowed Nightly runs set the paired comparison's threshold, so its regression alerts can be trusted
 - [moq-json's table/deltas bench measures the same work every iteration](/quest/m1/bench-json-deltas.md) - the `table/deltas/1%` cases stop flipping between snapshot and delta timings, so their trend history is usable
 - [Publish moq-bench to crates.io](/quest/m1/bench-publish.md) - `cargo install moq-bench` installs one binary, with the host sampler as `moq-bench host`, first as 0.1.0
-- [Catalog contributions become includes on the root's timeline](/quest/m1/catalog-include.md) - rename the unreleased `contributions` map before the cut and state that included broadcasts share the root's timeline
 - [Session policy lives in moq-net](/quest/m1/session-policy/README.md) - accept and connect deadlines, admission, window widening and reconnect live once in moq-net; moq-tokio and moq-relay's io_uring path call them
 - [A replacement that fails before delivering never ends a live track](/quest/m1/route-swap-keeps-incumbent.md) - a route change whose replacement aborts before its first group leaves readers on the source that was serving
 - [Vendor and trim the WebRTC stack](/quest/m1/webrtc-vendor.md) - str0m, dimpl, `is`, and sctp-proto live in moq-webrtc with unused code removed, so moq-rtc can take rind

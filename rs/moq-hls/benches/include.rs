@@ -1,11 +1,11 @@
-//! Master rendering and one contribution lookup, swept over contributions x renditions.
+//! Master rendering and one include lookup, swept over includes x renditions.
 //! The catalogs have no media, so setup also verifies that listing does not need an encode.
 
 use std::hint::black_box;
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use hang::catalog::{Contribution, Join, VideoCodec, VideoConfig};
+use hang::catalog::{Include, Join, VideoCodec, VideoConfig};
 use moq_hls::{Server, export::Route};
 use moq_mux::catalog::hang::Catalog;
 
@@ -23,12 +23,12 @@ fn publish_catalog(
 	producer
 }
 
-fn contributions(c: &mut Criterion) {
+fn include(c: &mut Criterion) {
 	let runtime = tokio::runtime::Builder::new_current_thread()
 		.enable_all()
 		.build()
 		.unwrap();
-	let mut group = c.benchmark_group("hls/contributions");
+	let mut group = c.benchmark_group("hls/include");
 	for count in [1, 8, 64] {
 		for renditions in [1, 4, 16] {
 			let (server, broadcaster, route, _publications, _catalogs, _origin) = runtime.block_on(async {
@@ -56,9 +56,9 @@ fn contributions(c: &mut Criterion) {
 						.announce(moq_net::origin::Route::default().with_instance(instance, 0))
 						.unwrap();
 					publications.push(broadcast);
-					root.contributions.insert(
+					root.include.insert(
 						id.clone(),
-						Contribution::new(moq_net::path::Relative::new(&format!("./{id}")).unwrap()),
+						Include::new(moq_net::path::Relative::new(&format!("./{id}")).unwrap()),
 					);
 				}
 				let parent = moq_net::Instance::random();
@@ -79,7 +79,7 @@ fn contributions(c: &mut Criterion) {
 				.await
 				.expect("every catalog is listed without media");
 				let route = Route::parse(&format!(
-					"/room/live/@{parent}/contribution/c0/video/missing/@{}/media.m3u8",
+					"/room/live/@{parent}/include/c0/video/missing/@{}/media.m3u8",
 					first.unwrap()
 				))
 				.unwrap();
@@ -100,5 +100,5 @@ fn contributions(c: &mut Criterion) {
 	group.finish();
 }
 
-criterion_group!(benches, contributions);
+criterion_group!(benches, include);
 criterion_main!(benches);

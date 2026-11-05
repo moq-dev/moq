@@ -65,6 +65,8 @@ federation) land.
 - [Wire stats](/quest/m3/wire-stats/README.md) - `Presence` counts each root's transport bytes on the wire, `wire_tx` and `wire_rx`, from QUIC, WebSocket, and embedder gateway sources
 - [Session outcome records](/quest/m3/session-outcome-records.md) - relay stats publish each refusal and abnormal session end as a record per label, bounded under a flood, beside the counters
 - [Audio renditions carry a language](/quest/m3/audio-lang.md) - audio renditions have an optional BCP-47 `lang`, and watch auto-picks within one language
+- [fMP4 and TS imports publish BCP-47 languages](/quest/m3/import-lang-iso639.md) - ISO 639-2 codes become `en`-style tags on audio and text
+- [HLS carries every audio language](/quest/m3/hls-audio-languages.md) - every `EXT-X-MEDIA` audio entry imports with its `LANGUAGE`, and exports write it back
 - [A refused follower asks a replacement handler](/quest/m3/follow-refused-retry.md) - a same-instance handler swap with identical route details re-asks a refused `Following`, while listeners still see no change
 - [Content protection](/quest/m3/drm/README.md) - Common Encryption CMAF publishes unchanged, signalled in the hang `drm` section and MSF `contentProtections`, with license URLs from Rust, the CLI, and every binding
 - [iOS capture](/quest/m3/mobile-capture-ios.md) - Rust captures the camera and screen on iOS, setting the catalog rotation

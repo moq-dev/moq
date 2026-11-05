@@ -5,8 +5,8 @@
 The epics that open claims held in place during the 2026-11-05 milestone
 re-cut sit where the re-cut's rules put them. What remains of api-audit,
 cluster-routing, datagram-tracks, push-to-talk, rind, session-policy, and
-stream-credit moves from m1 to m2; what remains of release-perf and moq-c
-parity moves under the [cut gate](/quest/m2/cut-gate/README.md); and the
+stream-credit moves from m1 to m2; what remains of release-perf moves under
+the [cut gate](/quest/m2/cut-gate/README.md); and the
 probe epic moves from m2 to m3. The "held" notes in the m1, m2, and cut gate
 READMEs are removed, along with each held entry's extra link from m2's or
 the gate's `Required`.
@@ -23,8 +23,7 @@ left leaves the cut gate for m1. If a child is claimed again before this runs,
 leave its epic in place and keep this quest for it.
 
 Prose that names a held epic's milestone becomes stale when it moves; update
-it in the same PR: moq-c parity in [c-origin-relay](/quest/m5/c-origin-relay.md),
-datagram tracks in [net-wrap](/quest/m5/net-wrap/README.md), and the browser
+it in the same PR: datagram tracks in [net-wrap](/quest/m5/net-wrap/README.md), and the browser
 padding probes in [lite07-finalize](/quest/m2/lite07-finalize.md).
 
 ## Required
@@ -37,5 +36,4 @@ padding probes in [lite07-finalize](/quest/m2/lite07-finalize.md).
 - [rind CPU error](/quest/m1/rind/cpu-error.md) - claim held rind
 - [Connect policy](/quest/m1/session-policy/connect.md) - claim held session-policy
 - [Release on leave](/quest/m1/stream-credit/release-on-leave.md) - claim held stream-credit
-- [moq-c API gaps](/quest/m1/c/api-gaps.md) - claim held moq-c parity
 - [Probe padding](/quest/m2/probe/padding.md) - claim held probe

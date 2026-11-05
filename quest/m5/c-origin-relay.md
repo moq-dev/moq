@@ -31,4 +31,4 @@ replaced it. Wire: none.
 
 ## Related
 
-- [moq-c at parity](/quest/m1/c/README.md) - the hand-written crate's m1 parity work, which this does not block
+- [moq-c at parity](/quest/m2/cut-gate/c/README.md) - the hand-written crate's pre-cut parity work, which this does not block

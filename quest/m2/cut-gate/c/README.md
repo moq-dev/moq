@@ -26,7 +26,3 @@ twice (0.6 to 0.7, then to the generated 0.8); that is the accepted cost.
   release produces the C archive the samples are checked against.
 
 Public API: moq-c gains each m1 or m2 binding feature. Wire: none.
-
-## Required
-
-- [API gaps](/quest/m1/c/api-gaps.md) - disabling pre-encoded simulcast rungs after the shared importer support lands

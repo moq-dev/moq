@@ -5,20 +5,20 @@
 
 use mp4_atom::{Decode, FourCC, Header};
 
-use super::{Error, MAX_FRAGMENT_SAMPLES, MAX_METADATA_BYTES, MAX_TRACKS, Result};
+use super::{Error, FRAGMENT_SAMPLE_BASE, MAX_FRAGMENT_SAMPLES, MAX_METADATA_BYTES, MAX_TRACKS, Result};
 
 /// Check every box, including ones a caller or mp4-atom will discard.
 pub(crate) fn check(data: &[u8]) -> Result<()> {
 	let mut scan = Scan::default();
 	scan.boxes(data, Namespace::Any)?;
-	scan.finish()
+	scan.finish(data.len())
 }
 
 /// Check a body already framed by the streaming importer.
 pub(super) fn body(kind: FourCC, data: &[u8]) -> Result<()> {
 	let mut scan = Scan::default();
 	scan.body(kind, data)?;
-	scan.finish()
+	scan.finish(data.len())
 }
 
 #[derive(Clone, Copy)]
@@ -43,8 +43,9 @@ struct Scan {
 }
 
 impl Scan {
-	fn finish(self) -> Result<()> {
-		if self.samples > MAX_FRAGMENT_SAMPLES {
+	/// Check the counts gathered from `len` bytes of metadata.
+	fn finish(self, len: usize) -> Result<()> {
+		if self.samples > MAX_FRAGMENT_SAMPLES.min(FRAGMENT_SAMPLE_BASE + len as u64) {
 			return Err(Error::TooManySamples(self.samples));
 		}
 		if self.groups > MAX_FRAGMENT_SAMPLES {
@@ -278,8 +279,17 @@ pub(crate) mod tests {
 
 	#[test]
 	fn counts_are_checked_across_runs_and_tracks_before_parsing() {
+		// A field-less run stores only a count, so a short moof gets one sample per byte past the base.
+		let short = |count| check(&boxed(b"moof", &boxed(b"traf", &inherited(count))));
+		let fit = (FRAGMENT_SAMPLE_BASE as usize + boxed(b"moof", &boxed(b"traf", &inherited(0))).len()) as u32;
+		short(fit).unwrap();
+		assert!(matches!(short(fit + 1), Err(Error::TooManySamples(count)) if count == u64::from(fit) + 1));
+
+		// Bytes the moof carries, here a padding box, pay for samples up to the cap, which sums
+		// across runs and tracks.
 		let half = (MAX_FRAGMENT_SAMPLES / 2) as u32;
-		let mut data = boxed(b"traf", &inherited(half));
+		let mut data = boxed(b"free", &vec![0; MAX_FRAGMENT_SAMPLES as usize]);
+		data.extend(boxed(b"traf", &inherited(half)));
 		data.extend(boxed(b"traf", &inherited(half)));
 		check(&boxed(b"moof", &data)).unwrap();
 		data.extend(boxed(b"traf", &inherited(1)));

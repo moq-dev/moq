@@ -12,7 +12,7 @@ scope; they already sit on moq-ffi through the generated C++.
 
 Decided 2026-10-25 (maintainer): this line ships after the cut, once moq builds
 its bindings from rust2's UniFFI fork. The hand-written crate ships at the cut
-with [parity](/quest/m1/c/README.md) instead. The generator fix for the C name
+with [parity](/quest/m2/cut-gate/c/README.md) instead. The generator fix for the C name
 clash landed in rust2's fork
 ([moq-dev/rust2#66](https://github.com/moq-dev/rust2/pull/66)), not in a
 `kixelated/uniffi-bindgen-cpp` release, and reaches moq with the switch.

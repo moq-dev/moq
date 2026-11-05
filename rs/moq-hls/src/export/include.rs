@@ -1,11 +1,11 @@
-//! Catalog-only contribution discovery for the HTTP HLS master.
+//! Catalog-only include discovery for the HTTP HLS master.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::task::{Poll, ready};
 use std::time::Duration;
 
-use hang::catalog::{Contribution, Media};
+use hang::catalog::{Include, Media};
 use moq_mux::{catalog::hang::Catalog, follow};
 
 #[cfg(feature = "server")]
@@ -23,7 +23,7 @@ struct Context {
 	origin: moq_net::origin::Consumer,
 	window: Duration,
 	spawner: driver::Spawner,
-	/// The root catalog's `media`. A contribution is included in the root broadcast, so its
+	/// The root catalog's `media`. An include is part of the root broadcast, so its
 	/// renditions share the root's timeline and segment on the root's grid.
 	root: kio::Producer<Media>,
 }
@@ -34,7 +34,7 @@ struct State {
 }
 
 struct Entry {
-	reference: Contribution,
+	reference: Include,
 	current: kio::Producer<Current>,
 	_owner: Option<driver::Owner>,
 }
@@ -88,8 +88,8 @@ impl Producer {
 		}
 		state
 			.entries
-			.retain(|id, entry| catalog.contributions.get(id) == Some(&entry.reference));
-		for (id, reference) in &catalog.contributions {
+			.retain(|id, entry| catalog.include.get(id) == Some(&entry.reference));
+		for (id, reference) in &catalog.include {
 			if state.entries.contains_key(id) || !master::is_path_segment(id) {
 				continue;
 			}
@@ -117,7 +117,7 @@ impl Producer {
 		}
 	}
 
-	/// Stop following every contribution for good. Closing the state under the same lock
+	/// Stop following every include for good. Closing the state under the same lock
 	/// makes this terminal: a [`sync`](Self::sync) racing past its catalog await finds the
 	/// state closed and cannot re-add entries or spawn follow tasks.
 	pub fn clear(&self) {
@@ -179,7 +179,7 @@ impl Producer {
 				{
 					continue;
 				}
-				let uri = master::contribution_uri(parent, id, &instance.id, &rendition, query);
+				let uri = master::include_uri(parent, id, &instance.id, &rendition, query);
 				match rendition.kind {
 					Kind::Video => video.push(master::VideoVariant {
 						uri,
@@ -206,7 +206,7 @@ impl Producer {
 	pub fn poll_rendition(
 		&self,
 		waiter: &kio::Waiter,
-		at: &super::route::Contribution,
+		at: &super::route::Include,
 		kind: Kind,
 		name: &str,
 	) -> Poll<crate::Result<Option<Arc<Rendition>>>> {
@@ -231,7 +231,7 @@ impl Producer {
 	}
 }
 
-/// Follows a contribution's instances into its [`Current`], watching each one's catalog.
+/// Follows an include's instances into its [`Current`], watching each one's catalog.
 struct FollowInstances {
 	instances: follow::Instances,
 	current: kio::Producer<Current>,
@@ -256,7 +256,7 @@ impl kio::Task for FollowInstances {
 					let owner = self.context.spawner.lead(super::WatchCatalog::new(
 						source,
 						renditions.clone(),
-						super::Role::Contribution(self.context.root.consume()),
+						super::Role::Include(self.context.root.consume()),
 					));
 					Current::Online(Arc::new(Instance {
 						id,
@@ -265,9 +265,9 @@ impl kio::Task for FollowInstances {
 					}))
 				}
 				Ok(None) => Current::Offline,
-				// An authorization refusal is final: the contribution stays out and its URLs answer 403.
+				// An authorization refusal is final: the include stays out and its URLs answer 403.
 				Err(err @ moq_mux::Error::Moq(moq_net::Error::Unauthorized)) => {
-					tracing::debug!(%err, "contribution refused");
+					tracing::debug!(%err, "include refused");
 					if let Ok(mut state) = self.current.write() {
 						*state = Current::Failed(err.into());
 					}
@@ -282,7 +282,7 @@ impl kio::Task for FollowInstances {
 				// Not routed yet, or refused otherwise: wait for the path's next announcement, which
 				// the follower hands out, however long it takes. Until then nothing is listed.
 				Err(err) => {
-					tracing::debug!(%err, "contribution not routed; waiting for its next announcement");
+					tracing::debug!(%err, "include not routed; waiting for its next announcement");
 					match &*self.current.read() {
 						Current::Pending => Current::Offline,
 						_ => continue,
@@ -307,16 +307,16 @@ mod tests {
 		let _parent = origin.publish("room/live", Default::default()).unwrap();
 		let source = crate::resolved(&origin, "room/live").await;
 		let mut catalog = Catalog::default();
-		catalog.contributions.insert(
+		catalog.include.insert(
 			"child".into(),
-			Contribution::new(moq_net::path::Relative::new("./child").unwrap()),
+			Include::new(moq_net::path::Relative::new("./child").unwrap()),
 		);
 		let (spawner, _driver) = driver::Spawner::new();
-		let contributions = Producer::new(origin.consume(), Duration::from_secs(16), spawner);
-		contributions.clear();
+		let include = Producer::new(origin.consume(), Duration::from_secs(16), spawner);
+		include.clear();
 		// A watcher already past its catalog await syncs after the clear.
-		contributions.sync(&source, &catalog);
-		assert!(contributions.state.read().entries.is_empty());
+		include.sync(&source, &catalog);
+		assert!(include.state.read().entries.is_empty());
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -344,24 +344,24 @@ mod tests {
 		json.update(moq_net::Timed::from(&catalog).at(moq_net::Timestamp::ZERO))
 			.unwrap();
 		catalog.video.renditions.clear();
-		catalog.contributions.insert(
+		catalog.include.insert(
 			"child".into(),
-			Contribution::new(moq_net::path::Relative::new("./child").unwrap()),
+			Include::new(moq_net::path::Relative::new("./child").unwrap()),
 		);
 		let (spawner, driver) = driver::Spawner::new();
-		let contributions = Producer::new(origin.consume(), Duration::from_secs(16), spawner);
-		contributions.sync(&source, &catalog);
-		let at = super::super::Contribution {
+		let include = Producer::new(origin.consume(), Duration::from_secs(16), spawner);
+		include.sync(&source, &catalog);
+		let at = super::super::Include {
 			id: "child".into(),
 			instance: child_id.to_string(),
 		};
-		let mut lookup = Box::pin(contributions.rendition(&at, Kind::Video, "v"));
+		let mut lookup = Box::pin(include.rendition(&at, Kind::Video, "v"));
 		// The catalog has been read, but the driver has not yet polled its follow task.
 		assert!(futures::poll!(lookup.as_mut()).is_pending());
 		let running = tokio::spawn(driver.run());
 		let rendition = lookup.await.unwrap().unwrap();
 		assert_eq!(rendition.name, "v");
-		drop((rendition, contributions));
+		drop((rendition, include));
 		running.await.unwrap();
 	}
 }
