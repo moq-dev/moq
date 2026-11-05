@@ -247,7 +247,9 @@ test("rejects a negative delay", () => {
 	expect(() => decode(raw)).toThrow();
 	expect(() =>
 		encode({
-			tracks: [{ name: "video0", packaging: "loc", isLive: true, role: "video", codec: "avc1.640028", delay: -1 }],
+			tracks: [
+				{ name: "video0", packaging: "loc", isLive: true, role: "video", codec: "avc1.640028", delay: -1 },
+			],
 		}),
 	).toThrow();
 });
