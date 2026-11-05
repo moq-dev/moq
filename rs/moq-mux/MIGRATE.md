@@ -20,6 +20,7 @@ catalog entry's `subscribe`.
 `timeline::Resume::ready` borrows the resume instead of consuming it, and the hang catalog consumer's
 `next` no longer requires `Catalog<E>: Unpin`.
 moq-mux no longer enables `moq-json/async`: enable it yourself to await moq-json's readers directly.
+
 ### `container::Playout` replaces `with_warmup` ([#7864](https://github.com/moq-dev/moq/pull/7864))
 
 `container::Consumer::with_warmup` is gone. Build a `container::Playout::new(delay, warmup)` from the `Delay` and the catalog rendition's `warmup`, subscribe with `playout.subscription(subscription)`, which widens the max delay by the warmup, and build the consumer with `playout.consumer(track, format)`, which skips at the max delay alone. The order no longer matters, and a track subscribed without the widening is widened when the consumer is built.

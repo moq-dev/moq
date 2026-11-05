@@ -10,6 +10,7 @@ The `import` and `export` modules compile only with the new `async` Cargo featur
 `server` feature enables. With `default-features = false`, enable it to keep them:
 `moq-hls = { version = "...", default-features = false, features = ["async"] }`.
 Nothing else changes for a build with `server`.
+
 ### HTTP HLS lists contributions without starting their media
 
 `Server` follows the root catalog's contributions and lists their renditions from their
