@@ -1,10 +1,12 @@
-# [XS] dispatch-query's terminate test survives load
+# [M] dispatch-query's terminate test survives load
 
 ## Goal
 
 `sh/dispatch-query.test.py`'s `test_terminating_the_run_stops_the_running_phase`
 passes reliably under host load, fixed at its cause under the epic's rules,
-and its `@unittest.skip` is removed.
+and its `@unittest.skip` is removed. Cancellation also covers a lane launched
+before registration in the PID map, so the confirmed launch race cannot leave
+an uncancelled lane holding the EXIT trap open.
 
 ## Plan
 
@@ -23,7 +25,10 @@ Investigation 2026-11-05:
   reports a failure in 1 of 420 runs on Bash 5.3.20: the EXIT trap's
   `wait` returns a cancelled lane's 143 and errexit skips `report`. Its
   `wait || true` patch reportedly passed 420/420. This remains a lead to
-  verify with a failing trace in the original environment.
+  verify with a failing trace in the original environment: argument-less
+  `wait` normally returns zero, while a trapped signal can interrupt it.
+  Record the actual status and whether a signal interrupted the wait rather
+  than assuming it propagated a child's status.
 - With the skip removed temporarily, the existing test passed alone and in
   100 loaded runs on the pinned Nix Bash 5.3.20. The loaded harness restricted
   itself and four CPU workers to two CPUs; each run covers CHECK_JOBS=1 and 3.
@@ -51,7 +56,9 @@ Investigating the older-Bash hang first was rejected because it differs from
 the reported missing timing line. Keep the test skipped until its cause is
 verified. This PR retains evidence only; the job-table cancellation candidate
 was discarded before this head. The isolated launch race is real, but does not
-establish the cause of the pinned-shell failure.
+establish the cause of the pinned-shell failure. After capturing that failure,
+fix and verify the confirmed launch/cancellation race as part of this quest,
+even if the missing-report failure has a different cause.
 
 ## Waiting
 
