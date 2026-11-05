@@ -14,8 +14,9 @@ the catalog consumers and `catalog::Stream::next`, the container `Consumer` and 
 every exporter (`next`, and fMP4's `next_chunk`), `ts::Follower`, `ts::Release`, `follow::Instances`,
 `json::Consumer`, `json::Snapshot`, `rate::Follower`, `timeline::Resume`, `Binding`, and `Linger`.
 It also covers the async functions with no poll of their own: `catalog::Consumer::new`,
-`Source::{catalog, resolve, subscribe_track}`, `ts::Release::new`, `fmp4::Muxer::read`, and the JSON
-catalog entry's `subscribe`.
+`Source::{catalog, resolve, subscribe_track}`, `ts::Release::new`, and the JSON catalog entry's `subscribe`.
+`fmp4::Muxer::read` is async too; without the feature, drive `fmp4::Muxer::poll_read`, passing the same
+empty `Vec` to every poll of one group.
 
 `timeline::Resume::ready` borrows the resume instead of consuming it, and the hang catalog consumer's
 `next` no longer requires `Catalog<E>: Unpin`.
