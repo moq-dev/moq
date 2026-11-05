@@ -1,6 +1,5 @@
 //! [`Follower`]: an [`Export`] driven by the publisher instances serving its path, as a player is.
 
-use std::future::Future;
 use std::pin::Pin;
 use std::task::Poll;
 use std::time::Duration;
@@ -9,8 +8,6 @@ use kio::clock::Instant;
 
 use super::{Export, catalog};
 use crate::container::Frame;
-
-type Subscribing<E> = Pin<Box<dyn Future<Output = crate::Result<crate::catalog::Consumer<E>>> + Send>>;
 
 /// What the instances say serves the exported path.
 enum Serving {
@@ -27,7 +24,7 @@ enum Serving {
 /// Subscribing to an instance's catalog, to carry the export on into it.
 struct Subscription<E: catalog::Catalog> {
 	target: moq_net::broadcast::Consumer,
-	catalog: Subscribing<E>,
+	catalog: crate::catalog::Subscribing<E>,
 }
 
 /// Why the export awaits the first catalog snapshot of the instance it carried on into.
@@ -148,11 +145,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 	}
 
 	/// Get the next muxed frame, or `None` once the broadcast ends with nothing to follow.
-	pub async fn next(&mut self) -> crate::Result<Option<Frame>> {
-		kio::wait(|waiter| self.poll_next(waiter)).await
-	}
-
-	/// Poll for the next muxed frame, registering `waiter` when there is none yet.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Frame>>> {
 		let next = self.poll_state(waiter);
 		if matches!(next, Poll::Ready(Ok(None) | Err(_))) {
@@ -245,7 +238,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 						self.state = State::Settling { end, deadline };
 						continue;
 					}
-					match waiter.poll_future(subscription.catalog.as_mut()) {
+					match subscription.catalog.poll_ok(waiter) {
 						Poll::Ready(Ok(catalog)) => {
 							self.carry_on(&subscription.target, catalog)?;
 							self.state = State::Running {
@@ -302,7 +295,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 			*switching = Some(self.subscribe(target.clone()));
 		}
 		let subscription = switching.as_mut().expect("just set");
-		match waiter.poll_future(subscription.catalog.as_mut()) {
+		match subscription.catalog.poll_ok(waiter) {
 			Poll::Ready(Ok(catalog)) => {
 				let subscription = switching.take().expect("just polled");
 				self.carry_on(&subscription.target, catalog)?;
@@ -371,10 +364,9 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 
 	/// Begin subscribing to `target`'s catalog.
 	fn subscribe(&self, target: moq_net::broadcast::Consumer) -> Subscription<E> {
-		let (broadcast, format) = (target.clone(), self.export.catalog_format());
 		Subscription {
+			catalog: crate::catalog::Subscribing::new(&target, self.export.catalog_format()),
 			target,
-			catalog: Box::pin(async move { crate::catalog::Consumer::new(&broadcast, format).await }),
 		}
 	}
 

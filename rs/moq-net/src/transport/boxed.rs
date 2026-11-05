@@ -68,12 +68,6 @@ impl Session {
 		})
 	}
 
-	/// Open a unidirectional stream scheduled by `options`, waiting its turn for credit.
-	pub(crate) async fn open_uni(&self, options: SendOptions<'_, Group>) -> Result<SendStream, Error> {
-		let mut open = Open::default();
-		kio::wait(|waiter| self.poll_open_uni(&mut open, waiter, options)).await
-	}
-
 	/// The handle each stream this session yields reserves its paused credit through.
 	fn budget(&self) -> Budget {
 		Arc::downgrade(&self.inner)

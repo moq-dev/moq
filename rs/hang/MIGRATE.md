@@ -4,6 +4,14 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### The async API is opt-in
+
+Enable the `async` Cargo feature to keep awaiting `catalog::Consumer::next` and `Catalog::subscribe`:
+`hang = { version = "...", features = ["async"] }`. This also applies with `default-features = false`.
+The feature is off by default; `catalog::Consumer::poll_next` stays available without it.
+The generated `next` no longer requires `Catalog<E>: Unpin`.
+The catalog format and JS and binding APIs are unchanged.
+
 ### The catalog track advertises a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
 
 `Catalog::default_track_info` takes moq-net's new zero default, so the catalog track advertises the live edge only where it advertised no limit. A late joiner still reads the newest snapshot, which never goes stale.

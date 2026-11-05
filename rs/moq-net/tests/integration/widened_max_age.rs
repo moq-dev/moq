@@ -144,8 +144,8 @@ async fn received(subscriber: &mut track::Subscriber) -> BTreeSet<u64> {
 #[kio::test]
 async fn a_fresh_reader_fills_nothing_below_its_start() {
 	for (version, want) in [
-		("moq-lite-04", 6..GROUPS),
 		// Starts at the live edge.
+		("moq-lite-04", GROUPS - 1..GROUPS),
 		("moq-lite-05", GROUPS - 1..GROUPS),
 		("moq-lite-06", 6..GROUPS),
 		("moq-lite-07-wip", 6..GROUPS),
@@ -349,4 +349,49 @@ async fn wider_newcomers_after_the_first_pull_nothing_upstream() {
 		assert_eq!(got, wide, "newcomer {newcomer}");
 	}
 	assert_eq!(sent_groups(&registry), widened, "later newcomers pull nothing upstream");
+}
+
+/// A lite-03/04 viewer that beats a relay's copy resolving starts at the largest group the
+/// relay's lite-07 feed reports, though the feed delivers the history the budget reaches after
+/// its answer: the SUBSCRIBE names no start, which those drafts define as the latest group.
+#[kio::test]
+async fn a_legacy_viewer_beating_a_relay_copy_joins_at_the_live_edge() {
+	for legacy in ["moq-lite-03", "moq-lite-04"] {
+		let publisher = origin(1);
+		let relay = origin(2);
+		let viewer = origin(3);
+		let mut options = MockConnectOptions::new(VERSION.parse().unwrap());
+		options.server_publish = Some(publisher.consume());
+		options.client_subscribe = Some(relay.clone());
+		let upstream = connect_mock(options).await;
+		let _downstream = peer(legacy.parse().unwrap(), &relay, &viewer).await;
+		let broadcast = publisher.create_broadcast("live").unwrap();
+		let source = broadcast.create_track("video", timed()).unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		for sequence in 0..GROUPS {
+			let mut group = source.create_group(moq_net::group::Info { sequence }).unwrap();
+			group
+				.write_frame(Timestamp::from_millis(sequence * 1000).unwrap(), &b"x"[..])
+				.unwrap();
+			group.finish().unwrap();
+		}
+
+		let consumer = viewer.consume();
+		let remote = consumer
+			.follow("live", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.expect("broadcast resolves");
+		upstream.server_transport.hold_unis();
+		let subscription = Subscription::default().with_delay(Delay::default().with_max(WIDE));
+		let mut reader = kio::clock::timeout(TIMEOUT, remote.track("video").unwrap().subscribe(subscription))
+			.await
+			.unwrap()
+			.unwrap();
+		upstream.server_transport.release_unis();
+		let got = kio::clock::timeout(TIMEOUT, received(&mut reader)).await.unwrap();
+		assert_eq!(got, BTreeSet::from([GROUPS - 1]), "{legacy}");
+	}
 }

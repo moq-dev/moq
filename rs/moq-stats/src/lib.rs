@@ -34,6 +34,9 @@
 //! [`group_track`] and [`parse_group_track`]. The full contract (paths,
 //! tracks, and counter semantics) is at
 //! <https://doc.moq.dev/concept/stats>.
+//!
+//! The `poll_*` methods are always available. Enable the `async` feature for their generated
+//! async wrappers (the readers' `next`) and [`Publisher`]'s `run`; it is off by default.
 
 pub mod aggregate;
 pub mod consume;

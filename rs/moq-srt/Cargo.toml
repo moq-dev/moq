@@ -19,7 +19,7 @@ bytes = { workspace = true }
 futures = { workspace = true }
 # The media max age an ingest declares by default.
 hang = { workspace = true }
-moq-mux = { workspace = true }
+moq-mux = { workspace = true, features = ["async"] }
 moq-net = { workspace = true }
 # Pure-Rust SRT (no libsrt / ffmpeg). SRT carries MPEG-TS, demuxed by moq-mux.
 srt-tokio = "0.4"
