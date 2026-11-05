@@ -861,7 +861,8 @@ class SmokeTest {
                 assertEquals(first.instance(), present.announce.route.instance)
                 assertNotNull(following.available()).close()
 
-                origin.route("instance", RouteOptions(instance = "camera", epoch = 1uL)).use { second ->
+                origin.route("instance", RouteOptions(instance = "camera", epoch = 1uL)).use {
+                    second ->
                     assertNotNull(following.available()).close()
 
                     // The takeover was not listed, so the next event is the path going absent.

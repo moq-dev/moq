@@ -4421,13 +4421,22 @@ impl kio::Task for FrontServe {
 								self.broadcast.serve_datagrams_from(self.sources.get(&source).cloned());
 							}
 							self.resolved = Some(instance.clone());
+							// Under the table's lock, as each takeover carries the front: a route
+							// that took over the one asked before this answer landed (a job route
+							// answering its prefix route's request) continues it, so requesters
+							// get its instance rather than one already superseded.
+							let table = self.shared.read();
 							if let Ok(mut pending) = self.request.write()
 								&& pending.resolved.is_none()
 							{
 								pending.first = Some(instance.clone());
 								pending.resolved = Some(Ok(instance));
 								pending.via = Some((route, asked));
+								if let Some(best) = table.best_route(&self.path, self.horizon, &HashSet::new(), |_| true) {
+									PendingFront::continue_with(&mut pending, best);
+								}
 							}
+							drop(table);
 						}
 						Action::Query { track: name, source } => {
 							let Some(io) = self.tracks.get_mut(&name) else { continue };

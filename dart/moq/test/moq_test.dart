@@ -632,7 +632,10 @@ void main() {
     expect(absent.announce.route.instance, 'camera');
 
     expect(
-      () => origin.route(path: 'refused', options: RouteOptions(instance: '')),
+      () => origin.route(
+        path: 'refused',
+        options: RouteOptions(instance: ''),
+      ),
       throwsA(isA<InvalidInstanceMoqException>()),
     );
     first.cancel();

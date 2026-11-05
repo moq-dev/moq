@@ -31,7 +31,7 @@ test("a listing reports only a path becoming present or absent", async () => {
 	const producer = new Announce.Producer();
 	const listing = Announce.list(producer.consume());
 
-	const route = Route.default;
+	const route = RouteInfo.default;
 	producer.append({ prefix: p("a"), captures: undefined, kind: "start", route });
 	producer.append({ prefix: p("a"), captures: undefined, kind: "update", route });
 	producer.append({ prefix: p("a"), captures: undefined, kind: "restart", route });
