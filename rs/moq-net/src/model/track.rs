@@ -3126,12 +3126,15 @@ impl TrackState {
 			self.install(info.unwrap_or_else(|| Info::default().with_max_age(None)));
 		}
 		let info = self.info.clone().unwrap();
-		let content = self.content_for_copy(sequence)?;
-		let mut group = group::Producer::new(group::Info { sequence }, info, self.cache.clone());
-		if let Some(content) = content {
-			group.handle().share_content(content);
+		let mut group = group::Producer::new(group::Info { sequence }, info.clone(), self.cache.clone());
+		// A compressed flight inflates from frame 0 with a decoder of its own, so it keeps
+		// its own content rather than the cached copy's, whose inflated copy is further on.
+		if !info.compress {
+			if let Some(content) = self.content_for_copy(sequence)? {
+				group.handle().share_content(content);
+			}
+			group.handle().register_content(&self.contents);
 		}
-		group.handle().register_content(&self.contents);
 		group.bound(frames)?;
 		self.cap(&group.handle())?;
 		self.charge_debt();
@@ -3145,16 +3148,12 @@ impl TrackState {
 		Ok(group)
 	}
 
-	/// The copy of group `sequence` a reader at frame `index` rides, furthest along of
-	/// those that admit it (see [`group::Handle::admits`]), and whether it is a flight
-	/// rather than a cached copy. Only one ahead of `from`, the copy it reads now, which it
-	/// hands over from.
-	pub(super) fn ride(
-		&self,
-		sequence: u64,
-		index: usize,
-		from: Option<&group::Consumer>,
-	) -> Option<(group::Handle, bool)> {
+	/// The copy of its group `reader` rides at its frame, furthest along of those that admit
+	/// it (see [`group::Handle::admits`]), and whether it is a flight rather than a cached
+	/// copy. When `ahead`, only one further along than the copy it reads, which it hands
+	/// over from.
+	pub(super) fn ride(&self, reader: &group::Consumer, ahead: bool) -> Option<(group::Handle, bool)> {
+		let sequence = reader.sequence;
 		let cached = self
 			.lookup
 			.get(&sequence)
@@ -3167,12 +3166,12 @@ impl TrackState {
 			.into_iter()
 			.flatten()
 			.filter_map(|flight| Some((flight.held()?, true)));
-		let past = from.map(group::Consumer::committed);
+		let past = ahead.then(|| reader.committed());
 		cached
 			.chain(flights)
-			.filter(|(copy, _)| from.is_none_or(|from| !copy.is_read_by(from)))
+			.filter(|(copy, _)| !ahead || !copy.is_read_by(reader))
 			.map(|(copy, flight)| (copy.committed(), copy, flight))
-			.filter(|(committed, copy, _)| past.is_none_or(|past| *committed > past) && copy.admits(index))
+			.filter(|(committed, copy, _)| past.is_none_or(|past| *committed > past) && copy.admits(reader))
 			.max_by_key(|(committed, ..)| *committed)
 			.map(|(_, copy, flight)| (copy, flight))
 	}
@@ -3186,21 +3185,19 @@ pub(super) enum Board {
 	Wait(Boarding),
 }
 
-/// Board group `sequence` of `track` at frame `index`, which the copy a reader read shed:
-/// ride a copy that admits the reader, else ask the track's [`Requests`] handlers for a
-/// flight from that frame. `None` when no handler can serve one.
+/// Board `reader`'s group at its frame, which the copy it read shed: ride a copy that
+/// admits it, else ask the track's [`Requests`] handlers for a flight from that frame.
+/// `None` when no handler can serve one.
 ///
-/// A compressed track flies nothing, since a flight starting past frame 0 lacks what its
-/// plain readers inflate from.
-pub(super) fn board(track: &kio::Producer<TrackState>, sequence: u64, index: usize) -> Option<Board> {
+/// A compressed group's flight starts at frame 0, since a later frame builds on the ones
+/// before it, and its riders skip to their frame.
+pub(super) fn board(track: &kio::Producer<TrackState>, reader: &group::Consumer) -> Option<Board> {
 	let state = track.read();
-	if state.info.as_ref().is_none_or(|info| info.compress) {
-		return None;
-	}
-	if let Some((copy, flight)) = state.ride(sequence, index, None)
-		&& let Some(reader) = copy.try_consume()
+	let compress = state.info.as_ref()?.compress;
+	if let Some((copy, flight)) = state.ride(reader, false)
+		&& let Some(copy) = copy.try_consume()
 	{
-		return Some(Board::Ride(reader, flight));
+		return Some(Board::Ride(copy, flight));
 	}
 	let fills = state.fills.clone();
 	drop(state);
@@ -3209,22 +3206,22 @@ pub(super) fn board(track: &kio::Producer<TrackState>, sequence: u64, index: usi
 		max_delay: None,
 		order: Order::Ascending,
 	};
-	let join = fills.lock().fly(&fills, sequence, index as u64, asking)?;
+	let (sequence, frame) = (reader.sequence, if compress { 0 } else { reader.index() });
+	let join = fills.lock().fly(&fills, sequence, frame, asking)?;
 	Some(Board::Wait(Boarding {
 		join: Box::new(join),
 		sequence,
-		frame: index as u64,
+		frame,
 	}))
 }
 
-/// The copy a reader riding `from` at frame `index` hands over to: one further along that
-/// admits it, and whether that is a flight. See [`TrackState::ride`].
+/// The copy `reader`, riding a flight, hands over to: one further along that admits it,
+/// and whether that is a flight. See [`TrackState::ride`].
 pub(super) fn hand_over(
 	track: &kio::Producer<TrackState>,
-	from: &group::Consumer,
-	index: usize,
+	reader: &group::Consumer,
 ) -> Option<(group::Consumer, bool)> {
-	let (copy, flight) = track.read().ride(from.sequence, index, Some(from))?;
+	let (copy, flight) = track.read().ride(reader, true)?;
 	Some((copy.try_consume()?, flight))
 }
 
@@ -3237,6 +3234,11 @@ pub(super) struct Boarding {
 }
 
 impl Boarding {
+	/// The frame the flight starts at.
+	pub(super) fn frame(&self) -> u64 {
+		self.frame
+	}
+
 	/// Poll for a reader of the flight, or why none came: the handlers refused it, or went
 	/// away without answering.
 	pub(super) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<group::Consumer>> {
@@ -23336,6 +23338,54 @@ mod test {
 			index += 1;
 		}
 		assert_eq!(read_numbered(&mut late), None, "at the live edge");
+	}
+
+	/// A plain reader of a compressed group that fell off boards a flight from frame 0,
+	/// since every later frame builds on the ones before it, and skips the frames before its
+	/// own as the handler writes them. It then hands over to the live copy.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_compressed_flight_starts_at_frame_0_and_its_rider_skips_ahead() {
+		let producer = track_producer("test", Info::default().with_compress(true));
+		let requests = producer.requests();
+		let mut live = producer.append_group().unwrap();
+		let mut reader = live.consume();
+		let mut behind = live.consume();
+		const FRAMES: u32 = 3_000;
+		for index in 0..FRAMES {
+			live.write_frame(None, numbered(index)).unwrap();
+			assert_eq!(read_numbered(&mut reader), Some(index));
+			if index < 10 {
+				assert_eq!(read_numbered(&mut behind), Some(index));
+			}
+		}
+
+		// The live reader's inflated copy shed frame 10, which the decoder is past.
+		assert_eq!(read_numbered(&mut behind), None);
+		let fill = asked(&requests).expect("a flight");
+		assert_eq!(fill.start(), Position { group: 0, frame: 0 }, "from frame 0");
+		let mut flight = fill.accept(0, None).unwrap();
+		let unwanted = |flight: &group::Producer| flight.handle().poll_unwanted(&kio::Waiter::noop()).is_ready();
+		for index in 0..10 {
+			flight.write_frame(None, numbered(index)).unwrap();
+			assert_eq!(read_numbered(&mut behind), None, "frame {index} is skipped");
+		}
+		let mut index = 10;
+		while !unwanted(&flight) {
+			flight.write_frame(None, numbered(index)).unwrap();
+			assert_eq!(read_numbered(&mut behind), Some(index));
+			index += 1;
+			assert!(index < FRAMES, "handed over before the flight caught up");
+		}
+		while index < FRAMES {
+			assert_eq!(
+				read_numbered(&mut behind),
+				Some(index),
+				"frame {index} from the live copy"
+			);
+			index += 1;
+		}
+		assert_eq!(read_numbered(&mut behind), None, "at the live edge");
 	}
 
 	/// The size of `payload` as a frame, for [`group::Producer::poll_ready`].

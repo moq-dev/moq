@@ -2312,13 +2312,23 @@ impl Producer {
 }
 
 impl Handle {
-	/// Whether a reader at frame `index` may ride this copy: it holds the frame, no further
+	/// Whether `reader` may ride this copy at its frame: it holds the frame, no further
 	/// than [`ADMIT`] behind the end of the last frame its fastest reader took, so the
 	/// front shedding as the writer runs a whole window ahead still leaves it in place.
-	pub(super) fn admits(&self, index: usize) -> bool {
+	pub(super) fn admits(&self, reader: &Consumer) -> bool {
+		let index = reader.cursor.index;
 		let state = self.state.read();
 		// Frames adopted below the log sit off this copy's pace scale.
 		if state.abort.is_some() || (index as u64) < state.log.base() {
+			return false;
+		}
+		// A plain read of a compressed copy inflates its frame from every slice since the
+		// last one inflated, which must all still be held, from frame 0.
+		if let Some(plain) = state.plain(reader.cursor.raw)
+			&& (state.offset != 0
+				|| plain.len.load(Ordering::Acquire).min(index) < state.held()
+				|| plain.shed_past(index))
+		{
 			return false;
 		}
 		let start = match state.log.get(index as u64) {
@@ -3422,14 +3432,18 @@ struct Ride {
 	boarding: Option<track::Boarding>,
 	// Whether the copy read is a flight, which the reader hands over from.
 	aboard: bool,
+	// Frames still to read and drop before the reader's own: a compressed flight starts at
+	// frame 0, and its rider inflates its way to the frame it boarded at.
+	skip: usize,
 }
 
 impl Ride {
-	/// Reading the copy boarded, a flight when `flight`.
-	fn aboard(flight: bool) -> Self {
+	/// Reading the copy boarded, a flight when `flight`, with `skip` frames to drop first.
+	fn aboard(flight: bool, skip: usize) -> Self {
 		Self {
 			boarding: None,
 			aboard: flight,
+			skip,
 		}
 	}
 }
@@ -3566,6 +3580,13 @@ impl Consumer {
 		self.cursor.raw = true;
 		self.cursor.prefetch = Prefetch::default();
 		self
+	}
+
+	/// Resolves once the group's outcome is final, wherever this cursor is: `Ok` once
+	/// finished, or the abort error.
+	#[cfg(feature = "async")]
+	pub(crate) fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
+		self.cursor.poll(waiter, |state| state.poll_outcome())
 	}
 
 	/// The index of the first frame the group holds (see [`Producer::start_at`]).
@@ -4050,18 +4071,30 @@ impl Consumer {
 						// reader's budget still gives up on it.
 						Poll::Pending => return self.poll_expired_if_blocked(waiter, Poll::Pending),
 					};
+					let start = usize::try_from(boarding.frame()).unwrap_or(usize::MAX);
+					let start = start.min(self.cursor.index);
+					let skip = self.cursor.index - start;
 					self.adopt_copy(copy);
-					self.set_ride(Some(Ride::aboard(true)));
+					self.cursor.index = start;
+					self.set_ride(Some(Ride::aboard(true, skip)));
 				} else if ride.aboard
 					&& self.cursor.prefetch.is_drained()
 					&& let Some(track) = self.cursor.cache.track()
-					&& let Some((copy, flight)) = track::hand_over(&track, self, self.cursor.index)
+					&& let Some((copy, flight)) = track::hand_over(&track, self)
 				{
+					let skip = self.ride_mut().map_or(0, |ride| ride.skip);
 					self.adopt_copy(copy);
-					self.set_ride(flight.then(|| Ride::aboard(true)));
+					self.set_ride((flight || skip > 0).then(|| Ride::aboard(flight, skip)));
 				}
 			}
 			let res = read(self, waiter);
+			if let Poll::Ready(Ok(Some(_))) = &res
+				&& let Some(ride) = self.ride_mut()
+				&& ride.skip > 0
+			{
+				ride.skip -= 1;
+				continue;
+			}
 			if !matches!(res, Poll::Ready(Err(_))) || !self.shed_next() {
 				return res;
 			}
@@ -4073,15 +4106,16 @@ impl Consumer {
 			let Some(track) = self.cursor.cache.track() else {
 				return res;
 			};
-			match track::board(&track, self.info.sequence, self.cursor.index) {
+			match track::board(&track, self) {
 				None => return res,
 				Some(track::Board::Ride(copy, flight)) => {
 					self.adopt_copy(copy);
-					self.set_ride(Some(Ride::aboard(flight)));
+					self.set_ride(Some(Ride::aboard(flight, 0)));
 				}
 				Some(track::Board::Wait(boarding)) => self.set_ride(Some(Ride {
 					boarding: Some(boarding),
 					aboard: true,
+					skip: 0,
 				})),
 			}
 		}
@@ -4109,11 +4143,16 @@ impl Consumer {
 	}
 
 	/// Whether the copy read shed the frame read next, rather than failing or never holding
-	/// it. Ordinals stand for frames only on a dense group, so only one boards a flight.
+	/// it. Ordinals stand for frames only on a dense group, so only one boards a flight. A
+	/// plain read of a compressed copy also loses a frame its inflated copy shed, which the
+	/// decoder, already past it, cannot inflate again.
 	fn shed_next(&self) -> bool {
 		let state = self.cursor.state.read();
 		let index = self.cursor.index;
-		state.abort.is_none() && !state.sparse() && index >= state.offset && index < state.held()
+		if state.abort.is_some() || state.sparse() || index < state.offset {
+			return false;
+		}
+		index < state.held() || state.plain(self.cursor.raw).is_some_and(|plain| plain.shed_past(index))
 	}
 
 	/// Read the same frames from `copy` from here on, keeping this reader's place and cap.

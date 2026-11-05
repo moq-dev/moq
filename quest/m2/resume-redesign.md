@@ -64,7 +64,7 @@ paths diverged.
    `Retain`, `Candidate`, and per-reader `learn_end`.
 4. `Recover` attaches to the slot, not a handed-out group: continuing a
    group whose copy failed is a
-   [flight](/quest/m1/unbounded-groups/flights.md) from the reader's frame on
+   [flight](https://github.com/moq-dev/moq/pull/7944) from the reader's frame on
    the new route, which hands over like any other flight.
 
 Hard constraint from the splice era: two caches sharing one group handle
@@ -94,5 +94,4 @@ serving copy's upstream closed, followed by a read.
 
 ## Related
 
-- [Flights](/quest/m1/unbounded-groups/flights.md) - the paced copy and handover `Recover` folds into, landed in [moq-dev/moq#7944](https://github.com/moq-dev/moq/pull/7944)
 - [Recover reads its budget without a sync](/quest/m2/recover-budget.md) - a per-frame cost this deletes

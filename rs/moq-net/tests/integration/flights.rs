@@ -73,8 +73,9 @@ async fn write_paced(
 }
 
 /// The origin's handler: serves each fill from the frame it starts at, paced by its riders,
-/// counting the frames it writes and the fills it ends.
-fn serve(requests: track::Requests, written: Arc<AtomicU64>, ended: Arc<AtomicU64>) {
+/// counting the frames it writes and the fills it ends. With `finish`, the archive holds the
+/// whole group, so each fill finishes after its last frame.
+fn serve(requests: track::Requests, written: Arc<AtomicU64>, ended: Arc<AtomicU64>, finish: bool) {
 	drop(kio::clock::sim::spawn(async move {
 		while let Ok(fill) = requests.requested_fill().await {
 			let start = fill.start();
@@ -84,6 +85,10 @@ fn serve(requests: track::Requests, written: Arc<AtomicU64>, ended: Arc<AtomicU6
 			drop(kio::clock::sim::spawn(async move {
 				for index in start.frame as u32.. {
 					let payload = (index < FRAMES).then(|| numbered(index));
+					if payload.is_none() && finish {
+						group.finish().expect("finish");
+						break;
+					}
 					if !write_paced(&mut group, &fill, &mut demand, payload).await {
 						break;
 					}
@@ -105,23 +110,50 @@ async fn next(group: &mut group::Consumer, version: &str, index: u32) -> u32 {
 	number(&frame)
 }
 
+/// Whether `group` ends cleanly at its next read.
+async fn next_end(group: &mut group::Consumer, version: &str) -> bool {
+	kio::clock::timeout(TIMEOUT, group.read_frame())
+		.await
+		.unwrap_or_else(|_| panic!("{version}: the group never ended"))
+		.unwrap_or_else(|err| panic!("{version}: the end: {err}"))
+		.is_none()
+}
+
 #[kio::test]
 async fn a_late_joiner_replays_through_a_relay_chain() {
 	for version in VERSIONS {
-		chain(version, true).await;
+		chain(version, Replay::Live).await;
 	}
 }
 
-/// A moq-transport hop holds a FETCH answer whole until FETCH_OK, so never more than one
-/// tail of it: the late joiner is refused rather than replayed, and every flight stops.
+/// A moq-transport hop refuses a FETCH reaching past the live edge of a live group, as a
+/// flight's whole-group FETCH does, before reading any of it: the late joiner is refused
+/// rather than replayed, and no flight reaches the origin.
 #[kio::test]
-async fn moq_transport_refuses_a_replay_past_one_tail() {
-	chain("moq-transport-22", false).await;
+async fn moq_transport_refuses_a_replay_of_a_live_group() {
+	chain("moq-transport-22", Replay::Refused).await;
 }
 
-/// Join group 0 late at the bottom of a two-relay chain, expecting it replayed from frame 0
-/// when `replays`, else refused.
-async fn chain(version: &str, replays: bool) {
+/// A moq-transport hop answers a FETCH of a finished group before reading it, then streams
+/// its objects, so a group far past one tail replays through each hop's flight.
+#[kio::test]
+async fn moq_transport_replays_a_finished_group() {
+	chain("moq-transport-22", Replay::Finished).await;
+}
+
+/// What a late joiner of group 0 finds at the bottom of the chain.
+#[derive(Clone, Copy, PartialEq)]
+enum Replay {
+	/// The live group, replayed from frame 0 until the joiner hands over to the live copy.
+	Live,
+	/// The finished group, replayed from frame 0 to its end.
+	Finished,
+	/// A refusal.
+	Refused,
+}
+
+/// Join group 0 late at the bottom of a two-relay chain, expecting `replay`.
+async fn chain(version: &str, replay: Replay) {
 	let version_parsed: Version = version.parse().unwrap();
 	let pools: [cache::Pool; 3] = Default::default();
 	let publisher = origin(1, &pools[0]);
@@ -132,7 +164,12 @@ async fn chain(version: &str, replays: bool) {
 	let track = broadcast.create_track("data", track::Info::default()).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 	let (written, ended) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
-	serve(track.requests(), written.clone(), ended.clone());
+	serve(
+		track.requests(),
+		written.clone(),
+		ended.clone(),
+		replay == Replay::Finished,
+	);
 
 	let mut options = MockConnectOptions::new(version_parsed);
 	options.server_publish = Some(publisher.consume());
@@ -173,6 +210,14 @@ async fn chain(version: &str, replays: bool) {
 		assert_eq!(next(&mut reader, version, index).await, index, "{version}: live");
 	}
 
+	if replay == Replay::Finished {
+		live.finish().unwrap();
+		assert!(
+			next_end(&mut reader, version).await,
+			"{version}: the live reader sees the end"
+		);
+	}
+
 	// A late joiner at the bottom: every copy in the chain shed frame 0.
 	let mut late_sub = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(subscription()))
 		.await
@@ -183,13 +228,13 @@ async fn chain(version: &str, replays: bool) {
 		.expect("group timeout")
 		.unwrap()
 		.expect("group 0");
-	if !replays {
+	if replay == Replay::Refused {
 		let refused = kio::clock::timeout(TIMEOUT, late.read_frame())
 			.await
 			.unwrap_or_else(|_| panic!("{version}: never answered"));
 		assert!(refused.is_err(), "{version}: {refused:?}");
 		kio::clock::sleep(Duration::from_secs(1)).await;
-		assert_eq!(ended.load(Ordering::Relaxed), 1, "{version}: one flight, stopped");
+		assert_eq!(written.load(Ordering::Relaxed), 0, "{version}: no flight at the origin");
 		return;
 	}
 	let mut held = 0;
@@ -198,11 +243,19 @@ async fn chain(version: &str, replays: bool) {
 		held = pools.iter().map(cache::Pool::used).max().unwrap().max(held);
 	}
 
+	if replay == Replay::Finished {
+		assert!(
+			next_end(&mut late, version).await,
+			"{version}: the replay ends with the group"
+		);
+	}
+
 	// The joiner left its flight for the live copy before the flights fetched the whole
-	// group, and every flight in the chain stopped.
+	// group, and every flight in the chain stopped. A finished group is short enough that
+	// its flight, a window ahead of the handover, reaches its end.
 	let fetched = written.load(Ordering::Relaxed);
 	assert!(
-		fetched < u64::from(FRAMES),
+		replay == Replay::Finished || fetched < u64::from(FRAMES),
 		"{version}: the origin wrote {fetched} frames"
 	);
 	kio::clock::sleep(Duration::from_secs(1)).await;
