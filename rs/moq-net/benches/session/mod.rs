@@ -902,7 +902,9 @@ impl<B: Backend> Room<B> {
 			room.round().await;
 		}
 		for (pool, capacity) in room.pools().zip(capacities) {
-			pool.resize(capacity.map(|capacity| capacity.max(pool.used() * 2)));
+			// Expiry dates activity on the next poll: retain those two batches
+			// plus the incoming batch until the following cleanup reclaims history.
+			pool.resize(capacity.map(|capacity| capacity.max(pool.used() * 3)));
 		}
 		// Exercise turnover as well as the empty cache, including Criterion's one-pass
 		// nightly smoke mode.
