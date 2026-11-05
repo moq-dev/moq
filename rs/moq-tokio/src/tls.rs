@@ -50,6 +50,16 @@ pub enum Error {
 	#[error("failed to parse private key")]
 	Key(#[source] rustls::pki_types::pem::Error),
 
+	/// A private key file parsed as PEM but its key couldn't be loaded, e.g. malformed or unsupported.
+	#[error("failed to load private key {}", key.display())]
+	LoadKey {
+		/// Path of the private key file.
+		key: PathBuf,
+		/// Why the crypto provider refused it. Boxed for the same reason as in [`Error::KeyMismatch`].
+		#[source]
+		source: Box<rustls::Error>,
+	},
+
 	/// A PEM file parsed cleanly but held no certificates.
 	#[error("no certificates found")]
 	Empty,
@@ -109,10 +119,6 @@ pub enum Error {
 	#[error("failed to initialize the Android platform verifier")]
 	AndroidInit(#[source] jni::errors::Error),
 
-	/// rustls rejected the mTLS client certificate and key, e.g. they don't match.
-	#[error("failed to configure client certificate")]
-	ClientAuth(#[source] rustls::Error),
-
 	/// Only one half of the mTLS client identity was given; it needs both a cert and a key.
 	#[error("both --connect-tls-cert and --connect-tls-key must be provided")]
 	IncompleteClientAuth,
@@ -129,7 +135,7 @@ pub enum Error {
 	#[error("a certificate resolver cannot be combined with cert, key, generate, or identity")]
 	ConflictingResolver,
 
-	/// A server cert/key pair was paired up by index but the key isn't the certificate's.
+	/// A certificate file and key file were paired but the key isn't the certificate's.
 	#[error("private key {} doesn't match certificate {}", key.display(), cert.display())]
 	KeyMismatch {
 		/// Path of the private key file.
@@ -184,10 +190,11 @@ impl Error {
 				| Self::ReadFile(_)
 				| Self::Read(_)
 				| Self::Key(_)
+				| Self::LoadKey { .. }
 				| Self::Empty
 				| Self::EmptyRoots(_)
 				| Self::AddRoot(_)
-				| Self::ClientAuth(_)
+				| Self::KeyMismatch { .. }
 				| Self::ServerVerifier(_)
 		)
 	}
@@ -227,6 +234,35 @@ fn read_roots(paths: &[PathBuf]) -> Result<Vec<CertificateDer<'static>>> {
 		roots.extend(certs);
 	}
 	Ok(roots)
+}
+
+/// Load a certificate chain and its private key, refusing a key that doesn't sign the leaf.
+fn load_key_pair(
+	provider: &crypto::Provider,
+	chain_path: &Path,
+	key_path: &Path,
+) -> Result<Arc<rustls::sign::CertifiedKey>> {
+	let chain = read_certs(chain_path)?;
+	if chain.is_empty() {
+		return Err(Error::Empty);
+	}
+
+	let key = PrivateKeyDer::from_pem_file(key_path).map_err(Error::Key)?;
+	let signer = provider
+		.key_provider
+		.load_private_key(key)
+		.map_err(|source| Error::LoadKey {
+			key: key_path.to_path_buf(),
+			source: Box::new(source),
+		})?;
+	let certified = rustls::sign::CertifiedKey::new(chain, signer);
+	certified.keys_match().map_err(|source| Error::KeyMismatch {
+		key: key_path.to_path_buf(),
+		cert: chain_path.to_path_buf(),
+		source: Box::new(source),
+	})?;
+
+	Ok(Arc::new(certified))
 }
 
 // ── Certified ───────────────────────────────────────────────────────
@@ -332,12 +368,12 @@ impl fmt::Debug for Identity {
 	}
 }
 
-/// Presents one fixed [`Identity`] whenever a server asks for a client certificate.
-#[cfg(feature = "_certs")]
+/// Presents one fixed client certificate whenever a server asks for one.
+#[cfg(any(feature = "_certs", not(feature = "watch")))]
 #[derive(Debug)]
 struct IdentityResolver(Arc<rustls::sign::CertifiedKey>);
 
-#[cfg(feature = "_certs")]
+#[cfg(any(feature = "_certs", not(feature = "watch")))]
 impl rustls::client::ResolvesClientCert for IdentityResolver {
 	fn resolve(
 		&self,
@@ -347,6 +383,47 @@ impl rustls::client::ResolvesClientCert for IdentityResolver {
 		// A self-signed identity chains to nothing, so the server's hints never
 		// match it. Offer it regardless and let the server's verifier decide.
 		Some(self.0.clone())
+	}
+
+	fn has_certs(&self) -> bool {
+		true
+	}
+}
+
+/// Presents the latest valid client certificate and key loaded from disk.
+///
+/// A rewrite that is briefly missing, malformed, or mismatched (the certificate
+/// replaced before its key) keeps the previous pair until the files agree again.
+#[cfg(feature = "watch")]
+#[derive(Debug)]
+struct ReloadingClientCert {
+	inner: Reloading<rustls::sign::CertifiedKey>,
+}
+
+#[cfg(feature = "watch")]
+impl ReloadingClientCert {
+	fn new(
+		provider: crypto::Provider,
+		cert: PathBuf,
+		key: PathBuf,
+		initial: Arc<rustls::sign::CertifiedKey>,
+	) -> Result<Self> {
+		let paths = [cert.clone(), key.clone()];
+		let build = move || load_key_pair(&provider, &cert, &key);
+		Ok(Self {
+			inner: Reloading::new(&paths, initial, "client certificate", build)?,
+		})
+	}
+}
+
+#[cfg(feature = "watch")]
+impl rustls::client::ResolvesClientCert for ReloadingClientCert {
+	fn resolve(
+		&self,
+		_root_hint_subjects: &[&[u8]],
+		_sigschemes: &[rustls::SignatureScheme],
+	) -> Option<Arc<rustls::sign::CertifiedKey>> {
+		Some(self.inner.current())
 	}
 
 	fn has_certs(&self) -> bool {
@@ -500,7 +577,9 @@ pub struct Connect {
 	/// PEM file containing the client certificate chain for mTLS.
 	///
 	/// Only certificates are extracted; any private keys in the file are ignored.
-	/// Must be paired with `--connect-tls-key`.
+	/// Must be paired with `--connect-tls-key`. With the `watch` feature, both files
+	/// are hot reloaded for new connections, retaining the last valid pair while a
+	/// rotation is missing, malformed, or mismatched.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[usage(
 		name = "connect-tls-cert",
@@ -718,19 +797,37 @@ impl CustomRoots {
 struct ReloadState<T: ?Sized + Send + Sync + 'static> {
 	current: RwLock<Arc<T>>,
 	build: Box<dyn Fn() -> Result<Arc<T>> + Send + Sync>,
-	role: &'static str,
+	/// What the files hold, for the reload logs.
+	material: &'static str,
+	/// Held across each read and install, so a slower read of older files never
+	/// replaces a newer one.
+	serial: std::sync::Mutex<()>,
 }
 
 #[cfg(feature = "watch")]
 impl<T: ?Sized + Send + Sync + 'static> ReloadState<T> {
 	fn reload(&self) {
+		let _serial = self.serial.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 		match (self.build)() {
 			Ok(next) => {
 				*self.current.write().unwrap_or_else(std::sync::PoisonError::into_inner) = next;
-				tracing::info!(role = self.role, "reloaded TLS root certificates");
+				tracing::info!(material = self.material, "reloaded TLS files");
 			}
 			Err(err) => {
-				tracing::warn!(%err, role = self.role, "failed to reload TLS root certificates; retaining previous roots");
+				tracing::warn!(%err, material = self.material, "failed to reload TLS files; retaining the previous ones");
+			}
+		}
+	}
+
+	/// Reread the files once the watch is registered, catching a rotation that
+	/// landed between the caller's first load and the watch, which no event reports.
+	/// Quiet on success, since it almost always rereads what was just loaded.
+	fn resync(&self) {
+		let _serial = self.serial.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+		match (self.build)() {
+			Ok(next) => *self.current.write().unwrap_or_else(std::sync::PoisonError::into_inner) = next,
+			Err(err) => {
+				tracing::warn!(%err, material = self.material, "failed to reread TLS files; retaining the previous ones")
 			}
 		}
 	}
@@ -743,7 +840,7 @@ impl<T: ?Sized + Send + Sync + 'static> ReloadState<T> {
 	}
 }
 
-/// A verifier whose implementation is replaced after its root files change.
+/// A verifier or client certificate replaced after its files change.
 #[cfg(feature = "watch")]
 struct Reloading<T: ?Sized + Send + Sync + 'static> {
 	state: Arc<ReloadState<T>>,
@@ -756,18 +853,20 @@ impl<T: ?Sized + Send + Sync + 'static> Reloading<T> {
 	fn new(
 		paths: &[PathBuf],
 		initial: Arc<T>,
-		role: &'static str,
+		material: &'static str,
 		build: impl Fn() -> Result<Arc<T>> + Send + Sync + 'static,
 	) -> Result<Self> {
 		let state = Arc::new(ReloadState {
 			current: RwLock::new(initial),
 			build: Box::new(build),
-			role,
+			material,
+			serial: std::sync::Mutex::new(()),
 		});
 
 		let reload = state.clone();
 		let watcher =
 			crate::watch::callback(paths, move || reload.reload()).map_err(|err| Error::Watch(err.to_string()))?;
+		state.resync();
 
 		Ok(Self {
 			state,
@@ -783,7 +882,9 @@ impl<T: ?Sized + Send + Sync + 'static> Reloading<T> {
 #[cfg(feature = "watch")]
 impl<T: ?Sized + Send + Sync + 'static> std::fmt::Debug for Reloading<T> {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		f.debug_struct("Reloading").field("role", &self.state.role).finish()
+		f.debug_struct("Reloading")
+			.field("material", &self.state.material)
+			.finish()
 	}
 }
 
@@ -995,8 +1096,9 @@ impl Connect {
 		if let Some(name) = &self.host_name {
 			server_name(name)?;
 		}
-		let reloadable_roots = cfg!(feature = "watch")
-			&& matches!(&verification, Verification::Roots { custom, .. } if !custom.paths.is_empty());
+		let reloadable = cfg!(feature = "watch")
+			&& (self.cert.is_some()
+				|| matches!(&verification, Verification::Roots { custom, .. } if !custom.paths.is_empty()));
 
 		// Allow TLS 1.2 in addition to 1.3 for WebSocket compatibility.
 		// QUIC always negotiates TLS 1.3 regardless of this setting.
@@ -1020,10 +1122,11 @@ impl Connect {
 		let builder = builder.dangerous().with_custom_certificate_verifier(verifier);
 		let mut tls = self.with_client_auth(builder)?;
 
-		// A resumed session skips certificate verification. Disable resumption when
-		// roots can change underneath this config so removing a CA takes effect on
-		// every subsequent handshake.
-		if reloadable_roots {
+		// A resumed session skips both certificate exchanges. Disable resumption when
+		// roots or the client certificate can change underneath this config, so
+		// removing a CA or reissuing the certificate takes effect on every
+		// subsequent handshake.
+		if reloadable {
 			tls.resumption = rustls::client::Resumption::disabled();
 		}
 
@@ -1123,22 +1226,21 @@ impl Connect {
 			return Ok(builder.with_client_cert_resolver(resolver));
 		}
 
-		Ok(match (&self.cert, &self.key) {
-			(Some(cert_path), Some(key_path)) => {
-				let cert_pem = fs::read(cert_path).map_err(Error::ReadFile)?;
-				let chain: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&cert_pem)
-					.collect::<std::result::Result<_, _>>()
-					.map_err(Error::Read)?;
-				if chain.is_empty() {
-					return Err(Error::Empty);
-				}
-				let key_pem = fs::read(key_path).map_err(Error::ReadFile)?;
-				let key = PrivateKeyDer::from_pem_slice(&key_pem).map_err(Error::Key)?;
-				builder.with_client_auth_cert(chain, key).map_err(Error::ClientAuth)?
-			}
-			(None, None) => builder.with_no_client_auth(),
+		let (cert, key) = match (&self.cert, &self.key) {
+			(Some(cert), Some(key)) => (cert.clone(), key.clone()),
+			(None, None) => return Ok(builder.with_no_client_auth()),
 			_ => return Err(Error::IncompleteClientAuth),
-		})
+		};
+
+		let provider = builder.crypto_provider().clone();
+		let initial = load_key_pair(&provider, &cert, &key)?;
+
+		#[cfg(feature = "watch")]
+		let resolver = Arc::new(ReloadingClientCert::new(provider, cert, key, initial)?);
+		#[cfg(not(feature = "watch"))]
+		let resolver = Arc::new(IdentityResolver(initial));
+
+		Ok(builder.with_client_cert_resolver(resolver))
 	}
 }
 
@@ -1821,7 +1923,7 @@ impl ReloadingServerVerifier {
 		build: impl Fn() -> Result<Arc<dyn rustls::client::danger::ServerCertVerifier>> + Send + Sync + 'static,
 	) -> Result<Self> {
 		Ok(Self {
-			inner: Reloading::new(paths, initial, "client", build)?,
+			inner: Reloading::new(paths, initial, "server roots", build)?,
 		})
 	}
 }
@@ -1883,7 +1985,7 @@ impl ReloadingClientVerifier {
 		build: impl Fn() -> Result<Arc<dyn rustls::server::danger::ClientCertVerifier>> + Send + Sync + 'static,
 	) -> Result<Self> {
 		Ok(Self {
-			inner: Reloading::new(paths, initial, "server", build)?,
+			inner: Reloading::new(paths, initial, "client roots", build)?,
 		})
 	}
 }
@@ -3028,9 +3130,93 @@ mod tests {
 			rustls::HandshakeKind::Full
 		);
 		assert_eq!(
-			handshake_kinds(reloadable, server).unwrap().0,
+			handshake_kinds(reloadable, server.clone()).unwrap().0,
 			rustls::HandshakeKind::Full
 		);
+
+		// A client certificate from disk can change too, so it disables resumption on its own.
+		let dir = tempfile::TempDir::new().unwrap();
+		let (cert, key) = write_client_pair(dir.path(), "a");
+		let identity = Connect {
+			insecure: Some(true),
+			cert: Some(cert),
+			key: Some(key),
+			..Default::default()
+		}
+		.build()
+		.unwrap();
+		let identity = Arc::new(identity);
+		for _ in 0..2 {
+			assert_eq!(
+				handshake_kinds(identity.clone(), server.clone()).unwrap().0,
+				rustls::HandshakeKind::Full
+			);
+		}
+	}
+
+	/// Write a fresh self-signed client certificate and its key as `cert.pem` and
+	/// `key.pem` in `dir`, returning both paths.
+	#[cfg(all(feature = "watch", feature = "quic"))]
+	fn write_client_pair(dir: &Path, name: &str) -> (PathBuf, PathBuf) {
+		let signing = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+		let mut params = rcgen::CertificateParams::new(vec![name.to_string()]).unwrap();
+		params.serial_number = Some(1u64.into());
+		let (cert, key) = (dir.join("cert.pem"), dir.join("key.pem"));
+		std::fs::write(&cert, params.self_signed(&signing).unwrap().pem()).unwrap();
+		std::fs::write(
+			&key,
+			pem::encode(&pem::Pem::new("PRIVATE KEY", signing.to_pkcs8().secret_pkcs8_der())),
+		)
+		.unwrap();
+		(cert, key)
+	}
+
+	#[cfg(all(feature = "watch", feature = "quic"))]
+	#[test]
+	fn client_certificate_reloads_for_new_handshakes() {
+		// A dedicated directory, not `/tmp`: see `reloadable_client_roots_disable_server_resumption`.
+		let dir = tempfile::TempDir::new().unwrap();
+		let (cert, key) = write_client_pair(dir.path(), "a");
+		let config = Connect {
+			insecure: Some(true),
+			cert: Some(cert.clone()),
+			key: Some(key.clone()),
+			..Default::default()
+		}
+		.build()
+		.unwrap();
+		let leaf =
+			|resolver: &dyn rustls::client::ResolvesClientCert| resolver.resolve(&[], &[]).unwrap().cert[0].clone();
+		let a = read_certs(&cert).unwrap().remove(0);
+		assert_eq!(leaf(config.client_auth_cert_resolver.as_ref()), a);
+
+		let provider = crypto::provider().unwrap();
+		let initial = load_key_pair(&provider, &cert, &key).unwrap();
+		let resolver = ReloadingClientCert::new(provider, cert.clone(), key.clone(), initial).unwrap();
+
+		write_client_pair(dir.path(), "b");
+		let b = read_certs(&cert).unwrap().remove(0);
+		resolver.inner.state.reload();
+		assert_eq!(leaf(&resolver), b);
+
+		// The certificate replaced before its key: keep presenting the last valid pair.
+		let other = tempfile::TempDir::new().unwrap();
+		let (cert_c, _) = write_client_pair(other.path(), "c");
+		std::fs::copy(cert_c, &cert).unwrap();
+		resolver.inner.state.reload();
+		assert_eq!(leaf(&resolver), b);
+
+		std::fs::write(&cert, "not a PEM certificate").unwrap();
+		resolver.inner.state.reload();
+		assert_eq!(leaf(&resolver), b);
+
+		// A well-formed PEM block whose key the provider refuses is retryable, like
+		// the other mid-rotation reads, so a `tls://` redial tries again.
+		let (cert, key) = write_client_pair(dir.path(), "d");
+		std::fs::write(&key, pem::encode(&pem::Pem::new("PRIVATE KEY", vec![0u8; 16]))).unwrap();
+		let error = load_key_pair(&crypto::provider().unwrap(), &cert, &key).unwrap_err();
+		assert!(matches!(error, Error::LoadKey { .. }), "{error:?}");
+		assert!(!error.is_terminal());
 	}
 
 	#[cfg(all(feature = "watch", feature = "quic"))]
@@ -3289,22 +3475,9 @@ impl ServeCerts {
 
 	// Load a certificate and corresponding key from a file, but don't add it to the certs
 	fn load(&self, chain_path: &Path, key_path: &Path) -> Result<Certified> {
-		let chain = read_certs(chain_path)?;
-		if chain.is_empty() {
-			return Err(Error::Empty);
-		}
-
-		// Read the PEM private key
-		let key = PrivateKeyDer::from_pem_file(key_path).map_err(Error::Key)?;
-		let certified = Certified::new(&self.provider, chain, key)?;
-
-		certified.rustls.keys_match().map_err(|source| Error::KeyMismatch {
-			key: key_path.to_path_buf(),
-			cert: chain_path.to_path_buf(),
-			source: Box::new(source),
-		})?;
-
-		Ok(certified)
+		Ok(Certified {
+			rustls: load_key_pair(&self.provider, chain_path, key_path)?,
+		})
 	}
 
 	// Replace the certificates
