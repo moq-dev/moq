@@ -190,7 +190,7 @@ export class Decoder {
 			const ranges = effect.get(active.buffered);
 			return startupSpan(ranges, timestamp);
 		});
-		this.#clock = this.sync.track("video", { target, startup });
+		this.#clock = this.sync.track({ target, startup });
 		this.#signals.cleanup(() => this.#clock.close());
 		this.#identity = this.#signals.computed((effect) => {
 			const config = effect.get(this.source.out.config);

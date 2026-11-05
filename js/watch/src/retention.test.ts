@@ -59,7 +59,7 @@ async function pendingListeners(run: () => Promise<void>): Promise<number> {
 // piles it up for the life of the player.
 test("waits on a stable clock leave nothing behind", async () => {
 	const sync = new Sync({ delay: Milli(10) });
-	const video = sync.track("video", { target: new Signal<Milli | undefined>(undefined) });
+	const video = sync.track({ target: new Signal<Milli | undefined>(undefined) });
 	// Let the delay effect run before anchoring.
 	await yieldNow();
 	video.received(Nano.toMilli(Nano(now())));
@@ -88,7 +88,7 @@ test("a long subscription through the player path leaves nothing behind", async 
 	const producer = new Container.Legacy.Producer(track, format);
 
 	const sync = new Sync({ delay: Milli(10) });
-	const audio = sync.track("audio", { target: new Signal<Milli | undefined>(undefined) });
+	const audio = sync.track({ target: new Signal<Milli | undefined>(undefined) });
 	const effect = new Effect();
 	const sub = subscribeMedia(effect, {
 		broadcast: broadcast.consume(),

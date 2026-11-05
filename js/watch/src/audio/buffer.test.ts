@@ -5,9 +5,6 @@ import type { Init, Message, State } from "./render";
 import { AudioRingBuffer } from "./ring-buffer";
 
 const HOUR = Milli(60 * 60 * 1000);
-
-// A context whose output has not started, so no state report maps to a rolling playhead.
-const silent = { getOutputTimestamp: () => ({ contextTime: 0, performanceTime: 0 }) } as unknown as AudioContext;
 const ms = (value: number) => Micro.fromMilli(Milli(value));
 
 // A buffered buffer over a real port, with the worklet's end of it left to the test.
@@ -19,7 +16,6 @@ function open(): {
 } {
 	const channel = new MessageChannel();
 	const buffer = new AudioBuffer({ port: channel.port1 } as unknown as AudioWorkletNode, {
-		context: silent,
 		channels: 1,
 		rate: 48_000,
 		delay: Milli(100),
@@ -33,9 +29,7 @@ function open(): {
 			const msg: State = {
 				type: "state",
 				timestamp: (timestamp ?? 0) as Micro,
-				time: 0,
 				stalled,
-				playing: true,
 				anchored: timestamp !== undefined,
 				underruns: 0,
 				epoch,
@@ -58,7 +52,6 @@ describe("AudioBuffer", () => {
 	it("transfers PCM ownership and orders control messages after the data they change", async () => {
 		const channel = new MessageChannel();
 		const buffer = new AudioBuffer({ port: channel.port1 } as unknown as AudioWorkletNode, {
-			context: silent,
 			channels: 2,
 			rate: 48_000,
 			delay: Milli(100),
@@ -426,21 +419,20 @@ describe("Backpressure", () => {
 });
 
 // A worklet whose port records what the buffer posts and delivers state reports synchronously.
-function fake(delay: Milli, buffered = false, context = silent) {
+function fake(delay: Milli, buffered = false) {
 	const sent: Message[] = [];
 	const port = Object.assign(new EventTarget(), {
 		postMessage: (msg: Message) => sent.push(msg),
 		start() {},
 	});
 	const buffer = new AudioBuffer({ port } as unknown as AudioWorkletNode, {
-		context,
 		channels: 1,
 		rate: 1000,
 		delay,
 		buffered,
 	});
-	const state = (timestamp: Micro, stalled: boolean, epoch: number, time = 0, playing = true) => {
-		const data: State = { type: "state", timestamp, time, stalled, playing, anchored: true, underruns: 0, epoch };
+	const state = (timestamp: Micro, stalled: boolean, epoch: number) => {
+		const data: State = { type: "state", timestamp, stalled, anchored: true, underruns: 0, epoch };
 		port.dispatchEvent(new MessageEvent("message", { data }));
 	};
 	return { buffer, sent, state };
@@ -456,7 +448,6 @@ describe("AudioBuffer past its decoded floor", () => {
 				start() {},
 			});
 			new AudioBuffer({ port } as unknown as AudioWorkletNode, {
-				context: silent,
 				channels: 2,
 				rate: 48_000,
 				delay,
@@ -542,47 +533,6 @@ describe("AudioBuffer past its decoded floor", () => {
 			expect(Bun.peek.status(wait)).toBe("pending");
 			state(ms(200), false, 1);
 			expect(Bun.peek.status(wait)).toBe("fulfilled");
-		} finally {
-			buffer.close();
-		}
-	});
-});
-
-describe("AudioBuffer playhead", () => {
-	it("maps each report to the sample reaching the output, on the current epoch only", () => {
-		// Context time 1 s reaches the output at local time 5000 ms.
-		const output = { contextTime: 0, performanceTime: 0 };
-		const context = { getOutputTimestamp: () => output } as unknown as AudioContext;
-		const { buffer, state } = fake(Milli(100), false, context);
-		try {
-			// Nothing has reached the output yet, so there is no mapping to report.
-			state(ms(2000), false, 0, 1.03);
-			expect(buffer.playhead.peek()).toBeUndefined();
-
-			// The next sample, 2 s into the media, renders at context time 1.03 s: 30 ms of output
-			// latency behind it, the output is at 1.97 s.
-			Object.assign(output, { contextTime: 1, performanceTime: 5000 });
-			state(ms(2000), false, 0, 1.03);
-			const rolling = buffer.playhead.peek();
-			expect(rolling?.rolling).toBe(true);
-			expect(rolling?.timestamp).toBeCloseTo(1970, 6);
-			expect(rolling?.rolling && rolling.wall).toBe(Milli(5000));
-
-			// A stall holds where the ring stopped reading.
-			state(ms(2010), true, 0, 1.05);
-			expect(buffer.playhead.peek()).toEqual({ rolling: false, timestamp: Milli(2010) });
-
-			// A ring held for buffered startup drives nothing.
-			state(ms(2010), false, 0, 1.06, false);
-			expect(buffer.playhead.peek()).toBeUndefined();
-
-			// A reset flushes the timeline, and a report the worklet sent before seeing it is ignored.
-			state(ms(2020), false, 0, 1.07);
-			expect(buffer.playhead.peek()?.rolling).toBe(true);
-			buffer.reset();
-			expect(buffer.playhead.peek()).toBeUndefined();
-			state(ms(2030), false, 0, 1.08);
-			expect(buffer.playhead.peek()).toBeUndefined();
 		} finally {
 			buffer.close();
 		}

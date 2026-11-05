@@ -39,11 +39,10 @@ export type SyncOutput = {
 	// that only care about the mode don't rerun when the number changes.
 	instant: Signal<boolean>;
 
-	// Local time minus media time, less the delay: `now()` is the local time minus this minus the
-	// delay. While audio plays it follows the audio playhead, re-synced on every report from the
-	// render worklet. Otherwise it is the earliest a frame has arrived relative to its timestamp,
-	// negative when timestamps run ahead of the local clock, and it settles once playback catches up
-	// to the live edge.
+	// The earliest time we've received a frame, relative to its timestamp: arrival minus timestamp
+	// in milliseconds, an offset that is negative when the timestamps run ahead of the local clock.
+	// This will keep being updated as we catch up to the live playhead then will be relatively static.
+	// Each track holds its own part of it; see `Track.reset()`.
 	reference: Signal<number | undefined>;
 
 	// The resolved delay from the live edge to the playhead: the configured number, or in "auto" the
@@ -63,9 +62,6 @@ export type SyncOutput = {
 	maxDelay: Signal<Milli>;
 };
 
-/** The media kinds that pace against the clock. @internal */
-export type TrackKind = "audio" | "video" | "text";
-
 /** A decoded span from the opening of a track's timeline. @internal */
 export type Span = { start: Milli; end: Milli };
 
@@ -76,15 +72,6 @@ export type TrackProps = {
 	/** For buffered startup: undefined is inactive, null is selected but has no playable span yet. */
 	startup?: Getter<Span | null | undefined>;
 };
-
-/**
- * Where audio output stands, as the render worklet last reported it: rolling, the sample at media
- * time `timestamp` ms (negative while output latency still covers the first sample) reaches the
- * output at local time `wall` on the `@moq/clock` timeline; stalled mid-playback, the output holds
- * at `timestamp`.
- * @internal
- */
-export type Playhead = { rolling: true; timestamp: number; wall: Milli } | { rolling: false; timestamp: Milli };
 
 /** What one track holds in the clock. @internal */
 export type Part = {
@@ -126,19 +113,6 @@ export class Clock {
 	// The track whose arrivals set the reference, which releases it when its timeline ends.
 	owner?: Part;
 
-	// The audio track, and whether its playhead drives the reference.
-	audio?: Part;
-	driving = false;
-
-	// Where a re-stall stopped the ring, and the output's progress when it did. The output keeps
-	// playing what the ring already read until it reaches `timestamp`, which output latency delays,
-	// so the clock follows `from` until then, refilled or not. Past it, the clock holds while the ring
-	// is stalled, and after a refill until the reported playhead passes it, since the output first
-	// plays the silence the stall left behind rather than stepping back.
-	readonly paused = new Signal<
-		{ timestamp: Milli; from: { playhead: number; wall: number }; stalled: boolean } | undefined
-	>(undefined);
-
 	constructor(props?: Inputs<SyncInput>) {
 		this.in = {
 			delay: getter(props?.delay ?? ("auto" as Delay)),
@@ -179,13 +153,6 @@ export class Clock {
 		const delay = this.out.delay.peek();
 		const late = current - ref + delay < 0;
 
-		// The audio playhead owns the reference while it plays: the ring skips and refills on its own,
-		// and another track's arrivals must not move its timeline.
-		if (this.driving) return late;
-
-		// A reference audio handed back belongs to whichever track arrives next.
-		this.owner ??= part;
-
 		const reference = this.fold(current, ref);
 		if (reference === current) return late;
 		this.out.reference.set(reference);
@@ -201,69 +168,10 @@ export class Clock {
 		return late;
 	}
 
-	// Re-sync the reference to the audio playhead, hold it at a re-stall, or hand it back to arrivals.
-	clock(part: Part, playhead: Playhead | undefined): void {
-		if (playhead?.rolling) {
-			// The wall clock's skips passed over frames relative to a playhead audio now replaces.
-			if (!this.driving) this.floor = undefined;
-			this.driving = true;
-			this.owner = undefined;
-			this.out.reference.set(playhead.wall - playhead.timestamp - this.out.delay.peek());
-			const paused = this.paused.peek();
-			if (!paused) return;
-			if (this.playhead() >= paused.timestamp && this.rolling() >= paused.timestamp) this.paused.set(undefined);
-			else this.paused.set({ ...paused, stalled: false });
-			return;
-		}
-		if (this.audio !== part || !this.driving) return;
-		// A ring that runs dry while it still plays holds the clock with it, so video waits for the
-		// audio it accompanies. Buffered playback drains between bursts by design, so its ring
-		// stalling means the audio ended, not that it is late.
-		if (playhead && !this.out.buffered.peek()) {
-			this.paused.set({
-				timestamp: playhead.timestamp,
-				from: { playhead: this.playhead(), wall: wall() },
-				stalled: true,
-			});
-			return;
-		}
-		this.release();
-	}
-
-	// The playhead extrapolated from the reference, before any hold or clamp.
-	rolling(): number {
-		return wall() - (this.out.reference.peek() ?? 0) - this.out.delay.peek();
-	}
-
-	// The playhead, applying a re-stall's hold.
-	playhead(): number {
-		const rolling = this.rolling();
-		const paused = this.paused.peek();
-		if (!paused) return rolling;
-		const before = paused.from.playhead + wall() - paused.from.wall;
-		if (before < paused.timestamp) return before;
-		return paused.stalled ? paused.timestamp : Math.max(rolling, paused.timestamp);
-	}
-
-	// Hand the clock back to the wall at the last audio-derived value, so video does not jump. The
-	// reference passes to another track still receiving, whose own timeline ending releases it, or
-	// else to the next track to arrive.
-	release(): void {
-		if (this.paused.peek()) this.out.reference.set(wall() - this.playhead() - this.out.delay.peek());
-		this.paused.set(undefined);
-		this.driving = false;
-		this.owner = this.parts.peek().find((part) => part !== this.audio && part.anchor !== undefined);
-	}
-
 	// End one track's timeline: its parked frames drop and it releases its part of the reference.
 	end(part: Part): void {
 		part.epoch.update((epoch) => epoch + 1);
 		part.anchor = undefined;
-		if (this.driving) {
-			// The audio playhead holds the reference, which another track's timeline leaves alone.
-			if (this.audio !== part) return;
-			this.release();
-		}
 		if (this.owner !== part) return;
 
 		// The earliest remaining track holds the reference, else the next frame anchors a new one.
@@ -290,8 +198,6 @@ export class Clock {
 
 	reset(): void {
 		for (const part of this.parts.peek()) part.anchor = undefined;
-		this.driving = false;
-		this.paused.set(undefined);
 		this.unanchor();
 	}
 
@@ -308,13 +214,13 @@ export class Clock {
 		if (!this.playing.peek()) return undefined;
 		const reference = this.out.reference.peek();
 		if (reference === undefined) return undefined;
-		// Media time is nonnegative, so a playhead before the first sample's turn reads as zero.
-		return Milli(Math.max(0, this.playhead()));
+		// Media time is nonnegative, so a playhead before the first frame's turn reads as zero.
+		return Milli(Math.max(0, wall() - reference - this.out.delay.peek()));
 	}
 
-	async wait(part: Part | undefined, timestamp: Milli, signal?: AbortSignal): Promise<boolean> {
+	async wait(part: Part, timestamp: Milli, signal?: AbortSignal): Promise<boolean> {
 		const epoch = this.epoch.peek();
-		const own = part?.epoch.peek();
+		const own = part.epoch.peek();
 
 		for (;;) {
 			// Closing or aborting wakes the sleep below, so frames parked here leave.
@@ -323,7 +229,7 @@ export class Clock {
 			// A reset clears the reference, so an unanchored frame predates the current timeline.
 			const reference = this.out.reference.peek();
 			if (reference === undefined || this.epoch.peek() !== epoch || this.skipped(timestamp)) return false;
-			if (part && part.epoch.peek() !== own) return false;
+			if (part.epoch.peek() !== own) return false;
 
 			// A zero delay still sleeps: the sleep comes from the reference, which holds an early frame
 			// until its timestamp comes up. "instant" is the only thing that skips the wait itself.
@@ -335,16 +241,8 @@ export class Clock {
 				continue;
 			}
 
-			// A stalled audio ring holds the playhead where it stopped until it plays again.
-			const paused = this.paused.peek();
-			if (paused?.stalled && timestamp > paused.timestamp) {
-				await this.sleep(part, undefined, signal);
-				continue;
-			}
-
-			// NOTE: This function runs in parallel for each frame. The playhead moves at most as fast
-			// as the local clock, so sleeping the difference never overshoots; a hold re-checks.
-			const sleep = timestamp - this.playhead();
+			// NOTE: This function runs in parallel for each frame.
+			const sleep = reference + timestamp - wall() + this.out.delay.peek();
 
 			// Skip the timer for small sleeps; the host's timer resolution (~4ms) would overshoot.
 			if (sleep < 5) return true;
@@ -356,7 +254,7 @@ export class Clock {
 	// Sleeps for `ms`, or wakes early once anything the sleep was computed from changes or `signal`
 	// aborts. Releases every listener either way: frames sleep once each, so a listener left on a
 	// signal that never changes would pile up for the life of the player.
-	sleep(part: Part | undefined, ms: number | undefined, signal?: AbortSignal): Promise<void> {
+	sleep(part: Part, ms: number | undefined, signal?: AbortSignal): Promise<void> {
 		return new Promise((resolve) => {
 			const timer = new AbortController();
 			const wake = () => {
@@ -372,9 +270,8 @@ export class Clock {
 				this.epoch.changed(wake),
 				this.closed.changed(wake),
 				this.playing.changed(wake),
-				this.paused.changed(wake),
+				part.epoch.changed(wake),
 			];
-			if (part) disposes.push(part.epoch.changed(wake));
 			if (signal) {
 				signal.addEventListener("abort", wake, { once: true });
 				disposes.push(() => signal.removeEventListener("abort", wake));
@@ -389,19 +286,19 @@ export class Clock {
  * @internal
  */
 export class Track {
-	protected readonly clock: Clock;
-	protected readonly part: Part;
+	readonly #clock: Clock;
+	readonly #part: Part;
 
 	/** @internal */
 	constructor(clock: Clock, props: TrackProps) {
-		this.clock = clock;
-		this.part = { props, epoch: new Signal(0) };
-		clock.parts.update((parts) => [...parts, this.part]);
+		this.#clock = clock;
+		this.#part = { props, epoch: new Signal(0) };
+		clock.parts.update((parts) => [...parts, this.#part]);
 	}
 
 	/** Fold a received frame into the clock and report whether it arrived too late for its turn. */
 	received(timestamp: Milli, arrival = wall()): boolean {
-		return this.clock.received(this.part, timestamp, arrival);
+		return this.#clock.received(this.#part, timestamp, arrival);
 	}
 
 	/**
@@ -409,7 +306,7 @@ export class Track {
 	 * may still present. Advisory, for showing a frame early; {@link Track.wait} decides on its own.
 	 */
 	presentable(timestamp: Milli): boolean {
-		return this.clock.presentable(timestamp);
+		return this.#clock.presentable(timestamp);
 	}
 
 	/**
@@ -419,7 +316,7 @@ export class Track {
 	 * reset ended its timeline, or `close()` or `signal` released the wait.
 	 */
 	wait(timestamp: Milli, signal?: AbortSignal): Promise<boolean> {
-		return this.clock.wait(this.part, timestamp, signal);
+		return this.#clock.wait(this.#part, timestamp, signal);
 	}
 
 	/**
@@ -427,32 +324,13 @@ export class Track {
 	 * drop, and its arrivals stop holding the reference; the other tracks' timelines are untouched.
 	 */
 	reset(): void {
-		this.clock.end(this.part);
+		this.#clock.end(this.#part);
 	}
 
 	/** Release this track's hold on the clock. */
 	close(): void {
-		this.clock.end(this.part);
-		this.clock.parts.update((parts) => parts.filter((part) => part !== this.part));
-		if (this.clock.audio === this.part) this.clock.audio = undefined;
-	}
-}
-
-/** The audio track, whose playhead drives the clock while it plays. @internal */
-export class AudioTrack extends Track {
-	/** @internal */
-	constructor(clock: Clock, props: TrackProps) {
-		if (clock.audio) throw new Error("the clock already has an audio track");
-		super(clock, props);
-		clock.audio = this.part;
-	}
-
-	/**
-	 * Report the audio playhead. A rolling one drives the clock, a stalled one holds it, and undefined
-	 * (muted, disabled, or flushed) hands it back to the wall clock where it stands.
-	 */
-	playhead(playhead: Playhead | undefined): void {
-		this.clock.clock(this.part, playhead);
+		this.#clock.end(this.#part);
+		this.#clock.parts.update((parts) => parts.filter((part) => part !== this.#part));
 	}
 }
 
@@ -482,16 +360,11 @@ export class Sync {
 	}
 
 	/**
-	 * Open a track's hold on the clock. The audio track's playhead drives the clock while it plays;
-	 * only one may be open at a time.
+	 * Open a track's hold on the clock: its playout target, startup span, arrivals, and paced frames.
 	 * @internal
 	 */
-	track(kind: "audio", props: TrackProps): AudioTrack;
-	/** Open a track's hold on the clock. @internal */
-	track(kind: "video" | "text", props: TrackProps): Track;
-	/** Open a track's hold on the clock. @internal */
-	track(kind: TrackKind, props: TrackProps): Track {
-		return kind === "audio" ? new AudioTrack(this.#clock, props) : new Track(this.#clock, props);
+	track(props: TrackProps): Track {
+		return new Track(this.#clock, props);
 	}
 
 	// Startup is data-driven: time passing cannot fill a missing track. The first picture still
@@ -559,14 +432,7 @@ export class Sync {
 			}
 		}
 
-		// The audio playhead does not move with the delay: the ring parks or sheds to reach it, and
-		// reports where it went. Keep `now()` on the playhead until it does.
-		const clock = this.#clock;
-		const reference = clock.out.reference.peek();
-		if (clock.driving && reference !== undefined) {
-			clock.out.reference.set(reference - (delay - clock.out.delay.peek()));
-		}
-		clock.out.delay.set(delay);
+		this.#clock.out.delay.set(delay);
 	}
 
 	/**
@@ -579,9 +445,8 @@ export class Sync {
 	}
 
 	/**
-	 * The PTS that should be rendering right now: the audio playhead while audio plays, else derived
-	 * from the reference and delay; zero until media time zero's turn. Undefined before ingress or
-	 * while buffered startup is filling.
+	 * The PTS that should be rendering right now, derived from the reference and delay; zero until
+	 * media time zero's turn. Undefined before ingress or while buffered startup is filling.
 	 */
 	now(): Milli | undefined {
 		return this.#clock.now();

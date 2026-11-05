@@ -150,7 +150,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 			delay: config.delay !== undefined ? Milli(config.delay) : undefined,
 		}),
 	);
-	const audio = sync.track("audio", { target: playout });
+	const audio = sync.track({ target: playout });
 	signals.cleanup(() => audio.close());
 	await settle();
 

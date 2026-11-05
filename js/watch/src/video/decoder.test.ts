@@ -381,7 +381,7 @@ async function guardedPlayback(
 		: undefined;
 	const decoder = new Decoder({ source, sync, enabled });
 	// Another track on the same clock, whose arrivals the tests drive by hand.
-	const audio = sync.track("audio", { target: new Signal<Milli | undefined>(undefined) });
+	const audio = sync.track({ target: new Signal<Milli | undefined>(undefined) });
 	await microtasks();
 	return {
 		decoder,
@@ -1213,7 +1213,7 @@ for (const kind of ["legacy", "cmaf"] as const) {
 		const reads: Read[] = [];
 		const playback = await guardedPlayback(kind, reads, [], false, 1000);
 		const audio = new Signal<{ start: Milli; end: Milli } | null>(null);
-		const remove = playback.sync.track("text", { target: new Signal(Milli(100)), startup: audio });
+		const remove = playback.sync.track({ target: new Signal(Milli(100)), startup: audio });
 		const reset = spyOn(playback.sync, "reset");
 		try {
 			playback.enabled.set(false);
@@ -1261,7 +1261,7 @@ for (const kind of ["legacy", "cmaf"] as const) {
 			reads.push(sample(group * 2n, Number(group) * 40_000));
 		}
 		const playback = await guardedPlayback(kind, reads, [], false, 1000);
-		const remove = playback.sync.track("text", { target: new Signal(Milli(100)), startup: new Signal(null) });
+		const remove = playback.sync.track({ target: new Signal(Milli(100)), startup: new Signal(null) });
 		try {
 			await microtasks();
 			await clock.advance(0);
@@ -1281,7 +1281,7 @@ for (const kind of ["legacy", "cmaf"] as const) {
 it("bounds startup decoding while another track is missing and releases it on close", async () => {
 	const clock = manualAt(0);
 	const playback = await guardedPlayback("legacy", [], [], true, 1000);
-	const remove = playback.sync.track("text", { target: new Signal(Milli(100)), startup: new Signal(null) });
+	const remove = playback.sync.track({ target: new Signal(Milli(100)), startup: new Signal(null) });
 	if (!playback.track) throw new Error("missing video track");
 	const group = playback.track.appendGroup();
 	try {
@@ -1307,7 +1307,7 @@ it("resumes decoding the moment shared startup releases", async () => {
 	const clock = manualAt(0);
 	const playback = await guardedPlayback("legacy", [], [], true, 1000);
 	const audio = new Signal<{ start: Milli; end: Milli } | null>(null);
-	const remove = playback.sync.track("text", { target: new Signal(Milli(100)), startup: audio });
+	const remove = playback.sync.track({ target: new Signal(Milli(100)), startup: audio });
 	if (!playback.track) throw new Error("missing video track");
 	const group = playback.track.appendGroup();
 	try {
@@ -1355,7 +1355,7 @@ it("continues filling when the shared floor rises while video waits on audio", a
 	const clock = manualAt(0);
 	const playback = await guardedPlayback("legacy", [], [], true, 1000);
 	const audio = new Signal<{ start: Milli; end: Milli } | null>(null);
-	const remove = playback.sync.track("text", { target: new Signal(Milli(100)), startup: audio });
+	const remove = playback.sync.track({ target: new Signal(Milli(100)), startup: audio });
 	if (!playback.track) throw new Error("missing video track");
 	const group = playback.track.appendGroup();
 	try {
@@ -1400,7 +1400,7 @@ for (const kind of ["legacy", "cmaf"] as const) {
 		const clock = manualAt(0);
 		const playback = await guardedPlayback(kind, [sample(0n, 0), sample(0n, 100_000)], [0, 100_000], false, 1000);
 		const other = new Signal<{ start: Milli; end: Milli } | null>(null);
-		const remove = playback.sync.track("text", { target: new Signal(Milli(100)), startup: other });
+		const remove = playback.sync.track({ target: new Signal(Milli(100)), startup: other });
 		try {
 			playback.release();
 			await microtasks();

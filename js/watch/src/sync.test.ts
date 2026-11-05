@@ -77,8 +77,8 @@ describe("auto delay", () => {
 		const audio = new Signal<Milli | undefined>(120 as Milli);
 		const video = new Signal<Milli | undefined>(40 as Milli);
 		const sync = new Sync();
-		const unregisterAudio = sync.track("audio", { target: audio });
-		sync.track("video", { target: video });
+		const unregisterAudio = sync.track({ target: audio });
+		sync.track({ target: video });
 		await flush();
 		expect(sync.out.delay.peek()).toBe(120 as Milli);
 
@@ -96,8 +96,8 @@ describe("auto delay", () => {
 	it("unregisters duplicate targets independently", async () => {
 		const media = new Signal<Milli | undefined>(20 as Milli);
 		const sync = new Sync();
-		const unregisterFirst = sync.track("video", { target: media });
-		const unregisterSecond = sync.track("video", { target: media });
+		const unregisterFirst = sync.track({ target: media });
+		const unregisterSecond = sync.track({ target: media });
 
 		unregisterFirst.close();
 		await flush();
@@ -112,7 +112,7 @@ describe("auto delay", () => {
 	it("takes a fixed delay literally, ignoring the measured targets", async () => {
 		const media = new Signal<Milli | undefined>(250 as Milli);
 		const sync = new Sync({ delay: 100 as Milli });
-		sync.track("video", { target: media });
+		sync.track({ target: media });
 		await flush();
 		expect(sync.out.delay.peek()).toBe(100 as Milli);
 		sync.close();
@@ -133,7 +133,7 @@ describe("wait", () => {
 
 	it("presents at once when constructed instant, before effects flush", async () => {
 		const sync = new Sync({ delay: "instant" });
-		const video = sync.track("video", { target: new Signal<Milli | undefined>(undefined) });
+		const video = sync.track({ target: new Signal<Milli | undefined>(undefined) });
 		video.received(nowMs());
 		expect(await video.wait(Milli(nowMs() + 10_000))).toBe(true);
 		sync.close();
@@ -141,14 +141,14 @@ describe("wait", () => {
 
 	it("drops an unanchored frame", async () => {
 		const sync = new Sync({ delay: "instant" });
-		const video = sync.track("video", { target: new Signal<Milli | undefined>(undefined) });
+		const video = sync.track({ target: new Signal<Milli | undefined>(undefined) });
 		expect(await video.wait(nowMs())).toBe(false);
 		sync.close();
 	});
 
 	it("presents a frame once its deadline comes due", async () => {
 		const sync = new Sync({ delay: 100 as Milli });
-		const video = sync.track("video", { target: new Signal<Milli | undefined>(undefined) });
+		const video = sync.track({ target: new Signal<Milli | undefined>(undefined) });
 		await flush();
 		const timestamp = nowMs();
 		video.received(timestamp);
@@ -165,7 +165,7 @@ describe("wait", () => {
 	it("wakes a sleeping wait to present when the delay switches to instant", async () => {
 		const delay = new Signal<Delay>(10_000 as Milli);
 		const sync = new Sync({ delay });
-		const video = sync.track("video", { target: new Signal<Milli | undefined>(undefined) });
+		const video = sync.track({ target: new Signal<Milli | undefined>(undefined) });
 		await flush();
 		video.received(nowMs());
 
@@ -180,7 +180,7 @@ describe("wait", () => {
 
 	it("drops a frame a skip passed over, before and after it parks", async () => {
 		const sync = new Sync({ delay: 100 as Milli });
-		const video = sync.track("video", { target: new Signal<Milli | undefined>(undefined) });
+		const video = sync.track({ target: new Signal<Milli | undefined>(undefined) });
 		await flush();
 		const timestamp = nowMs();
 		video.received(timestamp);
@@ -198,7 +198,7 @@ describe("wait", () => {
 
 	it("drops a sleeping wait at a reset, even when the next anchor restores the reference", async () => {
 		const sync = new Sync({ delay: 10_000 as Milli });
-		const video = sync.track("video", { target: new Signal<Milli | undefined>(undefined) });
+		const video = sync.track({ target: new Signal<Milli | undefined>(undefined) });
 		await flush();
 		const timestamp = nowMs();
 		video.received(timestamp);
@@ -215,7 +215,7 @@ describe("wait", () => {
 
 	it("drops a sleeping wait when its signal aborts", async () => {
 		const sync = new Sync({ delay: 10_000 as Milli });
-		const video = sync.track("video", { target: new Signal<Milli | undefined>(undefined) });
+		const video = sync.track({ target: new Signal<Milli | undefined>(undefined) });
 		await flush();
 		const timestamp = nowMs();
 		video.received(timestamp);
@@ -230,7 +230,7 @@ describe("wait", () => {
 
 	it("drops a sleeping wait when closed", async () => {
 		const sync = new Sync({ delay: 10_000 as Milli });
-		const video = sync.track("video", { target: new Signal<Milli | undefined>(undefined) });
+		const video = sync.track({ target: new Signal<Milli | undefined>(undefined) });
 		await flush();
 		const timestamp = nowMs();
 		video.received(timestamp);
@@ -248,7 +248,7 @@ describe("recorded ingress", () => {
 		clock.jump(Nano.fromMilli(Milli(10_000)));
 		const installed = clock.install();
 		const sync = new Sync({ delay: Milli(100) });
-		const video = sync.track("video", { target: new Signal<Milli | undefined>(undefined) });
+		const video = sync.track({ target: new Signal<Milli | undefined>(undefined) });
 		try {
 			for (let i = 0; i < 20; i++) await Promise.resolve();
 			expect(video.received(Milli(0), Milli(1000))).toBe(false);
@@ -275,7 +275,7 @@ describe("skip floor", () => {
 
 	it("a skip passes over only frames behind the playhead it jumped to", async () => {
 		const sync = new Sync({ delay: Milli(100) });
-		const video = sync.track("video", { target: new Signal<Milli | undefined>(undefined) });
+		const video = sync.track({ target: new Signal<Milli | undefined>(undefined) });
 		await flush();
 		video.received(Milli(1000), Milli(5000));
 		expect(video.presentable(Milli(0))).toBe(true);
@@ -295,7 +295,7 @@ describe("skip floor", () => {
 	it("a skip never lowers the floor and a reset clears it", async () => {
 		const delay = new Signal<Delay>(Milli(100));
 		const sync = new Sync({ delay });
-		const video = sync.track("video", { target: new Signal<Milli | undefined>(undefined) });
+		const video = sync.track({ target: new Signal<Milli | undefined>(undefined) });
 		await flush();
 		video.received(Milli(0), Milli(5000));
 		video.received(Milli(10_000), Milli(5000));
@@ -317,7 +317,7 @@ describe("skip floor", () => {
 
 	it("a skip counts how long the skipping frame waited after ingress", async () => {
 		const sync = new Sync({ delay: Milli(100) });
-		const video = sync.track("video", { target: new Signal<Milli | undefined>(undefined) });
+		const video = sync.track({ target: new Signal<Milli | undefined>(undefined) });
 		await flush();
 		video.received(Milli(0), Milli(5000));
 
@@ -331,7 +331,7 @@ describe("skip floor", () => {
 
 	it("instant skips pass over nothing", async () => {
 		const sync = new Sync({ delay: "instant" });
-		const video = sync.track("video", { target: new Signal<Milli | undefined>(undefined) });
+		const video = sync.track({ target: new Signal<Milli | undefined>(undefined) });
 		await flush();
 		video.received(Milli(0), Milli(5000));
 		video.received(Milli(10_000), Milli(5000));
@@ -351,7 +351,7 @@ describe("buffered startup", () => {
 				video: new Signal<{ start: Milli; end: Milli } | null>(null),
 			};
 			const tracks = Object.values(spans).map((startup) =>
-				sync.track("video", { target: new Signal(Milli(100)), startup }),
+				sync.track({ target: new Signal(Milli(100)), startup }),
 			);
 			const [video] = tracks;
 			try {
@@ -385,7 +385,7 @@ describe("buffered startup", () => {
 		const clock = new Manual();
 		const installed = clock.install();
 		const sync = new Sync({ delay: Milli(100), buffer: Milli(1000) });
-		const video = sync.track("video", { target: new Signal(Milli(100)), startup: new Signal(null) });
+		const video = sync.track({ target: new Signal(Milli(100)), startup: new Signal(null) });
 		try {
 			await clock.advance(Nano.zero);
 			video.received(Milli(0));
@@ -413,8 +413,8 @@ describe("buffered startup", () => {
 		const buffer = new Signal(Milli(1000));
 		const sync = new Sync({ delay: Milli(100), buffer });
 		const absent = new Signal<{ start: Milli; end: Milli } | null | undefined>(null);
-		const remove = sync.track("audio", { target: new Signal(Milli(100)), startup: absent });
-		const video = sync.track("video", {
+		const remove = sync.track({ target: new Signal(Milli(100)), startup: absent });
+		const video = sync.track({
 			target: new Signal(Milli(100)),
 			startup: new Signal({ start: Milli(0), end: Milli(100) }),
 		});
@@ -443,7 +443,7 @@ describe("buffered startup", () => {
 	});
 });
 
-describe("audio clock", () => {
+describe("tracks", () => {
 	// Local time is pinned, so every playhead and deadline below is exact.
 	let clock: Manual;
 	let installed: Installed;
@@ -455,193 +455,40 @@ describe("audio clock", () => {
 	afterEach(() => installed.close());
 
 	const target = () => new Signal<Milli | undefined>(undefined);
-	const local = () => Nano.toMilli(Nano(now()));
-
-	it("follows the audio playhead while it rolls, not the earliest arrival", async () => {
-		const sync = new Sync({ delay: Milli(100) });
-		const audio = sync.track("audio", { target: target() });
-		const video = sync.track("video", { target: target() });
-		await flush();
-		video.received(Milli(1000), Milli(5000));
-		expect(sync.now()).toBe(Milli(900));
-
-		// The ring re-buffered and plays 40ms behind where the wall clock would be.
-		audio.playhead({ rolling: true, timestamp: Milli(860), wall: Milli(5000) });
-		expect(sync.now()).toBe(Milli(860));
-		await clock.advance(Nano.fromMilli(Milli(10)));
-		expect(sync.now()).toBe(Milli(870));
-
-		// Video waits for the audio it accompanies, however early it arrived.
-		let presented: boolean | undefined;
-		void video.wait(Milli(900)).then((ok) => {
-			presented = ok;
-		});
-		await clock.advance(Nano.fromMilli(Milli(29)));
-		expect(presented).toBeUndefined();
-		await clock.advance(Nano.fromMilli(Milli(1)));
-		expect(presented).toBe(true);
-
-		// An earlier video arrival no longer moves the playhead audio owns.
-		video.received(Milli(5000), local());
-		expect(sync.now()).toBe(Milli(900));
-		sync.close();
-	});
-
-	it("holds the playhead through a re-stall and resumes with it", async () => {
-		const sync = new Sync({ delay: Milli(100) });
-		const audio = sync.track("audio", { target: target() });
-		const video = sync.track("video", { target: target() });
-		await flush();
-		audio.playhead({ rolling: true, timestamp: Milli(1000), wall: local() });
-		audio.playhead({ rolling: false, timestamp: Milli(1010) });
-		await clock.advance(Nano.fromMilli(Milli(500)));
-		expect(sync.now()).toBe(Milli(1010));
-
-		// A frame already due presents; the next waits for audio to resume.
-		expect(await video.wait(Milli(1010))).toBe(true);
-		let presented: boolean | undefined;
-		void video.wait(Milli(1020)).then((ok) => {
-			presented = ok;
-		});
-		await clock.advance(Nano.fromMilli(Milli(500)));
-		expect(presented).toBeUndefined();
-		audio.playhead({ rolling: true, timestamp: Milli(1015), wall: local() });
-		await clock.advance(Nano.fromMilli(Milli(5)));
-		expect(presented).toBe(true);
-		sync.close();
-	});
-
-	it("holds a re-stall where the output stops, not where the ring did", async () => {
-		const sync = new Sync({ delay: Milli(100) });
-		const audio = sync.track("audio", { target: target() });
-		await flush();
-		// 30ms of output latency: the ring has read to 1030 while the output plays 1000.
-		audio.playhead({ rolling: true, timestamp: Milli(1000), wall: local() });
-		audio.playhead({ rolling: false, timestamp: Milli(1030) });
-		expect(sync.now()).toBe(Milli(1000));
-		await clock.advance(Nano.fromMilli(Milli(20)));
-		expect(sync.now()).toBe(Milli(1020));
-		await clock.advance(Nano.fromMilli(Milli(100)));
-		expect(sync.now()).toBe(Milli(1030));
-
-		// Refilled, the output plays the latency's silence first: the clock never steps back.
-		audio.playhead({ rolling: true, timestamp: Milli(1000), wall: local() });
-		expect(sync.now()).toBe(Milli(1030));
-		await clock.advance(Nano.fromMilli(Milli(40)));
-		expect(sync.now()).toBe(Milli(1040));
-		audio.playhead({ rolling: true, timestamp: Milli(1040), wall: local() });
-		await clock.advance(Nano.fromMilli(Milli(10)));
-		expect(sync.now()).toBe(Milli(1050));
-		sync.close();
-	});
-
-	it("follows the output through a refill that lands before it reaches the stop", async () => {
-		const sync = new Sync({ delay: Milli(100) });
-		const audio = sync.track("audio", { target: target() });
-		await flush();
-		audio.playhead({ rolling: true, timestamp: Milli(1000), wall: local() });
-		audio.playhead({ rolling: false, timestamp: Milli(1030) });
-		await clock.advance(Nano.fromMilli(Milli(5)));
-		// Refilled within one quantum: no silence reaches the output, and the clock never jumps.
-		audio.playhead({ rolling: true, timestamp: Milli(1005), wall: local() });
-		expect(sync.now()).toBe(Milli(1005));
-		await clock.advance(Nano.fromMilli(Milli(40)));
-		expect(sync.now()).toBe(Milli(1045));
-		sync.close();
-	});
-
-	it("forgets the wall clock's skips once audio takes over", async () => {
-		const sync = new Sync({ delay: Milli(100) });
-		const audio = sync.track("audio", { target: target() });
-		const video = sync.track("video", { target: target() });
-		await flush();
-		// A burst skips the wall-clock playhead to 900, passing over everything before it.
-		video.received(Milli(0), local());
-		video.received(Milli(1000), local());
-		expect(video.presentable(Milli(100))).toBe(false);
-
-		// Audio plays from 0, so a frame at 100 is still ahead of it.
-		audio.playhead({ rolling: true, timestamp: Milli(0), wall: local() });
-		expect(video.presentable(Milli(100))).toBe(true);
-		const waiting = video.wait(Milli(100));
-		await clock.advance(Nano.fromMilli(Milli(100)));
-		expect(await waiting).toBe(true);
-		sync.close();
-	});
-
-	it("falls back to the wall clock where audio left it when audio stops", async () => {
-		for (const stalled of [false, true]) {
-			const sync = new Sync({ delay: Milli(100) });
-			const audio = sync.track("audio", { target: target() });
-			const video = sync.track("video", { target: target() });
-			await flush();
-			video.received(Milli(1000), Milli(5000));
-			audio.playhead({ rolling: true, timestamp: Milli(800), wall: local() });
-			if (stalled) audio.playhead({ rolling: false, timestamp: Milli(800) });
-			await clock.advance(Nano.fromMilli(Milli(50)));
-			const before = sync.now();
-
-			// Muted: no jump back to video's arrival anchor, and time runs on.
-			audio.playhead(undefined);
-			expect(sync.now()).toBe(before);
-			await clock.advance(Nano.fromMilli(Milli(10)));
-			expect(sync.now()).toBe(Milli((before ?? 0) + 10));
-
-			// Video's own arrivals hold the clock now, so ending its timeline re-anchors it.
-			video.reset();
-			expect(sync.now()).toBeUndefined();
-			video.received(Milli(3000), local());
-			expect(sync.now()).toBe(Milli(2900));
-			sync.close();
-		}
-	});
-
-	it("a buffered ring that drains hands the clock back instead of holding video", async () => {
-		const sync = new Sync({ delay: Milli(100), buffer: Milli(1000) });
-		const audio = sync.track("audio", { target: target() });
-		await flush();
-		audio.playhead({ rolling: true, timestamp: Milli(1000), wall: local() });
-		audio.playhead({ rolling: false, timestamp: Milli(1000) });
-		await clock.advance(Nano.fromMilli(Milli(20)));
-		expect(sync.now()).toBe(Milli(1020));
-		sync.close();
-	});
 
 	it("a video-only discontinuity leaves audio's timeline alone", async () => {
 		const sync = new Sync({ delay: Milli(100) });
-		const audio = sync.track("audio", { target: target() });
-		const video = sync.track("video", { target: target() });
+		const audio = sync.track({ target: target() });
+		const video = sync.track({ target: target() });
 		await flush();
+		// Video arrived earliest and anchors the clock.
 		audio.received(Milli(1000), Milli(5000));
-		video.received(Milli(1000), Milli(5000));
-		audio.playhead({ rolling: true, timestamp: Milli(900), wall: local() });
+		video.received(Milli(1010), Milli(5000));
+		expect(sync.now()).toBe(Milli(910));
 
-		// Video's parked frame belongs to the timeline that ended; audio keeps playing on its own.
+		// Video's parked frame belongs to the timeline that ended; audio's arrivals take the reference
+		// and its parked frame stays on its own timeline.
 		const parked = video.wait(Milli(950));
+		const playing = audio.wait(Milli(950));
 		video.reset();
 		expect(await parked).toBe(false);
 		expect(sync.now()).toBe(Milli(900));
-		await clock.advance(Nano.fromMilli(Milli(10)));
-		expect(sync.now()).toBe(Milli(910));
+		await clock.advance(Nano.fromMilli(Milli(50)));
+		expect(await playing).toBe(true);
 
-		// The same holds before audio rolls: audio's arrivals keep the reference.
-		const idle = new Sync({ delay: Milli(100) });
-		const quiet = idle.track("audio", { target: target() });
-		const picture = idle.track("video", { target: target() });
-		await flush();
-		quiet.received(Milli(1000), Milli(5000));
-		picture.received(Milli(990), Milli(5000));
-		const anchored = idle.out.reference.peek();
-		picture.reset();
-		expect(idle.out.reference.peek()).toBe(anchored);
+		// An audio break likewise leaves video's parked frames alone.
+		video.received(Milli(1100), Milli(5050));
+		const picture = video.wait(Milli(1040));
+		audio.reset();
+		await clock.advance(Nano.fromMilli(Milli(50)));
+		expect(await picture).toBe(true);
 		sync.close();
-		idle.close();
 	});
 
 	it("releases the reference of the earliest track when it leaves", async () => {
 		const sync = new Sync({ delay: Milli(100) });
-		const audio = sync.track("audio", { target: target() });
-		const video = sync.track("video", { target: target() });
+		const audio = sync.track({ target: target() });
+		const video = sync.track({ target: target() });
 		await flush();
 		// Video trails audio by 300ms, so audio anchors the clock and video is late against it.
 		audio.received(Milli(1000), Milli(5000));
@@ -658,57 +505,33 @@ describe("audio clock", () => {
 		sync.close();
 	});
 
-	it("keeps the playhead still when the delay moves under it", async () => {
-		const delay = new Signal<Delay>(Milli(100));
-		const sync = new Sync({ delay });
-		const audio = sync.track("audio", { target: target() });
-		await flush();
-		audio.playhead({ rolling: true, timestamp: Milli(1000), wall: local() });
-		delay.set(Milli(300));
-		await flush();
-		expect(sync.now()).toBe(Milli(1000));
-		sync.close();
-	});
-
-	it("drops parked frames and stops following audio at a reset", async () => {
+	it("drops every track's parked frames at a reset", async () => {
 		const sync = new Sync({ delay: Milli(100) });
-		const audio = sync.track("audio", { target: target() });
-		const video = sync.track("video", { target: target() });
+		const audio = sync.track({ target: target() });
+		const video = sync.track({ target: target() });
 		await flush();
-		audio.playhead({ rolling: true, timestamp: Milli(1000), wall: local() });
-		const parked = video.wait(Milli(1500));
+		audio.received(Milli(1000), Milli(5000));
+		const sound = audio.wait(Milli(1500));
+		const picture = video.wait(Milli(1500));
 		sync.reset();
-		expect(await parked).toBe(false);
+		expect(await sound).toBe(false);
+		expect(await picture).toBe(false);
 		expect(sync.now()).toBeUndefined();
 
-		// A stall reported after the reset is not a re-stall of the old timeline.
-		audio.playhead({ rolling: false, timestamp: Milli(1000) });
-		video.received(Milli(3000), local());
+		// The next frame anchors a new timeline, ignoring the anchors before the reset.
+		video.received(Milli(3000), Milli(5000));
 		expect(sync.now()).toBe(Milli(2900));
 		sync.close();
 	});
 
-	it("reads zero until media time zero's turn, from either source", async () => {
+	it("reads zero until media time zero's turn", async () => {
 		const sync = new Sync({ delay: Milli(100) });
-		const audio = sync.track("audio", { target: target() });
-		const video = sync.track("video", { target: target() });
+		const video = sync.track({ target: target() });
 		await flush();
-		video.received(Milli(0), local());
+		video.received(Milli(0), Milli(5000));
 		expect(sync.now()).toBe(Milli.zero);
-		// Output latency still covers the first sample.
-		audio.playhead({ rolling: true, timestamp: -30, wall: local() });
-		expect(sync.now()).toBe(Milli.zero);
-		await clock.advance(Nano.fromMilli(Milli(40)));
+		await clock.advance(Nano.fromMilli(Milli(110)));
 		expect(sync.now()).toBe(Milli(10));
-		sync.close();
-	});
-
-	it("allows one audio track at a time", () => {
-		const sync = new Sync();
-		const audio = sync.track("audio", { target: target() });
-		expect(() => sync.track("audio", { target: target() })).toThrow();
-		audio.close();
-		sync.track("audio", { target: target() }).close();
 		sync.close();
 	});
 });

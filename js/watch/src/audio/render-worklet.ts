@@ -85,9 +85,7 @@ class Render extends AudioWorkletProcessor {
 				const state: State = {
 					type: "state",
 					timestamp: ring.timestamp,
-					time: currentTime + output[0].length / ring.rate,
 					stalled: ring.stalled,
-					playing: this.#playing,
 					anchored: ring.anchored,
 					underruns: ring.underruns,
 					epoch: this.#epoch,

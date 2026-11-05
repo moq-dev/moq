@@ -248,7 +248,7 @@ export class Renderer {
 			const delay = effect.get(this.source.out.config)?.delay;
 			return delay !== undefined ? Milli(delay) : undefined;
 		});
-		this.#clock = this.sync.track("text", { target });
+		this.#clock = this.sync.track({ target });
 		this.#signals.cleanup(() => this.#clock.close());
 
 		this.#signals.run(this.#run.bind(this));
