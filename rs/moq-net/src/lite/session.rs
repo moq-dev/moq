@@ -29,8 +29,9 @@ pub(crate) struct SessionStart {
 	pub credential: Option<crate::auth::Credential>,
 	/// The implementation the peer's SETUP advertised, stored on the public [`crate::Session`].
 	pub peer_implementation: crate::setup::PeerImplementation,
-	/// Counts the datagrams the subscriber could route to no datagram track.
-	pub datagrams_unrouted: std::sync::Arc<std::sync::atomic::AtomicU64>,
+	/// Counts the datagrams the subscriber could route to no datagram track, on a version
+	/// with datagrams.
+	pub datagrams_unrouted: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 }
 
 /// Server: read the peer's single SETUP message off its Setup Stream before starting
@@ -364,7 +365,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 	});
 	subscriber.announces = announces;
 	subscriber.viewers = viewers;
-	let datagrams_unrouted = subscriber.datagrams_unrouted.clone();
+	let datagrams_unrouted = version.has_datagrams().then(|| subscriber.datagrams_unrouted.clone());
 
 	// SendSetup only logs a failure, so refuse a SETUP that cannot encode (one past the
 	// size bound, such as a long implementation or path) here rather than leave the peer waiting.

@@ -369,7 +369,7 @@ impl Client {
 				bandwidth: self.allocator(),
 				viewers,
 				peer_implementation: start.peer_implementation,
-				datagrams_unrouted: Some(start.datagrams_unrouted),
+				datagrams_unrouted: start.datagrams_unrouted,
 			},
 		))
 	}
@@ -546,7 +546,7 @@ impl Client {
 				bandwidth: self.allocator(),
 				viewers,
 				peer_implementation: start.peer_implementation,
-				datagrams_unrouted: Some(start.datagrams_unrouted),
+				datagrams_unrouted: start.datagrams_unrouted,
 			},
 		))
 	}

@@ -56,7 +56,8 @@ export interface Stats {
 
 	/**
 	 * Datagrams received for a subscription with no datagram track: one this session doesn't
-	 * know, has ended, or whose answer it hasn't received. Absent on moq-transport.
+	 * know, has ended, or whose answer it hasn't received. Absent on a version without datagrams:
+	 * moq-transport and moq-lite before 05.
 	 */
 	datagramsUnrouted?: number;
 }

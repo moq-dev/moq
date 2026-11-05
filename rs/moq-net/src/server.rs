@@ -236,7 +236,7 @@ impl Server {
 				bandwidth: crate::bandwidth::Allocator::default(),
 				viewers,
 				peer_implementation: start.peer_implementation,
-				datagrams_unrouted: Some(start.datagrams_unrouted),
+				datagrams_unrouted: start.datagrams_unrouted,
 			},
 		))
 	}
@@ -657,7 +657,7 @@ impl PausedNegotiated {
 				bandwidth: crate::bandwidth::Allocator::default(),
 				viewers,
 				peer_implementation: start.peer_implementation,
-				datagrams_unrouted: Some(start.datagrams_unrouted),
+				datagrams_unrouted: start.datagrams_unrouted,
 			},
 		))
 	}

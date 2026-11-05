@@ -118,7 +118,8 @@ pub struct Stats {
 	pub streams_evicted: Option<u64>,
 
 	/// Total datagrams received for a subscription with no datagram track: one this session
-	/// doesn't know, has ended, or whose answer it hasn't received. `None` on moq-transport.
+	/// doesn't know, has ended, or whose answer it hasn't received. `None` on a version without
+	/// datagrams: moq-transport and moq-lite before 05.
 	pub datagrams_unrouted: Option<u64>,
 }
 
@@ -452,8 +453,8 @@ pub(super) struct Handles {
 	pub peer_target: Option<kio::Consumer<bandwidth::Rate>>,
 	/// What the peer's SETUP advertised as its implementation.
 	pub peer_implementation: crate::setup::PeerImplementation,
-	/// The driver's count of datagrams it routed to no datagram track, for a protocol that
-	/// routes them (moq-lite).
+	/// The driver's count of datagrams it routed to no datagram track, for a version that
+	/// carries datagrams.
 	pub datagrams_unrouted: Option<Arc<AtomicU64>>,
 }
 
