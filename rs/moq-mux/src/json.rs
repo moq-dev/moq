@@ -420,13 +420,12 @@ impl crate::catalog::Entry<'_, JsonConfig> {
 	/// Errors if the entry declares a mode this build doesn't implement.
 	#[cfg(feature = "async")]
 	pub async fn subscribe<T: DeserializeOwned>(&self, source: &crate::Source) -> crate::Result<Consumer<T>> {
-		let track = source
-			.subscribe_track(
-				self.config().broadcast.as_ref(),
-				self.config().instance.as_ref(),
-				self.config().track(self.name()),
-			)
-			.await?;
+		let mut subscribe = source.subscribe(
+			self.config().broadcast.as_ref(),
+			self.config().instance.as_ref(),
+			self.config().track(self.name()),
+		)?;
+		let track = kio::wait(|waiter| subscribe.poll(waiter)).await?;
 		Consumer::from_track(track, self.config())
 	}
 }

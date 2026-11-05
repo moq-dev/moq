@@ -139,7 +139,9 @@ impl Subscriber {
 	/// Subscribe to the newest retained window on a broadcast.
 	#[cfg(feature = "async")]
 	pub async fn subscribe(broadcast: &broadcast::Consumer) -> Result<Self, Error> {
-		Ok(Self::new(broadcast.track(TRACK)?.subscribe(None).await?))
+		let track = broadcast.track(TRACK)?;
+		let subscribing = track.subscribe(None).into_inner();
+		Ok(Self::new(kio::wait(|waiter| subscribing.poll_ok(waiter)).await?))
 	}
 
 	/// Read window changes from an existing subscription, starting at the newest window.

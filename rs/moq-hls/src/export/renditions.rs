@@ -135,22 +135,70 @@ struct State {
 /// Where a rendition's media track is: its broadcast, instance, and track name.
 type Held = (Option<moq_net::path::Relative>, Option<moq_net::Instance>, String);
 
-/// Hold `track` on `binding` subscribed until dropped, as demand for its media.
+/// Holds `track` on `binding` subscribed until dropped, as demand for its media.
 ///
 /// A publisher that measures its join interval does so from media, and an on-demand one produces
 /// media only for a subscriber: without this, an export that subscribes only once the interval
 /// is declared would never see one.
-async fn hold(binding: moq_mux::Binding, track: String) {
-	let Ok(broadcast) = binding.broadcast().await else {
-		return;
-	};
-	let Ok(track) = broadcast.track(&track) else {
-		return;
-	};
-	let Ok(_subscriber) = track.subscribe(moq_net::track::Subscription::default()).await else {
-		return;
-	};
-	std::future::pending::<()>().await
+struct Hold {
+	binding: moq_mux::Binding,
+	track: String,
+	state: Holding,
+}
+
+#[allow(
+	clippy::large_enum_variant,
+	reason = "one per track a catalog lists before its join interval, held in place until dropped"
+)]
+enum Holding {
+	Binding,
+	Subscribing {
+		_broadcast: moq_net::broadcast::Consumer,
+		_track: moq_net::track::Consumer,
+		subscribing: moq_net::track::Subscribing,
+	},
+	Held {
+		_broadcast: moq_net::broadcast::Consumer,
+		_track: moq_net::track::Consumer,
+		_subscriber: moq_net::track::Subscriber,
+	},
+}
+
+impl kio::Task for Hold {
+	type Output = ();
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		if let Holding::Binding = self.state {
+			let Ok(broadcast) = std::task::ready!(self.binding.poll_broadcast(waiter)) else {
+				return Poll::Ready(());
+			};
+			let Ok(track) = broadcast.track(&self.track) else {
+				return Poll::Ready(());
+			};
+			let subscribing = track.subscribe(moq_net::track::Subscription::default()).into_inner();
+			self.state = Holding::Subscribing {
+				_broadcast: broadcast,
+				_track: track,
+				subscribing,
+			};
+		}
+		if let Holding::Subscribing { subscribing, .. } = &self.state {
+			let Ok(subscriber) = std::task::ready!(subscribing.poll_ok(waiter)) else {
+				return Poll::Ready(());
+			};
+			let Holding::Subscribing { _broadcast, _track, .. } = std::mem::replace(&mut self.state, Holding::Binding)
+			else {
+				unreachable!("subscribing above");
+			};
+			self.state = Holding::Held {
+				_broadcast,
+				_track,
+				_subscriber: subscriber,
+			};
+		}
+		// Held until the owner drops it.
+		Poll::Pending
+	}
 }
 
 /// The shared state handle each rendition's record watcher reaches.
@@ -362,7 +410,7 @@ impl Producer {
 
 impl Fanout {
 	/// Run `task` on the broadcaster's driver until it finishes or the returned [`Owner`] drops.
-	pub fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) -> Owner {
+	pub fn spawn(&self, task: impl kio::Task<Output = ()> + Send + 'static) -> Owner {
 		self.spawner.spawn(task)
 	}
 
@@ -449,11 +497,10 @@ impl Fanout {
 }
 
 impl Producer {
-	/// Resolve once at least one rendition has a playable media playlist. Bounding how long to
-	/// wait is the caller's policy, so wrap this in a timeout rather than passing one in.
-	pub async fn ready(&self) {
-		let _ = kio::wait(|waiter| {
-			self.state.poll_ref(waiter, |current| {
+	/// Ready once at least one rendition has a playable media playlist, or the set closed.
+	pub fn poll_ready(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.state
+			.poll_ref(waiter, |current| {
 				if current
 					.renditions
 					.values()
@@ -464,8 +511,7 @@ impl Producer {
 					Poll::Pending
 				}
 			})
-		})
-		.await;
+			.map(|_| ())
 	}
 
 	/// Resolve once at least one enabled rendition is [advertised](Rendition::is_advertised), so a
@@ -488,21 +534,21 @@ impl Producer {
 			.map(|_| ())
 	}
 
+	/// Ready once a catalog was read, or the set closed.
 	#[cfg(feature = "server")]
-	pub(crate) async fn catalogued(&self) {
-		let _ = kio::wait(|waiter| {
-			self.state.poll_ref(waiter, |current| {
+	pub(crate) fn poll_catalogued(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.state
+			.poll_ref(waiter, |current| {
 				if current.media.is_some() {
 					Poll::Ready(())
 				} else {
 					Poll::Pending
 				}
 			})
-		})
-		.await;
+			.map(|_| ())
 	}
 
-	/// Start every enabled video rendition's init build, then resolve once one of them has its
+	/// Start every enabled video rendition's init build, then be ready once one of them has its
 	/// init and lists a segment of its own, so a manifest lists it, or none is left
 	/// that listings do not refuse: a denied or failed one can never be listed. A build that has
 	/// nothing to read from yet starts on the wake that indexes its media.
@@ -510,8 +556,9 @@ impl Producer {
 		not(feature = "server"),
 		allow(dead_code, reason = "only the `server` feature uses it")
 	)]
-	pub(crate) async fn video_init(&self) {
-		kio::wait(|waiter| {
+	#[cfg_attr(test, kio::wrapper)]
+	pub(crate) fn poll_video_init(&self, waiter: &kio::Waiter) -> Poll<()> {
+		{
 			let poll = self.state.poll_ref(waiter, |current| {
 				let mut video = current
 					.renditions
@@ -540,8 +587,7 @@ impl Producer {
 				// and the predicate registered `waiter` on each of them.
 				Poll::Ready(Err(_)) | Poll::Pending => Poll::Pending,
 			}
-		})
-		.await
+		}
 	}
 
 	/// Enroll freshly created renditions with what their siblings share, and start following
@@ -655,7 +701,11 @@ impl Producer {
 			let Ok(binding) = source.bind(broadcast.as_ref(), instance.as_ref()) else {
 				continue;
 			};
-			let owner = self.fanout.spawn(hold(binding, track.clone()));
+			let owner = self.fanout.spawn(Hold {
+				binding,
+				track: track.clone(),
+				state: Holding::Binding,
+			});
 			waiting.insert(key, (held, owner));
 		}
 	}
@@ -792,9 +842,10 @@ pub struct Consumer {
 
 impl Consumer {
 	/// The next rendition change; `None` only after the catalog finishes cleanly.
-	pub async fn next(&mut self) -> crate::Result<Option<Event>> {
-		let Some(event) = kio::wait(|waiter| self.poll_next(waiter)).await? else {
-			return Ok(None);
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Event>>> {
+		let Some(event) = std::task::ready!(self.poll_event(waiter))? else {
+			return Poll::Ready(Ok(None));
 		};
 		match &event {
 			Event::Added(rendition) => {
@@ -805,10 +856,10 @@ impl Consumer {
 				self.seen.remove(&(*kind, name.clone()));
 			}
 		}
-		Ok(Some(event))
+		Poll::Ready(Ok(Some(event)))
 	}
 
-	fn poll_next(&self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Event>>> {
+	fn poll_event(&self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Event>>> {
 		// A failed catalog cannot wait for the change stream to close.
 		if let Poll::Ready(Ok(err)) = self
 			.feed

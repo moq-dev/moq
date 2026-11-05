@@ -346,10 +346,9 @@ impl<E: DeserializeOwned + Default> Catalog<E> {
 	/// Subscribe to catalog updates on a broadcast.
 	#[cfg(feature = "async")]
 	pub async fn subscribe(broadcast: &moq_net::broadcast::Consumer) -> Result<super::Consumer<E>> {
-		let track = broadcast
-			.track(Catalog::DEFAULT_NAME)?
-			.subscribe(Catalog::default_subscription())
-			.await?;
+		let track = broadcast.track(Catalog::DEFAULT_NAME)?;
+		let subscribing = track.subscribe(Catalog::default_subscription()).into_inner();
+		let track = kio::wait(|waiter| subscribing.poll_ok(waiter)).await?;
 		Ok(super::Consumer::new(track))
 	}
 
