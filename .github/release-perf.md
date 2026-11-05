@@ -19,9 +19,11 @@ The established harness ran on `desktop`, pinned to its eight performance
 CPUs (0-7), under the host benchmark lock and `quest gate`. Both sides used
 the release profile, default features and the same current generator and
 sampler. The host was shared, not idle: `/proc/loadavg` at entry was
-`10.84 10.75 12.09`; readings during the workload were `6.39 9.49 11.44` and
-`4.89 7.63 10.41`. These snapshots describe context, not every sampling window.
-The sign holds throughout the run despite that changing load.
+`10.84 10.75 12.09`. Four additional manual snapshots taken alongside the run
+had 1-minute values of 11.09, 6.39, 4.89 and 8.47 (range 4.89 to 11.09).
+They are not aligned to individual cells and do not establish that each
+measurement window was quiet. All snapshots are retained in the evidence.
+The CPU sign holds in every pair despite that changing load.
 
 Reproduce in a fresh project shell (the clean environment avoids inheriting
 obsolete variables from a session opened before the shell fix):
