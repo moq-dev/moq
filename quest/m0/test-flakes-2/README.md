@@ -37,8 +37,9 @@ Added 2026-10-21 and 2026-10-22 (maintainer): failures from the m0/m1
 merge runs, one child each.
 
 Decided 2026-10-26 (maintainer): the epic moved from m1 to m0, since every
-flake now fails a whole batch of the [batched merge gate](https://github.com/moq-dev/moq/blob/17a81d6c64/quest/m0/ci/land.md)
-rather than one PR. The queue's recurring flakes from 2026-10-23 to 10-26
+flake drops a queued PR from the merge queue (it then failed a whole batch of
+the [batched merge gate](https://github.com/moq-dev/moq/blob/17a81d6c64/quest/m0/ci/land.md),
+dropped 2026-11-01). The queue's recurring flakes from 2026-10-23 to 10-26
 were already fixed (the moq-rtsp stall tests, the moq-gst pinned-instance and
 sibling-restart tests, the moq-mux missing-sequence test,
 `js/common/worklet.test.ts`, and the IETF datagram range test in
@@ -91,6 +92,9 @@ from 2026-11-03 and early 2026-11-04 UTC, one child each.
 Added 2026-11-04 (maintainer, `/quest-plan`): moq-gst's interleaved restart
 test, which failed two merge-queue batches and two loaded local runs.
 
+Added 2026-11-05 (maintainer, `/quest-audit`): Interop's P2P data-channel
+timeout, one child.
+
 Public API: none. Wire: none.
 
 ## Required
@@ -101,4 +105,4 @@ Public API: none. Wire: none.
 - [dispatch-query's terminate test survives load](/quest/m0/test-flakes-2/dispatch-query-terminate.md) - `test_terminating_the_run_stops_the_running_phase` passes reliably under host load, re-enabled once fixed
 - [Diagnose and re-enable the FFI datagram connection test](/quest/m0/test-flakes-2/ffi-datagram-roundtrip.md) - diagnose the default-connection timeout and re-enable the quarantined test
 - [Test PulseAudio servers stay off the desktop's D-Bus](/quest/m0/test-flakes-2/pulse-dbus.md) - concurrent media runs on one desktop never collide on `org.PulseAudio1`
-- [The open-GOP browser fixture fails loudly](/quest/m0/test-flakes-2/open-gop-fixture.md) - its broadcast stub matches current stats dependencies and an effect exception fails the test
+- [The P2P data-channel test transfers its frame](/quest/m0/test-flakes-2/p2p-data-channel.md) - Interop's two-peer data-channel test stops stalling after a failed send

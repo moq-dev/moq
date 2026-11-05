@@ -57,19 +57,24 @@ every run; the 256-stream cell sometimes does.
   surface needs one; name it in the PR or leave the mirror out.
 - **Order with the [drop set](/quest/m1/drop-set.md).** The drop set
   replaces `poll_drop`'s `Delivered` argument and the skipped record, and
-  edits the lite-07 SUBSCRIBE_DROP wording. Land the wire half whenever it's
-  ready, but publish the API after the drop set, against its final
-  disposition record, so the public shape doesn't change twice.
+  edits the lite-07 SUBSCRIBE_DROP wording. Publish the API against its
+  final disposition record, so the public shape doesn't change twice.
 - The drop set owns the per-cursor drop runs and their reasons. This quest
   reports what a cursor gives up; it doesn't change how a cursor judges a
   missing group.
+
+Decided 2026-11-05 (maintainer, /quest-audit): ✅ this waits for
+[Drop set](/quest/m1/drop-set.md), since both rewrite the lite-07
+SUBSCRIBE_DROP draft wording and the drop signal's `Delivered` argument.
 
 Public API: additive for a separate read; breaking if folded into `recv_group`
 (its `Result<Option<group::Consumer>>` return changes for every caller), with
 MIGRATE notes. `@moq/net` and the bindings mirror it only with a named consumer.
 Wire: possibly lite-07 (SUBSCRIBE_DROP for a stopped group), decided here.
 
-## Related
+## Required
 
 - [Drop set](/quest/m1/drop-set.md) - owns the per-cursor drop runs this reports
+
+## Related
 - [The receive-windows benchmark](/quest/m1/receive-windows-evicted.md) - its overcommitted cells wait on this (skipped by [moq-dev/moq#7838](https://github.com/moq-dev/moq/pull/7838) until it lands)
