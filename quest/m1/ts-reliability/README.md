@@ -1,4 +1,4 @@
-# TS fidelity and recovery
+# [S] TS fidelity and recovery
 
 ## Goal
 
@@ -130,10 +130,6 @@ order).
 PMT fragmentation (#5220), initial mux-rate measurement (#5287), and
 decoder-time admission (#5306) have landed, as have PSI runs (#5606) and
 catalog linger (#5305).
-
-## Required
-
-- [A CBR import's muxRate can't stick low](/quest/m1/ts-reliability/mux-rate-raise.md) - a stable window above the published rate raises it, and an export's deadline miss names the rate it needed
 
 ## Related
 
