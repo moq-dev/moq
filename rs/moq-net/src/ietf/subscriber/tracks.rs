@@ -765,17 +765,6 @@ impl Subscriber {
 		Ok(())
 	}
 
-	/// Await [`Self::poll_read_answer`].
-	#[cfg(feature = "async")]
-	pub(super) async fn read_answer(
-		&self,
-		stream: &mut Stream<Transport, Version>,
-		messages: &mut Messages,
-		mut held: Option<&mut Resumed>,
-	) -> Result<Option<Accepted>, Error> {
-		kio::wait(|waiter| self.poll_read_answer(waiter, stream, messages, held.as_deref_mut())).await
-	}
-
 	/// Read the answer to a SUBSCRIBE, or to the REQUEST_UPDATE resuming `held`.
 	pub(super) fn poll_read_answer(
 		&self,
