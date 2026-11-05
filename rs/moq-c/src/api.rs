@@ -269,6 +269,9 @@ pub struct moq_video_init {
 
 	/// Catalog fields the bitstream cannot reveal itself. Zeroed means none.
 	pub hint: moq_video_hint,
+	/// Next lower pre-encoded video media handle, or 0 for the lowest rendition.
+	/// Publish it first; this track gets one priority below it, saturating at -128.
+	pub lower: u32,
 }
 
 /// Optional catalog fields for [moq_video_init::hint].
@@ -2622,6 +2625,12 @@ unsafe fn parse_video_init(
 	let mut video = moq_mux::import::VideoInit::new(video_format_from_u32(config.format)?, init.to_vec());
 	video.label = label.map(str::to_string);
 	video.hint = config.hint.resolve()?;
+	if config.lower != 0 {
+		video.priority = State::lock()
+			.publish
+			.media_video_priority(ffi::parse_id(config.lower)?)?
+			.saturating_sub(1);
+	}
 	Ok((video, config.hint.group_duration()?))
 }
 
@@ -2847,6 +2856,16 @@ pub unsafe extern "C" fn moq_publish_media_frame(
 		let payload = unsafe { ffi::parse_slice(payload, payload_size)? };
 		State::lock().publish.media_frame(media, payload, timestamp.try_into()?)
 	})
+}
+
+/// Enable or disable a pre-encoded media rendition in its catalog.
+///
+/// Disabling publishes a discontinuity and stops frames; resume video on a keyframe.
+/// Audio importers reject this operation.
+/// Returns zero on success or a negative error.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_media_set_enabled(media: u32, enabled: bool) -> i32 {
+	ffi::enter(move || State::lock().publish.media_set_enabled(ffi::parse_id(media)?, enabled))
 }
 
 /// Mark a timeline break without lowering the advertised jitter or delay.
@@ -3897,11 +3916,11 @@ pub unsafe extern "C" fn moq_consume_video_config(catalog: u32, index: u32, dst:
 	})
 }
 
-/// Query whether the publisher is serving a video rendition.
+/// Query whether a video rendition may be selected.
 ///
-/// False means no frames are coming until it re-enables. Pick an enabled rendition, but keep one
-/// already playing while every video rendition is disabled, so a re-enable plays without a
-/// resubscribe. A catalog that omits the optional field reads as true.
+/// False means no frames are coming and the rendition must not be selected: [moq_consume_video]
+/// and `moq_decode_video` refuse it with `MOQ_ERROR_NOT_FOUND`. A catalog that omits the optional
+/// field reads as true.
 ///
 /// Returns zero on success, or a negative code on failure.
 ///
@@ -3960,11 +3979,11 @@ pub unsafe extern "C" fn moq_consume_audio_config(catalog: u32, index: u32, dst:
 	})
 }
 
-/// Query whether the publisher is serving an audio rendition.
+/// Query whether an audio rendition may be selected.
 ///
-/// False means no frames are coming until it re-enables. Pick an enabled rendition, but keep one
-/// already playing while every audio rendition is disabled, so a re-enable plays without a
-/// resubscribe. A catalog that omits the optional field reads as true.
+/// False means no frames are coming and the rendition must not be selected: [moq_consume_audio]
+/// and `moq_decode_audio` refuse it with `MOQ_ERROR_NOT_FOUND`. A catalog that omits the optional
+/// field reads as true.
 ///
 /// Returns zero on success, or a negative code on failure.
 ///

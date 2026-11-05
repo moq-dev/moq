@@ -73,6 +73,8 @@ export class Estimator {
 	#interval = 0;
 	/** The largest delay seen in that interval. */
 	#peak = 0;
+	/** A declared end precedes the next measured observation, so the silence before it is not idle. */
+	#ended = false;
 
 	#histogram = prior();
 	/** How much of the histogram is still the prior's rather than evidence. */
@@ -119,6 +121,8 @@ export class Estimator {
 		}
 
 		const interval = Math.floor((arrival - this.#origin) / RESAMPLE);
+		const resumed = this.#ended;
+		this.#ended = false;
 		if (interval <= this.#interval) {
 			this.#peak = Math.max(this.#peak, delay);
 			return;
@@ -126,13 +130,25 @@ export class Estimator {
 
 		this.#fold(Math.min(BUCKETS - 1, Math.floor(this.#peak / BUCKET)));
 
-		const idle = Math.min(interval - this.#interval - 1, IDLE_MAX);
-		for (let i = 0; i < idle; i++) {
-			this.#fold(undefined);
+		if (resumed) {
+			// The publisher declared the silence, so it is not evidence of anything: the
+			// estimate keeps what it had and a fresh interval starts at this arrival.
+			this.#origin = arrival;
+			this.#interval = 0;
+		} else {
+			const idle = Math.min(interval - this.#interval - 1, IDLE_MAX);
+			for (let i = 0; i < idle; i++) {
+				this.#fold(undefined);
+			}
+			this.#interval = interval;
 		}
-
-		this.#interval = interval;
 		this.#peak = delay;
+	}
+
+	/** A declared end lies between the previous observation and the next. */
+	end(): void {
+		// Before any observation there is no interval for the silence to stretch.
+		if (this.#origin !== undefined) this.#ended = true;
 	}
 
 	/** The target the receiver holds, in milliseconds. */

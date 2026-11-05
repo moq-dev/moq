@@ -32,9 +32,9 @@
 
 #[cfg(test)]
 mod archive_tests;
-mod contributions;
 mod driver;
 mod grid;
+mod include;
 pub mod master;
 mod mpd;
 mod playlist;
@@ -56,7 +56,7 @@ pub(crate) use playlist::render_media;
 #[cfg(feature = "server")]
 pub(crate) use rendition::Demand;
 pub use rendition::{Kind, Rendition};
-pub use route::{Contribution, Resource, Route};
+pub use route::{Include, Resource, Route};
 
 /// Backoff bounds for the initial catalog subscription.
 ///
@@ -109,7 +109,7 @@ pub struct Broadcaster {
 	instance: Arc<str>,
 	/// The current rendition set, reconciled from the catalog by the watcher task.
 	renditions: renditions::Producer,
-	contributions: Option<contributions::Producer>,
+	include: Option<include::Producer>,
 	/// Shared by every clone; its drop with the last one ends the catalog watcher.
 	_guard: Arc<Guard>,
 }
@@ -117,7 +117,7 @@ pub struct Broadcaster {
 /// What the last [`Broadcaster`] clone releases.
 struct Guard {
 	renditions: renditions::Producer,
-	contributions: Option<contributions::Producer>,
+	include: Option<include::Producer>,
 	/// Ends the catalog watcher when dropped, or when [`replaced`](Broadcaster::replaced) takes it.
 	watcher: Mutex<Option<driver::Owner>>,
 }
@@ -129,8 +129,8 @@ impl Drop for Guard {
 		// media flowing, so its final segments are not truncated. Each rendition stops
 		// following its media once no recording cursor holds it.
 		self.renditions.clear();
-		if let Some(contributions) = &self.contributions {
-			contributions.clear();
+		if let Some(include) = &self.include {
+			include.clear();
 		}
 	}
 }
@@ -160,25 +160,25 @@ impl Broadcaster {
 			.clone()
 			.unwrap_or_else(moq_net::Instance::random);
 		let (spawner, mut driver) = driver::Spawner::new();
-		let contributions = origin.map(|origin| contributions::Producer::new(origin, config.window, spawner.clone()));
+		let include = origin.map(|origin| include::Producer::new(origin, config.window, spawner.clone()));
 		let renditions = renditions::Producer::new(config.window, spawner);
 		// The watcher owns its own producer clone; dropping the `Broadcaster` ends it so the
 		// standing catalog subscription stops when nobody's serving from this broadcaster.
 		let watcher = driver.lead(WatchCatalog::new(
 			source,
 			renditions.clone(),
-			Role::Root(contributions.clone().map(Box::new)),
+			Role::Root(include.clone().map(Box::new)),
 		));
 		let broadcaster = Self {
 			broadcast,
 			instance: Arc::from(instance.as_str()),
 			_guard: Arc::new(Guard {
 				renditions: renditions.clone(),
-				contributions: contributions.clone(),
+				include: include.clone(),
 				watcher: Mutex::new(Some(watcher)),
 			}),
 			renditions,
-			contributions,
+			include,
 		};
 		(broadcaster, driver)
 	}
@@ -259,12 +259,12 @@ impl Broadcaster {
 	#[cfg_attr(any(test, feature = "server"), kio::wrapper)]
 	pub(crate) fn poll_advertised(&self, waiter: &kio::Waiter) -> Poll<()> {
 		let own = self.renditions.poll_advertised(waiter);
-		let contribution = self
-			.contributions
+		let include = self
+			.include
 			.as_ref()
-			.is_some_and(|contributions| contributions.poll_advertised(waiter).is_ready());
-		// Contributions alone answer only while no own rendition could still be listed.
-		if own.is_ready() || (!self.renditions.listable() && contribution) {
+			.is_some_and(|include| include.poll_advertised(waiter).is_ready());
+		// Includes alone answer only while no own rendition could still be listed.
+		if own.is_ready() || (!self.renditions.listable() && include) {
 			Poll::Ready(())
 		} else {
 			Poll::Pending
@@ -303,9 +303,9 @@ impl Broadcaster {
 	/// holding different tokens; a credential in `Config` would embed one viewer's in
 	/// another's playlist.
 	///
-	/// A broadcaster obtained from `Server` also lists contribution renditions from their
+	/// A broadcaster obtained from `Server` also lists include renditions from their
 	/// catalogs, starting their media only on request. `Broadcaster::new` exports the own
-	/// renditions only, so a recorder never demands contributions.
+	/// renditions only, so a recorder never demands includes.
 	///
 	/// Lists only enabled own renditions a player can start, i.e. ones listing at least one segment,
 	/// so an early render may list audio alone, or nothing at all. A disabled rendition (catalog `enabled: false`) is left out until
@@ -339,27 +339,27 @@ impl Broadcaster {
 				}),
 			}
 		}
-		if let Some(contributions) = &self.contributions {
-			let (extra_video, extra_audio) = contributions.variants(&self.instance, query);
+		if let Some(include) = &self.include {
+			let (extra_video, extra_audio) = include.variants(&self.instance, query);
 			video.extend(extra_video);
 			audio.extend(extra_audio);
 		}
 		(video, audio)
 	}
 
-	/// The contribution rendition `at` names, once the catalog is read.
+	/// The include rendition `at` names, once the catalog is read.
 	#[cfg(feature = "server")]
 	#[kio::wrapper]
-	pub(crate) fn poll_contribution(
+	pub(crate) fn poll_include(
 		&self,
 		waiter: &kio::Waiter,
-		at: &Contribution,
+		at: &Include,
 		kind: Kind,
 		name: &str,
 	) -> Poll<crate::Result<Option<Arc<Rendition>>>> {
 		ready!(self.renditions.poll_catalogued(waiter));
-		match &self.contributions {
-			Some(contributions) => contributions.poll_rendition(waiter, at, kind, name),
+		match &self.include {
+			Some(include) => include.poll_rendition(waiter, at, kind, name),
 			None => Poll::Ready(Ok(None)),
 		}
 	}
@@ -496,8 +496,8 @@ impl Broadcaster {
 		let watcher = self._guard.watcher.lock().unwrap().take();
 		drop(watcher);
 		self.renditions.cut();
-		if let Some(contributions) = &self.contributions {
-			contributions.clear();
+		if let Some(include) = &self.include {
+			include.clear();
 		}
 	}
 
@@ -513,11 +513,11 @@ impl Broadcaster {
 
 /// What a catalog watcher reconciles besides its own rendition set.
 enum Role {
-	/// A root broadcast, following its catalog's contributions when an HTTP server serves it.
-	Root(Option<Box<contributions::Producer>>),
-	/// A contribution included in a root broadcast. Its renditions take the root catalog's
-	/// `media`, so they share the root's timeline and grid whatever the contribution declares.
-	Contribution(kio::Consumer<hang::catalog::Media>),
+	/// A root broadcast, following its catalog's includes when an HTTP server serves it.
+	Root(Option<Box<include::Producer>>),
+	/// A broadcast included in a root broadcast. Its renditions take the root catalog's
+	/// `media`, so they share the root's timeline and grid whatever the include declares.
+	Include(kio::Consumer<hang::catalog::Media>),
 }
 
 /// Follows a broadcast's catalog into its rendition set, as a driver task.
@@ -547,7 +547,7 @@ enum Watch {
 	Backoff(kio::clock::Sleep),
 	Reading {
 		consumer: catalog::Consumer<()>,
-		/// A contribution's latest catalog, re-synced when the root's media changes.
+		/// An include's latest catalog, re-synced when the root's media changes.
 		latest: Option<catalog::hang::Catalog>,
 	},
 }
@@ -588,7 +588,7 @@ impl WatchCatalog {
 				err.into()
 			}));
 		}
-		if let (Role::Contribution(root), Some(catalog)) = (&self.role, &latest)
+		if let (Role::Include(root), Some(catalog)) = (&self.role, &latest)
 			&& let Poll::Ready(Ok(())) = root.poll(waiter, |media| match **media != catalog.media {
 				true => Poll::Ready(()),
 				false => Poll::Pending,
@@ -601,12 +601,12 @@ impl WatchCatalog {
 	/// Reconcile the renditions with `catalog`.
 	fn sync(&mut self, mut catalog: catalog::hang::Catalog) {
 		match &self.role {
-			Role::Root(Some(contributions)) => contributions.sync(&self.source, &catalog),
+			Role::Root(Some(include)) => include.sync(&self.source, &catalog),
 			Role::Root(None) => {}
-			Role::Contribution(root) => catalog.media = *root.read(),
+			Role::Include(root) => catalog.media = *root.read(),
 		}
 		self.renditions.sync(&self.source, &catalog);
-		if let (Role::Contribution(_), Watch::Reading { latest, .. }) = (&self.role, &mut self.state) {
+		if let (Role::Include(_), Watch::Reading { latest, .. }) = (&self.role, &mut self.state) {
 			*latest = Some(catalog);
 		}
 	}
@@ -615,11 +615,11 @@ impl WatchCatalog {
 	fn finish(&self, result: crate::Result<()>) {
 		let failed = result.is_err();
 		self.renditions.finish(result);
-		// The root catalog lists the contributions: once it fails, stop following and advertising
+		// The root catalog lists the includes: once it fails, stop following and advertising
 		// them too. A clean end freezes the final catalog, which keeps its entries, as the own
 		// renditions keep their final set.
-		if failed && let Role::Root(Some(contributions)) = &self.role {
-			contributions.clear();
+		if failed && let Role::Root(Some(include)) = &self.role {
+			include.clear();
 		}
 	}
 }

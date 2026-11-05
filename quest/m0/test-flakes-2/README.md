@@ -99,7 +99,6 @@ Public API: none. Wire: none.
 - [moq-gst's interleaved restart test passes under load](/quest/m0/test-flakes-2/gst-reconnect-interleave.md) - `restarts_under_reconnects_interleave_on_one_pad` passes in loaded runs and the merge queue, its missed delivery and its stray `Eos` each fixed at the cause
 - [reload.test.ts's close-drain tests pass under load](/quest/m0/test-flakes-2/reload-close-drain.md) - the drain cases in `js/net`'s reload tests pass in loaded multi-file runs
 - [dispatch-query's terminate test survives load](/quest/m0/test-flakes-2/dispatch-query-terminate.md) - `test_terminating_the_run_stops_the_running_phase` passes reliably under host load, re-enabled once fixed
-- [release.test.ts never reaches the network](/quest/m0/test-flakes-2/release-test-offline.md) - the JSR release test fakes its registry lookup and passes offline
 - [Diagnose and re-enable the FFI datagram connection test](/quest/m0/test-flakes-2/ffi-datagram-roundtrip.md) - diagnose the default-connection timeout and re-enable the quarantined test
 - [Test PulseAudio servers stay off the desktop's D-Bus](/quest/m0/test-flakes-2/pulse-dbus.md) - concurrent media runs on one desktop never collide on `org.PulseAudio1`
 - [The open-GOP browser fixture fails loudly](/quest/m0/test-flakes-2/open-gop-fixture.md) - its broadcast stub matches current stats dependencies and an effect exception fails the test

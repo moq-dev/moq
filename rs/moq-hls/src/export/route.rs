@@ -12,26 +12,26 @@ pub struct Route {
 	/// The broadcast path, percent-decoded. An embedder that scopes its origin rewrites
 	/// this relative to that scope before looking it up.
 	pub broadcast: String,
-	/// The contribution ID and publisher instance, when the resource belongs to one.
-	pub contribution: Option<Contribution>,
+	/// The include ID and publisher instance, when the resource belongs to one.
+	pub include: Option<Include>,
 	/// The resource requested under the broadcast.
 	pub resource: Resource,
 }
 
-/// The contribution catalog and stream named inside a broadcast's instance URL.
+/// The include catalog and stream named inside a broadcast's instance URL.
 ///
-/// A contribution's resource nests under the served broadcast as
-/// `{broadcast}/@{instance}/contribution/{id}/{kind}/{rendition}/@{contribution-instance}/`
+/// An include's resource nests under the served broadcast as
+/// `{broadcast}/@{instance}/include/{id}/{kind}/{rendition}/@{include-instance}/`
 /// followed by the [`Resource`] file (`media.m3u8`, `init.{hash}.mp4`, or `seg/{segment}.m4s`).
 /// The broadcast's own `@{instance}` comes first, so [`Route::broadcast`] stays the parent's
-/// path and a path-based policy check covers its contributions. A denied contribution answers
+/// path and a path-based policy check covers its includes. A denied include answers
 /// `403`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct Contribution {
-	/// The contribution ID in the parent catalog, percent-decoded.
+pub struct Include {
+	/// The include ID in the parent catalog, percent-decoded.
 	pub id: String,
-	/// The contribution's publisher instance, percent-decoded and without its `@`.
+	/// The include's publisher instance, percent-decoded and without its `@`.
 	pub instance: String,
 }
 
@@ -114,23 +114,23 @@ impl Route {
 			_ => 0,
 		};
 		let end = parts.len() - tail;
-		let contribution = if tail != 0 {
+		let include = if tail != 0 {
 			match &parts[..end] {
 				[.., parent, directory, id, kind, _, child]
-					if directory == "contribution"
+					if directory == "include"
 						&& instance_id(parent).is_some()
 						&& Kind::parse(kind).is_some()
 						&& instance_id(child).is_some() =>
 				{
-					// Every slot has the contribution shape; otherwise the ordinary arms below
+					// Every slot has the include shape; otherwise the ordinary arms below
 					// parse the untouched parts as a longer broadcast path.
-					let contribution = Contribution {
+					let include = Include {
 						id: id.clone(),
 						instance: instance_id(child)?,
 					};
 					parts.remove(end - 1);
 					parts.drain(end - 5..end - 3);
-					Some(contribution)
+					Some(include)
 				}
 				_ => None,
 			}
@@ -175,7 +175,7 @@ impl Route {
 		}
 		Some(Self {
 			broadcast: broadcast.join("/"),
-			contribution,
+			include,
 			resource,
 		})
 	}
@@ -206,7 +206,7 @@ mod tests {
 			Route::parse("/project/live/@run/video/cam%231%2Fmain%3Falt/media.m3u8"),
 			Some(Route {
 				broadcast: "project/live".to_string(),
-				contribution: None,
+				include: None,
 				resource: Resource::Media {
 					instance: "run".to_string(),
 					kind: Kind::Video,
@@ -315,16 +315,16 @@ mod tests {
 	}
 
 	#[test]
-	fn contribution_resources_keep_the_parent_policy_path() {
+	fn include_resources_keep_the_parent_policy_path() {
 		for suffix in ["media.m3u8", "init.abcd.mp4", "seg/abcd.7.m4s"] {
 			let route = Route::parse(&format!(
-				"/room/live/@parent/contribution/a%2Fb/video/same%2Fname/@child/{suffix}"
+				"/room/live/@parent/include/a%2Fb/video/same%2Fname/@child/{suffix}"
 			))
 			.unwrap();
 			assert_eq!(route.broadcast, "room/live");
 			assert_eq!(
-				route.contribution,
-				Some(Contribution {
+				route.include,
+				Some(Include {
 					id: "a/b".into(),
 					instance: "child".into()
 				})
@@ -337,14 +337,14 @@ mod tests {
 			};
 			assert_eq!(instance, "parent");
 		}
-		let own = Route::parse("/room/@parent/contribution/id/@child/video/main/media.m3u8").unwrap();
-		assert_eq!(own.broadcast, "room/@parent/contribution/id");
-		assert!(own.contribution.is_none());
-		assert!(Route::parse("/room%2Flive/@parent/contribution/id/video/main/@child/media.m3u8").is_none());
-		// Contribution-shaped but for the child slot: an ordinary URL on a longer broadcast path.
-		let own = Route::parse("/room/@parent/contribution/id/video/@run/audio/seg/media.m3u8").unwrap();
-		assert_eq!(own.broadcast, "room/@parent/contribution/id/video");
-		assert!(own.contribution.is_none());
+		let own = Route::parse("/room/@parent/include/id/@child/video/main/media.m3u8").unwrap();
+		assert_eq!(own.broadcast, "room/@parent/include/id");
+		assert!(own.include.is_none());
+		assert!(Route::parse("/room%2Flive/@parent/include/id/video/main/@child/media.m3u8").is_none());
+		// Include-shaped but for the child slot: an ordinary URL on a longer broadcast path.
+		let own = Route::parse("/room/@parent/include/id/video/@run/audio/seg/media.m3u8").unwrap();
+		assert_eq!(own.broadcast, "room/@parent/include/id/video");
+		assert!(own.include.is_none());
 		match own.resource {
 			Resource::Media {
 				instance,

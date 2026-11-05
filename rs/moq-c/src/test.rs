@@ -413,6 +413,7 @@ fn publish_audio(broadcast: u32, format: moq_audio_format, init: &[u8], label: O
 fn publish_video(broadcast: u32, format: moq_video_format, init: &[u8], label: Option<&[u8]>) -> i32 {
 	let (label, label_len) = label_ptr(label);
 	let config = moq_video_init {
+		lower: 0,
 		format: format as u32,
 		init: init_ptr(init),
 		init_len: init.len(),
@@ -969,9 +970,10 @@ fn publish_catalog_config_null_pointer() {
 	assert_eq!(moq_publish_close(broadcast), 0);
 }
 
-/// Enablement belongs to each catalog snapshot; holding a disabled rendition keeps its subscription usable.
+/// Enablement belongs to each catalog snapshot, and a snapshot that disables a rendition refuses to
+/// consume it.
 #[test]
-fn audio_enabled_snapshots_preserve_a_held_consumer() {
+fn audio_enabled_follows_each_snapshot() {
 	let origin = id(moq_origin_create());
 	let path = b"audio-enabled";
 	let broadcast = publish_broadcast(origin, path);
@@ -1029,9 +1031,11 @@ fn audio_enabled_snapshots_preserve_a_held_consumer() {
 		MOQ_ERROR_INVALID_POINTER
 	);
 
-	// A held rendition may be opened from a disabled snapshot, then re-enabled without resubscribing.
 	let frames = Callback::new();
-	let track = id(unsafe { moq_consume_audio(disabled, 0, &TEN_SECONDS, Some(channel_callback), frames.ptr) });
+	assert_eq!(
+		unsafe { moq_consume_audio(disabled, 0, &TEN_SECONDS, Some(channel_callback), frames.ptr) },
+		MOQ_ERROR_NOT_FOUND
+	);
 	set_enabled(true);
 	let resumed = id(catalogs.recv());
 	assert_eq!(
@@ -1044,6 +1048,7 @@ fn audio_enabled_snapshots_preserve_a_held_consumer() {
 		0
 	);
 	assert!(!unsafe { enabled.assume_init() });
+	let track = id(unsafe { moq_consume_audio(resumed, 0, &TEN_SECONDS, Some(channel_callback), frames.ptr) });
 	let payload = b"resumed-audio";
 	assert_eq!(
 		unsafe { moq_publish_media_frame(media, payload.as_ptr(), payload.len(), micros(0)) },
@@ -8229,6 +8234,7 @@ fn track_request_media_carries_hints() {
 	let request = id(request_cb.recv());
 	let h264 = h264_init();
 	let video_config = moq_video_init {
+		lower: 0,
 		format: moq_video_format::MOQ_VIDEO_FORMAT_AVC3 as u32,
 		init: h264.as_ptr(),
 		init_len: h264.len(),
@@ -8283,6 +8289,7 @@ fn invalid_hints_are_refused() {
 	};
 	let video = |hint: moq_video_hint| {
 		let config = moq_video_init {
+			lower: 0,
 			format: moq_video_format::MOQ_VIDEO_FORMAT_AVC3 as u32,
 			init: h264.as_ptr(),
 			init_len: h264.len(),
@@ -8389,6 +8396,104 @@ fn group_duration_hint_declares_the_join_interval() {
 	);
 
 	assert_eq!(moq_publish_media_finish(hinted), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
+fn preencoded_rungs_and_rate_control() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"preencoded-rungs");
+	let init = h264_init();
+	let config = |lower| moq_video_init {
+		format: moq_video_format::MOQ_VIDEO_FORMAT_AVC3 as u32,
+		init: init.as_ptr(),
+		init_len: init.len(),
+		label: std::ptr::null(),
+		label_len: 0,
+		hint: moq_video_hint::default(),
+		lower,
+	};
+	let low = id(unsafe { moq_publish_video(broadcast, &config(0)) });
+	let high = id(unsafe { moq_publish_video(broadcast, &config(low)) });
+	{
+		let state = State::lock();
+		assert_eq!(
+			state
+				.publish
+				.media_video_priority(crate::ffi::parse_id(high).unwrap())
+				.unwrap(),
+			state
+				.publish
+				.media_video_priority(crate::ffi::parse_id(low).unwrap())
+				.unwrap() - 1
+		);
+	}
+	assert_eq!(moq_publish_media_set_enabled(high, false), 0);
+	assert_eq!(
+		published_catalog(broadcast)
+			.video
+			.renditions
+			.values()
+			.filter(|r| !r.enabled)
+			.count(),
+		1
+	);
+	assert_eq!(moq_publish_media_set_enabled(high, true), 0);
+	assert!(
+		published_catalog(broadcast)
+			.video
+			.renditions
+			.values()
+			.all(|r| r.enabled)
+	);
+	let (allocator, estimate) = test_allocator();
+	let reservation = id(moq_allocator_reserve_media(allocator, high, 4_000_000));
+	let control = id(moq_rate_control_create(
+		reservation,
+		moq_rate_policy {
+			max_bps: 4_000_000,
+			lower_bps: 2_000_000,
+			has_lower: true,
+		},
+	));
+	let mut target = moq_rate_target {
+		enabled: false,
+		bitrate_bps: 0,
+		changed: true,
+	};
+	assert!(
+		moq_rate_control_create(
+			reservation,
+			moq_rate_policy {
+				max_bps: 0,
+				lower_bps: 0,
+				has_lower: false,
+			},
+		) < 0
+	);
+	assert_eq!(unsafe { moq_rate_control_target(control, &mut target) }, 0);
+	assert!(target.enabled);
+	assert_eq!(target.bitrate_bps, 4_000_000);
+	assert!(!target.changed);
+	assert_eq!(unsafe { moq_rate_control_update(control, &mut target) }, 0);
+	assert!(!target.changed);
+	estimate
+		.set(Some(moq_net::bandwidth::Rate::from_bps(1_000_000)))
+		.unwrap();
+	assert_eq!(unsafe { moq_rate_control_update(control, &mut target) }, 0);
+	assert!(target.changed);
+	// Without a probing session a rung must stay on so its grant can recover.
+	assert!(target.enabled);
+	assert_eq!(target.bitrate_bps, 1_000_000);
+	assert_eq!(unsafe { moq_rate_control_update(control, &mut target) }, 0);
+	assert!(!target.changed);
+	assert_eq!(moq_reservation_close(reservation), 0);
+	assert_eq!(moq_rate_control_close(control), 0);
+	assert_eq!(moq_allocator_close(allocator), 0);
+	assert_eq!(moq_publish_media_finish(high), 0);
+	assert!(unsafe { moq_publish_video(broadcast, &config(high)) } < 0);
+	assert_eq!(moq_publish_media_finish(low), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }

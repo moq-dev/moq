@@ -611,18 +611,15 @@ moq_source_ranked_audio(const std::unordered_map<std::string, moq::Audio> &rendi
 	});
 }
 
-// The ranked renditions to try in turn: the enabled ones. With none enabled, a consumer
-// should not select a rendition but holds the one it has, so only those `held` accepts.
-template<typename Rendition, typename Held>
+// The ranked renditions to try in turn: the enabled ones, since a consumer must not select a
+// disabled rendition.
+template<typename Rendition>
 static std::vector<const CatalogEntry<Rendition> *>
-moq_source_candidates(std::vector<const CatalogEntry<Rendition> *> ranked, Held held)
+moq_source_candidates(std::vector<const CatalogEntry<Rendition> *> ranked)
 {
-	const bool any_enabled =
-		std::any_of(ranked.begin(), ranked.end(), [](const auto *entry) { return entry->second.enabled; });
-	ranked.erase(
-		std::remove_if(ranked.begin(), ranked.end(),
-			       [&](const auto *entry) { return any_enabled ? !entry->second.enabled : !held(*entry); }),
-		ranked.end());
+	ranked.erase(std::remove_if(ranked.begin(), ranked.end(),
+				    [](const auto *entry) { return !entry->second.enabled; }),
+		     ranked.end());
 	return ranked;
 }
 
@@ -976,10 +973,7 @@ static void moq_source_subscribe_track(struct moq_source *ctx, const std::shared
 static void moq_source_subscribe_video(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
 				       const moq::Catalog &catalog)
 {
-	const auto candidates = moq_source_candidates(moq_source_ranked_video(catalog.video), [&](const auto &entry) {
-		return moq_source_same_video(conn->video.get(), entry.first, entry.second) ||
-		       moq_source_same_video(conn->pending_video.get(), entry.first, entry.second);
-	});
+	const auto candidates = moq_source_candidates(moq_source_ranked_video(catalog.video));
 	if (candidates.empty()) {
 		LOG_INFO("Catalog has no enabled video rendition; audio only");
 		moq_source_clear_video_locked(ctx);
@@ -1021,10 +1015,7 @@ static void moq_source_subscribe_video(struct moq_source *ctx, const std::shared
 static void moq_source_subscribe_audio(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
 				       const moq::Catalog &catalog)
 {
-	const auto candidates = moq_source_candidates(moq_source_ranked_audio(catalog.audio), [&](const auto &entry) {
-		return moq_source_same_audio(conn->audio.get(), entry.first, entry.second) ||
-		       moq_source_same_audio(conn->pending_audio.get(), entry.first, entry.second);
-	});
+	const auto candidates = moq_source_candidates(moq_source_ranked_audio(catalog.audio));
 	if (candidates.empty()) {
 		LOG_INFO("Catalog has no enabled audio rendition; video only");
 		moq_source_clear_audio_locked(ctx);
