@@ -26,7 +26,11 @@ dispatch of an A/A Nightly run on `main` once
 `gh workflow run nightly.yml --ref main -f bench-base=<main's head>`.
 Check that `bench-rust` and `bench-rust-relay` each produce an artifact-root
 `paired.json`. A dispatch cancels any in-progress Nightly through its
-concurrency group.
+concurrency group; the 07:00 UTC scheduled run can also cancel the dispatch.
+Dispatch clear of that cron window so the benchmark legs can finish. Verify
+that the dispatched run's `head_sha` equals `bench-base` before treating it
+as A/A evidence; a concurrent merge can move `main` between reading and
+dispatching it.
 
 Calibrated 2026-11-05 for the shared, supplemental (`rust-extra`) and io_uring
 groups; `bench/README.md` records the numbers. Threshold 10%, 20
@@ -59,7 +63,21 @@ confirmations, and 3 rounds stay as they were:
   the rounds against one binary in both slots), then fix it in `bench/run.sh`.
   Lowering the threshold waits on that fix.
 - The shared, supplemental and io_uring legs took 19 to 44 minutes of their
-  hour across the three runs.
+  hour across the three runs. Check `rust-bench` and `rust-relay` against
+  their hour too; a cold mbx cache roughly doubles build time. A timeout
+  leaves calibration incomplete, rather than demonstrating bias.
+
+Retain the earlier bias cases when reading the remaining groups' A/A results:
+[moq-dev/moq#7139](https://github.com/moq-dev/moq/pull/7139) found
+`moq-net/group_relay_frames/plain/*` (+23%) and
+`moq-net/origin/serve_idle/3000r` (+46%) agreed in every round despite equal
+callgrind instruction counts. `codec_messages/*/lite` (+31%, +68%) changed
+because a new bench group shifted LTO inlining.
+[moq-dev/moq#7253](https://github.com/moq-dev/moq/pull/7253) found
+`server_admission/workers=4/0` (+10%) had identical machine code apart from
+addresses. Include moq-quic's windowed `benches/streams.rs` cases too: an
+unchanged base varied 17 to 43% between back-to-back runs on a shared host
+([moq-dev/moq#6950](https://github.com/moq-dev/moq/pull/6950)).
 
 Decided 2026-11-05 (agent, recorded in
 [moq-dev/moq#7928](https://github.com/moq-dev/moq/pull/7928)): `bench/run.sh`

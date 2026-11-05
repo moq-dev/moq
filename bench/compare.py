@@ -157,7 +157,8 @@ def criterion_baseline(directory, discovery, benchmark):
 
 
 # A paired case beyond this change is flagged, and fails the nightly only when its rounds agree.
-# Rounds on unchanged code have agreed at up to +9.7% on the hosted runner, so lower is unsafe.
+# Calibrated groups reached +9.7% on unchanged code; rust-bench and rust-relay still need A/A.
+# Lowering this waits on fixing the stable bias recorded in quest/m1/bench-ci.md.
 THRESHOLD_PCT = 10
 # Each alternating round costs seconds per case, so a noisy night confirms only its worst slowdowns.
 CONFIRMATIONS = 20
