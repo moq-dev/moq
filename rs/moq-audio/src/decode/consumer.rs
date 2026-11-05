@@ -349,6 +349,10 @@ impl Consumer {
 				// Behind whatever the resampler held from before the loss.
 				Some(Encoded::Gap { timestamp, duration }) => {
 					self.started = true;
+					// The restart forgets the end, but the silence across it stays declared.
+					if self.end.is_some() {
+						self.target.end();
+					}
 					self.restart()?;
 					self.warmup_pending = !self.warmup.is_zero();
 					self.ready.push_back(Read::Gap { timestamp, duration });
@@ -2201,7 +2205,9 @@ mod tests {
 	/// sample count either way, and an unoptimized Opus codec takes minutes over
 	/// the whole corpus. [`opus_states_its_own_frame_duration`] covers Opus. The
 	/// lowest common rate keeps each packet small, since only its duration counts.
-	async fn replay(case: &crate::jitter::tests::Case) -> Vec<f64> {
+	/// With `hole`, the group after each end marker never arrives, so the consumer reads a
+	/// gap between the marker and what resumes.
+	async fn replay(case: &crate::jitter::tests::Case, hole: bool) -> Vec<f64> {
 		use crate::jitter::tests::duration;
 
 		let rate = 8_000;
@@ -2239,16 +2245,24 @@ mod tests {
 
 		let payload: Bytes = vec![0u8; samples * size_of::<f32>()].into();
 		let mut series = Vec::with_capacity(case.arrival.len());
+		// The sequence of the next group, one per packet and one per marker.
+		let mut sequence = 0;
 		for (index, (&arrival, &media)) in case.arrival.iter().zip(&case.media).enumerate() {
 			// The marker goes out as the utterance stops, so it is read during the silence
 			// rather than alongside what resumes it.
 			if case.ends.contains(&index) {
 				producer.discontinuity().unwrap();
+				sequence += 1;
 				match consumer.read().await.unwrap() {
 					Some(Read::End { .. }) => {}
 					other => panic!("packet {index} is preceded by {other:?}, not its end"),
 				}
+				if hole {
+					sequence += 1;
+					producer.seek(sequence).unwrap();
+				}
 			}
+			sequence += 1;
 			CLOCK.set(Some(origin + duration(arrival)));
 			producer
 				.write(moq_mux::container::Frame {
@@ -2291,7 +2305,7 @@ mod tests {
 		] {
 			let case = crate::jitter::tests::case(name);
 			let expected = case.series();
-			for (index, actual) in replay(&case).await.into_iter().enumerate() {
+			for (index, actual) in replay(&case, false).await.into_iter().enumerate() {
 				// A Duration is whole nanoseconds, so the round trip through one costs up
 				// to a nanosecond on top of the corpus tolerance.
 				assert!(
@@ -2301,6 +2315,15 @@ mod tests {
 				);
 			}
 		}
+	}
+
+	/// A group lost between a declared end and what resumes leaves the end declared, as the
+	/// browser's consumer does: the estimator measures the same as when nothing was lost.
+	#[tokio::test]
+	async fn a_declared_end_survives_a_lost_group() {
+		let case = crate::jitter::tests::case("silence");
+		assert!(!case.ends.is_empty());
+		assert_eq!(replay(&case, true).await, replay(&case, false).await);
 	}
 
 	/// The frame term is the packet's full duration, pre-skip included: Opus trims
