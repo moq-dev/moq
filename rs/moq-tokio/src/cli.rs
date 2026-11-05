@@ -148,11 +148,13 @@ impl Merge<'_> {
 		}
 		let resolved = resolve(self.registry, layers).map_err(|err| err.to_string())?;
 
+		// Only a file needs the TOML round trip, which refuses non-UTF-8 paths.
+		let Some(source) = self.file else {
+			return Ok((parsed, resolved));
+		};
 		let occupied = occupied_keys(self.registry, &resolved);
 		let mut merged = toml::Value::try_from(&parsed).map_err(|err| err.to_string())?;
-		if let Some(source) = self.file {
-			overlay_unoccupied(&mut merged, source.value, "", &occupied);
-		}
+		overlay_unoccupied(&mut merged, source.value, "", &occupied);
 		let config: T = merged.try_into().map_err(|err: toml::de::Error| err.to_string())?;
 		Ok((config, resolved))
 	}

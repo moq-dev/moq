@@ -334,9 +334,11 @@ the relay reports it in the request and enforces the grant it gets back.
 `moq auth serve` grants a certificate only what `--mtls-publish` and
 `--mtls-subscribe` name, nothing by default, unless a rule in its config file
 scopes that certificate (below). Public rules ignore certificates,
-so `--auth-public` with a client CA refuses to start. Only the QUIC listener
-and a `tls://` TCP listener (`listen.tcp.tls`) verify client certificates, so a
-relay with neither refuses `listen.tls.root` too.
+so `--auth-public` with a client CA refuses to start. The QUIC listener and
+every `tls://` listener (`listen.tcp.tls`, and the HTTPS port's `tls://`) verify
+client certificates under `listen.tls.root`; plain HTTPS verifies them under
+`web.https.root`. A relay with neither a QUIC nor a `tls://` TCP listener
+refuses `listen.tls.root`.
 
 Cluster peers are admitted the same way, so a mesh runs
 `moq auth serve --mtls-publish '**' --mtls-subscribe '**' --mtls-link peer` (or a
@@ -366,7 +368,10 @@ listener) whether or not the client sent that root. Only a certificate whose
 key signed a link up from the leaf is listed, so a client cannot claim an
 intermediate by sending it, and the relay refuses a chain too tangled to trace
 rather than report the leaf alone. A rule can scope a leaf, an intermediate,
-or a whole root.
+or a whole root. A hash names one certificate, not a key: a cross-signed CA
+has a hash per certificate it was issued as, so revoke each one. When two
+certificates sit equally near the leaf, the order the client presented its
+chain in decides which rule applies.
 
 `moq auth serve` takes an optional TOML file holding every flag under its
 dotted key; a flag given on the command line wins. Only the file holds

@@ -1192,6 +1192,17 @@ mod tests {
 		}
 	}
 
+	#[cfg(unix)]
+	#[test]
+	fn a_non_utf8_path_merges_without_a_file() {
+		use std::os::unix::ffi::OsStrExt;
+		let (mut serve, settings) = parsed(&["moq", "auth", "serve", "--key", "unused"]);
+		let key = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(b"/keys/\xff.jwk"));
+		serve.key = Some(key.clone());
+		let merged = serve.merged(&settings, &usage_rs::config::EnvLayer::new([])).unwrap();
+		assert_eq!(merged.key, Some(key));
+	}
+
 	#[test]
 	fn mesh_flags_need_a_mesh_url_and_key() {
 		let err = merged(&["moq", "auth", "serve", "--mesh-relay", "https://relay.example"])
