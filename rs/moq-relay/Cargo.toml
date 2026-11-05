@@ -93,7 +93,7 @@ sd-notify = { workspace = true }
 [dev-dependencies]
 aws-lc-rs = { workspace = true }
 criterion = { workspace = true }
-# The http_auth bench drives the web listener over HTTP/2.
+# An HTTP/2 client for the http_auth bench and the internal listener's tests.
 h2 = "0.4"
 hex = { workspace = true }
 moq-auth = { path = "../moq-auth", features = ["client", "serve"] }
