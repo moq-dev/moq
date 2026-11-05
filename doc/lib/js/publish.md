@@ -74,8 +74,8 @@ with a warning, since every viewer would refuse it.
 Video encodes while enabled, so its recent groups wait in the track's cache for
 a late subscription's `delay.max` or a fetch. The cache keeps an idle group for
 30 seconds whatever `maxAge` says; `maxAge` only bounds how far back a reader
-may reach into it. Audio keeps raw PCM while nobody listens, then encodes that
-history ahead of live audio when a subscriber arrives. Raw audio keeps up to
+may reach into it. Audio keeps raw PCM while nobody listens, then encodes the part of
+that history within the subscribers' max delay ahead of live audio when one arrives. Raw audio keeps up to
 `maxAge`, which for media defaults to 30 seconds (about 11.5 MB for 48 kHz
 stereo f32). With `maxAge: null`, which sets no publisher limit on the media, raw
 audio still keeps 30 seconds, since raw history needs a bound. The catalog and

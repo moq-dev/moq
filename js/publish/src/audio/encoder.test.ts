@@ -1163,7 +1163,8 @@ test("a backlog encode refusal aborts its rendition when demand arrives", async 
 		});
 		const net = broadcast.net.peek();
 		if (!net) throw new Error("expected network broadcast");
-		subscriber = net.track("audio").subscribe();
+		// A live-edge budget would leave the retained frame unencoded.
+		subscriber = net.track("audio").subscribe({ delay: { max: null } });
 		await settle();
 		expect(encoder.out.error.peek()).toBe(failure);
 		expect(subscriber.closed.peek()).toBe(failure);
@@ -1217,6 +1218,45 @@ test("default audio replays the last second after three seconds without a subscr
 			expect(Moq.Varint.decode(frame.payload)[0]).toBe(index * 20_000);
 			group.close();
 		}
+	} finally {
+		late?.close();
+		encoder.close();
+		broadcast.close();
+		installed.close();
+	}
+});
+
+// Replayed groups reach the track as fresh arrivals, so only the encoder can tell they are old: a
+// live viewer rejoining after seconds idle would otherwise wade through all of them first.
+test("demand replays only the retained audio its max delay still wants", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	const clock = new Manual();
+	const installed = clock.install();
+	const broadcast = new Broadcast({ origin: new Moq.Origin.Producer(), name: Moq.Path.from("rejoin.hang") });
+	const feed = new Feed();
+	const configuring = configured();
+	const encoder = new Encoder("audio", { broadcast, capture: fakeCapture(feed) as never });
+	let late: Moq.Track.Subscriber | undefined;
+	try {
+		await configuring;
+		await settle();
+		for (let index = 0; index < 150; index++) {
+			await feed.push({ timestamp: Micro(index * 20_000), channels: [new Float32Array(960)] });
+			await feed.drain();
+			await clock.advance(Nano.fromMilli(Milli(20)));
+		}
+		const net = broadcast.net.peek();
+		if (!net) throw new Error("expected network broadcast");
+		// At 3000 ms, a 130 ms budget still wants the frames ending after 2870 ms: 143 onward.
+		late = net.track("audio").subscribe({ delay: { max: Milli(130) } });
+		await settle();
+		expect(encoder.out.stats.peek().frames).toBe(7 - LaggingAudioEncoder.LAG);
+		await feed.push({ timestamp: Micro(150 * 20_000), channels: [new Float32Array(960)] });
+		await feed.drain();
+		const group = await late.ordered().nextGroup();
+		const frame = await group?.readFrame();
+		if (!frame) throw new Error("expected a replayed frame");
+		expect(Moq.Varint.decode(frame.payload)[0]).toBe(143 * 20_000);
 	} finally {
 		late?.close();
 		encoder.close();
