@@ -4,6 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Pre-encoded simulcast
+
+`moq_video_init` gains `lower`, changing its C ABI layout. Rebuild against the
+regenerated `moq.h` and matching library, zero-initialize the struct, and set
+`lower` to the next lower pre-encoded video media handle (0 for none).
+Use `moq_publish_media_set_enabled` to advertise disabled video renditions,
+and `moq_allocator_reserve_media` with the new `moq_rate_control_*` handles to
+adapt an external encoder to its reservation. Close controls and reservations
+separately. No wire format changes.
+
 ### Announcements are a listing ([#7678](https://github.com/moq-dev/moq/pull/7678))
 
 `moq_announce_kind` is `MOQ_ANNOUNCE_KIND_PRESENT` (0) or `MOQ_ANNOUNCE_KIND_ABSENT` (1), and `moq_announce_event` loses `predecessor` and `predecessor_len`, changing the C ABI.

@@ -94,7 +94,7 @@ their tracks. To serve paths on demand, `moq_origin_route_prefix()` delivers eac
 answer with `moq_broadcast_request_serve()`, `moq_broadcast_request_route()`, or
 `moq_broadcast_request_reject()`.
 
-Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Publication track names stay separate from codec settings. For simulcast, give each rendition the next one down as the `lower` handle in its `moq_video_encode_options`: it stops encoding, advertised as disabled, while its bandwidth grant cannot fund it, and resumes once the grant recovers. A rung only disables while the session probes for bandwidth, which on native transports takes moq-quic with BBR3.
+Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Publication track names stay separate from codec settings. For simulcast, give each rendition the next one down as the `lower` handle in its `moq_video_encode_options`: it stops encoding, advertised as disabled, while its bandwidth grant cannot fund it, and resumes once the grant recovers. A rung only disables while the session probes for bandwidth, which on native transports takes moq-quic with BBR3. For pre-encoded video, publish from the lowest rendition up and set `moq_video_init.lower` to the next lower media handle. Reserve each track with `moq_allocator_reserve_media`, then bind its reservation with `moq_rate_control_create` and call `moq_rate_control_update` on every frame. Apply changed targets to your encoder and `moq_publish_media_set_enabled`, resuming video on a keyframe; close the control and reservation separately when done.
 
 ## Things to know
 

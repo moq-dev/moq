@@ -196,9 +196,27 @@ impl<T: Send + 'static> Kept<T> {
 	}
 }
 
-impl Abort for Kept<Box<import::Track>> {
+struct Media {
+	track: Box<import::Track>,
+	video_priority: Option<i8>,
+}
+
+impl std::ops::Deref for Media {
+	type Target = import::Track;
+	fn deref(&self) -> &Self::Target {
+		&self.track
+	}
+}
+
+impl std::ops::DerefMut for Media {
+	fn deref_mut(&mut self) -> &mut Self::Target {
+		&mut self.track
+	}
+}
+
+impl Abort for Kept<Media> {
 	fn abort(self, err: moq_net::Error) {
-		self.inner.abort(err);
+		self.inner.track.abort(err);
 	}
 }
 
@@ -285,7 +303,7 @@ pub struct Publish {
 
 	/// Single-codec media importers, fed timestamped frames.
 	// Boxed because the codec splitters/imports are much larger than the container ones.
-	media: NonZeroSlab<Kept<Box<import::Track>>>,
+	media: NonZeroSlab<Kept<Media>>,
 
 	/// Container importers, fed whole chunks. A separate space from `media` because a
 	/// container publishes several tracks and carries its own timing, so it takes no
@@ -451,9 +469,17 @@ impl Publish {
 	}
 
 	/// Insert a media importer as a child of the broadcast `children` belongs to.
-	fn insert_media(&mut self, track: import::Track, children: Children) -> Result<Id, Error> {
+	fn insert_media(
+		&mut self,
+		track: import::Track,
+		children: Children,
+		video_priority: Option<i8>,
+	) -> Result<Id, Error> {
 		let media = Kept {
-			inner: Box::new(track),
+			inner: Media {
+				track: Box::new(track),
+				video_priority,
+			},
 			children: children.clone(),
 		};
 		children.insert(&mut self.media, media, Child::Media)
@@ -481,7 +507,7 @@ impl Publish {
 
 		let track = import::Track::audio(request, catalog.reserve().with_interval(interval), init)?;
 		let children = children.clone();
-		self.insert_media(track, children)
+		self.insert_media(track, children, None)
 	}
 
 	/// `interval` as in [`Self::audio`].
@@ -501,9 +527,10 @@ impl Publish {
 		let name = broadcast.unique_name(&format!(".{}", init.format));
 		let request = broadcast.reserve_track(name)?;
 
+		let priority = init.priority;
 		let track = import::Track::video(request, catalog.reserve().with_interval(interval), init)?;
 		let children = children.clone();
-		self.insert_media(track, children)
+		self.insert_media(track, children, Some(priority))
 	}
 
 	pub fn container(&mut self, broadcast: Id, init: import::ContainerInit) -> Result<Id, Error> {
@@ -522,6 +549,22 @@ impl Publish {
 			children: children.clone(),
 		};
 		children.insert(&mut self.containers, container, Child::Container)
+	}
+
+	pub fn media_video_priority(&self, media: Id) -> Result<i8, Error> {
+		self.media
+			.get(media)
+			.ok_or(Error::MediaNotFound)?
+			.video_priority
+			.ok_or_else(|| Error::InvalidConfig("the lower rendition is not video".into()))
+	}
+
+	pub fn media_set_enabled(&mut self, media: Id, enabled: bool) -> Result<(), Error> {
+		self.media
+			.get_mut(media)
+			.ok_or(Error::MediaNotFound)?
+			.set_enabled(enabled)?;
+		Ok(())
 	}
 
 	pub fn media_frame(&mut self, media: Id, data: &[u8], timestamp: hang::container::Timestamp) -> Result<(), Error> {
@@ -983,7 +1026,7 @@ impl Publish {
 		} = self.track_request.remove(request).ok_or(Error::NotFound)?;
 		let catalog = self.catalog(broadcast)?;
 		let track = import::Track::audio(request, catalog.reserve().with_interval(interval), init)?;
-		self.insert_media(track, children)
+		self.insert_media(track, children, None)
 	}
 
 	/// Accept a track request as a video track, returning a media handle like [`Self::video`].
@@ -999,8 +1042,9 @@ impl Publish {
 			request,
 		} = self.track_request.remove(request).ok_or(Error::NotFound)?;
 		let catalog = self.catalog(broadcast)?;
+		let priority = init.priority;
 		let track = import::Track::video(request, catalog.reserve().with_interval(interval), init)?;
-		self.insert_media(track, children)
+		self.insert_media(track, children, Some(priority))
 	}
 
 	/// Reject a track request, failing every subscriber waiting on it with `error_code`.

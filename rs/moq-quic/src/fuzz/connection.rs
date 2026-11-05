@@ -257,8 +257,9 @@ impl Peer {
 	/// so a frame they accept is never missed. Over-counting only skips a check.
 	///
 	/// `from` is the first byte that may differ from what the sender sent. Packets ending
-	/// before it are untouched, and a change inside a packet's tag alters nothing: the tag
-	/// is never checked and bounds no packet.
+	/// before it are untouched, and so are the frames of the packet whose tag holds it: the
+	/// tag is never checked and bounds no packet. Every later byte may differ, so every later
+	/// coalesced packet is decoded.
 	fn taint(&mut self, datagram: &[u8], from: usize) {
 		let parser = FixedLengthConnectionIdParser::new(CID_LEN);
 		let mut rest = Some(BytesMut::from(datagram));
@@ -274,7 +275,7 @@ impl Peer {
 				continue;
 			}
 			if start <= from && from + TAG_LEN >= end {
-				return;
+				continue;
 			}
 
 			let Ok(packet) = partial.finish(Some(&Clear)) else {

@@ -197,7 +197,7 @@ pub struct Web {
 	health: moq_tokio::accept::Health,
 	http_listener: Option<net::TcpListener>,
 	https_listener: Option<net::TcpListener>,
-	https_tls: Option<RustlsConfig>,
+	https_tls: Option<(RustlsConfig, moq_tokio::tls::Serve)>,
 	rtmp: rtmp::Handoff,
 	/// Serves `tls://` on the HTTPS listener, when the relay has a listen identity.
 	tls_stream: Option<moq_tokio::tcp::TlsAcceptor>,
@@ -252,8 +252,9 @@ impl Web {
 			}
 		}
 		if self.https_tls.is_none() && self.config.https.listen.is_some() {
-			let tls = build_https_config(&self.config.https.cert, &self.config.https.key, &self.config.https.root)?;
-			self.https_tls = Some(RustlsConfig::from_config(tls));
+			let (serve, tls) =
+				build_https_config(&self.config.https.cert, &self.config.https.key, &self.config.https.root)?;
+			self.https_tls = Some((RustlsConfig::from_config(tls), serve));
 		}
 		if let Some(listen) = self.config.http.listen
 			&& self.http_listener.is_none()
@@ -498,16 +499,7 @@ impl Web {
 		};
 
 		let https = if let Some(listener) = https_listener {
-			let rustls_config = https_tls.expect("HTTPS config was built before binding");
-			state.cluster.critical.spawn(
-				"HTTPS certificate reload",
-				reload_https_config(
-					rustls_config.clone(),
-					config.https.cert,
-					config.https.key,
-					config.https.root,
-				),
-			);
+			let (rustls_config, serve) = https_tls.expect("HTTPS config was built before binding");
 			let mut server = crate::listener::server(
 				listener,
 				crate::listener::Config {
@@ -518,6 +510,7 @@ impl Web {
 				WebAcceptor::tls(
 					crate::listener::Tls {
 						http: rustls_config,
+						serve,
 						qmux: tls_stream,
 					},
 					ws,
@@ -590,15 +583,17 @@ async fn get_cors(request: axum::extract::Request, next: axum::middleware::Next)
 	response
 }
 
-/// Build a [`rustls::ServerConfig`] for the HTTPS listener.
+/// Load the HTTPS listener's TLS policy and build its [`rustls::ServerConfig`].
 ///
-/// TLS version is left at the rustls default (1.2 + 1.3) so older clients
-/// can still hit the HTTPS API; the QUIC server separately forces 1.3.
+/// The policy reloads the certificate, key, and root files in place, so the config
+/// serves each rotation without a rebuild. TLS version is left at the rustls default
+/// (1.2 + 1.3) so older clients can still hit the HTTPS API; the QUIC server
+/// separately forces 1.3.
 fn build_https_config(
 	cert: &[PathBuf],
 	key: &[PathBuf],
 	root: &[PathBuf],
-) -> anyhow::Result<Arc<rustls::ServerConfig>> {
+) -> anyhow::Result<(moq_tokio::tls::Serve, Arc<rustls::ServerConfig>)> {
 	anyhow::ensure!(
 		!cert.is_empty(),
 		"web.https.cert must include at least one certificate when web.https.listen is configured"
@@ -613,44 +608,11 @@ fn build_https_config(
 	tls.key = key.to_vec();
 	tls.root = root.to_vec();
 
-	tls.server_config(vec![b"h2".to_vec(), b"http/1.1".to_vec()])
-		.context("failed to build https TLS config")
-}
-
-fn https_watch_paths(cert: &[PathBuf], key: &[PathBuf], root: &[PathBuf]) -> Vec<PathBuf> {
-	cert.iter()
-		.cloned()
-		.chain(key.iter().cloned())
-		.chain(root.iter().cloned())
-		.collect()
-}
-
-/// Reload the HTTPS certificate and key whenever they change on disk.
-///
-/// `RustlsConfig::reload_from_pem_file` would rebuild with `with_no_client_auth`
-/// (silently stripping mTLS when configured), so we always rebuild via the full
-/// [`build_https_config`] path. The client verifier watches root files itself,
-/// while this watcher also uses them to retry a failed certificate/key rotation.
-async fn reload_https_config(config: RustlsConfig, cert: Vec<PathBuf>, key: Vec<PathBuf>, root: Vec<PathBuf>) {
-	let paths = https_watch_paths(&cert, &key, &root);
-
-	let mut watcher = match moq_tokio::watch::Files::new(&paths) {
-		Ok(watcher) => watcher,
-		Err(err) => {
-			tracing::error!(%err, "failed to watch web certificate files; hot reload disabled");
-			return;
-		}
-	};
-
-	loop {
-		watcher.changed().await;
-		tracing::info!("reloading web certificate");
-
-		match build_https_config(&cert, &key, &root) {
-			Ok(new) => config.reload_from_config(new),
-			Err(err) => tracing::warn!(%err, "failed to reload web certificate"),
-		}
-	}
+	let serve = tls.load().context("failed to load https TLS")?;
+	let config = serve
+		.config(vec![b"h2".to_vec(), b"http/1.1".to_vec()])
+		.context("failed to build https TLS config")?;
+	Ok((serve, config))
 }
 
 /// The kernel's view of the TCP connection a request arrived on.
@@ -795,7 +757,8 @@ impl<S: Send + 'static> Accept<crate::listener::Accepted, S> for WebAcceptor {
 			let peer = tls
 				.and_then(|tls| tls.peer_certificates())
 				.filter(|certs| !certs.is_empty())
-				.map(|certs| MtlsPeer(moq_tokio::tls::PeerIdentity::from_chain(certs.to_vec())));
+				.zip(this.tls.as_ref())
+				.map(|(certs, tls)| MtlsPeer(tls.serve.peer(certs.to_vec())));
 			let server_name = tls
 				.and_then(|tls| tls.server_name())
 				.map(|name| ServerName(name.to_owned()));
@@ -1738,7 +1701,7 @@ mod tests {
 		let dir = TempDir::new().unwrap();
 		let (ca_path, cert_path, key_path) = make_certs(&dir);
 
-		let config =
+		let (_, config) =
 			build_https_config(&[cert_path], &[key_path], &[ca_path]).expect("build_https_config should succeed");
 
 		// ALPN must include h2 + http/1.1; otherwise reqwest's h2 attempt
@@ -1750,21 +1713,6 @@ mod tests {
 		);
 	}
 
-	#[test]
-	fn https_watch_paths_include_roots() {
-		let cert = PathBuf::from("cert.pem");
-		let key = PathBuf::from("key.pem");
-		let root = PathBuf::from("root.pem");
-		assert_eq!(
-			https_watch_paths(
-				std::slice::from_ref(&cert),
-				std::slice::from_ref(&key),
-				std::slice::from_ref(&root)
-			),
-			vec![cert, key, root]
-		);
-	}
-
 	#[tokio::test]
 	async fn build_https_config_no_client_auth_when_ca_empty() {
 		let dir = TempDir::new().unwrap();
@@ -1772,7 +1720,7 @@ mod tests {
 
 		// Empty root is the JWT-only path; should still produce a valid
 		// config with ALPN set so axum-server's hyper layer can negotiate h2.
-		let config =
+		let (_, config) =
 			build_https_config(&[cert_path], &[key_path], &[]).expect("no-CA path should still build a usable config");
 
 		assert_eq!(config.alpn_protocols, vec![b"h2".to_vec(), b"http/1.1".to_vec()],);
@@ -1784,7 +1732,7 @@ mod tests {
 		let (_ca_a, cert_a, key_a) = make_named_certs(&dir, "cdn", "cdn.moq.dev");
 		let (_ca_b, cert_b, key_b) = make_named_certs(&dir, "pro", "moq.pro");
 
-		let config = build_https_config(&[cert_a, cert_b], &[key_a, key_b], &[])
+		let (_, config) = build_https_config(&[cert_a, cert_b], &[key_a, key_b], &[])
 			.expect("multiple HTTPS cert/key pairs should build");
 
 		assert_eq!(config.alpn_protocols, vec![b"h2".to_vec(), b"http/1.1".to_vec()]);
@@ -2771,7 +2719,11 @@ mod tests {
 		// per-connection service but is independent of it.
 		let mut with_peer = SetConnectionExtensions {
 			inner: EchoExt,
-			peer: Some(MtlsPeer(moq_tokio::tls::PeerIdentity::from_chain(Vec::new()))),
+			peer: Some(MtlsPeer({
+				let mut listen = moq_tokio::tls::Listen::default();
+				listen.generate = vec!["localhost".into()];
+				listen.load().unwrap().peer(Vec::new())
+			})),
 			server_name: None,
 			socket: None,
 			admission: None,
@@ -3004,7 +2956,7 @@ mod tests {
 			use rustls::pki_types::{CertificateDer, pem::PemObject};
 			let dir = TempDir::new().unwrap();
 			let (ca, cert, key) = make_certs(&dir);
-			let tls = build_https_config(&[cert], &[key], &[]).unwrap();
+			let (serve, tls) = build_https_config(&[cert], &[key], &[]).unwrap();
 			let mut roots = rustls::RootCertStore::empty();
 			for cert in CertificateDer::pem_slice_iter(&std::fs::read(ca).unwrap()) {
 				roots.add(cert.unwrap()).unwrap();
@@ -3027,6 +2979,7 @@ mod tests {
 			assert!(activity.close().now_or_never().is_none(), "TLS was not counted");
 			let tls = crate::listener::Tls {
 				http: RustlsConfig::from_config(tls),
+				serve,
 				qmux: None,
 			};
 			let acceptor = WebAcceptor::tls(tls, false, rtmp::Handoff::default(), acceptor_state());

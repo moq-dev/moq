@@ -640,6 +640,7 @@ export { Patterns } from "@moq/pattern";
 export type Peer = infer<typeof PeerSchema>;
 
 export const PeerSchema: ZodMiniObject<{
+	chain: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
 	expires: ZodMiniOptional<ZodMiniInt>;
 	fingerprint: ZodMiniString<string>;
 	issuer: ZodMiniString<string>;
@@ -689,6 +690,7 @@ export const RequestSchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 	}>>;
 	server_name: ZodMiniOptional<ZodMiniString<string>>;
 	tls: ZodMiniOptional<ZodMiniObject<{
+		chain: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
 		expires: ZodMiniOptional<ZodMiniInt>;
 		fingerprint: ZodMiniString<string>;
 		issuer: ZodMiniString<string>;
@@ -728,6 +730,7 @@ export const RequestSchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 	}>>;
 	server_name: ZodMiniOptional<ZodMiniString<string>>;
 	tls: ZodMiniOptional<ZodMiniObject<{
+		chain: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
 		expires: ZodMiniOptional<ZodMiniInt>;
 		fingerprint: ZodMiniString<string>;
 		issuer: ZodMiniString<string>;
@@ -767,6 +770,7 @@ export const RequestSchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 	}>>;
 	server_name: ZodMiniOptional<ZodMiniString<string>>;
 	tls: ZodMiniOptional<ZodMiniObject<{
+		chain: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
 		expires: ZodMiniOptional<ZodMiniInt>;
 		fingerprint: ZodMiniString<string>;
 		issuer: ZodMiniString<string>;
@@ -812,6 +816,7 @@ export const RequestSchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 	}>>;
 	server_name: ZodMiniOptional<ZodMiniString<string>>;
 	tls: ZodMiniOptional<ZodMiniObject<{
+		chain: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
 		expires: ZodMiniOptional<ZodMiniInt>;
 		fingerprint: ZodMiniString<string>;
 		issuer: ZodMiniString<string>;

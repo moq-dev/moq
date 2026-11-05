@@ -5862,6 +5862,11 @@ impl RecvGroup {
 				let _ = track.abort(Error::ProtocolViolation);
 				return Poll::Ready(Err(Error::ProtocolViolation));
 			}
+			Err(Error::MalformedTrack) => {
+				tracing::warn!(group = group.group_id, "malformed track");
+				let _ = track.abort(Error::MalformedTrack);
+				return Poll::Ready(Err(Error::MalformedTrack));
+			}
 			Err(err) => return Poll::Ready(Err(err)),
 			Ok(opened) => opened,
 		};
@@ -5989,6 +5994,8 @@ enum OpenStep {
 	PeekFirst,
 	/// Claiming the head a mid-group stream continues, from its first Object ID if it has one.
 	ClaimTail(Option<u64>),
+	/// A standalone END_OF_TRACK: consuming its marker, then refusing any byte past it.
+	EndOfTrack { object: u64, properties: bool },
 }
 
 impl OpenGroup {
@@ -6065,10 +6072,17 @@ impl OpenGroup {
 						}
 					};
 					if let Some(first) = first.filter(|first| first.end_of_track) {
-						return Poll::Ready(Ok(Opened::EndOfTrack {
+						// Only the stream's end may follow the track's end: an object past it
+						// makes the track malformed.
+						match header.flags.has_extensions {
+							true => ready!(stream.poll_decode::<PeekFirst<true>>(waiter)).map(drop)?,
+							false => ready!(stream.poll_decode::<PeekFirst<false>>(waiter)).map(drop)?,
+						}
+						self.step = OpenStep::EndOfTrack {
 							object: first.id,
 							properties: first.has_properties,
-						}));
+						};
+						continue;
 					}
 
 					// Without a fill, a relay preserves the subgroup's first Object ID and
@@ -6108,6 +6122,12 @@ impl OpenGroup {
 						// so the head it delivered is the whole group.
 						start => self.step = OpenStep::ClaimTail(start),
 					}
+				}
+				OpenStep::EndOfTrack { object, properties } => {
+					if ready!(stream.poll_has_more(waiter))? {
+						return Poll::Ready(Err(Error::MalformedTrack));
+					}
+					return Poll::Ready(Ok(Opened::EndOfTrack { object, properties }));
 				}
 				OpenStep::ClaimTail(start) => {
 					let claimed = ready!(poll_claim_fill(fill, track, sequence, start, reading, waiter))?;
@@ -6212,7 +6232,8 @@ enum IngestPhase {
 	Admit { header: frame::Header },
 	/// Streaming the object payload.
 	Payload { frame: frame::Producer },
-	/// An explicit end-of-group or end-of-track status arrived.
+	/// An explicit end-of-group or end-of-track status arrived, so only the stream end may
+	/// follow.
 	Finished(Ended),
 }
 
@@ -7786,9 +7807,10 @@ impl GroupIngest {
 		})
 	}
 
-	/// `Ready(Ok(_))` once the stream FINs on an object boundary, or an explicit
-	/// end-of-group or end-of-track status arrives. The caller finishes or aborts the
-	/// group; an object cut short mid-payload was already aborted here with the reason.
+	/// `Ready(Ok(_))` once the stream ends, whether on an object boundary or after an
+	/// explicit end-of-group or end-of-track status; a byte past that status is refused as
+	/// `MalformedTrack`. The caller finishes or aborts the group; an object cut short
+	/// mid-payload was already aborted here with the reason.
 	pub(crate) fn poll<R: crate::transport::poll::RecvStream + crate::coding::Pause>(
 		&mut self,
 		reader: &mut Reader<R, Version>,
@@ -7907,6 +7929,10 @@ impl GroupIngest {
 					}
 				}
 				IngestPhase::Finished(ended) => {
+					// An object past the group's final one makes the track malformed.
+					if ready!(reader.poll_has_more(waiter))? {
+						return Poll::Ready(Err(Error::MalformedTrack));
+					}
 					let ended = std::mem::replace(ended, Ended::Group);
 					return Poll::Ready(Ok(ended));
 				}
@@ -14416,6 +14442,34 @@ mod stitch_tests {
 		}
 
 		(sequence, frames)
+	}
+
+	/// Only the stream's end may follow an END_OF_GROUP or END_OF_TRACK status: an object
+	/// past the final one makes the track malformed, rather than ending it or its group clean.
+	#[kio::test]
+	async fn an_object_after_an_end_status_ends_the_track() {
+		use futures::FutureExt;
+
+		let header = tail_stream(SEQUENCE, 0, &[]).len();
+		let object = &tail_stream(SEQUENCE, 0, &[b"past"])[header..];
+		for (payloads, status) in [
+			(&[&b"last"[..]][..], END_OF_GROUP),
+			(&[&b"last"[..]][..], END_OF_TRACK),
+			// A standalone END_OF_TRACK, which opens no group.
+			(&[][..], END_OF_TRACK),
+		] {
+			let mut bytes = end_marker(tail_stream(SEQUENCE, 0, payloads), status);
+			bytes.extend_from_slice(object);
+
+			let h = Harness::new(Fill::Done, vec![bytes]);
+			let mut stream = h.stream().await;
+			let res = h.subscriber.clone().recv_group(&mut stream).await;
+			assert!(matches!(res, Err(Error::MalformedTrack)), "{status}: {res:?}");
+			assert!(
+				matches!(h.track.closed().now_or_never(), Some(Err(Error::MalformedTrack))),
+				"{status}"
+			);
+		}
 	}
 
 	/// The canonical join: the fill carries the objects published before we subscribed and

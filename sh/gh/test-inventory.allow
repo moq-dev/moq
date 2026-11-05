@@ -3,6 +3,7 @@
 # orphan missing here, and fails on an entry that has a caller.
 
 # Flaky under load; the quest makes it reliable, then removes its `#[ignore]`.
+ignore moq-ffi::test::datagrams_cross_a_default_connection /quest/m0/test-flakes-2/ffi-datagram-roundtrip.md
 ignore moq-gst::source::imp::session_tests::restarts_under_reconnects_interleave_on_one_pad /quest/m0/test-flakes-2/gst-reconnect-interleave.md
 
 # Need a GPU, a desktop, or a device that no CI runner has.

@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use hang::catalog::{AudioCodec, AudioConfig, Contribution, Join, VideoCodec, VideoConfig};
+use hang::catalog::{AudioCodec, AudioConfig, Include, Join, VideoCodec, VideoConfig};
 use moq_mux::catalog::hang::Catalog;
 use moq_net::{Instance, Timestamp, track};
 use tower::ServiceExt;
@@ -105,29 +105,29 @@ async fn master(server: &Server, contains: &str, present: bool) -> String {
 fn parent_catalog() -> Catalog {
 	let mut catalog = catalog();
 	catalog.audio.renditions.get_mut("sound").unwrap().track = Some("audio".into());
-	catalog.contributions.insert(
+	catalog.include.insert(
 		"rung/a".into(),
-		Contribution::new(moq_net::path::Relative::new("./ladder").unwrap()),
+		Include::new(moq_net::path::Relative::new("./ladder").unwrap()),
 	);
 	catalog
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_contribution_does_not_hide_the_parents_first_variants() {
+async fn an_include_does_not_hide_the_parents_first_variants() {
 	let origin = moq_tokio::origin::spawn();
 	let root = Instance::random();
 	let child = Instance::random();
 	let parent = publish(&origin, "room/live", &root, &parent_catalog());
-	let _contribution = publish(&origin, "room/ladder", &child, &catalog());
+	let _include = publish(&origin, "room/ladder", &child, &catalog());
 	let server = Server::new(origin.consume(), Default::default()).unwrap();
 	let broadcaster = server.broadcaster("room/live").await.unwrap();
-	let at = crate::export::Contribution {
+	let at = crate::export::Include {
 		id: "rung/a".into(),
 		instance: child.to_string(),
 	};
 	assert!(
 		broadcaster
-			.contribution(&at, crate::export::Kind::Video, "same")
+			.include(&at, crate::export::Kind::Video, "same")
 			.await
 			.unwrap()
 			.is_some()
@@ -139,7 +139,7 @@ async fn a_contribution_does_not_hide_the_parents_first_variants() {
 	let (status, body) = pending.await;
 	assert_eq!(status, StatusCode::OK);
 	assert!(body.contains(&format!("@{root}/video/same/media.m3u8")));
-	assert!(body.contains(&format!("contribution/rung%2Fa/video/same/@{child}/media.m3u8")));
+	assert!(body.contains(&format!("include/rung%2Fa/video/same/@{child}/media.m3u8")));
 }
 
 #[tokio::test(start_paused = true)]
@@ -150,13 +150,13 @@ async fn an_idle_predecessor_does_not_strand_a_requested_reconfigure() {
 	let parent = publish(&origin, "room/live", &root, &parent_catalog());
 	frames(&parent.video, 0);
 	let mut value = catalog();
-	let mut contribution = publish(&origin, "room/ladder", &child, &value);
-	frames(&contribution.video, 0);
+	let mut include = publish(&origin, "room/ladder", &child, &value);
+	frames(&include.video, 0);
 	let server = Server::new(origin.consume(), Default::default()).unwrap();
-	master(&server, "contribution/", true).await;
-	let uri = format!("/room/live/@{root}/contribution/rung%2Fa/video/same/@{child}/media.m3u8");
+	master(&server, "include/", true).await;
+	let uri = format!("/room/live/@{root}/include/rung%2Fa/video/same/@{child}/media.m3u8");
 	assert_eq!(request(&server, &uri).await.0, StatusCode::OK);
-	let next = contribution
+	let next = include
 		.route
 		.broadcast()
 		.create_track("next", hang::container::track_info(1))
@@ -164,7 +164,7 @@ async fn an_idle_predecessor_does_not_strand_a_requested_reconfigure() {
 	let video = value.video.renditions.get_mut("same").unwrap();
 	video.track = Some("next".into());
 	video.coded_width = Some(640);
-	contribution
+	include
 		.catalog
 		.update(moq_net::Timed::from(&value).at(Timestamp::ZERO))
 		.unwrap();
@@ -184,22 +184,22 @@ async fn an_idle_predecessor_does_not_strand_a_requested_reconfigure() {
 	})
 	.await
 	.expect("the requested replacement must start after the idle predecessor releases");
-	assert_eq!(contribution.video.demand().wanted(), None);
+	assert_eq!(include.video.demand().wanted(), None);
 	frames(&next, 3);
 	drop(held);
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_finished_parent_catalog_keeps_its_contributions() {
+async fn a_finished_parent_catalog_keeps_its_includes() {
 	let origin = moq_tokio::origin::spawn();
 	let root = Instance::random();
 	let child = Instance::random();
 	let mut parent = publish(&origin, "room/live", &root, &parent_catalog());
 	frames(&parent.video, 0);
 	frames(&parent.audio, 0);
-	let _contribution = publish(&origin, "room/ladder", &child, &catalog());
+	let _include = publish(&origin, "room/ladder", &child, &catalog());
 	let server = Server::new(origin.consume(), Default::default()).unwrap();
-	let listed = format!("contribution/rung%2Fa/video/same/@{child}");
+	let listed = format!("include/rung%2Fa/video/same/@{child}");
 	master(&server, &listed, true).await;
 	// A clean end freezes the final catalog, entries included.
 	parent.catalog.finish().unwrap();
@@ -208,7 +208,7 @@ async fn a_finished_parent_catalog_keeps_its_contributions() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_failed_parent_catalog_stops_its_contributions() {
+async fn a_failed_parent_catalog_stops_its_includes() {
 	let origin = moq_tokio::origin::spawn();
 	let root = Instance::random();
 	let child = Instance::random();
@@ -220,35 +220,27 @@ async fn a_failed_parent_catalog_stops_its_contributions() {
 	} = publish(&origin, "room/live", &root, &parent_catalog());
 	frames(&video, 0);
 	frames(&audio, 0);
-	let contribution = publish(&origin, "room/ladder", &child, &catalog());
+	let include = publish(&origin, "room/ladder", &child, &catalog());
 	let server = Server::new(origin.consume(), Default::default()).unwrap();
-	master(&server, "contribution/", true).await;
-	let uri = format!("/room/live/@{root}/contribution/rung%2Fa/video/same/@{child}/media.m3u8");
+	master(&server, "include/", true).await;
+	let uri = format!("/room/live/@{root}/include/rung%2Fa/video/same/@{child}/media.m3u8");
 	parent_catalog_track.abort(moq_net::Error::Cancel).unwrap();
 	let deadline = kio::clock::now() + Duration::from_secs(10);
-	// A live contribution's playlist waits for media this test never writes, so bound each request.
+	// A live include's playlist waits for media this test never writes, so bound each request.
 	while !matches!(
 		kio::clock::timeout(Duration::from_secs(1), request(&server, &uri)).await,
 		Ok((StatusCode::NOT_FOUND, _))
 	) {
-		assert!(
-			kio::clock::now() < deadline,
-			"the contribution outlived its parent catalog"
-		);
+		assert!(kio::clock::now() < deadline, "the include outlived its parent catalog");
 		kio::clock::sleep(Duration::from_millis(10)).await;
 	}
-	assert!(
-		!request(&server, "/room/live/master.m3u8")
-			.await
-			.1
-			.contains("contribution/")
-	);
-	let mut catalog = contribution.catalog.demand();
+	assert!(!request(&server, "/room/live/master.m3u8").await.1.contains("include/"));
+	let mut catalog = include.catalog.demand();
 	kio::clock::timeout(Duration::from_secs(1), async {
 		while catalog.wanted_changed().await.unwrap().is_some() {}
 	})
 	.await
-	.expect("the contribution catalog is released");
+	.expect("the include catalog is released");
 }
 
 #[tokio::test(start_paused = true)]
@@ -258,21 +250,21 @@ async fn idle_release_waits_out_the_playlist_window() {
 	let child = Instance::random();
 	let parent = publish(&origin, "room/live", &root, &parent_catalog());
 	frames(&parent.video, 0);
-	let contribution = publish(&origin, "room/ladder", &child, &catalog());
-	frames(&contribution.video, 0);
+	let include = publish(&origin, "room/ladder", &child, &catalog());
+	frames(&include.video, 0);
 	let server = Server::new(origin.consume(), Default::default()).unwrap();
-	master(&server, "contribution/", true).await;
-	let uri = format!("/room/live/@{root}/contribution/rung%2Fa/video/same/@{child}/media.m3u8");
+	master(&server, "include/", true).await;
+	let uri = format!("/room/live/@{root}/include/rung%2Fa/video/same/@{child}/media.m3u8");
 	assert_eq!(request(&server, &uri).await.0, StatusCode::OK);
 	let settle = || kio::clock::sleep(Duration::from_millis(10));
 	settle().await;
 	// Three target durations (12 s) would forget rows the 16 s window still lists.
 	tokio::time::advance(Duration::from_secs(13)).await;
 	settle().await;
-	assert!(contribution.video.demand().wanted().is_some());
+	assert!(include.video.demand().wanted().is_some());
 	tokio::time::advance(Duration::from_secs(8)).await;
 	settle().await;
-	assert_eq!(contribution.video.demand().wanted(), None);
+	assert_eq!(include.video.demand().wanted(), None);
 }
 
 #[tokio::test(start_paused = true)]
@@ -283,14 +275,14 @@ async fn idle_release_keeps_an_ended_playlists_inherited_segments() {
 	let parent = publish(&origin, "room/live", &root, &parent_catalog());
 	frames(&parent.video, 0);
 	let mut value = catalog();
-	let mut contribution = publish(&origin, "room/ladder", &child, &value);
-	frames(&contribution.video, 0);
+	let mut include = publish(&origin, "room/ladder", &child, &value);
+	frames(&include.video, 0);
 	let server = Server::new(origin.consume(), Default::default()).unwrap();
-	master(&server, "contribution/", true).await;
-	let uri = format!("/room/live/@{root}/contribution/rung%2Fa/video/same/@{child}/media.m3u8");
+	master(&server, "include/", true).await;
+	let uri = format!("/room/live/@{root}/include/rung%2Fa/video/same/@{child}/media.m3u8");
 	assert_eq!(request(&server, &uri).await.0, StatusCode::OK);
 	// Reconfigure onto another track; the predecessor ends with its own track.
-	let next = contribution
+	let next = include
 		.route
 		.broadcast()
 		.create_track("next", hang::container::track_info(1))
@@ -298,12 +290,12 @@ async fn idle_release_keeps_an_ended_playlists_inherited_segments() {
 	let video = value.video.renditions.get_mut("same").unwrap();
 	video.track = Some("next".into());
 	video.coded_width = Some(640);
-	contribution
+	include
 		.catalog
 		.update(moq_net::Timed::from(&value).at(Timestamp::ZERO))
 		.unwrap();
 	master(&server, "RESOLUTION=640x240", true).await;
-	contribution.video.finish().unwrap();
+	include.video.finish().unwrap();
 	let held = server
 		.router()
 		.oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
@@ -337,12 +329,12 @@ async fn idle_release_keeps_an_ended_playlists_inherited_segments() {
 	assert_eq!(after, ended);
 	// The finished window keeps the track pin its retained groups are read through.
 	let broadcaster = server.broadcaster("room/live").await.unwrap();
-	let at = crate::export::Contribution {
+	let at = crate::export::Include {
 		id: "rung/a".into(),
 		instance: child.to_string(),
 	};
 	let rendition = broadcaster
-		.contribution(&at, crate::export::Kind::Video, "same")
+		.include(&at, crate::export::Kind::Video, "same")
 		.await
 		.unwrap()
 		.unwrap();
@@ -350,7 +342,7 @@ async fn idle_release_keeps_an_ended_playlists_inherited_segments() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_contribution_rendition_whose_broadcast_failed_is_not_listed() {
+async fn an_include_rendition_whose_broadcast_failed_is_not_listed() {
 	let origin = moq_tokio::origin::spawn();
 	let root = Instance::random();
 	let parent = publish(&origin, "room/live", &root, &parent_catalog());
@@ -363,7 +355,7 @@ async fn a_contribution_rendition_whose_broadcast_failed_is_not_listed() {
 	let mut value = catalog();
 	value.audio.renditions.clear();
 	value.video.renditions.get_mut("same").unwrap().broadcast = Some(moq_net::path::Relative::new("./other").unwrap());
-	let _contribution = publish(&origin, "room/ladder", &child, &value);
+	let _include = publish(&origin, "room/ladder", &child, &value);
 	let server = Server::new(origin.consume(), Default::default()).unwrap();
 	master(&server, &format!("@{root}/video/same"), true).await;
 	// Not a denial, but its media still can't be read.
@@ -374,11 +366,11 @@ async fn a_contribution_rendition_whose_broadcast_failed_is_not_listed() {
 		.reject(moq_net::Error::Unroutable);
 	kio::clock::sleep(Duration::from_secs(1)).await;
 	let listed = master(&server, &format!("@{root}/video/same"), true).await;
-	assert!(!listed.contains("contribution/"), "{listed}");
+	assert!(!listed.contains("include/"), "{listed}");
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_contribution_answers_the_master_when_no_own_rendition_is_listable() {
+async fn an_include_answers_the_master_when_no_own_rendition_is_listable() {
 	let origin = moq_tokio::origin::spawn();
 	let root = Instance::random();
 	let child = Instance::random();
@@ -386,16 +378,16 @@ async fn a_contribution_answers_the_master_when_no_own_rendition_is_listable() {
 	value.video.renditions.get_mut("same").unwrap().enabled = false;
 	value.audio.renditions.get_mut("sound").unwrap().enabled = false;
 	let _parent = publish(&origin, "room/live", &root, &value);
-	let _contribution = publish(&origin, "room/ladder", &child, &catalog());
+	let _include = publish(&origin, "room/ladder", &child, &catalog());
 	let server = Server::new(origin.consume(), Default::default()).unwrap();
 	let broadcaster = server.broadcaster("room/live").await.unwrap();
-	let at = crate::export::Contribution {
+	let at = crate::export::Include {
 		id: "rung/a".into(),
 		instance: child.to_string(),
 	};
 	assert!(
 		broadcaster
-			.contribution(&at, crate::export::Kind::Video, "same")
+			.include(&at, crate::export::Kind::Video, "same")
 			.await
 			.unwrap()
 			.is_some()
@@ -405,20 +397,20 @@ async fn a_contribution_answers_the_master_when_no_own_rendition_is_listable() {
 	let (status, body) = request(&server, "/room/live/master.m3u8").await;
 	assert_eq!(status, StatusCode::OK, "{body}");
 	assert!(
-		body.contains(&format!("contribution/rung%2Fa/video/same/@{child}")),
+		body.contains(&format!("include/rung%2Fa/video/same/@{child}")),
 		"{body}"
 	);
 	assert!(kio::clock::now() - start < Duration::from_secs(1));
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_contribution_rendition_is_listed_once_its_broadcast_resolves() {
+async fn an_include_rendition_is_listed_once_its_broadcast_resolves() {
 	let origin = moq_tokio::origin::spawn();
 	let root = Instance::random();
 	let parent = publish(&origin, "room/live", &root, &parent_catalog());
 	frames(&parent.video, 0);
 	frames(&parent.audio, 0);
-	// The contribution's only rendition reads a sibling whose route has not answered yet.
+	// The include's only rendition reads a sibling whose route has not answered yet.
 	let other = origin
 		.route_prefix("room/other", moq_net::origin::RouteOptions::default())
 		.unwrap();
@@ -426,11 +418,11 @@ async fn a_contribution_rendition_is_listed_once_its_broadcast_resolves() {
 	let mut value = catalog();
 	value.audio.renditions.clear();
 	value.video.renditions.get_mut("same").unwrap().broadcast = Some(moq_net::path::Relative::new("./other").unwrap());
-	let _contribution = publish(&origin, "room/ladder", &child, &value);
+	let _include = publish(&origin, "room/ladder", &child, &value);
 	let server = Server::new(origin.consume(), Default::default()).unwrap();
 	let listed = master(&server, &format!("@{root}/video/same"), true).await;
 	assert!(
-		!listed.contains("contribution/"),
+		!listed.contains("include/"),
 		"a pending binding may yet be denied: {listed}"
 	);
 	let request = kio::clock::timeout(Duration::from_secs(5), other.requested())
@@ -438,7 +430,7 @@ async fn a_contribution_rendition_is_listed_once_its_broadcast_resolves() {
 		.expect("the binding never asked")
 		.unwrap();
 	request.serve(moq_net::broadcast::Info::new().produce());
-	master(&server, &format!("contribution/rung%2Fa/video/same/@{child}"), true).await;
+	master(&server, &format!("include/rung%2Fa/video/same/@{child}"), true).await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -452,29 +444,29 @@ async fn listing_is_catalog_only_and_requests_own_the_lazy_media_lifetime() {
 	frames(&parent.audio, 0);
 	let mut child_catalog = catalog();
 	child_catalog.audio.renditions.get_mut("sound").unwrap().track = Some("audio".into());
-	let contribution = publish(&origin, "room/ladder", &child, &child_catalog);
+	let include = publish(&origin, "room/ladder", &child, &child_catalog);
 	let server = Server::new(origin.consume(), Default::default()).unwrap();
-	let prefix = format!("@{root}/contribution/rung%2Fa");
+	let prefix = format!("@{root}/include/rung%2Fa");
 	let listed = master(&server, &prefix, true).await;
 	assert!(listed.contains(&format!("@{root}/video/same/media.m3u8?jwt=viewer")));
 	assert!(listed.contains(&format!("{prefix}/video/same/@{child}/media.m3u8?jwt=viewer")));
 	assert!(listed.contains("NAME=\"rung/a/sound\""));
-	assert_eq!(contribution.video.demand().wanted(), None);
-	assert_eq!(contribution.audio.demand().wanted(), None);
-	assert!(contribution.catalog.demand().wanted().is_some());
+	assert_eq!(include.video.demand().wanted(), None);
+	assert_eq!(include.audio.demand().wanted(), None);
+	assert!(include.catalog.demand().wanted().is_some());
 
 	let uri = format!("/room/live/{prefix}/video/same/@{child}/media.m3u8");
 	let mut pending = Box::pin(request(&server, &uri));
 	assert!(futures::poll!(pending.as_mut()).is_pending());
-	let mut demand = contribution.video.demand();
+	let mut demand = include.video.demand();
 	while demand.wanted_changed().await.unwrap().is_none() {}
-	assert_eq!(contribution.audio.demand().wanted(), None);
+	assert_eq!(include.audio.demand().wanted(), None);
 	// The idle window is 20 s (the 16 s playlist window plus TARGETDURATION 4), and this first
 	// encode is slower than all of it.
 	tokio::time::advance(Duration::from_secs(21)).await;
 	assert!(futures::poll!(pending.as_mut()).is_pending());
-	assert!(contribution.video.demand().wanted().is_some());
-	frames(&contribution.video, 0);
+	assert!(include.video.demand().wanted().is_some());
+	frames(&include.video, 0);
 	let (status, playlist) = pending.await;
 	assert_eq!(status, StatusCode::OK, "{playlist}");
 	assert!(playlist.contains("#EXT-X-MEDIA-SEQUENCE:0"));
@@ -488,35 +480,30 @@ async fn listing_is_catalog_only_and_requests_own_the_lazy_media_lifetime() {
 	assert_eq!(held.status(), StatusCode::OK);
 	tokio::time::advance(Duration::from_secs(21)).await;
 	assert!(
-		contribution.video.demand().wanted().is_some(),
+		include.video.demand().wanted().is_some(),
 		"a slow body still holds demand"
 	);
 	drop(held);
 	// The reload window starts at completion, and another request renews it.
 	tokio::time::advance(Duration::from_secs(19)).await;
-	assert!(contribution.video.demand().wanted().is_some());
+	assert!(include.video.demand().wanted().is_some());
 	assert_eq!(request(&server, &uri).await.0, StatusCode::OK);
 	tokio::time::advance(Duration::from_secs(19)).await;
-	assert!(contribution.video.demand().wanted().is_some());
+	assert!(include.video.demand().wanted().is_some());
 	tokio::time::advance(Duration::from_secs(2)).await;
 	while demand.wanted_changed().await.unwrap().is_some() {}
-	assert_eq!(contribution.audio.demand().wanted(), None);
+	assert_eq!(include.audio.demand().wanted(), None);
 	// A later request creates fresh demand and indexes later segments on the same grid.
 	let mut resumed = Box::pin(request(&server, &uri));
 	assert!(futures::poll!(resumed.as_mut()).is_pending());
 	while demand.wanted_changed().await.unwrap().is_none() {}
-	frames(&contribution.video, 3);
+	frames(&include.video, 3);
 	let (status, playlist) = resumed.await;
 	assert_eq!(status, StatusCode::OK);
 	assert!(playlist.contains("#EXT-X-MEDIA-SEQUENCE:3"), "{playlist}");
-	assert_eq!(contribution.audio.demand().wanted(), None);
-	// Neither the DASH manifest nor the recorder cursor expands the contribution.
-	assert!(
-		!request(&server, "/room/live/manifest.mpd")
-			.await
-			.1
-			.contains("contribution")
-	);
+	assert_eq!(include.audio.demand().wanted(), None);
+	// Neither the DASH manifest nor the recorder cursor expands the include.
+	assert!(!request(&server, "/room/live/manifest.mpd").await.1.contains("include"));
 	let broadcaster = server.broadcaster("room/live").await.unwrap();
 	let mut recorder = broadcaster.renditions();
 	for _ in 0..2 {
@@ -535,26 +522,26 @@ async fn late_instances_replace_unpinned_entries_and_do_not_replace_pins() {
 	let first = Instance::random();
 	let second = Instance::random();
 	let mut value = parent_catalog();
-	let mut pin = value.contributions["rung/a"].clone();
+	let mut pin = value.include["rung/a"].clone();
 	pin.instance = Some(first.clone());
-	value.contributions.insert("pinned".into(), pin);
+	value.include.insert("pinned".into(), pin);
 	let parent = publish(&origin, "room/live", &root, &value);
 	frames(&parent.video, 0);
 	frames(&parent.audio, 0);
 	let server = Server::new(origin.consume(), Default::default()).unwrap();
-	master(&server, "contribution/", false).await;
+	master(&server, "include/", false).await;
 	let old = publish(&origin, "room/ladder", &first, &catalog());
-	let old_uri = format!("contribution/rung%2Fa/video/same/@{first}");
+	let old_uri = format!("include/rung%2Fa/video/same/@{first}");
 	let listed = master(&server, &old_uri, true).await;
-	assert!(listed.contains(&format!("contribution/pinned/video/same/@{first}")));
+	assert!(listed.contains(&format!("include/pinned/video/same/@{first}")));
 	assert_eq!(old.video.demand().wanted(), None);
 	old.route.withdraw();
-	master(&server, "contribution/", false).await;
+	master(&server, "include/", false).await;
 	old.route.announce().unwrap();
-	master(&server, &format!("contribution/pinned/video/same/@{first}"), true).await;
+	master(&server, &format!("include/pinned/video/same/@{first}"), true).await;
 	let new = publish(&origin, "room/ladder", &second, &catalog());
-	let listed = master(&server, &format!("contribution/rung%2Fa/video/same/@{second}"), true).await;
-	assert!(!listed.contains("contribution/pinned/"));
+	let listed = master(&server, &format!("include/rung%2Fa/video/same/@{second}"), true).await;
+	assert!(!listed.contains("include/pinned/"));
 	assert!(!listed.contains(&old_uri));
 	assert_eq!(new.video.demand().wanted(), None);
 	assert_eq!(
@@ -564,59 +551,59 @@ async fn late_instances_replace_unpinned_entries_and_do_not_replace_pins() {
 		StatusCode::NOT_FOUND
 	);
 	new.route.withdraw();
-	master(&server, &format!("contribution/pinned/video/same/@{first}"), true).await;
+	master(&server, &format!("include/pinned/video/same/@{first}"), true).await;
 }
 
 #[tokio::test(start_paused = true)]
 #[tracing_test::traced_test]
-async fn contributions_take_the_roots_grid_and_denied_ones_are_not_advertised() {
+async fn includes_take_the_roots_grid_and_denied_ones_are_not_advertised() {
 	let origin = moq_tokio::origin::spawn();
 	let root = Instance::random();
 	let parent = publish(&origin, "room/live", &root, &parent_catalog());
 	frames(&parent.video, 0);
 	frames(&parent.audio, 0);
 	let child = Instance::random();
-	// The contribution declares its own interval, which HLS ignores for the root's.
+	// The include declares its own interval, which HLS ignores for the root's.
 	let mut value = catalog();
 	value.media.join = Join::new(Duration::from_secs(1));
-	let contribution = publish(&origin, "room/ladder", &child, &value);
+	let include = publish(&origin, "room/ladder", &child, &value);
 	let server = Server::new(origin.consume(), Default::default()).unwrap();
-	master(&server, "contribution/", true).await;
+	master(&server, "include/", true).await;
 	let patterns = ["room/live".parse::<moq_net::Pattern>().unwrap()].into_iter().collect();
 	let denied = Server::new(origin.consume().scope("", &patterns).unwrap(), Default::default()).unwrap();
-	master(&denied, "contribution/", false).await;
+	master(&denied, "include/", false).await;
 	for resource in ["media.m3u8", "init.abcd.mp4", "seg/abcd.0.m4s"] {
 		assert_eq!(
 			request(
 				&denied,
-				&format!("/room/live/@{root}/contribution/rung%2Fa/video/same/@{child}/{resource}")
+				&format!("/room/live/@{root}/include/rung%2Fa/video/same/@{child}/{resource}")
 			)
 			.await
 			.0,
 			StatusCode::FORBIDDEN
 		);
 	}
-	assert_eq!(contribution.video.demand().wanted(), None);
-	let uri = format!("/room/live/@{root}/contribution/rung%2Fa/video/same/@{child}/media.m3u8");
+	assert_eq!(include.video.demand().wanted(), None);
+	let uri = format!("/room/live/@{root}/include/rung%2Fa/video/same/@{child}/media.m3u8");
 	let mut pending = Box::pin(request(&server, &uri));
 	assert!(futures::poll!(pending.as_mut()).is_pending());
-	let mut demand = contribution.video.demand();
+	let mut demand = include.video.demand();
 	kio::clock::timeout(Duration::from_secs(10), async {
 		while demand.wanted_changed().await.unwrap().is_none() {}
 	})
 	.await
-	.expect("the request never demanded the contribution's media");
-	frames(&contribution.video, 0);
+	.expect("the request never demanded the include's media");
+	frames(&include.video, 0);
 	let (status, playlist) = kio::clock::timeout(Duration::from_secs(10), pending)
 		.await
-		.expect("the contribution never listed a segment");
+		.expect("the include never listed a segment");
 	assert_eq!(status, StatusCode::OK, "{playlist}");
 	// Twice the root's 2 s interval; its own 1 s interval would give 2.
 	assert!(playlist.contains("#EXT-X-TARGETDURATION:4"), "{playlist}");
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_refused_contribution_is_listed_once_announced() {
+async fn a_refused_include_is_listed_once_announced() {
 	let origin = moq_tokio::origin::spawn();
 	let root = Instance::random();
 	let parent = publish(&origin, "room/live", &root, &parent_catalog());
@@ -636,7 +623,7 @@ async fn a_refused_contribution_is_listed_once_announced() {
 	};
 	let own = format!("@{root}/video/same");
 	let (listed, ()) = futures::join!(master(&server, &own, true), refuse);
-	assert!(!listed.contains("contribution/"), "{listed}");
+	assert!(!listed.contains("include/"), "{listed}");
 	// The refusing route is not asked again on a timer.
 	assert!(
 		kio::clock::timeout(Duration::from_secs(30), claim.requested())
@@ -645,6 +632,6 @@ async fn a_refused_contribution_is_listed_once_announced() {
 	);
 	drop(claim);
 	let child = Instance::random();
-	let _contribution = publish(&origin, "room/ladder", &child, &catalog());
-	master(&server, &format!("contribution/rung%2Fa/video/same/@{child}"), true).await;
+	let _include = publish(&origin, "room/ladder", &child, &catalog());
+	master(&server, &format!("include/rung%2Fa/video/same/@{child}"), true).await;
 }

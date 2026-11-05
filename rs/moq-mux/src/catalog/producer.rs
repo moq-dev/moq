@@ -1363,7 +1363,7 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 		track.height = config.coded_height;
 		track.framerate = config.framerate;
 		track.bitrate = config.bitrate;
-		track.init_data = init_data;
+		track.init_data = init_data.map(Into::into);
 		track.render_group = Some(1);
 		track.alt_group = if has_multiple_video { Some(1) } else { None };
 		track.max_grp_sap_starting_type = sap_type;
@@ -1396,7 +1396,7 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 		track.samplerate = Some(config.sample_rate);
 		track.channel_config = Some(config.channel_count.to_string());
 		track.bitrate = config.bitrate;
-		track.init_data = init_data;
+		track.init_data = init_data.map(Into::into);
 		track.render_group = Some(1);
 		track.alt_group = if has_multiple_audio { Some(1) } else { None };
 		track.max_grp_sap_starting_type = Some(1);
@@ -1419,7 +1419,7 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 		track.lang = config.lang.clone();
 		track.label = config.label.clone();
 		if let hang::catalog::Container::Cmaf { init, .. } = &config.container {
-			track.init_data = Some(base64::engine::general_purpose::STANDARD.encode(init));
+			track.init_data = Some(base64::engine::general_purpose::STANDARD.encode(init).into());
 		}
 		track.render_group = Some(1);
 		track.jitter = config.jitter;
@@ -3084,7 +3084,7 @@ mod test {
 
 		let msf = to_msf_media::<()>(&catalog, &moq_net::Path::empty());
 		let video = &msf.tracks[0];
-		assert_eq!(video.init_data, Some("AQID".to_string()));
+		assert_eq!(video.init_data.as_deref(), Some("AQID"));
 	}
 
 	#[test]
@@ -3120,7 +3120,7 @@ mod test {
 		let msf = to_msf_media::<()>(&catalog, &moq_net::Path::empty());
 		let video = &msf.tracks[0];
 		assert_eq!(video.packaging, moq_msf::Packaging::Cmaf);
-		assert_eq!(video.init_data, Some("AAAYZ2Z0eXA=".to_string()));
+		assert_eq!(video.init_data.as_deref(), Some("AAAYZ2Z0eXA="));
 	}
 
 	#[test]
