@@ -121,26 +121,30 @@ Remove the cold-start warm-up reads (`claimed` in
 assert that the first subscription succeeds. Keep them for moq-transport.
 Run `just check`, `just test interop --all` and `just drafts check`.
 
-### Once identity replaces ANNOUNCE_TAKEOVER
+### Once the instance replaces ANNOUNCE_TAKEOVER
 
 Decided 2026-10-31 (maintainer, the /quest-complete requeue session). Kept
 separate from the identity rewrite of this Plan, which landed with
 [moq-dev/moq#7420](https://github.com/moq-dev/moq/pull/7420).
-"We're replacing EPOCH with IDENTITY soon" (maintainer, 2026-10-31).
+"We're replacing EPOCH with IDENTITY soon" (maintainer, 2026-10-31). The
+broadcast "identity" was renamed `instance` on 2026-11-01 (maintainer, in
+[the route API audit](/quest/m1/api-audit/route/README.md), landed in
+[moq-dev/moq#7489](https://github.com/moq-dev/moq/pull/7489)), so that
+IDENTITY is now the instance.
 
-- Reword "takeover" as an event or operation, in terms of identity
+- Reword "takeover" as an event or operation, in terms of instance
   continuity, in [moq-bench pins the instances it measures](/quest/m2/bench-epoch-pin.md)
   (Goal and Plan), [the HLS server follows each path once](/quest/m2/hls-follow-once.md)
   (Goal and Tests), and [lite-07 route wire](/quest/m1/cluster-routing/routes/wire.md)
   (the wire sketch, "the separately proven Takeover operation").
 - Rewrite the EPOCH references in `drafts/draft-lcurley-moq-cluster.md` and
-  `drafts/draft-lcurley-moq-epoch.md` in terms of IDENTITY.
+  `drafts/draft-lcurley-moq-epoch.md` in terms of the instance.
 - Add a regression test where a publisher restart's new announcement
   arrives before the old one's reset, on `solicit = false` moq-transport
   sessions. [moq-dev/moq#7239](https://github.com/moq-dev/moq/pull/7239)
   found that the subscriber (`rs/moq-net/src/ietf/subscriber.rs`, `attach`)
   folds such a PUBLISH_NAMESPACE into the same epochless route as an update
-  instead of End then Start; per-announcement identities resolve it, and
+  instead of End then Start; per-announcement instances resolve it, and
   the test proves they do.
 
 Public API: breaking; removes `Takeover` and the predecessor fields in every

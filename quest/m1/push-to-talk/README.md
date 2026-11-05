@@ -97,10 +97,6 @@ catches this. A complete set of runs finishes this epic.
 - [Push-to-talk suppresses silence instead of toggling the catalog](/quest/m1/push-to-talk/dtx.md) - replaces hold with DTX
 - [Native playback fills declared silence with comfort noise](/quest/m1/push-to-talk/native-comfort-noise.md) - `moq play` plays comfort noise over declared silence and counts no underrun, matching the browser
 
-## Closes
-
-- [#7101](https://github.com/moq-dev/moq/issues/7101) - a disabled audio rendition is deselected, so the start of the next utterance is lost
-
 ## Related
 
 - [Container reads drop backfill](/quest/m1/read-backfill.md) - changes how the ordered read treats a group below its cursor, where this head was lost
