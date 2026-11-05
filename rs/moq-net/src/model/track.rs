@@ -22739,6 +22739,7 @@ mod test {
 	/// rather than dropping it again as if the reader had judged it stale itself.
 	#[test]
 	#[cfg(feature = "async")]
+	#[expect(clippy::single_range_in_vec_init, reason = "the reopened runs are a list, here one")]
 	fn a_superseded_received_stale_report_stays_owed_after_an_update() {
 		let producer = track_producer("test", Info::timed());
 		let budget = Duration::from_millis(500);
@@ -22752,7 +22753,10 @@ mod test {
 		assert_eq!(subscriber.poll_drop(&waiter), Poll::Ready((1..3, Hole::stale(budget))));
 		producer.supersede_stale(None);
 		assert_eq!(subscriber.reoffer_stale(), [1..3]);
-		assert!(subscriber.poll_drop(&waiter).is_pending(), "no verdict under the new terms");
+		assert!(
+			subscriber.poll_drop(&waiter).is_pending(),
+			"no verdict under the new terms"
+		);
 		// The upstream drops it again under the new terms: reported again.
 		producer.give_up(1..3, Hole::stale(budget));
 		assert_eq!(subscriber.poll_drop(&waiter), Poll::Ready((1..3, Hole::stale(budget))));
