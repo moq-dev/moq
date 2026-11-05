@@ -482,7 +482,7 @@ test("integration: lite-07 serves sparse and relative ranges", async () => {
 				order: "ascending",
 				ranges: [
 					{ start: { absolute: 1n }, end: { absolute: 3n } },
-					{ start: { relative: 2 }, end: { absolute: 9n } },
+					{ start: { relative: 2n }, end: { absolute: 9n } },
 				],
 			})
 			.ordered();

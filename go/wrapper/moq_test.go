@@ -543,30 +543,43 @@ func TestInsertDatagramAndLargest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	track, err := broadcast.PublishTrack("events", timedInfo())
+	track, err := broadcast.CreateDatagrams("events", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	consumer, err := track.Consume(nil)
+	consumer, err := track.Consume()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := track.InsertDatagram(7, moq.Frame{Payload: []byte("seven"), Timestamp: ts(0)}); err != nil {
+	if err := track.Insert(moq.Datagram{Sequence: 7, Payload: []byte("seven")}); err != nil {
 		t.Fatal(err)
 	}
-	datagram, err := consumer.RecvDatagram(ctx)
+	datagram, err := consumer.Recv(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if datagram == nil || datagram.Sequence != 7 || string(datagram.Payload) != "seven" {
 		t.Fatalf("got datagram %+v", datagram)
 	}
-	if next, err := track.AppendDatagram(moq.Frame{Payload: []byte("next"), Timestamp: ts(0)}); err != nil || next != 8 {
+	if next, err := track.Append(nil, []byte("next")); err != nil || next != 8 {
 		t.Fatalf("appended at %d, err %v", next, err)
 	}
-	// Datagrams are numbered apart from groups, so they never move Largest.
-	if largest, err := track.Largest(); err != nil || largest != nil {
-		t.Fatalf("largest %v, err %v", largest, err)
+	if err := consumer.SetPriority(12); err != nil {
+		t.Fatal(err)
+	}
+	if priority, err := track.Priority(); err != nil || priority == nil || *priority != 12 {
+		t.Fatalf("priority %v, error %v", priority, err)
+	}
+	consumer.Cancel()
+	last := int8(12)
+	if priority, err := track.PriorityChanged(ctx, &last); err != nil || priority != nil {
+		t.Fatalf("priority %v, error %v", priority, err)
+	}
+	if err := track.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	if err := broadcast.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

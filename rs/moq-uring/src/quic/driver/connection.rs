@@ -201,8 +201,6 @@ pub struct Connection {
 	alpn: Option<String>,
 	/// The SNI the client presented, cached likewise.
 	server_name: Option<String>,
-	/// The peer's address when the handshake completed.
-	remote: SocketAddr,
 	handshake: crate::quic::handshake::Info,
 }
 
@@ -264,9 +262,8 @@ impl Connection {
 	///
 	/// Only records the close: the driver task frames the CONNECTION_CLOSE, so keep the worker
 	/// running until [`Self::closed`] resolves.
-	pub fn close(&self, error_code: VarInt, reason: &[u8]) {
-		self.shared
-			.close_code(error_code.into_inner(), &String::from_utf8_lossy(reason));
+	pub fn close(&self, error_code: VarInt, reason: &str) {
+		self.shared.close_code(error_code.into_inner(), reason);
 	}
 
 	/// Wait for the connection to close, returning why.
@@ -291,10 +288,9 @@ impl Connection {
 		self.shared.conn.borrow().peer_identity()
 	}
 
-	/// The peer's address as of the handshake; a peer that migrates later
-	/// keeps its connection but not this value.
-	pub fn remote_addr(&self) -> SocketAddr {
-		self.remote
+	/// The peer's current UDP address, following any migration.
+	pub fn remote_address(&self) -> SocketAddr {
+		self.shared.conn.borrow().remote_address()
 	}
 
 	/// The SNI the client presented, or `None` if it sent none. Always `None`
@@ -314,9 +310,8 @@ impl Connection {
 	///
 	/// Errors, changing nothing, on limits [`Limits::validate`](crate::quic::Limits::validate)
 	/// refuses.
-	pub fn set_limits(&self, limits: crate::quic::Limits) -> Result<(), Error> {
-		self.shared.conn.borrow_mut().set_limits(limits)?;
-		Ok(())
+	pub fn set_limits(&self, limits: crate::quic::Limits) -> Result<(), crate::quic::LimitsError> {
+		self.shared.conn.borrow_mut().set_limits(limits)
 	}
 
 	/// The wire counters this connection updates as it sends and receives.
@@ -343,7 +338,6 @@ impl Clone for Connection {
 			shared: self.shared.clone(),
 			alpn: self.alpn.clone(),
 			server_name: self.server_name.clone(),
-			remote: self.remote,
 			handshake: self.handshake,
 		}
 	}
@@ -442,7 +436,7 @@ pub(crate) async fn establish(shared: Shared, deadline: Option<Instant>) -> Resu
 	}
 	result?;
 
-	let (alpn, server_name, remote) = {
+	let (alpn, server_name) = {
 		let conn = shared.conn.borrow();
 		let (alpn, server_name) = match conn.handshake_data() {
 			Some(data) => (
@@ -451,8 +445,7 @@ pub(crate) async fn establish(shared: Shared, deadline: Option<Instant>) -> Resu
 			),
 			None => (None, None),
 		};
-		let remote = conn.remote_address();
-		(alpn, server_name, remote)
+		(alpn, server_name)
 	};
 
 	shared.hold();
@@ -460,7 +453,6 @@ pub(crate) async fn establish(shared: Shared, deadline: Option<Instant>) -> Resu
 		shared,
 		alpn,
 		server_name,
-		remote,
 		handshake: crate::quic::handshake::Info { deadline },
 	};
 	guard.shared = None;
@@ -517,7 +509,7 @@ impl Connection {
 	}
 
 	/// Receive the next datagram.
-	pub async fn read_datagram(&self) -> Result<Bytes, Error> {
+	pub async fn recv_datagram(&self) -> Result<Bytes, Error> {
 		kio::wait(|waiter| self.poll_recv_datagram(waiter)).await
 	}
 
@@ -545,7 +537,7 @@ impl Connection {
 		open(&self.shared, Dir::Bi, options, waiter).map_ok(|(send, recv)| (send, recv.expect("bidirectional")))
 	}
 
-	/// [`Self::read_datagram`], as a poll.
+	/// [`Self::recv_datagram`], as a poll.
 	pub fn poll_recv_datagram(&self, waiter: &kio::Waiter) -> Poll<Result<Bytes, Error>> {
 		recv_datagram(&self.shared, waiter)
 	}

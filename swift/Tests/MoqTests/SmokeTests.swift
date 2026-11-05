@@ -26,6 +26,30 @@ private func assertTimeOverflow<T>(
 }
 
 final class SmokeTests: XCTestCase {
+    func testDatagramOnlyRequestsHaveIndependentPriorityDemand() async throws {
+        let broadcast = try BroadcastProducer()
+        let stream = try broadcast.publishTrack(name: "events")
+        let requests = try broadcast.requests().datagrams()
+        let consumer = try broadcast.consume().datagrams(name: "events")
+        try consumer.setPriority(12)
+        let request = try await requests.requested()
+        XCTAssertEqual(try request.name(), "events")
+        XCTAssertEqual(try request.priority(), 12)
+        let producer = try request.accept()
+        XCTAssertEqual(try producer.priority(), 12)
+        XCTAssertNil(try stream.demand().wanted)
+        try producer.insert(Datagram(sequence: 7, timestamp: nil, payload: Data("seven".utf8)))
+        let datagram = try await consumer.recv()
+        XCTAssertEqual(datagram?.sequence, 7)
+        XCTAssertEqual(datagram?.payload, Data("seven".utf8))
+        consumer.cancel()
+        let priority = try await producer.priorityChanged(last: 12)
+        XCTAssertNil(priority)
+        try producer.finish()
+        requests.cancel()
+        try broadcast.close()
+    }
+
     func testDefaultSubscriptionSkipsSupersededGroupsAtOnce() {
         XCTAssertEqual(Subscription.default.delay.min, 0)
         XCTAssertEqual(Subscription.default.delay.max, 0)

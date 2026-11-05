@@ -1815,7 +1815,7 @@ export class Subscriber {
 	 * @internal
 	 */
 	async handleGroup(group: GroupMessage, stream: Reader) {
-		if (group.subGroupId !== 0) {
+		if (group.subGroupId !== 0n) {
 			throw new Error("subgroups are not supported");
 		}
 
@@ -2076,7 +2076,7 @@ export class Subscriber {
 					object.subgroup === "next";
 				if (first && inherits) throw new ProtocolViolation("the first fetch object refers to a prior object");
 				if (object.subgroup === "datagram") throw new JoinUnsupported("a datagram group is not fetchable");
-				if (object.subgroup === "next" || (object.subgroup === "explicit" && object.subgroupId !== 0)) {
+				if (object.subgroup === "next" || (object.subgroup === "explicit" && object.subgroupId !== 0n)) {
 					throw new JoinUnsupported("subgroups are not supported");
 				}
 
@@ -2167,7 +2167,7 @@ export class Subscriber {
 		const datagram = await ObjectDatagram.decode(data, version);
 		const { trackAlias: alias, groupId: sequence } = datagram;
 
-		if ((datagram.objectId ?? 0) !== 0) {
+		if ((datagram.objectId ?? 0n) !== 0n) {
 			console.debug(`dropping a datagram past object 0: alias=${alias} group=${sequence}`);
 			return;
 		}

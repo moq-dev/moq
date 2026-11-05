@@ -24,7 +24,7 @@ import { GRACE } from "../ledger.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
-import type { Producer, Subscriber as TrackSubscriber } from "../track.ts";
+import type { Producer } from "../track.ts";
 import { SEGMENT_BYTES } from "../util/limits.ts";
 import { Budget } from "../util/yield.ts";
 import * as Varint from "../varint.ts";
@@ -37,11 +37,11 @@ import { StreamId } from "./stream.ts";
 import {
 	encodeSubscribeResponse,
 	Subscribe,
-	SubscribeDrop,
-	SubscribeEnd,
+	SubscribeFinish,
 	SubscribeOk,
 	type SubscribeResponse,
 	SubscribeStart,
+	SubscribeUpdate,
 } from "./subscribe.ts";
 import { Minted, SUBSCRIBE_SETUP_TIMEOUT_MS, Subscriber } from "./subscriber.ts";
 import { Track, TrackInfo } from "./track.ts";
@@ -1010,6 +1010,8 @@ test("an unknown announce type between starts keeps the stream", async () => {
 
 interface FakeStream {
 	inbound: ReadableStreamDefaultController<Uint8Array>;
+	// The subscriber's writes as they arrive, so a decoder can wait for a whole message.
+	outbound: ReadableStream<Uint8Array>;
 	// Resolves once the subscriber waits on a read the test has not answered.
 	reading: Promise<void>;
 	aborted: Promise<unknown>;
@@ -1040,6 +1042,8 @@ function fakeSession(park: number[] = [], stall: number[] = []) {
 		close: (info?: WebTransportCloseInfo) => void closes.push(info),
 		createBidirectionalStream: () => {
 			let inbound!: ReadableStreamDefaultController<Uint8Array>;
+			let sent!: ReadableStreamDefaultController<Uint8Array>;
+			const outbound = new ReadableStream<Uint8Array>({ start: (controller) => (sent = controller) });
 			let onRead!: () => void;
 			let onAbort!: (reason: unknown) => void;
 			let onFinish!: () => void;
@@ -1068,7 +1072,9 @@ function fakeSession(park: number[] = [], stall: number[] = []) {
 						stopped.refused();
 						return Promise.reject(stopped.reason);
 					}
-					written.push(new Uint8Array(chunk));
+					const copy = new Uint8Array(chunk);
+					written.push(copy);
+					sent.enqueue(copy);
 					onWrite();
 					return new Promise<void>((resolve) => {
 						if (stalled) return;
@@ -1082,8 +1088,14 @@ function fakeSession(park: number[] = [], stall: number[] = []) {
 						channel.port2.postMessage(null);
 					});
 				},
-				close: () => onFinish(),
-				abort: (reason) => void onAbort(reason),
+				close: () => {
+					sent.close();
+					onFinish();
+				},
+				abort: (reason) => {
+					sent.error(reason);
+					onAbort(reason);
+				},
 			});
 			const opened = new Promise((resolve) => (release = () => resolve({ readable, writable })));
 			if (!park.includes(streams.length)) release();
@@ -1091,7 +1103,7 @@ function fakeSession(park: number[] = [], stall: number[] = []) {
 				new Promise<void>((refused) => {
 					stopped = { reason, refused };
 				});
-			streams.push({ inbound, reading, aborted, finished, writing, written, release, stop });
+			streams.push({ inbound, outbound, reading, aborted, finished, writing, written, release, stop });
 			count.set(streams.length);
 			return opened;
 		},
@@ -1301,47 +1313,51 @@ test("a lite subscribe whose SUBSCRIBE write stalls past the deadline closes its
 // On lite-05 and later a SUBSCRIBE goes out beside its TRACK, before the TRACK_INFO, and accepting
 // the info sends no SUBSCRIBE_UPDATE even when the publisher keeps groups fresh for less than the
 // subscriber waits.
-test.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])(
-	"lite %s: a subscribe goes out with its track",
-	async (version) => {
-		const { quic, streams, opened } = fakeSession();
-		const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
-		const track = subscriber
-			.consume(Path.from("room"))
-			.track("video")
-			.subscribe({ priority: 3, delay: { max: Milli(10_000) } });
-		try {
-			await opened(0);
-			await streams[0].reading;
-			await (await opened(1)).writing;
-			const sent = new Reader(undefined, new Uint8Array(Buffer.concat(streams[0].written)), version);
-			expect(await sent.u53()).toBe(StreamId.Track);
-			await drainReactions();
-			const wire = () => new Reader(undefined, new Uint8Array(Buffer.concat(streams[1].written)), version);
-			let subscribe = wire();
-			expect(await subscribe.u53()).toBe(StreamId.Subscribe);
-			const msg = await Subscribe.decode(subscribe, version);
-			expect([msg.id, msg.track, msg.priority, msg.maxDelay]).toEqual([0n, "video", 3, 10_000]);
+test.each(
+	[Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07].flatMap((version) =>
+		[false, true].map((forced) => ({ name: versionName(version), version, forced })),
+	),
+)("$name: a subscribe goes out with its track (forced yields: $forced)", async ({ version, forced }) => {
+	const yielding = forced ? spyOn(Budget.prototype, "poll").mockImplementation(() => yieldNow()) : undefined;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const track = subscriber
+		.consume(Path.from("room"))
+		.track("video")
+		.subscribe({ priority: 3, delay: { max: Milli(10_000) } });
+	try {
+		await opened(0);
+		await streams[0].reading;
+		const sent = new Reader(undefined, new Uint8Array(Buffer.concat(streams[0].written)), version);
+		expect(await sent.u53()).toBe(StreamId.Track);
+		const request = await opened(1);
+		const subscribe = new Reader(request.outbound, undefined, version);
+		expect(await subscribe.u53()).toBe(StreamId.Subscribe);
+		// Reading the request waits for its body without needing TRACK_INFO first.
+		const msg = await Subscribe.decode(subscribe, version);
+		expect([msg.id, msg.track, msg.priority, msg.maxDelay]).toEqual([0n, "video", 3, 10_000]);
 
-			const chunks: Uint8Array[] = [];
-			const writer = new Writer(
-				new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
-				version,
-			);
-			await new TrackInfo({ timescale: 1000, maxAge: 1000 }).encode(writer, version);
-			for (const chunk of chunks) streams[0].inbound.enqueue(chunk);
-			await track.info();
-			await drainReactions();
-			subscribe = wire();
-			await subscribe.u53();
-			await Subscribe.decode(subscribe, version);
-			expect(await subscribe.done()).toBe(true);
-		} finally {
-			track.close();
-			subscriber.close();
-		}
-	},
-);
+		const chunks: Uint8Array[] = [];
+		const writer = new Writer(
+			new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
+			version,
+		);
+		await new TrackInfo({ timescale: 1000, maxAge: 1000 }).encode(writer, version);
+		for (const chunk of chunks) streams[0].inbound.enqueue(chunk);
+		await track.info();
+		await request.reading;
+		// An explicit change orders after any update caused by TRACK_INFO, even if its encoding yields.
+		track.update({ priority: 4, delay: { max: Milli(10_000) } });
+		const update = await SubscribeUpdate.decode(subscribe, version);
+		expect([update.priority, update.maxDelay]).toEqual([4, 10_000]);
+		track.close();
+		expect(await subscribe.done()).toBe(true);
+	} finally {
+		track.close();
+		subscriber.close();
+		yielding?.mockRestore();
+	}
+});
 
 // A GROUP that beats its subscription's TRACK_INFO waits unread for it, then is read with it.
 test("a group that beats its track info waits for it", async () => {
@@ -1876,7 +1892,7 @@ test.each([
 			await respond(
 				subscribe,
 				version,
-				[{ start: new SubscribeStart([0n]) }, { end: new SubscribeEnd(0n) }],
+				[{ start: new SubscribeStart([0n]) }, { finish: new SubscribeFinish(0n) }],
 				true,
 			);
 			expect(await track.closed).toBeNull();
@@ -2203,7 +2219,7 @@ function drainReactions(): Promise<void> {
 	});
 }
 
-test("a local unsubscribe owes no SUBSCRIBE_END", async () => {
+test("a local unsubscribe owes no SUBSCRIBE_FINISH", async () => {
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, Version.DRAFT_07, HopSchema.parse(1n));
 	const responseTask = Promise.withResolvers<void>();
@@ -2452,7 +2468,7 @@ test("a lite-07 rewind is refused", async () => {
 	}
 });
 
-test("a publisher FIN without SUBSCRIBE_END still violates an open subscription", async () => {
+test("a publisher FIN without SUBSCRIBE_FINISH still violates an open subscription", async () => {
 	const { quic, streams, opened, closes } = fakeSession();
 	const subscriber = new Subscriber(quic, Version.DRAFT_07, HopSchema.parse(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
@@ -2463,7 +2479,7 @@ test("a publisher FIN without SUBSCRIBE_END still violates an open subscription"
 		await (await opened(1)).reading;
 		streams[1].inbound.close();
 		expect(await track.closed).toBeInstanceOf(ProtocolViolation);
-		expect((track.closed.peek() as Error).message).toBe("subscribe stream ended without SUBSCRIBE_END");
+		expect((track.closed.peek() as Error).message).toBe("subscribe stream ended without SUBSCRIBE_FINISH");
 		await drainReactions();
 		expect(closes.map((info) => info?.closeCode)).toEqual([SessionCode.ProtocolViolation]);
 	} finally {
@@ -2519,98 +2535,6 @@ test("an empty START remains resolved when its range widens", async () => {
 	}
 });
 
-// A lite-07 publisher FINs a bounded subscription without SUBSCRIBE_END once it covered the range,
-// which is no protocol violation. Covering a range is not ending the track, so the copy stays for
-// its readers, as the Rust copy does: they park, and widening the range asks again on the same
-// track. Decided 2026-10-31 (maintainer).
-test("a lite-07 publisher FIN keeps a covered bounded subscription's copy", async () => {
-	const version = Version.DRAFT_07;
-	const { quic, streams, opened, closes } = fakeSession();
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
-	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast.track("video").subscribe({ ranges: [{ start: { absolute: 0n }, end: { absolute: 2n } }] });
-	try {
-		await opened(0);
-		await answerTrackInfo(streams[0], version);
-		const stream = await opened(1);
-		await stream.reading;
-		const chunks: Uint8Array[] = [];
-		const writer = new Writer(
-			new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
-			version,
-		);
-		await encodeSubscribeResponse(writer, { start: new SubscribeStart([0n]) }, version);
-		await encodeSubscribeResponse(
-			writer,
-			{ drop: new SubscribeDrop({ start: 0n, end: 1n, error: StreamCode.NotFound }) },
-			version,
-		);
-		for (const chunk of chunks) stream.inbound.enqueue(chunk);
-		stream.inbound.close();
-		await drainReactions();
-		expect(track.closed.peek()).toBeUndefined();
-		expect(streams).toHaveLength(2);
-
-		track.update({ ranges: [{ start: { absolute: 0n }, end: { absolute: 3n } }] });
-		const reopened = await opened(2);
-		await reopened.reading;
-		const reader = new Reader(undefined, new Uint8Array(Buffer.concat(reopened.written)), version);
-		expect(await reader.u53()).toBe(StreamId.Subscribe);
-		const msg = await Subscribe.decode(reader, version);
-		expect(msg.ranges).toEqual([{ start: { absolute: 0n }, end: { absolute: 3n } }]);
-		expect(track.closed.peek()).toBeUndefined();
-		expect(closes).toEqual([]);
-	} finally {
-		track.close();
-		broadcast.close();
-		subscriber.close();
-	}
-});
-
-// A widening reopens a covered copy, and its readers leaving while the publisher never takes the
-// new SUBSCRIBE gives the setup up: its stream is reset and the copy released, not held forever.
-test("a reopened lite-07 subscription ends once its readers leave", async () => {
-	const version = Version.DRAFT_07;
-	const { quic, streams, opened } = fakeSession([], [2]);
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
-	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast.track("video").subscribe({ ranges: [{ start: { absolute: 0n }, end: { absolute: 2n } }] });
-	let next: TrackSubscriber | undefined;
-	try {
-		await opened(0);
-		await answerTrackInfo(streams[0], version);
-		const stream = await opened(1);
-		await stream.reading;
-		const chunks: Uint8Array[] = [];
-		const writer = new Writer(
-			new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
-			version,
-		);
-		await encodeSubscribeResponse(writer, { start: new SubscribeStart([0n]) }, version);
-		await encodeSubscribeResponse(
-			writer,
-			{ drop: new SubscribeDrop({ start: 0n, end: 1n, error: StreamCode.NotFound }) },
-			version,
-		);
-		for (const chunk of chunks) stream.inbound.enqueue(chunk);
-		stream.inbound.close();
-		await drainReactions();
-
-		track.update({ ranges: [{ start: { absolute: 0n }, end: { absolute: 3n } }] });
-		await (await opened(2)).writing;
-		track.close();
-		await drainReactions();
-		// A reader arriving now asks afresh, rather than join a copy held by the stalled setup.
-		next = broadcast.track("video").subscribe();
-		await opened(3);
-	} finally {
-		next?.close();
-		track.close();
-		broadcast.close();
-		subscriber.close();
-	}
-});
-
 // Before lite-05 the publisher FINs the subscribe stream only once the track is over, so that FIN
 // finishes the track once the tail settles, rather than releasing it for another route.
 test.each(
@@ -2649,7 +2573,7 @@ test.each(
 
 // A session that dies once the publisher ended the track, but before the tail settled, cuts it
 // off: the track ends with the session's error unless the declared end settled first. That end
-// is SUBSCRIBE_END on lite-05+, and the FIN before it.
+// is SUBSCRIBE_FINISH on lite-05+, and the FIN before it.
 test.each([
 	["lite-03 ends clean with its last group finished", Version.DRAFT_03, true],
 	["lite-03 aborts with its last group still open", Version.DRAFT_03, false],
@@ -2672,7 +2596,7 @@ test.each([
 		await subscribe.reading;
 		const responses: SubscribeResponse[] = legacy
 			? [{ ok: new SubscribeOk({}) }]
-			: [{ start: new SubscribeStart([0n]) }, { end: new SubscribeEnd(1n) }];
+			: [{ start: new SubscribeStart([0n]) }, { finish: new SubscribeFinish(1n) }];
 		await respond(subscribe, version, responses, true);
 		if (settled) {
 			const group = new ReadableStream<Uint8Array>({
@@ -2694,74 +2618,6 @@ test.each([
 
 		subscriber.close(died);
 		expect(await track.closed).toBe(settled ? null : died);
-	} finally {
-		track.close();
-		broadcast.close();
-		subscriber.close();
-		installed.close();
-	}
-});
-
-// The FIN may answer the bounded range before the publisher read an update that widened it, so
-// the copy asks again for the demand rather than end clean short of it or fail its readers.
-test.each([
-	["an open widening after SUBSCRIBE_START", { start: { absolute: 0n } }, true, false],
-	["a bounded widening without SUBSCRIBE_START", { start: { absolute: 0n }, end: { absolute: 5n } }, false, false],
-	["a widening the publisher stopped reading", { start: { absolute: 0n }, end: { absolute: 5n } }, false, true],
-] as const)("a lite-07 FIN short of %s subscribes again on the same track", async (_, range, start, stopped) => {
-	const clock = new Manual();
-	const installed = clock.install();
-	const version = Version.DRAFT_07;
-	const { quic, streams, opened, closes } = fakeSession();
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
-	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast
-		.track("video")
-		.subscribe({ delay: { max: Milli.zero }, ranges: [{ start: { absolute: 0n }, end: { absolute: 1n } }] });
-	try {
-		await opened(0);
-		await answerTrackInfo(streams[0], version);
-		const stream = await opened(1);
-		await stream.reading;
-		const refused = stopped
-			? stream.stop(
-					Object.assign(new Error("The stream was aborted by the remote server"), {
-						source: "stream",
-						streamErrorCode: StreamCode.Cancel,
-					}),
-				)
-			: undefined;
-		track.update({ delay: { max: Milli.zero }, ranges: [range] });
-		await refused;
-		await drainReactions();
-
-		const chunks: Uint8Array[] = [];
-		const writer = new Writer(
-			new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
-			version,
-		);
-		if (start) {
-			await encodeSubscribeResponse(writer, { start: new SubscribeStart([0n]) }, version);
-			await encodeSubscribeResponse(
-				writer,
-				{ drop: new SubscribeDrop({ start: 0n, end: 0n, error: StreamCode.NotFound }) },
-				version,
-			);
-		}
-		for (const chunk of chunks) stream.inbound.enqueue(chunk);
-		stream.inbound.close();
-		await drainReactions();
-
-		await clock.advance(Nano.fromMilli(GRACE));
-		const reopened = await opened(2);
-		await reopened.reading;
-		const reader = new Reader(undefined, new Uint8Array(Buffer.concat(reopened.written)), version);
-		expect(await reader.u53()).toBe(StreamId.Subscribe);
-		const msg = await Subscribe.decode(reader, version);
-		expect(msg.id).toBe(1n);
-		expect(msg.ranges).toEqual([range]);
-		expect(track.closed.peek()).toBeUndefined();
-		expect(closes).toEqual([]);
 	} finally {
 		track.close();
 		broadcast.close();
@@ -2804,7 +2660,7 @@ test.each([
 				new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
 				version,
 			);
-			await encodeSubscribeResponse(writer, { end: new SubscribeEnd(0n) }, version);
+			await encodeSubscribeResponse(writer, { finish: new SubscribeFinish(0n) }, version);
 			for (const chunk of chunks) stream.inbound.enqueue(chunk);
 			stream.inbound.close();
 			expect(await track.closed).toBeNull();
@@ -2853,7 +2709,7 @@ test("an unknown subscribe response type closes the session", async () => {
 		await answerTrackInfo(streams[0], Version.DRAFT_07);
 		await (await opened(1)).reading;
 		// An unassigned response type is a session protocol violation.
-		streams[1].inbound.enqueue(new Uint8Array([3, 0]));
+		streams[1].inbound.enqueue(new Uint8Array([5, 0]));
 		expect(await track.closed).toBeInstanceOf(ProtocolViolation);
 		await drainReactions();
 		expect(closes.map((info) => info?.closeCode)).toEqual([SessionCode.ProtocolViolation]);

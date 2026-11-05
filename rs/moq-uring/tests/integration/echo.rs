@@ -60,16 +60,16 @@ fn echo_tokio_peer() {
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("socket");
 	let endpoint =
-		quic::Endpoint::new(socket, quic::endpoint::Config::default().with_server(server)).expect("endpoint");
+		quic::Endpoint::new(quic::endpoint::Config::default().with_server(server), socket).expect("endpoint");
 	let addr = endpoint.local_addr();
 	let payload: Vec<u8> = (0..PAYLOAD).map(|i| (i * 31 % 251) as u8).collect();
 	let expected = payload.clone();
 	let (done_tx, done_rx) = tokio::sync::oneshot::channel();
 
 	let client = std::thread::spawn(move || {
-		// Enabling `ring` beside `aws-lc-rs` (as `--all-features` does) leaves rustls no implicit
-		// default, and the builder would panic on this thread while the server waits forever.
-		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		// rustls has no implicit default provider; without one the client builder would panic on
+		// this thread while the server waits forever.
+		let _ = rind_rustls::default_provider().unwrap().install_default();
 		let runtime = tokio::runtime::Builder::new_current_thread()
 			.enable_all()
 			.build()

@@ -17,7 +17,7 @@ use openh264_sys2::{
 	dsRefListNullPtrs, dsRefLost,
 };
 
-use super::{Backend, Codec, Config};
+use super::{Backend, Codec, Config, Stream};
 use crate::frame::{I420, Surface};
 use crate::{Error, Frame};
 
@@ -109,7 +109,8 @@ fn new_decoder() -> Result<Decoder, Error> {
 impl Openh264 {
 	/// openh264 decodes H.264 only; `config` is accepted for signature parity
 	/// (no hardware scaler; callers scale the CPU frames themselves).
-	pub(crate) fn open(codec: Codec, config: &Config) -> Result<Box<dyn Backend>, Error> {
+	pub(crate) fn open(stream: &Stream, config: &Config) -> Result<Box<dyn Backend>, Error> {
+		let codec = stream.codec;
 		Ok(Box::new(Self::new(codec, config)?))
 	}
 

@@ -15,9 +15,10 @@ import {
 import { Version } from "./ietf/version.ts";
 import { Version as Lite } from "./lite/version.ts";
 import { createMockTransportPair } from "./mock.ts";
-import { type Cursor, Reader, Readers, Stream, type StreamVersion, Writer } from "./stream.ts";
+import { acceptBudget, type Cursor, Reader, Readers, Stream, type StreamVersion, Writer } from "./stream.ts";
 import { TimeoutError } from "./util/timeout.ts";
 import { U64 } from "./util/u64.ts";
+import { Budget } from "./util/yield.ts";
 
 // The generic tests below read and write QUIC varints on the moq-lite stream code registry.
 const QUIC = Lite.DRAFT_06;
@@ -993,10 +994,8 @@ test("Reader u53 decodes every size in both formats, one byte per chunk", async 
 // A peer keeping streams ready must not hold the host for as long as they keep arriving:
 // each accept resolves in a microtask, so only a yield lets a sibling task run in between.
 // The CPU slice is stubbed to pass on every check, so the yield does not depend on load.
-// The stub only moves forward, since the budget's slice start outlives each test.
 // biome-ignore lint/style/noRestrictedGlobals: stubs the host CPU clock the budget reads.
 const host = performance;
-let fakeNow = host.now();
 for (const kind of ["uni", "bidi"] as const) {
 	test(`a flood of ${kind} streams yields to the host's other tasks`, async () => {
 		const STREAMS = 1024;
@@ -1006,7 +1005,11 @@ for (const kind of ["uni", "bidi"] as const) {
 			else await client.createBidirectionalStream();
 		}
 
+		let fakeNow = 0;
 		const clock = spyOn(host, "now").mockImplementation(() => (fakeNow += 5));
+		// The shared budget outlives Bun's file reruns, so isolate it with the stubbed CPU clock.
+		const budget = new Budget();
+		const poll = spyOn(acceptBudget, "poll").mockImplementation(() => budget.poll());
 		try {
 			const readers = kind === "uni" ? new Readers(server, QUIC) : undefined;
 			let accepted = 0;
@@ -1021,6 +1024,7 @@ for (const kind of ["uni", "bidi"] as const) {
 			expect(sibling).toBeDefined();
 			expect(sibling).toBeLessThan(STREAMS);
 		} finally {
+			poll.mockRestore();
 			clock.mockRestore();
 		}
 	});

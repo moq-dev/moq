@@ -26,7 +26,7 @@ never does.
 - A flight is a separate copy of a group: its own upstream fill from its
   first rider's frame into its own group copy, with its own 32 MB tail, paced
   by its fastest rider like the live edge
-  ([Fastest-reader pacing](/quest/m1/unbounded-groups/fastest-reader.md)).
+  ([Fastest-reader pacing](https://github.com/moq-dev/moq/pull/7664)).
   The live subscription is the first flight. Copies are never stitched
   together: two caches sharing one group handle caused the expiry and
   boundary bugs [Resume redesign](/quest/m2/resume-redesign.md) records.
@@ -40,7 +40,7 @@ never does.
   frame within 16 MB, half the tail, of the flight's fastest rider, less one
   shedding unit (a log segment). Judge it against the worst-case front:
   the ahead window is capped at 16 MB
-  ([Fastest-reader pacing](/quest/m1/unbounded-groups/fastest-reader.md)),
+  ([Fastest-reader pacing](https://github.com/moq-dev/moq/pull/7664)),
   so filling all outstanding credit still leaves an admitted reader held.
   Otherwise it starts its own flight, so it never boards at a front about to
   be shed.
@@ -72,13 +72,9 @@ never does.
 - Fills that write a whole batch of groups at once evict their own earlier
   groups before the reader takes them (the follow-up from
   [moq-dev/moq#7339](https://github.com/moq-dev/moq/pull/7339)). Moved here
-  from [fastest-reader pacing](/quest/m1/unbounded-groups/fastest-reader.md)
+  from [fastest-reader pacing](https://github.com/moq-dev/moq/pull/7664)
   on 2026-11-02 (maintainer): the failure crosses groups, while pacing holds
   back one group copy, so a flight's fill paces the batch by its riders
   instead.
 
 Public API: none. Wire: none, beyond the existing frame-offset fills.
-
-## Required
-
-- [Fastest-reader pacing](/quest/m1/unbounded-groups/fastest-reader.md) - flights pace on their fastest rider the same way the live edge does

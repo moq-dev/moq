@@ -298,10 +298,11 @@ Ranges are both a request and a filter. A subscriber reads only the groups its
 own ranges cover, resolved again whenever it replaces them, even when another
 subscriber of the same track asked for more. Widening them, including lowering
 the start, also serves the cached groups they newly cover, never one already
-served. A reader that has read every group its ranges cover waits rather than
-ends, since the track goes on: a moq-lite-07 publisher ends a bounded
-subscription once it covered it, and the copy stays cached for the same ranges
-until an update asks for groups it did not cover, wider or shifted. A group they cover below the live feed that the cache lacks (evicted
+served. A reader that has accounted for every group its bounded ranges cover
+ends, and repeated reads end immediately too. Widening the ranges resumes reading.
+A moq-lite-07 publisher ends a bounded subscription once it covered it, and the
+copy stays cached for the same ranges until an update asks for groups it did not
+cover, wider or shifted. A group they cover below the live feed that the cache lacks (evicted
 before the subscriber first looked for it, skipped, or below where the feed
 starts) is asked of the track's dynamic handler
 as a fill, which a relay serves by fetching upstream one group at a time, skipping
@@ -394,8 +395,10 @@ Under light congestion video drops the tail of a group; under heavy congestion
 video stops and audio lags by at most 500 ms. No protocol change, just knobs.
 
 A long group is paced by its fastest reader instead. Each hop receives at most
-16 MB of a group past its fastest reader, then stops reading the group's stream,
-so stream flow control pushes back hop by hop to the publisher, and a reader
+its stream receive window of a group past its fastest reader, capped at 16 MB
+(half the group's tail), then stops reading the group's stream, so the hop
+holds about what its upstream peer can have in flight on that stream and
+stream flow control pushes back hop by hop to the publisher. A reader
 that keeps up loses nothing. A slower reader is never waited on: one that trails
 the fastest by more than the group's 32 MB tail reaches a shed frame, and asks
 for a new group on tracks that opt into [refresh](#refresh) or ends with

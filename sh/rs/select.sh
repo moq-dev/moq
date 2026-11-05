@@ -244,10 +244,12 @@ case "$action" in
             fi
         fi
         # `play` and `capture` are off by default and turn on the device and
-        # render code in moq-video, moq-audio, and the cli. Only when moq-cli is
-        # selected, since cargo rejects a feature of a package outside the
-        # selection; a change to anything they reach selects moq-cli anyway.
-        if wants moq-cli; then flags+=(--features "moq-cli/play moq-cli/capture"); fi
+        # render code in moq-video, moq-audio, and the cli. The Linux sound
+        # server flags ride along to prove they compile away elsewhere. Only
+        # when moq-cli is selected, since cargo rejects a feature of a package
+        # outside the selection; a change to anything they reach selects
+        # moq-cli anyway.
+        if wants moq-cli; then flags+=(--features "moq-cli/play moq-cli/capture moq-cli/pipewire moq-cli/pulseaudio"); fi
         # Apple UDP batching is opt-in; compile its implementation and tests on macOS.
         if [[ "$(uname -s)" == Darwin ]] && wants moq-sock; then
             flags+=(--features moq-sock/fast-apple-datapath)

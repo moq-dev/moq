@@ -34,7 +34,7 @@ test("an explicit object id and a status", async () => {
 	const datagram = new ObjectDatagram({
 		trackAlias: 1n,
 		groupId: 2n,
-		objectId: 0,
+		objectId: 0n,
 		publisherPriority: 128,
 		endOfGroup: false,
 		body: { status: 0 },

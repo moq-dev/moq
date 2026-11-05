@@ -632,7 +632,7 @@ fn serve_worker(spawn: Spawn) -> bool {
 		endpoint_config.handshake.timeout = serve.timeout;
 		endpoint_config.reset_secret = serve.reset_secret;
 		let endpoint =
-			moq_uring::quic::Endpoint::new(socket, endpoint_config).context("failed to build the QUIC endpoint")?;
+			moq_uring::quic::Endpoint::new(endpoint_config, socket).context("failed to build the QUIC endpoint")?;
 		Ok((worker, endpoint))
 	})();
 
@@ -658,10 +658,14 @@ fn serve_worker(spawn: Spawn) -> bool {
 					let id = serve.cluster.next_connection_id();
 					let conn_handle = accept_handle.clone();
 					let serve = serve.clone();
-					let lifecycle =
-						Lifecycle::new(serve.cluster.clone(), serve.auth.clone(), id, Some(conn.remote_addr()))
-							.with_shutdown(serve.shutdown.clone())
-							.with_sessions(serve.sessions.clone());
+					let lifecycle = Lifecycle::new(
+						serve.cluster.clone(),
+						serve.auth.clone(),
+						id,
+						Some(conn.remote_address()),
+					)
+					.with_shutdown(serve.shutdown.clone())
+					.with_sessions(serve.sessions.clone());
 					accept_handle.spawn(async move {
 						let shared = serve.tokio.clone();
 						lifecycle
@@ -739,7 +743,7 @@ async fn serve_connection(
 	let mut deadline = Deadline::new(&handle, &conn);
 
 	// Read the link facts now: the handshake below consumes the connection.
-	let remote = conn.remote_addr();
+	let remote = conn.remote_address();
 	let sni = conn.server_name().map(str::to_owned);
 	// TLS validated this against the configured roots before the connection
 	// existed, so a chain here is an authenticated peer.
@@ -979,7 +983,7 @@ mod tests {
 	/// Unsupported listen settings fail before loading TLS or binding a socket.
 	#[test]
 	fn bind_refuses_preferred_addresses() {
-		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		moq_tokio::crypto::install_default().unwrap();
 		type Set = fn(&mut moq_tokio::listen::Config);
 		let cases: [(&str, Set); 2] = [
 			("listen.preferred_v4", |listen| {
@@ -1007,7 +1011,7 @@ mod tests {
 	/// The workers refuse what the tokio listener refuses, before binding a socket.
 	#[test]
 	fn bind_refuses_an_invalid_listen() {
-		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		moq_tokio::crypto::install_default().unwrap();
 		let mut server = moq_tokio::server::Config::default();
 		server.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 		server.listen.tls.generate = vec!["localhost".into()];
@@ -1117,7 +1121,7 @@ mod tests {
 	/// the workers waiting to serve instead of hanging on their join.
 	#[tokio::test]
 	async fn a_group_stopped_before_serving_joins() {
-		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		moq_tokio::crypto::install_default().unwrap();
 		if let Err(moq_uring::Error::Unsupported(reason)) = moq_uring::Worker::new(Default::default())
 			&& std::env::var_os("CI_STRICT").is_none()
 		{
@@ -1144,7 +1148,7 @@ mod tests {
 	/// An auth decision still pending at the drain deadline is abandoned by then.
 	#[tokio::test]
 	async fn pending_admission_is_abandoned_at_the_deadline() {
-		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		moq_tokio::crypto::install_default().unwrap();
 		if let Err(moq_uring::Error::Unsupported(reason)) = moq_uring::Worker::new(Default::default())
 			&& std::env::var_os("CI_STRICT").is_none()
 		{
@@ -1153,14 +1157,22 @@ mod tests {
 		}
 
 		let dir = tempfile::tempdir().unwrap();
-		let key = rcgen::KeyPair::generate().unwrap();
+		let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
 		let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+			.map(|mut params| {
+				params.serial_number = Some(1u64.into());
+				params
+			})
 			.unwrap()
 			.self_signed(&key)
 			.unwrap();
 		let (cert_path, key_path) = (dir.path().join("cert.pem"), dir.path().join("key.pem"));
 		std::fs::write(&cert_path, cert.pem()).unwrap();
-		std::fs::write(&key_path, key.serialize_pem()).unwrap();
+		std::fs::write(
+			&key_path,
+			pem::encode(&pem::Pem::new("PRIVATE KEY", key.to_pkcs8().secret_pkcs8_der())),
+		)
+		.unwrap();
 
 		let window = std::time::Duration::from_secs(1);
 		let mut config = crate::Config::default();
@@ -1203,7 +1215,7 @@ mod tests {
 	/// that never comes is abandoned at the handshake deadline.
 	#[tokio::test]
 	async fn pending_admission_is_abandoned_at_the_handshake_deadline() {
-		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		moq_tokio::crypto::install_default().unwrap();
 		if let Err(moq_uring::Error::Unsupported(reason)) = moq_uring::Worker::new(Default::default())
 			&& std::env::var_os("CI_STRICT").is_none()
 		{
@@ -1212,14 +1224,22 @@ mod tests {
 		}
 
 		let dir = tempfile::tempdir().unwrap();
-		let key = rcgen::KeyPair::generate().unwrap();
+		let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
 		let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+			.map(|mut params| {
+				params.serial_number = Some(1u64.into());
+				params
+			})
 			.unwrap()
 			.self_signed(&key)
 			.unwrap();
 		let (cert_path, key_path) = (dir.path().join("cert.pem"), dir.path().join("key.pem"));
 		std::fs::write(&cert_path, cert.pem()).unwrap();
-		std::fs::write(&key_path, key.serialize_pem()).unwrap();
+		std::fs::write(
+			&key_path,
+			pem::encode(&pem::Pem::new("PRIVATE KEY", key.to_pkcs8().secret_pkcs8_der())),
+		)
+		.unwrap();
 
 		let timeout = std::time::Duration::from_secs(1);
 		let mut config = crate::Config::default();

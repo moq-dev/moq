@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `socket`: `Endpoint`, which announces a hidden `<prefix>/.socket/<id>` broadcast, dials other endpoints, and accepts their dials in two protocols: `tcp` sessions (`dial_tcp`, `accept_tcp`, `TcpStream`), one group each way as a reliable, ordered byte pipe, and `track` sessions (`dial_track`, `accept_track`, `TrackStream`), a track each way with one message per group. Dials and accepts fail `Unsupported` while the origin has a moq-lite client session before 07 whose publish half doesn't opt into hidden broadcasts, since its peer never hears the endpoint; see `doc/concept/socket.md`.
 - `transport::SETUP_RECEIVE_WINDOW`, the connection credit a server offers before it admits a session: enough for the SETUP and one in-band AUTH.
 
 ## [0.3.10](https://github.com/moq-dev/moq/compare/moq-net-v0.3.9...moq-net-v0.3.10) - 2026-10-05
