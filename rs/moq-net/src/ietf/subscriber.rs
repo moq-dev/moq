@@ -6081,10 +6081,12 @@ impl OpenGroup {
 					// Without a fill, a relay preserves the subgroup's first Object ID and
 					// FIRST_OBJECT claim independently. Plain readers see only frame ordinals. A
 					// head that was owed and never came is the exception: the stream is the same
-					// unstitchable tail it is when it arrives before the fill settles, below.
+					// unstitchable tail it is when it arrives before the fill settles, below,
+					// unless it claims FIRST_OBJECT: a group may start past object 0.
 					if !fill.read().outstanding() {
 						let start = first.map_or(0, |first| first.id);
-						if start != 0 && (self.headless || fill.read().headless(sequence)) {
+						if start != 0 && !header.flags.first_object && (self.headless || fill.read().headless(sequence))
+						{
 							tracing::warn!(sequence, start, "no fill to stitch a mid-group stream onto");
 							return Poll::Ready(Err(Error::Unsupported));
 						}
@@ -15788,6 +15790,27 @@ mod stitch_tests {
 		});
 
 		assert!(matches!(group.read_frame().await, Err(Error::Cancel)));
+	}
+
+	/// A stream for a headless group that claims FIRST_OBJECT is whole even though its first
+	/// Object ID is past zero, so it is delivered rather than dropped as a cut tail.
+	#[kio::test]
+	async fn a_headless_group_claiming_its_first_object_is_delivered() {
+		let h = Harness::new(Fill::Done, vec![draft18_subgroup(SEQUENCE, true, 6, &[b"six"])]);
+		h.subscriber
+			.state
+			.lock()
+			.subscribes
+			.get_mut(&REQUEST)
+			.unwrap()
+			.headless_through = Some(SEQUENCE);
+		let mut consumer = h.track.subscribe(None);
+
+		let mut stream = h.stream().await;
+		h.subscriber.clone().recv_group(&mut stream).await.expect("group");
+		let (sequence, frames) = read_group(&mut consumer).await;
+		assert_eq!(sequence, SEQUENCE);
+		assert_eq!(frames.len(), 1);
 	}
 
 	/// Widening updates replaced fills that failed to head this group and the next, and the
