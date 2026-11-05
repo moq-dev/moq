@@ -91,7 +91,7 @@ impl Protocol {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		match self {
 			Self::Lite(driver) => driver.poll(waiter),
-			Self::Ietf(driver) => waiter.poll_future(std::pin::Pin::new(driver)),
+			Self::Ietf(driver) => driver.poll(waiter),
 		}
 	}
 

@@ -5,11 +5,47 @@ mod session;
 
 use std::sync::Arc;
 
-use criterion::{criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use futures::FutureExt;
 use moq_auth::{Grant, Pattern, lease};
 use moq_net::{cache, origin};
 use moq_relay::{Accepted, Connection, auth, cluster, stats};
 use session::{Backend, MockConnectOptions, Pair, mock::create_mock_session_pair};
+
+/// Session lifecycle updates against independent, actively waiting tally readers.
+fn tally(c: &mut Criterion) {
+	let mut group = c.benchmark_group("relay_tally");
+	for sessions in [1, 16, 256] {
+		for readers in [1, 16, 256] {
+			group.bench_function(BenchmarkId::new(format!("sessions={sessions}"), readers), |b| {
+				let observer = moq_relay::shutdown::Observer::disabled();
+				let mut readers: Vec<_> = (0..readers).map(|_| observer.clone()).collect();
+				b.iter(|| {
+					for _ in 0..sessions {
+						let mut changes: Vec<_> = readers.iter_mut().map(|reader| Box::pin(reader.changed())).collect();
+						for change in &mut changes {
+							assert!(change.as_mut().now_or_never().is_none());
+						}
+						let serving = observer.serve();
+						for change in &mut changes {
+							assert_eq!(change.as_mut().now_or_never().unwrap().open, 1);
+						}
+						drop(changes);
+						let mut changes: Vec<_> = readers.iter_mut().map(|reader| Box::pin(reader.changed())).collect();
+						for change in &mut changes {
+							assert!(change.as_mut().now_or_never().is_none());
+						}
+						drop(serving);
+						for change in &mut changes {
+							assert_eq!(change.as_mut().now_or_never().unwrap(), Default::default());
+						}
+					}
+				});
+			});
+		}
+	}
+	group.finish();
+}
 
 struct Relay;
 
@@ -124,6 +160,7 @@ impl Backend for Relay {
 
 criterion_group!(
 	benches,
+	tally,
 	session::session::<Relay>,
 	session::group_cost::<Relay>,
 	session::datagram::<Relay>,

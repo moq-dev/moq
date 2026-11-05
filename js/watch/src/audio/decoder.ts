@@ -236,9 +236,11 @@ export class Decoder {
 			const config = effect.get(this.source.out.config);
 			return config ? playbackIdentity(config) : undefined;
 		});
-		this.#idle = this.#signals.computed(
-			(effect) => effect.get(this.source.out.config) === undefined && effect.get(this.#out.stalled),
-		);
+		this.#idle = this.#signals.computed((effect) => {
+			if (effect.get(this.source.out.config) !== undefined) return false;
+			const ring = effect.get(this.#ring);
+			return effect.get(this.#out.stalled) || (!!ring && effect.get(ring.silent));
+		});
 
 		this.#signals.run(this.#runSubscribeMaxDelay.bind(this));
 		this.#signals.run(this.#runShape.bind(this));

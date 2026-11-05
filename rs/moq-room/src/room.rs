@@ -69,7 +69,8 @@ impl Room {
 		}
 	}
 
-	/// Poll for the next remote camera/screen (un)announce.
+	/// The next remote camera/screen (un)announce, or `None` once the announce stream ends.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<Event>> {
 		loop {
 			match self.announced.poll_next(waiter) {
@@ -135,11 +136,6 @@ impl Room {
 			}
 		}
 		Poll::Pending
-	}
-
-	/// Wait for the next remote camera/screen (un)announce.
-	pub async fn next(&mut self) -> Option<Event> {
-		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 }
 

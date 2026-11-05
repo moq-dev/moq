@@ -4,6 +4,24 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### The `async` feature is opt-in ([#7607](https://github.com/moq-dev/moq/pull/7607))
+
+`async` is no longer a default feature. Enable it to keep the sessions (`Client`, `Server`, `Session`), `time::run`, the announcement `Stream` adapter, and every async wrapper such as `next_group`, `read_frame`, or `closed`:
+`moq-net = { version = "...", features = ["async"] }`.
+Each wrapper is now generated from its `poll_*` method, which stays available without the feature, and its docs live on that poll.
+`frame::Consumer::read_all`, `track::Demand::closed`, and `track::Ordered::finished` gain theirs as the new `poll_read_all`, `poll_closed`, and `poll_finished`.
+`moq-tokio`'s `net` feature enables it for you.
+`group::Producer::ready` now needs the feature too.
+
+### Admission completion records its own time
+
+`server::Activity::drain()` begins closing admission once its active set empties.
+`Activity::close()` and the new poll-native `poll_close()` return that instant,
+even for a late observer. Replace matches against `()` with a discarded result
+or read the returned `kio::clock::Instant`. Once draining begins, the last `Active`
+drop closes admission synchronously, including when a close wait was cancelled.
+This is native listener bookkeeping; the protocol wire is unchanged.
+
 ### Announcements are a listing; `follow` reports the path going offline ([#7678](https://github.com/moq-dev/moq/pull/7678))
 
 `origin::Consumer::announced()` lists paths: `announce::Event` is `Present(Announce)` or `Absent(Announce)`.

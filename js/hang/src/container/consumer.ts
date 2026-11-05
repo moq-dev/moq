@@ -225,6 +225,7 @@ export class Consumer {
 	// estimator the silence is over. Not at the marker itself: the stopped encoder's final packets may
 	// follow it in its own group, and they belong to the speech before the silence.
 	#declared?: bigint;
+	#mediaSequence?: bigint;
 
 	#signals = new Effect();
 	#closed = new Once<Error | null>();
@@ -385,6 +386,7 @@ export class Consumer {
 	// Note an end the publisher declared in `group`, which a later group's first frame resumes from.
 	#declare(group: Group): void {
 		const sequence = group.consumer.sequence;
+		if (this.#mediaSequence !== undefined && sequence < this.#mediaSequence) return;
 		if (this.#declared === undefined || sequence > this.#declared) this.#declared = sequence;
 	}
 
@@ -423,6 +425,8 @@ export class Consumer {
 			// Observed here, before any gap handling or age budget: a target derived from
 			// what survives the budget would only ever confirm the budget it was cut to.
 			if (!marker) {
+				if (this.#mediaSequence === undefined || group.consumer.sequence > this.#mediaSequence)
+					this.#mediaSequence = group.consumer.sequence;
 				if (this.#declared !== undefined && group.consumer.sequence > this.#declared) {
 					this.#jitter.end();
 					this.#declared = undefined;

@@ -504,7 +504,7 @@ export class Encoder {
 		// encoder's share is honest. Wait for a bitrate so we never claim 0. The grant is ignored:
 		// following it for Opus is out of scope.
 		effect.run((effect) => {
-			const enabled = effect.get(this.in.enabled);
+			const enabled = effect.get(this.in.enabled) && !effect.get(this.muted);
 			const track = effect.get(rendition.track);
 			const allocator = effect.get(this.in.bandwidth);
 			if (!enabled || !track || !allocator || effect.get(this.#out.error)) return;

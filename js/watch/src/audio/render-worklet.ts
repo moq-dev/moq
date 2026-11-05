@@ -42,7 +42,10 @@ class Render extends AudioWorkletProcessor {
 				this.#ring?.truncate(msg.timestamp);
 			} else if (msg.type === "reset") {
 				if (msg.next) this.#ring?.next();
-				else this.#ring?.reset();
+				else {
+					this.#ring?.reset();
+					this.#comfort = this.#ring ? new ComfortNoise(this.#ring.rate) : undefined;
+				}
 				this.#epoch = msg.epoch;
 				this.#playing = msg.playing ?? true;
 			} else if (msg.type === "playing" && msg.epoch === this.#epoch) {

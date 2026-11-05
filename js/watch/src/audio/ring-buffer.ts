@@ -252,7 +252,9 @@ export class AudioRingBuffer {
 	 */
 	next(): void {
 		if (!this.#anchored || this.length <= 0) {
+			const silent = this.#silent;
 			this.reset();
+			this.#silent = silent;
 			return;
 		}
 		this.#tail = this.#end;
@@ -261,6 +263,7 @@ export class AudioRingBuffer {
 
 	// Flush all buffered samples and re-stall, ready to anchor the next utterance.
 	reset(): void {
+		this.#silent = false;
 		this.#readIndex = 0;
 		this.#writeIndex = 0;
 		this.#stalled = true;
