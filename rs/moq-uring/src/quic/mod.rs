@@ -18,6 +18,10 @@
 //! [`web::Session`] as the one transport type covering both.
 //!
 //! moq-quic is the sans-IO QUIC stack underneath the worker.
+//!
+//! Session waits take `&self` and a caller-owned `&kio::Waiter`; stream reads and writes
+//! take `&mut self`. Dropping the waiter cancels its registrations. Async helpers own their
+//! waiter, while `Future` and runtime I/O traits bridge their `Context` through `kio::Park`.
 
 pub mod client;
 pub mod endpoint;
@@ -168,6 +172,9 @@ pub enum Error {
 	/// The TLS material a connection needs could not be loaded.
 	#[error("tls error: {0}")]
 	Tls(String),
+	/// This CPU lacks a feature that rind, MoQ's cryptography, requires.
+	#[error(transparent)]
+	UnsupportedCpu(#[from] moq_crypto::provider::UnsupportedCpu),
 	/// The socket died underneath the connection.
 	#[error("socket error: {0}")]
 	Io(String),
@@ -200,9 +207,6 @@ pub enum Error {
 	/// This endpoint closed the connection locally.
 	#[error("locally closed")]
 	Closed,
-	/// The flow-control limits are ones a peer would refuse, so none were applied.
-	#[error("invalid quic limits: {0}")]
-	Limits(#[from] LimitsError),
 	/// The transport settings are ones the QUIC stack refuses.
 	#[error("invalid quic config: {0}")]
 	Config(#[from] moq_quic::ConfigError),

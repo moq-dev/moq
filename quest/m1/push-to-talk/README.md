@@ -22,6 +22,11 @@ Decided 2026-10-28 (maintainer):
 - **Hold, not DTX.** DTX is for silence the app can't predict. Push-to-talk
   knows when it is silent, and a held subscription costs no media bytes and no
   encoder CPU. DTX is off on main anyway ([#4919](https://github.com/moq-dev/moq/pull/4919)).
+  **Reversed 2026-11-04 (maintainer):** a catalog toggle makes every listener
+  wait out the `enabled` flip, so the jitter buffer must hold at least a round
+  trip. Push-to-talk moves to DTX ([Push-to-talk suppresses
+  silence](/quest/m1/push-to-talk/dtx.md)), and hold retires when that lands;
+  until then hold stays on main.
 - **Players hold a disabled rendition**, audio and video, by default, in
   every first-party player. Exports keep dropping it, since a held track
   sends nothing and an interleaving muxer or HLS player may wait on it. The
@@ -86,6 +91,10 @@ in [Container reads drop backfill](/quest/m1/read-backfill.md).
 
 The runner fails on a head that is received but never decoded, so the proof
 catches this. A complete set of runs finishes this epic.
+
+## Required
+
+- [Push-to-talk suppresses silence instead of toggling the catalog](/quest/m1/push-to-talk/dtx.md) - replaces hold with DTX
 
 ## Closes
 

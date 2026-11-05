@@ -349,12 +349,14 @@ replacement is up and it carries no subscription or fetch.
 [cache]
 capacity = "8GiB"                    # Target bytes of cached groups and buffered datagrams. "75%" of memory also works.
 headroom = "2GiB"                    # Or: keep this much system memory free and grow into the rest.
-duration = "30s"                     # Cap how long a non-latest group is kept, whatever the publisher asked.
+duration = "30s"                     # Reclaim groups idle this long, and cap every track's max age at it.
 ```
 
 `capacity` is a byte target, repaid as active publishers write. `duration`
 (30s by default) bounds memory by age, and sweeps on a timer, so a publisher
-that stalls but stays connected still has its idle groups reclaimed. The latest
+that stalls but stays connected still has its idle groups reclaimed. Set
+explicitly, it also caps how long a superseded group stays fresh, whatever max
+age the publisher declared; unset, each track keeps its own max age. The latest
 group of every track, and any group still being read, is kept past `capacity` but
 sheds its oldest frames instead. Whatever the capacity, a group holds at most its
 newest 32 MB. A reader of a track's newest group that reaches a shed frame asks

@@ -15,9 +15,12 @@ use std::time::Duration;
 use moq_net::{Hop, Timestamp, Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
-/// A millisecond track: the frames written here carry timestamps.
+/// A millisecond track with no publisher max age: the frames written here carry timestamps,
+/// and an unlimited read here reaches every cached group.
 fn timed() -> moq_net::track::Info {
-	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	moq_net::track::Info::default()
+		.with_timescale(moq_net::Timescale::MILLI)
+		.with_max_age(None)
 }
 
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -332,10 +335,11 @@ fn write_group(track: &moq_net::track::Producer, sequence: u64) {
 /// Publish a live track of groups `0..groups`, which the publisher keeps writing.
 fn publish_live(
 	origin: &moq_net::origin::Producer,
+	info: moq_net::track::Info,
 	groups: u64,
 ) -> (moq_net::origin::Publication, moq_net::track::Producer) {
 	let broadcast = origin.create_broadcast("bcast").unwrap();
-	let track = broadcast.create_track("video", timed()).unwrap();
+	let track = broadcast.create_track("video", info).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 	for sequence in 0..groups {
 		write_group(&track, sequence);
@@ -357,7 +361,7 @@ struct FetchedCopy {
 /// The relay speaks `upstream_version` to the publisher and `version` downstream.
 async fn fetched_copy(upstream_version: Version, version: Version) -> FetchedCopy {
 	let publisher = produce_origin(1);
-	let (broadcast, track) = publish_live(&publisher, 3);
+	let (broadcast, track) = publish_live(&publisher, timed(), 3);
 
 	let relay = produce_origin(2);
 	let mut options = MockConnectOptions::new(upstream_version);
@@ -477,7 +481,7 @@ async fn a_resumed_bounded_subscription_reads_below_the_answered_edge() {
 		kio::clock::timeout(TIMEOUT, async {
 			let version: Version = version.parse().unwrap();
 			let publisher = produce_origin(1);
-			let (broadcast, track) = publish_live(&publisher, 2);
+			let (broadcast, track) = publish_live(&publisher, timed(), 2);
 
 			let client = produce_origin(2);
 			let mut options = MockConnectOptions::new(version);
@@ -525,56 +529,68 @@ async fn a_resumed_bounded_subscription_reads_below_the_answered_edge() {
 }
 
 /// A copy that went idle holding a group resumes a bounded subscription of that group after
-/// the upstream moved on, and still reads it: the feed starts where it asked, not at the
-/// answer's Largest. A live join also keeps the cached history for an unlimited read.
+/// the upstream moved on. With an unlimited max age every version reads it from the cache.
+/// Under a finite one the copy cannot judge a group below its live floor, so it reads the
+/// group only where the resumed feed starts where it asked, not at the answer's Largest.
+/// A draft-18 SUBSCRIBE has no such start: its live join puts the floor above the cached
+/// group, which the read gives up at once rather than waiting for a group that won't come.
 #[kio::test]
 async fn a_resumed_bounded_subscription_keeps_its_cached_start() {
 	let versions = moq_net::Versions::all();
-	for version in versions.iter().copied().chain(["moq-lite-07-wip".parse().unwrap()]) {
-		kio::clock::timeout(TIMEOUT, async {
-			let publisher = produce_origin(1);
-			let (broadcast, track) = publish_live(&publisher, 1);
+	for max_age in [None, Some(Duration::from_secs(30))] {
+		for version in versions.iter().copied().chain(["moq-lite-07-wip".parse().unwrap()]) {
+			kio::clock::timeout(TIMEOUT, async {
+				let publisher = produce_origin(1);
+				let (broadcast, track) = publish_live(&publisher, timed().with_max_age(max_age), 1);
 
-			let client = produce_origin(2);
-			let mut options = MockConnectOptions::new(version);
-			options.server_publish = Some(publisher.consume());
-			options.client_subscribe = Some(client.clone());
-			let pair = connect_mock(options).await;
+				let client = produce_origin(2);
+				let mut options = MockConnectOptions::new(version);
+				options.server_publish = Some(publisher.consume());
+				options.client_subscribe = Some(client.clone());
+				let pair = connect_mock(options).await;
 
-			// A live read caches group 0, then leaves, so the copy goes idle holding it.
-			let remote = resolve(&client).await;
-			let copy = remote.track("video").unwrap();
-			let mut live = kio::clock::timeout(TIMEOUT, copy.subscribe(None))
-				.await
-				.expect("subscribe timed out")
-				.expect("subscribe");
-			assert_eq!(next_frames(&mut live).await, Some(frames(0)));
-			drop(live);
-			let mut watch = track.clone();
-			while watch.subscription().is_some() {
-				kio::clock::timeout(TIMEOUT, watch.subscription_changed())
+				// A live read caches group 0, then leaves, so the copy goes idle holding it.
+				let remote = resolve(&client).await;
+				let copy = remote.track("video").unwrap();
+				let mut live = kio::clock::timeout(TIMEOUT, copy.subscribe(None))
 					.await
-					.expect("unsubscribe timed out")
-					.unwrap();
-			}
-			for sequence in 1..4 {
-				write_group(&track, sequence);
-			}
+					.expect("subscribe timed out")
+					.expect("subscribe");
+				assert_eq!(next_frames(&mut live).await, Some(frames(0)));
+				drop(live);
+				let mut watch = track.clone();
+				while watch.subscription().is_some() {
+					kio::clock::timeout(TIMEOUT, watch.subscription_changed())
+						.await
+						.expect("unsubscribe timed out")
+						.unwrap();
+				}
+				for sequence in 1..4 {
+					write_group(&track, sequence);
+				}
 
-			// Past the edge the live read learned, so it subscribes; the answer names group 3.
-			let subscription = moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(None))
-				.with_range(0..1);
-			let mut sub = kio::clock::timeout(TIMEOUT, copy.subscribe(subscription))
-				.await
-				.expect("subscribe timed out")
-				.expect("subscribe");
-			assert_eq!(next_frames(&mut sub).await, Some(frames(0)), "{version}");
+				// Past the edge the live read learned, so it subscribes; the answer names group 3.
+				let subscription = moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(None))
+					.with_range(0..1);
+				let mut sub = kio::clock::timeout(TIMEOUT, copy.subscribe(subscription))
+					.await
+					.expect("subscribe timed out")
+					.expect("subscribe");
+				let started = kio::clock::now();
+				let read = next_frames(&mut sub).await;
+				if max_age.is_some() && version == "moq-transport-18".parse().unwrap() {
+					assert_eq!(read, None, "{version}: the group below the live floor was given up");
+					assert_eq!(kio::clock::now(), started, "{version}: the read waited");
+				} else {
+					assert_eq!(read, Some(frames(0)), "{version}, max age {max_age:?}");
+				}
 
-			drop((sub, copy, remote, pair, track, broadcast, client, publisher));
-		})
-		.await
-		.expect("timed out");
+				drop((sub, copy, remote, pair, track, broadcast, client, publisher));
+			})
+			.await
+			.unwrap_or_else(|_| panic!("{version}, max age {max_age:?}: timed out"));
+		}
 	}
 }
 

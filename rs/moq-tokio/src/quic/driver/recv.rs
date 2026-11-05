@@ -49,8 +49,7 @@ use crate::quic::driver::{VarInt, connection::ConnectionRef, stream};
 #[derive(Debug)]
 pub struct Stream {
 	reader: Reader,
-	/// Holds the waiter of a read polled from a [`Context`], by
-	/// [`AsyncRead`](tokio::io::AsyncRead) or [`Self::poll_lease`], across polls
+	/// Holds the waiter of an [`AsyncRead`](tokio::io::AsyncRead) read across polls
 	park: kio::Park,
 }
 
@@ -174,8 +173,7 @@ impl Stream {
 	/// is out.
 	///
 	/// Do not mix with the plain reads on one stream, which skip the leased bytes.
-	pub fn poll_lease(&mut self, cx: &mut Context<'_>, want: usize) -> Poll<Result<Lease<'_>, Error>> {
-		let waiter = self.park.hold(cx);
+	pub fn poll_lease(&mut self, waiter: &kio::Waiter, want: usize) -> Poll<Result<Lease<'_>, Error>> {
 		let inner = ready!(self.reader.poll_take(waiter, want))?;
 		Poll::Ready(Ok(Lease {
 			reader: &mut self.reader,
@@ -224,18 +222,16 @@ impl Stream {
 	/// Poll form of [`Self::received_reset`]. It takes no bytes, so a lease in progress is
 	/// left as it was.
 	#[cfg(feature = "quic")]
-	pub(crate) fn poll_received_reset(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<VarInt>, Error>> {
-		let waiter = self.park.hold(cx);
+	pub(crate) fn poll_received_reset(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<VarInt>, Error>> {
 		self.reader.poll_received_reset(waiter)
 	}
 	/// Observe FIN without consuming application bytes, including an empty stream's end.
 	#[cfg(feature = "quic")]
-	pub(crate) fn poll_closed(&mut self, cx: &Context<'_>) -> Poll<Result<Option<VarInt>, Error>> {
+	pub(crate) fn poll_closed(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<VarInt>, Error>> {
 		// A read that met the reset marks every byte read, so only the cached code still says how it ended.
 		if let Some(code) = self.reader.reset {
 			return Poll::Ready(Ok(Some(code)));
 		}
-		let waiter = self.park.hold(cx);
 		let read = self
 			.reader
 			.poll_read_generic(waiter, |chunks, waiter| match chunks.poll_next(waiter, 0) {

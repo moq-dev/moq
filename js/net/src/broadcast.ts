@@ -362,9 +362,10 @@ export class Producer {
 	 * from the returned producer. A request a handler has already taken stays a duplicate.
 	 * An append on the track throws if it would reuse a sequence an earlier track of the name
 	 * wrote in this broadcast, so a replacement writes its first group explicitly. Throws if an
-	 * open track or a live request already holds the name.
+	 * open track or a live request already holds the name. `info` resolves as
+	 * {@link track.Producer.accept} does, so an omitted `maxAge` is zero, the live edge only.
 	 */
-	createTrack(name: string, info: Partial<track.Info> = {}): track.Producer {
+	createTrack(name: string, info: track.InfoInit = {}): track.Producer {
 		if (this.#state.closed.peek() !== undefined) {
 			throw new Error("broadcast is closed");
 		}
@@ -376,7 +377,7 @@ export class Producer {
 			const lookups = this.#state.lookups.get(producer);
 			if (lookups) lookups.opened = false;
 			this.#state.requests.delete(name);
-			adopt(this.#state, producer, track.infoDefaults(info));
+			adopt(this.#state, producer, track.authoredInfo(info));
 			return producer;
 		}
 
@@ -388,7 +389,7 @@ export class Producer {
 		}
 
 		const producer = new track.Producer(name).accept(info);
-		adopt(this.#state, producer, track.infoDefaults(info));
+		adopt(this.#state, producer, track.authoredInfo(info));
 		return producer;
 	}
 

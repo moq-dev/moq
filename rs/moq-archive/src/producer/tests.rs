@@ -31,8 +31,12 @@ fn spawn(store: &Store<Mock>, broadcast: &broadcast::Producer, config: Config) -
 	tokio::spawn(Producer::new(store.clone(), broadcast.consume(), config).run())
 }
 
+/// A millisecond source track with no publisher max age, so the recorder reaches superseded
+/// groups and only its own max delay bounds the wait for a missing one.
 fn timed() -> track::Info {
-	track::Info::default().with_timescale(Timescale::MILLI)
+	track::Info::default()
+		.with_timescale(Timescale::MILLI)
+		.with_max_age(None)
 }
 
 fn ms(ms: u64) -> Timestamp {

@@ -4,6 +4,33 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Opens wait their turn for stream credit ([#7894](https://github.com/moq-dev/moq/pull/7894))
+
+A request no longer fails with `Error::NoStreamCredit` when the peer grants no more streams: every stream a session opens waits for credit, and returning credit goes to the open whose stream the transport would send first. The variant is removed; drop any arm matching it.
+`transport::poll::Session::poll_open_request` is removed. A transport drops its implementation; `poll_open_bi` is the only bidirectional open.
+A transport that knows the peer's stream credit reports it from the new `poll::Session::stream_credit`, which defaults to `None`, as `transport::StreamCredit { available, blocked }` per `transport::Dir`. A wrapper around another transport forwards it.
+
+### `Following` waits out a refusal ([#7836](https://github.com/moq-dev/moq/pull/7836))
+
+After `Following::available` returns a handler's refusal, the next call no longer asks the refusing route again at once.
+It waits for the serving route to change: another instance, the path going and coming back, or the same instance over another route.
+A caller that retried in a loop now waits instead of spinning; one that gave up on the first error is unaffected.
+
+### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+`track::Info::default()` sets `max_age` to `Some(Duration::ZERO)` instead of `None`: a superseded group is stale as soon as its successor arrives, so readers get only the live edge; the newest group never goes stale.
+A track that relied on unlimited history requests it explicitly before it is created, with `with_max_age(None)`, or sets a window, such as `hang::container::MAX_AGE` for media.
+A relay or cache bounds what it keeps with its own pool, not the publisher's default.
+Readers asking for history still set a sufficient `Delay::max` and range.
+Received metadata is unchanged: a track that arrives without a max age keeps `None`, and the wire is unchanged.
+
+```rust
+// Before: no publisher limit
+track::Info::default();
+// After: the same, stated explicitly
+track::Info::default().with_max_age(None);
+```
+
 ### A zero `Allocator::set_target` leaves the peer's PROBE target ([#7090](https://github.com/moq-dev/moq/pull/7090))
 
 A session with a sender now probes to the larger of its allocator's target and the PROBE target its peer sends, so `Allocator::set_target(Some(Rate::ZERO))` stops probing for this side's reservations only. A peer that advertises a target still raises the probe; a reservation's `Consumer::probed` stays `false`, since nothing probes for it.

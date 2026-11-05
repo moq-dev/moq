@@ -4,6 +4,31 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Request opens are ordinary bidirectional opens ([#7894](https://github.com/moq-dev/moq/pull/7894))
+
+`quic::web::Session::poll_open_request` is removed. Call `poll_open_bi`, which waits for the peer's stream credit.
+
+### Transport cryptography uses rind
+
+TLS configuration uses rind's rustls provider, and QUIC reset and token keys use rind through moq-quic.
+A CPU missing a feature rind needs fails configuration with `quic::Error::UnsupportedCpu`, wrapping `moq_crypto::provider::UnsupportedCpu`, which names the feature; it used to arrive as `quic::Error::Tls`.
+Build caller-supplied rustls configurations on `moq_crypto::provider::provider()?` or `moq_tokio::crypto::provider()?`.
+No wire format changes.
+
+### QUIC method names and signatures match the core and Tokio driver
+
+Construct an endpoint with `quic::Endpoint::new(config, socket)` instead of `new(socket, config)`.
+Rename `quic::Connection::remote_addr()` to `remote_address()`; it now reports the live peer address, following migration instead of caching the handshake address.
+`Connection::close(code, reason)` takes a UTF-8 `&str` instead of bytes, matching the core and Tokio driver.
+`Connection::set_limits` and `quic::web::Session::set_limits` return `quic::LimitsError` directly; `quic::Error::Limits` is removed.
+
+On `quic::Connection` and `quic::web::Session`, rename `read_datagram()` to `recv_datagram()`.
+On both layers' `send::Stream` and `send::Finished`, rename `stopped()` to `closed()`; results and acknowledgement semantics are unchanged.
+
+Both layers' `recv::Stream::poll_lease`, and `quic::web::recv::Stream::poll_reset`, take `&kio::Waiter` instead of `&mut Context`.
+Use `kio::wait(|waiter| stream.poll_lease(waiter, want).map_ok(...))` for a lease operation, or retain a `kio::Park` in a `Future` implementation and pass `park.hold(cx)`.
+Dropping the caller's waiter cancels its registrations while the stream stays alive.
+
 ### Native WebTransport implements moq-net's poll traits ([#7771](https://github.com/moq-dev/moq/pull/7771))
 
 `quic::web` is supported as a WebTransport library without running MoQ.
@@ -80,7 +105,7 @@ Read the worker's time with `kio::clock::now()` inside it.
 
 ### QUIC limits are `moq_quic::Limits` (#5871)
 
-`quic::Limits` is `moq_quic::Limits`, where each `None` field keeps that limit, and an invalid one fails `set_limits` with `Error::Limits` instead of `WindowRange` or `StreamsRange`.
+`quic::Limits` is `moq_quic::Limits`, where each `None` field keeps that limit, and an invalid one fails `set_limits` with `LimitsError` instead of `WindowRange` or `StreamsRange`.
 Start from `quic::Limits::default()` and set only the fields you change.
 
 ### The `noq` feature is `quic` (#5664)

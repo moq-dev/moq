@@ -132,7 +132,7 @@ fn an_unbounded_budget_still_leaves_the_dropped_port() {
 /// Dial through a proxy that drops the first flow, with `budget` as the
 /// configured backoff timeout and `effective` as the one a mesh dial runs.
 async fn dropped_flow_recovers(budget: Duration, effective: Duration) {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let peer = spawn_peer().await;
 	let (proxy, sources) = spawn_proxy(peer).await;

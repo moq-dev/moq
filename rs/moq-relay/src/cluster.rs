@@ -998,10 +998,10 @@ pub struct Options {
 	/// Cluster identity, peers, and discovery.
 	pub config: Config,
 
-	/// Shared group pool and per-track retention ceiling.
+	/// Shared group pool and per-track max age ceiling.
 	///
 	/// `None` uses an unbounded pool with the standard LRU window and no
-	/// media-timestamp ceiling.
+	/// max age ceiling.
 	pub cache: Option<crate::cache::Cache>,
 
 	/// Stats publishing on the cluster's origin. Disabled by default.
@@ -1258,13 +1258,15 @@ pub struct Cluster {
 	peer_quic: crate::limits::Quic,
 	config: Config,
 	/// Dial template every peer dial is built from; see [`Self::peer_client`].
-	connect: Option<moq_tokio::connect::Config>,
-	quic: Option<moq_tokio::quic::Config>,
+	/// The dial state sits behind `Arc`s because it is several KiB inline, and every
+	/// clone and every future holding one would copy it, on the stack in debug builds.
+	connect: Option<Arc<moq_tokio::connect::Config>>,
+	quic: Option<Arc<moq_tokio::quic::Config>>,
 	/// The client static and API peers share when the template binds a fixed
 	/// `[connect]` port, so that port stays the cluster's egress port. Otherwise
 	/// `None`, and every session builds its own client on an ephemeral port. Built
 	/// by [`Self::start`] and joins [`Self::dialers`] once [`Started::run`] begins.
-	dial: Option<moq_tokio::Client>,
+	dial: Option<Arc<moq_tokio::Client>>,
 	/// Every dial client, shared by all clones, for [`Self::close`].
 	dialers: Dialers,
 	/// Bound listen port and optional generated-certificate fingerprint.
@@ -1549,8 +1551,8 @@ impl Cluster {
 	/// Required when any peer is configured; [`start`](Self::start) returns an
 	/// error otherwise.
 	pub fn with_connect(mut self, connect: moq_tokio::connect::Config, quic: moq_tokio::quic::Config) -> Self {
-		self.connect = Some(connect);
-		self.quic = Some(quic);
+		self.connect = Some(Arc::new(connect));
+		self.quic = Some(Arc::new(quic));
 		self
 	}
 
@@ -1815,7 +1817,7 @@ impl Cluster {
 		let client = self
 			.peer_client(!shared, None)
 			.context("cluster peers configured but the dial template is unusable")?;
-		self.dial = shared.then_some(client);
+		self.dial = shared.then(|| Arc::new(client));
 
 		// After everything fallible, so a failed start leaves no credential behind.
 		#[cfg(feature = "cluster-lan")]
@@ -2138,7 +2140,7 @@ impl Cluster {
 		// leaves from a fresh port. A fixed `[connect]` bind port names a single
 		// source port, so static and API peers share the client bound to it instead.
 		let (client, _held) = match (&self.dial, target.lan) {
-			(Some(shared), false) => (shared.clone(), None),
+			(Some(shared), false) => (moq_tokio::Client::clone(shared), None),
 			_ => {
 				let client = self.peer_client(true, Some(target))?;
 				let held = self.dialers.hold(&client)?;
@@ -2210,7 +2212,8 @@ impl Cluster {
 	fn peer_client(&self, ephemeral: bool, target: Option<&DialTarget>) -> anyhow::Result<moq_tokio::Client> {
 		let mut connect = self
 			.connect
-			.clone()
+			.as_deref()
+			.cloned()
 			.context("cluster dial without a dial template (call Cluster::with_connect)")?;
 		if ephemeral {
 			let mut bind = connect.resolve().bind;
@@ -2232,7 +2235,7 @@ impl Cluster {
 			connect.tls = moq_tokio::tls::Connect::default();
 			connect.tls.fingerprint = vec![fingerprint.to_string()];
 		}
-		let mut quic = self.quic.clone().unwrap_or_default();
+		let mut quic = self.quic.as_deref().cloned().unwrap_or_default();
 		self.peer_quic.dial(&mut quic);
 		Ok(connect.init(quic)?)
 	}
@@ -3756,7 +3759,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn remote_plaintext_api_refuses_startup() {
-		let _ = moq_tokio::crypto::install_default();
+		moq_tokio::crypto::install_default().unwrap();
 		for url in ["http://api.example.com/", "http://192.0.2.1/", "http://[2001:db8::1]/"] {
 			let mut config = Config::default();
 			config.api.url = Some(url.into());
@@ -3789,7 +3792,7 @@ mod tests {
 	#[tokio::test]
 	async fn cluster_api_rejects_redirect_bodies() {
 		use tokio::io::{AsyncReadExt, AsyncWriteExt};
-		let _ = moq_tokio::crypto::install_default();
+		moq_tokio::crypto::install_default().unwrap();
 		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 		let url = format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap();
 		let server = async move {
@@ -3818,7 +3821,7 @@ mod tests {
 	#[tokio::test]
 	async fn lan_cluster_path_carries_broadcasts_both_ways() {
 		const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-		let _ = moq_tokio::crypto::install_default();
+		moq_tokio::crypto::install_default().unwrap();
 
 		let node = new_cluster(Config::default()).expect("node cluster");
 		let fingerprint = new_cluster(Config::default()).expect("fingerprint cluster");
@@ -3909,7 +3912,7 @@ mod tests {
 	/// dropping it releases its client rather than leaving it to `close`.
 	#[tokio::test]
 	async fn a_failed_start_leaves_the_dial_bind_free() {
-		let _ = moq_tokio::crypto::install_default();
+		moq_tokio::crypto::install_default().unwrap();
 		let dir = tempfile::tempdir().expect("tempdir");
 		let token = dir.path().join("token");
 		let config = Config {
@@ -3945,8 +3948,12 @@ mod tests {
 		idle: std::time::Duration,
 	) -> moq_tokio::quic::driver::endpoint::Endpoint {
 		use moq_tokio::quic::driver;
-		let key = rcgen::KeyPair::generate().expect("keypair");
+		let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
 		let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+			.map(|mut params| {
+				params.serial_number = Some(1u64.into());
+				params
+			})
 			.expect("cert params")
 			.self_signed(&key)
 			.expect("self-signed cert");
@@ -3954,7 +3961,7 @@ mod tests {
 			.with_no_client_auth()
 			.with_single_cert(
 				vec![cert.der().clone()],
-				rustls::pki_types::PrivateKeyDer::Pkcs8(key.serialize_der().into()),
+				rustls::pki_types::PrivateKeyDer::Pkcs8(key.to_pkcs8().secret_pkcs8_der().to_vec().into()),
 			)
 			.expect("server tls");
 		tls.alpn_protocols = connect
@@ -3981,7 +3988,7 @@ mod tests {
 	async fn cancelling_run_stops_its_dynamic_dials() {
 		const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 		const IDLE: std::time::Duration = std::time::Duration::from_secs(300);
-		let _ = moq_tokio::crypto::install_default();
+		moq_tokio::crypto::install_default().unwrap();
 
 		let mut connect = moq_tokio::connect::Config::default();
 		connect.tls.insecure = Some(true);
@@ -4030,7 +4037,7 @@ mod tests {
 		use moq_tokio::quic::driver;
 		const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 		const IDLE: std::time::Duration = std::time::Duration::from_secs(300);
-		let _ = moq_tokio::crypto::install_default();
+		moq_tokio::crypto::install_default().unwrap();
 
 		let mut connect = moq_tokio::connect::Config::default();
 		connect.tls.insecure = Some(true);
@@ -4129,7 +4136,7 @@ mod tests {
 	async fn closing_a_cluster_closes_its_lan_dials() {
 		const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 		const IDLE: std::time::Duration = std::time::Duration::from_secs(300);
-		let _ = moq_tokio::crypto::install_default();
+		moq_tokio::crypto::install_default().unwrap();
 		let mut quic = moq_tokio::quic::Config::default();
 		quic.idle_timeout = Some((IDLE).into());
 

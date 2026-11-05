@@ -121,6 +121,7 @@ pub(crate) struct Producer {
 #[derive(Default)]
 struct State {
 	renditions: BTreeMap<Key, Arc<Rendition>>,
+	media: Option<hang::catalog::Media>,
 	/// The catalog's confirmed end, distinct from dropping its watcher.
 	finished: Option<crate::Result<()>>,
 	// Cache catalog quality order without counting it as a holder.
@@ -159,6 +160,7 @@ async fn hold(binding: moq_mux::Binding, track: String) {
 /// channel open (so `renditions()` cursors would never terminate).
 #[derive(Clone)]
 pub(crate) struct Fanout {
+	pub(super) lazy: bool,
 	feed: kio::Producer<Feed>,
 	/// Starts each rendition's background work on the broadcaster's driver.
 	spawner: Spawner,
@@ -169,6 +171,7 @@ impl Producer {
 		Self {
 			state: kio::Producer::new(State::default()),
 			fanout: Fanout {
+				lazy: false,
 				feed: kio::Producer::new(Feed {
 					targets: Vec::new(),
 					discontinuities: Discontinuities::default(),
@@ -182,6 +185,12 @@ impl Producer {
 				spawner,
 			},
 		}
+	}
+
+	pub fn lazy(window: Duration, spawner: Spawner) -> Self {
+		let mut producer = Self::new(window, spawner);
+		producer.fanout.lazy = true;
+		producer
 	}
 
 	/// A producer whose renditions run on a driver spawned on the ambient runtime.
@@ -233,6 +242,22 @@ impl Producer {
 		self.state.read().renditions.get(&(kind, name.to_string())).cloned()
 	}
 
+	#[cfg(feature = "server")]
+	pub fn poll_get(&self, waiter: &kio::Waiter, kind: Kind, name: &str) -> Poll<Option<Arc<Rendition>>> {
+		match self.state.poll_ref(waiter, |state| {
+			if state.media.is_some() {
+				Poll::Ready(state.renditions.get(&(kind, name.to_string())).cloned())
+			} else {
+				Poll::Pending
+			}
+		}) {
+			Poll::Ready(Ok(rendition)) => Poll::Ready(rendition),
+			// Read through the closed state's guard: `get` would lock it again.
+			Poll::Ready(Err(state)) => Poll::Ready(state.renditions.get(&(kind, name.to_string())).cloned()),
+			Poll::Pending => Poll::Pending,
+		}
+	}
+
 	/// Snapshot video by name and audio in catalog quality order (for the master playlist).
 	pub fn snapshot(&self) -> Vec<Arc<Rendition>> {
 		let current = self.state.read();
@@ -258,6 +283,19 @@ impl Producer {
 	)]
 	pub fn is_empty(&self) -> bool {
 		self.state.read().renditions.is_empty()
+	}
+
+	/// Whether any rendition could still be listed: enabled and not failed on its own.
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(dead_code, reason = "only the `server` feature uses it")
+	)]
+	pub fn listable(&self) -> bool {
+		self.state
+			.read()
+			.renditions
+			.values()
+			.any(|rendition| rendition.is_enabled() && !rendition.failed_alone())
 	}
 
 	/// Release every rendition the map is holding.
@@ -436,14 +474,25 @@ impl Producer {
 		not(feature = "server"),
 		allow(dead_code, reason = "only the `server` feature uses it")
 	)]
-	pub(crate) async fn advertised(&self) {
+	pub(crate) fn poll_advertised(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.state
+			.poll_ref(waiter, |current| {
+				if current.renditions.values().any(|rendition| {
+					rendition.is_enabled() && (self.fanout.lazy || rendition.poll_advertised(waiter).is_ready())
+				}) {
+					Poll::Ready(())
+				} else {
+					Poll::Pending
+				}
+			})
+			.map(|_| ())
+	}
+
+	#[cfg(feature = "server")]
+	pub(crate) async fn catalogued(&self) {
 		let _ = kio::wait(|waiter| {
 			self.state.poll_ref(waiter, |current| {
-				if current
-					.renditions
-					.values()
-					.any(|rendition| rendition.is_enabled() && rendition.poll_advertised(waiter).is_ready())
-				{
+				if current.media.is_some() {
 					Poll::Ready(())
 				} else {
 					Poll::Pending
@@ -530,7 +579,7 @@ impl Producer {
 				if let Some(err) = &feed.failed {
 					rendition.fail(err.clone());
 					rendition.close();
-				} else {
+				} else if !self.fanout.lazy {
 					rendition.watch();
 				}
 				feed.targets.push(Arc::downgrade(&rendition));
@@ -618,6 +667,7 @@ impl Producer {
 		let Ok(mut current) = self.state.write() else {
 			return;
 		};
+		current.media = Some(catalog.media);
 
 		// Renditions the catalog dropped or reconfigured. Retire each as it goes so any cursor
 		// over it drains and ends, instead of parking on a window that never finishes -- the
@@ -645,7 +695,11 @@ impl Producer {
 		let mut handoffs = BTreeMap::new();
 		for key in stale {
 			if let Some(rendition) = current.renditions.remove(&key) {
-				handoffs.insert(key, rendition.retire());
+				let successor = match &key {
+					(Kind::Video, name) => catalog.video.renditions.get(name),
+					(Kind::Audio, _) => None,
+				};
+				handoffs.insert(key, rendition.retire(successor));
 			}
 		}
 
@@ -653,7 +707,8 @@ impl Producer {
 		let current = &mut *current;
 		match interval {
 			Some(_) => current.waiting.clear(),
-			None => self.wait(source, catalog, &mut current.waiting),
+			None if !self.fanout.lazy => self.wait(source, catalog, &mut current.waiting),
+			None => current.waiting.clear(),
 		}
 
 		let mut added = Vec::new();
@@ -802,6 +857,20 @@ fn next_event(current: &BTreeMap<Key, Arc<Rendition>>, seen: &BTreeMap<Key, Arc<
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// A set whose catalog closed before its first snapshot answers a lookup instead of
+	/// locking its state a second time.
+	#[cfg(feature = "server")]
+	#[test]
+	fn a_set_closed_before_its_catalog_answers_a_lookup() {
+		let (spawner, _driver) = Spawner::new();
+		let renditions = Producer::lazy(Duration::from_secs(16), spawner);
+		renditions.close();
+		assert!(matches!(
+			renditions.poll_get(&kio::Waiter::noop(), Kind::Video, "v"),
+			Poll::Ready(None)
+		));
+	}
 
 	#[tokio::test]
 	async fn cursors_end_only_with_a_finished_catalog() {

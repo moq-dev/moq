@@ -104,8 +104,15 @@ struct Run {
 
 async fn run(preset: &str) -> Run {
 	let preset = moq_shaper::Preset::load(preset).expect("preset");
-	let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-	let key = rustls::pki_types::PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
+	let cert = (|| -> std::result::Result<_, rcgen::Error> {
+		let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+		let mut params = rcgen::CertificateParams::new(vec!["localhost".into()])?;
+		params.serial_number = Some(1u64.into());
+		let cert = params.self_signed(&signing_key)?;
+		Ok(rcgen::CertifiedKey { cert, signing_key })
+	})()
+	.unwrap();
+	let key = rustls::pki_types::PrivatePkcs8KeyDer::from(cert.signing_key.to_pkcs8().secret_pkcs8_der().to_vec());
 	let server_config =
 		driver::server::Config::with_single_cert(vec![cert.cert.into()], key.into()).expect("server config");
 	let server = driver::endpoint::Endpoint::new(
@@ -285,7 +292,7 @@ fn slope(span: &[Reading]) -> Option<f64> {
 
 /// Runs `preset` and prints its rows of the table, under the same header as the others
 async fn report(preset: &str) {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let run = run(preset).await;
 	println!(
 		"| preset | signal | readings/s | noise σ | ceiling | detect @ceiling | detect @{THRESHOLD} | false alarms @{THRESHOLD} |"

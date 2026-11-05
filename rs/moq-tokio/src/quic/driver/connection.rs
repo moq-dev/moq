@@ -307,23 +307,6 @@ impl Connection {
 		Poll::Ready(Ok((send::Stream::new(conn.clone(), id), recv::Stream::new(conn, id))))
 	}
 
-	/// Open a request stream using only the credit already granted by the peer.
-	#[cfg(feature = "net")]
-	pub(crate) fn open_request(&self) -> Result<Option<(send::Stream, recv::Stream)>, Error> {
-		let mut state = self.0.state.lock();
-		if let Some(err) = state.error() {
-			return Err(err);
-		}
-		let Some(id) = state.inner.streams().open(Dir::Bi, Default::default()) else {
-			return Ok(None);
-		};
-		drop(state);
-		Ok(Some((
-			send::Stream::new(self.0.clone(), id),
-			recv::Stream::new(self.0.clone(), id),
-		)))
-	}
-
 	/// Accept the next incoming uni-directional stream
 	///
 	/// # Cancel safety
@@ -366,7 +349,7 @@ impl Connection {
 	/// # Cancel safety
 	///
 	/// This method is cancellation safe. If this does not resolve, no datagrams were consumed.
-	pub fn read_datagram(&self) -> impl Future<Output = Result<Bytes, Error>> + '_ {
+	pub fn recv_datagram(&self) -> impl Future<Output = Result<Bytes, Error>> + '_ {
 		kio::wait(|waiter| self.poll_recv_datagram(waiter))
 	}
 
@@ -490,7 +473,7 @@ impl Connection {
 
 	/// The peer's UDP address
 	///
-	/// If `ServerConfig::migration` is `true`, clients may change addresses at will, e.g. when
+	/// If [`moq_quic::server::Config::migration`] is `true`, clients may change addresses at will, e.g. when
 	/// switching to a cellular internet connection.
 	pub fn remote_address(&self) -> SocketAddr {
 		self.0.state.lock().inner.remote_address()
@@ -511,6 +494,18 @@ impl Connection {
 	pub(crate) fn receive_window(&self) -> moq_net::transport::ReceiveWindow {
 		let state = self.0.state.lock();
 		moq_net::transport::ReceiveWindow::new(state.inner.receive_window(), state.inner.stream_receive_window())
+	}
+
+	/// The peer's stream credit in `dir`, as this connection last heard it.
+	#[cfg(feature = "net")]
+	pub(crate) fn stream_credit(&self, dir: moq_net::transport::Dir) -> moq_net::transport::StreamCredit {
+		let dir = match dir {
+			moq_net::transport::Dir::Uni => Dir::Uni,
+			moq_net::transport::Dir::Bi => Dir::Bi,
+		};
+		let mut state = self.0.state.lock();
+		let streams = state.inner.streams();
+		moq_net::transport::StreamCredit::new(streams.credit(dir), streams.blocked(dir))
 	}
 
 	/// How many send streams the connection still holds state for

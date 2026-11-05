@@ -1,7 +1,7 @@
 //! The Ed25519 public key that names an endpoint, and its z-base-32 text.
 //!
 //! This builds without the `sign` feature, so a crate that only names endpoints shares the one
-//! codec without `moq-net` or a crypto backend.
+//! codec without `moq-net` or rind.
 
 use std::fmt;
 use std::str::FromStr;
@@ -40,10 +40,8 @@ impl PublicKey {
 	/// Whether `signature` is this key's Ed25519 signature over `message`.
 	#[cfg(feature = "sign")]
 	pub(crate) fn verify(&self, message: &[u8], signature: &[u8; crate::sign::scope::SIGNATURE_LEN]) -> bool {
-		use aws_lc_rs::signature::{ED25519, UnparsedPublicKey};
-		UnparsedPublicKey::new(&ED25519, &self.0)
-			.verify(message, signature)
-			.is_ok()
+		rind::signature::PublicKey::new(&rind::signature::verify::ED25519, &self.0)
+			.is_ok_and(|key| key.verify(message, signature).is_ok())
 	}
 }
 

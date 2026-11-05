@@ -7,8 +7,8 @@ use bytes::BytesMut;
 
 /// A drift budget no test timeline comes close to, so the reader sees every group.
 ///
-/// The media track's full retention window, so a reader started after importing can
-/// still read every retained group. These tests import a whole file first, which the default
+/// The media track's full max age, so a reader started after importing can
+/// still read every fresh group. These tests import a whole file first, which the default
 /// [`std::time::Duration::ZERO`](std::time::Duration::ZERO) budget collapses to the live edge:
 /// completeness has to be asked for.
 const RECORDING_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30);

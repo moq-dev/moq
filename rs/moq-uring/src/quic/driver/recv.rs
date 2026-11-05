@@ -4,8 +4,7 @@
 //! wait itself when a read owes the peer credit, and the handles wait through moq-quic's poll
 //! forms, which wake them.
 
-use std::future::poll_fn;
-use std::task::{Context, Poll, ready};
+use std::task::{Poll, ready};
 
 use bytes::{Buf, BufMut, Bytes};
 use moq_quic::recv::Chunks;
@@ -19,8 +18,6 @@ use crate::quic::{Error as ConnectionError, VarInt, stream};
 pub struct Stream {
 	shared: Shared,
 	id: stream::Id,
-	/// Retains the waiter registrations of the polls across calls.
-	park: kio::Park,
 	all_data_read: bool,
 	reset: Option<VarInt>,
 	/// The code a drop before the end stops with
@@ -33,7 +30,6 @@ impl Stream {
 		Self {
 			shared,
 			id,
-			park: kio::Park::default(),
 			all_data_read: false,
 			reset: None,
 			drop_stop: VarInt::from_u32(0),
@@ -47,17 +43,19 @@ impl Stream {
 	///
 	/// Cancel-safe.
 	pub async fn read(&mut self, buf: &mut impl BufMut) -> Result<Option<usize>, Error> {
-		poll_fn(|cx| self.poll_read(cx, buf)).await
+		kio::wait(|waiter| self.poll_read_buf(waiter, buf)).await
 	}
 
 	/// [`Self::read`], as a poll.
-	pub(crate) fn poll_read(&mut self, cx: &Context<'_>, buf: &mut impl BufMut) -> Poll<Result<Option<usize>, Error>> {
+	pub(crate) fn poll_read_buf(
+		&mut self,
+		waiter: &kio::Waiter,
+		buf: &mut impl BufMut,
+	) -> Poll<Result<Option<usize>, Error>> {
 		if !buf.has_remaining_mut() {
 			return Poll::Ready(Ok(Some(0)));
 		}
-		self.parked(cx, |this, waiter| {
-			this.poll_read_generic(waiter, |chunks, waiter| fill(chunks, waiter, buf))
-		})
+		self.poll_read_generic(waiter, |chunks, waiter| fill(chunks, waiter, buf))
 	}
 
 	/// Fill `buf` with data from the stream.
@@ -81,26 +79,16 @@ impl Stream {
 	///
 	/// Cancel-safe.
 	pub async fn read_chunk(&mut self, max: usize) -> Result<Option<Bytes>, Error> {
-		poll_fn(|cx| self.poll_read_chunk(cx, max)).await
+		kio::wait(|waiter| self.poll_read_chunk(waiter, max)).await
 	}
 
 	/// [`Self::read_chunk`], as a poll.
-	pub(crate) fn poll_read_chunk(&mut self, cx: &Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Error>> {
-		self.parked(cx, |this, waiter| {
-			this.poll_read_generic(waiter, |chunks, waiter| match chunks.poll_next(waiter, max) {
-				Poll::Ready(Ok(Some(chunk))) => ReadStatus::Readable(chunk.bytes),
-				Poll::Ready(res) => (None, res.err()).into(),
-				Poll::Pending => ReadStatus::Failed(None, moq_quic::recv::Error::Blocked),
-			})
+	fn poll_read_chunk(&mut self, waiter: &kio::Waiter, max: usize) -> Poll<Result<Option<Bytes>, Error>> {
+		self.poll_read_generic(waiter, |chunks, waiter| match chunks.poll_next(waiter, max) {
+			Poll::Ready(Ok(Some(chunk))) => ReadStatus::Readable(chunk.bytes),
+			Poll::Ready(res) => (None, res.err()).into(),
+			Poll::Pending => ReadStatus::Failed(None, moq_quic::recv::Error::Blocked),
 		})
-	}
-
-	/// Run `poll` with a waiter held in [`Self::park`], which outlives the call.
-	fn parked<R>(&mut self, cx: &Context<'_>, poll: impl FnOnce(&mut Self, &kio::Waiter) -> R) -> R {
-		let mut park = std::mem::take(&mut self.park);
-		let result = poll(self, park.hold(cx));
-		self.park = park;
-		result
 	}
 
 	/// Read all remaining data.
@@ -123,7 +111,7 @@ impl Stream {
 	/// Lease the stream's unreleased bytes once at least `want` have arrived in order, or the
 	/// stream ended. See [`Self::poll_lease()`].
 	pub async fn lease(&mut self, want: usize) -> Result<Lease<'_>, Error> {
-		let inner = poll_fn(|cx| self.parked(cx, |this, waiter| this.poll_take(waiter, want))).await?;
+		let inner = kio::wait(|waiter| self.poll_take(waiter, want)).await?;
 		Ok(Lease {
 			stream: self,
 			inner: Some(inner),
@@ -146,8 +134,8 @@ impl Stream {
 	/// is out.
 	///
 	/// Do not mix with the plain reads on one stream, which skip the leased bytes.
-	pub fn poll_lease(&mut self, cx: &mut Context<'_>, want: usize) -> Poll<Result<Lease<'_>, Error>> {
-		let inner = ready!(self.parked(cx, |this, waiter| this.poll_take(waiter, want)))?;
+	pub fn poll_lease(&mut self, waiter: &kio::Waiter, want: usize) -> Poll<Result<Lease<'_>, Error>> {
+		let inner = ready!(self.poll_take(waiter, want))?;
 		Poll::Ready(Ok(Lease {
 			stream: self,
 			inner: Some(inner),
@@ -213,16 +201,12 @@ impl Stream {
 	///
 	/// Cancel-safe.
 	pub async fn received_reset(&mut self) -> Result<Option<VarInt>, Error> {
-		poll_fn(|cx| self.poll_received_reset(cx)).await
+		kio::wait(|waiter| self.poll_received_reset(waiter)).await
 	}
 
 	/// Poll form of [`Self::received_reset`]. It takes no bytes, so a lease in progress is
 	/// left as it was.
-	pub(crate) fn poll_received_reset(&mut self, cx: &Context<'_>) -> Poll<Result<Option<VarInt>, Error>> {
-		self.parked(cx, Self::wait_received_reset)
-	}
-
-	fn wait_received_reset(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<VarInt>, Error>> {
+	pub(crate) fn poll_received_reset(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<VarInt>, Error>> {
 		if let Some(code) = self.reset {
 			return Poll::Ready(Ok(Some(code)));
 		}
@@ -251,25 +235,23 @@ impl Stream {
 	/// Unlike [`Self::received_reset`], it observes a finish whose bytes were all taken but
 	/// whose end was not read yet. An empty read reaches the end without taking the bytes
 	/// before it, so it keeps waiting while any are unread.
-	pub(crate) fn poll_closed(&mut self, cx: &Context<'_>) -> Poll<Result<Option<VarInt>, Error>> {
+	pub(crate) fn poll_closed(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<VarInt>, Error>> {
 		if let Some(code) = self.reset {
 			return Poll::Ready(Ok(Some(code)));
 		}
-		self.parked(cx, |this, waiter| {
-			let read = this.poll_read_generic(waiter, |chunks, waiter| match chunks.poll_next(waiter, 0) {
-				Poll::Ready(Ok(Some(_))) => ReadStatus::Readable(()),
-				Poll::Ready(res) => (None, res.err()).into(),
-				Poll::Pending => ReadStatus::Failed(None, moq_quic::recv::Error::Blocked),
-			});
-			match ready!(read) {
-				// Bytes are still unread, so the end is not reached: wait for a reset, or for
-				// more to arrive, as a reader would.
-				Ok(Some(())) => this.wait_received_reset(waiter),
-				Ok(None) => Poll::Ready(Ok(None)),
-				Err(Error::Reset(code)) => Poll::Ready(Ok(Some(code))),
-				Err(err) => Poll::Ready(Err(err)),
-			}
-		})
+		let read = self.poll_read_generic(waiter, |chunks, waiter| match chunks.poll_next(waiter, 0) {
+			Poll::Ready(Ok(Some(_))) => ReadStatus::Readable(()),
+			Poll::Ready(res) => (None, res.err()).into(),
+			Poll::Pending => ReadStatus::Failed(None, moq_quic::recv::Error::Blocked),
+		});
+		match ready!(read) {
+			// Bytes are still unread, so the end is not reached: wait for a reset, or for
+			// more to arrive, as a reader would.
+			Ok(Some(())) => self.poll_received_reset(waiter),
+			Ok(None) => Poll::Ready(Ok(None)),
+			Err(Error::Reset(code)) => Poll::Ready(Ok(Some(code))),
+			Err(err) => Poll::Ready(Err(err)),
+		}
 	}
 
 	/// Handle the logic common to every read out of a receive stream.

@@ -353,7 +353,7 @@ for (const version of VERSIONS) {
 	test(`${version}: a relative end on an empty track subscribes for the first group`, async () => {
 		const fx = fixture(version);
 		const reader = fx.broadcast.track("video").subscribe({
-			ranges: [{ start: { absolute: 0n }, end: { relative: 0 } }],
+			ranges: [{ start: { absolute: 0n }, end: { relative: 0n } }],
 			delay: { max: null },
 			order: "ascending",
 		});
@@ -370,7 +370,7 @@ for (const version of VERSIONS) {
 		const header = new Group({
 			trackAlias: 7n,
 			groupId: 0n,
-			subGroupId: 0,
+			subGroupId: 0n,
 			publisherPriority: 0,
 			flags: {
 				hasExtensions: false,
