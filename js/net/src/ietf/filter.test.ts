@@ -25,14 +25,10 @@ test("a live join is Next Object, its head left to a joining FETCH or a StartGro
 	expect(draft22.fill).toEqual({ filter: { kind: "relative", groups: 1n }, rangeFilters: false });
 });
 
-test.each([OLD, FIELDS, NEW])("an absolute session start includes its first objects on %s", (version) => {
-	const join = joinFilter(version, 0n);
-	expect(join.fill).toBeUndefined();
-	// An explicit {0, 0}, never the absent filter that joins live.
-	expect(join.filter).toEqual({ kind: "absolute", startGroup: 0n, startObject: 0n });
-	expect([...Filter.encode(join.filter, version)]).toEqual(
-		version === OLD ? [0x03, 0x00, 0x00] : version === FIELDS ? [] : [0x02, 0x00, 0x00],
-	);
+test.each([OLD, FIELDS, NEW])("a session start of group 0 joins live with no filter on %s", (version) => {
+	// Its earlier groups come from a range FETCH, so no draft spells an absolute {0, 0}.
+	expect(joinFilter(version, 0n)).toEqual({ filter: { kind: "unfiltered" } });
+	expect(joinFilter(version, 3n)).toEqual({ filter: { kind: "absolute", startGroup: 3n, startObject: 0n } });
 });
 
 async function subscribeBytes(filter: Filter.Filter, version: typeof OLD | typeof FIELDS | typeof NEW) {
@@ -60,16 +56,12 @@ async function subscribeBytes(filter: Filter.Filter, version: typeof OLD | typeo
 	return encoded;
 }
 
-test.each([OLD, FIELDS, NEW])("a filterless SUBSCRIBE stays apart from an explicit {0, 0} on %s", async (version) => {
-	const zero: Filter.Filter = { kind: "absolute", startGroup: 0n, startObject: 0n };
+test.each([OLD, FIELDS, NEW])("a filterless SUBSCRIBE omits LOCATION_FILTER on %s", async (version) => {
 	const filterless = await subscribeBytes({ kind: "unfiltered" }, version);
-	const explicit = await subscribeBytes(zero, version);
-	// The filterless request omits LOCATION_FILTER, so it is the shorter one.
-	expect(explicit.length).toBeGreaterThan(filterless.length);
-	const decode = async (bytes: Uint8Array) =>
-		(await Subscribe.decode(new Reader(undefined, bytes, version), version)).filter;
-	expect(await decode(filterless)).toEqual({ kind: "unfiltered" });
-	expect(await decode(explicit)).toMatchObject(zero);
+	const next = await subscribeBytes({ kind: "nextObject" }, version);
+	expect(next.length).toBeGreaterThan(filterless.length);
+	const decoded = await Subscribe.decode(new Reader(undefined, filterless, version), version);
+	expect(decoded.filter).toEqual({ kind: "unfiltered" });
 });
 
 function roundTrip(filter: Filter.Filter, version: typeof OLD | typeof FIELDS | typeof NEW): Filter.Filter {

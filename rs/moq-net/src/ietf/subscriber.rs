@@ -3028,9 +3028,10 @@ impl Subscriber {
 		};
 		let start = subscription.as_ref().and_then(|s| s.start());
 		let join = subscribe_join(start, subscription.as_ref().and_then(|s| s.end()), self.version);
-		// A live join delivers nothing below the group SUBSCRIBE_OK names as Largest.
-		// An absolute start keeps its requested prefix even if the answer arrives late.
-		let live = start.is_none() || join.fetch;
+		// A live join delivers nothing below the group SUBSCRIBE_OK names as Largest; the
+		// copy's fills fetch an earlier start's groups. An absolute start keeps its requested
+		// prefix even if the answer arrives late.
+		let live = !matches!(join.filter, Filter::Absolute { .. });
 
 		// A listed track's paused subscription is already this track's upstream copy, so
 		// resume it rather than open a second one.
@@ -12477,9 +12478,21 @@ struct Join {
 /// Earlier drafts have no fill parameter, so a live join uses Largest Object followed
 /// by a joining FETCH relative at offset 0 for that group's head.
 ///
-/// A known start group is absolute on every draft and needs no fill: the subscription's
-/// own range covers it, including a first burst that overtook its answer.
+/// A start of group 0 with no end is a filterless SUBSCRIBE on every draft, which our
+/// publishers serve from the start of the latest group, and the copy's fills fetch the
+/// groups below it as one range FETCH. Draft 20 has no absolute {0, 0} distinct from no
+/// filter, so no draft spells one.
+///
+/// Any other known start group is absolute on every draft and needs no fill: the
+/// subscription's own range covers it, including a first burst that overtook its answer.
 fn subscribe_join(start: Option<u64>, end: Option<u64>, version: Version) -> Join {
+	if start == Some(0) && end.is_none() {
+		return Join {
+			filter: Filter::Unfiltered,
+			fill: None,
+			fetch: false,
+		};
+	}
 	if !Filter::is_draft20(version) && start.is_none() {
 		return Join {
 			filter: Filter::NextObject,
@@ -12500,7 +12513,6 @@ fn subscribe_join(start: Option<u64>, end: Option<u64>, version: Version) -> Joi
 			}),
 			fetch: false,
 		},
-		// Even {0, 0} is spelled absolute: an absent filter is a live join, not history.
 		Some(start) => Join {
 			filter: Filter::Absolute {
 				start: ietf::Location {
@@ -12595,17 +12607,14 @@ mod filter_tests {
 		);
 	}
 
-	/// The whole track is an explicit absolute {0, 0}, since an absent filter joins live.
+	/// The whole track joins live with no filter on every draft, and fetches what came before.
 	#[test]
-	fn the_whole_track_is_absolute_zero() {
+	fn the_whole_track_is_unfiltered() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			assert_eq!(
 				subscribe_join(Some(0), None, version),
 				Join {
-					filter: Filter::Absolute {
-						start: ietf::Location::default(),
-						end: None,
-					},
+					filter: Filter::Unfiltered,
 					fill: None,
 					fetch: false,
 				}
@@ -15816,7 +15825,7 @@ mod joining_fetch_tests {
 	async fn an_absolute_start_never_becomes_a_largest_group_join() {
 		let largest = Some(ietf::Location { group: 9, object: 0 });
 		for version in JOINING_DRAFTS {
-			for start in [0, 7, 9, 11] {
+			for start in [7, 9, 11] {
 				let run = JoinRun::start(version, Some(start), subscribe_ok(version, largest), fetch_ok(version)).await;
 
 				let messages = decode_messages(&run.session.log, version);
@@ -15843,6 +15852,31 @@ mod joining_fetch_tests {
 					"{version} from {start}: an absolute stream includes its head"
 				);
 			}
+		}
+	}
+
+	/// A start of group 0 joins live with no filter on every draft and sends no joining
+	/// FETCH: the whole latest group arrives on the subscription, and the copy's fills fetch
+	/// the groups below it once a reader misses them.
+	#[kio::test]
+	async fn a_zero_start_joins_unfiltered_without_a_joining_fetch() {
+		let largest = Some(ietf::Location { group: 9, object: 0 });
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+			let run = JoinRun::start(version, Some(0), subscribe_ok(version, largest), fetch_ok(version)).await;
+
+			let messages = decode_messages(&run.session.log, version);
+			let subscribe = messages
+				.iter()
+				.find(|(id, _)| *id == ietf::Subscribe::ID)
+				.expect("SUBSCRIBE");
+			let msg = crate::coding::decode_from(&mut &subscribe.1[..], version, ietf::Subscribe::decode_msg).unwrap();
+			assert_eq!(msg.filter, Filter::Unfiltered, "{version}");
+			assert!(msg.fill.is_none(), "{version}");
+			assert!(
+				!messages.iter().any(|(id, _)| *id == ietf::Fetch::ID),
+				"{version}: no head to join"
+			);
+			assert!(!run.fill_outstanding(), "{version}");
 		}
 	}
 

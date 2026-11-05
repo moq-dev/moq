@@ -9,10 +9,10 @@ How to update your code for each breaking change, newest first.
 Explicit group ranges now keep their requested start when the subscription answer
 arrives after its first data. IETF publishers honor absolute starts on all
 supported drafts instead of silently joining at the live edge. A start of group 0
-goes out as an explicit absolute {0, 0} filter; on draft 20, which spells it with no
-fields, that is a present but empty LOCATION\_FILTER. A `Subscribe` with an
-unfiltered filter now omits LOCATION\_FILTER, and a SUBSCRIBE without one still
-joins live. There is no API change.
+is a filterless SUBSCRIBE on every draft, and the groups below the answer's Largest
+Object come from one range FETCH. A `Subscribe` with an unfiltered filter now omits
+LOCATION\_FILTER, and a SUBSCRIBE without one still joins live. There is no API
+change.
 
 ### Opens wait their turn for stream credit ([#7894](https://github.com/moq-dev/moq/pull/7894))
 

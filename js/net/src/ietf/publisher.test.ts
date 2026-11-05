@@ -2483,11 +2483,12 @@ test("draft-22: an absolute subscribe is no join", async () => {
 
 /**
  * A filterless SUBSCRIBE without a fill joins the latest group, as a relay cache always served
- * one; only an explicit absolute {0, 0} replays the groups before it. Ascending order sends
+ * one; only an absolute start from group 0 replays the groups before it. Ascending order sends
  * history first, so the first stream tells them apart.
  */
-test.each(IETF_VERSIONS)("version %d: only an explicit zero start replays history", async (version) => {
-	const zero: Filter.Filter = { kind: "absolute", startGroup: 0n, startObject: 0n };
+test.each(IETF_VERSIONS)("version %d: only an absolute start replays history", async (version) => {
+	// Bounded, since draft 20 spells an open {0, 0} as no filter at all.
+	const zero: Filter.Filter = { kind: "absolute", startGroup: 0n, startObject: 0n, endGroup: 1n };
 	for (const [filter, expected] of [
 		[{ kind: "unfiltered" }, [1n]],
 		[zero, [0n, 1n]],

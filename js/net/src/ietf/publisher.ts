@@ -2939,7 +2939,7 @@ function filterRange(filter: Filter.Filter, edge: LiveEdge): ServeRange {
 		// No restriction. moq-lite starts at the beginning of the latest group, which is the
 		// join point it is built around; a subscription passes objects as they are published,
 		// so an absent filter is not a request to replay history. A subscriber that wants the
-		// track from its start names the absolute {0, 0} instead.
+		// track from its start fetches the groups before the live one.
 		case "unfiltered":
 			return {};
 		// `{Largest.Group, Largest.Object + 1}`. Everything below it, including the already

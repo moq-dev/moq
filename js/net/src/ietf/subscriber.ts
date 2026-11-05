@@ -1546,8 +1546,9 @@ export class Subscriber {
 			maxAge: this.#maxAge ? maxDelayOf(request.subscription) : undefined,
 			// Fixed for the subscription's life: no REQUEST_UPDATE parameter carries it.
 			groupOrder: request.subscription.order,
-			// A known start is absolute; a live join recovers its head through a fetch stream
-			// (see {@link Join}). Fixed for the subscription's life.
+			// A known start is absolute, except group 0, which joins live with no filter. A Next
+			// Object join recovers its head through a fetch stream (see {@link Join}). Fixed for
+			// the subscription's life.
 			...joinFilter(version, bounds.start),
 		});
 		if (msg.fill) {
@@ -1605,11 +1606,12 @@ export class Subscriber {
 		if (!known) state.requests = producer.requests();
 		const tail = new Tail();
 		const subscription: Subscription = { track: producer, tail, timescale: ok.properties.timescale, fetchIds: [] };
-		const live = msg.filter.kind === "nextObject";
-		// A live subscription starts after Largest, so the joining FETCH or the fill brings its
-		// group's head. With no Largest the track is empty and every group whole. A draft-22 fill
-		// is one of the subscription's own streams, so the Stream Count already waits for it.
-		if (live && ok.largest) {
+		// A live join starts at Largest's group: a filterless one from its first object, and Next
+		// Object after Largest, so the joining FETCH or the fill brings that group's head. With no
+		// Largest the track is empty and every group whole. A draft-22 fill is one of the
+		// subscription's own streams, so the Stream Count already waits for it.
+		const live = msg.filter.kind !== "absolute";
+		if (msg.filter.kind === "nextObject" && ok.largest) {
 			subscription.join = new Join(ok.largest.groupId, tail, { counted: msg.fill !== undefined });
 			const join = subscription.join;
 			this.#joins.set(producer, join);
@@ -1625,7 +1627,8 @@ export class Subscriber {
 			// no object, so a Next Object join served onward still starts at the group's first.
 			hooks.reportedGroup(producer, ok.largest.groupId);
 		}
-		// Absolute subscriptions keep their prefix even when the answer follows its first data.
+		// Absolute subscriptions keep their prefix even when the answer follows its first data. A
+		// live join's earlier start is left to the copy's fills, one range FETCH per run.
 		hooks.startTrack(producer, {
 			start: live ? (ok.largest?.groupId ?? 0n) : (bounds.start ?? 0n),
 			requested: bounds.start,

@@ -10336,12 +10336,13 @@ mod serve_tests {
 	}
 
 	/// A filterless SUBSCRIBE without a fill joins the latest group, as a relay cache always
-	/// served one; only an explicit absolute {0, 0} replays the groups before it.
+	/// served one; only an absolute start from group 0 replays the groups before it.
 	#[kio::test]
-	async fn only_an_explicit_zero_start_replays_history() {
+	async fn only_an_absolute_start_replays_history() {
+		// Bounded, since draft 20 spells an open {0, 0} as no filter at all.
 		let zero = Filter::Absolute {
 			start: Location::default(),
-			end: None,
+			end: Some(EndLocation { group: 1, object: None }),
 		};
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			for (filter, history) in [(Filter::Unfiltered, 0), (zero, 1)] {
@@ -10362,15 +10363,16 @@ mod serve_tests {
 	}
 
 	/// The same through a relay: once an earlier reader warmed the relay's copy from group 0,
-	/// a filterless SUBSCRIBE still joins the latest group, and only an explicit {0, 0}
-	/// replays the cached history.
+	/// a filterless SUBSCRIBE still joins the latest group, and only an absolute start from
+	/// group 0 replays the cached history.
 	#[cfg(feature = "async")]
 	#[kio::test]
-	async fn a_relay_copy_replays_history_only_to_an_explicit_zero_start() {
+	async fn a_relay_copy_replays_history_only_to_an_absolute_start() {
 		const TIMEOUT: Duration = Duration::from_secs(5);
+		// Bounded, since draft 20 spells an open {0, 0} as no filter at all.
 		let zero = Filter::Absolute {
 			start: Location::default(),
-			end: None,
+			end: Some(EndLocation { group: 1, object: None }),
 		};
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			for (filter, history) in [(Filter::Unfiltered, 0), (zero, 1)] {
@@ -18435,7 +18437,7 @@ fn filter_range(filter: Filter, edge: LiveEdge) -> ServeRange {
 		// No restriction. moq-lite starts at the beginning of the latest group, which is
 		// the join point it is built around; a subscription passes objects as they are
 		// published, so an absent filter is not a request to replay history. A subscriber
-		// that wants the track from its start names the absolute {0, 0} instead.
+		// that wants the track from its start fetches the groups before the live one.
 		Filter::Unfiltered => ServeRange::default(),
 		// `{Largest.Group, Largest.Object + 1}`. Everything below it, including the
 		// already-published head of the current group, is outside the requested range,
@@ -18634,7 +18636,7 @@ mod range_tests {
 		assert_eq!(filter_range(msg.filter, EDGE), ServeRange::default());
 	}
 
-	/// An explicit absolute {0, 0} is the request for history the absent filter is not.
+	/// An absolute start from group 0 is the request for history the absent filter is not.
 	#[test]
 	fn an_absolute_zero_start_includes_history() {
 		let msg = subscribe(Filter::Absolute {

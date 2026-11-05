@@ -7,7 +7,7 @@ import * as Namespace from "./namespace.ts";
 import { type MessageLocation, Parameters } from "./parameters.ts";
 import { DEFAULT_WIRE } from "./priority.ts";
 import * as Properties from "./properties.ts";
-import { type IetfVersion, Version } from "./version.ts";
+import type { IetfVersion } from "./version.ts";
 
 /**
  * The GROUP_ORDER wire values.
@@ -52,10 +52,14 @@ function decodeGroupOrder(value: number): Order {
  * the next, its current-group join (section 3.5); earlier drafts have no fill, so the
  * subscriber sends a Relative Joining FETCH once SUBSCRIBE_OK names Largest. Spelling the
  * filter keeps a peer from reading an absent one its own way.
+ *
+ * A start of group 0 is filterless on every draft, which our publishers serve from the start
+ * of the latest group; the copy's fills fetch the groups below it as one range FETCH. Draft 20
+ * has no absolute {0, 0} distinct from no filter, so no draft spells one.
  */
 export function joinFilter(version: IetfVersion, start?: bigint): { filter: Filter.Filter; fill?: Filter.Fill } {
-	// Even {0, 0} is spelled absolute: an absent filter is a live join, not history. It stays
-	// open-ended, since REQUEST_UPDATE carries no range here: a finite end would hold the
+	if (start === 0n) return { filter: { kind: "unfiltered" } };
+	// Open-ended, since REQUEST_UPDATE carries no range here: a finite end would hold the
 	// subscription short when another reader later widens the track's demand.
 	if (start !== undefined) {
 		return { filter: { kind: "absolute", startGroup: start, startObject: 0n } };
@@ -198,16 +202,8 @@ export class Subscribe {
 			throw new Error("TRACK_PROPERTY_FILTER is not allowed on SUBSCRIBE");
 		}
 
-		// An absent LOCATION_FILTER is filterless: a live join, not a request for history.
-		// Draft-20 spells an open absolute {0, 0} with no fields, which the codec reads as
-		// unfiltered. Present, it is the explicit start a subscriber names for history.
-		const decoded = params.subscriptionFilter;
-		const filter: Filter.Filter =
-			decoded === undefined
-				? { kind: "unfiltered" }
-				: decoded.kind === "unfiltered" && version === Version.DRAFT_20
-					? { kind: "absolute", startGroup: 0n, startObject: 0n }
-					: decoded;
+		// An absent LOCATION_FILTER means the subscription is unfiltered.
+		const filter = params.subscriptionFilter ?? { kind: "unfiltered" as const };
 		const rawFill = params.fillParameters;
 		const fill = rawFill !== undefined ? Filter.decodeFill(rawFill, version) : undefined;
 
