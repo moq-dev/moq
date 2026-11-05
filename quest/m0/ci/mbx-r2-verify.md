@@ -68,10 +68,11 @@ compilation is "not looked up".
   local manifest, which was the install's. Since 1.28.0 an install builds
   under its own workspace, so the install order does not matter; it stays
   where `main` has it. mbx v1.29.1 (2026-11-01) includes
-  [#870](https://github.com/jdx/mr-boxington/pull/870), so this quest's PR bumps
-  `.github/actions/rust-cache/action.yml` from 1.28.0 to 1.29.1. Verify it
-  against the Windows criterion in Waiting below. The fix also offers legacy
-  CRLF identities, so an in-window manifest from 1.28.0 remains usable.
+  [#870](https://github.com/jdx/mr-boxington/pull/870), and
+  `.github/actions/rust-cache/action.yml` pins 1.29.2 (2026-11-03) since
+  [#7653](https://github.com/moq-dev/moq/pull/7653). Verify it against the
+  Windows criterion in Waiting below. The fix also offers legacy CRLF
+  identities, so an in-window manifest from 1.28.0 remains usable.
 - macOS: on 2026-10-28 the build did inherit, prefetching 732 predictions,
   yet hit only 13, with 1565 compilations not looked up. The install order is
   not the cause. Find out why the inherited predictions mostly miss, for
@@ -99,7 +100,7 @@ reported effective read-write. The workspace check took 10m 25s with 13 hits,
 1815 not looked up, no prefetch and no download; the preceding generator
 install had 122 hits and 121 prefetched. Those install hits do not prove the
 workspace reused the previous Nightly. The macOS job later failed tests;
-neither platform failure is evidence against 1.29.1.
+neither platform failure is evidence against the mbx bump.
 
 The [Linux doctest job](https://github.com/moq-dev/moq/actions/runs/41483654426/job/125408205232)
 also reported effective read-write, but 0 hits, 913 not looked up, 51 bypassed
@@ -117,23 +118,27 @@ feature unification, so changed compiler inputs remain a separate cause.
 
 ## Waiting
 
-- GitHub Actions: after this PR lands, a scheduled Windows job on 1.29.1
-  must load a workspace manifest of more than 124 predictions and hit. Check
-  the first run with an available manifest from an earlier scheduled Windows
-  workspace build at the same lockfile state or within 8 earlier states. A
-  setup failure or no in-window predecessor is inconclusive; inspect the next
-  eligible scheduled run. Until this proves inheritance pays, keep Linux's
-  shallow checkout as decided above. Do not dispatch Nightly.
+- GitHub Actions: a scheduled Windows job on mbx 1.29.1 or later must load
+  a workspace manifest of more than 124 predictions and hit, as its
+  workspace build's mbx summary reports. Check the first run with an
+  available manifest from an earlier scheduled Windows workspace build at the
+  same lockfile state or within 8 earlier states. A setup failure or no
+  in-window predecessor is inconclusive; inspect the next eligible scheduled
+  run. Until this proves inheritance pays, keep Linux's shallow checkout as
+  decided above. Do not dispatch Nightly.
 - moq-dev/moq: `release` still lacks the platform Rust cache as checked on
-  2026-11-02. Once it carries the cache, inspect a release pull request's
-  `Check the cache` step for effective read-only.
+  2026-11-04 with the command in the Goal. Once it carries the cache, inspect
+  a release pull request's `Check the cache` step for effective read-only.
 - GitHub Actions: scheduled runs must supply the remaining cross-platform
   reuse, restore-plus-build comparison and rebuild-frequency evidence in the
   Goal. Current timings are not a matched-commit comparison, and macOS's
   inherited-prediction misses remain unexplained.
 - Maintainer: from about 2026-11-26, collect R2 bucket size and request counts
   for the first month and check that the six old oversized manifests expired.
-  Use the numbers to decide the lifecycle; retain 30 days until then.
+  R2's account metrics need the maintainer's Cloudflare login, which agents
+  lack. Then decide the lifecycle in `infra/mbx/lifecycle.json`: shorten,
+  keep or lengthen the 30 days. Recommended: keep 30 days unless storage cost
+  or the rebuild count argues otherwise.
 
 ## Related
 
