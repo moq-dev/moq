@@ -898,19 +898,10 @@ fn export_keying_material() {
 	const LABEL: &[u8] = b"test_label";
 	const CONTEXT: &[u8] = b"test_context";
 
-	// client keying material
-	let mut client_buf = [0u8; 64];
-	pair.client_conn_mut(client_ch)
-		.export_keying_material(&mut client_buf, LABEL, CONTEXT)
-		.unwrap();
-
-	// server keying material
-	let mut server_buf = [0u8; 64];
-	pair.server_conn_mut(server_ch)
-		.export_keying_material(&mut server_buf, LABEL, CONTEXT)
-		.unwrap();
-
-	assert_eq!(&client_buf[..], &server_buf[..]);
+	let client = pair.client_conn_mut(client_ch).export_keying_material(LABEL, CONTEXT);
+	let server = pair.server_conn_mut(server_ch).export_keying_material(LABEL, CONTEXT);
+	assert!(client.is_some());
+	assert_eq!(client, server);
 }
 
 #[test]

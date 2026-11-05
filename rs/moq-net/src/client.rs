@@ -329,6 +329,8 @@ impl Client {
 				token: self.setup_token.clone().filter(|_| version.has_auth()),
 				ietf: self.extensions.ietf && version.has_ietf(),
 				implementation: self.implementation(),
+				// Filled by `lite::start` from the attached origin handles.
+				route_key: None,
 			}
 		} else {
 			lite::Setup::default()

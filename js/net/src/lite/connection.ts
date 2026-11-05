@@ -23,6 +23,7 @@ import { Fetch } from "./fetch.ts";
 import { Goaway } from "./goaway.ts";
 import { Group } from "./group.ts";
 import { Publisher } from "./publisher.ts";
+import { proveRouteKey } from "./route_key.ts";
 import { SessionInfo } from "./session.ts";
 import { hasClientParameters, ProbeLevel, type Role, Setup } from "./setup.ts";
 import { DataType, StreamId } from "./stream.ts";
@@ -36,6 +37,7 @@ import {
 	hasGoaway,
 	hasPadding,
 	hasProbeRtt,
+	hasRouteKey,
 	hasSetupStream,
 	hasTrackStream,
 	hasTracks,
@@ -376,10 +378,14 @@ export class Connection implements Established {
 		try {
 			await writer.u53(DataType.Setup);
 			const probe = await probeLevel(this.#quic, this.#version);
-			await new Setup({ probe, hop: this.hop, token: this.#token, implementation: this.#implementation }).encode(
-				writer,
-				this.#version,
-			);
+			const routeKey = hasRouteKey(this.#version) ? await proveRouteKey(this.#quic, this.#client) : undefined;
+			await new Setup({
+				probe,
+				hop: this.hop,
+				token: this.#token,
+				implementation: this.#implementation,
+				routeKey,
+			}).encode(writer, this.#version);
 			writer.close();
 		} catch (err: unknown) {
 			writer.reset(err);

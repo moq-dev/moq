@@ -106,6 +106,11 @@ pub struct Config {
 	/// detection and shortest-path routing.
 	pub hop: Hop,
 
+	/// The key this origin proves to every lite-07 peer, which files the routes it sends
+	/// under it when its grant is scoped. Origins sharing a key fail over as one. `None`
+	/// proves nothing, so such a peer files them under a key of its session alone.
+	pub route_key: Option<super::origin::RouteKey>,
+
 	/// Longest hop path a session using this origin accepts or forwards (default 32).
 	///
 	/// Applies to moq-lite-03+ hop paths and the negotiated MoQ Cluster extension on
@@ -162,6 +167,7 @@ impl Default for Config {
 		let pool = cache::Pool::new(cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY));
 		Self {
 			hop: Hop::random(),
+			route_key: None,
 			max_hops: HopLimit::default(),
 			pool,
 			cache_duration: Duration::MAX,
@@ -2137,7 +2143,7 @@ impl Producer {
 		let (tasks, set) = TaskSet::new();
 		let scope = OriginScope::default();
 		let timers = Deadlines::new(Instant::ZERO);
-		let shared = SendCell::new(kio::Shared::new(OriginState::new(config.update_hold)));
+		let shared = SendCell::new(kio::Shared::new(OriginState::new(config.update_hold, config.route_key)));
 		let pool = config.pool.clone();
 		let producer = Self {
 			hop: config.hop,
@@ -2223,12 +2229,19 @@ impl Producer {
 			pool: self.pool.clone(),
 			cache_duration: self.cache_duration,
 			update_hold: self.shared.lock().update_hold,
+			route_key: self.route_key(),
 		}
 	}
 
 	/// This origin's hop identity.
 	pub fn hop(&self) -> Hop {
 		self.hop
+	}
+
+	/// The key sessions prove for this origin.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn route_key(&self) -> Option<super::origin::RouteKey> {
+		self.shared.lock().route_key.clone()
 	}
 
 	// Sessions enforce the policy configured once on the origin.
@@ -2251,7 +2264,7 @@ impl Producer {
 			scope: OriginScope::empty(),
 			max_hops: HopLimit::default(),
 			root: Path::default(),
-			shared: SendCell::new(kio::Shared::new(OriginState::new(DEFAULT_UPDATE_HOLD))),
+			shared: SendCell::new(kio::Shared::new(OriginState::new(DEFAULT_UPDATE_HOLD, None))),
 			pool: cache::Pool::default(),
 			cache_duration: Duration::MAX,
 			stats: stats::Session::default(),
@@ -5171,6 +5184,8 @@ struct OriginState {
 	// See [`Config::update_hold`]. No `Default`: every origin takes it from its
 	// config, so no path silently disables the hold.
 	update_hold: Duration,
+	// See [`Config::route_key`].
+	route_key: Option<super::origin::RouteKey>,
 
 	// The announced routes, keyed by prefix. The table holds one entry per live
 	// advertisement, not one per broadcast consumer.
@@ -5209,9 +5224,10 @@ struct OriginState {
 }
 
 impl OriginState {
-	fn new(update_hold: Duration) -> Self {
+	fn new(update_hold: Duration, route_key: Option<super::origin::RouteKey>) -> Self {
 		Self {
 			update_hold,
+			route_key,
 			routes: RouteTable::default(),
 			next_route: 0,
 			next_watch: 0,
@@ -6541,6 +6557,12 @@ impl Consumer {
 	/// This origin's hop identity.
 	pub fn hop(&self) -> Hop {
 		self.hop
+	}
+
+	/// The key sessions prove for this origin.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn route_key(&self) -> Option<super::origin::RouteKey> {
+		self.shared.lock().route_key.clone()
 	}
 
 	/// A clone that never serves the given peer its own data: routes whose hop

@@ -33,7 +33,6 @@ pub struct HandshakeData {
 
 /// The requested keying material is longer than the handshake's hash can export.
 #[derive(Debug, PartialEq, Eq)]
-#[cfg_attr(not(test), expect(dead_code, reason = "only tests export keying material"))]
 pub(crate) struct ExportKeyingMaterialError;
 
 /// A cryptographic session (commonly TLS)
@@ -85,8 +84,7 @@ pub(crate) trait Session: Send + Sync + 'static {
 	///
 	/// This function will fail, returning [ExportKeyingMaterialError],
 	/// if the requested output length is too large.
-	#[cfg_attr(not(test), expect(dead_code, reason = "only tests export keying material"))]
-	fn export_keying_material(
+		fn export_keying_material(
 		&self,
 		output: &mut [u8],
 		label: &[u8],

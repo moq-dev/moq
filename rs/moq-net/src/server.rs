@@ -179,6 +179,8 @@ impl Server {
 				token: None,
 				ietf: self.extensions.ietf && version.has_ietf(),
 				implementation: self.implementation(),
+				// Filled by `lite::start` from the attached origin handles.
+				route_key: None,
 			}
 		} else {
 			lite::Setup::default()
@@ -1107,6 +1109,7 @@ mod tests {
 			token: None,
 			ietf: false,
 			implementation: None,
+			route_key: None,
 		}
 		.encode(&mut crate::coding::Encoder::new(&mut buf, v.into()), v)
 		.unwrap();

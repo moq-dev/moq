@@ -605,7 +605,8 @@ fn forged_identity_is_filed_apart_under_a_scoped_grant() {
 
 /// A local mesh publishing through two uplinks, each admitted under the same
 /// subject. Both CDN relays file the local origin under one key, so it
-/// survives losing an uplink; a retracted identity leaves no alias behind.
+/// survives losing an uplink, and so does the local relay's own identity; a
+/// retracted identity leaves no alias behind.
 #[test]
 fn scoped_delivery_through_two_uplinks_reaches_one_key() {
 	let (c1, c2, l1, l2, origin) = (0, 1, 2, 3, 4);
@@ -626,6 +627,12 @@ fn scoped_delivery_through_two_uplinks_reaches_one_key() {
 	assert_eq!(next(&sim, c1, key), Some(l1));
 	assert_eq!(next(&sim, c2, key), Some(l2));
 	assert_eq!(next(&sim, c1, qualified(LOCAL.subject, 20)), Some(l1));
+
+	sim.disconnect(l1, c1);
+	assert!(sim.run());
+	assert_eq!(next(&sim, c1, qualified(LOCAL.subject, 20)), Some(c2), "the local relay's own fails over");
+	sim.connect(l1, c1);
+	assert!(sim.run());
 
 	sim.disconnect(l2, c2);
 	assert!(sim.run());

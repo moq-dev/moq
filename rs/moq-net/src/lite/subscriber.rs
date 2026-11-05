@@ -3965,7 +3965,7 @@ mod tests {
 						.unwrap();
 					assert_eq!(accepted.early.len(), 2);
 					assert!(log.stops().is_empty());
-					peer_setup.set(accepted.setup);
+					peer_setup.set(accepted.setup).unwrap();
 					accepted.early
 				} else {
 					Vec::new()
