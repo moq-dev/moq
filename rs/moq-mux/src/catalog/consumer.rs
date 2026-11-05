@@ -52,11 +52,12 @@ impl<E: CatalogExt> Consumer<E> {
 		Ok(Self {
 			inner: match format {
 				CatalogFormat::Hang => {
-					let track = broadcast
-						.track(hang::Catalog::DEFAULT_NAME)?
-						.subscribe(hang::Catalog::default_subscription())
-						.await?;
-					State::Hang(super::hang::Consumer::new(track))
+					let track = broadcast.track(hang::Catalog::DEFAULT_NAME)?;
+					let consumer = super::hang::Consumer::new(track.clone());
+					// The consumer subscribes itself; resolving the info rides on that subscription,
+					// so a refused catalog fails here as it does for MSF.
+					track.info().await?;
+					State::Hang(consumer)
 				}
 				CatalogFormat::Msf => {
 					let track = broadcast.track(moq_msf::DEFAULT_NAME)?.subscribe(None).await?;

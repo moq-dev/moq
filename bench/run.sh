@@ -198,6 +198,9 @@ case $MODE in
         ;;
 esac
 ROOT=$(git rev-parse --show-toplevel)
+# shellcheck source=bench/lock.sh
+source "$ROOT/bench/lock.sh"
+bench_lock "$0" "$@"
 TARGET=${CARGO_TARGET_DIR:-$ROOT/target/bench}
 if [[ $TARGET != /* ]]; then
     TARGET=$ROOT/$TARGET
