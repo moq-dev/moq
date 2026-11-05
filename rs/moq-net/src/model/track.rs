@@ -2457,13 +2457,16 @@ impl TrackState {
 				self.debt -= freed.min(self.debt);
 				paid = paid.saturating_add(freed);
 			}
-			// Its flights too, which readers ride for the same reason.
-			for flight in self.flights.get(&sequence).into_iter().flatten() {
-				if let Some(group) = flight.held() {
-					let freed = group.shed(self.debt, cap - paid.min(cap));
-					self.debt -= freed.min(self.debt);
-					paid = paid.saturating_add(freed);
-				}
+		}
+		// Then the flights, which readers ride for the same reason, cached group or not.
+		for flight in self.flights.values().flatten() {
+			if self.debt == 0 || paid >= cap {
+				break;
+			}
+			if let Some(group) = flight.held() {
+				let freed = group.shed(self.debt, cap - paid.min(cap));
+				self.debt -= freed.min(self.debt);
+				paid = paid.saturating_add(freed);
 			}
 		}
 		paid
@@ -23507,6 +23510,64 @@ mod test {
 		for index in 0..1_000 {
 			flight.write_frame(None, numbered(index)).unwrap();
 			assert_eq!(read_numbered(&mut late), Some(index));
+			assert!(pool.used() < 2 * POOL, "frame {index}: {} bytes held", pool.used());
+		}
+	}
+
+	/// A reader waiting on the flight it asked for still goes stale: its budget gives up on
+	/// the group once a newer one supersedes it, though the handler never answered.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_reader_boarding_a_flight_goes_stale() {
+		let producer = track_producer("test", Info::timed());
+		let requests = producer.requests();
+		let mut sub = producer.subscribe(None);
+		let mut live = producer.append_group().unwrap();
+		for index in 0..3_000u32 {
+			let at = Timestamp::from_millis(index.into()).unwrap();
+			live.write_frame(at, numbered(index)).unwrap();
+		}
+		let mut late = sub.recv_group().now_or_never().unwrap().unwrap().expect("group 0");
+		assert!(late.read_frame().now_or_never().is_none(), "boarding");
+		let _flight = asked(&requests).expect("a flight, never answered");
+		let mut newer = producer.append_group().unwrap();
+		newer
+			.write_frame(Timestamp::from_millis(100_000).unwrap(), numbered(0))
+			.unwrap();
+		assert!(matches!(late.read_frame().now_or_never(), Some(Err(Error::Old))));
+	}
+
+	/// Pool debt sheds a flight even once the cached copy of its group was evicted whole.
+	#[test]
+	#[cfg(feature = "async")]
+	fn pool_debt_sheds_a_flight_without_its_cached_group() {
+		const POOL: u64 = 4 * 1024 * 1024;
+		let pool = cache::Pool::new(cache::Config::default().with_capacity(POOL));
+		let producer = Producer::new(
+			Arc::new(broadcast::Info {
+				pool: pool.clone(),
+				..Default::default()
+			}),
+			"test",
+			Info::default(),
+		);
+		let requests = producer.requests();
+		let mut old = producer.append_group().unwrap();
+		let mut late = old.consume();
+		for index in 0..1_000 {
+			old.write_frame(None, numbered(index)).unwrap();
+		}
+		assert_eq!(read_numbered(&mut late), None);
+		let mut flight = asked(&requests).expect("a flight").accept(0, None).unwrap();
+		assert_eq!(read_numbered(&mut late), None);
+		// A newer group leaves group 0 cold, and its cached copy goes whole.
+		let mut newer = producer.append_group().unwrap();
+		for index in 0..1_000 {
+			newer.write_frame(None, numbered(index)).unwrap();
+		}
+		assert!(!producer.state.read().lookup.contains_key(&0), "group 0 evicted");
+		for index in 0..1_000 {
+			flight.write_frame(None, numbered(index)).unwrap();
 			assert!(pool.used() < 2 * POOL, "frame {index}: {} bytes held", pool.used());
 		}
 	}

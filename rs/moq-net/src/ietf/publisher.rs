@@ -417,7 +417,9 @@ async fn read_fetch(
 		if frames.is_empty() {
 			first = id;
 		}
-		held += frame.payload.len() as u64;
+		// Each object's slot and fields too, so a long run of tiny frames is bounded as well.
+		let fields = frame.fields.as_ref().map_or(0, |fields| fields.heap());
+		held += (frame.payload.len() + size_of::<frame::Object>()) as u64 + fields;
 		if held > group::MAX_CACHE_BYTES {
 			return Err(Error::GroupTooLarge);
 		}

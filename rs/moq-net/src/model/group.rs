@@ -4063,11 +4063,16 @@ impl Consumer {
 		loop {
 			if let Some(ride) = self.ride_mut() {
 				if let Some(boarding) = &mut ride.boarding {
-					let copy = ready!(boarding.poll(waiter));
-					let Ok(copy) = copy else {
+					let copy = match boarding.poll(waiter) {
+						Poll::Ready(Ok(copy)) => copy,
 						// Nothing serves the frame: the shed read stands.
-						self.set_ride(None);
-						return Poll::Ready(Err(Error::Evicted));
+						Poll::Ready(Err(_)) => {
+							self.set_ride(None);
+							return Poll::Ready(Err(Error::Evicted));
+						}
+						// A read waiting on its flight is blocked like one at the edge, so the
+						// reader's budget still gives up on it.
+						Poll::Pending => return self.poll_expired_if_blocked(waiter, Poll::Pending),
 					};
 					self.adopt_copy(copy);
 					self.set_ride(Some(Ride::aboard(true)));
