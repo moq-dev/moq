@@ -998,13 +998,12 @@ impl Drop for JoiningTask {
 			state.cancelled = true;
 			state.committed
 		};
-		if committed && let Some(work) = self.work.take() {
+		if committed && let Some(mut work) = self.work.take() {
 			// The session owns cancelling the request, including after the subscription
 			// ends: closing it once its header is out, or resetting it while the peer's
 			// send window still holds the header back.
-			self.tasks.push(crate::util::future_task(async move {
-				let _ = work.await;
-			}));
+			self.tasks
+				.push(move |waiter: &kio::Waiter| waiter.poll_future(work.as_mut()).map(|_| ()));
 		}
 	}
 }
@@ -1070,28 +1069,30 @@ struct NamespaceRequest {
 	live: HashMap<Path, Advertisement>,
 }
 
-/// The initial set of a SUBSCRIBE_NAMESPACE still to read, under MoQ Active Count.
-struct Initial {
-	/// NAMESPACE messages still owed before the first change.
-	initial: u64,
-	/// Released once `initial` reaches zero.
-	snapshot: Option<crate::model::Snapshot>,
-}
-
 /// Resolve the subscription a data stream belongs to.
 ///
 /// SUBSCRIBE_OK can be reordered behind the stream it describes, so an alias we have not
 /// seen is worth waiting on briefly (draft-22 section 9.9). Three outcomes:
 /// the subscription, [`Error::Cancel`] for an alias we retired, and [`Error::NotFound`]
 /// once the wait expires without any binding at all.
-async fn resolve_track_alias(
-	runtime: &crate::time::Deadlines,
+struct ResolveAlias {
 	aliases: kio::Consumer<AliasTable>,
 	alias: u64,
-) -> Result<RequestId, Error> {
-	let mut timeout = crate::time::Deadline::after(runtime, TRACK_ALIAS_TIMEOUT);
-	kio::wait(|waiter| {
-		let resolved = aliases.poll(waiter, |aliases| match aliases.map.get(&alias) {
+	timeout: crate::time::Deadline,
+}
+
+impl ResolveAlias {
+	fn new(runtime: &crate::time::Deadlines, aliases: kio::Consumer<AliasTable>, alias: u64) -> Self {
+		Self {
+			aliases,
+			alias,
+			timeout: crate::time::Deadline::after(runtime, TRACK_ALIAS_TIMEOUT),
+		}
+	}
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<RequestId, Error>> {
+		let alias = self.alias;
+		let resolved = self.aliases.poll(waiter, |aliases| match aliases.map.get(&alias) {
 			Some(Alias::Active(request_id)) => Poll::Ready(Ok(*request_id)),
 			// A subscription we already cancelled, whose publisher has not caught up with
 			// our STOP_SENDING. Discard the group now rather than waiting out the timeout
@@ -1105,12 +1106,22 @@ async fn resolve_track_alias(
 		if let Poll::Ready(result) = resolved {
 			return Poll::Ready(result.unwrap_or(Err(Error::Cancel)));
 		}
-		if timeout.poll(waiter).is_ready() {
+		if self.timeout.poll(waiter).is_ready() {
 			return Poll::Ready(Err(Error::NotFound));
 		}
 		Poll::Pending
-	})
-	.await
+	}
+}
+
+/// Await [`ResolveAlias`].
+#[cfg(feature = "async")]
+async fn resolve_track_alias(
+	runtime: &crate::time::Deadlines,
+	aliases: kio::Consumer<AliasTable>,
+	alias: u64,
+) -> Result<RequestId, Error> {
+	let mut resolve = ResolveAlias::new(runtime, aliases, alias);
+	kio::wait(|waiter| resolve.poll(waiter)).await
 }
 
 impl Subscriber {
@@ -1158,7 +1169,9 @@ impl Subscriber {
 	pub fn with_auth(mut self, auth: crate::auth::Link) -> Self {
 		self.auth = auth;
 		let this = self.clone();
-		self.tasks.push(crate::util::future_task(async move { this.run_limit().await }));
+		let mut epoch = 0;
+		self.tasks
+			.push(move |waiter: &kio::Waiter| this.poll_limit(&mut epoch, waiter));
 		self
 	}
 
@@ -1172,14 +1185,9 @@ impl Subscriber {
 	/// Follow the session's limit, attaching every withheld namespace a new limit
 	/// covers. Each route's own serve task holds itself back when a limit no longer
 	/// covers it.
-	async fn run_limit(&self) {
-		let mut epoch = 0;
+	fn poll_limit(&self, epoch: &mut u64, waiter: &kio::Waiter) -> Poll<()> {
 		loop {
-			let permit = kio::wait(|waiter| {
-				self.auth
-					.poll_permit(crate::auth::Direction::Subscribe, &mut epoch, waiter)
-			})
-			.await;
+			let permit = ready!(self.auth.poll_permit(crate::auth::Direction::Subscribe, epoch, waiter));
 			let mut state = self.state.lock();
 			let mut attached = Vec::new();
 			for (path, entry) in state.broadcasts.iter_mut() {
@@ -1253,8 +1261,9 @@ impl Subscriber {
 	}
 
 	/// What the peer declared in its SETUP. See [`super::Publisher::peer`].
-	pub(super) async fn peer(&self) -> cluster::Peer {
-		self.peer_setup.get().await.cluster
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub(super) fn poll_peer(&self, waiter: &kio::Waiter) -> Poll<cluster::Peer> {
+		self.peer_setup.poll_get(waiter).map(|peer| peer.cluster)
 	}
 
 	/// The announcing session's declared or assigned identity, for split-horizon.
@@ -1393,19 +1402,8 @@ impl Subscriber {
 	}
 
 	/// Send SUBSCRIBE_NAMESPACE for one prefix on a bidi stream, and read what it reports
-	/// until the peer ends it or `live` closes.
-	/// The caller opens the stream, one per prefix.
-	///
-	/// A failure here is per-prefix, so the caller decides what it means for the
-	/// session: [`is_protocol_violation`] separates the peer's fault (fatal) from a
-	/// stream of ours that simply died (survivable).
-	///
-	/// `snapshot` holds the origin's announce consumers under the prefix short of
-	/// synced. It drops once the NAMESPACE messages MoQ Active Count promised are
-	/// in, on REQUEST_OK without the extension, or when no request goes out at all.
-	///
-	/// [`Ended::Local`](namespaces::Ended::Local) means `live` closed, and the request is
-	/// off the wire by the time this returns.
+	/// until the peer ends it or `live` closes: [`NamespaceSubscription`] awaited.
+	#[cfg(test)]
 	async fn run_subscribe_namespace(
 		&mut self,
 		stream: Stream<Transport, Version>,
@@ -1413,172 +1411,165 @@ impl Subscriber {
 		snapshot: crate::model::Snapshot,
 		live: kio::Consumer<()>,
 	) -> Result<namespaces::Ended, Error> {
-		let mut request = NamespaceRequest {
-			stream: stream.with_stats(self.origin.stats()),
-			messages: super::request_stream::Messages::new(self.session.clone(), self.control.client()),
-			prefix,
-			request_id: None,
-			live: HashMap::new(),
-		};
-		let res = self.subscribe_namespace(&mut request, snapshot, &live).await;
-
-		// The stream owns every advertisement it carried, so release them however it
-		// ends: a clean close, a decode error, the peer resetting it, or the session
-		// ending it. Without this each namespace keeps its refcount and the source never
-		// detaches.
-		for (path, advert) in std::mem::take(&mut request.live) {
-			if let Some(id) = advert.id {
-				let _ = self.stop_announce(path, id, false);
-			}
-		}
-
-		if let Ok(namespaces::Ended::Local) = res {
-			self.unsubscribe_namespace(request).await;
-		}
-		res
+		let mut request = NamespaceSubscription::new(self.clone(), stream, prefix, snapshot, live);
+		kio::wait(|waiter| request.poll(waiter)).await
 	}
 
 	/// Send the request and read its answers until either side ends it.
-	async fn subscribe_namespace(
+	fn poll_subscribe_namespace(
 		&mut self,
 		request: &mut NamespaceRequest,
-		snapshot: crate::model::Snapshot,
+		phase: &mut NamespacePhase,
+		snapshot: &mut Option<crate::model::Snapshot>,
 		live: &kio::Consumer<()>,
-	) -> Result<namespaces::Ended, Error> {
-		// Hidden namespaces are requested too, as on moq-lite: the session mirrors the
-		// peer into the origin and each local reader opts in on its own. The parameter
-		// fails decoding at a peer that doesn't know it, so it waits on the peer's SETUP
-		// to say whether it does (MoQ Hidden).
-		let declared = self.peer_setup.get().await;
-		let hidden = declared.hidden;
-		let prefix = request.prefix.clone();
+		waiter: &kio::Waiter,
+	) -> Poll<Result<namespaces::Ended, Error>> {
+		loop {
+			match phase {
+				NamespacePhase::Setup => {
+					// Hidden namespaces are requested too, as on moq-lite: the session mirrors the
+					// peer into the origin and each local reader opts in on its own. The parameter
+					// fails decoding at a peer that doesn't know it, so it waits on the peer's SETUP
+					// to say whether it does (MoQ Hidden).
+					let declared = ready!(self.peer_setup.poll_get(waiter));
+					let hidden = declared.hidden;
+					let prefix = request.prefix.clone();
 
-		let request_id = self.control.next_request_id();
-		request.request_id = Some(request_id);
-		let stream = &mut request.stream;
+					let request_id = self.control.next_request_id();
+					request.request_id = Some(request_id);
 
-		let msg = ietf::SubscribeNamespace {
-			authorization_token: None,
-			request_id,
-			namespace: prefix.clone(),
-			hidden,
-		};
-		// Flushed while waiting for the answer, so `live` closing still ends a request the
-		// peer's send window holds back.
-		stream.writer.buffer_message(ietf::SubscribeNamespace::ID, &msg)?;
+					let msg = ietf::SubscribeNamespace {
+						authorization_token: None,
+						request_id,
+						namespace: prefix.clone(),
+						hidden,
+					};
+					// Flushed while waiting for the answer, so `live` closing still ends a request the
+					// peer's send window holds back.
+					request
+						.stream
+						.writer
+						.buffer_message(ietf::SubscribeNamespace::ID, &msg)?;
 
-		tracing::debug!(%prefix, "subscribe_namespace started");
+					tracing::debug!(%prefix, "subscribe_namespace started");
+					*phase = NamespacePhase::Answer { declared };
+				}
+				NamespacePhase::Answer { declared } => {
+					let declared = *declared;
+					// Read response
+					let Some(framed) = ready!(Self::poll_namespace_message(request, live, waiter))? else {
+						return Poll::Ready(Ok(namespaces::Ended::Local));
+					};
+					let super::request_stream::Framed(type_id, body) =
+						framed.ok_or_else(|| request.messages.failed(Error::ProtocolViolation))?;
+					let mut data = body.decoder(self.version);
 
-		// Read response
-		let Some(framed) = self.next_namespace_message(request, live).await? else {
-			return Ok(namespaces::Ended::Local);
-		};
-		let super::request_stream::Framed(type_id, body) =
-			framed.ok_or_else(|| request.messages.failed(Error::ProtocolViolation))?;
-		let mut data = body.decoder(self.version);
+					let count = match type_id {
+						ietf::RequestOk::ID => ietf::RequestOk::decode_msg(&mut data, self.version)?.active,
+						ietf::RequestError::ID => {
+							let msg = ietf::RequestError::decode_msg(&mut data, self.version)?;
+							let err =
+								request::from_code(msg.error_code, request::Kind::SubscribeNamespace, self.version);
+							tracing::warn!(%err, reason = %msg.reason_phrase, "subscribe_namespace error");
+							return Poll::Ready(Err(err));
+						}
+						_ => return Poll::Ready(Err(Error::UnexpectedMessage)),
+					};
 
-		let count = match type_id {
-			ietf::RequestOk::ID => ietf::RequestOk::decode_msg(&mut data, self.version)?.active,
-			ietf::RequestError::ID => {
-				let msg = ietf::RequestError::decode_msg(&mut data, self.version)?;
-				let err = request::from_code(msg.error_code, request::Kind::SubscribeNamespace, self.version);
-				tracing::warn!(%err, reason = %msg.reason_phrase, "subscribe_namespace error");
-				return Err(err);
+					tracing::debug!(prefix = %request.prefix, ?count, "subscribe_namespace ok");
+
+					// MoQ Active Count says how many NAMESPACE messages make up the initial set. A
+					// count the negotiation did not promise, or a missing one it did, is the peer
+					// breaking the extension. Without it, the answer is the best boundary there is.
+					if declared.active_count != count.is_some() {
+						return Poll::Ready(Err(Error::ProtocolViolation));
+					}
+					let initial = count.unwrap_or(0);
+					if initial == 0 {
+						*snapshot = None;
+					}
+
+					// The extensions change the NAMESPACE encoding, so we can't parse one until
+					// the peer's SETUP says whether it negotiated them, which it has by now.
+					let peer = declared.cluster;
+					*phase = NamespacePhase::Entries(Entries {
+						negotiated: ietf::Negotiated {
+							cluster: peer.negotiated(),
+						},
+						peer,
+						initial,
+						// Each entry routes into the origin, so a peer streaming them must not hold
+						// the session's other tasks.
+						budget: kio::coop::Budget::new(32),
+					});
+				}
+				NamespacePhase::Entries(entries) => {
+					return self.poll_namespace_entries(request, entries, snapshot, live, waiter);
+				}
 			}
-			_ => return Err(Error::UnexpectedMessage),
-		};
-
-		tracing::debug!(%prefix, ?count, "subscribe_namespace ok");
-
-		// MoQ Active Count says how many NAMESPACE messages make up the initial set. A
-		// count the negotiation did not promise, or a missing one it did, is the peer
-		// breaking the extension. Without it, the answer is the best boundary there is.
-		if declared.active_count != count.is_some() {
-			return Err(Error::ProtocolViolation);
 		}
-		let initial = count.unwrap_or(0);
-		let snapshot = (initial > 0).then_some(snapshot);
-
-		// The extensions change the NAMESPACE encoding, so we can't parse one until
-		// the peer's SETUP says whether it negotiated them.
-		let peer = self.peer().await;
-		let negotiated = ietf::Negotiated {
-			cluster: peer.negotiated(),
-		};
-
-		self.run_namespace_entries(request, &peer, negotiated, Initial { initial, snapshot }, live)
-			.await
 	}
 
 	/// The next message on a SUBSCRIBE_NAMESPACE stream: `None` once `live` closes,
 	/// `Some(None)` once the peer finishes the stream.
-	async fn next_namespace_message(
-		&self,
+	fn poll_namespace_message(
 		request: &mut NamespaceRequest,
 		live: &kio::Consumer<()>,
-	) -> Result<Option<Option<super::request_stream::Framed>>, Error> {
+		waiter: &kio::Waiter,
+	) -> Poll<Result<Option<Option<super::request_stream::Framed>>, Error>> {
 		let NamespaceRequest { stream, messages, .. } = request;
-		kio::wait(|waiter| {
-			if live.poll_closed(waiter).is_ready() {
-				return Poll::Ready(Ok(None));
-			}
-			ready!(stream.writer.poll_flush(waiter))?;
-			messages
-				.poll_next(&mut stream.reader, waiter)
-				.map(|next| next.map(Some))
-		})
-		.await
+		if live.poll_closed(waiter).is_ready() {
+			return Poll::Ready(Ok(None));
+		}
+		ready!(stream.writer.poll_flush(waiter))?;
+		messages
+			.poll_next(&mut stream.reader, waiter)
+			.map(|next| next.map(Some))
 	}
 
-	/// End a request the session ended, and wait for it to leave the wire, so an
+	/// End a request the session ended, returning the wait for it to leave the wire, so an
 	/// overlapping one can go out: a peer may refuse a prefix that overlaps one it still
-	/// holds.
+	/// holds. `None` when there is nothing to wait on.
 	///
 	/// The stream closes (a FIN on draft-18, a reset on draft-22) and is read until the peer
 	/// closes its half.
-	async fn unsubscribe_namespace(&self, request: NamespaceRequest) {
+	fn unsubscribe_namespace(&self, request: NamespaceRequest) -> Option<Unsubscribe> {
 		let NamespaceRequest {
 			stream: Stream { mut writer, mut reader },
-			mut messages,
+			messages,
 			prefix,
 			request_id,
 			..
 		} = request;
 		// Nothing went out, so there is nothing to end.
-		if request_id.is_none() {
-			return;
-		}
+		request_id?;
 		// The request never reached the peer whole, so it holds nothing to wait on.
 		if !writer.is_flushed() {
 			tracing::debug!(%prefix, "subscribe_namespace abandoned before it was sent");
 			reader.abort(&Error::Cancel);
 			writer.abort(&Error::Cancel);
-			return;
+			return None;
 		}
 		tracing::debug!(%prefix, "unsubscribe_namespace");
 
-		match super::request_stream::fin_cancels(self.version) {
+		let writer = match super::request_stream::fin_cancels(self.version) {
 			true => {
 				let _ = writer.finish();
+				Some(writer)
 			}
-			false => writer.abort(&Error::Cancel),
-		}
-		let session = self.session.clone();
-		// A peer still streaming entries must not hold the session's other tasks.
-		let mut budget = kio::coop::Budget::new(32);
-		kio::wait(|waiter| {
-			if session.poll_closed(waiter).is_ready() {
-				return Poll::Ready(());
+			false => {
+				writer.abort(&Error::Cancel);
+				None
 			}
-			loop {
-				ready!(budget.poll_yield(waiter));
-				match ready!(messages.poll_next(&mut reader, waiter)) {
-					Ok(Some(_)) => continue,
-					Ok(None) | Err(_) => return Poll::Ready(()),
-				}
-			}
+		};
+		Some(Unsubscribe {
+			session: self.session.clone(),
+			_writer: writer,
+			reader,
+			messages,
+			// A peer still streaming entries must not hold the session's other tasks.
+			budget: kio::coop::Budget::new(32),
 		})
-		.await;
 	}
 
 	/// Read NAMESPACE / NAMESPACE_DONE entries until either side ends the request.
@@ -1586,30 +1577,34 @@ impl Subscriber {
 	/// `request.live` tracks the suffixes this stream has advertised, so a repeat is
 	/// recognized as an update rather than a second advertisement, and the caller can
 	/// release whatever is still held when the stream ends.
-	async fn run_namespace_entries(
+	fn poll_namespace_entries(
 		&mut self,
 		request: &mut NamespaceRequest,
-		peer: &cluster::Peer,
-		negotiated: ietf::Negotiated,
-		mut initial: Initial,
+		entries: &mut Entries,
+		snapshot: &mut Option<crate::model::Snapshot>,
 		live: &kio::Consumer<()>,
-	) -> Result<namespaces::Ended, Error> {
-		// Each entry routes into the origin, so a peer streaming them must not hold the
-		// session's other tasks.
-		let mut budget = kio::coop::Budget::new(32);
+		waiter: &kio::Waiter,
+	) -> Poll<Result<namespaces::Ended, Error>> {
+		let Entries {
+			peer,
+			negotiated,
+			initial,
+			budget,
+		} = entries;
 		loop {
-			kio::wait(|waiter| budget.poll_yield(waiter)).await;
+			ready!(budget.poll_yield(waiter));
 			// Every counted NAMESPACE is in the origin by now, dropped ones included.
-			if initial.initial == 0 {
-				initial.snapshot = None;
+			if *initial == 0 {
+				*snapshot = None;
 			}
-			let super::request_stream::Framed(type_id, body) = match self.next_namespace_message(request, live).await? {
-				Some(Some(message)) => message,
-				None => return Ok(namespaces::Ended::Local),
-				// A stream ending inside the counted set cut it short.
-				Some(None) if initial.initial > 0 => return Err(Error::ProtocolViolation),
-				Some(None) => return Ok(namespaces::Ended::Peer),
-			};
+			let super::request_stream::Framed(type_id, body) =
+				match ready!(Self::poll_namespace_message(request, live, waiter))? {
+					Some(Some(message)) => message,
+					None => return Poll::Ready(Ok(namespaces::Ended::Local)),
+					// A stream ending inside the counted set cut it short.
+					Some(None) if *initial > 0 => return Poll::Ready(Err(Error::ProtocolViolation)),
+					Some(None) => return Poll::Ready(Ok(namespaces::Ended::Peer)),
+				};
 			let prefix = &request.prefix;
 			let live = &mut request.live;
 			let mut data = body.decoder(self.version);
@@ -1619,11 +1614,11 @@ impl Subscriber {
 				// relative to our root -- so the join is too, which is what everything
 				// below wants (`create_broadcast` joins the root itself).
 				ietf::Namespace::ID => {
-					let msg = ietf::Namespace::decode_body(&mut data, self.version, negotiated)?;
+					let msg = ietf::Namespace::decode_body(&mut data, self.version, *negotiated)?;
 					if !data.is_empty() {
-						return Err(Error::WrongSize);
+						return Poll::Ready(Err(Error::WrongSize));
 					}
-					initial.initial = initial.initial.saturating_sub(1);
+					*initial = initial.saturating_sub(1);
 					let path = prefix.join(&msg.suffix)?;
 					let params = msg.params.unwrap_or_default();
 					let held = match live.entry(path.clone()) {
@@ -1665,13 +1660,13 @@ impl Subscriber {
 								Err(Error::Unauthorized) => {
 									tracing::debug!(%path, "namespace outside the subscribe scope; ignoring");
 								}
-								Err(err) => return Err(err),
+								Err(err) => return Poll::Ready(Err(err)),
 							}
 						}
 					}
 				}
 				// Only NAMESPACE may come before the counted set is in.
-				ietf::NamespaceDone::ID if initial.initial > 0 => return Err(Error::ProtocolViolation),
+				ietf::NamespaceDone::ID if *initial > 0 => return Poll::Ready(Err(Error::ProtocolViolation)),
 				ietf::NamespaceDone::ID => {
 					let msg = ietf::NamespaceDone::decode_msg(&mut data, self.version)?;
 					let path = prefix.join(&msg.suffix)?;
@@ -1682,12 +1677,163 @@ impl Subscriber {
 				}
 				_ => {
 					tracing::warn!(type_id, "unexpected message on subscribe_namespace stream");
-					return Err(Error::UnexpectedMessage);
+					return Poll::Ready(Err(Error::UnexpectedMessage));
 				}
 			}
 		}
 	}
+}
 
+/// One SUBSCRIBE_NAMESPACE for one prefix on a bidi stream, read until the peer ends it or
+/// `live` closes. The caller opens the stream, one per prefix.
+///
+/// A failure here is per-prefix, so the caller decides what it means for the
+/// session: [`is_protocol_violation`] separates the peer's fault (fatal) from a
+/// stream of ours that simply died (survivable).
+///
+/// `snapshot` holds the origin's announce consumers under the prefix short of
+/// synced. It drops once the NAMESPACE messages MoQ Active Count promised are
+/// in, on REQUEST_OK without the extension, or when no request goes out at all.
+///
+/// [`Ended::Local`](namespaces::Ended::Local) means `live` closed, and the request is
+/// off the wire by the time it is ready.
+struct NamespaceSubscription {
+	this: Subscriber,
+	live: kio::Consumer<()>,
+	state: NamespaceSubscriptionState,
+}
+
+enum NamespaceSubscriptionState {
+	/// Sending the request and reading what it reports.
+	Running {
+		request: NamespaceRequest,
+		phase: NamespacePhase,
+		snapshot: Option<crate::model::Snapshot>,
+	},
+	/// The session ended it: waiting for it to leave the wire.
+	Leaving(Unsubscribe),
+	Done,
+}
+
+/// How far a [`NamespaceSubscription`] has come.
+enum NamespacePhase {
+	/// Waiting on the peer's SETUP, which says how to encode the request.
+	Setup,
+	/// The request is buffered, waiting on its answer.
+	Answer { declared: peer::Peer },
+	/// Reading NAMESPACE and NAMESPACE_DONE.
+	Entries(Entries),
+}
+
+/// What reading a SUBSCRIBE_NAMESPACE's entries needs.
+struct Entries {
+	peer: cluster::Peer,
+	negotiated: ietf::Negotiated,
+	/// NAMESPACE messages still owed before the first change, under MoQ Active Count.
+	initial: u64,
+	budget: kio::coop::Budget,
+}
+
+impl NamespaceSubscription {
+	fn new(
+		this: Subscriber,
+		stream: Stream<Transport, Version>,
+		prefix: Path,
+		snapshot: crate::model::Snapshot,
+		live: kio::Consumer<()>,
+	) -> Self {
+		let request = NamespaceRequest {
+			stream: stream.with_stats(this.origin.stats()),
+			messages: super::request_stream::Messages::new(this.session.clone(), this.control.client()),
+			prefix,
+			request_id: None,
+			live: HashMap::new(),
+		};
+		Self {
+			this,
+			live,
+			state: NamespaceSubscriptionState::Running {
+				request,
+				phase: NamespacePhase::Setup,
+				snapshot: Some(snapshot),
+			},
+		}
+	}
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<namespaces::Ended, Error>> {
+		loop {
+			match &mut self.state {
+				NamespaceSubscriptionState::Running {
+					request,
+					phase,
+					snapshot,
+				} => {
+					let res = ready!(
+						self.this
+							.poll_subscribe_namespace(request, phase, snapshot, &self.live, waiter)
+					);
+					*snapshot = None;
+
+					// The stream owns every advertisement it carried, so release them however it
+					// ends: a clean close, a decode error, the peer resetting it, or the session
+					// ending it. Without this each namespace keeps its refcount and the source never
+					// detaches.
+					for (path, advert) in std::mem::take(&mut request.live) {
+						if let Some(id) = advert.id {
+							let _ = self.this.stop_announce(path, id, false);
+						}
+					}
+
+					let NamespaceSubscriptionState::Running { request, .. } =
+						std::mem::replace(&mut self.state, NamespaceSubscriptionState::Done)
+					else {
+						unreachable!("matched above");
+					};
+					if let Ok(namespaces::Ended::Local) = res
+						&& let Some(leaving) = self.this.unsubscribe_namespace(request)
+					{
+						self.state = NamespaceSubscriptionState::Leaving(leaving);
+						continue;
+					}
+					return Poll::Ready(res);
+				}
+				NamespaceSubscriptionState::Leaving(leaving) => {
+					ready!(leaving.poll(waiter));
+					self.state = NamespaceSubscriptionState::Done;
+					return Poll::Ready(Ok(namespaces::Ended::Local));
+				}
+				NamespaceSubscriptionState::Done => panic!("NamespaceSubscription polled after it finished"),
+			}
+		}
+	}
+}
+
+/// A request the session ended, read until the peer closes its half or the session ends.
+struct Unsubscribe {
+	session: Transport,
+	/// Kept until then, since dropping a finished writer resets it.
+	_writer: Option<Writer<crate::transport::boxed::SendStream, Version>>,
+	reader: Reader<crate::transport::boxed::RecvStream, Version>,
+	messages: super::request_stream::Messages,
+	budget: kio::coop::Budget,
+}
+
+impl Unsubscribe {
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		if self.session.poll_closed(waiter).is_ready() {
+			return Poll::Ready(());
+		}
+		loop {
+			ready!(self.budget.poll_yield(waiter));
+			match ready!(self.messages.poll_next(&mut self.reader, waiter)) {
+				Ok(Some(_)) => continue,
+				Ok(None) | Err(_) => return Poll::Ready(()),
+			}
+		}
+	}
+}
+
+impl Subscriber {
 	/// Handle an incoming bidi stream dispatched by the session.
 	///
 	/// `peer` and `declared` are what the peer declared in its SETUP, which the dispatcher
@@ -1760,22 +1906,24 @@ impl Subscriber {
 					declared,
 					gate,
 				};
-				async move {
-					if let Err(err) = this.serve_publish_namespace_stream(stream, incoming).await {
+				let session = this.session.clone();
+				let mut serve = ServePublishNamespace::new(this, stream, incoming);
+				Box::pin(kio::Pending::new(move |waiter: &kio::Waiter| {
+					if let Err(err) = ready!(serve.poll(waiter)) {
 						// An advertisement update is decoded here rather than in the
 						// dispatcher, so nothing else would surface a malformed one. The
 						// cluster draft requires closing the session on those; a stream
 						// the peer simply reset is not the peer's fault.
 						if is_protocol_violation(&err) {
-							this.session.close(
+							session.close(
 								super::error::to_session_code(&SessionError::from(&err)),
 								err.to_string().as_ref(),
 							);
 						}
 						tracing::debug!(%err, "publish_namespace stream error");
 					}
-				}
-				.boxed()
+					Poll::Ready(())
+				}))
 			}
 			_ => {
 				tracing::warn!(id, "unexpected bidi stream type for subscriber");
@@ -1789,17 +1937,24 @@ impl Subscriber {
 	/// other decode error leaves the session open.
 	fn reject_token(
 		&self,
-		stream: Stream<Transport, Version>,
+		mut stream: Stream<Transport, Version>,
 		kind: request::Kind,
 		err: DecodeError,
 	) -> BoxFuture<'static, ()> {
-		let version = self.version;
-		async move {
-			if let Err(err) = super::token::reject(stream, kind, err, version).await {
+		let reason = super::token::reason(&err);
+		let buffered =
+			super::request_stream::buffer_error(&mut stream.writer, kind, &Error::Decode(err), reason, self.version);
+		let mut refusal = buffered.map(|()| (stream, super::request_stream::Deliver::new()));
+		Box::pin(kio::Pending::new(move |waiter: &kio::Waiter| {
+			let res = match &mut refusal {
+				Ok((stream, deliver)) => ready!(deliver.poll(waiter, &mut stream.writer)),
+				Err(err) => Err(err.clone()),
+			};
+			if let Err(err) = res {
 				tracing::debug!(%err, "token refusal failed");
 			}
-		}
-		.boxed()
+			Poll::Ready(())
+		}))
 	}
 
 	/// What the peer declared about being solicited (MoQ Solicit).
@@ -1807,8 +1962,9 @@ impl Subscriber {
 	/// Read once by the dispatch loop and handed to each stream rather than awaited per
 	/// stream: the slot is settled by the time streams are accepted, and a stream task
 	/// that waited on it would park forever if it never were.
-	pub(super) async fn solicit(&self) -> Option<bool> {
-		self.peer_setup.get().await.solicit
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub(super) fn poll_solicit(&self, waiter: &kio::Waiter) -> Poll<Option<bool>> {
+		self.peer_setup.poll_get(waiter).map(|peer| peer.solicit)
 	}
 
 	/// Whether an incoming PUBLISH_NAMESPACE means the peer ignored our SETUP.
@@ -1840,7 +1996,8 @@ impl Subscriber {
 			msg.track_namespace.clone(),
 			crate::auth::Direction::Subscribe,
 		);
-		self.serve_publish_namespace_stream(
+		let mut serve = ServePublishNamespace::new(
+			self.clone(),
 			stream,
 			IncomingNamespace {
 				msg,
@@ -1848,215 +2005,12 @@ impl Subscriber {
 				declared,
 				gate,
 			},
-		)
-		.await
+		);
+		kio::wait(|waiter| serve.poll(waiter)).await
 	}
 
-	async fn serve_publish_namespace_stream(
-		&mut self,
-		mut stream: Stream<Transport, Version>,
-		incoming: IncomingNamespace,
-	) -> Result<(), Error> {
-		let IncomingNamespace {
-			msg,
-			peer,
-			declared,
-			gate,
-		} = incoming;
-		if let Some(error) = super::namespace::refusal(&msg.track_namespace, self.version) {
-			return super::request_stream::reject(stream, error).await;
-		}
-		let path = msg.track_namespace.to_owned();
-
-		if self.unsolicited_is_a_violation(declared) {
-			tracing::warn!(%path, "unsolicited publish_namespace from a peer that implements MoQ Solicit");
-			return Err(Error::ProtocolViolation);
-		}
-
-		// A path that already contains our own Hop ID looped back. Reject it rather
-		// than attaching a source we would then have to route around.
-		let Some(advert) = self.route(msg.params.cluster.as_ref(), &peer) else {
-			tracing::debug!(%path, "dropping reflected publish_namespace");
-			self.write_error(&mut stream, &Error::Unroutable, "route loops through this relay")
-				.await?;
-			let _ = stream.writer.close().await;
-			return Ok(());
-		};
-
-		// Our authorization of the peer (the limit) admits an announce without a token, and
-		// refuses one it does not cover: the peer learns at once rather than publishing into
-		// nothing, and re-announces once its limit widens. An AUTHORIZATION TOKEN on the
-		// announce goes to the application to verify for this announce alone (MoQ
-		// request-token), even where the limit covers it, and a verified one is exempt from the
-		// limit while it lasts.
-		let token = match &msg.authorization_token {
-			Some(token) if gate.token_decides() => Some(token.0.clone()),
-			_ => None,
-		};
-		if token.is_none() && !self.auth.within_limit(crate::auth::Direction::Subscribe, path.as_str()) {
-			tracing::debug!(%path, "refusing publish_namespace outside the limit");
-			let reason = crate::auth::unauthorized_reason(&path);
-			self.write_error(&mut stream, &Error::Unauthorized, &reason).await?;
-			let _ = stream.writer.close().await;
-			return Ok(());
-		}
-		let existing = self.state.lock().broadcasts.get(&path).map(|entry| entry._slot.clone());
-		let slot: Option<crate::auth::Hold> = Some(match existing {
-			Some(slot) => slot,
-			None => std::sync::Arc::new(self.acquire_announce()?),
-		});
-		let (admit, token_grant) = match token {
-			None => (Admit::Session(slot.clone()), None),
-			Some(token) => {
-				let verdict = gate.verify(token, slot.clone());
-				// The session closing or the peer withdrawing the announce withdraws the token.
-				let session = self.session.clone();
-				let version = self.version;
-				let verified = kio::wait(|waiter| {
-					if session.poll_closed(waiter).is_ready()
-						|| super::request_stream::poll_withdrawn(
-							&mut stream,
-							super::request_stream::fin_cancels(version),
-							waiter,
-						)
-						.is_ready()
-					{
-						return Poll::Ready(None);
-					}
-					verdict.poll_grant(waiter).map(Some)
-				})
-				.await;
-				let Some(verified) = verified else {
-					return Ok(());
-				};
-				let admitted = crate::auth::RequestGrant::new(
-					&self.runtime,
-					verdict,
-					verified,
-					path.clone(),
-					crate::auth::RequestKind::PublishNamespace,
-					slot.clone(),
-				);
-				match admitted {
-					Ok(grant) => (Admit::Token(slot.clone()), Some(grant)),
-					Err(refusal) => {
-						self.write_error(&mut stream, &refusal.error, &refusal.reason).await?;
-						let _ = stream.writer.close().await;
-						return Ok(());
-					}
-				}
-			}
-		};
-		let token = token_grant.is_some();
-
-		// Everything the advertisement does once admitted runs under what admitted it: its
-		// token's grant, or the session's limit, which never holds an announce back. Either
-		// ending at any await, the first answer included, drops it right there, and a
-		// publisher whose limit widens again re-announces. `attached` says the route is up, and
-		// `acked` that the OK went out, which decides how the peer is told.
-		let mut attached = None;
-		let mut acked = false;
-		let auth = self.auth.clone();
-		let mut epoch = 0;
-		let mut limited = |waiter: &kio::Waiter| {
-			let mut excluded = false;
-			while let Poll::Ready(permit) = auth.poll_permit(crate::auth::Direction::Subscribe, &mut epoch, waiter) {
-				excluded = !permit.within_limit(path.as_str());
-			}
-			match excluded {
-				true => Poll::Ready(crate::auth::Refusal {
-					error: Error::Unauthorized,
-					reason: crate::auth::unauthorized_reason(&path),
-				}),
-				false => Poll::Pending,
-			}
-		};
-		let mut ended = |waiter: &kio::Waiter| match &token_grant {
-			Some(grant) => grant.poll_ended(waiter),
-			None => limited(waiter),
-		};
-		let lived = crate::auth::until(
-			async {
-				match self.start_announce(path.clone(), advert, admit) {
-					Ok(id) => attached = Some(id),
-					Err(err) => return Ok(Withdraw::Reject(err.into())),
-				}
-				// Buffered whole before its first await, so however this is dropped from here, the
-				// advertisement can still end on the wire.
-				acked = true;
-				self.write_ok(&mut stream).await?;
-
-				// An endpoint updates an advertisement with REQUEST_UPDATE on the stream that
-				// already carries it, so keep reading until the stream closes.
-				self.run_publish_namespace_updates(
-					&mut stream,
-					&path,
-					Held {
-						cluster: msg.params.cluster,
-					},
-					peer,
-					&mut attached,
-					Admission {
-						grant: token_grant.clone(),
-						slot: slot.clone(),
-					},
-				)
-				.await
-			},
-			&mut ended,
-		)
-		.await;
-
-		// The route goes before anything waits on the peer, so a peer that stops reading
-		// cannot keep it routed. A stream that detached mid-flight (a reflected update) has
-		// nothing left to release.
-		self.release_announce(&path, &mut attached, token)?;
-
-		let withdraw = match lived {
-			Ok(withdraw) => withdraw?,
-			Err(refusal) => {
-				tracing::info!(%path, err = %refusal.error, reason = %refusal.reason, "announce no longer authorized");
-				if !acked {
-					self.write_error(&mut stream, &refusal.error, &refusal.reason).await?;
-					let _ = stream.writer.close().await;
-					return Ok(());
-				}
-				// A lapsed token cancels the request, resetting what we send and stopping what we
-				// read, so the publisher knows to announce again with a fresh one (moq-transport
-				// sections 6.4.2.3 and 9.14). It takes any OK still buffered with it.
-				if super::error::token_expired(&refusal.error) {
-					stream.reader.stop(super::error::EXPIRED_AUTH_TOKEN);
-					stream.writer.reset(super::error::EXPIRED_AUTH_TOKEN);
-					return Err(refusal.error);
-				}
-				self.cancel_announce(&mut stream).await?;
-				return Err(refusal.error);
-			}
-		};
-		match withdraw {
-			Withdraw::Done => {}
-			Withdraw::Close => {
-				let _ = stream.writer.close().await;
-			}
-			Withdraw::Reject(refusal) => {
-				self.write_error(&mut stream, &refusal.error, &refusal.reason).await?;
-				let _ = stream.writer.close().await;
-			}
-			Withdraw::Cancel(refusal) => {
-				self.write_error(&mut stream, &refusal.error, &refusal.reason).await?;
-				self.cancel_announce(&mut stream).await?;
-			}
-		}
-		Ok(())
-	}
-
-	/// Read advertisement updates off a live PUBLISH_NAMESPACE stream until it closes, and
-	/// return how it ends, which the caller writes once the route is released.
-	///
-	/// `held` is what the peer advertised, kept current because a REQUEST_UPDATE carries
-	/// only what changed. Each one is answered with REQUEST_OK, or REQUEST_ERROR and a
-	/// closed stream when it cannot be applied, which withdraws the advertisement
-	/// (moq-transport Section 9.5.1).
+	/// [`PublishNamespaceUpdates`] awaited.
+	#[cfg(test)]
 	async fn run_publish_namespace_updates(
 		&mut self,
 		stream: &mut Stream<Transport, Version>,
@@ -2066,268 +2020,8 @@ impl Subscriber {
 		attached: &mut Option<u64>,
 		admission: Admission,
 	) -> Result<Withdraw, Error> {
-		let token_grant = &admission.grant;
-		let Held { cluster: mut held } = held;
-		// A REQUEST_UPDATE carrying a fresh token refreshes the announce's request grant (MoQ
-		// request-token); its verify is raced against the stream in the loop's single wait
-		// (never a bare await), so a peer ending the announce ends it whatever the acceptor
-		// does, and the caller's guard ends it when the old grant does. Messages behind a
-		// pending verdict wait in `renewal`, handled in order once it resolves.
-		let mut renewal = request_update::Renewal::<(u64, ietf::Body)>::default();
-		let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
-		// Draft-22 only: the peer finished its send direction, which does not withdraw the
-		// advertisement there, so stop reading and keep watching the writer.
-		let mut finished = false;
-
-		// What one turn of the loop resolved to.
-		enum Turn {
-			// A whole message off the stream, or one drained from the queue.
-			Message(u64, ietf::Body),
-			// The peer finished its send direction.
-			Fin,
-			// Our send direction closed (the peer stopped reading or reset it).
-			WriterClosed(Result<(), Error>),
-			// The read failed.
-			Failed(Error),
-			// A pending renewal's verdict resolved, for the update with this request id.
-			Renewal(request_update::Verdict),
-		}
-
-		// Request IDs of updates queued behind a pending verdict, already spent.
-		let mut spent = std::collections::HashSet::new();
-		// Each update re-routes in the origin and is answered, so a peer streaming them must
-		// not hold the session's other tasks.
-		let mut budget = kio::coop::Budget::new(32);
-		loop {
-			kio::wait(|waiter| budget.poll_yield(waiter)).await;
-			// Handle one buffered update before reading the next, so answers stay in order.
-			let turn = if let Some((id, body)) = renewal.next() {
-				Turn::Message(id, body)
-			} else {
-				kio::wait(|waiter| {
-					if let Poll::Ready(result) = stream.writer.poll_closed(waiter) {
-						return Poll::Ready(Turn::WriterClosed(result));
-					}
-					if let Poll::Ready(renewed) = renewal.poll(waiter) {
-						return Poll::Ready(Turn::Renewal(renewed));
-					}
-					// Keep reading while a verdict is pending, so a withdrawal still ends the
-					// announce: a buffered update must not mask a later terminal.
-					if !finished {
-						return match messages.poll_next(&mut stream.reader, waiter) {
-							Poll::Ready(Ok(Some(super::request_stream::Framed(id, body)))) => {
-								Poll::Ready(Turn::Message(id, body))
-							}
-							Poll::Ready(Ok(None)) => Poll::Ready(Turn::Fin),
-							Poll::Ready(Err(err)) => Poll::Ready(Turn::Failed(err)),
-							Poll::Pending => Poll::Pending,
-						};
-					}
-					Poll::Pending
-				})
-				.await
-			};
-
-			let (type_id, body) = match turn {
-				// A non-terminal message read while a verdict is pending waits for it.
-				Turn::Message(id, body) if renewal.pending() => {
-					if id == ietf::PublishNamespaceUpdate::ID {
-						// Its request ID is spent on arrival, so one dropped with the queue still moves
-						// GOAWAY's cutoff past it.
-						let update_id = ietf::RequestId::decode(&mut body.decoder(self.version), self.version)?;
-						if let Err(err) = self.spend(update_id) {
-							if matches!(err, Error::GoingAway) {
-								return Ok(Withdraw::Cancel(crate::auth::Refusal {
-									error: err,
-									reason: "going away".to_string(),
-								}));
-							}
-							return Err(err);
-						}
-						spent.insert(update_id);
-						// Decoded on arrival too, so a session-fatal update still closes the session
-						// when a withdrawal drops the queue. A token refusal only refuses this
-						// announce, which waits for the update's turn.
-						let mut data = body.decoder(self.version);
-						match ietf::PublishNamespaceUpdate::decode_msg(&mut data, self.version) {
-							Err(err) if super::token::refuses_request(&err) => {}
-							msg => {
-								msg?;
-							}
-						}
-						if !data.is_empty() {
-							return Err(Error::WrongSize);
-						}
-					}
-					match renewal.queue((id, body), self.version) {
-						Ok(()) => continue,
-						// The dispatcher closes only on is_protocol_violation, which excludes
-						// Error::Session, so the session is closed here.
-						Err(request_update::Overflow::Session) => {
-							return Err(request_update::too_many(&mut self.session));
-						}
-						// Drafts below 19 negotiate no limit, so this is a local memory guard, not a
-						// protocol fault: end this announce, never the session.
-						Err(request_update::Overflow::Request) => return Ok(Withdraw::Close),
-					}
-				}
-				Turn::Message(id, body) => (id, body),
-				Turn::Fin => {
-					if super::request_stream::fin_cancels(self.version) {
-						return Ok(Withdraw::Done);
-					}
-					// The advertisement outlives the peer's send direction.
-					finished = true;
-					continue;
-				}
-				// Already finished: the advertisement outlived the peer's send direction until now.
-				Turn::WriterClosed(result) if finished => return result.map(|()| Withdraw::Done),
-				Turn::WriterClosed(result) => {
-					stream.reader.abort(&Error::Cancel);
-					result?;
-					if !super::request_stream::fin_cancels(self.version) {
-						stream.writer.closed().await?;
-					}
-					return Ok(Withdraw::Done);
-				}
-				Turn::Failed(err) => return Err(err),
-				Turn::Renewal(request_update::Verdict { verdict, grant: res }) => {
-					// Only a token-authorized announce starts a renewal.
-					let rg = token_grant.as_ref().expect("a renewal without a request grant");
-					// On accept the old grant is dropped and the deadline re-armed (REQUEST_OK).
-					let Err(refusal) = rg.renew(verdict, res) else {
-						self.write_ok(stream).await?;
-						continue;
-					};
-					// Per draft-18 section 10.9.1, a refused or uncovered
-					// renewal ends only this announce. Answer REQUEST_ERROR, then close the stream;
-					// the session stays up and the old grant does not survive.
-					return Ok(Withdraw::Cancel(refusal));
-				}
-			};
-
-			if type_id != ietf::PublishNamespaceUpdate::ID {
-				// A repeated PUBLISH_NAMESPACE lands here too: a second request on the
-				// stream is the base draft's duplicate request ID.
-				tracing::warn!(type_id, "unexpected message on publish_namespace stream");
-				return Err(Error::UnexpectedMessage);
-			}
-
-			let mut data = body.decoder(self.version);
-
-			// An update spends its own request ID, even one refused below. A queued one was
-			// spent when it arrived.
-			let update_id = ietf::RequestId::decode(&mut body.decoder(self.version), self.version)?;
-			if !spent.remove(&update_id)
-				&& let Err(err) = self.spend(update_id)
-			{
-				if matches!(err, Error::GoingAway) {
-					return Ok(Withdraw::Cancel(crate::auth::Refusal {
-						error: err,
-						reason: "going away".to_string(),
-					}));
-				}
-				return Err(err);
-			}
-			let msg = match ietf::PublishNamespaceUpdate::decode_msg(&mut data, self.version) {
-				// A token refusal rejects the update, which withdraws the advertisement as
-				// any refused update does.
-				Err(err) if super::token::refuses_request(&err) => {
-					// Junk after the fields is fatal, which a token refusal must not hide.
-					if !data.is_empty() {
-						return Err(Error::WrongSize);
-					}
-					let refusal = crate::auth::Refusal {
-						reason: super::token::reason(&err).to_string(),
-						error: Error::Decode(err),
-					};
-					return Ok(Withdraw::Cancel(refusal));
-				}
-				msg => msg?,
-			};
-			// Junk inside the declared size would otherwise be applied silently, which
-			// is the one decode path that skipped the check the others make.
-			if !data.is_empty() {
-				return Err(Error::WrongSize);
-			}
-
-			// Cluster parameters and a token renewal can ride the same update, so apply the
-			// routing first, for every update that carries it, before dealing with the token.
-			// A different original publisher applies in place too: the origin drains what the
-			// old one already serves and never splices the two. The parameters exist only on a
-			// session that negotiated the extension; anywhere else they are the peer's violation.
-			let carries_cluster = msg.hops.is_some() || msg.cost.is_some();
-			held = match &held {
-				Some(current) => Some(msg.apply(current)),
-				None if carries_cluster => {
-					tracing::warn!(%path, "cluster parameters on a session that negotiated none");
-					return Err(Error::ProtocolViolation);
-				}
-				None => None,
-			};
-
-			// Re-route only when the update actually changes the route (an omitted parameter
-			// keeps its value, so a token-only update leaves it untouched). A path that now runs
-			// through us is unusable, so detach rather than keep serving it; reading continues,
-			// since this stream is the advertisement's only channel and a later clean path
-			// arrives here or nowhere. Ending the stream is not ours to do: a peer MAY
-			// legitimately send a path carrying our Hop ID when a redundant sibling shares it.
-			let applied: Result<(), Error> = match carries_cluster {
-				true => match self.route(held.as_ref(), &peer) {
-					None => {
-						if let Some(id) = attached.take() {
-							tracing::debug!(%path, "publish_namespace now loops back; detaching");
-							let _ = self.stop_announce(path.clone(), id, token_grant.is_some());
-						}
-						Ok(())
-					}
-					Some(advert) => {
-						tracing::debug!(%path, hops = advert.route.hops.len(), cost = ?advert.route.cost, "publish_namespace update");
-						match *attached {
-							Some(id) => self.update_announce(path.clone(), id, advert),
-							// Re-attach: a clean path replaced the reflected one we detached from.
-							None => {
-								// The grant still holds the slot it was admitted with, so reuse it.
-								self.start_announce(path.clone(), advert, admission.admit())
-									.map(|id| *attached = Some(id))
-							}
-						}
-					}
-				},
-				false => Ok(()),
-			};
-
-			// An unroutable apply withdraws the announce whether or not a token also rides it.
-			// The close is the withdrawal.
-			if let Err(err) = applied {
-				tracing::warn!(%path, %err, "publish_namespace update refused");
-				return Ok(Withdraw::Reject(err.into()));
-			}
-
-			// A REQUEST_UPDATE carrying a fresh token refreshes the announce's request grant
-			// (MoQ request-token), when the announce is token-authorized. The verify is not
-			// awaited here: it becomes the pending renewal raced against the deadline above.
-			// The routing above is already applied, so the renewal's answer (written when its
-			// verdict resolves) is this update's single response, cluster parameters included.
-			if let Some(token) = msg
-				.authorization_token
-				.filter(|_| self.auth.token_decides(crate::auth::Direction::Subscribe))
-			{
-				let Some(grant) = &token_grant else {
-					// An announce is admitted by the session or by a token, and that never
-					// changes, so a token here is refused rather than taken unread.
-					return Ok(Withdraw::Cancel(crate::auth::Refusal {
-						error: Error::Unsupported,
-						reason: "AUTHORIZATION TOKEN on an announce admitted without one".to_string(),
-					}));
-				};
-				renewal.verify(grant.verify_renewal(&self.auth, token.0));
-				continue;
-			}
-
-			// No token rides this update: acknowledge it now.
-			self.write_ok(stream).await?;
-		}
+		let mut updates = PublishNamespaceUpdates::new(self, held, peer, admission);
+		kio::wait(|waiter| updates.poll(waiter, self, stream, path, attached)).await
 	}
 
 	/// Retract an advertisement's route ahead of a withdrawal that waits on the peer, so a peer
@@ -2339,13 +2033,6 @@ impl Subscriber {
 		Ok(())
 	}
 
-	/// End an advertisement we accepted, leaving the session up: a closed stream.
-	async fn cancel_announce(&self, stream: &mut Stream<Transport, Version>) -> Result<(), Error> {
-		// An OK cut short by the grant ending is still buffered, and goes out ahead of the FIN.
-		super::request_stream::deliver(&mut stream.writer).await
-	}
-
-	/// Send OK on the bidi stream.
 	/// Spend a peer's request ID, closing the session on one it already used.
 	fn spend(&self, id: RequestId) -> Result<(), Error> {
 		if let Err(err) = self.control.accept(id) {
@@ -2361,34 +2048,736 @@ impl Subscriber {
 		Ok(())
 	}
 
-	async fn write_ok(&self, stream: &mut Stream<Transport, Version>) -> Result<(), Error> {
-		stream
-			.writer
-			.encode_message(&ietf::RequestOk {
+	/// Buffer REQUEST_OK on the bidi stream.
+	fn buffer_ok(&self, stream: &mut Stream<Transport, Version>) -> Result<(), Error> {
+		stream.writer.buffer_message(
+			ietf::RequestOk::ID,
+			&ietf::RequestOk {
 				largest: None,
 				active: None,
-			})
-			.await?;
-		Ok(())
+			},
+		)
 	}
 
-	/// Refuse a PUBLISH_NAMESPACE on the bidi stream that carries it.
-	async fn write_error(
-		&self,
-		stream: &mut Stream<Transport, Version>,
-		err: &Error,
-		reason: &str,
-	) -> Result<(), Error> {
-		super::request_stream::write_error(
+	/// Buffer the REQUEST_ERROR refusing a PUBLISH_NAMESPACE on the bidi stream that carries it.
+	fn buffer_error(&self, stream: &mut Stream<Transport, Version>, err: &Error, reason: &str) -> Result<(), Error> {
+		super::request_stream::buffer_error(
 			&mut stream.writer,
 			request::Kind::PublishNamespace,
 			err,
 			reason,
 			self.version,
 		)
-		.await
+	}
+}
+
+/// Whether the session's limit stopped covering `path`, for an announce it admitted.
+fn poll_limited(
+	auth: &crate::auth::Link,
+	epoch: &mut u64,
+	path: &Path,
+	waiter: &kio::Waiter,
+) -> Poll<crate::auth::Refusal> {
+	let mut excluded = false;
+	while let Poll::Ready(permit) = auth.poll_permit(crate::auth::Direction::Subscribe, epoch, waiter) {
+		excluded = !permit.within_limit(path.as_str());
+	}
+	match excluded {
+		true => Poll::Ready(crate::auth::Refusal {
+			error: Error::Unauthorized,
+			reason: crate::auth::unauthorized_reason(path),
+		}),
+		false => Poll::Pending,
+	}
+}
+
+/// Serves an incoming PUBLISH_NAMESPACE on its bidi stream, from admitting it until its
+/// advertisement ends on the wire.
+struct ServePublishNamespace {
+	this: Subscriber,
+	/// `None` once it is taken apart to end the request.
+	stream: Option<Stream<Transport, Version>>,
+	state: ServeNamespaceState,
+}
+
+const SERVE_STREAM: &str = "the stream is only taken apart as the request ends";
+
+enum ServeNamespaceState {
+	/// Not polled yet.
+	Start(IncomingNamespace),
+	/// Waiting on the verdict for the announce's own token.
+	Verifying {
+		live: Box<LiveAnnounce>,
+		verdict: crate::auth::RequestVerdict,
+	},
+	/// Admitted, running under what admitted it until either ends.
+	Live(Box<LiveAnnounce>),
+	/// Ending with a closed stream, once what is buffered goes out when `flush` (failing if
+	/// it cannot).
+	Close {
+		flush: bool,
+	},
+	/// Waiting for the peer to acknowledge the close, whatever comes of it.
+	Closing {
+		closing: Option<crate::coding::Closing<crate::transport::boxed::SendStream, Version>>,
+		_reader: Reader<crate::transport::boxed::RecvStream, Version>,
+	},
+	/// Delivering the last message, then ending with `result`.
+	Deliver {
+		deliver: super::request_stream::Deliver,
+		result: Result<(), Error>,
+	},
+	Done,
+}
+
+/// An admitted PUBLISH_NAMESPACE: everything it does runs under what admitted it, its own
+/// token's grant or the session's limit, either of which ending drops it wherever it waits.
+struct LiveAnnounce {
+	path: Path,
+	peer: cluster::Peer,
+	slot: Option<crate::auth::Hold>,
+	/// Taken when the route attaches.
+	advert: Option<Advertised>,
+	/// What the peer advertised, taken when the updates start.
+	cluster: Option<cluster::Advert>,
+	/// Its own token's grant, when one admitted it.
+	grant: Option<crate::auth::RequestGrant>,
+	/// Whether the session's limit covers it, as of `epoch`, when no token admitted it.
+	epoch: u64,
+	/// Says the route is up.
+	attached: Option<u64>,
+	/// Says the OK went out, which decides how the peer is told.
+	acked: bool,
+	step: LiveStep,
+}
+
+#[expect(clippy::large_enum_variant, reason = "a machine's enum is its storage")]
+enum LiveStep {
+	/// Attaching the route and answering.
+	Attach,
+	/// Flushing the answer.
+	Ack,
+	Updates(PublishNamespaceUpdates),
+	/// Over, either way.
+	Ended,
+}
+
+impl ServePublishNamespace {
+	fn new(this: Subscriber, stream: Stream<Transport, Version>, incoming: IncomingNamespace) -> Self {
+		Self {
+			this,
+			stream: Some(stream),
+			state: ServeNamespaceState::Start(incoming),
+		}
 	}
 
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		loop {
+			match &mut self.state {
+				ServeNamespaceState::Start(_) => {
+					let ServeNamespaceState::Start(incoming) =
+						std::mem::replace(&mut self.state, ServeNamespaceState::Done)
+					else {
+						unreachable!("matched above");
+					};
+					self.state = self.start(incoming)?;
+				}
+				ServeNamespaceState::Verifying { verdict, .. } => {
+					let stream = self.stream.as_mut().expect(SERVE_STREAM);
+					// The session closing or the peer withdrawing the announce withdraws the token.
+					if self.this.session.poll_closed(waiter).is_ready()
+						|| super::request_stream::poll_withdrawn(
+							stream,
+							super::request_stream::fin_cancels(self.this.version),
+							waiter,
+						)
+						.is_ready()
+					{
+						self.state = ServeNamespaceState::Done;
+						return Poll::Ready(Ok(()));
+					}
+					let verified = ready!(verdict.poll_grant(waiter));
+					let ServeNamespaceState::Verifying { mut live, verdict } =
+						std::mem::replace(&mut self.state, ServeNamespaceState::Done)
+					else {
+						unreachable!("matched above");
+					};
+					let admitted = crate::auth::RequestGrant::new(
+						&self.this.runtime,
+						verdict,
+						verified,
+						live.path.clone(),
+						crate::auth::RequestKind::PublishNamespace,
+						live.slot.clone(),
+					);
+					match admitted {
+						Ok(grant) => {
+							live.grant = Some(grant);
+							self.state = ServeNamespaceState::Live(live);
+						}
+						Err(refusal) => {
+							self.this.buffer_error(stream, &refusal.error, &refusal.reason)?;
+							self.state = ServeNamespaceState::Close { flush: true };
+						}
+					}
+				}
+				ServeNamespaceState::Live(live) => {
+					let stream = self.stream.as_mut().expect(SERVE_STREAM);
+					// Polled first, so the announce never acts on authority that already ended.
+					let ended = match &live.grant {
+						Some(grant) => grant.poll_ended(waiter),
+						None => poll_limited(&self.this.auth, &mut live.epoch, &live.path, waiter),
+					};
+					let lived = match ended {
+						Poll::Ready(refusal) => Err(refusal),
+						Poll::Pending => Ok(ready!(live.poll(&mut self.this, stream, waiter))),
+					};
+					// Whatever the body held goes with it, before the route does.
+					live.step = LiveStep::Ended;
+
+					// The route goes before anything waits on the peer, so a peer that stops reading
+					// cannot keep it routed. A stream that detached mid-flight (a reflected update) has
+					// nothing left to release.
+					let token = live.grant.is_some();
+					self.this.release_announce(&live.path, &mut live.attached, token)?;
+
+					let withdraw = match lived {
+						Ok(withdraw) => withdraw?,
+						Err(refusal) => {
+							tracing::info!(path = %live.path, err = %refusal.error, reason = %refusal.reason, "announce no longer authorized");
+							if !live.acked {
+								self.this.buffer_error(stream, &refusal.error, &refusal.reason)?;
+								self.state = ServeNamespaceState::Close { flush: true };
+								continue;
+							}
+							// A lapsed token cancels the request, resetting what we send and stopping what we
+							// read, so the publisher knows to announce again with a fresh one (moq-transport
+							// sections 6.4.2.3 and 9.14). It takes any OK still buffered with it.
+							if super::error::token_expired(&refusal.error) {
+								let Stream { mut reader, writer } = self.stream.take().expect(SERVE_STREAM);
+								reader.stop(super::error::EXPIRED_AUTH_TOKEN);
+								writer.reset(super::error::EXPIRED_AUTH_TOKEN);
+								self.state = ServeNamespaceState::Done;
+								return Poll::Ready(Err(refusal.error));
+							}
+							// End the advertisement, leaving the session up: an OK cut short by the grant
+							// ending is still buffered, and goes out ahead of the FIN.
+							self.state = ServeNamespaceState::Deliver {
+								deliver: super::request_stream::Deliver::new(),
+								result: Err(refusal.error),
+							};
+							continue;
+						}
+					};
+					self.state = match withdraw {
+						Withdraw::Done => {
+							self.state = ServeNamespaceState::Done;
+							return Poll::Ready(Ok(()));
+						}
+						Withdraw::Close => ServeNamespaceState::Close { flush: false },
+						Withdraw::Reject(refusal) => {
+							self.this.buffer_error(stream, &refusal.error, &refusal.reason)?;
+							ServeNamespaceState::Close { flush: true }
+						}
+						// Refused, then the advertisement ends, leaving the session up.
+						Withdraw::Cancel(refusal) => {
+							self.this.buffer_error(stream, &refusal.error, &refusal.reason)?;
+							ServeNamespaceState::Deliver {
+								deliver: super::request_stream::Deliver::new(),
+								result: Ok(()),
+							}
+						}
+					};
+				}
+				ServeNamespaceState::Close { flush } => {
+					let stream = self.stream.as_mut().expect(SERVE_STREAM);
+					if *flush {
+						ready!(stream.writer.poll_flush(waiter))?;
+					}
+					let Stream { writer, reader } = self.stream.take().expect(SERVE_STREAM);
+					self.state = ServeNamespaceState::Closing {
+						closing: writer.closing().ok(),
+						_reader: reader,
+					};
+				}
+				ServeNamespaceState::Closing { closing, .. } => {
+					if let Some(closing) = closing {
+						let _ = ready!(closing.poll(waiter));
+					}
+					self.state = ServeNamespaceState::Done;
+					return Poll::Ready(Ok(()));
+				}
+				ServeNamespaceState::Deliver { deliver, .. } => {
+					let stream = self.stream.as_mut().expect(SERVE_STREAM);
+					let delivered = ready!(deliver.poll(waiter, &mut stream.writer));
+					let ServeNamespaceState::Deliver { result, .. } =
+						std::mem::replace(&mut self.state, ServeNamespaceState::Done)
+					else {
+						unreachable!("matched above");
+					};
+					return Poll::Ready(delivered.and(result));
+				}
+				ServeNamespaceState::Done => panic!("ServePublishNamespace polled after it finished"),
+			}
+		}
+	}
+
+	/// Decide what the request is owed before anything waits.
+	fn start(&mut self, incoming: IncomingNamespace) -> Result<ServeNamespaceState, Error> {
+		let IncomingNamespace {
+			msg,
+			peer,
+			declared,
+			gate,
+		} = incoming;
+		let this = &mut self.this;
+		let stream = self.stream.as_mut().expect(SERVE_STREAM);
+		if let Some(error) = super::namespace::refusal(&msg.track_namespace, this.version) {
+			stream.writer.buffer_message(ietf::RequestError::ID, &error)?;
+			return Ok(ServeNamespaceState::Deliver {
+				deliver: super::request_stream::Deliver::new(),
+				result: Ok(()),
+			});
+		}
+		let path = msg.track_namespace.to_owned();
+
+		if this.unsolicited_is_a_violation(declared) {
+			tracing::warn!(%path, "unsolicited publish_namespace from a peer that implements MoQ Solicit");
+			return Err(Error::ProtocolViolation);
+		}
+
+		// A path that already contains our own Hop ID looped back. Reject it rather
+		// than attaching a source we would then have to route around.
+		let Some(advert) = this.route(msg.params.cluster.as_ref(), &peer) else {
+			tracing::debug!(%path, "dropping reflected publish_namespace");
+			this.buffer_error(stream, &Error::Unroutable, "route loops through this relay")?;
+			return Ok(ServeNamespaceState::Close { flush: true });
+		};
+
+		// Our authorization of the peer (the limit) admits an announce without a token, and
+		// refuses one it does not cover: the peer learns at once rather than publishing into
+		// nothing, and re-announces once its limit widens. An AUTHORIZATION TOKEN on the
+		// announce goes to the application to verify for this announce alone (MoQ
+		// request-token), even where the limit covers it, and a verified one is exempt from the
+		// limit while it lasts.
+		let token = match &msg.authorization_token {
+			Some(token) if gate.token_decides() => Some(token.0.clone()),
+			_ => None,
+		};
+		if token.is_none() && !this.auth.within_limit(crate::auth::Direction::Subscribe, path.as_str()) {
+			tracing::debug!(%path, "refusing publish_namespace outside the limit");
+			let reason = crate::auth::unauthorized_reason(&path);
+			this.buffer_error(stream, &Error::Unauthorized, &reason)?;
+			return Ok(ServeNamespaceState::Close { flush: true });
+		}
+		let existing = this.state.lock().broadcasts.get(&path).map(|entry| entry._slot.clone());
+		let slot: Option<crate::auth::Hold> = Some(match existing {
+			Some(slot) => slot,
+			None => std::sync::Arc::new(this.acquire_announce()?),
+		});
+		let live = Box::new(LiveAnnounce {
+			path,
+			peer,
+			slot,
+			advert: Some(advert),
+			cluster: msg.params.cluster,
+			grant: None,
+			epoch: 0,
+			attached: None,
+			acked: false,
+			step: LiveStep::Attach,
+		});
+		Ok(match token {
+			None => ServeNamespaceState::Live(live),
+			Some(token) => {
+				let verdict = gate.verify(token, live.slot.clone());
+				ServeNamespaceState::Verifying { live, verdict }
+			}
+		})
+	}
+}
+
+impl LiveAnnounce {
+	/// Attach the route, answer, and follow the advertisement's updates until it ends,
+	/// ready with how.
+	fn poll(
+		&mut self,
+		this: &mut Subscriber,
+		stream: &mut Stream<Transport, Version>,
+		waiter: &kio::Waiter,
+	) -> Poll<Result<Withdraw, Error>> {
+		loop {
+			match &mut self.step {
+				LiveStep::Attach => {
+					let advert = self.advert.take().expect("the route attaches once");
+					let admit = match self.grant {
+						Some(_) => Admit::Token(self.slot.clone()),
+						None => Admit::Session(self.slot.clone()),
+					};
+					match this.start_announce(self.path.clone(), advert, admit) {
+						Ok(id) => self.attached = Some(id),
+						Err(err) => return Poll::Ready(Ok(Withdraw::Reject(err.into()))),
+					}
+					// Buffered whole before its first wait, so however this is dropped from here, the
+					// advertisement can still end on the wire.
+					self.acked = true;
+					this.buffer_ok(stream)?;
+					self.step = LiveStep::Ack;
+				}
+				LiveStep::Ack => {
+					ready!(stream.writer.poll_flush(waiter))?;
+					// An endpoint updates an advertisement with REQUEST_UPDATE on the stream that
+					// already carries it, so keep reading until the stream closes.
+					self.step = LiveStep::Updates(PublishNamespaceUpdates::new(
+						this,
+						Held {
+							cluster: self.cluster.take(),
+						},
+						self.peer,
+						Admission {
+							grant: self.grant.clone(),
+							slot: self.slot.clone(),
+						},
+					));
+				}
+				LiveStep::Updates(updates) => {
+					return updates.poll(waiter, this, stream, &self.path, &mut self.attached);
+				}
+				LiveStep::Ended => panic!("LiveAnnounce polled after it ended"),
+			}
+		}
+	}
+}
+
+/// Reads advertisement updates off a live PUBLISH_NAMESPACE stream until it closes, ready
+/// with how it ends, which the caller writes once the route is released.
+///
+/// `held` is what the peer advertised, kept current because a REQUEST_UPDATE carries
+/// only what changed. Each one is answered with REQUEST_OK, or REQUEST_ERROR and a
+/// closed stream when it cannot be applied, which withdraws the advertisement
+/// (moq-transport Section 9.5.1).
+struct PublishNamespaceUpdates {
+	held: Option<cluster::Advert>,
+	peer: cluster::Peer,
+	admission: Admission,
+	// A REQUEST_UPDATE carrying a fresh token refreshes the announce's request grant (MoQ
+	// request-token); its verify is raced against the stream in the loop's single wait
+	// (never a bare wait), so a peer ending the announce ends it whatever the acceptor
+	// does, and the caller's guard ends it when the old grant does. Messages behind a
+	// pending verdict wait in `renewal`, handled in order once it resolves.
+	renewal: request_update::Renewal<(u64, ietf::Body)>,
+	messages: super::request_stream::Messages,
+	// Draft-22 only: the peer finished its send direction, which does not withdraw the
+	// advertisement there, so stop reading and keep watching the writer.
+	finished: bool,
+	// Request IDs of updates queued behind a pending verdict, already spent.
+	spent: std::collections::HashSet<RequestId>,
+	// Each update re-routes in the origin and is answered, so a peer streaming them must
+	// not hold the session's other tasks.
+	budget: kio::coop::Budget,
+	step: UpdateStep,
+}
+
+enum UpdateStep {
+	/// Taking the next update, queued or off the stream.
+	Next,
+	/// Flushing the REQUEST_OK that answered one.
+	Ack,
+	/// Our send direction closed on a draft where the peer's FIN does not withdraw the
+	/// advertisement: waiting for its close to settle.
+	Closed,
+}
+
+impl PublishNamespaceUpdates {
+	fn new(this: &Subscriber, held: Held, peer: cluster::Peer, admission: Admission) -> Self {
+		Self {
+			held: held.cluster,
+			peer,
+			admission,
+			renewal: request_update::Renewal::default(),
+			messages: super::request_stream::Messages::new(this.session.clone(), this.control.client()),
+			finished: false,
+			spent: std::collections::HashSet::new(),
+			budget: kio::coop::Budget::new(32),
+			step: UpdateStep::Next,
+		}
+	}
+
+	fn poll(
+		&mut self,
+		waiter: &kio::Waiter,
+		this: &mut Subscriber,
+		stream: &mut Stream<Transport, Version>,
+		path: &Path,
+		attached: &mut Option<u64>,
+	) -> Poll<Result<Withdraw, Error>> {
+		// What one turn of the loop resolved to.
+		enum Turn {
+			// A whole message off the stream, or one drained from the queue.
+			Message(u64, ietf::Body),
+			// The peer finished its send direction.
+			Fin,
+			// Our send direction closed (the peer stopped reading or reset it).
+			WriterClosed(Result<(), Error>),
+			// The read failed.
+			Failed(Error),
+			// A pending renewal's verdict resolved, for the update with this request id.
+			Renewal(request_update::Verdict),
+		}
+
+		let Self {
+			held,
+			peer,
+			admission,
+			renewal,
+			messages,
+			finished,
+			spent,
+			budget,
+			step,
+		} = self;
+		let token_grant = &admission.grant;
+		loop {
+			match step {
+				UpdateStep::Next => {}
+				UpdateStep::Ack => {
+					ready!(stream.writer.poll_flush(waiter))?;
+					*step = UpdateStep::Next;
+					continue;
+				}
+				UpdateStep::Closed => {
+					ready!(stream.writer.poll_closed(waiter))?;
+					return Poll::Ready(Ok(Withdraw::Done));
+				}
+			}
+
+			ready!(budget.poll_yield(waiter));
+			// Handle one buffered update before reading the next, so answers stay in order.
+			let turn = if let Some((id, body)) = renewal.next() {
+				Turn::Message(id, body)
+			} else if let Poll::Ready(result) = stream.writer.poll_closed(waiter) {
+				Turn::WriterClosed(result)
+			} else if let Poll::Ready(renewed) = renewal.poll(waiter) {
+				Turn::Renewal(renewed)
+			} else if *finished {
+				return Poll::Pending;
+			} else {
+				// Keep reading while a verdict is pending, so a withdrawal still ends the
+				// announce: a buffered update must not mask a later terminal.
+				match ready!(messages.poll_next(&mut stream.reader, waiter)) {
+					Ok(Some(super::request_stream::Framed(id, body))) => Turn::Message(id, body),
+					Ok(None) => Turn::Fin,
+					Err(err) => Turn::Failed(err),
+				}
+			};
+
+			let (type_id, body) = match turn {
+				// A non-terminal message read while a verdict is pending waits for it.
+				Turn::Message(id, body) if renewal.pending() => {
+					if id == ietf::PublishNamespaceUpdate::ID {
+						// Its request ID is spent on arrival, so one dropped with the queue still moves
+						// GOAWAY's cutoff past it.
+						let update_id = ietf::RequestId::decode(&mut body.decoder(this.version), this.version)?;
+						if let Err(err) = this.spend(update_id) {
+							if matches!(err, Error::GoingAway) {
+								return Poll::Ready(Ok(Withdraw::Cancel(crate::auth::Refusal {
+									error: err,
+									reason: "going away".to_string(),
+								})));
+							}
+							return Poll::Ready(Err(err));
+						}
+						spent.insert(update_id);
+						// Decoded on arrival too, so a session-fatal update still closes the session
+						// when a withdrawal drops the queue. A token refusal only refuses this
+						// announce, which waits for the update's turn.
+						let mut data = body.decoder(this.version);
+						match ietf::PublishNamespaceUpdate::decode_msg(&mut data, this.version) {
+							Err(err) if super::token::refuses_request(&err) => {}
+							msg => {
+								msg?;
+							}
+						}
+						if !data.is_empty() {
+							return Poll::Ready(Err(Error::WrongSize));
+						}
+					}
+					match renewal.queue((id, body), this.version) {
+						Ok(()) => continue,
+						// The dispatcher closes only on is_protocol_violation, which excludes
+						// Error::Session, so the session is closed here.
+						Err(request_update::Overflow::Session) => {
+							return Poll::Ready(Err(request_update::too_many(&mut this.session)));
+						}
+						// Drafts below 19 negotiate no limit, so this is a local memory guard, not a
+						// protocol fault: end this announce, never the session.
+						Err(request_update::Overflow::Request) => return Poll::Ready(Ok(Withdraw::Close)),
+					}
+				}
+				Turn::Message(id, body) => (id, body),
+				Turn::Fin => {
+					if super::request_stream::fin_cancels(this.version) {
+						return Poll::Ready(Ok(Withdraw::Done));
+					}
+					// The advertisement outlives the peer's send direction.
+					*finished = true;
+					continue;
+				}
+				// Already finished: the advertisement outlived the peer's send direction until now.
+				Turn::WriterClosed(result) if *finished => return Poll::Ready(result.map(|()| Withdraw::Done)),
+				Turn::WriterClosed(result) => {
+					stream.reader.abort(&Error::Cancel);
+					result?;
+					if !super::request_stream::fin_cancels(this.version) {
+						*step = UpdateStep::Closed;
+						continue;
+					}
+					return Poll::Ready(Ok(Withdraw::Done));
+				}
+				Turn::Failed(err) => return Poll::Ready(Err(err)),
+				Turn::Renewal(request_update::Verdict { verdict, grant: res }) => {
+					// Only a token-authorized announce starts a renewal.
+					let rg = token_grant.as_ref().expect("a renewal without a request grant");
+					// On accept the old grant is dropped and the deadline re-armed (REQUEST_OK).
+					let Err(refusal) = rg.renew(verdict, res) else {
+						this.buffer_ok(stream)?;
+						*step = UpdateStep::Ack;
+						continue;
+					};
+					// Per draft-18 section 10.9.1, a refused or uncovered
+					// renewal ends only this announce. Answer REQUEST_ERROR, then close the stream;
+					// the session stays up and the old grant does not survive.
+					return Poll::Ready(Ok(Withdraw::Cancel(refusal)));
+				}
+			};
+
+			if type_id != ietf::PublishNamespaceUpdate::ID {
+				// A repeated PUBLISH_NAMESPACE lands here too: a second request on the
+				// stream is the base draft's duplicate request ID.
+				tracing::warn!(type_id, "unexpected message on publish_namespace stream");
+				return Poll::Ready(Err(Error::UnexpectedMessage));
+			}
+
+			let mut data = body.decoder(this.version);
+
+			// An update spends its own request ID, even one refused below. A queued one was
+			// spent when it arrived.
+			let update_id = ietf::RequestId::decode(&mut body.decoder(this.version), this.version)?;
+			if !spent.remove(&update_id)
+				&& let Err(err) = this.spend(update_id)
+			{
+				if matches!(err, Error::GoingAway) {
+					return Poll::Ready(Ok(Withdraw::Cancel(crate::auth::Refusal {
+						error: err,
+						reason: "going away".to_string(),
+					})));
+				}
+				return Poll::Ready(Err(err));
+			}
+			let msg = match ietf::PublishNamespaceUpdate::decode_msg(&mut data, this.version) {
+				// A token refusal rejects the update, which withdraws the advertisement as
+				// any refused update does.
+				Err(err) if super::token::refuses_request(&err) => {
+					// Junk after the fields is fatal, which a token refusal must not hide.
+					if !data.is_empty() {
+						return Poll::Ready(Err(Error::WrongSize));
+					}
+					let refusal = crate::auth::Refusal {
+						reason: super::token::reason(&err).to_string(),
+						error: Error::Decode(err),
+					};
+					return Poll::Ready(Ok(Withdraw::Cancel(refusal)));
+				}
+				msg => msg?,
+			};
+			// Junk inside the declared size would otherwise be applied silently, which
+			// is the one decode path that skipped the check the others make.
+			if !data.is_empty() {
+				return Poll::Ready(Err(Error::WrongSize));
+			}
+
+			// Cluster parameters and a token renewal can ride the same update, so apply the
+			// routing first, for every update that carries it, before dealing with the token.
+			// A different original publisher applies in place too: the origin drains what the
+			// old one already serves and never splices the two. The parameters exist only on a
+			// session that negotiated the extension; anywhere else they are the peer's violation.
+			let carries_cluster = msg.hops.is_some() || msg.cost.is_some();
+			*held = match &*held {
+				Some(current) => Some(msg.apply(current)),
+				None if carries_cluster => {
+					tracing::warn!(%path, "cluster parameters on a session that negotiated none");
+					return Poll::Ready(Err(Error::ProtocolViolation));
+				}
+				None => None,
+			};
+
+			// Re-route only when the update actually changes the route (an omitted parameter
+			// keeps its value, so a token-only update leaves it untouched). A path that now runs
+			// through us is unusable, so detach rather than keep serving it; reading continues,
+			// since this stream is the advertisement's only channel and a later clean path
+			// arrives here or nowhere. Ending the stream is not ours to do: a peer MAY
+			// legitimately send a path carrying our Hop ID when a redundant sibling shares it.
+			let applied: Result<(), Error> = match carries_cluster {
+				true => match this.route(held.as_ref(), peer) {
+					None => {
+						if let Some(id) = attached.take() {
+							tracing::debug!(%path, "publish_namespace now loops back; detaching");
+							let _ = this.stop_announce(path.clone(), id, token_grant.is_some());
+						}
+						Ok(())
+					}
+					Some(advert) => {
+						tracing::debug!(%path, hops = advert.route.hops.len(), cost = ?advert.route.cost, "publish_namespace update");
+						match *attached {
+							Some(id) => this.update_announce(path.clone(), id, advert),
+							// Re-attach: a clean path replaced the reflected one we detached from.
+							None => {
+								// The grant still holds the slot it was admitted with, so reuse it.
+								this.start_announce(path.clone(), advert, admission.admit())
+									.map(|id| *attached = Some(id))
+							}
+						}
+					}
+				},
+				false => Ok(()),
+			};
+
+			// An unroutable apply withdraws the announce whether or not a token also rides it.
+			// The close is the withdrawal.
+			if let Err(err) = applied {
+				tracing::warn!(%path, %err, "publish_namespace update refused");
+				return Poll::Ready(Ok(Withdraw::Reject(err.into())));
+			}
+
+			// A REQUEST_UPDATE carrying a fresh token refreshes the announce's request grant
+			// (MoQ request-token), when the announce is token-authorized. The verify is not
+			// waited on here: it becomes the pending renewal raced against the deadline above.
+			// The routing above is already applied, so the renewal's answer (written when its
+			// verdict resolves) is this update's single response, cluster parameters included.
+			if let Some(token) = msg
+				.authorization_token
+				.filter(|_| this.auth.token_decides(crate::auth::Direction::Subscribe))
+			{
+				let Some(grant) = &token_grant else {
+					// An announce is admitted by the session or by a token, and that never
+					// changes, so a token here is refused rather than taken unread.
+					return Poll::Ready(Ok(Withdraw::Cancel(crate::auth::Refusal {
+						error: Error::Unsupported,
+						reason: "AUTHORIZATION TOKEN on an announce admitted without one".to_string(),
+					})));
+				};
+				renewal.verify(grant.verify_renewal(&this.auth, token.0));
+				continue;
+			}
+
+			// No token rides this update: acknowledge it now.
+			this.buffer_ok(stream)?;
+			*step = UpdateStep::Ack;
+		}
+	}
+}
+
+impl Subscriber {
 	/// Attach the route for one newly advertised namespace, returning the id that names
 	/// this advertisement.
 	///
