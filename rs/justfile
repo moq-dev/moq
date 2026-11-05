@@ -102,7 +102,7 @@ windows $BASE="":
 # Test the platform-sensitive crates on Windows, independent of the diff.
 windows-test:
     just rs test --manifest-path rs/moq-auth/Cargo.toml
-    just rs test -p hang -p moq-tokio -p moq-sock -p moq-relay
+    just rs test -p kio -p hang -p moq-tokio -p moq-sock -p moq-relay
     just rs test -p moq-video --no-default-features --features render -E 'test(/^render::export::/)'
 
 # Run io_uring tests when the branch affects the relay or its dependencies.
