@@ -15,8 +15,8 @@ Cachix after the first `release` tag that proves nix.moq.dev, rather than
 waiting for the m2 cut to merge `main` into `release`. Not chosen: retiring it
 at the m2 cut with `CACHIX_AUTH_TOKEN` copied into `publish` meanwhile;
 retiring it at the m2 cut with the token left at repository scope. This
-absorbs Release tags substitute from nix.moq.dev, which
-[moq-dev/moq#7662](https://github.com/moq-dev/moq/pull/7662) had split into m2
+absorbs [moq-dev/moq#7662](https://github.com/moq-dev/moq/pull/7662)'s m2
+"Release tags substitute from nix.moq.dev" quest, which it had split out
 behind the cut; the backport removes its only reason to wait.
 
 Decided 2026-11-05 (maintainer, /quest-unblock): ✅ revoke the token but keep
@@ -28,7 +28,7 @@ accepting source builds.
 
 Today tags run `release`'s copies of the workflows. `release` still has
 `cachix.yml` and `cache.yml` and no `release-nix.yml`, so every tag so far,
-through `moq-relay-v0.17.9` and `moq-cli-v0.14.9` on 2026-10-28, pushed to
+through `moq-relay-v0.17.12` and `moq-cli-v0.14.12` on 2026-11-03, pushed to
 Cachix and never reached nix.moq.dev. `cachix.yml` names `publish`, which does
 not hold `CACHIX_AUTH_TOKEN`, so it reads the repository copy. That copy is
 what [Keep pull-request CI read-only](/quest/m0/ci/read-only-secrets.md) would

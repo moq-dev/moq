@@ -44,8 +44,11 @@ What remains, in order:
 
 1. Open the backport PR against `release` (agent work).
 2. Once it merges, the maintainer drops `main` from `publish`'s deployment
-   policy and removes `DISCORD_WEBHOOK` and `CACHIX_AUTH_TOKEN` from
-   `publish`. Environment settings need the maintainer's admin access.
+   policy. Environment settings need the maintainer's admin access.
+   `publish` holds neither `DISCORD_WEBHOOK` (it lives in `alert`) nor
+   `CACHIX_AUTH_TOKEN` (a repository secret that
+   [Release tags push to nix.moq.dev](/quest/m0/ci/cachix-retire.md) revokes),
+   so there is nothing to remove from it.
 
 Decided 2026-11-04 (maintainer, /quest-unblock): ✅ cut the combined patch
 release on `release` soon, once [moq-dev/moq#7596](https://github.com/moq-dev/moq/pull/7596)'s
