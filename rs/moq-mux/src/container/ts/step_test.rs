@@ -1,4 +1,5 @@
-//! A step of the source's clock onto another timeline ends the import's instance.
+//! A change of source, its clock stepping onto another timeline or its PAT naming another
+//! program, ends the import's instance.
 //!
 //! The stimulus is a real capture played twice, the second pass on another clock: the whole
 //! multiplex steps at one packet, with every continuity counter broken once and no
@@ -178,6 +179,57 @@ fn an_unflagged_switch_restarts_either_way() {
 			let (err, _) = feed(&rest, chunk);
 			assert!(err.is_none(), "{expected}: {err:?}");
 		}
+	}
+}
+
+/// A source switch whose PAT names another `transport_stream_id` before its first clock
+/// reading restarts at that PAT, where the old program's identity check would otherwise fail
+/// the whole import. The new instance reads the PAT itself, however the input is split.
+#[test]
+fn another_identity_restarts_at_its_pat() {
+	let mut second = shift(CLIP, |_| -SWITCH);
+	for pkt in second.as_chunks_mut::<188>().0 {
+		if pid(pkt) != 0 {
+			continue;
+		}
+		// A single-section PAT behind a zero pointer_field: retag its transport_stream_id.
+		assert_eq!(pkt[1] & 0x40, 0x40);
+		let section = 5 + usize::from(pkt[4]);
+		let len = 3 + (usize::from(pkt[section + 1] & 0x0f) << 8 | usize::from(pkt[section + 2]));
+		pkt[section + 3..section + 5].copy_from_slice(&7u16.to_be_bytes());
+		let crc = super::psi::CRC.checksum(&pkt[section..section + len - 4]);
+		pkt[section + len - 4..section + len].copy_from_slice(&crc.to_be_bytes());
+	}
+	let pat = second
+		.as_chunks::<188>()
+		.0
+		.iter()
+		.position(|pkt| pid(pkt) == 0)
+		.unwrap()
+		* 188;
+	assert!(
+		second.len() - pat > first_timed(&second).len(),
+		"the new PAT precedes the new clock"
+	);
+	let mut data = CLIP.to_vec();
+	data.extend_from_slice(&second);
+	for chunk in [data.len(), 188 * 7, 1_000] {
+		let (err, rest) = feed(&data, chunk);
+		let err = err.expect("the switch ends the instance");
+		let restart = err
+			.downcast_ref::<Restart>()
+			.unwrap_or_else(|| panic!("{chunk}: {err:#}"));
+		assert_eq!(
+			restart.step,
+			Step::Identity {
+				transport_stream_id: 7,
+				program_number: 1
+			},
+			"{chunk}"
+		);
+		assert_eq!(rest, second[pat..], "{chunk}: the new instance starts at its PAT");
+		let (err, _) = feed(&rest, chunk);
+		assert!(err.is_none(), "{chunk}: {err:?}");
 	}
 }
 
