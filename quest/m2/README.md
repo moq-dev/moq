@@ -90,6 +90,8 @@ lite-07; bitrate enforcement is not part of this release.
 - [Shared group serving and ingest in JS](/quest/m2/shared-serve-js.md) - the same split in js/net, following the Rust seam
 - [Paired bench BASE](/quest/m2/bench-base-paired.md) - `just bench <base>` uses the nightly's paired comparison and the old one is deleted
 - [Audio renditions carry a language](/quest/m2/audio-lang.md) - audio renditions have an optional BCP-47 `lang`, and watch auto-picks within one language
+- [fMP4 and TS imports publish BCP-47 languages](/quest/m2/import-lang-iso639.md) - ISO 639-2 codes become `en`-style tags on audio and text
+- [HLS carries every audio language](/quest/m2/hls-audio-languages.md) - every `EXT-X-MEDIA` audio entry imports with its `LANGUAGE`, and exports write it back
 - [Receive pool](/quest/m2/receive-pool.md) - one byte budget per worker covers every connection's receive credit and the cache, billing each frame once
 - [Front parking](/quest/m2/origin-front-parks.md) - an unroutable request waits on a front instead of re-asking on every route-table move
 - [A refused follower asks a replacement handler](/quest/m2/follow-refused-retry.md) - a same-instance handler swap with identical route details re-asks a refused `Following`, while listeners still see no change

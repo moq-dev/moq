@@ -44,7 +44,6 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [moq-net's ingest fuzz target finds no stall](/quest/m0/nightly/ingest-fuzz.md) - the 13-byte stream that stalls ingest is fixed at its cause and kept as a regression test
 - [Nightly's Miri job stays inside its time budget](/quest/m0/nightly/miri.md) - both Miri passes go green, with ARM timings inside the 60-minute job and 15-minute-per-test budgets
 - [Nightly's macOS platform job passes](/quest/m0/nightly/macos.md) - `moq-audio`'s tests compile on macOS again and the websocket version test's timeout is fixed if it recurs
 - [The OBS stop-drain test reads no gap](/quest/m0/nightly/obs-stop-drain.md) - OBS and OBS TSan read every delivered frame and the track's end after `Stop()`, with no gap

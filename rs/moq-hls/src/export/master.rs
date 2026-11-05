@@ -46,7 +46,7 @@ pub(crate) fn rendition_uri(instance: &str, kind: Kind, name: &str, query: Optio
 	uri
 }
 
-pub(crate) fn contribution_uri(
+pub(crate) fn include_uri(
 	parent: &str,
 	id: &str,
 	instance: &str,
@@ -54,7 +54,7 @@ pub(crate) fn contribution_uri(
 	query: Option<&str>,
 ) -> String {
 	let mut uri = format!(
-		"@{}/contribution/{}/{}/{}/@{}/media.m3u8",
+		"@{}/include/{}/{}/{}/@{}/media.m3u8",
 		utf8_percent_encode(parent, PATH_SEGMENT),
 		utf8_percent_encode(id, PATH_SEGMENT),
 		rendition.kind.as_str(),
@@ -340,7 +340,7 @@ mod tests {
 				Route::parse(url.path()).unwrap(),
 				Route {
 					broadcast: "live".into(),
-					contribution: None,
+					include: None,
 					resource: Resource::Media {
 						instance: instance.into(),
 						kind: Kind::Video,

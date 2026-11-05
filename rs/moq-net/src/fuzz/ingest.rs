@@ -219,10 +219,15 @@ fn run(session: Session, info: &track::Info, body: &[u8], chunk: usize) -> Optio
 			let mut reader = reader(Bytes::copy_from_slice(body), chunk, version);
 			let producer = track.append_group().ok()?;
 			let consumer = producer.consume();
+			let mut viewer = stored(producer.consume(), info.compress);
 			let mut group = crate::recv::Group::new(producer);
 			let framing = lite::Framing::new(info, version);
 			let mut ingest = lite::FrameIngest::new(framing, records, frame_start);
-			let end = drive(body.len(), |waiter| ingest.poll(&mut reader, &mut group, waiter));
+			let end = drive(body.len(), |waiter| {
+				let res = ingest.poll(&mut reader, &mut group, waiter);
+				keep_up(&mut viewer);
+				res
+			});
 			(end.map(|()| "fin".to_string()), (group, consumer))
 		}
 		Session::Ietf { version } => {
@@ -245,9 +250,14 @@ fn run(session: Session, info: &track::Info, body: &[u8], chunk: usize) -> Optio
 				})
 				.ok()?;
 			let consumer = producer.consume();
+			let mut viewer = stored(producer.consume(), info.compress);
 			let mut group = crate::recv::Group::new(producer);
 			let mut ingest = ietf::GroupIngest::new(version, &header, info.timescale);
-			let end = drive(body.len(), |waiter| ingest.poll(&mut reader, &mut group, waiter));
+			let end = drive(body.len(), |waiter| {
+				let res = ingest.poll(&mut reader, &mut group, waiter);
+				keep_up(&mut viewer);
+				res
+			});
 			(end.map(|ended| format!("{ended:?}")), (group, consumer))
 		}
 	};
@@ -283,8 +293,9 @@ fn reader<V: coding::StreamCodes>(payload: Bytes, chunk: usize, version: V) -> S
 /// Poll the ingest until it settles.
 ///
 /// The stream hands over a chunk every other poll and the ingest yields every few frames,
-/// so a stream of `len` bytes settles within a few polls per byte. One that does not is
-/// waiting on something other than the stream, which a peer could hold forever.
+/// so a stream of `len` bytes settles within a few polls per byte, given a reader that
+/// keeps up (see [`keep_up`]). One that does not is waiting on something other than the
+/// stream, which a peer could hold forever.
 fn drive<T>(
 	len: usize,
 	mut poll: impl FnMut(&kio::Waiter) -> std::task::Poll<Result<T, crate::Error>>,
@@ -298,12 +309,27 @@ fn drive<T>(
 	panic!("the ingest stalled on a complete {len}-byte stream");
 }
 
-/// Read every frame the group holds, in its stored form.
-fn read(consumer: group::Consumer, compress: bool) -> Vec<Seen> {
-	let mut consumer = match compress {
+/// Read a group's frames in their stored form, compressed on a compressed track.
+fn stored(consumer: group::Consumer, compress: bool) -> group::Consumer {
+	match compress {
 		true => consumer.compressed(),
 		false => consumer,
-	};
+	}
+}
+
+/// Take every frame that is ready, as a subscriber keeping up would, so the ingest's pace
+/// gate opens instead of waiting on a reader that never comes.
+///
+/// It records nothing: frames it took before an abort stay taken, while a later reader
+/// sees only the abort, so what it saw depends on where the stream split.
+fn keep_up(viewer: &mut group::Consumer) {
+	let waiter = &kio::Waiter::noop();
+	while let std::task::Poll::Ready(Ok(Some(_))) = viewer.poll_read_object(waiter) {}
+}
+
+/// Read every frame the group holds, in its stored form.
+fn read(consumer: group::Consumer, compress: bool) -> Vec<Seen> {
+	let mut consumer = stored(consumer, compress);
 	let waiter = &kio::Waiter::noop();
 	let mut frames = Vec::new();
 	while let std::task::Poll::Ready(Ok(Some(object))) = consumer.poll_read_object(waiter) {

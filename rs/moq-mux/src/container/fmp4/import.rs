@@ -355,9 +355,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// bounded: a `moov` or `moof` body larger than
 	/// [`MAX_METADATA_BYTES`](super::MAX_METADATA_BYTES), or a text sample larger than
 	/// [`MAX_HELD_BYTES`](super::MAX_HELD_BYTES), is refused before it is held. A `moof` declaring
-	/// more than [`MAX_FRAGMENT_SAMPLES`](super::MAX_FRAGMENT_SAMPLES) samples is refused before
-	/// they are planned, and a `moov` declaring more than [`MAX_TRACKS`](super::MAX_TRACKS)
-	/// tracks before any is created.
+	/// more than [`MAX_FRAGMENT_SAMPLES`](super::MAX_FRAGMENT_SAMPLES) samples, or more than its
+	/// size accepts, is refused before they are planned, and a `moov` declaring more than
+	/// [`MAX_TRACKS`](super::MAX_TRACKS) tracks before any is created.
 	///
 	/// A decode error is terminal: later decodes, cuts, seeks and discontinuities return the same
 	/// error without reading input or changing the tracks.
@@ -2100,10 +2100,18 @@ mod tests {
 			import.finish().unwrap();
 		}
 
-		// At the bound, the moof is accepted.
-		let (mut import, id, _) = initialized(false);
-		import.decode(&inherited_moof(id, &[half, half])).unwrap();
+		// A short moof declares one field-less sample per body byte past the base, and no more.
+		let (_, id, _) = initialized(false);
+		let fit = (super::super::FRAGMENT_SAMPLE_BASE as usize + inherited_moof(id, &[0]).len() - 8) as u32;
+		let (mut import, _, _) = initialized(false);
+		import.decode(&inherited_moof(id, &[fit])).unwrap();
 		assert!(import.moof.is_some());
+		let (mut import, _, _) = initialized(false);
+		let err = import.decode(&inherited_moof(id, &[fit + 1])).unwrap_err();
+		assert!(
+			matches!(err, crate::Error::Cmaf(Error::TooManySamples(count)) if count == u64::from(fit) + 1),
+			"{err:?}"
+		);
 	}
 
 	/// A fragment within the bounds plans within [`MAX_HELD_BYTES`](super::super::MAX_HELD_BYTES)
@@ -2145,12 +2153,22 @@ mod tests {
 				.collect()
 		};
 		let start = runs_moof(id, gapped(0)).len() + 8;
+		// Field-less samples past the base need a byte each, which entries supply here.
+		let mut paid = entries(MAX_FRAGMENT_SAMPLES as usize / 4, small);
+		paid.push(mp4_atom::Trun {
+			data_offset: None,
+			samples: mp4_atom::TrunSamples::Inherited {
+				count: (MAX_FRAGMENT_SAMPLES - MAX_FRAGMENT_SAMPLES / 4) as u32,
+				first_flags: None,
+			},
+		});
 		let inputs = [
 			(
 				"field-less runs",
 				inherited_moof(id, &[MAX_FRAGMENT_SAMPLES as u32]),
-				None,
+				Some(MAX_FRAGMENT_SAMPLES as usize),
 			),
+			("field-less runs paid in bytes", runs_moof(id, paid), None),
 			("full entries", runs_moof(id, entries(room / 16, full)), None),
 			(
 				"4-byte entries",

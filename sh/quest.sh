@@ -3,9 +3,9 @@
 set -euo pipefail
 
 root=$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)
-if [[ -n ${MOQ_QUEST:-} ]]; then
-    printf 'Dev-shell quest: %s\n' "$MOQ_QUEST" >&2
-    exec "$MOQ_QUEST" "$@"
+if [[ -n ${DEV_SHELL_QUEST:-} ]]; then
+    printf 'Dev-shell quest: %s\n' "$DEV_SHELL_QUEST" >&2
+    exec "$DEV_SHELL_QUEST" "$@"
 fi
 
 if [[ -n ${ALLOW_HOST_TOOLCHAIN:-} || $OSTYPE == msys || $OSTYPE == cygwin ]]; then
