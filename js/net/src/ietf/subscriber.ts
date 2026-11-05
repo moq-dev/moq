@@ -989,7 +989,7 @@ export class Subscriber {
 
 	#needsLive(producer: track.Producer, edge: bigint): boolean {
 		if (hooks.trackFinished(producer) || !hooks.subscribing(producer).peek()) return false;
-		const ranges = producer.subscription.peek()?.ranges ?? [];
+		const ranges = hooks.requested(producer).peek()?.ranges ?? [];
 		if (!bounded(ranges)) return true;
 		const end = wireSpan(ranges).end;
 		// A relative end resolves against Largest, or against the first group when none exists yet,
@@ -999,7 +999,7 @@ export class Subscriber {
 
 	async #historyOnly(producer: track.Producer, edge: bigint): Promise<void> {
 		while (this.#needsLive(producer, edge) && hooks.trackReleased(producer).peek() === undefined) {
-			await Signal.race(producer.subscription, hooks.subscribing(producer), hooks.trackReleased(producer));
+			await Signal.race(hooks.requested(producer), hooks.subscribing(producer), hooks.trackReleased(producer));
 		}
 	}
 
@@ -1078,7 +1078,7 @@ export class Subscriber {
 			const subscribing = hooks.subscribing(producer);
 			for (;;) {
 				if (hooks.trackReleased(producer).peek() !== undefined) return;
-				const subscription = producer.subscription.peek();
+				const subscription = hooks.requested(producer).peek();
 				if (!subscription) {
 					hooks.releaseTrack(producer);
 					return;
@@ -1089,7 +1089,7 @@ export class Subscriber {
 					continue;
 				}
 				await untilAborted(
-					Promise.resolve(Signal.race(producer.subscription, subscribing, hooks.trackReleased(producer))),
+					Promise.resolve(Signal.race(hooks.requested(producer), subscribing, hooks.trackReleased(producer))),
 					signal,
 				);
 			}
@@ -1375,14 +1375,14 @@ export class Subscriber {
 		for (;;) {
 			// With no subscriber left there is nothing to follow: the subscription is ending, or
 			// keeps what it last asked for until one returns, as on lite and in Rust.
-			const subscription = producer.subscription.peek();
+			const subscription = hooks.requested(producer).peek();
 			const wanted = toWire(subscription?.priority ?? 0);
 			const wantedMaxAge = this.#maxAge && subscription ? maxDelayOf(subscription) : undefined;
 			if (!subscription || (wanted === sent && wantedMaxAge === sentMaxAge) || unanswered.peek() > 0) {
 				const disposes: Dispose[] = [];
 				const wake = new Promise<void>((resolve) => {
 					disposes.push(
-						producer.subscription.changed(() => resolve()),
+						hooks.requested(producer).changed(() => resolve()),
 						unanswered.changed(() => resolve()),
 					);
 				});
