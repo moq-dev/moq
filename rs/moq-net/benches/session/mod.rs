@@ -34,9 +34,10 @@
 //! one datagram per track per round across publisher and viewer axes, then larger payloads
 //! and cadences, on the lite versions (moq-transport carries no datagram tracks). Throughput
 //! counts delivered datagrams, each checked for its sequence and payload, so a lost one fails.
-//! `SESSION_EXPIRY_ONLY=1` uses the standalone 30s-expiry pool and reports groups
-//! written plus charged cache bytes every 10s during long profiling runs. Each round
-//! advances the cache clock by a second, so the expiry window spans 30 rounds.
+//! Delivery history expires between rounds, outside timing, without byte-pressure loss.
+//! `SESSION_EXPIRY_ONLY=1` advances the cache clock by a second instead of the 30s
+//! expiry window, retaining 30 rounds for profiling. It reports groups written and
+//! charged cache bytes every 10s during long runs.
 //!
 //! `session_join_*` times a new viewer connecting, resolving a broadcast, and
 //! receiving its latest group, swept over what the relays already announce.
@@ -164,6 +165,8 @@ struct Shape {
 	compress: bool,
 	/// Read each group via a fresh FETCH rather than a live subscription.
 	fetch: bool,
+	/// Expire delivery history between rounds instead of applying byte pressure.
+	expiry: bool,
 	/// Deliver each round as `burst` datagrams of `frame` bytes per watched broadcast's
 	/// datagram track instead of groups.
 	datagrams: bool,
@@ -189,6 +192,7 @@ impl Shape {
 		fetch: false,
 		compress: false,
 		datagrams: false,
+		expiry: false,
 	};
 
 	/// What each viewer subscribes with: a burst is a backlog, which the default
@@ -516,7 +520,7 @@ pub(crate) trait Backend {
 	type Relay: Clone;
 	const PREFIX: &'static str;
 
-	fn relay(id: u64, capacity: u64) -> (Self::Relay, cache::Pool);
+	fn relay(id: u64, capacity: Option<u64>) -> (Self::Relay, cache::Pool);
 	fn origin(relay: &Self::Relay) -> &origin::Producer;
 	async fn connect(options: MockConnectOptions, relay: &Self::Relay, hidden: bool) -> Pair;
 }
@@ -528,7 +532,7 @@ impl Backend for Model {
 	type Relay = origin::Producer;
 	const PREFIX: &'static str = "";
 
-	fn relay(id: u64, capacity: u64) -> (Self::Relay, cache::Pool) {
+	fn relay(id: u64, capacity: Option<u64>) -> (Self::Relay, cache::Pool) {
 		make_origin(id, capacity)
 	}
 
@@ -565,15 +569,15 @@ impl Drop for Pair {
 	}
 }
 
-fn make_origin(id: u64, capacity: u64) -> (origin::Producer, cache::Pool) {
+fn make_origin(id: u64, capacity: Option<u64>) -> (origin::Producer, cache::Pool) {
 	let mut config = origin::Config::new(Hop::new(id).unwrap());
-	let pool = cache::Pool::new(if std::env::var_os("SESSION_EXPIRY_ONLY").is_some() {
-		cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY)
-	} else {
-		cache::Config::default()
-			.with_capacity(capacity)
-			.with_expiry(cache::DEFAULT_EXPIRY)
-	});
+	let pool = cache::Pool::new(
+		if capacity.is_none() || std::env::var_os("SESSION_EXPIRY_ONLY").is_some() {
+			cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY)
+		} else {
+			cache::Config::default().with_capacity(capacity)
+		},
+	);
 	config.pool = pool.clone();
 	let (producer, driver) = origin::Producer::new(config);
 	harness::spawn(driver);
@@ -583,6 +587,7 @@ fn make_origin(id: u64, capacity: u64) -> (origin::Producer, cache::Pool) {
 /// Relays and publishers, before any viewer joins. Holds every handle that
 /// keeps a session or broadcast alive.
 struct Cluster<B: Backend> {
+	expiry: bool,
 	version: Version,
 	window: usize,
 	credit: Option<usize>,
@@ -604,6 +609,7 @@ struct Cluster<B: Backend> {
 impl<B: Backend> Cluster<B> {
 	async fn new(version: &str, shape: Shape) -> Self {
 		let mut this = Self {
+			expiry: shape.expiry,
 			version: version.parse().unwrap(),
 			window: shape.window,
 			credit: shape.credit,
@@ -621,7 +627,7 @@ impl<B: Backend> Cluster<B> {
 
 		for _ in 0..shape.relays {
 			this.next_hop += 1;
-			let (relay, pool) = B::relay(this.next_hop, RELAY_CACHE);
+			let (relay, pool) = B::relay(this.next_hop, (!shape.expiry).then_some(RELAY_CACHE));
 			this.relays.push(relay);
 			this.pools.push(pool);
 		}
@@ -679,7 +685,7 @@ impl<B: Backend> Cluster<B> {
 
 	fn origin(&mut self, capacity: u64) -> (origin::Producer, cache::Pool) {
 		self.next_hop += 1;
-		make_origin(self.next_hop, capacity)
+		make_origin(self.next_hop, (!self.expiry).then_some(capacity))
 	}
 
 	/// Connect a viewer session to `relay`.
@@ -809,6 +815,7 @@ impl<B: Backend> Room<B> {
 		);
 		assert!(!shape.paced || shape.burst == 1, "a paced round writes one frame");
 		assert!(!shape.fetch || !shape.paced, "fetch rounds read finished groups");
+		let shape = Shape { expiry: true, ..shape };
 		let mut cluster = Cluster::<B>::new(version, shape).await;
 
 		let mut viewers = Vec::new();
@@ -879,9 +886,6 @@ impl<B: Backend> Room<B> {
 
 		// Delivery must retain every unread group. Bound history by expiry between
 		// rounds instead of byte pressure, which may shed an in-flight group's head.
-		for pool in room.pools() {
-			pool.resize(None);
-		}
 		let blocked_before: usize = room
 			.viewers
 			.iter()
