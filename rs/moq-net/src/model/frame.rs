@@ -1673,9 +1673,10 @@ impl Consumer {
 		true
 	}
 
-	/// Poll for the next chunk of bytes since the last read.
+	/// The next chunk of bytes since the last read.
 	///
 	/// Returns `None` once the frame is finished and all bytes have been consumed.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_read_chunk(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
 		if self.recover.is_none() {
 			return self.poll_read_chunk_once(waiter);
@@ -1737,13 +1738,15 @@ impl Consumer {
 		}
 	}
 
-	/// Return the next chunk of bytes since the last read.
-	#[cfg(feature = "async")]
-	pub async fn read_chunk(&mut self) -> Result<Option<Bytes>> {
-		kio::wait(|waiter| self.poll_read_chunk(waiter)).await
+	/// Return all remaining bytes once the frame is finished.
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_read_all(&mut self, waiter: &kio::Waiter) -> Poll<Result<Bytes>> {
+		if self.recover.is_none() {
+			return self.poll_read_all_once(waiter);
+		}
+		self.poll_resumed(waiter, Self::poll_read_all_once)
 	}
 
-	#[cfg(feature = "async")]
 	fn poll_read_all_once(&mut self, waiter: &kio::Waiter) -> Poll<Result<Bytes>> {
 		if self.expired {
 			return Poll::Ready(Err(Error::Old));
@@ -1778,18 +1781,6 @@ impl Consumer {
 		self.read_idx = size;
 		self.stats.bytes(out.len() as u64);
 		Poll::Ready(Ok(out))
-	}
-
-	/// Return all remaining bytes, blocking until the frame is finished.
-	#[cfg(feature = "async")]
-	pub async fn read_all(&mut self) -> Result<Bytes> {
-		kio::wait(|waiter| {
-			if self.recover.is_none() {
-				return self.poll_read_all_once(waiter);
-			}
-			self.poll_resumed(waiter, Self::poll_read_all_once)
-		})
-		.await
 	}
 }
 

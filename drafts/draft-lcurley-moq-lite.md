@@ -1059,6 +1059,8 @@ ANNOUNCE_OK Message {
 }
 ~~~
 
+ANNOUNCE_OK has no body and reserves no fields for a route-key proof.
+
 ## SYNCED {#synced}
 The initial set on a discovery stream has been delivered.
 

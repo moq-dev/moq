@@ -47,8 +47,8 @@ pub struct Waiter {
 	noop: bool,
 }
 
-/// Lists a waiter remembers being parked on. A relay's busiest tasks park on up to 8.
-const PARKED: usize = 8;
+/// Lists a waiter remembers being parked on.
+const PARKED: usize = 16;
 
 impl Waiter {
 	/// Create a new waiter from an async [`Waker`].
@@ -82,7 +82,7 @@ impl Waiter {
 	/// Register this waiter with a [`WaiterList`] for future notification.
 	///
 	/// Delegates to [`WaiterList::register`], a no-op while the list still holds it.
-	/// Only the first 8 lists at once are remembered: a waiter kept across polls
+	/// Only the first 16 lists at once are remembered: a waiter kept across polls
 	/// that also sits on more appends a duplicate to those extras on every call.
 	pub fn register(&self, list: &mut WaiterList) {
 		list.register(self);
@@ -514,8 +514,11 @@ mod tests {
 		let state = std::mem::size_of::<crate::channel::Channel<()>>();
 		assert!(list <= 56, "WaiterList grew to {list} B");
 		// 184 B before the version counter, the value list's tag mirror (8 B each), and the
-		// waiter lists' own mutex moved the parking off the value's lock.
-		assert!(state <= 200, "Channel<()> grew to {state} B");
+		// waiter lists' own mutex moved the parking off the value's lock. Measured where a
+		// `Mutex` is 8 B; Darwin boxes its pthread mutex behind a 16 B one, once per lock, and a
+		// smaller one (2 B on Windows) leaves room.
+		let mutexes = 2 * std::mem::size_of::<std::sync::Mutex<()>>().saturating_sub(8);
+		assert!(state <= 200 + mutexes, "Channel<()> grew to {state} B");
 	}
 
 	#[test]

@@ -38,7 +38,3 @@ see it for the decisions and research.
 
 Public API: breaking in moq-net (`Server`, `Handshake`, the transport session
 trait), with MIGRATE notes. Wire: none.
-
-## Required
-
-- [Generated async wrappers](/quest/m1/poll-first/async-feature.md) - gives the handshake a poll form these machines wait on

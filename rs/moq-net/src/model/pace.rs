@@ -22,6 +22,7 @@ use std::sync::{
 use std::task::Waker;
 
 use super::group::MAX_CACHE_BYTES;
+#[cfg(any(test, feature = "async"))]
 use crate::transport::ReceiveWindow;
 
 /// The furthest a paced writer runs ahead of its group's fastest reader: half the live
@@ -32,6 +33,7 @@ pub(crate) const AHEAD: u64 = MAX_CACHE_BYTES / 2;
 /// stream may hold under `receive`, the windows its transport grants, capped at [`AHEAD`].
 ///
 /// A transport that reports no window never pauses a stream, so its window is moot.
+#[cfg(any(test, feature = "async"))]
 pub(crate) fn window(receive: Option<ReceiveWindow>) -> u64 {
 	receive.map_or(AHEAD, |receive| receive.stream.min(receive.connection).min(AHEAD))
 }

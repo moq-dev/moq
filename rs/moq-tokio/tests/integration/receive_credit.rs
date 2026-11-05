@@ -183,6 +183,7 @@ async fn room(origin: &moq_net::origin::Producer) -> moq_net::broadcast::Consume
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves")
+		.unwrap()
 }
 
 /// Subscribe to track `name` of `remote` at `priority`.

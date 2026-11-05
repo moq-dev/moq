@@ -427,6 +427,12 @@ Only moq-lite-04+ and moq-transport clients act on a GOAWAY; older ones are
 closed when the window ends. An embedder can take over the signals; see
 [Embed](/bin/relay/#embed).
 
+An embedder's drain alert can page on the `forced` count returned by
+[`Observer::drained`](https://docs.rs/moq-relay/latest/moq_relay/shutdown/struct.Observer.html#method.drained).
+Its `ending` count distinguishes sessions already closed before the deadline
+but still reporting their end. The live tally separates open sessions from
+that cleanup, and the summary's elapsed time stays the same for late observers.
+
 ## \[log]
 
 ```toml

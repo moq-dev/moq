@@ -13,6 +13,17 @@ claim whose withdrawal is already known.
 
 ## Plan
 
+1. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **The draft describes the target before the code switches.** A hop-less ANNOUNCE cannot run before the router drives sessions; the quest's own Plan says so. So the draft now specifies the whole lite-07 route wire, while main's lite-07 session keeps sending hop-based ANNOUNCEs until [Route session integration](https://github.com/moq-dev/moq/blob/main/quest/m1/cluster-routing/routes/session.md) lands. lite-07 is unpublished `-wip`, off by default, and the epic lands in one release before the cut. The other option was to put only the new message sections in the draft and leave ANNOUNCE hop-based. I rejected it because ANNOUNCE_FLOOR's "for that route" and the Route ID would then be undefined in the draft.
+2. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **The request field is `Node ID (i)`, with 0 meaning "the publisher selects".** It is added to every request that resolves a path: TRACK, TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS. Node ID 0 is reserved everywhere.
+3. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **ROUTE_REQUEST names a Node ID, not a Route ID.** A request can then never race a ROUTE_END into a protocol violation.
+4. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **A held ROUTE_UPDATE carries a seqno and down-only bit of 0.** Any other value is refused, rather than letting the fields carry no meaning.
+5. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **Floor regions have no order, and a repeated region is a violation.** A sorted order would need Rust's `Path` ordering reproduced exactly in JS. Decoding into a map rejects duplicates at the same cost.
+6. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **The Hop setup parameter and ANNOUNCE_OK's Hop ID are dropped from lite-07.** Their only roles were path-vector exclusion and the implicit trailing hop. ANNOUNCE_OK reserves no body for a route-key proof: [moq-dev/moq#7937](https://github.com/moq-dev/moq/pull/7937), accepted the same day, proves the route key once per session in SETUP. The live hop-based codec still switches in session integration, as choice 1 requires.
+7. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **An echo naming a Route ID that was never ended, or was already echoed, is a violation at the publisher.** The publisher can check this from its live and unacknowledged ids alone, with no growing state.
+8. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **ANNOUNCE_TAKEOVER keeps its shape, with a Route ID in place of hops, and its predecessor must be under the same route.** [quest/m1/announce-takeover.md](https://github.com/moq-dev/moq/blob/main/quest/m1/announce-takeover.md) deletes the message, so this keeps the change minimal.
+9. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **Unknown announce types stay skipped by length on lite-06+**, as before. An unknown reply type is refused.
+
+
 The route layer's core landed in
 [moq-dev/moq#7676](https://github.com/moq-dev/moq/pull/7676): a
 crate-private, sans-IO `Router` in `rs/moq-net/src/route/`, generic over the
@@ -498,6 +509,11 @@ benchmarks.
   upstream nodes but still linked to the mesh, path vector routes its
   subscriptions through the radio mesh and the split refuses, and after a
   partition each island reaches the other through its uplink.
+
+## Waiting
+
+- Maintainer: two original claims (`live` and `live/a`) clamp to the same prefix for interest `live/a/x`, violating the one-claim-per-route/prefix rule and losing the key needed by cross-stream floors. Options: carry the original claim prefix (including ancestors of the interest), or define a projection and reconciliation rule that selects one covering claim. Recommend preserving original claim identity, with a grant-safe ancestor encoding; this changes the wire shape and needs your choice.
+- Maintainer: a Hidden=0 floor currently certifies absence for hidden claims delivered on a Hidden=1 stream. Options: make certification depend on each stream's requested filter, or isolate differently filtered views entirely. Recommend using the existing request filter to restrict negative evidence, without another field on the wire. Confirm this certification rule alongside the claim identity decision.
 
 ## Required
 

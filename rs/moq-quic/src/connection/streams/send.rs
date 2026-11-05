@@ -525,16 +525,13 @@ impl<'a> Stream<'a> {
 	///
 	/// Fails with [`Error::Closed`] once the peer will never acknowledge it, or no longer reads
 	/// it: a reset dropped the data before `offset`, the peer sent STOP_SENDING, or the
-	/// connection closed.
+	/// connection closed before the peer acknowledged it.
 	///
 	/// # Panics
 	/// - when `offset` came from another stream
 	pub fn acked(&mut self, offset: Offset) -> Result<bool, Error> {
 		let offset = self.own(offset);
-		if self.conn_state.is_closed() {
-			return Err(Error::Closed);
-		}
-		match self.state.send.get_mut(&self.id) {
+		let acked = match self.state.send.get_mut(&self.id) {
 			Some(Some(stream)) if !stream.released => stream.acked(offset),
 			// Nothing was written, so an offset of it is 0.
 			Some(None) => Ok(true),
@@ -545,6 +542,10 @@ impl<'a> Stream<'a> {
 				Some((End::Reset(_), acked)) if offset <= *acked => Ok(true),
 				_ => Err(Error::Closed),
 			},
+		};
+		match acked {
+			Ok(false) if self.conn_state.is_closed() => Err(Error::Closed),
+			acked => acked,
 		}
 	}
 
