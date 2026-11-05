@@ -505,7 +505,10 @@ class Reader implements ResumeSource {
 		// before this one still do.
 		const incumbent = route.incumbent;
 		if (!incumbent) return;
-		if (hooks.latestSequence(serving.sub) !== undefined) return route.delivered(source);
+		if (hooks.latestSequence(serving.sub) !== undefined) {
+			route.delivered(source);
+			return;
+		}
 		if (this.#copies.some((copy) => copy.source.from.closed === incumbent.from.closed)) return;
 		this.#add(
 			{
