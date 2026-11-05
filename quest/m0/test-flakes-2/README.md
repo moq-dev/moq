@@ -100,5 +100,4 @@ Public API: none. Wire: none.
 - [moq-gst's interleaved restart test passes under load](/quest/m0/test-flakes-2/gst-reconnect-interleave.md) - `restarts_under_reconnects_interleave_on_one_pad` passes in loaded runs and the merge queue, its missed delivery and its stray `Eos` each fixed at the cause
 - [reload.test.ts's close-drain tests pass under load](/quest/m0/test-flakes-2/reload-close-drain.md) - the drain cases in `js/net`'s reload tests pass in loaded multi-file runs
 - [dispatch-query's terminate test survives load](/quest/m0/test-flakes-2/dispatch-query-terminate.md) - `test_terminating_the_run_stops_the_running_phase` passes reliably under host load, re-enabled once fixed
-- [release.test.ts never reaches the network](/quest/m0/test-flakes-2/release-test-offline.md) - the JSR release test fakes its registry lookup and passes offline
 - [moq-ffi's datagram tests don't hinge on one datagram](/quest/m0/test-flakes-2/ffi-datagram-roundtrip.md) - the default-connection datagram tests pass under CI load
