@@ -1944,11 +1944,8 @@ impl Controller for Bbr3 {
     fn on_ack(&mut self, ack: Ack<'_>) {
         // equivalent to RS.newly_acked. It is passed to the ACK's model steps rather than kept in
         // `rs`, so no later `set_cwnd` counts it again.
-        let mut newly_acked = 0;
-        for acked in ack.packets {
-            self.check_recovery_done(acked.sent);
-            newly_acked += u64::from(acked.bytes);
-        }
+        let newly_acked = ack.packets.iter().map(|acked| u64::from(acked.bytes)).sum();
+        let latest_sent = ack.packets.iter().map(|acked| acked.sent).max();
         if let Some(delay) = &mut self.delay {
             delay.on_ack(ack.packets, ack.now);
         }
@@ -1960,11 +1957,21 @@ impl Controller for Bbr3 {
         if ack.app_limited && self.rate.is_app_limited() {
             self.probe_rtt_skip_app_limited = true;
         }
-        let Some(rs) = self.ack_rs else {
+        if let Some(rs) = self.ack_rs {
+            self.rs = Some(rs);
+            self.update_model_and_state(rs.prior_delivered, newly_acked, ack.app_limited, ack.now);
+        }
+        // The ACK that ends a loss round acknowledges the first packet sent after that round's
+        // first loss, which is also what ends the recovery that loss began. The model steps
+        // judge the round they close, so they see the recovery as it was: otherwise Startup's
+        // high-loss exit, which asks for a full round in recovery, misses every round one
+        // recovery episode spans, and an application-limited sender never leaves Startup.
+        if let Some(sent) = latest_sent {
+            self.check_recovery_done(sent);
+        }
+        if self.ack_rs.is_none() {
             return;
-        };
-        self.rs = Some(rs);
-        self.update_model_and_state(rs.prior_delivered, newly_acked, ack.app_limited, ack.now);
+        }
         if let Some(grew) = self.delay.as_mut().map(delay::Detector::take_signal) {
             self.raise_bw_delay();
             if grew {
@@ -2085,9 +2092,11 @@ impl Controller for Bbr3 {
     }
 
     fn metrics(&self) -> Metrics {
-        // The delay bound's `bw_delay` caps the estimate: it marks the path slower than `max_bw`,
-        // so a bandwidth follower, such as an encoder, should follow it. Infinite unless on.
-        let estimate = self.max_bw.min(self.bw_delay);
+        // BBR.bw, recomputed since a short-term model reset or a spurious-loss undo lands
+        // between ACKs: a loss-driven `bw_shortterm` and the delay bound's `bw_delay` both mark
+        // the path slower than `max_bw`, so a bandwidth follower, such as an encoder, should
+        // follow them. Both are infinite while unset.
+        let estimate = self.max_bw.min(self.bw_shortterm).min(self.bw_delay);
         Metrics {
             congestion_window: self.window(),
             ssthresh: None,
@@ -3420,6 +3429,70 @@ mod test {
             before_ilt, after_ilt,
             "inflight_longterm should be unchanged on an app-limited loss exit"
         );
+    }
+
+    /// Startup leaves on high loss when one recovery episode spans the whole loss round. The ACK
+    /// that ends the round acknowledges the first packet sent after the round's first loss,
+    /// which also ends that recovery, so the exit must judge the round by the recovery it spent.
+    #[test]
+    fn startup_exits_on_loss_round_one_recovery_spans() {
+        const MSS: u16 = 1200;
+        let mut bbr = Driver::new(Arc::new(Config::default()), MSS);
+        let base = Instant::now();
+        let at = |ms: u64| base + Duration::from_millis(ms);
+        let mut inflight = 0;
+        let send = |bbr: &mut Driver, ms: u64, pn: u64, inflight: &mut u64| {
+            bbr.send(at(ms), MSS, pn);
+            *inflight += u64::from(MSS);
+            // An application-limited sender, so only loss can end Startup
+            let held = bbr.bbr.inflight;
+            bbr.bbr.rate.mark_app_limited(held);
+        };
+
+        // An application-limited warmup, a round each 10ms
+        for round in 0..3u64 {
+            let ms = round * 10;
+            for pn in round * 10..round * 10 + 10 {
+                send(&mut bbr, ms, pn, &mut inflight);
+            }
+            for pn in round * 10..round * 10 + 10 {
+                bbr.ack(at(ms + 10), at(ms), MSS.into(), pn);
+                inflight -= u64::from(MSS);
+            }
+            bbr.end_acks(at(ms + 10), inflight, true);
+        }
+        assert_eq!(bbr.state, BbrState::Startup);
+
+        // The flight that overflows the path, sent before any loss
+        for pn in 100..140 {
+            send(&mut bbr, 30, pn, &mut inflight);
+        }
+        for pn in 100..102 {
+            bbr.ack(at(40), at(30), MSS.into(), pn);
+            inflight -= u64::from(MSS);
+        }
+        bbr.end_acks(at(40), inflight, true);
+
+        // Every loss is of that flight, so one recovery episode covers them all
+        let lose = |bbr: &mut Driver, ms: u64, pns: &[u64], inflight: &mut u64| {
+            for &pn in pns {
+                bbr.lose(MSS, pn, at(ms));
+                *inflight -= u64::from(MSS);
+            }
+        };
+        lose(&mut bbr, 50, &[102, 104, 106], &mut inflight);
+        assert!(bbr.in_recovery);
+        send(&mut bbr, 55, 200, &mut inflight);
+        lose(&mut bbr, 60, &[108, 110, 112, 114], &mut inflight);
+        assert_eq!(bbr.state, BbrState::Startup);
+
+        // The first packet sent since the loss round began ends both it and the recovery
+        bbr.ack(at(70), at(55), MSS.into(), 200);
+        inflight -= u64::from(MSS);
+        bbr.end_acks(at(70), inflight, true);
+        assert!(!bbr.in_recovery);
+        assert!(bbr.full_bw_reached, "Startup ignored a round of high loss");
+        assert_eq!(bbr.state, BbrState::Drain);
     }
 
     /// A.7: Never exiting STARTUP when application-limited with no loss.
@@ -8327,16 +8400,21 @@ mod test {
         assert_eq!(sim.bbr.delay_round_delivered, 0);
     }
 
-    /// The bandwidth estimate reports the delay bound when it is below `max_bw`, so a bandwidth
-    /// follower slows with the brake
+    /// The bandwidth estimate reports the loss and delay bounds when they are below `max_bw`, so
+    /// a bandwidth follower slows with them, and returns to `max_bw` once a probe lifts them
     #[test]
-    fn delay_bound_caps_the_bandwidth_estimate() {
+    fn bounds_cap_the_bandwidth_estimate() {
         let mut sim = scripted();
         sim.bbr.max_bw = 1_000_000.0;
         assert_eq!(sim.bbr.metrics().bandwidth_estimate, Some(1_000_000));
         sim.bbr.bw_delay = 400_000.0;
         assert_eq!(sim.bbr.metrics().bandwidth_estimate, Some(400_000));
         sim.bbr.bw_delay = 2_000_000.0;
+        assert_eq!(sim.bbr.metrics().bandwidth_estimate, Some(1_000_000));
+        sim.bbr.bw_shortterm = 700_000.0;
+        assert_eq!(sim.bbr.metrics().bandwidth_estimate, Some(700_000));
+        // Read between ACKs, before `bound_bw_for_model` folds the reset into BBR.bw
+        sim.bbr.reset_short_term_model();
         assert_eq!(sim.bbr.metrics().bandwidth_estimate, Some(1_000_000));
     }
 

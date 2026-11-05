@@ -99,8 +99,14 @@ impl Pace {
 		self.wake();
 	}
 
-	fn written(&self) -> u64 {
+	/// Where the last committed frame ends.
+	pub fn written(&self) -> u64 {
 		self.written.load(Ordering::Acquire)
+	}
+
+	/// Where the last frame the fastest reader took ends.
+	pub fn read(&self) -> u64 {
+		self.read.load(Ordering::Acquire)
 	}
 
 	/// Whether a writer `partial` bytes into an uncommitted frame is more than `window`
