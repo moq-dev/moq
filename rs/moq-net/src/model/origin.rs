@@ -13912,6 +13912,57 @@ mod tests {
 		assert!(matches!(next_group(&mut subscription).await, Ok(None)));
 	}
 
+	/// The incumbent finishes and the newcomer aborts before its first group: a reader whose
+	/// range starts past the end, and one joining while the newcomer is awaited, end cleanly.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn readers_owed_nothing_below_the_incumbents_end_end_cleanly() {
+		let (producer, _server, _upstream, old, _subscription) = remote_front().await;
+		let resolved = producer.consume().request("room/alice", None).await.unwrap();
+		let video = resolved.track("video").unwrap();
+		let mut later = video
+			.subscribe(crate::track::Subscription {
+				ranges: vec![crate::track::Range {
+					start: crate::track::Anchor::Absolute(3),
+					end: None,
+				}],
+				..Default::default()
+			})
+			.await
+			.unwrap();
+		let mut group = old.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"last".as_ref()).unwrap();
+		group.finish().unwrap();
+
+		let newcomer = producer.create_broadcast("room/alice").unwrap();
+		let mut handler = newcomer.requests();
+		newcomer
+			.announce(Route::default().with_instance(instance(), 0))
+			.unwrap();
+		let request = kio::clock::timeout(Duration::from_secs(1), handler.requested_track())
+			.await
+			.expect("the front asked the newcomer")
+			.expect("request");
+		let replacement = request.accept(crate::track::Info::timed());
+		for _ in 0..10 {
+			kio::clock::sim::yield_now().await;
+		}
+		let mut joiner = video.subscribe(None).await.unwrap();
+		for _ in 0..10 {
+			kio::clock::sim::yield_now().await;
+		}
+		old.finish().unwrap();
+		replacement.abort(Error::App(7)).unwrap();
+
+		assert!(matches!(next_group(&mut later).await, Ok(None)));
+		let mut group = next_group(&mut joiner)
+			.await
+			.expect("the incumbent's latest group")
+			.expect("track open");
+		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"last");
+		assert!(matches!(next_group(&mut joiner).await, Ok(None)));
+	}
+
 	/// While the front waits for the newcomer's first group, a reader changing its
 	/// preferences reaches the newcomer's copy, which may otherwise never send that group.
 	#[kio::test]

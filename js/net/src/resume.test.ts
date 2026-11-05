@@ -809,6 +809,36 @@ test("a replacement that aborts before its first group after the incumbent finis
 	close();
 });
 
+// The end is judged against what the reader's range still owes, not only what it was handed out.
+for (const [name, subscribe] of [
+	["a range starting past it", true],
+	["a reader joining at the live edge", false],
+] as const) {
+	test(`${name} ends cleanly when the incumbent finished and the replacement aborts`, async () => {
+		const { a, b, swap, active, close } = await setup();
+		const ta = copy(a);
+		const tb = copy(b);
+		const early = subscribe ? active.track("seq").subscribe({ ranges: [{ start: { absolute: 3n } }] }) : undefined;
+		ta.write(0n);
+		ta.write(1n);
+		await swap();
+		const sub = early ?? active.track("seq").subscribe();
+		await settle();
+		ta.producer.finish();
+		tb.producer.abort(new StreamError(StreamCode(64)));
+		await settle();
+		const groups: bigint[] = [];
+		for (let group = await sub.recvGroup(); group; group = await sub.recvGroup()) {
+			groups.push(group.sequence);
+			group.close();
+		}
+		expect(groups).toEqual(subscribe ? [] : [1n]);
+
+		sub.close();
+		close();
+	});
+}
+
 // Mirrors `a_replacement_aborted_after_its_answer_keeps_the_incumbent` for a reader awaiting only the end.
 test("waiting for the end of a track whose replacement aborts before its first group follows the incumbent", async () => {
 	const { a, b, swap, active, close } = await setup();

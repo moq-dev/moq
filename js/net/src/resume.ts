@@ -862,10 +862,11 @@ class Reader implements ResumeSource {
 		// serve it next. Once the track ended, a copy let go held nothing more.
 		if (serving ? ended === null : this.#ended) return this.#conclude() ? { kind: "done" } : { kind: "idle" };
 		if (ended instanceof Error) {
-			// A copy it replaced finished the track and the reader reached that end: the track
-			// ended cleanly whoever serves it now. Mirrors the Rust front.
+			// A copy it replaced finished the track and the reader owes nothing below that end:
+			// the track ended cleanly whoever serves it now. Mirrors the Rust front.
 			const end = this.#learnEnd();
-			if (end && !this.#declaredError && finalSequence(end) <= (this.#newest ?? -1n) + 1n)
+			const owed = max(this.#shell.cursor.peek().start, (this.#newest ?? -1n) + 1n);
+			if (end && !this.#declaredError && finalSequence(end) <= owed)
 				return this.#conclude() ? { kind: "done" } : { kind: "idle" };
 			if (serving && this.#revert(serving, ended)) return { kind: "idle" };
 			// A refusal from a route that still serves is the track's answer.
