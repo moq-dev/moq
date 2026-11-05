@@ -288,7 +288,7 @@ class QueryTests(unittest.TestCase):
         nix.chmod(0o755)
         quest = self.bin / "quest"
         quest.write_text('#!/usr/bin/env bash\nprintf "pinned quest %s\\n" "$*" >>"$CALLS"\n')
-        self.env.update(IN_MOQ_DEV_SHELL="1", MOQ_QUEST=str(quest), CALLS=str(self.root / "calls"))
+        self.env.update(IN_MOQ_DEV_SHELL="1", DEV_SHELL_QUEST=str(quest), CALLS=str(self.root / "calls"))
         (self.root / "calls").unlink(missing_ok=True)
         for script in ("markdown.sh", "shell.sh", "large-files.sh", "text.sh"):
             path = self.repo / "sh" / script
