@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Consumers and decoders refuse a disabled rendition ([#7942](https://github.com/moq-dev/moq/pull/7942))
+
+`moq_consume_audio`, `moq_consume_video`, `moq_decode_audio`, and `moq_decode_video` return `MOQ_ERROR_NOT_FOUND` when the catalog snapshot marks the rendition disabled, instead of subscribing and waiting for a re-enable. Check `moq_consume_audio_enabled` or `moq_consume_video_enabled` on the latest snapshot first, and cancel a consumer whose rendition a newer snapshot disables.
+
 ### Pre-encoded simulcast
 
 `moq_video_init` gains `lower`, changing its C ABI layout. Rebuild against the

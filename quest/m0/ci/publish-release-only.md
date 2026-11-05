@@ -25,7 +25,7 @@ Environment and `CACHIX_AUTH_TOKEN` needs no new home. The alternatives were
 moving the token into `cache-write`, or deleting Cachix everywhere now with a
 `release` backport. `release` keeps its Cachix workflows until the next cut
 merges `main` into it, and
-[nix-cache-verify](/quest/m0/ci/nix-cache-verify.md) deletes the Cachix
+[Release tags substitute from nix.moq.dev](/quest/m2/release-nix-cache.md) deletes the Cachix
 cache and token once a release tag substitutes from `nix.moq.dev`.
 
 What remains is the maintainer's, in order:

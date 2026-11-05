@@ -5,6 +5,10 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Decoders refuse a disabled rendition ([#7942](https://github.com/moq-dev/moq/pull/7942))
+
+`MoqAudioConsumer::subscribe` and `MoqVideoConsumer::subscribe` fail with `MoqError::NotFound` when the rendition's `enabled` is false, instead of subscribing and waiting for a re-enable. Pick an enabled rendition from the latest catalog, and close a decoder whose rendition a newer catalog disables.
+
 ### Announcements are a listing ([#7678](https://github.com/moq-dev/moq/pull/7678))
 
 `MoqAnnounceEvent` is `Present { announce }` or `Absent { announce }`. `Start`, `Update`, `End`, `Restart` and `Takeover` (with its `predecessor`) are gone: another instance taking a path over keeps it present, and a route's cost changing is not reported.

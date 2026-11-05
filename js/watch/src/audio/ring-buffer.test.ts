@@ -535,6 +535,174 @@ describe("re-buffer", () => {
 	});
 });
 
+// A publisher that stops sending, such as a push-to-talk mute, declares where its audio ends. Running
+// dry there is the silence it announced, not an underrun, through the refill of the next utterance.
+describe("declared end", () => {
+	it("is declared silence before any audio, and the next utterance anchors", () => {
+		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 40 as Milli });
+		buffer.end(Micro(5_000_000));
+		expect(buffer.silent).toBe(true);
+		expect(read(buffer, 20, 1)[0].length).toBe(0);
+		expect(buffer.underruns).toBe(0);
+
+		buffer.next();
+		expect(buffer.silent).toBe(true);
+		write(buffer, 6000 as Milli, 40, { channels: 1 });
+		expect(read(buffer, 20, 1)[0].length).toBe(20);
+		expect(buffer.silent).toBe(false);
+		expect(Milli.fromMicro(buffer.timestamp)).toBe(6020 as Milli);
+	});
+
+	it("clears declared silence on a timeline reset", () => {
+		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 40 as Milli });
+		write(buffer, 0 as Milli, 40, { channels: 1 });
+		buffer.end(Micro(30_000));
+		read(buffer, 50, 1);
+		expect(buffer.silent).toBe(true);
+		buffer.reset();
+		expect(buffer.silent).toBe(false);
+		expect(buffer.stalled).toBe(true);
+	});
+
+	it("runs dry at the end without an underrun, and stays silent across the next utterance", () => {
+		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 40 as Milli });
+		write(buffer, 0 as Milli, 40, { channels: 1 });
+		buffer.end(Micro(30_000));
+
+		expect(read(buffer, 20, 1)[0].length).toBe(20);
+		expect(buffer.silent).toBe(false);
+		// A partial quantum past the end is silence too, so playback waits for the next utterance.
+		expect(read(buffer, 30, 1)[0].length).toBe(20);
+		expect(buffer.silent).toBe(true);
+		expect(buffer.stalled).toBe(true);
+		expect(read(buffer, 20, 1)[0].length).toBe(0);
+		expect(buffer.underruns).toBe(0);
+
+		// The next utterance re-anchors and refills, still silent until it plays.
+		buffer.next();
+		expect(buffer.silent).toBe(true);
+		write(buffer, 5000 as Milli, 40, { channels: 1 });
+		expect(read(buffer, 20, 1)[0].length).toBe(20);
+		expect(buffer.silent).toBe(false);
+
+		// The reset forgot the old end, so running dry now is an underrun.
+		read(buffer, 20, 1);
+		read(buffer, 20, 1);
+		expect(buffer.underruns).toBe(1);
+		expect(buffer.silent).toBe(false);
+	});
+
+	it("counts running dry short of the end as an underrun", () => {
+		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 20 as Milli });
+		write(buffer, 0 as Milli, 20, { channels: 1 });
+		buffer.end(Micro(40_000));
+		read(buffer, 20, 1);
+		read(buffer, 20, 1);
+		expect(buffer.underruns).toBe(1);
+		expect(buffer.silent).toBe(false);
+	});
+
+	// Back-to-back presses: the next utterance arrives while the last one's tail is still buffered.
+	it("plays the next utterance after the end's tail without flushing it", () => {
+		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 40 as Milli });
+		write(buffer, 0 as Milli, 40, { channels: 1, value: 1 });
+		buffer.end(Micro(40_000));
+		expect(read(buffer, 20, 1)[0].length).toBe(20);
+
+		buffer.next();
+		write(buffer, 50 as Milli, 40, { channels: 1, value: 2 });
+		// The rest of the tail, the short gap to the next utterance, then the utterance itself.
+		const [played] = read(buffer, 70, 1);
+		expect([...played.slice(0, 20)]).toEqual(Array(20).fill(1));
+		expect([...played.slice(20, 30)]).toEqual(Array(10).fill(0));
+		expect([...played.slice(30)]).toEqual(Array(40).fill(2));
+		// The gap is the declared silence, for the reader to fill with comfort noise.
+		expect(buffer.quiet).toEqual([20, 30]);
+		expect(buffer.underruns).toBe(0);
+		expect(buffer.silent).toBe(false);
+
+		// The end no longer applies, so running dry now is an underrun.
+		read(buffer, 20, 1);
+		expect(buffer.underruns).toBe(1);
+	});
+
+	// The declared silence between them must not count toward the live band and push the unplayed
+	// tail out; once the tail has played, the band catches up by skipping the silence instead.
+	it("keeps the end's tail when the next utterance starts after a gap", () => {
+		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 40 as Milli });
+		write(buffer, 0 as Milli, 40, { channels: 1, value: 1 });
+		expect(read(buffer, 20, 1)[0].length).toBe(20);
+		buffer.end(Micro(40_000));
+		buffer.next();
+
+		write(buffer, 100 as Milli, 20, { channels: 1, value: 2 });
+		expect([...read(buffer, 20, 1)[0]]).toEqual(Array(20).fill(1));
+
+		write(buffer, 120 as Milli, 20, { channels: 1, value: 2 });
+		expect([...read(buffer, 40, 1)[0]]).toEqual(Array(40).fill(2));
+		expect(buffer.underruns).toBe(0);
+	});
+
+	it("reports a declared silence across reads until the next utterance plays", () => {
+		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 40 as Milli });
+		write(buffer, 0 as Milli, 40, { channels: 1, value: 1 });
+		buffer.end(Micro(40_000));
+		read(buffer, 30, 1);
+		buffer.next();
+		write(buffer, 70 as Milli, 20, { channels: 1, value: 2 });
+
+		read(buffer, 20, 1);
+		expect(buffer.quiet).toEqual([10, 20]);
+		read(buffer, 20, 1);
+		expect(buffer.quiet).toEqual([0, 20]);
+		read(buffer, 20, 1);
+		expect(buffer.quiet).toBeUndefined();
+	});
+
+	// The next utterance's audio may land a beat after the tail has played, which is still the
+	// silence the publisher declared.
+	it("treats running dry before the next utterance lands as declared silence", () => {
+		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 20 as Milli });
+		write(buffer, 0 as Milli, 40, { channels: 1 });
+		buffer.end(Micro(40_000));
+		read(buffer, 20, 1);
+		buffer.next();
+		read(buffer, 20, 1);
+		read(buffer, 20, 1);
+		expect(buffer.underruns).toBe(0);
+		expect(buffer.silent).toBe(true);
+
+		write(buffer, 60 as Milli, 20, { channels: 1, value: 2 });
+		read(buffer, 20, 1);
+		expect(buffer.quiet).toEqual([0, 20]);
+		expect([...read(buffer, 20, 1)[0]]).toEqual(Array(20).fill(2));
+		expect(buffer.quiet).toBeUndefined();
+		expect(buffer.underruns).toBe(0);
+	});
+
+	it("re-anchors the next utterance once the end's audio has played out", () => {
+		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 20 as Milli });
+		write(buffer, 0 as Milli, 20, { channels: 1 });
+		buffer.end(Micro(20_000));
+		read(buffer, 20, 1);
+		read(buffer, 20, 1);
+		expect(buffer.silent).toBe(true);
+		buffer.next();
+		expect(buffer.anchored).toBe(false);
+		expect(buffer.silent).toBe(true);
+	});
+
+	it("takes an end that arrives after the playhead ran out there", () => {
+		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 20 as Milli });
+		write(buffer, 0 as Milli, 20, { channels: 1 });
+		read(buffer, 20, 1);
+		read(buffer, 20, 1);
+		expect(buffer.underruns).toBe(1);
+		buffer.end(Micro(20_000));
+		expect(buffer.silent).toBe(true);
+	});
+});
+
 describe("buffered mode", () => {
 	function createBuffered(latency: number) {
 		return new AudioRingBuffer({ rate: 1000, channels: 1, latency: latency as Milli, buffered: true });

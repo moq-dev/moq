@@ -24,14 +24,15 @@ Decided 2026-10-28 (maintainer):
   encoder CPU. DTX is off on main anyway ([#4919](https://github.com/moq-dev/moq/pull/4919)).
   **Reversed 2026-11-04 (maintainer):** a catalog toggle makes every listener
   wait out the `enabled` flip, so the jitter buffer must hold at least a round
-  trip. Push-to-talk moves to DTX ([Push-to-talk suppresses
-  silence](/quest/m1/push-to-talk/dtx.md)), and hold retires when that lands;
-  until then hold stays on main.
-- **Players hold a disabled rendition**, audio and video, by default, in
-  every first-party player. Exports keep dropping it, since a held track
-  sends nothing and an interleaving muxer or HLS player may wait on it. The
-  hang spec weakens from "must not select" to "should not select" a disabled
-  rendition.
+  trip. Done by [moq-dev/moq#7942](https://github.com/moq-dev/moq/pull/7942):
+  the mute sends nothing and keeps the rendition enabled, the publisher gates
+  capture before the encoder and stamps chunks from the inputs it fed, and
+  each muted span ends with a discontinuity marker that listeners play as
+  comfort noise, with no underrun or stall, which the jitter estimator ignores.
+- **Players hold a disabled rendition**, retired by
+  [moq-dev/moq#7942](https://github.com/moq-dev/moq/pull/7942) with the mute
+  that needed it. Every first-party player deselects a disabled rendition
+  again, and the hang spec is back to "must not select".
 - **The publisher keeps its probe result across a disable**, and the
   element's `muted` and `invisible` leave capture open.
 - **Encoding no longer waits for demand**, in every first-party publisher
@@ -42,9 +43,10 @@ Decided 2026-10-28 (maintainer):
   same idea special-cased.
 
 The epic's own work: the acceptance proof `just test push-to-talk` (22
-presses, 60 ms Opus, 300 ms delay). A held listener's unmute pays no catalog
+presses, 60 ms Opus, 300 ms delay). A listener's unmute pays no catalog
 round trip and no resubscribe, and every frame of each utterance is encoded,
-sent, received, and decoded from its first frame.
+sent, received, and decoded from its first frame, with no catalog flip and no
+underrun or stall across the presses.
 
 Decided with the maintainer on
 [moq-dev/moq#7760](https://github.com/moq-dev/moq/pull/7760):
@@ -69,10 +71,9 @@ Decided with the maintainer on
   hardware codecs; Opus is software. A failure stays latched until a device,
   settings or `source` change.
 
-The publisher's tail drop is fixed:
-[moq-dev/moq#7725](https://github.com/moq-dev/moq/pull/7725) flushes the codec
-before a disable's discontinuity. A frame submitted under 1 ms before release
-used to be lost in 3 of 7 runs; it was lost in none of 12 since.
+The publisher's tail drop is fixed: a release's discontinuity marker waits
+until the codec has emitted every chunk submitted before it. A frame submitted
+under 1 ms before release used to be lost in 3 of 7 runs.
 
 What remains is a lost head at the listener. In one of 110 presses over the
 2026-11-04 relay runs (run 3, press 20, after a 60 s mute), the
@@ -94,7 +95,6 @@ catches this. A complete set of runs finishes this epic.
 
 ## Required
 
-- [Push-to-talk suppresses silence instead of toggling the catalog](/quest/m1/push-to-talk/dtx.md) - replaces hold with DTX
 - [Native playback fills declared silence with comfort noise](/quest/m1/push-to-talk/native-comfort-noise.md) - `moq play` plays comfort noise over declared silence and counts no underrun, matching the browser
 
 ## Closes

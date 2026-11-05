@@ -8,13 +8,6 @@ plays level-matched comfort noise instead of plain silence, counts no underrun
 or stall, and keeps that silence through the next utterance's refill. A
 push-to-talk listener on `moq play` then matches the browser.
 
-## Waiting
-
-- moq-dev/moq: [moq-dev/moq#7942](https://github.com/moq-dev/moq/pull/7942)
-  merges. It defines how a suppressed span is declared and already gives
-  `moq-audio`'s jitter estimator the declared-silence exception. Check that
-  it is merged and `quest/m1/push-to-talk/dtx.md` is gone from `main`.
-
 ## Plan
 
 Planned 2026-11-05 (maintainer, /quest-plan of the follow-ups from the

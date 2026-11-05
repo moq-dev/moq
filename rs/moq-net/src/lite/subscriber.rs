@@ -597,6 +597,13 @@ impl Subscriber {
 				)?;
 			}
 			lite::AnnounceBroadcast::Skipped | lite::AnnounceBroadcast::Synced => {}
+			// Nothing drives the route layer on this stream yet, so a peer relying on it
+			// cannot be served.
+			lite::AnnounceBroadcast::RouteStart { .. }
+			| lite::AnnounceBroadcast::RouteUpdate { .. }
+			| lite::AnnounceBroadcast::RouteHold { .. }
+			| lite::AnnounceBroadcast::RouteEnd { .. }
+			| lite::AnnounceBroadcast::Floor { .. } => return Err(Error::ProtocolViolation),
 		}
 		Ok(())
 	}
