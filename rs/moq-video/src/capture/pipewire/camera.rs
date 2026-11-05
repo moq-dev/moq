@@ -634,7 +634,10 @@ fn formats_each(
 			})
 			.register();
 		proxy.enum_params(0, Some(spa::param::ParamType::EnumFormat), 0, u32::MAX);
-		queries.push((node, query, proxy, params, errors));
+		// Tuple fields drop in order: unregister the listeners before destroying the
+		// proxy, whose `pw_proxy_destroy` frees their hook list when the server already
+		// removed the node.
+		queries.push((node, query, params, errors, proxy));
 	}
 	roundtrip(mainloop, core)?;
 	Ok(queries
