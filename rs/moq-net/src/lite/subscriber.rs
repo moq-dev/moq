@@ -10564,9 +10564,15 @@ impl ServeLoop {
 					}
 					let res = ready!(est.poll(waiter));
 					let id = est.id;
+					let fills_changed = est.fill_groups != self.range_fills.ask.groups;
 					self.mode = ServeMode::Select;
 					match res {
-						Ok(active) => self.sub = Sub::Active(active),
+						Ok(active) => {
+							self.sub = Sub::Active(active);
+							if fills_changed && let Err(err) = self.begin(serve, self.serving.subscription()) {
+								return Poll::Ready(ServeEnd::GiveBack(err));
+							}
+						}
 						Err(err) => {
 							// Opening the upstream failed (usually the session dying): hand
 							// the track back for another route to resume.
