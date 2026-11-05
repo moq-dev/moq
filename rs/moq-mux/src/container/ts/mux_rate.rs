@@ -256,6 +256,16 @@ mod test {
 	}
 
 	#[test]
+	fn upward_noise_republishes_only_at_a_new_high() {
+		let (low, high) = ((25_000, SAMPLE), (25_002, SAMPLE));
+		let mut meter = Meter::measured(Some(rate(100_000, WINDOW)));
+		assert_eq!(feed(&mut meter, [high; 4]), vec![Some(rate(100_008, WINDOW))]);
+		// Each upward step raises the bar, so jitter below the high mark never republishes.
+		let jitter = [[low; 4], [high; 4], [low, high, low, high]].concat().repeat(4);
+		assert!(feed(&mut meter, jitter).is_empty());
+	}
+
+	#[test]
 	fn vbr_never_publishes() {
 		let mut meter = Meter::default();
 		// A file-paced source: the clock is a grid but the packets come in bursts.
