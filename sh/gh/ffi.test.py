@@ -186,6 +186,7 @@ print((root / "jobs").read_text())
             ("x86_64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", False, False),
             ("aarch64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", False, False),
             ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", False, False),
+            ("x86_64-unknown-linux-gnu", "aarch64-linux-android", False, False),
             ("x86_64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", True, False),
             ("x86_64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", False, True),
             ("x86_64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", False, "wrong"),
@@ -214,6 +215,10 @@ print((root / "jobs").read_text())
                     """import json, os, pathlib, sys
 root = pathlib.Path(os.environ["TEST_ROOT"])
 args = sys.argv[1:]
+ndk = args[0] == "ndk"
+if ndk:
+    target = args[args.index("--target") + 1]
+    args = args[args.index("--") + 1:] + ["--target", target]
 if args[0] == "metadata":
     print(json.dumps({"target_directory": str(root / "target")}, separators=(",", ":")))
 elif args[0] == "build-ffi":
@@ -229,8 +234,9 @@ elif args[0] == "build-ffi":
     directory.mkdir(parents=True, exist_ok=True)
     for name in ["libmoq_ffi.so", "libmoq_ffi.a"]:
         (directory / name).write_bytes(os.environ["BUILD_ID"].encode())
-    print(json.dumps({"reason": "compiler-artifact", "target": {"name": "moq_ffi"},
-                      "filenames": [str(directory / "libmoq_ffi.so"), str(directory / "libmoq_ffi.a")]}))
+    if not ndk:
+        print(json.dumps({"reason": "compiler-artifact", "target": {"name": "moq_ffi"},
+                          "filenames": [str(directory / "libmoq_ffi.so"), str(directory / "libmoq_ffi.a")]}))
 elif args[0] == "run":
     assert pathlib.Path(args[args.index("--library") + 1]).read_bytes() == os.environ["BUILD_ID"].encode()
 else: raise AssertionError(args)
@@ -258,14 +264,15 @@ else: raise AssertionError(args)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 built = json.loads((self.root / "build").read_text())
                 self.assertEqual(built["target"], target if target != host else None)
-                self.assertEqual(built["linker"], "aarch64-linux-gnu-gcc" if target != host else None)
+                self.assertEqual(built["linker"], "aarch64-linux-gnu-gcc" if target == "aarch64-unknown-linux-gnu" and target != host else None)
                 self.assertEqual("--no-default-features" in built["args"], minimal)
                 self.assertEqual(
                     built["args"][built["args"].index("--target-dir") + 1],
                     str(self.root / "target" / "minimal" if minimal else self.root / "target"),
                 )
                 staged = self.root / f"dist/moq-ffi-1.2.3-{target}/lib"
-                self.assertEqual((staged / "libmoq_ffi.a").read_bytes(), payload)
+                if not target.endswith("-android"):
+                    self.assertEqual((staged / "libmoq_ffi.a").read_bytes(), payload)
                 self.assertEqual((staged / "libmoq_ffi.so").read_bytes(), payload)
                 if minimal:
                     self.assertEqual(default_library.read_bytes(), default_bytes)

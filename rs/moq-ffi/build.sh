@@ -137,8 +137,11 @@ build_target() {
 
     local messages
     if is_android "$target"; then
-        # Android targets use cargo-ndk
-        messages=$(cd "$WORKSPACE_DIR" && cargo ndk --target "$target" --platform 24 -- "${cargo_args[@]}")
+        # cargo-ndk consumes Cargo's artifact messages. It always passes an
+        # explicit target, so its output directory is unambiguous.
+        (cd "$WORKSPACE_DIR" && cargo ndk --target "$target" --platform 24 -- "${cargo_args[@]}")
+        BUILT_LIBRARY="$TARGET_BASE_DIR/$target/release/libmoq_ffi.so"
+        return
     else
         # Set up cross-compilation for Linux ARM64
         if [[ "$target" == "aarch64-unknown-linux-gnu" && "$target" != "$HOST_TARGET" ]]; then

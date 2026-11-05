@@ -111,10 +111,11 @@ Future<_Resolved> _build(Uri workspace, String target, String library) async {
     rustc.stdout as String,
   ).firstWhere((line) => line.startsWith('host: ')).substring('host: '.length);
   final native = target == host;
+  final android = target.contains('-android');
 
   // Android needs the NDK's linker and sysroot, which only cargo-ndk sets up.
   // This mirrors rs/moq-ffi/build.sh.
-  final args = target.contains('-android')
+  final args = android
       ? ['ndk', '--target', target, '--platform', '24', '--', ...cargoArgs]
       : [
           ...cargoArgs,
@@ -137,25 +138,31 @@ Future<_Resolved> _build(Uri workspace, String target, String library) async {
     );
   }
 
-  final artifacts = LineSplitter.split(result.stdout as String)
-      .map((line) => jsonDecode(line) as Map<String, dynamic>)
-      .where(
-        (message) =>
-            message['reason'] == 'compiler-artifact' &&
-            (message['target'] as Map<String, dynamic>)['name'] == 'moq_ffi',
-      )
-      .expand((message) => (message['filenames'] as List).cast<String>())
-      .map((path) => File(path).uri)
-      .where((uri) => uri.pathSegments.last == library)
-      .toSet();
-  if (artifacts.length != 1) {
-    throw StateError('expected one moq-ffi cdylib from Cargo: $artifacts');
-  }
-  final built = artifacts.single;
   final scoped = targetDir.resolve('$target/debug/$library');
-  final unscoped = targetDir.resolve('debug/$library');
-  if (built != scoped && !(native && built == unscoped)) {
-    throw StateError('Cargo artifact does not match target $target: $built');
+  final Uri built;
+  if (android) {
+    // cargo-ndk consumes Cargo's artifact messages and always sets --target.
+    built = scoped;
+  } else {
+    final artifacts = LineSplitter.split(result.stdout as String)
+        .map((line) => jsonDecode(line) as Map<String, dynamic>)
+        .where(
+          (message) =>
+              message['reason'] == 'compiler-artifact' &&
+              (message['target'] as Map<String, dynamic>)['name'] == 'moq_ffi',
+        )
+        .expand((message) => (message['filenames'] as List).cast<String>())
+        .map((path) => File(path).uri)
+        .where((uri) => uri.pathSegments.last == library)
+        .toSet();
+    if (artifacts.length != 1) {
+      throw StateError('expected one moq-ffi cdylib from Cargo: $artifacts');
+    }
+    built = artifacts.single;
+    final unscoped = targetDir.resolve('debug/$library');
+    if (built != scoped && !(native && built == unscoped)) {
+      throw StateError('Cargo artifact does not match target $target: $built');
+    }
   }
   if (!await File.fromUri(built).exists()) {
     throw StateError('cargo did not produce ${built.toFilePath()}');
