@@ -1726,6 +1726,7 @@ pub(crate) mod tests {
 			let consumer = kio::clock::timeout(WAIT, remote.consume().follow("pt.hang", None).unwrap().available())
 				.await
 				.unwrap()
+				.unwrap()
 				.unwrap();
 			let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&consumer).await.unwrap();
 			let catalog = kio::clock::timeout(WAIT, catalogs.next())
@@ -2175,7 +2176,7 @@ pub(crate) mod tests {
 				_ = kio::clock::sleep(Duration::from_secs(30)) => panic!("never announced"),
 				resolved = async {
 					let event = announced.next().await.expect("origin closed");
-					assert!(matches!(event, moq_net::announce::Event::Start(_)), "{event:?}");
+					assert!(matches!(event, moq_net::announce::Event::Present(_)), "{event:?}");
 					let broadcast = consumer.request("demo", None).await.unwrap();
 					let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&broadcast).await.unwrap();
 					let catalog = catalogs.next().await.unwrap().expect("a catalog");
@@ -2296,7 +2297,7 @@ pub(crate) mod tests {
 				instance = async {
 					loop {
 						use moq_net::announce::Event;
-						if let Event::Start(announce) | Event::Restart(announce) = announced.next().await.unwrap() {
+						if let Event::Present(announce) = announced.next().await.unwrap() {
 							break announce.route.instance.unwrap();
 						}
 					}

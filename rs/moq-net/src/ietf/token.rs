@@ -108,15 +108,15 @@ pub(super) fn reason(err: &DecodeError) -> &'static str {
 ///
 /// Section 8.9 rejects the message rather than the session.
 #[cfg(feature = "async")]
-pub(super) async fn reject(
+pub(super) fn rejection(
 	mut stream: Stream<Transport, Version>,
 	kind: request::Kind,
 	err: DecodeError,
 	version: Version,
-) -> Result<(), Error> {
+) -> super::request_stream::Reject {
 	let reason = reason(&err);
-	super::request_stream::buffer_error(&mut stream.writer, kind, &Error::Decode(err), reason, version)?;
-	super::request_stream::deliver(&mut stream.writer).await
+	let buffered = super::request_stream::buffer_error(&mut stream.writer, kind, &Error::Decode(err), reason, version);
+	super::request_stream::Reject::buffered(stream, buffered)
 }
 
 /// Encode `token` by value.

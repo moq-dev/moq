@@ -4,6 +4,37 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Following.Available` reports the path going offline
+
+After the first call, `Available` returns `(nil, nil)` once the followed path goes offline, or, for a `Follow` pinned to an instance, once another instance takes it over.
+The next call returns whatever serves the path next. The first call is never nil.
+Check for nil before using the broadcast, and drop what was read from the previous instance either way.
+
+### Announcements are a listing
+
+`AnnounceConsumer` yields only `AnnounceEventPresent`, when a route now covers a path that was absent, and `AnnounceEventAbsent`, when none does any more.
+Rename `AnnounceEventStart` to `AnnounceEventPresent` and `AnnounceEventEnd` to `AnnounceEventAbsent`.
+`AnnounceEventUpdate`, `AnnounceEventRestart`, and `AnnounceEventTakeover` with its `Predecessor` are gone: a route changing cost or hops, a restarted publisher, and a takeover all keep the path present and report nothing.
+Instead of requesting the path again on a restart, hold `Follow` and read each new publisher instance from `Available`, dropping what was read from the previous one.
+
+```go
+following, err := client.Follow(path, nil)
+if err != nil {
+	return err
+}
+defer following.Cancel()
+for {
+	broadcast, err := following.Available(ctx)
+	if err != nil {
+		return err
+	}
+	if broadcast == nil {
+		continue // offline until the next instance
+	}
+	play(broadcast)
+}
+```
+
 ### Catalog renditions carry their warmup ([#7864](https://github.com/moq-dev/moq/pull/7864))
 
 `ffi.MoqVideo` and `ffi.MoqAudio` (`media.Video` and `media.Audio`) gain `Warmup`, the catalog's decoder warmup, nil when absent. `media.NewTrackConsumer` and the audio and video `Subscribe` read it from the rendition and start that much earlier; a negative one is refused with an error. Only unkeyed struct literals change.

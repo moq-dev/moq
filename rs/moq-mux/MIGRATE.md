@@ -4,6 +4,29 @@ How to adopt new APIs and update for breaking changes, newest first.
 
 ## Unreleased
 
+### The async API is opt-in
+
+Enable the `async` Cargo feature to keep awaiting moq-mux:
+`moq-mux = { version = "...", features = ["async"] }`. This also applies with `default-features = false`.
+The feature is off by default, and every `poll_*` method stays available without it.
+It covers the `next`, `read`, `latest`, `refresh`, `ready`, `wait`, and `broadcast` methods beside each poll:
+the catalog consumers and `catalog::Stream::next`, the container `Consumer` and `GroupConsumer`,
+every exporter (`next`, and fMP4's `next_chunk`), `ts::Follower`, `ts::Release`, `follow::Instances`,
+`json::Consumer`, `json::Snapshot`, `rate::Follower`, `timeline::Resume`, `Binding`, and `Linger`.
+It also covers the async functions with no poll of their own: `catalog::Consumer::new`,
+`Source::{catalog, resolve, subscribe_track}`, `ts::Release::new`, and the JSON catalog entry's `subscribe`.
+`fmp4::Muxer::read` is async too; without the feature, drive `fmp4::Muxer::poll_read`, passing the same
+empty `Vec` to every poll of one group.
+
+`timeline::Resume::ready` borrows the resume instead of consuming it, and the hang catalog consumer's
+`next` no longer requires `Catalog<E>: Unpin`.
+moq-mux no longer enables `moq-json/async`: enable it yourself to await moq-json's readers directly.
+
+### `follow::Instances` folds into `Following` ([#7678](https://github.com/moq-dev/moq/pull/7678))
+
+`follow::Instances::new` is removed: call `origin.follow(path, instance)` and read `Following::available()`, which returns `Some(broadcast)` where `Event::Start` did and `None` where `Event::End` did.
+`Source::follow` still returns `follow::Instances`, for its one-shot hand-out of the catalog's own broadcast; its `next()` and `poll_next()` now return `Option<broadcast::Consumer>`, and `follow::Event` is gone.
+
 ### `container::Playout` replaces `with_warmup` ([#7864](https://github.com/moq-dev/moq/pull/7864))
 
 `container::Consumer::with_warmup` is gone. Build a `container::Playout::new(delay, warmup)` from the `Delay` and the catalog rendition's `warmup`, subscribe with `playout.subscription(subscription)`, which widens the max delay by the warmup, and build the consumer with `playout.consumer(track, format)`, which skips at the max delay alone. The order no longer matters, and a track subscribed without the widening is widened when the consumer is built.

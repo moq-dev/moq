@@ -51,7 +51,3 @@ when it starts accepting datagrams, and add a JS test that an undefined
 status closes the session.
 
 Public API: none beyond the model. Wire: no format change.
-
-## Required
-
-- [JS datagram tracks](/quest/m1/datagram-tracks/js.md) - the JS datagram types this maps

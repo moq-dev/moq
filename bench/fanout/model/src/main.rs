@@ -11,10 +11,17 @@ fn main() {
 	let mut args = std::env::args().skip(1).map(|a| a.parse::<usize>().unwrap());
 	let (subscribers, cycles) = (args.next().unwrap(), args.next().unwrap());
 	let mut info = broadcast::Info::default();
-	info.pool = cache::Pool::new(cache::Config::default().with_capacity(64 * 1024).with_expiry(cache::DEFAULT_EXPIRY));
+	info.pool = cache::Pool::new(
+		cache::Config::default()
+			.with_capacity(64 * 1024)
+			.with_expiry(cache::DEFAULT_EXPIRY),
+	);
 	let broadcast = broadcast::Producer::new(info);
 	let track = broadcast
-		.create_track("bench", track::Info::default().with_timescale(moq_net::Timescale::MILLI))
+		.create_track(
+			"bench",
+			track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+		)
 		.unwrap();
 	let mut subs: Vec<_> = (0..subscribers).map(|_| track.subscribe(None)).collect();
 	let waiters: Vec<_> = (0..subscribers).map(|_| kio::Waiter::noop()).collect();
