@@ -172,3 +172,24 @@ converted to the track's milliseconds; pass NULL to stamp the broadcast clock.
 int32_t moq_publish_json_window_push(uint32_t window, const char *value, uintptr_t value_len, const moq_timestamp *timestamp);
 int32_t moq_publish_json_window_pop(uint32_t window, uint64_t count, const moq_timestamp *timestamp);
 ```
+
+### Pre-encoded simulcast
+
+Publish video renditions from lowest to highest, passing the next lower media
+handle in `moq_video_init.lower` (0 for the lowest). This orders delivery so
+higher renditions yield to lower ones. `moq_publish_media_set_enabled` updates
+the catalog and marks a discontinuity when disabling; resume on a keyframe.
+Audio importers do not support this toggle.
+
+Reserve each media track with `moq_allocator_reserve_media`. Create a
+`moq_rate_control_create` handle bound to the reservation, with `moq_rate_policy.max_bps` and, for higher
+rungs, `has_lower` and `lower_bps`. Read its initial `moq_rate_control_target`,
+then call `moq_rate_control_update` on every frame,
+including while disabled. It returns 0 or a negative error; `target.changed`
+is true for a new target and false to hold the last one. Apply the target's `bitrate_bps`
+to your encoder and `enabled` through `moq_publish_media_set_enabled`.
+The shared controller drops immediately, ramps raises, ignores small changes,
+and holds without an estimate. A rung disables only with a probing session,
+which on native transports requires moq-quic with BBR3, so bandwidth can recover.
+Close controls with `moq_rate_control_close` and reservations with
+`moq_reservation_close`; neither owns or closes the media track.
