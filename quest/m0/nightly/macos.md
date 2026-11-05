@@ -23,7 +23,12 @@ handles stay non-Send; there is no new unsafe guarantee.
 The Linux-only PR gate cannot detect this macOS-only type error. Platform's
 existing `cargo check --all-targets` catches it, but runs nightly and on release
 PRs, with manual Platform dispatch available for platform changes. Adding a
-native macOS runner to every main PR is not a cheap check. Independent Nightly
+native macOS runner to every main PR is not a cheap check. A test-only
+non-Send marker in the synthetic Linux stream was also considered: it would
+catch test spawns, but not production callers, and would remove coverage of
+Linux's supported Send contract from test builds. Keep the real platform
+types and the existing non-macOS Send assertions rather than change the test
+backend's contract to simulate one macOS constraint. Independent Nightly
 error reporting remains owned by
 [moq-dev/moq#7667](https://github.com/moq-dev/moq/pull/7667).
 
