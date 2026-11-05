@@ -172,25 +172,17 @@ impl Consumer {
 		self.inner.name()
 	}
 
-	/// Poll for the next group in arrival order.
+	/// The next group in arrival order, or `None` once the track finished.
 	///
 	/// # Errors
 	///
 	/// A net error if the track fails.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_recv_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
 		let Some(inner) = ready!(self.inner.poll_recv_group(waiter)?) else {
 			return Poll::Ready(Ok(None));
 		};
 		Poll::Ready(Ok(Some(group::Consumer::new(inner, self.key, Arc::clone(&self.scope)))))
-	}
-
-	/// Receive the next group in arrival order.
-	///
-	/// # Errors
-	///
-	/// Same as [`Self::poll_recv_group`].
-	pub async fn recv_group(&mut self) -> Result<Option<group::Consumer>> {
-		kio::wait(|waiter| self.poll_recv_group(waiter)).await
 	}
 }
 
