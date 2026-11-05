@@ -88,13 +88,6 @@ has failed it, so it needs no child of its own (noted 2026-11-03,
 Added 2026-11-03 (maintainer, `/quest-plan`): five more merge-queue failures
 from 2026-11-03 and early 2026-11-04 UTC, one child each.
 
-Disabled 2026-11-04 during [moq-dev/moq#7666](https://github.com/moq-dev/moq/pull/7666):
-`moq-ffi test::datagrams_cross_a_default_connection` timed out at `consumer.recv()`
-after 10 seconds in loaded CI, then passed unchanged in 37 ms in isolation
-(current `origin/main` passed in 23 ms). Investigate the demand/readiness race
-or packet delivery at its cause, then re-enable the test and remove its
-`sh/gh/test-inventory.allow` entry. Do not add retries or raise the timeout.
-
 Added 2026-11-04 (maintainer, `/quest-plan`): moq-gst's interleaved restart
 test, which failed two merge-queue batches and two loaded local runs.
 

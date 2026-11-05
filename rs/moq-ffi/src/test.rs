@@ -6020,7 +6020,6 @@ async fn datagram_connection(
 
 /// A native datagram-only reader reaches a publisher on the default lite-06 path.
 #[tokio::test]
-#[ignore = "flaky: datagram receive can time out after demand is signalled; investigate readiness"]
 async fn datagrams_cross_a_default_connection() {
 	let (broadcast, remote, session, _server) = datagram_connection("sensor", vec![]).await;
 	let producer = broadcast

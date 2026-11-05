@@ -38,6 +38,3 @@ ignore moq-video::frame::tests::d3d11_resize_matches_cpu /quest/m3/video-hardwar
 ignore moq-video::render::export::dx12::tests::exports_an_nv12_texture /quest/m3/video-hardware.md
 ignore moq-video::render::export::dx12::tests::media_foundation_encodes_the_export_in_place /quest/m3/video-hardware.md
 
-
-# Disabled after a loaded CI timeout; investigate and restore coverage.
-ignore moq-ffi::test::datagrams_cross_a_default_connection /quest/m0/test-flakes-2/README.md
