@@ -2963,7 +2963,10 @@ impl SubscribeServe {
 
 	/// Serve the confirmed `track` from `latest`, the newest group as the join starts; see
 	/// [`cursor_floor`].
-	#[allow(clippy::too_many_arguments, reason = "the parts of a confirmed join, unpacked from either state")]
+	#[allow(
+		clippy::too_many_arguments,
+		reason = "the parts of a confirmed join, unpacked from either state"
+	)]
 	fn run(
 		shared: &Shared,
 		msg: lite::Subscribe<'static>,
