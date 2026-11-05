@@ -2858,7 +2858,7 @@ pub unsafe extern "C" fn moq_publish_media_frame(
 /// Enable or disable a pre-encoded media rendition in its catalog.
 ///
 /// Disabling publishes a discontinuity and stops frames; resume video on a keyframe.
-/// Audio currently returns an unsupported-format error, as in the shared importer.
+/// Audio importers reject this operation.
 /// Returns zero on success or a negative error.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_publish_media_set_enabled(media: u32, enabled: bool) -> i32 {
