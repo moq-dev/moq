@@ -100,8 +100,9 @@ Public API: none. Wire: none.
   (`sh/gh/test-inventory.allow`), no Actions log will show it; advance the
   capture by hand. `quest gate` waits for host load to drop, so supply the
   load inside the gated run: in the pinned Nix shell, run
-  `quest gate sh -c 'just check --all & for i in $(seq 100); do cargo test -p moq-gst --lib -- source::imp::session_tests::restarts_under_reconnects_interleave_on_one_pad --ignored --exact || break; done; wait'`
-  so the repetitions loop beside a loaded `just check --all`, as in the Plan.
+  `quest gate sh -c 'just check --all & c=$!; s=0; for i in $(seq 100); do kill -0 $c 2>/dev/null || break; cargo test -p moq-gst --lib -- source::imp::session_tests::restarts_under_reconnects_interleave_on_one_pad --ignored --exact || { s=1; break; }; done; wait $c || s=1; exit $s'`
+  so the repetitions loop only while `just check --all` still loads the host, as
+  in the Plan, and the command fails if either a repetition or the check fails.
   Attach the run or log, tested commit, load conditions, and full
   session error chain to this quest. If the failure output lacks the session
   error, surface that error before collecting another run. Clear this wait
