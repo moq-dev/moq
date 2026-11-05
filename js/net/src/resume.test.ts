@@ -809,35 +809,59 @@ test("a replacement that aborts before its first group after the incumbent finis
 	close();
 });
 
-// The end is judged against what the reader's range still owes, not only what it was handed out.
-for (const [name, subscribe] of [
-	["a range starting past it", true],
-	["a reader joining at the live edge", false],
-] as const) {
-	test(`${name} ends cleanly when the incumbent finished and the replacement aborts`, async () => {
-		const { a, b, swap, active, close } = await setup();
-		const ta = copy(a);
-		const tb = copy(b);
-		const early = subscribe ? active.track("seq").subscribe({ ranges: [{ start: { absolute: 3n } }] }) : undefined;
-		ta.write(0n);
-		ta.write(1n);
-		await swap();
-		const sub = early ?? active.track("seq").subscribe();
-		await settle();
-		ta.producer.finish();
-		tb.producer.abort(new StreamError(StreamCode(64)));
-		await settle();
-		const groups: bigint[] = [];
-		for (let group = await sub.recvGroup(); group; group = await sub.recvGroup()) {
-			groups.push(group.sequence);
-			group.close();
-		}
-		expect(groups).toEqual(subscribe ? [] : [1n]);
+// Mirrors `readers_owed_nothing_below_the_incumbents_end_end_cleanly` in rs/moq-net/src/model/origin.rs:
+// a reader owed nothing below the incumbent's end, and one joining while the replacement has yet
+// to deliver, end cleanly once the incumbent finished and the replacement aborted.
+test("readers owed nothing below the incumbent's end end cleanly when the replacement aborts", async () => {
+	const { a, b, swap, active, close } = await setup();
+	const ta = copy(a);
+	const tb = copy(b);
+	const later = active.track("seq").subscribe({ ranges: [{ start: { absolute: 3n } }] });
+	ta.write(0n);
+	ta.write(1n);
+	await swap();
+	const joiner = active.track("seq").subscribe();
+	await settle();
+	ta.producer.finish();
+	tb.producer.abort(new StreamError(StreamCode(64)));
+	await settle();
 
-		sub.close();
-		close();
-	});
-}
+	expect(await later.recvGroup()).toBeUndefined();
+	const groups: bigint[] = [];
+	for (let group = await joiner.recvGroup(); group; group = await joiner.recvGroup()) {
+		groups.push(group.sequence);
+		group.close();
+	}
+	expect(groups).toEqual([1n]);
+
+	later.close();
+	joiner.close();
+	close();
+});
+
+// A reader arriving after the replacement answered reads the incumbent too, as the Rust front
+// serves it until the replacement delivers.
+test("a reader joining before the replacement delivers keeps the incumbent when the replacement aborts", async () => {
+	const { a, b, swap, active, close } = await setup();
+	const ta = copy(a);
+	const tb = copy(b);
+	const first = active.track("seq").subscribe();
+	ta.write(0n);
+	expect(drain(first)).toEqual([0n]);
+	await swap();
+	const joiner = active.track("seq").subscribe();
+	await settle();
+	tb.producer.abort(new StreamError(StreamCode(64)));
+	await settle();
+	ta.write(1n);
+	await settle();
+	expect(drain(joiner)).toContain(1n);
+	expect(joiner.closed.peek()).toBeUndefined();
+
+	first.close();
+	joiner.close();
+	close();
+});
 
 // Mirrors `a_replacement_aborted_after_its_answer_keeps_the_incumbent` for a reader awaiting only the end.
 test("waiting for the end of a track whose replacement aborts before its first group follows the incumbent", async () => {

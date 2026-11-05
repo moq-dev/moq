@@ -203,6 +203,12 @@ class Route {
 	concluded = false;
 	/** The front refused the replacement: the track ends with this once the serving copy runs out. */
 	refusal?: Error;
+	/**
+	 * The source `source` replaced, held until a copy of `source` delivers: a reader arriving
+	 * meanwhile reads it too, as the readers before it do, so a replacement failing first leaves
+	 * it serving. The Rust front only swaps once the replacement delivers.
+	 */
+	incumbent?: Source;
 	/** Bumped on every change above, waking parked reads. */
 	readonly changed = new Signal(0);
 	readonly readers = new Set<Reader>();
@@ -222,6 +228,7 @@ class Route {
 		// A refusal ends the track: no later source continues it, compatible or not.
 		if (this.concluded || this.refusal || this.source === source) return;
 		this.generation++;
+		this.#hold(this.source);
 		this.source = source;
 		this.served = source;
 		this.#bump();
@@ -237,6 +244,7 @@ class Route {
 		// A concluded route serves nothing new, but the failed replacement was still its last.
 		if (this.source !== from && !(this.concluded && this.source === undefined)) return false;
 		this.generation++;
+		this.#hold(undefined);
 		this.source = to;
 		this.served = to;
 		this.#bump();
@@ -248,6 +256,7 @@ class Route {
 	park(): void {
 		if (!this.source) return;
 		this.generation++;
+		this.#hold(undefined);
 		this.source = undefined;
 		this.#bump();
 	}
@@ -273,12 +282,27 @@ class Route {
 	conclude(): void {
 		if (this.concluded) return;
 		this.concluded = true;
+		this.#hold(undefined);
 		this.source = undefined;
 		this.#bump();
 	}
 
+	/** A copy of `source` delivered: it no longer needs the source it replaced. */
+	delivered(source: Source): void {
+		if (source === this.source) this.#hold(undefined);
+	}
+
+	#hold(incumbent: Source | undefined): void {
+		incumbent?.retain();
+		this.incumbent?.release();
+		this.incumbent = incumbent;
+	}
+
 	leave(reader: Reader): void {
-		if (this.readers.delete(reader) && this.readers.size === 0) this.idle();
+		if (!this.readers.delete(reader) || this.readers.size > 0) return;
+		// Nobody reads the track, so nothing is left to protect from the replacement.
+		this.#hold(undefined);
+		this.idle();
 	}
 }
 
@@ -466,7 +490,7 @@ class Reader implements ResumeSource {
 			return;
 		}
 		const floor = this.#newest;
-		this.#add({
+		const serving: Copy = {
 			generation: route.generation,
 			source,
 			// The wire request carries the floor from the first message: some sessions read the
@@ -475,7 +499,25 @@ class Reader implements ResumeSource {
 			floor,
 			replaced: false,
 			lease: 0,
-		});
+		};
+		this.#add(serving);
+		// Arriving before the new copy delivered, read the source it replaced too, as the readers
+		// before this one still do.
+		const incumbent = route.incumbent;
+		if (!incumbent) return;
+		if (hooks.latestSequence(serving.sub) !== undefined) return route.delivered(source);
+		if (this.#copies.some((copy) => copy.source.from.closed === incumbent.from.closed)) return;
+		this.#add(
+			{
+				generation: route.generation - 1,
+				source: incumbent,
+				sub: subscribe(incumbent.wire, route.name, this.#wire({ floor })),
+				floor,
+				replaced: true,
+				lease: 0,
+			},
+			this.#copies.length - 1,
+		);
 	}
 
 	/** Read `copy` as the newest one, or at `index`, recording the properties it commits. */
@@ -670,6 +712,7 @@ class Reader implements ResumeSource {
 	#observe(copy: Copy, sequence: bigint): void {
 		copy.delivered = true;
 		if (copy.replaced || copy.generation !== this.#generation) return;
+		this.route.delivered(copy.source);
 		const bound = max(this.#newest ?? -1n, sequence - 1n);
 		for (const replaced of this.#copies) {
 			if (replaced === copy || !replaced.replaced || replaced.until !== undefined) continue;
