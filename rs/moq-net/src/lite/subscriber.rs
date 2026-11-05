@@ -1079,8 +1079,8 @@ impl SubscriberDriver {
 		// Datagrams go around the sources, which decode the answers that register their
 		// routes and the ends that remove them. A publisher sends a track's first datagram
 		// right behind its answer and its last right before its end, often in the same
-		// packet. So the datagrams of known tracks go first, ahead of any end, and the first
-		// with no known track waits for the sources' answers.
+		// packet. So the datagrams of known tracks go first, ahead of any end, and those with
+		// no known track wait for the sources' answers.
 		if let Poll::Ready(Err(err)) = self.poll_datagrams(waiter, true) {
 			return Poll::Ready(Err(err));
 		}
@@ -1752,8 +1752,9 @@ struct DatagramRecv {
 	// A dedicated receive handle: the poll interface takes `&mut self`.
 	recv: Transport,
 	enabled: bool,
-	/// The first datagram with no known track before the sources ran, routed once they have.
-	held: Option<bytes::Bytes>,
+	/// The datagrams with no known track before the sources ran, routed once they have. At
+	/// most one pass's budget, and empty again by the end of each driver poll.
+	held: Vec<bytes::Bytes>,
 }
 
 impl DatagramRecv {
@@ -1764,42 +1765,45 @@ impl DatagramRecv {
 			subscriber,
 			recv,
 			enabled,
-			held: None,
+			held: Vec::new(),
 		}
 	}
 
-	/// Route the ready datagrams. With `hold`, before the sources run, stop at the first with
-	/// no known track and keep it: its answer may be among what they decode. The pass after
-	/// them, in the same driver poll, routes it and the rest, dropping and counting each that
-	/// still finds no track.
+	/// Route the ready datagrams. With `hold`, before the sources run, keep each with no known
+	/// track: its answer may be among what they decode. The pass after them, in the same
+	/// driver poll, routes those first, then the rest, dropping and counting each that still
+	/// finds no track.
 	fn poll(&mut self, waiter: &kio::Waiter, hold: bool) -> Poll<Result<(), Error>> {
 		if !self.enabled {
 			return Poll::Ready(Ok(()));
 		}
-		// A peer keeping datagrams ready must not hold the session's other tasks.
+		if !hold {
+			for payload in std::mem::take(&mut self.held) {
+				self.route(payload, false);
+			}
+		}
+		// A peer keeping datagrams ready must not hold the session's other tasks, and bounds
+		// what the first pass holds.
 		let mut budget = kio::coop::Budget::new(32);
 		loop {
-			if hold && self.held.is_some() {
-				return Poll::Pending;
+			ready!(budget.poll_yield(waiter));
+			let payload = ready!(self.recv.poll_recv_datagram(waiter)).map_err(crate::lite::error::from_transport)?;
+			self.route(payload, hold);
+		}
+	}
+
+	/// Route one datagram, holding it with `hold` when its track isn't known yet.
+	fn route(&mut self, payload: bytes::Bytes, hold: bool) {
+		match self.subscriber.route_datagram(payload.clone()) {
+			Ok(None) => {}
+			Ok(Some(_)) if hold => self.held.push(payload),
+			Ok(Some(subscribe)) => {
+				self.subscriber
+					.datagrams_unrouted
+					.fetch_add(1, atomic::Ordering::Relaxed);
+				tracing::debug!(subscribe, "dropping datagram for a subscription with no datagram track");
 			}
-			let payload = match self.held.take() {
-				Some(payload) => payload,
-				None => {
-					ready!(budget.poll_yield(waiter));
-					ready!(self.recv.poll_recv_datagram(waiter)).map_err(crate::lite::error::from_transport)?
-				}
-			};
-			match self.subscriber.route_datagram(payload.clone()) {
-				Ok(None) => {}
-				Ok(Some(_)) if hold => self.held = Some(payload),
-				Ok(Some(subscribe)) => {
-					self.subscriber
-						.datagrams_unrouted
-						.fetch_add(1, atomic::Ordering::Relaxed);
-					tracing::debug!(subscribe, "dropping datagram for a subscription with no datagram track");
-				}
-				Err(err) => tracing::debug!(%err, "dropping datagram"),
-			}
+			Err(err) => tracing::debug!(%err, "dropping datagram"),
 		}
 	}
 }
@@ -3930,8 +3934,8 @@ mod tests {
 	}
 
 	/// Before the sources run, a datagram whose track isn't known yet is held rather than
-	/// dropped, and the pass after them routes it to a track registered in between. One that
-	/// still finds no track is dropped and counted.
+	/// dropped, while known tracks' datagrams go on, and the pass after them routes it to a
+	/// track registered in between. One that still finds no track is dropped and counted.
 	#[kio::test]
 	async fn a_datagram_waits_for_the_sources_before_it_is_dropped() {
 		use crate::transport::poll::Session as _;
@@ -3965,7 +3969,7 @@ mod tests {
 
 		send(1);
 		assert!(recv.poll(&waiter, true).is_pending());
-		assert!(recv.held.is_some(), "dropped before the sources ran");
+		assert_eq!(recv.held.len(), 1, "dropped before the sources ran");
 		let producer = datagram::Info::default().produce("datagrams");
 		let mut received = producer.consume();
 		subscriber.datagrams.lock().insert(
@@ -3979,10 +3983,15 @@ mod tests {
 		assert!(matches!(received.poll_recv(&waiter), Poll::Ready(Ok(Some(_)))));
 		assert_eq!(unrouted(), 0);
 
+		// A held datagram doesn't hold up a known track's behind it, which an end the sources
+		// read could otherwise drop.
 		send(2);
+		send(1);
 		assert!(recv.poll(&waiter, true).is_pending());
+		assert!(matches!(received.poll_recv(&waiter), Poll::Ready(Ok(Some(_)))));
+		assert_eq!(recv.held.len(), 1);
 		assert!(recv.poll(&waiter, false).is_pending());
-		assert!(recv.held.is_none());
+		assert!(recv.held.is_empty());
 		assert_eq!(unrouted(), 1);
 	}
 

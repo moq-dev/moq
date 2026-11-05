@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `moq_connection_stats` counts unrouted datagrams ([#7951](https://github.com/moq-dev/moq/pull/7951))
+
+`moq_connection_stats` gains `datagrams_unrouted` and `datagrams_unrouted_valid` at its end, which changes its ABI: recompile against the new header.
+`datagrams_unrouted` counts the datagrams received for a subscription with no datagram track, and is valid on versions with datagrams (moq-lite 05 and newer).
+
 ### Separate datagram tracks
 
 Create a separate producer with `moq_publish_datagrams` and `moq_datagram_info`; replace `moq_publish_track_datagram` with `moq_publish_datagrams_append` on that handle, or `moq_publish_datagrams_insert` for an explicit sequence. `moq_consume_datagrams` now takes a subscriber priority before its callback and never subscribes to a stream track. Use `moq_publish_datagrams_demand` and `moq_datagram_demand_priority` for aggregate priority, and `moq_publish_datagrams_requests` / `moq_datagram_request_accept` for on-demand publishing. Finish or abort datagram producers separately. A zeroed datagram info is untimed, unlike the microsecond default of stream-track info.
