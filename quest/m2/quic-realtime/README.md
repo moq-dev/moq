@@ -90,6 +90,28 @@ must use the corrected pacer: earlier candidate rows below 2 Mbit/s, including
 GCC's out-of-tree `tests::realtime` rows in #7546, can include up to 2x pacing
 overshoot.
 
+Collapse evidence for the comparison (maintainer, ✅ 2026-11-05, on
+[moq-dev/moq#7952](https://github.com/moq-dev/moq/pull/7952)): BBR3's own
+response time bounds its reported estimate; the loss-bound estimate and
+Startup/recovery ordering fixes complete that quest. The lossless bufferbloat
+case belongs in this comparison rather than a new estimator or enabling the
+delay bound on `CongestionControl::Delay` before the bake-off:
+
+- Real sockets, `just rs rung-disable`, FFI ladder over moq-shaper's
+  `cellular-step` (2 → 0.5 → 0.1 → 2 Mbit/s at 8 / 20 / 32 s): the
+  500 kbit/s step lost no packets because the shaper queued them. The top
+  rung disabled after 5.6 / 5.8 / 5.6 s with the fixes, versus
+  5.4 / 5.7 / 5.9 s before. Startup's full-bandwidth exit and two `max_bw`
+  filter advances account for the hold; no loss bound participates.
+- Sparse-sender sim, seeds 1–4, 250 kbit/s media probing for 1.25 Mbit/s,
+  40 ms RTT and a 12.5 kB drop-tail queue: after a 2 → 0.1 Mbit/s step,
+  plain BBR3's `max_bw` held the old rate for about 17 s. The fixes let
+  Startup exit on high loss after 3.2 s and first cut the estimate after
+  4.2 s (seed 1), but ProbeRTT exit lifted the short-term bound 1.6 s
+  later. The estimate reached ≤ 200 kbit/s after 17.0–17.1 s on plain
+  BBR3, versus 8.3 s with the delay bound. The sim step was lossy; it
+  explains the remaining model hold, not the lossless socket result.
+
 Remaining work once the candidates finish (this README's own job):
 
 - Run the shared comparison on the uplink presets: queuing delay p50/p95/p99,
