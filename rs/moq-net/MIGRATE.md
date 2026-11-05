@@ -16,6 +16,11 @@ filterless SUBSCRIBE on every draft, and the groups below the answer's Largest
 Object come from one range FETCH. A SUBSCRIBE that omits the filter still joins
 live, so third-party readers and relay caches see no change.
 
+### Group batch operations and `poll_next_frame` are crate-private ([#7874](https://github.com/moq-dev/moq/pull/7874))
+
+Read a frame in chunks with the async `group::Consumer::next_frame`, or read whole frames with `poll_read_frame` from a poll loop.
+`group::Consumer::{read_frames, poll_read_frames, keep_alive}`, `frame::Buffer`, and `group::Producer::write_frames` are now crate-private. Replace batch reads with repeated `read_frame` or `poll_read_frame` calls, and batch writes with `write_frame`. Cache access is refreshed by those reads.
+
 ### Readers at a shed frame ask a `track::Requests` handler for a flight ([#7944](https://github.com/moq-dev/moq/pull/7944))
 
 A reader that reaches a frame its group copy shed no longer gets `Error::Evicted` when the track has a live `track::Requests` handle: the handler receives a `Fill` of that one group from that frame (`Fill::start`), or from frame 0 on a compressed track, even though the group is still cached and live.

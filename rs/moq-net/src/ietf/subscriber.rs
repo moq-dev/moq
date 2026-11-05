@@ -4365,6 +4365,14 @@ impl SubscribeOnce {
 				held.producer = Some(track.clone());
 				held.timescale = timescale;
 				held.fill_ok(largest);
+				// A group-0 start joins filterless with no fill for the Largest group's head,
+				// so a stream there that starts mid-group is a cut message: drop it, and the
+				// readers skip that group, rather than surface its tail as the whole group.
+				if self.live && self.start == Some(0) {
+					if let Some(largest) = largest.filter(|largest| largest.object > 0) {
+						held.headless_through = held.headless_through.max(Some(largest.group));
+					}
+				}
 			}
 		}
 		this.entry_info(&self.key, request_id, track.info());
@@ -17312,6 +17320,24 @@ mod joining_fetch_tests {
 				"{version}: no head to join"
 			);
 			assert!(!run.fill_outstanding(), "{version}");
+		}
+	}
+
+	/// A group-0 start fetches only the groups below Largest, so when the publisher is
+	/// already partway through the Largest group, that group's mid-group stream is a cut
+	/// message. It is marked headless, so the stream is dropped and readers skip the group
+	/// (`a_headless_tail_after_its_fill_was_replaced_is_dropped`), rather than reading its
+	/// tail as a whole group. A Largest at object 0 leaves the group whole.
+	#[kio::test]
+	async fn a_zero_start_drops_the_largest_groups_cut_tail() {
+		for (object, headless) in [(2, Some(4)), (0, None)] {
+			let largest = Some(ietf::Location { group: 4, object });
+			for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+				let run = JoinRun::start(version, Some(0), subscribe_ok(version, largest), fetch_ok(version)).await;
+				let state = run.subscriber.state.lock();
+				let held = state.subscribes.values().next().expect("the subscription is registered");
+				assert_eq!(held.headless_through, headless, "{version}: Largest object {object}");
+			}
 		}
 	}
 
