@@ -349,14 +349,7 @@ struct Seen {
 
 impl Consumer {
 	/// The next rendition to report, or `None` once the transcoder is gone.
-	pub async fn next(&mut self) -> Option<Update> {
-		kio::wait(|waiter| self.poll_next(waiter)).await
-	}
-
-	/// Poll for the next rendition to report, without blocking.
-	///
-	/// Returns `Poll::Ready(Some(_))` for an update, `Poll::Ready(None)` once the
-	/// transcoder is gone, or `Poll::Pending` after registering `waiter`.
+	#[kio::wrapper]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<Update>> {
 		let update = {
 			let seen = &mut self.seen;

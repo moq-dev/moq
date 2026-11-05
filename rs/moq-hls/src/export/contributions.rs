@@ -204,17 +204,8 @@ impl Producer {
 	}
 
 	#[cfg(feature = "server")]
-	pub async fn rendition(
-		&self,
-		at: &super::route::Contribution,
-		kind: Kind,
-		name: &str,
-	) -> crate::Result<Option<Arc<Rendition>>> {
-		kio::wait(|waiter| self.poll_rendition(waiter, at, kind, name)).await
-	}
-
-	#[cfg(feature = "server")]
-	fn poll_rendition(
+	#[kio::wrapper]
+	pub fn poll_rendition(
 		&self,
 		waiter: &kio::Waiter,
 		at: &super::route::Contribution,

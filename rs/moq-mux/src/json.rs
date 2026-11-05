@@ -82,7 +82,9 @@ use moq_net::Timed;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use hang::catalog::{JsonConfig, Mode, Reference};
+#[cfg(feature = "async")]
+use hang::catalog::Reference;
+use hang::catalog::{JsonConfig, Mode};
 
 use crate::catalog::hang::CatalogExt;
 use crate::catalog::{IntoRendition, Listing, RenditionConfig};
@@ -201,14 +203,10 @@ impl<T: Serialize> Snapshot<T> {
 	}
 
 	/// Wait for a joiner to want a fresh group, then restate the value in one; see
-	/// [`moq_json::snapshot::Producer::refresh`].
+	/// [`moq_json::snapshot::Producer::poll_refresh`].
 	///
 	/// A restatement is not a new value, so it measures neither `jitter` nor `delay`.
-	pub async fn refresh(&self) -> crate::Result<()> {
-		Ok(self.inner.refresh().await?)
-	}
-
-	/// Poll for [`refresh`](Self::refresh), for an owner driving the producer synchronously.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_refresh(&self, waiter: &kio::Waiter) -> std::task::Poll<crate::Result<()>> {
 		self.inner.poll_refresh(waiter).map_err(Into::into)
 	}
@@ -389,11 +387,7 @@ impl<T: DeserializeOwned> Consumer<T> {
 	}
 
 	/// Get the next value, or `None` once the track ends.
-	pub async fn next(&mut self) -> crate::Result<Option<Timed<T>>> {
-		kio::wait(|waiter| self.poll_next(waiter)).await
-	}
-
-	/// Poll for the next value, without blocking.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> std::task::Poll<crate::Result<Option<Timed<T>>>> {
 		let result = match &mut self.inner {
 			Inner::Snapshot(consumer) => consumer.poll_next(waiter),
@@ -406,12 +400,9 @@ impl<T: DeserializeOwned> Consumer<T> {
 		}
 	}
 
-	/// Skip to the newest snapshot state; stream mode returns `UnsupportedMode`.
-	pub async fn latest(&mut self) -> crate::Result<Option<Timed<T>>> {
-		kio::wait(|waiter| self.poll_latest(waiter)).await
-	}
-
-	/// Poll for the newest snapshot state without discarding records from a lossless stream.
+	/// Skip to the newest snapshot state; stream mode returns `UnsupportedMode` rather than
+	/// discard records from a lossless stream.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_latest(&mut self, waiter: &kio::Waiter) -> std::task::Poll<crate::Result<Option<Timed<T>>>> {
 		match &mut self.inner {
 			Inner::Snapshot(consumer) => consumer.poll_latest(waiter).map(|result| result.map_err(Into::into)),
@@ -427,6 +418,7 @@ impl crate::catalog::Entry<'_, JsonConfig> {
 	/// field names a sibling broadcast is followed rather than silently read from the catalog's own.
 	///
 	/// Errors if the entry declares a mode this build doesn't implement.
+	#[cfg(feature = "async")]
 	pub async fn subscribe<T: DeserializeOwned>(&self, source: &crate::Source) -> crate::Result<Consumer<T>> {
 		let track = source
 			.subscribe_track(
