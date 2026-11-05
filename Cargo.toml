@@ -168,7 +168,7 @@ moq-uring = { version = "0.0.12", path = "rs/moq-uring", default-features = fals
 moq-v4l = { version = "0.1.0", path = "rs/moq-v4l" }
 # Standalone crate (moq-dev/vaapi); vendored from cros-libva + cros-codecs.
 # dlopen's libva at runtime (no libva-dev at build, no NEEDED libva in the binary).
-moq-vaapi = "0.1.0"
+moq-vaapi = "0.1.1"
 # `default-features = false` is here for `capture` (V4L2, libclang), which the
 # cross-compiled Python, Swift, Kotlin, and Go builds have no use for: adding
 # `features = ["capture"]` to a consumer that ships in those bindings pulls the
@@ -176,7 +176,7 @@ moq-vaapi = "0.1.0"
 # that argument, so moq-ffi and moq-c opt NVIDIA and VAAPI back in (OpenH264
 # through their own `openh264` feature, which release builds enable).
 moq-video = { version = "0.1.10", path = "rs/moq-video", default-features = false }
-mp4-atom = "0.17.0"
+mp4-atom = "0.17.1"
 nix = { version = "0.31.3", features = ["net", "socket", "uio"] }
 num_enum = "0.7"
 objc2 = "0.6.4"
