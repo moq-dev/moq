@@ -69,8 +69,8 @@ class Builds(unittest.TestCase):
                     tools.mkdir(parents=True)
                     tee = tools / "tee"
                     tee.write_text(
-                        '#!/usr/bin/env bash\n'
-                        'if [[ $1 == */base-build.log ]]; then cat; exit 1; fi\n'
+                        "#!/usr/bin/env bash\n"
+                        "if [[ $1 == */base-build.log ]]; then cat; exit 1; fi\n"
                         f'exec {shutil.which("tee")} "$@"\n'
                     )
                     tee.chmod(0o755)
