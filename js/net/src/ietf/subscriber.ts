@@ -926,7 +926,7 @@ export class Subscriber {
 			const revoked = new Promise<typeof revokedEnded>((resolve) => {
 				revoke = () => resolve(revokedEnded);
 			});
-			const disposeGrant = this.#grant?.subscribe(() => {
+			disposeGrant = this.#grant?.subscribe(() => {
 				if (this.#denied(broadcast)) revoke();
 			});
 			// The grant may have shrunk during setup, before this watcher existed.
