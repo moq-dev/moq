@@ -323,7 +323,9 @@ struct Track {
 	gap: u64,
 	/// Furthest presentation time muxed, so overlapping track losses share one break.
 	last_timestamp: Option<Timestamp>,
-	/// The last delivery loss the track signalled or joined ([`coalesce`]).
+	/// The last delivery loss the track signalled or joined ([`coalesce`]). Only the last, so
+	/// state stays bounded by the track count: a slower track can flag an outage again after a
+	/// faster one moved past it, an extra flag where loss did happen.
 	lost: Option<Lost>,
 	/// How many unmarked steps back the track's timeline took ([`Self::steps_back`]), each
 	/// counted as a marker of its own.
