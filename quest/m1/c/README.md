@@ -2,11 +2,11 @@
 
 ## Goal
 
-The hand-written `moq-c` crate (`rs/moq-c`, `moq.h`) ships at this cut as
-`moq-c` 0.7 with every binding feature moq-ffi gains in m1, so a C user can do
-whatever a Python, Swift, Kotlin, Go, Dart, or C++ user can. The C interop
-client and every `doc/lib/c` sample build and run against the built release
-archive before the cut.
+The hand-written `moq-c` crate (`rs/moq-c`, `moq.h`) ships at this cut at the
+shared 0.22 minor with every binding feature moq-ffi gains in m1, so a C user
+can do whatever a Python, Swift, Kotlin, Go, Dart, or C++ user can. The C
+interop client and every `doc/lib/c` sample build and run against the built
+release archive before the cut.
 
 ## Plan
 
@@ -14,7 +14,11 @@ Decided 2026-10-25 (maintainer): the hand-written crate ships at this cut and
 the [generated C line](/quest/m2/c/README.md) moves after it, waiting on the
 switch to rust2's UniFFI fork. The generated package (`c/moq`) builds in CI,
 but it publishes only after the cut. C users break
-twice (0.6 to 0.7, then to the generated 0.8); that is the accepted cost.
+twice (to 0.22 at this cut, then to the generated package at a later cut);
+that is the accepted cost. moq-c follows the shared minor like every
+published package (CONTRIBUTING.md's [Versions](/CONTRIBUTING.md#versions),
+[moq-dev/moq#7610](https://github.com/moq-dev/moq/pull/7610)), not a 0.7
+then 0.8 line of its own.
 
 - moq-c is not frozen: it takes the same breaks as moq-ffi and the other
   bindings. Every m1 quest or PR that changes the binding API changes

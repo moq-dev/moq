@@ -36,6 +36,8 @@ lite-07; bitrate enforcement is not part of this release.
 - [An audio track's final flush joins its open group](/quest/m2/audio-flush-group.md) - a zero-`delay.max` subscriber gets the tail, not `Old`
 - [Release execution](/quest/m2/release/README.md) - publication, installed-artifact proof, cleanup, and downstream adoption after m1
 - [Release tags substitute from nix.moq.dev](/quest/m2/release-nix-cache.md) - the first tag after the cut substitutes on a clean machine, bucket sizes hold, and Cachix is retired
+- [Release pull requests read the R2 Rust cache](/quest/m2/mbx-r2-release-cache.md) - a release PR's `Check the cache` step reports effective read-only once the cut brings the cache to `release`
+- [Binary release publishers run on their tag](/quest/m2/release-tag-publishers.md) - brew, Go and Swift releases stop running through `workflow_run` on main, once the cut brings the workflows to `release`
 - [One policy for oversized container metadata](/quest/m2/import-metadata-policy.md) - fMP4 and MKV refuse or stream huge metadata by one documented rule
 - [Wire fuzz coverage](/quest/m2/wire-fuzz-coverage.md) - the cmsg walks in moq-sock and moq-uring have invariant fuzz targets, and the unsafe peer input reaches runs under Miri
 - [VA-API renderer tests](/quest/m2/vaapi-render-tests.md) - the VA-API renderer, decode, and transcode tests run in `just rs gpu` on AMD and Intel and fail instead of skipping, and hosted CI reports them ignored
@@ -46,7 +48,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [moq-auth drops the unused peer grant API](/quest/m2/auth-drop-peer-grant.md) - P2P trusts its peers, so `PeerGrant` and its `KeySet` methods go
 - [rust2's exporter is ready for moq](/quest/m2/rust2-exporter.md) - waiting on moq-dev/rust2's exporter to generate every language moq ships
 - [Switch to rust2's exporter](/quest/m2/ffi-exporter.md) - moq's bindings come from rust2-ffi, moq-ffi shrinks to its remainder, and moq's UniFFI generator code is deleted
-- [Generated C bindings](/quest/m2/c/README.md) - C generated from moq-ffi ships as `moq-c` 0.8.0 and replaces the hand-written crate
+- [Generated C bindings](/quest/m2/c/README.md) - C generated from moq-ffi ships as `moq-c` at a later cut's shared minor and replaces the hand-written crate
 - [A C origin can discover eagerly, like a relay](/quest/m2/c-origin-relay.md) - the C API puts an origin in relay mode, so forwarding a client session's routes needs no local announce watcher
 - [A runtime-free QUIC driver](/quest/m2/quic-sansio-driver.md) - a caller's own loop moves UDP datagrams and polls moq sessions over moq-quic, for rust2's bindings
 - [Benchmark sources](/quest/m2/bench-sources.md) - every measuring nightly benchmark feeds the regression table, and none is a smoke run

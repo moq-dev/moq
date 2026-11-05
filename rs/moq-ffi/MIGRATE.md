@@ -11,6 +11,10 @@ MoqSocketEndpoint, MoqSocketIncomingTcp, MoqSocketIncomingTrack, MoqSocketTcpStr
 
 `MoqGroupProducer::ready(size)` is a new async call that waits until a frame of `size` bytes fits a window ahead of the group's fastest reader. Await it before each `write_frame` so the writer waits for its fastest reader instead of evicting it, though not for slower readers; a TCP socket session needs it to behave like TCP. Existing writers are unchanged and still shed the group's front when they outpace their readers.
 
+### Decoders refuse a disabled rendition ([#7942](https://github.com/moq-dev/moq/pull/7942))
+
+`MoqAudioConsumer::subscribe` and `MoqVideoConsumer::subscribe` fail with `MoqError::NotFound` when the rendition's `enabled` is false, instead of subscribing and waiting for a re-enable. Pick an enabled rendition from the latest catalog, and close a decoder whose rendition a newer catalog disables.
+
 ### Announcements are a listing ([#7678](https://github.com/moq-dev/moq/pull/7678))
 
 `MoqAnnounceEvent` is `Present { announce }` or `Absent { announce }`. `Start`, `Update`, `End`, `Restart` and `Takeover` (with its `predecessor`) are gone: another instance taking a path over keeps it present, and a route's cost changing is not reported.

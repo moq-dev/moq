@@ -63,11 +63,11 @@ try {
 	await page.evaluate(() => globalThis.ptt.press(false));
 	await page.waitForTimeout(5000);
 	const held = await page.evaluate(() => globalThis.ptt.state());
-	if (held.active || held.config?.enabled !== false || held.selected !== initial.selected) {
-		throw new Error("the muted listener did not hold its rendition");
+	if (held.active || !held.config || held.config.enabled === false || held.selected !== initial.selected) {
+		throw new Error("muting changed the rendition or the listener's selection");
 	}
 	// Tune-in can consume retained audio. Validate the tap on a fresh press only after the muted
-	// listener holds its subscription.
+	// listener keeps its subscription.
 	await page.evaluate(() => globalThis.ptt.press(true));
 	await page.waitForTimeout(3000);
 	await page.evaluate(() => globalThis.ptt.press(false));
