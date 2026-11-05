@@ -40,10 +40,11 @@ class SnapshotProducer:
 
 
 class SnapshotConsumer:
-    """Wraps parsed fake values in timed records, like the runtime consumer."""
+    """Reads the named fake track of a broadcast, wrapping its parsed values in timed records,
+    like the runtime consumer."""
 
-    def __init__(self, track: object) -> None:
-        self._track = track
+    def __init__(self, broadcast: object, name: str, *, priority: int = 0) -> None:
+        self._track = broadcast.tracks[name]
 
     async def __aiter__(self):
         async for value in self._track:

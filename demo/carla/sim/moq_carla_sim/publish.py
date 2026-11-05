@@ -389,7 +389,7 @@ async def _pump_driver(
     """
     log.info("driver %s connected (run %s)", driver_id, instance)
     try:
-        control = moq.json.SnapshotConsumer(await broadcast.subscribe_track("control"))
+        control = moq.json.SnapshotConsumer(broadcast, "control")
         async for message in control:
             command = parse_command(driver_id, message.value, instance)
             if command is not None:

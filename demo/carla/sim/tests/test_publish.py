@@ -246,11 +246,7 @@ class Following(Scripted):
             yield {"type": "drive", "sequence": sequence, "throttle": 0.5}
             await asyncio.Event().wait()
 
-        async def subscribe_track(name: str):
-            assert name == "control"
-            return control()
-
-        await self.send(SimpleNamespace(subscribe_track=subscribe_track))
+        await self.send(SimpleNamespace(tracks={"control": control()}))
 
     async def offline(self) -> None:
         await self.send(None)
